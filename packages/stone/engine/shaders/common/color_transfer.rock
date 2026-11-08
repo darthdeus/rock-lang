@@ -1,0 +1,24 @@
+// Texture and ENGINE-dependent wrappers over the shared transfer in
+// stone-core/color_transfer.rock. This file keeps only what needs samplers
+// or ENGINE.
+
+// Decode each color tap before interpolation; alpha and data samplers are not transferred.
+pub fn texture_srgb(source: Sampler2D, uv: Vec2, filtered: bool) -> Vec4 {
+    if !filtered { return srgb_color(texture(source, uv)) }
+    let size = texture_size(source)
+    let point = uv * size - v(0.5, 0.5)
+    let base = (floor(point) + v(0.5, 0.5)) / size
+    let step_uv = v(1.0, 1.0) / size
+    let weight = fract(point)
+    let a = srgb_color(texture(source, base))
+    let b = srgb_color(texture(source, base + v(step_uv.x, 0.0)))
+    let c = srgb_color(texture(source, base + v(0.0, step_uv.y)))
+    let d = srgb_color(texture(source, base + step_uv))
+    return a.lerp(b, weight.x).lerp(c.lerp(d, weight.x), weight.y)
+}
+
+pub fn world_color(value: Color) -> Color {
+    if !ENGINE.linear_world { return value }
+    return color(srgb_channel_to_linear(value.r), srgb_channel_to_linear(value.g),
+        srgb_channel_to_linear(value.b), value.a)
+}

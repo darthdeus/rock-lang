@@ -1,0 +1,155 @@
+// Pyramid kernels (Jimenez, "Next Generation Post Processing in Call
+// of Duty: Advanced Warfare", SIGGRAPH 2014). Three entries: a prefilter
+// that folds the soft-knee threshold into the first halving, a plain
+// downsample for the rest of the chain, and a tent upsample that the
+// Accumulate blend adds into the level above.
+//
+// Reach comes from the RESOLUTION, not the tap count: every kernel here
+// reaches ~2 texels, but a texel of level 5 is 64 full-res pixels. That is
+// the whole reason this replaces a fixed +/-3-texel full-res Gaussian.
+//
+// `src_texel` is 1/size of the texture being SAMPLED, which for the
+// upsample is the smaller level below -- so each pass needs its own value
+// and none of them can be derived from the output size.
+//
+// `src_uv_lo`/`src_uv_hi` are the centres of the first and last ACTIVE texels
+// of that same texture. Every tap clamps into them: a scene target is
+// allocated at capacity and only its active rectangle is written, so a kernel
+// that walks off the active edge reads a stale margin. Texture clamp-to-edge
+// only knows the capacity edge and is not sufficient.
+
+value BloomDownU {
+    src_texel: Vec2,
+    src_uv_lo: Vec2,
+    src_uv_hi: Vec2,
+    gain: float
+}
+
+value BloomPrefilterU {
+    src_texel: Vec2,
+    src_uv_lo: Vec2,
+    src_uv_hi: Vec2,
+    threshold: float,
+    knee: float,
+    gain: float
+}
+
+value BloomUpU {
+    src_texel: Vec2,
+    src_uv_lo: Vec2,
+    src_uv_hi: Vec2,
+    scatter: float
+}
+
+fn bloom_sample(src: Sampler2D, uv: Vec2, lo: Vec2, hi: Vec2) -> Vec4 {
+    let size = texture_size(src)
+    let clamped = clamp(uv, lo, hi)
+    let position = clamped * size - v(0.5, 0.5)
+    let base = v(floor(position.x), floor(position.y))
+    let fraction = v(fract(position.x), fract(position.y))
+    let max_index = size - v(1.0, 1.0)
+    let p00 = (clamp(base, v(0.0, 0.0), max_index) + v(0.5, 0.5)) / size
+    let p10 = (clamp(base + v(1.0, 0.0), v(0.0, 0.0), max_index)
+        + v(0.5, 0.5)) / size
+    let p01 = (clamp(base + v(0.0, 1.0), v(0.0, 0.0), max_index)
+        + v(0.5, 0.5)) / size
+    let p11 = (clamp(base + v(1.0, 1.0), v(0.0, 0.0), max_index)
+        + v(0.5, 0.5)) / size
+    let top_left = texture(src, p00)
+    let top_right = texture(src, p10)
+    let bottom_left = texture(src, p01)
+    let bottom_right = texture(src, p11)
+    let top = top_left + (top_right - top_left) * fraction.x
+    let bottom = bottom_left + (bottom_right - bottom_left) * fraction.x
+    return top + (bottom - top) * fraction.y
+}
+
+// Soft-knee bloom extract (Karis / COD): a hard `brightness > threshold`
+// step makes bloom pop on and off as a pixel crosses the threshold, because
+// 1.001 passes at full intensity while 0.999 contributes nothing. Instead
+// ramp the contribution quadratically across [threshold - knee,
+// threshold + knee]. knee <= 0 restores the hard cut.
+fn bloom_knee_extract(pixel: Vec4, threshold: float, knee: float) -> Vec4 {
+    let brightness = max(max(pixel.r, pixel.g), pixel.b)
+
+    let contribution = 0.0
+    if knee > 0.0 {
+        let soft = clamp(brightness - (threshold - knee), 0.0, 2.0 * knee)
+        soft = soft * soft * (0.25 / knee)
+        contribution = max(soft, brightness - threshold)
+    } else {
+        contribution = if brightness > threshold { brightness } else { 0.0 }
+    }
+
+    // Scale by how much of the pixel clears the knee, preserving hue.
+    // max() on the divisor guards the black-pixel 0/0.
+    return pixel * (contribution / max(brightness, 0.0001))
+}
+
+// 13 taps in a partitioned box: four overlapping 2x2 quads (the inner
+// ring, half the total weight) plus a 3x3 grid at 2-texel spacing. The
+// arrangement exists to kill the temporal pulsing plain bilinear box
+// downsampling produces as a small bright feature crosses texel centres.
+fn bloom_down_13(src: Sampler2D, tc: Vec2, texel: Vec2, lo: Vec2, hi: Vec2) -> Vec4 {
+    let a = bloom_sample(src, tc + v(-2.0, -2.0) * texel, lo, hi)
+    let b = bloom_sample(src, tc + v(0.0, -2.0) * texel, lo, hi)
+    let c = bloom_sample(src, tc + v(2.0, -2.0) * texel, lo, hi)
+    let d = bloom_sample(src, tc + v(-2.0, 0.0) * texel, lo, hi)
+    let e = bloom_sample(src, tc, lo, hi)
+    let f = bloom_sample(src, tc + v(2.0, 0.0) * texel, lo, hi)
+    let g = bloom_sample(src, tc + v(-2.0, 2.0) * texel, lo, hi)
+    let h = bloom_sample(src, tc + v(0.0, 2.0) * texel, lo, hi)
+    let i = bloom_sample(src, tc + v(2.0, 2.0) * texel, lo, hi)
+    let j = bloom_sample(src, tc + v(-1.0, -1.0) * texel, lo, hi)
+    let k = bloom_sample(src, tc + v(1.0, -1.0) * texel, lo, hi)
+    let l = bloom_sample(src, tc + v(-1.0, 1.0) * texel, lo, hi)
+    let m = bloom_sample(src, tc + v(1.0, 1.0) * texel, lo, hi)
+
+    return e * 0.125
+        + (a + c + g + i) * 0.03125
+        + (b + d + f + h) * 0.0625
+        + (j + k + l + m) * 0.125
+}
+
+// `gain` is the pyramid's normalisation, and only the FIRST pass carries a
+// value other than 1: every later level is a weight-1 average of the one
+// before, so scaling level 0 scales the whole stack. See pyramid_gain.
+@shader(fragment)
+fn bloom_prefilter_frag(@textures t: SrcTex, @uniform u: BloomPrefilterU, tc: Vec2) -> Vec4 {
+    return bloom_knee_extract(
+        bloom_down_13(t.src_tex, tc, u.src_texel, u.src_uv_lo, u.src_uv_hi),
+        u.threshold, u.knee) * u.gain
+}
+
+@shader(fragment)
+fn bloom_down_frag(@textures t: SrcTex, @uniform u: BloomDownU, tc: Vec2) -> Vec4 {
+    return bloom_down_13(t.src_tex, tc, u.src_texel, u.src_uv_lo, u.src_uv_hi) * u.gain
+}
+
+// 3x3 tent, weights 1/2/4 over 16. Output is ADDED into the level above by
+// BlendMode::Accumulate, so the alpha this returns is irrelevant -- which is
+// exactly why Accumulate and not Additive.
+//
+// `scatter` scales each rung's contribution, so level k lands at scatter^k:
+// 1.0 weights every octave equally (widest), lower values attenuate the
+// coarse levels and pull the halo tight. It is the wide-vs-tight knob.
+@shader(fragment)
+fn bloom_up_frag(@textures tex: SrcTex, @uniform u: BloomUpU, tc: Vec2) -> Vec4 {
+    let t = u.src_texel
+    let lo = u.src_uv_lo
+    let hi = u.src_uv_hi
+
+    let sum = bloom_sample(tex.src_tex, tc + v(-1.0, -1.0) * t, lo, hi)
+        + bloom_sample(tex.src_tex, tc + v(1.0, -1.0) * t, lo, hi)
+        + bloom_sample(tex.src_tex, tc + v(-1.0, 1.0) * t, lo, hi)
+        + bloom_sample(tex.src_tex, tc + v(1.0, 1.0) * t, lo, hi)
+
+    sum += (bloom_sample(tex.src_tex, tc + v(0.0, -1.0) * t, lo, hi)
+        + bloom_sample(tex.src_tex, tc + v(-1.0, 0.0) * t, lo, hi)
+        + bloom_sample(tex.src_tex, tc + v(1.0, 0.0) * t, lo, hi)
+        + bloom_sample(tex.src_tex, tc + v(0.0, 1.0) * t, lo, hi)) * 2.0
+
+    sum += bloom_sample(tex.src_tex, tc, lo, hi) * 4.0
+
+    return sum * (u.scatter / 16.0)
+}

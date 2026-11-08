@@ -1,0 +1,180 @@
+// S10: boot font coverage release. Dropping a font's coverage atlas and its
+// IMAGES aliases retires exactly their bytes while the face (TTF bytes,
+// metrics) stays live.
+
+fn font_residency_test_host() {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    assert(stone_text_init())
+}
+
+const FONT_RESIDENCY_PATH: string = project_asset_path("@engine/assets/fonts/DroidSans.ttf")
+
+fn font_residency_test_cleanup(font: Font?) {
+    if font != null { unload_font(font.unwrap()) }
+}
+
+fn font_residency_advance_of(backend: int) -> float {
+    let out = native_buffer_float(9)
+    assert(stone_get_glyph_info_for(backend, 0, 65, out.ptr),
+        "the fixture 'A' measures")
+    return out[8]
+}
+
+@test
+fn font_release_coverage_drops_the_atlas_and_keeps_the_face() {
+    font_residency_test_host()
+    load_pending_shader_sources()
+    let baseline = (stone_get_live_image_bytes() + stone_get_live_mip_bytes())
+    let font: Font? = null
+    world_fixture_with_cleanup(() => {
+        let loaded = load_font(FONT_RESIDENCY_PATH, 24,
+            raster: FontRasterPolicy::Fixed).unwrap()
+        font = loaded
+        let backend = loaded.data().unwrap().backend_id
+        let idx = backend - 1
+        let compat = FONT_ATLASES[idx]
+        assert(compat != Image(0), "the fixture owns its compat page")
+        assert(sampled_texture_is_live(sampled_image(compat)),
+            "the compat alias is live before the release")
+        let bucket_id = stone_ensure_font_atlas_instance_ffi(backend, 48)
+        assert(bucket_id != 0, "the demand bucket ensures")
+        let bucket = Image(stone_get_font_instance_image_ffi(bucket_id))
+        assert(bucket.0 != 0 && bucket.0 != compat.0, "the bucket owns its alias")
+        assert_eq(stone_font_atlas_instance_count_ffi(backend), 2,
+            "compat plus the demand bucket are resident")
+        let held = stone_font_data_len(backend)
+        assert(held > 1000, "the fixture retains its TTF bytes (held={held})")
+        let advance = font_residency_advance_of(backend)
+        assert(advance > 0.0, "the fixture advance is positive")
+        let compat_bytes = stone_get_image_byte_len(compat.0)
+        let bucket_bytes = stone_get_image_byte_len(bucket.0)
+        assert(compat_bytes > 0 && bucket_bytes > 0, "both aliases price nonzero bytes")
+
+        let live = (stone_get_live_image_bytes() + stone_get_live_mip_bytes())
+        font_release_coverage(loaded)
+        assert_eq(live - (stone_get_live_image_bytes() + stone_get_live_mip_bytes()), compat_bytes + bucket_bytes,
+            "the release retires exactly the compat and bucket bytes")
+        assert_eq((stone_get_live_image_bytes() + stone_get_live_mip_bytes()), baseline,
+            "the release leaks no live byte")
+        assert_eq(stone_get_font_atlas_image_cached_ffi(backend), 0,
+            "the compat alias is retired, not re-minted")
+        assert_eq(stone_font_atlas_instance_count_ffi(backend), 0,
+            "no bucket survives the release")
+        assert(FONT_ATLASES[idx] == Image(0), "the Rock atlas clears with the alias")
+        assert(!sampled_texture_is_live(sampled_image(compat)),
+            "the retired compat alias samples nothing")
+        assert(!sampled_texture_is_live(sampled_image(bucket)),
+            "the retired bucket alias samples nothing")
+        assert(stone_get_font_atlas_size(backend) == null,
+            "a released atlas publishes no extent")
+        assert_eq(stone_font_data_len(backend), held, "the TTF bytes stay resident")
+        assert_eq(font_residency_advance_of(backend), advance,
+            "the release moves no metric")
+        font_release_coverage(loaded)
+        assert_eq((stone_get_live_image_bytes() + stone_get_live_mip_bytes()), baseline,
+            "releasing twice is idempotent")
+    }, () => {
+        font_residency_test_cleanup(font)
+    })
+}
+
+@test
+fn font_reload_after_release_refreshes_without_pages() {
+    font_residency_test_host()
+    load_pending_shader_sources()
+    let baseline = (stone_get_live_image_bytes() + stone_get_live_mip_bytes())
+    let font: Font? = null
+    world_fixture_with_cleanup(() => {
+        let loaded = load_font(FONT_RESIDENCY_PATH, 24,
+            raster: FontRasterPolicy::Fixed).unwrap()
+        font = loaded
+        let backend = loaded.data().unwrap().backend_id
+        let idx = backend - 1
+        let advance = font_residency_advance_of(backend)
+        font_release_coverage(loaded)
+        assert_eq((stone_get_live_image_bytes() + stone_get_live_mip_bytes()), baseline,
+            "the release drops the fixture bytes")
+        // Only a committed reload re-pulls the Rock-side batch state.
+        FONT_PIXEL_SIZES[idx] = 0
+        reload_font(loaded, FONT_RESIDENCY_PATH)
+        assert_eq(FONT_PIXEL_SIZES[idx], 24,
+            "the reload commits its re-raster instead of refusing")
+        assert(FONT_ATLASES[idx] == Image(0),
+            "a reload keeps the released atlas down")
+        assert_eq(stone_get_font_atlas_image_cached_ffi(backend), 0,
+            "a reload mints no compat alias")
+        assert_eq((stone_get_live_image_bytes() + stone_get_live_mip_bytes()), baseline,
+            "a reload re-uploads nothing")
+        assert_eq(font_residency_advance_of(backend), advance,
+            "a reload of the same file keeps the metrics")
+    }, () => {
+        font_residency_test_cleanup(font)
+    })
+}
+
+@test
+fn font_release_fixture_failure_restores_state() {
+    font_residency_test_host()
+    load_pending_shader_sources()
+    let baseline = (stone_get_live_image_bytes() + stone_get_live_mip_bytes())
+    let probe: Font? = null
+    let failure = world_fixture_raised(() => {
+        world_fixture_with_cleanup(() => {
+            probe = load_font(FONT_RESIDENCY_PATH, 24,
+                raster: FontRasterPolicy::Fixed).unwrap()
+            error("intentional font release fixture failure")
+        }, () => {
+            font_residency_test_cleanup(probe)
+        })
+    })
+    let message = failure ?? "fixture returned without the deliberate failure"
+    assert(message.contains("intentional font release fixture failure"),
+        "the failure surfaces (got: {message})")
+    assert(probe != null && probe.unwrap().data() == null,
+        "a failed check unloads its font")
+    font_residency_test_host()
+    load_pending_shader_sources()
+    assert_eq((stone_get_live_image_bytes() + stone_get_live_mip_bytes()), baseline,
+        "a failed check leaks no live byte")
+    let again = load_font(FONT_RESIDENCY_PATH, 24,
+        raster: FontRasterPolicy::Fixed).unwrap()
+    assert(again.data() != null, "a failed check leaves later loads working")
+    font_residency_test_cleanup(again)
+}
+
+// A native slot freed behind the registry's back must not unload silently:
+// unload_font finishes the Rock-side cleanup, then raises naming itself and
+// the refused backend id. A stale handle stays a no-op via font.data().
+@test
+fn unload_font_surfaces_a_refused_native_unload() {
+    font_residency_test_host()
+    load_pending_shader_sources()
+    let saved_default = DEFAULT_FONT
+    let font: Font? = null
+    world_fixture_with_cleanup(() => {
+        let loaded = load_font(FONT_RESIDENCY_PATH, 24,
+            raster: FontRasterPolicy::Fixed).unwrap()
+        font = loaded
+        DEFAULT_FONT = loaded
+        let backend = loaded.data().unwrap().backend_id
+        assert(stone_unload_font_ffi(backend),
+            "the fixture frees its native slot first")
+        let failure = world_fixture_raised(() => {
+            unload_font(loaded)
+        })
+        font = null
+        let message = failure ?? "the call returned normally after a refused native unload"
+        assert(message.contains("unload_font"),
+            "the refusal names unload_font (got: {message})")
+        assert(message.contains("{backend}"),
+            "the refusal names the backend id (got: {message})")
+        assert(loaded.data() == null,
+            "the refusal still drops the registry entry")
+        assert(DEFAULT_FONT == null,
+            "the refusal still clears DEFAULT_FONT")
+    }, () => {
+        DEFAULT_FONT = saved_default
+        font_residency_test_cleanup(font)
+    })
+}

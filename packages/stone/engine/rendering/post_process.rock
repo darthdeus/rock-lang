@@ -1,0 +1,698 @@
+// Pipelines for the post-process chain. Hoisted to module globals so a
+// Pipeline table isn't allocated per-frame — both shaders are referenced
+// every frame when `post_processing` runs. `pipeline(name)` is a thin
+// newtype ctor, so this is pure allocation hygiene rather than a
+// correctness change.
+global BLUR_PIPELINE: Pipeline = pipeline(bloom_blur_shader)
+// Frames on which the bloom chain ran, for sims that pin the bloom setting to
+// the chain actually running rather than to a flag.
+pub global POST_BLOOM_RUNS: int = 0
+pub global BLOOM_PREFILTER_PIPELINE: Pipeline = pipeline(bloom_prefilter_shader)
+pub global BLOOM_DOWN_PIPELINE: Pipeline = pipeline(bloom_down_shader)
+global BLOOM_UP_PIPELINE: Pipeline = pipeline(bloom_up_shader)
+pub global TONEMAP_PIPELINE: Pipeline = pipeline(tonemap_shader)
+pub global PRESENT_PIPELINE: Pipeline = pipeline(present_shader)
+pub global BLIT_PIPELINE: Pipeline = pipeline(blit_shader)
+global UI_EFFECT_COMPOSITE_PIPELINE: Pipeline = pipeline(ui_effect_composite_shader)
+pub global TEXT_ART_RESOLVE_PIPELINE: Pipeline = pipeline(text_art_resolve_shader)
+pub const COLOR_GRADE_PIPELINE: Pipeline = pipeline(color_grade_shader)
+
+// Separable 7-tap Gaussian. `blur_amount` scales the tap SPACING, it is not
+// a radius: above ~1 the taps stop being adjacent and the result is a comb,
+// evenly spaced teeth with zeros between (the shadowmap asked for 12 and got
+// teeth at 0/12/24/36). So keep it near 1 and reach for the pyramid
+// (blur_pyramid_passes) when a wide blur is what is wanted. Live callers:
+// logo/effects.rock, at 4.0.
+pub fn blur_canvas(
+    input_canvas: Canvas,
+    temp_canvas_1: Canvas,
+    temp_canvas_2: Canvas,
+    blur_amount: float = 1.0
+) -> Canvas {
+    let extent = iv(int(input_canvas.width), int(input_canvas.height))
+    let ok = sampled_separable_blur(
+        sampled_canvas(input_canvas), temp_canvas_1, temp_canvas_2,
+        extent, 3.0, blur_amount, TextureFilter::Nearest)
+    if !ok { error("blur_canvas: separable blur pass was rejected") }
+    return temp_canvas_2
+}
+
+fn sampled_separable_blur(
+    source: SampledTexture,
+    horizontal: Canvas,
+    vertical: Canvas,
+    extent: IVec2,
+    radius: float,
+    tap_spacing: float,
+    sampling: TextureFilter
+) -> bool {
+    if extent.x <= 0 || extent.y <= 0 || radius <= 0.0 || tap_spacing == 0.0 {
+        return false
+    }
+    if !sampled_texture_is_live(source)
+        || !canvas_is_live(horizontal) || !canvas_is_live(vertical) {
+        return false
+    }
+    if int(horizontal.width) != extent.x || int(horizontal.height) != extent.y
+        || int(vertical.width) != extent.x || int(vertical.height) != extent.y {
+        return false
+    }
+    let source_extent = sampled_texture_dims(source)
+    let transparent = color(0.0, 0.0, 0.0, 0.0)
+    let horizontal_ok = run_pass(Pass {
+        pipeline: BLUR_PIPELINE,
+        slot_inputs: [(source, sampling)],
+        block: pass_block(BLUR_PIPELINE.shader_name, BloomBlurU {
+            radius: max(radius, 0.5),
+            direction: v(tap_spacing, 0.0),
+            resolution: source_extent.x as float,
+        }),
+        output: horizontal,
+        clear: transparent,
+        blend: BlendMode::Replace,
+    })
+    if !horizontal_ok { return false }
+    return run_pass(Pass {
+        pipeline: BLUR_PIPELINE,
+        slot_inputs: [(sampled_canvas(horizontal), sampling)],
+        block: pass_block(BLUR_PIPELINE.shader_name, BloomBlurU {
+            radius: max(radius, 0.5),
+            direction: v(0.0, tap_spacing),
+            resolution: extent.y as float,
+        }),
+        output: vertical,
+        clear: transparent,
+        blend: BlendMode::Replace,
+    })
+}
+
+fn sampled_texture_composite_pass(
+    source: SampledTexture,
+    target: Canvas,
+    extent: IVec2,
+    sampling: TextureFilter,
+    tint: Color,
+    offset: Vec2,
+    strength: float,
+    blend: BlendMode = BlendMode::Replace,
+    alpha_strength: float = -1.0,
+    premultiplied: bool = false
+) -> Pass? {
+    if extent.x <= 0 || extent.y <= 0 || strength < 0.0
+        || alpha_strength < -1.0
+        || !sampled_texture_is_live(source) || !canvas_is_live(target) {
+        return null
+    }
+    if int(target.width) != extent.x || int(target.height) != extent.y {
+        return null
+    }
+    let source_extent = sampled_texture_dims(source)
+    if source_extent.x <= 0 || source_extent.y <= 0 { return null }
+    return Pass {
+        pipeline: UI_EFFECT_COMPOSITE_PIPELINE,
+        slot_inputs: [(source, sampling)],
+        block: pass_block(UI_EFFECT_COMPOSITE_PIPELINE.shader_name, UiEffectCompositeU {
+            tint: v(tint.r, tint.g, tint.b, tint.a),
+            offset: offset,
+            source_size: v(source_extent.x as float, source_extent.y as float),
+            strength: strength,
+            alpha_strength: alpha_strength,
+            premultiplied: premultiplied,
+        }),
+        output: target,
+        clear: null,
+        blend: blend,
+    }
+}
+
+pub fn composite_sampled_texture(
+    source: SampledTexture,
+    target: Canvas,
+    extent: IVec2,
+    sampling: TextureFilter,
+    tint: Color,
+    offset: Vec2,
+    strength: float,
+    blend: BlendMode = BlendMode::Replace
+) -> bool {
+    let pass = sampled_texture_composite_pass(
+        source, target, extent, sampling, tint, offset, strength, blend) ?? return false
+    return run_pass(pass)
+}
+
+// Presentation bracket around the world composite. Between begin and end,
+// every bind of the default framebuffer (including the unset-to-FBO0 the
+// fullscreen passes below do) lands the view's scene_output_viewport, so the
+// tonemap composite and the outline overlay scale the scene raster onto
+// exactly that rectangle; the remainder stays the black cleared here (the
+// bars). No-op when the scene already covers the whole drawable.
+fn present_letterbox_begin() {
+    let view = RENDER_VIEW ?? return
+    let vp = view.scene_output_viewport
+    if vp.x == 0 && vp.y == 0 && vp.w == view.drawable_size.x && vp.h == view.drawable_size.y {
+        return
+    }
+    // Full-window bind first: the clear paints the bars black.
+    set_canvas_handle(0)
+    stone_clear_canvas(0.0, 0.0, 0.0, 1.0)
+    stone_set_present_viewport(true, vp.x, vp.y, vp.w, vp.h)
+    // Re-bind to apply the present viewport.
+    set_canvas_handle(0)
+}
+
+fn present_letterbox_end() {
+    let view = RENDER_VIEW ?? return
+    let vp = view.scene_output_viewport
+    if vp.x == 0 && vp.y == 0 && vp.w == view.drawable_size.x && vp.h == view.drawable_size.y {
+        return
+    }
+    stone_set_present_viewport(false, 0, 0, 0, 0)
+    // Re-bind to restore the full-window viewport for UI/text/imgui.
+    set_canvas_handle(0)
+}
+
+// ─────────────── the down/up pyramid ───────────────
+//
+// Progressive halving to N levels, then a tent upsample back up that ADDS
+// into each larger level on the way (Jimenez, SIGGRAPH 2014). Two consumers
+// with different first stages and nothing else different: bloom prefilters
+// with the soft-knee extract, the shadowmap soften takes its input as-is.
+//
+// The up chain writes back into the SAME levels under BlendMode::Accumulate,
+// so level i ends up holding its own band plus everything coarser and level 0
+// is the result. Hence no clear on the way up -- and hence Accumulate rather
+// than Additive, since a level's alpha is meaningless and weighting the sum
+// by it is the 140acbaeb class.
+//
+// `src_texel` is per-pass because it describes the texture being SAMPLED,
+// which on the way up is the smaller level below.
+
+// Level k reaches the result at weight scatter^k, so the stack sums to
+// sum(scatter^k) and the first pass divides by it: the accumulation is a
+// weighted AVERAGE, not a sum. Two reasons it must be. shadow_value
+// multiplies each light's strength unclamped in sprite_batch_shader, so an
+// un-normalised stack blows every light out; and it makes `scatter` a pure
+// SHAPE knob for bloom rather than one that moves width and brightness
+// together. Only the FIRST pass carries it, because every later level is a
+// weight-1 average of the one before -- scaling level 0 scales the stack.
+fn pyramid_gain(levels: int, scatter: float) -> float {
+    let sum = 0.0
+    let w = 1.0
+    let i = 0
+    while i < levels {
+        sum += w
+        w *= scatter
+        i += 1
+    }
+    return if sum > 0.0 { 1.0 / sum } else { 1.0 }
+}
+
+fn pyramid_texel(c: Canvas) -> Vec2 {
+    return v(1.0 / c.width, 1.0 / c.height)
+}
+
+// The centres of the first and last ACTIVE texels of `c`, in the UV space the
+// executor's active-local transform produces. Every kernel tap clamps into
+// this; clamp-to-edge would only stop at the capacity edge, which is stale.
+pub fn active_uv_lo(c: Canvas) -> Vec2 {
+    return v(0.5 / c.width, 0.5 / c.height)
+}
+
+pub fn active_uv_hi(c: Canvas) -> Vec2 {
+    let a = canvas_active(c)
+    return v(((a.x as float) - 0.5) / c.width, ((a.y as float) - 0.5) / c.height)
+}
+
+// The shared part: halve from level 0 down, then accumulate back up. The
+// caller has already pushed whatever writes level 0.
+fn pyramid_tail_passes(
+    passes: [Pass], levels: [Canvas], scatter: float) {
+    let transparent = color(0.0, 0.0, 0.0, 0.0)
+    let n = levels.len()
+
+    let i = 1
+    while i < n {
+        let from = levels[i - 1]
+        passes.push(Pass {
+            pipeline: BLOOM_DOWN_PIPELINE,
+            slot_inputs: [(sampled_canvas(from), TextureFilter::Nearest)],
+            block: pass_block(BLOOM_DOWN_PIPELINE.shader_name, BloomDownU {
+                src_texel: pyramid_texel(from),
+                src_uv_lo: active_uv_lo(from),
+                src_uv_hi: active_uv_hi(from),
+                gain: 1.0,
+            }),
+            output: levels[i],
+            clear: transparent,
+            blend: BlendMode::Replace,
+        })
+        i += 1
+    }
+
+    i = n - 2
+    while i >= 0 {
+        let from = levels[i + 1]
+        passes.push(Pass {
+            pipeline: BLOOM_UP_PIPELINE,
+            slot_inputs: [(sampled_canvas(from), TextureFilter::Nearest)],
+            block: pass_block(BLOOM_UP_PIPELINE.shader_name, BloomUpU {
+                src_texel: pyramid_texel(from),
+                src_uv_lo: active_uv_lo(from),
+                src_uv_hi: active_uv_hi(from),
+                scatter: scatter,
+            }),
+            output: levels[i],
+            clear: null,
+            blend: BlendMode::Accumulate,
+        })
+        i -= 1
+    }
+}
+
+// Bloom: the soft-knee extract folds into the first halving, so there is no
+// full-res threshold pass.
+pub fn bloom_pyramid_passes(
+    src: Canvas,
+    levels: [Canvas],
+    threshold: float,
+    knee: float,
+    scatter: float
+) -> [Pass] {
+    let passes: [Pass] = vec_new()
+    passes.push(Pass {
+        pipeline: BLOOM_PREFILTER_PIPELINE,
+        slot_inputs: [(sampled_canvas(src), TextureFilter::Nearest)],
+        block: pass_block(BLOOM_PREFILTER_PIPELINE.shader_name, BloomPrefilterU {
+            src_texel: pyramid_texel(src),
+            src_uv_lo: active_uv_lo(src),
+            src_uv_hi: active_uv_hi(src),
+            threshold: threshold,
+            knee: knee,
+            gain: pyramid_gain(levels.len(), scatter),
+        }),
+        output: levels[0],
+        clear: color(0.0, 0.0, 0.0, 0.0),
+        blend: BlendMode::Replace,
+    })
+    pyramid_tail_passes(passes, levels, scatter)
+    return passes
+}
+
+// Same machinery with no extract: a wide, energy-preserving blur. Level 0 is
+// the same size as `src` here (see SHADOWMAP_LEVELS), so its first pass is a
+// same-size 13-tap rather than a halving.
+pub fn blur_pyramid_passes(src: Canvas, levels: [Canvas], scatter: float) -> [Pass] {
+    let passes: [Pass] = vec_new()
+    passes.push(Pass {
+        pipeline: BLOOM_DOWN_PIPELINE,
+        slot_inputs: [(sampled_canvas(src), TextureFilter::Nearest)],
+        block: pass_block(BLOOM_DOWN_PIPELINE.shader_name, BloomDownU {
+            src_texel: pyramid_texel(src),
+            src_uv_lo: active_uv_lo(src),
+            src_uv_hi: active_uv_hi(src),
+            gain: pyramid_gain(levels.len(), scatter),
+        }),
+        output: levels[0],
+        clear: color(0.0, 0.0, 0.0, 0.0),
+        blend: BlendMode::Replace,
+    })
+    pyramid_tail_passes(passes, levels, scatter)
+    return passes
+}
+
+pub nobox value PyramidPassKey {
+    scatter: float,
+    level_count: int,
+    source: CanvasViewKey,
+    level0: CanvasViewKey,
+    level1: CanvasViewKey,
+    level2: CanvasViewKey,
+    level3: CanvasViewKey,
+    level4: CanvasViewKey,
+    level5: CanvasViewKey,
+}
+
+pub fn pyramid_pass_key(src: Canvas, levels: [Canvas], scatter: float) -> PyramidPassKey {
+    let absent = CanvasViewKey { handle: -1, width: 0.0, height: 0.0, active_x: 0, active_y: 0 }
+    let level0 = absent
+    let level1 = absent
+    let level2 = absent
+    let level3 = absent
+    let level4 = absent
+    let level5 = absent
+    if levels.len() > 0 { level0 = canvas_view_key(levels[0]) }
+    if levels.len() > 1 { level1 = canvas_view_key(levels[1]) }
+    if levels.len() > 2 { level2 = canvas_view_key(levels[2]) }
+    if levels.len() > 3 { level3 = canvas_view_key(levels[3]) }
+    if levels.len() > 4 { level4 = canvas_view_key(levels[4]) }
+    if levels.len() > 5 { level5 = canvas_view_key(levels[5]) }
+    return PyramidPassKey {
+        scatter, level_count: levels.len(), source: canvas_view_key(src),
+        level0, level1, level2, level3, level4, level5,
+    }
+}
+
+// A retained pass captures both Canvas values and sampling uniforms. GL may
+// resize storage behind the same handles while CrispArt keeps its active
+// raster, so bloom and shadow blur must key the entire pyramid view.
+nobox value BloomPassKey {
+    shape_version: int,
+    threshold: float,
+    knee: float,
+    pyramid: PyramidPassKey,
+}
+
+global BLOOM_PASSES: [Pass]? = null
+global BLOOM_PASS_KEY: BloomPassKey? = null
+
+fn bloom_passes_cached(
+    threshold: float,
+    knee: float,
+    scatter: float
+) -> [Pass] {
+    let key = BloomPassKey {
+        shape_version: 1,
+        threshold: threshold, knee: knee,
+        pyramid: pyramid_pass_key(screen_canvas, BLOOM_LEVELS, scatter),
+    }
+    if BLOOM_PASSES != null && BLOOM_PASS_KEY != null && BLOOM_PASS_KEY.unwrap() == key {
+        return BLOOM_PASSES.unwrap()
+    }
+
+    let passes = bloom_pyramid_passes(screen_canvas, BLOOM_LEVELS, threshold, knee, scatter)
+
+    BLOOM_PASS_KEY = key
+    BLOOM_PASSES = passes
+    return passes
+}
+
+pub fn submit_tonemap(
+    scene: Canvas,
+    bloom: Canvas,
+    output: Canvas,
+    exposure: float,
+    intensity: float
+) -> bool {
+    let active = canvas_active(output)
+    let weight = ENGINE.exposure_weight
+    let shader = if weight != null { tonemap_split_shader } else { tonemap_shader }
+    let scene_binding = GpuBinding { slot: 0, resource: SampledTexture::Canvas(scene), filter: TextureFilter::Nearest }
+    let bloom_binding = GpuBinding { slot: 1, resource: SampledTexture::Canvas(bloom), filter: TextureFilter::Linear }
+    let bindings = if weight != null {
+        [scene_binding, bloom_binding,
+            GpuBinding { slot: 2, resource: SampledTexture::Canvas(weight.unwrap()), filter: TextureFilter::Linear }]
+    } else { [scene_binding, bloom_binding] }
+    let draw = GpuDraw {
+        shader: shader,
+        bindings: bindings,
+        blend: BlendMode::Replace,
+        color_write: GPU_WRITE_RGBA,
+    }
+    if let w = weight {
+        gpu_draw_uniform_payload(draw, shader, TonemapSplitU {
+            exposure: exposure,
+            bloom_intensity: intensity,
+            bloom_uv: canvas_active_uv_rel(scene, bloom),
+            bloom_uv_lo: active_uv_lo(bloom),
+            bloom_uv_hi: active_uv_hi(bloom),
+            weighted_stops: log(max(ENGINE.exposure_weighted, 0.0001) / max(exposure, 0.0001)) / log(2.0),
+            weight_uv: canvas_active_uv_rel(scene, w),
+            weight_uv_lo: active_uv_lo(w),
+            weight_uv_hi: active_uv_hi(w),
+        })
+    } else {
+        gpu_draw_uniform_payload(draw, shader, TonemapU {
+            exposure: exposure,
+            bloom_intensity: intensity,
+            bloom_uv: canvas_active_uv_rel(scene, bloom),
+            bloom_uv_lo: active_uv_lo(bloom),
+            bloom_uv_hi: active_uv_hi(bloom),
+        })
+    }
+    return submit_pass(GpuPass {
+        target: GpuTarget::Canvas(output),
+        load: GpuLoad::Load,
+        viewport: GpuRect { x: 0, y: 0, w: active.x, h: active.y },
+        draws: [draw],
+    })
+}
+
+// Render-feature ablation: STONE_FX_OFF=bloom,shadowmap,glow,outline,lights
+// (or `all`). Exists to price GPU work where the driver has no timer query:
+// ablation under STONE_PRESENT_SYNC=finish attributes it.
+//
+// Every member still leaves a presentable frame, so a run stays comparable;
+// checked at the point of use rather than on the ENGINE flags because games
+// re-assert those every frame and a startup override would be silently
+// clobbered.
+// `draw` and `ui` additionally ablate CONTENT -- the game's @draw systems and
+// its screen-space UI. They blank the frame rather than merely simplifying it,
+// so `all` does not cover them and they must be named explicitly. They exist to
+// answer "is this frame bound by the work we do, or by a ceiling we cannot
+// see": if removing all drawing does not raise the frame rate, nothing about
+// the drawing was the limit.
+//
+// Read from the environment at load.
+global FX_OFF: string = os_getenv("STONE_FX_OFF") ?? ""
+
+pub fn fx_disabled(name: string) -> bool {
+    let off = FX_OFF
+    if off == "" { return false }
+    // Comma-delimited on both sides so `glow` can't match `glowfoo`.
+    if ",{off},".contains(",{name},") { return true }
+    return off == "all" && name != "draw" && name != "ui"
+}
+
+fn post_processing() {
+    // Final grading: tonemap lands in final_canvas and the game's passes run
+    // over it when queued.
+    let grading = FINAL_PASSES.len() > 0
+    // The whole composite stays at SCENE resolution -- tonemap, the game's
+    // grade chain, and the outline overlay the runner adds after this -- and
+    // present_composite() does the single resample onto the output rectangle.
+    // Exactly one resample per frame is what keeps that one a sharp bilinear.
+    let tonemap_out = final_canvas
+
+    if ENGINE.use_bloom && !fx_disabled("bloom") {
+        // Retain the filter passes until tuning or any pyramid canvas view changes.
+        POST_BLOOM_RUNS += 1
+        profile_gpu_begin("post.bloom")
+        run_passes(
+            bloom_passes_cached(
+                ENGINE.bloom_threshold, ENGINE.bloom_knee, ENGINE.bloom_scatter)
+        )
+        submit_tonemap(screen_canvas, bloom_output(), tonemap_out, ENGINE.exposure,
+            ENGINE.bloom_intensity)
+        profile_gpu_end("post.bloom")
+    } else {
+        // No bloom — tonemap still runs because exposure applies to the
+        // scene without bloom. The pyramid's level 0 is bound to satisfy
+        // the shader's sampler; intensity 0 makes "its contents are
+        // ignored" true rather than a claim about a stale canvas.
+        profile_gpu_begin("post.tonemap")
+        submit_tonemap(screen_canvas, bloom_output(), tonemap_out, ENGINE.exposure,
+            0.0)
+        profile_gpu_end("post.tonemap")
+    }
+
+    let composite: Canvas? = tonemap_out
+    if grading {
+        profile_gpu_begin("post.final_passes")
+        run_passes(FINAL_PASSES)
+        profile_gpu_end("post.final_passes")
+
+        // The chain's last output holds the frame. Canvas->canvas hops
+        // preserve content, so it is image-convention regardless of the
+        // chain's shape or length -- no parity, no chain-shape requirement.
+        let last = FINAL_PASSES[FINAL_PASSES.len() - 1]
+        if last.output == null {
+            log_once("RENDER", "final pass has output: null -- final passes must write canvases; the engine presents the last output (skipping present blit)")
+        } else {
+            composite = last.output
+        }
+        FINAL_PASSES.clear()
+    }
+
+    COMPOSITE_CANVAS = composite
+
+    profile_begin("post.nonfinite_overlay")
+    draw_nonfinite_overlay(COMPOSITE_CANVAS)
+    profile_end("post.nonfinite_overlay")
+}
+
+pub struct PresentedSceneSample {
+    canvas: Canvas,
+    generation: int,
+}
+
+// Where the finished LDR frame is waiting for present_composite(), or null
+// when the chain already wrote the window. Read by the outline overlay (it
+// composites into the same canvas) as well as the present.
+pub global COMPOSITE_CANVAS: Canvas? = null
+
+// A borrowed view of the postprocessed scene. COMPOSITE_CANVAS remains the
+// pending-present signal and is consumed by present_composite(); this copy of
+// the handle is the late-draw read lane and carries the content generation
+// needed by dynamic TextArt materials.
+pub global PRESENTED_SCENE_SAMPLE: PresentedSceneSample? = null
+pub global PRESENTED_SCENE_CONTENT_GENERATION: int = 0
+
+fn presented_scene_sample_begin_frame() {
+    PRESENTED_SCENE_SAMPLE = null
+}
+
+fn presented_scene_sample_capture() {
+    let composite = COMPOSITE_CANVAS
+    if composite == null {
+        PRESENTED_SCENE_SAMPLE = null
+        return
+    }
+    let canvas = composite.unwrap()
+    if !canvas_is_live(canvas) {
+        PRESENTED_SCENE_SAMPLE = null
+        return
+    }
+    if OUTPUT_HDR_CANVAS != null
+        && OUTPUT_HDR_CANVAS.unwrap().handle == canvas.handle {
+        error("presented scene sample cannot alias OUTPUT_HDR_CANVAS")
+    }
+    PRESENTED_SCENE_CONTENT_GENERATION += 1
+    PRESENTED_SCENE_SAMPLE = PresentedSceneSample {
+        canvas: canvas,
+        generation: PRESENTED_SCENE_CONTENT_GENERATION,
+    }
+}
+
+// Null until a scene has been presented this frame; a consumer that reflects
+// the presented scene has nothing to draw before then (a headless `submit`
+// run never presents at all). A sample that exists but is destroyed or
+// aliases the output canvas is still an error.
+pub fn presented_scene_sample() -> PresentedSceneSample? {
+    sim_draw_on_demand()
+    let sample = PRESENTED_SCENE_SAMPLE ?? return null
+    if !canvas_is_live(sample.canvas) {
+        error("reflective TextArt requested a destroyed presented scene sample")
+    }
+    if OUTPUT_HDR_CANVAS != null
+        && OUTPUT_HDR_CANVAS.unwrap().handle == sample.canvas.handle {
+        error("reflective TextArt presented scene sample aliases OUTPUT_HDR_CANVAS")
+    }
+    return sample
+}
+
+// The single upscale: the view's active scene rectangle onto its output
+// rectangle. Everything above it ran at scene resolution, so this is the only
+// stage in the frame that resamples.
+fn present_composite(target: GpuTarget = GpuTarget::Window) {
+    let src = COMPOSITE_CANVAS ?? return
+    let view = RENDER_VIEW ?? return
+
+    profile_begin("present_blit")
+    let r = view.scene_source_rect
+    let cap = view.scene_capacity
+    let vp = view.scene_output_viewport
+    // The source rect arrives top-left/Y-down; the pass samples GL bottom-up,
+    // so the origin is the margin BELOW the rect.
+    let origin = v(r.x, (view.scene_size.y as float) - r.y - r.h)
+
+    let pass = present_composite_command(target, src.unwrap(),
+        GpuRect { x: vp.x, y: vp.y, w: vp.w, h: vp.h })
+    let draw = pass.draws[0]
+    gpu_draw_uniform_payload(draw, PRESENT_PIPELINE.shader_name, PresentU {
+        encode_srgb: ENGINE.linear_world,
+        src_origin: origin,
+        src_extent: v(r.w, r.h),
+        tex_size: v(cap.x as float, cap.y as float),
+        active_size: v(view.scene_size.x as float, view.scene_size.y as float),
+        dst_scale: v((vp.w as float) / r.w, (vp.h as float) / r.h),
+    })
+
+    let submitted = submit_pass(pass)
+    profile_end("present_blit")
+    if !submitted {
+        // Admission is rechecked only on failure; successful presents keep
+        // the single validation path and do not build diagnostic strings.
+        let reason = gpu_pass_rejection(pass)
+        error("present_composite: final composite submission failed: {reason}")
+    }
+    COMPOSITE_CANVAS = null
+}
+
+global NONFINITE_PIPELINE: Pipeline = pipeline(nonfinite_shader)
+
+// STONE_NONFINITE=<canvas> replaces the presented image with a per-channel
+// map of which texels hold Inf/NaN. A single non-finite texel in an HDR
+// target survives the bloom blur into a whole neighbourhood and only becomes
+// visible after the tonemap turns it into NaN, so the stage that PRODUCED it
+// is not the stage where it shows up -- this reports the producer directly.
+fn nonfinite_debug_canvas() -> Canvas? {
+    let name = os_getenv("STONE_NONFINITE")
+    if name == null { return null }
+
+    let n = name.unwrap()
+    if n == "" { return null }
+    if n == "scene" { return screen_canvas }
+
+    // bloom0 is the finished bloom (and the prefilter's output before the up
+    // chain adds to it); higher indices are the coarser rungs. Enumerated
+    // from BLOOM_LEVELS rather than listed, so changing the pyramid's depth
+    // cannot leave a stale name here.
+    let i = 0
+    while i < BLOOM_LEVELS.len() {
+        if n == "bloom{i}" { return BLOOM_LEVELS[i] }
+        i += 1
+    }
+    // Reject: a typo'd name presenting the normal frame reads as "no
+    // non-finite texels found", which is the wrong answer, not a missing one.
+    log_error("RENDER", "STONE_NONFINITE: unknown canvas '{n}' (scene|bloom0..bloom{BLOOM_LEVELS.len() - 1})")
+    os_exit(4)
+    return null
+}
+
+fn draw_nonfinite_overlay(output: Canvas?) {
+    let src = nonfinite_debug_canvas() ?? return
+
+    run_pass(Pass {
+        pipeline: NONFINITE_PIPELINE,
+        slot_inputs: [(sampled_canvas(src), TextureFilter::Nearest)],
+        // Into the composite, not over it: writing the window directly would
+        // be overwritten by the present blit a moment later.
+        output: output,
+        clear: null,
+        // Replace, not inherited: a fullscreen filter that blends against
+        // whatever the game last bound is exactly the bug this hunts.
+        blend: BlendMode::Replace,
+    })
+}
+
+global PRESENT_COMPOSITE_COMMAND: GpuPass? = null
+
+fn present_composite_command(target: GpuTarget, source: Canvas, viewport: GpuRect) -> GpuPass {
+    let retained = gpu_submission_retains_commands()
+    let pass = if !retained && PRESENT_COMPOSITE_COMMAND != null {
+        PRESENT_COMPOSITE_COMMAND.unwrap()
+    } else {
+        let draw = GpuDraw {
+            shader: PRESENT_PIPELINE.shader_name,
+            bindings: [GpuBinding { slot: 0, resource: SampledTexture::Canvas(source), filter: TextureFilter::Linear }],
+            blend: BlendMode::Replace,
+            color_write: GPU_WRITE_RGBA,
+        }
+        GpuPass {
+            target: target,
+            // Preserve the letterbox bars outside this present's viewport.
+            load: GpuLoad::Load,
+            viewport: viewport,
+            draws: [draw],
+        }
+    }
+    // The next present may target a different surface or use a resized source.
+    // Captured commands never enter this cache, including across observer toggles.
+    if !retained { PRESENT_COMPOSITE_COMMAND = pass }
+    pass.target = target
+    pass.viewport = viewport
+    let draw = pass.draws[0]
+    draw.shader = PRESENT_PIPELINE.shader_name
+    draw.bindings[0].resource = SampledTexture::Canvas(source)
+    return pass
+}

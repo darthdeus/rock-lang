@@ -1,0 +1,112 @@
+use stone::*
+
+fn quad_corner_test_mesh() -> RetainedMesh {
+    return RetainedMesh { mesh: SpriteMesh {
+        vbo: native_buffer_vertex(12), capacity: 2, count: 0,
+        texture: sampled_image(Image(0)), tex_w: 32.0, tex_h: 16.0,
+        inset_x: 0.0, inset_y: 0.0, z_layer: 0,
+        depth: DepthMode::Off, blend: BlendMode::Alpha,
+    } }
+}
+
+fn quad_corner_near(actual: float, expected: float) {
+    assert(abs(actual-expected) < 0.00001, "vertex attribute {actual} matches corner input {expected}")
+}
+
+// Match by geometry, independently of the builder's private vertex order.
+// The polygon shoelace area and diagonal incidence check its triangulation.
+fn quad_corner_oracle(mesh: SpriteMesh, first: int, expected: [Vertex]) {
+    let seen: [int] = [0,0,0,0]
+    let area = 0.0
+    for tri in 0..2 {
+        let diagonal = 0
+        let a = mesh.vbo[first+tri*3].pos
+        let b = mesh.vbo[first+tri*3+1].pos
+        let c = mesh.vbo[first+tri*3+2].pos
+        let signed = (b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x)
+        assert(signed < 0.0, "both triangles retain clockwise winding")
+        area += signed
+        for j in 0..3 {
+            let actual = mesh.vbo[first+tri*3+j]
+            let found = -1
+            for k in 0..4 {
+                if actual.pos == expected[k].pos { found = k }
+            }
+            assert(found >= 0, "every vertex belongs to an input corner")
+            let want = expected[found]
+            seen[found] += 1
+            if found == 0 || found == 2 { diagonal += 1 }
+            quad_corner_near(actual.uv.x, want.uv.x)
+            quad_corner_near(actual.uv.y, want.uv.y)
+            quad_corner_near(actual.color.x, want.color.x)
+            quad_corner_near(actual.color.y, want.color.y)
+            quad_corner_near(actual.color.z, want.color.z)
+            quad_corner_near(actual.color.w, want.color.w)
+            quad_corner_near(actual.colorize, want.colorize)
+            quad_corner_near(actual.pivot_y, want.pivot_y)
+            quad_corner_near(actual.entity_id, want.entity_id)
+        }
+        assert_eq(diagonal, 2, "each triangle shares the TL/BR diagonal")
+    }
+    let polygon_area = 0.0
+    for k in 0..4 {
+        let p = expected[k].pos
+        let q = expected[(k+1)%4].pos
+        polygon_area += p.x*q.y-p.y*q.x
+        assert_eq(seen[k], if k == 0 || k == 2 { 2 } else { 1 },
+            "each boundary corner has the diagonal's expected incidence")
+    }
+    quad_corner_near(area, polygon_area)
+}
+
+@test
+fn sprite_mesh_quad_distinct_corner_attributes_follow_geometry() {
+    let retained = quad_corner_test_mesh()
+    let positions = [v(-2.0,3.0),v(5.0,4.0),v(6.0,-2.0),v(-3.0,-4.0)]
+    let alpha = [0.125,0.375,0.625,0.875]
+    let depth = [0.2,0.4,0.6,0.8]
+    let u = [-0.1,0.3,0.7,1.1]
+    let vv = [1.3,0.9,0.5,0.1]
+    let tint = Color { r: 0.25, g: 0.5, b: 0.75, a: 0.5 }
+    let expected: [Vertex] = []
+    for k in 0..4 {
+        expected.push(vert(positions[k].x,positions[k].y,u[k],vv[k],
+            tint.r,tint.g,tint.b,tint.a*alpha[k],7.0,colorize:depth[k]))
+    }
+    retained.add_quad(positions[0],positions[1],positions[2],positions[3],ir(8,4,16,8),
+        py:7.0,tint:tint,colorize:0.95,corner_alpha:v(alpha[0],alpha[1],alpha[2],alpha[3]),
+        corner_colorize:v(depth[0],depth[1],depth[2],depth[3]),
+        corner_u:v(u[0],u[1],u[2],u[3]),corner_v:v(vv[0],vv[1],vv[2],vv[3]))
+    assert_eq(retained.mesh.count,6,"retained quad emits exactly two triangles")
+    quad_corner_oracle(retained.mesh,0,expected)
+    sprite_mesh_add_quad(retained.mesh,positions[0],positions[1],positions[2],positions[3],ir(8,4,16,8),
+        py:7.0,tint:tint,colorize:0.95,corner_alpha:v(alpha[0],alpha[1],alpha[2],alpha[3]),
+        corner_colorize:v(depth[0],depth[1],depth[2],depth[3]),
+        corner_u:v(u[0],u[1],u[2],u[3]),corner_v:v(vv[0],vv[1],vv[2],vv[3]))
+    assert_eq(retained.mesh.count,12,"direct quad appends without changing the retained quad")
+    quad_corner_oracle(retained.mesh,0,expected)
+    quad_corner_oracle(retained.mesh,6,expected)
+}
+
+@test
+fn sprite_mesh_quad_scalar_defaults_and_alpha_remain_source_compatible() {
+    let retained = quad_corner_test_mesh()
+    let positions = [v(-2.0,3.0),v(5.0,4.0),v(6.0,-2.0),v(-3.0,-4.0)]
+    let uv = [v(0.25,0.25),v(0.75,0.25),v(0.75,0.75),v(0.25,0.75)]
+    retained.add_quad(positions[0],positions[1],positions[2],positions[3],ir(8,4,16,8))
+    let expected: [Vertex] = []
+    for k in 0..4 {
+        expected.push(vert(positions[k].x,positions[k].y,uv[k].x,uv[k].y,1.0,1.0,1.0,1.0))
+    }
+    quad_corner_oracle(retained.mesh,0,expected)
+    let alpha = [0.125,0.375,0.625,0.875]
+    sprite_mesh_add_quad(retained.mesh,positions[0],positions[1],positions[2],positions[3],ir(8,4,16,8),
+        py:7.0,tint:Color { r:0.25,g:0.5,b:0.75,a:0.5 },colorize:0.6,
+        corner_alpha:v(alpha[0],alpha[1],alpha[2],alpha[3]))
+    expected.clear()
+    for k in 0..4 {
+        expected.push(vert(positions[k].x,positions[k].y,uv[k].x,uv[k].y,
+            0.25,0.5,0.75,0.5*alpha[k],7.0,colorize:0.6))
+    }
+    quad_corner_oracle(retained.mesh,6,expected)
+}

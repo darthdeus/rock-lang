@@ -1,0 +1,2 @@
+// Sampling is per draw, so one image can use multiple filters in a frame.
+pub enum TextureFilter { Nearest, Linear, MipStable }

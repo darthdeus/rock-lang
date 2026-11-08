@@ -1,0 +1,1304 @@
+// TODO: this is bitgun specific?
+pub const BAR_WIDTH: int = 300
+pub global BAR_HEIGHT: int = 50
+const BAR_INSET: int = 5
+pub global PAD: int = 20
+
+// ── UI contexts ──────────────────────────────────────────────────────────
+//
+// A UiRect is authored in DESIGN units and lowered once, at each draw and
+// hit-test boundary, into its destination's own target units. WHICH
+// destination, and what reference height those design units are measured
+// against, are rect state -- so a carve, a widget-made child, or a skin's
+// content rect keeps the context with no ambient global to save and restore,
+// and two contexts can be interleaved in one frame.
+//
+// Both are scalars. UiRect is a `value` (immutable C-layout cdata, scalarized
+// through calls); a context OBJECT inside it would put a GC allocation on
+// every carve in the hottest layout code there is.
+//
+// Output is the default: logical window units, scaled by UiScale.
+//
+// Composite is the scene-resolution surface `pixel_screen` drains into, after
+// post-processing and before the present upscales it. Its scale is
+// target_height / reference_height, and the default reference height is the
+// virtual target height -- so the pixel-perfect case is one UI unit per scene
+// texel, with no per-call scale math. Output `user_scale` deliberately does
+// NOT apply: a continuous size preference would put UI on fractional scene
+// texels and defeat the grid contract that is the destination's whole point.
+pub const UI_CTX_OUTPUT: int = 0
+pub const UI_CTX_COMPOSITE: int = 1
+
+pub value UiRect {
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    // UI z-bucket. Draw ops emit into the z-sorted UI batch pool:
+    // .fill()/.outline() at z, .text() at z+1, so a rect's own text
+    // always sits on its fill and an .at_z(2) overlay draws above a
+    // base panel's text (default fill 0 / text 1). Carve ops carry z
+    // through unchanged. z is LOCAL to a surface: fixed flush order puts
+    // Output above Composite whatever their numbers.
+    z: int = 0,
+    // UI_CTX_OUTPUT / UI_CTX_COMPOSITE.
+    ctx: int = 0,
+    // Declared design reference height. 0 = the context's own default.
+    ref_h: float = 0.0,
+}
+
+pub struct UiLayoutOverflowState {
+    count: int,
+    last_key: string,
+}
+
+pub global UI_LAYOUT_OVERFLOW: UiLayoutOverflowState = UiLayoutOverflowState {
+    count: 0,
+    last_key: "",
+}
+
+pub @pure fn ui_rect(x: float, y: float, w: float, h: float) -> UiRect {
+    UiRect { x, y, w, h, z: 0 }
+}
+
+// Presentation order -- what mouse occlusion resolves BEFORE local z, so the
+// cursor agrees with the pixels: composite UI is drawn into the scene image
+// and then upscaled, output UI is drawn on the window afterwards.
+@pure fn ui_ctx_order(ctx: int) -> int {
+    return if ctx == UI_CTX_COMPOSITE { 0 } else { 1 }
+}
+
+@pure fn ui_ctx_scale_in(view: FrameView, ctx: int, ref_h: float) -> float {
+    if ctx != UI_CTX_COMPOSITE { return view.ui_scale }
+    let th = view.scene_size.y as float
+    let rh = if ref_h > 0.0 { ref_h } else { th }
+    if rh <= 0.0 { return 1.0 }
+    return th / rh
+}
+
+// Design -> target scale for a context. Resolved against the PRESENTED view,
+// like the output scale always has been, so drawing and hit-testing cannot
+// disagree about where a rect is.
+fn ui_ctx_scale(ctx: int, ref_h: float) -> float {
+    let view = PRESENTED_VIEW ?? return if ctx == UI_CTX_COMPOSITE { 1.0 } else { RENDER_CONFIG.ui.user_scale }
+    return ui_ctx_scale_in(view, ctx, ref_h)
+}
+
+pub fn UiRect.ctx_scale(r) -> float { return ui_ctx_scale(r.ctx, r.ref_h) }
+
+// Design -> target FONT factor. Output text is authored in design units and
+// FONT_RENDER_SCALE is that context's window/DPI factor; composite text is
+// authored on the scene grid, where a window factor has no meaning -- letting
+// it through would rasterize raw Target-space glyphs at the wrong size.
+pub fn UiRect.text_scale(r) -> float {
+    return if r.ctx == UI_CTX_COMPOSITE { r.ctx_scale() } else { FONT_RENDER_SCALE }
+}
+
+// Point the target-pixel emission core at this rect's destination pool unless
+// an enclosing pass selected an explicit pool. Not a closure bracket: UiRect
+// draw ops are the hot path and a per-op closure allocates.
+pub fn ui_ctx_push(r: UiRect) -> RenderBatchScope {
+    let prev = CURRENT_UI_POOL
+    if !prev.active() {
+        CURRENT_UI_POOL = render_batch_scope(if r.ctx == UI_CTX_COMPOSITE { pixel_screen.batches } else { UI_RENDER_BATCHES })
+    }
+    return prev
+}
+
+pub fn ui_ctx_pop(prev: RenderBatchScope) {
+    CURRENT_UI_POOL = prev
+}
+
+// The pointer in a context's TARGET space -- output px, or scene texels.
+// Null when the cursor is outside the presented scene image (a letterbox bar,
+// or outside a cropped 1x pixel-perfect frame), which is exactly where no
+// composite rect can be.
+fn ui_ctx_target_pointer(ctx: int) -> Vec2? {
+    if ctx != UI_CTX_COMPOSITE { return mouse_screen() }
+    let view = PRESENTED_VIEW ?? return null
+    return output_to_scene_texel(view, mouse_screen())
+}
+
+// The pointer in a context's AUTHORING (design) space -- what a rect's
+// coordinates are in, so `contains` is a straight comparison.
+fn ui_ctx_pointer(ctx: int, ref_h: float) -> Vec2? {
+    if ctx != UI_CTX_COMPOSITE { return mouse_ui() }
+    let t = ui_ctx_target_pointer(ctx) ?? return null
+    let s = ui_ctx_scale(ctx, ref_h)
+    if s <= 0.0 { return null }
+    return t / s
+}
+
+pub fn UiRect.pointer(r) -> Vec2? { return ui_ctx_pointer(r.ctx, r.ref_h) }
+fn UiRect.target_pointer(r) -> Vec2? { return ui_ctx_target_pointer(r.ctx) }
+
+// Re-context a rect onto the composite. `reference_height` 0 = the virtual
+// target height, i.e. one UI unit per scene texel.
+pub @pure fn UiRect.on_composite(r, reference_height: float = 0.0) -> UiRect {
+    return UiRect { ..r, ctx: UI_CTX_COMPOSITE, ref_h: reference_height }
+}
+
+pub @pure fn UiRect.on_output(r) -> UiRect {
+    return UiRect { ..r, ctx: UI_CTX_OUTPUT, ref_h: 0.0 }
+}
+
+// The whole virtual target, as a composite-context rect.
+pub fn ui_scene_full(reference_height: float = 0.0) -> UiRect {
+    let base = UiRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0, ctx: UI_CTX_COMPOSITE, ref_h: reference_height }
+    let view = PRESENTED_VIEW ?? return base
+    let s = ui_ctx_scale_in(view, UI_CTX_COMPOSITE, reference_height)
+    if s <= 0.0 { return base }
+    return UiRect { ..base,
+        w: (view.scene_size.x as float) / s,
+        h: (view.scene_size.y as float) / s,
+    }
+}
+
+// Same rect in a different z-bucket. The overlay verb: carve the
+// overlay rect from its anchor, then .at_z(2) before drawing.
+pub @pure fn UiRect.at_z(r, z: int) -> UiRect {
+    return UiRect { ..r, z }
+}
+
+// ── Design-space UI scaling ──────────────────────────────────────────
+// UI is authored in design units (a fixed canvas, GameConfig.
+// design_resolution). The engine maps design->screen at exactly two
+// boundaries: the draw ops (out) call ui_to_screen, hit-testing (in)
+// calls mouse_ui. The @pure carvers never read the scale, so they stay
+// pure and operate entirely in design space.
+//
+// ui_effective_scale folds the auto-fit (logical output height vs the
+// reference height, X flexes) and the user's scale preference into one
+// factor. It is resolved with the rest of the frame, in FrameView.ui_scale.
+// Lifetime count of text draws whose glyphs did not fit their box. The
+// oracle a derived label size is checked against (skin_label_size);
+// the sibling log names only the first box per interval.
+pub global UI_TEXT_OVERFLOW_N: int = 0
+
+pub fn ui_text_overflow_count() -> int { return UI_TEXT_OVERFLOW_N }
+
+pub fn ui_effective_scale() -> float {
+    let view = PRESENTED_VIEW ?? return RENDER_CONFIG.ui.user_scale
+    return view.ui_scale
+}
+
+// Screen extent expressed in design units -- the UI authoring space.
+pub fn screen_design() -> Vec2 { return screen_size() / ui_effective_scale() }
+
+// A screen-pixel point in design units. The screen->design boundary
+// (inverse of ui_to_screen for a point). mouse_ui and the ui_at_*
+// anchors are this applied to the mouse / a world projection.
+pub fn screen_to_design(p: Vec2) -> Vec2 { return p / ui_effective_scale() }
+
+// Inverse of screen_to_design: a design-space point back to screen pixels.
+// Use when an immediate/screen-space draw needs a point that lives in
+// design space (e.g. a connector line to a design-anchored UI rect).
+pub fn design_to_screen(p: Vec2) -> Vec2 { return p * ui_effective_scale() }
+
+pub fn world_to_design(p: Vec2) -> Vec2 {
+    return screen_to_design(world_to_screen(p))
+}
+
+// The single design->target boundary, applied by every draw op. The scale is
+// the RECT's context, so an output rect and a composite rect lower correctly
+// in the same frame.
+pub fn ui_to_screen(r: UiRect) -> UiRect {
+    let s = r.ctx_scale()
+    return UiRect { ..r, x: r.x * s, y: r.y * s, w: r.w * s, h: r.h * s }
+}
+
+// Mouse position in design units, for hit-testing UiRects.
+pub fn mouse_ui() -> Vec2 { return screen_to_design(mouse_screen()) }
+
+// Text size in DESIGN units (measure_text returns screen px because it
+// bakes in FONT_RENDER_SCALE). Use when sizing a design-space UiRect to
+// fit measured text.
+pub fn measure_ui(text: string, font_size: float, family: TextFamily? = null) -> Vec2 {
+    return measure_text(text, font_size, family: family) / ui_effective_scale()
+}
+
+// The longest whole-glyph prefix of `text` that measures within `room` design
+// units, the measure UiRect.text checks. With `ellipsis`, a cut text ends in
+// "..." and the marker counts against the room; "..." alone when no prefix fits.
+pub fn ui_fit_text(text: string, room: float, font_size: float, ellipsis: bool = false,
+    family: TextFamily? = null) -> string {
+    if measure_ui(text, font_size, family).x <= room { return text }
+    let marker = if ellipsis { "..." } else { "" }
+    // Binary search over glyph starts: `low` fits (or is the empty prefix),
+    // `high` overflows, and each probe is a glyph start strictly between them.
+    let low = 0
+    let high = text.len()
+    while true {
+        let mid = (low + high + 1) ./ 2
+        let cut = mid
+        while cut < high && text_codepoint_at(text, cut) == -1 { cut += 1 }
+        if cut == high {
+            cut = mid - 1
+            while cut > low && text_codepoint_at(text, cut) == -1 { cut -= 1 }
+            if cut == low { break }
+        }
+        if measure_ui(text.substring(0, cut) + marker, font_size, family).x <= room {
+            low = cut
+        } else {
+            high = cut
+        }
+    }
+    return text.substring(0, low) + marker
+}
+
+pub value UiTextFlow {
+    text: string,
+    size: Vec2,
+    line_count: int,
+}
+
+pub fn ui_text_flow(text: string, max_width: float, font_size: float,
+    family: TextFamily? = null) -> UiTextFlow {
+    let n = text.len()
+    let single_line = text.find("\n") < 0
+    let normalized_spaces = text.find("  ") < 0
+        && (n == 0 || (text.unit_at(0) != 32 && text.unit_at(n - 1) != 32))
+    if single_line && normalized_spaces {
+        let size = measure_ui(text, font_size, family)
+        if text.find(" ") < 0 || size.x <= max_width {
+            return UiTextFlow { text, size, line_count: 1 }
+        }
+    }
+    static buffer = UiRichFlow {}
+    static spans = [text_span("")]
+    spans[0].text = text
+    let flow = ui_flow(spans, max_width, font_size, 0.0, family,
+        buffer, true, family == null)
+    let wrapped = ""
+    for (i, line) in enumerate(flow.lines) {
+        if i > 0 { wrapped = wrapped + "\n" }
+        wrapped = wrapped + line.plain
+    }
+    return UiTextFlow {
+        text: wrapped,
+        size: measure_ui(wrapped, font_size, family),
+        line_count: flow.lines.len(),
+    }
+}
+
+// Fit against the same target-space layout and box width as UiRect.text.
+pub fn ui_fit_font(text: string, room: float, max: float,
+    family: TextFamily? = null, font: Font? = null) -> float {
+    if font != null && family != null { error("ui_fit_font: pass either font or family, not both") }
+    if room <= 0.0 || max <= 0.0 { return 0.0 }
+    let target_room = room * ui_effective_scale()
+    let size = max
+    for _i in 0..4 {
+        let w = measure_text(text, size, family, font).x
+        if w <= target_room { return size }
+        size = size * target_room / w
+    }
+    if measure_text(text, size, family, font).x <= target_room { return size }
+    let nudged = if size > 0.001 { size - 0.001 } else { 0.0 }
+    if measure_text(text, nudged, family, font).x <= target_room { return nudged }
+    let low = 0.0
+    let high = nudged
+    for _i in 0..16 {
+        let candidate = (low + high) * 0.5
+        if measure_text(text, candidate, family, font).x <= target_room {
+            low = candidate
+        } else {
+            high = candidate
+        }
+    }
+    return low
+}
+
+// Design-space shape/text draws: the free-function counterpart to the
+// UiRect carve, for the shapes a rect can't express. The carve covers
+// rect/sprite/text/shader, so a caller that also needs a circle had no
+// design-space option and hand-rolled a scaled wrapper (games/chess's
+// s_circle/s_text family). These delegate to the `screen` verbs, so z
+// handling and batching stay identical -- the only difference is that
+// the arguments are design units.
+pub fn ui_circle(center: Vec2, radius: float, color: Color, z: int = 0) {
+    let s = ui_effective_scale()
+    screen.circle(center * s, radius * s, color, z)
+}
+
+pub fn ui_circle_outline(
+    center: Vec2,
+    radius: float,
+    color: Color,
+    thickness: float = 1.0,
+    z: int = 0
+) {
+    let s = ui_effective_scale()
+    screen.circle_outline(center * s, radius * s, color, thickness * s, z)
+}
+
+pub fn ui_text(text: string, pos: Vec2, font_size: float, color: Color = WHITE, z: int = 0) {
+    let s = ui_effective_scale()
+    screen.text(text, pos * s, font_size, color, z)
+}
+
+pub @pure fn UiRect.center(r) -> Vec2 {
+    return v(r.x + r.w / 2, r.y + r.h / 2)
+}
+
+pub @pure fn UiRect.size(r) -> Vec2 {
+    return v(r.w, r.h)
+}
+
+pub @pure fn UiRect.inset(r, inset: float) -> UiRect {
+    return UiRect { ..r, x: r.x + inset, y: r.y + inset, w: r.w - inset * 2, h: r.h - inset * 2 }
+}
+
+pub @pure fn UiRect.scale(r, scale: float) -> UiRect {
+    return UiRect { ..r, w: r.w * scale, h: r.h * scale }
+}
+
+// Translate a rect by `d` without resizing. In design space (where
+// UiRects live), so the offset scales with UI_SCALE at draw time -- use
+// for a design-unit nudge on an anchored rect, e.g.
+// ui_at_world(...).offset(v(0, 36)). For a FIXED screen-px nudge, add to
+// the screen point before ui_at_screen instead.
+pub @pure fn UiRect.offset(r, d: Vec2) -> UiRect {
+    return UiRect { ..r, x: r.x + d.x, y: r.y + d.y }
+}
+
+pub @pure
+fn UiRect.contains(r, point: Vec2) -> bool {
+    return point.x >= r.x && point.x <= r.x + r.w && point.y >= r.y && point.y <= r.y + r.h
+}
+
+// Distance from `point` to the nearest point of the rect; 0 inside it.
+pub @pure
+fn UiRect.distance_to(r, point: Vec2) -> float {
+    let dx = max(max(r.x - point.x, point.x - (r.x + r.w)), 0.0)
+    let dy = max(max(r.y - point.y, point.y - (r.y + r.h)), 0.0)
+    return sqrt(dx * dx + dy * dy)
+}
+
+pub @pure fn UiRect.contains_rect(r, child: UiRect) -> bool {
+    if r.ctx != child.ctx || r.ref_h != child.ref_h { return false }
+    if r.w < 0.0 || r.h < 0.0 || child.w < 0.0 || child.h < 0.0 { return false }
+    return child.x >= r.x && child.y >= r.y
+        && child.x + child.w <= r.x + r.w
+        && child.y + child.h <= r.y + r.h
+}
+
+pub @pure fn ui_layout_overflows(bounds: UiRect, child: UiRect) -> bool {
+    return !bounds.contains_rect(child)
+}
+
+pub fn ui_layout_warn_overflow(bounds: UiRect, child: UiRect, key: string) -> bool {
+    if !ui_layout_overflows(bounds, child) { return false }
+    UI_LAYOUT_OVERFLOW.count = UI_LAYOUT_OVERFLOW.count + 1
+    UI_LAYOUT_OVERFLOW.last_key = key
+    log_throttled("UI", "layout item '{key}' overflows its bounds: child ({child.x}, {child.y}, {child.w}, {child.h}), bounds ({bounds.x}, {bounds.y}, {bounds.w}, {bounds.h})",
+        5.0, "ui-layout-overflow:{key}")
+    return true
+}
+
+// True when the mouse is over this rect. The everyday UI hit-test -- uses the
+// rect's own context pointer, so callers never name a coordinate system and a
+// composite rect is never "hovered" from a letterbox bar the scene does not
+// reach. Prefer `r.hovered()` over `r.contains(mouse_ui())`.
+pub fn UiRect.hovered(r) -> bool {
+    let p = r.pointer() ?? return false
+    return r.contains(p)
+}
+
+pub @pure fn UiRect.take_left(r, cut: float) -> UiRect {
+    return UiRect { ..r, w: cut }
+}
+
+pub @pure fn UiRect.take_right(r, cut: float) -> UiRect {
+    return UiRect { ..r, x: r.x + r.w - cut, w: cut }
+}
+
+pub @pure fn UiRect.take_top(r, cut: float) -> UiRect {
+    return UiRect { ..r, h: cut }
+}
+
+pub @pure fn UiRect.take_bottom(r, cut: float) -> UiRect {
+    return UiRect { ..r, y: r.y + r.h - cut, h: cut }
+}
+
+pub @pure fn UiRect.skip_left(r, cut: float) -> UiRect {
+    return UiRect { ..r, x: r.x + cut, w: r.w - cut }
+}
+
+pub @pure fn UiRect.skip_right(r, cut: float) -> UiRect {
+    return UiRect { ..r, w: r.w - cut }
+}
+
+pub @pure fn UiRect.skip_top(r, cut: float) -> UiRect {
+    return UiRect { ..r, y: r.y + cut, h: r.h - cut }
+}
+
+pub @pure fn UiRect.skip_bottom(r, cut: float) -> UiRect {
+    return UiRect { ..r, h: r.h - cut }
+}
+
+// Corner cuts: take a size-sized sub-rect anchored at one corner of
+// `r`. Equivalent to take_<vside>(size.y).take_<hside>(size.x) but
+// reads as one intent at the call site. Especially useful with
+// ui_full_screen().inset(pad).take_bottom_right(panel_size) for
+// fixed corner-anchored UI panels.
+pub @pure fn UiRect.take_top_left(r, size: Vec2) -> UiRect {
+    return UiRect { ..r, w: size.x, h: size.y }
+}
+
+pub @pure fn UiRect.take_top_right(r, size: Vec2) -> UiRect {
+    return UiRect { ..r, x: r.x + r.w - size.x, w: size.x, h: size.y }
+}
+
+pub @pure fn UiRect.take_bottom_left(r, size: Vec2) -> UiRect {
+    return UiRect { ..r, y: r.y + r.h - size.y, w: size.x, h: size.y }
+}
+
+pub @pure fn UiRect.take_bottom_right(r, size: Vec2) -> UiRect {
+    return UiRect { ..r, x: r.x + r.w - size.x, y: r.y + r.h - size.y, w: size.x, h: size.y }
+}
+
+// Edge-center cuts: take a size-sized sub-rect anchored to one edge
+// of `r`, centered along the perpendicular axis. Pairs with the
+// corner cuts above for the full 9-cell layout vocabulary.
+//   top_center    bottom_center  -> horizontally centered, hugs top/bottom
+//   left_center   right_center   -> vertically centered, hugs left/right
+pub @pure fn UiRect.take_top_center(r, size: Vec2) -> UiRect {
+    return UiRect { ..r, x: r.x + (r.w - size.x) / 2, w: size.x, h: size.y }
+}
+
+pub @pure fn UiRect.take_bottom_center(r, size: Vec2) -> UiRect {
+    return UiRect { ..r, x: r.x + (r.w - size.x) / 2, y: r.y + r.h - size.y, w: size.x, h: size.y }
+}
+
+pub @pure fn UiRect.take_left_center(r, size: Vec2) -> UiRect {
+    return UiRect { ..r, y: r.y + (r.h - size.y) / 2, w: size.x, h: size.y }
+}
+
+pub @pure fn UiRect.take_right_center(r, size: Vec2) -> UiRect {
+    return UiRect { ..r, x: r.x + r.w - size.x, y: r.y + (r.h - size.y) / 2, w: size.x, h: size.y }
+}
+
+// Dead-center cut. Completes the 9-cell vocabulary; equivalent to
+// inset((r.size() - size) / 2) for centered sub-rects.
+pub @pure fn UiRect.take_center(r, size: Vec2) -> UiRect {
+    return UiRect { ..r, x: r.x + (r.w - size.x) / 2, y: r.y + (r.h - size.y) / 2, w: size.x, h: size.y }
+}
+
+// UiRect drawing
+//
+// All ops emit into the z-sorted pool of the rect's own CONTEXT --
+// UI_RENDER_BATCHES for an output rect, pixel_screen.batches for a composite
+// one (ui_ctx_push) -- keyed by the rect's z: fills/outlines/sprites at r.z,
+// text at r.z + 1. Within one z, batches order by texture key, not push order
+// -- that is why text gets its own bucket; overlays that must cover another
+// rect's text use .at_z(2+). z is local to a surface: an output rect is above
+// a composite one at any z, because the composite drains before the present.
+
+// The white-pixel batch for shape draws at a given z.
+pub fn ui_shape_batch(z: int) -> RenderBatch {
+    return ensure_ui_batch(sampled_image(WHITE_PIXEL.unwrap()), RenderProps {
+        z_layer: z,
+        depth: DepthMode::Off,
+    })
+}
+
+// ── px emission core ─────────────────────────────────────────────────
+// The one place target-pixel UI shapes turn into vertices. Raw target px
+// (output pixels or scene texels, depending on the ambient pool), top-left
+// pos. Both vocabularies layer over these: the UiRect ops below (design
+// space, via ui_to_screen) and DrawList's Target verbs (draw_list.rock).
+// Sprites and text already have single primitives — ui_draw_sprite_topleft /
+// queue_ui_text_scaled (rendering/text.rock).
+
+pub @inline
+fn px_fill(pos: Vec2, size: Vec2, color: Color, z: int) {
+    // add_rect_vertices_of takes the rect CENTER; we take top-left.
+    add_rect_vertices_of(ui_shape_batch(z), pos + size / 2, size, color, FillMode::Fill, 0.0, 0)
+}
+
+@inline
+fn px_outline(pos: Vec2, size: Vec2, color: Color, thickness: float, z: int) {
+    // thickness is screen px; UI batches render with identity camera so
+    // vertex units ARE px (no /16 world conversion).
+    add_rect_vertices_of(ui_shape_batch(z), pos + size / 2, size, color, FillMode::Outline, thickness, 0)
+}
+
+// Flat-shaded triangle. The one shape whose silhouette the rect/circle/line
+// primitives cannot express, so consumers that need one (vector art, a
+// diagonal split) have a core to call instead of reaching into the vertex
+// builder themselves.
+pub @inline
+fn px_triangle(a: Vec2, b: Vec2, c: Vec2, color: Color, z: int) {
+    add_triangle_vertices_of(ui_shape_batch(z), a, b, c, color)
+}
+
+// Thin line as a rotated quad (two triangles), screen px, into the pooled
+// UI shape batch at z. The pool's one missing shape primitive -- lets the
+// profiler graph polyline leave the immediate draw_line path.
+pub @inline
+fn px_line(a: Vec2, b: Vec2, color: Color, thickness: float, z: int) {
+    let d = b - a
+    let len = d.length()
+    if len <= 0.0 { return () }
+    let perp = v(-d.y, d.x) / len * (thickness / 2.0)
+    px_triangle(a + perp, a - perp, b - perp, color, z)
+    px_triangle(a + perp, b - perp, b + perp, color, z)
+}
+
+pub @inline
+fn px_circle(center: Vec2, radius: float, color: Color, z: int) {
+    add_circle_vertices_of(ui_shape_batch(z), center, radius, color, FillMode::Fill, 0)
+}
+
+pub @inline
+fn px_circle_outline(center: Vec2, radius: float, color: Color, thickness: float, z: int) {
+    add_circle_vertices_of(ui_shape_batch(z), center, radius, color, FillMode::Outline, 0, thickness: thickness)
+}
+
+pub @inline
+fn UiRect.fill(r, color: Color) -> UiRect {
+    let s = ui_to_screen(r)
+    let prev = ui_ctx_push(r)
+    px_fill(v(s.x, s.y), v(s.w, s.h), color, r.z)
+    ui_ctx_pop(prev)
+    return r
+}
+
+pub @inline
+fn UiRect.outline(r, color: Color, thickness: float = 1.0) -> UiRect {
+    let s = ui_to_screen(r)
+    let prev = ui_ctx_push(r)
+    px_outline(v(s.x, s.y), v(s.w, s.h), color, thickness, r.z)
+    ui_ctx_pop(prev)
+    return r
+}
+
+pub fn UiRect.sprite(r, image: SampledTexture, source: IRect) -> UiRect {
+    r.sprite_batch(image, source)
+    return r
+}
+
+pub fn UiRect.sprite_batch(
+    r,
+    image: SampledTexture,
+    source: IRect,
+    tint: Color = WHITE,
+    pipeline: Pipeline? = null
+) -> RenderBatch {
+    let s = ui_to_screen(r)
+    // Pooled UI path (not draw_sprite_now, which the world camera transforms
+    // during @late_draw): order 1 sits above same-z shape fills, below text.
+    let prev = ui_ctx_push(r)
+    let batch = ui_draw_sprite_topleft(image, v(s.x, s.y), source, v(s.w, s.h), tint,
+        z_layer: r.z, pipeline: pipeline)
+    ui_ctx_pop(prev)
+    return batch
+}
+
+// Draw a textured quad whose corners are offsets from this rect's top-left,
+// in design units. The rect supplies the destination context and z bucket;
+// the corners preserve the affine shape instead of forcing the image into an
+// axis-aligned box.
+pub fn UiRect.sprite_quad(
+    r,
+    image: SampledTexture,
+    tl: Vec2,
+    tr: Vec2,
+    br: Vec2,
+    bl: Vec2,
+    source: IRect? = null,
+    tint: Color = WHITE,
+    pipeline: Pipeline? = null,
+    order: int = 1,
+    sampling: TextureFilter? = null,
+) -> RenderBatch {
+    let a = ui_to_screen(r.offset(tl))
+    let b = ui_to_screen(r.offset(tr))
+    let c = ui_to_screen(r.offset(br))
+    let d = ui_to_screen(r.offset(bl))
+    let prev = ui_ctx_push(r)
+    let batch = ui_draw_sprite_quad(image,
+        v(a.x, a.y), v(b.x, b.y), v(c.x, c.y), v(d.x, d.y),
+        source, tint, z_layer: r.z, order: order, pipeline: pipeline,
+        sampling: sampling)
+    ui_ctx_pop(prev)
+    return batch
+}
+
+// Full-rect quad through a custom pipeline: TexCoord runs 0..1 across
+// the rect over the white-pixel texture, so texture() is white and a
+// procedural shader works from TexCoord alone. The flush switches programs
+// per batch group (render_ui_batches); the shader must consume the batched
+// Vertex layout and gets the UI pass camera (pixel ortho, identity view).
+// A Rock `@uniform` block goes through `shader_quad` + `batch_block`.
+pub fn UiRect.shader(r, pl: Pipeline, order: int = 1) -> UiRect {
+    let s = ui_to_screen(r)
+    let prev = ui_ctx_push(r)
+    ui_draw_sprite_topleft(sampled_image(WHITE_PIXEL.unwrap()), v(s.x, s.y), irect(0, 0, 1, 1), v(s.w, s.h),
+        z_layer: r.z, order: order, pipeline: pl)
+    ui_ctx_pop(prev)
+    return r
+}
+
+// The quad a procedural UI shader draws through: TexCoord runs 0..1 over the
+// white-pixel texture, so the shader works from TexCoord alone. Returns the
+// occurrence-keyed batch so the caller can pack its `@uniform` block onto it.
+pub fn UiRect.shader_quad(r, pipeline: Pipeline, order: int = 1) -> RenderBatch {
+    let s = ui_to_screen(r)
+    // The rect's own context decides which pool the quad lands in; a composite
+    // rect emitted into the output pool draws at the wrong scale on the wrong
+    // surface.
+    let prev = ui_ctx_push(r)
+    let batch = ui_draw_sprite_topleft(sampled_image(WHITE_PIXEL.unwrap()), v(s.x, s.y), irect(0, 0, 1, 1), v(s.w, s.h),
+        z_layer: r.z, order: order, pipeline: pipeline)
+    ui_ctx_pop(prev)
+    return batch
+}
+
+pub fn UiRect.parametric_sprite(
+    r,
+    image: SampledTexture,
+    source: IRect,
+    pipeline: Pipeline,
+    p0x: float, p0y: float, p0z: float, p0w: float,
+    p1x: float, p1y: float, p1z: float, p1w: float,
+    p2x: float, p2y: float, p2z: float, p2w: float,
+    order: int = 1,
+) -> RenderBatch {
+    if !pipeline.parametric_quads {
+        error("parametric_sprite requires parametric_quad_pipeline")
+    }
+    let s = ui_to_screen(r)
+    let prev = ui_ctx_push(r)
+    let render = RenderProps {
+        z_layer: r.z,
+        order: order,
+        depth: DepthMode::Off,
+        blend: BlendMode::Alpha,
+        pipeline: pipeline,
+    }
+    let base_key = batch_key_of(image, render.z_layer, render.blend,
+        render.pixel_snap, render.depth, render.order, null, render.pipeline,
+        false, resolve_sampling(image, render.sampling),
+        shared_pipeline: true, text_batch: render.text_batch)
+    let batch = ensure_ui_batch(image, render, shared_pipeline: true)
+    if !parametric_batch_has_room(batch) {
+        let slot = parametric_batch_slot(base_key)
+        while !parametric_batch_has_room(batch) {
+            batch = ensure_ui_batch(image, render, shared_pipeline: true,
+                parametric_slot: slot)
+            if parametric_batch_has_room(batch) { break }
+            let cursor = PARAMETRIC_BATCH_CURSOR.get(base_key).unwrap()
+            cursor.slot += 1
+            slot = cursor.slot
+        }
+    }
+    let idx = batch_parametric_push(
+        batch,
+        p0x, p0y, p0z, p0w,
+        p1x, p1y, p1z, p1w,
+        p2x, p2y, p2z, p2w,
+    )
+    ui_push_sprite_topleft(batch, image, v(s.x, s.y), source,
+        v(s.w, s.h), WHITE, parametric_index: idx as float)
+    ui_ctx_pop(prev)
+    return batch
+}
+
+// The bar's uniform set, declared here because it is a CONVENTION the engine
+// writes and the shader that reads it ships beside it (`ui_sdf_bar_frag`,
+// stone/engine/ui/shaders.rock) --
+// the same relation `outline_target_vert` has to `Vertex`. uSize is rect design
+// units (aspect + corner scale), uRadius corner px.
+pub value UiSdfBarU { uSize: Vec2, uRatio: float, uRadius: float, uFill: Vec4, uBg: Vec4, uTime: float }
+
+// Procedural rounded-rect progress bar through `pipeline` (a shader reading
+// `UiSdfBarU`). The block is packed onto the quad's own batch, so two bars
+// sharing a base key keep their own values in their occurrence slots.
+//
+// `uTime` rides the block. It used to come from `setup_ui_pass_shader`'s engine
+// frame-global by-name set, which a block member has no location for.
+pub fn UiRect.sdf_bar(
+    r,
+    ratio: float,
+    pipeline: Pipeline,
+    fill: Color,
+    bg: Color,
+    radius: float = 6.0,
+    order: int = 1
+) -> UiRect {
+    if pipeline.parametric_quads {
+        r.parametric_sprite(
+            sampled_image(WHITE_PIXEL.unwrap()), irect(0, 0, 1, 1),
+            pipeline,
+            r.w, r.h, clamp(ratio, 0.0, 1.0), radius,
+            fill.r, fill.g, fill.b, fill.a,
+            bg.r, bg.g, bg.b, bg.a,
+            order: order,
+        )
+        return r
+    }
+    let batch = r.shader_quad(pipeline, order: order)
+    batch_block(batch, pipeline.shader_name, UiSdfBarU {
+        uSize: v(r.w, r.h),
+        uRatio: clamp(ratio, 0.0, 1.0),
+        uRadius: radius,
+        uFill: v(fill.r, fill.g, fill.b, fill.a),
+        uBg: v(bg.r, bg.g, bg.b, bg.a),
+        uTime: shader_clock(),
+    })
+    return r
+}
+
+pub fn UiRect.nine_patch(
+    r,
+    image: SampledTexture,
+    source: IRect,
+    corner: IVec2,
+    dest_scale: float,
+    tint: Color = WHITE,
+    pipeline: Pipeline? = null
+) -> UiRect {
+    r.nine_patch_batch(image, source, corner, dest_scale, tint, pipeline)
+    return r
+}
+
+// The nine-patch as ONE batch, returned so a caller can pack its `@uniform`
+// block onto it -- the same relation `shader_quad` has to `sdf_bar`. All nine
+// quads share a key, so ensuring once and pushing into that batch is also one
+// draw instead of nine occurrence slots.
+fn UiRect.nine_patch_batch(
+    r,
+    image: SampledTexture,
+    source: IRect,
+    corner: IVec2,
+    dest_scale: float,
+    tint: Color = WHITE,
+    pipeline: Pipeline? = null
+) -> RenderBatch {
+    // Design-space rect mapped to screen, like the other draw ops. The
+    // corner dest size also scales by UI so the patch grows with the UI.
+    let s = ui_to_screen(r)
+    let pos = v(s.x, s.y)
+    let size = v(s.w, s.h)
+    let ui_s = r.ctx_scale()
+    let prev = ui_ctx_push(r)
+
+    let cw = corner.x
+    let ch = corner.y
+
+    let mw = source.w - cw * 2
+    let mh = source.h - ch * 2
+
+    let tl = irect(source.x, source.y, cw, ch)
+    let tm = irect(source.x + cw, source.y, mw, ch)
+    let tr = irect(source.x + cw + mw, source.y, cw, ch)
+
+    let ml = irect(source.x, source.y + ch, cw, mh)
+    let mm = irect(source.x + cw, source.y + ch, mw, mh)
+    let mr = irect(source.x + cw + mw, source.y + ch, cw, mh)
+
+    let bl = irect(source.x, source.y + ch + mh, cw, ch)
+    let bm = irect(source.x + cw, source.y + ch + mh, mw, ch)
+    let br = irect(source.x + cw + mw, source.y + ch + mh, cw, ch)
+
+    // Clamp corner dest to half the rect so a small dest never inverts
+    // the middle strip (corners distort instead, which reads better).
+    let c_dest_w = min(cw * dest_scale * ui_s, size.x / 2)
+    let c_dest_h = min(ch * dest_scale * ui_s, size.y / 2)
+
+    let m_dest_w = size.x - c_dest_w * 2
+    let m_dest_h = size.y - c_dest_h * 2
+
+    let batch = ensure_ui_batch(image, RenderProps {
+        z_layer: r.z,
+        order: 1,
+        depth: DepthMode::Off,
+        blend: BlendMode::Alpha,
+        pipeline: pipeline,
+    })
+
+    ui_push_sprite_topleft(batch, image, pos, tl, v(c_dest_w, c_dest_h), tint)
+    ui_push_sprite_topleft(batch, image, pos + v(c_dest_w, 0), tm, v(m_dest_w, c_dest_h), tint)
+    ui_push_sprite_topleft(batch, image, pos + v(c_dest_w + m_dest_w, 0), tr, v(c_dest_w, c_dest_h), tint)
+
+    ui_push_sprite_topleft(batch, image, pos + v(0, c_dest_h), ml, v(c_dest_w, m_dest_h), tint)
+    ui_push_sprite_topleft(batch, image, pos + v(c_dest_w, c_dest_h), mm, v(m_dest_w, m_dest_h), tint)
+    ui_push_sprite_topleft(batch, image, pos + v(c_dest_w + m_dest_w, c_dest_h), mr, v(c_dest_w, m_dest_h), tint)
+
+    ui_push_sprite_topleft(batch, image, pos + v(0, c_dest_h + m_dest_h), bl, v(c_dest_w, c_dest_h), tint)
+    ui_push_sprite_topleft(batch, image, pos + v(c_dest_w, c_dest_h + m_dest_h), bm, v(m_dest_w, c_dest_h), tint)
+    ui_push_sprite_topleft(batch, image, pos + v(c_dest_w + m_dest_w, c_dest_h + m_dest_h), br, v(c_dest_w, c_dest_h), tint)
+
+    ui_ctx_pop(prev)
+    return batch
+}
+
+// Diagonal split: draws the rect as two triangles separated by the
+// top-right -> bottom-left diagonal (per-bend-sinister in heraldry).
+//   top_left  triangle: (TL, TR, BL) -> `tl_color`
+//   bot_right triangle: (TR, BR, BL) -> `br_color`
+// Same color in both args = solid fill via two triangles.
+pub @inline
+fn UiRect.split_diagonal(r, tl_color: Color, br_color: Color) -> UiRect {
+    let s = ui_to_screen(r)
+    let x1 = s.x
+    let y1 = s.y
+    let x2 = s.x + s.w
+    let y2 = s.y + s.h
+    let prev = ui_ctx_push(r)
+    // TL -> TR -> BL
+    px_triangle(v(x1, y1), v(x2, y1), v(x1, y2), tl_color, r.z)
+    // TR -> BR -> BL
+    px_triangle(v(x2, y1), v(x2, y2), v(x1, y2), br_color, r.z)
+    ui_ctx_pop(prev)
+    return r
+}
+
+pub @inline
+fn UiRect.progress(r, ratio: float, fill: Color, bg: Color) -> UiRect {
+    r.fill(bg)
+    // Spread, not ui_rect: a fresh rect would default back to the output.
+    UiRect { ..r, w: r.w * clamp(ratio, 0.0, 1.0) }.fill(fill)
+    return r
+}
+
+// 9-cell text alignment. Left/Center/Right are the vertically-centered
+// middle row (unchanged); the Top* / Bottom* variants pin to the top or
+// bottom edge. The single source of alignment is `text_align_fracs`;
+// both UiRect.text (positions within a rect) and draw_text (pivot
+// offset) derive from it.
+pub enum TextAlign {
+    TopLeft,
+    TopCenter,
+    TopRight,
+    Left,
+    Center,
+    Right,
+    BottomLeft,
+    BottomCenter,
+    BottomRight,
+}
+
+// Normalized anchor fraction for an alignment: x in {0=left, 0.5=center,
+// 1=right}, y in {0=top, 0.5=middle, 1=bottom}. Multiply by the free
+// space (box - text) to position, or negate for a draw pivot offset.
+pub @pure fn text_align_fracs(align: TextAlign) -> Vec2 {
+    return match align {
+        TextAlign::TopLeft      => v(0.0, 0.0),
+        TextAlign::TopCenter    => v(0.5, 0.0),
+        TextAlign::TopRight     => v(1.0, 0.0),
+        TextAlign::Left         => v(0.0, 0.5),
+        TextAlign::Center       => v(0.5, 0.5),
+        TextAlign::Right        => v(1.0, 0.5),
+        TextAlign::BottomLeft   => v(0.0, 1.0),
+        TextAlign::BottomCenter => v(0.5, 1.0),
+        TextAlign::BottomRight  => v(1.0, 1.0),
+    }
+}
+
+// `font` sits AFTER `align` so every positional caller is unaffected. A
+// composite context needs it: the atlas is rasterized at ONE pixel size, so a
+// 6-texel label through a 48 px default font is an 8x downscale -- a font
+// rasterized for the grid is the fix, and it must be selectable per rect.
+//
+// Measurement and emission take the SAME context scale, so alignment is exact
+// on either surface. FONT_RENDER_SCALE is the OUTPUT context's window factor
+// and never reaches a composite rect (UiRect.text_scale).
+pub fn UiRect.text(
+    r,
+    text: string,
+    font_size: float,
+    color: Color,
+    align: TextAlign = TextAlign::Center,
+    font: Font? = null,
+    shadow: bool = true,
+    family: TextFamily? = null
+) -> UiRect {
+    if font != null && family != null {
+        error("UiRect.text: pass either font or family, not both")
+    }
+    let s = ui_to_screen(r)
+    let ts = r.text_scale()
+    if family != null {
+        let layout = resolve_plain_text_layout(family.unwrap(), text,
+            font_size, ts, "UiRect.text")
+        let frac = text_align_fracs(align)
+        let trailing = (layout.lines.len - 1) as float * layout.line_height
+        let pos = v(s.x + (s.w - layout.width) * frac.x,
+            text_anchored_y(s.y + s.h * frac.y, frac.y, layout.height,
+                layout.ascent, resolved_plain_cap_height(layout), trailing))
+        let prev = ui_ctx_push(r)
+        if shadow {
+            emit_plain_text_layout(layout, TextPlacement::Output, pos + v(1, 1),
+                r.z + 1, BLACK)
+        }
+        emit_plain_text_layout(layout, TextPlacement::Output, pos, r.z + 1,
+            color)
+        ui_ctx_pop(prev)
+        return r
+    }
+    let f = font ?? DEFAULT_FONT ?? return r
+    let physical = if r.ctx == UI_CTX_COMPOSITE { 1.0 } else {
+        text_output_raster_density()
+    }
+    let layout = text_layout_cached(f, text, font_size, ts, align, physical)
+    let text_size = v(layout.logical_bounds.w, layout.logical_bounds.h)
+    // Free: the measurement above is needed for alignment anyway. Keyed on the
+    // BOX, not the string, so a widget whose text changes every frame (a score,
+    // a timer) reports once per interval instead of once per value.
+    if text_size.x > s.w {
+        // Counted as well as logged: the log is THROTTLED and keyed on the
+        // box, so it reports one of N offenders and is no oracle. The count
+        // is what a test can assert a derived size against.
+        UI_TEXT_OVERFLOW_N += 1
+        log_throttled("UI", "text overflows its box: \"{text}\" is {text_size.x}px in a {s.w}px box",
+            5.0, "ui-text-overflow:{r.x},{r.y},{r.w},{r.h}")
+    }
+    let frac = text_align_fracs(align)
+    let anchor = v(s.x + s.w * frac.x, s.y + s.h * frac.y)
+    // r.z + 1: text sits above this rect's shapes; shadow + main share
+    // the bucket (same font-atlas batch, push order holds within it).
+    let prev = ui_ctx_push(r)
+    if shadow {
+        emit_ui_text_layout(layout, anchor + v(1, 1), BLACK, v(), r.z + 1)
+    }
+    emit_ui_text_layout(layout, anchor, color, v(), r.z + 1)
+    ui_ctx_pop(prev)
+
+    return r
+}
+
+fn UiRect.rich_text_single_font(
+    r,
+    span: TextSpan,
+    font: Font,
+    font_size: float,
+    align: TextAlign,
+    shadow: bool
+) -> UiRect {
+    return r.rich_text_single_font_values(span.text, span.style.color,
+        span.style.bold, span.style.italic, font, font_size, align, shadow)
+}
+
+fn UiRect.rich_text_single_font_values(
+    r,
+    text: string,
+    color: Color,
+    bold: bool,
+    italic: bool,
+    font: Font,
+    font_size: float,
+    align: TextAlign,
+    shadow: bool
+) -> UiRect {
+    let idx = text_family_font_idx(font, "UiRect.rich_text")
+    let style = TextStyle { color: color, bold: bold, italic: italic }
+    let prepared = text_prepare_missing_glyphs(font, null, idx, text,
+        "UiRect.rich_text")
+    let face = text_validate_single_font_span(
+        font, idx, prepared, style, true, "UiRect.rich_text")
+    if face < 0 { return r }
+
+    let s = ui_to_screen(r)
+    let ts = r.text_scale()
+    let physical = if r.ctx == UI_CTX_COMPOSITE { 1.0 } else {
+        text_output_raster_density()
+    }
+    let layout = text_layout_cached(font, prepared, font_size, ts,
+        TextAlign::TopLeft, physical, face: face)
+    let frac = text_align_fracs(align)
+    let pos = v(s.x + (s.w - layout.logical_bounds.w) * frac.x,
+        text_anchored_y(s.y + s.h * frac.y, frac.y, layout.logical_bounds.h,
+            layout.ascent, text_font_cap_height(font, font_size, ts), 0.0))
+
+    let prev = ui_ctx_push(r)
+    if shadow {
+        let _ = text_layout_emit(layout, pos + v(1, 1), BLACK, r.z + 1)
+    }
+    let _ = text_layout_emit(layout, pos, color, r.z + 1)
+    ui_ctx_pop(prev)
+    return r
+}
+
+pub fn UiRect.rich_text_text(
+    r,
+    text: string,
+    color: Color,
+    font_size: float,
+    align: TextAlign = TextAlign::Center,
+    bold: bool = false,
+    italic: bool = false,
+    shadow: bool = true
+) -> UiRect {
+    let font = DEFAULT_FONT
+    if font == null {
+        error("rich text: no family given and no DEFAULT_FONT is loaded")
+    }
+    return r.rich_text_single_font_values(text, color, bold, italic,
+        font.unwrap(), font_size, align, shadow)
+}
+
+fn rich_text_emit_single_font_spans(
+    spans: [TextSpan],
+    font: Font,
+    font_size: float,
+    ts: float,
+    physical: float,
+    start: Vec2,
+    max_ascent: float,
+    z: int,
+    tint: Color?
+) {
+    let pen = start.x
+    for span in spans {
+        if span.text.len() == 0 { continue }
+        let idx = text_family_font_idx(font, "UiRect.rich_text")
+        let prepared = text_prepare_missing_glyphs(font, null, idx, span.text,
+            "UiRect.rich_text")
+        let face = text_validate_single_font_span(
+            font, idx, prepared, span.style, true, "UiRect.rich_text")
+        if face < 0 { continue }
+        let layout = text_layout_cached(font, prepared, font_size, ts,
+            TextAlign::TopLeft, physical, face: face)
+        let origin = v(pen, start.y + max_ascent - layout.ascent)
+        let _ = text_layout_emit(layout, origin, tint ?? span.style.color, z)
+        pen += layout.logical_bounds.w
+    }
+}
+
+// The default family has one font, so retaining a resolved-run vector for a
+// multi-span line only buys a temporary collection and substrings.
+pub fn UiRect.rich_text_single_font_spans(
+    r,
+    spans: [TextSpan],
+    font: Font,
+    font_size: float,
+    align: TextAlign,
+    shadow: bool
+) -> UiRect {
+    let idx = text_family_font_idx(font, "UiRect.rich_text")
+    let s = ui_to_screen(r)
+    let ts = r.text_scale()
+    let physical = if r.ctx == UI_CTX_COMPOSITE { 1.0 } else {
+        text_output_raster_density()
+    }
+    let width = 0.0
+    let max_ascent = 0.0
+    let max_height = 0.0
+    for span in spans {
+        if span.text.len() == 0 { continue }
+        let prepared = text_prepare_missing_glyphs(font, null, idx, span.text,
+            "UiRect.rich_text")
+        let face = text_validate_single_font_span(
+            font, idx, prepared, span.style, true, "UiRect.rich_text")
+        if face < 0 { continue }
+        let layout = text_layout_cached(font, prepared, font_size, ts,
+            TextAlign::TopLeft, physical, face: face)
+        width += layout.logical_bounds.w
+        if layout.ascent > max_ascent { max_ascent = layout.ascent }
+        if layout.logical_bounds.h > max_height {
+            max_height = layout.logical_bounds.h
+        }
+    }
+    let frac = text_align_fracs(align)
+    let pos = v(s.x + (s.w - width) * frac.x,
+        text_anchored_y(s.y + s.h * frac.y, frac.y, max_height, max_ascent,
+            text_font_cap_height(font, font_size, ts), 0.0))
+
+    let prev = ui_ctx_push(r)
+    if shadow {
+        rich_text_emit_single_font_spans(spans, font, font_size, ts, physical,
+            pos + v(1, 1), max_ascent, r.z + 1, BLACK)
+    }
+    rich_text_emit_single_font_spans(spans, font, font_size, ts, physical,
+        pos, max_ascent, r.z + 1, null)
+    ui_ctx_pop(prev)
+    return r
+}
+
+// Colored spans on one line, with UiRect.text's render-space behaviour: the
+// rect's own context scale for both measurement and emission, its ambient pool,
+// its z + 1, and the shadow as the same run sequence in black.
+//
+// Alignment anchors on the COMPLETE run bounds, so a colour boundary moves no
+// glyph. A null family is the default font's (text_family_or_default); an
+// unsupported byte, a line control or a dead handle rejects before the first
+// quad.
+pub fn UiRect.rich_text(
+    r,
+    spans: [TextSpan],
+    font_size: float,
+    align: TextAlign = TextAlign::Center,
+    family: TextFamily? = null,
+    shadow: bool = true
+) -> UiRect {
+    if spans.len() > 0 && spans[0].text.len() > 0 {
+        if family == null {
+            let font = DEFAULT_FONT
+            if font == null {
+                error("rich text: no family given and no DEFAULT_FONT is loaded")
+            }
+            if spans.len() == 1 {
+                return r.rich_text_single_font(
+                    spans[0], font.unwrap(), font_size, align, shadow)
+            }
+            return r.rich_text_single_font_spans(
+                spans, font.unwrap(), font_size, align, shadow)
+        }
+        let fam = family.unwrap()
+        if fam.fallbacks.len() == 0 && spans.len() == 1 {
+            return r.rich_text_single_font(
+                spans[0], fam.regular, font_size, align, shadow)
+        }
+        if fam.fallbacks.len() == 0 {
+            return r.rich_text_single_font_spans(
+                spans, fam.regular, font_size, align, shadow)
+        }
+    }
+    let fam = text_family_or_default(family)
+    let s = ui_to_screen(r)
+    let ts = r.text_scale()
+    let physical = if r.ctx == UI_CTX_COMPOSITE { 1.0 } else {
+        text_output_raster_density()
+    }
+    let runs = resolve_text_spans(
+        fam, spans, font_size, ts, "UiRect.rich_text", physical)
+    let (w, ascent, h) = measure_resolved_runs(runs)
+    let frac = text_align_fracs(align)
+    let pos = v(s.x + (s.w - w) * frac.x,
+        text_anchored_y(s.y + s.h * frac.y, frac.y, h, ascent,
+            resolved_runs_cap_height(runs), 0.0))
+
+    let prev = ui_ctx_push(r)
+    if shadow {
+        emit_resolved_runs(runs, TextPlacement::Output, pos + v(1, 1), ascent,
+            r.z + 1, BLACK)
+    }
+    emit_resolved_runs(runs, TextPlacement::Output, pos, ascent, r.z + 1)
+    ui_ctx_pop(prev)
+
+    return r
+}
+
+// Rich counterpart to measure_ui: design units, for sizing a design-space
+// UiRect around a span sequence.
+pub fn measure_rich_ui(spans: [TextSpan], font_size: float, family: TextFamily? = null) -> Vec2 {
+    let measured = if family == null {
+        let font = DEFAULT_FONT
+        if font == null {
+            error("rich text: no family given and no DEFAULT_FONT is loaded")
+        }
+        measure_rich_text_single_font(font.unwrap(), spans, font_size,
+            FONT_RENDER_SCALE)
+    } else {
+        let fam = family.unwrap()
+        if fam.fallbacks.len() == 0 {
+            measure_rich_text_single_font(fam.regular, spans, font_size,
+                FONT_RENDER_SCALE)
+        } else {
+            measure_rich_text_of(fam, spans, font_size, FONT_RENDER_SCALE)
+        }
+    }
+    return measured / ui_effective_scale()
+}
+
+pub fn measure_rich_ui_text(text: string, color: Color, font_size: float,
+                        bold: bool = false, italic: bool = false,
+                        family: TextFamily? = null) -> Vec2 {
+    let measured = if family == null {
+        let font = DEFAULT_FONT
+        if font == null {
+            error("rich text: no family given and no DEFAULT_FONT is loaded")
+        }
+        measure_rich_text_single_font_text(font.unwrap(), text, color, bold,
+            italic, font_size, FONT_RENDER_SCALE)
+    } else {
+        let fam = family.unwrap()
+        if fam.fallbacks.len() == 0 {
+            measure_rich_text_single_font_text(fam.regular, text, color, bold,
+                italic, font_size, FONT_RENDER_SCALE)
+        } else {
+            measure_rich_text_of(fam, [TextSpan {
+                text: text,
+                style: TextStyle { color, bold, italic },
+            }], font_size, FONT_RENDER_SCALE)
+        }
+    }
+    return measured / ui_effective_scale()
+}
+
+// Intentional alias: bg reads better than fill as a panel-background verb.
+pub fn UiRect.bg(r, color: Color) -> UiRect { return fill(r, color) }
+
+
+// UiRect constructors
+
+pub @pure fn ui_from_center_size(center: Vec2, size: Vec2) -> UiRect {
+    return UiRect {
+        x: center.x - size.x / 2,
+        y: center.y - size.y / 2,
+        w: size.x,
+        h: size.y,
+        z: 0
+    }
+}
+
+pub @pure fn ui_from_top_left(top_left: Vec2, size: Vec2) -> UiRect {
+    return UiRect {
+        x: top_left.x,
+        y: top_left.y,
+        w: size.x,
+        h: size.y,
+        z: 0
+    }
+}
+
+pub fn ui_full_screen() -> UiRect {
+    let sd = screen_design()
+    return UiRect { x: 0.0, y: 0.0, w: sd.x, h: sd.y, z: 0 }
+}
+
+pub fn ui_centered(size: Vec2) -> UiRect {
+    let s = ui_full_screen()
+    return ui_from_center_size(v(s.x + s.w * 0.5, s.y + s.h * 0.5), size)
+}
+
+fn ui_centered_top(size: Vec2) -> UiRect {
+    let s = ui_full_screen()
+    return UiRect {
+        x: s.x + (s.w - size.x) / 2,
+        y: s.y,
+        w: size.x,
+        h: size.y,
+        z: 0
+    }
+}
+
+// Design-space rect of `size` placed so a SCREEN-pixel point lands at the
+// rect's `pivot` (normalized 0..1: v(0.5,0.5)=center, v(0,0)=top-left,
+// v(0.5,0)=top-center [hangs below the point], v(0.5,1)=bottom-center
+// [floats above]). The anchor is converted to design space once, so the
+// result is a normal design-space rect -- carve/children/hit-test as usual.
+// At draw, ui_to_screen's *scale cancels the screen_to_design /scale on the
+// pivot point, so it round-trips to `screen_pos` exactly at any UI_SCALE;
+// the size still scales, growing around the pivot.
+pub fn ui_at_screen(screen_pos: Vec2, size: Vec2, pivot: Vec2 = v(0.5, 0.5)) -> UiRect {
+    return ui_from_top_left(screen_to_design(screen_pos) - size * pivot, size)
+}
+
+// World-anchored variant: places the rect at a world position (projected
+// through the camera). Use for floating healthbars / nameplates that must
+// track an entity while scaling with the HUD.
+//
+// Projects against the FROZEN render view, not the presented one. The anchor
+// is baked into output coordinates here, at the call, so unlike a world-space
+// draw -- which the shader projects at flush and is correct whenever it was
+// queued -- reading last frame's view lags it by a whole frame of camera
+// motion. Every caller runs at draw stage, where the render view is this
+// frame's and the presented view is the one the player saw last frame.
+pub fn ui_at_world(pos: Vec2, size: Vec2, pivot: Vec2 = v(0.5, 0.5)) -> UiRect {
+    let view = RENDER_VIEW ?? return ui_at_screen(v(0.0, 0.0), size, pivot)
+    return ui_at_screen(world_to_screen_in(view, pos), size, pivot)
+}

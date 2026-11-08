@@ -1,0 +1,389 @@
+// The focus widgets and the focus core driven through the production frame
+// order: widgets register during update, input arrives mid-frame, and the next
+// ui_mouse_begin_frame/ui_focus_begin_frame resolves it (tapnav_frame in
+// ui_focus_short_tap.rock). Repeat timing advances `time` one 60 Hz frame per
+// resolution against frame-scale ACTION_REPEAT_DELAY/RATE, set between frame
+// boundaries so accumulated time cannot flake a comparison.
+
+struct FocusWidgetsSaved {
+    tap: TapNavSnapshot,
+    pointer: Vec2?,
+    synthetic_mouse: Map<int, bool>,
+    clock: float,
+    repeat_delay: float,
+    repeat_rate: float,
+    batches: RenderBatchPool,
+    mouse_capture: bool?,
+    slider_drag: UiSliderDrag?,
+    feel: UiFeelState,
+    white: Image?,
+}
+
+fn focus_widgets_with(body: fn(Entity<UiSkin>) -> ()) {
+    setup_stone()
+    assert(stone_gpu_host_ensure(), "the widget fixture has a native view surface")
+    let saved = FocusWidgetsSaved {
+        tap: tapnav_isolate(),
+        pointer: sim_mouse_override,
+        synthetic_mouse: synthetic_mouse_down,
+        clock: time,
+        repeat_delay: ACTION_REPEAT_DELAY,
+        repeat_rate: ACTION_REPEAT_RATE,
+        batches: UI_RENDER_BATCHES,
+        mouse_capture: IMGUI_MOUSE_CAPTURE_OVERRIDE,
+        slider_drag: UI_SLIDER_DRAG,
+        feel: UI_FEEL,
+        white: WHITE_PIXEL,
+    }
+    // Fills and skins draw with the shared white pixel.
+    let white = outline_canvas_white()
+    WHITE_PIXEL = white
+    let skin = ui_skin_create(UiSkin { image: sampled_image(white), source: irect(0, 0, 1, 1),
+        pad_l: 6.0, pad_r: 6.0, pad_t: 4.0, pad_b: 4.0 })
+    defer {
+        skin.remove()
+        WHITE_PIXEL = saved.white
+        release_owned_image(white)
+        tapnav_restore(saved.tap)
+        sim_mouse_override = saved.pointer
+        synthetic_mouse_down = saved.synthetic_mouse
+        time = saved.clock
+        ACTION_REPEAT_DELAY = saved.repeat_delay
+        ACTION_REPEAT_RATE = saved.repeat_rate
+        UI_RENDER_BATCHES = saved.batches
+        IMGUI_MOUSE_CAPTURE_OVERRIDE = saved.mouse_capture
+        UI_SLIDER_DRAG = saved.slider_drag
+        UI_FEEL = saved.feel
+    }
+    tapnav_assert_clean()
+    let acts = tapnav_wire()
+    defer { tapnav_unwire(acts) }
+    SIM_INPUT_SYNTHETIC_ONLY = true
+    IMGUI_MOUSE_CAPTURE_OVERRIDE = false
+    synthetic_mouse_down = map_new()
+    UI_RENDER_BATCHES = render_batch_pool_new()
+    UI_SLIDER_DRAG = null
+    UI_FEEL = UiFeelState { base: UiFeel {}, named: map_new() }
+    time = 100.0
+    body(skin)
+}
+
+fn focus_widgets_frame() {
+    tapnav_frame()
+    time += 1.0 / 60.0
+}
+
+fn focus_widgets_point(p: Vec2) -> Vec2 {
+    let screen = design_to_screen(p)
+    sim_mouse_override = screen
+    return screen
+}
+
+fn focus_widgets_press_key(key: string) {
+    on_key_pressed_with_identity(key, key, 0, false)
+}
+
+fn focus_widgets_release_key(key: string) {
+    on_key_released_with_identity(key, key)
+}
+
+@test
+fn focus_slider_maps_the_pointer_while_held_and_steps_while_focused() {
+    focus_widgets_with((sk) => {
+        let r = ui_rect(100.0, 100.0, 260.0, 40.0)
+        let ch = r.content(sk.get().unwrap())
+        let scope = "slidertest"
+        let slider = (key: string, value: float, step: float) => {
+            ui_focus_set_scope(scope)
+            return focus_slider(r, key, value, 0.0, 1.0, sk, WHITE, scope, step: step)
+        }
+        focus_widgets_point(v(900.0, 900.0))
+        let vol = slider("vol", 0.2, 0.0)
+        assert(abs(vol - 0.2) < 0.0001, "no interaction returns the value unchanged")
+        focus_widgets_frame()
+
+        let p75 = focus_widgets_point(v(ch.x + ch.w * 0.75, ch.y + ch.h * 0.5))
+        vol = slider("vol", vol, 0.0)
+        focus_widgets_frame()
+        vol = slider("vol", vol, 0.0)
+        on_mouse_pressed(p75.x, p75.y, MOUSE_BUTTON_LEFT)
+        focus_widgets_frame()
+        vol = slider("vol", vol, 0.0)
+        assert(abs(vol - 0.75) < 0.01, "a press on the channel sets the value (got {vol})")
+        focus_widgets_frame()
+
+        let far = focus_widgets_point(v(ch.x + ch.w + 300.0, ch.y + ch.h * 0.5))
+        vol = slider("vol", vol, 0.0)
+        focus_widgets_frame()
+        vol = slider("vol", vol, 0.0)
+        assert(abs(vol - 1.0) < 0.0001, "a drag past the edge keeps capture and clamps to max (got {vol})")
+        on_mouse_released(far.x, far.y, MOUSE_BUTTON_LEFT)
+        focus_widgets_frame()
+
+        focus_widgets_point(v(ch.x + ch.w * 0.25, ch.y + ch.h * 0.5))
+        vol = slider("vol", vol, 0.0)
+        focus_widgets_frame()
+        vol = slider("vol", vol, 0.0)
+        assert(abs(vol - 1.0) < 0.0001, "after release the pointer no longer drives the value (got {vol})")
+        focus_widgets_frame()
+
+        let p33 = focus_widgets_point(v(ch.x + ch.w * 0.33, ch.y + ch.h * 0.5))
+        let sv = slider("snapvol", 0.5, 0.1)
+        focus_widgets_frame()
+        sv = slider("snapvol", sv, 0.1)
+        on_mouse_pressed(p33.x, p33.y, MOUSE_BUTTON_LEFT)
+        focus_widgets_frame()
+        sv = slider("snapvol", sv, 0.1)
+        assert(abs(sv - 0.3) < 0.0001, "step snaps the pointer set (got {sv})")
+        on_mouse_released(p33.x, p33.y, MOUSE_BUTTON_LEFT)
+        focus_widgets_frame()
+
+        let kv = slider("kbvol", 0.5, 0.1)
+        focus_widgets_press_key("left")
+        focus_widgets_frame()
+        kv = slider("kbvol", kv, 0.1)
+        assert(abs(kv - 0.5) < 0.0001, "an unfocused slider ignores left in pointer mode (got {kv})")
+        focus_widgets_release_key("left")
+        focus_widgets_frame()
+
+        kv = slider("kbvol", kv, 0.1)
+        focus_widgets_press_key("down")
+        focus_widgets_frame()
+        kv = slider("kbvol", kv, 0.1)
+        assert(ui_focused(ui_id(scope, "kbvol")), "Down enters nav on the slider")
+        focus_widgets_release_key("down")
+        focus_widgets_frame()
+
+        kv = slider("kbvol", kv, 0.1)
+        focus_widgets_press_key("left")
+        focus_widgets_frame()
+        kv = slider("kbvol", kv, 0.1)
+        assert(abs(kv - 0.4) < 0.0001, "a focused left edge steps down by step (got {kv})")
+        focus_widgets_release_key("left")
+        focus_widgets_frame()
+
+        ACTION_REPEAT_DELAY = 2.5 / 60.0
+        ACTION_REPEAT_RATE = 1.5 / 60.0
+        kv = slider("kbvol", kv, 0.1)
+        focus_widgets_press_key("right")
+        focus_widgets_frame()
+        kv = slider("kbvol", kv, 0.1)
+        assert(abs(kv - 0.5) < 0.0001, "a held right steps once on the edge (got {kv})")
+        focus_widgets_frame()
+        kv = slider("kbvol", kv, 0.1)
+        assert(abs(kv - 0.5) < 0.0001, "a held right waits out the repeat delay (got {kv})")
+        focus_widgets_frame()
+        kv = slider("kbvol", kv, 0.1)
+        focus_widgets_frame()
+        kv = slider("kbvol", kv, 0.1)
+        assert(abs(kv - 0.6) < 0.0001, "a held right repeats after the delay (got {kv})")
+        focus_widgets_release_key("right")
+        focus_widgets_frame()
+
+        let mv = slider("kbvol", 0.05, 0.1)
+        focus_widgets_press_key("left")
+        focus_widgets_frame()
+        mv = slider("kbvol", mv, 0.1)
+        assert(abs(mv) < 0.0001, "a keyboard step clamps at min (got {mv})")
+        focus_widgets_release_key("left")
+        focus_widgets_frame()
+    })
+}
+
+fn focus_widgets_label_verts(z: int, c: Color) -> int {
+    let n = 0
+    for (key, b_row) in UI_RENDER_BATCHES.entries {
+        let b = b_row.borrow().unwrap()
+        if !key.starts_with("{batch_key_z(z)}|") { continue }
+        for i in 0..b.count {
+            let vert = b.verts[i]
+            if (vert.color.x - c.r).abs() < 0.01
+                && (vert.color.y - c.g).abs() < 0.01
+                && (vert.color.z - c.b).abs() < 0.01 { n += 1 }
+        }
+    }
+    return n
+}
+
+@test
+fn focus_tab_row_selects_by_click_and_wraps_while_focused() {
+    focus_widgets_with((sk) => {
+        let r = ui_rect(100.0, 100.0, 450.0, 40.0)
+        let labels = ["Audio", "Gameplay", "Controls"]
+        let scope = "tabtest"
+        let row = (selected: int) => {
+            ui_focus_set_scope(scope)
+            return focus_tab_row(r, "tabs", labels, selected, sk, scope)
+        }
+        focus_widgets_point(v(900.0, 900.0))
+        let sel = row(0)
+        assert_eq(sel, 0, "no interaction returns the selection unchanged")
+        focus_widgets_frame()
+
+        let mid = focus_widgets_point(v(r.x + r.w * 0.5, r.y + r.h * 0.5))
+        sel = row(sel)
+        focus_widgets_frame()
+        sel = row(sel)
+        on_mouse_pressed(mid.x, mid.y, MOUSE_BUTTON_LEFT)
+        focus_widgets_frame()
+        sel = row(sel)
+        assert_eq(sel, 1, "clicking the middle tab selects it")
+        on_mouse_released(mid.x, mid.y, MOUSE_BUTTON_LEFT)
+        focus_widgets_frame()
+
+        sel = row(sel)
+        focus_widgets_press_key("right")
+        focus_widgets_frame()
+        sel = row(sel)
+        assert_eq(sel, 1, "an unfocused row ignores right in pointer mode")
+        focus_widgets_release_key("right")
+        focus_widgets_frame()
+
+        sel = row(sel)
+        focus_widgets_press_key("down")
+        focus_widgets_frame()
+        sel = row(sel)
+        assert(ui_focused(ui_id(scope, "tabs")), "Down enters nav on the row")
+        focus_widgets_release_key("down")
+        focus_widgets_frame()
+
+        for (key, expected, rule) in [("right", 2, "a focused right advances the selection"),
+            ("right", 0, "right wraps past the last tab"), ("left", 2, "left wraps back to the last tab")] {
+            sel = row(sel)
+            focus_widgets_press_key(key)
+            focus_widgets_frame()
+            sel = row(sel)
+            assert_eq(sel, expected, rule)
+            focus_widgets_release_key(key)
+            focus_widgets_frame()
+        }
+
+        // The current choice is drawn as selected, not as hovered, with no
+        // pointer near the row. Labels draw one layer above their button.
+        let saved_font = DEFAULT_FONT
+        let font = load_font(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 24, raster: FontRasterPolicy::Fixed).unwrap()
+        DEFAULT_FONT = font
+        defer { DEFAULT_FONT = saved_font; unload_font(font) }
+        let tint = color(0.95, 0.72, 0.25, 1.0)
+        let label_color = skin_button_selected_label_color(tint)
+        let marked = ui_rect(100.0, 200.0, 360.0, 40.0).at_z(779)
+        focus_widgets_point(v(900.0, 900.0))
+        let before = focus_widgets_label_verts(780, label_color)
+        let _ = focus_tab_row(marked, "marked", ["A", "B", "C"], 1, sk, "tabmarked", selected_tint: tint)
+        let one = focus_widgets_label_verts(780, label_color) - before
+        let _ = focus_tab_row(marked, "marked2", ["A", "B", "C"], 2, sk, "tabmarked", selected_tint: tint)
+        let two = focus_widgets_label_verts(780, label_color) - before - one
+        assert(one > 0, "the current choice's label is drawn in the selected color")
+        assert_eq(two, one, "exactly one single-glyph label per row is drawn selected")
+    })
+}
+
+fn focus_widgets_nav_register() {
+    ui_focus_set_scope("fsim")
+    for (key, y) in [("a", 100.0), ("b", 140.0), ("c", 180.0)] {
+        let r = ui_rect(100.0, y, 200.0, 30.0)
+        ui_focus_item(ui_id("fsim", key), r, "fsim")
+        ui_mouse_item(ui_id("fsim", key), r)
+    }
+}
+
+fn focus_widgets_nav_press(key: string) {
+    focus_widgets_nav_register()
+    focus_widgets_press_key(key)
+    focus_widgets_frame()
+    focus_widgets_nav_register()
+}
+
+fn focus_widgets_nav_release(key: string) {
+    focus_widgets_release_key(key)
+    focus_widgets_frame()
+}
+
+@test
+fn ui_focus_nav_moves_wraps_repeats_and_hands_focus_back_to_the_pointer() {
+    focus_widgets_with((_sk) => {
+        let ia = ui_id("fsim", "a")
+        let ib = ui_id("fsim", "b")
+        let ic = ui_id("fsim", "c")
+        let attack = action_new("fsim_attack", [key_bind("f")])
+        defer {
+            action_remove(attack)
+            bindings_forget_raw_entry("fsim_attack")
+        }
+        focus_widgets_point(v(900.0, 900.0))
+        focus_widgets_nav_register()
+        assert(!ui_focused(ia) && !ui_wants_input(), "pointer mode focuses nothing and captures nothing")
+        focus_widgets_frame()
+
+        focus_widgets_nav_press("down")
+        assert(ui_focused(ia), "the first nav press enters nav mode on the first item")
+        assert(ui_wants_input(), "nav-mode focus captures the keyboard")
+        focus_widgets_release_key("down")
+        focus_widgets_press_key("f")
+        assert(!attack.pressed(), "a gameplay action is gated while nav focus is live")
+        focus_widgets_nav_release("f")
+
+        focus_widgets_nav_press("down")
+        assert(ui_focused(ib) && !ui_focused(ia), "UiDown moves focus to the next item")
+        focus_widgets_nav_release("down")
+        focus_widgets_nav_press("up")
+        assert(ui_focused(ia), "UiUp moves focus back")
+        focus_widgets_nav_release("up")
+        focus_widgets_nav_press("up")
+        assert(ui_focused(ic), "UiUp wraps from the first item to the last")
+        focus_widgets_nav_release("up")
+
+        ACTION_REPEAT_DELAY = 2.5 / 60.0
+        ACTION_REPEAT_RATE = 1.5 / 60.0
+        focus_widgets_nav_press("down")
+        assert(ui_focused(ia), "a held UiDown moves once on the edge, wrapping c to a")
+        for _ in 0..2 {
+            focus_widgets_frame()
+            focus_widgets_nav_register()
+            assert(ui_focused(ia), "a held UiDown waits out the repeat delay")
+        }
+        focus_widgets_frame()
+        focus_widgets_nav_register()
+        assert(ui_focused(ib), "a held UiDown repeats after the delay")
+        focus_widgets_nav_release("down")
+
+        focus_widgets_nav_press("return")
+        assert(ui_focus_confirmed(ib) && !ui_focus_confirmed(ia), "Confirm fires for the focused item only")
+        focus_widgets_nav_release("return")
+        focus_widgets_nav_register()
+        assert(!ui_focus_confirmed(ib), "Confirm is a one-frame edge")
+        focus_widgets_frame()
+
+        focus_widgets_point(v(880.0, 880.0))
+        focus_widgets_nav_register()
+        focus_widgets_frame()
+        focus_widgets_nav_register()
+        assert(!ui_focused(ib) && !ui_wants_input(), "pointer movement exits nav mode and releases capture")
+        focus_widgets_frame()
+        focus_widgets_nav_press("down")
+        assert(ui_focused(ib), "re-entering nav resumes at the remembered item")
+        focus_widgets_nav_release("down")
+
+        focus_widgets_point(v(200.0, 195.0))
+        focus_widgets_nav_register()
+        focus_widgets_frame()
+        focus_widgets_nav_register()
+        assert(!ui_focused(ic), "hover alone does not make focus live")
+        focus_widgets_frame()
+        focus_widgets_nav_press("down")
+        assert(ui_focused(ic), "nav entry resumes at the hovered item")
+        focus_widgets_nav_release("down")
+
+        // The focused item vanishes: focus clamps to its index in the
+        // surviving list ([a, b], index 2 -> b).
+        let ra = ui_rect(100.0, 100.0, 200.0, 30.0)
+        let rb = ui_rect(100.0, 140.0, 200.0, 30.0)
+        ui_focus_set_scope("fsim")
+        ui_focus_item(ia, ra, "fsim")
+        ui_focus_item(ib, rb, "fsim")
+        ui_mouse_item(ia, ra)
+        ui_mouse_item(ib, rb)
+        focus_widgets_frame()
+        assert(ui_focused(ib), "a vanished focus clamps to its index in the surviving list")
+    })
+}

@@ -1,0 +1,16 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Text layout ownership identifier, not a credential"
+condition = "AND"
+paths = ['''^packages/stone/tests/native_ui_n5\.rock$''']
+regexTarget = "line"
+regexes = ['''consumer_key: "ownership/face"''']
+
+[[allowlists]]
+description = "Generated ImGui key input function, not a credential"
+condition = "AND"
+paths = ['''^packages/stone/prebuilt/cimgui/wrap\.lua$''']
+regexTarget = "line"
+regexes = ['''M\.GetKeyMagnitude2d = M\.GetKeyMagnitude2d  or function\(i1, i2, i3, i4\)''']

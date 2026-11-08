@@ -1,0 +1,163 @@
+pub global REBIND_CAPTURE: bool = false
+pub global REBIND_CAPTURE_CANCELLED: bool = false
+pub global REBIND_INPUT_CONSUMED: bool = false
+global REBIND_PENDING_MODIFIER: string = ""
+
+global REBIND_SNAPSHOT_SCANCODES_DOWN: Map<string, bool> = map_new()
+global REBIND_SNAPSHOT_SCANCODES_PRESSED: Map<string, bool> = map_new()
+global REBIND_SNAPSHOT_MOUSE_DOWN: Map<int, bool> = map_new()
+global REBIND_SNAPSHOT_MOUSE_PRESSED: Map<int, bool> = map_new()
+global REBIND_SNAPSHOT_WHEEL_DELTA: int = 0
+global REBIND_SNAPSHOT_PAD_DOWN: Map<string, bool> = map_new()
+global REBIND_SNAPSHOT_PAD_PRESSED: Map<string, bool> = map_new()
+global REBIND_SNAPSHOT_AXES: Map<string, float> = map_new()
+global REBIND_SNAPSHOT_AXIS_MOTION: Map<string, float> = map_new()
+
+fn input_capture_copy_bools(dst: Map<string, bool>, src: Map<string, bool>) {
+    dst.clear()
+    for (key, value) in src.to_array() {
+        if value { dst[key] = true }
+    }
+}
+
+fn input_capture_copy_mouse_bools(dst: Map<int, bool>, src: Map<int, bool>) {
+    dst.clear()
+    for (button, value) in src.to_array() {
+        if value { dst[button] = true }
+    }
+}
+
+fn input_capture_copy_axes(dst: Map<string, float>, src: Map<string, float>) {
+    dst.clear()
+    for (axis, value) in src.to_array() { dst[axis] = value }
+}
+
+pub fn input_capture_clear_snapshot() {
+    REBIND_PENDING_MODIFIER = ""
+    REBIND_SNAPSHOT_SCANCODES_DOWN.clear()
+    REBIND_SNAPSHOT_SCANCODES_PRESSED.clear()
+    REBIND_SNAPSHOT_MOUSE_DOWN.clear()
+    REBIND_SNAPSHOT_MOUSE_PRESSED.clear()
+    REBIND_SNAPSHOT_WHEEL_DELTA = 0
+    REBIND_SNAPSHOT_PAD_DOWN.clear()
+    REBIND_SNAPSHOT_PAD_PRESSED.clear()
+    REBIND_SNAPSHOT_AXES.clear()
+    REBIND_SNAPSHOT_AXIS_MOTION.clear()
+}
+
+fn input_capture_finish(cancelled: bool) {
+    REBIND_CAPTURE = false
+    REBIND_CAPTURE_CANCELLED = cancelled
+    REBIND_INPUT_CONSUMED = true
+    input_capture_clear_snapshot()
+}
+
+pub fn input_capture_begin() {
+    REBIND_CAPTURE = true
+    REBIND_CAPTURE_CANCELLED = false
+    REBIND_PENDING_MODIFIER = ""
+    input_capture_copy_bools(REBIND_SNAPSHOT_SCANCODES_DOWN, scancodes_down)
+    input_capture_copy_bools(REBIND_SNAPSHOT_SCANCODES_PRESSED, scancodes_pressed_this_frame)
+    input_capture_copy_mouse_bools(REBIND_SNAPSHOT_MOUSE_DOWN, mouse_down)
+    input_capture_copy_mouse_bools(REBIND_SNAPSHOT_MOUSE_PRESSED, mouse_pressed_this_frame)
+    REBIND_SNAPSHOT_WHEEL_DELTA = mouse_wheel_delta
+    input_capture_copy_bools(REBIND_SNAPSHOT_PAD_DOWN, pad_down)
+    input_capture_copy_bools(REBIND_SNAPSHOT_PAD_PRESSED, pad_pressed_this_frame)
+    input_capture_copy_axes(REBIND_SNAPSHOT_AXES, pad_axes)
+    input_capture_copy_axes(REBIND_SNAPSHOT_AXIS_MOTION, pad_axis_motion_this_frame)
+}
+
+pub fn input_capture_active() -> bool { return REBIND_CAPTURE }
+
+pub fn input_capture_cancelled() -> bool { return REBIND_CAPTURE_CANCELLED }
+
+pub fn input_capture_cancel() {
+    if REBIND_CAPTURE { input_capture_finish(true) }
+}
+
+fn input_capture_key(scan: string) -> InputBinding {
+    let modifiers = action_modifiers_for(scan)
+    return key_bind(scan,
+        ctrl: (modifiers & STONE_MOD_CTRL) != 0,
+        shift: (modifiers & STONE_MOD_SHIFT) != 0,
+        alt: (modifiers & STONE_MOD_ALT) != 0,
+        gui: (modifiers & STONE_MOD_GUI) != 0)
+}
+
+fn input_capture_is_modifier(scan: string) -> bool {
+    return scan == "lctrl" || scan == "rctrl"
+        || scan == "lshift" || scan == "rshift"
+        || scan == "lalt" || scan == "ralt"
+        || scan == "lgui" || scan == "rgui"
+}
+
+pub fn input_capture_next() -> InputBinding? {
+    if !REBIND_CAPTURE { return null }
+
+    if scancodes_pressed_this_frame.get("escape").unwrap_or(false)
+        && !REBIND_SNAPSHOT_SCANCODES_PRESSED.get("escape").unwrap_or(false)
+        && !REBIND_SNAPSHOT_SCANCODES_DOWN.get("escape").unwrap_or(false) {
+        scancodes_pressed_this_frame["escape"] = false
+        input_capture_finish(true)
+        return null
+    }
+
+    for scan in keys(scancodes_pressed_this_frame) {
+        if scan == "escape" { continue }
+        if REBIND_SNAPSHOT_SCANCODES_PRESSED.get(scan).unwrap_or(false)
+            || REBIND_SNAPSHOT_SCANCODES_DOWN.get(scan).unwrap_or(false) { continue }
+        if input_capture_is_modifier(scan) {
+            if REBIND_PENDING_MODIFIER == "" { REBIND_PENDING_MODIFIER = scan }
+            continue
+        }
+        let binding = input_capture_key(scan)
+        input_capture_finish(false)
+        return binding
+    }
+
+    for button in keys(mouse_pressed_this_frame) {
+        if REBIND_SNAPSHOT_MOUSE_PRESSED.get(button).unwrap_or(false)
+            || REBIND_SNAPSHOT_MOUSE_DOWN.get(button).unwrap_or(false) { continue }
+        let binding = mouse_bind(button)
+        input_capture_finish(false)
+        return binding
+    }
+
+    if REBIND_SNAPSHOT_WHEEL_DELTA != 0 {
+        if mouse_wheel_delta == REBIND_SNAPSHOT_WHEEL_DELTA { return null }
+        REBIND_SNAPSHOT_WHEEL_DELTA = 0
+    }
+    if mouse_wheel_delta != 0 {
+        let binding = wheel_bind(mouse_wheel_delta)
+        mouse_wheel_delta = 0
+        input_capture_finish(false)
+        return binding
+    }
+
+    for button in keys(pad_pressed_this_frame) {
+        if REBIND_SNAPSHOT_PAD_PRESSED.get(button).unwrap_or(false)
+            || REBIND_SNAPSHOT_PAD_DOWN.get(button).unwrap_or(false) { continue }
+        let binding = pad_bind(button)
+        input_capture_finish(false)
+        return binding
+    }
+
+    for axis in keys(pad_axis_motion_this_frame) {
+        if REBIND_SNAPSHOT_AXIS_MOTION.contains(axis) { continue }
+        let value = pad_axis_motion_this_frame[axis]
+        let was = REBIND_SNAPSHOT_AXES.get(axis).unwrap_or(0.0)
+        if abs(value) < REBIND_AXIS_CAPTURE_THRESHOLD
+            || abs(was) >= REBIND_AXIS_CAPTURE_THRESHOLD { continue }
+        let binding = axis_bind(axis, if value < 0.0 { -1 } else { 1 })
+        input_capture_finish(false)
+        return binding
+    }
+
+    if REBIND_PENDING_MODIFIER != "" && is_scancode_released(REBIND_PENDING_MODIFIER) {
+        let binding = input_capture_key(REBIND_PENDING_MODIFIER)
+        input_capture_finish(false)
+        return binding
+    }
+
+    return null
+}

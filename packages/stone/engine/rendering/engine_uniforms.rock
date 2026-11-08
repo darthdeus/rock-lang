@@ -1,0 +1,320 @@
+// The engine's own std140 block: the frame-global values every vertex stage
+// reads, at binding 0, declared by BOTH stages of a program.
+//
+// `@engine` is a param ROLE, not a second `@uniform`: it differs in PRODUCER
+// and LIFETIME, not in layout. The compiler guarantees one engine block per
+// program at binding 0 and deliberately does not know this type by name --
+// "it is the engine's own" is checked at registration, against the fingerprint
+// the compiler ships (`build_uniform_blocks`, whose result is published only
+// if every block is accepted).
+//
+// Fixed and engine-owned, not extensible per game: the moment a game can add
+// members, the engine cannot fill the block without knowing a per-game layout,
+// which is the thing being deleted.
+
+// Member order is the std140 layout: two mat4 (64 each), then the two Vec2
+// (align 8), the clock float, and one uint texture-orientation mask.
+pub value EngineU {
+    uProjection: Mat4,
+    uView: Mat4,
+    // Isometric depth-remap band, in world y. South=0, north=1.
+    uYBounds: Vec2,
+    // Camera y extent, the wider band effects anchor against.
+    uScreenBounds: Vec2,
+    uEngineTime: float,
+    uTextureVFlip: uint,
+}
+
+// The camera, as Rock owns it: ONE implementation feeding both deliveries --
+// this block, and the by-name writes hand-authored GLSL still needs.
+// Draw space belongs to each producer; the camera stores only its matrix.
+pub global CAMERA_VIEW: Mat4 = mat4_identity()
+
+// world_to_screen is (v + offset) * scale, so the translation is +offset*scale.
+pub fn camera_view_matrix(offset: Vec2, scale: float) -> Mat4 {
+    return Mat4 {
+        c0: v(scale, 0.0, 0.0, 0.0),
+        c1: v(0.0, scale, 0.0, 0.0),
+        c2: v(0.0, 0.0, 1.0, 0.0),
+        c3: v(offset.x * scale, offset.y * scale, 0.0, 1.0),
+    }
+}
+
+// The clock every shader animates on. NOT `stone_get_time()`: that is wall
+// time since process start, so it ignores `SIM_FIXED_DT` and does not replay. `time` accumulates the dt the frame
+// actually committed, which is what makes a rendered frame a function of its
+// frame index. One oracle -- `uEngineTime` and every `uTime` read it.
+pub fn shader_clock() -> float {
+    return time
+}
+
+pub fn set_camera(offset: Vec2, scale: float) {
+    CAMERA_VIEW = camera_view_matrix(offset, scale)
+}
+
+// Column stores, not `CAMERA_VIEW = mat4_identity()`: a Mat4 store constructs
+// the value, and every one-draw camera clear (each target rect-batch flush and
+// immediate draw) resets it.
+pub fn reset_camera() {
+    CAMERA_VIEW.c0 = v(1.0, 0.0, 0.0, 0.0)
+    CAMERA_VIEW.c1 = v(0.0, 1.0, 0.0, 0.0)
+    CAMERA_VIEW.c2 = v(0.0, 0.0, 1.0, 0.0)
+    CAMERA_VIEW.c3 = v(0.0, 0.0, 0.0, 1.0)
+}
+
+// Compare leaves without constructing a Mat4 on the per-draw cache path.
+fn camera_view_is_identity() -> bool {
+    return CAMERA_VIEW.c0.x == 1.0 && CAMERA_VIEW.c0.y == 0.0
+        && CAMERA_VIEW.c0.z == 0.0 && CAMERA_VIEW.c0.w == 0.0
+        && CAMERA_VIEW.c1.x == 0.0 && CAMERA_VIEW.c1.y == 1.0
+        && CAMERA_VIEW.c1.z == 0.0 && CAMERA_VIEW.c1.w == 0.0
+        && CAMERA_VIEW.c2.x == 0.0 && CAMERA_VIEW.c2.y == 0.0
+        && CAMERA_VIEW.c2.z == 1.0 && CAMERA_VIEW.c2.w == 0.0
+        && CAMERA_VIEW.c3.x == 0.0 && CAMERA_VIEW.c3.y == 0.0
+        && CAMERA_VIEW.c3.z == 0.0 && CAMERA_VIEW.c3.w == 1.0
+}
+
+// The one-draw camera clear, owned here so callers never hand-roll it:
+// begin saves the matrix and resets, end restores it. Both former copies
+// (the immediate-shape draw and the target rect-batch flush) called
+// save/reset/restore inline; a third caller would have copied it again.
+//
+// Shape is begin/end, not a `with_` closure and not a returned view. A
+// closure param would allocate per flush on the rect-batch path, and a
+// returned Mat4 would sit in a caller local and scalarise into sixteen
+// live floats across `set_engine_uniforms` and the mesh submit, dooming
+// the side trace off the engine-block key compare. Callers keep no local
+// live across the draw.
+//
+// The saved view is 16 float cells, not a `Mat4` value: a `Mat4`
+// global-to-global store rebuilds the value on EVERY save and every
+// restore (immediate-verb allocation per frame rose when it did). Float
+// cells store and load with no construction, and the reset and restore
+// write CAMERA_VIEW's columns in place, so a scoped draw constructs nothing.
+// The restore keeps every leaf: a partial restore would read as wrong
+// numbers in `rect_batch_target_restores_the_camera`, which pins all sixteen.
+//
+// Nest-safe by depth: only the outermost begin saves, only the outermost
+// end restores. No begin/end pair currently encloses another (a target
+// flush draws a single mesh and flushes no other batch; the immediate
+// bound-shader arm touches no camera), but a future caller nesting them
+// still gets back the outermost camera.
+global CLEARED_CAMERA_SAVED_C0X: float = 0.0
+global CLEARED_CAMERA_SAVED_C0Y: float = 0.0
+global CLEARED_CAMERA_SAVED_C0Z: float = 0.0
+global CLEARED_CAMERA_SAVED_C0W: float = 0.0
+global CLEARED_CAMERA_SAVED_C1X: float = 0.0
+global CLEARED_CAMERA_SAVED_C1Y: float = 0.0
+global CLEARED_CAMERA_SAVED_C1Z: float = 0.0
+global CLEARED_CAMERA_SAVED_C1W: float = 0.0
+global CLEARED_CAMERA_SAVED_C2X: float = 0.0
+global CLEARED_CAMERA_SAVED_C2Y: float = 0.0
+global CLEARED_CAMERA_SAVED_C2Z: float = 0.0
+global CLEARED_CAMERA_SAVED_C2W: float = 0.0
+global CLEARED_CAMERA_SAVED_C3X: float = 0.0
+global CLEARED_CAMERA_SAVED_C3Y: float = 0.0
+global CLEARED_CAMERA_SAVED_C3Z: float = 0.0
+global CLEARED_CAMERA_SAVED_C3W: float = 0.0
+global CLEARED_CAMERA_DEPTH: int = 0
+
+pub fn begin_cleared_camera() {
+    if CLEARED_CAMERA_DEPTH == 0 {
+        CLEARED_CAMERA_SAVED_C0X = CAMERA_VIEW.c0.x
+        CLEARED_CAMERA_SAVED_C0Y = CAMERA_VIEW.c0.y
+        CLEARED_CAMERA_SAVED_C0Z = CAMERA_VIEW.c0.z
+        CLEARED_CAMERA_SAVED_C0W = CAMERA_VIEW.c0.w
+        CLEARED_CAMERA_SAVED_C1X = CAMERA_VIEW.c1.x
+        CLEARED_CAMERA_SAVED_C1Y = CAMERA_VIEW.c1.y
+        CLEARED_CAMERA_SAVED_C1Z = CAMERA_VIEW.c1.z
+        CLEARED_CAMERA_SAVED_C1W = CAMERA_VIEW.c1.w
+        CLEARED_CAMERA_SAVED_C2X = CAMERA_VIEW.c2.x
+        CLEARED_CAMERA_SAVED_C2Y = CAMERA_VIEW.c2.y
+        CLEARED_CAMERA_SAVED_C2Z = CAMERA_VIEW.c2.z
+        CLEARED_CAMERA_SAVED_C2W = CAMERA_VIEW.c2.w
+        CLEARED_CAMERA_SAVED_C3X = CAMERA_VIEW.c3.x
+        CLEARED_CAMERA_SAVED_C3Y = CAMERA_VIEW.c3.y
+        CLEARED_CAMERA_SAVED_C3Z = CAMERA_VIEW.c3.z
+        CLEARED_CAMERA_SAVED_C3W = CAMERA_VIEW.c3.w
+    }
+    CLEARED_CAMERA_DEPTH += 1
+    reset_camera()
+}
+
+pub fn end_cleared_camera() {
+    assert(CLEARED_CAMERA_DEPTH > 0, "end_cleared_camera without begin_cleared_camera")
+    CLEARED_CAMERA_DEPTH -= 1
+    if CLEARED_CAMERA_DEPTH == 0 {
+        CAMERA_VIEW.c0 = v(CLEARED_CAMERA_SAVED_C0X, CLEARED_CAMERA_SAVED_C0Y, CLEARED_CAMERA_SAVED_C0Z, CLEARED_CAMERA_SAVED_C0W)
+        CAMERA_VIEW.c1 = v(CLEARED_CAMERA_SAVED_C1X, CLEARED_CAMERA_SAVED_C1Y, CLEARED_CAMERA_SAVED_C1Z, CLEARED_CAMERA_SAVED_C1W)
+        CAMERA_VIEW.c2 = v(CLEARED_CAMERA_SAVED_C2X, CLEARED_CAMERA_SAVED_C2Y, CLEARED_CAMERA_SAVED_C2Z, CLEARED_CAMERA_SAVED_C2W)
+        CAMERA_VIEW.c3 = v(CLEARED_CAMERA_SAVED_C3X, CLEARED_CAMERA_SAVED_C3Y, CLEARED_CAMERA_SAVED_C3Z, CLEARED_CAMERA_SAVED_C3W)
+    }
+}
+
+// The bound target's Y convention. `Direct` is the ordinary one: the target's
+// rows run with authored y. `PresentSource` is for a canvas the present pass
+// samples WITH A FLIP (the composite) -- authored top-left content needs the
+// pre-compensating ortho or it comes back mirrored, measured as an exact
+// 720 - y.
+//
+// The caller chooses, and it is deliberately NOT inferred from whether a canvas
+// is bound: world geometry renders into canvases too and needs `Direct`, so
+// canvas-vs-window carries too little information. Centralizing it in the
+// PROJECTION is what makes it cover every primitive at once -- a shape, a
+// sprite and a label all mirrored identically before this existed, and a
+// per-writer coordinate flip would have had to fix each separately.
+pub enum TargetConvention {
+    Direct,
+    PresentSource,
+}
+
+fn target_ortho_for_extent(extent: Vec2, convention: TargetConvention = TargetConvention::Direct) -> Mat4 {
+    let w = extent.x
+    let h = extent.y
+    match convention {
+        TargetConvention::Direct => return mat4_ortho(0.0, w, h, 0.0, -1.0, 1.0),
+        TargetConvention::PresentSource => return mat4_ortho(0.0, w, 0.0, h, -1.0, 1.0),
+    }
+}
+
+// THE construction site. A block uploads WHOLE, so every member converges here
+// -- the shape `sprite_frag_uniforms` took for the fragment block. Splitting it
+// is what let `uYBounds` and the screen bounds drift onto separate by-name
+// setters in the first place.
+pub fn engine_uniforms(yb: Vec2, convention: TargetConvention = TargetConvention::Direct) -> EngineU {
+    return engine_uniforms_for_extent(
+        v(stone_current_target_width(), stone_current_target_height()), yb, convention)
+}
+
+pub fn engine_uniforms_for_extent(
+    extent: Vec2, yb: Vec2, convention: TargetConvention = TargetConvention::Direct
+) -> EngineU {
+    return engine_uniforms_for_extent_with_view(extent, yb, CAMERA_VIEW, convention)
+}
+
+pub fn engine_uniforms_for_extent_with_view(
+    extent: Vec2, yb: Vec2, view: Mat4,
+    convention: TargetConvention = TargetConvention::Direct
+) -> EngineU {
+    return EngineU {
+        uProjection: target_ortho_for_extent(extent, convention),
+        uView: view,
+        uYBounds: yb,
+        uScreenBounds: camera_y_bounds(),
+        uEngineTime: shader_clock(),
+        // No binding flips V; the member stays for the shared block layout.
+        uTextureVFlip: 0 as uint,
+    }
+}
+
+// How many times the engine block has been PACKED, ever. Deliveries are
+// counted by the entry's own `uploads`; this counts the 38-leaf pack behind
+// them, which is the cost the screen-space reuse below collapses. Cleared by
+// nothing -- a sim reads the delta across a window it drives itself.
+pub global ENGINE_BLOCK_PACKS: int = 0
+
+// The screen-space engine block, identified by the inputs it is built from.
+//
+// Every program in a screen-space pass gets the SAME block. `reset_camera` has
+// run, so the view is identity, and the target extent, the convention, the
+// depth band, the camera's screen bounds and the shader clock are shared by
+// all of them -- only the destination scratch differs. So the pack runs once
+// per distinct state and each entry remembers the stamp of the state its
+// scratch holds (`engine_block_upload` drives both boot programs through one).
+//
+// Keyed on the INPUTS rather than on the packed bytes: comparing the bytes
+// means reading them back through the same constant pointer offsets the pack
+// writes, which is the cost this exists to remove.
+//
+// The camera is deliberately NOT in the key. Reuse is confined to an
+// identity matrix, checked from the data itself because scoped restores can
+// assign CAMERA_VIEW directly. Nonidentity views always pack their own bytes.
+//
+// Stamps start at 1, so a fresh entry's 0 never matches.
+global ENGINE_BLOCK_STAMP: int = 0
+global ENGINE_BLOCK_KEY_VALID: bool = false
+global ENGINE_BLOCK_KEY_W: float = 0.0
+global ENGINE_BLOCK_KEY_H: float = 0.0
+global ENGINE_BLOCK_KEY_PRESENT_SOURCE: bool = false
+global ENGINE_BLOCK_KEY_YB_X: float = 0.0
+global ENGINE_BLOCK_KEY_YB_Y: float = 0.0
+global ENGINE_BLOCK_KEY_SB_X: float = 0.0
+global ENGINE_BLOCK_KEY_SB_Y: float = 0.0
+global ENGINE_BLOCK_KEY_TIME: float = 0.0
+
+// The stamp identifying the screen-space block these inputs build. Unchanged
+// inputs return the previous stamp; anything else adopts the new inputs and
+// mints the next one, which invalidates every entry at once.
+fn engine_block_screen_stamp(w: float, h: float, present_source: bool,
+                             yb: Vec2) -> int {
+    // Read here rather than taken as parameters: they are the same two calls
+    // the builder makes, and passing them in put three more floats live across
+    // the call on every delivery.
+    let sb = camera_y_bounds()
+    let t = shader_clock()
+    if ENGINE_BLOCK_KEY_VALID
+            && ENGINE_BLOCK_KEY_W == w
+            && ENGINE_BLOCK_KEY_H == h
+            && ENGINE_BLOCK_KEY_PRESENT_SOURCE == present_source
+            && ENGINE_BLOCK_KEY_YB_X == yb.x
+            && ENGINE_BLOCK_KEY_YB_Y == yb.y
+            && ENGINE_BLOCK_KEY_SB_X == sb.x
+            && ENGINE_BLOCK_KEY_SB_Y == sb.y
+            && ENGINE_BLOCK_KEY_TIME == t {
+        return ENGINE_BLOCK_STAMP
+    }
+    ENGINE_BLOCK_KEY_VALID = true
+    ENGINE_BLOCK_KEY_W = w
+    ENGINE_BLOCK_KEY_H = h
+    ENGINE_BLOCK_KEY_PRESENT_SOURCE = present_source
+    ENGINE_BLOCK_KEY_YB_X = yb.x
+    ENGINE_BLOCK_KEY_YB_Y = yb.y
+    ENGINE_BLOCK_KEY_SB_X = sb.x
+    ENGINE_BLOCK_KEY_SB_Y = sb.y
+    ENGINE_BLOCK_KEY_TIME = t
+    ENGINE_BLOCK_STAMP += 1
+    return ENGINE_BLOCK_STAMP
+}
+
+// Deliver the engine block to `shader`, when its program declares one.
+pub fn set_engine_uniforms(shader: string, yb: Vec2,
+    convention: TargetConvention = TargetConvention::Direct,
+    extent: Vec2? = null) {
+    // One lookup: the presence test and the upload want the same entry, and
+    // `set_uniform_block` would search for it again. This is the hottest
+    // uniform path in the game -- every batch of every pass reaches it.
+    //
+    // The lookup runs BEFORE the block value exists. `uniform_block_id` reads
+    // only its argument's type and never lowers it, so the value is built
+    // inside the branch that consumes it. Built first, its 38 scalars stay
+    // live across the lookup's guards, and a side trace from any of those
+    // exits then needs them all in registers -- the largest single source of
+    // `NYI: register coalescing too complex` in a combat frame.
+    if let block = shader_block_by_fingerprint(shader, uniform_block_id(engine_uniforms(yb, convention))) {
+        let entry = block.unwrap()
+        // Resolved once: the key and the block are built from the same extent,
+        // and the default one is the bound target's, which a canvas bind moves.
+        let target = if extent != null {
+            extent.unwrap()
+        } else {
+            v(stone_current_target_width(), stone_current_target_height())
+        }
+        // 0 is "not reusable": a nonidentity view is not in the key, and
+        // it is also what every other packer leaves on the entry.
+        let stamp = if !camera_view_is_identity() { 0 } else {
+            engine_block_screen_stamp(target.x, target.y,
+                convention == TargetConvention::PresentSource, yb)
+        }
+        if stamp != 0 && entry.engine_stamp == stamp {
+            // The scratch already holds these bytes. The upload still runs:
+            // the buffer is this program's own and the delivery is what the
+            // caller asked for.
+            __upload_uniform_block(shader, entry, __SITE__)
+            return
+        }
+        ENGINE_BLOCK_PACKS += 1
+        __upload_resolved_block(shader, entry,
+            engine_uniforms_for_extent(target, yb, convention), __SITE__)
+        entry.engine_stamp = stamp
+    }
+}

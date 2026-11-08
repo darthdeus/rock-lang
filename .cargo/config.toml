@@ -2,3 +2,6 @@
 # nesting limit against it and against the engine's own stack.
 [target.wasm32-unknown-unknown]
 rustflags = ["-C", "link-arg=-zstack-size=8388608"]
+
+[target.'cfg(target_os = "linux")']
+runner = "scripts/native-runtime"

@@ -1,0 +1,692 @@
+// Asset loading configuration. ASSET_DEV_MODE means "assets are on disk":
+// loaders register mutable paths with the Rust filesystem watcher and edits
+// hot-reload. Immutable Eat generations are not watched. On for every dev
+// invocation (rock run / stone / frame / perf / sim), where nothing is baked
+// in; off when a runner registered an embedded archive
+// (`__ROCK_ASSETS_EMBEDDED`, set by fire). An embedded runner serving
+// assets from disk is a dev build like any other -- which is why this asks the
+// runner what it did rather than inferring it from __GAME_DIR_OVERRIDE, whose
+// job is asset-key construction. The _G field is set in the preamble before
+// this global initializes.
+inline(lua) fn __resolve_asset_dev_mode() -> bool = """
+    return _G.__ROCK_ASSETS_EMBEDDED ~= true
+"""
+pub global ASSET_DEV_MODE: bool = __resolve_asset_dev_mode()
+
+inline(lua) fn __resolve_asset_overlay_dirs() -> [string] = """
+    local result = { _data = {}, len = 0, __ty = "Vec" }
+    local raw = os.getenv("ROCK_ASSET_OVERLAYS")
+    if raw == nil then
+        for _, root in ipairs(_G.__ROCK_ASSET_OVERLAY_DEFAULTS or {}) do
+            result.len = result.len + 1
+            result._data[result.len] = root
+        end
+        return result
+    end
+    if raw == "" then return result end
+    local windows = package.config:sub(1, 1) == "\\"
+    local separator = windows and ";" or ":"
+    local start = 1
+    while start <= #raw + 1 do
+        local stop = string.find(raw, separator, start, true) or (#raw + 1)
+        local root = string.sub(raw, start, stop - 1)
+        if root ~= "" then
+            local drive = windows and root:match("^%a:") ~= nil
+                and (root:sub(3, 3) == "\\" or root:sub(3, 3) == "/")
+            local unc = windows
+                and (root:sub(1, 1) == "\\" or root:sub(1, 1) == "/")
+                and (root:sub(2, 2) == "\\" or root:sub(2, 2) == "/")
+            local absolute = windows and (drive or unc) or root:sub(1, 1) == "/"
+            if not absolute then
+                error("ROCK_ASSET_OVERLAYS entries must be absolute directories: " .. root)
+            end
+            local root_len = windows and drive and #root == 3 and 3 or 1
+            while #root > root_len and (root:sub(-1) == "/" or root:sub(-1) == "\\") do
+                root = root:sub(1, -2)
+            end
+            result.len = result.len + 1
+            result._data[result.len] = root
+        end
+        if stop > #raw then break end
+        start = stop + 1
+    end
+    return result
+"""
+pub const ASSET_OVERLAY_DIRS: [string] = __resolve_asset_overlay_dirs()
+
+// Resolve game source directory:
+//   1. _G.__GAME_DIR_OVERRIDE (set by an embedded runner before bytecode load —
+//      needed because Rust set_var doesn't propagate to LuaJIT's CRT on Windows)
+//   2. GAME_SOURCE_DIR env var (manual override; works on macOS/Linux)
+//   3. __ROCK_GAME_SOURCE_DIR (set by compiler preamble, absolute path)
+//   4. "" (fallback)
+inline(lua) fn __resolve_game_source_dir() -> string = """
+    return _G.__GAME_DIR_OVERRIDE or os.getenv("GAME_SOURCE_DIR") or __ROCK_GAME_SOURCE_DIR or ""
+"""
+pub global GAME_SOURCE_DIR: string = __resolve_game_source_dir()
+
+inline(lua) fn __resolve_stone_source_dir() -> string = """
+    local resolved = _G.__STONE_DIR_OVERRIDE
+        or os.getenv("STONE_SOURCE_DIR")
+        or _G.__ROCK_STONE_DIR
+    if resolved == nil or resolved == "" then
+        error("Stone source directory is not configured; set STONE_SOURCE_DIR, __STONE_DIR_OVERRIDE, or __ROCK_STONE_DIR")
+    end
+    return resolved
+"""
+const STONE_SOURCE_DIR: string = __resolve_stone_source_dir()
+
+pub fn project_asset_path(relative_path: string) -> string {
+    // Accept both desktop path syntaxes, including Windows rooted/UNC paths.
+    // A drive-relative path (C:save.json) still needs resolution.
+    if relative_path.starts_with("/") || relative_path.starts_with("\\") {
+        return relative_path
+    }
+    if relative_path.len() >= 3 && relative_path.substring(1, 2) == ":"
+            && (relative_path.substring(2, 3) == "/" || relative_path.substring(2, 3) == "\\")
+            && "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(relative_path.substring(0, 1)) {
+        return relative_path
+    }
+
+    // Support @engine/ prefix for engine-shared assets
+    if relative_path.starts_with("@engine/") {
+        return "{STONE_SOURCE_DIR}/engine/{relative_path.substring(8, relative_path.len())}"
+    }
+    return "{GAME_SOURCE_DIR}/{relative_path}"
+}
+
+// Cache overlay lookup results to avoid repeating filesystem probes.
+// Keyed by the roots table it was built against, by identity: a full reload
+// re-resolves `ASSET_OVERLAY_DIRS` into a fresh table, and an answer from the
+// previous roots must not outlive them. No path is spelled `roots`, which all
+// start with `assets/`.
+@nomangle inline(lua) fn __asset_path_memo(relative_path: string, roots: [string]) -> string = """
+    local m = _G.__stone_asset_path_memo
+    if not m or m.roots ~= roots then return "" end
+    return m[relative_path] or ""
+"""
+
+@nomangle inline(lua) fn __asset_path_memo_put(relative_path: string, resolved: string, roots: [string]) = """
+    local m = _G.__stone_asset_path_memo
+    if not m or m.roots ~= roots then m = { roots = roots }; _G.__stone_asset_path_memo = m end
+    m[relative_path] = resolved
+"""
+
+pub fn asset_path(relative_path: string) -> string {
+    if relative_path.starts_with("/") || relative_path.starts_with("@engine/") {
+        return project_asset_path(relative_path)
+    }
+
+    if !ASSET_DEV_MODE || !relative_path.starts_with("assets/") {
+        return project_asset_path(relative_path)
+    }
+
+    let remembered = __asset_path_memo(relative_path, ASSET_OVERLAY_DIRS)
+    if remembered != "" { return remembered }
+
+    for root in ASSET_OVERLAY_DIRS {
+        if !stone_is_directory(root) {
+            _log_once_impl(0, "ASSETS", "configured asset overlay is not a directory: {root}",
+                "asset_overlay:invalid:{root}")
+        } else {
+            let candidate = "{root}/{relative_path}"
+            if stone_file_exists(candidate) || stone_is_directory(candidate) {
+                log_debug("ASSETS", "overlay {relative_path} -> {candidate}")
+                __asset_path_memo_put(relative_path, candidate, ASSET_OVERLAY_DIRS)
+                return candidate
+            }
+        }
+    }
+
+    // Only an overlay HIT is remembered. A miss stays unmemoized so a file
+    // added to an overlay while the game runs is still found.
+    return project_asset_path(relative_path)
+}
+
+pub fn asset_list_dir(relative_path: string) -> [string] {
+    let rel = relative_path
+    while rel.len() > 1 && (rel.ends_with("/") || rel.ends_with("\\")) {
+        rel = rel.substring(0, rel.len() - 1)
+    }
+
+    let physical_dirs: [string] = vec_new()
+    if rel.starts_with("/") {
+        physical_dirs.push(rel)
+    } else if rel.starts_with("@engine/") {
+        physical_dirs.push("{STONE_SOURCE_DIR}/engine/{rel.substring(8, rel.len())}")
+    } else {
+        if ASSET_DEV_MODE && (rel == "assets" || rel.starts_with("assets/")) {
+            for root in ASSET_OVERLAY_DIRS {
+                if !stone_is_directory(root) {
+                    _log_once_impl(0, "ASSETS", "configured asset overlay is not a directory: {root}",
+                        "asset_overlay:invalid:{root}")
+                } else {
+                    physical_dirs.push("{root}/{rel}")
+                }
+            }
+        }
+        physical_dirs.push(if GAME_SOURCE_DIR == "" { rel } else { "{GAME_SOURCE_DIR}/{rel}" })
+    }
+
+    let seen: Map<string, bool> = map_new()
+    let names: [string] = vec_new()
+    for physical in physical_dirs {
+        if !stone_is_directory(physical) { continue }
+        let listed = stone_list_directory(physical)
+        if listed == null { continue }
+        for name in listed.unwrap() {
+            if seen.get(name) == null {
+                seen.insert(name, true)
+                names.push(name)
+            }
+        }
+    }
+    sort(names, name => name)
+
+    let result: [string] = vec_new()
+    for name in names {
+        result.push(if rel == "/" { "/{name}" } else { "{rel}/{name}" })
+    }
+    return result
+}
+
+// Maps Image handle -> resolved on-disk path. Populated by every
+// asset-loader entry point; consumed by the asset hot-reload watcher.
+pub global IMAGE_PATHS: Map<int, string> = map_new()
+
+pub fn register_image_path(handle: int, resolved_path: string) {
+    if handle != 0 {
+        IMAGE_PATHS.insert(handle, resolved_path)
+    }
+}
+
+pub fn image_path(image: Image) -> string? {
+    return IMAGE_PATHS.get(image.0)
+}
+
+// Image identity -> the one live Image handle loaded for it. Repeat loads
+// return the SAME handle while it remains cached. An image stays while
+// IMAGE_ASSET_REFS holds it (load_image_asset's reference is never released);
+// an unreferenced one may leave the cache through residency_trim, which
+// destroys the GL texture and makes later demand a real load again.
+// The identity is `image_identity`: an Eat object's content digest plus its
+// filter, so logical paths naming the same bytes share one upload; any other
+// path is its own identity. IMAGE_ASSET_REFS shares these keys. A path declares one filter (the filter-once rule below); sampling is
+// otherwise declared per draw and bound as sampler state.
+//
+// Asset hot reload mutates the texture in place
+// behind the handle (stone_reload_image), and image_dims() queries size live, so
+// a cached Image stays correct across a file edit -- no invalidation needed.
+// Callers that own a texture via stone_load_image + stone_unload_image
+// intentionally bypass this cache (a shared handle they freed would leave a
+// dangling cache entry).
+pub global IMAGE_CACHE: Map<string, Image> = map_new()
+
+pub global IMAGE_FRAME_LOAD_PATHS: [string] = vec_new()
+pub global IMAGE_FRAME_LOAD_SUCCEEDED: [bool] = vec_new()
+
+fn image_load_diag_frame_begin() {
+    IMAGE_FRAME_LOAD_PATHS.clear()
+    IMAGE_FRAME_LOAD_SUCCEEDED.clear()
+    residency_frame_begin()
+}
+
+fn image_load_diag_record(path: string, succeeded: bool) {
+    IMAGE_FRAME_LOAD_PATHS.push(path)
+    IMAGE_FRAME_LOAD_SUCCEEDED.push(succeeded)
+}
+
+// Resolved path -> its identity, for Eat object paths only (every other path
+// is its own identity). Lets a path-only caller (release, lookup) find the
+// entry its load created.
+global IMAGE_RESOLVED_IDENTITY: Map<string, string> = map_new()
+
+// Eat identity -> every resolved path that shares its current handle, for the
+// residency dump (IMAGE_PATHS keeps one logical path per handle). The list is
+// kept while cached; a fresh load forgets whatever paths
+// a previous handle recorded, so each path records itself again on its next
+// load.
+global IMAGE_IDENTITY_PATHS: Map<string, [string]> = map_new()
+
+// Outstanding `acquire_image_asset` counts per resolved path. The identity
+// refcount is the sum over its paths; a path whose count reaches zero drops
+// its identity association, so a later acquire under another filter starts
+// from that filter's key instead of the stale one.
+global IMAGE_PATH_REFS: Map<string, int> = map_new()
+
+fn is_hex_digest(text: string) -> bool {
+    if text.len() != 64 { return false }
+    for c in text.chars() {
+        let digit = c >= 48 && c <= 57
+        let lower = c >= 97 && c <= 102
+        let upper = c >= 65 && c <= 70
+        if !digit && !lower && !upper { return false }
+    }
+    return true
+}
+
+// The content digest of an immutable Eat object path
+// (`.../.eat/<sha256>/<name>`), or null. The asset watcher's
+// `immutable_eat_object` and `rock_engine_host::release::object_key_parts`
+// read the same layout: the directory name is the SHA-256 of the file's
+// bytes, so equal digests are equal pixels.
+// An Eat object's content key: its hash directory and the file's path inside
+// it. One directory holds a sheet's channel files, so the name tells them
+// apart; the same key under two overlay roots is one image.
+fn eat_object_key(resolved: string) -> string? {
+    if !resolved.contains(".eat/") { return null }
+    let parts = resolved.split("/")
+    let i = 0
+    while i < parts.len() {
+        if parts[i] == ".eat" {
+            if i + 2 >= parts.len() || parts[i + 2] == "" || parts[i + 2] == "banks" { return null }
+            let digest = parts[i + 1]
+            if !is_hex_digest(digest) { return null }
+            let key = digest
+            for n in i + 2..parts.len() { key = key + "/" + parts[n] }
+            return key
+        }
+        i = i + 1
+    }
+    return null
+}
+
+fn image_format_tag(format: ImageAssetFormat) -> string {
+    match format {
+        ImageAssetFormat::Rgba8 => "rgba8",
+        ImageAssetFormat::DepthRg8 => "depth-rg8",
+        ImageAssetFormat::R8 => "r8",
+        ImageAssetFormat::MaterialRg8 => "material-rg8",
+    }
+}
+
+fn image_format_path(resolved: string, format: ImageAssetFormat) -> string {
+    if format == ImageAssetFormat::Rgba8 { return resolved }
+    return "image-format:{image_format_tag(format)}:{resolved}"
+}
+
+fn image_path_from_format_key(path_key: string) -> string {
+    for format in [ImageAssetFormat::DepthRg8, ImageAssetFormat::MaterialRg8, ImageAssetFormat::R8] {
+        let prefix = "image-format:{image_format_tag(format)}:"
+        if path_key.starts_with(prefix) { return path_key.substring(prefix.len(), path_key.len()) }
+    }
+    return path_key
+}
+
+pub fn image_identity(resolved: string, sampling: TextureFilter,
+    format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> string {
+    let suffix = if format == ImageAssetFormat::Rgba8 { "" } else { "#{image_format_tag(format)}" }
+    if let key = eat_object_key(resolved) { return "{key}#{sampling}{suffix}" }
+    return image_format_path(resolved, format)
+}
+
+// The cache key a loaded path is held under.
+fn image_asset_key(resolved: string, format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> string {
+    let path_key = image_format_path(resolved, format)
+    return IMAGE_RESOLVED_IDENTITY.get(path_key) ?? path_key
+}
+
+fn image_identity_record(resolved: string, identity: string) {
+    if identity == resolved { return }
+    IMAGE_RESOLVED_IDENTITY.insert(resolved, identity)
+    RESIDENCY_PATH_IDENTITIES.insert(resolved, identity)
+    let paths = IMAGE_IDENTITY_PATHS.get(identity) ?? vec_new()
+    for path in paths {
+        if path == resolved { return }
+    }
+    paths.push(resolved)
+    IMAGE_IDENTITY_PATHS.insert(identity, paths)
+}
+
+fn image_identity_fresh(resolved: string, identity: string) {
+    if identity == resolved { return }
+    if let previous = IMAGE_IDENTITY_PATHS.get(identity) {
+        // A path the list still names may since have moved to another live
+        // identity; only forget the ones that still resolve here.
+        for path in previous {
+            if image_asset_key(path) == identity { IMAGE_RESOLVED_IDENTITY.remove(path) }
+        }
+        IMAGE_IDENTITY_PATHS.remove(identity)
+    }
+    image_identity_record(resolved, identity)
+}
+
+// A path whose last reference is released forgets its identity, so a later
+// acquire under another filter reaches that filter's key. Only touches the
+// association it names: a path that already moved on keeps its new one.
+fn image_identity_unrecord(resolved: string, identity: string) {
+    if identity == resolved { return }
+    if image_asset_key(resolved) != identity { return }
+    IMAGE_RESOLVED_IDENTITY.remove(resolved)
+}
+
+global IMAGE_ASSET_REFS: Map<string, int> = map_new()
+
+@nomangle fn __stone_asset_destroy_owned(handle: int) {
+    destroy_image(Image(handle))
+}
+
+// Residency trim drops an unreferenced cached image and every path that
+// resolved to it.
+fn image_asset_evict(identity: string, handle: int) {
+    __stone_asset_destroy_owned(handle)
+    IMAGE_CACHE.remove(identity)
+    IMAGE_PATHS.remove(handle)
+    if let paths = IMAGE_IDENTITY_PATHS.get(identity) {
+        for path in paths {
+            if RESIDENCY_PATH_IDENTITIES.get(path) == identity { RESIDENCY_PATH_IDENTITIES.remove(path) }
+            if image_asset_key(path) == identity {
+                IMAGE_PATH_REFS.remove(path)
+                IMAGE_RESOLVED_IDENTITY.remove(path)
+            }
+        }
+        IMAGE_IDENTITY_PATHS.remove(identity)
+    }
+}
+
+value GeneratedResource {
+    kind: string,
+    handle: int,
+}
+
+// Images and image data the game made itself. Runner shutdown destroys what
+// is left while the window still exists.
+global GENERATED_RESOURCES: Map<string, GeneratedResource> = map_new()
+
+fn generated_key(kind: string, handle: int) -> string {
+    return "{kind}:{handle}"
+}
+
+fn generated_register(kind: string, handle: int) {
+    if handle == 0 { error("cannot own a null {kind}") }
+    let key = generated_key(kind, handle)
+    if GENERATED_RESOURCES.get(key) != null { error("generated resource already owned: {key}") }
+    GENERATED_RESOURCES.insert(key, GeneratedResource { kind: kind, handle: handle })
+}
+
+@nomangle fn __stone_generated_destroy(kind: string, handle: int) {
+    if kind == "image" { destroy_image(Image(handle)) }
+    else if kind == "image_data" { stone_destroy_image_data(handle) }
+    else { error("unknown generated resource {kind}") }
+}
+
+fn generated_release(kind: string, handle: int) {
+    let key = generated_key(kind, handle)
+    if GENERATED_RESOURCES.get(key) == null { error("generated resource is not owned: {key}") }
+    GENERATED_RESOURCES.remove(key)
+    __stone_generated_destroy(kind, handle)
+}
+
+fn generated_resources_shutdown() {
+    let resources = GENERATED_RESOURCES
+    GENERATED_RESOURCES = map_new()
+    for (_, resource) in resources { __stone_generated_destroy(resource.kind, resource.handle) }
+}
+
+pub fn new_owned_image_data(width: int, height: int) -> ImageData {
+    let data = new_image_data(width, height)
+    generated_register("image_data", data.0)
+    return data
+}
+
+pub fn new_owned_image_from_data(data: ImageData,
+    sampling: TextureFilter = TextureFilter::Nearest) -> Image {
+    let image = new_image_from_data(data, sampling)
+    generated_register("image", image.0)
+    return image
+}
+
+pub fn release_owned_image(image: Image) {
+    generated_release("image", image.0)
+}
+
+pub fn release_owned_image_data(data: ImageData) {
+    generated_release("image_data", data.0)
+}
+
+pub const DEVELOPMENT_MISSING_IMAGE_SIZE: int = 8
+
+fn development_missing_image(sampling: TextureFilter) -> Image {
+    let data = new_image_data(DEVELOPMENT_MISSING_IMAGE_SIZE, DEVELOPMENT_MISSING_IMAGE_SIZE)
+    for y in 0..DEVELOPMENT_MISSING_IMAGE_SIZE {
+        for x in 0..DEVELOPMENT_MISSING_IMAGE_SIZE {
+            let bright = ((x ./ 2) + (y ./ 2)) % 2 == 0
+            image_data_set_pixel(data, x, y,
+                if bright { 1.0 } else { 0.1 }, 0.0,
+                if bright { 0.8 } else { 0.1 }, 1.0)
+        }
+    }
+    let image = new_image_from_data(data, sampling)
+    stone_destroy_image_data(data.0)
+    return image
+}
+
+// Load `resolved` (already through asset_path, or an absolute path) once,
+// returning a shared handle on repeat calls. `canonical` is the caller-facing
+// path recorded for the editor/watcher (asset-relative for load_image_asset).
+// The result is unreferenced: a caller that keeps the handle acquires it.
+pub fn load_image_cached(
+    resolved: string,
+    canonical: string,
+    sampling: TextureFilter = TextureFilter::Nearest,
+    watch: bool = true,
+    exact_texels: bool = false,
+    class: ResidencyClass = ResidencyClass::Required,
+    format: ImageAssetFormat = ImageAssetFormat::Rgba8,
+    logical_size: IVec2? = null
+) -> Image {
+    let path_key = image_format_path(resolved, format)
+    let key = image_asset_key(resolved, format)
+    if (IMAGE_PATH_REFS.get(path_key) ?? 0) == 0 {
+        key = image_identity(resolved, sampling, format)
+    }
+    let cached = IMAGE_CACHE.get(key)
+    let new_alias = false
+    if cached == null {
+        // A path seen before keeps its identity, so asking it for another
+        // filter still meets the filter-once error below; a new path or
+        // filter computes its own, which may already be cached under another
+        // logical path of the same Eat object.
+        key = image_identity(resolved, sampling, format)
+        if key != path_key {
+            cached = IMAGE_CACHE.get(key)
+            new_alias = cached != null
+        }
+    }
+    if cached != null {
+        let img = cached.unwrap()
+        if image_storage_format(img) != format {
+            error("load_image_asset: {canonical} is cached as {image_storage_format(img)}, requested {format}")
+        }
+        // One upload per path, so a caller that needs the file's own texels
+        // cannot be handed an upload that already lost them. Checked on the
+        // OUTCOME rather than on the declaration: a first load that never
+        // declared anything is still fine as long as no cap reduced it, and
+        // that is the only case where the second caller would be wrong.
+        //
+        // A headers-only stub stores one white texel without resampling the
+        // file's pixels. Ask the loaded image: process policy alone cannot
+        // distinguish a stub from a real image that needed a decode fallback.
+        if exact_texels && !image_is_stub(img)
+            && image_storage_dims(img) != image_dims(img) {
+            error("load_image_asset: {canonical} needs its own texels, but it is already loaded with {image_storage_dims(img)} of {image_dims(img)} stored under STONE_IMAGE_MAX_SIDE; the first load has to declare exact_texels too")
+        }
+        // One upload per path, so the path carries ONE declared default. A
+        // second load asking for a different one cannot be honoured without
+        // silently giving whichever call ran first; a caller that wants the
+        // other filter passes it per draw.
+        if image_sampling(img) != sampling {
+            error("load_image_asset: {canonical} is already loaded as {image_sampling(img)}; a second load cannot redeclare it as {sampling} (pass `sampling:` at the draw instead)")
+        }
+        if new_alias || IMAGE_RESOLVED_IDENTITY.get(path_key) != key { image_identity_record(path_key, key) }
+        residency_touch(key)
+        if class == ResidencyClass::Required {
+            residency_require_loaded(img, canonical)
+        }
+        if watch && ASSET_DEV_MODE {
+            stone_watch_asset(resolved)
+        }
+        return img
+    }
+    let handle = load_image_handle(resolved, sampling, exact_texels,
+        deferred: class == ResidencyClass::Prefetch, format: format, logical_size: logical_size)
+    image_load_diag_record(canonical, handle != 0)
+    if handle == 0 {
+        // The path goes on the second line: the badge keys on the first, so
+        // every failed image is one counted row.
+        if !ASSET_DEV_MODE {
+            log_once("ASSETS", "image asset failed to load\n{canonical} (asset_path: {resolved})", "load_image_asset:{canonical}")
+            return Image(0)
+        }
+        log_error("ASSETS", "image asset failed to load; drawing a development placeholder\n{canonical} (asset_path: {resolved})")
+        if format != ImageAssetFormat::Rgba8 { return Image(0) }
+        handle = development_missing_image(sampling).0
+        if handle == 0 { return Image(0) }
+    }
+    // Register the canonical (pre-resolution) path: that's the asset's identity.
+    // Save-back goes through asset_path again, so it round-trips across hot
+    // reloads, and the editor surfaces "assets/Sprites/foo.png" rather than the
+    // leaky "bitgun/assets/Sprites/foo.png".
+    register_image_path(handle, canonical)
+    // Under `rock stone`, hand the resolved on-disk path to the filesystem
+    // watcher so an external edit to a mutable image hot-reloads it in place
+    // (handle is preserved -- see stone_reload_image). The reload poll lives in
+    // update_watcher (stone/engine/debug/watcher.rock).
+    if watch && ASSET_DEV_MODE {
+        stone_watch_asset(resolved)
+    }
+    let img = register_image(handle, sampling)
+    image_identity_fresh(path_key, key)
+    IMAGE_CACHE.insert(key, img)
+    residency_touch(key)
+    if class == ResidencyClass::Required { residency_record_miss(img, canonical) }
+    return img
+}
+
+// `exact_texels` declares that this asset's texels are read individually rather
+// than sampled as colour -- a lookup table, an index structure, a packed mesh --
+// which withholds `STONE_IMAGE_MAX_SIDE` from it. Averaging such a texel does
+// not blur a value, it invents a different one.
+//
+// The caller keeps the handle for the process: each call takes a reference
+// that is never released, so trim cannot destroy a texture it still draws.
+pub fn load_image_asset(path: string, sampling: TextureFilter = TextureFilter::Nearest,
+    exact_texels: bool = false, format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> Image {
+    return acquire_image_resolved(asset_path(path), path, sampling, exact_texels: exact_texels,
+        format: format)
+}
+
+// The handle an asset path is ALREADY loaded under, or null. For a VIEWER
+// that wants whatever filter the owner declared rather than declaring one
+// of its own: a browser enumerating a directory does not own what it finds
+// there, and a second load asking for a different filter is a hard error
+// (the skin gallery hit exactly that on a game's Linear splash logos).
+pub fn image_asset_cached(path: string, format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> Image? {
+    let resolved = asset_path(path)
+    let path_key = image_format_path(resolved, format)
+    return IMAGE_CACHE.get(IMAGE_RESOLVED_IDENTITY.get(path_key)
+        ?? RESIDENCY_PATH_IDENTITIES.get(path_key) ?? path_key)
+}
+
+pub fn acquire_image_asset(
+    path: string,
+    sampling: TextureFilter = TextureFilter::Nearest,
+    watch: bool = true,
+    exact_texels: bool = false,
+    class: ResidencyClass = ResidencyClass::Required,
+    format: ImageAssetFormat = ImageAssetFormat::Rgba8
+) -> Image {
+    return acquire_image_resolved(asset_path(path), path, sampling, watch: watch,
+        exact_texels: exact_texels, class: class, format: format)
+}
+
+// acquire_image_asset for a path already through asset_path; `canonical` is
+// the caller-facing path, as for load_image_cached.
+fn acquire_image_resolved(
+    resolved: string,
+    canonical: string,
+    sampling: TextureFilter = TextureFilter::Nearest,
+    watch: bool = true,
+    exact_texels: bool = false,
+    class: ResidencyClass = ResidencyClass::Required,
+    format: ImageAssetFormat = ImageAssetFormat::Rgba8
+) -> Image {
+    let path_key = image_format_path(resolved, format)
+    let image = load_image_cached(resolved, canonical, sampling, watch: watch,
+        exact_texels: exact_texels, class: class, format: format)
+    if image.0 != 0 {
+        let key = image_asset_key(resolved, format)
+        IMAGE_ASSET_REFS.insert(key, (IMAGE_ASSET_REFS.get(key) ?? 0) + 1)
+        IMAGE_PATH_REFS.insert(path_key, (IMAGE_PATH_REFS.get(path_key) ?? 0) + 1)
+    }
+    return image
+}
+
+pub fn image_asset_acquire_count(path: string, format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> int {
+    return IMAGE_ASSET_REFS.get(image_asset_key(asset_path(path), format)) ?? 0
+}
+
+pub fn release_image_asset(path: string, format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> bool {
+    // A path spends only what it acquired: aliases share the identity count,
+    // but a release through one alias must not consume another's reference.
+    let resolved = asset_path(path)
+    let path_key = image_format_path(resolved, format)
+    let held = IMAGE_PATH_REFS.get(path_key) ?? 0
+    if held <= 0 { return false }
+    let key = image_asset_key(resolved, format)
+    let refs = IMAGE_ASSET_REFS.get(key) ?? 0
+    if refs <= 0 { return false }
+    if held > 1 {
+        IMAGE_PATH_REFS.insert(path_key, held - 1)
+    } else {
+        IMAGE_PATH_REFS.remove(path_key)
+        image_identity_unrecord(path_key, key)
+    }
+    if refs > 1 {
+        IMAGE_ASSET_REFS.insert(key, refs - 1)
+        return true
+    }
+
+    IMAGE_ASSET_REFS.remove(key)
+    if IMAGE_CACHE.get(key) == null { error("managed image has no cached handle: {key}") }
+    // The last reference demotes the image into the residency LRU.
+    residency_demote(key)
+    return true
+}
+
+// Static sound loader. Delegates to load_audio (engine/bindings.rock) -- the single
+// SoundData construction + watcher-registration site -- so the two sound-load
+// paths can't drift.
+pub fn load_sound_asset(path: string, recipe: SoundRecipe? = null, stream: bool = false) -> Sound {
+    return load_audio(path, if stream { "stream" } else { "static" }, recipe)
+}
+
+fn load_multisound_asset(paths: [string]) -> MultiSound {
+    let sources: [Sound] = vec_new()
+
+    for path in paths {
+        sources.push(load_sound_asset(path))
+    }
+
+    return MultiSound { sources: sources }
+}
+
+fn load_multisound_available(paths: [string], recipes: JsonValue, stream: bool) -> MultiSound {
+    let sources: [Sound] = vec_new()
+    for path in paths {
+        let recipe_value = json_field(recipes, path)
+        let recipe: SoundRecipe? = if recipe_value == null { null }
+            else { sound_bank_source_recipe(recipe_value.unwrap(), path) }
+        let source = sound_residency_load_shared(path, recipe, stream)
+        if !sound_known(source) {
+            sound_residency_release_shared(source)
+            continue
+        }
+        sources.push(source)
+    }
+    return MultiSound { sources: sources }
+}
+
+fn unload_multisound(multi_sound: MultiSound) {
+    for source in multi_sound.sources { sound_residency_release_shared(source) }
+}

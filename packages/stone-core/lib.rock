@@ -1,0 +1,28 @@
+// IVec2 -> Vec2 widening. The scalar constructors (v(), v(x), v(x, y)) and
+// zero() live in stdlib/vec.rock; this overload stays because IVec2 is
+// engine-defined.
+@inline
+@pure fn v(v: IVec2) -> Vec2 {
+    return Vec2 { x: v.x, y: v.y }
+}
+
+// Component-wise color multiply (including alpha) -- tint/dim: a base color
+// times a modulation color. e.g. face_tint * WHITE.alpha(0.5) dims + fades.
+pub @pure operator *(a: Color, b: Color) -> Color {
+    return Color { r: a.r * b.r, g: a.g * b.g, b: a.b * b.b, a: a.a * b.a }
+}
+
+pub const TRANSPARENT: Color = Color { r: 0, g: 0, b: 0, a: 0 }
+pub const WHITE: Color = Color { r: 1, g: 1, b: 1, a: 1 }
+pub const BLACK: Color = Color { r: 0, g: 0, b: 0, a: 1 }
+pub const GRAY: Color = Color { r: 0.15, g: 0.15, b: 0.15, a: 1 }
+pub const RED: Color = Color { r: 1, g: 0, b: 0, a: 1 }
+const RED_DEBUG: Color = Color { r: 1, g: 0, b: 0, a: 0.3 }
+pub const GREEN: Color = Color { r: 0, g: 1, b: 0, a: 1 }
+pub const BLUE: Color = Color { r: 0, g: 0, b: 1, a: 1 }
+pub const YELLOW: Color = Color { r: 1, g: 1, b: 0, a: 1 }
+pub const CYAN: Color = Color { r: 0, g: 1, b: 1, a: 1 }
+pub const MAGENTA: Color = Color { r: 1, g: 0, b: 1, a: 1 }
+pub const PURPLE: Color = Color { r: 0.5, g: 0, b: 0.5, a: 1 }
+
+pub const ORANGE: Color = Color { r: 1, g: 0.5, b: 0, a: 1 }

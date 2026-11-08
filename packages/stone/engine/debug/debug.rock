@@ -1,0 +1,136 @@
+struct DebugItem {
+    a: Vec2,
+    b: Vec2,
+    color: Color,
+}
+
+global DEBUG_QUEUE: [DebugItem] = vec_new()
+global DEBUG_LOG_QUEUE: [string] = vec_new()
+
+fn debug_log(msg: string) {
+    DEBUG_LOG_QUEUE.push(msg)
+}
+
+pub @nomangle
+@debug_impure
+fn d(msg: string) {
+    debug_log(msg)
+
+    // Only print to console when in one-frame mode
+    if os_getenv("ONE_FRAME") == "1" || !is_null(os_getenv("FRAME_COUNT")) {
+        // Simple line wrapping - if message is too long, print on multiple lines
+        let max_width = 120
+        let prefix = "[DEBUG] "
+        if msg.len() <= max_width - 8 {
+            print("{prefix}{msg}")
+        } else {
+            // For now, just print long lines as-is with a marker
+            print("{prefix}{msg} [LONG]")
+        }
+    }
+}
+
+pub fn debug_draw_line(a: Vec2, b: Vec2, color: Color) {
+    DEBUG_QUEUE.push(DebugItem {
+        a: a,
+        b: b,
+        color: color,
+    })
+}
+
+pub fn draw_debug() {
+    // COORDINATE SPACE DEBUG VISUALIZATION
+    // Draw world axes at (0,0) to verify Y-axis orientation
+    let axis_length = 3.0
+
+    // X-axis (RED) - points RIGHT in world space
+    draw_line_immediate(v(0, 0), v(axis_length, 0), RED)
+    draw_text_immediate(DrawSpace::World, "+X", v(axis_length + 0.2, 0), 0.4, RED, v(-0.5, -0.5))
+
+    // Y-axis (GREEN) - should point UP in world space
+    draw_line_immediate(v(0, 0), v(0, axis_length), GREEN)
+    draw_text_immediate(DrawSpace::World, "+Y", v(0, axis_length + 0.2), 0.4, GREEN, v(-0.5, -0.5))
+
+    // Origin marker (YELLOW)
+    draw_circle_immediate(v(0, 0), 0.2, YELLOW)
+    draw_text_immediate(DrawSpace::World, "(0,0)", v(0.3, 0.3), 0.35, YELLOW, v(-0.5, -0.5))
+
+    // Display mouse world position
+    let mouse = mouse_world()
+    draw_circle_immediate(mouse, 0.15, MAGENTA)
+    draw_text_immediate(DrawSpace::World, "Mouse: ({mouse.x:.2f}, {mouse.y:.2f})",
+        mouse + v(0, 0.5), 0.35, MAGENTA, v(-0.5, -0.5))
+
+    for item in DEBUG_QUEUE {
+        draw_line_immediate(item.a, item.b, item.color)
+    }
+
+    DEBUG_QUEUE.clear()
+}
+
+// The world pass's own depth attachment, gamma-curved, into a sub-rect of the
+// bound target. `screen_canvas` owns the only depth attachment the world pass
+// renders into.
+//
+// A fullscreen-quad pass under a viewport rect IS the corner preview -- the
+// NDC quad maps to whatever the viewport is -- so no sprite-convention twin of
+// the shader exists. Re-binding the target is what restores the full viewport.
+pub fn draw_depth_buffer_preview(x: float, y: float, w: float, h: float) {
+    set_shader(depth_visualize_shader)
+    shader_bind_canvas_depth(depth_visualize_shader, "depth_tex", screen_canvas)
+    stone_set_viewport_rect(transmute(x), transmute(y), transmute(w), transmute(h))
+    // Sample the live rectangle, not the whole backing texture: TexCoord
+    // addresses the active extent in 0..1, the same transform the pass
+    // executor installs around ordinary fullscreen draws.
+    let uv = canvas_active_uv(screen_canvas)
+    set_fullscreen_uv_scale(uv.x, uv.y)
+    draw_fullscreen_quad()
+    set_fullscreen_uv_scale(1.0, 1.0)
+    // Immediately after the draw and before anything else can bind, same
+    // contract as every other pass (`run_pass_body`).
+    audit_texture_slots_for_draw(depth_visualize_shader)
+    release_depth_sampler(depth_visualize_shader, "depth_tex")
+    end_shader()
+    // Restores the viewport as well as the binding; there is no separate
+    // viewport reset by design.
+    unset_canvas()
+}
+
+fn draw_debug_ui() {
+    let debug_text = ""
+
+    // let FPS = round(1 / dt)
+    // if FPS < 30 {
+    //     debug_text = "FPS: {FPS}\nLIGHTS: {vec_len(LIGHTS)}"
+    // }
+
+    for msg in DEBUG_LOG_QUEUE {
+        if debug_text == "" {
+            debug_text = msg
+        } else {
+            debug_text = "{debug_text}\n{msg}"
+        }
+    }
+
+    DEBUG_LOG_QUEUE.clear()
+
+    draw_text_immediate(DrawSpace::Target,
+        debug_text,
+        v(2 * PAD, 3 * (BAR_HEIGHT + PAD)),
+        20,
+        WHITE,
+        v()
+    )
+
+    ()
+}
+
+@update(stage = 0)
+fn toggle_profiler_key() {
+    if !debug_keys_enabled() { return }
+    if tool_key_pressed(KEY_DEBUG_PROFILER) && tool_ctrl_held() {
+        let enabled = !profiler_requested_enabled()
+        profiler_set_enabled(enabled)
+        log_info("STONE", "Profiler enabled: {enabled}")
+    }
+}

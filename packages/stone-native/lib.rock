@@ -1,0 +1,173 @@
+use stone_core::*;
+
+pub @nomangle nobox value NativeNavInt {
+    lo: int,
+    hi: int,
+}
+
+// Each half of the wire is an int32 (stone.h NativeNavIntWire). The halves are
+// computed arithmetically, never by letting the FFI truncate an out-of-range
+// double: that conversion is undefined and LuaJIT builds disagree about it.
+pub fn native_nav_int(v: int) -> NativeNavInt {
+    let hi = v ./ 4294967296
+    let low = v - hi * 4294967296
+    let lo = if low > 2147483647 { low - 4294967296 } else { low }
+    return NativeNavInt { lo, hi }
+}
+
+pub fn native_nav_value(v: NativeNavInt) -> int {
+    let lo = if v.lo < 0 { v.lo + 4294967296 } else { v.lo }
+    return lo + v.hi * 4294967296
+}
+
+pub fn native_nav_buffer(n: int) -> NativeBuffer<NativeNavInt> {
+    return native_buffer_alloc(n)
+}
+
+pub @nomangle inline(lua) fn stone_native_library_path() -> string = """
+    return os.getenv("ROCK_STONE_LIB") or (ffi.os == "OSX" and "libstone.dylib"
+        or ffi.os == "Windows" and "libstone.dll" or "libstone.so")
+"""
+
+pub @nomangle inline(lua) fn stone_native_load() = """
+    if not _G.__stone_native_ffi_defined then
+        ffi.cdef[[
+        const char* stone_visual_bank_decode(const uint8_t* data, size_t len);
+        const char* stone_visual_geometry_decode(const uint8_t* data, size_t len, uint32_t width, uint32_t height, uint32_t cell_width, uint32_t cell_height, uint32_t frames, uint32_t directions);
+        uint8_t stone_actor_query_rect(const int* records, int64_t len, const int* candidates, int64_t candidate_len, int min_x, int min_y, int max_x, int max_y, uint8_t include_uninstalled, int* output, int64_t output_len);
+        double stone_terrain_noise(double x, double y);
+        double stone_terrain_random(double x, double y, double stream, double seed);
+        double stone_terrain_field(double a, double b, double c, double d, double e, double f, double g, double h, double i, double x, double y, double wx, double wy, int noisy);
+        int stone_meadow_profile(double x, double y, uint8_t* output);
+        int stone_meadow_cover(const uint8_t* input, int len, double gx, double gy, double x, double y, double wx, double wy, int woodland, uint8_t* output);
+        double stone_meadow_distance(const uint8_t* input, int len, double x, double y);
+        int stone_meadow_sort(float* blades, int count);
+        int stone_meadow_blades(const uint8_t* input, int len, const uint8_t* params, int params_len, uint8_t* output, int capacity);
+        uint64_t stone_flow_submit(int width, int height, int goal_x, int goal_y, int cap, const uint8_t* walkable, int64_t len);
+        uint64_t stone_terrain_submit(int width, int height, int sub, const uint8_t* solid, int64_t len);
+        int stone_flow_poll(uint64_t handle);
+        int stone_flow_wait(uint64_t handle);
+        int stone_flow_copy(uint64_t handle, float* output, int64_t len);
+        void stone_flow_cancel(uint64_t handle);
+        void stone_flow_cancel_all(void);
+        int64_t stone_relight_diff_submit(int width, int samples, int border, const uint8_t* old, int64_t old_len, const uint8_t* next, int64_t len);
+        int stone_relight_diff_copy(uint64_t handle, uint8_t* pixels, int64_t len, float* region);
+        void stone_relight_diff_cancel(uint64_t handle);
+        int64_t stone_light_table_measure(int size, int cell_size, double epsilon, int count, const float* positions, int* counts);
+        uint8_t stone_light_table_pack(int size, int cell_size, double epsilon, int count, const float* positions, const float* colors, const int* owners, const int* source_rows, const int* source_slots, const int* counts, int* offsets, float* data, int64_t data_len);
+        uint8_t stone_image_data_fill_rect_rgba8(uint64_t handle, int x, int y, int width, int height, int r, int g, int b, int a);
+        typedef NativeNavInt NativeNavIntWire;
+        int64_t stone_nav_create(const NativeNavIntWire* layout, int64_t layout_len, const uint8_t* blocked, const NativeNavIntWire* corners, const NativeNavIntWire* extra, int64_t tiles, const NativeNavIntWire* links, int64_t link_len, int64_t cluster_size);
+        int64_t stone_nav_fork(int64_t handle);
+        void stone_nav_free(int64_t handle);
+        int64_t stone_nav_layout_valid(const NativeNavIntWire* data, int64_t len, int64_t cluster);
+        int64_t stone_nav_edge_cost(int64_t step, int64_t ea, int64_t eb);
+        double stone_nav_metric(int64_t handle, int64_t field);
+        int64_t stone_nav_descend_prepare(int64_t handle, int64_t slot, int64_t generation, int64_t space, int64_t x, int64_t y);
+        int64_t stone_nav_descend_candidate(int64_t handle, int64_t index, int64_t phase, NativeNavIntWire* out);
+        int64_t stone_nav_descend_accept(int64_t handle, int64_t index, int64_t phase);
+        int64_t stone_nav_descend_result(int64_t handle, NativeNavIntWire* out);
+        int64_t stone_nav_route_restore(int64_t handle, int64_t slot, int64_t generation, const NativeNavIntWire* data, int64_t len, int64_t path_pos, int64_t cost, int64_t walked);
+        int64_t stone_nav_set_links(int64_t handle, const NativeNavIntWire* data, int64_t len);
+        int64_t stone_nav_edit(int64_t handle, int64_t op, int64_t a, int64_t b, int64_t c, int64_t d, int64_t e, int64_t f);
+        int64_t stone_nav_get(int64_t handle, int64_t op, int64_t a, int64_t b, int64_t c);
+        int64_t stone_nav_request(int64_t handle, int64_t space, int64_t x, int64_t y, int64_t goal_space, int64_t gx, int64_t gy, int64_t gw, int64_t gh, int64_t teleports, int64_t seed, int64_t due_tick);
+        int64_t stone_nav_plan(int64_t handle, int64_t slot, int64_t generation, int64_t op, int64_t a, int64_t b, int64_t c);
+        int64_t stone_nav_step(int64_t handle, int64_t slot, int64_t generation, int64_t space, int64_t x, int64_t y, int64_t due_tick, NativeNavIntWire* out);
+        int64_t stone_nav_route_copy(int64_t handle, int64_t slot, int64_t generation, NativeNavIntWire* out, int64_t len);
+        ]]
+        _G.__stone_native_ffi_defined = true
+    end
+    -- Keep the library alive across reloads and native handle finalizers.
+    if _G.stone then return end
+    _G.stone = ffi.load(stone_native_library_path())
+"""
+
+pub extern(ffi, "stone") fn stone_flow_submit(width: int, height: int, goal_x: int, goal_y: int, cap: int, walkable: PtrU8, len: int) -> int
+pub extern(ffi, "stone") fn stone_terrain_submit(width: int, height: int, sub: int, solid: PtrU8, len: int) -> int
+pub extern(ffi, "stone") fn stone_flow_poll(handle: int) -> int
+pub extern(ffi, "stone") fn stone_flow_wait(handle: int) -> int
+pub extern(ffi, "stone") fn stone_flow_copy(handle: int, output: Ptr<float>, len: int) -> int
+pub extern(ffi, "stone") fn stone_flow_cancel(handle: int)
+pub extern(ffi, "stone") fn stone_flow_cancel_all()
+
+pub extern(ffi, "stone") fn stone_relight_diff_submit(width: int, samples: int, border: int, old: PtrU8, old_len: int, next: PtrU8, len: int) -> int
+pub extern(ffi, "stone") fn stone_relight_diff_copy(handle: int, pixels: PtrU8, len: int, region: Ptr<float>) -> int
+pub extern(ffi, "stone") fn stone_relight_diff_cancel(handle: int)
+pub extern(ffi, "stone") fn stone_light_table_measure(size: int, cell_size: int, epsilon: float, count: int, positions: Ptr<float>, counts: Ptr<int>) -> int
+pub extern(ffi, "stone") fn stone_light_table_pack(size: int, cell_size: int, epsilon: float, count: int, positions: Ptr<float>, colors: Ptr<float>, owners: Ptr<int>, source_rows: Ptr<int>, source_slots: Ptr<int>, counts: Ptr<int>, offsets: Ptr<int>, data: Ptr<float>, data_len: int) -> bool
+pub extern(ffi, "stone") fn stone_image_data_fill_rect_rgba8(handle: int, x: int, y: int, width: int, height: int, r: int, g: int, b: int, a: int) -> bool
+
+pub extern(ffi, "stone") fn stone_actor_query_rect(records: Ptr<int>, len: int, candidates: Ptr<int>, candidate_len: int, min_x: int, min_y: int, max_x: int, max_y: int, include_uninstalled: bool, output: Ptr<int>, output_len: int) -> bool
+
+pub extern(ffi, "stone") fn stone_nav_create(layout: Ptr<NativeNavInt>, layout_len: int, blocked: PtrU8, corners: Ptr<NativeNavInt>, extra: Ptr<NativeNavInt>, tiles: int, links: Ptr<NativeNavInt>, link_len: int, cluster_size: int) -> int
+pub extern(ffi, "stone") fn stone_nav_fork(handle: int) -> int
+pub extern(ffi, "stone") fn stone_nav_free(handle: int)
+pub extern(ffi, "stone") fn stone_nav_set_links(handle: int, data: Ptr<NativeNavInt>, len: int) -> int
+pub extern(ffi, "stone") fn stone_nav_edit(handle: int, op: int, a: int, b: int, c: int, d: int, e: int, f: int) -> int
+pub extern(ffi, "stone") fn stone_nav_get(handle: int, op: int, a: int, b: int, c: int) -> int
+pub extern(ffi, "stone") fn stone_nav_request(handle: int, space: int, x: int, y: int, goal_space: int, gx: int, gy: int, gw: int, gh: int, teleports: int, seed: int, due_tick: int) -> int
+pub extern(ffi, "stone") fn stone_nav_plan(handle: int, slot: int, generation: int, op: int, a: int, b: int, c: int) -> int
+pub extern(ffi, "stone") fn stone_nav_step(handle: int, slot: int, generation: int, space: int, x: int, y: int, due_tick: int, out: Ptr<NativeNavInt>) -> int
+pub extern(ffi, "stone") fn stone_nav_route_copy(handle: int, slot: int, generation: int, out: Ptr<NativeNavInt>, len: int) -> int
+
+pub struct NativeNavOwner { token: any? = null }
+
+pub inline(lua) fn native_nav_owner(owner: NativeNavOwner, handle: int) = """
+    local function own(id)
+        if id <= 0 then error("native navigation fork failed", 0) end
+        local guard = newproxy(true)
+        local mt = getmetatable(guard)
+        mt.handle = id
+        mt.__gc = function() stone.stone_nav_free(id) end
+        mt.__deepcopy = function() return own(tonumber(stone.stone_nav_fork(id))) end
+        return guard
+    end
+    owner.token = own(handle)
+"""
+
+pub inline(lua) fn native_nav_handle(owner: NativeNavOwner) -> int = """
+    return owner.token and getmetatable(owner.token).handle or 0
+"""
+
+pub extern(ffi, "stone") fn stone_nav_route_restore(handle: int, slot: int, generation: int, data: Ptr<NativeNavInt>, len: int, path_pos: int, cost: int, walked: int) -> int
+
+pub extern(ffi, "stone") fn stone_nav_edge_cost(step: int, ea: int, eb: int) -> int
+pub extern(ffi, "stone") fn stone_nav_metric(handle: int, field: int) -> float
+pub extern(ffi, "stone") fn stone_nav_descend_prepare(handle: int, slot: int, generation: int, space: int, x: int, y: int) -> int
+pub extern(ffi, "stone") fn stone_nav_descend_candidate(handle: int, index: int, phase: int, out: Ptr<NativeNavInt>) -> int
+pub extern(ffi, "stone") fn stone_nav_descend_accept(handle: int, index: int, phase: int) -> int
+pub extern(ffi, "stone") fn stone_nav_descend_result(handle: int, out: Ptr<NativeNavInt>) -> int
+
+pub extern(ffi, "stone") fn stone_nav_layout_valid(data: Ptr<NativeNavInt>, len: int, cluster: int) -> int
+
+pub extern(ffi, "stone") fn stone_meadow_profile(x: float, y: float, output: PtrU8) -> int
+pub extern(ffi, "stone") fn stone_meadow_cover(input: PtrU8, len: int, gx: float, gy: float, x: float, y: float, wx: float, wy: float, woodland: int, output: PtrU8) -> int
+pub extern(ffi, "stone") fn stone_meadow_distance(input: PtrU8, len: int, x: float, y: float) -> float
+pub extern(ffi, "stone") fn stone_meadow_sort(blades: Ptr<float>, count: int) -> int
+pub extern(ffi, "stone") fn stone_meadow_blades(input: PtrU8, len: int, params: PtrU8, params_len: int, output: PtrU8, capacity: int) -> int
+
+pub inline(lua) fn meadow_snapshot_set(buffer: NativeBufferU8, index: int, value: float) = "assert(index >= 0 and index * 8 + 8 <= buffer.len); ffi.cast('double*', buffer.ptr)[index] = value"
+pub inline(lua) fn meadow_snapshot_get(buffer: NativeBufferU8, index: int) -> float = "assert(index >= 0 and index * 8 + 8 <= buffer.len); return tonumber(ffi.cast('double*', buffer.ptr)[index])"
+
+pub extern(ffi, "stone") fn stone_terrain_noise(x: float, y: float) -> float
+pub extern(ffi, "stone") fn stone_terrain_random(x: float, y: float, stream: float, seed: float) -> float
+pub extern(ffi, "stone") fn stone_terrain_field(a: float, b: float, c: float, d: float, e: float, f: float, g: float, h: float, i: float, x: float, y: float, wx: float, wy: float, noisy: int) -> float
+
+// Native validation returns JSON for conversion through the public JSON reader.
+pub inline(lua) fn native_visual_bank_decode(raw: string) -> string = """
+    return ffi.string(stone.stone_visual_bank_decode(raw, #raw))
+"""
+
+pub inline(lua) fn native_visual_geometry_decode(raw: string, width: int, height: int,
+    cell_width: int, cell_height: int, frames: int, directions: int) -> string = """
+    return ffi.string(stone.stone_visual_geometry_decode(raw, #raw, width, height, cell_width, cell_height, frames, directions))
+"""
+
+// A process-local wire namespace; copied state retains its existing value.
+pub inline(lua) fn native_identity_new() -> int = """
+    local id = (_G.__stone_identity or 0) + 1
+    assert(id < 9007199254740992, "identity namespace exhausted")
+    _G.__stone_identity = id
+    return id
+"""

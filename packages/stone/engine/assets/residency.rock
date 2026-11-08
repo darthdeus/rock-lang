@@ -1,0 +1,1007 @@
+// Image prefetch and cached-byte pressure.
+// Holding an image is acquire_image_asset's reference count; every cached
+// image nobody references sits in one LRU trimmed to RESIDENCY_BUDGET.
+
+pub enum ResidencyClass { Required, Prefetch }
+pub enum ResidencyState { Absent, Loading, Resident }
+pub value ResidencyRequest {
+    // Validated logical dimensions supplied by an asset manifest.
+    logical_size: IVec2? = null,
+    path: string,
+    sampling: TextureFilter = TextureFilter::Nearest,
+    exact_texels: bool = false,
+    format: ImageAssetFormat = ImageAssetFormat::Rgba8,
+}
+
+struct ResidencyCached {
+    previous: string?, next: string?, bytes: int, touch: int,
+}
+struct ResidencyCache {
+    entries: Map<string, ResidencyCached>,
+    touches: Map<string, int>,
+    first: string? = null, last: string? = null, bytes: int = 0, touch: int = 0,
+}
+fn residency_cache_new() -> ResidencyCache {
+    return ResidencyCache { entries: map_new(), touches: map_new() }
+}
+global RESIDENCY_CACHE: ResidencyCache = residency_cache_new()
+global RESIDENCY_PATH_IDENTITIES: Map<string, string> = map_new()
+// Cached, unreferenced bytes the LRU may hold: 2 GiB, a fixed Steam Deck
+// floor.
+global RESIDENCY_BUDGET: int = max(0, get_env_int("STONE_RESIDENCY_BUDGET_MB", 2048)) * 1024 * 1024
+// Decoded bytes the native queue may hold past publication (RESIDENCY_BUDGET);
+// Prefetch submissions wait while the queue is fuller than this.
+global RESIDENCY_PREFETCH_INFLIGHT_BUDGET: int = 128 * 1024 * 1024
+
+pub fn residency_set_prefetch_budget(bytes: int) {
+    RESIDENCY_PREFETCH_INFLIGHT_BUDGET = max(0, bytes)
+}
+
+pub fn residency_prefetch_budget_bytes() -> int { return RESIDENCY_PREFETCH_INFLIGHT_BUDGET }
+
+// Prefetches waiting for inflight room, first in first out; the queued map
+// keeps one entry per path key.
+global RESIDENCY_PREFETCH_QUEUE: [ResidencyRequest] = vec_new()
+global RESIDENCY_PREFETCH_QUEUED: Map<string, bool> = map_new()
+struct ResidencyEvictor { name: string, usage: fn() -> int, budget: fn() -> int,
+    release: fn(int) -> int }
+global RESIDENCY_EVICTORS: [ResidencyEvictor] = vec_new()
+global RESIDENCY_FRAME_WAIT_PATHS: [string] = vec_new()
+global RESIDENCY_FRAME_MISS_WAIT_US: int = 0
+global RESIDENCY_PROFILE_MISS_WAIT_US: int = 0
+global RESIDENCY_FRAME_EVICTIONS: int = 0
+global RESIDENCY_PROFILE_EVICTIONS: int = 0
+global RESIDENCY_FRAME_EVICTED_BYTES: int = 0
+global RESIDENCY_PROFILE_EVICTED_BYTES: int = 0
+
+pub fn residency_set_budget(bytes: int) { RESIDENCY_BUDGET = max(0, bytes) }
+pub fn residency_budget_bytes() -> int { return RESIDENCY_BUDGET }
+
+fn residency_cache_remove(identity: string) {
+    let entry = RESIDENCY_CACHE.entries.remove(identity) ?? return
+    if let previous = entry.previous {
+        RESIDENCY_CACHE.entries[previous].next = entry.next
+    } else { RESIDENCY_CACHE.first = entry.next }
+    if let next = entry.next {
+        RESIDENCY_CACHE.entries[next].previous = entry.previous
+    } else { RESIDENCY_CACHE.last = entry.previous }
+    RESIDENCY_CACHE.bytes -= entry.bytes
+}
+
+fn residency_touch(identity: string) {
+    residency_cache_remove(identity)
+    RESIDENCY_CACHE.touch += 1
+    RESIDENCY_CACHE.touches.insert(identity, RESIDENCY_CACHE.touch)
+}
+
+// Monotonic residency touches served. Every load_image_cached hit or fresh
+// load advances it exactly once, so a delta across a draw pass counts that
+// pass's residency lookups.
+pub fn residency_touch_count() -> int {
+    return RESIDENCY_CACHE.touch
+}
+
+// Appends an unreferenced cached image as the LRU's most recently used entry.
+// A deferred load's storage size is registered at submission, so a loading
+// image enters with its final bytes.
+@nomangle fn residency_demote(identity: string) {
+    if (IMAGE_ASSET_REFS.get(identity) ?? 0) > 0 { return }
+    let image = IMAGE_CACHE.get(identity) ?? return
+    residency_touch(identity)
+    let entry = ResidencyCached { previous: RESIDENCY_CACHE.last, next: null,
+        bytes: residency_live_bytes(image), touch: RESIDENCY_CACHE.touch }
+    if let last = RESIDENCY_CACHE.last { RESIDENCY_CACHE.entries[last].next = identity }
+    else { RESIDENCY_CACHE.first = identity }
+    RESIDENCY_CACHE.last = identity
+    RESIDENCY_CACHE.entries.insert(identity, entry)
+    RESIDENCY_CACHE.bytes += entry.bytes
+}
+
+fn residency_identity_cached(resolved: string, sampling: TextureFilter,
+    format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> bool {
+    if IMAGE_CACHE.get(image_asset_key(resolved, format)) != null { return true }
+    return IMAGE_CACHE.get(image_identity(resolved, sampling, format)) != null
+}
+
+fn residency_prefetch_load(req: ResidencyRequest, resolved: string) -> Image {
+    let image = load_image_cached(resolved, req.path, req.sampling, exact_texels: req.exact_texels,
+        class: ResidencyClass::Prefetch, format: req.format, logical_size: req.logical_size)
+    if image.0 != 0 { residency_demote(image_asset_key(resolved, req.format)) }
+    return image
+}
+
+// Starts `req`'s load unless it is cached, and marks an unreferenced image
+// most recently used. A load past the inflight budget waits in the queue and
+// returns Image(0); a queued request still loads after its requester has
+// moved on, and lands in the LRU like any other.
+pub fn residency_prefetch(req: ResidencyRequest) -> Image {
+    let resolved = asset_path(req.path)
+    if residency_identity_cached(resolved, req.sampling, req.format)
+        || image_loads_pending_bytes() < RESIDENCY_PREFETCH_INFLIGHT_BUDGET {
+        return residency_prefetch_load(req, resolved)
+    }
+    let path_key = image_format_path(resolved, req.format)
+    if !RESIDENCY_PREFETCH_QUEUED.contains(path_key) {
+        RESIDENCY_PREFETCH_QUEUED.insert(path_key, true)
+        RESIDENCY_PREFETCH_QUEUE.push(req)
+    }
+    return Image(0)
+}
+
+fn residency_prefetch_waiting(req: ResidencyRequest) -> bool {
+    return !residency_identity_cached(asset_path(req.path), req.sampling, req.format)
+}
+
+// Submits waiting prefetches in arrival order while the native queue has
+// inflight room, skipping any another load cached meanwhile. Called once per
+// frame from the game's prefetch update; the run-prepare manifest phase also
+// drains through it.
+pub fn residency_prefetch_advance() {
+    if RESIDENCY_PREFETCH_QUEUE.len() == 0 { return }
+    let waiting = RESIDENCY_PREFETCH_QUEUE
+    RESIDENCY_PREFETCH_QUEUE = vec_new()
+    let i = 0
+    while i < waiting.len() {
+        let req = waiting[i]
+        if residency_prefetch_waiting(req) {
+            if image_loads_pending_bytes() >= RESIDENCY_PREFETCH_INFLIGHT_BUDGET { break }
+            let _ = residency_prefetch_load(req, asset_path(req.path))
+        }
+        let _ = RESIDENCY_PREFETCH_QUEUED.remove(image_format_path(asset_path(req.path), req.format))
+        i += 1
+    }
+    while i < waiting.len() {
+        RESIDENCY_PREFETCH_QUEUE.push(waiting[i])
+        i += 1
+    }
+}
+
+// Nothing waiting for inflight room and nothing still publishing.
+pub fn residency_prefetch_idle() -> bool {
+    let kept: [ResidencyRequest] = vec_new()
+    for req in RESIDENCY_PREFETCH_QUEUE {
+        if residency_prefetch_waiting(req) { kept.push(req) }
+        else { let _ = RESIDENCY_PREFETCH_QUEUED.remove(image_format_path(asset_path(req.path), req.format)) }
+    }
+    RESIDENCY_PREFETCH_QUEUE = kept
+    return RESIDENCY_PREFETCH_QUEUE.len() == 0 && image_loads_pending_bytes() == 0
+}
+
+// Requires a bound image the way a Required acquire does: promote a pending
+// Deferred load and attribute the wait. A consumer calls this for images a
+// predictive Prefetch bound; load_image_cached calls it for Required hits.
+pub fn residency_require_loaded(image: Image, path: string) {
+    if image_load_ready(image) { return }
+    let _ = image_load_require(image)
+    RESIDENCY_FRAME_WAIT_PATHS.push(path)
+}
+
+pub fn residency_register_evictor(name: string, usage: fn() -> int, budget: fn() -> int,
+    release: fn(int) -> int) {
+    for evictor in RESIDENCY_EVICTORS {
+        if evictor.name == name {
+            evictor.usage = usage; evictor.budget = budget; evictor.release = release
+            return
+        }
+    }
+    RESIDENCY_EVICTORS.push(ResidencyEvictor { name: name, usage: usage, budget: budget, release: release })
+}
+
+pub fn residency_trim() {
+    for evictor in RESIDENCY_EVICTORS {
+        let overage = evictor.usage() - evictor.budget()
+        if overage > 0 { let _ = evictor.release(overage) }
+    }
+    if RESIDENCY_CACHE.bytes <= RESIDENCY_BUDGET { return }
+    let identity = RESIDENCY_CACHE.first
+    while RESIDENCY_CACHE.bytes > RESIDENCY_BUDGET {
+        let key = identity ?? break
+        let entry = RESIDENCY_CACHE.entries[key]
+        identity = entry.next
+        let cached = IMAGE_CACHE.get(key)
+        if cached == null { residency_cache_remove(key); continue }
+        let image = cached.unwrap()
+        residency_cache_remove(key)
+        let _ = RESIDENCY_CACHE.touches.remove(key)
+        image_asset_evict(key, image.0)
+        RESIDENCY_FRAME_EVICTIONS += 1
+        RESIDENCY_PROFILE_EVICTIONS += 1
+        RESIDENCY_FRAME_EVICTED_BYTES += entry.bytes
+        RESIDENCY_PROFILE_EVICTED_BYTES += entry.bytes
+    }
+}
+
+// Required loads keep batching until prepare. Only frames waiting for an admit
+// pay for timing; a quiet flush has no residency allocation or clock reads.
+pub fn residency_flush_required() {
+    if RESIDENCY_FRAME_WAIT_PATHS.len() == 0 { stone_flush_image_uploads(); return }
+    let t0 = stone_get_time()
+    stone_flush_image_uploads()
+    let waited = max(0, ((stone_get_time() - t0) * 1000000.0) as int)
+    RESIDENCY_FRAME_MISS_WAIT_US += waited
+    RESIDENCY_PROFILE_MISS_WAIT_US += waited
+    residency_observe_decode_failures()
+}
+
+// Name newly failed decodes on Required-observed paths through the shared
+// logger, once per identity. Counting is native (the stats read the
+// cumulative counter, so Prefetch failures count too); this pass attaches
+// paths to the failures the frame waited on.
+fn residency_observe_decode_failures() {
+    for path in RESIDENCY_FRAME_WAIT_PATHS {
+        let image = image_asset_cached(path) ?? continue
+        if !image_load_decode_failed(image) { continue }
+        let resolved = asset_path(path)
+        let identity = IMAGE_RESOLVED_IDENTITY.get(resolved)
+            ?? RESIDENCY_PATH_IDENTITIES.get(resolved) ?? resolved
+        if RESIDENCY_DECODE_FAILED_LOGGED.get(identity) ?? false { continue }
+        RESIDENCY_DECODE_FAILED_LOGGED.insert(identity, true)
+        _log_once_impl(0, "RESIDENCY", "decode failed {path}", "residency-decode:{path}")
+    }
+}
+
+
+// The update-time pump can be blocking (budget 0), so it shares attribution
+// with the prepare flush for Required paths admitted during update.
+fn residency_service_uploads() -> int {
+    let _ = stone_service_sound_admissions()
+    if RESIDENCY_FRAME_WAIT_PATHS.len() == 0 { return stone_service_image_uploads() }
+    let t0 = stone_get_time()
+    let published = stone_service_image_uploads()
+    let waited = max(0, ((stone_get_time() - t0) * 1000000.0) as int)
+    RESIDENCY_FRAME_MISS_WAIT_US += waited
+    RESIDENCY_PROFILE_MISS_WAIT_US += waited
+    residency_observe_decode_failures()
+    return published
+}
+
+// A miss is a cache lookup that had to submit a load. Inside a cold-arrival
+// scope or window (a jump the residency set could not anticipate) misses
+// count as cold instead. Frame stats reset per frame; profile stats accumulate over the
+// profiler window.
+pub value ResidencyStats {
+    misses: int,
+    miss_bytes: int,
+    cold_misses: int,
+    cold_miss_bytes: int,
+    miss_wait_us: int,
+    decode_failures: int,
+    evictions: int,
+    evicted_bytes: int,
+}
+
+// One cached identity. `paths` are the resolved paths that share its handle;
+// `bytes` is storage (what GL holds), 0 while the handle is not live.
+pub value ResidencyRow {
+    identity: string,
+    paths: [string],
+    image: Image,
+    state: ResidencyState,
+    refs: int,
+    bytes: int,
+    touch: int,
+    evictor_budget: int? = null,
+}
+
+global RESIDENCY_FRAME_MISSES: int = 0
+global RESIDENCY_FRAME_MISS_BYTES: int = 0
+global RESIDENCY_FRAME_COLD_MISSES: int = 0
+global RESIDENCY_FRAME_COLD_MISS_BYTES: int = 0
+global RESIDENCY_PROFILE_MISSES: int = 0
+global RESIDENCY_PROFILE_MISS_BYTES: int = 0
+global RESIDENCY_PROFILE_COLD_MISSES: int = 0
+global RESIDENCY_PROFILE_COLD_MISS_BYTES: int = 0
+global RESIDENCY_COLD_DEPTH: int = 0
+// Native decode-failure count at the frame and profile boundaries; the stats
+// report the deltas, so every class of failure counts without a Rock-side
+// observation point per publish site.
+global RESIDENCY_FRAME_DECODE_FAILED_BASE: int = 0
+global RESIDENCY_PROFILE_DECODE_FAILED_BASE: int = 0
+// Identities whose decode failure the shared logger already named.
+global RESIDENCY_DECODE_FAILED_LOGGED: Map<string, bool> = map_new()
+
+fn residency_record_miss(image: Image, path: string) {
+    RESIDENCY_FRAME_WAIT_PATHS.push(path)
+    let bytes = residency_live_bytes(image)
+    // A boot misses on every path it loads (hundreds), and the stats count
+    // them, so per-path names stay at debug.
+    _log_once_impl(3, "RESIDENCY", "miss {path} {bytes}", "residency:{path}")
+    if RESIDENCY_COLD_DEPTH > 0 || RESIDENCY_COLD_ARRIVAL_OPEN {
+        RESIDENCY_FRAME_COLD_MISSES = RESIDENCY_FRAME_COLD_MISSES + 1
+        RESIDENCY_FRAME_COLD_MISS_BYTES = RESIDENCY_FRAME_COLD_MISS_BYTES + bytes
+        RESIDENCY_PROFILE_COLD_MISSES = RESIDENCY_PROFILE_COLD_MISSES + 1
+        RESIDENCY_PROFILE_COLD_MISS_BYTES = RESIDENCY_PROFILE_COLD_MISS_BYTES + bytes
+    } else {
+        RESIDENCY_FRAME_MISSES = RESIDENCY_FRAME_MISSES + 1
+        RESIDENCY_FRAME_MISS_BYTES = RESIDENCY_FRAME_MISS_BYTES + bytes
+        RESIDENCY_PROFILE_MISSES = RESIDENCY_PROFILE_MISSES + 1
+        RESIDENCY_PROFILE_MISS_BYTES = RESIDENCY_PROFILE_MISS_BYTES + bytes
+    }
+}
+
+fn residency_frame_begin() {
+    RESIDENCY_FRAME_WAIT_PATHS.clear()
+    RESIDENCY_FRAME_DECODE_FAILED_BASE = stone_image_decode_failed_count()
+    RESIDENCY_FRAME_MISS_WAIT_US = 0
+    RESIDENCY_FRAME_EVICTIONS = 0
+    RESIDENCY_FRAME_EVICTED_BYTES = 0
+    RESIDENCY_FRAME_MISSES = 0
+    RESIDENCY_FRAME_MISS_BYTES = 0
+    RESIDENCY_FRAME_COLD_MISSES = 0
+    RESIDENCY_FRAME_COLD_MISS_BYTES = 0
+    asset_report_frame_tick()
+}
+
+pub fn residency_reset_profile_stats() {
+    RESIDENCY_PROFILE_DECODE_FAILED_BASE = stone_image_decode_failed_count()
+    RESIDENCY_PROFILE_MISS_WAIT_US = 0
+    RESIDENCY_PROFILE_EVICTIONS = 0
+    RESIDENCY_PROFILE_EVICTED_BYTES = 0
+    RESIDENCY_PROFILE_MISSES = 0
+    RESIDENCY_PROFILE_MISS_BYTES = 0
+    RESIDENCY_PROFILE_COLD_MISSES = 0
+    RESIDENCY_PROFILE_COLD_MISS_BYTES = 0
+}
+
+// The profiler's warmup boundary: keep only the current frame's counts.
+pub fn residency_reset_profile_stats_to_frame() {
+    RESIDENCY_PROFILE_DECODE_FAILED_BASE = RESIDENCY_FRAME_DECODE_FAILED_BASE
+    RESIDENCY_PROFILE_MISS_WAIT_US = RESIDENCY_FRAME_MISS_WAIT_US
+    RESIDENCY_PROFILE_EVICTIONS = RESIDENCY_FRAME_EVICTIONS
+    RESIDENCY_PROFILE_EVICTED_BYTES = RESIDENCY_FRAME_EVICTED_BYTES
+    RESIDENCY_PROFILE_MISSES = RESIDENCY_FRAME_MISSES
+    RESIDENCY_PROFILE_MISS_BYTES = RESIDENCY_FRAME_MISS_BYTES
+    RESIDENCY_PROFILE_COLD_MISSES = RESIDENCY_FRAME_COLD_MISSES
+    RESIDENCY_PROFILE_COLD_MISS_BYTES = RESIDENCY_FRAME_COLD_MISS_BYTES
+}
+
+pub fn residency_frame_stats() -> ResidencyStats {
+    return ResidencyStats {
+        misses: RESIDENCY_FRAME_MISSES,
+        miss_bytes: RESIDENCY_FRAME_MISS_BYTES,
+        cold_misses: RESIDENCY_FRAME_COLD_MISSES,
+        cold_miss_bytes: RESIDENCY_FRAME_COLD_MISS_BYTES,
+        miss_wait_us: RESIDENCY_FRAME_MISS_WAIT_US,
+        decode_failures: stone_image_decode_failed_count() - RESIDENCY_FRAME_DECODE_FAILED_BASE,
+        evictions: RESIDENCY_FRAME_EVICTIONS,
+        evicted_bytes: RESIDENCY_FRAME_EVICTED_BYTES,
+    }
+}
+
+pub fn residency_record_sound_decode(path: string, waited_us: int) {
+    if waited_us <= 0 { return }
+    RESIDENCY_FRAME_WAIT_PATHS.push("sound:{path}")
+    RESIDENCY_FRAME_MISS_WAIT_US += waited_us
+    RESIDENCY_PROFILE_MISS_WAIT_US += waited_us
+}
+
+pub fn residency_profile_stats() -> ResidencyStats {
+    return ResidencyStats {
+        misses: RESIDENCY_PROFILE_MISSES,
+        miss_bytes: RESIDENCY_PROFILE_MISS_BYTES,
+        cold_misses: RESIDENCY_PROFILE_COLD_MISSES,
+        cold_miss_bytes: RESIDENCY_PROFILE_COLD_MISS_BYTES,
+        miss_wait_us: RESIDENCY_PROFILE_MISS_WAIT_US,
+        decode_failures: stone_image_decode_failed_count() - RESIDENCY_PROFILE_DECODE_FAILED_BASE,
+        evictions: RESIDENCY_PROFILE_EVICTIONS,
+        evicted_bytes: RESIDENCY_PROFILE_EVICTED_BYTES,
+    }
+}
+
+// An explicit scope for a caller that brackets its own frames (sims, tools).
+pub fn residency_cold_arrival_begin() {
+    RESIDENCY_COLD_DEPTH = RESIDENCY_COLD_DEPTH + 1
+}
+
+pub fn residency_cold_arrival_end() {
+    if RESIDENCY_COLD_DEPTH <= 0 {
+        error("residency_cold_arrival_end without a matching begin")
+    }
+    RESIDENCY_COLD_DEPTH = RESIDENCY_COLD_DEPTH - 1
+}
+
+// A jump the residency set could not anticipate (blink, procgen entry,
+// recovery expiry, seek, editor jump). Its misses count as cold until the
+// first world render that began after the jump has finished: the arrival's
+// images are first required by that frame's prepare and draw.
+global RESIDENCY_COLD_ARRIVAL_OPEN: bool = false
+global RESIDENCY_COLD_ARRIVAL_RENDERING: bool = false
+
+pub fn residency_cold_arrival() {
+    RESIDENCY_COLD_ARRIVAL_OPEN = true
+    RESIDENCY_COLD_ARRIVAL_RENDERING = false
+}
+
+pub fn residency_cold_arrival_pending() -> bool { return RESIDENCY_COLD_ARRIVAL_OPEN }
+
+// frame_core_render_frame brackets every world render with these two.
+pub fn residency_cold_arrival_render_begin() {
+    RESIDENCY_COLD_ARRIVAL_RENDERING = RESIDENCY_COLD_ARRIVAL_OPEN
+}
+
+pub fn residency_cold_arrival_render_end() {
+    if !RESIDENCY_COLD_ARRIVAL_RENDERING { return }
+    RESIDENCY_COLD_ARRIVAL_OPEN = false
+    RESIDENCY_COLD_ARRIVAL_RENDERING = false
+}
+
+fn residency_image_live(image: Image) -> bool {
+    return sampled_texture_is_live(SampledTexture::Image(image))
+}
+
+fn residency_live_bytes(image: Image) -> int {
+    if !residency_image_live(image) { return 0 }
+    return image_storage_bytes(image)
+}
+
+pub fn residency_state(path: string, format: ImageAssetFormat = ImageAssetFormat::Rgba8) -> ResidencyState {
+    let image = image_asset_cached(path, format) ?? return ResidencyState::Absent
+    if !residency_image_live(image) { return ResidencyState::Absent }
+    return if image_load_ready(image) { ResidencyState::Resident } else { ResidencyState::Loading }
+}
+
+// Storage bytes for a cached asset; otherwise validated manifest dimensions
+// or a header probe. Logical dimensions are an upper bound under an image cap.
+// Without declared dimensions, a missing or unreadable header costs 0.
+pub fn residency_image_bytes(path: string, format: ImageAssetFormat = ImageAssetFormat::Rgba8,
+    logical_size: IVec2? = null) -> int {
+    if let image = image_asset_cached(path, format) { return residency_live_bytes(image) }
+    let size = logical_size ?? stone_probe_image_size(asset_path(path)) ?? return 0
+    let bpp = match format {
+        ImageAssetFormat::Rgba8 => 4,
+        ImageAssetFormat::DepthRg8 => 2,
+        ImageAssetFormat::R8 => 1,
+        ImageAssetFormat::MaterialRg8 => 2,
+    }
+    return size.x * size.y * bpp
+}
+
+// The cache's contents, one row per identity, sorted by identity. A
+// diagnostic: it walks the whole cache and queries every handle.
+pub fn residency_dump() -> [ResidencyRow] {
+    let rows: [ResidencyRow] = vec_new()
+    for (identity, image) in IMAGE_CACHE {
+        // A path that is not an Eat object is its own identity.
+        let paths: [string] = vec_new()
+        if let shared = IMAGE_IDENTITY_PATHS.get(identity) {
+            for path in shared { paths.push(image_path_from_format_key(path)) }
+        } else {
+            paths.push(image_path_from_format_key(identity))
+        }
+        let live = residency_image_live(image)
+        rows.push(ResidencyRow {
+            identity: identity,
+            paths: paths,
+            image: image,
+            state: if !live { ResidencyState::Absent } else if image_load_ready(image) {
+                ResidencyState::Resident } else { ResidencyState::Loading },
+            refs: IMAGE_ASSET_REFS.get(identity) ?? 0,
+            bytes: if live { residency_live_bytes(image) } else { 0 },
+            touch: RESIDENCY_CACHE.touches.get(identity) ?? 0,
+        })
+    }
+    for evictor in RESIDENCY_EVICTORS {
+        rows.push(ResidencyRow { identity: "evictor:{evictor.name}", paths: [], image: Image(0),
+            state: ResidencyState::Absent, refs: 0, bytes: evictor.usage(),
+            touch: 0, evictor_budget: evictor.budget() })
+    }
+    sort(rows, row => row.identity)
+    return rows
+}
+
+// Handle count and storage bytes the image cache holds, split by who keeps
+// each entry alive. `shared_paths` counts logical paths beyond the first per
+// identity, and `shared_bytes` the uploads they would each cost if keyed by
+// path.
+pub value ResidencyCensus {
+    handles: int,
+    bytes: int,
+    referenced_bytes: int,
+    cached_bytes: int,
+    shared_paths: int,
+    shared_bytes: int,
+    loading_bytes: int,
+    live_image_bytes: int,
+    live_mip_bytes: int,
+    live_canvas_bytes: int,
+    live_total_bytes: int,
+}
+
+// The census the profiler reports, taken once when its measured window opens
+// (the perf summary is written after the window and its textures are gone).
+// Live image levels and managed canvas attachments, cached assets or not;
+// image base, mip, canvas and combined totals are retained separately.
+global RESIDENCY_PROFILE_CENSUS: ResidencyCensus = ResidencyCensus { handles: 0, bytes: 0,
+    referenced_bytes: 0, cached_bytes: 0, shared_paths: 0, shared_bytes: 0,
+    loading_bytes: 0, live_image_bytes: 0, live_mip_bytes: 0, live_canvas_bytes: 0, live_total_bytes: 0 }
+global RESIDENCY_PROFILE_LIVE_TEXTURE_BYTES: int = 0
+
+pub fn residency_profile_census_capture() {
+    RESIDENCY_PROFILE_CENSUS = residency_census()
+    RESIDENCY_PROFILE_LIVE_TEXTURE_BYTES = stone_get_live_texture_bytes()
+}
+
+pub fn residency_profile_census() -> ResidencyCensus {
+    return RESIDENCY_PROFILE_CENSUS
+}
+
+pub fn residency_profile_live_texture_bytes() -> int {
+    return RESIDENCY_PROFILE_LIVE_TEXTURE_BYTES
+}
+
+pub fn residency_census() -> ResidencyCensus {
+    let handles = 0
+    let bytes = 0
+    let referenced_bytes = 0
+    let cached_bytes = 0
+    let loading_bytes = 0
+    let shared_paths = 0
+    let shared_bytes = 0
+    // A census needs scalar totals, not the sorted paths in the diagnostic
+    // dump. Read the same cache records without materializing it.
+    for (identity, image) in IMAGE_CACHE {
+        if !residency_image_live(image) { continue }
+        let image_bytes = residency_live_bytes(image)
+        if !image_load_ready(image) { loading_bytes += image_bytes }
+        handles += 1
+        bytes += image_bytes
+        let paths = if let shared = IMAGE_IDENTITY_PATHS.get(identity) { shared.len() } else { 1 }
+        if paths > 1 {
+            shared_paths += paths - 1
+            shared_bytes += (paths - 1) * image_bytes
+        }
+        if (IMAGE_ASSET_REFS.get(identity) ?? 0) > 0 {
+            referenced_bytes += image_bytes
+        } else {
+            cached_bytes += image_bytes
+        }
+    }
+    return ResidencyCensus { handles: handles, bytes: bytes,
+        referenced_bytes: referenced_bytes, cached_bytes: cached_bytes,
+        shared_paths: shared_paths, shared_bytes: shared_bytes, loading_bytes: loading_bytes,
+        live_image_bytes: stone_get_live_image_bytes(),
+        live_mip_bytes: stone_get_live_mip_bytes(),
+        live_canvas_bytes: stone_get_live_canvas_bytes(),
+        live_total_bytes: stone_get_live_texture_bytes() }
+}
+
+// ============================================================================
+// Asset accounting reports: one JSON document of every
+// live asset with its memory. The image rows ARE the residency dump, so the
+// image-kind total equals residency_census by construction; every other kind
+// is enumerated from its own registry with the smallest FFI that counts it.
+// A byte basis is `counted` when read off the owning registry or derived from
+// exact inputs by a documented formula, `estimated` when the driver decides
+// the packing (canvas depth), and `uncounted` when no registry holds it
+// (Rock-side mesh vertex copies).
+// ============================================================================
+
+pub struct AssetReportRow {
+    kind: string,
+    identity: string,
+    paths: [string],
+    width: int,
+    height: int,
+    format: string,
+    gpu_bytes: int,
+    gpu_basis: string,
+    cpu_bytes: int,
+    cpu_basis: string,
+    refs: int,
+    state: string,
+    detail: string,
+}
+
+pub struct AssetKindTotal {
+    kind: string,
+    rows: int,
+    gpu_bytes: int,
+    cpu_bytes: int,
+}
+
+pub value CanvasStorageReport {
+    width: int,
+    height: int,
+    format: int,
+}
+
+// Dispatched by arg count: this overload (1 arg) coexists with the extern
+// above (3 args), the stone_probe_image_size shape.
+pub fn stone_canvas_report(handle: int) -> CanvasStorageReport? {
+    let format = stone_canvas_report(handle, FFI_INT_OUT_1.ptr, FFI_INT_OUT_2.ptr)
+    if format < 0 { return null }
+    return CanvasStorageReport {
+        width: FFI_INT_OUT_1.ptr.read(),
+        height: FFI_INT_OUT_2.ptr.read(),
+        format: format,
+    }
+}
+
+const ASSET_REPORT_KINDS: [string] = ["source_texture", "generated_texture",
+    "canvas", "font_atlas", "sound", "mesh"]
+
+fn asset_report_new_row(kind: string, identity: string) -> AssetReportRow {
+    return AssetReportRow {
+        kind: kind, identity: identity, paths: vec_new(),
+        width: 0, height: 0, format: "", gpu_bytes: 0, gpu_basis: "counted",
+        cpu_bytes: 0, cpu_basis: "counted",
+        refs: 0, state: "live", detail: "",
+    }
+}
+
+fn asset_report_source_rows(rows: [AssetReportRow]) {
+    for row in residency_dump() {
+        if row.image.0 == 0 || row.state == ResidencyState::Absent { continue }
+        let stored = image_storage_dims(row.image)
+        let entry = asset_report_new_row("source_texture", row.identity)
+        entry.paths = row.paths
+        entry.width = stored.x
+        entry.height = stored.y
+        entry.format = image_format_tag(image_storage_format(row.image))
+        entry.gpu_bytes = row.bytes
+        entry.refs = row.refs
+        entry.state = if row.state == ResidencyState::Loading { "loading" } else { "resident" }
+        entry.detail = "{image_sampling(row.image)}"
+        rows.push(entry)
+    }
+}
+
+fn asset_report_generated_rows(rows: [AssetReportRow]) {
+    for (_, entry) in GENERATED_RESOURCES {
+        if entry.kind == "image" {
+            let image = Image(entry.handle)
+            if !sampled_texture_is_live(SampledTexture::Image(image)) { continue }
+            let stored = image_storage_dims(image)
+            let row = asset_report_new_row("generated_texture",
+                "generated:image:{entry.handle}")
+            row.width = stored.x
+            row.height = stored.y
+            row.format = image_format_tag(image_storage_format(image))
+            row.gpu_bytes = residency_live_bytes(image)
+            row.detail = "{image_sampling(image)}"
+            rows.push(row)
+        } else if entry.kind == "image_data" {
+            let (w, h) = image_data_size(entry.handle)
+            if w <= 0 || h <= 0 { continue }
+            let row = asset_report_new_row("generated_texture",
+                "generated:image_data:{entry.handle}")
+            row.width = w
+            row.height = h
+            row.format = "rgba8"
+            row.cpu_bytes = w * h * 4
+            row.detail = "image_data"
+            rows.push(row)
+        }
+    }
+}
+
+fn asset_report_canvas_format_name(code: int) -> string {
+    if code == STONE_CANVAS_RGBA16F { return "rgba16f" }
+    if code == STONE_CANVAS_RGBA32F { return "rgba32f" }
+    if code == STONE_CANVAS_R32I { return "r32i" }
+    return "rgba8"
+}
+
+pub fn asset_report_canvas_bytes(handle: int) -> int {
+    let storage = stone_canvas_report(handle) ?? return 0
+    let bpp = 4
+    if storage.format == STONE_CANVAS_RGBA16F { bpp = 8 }
+    if storage.format == STONE_CANVAS_RGBA32F { bpp = 16 }
+    let bytes = storage.width * storage.height * bpp
+    let canvas = Canvas { handle: CanvasId(handle), width: 0.0, height: 0.0 }
+    if canvas_has_depth(canvas) { return bytes + storage.width * storage.height * 4 }
+    return bytes
+}
+
+fn asset_report_canvas_rows(rows: [AssetReportRow]) {
+    for index in 0..stone_get_live_canvas_count() {
+        let handle = stone_get_live_canvas_handle(index)
+        if handle == 0 { continue }
+        let storage = stone_canvas_report(handle) ?? continue
+        let row = asset_report_new_row("canvas", "canvas:{handle}")
+        row.width = storage.width
+        row.height = storage.height
+        row.format = asset_report_canvas_format_name(storage.format)
+        row.gpu_bytes = asset_report_canvas_bytes(handle)
+        let probe = Canvas { handle: CanvasId(handle), width: 0.0, height: 0.0 }
+        if canvas_has_depth(probe) {
+            // DEPTH_COMPONENT24, whose in-memory packing is driver-defined.
+            row.gpu_basis = "estimated"
+            row.detail = "depth"
+        }
+        rows.push(row)
+    }
+}
+
+fn asset_report_font_rows(rows: [AssetReportRow]) {
+    for (_entity, data) in FONT_REGISTRY {
+        let backend = data.backend_id
+        if backend <= 0 { continue }
+        let cpu = stone_font_data_len(backend)
+        if cpu < 0 { continue }
+        let row = asset_report_new_row("font_atlas", "font:{backend}#metrics")
+        row.paths.push(data.path)
+        row.format = "none"
+        row.cpu_bytes = cpu
+        row.detail = "metrics-only"
+        rows.push(row)
+        // Instance zero aliases the compatibility atlas; count that texture only here.
+        // image_at registers aliases lazily, before the census reads native totals.
+        let instances = stone_font_atlas_instance_count(backend)
+        for i in 0..instances {
+            let image = stone_get_font_atlas_instance_image_at(backend, i)
+            if image == 0 { continue }
+            let stored = image_storage_dims(Image(image))
+            let row = asset_report_new_row("font_atlas", "font:{backend}#instance{i}")
+            row.paths.push(data.path)
+            row.width = stored.x
+            row.height = stored.y
+            row.format = "r8"
+            row.gpu_bytes = stored.x * stored.y
+            row.detail = "{stone_get_font_atlas_instance_pixel_size(backend, i)}px"
+            rows.push(row)
+        }
+    }
+}
+
+fn asset_report_sound_rows(rows: [AssetReportRow]) {
+    for (_entity, data) in SOUND_REGISTRY {
+        let backend = data.backend_id
+        // A failed load holds no PCM; a registry entry whose native handle
+        // is gone holds none either. Neither is a live asset.
+        if backend == 0 { continue }
+        if data.path == "" {
+            let held = stone_music_byte_len(backend)
+            if held < 0 { continue }
+            // `music`, not `sound`: native sound and music ids mint from
+            // separate per-class spaces, so one number names two assets.
+            let row = asset_report_new_row("sound", "music:{backend}")
+            row.format = "encoded"
+            row.cpu_bytes = held
+            row.detail = "music"
+            rows.push(row)
+        } else if stone_sound_stream_bytes(backend) >= 0 {
+            // A stream source holds its encoded file, never PCM.
+            let row = asset_report_new_row("sound", "sound:{backend}")
+            row.paths.push(data.path)
+            row.format = "encoded-stream"
+            row.cpu_bytes = stone_sound_stream_bytes(backend)
+            row.detail = "stream"
+            rows.push(row)
+        } else {
+            let samples = stone_sound_sample_count(backend)
+            if samples < 0 { continue }
+            let row = asset_report_new_row("sound", "sound:{backend}")
+            row.paths.push(data.path)
+            row.format = "f32-pcm"
+            row.cpu_bytes = samples * 4
+            row.detail = "samples={samples}"
+            rows.push(row)
+        }
+    }
+}
+
+fn asset_report_mesh_rows(rows: [AssetReportRow]) {
+    for index in 0..stone_get_live_mesh_count() {
+        let handle = stone_get_live_mesh_handle(index)
+        if handle == 0 { continue }
+        let row = asset_report_new_row("mesh", "mesh:{handle}")
+        row.format = "vertex-buffer"
+        row.gpu_bytes = stone_mesh_bytes(handle)
+        row.cpu_bytes = 0
+        row.cpu_basis = "uncounted"
+        rows.push(row)
+    }
+}
+
+// Every live asset at this moment, sorted by kind and identity so two dumps
+// diff row by row. A diagnostic: it walks every registry and queries every
+// handle, like residency_dump.
+pub fn asset_report_rows() -> [AssetReportRow] {
+    let rows: [AssetReportRow] = vec_new()
+    asset_report_source_rows(rows)
+    asset_report_generated_rows(rows)
+    asset_report_canvas_rows(rows)
+    asset_report_font_rows(rows)
+    asset_report_sound_rows(rows)
+    asset_report_mesh_rows(rows)
+    sort(rows, row => "{row.kind}:{row.identity}")
+    return rows
+}
+
+fn asset_report_sum(rows: [AssetReportRow]) -> [AssetKindTotal] {
+    let totals: [AssetKindTotal] = vec_new()
+    for kind in ASSET_REPORT_KINDS {
+        totals.push(AssetKindTotal { kind: kind, rows: 0, gpu_bytes: 0, cpu_bytes: 0 })
+    }
+    for row in rows {
+        for total in totals {
+            if total.kind != row.kind { continue }
+            total.rows = total.rows + 1
+            total.gpu_bytes = total.gpu_bytes + row.gpu_bytes
+            total.cpu_bytes = total.cpu_bytes + row.cpu_bytes
+        }
+    }
+    return totals
+}
+
+pub fn asset_report_totals() -> [AssetKindTotal] {
+    return asset_report_sum(asset_report_rows())
+}
+
+fn asset_report_row_json(row: AssetReportRow) -> JsonValue {
+    let paths: [JsonValue] = vec_new()
+    for path in row.paths { paths.push(json_str(path)) }
+    let m: Map<string, JsonValue> = map_new()
+    m["kind"] = json_str(row.kind)
+    m["identity"] = json_str(row.identity)
+    m["paths"] = json_array(paths)
+    m["width"] = json_int(row.width)
+    m["height"] = json_int(row.height)
+    m["format"] = json_str(row.format)
+    m["gpu_bytes"] = json_int(row.gpu_bytes)
+    m["gpu_basis"] = json_str(row.gpu_basis)
+    m["cpu_bytes"] = json_int(row.cpu_bytes)
+    m["cpu_basis"] = json_str(row.cpu_basis)
+    m["refs"] = json_int(row.refs)
+    m["state"] = json_str(row.state)
+    m["detail"] = json_str(row.detail)
+    return json_object(m)
+}
+
+fn asset_report_total_json(total: AssetKindTotal) -> JsonValue {
+    let m: Map<string, JsonValue> = map_new()
+    m["kind"] = json_str(total.kind)
+    m["rows"] = json_int(total.rows)
+    m["gpu_bytes"] = json_int(total.gpu_bytes)
+    m["cpu_bytes"] = json_int(total.cpu_bytes)
+    return json_object(m)
+}
+
+pub fn asset_report_json(frame: int, event: string) -> string {
+    return asset_report_snapshot(frame, event).0
+}
+
+fn asset_report_snapshot(frame: int, event: string) -> (string, [JsonValue]) {
+    let rows = asset_report_rows()
+    let assets: [JsonValue] = vec_new()
+    for row in rows { assets.push(asset_report_row_json(row)) }
+    let totals: [JsonValue] = vec_new()
+    for total in asset_report_sum(rows) { totals.push(asset_report_total_json(total)) }
+    let census = residency_census()
+    let census_json: Map<string, JsonValue> = map_new()
+    census_json["handles"] = json_int(census.handles)
+    census_json["bytes"] = json_int(census.bytes)
+    census_json["referenced_bytes"] = json_int(census.referenced_bytes)
+    census_json["cached_bytes"] = json_int(census.cached_bytes)
+    census_json["shared_paths"] = json_int(census.shared_paths)
+    census_json["shared_bytes"] = json_int(census.shared_bytes)
+    census_json["live_image_bytes"] = json_int(census.live_image_bytes)
+    census_json["live_mip_bytes"] = json_int(census.live_mip_bytes)
+    census_json["live_canvas_bytes"] = json_int(census.live_canvas_bytes)
+    census_json["live_total_bytes"] = json_int(census.live_total_bytes)
+    let crosscheck: Map<string, JsonValue> = map_new()
+    crosscheck["live_image_bytes"] = json_int(stone_get_live_image_bytes())
+    crosscheck["live_mip_bytes"] = json_int(stone_get_live_mip_bytes())
+    crosscheck["live_canvas_bytes"] = json_int(stone_get_live_canvas_bytes())
+    crosscheck["live_texture_bytes"] = json_int(stone_get_live_texture_bytes())
+    crosscheck["census"] = json_object(census_json)
+    let doc: Map<string, JsonValue> = map_new()
+    doc["schema"] = json_str("asset-report/1")
+    doc["frame"] = json_int(frame)
+    doc["event"] = json_str(event)
+    doc["totals"] = json_array(totals)
+    doc["crosscheck"] = json_object(crosscheck)
+    doc["assets"] = json_array(assets)
+    return (json_encode_pretty(json_object(doc), ["assets"]), totals)
+}
+
+// Reporting is opt-in. Environment configuration is read once; disarmed
+// frames only check flags and allocate nothing.
+
+global ASSET_REPORT_DIR: string = ""
+global ASSET_REPORT_INTERVAL: int = 600
+global ASSET_REPORT_ARMED: bool = false
+global ASSET_REPORT_ENV_CHECKED: bool = false
+global ASSET_REPORT_LAST_FRAME: int = -600
+
+value AssetReportIndexEntry {
+    frame: int,
+    event: string,
+    file: string,
+    totals: [JsonValue],
+}
+
+global ASSET_REPORT_INDEX: [AssetReportIndexEntry] = vec_new()
+
+pub fn asset_report_armed() -> bool {
+    return ASSET_REPORT_ARMED
+}
+
+pub fn asset_report_configure(dir: string, interval_frames: int) {
+    ASSET_REPORT_DIR = dir
+    ASSET_REPORT_INTERVAL = if interval_frames > 0 { interval_frames } else { 600 }
+    ASSET_REPORT_ARMED = dir != ""
+    ASSET_REPORT_ENV_CHECKED = true
+    ASSET_REPORT_LAST_FRAME = 0 - ASSET_REPORT_INTERVAL
+    ASSET_REPORT_INDEX.clear()
+}
+
+pub fn asset_report_disarm() {
+    ASSET_REPORT_ARMED = false
+    ASSET_REPORT_DIR = ""
+    ASSET_REPORT_INDEX.clear()
+}
+
+fn asset_report_parse_int(text: string) -> int? {
+    if text.len() == 0 { return null }
+    let value = 0
+    for c in text.chars() {
+        if c < 48 || c > 57 { return null }
+        value = value * 10 + (c - 48)
+    }
+    return value
+}
+
+fn asset_report_env_boot() {
+    if ASSET_REPORT_ENV_CHECKED { return }
+    ASSET_REPORT_ENV_CHECKED = true
+    let dir = os_getenv("STONE_ASSET_REPORT_DIR") ?? return
+    if dir == "" { return }
+    let interval = 600
+    if let text = os_getenv("STONE_ASSET_REPORT_INTERVAL") {
+        interval = asset_report_parse_int(text) ?? 600
+    }
+    asset_report_configure(dir, interval)
+}
+
+fn asset_report_index_json() -> string {
+    let dumps: [JsonValue] = vec_new()
+    for entry in ASSET_REPORT_INDEX {
+        let m: Map<string, JsonValue> = map_new()
+        m["frame"] = json_int(entry.frame)
+        m["event"] = json_str(entry.event)
+        m["file"] = json_str(entry.file)
+        m["totals"] = json_array(entry.totals)
+        dumps.push(json_object(m))
+    }
+    let doc: Map<string, JsonValue> = map_new()
+    doc["schema"] = json_str("asset-report-index/1")
+    doc["dumps"] = json_array(dumps)
+    return json_encode_pretty(json_object(doc), ["dumps"])
+}
+
+fn asset_report_write(frame: int, event: string) -> bool {
+    let file = "{frame}-{event}.json"
+    let report = asset_report_snapshot(frame, event)
+    if !io_write_file("{ASSET_REPORT_DIR}/{file}", report.0) {
+        return false
+    }
+    let kept: [AssetReportIndexEntry] = vec_new()
+    for entry in ASSET_REPORT_INDEX {
+        if entry.file != file { kept.push(entry) }
+    }
+    kept.push(AssetReportIndexEntry {
+        frame: frame, event: event, file: file, totals: report.1,
+    })
+    ASSET_REPORT_INDEX = kept
+    return io_write_file("{ASSET_REPORT_DIR}/index.json", asset_report_index_json())
+}
+
+pub fn asset_report_event(name: string) -> bool {
+    asset_report_env_boot()
+    if !ASSET_REPORT_ARMED { return false }
+    return asset_report_write(RENDER_FRAME, name)
+}
+
+pub fn asset_report_frame_tick() {
+    if ASSET_REPORT_ARMED {
+        let frame = RENDER_FRAME
+        if frame - ASSET_REPORT_LAST_FRAME >= ASSET_REPORT_INTERVAL {
+            ASSET_REPORT_LAST_FRAME = frame
+            let _ = asset_report_write(frame, "periodic")
+        }
+        return
+    }
+    if !ASSET_REPORT_ENV_CHECKED { asset_report_env_boot() }
+}

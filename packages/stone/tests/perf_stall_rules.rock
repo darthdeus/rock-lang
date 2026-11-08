@@ -1,0 +1,22 @@
+@test
+fn perf_stalls_fixed_thresholds_and_excess() {
+    // Hand-counted: strict boundaries, a 60 Hz band, and one large stall.
+    let samples = native_buffer_float(8)
+    for (i, ms) in enumerate([10.0, 16.0, 17.0, 18.0, 33.0, 34.0, 50.0, 100.0]) {
+        nb_set(samples, i, ms)
+    }
+    let summary = perf_stall_summary(samples, 8)
+    assert_eq(summary.over_17, 5)
+    assert_eq(summary.over_33, 3)
+    assert_eq(summary.over_50, 1)
+    assert_eq(summary.over_34, 2)
+    assert_eq(summary.excess_17, 150.0)
+    assert_eq(summary.excess_34, 82.0)
+    assert_eq(summary.median_ms, 25.5)
+    assert_eq(summary.worst_ms, 100.0)
+    assert_eq(perf_stall_band(summary.median_ms), "30")
+    assert_eq(perf_stall_band(24.999), "60")
+    assert_eq(perf_stall_band(25.0), "30")
+    assert_eq(perf_stall_band(34.0), "30")
+    assert_eq(perf_stall_band(34.001), "below")
+}

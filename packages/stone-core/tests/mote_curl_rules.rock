@@ -1,0 +1,47 @@
+@test
+fn mote_hash_range_determinism_and_distribution() {
+    let bins = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    let sum = 0.0
+    let squares = 0.0
+    // Signed lattice cells cover the actual value-noise hash inputs.
+    for x in -8..8 {
+        for y in -8..8 {
+            for z in -8..8 {
+                let h = mote_hash3(x as float, y as float, z as float)
+                assert(h >= 0.0 && h < 1.0, "hash is in [0, 1)")
+                assert(h == mote_hash3(x as float, y as float, z as float),
+                    "hash is deterministic")
+                bins[floor(h * 16.0) as int] += 1
+                sum += h
+                squares += h * h
+            }
+        }
+    }
+    // Broad uniform-distribution bounds, independent of any frozen field.
+    for count in bins {
+        assert(count >= 128 && count <= 384, "grid fills every hash bin")
+    }
+    let mean = sum / 4096.0
+    let variance = squares / 4096.0 - mean * mean
+    assert(mean > 0.45 && mean < 0.55, "grid hash mean is near one half")
+    assert(variance > 0.07 && variance < 0.10, "grid hash spans the unit interval")
+}
+
+@test
+fn mote_curl_is_deterministic_and_divergence_free() {
+    let points = [v(0.0, 0.0, 0.0), v(0.25, 0.5, 0.75),
+        v(-1.1, -2.3, -0.7), v(-83.1, -9.7, -55.5),
+        v(0.999999, 1.000001, -0.000001), v(125.125, -73.375, 19.625)]
+    for p in points {
+        let a = mote_curl(p)
+        let b = mote_curl(p)
+        assert(a.x == b.x && a.y == b.y && a.z == b.z, "curl is deterministic")
+        // Match the curl's central-difference step so mixed partials cancel,
+        // including across lattice boundaries; only rounding remains.
+        let dx = mote_curl(p + v(0.1, 0.0, 0.0)) - mote_curl(p - v(0.1, 0.0, 0.0))
+        let dy = mote_curl(p + v(0.0, 0.1, 0.0)) - mote_curl(p - v(0.0, 0.1, 0.0))
+        let dz = mote_curl(p + v(0.0, 0.0, 0.1)) - mote_curl(p - v(0.0, 0.0, 0.1))
+        let divergence = (dx.x + dy.y + dz.z) / 0.2
+        assert(abs(divergence) < 1e-8, "curl has zero discrete divergence")
+    }
+}

@@ -1,0 +1,79 @@
+use stone::*
+
+// GpuMesh through the real FFI chain (cdef, stone_mesh_* symbols, attribute
+// layout): an instanced draw renders one quad per instance and is counted as
+// instanced, a plain draw is not, and the path raises no GL error.
+
+value MeshProbeVertex { position: Vec2 }
+value MeshProbeInstance { offset: Vec2 }
+value MeshProbeVary { position: Vec4 }
+
+@shader(vertex)
+fn mesh_probe_vert(@attr a: MeshProbeVertex, @instance instance: MeshProbeInstance) -> MeshProbeVary {
+    return MeshProbeVary { position: v(a.position * 0.05 + instance.offset, 0.0, 1.0) }
+}
+
+@shader(fragment)
+fn mesh_probe_frag(_vary: MeshProbeVary) -> Vec4 { return v(1.0, 0.0, 0.0, 1.0) }
+
+fn gpu_mesh_draw_white() -> Image {
+    let data = new_owned_image_data(1, 1)
+    image_data_set_pixel(data, 0, 0, 1.0, 1.0, 1.0, 1.0)
+    let image = new_owned_image_from_data(data, TextureFilter::Nearest)
+    release_owned_image_data(data)
+    return image
+}
+
+@test
+fn gpu_mesh_instanced_draw_renders_each_instance_and_counts_once() {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    let saved_canvas = CURRENT_CANVAS_HANDLE
+    let white = gpu_mesh_draw_white()
+    let size = 64
+    let target = new_canvas(float(size), float(size), "rgba8")
+    // Unit quad fan, pos-only: stride 2, one size-2 attribute at location 0.
+    let verts = native_buffer_float(8)
+    verts[0] = -1.0; verts[1] = -1.0
+    verts[2] = 1.0;  verts[3] = -1.0
+    verts[4] = 1.0;  verts[5] = 1.0
+    verts[6] = -1.0; verts[7] = 1.0
+    let mesh = gpu_mesh_new(verts.ptr, 4, 2, [2], "fan")
+    let plain = gpu_mesh_new(verts.ptr, 4, 2, [2], "fan")
+    defer {
+        gpu_mesh_free(mesh)
+        gpu_mesh_free(plain)
+        destroy_canvas(target)
+        release_owned_image(white)
+        set_canvas_handle(saved_canvas)
+    }
+    // Three instances at NDC x offsets (location 1, divisor 1).
+    let inst = native_buffer_float(6)
+    inst[0] = -0.5; inst[1] = 0.0
+    inst[2] = 0.0;  inst[3] = 0.0
+    inst[4] = 0.5;  inst[5] = 0.0
+    gpu_mesh_set_instances(mesh, inst.ptr, 3, 2, [2])
+
+    let sid = rock_shader(mesh_probe_vert, mesh_probe_frag)
+    let gl_errors = stone_gl_error_count()
+    // FRAME_STATS resets at frame start, so read the counter right after each draw.
+    stone_reset_frame_stats()
+    with_canvas(target, () => {
+        clear_screen(0.0, 0.0, 0.0, 1.0)
+        with_shader(sid, () => { gpu_mesh_draw(mesh, white) })
+    })
+    assert_eq(stone_get_graphics_stats().instanced_draws, 1, "the instanced draw is counted")
+    let mid = size ./ 2
+    for x in [size ./ 4, mid, size * 3 ./ 4] {
+        assert(stone_read_canvas_pixel_channel(target.handle.0, x, mid, 0) > 0.5,
+            "an instance quad renders at x={x}")
+    }
+    assert(stone_read_canvas_pixel_channel(target.handle.0, size * 3 ./ 8, mid, 0) < 0.5,
+        "the gap between instances stays clear")
+
+    with_canvas(target, () => {
+        with_shader(sid, () => { gpu_mesh_draw(plain, white) })
+    })
+    assert_eq(stone_get_graphics_stats().instanced_draws, 1, "a plain draw is not counted as instanced")
+    assert_eq(stone_gl_error_count(), gl_errors, "the gpu_mesh path raises no GL error")
+}

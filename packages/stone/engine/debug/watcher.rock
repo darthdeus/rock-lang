@@ -1,0 +1,1047 @@
+pub struct FileWatcher {
+    enabled: bool,
+    shaders: Map<string, WatcherShader>,
+    current_shader_name: string?,
+}
+
+// Registry entry for a compiled rock_shader program, keyed by its rock_shader
+// key. A reload re-registers under the same key (`publish_shader_registration`).
+pub value WatcherShader {
+    shader: ShaderId,
+}
+
+pub global WATCHER: FileWatcher = FileWatcher {
+    enabled: true,
+    shaders: map_new(),
+    current_shader_name: null
+}
+
+// -- rock_shader in-game shader compilation --
+// The compiler emits one __rock_shader_register(key, glsl) per distinct
+// rock_shader pair at chunk top level, so a reload re-runs it with the new
+// source. WATCHER.shaders is the name->ShaderId registry pipeline() resolves
+// through.
+
+// What makes a re-registration a NO-OP, per key. The GLSL source alone is NOT
+// enough: a compiler layout change can move a member's offset without touching
+// the emitted declaration, so keying on the source would take the early return
+// and leave the buffer bound and fingerprinted for the OLD layout. Both halves
+// are compared, rather than mixed into one number, so neither can mask the
+// other.
+value ShaderRegistrationKey {
+    src_hash: int,
+    block_fingerprint: int,
+    fullscreen_vertex: bool,
+    semantic_fingerprint: int,
+}
+global REGISTERED_SHADER_HASHES: Map<string, ShaderRegistrationKey> = map_new()
+// Cold-start deferral: a top-level registration runs BEFORE the window/GL exists
+// (before @init). Those get queued here and compiled by the @init drain
+// (load_pending_shader_sources). A reload runs with GL already up -> compiled in
+// place immediately, no queue.
+value PendingShader {
+    src: string,
+    texture_slots: [string],
+    blocks: [UniformBlockDecl],
+    fullscreen_vertex: bool,
+    semantic: SemanticShaderInterface,
+}
+global PENDING_SHADER_SRCS: Map<string, PendingShader> = map_new()
+
+
+// Decoded compiler metadata used by semantic submission admission. This is a
+// runtime copy of the compiler wire, not a second shader planner: names, order,
+// kinds and capacities arrive from `ShaderInterfacePlan::semantic_wire`, while
+// backend maps below say which physical generation made that metadata usable.
+pub value SemanticShaderMember {
+    name: string,
+    kind: int,
+    capacity: int,
+}
+
+pub value SemanticShaderBlock {
+    role: string,
+    name: string,
+    fingerprint: int,
+    members: [SemanticShaderMember],
+}
+
+pub value SemanticShaderOutput {
+    name: string,
+    location: int,
+    kind: int,
+}
+
+pub value SemanticShaderVertexAttr {
+    name: string,
+    kind: int,
+}
+
+pub value SemanticShaderVertexInput {
+    name: string,
+    rate: string,
+    attrs: [SemanticShaderVertexAttr],
+}
+
+pub value SemanticShaderInterface {
+    fingerprint: int,
+    fullscreen: bool,
+    vertex_inputs: [SemanticShaderVertexInput],
+    texture_slots: [string],
+    texture_kinds: [int],
+    blocks: [SemanticShaderBlock],
+    array_blocks: [SemanticShaderBlock],
+    outputs: [SemanticShaderOutput],
+}
+
+pub value SemanticShaderGeneration {
+    interface: SemanticShaderInterface,
+    generation: int,
+}
+
+global NEXT_SEMANTIC_SHADER_GENERATION: int = 0
+pub global GL_SHADER_SEMANTICS: Map<string, SemanticShaderGeneration> = map_new()
+global GL_SHADER_ARTIFACT_GENERATIONS: Map<string, int> = map_new()
+global GL_SHADER_ARTIFACT_FINGERPRINTS: Map<string, int> = map_new()
+
+fn semantic_line(lines: [string], at: int, tag: string, min_fields: int) -> [string]? {
+    if at < 0 || at >= lines.len { return null }
+    let fields = lines[at].split(" ")
+    if fields.len < min_fields || fields[0] != tag { return null }
+    return fields
+}
+
+fn semantic_int(fields: [string], index: int) -> int? {
+    if index < 0 || index >= fields.len { return null }
+    return fields[index].parse_int()
+}
+
+fn semantic_skip_lines(lines: [string], at: int, count: int, tag: string, min_fields: int) -> int? {
+    let cursor = at
+    for _ in 0..count {
+        if semantic_line(lines, cursor, tag, min_fields) == null { return null }
+        cursor += 1
+    }
+    return cursor
+}
+
+fn parse_semantic_shader_wire(wire: string) -> SemanticShaderInterface? {
+    let lines = wire.split("\n")
+    if lines.len < 3 || lines[0] != "SHADER_INTERFACE_V1" { return null }
+    let fingerprint_line = semantic_line(lines, 1, "fingerprint", 2) ?? return null
+    let fingerprint = semantic_int(fingerprint_line, 1) ?? return null
+    let fullscreen_line = semantic_line(lines, 2, "fullscreen", 2) ?? return null
+    let fullscreen_value = semantic_int(fullscreen_line, 1) ?? return null
+    if fullscreen_value != 0 && fullscreen_value != 1 { return null }
+    let cursor = 3
+
+    let stages_line = semantic_line(lines, cursor, "stages", 2) ?? return null
+    let stage_count = semantic_int(stages_line, 1) ?? return null
+    if stage_count < 0 { return null }
+    cursor += 1
+    let has_compute_stage = false
+    for _ in 0..stage_count {
+        let stage = semantic_line(lines, cursor, "stage", 2) ?? return null
+        if stage[1] == "compute" { has_compute_stage = true }
+        cursor += 1
+    }
+
+    let inputs_line = semantic_line(lines, cursor, "vertex_inputs", 2) ?? return null
+    let input_count = semantic_int(inputs_line, 1) ?? return null
+    if input_count < 0 { return null }
+    cursor += 1
+    let vertex_inputs: [SemanticShaderVertexInput] = vec_new()
+    for _ in 0..input_count {
+        let input = semantic_line(lines, cursor, "vertex_input", 4) ?? return null
+        let attr_count = semantic_int(input, 3) ?? return null
+        if attr_count < 0 { return null }
+        cursor += 1
+        let attrs: [SemanticShaderVertexAttr] = vec_new()
+        for _ in 0..attr_count {
+            let attr = semantic_line(lines, cursor, "attr", 3) ?? return null
+            let kind = semantic_int(attr, 2) ?? return null
+            attrs.push(SemanticShaderVertexAttr { name: attr[1], kind: kind })
+            cursor += 1
+        }
+        vertex_inputs.push(SemanticShaderVertexInput {
+            name: input[1],
+            rate: input[2],
+            attrs: attrs,
+        })
+    }
+
+    let varyings_line = semantic_line(lines, cursor, "varyings", 2) ?? return null
+    let varying_count = semantic_int(varyings_line, 1) ?? return null
+    if varying_count < 0 { return null }
+    cursor += 1
+    cursor = semantic_skip_lines(lines, cursor, varying_count, "varying", 4) ?? return null
+
+    let group_line = semantic_line(lines, cursor, "groups", 2) ?? return null
+    let group_count = semantic_int(group_line, 1) ?? return null
+    if group_count < 0 { return null }
+    cursor += 1
+    let blocks: [SemanticShaderBlock] = vec_new()
+    for _ in 0..group_count {
+        let group = semantic_line(lines, cursor, "group", 5) ?? return null
+        let fingerprint = semantic_int(group, 3) ?? return null
+        let member_count = semantic_int(group, 4) ?? return null
+        if member_count < 0 { return null }
+        cursor += 1
+        let members: [SemanticShaderMember] = vec_new()
+        for _ in 0..member_count {
+            let member = semantic_line(lines, cursor, "member", 3) ?? return null
+            let kind = semantic_int(member, 2) ?? return null
+            members.push(SemanticShaderMember { name: member[1], kind: kind, capacity: 0 })
+            cursor += 1
+        }
+        blocks.push(SemanticShaderBlock { role: group[1], name: group[2], fingerprint: fingerprint, members: members })
+    }
+
+    let array_blocks: [SemanticShaderBlock] = vec_new()
+    let array_line = semantic_line(lines, cursor, "arrays", 2) ?? return null
+    let array_count = semantic_int(array_line, 1) ?? return null
+    if array_count < 0 { return null }
+    cursor += 1
+    for _ in 0..array_count {
+        let array = semantic_line(lines, cursor, "array", 4) ?? return null
+        let member_count = semantic_int(array, 3) ?? return null
+        if member_count < 0 { return null }
+        cursor += 1
+        let members: [SemanticShaderMember] = vec_new()
+        for _ in 0..member_count {
+            let member = semantic_line(lines, cursor, "array_member", 4) ?? return null
+            let kind = semantic_int(member, 2) ?? return null
+            let capacity = semantic_int(member, 3) ?? return null
+            if capacity <= 0 { return null }
+            members.push(SemanticShaderMember { name: member[1], kind: kind, capacity: capacity })
+            cursor += 1
+        }
+        array_blocks.push(SemanticShaderBlock { role: array[1], name: array[2], fingerprint: 0, members: members })
+    }
+
+    let compute_line = semantic_line(lines, cursor, "compute", 2)
+    if compute_line != null {
+        let compute_line = compute_line.unwrap()
+        if compute_line[1] != "some" || !has_compute_stage { return null }
+        cursor += 1
+        let workgroup = semantic_line(lines, cursor, "compute_workgroup", 4) ?? return null
+        let wx = semantic_int(workgroup, 1) ?? return null
+        let wy = semantic_int(workgroup, 2) ?? return null
+        let wz = semantic_int(workgroup, 3) ?? return null
+        if wx <= 0 || wy <= 0 || wz <= 0 { return null }
+        cursor += 1
+        let dispatch = semantic_line(lines, cursor, "compute_dispatch", 3) ?? return null
+        if dispatch[1] == "runtime" {
+            let dimensions = semantic_int(dispatch, 2) ?? return null
+            if dimensions < 1 || dimensions > 3 { return null }
+        } else if dispatch[1] == "fixed" {
+            if dispatch.len != 5 { return null }
+            if (semantic_int(dispatch, 2) ?? return null) <= 0
+                || (semantic_int(dispatch, 3) ?? return null) <= 0
+                || (semantic_int(dispatch, 4) ?? return null) <= 0 { return null }
+        } else { return null }
+        cursor += 1
+        let builtin_line = semantic_line(lines, cursor, "compute_builtins", 2) ?? return null
+        let builtin_count = semantic_int(builtin_line, 1) ?? return null
+        if builtin_count < 0 { return null }
+        cursor += 1
+        for _ in 0..builtin_count {
+            let builtin = semantic_line(lines, cursor, "compute_builtin", 2) ?? return null
+            if builtin[1] != "global_invocation_id"
+                && builtin[1] != "local_invocation_id"
+                && builtin[1] != "workgroup_id"
+                && builtin[1] != "local_invocation_index"
+                && builtin[1] != "num_workgroups" { return null }
+            cursor += 1
+        }
+        let resources_line = semantic_line(lines, cursor, "compute_resources", 2) ?? return null
+        let resource_count = semantic_int(resources_line, 1) ?? return null
+        if resource_count < 0 { return null }
+        cursor += 1
+        for _ in 0..resource_count {
+            let resource = semantic_line(lines, cursor, "compute_resource", 6) ?? return null
+            let shape = semantic_int(resource, 4) ?? return null
+            let kind = semantic_int(resource, 5) ?? return null
+            if resource[2] != "storage"
+                || (resource[3] != "read" && resource[3] != "read_write")
+                || shape != 1
+                || (kind < 0 || kind > 3)
+                || (kind == 3 && resource[3] != "read_write") { return null }
+            cursor += 1
+        }
+        let workgroup_line = semantic_line(lines, cursor, "compute_workgroup_arrays", 2) ?? return null
+        let workgroup_count = semantic_int(workgroup_line, 1) ?? return null
+        if workgroup_count < 0 { return null }
+        cursor += 1
+        for _ in 0..workgroup_count {
+            let memory = semantic_line(lines, cursor, "compute_workgroup_array", 4) ?? return null
+            let kind = semantic_int(memory, 2) ?? return null
+            let size = semantic_int(memory, 3) ?? return null
+            if kind < 0 || kind > 4 || size <= 0 { return null }
+            cursor += 1
+        }
+    }
+
+    let texture_line = semantic_line(lines, cursor, "textures", 3) ?? return null
+    let texture_count = semantic_int(texture_line, 2) ?? return null
+    if texture_count < 0 || texture_line[1] == "" || (texture_count > 0 && texture_line[1] == "none") { return null }
+    cursor += 1
+    let texture_slots: [string] = vec_new()
+    let texture_kinds: [int] = vec_new()
+    for _ in 0..texture_count {
+        let texture = semantic_line(lines, cursor, "texture", 3) ?? return null
+        let kind = semantic_int(texture, 2) ?? return null
+        texture_slots.push(texture[1])
+        texture_kinds.push(kind)
+        cursor += 1
+    }
+    let texture_stages = semantic_line(lines, cursor, "texture_stages", 2) ?? return null
+    let texture_stage_count = semantic_int(texture_stages, 1) ?? return null
+    if texture_stage_count < 0 { return null }
+    cursor += 1
+    cursor = semantic_skip_lines(lines, cursor, texture_stage_count, "texture_stage", 2) ?? return null
+
+    let bare_line = semantic_line(lines, cursor, "bare_samplers", 2) ?? return null
+    let bare_count = semantic_int(bare_line, 1) ?? return null
+    if bare_count < 0 { return null }
+    cursor += 1
+    cursor = semantic_skip_lines(lines, cursor, bare_count, "bare_sampler", 4) ?? return null
+
+    let output = semantic_line(lines, cursor, "output", 2) ?? return null
+    let outputs: [SemanticShaderOutput] = vec_new()
+    if output[1] == "single" {
+        let kind = semantic_int(output, 2) ?? return null
+        outputs.push(SemanticShaderOutput { name: "FragColor", location: 0, kind: kind })
+    } else if output[1] == "mrt" {
+        let output_count = semantic_int(output, 2) ?? return null
+        if output_count < 0 { return null }
+        cursor += 1
+        for location in 0..output_count {
+            let member = semantic_line(lines, cursor, "output_member", 3) ?? return null
+            let kind = semantic_int(member, 2) ?? return null
+            outputs.push(SemanticShaderOutput { name: member[1], location: location, kind: kind })
+            cursor += 1
+        }
+        output = semantic_line(lines, cursor, "end", 1) ?? return null
+        return if output[0] == "end" {
+            SemanticShaderInterface { fingerprint: fingerprint, fullscreen: fullscreen_value != 0,
+                                      vertex_inputs: vertex_inputs,
+                                      texture_slots: texture_slots, texture_kinds: texture_kinds, blocks: blocks,
+                                      array_blocks: array_blocks, outputs: outputs }
+        } else { null }
+    } else if output[1] != "none" {
+        return null
+    }
+    cursor += 1
+    let end = semantic_line(lines, cursor, "end", 1) ?? return null
+    if end[0] != "end" { return null }
+    SemanticShaderInterface { fingerprint: fingerprint, fullscreen: fullscreen_value != 0,
+                              vertex_inputs: vertex_inputs,
+                              texture_slots: texture_slots, texture_kinds: texture_kinds, blocks: blocks,
+                              array_blocks: array_blocks, outputs: outputs }
+}
+
+fn next_semantic_shader_generation() -> int {
+    NEXT_SEMANTIC_SHADER_GENERATION += 1
+    return NEXT_SEMANTIC_SHADER_GENERATION
+}
+
+fn publish_gl_shader_semantic(key: string, interface: SemanticShaderInterface) {
+    let generation = next_semantic_shader_generation()
+    GL_SHADER_SEMANTICS.insert(key, SemanticShaderGeneration { interface: interface, generation: generation })
+    GL_SHADER_ARTIFACT_GENERATIONS.insert(key, generation)
+    GL_SHADER_ARTIFACT_FINGERPRINTS.insert(key, interface.fingerprint)
+}
+
+pub fn selected_shader_interface(shader_name: string) -> SemanticShaderInterface? {
+    let semantic = GL_SHADER_SEMANTICS.get(shader_name)
+    if WATCHER.shaders.get(shader_name) == null { return null }
+    let artifact_generation = GL_SHADER_ARTIFACT_GENERATIONS.get(shader_name) ?? return null
+    let artifact_fingerprint = GL_SHADER_ARTIFACT_FINGERPRINTS.get(shader_name) ?? return null
+    if semantic == null { return null }
+    let entry = semantic.unwrap()
+    if entry.generation != artifact_generation || entry.interface.fingerprint != artifact_fingerprint { return null }
+    return entry.interface
+}
+
+// The compiler's std140 layout for ONE of this shader's uniform groups,
+// straight from `UniformBlockPlan` or `UniformArrayBlockPlan`. A1 has at most
+// one; an A2 pipeline has one per stage, plus the engine block, plus an array
+// block per stage that declares `@size(N)` params.
+//
+// Both kinds arrive as this one type because a block is a block to the driver:
+// bind it, verify it against the plan, allocate its scratch, upload it whole.
+// What separates them is per MEMBER -- `capacities[i] > 0` is what makes member
+// `i` an array, and it is the same number that bounds a payload write.
+value UniformBlockDecl {
+    name: string,
+    // The GL binding index, sent explicitly by the compiler rather than inferred
+    // from position: slot 0 is RESERVED for the `@engine` block, so a program
+    // without one leaves it empty instead of sliding its own group into it.
+    binding: int,
+    size: int,
+    fingerprint: int,
+    members: [string],
+    offsets: [int],
+    // Per member, parallel to `members`. `kinds` is the compiler's wire-kind
+    // code; `capacities` and `strides` are 0 for a scalar member.
+    kinds: [int],
+    capacities: [int],
+    strides: [int],
+}
+
+// The compiler sends the blocks as parallel FLAT lists -- one entry per block,
+// members concatenated with a per-block count -- so neither hand-written driver
+// has to nest. This is the one place that shape is understood.
+fn __unflatten_block_decls(names: [string], bindings: [int], sizes: [int], fingerprints: [int], counts: [int],
+                           member_names: [string], member_offsets: [int], member_kinds: [int],
+                           member_capacities: [int], member_strides: [int]) -> [UniformBlockDecl] {
+    let out: [UniformBlockDecl] = vec_new()
+    let at = 0
+    for (i, name) in enumerate(names) {
+        let n = counts[i]
+        let ms: [string] = vec_new()
+        let os: [int] = vec_new()
+        let ks: [int] = vec_new()
+        let cs: [int] = vec_new()
+        let ss: [int] = vec_new()
+        let k = 0
+        while k < n {
+            ms.push(member_names[at + k])
+            os.push(member_offsets[at + k])
+            ks.push(member_kinds[at + k])
+            cs.push(member_capacities[at + k])
+            ss.push(member_strides[at + k])
+            k += 1
+        }
+        at += n
+        out.push(UniformBlockDecl { name: name, binding: bindings[i], size: sizes[i],
+                                    fingerprint: fingerprints[i], members: ms, offsets: os,
+                                    kinds: ks, capacities: cs, strides: ss })
+    }
+    return out
+}
+
+// A single number standing for ALL of this program's block layouts, for the
+// registration idempotence key. Order and binding both matter, so this is a
+// fold rather than a sum -- a block that only MOVED slot must still re-register.
+fn __blocks_fingerprint(blocks: [UniformBlockDecl]) -> int {
+    let h = 0
+    for b in blocks {
+        h = (h * 31 + b.fingerprint + b.binding) % 2147483647
+    }
+    return h
+}
+
+value ShaderTextureSlots {
+    names: [string],
+    by_name: Map<string, int>,
+}
+
+// Per shader key: the `@textures` sampler names and their compiler-assigned
+// slots. Empty/absent for a shader with no group, whose samplers are still
+// bound by name and a caller-chosen unit.
+global SHADER_TEXTURE_SLOTS: Map<string, ShaderTextureSlots> = map_new()
+
+// The compiler resolves whether an artifact owns its vertex stage. Fullscreen
+// geometry can only realize the compiler-owned stage; explicit stages may
+// observe vertex identity and need a future geometry variant.
+pub global SHADER_COMPILER_FULLSCREEN_VERTEX: Map<string, bool> = map_new()
+
+inline(lua) fn __shader_src_hash(s: string) -> int = """
+    local h = 5381
+    for i = 1, #s do
+        h = bit.band(h * 33 + string.byte(s, i), 0x7FFFFFFF)
+    end
+    return h
+"""
+
+// Crash-safe GL readiness. A top-level registration runs during the chunk
+// dofile, before the stone FFI namespace is even ffi.load'd (cold start), so
+// stone_is_initialized() -- which emits a bare `stone.stone_is_initialized()`
+// -- would index a nil global. rawget the namespace first; only then is the FFI
+// call safe. True only once the window/GL exist (a reload always sees this true).
+//
+// The pcall covers a second not-ready shape: an embedded runner (fire on iOS)
+// sets `_G.stone = ffi.C` up front, so `s` is truthy at top level even though
+// the stone ffi.cdef declarations run later in the chunk -- a bare call then
+// raises "missing declaration for symbol". Either failure means not-ready, so
+// registration defers to PENDING_SHADER_SRCS and @init drains it post-GL.
+inline(lua) fn __stone_gl_ready() -> bool = """
+    local s = rawget(_G, "stone")
+    if not s then return false end
+    local ok, ready = pcall(function() return s.stone_is_initialized() end)
+    -- The cdef return is `uint8_t`, not `bool` (see `ExternRet::Bool`), so the
+    -- byte is compared here. This is the one raw reader that CANNOT route
+    -- through the emitted `stone_is_initialized` wrapper instead: the whole
+    -- point of this fn is that it runs before that wrapper's global exists.
+    return ok and ready ~= 0
+"""
+
+pub @nomangle fn __rock_shader_register(key: string, src: string, texture_slots: [string],
+                                    block_names: [string], block_bindings: [int], block_sizes: [int],
+                                    block_fingerprints: [int], block_member_counts: [int],
+                                    block_member_names: [string], block_member_offsets: [int],
+                                    block_member_kinds: [int], block_member_capacities: [int],
+                                    block_member_strides: [int], fullscreen_vertex: bool,
+                                    semantic_wire: string) {
+    let parsed_semantic = parse_semantic_shader_wire(semantic_wire)
+    if parsed_semantic == null {
+        log_error("SHADER", "rock_shader: compiler semantic wire is invalid for {key}")
+        return
+    }
+    let semantic = parsed_semantic.unwrap()
+    if semantic.fullscreen != fullscreen_vertex {
+        log_error("SHADER", "rock_shader: compiler semantic geometry disagrees for {key}")
+        return
+    }
+    let blocks = __unflatten_block_decls(block_names, block_bindings, block_sizes, block_fingerprints,
+                                         block_member_counts, block_member_names, block_member_offsets,
+                                         block_member_kinds, block_member_capacities, block_member_strides)
+    let h = ShaderRegistrationKey { src_hash: __shader_src_hash(src), block_fingerprint: __blocks_fingerprint(blocks), fullscreen_vertex: fullscreen_vertex, semantic_fingerprint: semantic.fingerprint }
+    // Texture slots are published with the rest of the registration, not here:
+    // a program whose blocks are rejected must leave NO trace, and slots written
+    // ahead of validation outlived the program they described.
+    if let prev = REGISTERED_SHADER_HASHES.get(key) {
+        let p = prev.unwrap()
+        // unchanged source AND layout -> no-op
+        if p.src_hash == h.src_hash && p.block_fingerprint == h.block_fingerprint && p.fullscreen_vertex == h.fullscreen_vertex && p.semantic_fingerprint == h.semantic_fingerprint { return }
+    }
+    if !__stone_gl_ready() {
+        // pre-GL cold start; @init drains
+        PENDING_SHADER_SRCS.insert(key, PendingShader { src: src, texture_slots: texture_slots, blocks: blocks, fullscreen_vertex: fullscreen_vertex, semantic: semantic })
+        return
+    }
+    rock_shader_compile_now(key, src, h, texture_slots, blocks, fullscreen_vertex, semantic)
+}
+
+@nomangle fn __rock_native_shader_publish(key: string, src: string, sid: ShaderId,
+                                          texture_slots: [string], block_names: [string],
+                                          block_bindings: [int], block_sizes: [int],
+                                          block_fingerprints: [int], block_member_counts: [int],
+                                          block_member_names: [string], block_member_offsets: [int],
+                                          block_member_kinds: [int], block_member_capacities: [int],
+                                          block_member_strides: [int], fullscreen_vertex: bool,
+                                          semantic_wire: string) -> bool {
+    let parsed_semantic = parse_semantic_shader_wire(semantic_wire)
+    if parsed_semantic == null {
+        log_error("SHADER", "native artifact semantic wire is invalid for {key}")
+        return false
+    }
+    let semantic = parsed_semantic.unwrap()
+    if semantic.fullscreen != fullscreen_vertex {
+        log_error("SHADER", "native artifact geometry disagrees with its semantic wire for {key}")
+        return false
+    }
+    let blocks = __unflatten_block_decls(block_names, block_bindings, block_sizes, block_fingerprints,
+                                         block_member_counts, block_member_names, block_member_offsets,
+                                         block_member_kinds, block_member_capacities, block_member_strides)
+    let h = ShaderRegistrationKey { src_hash: __shader_src_hash(src), block_fingerprint: __blocks_fingerprint(blocks), fullscreen_vertex: fullscreen_vertex, semantic_fingerprint: semantic.fingerprint }
+    if let prev = REGISTERED_SHADER_HASHES.get(key) {
+        let p = prev.unwrap()
+        if p.src_hash == h.src_hash && p.block_fingerprint == h.block_fingerprint && p.fullscreen_vertex == h.fullscreen_vertex && p.semantic_fingerprint == h.semantic_fingerprint
+            && WATCHER.shaders.get(key) != null { return true }
+    }
+    // `stone_register_native_shaders` has already compiled, bound, and
+    // driver-validated the native program's blocks before this hook runs.
+    // Publication only mirrors their compiler metadata into Rock's packer
+    // registry; binding here would create a second buffer for the same block.
+    publish_shader_registration(key, sid, h, texture_slots, fullscreen_vertex, semantic,
+                                native_uniform_blocks(blocks))
+    return true
+}
+
+// Drained at @init (post-GL).
+fn load_pending_shader_sources() {
+    let keys = PENDING_SHADER_SRCS.keys()
+    sort(keys, x => x)
+    for key in keys {
+        let p = PENDING_SHADER_SRCS.get(key) ?? continue
+        let h = ShaderRegistrationKey { src_hash: __shader_src_hash(p.src), block_fingerprint: __blocks_fingerprint(p.blocks), fullscreen_vertex: p.fullscreen_vertex, semantic_fingerprint: p.semantic.fingerprint }
+        rock_shader_compile_now(key, p.src, h, p.texture_slots, p.blocks, p.fullscreen_vertex, p.semantic)
+    }
+    PENDING_SHADER_SRCS.clear()
+}
+
+fn rock_shader_compile_now(key: string, src: string, h: ShaderRegistrationKey, texture_slots: [string], blocks: [UniformBlockDecl], fullscreen_vertex: bool, semantic: SemanticShaderInterface) {
+    // Inspection artifact: the generated GLSL on disk, next to preprocessed
+    // shaders. Not under the sim harness: every sim process would rewrite the
+    // same ~60 repo-root files at boot (measured 70-95ms of a ~1.1s boot, and
+    // eight processes writing the same paths at once), and no sim reads them -- a
+    // person inspecting a shader runs the game or `rock frame`.
+    if !sim_mode_active() {
+        let safe = key.gsub("[^%w_]", "_")
+        if !io_write_file("debug_shaders/{safe}.gl.glsl", src) {
+            log_error("SHADER", "rock_shader: failed to write debug dump for {key}")
+        }
+    }
+    let (shader, err) = new_shader_safe(src)
+    if shader == null {
+        // Loud + keep the previous program; hash unset -> retried on next reload.
+        log_error("SHADER", "rock_shader: GL compile failed for {key}: {err}")
+        return
+    }
+    let sid = shader.unwrap()
+
+    // VALIDATE BEFORE PUBLISHING. A program that links is not yet fit to go
+    // live: its engine slot may hold a foreign block, a block may fail to bind,
+    // or the driver may disagree with the compiler's layout. Publishing first
+    // made every one of those unrecoverable -- the invalid program was current,
+    // its hash was recorded so the next reload skipped recompiling it, and its
+    // blocks had already been dropped, so the draw-time unfilled gate had
+    // nothing left to notice.
+    let live = build_uniform_blocks(key, sid, blocks)
+    if live == null {
+        // Destroy the candidate and keep whatever was live before. The hash
+        // stays unset, so an edit retries rather than being skipped as
+        // unchanged -- the same contract the compile failure above has.
+        stone_destroy_shader(transmute(sid.0))
+        log_error("SHADER", "rock_shader: `{key}` not registered -- its uniform blocks were rejected (see above); the previous program stays live")
+        return
+    }
+
+    publish_shader_registration(key, sid, h, texture_slots, fullscreen_vertex, semantic, live.unwrap())
+}
+
+fn publish_shader_registration(key: string, sid: ShaderId, h: ShaderRegistrationKey,
+                               texture_slots: [string], fullscreen_vertex: bool,
+                               semantic: SemanticShaderInterface, live: [ShaderUniformBlock]) {
+    let existing = WATCHER.shaders.get(key)
+    if existing != null {
+        // Remap under the same key: pipelines resolve the ShaderId through
+        // WATCHER.shaders at draw time, so replacing the entry is what they see.
+        let superseded = existing.unwrap().shader
+        WATCHER.shaders.insert(key, WatcherShader { shader: sid })
+        // The key is the only thing that named the old program, so remapping it
+        // is what makes the program unreachable. Destroy AFTER the remap, so no
+        // window exists where the key names a destroyed program. The ledger
+        // cannot catch a miss here: a boot-owned orphan stays live, so it is
+        // neither an `extras` nor a `missing` and the boundary diff is clean.
+        if superseded.0 != sid.0 {
+            stone_destroy_shader(transmute(superseded.0))
+        }
+    } else {
+        WATCHER.shaders.insert(key, WatcherShader { shader: sid })
+    }
+    gpu_label_shader(transmute(sid.0), key)
+    REGISTERED_SHADER_HASHES.insert(key, h)
+    let slots_by_name: Map<string, int> = map_new()
+    for (slot, name) in enumerate(texture_slots) {
+        slots_by_name.insert(name, slot)
+    }
+    SHADER_TEXTURE_SLOTS.insert(key, ShaderTextureSlots {
+        names: texture_slots,
+        by_name: slots_by_name,
+    })
+    SHADER_COMPILER_FULLSCREEN_VERTEX.insert(key, fullscreen_vertex)
+    bind_texture_slots(sid, texture_slots)
+    publish_uniform_blocks(key, live)
+    publish_gl_shader_semantic(key, semantic)
+}
+
+pub fn shader_uses_compiler_fullscreen_vertex(shader_name: string) -> bool {
+    return SHADER_COMPILER_FULLSCREEN_VERTEX.get(shader_name) ?? false
+}
+
+// Point each `@textures` sampler at its unit, once. GLES 3.0 has no
+// `layout(binding=)` (GL 4.2 / GLES 3.1), so the name is needed exactly here
+// and never again -- afterwards the CPU binds a texture to a unit and the
+// sampler already knows which one to read. Re-run after every recompile: a
+// fresh program has fresh uniform state.
+fn bind_texture_slots(sid: ShaderId, names: [string]) {
+    for (slot, name) in enumerate(names) {
+        stone_shader_set_texture(sid, name, slot)
+    }
+}
+
+// Bind `image` to the unit the COMPILER gave `sampler` in this shader's
+// `@textures` group. The caller names which texture it means; it never picks
+// the number, which is what made two bind sites able to collide on one unit.
+//
+// The bind IS the mark: a slot bound for this draw is a slot the audit must
+// see, and a separate mark call is a second place to forget. This required
+// form diagnoses a missing group or sampler; shared engine inputs use the
+// explicitly optional sibling.
+pub fn shader_bind_texture(shader_name: string, sampler: string, source: SampledTexture,
+    sampling: TextureFilter = TextureFilter::Nearest) {
+    let slot = shader_texture_slot(shader_name, sampler)
+    if slot < 0 { return }
+    bind_sampled_texture_slot(shader_name, slot, source, sampling)
+}
+
+fn shader_bind_texture_if_present(shader_name: string, sampler: string, source: SampledTexture,
+    sampling: TextureFilter = TextureFilter::Nearest) {
+    let slot = shader_texture_slot_if_present(shader_name, sampler)
+    if slot < 0 { return }
+    bind_sampled_texture_slot(shader_name, slot, source, sampling)
+}
+
+fn bind_sampled_texture_slot(shader_name: string, slot: int, source: SampledTexture,
+    sampling: TextureFilter = TextureFilter::Nearest) {
+    if bind_sampled_texture_to_unit(source, slot) {
+        mark_texture_slot_filled(shader_name, slot)
+    }
+    stone_bind_sampler(slot, texture_filter_to_int(sampling), sampled_texture_sampler_key(source))
+}
+
+// PER-DRAW texture-filled state: slot N of the program about to draw was bound
+// during THIS draw's setup. Same failure class as the unfilled uniform block --
+// a slot nobody binds reads whatever the last draw left on that unit, which is
+// a plausible image rather than an obvious one.
+//
+// Per Pass draw, not per frame. Frame-sticky state lets an earlier pass that
+// bound slot 1 hide a later pass that forgot it, since the unit still holds a
+// live texture. The audit removes the program's marks after every Pass draw.
+global TEXTURE_SLOT_FILLED: Map<string, int> = map_new()
+global UNFILLED_TEXTURE_SLOT_COUNT: int = 0
+
+// Shared textures remain filled for one program activation; set_shader clears this tier.
+global TEXTURE_SLOT_ACTIVATION: Map<string, int> = map_new()
+
+struct ShaderSharedTexture {
+    sampler: string,
+    source: SampledTexture,
+    sampling: TextureFilter,
+}
+global SHADER_SHARED_TEXTURES: Map<string, [ShaderSharedTexture]> = map_new()
+
+// A program-wide input, rebound on every activation through the same sampler
+// owner as lights. Binding once at registration would leave it vulnerable to
+// another program using the same unit between two draws.
+pub fn shader_set_shared_texture(shader: string, sampler: string, source: SampledTexture,
+                                  sampling: TextureFilter = TextureFilter::Nearest) {
+    assert(shader_texture_slot(shader, sampler) >= 0, "shared texture requires a declared sampler")
+    if !SHADER_SHARED_TEXTURES.contains(shader) { SHADER_SHARED_TEXTURES[shader] = [] }
+    let inputs = SHADER_SHARED_TEXTURES.get(shader).unwrap()
+    for input in inputs {
+        if input.sampler == sampler {
+            input.source = source
+            input.sampling = sampling
+            if WATCHER.current_shader_name == shader { shader_bind_sampled_for_activation(shader, sampler, source, sampling) }
+            return
+        }
+    }
+    inputs.push(ShaderSharedTexture { sampler, source, sampling })
+    if WATCHER.current_shader_name == shader { shader_bind_sampled_for_activation(shader, sampler, source, sampling) }
+}
+
+pub fn shader_clear_shared_textures(shader: string) {
+    if WATCHER.current_shader_name == shader { shader_release_shared_textures() }
+    SHADER_SHARED_TEXTURES.remove(shader)
+}
+
+fn shader_release_shared_textures() {
+    let shader = WATCHER.current_shader_name ?? return
+    let inputs = SHADER_SHARED_TEXTURES.get(shader) ?? return
+    for input in inputs { release_activation_sampler(shader, input.sampler) }
+}
+
+fn shader_bind_shared_textures(shader: string) {
+    let inputs = SHADER_SHARED_TEXTURES.get(shader) ?? return
+    for input in inputs {
+        shader_bind_sampled_for_activation(shader, input.sampler, input.source, input.sampling)
+    }
+}
+
+pub fn mark_texture_slot_filled(shader_name: string, slot: int) {
+    if texture_slot_marks_suppressed() { return }
+    let cur = TEXTURE_SLOT_FILLED.get(shader_name) ?? 0
+    TEXTURE_SLOT_FILLED[shader_name] = cur | (1 << slot)
+}
+
+pub fn mark_texture_slot_activation(shader_name: string, slot: int) {
+    if texture_slot_marks_suppressed() { return }
+    let cur = TEXTURE_SLOT_ACTIVATION.get(shader_name) ?? 0
+    TEXTURE_SLOT_ACTIVATION[shader_name] = cur | (1 << slot)
+}
+
+// Both tiers, so the injection suppresses the whole account rather than the
+// per-draw half of it.
+fn texture_slot_marks_suppressed() -> bool {
+    static force_unfilled = os_getenv("STONE_TEXTURE_SLOT_FORCE_UNFILLED") == "1"
+    return force_unfilled
+}
+
+fn clear_texture_slot_activation(shader_name: string) {
+    TEXTURE_SLOT_ACTIVATION.remove(shader_name)
+}
+
+// Check the program that just drew, then FORGET the per-draw half. Returns the
+// number of slots it declared but did not have bound for this draw.
+pub fn audit_texture_slots_for_draw(shader_name: string) -> int {
+    let declared = shader_texture_slot_count(shader_name)
+    if declared == 0 {
+        TEXTURE_SLOT_FILLED.remove(shader_name)
+        return 0
+    }
+    let filled = (TEXTURE_SLOT_FILLED.get(shader_name) ?? 0) | (TEXTURE_SLOT_ACTIVATION.get(shader_name) ?? 0)
+    let missing = 0
+    for slot in 0..declared {
+        if (filled & (1 << slot)) == 0 {
+            missing = missing + 1
+            // Explicit site key, not the 2-arg log_once: the auto-injected
+            // __SITE__ is this one line, so a shared key reports the first
+            // (shader, slot) and swallows every other one for the run -- which
+            // makes the log useless exactly when several programs are wrong.
+            log_once("SHADER",
+                "`{shader_name}` drew with slot {slot} of its @textures group never bound -- it reads whatever the previous draw left on that unit",
+                "unfilled-texture-slot:{shader_name}:{slot}")
+        }
+    }
+    UNFILLED_TEXTURE_SLOT_COUNT = UNFILLED_TEXTURE_SLOT_COUNT + missing
+    TEXTURE_SLOT_FILLED.remove(shader_name)
+    return missing
+}
+
+pub fn stone_unfilled_texture_slot_count() -> int {
+    return UNFILLED_TEXTURE_SLOT_COUNT
+}
+
+// Shared inputs stay filled until the program is rebound. Missing optional
+// samplers are ignored; sampler-to-unit assignments were set at link time.
+fn shader_bind_sampled_for_activation(shader_name: string, sampler: string, source: SampledTexture,
+    sampling: TextureFilter = TextureFilter::Nearest) {
+    let slot = shader_texture_slot_if_present(shader_name, sampler)
+    if slot < 0 { return }
+    if bind_sampled_texture_slot_for_activation(source, slot, sampling) {
+        mark_texture_slot_activation(shader_name, slot)
+    }
+}
+
+fn bind_sampled_texture_slot_for_activation(source: SampledTexture, slot: int,
+    sampling: TextureFilter) -> bool {
+    let ok = bind_sampled_texture_to_unit(source, slot)
+    stone_bind_sampler(slot, texture_filter_to_int(sampling), sampled_texture_sampler_key(source))
+    return ok
+}
+
+// Release the sampler a `shader_bind_sampled_for_activation` took, resolving the
+// same slot rather than assuming a number -- the slots are compiler-assigned and
+// differ per program (grass and the sprite batch get 2 and 1 for one spelling).
+fn release_activation_sampler(shader_name: string, sampler: string) {
+    let slot = shader_texture_slot_if_present(shader_name, sampler)
+    if slot < 0 { return }
+    sampler_release_unit(slot)
+}
+
+// Bind `canvas`'s DEPTH attachment, per draw. The required form: a caller
+// asking for depth knows the program declares a depth sampler, and a canvas
+// with no depth attachment is a caller error rather than a shape difference.
+fn shader_bind_canvas_depth(shader_name: string, sampler: string, canvas: Canvas) {
+    let slot = shader_texture_slot(shader_name, sampler)
+    if slot < 0 { return }
+    if !canvas_has_depth(canvas) {
+        log_once("SHADER",
+            "`{shader_name}` wants depth in `{sampler}` but this canvas has no depth attachment -- create it with new_canvas_with_depth",
+            "canvas-without-depth:{shader_name}:{sampler}")
+        return
+    }
+    // Nearest, explicitly: depth is read per-texel, and the alternative is
+    // inheriting whatever sampler the previous draw left on this slot. Released
+    // by `release_depth_sampler` at the caller's teardown.
+    if bind_canvas_depth_to_slot(canvas, slot, TextureFilter::Nearest) {
+        mark_texture_slot_filled(shader_name, slot)
+    }
+}
+
+fn release_depth_sampler(shader_name: string, sampler: string) {
+    let slot = shader_texture_slot_if_present(shader_name, sampler)
+    if slot < 0 { return }
+    sampler_release_unit(slot)
+}
+
+fn shader_texture_slot(shader_name: string, sampler: string) -> int {
+    return shader_texture_slot_impl(shader_name, sampler, true)
+}
+
+pub fn shader_texture_slot_if_present(shader_name: string, sampler: string) -> int {
+    return shader_texture_slot_impl(shader_name, sampler, false)
+}
+
+fn shader_texture_slot_impl(shader_name: string, sampler: string, required: bool) -> int {
+    let slots = SHADER_TEXTURE_SLOTS.get(shader_name)
+    if slots == null || slots.unwrap().names.len() == 0 {
+        if required {
+            log_once("SHADER",
+                "`{shader_name}` declares no @textures group -- nothing can bind required sampler `{sampler}`",
+                "required-texture-group:{shader_name}:{sampler}")
+        }
+        return -1
+    }
+    let slot = slots.unwrap().by_name.get(sampler)
+    if slot != null { return slot.unwrap() }
+    if required {
+        log_once("SHADER",
+            "`{shader_name}` has no sampler `{sampler}` in its @textures group",
+            "required-texture-sampler:{shader_name}:{sampler}")
+    }
+    return -1
+}
+
+// The group's sampler names in slot order, empty when there is no group.
+pub fn shader_texture_slot_names(shader_name: string) -> [string] {
+    let slots = SHADER_TEXTURE_SLOTS.get(shader_name)
+    if slots == null { return [] }
+    return slots.unwrap().names
+}
+
+// How many slots `shader_name`'s group declares; 0 when it has none. The
+// denominator for the exact-cardinality check on a slot-addressed Pass.
+pub fn shader_texture_slot_count(shader_name: string) -> int {
+    let slots = SHADER_TEXTURE_SLOTS.get(shader_name)
+    if slots == null { return 0 }
+    return slots.unwrap().names.len()
+}
+
+pub value ExactFileWatch {
+    path: string,
+    callback: fn(string) -> (),
+}
+
+pub global EXACT_FILE_WATCHES: [ExactFileWatch] = []
+
+pub fn watch_exact_file(path: string, callback: fn(string) -> ()) {
+    if !ASSET_DEV_MODE || path == "" { return }
+    for index in 0..EXACT_FILE_WATCHES.len() {
+        if EXACT_FILE_WATCHES[index].path == path {
+            EXACT_FILE_WATCHES[index].callback = callback
+            stone_watch_asset(path)
+            return
+        }
+    }
+    EXACT_FILE_WATCHES.push(ExactFileWatch { path, callback })
+    stone_watch_asset(path)
+}
+
+pub fn reload_exact_file(changed: string) {
+    for watch in EXACT_FILE_WATCHES {
+        if watch.path == changed { watch.callback(changed) }
+    }
+}
+
+// Drain the filesystem watcher and hot-reload every changed asset. The watcher
+// (stone-rs) collects events on its own thread; this just polls the result.
+// Images reload in place via stone_reload_image (handle preserved). Asset paths
+// are registered by the loaders (load_image_asset) when ASSET_DEV_MODE is on.
+// Hot-reload events this run has been handed, whatever kind of asset they named.
+//
+// `reload_changed_asset` only bumps a counter for images, which cannot see an
+// event for a font or any other asset type.
+pub global ASSET_CHANGE_EVENTS: int = 0
+
+fn poll_and_reload_assets() {
+    let n = stone_poll_changed_assets()
+    if n == 0 { return }
+
+    ASSET_CHANGE_EVENTS = ASSET_CHANGE_EVENTS + n
+    let i = 0
+    while i < n {
+        let changed = stone_changed_asset_path(i)
+        reload_changed_asset(changed)
+        i = i + 1
+    }
+}
+
+// Monotonic count of successful image hot-reloads. A reload can change an
+// image's pixel SIZE in place (same handle), so games that cache per-image
+// data (sprite dims, src rects) compare against this once per frame and
+// refresh their caches on a bump -- no per-draw image_dims() FFI needed.
+global IMAGE_RELOAD_GEN: int = 0
+
+// `changed` is the resolved on-disk path the loader registered. Reload every
+// image whose asset resolves to it (a path may back more than one handle).
+// One source of truth: IMAGE_PATHS (handle -> asset-relative path).
+pub fn reload_changed_asset(changed: string) {
+    for (handle, rel) in IMAGE_PATHS {
+        if asset_path(rel) == changed {
+            if reload_image(Image(handle), changed) {
+                IMAGE_RELOAD_GEN = IMAGE_RELOAD_GEN + 1
+                log_info("ASSETS", "Hot-reloaded image {rel}")
+            } else {
+                log_once("ASSETS", "Hot-reload failed for image {rel} (handle {handle})")
+            }
+        }
+    }
+
+    // Sounds: re-decode in place behind the same handle.
+    for (_, sd) in SOUND_REGISTRY {
+        if sd.path != "" && asset_path(sd.path) == changed {
+            if stone_reload_sound(sd.backend_id, changed) {
+                log_info("ASSETS", "Hot-reloaded sound {sd.path}")
+            } else {
+                log_once("ASSETS", "Hot-reload failed for sound {sd.path}")
+            }
+        }
+    }
+
+    // Fonts: re-rasterize in place. fd.path is the resolved path, matched
+    // directly. One .ttf backs one font per pixel size; reload_font handles each.
+    for (e, fd) in FONT_REGISTRY {
+        if fd.path != "" && fd.path == changed {
+            reload_font(Font { handle: e }, changed)
+        }
+    }
+
+    reload_exact_file(changed)
+}
+
+@update(stage = 5)
+fn update_watcher() {
+    if !WATCHER.enabled { return }
+
+    poll_and_reload_assets()
+}
+
+pub fn set_shader(shader_id: string) {
+    let shaders = WATCHER.shaders
+
+    let item = shaders.get(shader_id)
+    if item != null {
+        shader_release_shared_textures()
+        set_shader_raw(item.shader)
+        WATCHER.current_shader_name = clone_into(shader_id, map_storage(shaders))
+        // A new activation: nothing this program's previous bind left on a unit
+        // is guaranteed still there, so its activation marks stop answering.
+        clear_texture_slot_activation(shader_id)
+        shader_bind_shared_textures(shader_id)
+    } else {
+        // Never fires today (every set_shader caller names a registered shader),
+        // which is exactly why a future miss must be loud rather than a silent
+        // no-op that leaves whatever program was bound (the class that masked the
+        // custom_draw desync -- world_shader_after_custom_draw).
+        log_once("SHADER", "set_shader: no shader registered for '{shader_id}'; keeping previously bound program")
+    }
+}
+
+// The closing half of a `set_shader` bracket. The name is cleared with the
+// bind: the implicit unit-0 texture-slot account (`audit_implicit_texture_slot`)
+// reads it, so a stale one would attribute the next draw to this program.
+pub fn end_shader() {
+    shader_release_shared_textures()
+    unset_shader()
+    WATCHER.current_shader_name = null
+}
+
+pub fn with_shader(shader_id: string, f: fn() -> ()) {
+    set_shader(shader_id)
+    f()
+    end_shader()
+}
+
+pub fn with_canvas(color_canvas: Canvas, f: fn() -> ()) {
+    let prior = CURRENT_CANVAS_HANDLE
+    set_canvas(color_canvas)
+    f()
+    set_canvas_handle(prior)
+}
+
+// Bracket `f` with a blend-mode change, restoring the caller's PRIOR
+// mode afterward (true save/restore, nests properly). The prior mode
+// comes from the CURRENT_BLEND shadow global -- no stone-side
+// state-read API needed, same trick as with_draw_pool.
+pub fn with_blend_mode(mode: BlendMode, f: fn() -> ()) {
+    let prev = CURRENT_BLEND
+    set_blend_mode(mode)
+    f()
+    set_blend_mode(prev)
+}

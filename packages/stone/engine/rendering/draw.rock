@@ -1,0 +1,1760 @@
+// Shaders
+// @engine/ prefix = shared engine shaders from stone/engine/shaders/
+// No prefix = game-specific shaders from bitgun/shaders/
+
+pub const sprite_batch_shader: string = rock_shader(sprite_batch_vert, sprite_batch_frag)  // sprite_batch_shader.rock (A2b)
+pub const sprite_basic_shader: string = rock_shader(sprite_basic_vert, sprite_basic_frag)  // sprite_basic_shader.rock (C2); the immediate/present sprite program
+const text_shader: string = rock_shader(text_vert, text_frag)  // text_shader.rock (C3); text.rs binds it by handle
+
+pub const tonemap_shader: string = rock_shader(tonemap_frag)  // tonemapping_shader.rock
+pub const tonemap_split_shader: string = rock_shader(tonemap_split_frag)  // tonemapping_shader.rock
+
+const bloom_prefilter_shader: string = rock_shader(bloom_prefilter_frag)  // bloom_pyramid_shader.rock
+const bloom_down_shader: string = rock_shader(bloom_down_frag)  // bloom_pyramid_shader.rock
+const bloom_up_shader: string = rock_shader(bloom_up_frag)  // bloom_pyramid_shader.rock
+const bloom_blur_shader: string = rock_shader(bloom_blur_frag)  // bloom_blur_shader.rock
+pub const blit_shader: string = rock_shader(blit_frag)  // blit_shader.rock
+const ui_effect_composite_shader: string = rock_shader(ui_effect_composite_frag)
+const text_art_resolve_shader: string = rock_shader(text_art_resolve_frag)
+const color_grade_shader: string = rock_shader(color_grade_frag)  // color_grade_shader.rock
+
+
+const depth_visualize_shader: string = rock_shader(depth_visualize_frag)  // depth_visualize_shader.rock
+const nonfinite_shader: string = rock_shader(nonfinite_frag)  // nonfinite_shader.rock (B2)
+pub const present_shader: string = rock_shader(present_frag)  // present_shader.rock
+
+const outline_target_shader: string = rock_shader(outline_target_vert, outline_target_frag)  // outline_target_shader.rock (B3)
+const outline_detect_shader: string = rock_shader(outline_detect_vert, outline_detect_frag)  // outline_detect_shader.rock (B4)
+const entity_id_debug_shader: string = rock_shader(entity_id_debug_frag)  // entity_id_debug_shader.rock (B1)
+
+// Canvases
+// TODO: canvas recreation on hot reload
+
+pub global screen_canvas: Canvas = NO_CANVAS
+// Tonemapped LDR frame -- only written when FINAL_PASSES are queued
+// (otherwise tonemap goes straight to the default framebuffer).
+// Input for game final-grade passes; see pass.rock queue_final_pass.
+pub global final_canvas: Canvas = NO_CANVAS
+// The designated output / ping-pong partner for final passes: a pass
+// cannot read and write the same canvas (GL feedback loop), so a
+// single grade pass reads final_canvas and writes final_canvas_2.
+pub global final_canvas_2: Canvas = NO_CANVAS
+// The scene-pass analogue: a SCENE pass that samples the lit world
+// composite reads screen_canvas and writes screen_canvas_2 (chains
+// ping-pong between the two). run_scene_passes blits the scene back
+// into screen_canvas when a chain ends here, so the post chain always
+// reads screen_canvas.
+pub global screen_canvas_2: Canvas = NO_CANVAS
+// Mip pyramids, largest first, each level half the one before. The down
+// chain writes them in order, the up chain adds back into them in reverse,
+// so level 0 ends up holding the result -- there is no separate up-chain
+// canvas set (the whole point of BlendMode::Accumulate).
+//
+// Bloom starts at half scene resolution; the tonemap samples normalized coordinates.
+pub global BLOOM_LEVELS: [Canvas] = vec_new()
+
+// Stop halving here. Six levels off 1866x1050 ends near 29x16, whose
+// ~2-texel kernel reach is ~128 full-res pixels.
+pub const PYRAMID_MAX_LEVELS: int = 6
+const PYRAMID_MIN_LEVEL_SIZE: int = 8
+
+pub fn bloom_output() -> Canvas {
+    return BLOOM_LEVELS[0]
+}
+
+// Levels start AT (w, h) -- the caller picks whether that is the render size
+// or half of it. Level 0 always exists even on a pathologically small target,
+// since consumers bind it unconditionally and an empty pyramid would be an
+// unbound sampler rather than "no effect".
+//
+// A fresh chain for a caller that owns it outright (TextArt workspaces): every
+// level is created and the caller destroys them. The scene pyramids go through
+// `build_pyramid_levels` instead, which never destroys.
+fn create_pyramid_levels(w: int, h: int, max_levels: int) -> [Canvas] {
+    let levels: [Canvas] = vec_new()
+    for extent in pyramid_chain(w, h, max_levels) {
+        levels.push(pyramid_level_canvas(extent.x, extent.y))
+    }
+    return levels
+}
+
+// Retain unused bloom levels at minimum extent for reuse.
+global PYRAMID_PARKED: [Canvas] = vec_new()
+
+// The same chain as `create_pyramid_levels`, reusing the canvases `existing`
+// already holds. A level that is there is RESIZED (its handle survives); a
+// level the new extent adds comes from PYRAMID_PARKED, or is created when
+// that is empty; a level the extent no longer reaches is parked.
+pub fn build_pyramid_levels(existing: [Canvas], parked: [Canvas], w: int, h: int, max_levels: int) -> [Canvas] {
+    let levels: [Canvas] = vec_new()
+    for extent in pyramid_chain(w, h, max_levels) {
+        levels.push(pyramid_level_at(existing, parked, levels.len(), extent.x, extent.y))
+    }
+    for i in levels.len()..existing.len() {
+        parked.push(scene_target(existing[i],
+            PYRAMID_MIN_LEVEL_SIZE, PYRAMID_MIN_LEVEL_SIZE, PYRAMID_LEVEL_FORMAT, false))
+    }
+    return levels
+}
+
+// The extents of a pyramid rooted at (w, h): halve until the cap or until the
+// next level would fall under PYRAMID_MIN_LEVEL_SIZE.
+fn pyramid_chain(w: int, h: int, max_levels: int) -> [IVec2] {
+    let chain: [IVec2] = vec_new()
+    let lw = max(1, w)
+    let lh = max(1, h)
+    chain.push(iv(lw, lh))
+    while chain.len() < max_levels
+        && lw ./ 2 >= PYRAMID_MIN_LEVEL_SIZE
+        && lh ./ 2 >= PYRAMID_MIN_LEVEL_SIZE {
+        lw = lw ./ 2
+        lh = lh ./ 2
+        chain.push(iv(lw, lh))
+    }
+    return chain
+}
+
+fn pyramid_level_at(existing: [Canvas], parked: [Canvas], index: int, w: int, h: int) -> Canvas {
+    if index < existing.len() {
+        return scene_target(existing[index], w, h, PYRAMID_LEVEL_FORMAT, false)
+    }
+    let reusable = parked.pop() ?? return pyramid_level_canvas(w, h)
+    return scene_target(reusable, w, h, PYRAMID_LEVEL_FORMAT, false)
+}
+
+// Both pyramid kernels are defined in terms of bilinear interpolation -- the
+// shader reconstructs it from nearest texel reads so every driver uses the same
+// arithmetic. Every pyramid Pass therefore binds its input as NEAREST; the
+// filter is part of the shader's sampling contract rather than canvas state.
+//
+// The levels stay RGBA16F for HDR range; explicit nearest reads keep that
+// format's interpolation independent of backend filter support.
+const PYRAMID_LEVEL_FORMAT: string = "rgba16f"
+
+fn pyramid_level_canvas(w: int, h: int) -> Canvas {
+    return new_canvas(w, h, PYRAMID_LEVEL_FORMAT)
+}
+
+// Entity id canvas. Contains the id of whatever is actually *visible* at each
+// pixel — the color pass writes it as MRT attachment 1, resolved against that
+// pass's own depth buffer, so it matches the color pass's depth ordering. This
+// is the canonical source for hover detection and for occlusion queries in the
+// outline post-process.
+pub global visible_id_canvas: Canvas = NO_CANVAS
+
+// Draw-buffer attachment masks for `stone_set_draw_buffer_mask`. Bit i enables
+// COLOR_ATTACHMENT i; a clear bit below the highest set one writes GL_NONE
+// there, which is the whole reason this is a mask rather than a count. The
+// attachment order is colour, id, material, normal, surface owner.
+pub const DRAW_BUFFERS_COLOR_ONLY: int = 0b00001
+pub const DRAW_BUFFERS_COLOR_AND_ID: int = 0b00011
+const DRAW_BUFFERS_COLOR_ID_MATERIAL: int = 0b00111
+pub const DRAW_BUFFERS_COLOR_ID_MATERIAL_NORMAL: int = 0b01111
+const DRAW_BUFFERS_FULL_SURFACE: int = 0b11111
+// A surface-material writer re-authors an existing receiver: it blends colour
+// and material, and the gap at bit 1 is what leaves the picking ID byte-exact.
+const DRAW_BUFFERS_COLOR_AND_MATERIAL: int = 0b00101
+// A surface-normal writer (a floor decal) also re-authors the normal target;
+// the id and surface owner stay the producer's.
+const DRAW_BUFFERS_COLOR_MATERIAL_AND_NORMAL: int = 0b01101
+
+// The frame's G-buffer clear list: colour, the entity id, and the surface owner
+// where one is attached. Bits 2 and 3 stay clear so the clear leaves the
+// material and normal targets alone -- every texel of those the resolve reads is
+// re-authored by this pass anyway, and clearing them costs two more full-screen
+// writes than it saves.
+const DRAW_BUFFERS_CLEAR_WITH_OWNER: int = 0b10011
+
+// Material pixels are valid only where the matching visible ID names a receiver.
+pub global world_material_canvas: Canvas? = null
+
+pub fn ensure_world_material_canvas() -> Canvas {
+    if world_material_canvas == null || !canvas_is_live(world_material_canvas.unwrap()) {
+        let target = new_canvas(int(screen_canvas.width),int(screen_canvas.height),"rgba8")
+        assert(stone_canvas_attach_color_target(screen_canvas.handle.0,target.handle.0,2),
+            "world material attachment must match the live scene target")
+        let active = canvas_active(screen_canvas)
+        set_canvas_active(target,active.x,active.y)
+        with_canvas(target,() => { clear_screen(0,0,0,0) })
+        world_material_canvas = target
+    }
+    return world_material_canvas.unwrap()
+}
+
+// World-space material normals share receiver visibility with the material target.
+pub global world_normal_canvas: Canvas? = null
+
+pub fn ensure_world_normal_canvas() -> Canvas {
+    if world_normal_canvas == null || !canvas_is_live(world_normal_canvas.unwrap()) {
+        let _ = ensure_world_material_canvas()
+        let target = new_canvas(int(screen_canvas.width),int(screen_canvas.height),"rgba8")
+        assert(stone_canvas_attach_color_target(screen_canvas.handle.0,target.handle.0,3),
+            "world normal attachment must match the live scene target")
+        let active = canvas_active(screen_canvas)
+        set_canvas_active(target,active.x,active.y)
+        with_canvas(target,() => { clear_screen(0,0,0,0) })
+        world_normal_canvas = target
+    }
+    return world_normal_canvas.unwrap()
+}
+
+// Matching picking IDs prevent a foreground legacy sprite from inheriting PBR data.
+pub global world_surface_owner_canvas: Canvas? = null
+
+pub fn ensure_world_surface_owner_canvas() -> Canvas {
+    if world_surface_owner_canvas == null || !canvas_is_live(world_surface_owner_canvas.unwrap()) {
+        let _ = ensure_world_normal_canvas()
+        let target = new_canvas(int(screen_canvas.width),int(screen_canvas.height),"r32i")
+        assert(stone_canvas_attach_color_target(screen_canvas.handle.0,target.handle.0,4),
+            "surface owner attachment must match the live scene target")
+        let active = canvas_active(screen_canvas)
+        set_canvas_active(target,active.x,active.y)
+        with_canvas(target,() => { stone_clear_canvas_int(0,0) })
+        world_surface_owner_canvas = target
+    }
+    return world_surface_owner_canvas.unwrap()
+}
+
+// Whether visible_id_canvas is currently attached as screen_canvas's MRT
+// color-attachment-1. False means the attach failed (or the FBO was
+// incomplete): the color pass then renders single-buffer (color only, no id
+// output) so a failed attach degrades pick/outline but never blacks the world.
+pub global mrt_id_attached: bool = false
+
+// Whether any batch in the current frame's color pass actually drew with the
+// id attachment in its draw-buffer list. `mrt_id_attached` says ids CAN be
+// written; this says some WERE. A UI-only game attaches fine and writes
+// nothing, and the outline detect pass must not scan that empty buffer.
+pub global outline_ids_written: bool = false
+
+// Whether this frame's per-frame silhouette mask pass drew anything, i.e.
+// whether any sprite asked for an outline. `outline_ids_written` says the
+// world drew; this says something wants an outline drawn AROUND it, which is
+// the question the detect pass's cost actually turns on -- its only paint
+// source is that mask, so an empty one discards every fragment.
+pub global outline_mask_written: bool = false
+
+// Binary silhouette mask of every sprite drawn with a non-null Outline.
+// Populated without depth testing so each outlined sprite's full shape is
+// preserved even when other sprites occlude it in the color pass. The
+// outline post-process edge-detects this mask to generate the outline.
+pub global outline_target_canvas: Canvas = NO_CANVAS
+pub global UI_RASTER_CANVAS: Canvas? = null
+pub global OUTPUT_HDR_CANVAS: Canvas? = null
+// Submitted clears of OUTPUT_HDR_CANVAS, for sims.
+pub global OUTPUT_HDR_CLEARS: int = 0
+// Whether OUTPUT_HDR_CANVAS holds this frame's content. Only the main menu's
+// TextArt writes the layer, so the first write of a frame creates (when
+// absent) and clears it and only a written frame presents it; once nothing
+// has written it for OUTPUT_HDR_RELEASE_FRAMES frames it is released. A
+// gameplay frame pays for neither the pass nor the rgba16f storage.
+global OUTPUT_HDR_WRITTEN: bool = false
+// Long enough that a menu skipping its write for a frame or two does not
+// churn the allocation.
+pub const OUTPUT_HDR_RELEASE_FRAMES: int = 30
+global OUTPUT_HDR_IDLE_FRAMES: int = 0
+global UI_RASTER_TARGET_SIZE: IVec2 = iv(0, 0)
+global OUTPUT_HDR_TARGET_SIZE: IVec2 = iv(0, 0)
+
+pub fn ensure_ui_raster_targets(view: FrameView) {
+    // The output HDR layer is created by its first writer at this extent; a
+    // stale one is dropped here so that writer re-creates it.
+    if OUTPUT_HDR_CANVAS != null
+            && (!canvas_is_live(OUTPUT_HDR_CANVAS.unwrap())
+                || OUTPUT_HDR_TARGET_SIZE != view.ui_raster_size) {
+        output_hdr_release()
+    }
+    OUTPUT_HDR_TARGET_SIZE = view.ui_raster_size
+
+    let scaled = view.ui_raster_size.x != view.drawable_size.x
+        || view.ui_raster_size.y != view.drawable_size.y
+    if !scaled {
+        if UI_RASTER_CANVAS != null { destroy_canvas(UI_RASTER_CANVAS.unwrap()) }
+        UI_RASTER_CANVAS = null
+        UI_RASTER_TARGET_SIZE = iv(0, 0)
+    } else if UI_RASTER_CANVAS == null
+            || !canvas_is_live(UI_RASTER_CANVAS.unwrap())
+            || UI_RASTER_TARGET_SIZE != view.ui_raster_size {
+        if UI_RASTER_CANVAS != null { destroy_canvas(UI_RASTER_CANVAS.unwrap()) }
+        UI_RASTER_CANVAS = new_canvas(view.ui_raster_size.x, view.ui_raster_size.y, "rgba8")
+        UI_RASTER_TARGET_SIZE = view.ui_raster_size
+    }
+}
+
+fn render_scaled_ui_batches(pool: RenderBatchPool = UI_RENDER_BATCHES) {
+    let target = UI_RASTER_CANVAS ?? return
+    let extent = screen_size()
+    set_canvas(target)
+    stone_clear_canvas(0.0, 0.0, 0.0, 0.0)
+    render_ui_batches(pool, projection_extent: extent,
+        convention: TargetConvention::PresentSource)
+    unset_canvas()
+}
+
+fn submit_ui_blit(src: Canvas, target: GpuTarget, blend: BlendMode) {
+    let view = RENDER_VIEW ?? return
+    let pass = GpuPass {
+        target: target,
+        load: GpuLoad::Load,
+        viewport: GpuRect { x: 0, y: 0, w: view.drawable_size.x, h: view.drawable_size.y },
+        draws: [
+            GpuDraw {
+                shader: BLIT_PIPELINE.shader_name,
+                bindings: [
+                    GpuBinding {
+                        slot: 0,
+                        resource: SampledTexture::Canvas(src),
+                        filter: TextureFilter::Nearest,
+                    }
+                ],
+                blend: blend,
+                color_write: GPU_WRITE_RGBA,
+            }
+        ],
+    }
+    if !submit_pass(pass) {
+        // Successful blits keep one admission path and build no diagnostics.
+        let reason = gpu_pass_rejection(pass)
+        error("submit_ui_blit: UI blit submission failed: {reason}")
+    }
+}
+
+fn composite_scaled_ui(target: GpuTarget) {
+    let src = UI_RASTER_CANVAS ?? return
+    submit_ui_blit(src, target, BlendMode::Alpha)
+}
+
+fn output_hdr_release() {
+    if OUTPUT_HDR_CANVAS != null { destroy_canvas(OUTPUT_HDR_CANVAS.unwrap()) }
+    OUTPUT_HDR_CANVAS = null
+    OUTPUT_HDR_WRITTEN = false
+    OUTPUT_HDR_IDLE_FRAMES = 0
+}
+
+fn output_hdr_begin_frame() {
+    if OUTPUT_HDR_CANVAS != null {
+        OUTPUT_HDR_IDLE_FRAMES = if OUTPUT_HDR_WRITTEN { 0 } else { OUTPUT_HDR_IDLE_FRAMES + 1 }
+        if OUTPUT_HDR_IDLE_FRAMES >= OUTPUT_HDR_RELEASE_FRAMES { output_hdr_release() }
+    }
+    OUTPUT_HDR_WRITTEN = false
+}
+
+// This frame's layer for a writer or reader, created when absent and cleared
+// on the frame's first use. Null before any render view sized it.
+pub fn output_hdr_frame_canvas() -> Canvas? {
+    if OUTPUT_HDR_WRITTEN { return OUTPUT_HDR_CANVAS }
+    let size = OUTPUT_HDR_TARGET_SIZE
+    if size.x < 1 || size.y < 1 { return null }
+    if OUTPUT_HDR_CANVAS == null {
+        OUTPUT_HDR_CANVAS = new_canvas(size.x, size.y, "rgba16f")
+    }
+    let target = OUTPUT_HDR_CANVAS.unwrap()
+    OUTPUT_HDR_WRITTEN = true
+    if SIM_SKIP_SUBMIT { return target }
+    with_canvas(target, () => clear_screen(0.0, 0.0, 0.0, 0.0))
+    OUTPUT_HDR_CLEARS += 1
+    return target
+}
+
+// This frame's layer if something wrote it; a stale layer is never presented.
+fn output_hdr_written_canvas() -> Canvas? {
+    if !OUTPUT_HDR_WRITTEN { return null }
+    return OUTPUT_HDR_CANVAS
+}
+
+pub fn output_hdr_composite_to(source: Canvas, target: Canvas) {
+    if int(source.width) != int(target.width) || int(source.height) != int(target.height) {
+        error("output HDR source extent must equal FrameView.ui_raster_size")
+    }
+    if !run_pass(Pass {
+        pipeline: BLIT_PIPELINE,
+        slot_inputs: [(sampled_canvas(source), TextureFilter::Nearest)],
+        output: target,
+        clear: null,
+        blend: BlendMode::Premultiplied,
+    }) {
+        error("output HDR canvas composite was refused")
+    }
+}
+
+pub fn output_hdr_composite_canvas(source: Canvas) {
+    let target = output_hdr_frame_canvas() ?? return
+    output_hdr_composite_to(source, target)
+}
+
+fn output_hdr_present(target: GpuTarget) {
+    // The stamp marks the scene-present phase, which completed before this
+    // flush point whether or not the HDR layer exists (gameplay never writes
+    // it now that the layer is lazy); the early return is storage, not a
+    // skipped present.
+    text_render_order_present()
+    if OUTPUT_HDR_CANVAS == null { return }
+    let layer = output_hdr_written_canvas() ?? return
+    submit_ui_blit(layer, target, BlendMode::Premultiplied)
+}
+
+@test
+fn output_hdr_present_stamps_the_scene_present_without_a_layer() {
+    let prior_serial = TEXT_RENDER_ORDER_SERIAL
+    let prior_present = TEXT_OUTPUT_PRESENT_ORDER
+    let prior_canvas = OUTPUT_HDR_CANVAS
+    let prior_written = OUTPUT_HDR_WRITTEN
+    defer {
+        TEXT_RENDER_ORDER_SERIAL = prior_serial
+        TEXT_OUTPUT_PRESENT_ORDER = prior_present
+        OUTPUT_HDR_CANVAS = prior_canvas
+        OUTPUT_HDR_WRITTEN = prior_written
+    }
+    // Gameplay shape: no HDR layer (lazy, never written), so the old code
+    // returned before stamping.
+    OUTPUT_HDR_CANVAS = null
+    OUTPUT_HDR_WRITTEN = false
+    output_hdr_present(GpuTarget::Window)
+    assert(TEXT_RENDER_ORDER_SERIAL == prior_serial + 1,
+        "the scene present advances the render-order serial (stayed {prior_serial})")
+    assert(TEXT_OUTPUT_PRESENT_ORDER == TEXT_RENDER_ORDER_SERIAL,
+        "the present stamp takes the advanced serial (present {TEXT_OUTPUT_PRESENT_ORDER}, serial {TEXT_RENDER_ORDER_SERIAL})")
+}
+
+// One scene target slot at (rw, rh): the canvas already in the slot RESIZED to
+// that extent, or a fresh one.
+//
+// Resizing keeps the handle across a raster change, so nothing holding the old
+// canvas is left with a dead id.
+//
+pub fn scene_target(existing: Canvas, rw: int, rh: int, format: string, with_depth: bool) -> Canvas {
+    // A null is a REFUSAL -- an unknown or dead handle, or an FBO the driver
+    // would not complete at the new extent (`stone_canvas_resize` logs which,
+    // and puts the old storage back). Recreating is the right recovery; it is
+    // logged with the handle and the extent that did it.
+    let resized = resize_canvas(existing, rw, rh)
+    if resized != null { return resized.unwrap() }
+    if existing.handle.0 != 0 && canvas_is_live(existing) {
+        log_once("RENDER", "scene target {existing.handle.0} could not be resized to {rw}x{rh}; recreating it")
+    }
+    if existing.handle.0 != 0 { destroy_canvas(existing) }
+    if with_depth { return new_canvas_with_depth(rw, rh, format) }
+    return new_canvas(rw, rh, format)
+}
+
+// Resized with the rest of the set; a refusal drops the target and its
+// `ensure_world_*_canvas` mints and re-attaches a matching one on the next frame
+// that asks for it.
+fn resize_lazy_scene_target(target: Canvas?, rw: int, rh: int) -> Canvas? {
+    if target == null { return null }
+    let resized = resize_canvas(target.unwrap(), rw, rh)
+    if resized == null { destroy_canvas(target.unwrap()) }
+    return resized
+}
+
+fn create_render_canvases(rw: int, rh: int) {
+    screen_canvas = scene_target(screen_canvas, rw, rh, "rgba16f", true)
+    screen_canvas_2 = scene_target(screen_canvas_2, rw, rh, "rgba16f", false)
+    final_canvas = scene_target(final_canvas, rw, rh, "rgba16f", false)
+    final_canvas_2 = scene_target(final_canvas_2, rw, rh, "rgba16f", false)
+
+    BLOOM_LEVELS = build_pyramid_levels(BLOOM_LEVELS, PYRAMID_PARKED,
+        rw ./ 2, rh ./ 2, PYRAMID_MAX_LEVELS)
+
+
+
+    visible_id_canvas = scene_target(visible_id_canvas, rw, rh, "r32i", false)
+    let old_outline_handle = outline_target_canvas.handle.0
+    outline_target_canvas = scene_target(outline_target_canvas, rw, rh, "r32i", false)
+
+    // The silhouette mask pass is skipped on a frame that outlines nothing
+    // (batch.rock), so this is what makes "no mask pass ran" mean "the mask is
+    // empty" rather than "the mask is whatever a resize left in it". Creation
+    // already establishes blank contents; binding a fresh boot target here
+    // would make the sim boundary conservatively reject it as authored boot
+    // content. A surviving resize needs the explicit clear. Every frame that
+    // DOES outline clears it again at the top of render_silhouette_mask.
+    if old_outline_handle != 0 && outline_target_canvas.handle.0 == old_outline_handle {
+        with_canvas(
+            outline_target_canvas,
+            () => {
+                stone_clear_canvas_int(0, 0)
+            }
+        )
+    }
+
+    // The lazily attached material, normal and surface-owner targets are
+    // COLOR_ATTACHMENT2, 3 and 4 of screen_canvas, so MRT requires them to
+    // match the extent above.
+    world_material_canvas = resize_lazy_scene_target(world_material_canvas, rw, rh)
+    world_normal_canvas = resize_lazy_scene_target(world_normal_canvas, rw, rh)
+    world_surface_owner_canvas = resize_lazy_scene_target(world_surface_owner_canvas, rw, rh)
+
+    // R6 (MRT): the color pass writes entity_id to visible_id_canvas's texture
+    // as COLOR_ATTACHMENT1 of screen_canvas -- one geometry traversal instead
+    // of a second whole-scene entity_id pass. visible_id_canvas keeps its own
+    // FBO (pick readback) and texture (outline detect); both read the texture
+    // this attaches, so they need no change. Re-run on every build: the
+    // attachment survives a resize (it names the texture OBJECT, whose storage
+    // was replaced under it), but re-attaching re-checks FBO completeness at the
+    // new extent, which is the answer `mrt_id_attached` is.
+    // R32I is color-renderable without an extension; the gate is FBO
+    // completeness only.
+    mrt_id_attached = stone_canvas_attach_id_target(screen_canvas.handle.0, visible_id_canvas.handle.0)
+    if !mrt_id_attached {
+        log_once("RENDER", "MRT id-target off (attach failed); color pass renders single-buffer -- world intact, entity-id/pick/outline blank")
+        // The color pass's per-frame id reset rides the MRT clear, which the
+        // mrt_id_attached guard now skips -- so without this the id texture
+        // keeps its undefined creation contents and pick reads phantom ids.
+        // Clear it once through its own (pick-readback) FBO so pick returns 0.
+        with_canvas(
+            visible_id_canvas,
+            () => {
+                stone_clear_canvas_int(0, 0)
+            }
+        )
+    }
+}
+
+
+
+// The scene target set is allocated at CAPACITY, which is a property of the
+// raster profile and the drawable -- never of camera zoom. Reallocating is
+// therefore rare: a drawable resize or a raster-profile change, not a frame's
+// framing. SCENE_CAPACITY is what the current set was built for.
+pub global SCENE_CAPACITY: IVec2 = iv(0, 0)
+// How many times the set was re-specified for a new capacity. A reallocation
+// keeps every handle, so this count is the only reading of "a rebuild happened".
+pub global SCENE_TARGET_REALLOCS: int = 0
+
+// A process whose sim entries never render (SIM_DRAW=none for all of
+// them; they share a boot signature) allocates the scene target set at this
+// token extent instead of the capacity: ~185 MB at 1080p and ~650 MB at a
+// 3733x2100 window that nothing ever draws into. SCENE_CAPACITY still
+// reports the requested capacity; `scene_target_extent_for` answers what was
+// allocated for it.
+// Latched ONCE at boot: fixtures toggle SIM_SKIP_RENDER in-body, and a live
+// decision in ensure_scene_capacity would rebuild the set mid-run.
+const SCENE_TARGET_TOKEN_EXTENT: int = 8
+global SCENE_TARGETS_TOKEN: bool = false
+
+fn scene_targets_latch_boot_policy() {
+    SCENE_TARGETS_TOKEN = sim_process_never_draws()
+}
+
+fn scene_target_extent_for(cap: IVec2) -> IVec2 {
+    if !SCENE_TARGETS_TOKEN { return cap }
+    return iv(min(cap.x, SCENE_TARGET_TOKEN_EXTENT), min(cap.y, SCENE_TARGET_TOKEN_EXTENT))
+}
+
+// Every scene target's active rectangle, keyed by canvas handle. The pass
+// executor reads it to bracket the output viewport and to build each sampled
+// input's active-local UV transform; no pass computes its own extent.
+// Unregistered (a game's own canvas) means active == the whole canvas.
+global CANVAS_ACTIVE: Map<int, IVec2> = map_new()
+
+pub fn canvas_active(c: Canvas) -> IVec2 {
+    let a = CANVAS_ACTIVE.get(c.handle.0) ?? return iv(int(c.width), int(c.height))
+    return a
+}
+
+// Cache identity for a pass that retains Canvas snapshots or sampling bounds.
+// Handles alone survive GL storage resize; active rectangles can change without
+// any allocation. Both are part of a cached view, not the native object identity.
+pub nobox value CanvasViewKey {
+    handle: int,
+    width: float,
+    height: float,
+    active_x: int,
+    active_y: int,
+}
+
+fn canvas_view_key(canvas: Canvas) -> CanvasViewKey {
+    let active = canvas_active(canvas)
+    return CanvasViewKey { handle: canvas.handle.0, width: canvas.width, height: canvas.height,
+        active_x: active.x, active_y: active.y }
+}
+
+// The active fraction of a canvas's backing texture: what 0..1 of TexCoord
+// must be scaled by for a sample to stay inside the live image.
+pub fn canvas_active_uv(c: Canvas) -> Vec2 {
+    let a = canvas_active(c)
+    if c.width <= 0.0 || c.height <= 0.0 { return v(1.0, 1.0) }
+    return v((a.x as float) / c.width, (a.y as float) / c.height)
+}
+
+pub fn sampled_texture_active_uv(source: SampledTexture) -> Vec2 {
+    match source {
+        SampledTexture::Image(_image) => return v(1.0, 1.0),
+        SampledTexture::Canvas(canvas) => return canvas_active_uv(canvas),
+    }
+}
+
+fn sampled_texture_uv_lo(source: SampledTexture) -> Vec2 {
+    let dims = sampled_texture_dims(source)
+    return v(0.5 / dims.x, 0.5 / dims.y)
+}
+
+fn sampled_texture_uv_hi(source: SampledTexture) -> Vec2 {
+    let dims = sampled_texture_dims(source)
+    let active = match source {
+        SampledTexture::Image(_image) => dims,
+        SampledTexture::Canvas(canvas) => canvas_active(canvas),
+    }
+    return v(((active.x as float) - 0.5) / dims.x, ((active.y as float) - 0.5) / dims.y)
+}
+
+// Input `b`'s active fraction expressed relative to input `a`'s, for a pass
+// whose TexCoord addresses `a` but which also samples `b`.
+pub fn canvas_active_uv_rel(a: Canvas, b: Canvas) -> Vec2 {
+    let ua = canvas_active_uv(a)
+    let ub = canvas_active_uv(b)
+    if ua.x <= 0.0 || ua.y <= 0.0 { return v(1.0, 1.0) }
+    return v(ub.x / ua.x, ub.y / ua.y)
+}
+
+pub fn set_canvas_active(c: Canvas, w: int, h: int) {
+    if c.handle.0 == 0 { return }
+    let aw = int(clamp(w, 1, int(c.width)))
+    let ah = int(clamp(h, 1, int(c.height)))
+    CANVAS_ACTIVE.insert(c.handle.0, iv(aw, ah))
+    stone_set_canvas_active(c.handle.0, aw, ah)
+}
+
+// One rule for a derived pyramid level, applied here rather than by each
+// pass: halve the active extent and never go below one texel.
+pub fn pyramid_active_step(a: IVec2) -> IVec2 {
+    return iv(max(1, int(ceil((a.x as float) / 2.0))), max(1, int(ceil((a.y as float) / 2.0))))
+}
+
+pub fn set_pyramid_active(levels: [Canvas], root: IVec2) {
+    let a = root
+    for level in levels {
+        set_canvas_active(level, a.x, a.y)
+        a = pyramid_active_step(a)
+    }
+}
+
+// Point the whole scene target set at this frame's active rectangle. Camera
+// zoom moves these; the allocation is untouched.
+fn set_scene_active_rects(scene: IVec2) {
+    // Never past what was allocated (token-sized targets, see SCENE_TARGETS_TOKEN).
+    let alloc = scene_target_extent_for(SCENE_CAPACITY)
+    let scene = iv(min(scene.x, alloc.x), min(scene.y, alloc.y))
+    for c in [
+        screen_canvas, screen_canvas_2, final_canvas, final_canvas_2,
+        visible_id_canvas, outline_target_canvas
+    ] {
+        set_canvas_active(c, scene.x, scene.y)
+    }
+    if world_surface_owner_canvas != null { set_canvas_active(world_surface_owner_canvas.unwrap(),scene.x,scene.y) }
+    if world_normal_canvas != null { set_canvas_active(world_normal_canvas.unwrap(),scene.x,scene.y) }
+    if world_material_canvas != null { set_canvas_active(world_material_canvas.unwrap(),scene.x,scene.y) }
+    // Bloom's level 0 is already a half-step down from the scene.
+    set_pyramid_active(BLOOM_LEVELS, pyramid_active_step(scene))
+}
+
+// Rebuild the scene target set for `cap` if it is not already that size.
+// Call from update code, not while a world canvas is bound.
+pub fn ensure_scene_capacity(cap: IVec2) {
+    if cap.x < 1 || cap.y < 1 { return }
+    if SCENE_CAPACITY.x == cap.x && SCENE_CAPACITY.y == cap.y { return }
+    let old = SCENE_CAPACITY
+    // A queued pass names the extents the set had when it was queued, so a
+    // reallocation invalidates it whether or not the canvases behind it survive
+    // one. Same for the presented sample, which is a rectangle of the old set.
+    // Only when there WAS an old set: iv(0,0) is the first allocation in the
+    // process, and the pass queues are not initialized yet at that point.
+    if old.x > 0 && old.y > 0 {
+        drop_queued_passes_on_target_rebuild()
+        PRESENTED_SCENE_SAMPLE = null
+    }
+    // Active rectangles are expressed inside a capacity that just moved. The
+    // build re-establishes each target at its full new extent, and
+    // `set_scene_active_rects` narrows them again on the next frame.
+    CANVAS_ACTIVE.clear()
+    let alloc = scene_target_extent_for(cap)
+    // iv(0,0) means nothing has been allocated yet; every slot holds NO_CANVAS
+    // and the build creates rather than resizes, with no separate first-time path.
+    create_render_canvases(alloc.x, alloc.y)
+    SCENE_CAPACITY = cap
+    SCENE_TARGET_REALLOCS += 1
+    if alloc == cap {
+        log_info("RENDER", "scene targets realloc {old.x}x{old.y} -> {cap.x}x{cap.y}")
+    } else {
+        log_info("RENDER", "scene targets realloc {old.x}x{old.y} -> {cap.x}x{cap.y} (allocated {alloc.x}x{alloc.y}: no entry in this process renders)")
+    }
+}
+
+// Window resize: the drawable moved, so the profile's capacity may have too.
+// Resolve a fresh view first -- the new drawable is already cached.
+fn handle_window_resized() {
+    refresh_render_view()
+    let view = RENDER_VIEW ?? return
+    ensure_scene_capacity(view.scene_capacity)
+}
+
+// Read the entity_id at a screen pixel from the depth-tested id buffer.
+// Returns 0 if no entity at that pixel. The id canvas is R32I on every
+// context (no float-canvas dependency); the readback returns the integer
+// id as float, exact below 2^24.
+// Under SIM_DRAW=commands the id canvas is never written, so the honest
+// answer is "no entity under the cursor" (0): production hover resolution
+// asks every frame and must not abort the frame. Only the sim-facing pixel
+// readers fail loud (`sim_submit_guard`).
+pub fn get_entity_id_at_pixel(screen_x: int, screen_y: int) -> int {
+    sim_draw_on_demand()
+    if screen_x < 0 || screen_y < 0 { return 0 }
+    if SIM_SKIP_SUBMIT { return 0 }
+    return max(0, int(read_canvas_pixel(visible_id_canvas, screen_x, screen_y)))
+}
+
+pub fn get_nearest_entity_id_at_pixel(screen_x: int, screen_y: int, side: int) -> int {
+    sim_draw_on_demand()
+    if screen_x < 0 || screen_y < 0 { return 0 }
+    if SIM_SKIP_SUBMIT { return 0 }
+    return read_canvas_nearest_id(visible_id_canvas, screen_x, screen_y, side)
+}
+
+// The visible_id_canvas pixel for a logical-output point (mouse_canvas_pixel
+// = the cursor's). Returns iv(-1, -1) outside the presented scene rectangle
+// -- a click in a letterbox bar, or outside a cropped 1x pixel-perfect image
+// -- and -1 makes the Rust-side readback bounds check return entity id 0.
+//
+// output_to_scene_texel lands the top-left/Y-down scene texel; the flip here
+// is the last step, because the world is stored image-convention (the `-2/h`
+// ortho) while read_canvas_pixel takes a top-left y and converts to a GL
+// bottom-up row itself (pixel_readback.rs).
+//
+// INVARIANT: the world projection and this readback share one FrameView, so
+// they cannot drift apart the way an offset applied on only one side did
+// (becadc0a1).
+pub fn canvas_pixel_for(p: Vec2) -> IVec2 {
+    // A resize reallocates the id canvas before its first new present, so the
+    // previous presented view can address outside the current target.
+    let view = RENDER_VIEW ?? PRESENTED_VIEW ?? return iv(-1, -1)
+    let t = output_to_scene_texel(view, p) ?? return iv(-1, -1)
+    return iv(int(t.x), int((view.scene_size.y as float) - 1.0 - t.y))
+}
+
+pub fn mouse_canvas_pixel() -> IVec2 {
+    return canvas_pixel_for(mouse_screen())
+}
+
+// Read the entity_id under the current mouse cursor. Returns 0 if none.
+pub fn get_entity_id_at_mouse() -> int {
+    let p = mouse_canvas_pixel()
+    return get_entity_id_at_pixel(p.x, p.y)
+}
+
+pub fn get_nearest_entity_id_at_mouse(side: int) -> int {
+    let p = mouse_canvas_pixel()
+    return get_nearest_entity_id_at_pixel(p.x, p.y, side)
+}
+
+// Same as get_entity_id_at_mouse, but routed through an async PBO slot: the
+// returned value is the eid under the cursor one frame ago. Avoids the
+// synchronous glReadPixels stall (~3ms/frame). Allocate the slot once with
+// pixel_readback_new() or pixel_readback_area_new() and reuse it.
+// Deferred pick submit: a mid-frame ReadPixels from a canvas written THIS
+// frame forces a TBDR pipeline drain (24.7 ms measured on an iPhone 16, vs
+// 0.07 ms deferred). The submit is queued here and issued at the next frame
+// start (runner.rock), when the id canvas holds last frame's completed ids
+// -- the read rides the same wait frame_clear already absorbs. Costs one
+// extra frame of hover staleness on top of the PBO's own frame.
+global PICK_DEFER_SLOT: PixelReadback? = null
+global PICK_DEFER_POS: IVec2 = iv(0, 0)
+global PICK_DEFER_SIDE: int = 0
+global PICK_ANSWER_POS: IVec2? = null
+
+fn flush_deferred_pick_submit() {
+    if PICK_DEFER_SLOT != null {
+        if PICK_DEFER_SIDE > 0 {
+            pixel_readback_submit_area(PICK_DEFER_SLOT.unwrap(), visible_id_canvas,
+                PICK_DEFER_POS.x, PICK_DEFER_POS.y, PICK_DEFER_SIDE)
+        } else {
+            pixel_readback_submit(PICK_DEFER_SLOT.unwrap(), visible_id_canvas,
+                PICK_DEFER_POS.x, PICK_DEFER_POS.y)
+        }
+        PICK_DEFER_SLOT = null
+        PICK_DEFER_SIDE = 0
+    }
+}
+
+pub fn get_entity_id_at_mouse_async(slot: PixelReadback, side: int = 0) -> int? {
+    return get_entity_id_at_pixel_async(slot, mouse_canvas_pixel(), side)
+}
+
+// Asks for the id at canvas pixel `p` (a canvas_pixel_for result) and returns
+// the answer to an earlier request on this slot, or null while none has
+// landed: the read never waits on the GPU, so a GPU running frames behind
+// delays answers instead of stalling the CPU. entity_id_async_answer_pixel
+// names the pixel an answer is for.
+pub fn get_entity_id_at_pixel_async(slot: PixelReadback, p: IVec2, side: int = 0) -> int? {
+    sim_draw_on_demand()
+    // No id canvas is written, so 0 is the honest answer for any pixel.
+    if SIM_SKIP_SUBMIT {
+        PICK_ANSWER_POS = p
+        return 0
+    }
+    PICK_DEFER_SLOT = slot
+    PICK_DEFER_POS = p
+    PICK_DEFER_SIDE = side
+    let readback_phase = perf_phase_begin("gl.pick_readback")
+    let id = stone_pixel_readback_poll_id(slot.handle.0)
+    perf_phase_end(readback_phase)
+    if id < 0 {
+        PICK_ANSWER_POS = null
+        return null
+    }
+    PICK_ANSWER_POS = iv(stone_pixel_readback_answer_x(slot.handle.0),
+        stone_pixel_readback_answer_y(slot.handle.0))
+    return id
+}
+
+// The canvas pixel the last get_entity_id_at_*_async call answered, or null
+// when it had no answer.
+pub fn entity_id_async_answer_pixel() -> IVec2? {
+    return PICK_ANSWER_POS
+}
+
+struct TextDraw {
+    pos: Vec2,
+    text: string,
+    color: Color,
+    size: float,
+}
+
+struct RectDraw {
+    pos: Vec2,
+    size: Vec2,
+    color: Color,
+    mode: string,
+}
+
+// Duration drawing system for debug visuals
+value DurationItem {
+    draw_fn: () -> (),
+    time_remaining: float,
+}
+
+global duration_items: [DurationItem] = []
+
+pub fn run_with_duration(duration: float, draw_fn: () -> ()) {
+    duration_items.push(DurationItem {
+        draw_fn: draw_fn,
+        time_remaining: duration,
+    })
+}
+
+@update(stage = 15)
+fn update_duration_items() {
+    let i = 0
+    while i < duration_items.len() {
+        let item = duration_items[i]
+        let remaining = item.time_remaining - dt
+        duration_items[i].time_remaining = remaining
+
+        item.draw_fn()
+
+        if remaining <= 0.0 {
+            duration_items.swap_remove(i)
+            ()
+        } else {
+            i = i + 1
+        }
+    }
+}
+
+// Shapes
+
+// Splitting note: each of the duration-variant draw fns below has the
+// closure-creating branch hoisted into a separate `_*_dur` helper.
+// Reason: a Lua function that contains a closure anywhere in its body
+// emits `UCLO` at function exit, which aborts every LuaJIT trace
+// passing through — even on the hot path where the closure branch is
+// never taken. Pulling the closure into a separate fn keeps the hot
+// path closure-free.
+
+pub fn draw_rect(
+    pos: Vec2,
+    size: Vec2,
+    color: Color,
+    layer: int = DEFAULT_SHAPE_LAYER,
+    depth: DepthMode = DepthMode::Off,
+    duration: float? = null
+) {
+    if duration != null {
+        _draw_rect_dur(pos, size, color, layer, depth, duration.unwrap())
+    } else {
+        push_draw_rect(pos, size, color, "fill", 0, layer, depth)
+    }
+}
+
+fn _draw_rect_dur(
+    pos: Vec2,
+    size: Vec2,
+    color: Color,
+    layer: int,
+    depth: DepthMode,
+    duration: float
+) {
+    run_with_duration(duration, () => push_draw_rect(pos, size, color, "fill", 0, layer, depth))
+}
+
+pub fn draw_circle_outline(
+    p: Vec2,
+    radius: float,
+    color: Color,
+    entity_id: int = 0,
+    layer: int = DEFAULT_SHAPE_LAYER,
+    depth: DepthMode = DepthMode::Off,
+    duration: float? = null,
+    thickness: float = 1.0 / 16.0
+) {
+    if duration != null {
+        _draw_circle_outline_dur(p, radius, color, entity_id, layer, depth, duration.unwrap(), thickness)
+    } else {
+        draw_circle(p, radius, color, entity_id, layer, FillMode::Outline, depth, thickness: thickness)
+    }
+}
+
+fn _draw_circle_outline_dur(
+    p: Vec2,
+    radius: float,
+    color: Color,
+    entity_id: int,
+    layer: int,
+    depth: DepthMode,
+    duration: float,
+    thickness: float
+) {
+    run_with_duration(duration, () => draw_circle(p, radius, color, entity_id, layer, FillMode::Outline, depth, thickness: thickness))
+}
+
+pub fn draw_ellipse_outline(
+    p: Vec2,
+    radii: Vec2,
+    color: Color,
+    entity_id: int = 0,
+    layer: int = DEFAULT_SHAPE_LAYER,
+    depth: DepthMode = DepthMode::Off,
+    thickness: float = 1.0 / 16.0,
+    blend: BlendMode = BlendMode::Alpha,
+    order: int = 0,
+    z_off: float = 0,
+    outline: Outline? = null,
+    segments: int = 32
+) {
+    emit_ellipse(p, radii, color, entity_id, layer, FillMode::Outline, depth,
+        thickness, blend: blend, order: order, z_off: z_off,
+        outline: outline, segments: segments)
+}
+
+pub fn draw_circle(
+    p: Vec2,
+    radius: float,
+    color: Color,
+    entity_id: int = 0,
+    layer: int = DEFAULT_SHAPE_LAYER,
+    mode: FillMode = FillMode::Fill,
+    depth: DepthMode = DepthMode::Off,
+    duration: float? = null,
+    thickness: float = 1.0 / 16.0,
+    blend: BlendMode = BlendMode::Alpha,
+    z_off: float = 0,
+    outline: Outline? = null,
+    unlit: bool = false
+) {
+    if duration != null {
+        _draw_circle_dur(p, radius, color, entity_id, layer, mode, depth, duration.unwrap(), thickness, blend, z_off, outline, unlit)
+    } else {
+        emit_circle(p, radius, color, entity_id, layer, mode, depth, thickness, blend: blend, z_off: z_off, unlit: unlit, outline: outline)
+    }
+}
+
+// Scalar emit core: resolve the batch + append verts directly, no
+// CircleDrawCommand / DrawCommand::Circle allocation (mirrors draw_sprite).
+fn emit_circle(
+    p: Vec2,
+    radius: float,
+    color: Color,
+    entity_id: int,
+    layer: int,
+    mode: FillMode,
+    depth: DepthMode,
+    thickness: float = 1.0 / 16.0,
+    blend: BlendMode = BlendMode::Alpha,
+    z_off: float = 0,
+    unlit: bool = false,
+    outline: Outline? = null
+) {
+    emit_ellipse(p, v(radius), color, entity_id, layer, mode, depth, thickness,
+        blend: blend, z_off: z_off, unlit: unlit, outline: outline)
+}
+
+pub fn emit_ellipse(
+    p: Vec2,
+    radii: Vec2,
+    color: Color,
+    entity_id: int,
+    layer: int,
+    mode: FillMode,
+    depth: DepthMode,
+    thickness: float = 1.0 / 16.0,
+    blend: BlendMode = BlendMode::Alpha,
+    order: int = 0,
+    z_off: float = 0,
+    unlit: bool = false,
+    outline: Outline? = null,
+    segments: int = 32,
+    pipeline: Pipeline? = null
+) {
+    let texture = WHITE_PIXEL.unwrap()
+    // A shape carries no per-draw uniforms, so a pipeline is shared.
+    let batch = ensure_batch_of(sampled_image(texture), layer, blend, false, depth,
+        order: order, pipeline:pipeline, unlit: unlit || blend == BlendMode::Additive,
+        shared_pipeline: pipeline != null)
+    let outline_entity_id = if outline != null { outline.unwrap().entity_id } else { 0 }
+    let mask_entity_id = if entity_id != 0 { entity_id } else { outline_entity_id }
+
+    if outline != null && mask_entity_id > 0 {
+        register_outline_entry(mask_entity_id, outline.unwrap())
+    }
+
+    // A custom vertex shader reads the expanded triangle payload.
+    let compact = pipeline == null || pipeline.unwrap().shader_name == sprite_batch_shader
+    add_ellipse_vertices_of(batch, p, radii, color, mode, entity_id,
+        thickness: thickness, z_off: z_off, segments: segments, compact_native: compact)
+
+    if outline != null && mask_entity_id > 0 {
+        let mask = ensure_mask_batch_in(OUTLINE_MASK_BATCHES, sampled_image(texture))
+        add_ellipse_vertices_of(mask, p, radii, WHITE, mode, mask_entity_id,
+            thickness: thickness, z_off: z_off, segments: segments)
+    }
+}
+
+fn _draw_circle_dur(
+    p: Vec2,
+    radius: float,
+    color: Color,
+    entity_id: int,
+    layer: int,
+    mode: FillMode,
+    depth: DepthMode,
+    duration: float,
+    thickness: float,
+    blend: BlendMode,
+    z_off: float,
+    outline: Outline?,
+    unlit: bool
+) {
+    run_with_duration(duration, () => emit_circle(p, radius, color, entity_id, layer, mode, depth, thickness, blend: blend, z_off: z_off, unlit: unlit, outline: outline))
+}
+
+pub fn draw_rect_top_left(
+    pos: Vec2,
+    size: Vec2,
+    color: Color,
+    layer: int = DEFAULT_SHAPE_LAYER,
+    depth: DepthMode = DepthMode::Off
+) {
+    push_draw_rect(pos + size / 2, size, color, "fill", 0, layer, depth)
+}
+
+pub fn draw_rect_outline(
+    pos: Vec2,
+    size: Vec2,
+    color: Color,
+    layer: int = DEFAULT_SHAPE_LAYER,
+    depth: DepthMode = DepthMode::Off,
+    duration: float? = null
+) {
+    if duration != null {
+        _draw_rect_outline_dur(pos, size, color, layer, depth, duration.unwrap())
+    } else {
+        push_draw_rect(pos, size, color, "line", 0, layer, depth)
+    }
+}
+
+fn _draw_rect_outline_dur(
+    pos: Vec2,
+    size: Vec2,
+    color: Color,
+    layer: int,
+    depth: DepthMode,
+    duration: float
+) {
+    run_with_duration(duration, () => push_draw_rect(pos, size, color, "line", 0, layer, depth))
+}
+
+pub fn draw_rect_outline_top_left(
+    pos: Vec2,
+    size: Vec2,
+    color: Color,
+    layer: int = DEFAULT_SHAPE_LAYER,
+    depth: DepthMode = DepthMode::Off
+) {
+    push_draw_rect(pos + (size / 2), size, color, "line", 0, layer, depth)
+}
+
+fn push_draw_rect(
+    pos: Vec2,
+    size: Vec2,
+    color: Color,
+    mode: string,
+    entity_id: int = 0,
+    layer: int = DEFAULT_SHAPE_LAYER,
+    depth: DepthMode = DepthMode::Off,
+    unlit: bool = false,
+) {
+    let fill_mode = if mode == "fill" { FillMode::Fill } else { FillMode::Outline }
+    emit_rect(pos, size, color, entity_id, layer, fill_mode, depth, unlit: unlit)
+}
+
+// Scalar rect core, mirroring emit_ellipse: the only rect route that takes a
+// pipeline, so after-scene content (MAG emissives) can draw rects.
+pub fn emit_rect(
+    pos: Vec2,
+    size: Vec2,
+    color: Color,
+    entity_id: int,
+    layer: int,
+    mode: FillMode,
+    depth: DepthMode,
+    thickness: float = 1.0 / 16.0,
+    blend: BlendMode = BlendMode::Alpha,
+    order: int = 0,
+    unlit: bool = false,
+    pipeline: Pipeline? = null
+) {
+    // A shape carries no per-draw uniforms, so a pipeline is shared.
+    let batch = ensure_batch_of(sampled_image(WHITE_PIXEL.unwrap()), layer, blend, false, depth,
+        order: order, pipeline: pipeline, unlit: unlit || blend == BlendMode::Additive,
+        shared_pipeline: pipeline != null)
+    add_rect_vertices_of(batch, pos, size, color, mode, thickness, entity_id)
+}
+
+// `z_off` biases the isometric depth-sort key (add_line_vertices_of),
+// same convention as draw_circle's z_off -- callers with DepthMode::Off
+// never read it.
+pub fn draw_line(
+    a: Vec2,
+    b: Vec2,
+    color: Color,
+    width: float = 1.0 / 16.0,
+    entity_id: int = 0,
+    layer: int = DEFAULT_SHAPE_LAYER,
+    depth: DepthMode = DepthMode::Off,
+    duration: float? = null,
+    blend: BlendMode = BlendMode::Alpha,
+    order: int = 0,
+    z_off: float = 0,
+    unlit: bool = false,
+    pipeline: Pipeline? = null,
+    outline: Outline? = null
+) {
+    if duration != null {
+        _draw_line_dur(a, b, color, width, entity_id, layer, depth, duration.unwrap(), blend, order, z_off,
+            unlit, pipeline, outline)
+    } else {
+        emit_line(a, b, color, width, entity_id, layer, depth, unlit: unlit, blend: blend, order: order, z_off: z_off,
+            pipeline: pipeline, outline: outline)
+    }
+}
+
+// Scalar emit core: no LineDrawCommand / DrawCommand::Line allocation.
+fn emit_line(
+    a: Vec2,
+    b: Vec2,
+    color: Color,
+    width: float,
+    entity_id: int,
+    layer: int,
+    depth: DepthMode,
+    unlit: bool = false,
+    blend: BlendMode = BlendMode::Alpha,
+    order: int = 0,
+    z_off: float = 0,
+    pipeline: Pipeline? = null,
+    outline: Outline? = null
+) {
+    let batch = ensure_batch_of(sampled_image(WHITE_PIXEL.unwrap()), layer, blend, false, depth, order: order,
+        pipeline: pipeline, unlit: unlit, shared_pipeline: pipeline != null)
+    add_line_vertices_of(batch, a, b, color, width, entity_id, z_off: z_off)
+
+    // Same outline contract as emit_ellipse: the line's silhouette enters the
+    // outline mask under the outline's id.
+    if let o = outline {
+        let mask_entity_id = if entity_id != 0 { entity_id } else { o.entity_id }
+        if mask_entity_id > 0 {
+            register_outline_entry(mask_entity_id, o)
+            let mask = ensure_mask_batch_in(OUTLINE_MASK_BATCHES, sampled_image(WHITE_PIXEL.unwrap()))
+            add_line_vertices_of(mask, a, b, WHITE, width, mask_entity_id, z_off: z_off)
+        }
+    }
+}
+
+fn _draw_line_dur(
+    a: Vec2,
+    b: Vec2,
+    color: Color,
+    width: float,
+    entity_id: int,
+    layer: int,
+    depth: DepthMode,
+    duration: float,
+    blend: BlendMode,
+    order: int,
+    z_off: float,
+    unlit: bool,
+    pipeline: Pipeline?,
+    outline: Outline?
+) {
+    // The shader name may be Frame text; the retained closure outlives it.
+    let owned_pipeline = if let p = pipeline { pipeline_owned_in(p, duration_items.storage) } else { null }
+    run_with_duration(duration, () => emit_line(a, b, color, width, entity_id, layer, depth, unlit: unlit,
+        blend: blend, order: order, z_off: z_off, pipeline: owned_pipeline, outline: outline))
+}
+
+pub fn draw_polygon(
+    vertices: [float],
+    color: Color,
+    mode: FillMode = FillMode::Fill,
+    entity_id: int = 0,
+    layer: int = DEFAULT_SHAPE_LAYER,
+    depth: DepthMode = DepthMode::Off,
+    py: float? = null,
+    outline: Outline? = null,
+) {
+    let batch = ensure_batch_of(sampled_image(WHITE_PIXEL.unwrap()), layer, BlendMode::Alpha, false, depth)
+    let outline_entity_id = if outline != null { outline.unwrap().entity_id } else { 0 }
+    let mask_entity_id = if entity_id != 0 { entity_id } else { outline_entity_id }
+
+    if outline != null && mask_entity_id > 0 {
+        register_outline_entry(mask_entity_id, outline.unwrap())
+    }
+
+    add_polygon_vertices_of(batch, vertices, color, mode, entity_id, py)
+
+    if outline != null && mask_entity_id > 0 {
+        let mask = ensure_mask_batch_in(OUTLINE_MASK_BATCHES, sampled_image(WHITE_PIXEL.unwrap()))
+        add_polygon_vertices_of(mask, vertices, WHITE, mode, mask_entity_id, py)
+    }
+}
+
+// Horizontal alignment around `pos`:
+//   Left   = pos.x is the left edge of the text (default)
+//   Center = pos.x is the horizontal center
+//   Right  = pos.x is the right edge
+// Vertical anchor is fixed at "vertical center" (offset.y = -0.5),
+// matching the old draw_text_left_align convention -- "text drawn AT
+// pos" with the text vertically centered on pos.y. Use the
+// draw_text_top_left helper if you want pos to be the literal
+// top-left of the text rect (no vertical shift).
+// `size` = em height in world units (quantized to whole canvas px per font
+// pixel at render time -- see draw_text_immediate).
+pub fn draw_text(
+    text: string,
+    pos: Vec2,
+    size: float = 1.0,
+    color: Color = WHITE,
+    align: TextAlign = TextAlign::Left,
+    entity_id: int = 0,
+    layer: int = DEFAULT_SHAPE_LAYER,
+    depth: DepthMode = DepthMode::Off,
+    duration: float? = null,
+    family: TextFamily? = null
+) {
+    let offset = text_align_offset(align)
+    let label = text_align_label(align)
+    if family != null {
+        if duration != null {
+            _draw_text_dur_family(text, pos, size, color, offset, label,
+                entity_id, layer, depth, duration.unwrap(), family.unwrap())
+        } else {
+            push_draw_text(text, pos, size, color, offset, true, entity_id,
+                layer, depth, label, family: family)
+        }
+        return
+    }
+    if duration != null {
+        _draw_text_dur(text, pos, size, color, offset, label, entity_id, layer, depth, duration.unwrap())
+    } else {
+        push_draw_text(text, pos, size, color, offset, true, entity_id, layer, depth, label)
+    }
+}
+
+fn _draw_text_dur_family(
+    text: string,
+    pos: Vec2,
+    size: float,
+    color: Color,
+    offset: Vec2,
+    label: string,
+    entity_id: int,
+    layer: int,
+    depth: DepthMode,
+    duration: float,
+    family: TextFamily
+) {
+    let regular = family.regular.handle
+    let fallback_handles: [Entity<FontData>] = []
+    for fallback in family.fallbacks {
+        fallback_handles.push(fallback.handle)
+    }
+    run_with_duration(duration, () => {
+        let captured = TextFamily {
+            regular: Font { handle: regular },
+            fallbacks: []
+        }
+        for handle in fallback_handles {
+            captured.fallbacks.push(Font { handle: handle })
+        }
+        push_draw_text(text, pos, size, color, offset, true, entity_id,
+            layer, depth, label, family: captured)
+    })
+}
+
+pub fn draw_scene_text(
+    text: string,
+    pos: Vec2,
+    size: float = 1.0,
+    color: Color = WHITE,
+    align: TextAlign = TextAlign::Left,
+    entity_id: int = 0,
+    layer: int = DEFAULT_SHAPE_LAYER,
+    depth: DepthMode = DepthMode::Off,
+    duration: float? = null
+) {
+    let offset = text_align_offset(align)
+    let label = text_align_label(align)
+    if duration != null {
+        let owned = text.clone_into(duration_items.storage)
+        _draw_text_dur(owned, pos, size, color, offset, label,
+            entity_id, layer, depth, duration.unwrap())
+    } else {
+        push_draw_text(text, pos, size, color, offset, true, entity_id,
+            layer, depth, label)
+    }
+}
+
+// Pivot offset (text positioned at pos + offset * dims) = the negated
+// anchor fraction, so all 9 alignments fall out of text_align_fracs.
+pub fn text_align_offset(align: TextAlign) -> Vec2 {
+    return text_align_fracs(align) * -1.0
+}
+
+fn text_align_label(align: TextAlign) -> string {
+    return match align {
+        TextAlign::TopLeft      => "top-left",
+        TextAlign::TopCenter    => "top-center",
+        TextAlign::TopRight     => "top-right",
+        TextAlign::Left         => "left",
+        TextAlign::Center       => "centered",
+        TextAlign::Right        => "right",
+        TextAlign::BottomLeft   => "bottom-left",
+        TextAlign::BottomCenter => "bottom-center",
+        TextAlign::BottomRight  => "bottom-right",
+    }
+}
+
+fn _draw_text_dur(
+    text: string,
+    pos: Vec2,
+    size: float,
+    color: Color,
+    offset: Vec2,
+    label: string,
+    entity_id: int,
+    layer: int,
+    depth: DepthMode,
+    duration: float
+) {
+    run_with_duration(duration, () => push_draw_text(text, pos, size, color, offset, true, entity_id, layer, depth, label))
+}
+
+pub fn draw_text_top_left(
+    text: string,
+    pos: Vec2,
+    size: float,
+    color: Color,
+    entity_id: int = 0,
+    layer: int = DEFAULT_SHAPE_LAYER,
+    depth: DepthMode = DepthMode::Off,
+    duration: float? = null,
+    family: TextFamily? = null
+) {
+    if family != null {
+        if duration != null {
+            _draw_text_top_left_dur_family(text, pos, size, color, entity_id,
+                layer, depth, duration.unwrap(), family.unwrap())
+        } else {
+            push_draw_text(text, pos, size, color, v(0, 0), false, entity_id,
+                layer, depth, "top_left", family: family)
+        }
+        return
+    }
+    if duration != null {
+        _draw_text_top_left_dur(text, pos, size, color, entity_id, layer, depth, duration.unwrap())
+    } else {
+        push_draw_text(text, pos, size, color, v(0, 0), false, entity_id, layer, depth, "top_left")
+    }
+}
+
+fn _draw_text_top_left_dur(
+    text: string,
+    pos: Vec2,
+    size: float,
+    color: Color,
+    entity_id: int,
+    layer: int,
+    depth: DepthMode,
+    duration: float
+) {
+    run_with_duration(duration, () => push_draw_text(text, pos, size, color, v(0, 0), false, entity_id, layer, depth, "top_left"))
+}
+
+fn _draw_text_top_left_dur_family(text: string, pos: Vec2, size: float, color: Color, entity_id: int, layer: int, depth: DepthMode, duration: float, family: TextFamily) {
+    run_with_duration(duration, () => push_draw_text(text, pos, size, color,
+        v(0, 0), false, entity_id, layer, depth, "top_left", family: family))
+}
+
+// World-space extent from the emitter's retained metrics, without window/DPI scaling.
+fn measure_world_text_for(font: Font, text: string, em_wu: float) -> Vec2 {
+    let d = font.data() ?? return v()
+    let idx = d.backend_id - 1
+    if idx < 0 || idx >= FONT_UNIT_SIZES.len || FONT_UNIT_SIZES[idx] <= 0.0 {
+        return v()
+    }
+    let scale = em_wu / FONT_UNIT_SIZES[idx]
+    let layout = text_world_layout_scaled(font, text, scale, scale)
+    return v(layout.logical_bounds.w, layout.logical_bounds.h)
+}
+
+pub fn measure_world_text(text: string, em_wu: float) -> Vec2 {
+    let font = DEFAULT_FONT ?? return v(0.0, 0.0)
+    return measure_world_text_for(font, text, em_wu)
+}
+
+// Quantized: whole font-pixels per canvas-pixel, so glyph columns stay
+// uniform -- but the ladder is coarse and its bottom rung is a FLOOR, so
+// a smaller request lands on it rather than rendering smaller.
+pub fn world_text_em_for(font: Font, size: float) -> float {
+    if !WORLD_TEXT_QUANTIZE_EM { return size }
+    let view = RENDER_VIEW ?? return size
+    let ppwu = view.world_to_scene_scale
+    let d = font.data() ?? return size
+    let native = if d.native_em > 0 { d.native_em as float } else { d.pixel_size as float }
+    if native <= 0.0 || ppwu <= 0.0 { return size }
+    return max(1.0, round(size * ppwu / native)) * native / ppwu
+}
+
+pub fn world_text_em(size: float) -> float {
+    let font = DEFAULT_FONT ?? return size
+    return world_text_em_for(font, size)
+}
+
+fn world_text_anchor(pos: Vec2, dims: Vec2, offset: Vec2) -> Vec2 {
+    let raw = v(pos.x + offset.x * dims.x, pos.y + (-1.0 - offset.y) * dims.y)
+    let view = RENDER_VIEW ?? return raw
+    let ppwu = view.world_to_scene_scale
+    let cam = camera_offset_in(view)
+
+    if !WORLD_TEXT_SNAP {
+        return raw
+    }
+
+    let ax = round((raw.x + cam.x) * ppwu) / ppwu - cam.x
+    // Vertical align only: world glyphs ascend from the baseline (Y-up), but
+    // the align frac is a Y-down (screen) convention, so Top/Bottom render
+    // inverted. Flip the vertical anchor so TopLeft anchors the text's TOP.
+    // Horizontal (ax) is unchanged; Center is symmetric so it's a no-op; UI
+    // text uses a separate path (UiRect.text).
+    let ay = round((raw.y + cam.y) * ppwu) / ppwu - cam.y
+    return v(ax, ay)
+}
+
+pub fn world_text_raster_for(font: Font, text: string, pos: Vec2, offset: Vec2, size: float) -> (float, Vec2) {
+    let em_wu = world_text_em_for(font, size)
+    let dims = measure_world_text_for(font, text, em_wu)
+    return (em_wu, world_text_anchor(pos, dims, offset))
+}
+
+pub fn world_text_raster(text: string, pos: Vec2, offset: Vec2, size: float) -> (float, Vec2) {
+    let font = DEFAULT_FONT ?? return (0.0, pos)
+    return world_text_raster_for(font, text, pos, offset, size)
+}
+
+fn queue_world_text_at_for(font: Font, text: string, pos: Vec2, size: float, color: Color, offset: Vec2, layer: int, depth: DepthMode) {
+    let d = font.data() ?? return
+    if d.pixel_size <= 0 { return }
+    let idx = d.backend_id - 1
+    if idx < 0 || idx >= FONT_UNIT_SIZES.len || FONT_UNIT_SIZES[idx] <= 0.0 {
+        return
+    }
+    let em_wu = world_text_em_for(font, size)
+    let scale = em_wu / FONT_UNIT_SIZES[idx]
+    let layout = text_world_layout_scaled(font, text, scale, scale)
+    let dims = v(layout.logical_bounds.w, layout.logical_bounds.h)
+    let anchor = world_text_anchor(pos, dims, offset)
+    queue_world_text_layout(layout, anchor.x, anchor.y, color, layer, depth)
+}
+
+pub fn queue_world_text_at(text: string, pos: Vec2, size: float, color: Color, offset: Vec2, layer: int, depth: DepthMode) {
+    let font = DEFAULT_FONT ?? return
+    queue_world_text_at_for(font, text, pos, size, color, offset, layer, depth)
+}
+
+// Always world-space: the draw_text family queues into the world pool
+// and renders under the world camera. (The batched path was
+// always world -- its old closure ran inside the color pass where the
+// camera is unconditionally set.)
+fn push_draw_text(text: string, pos: Vec2, size: float, color: Color, offset: Vec2, shadow: bool, _entity_id: int, layer: int, depth: DepthMode, debug_label: string? = null, family: TextFamily? = null) {
+    if family != null {
+        let selected = family.unwrap()
+        let layout = resolve_plain_world_text_layout(selected, text,
+            size, "draw_text")
+        let em_wu = world_text_em_for(selected.regular, size)
+        let anchor = world_text_anchor(pos, v(layout.width, layout.height), offset)
+        let off_r = em_wu / 0.75
+        if shadow {
+            emit_plain_text_layout(layout, TextPlacement::World,
+                anchor + v(off_r / 16.0, -1.0 * off_r / 16.0), layer,
+                BLACK, depth)
+        }
+        emit_plain_text_layout(layout, TextPlacement::World, anchor, layer,
+            color, depth)
+        return
+    }
+    let font = DEFAULT_FONT ?? return
+    let d = font.data() ?? return
+    let idx = d.backend_id - 1
+    if idx < 0 || idx >= FONT_UNIT_SIZES.len || FONT_UNIT_SIZES[idx] <= 0.0 {
+        return
+    }
+    let em_wu = world_text_em_for(font, size)
+    let scale = em_wu / FONT_UNIT_SIZES[idx]
+    let layout = text_world_layout_scaled(font, text, scale, scale)
+    let dims = v(layout.logical_bounds.w, layout.logical_bounds.h)
+    let anchor = world_text_anchor(pos, dims, offset)
+    let off_r = em_wu / 0.75
+
+    if shadow {
+        // -y: world is Y-up, a drop shadow falls below the text.
+        let shadow_pos = pos + v(off_r / 16.0, -1.0 * off_r / 16.0)
+        let shadow_anchor = world_text_anchor(shadow_pos, dims, offset)
+        queue_world_text_layout(layout, shadow_anchor.x, shadow_anchor.y,
+            BLACK, layer, depth)
+    }
+
+    queue_world_text_layout(layout, anchor.x, anchor.y, color, layer, depth)
+
+    if ENGINE.debug_text_size {
+        // Measure at the SNAPPED em (integer glyph bucket) the renderer
+        // actually uses, not the raw `size`, so the box matches the glyphs
+        // (see world_text_raster). Outline, not fill, so the text shows through.
+        let o = dims * (offset + v(0.5))
+
+        draw_rect_outline(pos + o, dims, RED.alpha(0.9), layer)
+        draw_circle(pos, 0.15 * size, GREEN, layer: layer)
+
+        if debug_label != null {
+            queue_world_text_at_for(font, debug_label.unwrap(), pos + v(0, -off_r * 0.5) + v(off_r / 32), size * 0.5, BLACK, offset, layer, depth)
+            queue_world_text_at_for(font, debug_label.unwrap(), pos + v(0, -off_r * 0.5), size * 0.5, GREEN.alpha(0.7), offset, layer, depth)
+        }
+    }
+}
+
+// Space is explicit even when a world camera is currently bound; both spaces
+// queue into the batch system.
+pub fn draw_text_immediate(space: DrawSpace, text: string, pos: Vec2, size: float, color: Color, offset: Vec2 = v(), z_layer: int = UI_TEXT_Z_LAYER, family: TextFamily? = null) {
+    if family != null {
+        if space == DrawSpace::World {
+            let layout = resolve_plain_world_text_layout(family.unwrap(), text,
+                size, "draw_text_immediate")
+            let anchor = world_text_anchor(pos, v(layout.width, layout.height), offset)
+            emit_plain_text_layout(layout, TextPlacement::World, anchor,
+                z_layer, color)
+        } else {
+            let layout = resolve_plain_text_layout(family.unwrap(), text, size,
+                FONT_RENDER_SCALE, "draw_text_immediate")
+            let start = v(pos.x + offset.x * layout.width,
+                pos.y + offset.y * layout.height)
+            emit_plain_text_layout(layout, TextPlacement::Output, start, z_layer,
+                color)
+        }
+        return
+    }
+    let _ = DEFAULT_FONT ?? return
+    if space == DrawSpace::World {
+        // World space: `size` is the em height in WORLD UNITS -- no window
+        // factors (FONT_RENDER_SCALE is a UI/window concept; world text has
+        // one physical size on every monitor). Raster params shared with
+        // the batched path (world_text_raster).
+        queue_world_text_at(text, pos, size, color, offset, z_layer, DepthMode::Off)
+    } else {
+        // Screen space: queue into batch system
+        queue_ui_text(text, pos, size, color, offset, z_layer)
+    }
+}
+
+// Immediate shape draws: build vertices engine-side and submit through
+// the same stone_draw_mesh the batch flush uses (design principle 4 --
+// immediate mode is submit-with-count=1, no separate C-side path). The
+// mesh submit resolves the ambient camera/projection exactly like the
+// retired stone_draw_rectangle/_circle/_line FFI (bound shader's camera,
+// or bound-target pixel ortho when none), so world-space and canvas
+// callers land identically. GPU state is committed on return, preserving
+// immediate semantics for canvas/readback boundaries.
+fn new_immediate_shape_batch() -> RenderBatch {
+    let cap = RENDER_BATCH_DEFAULT_CAP
+    let vbo = native_buffer_vertex(cap)
+    RenderBatch {
+        texture: sampled_image(WHITE_PIXEL.unwrap()),
+        verts: vbo,
+        count: 0,
+        capacity: cap,
+        blend: BlendMode::Alpha,
+        pixel_snap: false,
+        z_layer: 0,
+        depth: DepthMode::Off,
+    }
+}
+
+pub fn immediate_shape_batch() -> RenderBatch {
+    static b: RenderBatch = new_immediate_shape_batch()
+    reset_batch_geometry(b)
+    return b
+}
+
+// Run an immediate mesh draw with a program guaranteed bound. If a camera pass
+// is already active (a world-space immediate draw inside a custom_draw, e.g.
+// mag custom_draw_aux_pollution), draw through it so the geometry inherits that
+// pass's camera. Otherwise bind the basic sprite program with a bound-target
+// pixel ortho + identity view -- the behavior the deleted embedded default
+// program provided (the same identity view + pixel ortho the UI pass uses). Either
+// way stone_draw_mesh's no-shader arm stays fail-closed: nothing reaches it
+// unbound.
+// Closure-free bracket form for flush loops (#948): begin returns 1 when it
+// inherited the bound program (end is a no-op), 2 when it bound
+// sprite_basic under a cleared camera (end restores both), and 0 when
+// sprite_basic has no live handle -- the caller skips its draw and still
+// calls end to unbind.
+fn begin_immediate_shader() -> int {
+    if stone_current_shader_bound() {
+        // Inheriting a program means inheriting its per-draw texture slots. A
+        // DrawList or world custom_draw closure that calls an immediate verb
+        // lands here with sprite_batch current, and that program's normal slot
+        // is bound per DRAW -- the flush's bind belonged to the flush's own
+        // draw, not to this one. An immediate shape carries no normal sheet.
+        if let current = WATCHER.current_shader_name {
+            bind_sprite_normal_texture(current.unwrap(), null)
+            bind_sprite_surface_texture(current.unwrap(), null)
+        }
+        return 1
+    }
+    set_shader(sprite_basic_shader)
+    if get_shader_handle(sprite_basic_shader) == 0 { return 0 }
+    // The identity matrix belongs to this draw only. Restore the caller's
+    // matrix for subsequent world submissions (end_cleared_camera).
+    begin_cleared_camera()
+    set_engine_uniforms(sprite_basic_shader, v(0.0, 1.0))
+    return 2
+}
+
+fn end_immediate_shader(state: int) {
+    if state == 2 {
+        end_cleared_camera()
+        end_shader()
+    } else if state == 0 {
+        end_shader()
+    }
+}
+
+fn with_immediate_shader(draw: fn() -> ()) {
+    let state = begin_immediate_shader()
+    if state != 0 { draw() }
+    end_immediate_shader(state)
+}
+
+fn submit_immediate_shape_bound(batch: RenderBatch) {
+    if batch.count == 0 { return }
+    let (texture_kind, texture_key, sampler_key) =
+        sampled_texture_render_keys(batch.texture)
+    draw_mesh_sampled(batch.verts, batch.count,
+        texture_kind, texture_key, sampler_key, batch.sampling)
+    reset_batch_geometry(batch)
+}
+
+fn submit_immediate_shape(batch: RenderBatch) {
+    if batch.count == 0 { return }
+    let shader_state = begin_immediate_shader()
+    if shader_state != 0 { submit_immediate_shape_bound(batch) }
+    end_immediate_shader(shader_state)
+}
+
+// TODO: Remove mode
+pub fn draw_rect_immediate(pos: Vec2, size: Vec2, color: Color, mode: string = "fill") {
+    if mode == "fill" {
+        let b = immediate_shape_batch()
+        add_rect_vertices_of(b, pos, size, color, FillMode::Fill, 0.0, 0)
+        submit_immediate_shape(b)
+    } else {
+        draw_rect_outline_immediate(pos, size, color)
+    }
+}
+
+pub fn draw_image_immediate(
+    image: SampledTexture,
+    pos: Vec2,
+    dest_size: Vec2,
+    source: IRect? = null,
+    color: Color = WHITE,
+    sampling: TextureFilter? = null
+) {
+    let b = immediate_shape_batch()
+    b.texture = image
+    b.sampling = resolve_sampling(image, sampling)
+    add_sprite_vertices_of(
+        b, image, pos, source, dest_size, PIVOT_CENTER,
+        0.0, false, false, color, 0.0, 0)
+    submit_immediate_shape(b)
+}
+
+// Four 1.0-wide edge-centered lines around the rect (top-left = pos -
+// size/2), matching the retired FFI "line" mode -- NOT the inset
+// add_rect_vertices_of(Outline) border.
+pub fn draw_rect_outline_immediate(pos: Vec2, size: Vec2, color: Color) {
+    let b = immediate_shape_batch()
+    let tl = pos - (size / 2)
+    let tr = tl + v(size.x, 0)
+    let br = tl + size
+    let bl = tl + v(0, size.y)
+    add_line_vertices_of(b, tl, tr, color, 1.0, 0)
+    add_line_vertices_of(b, tr, br, color, 1.0, 0)
+    add_line_vertices_of(b, br, bl, color, 1.0, 0)
+    add_line_vertices_of(b, bl, tl, color, 1.0, 0)
+    submit_immediate_shape(b)
+}
+
+pub fn draw_circle_immediate(
+    p: Vec2,
+    radius: float,
+    color: Color,
+    segments: int = 16,
+    mode: string = "fill"
+) {
+    let b = immediate_shape_batch()
+    let fm = if mode == "fill" { FillMode::Fill } else { FillMode::Outline }
+    add_circle_vertices_of(b, p, radius, color, fm, 0, thickness: 1.0, segments: segments)
+    submit_immediate_shape(b)
+}
+
+pub fn draw_line_immediate(a: Vec2, b: Vec2, color: Color, width: float = 1.0) {
+    let batch = immediate_shape_batch()
+    add_line_vertices_of(batch, a, b, color, width, 0)
+    submit_immediate_shape(batch)
+}
+
+pub fn draw_polygon_immediate(vertices: [float], color: Color, mode: string = "fill") {
+    let b = immediate_shape_batch()
+    let fm = if mode == "fill" { FillMode::Fill } else { FillMode::Outline }
+    add_polygon_vertices_of(b, vertices, color, fm, 0)
+    submit_immediate_shape(b)
+}

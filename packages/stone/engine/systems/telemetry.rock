@@ -1,0 +1,206 @@
+pub fn telemetry_start(organization: string, application: string, game: string,
+    build: string, platform: string, channel: string,
+    endpoint: string, token: string, explicit_reconsent: bool = false) -> bool {
+    let root = get_pref_path(organization, application) ?? return false
+    return telemetry_start_at(root, game, build, platform, channel, endpoint, token, explicit_reconsent)
+}
+
+pub fn telemetry_start_at(root: string, game: string, build: string,
+    platform: string, channel: string, endpoint: string, token: string,
+    explicit_reconsent: bool = false) -> bool {
+    telemetry_capture_close()
+    return telemetry_configure_native(root, game, build, platform, channel, endpoint, token, explicit_reconsent)
+}
+
+inline(lua) fn telemetry_configure_native(root: string, game: string, build: string,
+    platform: string, channel: string, endpoint: string, token: string,
+    explicit_reconsent: bool) -> bool = """
+    return stone.stone_telemetry_configure(root, game, build, platform, channel, endpoint, token, explicit_reconsent)
+"""
+
+// One event's optional structured payload. Stone owns the sink, so it owns the
+// payload's shape; the event vocabulary stays with the game.
+//
+// The bounds enforced by the ingest are: at
+// most 32 keys, keys at most 64 characters, values are 64-bit integers, finite
+// floats, booleans, strings of at most 256 characters, or arrays of at most 32
+// of those. The native client refuses a payload that breaks them, and a refused
+// payload is a dropped event rather than a truncated one.
+pub struct TelemetryData {
+    fields: Map<string, JsonValue>,
+}
+
+pub fn telemetry_data() -> TelemetryData {
+    return TelemetryData { fields: map_new() }
+}
+
+pub fn TelemetryData.set_str(d, key: string, value: string) -> TelemetryData {
+    d.fields[key] = json_str(value)
+    return d
+}
+
+pub fn TelemetryData.set_int(d, key: string, value: int) -> TelemetryData {
+    d.fields[key] = json_int(value)
+    return d
+}
+
+// A non-finite float has no JSON spelling, and encoding it as null would cost
+// the whole event rather than the one field it came from.
+pub fn TelemetryData.set_float(d, key: string, value: float) -> TelemetryData {
+    if is_nan(value) || value == 1.0 / 0.0 || value == -1.0 / 0.0 {
+        log_throttled("TELEMETRY", "dropped non-finite value for '{key}'", 30.0)
+        return d
+    }
+    d.fields[key] = json_float(value)
+    return d
+}
+
+pub fn TelemetryData.set_bool(d, key: string, value: bool) -> TelemetryData {
+    d.fields[key] = json_bool(value)
+    return d
+}
+
+pub fn TelemetryData.set_ints(d, key: string, values: [int]) -> TelemetryData {
+    let items: [JsonValue] = []
+    for v in values { items.push(json_int(v)) }
+    d.fields[key] = json_array(items)
+    return d
+}
+
+pub fn TelemetryData.set_strs(d, key: string, values: [string]) -> TelemetryData {
+    let items: [JsonValue] = []
+    for v in values { items.push(json_str(v)) }
+    d.fields[key] = json_array(items)
+    return d
+}
+
+fn TelemetryData.is_empty(d) -> bool {
+    return d.fields.is_empty()
+}
+
+// "" is what the native side reads as "this event has no data", so an absent
+// builder and an empty one produce the same envelope rather than one carrying
+// an empty object.
+fn telemetry_data_encode(data: TelemetryData?) -> string {
+    let d = data ?? return ""
+    if d.is_empty() { return "" }
+    return json_encode(json_object(d.fields))
+}
+
+pub fn telemetry_record(name: string, timestamp: int, data: TelemetryData? = null) -> bool {
+
+    let encoded = telemetry_data_encode(data)
+    if TELEMETRY_CAPTURE_OPEN { return telemetry_capture_record(name, timestamp, encoded) }
+    return telemetry_record_native(name, timestamp, encoded)
+}
+
+inline(lua) fn telemetry_record_native(name: string, timestamp: int, data: string) -> bool = """
+    return stone.stone_telemetry_record(name, timestamp, data)
+"""
+
+inline(lua) fn telemetry_validate_native(name: string, timestamp: int, data: string) -> bool = """
+    return stone.stone_telemetry_validate(name, timestamp, data)
+"""
+
+// Closing keeps a capture's events readable, as closing the queue keeps its file.
+pub fn telemetry_close() {
+    telemetry_capture_close()
+    telemetry_close_native()
+}
+
+@inline inline(lua) fn telemetry_close_native() = "stone.stone_telemetry_close()"
+
+pub fn telemetry_flush_for_observation() -> bool {
+    if TELEMETRY_CAPTURE_EVENTS != null { return true }
+    return telemetry_flush_native()
+}
+
+@inline inline(lua) fn telemetry_flush_native() -> bool = "return stone.stone_telemetry_flush()"
+
+// Last among the shutdown systems: closing the queue is what bounds the final
+// upload, so anything a game wants recorded about the session has to have been
+// appended by an earlier stage.
+@shutdown(stage=900)
+fn telemetry_shutdown() {
+    telemetry_close()
+}
+
+pub fn telemetry_clear(organization: string, application: string) -> bool {
+    let root = get_pref_path(organization, application) ?? return false
+    return telemetry_clear_at(root)
+}
+
+pub fn telemetry_clear_at(root: string) -> bool {
+    telemetry_capture_clear()
+    return telemetry_clear_native(root)
+}
+
+inline(lua) fn telemetry_clear_native(root: string) -> bool = "return stone.stone_telemetry_clear(root)"
+
+// A withdrawal recorded under `root` outranks any saved preference: the queue
+// refuses to open without an explicit opt-in, so a caller whose settings still
+// say "on" should show the withdrawal rather than a consent that does nothing.
+pub fn telemetry_withdrawn_at(root: string) -> bool {
+    return telemetry_withdrawn_native(root)
+}
+
+inline(lua) fn telemetry_withdrawn_native(root: string) -> bool = "return stone.stone_telemetry_withdrawn(root)"
+
+// ---------------------------------------------------------------------------
+// In-memory capture
+//
+// A sim that asserts on the event STREAM -- which events, in what order, with
+// what data -- records here instead of into a durable queue. It needs no root,
+// writes no files, and so costs no boot of its own. The queue's own contract
+// (envelopes, sequencing, persistence, consent, revocation) is tested in
+// stone-rs/src/telemetry.rs, not through a game.
+//
+// Admission is the native client's own check, so a payload the queue would
+// refuse is refused here too.
+
+pub value TelemetryCapturedEvent {
+    name: string,
+    timestamp: int,
+    data: string,
+}
+
+// Far above any sim's stream; reaching it means something records per frame.
+const TELEMETRY_CAPTURE_MAX: int = 8192
+
+pub global TELEMETRY_CAPTURE_OPEN: bool = false
+global TELEMETRY_CAPTURE_EVENTS: [TelemetryCapturedEvent]? = null
+
+// Replaces any open queue with the capture. Reopening appends to what an earlier
+// capture kept, as reopening a queue appends to its file; only a clear empties it.
+pub fn telemetry_start_capture() -> bool {
+    telemetry_close_native()
+    if TELEMETRY_CAPTURE_EVENTS == null { TELEMETRY_CAPTURE_EVENTS = [] }
+    TELEMETRY_CAPTURE_OPEN = true
+    return true
+}
+
+fn telemetry_capture_record(name: string, timestamp: int, data: string) -> bool {
+    let events = TELEMETRY_CAPTURE_EVENTS ?? return false
+    if !telemetry_validate_native(name, timestamp, data) { return false }
+    if events.len() >= TELEMETRY_CAPTURE_MAX {
+        log_once("TELEMETRY", "telemetry capture is full at {TELEMETRY_CAPTURE_MAX} events; refusing '{name}'")
+        return false
+    }
+    events.push(TelemetryCapturedEvent { name: name, timestamp: timestamp, data: data })
+    return true
+}
+
+fn telemetry_capture_close() {
+    TELEMETRY_CAPTURE_OPEN = false
+}
+
+// Withdrawal: the captured events are discarded, as the queue's file is.
+pub fn telemetry_capture_clear() {
+    TELEMETRY_CAPTURE_OPEN = false
+    TELEMETRY_CAPTURE_EVENTS = null
+}
+
+// The captured stream in record order; empty when nothing was captured.
+pub fn telemetry_captured() -> [TelemetryCapturedEvent] {
+    return TELEMETRY_CAPTURE_EVENTS ?? []
+}

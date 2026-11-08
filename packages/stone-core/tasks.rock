@@ -1,0 +1,770 @@
+// The coroutine scheduler core: tasks, waits, clocks, pollers and the
+// combinators. It holds no host state. Every clock and poller is passed in by
+// its owner (a world, a scene, or the engine host), and an owner advances its
+// clock itself. The host clock, the engine POLLER, its pump and the
+// host-default overloads live in stone/engine/systems/coroutines.rock.
+
+pub struct TaskScope {
+    live_count: int = 0,
+    disposed: bool = false,
+}
+
+pub struct TaskState {
+    scope: TaskScope,
+    retired: bool = false,
+    active: Wait,
+    last_tick_frame: int = -1,
+    clock: TaskClock,
+}
+
+pub struct TaskClock {
+    dt: float = 0.0,
+    time: float = 0.0,
+    frame: int = 0,
+    retired: bool = false,
+}
+
+pub fn task_clock_new(time: float = 0.0, frame: int = 0, dt: float = 0.0) -> TaskClock {
+    return TaskClock { dt, time, frame }
+}
+
+pub fn TaskClock.state(clock) -> TaskClock {
+    assert(!clock.retired, "TaskClock: clock has been retired")
+    return clock
+}
+
+pub fn task_clock_retire(clock: TaskClock) -> bool {
+    if clock.retired { return false }
+    clock.retired = true
+    return true
+}
+
+pub fn task_clock_same(a: TaskClock, b: TaskClock) -> bool { return same_ref(a, b) }
+
+pub fn TaskClock.now(clock) -> float { return clock.state().time }
+pub fn TaskClock.delta(clock) -> float { return clock.state().dt }
+pub fn TaskClock.frame_index(clock) -> int { return clock.state().frame }
+
+pub fn task_clock_advance(clock: TaskClock, delta: float) {
+    let state = clock.state()
+    state.dt = delta
+    state.time += delta
+    state.frame += 1
+}
+
+pub fn task_clock_set(clock: TaskClock, dt: float, time: float, frame: int) {
+    let state = clock.state()
+    state.dt = dt
+    state.time = time
+    state.frame = frame
+}
+
+pub struct CoroutinePoller {
+    clock: TaskClock,
+    entries: [CoState?] = [],
+    free_entries: [int] = [],
+    entry_count: int = 0,
+    scope: TaskScope = TaskScope {},
+}
+
+pub value Task<R = ()> {
+    coroutine: Coroutine<Wait, R>,
+    state: TaskState,
+}
+
+/// The bound clock is available while the task state is live. Completion or
+/// abandonment retires that state, so terminal handles have no task clock.
+pub fn Task<R>.clock(task) -> TaskClock {
+    if let state = task.state.get() { return state.clock }
+    error("Task.clock: task state has been retired")
+    return phantom()
+}
+
+pub @pure @inline fn task_same_instance(a: Task, b: Task) -> bool {
+    return same_ref(a.state, b.state)
+}
+
+pub fn Task.last_tick_frame(task) -> int {
+    if let state = task.state.get() { return state.last_tick_frame }
+    return -1
+}
+
+pub fn Task.active(task) -> Wait {
+    if let state = task.state.get() { return state.active }
+    return Wait::Frame
+}
+
+pub fn TaskState.get(state) -> TaskState? {
+    if state.retired || state.scope.disposed { return null }
+    return state
+}
+
+fn task_new_in<R>(scope: TaskScope, coroutine: Coroutine<Wait, R>,
+    clock: TaskClock, active: Wait) -> Task<R> {
+    assert(!scope.disposed, "cannot start a task in a disposed poller")
+    scope.live_count += 1
+    return Task { coroutine, state: TaskState { scope, active, clock } }
+}
+
+fn task_abandon<R>(task: Task<R>) {
+    let state = task.state.get() ?? return
+    state.retired = true
+    state.scope.live_count -= 1
+}
+
+fn poller_insert(poller: CoroutinePoller, entry: CoState) {
+    assert(!poller.scope.disposed, "cannot register a task in a disposed poller")
+    let slot = poller.free_entries.pop() ?? poller.entries.len()
+    if slot == poller.entries.len() { poller.entries.push(entry) }
+    else { poller.entries[slot] = entry }
+    poller.entry_count += 1
+}
+
+fn poller_remove(poller: CoroutinePoller, slot: int, entry: CoState) {
+    if slot >= poller.entries.len() { return }
+    let current = poller.entries[slot] ?? return
+    if !same_ref(current, entry) { return }
+    poller.entries[slot] = null
+    poller.free_entries.push(slot)
+    poller.entry_count -= 1
+}
+
+// Eager: run the coroutine to its first suspension NOW (the code before the
+// first yield is the constructor). A fresh task's observable state is seeded
+// the same frame it is spawned -- no frame where the task exists but hasn't
+// run its init. A positive `delay` is the explicit lazy form: the first wait
+// is `Wait::Secs(delay)`, left untouched (no prime).
+// The task's state lives in `poller`'s store and is bound to its clock, but the
+// poller does not drive it: the caller polls or ticks the handle it keeps.
+pub fn start<R>(coroutine: Coroutine<Wait, R>, poller: CoroutinePoller,
+    delay: float = 0) -> Task<R> {
+    let active = if delay > 0.0 { Wait::Secs(delay) } else { Wait::Frame }
+    let t = task_new_in(poller.scope, coroutine, poller.clock, active)
+    if delay <= 0.0 {
+        let _ = poll(t, 0)
+    }
+    return t
+}
+
+// STONE_CO_DEBUG=1: report a same-frame second RAW poll (the two-schedulers-
+// driving-one-task migration bug shape). Observation only -- poll stays
+// magic-free and still advances.
+fn co_double_poll_warn_enabled() -> bool {
+    static enabled = (env_var("STONE_CO_DEBUG") ?? "0") == "1"
+    return enabled
+}
+
+// Advance one frame; returns false the frame the coroutine completes. Stamps
+// `last_tick_frame` so a same-frame re-poll (poller after an eager prime, a
+// combinator `tick`) can be skipped by the caller -- `poll` never reads the
+// stamp itself, so it stays usable without stone (manual driving, bare tests).
+pub fn poll<R>(pc: Task<R>, dt: float) -> bool {
+    let state = pc.state.get() ?? return false
+    return task_poll_step(pc, dt, state.clock.frame_index())
+}
+
+pub fn task_poll_step<R>(pc: Task<R>, dt: float, frame: int) -> bool {
+    let state = pc.state.get() ?? return false
+    if co_double_poll_warn_enabled() && state.last_tick_frame == frame {
+        log_once("CO", "same-frame second raw poll of a task -- two schedulers driving one coroutine? (STONE_CO_DEBUG)")
+    }
+    state.last_tick_frame = frame
+    let resume_now = match state.active {
+        Wait::Frame => true
+        Wait::Secs(secs) => {
+            let remaining = secs - dt
+            state.active = Wait::Secs(remaining)
+            remaining <= 0.0
+        }
+        Wait::Tween(tw, upd) => {
+            let advanced = Tween { ..tw, elapsed: tw.elapsed + dt }
+            state.active = Wait::Tween(advanced, upd)
+            upd(advanced.current())
+            advanced.elapsed >= advanced.duration
+        }
+        Wait::Until(pred, n) => {
+            if pred() {
+                true
+            } else if n == 0 {
+                false                  // unlimited budget
+            } else {
+                let remaining = n - 1
+                state.active = Wait::Until(pred, remaining)
+                remaining <= 0         // budget exhausted
+            }
+        }
+    }
+
+    if resume_now {
+        let frame = resume(pc.coroutine)
+        if frame == null {
+            // A raise inside the body must surface here: the poller is the
+            // top-level consumer and nothing else reads last_error, so an
+            // unreported errored coroutine is a swallowed error.
+            if status(pc.coroutine) == "errored" {
+                let err = last_error(pc.coroutine) ?? "<no message>"
+                log_error("CO", "coroutine errored: {err}")
+            }
+            // Natural completion: state is already terminal (completed, -3),
+            // so kill() is a no-op. Called for contract consistency — every
+            // removal path goes through kill() so any future "eject alive"
+            // paths fire on_killed.
+            kill(pc.coroutine)
+            task_abandon(pc)
+            return false
+        }
+        let resumed_state = pc.state.get() ?? return false
+        resumed_state.active = frame
+    }
+    return true
+}
+
+// The poller borrows each coroutine through `live_task()` rather than owning
+// it: null => cancelled / gone => drop, no orphan. `clear` (if set) nulls the
+// owner's slot on natural completion. `run` holds a constant Task;
+// `run_into` reads through the slot.
+pub struct CoState {
+    // Exactly one of `fetch` (a slot or entity read) and `task` (a constant
+    // handle) is set. `run` keeps its Task here directly: a closure capturing
+    // the value would rebuild its tables on every call.
+    fetch: (() -> Task?)? = null,
+    task: Task? = null,
+    clear: (() -> ())? = null,
+    last: Task? = null,
+}
+
+/// The task this entry drives now: the constant handle, or a fresh read of
+/// its slot. Null once the slot is emptied or its entity is gone.
+pub fn CoState.live_task(co_state) -> Task? {
+    if let fetch = co_state.fetch { return fetch() }
+    return co_state.task
+}
+
+// What a `co fn` yields to pause; `poll` interprets it against frame time.
+pub enum Wait {
+    Frame,                           // resume next frame
+    Secs(float),                     // wait N seconds
+    Tween(Tween, (float) -> ()),     // run tween, call update(value) each frame
+    Until(() -> bool, int),          // poll predicate; int = max frames (0 = unlimited)
+}
+
+pub fn wait_frame() -> Wait {
+    return Wait::Frame
+}
+
+pub fn wait_sec(seconds: float) -> Wait {
+    return Wait::Secs(seconds)
+}
+
+/// Yield this from a `co fn` to pause until `pred` returns true (or
+/// until `max_frames` frames have elapsed; pass 0 for unlimited).
+/// The poller evaluates the predicate each frame; the coroutine itself
+/// is not resumed while waiting. On budget exhaustion the wait clears
+/// and the coroutine resumes — body code can check whatever signal it
+/// expected, distinguish "satisfied" from "timed out" if it cares.
+///
+/// Useful in sim scripts and anywhere a `co fn` would otherwise do
+/// `while !pred { yield wait_frame() }`.
+pub fn wait_until(max_frames: int, pred: () -> bool) -> Wait {
+    return Wait::Until(pred, max_frames)
+}
+
+pub fn tween(from: float, to: float, duration: float, easing_fn: int, update: (float) -> ()) -> Wait {
+    return Wait::Tween(
+        Tween {
+            id: "CO_TWEEN_NOID",
+            from: from,
+            to: to,
+            duration: duration,
+            elapsed: 0,
+            easing: easing_fn
+        },
+        update,
+    )
+}
+
+pub fn coroutine_poller_update(poller: CoroutinePoller) {
+    coroutine_poller_step(poller, null)
+}
+
+pub fn coroutine_poller_update_task(poller: CoroutinePoller, selected: Task?) {
+    if selected != null { coroutine_poller_step(poller, selected) }
+}
+
+fn coroutine_poller_step(poller: CoroutinePoller, selected: Task?) {
+    if poller.scope.disposed { return }
+    let clock = poller.clock.state()
+    let delta = clock.dt
+    let frame = clock.frame
+    let limit = poller.entries.len()
+    for slot in 0..limit {
+        if slot >= poller.entries.len() { break }
+        let entry = poller.entries[slot] ?? continue
+        if let task = entry.live_task() {
+            if let last = entry.last {
+                if !task_same_instance(last, task) {
+                    task_abandon(last)
+                    entry.last = task
+                }
+            } else { entry.last = task }
+            if let wanted = selected {
+                if !task_same_instance(task, wanted) { continue }
+            }
+            if !task_tick_step(task, delta, frame) {
+                if let current = entry.live_task() {
+                    entry.last = current
+                    if task_same_instance(current, task) {
+                        task_abandon(task)
+                        if let clear = entry.clear { clear() }
+                        poller_remove(poller, slot, entry)
+                    } else { task_abandon(task) }
+                } else {
+                    task_abandon(task)
+                    poller_remove(poller, slot, entry)
+                }
+            }
+        } else {
+            if let last = entry.last { task_abandon(last) }
+            poller_remove(poller, slot, entry)
+        }
+    }
+}
+
+/// Poll `t` unless it was already advanced this frame (an eager prime, a prior
+/// `poll`, or another `tick` stamped its clock frame). Returns whether the task is
+/// still live. A terminal task (completed / killed / errored) returns false
+/// WITHOUT re-polling: re-driving a dead frame re-fires its stale Wait's side
+/// effects (a Tween's update callback, an Until pred) and re-logs an errored
+/// body every poll. Combinators drive their children through `tick` so a child
+/// re-reached within one frame advances at most once. Frame-aware on purpose,
+/// unlike the magic-free `poll`.
+pub fn tick<R>(t: Task<R>, dt: float) -> bool {
+    let state = t.state.get() ?? return false
+    return task_tick_step(t, dt, state.clock.frame_index())
+}
+
+pub fn tick<R>(t: Task<R>) -> bool {
+    let state = t.state.get() ?? return false
+    let clock = state.clock.state()
+    return task_tick_step(t, clock.dt, clock.frame)
+}
+
+pub fn task_tick_step<R>(t: Task<R>, dt: float, frame: int) -> bool {
+    if status(t.coroutine) != "suspended" { return false }
+    let state = t.state.get() ?? return false
+    if state.last_tick_frame == frame { return true }
+    return task_poll_step(t, dt, frame)
+}
+
+// -- Combinators --
+// Shared contract, every combinator:
+//   - children are driven by `tick` (once per frame, stamp-guarded; a terminal
+//     child is never re-polled),
+//   - EVERY child is killed through the combinator's `defer`, so both a normal
+//     exit and a kill of the combinator (or of a parent awaiting it) cascade
+//     to the whole child tree (structured concurrency; kill on an
+//     already-completed child is a no-op),
+//   - an errored child PROPAGATES: the combinator re-raises the child's error
+//     (killing the siblings via its defer) instead of reading the error as a
+//     completion. `await` re-raises an inner's error, so the failure travels
+//     all the way up the await chain. Race tie-break: children are scanned in
+//     slot order and a completion returns immediately, so a later sibling is
+//     not ticked that frame -- it dies suspended (never errors) rather than
+//     losing a would-be error. Joins tick ALL children before checking, so
+//     there every error surfaces.
+//
+// The coroutine-argument forms start their children in an explicit poller's
+// store on its clock; the engine adds host-poller overloads.
+
+/// The checked bridge from `result(): R?` to `R`, for a task the caller drove
+/// to its end. `completed()` (natural finish) is the only state where the
+/// stored `__return` is trustworthy -- there `cast` is sound: explicit
+/// `return <expr>` is bone-coerced to R, a reachable fall-off in a concrete
+/// non-unit co fn is REJECTED at emit (skull-mir `lower_root`), nil IS the
+/// unit for R = (), and null is a legal value for nullable R. (A GENERIC-R co
+/// fn that falls off is still admitted -- unknown at the shared lowering -- so
+/// such a body instantiated non-unit can yield nil-as-R; don't write those.)
+/// Errored re-raises the child's error; killed / still-suspended raise instead
+/// of fabricating a nil typed as R.
+pub fn take_result<R>(t: Task<R>) -> R {
+    if completed(t.coroutine) {
+        // Neither fix the lint suggests exists here: `R` is generic so there is
+        // no `?? default`, and null is a legal value for a nullable `R` so a
+        // null check would raise on a correct result.
+        // rock: allow(transmute_of_nullable)
+        return cast(result(t.coroutine))
+    }
+    if status(t.coroutine) == "errored" {
+        let msg = last_error(t.coroutine) ?? "<no message>"
+        error("take_result: awaited task errored: {msg}")
+    }
+    if status(t.coroutine) == "suspended" {
+        error("take_result: task is still running")
+    }
+    error("take_result: awaited task was killed before completing")
+    return phantom()   // unreachable: error() raised
+}
+
+/// Fail-fast probe for combinator loops: re-raise a child's error the frame it
+/// happens, so siblings die through the combinator's defer instead of running
+/// to completion under a doomed parent.
+pub fn raise_if_errored<R>(t: Task<R>) {
+    if status(t.coroutine) == "errored" {
+        let msg = last_error(t.coroutine) ?? "<no message>"
+        error("awaited task errored: {msg}")
+    }
+}
+
+/// Race two tasks; returns the index (0 or 1) of the first to complete.
+pub fn race2(a: Coroutine<Wait>, b: Coroutine<Wait>, poller: CoroutinePoller) -> Coroutine<Wait, int> {
+    return race2(start(a, poller), start(b, poller))
+}
+
+pub co fn race2(a: Task, b: Task) -> Coroutine<Wait, int> {
+    defer { stop(a); stop(b) }
+    while true {
+        let la = tick(a)
+        raise_if_errored(a)
+        if !la { return 0 }
+        let lb = tick(b)
+        raise_if_errored(b)
+        if !lb { return 1 }
+        yield wait_frame()
+    }
+}
+
+/// Race three tasks; returns the index (0, 1, or 2) of the first to complete.
+pub fn race3(a: Coroutine<Wait>, b: Coroutine<Wait>, c: Coroutine<Wait>,
+    poller: CoroutinePoller) -> Coroutine<Wait, int> {
+    return race3(start(a, poller), start(b, poller), start(c, poller))
+}
+
+pub co fn race3(a: Task, b: Task, c: Task) -> Coroutine<Wait, int> {
+    defer { stop(a); stop(b); stop(c) }
+    while true {
+        let la = tick(a)
+        raise_if_errored(a)
+        if !la { return 0 }
+        let lb = tick(b)
+        raise_if_errored(b)
+        if !lb { return 1 }
+        let lc = tick(c)
+        raise_if_errored(c)
+        if !lc { return 2 }
+        yield wait_frame()
+    }
+}
+
+/// Race a homogeneous list of tasks; returns the index of the first to
+/// complete. An empty list completes immediately with -1.
+pub fn race_all(cos: [Coroutine<Wait>], poller: CoroutinePoller) -> Coroutine<Wait, int> {
+    let tasks: [Task] = []
+    for c in cos { tasks.push(start(c, poller)) }
+    return race_all(tasks)
+}
+
+pub co fn race_all(tasks: [Task]) -> Coroutine<Wait, int> {
+    defer { for t in tasks { stop(t) } }
+    if tasks.len == 0 { return -1 }
+    while true {
+        for (i, t) in enumerate(tasks) {
+            let live = tick(t)
+            raise_if_errored(t)
+            if !live { return i }
+        }
+        yield wait_frame()
+    }
+}
+
+/// Await an already-running task and read its typed result, driving it to
+/// completion first. The promise pattern: `let t = start(load_x()); ...; let x
+/// = await wait_for(t)`. A unit task (R = ()) yields the unit value. Owns the
+/// task: killing the waiter kills the task (defer); a task killed out from
+/// under the waiter raises (via `take_result`).
+pub co fn wait_for<R>(t: Task<R>) -> Coroutine<Wait, R> {
+    defer { stop(t) }
+    while tick(t) {
+        yield wait_frame()
+    }
+    return take_result(t)
+}
+
+/// Await two tasks; returns their results as a tuple once BOTH complete.
+pub fn join2<A, B>(a: Coroutine<Wait, A>, b: Coroutine<Wait, B>,
+    poller: CoroutinePoller) -> Coroutine<Wait, (A, B)> {
+    return join2(start(a, poller), start(b, poller))
+}
+
+pub co fn join2<A, B>(a: Task<A>, b: Task<B>) -> Coroutine<Wait, (A, B)> {
+    defer { stop(a); stop(b) }
+    while true {
+        let la = tick(a)
+        let lb = tick(b)
+        raise_if_errored(a)
+        raise_if_errored(b)
+        if !la && !lb { break }
+        yield wait_frame()
+    }
+    return (take_result(a), take_result(b))
+}
+
+/// Await three tasks; returns their results as a tuple once ALL complete.
+pub fn join3<A, B, C>(a: Coroutine<Wait, A>, b: Coroutine<Wait, B>, c: Coroutine<Wait, C>,
+    poller: CoroutinePoller) -> Coroutine<Wait, (A, B, C)> {
+    return join3(start(a, poller), start(b, poller), start(c, poller))
+}
+
+pub co fn join3<A, B, C>(a: Task<A>, b: Task<B>, c: Task<C>) -> Coroutine<Wait, (A, B, C)> {
+    defer { stop(a); stop(b); stop(c) }
+    while true {
+        let la = tick(a)
+        let lb = tick(b)
+        let lc = tick(c)
+        raise_if_errored(a)
+        raise_if_errored(b)
+        raise_if_errored(c)
+        if !la && !lb && !lc { break }
+        yield wait_frame()
+    }
+    return (take_result(a), take_result(b), take_result(c))
+}
+
+/// Await a homogeneous list of tasks; returns their results in list order once
+/// ALL complete. An empty list completes immediately with `[]`.
+pub fn join_all<R>(cos: [Coroutine<Wait, R>], poller: CoroutinePoller) -> Coroutine<Wait, [R]> {
+    let tasks: [Task<R>] = []
+    for c in cos { tasks.push(start(c, poller)) }
+    return join_all(tasks)
+}
+
+pub co fn join_all<R>(tasks: [Task<R>]) -> Coroutine<Wait, [R]> {
+    defer { for t in tasks { stop(t) } }
+    while true {
+        let any_live = false
+        for t in tasks {
+            if tick(t) { any_live = true }
+            raise_if_errored(t)
+        }
+        if !any_live { break }
+        yield wait_frame()
+    }
+    let out: [R] = []
+    for t in tasks {
+        out.push(take_result(t))
+    }
+    return out
+}
+
+/// Race a task against a clock: its result if it completes within `secs` of
+/// WAITING, else `null` (the loser dies through the defer). The budget bounds
+/// the wait, not the task's total runtime: it charges only time yielded inside
+/// this combinator (the awaiting frame's tick is free, and a stamp-skipped
+/// tick -- task started the same frame -- costs nothing), and the tick on the
+/// expiring frame still runs, so a task completing exactly on the deadline
+/// wins the tie. UFCS reads naturally: `await t.timeout(2.0)`. For R = () the
+/// result is uninformative (unit reads as null either way) -- distinguish via
+/// `completed(t.coroutine)`.
+pub fn timeout<R>(coroutine: Coroutine<Wait, R>, secs: float,
+    poller: CoroutinePoller) -> Coroutine<Wait, R?> {
+    return timeout(start(coroutine, poller), secs)
+}
+
+pub co fn timeout<R>(t: Task<R>, secs: float) -> Coroutine<Wait, R?> {
+    defer { stop(t) }
+    let elapsed = 0.0
+    while tick(t) {
+        if elapsed >= secs {
+            return null
+        }
+        yield wait_frame()
+        if let state = t.state.get() {
+            elapsed = elapsed + state.clock.delta()
+        }
+    }
+    return take_result(t)
+}
+
+/// Frame-budget sibling of `timeout` (the `Wait::Until(pred, max_frames)`
+/// shape, for tasks): the task's result if it completes within `frames` waited
+/// frames, else `null`. Same wait-bounding, tie-break, ownership, and unit
+/// rules as `timeout` -- so the task may advance on the awaiting frame plus
+/// once per waited frame.
+pub fn timeout_frames<R>(coroutine: Coroutine<Wait, R>, frames: int,
+    poller: CoroutinePoller) -> Coroutine<Wait, R?> {
+    return timeout_frames(start(coroutine, poller), frames)
+}
+
+pub co fn timeout_frames<R>(t: Task<R>, frames: int) -> Coroutine<Wait, R?> {
+    defer { stop(t) }
+    let waited = 0
+    while tick(t) {
+        if waited >= frames {
+            return null
+        }
+        yield wait_frame()
+        waited = waited + 1
+    }
+    return take_result(t)
+}
+
+// Re-read the owner's slot each frame. Null abandons; natural completion clears it.
+// Replacements must share poller.clock so the frame guard remains meaningful.
+pub fn poll_co_owned(poller: CoroutinePoller, fetch: () -> Task?, clear: (() -> ())? = null) {
+    poller_insert(poller, CoState { fetch: fetch, clear: clear, last: fetch() })
+}
+
+fn poll_task_owned(poller: CoroutinePoller, t: Task) {
+    poller_insert(poller, CoState { task: t, last: t })
+}
+
+/// Fire-and-forget owned by a POLLER the caller holds. The task advances only
+/// while that poller is pumped, bound to the poller's clock for waits and
+/// frame guards. Returns the handle -- watch it (`completed`) or `stop(t)` it
+/// if you care, ignore it if you don't.
+pub fn run(poller: CoroutinePoller, coroutine: Coroutine<Wait>, delay: float = 0) -> Task {
+    let active = if delay > 0.0 { Wait::Secs(delay) } else { Wait::Frame }
+    let t = task_new_in(poller.scope, coroutine, poller.clock, active)
+    poll_task_owned(poller, t)
+    if delay <= 0.0 {
+        let _ = poll(t, 0)
+    }
+    return t
+}
+
+/// Slot-owned spawn on a value's `Task?` FIELD, addressed by a compile-checked
+/// key path (`FieldRef<T, Task?>`): assign the field, register the poller, then
+/// prime -- IN THAT ORDER, so the body's pre-yield constructor code already sees
+/// `o.field != null` ("running" holds from the body's first instruction -- what
+/// a cast coroutine needs to publish state before its first yield). The poller
+/// reads through the field each frame (`stop` / null it to cancel) and nulls it
+/// on natural completion, so `field != null` stays an honest "is it running".
+/// Can't be `o.field = run(co)` -- start() would prime BEFORE the assignment
+/// lands.
+pub fn run_into<T>(poller: CoroutinePoller, o: T, f: FieldRef<T, Task?>,
+    coroutine: Coroutine<Wait>) -> Task {
+    let t = task_new_in(poller.scope, coroutine, poller.clock, Wait::Frame)
+    field_set(o, f, t)
+    poll_co_owned(poller, () => field_get(o, f), () => { field_set(o, f, null) })
+    let _ = poll(t, 0)
+    return t
+}
+
+/// Entity variant: address the `Task?` field through a generation-safe
+/// `Entity<T>`. A dead entity's `get()` is null, so the assign no-ops and every
+/// later fetch drops the entry with no orphan.
+pub fn run_into<T>(poller: CoroutinePoller, e: Entity<T>, f: FieldRef<T, Task?>,
+    coroutine: Coroutine<Wait>) -> Task {
+    let t = task_new_in(poller.scope, coroutine, poller.clock, Wait::Frame)
+    if let m = e.get() { field_set(m, f, t) }
+    poll_co_owned(
+        poller,
+        () => if let m = e.get() { field_get(m, f) } else { null },
+        () => { if let m = e.get() { field_set(m, f, null) } },
+    )
+
+    if e.get() != null {
+        let _ = poll(t, 0)
+    } else {
+        task_abandon(t)
+    }
+
+    return t
+}
+
+/// Entity-tied: the poller drives the coroutine while `e` is alive, and DROPS
+/// it (abandonment -- no terminal defers, same as nulling a slot) when the
+/// entity dies. For transient-but-entity-tied coroutines (a projectile homing
+/// a target) with no slot to own. `Entity.get()` is generation-safe, so no
+/// arena argument is needed.
+pub fn run_while<T>(poller: CoroutinePoller, coroutine: Coroutine<Wait>, e: Entity<T>,
+    delay: float = 0) -> Task {
+    let active = if delay > 0.0 { Wait::Secs(delay) } else { Wait::Frame }
+    let t = task_new_in(poller.scope, coroutine, poller.clock, active)
+    poll_co_owned(poller, () => if e.get() != null { t } else { null })
+    if delay <= 0.0 {
+        let _ = poll(t, 0)
+    }
+    if e.get() == null { task_abandon(t) }
+    return t
+}
+
+/// Stop a task by handle: kill its coroutine so terminal defers + the
+/// on_killed hook fire (cascading through `await`'s `__inner` chain).
+/// No-op once terminal. Overload sibling of the slot form below.
+pub fn stop<R>(t: Task<R>) {
+    kill(t.coroutine)
+    task_abandon(t)
+}
+
+/// Cancel a coroutine held in a `Task?` field, firing its terminal
+/// defers + on_killed hook -- unlike a bare `o.field = null`, which
+/// abandons it mid-stack so the `defer` never runs (verified: kill/
+/// natural-completion run defers, abandon does not). Idempotent: safe on
+/// an already-finished or null slot (`kill` no-ops once terminal). Prefer
+/// this over `field = null` for any live-cancellable coroutine slot.
+pub fn stop<T>(o: T, f: FieldRef<T, Task?>) {
+    if let pc = field_get(o, f) { stop(pc) }
+    field_set(o, f, null)
+}
+
+/// Replace a coroutine slot, killing the outgoing coroutine first so its
+/// cleanup runs. A bare `o.field = start(...)` over a LIVE slot abandons
+/// the old one -- same defer-skipping hazard as a bare null.
+pub fn replace<T>(o: T, f: FieldRef<T, Task?>, next: Task?) {
+    if let pc = field_get(o, f) { stop(pc) }
+    field_set(o, f, next)
+}
+
+/// Entity variant: cancel through the generation-safe handle, no manual
+/// `.get()` unwrap at the site. Dead entity: no-op (the poller has already
+/// dropped the task as abandonment).
+pub fn stop<T>(e: Entity<T>, f: FieldRef<T, Task?>) {
+    if let m = e.get() { stop(m, f) }
+}
+
+/// Entity variant of `replace`. Dead entity: no-op -- `next` is neither
+/// stored nor driven, matching the deep safe-nav assign skip.
+pub fn replace<T>(e: Entity<T>, f: FieldRef<T, Task?>, next: Task?) {
+    if let m = e.get() { replace(m, f, next) }
+}
+
+pub fn coroutine_poller_clear(poller: CoroutinePoller) {
+    for entry in poller.entries {
+        let entry = entry ?? continue
+        if let task = entry.live_task() {
+            if let last = entry.last {
+                if !task_same_instance(last, task) { task_abandon(last) }
+            }
+            stop(task)
+        } else {
+            if let last = entry.last { task_abandon(last) }
+        }
+    }
+    poller.entries.clear()
+    poller.free_entries.clear()
+    poller.entry_count = 0
+}
+
+pub fn coroutine_poller_retire(poller: CoroutinePoller) -> bool {
+    if poller.scope.disposed { return false }
+    poller.scope.disposed = true
+    poller.scope.live_count = 0
+    poller.entries.clear()
+    poller.free_entries.clear()
+    poller.entry_count = 0
+    return true
+}
+
+pub fn coroutine_poller_dispose(poller: CoroutinePoller) -> bool {
+    if poller.scope.disposed { return false }
+    coroutine_poller_clear(poller)
+    return coroutine_poller_retire(poller)
+}
+
+pub fn coroutine_poller_fire_hot_reloads(poller: CoroutinePoller) {
+    for entry in poller.entries {
+        if let state = entry {
+            if let task = state.live_task() { fire_hot_reload(task.coroutine) }
+        }
+    }
+}

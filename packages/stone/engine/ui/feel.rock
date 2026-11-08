@@ -1,0 +1,132 @@
+// UI feel -- interaction feedback (audio + VFX) per skinned element.
+// The engine owns the emit sites: widgets (widgets.rock), the focus
+// core (focus.rock), and game panel layers call ui_event at their
+// interaction edges, passing geometry and the skin's `feel` tag. The
+// game owns the content: one default UiFeel plus named profiles,
+// registered at init (the ui_nav_use pattern). Resolution happens at
+// the EVENT, not at draw or registration -- so init order between
+// skins and feels doesn't matter and re-registering a tag takes effect
+// on the next event (hot-reload friendly). A profile's unset halves
+// inherit the default's independently (play ?? default, fx ?? default).
+// An unknown tag warns once and uses the default. Emit counters sit
+// ABOVE the STONE_QUIET gate: sims run quiet but still observe
+// emissions; ui_feel_plays counts playback callbacks that accepted the
+// event; simulations cover slider-drag sounds and bus routing.
+
+pub enum UiEvent {
+    Hover, Click, FocusMove, SliderTick, SliderDragStart, SliderDragEnd,
+    TabSwitch, TextEdit, TextSubmit, Open, Close,
+}
+
+pub value UiFeel {
+    play: (fn(UiEvent) -> bool)? = null,
+    // skin is the emitting widget's or panel's skin -- null only at
+    // focus-move, which moves BETWEEN widgets and belongs to none, and
+    // for a panel that registers no frame. Lets an fx redraw the subject
+    // (ghosts) without a parallel hook. world_anchor is present when a
+    // screen-sized subject must remain attached to a point in the scene.
+    fx: ((UiEvent, Vec2, UiRect, Entity<UiSkin>?, Vec2?) -> ())? = null,
+}
+
+pub struct UiFeelState {
+    base: UiFeel,
+    named: Map<string, UiFeel>,
+    hover_n: int = 0,
+    click_n: int = 0,
+    focus_move_n: int = 0,
+    slider_tick_n: int = 0,
+    slider_drag_start_n: int = 0,
+    slider_drag_end_n: int = 0,
+    tab_switch_n: int = 0,
+    text_edit_n: int = 0,
+    text_submit_n: int = 0,
+    open_n: int = 0,
+    close_n: int = 0,
+    plays_n: int = 0,
+}
+
+pub global UI_FEEL: UiFeelState = UiFeelState { base: UiFeel {}, named: map_new() }
+
+pub fn ui_feel_default(f: UiFeel) {
+    UI_FEEL.base = f
+}
+
+pub fn ui_feel_register(tag: string, f: UiFeel) {
+    UI_FEEL.named.insert(tag, f)
+}
+
+// One interaction edge. `at`/`r` default to zero geometry for the
+// positionless emitters (focus-move, panel open/close).
+pub fn ui_event(ev: UiEvent, at: Vec2 = v(0.0, 0.0), r: UiRect = UiRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }, feel: string = "", skin: Entity<UiSkin>? = null, world_anchor: Vec2? = null) {
+    let s = UI_FEEL
+
+    if ev == UiEvent::Hover {
+        s.hover_n = s.hover_n + 1
+    } else if ev == UiEvent::Click {
+        s.click_n = s.click_n + 1
+    } else if ev == UiEvent::FocusMove {
+        s.focus_move_n = s.focus_move_n + 1
+    } else if ev == UiEvent::SliderTick {
+        s.slider_tick_n = s.slider_tick_n + 1
+    } else if ev == UiEvent::SliderDragStart {
+        s.slider_drag_start_n += 1
+    } else if ev == UiEvent::SliderDragEnd {
+        s.slider_drag_end_n += 1
+    } else if ev == UiEvent::TabSwitch {
+        s.tab_switch_n = s.tab_switch_n + 1
+    } else if ev == UiEvent::TextEdit {
+        s.text_edit_n = s.text_edit_n + 1
+    } else if ev == UiEvent::TextSubmit {
+        s.text_submit_n = s.text_submit_n + 1
+    } else if ev == UiEvent::Open {
+        s.open_n = s.open_n + 1
+    } else if ev == UiEvent::Close {
+        s.close_n = s.close_n + 1
+    }
+
+    let f = if feel != "" {
+        let hit = s.named.get(feel)
+        if hit == null {
+            log_once("UI", "unregistered feel tag '{feel}' -- using the default feel")
+        }
+        hit ?? s.base
+    } else {
+        s.base
+    }
+
+    let play = f.play ?? s.base.play
+    if play != null && play.unwrap()(ev) {
+        s.plays_n = s.plays_n + 1
+    }
+
+    let fx = f.fx ?? s.base.fx
+    if fx != null {
+        let cb = fx.unwrap()
+        cb(ev, at, r, skin, world_anchor)
+    }
+}
+
+// Lifetime emit count per event -- what the contract sim asserts
+// (playback itself is silenced under STONE_QUIET).
+pub fn ui_event_count(ev: UiEvent) -> int {
+    let s = UI_FEEL
+    return match ev {
+        UiEvent::Hover      => s.hover_n,
+        UiEvent::Click      => s.click_n,
+        UiEvent::FocusMove  => s.focus_move_n,
+        UiEvent::SliderTick => s.slider_tick_n,
+        UiEvent::SliderDragStart => s.slider_drag_start_n,
+        UiEvent::SliderDragEnd => s.slider_drag_end_n,
+        UiEvent::TabSwitch  => s.tab_switch_n,
+        UiEvent::TextEdit   => s.text_edit_n,
+        UiEvent::TextSubmit => s.text_submit_n,
+        UiEvent::Open       => s.open_n,
+        UiEvent::Close      => s.close_n,
+    }
+}
+
+// Lifetime count of events whose resolved bank was non-empty -- the
+// would-play oracle for sound resolution under quiet sims.
+pub fn ui_feel_plays() -> int {
+    return UI_FEEL.plays_n
+}

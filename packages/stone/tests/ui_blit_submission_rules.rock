@@ -1,0 +1,202 @@
+fn ui_blit_test_fixture(body: fn(Canvas, Canvas) -> ()) {
+    assert(!UI_SUBMISSION_PROBE_ON, "fixture cannot replace an active native probe")
+    setup_stone()
+    assert(stone_gpu_host_ensure(), "borrow the process GPU host")
+    let saved_view = RENDER_VIEW
+    let saved_raster = UI_RASTER_CANVAS
+    let saved_hdr = OUTPUT_HDR_CANVAS
+    let saved_written = OUTPUT_HDR_WRITTEN
+    let saved_serial = TEXT_RENDER_ORDER_SERIAL
+    let saved_present = TEXT_OUTPUT_PRESENT_ORDER
+    let saved_canvas = CURRENT_CANVAS_HANDLE
+    let saved_shader = WATCHER.current_shader_name
+    let saved_blend = CURRENT_BLEND
+    let saved_windowless = UI_SUBMISSION_PROBE_WINDOWLESS
+    let saved_pass = UI_SUBMISSION_PROBE_PASS_HOOK
+    let saved_draw = UI_SUBMISSION_PROBE_DRAW_HOOK
+    let saved_refusal = UI_SUBMISSION_PROBE_REFUSAL_HOOK
+    let saved_trace_on = GPU_TRACE_ON
+    let scope = stone_gl_pass_state_begin()
+    assert(scope != 0)
+    let src: Canvas? = null
+    let out: Canvas? = null
+    defer {
+        UI_SUBMISSION_PROBE_ON = false
+        UI_SUBMISSION_PROBE_WINDOWLESS = saved_windowless
+        UI_SUBMISSION_PROBE_PASS_HOOK = saved_pass
+        UI_SUBMISSION_PROBE_DRAW_HOOK = saved_draw
+        UI_SUBMISSION_PROBE_REFUSAL_HOOK = saved_refusal
+        RENDER_VIEW = saved_view
+        UI_RASTER_CANVAS = saved_raster
+        OUTPUT_HDR_CANVAS = saved_hdr
+        OUTPUT_HDR_WRITTEN = saved_written
+        TEXT_RENDER_ORDER_SERIAL = saved_serial
+        TEXT_OUTPUT_PRESENT_ORDER = saved_present
+        GPU_TRACE_ON = saved_trace_on
+        unset_canvas()
+        if out != null { destroy_canvas(out.unwrap()) }
+        if src != null { destroy_canvas(src.unwrap()) }
+        set_canvas_handle(saved_canvas)
+        if saved_shader != null { set_shader(saved_shader.unwrap()) } else { unset_shader() }
+        WATCHER.current_shader_name = saved_shader
+        CURRENT_BLEND = saved_blend
+        assert(stone_gl_pass_state_end(scope), "restore the borrowed host's native state")
+    }
+    src = new_canvas(4.0, 4.0, "rgba8")
+    out = new_canvas(8.0, 8.0, "rgba8")
+    GPU_TRACE_ON = false
+    stone_set_color_mask(true, true, true, true)
+    RENDER_VIEW = resolve_frame_view(v(8, 8), iv(8, 8),
+        Camera2D { center: v(0, 0), visible_world_width: 8.0 },
+        RenderConfig { scene: SceneRaster::Native })
+    UI_RASTER_CANVAS = src
+    OUTPUT_HDR_CANVAS = src
+    OUTPUT_HDR_WRITTEN = true
+    UI_SUBMISSION_PROBE_WINDOWLESS = false
+    body(src.unwrap(), out.unwrap())
+}
+
+fn ui_blit_test_route(route: int, target: Canvas) {
+    if route == 0 { composite_scaled_ui(GpuTarget::Canvas(target)) }
+    else { output_hdr_present(GpuTarget::Canvas(target)) }
+}
+
+fn ui_blit_test_pixels(target: Canvas) -> NativeBuffer<float> {
+    return canvas_read_pixels(target).rgba
+}
+
+fn ui_blit_test_refusal_and_retry(route: int) {
+    ui_blit_test_fixture((src, out) => {
+        with_canvas(src, () => {
+            stone_set_scissor(false, 0, 0, 4, 4)
+            stone_clear_canvas(0.25, 0.0, 0.0, 0.5)
+            stone_set_scissor(true, 0, 0, 4, 2)
+            stone_clear_canvas(0.125, 0.0, 0.0, 0.5)
+            stone_set_scissor(false, 0, 0, 8, 8)
+        })
+        with_canvas(out, () => { stone_clear_canvas(0.5, 0.0, 0.0, 1.0) })
+        unset_canvas()
+        stone_clear_canvas(0.5, 0.0, 0.0, 1.0)
+        let before = ui_blit_test_pixels(out)
+        let valid = RENDER_VIEW.unwrap()
+        let invalid = resolve_frame_view(v(8, 8), iv(8, 8),
+            Camera2D { center: v(0, 0), visible_world_width: 8.0 },
+            RenderConfig { scene: SceneRaster::Native }).unwrap()
+        invalid.drawable_size.x = 0
+        RENDER_VIEW = invalid
+        let refusal = ""
+        let refusals = 0
+        let executed = 0
+        UI_SUBMISSION_PROBE_ON = true
+        UI_SUBMISSION_PROBE_PASS_HOOK = (_pass) => {}
+        UI_SUBMISSION_PROBE_DRAW_HOOK = (draw, _geometry) => {
+            executed += 1
+            let blend = if route == 0 { BlendMode::Alpha } else { BlendMode::Premultiplied }
+            assert_eq(draw.blend, blend)
+            return
+        }
+        UI_SUBMISSION_PROBE_REFUSAL_HOOK = (_kind, reason) => { refusal = reason; refusals += 1 }
+        let draws_before = stone_get_graphics_stats().draw_calls
+        let failure = world_fixture_raised(() => { ui_blit_test_route(route, out) }, world_fixture_traceback)
+        assert_eq(refusals, 1, "production admission refuses the invalid viewport once")
+        assert_eq(executed, 0, "a refusal never reaches a draw")
+        assert_eq(stone_get_graphics_stats().draw_calls, draws_before)
+        let refused_pixels = ui_blit_test_pixels(out)
+        for i in 0..before.len {
+            assert_eq(refused_pixels[i], before[i], "refusal leaves every target channel untouched")
+        }
+        assert(failure != null, "a refused UI blit must raise")
+        assert(failure.unwrap().contains("submit_ui_blit"), "error names the failed operation")
+        assert(refusal.contains("viewport") && failure.unwrap().contains(refusal),
+            "error includes the actual admission reason")
+        RENDER_VIEW = valid
+        ui_blit_test_route(route, out)
+        assert_eq(executed, 1, "valid retry executes exactly one draw")
+        assert_eq(refusals, 1, "retry has one successful admission path")
+        assert_eq(stone_get_graphics_stats().draw_calls, draws_before + 1)
+        let actual = ui_blit_test_pixels(out)
+        for y in 0..8 {
+            let red = if y < 4 { 0.25 } else { 0.125 }
+            let expected = if route == 0 { red * 0.5 + 0.25 } else { red + 0.25 }
+            for x in 0..8 {
+                assert(abs(actual[(y * 8 + x) * 4] - expected) < 0.01,
+                    "route {route} pixel {x},{y}: expected {expected}, got {actual[(y * 8 + x) * 4]}")
+            }
+        }
+    })
+}
+
+@test fn ui_blit_scaled_composite_refusal_is_retryable() { ui_blit_test_refusal_and_retry(0) }
+@test fn ui_blit_output_hdr_refusal_is_retryable() { ui_blit_test_refusal_and_retry(1) }
+
+@test
+fn ui_blit_absent_layers_short_circuit() {
+    ui_blit_test_fixture((src, out) => {
+        UI_RASTER_CANVAS = null
+        OUTPUT_HDR_CANVAS = null
+        let invalid = RENDER_VIEW.unwrap()
+        invalid.drawable_size = iv(0, 8)
+        RENDER_VIEW = invalid
+        let before = stone_get_graphics_stats().draw_calls
+        for route in 0..2 { ui_blit_test_route(route, out) }
+        OUTPUT_HDR_CANVAS = src
+        OUTPUT_HDR_WRITTEN = false
+        output_hdr_present(GpuTarget::Canvas(out))
+        UI_RASTER_CANVAS = src
+        OUTPUT_HDR_WRITTEN = true
+        RENDER_VIEW = null
+        for route in 0..2 { ui_blit_test_route(route, out) }
+        assert_eq(stone_get_graphics_stats().draw_calls, before)
+    })
+}
+
+@test
+fn ui_blit_fixture_restores_after_assertion_failure() {
+    assert(stone_gpu_host_ensure(), "snapshot an initialized borrowed host")
+    let view = RENDER_VIEW
+    let raster = UI_RASTER_CANVAS
+    let hdr = OUTPUT_HDR_CANVAS
+    let written = OUTPUT_HDR_WRITTEN
+    assert(UI_SUBMISSION_PROBE_PASS_HOOK == null && UI_SUBMISSION_PROBE_DRAW_HOOK == null
+        && UI_SUBMISSION_PROBE_REFUSAL_HOOK == null)
+    let windowless = UI_SUBMISSION_PROBE_WINDOWLESS
+    let serial = TEXT_RENDER_ORDER_SERIAL
+    let present = TEXT_OUTPUT_PRESENT_ORDER
+    let canvas = CURRENT_CANVAS_HANDLE
+    let shader = WATCHER.current_shader_name
+    let blend = CURRENT_BLEND
+    let trace = GPU_TRACE_ON
+    let gl_blend = stone_gl_blend_state()
+    let gl_write = stone_gl_write_state()
+    let source: Canvas? = null
+    let target: Canvas? = null
+    let failure = world_fixture_raised(() => {
+        ui_blit_test_fixture((src, out) => {
+            source = src
+            target = out
+            UI_SUBMISSION_PROBE_ON = true
+            UI_SUBMISSION_PROBE_PASS_HOOK = (_pass) => {}
+            UI_SUBMISSION_PROBE_DRAW_HOOK = (_draw, _geometry) => {}
+            UI_SUBMISSION_PROBE_REFUSAL_HOOK = (_kind, _reason) => {}
+            output_hdr_present(GpuTarget::Canvas(out))
+            assert(false, "intentional UI blit fixture assertion failure")
+        })
+    }, world_fixture_traceback)
+    assert(failure != null && failure.unwrap().contains("intentional UI blit fixture assertion failure"))
+    assert(RENDER_VIEW == view && UI_RASTER_CANVAS == raster)
+    assert(OUTPUT_HDR_CANVAS == hdr && OUTPUT_HDR_WRITTEN == written)
+    assert(!UI_SUBMISSION_PROBE_ON && UI_SUBMISSION_PROBE_PASS_HOOK == null
+        && UI_SUBMISSION_PROBE_DRAW_HOOK == null && UI_SUBMISSION_PROBE_REFUSAL_HOOK == null)
+    assert_eq(UI_SUBMISSION_PROBE_WINDOWLESS, windowless)
+    assert_eq(TEXT_RENDER_ORDER_SERIAL, serial)
+    assert_eq(TEXT_OUTPUT_PRESENT_ORDER, present)
+    assert_eq(CURRENT_CANVAS_HANDLE, canvas)
+    assert_eq(WATCHER.current_shader_name, shader)
+    assert_eq(CURRENT_BLEND, blend)
+    assert_eq(GPU_TRACE_ON, trace)
+    assert_eq(stone_gl_blend_state(), gl_blend)
+    assert_eq(stone_gl_write_state(), gl_write)
+    assert(!canvas_is_live(source.unwrap()) && !canvas_is_live(target.unwrap()), "fixture releases both canvases")
+    assert(stone_gpu_host_ensure(), "failure leaves the process GPU host usable")
+    ui_blit_test_refusal_and_retry(0)
+}

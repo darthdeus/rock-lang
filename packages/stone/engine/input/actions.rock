@@ -1,0 +1,714 @@
+// The action layer gives stable handles over mutable bindings and runtime
+// state.
+
+const DEFAULT_AXIS_DEADZONE: float = 0.2
+const DEFAULT_AXIS_THRESHOLD: float = 0.5
+const PAD_DEVICE_CLAIM_THRESHOLD: float = 0.5
+pub const REBIND_AXIS_CAPTURE_THRESHOLD: float = 0.7
+pub const ACTION_BINDING_SLOT_COUNT: int = 3
+pub const INPUT_BINDING_ACTIVITY_DOWN: int = 1
+pub const INPUT_BINDING_ACTIVITY_PRESSED: int = 2
+
+pub enum PadStick { Left, Right }
+
+pub enum InputBinding {
+    Key { scan: string, ctrl: bool, shift: bool, alt: bool, gui: bool },
+    Mouse(int),
+    Wheel(int),
+    Pad(string),
+    PadAxis { axis: string, dir: int, deadzone: float, threshold: float },
+}
+
+pub fn key_bind(scan: string, ctrl: bool = false, shift: bool = false,
+            alt: bool = false, gui: bool = false) -> InputBinding {
+    return InputBinding::Key { scan: scan, ctrl: ctrl, shift: shift, alt: alt, gui: gui }
+}
+
+pub fn mouse_bind(button: int) -> InputBinding {
+    return InputBinding::Mouse(button)
+}
+
+pub fn wheel_bind(dir: int) -> InputBinding {
+    return InputBinding::Wheel(if dir < 0 { -1 } else { 1 })
+}
+
+pub fn pad_bind(button: string) -> InputBinding {
+    return InputBinding::Pad(button)
+}
+
+pub fn axis_bind(axis: string, dir: int, deadzone: float = DEFAULT_AXIS_DEADZONE,
+             threshold: float = DEFAULT_AXIS_THRESHOLD) -> InputBinding {
+    return InputBinding::PadAxis {
+        axis: axis,
+        dir: if dir < 0 { -1 } else { 1 },
+        deadzone: clamp(deadzone, 0.0, 0.99),
+        threshold: clamp(threshold, 0.0, 1.0),
+    }
+}
+
+pub newtype ActionDef(string)
+
+pub @inline @pure fn ActionDef.name(a) -> string { return a.0 }
+
+pub value ActionEntry {
+    handle: ActionDef,
+    defaults: [InputBinding],
+    bindings: [InputBinding],
+    ui: bool,
+    override_active: bool,
+    shared_defaults_with: [string] = [],
+}
+
+pub value ActionRuntime {
+    held_since: float,
+    last_fire: float,
+}
+
+// Registry: name -> def, plus insertion order for the rebind screen.
+pub global ACTIONS: Map<string, ActionEntry> = map_new()
+pub global ACTION_NAMES: [string] = []
+pub global ACTION_RUNTIME: Map<string, ActionRuntime> = map_new()
+global ACTION_CLAIMED_SCANCODES: [string] = []
+
+// Keyboard capture: while true, non-ui actions read false (imgui's
+// WantCaptureKeyboard). Set each frame by the focus core -- nav-mode
+// focus live -- NOT by "any panel open".
+pub global UI_INPUT_CAPTURE: bool = false
+// Text fields capture UI actions too: Enter/Escape and printable bindings
+// belong to the editor until it submits or cancels. Code-native fields set
+// this immediately; ui_text_input_begin_frame also samples ImGui once per
+// frame so its text fields receive the same ownership.
+pub global UI_TEXT_INPUT_CAPTURE: bool = false
+pub global ACTION_REPEAT_DELAY: float = 0.35
+pub global ACTION_REPEAT_RATE: float = 0.05
+
+pub fn ui_wants_input() -> bool { return UI_INPUT_CAPTURE || UI_TEXT_INPUT_CAPTURE }
+
+pub fn action_claims_begin_frame() {
+    ACTION_CLAIMED_SCANCODES.clear()
+}
+
+pub fn action_claim_scancode(scan: string) {
+    for claimed in ACTION_CLAIMED_SCANCODES {
+        if claimed == scan { return }
+    }
+    ACTION_CLAIMED_SCANCODES.push(scan)
+}
+
+pub fn action_scancode_claimed(scan: string) -> bool {
+    for claimed in ACTION_CLAIMED_SCANCODES {
+        if claimed == scan { return true }
+    }
+    return false
+}
+
+fn action_copy_bindings(src: [InputBinding]) -> [InputBinding] {
+    return src.clone()
+}
+
+pub fn action_binding_equal(a: InputBinding, b: InputBinding) -> bool {
+    match (a, b) {
+        (InputBinding::Key { scan: ascan, ctrl: actrl, shift: ashift, alt: aalt, gui: agui },
+         InputBinding::Key { scan: bscan, ctrl: bctrl, shift: bshift, alt: balt, gui: bgui }) =>
+            return ascan == bscan && actrl == bctrl && ashift == bshift && aalt == balt && agui == bgui,
+        (InputBinding::Mouse(a_button), InputBinding::Mouse(b_button)) => return a_button == b_button,
+        (InputBinding::Wheel(a_dir), InputBinding::Wheel(b_dir)) => return a_dir == b_dir,
+        (InputBinding::Pad(a_button), InputBinding::Pad(b_button)) => return a_button == b_button,
+        (InputBinding::PadAxis { axis: aaxis, dir: adir, deadzone: adeadzone, threshold: athreshold },
+         InputBinding::PadAxis { axis: baxis, dir: bdir, deadzone: bdeadzone, threshold: bthreshold }) =>
+            return aaxis == baxis && adir == bdir && adeadzone == bdeadzone && athreshold == bthreshold,
+        _ => return false,
+    }
+}
+
+pub fn input_binding_device(binding: InputBinding) -> InputDevice {
+    match binding {
+        InputBinding::Key { .. } => return InputDevice::KeyboardMouse,
+        InputBinding::Mouse(_) => return InputDevice::KeyboardMouse,
+        InputBinding::Wheel(_) => return InputDevice::KeyboardMouse,
+        InputBinding::Pad(_) => return InputDevice::Pad,
+        InputBinding::PadAxis { .. } => return InputDevice::Pad,
+    }
+}
+
+pub fn action_primary_binding_for_device(name: string, device: InputDevice) -> InputBinding? {
+    let entry = ACTIONS.get(name) ?? return null
+    for binding in entry.bindings {
+        if input_binding_device(binding) == device { return binding }
+    }
+    return null
+}
+
+pub fn action_bindings_equal(a: [InputBinding], b: [InputBinding]) -> bool {
+    if a.len() != b.len() { return false }
+    for i in 0..a.len() {
+        if !action_binding_equal(a[i], b[i]) { return false }
+    }
+    return true
+}
+
+// Authored sharing applies only to a chord present in both default lists.
+// A remap to another chord still deserves the normal conflict diagnostic.
+pub fn action_entries_share_default(a: ActionEntry, b: ActionEntry, chord: InputBinding) -> bool {
+    let declared = false
+    for name in a.shared_defaults_with {
+        if name == b.handle.name() { declared = true }
+    }
+    for name in b.shared_defaults_with {
+        if name == a.handle.name() { declared = true }
+    }
+    if !declared { return false }
+    let a_default = false
+    for binding in a.defaults {
+        if action_binding_equal(binding, chord) { a_default = true }
+    }
+    if !a_default { return false }
+    for binding in b.defaults {
+        if action_binding_equal(binding, chord) { return true }
+    }
+    return false
+}
+
+pub fn action_new(name: string, defaults: [InputBinding], ui: bool = false,
+                  shared_defaults_with: [string] = []) -> ActionDef {
+    let fresh_defaults = action_copy_bindings(defaults)
+    if let existing = ACTIONS.get(name) {
+        ACTIONS[name].defaults = fresh_defaults
+        ACTIONS[name].ui = ui
+        ACTIONS[name].shared_defaults_with = shared_defaults_with.clone()
+        if !existing.override_active {
+            ACTIONS[name].bindings = action_copy_bindings(fresh_defaults)
+        }
+        return existing.handle
+    }
+
+    let handle = ActionDef(name)
+    ACTIONS[name] = ActionEntry {
+        handle: handle,
+        defaults: fresh_defaults,
+        bindings: action_copy_bindings(fresh_defaults),
+        ui: ui,
+        override_active: false,
+        shared_defaults_with: shared_defaults_with.clone(),
+    }
+    ACTION_NAMES.push(name)
+    ACTION_RUNTIME[name] = ActionRuntime { held_since: -1.0, last_fire: -1.0 }
+    bindings_claim_raw_entry(name)
+    return handle
+}
+
+pub fn action_remove(a: ActionDef) {
+    if !ACTIONS.contains(a.name()) { return }
+    bindings_preserve_action_entry(a.name())
+    ACTIONS.remove(a.name())
+    ACTION_RUNTIME.remove(a.name())
+    let names: [string] = []
+    for name in ACTION_NAMES {
+        if name != a.name() { names.push(name) }
+    }
+    ACTION_NAMES = names
+}
+
+pub fn action_is_ui(a: ActionDef) -> bool {
+    let entry = ACTIONS.get(a.name()) ?? return false
+    return entry.ui
+}
+
+pub fn action_names() -> [string] {
+    let out: [string] = []
+    for name in ACTION_NAMES { out.push(name) }
+    return out
+}
+
+pub fn action_bindings(name: string) -> [InputBinding] {
+    let entry = ACTIONS.get(name) ?? return []
+    return action_copy_bindings(entry.bindings)
+}
+
+pub fn action_binding_is_default(a: ActionDef) -> bool {
+    let entry = ACTIONS.get(a.name()) ?? return true
+    return action_bindings_equal(entry.bindings, entry.defaults)
+}
+
+pub fn action_rebind(a: ActionDef, bindings: [InputBinding]) {
+    if ACTIONS.get(a.name()) == null { return }
+    bindings_forget_raw_entry(a.name())
+    action_store_bindings(a.name(), action_copy_bindings(bindings))
+}
+
+pub fn action_binding_at(name: string, slot: int) -> InputBinding? {
+    if slot < 0 { return null }
+    let entry = ACTIONS.get(name) ?? return null
+    if slot >= entry.bindings.len { return null }
+    return entry.bindings[slot]
+}
+
+// Replaces a registered action's bindings and recomputes whether they
+// override its defaults.
+fn action_store_bindings(name: string, bindings: [InputBinding]) {
+    let entry = ACTIONS.get(name) ?? return
+    ACTIONS[name].bindings = bindings
+    ACTIONS[name].override_active = !action_bindings_equal(bindings, entry.defaults)
+}
+
+fn action_remove_equal_binding(name: string, target: InputBinding) {
+    let entry = ACTIONS.get(name) ?? return
+    let next: [InputBinding] = []
+    for binding in entry.bindings {
+        if !action_binding_equal(binding, target) { next.push(binding) }
+    }
+    action_store_bindings(name, next)
+    bindings_forget_raw_entry(name)
+}
+
+pub fn action_assign_binding(a: ActionDef, slot: int, binding: InputBinding) -> bool {
+    if slot < 0 || slot >= ACTION_BINDING_SLOT_COUNT || ACTIONS.get(a.name()) == null { return false }
+
+    let current = action_bindings(a.name())
+    let kept: [InputBinding] = []
+    for (i, existing) in enumerate(current) {
+        if i != slot && !action_binding_equal(existing, binding) { kept.push(existing) }
+    }
+
+    let next: [InputBinding] = []
+    let insert_at = min(slot, kept.len)
+    for i in 0..kept.len {
+        if i == insert_at { next.push(binding) }
+        next.push(kept[i])
+    }
+    if insert_at == kept.len { next.push(binding) }
+
+    for name in ACTION_NAMES {
+        if name == a.name() { continue }
+        let other = ACTIONS.get(name) ?? continue
+        if action_is_ui(other.handle) == action_is_ui(a) {
+            action_remove_equal_binding(name, binding)
+        }
+    }
+
+    if ACTIONS.get(a.name()) == null { return false }
+    action_store_bindings(a.name(), next)
+    bindings_forget_raw_entry(a.name())
+    return true
+}
+
+pub fn action_replace_primary_for_device(a: ActionDef, binding: InputBinding) -> bool {
+    if ACTIONS.get(a.name()) == null { return false }
+    let family = input_binding_device(binding)
+    let current = action_bindings(a.name())
+    let primary = -1
+    for (i, existing) in enumerate(current) {
+        if input_binding_device(existing) == family {
+            primary = i
+            break
+        }
+    }
+    if primary < 0 && current.len >= ACTION_BINDING_SLOT_COUNT { return false }
+
+    let kept: [InputBinding] = []
+    for (i, existing) in enumerate(current) {
+        if i == primary || action_binding_equal(existing, binding) { continue }
+        kept.push(existing)
+    }
+    let insert_at = if primary < 0 { kept.len } else { min(primary, kept.len) }
+    let next: [InputBinding] = []
+    for i in 0..kept.len {
+        if i == insert_at { next.push(binding) }
+        next.push(kept[i])
+    }
+    if insert_at == kept.len { next.push(binding) }
+
+    for name in ACTION_NAMES {
+        if name == a.name() { continue }
+        let other = ACTIONS.get(name) ?? continue
+        if action_is_ui(other.handle) == action_is_ui(a) {
+            action_remove_equal_binding(name, binding)
+        }
+    }
+
+    action_store_bindings(a.name(), next)
+    bindings_forget_raw_entry(a.name())
+    return true
+}
+
+pub fn action_unbind_binding(a: ActionDef, slot: int) -> bool {
+    let current = action_bindings(a.name())
+    if slot < 0 || slot >= current.len { return false }
+    let next: [InputBinding] = []
+    for (i, binding) in enumerate(current) {
+        if i != slot { next.push(binding) }
+    }
+    action_rebind(a, next)
+    return true
+}
+
+pub fn action_reset_all_bindings() {
+    for name in action_names() { action_reset_binding(ActionDef(name)) }
+}
+
+pub fn action_reset_binding(a: ActionDef) {
+    let entry = ACTIONS.get(a.name()) ?? return
+    bindings_forget_raw_entry(a.name())
+    ACTIONS[a.name()].bindings = action_copy_bindings(entry.defaults)
+    ACTIONS[a.name()].override_active = false
+}
+
+fn action_modifiers_for(scan: string) -> int {
+    let modifiers = scancode_modifiers(scan)
+    if is_scancode_down("lctrl") || is_scancode_down("rctrl") { modifiers = modifiers | STONE_MOD_CTRL }
+    if is_scancode_down("lshift") || is_scancode_down("rshift") { modifiers = modifiers | STONE_MOD_SHIFT }
+    if is_scancode_down("lalt") || is_scancode_down("ralt") { modifiers = modifiers | STONE_MOD_ALT }
+    if is_scancode_down("lgui") || is_scancode_down("rgui") { modifiers = modifiers | STONE_MOD_GUI }
+    if scan == "lctrl" || scan == "rctrl" { modifiers = modifiers & ~STONE_MOD_CTRL }
+    else if scan == "lshift" || scan == "rshift" { modifiers = modifiers & ~STONE_MOD_SHIFT }
+    else if scan == "lalt" || scan == "ralt" { modifiers = modifiers & ~STONE_MOD_ALT }
+    else if scan == "lgui" || scan == "rgui" { modifiers = modifiers & ~STONE_MOD_GUI }
+    return modifiers & (STONE_MOD_CTRL | STONE_MOD_SHIFT | STONE_MOD_ALT | STONE_MOD_GUI)
+}
+
+fn action_key_matches(scan: string, ctrl: bool, shift: bool, alt: bool, gui: bool) -> bool {
+    let wanted = 0
+    if ctrl { wanted = wanted | STONE_MOD_CTRL }
+    if shift { wanted = wanted | STONE_MOD_SHIFT }
+    if alt { wanted = wanted | STONE_MOD_ALT }
+    if gui { wanted = wanted | STONE_MOD_GUI }
+    return action_modifiers_for(scan) == wanted
+}
+
+fn action_axis_value_at(raw: float, dir: int, deadzone: float) -> float {
+    let directed = raw * (dir as float)
+    if directed <= deadzone { return 0.0 }
+    return clamp((directed - deadzone) / (1.0 - deadzone), 0.0, 1.0)
+}
+
+fn action_allowed(a: ActionDef) -> bool {
+    if REBIND_CAPTURE || REBIND_INPUT_CONSUMED || UI_TEXT_INPUT_CAPTURE { return false }
+    return action_is_ui(a) || !UI_INPUT_CAPTURE
+}
+
+fn input_binding_down(binding: InputBinding) -> bool {
+    match binding {
+        InputBinding::Key { scan, ctrl, shift, alt, gui } =>
+            return is_scancode_down(scan) && action_key_matches(scan, ctrl, shift, alt, gui),
+        InputBinding::Mouse(button) => return is_mouse_down(button),
+        InputBinding::Wheel(_) => return false,
+        InputBinding::Pad(button) => return is_pad_down(button),
+        InputBinding::PadAxis { axis, dir, deadzone, threshold } =>
+            return action_axis_value_at(pad_axis_value(axis), dir, deadzone) >= threshold,
+    }
+}
+
+fn input_binding_pressed(binding: InputBinding) -> bool {
+    match binding {
+        InputBinding::Key { scan, ctrl, shift, alt, gui } =>
+            return is_scancode_pressed(scan) && action_key_matches(scan, ctrl, shift, alt, gui),
+        InputBinding::Mouse(button) => return is_mouse_pressed(button),
+        InputBinding::Wheel(dir) => return mouse_wheel_delta * dir > 0,
+        InputBinding::Pad(button) => return is_pad_pressed(button),
+        InputBinding::PadAxis { axis, dir, deadzone, threshold } => {
+            let now = action_axis_value_at(pad_axis_value(axis), dir, deadzone)
+            let was = action_axis_value_at(pad_axis_value_last(axis), dir, deadzone)
+            return now >= threshold && was < threshold
+        }
+    }
+}
+
+// Whether `binding` was down last frame. A press and release in one frame
+// counts as not down, so that press still counts. Chord modifiers are matched
+// against the current state.
+fn input_binding_was_down(binding: InputBinding) -> bool {
+    match binding {
+        InputBinding::Key { scan, ctrl, shift, alt, gui } =>
+            return !is_scancode_pressed(scan) && (is_scancode_down(scan) || is_scancode_released(scan))
+                && action_key_matches(scan, ctrl, shift, alt, gui),
+        InputBinding::Mouse(button) =>
+            return !is_mouse_pressed(button) && (is_mouse_down(button) || is_mouse_released(button)),
+        InputBinding::Wheel(_) => return false,
+        InputBinding::Pad(button) =>
+            return !is_pad_pressed(button) && (is_pad_down(button) || is_pad_released(button)),
+        InputBinding::PadAxis { axis, dir, deadzone, threshold } =>
+            return action_axis_value_at(pad_axis_value_last(axis), dir, deadzone) >= threshold,
+    }
+}
+
+// An action is one control however many bindings reach it: a press while
+// another binding already held it is not a new press. The Steam Deck layout
+// sends a key and a pad button for one button, and the two need not land in
+// the same frame.
+fn action_any_binding_was_down(bindings: [InputBinding]) -> bool {
+    for b in bindings {
+        if input_binding_was_down(b) { return true }
+    }
+    return false
+}
+
+fn action_input_binding_available(binding: InputBinding) -> bool {
+    return match binding {
+        InputBinding::Key { scan, .. } => !action_scancode_claimed(scan),
+        _ => true,
+    }
+}
+
+pub fn input_binding_activity(binding: InputBinding) -> int {
+    let activity = 0
+    if input_binding_down(binding) { activity = activity | INPUT_BINDING_ACTIVITY_DOWN }
+    if input_binding_pressed(binding) { activity = activity | INPUT_BINDING_ACTIVITY_PRESSED }
+    return activity
+}
+
+pub fn action_binding_down(name: string, slot: int) -> bool {
+    let binding = action_binding_at(name, slot) ?? return false
+    return input_binding_down(binding)
+}
+
+pub fn action_binding_pressed(name: string, slot: int) -> bool {
+    let binding = action_binding_at(name, slot) ?? return false
+    return input_binding_pressed(binding)
+}
+
+pub fn action_binding_activity(name: string, slot: int) -> int {
+    let binding = action_binding_at(name, slot) ?? return 0
+    return input_binding_activity(binding)
+}
+
+pub fn action_consume_mouse_wheel(a: ActionDef) -> bool {
+    if mouse_wheel_delta == 0 { return false }
+    let entry = ACTIONS.get(a.name()) ?? return false
+    for binding in entry.bindings {
+        match binding {
+            InputBinding::Wheel(dir) => if mouse_wheel_delta * dir > 0 {
+                mouse_wheel_delta = 0
+                return true
+            },
+            _ => {}
+        }
+    }
+    return false
+}
+
+// The first three bindings are unrolled for the reason `pressed` below is:
+// an action carries one to three bindings, so the loop runs once or twice and
+// then compiles, and every root trace that reaches this function -- its own
+// hot entry included -- aborts `inner loop in root trace` against it. The tail
+// loop keeps arbitrary binding counts working.
+pub fn down(a: ActionDef) -> bool {
+    if !action_allowed(a) { return false }
+    let entry = ACTIONS.get(a.name()) ?? return false
+    let n = entry.bindings.len()
+    if n > 0 && action_input_binding_available(entry.bindings[0])
+       && input_binding_down(entry.bindings[0]) { return true }
+    if n > 1 && action_input_binding_available(entry.bindings[1])
+       && input_binding_down(entry.bindings[1]) { return true }
+    if n > 2 && action_input_binding_available(entry.bindings[2])
+       && input_binding_down(entry.bindings[2]) { return true }
+    for i in 3..n {
+        if action_input_binding_available(entry.bindings[i])
+           && input_binding_down(entry.bindings[i]) { return true }
+    }
+    return false
+}
+
+pub fn pressed(a: ActionDef) -> bool {
+    if !action_allowed(a) { return false }
+    let entry = ACTIONS.get(a.name()) ?? return false
+    let n = entry.bindings.len()
+    if n > 0 && action_input_binding_available(entry.bindings[0])
+       && input_binding_pressed(entry.bindings[0]) { return !action_any_binding_was_down(entry.bindings) }
+    if n > 1 && action_input_binding_available(entry.bindings[1])
+       && input_binding_pressed(entry.bindings[1]) { return !action_any_binding_was_down(entry.bindings) }
+    if n > 2 && action_input_binding_available(entry.bindings[2])
+       && input_binding_pressed(entry.bindings[2]) { return !action_any_binding_was_down(entry.bindings) }
+    for i in 3..n {
+        if action_input_binding_available(entry.bindings[i])
+           && input_binding_pressed(entry.bindings[i]) { return !action_any_binding_was_down(entry.bindings) }
+    }
+    return false
+}
+
+// Capture does not gate releases: a hold begun before a panel opened still
+// has to terminate when its input is released. A release while another
+// binding still holds the action is not a release.
+pub fn released(a: ActionDef) -> bool {
+    if REBIND_CAPTURE { return false }
+    let entry = ACTIONS.get(a.name()) ?? return false
+    let any = false
+    for b in entry.bindings {
+        match b {
+            InputBinding::Key { scan, .. } => if is_scancode_released(scan) { any = true },
+            InputBinding::Mouse(button) => if is_mouse_released(button) { any = true },
+            InputBinding::Wheel(_) => {},
+            InputBinding::Pad(button) => if is_pad_released(button) { any = true },
+            InputBinding::PadAxis { axis, dir, deadzone, threshold } => {
+                let now = action_axis_value_at(pad_axis_value(axis), dir, deadzone)
+                let was = action_axis_value_at(pad_axis_value_last(axis), dir, deadzone)
+                if now < threshold && was >= threshold { any = true }
+            }
+        }
+        if any { break }
+    }
+    if !any { return false }
+    for b in entry.bindings {
+        if input_binding_down(b) { return false }
+    }
+    return true
+}
+
+// One binding's analog contribution, never negative. An unavailable binding
+// contributes 0.0, which is what skipping it did: `best` starts at 0.0 and
+// only ever rises, so 0.0 never wins.
+fn action_binding_contribution(b: InputBinding) -> float {
+    if !action_input_binding_available(b) { return 0.0 }
+    return match b {
+        InputBinding::Key { scan, ctrl, shift, alt, gui } =>
+            if is_scancode_down(scan) && action_key_matches(scan, ctrl, shift, alt, gui) { 1.0 } else { 0.0 },
+        InputBinding::Mouse(button) => if is_mouse_down(button) { 1.0 } else { 0.0 },
+        InputBinding::Wheel(dir) => if mouse_wheel_delta * dir > 0 { 1.0 } else { 0.0 },
+        InputBinding::Pad(button) => if is_pad_down(button) { 1.0 } else { 0.0 },
+        InputBinding::PadAxis { axis, dir, deadzone, .. } =>
+            action_axis_value_at(pad_axis_value(axis), dir, deadzone),
+    }
+}
+
+// Unrolled for the same reason as `down` and `pressed`.
+pub fn value(a: ActionDef) -> float {
+    if !action_allowed(a) { return 0.0 }
+    let entry = ACTIONS.get(a.name()) ?? return 0.0
+    let n = entry.bindings.len()
+    let best = 0.0
+    if n > 0 {
+        let c = action_binding_contribution(entry.bindings[0])
+        if c > best { best = c }
+    }
+    if n > 1 {
+        let c = action_binding_contribution(entry.bindings[1])
+        if c > best { best = c }
+    }
+    if n > 2 {
+        let c = action_binding_contribution(entry.bindings[2])
+        if c > best { best = c }
+    }
+    for i in 3..n {
+        let c = action_binding_contribution(entry.bindings[i])
+        if c > best { best = c }
+    }
+    return best
+}
+
+pub fn repeating(a: ActionDef) -> bool {
+    if a.pressed() {
+        if ACTION_RUNTIME.get(a.name()) == null { return false }
+        ACTION_RUNTIME[a.name()].held_since = time
+        ACTION_RUNTIME[a.name()].last_fire = time
+        return true
+    }
+    if !a.down() { return false }
+    let runtime = ACTION_RUNTIME.get(a.name()) ?? return false
+    if time - runtime.held_since < ACTION_REPEAT_DELAY { return false }
+    if time - runtime.last_fire >= ACTION_REPEAT_RATE {
+        ACTION_RUNTIME[a.name()].last_fire = time
+        return true
+    }
+    return false
+}
+
+pub fn action_vec2(left: ActionDef, right: ActionDef, up: ActionDef, down: ActionDef) -> Vec2 {
+    let out = v(right.value() - left.value(), up.value() - down.value())
+    let length = out.length()
+    if length > 1.0 { return out / length }
+    return out
+}
+
+pub fn stick_value(which: PadStick, deadzone: float = DEFAULT_AXIS_DEADZONE) -> Vec2 {
+    let x_axis = if which == PadStick::Left { "leftx" } else { "rightx" }
+    let y_axis = if which == PadStick::Left { "lefty" } else { "righty" }
+    let out = v(pad_axis_value(x_axis), pad_axis_value(y_axis))
+    let length = out.length()
+    if length <= deadzone { return v(0.0, 0.0) }
+    let scaled = clamp((length - deadzone) / (1.0 - deadzone), 0.0, 1.0)
+    return out / length * scaled
+}
+
+pub fn binding_label(binding: InputBinding) -> string {
+    match binding {
+        InputBinding::Key { scan, ctrl, shift, alt, gui } => {
+            if !ctrl && !shift && !alt && !gui { return stone_scancode_label(scan) }
+            let parts: [string] = []
+            if ctrl { parts.push("Ctrl") }
+            if shift { parts.push("Shift") }
+            if alt { parts.push("Alt") }
+            if gui { parts.push("Gui") }
+            parts.push(stone_scancode_label(scan))
+            return join(parts, "+")
+        }
+        InputBinding::Mouse(button) => {
+            if button == MOUSE_BUTTON_LEFT { return "LMB" }
+            if button == MOUSE_BUTTON_MIDDLE { return "MMB" }
+            if button == MOUSE_BUTTON_RIGHT { return "RMB" }
+            return "Mouse {button}"
+        },
+        InputBinding::Wheel(dir) => return "Wheel {if dir < 0 { "Down" } else { "Up" }}",
+        InputBinding::Pad(button) => return pad_button_label(button),
+        InputBinding::PadAxis { axis, dir, .. } => return pad_axis_label(axis, dir),
+    }
+}
+
+// Capture persists the raw SDL button token, so this table is the only
+// player-facing spelling of a pad binding. A token the pad reports but this
+// table does not name keeps a Pad marker, as an unknown mouse button does.
+fn pad_button_label(button: string) -> string {
+    return match button {
+        "a" => "A",
+        "b" => "B",
+        "x" => "X",
+        "y" => "Y",
+        "back" => "Back",
+        "start" => "Start",
+        "guide" => "Guide",
+        "leftshoulder" => "LB",
+        "rightshoulder" => "RB",
+        "leftstick" => "LS",
+        "rightstick" => "RS",
+        "dpup" => "D-pad Up",
+        "dpdown" => "D-pad Down",
+        "dpleft" => "D-pad Left",
+        "dpright" => "D-pad Right",
+        _ => "Pad {button}",
+    }
+}
+
+// A trigger has one pressed direction, so its sign says nothing; a stick axis
+// carries a different action each way, so it names the direction instead.
+fn pad_axis_label(axis: string, dir: int) -> string {
+    let trigger = match axis {
+        "lefttrigger" => "LT",
+        "righttrigger" => "RT",
+        _ => "",
+    }
+    if trigger != "" { return if dir < 0 { "{trigger} -" } else { trigger } }
+    let stick = match axis {
+        "leftx" | "lefty" => "Left Stick",
+        "rightx" | "righty" => "Right Stick",
+        _ => "",
+    }
+    if stick != "" {
+        let way = match axis {
+            "leftx" | "rightx" => if dir < 0 { "Left" } else { "Right" },
+            _ => if dir < 0 { "Up" } else { "Down" },
+        }
+        return "{stick} {way}"
+    }
+    return "Pad {axis} {if dir < 0 { "-" } else { "+" }}"
+}
+
+// One and two bindings cover every shipped action, and both take the
+// straight-line path: no loop to compile, and no scratch array either.
+pub fn action_binding_labels(name: string) -> string {
+    let bindings = action_bindings(name)
+    let n = bindings.len()
+    if n == 0 { return "" }
+    if n == 1 { return binding_label(bindings[0]) }
+    if n == 2 { return binding_label(bindings[0]) + ", " + binding_label(bindings[1]) }
+    let parts: [string] = []
+    for binding in bindings { parts.push(binding_label(binding)) }
+    return join(parts, ", ")
+}

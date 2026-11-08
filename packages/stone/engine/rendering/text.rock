@@ -1,0 +1,3212 @@
+// Text owner: font projection lifecycle, text layout/cache, and text
+// emission/measurement. Split out of `batch.rock`, which keeps the generic
+// batch pools, geometry, ordering and flushing; this file calls into those
+// (ensure_ui_batch, append_vertex, batch_key_of) and batch calls back only
+// through `invalidate_text_batch_caches` and the `text_batch` batch key.
+//
+// Stays out on purpose: font loading and default-family resolution live in
+// `stone/engine/font_resolve.rock`; text-art effects live in
+// `stone/engine/ui/text_art.rock`.
+
+// --- Unified text batching (per-font) ---
+// One slot per loaded font, indexed by `font_id - 1` (matches the
+// stone-rs 1-based font_id). init_text_batch_for() grows the vecs
+// when a new font loads; queue_ui_text() reads from the slot keyed
+// by the call's Font argument (or DEFAULT_FONT if omitted).
+pub global FONT_ATLASES: [Image] = []
+global FONT_PIXEL_SIZES: [int] = []
+global FONT_CAP_HEIGHTS: [float] = []     // legacy per-font 'X' coverage height in atlas px
+pub global FONT_UNIT_SIZES: [float] = []      // units_per_em; layout authority, never raster-rounded
+pub global FONT_UNIT_CAP_HEIGHTS: [float] = []
+pub global FONT_UNIT_ASCENTS: [float] = []
+pub global FONT_UNIT_DESCENTS: [float] = []
+pub global FONT_UNIT_LINE_GAPS: [float] = []
+// Per font, then per FACE (Face::ALL order), then by text slot 0..127. An
+// undeclared face's slice is empty: nothing substitutes regular for it.
+pub global GLYPH_CACHES: [[[GlyphData]]] = []
+pub global GLYPH_UNIT_CACHES: [[[GlyphUnitData]]] = []
+// Per font: declared codepoint -> text slot, for codepoints outside the
+// identity block. Published by stone-rs from the charset that baked the atlas
+// rather than re-derived here, so one side owns what a slot means.
+pub global FONT_CP_SLOTS: [Map<int, int>] = []
+pub const UI_TEXT_Z_LAYER: int = 1            // default z_layer for batched text
+global TEXT_LAYOUT_INSTANCE_GLYPH_SCRATCH: NativeBuffer<float> = native_buffer_float(9)
+pub const TEXT_LAYOUT_INSTANCE_GLYPH_SCRATCH_ALLOCS: int = 0
+pub global TEXT_LAYOUT_INSTANCE_GLYPH_FETCHES: int = 0
+// How many times the raster geometry walked `Font` -> `FontData` (`Font.data`
+// -> `Entity.get` -> the Session arena registry -> `arena_slot_live`). That
+// walk is inlined into every trace that reaches a glyph loop, so the emitter
+// owes one resolution per emitted string, not one per glyph corner.
+pub global TEXT_LAYOUT_RASTER_FONT_RESOLVES: int = 0
+pub global TEXT_LAYOUT_INSTANCE_CACHE_HITS: int = 0
+
+pub value GlyphUnitData {
+    left: float,
+    top: float,
+    width: float,
+    height: float,
+    advance: float,
+    valid: bool,
+}
+
+value TextLineMetrics {
+    ascent: float,
+    descent: float,
+    line_gap: float,
+    line_height: float,
+}
+
+fn text_line_metrics(font_idx: int, scale_y: float) -> TextLineMetrics {
+    if font_idx < 0 || font_idx >= FONT_UNIT_ASCENTS.len
+        || font_idx >= FONT_UNIT_DESCENTS.len
+        || font_idx >= FONT_UNIT_LINE_GAPS.len {
+        return TextLineMetrics {
+            ascent: 0.0,
+            descent: 0.0,
+            line_gap: 0.0,
+            line_height: 0.0,
+        }
+    }
+    let scale = abs(scale_y)
+    let ascent = FONT_UNIT_ASCENTS[font_idx] * scale
+    let descent = -FONT_UNIT_DESCENTS[font_idx] * scale
+    let line_gap = FONT_UNIT_LINE_GAPS[font_idx] * scale
+    return TextLineMetrics {
+        ascent: ascent,
+        descent: descent,
+        line_gap: line_gap,
+        line_height: ascent + descent + line_gap,
+    }
+}
+
+// Per-font default-z text-batch cache; invalidate every entry (the pooled
+// batch stays valid, but get_text_batch re-resolves through ensure_ui_batch's
+// map hit -- no allocation either way).
+pub fn invalidate_text_batch_caches() {
+    let i = 0
+    while i < TEXT_BATCH_CACHES.len {
+        TEXT_BATCH_CACHES[i] = null
+        TEXT_BATCH_POOLS[i] = null
+        i = i + 1
+    }
+}
+
+// --- Unified text batching functions ---
+
+// Initialize per-font batch state. Called by load_font() in lib.rock
+// after the FFI succeeds, so each loaded font automatically gets its
+// atlas image, pixel size, and glyph cache populated. Grows the
+// per-font vecs to font.backend_id and writes into the [backend_id - 1] slot.
+//
+// `atlas: false` is the metrics-only load (`load_font_metrics`): everything
+// below still runs -- pixel size, font-unit metrics, codepoint slots, both
+// glyph caches -- except the atlas page, because a metrics font owns no GL
+// texture. That is ONE step skipped, not a second init: measurement and layout
+// read the unit cache, so they are the same code on both paths.
+fn init_text_batch_for(font: Font, atlas: bool = true) {
+    let d = font.data() ?? return
+    let idx = d.backend_id - 1
+
+    // Grow each per-font vec to length backend_id, filling holes with
+    // sentinel/empty values for fonts that haven't been loaded.
+    // Multiple loads in order always append.
+    while FONT_ATLASES.len <= idx {
+        FONT_ATLASES.push(Image(0))
+        FONT_PIXEL_SIZES.push(0)
+        FONT_CAP_HEIGHTS.push(0.0)
+        FONT_UNIT_SIZES.push(0.0)
+        FONT_UNIT_CAP_HEIGHTS.push(0.0)
+        FONT_UNIT_ASCENTS.push(0.0)
+        FONT_UNIT_DESCENTS.push(0.0)
+        FONT_UNIT_LINE_GAPS.push(0.0)
+        GLYPH_CACHES.push([])
+        GLYPH_UNIT_CACHES.push([])
+        FONT_CP_SLOTS.push(map_new())
+        TEXT_BATCH_CACHES.push(null)
+        TEXT_BATCH_POOLS.push(null)
+    }
+
+    // The atlas is an Image like any other, so it registers -- but its filter
+    // stays the font's own declaration (Font.sampling), not an image default.
+    if atlas {
+        FONT_ATLASES[idx] = register_image(stone_get_font_atlas_image_for(d.backend_id), d.sampling)
+    }
+    // Otherwise the slot keeps the Image(0) the growth loop above put there. A
+    // metrics font that reached a draw would be refused by stone-rs by
+    // name, so nothing here has to invent a texture for it.
+    d.pixel_size = stone_get_font_pixel_size_for(d.backend_id)
+    FONT_PIXEL_SIZES[idx] = d.pixel_size
+
+    let font_units = native_buffer_float(5)
+    if stone_get_font_unit_metrics(d.backend_id, font_units.ptr) {
+        FONT_UNIT_SIZES[idx] = font_units[0]
+        FONT_UNIT_ASCENTS[idx] = font_units[1]
+        FONT_UNIT_DESCENTS[idx] = font_units[2]
+        FONT_UNIT_LINE_GAPS[idx] = font_units[3]
+        FONT_UNIT_CAP_HEIGHTS[idx] = font_units[4]
+    } else {
+        FONT_UNIT_SIZES[idx] = FONT_PIXEL_SIZES[idx] as float
+        FONT_UNIT_CAP_HEIGHTS[idx] = FONT_PIXEL_SIZES[idx] as float
+        FONT_UNIT_ASCENTS[idx] = FONT_PIXEL_SIZES[idx] as float
+        FONT_UNIT_DESCENTS[idx] = 0.0
+        FONT_UNIT_LINE_GAPS[idx] = 0.0
+    }
+
+    // Bulk-fetch every declared face's glyph infos (one FFI call each, done
+    // once). An undeclared face gets an EMPTY slice rather than a run of invalid
+    // entries, so asking for it is a distinguishable condition rather than a
+    // string that measures zero.
+    // The slot count and the codepoint mapping both come from stone-rs, which
+    // owns the charset that baked the atlas: re-deriving either here would be a
+    // second place that has to agree about what slot 128 means.
+    let slot_count = stone_get_font_slot_count(d.backend_id)
+    let cp_slots = map_new()
+    // From 127, not 128: the identity block's own non-ASCII entry is published
+    // like any other, so the only codepoint rule spelled out on this side is
+    // the printable-ASCII range in text_glyph_slot.
+    let slot = 127
+    while slot < slot_count {
+        let cp = stone_get_font_slot_codepoint(d.backend_id, slot)
+        if cp >= 0 { cp_slots[cp] = slot }
+        slot = slot + 1
+    }
+    FONT_CP_SLOTS[idx] = cp_slots
+
+    let faces: [[GlyphData]] = []
+    let face = 0
+    while face < 4 {
+        let glyphs: [GlyphData] = []
+        if faces_declare(d.faces, face) {
+            let i = 0
+            while i < slot_count {
+                let out = native_buffer_float(9)
+                let g = if stone_get_glyph_info_for(d.backend_id, face, i, out.ptr) {
+                    GlyphData {
+                        u0: out[0], v0: out[1], u1: out[2], v1: out[3],
+                        width: out[4], height: out[5],
+                        bearing_x: out[6], bearing_y: out[7],
+                        advance: out[8], valid: true,
+                    }
+                } else {
+                    GlyphData {
+                        u0: 0.0, v0: 0.0, u1: 0.0, v1: 0.0,
+                        width: 0.0, height: 0.0, bearing_x: 0.0, bearing_y: 0.0,
+                        advance: 0.0, valid: false
+                    }
+                }
+                glyphs.push(g)
+                i = i + 1
+            }
+        }
+        faces.push(glyphs)
+        face = face + 1
+    }
+    GLYPH_CACHES[idx] = faces
+    let unit_faces: [[GlyphUnitData]] = []
+    let unit_face = 0
+    while unit_face < 4 {
+        let units: [GlyphUnitData] = []
+        if faces_declare(d.faces, unit_face) {
+            let i = 0
+            while i < slot_count {
+                let out = native_buffer_float(5)
+                let valid = stone_get_glyph_unit_metrics(d.backend_id, unit_face, i, out.ptr)
+                units.push(
+                    if valid {
+                        GlyphUnitData {
+                            left: out[0], top: out[1], width: out[2], height: out[3],
+                            advance: out[4], valid: true,
+                        }
+                    } else {
+                        GlyphUnitData {
+                            left: 0.0, top: 0.0, width: 0.0, height: 0.0,
+                            advance: 0.0, valid: false,
+                        }
+                    }
+                )
+                i = i + 1
+            }
+        }
+        unit_faces.push(units)
+        unit_face = unit_face + 1
+    }
+    GLYPH_UNIT_CACHES[idx] = unit_faces
+    TEXT_BATCH_CACHES[idx] = null
+    TEXT_BATCH_POOLS[idx] = null
+    text_layout_cache_clear()
+    text_prepare_cache_clear()
+    let glyphs = faces[FACE_REGULAR]
+
+    // Keep the coverage alias for diagnostics and old raster consumers. Layout
+    // and FontData use the native face metric loaded above.
+    let cap = glyphs[88].height
+    if !glyphs[88].valid || cap <= 0.0 {
+        cap = d.pixel_size as float
+    }
+    FONT_CAP_HEIGHTS[idx] = cap
+    d.cap_height = FONT_UNIT_CAP_HEIGHTS[idx]
+}
+
+// Drop the per-font batch state for a backend_id. Called by
+// unload_font() in lib.rock after the FFI unload, so the GLYPH_CACHES
+// / FONT_ATLASES slot doesn't hold a stale Image handle. Doesn't
+// shrink the vecs (slot reuse never happens; ids are monotonic).
+fn drop_text_batch_for(backend_id: int) {
+    let idx = backend_id - 1
+    if idx < 0 || idx >= FONT_ATLASES.len { return }
+    FONT_ATLASES[idx] = Image(0)
+    FONT_PIXEL_SIZES[idx] = 0
+    FONT_CAP_HEIGHTS[idx] = 0.0
+    FONT_UNIT_SIZES[idx] = 0.0
+    FONT_UNIT_CAP_HEIGHTS[idx] = 0.0
+    FONT_UNIT_ASCENTS[idx] = 0.0
+    FONT_UNIT_DESCENTS[idx] = 0.0
+    FONT_UNIT_LINE_GAPS[idx] = 0.0
+    GLYPH_CACHES[idx] = []
+    GLYPH_UNIT_CACHES[idx] = []
+    FONT_CP_SLOTS[idx] = map_new()
+    TEXT_BATCH_CACHES[idx] = null
+    TEXT_BATCH_POOLS[idx] = null
+    text_layout_cache_clear()
+    text_prepare_cache_clear()
+}
+
+fn drop_all_text_batches() {
+    let count = FONT_ATLASES.len
+    for i in 0..count {
+        drop_text_batch_for(i + 1)
+    }
+}
+
+// Per-font default-z text-batch cache. Indexed by font_id - 1, invalidated
+// each frame by clear_ui_batches().
+//
+// The cached batch belongs to ONE pool. A frame that mixes `pixel_screen.text`
+// and `screen.text` at default z alternates the ambient UI pool, and a
+// font-only cache would route whichever call came second into the batch the
+// first one minted -- composite glyphs onto the window, or window glyphs into
+// the composite. The last-(pool, batch) pair keeps the single-surface hot path
+// exactly as cheap and makes a surface switch a miss rather than a wrong hit.
+pub global TEXT_BATCH_CACHES: [Entity<RenderBatch>?] = []
+global TEXT_BATCH_POOLS: [RenderBatchPool?] = []
+
+pub fn get_text_batch(font: Font) -> RenderBatch {
+    let d = font.data().unwrap()
+    let idx = d.backend_id - 1
+    if FONT_ATLASES[idx] == Image(0) {
+        error("font {d.backend_id} text requested a font with no atlas")
+    }
+    let pool = current_ui_pool()
+    if let cached = TEXT_BATCH_CACHES[idx] {
+        let owner = TEXT_BATCH_POOLS[idx]
+        if owner != null && render_batch_pool_same(owner.unwrap(), pool) {
+            if let batch = cached.get() { return batch }
+        }
+    }
+
+    let batch = ensure_ui_batch(sampled_image(FONT_ATLASES[idx]), RenderProps {
+        z_layer: UI_TEXT_Z_LAYER,
+        depth: DepthMode::Off,
+        sampling: d.sampling,
+        text_batch: true,
+    })
+    TEXT_BATCH_CACHES[idx] = batch.handle.entity().unwrap()
+    TEXT_BATCH_POOLS[idx] = pool
+    batch
+}
+
+fn __queue_text_quad(
+    buf: NativeBuffer<Vertex>,
+    vi: int,
+    a: Vec2,
+    b: Vec2,
+    c: Vec2,
+    d: Vec2,
+    u1: float,
+    v1: float,
+    u2: float,
+    v2: float,
+    r: float,
+    g: float,
+    b_: float,
+    alpha: float
+) {
+    buf[vi]     = vert(a.x, a.y, u1, v1, r, g, b_, alpha)
+    buf[vi + 1] = vert(b.x, b.y, u2, v1, r, g, b_, alpha)
+    buf[vi + 2] = vert(c.x, c.y, u2, v2, r, g, b_, alpha)
+    buf[vi + 3] = vert(a.x, a.y, u1, v1, r, g, b_, alpha)
+    buf[vi + 4] = vert(c.x, c.y, u2, v2, r, g, b_, alpha)
+    buf[vi + 5] = vert(d.x, d.y, u1, v2, r, g, b_, alpha)
+}
+
+// The metric em the raster geometry scales by, plus the check that the layout
+// can produce geometry at all. Separate from the geometry below because it is
+// the only part that walks `Font` -> `FontData`, and that walk is loop
+// invariant: one emitted string names one font. A glyph loop resolves it once
+// and passes it to `text_layout_raster_rect_at`; resolving per glyph corner
+// was four walks per glyph and 77% of every Font -> FontData resolution in a
+// combat frame.
+fn text_layout_metric_unit_size(layout: TextLayout, source_pixel_size: float) -> float {
+    TEXT_LAYOUT_RASTER_FONT_RESOLVES += 1
+    let font = layout.font
+    if font == null { error("text raster geometry requires a live font") }
+    let data = font.unwrap().data()
+    if data == null { error("text raster geometry requires live font data") }
+    let idx = data.unwrap().backend_id - 1
+    if idx < 0 || idx >= FONT_UNIT_SIZES.len || source_pixel_size <= 0.0 {
+        error("text raster geometry has invalid source metrics")
+    }
+    return FONT_UNIT_SIZES[idx]
+}
+
+// The ink rect, given the metric em the layout's font already resolved to.
+fn text_layout_raster_rect_at(
+    unit_size: float,
+    layout: TextLayout,
+    glyph_origin: Vec2,
+    raw: GlyphData,
+    source_pixel_size: float
+) -> Rect {
+    let metric_to_layout_x = unit_size
+        * layout.raster_metric_scale_x / source_pixel_size
+    let metric_to_layout_y = unit_size
+        * abs(layout.raster_metric_scale_y) / source_pixel_size
+    return rect(
+        glyph_origin.x + raw.bearing_x * metric_to_layout_x,
+        glyph_origin.y - raw.bearing_y * metric_to_layout_y,
+        raw.width * abs(metric_to_layout_x),
+        raw.height * metric_to_layout_y)
+}
+
+// Resolving entry point for callers outside a glyph loop.
+pub fn text_layout_raster_rect(
+    layout: TextLayout,
+    glyph_origin: Vec2,
+    raw: GlyphData,
+    source_pixel_size: float
+) -> Rect {
+    return text_layout_raster_rect_at(
+        text_layout_metric_unit_size(layout, source_pixel_size),
+        layout, glyph_origin, raw, source_pixel_size)
+}
+
+// One corner of a glyph quad from its ink rect. The four corners of a glyph
+// share the rect, so a loop builds the rect once and asks for each corner.
+fn text_layout_pose_corner(
+    ink: Rect,
+    glyph_pivot: Vec2,
+    pose: GlyphPose?,
+    origin: Vec2,
+    corner: int,
+    layout_scale: float = 1.0
+) -> Vec2 {
+    let point = if corner == 0 {
+        v(ink.x, ink.y)
+    } else if corner == 1 {
+        v(ink.x + ink.w, ink.y)
+    } else if corner == 2 {
+        v(ink.x + ink.w, ink.y + ink.h)
+    } else {
+        v(ink.x, ink.y + ink.h)
+    }
+    return text_layout_pose_point(glyph_pivot, point, pose) * layout_scale + origin
+}
+
+pub fn text_layout_raster_quad_point(
+    layout: TextLayout,
+    glyph_origin: Vec2,
+    glyph_pivot: Vec2,
+    raw: GlyphData,
+    source_pixel_size: float,
+    pose: GlyphPose?,
+    origin: Vec2,
+    corner: int
+) -> Vec2 {
+    let ink = text_layout_raster_rect(layout, glyph_origin, raw, source_pixel_size)
+    return text_layout_pose_corner(ink, glyph_pivot, pose, origin, corner)
+}
+
+pub fn text_layout_instance_glyph(
+    instance_id: int,
+    face: int,
+    glyph: int
+) -> bool {
+    TEXT_LAYOUT_INSTANCE_GLYPH_FETCHES += 1
+    let out = TEXT_LAYOUT_INSTANCE_GLYPH_SCRATCH
+    let found = stone_get_font_instance_glyph_info(instance_id, face, glyph, out.ptr)
+    return found
+}
+
+pub fn text_layout_instance_glyph_data() -> GlyphData {
+    let out = TEXT_LAYOUT_INSTANCE_GLYPH_SCRATCH
+    return GlyphData {
+        u0: out[0], v0: out[1], u1: out[2], v1: out[3],
+        width: out[4], height: out[5], bearing_x: out[6], bearing_y: out[7],
+        advance: out[8], valid: true,
+    }
+}
+
+const TEXT_LAYOUT_INSTANCE_GLYPH_STRIDE: int = 10
+
+fn text_layout_instance_glyph_cache_prepare(layout: TextLayout, instance_id: int) {
+    let expected = layout.glyphs.len * TEXT_LAYOUT_INSTANCE_GLYPH_STRIDE
+    if layout.instance_glyph_id == instance_id
+        && layout.instance_glyph_data != null
+        && layout.instance_glyph_data.unwrap().len == expected { return () }
+    // A layout drawn at an animated scale can move between atlas instances;
+    // the per-glyph rows keep their shape, so refill the owned buffer.
+    let cached = if layout.instance_glyph_data != null
+        && layout.instance_glyph_data.unwrap().len == expected {
+        layout.instance_glyph_data.unwrap()
+    } else { native_buffer_float(expected) }
+    for i in 0..layout.glyphs.len {
+        let base = i * TEXT_LAYOUT_INSTANCE_GLYPH_STRIDE
+        let glyph = layout.glyphs[i]
+        let found = text_layout_instance_glyph(instance_id, glyph.face, glyph.glyph)
+        cached[base] = if found { 1.0 } else { 0.0 }
+        if found {
+            let raw = TEXT_LAYOUT_INSTANCE_GLYPH_SCRATCH
+            for j in 0..9 { cached[base + 1 + j] = raw[j] }
+        }
+    }
+    layout.instance_glyph_id = instance_id
+    layout.instance_glyph_data = cached
+}
+
+fn text_layout_instance_glyph_cached(data: NativeBuffer<float>, index: int) -> GlyphData {
+    let base = index * TEXT_LAYOUT_INSTANCE_GLYPH_STRIDE + 1
+    return GlyphData {
+        u0: data[base], v0: data[base + 1], u1: data[base + 2], v1: data[base + 3],
+        width: data[base + 4], height: data[base + 5],
+        bearing_x: data[base + 6], bearing_y: data[base + 7],
+        advance: data[base + 8], valid: true,
+    }
+}
+
+
+fn text_layout_emit_instance(
+    batch: RenderBatch,
+    layout: TextLayout,
+    origin: Vec2,
+    color: Color,
+    instance_id: int,
+    poses: [GlyphPose]?,
+    probe_text: string = "",
+    probe_consumer_key: string = "",
+    probe_admitted_count: int = -1,
+    probe_layout_glyph_count: int = -1,
+    probe_layout_ink_bounds: Rect = rect(0.0, 0.0, 0.0, 0.0),
+    layout_scale: float = 1.0
+) -> bool {
+    profile_begin("text.emit.glyphs")
+    let before = batch.count
+    let emitted_count = 0
+    let emitted_bounds = rect(0.0, 0.0, 0.0, 0.0)
+    let source_pixel_size = if layout.instance_cached_id == instance_id
+        && layout.instance_cached_pixel_size > 0 {
+        layout.instance_cached_pixel_size
+    } else { stone_get_font_instance_pixel_size_ffi(instance_id) }
+    text_layout_instance_glyph_cache_prepare(layout, instance_id)
+    let cached_glyphs = layout.instance_glyph_data
+    let unit_size = 0.0
+    let unit_size_ready = false
+    for i in 0..layout.glyphs.len {
+        let glyph_origin = layout.glyphs[i].origin
+        let glyph_pivot = layout.glyphs[i].pivot
+        let data = cached_glyphs.unwrap()
+        if data[i * TEXT_LAYOUT_INSTANCE_GLYPH_STRIDE] == 0.0 { continue }
+        let raw = text_layout_instance_glyph_cached(data, i)
+        let pose = text_layout_pose_at(layout, i, poses)
+        if !unit_size_ready {
+            unit_size = text_layout_metric_unit_size(layout, source_pixel_size)
+            unit_size_ready = true
+        }
+        let ink = text_layout_raster_rect_at(unit_size, layout, glyph_origin,
+            raw, source_pixel_size)
+        let a = text_layout_pose_corner(ink, glyph_pivot, pose, origin, 0, layout_scale)
+        let b = text_layout_pose_corner(ink, glyph_pivot, pose, origin, 1, layout_scale)
+        let c = text_layout_pose_corner(ink, glyph_pivot, pose, origin, 2, layout_scale)
+        let d = text_layout_pose_corner(ink, glyph_pivot, pose, origin, 3, layout_scale)
+        __queue_text_quad(batch.verts, batch.count, a, b, c, d,
+            raw.u0, raw.v0, raw.u1, raw.v1,
+            color.r, color.g, color.b, color.a)
+        if probe_text != "" || UI_SUBMISSION_PROBE_ON {
+            let observed = batch.verts[batch.count].pos.to_f64()
+            let lo = observed
+            let hi = observed
+            for j in 1..6 {
+                let p = batch.verts[batch.count + j].pos
+                lo = v(min(lo.x, p.x), min(lo.y, p.y))
+                hi = v(max(hi.x, p.x), max(hi.y, p.y))
+            }
+            emitted_bounds = text_layout_emission_bounds_union(
+                emitted_bounds, rect(lo.x, lo.y, hi.x - lo.x, hi.y - lo.y))
+            emitted_count += 1
+        }
+        if UI_SUBMISSION_PROBE_ON {
+            UI_SUBMISSION_PROBE_GLYPH_HOOK.unwrap()(batch, layout, layout.glyphs[i], pose,
+                origin, instance_id, raw, layout_scale)
+        }
+        batch.count += 6
+    }
+    if probe_text != "" || UI_SUBMISSION_PROBE_ON {
+        let probe_demand = text_layout_raster_demand(layout, null, layout_scale)
+        let source_cap_height = 0.0
+        if layout.font != null {
+            let font = layout.font.unwrap()
+            let data = font.data()
+            if data != null {
+                source_cap_height = source_pixel_size as float
+                    * text_art_font_cap_height_ratio(font)
+            }
+        }
+        let value = TextLayoutEmissionProbe {
+            frame: RENDER_FRAME,
+            retained_text: probe_text,
+            admitted_count: if probe_admitted_count < 0 {
+                layout.admitted_count
+            } else { probe_admitted_count },
+            layout_glyph_count: if probe_layout_glyph_count < 0 {
+                layout.glyphs.len
+            } else { probe_layout_glyph_count },
+            emitted_count: emitted_count,
+            instance_id: instance_id,
+            consumer_key: probe_consumer_key,
+            origin: origin,
+            logical_bounds: text_rect_scaled(layout.logical_bounds, layout_scale),
+            layout_ink_bounds: text_rect_scaled(if probe_admitted_count < 0 {
+                layout.ink_bounds
+            } else { probe_layout_ink_bounds }, layout_scale),
+            emitted_bounds: emitted_bounds,
+            target_pixel_cap_height: probe_demand.target_pixel_cap_height,
+            required_pixel_em: probe_demand.required_pixel_em,
+            selected_pixel_em: source_pixel_size,
+            source_cap_height: source_cap_height,
+        }
+        if probe_text != "" {
+            text_layout_emission_probe_record(value)
+        }
+        if UI_SUBMISSION_PROBE_ON { UI_SUBMISSION_PROBE_TEXT_HOOK.unwrap()(value, layout.text) }
+    }
+    let emitted = batch.count > before
+    profile_end("text.emit.glyphs")
+    return emitted
+}
+
+fn text_layout_pose_max_scale(poses: [GlyphPose]?) -> float {
+    if poses == null { return 1.0 }
+    let largest = 1.0
+    for pose in poses.unwrap() {
+        largest = max(largest, max(abs(pose.scale.x), abs(pose.scale.y)))
+    }
+    return largest
+}
+
+fn text_rect_scaled(r: Rect, k: float) -> Rect {
+    if k == 1.0 { return r }
+    return rect(r.x * k, r.y * k, r.w * k, r.h * k)
+}
+
+// `layout_scale` is a whole-layout scale applied at emission (see
+// ResolvedTextRun.draw_scale); the demand follows the drawn size so the same
+// atlas instance is chosen as for a layout built at that size.
+pub fn text_layout_raster_demand(layout: TextLayout, poses: [GlyphPose]?,
+    layout_scale: float = 1.0) -> TextArtRasterDemand {
+    let pose_scale = text_layout_pose_max_scale(poses)
+    let coverage_oversampling = font_coverage_oversampling_require(
+        layout.coverage_oversampling)
+    let target = layout.raster_target_cap_height * layout_scale * pose_scale
+        * coverage_oversampling
+    let footprint = v(layout.logical_bounds.w, layout.logical_bounds.h) * layout_scale
+    let font = layout.font ?? return TextArtRasterDemand {
+        glyph_population: layout.admitted_count,
+        target_footprint: footprint,
+        source_footprint: v(),
+        authored_cap_height: layout.raster_authored_cap_height,
+        layout_to_target_scale: layout.raster_layout_to_target_scale,
+        physical_target_scale: layout.raster_physical_target_scale,
+        max_pose_scale: pose_scale,
+        coverage_oversampling: coverage_oversampling,
+        target_pixel_cap_height: target,
+        required_pixel_em: 0.0,
+        coverage_bucket: 0,
+    }
+    let required_pixel_em = if target > 0.0 {
+        text_art_required_pixel_em_for(font, target)
+    } else { 0.0 }
+    return TextArtRasterDemand {
+        glyph_population: layout.admitted_count,
+        target_footprint: footprint,
+        source_footprint: v(),
+        authored_cap_height: layout.raster_authored_cap_height,
+        layout_to_target_scale: layout.raster_layout_to_target_scale,
+        physical_target_scale: layout.raster_physical_target_scale,
+        max_pose_scale: pose_scale,
+        coverage_oversampling: coverage_oversampling,
+        target_pixel_cap_height: target,
+        required_pixel_em: required_pixel_em,
+        coverage_bucket: if required_pixel_em > 0.0 {
+            text_art_coverage_bucket_for_ppem(required_pixel_em)
+        } else { 0 },
+    }
+}
+
+pub fn text_layout_emit(
+    layout: TextLayout,
+    origin: Vec2,
+    color: Color,
+    z_layer: int,
+    poses: [GlyphPose]? = null,
+    consumer_key: string = "",
+    layout_scale: float = 1.0
+) -> bool {
+    TEXT_LAYOUT_EMIT_CALLS += 1
+    let font = layout.font ?? return false
+    let fd = font.data() ?? return false
+    if layout.glyphs.len == 0 { return false }
+    if poses != null { text_layout_validate_poses(layout, poses.unwrap()) }
+    let probe_text = text_layout_probe_text(layout)
+    let probe_admitted_count = layout.admitted_count
+    let probe_layout_glyph_count = layout.glyphs.len
+    let probe_layout_ink_bounds = layout.ink_bounds
+    let cache_instance = poses == null && consumer_key == "" && layout_scale == 1.0
+    let instance_id = 0
+    let image = 0
+    if cache_instance && layout.instance_cached_id > 0 {
+        TEXT_LAYOUT_INSTANCE_CACHE_HITS += 1
+        profile_begin("text.layout.raster_demand")
+        profile_end("text.layout.raster_demand")
+        profile_begin("text.art.atlas_lookup")
+        profile_end("text.art.atlas_lookup")
+        instance_id = layout.instance_cached_id
+        image = layout.instance_cached_image
+    } else {
+        profile_begin("text.layout.raster_demand")
+        let demand = text_layout_raster_demand(layout, poses, layout_scale)
+        profile_end("text.layout.raster_demand")
+        profile_begin("text.art.atlas_lookup")
+        let instance = text_art_atlas_instance_for(font, demand, consumer_key)
+        profile_end("text.art.atlas_lookup")
+        instance_id = instance.instance_id
+        image = stone_get_font_instance_image_ffi(instance_id)
+        if cache_instance {
+            layout.instance_cached_id = instance_id
+            layout.instance_cached_pixel_size = instance.pixel_size
+            layout.instance_cached_image = image
+        }
+    }
+    TEXT_ART_COVERAGE_EMIT_CALLS = TEXT_ART_COVERAGE_EMIT_CALLS + 1
+    if image == 0 { error("TextLayout atlas instance {instance_id} has no GL image") }
+    profile_begin("text.batch.lookup")
+    let batch = ensure_ui_batch(sampled_image(Image(image)), RenderProps {
+        z_layer: z_layer,
+        depth: DepthMode::Off,
+        sampling: fd.sampling,
+        pipeline: null,
+        text_batch: true,
+    })
+    profile_end("text.batch.lookup")
+    reserve_vertices(batch, layout.glyphs.len * 6)
+    return text_layout_emit_instance(
+        batch, layout, origin, color, instance_id, poses,
+        probe_text: probe_text, probe_consumer_key: consumer_key,
+        probe_admitted_count: probe_admitted_count,
+        probe_layout_glyph_count: probe_layout_glyph_count,
+        probe_layout_ink_bounds: probe_layout_ink_bounds,
+        layout_scale: layout_scale)
+}
+
+
+fn text_layout_emit_world_instance(
+    batch: RenderBatch,
+    layout: TextLayout,
+    baseline: Vec2,
+    color: Color,
+    instance_id: int,
+    poses: [GlyphPose]?
+) -> bool {
+    let before = batch.count
+    // `source_pixel_size` below is a function of `instance_id` alone, so the
+    // metric em it validates is loop invariant too.
+    let unit_size = 0.0
+    let unit_size_ready = false
+    for i in 0..layout.glyphs.len {
+        let glyph_face = layout.glyphs[i].face
+        let glyph_id = layout.glyphs[i].glyph
+        let glyph_origin = layout.glyphs[i].origin
+        let glyph_pivot = layout.glyphs[i].pivot
+        if !text_layout_instance_glyph(instance_id, glyph_face, glyph_id) { continue }
+        let raw = text_layout_instance_glyph_data()
+        if raw.height <= 0.0 { continue }
+        let pose = text_layout_pose_at(layout, i, poses)
+        let line_y = glyph_origin.y - layout.ascent
+        let source_pixel_size = stone_get_font_instance_pixel_size_ffi(instance_id)
+        if !unit_size_ready {
+            unit_size = text_layout_metric_unit_size(layout, source_pixel_size)
+            unit_size_ready = true
+        }
+        let ink = text_layout_raster_rect_at(unit_size, layout, glyph_origin,
+            raw, source_pixel_size)
+        let a0 = text_layout_pose_corner(ink, glyph_pivot, pose, v(), 0)
+        let b0 = text_layout_pose_corner(ink, glyph_pivot, pose, v(), 1)
+        let c0 = text_layout_pose_corner(ink, glyph_pivot, pose, v(), 2)
+        let d0 = text_layout_pose_corner(ink, glyph_pivot, pose, v(), 3)
+        let a = v(baseline.x + a0.x,
+            baseline.y + 2.0 * line_y + layout.ascent - a0.y)
+        let b = v(baseline.x + b0.x,
+            baseline.y + 2.0 * line_y + layout.ascent - b0.y)
+        let c = v(baseline.x + c0.x,
+            baseline.y + 2.0 * line_y + layout.ascent - c0.y)
+        let d = v(baseline.x + d0.x,
+            baseline.y + 2.0 * line_y + layout.ascent - d0.y)
+        batch.verts[batch.count + 0] = make_world_text_vertex(
+            a.x, a.y, raw.u0, raw.v0, color, baseline.y)
+        batch.verts[batch.count + 1] = make_world_text_vertex(
+            d.x, d.y, raw.u0, raw.v1, color, baseline.y)
+        batch.verts[batch.count + 2] = make_world_text_vertex(
+            c.x, c.y, raw.u1, raw.v1, color, baseline.y)
+        batch.verts[batch.count + 3] = make_world_text_vertex(
+            a.x, a.y, raw.u0, raw.v0, color, baseline.y)
+        batch.verts[batch.count + 4] = make_world_text_vertex(
+            c.x, c.y, raw.u1, raw.v1, color, baseline.y)
+        batch.verts[batch.count + 5] = make_world_text_vertex(
+            b.x, b.y, raw.u1, raw.v0, color, baseline.y)
+        batch.count += 6
+    }
+    return batch.count > before
+}
+
+fn text_layout_emit_world(
+    layout: TextLayout,
+    baseline: Vec2,
+    z_layer: int,
+    depth: DepthMode,
+    color: Color,
+    poses: [GlyphPose]? = null
+) -> bool {
+    let data = layout.font ?? return false
+    let fd = data.data() ?? return false
+    let idx = fd.backend_id - 1
+    if idx < 0 || idx >= FONT_ATLASES.len || layout.glyphs.len == 0 { return false }
+    if poses != null { text_layout_validate_poses(layout, poses.unwrap()) }
+    profile_begin("text.layout.raster_demand")
+    let demand = text_layout_raster_demand(layout, poses)
+    profile_end("text.layout.raster_demand")
+    profile_begin("text.art.atlas_lookup")
+    let instance = text_art_atlas_instance_for(data, demand)
+    profile_end("text.art.atlas_lookup")
+    let image = stone_get_font_instance_image_ffi(instance.instance_id)
+    if image == 0 { error("world text atlas instance {instance.instance_id} has no GL image") }
+    profile_begin("text.batch.lookup")
+    let batch = ensure_world_sprite_batch(
+        sampled_image(Image(image)), z_layer, BlendMode::Alpha, false,
+        depth, unlit: true, sampling: fd.sampling, text_batch: true)
+    profile_end("text.batch.lookup")
+    reserve_vertices(batch, layout.glyphs.len * 6)
+    profile_begin("text.emit.glyphs")
+    let emitted = text_layout_emit_world_instance(
+        batch, layout, baseline, color, instance.instance_id, poses)
+    profile_end("text.emit.glyphs")
+    return emitted
+}
+
+// Push screen-space text into UI_RENDER_BATCHES.
+//
+// `z_layer` defaults to the engine's UI_TEXT_Z_LAYER (1) and uses the
+// cached text-batch fast path. Pass an explicit z to land text in a
+// different z-bucket (e.g. an overlay above other UI). Non-default z
+// goes through a fresh `ensure_ui_batch` per call site so the cache
+// stays valid for the common path. Caller-driven z lets callers stack
+// arbitrary screen-space content above text without an imgui escape hatch.
+pub fn queue_ui_text(
+    text: string,
+    pos: Vec2,
+    size: float,
+    color: Color,
+    offset: Vec2,
+    z_layer: int = UI_TEXT_Z_LAYER
+) {
+    let f = DEFAULT_FONT ?? return
+    queue_ui_text_with_font(f, text, pos, size, color, offset, z_layer)
+}
+
+// Per-font variant. Use directly when rendering with a font other
+// than DEFAULT_FONT (e.g. a custom font loaded via load_font()).
+pub fn queue_ui_text_with_font(
+    font: Font,
+    text: string,
+    pos: Vec2,
+    size: float,
+    color: Color,
+    offset: Vec2,
+    z_layer: int = UI_TEXT_Z_LAYER
+) {
+    queue_ui_text_scaled(font, text, pos, size, color, offset, z_layer,
+        FONT_RENDER_SCALE, TextAlign::TopLeft, text_output_raster_density())
+}
+
+// Screen coordinates supplied directly in output pixels do not belong to the
+// design-space text path. Keep the atlas demand physical-density aware, but
+// leave the emitted glyph geometry in the caller's pixel space.
+fn queue_ui_text_output_px(
+    font: Font,
+    text: string,
+    pos: Vec2,
+    size: float,
+    color: Color,
+    offset: Vec2,
+    z_layer: int = UI_TEXT_Z_LAYER
+) {
+    queue_ui_text_scaled(font, text, pos, size, color, offset, z_layer,
+        1.0, TextAlign::TopLeft, text_output_raster_density())
+}
+
+pub fn text_output_raster_density() -> float {
+    let view = RENDER_VIEW ?? return 1.0
+    return max(
+        0.0001,
+        view.ui_raster_size.y as float
+        / max(view.logical_size.y, 1.0)
+    )
+}
+
+fn world_text_scene_density() -> float {
+    let view = RENDER_VIEW ?? return 1.0
+    return max(0.0001, view.world_to_scene_scale)
+}
+
+// The size divisor for a font: cap height when CAP_HEIGHT_FONTS is on (so the
+// same number is the same visible height across fonts), else the em. 0 = the
+// font has no usable metrics yet.
+pub fn font_size_divisor(idx: int) -> float {
+    if idx < 0 || idx >= FONT_UNIT_SIZES.len { return 0.0 }
+    return if CAP_HEIGHT_FONTS { FONT_UNIT_CAP_HEIGHTS[idx] } else { FONT_UNIT_SIZES[idx] }
+}
+
+// Family-aware callers delegate to the same native unit metric authority.
+pub fn font_size_divisor(font: Font) -> float {
+    let d = font.data() ?? return 0.0
+    return font_size_divisor(d.backend_id - 1)
+}
+
+fn text_layout_raster_cap_for_scale(font: Font, scale_y: float) -> float {
+    let d = font.data() ?? return abs(scale_y)
+    let idx = d.backend_id - 1
+    if idx >= 0 && idx < FONT_UNIT_CAP_HEIGHTS.len {
+        let cap = FONT_UNIT_CAP_HEIGHTS[idx]
+        if cap > 0.0 { return abs(scale_y) * cap }
+    }
+    return abs(scale_y)
+}
+
+// Target-space extent of `text`, measured with the SAME divisor and design->
+// target factor the emitter below uses -- so a caller that positions by
+// measurement cannot disagree with the glyphs. `render_scale` is the calling
+// context's factor: FONT_RENDER_SCALE for output-authored text, the context
+// scale for a scene-target UiRect, 1.0 for raw Target coordinates. Density
+// defaults to 1 for source footprints; output measurement passes its density.
+pub fn measure_text_of(font: Font, text: string, size: float, render_scale: float,
+    raster_density: float = 1.0) -> Vec2 {
+    let d = font.data() ?? return v()
+    let idx = d.backend_id - 1
+    if idx < 0 || idx >= FONT_ATLASES.len || idx >= GLYPH_CACHES.len
+        || GLYPH_CACHES[idx].len <= FACE_REGULAR
+        || GLYPH_CACHES[idx][FACE_REGULAR].len == 0
+        || font_size_divisor(idx) <= 0.0 { return v() }
+    let layout = text_layout_cached(font, text, size, render_scale,
+        TextAlign::TopLeft, raster_density)
+    return v(layout.logical_bounds.w, layout.logical_bounds.h)
+}
+
+// --- The shared target-space glyph core ---
+//
+// Byte admission, glyph lookup, advance, bearing, scale and baseline placement
+// live here once. Plain and rich callers retain the same layout facts while
+// choosing their own color, face and surface conventions.
+
+// The codepoint whose encoding STARTS at unit `i`. Two distinct refusals, so
+// a rejection surface can tell them apart: -1 means `i` is not a lead unit (a
+// UTF-8 continuation byte, a UTF-16 trail surrogate) and is skipped by every
+// walker, while -2 means the unit STARTS a sequence that is malformed or
+// truncated, which is a real defect in the text. Walking units one at a time
+// and skipping -1 is what lets the byte-range loops below stand unchanged over
+// multi-unit text: a non-lead unit is simply not the start of anything.
+pub inline(lua) fn text_codepoint_at(text: string, i: int) -> int = """
+    local b = string.byte(text, i + 1)
+    if b == nil then return -1 end
+    if b < 0x80 then return b end
+    if b < 0xC0 then return -1 end
+    local n, cp
+    if b < 0xE0 then n, cp = 1, b - 0xC0
+    elseif b < 0xF0 then n, cp = 2, b - 0xE0
+    elseif b < 0xF8 then n, cp = 3, b - 0xF0
+    else return -2 end
+    for k = 1, n do
+        local c = string.byte(text, i + 1 + k)
+        if c == nil or c < 0x80 or c > 0xBF then return -2 end
+        cp = cp * 64 + (c - 0x80)
+    end
+    return cp
+"""
+
+pub fn text_glyph_slot(cp_slots: Map<int, int>, text: string, i: int) -> int {
+    let cp = text_codepoint_at(text, i)
+    if cp < 0 { return -1 }
+    if cp >= 32 && cp <= 126 { return cp }
+    return cp_slots.get(cp) ?? -1
+}
+
+pub value TextGlyph {
+    glyph_index: int,
+    source_index: int,
+    glyph: int,
+    face: int,
+    origin: Vec2,
+    ink: Rect,
+    advance: float,
+    pivot: Vec2,
+}
+
+// Advance, max ascent and max glyph height of `text[from..to)` at `scale`.
+pub fn measure_text_range(
+    glyphs: [GlyphData],
+    cp_slots: Map<int, int>,
+    text: string,
+    from: int,
+    to: int,
+    scale: float
+) -> (float, float, float) {
+    let advance = 0.0
+    let max_ascent = 0.0
+    let max_glyph_h = 0.0
+    for i in from..to {
+        let slot = text_glyph_slot(cp_slots, text, i)
+        if slot < 0 { continue }
+        let g = glyphs[slot]
+        if !g.valid { continue }
+        advance = advance + g.advance * scale
+        let a = g.bearing_y * scale
+        if a > max_ascent { max_ascent = a }
+        let gh = g.height * scale
+        if gh > max_glyph_h { max_glyph_h = gh }
+    }
+    return (advance, max_ascent, max_glyph_h)
+}
+
+pub nobox value TextFlowMetrics {
+    font: Font,
+    index: int,
+    face: int,
+    scale: float,
+    ascent: float,
+    below: float,
+    plain: bool,
+}
+
+fn text_flow_paragraph_text(text: string) -> string {
+    if text.find("\n") < 0 { return text }
+    // Removing a newline first could join two malformed UTF-8 halves into a
+    // valid glyph. Admit the original bytes before normalizing controls.
+    for i in 0..text.len() {
+        if text_codepoint_at(text, i) == -2 {
+            error("ui_rich_flow: byte at offset {i} begins a malformed glyph")
+        }
+    }
+    return text.replace("\n", "")
+}
+
+pub fn text_flow_metrics(font: Font, text: string, style: TextStyle,
+                         size: float, render_scale: float, plain: bool = false) -> TextFlowMetrics {
+    let site = "ui_rich_flow"
+    let idx = text_family_font_idx(font, site, require_atlas: false)
+    let face = FACE_REGULAR
+    if !plain {
+        let admitted = text_flow_paragraph_text(text)
+        let prepared = text_prepare_missing_glyphs(font, null, idx, admitted, site)
+        face = text_validate_single_font_span(font, idx, prepared, style, true, site)
+    } else if TEXT_MISSING_GLYPH_POLICY == TextMissingGlyphPolicy::Substitute {
+        // Plain rendering tolerates malformed bytes; preparation logs missing
+        // codepoints, while the advance walk keeps the authored byte ranges.
+        let _ = text_prepare_missing_glyphs(font, null, idx, text, site)
+    }
+    if !plain && (text.find("\r") >= 0 || text.find("\t") >= 0) {
+        error("ui_rich_flow: carriage return and tab are not paragraph controls")
+    }
+    let scale = size * render_scale / font_size_divisor(idx)
+    let metrics = text_line_metrics(idx, scale)
+    return TextFlowMetrics { font, index: idx, face: max(face, 0), scale,
+        ascent: metrics.ascent, below: metrics.line_height - metrics.ascent, plain }
+}
+
+// Keep the renderer's glyph-addition order, including spaces. Adding a measured
+// word to a measured prefix can round to the other side of a wrap boundary.
+pub fn text_flow_advance(metrics: TextFlowMetrics, text: string,
+                         start: int, end: int, pen: float) -> float {
+    let result = pen
+    let glyphs = GLYPH_UNIT_CACHES[metrics.index][metrics.face]
+    for i in start..end {
+        let cp = text_codepoint_at(text, i)
+        if cp < 0 || cp == 10 || (metrics.plain && (cp == 13 || cp == 9)) { continue }
+        let slot = if cp >= 32 && cp <= 126 { cp }
+            else { FONT_CP_SLOTS[metrics.index].get(cp) ?? -1 }
+        if slot < 0 || slot >= glyphs.len || !glyphs[slot].valid {
+            if metrics.plain && TEXT_MISSING_GLYPH_POLICY == TextMissingGlyphPolicy::Reject { continue }
+            slot = text_glyph_slot(FONT_CP_SLOTS[metrics.index], "?", 0)
+        }
+        result += glyphs[slot].advance * metrics.scale
+    }
+    return result
+}
+
+pub fn text_flow_validate_family(fonts: [Font], indices: [int], text: string,
+                                  style: TextStyle, size: float, render_scale: float) {
+    let runs: [ResolvedTextRun] = []
+    text_resolve_segment(runs, fonts, indices, text_flow_paragraph_text(text), size,
+        render_scale, false, style, true, "ui_rich_flow")
+}
+
+// The family resolver remains the glyph owner. Layout needs only advances and
+// line metrics, so it never allocates per-glyph runs or prefix layouts.
+pub fn text_flow_family_advance(indices: [int], style: TextStyle,
+                                text: string, start: int, end: int,
+                                size: float, render_scale: float, pen: float)
+                                -> (float, float, float) {
+    let result = pen
+    let ascent = 0.0
+    let below = 0.0
+    let selected = -1
+    let run = 0.0
+    for i in start..end {
+        let cp = text_codepoint_at(text, i)
+        if cp < 0 { continue }
+        let owner = text_select_font(indices, text, i)
+        let glyph_text = text
+        let at = i
+        if owner < 0 {
+            glyph_text = "?"
+            at = 0
+            owner = text_select_font(indices, glyph_text, at)
+        }
+        if owner != selected { result += run; run = 0.0; selected = owner }
+        let idx = indices[owner]
+        let face = style_face_index(style)
+        let scale = size * render_scale / font_size_divisor(idx)
+        let slot = text_glyph_slot(FONT_CP_SLOTS[idx], glyph_text, at)
+        run += GLYPH_UNIT_CACHES[idx][face][slot].advance * scale
+        let metrics = text_line_metrics(idx, scale)
+        ascent = max(ascent, metrics.ascent)
+        below = max(below, metrics.line_height - metrics.ascent)
+    }
+    return (result + run, ascent, below)
+}
+
+pub struct TextLayout {
+    font: Font?,
+    text: string,
+    face: int,
+    glyphs: FlatVec<TextGlyph>,
+    logical_bounds: Rect,
+    ink_bounds: Rect,
+    ascent: float,
+    descent: float,
+    line_height: float,
+    line_count: int,
+    admitted_count: int,
+    alignment: TextAlign,
+    alignment_offset: Vec2,
+    raster_authored_cap_height: float,
+    raster_layout_to_target_scale: float,
+    raster_physical_target_scale: float,
+    raster_target_cap_height: float,
+    coverage_oversampling: float,
+    raster_metric_scale_x: float,
+    raster_metric_scale_y: float,
+    instance_glyph_id: int,
+    instance_glyph_data: NativeBuffer<float>?,
+    instance_cached_id: int,
+    instance_cached_pixel_size: int,
+    instance_cached_image: int,
+}
+
+pub const TEXT_LAYOUT_CACHE_CAPACITY: int = 256
+
+struct TextLayoutCacheEntry {
+    font_id: int,
+    text: string,
+    size: float,
+    render_scale: float,
+    scale_x: float,
+    scale_y: float,
+    world_raster: bool,
+    cap_height_fonts: bool,
+    align: TextAlign,
+    raster_physical_target_scale: float,
+    // text_layout_variant_key of the fields above; the index slot this entry
+    // occupies under its text.
+    variant: int,
+    // Next resident slot sharing this text/variant key, or -1 at chain end.
+    next_variant_slot: int,
+    last_used: int,
+    layout: TextLayout,
+}
+
+global TEXT_LAYOUT_CACHE: [TextLayoutCacheEntry] = []
+global TEXT_LAYOUT_CACHE_CLOCK: int = 0
+// text -> variant key -> TEXT_LAYOUT_CACHE slot. Two map reads replace a probe
+// over every cached variant of the text: that loop kept all seven request
+// parameters plus the probe state live across its exits and was a standing
+// "register coalescing too complex" abort in every text-heavy frame.
+global TEXT_LAYOUT_CACHE_INDEX: Map<string, Map<int, int>> = map_new()
+pub global TEXT_LAYOUT_CACHE_HITS: int = 0
+pub global TEXT_LAYOUT_CACHE_INDEX_HITS: int = 0
+global TEXT_LAYOUT_CACHE_REQUESTS: int = 0
+global TEXT_LAYOUT_CACHE_MISSES: int = 0
+pub global TEXT_LAYOUT_CACHE_BUILDS: int = 0
+global TEXT_LAYOUT_CACHE_EVICTIONS: int = 0
+global TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED: int = 0
+global TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED: int = 0
+global TEXT_LAYOUT_CACHE_WINDOW_REQUESTS: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_HITS: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_MISSES: int = -1
+pub global TEXT_LAYOUT_CACHE_WINDOW_BUILDS: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_EVICTIONS: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_HIGH_WATER: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_UI_REQUESTS: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_UI_HITS: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_UI_MISSES: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_UI_BUILDS: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_UI_EVICTIONS: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_WORLD_REQUESTS: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_WORLD_HITS: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_WORLD_MISSES: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_WORLD_BUILDS: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_WORLD_EVICTIONS: int = -1
+global TEXT_LAYOUT_CACHE_WINDOW_START_REQUESTS: int = 0
+global TEXT_LAYOUT_CACHE_WINDOW_START_HITS: int = 0
+global TEXT_LAYOUT_CACHE_WINDOW_START_MISSES: int = 0
+global TEXT_LAYOUT_CACHE_WINDOW_START_BUILDS: int = 0
+global TEXT_LAYOUT_CACHE_WINDOW_START_EVICTIONS: int = 0
+global TEXT_LAYOUT_CACHE_WINDOW_START_ENTRIES_EXAMINED: int = 0
+global TEXT_LAYOUT_CACHE_WINDOW_START_WORLD_BUILDS: int = 0
+const TEXT_LAYOUT_CACHE_WINDOW_START_OCCUPANCY: int = 0
+global TEXT_LAYOUT_CACHE_HIGH_WATER: int = 0
+global TEXT_LAYOUT_CACHE_WINDOW_ACTIVE: bool = false
+global TEXT_WORLD_LAYOUT_BUILD_CALLS: int = 0
+
+pub struct TextLayoutEmissionProbe {
+    frame: int,
+    retained_text: string,
+    admitted_count: int,
+    layout_glyph_count: int,
+    emitted_count: int,
+    instance_id: int,
+    consumer_key: string,
+    origin: Vec2,
+    logical_bounds: Rect,
+    layout_ink_bounds: Rect,
+    emitted_bounds: Rect,
+    target_pixel_cap_height: float,
+    required_pixel_em: float,
+    selected_pixel_em: int,
+    source_cap_height: float,
+}
+
+pub const TEXT_LAYOUT_SIM_PROBES: bool = get_env_int("STONE_TEXT_LAYOUT_SIM_PROBES", 1) != 0
+
+fn text_layout_probe_text(layout: TextLayout) -> string {
+    return if sim_mode_active() && TEXT_LAYOUT_SIM_PROBES { layout.text } else { "" }
+}
+
+pub fn text_layout_emission_probe_empty() -> TextLayoutEmissionProbe {
+    return TextLayoutEmissionProbe {
+        frame: -1,
+        retained_text: "",
+        admitted_count: 0,
+        layout_glyph_count: 0,
+        emitted_count: 0,
+        instance_id: 0,
+        consumer_key: "",
+        origin: v(),
+        logical_bounds: rect(0.0, 0.0, 0.0, 0.0),
+        layout_ink_bounds: rect(0.0, 0.0, 0.0, 0.0),
+        emitted_bounds: rect(0.0, 0.0, 0.0, 0.0),
+        target_pixel_cap_height: 0.0,
+        required_pixel_em: 0.0,
+        selected_pixel_em: 0,
+        source_cap_height: 0.0,
+    }
+}
+
+pub value GlyphPose {
+    glyph_index: int,
+    source_index: int,
+    glyph: int,
+    translation: Vec2,
+    scale: Vec2,
+    rotation: float,
+}
+
+pub global TEXT_LAYOUT_BUILD_CALLS: int = 0
+pub global TEXT_LAYOUT_EMIT_CALLS: int = 0
+global TEXT_ART_COVERAGE_EMIT_CALLS: int = 0
+// The emission probe grows with the distinct texts recorded since the last
+// reset; the index keeps admission O(1) on long sim runs without one.
+pub global TEXT_LAYOUT_EMISSION_PROBES: [TextLayoutEmissionProbe] = []
+global TEXT_LAYOUT_EMISSION_PROBE_INDEX: Map<string, int> = map_new()
+
+pub fn text_layout_emission_probe(text: string) -> TextLayoutEmissionProbe? {
+    for probe in TEXT_LAYOUT_EMISSION_PROBES {
+        if probe.retained_text == text { return probe }
+    }
+    return null
+}
+
+pub fn text_layout_emission_probe_record(value: TextLayoutEmissionProbe) {
+    if let slot = TEXT_LAYOUT_EMISSION_PROBE_INDEX.get(value.retained_text) {
+        TEXT_LAYOUT_EMISSION_PROBES[slot] = value
+    } else {
+        TEXT_LAYOUT_EMISSION_PROBE_INDEX[value.retained_text] = TEXT_LAYOUT_EMISSION_PROBES.len
+        TEXT_LAYOUT_EMISSION_PROBES.push(value)
+    }
+}
+
+pub fn text_layout_emission_probe_reset() {
+    TEXT_LAYOUT_EMISSION_PROBES.clear()
+    TEXT_LAYOUT_EMISSION_PROBE_INDEX.clear()
+}
+
+fn text_layout_emission_probe_case_text(i: int) -> string {
+    return "tn-keyboard-probe-{i}"
+}
+
+@test
+fn text_layout_emission_probe_keeps_texts_past_the_old_bound() {
+    text_layout_emission_probe_reset()
+    defer { text_layout_emission_probe_reset() }
+    // More distinct texts than the 16 slots the keyboard pause sim outgrew
+    // (1e585292c8 RED 7/13): every recorded text stays retrievable.
+    let count = 24
+    for i in 0..count {
+        let value = text_layout_emission_probe_empty()
+        value.retained_text = text_layout_emission_probe_case_text(i)
+        value.emitted_count = i + 1
+        text_layout_emission_probe_record(value)
+    }
+    assert_eq(TEXT_LAYOUT_EMISSION_PROBES.len, count,
+        "recording keeps one slot per distinct text")
+    for i in 0..count {
+        let text = text_layout_emission_probe_case_text(i)
+        let found = text_layout_emission_probe(text)
+        assert(found != null, "recorded probe text {text} stays retrievable")
+        assert_eq(found.unwrap().emitted_count, i + 1,
+            "probe {text} keeps its recorded emission")
+    }
+    // Re-recording a text overwrites its slot instead of growing a duplicate.
+    let again = text_layout_emission_probe_empty()
+    again.retained_text = text_layout_emission_probe_case_text(5)
+    again.emitted_count = 50
+    text_layout_emission_probe_record(again)
+    assert_eq(TEXT_LAYOUT_EMISSION_PROBES.len, count,
+        "re-recording a text keeps the slot count")
+    assert_eq(text_layout_emission_probe(
+        text_layout_emission_probe_case_text(5)).unwrap().emitted_count, 50,
+        "re-recording a text updates its slot")
+}
+
+fn text_layout_emission_bounds_union(a: Rect, b: Rect) -> Rect {
+    if a.w <= 0.0 || a.h <= 0.0 { return b }
+    let lo = v(min(a.x, b.x), min(a.y, b.y))
+    let hi = v(max(a.x + a.w, b.x + b.w), max(a.y + a.h, b.y + b.h))
+    return rect(lo.x, lo.y, hi.x - lo.x, hi.y - lo.y)
+}
+
+fn text_layout_source_step(text: string, i: int) -> int {
+    let end = text_codepoint_end(text, i)
+    return max(1, end - i)
+}
+
+fn text_layout_coverage_oversampling(font: Font?) -> float {
+    let value = FONT_COVERAGE_OVERSAMPLING
+    if font != null {
+        let data = font.unwrap().data()
+        if data != null && data.unwrap().raster == FontRasterPolicy::Fixed {
+            value = FONT_COVERAGE_OVERSAMPLING_DEFAULT
+        }
+    }
+    return font_coverage_oversampling_require(value)
+}
+
+fn text_layout_empty(font: Font?, text: string, face: int, align: TextAlign) -> TextLayout {
+    return TextLayout {
+        font: font,
+        text: text,
+        face: face,
+        glyphs: flat_vec_new(max(1, text.len())),
+        logical_bounds: rect(0.0, 0.0, 0.0, 0.0),
+        ink_bounds: rect(0.0, 0.0, 0.0, 0.0),
+        ascent: 0.0,
+        descent: 0.0,
+        line_height: 0.0,
+        line_count: 0,
+        admitted_count: 0,
+        alignment: align,
+        alignment_offset: v(),
+        raster_authored_cap_height: 0.0,
+        raster_layout_to_target_scale: 1.0,
+        raster_physical_target_scale: 1.0,
+        raster_target_cap_height: 0.0,
+        coverage_oversampling: text_layout_coverage_oversampling(font),
+        raster_metric_scale_x: 0.0,
+        raster_metric_scale_y: 0.0,
+        instance_glyph_id: 0,
+        instance_glyph_data: null,
+        instance_cached_id: 0,
+        instance_cached_pixel_size: 0,
+        instance_cached_image: 0,
+    }
+}
+
+// Vertical centering rule for UI-target text: the middle row (Left/Center/Right)
+// centers the CAP BOX -- first line's cap top to last baseline -- so
+// descenders never move a centered label. Top/Bottom rows pin the logical
+// box edge exactly as text_align_fracs. World text keeps logical-box
+// centering on every row.
+
+// Distance from a TopLeft origin down to the cap-box center. `trailing`
+// carries the multiline tail ((lines - 1) * line height); one line passes 0.
+pub fn text_cap_center_from_top(ascent: float, cap_height: float, trailing: float) -> float {
+    return ascent - cap_height * 0.5 + trailing * 0.5
+}
+
+// Origin y for UI-target text hung from an anchor: the middle row centers
+// the cap box, every other row pins the logical box. `frac_y` is the
+// text_align_fracs y; callers pass 0.0 trailing for one line.
+pub fn text_anchored_y(anchor_y: float, frac_y: float, text_h: float, ascent: float, cap_height: float, trailing: float) -> float {
+    if frac_y == 0.5 && cap_height > 0.0 && text_h > 0.0 {
+        return anchor_y - text_cap_center_from_top(ascent, cap_height, trailing)
+    }
+    return anchor_y - frac_y * text_h
+}
+
+// Scaled cap height of one font at an authored UI size: the same divisor
+// and context factor text_layout_build emits with. 0.0 = the font has no
+// usable metrics yet; callers keep logical-box centering then.
+pub fn text_font_cap_height(font: Font, size: float, render_scale: float) -> float {
+    let d = font.data() ?? return 0.0
+    let idx = d.backend_id - 1
+    if idx < 0 || idx >= FONT_UNIT_CAP_HEIGHTS.len { return 0.0 }
+    let divisor = font_size_divisor(idx)
+    if divisor <= 0.0 || FONT_UNIT_CAP_HEIGHTS[idx] <= 0.0 { return 0.0 }
+    return FONT_UNIT_CAP_HEIGHTS[idx] * size * render_scale / divisor
+}
+
+// Cap height over resolved runs in each run's own target scale, taking the
+// maximum like measure_resolved_runs takes the maximum ascent.
+pub fn resolved_runs_cap_height(runs: [ResolvedTextRun]) -> float {
+    let cap = 0.0
+    for run in runs {
+        let d = run.font.data() ?? continue
+        let idx = d.backend_id - 1
+        if idx < 0 || idx >= FONT_UNIT_CAP_HEIGHTS.len { continue }
+        let c = FONT_UNIT_CAP_HEIGHTS[idx] * resolved_run_scale(run) * run.draw_scale
+        if c > cap { cap = c }
+    }
+    return cap
+}
+
+pub fn resolved_plain_cap_height(layout: ResolvedPlainText) -> float {
+    let cap = 0.0
+    for line in layout.lines {
+        let c = resolved_runs_cap_height(line.runs)
+        if c > cap { cap = c }
+    }
+    return cap
+}
+
+pub fn text_layout_build_scaled(
+    font: Font,
+    text: string,
+    scale_x: float,
+    scale_y: float,
+    face: int,
+    align: TextAlign,
+    reject_invalid: bool,
+    split_lines: bool = true,
+    reject_site: string = "",
+    raster_physical_target_scale: float = 1.0
+) -> TextLayout {
+    TEXT_LAYOUT_BUILD_CALLS += 1
+    let data = font.data()
+    if data == null { return text_layout_empty(font, text, face, align) }
+    let idx = data.unwrap().backend_id - 1
+    if TEXT_MISSING_GLYPH_POLICY == TextMissingGlyphPolicy::Substitute
+        && idx >= 0 && idx < FONT_CP_SLOTS.len && idx < GLYPH_CACHES.len
+        && GLYPH_CACHES[idx].len > FACE_REGULAR
+        && GLYPH_CACHES[idx][FACE_REGULAR].len > 0 {
+        let prepare_site = if reject_site == "" { "text layout" } else { reject_site }
+        text = text_prepare_missing_glyphs(font, null, idx, text, prepare_site)
+    }
+    let layout = text_layout_empty(font, text, face, align)
+    layout.font = font
+    layout.text = text
+    layout.face = face
+    layout.logical_bounds = rect(0.0, 0.0, 0.0, 0.0)
+    layout.ink_bounds = rect(0.0, 0.0, 0.0, 0.0)
+    layout.ascent = 0.0
+    layout.descent = 0.0
+    let abs_sy = abs(scale_y)
+    let metrics = text_line_metrics(idx, scale_y)
+    layout.line_height = metrics.line_height
+    layout.line_count = 1
+    layout.admitted_count = 0
+    layout.alignment = align
+    layout.alignment_offset = v()
+    layout.raster_metric_scale_x = scale_x
+    layout.raster_metric_scale_y = scale_y
+    layout.raster_authored_cap_height = 0.0
+    layout.raster_layout_to_target_scale = 1.0
+    layout.raster_physical_target_scale = raster_physical_target_scale
+    layout.raster_target_cap_height = 0.0
+
+    if idx >= 0 && idx < FONT_UNIT_SIZES.len
+        && idx < FONT_UNIT_CAP_HEIGHTS.len {
+        layout.raster_authored_cap_height = text_layout_raster_cap_for_scale(font, scale_y)
+        layout.raster_target_cap_height = layout.raster_authored_cap_height
+            * layout.raster_layout_to_target_scale
+            * layout.raster_physical_target_scale
+    }
+    if idx < 0 || idx >= GLYPH_CACHES.len || idx >= GLYPH_UNIT_CACHES.len
+        || face < 0 || face >= GLYPH_CACHES[idx].len
+        || face >= GLYPH_UNIT_CACHES[idx].len {
+        return layout
+    }
+    let glyphs = GLYPH_CACHES[idx][face]
+    let unit_glyphs = GLYPH_UNIT_CACHES[idx][face]
+    if glyphs.len == 0 || unit_glyphs.len == 0 { return layout }
+
+    let cursor_x = 0.0
+    let line_index = 0
+    let max_width = 0.0
+    let i = 0
+    while i < text.len() {
+        let byte = text.unit_at(i)
+        if byte == 13 || byte == 9 {
+            if reject_invalid && reject_site != "" {
+                error("{reject_site}: rich text is one line -- byte {byte} at offset {i} of {text.len()} is a line control")
+            }
+            if reject_invalid {
+                error("text layout rejected line control byte {byte} at offset {i}")
+            }
+            i += 1
+            continue
+        }
+        if byte == 10 && reject_invalid && reject_site != "" {
+            error("{reject_site}: rich text is one line -- byte {byte} at offset {i} of {text.len()} is a line control")
+        }
+        if byte == 10 && split_lines {
+            if cursor_x > max_width { max_width = cursor_x }
+            line_index += 1
+            layout.line_count = line_index + 1
+            cursor_x = 0.0
+            i += 1
+            continue
+        }
+        if byte == 10 {
+            i += 1
+            continue
+        }
+        let slot = text_glyph_slot(FONT_CP_SLOTS[idx], text, i)
+        let step = text_layout_source_step(text, i)
+        if slot < 0 {
+            if reject_invalid {
+                if reject_site != "" {
+                    error("{reject_site}: byte {byte} at offset {i} is outside the supported text atlas")
+                }
+                error("text layout rejected byte {byte} at offset {i}")
+            }
+            i += step
+            continue
+        }
+        if slot >= glyphs.len {
+            if reject_invalid {
+                if reject_site != "" {
+                    error("{reject_site}: glyph slot {slot} at offset {i} is outside the supported text atlas")
+                }
+                error("text layout rejected glyph slot {slot} at offset {i}")
+            }
+            i += step
+            continue
+        }
+        let raster_g = glyphs[slot]
+        let g = unit_glyphs[slot]
+        if !raster_g.valid || !g.valid {
+            if reject_invalid {
+                if reject_site != "" {
+                    error("{reject_site}: glyph slot {slot} at offset {i} is unavailable")
+                }
+                error("text layout rejected unavailable glyph slot {slot} at offset {i}")
+            }
+            i += step
+            continue
+        }
+        layout.admitted_count += 1
+        let advance = g.advance * scale_x
+        let glyph_h = g.height * abs_sy
+        if g.width > 0.0 && g.height > 0.0 {
+            let origin = v(cursor_x, line_index as float * metrics.line_height)
+            layout.glyphs.push(TextGlyph {
+                glyph_index: layout.glyphs.len,
+                source_index: i,
+                glyph: slot,
+                face: face,
+                origin: origin,
+                ink: rect(cursor_x + g.left * scale_x,
+                    origin.y - g.top * abs_sy,
+                    g.width * abs(scale_x), glyph_h),
+                advance: advance,
+                pivot: v(cursor_x + advance * 0.5,
+                    (line_index as float + 0.5) * metrics.line_height),
+            })
+        }
+        cursor_x += advance
+        i += step
+    }
+    if cursor_x > max_width { max_width = cursor_x }
+
+    if layout.admitted_count > 0 {
+        layout.ascent = metrics.ascent
+        layout.descent = metrics.descent
+    }
+
+    for i in 0..layout.glyphs.len {
+        let glyph = layout.glyphs[i]
+        layout.glyphs[i] = TextGlyph {
+            glyph_index: glyph.glyph_index,
+            source_index: glyph.source_index,
+            glyph: glyph.glyph,
+            face: glyph.face,
+            origin: glyph.origin + v(0.0, layout.ascent),
+            ink: rect(glyph.ink.x, glyph.ink.y + layout.ascent,
+                glyph.ink.w, glyph.ink.h),
+            advance: glyph.advance,
+            pivot: glyph.pivot,
+        }
+    }
+    let logical_height = if layout.admitted_count > 0 {
+        layout.line_count as float * metrics.line_height
+    } else { 0.0 }
+    layout.logical_bounds = rect(0.0, 0.0, max_width, logical_height)
+    let found_ink = false
+    let ink_lo = v()
+    let ink_hi = v()
+    for glyph in layout.glyphs {
+        let lo = v(glyph.ink.x, glyph.ink.y)
+        let hi = v(glyph.ink.x + glyph.ink.w, glyph.ink.y + glyph.ink.h)
+        if !found_ink {
+            ink_lo = lo
+            ink_hi = hi
+            found_ink = true
+        } else {
+            ink_lo = v(min(ink_lo.x, lo.x), min(ink_lo.y, lo.y))
+            ink_hi = v(max(ink_hi.x, hi.x), max(ink_hi.y, hi.y))
+        }
+    }
+    if found_ink {
+        layout.ink_bounds = rect(ink_lo.x, ink_lo.y,
+            ink_hi.x - ink_lo.x, ink_hi.y - ink_lo.y)
+    }
+    let frac = text_align_fracs(align)
+    layout.alignment_offset = frac * -1.0
+        * v(layout.logical_bounds.w, layout.logical_bounds.h)
+    if frac.y == 0.5 && layout.logical_bounds.h > 0.0
+        && idx >= 0 && idx < FONT_UNIT_CAP_HEIGHTS.len
+        && FONT_UNIT_CAP_HEIGHTS[idx] > 0.0 {
+        let trailing = (layout.line_count - 1) as float * metrics.line_height
+        layout.alignment_offset.y = -text_cap_center_from_top(
+            layout.ascent, FONT_UNIT_CAP_HEIGHTS[idx] * abs_sy, trailing)
+    }
+    return layout
+}
+
+fn text_layout_shift_y(layout: TextLayout, delta: float) {
+    for i in 0..layout.glyphs.len {
+        let glyph = layout.glyphs[i]
+        layout.glyphs[i] = TextGlyph {
+            glyph_index: glyph.glyph_index,
+            source_index: glyph.source_index,
+            glyph: glyph.glyph,
+            face: glyph.face,
+            origin: glyph.origin + v(0.0, delta),
+            ink: rect(glyph.ink.x, glyph.ink.y + delta,
+                glyph.ink.w, glyph.ink.h),
+            advance: glyph.advance,
+            pivot: glyph.pivot + v(0.0, delta),
+        }
+    }
+    layout.ink_bounds.y += delta
+}
+
+pub fn text_layout_build(
+    font: Font,
+    text: string,
+    size: float,
+    render_scale: float,
+    face: int = FACE_REGULAR,
+    align: TextAlign = TextAlign::TopLeft,
+    reject_invalid: bool = false,
+    raster_physical_target_scale: float = 1.0
+) -> TextLayout {
+    let data = font.data()
+    if data == null { return text_layout_empty(font, text, face, align) }
+    let idx = data.unwrap().backend_id - 1
+    let divisor = font_size_divisor(idx)
+    if divisor <= 0.0 {
+        return text_layout_empty(font, text, face, align)
+    }
+    let scale = size * render_scale / divisor
+    let layout = text_layout_build_scaled(font, text, scale, scale,
+        face, align, reject_invalid)
+    layout.raster_authored_cap_height = size
+    layout.raster_layout_to_target_scale = render_scale
+    layout.raster_physical_target_scale = raster_physical_target_scale
+    layout.raster_target_cap_height = text_layout_raster_cap_for_scale(font, scale)
+        * raster_physical_target_scale
+    return layout
+}
+
+fn text_layout_cache_window_begin() {
+    TEXT_LAYOUT_CACHE_WINDOW_START_REQUESTS = TEXT_LAYOUT_CACHE_REQUESTS
+    TEXT_LAYOUT_CACHE_WINDOW_START_HITS = TEXT_LAYOUT_CACHE_HITS
+    TEXT_LAYOUT_CACHE_WINDOW_START_MISSES = TEXT_LAYOUT_CACHE_MISSES
+    TEXT_LAYOUT_CACHE_WINDOW_START_BUILDS = TEXT_LAYOUT_CACHE_BUILDS
+    TEXT_LAYOUT_CACHE_WINDOW_START_EVICTIONS = TEXT_LAYOUT_CACHE_EVICTIONS
+    TEXT_LAYOUT_CACHE_WINDOW_START_ENTRIES_EXAMINED = TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED
+    TEXT_LAYOUT_CACHE_WINDOW_START_WORLD_BUILDS = TEXT_WORLD_LAYOUT_BUILD_CALLS
+    TEXT_LAYOUT_CACHE_WINDOW_REQUESTS = 0
+    TEXT_LAYOUT_CACHE_WINDOW_HITS = 0
+    TEXT_LAYOUT_CACHE_WINDOW_MISSES = 0
+    TEXT_LAYOUT_CACHE_WINDOW_BUILDS = 0
+    TEXT_LAYOUT_CACHE_WINDOW_EVICTIONS = 0
+    TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED = 0
+    TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED = 0
+    TEXT_LAYOUT_CACHE_WINDOW_HIGH_WATER = TEXT_LAYOUT_CACHE.len
+    TEXT_LAYOUT_CACHE_WINDOW_UI_REQUESTS = 0
+    TEXT_LAYOUT_CACHE_WINDOW_UI_HITS = 0
+    TEXT_LAYOUT_CACHE_WINDOW_UI_MISSES = 0
+    TEXT_LAYOUT_CACHE_WINDOW_UI_BUILDS = 0
+    TEXT_LAYOUT_CACHE_WINDOW_UI_EVICTIONS = 0
+    TEXT_LAYOUT_CACHE_WINDOW_WORLD_REQUESTS = 0
+    TEXT_LAYOUT_CACHE_WINDOW_WORLD_HITS = 0
+    TEXT_LAYOUT_CACHE_WINDOW_WORLD_MISSES = 0
+    TEXT_LAYOUT_CACHE_WINDOW_WORLD_BUILDS = 0
+    TEXT_LAYOUT_CACHE_WINDOW_WORLD_EVICTIONS = 0
+    TEXT_LAYOUT_CACHE_WINDOW_ACTIVE = true
+}
+
+fn text_layout_cache_window_end() {
+    if !TEXT_LAYOUT_CACHE_WINDOW_ACTIVE { return () }
+    TEXT_LAYOUT_CACHE_WINDOW_REQUESTS = TEXT_LAYOUT_CACHE_REQUESTS - TEXT_LAYOUT_CACHE_WINDOW_START_REQUESTS
+    TEXT_LAYOUT_CACHE_WINDOW_HITS = TEXT_LAYOUT_CACHE_HITS - TEXT_LAYOUT_CACHE_WINDOW_START_HITS
+    TEXT_LAYOUT_CACHE_WINDOW_MISSES = TEXT_LAYOUT_CACHE_MISSES - TEXT_LAYOUT_CACHE_WINDOW_START_MISSES
+    TEXT_LAYOUT_CACHE_WINDOW_BUILDS = TEXT_LAYOUT_CACHE_BUILDS - TEXT_LAYOUT_CACHE_WINDOW_START_BUILDS
+    TEXT_LAYOUT_CACHE_WINDOW_EVICTIONS = TEXT_LAYOUT_CACHE_EVICTIONS - TEXT_LAYOUT_CACHE_WINDOW_START_EVICTIONS
+    TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED = TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED - TEXT_LAYOUT_CACHE_WINDOW_START_ENTRIES_EXAMINED
+    TEXT_LAYOUT_CACHE_WINDOW_WORLD_BUILDS = TEXT_WORLD_LAYOUT_BUILD_CALLS - TEXT_LAYOUT_CACHE_WINDOW_START_WORLD_BUILDS
+    TEXT_LAYOUT_CACHE_WINDOW_ACTIVE = false
+}
+
+pub fn text_layout_cache_clear() {
+    TEXT_LAYOUT_CACHE.clear()
+    TEXT_LAYOUT_CACHE_INDEX.clear()
+    TEXT_LAYOUT_CACHE_CLOCK = 0
+}
+
+fn text_align_ordinal(align: TextAlign) -> int {
+    match align {
+        TextAlign::TopLeft => 0, TextAlign::TopCenter => 1, TextAlign::TopRight => 2,
+        TextAlign::Left => 3, TextAlign::Center => 4, TextAlign::Right => 5,
+        TextAlign::BottomLeft => 6, TextAlign::BottomCenter => 7,
+        TextAlign::BottomRight => 8,
+    }
+}
+
+@inline
+fn text_layout_quantize(value: float, scale: float, modulus: int) -> int {
+    let q = floor(value * scale) as int
+    return ((q % modulus) + modulus) % modulus
+}
+
+// A hash of one cache variant, packed into 50 bits so it stays an exact
+// integer in a Lua number. It is a hash, not an identity: the float fields are
+// quantized, so lookups confirm the exact fields among entries sharing a key.
+fn text_layout_variant_key(world_raster: bool, font_id: int, face: int,
+                           align: TextAlign, cap_height: bool,
+                           a: float, b: float, c: float) -> int {
+    let key = if world_raster { 1 } else { 0 }
+    key = key * 256 + ((font_id % 256) + 256) % 256
+    key = key * 4 + ((face % 4) + 4) % 4
+    key = key * 16 + text_align_ordinal(align)
+    key = key * 2 + if cap_height { 1 } else { 0 }
+    key = key * 16384 + text_layout_quantize(a, 16.0, 16384)
+    key = key * 1024 + text_layout_quantize(b, 32.0, 1024)
+    key = key * 1024 + text_layout_quantize(c, 32.0, 1024)
+    return key
+}
+
+fn text_layout_cache_index_add(text: string, variant: int, index: int) {
+    let variants = TEXT_LAYOUT_CACHE_INDEX.get(text)
+    if variants != null {
+        let by_variant = variants.unwrap()
+        let entry = TEXT_LAYOUT_CACHE[index]
+        entry.next_variant_slot = by_variant.get(variant).unwrap_or(-1)
+        TEXT_LAYOUT_CACHE[index] = entry
+        by_variant.insert(variant, index)
+    } else {
+        let entry = TEXT_LAYOUT_CACHE[index]
+        entry.next_variant_slot = -1
+        TEXT_LAYOUT_CACHE[index] = entry
+        let created: Map<int, int> = map_new()
+        created.insert(variant, index)
+        TEXT_LAYOUT_CACHE_INDEX.insert(text, created)
+    }
+}
+
+// A quantized variant may represent several distinct exact keys. Each resident
+// entry belongs to one slot in the same-variant chain; unlink it before that
+// slot is reused, preserving the remaining entries as lookup candidates.
+fn text_layout_cache_index_remove(text: string, variant: int, index: int) {
+    let variants = TEXT_LAYOUT_CACHE_INDEX.get(text) ?? return
+    let head = variants.get(variant) ?? return
+    if head == index {
+        let next = TEXT_LAYOUT_CACHE[index].next_variant_slot
+        if next >= 0 {
+            variants.insert(variant, next)
+        } else {
+            let _ = variants.remove(variant)
+            if variants.is_empty() { let _ = TEXT_LAYOUT_CACHE_INDEX.remove(text) }
+        }
+        let entry = TEXT_LAYOUT_CACHE[index]
+        entry.next_variant_slot = -1
+        TEXT_LAYOUT_CACHE[index] = entry
+        return ()
+    }
+
+    let previous = head
+    let current = TEXT_LAYOUT_CACHE[head].next_variant_slot
+    while current >= 0 {
+        let entry = TEXT_LAYOUT_CACHE[current]
+        if current == index {
+            let previous_entry = TEXT_LAYOUT_CACHE[previous]
+            previous_entry.next_variant_slot = entry.next_variant_slot
+            TEXT_LAYOUT_CACHE[previous] = previous_entry
+            entry.next_variant_slot = -1
+            TEXT_LAYOUT_CACHE[index] = entry
+            return ()
+        }
+        previous = current
+        current = entry.next_variant_slot
+    }
+}
+
+fn text_layout_cache_slot(text: string, variant: int) -> int {
+    let variants = TEXT_LAYOUT_CACHE_INDEX.get(text) ?? return -1
+    let slot = variants.get(variant) ?? return -1
+    if slot < 0 || slot >= TEXT_LAYOUT_CACHE.len { return -1 }
+    return slot
+}
+
+// The slot a new entry takes: the next free index, or the least recently used
+// entry, evicted here. The caller stores the entry it built straight into this
+// slot so the layout is constructed in the cache's own storage; a stored copy
+// would deep-copy every glyph row on each miss (Lua has no owner to move into).
+fn text_layout_cache_claim_slot(world_raster: bool) -> int {
+    if TEXT_LAYOUT_CACHE.len < TEXT_LAYOUT_CACHE_CAPACITY {
+        return TEXT_LAYOUT_CACHE.len
+    }
+    let oldest_idx = 0
+    let oldest_used = TEXT_LAYOUT_CACHE[0].last_used
+    for i in 1..TEXT_LAYOUT_CACHE.len {
+        if TEXT_LAYOUT_CACHE[i].last_used < oldest_used {
+            oldest_idx = i
+            oldest_used = TEXT_LAYOUT_CACHE[i].last_used
+        }
+    }
+    TEXT_LAYOUT_CACHE_EVICTIONS += 1
+    if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
+        TEXT_LAYOUT_CACHE_WINDOW_EVICTIONS += 1
+        if world_raster {
+            TEXT_LAYOUT_CACHE_WINDOW_WORLD_EVICTIONS += 1
+        } else {
+            TEXT_LAYOUT_CACHE_WINDOW_UI_EVICTIONS += 1
+        }
+    }
+    let old = TEXT_LAYOUT_CACHE[oldest_idx]
+    text_layout_cache_index_remove(old.text, old.variant, oldest_idx)
+    return oldest_idx
+}
+
+fn text_layout_cache_commit(slot: int) -> TextLayout {
+    let entry = TEXT_LAYOUT_CACHE[slot]
+    text_layout_cache_index_add(entry.text, entry.variant, slot)
+    if TEXT_LAYOUT_CACHE.len > TEXT_LAYOUT_CACHE_HIGH_WATER {
+        TEXT_LAYOUT_CACHE_HIGH_WATER = TEXT_LAYOUT_CACHE.len
+    }
+    if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE
+        && TEXT_LAYOUT_CACHE.len > TEXT_LAYOUT_CACHE_WINDOW_HIGH_WATER {
+        TEXT_LAYOUT_CACHE_WINDOW_HIGH_WATER = TEXT_LAYOUT_CACHE.len
+    }
+    return entry.layout
+}
+
+pub fn text_layout_cached(
+    font: Font,
+    text: string,
+    size: float,
+    render_scale: float,
+    align: TextAlign,
+    raster_physical_target_scale: float,
+    face: int = FACE_REGULAR
+) -> TextLayout {
+    TEXT_LAYOUT_CACHE_CLOCK += 1
+    TEXT_LAYOUT_CACHE_REQUESTS += 1
+    if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
+        TEXT_LAYOUT_CACHE_WINDOW_REQUESTS += 1
+        TEXT_LAYOUT_CACHE_WINDOW_UI_REQUESTS += 1
+    }
+    let data = font.data()
+    if data == null {
+        let owned_text = text.clone_into(TEXT_LAYOUT_CACHE.storage)
+        return text_layout_empty(font, owned_text, face, align)
+    }
+    let font_id = data.backend_id
+    let variant = text_layout_variant_key(false, font_id, face, align,
+        CAP_HEIGHT_FONTS, size, render_scale, raster_physical_target_scale)
+    let examined = 0
+    let head_slot = text_layout_cache_slot(text, variant)
+    let slot = head_slot
+    while slot >= 0 {
+        examined += 1
+        let entry = TEXT_LAYOUT_CACHE[slot]
+        if !entry.world_raster && entry.font_id == font_id
+            && entry.text == text
+            && entry.size == size
+            && entry.render_scale == render_scale
+            && entry.cap_height_fonts == CAP_HEIGHT_FONTS
+            && entry.align == align
+            && entry.layout.face == face
+            && entry.raster_physical_target_scale == raster_physical_target_scale {
+            entry.last_used = TEXT_LAYOUT_CACHE_CLOCK
+            TEXT_LAYOUT_CACHE_HITS += 1
+            TEXT_LAYOUT_CACHE_INDEX_HITS += 1
+            TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED += examined
+            if examined > TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED {
+                TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED = examined
+            }
+            if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
+                TEXT_LAYOUT_CACHE_WINDOW_HITS += 1
+                TEXT_LAYOUT_CACHE_WINDOW_UI_HITS += 1
+                TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED += examined
+                if examined > TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED {
+                    TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED = examined
+                }
+            }
+            return entry.layout
+        }
+        slot = entry.next_variant_slot
+    }
+    TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED += examined
+    if examined > TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED {
+        TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED = examined
+    }
+    if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
+        TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED += examined
+        if examined > TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED {
+            TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED = examined
+        }
+        TEXT_LAYOUT_CACHE_WINDOW_MISSES += 1
+        TEXT_LAYOUT_CACHE_WINDOW_UI_MISSES += 1
+    }
+    TEXT_LAYOUT_CACHE_MISSES += 1
+    let owned_text = text.clone_into(TEXT_LAYOUT_CACHE.storage)
+    let layout = text_layout_build(font, owned_text, size, render_scale,
+        face: face, align: align,
+        raster_physical_target_scale: raster_physical_target_scale)
+    TEXT_LAYOUT_CACHE_BUILDS += 1
+    if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
+        TEXT_LAYOUT_CACHE_WINDOW_BUILDS += 1
+        TEXT_LAYOUT_CACHE_WINDOW_UI_BUILDS += 1
+    }
+    let entry = TextLayoutCacheEntry {
+        font_id: font_id,
+        text: owned_text,
+        size: size,
+        render_scale: render_scale,
+        scale_x: 0.0,
+        scale_y: 0.0,
+        world_raster: false,
+        cap_height_fonts: CAP_HEIGHT_FONTS,
+        align: align,
+        raster_physical_target_scale: raster_physical_target_scale,
+        variant: variant,
+        next_variant_slot: -1,
+        last_used: TEXT_LAYOUT_CACHE_CLOCK,
+        layout: layout,
+    }
+    let slot = text_layout_cache_claim_slot(false)
+    if slot == TEXT_LAYOUT_CACHE.len {
+        TEXT_LAYOUT_CACHE.push(entry)
+    } else {
+        TEXT_LAYOUT_CACHE[slot] = entry
+    }
+    return text_layout_cache_commit(slot)
+}
+
+fn text_layout_cached_world(
+    font: Font,
+    text: string,
+    scale_x: float,
+    scale_y: float,
+    raster_physical_target_scale: float = -1.0,
+    face: int = FACE_REGULAR
+) -> TextLayout {
+    TEXT_LAYOUT_CACHE_CLOCK += 1
+    TEXT_LAYOUT_CACHE_REQUESTS += 1
+    if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
+        TEXT_LAYOUT_CACHE_WINDOW_REQUESTS += 1
+        TEXT_LAYOUT_CACHE_WINDOW_WORLD_REQUESTS += 1
+    }
+    let data = font.data()
+    if data == null {
+        let owned_text = text.clone_into(TEXT_LAYOUT_CACHE.storage)
+        return text_layout_empty(font, owned_text, face, TextAlign::TopLeft)
+    }
+    let font_id = data.backend_id
+    let density = if raster_physical_target_scale > 0.0 {
+        raster_physical_target_scale
+    } else { world_text_scene_density() }
+    let variant = text_layout_variant_key(true, font_id, face, TextAlign::TopLeft,
+        false, scale_x, scale_y, density)
+    let examined = 0
+    let head_slot = text_layout_cache_slot(text, variant)
+    let slot = head_slot
+    while slot >= 0 {
+        examined += 1
+        let entry = TEXT_LAYOUT_CACHE[slot]
+        if entry.world_raster && entry.font_id == font_id
+            && entry.text == text
+            && entry.scale_x == scale_x
+            && entry.scale_y == scale_y
+            && entry.raster_physical_target_scale == density
+            && entry.layout.face == face {
+            entry.last_used = TEXT_LAYOUT_CACHE_CLOCK
+            TEXT_LAYOUT_CACHE_HITS += 1
+            TEXT_LAYOUT_CACHE_INDEX_HITS += 1
+            if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
+                TEXT_LAYOUT_CACHE_WINDOW_HITS += 1
+                TEXT_LAYOUT_CACHE_WINDOW_WORLD_HITS += 1
+            }
+            TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED += examined
+            if examined > TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED {
+                TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED = examined
+            }
+            if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
+                TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED += examined
+                if examined > TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED {
+                    TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED = examined
+                }
+            }
+            return entry.layout
+        }
+        slot = entry.next_variant_slot
+    }
+    TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED += examined
+    if examined > TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED {
+        TEXT_LAYOUT_CACHE_MAX_ENTRIES_EXAMINED = examined
+    }
+    if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
+        TEXT_LAYOUT_CACHE_WINDOW_ENTRIES_EXAMINED += examined
+        if examined > TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED {
+            TEXT_LAYOUT_CACHE_WINDOW_MAX_ENTRIES_EXAMINED = examined
+        }
+        TEXT_LAYOUT_CACHE_WINDOW_MISSES += 1
+        TEXT_LAYOUT_CACHE_WINDOW_WORLD_MISSES += 1
+    }
+    TEXT_LAYOUT_CACHE_MISSES += 1
+    TEXT_WORLD_LAYOUT_BUILD_CALLS += 1
+    let owned_text = text.clone_into(TEXT_LAYOUT_CACHE.storage)
+    let layout = text_layout_build_scaled(font, owned_text, scale_x, scale_y,
+        face, TextAlign::TopLeft, false, true, "", density)
+    TEXT_LAYOUT_CACHE_BUILDS += 1
+    if TEXT_LAYOUT_CACHE_WINDOW_ACTIVE {
+        TEXT_LAYOUT_CACHE_WINDOW_BUILDS += 1
+        TEXT_LAYOUT_CACHE_WINDOW_WORLD_BUILDS += 1
+    }
+    let entry = TextLayoutCacheEntry {
+        font_id: font_id,
+        text: owned_text,
+        size: 0.0,
+        render_scale: 0.0,
+        scale_x: scale_x,
+        scale_y: scale_y,
+        world_raster: true,
+        cap_height_fonts: false,
+        align: TextAlign::TopLeft,
+        raster_physical_target_scale: density,
+        variant: variant,
+        next_variant_slot: -1,
+        last_used: TEXT_LAYOUT_CACHE_CLOCK,
+        layout: layout,
+    }
+    let slot = text_layout_cache_claim_slot(true)
+    if slot == TEXT_LAYOUT_CACHE.len {
+        TEXT_LAYOUT_CACHE.push(entry)
+    } else {
+        TEXT_LAYOUT_CACHE[slot] = entry
+    }
+    return text_layout_cache_commit(slot)
+}
+
+pub fn text_layout_aligned_origin(layout: TextLayout, anchor: Vec2) -> Vec2 {
+    return anchor + layout.alignment_offset
+}
+
+pub fn text_layout_identity_poses(layout: TextLayout) -> [GlyphPose] {
+    let poses: [GlyphPose] = []
+    for glyph in layout.glyphs {
+        poses.push(GlyphPose {
+            glyph_index: glyph.glyph_index,
+            source_index: glyph.source_index,
+            glyph: glyph.glyph,
+            translation: v(),
+            scale: v(1.0, 1.0),
+            rotation: 0.0,
+        })
+    }
+    return poses
+}
+
+pub fn glyph_pose_translate(pose: GlyphPose, translation: Vec2) -> GlyphPose {
+    return GlyphPose {
+        glyph_index: pose.glyph_index,
+        source_index: pose.source_index,
+        glyph: pose.glyph,
+        translation: pose.translation + translation,
+        scale: pose.scale,
+        rotation: pose.rotation,
+    }
+}
+
+pub fn glyph_pose_transform(
+    pose: GlyphPose,
+    translation: Vec2,
+    scale: Vec2,
+    rotation: float
+) -> GlyphPose {
+    return GlyphPose {
+        glyph_index: pose.glyph_index,
+        source_index: pose.source_index,
+        glyph: pose.glyph,
+        translation: pose.translation + translation,
+        scale: pose.scale * scale,
+        rotation: pose.rotation + rotation,
+    }
+}
+
+fn text_layout_pose_at(layout: TextLayout, index: int, poses: [GlyphPose]?) -> GlyphPose? {
+    if poses == null { return null }
+    let all = poses.unwrap()
+    if all.len != layout.glyphs.len {
+        error("text layout pose count {all.len} does not match glyph count {layout.glyphs.len}")
+    }
+    let pose = all[index]
+    let glyph = layout.glyphs[index]
+    if pose.glyph_index != glyph.glyph_index
+        || pose.source_index != glyph.source_index
+        || pose.glyph != glyph.glyph {
+        error("text layout pose {index} does not match glyph identity")
+    }
+    return pose
+}
+
+fn text_layout_validate_poses(layout: TextLayout, poses: [GlyphPose]) {
+    if poses.len != layout.glyphs.len {
+        error("text layout pose count {poses.len} does not match glyph count {layout.glyphs.len}")
+    }
+    for i in 0..poses.len {
+        let pose = poses[i]
+        let glyph = layout.glyphs[i]
+        if pose.glyph_index != glyph.glyph_index
+            || pose.source_index != glyph.source_index
+            || pose.glyph != glyph.glyph {
+            error("text layout pose {i} does not match glyph identity")
+        }
+    }
+}
+
+fn text_layout_pose_point(glyph_pivot: Vec2, point: Vec2, pose: GlyphPose?) -> Vec2 {
+    if pose == null { return point }
+    let p = pose.unwrap()
+    if p.translation == v() && p.scale == v(1.0, 1.0) && p.rotation == 0.0 {
+        return point
+    }
+    return glyph_pivot + ((point - glyph_pivot) * p.scale).rotate(p.rotation)
+        + p.translation
+}
+
+pub fn text_layout_glyph_bounds(layout: TextLayout, index: int, poses: [GlyphPose]?) -> Rect {
+    let glyph = layout.glyphs[index]
+    let pose = text_layout_pose_at(layout, index, poses)
+    let a = text_layout_pose_point(glyph.pivot, v(glyph.ink.x, glyph.ink.y), pose)
+    let b = text_layout_pose_point(glyph.pivot, v(glyph.ink.x + glyph.ink.w, glyph.ink.y), pose)
+    let c = text_layout_pose_point(
+        glyph.pivot,
+        v(glyph.ink.x + glyph.ink.w,
+            glyph.ink.y + glyph.ink.h),
+        pose
+    )
+    let d = text_layout_pose_point(
+        glyph.pivot, v(glyph.ink.x, glyph.ink.y + glyph.ink.h), pose)
+    let lo = v(min(min(a.x, b.x), min(c.x, d.x)), min(min(a.y, b.y), min(c.y, d.y)))
+    let hi = v(max(max(a.x, b.x), max(c.x, d.x)), max(max(a.y, b.y), max(c.y, d.y)))
+    return rect(lo.x, lo.y, hi.x - lo.x, hi.y - lo.y)
+}
+
+fn text_layout_cache_key(layout: TextLayout) -> string {
+    let font_id = if layout.font == null { 0 } else {
+        layout.font.unwrap().data()?.backend_id
+    }
+    return "{font_id}:{layout.text}:{layout.face}:{layout.line_height:.5}:{layout.logical_bounds.x:.5}:{layout.logical_bounds.y:.5}:{layout.logical_bounds.w:.5}:{layout.logical_bounds.h:.5}:{layout.alignment_offset.x:.5}:{layout.alignment_offset.y:.5}"
+}
+
+fn text_world_layout_scaled(
+    font: Font,
+    text: string,
+    scale_x: float,
+    scale_y: float
+) -> TextLayout {
+    return text_layout_cached_world(font, text, scale_x, scale_y)
+}
+
+// The plain entry point. `render_scale` is EXPLICIT: FONT_RENDER_SCALE
+// is the output context's window/DPI factor and has no meaning on a surface
+// authored in its own units (scene texels), where letting it through would
+// rasterize glyphs at the wrong size for the grid.
+//
+// Multiline: one implicit run per line, all sharing the block's max ascent and
+// max glyph height, exactly as before. No TextSpan is built for it.
+pub fn queue_ui_text_scaled(
+    font: Font,
+    text: string,
+    pos: Vec2,
+    size: float,
+    color: Color,
+    offset: Vec2,
+    z_layer: int,
+    render_scale: float,
+    align: TextAlign = TextAlign::TopLeft,
+    raster_physical_target_scale: float = 1.0
+) {
+    if text.len() == 0 { return }
+    let d = font.data() ?? return
+    let idx = d.backend_id - 1
+    if idx < 0 || idx >= FONT_ATLASES.len || idx >= GLYPH_CACHES.len
+        || GLYPH_CACHES[idx].len <= FACE_REGULAR
+        || GLYPH_CACHES[idx][FACE_REGULAR].len == 0
+        || font_size_divisor(idx) <= 0.0 { return }
+    let layout = text_layout_cached(font, text, size, render_scale,
+        align, raster_physical_target_scale)
+    emit_ui_text_layout(layout, pos, color, offset, z_layer)
+}
+
+fn emit_ui_text_layout(
+    layout: TextLayout,
+    pos: Vec2,
+    color: Color,
+    offset: Vec2,
+    z_layer: int
+) {
+    if layout.glyphs.len == 0 { return }
+    let anchor = pos + offset * v(layout.logical_bounds.w, layout.logical_bounds.h)
+    let origin = text_layout_aligned_origin(layout, anchor)
+    let _ = text_layout_emit(layout, origin, color, z_layer)
+}
+
+// --- Rich text: several runs, one line ---
+//
+// The walker's input. Face resolution and byte admission both happen before
+// one of these exists, so nothing downstream re-decides them. Every run reads
+// one face of one font at one size; the mixed-size arc varies `size` here
+// without touching the walk or the public span collection.
+pub struct ResolvedTextRun {
+    text: string,
+    font: Font,
+    // Which baked face this run reads. Resolution happened before the run
+    // existed; the walk never re-decides it.
+    face: int,
+    // Target-context size: the authored size through the selected font's
+    // target or world scaling policy.
+    size: float,
+    // Font-unit divisor. Target runs use the selected font's UI divisor;
+    // world runs use the selected font's native em.
+    scale_divisor: float,
+    color: Color,
+    raster_physical_target_scale: float = 1.0,
+    layout: TextLayout? = null,
+    // Whole-run scale applied at measure and emit time, so a size that
+    // animates every frame reuses one layout built at the base size.
+    draw_scale: float = 1.0,
+}
+
+pub struct ResolvedTextLine {
+    runs: [ResolvedTextRun],
+    width: float,
+    ascent: float,
+    height: float,
+}
+
+pub value ResolvedPlainText {
+    lines: [ResolvedTextLine],
+    width: float,
+    ascent: float,
+    height: float,
+    line_height: float,
+}
+
+pub fn run_glyphs(run: ResolvedTextRun) -> [GlyphData] {
+    return GLYPH_CACHES[run.font.data().unwrap().backend_id - 1][run.face]
+}
+
+pub fn run_cp_slots(run: ResolvedTextRun) -> Map<int, int> {
+    return FONT_CP_SLOTS[run.font.data().unwrap().backend_id - 1]
+}
+
+// An explicit family resolves every handle and atlas up front; legacy
+// single-Font calls retain their documented stale-handle no-op.
+//
+// `require_atlas` separates the two questions this used to answer as one. Batch
+// state, a glyph cache and usable metrics are what LAYOUT needs; an atlas page
+// is a GL texture, which only EMISSION needs. A metrics-only font
+// (`load_font_metrics`, the code-test process) has every metric and no page, so
+// a measurement that demanded a page refused a font it never had to touch.
+// The default is the draw requirement, so an emitting caller that says nothing
+// keeps it; the measurement entry points opt out by name.
+pub fn text_family_font_idx(font: Font, site: string, require_atlas: bool = true) -> int {
+    let fd = font.data()
+    if fd == null { error("{site}: stale font handle -- the font was unloaded") }
+    let d = fd.unwrap()
+    let idx = d.backend_id - 1
+    if idx < 0 || idx >= FONT_ATLASES.len
+        || idx >= FONT_CP_SLOTS.len || idx >= GLYPH_CACHES.len {
+        error("{site}: font {d.backend_id} has no batch state")
+    }
+    if require_atlas && FONT_ATLASES[idx] == Image(0) {
+        error("{site}: font {d.backend_id} has no usable atlas")
+    }
+    if FACE_REGULAR < 0 || FACE_REGULAR >= GLYPH_CACHES[idx].len
+        || GLYPH_CACHES[idx][FACE_REGULAR].len == 0 {
+        error("{site}: font {d.backend_id} has no glyph cache")
+    }
+    // The int overload: `idx` is what the Font overload would resolve to, and
+    // it is already in hand.
+    if font_size_divisor(idx) <= 0.0 {
+        error("{site}: font {d.backend_id} has no usable metrics")
+    }
+    return idx
+}
+
+fn text_family_fonts(family: TextFamily) -> [Font] {
+    let fonts: [Font] = []
+    fonts.push(family.regular)
+    for fallback in family.fallbacks { fonts.push(fallback) }
+    return fonts
+}
+
+// Validate the whole flat family before looking at spans. This also makes an
+// empty span list name every handle and atlas in the family.
+pub fn text_family_indices(family: TextFamily, site: string,
+    require_atlas: bool = true) -> ([Font], [int]) {
+    let fonts = text_family_fonts(family)
+    let indices: [int] = []
+    for font in fonts { indices.push(text_family_font_idx(font, site, require_atlas)) }
+    return (fonts, indices)
+}
+
+fn text_supported_slot(idx: int, text: string, at: int, face: int) -> int {
+    if idx < 0 || idx >= FONT_CP_SLOTS.len || idx >= GLYPH_CACHES.len {
+        return -1
+    }
+    if face < 0 || face >= GLYPH_CACHES[idx].len { return -1 }
+    let slot = text_glyph_slot(FONT_CP_SLOTS[idx], text, at)
+    let glyphs = GLYPH_CACHES[idx][face]
+    if slot < 0 || slot >= glyphs.len { return -1 }
+    if !glyphs[slot].valid { return -1 }
+    return slot
+}
+
+fn text_codepoint_end(text: string, at: int) -> int {
+    let end = at + 1
+    while end < text.len() && text_codepoint_at(text, end) == -1 {
+        end = end + 1
+    }
+    return end
+}
+
+fn text_select_font(indices: [int], text: string, at: int) -> int {
+    for i in 0..indices.len {
+        if text_supported_slot(indices[i], text, at, FACE_REGULAR) >= 0 {
+            return i
+        }
+    }
+    return -1
+}
+
+pub enum TextMissingGlyphPolicy {
+    Reject,
+    Substitute,
+}
+
+pub global TEXT_MISSING_GLYPH_POLICY: TextMissingGlyphPolicy = TextMissingGlyphPolicy::Substitute
+
+// Memo for text_prepare_missing_glyphs. Preparation is a pure function of the
+// text, the font set, TEXT_MISSING_GLYPH_POLICY and the loaded fonts' glyph
+// coverage, and every drawn string re-ran its per-codepoint loop every frame.
+// Two levels rather than one composite key so the lookup is two table reads:
+// building a "{set}:{text}" key would allocate on the hot path it exists to
+// clear.
+//
+// The bound is a capacity with a FULL clear, not the layout cache's LRU: drawn
+// text is largely per-frame dynamic (damage numbers, timers, coordinates), so
+// the working set turns over wholesale rather than aging, and an eviction scan
+// would cost more than re-preparing the live strings after a clear.
+const TEXT_PREPARE_CACHE_CAPACITY: int = 512
+
+// A family folds its index list, length first, so a two-font set can never
+// share a key with a one-font set. Backend ids are monotonic from zero and
+// never reused, and families are two or three fonts, so the fold stays exact
+// well past any set Stone builds; a set that would not fold exactly declines
+// the memo instead of sharing a key with a different one. A single_idx caller
+// lands on the one-element family's key on purpose: the two describe the same
+// font set and must share their answers.
+const TEXT_PREPARE_KEY_RADIX: int = 4096
+const TEXT_PREPARE_KEY_MAX_FONTS: int = 4
+
+global TEXT_PREPARE_CACHE: Map<int, Map<string, string>> = map_new()
+global TEXT_PREPARE_CACHE_ENTRIES: int = 0
+global TEXT_PREPARE_CACHE_POLICY: TextMissingGlyphPolicy = TextMissingGlyphPolicy::Substitute
+
+// Called from every seam that rebuilds or drops glyph coverage:
+// init_text_batch_for(), drop_text_batch_for() and the font projection reset.
+// Those are the only writers of GLYPH_CACHES and FONT_CP_SLOTS, which are the
+// only coverage a prepared string depends on.
+fn text_prepare_cache_clear() {
+    TEXT_PREPARE_CACHE = map_new()
+    TEXT_PREPARE_CACHE_ENTRIES = 0
+    TEXT_PREPARE_CACHE_POLICY = TEXT_MISSING_GLYPH_POLICY
+    text_validate_cache_clear()
+}
+
+fn text_prepare_font_set_key(indices: [int]?, single_idx: int) -> int {
+    if let family_indices = indices {
+        if family_indices.len > TEXT_PREPARE_KEY_MAX_FONTS { return -1 }
+        let key = family_indices.len
+        for i in 0..family_indices.len {
+            let idx = family_indices[i]
+            if idx < 0 || idx >= TEXT_PREPARE_KEY_RADIX { return -1 }
+            key = key * TEXT_PREPARE_KEY_RADIX + idx + 1
+        }
+        return key
+    }
+    if single_idx < 0 || single_idx >= TEXT_PREPARE_KEY_RADIX { return -1 }
+    return TEXT_PREPARE_KEY_RADIX + single_idx + 1
+}
+
+fn text_prepare_cache_store(set_key: int, text: string, prepared: string) {
+    if TEXT_PREPARE_CACHE_ENTRIES >= TEXT_PREPARE_CACHE_CAPACITY {
+        text_prepare_cache_clear()
+    }
+    if let by_text = TEXT_PREPARE_CACHE.get(set_key) {
+        by_text.insert(text, prepared)
+    } else {
+        let created: Map<string, string> = map_new()
+        created.insert(text, prepared)
+        TEXT_PREPARE_CACHE.insert(set_key, created)
+    }
+    TEXT_PREPARE_CACHE_ENTRIES += 1
+}
+
+pub @pure fn text_missing_glyph_policy_for_run(sim: bool, max_frames: int,
+                                            perf_seconds: float) -> TextMissingGlyphPolicy {
+    if sim || max_frames > 0 || perf_seconds > 0.0 {
+        return TextMissingGlyphPolicy::Reject
+    }
+    return TextMissingGlyphPolicy::Substitute
+}
+
+fn text_missing_glyph_reject(site: string, text: string, at: int, cp: int) {
+    if cp < 256 {
+        error("{site}: byte {text.unit_at(at)} at offset {at} of {text.len()} starts codepoint {cp}, but no family font renders it")
+    }
+    error("{site}: codepoint {cp} at offset {at} of {text.len()} is not renderable by any family font")
+}
+
+fn text_missing_glyph_log(font: Font, site: string, cp: int) {
+    let data = font.data().unwrap()
+    log_once("TEXT",
+        "{site}: codepoint {cp} is not renderable by the family rooted at {data.path}; substituting '?'",
+        "text-missing-glyph:{data.backend_id}:{cp}")
+}
+
+fn text_missing_glyph_owner(indices: [int]?, single_idx: int,
+                            text: string, at: int) -> int {
+    if let family_indices = indices {
+        return text_select_font(family_indices, text, at)
+    }
+    return if text_supported_slot(single_idx, text, at, FACE_REGULAR) >= 0 {
+        0
+    } else { -1 }
+}
+
+// The memo front of text_prepare_missing_glyphs_uncached. A string already
+// accepted for this font set is returned as prepared without re-validating it.
+//
+// Rejection is not memoized: under Reject an unrenderable codepoint errors
+// out of the uncached body and never reaches the store, so a bad string keeps
+// erroring on every sight. `site` is deliberately absent from the key -- it
+// only reaches the log_once() for a substitution, which is already
+// deduplicated by (font, codepoint) rather than by site, so a second site
+// seeing the same substituted string logged nothing before the memo either.
+pub fn text_prepare_missing_glyphs(primary: Font, indices: [int]?, single_idx: int,
+                               text: string, site: string) -> string {
+    let set_key = text_prepare_font_set_key(indices, single_idx)
+    if set_key < 0 {
+        return text_prepare_missing_glyphs_uncached(primary, indices, single_idx,
+            text, site)
+    }
+    if TEXT_PREPARE_CACHE_POLICY != TEXT_MISSING_GLYPH_POLICY {
+        text_prepare_cache_clear()
+    }
+    if let by_text = TEXT_PREPARE_CACHE.get(set_key) {
+        if let hit = by_text.get(text) { return hit }
+    }
+    let prepared = text_prepare_missing_glyphs_uncached(primary, indices,
+        single_idx, text, site)
+    text_prepare_cache_store(set_key, text, prepared)
+    return prepared
+}
+
+fn text_prepare_missing_glyphs_uncached(primary: Font, indices: [int]?,
+                                        single_idx: int,
+                                        text: string, site: string) -> string {
+    let prepared = ""
+    let copy_from = 0
+    let changed = false
+    let i = 0
+    while i < text.len() {
+        let cp = text_codepoint_at(text, i)
+        if cp == -2 || cp < 0 {
+            i += 1
+            continue
+        }
+        let end = text_codepoint_end(text, i)
+        if cp == 10 || cp == 13 || cp == 9
+            || text_missing_glyph_owner(indices, single_idx, text, i) >= 0 {
+            i = end
+            continue
+        }
+        if TEXT_MISSING_GLYPH_POLICY == TextMissingGlyphPolicy::Reject {
+            text_missing_glyph_reject(site, text, i, cp)
+        }
+        if text_missing_glyph_owner(indices, single_idx, "?", 0) < 0 {
+            error("{site}: codepoint {cp} is not renderable and no family font renders the replacement '?'")
+        }
+        text_missing_glyph_log(primary, site, cp)
+        prepared = prepared + text.substring(copy_from, i) + "?"
+        copy_from = end
+        changed = true
+        i = end
+    }
+    if !changed { return text }
+    return prepared + text.substring(copy_from, text.len())
+}
+
+// The requested face must be declared by the font that owns the regular
+// glyph. Synthesis is a declaration, not a fallback: serving regular for an
+// undeclared bold would render a line that measures right and reads wrong.
+fn text_face(font: Font, idx: int, style: TextStyle, cp: int, at: int, site: string) -> int {
+    let d = font.data().unwrap()
+    let face = style_face_index(style)
+    if !faces_declare(d.faces, face) {
+        error("{site}: codepoint {cp} at offset {at} selected {d.path}, which declares no {face_name(face)} face -- pass faces: TextFaces {{ bold: true, italic: true }} to load_font")
+    }
+    if face < 0 || face >= GLYPH_CACHES[idx].len
+        || GLYPH_CACHES[idx][face].len == 0 {
+        error("{site}: codepoint {cp} at offset {at} selected font {d.backend_id}, which declares a {face_name(face)} face but baked no glyphs for it")
+    }
+    return face
+}
+
+fn text_face_divisor(font: Font, world_raster: bool, site: string) -> float {
+    let data = font.data()
+    if data == null { error("{site}: selected font is stale") }
+    let d = data.unwrap()
+    let idx = d.backend_id - 1
+    let divisor = if world_raster {
+        if idx < 0 || idx >= FONT_UNIT_SIZES.len { 0.0 }
+        else { FONT_UNIT_SIZES[idx] }
+    } else {
+        font_size_divisor(idx)
+    }
+    if divisor <= 0.0 { error("{site}: selected font {d.backend_id} has no usable text divisor") }
+    return divisor
+}
+
+fn text_make_run(
+    text: string,
+    from: int,
+    to: int,
+    font: Font,
+    face: int,
+    size: float,
+    divisor: float,
+    color: Color
+) -> ResolvedTextRun {
+    return ResolvedTextRun {
+        text: text.substring(from, to),
+        font: font,
+        face: face,
+        size: size,
+        scale_divisor: divisor,
+        color: color,
+    }
+}
+
+fn text_run_size(font: Font, size: float, render_scale: float, world_raster: bool) -> float {
+    return if world_raster {
+        world_text_em_for(font, size)
+    } else {
+        size * render_scale
+    }
+}
+
+// Memo for text_validate_single_font_span, cleared on the same seams as the
+// prepare memo (text_prepare_cache_clear). The answer is a pure function of the
+// text, the font, the face the style selects and the line-control rule. Once
+// preparation stopped looping, this validation was the next per-codepoint walk
+// the recorder reached on every drawn string, and the census moved to it
+// wholesale.
+global TEXT_VALIDATE_CACHE: Map<int, Map<string, int>> = map_new()
+pub global TEXT_VALIDATE_CACHE_ENTRIES: int = 0
+
+fn text_validate_cache_clear() {
+    TEXT_VALIDATE_CACHE = map_new()
+    TEXT_VALIDATE_CACHE_ENTRIES = 0
+}
+
+pub fn text_validate_single_font_span(
+    font: Font,
+    idx: int,
+    text: string,
+    style: TextStyle,
+    reject_line_controls: bool,
+    site: string
+) -> int {
+    if idx < 0 {
+        return text_validate_single_font_span_uncached(font, idx, text, style,
+            reject_line_controls, site)
+    }
+    let key = (idx * 4 + style_face_index(style)) * 2
+        + if reject_line_controls { 1 } else { 0 }
+    if let by_text = TEXT_VALIDATE_CACHE.get(key) {
+        if let hit = by_text.get(text) { return hit }
+    }
+    // Rejection errors out above and never reaches the store.
+    let face = text_validate_single_font_span_uncached(font, idx, text, style,
+        reject_line_controls, site)
+    if TEXT_VALIDATE_CACHE_ENTRIES >= TEXT_PREPARE_CACHE_CAPACITY {
+        text_validate_cache_clear()
+    }
+    if let by_text = TEXT_VALIDATE_CACHE.get(key) {
+        by_text.insert(text, face)
+    } else {
+        let created: Map<string, int> = map_new()
+        created.insert(text, face)
+        TEXT_VALIDATE_CACHE.insert(key, created)
+    }
+    TEXT_VALIDATE_CACHE_ENTRIES += 1
+    return face
+}
+
+fn text_validate_single_font_span_uncached(
+    font: Font,
+    idx: int,
+    text: string,
+    style: TextStyle,
+    reject_line_controls: bool,
+    site: string
+) -> int {
+    let face = -1
+    let i = 0
+    while i < text.len() {
+        let unit = text.unit_at(i)
+        if reject_line_controls && (unit == 10 || unit == 13 || unit == 9) {
+            error("{site}: rich text is one line -- byte {unit} at offset {i} of {text.len()} is a line control")
+        }
+        let cp = text_codepoint_at(text, i)
+        if cp == -2 {
+            error("{site}: byte {unit} at offset {i} of {text.len()} starts a malformed sequence")
+        }
+        if cp < 0 {
+            i += 1
+            continue
+        }
+        if text_supported_slot(idx, text, i, FACE_REGULAR) < 0 {
+            text_missing_glyph_reject(site, text, i, cp)
+        }
+        let resolved = text_face(font, idx, style, cp, i, site)
+        if text_supported_slot(idx, text, i, resolved) < 0 {
+            let d = font.data().unwrap()
+            error("{site}: codepoint {cp} at offset {i} selected font {d.backend_id}, but its {face_name(resolved)} face has no valid glyph")
+        }
+        face = resolved
+        i = text_codepoint_end(text, i)
+    }
+    return face
+}
+
+// Resolve one string segment into contiguous owner runs. The scan keeps byte
+// offsets until an owner changes, so a family-aware plain string allocates one
+// substring per run rather than one substring per codepoint.
+// Append into the consumer-owned sequence; span boundaries need no temporary list.
+pub fn text_resolve_segment(
+    runs: [ResolvedTextRun],
+    fonts: [Font],
+    indices: [int],
+    text: string,
+    size: float,
+    render_scale: float,
+    world_raster: bool,
+    style: TextStyle,
+    reject_line_controls: bool,
+    site: string
+) {
+    if fonts.len == 1 && indices.len == 1 {
+        let font = fonts[0]
+        let prepared = text_prepare_missing_glyphs(
+            font, null, indices[0], text, site)
+        let face = text_validate_single_font_span(
+            font, indices[0], prepared, style, reject_line_controls, site)
+        if face >= 0 {
+            runs.push(text_make_run(prepared, 0, prepared.len(), font, face,
+                text_run_size(font, size, render_scale, world_raster),
+                text_face_divisor(font, world_raster, site), style.color))
+        }
+        return
+    }
+    let prepared = text_prepare_missing_glyphs(fonts[0], indices, -1, text, site)
+    let selected = -1
+    let selected_face = -1
+    let run_start = 0
+    let i = 0
+    while i < prepared.len() {
+        let unit = prepared.unit_at(i)
+        if reject_line_controls && (unit == 10 || unit == 13 || unit == 9) {
+            error("{site}: rich text is one line -- byte {unit} at offset {i} of {prepared.len()} is a line control")
+        }
+        let cp = text_codepoint_at(prepared, i)
+        if cp == -2 {
+            error("{site}: byte {unit} at offset {i} of {prepared.len()} starts a malformed sequence")
+        }
+        if cp < 0 {
+            i = i + 1
+            continue
+        }
+        let owner = text_select_font(indices, prepared, i)
+        if owner < 0 {
+            text_missing_glyph_reject(site, prepared, i, cp)
+        }
+        let font = fonts[owner]
+        let idx = indices[owner]
+        let face = text_face(font, idx, style, cp, i, site)
+        if text_supported_slot(idx, prepared, i, face) < 0 {
+            let d = font.data().unwrap()
+            error("{site}: codepoint {cp} at offset {i} selected font {d.backend_id}, but its {face_name(face)} face has no valid glyph")
+        }
+        let end = text_codepoint_end(prepared, i)
+        if selected != owner || selected_face != face {
+            if selected >= 0 {
+                let previous = fonts[selected]
+                runs.push(
+                    text_make_run(prepared, run_start, i, previous,
+                        selected_face,
+                        text_run_size(previous, size, render_scale, world_raster),
+                        text_face_divisor(previous, world_raster, site),
+                        style.color)
+                )
+            }
+            selected = owner
+            selected_face = face
+            run_start = i
+        }
+        i = end
+    }
+    if selected >= 0 {
+        let font = fonts[selected]
+        runs.push(
+            text_make_run(prepared, run_start, prepared.len(), font,
+                selected_face,
+                text_run_size(font, size, render_scale, world_raster),
+                text_face_divisor(font, world_raster, site), style.color)
+        )
+    }
+    return
+}
+
+// Validate and resolve the WHOLE sequence before anything is measured or
+// emitted, so an invalid later span cannot leave earlier spans half-drawn.
+//
+// The FAMILY is validated for the call, before the loop: an empty sequence
+// names a family exactly as a full one does. Each selected face is then
+// validated before its run is appended, so an undeclared face in the last
+// span cannot leave the first spans drawn.
+fn resolve_text_spans_at(
+    runs: [ResolvedTextRun],
+    family: TextFamily,
+    spans: [TextSpan],
+    size: float,
+    render_scale: float,
+    world_raster: bool,
+    site: string,
+    raster_physical_target_scale: float = 1.0,
+    require_atlas: bool = true,
+    build_layouts: bool = true
+) {
+    let (fonts, indices) = text_family_indices(family, site, require_atlas)
+    runs.clear()
+    for span in spans {
+        let start = runs.len()
+        text_resolve_segment(runs, fonts, indices, span.text,
+            size, render_scale, world_raster, span.style, true, site)
+        for i in start..runs.len() {
+            let run = runs[i]
+            let scale = resolved_run_scale(run)
+            let layout: TextLayout? = if !build_layouts {
+                null
+            } else if world_raster {
+                text_layout_cached_world(run.font, run.text, scale, scale,
+                    raster_physical_target_scale: 1.0, face: run.face)
+            } else {
+                text_layout_cached(run.font, run.text, size, render_scale,
+                    TextAlign::TopLeft, raster_physical_target_scale,
+                    face: run.face)
+            }
+            if let built = layout { run.text = built.text }
+            run.raster_physical_target_scale = raster_physical_target_scale
+            run.layout = layout
+        }
+    }
+}
+
+pub fn resolve_text_spans(
+    family: TextFamily,
+    spans: [TextSpan],
+    size: float,
+    render_scale: float,
+    site: string,
+    raster_physical_target_scale: float = 1.0,
+    require_atlas: bool = true
+) -> [ResolvedTextRun] {
+    let runs: [ResolvedTextRun] = []
+    resolve_text_spans_at(runs, family, spans, size, render_scale,
+        false, site, raster_physical_target_scale, require_atlas)
+    return runs
+}
+
+pub fn resolve_world_text_spans(
+    family: TextFamily,
+    spans: [TextSpan],
+    size: float,
+    site: string,
+    require_atlas: bool = true
+) -> [ResolvedTextRun] {
+    let runs: [ResolvedTextRun] = []
+    resolve_text_spans_at(runs, family, spans, size, 1.0, true, site, 1.0, require_atlas)
+    return runs
+}
+
+pub fn plain_text_layout_from_lines(
+    lines: [ResolvedTextLine]
+) -> ResolvedPlainText {
+    let width = 0.0
+    let ascent = 0.0
+    let below_baseline = 0.0
+    for line in lines {
+        if line.width > width { width = line.width }
+        if line.ascent > ascent { ascent = line.ascent }
+        let line_below = line.height - line.ascent
+        if line_below > below_baseline { below_baseline = line_below }
+    }
+    let line_height = ascent + below_baseline
+    let height = lines.len as float * line_height
+    return ResolvedPlainText {
+        lines: lines,
+        width: width,
+        ascent: ascent,
+        height: height,
+        line_height: line_height,
+    }
+}
+
+fn resolve_plain_text_layout_at(
+    family: TextFamily,
+    text: string,
+    size: float,
+    render_scale: float,
+    world_raster: bool,
+    site: string,
+    require_atlas: bool = true
+) -> ResolvedPlainText {
+    let (fonts, indices) = text_family_indices(family, site, require_atlas)
+    let lines: [ResolvedTextLine] = []
+    let line_start = 0
+    let i = 0
+    while i <= text.len() {
+        if i == text.len() || text.unit_at(i) == 10 {
+            let line_text = text.substring(line_start, i)
+            let runs: [ResolvedTextRun] = []
+            text_resolve_segment(runs, fonts, indices, line_text,
+                size, render_scale, world_raster, TextStyle {}, false, site)
+            let (width, ascent, height) = measure_resolved_runs(runs)
+            for run in runs {
+                run.text = run.layout.unwrap().text
+            }
+            lines.push(ResolvedTextLine {
+                runs: runs,
+                width: width,
+                ascent: ascent,
+                height: height,
+            })
+            line_start = i + 1
+        }
+        i = i + 1
+    }
+    return plain_text_layout_from_lines(lines)
+}
+
+pub fn resolve_plain_text_layout(
+    family: TextFamily,
+    text: string,
+    size: float,
+    render_scale: float,
+    site: string,
+    require_atlas: bool = true
+) -> ResolvedPlainText {
+    return resolve_plain_text_layout_at(family, text, size, render_scale,
+        false, site, require_atlas)
+}
+
+pub fn resolve_plain_world_text_layout(
+    family: TextFamily,
+    text: string,
+    size: float,
+    site: string
+) -> ResolvedPlainText {
+    return resolve_plain_text_layout_at(family, text, size, 1.0,
+        true, site)
+}
+
+pub fn resolved_run_scale(run: ResolvedTextRun) -> float {
+    return run.size / run.scale_divisor
+}
+
+// The run's layout, built once on first use. Measurement and emission read
+// through here, so they always walk the same layout.
+fn resolved_run_layout(run: ResolvedTextRun) -> TextLayout {
+    if let layout = run.layout { return layout }
+    let scale = resolved_run_scale(run)
+    let built = text_layout_cached_world(run.font, run.text, scale, scale,
+        run.raster_physical_target_scale, run.face)
+    run.layout = built
+    return built
+}
+
+// Total advance, max ascent and max glyph height over the COMPLETE sequence.
+// Alignment anchors on this, never on a single run: an empty run contributes
+// nothing and an all-empty list measures zero.
+pub fn measure_resolved_runs(runs: [ResolvedTextRun]) -> (float, float, float) {
+    let total = 0.0
+    let max_ascent = 0.0
+    let max_below_baseline = 0.0
+    for run in runs {
+        let layout = resolved_run_layout(run)
+        let k = run.draw_scale
+        total = total + layout.logical_bounds.w * k
+        if layout.ascent * k > max_ascent { max_ascent = layout.ascent * k }
+        let below_baseline = (layout.logical_bounds.h - layout.ascent) * k
+        if below_baseline > max_below_baseline {
+            max_below_baseline = below_baseline
+        }
+    }
+    return (total, max_ascent, max_ascent + max_below_baseline)
+}
+
+// Where a resolved-run walk puts each run. Output and Target are Y-down:
+// `start` is the line's top-left and every run hangs from the line's max
+// ascent. World is Y-up: `start` is the baseline every run sits on. Output
+// goes to the UI pool, Target to the render-pool canvas bake, World to the
+// world sprite batch at the caller's depth.
+pub enum TextPlacement {
+    Output,
+    Target,
+    World,
+}
+
+// Emit the sequence with ONE continuous pen from `start`. A run boundary
+// changes the colour and the face and nothing else -- one atlas, one baseline,
+// one pen. `tint` replaces every authored colour, so the shadow pass is the
+// same resolved sequence in black. A run with no drawable glyph (whitespace)
+// still advances the pen, as measure_resolved_runs counts it. `max_ascent`
+// is unused by World; `depth` only by World; `consumer_key` only by Output.
+pub fn emit_resolved_runs(
+    runs: [ResolvedTextRun],
+    placement: TextPlacement,
+    start: Vec2,
+    max_ascent: float,
+    z_layer: int,
+    tint: Color? = null,
+    depth: DepthMode = DepthMode::Off,
+    consumer_key: string = ""
+) {
+    let pen = start.x
+    for run in runs {
+        let layout = resolved_run_layout(run)
+        let k = run.draw_scale
+        let color = tint ?? run.color
+        let _ = match placement {
+            TextPlacement::Output => text_layout_emit(layout,
+                v(pen, start.y + max_ascent - layout.ascent * k), color, z_layer,
+                consumer_key: consumer_key, layout_scale: k),
+            TextPlacement::Target => emit_target_layout_in_render_pool(layout,
+                v(pen, start.y + max_ascent - layout.ascent * k), z_layer, color),
+            TextPlacement::World => text_layout_emit_world(layout,
+                v(pen, start.y), z_layer, depth, color),
+        }
+        pen += layout.logical_bounds.w * k
+    }
+}
+
+pub fn emit_plain_text_layout(
+    layout: ResolvedPlainText,
+    placement: TextPlacement,
+    start: Vec2,
+    z_layer: int,
+    tint: Color? = null,
+    depth: DepthMode = DepthMode::Off
+) {
+    let line_y = start.y
+    for line in layout.lines {
+        emit_resolved_runs(line.runs, placement, v(start.x, line_y),
+            layout.ascent, z_layer, tint, depth)
+        line_y += layout.line_height
+    }
+}
+
+// The canvas-bake destination shares its layout oracle and its Y-down glyph
+// geometry with every other target list; only the pool it drains into differs,
+// so it selects the same coverage instance rather than deriving quads from the
+// raw atlas pages, whose metrics are in raster pixels and not font units.
+fn emit_target_layout_in_render_pool(
+    layout: TextLayout,
+    origin: Vec2,
+    z_layer: int,
+    color: Color
+) -> bool {
+    let font = layout.font ?? return false
+    let fd = font.data() ?? return false
+    let idx = fd.backend_id - 1
+    if idx < 0 || idx >= FONT_ATLASES.len || layout.glyphs.len == 0 {
+        return false
+    }
+    let demand = text_layout_raster_demand(layout, null)
+    let instance = text_art_atlas_instance_for(font, demand)
+    let image = stone_get_font_instance_image_ffi(instance.instance_id)
+    if image == 0 {
+        error("target canvas text atlas instance {instance.instance_id} has no GL image")
+    }
+    let batch = ensure_world_sprite_batch(
+        sampled_image(Image(image)), z_layer, BlendMode::Alpha, false,
+        DepthMode::Off, unlit: true, sampling: fd.sampling)
+    reserve_vertices(batch, layout.glyphs.len * 6)
+    return text_layout_emit_instance(batch, layout, origin, color,
+        instance.instance_id, null)
+}
+
+// Target-space extent of a span sequence, measured with the SAME walk the
+// emitter uses, so a caller that positions by measurement cannot disagree with
+// the glyphs. `render_scale` is the calling context's factor, as for
+// measure_text_of.
+pub fn measure_rich_text_of(
+    family: TextFamily,
+    spans: [TextSpan],
+    size: float,
+    render_scale: float
+) -> Vec2 {
+    let runs = resolve_text_spans(family, spans, size, render_scale, "measure_rich_text_of",
+        require_atlas: false)
+    let (w, _a, h) = measure_resolved_runs(runs)
+    return v(w, h)
+}
+
+fn measure_rich_text_single_font(
+    font: Font,
+    spans: [TextSpan],
+    size: float,
+    render_scale: float
+) -> Vec2 {
+    let idx = text_family_font_idx(font, "measure_rich_text_of", require_atlas: false)
+    let width = 0.0
+    let max_ascent = 0.0
+    let max_below_baseline = 0.0
+    for span in spans {
+        if span.text.len() == 0 { continue }
+        let prepared = text_prepare_missing_glyphs(font, null, idx, span.text,
+            "measure_rich_text_of")
+        let face = text_validate_single_font_span(
+            font, idx, prepared, span.style, true, "measure_rich_text_of")
+        if face < 0 { continue }
+        let layout = text_layout_cached(font, prepared, size, render_scale,
+            TextAlign::TopLeft, 1.0, face: face)
+        width += layout.logical_bounds.w
+        if layout.ascent > max_ascent { max_ascent = layout.ascent }
+        let below_baseline = layout.logical_bounds.h - layout.ascent
+        if below_baseline > max_below_baseline {
+            max_below_baseline = below_baseline
+        }
+    }
+    return v(width, max_ascent + max_below_baseline)
+}
+
+fn measure_rich_text_single_font_text(
+    font: Font,
+    text: string,
+    color: Color,
+    bold: bool,
+    italic: bool,
+    size: float,
+    render_scale: float
+) -> Vec2 {
+    let idx = text_family_font_idx(font, "measure_rich_text_of", require_atlas: false)
+    let style = TextStyle { color: color, bold: bold, italic: italic }
+    let prepared = text_prepare_missing_glyphs(font, null, idx, text,
+        "measure_rich_text_of")
+    let face = text_validate_single_font_span(
+        font, idx, prepared, style, true, "measure_rich_text_of")
+    if face < 0 { return v() }
+    let layout = text_layout_cached(font, prepared, size, render_scale,
+        TextAlign::TopLeft, 1.0, face: face)
+    return v(layout.logical_bounds.w, layout.logical_bounds.h)
+}
+
+pub fn measure_world_rich_text(spans: [TextSpan], size: float) -> Vec2 {
+    let runs = resolve_world_text_spans(text_family_or_default(), spans, size,
+        "measure_world_rich_text", require_atlas: false)
+    let (w, _a, h) = measure_resolved_runs(runs)
+    return v(w, h)
+}
+
+pub fn measure_world_rich_text_metrics(spans: [TextSpan], size: float) -> (float, float, float) {
+    let runs = resolve_world_text_spans(text_family_or_default(), spans, size,
+        "measure_world_rich_text_metrics", require_atlas: false)
+    return measure_resolved_runs(runs)
+}
+
+// Plain family measurement is named separately from the legacy Font-only
+// measure_text_of so overload resolution cannot hide which admission policy a
+// caller selected.
+pub fn measure_plain_text_of(
+    family: TextFamily,
+    text: string,
+    size: float,
+    render_scale: float
+) -> Vec2 {
+    let layout = resolve_plain_text_layout(family, text, size, render_scale,
+        "measure_plain_text_of", require_atlas: false)
+    return v(layout.width, layout.height)
+}
+
+@pure fn make_world_text_vertex(
+    x: float,
+    y: float,
+    u: float,
+    v_: float,
+    color: Color,
+    py: float
+) -> Vertex {
+    return Vertex {
+        pos: Vec2f { x: x, y: y },
+        uv: Vec2f { x: u, y: v_ },
+        color: Vec4f { x: color.r, y: color.g, z: color.b, w: color.a },
+        pivot_y: py,
+        entity_id: 0.0,
+        colorize: 0.0,
+    }
+}
+
+// World-space text as a normal vertex batch: glyph quads on the font
+// atlas into the current render pool, same pen math as the immediate
+// FFI path (stone-rs `draw_text_line_internal`, negative-sy branch):
+// baseline-anchored, Y-up, quads descend from baseline + bearing_y.
+// `sy` is negative. entity_id stays zero so the aux passes
+// drop text the standard way (outline_target discards, no id claimed).
+pub fn queue_world_text(
+    font: Font,
+    text: string,
+    x: float,
+    y: float,
+    sx: float,
+    sy: float,
+    color: Color,
+    z_layer: int,
+    depth: DepthMode
+) {
+    let d = font.data() ?? return
+    let idx = d.backend_id - 1
+    if idx < 0 || idx >= FONT_ATLASES.len { return }
+    if text.len() == 0 { return }
+    let unit_em = if idx < FONT_UNIT_SIZES.len { FONT_UNIT_SIZES[idx] } else { d.pixel_size as float }
+    let unit_scale_x = sx * (d.pixel_size as float) / unit_em
+    let unit_scale_y = abs(sy) * (d.pixel_size as float) / unit_em
+    let layout = text_world_layout_scaled(font, text, unit_scale_x, unit_scale_y)
+    queue_world_text_layout(layout, x, y, color, z_layer, depth)
+}
+
+fn queue_world_text_layout(
+    layout: TextLayout,
+    x: float,
+    y: float,
+    color: Color,
+    z_layer: int,
+    depth: DepthMode
+) {
+    let _ = text_layout_emit_world(layout, v(x, y), z_layer, depth, color)
+}
+
+// Moved from the math module when stone-core was split out: it needs a Font
+// and the default font, which are the renderer's, not a value type's.
+
+// Default-font UI text measurement in OUTPUT units -- the same divisor and
+// window factor `queue_ui_text` emits with (measure_text_of, text.rock), so
+// a caller that positions by measurement lands on the glyphs. The world path
+// measures through `measure_world_text` (draw.rock), which divides
+// FONT_RENDER_SCALE back out to reach world units.
+pub fn measure_text(text: string, font_size: float, family: TextFamily? = null,
+    font: Font? = null) -> Vec2 {
+    if font != null && family != null { error("measure_text: pass either font or family, not both") }
+    if family != null {
+        return measure_plain_text_of(family.unwrap(), text, font_size,
+            FONT_RENDER_SCALE)
+    }
+    let f = font ?? DEFAULT_FONT ?? return Vec2 { x: 0.0, y: 0.0 }
+    return measure_text_of(f, text, font_size, FONT_RENDER_SCALE, text_output_raster_density())
+}

@@ -1,0 +1,157 @@
+// Pipeline inspector -- a live imgui window over the render pipeline:
+// the decoded world-batch list (layer / blend / depth / shader / texture
+// / vertex count, with program-switch highlights), a canvas gallery, the
+// full ordered list of Passes that ran this frame (engine bloom / tonemap
+// / outline AND game-injected scene / final passes), and the frame graphics
+// stats. All data already
+// exists engine-side; this only reads it. Toggle with Ctrl+F11 (see runner).
+//
+// Capture is driven from the choke points, not a fixed runner line, so it
+// works no matter who flushes: render_batches() (the single batch flush,
+// called by the engine OR by a game's own @draw like bitgun) resets the
+// snapshot at its top and records each batch; run_pass() (the single pass
+// entry point) appends every Pass as it executes. Batches and passes are
+// cleared right after they flush each frame, so a read at imgui time would
+// see truncated counts and emptied queues -- recording as they run keeps
+// counts live and the pass list in true execution order. Zero cost when
+// the window is closed (every hook early-returns on the flag).
+
+value BatchInfo {
+    z_layer: int,
+    depth: DepthMode,
+    blend: BlendMode,
+    shader: string,       // "default" or the pipeline override name
+    texture_key: string,
+    count: int,           // vertices this frame
+    is_custom: bool,      // custom_draw closure batch
+    normal_key: string,   // empty = none
+}
+
+global PIPELINE_SNAPSHOT: [BatchInfo] = []
+// Passes in execution order this frame. Both execution contracts record at
+// their validated entry points, so the inspector follows the live path rather
+// than retaining a legacy-only view.
+pub enum PipelinePassInfo {
+    Legacy(Pass),
+    Semantic(GpuPass),
+}
+pub global PIPELINE_PASS_LOG: [PipelinePassInfo] = []
+
+// Called at the top of render_batches (the first pipeline step each
+// frame): reset the per-frame captures. Guarded so it's a no-op branch
+// when the window is closed.
+pub fn pipeline_inspector_frame_begin() {
+    if !ENGINE.show_pipeline_inspector { return }
+    PIPELINE_SNAPSHOT = []
+    PIPELINE_PASS_LOG = []
+}
+
+// Called per batch inside render_batches' color loop (guarded at the call
+// site so the hot path is a single branch when the window is closed).
+fn pipeline_inspector_record_batch(b: RenderBatch) {
+    let shader = if b.pipeline != null { b.pipeline.unwrap().shader_name } else { "default" }
+    let nm = if b.normal != null { sampled_texture_key(b.normal.unwrap()) } else { "" }
+    PIPELINE_SNAPSHOT.push(BatchInfo {
+        z_layer: b.z_layer,
+        depth: b.depth,
+        blend: b.blend,
+        shader: shader,
+        texture_key: sampled_texture_key(b.texture),
+        count: b.count,
+        is_custom: b.custom_draw != null,
+        normal_key: nm,
+    })
+}
+
+// Called at the top of run_pass (guarded at the call site).
+fn pipeline_inspector_record_pass(p: Pass) {
+    PIPELINE_PASS_LOG.push(PipelinePassInfo::Legacy(p))
+}
+
+fn pipeline_inspector_record_gpu_pass(p: GpuPass) {
+    PIPELINE_PASS_LOG.push(PipelinePassInfo::Semantic(p))
+}
+
+fn draw_pipeline_inspector() {
+    if !ENGINE.show_pipeline_inspector { return }
+
+    imgui_set_next_window_size_once(v(560, 680))
+    imgui_begin_debug_window("Pipeline Inspector")
+
+    let stats = stone_get_graphics_stats()
+    imgui_text("draws {stats.draw_calls}   shader-sw {stats.shader_switches}   canvas-sw {stats.canvas_switches}")
+    imgui_text("images {stats.images}   canvases {stats.canvases}   texmem {stats.texture_memory_mib}MiB")
+    imgui_separator()
+
+    if imgui_tree_node("World batches ({PIPELINE_SNAPSHOT.len()})###pipe_batches") {
+        let last_shader = ""
+        for bi in PIPELINE_SNAPSHOT {
+            let switched = bi.shader != last_shader
+            last_shader = bi.shader
+            let tag = if bi.is_custom { "custom" } else { "{bi.count}v" }
+            let extra = ""
+            if bi.normal_key != "" { extra = "{extra} nm:{bi.normal_key}" }
+            let line = "L{bi.z_layer} {blend_key(bi.blend)} {depth_key(bi.depth)} sh:{bi.shader} tex:{bi.texture_key} {tag}{extra}"
+            // Highlight the batch where the program switches -- that is the
+            // GPU state change the sh{} key segment groups.
+            if switched {
+                imgui_text_colored("> {line}", color(1.0, 0.85, 0.3, 1.0))
+            } else {
+                imgui_text("  {line}")
+            }
+        }
+        imgui_tree_pop()
+    }
+    imgui_separator()
+
+    // Every Pass that ran this frame, in order: the engine post chain
+    // (bloom threshold / blur / tonemap / outline) interleaved with any
+    // game-injected scene + final passes.
+    if imgui_tree_node("Passes this frame ({PIPELINE_PASS_LOG.len()})###pipe_passes") {
+        let i = 0
+        for info in PIPELINE_PASS_LOG {
+            match info {
+                PipelinePassInfo::Legacy(p) => {
+                    let out = if p.output != null { "canvas" } else { "screen" }
+                    imgui_text("{i}: {p.pipeline.shader_name}   in:{p.slot_inputs.len()}  -> {out}")
+                }
+                PipelinePassInfo::Semantic(p) => {
+                    let out = match p.target {
+                        GpuTarget::Window => "screen",
+                        GpuTarget::Canvas(_c) => "canvas",
+                    }
+                    let inputs = 0
+                    let shader = "<none>"
+                    if p.draws.len() > 0 {
+                        inputs = p.draws[0].bindings.len()
+                        shader = p.draws[0].shader
+                    }
+                    imgui_text("{i}: {shader}   in:{inputs}  semantic -> {out}")
+                }
+            }
+            i += 1
+        }
+        imgui_tree_pop()
+    }
+    imgui_separator()
+
+    if imgui_tree_node("Canvases###pipe_canvases") {
+        pipeline_canvas_thumb("screen", screen_canvas)
+        imgui_same_line()
+        pipeline_canvas_thumb("screen_2", screen_canvas_2)
+
+        imgui_same_line()
+        pipeline_canvas_thumb("bloom", bloom_output())
+        pipeline_canvas_thumb("final", final_canvas)
+        imgui_same_line()
+        pipeline_canvas_thumb("final_2", final_canvas_2)
+        imgui_tree_pop()
+    }
+
+    imgui_end()
+}
+
+fn pipeline_canvas_thumb(label: string, c: Canvas) {
+    imgui_text(label)
+    imgui_canvas_image(c, v(160, 90), border_color: color(0.3, 0.3, 0.3, 1.0))
+}

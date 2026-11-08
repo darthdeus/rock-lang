@@ -1,0 +1,120 @@
+
+co fn clock_handle_wait(clock: TaskClock, seen: [float]) -> Coroutine<Wait> {
+    yield wait_sec(0.5)
+    seen.push(clock.now())
+}
+
+@test
+fn clock_aliases_share_time_and_copies_own_time() {
+    let clock = task_clock_new()
+    let poller = CoroutinePoller { clock }
+    let copy = clock
+    task_clock_advance(copy, 0.25)
+    assert_eq(poller.clock.now(), 0.25)
+    assert_eq(clock.frame_index(), 1)
+    let seen: [float] = []
+    let t = start(clock_handle_wait(clock, seen), poller)
+    task_clock_advance(clock, 0.5)
+    let _ = poll(t, 0.5)
+    assert_eq(seen.len(), 1)
+    assert_eq(seen[0], 0.75)
+    let fork = deepcopy(clock)
+    assert(!task_clock_same(clock, fork), "a copied clock has independent identity")
+    task_clock_advance(fork, 0.5)
+    assert_eq(clock.now(), 0.75, "advancing a copy does not alter its parent")
+    assert_eq(fork.now(), 1.25)
+    assert(task_clock_retire(fork))
+    assert(!task_clock_retire(fork), "retirement is idempotent")
+    assert_eq(clock.now(), 0.75, "retiring a copy leaves its parent live")
+}
+
+@test
+fn task_state_belongs_to_its_poller_not_its_clock() {
+    let clock = task_clock_new()
+    let poller = CoroutinePoller { clock }
+    let seen: [float] = []
+    let t = start(clock_handle_wait(clock, seen), poller)
+    assert(t.state.get() != null, "the task state lives in the poller's store")
+    assert(coroutine_poller_dispose(poller))
+    assert(t.state.get() == null, "retiring the poller's store retires the task")
+    task_clock_advance(clock, 1.0)
+    assert_eq(clock.now(), 1.0, "the clock outlives the task store")
+}
+
+co fn tween_wait(seen: [float]) -> Coroutine<Wait> {
+    yield tween(0.0, 1.0, 1.0, EASE_LINEAR, v => seen.push(v))
+    seen.push(-1.0)
+}
+
+@test
+fn a_tween_wait_advances_across_polls_and_resumes_at_its_duration() {
+    let clock = task_clock_new()
+    let poller = CoroutinePoller { clock }
+    let seen: [float] = []
+    let t = start(tween_wait(seen), poller)
+    for _ in 0..3 { let _ = poll(t, 0.25) }
+    assert_eq(seen.len(), 3, "one update per poll, no resume before the duration")
+    assert_eq(seen[2], 0.75)
+    let _ = poll(t, 0.25)
+    assert_eq(seen.len(), 5, "the final update, then the body resumes")
+    assert_eq(seen[3], 1.0)
+    assert_eq(seen[4], -1.0)
+}
+
+struct TaskForkProbe {
+    values: [float] = [],
+    cleanups: int = 0,
+    ready: bool = false,
+    task: Task? = null,
+}
+
+struct TaskForkOwner {
+    poller: CoroutinePoller,
+    probe: TaskForkProbe,
+}
+
+co fn task_fork_wait(probe: TaskForkProbe, clock: TaskClock) -> Coroutine<Wait> {
+    defer { probe.cleanups += 1 }
+    yield wait_sec(0.5)
+    probe.values.push(clock.now())
+    yield wait_until(0, () => probe.ready)
+    probe.values.push(clock.now())
+}
+
+@test
+fn copied_poller_owns_suspended_tasks_and_cleanup_captures() {
+    let parent = TaskForkOwner { poller: CoroutinePoller { clock: task_clock_new() }, probe: TaskForkProbe {} }
+    let _ = run_into(parent.poller, parent.probe, .task, task_fork_wait(parent.probe, parent.poller.clock))
+    let branch = deepcopy(parent)
+    let sibling = deepcopy(parent)
+    assert(!task_same_instance(parent.probe.task.unwrap(), branch.probe.task.unwrap()),
+        "copied tasks own independent polling state")
+    task_clock_advance(branch.poller.clock, 0.5)
+    coroutine_poller_update(branch.poller)
+    assert_eq(branch.probe.values.len(), 1, "the copied suspended continuation resumes")
+    assert_eq(branch.probe.values[0], 0.5, "the continuation captures its copied clock")
+    assert_eq(parent.probe.values.len(), 0, "branch continuation leaves parent captures unchanged")
+    coroutine_poller_clear(sibling.poller)
+    assert_eq(sibling.probe.cleanups, 1, "copied cancellation runs its own defer once")
+    assert_eq(parent.probe.cleanups + branch.probe.cleanups, 0, "cancellation cannot clean other copies")
+    let waiting = deepcopy(branch)
+    waiting.probe.ready = true
+    task_clock_advance(waiting.poller.clock, 0.25)
+    coroutine_poller_update(waiting.poller)
+    assert_eq(waiting.probe.values.len(), 2, "a copied active Until wait uses copied predicate captures")
+    assert_eq(branch.probe.values.len(), 1, "the copied active wait leaves the source suspended")
+    assert_eq(waiting.poller.scope.live_count, 0, "completion retires the copied state exactly once")
+    branch.probe.ready = true
+    task_clock_advance(branch.poller.clock, 0.25)
+    coroutine_poller_update(branch.poller)
+    assert_eq(branch.probe.values.len(), 2, "copied Until predicate observes the copied owner")
+    assert_eq(branch.probe.values[1], 0.75)
+    assert(branch.probe.task == null, "natural completion clears only the copied slot")
+    assert_eq(branch.probe.cleanups, 1)
+    task_clock_advance(parent.poller.clock, 0.5)
+    coroutine_poller_update(parent.poller)
+    assert_eq(parent.probe.values.len(), 1, "the parent resumes from its original suspension")
+    coroutine_poller_clear(parent.poller)
+    assert_eq(parent.probe.cleanups, 1)
+    assert_eq(parent.poller.scope.live_count + branch.poller.scope.live_count + sibling.poller.scope.live_count, 0)
+}

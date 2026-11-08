@@ -1,0 +1,400 @@
+// Rendering Testbed
+// Run with: rock stone demos/testbed/
+//
+// Exercises world space vs screen space, immediate vs batched drawing,
+// shapes/text/UI, and camera position/zoom.
+//
+// Controls:
+//   Arrow keys / WASD - Move camera
+//   Mouse wheel       - Zoom camera
+//   R                 - Reset camera
+//   G                 - Toggle grid
+//   ESC               - Exit
+
+global BG_COLOR: Color = color(0.12, 0.12, 0.15, 1.0)
+global GRID_COLOR: Color = color(1.0, 1.0, 1.0, 0.08)
+global AXIS_COLOR_X: Color = color(1.0, 0.3, 0.3, 0.4)
+global AXIS_COLOR_Y: Color = color(0.3, 1.0, 0.3, 0.4)
+global CAMERA_MOVE_SPEED: float = 8.0
+
+global SHOW_GRID: bool = true
+
+// World-space text sizes (in world units)
+global W_TEXT_HEADING: float = 1.44
+global W_TEXT_TITLE: float = 0.07
+global W_TEXT_LABEL: float = 0.96
+global W_TEXT_SMALL: float = 0.04
+
+// Screen-space text sizes (in pixels)
+global S_TEXT_HEADING: float = 24.0
+global S_TEXT_LABEL: float = 20.0
+global S_TEXT_BODY: float = 18.0
+global S_TEXT_SMALL: float = 16.0
+
+global HINT_COLOR: Color = color(0.5, 0.5, 0.5, 1.0)
+global MUTED_COLOR: Color = color(0.7, 0.7, 0.7, 1.0)
+
+global S_SPACING: float = 22.0
+global S_MARGIN: float = 20.0
+
+// World-space layout
+//
+// Viewport at default camera: x ~ [-15, 25], y ~ [-11, 11]
+//
+//  Left half (x -14..6): test rows      Right half (x 10..24): UI panels
+//  +---------------------------------------------------------------------+
+//  |  WORLD BATCHED (y=8)               World UI Panel (blue) (y=8)      |
+//  |  [rect][outline][circle]...        +----------+                     |
+//  |                                    | pos (16,8)|                    |
+//  |                                    +----------+                     |
+//  |  WORLD IMMEDIATE (y=1)             Text sizes (y=1)                 |
+//  |  [rect][outline][circle]...        Size 0.15 / 0.09 / 0.05         |
+//  |            * markers *                                              |
+//  |  WORLD ANIMATED (y=-5)             World UI Panel (red) (y=-5)      |
+//  |  [orbit][pulse][rotate]            +----------+                     |
+//  |                                    |pos (16,-5)|                    |
+//  |                                    +----------+                     |
+//  +---------------------------------------------------------------------+
+
+global ROW_BATCHED_Y: float = 8.0
+global ROW_IMMEDIATE_Y: float = 1.0
+global ROW_ANIMATED_Y: float = -5.0
+global ROW_PIVOTS_Y: float = -13.0
+global ROW_PIVOTS_X: float = -8.0
+global ROW_LEFT_X: float = -14.0
+
+struct TestbedState {
+    time: float,
+}
+
+global TB: TestbedState = TestbedState {
+    time: 0.0,
+}
+
+@init
+fn testbed_init() {
+    camera.visible_world_width = 40.0
+    camera.center = v(5, 0)
+
+    ENGINE.use_bloom = false
+
+    log_info("TESTBED", "Rendering testbed initialized")
+}
+
+@update(stage = 10)
+fn testbed_update() {
+    TB.time += dt
+
+    let left  = if is_key_held("left")  || is_key_held("a") { 1.0 } else { 0.0 }
+    let right = if is_key_held("right") || is_key_held("d") { 1.0 } else { 0.0 }
+    let down  = if is_key_held("down")  || is_key_held("s") { 1.0 } else { 0.0 }
+    let up    = if is_key_held("up")    || is_key_held("w") { 1.0 } else { 0.0 }
+    let move = v(right - left, up - down)
+
+    if move.length() > 0 {
+        camera.center = camera.center + move.normalize() * CAMERA_MOVE_SPEED * dt
+    }
+
+    if is_key_pressed("r") {
+        camera.center = v(5, 0)
+        camera.visible_world_width = 40.0
+    }
+
+    if is_key_pressed("g") {
+        SHOW_GRID = !SHOW_GRID
+    }
+
+    if mouse_wheel_delta != 0 {
+        camera.visible_world_width = clamp(
+            camera.visible_world_width * pow(1.2, mouse_wheel_delta), 10.0, 60.0)
+        mouse_wheel_delta = 0
+    }
+}
+
+@draw(stage = 10)
+fn draw_world_grid() {
+    if !SHOW_GRID { return }
+
+    let half = 20
+    for i in (-half)..(half + 1) {
+        let fi = int_to_float(i)
+        let half_f = int_to_float(half)
+        draw_line(v(fi, -half_f), v(fi, half_f), GRID_COLOR, 1.0 / 32.0, layer: LAYER_BACKGROUND)
+        draw_line(v(-half_f, fi), v(half_f, fi), GRID_COLOR, 1.0 / 32.0, layer: LAYER_BACKGROUND)
+    }
+
+    draw_line(v(-100, 0), v(100, 0), AXIS_COLOR_X, 1.0 / 16.0, layer: LAYER_BACKGROUND)
+    draw_line(v(0, -100), v(0, 100), AXIS_COLOR_Y, 1.0 / 16.0, layer: LAYER_BACKGROUND)
+}
+
+// Batched: goes through batch renderer with camera transform. World units, Y-up.
+@draw(stage = 20)
+fn draw_world_batched() {
+    let base = v(ROW_LEFT_X, ROW_BATCHED_Y)
+    let sp = 3.0
+
+    draw_text("WORLD BATCHED", base + v(8, 2.5), W_TEXT_HEADING, YELLOW, layer: LAYER_WORLD)
+
+    draw_rect(base + v(0, 0), v(2, 2), RED, layer: LAYER_WORLD)
+    draw_text("rect", base + v(0, -1.5), W_TEXT_LABEL, WHITE, layer: LAYER_WORLD)
+
+    draw_rect_outline(base + v(sp, 0), v(2, 2), GREEN, layer: LAYER_WORLD)
+    draw_text("outline", base + v(sp, -1.5), W_TEXT_LABEL, WHITE, layer: LAYER_WORLD)
+
+    draw_circle(base + v(sp * 2, 0), 1.0, BLUE, layer: LAYER_WORLD)
+    draw_text("circle", base + v(sp * 2, -1.5), W_TEXT_LABEL, WHITE, layer: LAYER_WORLD)
+
+    draw_circle_outline(base + v(sp * 3, 0), 1.0, CYAN, layer: LAYER_WORLD)
+    draw_text("circ.out", base + v(sp * 3, -1.5), W_TEXT_LABEL, WHITE, layer: LAYER_WORLD)
+
+    draw_line(base + v(sp * 4 - 1, -1), base + v(sp * 4 + 1, 1), MAGENTA, 1.0 / 8.0, layer: LAYER_WORLD)
+    draw_text("line", base + v(sp * 4, -1.5), W_TEXT_LABEL, WHITE, layer: LAYER_WORLD)
+
+    let tri = base + v(sp * 5, 0)
+    draw_polygon([
+        tri.x - 1, tri.y - 1,
+        tri.x + 1, tri.y - 1,
+        tri.x, tri.y + 1,
+    ], ORANGE, layer: LAYER_WORLD)
+    draw_text("polygon", base + v(sp * 5, -1.5), W_TEXT_LABEL, WHITE, layer: LAYER_WORLD)
+}
+
+// Immediate: queue_custom_draw runs inside camera shader context, world space.
+@draw(stage = 20)
+fn draw_world_immediate() {
+    let base = v(ROW_LEFT_X, ROW_IMMEDIATE_Y)
+    let sp = 3.0
+
+    queue_custom_draw(() => {
+        draw_text_immediate(DrawSpace::World, "WORLD IMMEDIATE", base + v(8, 2.5), W_TEXT_HEADING, YELLOW, v(-0.5, -0.5))
+
+        draw_rect_immediate(base + v(0, 0), v(2, 2), RED)
+        draw_text_immediate(DrawSpace::World, "rect", base + v(0, -1.5), W_TEXT_LABEL, WHITE, v(-0.5, -0.5))
+
+        draw_rect_outline_immediate(base + v(sp, 0), v(2, 2), GREEN)
+        draw_text_immediate(DrawSpace::World, "outline", base + v(sp, -1.5), W_TEXT_LABEL, WHITE, v(-0.5, -0.5))
+
+        draw_circle_immediate(base + v(sp * 2, 0), 1.0, BLUE)
+        draw_text_immediate(DrawSpace::World, "circle", base + v(sp * 2, -1.5), W_TEXT_LABEL, WHITE, v(-0.5, -0.5))
+
+        draw_line_immediate(base + v(sp * 3 - 1, -1), base + v(sp * 3 + 1, 1), MAGENTA)
+        draw_text_immediate(DrawSpace::World, "line", base + v(sp * 3, -1.5), W_TEXT_LABEL, WHITE, v(-0.5, -0.5))
+
+        draw_rect_immediate(base + v(sp * 4, 0), v(2, 2), ORANGE.alpha(0.5))
+        draw_circle_immediate(base + v(sp * 4, 0), 0.8, PURPLE)
+        draw_text_immediate(DrawSpace::World, "overlap", base + v(sp * 4, -1.5), W_TEXT_LABEL, WHITE, v(-0.5, -0.5))
+    }, LAYER_WORLD)
+}
+
+@draw(stage = 20)
+fn draw_world_animated() {
+    let base = v(ROW_LEFT_X, ROW_ANIMATED_Y)
+    let sp = 5.0
+
+    draw_text("WORLD ANIMATED", base + v(6, 2.8), W_TEXT_HEADING, YELLOW, layer: LAYER_WORLD)
+
+    // Orbiting circle
+    let orbit_center = base + v(1, 0)
+    let orbit_radius = 1.5
+    let angle = TB.time * 1.5
+    let orbit_pos = orbit_center + v(cos(angle) * orbit_radius, sin(angle) * orbit_radius)
+    draw_circle(orbit_pos, 0.3, CYAN, layer: LAYER_WORLD)
+    draw_circle_outline(orbit_center, orbit_radius, CYAN.alpha(0.3), layer: LAYER_WORLD)
+    draw_text("orbit", base + v(1, -2.2), W_TEXT_LABEL, WHITE, layer: LAYER_WORLD)
+
+    // Pulsing rect
+    let pulse = 1.0 + sin(TB.time * 3.0) * 0.3
+    draw_rect(base + v(sp, 0), v(2 * pulse, 2 * pulse), MAGENTA.alpha(0.7), layer: LAYER_WORLD)
+    draw_text("pulse", base + v(sp, -2.2), W_TEXT_LABEL, WHITE, layer: LAYER_WORLD)
+
+    // Rotating line
+    let line_center = base + v(sp * 2, 0)
+    let line_angle = TB.time * 2.0
+    let line_dir = v(cos(line_angle), sin(line_angle))
+    draw_line(line_center - line_dir, line_center + line_dir, GREEN, 1.0 / 8.0, layer: LAYER_WORLD)
+    draw_text("rotate", base + v(sp * 2, -2.2), W_TEXT_LABEL, WHITE, layer: LAYER_WORLD)
+
+    // Moving text
+    let text_offset = sin(TB.time * 2.0) * 2.0
+    draw_text("moving", base + v(sp * 3 + text_offset, 0), W_TEXT_TITLE, ORANGE, layer: LAYER_WORLD)
+    draw_text("text", base + v(sp * 3, -2.2), W_TEXT_LABEL, WHITE, layer: LAYER_WORLD)
+}
+
+// Reference markers at known world positions to verify camera transform.
+@draw(stage = 20)
+fn draw_world_markers() {
+    draw_circle(v(0, 0), 0.2, WHITE, layer: LAYER_WORLD_FRONT)
+    draw_text("(0,0)", v(0.3, -0.1), W_TEXT_SMALL, WHITE, layer: LAYER_WORLD_FRONT)
+
+    let marker_positions = [
+        (v(5, 0), "(5,0)"),
+        (v(10, 0), "(10,0)"),
+        (v(-5, 0), "(-5,0)"),
+        (v(0, 5), "(0,5)"),
+        (v(0, -5), "(0,-5)"),
+        (v(10, 10), "(10,10)"),
+        (v(-10, -10), "(-10,-10)"),
+    ]
+
+    for (pos, label) in marker_positions {
+        draw_circle(pos, 0.12, YELLOW, layer: LAYER_WORLD_FRONT)
+        draw_text(label, pos + v(0.25, -0.1), W_TEXT_SMALL, YELLOW, layer: LAYER_WORLD_FRONT)
+    }
+}
+
+@draw(stage = 25)
+fn draw_world_ui_panels() {
+    let p1 = v(16, 8)
+    let s1 = v(7, 3.5)
+    let c1 = color(0.4, 0.6, 1.0, 1.0)
+
+    draw_rect(p1, s1, color(0.1, 0.1, 0.2, 0.85), layer: LAYER_UI_BACK)
+    draw_rect_outline(p1, s1, c1.alpha(0.6), layer: LAYER_UI)
+    draw_text("World UI Panel", p1 + v(0, 1.0), W_TEXT_TITLE, c1, layer: LAYER_UI)
+    draw_text("pos: ({format_float(p1.x, 0)},{format_float(p1.y, 0)})", p1 + v(0, 0.1), W_TEXT_LABEL, WHITE, layer: LAYER_UI)
+    draw_text("This moves with camera", p1 + v(0, -0.7), W_TEXT_SMALL, MUTED_COLOR, layer: LAYER_UI)
+
+    let p2 = v(16, -5)
+    let s2 = v(7, 3)
+    let c2 = color(1.0, 0.4, 0.4, 1.0)
+
+    draw_rect(p2, s2, color(0.2, 0.1, 0.1, 0.85), layer: LAYER_UI_BACK)
+    draw_rect_outline(p2, s2, c2.alpha(0.6), layer: LAYER_UI)
+    draw_text("Another World Panel", p2 + v(0, 0.7), W_TEXT_TITLE, c2, layer: LAYER_UI)
+    draw_text("Also in world space", p2 + v(0, -0.3), W_TEXT_SMALL, MUTED_COLOR, layer: LAYER_UI)
+}
+
+@draw(stage = 20)
+fn draw_world_text_sizes() {
+    let base = v(14, 2)
+
+    draw_text("TEXT SIZES", base + v(0, 2.2), W_TEXT_HEADING, YELLOW, layer: LAYER_WORLD)
+    draw_text("Size 0.15", base + v(0, 1), 0.15, WHITE, layer: LAYER_WORLD)
+    draw_text("Size 0.09", base + v(0, -0.2), 0.09, WHITE, layer: LAYER_WORLD)
+    draw_text("Size 0.05", base + v(0, -1.0), 0.05, WHITE, layer: LAYER_WORLD)
+}
+
+// Pivot demo: white dot marks the anchor, sprite extends opposite.
+// Rotation is always around geometric center, not anchor.
+fn draw_pivot_cell(anchor: Vec2, pivot: Vec2, label: string, spr_size: Vec2, tint: Color) {
+    draw_sprite(sampled_image(WHITE_PIXEL.unwrap()), anchor, dest_size: spr_size, pivot: pivot, color: tint.alpha(0.75), layer: LAYER_WORLD)
+    draw_circle(anchor, 0.1, WHITE, layer: LAYER_WORLD_FRONT)
+    draw_text(label, anchor + v(0, -1.6), W_TEXT_SMALL, tint, layer: LAYER_WORLD)
+}
+
+@draw(stage = 20)
+fn draw_pivot_section() {
+    let base = v(ROW_PIVOTS_X, ROW_PIVOTS_Y)
+    let spr_size = v(2.2, 1.2)
+    let sp = 3.2
+
+    draw_text("PIVOT DEMO", base + v(7, 1.2), W_TEXT_HEADING, YELLOW, layer: LAYER_WORLD)
+    draw_text("dot = anchor pos", base + v(7, 0.5), W_TEXT_SMALL, MUTED_COLOR, layer: LAYER_WORLD)
+    draw_text("(scroll down)", base + v(7, 0.0), W_TEXT_SMALL, MUTED_COLOR, layer: LAYER_WORLD)
+
+    draw_pivot_cell(base + v(0, 0),        PIVOT_TOP_LEFT,    "top-left",   spr_size, RED)
+    draw_pivot_cell(base + v(sp, 0),       PIVOT_TOP_CENTER,  "top-center", spr_size, ORANGE)
+    draw_pivot_cell(base + v(sp * 2, 0),   PIVOT_CENTER,      "center",     spr_size, WHITE)
+    draw_pivot_cell(base + v(sp * 3, 0),   PIVOT_FEET,        "feet",       spr_size, CYAN)
+    draw_pivot_cell(base + v(sp * 4, 0),   PIVOT_BOTTOM_RIGHT,"btm-right",  spr_size, GREEN)
+
+    let rot_base = base + v(sp * 5 + 1.5, 0)
+    let rot = TB.time * 1.5
+    draw_sprite(sampled_image(WHITE_PIXEL.unwrap()), rot_base, dest_size: spr_size, pivot: PIVOT_TOP_LEFT, rotation: rot, color: MAGENTA.alpha(0.75), layer: LAYER_WORLD)
+    draw_circle(rot_base, 0.1, WHITE, layer: LAYER_WORLD_FRONT)
+    draw_text("top-left", rot_base + v(0, -1.6), W_TEXT_SMALL, MAGENTA, layer: LAYER_WORLD)
+    draw_text("rotating", rot_base + v(0, -2.2), W_TEXT_SMALL, MUTED_COLOR, layer: LAYER_WORLD)
+}
+
+// Screen-space immediate drawing. Pixel coords, top-left origin.
+@draw(stage = 90)
+fn draw_screen_space() {
+    let screen = screen_size()
+
+    let x = S_MARGIN
+    let y = S_MARGIN
+
+    draw_text_immediate(DrawSpace::Target, "SCREEN IMMEDIATE", v(x, y), S_TEXT_HEADING, YELLOW, v(0, 0))
+    y += S_SPACING * 1.5
+
+    draw_rect_immediate(v(x + 30, y + 15), v(60, 30), RED)
+    draw_text_immediate(DrawSpace::Target, "rect", v(x + 70, y + 5), S_TEXT_LABEL, WHITE, v(0, 0))
+    y += S_SPACING * 2
+
+    draw_rect_outline_immediate(v(x + 30, y + 15), v(60, 30), GREEN)
+    draw_text_immediate(DrawSpace::Target, "outline", v(x + 70, y + 5), S_TEXT_LABEL, WHITE, v(0, 0))
+    y += S_SPACING * 2
+
+    draw_circle_immediate(v(x + 30, y + 15), 15.0, BLUE)
+    draw_text_immediate(DrawSpace::Target, "circle", v(x + 70, y + 5), S_TEXT_LABEL, WHITE, v(0, 0))
+    y += S_SPACING * 2
+
+    draw_line_immediate(v(x + 10, y + 25), v(x + 60, y), MAGENTA)
+    draw_text_immediate(DrawSpace::Target, "line", v(x + 70, y + 5), S_TEXT_LABEL, WHITE, v(0, 0))
+    y += S_SPACING * 2
+
+    draw_text_immediate(DrawSpace::Target, "48px", v(x, y), 48.0, WHITE, v(0, 0))
+    draw_text_immediate(DrawSpace::Target, "24px", v(x + 100, y + 12), S_TEXT_HEADING, WHITE, v(0, 0))
+    draw_text_immediate(DrawSpace::Target, "16px", v(x + 160, y + 18), S_TEXT_SMALL, WHITE, v(0, 0))
+
+    // Corner anchors
+    let ctrl_x = screen.x - 250.0
+    let ctrl_y = S_MARGIN
+
+    draw_text_immediate(DrawSpace::Target, "CONTROLS", v(ctrl_x, ctrl_y), S_TEXT_HEADING, YELLOW, v(0, 0))
+    ctrl_y += S_SPACING * 1.5
+
+    draw_text_immediate(DrawSpace::Target, "WASD/Arrows - Move", v(ctrl_x, ctrl_y), S_TEXT_BODY, HINT_COLOR, v(0, 0))
+    ctrl_y += S_SPACING
+    draw_text_immediate(DrawSpace::Target, "Mouse Wheel - Zoom", v(ctrl_x, ctrl_y), S_TEXT_BODY, HINT_COLOR, v(0, 0))
+    ctrl_y += S_SPACING
+    draw_text_immediate(DrawSpace::Target, "R - Reset Camera", v(ctrl_x, ctrl_y), S_TEXT_BODY, HINT_COLOR, v(0, 0))
+    ctrl_y += S_SPACING
+    draw_text_immediate(DrawSpace::Target, "G - Toggle Grid", v(ctrl_x, ctrl_y), S_TEXT_BODY, HINT_COLOR, v(0, 0))
+    ctrl_y += S_SPACING
+    let corner_color = color(1.0, 0.5, 0.0, 0.7)
+    let margin = 10.0
+    draw_text_immediate(DrawSpace::Target, "TL", v(margin, margin), S_TEXT_SMALL, corner_color, v(0, 0))
+    draw_text_immediate(DrawSpace::Target, "TR", v(screen.x - margin, margin), S_TEXT_SMALL, corner_color, v(-1, 0))
+    draw_text_immediate(DrawSpace::Target, "BL", v(margin, screen.y - margin), S_TEXT_SMALL, corner_color, v(0, -1))
+    draw_text_immediate(DrawSpace::Target, "BR", v(screen.x - margin, screen.y - margin), S_TEXT_SMALL, corner_color, v(-1, -1))
+}
+
+// Tests screen_to_world by placing a batched shape at a fixed screen position.
+@draw(stage = 85)
+fn draw_screen_batched_test() {
+    let view = RENDER_VIEW ?? return
+    let screen = screen_size()
+
+    let bar_screen_pos = v(screen.x - 150, screen.y - 40)
+    let bar_world_pos = screen_to_world_in(view, bar_screen_pos)
+    let s = view.world_to_output_scale
+    let bar_world_size = v(120.0 / s, 20.0 / s)
+
+    draw_rect(bar_world_pos, bar_world_size, color(0.3, 0.0, 0.5, 0.8), layer: LAYER_DEBUG)
+    draw_text("screen->world", bar_world_pos, W_TEXT_SMALL, WHITE, layer: LAYER_DEBUG)
+}
+
+fn format_float(val: float, decimals: int) -> string {
+    if decimals == 0 {
+        let ival = float_to_int(round(val))
+        return "{ival}"
+    }
+
+    let factor = pow(10.0, int_to_float(decimals))
+    let rounded = round(val * factor) / factor
+
+    let int_part = float_to_int(floor(abs(rounded)))
+    let frac_part = float_to_int(round((abs(rounded) - floor(abs(rounded))) * factor))
+
+    let sign = if rounded < 0.0 { "-" } else { "" }
+    return "{sign}{int_part}.{frac_part}"
+}
+
+fn main() {
+    stone_run_game(GameConfig {
+        title: "Rendering Testbed",
+        width: 1280,
+        height: 720,
+    })
+}

@@ -1,0 +1,229 @@
+// Engine-owned SpriteMesh lifecycles -- the ONLY lifecycles (the manual
+// reset/submit API is deleted; sprite_mesh_new/add are building blocks):
+//
+//   ACQUIRE -- frame-scoped, per-frame-changing content:
+//     let m = world.acquire_mesh(atlas, z: LAYER_WORLD_BACK, depth: DepthMode::Off)
+//     for ... { sprite_mesh_add(m, ...) }
+//     // no submit, no reset, no global: registered at acquire, the
+//     // count is read at flush, the buffer recycles next frame.
+//
+//   RETAIN -- fill-on-change content (tile grids):
+//     global FLOORS: RetainedMesh          // init-assigned, like an Image
+//     FLOORS = retain_mesh(atlas, z: ..., depth: ...)
+//     ...
+//     if FLOORS.dirty { FLOORS.refill_begin(); for ... { FLOORS.add(...) } }
+//     FLOORS.draw_mesh()                        // cheap per-frame re-register
+//     ...
+//     FLOORS.invalidate()                  // from every mutation path
+//
+// invalidate() never unregisters anything -- it only marks contents
+// stale so the owner refills before the next draw().
+
+// ── acquire: engine buffer pool ──────────────────────────────────────
+//
+// FREE -> (acquire) -> PENDING -> (render_batches submits) -> IN_FLIGHT
+// -> (next frame's clear_batches, after the mesh's batch is truncated)
+// -> FREE. Buffers are reused by capacity fit; the pool only grows to
+// the peak number of concurrent acquires.
+pub global MESH_FREE: [SpriteMesh] = []
+pub global MESH_PENDING: [SpriteMesh] = []
+global MESH_IN_FLIGHT: [SpriteMesh] = []
+
+pub fn acquire_mesh(
+    dl: DrawList,
+    img: SampledTexture,
+    capacity: int = 16384,
+    z: int = 0,
+    depth: DepthMode = DepthMode::TestWrite,
+    blend: BlendMode = BlendMode::Alpha,
+    order: int = 0,
+    unlit: bool = false,
+    normal: SampledTexture? = null,
+    surface: SampledTexture? = null,
+    pipeline: Pipeline? = null,
+    sampling: TextureFilter? = null,
+    shared: bool = false
+) -> SpriteMesh {
+    // Acquired meshes are submitted into the engine world pool. A target-space
+    // or user-owned list cannot receive one there without silently drawing on
+    // a different surface.
+    let world_pool = dl.space == DrawSpace::World && dl.dest == DrawDest::Scene && !dl.owns_pool
+    assert(world_pool,
+        "acquire_mesh on the '{dl.name}' DrawList: acquired meshes require a World+Scene DrawList backed by the engine world pool")
+    let zl = resolve_z(dl, z)
+    // Only pending, explicitly shared meshes may coalesce; flush consumes them.
+    if shared {
+        for m in MESH_PENDING {
+            if m.shared_capacity == capacity && sampled_texture_same(m.texture, img)
+                && m.z_layer == zl && m.depth == depth && m.blend == blend
+                && m.order == order && m.unlit == unlit && m.sampling == sampling
+                && sampled_texture_optional_same(m.normal, normal)
+                && sampled_texture_optional_same(m.surface, surface)
+                && pipeline_optional_same(m.pipeline, pipeline)
+                && m.auxiliary == null && m.material == null
+                && m.block_frame != RENDER_FRAME
+                && m.surface_outputs == WorldSurfaceOutputs::Automatic {
+                return m
+            }
+        }
+    }
+
+    let i = 0
+    while i < MESH_FREE.len() {
+        if MESH_FREE[i].capacity >= capacity {
+            let m = MESH_FREE[i]
+            MESH_FREE.swap_remove(i)
+            // Reconfigure the pooled buffer for this frame's use; the
+            // vbo/capacity stay (that is the point of the pool).
+            let dims = sampled_texture_dims(img)
+            m.texture = img
+            m.tex_w = float(dims.x)
+            m.tex_h = float(dims.y)
+            m.inset_x = ENGINE.texel_bleed_prevention / m.tex_w
+            m.inset_y = ENGINE.texel_bleed_prevention / m.tex_h
+            m.count = 0
+            m.shared_capacity = if shared { capacity } else { -1 }
+            m.z_layer = zl
+            m.depth = depth
+            m.blend = blend
+            m.order = order
+            m.unlit = unlit
+            // Reconfigure, never inherit: a pooled mesh carries the previous
+            // acquire's shader and sampling until overwritten here.
+            m.pipeline = pipeline
+            m.normal = normal
+            m.surface = surface
+            m.auxiliary = null
+            // A scene drain can recycle this mesh again in the same frame.
+            m.block_frame = -1
+            m.sampling = sampling
+            MESH_PENDING.push(m)
+            return m
+        }
+        i += 1
+    }
+
+    let m = sprite_mesh_new(img, capacity: capacity, z_layer: zl, depth: depth, blend: blend, order: order, unlit: unlit, normal: normal, surface: surface, pipeline: pipeline, sampling: sampling)
+    m.shared_capacity = if shared { capacity } else { -1 }
+    MESH_PENDING.push(m)
+    return m
+}
+
+// Called at the top of render_batches: materialize this frame's
+// acquired meshes into pool batches (count snapshots HERE, so adds are
+// legal any time between acquire and flush).
+pub fn flush_acquired_meshes() {
+    for m in MESH_PENDING {
+        if m.count > 0 {
+            submit_mesh_into(RENDER_BATCHES, m)
+        }
+        MESH_IN_FLIGHT.push(m)
+    }
+    MESH_PENDING.clear()
+}
+
+// Called from clear_batches, right after mesh batches are truncated -- no
+// queued draw reads the buffers, so they can serve the next frame's acquires.
+pub fn recycle_acquired_meshes() {
+    for m in MESH_IN_FLIGHT {
+        MESH_FREE.push(m)
+    }
+    MESH_IN_FLIGHT.clear()
+}
+
+// An acquire is a frame-scoped command like any other. When the world flush
+// never runs -- a seek, SIM_SKIP_RENDER, an fx-disabled draw stage -- the
+// acquires it would have submitted go back to the free pool at the next frame
+// start instead of riding the next flush that does happen.
+pub fn recycle_pending_meshes() {
+    for m in MESH_PENDING {
+        MESH_FREE.push(m)
+    }
+    MESH_PENDING.clear()
+}
+
+// ── retain: caller-owned mesh with a dirty flag ─────────────────────
+
+pub struct RetainedMesh {
+    mesh: SpriteMesh,
+    gpu_mesh: MeshId? = null,
+    // Contents stale: refill (refill_begin + add loop) before draw().
+    // True on creation; set by invalidate() from mutation paths.
+    dirty: bool = true,
+}
+
+pub fn retain_mesh(
+    img: SampledTexture,
+    capacity: int = 16384,
+    layer: int = DEFAULT_RENDER_LAYER,
+    depth: DepthMode = DepthMode::TestWrite,
+    blend: BlendMode = BlendMode::Alpha,
+    order: int = 0,
+    unlit: bool = false,
+    normal: SampledTexture? = null,
+    surface: SampledTexture? = null,
+    pipeline: Pipeline? = null,
+    sampling: TextureFilter? = null
+) -> RetainedMesh {
+    return RetainedMesh {
+        mesh: sprite_mesh_new(img, capacity: capacity, z_layer: layer, depth: depth, blend: blend, order: order, unlit: unlit, normal: normal, surface: surface, pipeline: pipeline, sampling: sampling),
+    }
+}
+
+pub fn invalidate(rm: RetainedMesh) {
+    rm.dirty = true
+}
+
+pub fn retained_mesh_gpu_release(rm: RetainedMesh) {
+    if let gpu = rm.gpu_mesh {
+        stone_mesh_free(gpu.0)
+        rm.gpu_mesh = null
+    }
+}
+
+pub fn refill_begin(rm: RetainedMesh) {
+    retained_mesh_gpu_release(rm)
+    rm.mesh.count = 0
+    rm.dirty = false
+}
+
+pub fn add(rm: RetainedMesh, pos: Vec2, src: IRect, dest_size: Vec2, pivot: Vec2 = PIVOT_CENTER) {
+    retained_mesh_gpu_release(rm)
+    sprite_mesh_add(rm.mesh, pos, src, dest_size, pivot)
+}
+
+pub fn add_quad(
+    rm: RetainedMesh,
+    tl: Vec2,
+    tr: Vec2,
+    br: Vec2,
+    bl: Vec2,
+    src: IRect,
+    py: float = 0.0,
+    tint: Color = WHITE,
+    colorize: float = 0.0,
+    corner_alpha: Vec4? = null,
+    corner_colorize: Vec4? = null,
+    corner_u: Vec4? = null,
+    corner_v: Vec4? = null
+) {
+    retained_mesh_gpu_release(rm)
+    sprite_mesh_add_quad(rm.mesh, tl, tr, br, bl, src, py, tint, colorize, corner_alpha, corner_colorize, corner_u, corner_v)
+}
+
+// Prepare GPU storage without registering retained contents for a draw.
+pub fn retained_mesh_prepare(rm: RetainedMesh) {
+    if rm.mesh.count == 0 { return }
+    if rm.gpu_mesh == null
+        && match rm.mesh.texture { SampledTexture::Image(_) => true, _ => false } {
+        rm.gpu_mesh = retained_sprite_mesh_upload(rm.mesh.vbo, rm.mesh.count)
+    }
+}
+
+// Register the retained contents for this frame. Cheap (one pool
+// insert); not calling it simply doesn't render the mesh this frame.
+pub fn draw_mesh(rm: RetainedMesh) {
+    if rm.mesh.count == 0 { return }
+    retained_mesh_prepare(rm)
+    submit_mesh_into(current_render_pool(), rm.mesh, rm.gpu_mesh)
+}

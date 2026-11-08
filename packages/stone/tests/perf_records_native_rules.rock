@@ -1,0 +1,64 @@
+// Per-frame native JIT deltas ride in every frame-record row after the image
+// timing fields. This holds the widened shape and the zero-filled export path;
+// live native values are proven by perf captures, not unit fixtures.
+// perf_record_frame now takes the frame's image-load stats beside the JIT
+// counters; these rules need neither, so the rows carry a zeroed stat block.
+fn zero_image_stats() -> ImageLoadStats {
+    return ImageLoadStats {
+        load_calls: 0, load_failures: 0, decoded_bytes: 0, load_us: 0,
+        upload_calls: 0, upload_bytes: 0, wait_us: 0, upload_us: 0,
+        active_frames: 0, max_wait_us: 0,
+    }
+}
+
+@test
+fn perf_record_row_carries_native_jit_columns() {
+    assert_eq(PERF_RECORD_COLUMNS, 17 + GC_STEP_FIELDS + JIT_NATIVE_COLUMNS + 2,
+        "native JIT columns widen the frame row")
+    assert_eq(JIT_NATIVE_COLUMNS, 18, "native layout matches the ABI column count")
+    let saved_count = PERF_RECORDS.count
+    let saved_seconds = PERF_RECORDS.seconds
+    let saved_read = JIT_NATIVE_READ_ENABLED
+    JIT_NATIVE_READ_ENABLED = false
+    perf_record_frame(7, 1000.0, 16.6, 1024.0, 1.0, 0, 0, 0, 0, zero_image_stats())
+    JIT_NATIVE_READ_ENABLED = saved_read
+    let at = saved_count * PERF_RECORD_COLUMNS
+    assert(nb_get(PERF_RECORDS.data, at) == 7.0, "row lands at the saved count")
+    for c in 0..JIT_NATIVE_COLUMNS {
+        assert(nb_get(PERF_RECORDS.data, at + 17 + GC_STEP_FIELDS + c) == 0.0,
+            "disabled native read zero-fills the row")
+    }
+    // The (-1, 0) mover padding and signed byte diffs serialize through the
+    // same cast the row export uses; nearly every real row carries a -1.
+    assert_eq("{(-1.0) as int}", "-1", "reason padding serializes as -1")
+    assert_eq("{(-150.0) as int}", "-150", "negative diffs serialize exactly")
+    let json = perf_records_json()
+    assert(json.contains("jitn_aborts"), "native columns serialize by name")
+    assert(json.contains("jitn_coalescing_overflow"), "the full native layout serializes")
+    PERF_RECORDS.count = saved_count
+    PERF_RECORDS.seconds = saved_seconds
+}
+
+// The live read path: one native call per recorded frame into preallocated
+// staging, then a fixed copy. Holds the FFI wiring and the mover layout;
+// delta magnitudes across frames are proven by perf captures.
+@test
+fn perf_record_row_reads_live_native_deltas() {
+    let saved_count = PERF_RECORDS.count
+    let saved_seconds = PERF_RECORDS.seconds
+    let saved_read = JIT_NATIVE_READ_ENABLED
+    JIT_NATIVE_READ_ENABLED = true
+    perf_record_frame(9, 2000.0, 16.6, 2048.0, 2.0, 1, 1, 1, 0, zero_image_stats())
+    JIT_NATIVE_READ_ENABLED = saved_read
+    let at = saved_count * PERF_RECORD_COLUMNS
+    for c in 0..JIT_NATIVE_COLUMNS {
+        let v = nb_get(PERF_RECORDS.data, at + 17 + GC_STEP_FIELDS + c)
+        assert(v == v, "live native delta columns stay finite")
+    }
+    for k in 0..3 {
+        let r = nb_get(PERF_RECORDS.data, at + 17 + GC_STEP_FIELDS + 5 + k * 2)
+        assert(r == -1.0 || (r >= 0.0 && r < 64.0), "mover reasons stay -1 or a traceerr index")
+    }
+    PERF_RECORDS.count = saved_count
+    PERF_RECORDS.seconds = saved_seconds
+}

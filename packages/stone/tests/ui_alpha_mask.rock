@@ -1,0 +1,93 @@
+@test
+fn ui_alpha_mask_hits_follow_source_pixels_and_scaled_rect() {
+    let saved = ui_id_retention_isolate()
+    defer { ui_id_retention_restore(saved) }
+    let pixels = native_buffer_u8(4)
+    pixels[0] = 255
+    pixels[3] = 255
+    let mask = UiAlphaMask { width: 2, height: 2, pixels }
+    ui_mouse_item(17, ui_rect(10.0, 20.0, 40.0, 80.0), mask)
+    let item = UI_MOUSE.cur[0]
+    assert(ui_mouse_item_contains(item, v(20.0, 40.0)), "top-left covered pixel is selectable")
+    assert(!ui_mouse_item_contains(item, v(40.0, 40.0)), "transparent top-right pixel passes through")
+    assert(!ui_mouse_item_contains(item, v(20.0, 80.0)), "transparent bottom-left pixel passes through")
+    assert(ui_mouse_item_contains(item, v(40.0, 80.0)), "bottom-right pixel preserves image orientation")
+    assert(!ui_mouse_item_contains(item, v(50.0, 40.0)), "right border is outside the image")
+    assert(!ui_mouse_item_contains(item, v(30.0, 100.0)), "bottom border is outside the image")
+    ui_mouse_item(18, ui_rect(10.0, 20.0, 40.0, 80.0))
+    assert(ui_mouse_item_contains(UI_MOUSE.cur[1], v(40.0, 40.0)), "ordinary widgets retain rectangle picking")
+}
+
+@test
+fn ui_alpha_mask_resolution_uses_current_pointer_and_retains_drag_capture() {
+    let saved = ui_id_retention_isolate()
+    let old_pointer = sim_mouse_override
+    let old_buttons = mouse_down
+    let old_capture = IMGUI_MOUSE_CAPTURE_OVERRIDE
+    defer {
+        ui_id_retention_restore(saved)
+        sim_mouse_override = old_pointer
+        mouse_down = old_buttons
+        IMGUI_MOUSE_CAPTURE_OVERRIDE = old_capture
+    }
+    mouse_down = map_new()
+    IMGUI_MOUSE_CAPTURE_OVERRIDE = false
+    let pixels = native_buffer_u8(2)
+    pixels[0] = 255
+    let mask = UiAlphaMask { width: 2, height: 1, pixels }
+    let rect = ui_rect(10.0, 10.0, 80.0, 40.0)
+    sim_mouse_override = design_to_screen(v(20.0, 20.0))
+    ui_mouse_item(11, rect)
+    ui_mouse_item(12, rect.at_z(rect.z + 1), mask)
+    sim_mouse_override = design_to_screen(v(70.0, 20.0))
+    ui_mouse_begin_frame()
+    assert(ui_hot(11), "moving into a transparent pixel before resolution reaches the underlying item")
+    assert(UI_MOUSE.last[1].mask == null, "consumed registrations release their mask references")
+    ui_mouse_item(11, rect)
+    ui_mouse_item(12, rect.at_z(rect.z + 1), mask)
+    sim_mouse_override = design_to_screen(v(20.0, 20.0))
+    mouse_down[MOUSE_BUTTON_LEFT] = true
+    UI_MOUSE.press_event = true
+    ui_mouse_begin_frame()
+    assert(ui_clicked(12) && ui_active(12), "the opaque front pixel receives the real press and capture")
+    ui_mouse_item(11, rect)
+    ui_mouse_item(12, rect.at_z(rect.z + 1), mask)
+    sim_mouse_override = design_to_screen(v(200.0, 200.0))
+    ui_mouse_begin_frame()
+    assert(!ui_hot(12) && ui_active(12), "drag capture survives leaving the image")
+    mouse_down[MOUSE_BUTTON_LEFT] = false
+    ui_mouse_begin_frame()
+    assert(!ui_active(12), "release ends capture")
+}
+
+@test
+fn ui_alpha_mask_copies_coverage_without_retaining_native_image_data() {
+    let count = stone_get_image_data_count()
+    let image = new_image_data(4, 3)
+    image_data_set_pixel(image, 0, 0, 1.0, 1.0, 1.0, 1.0)
+    image_data_set_pixel(image, 2, 1, 1.0, 1.0, 1.0, 1.0 / 255.0)
+    let full = ui_alpha_mask_from_image(image)
+    let mask = ui_alpha_mask_from_image(image, linear: true, origin: iv(1, 1), size: iv(2, 1))
+    stone_destroy_image_data(image.0)
+    assert_eq(stone_get_image_data_count(), count)
+    assert_eq(full.width, 4)
+    assert_eq(full.height, 3)
+    assert(ui_alpha_mask_contains(full, v(0.125, 1.0 / 6.0)))
+    assert_eq(mask.width, 2)
+    assert_eq(mask.height, 1)
+    assert(mask.linear)
+    assert(!ui_alpha_mask_contains(mask, v(0.25, 0.5)))
+    assert(ui_alpha_mask_contains(mask, v(0.75, 0.5)), "even the faintest visible pixel has coverage")
+}
+
+@test
+fn ui_alpha_mask_linear_filter_keeps_visible_antialiased_edges() {
+    let pixels = native_buffer_u8(2)
+    pixels[0] = 255
+    let nearest = UiAlphaMask { width: 2, height: 1, pixels }
+    let linear = UiAlphaMask { width: 2, height: 1, pixels, linear: true }
+    assert(!ui_alpha_mask_contains(nearest, v(0.6, 0.5)))
+    assert(ui_alpha_mask_contains(linear, v(0.6, 0.5)), "the filtered edge still contains visible alpha")
+    assert(!ui_alpha_mask_contains(linear, v(0.75, 0.5)), "a fully transparent filtered texel passes through")
+    assert(ui_alpha_mask_contains(linear, v(0.0, 0.0)), "linear edges clamp to the image's edge texel")
+}

@@ -1,0 +1,270 @@
+// Tool input: the developer's keyboard, read live from ImGui IO, which the
+// Rust side feeds raw SDL.
+//
+// This is a different channel from `is_key_pressed` (input/state.rock), which
+// reads `keys_down` -- the run's game-input authority, which is the injected
+// synthetic channel while a sim owns input. A debug shortcut on that channel
+// would be dead to the developer's live press during a sim, and a key the sim
+// injects would fire it.
+//
+// So: `is_key_pressed` drives the GAME; `tool_key_pressed` drives the TOOLS.
+// A game's own editor keys are game input.
+
+// The typed vocabulary is the one production binding surface. Dynamic names
+// remain an escape hatch only for the test injector below.
+pub enum ToolKey {
+    F3, F5, F6, F7, F8, F10, F11, F12,
+    LeftBracket, RightBracket, Backslash,
+    LeftCtrl, RightCtrl, LeftShift, RightShift,
+    Space, Right, A, B, L, Left, Up, Down, U,
+    Escape, R, C, Tab, Return, Backspace, Delete, F, P, Z,
+}
+
+fn tool_key_name(key: ToolKey) -> string {
+    match key {
+        ToolKey::F3 => "f3", ToolKey::F5 => "f5", ToolKey::F6 => "f6", ToolKey::F7 => "f7",
+        ToolKey::F8 => "f8", ToolKey::F10 => "f10",
+        ToolKey::F11 => "f11", ToolKey::F12 => "f12",
+        ToolKey::LeftBracket => "[", ToolKey::RightBracket => "]",
+        ToolKey::Backslash => "\\",
+        ToolKey::LeftCtrl => "lctrl", ToolKey::RightCtrl => "rctrl",
+        ToolKey::LeftShift => "lshift", ToolKey::RightShift => "rshift",
+        ToolKey::Space => "space", ToolKey::Right => "right",
+        ToolKey::A => "a", ToolKey::B => "b", ToolKey::L => "l",
+        ToolKey::Left => "left", ToolKey::Up => "up",
+        ToolKey::Down => "down", ToolKey::U => "u", ToolKey::Escape => "escape",
+        ToolKey::R => "r", ToolKey::C => "c", ToolKey::Tab => "tab",
+        ToolKey::Return => "return", ToolKey::Backspace => "backspace", ToolKey::Delete => "delete",
+        ToolKey::F => "f", ToolKey::P => "p", ToolKey::Z => "z",
+    }
+}
+
+// Name -> ImGuiKey, the ONE mapping: queries and the headless injector both
+// resolve through it, so a key that can be injected is a key that can be read.
+// TWO failures, told apart because only one of them is a bug: -2 is "no imgui
+// here" (headless boot, iOS, stubbed imgui), which is expected and
+// silent; -1 is a name this map does not know, which is a DEAD SHORTCUT and
+// gets named by the caller. The punctuation rows are not decoration -- the
+// time-scale ladder is bound to `[`, `]` and `\\`.
+@nomangle inline(lua) fn __tool_imgui_key_id(name: string) -> int = """
+    if not (_G.imgui and imgui.IsKeyPressed_Bool) or imgui.__stone_stub then return -2 end
+    -- Memoized: resolution allocates a table and concatenates a name, and the
+    -- per-frame sampler below asks for every ToolKey. Only a RESOLVED answer
+    -- is cached: -2 ("no imgui here") returns above, so a later boot that
+    -- brings imgui up still resolves.
+    local cache = _G.__stone_tool_key_ids
+    if not cache then cache = {}; _G.__stone_tool_key_ids = cache end
+    local cached = cache[name]
+    if cached ~= nil then return cached end
+    local specials = {
+        space = "Space", ["return"] = "Enter", enter = "Enter", escape = "Escape",
+        tab = "Tab", backspace = "Backspace", delete = "Delete",
+        left = "LeftArrow", right = "RightArrow", up = "UpArrow", down = "DownArrow",
+        lshift = "LeftShift", rshift = "RightShift",
+        lctrl = "LeftCtrl", rctrl = "RightCtrl",
+        lalt = "LeftAlt", ralt = "RightAlt",
+         ["["] = "LeftBracket", ["]"] = "RightBracket", ["\\"] = "Backslash",
+        [";"] = "Semicolon", ["'"] = "Apostrophe", [","] = "Comma",
+        ["-"] = "Minus", ["."] = "Period", ["/"] = "Slash", ["="] = "Equal",
+        ["`"] = "GraveAccent",
+    }
+    local suffix = specials[name]
+    if not suffix then
+        local fn_digits = name:match("^[fF]([0-9]+)$")
+        if fn_digits and tonumber(fn_digits) >= 1 and tonumber(fn_digits) <= 12 then
+            suffix = "F" .. fn_digits
+        elseif #name == 1 and name:match("^[%a%d]$") then
+            suffix = name:upper()
+        end
+    end
+    if not suffix then cache[name] = -1; return -1 end
+    local id = imgui["ImGuiKey_" .. suffix]
+    if id == nil then cache[name] = -1; return -1 end
+    cache[name] = id
+    return id
+"""
+
+// The resolved id, or negative. An UNMAPPED name is reported once per NAME --
+// the dedup key carries the key, because a site-keyed `log_once` would report
+// the first dead shortcut and swallow every other one.
+fn tool_key_id_dynamic(key: string) -> int {
+    let id = __tool_imgui_key_id(key)
+    if id == -1 {
+        log_once("INPUT", "tool key '{key}' has no ImGui mapping: this shortcut is dead", "tool_key:{key}")
+    }
+    return id
+}
+
+fn tool_key_id(key: ToolKey) -> int {
+    return tool_key_id_dynamic(tool_key_name(key))
+}
+
+// The live queries, called ONCE per key per frame from the sampler below.
+//
+// They read `imgui.C` -- the raw cimgui namespace that the generated bindings
+// call themselves -- and not the `imgui.*` wrappers. Every wrapper in
+// `stone/prebuilt/cimgui/wrap.lua` opens with `jit.off(true)`, which
+// blacklists it, so a LuaJIT trace that reaches one is thrown away: the
+// per-key query below was the top-40 census entry worth 116 aborts in a `rock
+// sim mag trace_pressure_combat_bench` run, and the mouse side another 161.
+// Same C function, same answer, no `jit.off`; `imgui.C.igGetIO_Nil()` in the
+// injector below is the same idiom.
+// The wrapper's only other work is filling a defaulted argument, which every
+// caller here passes explicitly.
+@nomangle inline(lua) fn __tool_imgui_key_pressed_id(id: int) -> bool = """
+    if not (_G.imgui and imgui.C) then return false end
+    return imgui.C.igIsKeyPressed_Bool(id, false) and true or false
+"""
+
+@nomangle inline(lua) fn __tool_imgui_key_down_id(id: int) -> bool = """
+    if not (_G.imgui and imgui.C) then return false end
+    return imgui.C.igIsKeyDown_Nil(id) and true or false
+"""
+
+// Test hook: queue a key DOWN event, consumed at the next NewFrame, so the
+// shortcuts can be driven headless. Driven by STONE_TIMELINE_KEY(_AT).
+@nomangle inline(lua) fn __tool_imgui_inject_key_id(id: int) = """
+    if not (_G.imgui and imgui.C) then return end
+    imgui.C.ImGuiIO_AddKeyEvent(imgui.C.igGetIO_Nil(), id, true)
+    if id == imgui.ImGuiKey_LeftCtrl or id == imgui.ImGuiKey_RightCtrl then
+        imgui.C.ImGuiIO_AddKeyEvent(imgui.C.igGetIO_Nil(), imgui.ImGuiKey_ReservedForModCtrl, true)
+    end
+"""
+
+@nomangle inline(lua) fn __tool_imgui_release_key_id(id: int) = """
+    if not (_G.imgui and imgui.C) then return end
+    imgui.C.ImGuiIO_AddKeyEvent(imgui.C.igGetIO_Nil(), id, false)
+    if id == imgui.ImGuiKey_LeftCtrl or id == imgui.ImGuiKey_RightCtrl then
+        imgui.C.ImGuiIO_AddKeyEvent(imgui.C.igGetIO_Nil(), imgui.ImGuiKey_ReservedForModCtrl, false)
+    end
+"""
+
+// --- per-frame snapshot ----------------------------------------------------
+//
+// Every tool key is sampled ONCE per frame, right after ImGui's NewFrame (see
+// `input_imgui_new_frame`), and the typed queries below read that sample
+// instead of asking ImGui. Two reasons, and the second is the one that made
+// this worth doing:
+//
+//   * the debug/editor surface polls a dozen of these per frame from as many
+//     render-phase sites, and each poll used to re-resolve a name and cross
+//     the binding; and
+//   * a poll from a hot site is a trace hazard. See `__tool_imgui_key_id`
+//     and the live queries above.
+//
+// The sample is EXACT, not an approximation. ImGui's KeysData changes only
+// inside NewFrame, and `__tool_imgui_inject_key_id` queues events that are
+// consumed there too, so between two NewFrames a live query and the sample
+// taken at the earlier one cannot disagree -- including the edge that
+// `IsKeyPressed` reports, which is true for exactly one NewFrame either way.
+// Every tool-key consumer runs in the render phase below
+// `input_imgui_new_frame`, so each reads its own frame's sample.
+//
+@nomangle inline(lua) fn __tool_snapshot_begin(ctrl_down: bool) = """
+    local snap = _G.__stone_tool_keys
+    if not snap then
+        snap = {pressed = {}, down = {}}
+        _G.__stone_tool_keys = snap
+    end
+    snap.ctrl = ctrl_down
+"""
+
+// No clear step: the sampler walks the same fixed key set every frame and
+// overwrites both entries, so the tables never grow and never allocate after
+// the first frame.
+@nomangle inline(lua) fn __tool_snapshot_put(id: int, pressed: bool, down: bool) = """
+    local snap = _G.__stone_tool_keys
+    snap.pressed[id] = pressed
+    snap.down[id] = down
+"""
+
+@nomangle inline(lua) fn __tool_snapshot_pressed(id: int) -> bool = """
+    local snap = _G.__stone_tool_keys
+    return (snap and snap.pressed[id]) or false
+"""
+
+@nomangle inline(lua) fn __tool_snapshot_down(id: int) -> bool = """
+    local snap = _G.__stone_tool_keys
+    return (snap and snap.down[id]) or false
+"""
+
+@nomangle inline(lua) fn __tool_snapshot_ctrl() -> bool = """
+    local snap = _G.__stone_tool_keys
+    return (snap and snap.ctrl) or false
+"""
+
+// Every ToolKey. `tool_key_name`'s exhaustive match is what fails a member
+// added without a name; this list is what the sampler walks, and a member
+// missing from it reads as never pressed.
+const TOOL_KEY_ALL: [ToolKey] = [
+    ToolKey::F3, ToolKey::F5, ToolKey::F6, ToolKey::F7, ToolKey::F8,
+    ToolKey::F10, ToolKey::F11, ToolKey::F12,
+    ToolKey::LeftBracket, ToolKey::RightBracket, ToolKey::Backslash,
+    ToolKey::LeftCtrl, ToolKey::RightCtrl, ToolKey::LeftShift, ToolKey::RightShift,
+    ToolKey::Space, ToolKey::Right, ToolKey::A, ToolKey::B, ToolKey::L,
+    ToolKey::Left, ToolKey::Up, ToolKey::Down, ToolKey::U,
+    ToolKey::Escape, ToolKey::R, ToolKey::C, ToolKey::Tab,
+    ToolKey::Return, ToolKey::Backspace, ToolKey::Delete, ToolKey::F, ToolKey::P, ToolKey::Z,
+]
+
+// The one per-frame sample. Before imgui is up every id is negative and the
+// tables stay empty, which reads as "nothing pressed" -- the same answer the
+// live queries gave.
+fn tool_input_sample_frame() {
+    __tool_snapshot_begin(__tool_imgui_ctrl_down())
+    for key in TOOL_KEY_ALL {
+        let id = tool_key_id(key)
+        if id >= 0 {
+            __tool_snapshot_put(id, __tool_imgui_key_pressed_id(id), __tool_imgui_key_down_id(id))
+        }
+    }
+}
+
+// Edge-triggered, no repeat: the press, not the hold. A text-owning tool
+// may explicitly receive its own finish/cancel key during text input.
+pub fn tool_key_pressed(key: ToolKey, during_text_input: bool = false) -> bool {
+    if UI_TEXT_INPUT_CAPTURE && !during_text_input { return false }
+    let id = tool_key_id(key)
+    if id < 0 { return false }
+    return __tool_snapshot_pressed(id)
+}
+
+// By NAME, and live rather than sampled: this is the escape hatch for keys
+// outside the typed vocabulary (the two JIT hotkeys, a test injector), so
+// there is no ToolKey to have sampled. It costs one raw C call per query and
+// blacklists nothing.
+fn tool_key_pressed_dynamic(key: string) -> bool {
+    if UI_TEXT_INPUT_CAPTURE { return false }
+    let id = tool_key_id_dynamic(key)
+    if id < 0 { return false }
+    return __tool_imgui_key_pressed_id(id)
+}
+
+pub fn tool_key_down(key: ToolKey) -> bool {
+    let id = tool_key_id(key)
+    if id < 0 { return false }
+    return __tool_snapshot_down(id)
+}
+
+@nomangle inline(lua) fn __tool_imgui_ctrl_down() -> bool = """
+    if not (_G.imgui and imgui.C) then return false end
+    return (imgui.C.igIsKeyDown_Nil(imgui.ImGuiKey_ReservedForModCtrl)
+        or imgui.C.igIsKeyDown_Nil(imgui.ImGuiKey_LeftCtrl)
+        or imgui.C.igIsKeyDown_Nil(imgui.ImGuiKey_RightCtrl)) and true or false
+"""
+
+pub fn tool_ctrl_held() -> bool {
+    return __tool_snapshot_ctrl()
+}
+
+pub fn tool_inject_key(key: string) {
+    let id = tool_key_id_dynamic(key)
+    if id < 0 { return }
+    __tool_imgui_inject_key_id(id)
+}
+
+pub fn tool_release_key(key: string) {
+    let id = tool_key_id_dynamic(key)
+    if id < 0 { return }
+    __tool_imgui_release_key_id(id)
+}

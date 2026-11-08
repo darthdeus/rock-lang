@@ -1,0 +1,10 @@
+[package]
+name = "stone-native"
+version = "0.1.0"
+type = "lib"
+
+[language]
+modules = "v1"
+
+[dependencies]
+stone-core = { package = "stone-core" }

@@ -1,0 +1,115 @@
+// The mixing desk. One strip per bus, and the ONLY thing that calls
+// bus_set_gain.
+//
+// That exclusivity is the point. Level used to arrive at a bus by three
+// different routes -- a settings screen writing the master bus, two engine
+// globals (`sound_volume`/`music_volume`) folded into every voice at play time
+// regardless of which bus it was headed for, and a game multiplying master into
+// its own levels by hand. Each was invisible to the others, which is how the
+// "sfx" level came to quietly attenuate ambience and UI, and how ambience came
+// to ignore master entirely. A fader, a settings slider and a game all edit
+// STRIPS now; mixer_push is what reaches the engine.
+
+value MixerStrip {
+    gain: float,
+    mute: bool,
+    // Session state, deliberately not persisted: quitting while something is
+    // soloed and finding it still soloed next launch is a bug report, not a
+    // restored preference.
+    solo: bool,
+}
+
+const MIXER_BUSES: [int] = [
+    STONE_BUS_MASTER, STONE_BUS_SFX, STONE_BUS_MUSIC, STONE_BUS_AMBIENCE, STONE_BUS_UI,
+    STONE_BUS_FOLEY,
+]
+
+global MIXER: [MixerStrip] = [
+    MixerStrip { gain: 1.0, mute: false, solo: false },
+    MixerStrip { gain: 1.0, mute: false, solo: false },
+    MixerStrip { gain: 1.0, mute: false, solo: false },
+    MixerStrip { gain: 1.0, mute: false, solo: false },
+    MixerStrip { gain: 1.0, mute: false, solo: false },
+    MixerStrip { gain: 1.0, mute: false, solo: false },
+]
+
+// Bus ids are contiguous and MIXER is indexed by them, but that is an engine
+// coincidence rather than a rule a caller should rely on.
+fn mixer_strip(bus: int) -> MixerStrip? {
+    if bus < 0 || bus >= MIXER.len() { return null }
+    return MIXER[bus]
+}
+
+// Master is not soloable: soloing it would mean "silence everything except the
+// bus everything already flows through", which silences nothing. Excluding it
+// also means an accidental click on it cannot mute the whole game.
+fn mixer_can_solo(bus: int) -> bool {
+    return bus != STONE_BUS_MASTER
+}
+
+fn mixer_any_solo() -> bool {
+    for (i, s) in enumerate(MIXER) {
+        if s.solo && mixer_can_solo(i) { return true }
+    }
+    return false
+}
+
+// The gain a bus ACTUALLY runs at, derived rather than stored. Solo is not a
+// per-strip attribute -- it is a statement about every OTHER strip -- so there
+// is no correct value to keep in the strip itself, and a cached one would go
+// stale the moment a different strip was soloed.
+pub fn mixer_applied_gain(bus: int) -> float {
+    let s = mixer_strip(bus)
+    if s == null { return 0.0 }
+    if s.mute { return 0.0 }
+    if mixer_any_solo() && mixer_can_solo(bus) && !s.solo { return 0.0 }
+    return max(0.0, s.gain)
+}
+
+// Push every strip. All five every time rather than just the one that moved:
+// soloing one strip changes the applied gain of the other four, so a
+// push-what-changed version would be wrong exactly when solo is in use.
+fn mixer_push() {
+    for bus in MIXER_BUSES {
+        bus_set_gain(bus, mixer_applied_gain(bus))
+    }
+}
+
+// The strip's own fader position, ignoring mute and solo -- what a settings
+// file should persist. mixer_applied_gain is what the bus runs at, which is
+// deliberately NOT the same number and must never be the one saved: quitting
+// while something is muted would otherwise persist as a gain of zero.
+pub fn mixer_gain_of(bus: int) -> float {
+    let s = mixer_strip(bus)
+    if s == null { return 0.0 }
+    return s.gain
+}
+
+pub fn mixer_set_gain(bus: int, gain: float) {
+    let s = mixer_strip(bus)
+    if s == null { return }
+    MIXER[bus].gain = clamp(gain, 0.0, MIXER_GAIN_MAX)
+    mixer_push()
+}
+
+pub fn mixer_set_mute(bus: int, mute: bool) {
+    if mixer_strip(bus) == null { return }
+    MIXER[bus].mute = mute
+    mixer_push()
+}
+
+pub fn mixer_set_solo(bus: int, solo: bool) {
+    if mixer_strip(bus) == null || !mixer_can_solo(bus) { return }
+    MIXER[bus].solo = solo
+    mixer_push()
+}
+
+pub fn mixer_clear_solo() {
+    for (i, _) in enumerate(MIXER) { MIXER[i].solo = false }
+    mixer_push()
+}
+
+// Faders run past unity so a bank that was authored too quiet can be brought
+// up without re-exporting it. Above 0dB is the caller's business -- the mix
+// sums unlimited, and the meter turns red when it costs you.
+const MIXER_GAIN_MAX: float = 2.0

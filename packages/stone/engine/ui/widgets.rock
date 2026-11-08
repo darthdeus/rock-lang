@@ -1,0 +1,644 @@
+// Skinned widgets on the hot/active mouse core (mouse.rock) and the
+// UiSkin draw ops (skin.rock). The kit ships one texture per widget;
+// states are runtime tints (a multiplicative sprite tint), not textures.
+// Since the tint can't brighten past the texture, the ramp reads as
+// hover-brighten / press-darken by dimming the resting state: hovered is
+// full white (brightest), normal/pressed/disabled step down via darken.
+
+pub enum ButtonState { Normal, Hovered, Pressed, Disabled }
+enum UiButtonEdge { None, Mouse, Focus }
+
+pub fn skin_button_tint(st: ButtonState) -> Color {
+    return match st {
+        ButtonState::Hovered  => WHITE,
+        ButtonState::Normal   => WHITE.darken(0.72),
+        ButtonState::Pressed  => WHITE.darken(0.55),
+        ButtonState::Disabled => WHITE.darken(0.45),
+    }
+}
+
+fn skin_button_tint_for(st: ButtonState, selected: bool, selected_tint: Color) -> Color {
+    if !selected { return skin_button_tint(st) }
+    return match st {
+        ButtonState::Hovered  => selected_tint.lighten(0.18),
+        ButtonState::Normal   => selected_tint,
+        ButtonState::Pressed  => selected_tint.darken(0.68),
+        ButtonState::Disabled => selected_tint.darken(0.45),
+    }
+}
+
+// Text inside a skinned frame -- the size such a rect must be, and the
+// draw that puts the label in the skin's CONTENT channel instead of on
+// top of its border art. Buttons are this plus a state tint; a hint
+// popup or a static plate is this alone.
+
+// Reserve the font's full line box so the plate height does not depend on
+// which glyphs its label contains.
+fn skin_label_line_h(font_size: float) -> float {
+    return measure_ui("Xg", font_size).y
+}
+
+// A VISUAL POLICY, not arithmetic. Below twice its scaled corner a
+// nine-patch has both corners clamped to size/2 (nine_patch_batch) and
+// reads as four squashed corners with no frame between them, so a
+// derived label size never asks for that. A caller that wants the
+// degraded look builds its own rect.
+@pure fn skin_corner_floor(s: UiSkin) -> Vec2 {
+    return v(float(s.corner.x) * s.scale * 2.0, float(s.corner.y) * s.scale * 2.0)
+}
+
+// `extra` is caller-side breathing room ON TOP of the skin's own pads.
+pub fn skin_label_size(s: UiSkin, text: string, font_size: float, extra: Vec2 = v(0.0, 0.0)) -> Vec2 {
+    let floor = skin_corner_floor(s)
+    let w = measure_ui(text, font_size).x + (s.pad_l + s.pad_r) * s.scale + extra.x
+    let h = skin_label_line_h(font_size) + (s.pad_t + s.pad_b) * s.scale + extra.y
+    return v(max(w, floor.x), max(h, floor.y))
+}
+
+pub fn skin_label_rich_size(s: UiSkin, spans: [TextSpan], font_size: float, extra: Vec2 = v(0.0, 0.0)) -> Vec2 {
+    let floor = skin_corner_floor(s)
+    let w = measure_rich_ui(spans, font_size).x + (s.pad_l + s.pad_r) * s.scale + extra.x
+    let h = skin_label_line_h(font_size) + (s.pad_t + s.pad_b) * s.scale + extra.y
+    return v(max(w, floor.x), max(h, floor.y))
+}
+
+fn skin_label_content_draw(r: UiRect, label: string, s: UiSkin, font_size: float,
+    text_color: Color = WHITE, nudge: Vec2 = v(0.0, 0.0),
+    align: TextAlign = TextAlign::Center) {
+    r.content(s).offset(nudge).text(label, font_size, text_color, align)
+}
+
+fn skin_label_content_rich_draw(r: UiRect, spans: [TextSpan], s: UiSkin, font_size: float,
+    nudge: Vec2 = v(0.0, 0.0), align: TextAlign = TextAlign::Center) {
+    r.content(s).offset(nudge).rich_text(spans, font_size, align)
+}
+
+pub fn skin_label_draw(r: UiRect, label: string, s: UiSkin, font_size: float,
+    text_color: Color = WHITE, tint: Color = WHITE, nudge: Vec2 = v(0.0, 0.0),
+    align: TextAlign = TextAlign::Center) {
+    r.skin(s, tint)
+    skin_label_content_draw(r, label, s, font_size, text_color, nudge, align)
+}
+
+fn skin_label_presence_draw(r: UiRect, label: string, s: UiSkin, font_size: float,
+    progress: float, pipeline: Pipeline,
+    text_color: Color = WHITE, tint: Color = WHITE, nudge: Vec2 = v(0.0, 0.0),
+    align: TextAlign = TextAlign::Center) {
+    ui_presence_skin_draw(r, s, progress, pipeline, tint: tint)
+    skin_label_content_draw(r, label, s, font_size, text_color, nudge, align)
+}
+
+pub fn skin_label_presence_rich_draw(r: UiRect, spans: [TextSpan], s: UiSkin, font_size: float,
+    progress: float, pipeline: Pipeline,
+    tint: Color = WHITE, nudge: Vec2 = v(0.0, 0.0), align: TextAlign = TextAlign::Center) {
+    ui_presence_skin_draw(r, s, progress, pipeline, tint: tint)
+    skin_label_content_rich_draw(r, spans, s, font_size, nudge, align)
+}
+
+// A tint multiplies into the skin, and a dark skin swallows it, so the label
+// carries the selected state too. Softened toward white: the full tint is loud
+// as text.
+const SKIN_BUTTON_SELECTED_LABEL_MIX: float = 0.55
+
+pub fn skin_button_selected_label_color(selected_tint: Color) -> Color {
+    return WHITE.lerp(selected_tint, SKIN_BUTTON_SELECTED_LABEL_MIX)
+}
+
+// Draw a button in a fixed visual state, no mouse routing. skin_button
+// composes routing + this; the gallery calls it directly to show every
+// state without a live cursor.
+pub fn skin_button_draw(r: UiRect, label: string, skin: UiSkin, st: ButtonState, font_size: float,
+    selected: bool = false, selected_tint: Color = WHITE) {
+    // 1px content nudge while pressed (physical-press feel).
+    let nudge = if st == ButtonState::Pressed { v(0.0, 1.0) } else { v(0.0, 0.0) }
+    let tcol = if st == ButtonState::Disabled { WHITE.darken(0.6) }
+        else if selected { skin_button_selected_label_color(selected_tint) }
+        else { WHITE }
+    skin_label_draw(r, label, skin, font_size, tcol, skin_button_tint_for(st, selected, selected_tint), nudge)
+}
+
+// Routing every button visual shares: register the hit rect for next
+// frame's resolution, register the focusable (keyboard nav highlights it
+// as Hovered and Confirm fires it), fire the hover feel edge, and report
+// which state to draw. Split out so a second visual is a draw call, not
+// a second copy of the routing.
+@inline fn ui_button_register(id: int, r: UiRect, scope: string) {
+    ui_mouse_item(id, r)
+    ui_focus_item(id, r, scope)
+}
+
+@inline fn ui_button_read_state(id: int) -> ButtonState {
+    if ui_active(id) { return ButtonState::Pressed }
+    if ui_hot(id) || ui_focused(id) { return ButtonState::Hovered }
+    return ButtonState::Normal
+}
+
+@inline fn ui_button_hover_emit(r: UiRect, feel: string, skin: Entity<UiSkin>? = null) {
+    ui_event(UiEvent::Hover, r.pointer() ?? r.center(), r, feel, skin)
+}
+
+pub fn ui_button_state(id: int, r: UiRect, scope: string, feel: string = "") -> ButtonState {
+    ui_button_register(id, r, scope)
+    if ui_hover_entered(id) { ui_button_hover_emit(r, feel) }
+    return ui_button_read_state(id)
+}
+
+pub fn skin_button_state(id: int, r: UiRect, scope: string, feel: string, skin: Entity<UiSkin>) -> ButtonState {
+    ui_button_register(id, r, scope)
+    if ui_hover_entered(id) { ui_button_hover_emit(r, feel, skin) }
+    return ui_button_read_state(id)
+}
+
+// The click edge (press-fires, once). Called AFTER the draw so the visual
+// and the event agree on one frame.
+fn ui_button_edge(id: int) -> UiButtonEdge {
+    if ui_clicked(id) { return UiButtonEdge::Mouse }
+    if ui_focus_confirmed(id) { return UiButtonEdge::Focus }
+    return UiButtonEdge::None
+}
+
+@inline fn ui_button_click_emit(edge: UiButtonEdge, r: UiRect, feel: string, skin: Entity<UiSkin>? = null) {
+    let at = if edge == UiButtonEdge::Mouse { r.pointer() ?? r.center() } else { r.center() }
+    ui_event(UiEvent::Click, at, r, feel, skin)
+}
+
+pub fn ui_button_fired(id: int, r: UiRect, feel: string = "") -> bool {
+    let edge = ui_button_edge(id)
+    if edge != UiButtonEdge::None { ui_button_click_emit(edge, r, feel) }
+    return edge != UiButtonEdge::None
+}
+
+pub fn skin_button_fired(id: int, r: UiRect, feel: string, skin: Entity<UiSkin>) -> bool {
+    let edge = ui_button_edge(id)
+    if edge != UiButtonEdge::None { ui_button_click_emit(edge, r, feel, skin) }
+    return edge != UiButtonEdge::None
+}
+
+pub fn ui_button_action_fired(id: int, r: UiRect, scope: string) -> bool {
+    ui_mouse_item(id, r)
+    ui_focus_item(id, r, scope)
+    return ui_button_edge(id) != UiButtonEdge::None
+}
+
+pub fn ui_button_id(scope: string, label: string, key: string) -> int {
+    return ui_id(scope, if key != "" { key } else { label })
+}
+
+// Skinned, hot/active-routed button.
+// Disabled still REGISTERS -- it must occlude items beneath it and
+// swallow presses (ui_wants_mouse stays true over it) -- but never
+// fires and never leaves the Disabled visual state.
+pub fn skin_button(r: UiRect, label: string, skin: Entity<UiSkin>, scope: string, key: string = "", font_size: float = 18.0, disabled: bool = false,
+    selected: bool = false, selected_tint: Color = WHITE) -> bool {
+    let resolved = skin.get().unwrap()
+    let id = ui_button_id(scope, label, key)
+    if disabled {
+        ui_mouse_item(id, r)
+        skin_button_draw(r, label, resolved, ButtonState::Disabled, font_size, selected, selected_tint)
+        return false
+    }
+    let st = skin_button_state(id, r, scope, resolved.feel, skin)
+    skin_button_draw(r, label, resolved, st, font_size, selected, selected_tint)
+    return skin_button_fired(id, r, resolved.feel, skin)
+}
+
+// Flat-color button: the same routing with no texture kit, for a game that
+// ships no UI art. The state ramp moves `base` instead of tinting a sprite,
+// so the button can be any color -- which a sprite tint can't do, since a
+// tint only ever darkens toward the texture.
+pub fn ui_button(r: UiRect, label: string, base: Color, scope: string, key: string = "", font_size: float = 18.0, disabled: bool = false) -> bool {
+    let id = ui_button_id(scope, label, key)
+    if disabled {
+        ui_mouse_item(id, r)
+        ui_button_flat_draw(r, label, base, ButtonState::Disabled, font_size)
+        return false
+    }
+    let st = ui_button_state(id, r, scope)
+    ui_button_flat_draw(r, label, base, st, font_size)
+    return ui_button_fired(id, r)
+}
+
+// Fixed visual state, no routing -- the skin_button_draw analogue.
+pub fn ui_button_flat_draw(r: UiRect, label: string, base: Color, st: ButtonState, font_size: float) {
+    let bg = match st {
+        ButtonState::Hovered  => base.lighten(1.18),
+        ButtonState::Pressed  => base.darken(0.78),
+        ButtonState::Normal   => base,
+        ButtonState::Disabled => base.darken(0.45),
+    }
+    r.fill(bg)
+    let tcol = if st == ButtonState::Disabled { WHITE.darken(0.55) } else { WHITE }
+    // 1px content nudge while pressed (physical-press feel), same as skinned.
+    let content = if st == ButtonState::Pressed { r.offset(v(0.0, 1.0)) } else { r }
+    content.text(label, font_size, tcol, TextAlign::Center)
+}
+
+// Metadata belongs to the captured interaction, so release still has its feel
+// and geometry when the widget disappears before the mouse is released.
+pub struct UiSliderDrag {
+    id: int,
+    rect: UiRect,
+    feel: string,
+    skin: Entity<UiSkin>,
+}
+
+// The skin is a host resource, so the captured presentation metadata is a
+// platform projection rather than part of the mouse router's session image.
+global UI_SLIDER_DRAG: UiSliderDrag? = null
+
+@reset
+fn reset_ui_slider_drag() { UI_SLIDER_DRAG = null }
+
+pub fn ui_slider_drag_active() -> bool {
+    let drag = UI_SLIDER_DRAG ?? return false
+    return ui_active(drag.id)
+}
+
+// Called by the mouse router before the host reads the drag signal. Losing
+// registration cancels the episode too (closing a panel while holding).
+fn ui_slider_drag_begin_frame() {
+    let drag = UI_SLIDER_DRAG ?? return
+    let registered = false
+    for i in 0..UI_MOUSE.last_count {
+        if UI_MOUSE.last[i].id == drag.id { registered = true; break }
+    }
+    if ui_active(drag.id) && registered { return }
+    UI_SLIDER_DRAG = null
+    ui_event(UiEvent::SliderDragEnd, drag.rect.center(), drag.rect, drag.feel, drag.skin)
+}
+
+pub fn ui_slider_drag_highlight() -> Color { return color(0.95, 0.72, 0.25, 1.0) }
+
+// Skinned slider combines mouse routing with ui_focus_lr navigation. While
+// active the value
+// maps mouse_screen across the content channel captured in SCREEN px on
+// the press edge (ui_drag_anchor) -- a live design-space mapping feeds
+// back when the slider itself drives UI_SCALE (value -> scale ->
+// mouse_ui -> value oscillation); screen px are drag-stable. step > 0
+// snaps mouse sets and sizes keyboard steps, step == 0 is continuous
+// (keyboard steps (max-min)/20).
+pub fn focus_slider(r: UiRect, key: string, val: float, min_v: float, max_v: float, skin: Entity<UiSkin>, fill: Color, scope: string, step: float = 0.0) -> float {
+    let resolved = skin.get().unwrap()
+    let id = ui_id(scope, key)
+    ui_mouse_item(id, r)
+    ui_focus_item(id, r, scope)
+
+    if ui_hover_entered(id) { ui_event(UiEvent::Hover, r.pointer() ?? r.center(), r, resolved.feel, skin) }
+
+    let ch = r.content(resolved)
+    let v = clamp(val, min_v, max_v)
+    let v0 = v
+    if ui_clicked(id) && ch.w > 0.0 {
+        ui_drag_anchor_set(ui_to_screen(ch))
+        if ui_active(id) {
+            UI_SLIDER_DRAG = UiSliderDrag { id, rect: r, feel: resolved.feel, skin }
+            ui_event(UiEvent::SliderDragStart, r.pointer() ?? r.center(), r, resolved.feel, skin)
+        }
+    }
+    let a = ui_drag_anchor()
+    // The pointer in the ANCHOR's target space -- output px, or scene texels
+    // for a composite slider. Null (cursor off the presented scene) leaves the
+    // value where it is rather than snapping to an edge.
+    let mp = ui_ctx_target_pointer(a.ctx)
+    if ui_active(id) && a.w > 0.0 && mp != null {
+        let t = clamp((mp.unwrap().x - a.x) / a.w, 0.0, 1.0)
+        v = min_v + t * (max_v - min_v)
+        if step > 0.0 {
+            v = min_v + floor((v - min_v) / step + 0.5) * step
+        }
+    } else if ui_focused(id) {
+        let dir = ui_focus_lr()
+        if dir != 0 {
+            let s = if step > 0.0 { step } else { (max_v - min_v) / 20.0 }
+            v = v + float(dir) * s
+        }
+    }
+    v = clamp(v, min_v, max_v)
+
+    // Keyboard steps retain notch feedback; held mouse drags have their own episode.
+    let notch = if step > 0.0 { step } else { (max_v - min_v) / 20.0 }
+    if !ui_active(id) && notch > 0.0 && floor((v - min_v) / notch + 0.5) != floor((v0 - min_v) / notch + 0.5) {
+        // Fire at the stepped thumb position. (Vec2
+        // literal: the slider value local `v` shadows the ctor here.)
+        let tt = (v - min_v) / (max_v - min_v)
+        ui_event(UiEvent::SliderTick, Vec2 { x: ch.x + ch.w * tt, y: ch.y + ch.h * 0.5 }, r, resolved.feel, skin)
+    }
+
+    let ratio = if max_v > min_v { (v - min_v) / (max_v - min_v) } else { 0.0 }
+    let tint = if ui_hot(id) || ui_active(id) || ui_focused(id) { WHITE } else { WHITE.darken(0.72) }
+    UiRect { ..ch, w: ch.w * ratio, z: r.z }.fill(fill)
+    r.skin(resolved, tint)
+    if ui_active(id) && ui_slider_drag_active() {
+        r.at_z(r.z + 1).outline(ui_slider_drag_highlight(), 2.0)
+    }
+    return v
+}
+
+// One focusable for the whole row; UiLeft/UiRight cycle selection with
+// wrap while focused, clicks select directly. Labels must be unique per
+// row (they mint the per-tab mouse ids).
+pub fn focus_tab_row(r: UiRect, key: string, labels: [string], selected: int, skin: Entity<UiSkin>, scope: string, font_size: float = 18.0,
+    selected_tint: Color = WHITE) -> int {
+    let n = labels.len
+    if n == 0 { return selected }
+    let resolved = skin.get().unwrap()
+    let id = ui_id(scope, key)
+    ui_focus_item(id, r, scope)
+
+    let sel = clamp(selected, 0, n - 1) as int
+    let sel0 = sel
+    if ui_focused(id) {
+        let dir = ui_focus_lr()
+        if dir != 0 {
+            sel = sel + dir
+            if sel < 0 { sel = n - 1 } else if sel >= n { sel = 0 }
+        }
+    }
+
+    let tw = r.w / float(n)
+    for i in 0..n {
+        let lb = labels[i]
+        let tr = UiRect { ..r, x: r.x + float(i) * tw, w: tw }
+        let tid = ui_id(scope, "{key}/{lb}")
+        ui_mouse_item(tid, tr)
+        if ui_hover_entered(tid) { ui_event(UiEvent::Hover, tr.pointer() ?? tr.center(), tr, resolved.feel, skin) }
+        if ui_clicked(tid) { sel = i }
+        let st = if ui_hot(tid) { ButtonState::Hovered } else { ButtonState::Normal }
+        skin_button_draw(tr, lb, resolved, st, font_size, selected: sel == i, selected_tint: selected_tint)
+    }
+    if sel != sel0 {
+        let str = UiRect { ..r, x: r.x + float(sel) * tw, w: tw }
+        ui_event(UiEvent::TabSwitch, str.center(), str, resolved.feel, skin)
+    }
+    return sel
+}
+
+// One active code-native text field at a time. SDL supplies committed UTF-8
+// text; navigation and editing keys stay on the raw scancode lane so action
+// bindings are completely suppressed while the field owns the keyboard.
+pub struct UiTextInputState {
+    active_id: int,
+    value: string,
+    cursor: int,
+    max_chars: int,
+    select_all: bool,
+    invalid: bool,
+    seen: bool,
+}
+
+pub struct UiTextInputResult {
+    value: string,
+    submit: bool,
+    cancel: bool,
+}
+
+pub global UI_TEXT_INPUT: UiTextInputState = UiTextInputState {
+    active_id: 0,
+    value: "",
+    cursor: 0,
+    max_chars: 0,
+    select_all: false,
+    invalid: false,
+    seen: false,
+}
+
+fn ui_text_input_codepoints(text: string) -> [int] {
+    let out: [int] = []
+    for cp in text.chars() { out.push(cp) }
+    return out
+}
+
+fn ui_text_input_build(chars: [int]) -> string {
+    let out = sb_new()
+    for cp in chars { sb_push(out, from_codepoint(cp)) }
+    return sb_build(out)
+}
+
+fn ui_text_input_prefix(value: string, count: int) -> string {
+    let out = sb_new()
+    let i = 0
+    for cp in value.chars() {
+        if i >= count { break }
+        sb_push(out, from_codepoint(cp))
+        i = i + 1
+    }
+    return sb_build(out)
+}
+
+pub fn ui_text_input_active(id: int) -> bool {
+    return id != 0 && UI_TEXT_INPUT.active_id == id
+}
+
+pub fn ui_text_input_value(id: int) -> string {
+    if !ui_text_input_active(id) { return "" }
+    return UI_TEXT_INPUT.value
+}
+
+pub fn ui_text_input_start(id: int, value: string, max_chars: int) {
+    if id == 0 || max_chars <= 0 { return }
+    let s = UI_TEXT_INPUT
+    s.active_id = id
+    s.value = value
+    s.cursor = ui_text_input_codepoints(value).len
+    s.max_chars = max_chars
+    s.select_all = false
+    s.invalid = false
+    s.seen = true
+    UI_TEXT_INPUT_CAPTURE = true
+    stone_start_text_input()
+}
+
+pub fn ui_text_input_finish(id: int) {
+    if !ui_text_input_active(id) { return }
+    let s = UI_TEXT_INPUT
+    s.active_id = 0
+    s.value = ""
+    s.cursor = 0
+    s.max_chars = 0
+    s.select_all = false
+    s.invalid = false
+    s.seen = false
+    UI_TEXT_INPUT_CAPTURE = false
+    stone_stop_text_input()
+}
+
+pub fn ui_text_input_cancel(id: int) {
+    ui_text_input_finish(id)
+}
+
+pub fn ui_text_input_reject(id: int) {
+    if ui_text_input_active(id) { UI_TEXT_INPUT.invalid = true }
+}
+
+// Called before game systems. A field that vanished without finishing releases
+// SDL and action capture on the next frame boundary.
+fn ui_text_input_begin_frame() {
+    let s = UI_TEXT_INPUT
+    if s.active_id != 0 && !s.seen { ui_text_input_finish(s.active_id) }
+    s.seen = false
+    UI_TEXT_INPUT_CAPTURE = s.active_id != 0 || imgui_wants_text_input()
+}
+
+fn ui_text_input_key(scan: string) -> bool {
+    return is_scancode_pressed(scan) || scancode_repeated(scan)
+}
+
+@pure fn ui_text_input_whitespace(cp: int) -> bool {
+    return cp == 0x20 || cp == 0xa0 || cp == 0x1680
+        || (cp >= 0x2000 && cp <= 0x200a)
+        || cp == 0x2028 || cp == 0x2029 || cp == 0x202f
+        || cp == 0x205f || cp == 0x3000
+}
+
+fn ui_text_input_edit() -> (bool, bool) {
+    let s = UI_TEXT_INPUT
+    let submit = false
+    let cancel = false
+
+    if is_scancode_pressed("escape") {
+        cancel = true
+    } else if is_scancode_pressed("return") || is_scancode_pressed("kpenter") {
+        submit = true
+    } else if ui_text_input_key("home") || ui_text_input_key("end")
+        || ui_text_input_key("left") || ui_text_input_key("right")
+        || ui_text_input_key("backspace") || ui_text_input_key("delete")
+        || text_input_this_frame != "" {
+        // The focused field idles here most frames: no key or committed
+        // text means nothing to decode and nothing to rebuild.
+        let chars = ui_text_input_codepoints(s.value)
+        let dirty = false
+        let ctrl = is_scancode_down("lctrl") || is_scancode_down("rctrl")
+        if ui_text_input_key("home") {
+            s.select_all = false
+            s.cursor = 0
+        } else if ui_text_input_key("end") {
+            s.select_all = false
+            s.cursor = chars.len
+        } else if ui_text_input_key("left") {
+            if s.select_all { s.cursor = 0 } else { s.cursor = max(0, s.cursor - 1) }
+            s.select_all = false
+        } else if ui_text_input_key("right") {
+            if s.select_all { s.cursor = chars.len } else { s.cursor = min(chars.len, s.cursor + 1) }
+            s.select_all = false
+        } else if ui_text_input_key("backspace") {
+            if s.select_all {
+                chars.clear()
+                dirty = true
+                s.cursor = 0
+            } else if ctrl {
+                while s.cursor > 0 && ui_text_input_whitespace(chars[s.cursor - 1]) {
+                    let _ = chars.remove_at(s.cursor - 1)
+                    dirty = true
+                    s.cursor = s.cursor - 1
+                }
+                while s.cursor > 0 && !ui_text_input_whitespace(chars[s.cursor - 1]) {
+                    let _ = chars.remove_at(s.cursor - 1)
+                    dirty = true
+                    s.cursor = s.cursor - 1
+                }
+            } else if s.cursor > 0 {
+                let _ = chars.remove_at(s.cursor - 1)
+                dirty = true
+                s.cursor = s.cursor - 1
+            }
+            s.select_all = false
+            s.invalid = false
+        } else if ui_text_input_key("delete") {
+            if s.select_all {
+                chars.clear()
+                dirty = true
+                s.cursor = 0
+            } else if s.cursor < chars.len {
+                let _ = chars.remove_at(s.cursor)
+                dirty = true
+            }
+            s.select_all = false
+            s.invalid = false
+        }
+
+        if text_input_this_frame != "" {
+            if s.select_all {
+                chars.clear()
+                dirty = true
+                s.cursor = 0
+            }
+            s.select_all = false
+            for cp in text_input_this_frame.chars() {
+                if chars.len >= s.max_chars { break }
+                if cp < 0x20 || cp == 0x7f { continue }
+                chars.insert_at(s.cursor, cp)
+                dirty = true
+                s.cursor = s.cursor + 1
+            }
+            s.invalid = false
+        }
+        // Movement-only frames decode for length but keep the stored value.
+        if dirty {
+            s.value = ui_text_input_build(chars)
+        }
+    }
+    return (submit, cancel)
+}
+
+pub fn focus_text_input(r: UiRect, id: int, value: string, skin: Entity<UiSkin>, scope: string,
+    max_chars: int, font_size: float = 18.0, text_color: Color = WHITE,
+    invalid_tint: Color = color(0.85, 0.25, 0.20, 1.0),
+    selection_tint: Color = color(0.22, 0.38, 0.62, 0.72)) -> UiTextInputResult {
+    let resolved = skin.get().unwrap()
+    let st = skin_button_state(id, r, scope, resolved.feel, skin)
+    if !ui_text_input_active(id) && ui_button_edge(id) != UiButtonEdge::None {
+        ui_text_input_start(id, value, max_chars)
+    }
+
+    let submit = false
+    let cancel = false
+    let display = value
+    if ui_text_input_active(id) {
+        let s = UI_TEXT_INPUT
+        s.seen = true
+        let before = s.value
+        let edit = ui_text_input_edit()
+        submit = edit.0
+        cancel = edit.1
+        display = s.value
+        if s.value != before {
+            ui_event(UiEvent::TextEdit, r.center(), r, resolved.feel, skin)
+        }
+        if submit {
+            ui_event(UiEvent::TextSubmit, r.center(), r, resolved.feel, skin)
+        }
+    }
+
+    let selected = ui_text_input_active(id)
+    let tint = if selected && UI_TEXT_INPUT.invalid { invalid_tint } else { WHITE }
+    r.skin(resolved, skin_button_tint_for(st, selected, tint))
+    let content = r.content(resolved)
+    let fitted = ui_fit_font(display, max(content.w - 4.0, 1.0), font_size)
+    if selected && UI_TEXT_INPUT.select_all && display != "" {
+        let selection_w = min(measure_ui(display, fitted).x + 2.0, content.w)
+        UiRect { x: content.x, y: content.y + 1.0, w: selection_w,
+            h: max(content.h - 2.0, 1.0), z: content.z }.fill(selection_tint)
+    }
+    content.text(display, fitted, text_color, TextAlign::Left)
+    if selected && !UI_TEXT_INPUT.select_all {
+        let prefix = ui_text_input_prefix(UI_TEXT_INPUT.value, UI_TEXT_INPUT.cursor)
+        let caret_x = min(content.x + measure_ui(prefix, fitted).x + 1.0, content.x + content.w - 1.0)
+        UiRect { x: caret_x, y: content.y + 2.0, w: 1.0, h: max(content.h - 4.0, 1.0), z: content.z + 1 }
+            .fill(text_color)
+    }
+    if cancel { ui_text_input_cancel(id) }
+    return UiTextInputResult { value: display, submit: submit, cancel: cancel }
+}
+
+// Flat color fill clipped to `ratio` of the skin's content-pad channel
+// WIDTH, drawn under the frame sprite. Order-0 fill / order-1 sprite in
+// the same z bucket layers the frame over the fill for free (rect.rock
+// batch ordering), so a bar skin with a transparent fill channel shows
+// the color through.
+pub fn skin_progress(r: UiRect, ratio: float, skin: UiSkin, fill: Color) -> UiRect {
+    let channel = r.content(skin)
+    let w = channel.w * clamp(ratio, 0.0, 1.0)
+    UiRect { ..channel, w: w, z: r.z }.fill(fill)
+    r.skin(skin)
+    return r
+}

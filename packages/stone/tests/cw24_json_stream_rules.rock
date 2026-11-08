@@ -1,0 +1,17 @@
+@test
+fn incremental_json_encoding_drains_document_values() {
+    let value = json_array([json_str("line\nquote\"slash\\"), json_int(42),
+        json_array([json_bool(true), json_null()])])
+    let job = json_encode_job(value)
+    let output = ""
+    let calls = 0
+    while !json_encode_job_done(job) && calls < 1000 {
+        let _ = json_encode_job_advance(job, 7)
+        output += json_encode_job_take_output(job)
+        calls += 1
+    }
+    assert(json_encode_job_done(job), "incremental encoding finishes")
+    assert_eq(json_encode(json_decode(output).unwrap()), json_encode(value),
+        "drained fragments preserve the JSON values")
+    assert_eq(json_encode_job_take_output(job), "", "drained output is consumed only once")
+}

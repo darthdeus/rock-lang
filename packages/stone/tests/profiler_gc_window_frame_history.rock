@@ -1,0 +1,128 @@
+// `rock perf --gc-window N` can ask for a window longer than any fixed frame
+// history. The window's frame history is sized from N when the window opens,
+// so every requested frame is kept and nothing allocates per frame. A window
+// that cannot keep its frames invalidates the whole section attribution, which
+// is why the frame count is a contract rather than a diagnostic.
+
+fn profiler_gc_window_history_fixture(body: fn()) {
+    let running = lua_gc_is_running()
+    let enabled = ENGINE.profiler_enabled
+    let capture = PERF_FRAME_CAPTURE
+    defer {
+        profiler_allocator_shutdown()
+        GC_WIN_SECTION_REGISTRY_FROZEN = false
+        GC_WIN_N = 0
+        GC_WIN_FRAME = 0
+        PROF_OPEN_TOP = 0
+        PROFILER.current_depth = 0
+        PERF_FRAME_CAPTURE = capture
+        ENGINE.profiler_enabled = enabled
+        if running { __gc_restart() } else { __gc_collect_stop() }
+    }
+    lua_alloc_split_init()
+    init_profiler()
+    ENGINE.profiler_enabled = true
+    PROFILER_SECTIONS_OFF = 0
+    PROFILER.warmup_active = false
+    PROFILER.warmup_seconds = 0.0
+    PERF_FRAME_CAPTURE = true
+    body()
+}
+
+// One real frame: an open section, work that requests Lua allocation, and the
+// frame end that samples the window.
+fn profiler_gc_window_history_frame(frame: int) {
+    profile_frame_begin()
+    profile_begin("history.frame")
+    let payload: [int] = [frame, frame + 1, frame + 2]
+    profile_work("history.work", payload.len())
+    profile_end("history.frame")
+    profile_frame_end()
+}
+
+// A completed window of `frames` needs one frame to open it and one sampled
+// frame per requested frame. Returns the frames actually driven.
+fn profiler_gc_window_history_run(frames: int) -> int {
+    GC_WIN_N = frames
+    GC_WIN_START = 1
+    GC_WIN_FRAME = 0
+    GC_WIN_T0_KB = 0.0
+    GC_WIN_ACCOUNT_CURSOR_KB = 0.0
+    GC_WIN_FRAME_START_KB = 0.0
+    let driven = 0
+    while GC_WIN_FRAME < GC_WIN_START + GC_WIN_N {
+        profiler_gc_window_history_frame(driven)
+        driven += 1
+    }
+    return driven
+}
+
+// Longer than the 4096-frame history the window used to keep.
+const GC_WINDOW_HISTORY_LONG_FRAMES: int = 4200
+
+fn profiler_gc_window_history_long() {
+    profiler_gc_window_history_fixture(() => {
+        let driven = profiler_gc_window_history_run(GC_WINDOW_HISTORY_LONG_FRAMES)
+        assert_eq(driven, GC_WINDOW_HISTORY_LONG_FRAMES + 1,
+            "the long window closed on its own last frame")
+        assert_eq(GC_WIN_FRAME_SAMPLES, GC_WINDOW_HISTORY_LONG_FRAMES,
+            "a {GC_WINDOW_HISTORY_LONG_FRAMES}-frame window keeps every measured frame, kept {GC_WIN_FRAME_SAMPLES}")
+        assert(!GC_WIN_MONOTONIC_FAILURE,
+            "a completed long window has no monotonic failure: negative_delta {GC_WIN_NEGATIVE_DELTA_KB_RESULT}KB at frame {GC_WIN_NEGATIVE_FRAME_INDEX_RESULT}")
+        assert(GC_WIN_ACCOUNTING_VALID,
+            "a long window reconciles every frame: frames {GC_WIN_FRAME_SAMPLES}/{GC_WIN_N} residual {GC_WIN_RESIDUAL_RESULT} cursor_residual {GC_WIN_CURSOR_RESIDUAL_RESULT} dropped {GC_WIN_DROPPED_EVENTS} unknown {GC_WIN_UNKNOWN_SECTIONS}")
+        assert(GC_WIN_FRAME_MAX_RESULT > 0.0,
+            "a long window reports its worst frame, max {GC_WIN_FRAME_MAX_RESULT}KB")
+        assert(GC_WIN_FRAME_MEAN_RESULT > 0.0,
+            "a long window reports a frame mean, mean {GC_WIN_FRAME_MEAN_RESULT}KB")
+        assert(GC_WIN_WORST_FRAME_INDEX_RESULT >= 0
+            && GC_WIN_WORST_FRAME_INDEX_RESULT < GC_WINDOW_HISTORY_LONG_FRAMES,
+            "the worst frame is an index inside the window, got {GC_WIN_WORST_FRAME_INDEX_RESULT}")
+        // Every frame of this fixture allocates inside history.frame, so the
+        // worst frame's row must explain part of its total and never more.
+        assert(GC_WIN_FRAME_SECTION_SLOT_COUNT > 0,
+            "a long window still interns the sections it measured")
+        let worst_row_kb = 0.0
+        for slot in 0..GC_WIN_FRAME_SECTION_SLOT_COUNT {
+            worst_row_kb += gc_window_worst_frame_section_kb(slot)
+        }
+        assert(worst_row_kb > 0.0
+            && worst_row_kb <= GC_WIN_WORST_FRAME_TOTAL_KB_RESULT + 1e-3,
+            "the worst frame's section row stays inside its total {GC_WIN_WORST_FRAME_TOTAL_KB_RESULT}KB, got {worst_row_kb}KB")
+    })
+}
+
+// A second, shorter window in the same process must record only its own
+// frames instead of inheriting the first window's history.
+fn profiler_gc_window_history_shorter() {
+    profiler_gc_window_history_fixture(() => {
+        let long_driven = profiler_gc_window_history_run(GC_WINDOW_HISTORY_LONG_FRAMES)
+        assert_eq(long_driven, GC_WINDOW_HISTORY_LONG_FRAMES + 1,
+            "the long window closed on its own last frame")
+        let short_frames = 64
+        let short_driven = profiler_gc_window_history_run(short_frames)
+        assert_eq(short_driven, short_frames + 1,
+            "the shorter window closed on its own last frame")
+        assert_eq(GC_WIN_FRAME_SAMPLES, short_frames,
+            "a shorter window records only its own frames, kept {GC_WIN_FRAME_SAMPLES}")
+        assert(GC_WIN_ACCOUNTING_VALID,
+            "a shorter window after a long one still reconciles: residual {GC_WIN_RESIDUAL_RESULT} cursor_residual {GC_WIN_CURSOR_RESIDUAL_RESULT}")
+        assert(GC_WIN_WORST_FRAME_INDEX_RESULT >= 0
+            && GC_WIN_WORST_FRAME_INDEX_RESULT < short_frames,
+            "the shorter window's worst frame is one of its own, got {GC_WIN_WORST_FRAME_INDEX_RESULT}")
+    })
+}
+
+@nomangle fn profiler_gc_window_history_case(which: int) {
+    if which == 0 { profiler_gc_window_history_long() }
+    if which == 1 { profiler_gc_window_history_shorter() }
+}
+
+@test
+fn profiler_gc_window_history_keeps_every_frame_past_the_old_cap() {
+    profiler_test_process("profiler_gc_window_history_case", 0)
+}
+@test
+fn profiler_gc_window_history_records_a_shorter_following_window() {
+    profiler_test_process("profiler_gc_window_history_case", 1)
+}

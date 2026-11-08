@@ -1,0 +1,663 @@
+// The backend-neutral submission: a complete statement of one pass and its
+// draws, with nothing in it that only OpenGL could answer.
+//
+// `Pass` (pass.rock) is a description of a post-process step that `run_pass`
+// executes by mutating GL state in a fixed order. That order IS the meaning
+// there. A submission is instead complete BEFORE anything is bound -- target,
+// load, viewport, shader artifact, bindings in order, one canonical uniform
+// packet (or a physical block), blend and write state -- and the executor
+// becomes a consumer of it rather than the place the state is decided.
+//
+// Every draw is a fullscreen rectangle under a fragment-only shader, into one
+// color target with depth off: that is everything the GL executor realizes.
+//
+// The shader is OPAQUE here -- a stable name plus the bytes and ordered
+// bindings submitted against it. The compiler owns shader interface, layout
+// and ABI planning; restating any of it here
+// would be a second authority.
+//
+// The direct production callers are `submit_ui_blit`, `submit_tonemap` and
+// `present_composite`. The conformance fixture has two more direct calls; it
+// is not a production route.
+
+// A destination rectangle in drawable pixels, bottom-left origin (GL's
+// viewport convention). Semantic because it is where the draw LANDS, not how a backend
+// spells it.
+pub value GpuRect { x: int, y: int, w: int, h: int }
+
+// Where a pass writes. A canvas is named by its `Canvas` handle, which the
+// registry resolves; no GL name, texture id or FBO reaches this contract.
+pub enum GpuTarget {
+    Window,
+    Canvas(Canvas),
+}
+
+// What happens to the target's existing contents before the draws. `Load`
+// keeps them.
+pub enum GpuLoad {
+    Load,
+    Clear(Color),
+}
+
+// One sampled texture, on the shader's compiler-assigned slot. Ordered by
+// slot, and the order is part of the submission: a backend that binds a
+// descriptor set in a different order is not doing the same thing.
+pub struct GpuBinding {
+    slot: int,
+    resource: SampledTexture,
+    filter: TextureFilter,
+    wrap_repeat: bool = false,
+}
+
+// Per-channel colour write mask. Ambient in GL, so a draw states it rather
+// than inheriting whatever the previous draw left.
+pub value GpuColorWrite { r: bool, g: bool, b: bool, a: bool }
+
+pub global GPU_WRITE_RGBA: GpuColorWrite = GpuColorWrite { r: true, g: true, b: true, a: true }
+
+// A fullscreen rectangle's texture mapping, resolved at submit: `(u0, v0)` is
+// the UV at NDC (-1,-1) and `(u1, v1)` the UV at NDC (+1,+1).
+//
+// THE semantic content of fullscreen geometry, and all of it. Orientation is in
+// here -- `v0 > v1` is the present's one V flip -- and so is the active-local
+// scale, because both are statements about which texel lands on which corner.
+// What is NOT in here, on purpose: vertex count, vertex order, which diagonal
+// splits the rectangle, and winding: no submission can observe them.
+pub value GpuFullscreenGeometry { u0: float, v0: float, u1: float, v1: float }
+
+// One draw. Everything a backend needs to select a pipeline and issue it.
+pub struct GpuDraw {
+    // Opaque artifact identity: the registered shader name. What its inputs
+    // mean is the compiler's business, not this contract's.
+    shader: string,
+    bindings: [GpuBinding] = [],
+    semantic_block: SemanticUniformBlock? = null,
+    block: OwnedUniformBlock? = null,
+    blend: BlendMode,
+    color_write: GpuColorWrite,
+}
+
+pub struct GpuPass {
+    target: GpuTarget,
+    load: GpuLoad,
+    viewport: GpuRect,
+    draws: [GpuDraw],
+}
+
+// ─────────────── validation ───────────────
+
+// Why this submission cannot be executed, or "" when it can.
+//
+// Runs BEFORE the recording and before any backend-visible effect, for the
+// same reason `pass_input_rejection` does: a refusal that has already bound
+// the output has already moved state a later measurement reads, and a refusal
+// that has already been recorded puts a pass in the trace that never ran.
+fn gpu_pass_rejection(p: GpuPass) -> string {
+    match p.target {
+        GpuTarget::Canvas(c) => {
+            if !canvas_is_live(c) {
+                return "target names canvas {c.handle.0}, which the registry no longer knows"
+            }
+        }
+        GpuTarget::Window => {}
+    }
+    if p.viewport.w <= 0 || p.viewport.h <= 0 {
+        return "viewport {p.viewport.w}x{p.viewport.h} has no pixels"
+    }
+    if p.draws.len() == 0 {
+        return "no draws"
+    }
+
+    for d in p.draws {
+        let interface = selected_shader_interface(d.shader)
+        if interface == null {
+            return "draw names shader `{d.shader}`, whose selected-backend semantic metadata or artifact generation is not live"
+        }
+        let interface = interface.unwrap()
+        if interface.outputs.len() != 1 {
+            return "draw `{d.shader}` declares {interface.outputs.len()} color outputs but a pass has one target"
+        }
+        if !interface.fullscreen {
+            return "draw `{d.shader}` has an explicit vertex stage, which fullscreen geometry cannot realize"
+        }
+        let block_count = interface.blocks.len()
+        if block_count > 1 {
+            return "draw `{d.shader}` declares {block_count} uniform blocks but a draw carries one"
+        }
+        if interface.array_blocks.len() > 0 {
+            return "draw `{d.shader}` declares uniform-array blocks, which a draw cannot carry"
+        }
+        if d.semantic_block != null && d.block != null {
+            return "draw `{d.shader}` carries both canonical and target-physical uniform values"
+        }
+        if d.semantic_block != null {
+            if block_count != 1 {
+                return "draw `{d.shader}` carries a canonical packet for {block_count} logical blocks"
+            }
+            if !semantic_uniform_packet_matches(d.semantic_block.unwrap(), interface.blocks[0]) {
+                return "draw `{d.shader}` carries canonical uniform values that do not match its semantic block"
+            }
+            if semantic_uniform_physical_block(d.shader, interface.blocks[0]) == null {
+                return "draw `{d.shader}` has no live GL physical block for its semantic values"
+            }
+        } else if d.block == null {
+            if block_count > 0 {
+                return "draw `{d.shader}` omits its required uniform block"
+            }
+        } else {
+            let fp = d.block.unwrap().fingerprint
+            if block_count == 0 || shader_block_by_fingerprint(d.shader, fp) == null {
+                return "draw `{d.shader}` carries a uniform block it does not declare"
+            }
+        }
+        for b in d.bindings {
+            if !sampled_texture_is_live(b.resource) {
+                return "draw `{d.shader}` binds dead source {sampled_texture_key(b.resource)} on slot {b.slot}"
+            }
+        }
+        // EXACT and IN ORDER, the same rule the slot lane already carries: a
+        // short list leaves a slot reading whatever the previous draw left
+        // there, and an out-of-order one is a different program's meaning.
+        let declared = interface.texture_slots.len()
+        if d.bindings.len() != declared {
+            return "draw `{d.shader}` binds {d.bindings.len()} slot(s) for {declared} declared"
+        }
+        for (i, b) in enumerate(d.bindings) {
+            if b.slot != i {
+                return "draw `{d.shader}` binding {i} names slot {b.slot} -- bindings are ordered by slot"
+            }
+        }
+    }
+    return ""
+}
+
+// ─────────────── the recorder ───────────────
+
+// A submission as it was accepted, with its geometry resolved. The recording
+// backend has no pixels or device; it captures the exact submitted state.
+pub struct GpuTracedDraw {
+    draw: GpuDraw,
+    // The draw's geometry with everything the submission left implicit filled
+    // in: the target's orientation and binding 0's active-local UV scale, both
+    // derived at this seam rather than stated by the caller, because both are
+    // properties of what the draw is pointed at. A second backend derives them
+    // the same way and then realizes the rectangle however it likes.
+    //
+    // While tracing, the executor consumes this value. Trace-off execution
+    // calls the same resolver directly and retains no traced wrapper.
+    geometry: GpuFullscreenGeometry,
+}
+
+pub struct GpuTracedPass {
+    pass: GpuPass,
+    draws: [GpuTracedDraw],
+}
+
+global GPU_TRACE_ON: bool = false
+global GPU_TRACE: [GpuTracedPass]
+pub global GPU_TRACE_DRAW_RETAINS: int = 0
+
+@init
+fn init_gpu_trace() {
+    GPU_TRACE = vec_new()
+}
+
+pub fn gpu_trace_begin() {
+    GPU_TRACE.clear()
+    GPU_TRACE_ON = true
+}
+
+// Stop recording and hand over what was captured.
+pub fn gpu_trace_take() -> [GpuTracedPass] {
+    GPU_TRACE_ON = false
+    let taken = GPU_TRACE
+    GPU_TRACE = vec_new()
+    return taken
+}
+
+// ─────────────── submission ───────────────
+
+// These observers may retain the command after synchronous execution returns.
+// Callers may reuse unpublished commands only when this is false.
+pub fn gpu_submission_retains_commands() -> bool {
+    return GPU_TRACE_ON || UI_SUBMISSION_PROBE_ON || ENGINE.show_pipeline_inspector
+}
+
+// The one entry point. Validate, optionally resolve and record, then execute,
+// so a refused submission costs nothing and a traced execution is exactly what
+// was recorded.
+pub fn submit_pass(p: GpuPass) -> bool {
+    let rejection = gpu_pass_rejection(p)
+    if rejection != "" {
+        if UI_SUBMISSION_PROBE_ON { UI_SUBMISSION_PROBE_REFUSAL_HOOK.unwrap()("semantic_pass", rejection) }
+        log_once("RENDER", "submission NOT EXECUTED: {rejection}")
+        return false
+    }
+
+    let target = p.target
+    let to_window = match target {
+        GpuTarget::Window => true,
+        GpuTarget::Canvas(_c) => false,
+    }
+
+    let traced: [GpuTracedDraw]? = null
+    if GPU_TRACE_ON {
+        let retained: [GpuTracedDraw] = vec_new()
+        for d in p.draws {
+            GPU_TRACE_DRAW_RETAINS += 1
+            retained.push(GpuTracedDraw {
+                draw: d,
+                geometry: gpu_resolve_geometry(d, to_window),
+            })
+        }
+        traced = retained
+        GPU_TRACE.push(GpuTracedPass { pass: p, draws: retained })
+    }
+
+    if UI_SUBMISSION_PROBE_ON { UI_SUBMISSION_PROBE_PASS_HOOK.unwrap()(p) }
+    if ENGINE.show_pipeline_inspector {
+        pipeline_inspector_record_gpu_pass(p)
+    }
+
+    return gpu_execute_pass(p, traced, to_window)
+}
+
+// Fill in what the submission left implicit. THE oracle: trace-on stores this
+// value for the executor, while trace-off hands it directly to the executor.
+fn gpu_resolve_geometry(d: GpuDraw, to_window: bool) -> GpuFullscreenGeometry {
+    // Input 0's active rectangle as a fraction of its capacity, or the identity
+    // when the draw samples nothing: a fragment body reads TexCoord as "the
+    // live image" whatever its backing texture's capacity is.
+    let uv = if d.bindings.len() == 0 {
+        v(1.0, 1.0)
+    } else {
+        sampled_texture_active_uv(d.bindings[0].resource)
+    }
+
+    // The window is bottom-up, so a present maps V the other way.
+    if to_window {
+        return GpuFullscreenGeometry { u0: 0.0, v0: uv.y, u1: uv.x, v1: 0.0 }
+    }
+    return GpuFullscreenGeometry { u0: 0.0, v0: 0.0, u1: uv.x, v1: uv.y }
+}
+
+// ─────────────── backend executors ───────────────
+
+// Consumes the submission. Every piece of state it sets comes from the
+// description; nothing is inherited from whatever the frame left bound, which
+// is the difference between this and the imperative pass path.
+fn gpu_execute_pass(p: GpuPass, traced: [GpuTracedDraw]?, to_window: bool) -> bool {
+    if UI_SUBMISSION_PROBE_WINDOWLESS {
+        return gpu_execute_gl_pass(p, traced, to_window)
+    }
+    return gpu_execute_gl_scoped(p, traced, to_window, CURRENT_BLEND,
+        CURRENT_CANVAS_HANDLE, gpu_execute_gl_pass, gpu_cleanup_gl_pass)
+}
+
+// One transaction owner, with static function arguments rather than a fresh
+// closure per pass. Preserve the original raised value after cleanup; pcall
+// does not stringify it or turn a failed execution into a successful submit.
+inline(lua) fn gpu_execute_gl_scoped(
+    p: GpuPass, traced: [GpuTracedDraw]?, to_window: bool, blend: BlendMode, canvas: int,
+    execute: fn(GpuPass, [GpuTracedDraw]?, bool) -> bool,
+    cleanup: fn(GpuPass, BlendMode, int, bool),
+) -> bool = """
+    local scope = stone.stone_gl_pass_state_begin()
+    if scope == 0 then error("GL semantic pass state capture failed", 0) end
+    local ok, result = pcall(execute, p, traced, to_window)
+    local clean_ok, clean_err = pcall(cleanup, p, blend, canvas, not ok)
+    local restored = stone.stone_gl_pass_state_end(scope)
+    if not ok then
+        if not clean_ok or not restored then
+            error(tostring(result) .. "; GL semantic pass cleanup failed: " .. tostring(clean_err), 0)
+        end
+        error(result, 0)
+    end
+    if not clean_ok then error(clean_err, 0) end
+    if not restored then error("GL semantic pass state restore failed", 0) end
+    return result
+"""
+
+fn gpu_cleanup_gl_pass(p: GpuPass, blend: BlendMode, canvas: int, failed: bool) {
+    if failed {
+        // A throw can bypass the draw's normal shader/sampler teardown.
+        for d in p.draws {
+            for b in d.bindings { sampler_release_unit(b.slot) }
+        }
+        end_shader()
+    }
+    // Native restoration owns the exact GL state, including separate alpha
+    // factors. Setting a mode here would overwrite that snapshot's raw state.
+    CURRENT_BLEND = blend
+    set_canvas_handle(canvas)
+}
+
+fn gpu_execute_gl_pass(p: GpuPass, traced: [GpuTracedDraw]?, to_window: bool) -> bool {
+    // Bind the stated target, including the window. Leaving the window case to
+    // "whatever was bound" is how the submitted target became a field nothing
+    // read: it happened to be right for the one migrated consumer.
+    if !UI_SUBMISSION_PROBE_WINDOWLESS {
+    match p.target {
+        GpuTarget::Canvas(c) => set_canvas(c),
+        GpuTarget::Window => unset_canvas(),
+    }
+
+    // The SUBMITTED viewport wins over the ambient one. Binding a target
+    // installs that target's own rect (and, for the window, the letterbox
+    // present rect), so a pass that did not re-state its viewport was landing
+    // wherever the frame had last left it.
+    stone_set_gl_viewport(p.viewport.x, p.viewport.y, p.viewport.w, p.viewport.h)
+
+    match p.load {
+        GpuLoad::Clear(c) => clear_screen(c.r, c.g, c.b, c.a),
+        GpuLoad::Load => {}
+    }
+
+    }
+
+    if traced != null {
+        for t in traced.unwrap() { gpu_execute_draw_resolved(t.draw, t.geometry) }
+    } else if p.draws.len() == 1 {
+        // Not a length guard: both arms execute every draw, and the loop below
+        // is unchanged for every longer pass. Measured on mag's combat bench,
+        // all 3,996 passes reaching this branch carried exactly one draw, so
+        // the loop always tripped once -- and a loop that always trips once is
+        // one LuaJIT starts a root trace at and then aborts, because the loop
+        // leaves on the iteration being recorded.
+        let only = p.draws[0]
+        gpu_execute_draw_resolved(only, gpu_resolve_geometry(only, to_window))
+    } else {
+        for d in p.draws { gpu_execute_draw_resolved(d, gpu_resolve_geometry(d, to_window)) }
+    }
+
+    return true
+}
+
+// The UI probe's statement of the pass target and load, one line.
+pub fn semantic_attachment_wire(p: GpuPass) -> string {
+    let handle = match p.target {
+        GpuTarget::Window => "0",
+        GpuTarget::Canvas(c) => "{c.handle.0:.0}",
+    }
+    let (load, clear) = match p.load {
+        GpuLoad::Load => (0, BLACK),
+        GpuLoad::Clear(c) => (1, c),
+    }
+    return "color {handle} {load} {clear.r} {clear.g} {clear.b} {clear.a}"
+}
+
+fn gpu_execute_draw_resolved(d: GpuDraw, g: GpuFullscreenGeometry) {
+    if UI_SUBMISSION_PROBE_ON { UI_SUBMISSION_PROBE_DRAW_HOOK.unwrap()(d, g) }
+    if UI_SUBMISSION_PROBE_WINDOWLESS {
+        stone_draw_fullscreen_rect(g.u0, g.v0, g.u1, g.v1)
+        stone_ui_probe_end_operation()
+        return
+    }
+    set_blend_mode(d.blend)
+    apply_depth_mode(DepthMode::Off)
+    stone_set_color_mask(d.color_write.r, d.color_write.g, d.color_write.b, d.color_write.a)
+
+    set_shader(d.shader)
+    if d.semantic_block != null {
+        let projected = new_owned_semantic_block(d.shader, d.semantic_block.unwrap(), __SITE__)
+        if projected != null { upload_owned_block(d.shader, projected.unwrap()) }
+    } else if d.block != null {
+        upload_owned_block(d.shader, d.block.unwrap())
+    }
+    for b in d.bindings {
+        if bind_sampled_to_slot(b.resource, b.slot, b.filter) {
+            mark_texture_slot_filled(d.shader, b.slot)
+        }
+    }
+
+    // The SAME value that was recorded, handed to the backend to realize
+    // however it likes. Culling is off by this verb's contract, which is what
+    // makes the two tiers' opposite winding harmless by agreement rather than
+    // by GL's default happening to survive the frame.
+    stone_draw_fullscreen_rect(g.u0, g.v0, g.u1, g.v1)
+    if UI_SUBMISSION_PROBE_ON { stone_ui_probe_end_operation() }
+
+    // AFTER the draw and before anything else can bind: the marks describe
+    // this draw only.
+    audit_texture_slots_for_draw(d.shader)
+    // A one-binding fast path here was tried and MEASURED WORSE, so this stays
+    // a plain loop. Two thirds of draws bind one sampler, and taking those out
+    // of the loop left it seeing only the two-binding case -- which still
+    // leaves on its recorded iteration, and aborted more often than the mixed
+    // population did: 21 aborts over three census runs became 52. The win at
+    // `gpu_execute_pass` above is real and this is not.
+    for b in d.bindings { sampler_release_unit(b.slot) }
+    end_shader()
+}
+
+// ─────────────── serialization ───────────────
+//
+// One line per fact, in submission order. Deterministic by construction: no
+// map traversal, no address, no backend-assigned id. A canvas appears as its
+// engine registry handle, which is assigned in creation order by the same
+// Rock code on every tier -- unlike a GL texture name, which the driver picks.
+//
+// TWO renderings, because the trace holds two kinds of fact and only one of
+// them is a cross-backend claim:
+//
+//   `gpu_trace_text`          -- SEMANTIC. Everything here is target-neutral,
+//                                so two backends producing different text are
+//                                submitting different draws. This is the
+//                                conformance oracle.
+//   `gpu_trace_text_physical` -- the semantic text plus each block's std140
+//                                bytes and its layout fingerprint. Both are
+//                                target-ABI decisions (the fingerprint hashes
+//                                the std140 OFFSETS), so this is a GL
+//                                REGRESSION trace and never a portability one.
+//
+// Canonical uniform packets are part of the semantic trace. `OwnedUniformBlock`
+// remains the physical GL projection for unmigrated callers and is only shown
+// in the physical trace.
+
+pub fn gpu_trace_text(passes: [GpuTracedPass]) -> string {
+    return gpu_trace_render(passes, false)
+}
+
+pub fn gpu_trace_text_physical(passes: [GpuTracedPass]) -> string {
+    return gpu_trace_render(passes, true)
+}
+
+fn gpu_trace_render(passes: [GpuTracedPass], physical: bool) -> string {
+    let out = ""
+    for p in passes { out = out + gpu_pass_text(p, physical) }
+    return out
+}
+
+fn gpu_pass_text(t: GpuTracedPass, physical: bool) -> string {
+    let p = t.pass
+    let target = match p.target {
+        GpuTarget::Window => "window",
+        GpuTarget::Canvas(c) => "canvas:{gpu_handle_text(c.handle)}",
+    }
+    let load = match p.load {
+        GpuLoad::Load => "load",
+        GpuLoad::Clear(c) => "clear:{c.r},{c.g},{c.b},{c.a}",
+    }
+    let out = "pass target={target} load={load} viewport={p.viewport.x},{p.viewport.y},{p.viewport.w},{p.viewport.h} draws={t.draws.len()}\n"
+    for d in t.draws { out = out + gpu_draw_text(d, physical) }
+    return out
+}
+
+fn gpu_draw_text(t: GpuTracedDraw, physical: bool) -> string {
+    let d = t.draw
+    let w = d.color_write
+    let out = "  draw shader={d.shader} blend={blend_mode_name(d.blend)} write={gpu_write_text(w)}\n"
+    for b in d.bindings {
+        match b.resource {
+            SampledTexture::Canvas(canvas) => {
+                out = out + "    bind slot={b.slot} canvas={canvas.handle.0:.0} filter={texture_filter_name(b.filter)}\n"
+            }
+            SampledTexture::Image(image) => {
+                let wrap = if b.wrap_repeat { "repeat" } else { "clamp" }
+                out = out + "    bind slot={b.slot} image={image.0:.0} filter={texture_filter_name(b.filter)} wrap={wrap}\n"
+            }
+        }
+    }
+    let g = t.geometry
+    out = out + "    geometry fullscreen cull=none uv=({g.u0},{g.v0})-({g.u1},{g.v1})\n"
+    if d.semantic_block != null {
+        let b = d.semantic_block.unwrap()
+        if physical {
+            let projected = new_owned_semantic_block(d.shader, b, "gpu_trace_text_physical")
+            if projected != null {
+                let p = projected.unwrap()
+                out = out + "    block fingerprint={p.fingerprint:.0} size={p.size} bytes={gpu_hex(p.bytes, p.size)}\n"
+            }
+        } else {
+            out = out + "    semantic block fingerprint={b.fingerprint} leaves={b.leaves.len()} values="
+            for leaf in b.leaves {
+                match leaf {
+                    CanonicalUniformLeaf::Float(value) => out = out + "f:{value},",
+                    CanonicalUniformLeaf::Int(value) => out = out + "i:{value},",
+                    CanonicalUniformLeaf::Uint(value) => out = out + "u:{value},",
+                    CanonicalUniformLeaf::Bool(value) => {
+                        let bit = if value { "1" } else { "0" }
+                        out = out + "b:{bit},"
+                    }
+                }
+            }
+            out = out + "\n"
+        }
+    } else if d.block != null {
+        let b = d.block.unwrap()
+        if physical {
+            out = out + "    block fingerprint={b.fingerprint:.0} size={b.size} bytes={gpu_hex(b.bytes, b.size)}\n"
+        } else {
+            out = out + "    block target-physical\n"
+        }
+    }
+    return out
+}
+
+fn gpu_write_text(w: GpuColorWrite) -> string {
+    let s = ""
+    s = s + (if w.r { "r" } else { "-" })
+    s = s + (if w.g { "g" } else { "-" })
+    s = s + (if w.b { "b" } else { "-" })
+    s = s + (if w.a { "a" } else { "-" })
+    return s
+}
+
+// Bytes, not floats: a float's decimal spelling is a formatting decision and
+// this is meant to be compared exactly across tiers.
+fn gpu_hex(b: NativeBufferU8, n: int) -> string {
+    let s = ""
+    let i = 0
+    while i < n {
+        let v = nb_get(b, i)
+        s = s + GPU_HEX_DIGITS[(v / 16) as int] + GPU_HEX_DIGITS[v % 16]
+        i += 1
+    }
+    return s
+}
+
+global GPU_HEX_DIGITS: [string] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "a", "b", "c", "d", "e", "f"]
+
+// ─────────────── the conformance fixture ───────────────
+//
+// ONE fixed submission, built from literals. Its trace text must be
+// `GPU_CONFORMANCE_GOLDEN` byte for byte.
+//
+// FIXED rather than the frame's own present, because a present carries the
+// host window's geometry. Everything here is a literal or derived from one.
+//
+// It carries no uniform block on purpose. A block's bytes and fingerprint are
+// std140/GL PHYSICAL (`gpu_trace_text_physical`), so including one would put a
+// target-ABI decision inside a target-neutral comparison.
+//
+// Two passes, because the fullscreen rectangle's UV mapping differs by target
+// and that difference is exactly what the semantic geometry has to state: a
+// canvas target maps 1:1, the window target flips V.
+pub fn gpu_conformance_trace() -> string {
+    let out = new_canvas(16.0, 16.0, "rgba8")
+    let src = new_canvas(16.0, 16.0, "rgba8")
+    // Exact binary fractions, so float formatting cannot vary:
+    // 12/16 = 0.75, 10/16 = 0.625.
+    set_canvas_active(src, 12, 10)
+
+    gpu_trace_begin()
+    submit_pass(GpuPass {
+        target: GpuTarget::Canvas(out),
+        load: GpuLoad::Clear(color(0.25, 0.5, 0.75, 1.0)),
+        viewport: GpuRect { x: 0, y: 0, w: 16, h: 16 },
+        draws: [GpuDraw {
+            shader: BLIT_PIPELINE.shader_name,
+            bindings: [GpuBinding { slot: 0, resource: SampledTexture::Canvas(src), filter: TextureFilter::Nearest }],
+            blend: BlendMode::Replace,
+            color_write: GPU_WRITE_RGBA,
+        }],
+    })
+    submit_pass(GpuPass {
+        target: GpuTarget::Window,
+        load: GpuLoad::Load,
+        viewport: GpuRect { x: 4, y: 2, w: 8, h: 6 },
+        draws: [GpuDraw {
+            shader: BLIT_PIPELINE.shader_name,
+            bindings: [GpuBinding { slot: 0, resource: SampledTexture::Canvas(out), filter: TextureFilter::Linear }],
+            blend: BlendMode::Alpha,
+            color_write: GpuColorWrite { r: true, g: true, b: true, a: false },
+        }],
+    })
+    let text = gpu_trace_text(gpu_trace_take())
+
+    destroy_canvas(out)
+    destroy_canvas(src)
+
+    // A registry handle is assigned in creation order, so it depends on how
+    // many canvases the game created first. The trace keeps handles (they are
+    // the semantic identity of a canvas); the FIXTURE, and only the fixture,
+    // renames its own two to fixed aliases so the golden is independent of boot.
+    return gpu_alias_canvas(gpu_alias_canvas(text, out, "OUT"), src, "SRC")
+}
+
+// What `gpu_conformance_trace()` must produce.
+pub const GPU_CONFORMANCE_GOLDEN: string = "pass target=canvas:OUT load=clear:0.25,0.5,0.75,1 viewport=0,0,16,16 draws=1
+  draw shader=stone::blit_frag blend=replace write=rgba
+    bind slot=0 canvas=SRC filter=nearest
+    geometry fullscreen cull=none uv=(0,0)-(0.75,0.625)
+pass target=window load=load viewport=4,2,8,6 draws=1
+  draw shader=stone::blit_frag blend=alpha write=rgb-
+    bind slot=0 canvas=OUT filter=linear
+    geometry fullscreen cull=none uv=(0,1)-(1,0)
+"
+
+
+fn gpu_alias_canvas(text: string, c: Canvas, alias: string) -> string {
+    let h = gpu_handle_text(c.handle)
+    return text.replace("target=canvas:{h} ", "target=canvas:{alias} ")
+               .replace("canvas={h} ", "canvas={alias} ")
+}
+
+pub fn blend_mode_name(b: BlendMode) -> string {
+    match b {
+        BlendMode::Alpha => return "alpha",
+        BlendMode::Additive => return "additive",
+        BlendMode::Accumulate => return "accumulate",
+        BlendMode::Multiply => return "multiply",
+        BlendMode::Lighten => return "lighten",
+        BlendMode::Replace => return "replace",
+        BlendMode::Premultiplied => return "premultiplied",
+    }
+}
+
+pub fn depth_mode_name(d: DepthMode) -> string {
+    match d {
+        DepthMode::Off => return "off",
+        DepthMode::AlwaysWrite => return "always_write",
+        DepthMode::TestWrite => return "test_write",
+        DepthMode::TestNoWrite => return "test_no_write",
+    }
+}
+
+fn texture_filter_name(f: TextureFilter) -> string {
+    match f {
+        TextureFilter::Nearest => return "nearest",
+        TextureFilter::Linear => return "linear",
+        TextureFilter::MipStable => return "mip_stable",
+    }
+}

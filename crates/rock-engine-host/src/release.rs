@@ -205,6 +205,10 @@ pub fn select_assets_with_overlays(
         } else {
             missing.push(source);
         }
+        let assets = stone_dir.join("engine/assets");
+        if assets.exists() {
+            add_path(&mut by_key, "stone", &assets, stone_dir, &assets, false)?;
+        }
     }
 
     Ok(AssetSelection {
@@ -662,6 +666,12 @@ mod tests {
         std::fs::write(project.join("assets/nested/a.txt"), "a").unwrap();
         std::fs::write(project.join("saves/level.json"), "level").unwrap();
         std::fs::write(engine.path().join("engine/shaders/common/a.glsl"), "shader").unwrap();
+        std::fs::create_dir_all(engine.path().join("engine/assets/fonts")).unwrap();
+        std::fs::write(
+            engine.path().join("engine/assets/fonts/default.ttf"),
+            "font",
+        )
+        .unwrap();
         let cfg = StickConfig::new_from_str(
             "[package]\nname = \"demo\"\n[release]\nassets = [\"assets\", \"saves/level.json\"]\n",
         )
@@ -677,9 +687,14 @@ mod tests {
         assert!(keys.contains(&"games/demo/assets/nested/a.txt"));
         assert!(keys.contains(&"games/demo/saves/level.json"));
         assert!(keys.contains(&"stone/engine/shaders/common/a.glsl"));
+        assert!(keys.contains(&"stone/engine/assets/fonts/default.ttf"));
 
         let out = root.path().join("staged");
         let staged = stage_assets(&selected, &out).unwrap();
+        assert_eq!(
+            std::fs::read(out.join("stone/engine/assets/fonts/default.ttf")).unwrap(),
+            b"font"
+        );
         assert_eq!(staged.file_count, keys.len());
         assert_eq!(
             std::fs::read(out.join("games/demo/assets/nested/a.txt")).unwrap(),

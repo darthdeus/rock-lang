@@ -1,0 +1,78 @@
+@test
+fn ui_presence_tracks_open_close_and_hidden_edges() {
+    let saved_feel = UI_FEEL
+    defer { UI_FEEL = saved_feel }
+    UI_FEEL = UiFeelState { base: UiFeel {}, named: map_new() }
+    let p = UiPresence {}
+    let r = ui_rect(210, 180, 160, 52)
+    assert(ui_presence_step(p, false) == UiPresenceEdge::Initial, "first observation arms the subject")
+    assert(ui_presence_step(p, true, rect: r) == UiPresenceEdge::Open, "visibility emits one open edge")
+    assert(ui_presence_is_visible(p), "an opened subject stays visible")
+    assert(ui_presence_step(p, true, rect: r) == UiPresenceEdge::None, "steady visibility has no edge")
+    assert(ui_presence_step(p, false) == UiPresenceEdge::Close, "closure emits one close edge")
+    assert(!ui_presence_is_visible(p), "a closed subject is hidden")
+    assert(ui_presence_step(p, false) == UiPresenceEdge::None, "hidden subjects stay closed")
+}
+
+@test
+fn ui_ghost_update_retains_reprojects_and_expires_afterimages() {
+    let saved_ghosts = UI_GHOSTS
+    let saved_batches = UI_RENDER_BATCHES
+    let saved_view = RENDER_VIEW
+    assert(stone_gpu_host_ensure(), "the ghost fixture has a native view surface")
+    let saved_window_size = WINDOW_SIZE
+    let saved_drawable_size = DRAWABLE_SIZE
+    let saved_camera = camera
+    let saved_editor = WORLD_MODE.editor_mode_enabled
+    let saved_shake = CAMERA_SHAKE_OFFSET
+    let saved_dt = dt
+    let saved_sampling = IMAGE_SAMPLING.get(0)
+    let owned_skin: Entity<UiSkin>? = null
+    world_fixture_with_cleanup(() => {
+    WINDOW_SIZE = v(960, 540)
+    DRAWABLE_SIZE = iv(960, 540)
+
+    IMAGE_SAMPLING[0] = TextureFilter::Nearest
+    UI_GHOSTS = arena_new()
+    UI_RENDER_BATCHES = render_batch_pool_new()
+    let skin = ui_skin_create(UiSkin { image: SampledTexture::Image(Image(0)), source: irect(0, 0, 8, 8) })
+    owned_skin = skin
+    let duration = 0.5
+    let r = ui_rect(100, 100, 160, 52)
+    ui_ghost_push(skin, r, duration: duration)
+    assert_eq(UI_GHOSTS.len(), 1, "push retains one afterimage")
+    dt = duration / 4.0
+    update_ui_ghosts()
+    assert_eq(UI_GHOSTS.len(), 1, "a partial lifetime keeps the afterimage")
+    dt = duration
+    update_ui_ghosts()
+    assert_eq(UI_GHOSTS.len(), 0, "expiry removes the afterimage without a world-pause gate")
+    WORLD_MODE.editor_mode_enabled = false
+    CAMERA_SHAKE_OFFSET = v()
+    camera = Camera2D { ..camera, center: v(12, 9) }
+    RENDER_VIEW = resolve_frame_view(v(960, 540), iv(960, 540), camera, RENDER_CONFIG).unwrap()
+    ui_ghost_push_at_world(skin, v(12, 9), r, duration: duration)
+    dt = 0.0
+    update_ui_ghosts()
+    let before = 0.0
+    for (_e, g) in UI_GHOSTS { before = g.rect.x }
+    camera.center = camera.center + v(4, 0)
+    RENDER_VIEW = resolve_frame_view(v(960, 540), iv(960, 540), camera, RENDER_CONFIG).unwrap()
+    dt = duration / 4.0
+    update_ui_ghosts()
+    for (_e, g) in UI_GHOSTS { assert(g.rect.x < before, "world afterimages follow the moved render view") }
+    assert_eq(UI_GHOSTS.len(), 1, "the reprojected afterimage remains alive")
+    }, () => {
+        if let skin = owned_skin { skin.remove() }
+        UI_GHOSTS = saved_ghosts
+        UI_RENDER_BATCHES = saved_batches
+        RENDER_VIEW = saved_view
+        WINDOW_SIZE = saved_window_size
+        DRAWABLE_SIZE = saved_drawable_size
+        camera = saved_camera
+        WORLD_MODE.editor_mode_enabled = saved_editor
+        CAMERA_SHAKE_OFFSET = saved_shake
+        dt = saved_dt
+        if let sampling = saved_sampling { IMAGE_SAMPLING[0] = sampling } else { IMAGE_SAMPLING.remove(0) }
+    })
+}

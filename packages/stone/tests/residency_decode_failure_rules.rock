@@ -1,0 +1,218 @@
+// IMAGE_DECODE_FAILURE_PRESENTATION: an image
+// whose deferred decode fails draws the placeholder texture, is counted and
+// logged through the shared logger, and never reads Resident.
+
+// The placeholder texel contract, shared with the development missing-image
+// checker (assets.rock): bright magenta cells on near-black, 2x2 cells.
+const RESIDENCY_DECODE_PLACEHOLDER_BRIGHT: int = 0xFF00CCFF
+const RESIDENCY_DECODE_PLACEHOLDER_DARK: int = 0x190019FF
+
+fn residency_decode_failure_png(path: string, w: int, h: int) {
+    let data = new_image_data(w, h)
+    for y in 0..h {
+        for x in 0..w {
+            image_data_set_pixel(data, x, y, 0.0, 1.0, 0.0, 1.0)
+        }
+    }
+    assert(image_data_encode(data, "png", path), "fixture {path} written")
+    stone_destroy_image_data(data.0)
+}
+
+// Flip one IDAT payload byte of a PNG: headers byte-identical (so the probe
+// reads the dimensions and the load mints a handle for a deferred decode),
+// the payload broken (so the pool decode fails). Deterministic under any
+// encoder chunk layout, unlike a blind truncation.
+@nomangle inline(lua) fn residency_decode_failure_corrupt_idat(png: string) -> string = """
+    assert(#png > 64, "fixture png too small to corrupt")
+    assert(png:sub(1, 8) == "\137PNG\r\n\26\n", "fixture is not a png")
+    local off = 9
+    while true do
+        local len = png:byte(off) * 16777216 + png:byte(off + 1) * 65536
+            + png:byte(off + 2) * 256 + png:byte(off + 3)
+        local typ = png:sub(off + 4, off + 7)
+        if typ == "IDAT" then
+            assert(len > 0, "empty IDAT")
+            local at = off + 8 + math.floor(len / 2)
+            local byte = png:byte(at)
+            return png:sub(1, at - 1) .. string.char((byte + 1) % 256) .. png:sub(at + 1)
+        end
+        off = off + 12 + len
+        assert(off + 8 <= #png, "no IDAT in fixture png")
+    end
+"""
+
+// A valid all-green PNG plus its header-valid body-corrupt twin: the probe
+// reads the twin's dimensions (so the load mints a handle and decodes on the
+// pool) while the pool decode fails.
+fn residency_decode_failure_object(digest_char: string) -> [string] {
+    let root = (env_var("ROCK_TEST_TMP") ?? env_var("TMPDIR") ?? "/tmp") + "/rock-residency-decode"
+    let dir = root + "/.eat/" + digest_char.repeat(64)
+    let _ = create_directory(root)
+    let _ = create_directory(root + "/.eat")
+    let _ = create_directory(dir)
+    // The twin stays loose: one digest dir names one image, so a second file
+    // under it would alias the corrupt identity instead of controlling it.
+    let good = root + "/good-" + digest_char + ".png"
+    let bad = dir + "/bad.png"
+    residency_decode_failure_png(good, 4, 2)
+    let bytes = file_read(good).unwrap()
+    assert(file_write(bad, residency_decode_failure_corrupt_idat(bytes)),
+        "fixture {bad} written")
+    return [good, bad]
+}
+
+@nomangle fn residency_decode_failure_fixture(digest_char: string, fail: bool,
+                                             body: fn([string])) {
+    residency_test_host()
+    let paths = residency_decode_failure_object(digest_char)
+    residency_owner_test_isolated(() => {
+        body(paths)
+        if fail { error("intentional residency decode failure") }
+    }, () => {
+        residency_owner_test_cleanup(paths)
+    })
+}
+
+@test
+fn residency_decode_failure_draws_placeholder_counts_and_logs() {
+    residency_decode_failure_fixture("e", false, paths => {
+        let good = paths[0]
+        let bad = paths[1]
+        assert_eq(stone_probe_image_size(bad), iv(4, 2),
+            "the truncated twin keeps a readable header, so the load defers its decode")
+        let fails_before = stone_image_decode_failed_count()
+        let image = acquire_image_asset(bad, watch: false)
+        assert(image.0 != 0, "a header-valid corrupt file mints a handle")
+        residency_flush_required()
+        assert(image_load_decode_failed(image), "the failed decode marks its handle")
+        assert_eq(residency_state(bad), ResidencyState::Loading,
+            "a failed decode never reads Resident")
+        assert_eq(stone_image_decode_failed_count() - fails_before, 1,
+            "the failure counts once")
+        assert_eq(residency_frame_stats().decode_failures, 1,
+            "the frame stats count the failure")
+        assert_eq(residency_profile_stats().decode_failures, 1,
+            "the profile stats count the failure")
+        assert_eq(stone_image_read_texel(image.0, 0, 0),
+            RESIDENCY_DECODE_PLACEHOLDER_BRIGHT,
+            "the failed texture draws the placeholder's bright cell")
+        assert_eq(stone_image_read_texel(image.0, 2, 0),
+            RESIDENCY_DECODE_PLACEHOLDER_DARK,
+            "the failed texture draws the placeholder's dark cell")
+        assert_eq(stone_image_read_texel(image.0, 1, 1),
+            RESIDENCY_DECODE_PLACEHOLDER_BRIGHT,
+            "the placeholder repeats in 2x2 cells")
+        let errors = stone_log_records_text(0, stone_log_record_total(0))
+        assert(errors.contains("RESIDENCY") && errors.contains(bad),
+            "the shared logger names the failed path under RESIDENCY")
+        let control = acquire_image_asset(good, watch: false)
+        residency_flush_required()
+        assert(!image_load_decode_failed(control), "the intact twin is not marked")
+        assert_eq(residency_state(good), ResidencyState::Resident,
+            "the intact twin reads Resident")
+        assert_eq(stone_image_read_texel(control.0, 0, 0), 0x00FF00FF,
+            "the probe reads real uploaded pixels on the intact twin")
+        let loads = stone_get_image_profile_stats().load_calls
+        let again = acquire_image_asset(bad, watch: false)
+        assert_eq(again, image, "reacquiring the failed identity hits the cache")
+        assert_eq(stone_get_image_profile_stats().load_calls, loads,
+            "reacquiring submits no decode")
+        assert_eq(residency_frame_stats().decode_failures, 1,
+            "reacquiring counts no second failure")
+        assert(release_image_asset(good))
+        assert(release_image_asset(bad))
+        assert(release_image_asset(bad))
+    })
+}
+
+@test
+fn residency_decode_failure_prefetch_counts_without_require() {
+    residency_decode_failure_fixture("d", false, paths => {
+        let bad = paths[1]
+        let fails_before = stone_image_decode_failed_count()
+        let prefetched = residency_prefetch(ResidencyRequest { path: bad, logical_size: iv(4, 2) })
+        assert(prefetched.0 != 0, "the corrupt prefetch submits")
+        let drain = 0
+        while stone_image_uploads_pending() > 0 && drain < 1000 {
+            let _ = stone_service_image_uploads()
+            drain += 1
+        }
+        assert_eq(stone_image_uploads_pending(), 0, "the corrupt prefetch publishes")
+        assert_eq(stone_image_decode_failed_count() - fails_before, 1,
+            "a never-required prefetch failure still counts")
+        assert_eq(residency_frame_stats().decode_failures, 1,
+            "the frame stats count the prefetch failure")
+        assert_eq(residency_state(bad), ResidencyState::Loading,
+            "the failed prefetch never reads Resident")
+    })
+}
+
+@test
+fn residency_decode_failure_fixture_restores_after_failure() {
+    let origin = "decode_failure_fixture"
+    let paths = residency_decode_failure_object("f")
+    residency_test_host()
+    let images_before = stone_native_live_handles("image")
+    let data_before = stone_native_live_handles("image_data")
+    let failure = (world_fixture_raised(() => {
+        residency_owner_test_isolated(() => {
+            let image = acquire_image_asset(paths[1], watch: false)
+            assert(image.0 != 0)
+            residency_flush_required()
+            assert(image_load_decode_failed(image))
+            error("intentional {origin} failure")
+        }, () => {
+            residency_owner_test_cleanup(paths)
+        })
+    }) ?? "")
+    assert(failure.contains("intentional {origin} failure"),
+        "{origin}: preserves the body diagnostic: {failure}")
+    assert(!file_exists(paths[0]) && !file_exists(paths[1]),
+        "{origin}: the fixture files retire")
+    assert_eq(stone_native_live_handles("image"), images_before,
+        "{origin}: no native image escapes")
+    assert_eq(stone_native_live_handles("image_data"), data_before,
+        "{origin}: no native image data escapes")
+    assert_eq(RESIDENCY_DECODE_FAILED_LOGGED.len(), 0,
+        "{origin}: the failure log set restores")
+    assert_eq(residency_state(paths[1]), ResidencyState::Absent,
+        "{origin}: the failed identity leaves the cache")
+}
+
+// Cold loads are the cache working: every boot misses on hundreds of paths.
+// The stats count each miss; the shared logger keeps per-path names below
+// info so a normal start does not print one line per image.
+@nomangle inline(lua) fn residency_miss_log_probe_begin() = """
+    local previous = _G.__rock_log_sink
+    _G.__residency_miss_log_probe = { previous = previous, messages = {} }
+    _G.__rock_log_sink = function(level, category, message, wall_clock)
+        if level <= 2 and category == "RESIDENCY" then
+            table.insert(_G.__residency_miss_log_probe.messages, message)
+        end
+        previous(level, category, message, wall_clock)
+    end
+"""
+
+// Restores the sink and returns the captured records, joined.
+@nomangle inline(lua) fn residency_miss_log_probe_end() -> string = """
+    local probe = _G.__residency_miss_log_probe
+    _G.__rock_log_sink = probe.previous
+    _G.__residency_miss_log_probe = nil
+    return table.concat(probe.messages, "; ")
+"""
+
+@test
+fn residency_miss_counts_without_info_log() {
+    residency_decode_failure_fixture("c", false, paths => {
+        let good = paths[0]
+        let misses_before = residency_frame_stats().misses
+        residency_miss_log_probe_begin()
+        let image = acquire_image_asset(good, watch: false)
+        residency_flush_required()
+        let messages = residency_miss_log_probe_end()
+        assert(image.0 != 0, "the cold load mints a handle")
+        assert_eq(residency_frame_stats().misses - misses_before, 1, "the stats count the miss")
+        assert_eq(messages, "", "a miss writes no info-level RESIDENCY record")
+        assert(release_image_asset(good))
+    })
+}

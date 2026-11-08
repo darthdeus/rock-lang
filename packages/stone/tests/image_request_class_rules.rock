@@ -1,0 +1,161 @@
+// Native request classes (asset residency plan 2.4): a Required load is
+// published by the next flush; a Deferred one only by a pump, or by a flush
+// once it is required.
+
+fn image_class_test_host() {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+}
+
+fn image_class_test_fixture(large: bool = false) -> string {
+    let path = env_var("ROCK_TEST_TMP").unwrap() + "/rock-image-class-fixture.png"
+    let data = new_image_data(if large { 192 } else { 4 }, if large { 192 } else { 2 })
+    if large {
+        // Varied pixels keep the encoded payload larger than a header prefix.
+        let state = 1
+        for y in 0..192 {
+            for x in 0..192 {
+                state = (state * 48271) % 2147483647
+                let r = (state % 256) as float / 255.0
+                state = (state * 48271) % 2147483647
+                let g = (state % 256) as float / 255.0
+                state = (state * 48271) % 2147483647
+                let b = (state % 256) as float / 255.0
+                image_data_set_pixel(data, x, y, r, g, b, 1.0)
+            }
+        }
+    }
+    image_data_set_pixel(data, 1, 1, 1.0, 0.5, 0.0, 1.0)
+    assert(image_data_encode(data, "png", path), "fixture {path} written")
+    stone_destroy_image_data(data.0)
+    if large { assert(stone_file_size(path) > 64 * 1024) }
+    return path
+}
+
+fn image_class_test_load(path: string, deferred: bool) -> Image {
+    return register_image(load_image_handle(path, TextureFilter::Nearest, deferred: deferred),
+        TextureFilter::Nearest)
+}
+
+struct ImageClassBindTex {
+    uTexture: Sampler2D,
+    uNormalTex: Sampler2D,
+    uSurfaceTex: Sampler2D,
+    uMaterialTex: Sampler2D,
+}
+
+@shader(fragment)
+fn image_class_bind_frag(vary: SpriteVary, @textures t: ImageClassBindTex) -> Vec4 {
+    return texture(t.uTexture, vary.TexCoord) * texture(t.uNormalTex, vary.TexCoord)
+        * texture(t.uSurfaceTex, vary.TexCoord) * texture(t.uMaterialTex, vary.TexCoord)
+}
+
+@test
+fn binding_required_image_publishes_it() {
+    image_class_test_host()
+    let path = image_class_test_fixture()
+    defer { let _ = remove_file(path) }
+    let pending = image_class_test_load(path, false)
+    defer { destroy_image(pending) }
+    assert(!image_load_ready(pending))
+    let shader = rock_shader(sprite_batch_vert, image_class_bind_frag)
+    load_pending_shader_sources()
+    assert(get_shader_handle(shader) != 0)
+    set_shader(shader)
+    defer { unset_shader() }
+    shader_bind_texture(shader, "uTexture", sampled_image(pending))
+    let normal = image_class_test_load(path, false)
+    defer { destroy_image(normal) }
+    bind_sprite_normal_texture(shader, sampled_image(normal))
+    let surface = image_class_test_load(path, false)
+    defer { destroy_image(surface) }
+    bind_sprite_surface_texture(shader, sampled_image(surface))
+    let material = image_class_test_load(path, false)
+    defer { destroy_image(material) }
+    shader_bind_texture(shader, "uMaterialTex", sampled_image(material))
+    assert(image_load_ready(pending), "binding a required image publishes its pixels")
+    assert(image_load_ready(normal) && image_load_ready(surface) && image_load_ready(material))
+    assert_eq(audit_texture_slots_for_draw(shader), 0, "all sampled images were bound")
+}
+
+@test
+fn unpublished_image_is_not_exposed_to_texture_sampling() {
+    image_class_test_host()
+    let path = image_class_test_fixture()
+    defer { let _ = remove_file(path) }
+    let pending = image_class_test_load(path, false)
+    defer { destroy_image(pending) }
+    assert(!image_load_ready(pending))
+    load_pending_shader_sources()
+    let pass = Pass { pipeline: BLIT_PIPELINE,
+        slot_inputs: [(sampled_image(pending), TextureFilter::Nearest)] }
+    assert(pass_input_rejection(pass) != "", "an unpublished input rejects the pass before output is cleared")
+    assert_eq(stone_get_image_texture(pending.0), 0, "a pending image exposes no sampleable GL texture")
+    stone_flush_image_uploads()
+    assert(image_load_ready(pending))
+    assert_eq(pass_input_rejection(pass), "", "the same pass is admitted once its input completes")
+    assert(stone_get_image_texture(pending.0) != 0)
+    assert(stone_bind_image_texture_to_unit(pending.0, 0))
+}
+
+@test
+fn image_load_ready_follows_publication_by_request_class() {
+    image_class_test_host()
+    let path = image_class_test_fixture(large: true)
+    stone_set_frame_image_upload_budget(0)
+
+    let required = image_class_test_load(path, false)
+    assert(required.0 != 0)
+    assert(!image_load_ready(required), "a Required load is not ready until published")
+    stone_flush_image_uploads()
+    assert(image_load_ready(required), "the flush publishes a Required load")
+
+    let deferred = image_class_test_load(path, true)
+    assert(!image_load_ready(deferred), "a Deferred load is not ready until published")
+    assert_eq(image_dims(deferred), image_dims(required), "dimensions are available before publication")
+    assert(image_loads_pending_bytes() >= 4 * 2 * 4, "its decoded bytes count as pending")
+    assert(image_load_require(deferred), "a pending Deferred load can be required")
+    assert(!image_load_require(deferred), "a Required load has nothing to promote")
+    stone_flush_image_uploads()
+    assert(image_load_ready(deferred), "the flush publishes a required Deferred load")
+
+    let pumped = image_class_test_load(path, true)
+    assert(!image_load_ready(pumped))
+    let _ = stone_service_image_uploads()
+    assert(image_load_ready(pumped), "a blocking pump publishes Deferred loads")
+    assert_eq(image_loads_pending_bytes(), 0)
+    for image in [deferred, pumped] {
+        assert_eq(stone_image_read_texel(image.0, 1, 1), stone_image_read_texel(required.0, 1, 1),
+            "worker-read payloads publish the same pixels as Required loads")
+    }
+
+    for image in [required, deferred, pumped] { destroy_image(image) }
+    destroy_image(pumped)
+    assert(remove_file(path))
+}
+
+@test
+fn image_destroy_before_publication_releases_pending_accounting() {
+    image_class_test_host()
+    let path = image_class_test_fixture()
+    stone_set_frame_image_upload_budget(0)
+
+    let pending_before = image_loads_pending_bytes()
+    let deferred = image_class_test_load(path, true)
+    assert(deferred.0 != 0)
+    assert(!image_load_ready(deferred), "a Deferred load is not ready until published")
+    assert(image_loads_pending_bytes() >= 4 * 2 * 4, "its decoded bytes count as pending")
+    destroy_image(deferred)
+    assert_eq(image_loads_pending_bytes(), pending_before, "a destroyed request stops counting its bytes")
+    assert(image_load_ready(deferred), "a destroyed request reports published")
+
+    let required = image_class_test_load(path, false)
+    assert(required.0 != 0)
+    assert(!image_load_ready(required), "a Required load is not ready until published")
+    destroy_image(required)
+    stone_flush_image_uploads()
+    assert_eq(image_loads_pending_bytes(), 0, "a destroyed Required request holds no flush")
+    assert(image_load_ready(required), "a destroyed Required request reports published")
+
+    assert(remove_file(path))
+}

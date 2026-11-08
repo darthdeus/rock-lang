@@ -1,0 +1,243 @@
+// The depth preview samples screen_canvas's live active rectangle, not the
+// whole backing texture. Each witness renders real world geometry, checks the
+// written depth through the independent native readback, draws the production
+// preview into a separate canvas, and compares previews against each other --
+// never against a reimplementation of the visualize shader's curve.
+
+// Numeric trace for evidence runs. Off unless DEPTH_WITNESS_LOG names a file,
+// so the committed tests stay hermetic under a plain `rock test stone`.
+inline(lua) fn depth_preview_record(line: string) = """
+    local path = os.getenv("DEPTH_WITNESS_LOG")
+    if path ~= nil and path ~= "" then
+        local out = assert(io.open(path, "a"))
+        out:write(line, "\n")
+        out:close()
+    end
+"""
+
+fn depth_preview_view(size: int) -> FrameView {
+    return resolve_frame_view(v(size as float, size as float), iv(size, size),
+        Camera2D { visible_world_width: 20.0 }, RenderConfig {}).unwrap()
+}
+
+// One world frame covering the whole live rectangle at `anchor_y`, whose
+// y-sort key the world pass remaps to `expected_depth`. Returns the
+// independently read back native depth.
+fn depth_preview_render_world(view: FrameView, anchor_y: float, expected_depth: float, label: string) -> float {
+    RENDER_VIEW = view
+    draw_rect(v(0.0, anchor_y), v(80.0, 80.0), WHITE, depth: DepthMode::TestWrite)
+    render_batches()
+    let active = canvas_active(screen_canvas)
+    let actual = read_depth_pixel(screen_canvas, int(active.x / 2), int(active.y / 2))
+    assert(abs(actual - expected_depth) < 0.0001,
+        "{label}: independent world depth {actual}, expected {expected_depth}")
+    clear_batches()
+    return actual
+}
+
+// Production preview of the current screen_canvas into a fresh canvas.
+// Returns the red channel at three spread points.
+fn depth_preview_sample(label: string) -> [float] {
+    let preview = new_canvas(64, 64, "rgba32f")
+    defer { destroy_canvas(preview) }
+    set_canvas(preview)
+    set_blend_mode(BlendMode::Replace)
+    unset_depth_mode()
+    draw_depth_buffer_preview(0.0, 0.0, 64.0, 64.0)
+    depth_preview_assert_preview_teardown(label)
+    let out: [float] = []
+    for point in [iv(8, 8), iv(32, 32), iv(55, 55)] {
+        let gray = read_canvas_pixel(preview, point.x, point.y)
+        let active = canvas_active(screen_canvas)
+        depth_preview_record("{label}: storage={screen_canvas.width}x{screen_canvas.height} active={active.x}x{active.y} gray({point.x},{point.y})={gray}")
+        out.push(gray)
+    }
+    return out
+}
+
+// The preview leaves no binding, program, or viewport behind: the target
+// handle is released, no shader stays bound, and the next bind re-establishes
+// its own full viewport (there is no separate viewport reset by design).
+fn depth_preview_assert_preview_teardown(label: string) {
+    assert_eq(CURRENT_CANVAS_HANDLE, 0, "{label}: preview releases its target binding")
+    assert(WATCHER.current_shader_name == null, "{label}: preview clears the bound-shader bookkeeping")
+    assert(!stone_current_shader_bound(), "{label}: preview leaves no program bound")
+}
+
+fn depth_preview_assert_grays_near(actual: [float], expected: [float], tolerance: float, label: string) {
+    assert_eq(actual.len(), expected.len(), "{label}: same sample points")
+    for i in 0..actual.len() {
+        assert(abs(actual[i] - expected[i]) < tolerance,
+            "{label}: preview gray [{i}] {actual[i]}, control {expected[i]}")
+    }
+}
+
+fn depth_preview_fixture(body: fn() -> (), intentional_failure: bool = false) {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    let saved_screen = screen_canvas
+    let saved_camera = CAMERA_VIEW
+    let saved_target = CURRENT_CANVAS_HANDLE
+    let saved_blend = CURRENT_BLEND
+    let saved_shader = WATCHER.current_shader_name
+    let canvases = stone_get_graphics_stats().canvases
+    let arenas = arena_live_count()
+    let view = depth_preview_view(64)
+    let failure = world_fixture_raised(() => { with_scene_render_scope(view, body) }, world_fixture_traceback)
+    assert(screen_canvas == saved_screen && CAMERA_VIEW == saved_camera,
+        "fixture restores world target and camera on success and failure")
+    assert(CURRENT_CANVAS_HANDLE == saved_target && CURRENT_BLEND == saved_blend,
+        "fixture restores bound target and blend on success and failure")
+    assert(WATCHER.current_shader_name == saved_shader,
+        "fixture restores the bound-shader bookkeeping on success and failure")
+    assert_eq(stone_get_graphics_stats().canvases, canvases, "fixture releases canvases on success and failure")
+    assert_eq(arena_live_count(), arenas, "fixture releases arenas on success and failure")
+    if intentional_failure {
+        assert(failure != null && failure.unwrap().contains("intentional depth fixture failure"),
+            "fixture rethrows the injected failure")
+    } else {
+        assert(failure == null, failure ?? "")
+    }
+}
+
+@test
+fn depth_preview_active_extent_matches_full_control() {
+    depth_preview_fixture(() => {
+        let full = RENDER_VIEW.unwrap()
+        depth_preview_render_world(full, 0.0, 0.5, "control frame")
+        let control = depth_preview_sample("control frame")
+        // Establish non-0.5 backing everywhere before shrinking: whatever the
+        // inactive texels hold afterwards (this depth or the clear value), an
+        // unscaled preview samples something other than the live 0.5 frame.
+        depth_preview_render_world(full, 6.5, 0.75, "backing frame")
+        let control75 = depth_preview_sample("backing frame")
+        assert(abs(control75[0] - control[0]) > 0.1 && abs(control75[1] - control[1]) > 0.1,
+            "the two control depths preview distinguishably, so equality below is meaningful")
+        set_canvas_active(screen_canvas, 32, 32)
+        set_canvas_active(visible_id_canvas, 32, 32)
+        let reduced = depth_preview_view(32)
+        depth_preview_render_world(reduced, 0.0, 0.5, "reduced frame")
+        assert(canvas_active(screen_canvas) == iv(32, 32), "the reduced frame keeps 32x32 active in 64x64 storage")
+        let reduced_grays = depth_preview_sample("reduced frame")
+        depth_preview_assert_grays_near(reduced_grays, control, 0.002,
+            "reduced active extent previews the live rectangle")
+    })
+}
+
+@test
+fn depth_preview_successive_frames_track_depth() {
+    depth_preview_fixture(() => {
+        let view = RENDER_VIEW.unwrap()
+        depth_preview_render_world(view, 0.0, 0.5, "first frame")
+        let first = depth_preview_sample("first frame")
+        depth_preview_render_world(view, 6.5, 0.75, "second frame")
+        let second = depth_preview_sample("second frame")
+        for i in 0..first.len() {
+            assert(second[i] - first[i] > 0.1,
+                "the second frame previews its new depth at [{i}]: {first[i]} -> {second[i]}")
+        }
+    })
+}
+
+@test
+fn depth_preview_native_resize_keeps_preview() {
+    depth_preview_fixture(() => {
+        depth_preview_render_world(RENDER_VIEW.unwrap(), 0.0, 0.5, "before resize")
+        let before = depth_preview_sample("before resize")
+        let handle = screen_canvas.handle.0
+        screen_canvas = resize_canvas(screen_canvas, 96.0, 80.0).unwrap()
+        visible_id_canvas = resize_canvas(visible_id_canvas, 96.0, 80.0).unwrap()
+        assert(screen_canvas.handle.0 == handle, "native resize keeps the world handle")
+        assert(stone_canvas_attach_id_target(screen_canvas.handle.0, visible_id_canvas.handle.0))
+        let resized = resolve_frame_view(v(96, 80), iv(96, 80),
+            Camera2D { visible_world_width: 20.0 }, RenderConfig {}).unwrap()
+        depth_preview_render_world(resized, 0.0, 0.5, "after resize")
+        let after = depth_preview_sample("after resize")
+        depth_preview_assert_grays_near(after, before, 0.002, "resized preview matches pre-resize control")
+    })
+}
+
+// A horizontal gray gradient image: every row is identical, so only the U
+// mapping matters and any V convention cancels out.
+fn depth_preview_gradient_source() -> (ImageData, Image) {
+    let data = new_owned_image_data(64, 64)
+    for y in 0..64 {
+        for x in 0..64 {
+            let g = (x as float) / 63.0
+            image_data_set_pixel(data, x, y, g, g, g, 1.0)
+        }
+    }
+    let image = new_owned_image_from_data(data, TextureFilter::Nearest)
+    return (data, image)
+}
+
+// Raw fullscreen copy through the imperative quad path -- the draw that
+// observes a leaked UV scale, since unlike a pass it installs none itself.
+fn depth_preview_blit_full(source: SampledTexture, output: Canvas) {
+    set_canvas(output)
+    set_blend_mode(BlendMode::Replace)
+    unset_depth_mode()
+    set_shader(blit_shader)
+    let slot = shader_texture_slot_if_present(blit_shader, "input_tex")
+    assert(slot >= 0, "the blit program exposes input_tex")
+    assert(bind_sampled_to_slot(source, slot, TextureFilter::Nearest), "the blit binds its source")
+    mark_texture_slot_filled(blit_shader, slot)
+    draw_fullscreen_quad()
+    assert_eq(audit_texture_slots_for_draw(blit_shader), 0, "the blit fills every declared slot")
+    sampler_release_unit(slot)
+    end_shader()
+    unset_canvas()
+}
+
+fn depth_preview_read_row(canvas: Canvas) -> [float] {
+    let out: [float] = []
+    for x in [8, 32, 55] {
+        out.push(read_canvas_pixel(canvas, x, 32))
+    }
+    return out
+}
+
+@test
+fn depth_preview_following_fullscreen_draw_keeps_default_uv() {
+    depth_preview_fixture(() => {
+        let output = new_canvas(64, 64, "rgba8")
+        defer { destroy_canvas(output) }
+        let (data, image) = depth_preview_gradient_source()
+        defer {
+            release_owned_image(image)
+            release_owned_image_data(data)
+        }
+        let source = sampled_image(image)
+        depth_preview_blit_full(source, output)
+        let before = depth_preview_read_row(output)
+        // A reduced-extent preview through a sub-rect: a non-trivial UV scale
+        // plus a viewport the teardown must release.
+        depth_preview_render_world(RENDER_VIEW.unwrap(), 0.0, 0.5, "uv frame")
+        set_canvas_active(screen_canvas, 32, 32)
+        set_canvas_active(visible_id_canvas, 32, 32)
+        depth_preview_render_world(depth_preview_view(32), 0.0, 0.5, "uv reduced frame")
+        let scratch = new_canvas(64, 64, "rgba32f")
+        defer { destroy_canvas(scratch) }
+        set_canvas(scratch)
+        set_blend_mode(BlendMode::Replace)
+        unset_depth_mode()
+        draw_depth_buffer_preview(0.0, 0.0, 32.0, 32.0)
+        depth_preview_assert_preview_teardown("uv reduced frame")
+        depth_preview_blit_full(source, output)
+        let after = depth_preview_read_row(output)
+        depth_preview_assert_grays_near(after, before, 0.002, "a following fullscreen draw sees default UVs")
+        assert(after[2] - after[0] > 0.6,
+            "the following draw copies the full gradient, not a scaled sub-rect: {after[0]}, {after[1]}, {after[2]}")
+        assert(abs(after[0] - 8.0 / 63.0) < 0.03 && abs(after[2] - 55.0 / 63.0) < 0.03,
+            "the following draw lands full-frame: {after[0]}, {after[1]}, {after[2]}")
+    })
+}
+
+@test
+fn depth_preview_failure_restores_state() {
+    depth_preview_fixture(() => {
+        depth_preview_render_world(RENDER_VIEW.unwrap(), 0.0, 0.5, "before intentional failure")
+        let _ = depth_preview_sample("before intentional failure")
+        assert(false, "intentional depth fixture failure")
+    }, intentional_failure: true)
+}

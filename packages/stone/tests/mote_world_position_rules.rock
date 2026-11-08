@@ -1,0 +1,8 @@
+@test
+fn mote_position_keeps_its_world_coordinate_type() {
+    let mote = Mote {
+        pos: MoteWorldPoint { x: 3.0, y: 5.0, z: 0.75 },
+        vel: v(0.0, 0.0, 0.0),
+    }
+    let _world_position: MoteWorldPoint = mote.pos
+}

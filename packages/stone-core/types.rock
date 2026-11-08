@@ -1,0 +1,223 @@
+// Engine math types shared across all games: IVec2/Rect/IRect/Color and the
+// sprite-animation structs, plus their constructors and operators. Vec2/Vec3/
+// Vec4 and their pure algebra (incl. v()/zero()) live in
+// stdlib/vec.rock; what stays here touches engine-only types or globals.
+
+pub nobox value IVec2 {
+    x: int,
+    y: int,
+}
+
+pub nobox value Rect {
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+}
+
+pub nobox value IRect {
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+}
+
+pub nobox value Color {
+    r: float,
+    g: float,
+    b: float,
+    a: float,
+}
+
+pub value SpriteAnimation {
+    start: IRect,
+    step: int,
+    frame_count: int,
+    frame_time: float,
+    looping: bool,
+}
+
+pub struct SpriteAnimationState {
+    current_anim: SpriteAnimation,
+    frame: int,
+    time: float,
+    is_finished: bool,
+    frame_time_override: float,
+}
+
+pub @inline
+@pure fn ir(x: int, y: int, w: int, h: int) -> IRect {
+    return irect(x, y, w, h)
+}
+
+pub @inline
+@pure fn irect(x: int, y: int, w: int, h: int) -> IRect {
+    return IRect { x: x, y: y, w: w, h: h }
+}
+
+pub @inline
+@pure fn irect_size(rect: IRect) -> IVec2 {
+    return iv(rect.w, rect.h)
+}
+
+// Rect is now defined in stone-core/types.rock
+
+@inline
+@pure fn r(x: float, y: float, w: float, h: float) -> Rect {
+    return rect(x, y, w, h)
+}
+
+@inline
+@pure fn make_rect(x: float, y: float, w: float, h: float) -> Rect {
+    return rect(x, y, w, h)
+}
+
+pub @inline
+@pure fn rect(x: float, y: float, w: float, h: float) -> Rect {
+    return Rect { x: x, y: y, w: w, h: h }
+}
+
+@inline
+@pure fn rect_size(rect: Rect) -> Vec2 {
+    return std::v(rect.w, rect.h)
+}
+pub @inline @pure fn Rect.size(rect) -> Vec2 { return rect_size(rect) }
+
+@pure fn rect_center(rect: Rect) -> Vec2 {
+    return std::v(rect.x + rect.w / 2, rect.y + rect.h / 2)
+}
+pub @pure fn Rect.center(rect) -> Vec2 { return rect_center(rect) }
+
+// V0: one-arg `iv(x)` uses x twice in its body; leaving it non-inline so
+// call sites with arithmetic args like `iv(off / 32)` still compile. V1
+// will handle arg-binding automatically.
+pub @pure fn iv(x: int) -> IVec2 {
+    return iv(x, x)
+}
+
+pub @inline
+@pure fn iv(x: int, y: int) -> IVec2 {
+    return ivec2(x, y)
+}
+
+pub @inline
+@pure fn ivec2(x: int, y: int) -> IVec2 {
+    return IVec2 { x: x, y: y }
+}
+
+pub @inline
+@pure fn ivec2_vec2(v: IVec2) -> Vec2 {
+    return Vec2 { x: v.x, y: v.y }
+}
+
+pub @pure operator +(a: IVec2, b: IVec2) -> IVec2 {
+    return IVec2 { x: a.x + b.x, y: a.y + b.y }
+}
+
+pub @pure operator -(a: IVec2, b: IVec2) -> IVec2 {
+    return IVec2 { x: a.x - b.x, y: a.y - b.y }
+}
+
+pub @pure operator *(a: IVec2, b: int) -> IVec2 {
+    return iv(a.x * b, a.y * b)
+}
+
+@pure operator *(a: int, b: IVec2) -> IVec2 {
+    return iv(a * b.x, a * b.y)
+}
+
+@pure operator *(a: IVec2, b: IVec2) -> IVec2 {
+    return IVec2 { x: a.x * b.x, y: a.y * b.y }
+}
+
+@pure operator /(a: IVec2, b: int) -> IVec2 {
+    return IVec2 { x: a.x ./ b, y: a.y ./ b }
+}
+
+// Per-element sign/abs. UFCS: `d.sign()`, `d.abs()`.
+pub @pure fn IVec2.sign(a) -> IVec2 { return iv(std::sign(a.x), std::sign(a.y)) }
+@pure fn IVec2.abs(a) -> IVec2 { return iv(std::abs(a.x), std::abs(a.y)) }
+
+pub @inline
+@pure fn color(r: float, g: float, b: float, a: float = 1.0) -> Color {
+    return Color { r: r, g: g, b: b, a: a }
+}
+
+pub @inline @pure fn color(value: float, a: float = 1.0) -> Color {
+    return Color { r: value, g: value, b: value, a: a}
+}
+
+fn Color.to_array(color) -> [float] {
+    return [color.r, color.g, color.b, color.a]
+}
+
+pub fn make_anim_state(anim: SpriteAnimation) -> SpriteAnimationState {
+    return SpriteAnimationState {
+        current_anim: anim,
+        frame: 0,
+        time: 0,
+        is_finished: false,
+        frame_time_override: 0
+    }
+}
+
+pub @pure fn rect_overlaps(a: Rect, b: Rect) -> bool {
+    if a.x + a.w < b.x || b.x + b.w < a.x { return false }
+    if a.y + a.h < b.y || b.y + b.h < a.y { return false }
+    return true
+}
+
+pub @pure fn Color.lerp(a, b: Color, t: float) -> Color {
+    return color(
+        std::lerp(a.r, b.r, t),
+        std::lerp(a.g, b.g, t),
+        std::lerp(a.b, b.b, t),
+        std::lerp(a.a, b.a, t)
+    )
+}
+
+// Scale RGB by k (alpha untouched). k > 1 pushes channels overbright
+// (max-channel > bloom_threshold), which is how a color feeds bloom.
+pub @pure fn Color.scale(c, k: float) -> Color {
+    return color(c.r * k, c.g * k, c.b * k, c.a)
+}
+
+// Scale RGB toward black (alpha untouched).
+pub @pure fn Color.darken(color, amount: float) -> Color {
+    return Color {
+        r: color.r * amount,
+        g: color.g * amount,
+        b: color.b * amount,
+        a: color.a
+    }
+}
+
+// Interpolate toward white. amount=0 returns the original color,
+// amount=1 returns pure white. Symmetric counterpart to Color.darken.
+pub @pure fn Color.lighten(color, amount: float) -> Color {
+    return Color {
+        r: color.r + (1.0 - color.r) * amount,
+        g: color.g + (1.0 - color.g) * amount,
+        b: color.b + (1.0 - color.b) * amount,
+        a: color.a
+    }
+}
+
+// Replace alpha, RGB untouched.
+pub @pure fn Color.alpha(color, alpha: float) -> Color {
+    return Color {
+        r: color.r,
+        g: color.g,
+        b: color.b,
+        a: alpha
+    }
+}
+
+pub @pure fn Color.clamp(color, a: float, b: float) -> Color {
+    return Color {
+        r: color.r.clamp(a, b),
+        g: color.g.clamp(a, b),
+        b: color.b.clamp(a, b),
+        a: color.a.clamp(a, b),
+    }
+}

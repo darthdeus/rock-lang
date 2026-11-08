@@ -1,0 +1,32 @@
+@test
+fn replay_input_authority_device_policy() {
+    let saved_device = LAST_INPUT_DEVICE
+    defer { LAST_INPUT_DEVICE = saved_device }
+    assert_eq(input_classify_last_device(InputDeviceEvent::KeyPress) == InputDevice::KeyboardMouse,
+        true, "replay_input_authority: keyboard press claims keyboard/mouse")
+    assert_eq(input_classify_last_device(InputDeviceEvent::MouseButtonPress) == InputDevice::KeyboardMouse,
+        true, "replay_input_authority: mouse button press claims keyboard/mouse")
+    assert_eq(input_classify_last_device(InputDeviceEvent::PadButtonPress) == InputDevice::Pad,
+        true, "replay_input_authority: pad button press claims pad")
+    assert_eq(input_classify_last_device(InputDeviceEvent::PadAxisMotion((1.0 + PAD_DEVICE_CLAIM_THRESHOLD) * 0.5)) == InputDevice::Pad,
+        true, "replay_input_authority: above-threshold pad axis claims pad")
+    assert_eq(input_classify_last_device(InputDeviceEvent::PadAxisMotion(PAD_DEVICE_CLAIM_THRESHOLD)) == null,
+        true, "replay_input_authority: axis exactly at the device threshold does not claim a pad")
+    assert_eq(input_classify_last_device(InputDeviceEvent::PadAxisMotion(PAD_DEVICE_CLAIM_THRESHOLD * 0.02)) == null,
+        true, "replay_input_authority: sub-threshold pad axis does not claim a device")
+    assert_eq(input_classify_last_device(InputDeviceEvent::MouseMotion) == null,
+        true, "replay_input_authority: mouse motion does not change the device modality")
+
+    input_note_last_device(InputDeviceEvent::KeyPress)
+    assert_eq(input_last_device() == InputDevice::KeyboardMouse, true,
+        "replay_input_authority: keyboard press selects keyboard/mouse modality")
+    input_note_last_device(InputDeviceEvent::PadAxisMotion(PAD_DEVICE_CLAIM_THRESHOLD * 0.02))
+    assert_eq(input_last_device() == InputDevice::KeyboardMouse, true,
+        "replay_input_authority: axis noise leaves glyph modality unchanged")
+    input_note_last_device(InputDeviceEvent::MouseMotion)
+    assert_eq(input_last_device() == InputDevice::KeyboardMouse, true,
+        "replay_input_authority: mouse motion leaves glyph modality unchanged")
+    input_note_last_device(InputDeviceEvent::PadButtonPress)
+    assert_eq(input_last_device() == InputDevice::Pad, true,
+        "replay_input_authority: pad press selects pad modality")
+}

@@ -1,0 +1,250 @@
+// global SPRITE_DATA: Map<string, [(float, float, float, float, float)]> = map_new()
+global IMAGE_MAP: Map<string, Image> = map_new()
+// Pivot presets: normalized (0,0) = top-left, (1,1) = bottom-right
+pub const PIVOT_CENTER: Vec2 = v(0.5, 0.5)
+pub const PIVOT_FEET: Vec2 = v(0.5, 1.0)
+pub const PIVOT_TOP_LEFT: Vec2 = v(0.0, 0.0)
+pub const PIVOT_TOP_CENTER: Vec2 = v(0.5, 0.0)
+const PIVOT_TOP_RIGHT: Vec2 = v(1.0, 0.0)
+pub const PIVOT_BOTTOM_RIGHT: Vec2 = v(1.0, 1.0)
+const PIVOT_BOTTOM_LEFT: Vec2 = v(0.0, 1.0)
+
+@init
+fn init_batching() {
+    gpu_programs_drain()
+}
+
+// Compiles the rock_shader pipelines registered at chunk top level before a GL
+// context existed. The runner drains at @init; a host that
+// brings GL up outside the runner (`stone_gpu_host_ensure`) drains through this
+// call. The debug_shaders dump directory is cleared first, except under the sim
+// harness, where it is not written (see `rock_shader_compile_now`) and where
+// concurrent workers clearing one repo-root directory raced each other.
+pub fn gpu_programs_drain() {
+    if !sim_mode_active() { io_clear_directory_recursive("debug_shaders") }
+    load_pending_shader_sources()
+}
+
+// A sprite's world size when the caller gives no dest_size: source pixels at
+// 16 px per world unit. Every path that resolves a default dest_size resolves
+// it here.
+@pure
+fn sprite_default_world_size(source: IRect) -> Vec2 {
+    return v(source.w, source.h) / 16.0
+}
+
+// `sampling` null inherits `image`'s declared filter (and `normal`'s for the
+// normal sheet); an explicit value overrides both.
+pub fn draw_sprite(
+    image: SampledTexture,
+    pos: Vec2,
+    source: IRect? = null,
+    dest_size: Vec2? = null,
+    pivot: Vec2 = PIVOT_CENTER,
+    rotation: float = 0,
+    flip_x: bool = false,
+    flip_y: bool = false,
+    color: Color = WHITE,
+    z_off: float = 0,
+    outline: Outline? = null,
+    layer: int = DEFAULT_RENDER_LAYER,
+    depth: DepthMode = DepthMode::TestWrite,
+    blend: BlendMode = BlendMode::Alpha,
+    pixel_snap: bool = false,
+    entity_id: int = 0,
+    unlit: bool = false,
+    normal: SampledTexture? = null,
+    surface: SampledTexture? = null,
+    pipeline: Pipeline? = null,
+    sampling: TextureFilter? = null,
+    colorize: float = 0.0,
+    depth_slope_x: float = 0.0,
+    // A pipeline every such draw shares, so they batch together on the keyed
+    // fast path (sprite_batch).
+    shared_pipeline: bool = false,
+    block: OwnedUniformBlock? = null,
+) {
+    // Direct path: resolve the batch and append vertices with flat
+    // fields, no per-call command object (a command struct + enum box
+    // was ~6 KB/sprite of transient garbage).
+    assert(block == null || (pipeline != null && !shared_pipeline),
+        "per-draw uniform blocks require an independent shader submission")
+    let batch = sprite_batch(image, layer, depth, blend, pixel_snap, normal,
+        surface, pipeline, unlit, sampling, shared_pipeline)
+    if block != null {
+        batch.block = block
+        batch.block_frame = RENDER_FRAME
+    }
+    draw_sprite_into(
+        batch, image, pos, source, dest_size, pivot, rotation,
+        flip_x, flip_y, color, z_off, outline, entity_id, colorize, depth_slope_x
+    )
+}
+
+// The batch a sprite draw lands in, as its own step -- the sibling of
+// `sprite_quad_batch` for the `draw_sprite` / `draw_sprite_into` pair. It is
+// the ONE statement of what keys a sprite batch: `draw_sprite` reaches it per
+// call, and a caller whose geometry is already live resolves it FIRST and
+// pushes through `draw_sprite_into`.
+//
+// The acquisition carries the texture-keyed fast probe, whose dozen candidate
+// compares are each a trace exit. Reached from under a draw's geometry those
+// exits hold the caller's position, dest size, pivot, source rect, colour and
+// colorize all at once -- 27 to 41 floats against LuaJIT's 16-register float
+// budget, so none of their side traces can compile (`NYI: register coalescing
+// too complex`). Resolved before the
+// geometry exists, the same exits carry only what the caller holds at entry.
+//
+// `@inline` so the split costs no Lua frame; splicing needs the call site to
+// spell every argument positionally.
+pub @inline
+fn sprite_batch(
+    image: SampledTexture,
+    layer: int = DEFAULT_RENDER_LAYER,
+    depth: DepthMode = DepthMode::TestWrite,
+    blend: BlendMode = BlendMode::Alpha,
+    pixel_snap: bool = false,
+    normal: SampledTexture? = null,
+    surface: SampledTexture? = null,
+    pipeline: Pipeline? = null,
+    unlit: bool = false,
+    sampling: TextureFilter? = null,
+    shared_pipeline: bool = false,
+    order: int = 0,
+) -> RenderBatch {
+    // draw_sprite has no `target` param, Additive is emissive by convention --
+    // never dim a light emitter with scene lighting. Unlit is a batch property
+    // (uUnlit uniform), so lit and unlit content on the same texture/z/blend
+    // land in separate batches.
+    return ensure_batch_of(
+        image, layer, blend, pixel_snap, depth,
+        normal: normal, surface: surface, pipeline: pipeline,
+        unlit: unlit || blend == BlendMode::Additive,
+        sampling: sampling, shared_pipeline: shared_pipeline, order: order,
+    )
+}
+
+// The batch a sprite-quad draw lands in, as its own step. `draw_sprite_quad`
+// resolves one per call; a caller emitting many quads that all share a batch
+// resolves it ONCE outside its loop and pushes through `draw_sprite_quad_into`.
+// The acquisition carries the texture-keyed fast probe, and a guard in there is
+// a trace exit: with the acquisition inside such a loop the quad's seventeen
+// geometry floats are live across that exit in three frames at once, over the
+// 16-register float budget, so the side trace can never compile
+// (`NYI: register coalescing too complex`).
+// The pair mirrors draw_sprite / draw_sprite_into.
+@inline
+fn sprite_quad_batch(
+    image: SampledTexture,
+    layer: int = DEFAULT_RENDER_LAYER,
+    depth: DepthMode = DepthMode::TestWrite,
+    blend: BlendMode = BlendMode::Alpha,
+    unlit: bool = false,
+    sampling: TextureFilter? = null,
+) -> RenderBatch {
+    return ensure_batch_of(image, layer, blend, false, depth,
+        unlit: unlit || blend == BlendMode::Additive,
+        sampling: sampling)
+}
+
+// Vertex tail of the sprite-quad path: the caller owns the batch. Both halves
+// are `@inline`, so the split costs no Lua frame -- an added frame would put
+// the same geometry floats in the exit snapshot one more time, which is the
+// pressure the split exists to remove.
+pub @inline
+fn draw_sprite_quad_into(
+    batch: RenderBatch,
+    image: SampledTexture,
+    tl: Vec2,
+    tr: Vec2,
+    br: Vec2,
+    bl: Vec2,
+    source: IRect? = null,
+    color: Color = WHITE,
+    py: float = 0,
+    entity_id: int = 0,
+    colorize: float = 0.0,
+) {
+    emit_textured_quad(batch, image, tl, tr, br, bl,
+        source ?? full_image_rect(image), color, py, entity_id, colorize)
+}
+
+pub fn draw_sprite_quad(
+    image: SampledTexture,
+    tl: Vec2,
+    tr: Vec2,
+    br: Vec2,
+    bl: Vec2,
+    source: IRect? = null,
+    color: Color = WHITE,
+    py: float = 0,
+    layer: int = DEFAULT_RENDER_LAYER,
+    depth: DepthMode = DepthMode::TestWrite,
+    blend: BlendMode = BlendMode::Alpha,
+    entity_id: int = 0,
+    unlit: bool = false,
+    sampling: TextureFilter? = null,
+) {
+    let batch = sprite_quad_batch(image, layer, depth, blend, unlit, sampling)
+    draw_sprite_quad_into(batch, image, tl, tr, br, bl, source, color, py,
+        entity_id)
+}
+
+// Existing vertex depth interpolates across the quad in every renderer pass.
+fn sprite_vertices_depth_slope(vertices: NativeBuffer<Vertex>, first: int,
+                               origin_x: float, slope: float) {
+    for i in first..first+6 {
+        vertices[i].pivot_y += (vertices[i].pos.x-origin_x)*slope
+    }
+}
+
+// Shared vertex tail of the sprite path: entity-id precedence, outline
+// registry, vertex append. Both front doors resolve their batch first and
+// funnel here — draw_sprite via ensure_batch_of per call, Material.draw via
+// its cached pool entry (material.rock).
+pub fn draw_sprite_into(
+    batch: RenderBatch,
+    image: SampledTexture,
+    pos: Vec2,
+    source: IRect?,
+    dest_size: Vec2?,
+    pivot: Vec2,
+    rotation: float,
+    flip_x: bool,
+    flip_y: bool,
+    color: Color,
+    z_off: float,
+    outline: Outline?,
+    entity_id: int,
+    colorize: float = 0.0,
+    depth_slope_x: float = 0.0,
+) {
+    // Fullbright (unlit) is a batch property now, resolved by the caller
+    // when it ensures the batch (draw_sprite / material.draw pass `unlit:`
+    // to ensure_batch_of). This funnel only writes geometry + entity id.
+    // One test of `outline` on the common path, not three. Each was a trace
+    // exit inside the draw stack, and the `entity_id != 0` exit is bimodal --
+    // MAG draws both id-carrying and id-less sprites through here -- so it
+    // spawned side traces that never compiled.
+    let eid = entity_id
+    let has_outline = outline != null
+    if has_outline {
+        let o = outline.unwrap()
+        // Explicit entity_id parameter takes precedence over outline's entity_id
+        if eid == 0 { eid = o.entity_id }
+        // Register per-entity outline color data so apply_outline_overlay can
+        // upload it to the shader. Falls back to the global OUTLINE_COLOR /
+        // OUTLINE_COLOR_OCCLUDED when the style table is full -- see outline.rock.
+        // The id test is kept even though register_outline_entry ignores
+        // ids <= 0: it also keeps a NaN id out of OUTLINE_ENTRIES.
+        if eid > 0 { register_outline_entry(eid, o) }
+    }
+
+    add_sprite_vertices_of(
+        batch, image, pos, source, dest_size, pivot, rotation,
+        flip_x, flip_y, color, z_off, eid, has_outline, colorize
+    )
+    if depth_slope_x != 0.0 {
+        sprite_vertices_depth_slope(batch.verts, batch.count - 6, pos.x, depth_slope_x)
+    }
+}

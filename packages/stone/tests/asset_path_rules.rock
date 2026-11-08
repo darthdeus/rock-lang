@@ -1,0 +1,11 @@
+@test
+fn project_asset_path_preserves_absolute_paths() {
+    for path in ["/tmp/save.json", "C:/saves/save.json", "c:\\saves\\save.json",
+            "\\\\server\\share\\save.json", "\\saves\\save.json"] {
+        assert_eq(project_asset_path(path), path)
+        assert_eq(project_asset_path(project_asset_path(path)), path)
+    }
+    assert_eq(project_asset_path("assets/image.png"), "{GAME_SOURCE_DIR}/assets/image.png")
+    assert_eq(project_asset_path("C:save.json"), "{GAME_SOURCE_DIR}/C:save.json")
+    assert_eq(project_asset_path("@engine/font.ttf"), "{STONE_SOURCE_DIR}/engine/font.ttf")
+}

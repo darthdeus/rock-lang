@@ -1,0 +1,49 @@
+pub inline(lua) fn io_read_text_file(path: string) -> string? = """
+    local file = io.open(path, "r")
+    if not file then
+        return nil
+    end
+    local content = file:read("*all")
+    file:close()
+    return content
+"""
+
+pub inline(lua) fn io_write_file(path: string, content: string) -> bool = """
+    -- Create parent directory if needed via Stone's cross-platform API
+    -- (`os.execute("mkdir -p ...")` doesn't exist on Windows cmd.exe).
+    local dir = path:match("(.*/)")
+    if dir then
+        stone.stone_create_directory(dir)
+    end
+
+    local file = io.open(path, "w")
+    if not file then
+        return false
+    end
+
+    file:write(content)
+    file:close()
+    return true
+"""
+
+// Recursively clear directory contents through Stone's cross-platform fs APIs.
+pub fn io_clear_directory_recursive(path: string) {
+    if !stone_create_directory(path) {
+        _log_once_impl(0, "FILE", "cannot create directory before clearing it: {path}",
+            "io_clear_directory:create:{path}")
+        return
+    }
+    let listed = stone_list_directory(path) ?? return
+    for name in listed.unwrap() {
+        let child = "{path}/{name}"
+        let removed = if stone_is_directory(child) {
+            stone_remove_dir(child)
+        } else {
+            stone_remove_file(child)
+        }
+        if !removed {
+            _log_once_impl(0, "FILE", "cannot remove entry while clearing directory: {child}",
+                "io_clear_directory:entry:{child}")
+        }
+    }
+}

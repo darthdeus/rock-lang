@@ -1,0 +1,64 @@
+// Skinned UI drawing. UiSkin describes one kit asset: image region,
+// 9-slice corner, content padding, all in SOURCE px. The engine owns
+// the mechanism (this file); host-projected rows hold the mutable skins.
+// Games keep hot-reloadable handles to their instances. corner == (0,0)
+// marks a fixed-aspect asset
+// (ornamented art that must not stretch) -- drawn whole; place it with
+// take_center(native_size(s)) or a uniform multiple of it.
+
+pub struct UiSkin {
+    image: SampledTexture,
+    source: IRect,
+    corner: IVec2 = iv(0, 0),
+    // Content insets from each edge (where text/children sit). Fixed
+    // border distances like the corners -- they don't stretch.
+    pad_l: float = 0.0,
+    pad_t: float = 0.0,
+    pad_r: float = 0.0,
+    pad_b: float = 0.0,
+    // Source px -> design units. The kit is painted hi-res; 0.25 draws
+    // a 1024px-wide panel as 256 design units.
+    scale: float = 1.0,
+    // Feel-profile tag (ui/feel.rock), resolved when a widget wearing
+    // this skin fires an interaction edge. "" = the default feel.
+    feel: string = "",
+}
+
+pub global UI_SKINS: Arena<UiSkin> = arena_new()
+
+pub fn ui_skin_create(skin: UiSkin) -> Entity<UiSkin> {
+    return UI_SKINS.insert(skin)
+}
+
+pub fn UiRect.skin(r, s: UiSkin, tint: Color = WHITE, pipeline: Pipeline? = null) -> UiRect {
+    r.skin_batch(s, tint, pipeline)
+    return r
+}
+
+// The skin as ONE batch, returned so a caller can pack its `@uniform` block onto
+// it. Both arms are a single batch, so a block has exactly one owner whichever
+// shape the skin has.
+fn UiRect.skin_batch(r, s: UiSkin, tint: Color = WHITE, pipeline: Pipeline? = null) -> RenderBatch {
+    if s.corner.x > 0 || s.corner.y > 0 {
+        return r.nine_patch_batch(s.image, s.source, s.corner, s.scale, tint, pipeline)
+    }
+    let sc = ui_to_screen(r)
+    let prev = ui_ctx_push(r)
+    let batch = ui_draw_sprite_topleft(s.image, v(sc.x, sc.y), s.source, v(sc.w, sc.h), tint, z_layer: r.z, pipeline: pipeline)
+    ui_ctx_pop(prev)
+    return batch
+}
+
+// Design-space size the asset was painted for.
+@pure fn UiSkin.native_size(s) -> Vec2 {
+    return v(s.source.w * s.scale, s.source.h * s.scale)
+}
+
+pub @pure fn UiRect.content(r, s: UiSkin) -> UiRect {
+    return UiRect { ..r,
+        x: r.x + s.pad_l * s.scale,
+        y: r.y + s.pad_t * s.scale,
+        w: r.w - (s.pad_l + s.pad_r) * s.scale,
+        h: r.h - (s.pad_t + s.pad_b) * s.scale,
+    }
+}

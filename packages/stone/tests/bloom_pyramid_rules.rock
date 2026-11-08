@@ -1,0 +1,94 @@
+use stone::*
+
+// The bloom pyramid (bloom_pyramid_passes) run directly on canvases: a lit
+// rectangle in an HDR source, read back from level 0. Distances are in level-0
+// pixels, which are half source pixels.
+
+// draw_rect_immediate draws with WHITE_PIXEL, and its static batch keeps the
+// image it first saw, so the white image lives for the whole process.
+global BLOOM_PYRAMID_WHITE: Image? = null
+
+fn bloom_pyramid_white() -> Image {
+    if let white = BLOOM_PYRAMID_WHITE { return white }
+    let data = new_owned_image_data(1, 1)
+    image_data_set_pixel(data, 0, 0, 1.0, 1.0, 1.0, 1.0)
+    let white = new_owned_image_from_data(data, TextureFilter::Nearest)
+    release_owned_image_data(data)
+    BLOOM_PYRAMID_WHITE = white
+    return white
+}
+
+fn bloom_pyramid_fixture(w: int, h: int, blob: float, brightness: float,
+        body: fn(Canvas, [Canvas]) -> ()) {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    let saved_canvas = CURRENT_CANVAS_HANDLE
+    let saved_white = WHITE_PIXEL
+    WHITE_PIXEL = bloom_pyramid_white()
+    let src = new_canvas(float(w), float(h), "rgba16f")
+    let levels = create_pyramid_levels(w ./ 2, h ./ 2, PYRAMID_MAX_LEVELS)
+    defer {
+        set_canvas_handle(saved_canvas)
+        WHITE_PIXEL = saved_white
+        for level in levels { destroy_canvas(level) }
+        destroy_canvas(src)
+    }
+    with_canvas(src, () => {
+        clear_screen(0.0, 0.0, 0.0, 1.0)
+        draw_rect_immediate(v(float(w) / 2.0, float(h) / 2.0), v(blob, blob),
+            color(brightness, brightness, brightness, 1.0))
+    })
+    body(src, levels)
+}
+
+// Light reaches tens of level-0 pixels and falls off with distance; the levels
+// are sampled bilinearly, so the halo changes at nearly every pixel instead of
+// once per coarse texel; the threshold keeps the dark corner clean.
+@test
+fn bloom_pyramid_spreads_light_far_and_smoothly() {
+    bloom_pyramid_fixture(1280, 720, 16.0, 20.0, (src, levels) => {
+        assert(levels.len() > 1, "the pyramid has more than one level ({levels.len()})")
+        run_passes(bloom_pyramid_passes(src, levels, 1.0, 0.5, 1.0))
+        let out = levels[0]
+        let cx = 1280 ./ 4
+        let cy = 720 ./ 4
+        let core = read_canvas_pixel(out, cx, cy)
+        let near = read_canvas_pixel(out, cx + 4, cy)
+        let mid = read_canvas_pixel(out, cx + 16, cy)
+        let far = read_canvas_pixel(out, cx + 48, cy)
+        assert(core > 0.5, "the blob is bright at the core (core={core:.4})")
+        assert(mid > 0.01, "the halo reaches 16 level-0 px (mid={mid:.4})")
+        assert(far > 0.002, "the halo still reads at 48 level-0 px (far={far:.4})")
+        assert(near > mid && mid > far,
+            "the halo falls off with distance (near={near:.4} mid={mid:.4} far={far:.4})")
+
+        let distinct = 1
+        let prev = read_canvas_pixel(out, cx + 24, cy)
+        for d in 25..49 {
+            let val = read_canvas_pixel(out, cx + d, cy)
+            if val != prev { distinct += 1 }
+            prev = val
+        }
+        assert(distinct >= 22, "the halo is smooth, not stair-stepped ({distinct}/25 distinct values)")
+
+        let corner = read_canvas_pixel(out, 8, 8)
+        assert(corner < 0.01, "the threshold keeps the dark corner clean (corner={corner:.4})")
+    })
+}
+
+// A 0.8 blob is under a 1.0 threshold. Knee 0 cuts it hard; knee 0.5 puts it
+// inside [threshold - knee, threshold + knee], where it ramps in attenuated.
+@test
+fn bloom_knee_ramps_sub_threshold_light_in() {
+    bloom_pyramid_fixture(1280, 720, 64.0, 0.8, (src, levels) => {
+        let cx = 1280 ./ 4
+        let cy = 720 ./ 4
+        run_passes(bloom_pyramid_passes(src, levels, 1.0, 0.0, 1.0))
+        let hard = read_canvas_pixel(levels[0], cx, cy)
+        assert(hard == 0.0, "knee 0 is a hard cut: the 0.8 blob extracts nothing (got {hard:.5})")
+        run_passes(bloom_pyramid_passes(src, levels, 1.0, 0.5, 1.0))
+        let soft = read_canvas_pixel(levels[0], cx, cy)
+        assert(soft > 0.0, "knee 0.5 ramps the same blob in (got {soft:.5})")
+        assert(soft < 0.8, "the ramp attenuates rather than passing the blob through (got {soft:.5})")
+    })
+}

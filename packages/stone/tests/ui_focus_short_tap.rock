@@ -1,0 +1,456 @@
+// Short-tap witness for ui_focus_begin_frame (stone/engine/ui/focus.rock):
+// a key down/up pair delivered in one poll must drive nav, confirm and
+// left/right edges exactly once, with no repeat. Gameplay key queries see
+// the tap through the pressed-event latches; focus must consume the same
+// latches instead of deriving edges from its held-state snapshot alone.
+// The two control tests pin the behavior the repair must preserve: a held
+// key fires one edge, and a sim's mid-frame injection still lands.
+
+struct TapNavSnapshot {
+    mouse: UiMouseState,
+    focus: UiFocusState,
+    id_debug: UiIdDebug,
+    capture: bool,
+    rebind_consumed: bool,
+    synthetic_only: bool,
+    last_device: InputDevice,
+    keys_down: Map<string, bool>,
+    keys_down_last: Map<string, bool>,
+    keys_pressed: Map<string, bool>,
+    keys_repeated: Map<string, bool>,
+    scans_down: Map<string, bool>,
+    scans_down_last: Map<string, bool>,
+    scans_pressed: Map<string, bool>,
+    scans_repeated: Map<string, bool>,
+    scan_mods: Map<string, int>,
+    text_input: string,
+    mouse_down: Map<int, bool>,
+    mouse_down_last: Map<int, bool>,
+    mouse_pressed: Map<int, bool>,
+    mouse_released: Map<int, bool>,
+    pad_down: Map<string, bool>,
+    pad_down_last: Map<string, bool>,
+    pad_axes: Map<string, float>,
+    pad_axes_last: Map<string, float>,
+    pad_motion: Map<string, float>,
+    pad_pressed: Map<string, bool>,
+    pad_released: Map<string, bool>,
+    phys_keys_down: Map<string, bool>,
+    phys_keys_pressed: Map<string, bool>,
+    phys_scans_down: Map<string, bool>,
+    phys_scan_mods: Map<string, int>,
+    phys_scans_pressed: Map<string, bool>,
+    synth_keys_down: Map<string, bool>,
+    synth_keys_pressed: Map<string, bool>,
+    synth_scans_down: Map<string, bool>,
+    synth_scan_mods: Map<string, int>,
+    synth_scans_pressed: Map<string, bool>,
+}
+
+struct TapNavActions {
+    up: ActionDef,
+    dn: ActionDef,
+    lf: ActionDef,
+    rt: ActionDef,
+    cf: ActionDef,
+    bk: ActionDef,
+}
+
+fn tapnav_isolate() -> TapNavSnapshot {
+    let snap = TapNavSnapshot {
+        mouse: UI_MOUSE,
+        focus: UI_FOCUS,
+        id_debug: UI_ID_DEBUG,
+        capture: UI_INPUT_CAPTURE,
+        rebind_consumed: REBIND_INPUT_CONSUMED,
+        synthetic_only: SIM_INPUT_SYNTHETIC_ONLY,
+        last_device: LAST_INPUT_DEVICE,
+        keys_down: keys_down,
+        keys_down_last: keys_down_last,
+        keys_pressed: keys_pressed_this_frame,
+        keys_repeated: keys_repeated_this_frame,
+        scans_down: scancodes_down,
+        scans_down_last: scancodes_down_last,
+        scans_pressed: scancodes_pressed_this_frame,
+        scans_repeated: scancodes_repeated_this_frame,
+        scan_mods: scancode_modifier_state,
+        text_input: text_input_this_frame,
+        mouse_down: mouse_down,
+        mouse_down_last: mouse_down_last,
+        mouse_pressed: mouse_pressed_this_frame,
+        mouse_released: mouse_released_this_frame,
+        pad_down: pad_down,
+        pad_down_last: pad_down_last,
+        pad_axes: pad_axes,
+        pad_axes_last: pad_axes_last,
+        pad_motion: pad_axis_motion_this_frame,
+        pad_pressed: pad_pressed_this_frame,
+        pad_released: pad_released_this_frame,
+        phys_keys_down: physical_keys_down,
+        phys_keys_pressed: physical_keys_pressed_this_frame,
+        phys_scans_down: physical_scancodes_down,
+        phys_scan_mods: physical_scancode_modifiers,
+        phys_scans_pressed: physical_scancodes_pressed_this_frame,
+        synth_keys_down: synthetic_keys_down,
+        synth_keys_pressed: synthetic_keys_pressed_this_frame,
+        synth_scans_down: synthetic_scancodes_down,
+        synth_scan_mods: synthetic_scancode_modifiers,
+        synth_scans_pressed: synthetic_scancodes_pressed_this_frame,
+    }
+    UI_MOUSE = UiMouseState {
+        last: vec_new(),
+        last_count: 0,
+        cur: vec_new(),
+        cur_count: 0,
+        hot: 0,
+        hot_prev: 0,
+        active: 0,
+        clicked: 0,
+        was_down: false,
+        press_event: false,
+        anchor_x: 0.0,
+        anchor_y: 0.0,
+        anchor_w: 0.0,
+        anchor_h: 0.0,
+        anchor_ctx: 0,
+        anchor_ref_h: 0.0,
+    }
+    UI_FOCUS = UiFocusState {
+        last: vec_new(),
+        last_count: 0,
+        cur: vec_new(),
+        cur_count: 0,
+        scope: "",
+        nav_mode: false,
+        focused_ids: map_new(),
+        focused_idx: map_new(),
+        live_id: 0,
+        confirmed_id: 0,
+        up: null,
+        down_act: null,
+        left: null,
+        right: null,
+        confirm: null,
+        back: null,
+        up_was: false,
+        down_was: false,
+        confirm_was: false,
+        held_since: 0.0,
+        last_fire: 0.0,
+        prev_mouse: v(-1.0, -1.0),
+        left_was: false,
+        right_was: false,
+        lr_held_since: 0.0,
+        lr_last_fire: 0.0,
+        lr_dir: 0,
+    }
+    UI_ID_DEBUG = UiIdDebug {
+        enabled: false,
+        scopes: map_new(),
+        labels: map_new(),
+        seen: map_new(),
+        dupes: 0,
+        hash_collisions: 0,
+        last_dupe_name: "",
+    }
+    UI_INPUT_CAPTURE = false
+    SIM_INPUT_SYNTHETIC_ONLY = false
+    keys_down = map_new()
+    keys_down_last = map_new()
+    keys_pressed_this_frame = map_new()
+    keys_repeated_this_frame = map_new()
+    scancodes_down = map_new()
+    scancodes_down_last = map_new()
+    scancodes_pressed_this_frame = map_new()
+    scancodes_repeated_this_frame = map_new()
+    scancode_modifier_state = map_new()
+    text_input_this_frame = ""
+    mouse_down = map_new()
+    mouse_down_last = map_new()
+    mouse_pressed_this_frame = map_new()
+    mouse_released_this_frame = map_new()
+    pad_down = map_new()
+    pad_down_last = map_new()
+    pad_axes = map_new()
+    pad_axes_last = map_new()
+    pad_axis_motion_this_frame = map_new()
+    pad_pressed_this_frame = map_new()
+    pad_released_this_frame = map_new()
+    physical_keys_down = map_new()
+    physical_keys_pressed_this_frame = map_new()
+    physical_scancodes_down = map_new()
+    physical_scancode_modifiers = map_new()
+    physical_scancodes_pressed_this_frame = map_new()
+    synthetic_keys_down = map_new()
+    synthetic_keys_pressed_this_frame = map_new()
+    synthetic_scancodes_down = map_new()
+    synthetic_scancode_modifiers = map_new()
+    synthetic_scancodes_pressed_this_frame = map_new()
+    return snap
+}
+
+fn tapnav_restore(snap: TapNavSnapshot) {
+    UI_MOUSE = snap.mouse
+    UI_FOCUS = snap.focus
+    UI_ID_DEBUG = snap.id_debug
+    UI_INPUT_CAPTURE = snap.capture
+    REBIND_INPUT_CONSUMED = snap.rebind_consumed
+    SIM_INPUT_SYNTHETIC_ONLY = snap.synthetic_only
+    LAST_INPUT_DEVICE = snap.last_device
+    keys_down = snap.keys_down
+    keys_down_last = snap.keys_down_last
+    keys_pressed_this_frame = snap.keys_pressed
+    keys_repeated_this_frame = snap.keys_repeated
+    scancodes_down = snap.scans_down
+    scancodes_down_last = snap.scans_down_last
+    scancodes_pressed_this_frame = snap.scans_pressed
+    scancodes_repeated_this_frame = snap.scans_repeated
+    scancode_modifier_state = snap.scan_mods
+    text_input_this_frame = snap.text_input
+    mouse_down = snap.mouse_down
+    mouse_down_last = snap.mouse_down_last
+    mouse_pressed_this_frame = snap.mouse_pressed
+    mouse_released_this_frame = snap.mouse_released
+    pad_down = snap.pad_down
+    pad_down_last = snap.pad_down_last
+    pad_axes = snap.pad_axes
+    pad_axes_last = snap.pad_axes_last
+    pad_axis_motion_this_frame = snap.pad_motion
+    pad_pressed_this_frame = snap.pad_pressed
+    pad_released_this_frame = snap.pad_released
+    physical_keys_down = snap.phys_keys_down
+    physical_keys_pressed_this_frame = snap.phys_keys_pressed
+    physical_scancodes_down = snap.phys_scans_down
+    physical_scancode_modifiers = snap.phys_scan_mods
+    physical_scancodes_pressed_this_frame = snap.phys_scans_pressed
+    synthetic_keys_down = snap.synth_keys_down
+    synthetic_keys_pressed_this_frame = snap.synth_keys_pressed
+    synthetic_scancodes_down = snap.synth_scans_down
+    synthetic_scancode_modifiers = snap.synth_scan_mods
+    synthetic_scancodes_pressed_this_frame = snap.synth_scans_pressed
+}
+
+// Throwaway nav actions use the production binding names and defaults.
+fn tapnav_wire() -> TapNavActions {
+    let acts = TapNavActions {
+        up: action_new("ftap_up", [key_bind("up")], ui: true),
+        dn: action_new("ftap_down", [key_bind("down")], ui: true),
+        lf: action_new("ftap_left", [key_bind("left")], ui: true),
+        rt: action_new("ftap_right", [key_bind("right")], ui: true),
+        cf: action_new("ftap_confirm", [key_bind("return")], ui: true),
+        bk: action_new("ftap_back", [key_bind("escape")], ui: true),
+    }
+    ui_nav_use(acts.up, acts.dn, acts.lf, acts.rt, acts.cf, acts.bk)
+    return acts
+}
+
+fn tapnav_unwire(acts: TapNavActions) {
+    action_remove(acts.up)
+    action_remove(acts.dn)
+    action_remove(acts.lf)
+    action_remove(acts.rt)
+    action_remove(acts.cf)
+    action_remove(acts.bk)
+    bindings_forget_raw_entry("ftap_up")
+    bindings_forget_raw_entry("ftap_down")
+    bindings_forget_raw_entry("ftap_left")
+    bindings_forget_raw_entry("ftap_right")
+    bindings_forget_raw_entry("ftap_confirm")
+    bindings_forget_raw_entry("ftap_back")
+}
+
+fn tapnav_register() {
+    ui_focus_set_scope("ftap")
+    let r = ui_rect(100.0, 100.0, 200.0, 30.0)
+    ui_focus_item(ui_id("ftap", "a"), r, "ftap")
+    ui_focus_item(ui_id("ftap", "b"), r, "ftap")
+    ui_focus_item(ui_id("ftap", "c"), r, "ftap")
+}
+
+// Production frame order (stone/engine/runner.rock): poll events first,
+// then the authority projection, mouse/focus resolution, end-of-frame
+// snapshot.
+fn tapnav_frame() {
+    input_select_game_authority()
+    ui_mouse_begin_frame()
+    ui_focus_begin_frame()
+    input_end_frame()
+}
+
+// One poll delivering a full tap: the pressed latch survives the release,
+// the hold does not.
+fn tapnav_poll_tap(key: string, scan: string) {
+    input_physical_key_pressed(key, scan, 0, false)
+    input_physical_key_released(key, scan)
+}
+
+fn tapnav_assert_clean() {
+    assert(ACTIONS.get("ftap_down") == null,
+        "ftap: a previous test leaked its nav actions")
+    assert(!UI_INPUT_CAPTURE, "ftap: a previous test leaked keyboard capture")
+    assert(keys_down.is_empty() && scancodes_down.is_empty()
+        && physical_keys_down.is_empty() && physical_scancodes_down.is_empty()
+        && scancodes_pressed_this_frame.is_empty(),
+        "ftap: a previous test leaked input holds or latches")
+}
+
+@test
+fn ui_focus_short_tap_moves_once_without_repeat() {
+    let snap = tapnav_isolate()
+    defer { tapnav_restore(snap) }
+    tapnav_assert_clean()
+    let acts = tapnav_wire()
+    defer { tapnav_unwire(acts) }
+
+    let ia = ui_id("ftap", "a")
+    let ib = ui_id("ftap", "b")
+    let ic = ui_id("ftap", "c")
+
+    tapnav_register()
+    tapnav_frame()
+    assert(!UI_FOCUS.nav_mode, "ftap: no input leaves pointer mode")
+
+    // A tap completed in one poll enters nav mode on the first item.
+    tapnav_poll_tap("down", "down")
+    tapnav_register()
+    tapnav_frame()
+    assert(UI_FOCUS.nav_mode, "ftap: a same-poll tap enters nav mode")
+    assert(ui_focused(ia), "ftap: the entering tap focuses the first item")
+    assert(UI_INPUT_CAPTURE, "ftap: nav-mode focus captures the keyboard")
+
+    // The next tap moves exactly one item down the declaration order.
+    tapnav_poll_tap("down", "down")
+    tapnav_register()
+    tapnav_frame()
+    assert(ui_focused(ib), "ftap: a same-poll tap moves focus to the next item")
+    assert(!ui_focused(ia) && !ui_focused(ic),
+        "ftap: the tap moves one item, not zero or two")
+
+    // A quiet frame fires nothing: one activation, no repeat.
+    tapnav_register()
+    tapnav_frame()
+    assert(ui_focused(ib), "ftap: a quiet frame after a tap repeats nothing")
+    assert(UI_FOCUS.nav_mode, "ftap: nav mode survives a quiet frame")
+}
+
+@test
+fn ui_focus_short_tap_confirms_once() {
+    let snap = tapnav_isolate()
+    defer { tapnav_restore(snap) }
+    tapnav_assert_clean()
+    let acts = tapnav_wire()
+    defer { tapnav_unwire(acts) }
+
+    let ia = ui_id("ftap", "a")
+    let ib = ui_id("ftap", "b")
+
+    tapnav_register()
+    tapnav_frame()
+    tapnav_poll_tap("down", "down")
+    tapnav_register()
+    tapnav_frame()
+    assert(ui_focused(ia), "ftap: the entering tap focuses the first item")
+
+    tapnav_poll_tap("return", "return")
+    tapnav_register()
+    tapnav_frame()
+    assert(ui_focus_confirmed(ia), "ftap: a same-poll confirm tap fires for the focused item")
+    assert(!ui_focus_confirmed(ib), "ftap: confirm does not fire for unfocused items")
+
+    tapnav_register()
+    tapnav_frame()
+    assert(!ui_focus_confirmed(ia), "ftap: confirm is a one-frame edge after a tap")
+    assert(ui_focused(ia), "ftap: confirming leaves focus unmoved")
+}
+
+@test
+fn ui_focus_short_tap_drives_lr_once() {
+    let snap = tapnav_isolate()
+    defer { tapnav_restore(snap) }
+    tapnav_assert_clean()
+    let acts = tapnav_wire()
+    defer { tapnav_unwire(acts) }
+
+    let ia = ui_id("ftap", "a")
+
+    tapnav_register()
+    tapnav_frame()
+    tapnav_poll_tap("down", "down")
+    tapnav_register()
+    tapnav_frame()
+    assert(ui_focused(ia), "ftap: the entering tap focuses the first item")
+
+    tapnav_poll_tap("left", "left")
+    tapnav_register()
+    tapnav_frame()
+    assert_eq(UI_FOCUS.lr_dir, -1, "ftap: a same-poll left tap resolves -1")
+
+    tapnav_register()
+    tapnav_frame()
+    assert_eq(UI_FOCUS.lr_dir, 0, "ftap: a quiet frame after a left tap resolves 0")
+
+    tapnav_poll_tap("right", "right")
+    tapnav_register()
+    tapnav_frame()
+    assert_eq(UI_FOCUS.lr_dir, 1, "ftap: a same-poll right tap resolves +1")
+}
+
+@test
+fn ui_focus_held_key_fires_one_edge() {
+    let snap = tapnav_isolate()
+    defer { tapnav_restore(snap) }
+    tapnav_assert_clean()
+    let acts = tapnav_wire()
+    defer { tapnav_unwire(acts) }
+
+    let ia = ui_id("ftap", "a")
+    let ib = ui_id("ftap", "b")
+
+    tapnav_register()
+    tapnav_frame()
+
+    // A held key: the down poll fires the entering edge once.
+    input_physical_key_pressed("down", "down", 0, false)
+    tapnav_register()
+    tapnav_frame()
+    assert(ui_focused(ia), "ftap: a held key enters nav mode on the first item")
+
+    // Still held, no new events: no second edge, no repeat on frozen time.
+    tapnav_register()
+    tapnav_frame()
+    assert(ui_focused(ia), "ftap: a held key does not re-fire without a new press")
+    assert(!ui_focused(ib), "ftap: a held key does not advance focus by itself")
+
+    input_physical_key_released("down", "down")
+    tapnav_register()
+    tapnav_frame()
+    assert(ui_focused(ia), "ftap: releasing a held key leaves focus unmoved")
+}
+
+@test
+fn ui_focus_sim_midframe_injection_still_lands() {
+    let snap = tapnav_isolate()
+    defer { tapnav_restore(snap) }
+    tapnav_assert_clean()
+    let acts = tapnav_wire()
+    defer { tapnav_unwire(acts) }
+    SIM_INPUT_SYNTHETIC_ONLY = true
+
+    let ia = ui_id("ftap", "a")
+    let ib = ui_id("ftap", "b")
+
+    tapnav_register()
+    tapnav_frame()
+
+    // A sim injects mid-frame, after resolution: the next resolution fires.
+    on_key_pressed_with_identity("down", "down", 0, false)
+    tapnav_register()
+    tapnav_frame()
+    assert(ui_focused(ia), "ftap: a mid-frame injected press enters nav mode")
+
+    on_key_released_with_identity("down", "down")
+    tapnav_register()
+    tapnav_frame()
+    assert(ui_focused(ia), "ftap: releasing an injected key leaves focus unmoved")
+    assert(!ui_focused(ib), "ftap: an injected press moves at most once")
+}

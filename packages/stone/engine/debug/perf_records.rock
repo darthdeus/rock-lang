@@ -1,0 +1,421 @@
+// Perf-only storage: fixed capacity allocated before the first frame. Numeric
+// columns are interleaved; slowest-system strings borrow registered names.
+
+// Opt-in start metadata survives warmup and frame boundaries; all counts and
+// mcode queries are limited to measured outer frames. No locations, event log
+// or per-event JSON; reason labels are resolved after the window closes.
+// rock: allow(long_inline_lua)
+@nomangle inline(lua) fn perf_jit_health_active(active: bool) = """
+    local state = _G.__stone_perf_jit_health
+    if state == nil then
+        state = {enabled = os.getenv("PERF_JIT_HEALTH") == "1", starts = 0, aborts = 0,
+                 root_compiles = 0, side_compiles = 0, mcode_bytes = 0, flushes = 0,
+                 mcode_unavailable = 0, unclassified_compiles = 0,
+                 reasons = {}, exits = {}, exit_records = {}}
+        _G.__stone_perf_jit_health = state
+    end
+    if not state.enabled then
+        _G.__stone_perf_jit_event = nil
+        return
+    end
+    state.active = active
+    if state.observe == nil then
+        local util = require("jit.util")
+        local function exit_for(parent_id, exit_id)
+            local parent = state.exits[parent_id]
+            if parent == nil then parent = {}; state.exits[parent_id] = parent end
+            local exit = parent[exit_id]
+            if exit == nil then
+                exit = {starts = 0, stops = 0}
+                parent[exit_id] = exit
+                state.exit_records[#state.exit_records + 1] = exit
+            end
+            return exit
+        end
+        state.observe = function(what, tr, func, pc, other, extra)
+            -- LuaJIT has one recorder; remember its current start even when
+            -- it precedes the measurement window. Do not charge warmup work.
+            if what == "start" then
+                state.trace, state.parent, state.exit = tr, other or 0, extra
+            elseif what == "flush" then
+                -- Trace numbers are reused; keep generations distinct even
+                -- when the flush happens between measured frames.
+                state.exits, state.trace = {}, nil
+            end
+            if not state.active then
+                if what == "stop" or what == "abort" then state.trace = nil end
+                return
+            end
+            if what == "start" then
+                state.starts = state.starts + 1
+                if other and other > 0 then
+                    local exit = exit_for(other, extra)
+                    exit.starts = exit.starts + 1
+                end
+            elseif what == "stop" then
+                if state.trace ~= tr then
+                    state.unclassified_compiles = state.unclassified_compiles + 1
+                elseif state.parent > 0 then
+                    state.side_compiles = state.side_compiles + 1
+                    local exit = exit_for(state.parent, state.exit)
+                    exit.stops = exit.stops + 1
+                else
+                    state.root_compiles = state.root_compiles + 1
+                end
+                state.trace = nil
+                -- Emitted traffic, including code later flushed, not live arena size.
+                local code = util.tracemc(tr)
+                if type(code) == "string" then state.mcode_bytes = state.mcode_bytes + #code
+                else state.mcode_unavailable = state.mcode_unavailable + 1 end
+            elseif what == "abort" then
+                state.aborts = state.aborts + 1
+                local reason = other or -1
+                state.reasons[reason] = (state.reasons[reason] or 0) + 1
+                state.trace = nil
+            elseif what == "flush" then
+                state.flushes = state.flushes + 1
+            end
+        end
+    end
+    _G.__stone_perf_jit_event = state.observe
+"""
+
+// rock: allow(long_inline_lua)
+@nomangle inline(lua) fn perf_jit_health_json() -> string = """
+    local s = _G.__stone_perf_jit_health
+    if s == nil or not s.enabled then return '{"available":false}' end
+    local vmdef = require("jit.vmdef")
+    local reasons = {}
+    for id, count in pairs(s.reasons) do
+        reasons[#reasons + 1] = {reason = vmdef.traceerr[id] or tostring(id), count = count}
+    end
+    table.sort(reasons, function(a, b)
+        if a.count == b.count then return a.reason < b.reason end
+        return a.count > b.count
+    end)
+    local rows = {}
+    for i = 1, #reasons do
+        local r = reasons[i]
+        rows[#rows + 1] = '{"reason":"' .. __perf_json_escape_name(r.reason) .. '","count":' .. r.count .. '}'
+    end
+    local repeated, maximum = 0, 0
+    for _, exit in ipairs(s.exit_records) do
+        if exit.stops == 0 then
+            maximum = math.max(maximum, exit.starts)
+            if exit.starts > 10 then repeated = repeated + 1 end
+        end
+    end
+    local bytes = s.mcode_unavailable == 0 and tostring(s.mcode_bytes) or "null"
+    local roots = s.unclassified_compiles == 0 and tostring(s.root_compiles) or "null"
+    local sides = s.unclassified_compiles == 0 and tostring(s.side_compiles) or "null"
+    return '{"available":true,"starts":' .. s.starts .. ',"aborts":' .. s.aborts ..
+        ',"root_compiles":' .. roots .. ',"side_compiles":' .. sides ..
+        ',"unclassified_compiles":' .. s.unclassified_compiles ..
+        ',"mcode_bytes":' .. bytes .. ',"mcode_unavailable":' .. s.mcode_unavailable ..
+        ',"flushes":' .. s.flushes .. ',"retry_threshold":10,"repeated_exits":' .. repeated ..
+        ',"max_exit_retries":' .. maximum .. ',"abort_reasons":[' .. table.concat(rows, ',') .. ']}'
+"""
+
+// Native JIT per-frame deltas ride in the same row after the image timing
+// fields, so every row joins its JIT counters without a second table. Column
+// order mirrors stone-rs jit_health_abi FRAME_DELTA_COLUMNS.
+const JIT_NATIVE_COLUMNS: int = 18
+const PERF_RECORD_TIMING_OFFSET: int = 17 + GC_STEP_FIELDS + JIT_NATIVE_COLUMNS
+const PERF_RECORD_COLUMNS: int = PERF_RECORD_TIMING_OFFSET + 2
+const PERF_RECORD_CAPACITY: int = 65536
+
+pub struct PerfStallSummary {
+    over_17: int, over_33: int, over_34: int, over_50: int,
+    excess_17: float, excess_34: float, median_ms: float, worst_ms: float,
+}
+
+pub fn perf_stall_band(median_ms: float) -> string {
+    if median_ms < 25.0 { return "60" }
+    if median_ms <= 34.0 { return "30" }
+    return "below"
+}
+
+// Called only after measurement (and by the owning synthetic-series test).
+pub fn perf_stall_summary(samples: NativeBuffer<float>, count: int,
+                          stride: int = 1, offset: int = 0) -> PerfStallSummary {
+    let result = PerfStallSummary { over_17: 0, over_33: 0, over_34: 0, over_50: 0,
+        excess_17: 0.0, excess_34: 0.0, median_ms: 0.0, worst_ms: 0.0 }
+    let sorted: [float] = []
+    for i in 0..count {
+        let ms = nb_get(samples, i * stride + offset)
+        sorted.push(ms)
+        if ms > 17.0 { result.over_17 += 1; result.excess_17 += ms - 17.0 }
+        if ms > 33.0 { result.over_33 += 1 }
+        if ms > 34.0 { result.over_34 += 1; result.excess_34 += ms - 34.0 }
+        if ms > 50.0 { result.over_50 += 1 }
+        result.worst_ms = max(result.worst_ms, ms)
+    }
+    sort(sorted, x => x)
+    if count > 0 {
+        result.median_ms = (sorted[((count - 1) / 2) as int] + sorted[(count / 2) as int]) / 2.0
+    }
+    return result
+}
+
+pub struct PerfRecords {
+    data: NativeBuffer<float>, names: [string], count: int,
+    previous_frame: int, previous_t: float, previous_measured: bool,
+    start_frame: int, seconds: float, measured_t0: float, requested_seconds: float, termination: string,
+    waiting: bool, ready: bool, scenario: string, scene: string, phase: string,
+    warmup_frames: int, requested_frames: int, ready_frame: int, start_relative_frame: int,
+    absolute_start_frame: int,
+    transition_frames: NativeBuffer<int>, transition_ms: NativeBuffer<float>, transitions: int,
+    jit_native_stage: NativeBuffer<float>,
+}
+
+fn perf_records_new() -> PerfRecords {
+    let capacity = if PERF_FRAME_CAPTURE { PERF_RECORD_CAPACITY } else { 1 }
+    let names: [string] = []
+    for _ in 0..capacity { names.push("") }
+    return PerfRecords {
+        data: native_buffer_float(capacity * PERF_RECORD_COLUMNS), names, count: 0,
+        previous_frame: -1, previous_t: 0.0, previous_measured: false,
+        start_frame: -1, seconds: 0.0, measured_t0: -1.0,
+        requested_seconds: get_env_float("PERF_SECONDS", -1.0), termination: "interrupted",
+        waiting: false, ready: true, scenario: "", scene: "", phase: "", warmup_frames: -1,
+        requested_frames: -1, ready_frame: -1,
+        start_relative_frame: -1, absolute_start_frame: -1,
+        transition_frames: native_buffer_int(capacity),
+        transition_ms: native_buffer_float(capacity), transitions: 0,
+        jit_native_stage: native_buffer_float(JIT_NATIVE_COLUMNS),
+    }
+}
+
+pub global PERF_RECORDS: PerfRecords = perf_records_new()
+
+pub fn perf_scenario_wait(name: string) {
+    PERF_RECORDS.scenario = name
+    PERF_RECORDS.phase = ""
+    PERF_RECORDS.warmup_frames = -1
+    PERF_RECORDS.requested_frames = -1
+    PERF_RECORDS.ready = false
+    PERF_RECORDS.waiting = true
+    PERF_RECORDS.ready_frame = -1
+    PERF_RECORDS.start_relative_frame = -1
+    if PERF_FRAME_CAPTURE {
+        PROFILER.warmup_active = true
+        PROFILER.warmup_start_time = -1.0
+    }
+}
+
+fn perf_scenario_require_window() {
+    assert(PERF_RECORDS.warmup_frames >= 0 && PERF_RECORDS.requested_frames > 0,
+        "perf scenario requires a declared window before readiness")
+}
+
+pub fn perf_scenario_ready(scene: string) {
+    perf_scenario_require_window()
+    if PERF_RECORDS.ready { return }
+    PERF_RECORDS.scene = scene
+    PERF_RECORDS.ready = true
+    PERF_RECORDS.waiting = false
+    PERF_RECORDS.ready_frame = -1
+    PERF_RECORDS.start_relative_frame = -1
+    if PERF_FRAME_CAPTURE {
+        PROFILER.warmup_start_time = stone_get_time()
+        PROFILER.frame_count = 0
+    }
+}
+
+pub fn perf_scenario_window(phase: string, warmup_frames: int, frames: int) {
+    assert(frames > 0, "perf scenario measurement frames must be positive")
+    assert(warmup_frames >= 0, "perf scenario warmup frames must be nonnegative")
+    PERF_RECORDS.phase = phase
+    PERF_RECORDS.absolute_start_frame = get_env_int("PERF_ABSOLUTE_START_FRAME", -1)
+    assert(PERF_RECORDS.absolute_start_frame >= -1, "PERF_ABSOLUTE_START_FRAME must be nonnegative or unset")
+    PERF_RECORDS.warmup_frames = get_env_int("PERF_WARMUP_FRAMES", warmup_frames)
+    assert(PERF_RECORDS.warmup_frames >= 0, "PERF_WARMUP_FRAMES must be nonnegative")
+    PERF_RECORDS.requested_frames = get_env_int("PERF_MEASURE_FRAMES", frames)
+    assert(PERF_RECORDS.requested_frames > 0 && PERF_RECORDS.requested_frames <= PERF_RECORD_CAPACITY,
+        "perf measurement frames must be between 1 and record capacity")
+    PERF_RECORDS.ready_frame = -1
+    PERF_RECORDS.start_relative_frame = -1
+    if PERF_FRAME_CAPTURE {
+        PROFILER.warmup_active = true
+        PROFILER.warmup_seconds = 0.0
+        PROFILER.warmup_min_frames = PERF_RECORDS.warmup_frames
+        PROFILER.warmup_start_time = -1.0
+        PROFILER.frame_count = 0
+    }
+}
+
+// A scenario may fix its own measured count; the CLI supplies this default
+// for every other workload. PERF_MEASURE_FRAMES overrides either declaration.
+pub fn perf_scenario_default_window(phase: string) {
+    perf_scenario_window(phase, 600, get_env_int("PERF_DEFAULT_MEASURE_FRAMES", 1200))
+}
+
+pub fn perf_scenario_transition(start: float) {
+    if !PERF_FRAME_CAPTURE || PERF_RECORDS.measured_t0 < 0.0 { return }
+    let i = PERF_RECORDS.transitions
+    assert(i < PERF_RECORD_CAPACITY, "perf transition capacity exceeded")
+    nb_set(PERF_RECORDS.transition_frames, i, PERF_RECORDS.previous_frame)
+    nb_set(PERF_RECORDS.transition_ms, i, (stone_get_time() - start) * 1000.0)
+    PERF_RECORDS.transitions += 1
+}
+
+// One boundary supplies both the hitch ledger and perf records. Closing the
+// preceding frame here includes presentation, pacing and runner bookkeeping.
+fn perf_outer_frame_boundary(frame: int, now: float) {
+    perf_outer_frame_close(now)
+    if PERF_RECORDS.absolute_start_frame >= 0 && PERF_RECORDS.warmup_frames >= 0 {
+        let latest_ready = PERF_RECORDS.absolute_start_frame - PERF_RECORDS.warmup_frames
+        assert(frame <= latest_ready || PERF_RECORDS.ready_frame >= 0,
+            "perf scenario readiness missed the absolute start warmup deadline")
+    }
+    if PERF_RECORDS.ready && PERF_RECORDS.ready_frame < 0 {
+        PERF_RECORDS.ready_frame = frame
+    }
+    PERF_RECORDS.previous_frame = frame
+    PERF_RECORDS.previous_t = now
+    PERF_RECORDS.previous_measured = PERF_FRAME_CAPTURE && PERF_RECORDS.ready
+        && !PROFILER.warmup_active && !perf_measurement_complete()
+    if PERF_RECORDS.previous_measured && PERF_RECORDS.measured_t0 < 0.0 {
+        assert(PERF_RECORDS.absolute_start_frame < 0 || frame == PERF_RECORDS.absolute_start_frame,
+            "perf scenario missed its absolute start frame")
+        PERF_RECORDS.measured_t0 = now
+        PERF_RECORDS.start_frame = frame
+        PERF_RECORDS.start_relative_frame = if PERF_RECORDS.ready_frame >= 0 {
+            frame - PERF_RECORDS.ready_frame
+        } else { -1 }
+    }
+    if PERF_FRAME_CAPTURE { perf_jit_health_active(PERF_RECORDS.previous_measured) }
+}
+
+fn perf_outer_frame_close(now: float) {
+    if PERF_FRAME_CAPTURE { perf_jit_health_active(false) }
+    if PERF_RECORDS.previous_frame >= 0 {
+        let ms = (now - PERF_RECORDS.previous_t) * 1000.0
+        hitch_frame_record(PERF_RECORDS.previous_frame, ms, PERF_RECORDS.previous_t * 1000.0,
+            PERF_RECORDS.previous_measured)
+    }
+    PERF_RECORDS.previous_frame = -1
+}
+
+fn perf_measurement_complete() -> bool {
+    return PERF_RECORDS.warmup_frames >= 0 && PERF_RECORDS.requested_frames > 0
+        && PERF_RECORDS.count == PERF_RECORDS.requested_frames
+}
+
+// The runner calls this after closing the preceding frame, before starting
+// another. Caps apply even during readiness, warmup and allocation windows.
+fn perf_run_termination(frame: int, max_frames: int, elapsed: float, seconds: float) -> string {
+    if PERF_FRAME_CAPTURE && perf_measurement_complete() {
+        return if profiler_gc_window_pending() { "gc_window_incomplete" } else { "window_complete" }
+    }
+    if seconds > 0.0 && elapsed >= seconds { return "seconds_cap" }
+    if max_frames > 0 && frame >= max_frames { return "process_frame_cap" }
+    return ""
+}
+
+fn perf_measurement_json() -> string {
+    let r = PERF_RECORDS
+    return "{{\"requested_frames\":{r.requested_frames},\"completed_frames\":{r.count},\"seconds_cap\":{r.requested_seconds:.6f},\"termination\":\"{r.termination}\"}}"
+}
+
+fn perf_record_frame(frame: int, t_ms: float, ms: float, heap: float, delta: float,
+                     starts: int, compiles: int, aborts: int, flushes: int, images: ImageLoadStats) {
+    let i = PERF_RECORDS.count
+    assert(i < PERF_RECORD_CAPACITY, "perf frame record capacity exceeded; shorten the run")
+    let at = i * PERF_RECORD_COLUMNS
+    nb_set(PERF_RECORDS.data, at, frame as float)
+    nb_set(PERF_RECORDS.data, at + 1, t_ms)
+    nb_set(PERF_RECORDS.data, at + 2, ms)
+    nb_set(PERF_RECORDS.data, at + 3, metric_recent(FRAME_LOGIC_CPU, 0))
+    nb_set(PERF_RECORDS.data, at + 4, metric_recent(FRAME_RENDER_CPU, 0))
+    nb_set(PERF_RECORDS.data, at + 5, metric_recent(FRAME_PRESENT, 0))
+    nb_set(PERF_RECORDS.data, at + 6, heap)
+    nb_set(PERF_RECORDS.data, at + 7, delta)
+    nb_set(PERF_RECORDS.data, at + 8, starts as float)
+    nb_set(PERF_RECORDS.data, at + 9, compiles as float)
+    nb_set(PERF_RECORDS.data, at + 10, aborts as float)
+    nb_set(PERF_RECORDS.data, at + 11, flushes as float)
+    nb_set(PERF_RECORDS.data, at + 12, images.upload_us as float)
+    nb_set(PERF_RECORDS.data, at + 13, RESIDENCY_FRAME_MISS_WAIT_US as float)
+    nb_set(PERF_RECORDS.data, at + 14, HITCH.cur_slow_ms)
+    if GC_STEP_ENABLED {
+        for c in 0..GC_STEP_FIELDS {
+            nb_set(PERF_RECORDS.data, at + 15 + c, nb_get(GC_STEP_FRAME, c))
+        }
+    }
+    nb_set(PERF_RECORDS.data, at + 15 + GC_STEP_FIELDS, images.load_us as float)
+    nb_set(PERF_RECORDS.data, at + 16 + GC_STEP_FIELDS, images.wait_us as float)
+    // One native read per recorded frame into preallocated staging, then a
+    // fixed copy into the row. Buffered serialization at export keeps this
+    // free of per-frame allocation. PERF_JIT_NATIVE_READ=0 keeps the overhead
+    // switch honest by zero-filling instead of reading.
+    if JIT_NATIVE_READ_ENABLED {
+        jit_native_health_frame_delta(PERF_RECORDS.jit_native_stage.ptr, JIT_NATIVE_COLUMNS)
+    } else {
+        for c in 0..JIT_NATIVE_COLUMNS { nb_set(PERF_RECORDS.jit_native_stage, c, 0.0) }
+    }
+    for c in 0..JIT_NATIVE_COLUMNS {
+        nb_set(PERF_RECORDS.data, at + 17 + GC_STEP_FIELDS + c,
+            nb_get(PERF_RECORDS.jit_native_stage, c))
+    }
+    nb_set(PERF_RECORDS.data, at + PERF_RECORD_TIMING_OFFSET,
+        metric_recent(FRAME_EFFECTIVE_CPU, 0))
+    nb_set(PERF_RECORDS.data, at + PERF_RECORD_TIMING_OFFSET + 1,
+        metric_recent(FRAME_RENDERED, 0))
+    PERF_RECORDS.names[i] = HITCH.cur_slow_name
+    PERF_RECORDS.count += 1
+    PERF_RECORDS.seconds += ms / 1000.0
+}
+
+fn perf_records_json() -> string {
+    let rows: [string] = []
+    for i in 0..PERF_RECORDS.count {
+        let values: [string] = []
+        for c in 0..14 {
+            let n = nb_get(PERF_RECORDS.data, i * PERF_RECORD_COLUMNS + c)
+            values.push(if c == 0 || c >= 8 { "{n as int}" } else { "{n:.6f}" })
+        }
+        values.push("\"{__perf_json_escape_name(PERF_RECORDS.names[i])}\"")
+        values.push("{nb_get(PERF_RECORDS.data, i * PERF_RECORD_COLUMNS + 14):.6f}")
+        for c in 0..GC_STEP_FIELDS {
+            let n = nb_get(PERF_RECORDS.data, i * PERF_RECORD_COLUMNS + 15 + c)
+            values.push(if GC_STEP_ENABLED && n >= 0.0 { "{n:.6f}" } else { "null" })
+        }
+        let load_us = nb_get(PERF_RECORDS.data, i * PERF_RECORD_COLUMNS + 15 + GC_STEP_FIELDS)
+        let decode_wait_us = nb_get(PERF_RECORDS.data, i * PERF_RECORD_COLUMNS + 16 + GC_STEP_FIELDS)
+        values.push("{load_us as int}")
+        values.push("{decode_wait_us as int}")
+        for c in 0..JIT_NATIVE_COLUMNS {
+            let n = nb_get(PERF_RECORDS.data, i * PERF_RECORD_COLUMNS + 17 + GC_STEP_FIELDS + c)
+            values.push("{n as int}")
+        }
+        values.push("{nb_get(PERF_RECORDS.data, i * PERF_RECORD_COLUMNS + PERF_RECORD_TIMING_OFFSET):.6f}")
+        values.push("{nb_get(PERF_RECORDS.data, i * PERF_RECORD_COLUMNS + PERF_RECORD_TIMING_OFFSET + 1):.6f}")
+        rows.push("[{values.join(",")}]")
+    }
+    return "{{\"columns\":[\"frame\",\"t_ms\",\"frame_ms\",\"logic_ms\",\"render_ms\",\"present_ms\",\"heap_kb\",\"heap_delta_kb\",\"jit_starts\",\"jit_compiles\",\"jit_aborts\",\"jit_flushes\",\"upload_us\",\"residency_us\",\"slowest_system\",\"slowest_ms\",\"gc_step_ms\",\"gc_atomic_ms\",\"gc_full_ms\",\"gc_steps\",\"gc_atomics\",\"gc_fulls\",\"gc_max_step_ms\",\"gc_phase_start\",\"gc_phase_end\",\"gc_heap_start_kb\",\"gc_heap_end_kb\",\"gc_request_kb\",\"gc_ms_per_kb\",\"load_us\",\"decode_wait_us\",\"jitn_root_starts\",\"jitn_side_starts\",\"jitn_root_compiles\",\"jitn_side_compiles\",\"jitn_aborts\",\"jitn_abort_reason0\",\"jitn_abort_count0\",\"jitn_abort_reason1\",\"jitn_abort_count1\",\"jitn_abort_reason2\",\"jitn_abort_count2\",\"jitn_flushes\",\"jitn_mcode_bytes\",\"jitn_live_traces\",\"jitn_arena_occupied_bytes\",\"jitn_code_free_bytes\",\"jitn_coalescing_next\",\"jitn_coalescing_overflow\",\"effective_ms\",\"rendered_ms\"],\"rows\":[{rows.join(",")}]}}"
+}
+
+fn perf_stalls_json() -> string {
+    let s = perf_stall_summary(PERF_RECORDS.data, PERF_RECORDS.count, PERF_RECORD_COLUMNS, 2)
+    let band = if PERF_RECORDS.count == 0 { "below" } else { perf_stall_band(s.median_ms) }
+    let in_band = if band == "60" { "{s.over_17}" } else if band == "30" { "{s.over_34}" } else { "null" }
+    return "{{\"window\":{{\"start_frame\":{PERF_RECORDS.start_frame},\"frames\":{PERF_RECORDS.count},\"seconds\":{PERF_RECORDS.seconds:.6f}}},\"counts\":{{\"over_17\":{s.over_17},\"over_33\":{s.over_33},\"over_50\":{s.over_50}}},\"excess_ms\":{{\"over_17\":{s.excess_17:.6f},\"over_34\":{s.excess_34:.6f}}},\"median_ms\":{s.median_ms:.6f},\"worst_ms\":{s.worst_ms:.6f},\"band\":\"{band}\",\"band_rule\":\"v1\",\"stalls_in_band\":{in_band}}}"
+}
+
+fn perf_scenario_json() -> string {
+    let r = PERF_RECORDS
+    let end_relative_frame = if r.start_relative_frame >= 0 {
+        r.start_relative_frame + r.count
+    } else { -1 }
+    let complete = perf_measurement_complete() && r.termination == "window_complete"
+    return "{{\"name\":\"{__perf_json_escape_name(r.scenario)}\",\"scene\":\"{__perf_json_escape_name(r.scene)}\",\"ready\":{r.ready},\"phase\":\"{__perf_json_escape_name(r.phase)}\",\"ready_frame\":{r.ready_frame},\"absolute_start_frame\":{r.start_frame},\"requested_absolute_start_frame\":{r.absolute_start_frame},\"warmup_frames\":{r.warmup_frames},\"requested_frames\":{r.requested_frames},\"start_relative_frame\":{r.start_relative_frame},\"end_relative_frame\":{end_relative_frame},\"complete\":{complete}}}"
+}
+
+fn perf_transitions_json() -> string {
+    let rows: [string] = []
+    for i in 0..PERF_RECORDS.transitions {
+        rows.push("{{\"frame\":{nb_get(PERF_RECORDS.transition_frames, i)},\"ms\":{nb_get(PERF_RECORDS.transition_ms, i):.6f}}}")
+    }
+    return "[{rows.join(",")}]"
+}

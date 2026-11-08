@@ -1,0 +1,187 @@
+@test
+fn c_ui_text_art_cache_and_coverage() {
+    assert(stone_gpu_host_ensure())
+    let pixels = new_owned_image_data(1, 1)
+    image_data_set_pixel(pixels, 0, 0, 1.0, 1.0, 1.0, 1.0)
+    WHITE_PIXEL = new_owned_image_from_data(pixels)
+    release_owned_image_data(pixels)
+    assert(stone_text_init())
+    load_pending_shader_sources()
+    let font = load_font(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 24,
+        raster: FontRasterPolicy::Fixed).unwrap()
+    let consumers = TEXT_ART_SELECTED_BUCKETS.len()
+    let formats = TEXT_ART_CONSUMER_KEY_FORMATS
+    text_art_anonymous_measurement_case(font)
+    let measurement_error = world_fixture_raised(() => {
+        text_art_anonymous_measurement_case(font, fail_after_measurement: true)
+    })
+    assert(measurement_error != null
+        && measurement_error.unwrap().contains("TextArt measurement fixture failure"))
+    assert_eq(TEXT_ART_SELECTED_BUCKETS.len(), consumers)
+    assert_eq(TEXT_ART_CONSUMER_KEY_FORMATS, formats)
+    let low = text_art_raster_demand_for(font, "N5", 20.0, 1.0)
+    let high = text_art_raster_demand_for(font, "N5", 20.0, 2.0)
+    assert_eq(low.glyph_population, 2)
+    assert_eq(high.glyph_population, 2)
+    assert(high.coverage_bucket > low.coverage_bucket)
+    let first = text_art_atlas_instance_for(font, low, "n5/coverage")
+    let repeated = text_art_atlas_instance_for(font, low, "n5/coverage")
+    assert_eq(first.instance_id, repeated.instance_id)
+    assert_eq(first.generation_count, repeated.generation_count)
+    let larger = text_art_atlas_instance_for(font, high, "n5/coverage")
+    assert(larger.pixel_size > first.pixel_size)
+    assert(larger.atlas_width > 0 && larger.atlas_height > 0)
+
+    let art = text_art_new<TextArtGlyphInput>("n5/cache")
+    let style = TextArtStyle { shadow_levels: 1, bloom_levels: 1 }
+    let layout = text_layout_build(font, "N5", 20.0, 1.0)
+    let poses = text_layout_identity_poses(layout)
+    let input = text_art_glyph_input(layout, TextArtFollow::StaticRun, poses)
+    let first_canvas = text_art_glyph_ensure(art, input, style)
+    assert(canvas_is_live(first_canvas))
+    assert_eq(text_art_stats(art).surface_source_bake_count, 1)
+    assert_eq(text_art_stats(art).bake_count, 1)
+    let again = text_art_glyph_ensure(art, input, style)
+    assert_eq(again.handle.0, first_canvas.handle.0)
+    assert_eq(text_art_stats(art).surface_source_bake_count, 1)
+    assert(text_art_stats(art).cache_hit)
+    assert(text_art_stats(art).surface_source_cache_hit)
+    let changed_input = text_art_glyph_input(layout, TextArtFollow::StaticRun, poses, tint: RED)
+    let changed = text_art_glyph_ensure(art, changed_input, style)
+    assert_eq(changed.handle.0, first_canvas.handle.0)
+    assert_eq(text_art_stats(art).surface_source_bake_count, 2)
+    assert_eq(text_art_stats(art).bake_count, 2)
+    assert(!text_art_stats(art).cache_hit)
+    let canvases = stone_get_graphics_stats().canvases
+    for shadow_mode in 0..3 {
+        text_art_glyph_input_ownership_case(font, shadow_mode)
+        assert_eq(stone_get_graphics_stats().canvases, canvases)
+    }
+    let raised = world_fixture_raised(() => {
+        text_art_glyph_input_ownership_case(font, 2, fail_after_ensure: true)
+    })
+    assert(raised != null && raised.unwrap().contains("TextArt ownership fixture failure"))
+    assert_eq(stone_get_graphics_stats().canvases, canvases,
+        "ownership fixture retires its canvases on failure")
+    text_art_destroy(art)
+    assert(!canvas_is_live(first_canvas))
+    assert_eq(text_art_stats(art).extent, iv(0, 0))
+    assert(ui_bake_canvas(art.source) == null)
+    unload_font(font)
+}
+
+fn text_art_anonymous_measurement_case(font: Font, fail_after_measurement: bool = false) {
+    let saved_buckets = TEXT_ART_SELECTED_BUCKETS
+    let saved_formats = TEXT_ART_CONSUMER_KEY_FORMATS
+    TEXT_ART_SELECTED_BUCKETS = map_new()
+    TEXT_ART_CONSUMER_KEY_FORMATS = 0
+    defer {
+        TEXT_ART_SELECTED_BUCKETS = saved_buckets
+        TEXT_ART_CONSUMER_KEY_FORMATS = saved_formats
+    }
+    for i in 0..16 {
+        let layout = text_layout_build(font, "Editor label {i}", 20.0, 1.0)
+        let input = text_art_glyph_input(layout, TextArtFollow::StaticRun,
+            text_layout_identity_poses(layout))
+        let bounds = text_art_glyph_raster_bounds(input)
+        assert(bounds.w > 0.0 && bounds.h > 0.0)
+        assert_eq(text_art_glyph_raster_bounds(input), bounds)
+    }
+    assert_eq(TEXT_ART_SELECTED_BUCKETS.len(), 0,
+        "distinct anonymous measurements do not retain hysteresis consumers")
+    assert_eq(TEXT_ART_CONSUMER_KEY_FORMATS, 0)
+
+    let layout = text_layout_build(font, "Editor retained label", 20.0, 1.0)
+    let demand = text_layout_raster_demand(layout, null)
+    // Straddle a bucket boundary inside its downward hysteresis band.
+    layout.raster_target_cap_height *= 97.0 / demand.required_pixel_em
+    let retained = text_art_glyph_input(layout, TextArtFollow::StaticRun,
+        text_layout_identity_poses(layout), consumer_key: "n5/measurement")
+    assert_eq(retained.consumer_key, "n5/measurement")
+    let _ = text_art_glyph_raster_bounds(retained)
+    let high_instance = TEXT_ART_LAST_INSTANCE_ID
+    layout.raster_target_cap_height *= 95.0 / 97.0
+    let downward = text_art_glyph_input(layout, TextArtFollow::StaticRun,
+        text_layout_identity_poses(layout), consumer_key: "n5/measurement")
+    let _ = text_art_glyph_raster_bounds(downward)
+    assert_eq(TEXT_ART_LAST_INSTANCE_ID, high_instance,
+        "a stable consumer retains its selected raster across the downward band")
+    assert_eq(TEXT_ART_SELECTED_BUCKETS.len(), 1)
+    let anonymous = text_art_glyph_input(layout, TextArtFollow::StaticRun,
+        text_layout_identity_poses(layout))
+    let _ = text_art_glyph_raster_bounds(anonymous)
+    assert_eq(anonymous.consumer_key, "")
+    assert(TEXT_ART_LAST_INSTANCE_ID != high_instance,
+        "an anonymous measurement selects independently of retained hysteresis")
+    assert_eq(TEXT_ART_SELECTED_BUCKETS.len(), 1)
+    assert_eq(TEXT_ART_CONSUMER_KEY_FORMATS, 2)
+    if fail_after_measurement { error("TextArt measurement fixture failure") }
+}
+
+fn text_art_glyph_input_ownership_case(
+    font: Font, shadow_mode: int, fail_after_ensure: bool = false
+) {
+    let layout = text_layout_build(font, "N5", 20.0, 1.0)
+    let poses = text_layout_identity_poses(layout)
+    let input = text_art_glyph_input(layout, TextArtFollow::GlyphPoses, poses,
+        origin: v(71.0, -43.0), consumer_key: "ownership/face")
+    let shadow = if shadow_mode == 2 { input } else {
+        text_art_glyph_input(layout, TextArtFollow::StaticRun, poses,
+            tint: RED, origin: v(-29.0, 83.0), consumer_key: "ownership/shadow")
+    }
+    let shadow_input: TextArtGlyphInput? = if shadow_mode == 0 { null } else { shadow }
+    let before = TextArtGlyphInput { ..input }
+    let shadow_before = TextArtGlyphInput { ..shadow }
+    let style = TextArtStyle { shadow_offset: v(-3.0, 5.0), shadow_levels: 1, bloom_levels: 1 }
+    let bounds = text_art_glyph_effect_bounds(input, style, shadow_input)
+    assert(input.origin != bounds.origin && shadow.origin != bounds.origin)
+    let art = text_art_new<TextArtGlyphInput>("ownership/actual")
+    defer { text_art_destroy(art) }
+    let reference = text_art_new<TextArtGlyphInput>("ownership/reference")
+    defer { text_art_destroy(reference) }
+    let expected_input = TextArtGlyphInput { ..before, origin: bounds.origin }
+    let expected_shadow: TextArtGlyphInput? = if shadow_mode == 0 { null } else {
+        TextArtGlyphInput { ..shadow_before, origin: bounds.origin }
+    }
+    let expected = text_art_ensure(reference, bounds.extent, expected_input, style,
+        text_art_glyph_paint, expected_shadow, inputs_equal: text_art_glyph_paint_equal)
+    let actual = text_art_glyph_ensure(art, input, style, shadow_input)
+    if fail_after_ensure { error("TextArt ownership fixture failure") }
+    assert_eq(input.origin, before.origin, "ensure preserves caller glyph origin")
+    assert_eq(shadow.origin, shadow_before.origin, "ensure preserves caller shadow origin")
+    assert(text_art_glyph_paint_equal(input, before))
+    assert(text_art_glyph_paint_equal(shadow, shadow_before))
+    assert_eq(text_art_stats(art).extent, bounds.extent)
+    let expected_pixels = canvas_read_pixels(expected)
+    let actual_pixels = canvas_read_pixels(actual)
+    assert_eq(actual_pixels.rgba.len, expected_pixels.rgba.len)
+    let ink = false
+    for i in 0..actual_pixels.rgba.len {
+        assert_eq(actual_pixels.rgba[i], expected_pixels.rgba[i], "detached inputs preserve pixels")
+        if actual_pixels.rgba[i] > 0.0 { ink = true }
+    }
+    assert(ink, "the comparison contains rendered ink")
+    let again = text_art_glyph_ensure(art, input, style, shadow_input)
+    assert_eq(again.handle.0, actual.handle.0)
+    assert_eq(input.origin, before.origin)
+    assert_eq(shadow.origin, shadow_before.origin)
+    assert(text_art_stats(art).cache_hit)
+    assert(text_art_stats(art).surface_source_cache_hit)
+    assert(text_art_stats(art).shadow_source_cache_hit)
+    assert_eq(text_art_stats(art).bake_count, 1)
+    if shadow_mode == 0 { assert(art.shadow_source == null && art.shadow_inputs == null) }
+    input.origin += v(13.0, -7.0)
+    shadow.origin += v(-5.0, 11.0)
+    let moved_origin = input.origin
+    let moved_shadow_origin = shadow.origin
+    let _ = text_art_glyph_ensure(art, input, style, shadow_input)
+    assert(text_art_stats(art).cache_hit, "caller origins do not change raster placement")
+    assert_eq(input.origin, moved_origin)
+    assert_eq(shadow.origin, moved_shadow_origin)
+    input.tint = RED
+    let _ = text_art_glyph_ensure(art, input, style, shadow_input)
+    assert(!text_art_stats(art).cache_hit, "retained shifted snapshots detect changed paint")
+    assert_eq(text_art_stats(art).surface_source_bake_count, 2)
+    assert_eq(input.origin, moved_origin)
+    assert_eq(shadow.origin, moved_shadow_origin)
+}

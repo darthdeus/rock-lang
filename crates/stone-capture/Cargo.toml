@@ -1,0 +1,20 @@
+[package]
+name = "stone-capture"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# The one owner of the CPU-RGBA screenshot policy -- PNG encoding, vertical
+# orientation and long-edge resizing -- used by stone-rs (GL readback).
+
+[dependencies]
+log = "0.4"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[lints]
+workspace = true

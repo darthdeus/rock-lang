@@ -1,0 +1,14 @@
+[package]
+name = "stone-gl"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+glow = "0.17"
+log = { workspace = true }

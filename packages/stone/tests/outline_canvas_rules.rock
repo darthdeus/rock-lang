@@ -1,0 +1,171 @@
+use stone::*
+
+// The ad-hoc silhouette-to-canvas bracket (outline_canvas_begin/push/end),
+// which MAG's paperdoll uses to outline equipment previews.
+
+const OUTLINE_CANVAS_STYLE: Outline = Outline { entity_id: 1, color: color(0.1, 1.0, 0.3, 1.0), width: 4.0 }
+
+fn outline_canvas_white() -> Image {
+    let data = new_owned_image_data(1, 1)
+    image_data_set_pixel(data, 0, 0, 1.0, 1.0, 1.0, 1.0)
+    let image = new_owned_image_from_data(data, TextureFilter::Nearest)
+    release_owned_image_data(data)
+    return image
+}
+
+fn outline_canvas_fixture(body: fn(SampledTexture) -> ()) {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    let saved_canvas = CURRENT_CANVAS_HANDLE
+    let saved_frame = frame_seq
+    let saved_white = WHITE_PIXEL
+    let white = outline_canvas_white()
+    // draw_rect_immediate draws with the shared white pixel.
+    WHITE_PIXEL = white
+    defer {
+        set_canvas_handle(saved_canvas)
+        frame_seq = saved_frame
+        WHITE_PIXEL = saved_white
+        outline_bracket_clear()
+    }
+    body(sampled_image(white))
+}
+
+fn outline_canvas_alpha(canvas: Canvas, x: int, y: int) -> float {
+    return stone_read_canvas_pixel_channel(canvas.handle.0, x, y, 3)
+}
+
+@test
+fn outline_canvas_draws_a_ring_outside_the_silhouette() {
+    outline_canvas_fixture((white) => {
+        let size = 128
+        let canvas = new_canvas(float(size), float(size), "rgba8")
+        defer { destroy_canvas(canvas) }
+        // Scale 32 puts a 2-unit quad at pixels [32, 96] with world origin at
+        // the canvas center.
+        let scale = 32.0
+        let off = float(size) / (2.0 * scale)
+        // Strays outside a bracket are ignored and leave nothing for the next one.
+        outline_silhouette_sprite(white, v(0, 0), dest_size: v(2, 2))
+        outline_canvas_end()
+        outline_canvas_begin(canvas, OUTLINE_CANVAS_STYLE, v(off, off), scale)
+        outline_silhouette_sprite(white, v(0, 0), dest_size: v(2, 2))
+        outline_canvas_end()
+
+        let mid = size ./ 2
+        let ring = 0
+        for x in 0..size {
+            if outline_canvas_alpha(canvas, x, mid) > 0.5
+                    && stone_read_canvas_pixel_channel(canvas.handle.0, x, mid, 1) > 0.3 {
+                ring += 1
+            }
+        }
+        assert(ring > 0, "the outline ring crosses the center row ({ring} px)")
+        assert(outline_canvas_alpha(canvas, mid, mid) < 0.5, "the silhouette interior stays transparent")
+        assert(outline_canvas_alpha(canvas, 4, 4) < 0.5, "the background beyond the ring stays transparent")
+    })
+}
+
+@test
+fn outline_canvas_end_restores_the_callers_canvas() {
+    outline_canvas_fixture((white) => {
+        let size = 64
+        let atlas = new_canvas(float(size), float(size), "rgba8")
+        let target = new_canvas(float(size), float(size), "rgba8")
+        defer {
+            destroy_canvas(atlas)
+            destroy_canvas(target)
+        }
+        let scale = 32.0
+        let off = float(size) / (2.0 * scale)
+        with_canvas(atlas, () => {
+            clear_screen(0.0, 0.0, 0.0, 1.0)
+            outline_canvas_begin(target, OUTLINE_CANVAS_STYLE, v(off, off), scale)
+            outline_silhouette_sprite(white, v(0, 0), dest_size: v(2, 2))
+            outline_canvas_end()
+            // Lands in atlas only if the bracket restored the binding it captured.
+            draw_rect_immediate(v(float(size) / 2.0, float(size) / 2.0), v(float(size), float(size)),
+                color(1.0, 0.0, 1.0, 1.0))
+        })
+        let mid = size ./ 2
+        assert(stone_read_canvas_pixel_channel(atlas.handle.0, mid, mid, 0) > 0.5,
+            "a draw after the bracket lands in the caller's canvas, not the backbuffer")
+    })
+}
+
+@test
+fn outline_canvas_bracket_never_spans_a_frame() {
+    outline_canvas_fixture((white) => {
+        let saved = new_canvas(64.0, 64.0, "rgba8")
+        let current = new_canvas(64.0, 64.0, "rgba8")
+        let target = new_canvas(64.0, 64.0, "rgba8")
+        defer {
+            destroy_canvas(saved)
+            destroy_canvas(current)
+            destroy_canvas(target)
+        }
+        set_canvas(saved)
+        outline_canvas_begin(target, OUTLINE_CANVAS_STYLE, v(1, 1), 32.0)
+        frame_seq += 1
+        set_canvas(current)
+        outline_canvas_end()
+        assert_eq(CURRENT_CANVAS_HANDLE, current.handle.0,
+            "a stale end leaves the current frame's binding intact")
+
+        // A rejected end retires the bracket, so the next begin succeeds.
+        outline_canvas_begin(target, OUTLINE_CANVAS_STYLE, v(1, 1), 32.0)
+        outline_silhouette_sprite(white, v(0, 0), dest_size: v(1, 1))
+        outline_canvas_end()
+        assert_eq(CURRENT_CANVAS_HANDLE, current.handle.0,
+            "the next same-frame bracket restores its own binding")
+
+        set_canvas(saved)
+        outline_canvas_begin(target, OUTLINE_CANVAS_STYLE, v(1, 1), 32.0)
+        frame_seq += 1
+        set_canvas(current)
+        outline_silhouette_sprite(white, v(0, 0), dest_size: v(1, 1))
+        // A rejected push retires the bracket too; this begin captures current.
+        outline_canvas_begin(target, OUTLINE_CANVAS_STYLE, v(1, 1), 32.0)
+        outline_canvas_end()
+        assert_eq(CURRENT_CANVAS_HANDLE, current.handle.0,
+            "a stale push clears the bracket for the next begin")
+    })
+}
+
+@test
+fn outline_canvas_alternating_sizes_share_one_mask_allocation() {
+    outline_canvas_fixture((white) => {
+        let small = new_canvas(64.0, 64.0, "rgba8")
+        let large = new_canvas(128.0, 128.0, "rgba8")
+        defer {
+            destroy_canvas(small)
+            destroy_canvas(large)
+        }
+        let first = adhoc_intermediate_handle()
+        let handles: [int] = []
+        for _ in 0..5 {
+            outline_canvas_begin(small, OUTLINE_CANVAS_STYLE, v(1.0, 1.0), 32.0)
+            outline_silhouette_sprite(white, v(0, 0), dest_size: v(2, 2))
+            outline_canvas_end()
+            handles.push(adhoc_intermediate_handle())
+            outline_canvas_begin(large, OUTLINE_CANVAS_STYLE, v(2.0, 2.0), 32.0)
+            outline_silhouette_sprite(white, v(0, 0), dest_size: v(2, 2))
+            outline_canvas_end()
+            handles.push(adhoc_intermediate_handle())
+        }
+        let churn = 0
+        let previous = first
+        for handle in handles {
+            if handle != previous { churn += 1 }
+            previous = handle
+        }
+        // One allocation for the first use or the grow to 128, then reuse.
+        assert(churn <= 2, "alternating target sizes reallocate at most for first use and the grow (churn {churn})")
+        let reused = 0
+        for i in 2..handles.len() { if handles[i] == handles[1] { reused += 1 } }
+        assert_eq(reused, handles.len() - 2, "after the grow every call reuses one mask canvas")
+        let it = ADHOC_INTERMEDIATE.unwrap()
+        assert_eq(int(it.canvas.width), 128, "capacity covers the largest target")
+        assert_eq(canvas_active(it.canvas).x, 128, "the active rect follows the last target")
+    })
+}

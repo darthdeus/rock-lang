@@ -1,0 +1,141 @@
+// Material — the batch-affecting half of a sprite draw, created once.
+//
+// A Material bundles (texture, layer, order, depth, blend, pixel_snap)
+// — exactly the batch-key fields — so the per-instance half stays as
+// named args on `mat.draw_material(...)` and the per-sprite batch resolution
+// (string key build + pool lookup in ensure_batch_of) happens once per
+// material, or once per frame for occurrence-backed state. Same texture at
+// two layers = two materials; materials are cheap. draw_sprite remains the
+// one-off/generic front door; both funnel into draw_sprite_into.
+
+pub struct Material {
+    image: SampledTexture,
+    z_layer: int,
+    order: int,
+    depth: DepthMode,
+    blend: BlendMode,
+    pixel_snap: bool,
+    // Optional normal-map sheet (same UV layout as `image`; eat bakes
+    // these as `<name>-normal.png`, view-space encoded). Batch-affecting.
+    normal: SampledTexture?,
+    surface: SampledTexture? = null,
+    // Fullbright: every draw through this material skips world lighting.
+    // Rides the batch key and binds as the uUnlit uniform per batch. For
+    // world-space VFX and overlays that must not dim under dark ambient.
+    unlit: bool,
+    // Optional color-pass shader override. null = the engine sprite
+    // batch shader. Batch-affecting (shader segment in the batch key);
+    // the custom shader must consume the batched Vertex layout —
+    // constraints on RenderBatch.pipeline (batch.rock).
+    pipeline: Pipeline?,
+    // How this material's texture is sampled: null uses the source's own
+    // declared default, an explicit value overrides it (and its normal sheet).
+    sampling: TextureFilter? = null,
+    cached_batch: Entity<RenderBatch>? = null,
+    cached_frame: int = -1,
+}
+
+pub fn material(
+    image: SampledTexture,
+    layer: int = DEFAULT_RENDER_LAYER,
+    order: int = 0,
+    depth: DepthMode = DepthMode::TestWrite,
+    blend: BlendMode = BlendMode::Alpha,
+    pixel_snap: bool = false,
+    unlit: bool = false,
+    normal: SampledTexture? = null,
+    pipeline: Pipeline? = null,
+    sampling: TextureFilter? = null,
+    surface: SampledTexture? = null,
+    owner: Arena<Material> = MATERIAL_ROWS,
+) -> Entity<Material> {
+    let handle = owner.insert(Material {
+        image: image,
+        sampling: sampling,
+        z_layer: layer,
+        order: order,
+        depth: depth,
+        blend: blend,
+        pixel_snap: pixel_snap,
+        unlit: unlit,
+        normal: normal,
+        surface: surface,
+        pipeline: null,
+    })
+    if pipeline != null {
+        handle.get().unwrap().pipeline = pipeline_owned_in(pipeline.unwrap(), handle.storage())
+    }
+    return handle
+}
+
+// Draw one sprite through this material. Per-instance args only; the
+// batch half lives on the material. UFCS: mat.draw_material(pos, src, ...).
+pub fn draw_material(
+    handle: Entity<Material>,
+    pos: Vec2,
+    source: IRect? = null,
+    dest_size: Vec2? = null,
+    pivot: Vec2 = PIVOT_CENTER,
+    rotation: float = 0,
+    flip_x: bool = false,
+    flip_y: bool = false,
+    color: Color = WHITE,
+    z_off: float = 0,
+    outline: Outline? = null,
+    entity_id: int = 0,
+    depth_slope_x: float = 0.0,
+) {
+    let mat = handle.get().unwrap()
+    let batch = material_resolve_batch_row(mat)
+
+    draw_sprite_into(batch, mat.image, pos, source, dest_size, pivot,
+        rotation, flip_x, flip_y, color, z_off, outline, entity_id, depth_slope_x: depth_slope_x)
+}
+
+pub global MATERIAL_ROWS: Arena<Material> = arena_new()
+
+pub fn material_cached_batch(handle: Entity<Material>) -> RenderBatch? {
+    let mat = handle.get() ?? return null
+    let batch = mat.cached_batch ?? return null
+    return batch.get()
+}
+
+pub fn material_resolve_batch(handle: Entity<Material>) -> RenderBatch {
+    return material_resolve_batch_row(handle.get().unwrap())
+}
+
+fn material_resolve_batch_row(mat: Material) -> RenderBatch {
+    let cached = if mat.cached_batch != null { mat.cached_batch.unwrap().get() } else { null }
+    let batch = if CURRENT_RENDER_POOL.active() {
+        ensure_batch_of(mat.image, mat.z_layer, mat.blend, mat.pixel_snap,
+            mat.depth, order: mat.order, normal: mat.normal,
+            pipeline: mat.pipeline,
+            unlit: mat.unlit || mat.blend == BlendMode::Additive,
+            sampling: mat.sampling, surface: mat.surface)
+    } else if cached != null && cached.unwrap().pooled
+            && (mat.cached_frame == RENDER_FRAME
+                || mat.pipeline == null) {
+        let b = cached.unwrap()
+        b.last_used_frame = RENDER_FRAME
+        b
+    } else {
+        let b = ensure_world_sprite_batch(mat.image, mat.z_layer, mat.blend, mat.pixel_snap,
+            mat.depth, order: mat.order, normal: mat.normal,
+            pipeline: mat.pipeline,
+            unlit: mat.unlit || mat.blend == BlendMode::Additive,
+            sampling: mat.sampling, surface: mat.surface)
+        mat.cached_batch = b.handle.entity().unwrap()
+        mat.cached_frame = RENDER_FRAME
+        b
+    }
+    return batch
+}
+
+// Queued batches own their payload, including any copied pipeline name.
+pub fn retire_material(handle: Entity<Material>) -> bool {
+    let mat = handle.get() ?? return false
+    mat.pipeline = null
+    mat.cached_batch = null
+    let _ = handle.remove()
+    return true
+}

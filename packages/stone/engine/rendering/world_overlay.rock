@@ -1,0 +1,373 @@
+// The pending queue behind `world_overlay` -- the World+Output DrawList.
+//
+// A Scene-destination verb submits world coordinates and the shader projects
+// them when the pool flushes, so it is correct whenever it was queued. An
+// Output-destination verb has no shader projection left to run: the anchor is
+// baked into output coordinates on the CPU. Baking it at the CALL reads
+// whatever view exists then, and a caller in an @update system runs before the
+// camera has settled -- a whole frame of camera motion stale. So the verbs
+// record world coordinates here and the flush projects them against the frozen
+// render view, after the scene is presented and before the UI pool drains.
+
+pub enum OverlayVerb {
+    Rect,
+    RectOutline,
+    Sprite,
+    RichText,
+    Line,
+    Circle,
+    CircleOutline,
+    Custom,
+}
+
+// One queued command. Each push writes every field its own verb's flush arm
+// reads; the rest keep whatever the previous occupant left, because entries
+// are reused across frames rather than reallocated.
+pub struct OverlayCmd {
+    verb: OverlayVerb,
+    a: Vec2,          // world anchor, or a line's start
+    b: Vec2,          // world extent, or a line's end
+    radius: float,
+    thickness: float,
+    size: float,      // cap height or world em, selected by cap_height
+    // Rich text only: drawn size over `size`. Layout happens at `size` and
+    // the scale is applied to the glyph quads, so an animating scale reuses
+    // one cached layout.
+    scale: float,
+    cap_height: bool,
+    color: Color,
+    rich_runs: [ResolvedTextRun],
+    shadow: bool,
+    align: TextAlign,
+    baseline_anchor: bool,
+    image: SampledTexture?,
+    source: IRect?,
+    pivot: Vec2,
+    draw_fn: (fn() -> ())?,
+    z: int,
+}
+
+pub global OVERLAY_CMDS: [OverlayCmd] = []
+pub global OVERLAY_CMD_LEN: int = 0
+pub global TEXT_RENDER_ORDER_SERIAL: int = 0
+pub global TEXT_OUTPUT_PRESENT_ORDER: int = 0
+pub global TEXT_WORLD_OVERLAY_ORDER: int = 0
+pub global TEXT_UI_FLUSH_ORDER: int = 0
+pub global WORLD_OVERLAY_LAST_RICH_TEXT: string = ""
+pub global WORLD_OVERLAY_LAST_RICH_ANCHOR: Vec2 = v()
+pub global WORLD_OVERLAY_LAST_RICH_SIZE: float = 0.0
+pub global WORLD_OVERLAY_LAST_RICH_CAP_HEIGHT: bool = false
+pub global WORLD_OVERLAY_LAST_RICH_FRAME: int = -1
+
+fn overlay_cmd(verb: OverlayVerb) -> OverlayCmd {
+    if OVERLAY_CMD_LEN < OVERLAY_CMDS.len {
+        let reused = OVERLAY_CMDS[OVERLAY_CMD_LEN]
+        OVERLAY_CMD_LEN += 1
+        reused.verb = verb
+        return reused
+    }
+
+    let c = OverlayCmd {
+        verb: verb,
+        a: v(0.0, 0.0),
+        b: v(0.0, 0.0),
+        radius: 0.0,
+        thickness: 0.0,
+        size: 0.0,
+        scale: 1.0,
+        cap_height: false,
+        color: WHITE,
+        rich_runs: [],
+        shadow: false,
+        align: TextAlign::Left,
+        baseline_anchor: false,
+        image: null,
+        source: null,
+        pivot: PIVOT_CENTER,
+        draw_fn: null,
+        z: 0,
+    }
+    OVERLAY_CMDS.push(c)
+    OVERLAY_CMD_LEN += 1
+    return c
+}
+
+// Commands live for exactly one frame. Dropping them here rather than at the
+// flush is what keeps a skipped render pass (sim mode, a seek) from carrying
+// last frame's queue forward.
+//
+// Truncating the length is not dropping: entries are pooled, so the backing
+// array still reaches every reference the retired prefix held -- a custom
+// closure and its whole captured graph, a source image -- until that slot is
+// reused, which may be never. The reference fields are released explicitly;
+// the scalar ones are overwritten by whatever verb takes the slot next.
+pub fn world_overlay_begin_frame() {
+    // Rich-text validation can fail after filling the next unpublished slot.
+    // Retire that slot too, including when the frame never reaches its flush.
+    let clear_len = min(OVERLAY_CMD_LEN + 1, OVERLAY_CMDS.len())
+    for i in 0..clear_len {
+        let c = OVERLAY_CMDS[i]
+        c.draw_fn = null
+        c.image = null
+        c.source = null
+        c.rich_runs.clear()
+    }
+    OVERLAY_CMD_LEN = 0
+}
+
+@reset
+fn reset_world_overlay() {
+    OVERLAY_CMDS.clear()
+    OVERLAY_CMD_LEN = 0
+    WORLD_OVERLAY_RICH_TEXT_SUBMISSIONS = 0
+    TEXT_RENDER_ORDER_SERIAL = 0
+    TEXT_OUTPUT_PRESENT_ORDER = 0
+    TEXT_WORLD_OVERLAY_ORDER = 0
+    TEXT_UI_FLUSH_ORDER = 0
+    WORLD_OVERLAY_LAST_RICH_TEXT = ""
+    WORLD_OVERLAY_LAST_RICH_ANCHOR = v()
+    WORLD_OVERLAY_LAST_RICH_SIZE = 0.0
+    WORLD_OVERLAY_LAST_RICH_CAP_HEIGHT = false
+    WORLD_OVERLAY_LAST_RICH_FRAME = -1
+}
+
+fn text_render_order_present() {
+    TEXT_RENDER_ORDER_SERIAL += 1
+    TEXT_OUTPUT_PRESENT_ORDER = TEXT_RENDER_ORDER_SERIAL
+}
+
+fn text_render_order_ui_flush() {
+    TEXT_RENDER_ORDER_SERIAL += 1
+    TEXT_UI_FLUSH_ORDER = TEXT_RENDER_ORDER_SERIAL
+}
+
+fn overlay_rect(pos: Vec2, size: Vec2, color: Color, z: int) {
+    let c = overlay_cmd(OverlayVerb::Rect)
+    c.a = pos
+    c.b = size
+    c.color = color
+    c.z = z
+}
+
+fn overlay_rect_outline(pos: Vec2, size: Vec2, color: Color, thickness: float, z: int) {
+    let c = overlay_cmd(OverlayVerb::RectOutline)
+    c.a = pos
+    c.b = size
+    c.thickness = thickness
+    c.color = color
+    c.z = z
+}
+
+fn overlay_sprite(
+    image: SampledTexture,
+    pos: Vec2,
+    source: IRect,
+    size: Vec2,
+    color: Color,
+    pivot: Vec2,
+    z: int
+) {
+    let c = overlay_cmd(OverlayVerb::Sprite)
+    c.a = pos
+    c.b = size
+    c.image = image
+    c.source = source
+    c.color = color
+    c.pivot = pivot
+    c.z = z
+}
+
+fn overlay_text(text: string, pos: Vec2, size: float, color: Color,
+    align: TextAlign, z: int, family: TextFamily? = null) {
+    overlay_rich_text([text_span(text, color)], pos, size,
+        text_family_or_default(family), align, z, shadow: true, cap_height: true)
+}
+
+pub global WORLD_OVERLAY_RICH_TEXT_SUBMISSIONS: int = 0
+
+pub fn overlay_rich_text(
+    spans: [TextSpan],
+    pos: Vec2,
+    size: float,
+    family: TextFamily,
+    align: TextAlign,
+    z: int,
+    shadow: bool = false,
+    cap_height: bool = false,
+    baseline_anchor: bool = false,
+    scale: float = 1.0
+) {
+    WORLD_OVERLAY_RICH_TEXT_SUBMISSIONS += 1
+    WORLD_OVERLAY_LAST_RICH_TEXT = ""
+    for span in spans {
+        WORLD_OVERLAY_LAST_RICH_TEXT = WORLD_OVERLAY_LAST_RICH_TEXT + span.text
+    }
+    WORLD_OVERLAY_LAST_RICH_ANCHOR = pos
+    WORLD_OVERLAY_LAST_RICH_SIZE = size * scale
+    WORLD_OVERLAY_LAST_RICH_CAP_HEIGHT = cap_height
+    WORLD_OVERLAY_LAST_RICH_FRAME = RENDER_FRAME
+    let _ = text_family_font_idx(family.regular, "DrawList.rich_text.world_overlay")
+    // Faces and colours resolve now, against the spans as they are this
+    // call; the layout waits for the flush, which knows the output size.
+    // The next slot is unpublished until validation succeeds. Its run storage
+    // belongs to this command, so later submissions cannot change its snapshot.
+    let runs: [ResolvedTextRun] = if OVERLAY_CMD_LEN < OVERLAY_CMDS.len() {
+        OVERLAY_CMDS[OVERLAY_CMD_LEN].rich_runs
+    } else { [] }
+    resolve_text_spans_at(runs, family, spans, size, 1.0, !cap_height,
+        "DrawList.rich_text.world_overlay",
+        if cap_height { text_output_raster_density() } else { 1.0 },
+        build_layouts: false)
+    let c = overlay_cmd(OverlayVerb::RichText)
+    c.a = pos
+    c.size = size
+    c.scale = scale
+    c.rich_runs = runs
+    c.cap_height = cap_height
+    c.shadow = shadow
+    c.align = align
+    c.baseline_anchor = baseline_anchor
+    c.z = z
+}
+
+fn overlay_line(a: Vec2, b: Vec2, color: Color, thickness: float, z: int) {
+    let c = overlay_cmd(OverlayVerb::Line)
+    c.a = a
+    c.b = b
+    c.thickness = thickness
+    c.color = color
+    c.z = z
+}
+
+fn overlay_circle(center: Vec2, radius: float, color: Color, z: int) {
+    let c = overlay_cmd(OverlayVerb::Circle)
+    c.a = center
+    c.radius = radius
+    c.color = color
+    c.z = z
+}
+
+fn overlay_circle_outline(center: Vec2, radius: float, color: Color, thickness: float, z: int) {
+    let c = overlay_cmd(OverlayVerb::CircleOutline)
+    c.a = center
+    c.radius = radius
+    c.thickness = thickness
+    c.color = color
+    c.z = z
+}
+
+fn overlay_custom(draw_fn: fn() -> (), z: int) {
+    let c = overlay_cmd(OverlayVerb::Custom)
+    c.draw_fn = draw_fn
+    c.z = z
+}
+
+// Where a world anchor lands on the output, snapped like the text arm draws
+// it. One formula, so a caller that needs to know where its label went (a sim,
+// a hit test) cannot disagree with the pixels.
+pub @pure
+fn world_overlay_anchor_of(view: FrameView, p: Vec2) -> Vec2 {
+    let s = world_to_screen_in(view, p)
+    return v(round(s.x), round(s.y))
+}
+
+pub fn rich_text_aligned_start(anchor: Vec2, width: float, ascent: float,
+                           height: float, align: TextAlign,
+                           baseline_anchor: bool, cap_height: float = 0.0) -> Vec2 {
+    let off = text_align_offset(align)
+    return v(anchor.x + off.x * width,
+        if baseline_anchor { anchor.y - ascent }
+        else { text_anchored_y(anchor.y, text_align_fracs(align).y, height,
+            ascent, cap_height, 0.0) })
+}
+
+// Project the queue onto the output. Runs after the scene is presented and
+// before the UI pool drains, so `RENDER_VIEW` is this frame's frozen view and
+// every command lands through the same px_* / queue_ui_text core the Target
+// verbs use.
+pub fn flush_world_overlay() {
+    if OVERLAY_CMD_LEN == 0 { return }
+    let view = RENDER_VIEW ?? return
+    TEXT_RENDER_ORDER_SERIAL += 1
+    TEXT_WORLD_OVERLAY_ORDER = TEXT_RENDER_ORDER_SERIAL
+    let s = view.world_to_output_scale
+
+    for i in 0..OVERLAY_CMD_LEN {
+        let c = OVERLAY_CMDS[i]
+        let p = world_to_screen_in(view, c.a)
+
+        match c.verb {
+            OverlayVerb::Rect => {
+                let size = c.b * s
+                px_fill(p - size / 2.0, size, c.color, c.z)
+            }
+            OverlayVerb::RectOutline => {
+                let size = c.b * s
+                px_outline(p - size / 2.0, size, c.color, c.thickness * s, c.z)
+            }
+            OverlayVerb::Sprite => {
+                // draw_sprite's own anchor->center formula, so the two verbs
+                // read a pivot the same way whatever the anchor convention.
+                let ws = c.b
+                let center = v(
+                    c.a.x + (0.5 - c.pivot.x) * ws.x,
+                    c.a.y + (0.5 - c.pivot.y) * ws.y,
+                )
+                let d = ws * s
+                let tl = world_to_screen_in(view, center) - d / 2.0
+                ui_draw_sprite_topleft(c.image.unwrap(), tl, c.source.unwrap(), d, c.color, z_layer: c.z)
+            }
+            OverlayVerb::RichText => {
+                profile_begin("screen.world_overlay.rich_text")
+                let a = world_overlay_anchor_of(view, c.a)
+                let drawn = c.size * c.scale
+                let output_size = if c.cap_height {
+                    drawn * s
+                } else { world_text_em(drawn) * s }
+                for j in 0..c.rich_runs.len {
+                    let run = c.rich_runs[j]
+                    // Lay out at the base size; the drawn size is the same
+                    // quantized em the run would have had at `drawn`.
+                    if c.cap_height {
+                        run.size = c.size * s
+                        run.draw_scale = c.scale
+                    } else {
+                        let base = world_text_em_for(run.font, c.size)
+                        run.size = base * s
+                        run.draw_scale = if c.scale == 1.0 || base <= 0.0 {
+                            1.0
+                        } else { world_text_em_for(run.font, drawn) / base }
+                    }
+                    run.layout = null
+                    run.raster_physical_target_scale = text_output_raster_density()
+                    c.rich_runs[j] = run
+                }
+                let (w, ascent, h) = measure_resolved_runs(c.rich_runs)
+                let start = rich_text_aligned_start(a, w, ascent, h,
+                    c.align, c.baseline_anchor)
+                if c.shadow {
+                    let shadow = (output_size / 0.75) / 16.0
+                    emit_resolved_runs(c.rich_runs, TextPlacement::Output,
+                        start + v(shadow, shadow), ascent,
+                        output_z(c.z), BLACK, consumer_key: "world-overlay")
+                }
+                emit_resolved_runs(c.rich_runs, TextPlacement::Output, start, ascent,
+                    output_z(c.z),
+                    consumer_key: "world-overlay")
+                profile_end("screen.world_overlay.rich_text")
+            }
+            OverlayVerb::Line => {
+                px_line(p, world_to_screen_in(view, c.b), c.color, c.thickness * s, output_z(c.z))
+            }
+            OverlayVerb::Circle => {
+                px_circle(p, c.radius * s, c.color, output_z(c.z))
+            }
+            OverlayVerb::CircleOutline => {
+                px_circle_outline(p, c.radius * s, c.color, c.thickness * s, output_z(c.z))
+            }
+            OverlayVerb::Custom => {
+                queue_custom_draw_into(UI_RENDER_BATCHES, c.draw_fn.unwrap(), c.z, depth: DepthMode::Off)
+            }
+        }
+    }
+}

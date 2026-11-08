@@ -1,0 +1,132 @@
+pub struct CollisionInfo {
+    collided: bool,
+    normal: Vec2,
+    penetration: float,
+    position: Vec2,
+}
+
+pub fn circle_circle_collision(pos1: Vec2, radius1: float, pos2: Vec2, radius2: float) -> CollisionInfo? {
+    let diff = pos1 - pos2
+    let distance = diff.length()
+    let min_distance = radius1 + radius2
+
+    if distance < min_distance && distance > 0.001 {
+        let normal = diff.normalize()
+        let penetration = min_distance - distance
+        let position = pos2 + normal * radius2
+
+        return CollisionInfo {
+            collided: true,
+            normal: normal,
+            penetration: penetration,
+            position: position
+        }
+    }
+
+    return null
+}
+
+pub fn circle_rect_collision(
+    circle_pos: Vec2,
+    radius: float,
+    rect_pos: Vec2,
+    half_size: Vec2
+) -> CollisionInfo? {
+    let rect_min = rect_pos - half_size
+    let rect_max = rect_pos + half_size
+
+    let closest = v(
+        clamp(circle_pos.x, rect_min.x, rect_max.x),
+        clamp(circle_pos.y, rect_min.y, rect_max.y)
+    )
+
+    let diff = circle_pos - closest
+    let distance = diff.length()
+
+    if distance < radius && distance > 0.001 {
+        let normal = diff.normalize()
+        let penetration = radius - distance
+
+        return CollisionInfo {
+            collided: true,
+            normal: normal,
+            penetration: penetration,
+            position: closest
+        }
+    } else if distance < 0.001 && circle_pos.x >= rect_min.x && circle_pos.x <= rect_max.x && circle_pos.y >= rect_min.y && circle_pos.y <= rect_max.y {
+        let to_center = circle_pos - rect_pos
+        let overlap_x = half_size.x + radius - abs(to_center.x)
+        let overlap_y = half_size.y + radius - abs(to_center.y)
+
+        if overlap_x < overlap_y {
+            let normal = v(if to_center.x > 0 { 1.0 } else { -1.0 }, 0.0)
+            return CollisionInfo {
+                collided: true,
+                normal: normal,
+                penetration: overlap_x,
+                position: rect_pos + v(half_size.x * normal.x, to_center.y)
+            }
+        } else {
+            let normal = v(0.0, if to_center.y > 0 { 1.0 } else { -1.0 })
+            return CollisionInfo {
+                collided: true,
+                normal: normal,
+                penetration: overlap_y,
+                position: rect_pos + v(to_center.x, half_size.y * normal.y)
+            }
+        }
+    }
+
+    return null
+}
+
+
+// Sutherland-Hodgman clip of `points` to the rectangle `lo..hi`, one half-plane
+// per pass. Crossing points land exactly on the bound. The rectangle is convex,
+// so a concave polygon still clips to the right area.
+pub fn polygon_clip_rect(points: [Vec2], lo: Vec2, hi: Vec2) -> [Vec2] {
+    let out: [Vec2] = []
+    let scratch: [Vec2] = []
+    polygon_clip_rect_into(points, lo, hi, out, scratch)
+    return out
+}
+
+// The caller owns separate output and scratch arrays for repeated clips.
+pub fn polygon_clip_rect_into(points: [Vec2], lo: Vec2, hi: Vec2,
+    out: [Vec2], scratch: [Vec2]) {
+    out.clear()
+    for p in points { out.push(p) }
+    for edge in 0..4 {
+        scratch.clear()
+        if out.len() == 0 { return }
+        let bound = match edge { 0 => lo.x, 1 => hi.x, 2 => lo.y, _ => hi.y }
+        let prev = out[out.len() - 1]
+        let prev_in = polygon_clip_rect_inside(prev, edge, bound)
+        for cur in out {
+            let cur_in = polygon_clip_rect_inside(cur, edge, bound)
+            if cur_in != prev_in {
+                if edge < 2 {
+                    let t = (bound - prev.x) / (cur.x - prev.x)
+                    scratch.push(v(bound, prev.y + (cur.y - prev.y) * t))
+                } else {
+                    let t = (bound - prev.y) / (cur.y - prev.y)
+                    scratch.push(v(prev.x + (cur.x - prev.x) * t, bound))
+                }
+            }
+            if cur_in { scratch.push(cur) }
+            prev = cur
+            prev_in = cur_in
+        }
+        out.clear()
+        for p in scratch { out.push(p) }
+    }
+}
+
+fn polygon_clip_rect_inside(p: Vec2, edge: int, bound: float) -> bool {
+    return match edge {
+        0 => p.x >= bound,
+        1 => p.x <= bound,
+        2 => p.y >= bound,
+        _ => p.y <= bound,
+    }
+}

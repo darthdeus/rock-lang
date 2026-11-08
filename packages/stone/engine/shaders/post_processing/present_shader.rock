@@ -1,0 +1,49 @@
+// The one place the frame is resampled: the active scene rectangle inside the
+// capacity-sized scene texture, onto the view's output rectangle.
+//
+// It magnifies with a SHARP bilinear filter whose ramp is exactly one OUTPUT
+// pixel wide -- texel interiors stay as hard as NEAREST, and only the boundary
+// between two texels gets a single pixel of blend. Plain bilinear would soften
+// the whole image instead of just the boundaries, which is why it was rejected
+// for the upscale.
+
+pub value PresentU {
+    // Set only when the complete source composite is display-linear.
+    encode_srgb: bool = false,
+    // Active source rectangle inside the scene texture, in texels, GL
+    // bottom-up (the convention TexCoord arrives in).
+    src_origin: Vec2,
+    src_extent: Vec2,
+    // The backing texture's full extent. Capacity is allocated for the
+    // profile's worst case, so it is not the active rectangle.
+    tex_size: Vec2,
+    // The active rectangle inside it. TexCoord arrives scaled to the active
+    // fraction (the executor's active-local transform), and this is the only
+    // pass that has to undo that: its TexCoord means DESTINATION space, which
+    // it maps onto the crop below rather than onto the whole active image.
+    active_size: Vec2,
+    // Output pixels per scene texel. The ramp is 1/scale texels wide, i.e.
+    // one output pixel; at scale <= 1 (downscale) the warp is disabled.
+    dst_scale: Vec2,
+}
+
+@shader(fragment)
+fn present_frag(@textures t: SrcTex, @uniform u: PresentU, tc: Vec2) -> Vec4 {
+    let dst = tc * u.tex_size / u.active_size
+    let texel = u.src_origin + dst * u.src_extent
+
+    // Distance from the texel centre, clamped to the flat region: inside it
+    // the sample lands exactly on the centre (NEAREST), and the leftover is
+    // stretched by `scale` so the transition spans one output pixel.
+    let scale = max(u.dst_scale, v(1.0, 1.0))
+    let region = v(0.5, 0.5) - v(0.5, 0.5) / scale
+    let center_dist = fract(texel) - 0.5
+    let warped = (center_dist - clamp(center_dist, v(0.0, 0.0) - region, region)) * scale + 0.5
+
+    // Clamp the tap to the centres of the first and last ACTIVE texels --
+    // texture clamp-to-edge only knows the capacity edge, which is stale.
+    let lo = u.src_origin + v(0.5, 0.5)
+    let hi = u.src_origin + u.src_extent - v(0.5, 0.5)
+    let pixel = texture(t.src_tex, clamp(floor(texel) + warped, lo, hi) / u.tex_size)
+    return v(if u.encode_srgb { linear_to_srgb(pixel.rgb) } else { pixel.rgb }, pixel.a)
+}

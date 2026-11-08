@@ -1,0 +1,31 @@
+struct TextArtResolveTex {
+    base_tex: Sampler2D,
+    emission_tex: Sampler2D,
+    bloom_tex: Sampler2D,
+    coverage_tex: Sampler2D,
+}
+
+// The common scale preserves channel ratios; peak/(1+peak) is monotonic and
+// bounded below one, so a chromatic source cannot turn into white.
+fn text_art_display_color(color: Vec3) -> Vec3 {
+    let peak = max(max(color.r, color.g), color.b)
+    if peak <= 0.0 { return v(0.0, 0.0, 0.0) }
+    return color * ((peak / (1.0 + peak)) / peak)
+}
+
+fn text_art_overlay_radiance(base: Vec3, radiance: Vec3) -> Vec3 {
+    let headroom = max(0.0, 1.0 - max(max(base.r, base.g), base.b))
+    return base + radiance * headroom
+}
+
+@shader(fragment)
+fn text_art_resolve_frag(@textures t: TextArtResolveTex, tc: Vec2) -> Vec4 {
+    let base = texture(t.base_tex, tc)
+    let emission = texture(t.emission_tex, tc).rgb
+    let bloom = texture(t.bloom_tex, tc).rgb
+    let face_coverage = clamp(texture(t.coverage_tex, tc).a, 0.0, 1.0)
+    let radiance = text_art_display_color(
+        emission * (1.0 - face_coverage) + bloom)
+    return v(text_art_overlay_radiance(base.rgb, radiance),
+        clamp(base.a, 0.0, 1.0))
+}

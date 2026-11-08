@@ -1,0 +1,41 @@
+// Filter for the outline_target_canvas pass (render_silhouette_mask, batch.rock).
+// Draws the OUTLINE_MASK_BATCHES pool -- already only outlined geometry --
+// and writes each draw's entity_id into the red channel. Depth is off, so the
+// mask is every outlined draw's full silhouette with per-pixel id; the detect
+// pass compares it against visible_id_canvas to classify visible vs occluded
+// edges.
+//
+// Declares the full sprite vertex (`Vertex`, rect_batch.rock), so locations
+// 0..4 are the owning struct's by construction. Only pos/uv/entity_id are read;
+// color/pivot_y are present for layout only. No uYBounds / iso-depth remap --
+// this pass writes a flat silhouette.
+
+value OutlineTargetVary {
+    position: Vec4,
+    TexCoord: Vec2,
+    @flat EntityId: float,
+}
+
+@shader(vertex)
+fn outline_target_vert(@attr a: Vertex, @engine e: EngineU) -> OutlineTargetVary {
+    return OutlineTargetVary {
+        position: e.uProjection * e.uView * v(a.pos.to_f64(), 0.0, 1.0),
+        TexCoord: a.uv.to_f64(),
+        EntityId: a.entity_id,
+    }
+}
+
+@shader(fragment)
+fn outline_target_frag(vary: OutlineTargetVary, @textures t: MainTex) -> int {
+    // Every draw in the pool is outlined; only guard the id (the detect
+    // shader needs it per-pixel) and the texture's own alpha. The target is
+    // an R32I mask canvas -- the id is the whole output.
+    if vary.EntityId <= 0.0 {
+        discard()
+    }
+    let pixel = texture(t.uTexture, vary.TexCoord)
+    if pixel.w <= 0.0 {
+        discard()
+    }
+    return vary.EntityId as int
+}

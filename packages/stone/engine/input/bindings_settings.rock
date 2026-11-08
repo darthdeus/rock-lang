@@ -1,0 +1,402 @@
+pub global BINDING_RAW_ACTIONS: Map<string, JsonValue> = map_new()
+pub global BINDING_RAW_ACTION_BYTES: Map<string, string> = map_new()
+pub global BINDING_RAW_ACTION_KEYS: Map<string, string> = map_new()
+
+pub fn bindings_forget_raw_entry(name: string) {
+    BINDING_RAW_ACTIONS.remove(name)
+    BINDING_RAW_ACTION_BYTES.remove(name)
+    BINDING_RAW_ACTION_KEYS.remove(name)
+}
+
+fn bindings_preserve_action_entry(name: string) {
+    let bindings = action_bindings(name)
+    if bindings.len() == 0 {
+        bindings_forget_raw_entry(name)
+        return
+    }
+    BINDING_RAW_ACTIONS[name] = bindings_to_json(bindings)
+    BINDING_RAW_ACTION_BYTES.remove(name)
+    BINDING_RAW_ACTION_KEYS.remove(name)
+}
+
+fn bindings_claim_raw_entry(name: string) -> bool {
+    let value = BINDING_RAW_ACTIONS.get(name) ?? return false
+    let (parsed, valid) = bindings_from_json(value)
+    if !valid { return false }
+    action_rebind(ActionDef(name), parsed)
+    return true
+}
+
+pub fn binding_to_json(binding: InputBinding) -> JsonValue {
+    let m: Map<string, JsonValue> = map_new()
+    match binding {
+        InputBinding::Key { scan, ctrl, shift, alt, gui } => {
+            m["kind"] = json_str("key")
+            m["scan"] = json_str(scan)
+            m["ctrl"] = json_bool(ctrl)
+            m["shift"] = json_bool(shift)
+            m["alt"] = json_bool(alt)
+            m["gui"] = json_bool(gui)
+        },
+        InputBinding::Mouse(button) => {
+            m["kind"] = json_str("mouse")
+            m["button"] = json_int(button)
+        },
+        InputBinding::Wheel(dir) => {
+            m["kind"] = json_str("wheel")
+            m["dir"] = json_int(dir)
+        },
+        InputBinding::Pad(button) => {
+            m["kind"] = json_str("pad")
+            m["button"] = json_str(button)
+        },
+        InputBinding::PadAxis { axis, dir, deadzone, threshold } => {
+            m["kind"] = json_str("axis")
+            m["axis"] = json_str(axis)
+            m["dir"] = json_int(dir)
+            m["deadzone"] = json_float(deadzone)
+            m["threshold"] = json_float(threshold)
+        },
+    }
+    return json_object(m)
+}
+
+pub fn bindings_to_json(bindings: [InputBinding]) -> JsonValue {
+    let out: [JsonValue] = []
+    for binding in bindings { out.push(binding_to_json(binding)) }
+    return json_array(out)
+}
+
+fn binding_json_string(v: JsonValue, key: string) -> string? {
+    return json_as_str(json_field(v, key) ?? return null)
+}
+
+fn binding_json_bool(v: JsonValue, key: string) -> bool? {
+    return json_as_bool(json_field(v, key) ?? return null)
+}
+
+fn binding_json_int(v: JsonValue, key: string) -> int? {
+    return json_as_int(json_field(v, key) ?? return null)
+}
+
+fn binding_json_float(v: JsonValue, key: string) -> float? {
+    return json_as_float(json_field(v, key) ?? return null)
+}
+
+pub fn binding_from_json(v: JsonValue) -> InputBinding? {
+    let kind = binding_json_string(v, "kind") ?? return null
+    if kind == "key" {
+        let scan = binding_json_string(v, "scan") ?? return null
+        let ctrl = binding_json_bool(v, "ctrl") ?? return null
+        let shift = binding_json_bool(v, "shift") ?? return null
+        let alt = binding_json_bool(v, "alt") ?? return null
+        let gui = binding_json_bool(v, "gui") ?? return null
+        return key_bind(scan, ctrl, shift, alt, gui)
+    }
+    if kind == "mouse" {
+        let button = binding_json_int(v, "button") ?? return null
+        return mouse_bind(button)
+    }
+    if kind == "wheel" {
+        let dir = binding_json_int(v, "dir") ?? return null
+        if dir != -1 && dir != 1 { return null }
+        return wheel_bind(dir)
+    }
+    if kind == "pad" {
+        let button = binding_json_string(v, "button") ?? return null
+        return pad_bind(button)
+    }
+    if kind == "axis" {
+        let axis = binding_json_string(v, "axis") ?? return null
+        let dir = binding_json_int(v, "dir") ?? return null
+        if dir != -1 && dir != 1 { return null }
+        let deadzone = binding_json_float(v, "deadzone") ?? return null
+        let threshold = binding_json_float(v, "threshold") ?? return null
+        if deadzone < 0.0 || deadzone >= 1.0 || threshold < 0.0 || threshold > 1.0 { return null }
+        return axis_bind(axis, dir, deadzone, threshold)
+    }
+    return null
+}
+
+pub fn bindings_from_json(v: JsonValue) -> ([InputBinding], bool) {
+    let values = json_as_array(v) ?? return ([], false)
+    let out: [InputBinding] = []
+    for value in values {
+        let binding = binding_from_json(value) ?? return ([], false)
+        out.push(binding)
+    }
+    return (out, true)
+}
+
+fn bindings_reset_registered_defaults() {
+    BINDING_RAW_ACTIONS = map_new()
+    BINDING_RAW_ACTION_BYTES = map_new()
+    BINDING_RAW_ACTION_KEYS = map_new()
+    for name in action_names() { action_reset_binding(ActionDef(name)) }
+}
+
+fn bindings_overlay_root_json() -> JsonValue {
+    let actions: Map<string, JsonValue> = map_new()
+    for name in action_names() {
+        actions[name] = bindings_to_json(action_bindings(name))
+    }
+    let root: Map<string, JsonValue> = map_new()
+    root["version"] = json_int(1)
+    root["actions"] = json_object(actions)
+    return json_object(root)
+}
+
+fn bindings_apply_json(root: JsonValue) -> bool {
+    let version = json_as_int(json_field(root, "version") ?? json_null()) ?? return false
+    if version != 1 { return false }
+    let actions = json_as_object(json_field(root, "actions") ?? json_null()) ?? return false
+    bindings_reset_registered_defaults()
+    let values = actions.unwrap()
+    for name in keys(values) {
+        let value = values[name]
+        if !ACTIONS.contains(name) {
+            BINDING_RAW_ACTIONS[name] = value.clone_into(map_storage(BINDING_RAW_ACTIONS))
+            continue
+        }
+        let (parsed, valid) = bindings_from_json(value)
+        if !valid {
+            BINDING_RAW_ACTIONS[name] = value.clone_into(map_storage(BINDING_RAW_ACTIONS))
+            continue
+        }
+        action_rebind(ActionDef(name), parsed)
+    }
+    return true
+}
+
+fn bindings_skip_json_space(raw: string, start: int) -> int {
+    let at = start
+    while at < raw.len() {
+        let b = raw.unit_at(at)
+        if b == 32 || b == 9 || b == 10 || b == 13 { at += 1 } else { break }
+    }
+    return at
+}
+
+fn bindings_raw_string_end(raw: string, start: int) -> int? {
+    if start >= raw.len() || raw.unit_at(start) != 34 { return null }
+    let at = start + 1
+    let escaped = false
+    while at < raw.len() {
+        let b = raw.unit_at(at)
+        if escaped {
+            escaped = false
+        } else if b == 92 {
+            escaped = true
+        } else if b == 34 {
+            return at + 1
+        }
+        at += 1
+    }
+    return null
+}
+
+fn bindings_raw_value_end(raw: string, start: int) -> int? {
+    if start >= raw.len() { return null }
+    let first = raw.unit_at(start)
+    if first == 34 { return bindings_raw_string_end(raw, start) }
+    if first != 91 && first != 123 {
+        let at = start
+        while at < raw.len() {
+            let b = raw.unit_at(at)
+            if b == 44 || b == 125 || b == 93 { break }
+            at += 1
+        }
+        let end = at
+        let cursor = end
+        while cursor > start {
+            let b = raw.unit_at(cursor - 1)
+            if b == 32 || b == 9 || b == 10 || b == 13 { cursor -= 1 } else { break }
+        }
+        return cursor
+    }
+    let cursor = start
+    let depth = 0
+    while cursor < raw.len() {
+        let b = raw.unit_at(cursor)
+        if b == 34 {
+            let end = bindings_raw_string_end(raw, cursor) ?? return null
+            cursor = end
+            continue
+        }
+        if b == 91 || b == 123 { depth += 1 }
+        if b == 93 || b == 125 {
+            depth -= 1
+            if depth == 0 { return cursor + 1 }
+        }
+        cursor += 1
+    }
+    return null
+}
+
+fn bindings_raw_action_members(raw: string) -> (Map<string, string>, Map<string, string>, bool) {
+    let values: Map<string, string> = map_new()
+    let key_bytes: Map<string, string> = map_new()
+    let marker = raw.find("\"actions\"")
+    if marker < 0 { return (values, key_bytes, false) }
+    let key_end = bindings_raw_string_end(raw, marker) ?? return (values, key_bytes, false)
+    let colon = bindings_skip_json_space(raw, key_end)
+    if colon >= raw.len() || raw.unit_at(colon) != 58 { return (values, key_bytes, false) }
+    let at = bindings_skip_json_space(raw, colon + 1)
+    if at >= raw.len() || raw.unit_at(at) != 123 { return (values, key_bytes, false) }
+    at += 1
+    while true {
+        at = bindings_skip_json_space(raw, at)
+        if at >= raw.len() { return (values, key_bytes, false) }
+        if raw.unit_at(at) == 125 { return (values, key_bytes, true) }
+        let raw_key_start = at
+        let raw_key_end = bindings_raw_string_end(raw, at) ?? return (values, key_bytes, false)
+        let decoded = json_decode(raw.substring(raw_key_start, raw_key_end)) ?? return (values, key_bytes, false)
+        let name = json_as_str(decoded) ?? return (values, key_bytes, false)
+        at = bindings_skip_json_space(raw, raw_key_end)
+        if at >= raw.len() || raw.unit_at(at) != 58 { return (values, key_bytes, false) }
+        let value_start = bindings_skip_json_space(raw, at + 1)
+        let value_end = bindings_raw_value_end(raw, value_start) ?? return (values, key_bytes, false)
+        values[name] = raw.substring(value_start, value_end)
+        key_bytes[name] = raw.substring(raw_key_start, raw_key_end)
+        at = bindings_skip_json_space(raw, value_end)
+        if at < raw.len() && raw.unit_at(at) == 44 {
+            at += 1
+        } else if at < raw.len() && raw.unit_at(at) == 125 {
+            return (values, key_bytes, true)
+        } else {
+            return (values, key_bytes, false)
+        }
+    }
+    return (values, key_bytes, false)
+}
+
+pub fn bindings_sparse_json() -> string {
+    let included: [string] = []
+    for name in keys(BINDING_RAW_ACTIONS) { included.push(name) }
+    for name in action_names() {
+        let already = false
+        for prior in included { if prior == name { already = true } }
+        if !action_binding_is_default(ActionDef(name)) && !already {
+            included.push(name)
+        }
+    }
+    sort(included, name => name)
+    let parts: [string] = ["{{\"version\":1,\"actions\":{{"]
+    for (i, name) in enumerate(included) {
+        if i > 0 { parts.push(",") }
+        parts.push(BINDING_RAW_ACTION_KEYS.get(name) ?? json_encode(json_str(name)))
+        parts.push(":")
+        if let raw = BINDING_RAW_ACTION_BYTES.get(name) {
+            parts.push(raw)
+        } else {
+            if ACTIONS.contains(name) {
+                parts.push(json_encode(bindings_to_json(action_bindings(name))))
+            } else {
+                parts.push(json_encode(BINDING_RAW_ACTIONS[name]))
+            }
+        }
+    }
+    parts.push("}}}}")
+    return join(parts, "")
+}
+
+fn bindings_load_conflict_message(a: string, b: string, chord: InputBinding) -> string {
+    let label = binding_label(chord)
+    return "binding conflict at load: \"{a}\" and \"{b}\" share \"{label}\""
+}
+
+// Reports chords two registered actions hold in the same input context after
+// a load completes. Same-context matches the capture path's displacement rule;
+// undeclared (pair, chord) matches report once. Read-only: no displacement, persistence,
+// or capture behavior changes.
+fn bindings_report_load_conflicts() {
+    let names = action_names()
+    for i in 0..names.len() {
+        let rest = i + 1
+        for j in rest..names.len() {
+            let a = ActionDef(names[i])
+            let b = ActionDef(names[j])
+            if action_is_ui(a) != action_is_ui(b) { continue }
+            let reported: [InputBinding] = []
+            for binding in action_bindings(names[i]) {
+                let shared = false
+                for other in action_bindings(names[j]) {
+                    if action_binding_equal(binding, other) { shared = true }
+                }
+                if !shared { continue }
+                if action_entries_share_default(ACTIONS[names[i]], ACTIONS[names[j]], binding) { continue }
+                let dup = false
+                for prior in reported {
+                    if action_binding_equal(binding, prior) { dup = true }
+                }
+                if dup { continue }
+                reported.push(binding)
+                log_warn("BINDINGS", bindings_load_conflict_message(names[i], names[j], binding))
+            }
+        }
+    }
+}
+
+// Returns a rejection reason before any live bindings are changed.
+fn bindings_restore_json(raw: string) -> string? {
+    let parsed = json_decode(raw)
+    if parsed == null {
+        return "corrupt binding configuration"
+    }
+    let owned = parsed.unwrap().clone_into(map_storage(BINDING_RAW_ACTIONS))
+    if !bindings_apply_json(owned) {
+        return "unsupported binding configuration"
+    }
+    let (raw_values, raw_keys, raw_ok) = bindings_raw_action_members(raw)
+    if raw_ok {
+        BINDING_RAW_ACTION_BYTES = raw_values
+        BINDING_RAW_ACTION_KEYS = raw_keys
+    }
+    bindings_report_load_conflicts()
+    return null
+}
+
+pub fn load_bindings_json(raw: string) -> bool {
+    if let reason = bindings_restore_json(raw) {
+        bindings_reset_registered_defaults()
+        log_warn("BINDINGS", "{reason}, using current defaults")
+        return false
+    }
+    return true
+}
+
+pub fn save_bindings(path: string) -> bool {
+    return file_write_atomic(path, bindings_sparse_json() + "\n")
+}
+
+pub fn load_bindings(path: string) -> bool {
+    if !file_exists(path) {
+        bindings_reset_registered_defaults()
+        bindings_report_load_conflicts()
+        return true
+    }
+    let raw = file_read(path) ?? return false
+    return load_bindings_json(raw)
+}
+
+pub fn bindings_overlay_json() -> string {
+    return json_encode(bindings_overlay_root_json())
+}
+
+pub fn load_bindings_overlay_json(raw: string) -> bool {
+    if let reason = bindings_restore_json(raw) {
+        log_warn("BINDINGS", "{reason}, keeping current bindings")
+        return false
+    }
+    return true
+}
+
+pub fn load_bindings_for_run(path: string) -> bool {
+
+    if path == "" {
+        bindings_reset_registered_defaults()
+        bindings_report_load_conflicts()
+        return true
+    }
+    return load_bindings(path)
+}

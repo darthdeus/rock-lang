@@ -1,0 +1,140 @@
+// Every static sound is admitted (decoded on a worker) when it loads, so a
+// bank is resident shortly after boot. A one-shot that plays before its
+// decode published decodes synchronously rather than being dropped; those
+// late decodes are counted here. Stream sources (ambience, music) hold their
+// encoded bytes once admitted and never hold PCM.
+
+pub value SoundRecipe {
+    frames: int,
+    rate: int,
+    channels: int,
+    digest: string,
+}
+
+pub value SoundResidencyMetrics {
+    sync_decodes: int,
+    sync_decode_us: int,
+}
+
+global SOUND_RESIDENCY_RECIPES: Map<int, SoundRecipe> = map_new()
+value SoundResidencySharedSource {
+    sound: Sound,
+    references: int,
+}
+global SOUND_RESIDENCY_SHARED_SOURCES: Map<string, SoundResidencySharedSource> = map_new()
+global SOUND_RESIDENCY_SHARED_KEYS: Map<int, string> = map_new()
+global SOUND_RESIDENCY_SYNC_DECODES: int = 0
+global SOUND_RESIDENCY_SYNC_DECODE_US: int = 0
+
+pub fn sound_residency_metrics() -> SoundResidencyMetrics {
+    return SoundResidencyMetrics {
+        sync_decodes: SOUND_RESIDENCY_SYNC_DECODES,
+        sync_decode_us: SOUND_RESIDENCY_SYNC_DECODE_US,
+    }
+}
+
+pub fn sound_residency_restore_metrics(metrics: SoundResidencyMetrics) {
+    SOUND_RESIDENCY_SYNC_DECODES = metrics.sync_decodes
+    SOUND_RESIDENCY_SYNC_DECODE_US = metrics.sync_decode_us
+}
+
+pub fn sound_residency_register_recipe(handle: int, recipe: SoundRecipe) {
+    if handle == 0 { return }
+    SOUND_RESIDENCY_RECIPES.insert(handle, recipe)
+}
+
+fn sound_residency_load_shared(path: string, recipe: SoundRecipe?, stream: bool) -> Sound {
+    let resolved = asset_path(path)
+    let digest_key = if let metadata = recipe {
+        "{resolved}#{metadata.digest}"
+    } else { resolved }
+    let key = if stream { digest_key + "#stream" } else { digest_key }
+    if let source = SOUND_RESIDENCY_SHARED_SOURCES.get(key) {
+        SOUND_RESIDENCY_SHARED_SOURCES.insert(key, SoundResidencySharedSource {
+            sound: source.sound,
+            references: source.references + 1,
+        })
+        return source.sound
+    }
+    let sound = load_sound_asset(path, recipe, stream)
+    let data = sound.data() ?? return sound
+    if data.backend_id == 0 { return sound }
+    SOUND_RESIDENCY_SHARED_SOURCES.insert(key,
+        SoundResidencySharedSource { sound, references: 1 })
+    SOUND_RESIDENCY_SHARED_KEYS.insert(data.backend_id, key)
+    return sound
+}
+
+fn sound_residency_release_shared(sound: Sound) {
+    let data = sound.data() ?? return
+    let key = SOUND_RESIDENCY_SHARED_KEYS.get(data.backend_id) ?? {
+        sound_residency_unload(sound)
+        return
+    }
+    let source = SOUND_RESIDENCY_SHARED_SOURCES.get(key) ?? {
+        SOUND_RESIDENCY_SHARED_KEYS.remove(data.backend_id)
+        sound_residency_unload(sound)
+        return
+    }
+    let references = source.references - 1
+    if references > 0 {
+        SOUND_RESIDENCY_SHARED_SOURCES.insert(key, SoundResidencySharedSource {
+            sound: source.sound,
+            references,
+        })
+        return
+    }
+    SOUND_RESIDENCY_SHARED_SOURCES.remove(key)
+    SOUND_RESIDENCY_SHARED_KEYS.remove(data.backend_id)
+    sound_residency_unload(sound)
+}
+
+pub fn sound_residency_recipe(sound: Sound) -> SoundRecipe? {
+    let data = sound.data() ?? return null
+    return SOUND_RESIDENCY_RECIPES.get(data.backend_id)
+}
+
+pub fn sound_residency_admit(sound: Sound) -> bool {
+    let data = sound.data() ?? return false
+    if data.backend_id == 0 { return false }
+    if stone_sound_playable(data.backend_id) { return true }
+    return stone_sound_admit(data.backend_id)
+}
+
+pub fn sound_residency_pool_resident(pool: MultiSound) -> bool {
+    if pool.sources.len() == 0 { return false }
+    for sound in pool.sources {
+        let data = sound.data() ?? return false
+        if data.backend_id == 0 || !stone_sound_playable(data.backend_id) { return false }
+    }
+    return true
+}
+
+pub fn sound_residency_loop_ready(pool: MultiSound) -> bool {
+    return stone_audio_stub_active() || sound_residency_pool_resident(pool)
+}
+
+pub fn sound_residency_admit_pool(pool: MultiSound) {
+    for sound in pool.sources { let _ = sound_residency_admit(sound) }
+}
+
+pub fn sound_residency_forget(sound: Sound) {
+    let data = sound.data() ?? return
+    SOUND_RESIDENCY_RECIPES.remove(data.backend_id)
+}
+
+pub fn sound_residency_decode_sync(sound: Sound) -> int {
+    let data = sound.data() ?? return -1
+    let waited = stone_sound_decode_sync(data.backend_id)
+    if waited < 0 { return waited }
+    SOUND_RESIDENCY_SYNC_DECODES += 1
+    SOUND_RESIDENCY_SYNC_DECODE_US += waited
+    residency_record_sound_decode(data.path, waited)
+    log_info("AUDIO", "synchronous sound decode path={data.path} wait_us={waited}")
+    return waited
+}
+
+pub fn sound_residency_unload(sound: Sound) {
+    sound_residency_forget(sound)
+    unload_sound(sound)
+}

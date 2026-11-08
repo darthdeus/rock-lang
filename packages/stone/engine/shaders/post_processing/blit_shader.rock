@@ -1,0 +1,12 @@
+// Plain copy: sample input_tex, write it out. The engine's present hop for
+// final-pass chains, or any canvas-to-canvas move. Orientation is handled by
+// the fullscreen quad selected in stone_draw_fullscreen_quad (present vs
+// identity by bound target) -- the blit itself never flips.
+//
+// Compiled in-game via `rock_shader(blit_frag)` (single-arg fullscreen form,
+// `InputTex` is the Pass slot group (input_tex 0).
+
+@shader(fragment)
+fn blit_frag(@textures t: InputTex, tc: Vec2) -> Vec4 {
+    return texture(t.input_tex, tc)
+}

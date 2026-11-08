@@ -1,0 +1,146 @@
+// Compare the successor draw with the same draw before the semantic pass.
+// The control inherits GL state directly: it cannot repair the leak it tests.
+
+fn submission_state_entry(depth_compare: string) {
+    set_blend_mode(BlendMode::Multiply)
+    set_depth_mode(depth_compare, true)
+    stone_set_color_mask(true, false, true, true)
+    stone_set_clear_color(0.125, 0.25, 0.5, 0.75)
+}
+
+fn submission_state_control(target: Canvas, source: Canvas) {
+    set_canvas(target)
+    set_shader(BLIT_PIPELINE.shader_name)
+    assert(bind_sampled_to_slot(SampledTexture::Canvas(source), 0, TextureFilter::Nearest))
+    stone_draw_fullscreen_rect(0.0, 0.0, 1.0, 1.0)
+    sampler_release_unit(0)
+    unset_shader()
+    unset_canvas()
+}
+
+fn submission_state_case(fail: bool, trace: bool, depth_compare: string) {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    let entry_blend = CURRENT_BLEND
+    let entry_canvas = CURRENT_CANVAS_HANDLE
+    let entry_shader = WATCHER.current_shader_name
+    let entry_trace = GPU_TRACE
+    let entry_trace_on = GPU_TRACE_ON
+    let entry_retains = GPU_TRACE_DRAW_RETAINS
+    GPU_TRACE = vec_new()
+    GPU_TRACE_ON = false
+    let scope = stone_gl_pass_state_begin()
+    assert(scope != 0)
+    let probe_on = UI_SUBMISSION_PROBE_ON
+    let probe_hook = UI_SUBMISSION_PROBE_DRAW_HOOK
+    let pass_hook = UI_SUBMISSION_PROBE_PASS_HOOK
+    let source = new_canvas(8.0, 8.0, "rgba8")
+    let output = new_canvas(8.0, 8.0, "rgba8")
+    let before = new_canvas_with_depth(8.0, 8.0, "rgba8")
+    let after = new_canvas_with_depth(8.0, 8.0, "rgba8")
+    world_fixture_with_cleanup(() => {
+        stone_set_color_mask(true, true, true, true)
+        for c in [source, output, before, after] {
+            set_canvas(c)
+            stone_clear_canvas(0.75, 0.5, 0.25, 0.625)
+        }
+        unset_canvas()
+        let draw = GpuDraw {
+            shader: BLIT_PIPELINE.shader_name,
+            bindings: [GpuBinding { slot: 0, resource: SampledTexture::Canvas(source),
+                filter: TextureFilter::Nearest }],
+            blend: BlendMode::Lighten,
+            color_write: GPU_WRITE_RGBA,
+        }
+        let pass = GpuPass {
+            target: GpuTarget::Canvas(output), load: GpuLoad::Clear(BLACK),
+            viewport: GpuRect { x: 0, y: 0, w: 8, h: 8 },
+            draws: [draw, draw],
+        }
+        submission_state_entry(depth_compare)
+        submission_state_control(before, source)
+        let expected = canvas_read_pixels(before)
+        submission_state_entry(depth_compare)
+        set_canvas(before)
+        let mode = CURRENT_BLEND
+        let blend = stone_gl_blend_state()
+        let write = stone_gl_write_state()
+        let depth_write = stone_gl_depth_write_enabled()
+        let errors = stone_log_record_total(0)
+        set_depth_mode("invalid-submission-depth", false)
+        assert_eq(stone_log_record_total(0), errors + 1,
+            "the public string API reports rejected depth names through the shared logger")
+        assert(stone_log_records_text(0, errors + 1).contains("invalid-submission-depth"))
+        assert_eq(stone_gl_depth_write_enabled(), depth_write,
+            "rejection preserves the entry write mask before typed semantic depth transitions")
+        if trace { gpu_trace_begin() }
+        let calls_before = stone_get_graphics_stats().draw_calls
+        if fail {
+            let calls = 0
+            UI_SUBMISSION_PROBE_ON = true
+            UI_SUBMISSION_PROBE_PASS_HOOK = (_pass) => {}
+            UI_SUBMISSION_PROBE_DRAW_HOOK = (_draw, _geometry) => {
+                calls += 1
+                if calls == 2 { error("intentional semantic execution failure") }
+                return
+            }
+            let raised = world_fixture_raised(() => { assert(submit_pass(pass)) }, world_fixture_traceback)
+            UI_SUBMISSION_PROBE_ON = probe_on
+            UI_SUBMISSION_PROBE_DRAW_HOOK = probe_hook
+            UI_SUBMISSION_PROBE_PASS_HOOK = pass_hook
+            assert(raised != null && raised.unwrap().contains("intentional semantic execution failure"),
+                "the executor surfaces its original failure: {raised ?? "no error"}")
+            assert_eq(calls, 2, "failure follows a draw that changed native state")
+        } else {
+            assert(submit_pass(pass))
+        }
+        if trace { assert_eq(gpu_trace_take().len(), 1) }
+        assert_eq(stone_get_graphics_stats().draw_calls - calls_before, if fail { 1 } else { pass.draws.len() },
+            "the admitted pass really draws before completion or failure")
+        assert_eq(CURRENT_BLEND, mode, "the Rock blend mirror is restored")
+        assert_eq(stone_gl_blend_state(), blend, "native blend is restored")
+        assert_eq(stone_gl_write_state(), write, "native color mask and clear color are restored")
+        assert_eq(stone_gl_depth_write_enabled(), depth_write, "native depth write mask is restored")
+        assert_eq(CURRENT_CANVAS_HANDLE, before.handle.0, "success and failure restore the caller target")
+        assert_eq(read_canvas_pixel(output, 4, 4), read_canvas_pixel(source, 4, 4),
+            "the differently configured pass produced its submitted output")
+        submission_state_control(after, source)
+        let actual = canvas_read_pixels(after)
+        assert_eq(actual.rgba.len, expected.rgba.len)
+        for i in 0..actual.rgba.len {
+            assert_eq(actual.rgba[i], expected.rgba[i], "the successor retains entry depth/blend/write behavior")
+        }
+        // Cleanup must finish before a later successful transaction can run.
+        assert(submit_pass(pass))
+        assert_eq(stone_gl_blend_state(), blend)
+        assert_eq(stone_gl_write_state(), write)
+        assert_eq(stone_gl_depth_write_enabled(), depth_write)
+    }, () => {
+        if trace { let _ = gpu_trace_take() }
+        UI_SUBMISSION_PROBE_ON = probe_on
+        UI_SUBMISSION_PROBE_DRAW_HOOK = probe_hook
+        UI_SUBMISSION_PROBE_PASS_HOOK = pass_hook
+        unset_canvas()
+        for c in [source, output, before, after] { destroy_canvas(c) }
+        set_canvas_handle(entry_canvas)
+        if entry_shader != null { set_shader(entry_shader.unwrap()) } else { unset_shader() }
+        WATCHER.current_shader_name = entry_shader
+        CURRENT_BLEND = entry_blend
+        GPU_TRACE = entry_trace
+        GPU_TRACE_ON = entry_trace_on
+        GPU_TRACE_DRAW_RETAINS = entry_retains
+        assert(stone_gl_pass_state_end(scope), "fixture restores native state even after a failed assertion")
+    }, world_fixture_traceback)
+}
+
+@test
+fn semantic_pass_restores_ambient_gl_state() {
+    submission_state_case(false, false, "always")
+    submission_state_case(false, true, "never")
+}
+
+@test
+fn semantic_pass_failure_restores_ambient_gl_state() {
+    submission_state_case(true, true, "always")
+    submission_state_case(true, false, "never")
+}

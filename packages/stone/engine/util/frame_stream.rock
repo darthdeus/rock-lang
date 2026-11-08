@@ -1,0 +1,67 @@
+// A recording of presented frames as one raw RGBA stream: top-down rows,
+// frame after frame, all at the drawable size. The frame pays only the GL
+// readback; stone-capture's writer thread orders the rows and writes them,
+// usually into a FIFO an encoder reads (tools/video). A screenshot, by
+// contrast, is a PNG written within its frame (screenshot.rock).
+//
+// One recording at a time: frame_stream_begin, then frame_stream_record on
+// each frame to keep, then frame_stream_finish, which waits for the writer
+// and reports every failure.
+
+pub struct FrameStreamResult {
+    ok: bool,
+    frames: int,
+    width: int,
+    height: int,
+    error: string,
+}
+
+// Frames that paid a recording readback, failed ones included: like a
+// screenshot, they say nothing about how fast the game runs for a player.
+pub global FRAME_STREAM_READBACKS: int = 0
+global FRAME_STREAM_LIVE: bool = false
+global FRAME_STREAM_PENDING: bool = false
+
+pub fn frame_stream_begin(path: string) -> bool {
+    sim_submit_guard("frame_stream_begin")
+    if !stone_frame_stream_begin(path) { return false }
+    FRAME_STREAM_LIVE = true
+    return true
+}
+
+// Records the frame being drawn when it is presented.
+pub fn frame_stream_record() {
+    sim_submit_guard("frame_stream_record")
+    FRAME_STREAM_PENDING = true
+}
+
+pub fn frame_stream_finish() -> FrameStreamResult {
+    if FRAME_STREAM_PENDING {
+        log_error("STONE", "frame stream: finished before the last recorded frame was presented")
+        FRAME_STREAM_PENDING = false
+    }
+    let (ok, frames, width, height) = stone_frame_stream_finish()
+    FRAME_STREAM_LIVE = false
+    return FrameStreamResult {
+        ok: ok,
+        frames: frames,
+        width: width,
+        height: height,
+        error: if ok { "" } else { stone_frame_stream_last_error() },
+    }
+}
+
+fn frame_stream_capture_for_present() {
+    if !FRAME_STREAM_PENDING { return }
+    FRAME_STREAM_PENDING = false
+    FRAME_STREAM_READBACKS = FRAME_STREAM_READBACKS + 1
+    let (draw_w, draw_h) = stone_get_drawable_size()
+    // A failure is logged natively and kept for frame_stream_finish.
+    let _ = stone_frame_stream_record(draw_w, draw_h)
+}
+
+fn frame_stream_close_at_shutdown() {
+    if !FRAME_STREAM_LIVE { return }
+    let result = frame_stream_finish()
+    log_error("STONE", "frame stream still live at shutdown; closed with {result.frames} frames ({result.error})")
+}

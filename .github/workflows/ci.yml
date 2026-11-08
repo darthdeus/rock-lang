@@ -8,10 +8,6 @@ on:
 permissions:
   contents: read
 
-env:
-  # LuaJIT v2.1 at 2.1.1785763465.
-  LUAJIT_SHA: 1edc3e52b67eaf6ce5f809be8e17d6862594b8bc
-
 jobs:
   check:
     runs-on: ubuntu-latest
@@ -20,36 +16,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - name: Install SDL2 development libraries
+      - name: Install native build and test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsdl2-dev pkg-config
-      # Distro LuaJIT builds older than 2.1.1785763465 round some exact
-      # ties in number formatting differently from the correctly rounded
-      # result that the Lua and JS backends must agree on.
-      - name: Cache LuaJIT
-        id: luajit-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/luajit
-          key: luajit-${{ runner.os }}-${{ env.LUAJIT_SHA }}
-      - name: Build LuaJIT
-        if: steps.luajit-cache.outputs.cache-hit != 'true'
-        shell: bash
+          sudo apt-get install -y libsdl2-dev libasound2-dev pkg-config clang xvfb i3 mesa-utils libgl1-mesa-dri
+      - name: Install native bundle
         run: |
-          set -euo pipefail
-          src="$RUNNER_TEMP/luajit-src"
-          git init -q "$src"
-          git -C "$src" fetch -q --depth 1 https://github.com/LuaJIT/LuaJIT.git "$LUAJIT_SHA"
-          git -C "$src" checkout -q FETCH_HEAD
-          make -C "$src" -j"$(nproc)" PREFIX="$HOME/luajit"
-          make -C "$src" install PREFIX="$HOME/luajit"
-      - name: Put LuaJIT on PATH
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "$HOME/luajit/bin" >> "$GITHUB_PATH"
-          "$HOME/luajit/bin/luajit" -v
+          python3 scripts/gamelibs.py sync
+          native=$(python3 scripts/gamelibs.py path)
+          echo "$native/bin" >> "$GITHUB_PATH"
+      - uses: taiki-e/install-action@nextest
       - name: Check public content
         shell: bash
         env:
@@ -67,10 +43,20 @@ jobs:
         run: command -v luajit && luajit -v
       - name: Build workspace
         run: cargo build --locked --workspace
-      - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Compiler Clippy
+        run: cargo clippy --locked --workspace --exclude stone-rs --exclude stone-gl --exclude stone-capture --exclude stone-imgui-abi --all-targets -- -D warnings
+      - name: Native Clippy diagnostics
+        run: cargo clippy --locked -p stone-rs -p stone-gl -p stone-capture -p stone-imgui-abi --all-targets -- -W clippy::approx_constant
       - name: Test workspace
-        run: cargo test --locked --workspace
+        run: cargo nextest run --locked --workspace
+      - name: Test doc examples
+        run: cargo test --locked --workspace --doc
+      - name: Test bundle installer
+        run: python3 -m unittest discover -s scripts -p test_gamelibs.py
+      - name: Test Stone packages
+        run: |
+          cargo run --locked -p rock-cli --bin rock -- test packages/stone-core
+          cargo run --locked -p rock-cli --bin rock -- test packages/stone
       - name: Test language corpus
         run: cargo run --locked -p rock-cli --bin rock -- test tests/
       - name: Test language corpus on the JS backend

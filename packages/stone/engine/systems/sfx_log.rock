@@ -1,0 +1,269 @@
+// A ring of the last N sounds played, with the parameters each was played
+// with, so "what was that, and how loud/low was it?" is a thing you can look at
+// instead of a thing you infer from the code.
+//
+// Recorded in play_sound BEFORE the mute gate, and `muted` says which side of
+// it the play landed on. That is deliberate: a headless or sim run silences
+// audio, so without it every automated run would log nothing and audio would
+// stay the one subsystem with no observable surface at all. `sfx_last()` is
+// the assertion handle.
+//
+// Every sound in every game funnels through play_sound (play_random_sound
+// resolves its pick and delegates), so one record site covers the lot -- and
+// for a random bank it names the variant that actually played, which the bank
+// name would not.
+
+pub value SfxEvent {
+    // Monotonic play number. The stable identity of a row: a position in the
+    // ring is not one, because every new play shifts it.
+    seq: int,
+    // Engine `time` at the play, i.e. scaled game time -- the same clock the
+    // VFX beats run on, so a row lines up with what was on screen.
+    at: float,
+    // Kept for replay. May go stale if the asset is unloaded; replaying a
+    // stale handle is a no-op through play_sound's own null check.
+    sound: Sound,
+    // Asset-relative source path, straight off SoundData -- the identifier
+    // that survives a bank rename and distinguishes variants within a bank.
+    path: string,
+    // Where the play was asked for -- "audio/sfx.rock:223". The path says which
+    // FILE was played, which does not say who played it; a bank shared by six
+    // events looks identical on every row without this. Captured by the
+    // play_sound/play_random_sound macros via `__SITE__`, so a wrapper that
+    // forwards its `site` stays invisible and the row names gameplay code.
+    site: string,
+    // Which bus it was routed to (STONE_BUS_*). Part of what a play IS once
+    // there is a bus graph: the same sample on `ambience` and on `sfx` ducks,
+    // filters and fades differently.
+    bus: int,
+    volume: float,
+    speed: float,
+    decay: float,
+    looped: bool,
+    spatial: bool,
+    pan: float,
+    muted: bool,
+    resident: bool,
+    sync_decode_us: int,
+    // One traversal's heard length. A looped row is unbounded, but its cycle
+    // still needs a width in the browser timeline.
+    dur: float,
+}
+
+// The heard length of a play. Exposed because it is the number the browser's
+// timeline is drawn from, and the one that answers "why is that still going".
+pub @pure fn sfx_heard_duration(source_dur: float, speed: float, decay: float) -> float {
+    let stretched = if speed > 0.0 { source_dur / speed } else { source_dur }
+    if decay > 0.0 && decay < stretched { return decay }
+    return stretched
+}
+
+// A ring, and it stays a ring: the primary question this answers is "what was
+// THAT", asked after the sound has already happened. An explicitly-started
+// unbounded recording cannot answer it -- you would have had to know in advance
+// -- and it grows without bound in a session that runs for hours. Always-on
+// with a cap is the shape that matches the question.
+//
+// 512 rather than the 96 it shipped with: 96 is under a minute of a scene with
+// footsteps in it, and the ring wrapping while you read it is the exact
+// complaint HOLD exists to fix.
+const SFX_LOG_CAP: int = 512
+
+pub global SFX_LOG: [SfxEvent] = []
+// Next slot to overwrite once the ring is full; meaningless before that.
+pub global SFX_LOG_HEAD: int = 0
+// Total plays ever, so a row can be labelled with a number that does not
+// shuffle as the ring wraps.
+pub global SFX_LOG_SEQ: int = 0
+
+// Set while the browser plays a row back, so the replay does not land in the
+// ring. A replay is the tool's own noise: recording it would push the events
+// being inspected out of the ring, and grow the list under the row being read.
+// The log is what the GAME played.
+global SFX_LOG_SUPPRESS: bool = false
+// The voice the browser's last replay is still playing, so the next press can
+// stop it. A HANDLE the host minted for a tool press: hashing it would make
+// the desync hash compare two allocation counters -- host bookkeeping, not
+// anything the game did.
+global SFX_REPLAY_VOICE: Voice = Voice(0)
+
+// HOLD: stop recording, and stop the clock the timeline is drawn against, so
+// what is on screen stays put while it is being read. One flag, not a
+// transient-plus-sticky pair: the browser LATCHES this on when the pointer
+// enters it, and only an explicit Resume clears it. A hold that released itself
+// when the pointer wandered off ended a study session by accident.
+global SFX_LOG_PAUSED: bool = false
+// The clock reading when the hold began. The timeline draws against this rather
+// than `time` while held, so the view freezes instead of scrolling.
+global SFX_LOG_HELD_AT: float = 0.0
+// Plays dropped while held. Surfaced in the window: a hold that silently ate
+// events would have the tool lying about what the game did, which is the one
+// thing it must not do.
+// The newest play the frozen view shows. A hold freezes what is DISPLAYED,
+// never what is recorded: the ring is the answer to "what was that", and a
+// hold that ate events would destroy exactly the data it was invoked to look
+// at. Rows past this keep arriving and appear when the hold is released.
+pub global SFX_LOG_HELD_SEQ: int = 0
+
+pub fn sfx_log_holding() -> bool {
+    return SFX_LOG_PAUSED
+}
+
+// Stamps the freeze clock on the RISING edge only. The browser re-asserts the
+// hold every frame it is hovered, and a per-call stamp would slide the frozen
+// view forward under the cursor.
+pub fn sfx_log_set_hold(held: bool) {
+    let was = SFX_LOG_PAUSED
+    SFX_LOG_PAUSED = held
+    if !was && held {
+        SFX_LOG_HELD_AT = time
+        SFX_LOG_HELD_SEQ = SFX_LOG_SEQ
+    }
+}
+
+// The clock the timeline is drawn against: frozen while held, live otherwise.
+pub fn sfx_view_now() -> float {
+    if sfx_log_holding() { return SFX_LOG_HELD_AT }
+    return time
+}
+
+fn sfx_log_record(sound: Sound, bus: int, volume: float, speed: float, decay: float,
+                  looped: bool, spatial: bool, pan: float, muted: bool,
+                  site: string, resident: bool, sync_decode_us: int) {
+    if SFX_LOG_SUPPRESS { return }
+
+    // An unloaded handle still gets a row: a play that resolved to nothing is
+    // exactly the kind of thing this window exists to make visible.
+    let path = sound.data()?.path ?? "<unloaded>"
+    let owned_path = path.clone_into(SFX_LOG.storage)
+
+    SFX_LOG_SEQ += 1
+
+    let e = SfxEvent {
+        seq: SFX_LOG_SEQ,
+        at: time,
+        sound: sound,
+        path: owned_path,
+        site: site,
+        bus: bus,
+        volume: volume,
+        speed: speed,
+        decay: decay,
+        looped: looped,
+        spatial: spatial,
+        pan: pan,
+        muted: muted,
+        resident: resident,
+        sync_decode_us: sync_decode_us,
+        dur: sfx_heard_duration(sound_duration(sound), speed, decay),
+    }
+
+    if SFX_LOG.len() < SFX_LOG_CAP {
+        SFX_LOG.push(e)
+    } else {
+        SFX_LOG[SFX_LOG_HEAD] = e
+        SFX_LOG_HEAD = (SFX_LOG_HEAD + 1) % SFX_LOG_CAP
+    }
+}
+
+// Short bus label for a row. Unknown ids render as their number rather than
+// as a guess -- a bus added engine-side without a name here should look
+// unnamed, not look like `sfx`.
+pub fn sfx_bus_name(bus: int) -> string {
+    if bus == STONE_BUS_MASTER { return "master" }
+    if bus == STONE_BUS_SFX { return "sfx" }
+    if bus == STONE_BUS_MUSIC { return "music" }
+    if bus == STONE_BUS_AMBIENCE { return "amb" }
+    if bus == STONE_BUS_UI { return "ui" }
+    if bus == STONE_BUS_FOLEY { return "foley" }
+    return "{bus}"
+}
+
+// Is this row inside the frozen view? Everything is, unless a hold is in
+// force and the row arrived after it.
+pub fn sfx_view_shows(e: SfxEvent) -> bool {
+    return !sfx_log_holding() || e.seq <= SFX_LOG_HELD_SEQ
+}
+
+// Plays that have arrived since the view froze. They ARE in the ring -- this
+// is how many the display is holding back, not how many were lost.
+pub fn sfx_held_behind() -> int {
+    if !sfx_log_holding() { return 0 }
+    return SFX_LOG_SEQ - SFX_LOG_HELD_SEQ
+}
+
+pub fn sfx_log_len() -> int {
+    return SFX_LOG.len()
+}
+
+// Seconds between the oldest row still in the ring and the newest -- how far
+// back the view can be panned before it runs out of data.
+fn sfx_log_span() -> float {
+    let n = SFX_LOG.len()
+    if n < 2 { return 0.0 }
+
+    let newest = sfx_log_recent(0)
+    let oldest = sfx_log_recent(n - 1)
+    if newest == null || oldest == null { return 0.0 }
+    return newest.unwrap().at - oldest.unwrap().at
+}
+
+// Newest first: `i` 0 is the most recent play. Null past the end.
+pub fn sfx_log_recent(i: int) -> SfxEvent? {
+    let n = SFX_LOG.len()
+    if i < 0 || i >= n { return null }
+
+    // Before the ring wraps, the newest sits at the end; after, one before the
+    // write head.
+    let start = if n < SFX_LOG_CAP { n } else { SFX_LOG_HEAD }
+    return SFX_LOG[((start - 1 - i) % n + n) % n]
+}
+
+// The assertion handle: what played last, or null if nothing has.
+pub fn sfx_last() -> SfxEvent? {
+    return sfx_log_recent(0)
+}
+
+pub fn sfx_log_clear() {
+    SFX_LOG = []
+    SFX_LOG_HEAD = 0
+}
+
+// Find a row by its play number. Null once the ring has wrapped past it.
+pub fn sfx_log_by_seq(seq: int) -> SfxEvent? {
+    for e in SFX_LOG {
+        if e.seq == seq { return e }
+    }
+    return null
+}
+
+// Play a sound without recording it. Still goes through play_sound, so the
+// mute gate stays the single gate -- a debug replay must not be the one path
+// that can make noise during a seek or a headless run.
+fn sfx_play_unlogged(sound: Sound, bus: int, volume: float, speed: float,
+                     decay: float, looped: bool, spatial: bool, pan: float,
+                     site: string) -> Voice {
+    SFX_LOG_SUPPRESS = true
+    let voice = _play_sound_impl(sound, bus, volume, speed, decay, looped, site,
+        spatial, pan)
+    SFX_LOG_SUPPRESS = false
+    return voice
+}
+
+// Play a logged event again exactly as it was played. It carries the ORIGINAL
+// site AND its original bus: a replay is the same play again, and a replay
+// that silently moved to the default bus would be the tool misreporting what
+// the game did. Attributing it to the browser button would be a second
+// meaning for the field.
+pub fn sfx_replay(e: SfxEvent) {
+    sfx_replay_params(e.sound, e.bus, e.volume, e.speed, e.decay, e.looped,
+        e.spatial, e.pan, e.site)
+}
+
+fn sfx_replay_params(sound: Sound, bus: int, volume: float, speed: float,
+                     decay: float, looped: bool, spatial: bool, pan: float,
+                     site: string) {
+    SFX_REPLAY_VOICE.stop()
+    SFX_REPLAY_VOICE = sfx_play_unlogged(sound, bus, volume, speed, decay, looped,
+        spatial, pan, site)
+}

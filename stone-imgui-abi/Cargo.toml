@@ -1,0 +1,13 @@
+[package]
+name = "stone-imgui-abi"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[lints]
+workspace = true

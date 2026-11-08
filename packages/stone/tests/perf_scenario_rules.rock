@@ -1,0 +1,153 @@
+@nomangle
+fn perf_scenario_interval_entry(_which: int) {
+    init_profiler()
+    ENGINE.profiler_enabled = true
+    HITCH = hitch_ledger_new()
+    PERF_FRAME_CAPTURE = true
+    PERF_RECORDS = perf_records_new()
+    perf_scenario_wait("synthetic")
+    perf_scenario_window("fighting", 2, 3)
+    PERF_RECORDS.requested_frames = 3
+    PERF_RECORDS.requested_seconds = 0.001
+    profile_frame_begin()
+    profile_work("interval.units", 100)
+    profile_frame_end()
+    perf_scenario_ready("synthetic")
+    perf_outer_frame_boundary(10, 0.0)
+    perf_outer_frame_boundary(11, 0.1)
+    profiler_finish_warmup(false)
+    perf_outer_frame_boundary(12, 0.2)
+    for i in 0..3 {
+        assert(!perf_measurement_complete(), "elapsed time cannot end a fixed-frame interval")
+        profile_frame_begin()
+        profile_work("interval.units", 30)
+        profile_work("interval.identity", 17)
+        profile_frame_end()
+        perf_outer_frame_boundary(13 + i, 0.3 + i as float * 0.1)
+    }
+    assert(perf_measurement_complete(), "exactly three completed frames end the interval")
+    assert_eq(PERF_RECORDS.count, 3, "the next frame is excluded")
+    assert_eq(PERF_RECORDS.start_relative_frame, 2, "start is relative to readiness")
+    assert_eq(profile_work_total("interval.units"), 90, "work covers the selected frames")
+    assert_eq(profile_work_total("interval.identity"), 51, "warmup work is excluded")
+    profile_work("interval.units", 100)
+    perf_outer_frame_boundary(16, 0.6)
+    assert_eq(PERF_RECORDS.count, 3, "post-window work cannot add a timing sample")
+    assert_eq(profile_work_total("interval.units"), 90, "uncompleted work cannot change interval totals")
+}
+
+
+@test
+fn perf_scenario_interval_captures_only_the_selected_frames() {
+    profiler_test_process("perf_scenario_interval_entry", 0)
+}
+
+@test
+fn perf_scenario_rejects_readiness_without_a_declared_window() {
+    let saved = PERF_RECORDS
+    let capture = PERF_FRAME_CAPTURE
+    let profiler = deepcopy(PROFILER)
+    defer {
+        PERF_RECORDS = saved
+        PERF_FRAME_CAPTURE = capture
+        PROFILER = profiler
+    }
+    PERF_FRAME_CAPTURE = true
+    PERF_RECORDS = perf_records_new()
+    perf_scenario_wait("missing_window")
+    let failure = (world_fixture_raised(() => { perf_scenario_ready("missing_window") }) ?? "")
+    assert(failure.contains("declared window"), "readiness must reject an undeclared interval: {failure}")
+}
+
+@test
+fn perf_scenario_caps_fail_an_unfinished_window_even_with_gc_pending() {
+    let saved = PERF_RECORDS
+    let capture = PERF_FRAME_CAPTURE
+    let profiler = deepcopy(PROFILER)
+    let gc_n = GC_WIN_N
+    let gc_frame = GC_WIN_FRAME
+    let gc_start = GC_WIN_START
+    defer {
+        PERF_RECORDS = saved
+        PERF_FRAME_CAPTURE = capture
+        PROFILER = profiler
+        GC_WIN_N = gc_n
+        GC_WIN_FRAME = gc_frame
+        GC_WIN_START = gc_start
+    }
+    PERF_FRAME_CAPTURE = true
+    PERF_RECORDS = perf_records_new()
+    perf_scenario_wait("capped")
+    perf_scenario_window("steady", 2, 8)
+    PERF_RECORDS.requested_frames = 8
+    perf_scenario_ready("capped")
+    GC_WIN_N = 4
+    GC_WIN_FRAME = 0
+    GC_WIN_START = 100
+    let termination = perf_run_termination(1, 20, 0.25, 0.05)
+    assert_eq(termination, "seconds_cap", "readiness and warmup consume the launch bound")
+    PERF_RECORDS.termination = termination
+    assert(!perf_measurement_complete(), "a cap never completes an unfinished frame interval")
+    let scenario = json_decode(perf_scenario_json()).unwrap()
+    assert(!json_as_bool(json_field(scenario, "complete").unwrap()).unwrap(),
+        "the diagnostic artifact records the incomplete scenario")
+    let measurement = json_decode(perf_measurement_json()).unwrap()
+    assert_eq(json_as_str(json_field(measurement, "termination").unwrap()).unwrap(), "seconds_cap")
+    assert_eq(perf_run_termination(1, 1, 0.0, 10.0), "process_frame_cap",
+        "an allocation window cannot exempt the process cap")
+    PERF_RECORDS.count = PERF_RECORDS.requested_frames
+    assert_eq(perf_run_termination(8, -1, 0.0, -1.0), "gc_window_incomplete",
+        "the profiler must not extend the declared timing population to finish GC")
+    GC_WIN_N = 0
+    assert_eq(perf_run_termination(8, -1, 0.0, -1.0), "window_complete")
+}
+
+@test
+fn perf_scenario_fixed_start_keeps_adjacent_readiness_aligned() {
+    let saved = PERF_RECORDS
+    let capture = PERF_FRAME_CAPTURE
+    let profiler = deepcopy(PROFILER)
+    let engine_profiler = ENGINE.profiler_enabled
+    defer {
+        PERF_RECORDS = saved
+        PERF_FRAME_CAPTURE = capture
+        PROFILER = profiler
+        ENGINE.profiler_enabled = engine_profiler
+    }
+    PERF_FRAME_CAPTURE = true
+    ENGINE.profiler_enabled = true
+    for ready in 10..12 {
+        PERF_RECORDS = perf_records_new()
+        perf_scenario_wait("aligned")
+        perf_scenario_window("steady", 2, 3)
+        PERF_RECORDS.absolute_start_frame = 20
+        perf_scenario_ready("aligned")
+        for frame in ready..24 {
+            perf_outer_frame_boundary(frame, stone_get_time())
+            profile_frame_begin()
+            profile_frame_end()
+        }
+        assert_eq(PERF_RECORDS.start_frame, 20, "adjacent readiness must share the absolute start")
+        assert_eq(PERF_RECORDS.count, 3, "the requested frame count remains exact")
+    }
+}
+
+@test
+fn perf_scenario_fixed_start_rejects_late_readiness() {
+    let saved = PERF_RECORDS
+    let capture = PERF_FRAME_CAPTURE
+    let profiler = deepcopy(PROFILER)
+    defer {
+        PERF_RECORDS = saved
+        PERF_FRAME_CAPTURE = capture
+        PROFILER = profiler
+    }
+    PERF_FRAME_CAPTURE = true
+    PERF_RECORDS = perf_records_new()
+    perf_scenario_wait("late")
+    perf_scenario_window("steady", 2, 3)
+    PERF_RECORDS.absolute_start_frame = 20
+    perf_scenario_ready("late")
+    let failure = (world_fixture_raised(() => { perf_outer_frame_boundary(19, stone_get_time()) }) ?? "")
+    assert(failure.contains("warmup"), "late readiness must reject the requested warmup: {failure}")
+}

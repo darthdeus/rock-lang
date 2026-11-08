@@ -1,0 +1,164 @@
+// Effector-driven point sim for wisp-style magic VFX. Motes are points of
+// magical thought: a few
+// persistent ones (a game's wisps) plus transient sub-wisps emitted on
+// action. Games push effectors every frame. Decorative motes integrate in
+// @late_update, which also clears the effector list; a game whose motes carry
+// authoritative state keeps them in its own arena and calls
+// `mote_integrate_arena_in` from its simulation tick instead. Rendering is
+// consumer-side: iterate the arena and draw with the game's own
+// projection/palette.
+
+pub global MOTES: Arena<Mote> = arena_new()
+pub global MOTE_EFFECTORS: [MoteEffector] = []
+pub global MOTE_MOOD: MoteMood = default_mote_mood()
+
+pub fn mote_mood_reset() {
+    MOTE_MOOD = default_mote_mood()
+}
+
+// Motes whose position is authoritative live in the game's own arena rather
+// than in MOTES; MAG's wisps do, because a wisp's position is the player's mana
+// regen. Entity<Mote> carries its arena id, so a handle from either arena
+// resolves the same way and consumers need not know which one they hold.
+pub fn mote_spawn_into(arena: Arena<Mote>, pos: MoteWorldPoint, group: int = 0,
+    tint: Color = WHITE, size: float = 0.07,
+    floor_z: float? = null, restitution: float = 0.0, floor_friction: float = 1.0,
+    drag: float = 1.0, curl: float = 1.0, curl_seed: float? = null) -> Entity<Mote> {
+    return arena.insert(Mote {
+        pos: pos,
+        vel: v(0.0, 0.0, 0.0),
+        group: group,
+        persistent: true,
+        // Gameplay callers supply a seed; decorative motes use presentation randomness.
+        seed: curl_seed ?? presentation_random_range(0.0, 1000.0),
+        tint: tint,
+        size: size,
+        floor_z: floor_z,
+        restitution: restitution,
+        floor_friction: floor_friction,
+        drag: drag,
+        curl: curl,
+    })
+}
+
+pub fn mote_spawn(pos: MoteWorldPoint, group: int = 0, tint: Color = WHITE, size: float = 0.07,
+    floor_z: float? = null, restitution: float = 0.0, floor_friction: float = 1.0,
+    drag: float = 1.0, curl: float = 1.0, curl_seed: float? = null) -> Entity<Mote> {
+    return mote_spawn_into(MOTES, pos, group: group, tint: tint, size: size,
+        floor_z: floor_z, restitution: restitution, floor_friction: floor_friction,
+        drag: drag, curl: curl, curl_seed: curl_seed)
+}
+
+pub fn mote_emit(pos: MoteWorldPoint, vel: Vec3, lifetime: float, group: int = 0, tint: Color = WHITE, size: float = 0.05,
+    floor_z: float? = null, restitution: float = 0.0, floor_friction: float = 1.0,
+    drag: float = 1.0, curl: float = 1.0) -> Entity<Mote> {
+    return MOTES.insert(Mote {
+        pos: pos,
+        vel: vel,
+        group: group,
+        persistent: false,
+        lifetime: lifetime,
+        total_lifetime: lifetime,
+        seed: presentation_random_range(0.0, 1000.0),
+        tint: tint,
+        size: size,
+        floor_z: floor_z,
+        restitution: restitution,
+        floor_friction: floor_friction,
+        drag: drag,
+        curl: curl,
+    })
+}
+
+pub fn mote_count() -> int {
+    let n = 0
+    for (_e, _m) in MOTES { n += 1 }
+    return n
+}
+
+pub fn mote_clear() {
+    MOTES.clear()
+    MOTE_EFFECTORS.clear()
+}
+
+@reset
+fn reset_motes() {
+    mote_clear()
+}
+
+pub fn mote_attract(pos: Vec3, strength: float, falloff: float, group: int = -1) {
+    MOTE_EFFECTORS.push(MoteEffector {
+        kind: MoteEffectorKind::Attract,
+        pos: pos,
+        axis: v(0.0, 0.0, 1.0),
+        strength: strength,
+        falloff: falloff,
+        group: group,
+        path: null,
+        flow: 0.0,
+    })
+}
+
+pub fn mote_repulse(pos: Vec3, strength: float, falloff: float, group: int = -1) {
+    mote_repulse_into(MOTE_EFFECTORS, pos, strength, falloff, group)
+}
+
+// Force proportional to distance (no falloff): lunges when far, eases when
+// near. The chase effector -- attract/falloff is for hovering NEAR a target.
+pub fn mote_spring(pos: Vec3, strength: float, group: int = -1) {
+    mote_spring_into(MOTE_EFFECTORS, pos, strength, group)
+}
+
+// Uniform downward acceleration -- no falloff, no anchor. Pushed per frame
+// like every other effector, so a game gravitates ONE group without making
+// gravity a property of the world.
+pub fn mote_gravity(accel: float, group: int = -1) {
+    MOTE_EFFECTORS.push(MoteEffector {
+        kind: MoteEffectorKind::Gravity,
+        pos: v(0.0, 0.0, 0.0),
+        axis: v(0.0, 0.0, -1.0),
+        strength: accel,
+        falloff: 0.0,
+        group: group,
+        path: null,
+        flow: 0.0,
+    })
+}
+
+pub fn mote_vortex(center: Vec3, axis: Vec3, swirl: float, falloff: float, group: int = -1) {
+    mote_vortex_into(MOTE_EFFECTORS, center, axis, swirl, falloff, group)
+}
+
+// Follow a polyline: each mote is pulled toward a point a few samples
+// AHEAD of its nearest point, so the pull has a tangential component --
+// the path reads as flow, not as a rope of magnets. Wraps at the end
+// (a drawn path becomes a circuit).
+pub fn mote_path(points: [Vec3], flow: float, attach: float, group: int = -1) {
+    MOTE_EFFECTORS.push(MoteEffector {
+        kind: MoteEffectorKind::Path,
+        pos: v(0.0, 0.0, 0.0),
+        axis: v(0.0, 0.0, 1.0),
+        strength: attach,
+        falloff: 2.0,
+        group: group,
+        path: points,
+        flow: flow,
+    })
+}
+
+fn mote_integrate_arena(arena: Arena<Mote>) {
+    mote_integrate_arena_in(arena, MOTE_EFFECTORS, MOTE_MOOD, dt)
+}
+
+// Decorative motes. Authoritative arenas have already advanced by the time this
+// runs, so this is also where the shared effector list is retired for the
+// frame.
+pub @late_update
+fn update_motes() {
+    if world_frozen() {
+        MOTE_EFFECTORS.clear()
+        return
+    }
+    mote_integrate_arena(MOTES)
+    MOTE_EFFECTORS.clear()
+}

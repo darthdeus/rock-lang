@@ -1,0 +1,168 @@
+// Sprite-mesh and custom-draw batch rows across frame discards. A mesh drawn
+// every frame keeps its row and key; a mesh that stops drawing leaves the pool
+// at the next discard; flush order stays the per-frame submission order.
+
+fn mesh_batch_retention_test_mesh(z: int) -> SpriteMesh {
+    let mesh = SpriteMesh {
+        vbo: native_buffer_vertex(6),
+        capacity: 1,
+        count: 0,
+        texture: SampledTexture::Image(Image(0)),
+        tex_w: 16.0,
+        tex_h: 16.0,
+        inset_x: 0.0,
+        inset_y: 0.0,
+        z_layer: z,
+        depth: DepthMode::Off,
+        blend: BlendMode::Alpha,
+        sampling: TextureFilter::Nearest,
+    }
+    sprite_mesh_add(mesh, v(8.0, 12.0), ir(0, 0, 8, 8), v(6.0, 10.0))
+    return mesh
+}
+
+fn mesh_batch_retention_key(z: int, counter: int) -> string {
+    return "{batch_key_prefix(z, 0)}|sh0|mesh_{pad_int(counter, 4)}|{batch_key_state(DepthMode::Off, BlendMode::Alpha, false, TextureFilter::Nearest)}"
+}
+
+// The engine discards the world pool twice per frame: clear_batches after the
+// previous frame's flush, then the frame-start discard.
+fn mesh_batch_retention_frame(pool: RenderBatchPool, meshes: [SpriteMesh]) {
+    discard_pool_batches(pool)
+    RENDER_FRAME += 1
+    discard_pool_batches(pool)
+    CUSTOM_DRAW_COUNTER = 0
+    for m in meshes { submit_mesh_into(pool, m) }
+}
+
+@test
+fn a_redrawn_mesh_keeps_its_batch_row_across_discards() {
+    let pool = render_batch_pool_new()
+    let mesh = mesh_batch_retention_test_mesh(3)
+    CUSTOM_DRAW_COUNTER = 0
+    submit_mesh_into(pool, mesh)
+    let first = mesh.batch.entity().unwrap()
+    let row = first.get().unwrap()
+    mesh_batch_retention_frame(pool, [mesh])
+    assert(first.get() != null, "the discard keeps a redrawn mesh's row")
+    assert(same_ref(mesh.batch.entity().unwrap().get().unwrap(), row),
+        "the second frame submits through the same row")
+    assert_eq(pool.len(), 1, "one mesh owns one entry")
+    let batch = pool.get(mesh_batch_retention_key(3, 1)).unwrap()
+    assert_eq(batch.count, 6, "the kept row carries the mesh count")
+    assert(batch.external_verts, "the kept row still draws the mesh's buffer")
+    pool.clear()
+}
+
+@test
+fn a_mesh_that_stops_drawing_leaves_the_pool() {
+    let pool = render_batch_pool_new()
+    let kept = mesh_batch_retention_test_mesh(3)
+    let dropped = mesh_batch_retention_test_mesh(4)
+    mesh_batch_retention_frame(pool, [kept, dropped])
+    let dropped_row = dropped.batch.entity().unwrap()
+    mesh_batch_retention_frame(pool, [kept])
+    let empty = pool.get(mesh_batch_retention_key(4, 2))
+    assert(empty == null || empty.unwrap().count == 0,
+        "an undrawn mesh submits no vertices")
+    mesh_batch_retention_frame(pool, [kept])
+    assert(dropped_row.get() == null, "an undrawn mesh's row retires")
+    assert_eq(pool.keys(), [mesh_batch_retention_key(3, 1)],
+        "only the drawn mesh remains")
+    pool.clear()
+}
+
+@test
+fn reordered_meshes_flush_in_submission_order() {
+    let pool = render_batch_pool_new()
+    let a = mesh_batch_retention_test_mesh(3)
+    let b = mesh_batch_retention_test_mesh(3)
+    mesh_batch_retention_frame(pool, [a, b])
+    mesh_batch_retention_frame(pool, [b, a])
+    let cache: [string] = []
+    let keys = pool.sorted_keys_into(cache)
+    assert_eq(keys.len(), 2, "each mesh has exactly one entry")
+    assert(same_ref(pool.get(keys[0]).unwrap(), b.batch.entity().unwrap().get().unwrap()),
+        "the first submission flushes first")
+    assert(same_ref(pool.get(keys[1]).unwrap(), a.batch.entity().unwrap().get().unwrap()),
+        "the second submission flushes second")
+    mesh_batch_retention_frame(pool, [a])
+    assert_eq(pool.len(), 1, "the stale key leaves with the undrawn mesh")
+    assert(same_ref(pool.get(mesh_batch_retention_key(3, 1)).unwrap(),
+        a.batch.entity().unwrap().get().unwrap()), "the drawn mesh takes the first slot")
+    pool.clear()
+}
+
+@test
+fn a_mesh_state_change_reaches_its_kept_row() {
+    let pool = render_batch_pool_new()
+    let mesh = mesh_batch_retention_test_mesh(3)
+    mesh_batch_retention_frame(pool, [mesh])
+    mesh.blend = BlendMode::Additive
+    mesh.z_layer = 5
+    mesh_batch_retention_frame(pool, [mesh])
+    let key = "{batch_key_prefix(5, 0)}|sh0|mesh_0001|{batch_key_state(DepthMode::Off, BlendMode::Additive, false, TextureFilter::Nearest)}"
+    assert_eq(pool.keys(), [key], "the key follows the mesh state")
+    let batch = pool.get(key).unwrap()
+    assert(batch.blend == BlendMode::Additive && batch.z_layer == 5 && batch.unlit,
+        "the row follows the mesh state")
+    pool.clear()
+}
+
+fn mesh_batch_retention_single_key(pool: RenderBatchPool, mesh: SpriteMesh) -> string {
+    mesh_batch_retention_frame(pool, [mesh])
+    let keys = pool.keys()
+    assert_eq(keys.len(), 1, "one mesh owns one entry")
+    return keys[0]
+}
+
+// Each key input on its own, so a cache check that skips one input keeps the
+// old key.
+@test
+fn each_key_input_change_rebuilds_the_mesh_key() {
+    let pool = render_batch_pool_new()
+    let mesh = mesh_batch_retention_test_mesh(3)
+    let _ = mesh_batch_retention_single_key(pool, mesh)
+    mesh.z_layer = 5
+    assert_eq(mesh_batch_retention_single_key(pool, mesh),
+        "{batch_key_prefix(5, 0)}|sh0|mesh_0001|{batch_key_state(DepthMode::Off, BlendMode::Alpha, false, TextureFilter::Nearest)}",
+        "the layer reaches the key")
+    mesh.order = 2
+    assert_eq(mesh_batch_retention_single_key(pool, mesh),
+        "{batch_key_prefix(5, 2)}|sh0|mesh_0001|{batch_key_state(DepthMode::Off, BlendMode::Alpha, false, TextureFilter::Nearest)}",
+        "the order reaches the key")
+    mesh.depth = DepthMode::TestWrite
+    assert_eq(mesh_batch_retention_single_key(pool, mesh),
+        "{batch_key_prefix(5, 2)}|sh0|mesh_0001|{batch_key_state(DepthMode::TestWrite, BlendMode::Alpha, false, TextureFilter::Nearest)}",
+        "the depth mode reaches the key")
+    mesh.blend = BlendMode::Multiply
+    assert_eq(mesh_batch_retention_single_key(pool, mesh),
+        "{batch_key_prefix(5, 2)}|sh0|mesh_0001|{batch_key_state(DepthMode::TestWrite, BlendMode::Multiply, false, TextureFilter::Nearest)}",
+        "the blend mode reaches the key")
+    mesh.sampling = TextureFilter::Linear
+    assert_eq(mesh_batch_retention_single_key(pool, mesh),
+        "{batch_key_prefix(5, 2)}|sh0|mesh_0001|{batch_key_state(DepthMode::TestWrite, BlendMode::Multiply, false, TextureFilter::Linear)}",
+        "the sampling reaches the key")
+    pool.clear()
+}
+
+@test
+fn custom_draw_rows_reuse_their_payload() {
+    let pool = render_batch_pool_new()
+    let saved_white = WHITE_PIXEL
+    WHITE_PIXEL = Image(0)
+    CUSTOM_DRAW_COUNTER = 0
+    queue_custom_draw_into(pool, () => {}, z_layer: 2)
+    let row = pool.get(pool.keys()[0]).unwrap()
+    discard_pool_batches(pool)
+    assert_eq(pool.len(), 0, "a custom draw lasts one frame")
+    CUSTOM_DRAW_COUNTER = 0
+    queue_custom_draw_into(pool, () => {}, z_layer: 4, blend: BlendMode::Additive)
+    let again = pool.get(pool.keys()[0]).unwrap()
+    assert(same_ref(again, row), "the next custom draw reuses the vacated row")
+    assert(again.custom_draw != null && again.z_layer == 4
+        && again.blend == BlendMode::Additive && again.count == 0,
+        "the reused row carries the new draw's state")
+    discard_pool_batches(pool)
+    WHITE_PIXEL = saved_white
+}

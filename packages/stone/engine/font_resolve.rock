@@ -1,0 +1,68 @@
+// Who owns DEFAULT_FONT.
+//
+// GameConfig and runtime-selected game fonts go through declare_game_font;
+// unload_font clears a retired current handle.
+//
+pub value FontSpec {
+    path: string,          // already asset_path-resolved
+    size: int,
+    raster: FontRasterPolicy,
+    sampling: TextureFilter,
+    faces: TextFaces,
+    native_em: int,        // authored pixel em; 0 = use this font's atlas em
+    extra: string,
+}
+
+pub global FONT_SPEC_CACHE: Map<string, Font> = map_new()
+
+// The key carries the whole policy, not just the path: the same file loaded
+// under different raster, sampling or face policies is a different atlas.
+fn font_spec_key(spec: FontSpec) -> string {
+    let smp = if spec.sampling == TextureFilter::Nearest { "n" } else { "l" }
+    let ras = if spec.raster == FontRasterPolicy::Fixed { "f" } else { "d" }
+    let b = if spec.faces.bold { "b" } else { "-" }
+    let i = if spec.faces.italic { "i" } else { "-" }
+    return "{spec.path}|{spec.size}|{smp}{ras}{b}{i}|{spec.native_em}|{spec.extra}"
+}
+
+pub fn font_for_spec(spec: FontSpec) -> Font? {
+    let key = font_spec_key(spec)
+    if let existing = FONT_SPEC_CACHE.get(key) {
+        // Every unload removes the registry entity, so a cached font with no
+        // entity is stale: evict it and reload instead of handing out a dead
+        // handle. A coverage release keeps the entity (and the native face),
+        // so it still hits here.
+        if existing.data() != null { return existing }
+        FONT_SPEC_CACHE.remove(key)
+    }
+    let f = load_font(spec.path, spec.size, spec.sampling,
+        raster: spec.raster, faces: spec.faces, native_em: spec.native_em,
+        extra: spec.extra)
+    if f == null { return null }
+    FONT_SPEC_CACHE[key] = f
+    return f
+}
+
+// `stone_run_game` calls this from GameConfig; a game whose font depends on
+// runtime facts calls it from @init. Failed loads leave the current font alone.
+pub fn declare_game_font(spec: FontSpec) -> Font? {
+    let f = font_for_spec(spec)
+    if f == null {
+        log_error("FONT", "load_font failed for {spec.path} (size={spec.size}); keeping the current font")
+        return null
+    }
+    DEFAULT_FONT = f
+    return f
+}
+
+fn font_spec_from_config(config: GameConfig) -> FontSpec {
+    return FontSpec {
+        path: asset_path(config.font_path),
+        size: config.font_size,
+        raster: config.font_raster,
+        sampling: config.font_sampling,
+        faces: config.font_faces,
+        native_em: config.font_native_em,
+        extra: config.font_extra,
+    }
+}

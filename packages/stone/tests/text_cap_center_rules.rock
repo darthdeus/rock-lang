@@ -1,0 +1,68 @@
+fn cap_center_test_font() -> Font {
+    return load_font_metrics(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 48).unwrap()
+}
+
+fn cap_center_cap_px(font: Font, size: float) -> float {
+    let idx = font.data().unwrap().backend_id - 1
+    let cap = FONT_UNIT_CAP_HEIGHTS[idx]
+    assert(cap > 0.0, "cap-center: the font publishes a cap height")
+    return cap * size * 1.0 / font_size_divisor(font)
+}
+
+@test
+fn center_align_centers_cap_box_on_anchor() {
+    let font = cap_center_test_font()
+    defer { unload_font(font) }
+    let anchor = v(200.0, 200.0)
+    // With and without descenders: the CAP BOX (first cap top to last
+    // baseline) centers on the anchor, so the label never moves with p/g.
+    for text in ["H", "Hg", "Ag"] {
+        let layout = text_layout_build(font, text, 24.0, 1.0,
+            align: TextAlign::Center)
+        assert(layout.admitted_count > 0, "cap-center: {text} admits glyphs")
+        let origin = text_layout_aligned_origin(layout, anchor)
+        let cap_center = origin.y + layout.ascent
+            - cap_center_cap_px(font, 24.0) * 0.5
+        let drift = abs(cap_center - anchor.y)
+        assert(drift < 0.01,
+            "cap-center: {text} cap box centers on the anchor (drift {drift})")
+    }
+}
+
+@test
+fn center_align_ignores_descenders() {
+    let font = cap_center_test_font()
+    defer { unload_font(font) }
+    let anchor = v(200.0, 200.0)
+    let plain = text_layout_aligned_origin(
+        text_layout_build(font, "H", 24.0, 1.0, align: TextAlign::Center),
+        anchor)
+    let desc = text_layout_aligned_origin(
+        text_layout_build(font, "Hg", 24.0, 1.0, align: TextAlign::Center),
+        anchor)
+    assert_eq(plain.y, desc.y,
+        "cap-center: descenders do not move vertical centering")
+}
+
+@test
+fn center_align_keeps_horizontal_and_edge_rows() {
+    let font = cap_center_test_font()
+    defer { unload_font(font) }
+    let center = text_layout_build(font, "Hg", 24.0, 1.0,
+        align: TextAlign::Center)
+    assert_eq(center.alignment_offset.x, -center.logical_bounds.w * 0.5,
+        "cap-center: Center keeps horizontal centering")
+    let top = text_layout_build(font, "Hg", 24.0, 1.0,
+        align: TextAlign::TopCenter)
+    assert_eq(top.alignment_offset, v(-top.logical_bounds.w * 0.5, 0.0),
+        "cap-center: TopCenter still pins the top edge")
+    let bottom = text_layout_build(font, "Hg", 24.0, 1.0,
+        align: TextAlign::BottomCenter)
+    assert_eq(bottom.alignment_offset,
+        v(-bottom.logical_bounds.w * 0.5, -bottom.logical_bounds.h),
+        "cap-center: BottomCenter still pins the bottom edge")
+    let left = text_layout_build(font, "Hg", 24.0, 1.0,
+        align: TextAlign::Left)
+    assert_eq(left.alignment_offset.x, 0.0,
+        "cap-center: Left still pins the left edge")
+}

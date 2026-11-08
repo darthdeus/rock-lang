@@ -1,0 +1,244 @@
+fn text_layout_cache_index_chain(text: string, variant: int) -> [int] {
+    let slots: [int] = []
+    let slot = text_layout_cache_slot(text, variant)
+    while slot >= 0 {
+        slots.push(slot)
+        slot = TEXT_LAYOUT_CACHE[slot].next_variant_slot
+    }
+    return slots
+}
+
+@test
+fn text_layout_cache_collision_finds_each_resident_exact_key() {
+    let font = load_font_metrics(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 48).unwrap()
+    defer {
+        text_layout_cache_clear()
+        unload_font(font)
+    }
+    text_layout_cache_clear()
+
+    let text = "quantized-collision-witness"
+    let first_size = 24.0
+    let colliding_size = 24.01
+    let font_id = font.data().unwrap().backend_id
+    let first_variant = text_layout_variant_key(false, font_id, FACE_REGULAR,
+        TextAlign::TopLeft, CAP_HEIGHT_FONTS, first_size, 1.0, 1.0)
+    let colliding_variant = text_layout_variant_key(false, font_id, FACE_REGULAR,
+        TextAlign::TopLeft, CAP_HEIGHT_FONTS, colliding_size, 1.0, 1.0)
+    assert_eq(first_variant, colliding_variant,
+        "the exact sizes intentionally share one production variant key")
+
+    let _first = text_layout_cached(font, text, first_size, 1.0,
+        TextAlign::TopLeft, 1.0)
+    let first_slot = text_layout_cache_slot(text, first_variant)
+    let _colliding = text_layout_cached(font, text, colliding_size, 1.0,
+        TextAlign::TopLeft, 1.0)
+    let colliding_slot = text_layout_cache_slot(text, first_variant)
+    assert(first_slot >= 0 && colliding_slot >= 0 && first_slot != colliding_slot,
+        "the exact keys occupy separate cache entries")
+    assert_eq(TEXT_LAYOUT_CACHE[first_slot].size, first_size,
+        "the original exact-key entry remains resident")
+    assert_eq(TEXT_LAYOUT_CACHE[colliding_slot].size, colliding_size,
+        "the most recent collision is the variant-chain head")
+    assert_eq(TEXT_LAYOUT_CACHE[colliding_slot].next_variant_slot, first_slot,
+        "the variant chain retains the older resident entry")
+
+    let examined_before = TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED
+    let misses_before = TEXT_LAYOUT_CACHE_MISSES
+    let hits_before = TEXT_LAYOUT_CACHE_HITS
+    let _first_again = text_layout_cached(font, text, first_size, 1.0,
+        TextAlign::TopLeft, 1.0)
+    assert_eq(TEXT_LAYOUT_CACHE_HITS, hits_before + 1,
+        "production lookup finds the exact key behind the colliding head")
+    assert_eq(TEXT_LAYOUT_CACHE_MISSES, misses_before,
+        "a resident exact key does not build again")
+    assert_eq(TEXT_LAYOUT_CACHE_ENTRIES_EXAMINED, examined_before + 2,
+        "lookup accounts for the mismatching head and matching next entry")
+
+    let hits_after_first = TEXT_LAYOUT_CACHE_HITS
+    let _colliding_again = text_layout_cached(font, text, colliding_size, 1.0,
+        TextAlign::TopLeft, 1.0)
+    assert_eq(TEXT_LAYOUT_CACHE_HITS, hits_after_first + 1,
+        "production lookup also finds the chain head")
+    assert_eq(text_layout_cache_index_chain(text, first_variant).len, 2,
+        "both exact variants remain indexed after hits")
+}
+
+@test
+fn text_layout_cache_world_collision_finds_each_exact_scale_key() {
+    let font = load_font_metrics(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 48).unwrap()
+    defer {
+        text_layout_cache_clear()
+        unload_font(font)
+    }
+    text_layout_cache_clear()
+
+    let text = "world-quantized-collision"
+    let first_scale_x = 1.0
+    let colliding_scale_x = 1.001
+    let density = 1.0
+    let font_id = font.data().unwrap().backend_id
+    let first_variant = text_layout_variant_key(true, font_id, FACE_REGULAR,
+        TextAlign::TopLeft, false, first_scale_x, 1.0, density)
+    let colliding_variant = text_layout_variant_key(true, font_id, FACE_REGULAR,
+        TextAlign::TopLeft, false, colliding_scale_x, 1.0, density)
+    assert_eq(first_variant, colliding_variant,
+        "the world-raster exact scales intentionally share one production variant key")
+
+    let _first = text_layout_cached_world(font, text, first_scale_x, 1.0, density)
+    let first_slot = text_layout_cache_slot(text, first_variant)
+    let _colliding = text_layout_cached_world(font, text, colliding_scale_x, 1.0, density)
+    let colliding_slot = text_layout_cache_slot(text, first_variant)
+    assert(first_slot >= 0 && colliding_slot >= 0 && first_slot != colliding_slot,
+        "world exact keys occupy separate cache entries")
+    assert_eq(TEXT_LAYOUT_CACHE[colliding_slot].next_variant_slot, first_slot,
+        "world collision entries share the same collision-safe index chain")
+
+    let hits_before = TEXT_LAYOUT_CACHE_HITS
+    let misses_before = TEXT_LAYOUT_CACHE_MISSES
+    let _first_again = text_layout_cached_world(font, text, first_scale_x, 1.0, density)
+    assert_eq(TEXT_LAYOUT_CACHE_HITS, hits_before + 1,
+        "world production lookup finds the exact scale behind the colliding head")
+    assert_eq(TEXT_LAYOUT_CACHE_MISSES, misses_before,
+        "a resident world-raster key does not build again")
+}
+
+@test
+fn text_layout_cache_collision_index_unlinks_lru_head_and_interior() {
+    let font = load_font_metrics(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 48).unwrap()
+    defer {
+        text_layout_cache_clear()
+        unload_font(font)
+    }
+    text_layout_cache_clear()
+
+    let text = "head-collision-eviction"
+    let font_id = font.data().unwrap().backend_id
+    let variant = text_layout_variant_key(false, font_id, FACE_REGULAR,
+        TextAlign::TopLeft, CAP_HEIGHT_FONTS, 24.0, 1.0, 1.0)
+    let _older = text_layout_cached(font, text, 24.0, 1.0,
+        TextAlign::TopLeft, 1.0)
+    let older_slot = text_layout_cache_slot(text, variant)
+    let _newer = text_layout_cached(font, text, 24.01, 1.0,
+        TextAlign::TopLeft, 1.0)
+    let newer_slot = text_layout_cache_slot(text, variant)
+    let _touch_older = text_layout_cached(font, text, 24.0, 1.0,
+        TextAlign::TopLeft, 1.0)
+    assert_eq(text_layout_cache_index_chain(text, variant).len, 2,
+        "head-eviction setup has both exact keys indexed")
+
+    for i in 0..(TEXT_LAYOUT_CACHE_CAPACITY - 2) {
+        let _layout = text_layout_cached(font, "head-fill-{i}", 24.0, 1.0,
+            TextAlign::TopLeft, 1.0)
+    }
+    assert_eq(TEXT_LAYOUT_CACHE.len, TEXT_LAYOUT_CACHE_CAPACITY,
+        "head-eviction setup fills the unchanged production cache")
+    let evictions_before_head = TEXT_LAYOUT_CACHE_EVICTIONS
+    let _trigger_head = text_layout_cached(font, "head-eviction-trigger", 24.0, 1.0,
+        TextAlign::TopLeft, 1.0)
+    assert_eq(TEXT_LAYOUT_CACHE_EVICTIONS, evictions_before_head + 1,
+        "the existing LRU evicts one entry at capacity")
+    let after_head = text_layout_cache_index_chain(text, variant)
+    assert_eq(after_head.len, 1,
+        "evicting the chain head leaves the older exact key indexed")
+    assert_eq(after_head[0], older_slot,
+        "head removal advances the variant map to the next resident slot")
+    assert_eq(TEXT_LAYOUT_CACHE[older_slot].size, 24.0,
+        "head eviction preserves the surviving exact entry")
+    assert_eq(TEXT_LAYOUT_CACHE[newer_slot].next_variant_slot, -1,
+        "the reused head slot no longer links into its former collision chain")
+
+    text_layout_cache_clear()
+    let text = "interior-collision-eviction"
+    let variant = text_layout_variant_key(false, font_id, FACE_REGULAR,
+        TextAlign::TopLeft, CAP_HEIGHT_FONTS, 24.0, 1.0, 1.0)
+    let _older = text_layout_cached(font, text, 24.0, 1.0,
+        TextAlign::TopLeft, 1.0)
+    let older_slot = text_layout_cache_slot(text, variant)
+    let _middle = text_layout_cached(font, text, 24.01, 1.0,
+        TextAlign::TopLeft, 1.0)
+    let middle_slot = text_layout_cache_slot(text, variant)
+    let _newer = text_layout_cached(font, text, 24.02, 1.0,
+        TextAlign::TopLeft, 1.0)
+    let newer_slot = text_layout_cache_slot(text, variant)
+    let _touch_older = text_layout_cached(font, text, 24.0, 1.0,
+        TextAlign::TopLeft, 1.0)
+    let _touch_newer = text_layout_cached(font, text, 24.02, 1.0,
+        TextAlign::TopLeft, 1.0)
+    let chain_before_interior = text_layout_cache_index_chain(text, variant)
+    assert_eq(chain_before_interior.len, 3,
+        "interior-eviction setup has three colliding exact keys")
+    assert_eq(chain_before_interior[0], newer_slot,
+        "newest key leads the three-entry chain")
+    assert_eq(chain_before_interior[1], middle_slot,
+        "the untouched middle key is the interior eviction target")
+    assert_eq(chain_before_interior[2], older_slot,
+        "oldest exact key remains at the chain tail")
+    for i in 0..(TEXT_LAYOUT_CACHE_CAPACITY - 3) {
+        let _layout = text_layout_cached(font, "interior-fill-{i}", 24.0, 1.0,
+            TextAlign::TopLeft, 1.0)
+    }
+    assert_eq(TEXT_LAYOUT_CACHE.len, TEXT_LAYOUT_CACHE_CAPACITY,
+        "interior-eviction setup fills the unchanged production cache")
+    let evictions_before_interior = TEXT_LAYOUT_CACHE_EVICTIONS
+    let _trigger_interior = text_layout_cached(font, "interior-eviction-trigger", 24.0, 1.0,
+        TextAlign::TopLeft, 1.0)
+    assert_eq(TEXT_LAYOUT_CACHE_EVICTIONS, evictions_before_interior + 1,
+        "the existing LRU evicts one entry at capacity")
+    let after_interior = text_layout_cache_index_chain(text, variant)
+    assert_eq(after_interior.len, 2,
+        "evicting the middle member keeps both remaining entries indexed")
+    assert_eq(after_interior[0], newer_slot,
+        "interior removal leaves the head unchanged")
+    assert_eq(after_interior[1], older_slot,
+        "interior removal links the head to the surviving tail")
+    assert_eq(TEXT_LAYOUT_CACHE[newer_slot].next_variant_slot, older_slot,
+        "head points past the removed interior slot")
+    assert_eq(TEXT_LAYOUT_CACHE[older_slot].next_variant_slot, -1,
+        "the surviving tail terminates the chain")
+    assert_eq(TEXT_LAYOUT_CACHE[middle_slot].text, "interior-eviction-trigger",
+        "the evicted interior slot is safely reused for the new entry")
+}
+
+@test
+fn text_layout_cache_collision_index_reset_and_slot_reuse() {
+    let font = load_font_metrics(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 48).unwrap()
+    defer {
+        text_layout_cache_clear()
+        unload_font(font)
+    }
+    text_layout_cache_clear()
+
+    let text = "collision-reset-reuse"
+    let font_id = font.data().unwrap().backend_id
+    let variant = text_layout_variant_key(false, font_id, FACE_REGULAR,
+        TextAlign::TopLeft, CAP_HEIGHT_FONTS, 24.0, 1.0, 1.0)
+    let _first = text_layout_cached(font, text, 24.0, 1.0,
+        TextAlign::TopLeft, 1.0)
+    let _second = text_layout_cached(font, text, 24.01, 1.0,
+        TextAlign::TopLeft, 1.0)
+    assert_eq(text_layout_cache_index_chain(text, variant).len, 2,
+        "reset setup contains both colliding exact keys")
+
+    text_layout_cache_clear()
+    assert_eq(TEXT_LAYOUT_CACHE.len, 0,
+        "reset clears all resident cache entries")
+    assert_eq(text_layout_cache_slot(text, variant), -1,
+        "reset clears the variant chain head")
+
+    let _first_after_reset = text_layout_cached(font, text, 24.0, 1.0,
+        TextAlign::TopLeft, 1.0)
+    let first_slot = text_layout_cache_slot(text, variant)
+    let _second_after_reset = text_layout_cached(font, text, 24.01, 1.0,
+        TextAlign::TopLeft, 1.0)
+    let second_slot = text_layout_cache_slot(text, variant)
+    assert_eq(text_layout_cache_index_chain(text, variant).len, 2,
+        "reused slots rebuild a complete collision chain after reset")
+    let hits_before = TEXT_LAYOUT_CACHE_HITS
+    let _first_hit = text_layout_cached(font, text, 24.0, 1.0,
+        TextAlign::TopLeft, 1.0)
+    assert_eq(TEXT_LAYOUT_CACHE_HITS, hits_before + 1,
+        "the pre-reset exact key is findable after slot reuse")
+    assert_eq(TEXT_LAYOUT_CACHE[second_slot].next_variant_slot, first_slot,
+        "the reused head links to the reused older slot")
+}

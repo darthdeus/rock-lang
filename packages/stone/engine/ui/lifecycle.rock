@@ -1,0 +1,94 @@
+// Visibility state for UI that can disappear before its feedback does.
+
+const UI_PRESENCE_DEFAULT_DURATION: float = 0.18
+
+pub enum UiPresenceEdge { None, Initial, Open, Close }
+
+pub value UiPresence {
+    armed: bool = false,
+    was_visible: bool = false,
+    last_rect: UiRect = UiRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+    last_world_anchor: Vec2? = null,
+    opening_age: float = 0.0,
+    opening_duration: float = UI_PRESENCE_DEFAULT_DURATION,
+}
+
+fn ui_presence_emit(ev: UiEvent, r: UiRect, skin: (() -> Entity<UiSkin>)?,
+                    world_anchor: Vec2?) {
+    let resolved = if let mk = skin { mk() } else { null }
+    ui_event(ev, r.center(), r, if let e = resolved { e.get().unwrap().feel } else { "" }, resolved,
+        world_anchor: world_anchor)
+}
+
+// `rect` is optional for subjects whose geometry is only valid in draw; their
+// last captured visible rect remains the Close payload. A supplied world anchor
+// is retained with it so close feedback can keep following the scene. No
+// world-freeze gate belongs here: this is UI time, like update_ui_ghosts.
+pub fn ui_presence_step(
+    p: ref UiPresence,
+    visible: bool,
+    rect: UiRect? = null,
+    skin: (() -> Entity<UiSkin>)? = null,
+    world_anchor: Vec2? = null
+) -> UiPresenceEdge {
+    if !p.armed {
+        p.armed = true
+        p.was_visible = visible
+        if visible {
+            if rect != null { p.last_rect = rect.unwrap() }
+            p.last_world_anchor = world_anchor
+            p.opening_age = p.opening_duration
+        }
+        return UiPresenceEdge::Initial
+    }
+
+    if visible {
+        if rect != null { p.last_rect = rect.unwrap() }
+        p.last_world_anchor = world_anchor
+        if !p.was_visible {
+            p.opening_age = 0.0
+            ui_presence_emit(UiEvent::Open, p.last_rect, skin,
+                p.last_world_anchor)
+            p.was_visible = true
+            return UiPresenceEdge::Open
+        }
+        p.opening_age = min(p.opening_age + dt, p.opening_duration)
+        return UiPresenceEdge::None
+    }
+
+    if p.was_visible {
+        ui_presence_emit(UiEvent::Close, p.last_rect, skin,
+            p.last_world_anchor)
+        p.opening_age = p.opening_duration
+        p.was_visible = false
+        return UiPresenceEdge::Close
+    }
+
+    return UiPresenceEdge::None
+}
+
+pub fn ui_presence_capture_rect(p: ref UiPresence, r: UiRect) {
+    if p.armed && p.was_visible { p.last_rect = r }
+}
+
+pub fn ui_presence_is_visible(p: UiPresence) -> bool {
+    return p.armed && p.was_visible
+}
+
+pub fn ui_presence_progress(p: UiPresence) -> float {
+    if p.opening_duration <= 0.0 { return 1.0 }
+    return clamp(p.opening_age / p.opening_duration, 0.0, 1.0)
+}
+
+// Progress 0 is fully dissolved. Completed skins return to the ordinary path
+// so steady-state panels do not pay for a custom pipeline.
+pub fn ui_presence_skin_draw(r: UiRect, skin: UiSkin, progress: float, pipeline: Pipeline, tint: Color = WHITE) {
+    let p = clamp(progress, 0.0, 1.0)
+    if p >= 1.0 {
+        r.skin(skin, tint)
+        return
+    }
+
+    let batch = r.skin_batch(skin, tint: tint, pipeline: pipeline)
+    batch_block(batch, pipeline.shader_name, UiDissolveU { uDissolve: 1.0 - p })
+}

@@ -1,0 +1,203 @@
+// Edge detector for the outline post-process pass, compiled
+// in-game via `rock_shader(outline_detect_vert, outline_detect_frag)` -- no
+// committed GLSL. Samples two R32I id-canvases (integer ids, texture_id()):
+//
+//   target_mask  -- entity id of the outline target at each pixel, or 0. Written
+//                   by the outline_target pass without depth testing, so it holds
+//                   every outlined sprite's full silhouette regardless of
+//                   occlusion.
+//   visible_id   -- the entity id visible at each pixel AFTER depth testing
+//                   (matches the color pass), used to decide whether the target
+//                   is actually in front at a given silhouette pixel.
+//
+// A pixel becomes an outline pixel if its center is outside the target silhouette
+// (target_mask == 0) and a neighbor within outline_radius is inside it. Each edge
+// is classified by reading visible_id at the nearest silhouette neighbor's own
+// position: id match => the target is visible there (bright color); no visible
+// neighbor within the band => occluded (dim color). The see-through id (ground
+// cover) counts as the target, so it never classifies an edge occluded.
+//
+// Fullscreen post-process: a pipeline pair with a trivial NDC-passthrough vertex.
+// The explicit vertex/fragment form is required here because the shader has a
+// real vertex input/varying and integer texture reads. Its three fragment arrays
+// are the ordered block at the binding assigned by the compiler, filled by the
+// payload outline.rock's build_outline_detect_pass supplies -- the order of the
+// pushes there is the order of the `@size(N)` params here.
+
+// Field order IS the slot: target_mask 0, visible_id 1. Both INTEGER samplers
+// -- the id canvases are r32i, and reading one through a float sampler is
+// undefined rather than lossy.
+struct OutlineDetectTex {
+    target_mask: ISampler2D,
+    visible_id: ISampler2D,
+}
+
+value OutlineDetectVert {
+    aPos: Vec2,
+    aTexCoord: Vec2,
+}
+
+value OutlineDetectVary {
+    position: Vec4,
+    TexCoord: Vec2,
+}
+
+@shader(vertex)
+fn outline_detect_vert(@attr a: OutlineDetectVert) -> OutlineDetectVary {
+    return OutlineDetectVary {
+        position: v(a.aPos, 0.0, 1.0),
+        TexCoord: a.aTexCoord,
+    }
+}
+
+value OutlineDetectU {
+    linear_world: bool = false,
+    // Scan ceiling in texels -- the kernel never samples farther. Also the slot-0
+    // fallback band width for ids without a per-entity entry.
+    outline_radius: float,
+    // > 0.5: output raw classification state instead of styled pixels (dev viz,
+    // ENGINE.debug_outline_classify).
+    debug_classify: float,
+    // > 0.5: classify every silhouette edge visible (the ad-hoc path has no
+    // visible-id input). The per-frame path leaves this 0.
+    force_visible: float,
+    // camera_offset() in target pixels. The detect pass is fullscreen, so its
+    // TexCoord is screen space; subtracting this anchors the flame noise to
+    // the world, or a walking camera drags the pattern across the sprite.
+    noise_origin: Vec2,
+    // Nonzero: a visible id that never hides the target (ground cover).
+    see_through_id: int = 0,
+}
+
+// Slots 1..255 form a bounded hash table. Picking ids remain unchanged in
+// both id canvases, preserving occlusion and cursor readback identity.
+// params packs (band width, flame amount, resolved phase, picking id).
+// Array sizes stay in sync with OUTLINE_MAX_ENTRIES in outline.rock.
+@shader(fragment)
+fn outline_detect_frag(
+    vary: OutlineDetectVary,
+    @uniform u: OutlineDetectU,
+    @textures tex: OutlineDetectTex,
+    @size(256) outline_colors: UniformArray<Vec4>,
+    @size(256) outline_colors_occluded: UniformArray<Vec4>,
+    @size(256) outline_params: UniformArray<Vec4>,
+) -> Vec4 {
+    let debug = u.debug_classify > 0.5
+
+    // Inside any target silhouette -> never paint. In debug mode tint the
+    // interior so the target shape is visible.
+    let center_id = texture_id(tex.target_mask, vary.TexCoord)
+    if center_id > 0 {
+        if debug {
+            return v(0.0, 0.0, 0.3, 0.5)
+        }
+        discard()
+    }
+
+    let radius = u.outline_radius as int
+    let texel_size = v(1.0, 1.0) / texture_size(tex.target_mask)
+
+    // Find the closest silhouette neighbor and classify this edge by what's
+    // visible at that neighbor's own position -- per-edge, so different parts of
+    // one target can be visible vs occluded independently.
+    let found = false
+    let min_dist_sq = (radius + 1) * (radius + 1) * 4
+    let nearest_visible = false
+    let nearest_slot = 0
+
+    for y in (0 - radius)..(radius + 1) {
+        for x in (0 - radius)..(radius + 1) {
+            if x == 0 && y == 0 {
+                continue
+            }
+            let d2 = x * x + y * y
+            if d2 >= min_dist_sq {
+                continue
+            }
+
+            let offset = v(int_to_float(x), int_to_float(y)) * texel_size
+            let nuv = vary.TexCoord + offset
+
+            let ntarget = texture_id(tex.target_mask, nuv)
+            if ntarget <= 0 {
+                continue
+            }
+
+            // Per-entity width: only accept a silhouette neighbor if this
+            // fragment falls inside that entity's band, else a thin outline
+            // leaks to the global scan ceiling. Unregistered ids fall to slot 0.
+            let candidate = (ntarget - 1) % 255 + 1
+            let slot = 0
+            for _probe in 0..255 {
+                let stored = at(outline_params, candidate).w
+                if stored == int_to_float(ntarget) { slot = candidate; break }
+                if stored == 0.0 { break }
+                candidate = candidate % 255 + 1
+            }
+            let entity_w = at(outline_params, slot).x
+            if int_to_float(d2) > entity_w * entity_w {
+                continue
+            }
+
+            found = true
+            min_dist_sq = d2
+            nearest_slot = slot
+
+            // Target visible at its own silhouette here? Compare the mask id with
+            // whatever is actually visible at that neighbor pixel; equal => in
+            // front. force_visible short-circuits it for the ad-hoc path.
+            let nvis = texture_id(tex.visible_id, nuv)
+            nearest_visible = (u.force_visible > 0.5) || (nvis == ntarget)
+                || (u.see_through_id != 0 && nvis == u.see_through_id)
+        }
+    }
+
+    if !found {
+        discard()
+    }
+
+    if debug {
+        // Classification bits as color: green = visible, red = occluded.
+        if nearest_visible {
+            return v(0.0, 1.0, 0.0, 1.0)
+        }
+        return v(1.0, 0.0, 0.0, 1.0)
+    }
+
+    // Per-entity color for the nearest neighbor's id; unregistered -> slot 0.
+    let slot = nearest_slot
+
+    let authored_base = at(outline_colors_occluded, slot)
+    if nearest_visible {
+        authored_base = at(outline_colors, slot)
+    }
+
+    let base = if u.linear_world { srgb_color(authored_base) } else { authored_base }
+    let flame = at(outline_params, slot).y
+    if flame <= 0.001 {
+        return base
+    }
+
+    // Normalized distance across the band: 0 at the silhouette edge, 1 at the rim.
+    let w = max(at(outline_params, slot).x, 1.0)
+    let edge_t = clamp(sqrt(int_to_float(min_dist_sq)) / w, 0.0, 1.0)
+    let hot = 1.0 - edge_t
+
+    // Two worley octaves drifting upward: billowy blobs scrolled into rising
+    // tongues. worley2/random2 are the byte-identical shared tier-0 helpers.
+    let res = texture_size(tex.target_mask)
+    // Y is added, not subtracted: TexCoord runs top-down while world Y runs
+    // up, so the camera origin cancels with opposite sign on each axis.
+    let p = (vary.TexCoord * res - v(u.noise_origin.x, -u.noise_origin.y)) * 0.045
+    let t = at(outline_params, slot).z
+    let noise = flame_worley2(p, t)
+
+    // High noise lets fire reach the outer rim; low noise hugs the silhouette.
+    let body = clamp((hot - (1.0 - noise) * 0.55) * (1.2 + flame * 0.8), 0.0, 1.0)
+    let temp = clamp(hot * (0.35 + 0.85 * noise), 0.0, 1.0)
+
+    let hot_color = if u.linear_world { srgb_to_linear(v(1.0, 0.93, 0.6)) } else { v(1.0, 0.93, 0.6) }
+    let hotc = lerp(base.rgb, hot_color, temp * temp)
+    let rgb = hotc * (0.7 + 1.6 * temp * flame)
+    return v(rgb, base.a * body)
+}

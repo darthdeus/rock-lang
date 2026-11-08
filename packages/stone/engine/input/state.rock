@@ -1,0 +1,758 @@
+pub global IMGUI_MOUSE_CAPTURE_OVERRIDE: bool? = null
+
+// The run's game-input authority: the host's SDL keyboard/mouse/pad, or the
+// engine's injected synthetic channel. `input_select_game_authority` projects
+// exactly one of them into `keys_down`/`mouse_down`/`pad_down` every frame.
+//
+// Real SDL input must not reach a run that has no host input to read. A focused
+// window takes a modifier the developer happens to be holding (measured while a
+// mag input sim pressed "f": with a real Ctrl down, `ctrl_held()` answered true,
+// so a Ctrl debug shortcut fired on some runs only), and an unmapped
+// headless window takes it too -- SDL's X11 keyboard init calls XQueryKeymap on
+// the display's SERVER-GLOBAL keymap and synthesizes a press for a modifier held
+// in any other application, before the run's first frame. Sims and headless runs
+// are therefore synthetic-only; SIM_INPUT_SYNTHETIC_ONLY=0 is the explicit opt-in
+// to the host lane that the SDL-to-Rock integration gate uses. Window and quit
+// events are still handled either way.
+pub global SIM_INPUT_SYNTHETIC_ONLY: bool = false
+
+pub global mouse_down: Map<int, bool> = map_new()
+pub global mouse_down_last: Map<int, bool> = map_new()
+pub global keys_down: Map<string, bool> = map_new()
+pub global keys_down_last: Map<string, bool> = map_new()
+pub global scancodes_down: Map<string, bool> = map_new()
+pub global scancodes_down_last: Map<string, bool> = map_new()
+pub global scancode_modifier_state: Map<string, int> = map_new()
+pub global scancodes_pressed_this_frame: Map<string, bool> = map_new()
+global scancodes_repeated_this_frame: Map<string, bool> = map_new()
+global keys_repeated_this_frame: Map<string, bool> = map_new()
+
+// SDL owns the physical channel. `keys_down`/`mouse_down` remain the effective
+// game channel, which projects physical or synthetic input at the frame boundary.
+global physical_mouse_down: Map<int, bool> = map_new()
+global physical_mouse_suppressed: Map<int, bool> = map_new()
+pub global physical_keys_down: Map<string, bool> = map_new()
+global physical_scancodes_down: Map<string, bool> = map_new()
+global physical_scancode_modifiers: Map<string, int> = map_new()
+global physical_scancodes_pressed_this_frame: Map<string, bool> = map_new()
+global physical_scancodes_repeated_this_frame: Map<string, bool> = map_new()
+global physical_keys_repeated_this_frame: Map<string, bool> = map_new()
+global physical_keys_pressed_this_frame: Map<string, bool> = map_new()
+global physical_text_input_this_frame: string = ""
+global physical_mouse_pressed_this_frame: Map<int, bool> = map_new()
+global physical_mouse_released_this_frame: Map<int, bool> = map_new()
+global physical_pad_down: Map<string, bool> = map_new()
+global physical_pad_axes: Map<string, float> = map_new()
+global physical_pad_axis_motion_this_frame: Map<string, float> = map_new()
+global physical_pad_pressed_this_frame: Map<string, bool> = map_new()
+global physical_pad_released_this_frame: Map<string, bool> = map_new()
+global physical_pad_active_instance: int = -1
+
+// Synthetic sim input is deliberately separate from SDL. It is selected only
+// while a sim owns the input lane, and remains available to the existing
+// on_key_pressed/on_mouse_pressed test seams.
+global synthetic_mouse_down: Map<int, bool> = map_new()
+global synthetic_mouse_released_this_frame: Map<int, bool> = map_new()
+global synthetic_keys_down: Map<string, bool> = map_new()
+global synthetic_scancodes_down: Map<string, bool> = map_new()
+global synthetic_scancode_modifiers: Map<string, int> = map_new()
+global synthetic_scancodes_pressed_this_frame: Map<string, bool> = map_new()
+global synthetic_scancodes_repeated_this_frame: Map<string, bool> = map_new()
+global synthetic_keys_pressed_this_frame: Map<string, bool> = map_new()
+global synthetic_keys_repeated_this_frame: Map<string, bool> = map_new()
+global synthetic_text_input_this_frame: string = ""
+global synthetic_pad_down: Map<string, bool> = map_new()
+global synthetic_pad_axes: Map<string, float> = map_new()
+global synthetic_pad_axis_motion_this_frame: Map<string, float> = map_new()
+global synthetic_pad_pressed_this_frame: Map<string, bool> = map_new()
+global synthetic_pad_released_this_frame: Map<string, bool> = map_new()
+
+// A press that goes down AND up within one frame's SDL drain (a sub-frame tap,
+// or both events batched during a long/stalled frame) would leave keys_down/
+// mouse_down false, so the plain `down_now && !down_last` edge never fires and
+// the input is silently lost. These latches record "a press arrived this frame"
+// and survive a same-frame release; is_*_pressed OR them in, and input_end_frame
+// clears them. Set at the same gate as the down-map (mouse honors imgui capture).
+pub global keys_pressed_this_frame: Map<string, bool> = map_new()
+global text_input_this_frame: string = ""
+global mouse_pressed_this_frame: Map<int, bool> = map_new()
+global mouse_released_this_frame: Map<int, bool> = map_new()
+pub global pad_down: Map<string, bool> = map_new()
+pub global pad_down_last: Map<string, bool> = map_new()
+pub global pad_axes: Map<string, float> = map_new()
+pub global pad_axes_last: Map<string, float> = map_new()
+global pad_axis_motion_this_frame: Map<string, float> = map_new()
+global pad_pressed_this_frame: Map<string, bool> = map_new()
+global pad_released_this_frame: Map<string, bool> = map_new()
+
+pub enum InputDevice { KeyboardMouse, Pad }
+pub enum InputDeviceEvent { KeyPress, MouseButtonPress, PadButtonPress, PadAxisMotion(float), MouseMotion }
+
+pub fn set_cursor_direct(cursor_id: int) {
+    stone_set_cursor(cursor_id)
+}
+
+pub fn show_cursor_direct(show: bool) {
+    stone_show_cursor(show)
+}
+
+pub fn reset_cursor_direct() {
+    stone_reset_cursor()
+}
+
+pub @pure
+fn input_classify_last_device(event: InputDeviceEvent) -> InputDevice? {
+    match event {
+        InputDeviceEvent::KeyPress => return InputDevice::KeyboardMouse,
+        InputDeviceEvent::MouseButtonPress => return InputDevice::KeyboardMouse,
+        InputDeviceEvent::PadButtonPress => return InputDevice::Pad,
+        InputDeviceEvent::PadAxisMotion(value) => {
+            if abs(value) > PAD_DEVICE_CLAIM_THRESHOLD { return InputDevice::Pad }
+        }
+        InputDeviceEvent::MouseMotion => {}
+    }
+    return null
+}
+
+global LAST_INPUT_DEVICE: InputDevice = InputDevice::KeyboardMouse
+
+pub fn input_note_last_device(event: InputDeviceEvent) {
+    let device = input_classify_last_device(event)
+    if device != null { LAST_INPUT_DEVICE = device.unwrap() }
+}
+
+pub fn input_last_device() -> InputDevice { return LAST_INPUT_DEVICE }
+
+pub fn input_end_frame() {
+    // Clear and rebuild last frame's state by copying current state
+    // This is much faster than deepcopy since we only copy small maps with primitive values
+
+    // Clear previous state
+    mouse_down_last.clear()
+    keys_down_last.clear()
+    scancodes_down_last.clear()
+    pad_down_last.clear()
+    pad_axes_last.clear()
+
+    // Copy current button states (typically 0-3 buttons)
+    for (button, is_down) in mouse_down {
+        mouse_down_last.insert(button, is_down)
+    }
+
+    // Copy current key states (typically <10 keys)
+    for (key, is_down) in keys_down {
+        keys_down_last.insert(key, is_down)
+    }
+
+    for (scan, is_down) in scancodes_down {
+        scancodes_down_last.insert(scan, is_down)
+    }
+
+    for (button, is_down) in pad_down {
+        pad_down_last.insert(button, is_down)
+    }
+
+    for (axis, value) in pad_axes {
+        pad_axes_last.insert(axis, value)
+    }
+
+    keys_pressed_this_frame.clear()
+    text_input_this_frame = ""
+    mouse_pressed_this_frame.clear()
+    scancodes_pressed_this_frame.clear()
+    scancodes_repeated_this_frame.clear()
+    keys_repeated_this_frame.clear()
+    physical_keys_pressed_this_frame.clear()
+    physical_text_input_this_frame = ""
+    physical_scancodes_pressed_this_frame.clear()
+    physical_scancodes_repeated_this_frame.clear()
+    physical_keys_repeated_this_frame.clear()
+    synthetic_scancodes_pressed_this_frame.clear()
+    synthetic_scancodes_repeated_this_frame.clear()
+    synthetic_keys_pressed_this_frame.clear()
+    synthetic_text_input_this_frame = ""
+    synthetic_keys_repeated_this_frame.clear()
+    physical_mouse_pressed_this_frame.clear()
+    physical_mouse_released_this_frame.clear()
+    synthetic_mouse_released_this_frame.clear()
+    physical_pad_axis_motion_this_frame.clear()
+    physical_pad_pressed_this_frame.clear()
+    physical_pad_released_this_frame.clear()
+    synthetic_pad_axis_motion_this_frame.clear()
+    synthetic_pad_pressed_this_frame.clear()
+    synthetic_pad_released_this_frame.clear()
+
+    pad_axis_motion_this_frame.clear()
+    pad_pressed_this_frame.clear()
+    pad_released_this_frame.clear()
+    mouse_released_this_frame.clear()
+}
+
+// Clears the game/synthetic input lane; SDL state stays process-owned.
+pub fn input_reset_game_lane() {
+    mouse_down.clear()
+    mouse_down_last.clear()
+    keys_down.clear()
+    keys_down_last.clear()
+    scancodes_down.clear()
+    scancodes_down_last.clear()
+    scancode_modifier_state.clear()
+    scancodes_pressed_this_frame.clear()
+    scancodes_repeated_this_frame.clear()
+    keys_pressed_this_frame.clear()
+    keys_repeated_this_frame.clear()
+    mouse_pressed_this_frame.clear()
+    mouse_released_this_frame.clear()
+    pad_down.clear()
+    pad_down_last.clear()
+    pad_axes.clear()
+    pad_axes_last.clear()
+    pad_axis_motion_this_frame.clear()
+    pad_pressed_this_frame.clear()
+    pad_released_this_frame.clear()
+
+    synthetic_mouse_down.clear()
+    synthetic_mouse_released_this_frame.clear()
+    synthetic_keys_down.clear()
+    synthetic_scancodes_down.clear()
+    synthetic_scancode_modifiers.clear()
+    synthetic_scancodes_pressed_this_frame.clear()
+    synthetic_scancodes_repeated_this_frame.clear()
+    synthetic_keys_pressed_this_frame.clear()
+    synthetic_text_input_this_frame = ""
+    synthetic_keys_repeated_this_frame.clear()
+    synthetic_pad_down.clear()
+    synthetic_pad_axes.clear()
+    synthetic_pad_axis_motion_this_frame.clear()
+    synthetic_pad_pressed_this_frame.clear()
+    synthetic_pad_released_this_frame.clear()
+
+    // Action bindings and rebind capture are engine-owned process state, so
+    // the lane reset clears them here rather than from a game hook. An armed
+    // capture keeps `action_allowed` false for every non-UI action.
+    action_reset_all_bindings()
+    REBIND_CAPTURE = false
+    REBIND_CAPTURE_CANCELLED = false
+    REBIND_INPUT_CONSUMED = false
+    input_capture_clear_snapshot()
+
+    mouse_wheel_delta = 0
+    sim_mouse_override = null
+    IMGUI_MOUSE_CAPTURE_OVERRIDE = null
+    LAST_INPUT_DEVICE = InputDevice::KeyboardMouse
+}
+
+pub fn input_copy_keys(dst: Map<string, bool>, src: Map<string, bool>) {
+    dst.clear()
+    for (key, is_down) in src {
+        if is_down { dst.insert(key, true) }
+    }
+}
+
+fn input_copy_scancodes(dst: Map<string, bool>, src: Map<string, bool>) {
+    dst.clear()
+    for (scan, is_down) in src {
+        if is_down { dst.insert(scan, true) }
+    }
+}
+
+fn input_copy_scancode_modifiers(dst: Map<string, int>, src: Map<string, int>) {
+    dst.clear()
+    for (scan, modifiers) in src {
+        dst.insert(scan, modifiers)
+    }
+}
+
+fn input_copy_mouse(dst: Map<int, bool>, src: Map<int, bool>) {
+    dst.clear()
+    for (button, is_down) in src {
+        if is_down { dst.insert(button, true) }
+    }
+}
+
+fn input_copy_pad(dst: Map<string, bool>, src: Map<string, bool>) {
+    dst.clear()
+    for (button, is_down) in src {
+        if is_down { dst.insert(button, true) }
+    }
+}
+
+fn input_copy_pad_axes(dst: Map<string, float>, src: Map<string, float>) {
+    dst.clear()
+    for (axis, value) in src {
+        if value != 0.0 { dst.insert(axis, value) }
+    }
+}
+
+fn input_copy_pad_motion(dst: Map<string, float>, src: Map<string, float>) {
+    dst.clear()
+    for (axis, value) in src {
+        dst.insert(axis, value)
+    }
+}
+
+fn input_copy_live_mouse(dst: Map<int, bool>) {
+    dst.clear()
+    for (button, is_down) in physical_mouse_down {
+        if is_down && !physical_mouse_suppressed.get(button).unwrap_or(false) {
+            dst.insert(button, true)
+        }
+    }
+}
+
+// The host has no keyboard/mouse for this run: `rock frame`, `rock sim` and the
+// headless editor/agent boots all set STONE_HEADLESS and create the window
+// unmapped. Matches the host predicate (`STONE_HEADLESS` present, any value).
+fn input_headless_run() -> bool {
+    return os_getenv("STONE_HEADLESS") != null
+}
+
+// Latch the game-input authority for the whole run, once, before any game code
+// reads an input predicate. A sim always drives its own lane; so does a run with
+// no window to type into. Only a windowed, non-sim run takes the host lane by
+// default, and the env opt-out overrides both.
+pub fn input_resolve_authority() {
+    let host_opt_in = os_getenv("SIM_INPUT_SYNTHETIC_ONLY") == "0"
+    SIM_INPUT_SYNTHETIC_ONLY = !host_opt_in && (sim_mode_active() || input_headless_run())
+}
+
+// One frame-start projection point for game input. Tool input intentionally
+// bypasses this path and reads live ImGui state in input/tool.rock.
+pub fn input_select_game_authority() {
+    keys_pressed_this_frame.clear()
+    mouse_pressed_this_frame.clear()
+    mouse_released_this_frame.clear()
+    scancodes_pressed_this_frame.clear()
+    scancodes_repeated_this_frame.clear()
+    keys_repeated_this_frame.clear()
+    text_input_this_frame = ""
+    pad_axis_motion_this_frame.clear()
+    pad_pressed_this_frame.clear()
+    pad_released_this_frame.clear()
+    if SIM_INPUT_SYNTHETIC_ONLY {
+        input_copy_keys(keys_down, synthetic_keys_down)
+        input_copy_scancodes(scancodes_down, synthetic_scancodes_down)
+        input_copy_scancode_modifiers(scancode_modifier_state, synthetic_scancode_modifiers)
+        input_copy_mouse(mouse_down, synthetic_mouse_down)
+        input_copy_pad(pad_down, synthetic_pad_down)
+        input_copy_pad_axes(pad_axes, synthetic_pad_axes)
+        input_copy_pad_motion(pad_axis_motion_this_frame, synthetic_pad_axis_motion_this_frame)
+        text_input_this_frame = synthetic_text_input_this_frame
+        for (key, pressed) in synthetic_keys_pressed_this_frame {
+            if pressed { keys_pressed_this_frame.insert(key, true) }
+        }
+        for (scan, pressed) in synthetic_scancodes_pressed_this_frame {
+            if pressed { scancodes_pressed_this_frame.insert(scan, true) }
+        }
+        for (scan, repeated) in synthetic_scancodes_repeated_this_frame {
+            if repeated { scancodes_repeated_this_frame.insert(scan, true) }
+        }
+        for (key, repeated) in synthetic_keys_repeated_this_frame {
+            if repeated { keys_repeated_this_frame.insert(key, true) }
+        }
+        for (button, pressed) in synthetic_pad_pressed_this_frame {
+            if pressed { pad_pressed_this_frame.insert(button, true) }
+        }
+        for (button, released) in synthetic_pad_released_this_frame {
+            if released { pad_released_this_frame.insert(button, true) }
+        }
+        for (button, released) in synthetic_mouse_released_this_frame {
+            if released { mouse_released_this_frame.insert(button, true) }
+        }
+    } else {
+        input_copy_keys(keys_down, physical_keys_down)
+        input_copy_scancodes(scancodes_down, physical_scancodes_down)
+        input_copy_scancode_modifiers(scancode_modifier_state, physical_scancode_modifiers)
+        input_copy_live_mouse(mouse_down)
+        input_copy_pad(pad_down, physical_pad_down)
+        input_copy_pad_axes(pad_axes, physical_pad_axes)
+        input_copy_pad_motion(pad_axis_motion_this_frame, physical_pad_axis_motion_this_frame)
+        text_input_this_frame = physical_text_input_this_frame
+        for (key, pressed) in physical_keys_pressed_this_frame {
+            if pressed { keys_pressed_this_frame.insert(key, true) }
+        }
+        for (scan, pressed) in physical_scancodes_pressed_this_frame {
+            if pressed { scancodes_pressed_this_frame.insert(scan, true) }
+        }
+        for (scan, repeated) in physical_scancodes_repeated_this_frame {
+            if repeated { scancodes_repeated_this_frame.insert(scan, true) }
+        }
+        for (key, repeated) in physical_keys_repeated_this_frame {
+            if repeated { keys_repeated_this_frame.insert(key, true) }
+        }
+        for (button, pressed) in physical_mouse_pressed_this_frame {
+            if pressed { mouse_pressed_this_frame.insert(button, true) }
+        }
+        for (button, pressed) in physical_pad_pressed_this_frame {
+            if pressed { pad_pressed_this_frame.insert(button, true) }
+        }
+        for (button, released) in physical_pad_released_this_frame {
+            if released { pad_released_this_frame.insert(button, true) }
+        }
+        for (button, released) in physical_mouse_released_this_frame {
+            if released { mouse_released_this_frame.insert(button, true) }
+        }
+    }
+}
+
+
+pub fn is_key_down(key: string) -> bool {
+    return keys_down.get(key).unwrap_or(false)
+}
+
+pub fn is_pad_down(button: string) -> bool {
+    return pad_down.get(button).unwrap_or(false)
+}
+
+pub fn pad_connected() -> bool {
+    return stone_pad_connected()
+}
+
+pub fn pad_type_name() -> string {
+    return stone_pad_type_name_raw()
+}
+
+pub fn is_pad_pressed(button: string) -> bool {
+    if pad_pressed_this_frame.get(button).unwrap_or(false) { return true }
+    let is_down = pad_down.get(button).unwrap_or(false)
+    let was_down = pad_down_last.get(button).unwrap_or(false)
+    return is_down && !was_down
+}
+
+pub fn is_pad_released(button: string) -> bool {
+    if pad_released_this_frame.get(button).unwrap_or(false) { return true }
+    let is_down = pad_down.get(button).unwrap_or(false)
+    let was_down = pad_down_last.get(button).unwrap_or(false)
+    return !is_down && was_down
+}
+
+pub fn pad_axis_value(axis: string) -> float {
+    return pad_axes.get(axis).unwrap_or(0.0)
+}
+
+fn pad_axis_value_last(axis: string) -> float {
+    return pad_axes_last.get(axis).unwrap_or(0.0)
+}
+
+// Either control key. The debug function-key row is fully assigned, so actions
+// that share a key are separated by this modifier: each site gates on it, one
+// way or the other.
+pub fn ctrl_held() -> bool {
+    return is_key_down(KEY_CTRL_LEFT) || is_key_down(KEY_CTRL_RIGHT)
+}
+
+pub @intrinsic fn is_key_pressed(key: string) -> bool {
+    if keys_pressed_this_frame.get(key).unwrap_or(false) { return true }
+    if keys_repeated_this_frame.get(key).unwrap_or(false) { return false }
+    let a = keys_down.get(key).unwrap_or(false)
+    let b = keys_down_last.get(key).unwrap_or(false)
+
+    return a && !b
+}
+
+// The pressed-latch is OR'd in so a sub-frame tap (down and up inside one
+// frame's drain) reports press AND release on that frame, rather than
+// stranding whatever the hold was accumulating.
+pub fn is_key_released(key: string) -> bool {
+    if keys_down.get(key).unwrap_or(false) { return false }
+    return keys_down_last.get(key).unwrap_or(false)
+        || keys_pressed_this_frame.get(key).unwrap_or(false)
+}
+
+pub fn is_scancode_down(scan: string) -> bool {
+    return scancodes_down.get(scan).unwrap_or(false)
+}
+
+pub fn is_scancode_pressed(scan: string) -> bool {
+    if scancodes_pressed_this_frame.get(scan).unwrap_or(false) { return true }
+    if scancodes_repeated_this_frame.get(scan).unwrap_or(false) { return false }
+    let a = scancodes_down.get(scan).unwrap_or(false)
+    let b = scancodes_down_last.get(scan).unwrap_or(false)
+    return a && !b
+}
+
+pub fn is_scancode_released(scan: string) -> bool {
+    if scancodes_down.get(scan).unwrap_or(false) { return false }
+    return scancodes_down_last.get(scan).unwrap_or(false)
+        || scancodes_pressed_this_frame.get(scan).unwrap_or(false)
+}
+
+pub fn scancode_modifiers(scan: string) -> int {
+    return scancode_modifier_state.get(scan).unwrap_or(0)
+}
+
+pub fn scancode_repeated(scan: string) -> bool {
+    return scancodes_repeated_this_frame.get(scan).unwrap_or(false)
+}
+
+// Is the mouse currently owned by an overlay rather than the game? Bounded
+// input fixtures can override capture; otherwise the live ImGui host owns it.
+pub fn input_mouse_captured() -> bool {
+    if IMGUI_MOUSE_CAPTURE_OVERRIDE != null {
+        return IMGUI_MOUSE_CAPTURE_OVERRIDE.unwrap()
+    }
+    return is_imgui_using_mouse()
+}
+
+pub fn is_mouse_down(button: int) -> bool {
+    let is_down = mouse_down.get(button).unwrap_or(false)
+    return (!input_mouse_captured()) && is_down
+}
+
+pub @intrinsic fn is_mouse_pressed(button: int) -> bool {
+    if mouse_pressed_this_frame.get(button).unwrap_or(false) { return true }
+    let was_down = mouse_down_last.get(button).unwrap_or(false)
+    let is_down = is_mouse_down(button)
+
+    return is_down && !was_down
+}
+
+pub fn is_mouse_released(button: int) -> bool {
+    if mouse_released_this_frame.get(button).unwrap_or(false) { return true }
+    let was_down = mouse_down_last.get(button).unwrap_or(false)
+    let is_down = is_mouse_down(button)
+    return !is_down && was_down
+}
+
+pub @nomangle
+fn on_mouse_pressed(_x: float, _y: float, button: int) {
+    input_note_last_device(InputDeviceEvent::MouseButtonPress)
+    let captured = input_mouse_captured()
+    synthetic_mouse_down.insert(button, true)
+    if SIM_INPUT_SYNTHETIC_ONLY {
+        mouse_down.insert(button, true)
+        if !captured {
+            ui_mouse_note_press(button)
+            mouse_pressed_this_frame.insert(button, true)
+        }
+    }
+}
+
+fn input_physical_mouse_pressed(_x: float, _y: float, button: int) {
+    input_note_last_device(InputDeviceEvent::MouseButtonPress)
+    let captured = input_mouse_captured()
+    physical_mouse_down.insert(button, true)
+    if captured {
+        physical_mouse_suppressed.insert(button, true)
+    } else {
+        ui_mouse_note_press(button)
+        physical_mouse_pressed_this_frame.insert(button, true)
+    }
+}
+
+pub @nomangle
+fn on_mouse_released(_x: float, _y: float, button: int) {
+    if synthetic_mouse_down.get(button).unwrap_or(false) {
+        synthetic_mouse_released_this_frame.insert(button, true)
+    }
+    synthetic_mouse_down.remove(button)
+    if SIM_INPUT_SYNTHETIC_ONLY {
+        if mouse_down.get(button).unwrap_or(false) { mouse_released_this_frame.insert(button, true) }
+        mouse_down.remove(button)
+    }
+    ()
+}
+
+fn input_physical_mouse_released(_x: float, _y: float, button: int) {
+    let suppressed = physical_mouse_suppressed.get(button).unwrap_or(false)
+    // A press hidden from game input cannot close a game-visible hold.
+    if physical_mouse_down.get(button).unwrap_or(false) && !suppressed {
+        physical_mouse_released_this_frame.insert(button, true)
+    }
+    physical_mouse_down.remove(button)
+    physical_mouse_suppressed.remove(button)
+    ()
+}
+
+fn input_pad_axis_normalize(raw: int) -> float {
+    let value = float(raw) / 32767.0
+    if value < -1.0 { return -1.0 }
+    if value > 1.0 { return 1.0 }
+    return value
+}
+
+fn input_physical_pad_device_removed(instance: int) {
+    if physical_pad_active_instance != instance { return }
+    physical_pad_active_instance = -1
+    physical_pad_down.clear()
+    physical_pad_axes.clear()
+}
+
+fn input_physical_pad_active_changed(instance: int) {
+    physical_pad_active_instance = instance
+    physical_pad_down.clear()
+    physical_pad_axes.clear()
+    physical_pad_axis_motion_this_frame.clear()
+}
+
+fn input_physical_pad_pressed(instance: int, button: string, sync: bool) {
+    if physical_pad_active_instance != instance { return }
+    if !sync { input_note_last_device(InputDeviceEvent::PadButtonPress) }
+    physical_pad_down.insert(button, true)
+    if !sync { physical_pad_pressed_this_frame.insert(button, true) }
+}
+
+fn input_physical_pad_released(instance: int, button: string) {
+    if physical_pad_active_instance != instance { return }
+    if physical_pad_down.get(button).unwrap_or(false) {
+        physical_pad_released_this_frame.insert(button, true)
+    }
+    physical_pad_down.remove(button)
+}
+
+fn input_physical_pad_axis(instance: int, axis: string, raw: int, sync: bool) {
+    if physical_pad_active_instance != instance { return }
+    let value = input_pad_axis_normalize(raw)
+    if !sync { input_note_last_device(InputDeviceEvent::PadAxisMotion(value)) }
+    if value == 0.0 {
+        physical_pad_axes.remove(axis)
+    } else {
+        physical_pad_axes.insert(axis, value)
+    }
+    if !sync { physical_pad_axis_motion_this_frame.insert(axis, value) }
+}
+
+pub @nomangle
+fn on_pad_pressed(button: string) {
+    input_note_last_device(InputDeviceEvent::PadButtonPress)
+    synthetic_pad_down.insert(button, true)
+    synthetic_pad_pressed_this_frame.insert(button, true)
+    if SIM_INPUT_SYNTHETIC_ONLY {
+        pad_down.insert(button, true)
+        pad_pressed_this_frame.insert(button, true)
+    }
+}
+
+pub @nomangle
+fn on_pad_released(button: string) {
+    if synthetic_pad_down.get(button).unwrap_or(false) {
+        synthetic_pad_released_this_frame.insert(button, true)
+    }
+    synthetic_pad_down.remove(button)
+    if SIM_INPUT_SYNTHETIC_ONLY {
+        if pad_down.get(button).unwrap_or(false) { pad_released_this_frame.insert(button, true) }
+        pad_down.remove(button)
+    }
+}
+
+pub @nomangle
+fn on_pad_axis(axis: string, value: float) {
+    input_note_last_device(InputDeviceEvent::PadAxisMotion(value))
+    if value == 0.0 {
+        synthetic_pad_axes.remove(axis)
+    } else {
+        synthetic_pad_axes.insert(axis, value)
+    }
+    synthetic_pad_axis_motion_this_frame.insert(axis, value)
+    if SIM_INPUT_SYNTHETIC_ONLY {
+        if value == 0.0 {
+            pad_axes.remove(axis)
+        } else {
+            pad_axes.insert(axis, value)
+        }
+        pad_axis_motion_this_frame.insert(axis, value)
+    }
+}
+
+pub @nomangle
+fn on_key_pressed(key: string, scancode: string, repeats: bool) {
+    let resolved_scancode = input_resolve_synthetic_scancode(key, scancode)
+    on_key_pressed_with_identity(key, resolved_scancode, 0, repeats)
+}
+
+fn input_resolve_synthetic_scancode(key: string, scancode: string) -> string {
+    if scancode != "" { return scancode }
+    let value = stone_scancode_value(key)
+    if value < 0 { return "" }
+    return stone_scancode_token_for(value)
+}
+
+pub @nomangle
+fn on_key_pressed_with_identity(key: string, scancode: string, modifiers: int, repeats: bool) {
+    if !repeats { input_note_last_device(InputDeviceEvent::KeyPress) }
+    synthetic_keys_down.insert(key, true)
+    if scancode != "" {
+        synthetic_scancodes_down.insert(scancode, true)
+        synthetic_scancode_modifiers.insert(scancode, modifiers)
+    }
+    if repeats {
+        synthetic_keys_repeated_this_frame.insert(key, true)
+        if scancode != "" { synthetic_scancodes_repeated_this_frame.insert(scancode, true) }
+    } else {
+        synthetic_keys_pressed_this_frame.insert(key, true)
+        if scancode != "" { synthetic_scancodes_pressed_this_frame.insert(scancode, true) }
+    }
+    if SIM_INPUT_SYNTHETIC_ONLY {
+        keys_down.insert(key, true)
+        if scancode != "" {
+            scancodes_down.insert(scancode, true)
+            scancode_modifier_state.insert(scancode, modifiers)
+        }
+        if repeats {
+            keys_repeated_this_frame.insert(key, true)
+            if scancode != "" { scancodes_repeated_this_frame.insert(scancode, true) }
+        } else {
+            keys_pressed_this_frame.insert(key, true)
+            if scancode != "" { scancodes_pressed_this_frame.insert(scancode, true) }
+        }
+    }
+}
+
+pub fn input_physical_key_pressed(key: string, scancode: string, modifiers: int, repeats: bool) {
+    if !repeats { input_note_last_device(InputDeviceEvent::KeyPress) }
+    physical_keys_down.insert(key, true)
+    if scancode != "" {
+        physical_scancodes_down.insert(scancode, true)
+        physical_scancode_modifiers.insert(scancode, modifiers)
+    }
+    if repeats {
+        physical_keys_repeated_this_frame.insert(key, true)
+        if scancode != "" { physical_scancodes_repeated_this_frame.insert(scancode, true) }
+    } else {
+        physical_keys_pressed_this_frame.insert(key, true)
+        if scancode != "" { physical_scancodes_pressed_this_frame.insert(scancode, true) }
+    }
+}
+
+pub @nomangle
+fn on_text_input(text: string) {
+    synthetic_text_input_this_frame = synthetic_text_input_this_frame + text
+    if SIM_INPUT_SYNTHETIC_ONLY {
+        text_input_this_frame = text_input_this_frame + text
+    }
+}
+
+fn input_physical_text(text: string) {
+    physical_text_input_this_frame = physical_text_input_this_frame + text
+}
+
+pub @nomangle
+fn on_key_released(key: string) {
+    on_key_released_with_identity(key, input_resolve_synthetic_scancode(key, ""))
+}
+
+pub @nomangle
+fn on_key_released_with_identity(key: string, scancode: string) {
+    synthetic_keys_down.remove(key)
+    if scancode != "" {
+        synthetic_scancodes_down.remove(scancode)
+        synthetic_scancode_modifiers.remove(scancode)
+    }
+    if SIM_INPUT_SYNTHETIC_ONLY {
+        keys_down.remove(key)
+        if scancode != "" {
+            scancodes_down.remove(scancode)
+            scancode_modifier_state.remove(scancode)
+        }
+    }
+    ()
+}
+
+pub fn input_physical_key_released(key: string, scancode: string) {
+    physical_keys_down.remove(key)
+    if scancode != "" {
+        physical_scancodes_down.remove(scancode)
+        physical_scancode_modifiers.remove(scancode)
+    }
+    ()
+}

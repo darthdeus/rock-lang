@@ -1,0 +1,149 @@
+// Prefetch submission is paced by decoded-bytes-in-flight. It
+// submits at once while the
+// native queue has room and wait otherwise; residency_prefetch_advance drains
+// the waiters in arrival order, and residency_prefetch_idle reports a drained
+// queue with nothing still publishing.
+
+fn residency_prefetch_test_image(digest: string, name: string, w: int, h: int) -> string {
+    let root = (env_var("ROCK_TEST_TMP") ?? env_var("TMPDIR") ?? "/tmp") + "/rock-residency-prefetch"
+    let eat = root + "/.eat"
+    let dir = eat + "/" + digest.repeat(64)
+    let _ = create_directory(root)
+    let _ = create_directory(eat)
+    let _ = create_directory(dir)
+    let data = new_image_data(w, h)
+    image_data_set_pixel(data, 1, 1, 1.0, 0.5, 0.0, 1.0)
+    let path = "{dir}/{name}.png"
+    assert(image_data_encode(data, "png", path), "fixture {path} written")
+    stone_destroy_image_data(data.0)
+    return path
+}
+
+fn residency_prefetch_fixture(body: fn([string])) {
+    residency_test_host()
+    let paths = [residency_prefetch_test_image("1", "small", 4, 2),
+        residency_prefetch_test_image("2", "big", 64, 64)]
+    residency_owner_test_isolated(() => { body(paths) }, () => {
+        residency_owner_test_cleanup(paths)
+    })
+}
+
+@test
+fn residency_prefetch_idle_when_nothing_waits() {
+    residency_prefetch_fixture(paths => {
+        assert(residency_prefetch_idle(), "a fresh cache has nothing queued or loading")
+    })
+}
+
+@test
+fn residency_prefetch_submits_while_under_budget() {
+    residency_prefetch_fixture(paths => {
+        let small = paths[0]
+        let big = paths[1]
+        let big_bytes = 64 * 64 * 4
+        residency_set_prefetch_budget(big_bytes)
+        let big_image = residency_prefetch(ResidencyRequest { path: big })
+        assert(big_image.0 != 0, "the first prefetch submits at once")
+        assert_eq(residency_state(big), ResidencyState::Loading, "the submitted prefetch is loading")
+        let small_image = residency_prefetch(ResidencyRequest { path: small })
+        assert_eq(small_image.0, 0, "a prefetch past the inflight budget waits")
+        assert_eq(residency_state(small), ResidencyState::Absent, "a waiting prefetch submits nothing")
+        assert(!residency_prefetch_idle(), "a waiting prefetch is not idle")
+        residency_prefetch_advance()
+        assert_eq(residency_state(small), ResidencyState::Absent,
+            "advance submits nothing while the budget is full")
+        residency_set_prefetch_budget(512 * 1024 * 1024)
+        residency_prefetch_advance()
+        assert_eq(residency_state(small), ResidencyState::Loading, "advance drains the waiter")
+        assert(!residency_prefetch_idle(), "loading prefetches are not idle")
+        // The blocking pump publishes Deferred results; the prepare flush
+        // only waits for Required ones.
+        let _ = stone_service_image_uploads()
+        assert_eq(residency_state(big), ResidencyState::Resident, "the pump publishes")
+        assert_eq(residency_state(small), ResidencyState::Resident, "the drained waiter publishes")
+        assert(residency_prefetch_idle(), "a published set is idle")
+    })
+}
+
+@test
+fn residency_prefetch_advance_is_first_in_first_out() {
+    residency_prefetch_fixture(paths => {
+        let small = paths[0]
+        let big = paths[1]
+        residency_set_prefetch_budget(0)
+        let _ = residency_prefetch(ResidencyRequest { path: small })
+        let _ = residency_prefetch(ResidencyRequest { path: big })
+        let _ = residency_prefetch(ResidencyRequest { path: small })
+        assert_eq(residency_state(small), ResidencyState::Absent, "small waits")
+        assert_eq(residency_state(big), ResidencyState::Absent, "big waits")
+        // Room for one submission: the first waiter takes it.
+        residency_set_prefetch_budget(1)
+        let loads = stone_get_image_profile_stats().load_calls
+        residency_prefetch_advance()
+        assert_eq(residency_state(small), ResidencyState::Loading, "the first waiter submits first")
+        assert_eq(residency_state(big), ResidencyState::Absent, "the later waiter keeps waiting")
+        residency_set_prefetch_budget(512 * 1024 * 1024)
+        residency_prefetch_advance()
+        assert_eq(residency_state(big), ResidencyState::Loading, "the later waiter drains next")
+        assert_eq(stone_get_image_profile_stats().load_calls, loads + 2,
+            "a repeated request queues one load")
+    })
+}
+
+@test
+fn residency_prefetch_required_acquire_submits_a_waiter() {
+    residency_prefetch_fixture(paths => {
+        residency_set_prefetch_budget(0)
+        let _ = residency_prefetch(ResidencyRequest { path: paths[0] })
+        let loads = stone_get_image_profile_stats().load_calls
+        let misses = residency_frame_stats().misses
+        let image = acquire_image_asset(paths[0], watch: false)
+        assert(image.0 != 0, "a Required acquire of a waiter submits at once")
+        assert_eq(residency_state(paths[0]), ResidencyState::Loading, "the waiter is loading")
+        assert_eq(residency_frame_stats().misses, misses + 1,
+            "a prefetch that never submitted is a genuine miss")
+        residency_set_prefetch_budget(512 * 1024 * 1024)
+        residency_prefetch_advance()
+        assert_eq(stone_get_image_profile_stats().load_calls, loads + 1,
+            "advance skips the submitted waiter")
+        assert(!residency_prefetch_idle(), "the submitted Required load still publishes")
+        stone_flush_image_uploads()
+        assert(residency_prefetch_idle(), "no waiters remain")
+        assert(release_image_asset(paths[0]))
+    })
+}
+
+@test
+fn residency_manifest_dimensions_admit_before_file_read() {
+    residency_prefetch_fixture(paths => {
+        let path = paths[0]
+        assert(remove_file(path))
+        defer { assert(file_write(path, "")) }
+        let image = residency_prefetch(ResidencyRequest { path, logical_size: iv(4, 2) })
+        assert(image.0 != 0, "manifest admission returns a pending handle even when the worker will fail to read")
+        assert_eq(image_dims(image), iv(4, 2), "manifest dimensions are available without a readable file")
+        assert(!image_load_ready(image))
+        let _ = image_load_require(image)
+        residency_flush_required()
+        assert(image_load_decode_failed(image), "the worker reports the missing file")
+        assert_eq(residency_state(path), ResidencyState::Loading, "missing pixels never become Resident")
+    })
+}
+
+@test
+fn residency_manifest_dimensions_are_verified_before_publication() {
+    residency_prefetch_fixture(paths => {
+        let good = residency_prefetch(ResidencyRequest { path: paths[0], logical_size: iv(4, 2) })
+        let mismatch = residency_prefetch(ResidencyRequest { path: paths[1], logical_size: iv(8, 4) })
+        assert_eq(image_dims(good), iv(4, 2))
+        assert_eq(image_dims(mismatch), iv(8, 4), "admission uses the supplied manifest")
+        let _ = image_load_require(good)
+        let _ = image_load_require(mismatch)
+        residency_flush_required()
+        assert(image_load_ready(good))
+        assert(image_load_decode_failed(mismatch), "a stale manifest cannot publish mismatched pixels")
+        assert(!image_load_ready(mismatch))
+        assert_eq(stone_image_read_texel(good.0, 1, 1), 0xFF7F00FF,
+            "matching dimensions preserve decoded pixels")
+    })
+}

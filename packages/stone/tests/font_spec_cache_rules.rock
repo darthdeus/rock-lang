@@ -1,0 +1,123 @@
+// S10: FONT_SPEC_CACHE validity. A cached spec whose font was unloaded
+// reloads instead of returning the stale handle.
+
+fn font_spec_cache_test_host() {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    assert(stone_text_init())
+}
+
+fn font_spec_cache_key_set() -> Map<string, bool> {
+    let keys: Map<string, bool> = map_new()
+    for (key, _) in FONT_SPEC_CACHE { keys[key] = true }
+    return keys
+}
+
+fn font_spec_cache_test_spec(path: string = project_asset_path("@engine/assets/fonts/DroidSans.ttf")) -> FontSpec {
+    return FontSpec {
+        path: path,
+        size: 24,
+        raster: FontRasterPolicy::Fixed,
+        sampling: TextureFilter::Nearest,
+        faces: TextFaces {},
+        native_em: 0,
+        extra: "",
+    }
+}
+
+fn font_spec_cache_test_cleanup(font: Font?, before: Map<string, bool>) {
+    if font != null { unload_font(font.unwrap()) }
+    for (key, _) in FONT_SPEC_CACHE {
+        if before.get(key) == null { FONT_SPEC_CACHE.remove(key) }
+    }
+}
+
+@test
+fn font_for_spec_reloads_an_unloaded_font() {
+    font_spec_cache_test_host()
+    load_pending_shader_sources()
+    let before = font_spec_cache_key_set()
+    let font: Font? = null
+    world_fixture_with_cleanup(() => {
+        let spec = font_spec_cache_test_spec()
+        let first = font_for_spec(spec).unwrap()
+        let backend = first.data().unwrap().backend_id
+        let hit = font_for_spec(spec).unwrap()
+        assert_eq(hit.data().unwrap().backend_id, backend,
+            "a live cached font is returned, not reloaded")
+        let held = stone_font_data_len(backend)
+        assert(held > 1000, "the cached font is natively live (held={held})")
+        unload_font(first)
+        assert(first.data() == null, "unload drops the registry entity")
+        let second = font_for_spec(spec).unwrap()
+        let backend2 = second.data().unwrap().backend_id
+        assert(backend2 != backend,
+            "the spec reloads after unload instead of returning the stale handle")
+        assert(stone_font_data_len(backend2) > 1000,
+            "the reloaded font is natively live")
+        let out = native_buffer_float(9)
+        assert(stone_get_glyph_info_for(backend2, 0, 65, out.ptr),
+            "the reloaded font measures 'A'")
+        font = second
+    }, () => {
+        font_spec_cache_test_cleanup(font, before)
+    })
+}
+
+@test
+fn font_spec_cache_fixture_failure_restores_state() {
+    font_spec_cache_test_host()
+    load_pending_shader_sources()
+    let before = font_spec_cache_key_set()
+    let probe: Font? = null
+    let failure = world_fixture_raised(() => {
+        world_fixture_with_cleanup(() => {
+            probe = font_for_spec(font_spec_cache_test_spec()).unwrap()
+            error("intentional font spec cache fixture failure")
+        }, () => {
+            font_spec_cache_test_cleanup(probe, before)
+        })
+    })
+    let message = failure ?? "fixture returned without the deliberate failure"
+    assert(message.contains("intentional font spec cache fixture failure"),
+        "the failure surfaces (got: {message})")
+    assert(probe != null && probe.unwrap().data() == null,
+        "a failed check unloads its font")
+    let after = font_spec_cache_key_set()
+    for (key, _) in after {
+        assert(before.get(key) != null, "a failed check evicts its cache key ({key})")
+    }
+    font_spec_cache_test_host()
+    load_pending_shader_sources()
+    let again = font_for_spec(font_spec_cache_test_spec()).unwrap()
+    assert(again.data() != null, "a failed check leaves later loads working")
+    font_spec_cache_test_cleanup(again, before)
+}
+
+// A hard load failure leaves the current font in place.
+@test
+fn declaring_a_bad_font_keeps_the_current_font() {
+    font_spec_cache_test_host()
+    load_pending_shader_sources()
+    let before = font_spec_cache_key_set()
+    let saved_default = DEFAULT_FONT
+    let root = (env_var("ROCK_TEST_TMP") ?? env_var("TMPDIR") ?? "/tmp") + "/rock-font-declaration-failure"
+    let _ = create_directory(root)
+    let bad = root + "/not-a-font.ttf"
+    let font: Font? = null
+    world_fixture_with_cleanup(() => {
+        assert(file_write(bad, "this is not a font payload"), "fixture {bad} written")
+        let spec = font_spec_cache_test_spec()
+        let declared = declare_game_font(spec)
+        assert(declared != null, "the good font is declared")
+        if before.get(font_spec_key(spec)) == null { font = declared }
+        let rendered = DEFAULT_FONT.unwrap().data().unwrap().backend_id
+        let bad_spec = font_spec_cache_test_spec(bad)
+        assert(declare_game_font(bad_spec) == null, "an unloadable font reports failure")
+        assert_eq(DEFAULT_FONT.unwrap().data().unwrap().backend_id, rendered,
+            "the previous font keeps rendering")
+    }, () => {
+        DEFAULT_FONT = saved_default
+        font_spec_cache_test_cleanup(font, before)
+    })
+}

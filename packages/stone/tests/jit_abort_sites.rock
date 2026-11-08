@@ -1,0 +1,159 @@
+// The counter-only trace handler runs inside every timing capture, so it
+// records abort sites as numeric ids and only the perf export resolves them
+// through the census naming path. These rules hold that shape: a window's
+// rows are exactly its aborts (warmup sites do not leak in), an abort joins
+// its trace's start, and the top-N list never loses the total.
+
+// Fresh closures: the site identity is (func object, pc), so each call is a
+// new abort site even though the source line is shared.
+@nomangle inline(lua) fn jit_abort_sites_probe() -> any = "return function(x) local y = x + 1; return y end"
+
+// A second definition, so the two sites below resolve different lines.
+@nomangle inline(lua) fn jit_abort_sites_probe_other() -> any = "return function(x) local y = x * 2; return y end"
+
+@nomangle inline(lua) fn jit_abort_sites_clear() = """
+    _G.__stone_jit_abort_sites = nil
+    _G.__stone_jit_abort_site_report = nil
+"""
+
+// REASON_TRACE_LONG is vmdef.traceerr's "trace too long" index; a reason with
+// no format argument keeps the row text independent of the bytecode tables.
+const JIT_ABORT_SITES_REASON: int = 2
+
+fn jit_abort_sites_fixture(body: fn()) {
+    let running = lua_gc_is_running()
+    let enabled = ENGINE.profiler_enabled
+    let capture = PERF_FRAME_CAPTURE
+    let counter = JIT_COUNTER_INSTALLED
+    let counts = (jit_trace_count_of("starts"), jit_trace_count_of("compiles"),
+                  jit_trace_count_of("aborts"), jit_trace_count_of("flushes"))
+    defer {
+        profiler_allocator_shutdown()
+        init_profiler()
+        PERF_FRAME_CAPTURE = capture
+        JIT_COUNTER_INSTALLED = counter
+        ENGINE.profiler_enabled = enabled
+        jit_trace_counts_set_for_test(counts.0, counts.1, counts.2, counts.3)
+        jit_abort_sites_clear()
+        if running { __gc_restart() } else { __gc_collect_stop() }
+    }
+    lua_alloc_split_init()
+    init_profiler()
+    ENGINE.profiler_enabled = true
+    PROFILER_SECTIONS_OFF = 0
+    PROFILER.warmup_active = false
+    PROFILER.warmup_seconds = 0.0
+    PERF_FRAME_CAPTURE = true
+    JIT_COUNTER_INSTALLED = true
+    body()
+}
+
+fn jit_abort_sites_frame() {
+    profile_frame_begin()
+    profile_frame_end()
+}
+
+// Drives a real allocation window: the first frame opens it, `in_window` runs
+// with the window collecting, and the remaining frames close it. The recorder
+// starts its era at the first event after `in_window` begins, exactly as it
+// does live.
+fn jit_abort_sites_window(frames: int, in_window: fn()) {
+    GC_WIN_N = frames
+    GC_WIN_START = 1
+    GC_WIN_FRAME = 0
+    GC_WIN_T0_KB = 0.0
+    GC_WIN_ACCOUNT_CURSOR_KB = 0.0
+    GC_WIN_FRAME_START_KB = 0.0
+    jit_abort_sites_frame()
+    in_window()
+    while GC_WIN_FRAME < GC_WIN_START + GC_WIN_N {
+        jit_abort_sites_frame()
+    }
+}
+
+fn jit_abort_sites_report() -> JsonValue {
+    let doc = json_decode(profiler_perf_json()).unwrap()
+    return json_field(json_field(doc, "run").unwrap(), "jit_trace").unwrap()
+}
+
+fn jit_abort_sites_rows(report: JsonValue) -> [JsonValue] {
+    return json_as_array(json_field(report, "abort_sites") ?? json_null()).unwrap()
+}
+
+fn jit_abort_sites_total(report: JsonValue) -> int {
+    return json_as_int(json_field(report, "abort_sites_total") ?? json_null()).unwrap()
+}
+
+fn jit_abort_sites_field(row: JsonValue, name: string) -> string {
+    return json_as_str(json_field(row, name) ?? json_null()).unwrap()
+}
+
+@test
+fn jit_abort_sites_are_the_window_and_join_their_start() {
+    jit_abort_sites_fixture(() => {
+        let counts = __stone_jit_trace_counts_table()
+        let site = jit_abort_sites_probe()
+        let orphan = jit_abort_sites_probe_other()
+        // Warmup aborts: the window must drop them, not report them as its own.
+        __stone_jit_count_event(counts, "start", 11, site, 0, JIT_ABORT_SITES_REASON, 0)
+        __stone_jit_count_event(counts, "abort", 11, site, 0, JIT_ABORT_SITES_REASON, 0)
+        jit_abort_sites_window(2, () => {
+            __stone_jit_count_event(counts, "start", 21, site, 0, JIT_ABORT_SITES_REASON, 0)
+            for _ in 0..3 {
+                __stone_jit_count_event(counts, "abort", 21, site, 0, JIT_ABORT_SITES_REASON, 0)
+            }
+            // No start for trace 22: the site keeps its abort location and
+            // reports no start location.
+            __stone_jit_count_event(counts, "abort", 22, orphan, 0, JIT_ABORT_SITES_REASON, 0)
+        })
+        let report = jit_abort_sites_report()
+        let rows = jit_abort_sites_rows(report)
+        assert_eq(rows.len(), 2, "one row per aborted site, warmup excluded: {json_encode(report)}")
+        assert_eq(jit_abort_sites_total(report), 4, "every window abort is counted: {json_encode(report)}")
+        let joined = rows[0]
+        let unjoined = rows[1]
+        assert_eq(json_as_int(json_field(joined, "count") ?? json_null()).unwrap(), 3,
+            "the repeated site ranks first: {json_encode(report)}")
+        assert_eq(json_as_int(json_field(unjoined, "count") ?? json_null()).unwrap(), 1,
+            "the single abort ranks second: {json_encode(report)}")
+        assert(jit_abort_sites_field(joined, "reason").len() > 0, "a row names its reason: {json_encode(joined)}")
+        assert_eq(jit_abort_sites_field(joined, "reason"), jit_abort_sites_field(unjoined, "reason"),
+            "the same traceerr index renders one reason: {json_encode(report)}")
+        assert(jit_abort_sites_field(joined, "abort_loc") != "(?)",
+            "a real function and pc resolve a location: {json_encode(joined)}")
+        assert_eq(jit_abort_sites_field(joined, "start_loc"), jit_abort_sites_field(joined, "abort_loc"),
+            "the trace started where it was aborted: {json_encode(joined)}")
+        assert_eq(jit_abort_sites_field(unjoined, "start_loc"), "(?)",
+            "an unstarted trace has no start location: {json_encode(unjoined)}")
+        assert(jit_abort_sites_field(unjoined, "abort_loc") != jit_abort_sites_field(joined, "abort_loc"),
+            "two code sites keep two rows: {json_encode(report)}")
+    })
+    assert(json_decode(profiler_perf_json()) != null,
+        "the fixture leaves a valid profiler report for the next test")
+}
+
+@test
+fn jit_abort_sites_top_fifty_keeps_the_total() {
+    jit_abort_sites_fixture(() => {
+        let counts = __stone_jit_trace_counts_table()
+        // 60 distinct sites: each call makes a fresh closure, and the site id
+        // is (func object, pc).
+        jit_abort_sites_window(2, () => {
+            for i in 0..60 {
+                let site = jit_abort_sites_probe()
+                __stone_jit_count_event(counts, "start", 100 + i, site, 0, JIT_ABORT_SITES_REASON, 0)
+                __stone_jit_count_event(counts, "abort", 100 + i, site, 0, JIT_ABORT_SITES_REASON, 0)
+            }
+        })
+        let report = jit_abort_sites_report()
+        let rows = jit_abort_sites_rows(report)
+        assert_eq(rows.len(), 50, "the export lists the top 50 sites: {json_encode(report)}")
+        assert_eq(jit_abort_sites_total(report), 60,
+            "the total counts every site, listed or not: {json_encode(report)}")
+        let listed = 0
+        for row in rows {
+            listed += json_as_int(json_field(row, "count") ?? json_null()).unwrap()
+        }
+        assert_eq(listed, 50, "the listed rows carry one abort each: {json_encode(report)}")
+    })
+}

@@ -1,0 +1,320 @@
+// Focus and keyboard navigation. Focusables register via ui_focus_item while drawing --
+// a SEPARATE list from the mouse items (that one holds everything
+// hit-testable with z; this one holds only focusables, in declaration
+// order, per scope). Same frame model as the mouse core: resolve at
+// frame start against LAST frame's list; the runner calls
+// ui_focus_begin_frame right after ui_mouse_begin_frame (hot must be
+// fresh for hover-steal).
+//
+// Modality: nav mode is entered by an UiUp/UiDown press (the entering
+// press focuses the remembered item -- it does not also move) and
+// exited by pointer movement. Focus is LIVE only in nav mode; per-scope
+// remembered focus persists across mode switches. Keyboard capture
+// (UI_INPUT_CAPTURE, actions.rock) = nav-mode focus live -- pointer
+// mode never captures, so an open panel can't kill gameplay keys.
+//
+// Nav edges OR the action's pressed latch with this core's OWN prev-down
+// snapshot. The latch catches a tap completed in one poll (down and up
+// before resolution: the hold is gone but the press arrived); the own
+// snapshot catches a sim's mid-frame injection, whose latch the input
+// layer's snapshot rotation eats before this frame-start resolution
+// sees it (same trick as the mouse core's was_down).
+
+pub nobox value UiFocusItem {
+    id: int,
+    scope: string,
+    // Design-space rect at registration: FocusMove fx geometry now, the
+    // spatial-nav upgrade later.
+    rect: UiRect,
+}
+
+pub struct UiFocusState {
+    // Grow-only pools swapped each frame (the mouse-core pattern).
+    last: [UiFocusItem],
+    last_count: int,
+    cur: [UiFocusItem],
+    cur_count: int,
+
+    // Active scope, game-set each frame (mag: topmost open panel).
+    scope: string,
+
+    nav_mode: bool,
+    // Remembered focus per scope: id + declaration index (the index is
+    // the id-miss fallback -- widget vanished, clamp to position).
+    focused_ids: Map<string, int>,
+    focused_idx: Map<string, int>,
+    live_id: int,       // focused id this frame; 0 unless nav mode
+    confirmed_id: int,  // Confirm fired for this id this frame (edge)
+
+    up: ActionDef?,
+    down_act: ActionDef?,
+    left: ActionDef?,
+    right: ActionDef?,
+    confirm: ActionDef?,
+    back: ActionDef?,
+
+    up_was: bool,
+    down_was: bool,
+    confirm_was: bool,
+    held_since: float,
+    last_fire: float,
+    prev_mouse: Vec2,
+
+    // UiLeft/UiRight direction resolved this frame (-1/0/+1); timers
+    // separate from up/down so holding both axes can't cross-reset.
+    left_was: bool,
+    right_was: bool,
+    lr_held_since: float,
+    lr_last_fire: float,
+    lr_dir: int,
+}
+
+pub global UI_FOCUS: UiFocusState = UiFocusState {
+    last: vec_new(),
+    last_count: 0,
+    cur: vec_new(),
+    cur_count: 0,
+    scope: "",
+    nav_mode: false,
+    focused_ids: map_new(),
+    focused_idx: map_new(),
+    live_id: 0,
+    confirmed_id: 0,
+    up: null,
+    down_act: null,
+    left: null,
+    right: null,
+    confirm: null,
+    back: null,
+    up_was: false,
+    down_was: false,
+    confirm_was: false,
+    held_since: 0.0,
+    last_fire: 0.0,
+    prev_mouse: v(-1.0, -1.0),
+    left_was: false,
+    right_was: false,
+    lr_held_since: 0.0,
+    lr_last_fire: 0.0,
+    lr_dir: 0,
+}
+
+// Wire the game's six nav actions (once, at @init). Left/right/back are
+// stored for the slider/back consumers; up/down/confirm drive the MVP.
+pub fn ui_nav_use(up: ActionDef, down: ActionDef, left: ActionDef, right: ActionDef, confirm: ActionDef, back: ActionDef) {
+    assert(action_is_ui(up) && action_is_ui(down) && action_is_ui(left) && action_is_ui(right)
+        && action_is_ui(confirm) && action_is_ui(back),
+        "ui_nav_use: nav actions must be ui: true (a gated nav action deadlocks capture)")
+    let f = UI_FOCUS
+    f.up = up
+    f.down_act = down
+    f.left = left
+    f.right = right
+    f.confirm = confirm
+    f.back = back
+}
+
+// Active focus scope for NEXT frame's resolution. Game-set each frame.
+pub fn ui_focus_set_scope(scope: string) {
+    UI_FOCUS.scope = scope
+}
+
+// Register a focusable for NEXT frame's resolution. Declaration order
+// is the nav order. `r` is taken for the future spatial upgrade; 1D
+// vertical nav doesn't read it yet.
+pub fn ui_focus_item(id: int, r: UiRect, scope: string) {
+    let f = UI_FOCUS
+    f.cur_count = f.cur_count + 1
+    if f.cur_count <= f.cur.len {
+        f.cur[f.cur_count - 1] = UiFocusItem { id: id, scope: scope, rect: r }
+    } else {
+        f.cur.push(UiFocusItem { id: id, scope: scope, rect: r })
+    }
+}
+
+pub fn ui_focused(id: int) -> bool {
+    return UI_FOCUS.nav_mode && UI_FOCUS.live_id == id && id != 0
+}
+
+// UiLeft/UiRight direction this frame: -1/0/+1, edge then hold-repeat.
+// Consumers (focus_slider, focus_tab_row) gate on ui_focused themselves.
+fn ui_focus_lr() -> int {
+    return UI_FOCUS.lr_dir
+}
+
+pub fn ui_focus_confirmed(id: int) -> bool {
+    return UI_FOCUS.confirmed_id == id && id != 0
+}
+
+// The active scope's item at position i (declaration order), or 0.
+fn __focus_nth(f: UiFocusState, i: int) -> int {
+    let k = 0
+    for j in 0..f.last_count {
+        let it = f.last[j]
+        if it.scope != f.scope { continue }
+        if k == i { return it.id }
+        k = k + 1
+    }
+    return 0
+}
+
+// The active scope's rect for `id` (last-frame registration), or zero.
+fn __focus_rect_of(f: UiFocusState, id: int) -> UiRect {
+    for j in 0..f.last_count {
+        let it = f.last[j]
+        if it.scope == f.scope && it.id == id { return it.rect }
+    }
+    return UiRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 }
+}
+
+fn __focus_index_of(f: UiFocusState, id: int) -> int {
+    let k = 0
+    for j in 0..f.last_count {
+        let it = f.last[j]
+        if it.scope != f.scope { continue }
+        if it.id == id { return k }
+        k = k + 1
+    }
+    return -1
+}
+
+fn __focus_scope_len(f: UiFocusState) -> int {
+    let k = 0
+    for j in 0..f.last_count {
+        if f.last[j].scope == f.scope { k = k + 1 }
+    }
+    return k
+}
+
+// Resolve the scope's remembered focus against the current list:
+// remembered id if it still exists, else clamp its index (id-miss),
+// else the first item. Syncs both maps.
+fn __focus_resolve(f: UiFocusState, n: int) {
+    let want = f.focused_ids.get(f.scope) ?? 0
+    if want != 0 {
+        let at = __focus_index_of(f, want)
+        if at >= 0 {
+            f.focused_idx[f.scope] = at
+            return
+        }
+    }
+    let idx = clamp(f.focused_idx.get(f.scope) ?? 0, 0, n - 1) as int
+    f.focused_ids[f.scope] = __focus_nth(f, idx)
+    f.focused_idx[f.scope] = idx
+}
+
+// Runner-called, right after ui_mouse_begin_frame.
+pub fn ui_focus_begin_frame() {
+    let f = UI_FOCUS
+    let tmp = f.last
+    f.last = f.cur
+    f.last_count = f.cur_count
+    f.cur = tmp
+    f.cur_count = 0
+
+    f.confirmed_id = 0
+
+    let d = UI_ID_DEBUG
+    if d.enabled {
+        __ui_id_debug_begin_list()
+        for j in 0..f.last_count {
+            let id = f.last[j].id
+            __ui_id_debug_check_registration(id, "focus")
+        }
+        __ui_id_debug_end_frame()
+    }
+
+    let up_d = f.up?.down() ?? false
+    let dn_d = f.down_act?.down() ?? false
+    let cf_d = f.confirm?.down() ?? false
+    let up_edge = (f.up?.pressed() ?? false) || (up_d && !f.up_was)
+    let dn_edge = (f.down_act?.pressed() ?? false) || (dn_d && !f.down_was)
+    let cf_edge = (f.confirm?.pressed() ?? false) || (cf_d && !f.confirm_was)
+    f.up_was = up_d
+    f.down_was = dn_d
+    f.confirm_was = cf_d
+
+    let lf_d = f.left?.down() ?? false
+    let rt_d = f.right?.down() ?? false
+    let lf_edge = (f.left?.pressed() ?? false) || (lf_d && !f.left_was)
+    let rt_edge = (f.right?.pressed() ?? false) || (rt_d && !f.right_was)
+    f.left_was = lf_d
+    f.right_was = rt_d
+    f.lr_dir = 0
+    if lf_edge || rt_edge {
+        f.lr_dir = if lf_edge { -1 } else { 1 }
+        f.lr_held_since = time
+        f.lr_last_fire = time
+    } else if (lf_d || rt_d)
+        && time - f.lr_held_since >= ACTION_REPEAT_DELAY
+        && time - f.lr_last_fire >= ACTION_REPEAT_RATE {
+        f.lr_dir = if lf_d { -1 } else { 1 }
+        f.lr_last_fire = time
+    }
+
+    let mp = mouse_ui()
+    // Half-a-design-px threshold: exact != flags phantom moves from
+    // float32 round-trip noise (Vec2 cdata vs double math), and real
+    // hardware sub-pixel jitter shouldn't yank nav mode either.
+    let moved = abs(mp.x - f.prev_mouse.x) > 0.5 || abs(mp.y - f.prev_mouse.y) > 0.5
+    f.prev_mouse = mp
+    if moved {
+        f.nav_mode = false
+        // Hover-steal: a hovered focusable in the active scope retargets
+        // the remembered focus, so the next nav entry starts there.
+        let hot = UI_MOUSE.hot
+        if hot != 0 {
+            let at = __focus_index_of(f, hot)
+            if at >= 0 {
+                f.focused_ids[f.scope] = hot
+                f.focused_idx[f.scope] = at
+            }
+        }
+    }
+
+    let n = __focus_scope_len(f)
+
+    if !f.nav_mode {
+        // The entering press focuses (remembered or first); it does not
+        // also move.
+        if (up_edge || dn_edge) && n > 0 {
+            f.nav_mode = true
+            __focus_resolve(f, n)
+            f.held_since = time
+            f.last_fire = time
+        }
+    } else if n == 0 {
+        f.nav_mode = false
+    } else {
+        __focus_resolve(f, n)
+
+        let dir = 0
+        if up_edge || dn_edge {
+            dir = if up_edge { -1 } else { 1 }
+            f.held_since = time
+            f.last_fire = time
+        } else if (up_d || dn_d)
+            && time - f.held_since >= ACTION_REPEAT_DELAY
+            && time - f.last_fire >= ACTION_REPEAT_RATE {
+            dir = if up_d { -1 } else { 1 }
+            f.last_fire = time
+        }
+
+        if dir != 0 {
+            let idx = (f.focused_idx.get(f.scope) ?? 0) + dir
+            let wrapped = if idx < 0 { n - 1 } else if idx >= n { 0 } else { idx }
+            let nid = __focus_nth(f, wrapped)
+            f.focused_ids[f.scope] = nid
+            f.focused_idx[f.scope] = wrapped
+            let nr = __focus_rect_of(f, nid)
+            ui_event(UiEvent::FocusMove, nr.center(), nr)
+        }
+
+        if cf_edge {
+            f.confirmed_id = (f.focused_ids.get(f.scope) ?? 0)
+        }
+    }
+
+    f.live_id = if f.nav_mode { f.focused_ids.get(f.scope) ?? 0 } else { 0 }
+    UI_INPUT_CAPTURE = f.nav_mode && f.live_id != 0
+}

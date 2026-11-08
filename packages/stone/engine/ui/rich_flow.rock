@@ -1,0 +1,276 @@
+pub nobox value UiRichFragment {
+    text: string,
+    style: TextStyle,
+    source_span: int,
+    source_start: int,
+    source_end: int,
+    x: float = 0.0,
+    w: float = 0.0,
+}
+
+pub struct UiRichFlowLine {
+    plain: string = "",
+    spans: [TextSpan] = [],
+    fragments: [UiRichFragment] = [],
+    y: float = 0.0,
+    w: float = 0.0,
+    h: float = 0.0,
+}
+
+pub struct UiRichFlow {
+    lines: [UiRichFlowLine] = [],
+    size: Vec2 = v(),
+    pool: [UiRichFlowLine] = [],
+    offsets: [int] = [],
+    metrics: [TextFlowMetrics] = [],
+    parts: [UiRichFlowPart] = [],
+    fonts: [Font] = [],
+    font_indices: [int] = [],
+}
+
+pub nobox value UiRichFlowPart {
+    source: int,
+    start: int,
+    end: int,
+    space: bool = false,
+    x: float = 0.0,
+    right: float = 0.0,
+    ascent: float = 0.0,
+    below: float = 0.0,
+}
+
+// A supplied buffer owns its returned lines until its next layout. The default
+// allocates independent output, so document caches can retain several flows.
+fn ui_rich_flow_line(flow: UiRichFlow) -> UiRichFlowLine {
+    let index = flow.lines.len()
+    if index == flow.pool.len() { flow.pool.push(UiRichFlowLine {}) }
+    let line = flow.pool[index]
+    line.plain = ""
+    line.spans.clear()
+    line.fragments.clear()
+    line.y = 0.0
+    line.w = 0.0
+    line.h = 0.0
+    return line
+}
+
+fn ui_rich_flow_append(line: UiRichFlowLine, text: string, style: TextStyle,
+                        source: int, start: int, end: int, x: float, right: float) {
+    if text == "" { return }
+    let last = line.fragments.len() - 1
+    if last >= 0 && line.fragments[last].source_span == source {
+        line.fragments[last].text = line.fragments[last].text + text
+        line.fragments[last].source_end = end
+        line.fragments[last].w = right - line.fragments[last].x
+        line.spans[last].text = line.fragments[last].text
+    } else {
+        line.fragments.push(UiRichFragment { text, style, source_span: source,
+            source_start: start, source_end: end, x, w: right - x })
+        line.spans.push(TextSpan { text, style })
+    }
+    line.plain = line.plain + text
+}
+
+fn ui_rich_flow_finish(flow: UiRichFlow, line: UiRichFlowLine, width: float,
+                        height: float, gap: float, spans: [TextSpan],
+                        single: bool, source_start: int, source_end: int) -> Vec2 {
+    if single && line.plain != "" {
+        line.spans.push(TextSpan { text: line.plain, style: spans[0].style })
+        line.fragments.push(UiRichFragment { text: line.plain, style: spans[0].style,
+            source_span: 0, source_start, source_end, w: width })
+    }
+    let y = flow.size.y + if flow.lines.len() > 0 { gap } else { 0.0 }
+    line.y = y
+    line.w = width
+    line.h = height
+    flow.lines.push(line)
+    return v(max(flow.size.x, width), y + height)
+}
+
+pub fn ui_rich_flow(spans: [TextSpan], max_width: float, font_size: float,
+                line_gap: float = 0.0, family: TextFamily? = null,
+                buffer: UiRichFlow? = null, keep_final_empty: bool = false) -> UiRichFlow {
+    return ui_flow(spans, max_width, font_size, line_gap, family, buffer, keep_final_empty, false)
+}
+
+fn ui_flow(spans: [TextSpan], max_width: float, font_size: float,
+           line_gap: float, family: TextFamily?, buffer: UiRichFlow?,
+           keep_final_empty: bool, plain: bool) -> UiRichFlow {
+    let flow = buffer ?? UiRichFlow {}
+    flow.lines.clear()
+    flow.offsets.clear()
+    flow.metrics.clear()
+    flow.fonts.clear()
+    flow.font_indices.clear()
+    flow.size = v()
+    let font = if let fam = family { fam.regular } else {
+        let default = DEFAULT_FONT
+        if default == null { error("ui_rich_flow: no family given and no DEFAULT_FONT is loaded") }
+        default.unwrap()
+    }
+    let flat = ""
+    let fallback = family != null && family.unwrap().fallbacks.len() > 0
+    if fallback {
+        flow.fonts.push(font)
+        for other in family.unwrap().fallbacks { flow.fonts.push(other) }
+        for other in flow.fonts {
+            flow.font_indices.push(text_family_font_idx(other, "ui_rich_flow", require_atlas: false))
+        }
+    }
+    let _ = text_family_font_idx(font, "ui_rich_flow", require_atlas: false)
+    flow.offsets.push(0)
+    for span in spans {
+        flat = flat + span.text
+        flow.offsets.push(flat.len())
+        if fallback {
+            text_flow_validate_family(flow.fonts, flow.font_indices, span.text,
+                span.style, font_size, FONT_RENDER_SCALE)
+        }
+        flow.metrics.push(text_flow_metrics(font, if fallback { "" } else { span.text },
+            span.style, font_size, FONT_RENDER_SCALE, plain))
+    }
+    let design_scale = ui_effective_scale()
+    let strut = measure_rich_ui_text("Xg", WHITE, font_size, family: family).y
+    let single = spans.len() == 1 && !fallback
+    let line_start = 0
+    let line_end = 0
+    let line = ui_rich_flow_line(flow)
+    let word_start = 0
+    let pending_space = -1
+    let source = 0
+    let pen = 0.0
+    let run_pen = 0.0
+    let run_source = -1
+    let ascent = 0.0
+    let below = 0.0
+    let i = 0
+    while i <= flat.len() {
+        let end = i == flat.len()
+        let byte = if end { -1 } else { flat.unit_at(i) }
+        if end || byte == 32 || byte == 10 {
+            if word_start < i {
+                if !single {
+                    flow.parts.clear()
+                    if line.plain != "" && pending_space >= 0 {
+                        while source < spans.len() && flow.offsets[source + 1] <= pending_space { source += 1 }
+                        flow.parts.push(UiRichFlowPart { source, start: pending_space - flow.offsets[source],
+                            end: pending_space - flow.offsets[source] + 1, space: true })
+                    }
+                    while source < spans.len() && flow.offsets[source + 1] <= word_start { source += 1 }
+                    let k = source
+                    while k < spans.len() && flow.offsets[k] < i {
+                        let start = max(word_start, flow.offsets[k]) - flow.offsets[k]
+                        let stop = min(i, flow.offsets[k + 1]) - flow.offsets[k]
+                        if start < stop { flow.parts.push(UiRichFlowPart { source: k, start, end: stop }) }
+                        k += 1
+                    }
+                }
+                let old_width = (pen + run_pen) / design_scale
+                for retry in 0..2 {
+                    if single {
+                        let metrics = flow.metrics[0]
+                        if retry == 0 && line.plain != "" && pending_space >= 0 {
+                            run_pen = text_flow_advance(metrics, " ", 0, 1, run_pen)
+                        }
+                        run_pen = text_flow_advance(metrics, flat, word_start, i, run_pen)
+                    } else {
+                        for index in 0..flow.parts.len() {
+                            let part = flow.parts[index]
+                            if retry == 1 && part.space { continue }
+                            let metrics = flow.metrics[part.source]
+                            let x = (pen + run_pen) / design_scale
+                            if run_source != part.source {
+                                pen += run_pen
+                                run_pen = 0.0
+                                run_source = part.source
+                            }
+                            let text = if part.space { " " } else { spans[part.source].text }
+                            let start = if part.space { 0 } else { part.start }
+                            let stop = if part.space { 1 } else { part.end }
+                            let a = metrics.ascent
+                            let b = metrics.below
+                            if fallback {
+                                let (advance, measured_a, measured_b) = text_flow_family_advance(
+                                    flow.font_indices, spans[part.source].style,
+                                    text, start, stop, font_size, FONT_RENDER_SCALE, run_pen)
+                                run_pen = advance
+                                a = measured_a
+                                b = measured_b
+                            } else {
+                                run_pen = text_flow_advance(metrics, text, start, stop, run_pen)
+                            }
+                            flow.parts[index].ascent = a
+                            flow.parts[index].below = b
+                            flow.parts[index].x = x
+                            flow.parts[index].right = (pen + run_pen) / design_scale
+                        }
+                    }
+                    if retry == 0 && line.plain != "" && (pen + run_pen) / design_scale > max_width {
+                        flow.size = ui_rich_flow_finish(flow, line, old_width,
+                            max(strut, (ascent + below) / design_scale), line_gap, spans, single, line_start, line_end)
+                        line = ui_rich_flow_line(flow)
+                        pen = 0.0
+                        run_pen = 0.0
+                        run_source = -1
+                        ascent = 0.0
+                        below = 0.0
+                        continue
+                    }
+                    if single {
+                        let word = flat.substring(word_start, i)
+                        if line.plain == "" { line_start = word_start }
+                        line_end = i
+                        line.plain = if line.plain == "" { word } else { "{line.plain} {word}" }
+                        ascent = flow.metrics[0].ascent
+                        below = flow.metrics[0].below
+                    } else {
+                        for part in flow.parts {
+                            if retry == 1 && part.space { continue }
+                            let span = spans[part.source]
+                            let text = if part.space { " " } else { span.text.substring(part.start, part.end) }
+                            ui_rich_flow_append(line, text, span.style, part.source,
+                                part.start, part.end, part.x, part.right)
+                            ascent = max(ascent, part.ascent)
+                            below = max(below, part.below)
+                        }
+                    }
+                    break
+                }
+                pending_space = -1
+            }
+            if byte == 32 && pending_space < 0 { pending_space = i }
+            if byte == 10 {
+                flow.size = ui_rich_flow_finish(flow, line, (pen + run_pen) / design_scale,
+                    max(strut, (ascent + below) / design_scale), line_gap, spans, single, line_start, line_end)
+                line = ui_rich_flow_line(flow)
+                pen = 0.0
+                run_pen = 0.0
+                run_source = -1
+                ascent = 0.0
+                below = 0.0
+                pending_space = -1
+            }
+            word_start = i + 1
+        }
+        i += 1
+    }
+    if line.plain != "" || flow.lines.len() == 0 || keep_final_empty {
+        flow.size = ui_rich_flow_finish(flow, line, (pen + run_pen) / design_scale,
+            max(strut, (ascent + below) / design_scale), line_gap, spans, single, line_start, line_end)
+    }
+    return flow
+}
+
+pub fn UiRichFlow.plain_lines(flow) -> [string] {
+    let lines: [string] = []
+    for line in flow.lines { lines.push(line.plain) }
+    return lines
+}
+
+pub fn UiRect.draw_rich_flow(r, flow: UiRichFlow, font_size: float,
+                         family: TextFamily? = null) {
+    for line in flow.lines {
+        r.skip_top(line.y).take_top(line.h)
+            .rich_text(line.spans, font_size, TextAlign::TopLeft, family)
+    }
+}

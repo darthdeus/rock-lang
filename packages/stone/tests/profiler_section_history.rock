@@ -1,0 +1,218 @@
+// An early burst must survive the live 120-event tail, and conditional
+// sections must use the same frame denominator as continuously active ones.
+fn profiler_section_history_setup() {
+    PERF_FRAME_CAPTURE = true
+    PERF_SECTION_HISTORY = true
+    init_profiler()
+    ENGINE.profiler_enabled = true
+    PROFILER_SECTIONS_OFF = 0
+    PROFILER.warmup_active = false
+    PROFILER.warmup_seconds = 0.0
+    PROFILER.warmup_start_time = -1.0
+    PROFILER.warmup_min_frames = 0
+    PERF_RECORDS.waiting = false
+    GC_WIN_N = 0
+}
+
+fn profiler_section_history_frame(name: string, duration_seconds: float) {
+    profile_frame_begin()
+    profile_begin(name)
+    profile_end(name)
+    let event = PROF_CUR.count - 1
+    nb_set(PROF_CUR.start_t, event, 1.0)
+    nb_set(PROF_CUR.end_t, event, 1.0 + duration_seconds)
+    profile_frame_end()
+}
+
+fn profiler_section_history_complete(report_json: string) -> bool {
+    let report = json_decode(report_json).unwrap()
+    let history = json_field(report, "sections_per_frame") ?? json_null()
+    assert(!json_is_null(history), "perf must export full-window section frames")
+    return json_as_bool(json_field(history, "complete") ?? json_null()) ?? true
+}
+
+fn profiler_section_history_dropped_events(report_json: string) -> int {
+    let report = json_decode(report_json).unwrap()
+    let history = json_field(report, "sections_per_frame") ?? json_null()
+    assert(!json_is_null(history), "perf must export full-window section frames")
+    return json_as_int(json_field(history, "dropped_events") ?? json_null()).unwrap()
+}
+
+fn profiler_section_history_sample_count(report_json: string, target: string) -> int {
+    let report = json_decode(report_json).unwrap()
+    let history = json_field(report, "sections_per_frame") ?? json_null()
+    assert(!json_is_null(history), "perf must export full-window section frames")
+    let rows = json_as_array(json_field(history, "rows") ?? json_null()).unwrap()
+    let count = -1
+    for row in rows {
+        let name = json_as_str(json_field(row, "name") ?? json_null()) ?? ""
+        if name == target {
+            let ms = json_field(row, "ms") ?? json_null()
+            count = json_as_int(json_field(ms, "n") ?? json_null()).unwrap()
+        }
+    }
+    assert(count >= 0, "section frame history does not contain {target}")
+    return count
+}
+
+fn profiler_section_history_full_window() {
+    profiler_section_history_setup()
+    profile_frame_begin()
+    profile_begin("history.burst")
+    profile_end("history.burst")
+    profile_begin("history.burst")
+    profile_end("history.burst")
+    profile_observation("history.observed", 2.0)
+    profile_observation("history.observed", 3.0)
+    nb_set(PROF_CUR.start_t, 0, 1.0)
+    nb_set(PROF_CUR.end_t, 0, 1.002)
+    nb_set(PROF_CUR.start_t, 1, 2.0)
+    nb_set(PROF_CUR.end_t, 1, 2.003)
+    profile_frame_end()
+    for _i in 0..130 {
+        profile_frame_begin()
+        profile_frame_end()
+    }
+    profile_frame_begin()
+    profile_begin("history.late")
+    profile_end("history.late")
+    profile_observation("history.late_observed", 7.0)
+    nb_set(PROF_CUR.start_t, 0, 3.0)
+    nb_set(PROF_CUR.end_t, 0, 3.002)
+    profile_frame_end()
+    let report = json_decode(profiler_perf_json()).unwrap()
+    let history = json_field(report, "sections_per_frame") ?? json_null()
+    assert(!json_is_null(history), "perf must export full-window section frames")
+    let rows = json_as_array(json_field(history, "rows") ?? json_null()).unwrap()
+    for row in rows {
+        let name = json_as_str(json_field(row, "name") ?? json_null()) ?? ""
+        if name != "history.burst" && name != "history.late" { continue }
+        let ms = json_field(row, "ms") ?? json_null()
+        assert_eq(json_as_int(json_field(ms, "n") ?? json_null()).unwrap(), 132)
+        let total = if name == "history.burst" { 5.0 } else { 2.0 }
+        let calls = if name == "history.burst" { 2 } else { 1 }
+        assert_eq(json_as_int(json_field(row, "calls").unwrap()).unwrap(), calls)
+        assert(abs(json_as_float(json_field(row, "calls_per_frame").unwrap()).unwrap()
+            - (calls as float) / 132.0) < 0.000001)
+        let mean = json_as_float(json_field(ms, "mean") ?? json_null()).unwrap()
+        assert(abs(mean - total / 132.0) < 0.0001, "all calls sum per frame, including absent frames")
+        assert_eq(json_as_float(json_field(ms, "p99") ?? json_null()).unwrap(), 0.0)
+        assert(abs(json_as_float(json_field(ms, "max") ?? json_null()).unwrap() - total) < 0.001, "{name}: max frame sum: {json_encode(ms)}")
+    }
+    assert_eq(rows.len(), 4, "observation names are registered alongside timed sections")
+
+    // Observations sum their own millisecond values per frame; they are not
+    // main-thread CPU timing rows.
+    let observations = json_as_array(json_field(history, "observations_per_frame") ?? json_null()).unwrap()
+    assert_eq(observations.len(), 2, "full-window observations include early and late names")
+    let observed_found = false
+    let late_observed_found = false
+    for row in observations {
+        let name = json_as_str(json_field(row, "name") ?? json_null()) ?? ""
+        if name != "history.observed" && name != "history.late_observed" { continue }
+        let ms = json_field(row, "ms") ?? json_null()
+        assert_eq(json_as_int(json_field(ms, "n") ?? json_null()).unwrap(), 132)
+        let total = if name == "history.observed" { 5.0 } else { 7.0 }
+        let mean = json_as_float(json_field(ms, "mean") ?? json_null()).unwrap()
+        assert(abs(mean - total / 132.0) < 0.0001,
+            "observation totals are summed per frame with zeroes for absent frames")
+        assert_eq(json_as_float(json_field(ms, "p99") ?? json_null()).unwrap(), 0.0)
+        assert(abs(json_as_float(json_field(ms, "max") ?? json_null()).unwrap() - total) < 0.001,
+            "{name}: max frame observation sum: {json_encode(ms)}")
+        if name == "history.observed" { observed_found = true }
+        if name == "history.late_observed" { late_observed_found = true }
+    }
+    assert(observed_found, "full-window history contains the early observation")
+    assert(late_observed_found, "full-window history contains the late observation")
+}
+
+fn profiler_section_history_warmup_and_clear() {
+    profiler_section_history_setup()
+    let id = section_id("history.lifecycle")
+    profiler_section_history_frame("history.lifecycle", 0.010)
+    assert_eq(PROFILER.frame_count, 1)
+    assert_eq(SECTION_FRAME_TIME[id].get().unwrap().count, 1)
+
+    // Warmup frames must not append to the measured section history.
+    perf_scenario_wait("section_history")
+    perf_scenario_window("steady", 2, 2)
+    perf_scenario_ready("history.lifecycle")
+    perf_outer_frame_boundary(1, stone_get_time())
+    profiler_section_history_frame("history.lifecycle", 0.020)
+    let during_warmup = SECTION_FRAME_TIME[id].get().unwrap()
+    assert_eq(during_warmup.count, 1, "warmup frames do not enter section history")
+    assert(abs(during_warmup.mean - 0.010) < 0.000001,
+        "warmup sample does not replace or extend measured history")
+
+    // The final warmup frame clears history without becoming a measured sample.
+    perf_outer_frame_boundary(2, stone_get_time())
+    profiler_section_history_frame("history.lifecycle", 0.020)
+    assert(!PROFILER.warmup_active, "the declared warmup interval completed")
+    assert_eq(PROFILER.frame_count, 0, "warmup completion excludes its own frame")
+    assert_eq(SECTION_FRAME_TIME[id].get().unwrap().count, 0,
+        "warmup completion clears prior section samples")
+    perf_outer_frame_boundary(3, stone_get_time())
+    profiler_section_history_frame("history.lifecycle", 0.003)
+    let after_transition = SECTION_FRAME_TIME[id].get().unwrap()
+    assert_eq(PROFILER.frame_count, 1, "warmup transition restarts the frame count")
+    assert_eq(after_transition.count, 1, "warmup transition clears prior section samples")
+    assert(abs(after_transition.mean - 0.003) < 0.000001,
+        "only the post-transition frame remains")
+    assert_eq(profiler_section_history_sample_count(profiler_perf_json(), "history.lifecycle"), 1,
+        "the first measured frame after warmup has one exported sample")
+
+    profiler_clear_samples()
+    assert_eq(PROFILER.frame_count, 0, "clearing samples resets the frame count")
+    assert_eq(SECTION_FRAME_TIME[id].get().unwrap().count, 0,
+        "clearing samples resets section frame history")
+    profiler_section_history_frame("history.lifecycle", 0.004)
+    let after_clear = SECTION_FRAME_TIME[id].get().unwrap()
+    assert_eq(PROFILER.frame_count, 1)
+    assert_eq(after_clear.count, 1, "one measured frame starts a fresh history")
+    assert(abs(after_clear.mean - 0.004) < 0.000001)
+    assert_eq(profiler_section_history_sample_count(profiler_perf_json(), "history.lifecycle"), 1,
+        "one post-clear measured frame has one exported sample")
+}
+
+fn profiler_section_history_incomplete() {
+    profiler_section_history_setup()
+    profile_frame_begin()
+    profile_begin("history.dropped")
+    profile_end("history.dropped")
+    nb_set(PROF_CUR.start_t, 0, 1.0)
+    nb_set(PROF_CUR.end_t, 0, 1.005)
+    PROF_CUR.dropped = 1
+    profile_frame_end()
+    let dropped_report = profiler_perf_json()
+    assert_eq(profiler_section_history_dropped_events(dropped_report), 1)
+    assert_eq(profiler_section_history_complete(dropped_report), false,
+        "a dropped measured event makes the frame history incomplete")
+
+    profiler_section_history_setup()
+    profiler_section_history_frame("history.capacity", 0.004)
+    PROFILER.frame_count = MAX_PERF_FRAME_HISTORY + 1
+    assert_eq(profiler_section_history_complete(profiler_perf_json()), false,
+        "a frame count beyond history capacity is incomplete")
+}
+
+@nomangle fn profiler_section_history_case(which: int) {
+    if which == 0 { profiler_section_history_full_window() }
+    if which == 1 { profiler_section_history_warmup_and_clear() }
+    if which == 2 { profiler_section_history_incomplete() }
+    if which < 0 || which > 2 { error("unknown profiler section history case: {which}") }
+}
+
+@test
+fn profiler_section_history_keeps_early_bursts_and_absent_frames() {
+    profiler_test_process("profiler_section_history_case", 0)
+}
+
+@test
+fn profiler_section_history_resets_after_warmup_and_clear() {
+    profiler_test_process("profiler_section_history_case", 1)
+}
+
+@test
+fn profiler_section_history_marks_dropped_and_over_capacity_data_incomplete() {
+    profiler_test_process("profiler_section_history_case", 2)
+}

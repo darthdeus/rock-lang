@@ -1,0 +1,71 @@
+// Filesystem operations - using Stone C implementations
+pub @nomangle fn file_write(filename: string, data: string) -> bool {
+    return stone_file_write(filename, data)
+}
+
+pub @nomangle fn file_append(filename: string, data: string) -> bool {
+    return stone_file_append(filename, data)
+}
+
+pub @nomangle fn remove_file(filename: string) -> bool {
+    return stone_remove_file(filename)
+}
+
+pub @nomangle fn remove_dir(dirname: string) -> bool {
+    return stone_remove_dir(dirname)
+}
+
+// Flush a file's bytes to stable storage. This covers file contents, not the
+// durability of a newly created directory entry.
+pub @nomangle fn file_sync(filename: string) -> bool {
+    return stone_file_sync(filename)
+}
+
+// File-level whole-file replace: write a sibling temp, sync it, then rename
+// over the target. A reader or process crash sees an intact old or new file,
+// never a half-written file. The parent directory is not synced here, so this
+// does not claim power-loss durability for a new or renamed directory entry.
+pub @nomangle fn file_write_atomic(filename: string, data: string) -> bool {
+    let tmp = "{filename}.tmp"
+    if !file_write(tmp, data) { return false }
+    if !file_sync(tmp) { return false }
+    return stone_rename(tmp, filename)
+}
+
+pub @nomangle fn file_read(filename: string) -> string? {
+    return stone_file_read(filename)
+}
+
+pub @nomangle fn file_exists(filename: string) -> bool {
+    return stone_file_exists(filename)
+}
+
+pub @nomangle fn create_directory(name: string) -> bool {
+    return stone_create_directory(name)
+}
+
+// Note: the legacy `table_to_json` and `json_to_table` inline(lua) primitives
+// were removed as part of the CLR-migration Phase 0 effort. Use `json_encode` / `json_decode` from
+// stdlib/json.rock instead — those operate on the typed `JsonValue`
+// surface and have no `inline(lua)` body.
+
+@inline inline(lua) fn wall_clock_unix_seconds() -> int = """
+    return os.time()
+"""
+
+// Wall-clock Unix seconds. Deliberately NOT the engine clock: a save timestamp
+// has to mean something across restarts, and `time` restarts at 0.
+//
+// FIXED under a sim, for the reason `dt` is: an entry that persists a timestamp
+// otherwise writes a different artifact on every run, which no differential can
+// tell apart from a real change. Measured on mag's `save_progress_*`, whose
+// `progress.json` came out the same 173 bytes with a different hash every time.
+// Keyed on `sim_mode_active()` rather than a live sim handle, so a stamp taken
+// during boot -- before the first entry owns the process -- is fixed too.
+//
+pub fn get_timestamp() -> int {
+    if sim_mode_active() { return SIM_FIXED_EPOCH }
+    return wall_clock_unix_seconds()
+}
+
+pub fn any_is_null(x: any) -> bool { return is_null(x) }

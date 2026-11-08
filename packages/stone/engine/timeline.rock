@@ -1,0 +1,66 @@
+// The live runner pause gate keeps polling events and rendering while game
+// time and update systems stop. MAG's screenshot-pause tool uses this gate.
+@nomangle inline(lua) fn __timeline_init() = """
+    _G.__stone_timeline = { paused = false }
+"""
+
+fn timeline_init() {
+    __timeline_init()
+}
+
+@nomangle inline(lua) fn timeline_should_tick() -> bool = """
+    local tl = _G.__stone_timeline
+    return not tl or not tl.paused
+"""
+
+pub @nomangle inline(lua) fn timeline_is_paused() -> bool = """
+    local tl = _G.__stone_timeline
+    return (tl and tl.paused) or false
+"""
+
+pub @nomangle inline(lua) fn timeline_set_paused(p: bool) = """
+    local tl = _G.__stone_timeline
+    if tl then tl.paused = p end
+"""
+
+// Fixed rungs keep the time-scale hotkeys repeatable across runs.
+global TIME_SCALE_LADDER: [float] = [0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 4.0]
+
+// Rungs are >= 0.05 apart, so this only absorbs float noise.
+const TIME_SCALE_EPS: float = 0.001
+
+// A negative scale would run every timer backwards; clamp loudly instead.
+fn time_scale() -> float {
+    if TIME_SCALE < 0.0 {
+        log_once("STONE", "TIME_SCALE {TIME_SCALE} < 0; clamping to a freeze")
+        return 0.0
+    }
+    return TIME_SCALE
+}
+
+pub fn set_time_scale(s: float) {
+    let clamped = if s < 0.0 { 0.0 } else { s }
+    TIME_SCALE = clamped
+    log_info("STONE", "time scale x{clamped}")
+}
+
+// Move one rung up (dir > 0) or down from wherever the scale currently sits --
+// an off-ladder value snaps to its neighbouring rung. Ends are sticky.
+pub fn time_scale_step(dir: int) {
+    let cur = time_scale()
+    if dir > 0 {
+        for s in TIME_SCALE_LADDER {
+            if s > cur + TIME_SCALE_EPS {
+                set_time_scale(s)
+                return
+            }
+        }
+        set_time_scale(TIME_SCALE_LADDER[TIME_SCALE_LADDER.len - 1])
+    } else {
+        let prev = TIME_SCALE_LADDER[0]
+        for s in TIME_SCALE_LADDER {
+            if s < cur - TIME_SCALE_EPS { prev = s }
+        }
+        set_time_scale(prev)
+    }
+}

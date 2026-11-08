@@ -1,0 +1,710 @@
+// The SFX browser: what played, how it was played, and a button to hear it
+// again. Reads the ring in sfx_log.rock; toggle with F6 (see runner).
+//
+// It exists because audio had no observable surface at all -- a sound is gone
+// the instant it happens, sims run muted, and every parameter (gain, playback
+// ratio, decay) was a number you could only read in the source. A row here is
+// the answer to "what WAS that", and the replay button turns tuning from
+// edit-rebuild-recast into a click.
+//
+// The selected row's parameters are editable and replay with the edit, so a
+// value can be found by ear before it is written into the game. The edit is
+// deliberately NOT written back into the ring: the log is a record of what
+// happened, and a record you can retro-edit is not one.
+
+// The selected row's PLAY NUMBER, not its position: a position shifts every
+// time the game plays anything, so an index-keyed selection silently re-binds
+// the sliders to a different sound while you are dragging them. 0 = none.
+global SFX_BROWSER_SEL_SEQ: int = 0
+global SFX_BROWSER_VOL: float = 1.0
+global SFX_BROWSER_SPEED: float = 1.0
+global SFX_BROWSER_DECAY: float = 0.0
+
+pub fn sfx_browser_select_event(e: SfxEvent) {
+    SFX_BROWSER_SEL_SEQ = e.seq
+    SFX_BROWSER_VOL = e.volume
+    SFX_BROWSER_SPEED = e.speed
+    SFX_BROWSER_DECAY = e.decay
+}
+
+// The selected row, or null if nothing is selected or the ring wrapped past it.
+pub fn sfx_browser_selected() -> SfxEvent? {
+    if SFX_BROWSER_SEL_SEQ == 0 { return null }
+    return sfx_log_by_seq(SFX_BROWSER_SEL_SEQ)
+}
+
+// Hover latches the hold ON but never releases it, so a study session is not
+// ended by the pointer drifting off the window.
+//
+// The armed flag is what makes Resume work at all. The pointer is still inside
+// the window when you click it -- it is ON the button -- so without arming, the
+// latch fires again on the very next frame and the button looks dead. Latching
+// disarms; leaving the window re-arms.
+global SFX_HOVER_ARMED: bool = true
+
+// Why the hold is on. Shown in the header: a hold nobody remembers asking for
+// looks like the log has stopped working, and the answer is always "something
+// latched it" -- so say what.
+global SFX_HOLD_REASON: string = ""
+
+// The play number under the pointer, in EITHER view. One global rather than two
+// because the highlight is symmetric: pointing at a bar and pointing at its row
+// mean the same thing, and the other view lights up.
+//
+// The timeline draws before the list, so the two directions differ in latency
+// and cannot both be same-frame without splitting the draw. Bar -> row is
+// immediate (the timeline hit-tests, then the rows read it). Row -> bar reads
+// what the list set LAST frame, which at any frame rate is invisible.
+global SFX_HOVER_SEQ: int = 0
+
+pub fn sfx_browser_hover_tick(hovered: bool) {
+    if !hovered {
+        SFX_HOVER_ARMED = true
+    } else if SFX_HOVER_ARMED {
+        SFX_HOVER_ARMED = false
+        SFX_HOLD_REASON = "pointer entered"
+        sfx_log_set_hold(true)
+    }
+}
+
+// What counts as "the pointer is interacting with this window".
+//
+// Hovering, or a drag that started here and wandered out -- and a DRAG means a
+// held mouse button. An earlier version used bare imgui_is_any_item_active(),
+// which is global and keyboard-inclusive: any item activated anywhere, by any
+// means, latched this window's hold. A keypress with the pointer nowhere near
+// the window would silently pause the log.
+fn sfx_browser_pointer_engaged() -> bool {
+    if imgui_is_window_hovered() { return true }
+    return imgui_is_window_focused() && imgui_is_any_item_active() && imgui_is_mouse_down(0)
+}
+
+pub fn sfx_browser_resume() {
+    sfx_log_set_hold(false)
+    SFX_TIMELINE_PAN = 0.0
+}
+
+// Trailing path segment -- the banks are one directory per event
+// ("spells/lightning/01.ogg" -> "lightning/01.ogg"), which is what identifies
+// a row on sight. The full path is on the selected row.
+pub fn sfx_short_path(path: string) -> string {
+    let parts = path.split("/")
+    let n = parts.len()
+    if n < 2 { return path }
+    return "{parts[n - 2]}/{parts[n - 1]}"
+}
+
+// Horizontal resolution of the waveform strip. Enough to separate a percussive
+// attack from a pad at the width the panel actually gets; past ~1 bucket per
+// pixel the extra detail is drawn on top of itself.
+const SFX_WAVE_BUCKETS: int = 220
+
+// The peak envelope of the SELECTED sound, and which play it was computed for.
+global SFX_WAVE: NativeBuffer<float> = native_buffer_float(SFX_WAVE_BUCKETS)
+global SFX_WAVE_SEQ: int = 0
+global SFX_WAVE_N: int = 0
+
+// The shape of the sample: peak amplitude per bucket, mirrored about a centre
+// line. This is the view that answers the questions you would otherwise answer
+// by playing the sound repeatedly -- where the attack is, whether it sustains,
+// and whether it already carries its own tail (in which case a slowed second
+// copy under it is redundant).
+//
+// The decay slider draws as a cut across it, so "does the envelope land before
+// the sound ends" is a thing you look at rather than infer.
+fn draw_sfx_waveform(e: SfxEvent) {
+    if SFX_WAVE_SEQ != e.seq {
+        SFX_WAVE_SEQ = e.seq
+        SFX_WAVE_N = 0
+    }
+    if SFX_WAVE_N <= 0 {
+        SFX_WAVE_N = sound_peaks(e.sound, SFX_WAVE, SFX_WAVE_BUCKETS)
+    }
+    if SFX_WAVE_N <= 0 {
+        imgui_text("(sample waveform unavailable)")
+        return
+    }
+
+    let origin = imgui_get_cursor_screen_pos()
+    let width = imgui_get_content_region_avail().x
+    let height = 64.0
+    imgui_dummy(v(width, height))
+
+    imgui_window_add_rect_filled(origin, origin + v(width, height),
+        color_to_abgr(color(0.08, 0.08, 0.10, 1.0)))
+
+    let mid = origin.y + height * 0.5
+    let half = height * 0.5 - 1.0
+    imgui_window_add_rect_filled(v(origin.x, mid), v(origin.x + width, mid + 1.0),
+        color_to_abgr(color(0.20, 0.20, 0.24, 1.0)))
+
+    // A bucket is at least a pixel wide: below that the bars stop touching and
+    // a continuous waveform reads as a picket fence.
+    let bw = max(1.0, width / (SFX_WAVE_N as float))
+    for i in 0..SFX_WAVE_N {
+        // Peaks are not clamped at the source (a hot sample exceeds 1), so the
+        // height is clamped here rather than drawing outside the strip.
+        let p = min(1.0, nb_get(SFX_WAVE, i))
+        let h = p * half
+        let x = origin.x + width * (i as float) / (SFX_WAVE_N as float)
+        imgui_window_add_rect_filled(v(x, mid - h), v(x + bw, mid + h),
+            color_to_abgr(color(0.45, 0.75, 1.0, 1.0)))
+    }
+
+    // Where the decay envelope silences it, as a fraction of the sample's own
+    // length. Both are measured in HEARD seconds, so the speed cancels and the
+    // cut sits at the same place on the shape whatever the pitch.
+    //
+    // The stretch comes from sfx_heard_duration at decay 0 rather than a second
+    // `src / speed` here: it is the same rule the row's length and the decay
+    // slider's range are built on, and three copies of it are three chances to
+    // disagree about where the sound ends.
+    let full = sfx_heard_duration(sound_duration(e.sound), SFX_BROWSER_SPEED, 0.0)
+    if SFX_BROWSER_DECAY > 0.0 && full > 0.0 && SFX_BROWSER_DECAY < full {
+        let cx = origin.x + width * (SFX_BROWSER_DECAY / full)
+        imgui_window_add_rect_filled(v(cx, origin.y), v(cx + 1.0, origin.y + height),
+            color_to_abgr(color(1.0, 0.5, 0.2, 1.0)))
+    }
+}
+
+// Bus meters. These read the LIVE mix, and stay live while the ring is held:
+// a hold freezes the view of what was recorded, but a level has no history to
+// freeze, so holding one would mean drawing a number that is no longer true.
+const MIXER_FLOOR_DB: float = -60.0
+// The peak tick only: it marks the loudest recent moment, so it has to outlast
+// the bar it sits above. The BAR's ballistics are the engine's -- bus_peak
+// already returns an envelope that rises instantly and falls at 20dB/sec, and
+// a second falloff here would be one clock smoothing another.
+const MIXER_HOLD_SECS: float = 1.2
+const MIXER_HOLD_FALL: float = 0.7
+
+// Strip geometry: fader on the left, meter down the right edge, the way a desk
+// puts them -- you read the level you asked for against the level you got
+// without moving your eye between two panels.
+//
+// The strip is sized by its WIDEST text, not by its controls. ImGui's font
+// here runs about 15 units per character, so "master" alone is ~90 -- which is
+// how an 86-wide strip came to be narrower than its own label. The floor is
+// that label plus padding; the fader and meter then divide what is left.
+const MIXER_STRIP_W: float = 130.0
+const MIXER_STRIP_GAP: float = 12.0
+const MIXER_FADER_W: float = 52.0
+const MIXER_BAR_W: float = 56.0
+const MIXER_BAR_H: float = 220.0
+const MIXER_LABEL_H: float = 26.0
+const MIXER_BTN_H: float = 32.0
+const MIXER_VALUE_H: float = 26.0
+
+// One decimal, because the fader prints this INSIDE its own track.
+const MIXER_FADER_FMT: string = "%.1f"
+
+// Lit-button tints, ImGui ABGR (0xAABBGGRR).
+const MIXER_SOLO_LIT: int = 0xff30c0f0
+const MIXER_MUTE_LIT: int = 0xff4040e0
+
+global MIXER_HOLD: NativeBuffer<float> = native_buffer_float(6)
+global MIXER_HOLD_AGE: NativeBuffer<float> = native_buffer_float(6)
+
+// Amplitude -> position along the bar, on a dB scale. Linear amplitude puts
+// every level a game actually mixes at into the bottom fifth of the strip,
+// which is the reason meters are not linear. NOT clamped at 1.0: above unity
+// is the clip, and clamping here would throw away the only evidence of it.
+pub @pure fn mixer_meter_norm(amp: float) -> float {
+    if amp <= 0.0 { return 0.0 }
+    let db = 8.685889638065035 * log(amp)   // 20*log10(amp)
+    if db <= MIXER_FLOOR_DB { return 0.0 }
+    return 1.0 - db / MIXER_FLOOR_DB
+}
+
+// Inverse of the above, so the readout and the bar cannot disagree about what
+// the level is -- they are the same number rendered two ways.
+pub @pure fn mixer_meter_db(norm: float) -> float {
+    return MIXER_FLOOR_DB * (1.0 - norm)
+}
+
+// Banded on the bar position, not on a raw amplitude, for the same reason.
+@pure fn mixer_meter_color(norm: float) -> Color {
+    if norm > 1.0 { return color(1.0, 0.30, 0.25, 1.0) }
+    if norm > 0.9 { return color(0.95, 0.80, 0.30, 1.0) }
+    return color(0.35, 0.80, 0.45, 1.0)
+}
+
+// Vertical channel strips, the way a desk lays them out: level is a height, so
+// the strips read against each other at a glance instead of one bar per row
+// having to be compared end to end.
+fn draw_mixer() {
+    let origin = imgui_get_cursor_screen_pos()
+    let n = MIXER_BUSES.len()
+    let height = MIXER_LABEL_H + MIXER_BAR_H + MIXER_BTN_H + MIXER_VALUE_H
+    let width = (MIXER_STRIP_W + MIXER_STRIP_GAP) * (n as float)
+    imgui_dummy(v(width, height))
+    let after = imgui_get_cursor_screen_pos()
+
+    let bar_top = origin.y + MIXER_LABEL_H
+    let bar_bot = bar_top + MIXER_BAR_H
+
+    for (i, bus) in enumerate(MIXER_BUSES) {
+        // One number feeds the bar, the tick, the colour and the readout. An
+        // earlier cut drew the bar from a smoothed level but coloured it and
+        // labelled it from the raw read, so every poll landing between two
+        // device callbacks -- which is most of them, 23ms of buffer against
+        // 16.7ms of vsync -- flipped a loud red bar green and its readout to
+        // "--". That was the flicker.
+        let lvl = mixer_meter_norm(bus_peak(bus))
+
+        let hold = nb_get(MIXER_HOLD, i)
+        if lvl >= hold {
+            nb_set(MIXER_HOLD, i, lvl)
+            nb_set(MIXER_HOLD_AGE, i, 0.0)
+        } else {
+            let age = nb_get(MIXER_HOLD_AGE, i) + dt
+            nb_set(MIXER_HOLD_AGE, i, age)
+            if age > MIXER_HOLD_SECS {
+                nb_set(MIXER_HOLD, i, max(lvl, hold - MIXER_HOLD_FALL * dt))
+            }
+        }
+
+        let strip_x = origin.x + (MIXER_STRIP_W + MIXER_STRIP_GAP) * (i as float)
+        // Hard against the fader rather than against the strip's right edge:
+        // the strip is wider than its controls to fit text, and pinning the
+        // meter to the edge would open a gap through the middle of the pair
+        // you are meant to read together.
+        let bar_x = strip_x + MIXER_FADER_W + 6.0
+        let bar_r = bar_x + MIXER_BAR_W
+
+        imgui_window_add_rect_filled(v(bar_x, bar_top), v(bar_r, bar_bot),
+            color_to_abgr(color(0.08, 0.08, 0.10, 1.0)))
+
+        // Unity, so "how close to clipping" is a distance up the strip rather
+        // than a number to convert in your head.
+        let unity_y = bar_bot - MIXER_BAR_H * mixer_meter_norm(1.0)
+        imgui_window_add_rect_filled(v(bar_x, unity_y), v(bar_r, unity_y + 1.0),
+            color_to_abgr(color(0.35, 0.35, 0.40, 1.0)))
+
+        // Grows up from the floor, so the strips line up along a common zero.
+        if lvl > 0.0 {
+            let fill_y = bar_bot - MIXER_BAR_H * min(1.0, lvl)
+            imgui_window_add_rect_filled(v(bar_x, fill_y), v(bar_r, bar_bot),
+                color_to_abgr(mixer_meter_color(lvl)))
+        }
+
+        let held = nb_get(MIXER_HOLD, i)
+        if held > 0.0 {
+            let hy = bar_bot - MIXER_BAR_H * min(1.0, held)
+            imgui_window_add_rect_filled(v(bar_x, hy - 1.0), v(bar_r, hy + 1.0),
+                color_to_abgr(color(0.95, 0.95, 1.0, 1.0)))
+        }
+
+        imgui_set_cursor_screen_pos(v(strip_x, origin.y))
+        imgui_text(sfx_bus_name(bus))
+
+        // The fader edits the STRIP, never the bus: mixer_set_gain is what
+        // reaches the engine, and it is also what recomputes every other
+        // strip's applied gain, which a direct bus_set_gain here would skip.
+        let strip = mixer_strip(bus)
+        if strip != null {
+            imgui_set_cursor_screen_pos(v(strip_x, bar_top))
+            let (moved, g) = imgui_v_slider_float("###mixfader{bus}",
+                v(MIXER_FADER_W, MIXER_BAR_H), strip.gain, 0.0, MIXER_GAIN_MAX,
+                MIXER_FADER_FMT)
+            if moved { mixer_set_gain(bus, g) }
+
+            let btn_y = bar_bot + 2.0
+            let ctrl_w = MIXER_FADER_W + 6.0 + MIXER_BAR_W
+            let bw = (ctrl_w - 4.0) * 0.5
+
+            // Master has no solo button rather than a disabled one: there is no
+            // state it could be in, so an affordance for it would be a lie. Its
+            // mute then takes the left slot -- a lone button floating in the
+            // right half reads as a missing control rather than an absent one.
+            // Latched BEFORE the button, and the pop reads the latch rather
+            // than the strip. The button's own click flips the strip between
+            // the push and the pop, so re-reading it there pops a colour that
+            // was never pushed -- which is an ImGui assert, not a wrong tint.
+            let solo_lit = strip.solo
+            let mute_lit = strip.mute
+
+            let mute_x = if mixer_can_solo(bus) { strip_x + bw + 4.0 } else { strip_x }
+            if mixer_can_solo(bus) {
+                imgui_set_cursor_screen_pos(v(strip_x, btn_y))
+                if solo_lit { imgui_push_style_color(21, MIXER_SOLO_LIT) }
+                if imgui_button_sized("S###mixsolo{bus}", v(bw, MIXER_BTN_H - 4.0)) {
+                    mixer_set_solo(bus, !solo_lit)
+                }
+                if solo_lit { imgui_pop_style_color(1) }
+            }
+
+            imgui_set_cursor_screen_pos(v(mute_x, btn_y))
+            if mute_lit { imgui_push_style_color(21, MIXER_MUTE_LIT) }
+            if imgui_button_sized("M###mixmute{bus}", v(bw, MIXER_BTN_H - 4.0)) {
+                mixer_set_mute(bus, !mute_lit)
+            }
+            if mute_lit { imgui_pop_style_color(1) }
+        }
+
+        imgui_set_cursor_screen_pos(v(strip_x, bar_bot + MIXER_BTN_H + 2.0))
+        if lvl <= 0.0 {
+            imgui_text_colored("--", color(0.45, 0.45, 0.50, 1.0))
+        } else {
+            imgui_text_colored("{mixer_meter_db(lvl):.1f}", mixer_meter_color(lvl))
+        }
+    }
+
+    // The absolute text placement above left the cursor on the last row; put
+    // it back where the reserved block ended or everything after this stacks
+    // on top of the meters.
+    imgui_set_cursor_screen_pos(after)
+}
+
+// Last path segment of a `__SITE__` -- "audio/sfx.rock:223" -> "sfx.rock:223".
+// The directory is nearly always the game's own and repeats down every row; the
+// file and line are what tell two callers apart. Full site on the selected row.
+fn sfx_short_site(site: string) -> string {
+    let parts = site.split("/")
+    let n = parts.len()
+    if n < 1 { return site }
+    return parts[n - 1]
+}
+
+// Total seconds the timeline spans. Long enough to hold a whole VFX beat
+// sequence and its tails, short enough that a single strike is not a sliver.
+global SFX_TIMELINE_WINDOW: float = 8.0
+// Where `now` sits across that span. NOT the right edge: a bar is drawn for its
+// whole duration, so a sound that is still playing extends into the future, and
+// with now at the edge that part is clipped away -- which is precisely the part
+// worth seeing when the question is "why is this still going".
+const SFX_TIMELINE_NOW_AT: float = 0.7
+// Seconds to rewind the view by. The ring holds far more than one screenful,
+// so this is how the rest of it is reached; scrubbing takes the hold with it,
+// since asking to see the past means asking the present to stop moving.
+global SFX_TIMELINE_PAN: float = 0.0
+
+// Readable on the dark window, and distinct from each other at bar width.
+const SFX_PALETTE: [Color] = [
+    color(0.45, 0.75, 1.00, 1),
+    color(1.00, 0.72, 0.35, 1),
+    color(0.55, 0.90, 0.55, 1),
+    color(0.95, 0.55, 0.75, 1),
+    color(0.80, 0.70, 1.00, 1),
+    color(0.95, 0.90, 0.45, 1),
+    color(0.45, 0.90, 0.85, 1),
+    color(1.00, 0.55, 0.45, 1),
+]
+
+// A stable colour per sound, keyed on the path through the engine's existing
+// djb2 (the same hash the UI ids use), so the same sample is the same colour
+// every time it fires and a repeat is recognisable as one without reading
+// anything.
+fn sfx_path_color(path: string, muted: bool) -> Color {
+    let c = SFX_PALETTE[__ui_string_hash(path) % SFX_PALETTE.len()]
+    if muted { return c.alpha(0.4) }
+    return c
+}
+
+// Where a bar sits, as (x0, x1) offsets from the timeline's left edge. Shared
+// by the drawing and the hover hit-test on purpose: two copies of this would be
+// a highlight that lights the bar next to the one under the pointer.
+//
+// The 2px floor is why it is not a bare multiply -- a 30ms blip must still be
+// visible and still be hoverable, and a bar narrower than a pixel is an event
+// you cannot tell happened.
+pub @pure fn sfx_bar_span(at: float, dur: float, t0: float, span: float, width: float) -> (float, float) {
+    let x0 = width * (at - t0) / span
+    let w = max(width * dur / span, 2.0)
+    return (x0, min(x0 + w, width))
+}
+
+// Events on a time axis: x is when it fired, width is how long it actually
+// lasts. This is the view that makes overlap legible -- three sounds inside
+// 150ms with 2s tails read as one smear by ear and as three overlapping bars
+// here, which is the difference between guessing and seeing.
+fn draw_sfx_timeline(now: float, hovered_seq: int) {
+    let origin = imgui_get_cursor_screen_pos()
+    let width = imgui_get_content_region_avail().x
+    let row_h = 14.0
+    let rows = 6
+    let height = (rows as float) * row_h
+
+    imgui_dummy(v(width, height))
+
+    // Hit-testing is done against the bars themselves rather than through an
+    // imgui item per bar: they overlap by design, and overlapping items would
+    // make only the topmost hoverable -- which is the wrong one, since the
+    // interesting bar in a pile is usually the long one underneath.
+    let mouse = imgui_get_mouse_pos()
+    let can_hit = imgui_is_window_hovered()
+    imgui_window_add_rect_filled(origin, origin + v(width, height),
+        color_to_abgr(color(0.08, 0.08, 0.10, 1.0)))
+
+    // One second per gridline, so a bar's length is readable as a duration
+    // without a scale.
+    let secs = int(SFX_TIMELINE_WINDOW)
+    for s in 0..secs {
+        let gx = origin.x + width * (s as float) / SFX_TIMELINE_WINDOW
+        imgui_window_add_rect_filled(v(gx, origin.y), v(gx + 1.0, origin.y + height),
+            color_to_abgr(color(0.20, 0.20, 0.24, 1.0)))
+    }
+
+    let t0 = now - SFX_TIMELINE_WINDOW * SFX_TIMELINE_NOW_AT
+    let i = 0
+    let n = sfx_log_len()
+    for _ in 0..n {
+        let opt = sfx_log_recent(i)
+        // Rows past the freeze are IN the ring; the frozen view just does not
+        // draw them yet.
+        if opt != null && sfx_view_shows(opt.unwrap()) {
+            let e = opt.unwrap()
+            if e.at >= t0 {
+                // Stack by recency so simultaneous plays do not draw on top of
+                // each other -- the overlap is the thing being looked for.
+                let row = i % rows
+                let (bx0, bx1) = sfx_bar_span(e.at, e.dur, t0, SFX_TIMELINE_WINDOW, width)
+                let x0 = origin.x + bx0
+                let x1 = origin.x + bx1
+                let y0 = origin.y + (row as float) * row_h
+
+                if can_hit && mouse.x >= x0 && mouse.x <= x1
+                    && mouse.y >= y0 && mouse.y <= y0 + row_h {
+                    SFX_HOVER_SEQ = e.seq
+                }
+
+                // Selected wins over hovered: the pointer moves constantly and
+                // the selection is the thing being worked on, so it must not be
+                // repainted by whatever the mouse happens to cross.
+                if e.seq == SFX_BROWSER_SEL_SEQ {
+                    imgui_window_add_rect_filled(
+                        v(x0 - 1.0, y0), v(x1 + 1.0, y0 + row_h),
+                        color_to_abgr(color(1.0, 1.0, 1.0, 0.95)))
+                } else if e.seq == hovered_seq || e.seq == SFX_HOVER_SEQ {
+                    imgui_window_add_rect_filled(
+                        v(x0 - 1.0, y0), v(x1 + 1.0, y0 + row_h),
+                        color_to_abgr(color(1.0, 0.8, 0.3, 0.95)))
+                }
+
+                imgui_window_add_rect_filled(
+                    v(x0, y0 + 1.0), v(x1, y0 + row_h - 1.0),
+                    color_to_abgr(sfx_path_color(e.path, e.muted)))
+            }
+        }
+        i += 1
+    }
+
+    // The now-line. Bars to the right of it are still playing.
+    let nx = origin.x + width * SFX_TIMELINE_NOW_AT
+    imgui_window_add_rect_filled(
+        v(nx - 1.0, origin.y), v(nx + 1.0, origin.y + height),
+        color_to_abgr(color(1.0, 1.0, 1.0, 0.85)))
+}
+
+fn draw_sfx_browser() {
+    if !ENGINE.show_sfx_browser { return }
+
+    // FirstUseEver, not every frame: the unconditional form re-forces the size
+    // each frame and the window cannot then be resized at all.
+    imgui_set_next_window_size_once(v(1100, 760))
+
+    // Debug flavour: F6 shows the window, it does not hand the keyboard to it.
+    if !imgui_begin_debug_window("SFX Browser") {
+        // Collapsed. Nothing is being read, so nothing should be held either.
+        imgui_end()
+        return
+    }
+
+    // Hovering the window IS the intent to study it, so it holds automatically.
+    // Read before anything else draws so the whole frame agrees on one view
+    // clock.
+    sfx_browser_hover_tick(sfx_browser_pointer_engaged())
+
+    // Last frame's hover, kept before it is recomputed: the timeline draws
+    // first and needs it to light a bar the LIST is pointing at.
+    let hovered_prev = SFX_HOVER_SEQ
+    SFX_HOVER_SEQ = 0
+
+    // How far back the ring actually reaches, which depends entirely on how
+    // busy the scene is -- 512 slots is minutes of a quiet room and under a
+    // minute of a fight. Stating the seconds beats stating the slots.
+    imgui_text("{sfx_log_len()}/{SFX_LOG_CAP} slots holding {sfx_log_span():.1}s, {SFX_LOG_SEQ} plays this session")
+
+    let held = sfx_log_holding()
+    if imgui_button(if held { "Resume###sfx_hold" } else { "Pause###sfx_hold" }) {
+        if held {
+            sfx_browser_resume()
+        } else {
+            SFX_HOLD_REASON = "paused"
+            sfx_log_set_hold(true)
+        }
+    }
+    imgui_same_line()
+    if imgui_button("Clear") { sfx_log_clear(); SFX_BROWSER_SEL_SEQ = 0 }
+    imgui_same_line()
+
+    if sfx_log_holding() {
+        let behind = sfx_held_behind()
+        let queued = if behind > 0 { ", {behind} more recorded" } else { "" }
+        imgui_text_colored("HELD ({SFX_HOLD_REASON}) at t={SFX_LOG_HELD_AT:.2}{queued}",
+            color(1.0, 0.8, 0.3, 1.0))
+    } else {
+        imgui_text("t={time:.2}   live")
+    }
+
+    imgui_separator()
+    draw_mixer()
+    imgui_separator()
+
+    // Scrub, always available: a drag here means "show me the past", so it
+    // takes the hold with it rather than fighting a view that is still
+    // scrolling. Bounded by what the ring actually holds, not by the window.
+    let span = sfx_log_span()
+    let (scrubbed, pan) = imgui_slider_float("scrub (s ago)", SFX_TIMELINE_PAN, 0.0, max(span, 1.0))
+    if scrubbed {
+        SFX_TIMELINE_PAN = pan
+        SFX_HOLD_REASON = "scrubbed"
+        sfx_log_set_hold(true)
+    }
+    imgui_same_line()
+    if imgui_button("Now") { SFX_TIMELINE_PAN = 0.0 }
+
+    let (_, win) = imgui_slider_float("span (s)", SFX_TIMELINE_WINDOW, 1.0, 30.0)
+    SFX_TIMELINE_WINDOW = win
+
+    let now = if sfx_log_holding() { sfx_view_now() - SFX_TIMELINE_PAN } else { time }
+
+    draw_sfx_timeline(now, hovered_prev)
+    imgui_separator()
+
+    let sel = sfx_browser_selected()
+    if sel == null {
+        // Either nothing is selected or the ring wrapped past it. Drop it
+        // rather than silently editing a different sound than the one clicked.
+        SFX_BROWSER_SEL_SEQ = 0
+    } else {
+        let e = sel.unwrap()
+        imgui_text("#{e.seq}  {e.path}")
+        // Who asked for it. The path above says WHAT played; a bank shared by
+        // several events reads identically on every row without this.
+        let spatial = if e.spatial { "   spatial pan {e.pan:+.2}" } else { "" }
+        imgui_text("from {e.site}   -> bus {sfx_bus_name(e.bus)}{spatial}")
+
+        draw_sfx_waveform(e)
+
+        // Audition on RELEASE, not on every value change: a slider dragged
+        // across its range fires a play per frame otherwise, which is dozens of
+        // overlapping copies and tells you nothing. Deactivated-AFTER-EDIT, so
+        // grabbing a slider without moving it stays silent.
+        let commit = false
+
+        let (_, vol) = imgui_slider_float("volume", SFX_BROWSER_VOL, 0.0, 2.0)
+        SFX_BROWSER_VOL = vol
+        if imgui_is_item_deactivated_after_edit() { commit = true }
+
+        let (_, spd) = imgui_slider_float("speed", SFX_BROWSER_SPEED, 0.05, 4.0)
+        SFX_BROWSER_SPEED = spd
+        if imgui_is_item_deactivated_after_edit() { commit = true }
+
+        // Decay is measured in HEARD seconds, and a value at or past the play's
+        // own length cuts nothing -- so that length IS the top of the useful
+        // range. A fixed 0..6 spends most of its travel doing nothing on a
+        // second-long sample and cannot reach the end of a heavily slowed one
+        // (the roll runs 5.2s at speed 0.17, and slower still is reachable).
+        // Tracks `speed`, so the range is always the sound you are hearing.
+        //
+        // A slider clamps, so raising `speed` shortens a decay that no longer
+        // fits. The play is unchanged at that moment -- both the old and the
+        // clamped value cut nothing -- but scrubbing speed back down now leaves
+        // a real cut where there was none. Audible only while auditioning, which
+        // is when you are listening anyway.
+        let full = sfx_heard_duration(sound_duration(e.sound), SFX_BROWSER_SPEED, 0.0)
+        let decay_max = if full > 0.0 { full } else { 6.0 }
+        let (_, dec) = imgui_slider_float("decay", SFX_BROWSER_DECAY, 0.0, decay_max)
+        SFX_BROWSER_DECAY = dec
+        if imgui_is_item_deactivated_after_edit() { commit = true }
+
+        // speed is a playback ratio, so the musical interval is its log --
+        // "0.38" means nothing by ear, "-1.40 oct" is the thing you are
+        // actually choosing. The length follows the same knob, which is the
+        // other half of what a speed edit does to you.
+        // log2 of the ratio, NOT its negation: halving the speed is an octave
+        // DOWN and has to read as -1.00, or the sign says the opposite of what
+        // the ear hears.
+        let oct = log2(SFX_BROWSER_SPEED)
+        let heard = sfx_heard_duration(sound_duration(e.sound), SFX_BROWSER_SPEED, SFX_BROWSER_DECAY)
+        if e.looped && SFX_BROWSER_DECAY == 0.0 {
+            imgui_text("pitch {oct:+.2} oct    loops every {heard:.2}s")
+        } else {
+            imgui_text("pitch {oct:+.2} oct    plays for {heard:.2}s")
+        }
+
+        if commit {
+            sfx_replay_params(e.sound, e.bus, SFX_BROWSER_VOL, SFX_BROWSER_SPEED,
+                SFX_BROWSER_DECAY, e.looped, e.spatial, e.pan, e.site)
+        }
+
+        if imgui_button("Play edited") {
+            sfx_replay_params(e.sound, e.bus, SFX_BROWSER_VOL, SFX_BROWSER_SPEED,
+                SFX_BROWSER_DECAY, e.looped, e.spatial, e.pan, e.site)
+        }
+        imgui_same_line()
+        if imgui_button("Reset to logged") { sfx_browser_select_event(e) }
+        imgui_same_line()
+        if imgui_button("Deselect") { SFX_BROWSER_SEL_SEQ = 0 }
+        imgui_separator()
+    }
+
+    // Newest first: the sound you just heard is the one you are looking for.
+    let i = 0
+    let shown = sfx_log_len()
+    for _ in 0..shown {
+        let opt = sfx_log_recent(i)
+        if opt != null && sfx_view_shows(opt.unwrap()) {
+            let e = opt.unwrap()
+            // ### is keyed to the PLAY NUMBER, not the row position, so a row's
+            // buttons keep their imgui identity as new plays push it down the
+            // list -- an id that shifts under a held mouse button retargets the
+            // click.
+            // Every item in the row counts as the row: reaching for its play
+            // button is pointing at it just as much as resting on its text is.
+            let row_hovered = false
+
+            if imgui_button("play###sfx_play_{e.seq}") { sfx_replay(e) }
+            if imgui_is_item_hovered() { row_hovered = true }
+            imgui_same_line()
+            if imgui_button("edit###sfx_edit_{e.seq}") { sfx_browser_select_event(e) }
+            if imgui_is_item_hovered() { row_hovered = true }
+            imgui_same_line()
+
+            let sel = e.seq == SFX_BROWSER_SEL_SEQ
+            let mark = if sel { ">" } else { " " }
+            let tail = if e.muted { "  [muted]" } else { "" }
+            let looped = if e.looped { " loop" } else { "" }
+            let panned = if e.spatial { " p{e.pan:+.2}" } else { "" }
+            let line = "{mark} #{e.seq} {e.at:7.2} {sfx_short_path(e.path)}  {sfx_bus_name(e.bus)} v{e.volume:.2} s{e.speed:.2} d{e.decay:.2}{panned}{looped}  {e.dur:.2}s  {sfx_short_site(e.site)}{tail}"
+
+            // Pointed at from the timeline, this frame: the bar hit-test ran
+            // before this loop, so that direction needs no lag.
+            let lit = e.seq == SFX_HOVER_SEQ
+
+            if sel {
+                // White, matching the frame drawn round its bar above: the row
+                // being edited has to be findable in both views at a glance.
+                imgui_text_colored(line, color(1.0, 1.0, 1.0, 1.0))
+            } else if lit {
+                // Same accent as the hover frame on its bar.
+                imgui_text_colored(line, color(1.0, 0.8, 0.3, 1.0))
+            } else if e.muted {
+                // Silenced by the gate (sim, headless, or a seek): it was
+                // asked for and never came out of the speakers.
+                imgui_text_colored(line, color(0.6, 0.6, 0.6, 1.0))
+            } else {
+                // Same colour as the row's bar in the timeline above, so the
+                // two views are one view.
+                imgui_text_colored(line, sfx_path_color(e.path, false))
+            }
+            if imgui_is_item_hovered() { row_hovered = true }
+
+            if row_hovered { SFX_HOVER_SEQ = e.seq }
+        }
+        i += 1
+    }
+
+    imgui_end()
+}

@@ -1,0 +1,29 @@
+// Shared `@textures` groups. Field order IS slot order -- `Pass.slot_inputs` is
+// indexed by it, and on the sprite lane slot 0 is the unit `stone_draw_mesh`
+// binds. A group shared by several programs is also one statement of what that
+// sampler is called and where it lands, rather than one per entry point.
+//
+// A group forks the moment an entry needs a different sampler SET; sharing here
+// is only for entries whose set is literally identical.
+
+// The one texture a sprite-format draw binds: `stone_draw_mesh` puts it on unit
+// 0, so it must be slot 0 and there must be nothing else in the group. The name
+// is now the group's alone -- no Rust site resolves it.
+pub struct MainTex {
+    uTexture: Sampler2D,
+}
+
+// The canvas a copy-shaped pass reads: blit, bloom_blur.
+struct InputTex {
+    input_tex: Sampler2D,
+}
+
+// The canvas a sampling pass reads: the bloom pyramid, nonfinite, present.
+pub struct SrcTex {
+    src_tex: Sampler2D,
+}
+
+// The composited scene a filter pass reads: color_grade, grain, heat_shimmer.
+pub struct SceneTex {
+    scene_tex: Sampler2D,
+}

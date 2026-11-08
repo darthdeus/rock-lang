@@ -83,6 +83,20 @@ in [`examples/guide/`](examples/guide/), so clone the repository to run them.
 For advanced facilities, see the [language reference](docs/language-reference.md)
 and [coroutines](docs/coroutines.md).
 
+## Stone games
+
+Build the native dependencies and run the rendering testbed from a source checkout:
+
+```sh
+python3 scripts/gamelibs.py sync
+cargo run -p rock-cli --bin rock -- stone demos/testbed
+```
+
+`bash scripts/release.sh` builds a host archive containing Rock, Stone, LuaJIT,
+native libraries and named packages. Extract it and run `bin/rock stone demos/testbed`.
+Native window tests use `cargo nextest run -p stone-rs`; Linux needs Xvfb, i3,
+clang and the system development libraries required by SDL2/audio.
+
 ## Testing compiler changes
 
 The [compiler structure guide](docs/compiler.md) maps the implementation and

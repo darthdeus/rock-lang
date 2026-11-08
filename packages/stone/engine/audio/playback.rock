@@ -1,0 +1,194 @@
+pub struct MultiSound {
+    sources: [Sound],
+    // Empty for ordinary pools; a compiled bank requires one gain per admitted source.
+    gains: [float] = [],
+    // Which variant played last, -1 before the first. A uniform pick repeats
+    // itself one time in n, and a sample heard twice back to back is heard as
+    // one sound repeated -- which is the thing having variants exists to
+    // prevent, so the pick has to remember.
+    last: int = -1,
+}
+
+pub struct RandomSoundPick {
+    sound: Sound,
+    speed: float,
+    gain: float,
+}
+
+pub value SpatialSoundMix {
+    gain: float,
+    pan: float,
+}
+
+// Static 2D one-shot mix. `distance` and `pan_axis` are in the caller's
+// acoustic units. The native source owns the actual constant-power channel
+// gains.
+pub @pure fn spatial_sound_mix(distance: float, pan_axis: float,
+                           inner_radius: float, outer_radius: float) -> SpatialSoundMix {
+    let inner = max(inner_radius, 0.0)
+    let outer = max(outer_radius, inner + 0.0001)
+    let d = max(distance, 0.0)
+    let t = clamp((d - inner) / (outer - inner), 0.0, 1.0)
+    let smooth = t * t * (3.0 - 2.0 * t)
+    return SpatialSoundMix {
+        gain: 1.0 - smooth,
+        pan: clamp(pan_axis / outer, -1.0, 1.0),
+    }
+}
+
+// True silences all SFX + music through the Rock playback gate. Sims and headless runs
+// default quiet; an explicit STONE_QUIET=0 opts a headless audio test back in.
+//
+// Mutable on purpose: a game drives it from its own settings, and a fixture
+// that needs live voices for its assertions opens it. What that cannot do is
+// make the process audible -- the native mixer mutes its OUTPUT on the same
+// condition, latched where no Rock code can reach it (`output_muted`,
+// `stone-rs/src/audio.rs`).
+pub global STONE_QUIET: bool = false
+
+// Seeded from the native latch rather than re-read here. The condition has one
+// reading: spelling it in both places let a fourth condition reach one answer
+// and not the other, and the two answers decide the same thing -- whether this
+// process has a listener.
+@early_init
+fn stone_quiet_init() {
+    STONE_QUIET = stone_audio_quiet_env()
+}
+
+// Headless and sim runs can silence playback through the shared quiet gate.
+fn audio_gate_muted() -> bool { return STONE_QUIET }
+
+pub fn play_music_direct(handle: int) {
+    stone_play_music(handle)
+}
+
+pub fn play_sound_direct(handle: int, bus: int, volume: float, speed: float, decay: float, looped: bool) -> int {
+    return stone_play_sound(handle, bus, volume, speed, decay, looped, false, 0.0)
+}
+
+pub fn load_multisound(paths: [string]) -> MultiSound {
+    return load_multisound_asset(paths)
+}
+
+pub fn stop_multisound(multi_sound: MultiSound) {
+    for source in multi_sound.sources {
+        stop_sound(source)
+    }
+}
+
+// Pick one of a bank's variants and play it. A macro for the same reason
+// play_sound is (see there): the row names the caller. Arity picks the macro
+// overload, so the two BANK SHAPES (MultiSound and a bare [Sound]) cannot each
+// be a macro arm at the same arity -- one macro forwards to `_play_random_sound_impl`,
+// which is an ordinary overload set and dispatches on the type as usual.
+macro play_random_sound(bank: expr, volume: expr = 1.0, speed: expr = 1.0, decay: expr = 0.0, bus: expr = STONE_BUS_SFX, pitch_jitter: expr = 0.0) {
+    _play_random_sound_impl(bank, volume, speed, decay, bus, pitch_jitter, false,
+        false, 0.0, __SITE__)
+}
+
+// The variant-picking play, keeping the voice. Voice(0) if the bank is empty
+// or audio is gated, so a caller can drive it unconditionally.
+macro play_random_voice(bank: expr, volume: expr = 1.0, speed: expr = 1.0, decay: expr = 0.0, bus: expr = STONE_BUS_SFX, pitch_jitter: expr = 0.0) {
+    _play_random_sound_impl(bank, volume, speed, decay, bus, pitch_jitter, false,
+        false, 0.0, __SITE__)
+}
+
+macro play_random_looping_voice(bank: expr, volume: expr = 1.0, speed: expr = 1.0, bus: expr = STONE_BUS_SFX, pitch_jitter: expr = 0.0) {
+    _play_random_sound_impl(bank, volume, speed, 0.0, bus, pitch_jitter, true,
+        false, 0.0, __SITE__)
+}
+
+macro play_random_spatial_looping_voice(bank: expr, volume: expr = 1.0, speed: expr = 1.0, bus: expr = STONE_BUS_SFX, pan: expr = 0.0) {
+    _play_random_sound_impl(bank, volume, speed, 0.0, bus, 0.0, true,
+        true, pan, __SITE__)
+}
+
+pub fn random_sound_pick(multi_sound: MultiSound, speed: float = 1.0, pitch_jitter: float = 0.0) -> RandomSoundPick? {
+    let n = multi_sound.sources.len()
+    if n == 0 {
+        // An empty bank is legitimate -- an unset UI event is deliberately
+        // silent -- so this is not an error.
+        return null
+    }
+
+    // The pick happens BEFORE the gate so a muted play still resolves to a
+    // variant and reaches play_sound, which is the single place that both
+    // gates and records. Gating here as well would silence the log on exactly
+    // the runs (sim, headless) where it is the only way to see anything.
+    // Uniform over everything EXCEPT the last one played: roll over n-1 and
+    // step past the excluded index. One roll and no rejection loop -- rerolling
+    // until different only makes a repeat unlikely rather than impossible, and
+    // loops forever on a one-sample bank.
+    let index = 0
+    if n > 1 && multi_sound.last >= 0 && multi_sound.last < n {
+        index = presentation_random_int(0, n - 1)
+        if index >= multi_sound.last { index += 1 }
+    } else {
+        index = presentation_random_int(0, n)
+    }
+    multi_sound.last = index
+
+    let source_opt = multi_sound.sources.get(index)
+    if source_opt == null {
+        // random_int contract is half-open [0, n) so this should not happen,
+        // but if .get ever returns null we'd rather log than crash on unwrap.
+        log_once("AUDIO", "play_random_voice: .get returned null at idx {index} (sources len {n})")
+        return null
+    }
+    // Detune MULTIPLIES the caller's speed rather than replacing it, so a
+    // caller that already transposed keeps its transposition and gets spread
+    // around it. Rolled here rather than at the call site because "a variant
+    // play varies" is what this function is for -- a caller rolling its own is
+    // a second mechanism doing the same job.
+    let detuned = speed * semitones(presentation_random_range(-pitch_jitter, pitch_jitter))
+
+    return RandomSoundPick { sound: source_opt.unwrap(), speed: detuned, gain: multi_sound.gains.get(index) ?? 1.0 }
+}
+
+pub fn _play_random_sound_impl(multi_sound: MultiSound, volume: float, speed: float,
+                           decay: float, bus: int, pitch_jitter: float, looped: bool,
+                           spatial: bool, pan: float, site: string) -> Voice {
+    let pick = random_sound_pick(multi_sound, speed, pitch_jitter)
+    if pick == null { return Voice(0) }
+    // The impl, not the macro: `site` is the caller's, and re-entering the macro
+    // here would stamp every random play with this line instead.
+    let picked = pick.unwrap()
+    return _play_sound_impl(picked.sound, bus, volume * picked.gain, picked.speed, decay, looped,
+        site, spatial, pan)
+}
+
+// Pitch as musical interval rather than as a playback ratio. 12 semitones is
+// an octave, so a detune reads as a transposition instead of as an opaque
+// fraction -- and it is symmetric in PITCH, which a linear +/- on the ratio is
+// not: perception of pitch is logarithmic, the same reason the bus lowpass
+// slews in log2(Hz).
+pub @pure fn semitones(n: float) -> float {
+    return pow(2.0, n / 12.0)
+}
+
+// Level as decibels rather than as a gain ratio, for the same reason.
+pub @pure fn decibels(db: float) -> float {
+    return pow(10.0, db / 20.0)
+}
+
+pub fn load_sound(path: string) -> Sound {
+    return load_sound_asset(path)
+}
+
+// The bare-array bank overload, beside the macro that forwards to it. It sat
+// in the math types file until stone-core was split out.
+
+// The bare-array bank shape. Reached through the `play_random_sound` macro in
+// audio.rock, which forwards to whichever impl the argument type selects.
+pub fn _play_random_sound_impl(sounds: [Sound], volume: float, speed: float,
+                           decay: float, bus: int, pitch_jitter: float, looped: bool,
+                           spatial: bool, pan: float, site: string) {
+    let n = sounds.len()
+    // Empty is legitimate (an unset event is deliberately silent) and `sounds[0]`
+    // on an empty vec errors, so it cannot just fall through to the pick.
+    if n == 0 { return }
+    let idx = presentation_random_int(0, n)
+    _play_sound_impl(sounds[idx], bus, volume,
+        speed * semitones(presentation_random_range(-pitch_jitter, pitch_jitter)), decay,
+        looped, site, spatial, pan)
+}

@@ -1,0 +1,72 @@
+// The mixer desk owns strip derivation and meter math: applied gain is
+// derived from gain/mute/solo rather than stored, and the meter maps
+// amplitude to bar position on a dB scale. bus_routing keeps only the wiring
+// (bus gains land, ducks fire, peaks read); the derivation itself is pinned
+// here, beside the Stone engine that owns it.
+
+@test
+fn mixer_meter_maps_unity_half_and_clip() {
+    assert(abs(mixer_meter_norm(1.0) - 1.0) < 0.0001,
+        "unity is the top of the meter (got {mixer_meter_norm(1.0):.5f})")
+    assert(abs(mixer_meter_db(mixer_meter_norm(0.5)) + 6.0206) < 0.01,
+        "half amplitude reads as -6dB (got {mixer_meter_db(mixer_meter_norm(0.5)):.4f})")
+    assert(mixer_meter_norm(2.0) > 1.0,
+        "clipping is not clamped away before the colour can see it")
+    assert_eq(mixer_meter_norm(0.0), 0.0, "silence sits at the bottom of the meter")
+}
+
+@test
+fn mixer_applied_gain_runs_muted_and_plain_strips() {
+    let saved = MIXER.clone()
+    defer {
+        mixer_clear_solo()
+        for bus in 0..saved.len() {
+            mixer_set_gain(bus, saved[bus].gain)
+            mixer_set_mute(bus, saved[bus].mute)
+            if saved[bus].solo {
+                mixer_set_solo(bus, true)
+            }
+        }
+    }
+    mixer_clear_solo()
+    mixer_set_mute(STONE_BUS_SFX, false)
+    mixer_set_gain(STONE_BUS_SFX, 0.5)
+    assert(abs(mixer_applied_gain(STONE_BUS_SFX) - 0.5) < 0.0001,
+        "an unmuted, unsoloed strip runs at its own gain")
+    mixer_set_mute(STONE_BUS_SFX, true)
+    assert_eq(mixer_applied_gain(STONE_BUS_SFX), 0.0, "mute silences the strip")
+    mixer_set_mute(STONE_BUS_SFX, false)
+    assert(abs(mixer_applied_gain(STONE_BUS_SFX) - 0.5) < 0.0001,
+        "unmuting restores the strip gain")
+}
+
+@test
+fn mixer_applied_gain_solo_silences_others_except_master() {
+    let saved = MIXER.clone()
+    defer {
+        mixer_clear_solo()
+        for bus in 0..saved.len() {
+            mixer_set_gain(bus, saved[bus].gain)
+            mixer_set_mute(bus, saved[bus].mute)
+            if saved[bus].solo {
+                mixer_set_solo(bus, true)
+            }
+        }
+    }
+    mixer_clear_solo()
+    mixer_set_mute(STONE_BUS_AMBIENCE, false)
+    mixer_set_mute(STONE_BUS_MUSIC, false)
+    mixer_set_gain(STONE_BUS_AMBIENCE, 1.0)
+    mixer_set_solo(STONE_BUS_MUSIC, true)
+    assert_eq(mixer_applied_gain(STONE_BUS_AMBIENCE), 0.0,
+        "soloing one strip silences the others")
+    assert(mixer_applied_gain(STONE_BUS_MASTER) > 0.0,
+        "but master is exempt -- soloing it would silence nothing")
+    mixer_clear_solo()
+    assert(mixer_applied_gain(STONE_BUS_AMBIENCE) > 0.0,
+        "clearing solo restores the rest")
+    mixer_set_solo(STONE_BUS_MASTER, true)
+    assert(mixer_applied_gain(STONE_BUS_AMBIENCE) > 0.0,
+        "soloing master silences nothing")
+    mixer_clear_solo()
+}

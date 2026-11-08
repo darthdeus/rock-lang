@@ -1,0 +1,76 @@
+fn profiler_work_window_row(doc: JsonValue, name: string) -> JsonValue? {
+    let window = json_field(doc, "section_window").unwrap()
+    for row in json_as_array(json_field(window, "sections").unwrap()).unwrap() {
+        if json_as_str(json_field(row, "name").unwrap()).unwrap() == name { return row }
+    }
+    return null
+}
+
+@nomangle
+fn profiler_work_window_entry(_which: int) {
+    init_profiler()
+    ENGINE.profiler_enabled = true
+    PROFILER_SECTIONS_OFF = 0
+    GC_WIN_N = 0
+    profile_frame_begin()
+    profile_begin("window.early")
+    profile_work("window.early", 3)
+    profile_observation("window.early", 2.0)
+    profile_end("window.early")
+    profile_begin("window.early")
+    profile_work("window.early", 0)
+    profile_observation("window.early", 4.0)
+    profile_end("window.early")
+    profile_frame_end()
+    for _ in 0..130 {
+        profile_frame_begin()
+        profile_frame_end()
+    }
+    let doc = json_decode(profiler_perf_json()).unwrap()
+    let window = json_field(doc, "section_window").unwrap()
+    assert_eq(json_as_int(json_field(window, "frames").unwrap()).unwrap(), 131,
+        "the full window keeps every completed frame")
+    let row = profiler_work_window_row(doc, "window.early").unwrap()
+    assert_eq(json_as_int(json_field(row, "calls").unwrap()).unwrap(), 2,
+        "both calls in the early frame survive the trailing ring")
+    assert_eq(json_as_int(json_field(row, "work_units").unwrap()).unwrap(), 3,
+        "early work survives the trailing ring")
+    assert_eq(json_as_int(json_field(row, "work_observations").unwrap()).unwrap(), 2,
+        "a zero-work observation still counts")
+    assert_eq(json_as_int(json_field(row, "observations").unwrap()).unwrap(), 2,
+        "operation observations keep their own denominator")
+    assert_eq(json_as_float(json_field(row, "observation_total_ms").unwrap()).unwrap(), 6.0,
+        "observation totals are independent of section duration")
+    let calls = json_field(row, "calls_per_frame").unwrap()
+    assert_eq(json_as_int(json_field(calls, "n").unwrap()).unwrap(), 120,
+        "per-frame distributions remain bounded")
+    assert_eq(json_as_float(json_field(calls, "max").unwrap()).unwrap(), 0.0,
+        "quiet frames contribute zero calls rather than disappearing")
+
+    profiler_clear_samples()
+    profile_frame_begin()
+    profile_work("window.early", 17)
+    profile_frame_end()
+    PROFILER.warmup_active = true
+    PROFILER.warmup_seconds = 0.0
+    PROFILER.warmup_start_time = stone_get_time() - 1.0
+    profile_frame_begin()
+    profile_work("window.early", 9)
+    profile_frame_end()
+    let after = profiler_work_window_row(json_decode(profiler_perf_json()).unwrap(), "window.early").unwrap()
+    assert_eq(json_as_int(json_field(after, "work_units").unwrap()).unwrap(), 9,
+        "warmup reset excludes earlier work and keeps the admitted frame")
+    ENGINE.profiler_enabled = false
+    profile_work("window.early", 99)
+    ENGINE.profiler_enabled = true
+    profile_frame_begin()
+    profile_frame_end()
+    let disabled = profiler_work_window_row(json_decode(profiler_perf_json()).unwrap(), "window.early").unwrap()
+    assert_eq(json_as_int(json_field(disabled, "work_units").unwrap()).unwrap(), 9,
+        "disabled profiling cannot add work")
+}
+
+@test
+fn profiler_work_window_retains_early_work_and_resets_at_warmup() {
+    profiler_test_process("profiler_work_window_entry", 0)
+}

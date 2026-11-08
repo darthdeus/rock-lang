@@ -1,0 +1,73 @@
+struct NativeFlowTestOwner {}
+
+fn native_flow_unretained_owner_job() -> int {
+    let owner = NativeFlowTestOwner {}
+    let walk = native_buffer_u8(25)
+    for index in 0..25 { nb_set(walk, index, 1) }
+    let handle = stone_flow_submit(3, 3, 1, 1, 2, walk.ptr, walk.len)
+    native_flow_handle_set(owner, 1, handle)
+    assert_eq(native_flow_handle(owner, 1), handle, "the live owner retains its transport")
+    return handle
+}
+
+inline(lua) fn native_flow_collect() = """
+    collectgarbage("collect")
+    collectgarbage("collect")
+"""
+
+@test
+fn native_flow_owner_collection_releases_pending_handle() {
+    stone_native_load()
+    let handle = native_flow_unretained_owner_job()
+    assert(handle > 0, "the owner submitted a real job")
+    assert_eq(stone_flow_wait(handle), 1, "native computation completes")
+    native_flow_collect()
+    assert_eq(stone_flow_poll(handle), -1, "collected owners release their pending jobs")
+}
+
+@test
+fn native_loader_is_idempotent() {
+    stone_native_load()
+    stone_native_load()
+    let walk = native_buffer_u8(25)
+    for index in 0..25 { nb_set(walk, index, 1) }
+    let handle = stone_flow_submit(3, 3, 1, 1, 2, walk.ptr, walk.len)
+    defer { stone_flow_cancel(handle) }
+    assert(handle > 0, "loading twice leaves the shared binding usable")
+    assert_eq(stone_flow_wait(handle), 1, "a standalone native host computes without the engine")
+}
+
+@test
+fn native_terrain_field_uses_loaded_provider() {
+    stone_native_load()
+    let solid = native_buffer_u8(9)
+    for index in 0..9 { nb_set(solid, index, 0) }
+    nb_set(solid, 4, 1)
+    let handle = stone_terrain_submit(3, 3, 1, solid.ptr, solid.len)
+    defer { stone_flow_cancel(handle) }
+    assert(handle > 0, "the loaded provider accepts a terrain snapshot")
+    assert_eq(stone_flow_wait(handle), 1, "the native terrain field completes")
+    let distance = native_buffer_float(9)
+    assert_eq(stone_flow_copy(handle, distance.ptr, distance.len), 0,
+        "terrain results use the shared flow transport")
+    assert(distance[4] < 0.0, "the solid tile has negative distance")
+    assert(distance[0] > 0.0, "the empty tile has positive distance")
+}
+
+@test
+fn native_light_table_rejects_invalid_shapes() {
+    stone_native_load()
+    let floats = native_buffer_float(0)
+    let ints = native_buffer_int(0)
+    assert(!stone_light_table_pack(0, 8, 0.0001, 0,
+        floats.ptr, floats.ptr, ints.ptr, ints.ptr, ints.ptr,
+        ints.ptr, ints.ptr, floats.ptr, 0),
+        "an invalid table shape returns false through the native binding")
+}
+
+@test
+fn native_image_fill_rejects_invalid_handle() {
+    stone_native_load()
+    assert(!stone_image_data_fill_rect_rgba8(0, 0, 0, 1, 1, 0, 0, 0, 255),
+        "an unowned image handle returns false through the native binding")
+}

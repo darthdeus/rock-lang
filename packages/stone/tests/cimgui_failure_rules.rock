@@ -1,0 +1,190 @@
+// cimgui failure paths: the prelude stub must not answer enum lookups with
+// functions, and the frame path must not reach imgui.C without a live context.
+//
+// Oracles, not restatements:
+//  * the enum-name list is parsed from production prebuilt/cimgui/enums.lua,
+//    the artifact the real imgui table is built from;
+//  * the stub under test is installed by the production platform-failure path;
+//  * the C-touch spy observes the production frame path
+//    (input_imgui_new_frame -> hover sample + tool sampler).
+
+inline(lua) fn cimgui_failure_set_enum_src(src: string) = """
+    _G.__cimgui_failure_enum_src = src
+"""
+
+// Sweep every M.<name> defined by the production enums source against the
+// installed stub. Returns (violations, swept, first_violation).
+inline(lua) fn cimgui_failure_sweep_stub_enums() -> (int, int, string) = """
+    local stub = _G.imgui
+    local violations, swept = 0, 0
+    local first = ""
+    for name in _G.__cimgui_failure_enum_src:gmatch("M%.([A-Za-z0-9_]+)%s*=") do
+        swept = swept + 1
+        if type(stub[name]) == "function" then
+            violations = violations + 1
+            if first == "" then first = name end
+        end
+    end
+    return violations, swept, first
+"""
+
+// Pin: the oracle source really defines `name` as an enum.
+inline(lua) fn cimgui_failure_enum_src_has(src: string, name: string) -> bool = """
+    return src:match("M%." .. name .. "%s*=") ~= nil
+"""
+
+inline(lua) fn cimgui_failure_save_imgui_state() = """
+    _G.__cimgui_failure_saved = {
+        imgui = _G.imgui,
+        key_ids = _G.__stone_tool_key_ids,
+        tool_keys = _G.__stone_tool_keys,
+        hover = _G.__stone_imgui_mouse_hover,
+    }
+    _G.__stone_tool_key_ids = nil
+"""
+
+inline(lua) fn cimgui_failure_restore_imgui_state() = """
+    local s = _G.__cimgui_failure_saved
+    _G.imgui = s.imgui
+    _G.__stone_tool_key_ids = s.key_ids
+    _G.__stone_tool_keys = s.tool_keys
+    _G.__stone_imgui_mouse_hover = s.hover
+    _G.__cimgui_failure_saved = nil
+"""
+
+// Table identity, so the test proves the ambient imgui table is restored.
+inline(lua) fn cimgui_failure_imgui_identity() -> string = "return tostring(_G.imgui)"
+
+fn cimgui_failure_force_production_stub() {
+    __imgui_note_platform_init_failed()
+}
+
+fn cimgui_failure_sweep_under_forced_stub() -> (int, int, string) {
+    cimgui_failure_save_imgui_state()
+    defer { cimgui_failure_restore_imgui_state() }
+    cimgui_failure_force_production_stub()
+    return cimgui_failure_sweep_stub_enums()
+}
+
+@test
+fn cimgui_failure_stub_answers_no_enum_with_a_function() {
+    let enums_src = embed_string("prebuilt/cimgui/enums.lua")
+    cimgui_failure_set_enum_src(enums_src)
+    assert(cimgui_failure_enum_src_has(enums_src, "ImGuiKey_A"),
+        "oracle pin: production enums.lua defines ImGuiKey_A")
+    assert(cimgui_failure_enum_src_has(enums_src, "ImGuiKey_Space"),
+        "oracle pin: production enums.lua defines ImGuiKey_Space")
+    assert(cimgui_failure_enum_src_has(enums_src, "ImGuiWindowFlags_None"),
+        "oracle pin: production enums.lua defines ImGuiWindowFlags_None")
+
+    let before = cimgui_failure_imgui_identity()
+    let (violations, swept, first) = cimgui_failure_sweep_under_forced_stub()
+    assert_eq(cimgui_failure_imgui_identity(), before,
+        "forcing the stub restores the ambient _G.imgui")
+    assert(swept > 500, "swept {swept} production enum names (vacuous if ~0)")
+    assert_eq(violations, 0,
+        "stub answers {violations} enum lookups with functions, first: {first}")
+}
+
+// The production tool path under the production stub: resolution, then the
+// per-frame typed query that raised "attempt to compare function with number"
+// on every frame of a stubbed run. The query runs only once resolution is
+// sane, so a broken stub reports the bad id instead of raising here.
+fn cimgui_failure_probe_tool_key_under_stub() -> (int, bool) {
+    cimgui_failure_save_imgui_state()
+    defer { cimgui_failure_restore_imgui_state() }
+    cimgui_failure_force_production_stub()
+    let id = tool_key_id_dynamic("a")
+    if id == -2 {
+        tool_input_sample_frame()
+        return (id, tool_key_pressed(ToolKey::A))
+    }
+    return (id, false)
+}
+
+@test
+fn cimgui_failure_tool_key_reports_no_imgui_under_stub() {
+    let before = cimgui_failure_imgui_identity()
+    let (id, pressed) = cimgui_failure_probe_tool_key_under_stub()
+    assert_eq(cimgui_failure_imgui_identity(), before,
+        "forcing the stub restores the ambient _G.imgui")
+    assert_eq(id, -2, "under the stub, tool-key resolution reports no-imgui (-2)")
+    assert(!pressed, "tool_key_pressed answers false under the stub")
+}
+
+// Non-forwarding imgui.C spy: every raw-namespace touch is recorded and
+// answered with nil, so the probe never executes C without a context.
+inline(lua) fn cimgui_failure_install_c_spy() = """
+    _G.__cimgui_failure_saved_c = _G.imgui.C
+    _G.__cimgui_failure_saved_key_ids = _G.__stone_tool_key_ids
+    _G.__cimgui_failure_saved_tool_keys = _G.__stone_tool_keys
+    _G.__cimgui_failure_saved_hover = _G.__stone_imgui_mouse_hover
+    _G.__cimgui_failure_c_touches = {}
+    local touches = _G.__cimgui_failure_c_touches
+    _G.imgui.C = setmetatable({}, {__index = function(_, k)
+        touches[#touches + 1] = k
+        return function() return nil end
+    end})
+"""
+
+inline(lua) fn cimgui_failure_remove_c_spy() = """
+    _G.imgui.C = _G.__cimgui_failure_saved_c
+    _G.__stone_tool_key_ids = _G.__cimgui_failure_saved_key_ids
+    _G.__stone_tool_keys = _G.__cimgui_failure_saved_tool_keys
+    _G.__stone_imgui_mouse_hover = _G.__cimgui_failure_saved_hover
+    _G.__cimgui_failure_saved_c = nil
+    _G.__cimgui_failure_c_touches = nil
+"""
+
+inline(lua) fn cimgui_failure_reset_c_touches() = """
+    -- Clear in place: the spy closure captured this table, so replacing it
+    -- would blind the counter while touches keep landing on the old one.
+    local t = _G.__cimgui_failure_c_touches
+    for k in pairs(t) do t[k] = nil end
+"""
+
+inline(lua) fn cimgui_failure_c_touch_count() -> int = """
+    return #_G.__cimgui_failure_c_touches
+"""
+
+inline(lua) fn cimgui_failure_c_touch_names() -> string = """
+    return table.concat(_G.__cimgui_failure_c_touches, ",")
+"""
+
+// Number-valued keys on the ambient table: ~1031 on the real table (every
+// production enum), at most one on the stub (its predeclared hover flag).
+inline(lua) fn cimgui_failure_ambient_number_count() -> int = """
+    local n = 0
+    for _, v in pairs(_G.imgui) do
+        if type(v) == "number" then n = n + 1 end
+    end
+    return n
+"""
+
+@test
+fn cimgui_failure_frame_path_quiet_when_unready() {
+    assert(!IMGUI_READY, "package tests never boot the imgui backend")
+    assert(!stone_imgui_initialized(), "no live imgui context in package tests")
+    assert(cimgui_failure_ambient_number_count() > 500,
+        "ambient _G.imgui is the real table, so the spy observes live-C call sites")
+
+    cimgui_failure_install_c_spy()
+    defer { cimgui_failure_remove_c_spy() }
+
+    input_imgui_new_frame()
+    let touches = cimgui_failure_c_touch_count()
+    if touches != 0 {
+        assert(false,
+            "frame path touches imgui.C {touches}x with no live context: {cimgui_failure_c_touch_names()}")
+    }
+
+    // Positive control: with imgui marked ready, the same frame path DOES
+    // reach imgui.C through the spy, proving the zero above is the gate.
+    let ready_before = IMGUI_READY
+    defer { IMGUI_READY = ready_before }
+    cimgui_failure_reset_c_touches()
+    IMGUI_READY = true
+    input_imgui_new_frame()
+    assert(cimgui_failure_c_touch_count() > 0,
+        "spy observes the sampler path when ready (control)")
+}

@@ -1,0 +1,63 @@
+inline(lua) fn poller_gc_kb() -> float = "return collectgarbage('count')"
+inline(lua) fn poller_gc_freeze() = "collectgarbage('collect'); collectgarbage('stop')"
+inline(lua) fn poller_gc_thaw() = "collectgarbage('restart')"
+inline(lua) fn poller_jit_off() = "if jit then jit.off() end"
+inline(lua) fn poller_jit_on() = "if jit then jit.on() end"
+
+co fn poller_idle_forever() -> Coroutine<Wait> {
+    while true {
+        yield wait_frame()
+    }
+}
+
+// Bytes allocated per registered coroutine per `coroutine_poller_update` once
+// every coroutine is idle on `Wait::Frame`.
+fn poller_idle_bytes_per_coroutine(poller: CoroutinePoller, count: int) -> float {
+    let updates = 200
+    for _ in 0..4 {
+        task_clock_advance(poller.clock, 0.016)
+        coroutine_poller_update(poller)
+    }
+    poller_jit_off()
+    poller_gc_freeze()
+    let before = poller_gc_kb()
+    for _ in 0..updates {
+        task_clock_advance(poller.clock, 0.016)
+        coroutine_poller_update(poller)
+    }
+    let after = poller_gc_kb()
+    poller_gc_thaw()
+    poller_jit_on()
+    return (after - before) * 1024.0 / ((updates * count) as float)
+}
+
+@test
+fn poller_update_with_run_coroutines_allocates_nothing() {
+    let poller = CoroutinePoller { clock: task_clock_new() }
+    let count = 64
+    for _ in 0..count {
+        let _ = run(poller, poller_idle_forever())
+    }
+    assert_eq(poller.entry_count, count)
+    let bytes = poller_idle_bytes_per_coroutine(poller, count)
+    assert(bytes < 1.0, "idle run() coroutine allocates {bytes} bytes per poller update")
+    assert_eq(poller.entry_count, count, "idle coroutines stay registered")
+}
+
+struct PollerSlotOwner {
+    slot: Task? = null,
+}
+
+@test
+fn poller_update_with_entity_slot_coroutines_allocates_nothing() {
+    let poller = CoroutinePoller { clock: task_clock_new() }
+    let owners: Arena<PollerSlotOwner> = arena_new()
+    let count = 64
+    for _ in 0..count {
+        let owner = owners.insert(PollerSlotOwner {})
+        let _ = run_into(poller, owner, .slot, poller_idle_forever())
+    }
+    assert_eq(poller.entry_count, count)
+    let bytes = poller_idle_bytes_per_coroutine(poller, count)
+    assert(bytes < 1.0, "idle run_into() coroutine allocates {bytes} bytes per poller update")
+}

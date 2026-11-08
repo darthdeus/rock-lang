@@ -1,0 +1,416 @@
+// Hot/active mouse routing.
+// Widgets register (id, rect) in design space while drawing; the runner
+// calls ui_mouse_begin_frame() before @update systems, which resolves
+// LAST frame's list against THIS frame's mouse. Consumption is implicit
+// and z-correct: only the topmost registered rect under the cursor is
+// hot, a press latches it active until release (drag keeps capture
+// outside the rect). The only staleness is the rects -- UI that moved
+// or spawned under the cursor that exact frame misses one frame.
+//
+// The press edge is detected against the core's OWN was_down snapshot,
+// not is_mouse_pressed: sims inject presses mid-frame (after this
+// frame's resolution) and input_end_frame's snapshot would eat the
+// edge before the next resolution sees it. Real events are polled
+// before resolution, so real clicks fire the same frame either way.
+
+pub struct UiAlphaMask {
+    width: int,
+    height: int,
+    pixels: NativeBufferU8,
+    linear: bool = false,
+}
+
+pub nobox value UiMouseItem {
+    id: int,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    z: int,
+    group: int = 0,
+    group_base_z: int = 0,
+    // The rect's UI context: which surface it was authored for, and the
+    // reference height its design units are measured against. Resolution
+    // converts the cursor per item, so two surfaces can register in one list.
+    ctx: int,
+    ref_h: float,
+    mask: UiAlphaMask? = null,
+}
+
+pub struct UiMouseState {
+    // Two grow-only pools, swapped each frame; counts track live items
+    // so steady-state frames allocate nothing.
+    last: [UiMouseItem],
+    last_count: int,
+    cur: [UiMouseItem],
+    cur_count: int,
+    hot: int,        // 0 = none
+    hot_prev: int,   // last frame's hot (hover-enter edge)
+    active: int,
+    clicked: int,    // id pressed this frame (edge, one frame only)
+    was_down: bool,
+    // Set by the input handler on a LEFT press EVENT, consumed at the
+    // next resolution: a sub-frame tap (press + release in one poll
+    // batch) never shows up in the level snapshot, so the level edge
+    // alone eats real fast clicks.
+    press_event: bool,
+    // Press-time drag anchor in SCREEN px (one slot: only one widget is
+    // active at a time). Design space is a function of UI_SCALE, so a
+    // widget whose drag changes the scale can't map against its live
+    // geometry -- it captures it here on the press edge instead.
+    // anchor_w == 0 means unset; cleared on release.
+    anchor_x: float,
+    anchor_y: float,
+    anchor_w: float,
+    anchor_h: float,
+    // The anchor's UI context, so the drag maps the pointer through the same
+    // surface the geometry was captured on.
+    anchor_ctx: int,
+    anchor_ref_h: float,
+}
+
+pub global UI_MOUSE: UiMouseState = UiMouseState {
+    last: vec_new(),
+    last_count: 0,
+    cur: vec_new(),
+    cur_count: 0,
+    hot: 0,
+    hot_prev: 0,
+    active: 0,
+    clicked: 0,
+    was_down: false,
+    press_event: false,
+    anchor_x: 0.0,
+    anchor_y: 0.0,
+    anchor_w: 0.0,
+    anchor_h: 0.0,
+    anchor_ctx: 0,
+    anchor_ref_h: 0.0,
+}
+
+// Capture the active drag's reference geometry, in the rect's TARGET units
+// (output px, or scene texels). Called by a widget on its own ui_clicked edge
+// (the same edge that latched it active), read back via ui_drag_anchor while
+// ui_active holds. The context rides along so the drag maps the pointer
+// through the same surface.
+pub fn ui_drag_anchor_set(r: UiRect) {
+    let m = UI_MOUSE
+    m.anchor_x = r.x
+    m.anchor_y = r.y
+    m.anchor_w = r.w
+    m.anchor_h = r.h
+    m.anchor_ctx = r.ctx
+    m.anchor_ref_h = r.ref_h
+}
+
+// w == 0 -> no anchor for this drag (e.g. a ui_set_active handoff that
+// never saw a press edge).
+pub fn ui_drag_anchor() -> UiRect {
+    let m = UI_MOUSE
+    return UiRect {
+        x: m.anchor_x, y: m.anchor_y, w: m.anchor_w, h: m.anchor_h,
+        ctx: m.anchor_ctx, ref_h: m.anchor_ref_h,
+    }
+}
+
+// Called from on_mouse_pressed (input/state.rock) so the press EVENT
+// reaches the next resolution even when the release lands in the same
+// poll batch.
+fn ui_mouse_note_press(button: int) {
+    if button == MOUSE_BUTTON_LEFT {
+        UI_MOUSE.press_event = true
+    }
+}
+
+// Collision detector state. Ids are label-derived, so collisions are
+// reported by NAME ("scope/label", recorded at mint), not call site --
+// a __SITE__ shim can't see through widgets (skin_button registers
+// internally), and macro named args bind positionally (TODO.md), so
+// shimming every widget is a trap. MAG wiring: ui_id_collision; detector rules:
+// stone/tests/ui_id_debug_retention.rock.
+pub struct UiIdDebug {
+    enabled: bool,
+    scopes: Map<int, string>,
+    labels: Map<int, string>,
+    seen: Map<int, bool>,     // per-scan scratch
+    dupes: int,               // lifetime duplicate-registration count
+    hash_collisions: int,     // lifetime distinct-string same-hash mint count
+    last_dupe_name: string,
+}
+
+pub global UI_ID_DEBUG: UiIdDebug = UiIdDebug {
+    enabled: false,
+    scopes: map_new(),
+    labels: map_new(),
+    seen: map_new(),
+    dupes: 0,
+    hash_collisions: 0,
+    last_dupe_name: "",
+}
+
+pub fn ui_id_debug_set_enabled(enabled: bool) {
+    let d = UI_ID_DEBUG
+    if !enabled {
+        d.scopes.clear()
+        d.labels.clear()
+        d.seen.clear()
+    }
+    d.enabled = enabled
+}
+
+pub const UI_ID_JOIN_FORMATS: int = 0
+
+// djb2 over "scope/label", masked to positive 31-bit (h*33 stays well
+// inside double precision, unlike FNV's 16777619 multiplier). 0 is the
+// "none" sentinel, remapped to 1.
+inline(lua) fn __ui_id_hash(scope: string, label: string) -> int = """
+    local h = 5381
+    for i = 1, #scope do
+        h = bit.band(h * 33 + string.byte(scope, i), 0x7FFFFFFF)
+    end
+    h = bit.band(h * 33 + 47, 0x7FFFFFFF)
+    for i = 1, #label do
+        h = bit.band(h * 33 + string.byte(label, i), 0x7FFFFFFF)
+    end
+    if h == 0 then h = 1 end
+    return h
+"""
+
+pub inline(lua) fn __ui_string_hash(s: string) -> int = """
+    local h = 5381
+    for i = 1, #s do
+        h = bit.band(h * 33 + string.byte(s, i), 0x7FFFFFFF)
+    end
+    if h == 0 then h = 1 end
+    return h
+"""
+
+fn __ui_id_debug_track_mint(id: int, scope: string, label: string) {
+    let d = UI_ID_DEBUG
+    let prev_scope = d.scopes.get(id)
+    let prev_label = d.labels.get(id)
+    if prev_scope == null || prev_label == null {
+        d.scopes[id] = scope
+        d.labels[id] = label
+    } else if prev_scope.unwrap() != scope || prev_label.unwrap() != label {
+        d.hash_collisions = d.hash_collisions + 1
+        let previous = "{prev_scope.unwrap()}/{prev_label.unwrap()}"
+        let current = "{scope}/{label}"
+        log_once("ui", "ui_id hash collision: '{previous}' and '{current}' both hash to {id} -- rename one", current)
+    }
+}
+
+fn __ui_id_debug_begin_list() {
+    UI_ID_DEBUG.seen.clear()
+}
+
+fn __ui_id_debug_check_registration(id: int, list: string) {
+    let d = UI_ID_DEBUG
+    if d.seen.get(id) ?? false {
+        __ui_id_report_dupe(id, list)
+    }
+    d.seen[id] = true
+}
+
+fn __ui_id_debug_end_frame() {
+    let d = UI_ID_DEBUG
+    // Both lists have consumed last frame's mints; wipe before this frame's
+    // systems re-mint so entity-keyed ids do not grow the maps for the session.
+    d.scopes.clear()
+    d.labels.clear()
+}
+
+pub fn ui_id(scope: string, label: string) -> int {
+    let id = __ui_id_hash(scope, label)
+    if UI_ID_DEBUG.enabled { __ui_id_debug_track_mint(id, scope, label) }
+    return id
+}
+
+// Duplicate id inside one registration list: both widgets answer
+// hot/active/focus queries with no error anywhere -- scream instead.
+fn __ui_id_report_dupe(id: int, list: string) {
+    let d = UI_ID_DEBUG
+    d.dupes = d.dupes + 1
+    let scope = d.scopes.get(id)
+    let label = d.labels.get(id)
+    let name = if scope != null && label != null {
+        "{scope.unwrap()}/{label.unwrap()}"
+    } else { "id {id}" }
+    d.last_dupe_name = name
+    log_once("ui", "ui id collision: '{name}' registered more than once this frame ({list} list) -- scope/label must be unique", "{list}/{name}")
+}
+
+// Force a widget active this frame (imgui's SetActiveID). For a
+// programmatic drag handoff: a widget spawned under the cursor mid-press
+// -- dragging a nameplate out of a mob -- never saw a press edge on itself,
+// so seed the latch here and it keeps capture until release.
+pub fn ui_set_active(id: int) {
+    UI_MOUSE.active = id
+}
+
+// Register a widget's hit rect for NEXT frame's resolution. Design space of
+// the rect's own context; occlusion resolves SURFACE order first (output over
+// composite, matching the flush order), then group base z, group, local z,
+// and registration order
+// (later wins, matching draw order).
+pub fn ui_mouse_item(id: int, r: UiRect, mask: UiAlphaMask? = null) {
+    let m = UI_MOUSE
+    m.cur_count = m.cur_count + 1
+    let it = UiMouseItem { id: id, x: r.x, y: r.y, w: r.w, h: r.h,
+        z: r.z, group: UI_DRAW_GROUP,
+        group_base_z: if UI_DRAW_GROUP == 0 { r.z } else { UI_DRAW_GROUP_BASE_Z },
+        ctx: r.ctx, ref_h: r.ref_h, mask }
+    if m.cur_count <= m.cur.len {
+        m.cur[m.cur_count - 1] = it
+    } else {
+        m.cur.push(it)
+    }
+}
+
+pub fn ui_alpha_mask_from_image(data: ImageData, linear: bool = false,
+    origin: IVec2 = iv(0, 0), size: IVec2? = null) -> UiAlphaMask {
+    let (source_width, source_height) = image_data_size(data.0)
+    if source_width <= 0 || source_height <= 0 { error("UI alpha mask requires a live image") }
+    let extent = size ?? iv(source_width - origin.x, source_height - origin.y)
+    let width = extent.x
+    let height = extent.y
+    if origin.x < 0 || origin.y < 0 || width <= 0 || height <= 0
+        || origin.x > source_width - width || origin.y > source_height - height {
+        error("UI alpha mask crop must be inside the image")
+    }
+    let rgba = image_data_rgba8(data, source_width, source_height)
+    let pixels = native_buffer_u8(width * height)
+    for y in 0..height {
+        let source_row = ((origin.y + y) * source_width + origin.x) * 4
+        for x in 0..width { pixels[y * width + x] = rgba[source_row + x * 4 + 3] }
+    }
+    return UiAlphaMask { width, height, pixels, linear }
+}
+
+// The mask's rows from `first` down, for a widget drawn with its top cropped.
+pub fn ui_alpha_mask_rows(mask: UiAlphaMask, first: int) -> UiAlphaMask {
+    let start = clamp(first, 0, mask.height - 1) as int
+    let height = mask.height - start
+    let pixels = native_buffer_u8(mask.width * height)
+    for index in 0..mask.width * height { pixels[index] = mask.pixels[start * mask.width + index] }
+    return UiAlphaMask { width: mask.width, height, pixels, linear: mask.linear }
+}
+
+pub fn ui_alpha_mask_contains(mask: UiAlphaMask, uv: Vec2) -> bool {
+    if uv.x < 0.0 || uv.y < 0.0 || uv.x >= 1.0 || uv.y >= 1.0 { return false }
+    if mask.linear {
+        let px = uv.x * mask.width as float - 0.5
+        let py = uv.y * mask.height as float - 0.5
+        let x = int(floor(px))
+        let y = int(floor(py))
+        let fx = px - floor(px)
+        let fy = py - floor(py)
+        let x0 = clamp(x, 0, mask.width - 1) as int
+        let x1 = clamp(x + 1, 0, mask.width - 1) as int
+        let y0 = clamp(y, 0, mask.height - 1) as int
+        let y1 = clamp(y + 1, 0, mask.height - 1) as int
+        let top = mask.pixels[y0 * mask.width + x0] as float * (1.0 - fx)
+            + mask.pixels[y0 * mask.width + x1] as float * fx
+        let bottom = mask.pixels[y1 * mask.width + x0] as float * (1.0 - fx)
+            + mask.pixels[y1 * mask.width + x1] as float * fx
+        return top * (1.0 - fy) + bottom * fy > 0.0
+    }
+    let x = int(floor(uv.x * mask.width as float))
+    let y = int(floor(uv.y * mask.height as float))
+    return mask.pixels[y * mask.width + x] > 0
+}
+
+pub fn ui_mouse_item_contains(item: UiMouseItem, pos: Vec2) -> bool {
+    if pos.x < item.x || pos.x > item.x + item.w || pos.y < item.y || pos.y > item.y + item.h { return false }
+    if let mask = item.mask {
+        if item.w <= 0.0 || item.h <= 0.0 { return false }
+        return ui_alpha_mask_contains(mask, v((pos.x - item.x) / item.w, (pos.y - item.y) / item.h))
+    }
+    return true
+}
+
+// Runner-called, before @update systems (stone/engine/runner.rock) --
+// ordering vs game code is by construction, not stage arithmetic.
+pub fn ui_mouse_begin_frame() {
+    REBIND_INPUT_CONSUMED = false
+    let m = UI_MOUSE
+    let tmp = m.last
+    m.last = m.cur
+    m.last_count = m.cur_count
+    m.cur = tmp
+    m.cur_count = 0
+
+    let d = UI_ID_DEBUG
+    if d.enabled { __ui_id_debug_begin_list() }
+
+    let hot = 0
+    let hot_rank = -1000000000
+    let hot_base_z = -1000000000
+    let hot_group = -1000000000
+    let hot_z = -1000000000
+    for i in 0..m.last_count {
+        let it = m.last[i]
+        // This list is consumed once; do not retain replaced asset masks in its pool.
+        if it.mask != null { m.last[i].mask = null }
+        if d.enabled { __ui_id_debug_check_registration(it.id, "mouse") }
+        // Per item: a composite rect's cursor comes through the presented
+        // scene image, and is absent in a letterbox bar.
+        let mp = ui_ctx_pointer(it.ctx, it.ref_h) ?? continue
+        if ui_mouse_item_contains(it, mp) {
+            // Surface order first: output UI is drawn after the present, so it
+            // occludes composite UI whatever the local z says. Then base z,
+            // group, local z, and registration order (>= for later ties).
+            let rank = ui_ctx_order(it.ctx)
+            if rank > hot_rank || (rank == hot_rank
+                    && (it.group_base_z > hot_base_z
+                    || (it.group_base_z == hot_base_z
+                    && (it.group > hot_group || (it.group == hot_group && it.z >= hot_z))))) {
+                hot = it.id
+                hot_rank = rank
+                hot_base_z = it.group_base_z
+                hot_group = it.group
+                hot_z = it.z
+            }
+        }
+    }
+    m.hot_prev = m.hot
+    m.hot = hot
+
+    let down = is_mouse_down(MOUSE_BUTTON_LEFT)
+    let edge = m.press_event || (down && !m.was_down)
+    m.press_event = false
+    if !down {
+        m.active = 0
+        m.anchor_w = 0.0
+    }
+    m.clicked = 0
+    if edge && hot != 0 && m.active == 0 {
+        m.clicked = hot
+        // A tap already released: click fires, nothing to latch.
+        if down { m.active = hot }
+    }
+    m.was_down = down
+    ui_slider_drag_begin_frame()
+}
+
+pub fn ui_hot(id: int) -> bool { return UI_MOUSE.hot == id }
+
+// Whether the item registered last (this frame) is hot, so a control's
+// tooltip is declared where it is drawn without re-deriving its id.
+pub fn ui_item_hot() -> bool {
+    let m = UI_MOUSE
+    return m.cur_count > 0 && m.hot != 0 && m.cur[m.cur_count - 1].id == m.hot
+}
+
+// Hover-enter edge: id became hot this frame and no drag is in flight
+// (a held drag sweeping across widgets must not blip). SFX/feedback use.
+fn ui_hover_entered(id: int) -> bool {
+    let m = UI_MOUSE
+    return m.hot == id && m.hot_prev != id && m.active == 0
+}
+pub fn ui_active(id: int) -> bool { return UI_MOUSE.active == id }
+pub fn ui_clicked(id: int) -> bool { return UI_MOUSE.clicked == id }
+
+// True while any registered widget is hot or a drag is in flight --
+// gameplay mouse queries gate on this, alongside ui_wants_input.
+pub fn ui_wants_mouse() -> bool { return UI_MOUSE.hot != 0 || UI_MOUSE.active != 0 }

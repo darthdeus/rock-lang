@@ -1,0 +1,93 @@
+// Slice 2 RED tests: the shared sRGB <-> linear transfer.
+//
+// Oracles are hardcoded decimals verified against an independent Python
+// float64 computation (see the slice report): the card's 0.04045/0.5 decode
+// values plus off-junction arm pins and encode values. The vector-wrapper
+// test checks each channel against the scalar it must call; the scalars
+// themselves are pinned by the decimals above, never restated.
+
+const TRANSFER_TOL: float = 1e-9
+const TRANSFER_TIGHT_TOL: float = 1e-12
+
+@test
+fn transfer_decode_mid_gray_matches_card_value() {
+    let got = srgb_channel_to_linear(0.5)
+    assert(abs(got - 0.21404114048223) < TRANSFER_TOL,
+        "sRGB 0.5 decodes to linear 0.21404114048223")
+}
+
+@test
+fn transfer_decode_toe_boundary_takes_the_linear_arm() {
+    // At exactly 0.04045 the <= arm divides by 12.92; the pow arm sits
+    // 2.33e-9 higher, so this tolerance pins the arm, not just the value.
+    let got = srgb_channel_to_linear(0.04045)
+    assert(abs(got - 0.00313080495356) < TRANSFER_TOL,
+        "sRGB 0.04045 decodes to linear 0.00313080495356")
+}
+
+@test
+fn transfer_decode_arms_match_off_junction_values() {
+    let below = srgb_channel_to_linear(0.04)
+    assert(abs(below - 0.0030959752321981426) < TRANSFER_TIGHT_TOL,
+        "sRGB 0.04 decodes through the linear arm")
+    let above = srgb_channel_to_linear(0.041)
+    assert(abs(above - 0.0031742787091666403) < TRANSFER_TIGHT_TOL,
+        "sRGB 0.041 decodes through the pow arm")
+}
+
+@test
+fn transfer_encode_mid_energy_matches_reference() {
+    let got = linear_channel_to_srgb(0.5)
+    assert(abs(got - 0.7353569830524494) < TRANSFER_TIGHT_TOL,
+        "linear 0.5 encodes to sRGB 0.7353569830524494")
+}
+
+@test
+fn transfer_encode_toe_takes_the_linear_arm() {
+    let got = linear_channel_to_srgb(0.0031308)
+    assert(abs(got - 0.040449936) < TRANSFER_TIGHT_TOL,
+        "linear 0.0031308 encodes to sRGB 0.040449936")
+}
+
+@test
+fn transfer_endpoints_are_exact() {
+    assert(srgb_channel_to_linear(0.0) == 0.0, "sRGB black decodes to zero")
+    assert(abs(srgb_channel_to_linear(1.0) - 1.0) < TRANSFER_TIGHT_TOL,
+        "sRGB white decodes to unit energy")
+    assert(linear_channel_to_srgb(0.0) == 0.0, "linear black encodes to zero")
+    assert(abs(linear_channel_to_srgb(1.0) - 1.0) < TRANSFER_TIGHT_TOL,
+        "linear white encodes to unit sRGB")
+}
+
+@test
+fn transfer_round_trip_recovers_off_junction_inputs() {
+    // Each value round-trips to within a few ulps in float64 (verified in
+    // Python); the junction itself switches arms and is pinned above.
+    for x in [0.0, 0.25, 0.5, 1.0] {
+        let back = linear_channel_to_srgb(srgb_channel_to_linear(x))
+        assert(abs(back - x) < TRANSFER_TIGHT_TOL,
+            "the transfer round-trips its input")
+    }
+}
+
+@test
+fn transfer_vector_wrappers_apply_the_scalar_per_channel() {
+    // Distinct channels catch a swap; exact equality holds because the
+    // wrappers must call the same scalar on the same doubles.
+    let decoded = srgb_to_linear(v(0.5, 0.04045, 0.0))
+    assert(decoded.x == srgb_channel_to_linear(0.5)
+        && decoded.y == srgb_channel_to_linear(0.04045)
+        && decoded.z == srgb_channel_to_linear(0.0),
+        "srgb_to_linear decodes each channel like the scalar")
+    let encoded = linear_to_srgb(v(0.5, 0.0031308, 1.0))
+    assert(encoded.x == linear_channel_to_srgb(0.5)
+        && encoded.y == linear_channel_to_srgb(0.0031308)
+        && encoded.z == linear_channel_to_srgb(1.0),
+        "linear_to_srgb encodes each channel like the scalar")
+    let colored = srgb_color(v(0.5, 0.04045, 0.0, 0.75))
+    assert(colored.x == srgb_channel_to_linear(0.5)
+        && colored.y == srgb_channel_to_linear(0.04045)
+        && colored.z == srgb_channel_to_linear(0.0)
+        && colored.w == 0.75,
+        "srgb_color decodes rgb and preserves alpha")
+}

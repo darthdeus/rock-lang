@@ -1,0 +1,49 @@
+use stone_core::*;
+
+pub const TERRAIN_DETAIL_SEED: float = 37.0
+
+pub fn terrain_value_noise(p: Vec2) -> float {
+    stone_native_load()
+    return stone_terrain_noise(p.x, p.y)
+}
+
+pub fn terrain_detail_random(p: Vec2, stream: float) -> float {
+    stone_native_load()
+    return stone_terrain_random(p.x, p.y, stream, TERRAIN_DETAIL_SEED)
+}
+
+fn terrain_field_sample(field: [float], x: float, y: float, world_grid: Vec2, noisy: int) -> float {
+    stone_native_load()
+    let sample = stone_terrain_field(field[0], field[1], field[2], field[3], field[4],
+        field[5], field[6], field[7], field[8], x, y, world_grid.x, world_grid.y, noisy)
+    assert(sample == sample, "native terrain sample rejected tile-local coordinates")
+    return sample
+}
+
+pub fn terrain_field_bilinear(field: [float], x: float, y: float) -> float {
+    return terrain_field_sample(field, x, y, v(), 0)
+}
+
+pub fn terrain_field_weight(field: [float], x: float, y: float, world_grid: Vec2) -> float {
+    return terrain_field_sample(field, x, y, world_grid, 1)
+}
+
+// Native sampling consumes the same snapshot as the blade batch and semantic fuel.
+pub fn meadow_cover_profile(p: Vec2) -> Vec3 {
+    stone_native_load()
+    static output: NativeBufferU8 = native_buffer_u8(24)
+    assert(stone_meadow_profile(p.x, p.y, output.ptr) == 0, "native meadow profile rejected")
+    return v(meadow_snapshot_get(output, 0),
+        meadow_snapshot_get(output, 1), meadow_snapshot_get(output, 2))
+}
+
+pub fn meadow_cover_at(snapshot: NativeBufferU8, grid: IVec2, local: Vec2,
+    layout: Vec2, woodland: bool = false) -> Vec3 {
+    stone_native_load()
+    static output: NativeBufferU8 = native_buffer_u8(24)
+    assert(stone_meadow_cover(snapshot.ptr, snapshot.len,
+        grid.x as float, grid.y as float, local.x, local.y, layout.x, layout.y,
+        if woodland { 1 } else { 0 }, output.ptr) == 0, "native meadow cover snapshot rejected")
+    return v(meadow_snapshot_get(output, 0),
+        meadow_snapshot_get(output, 1), meadow_snapshot_get(output, 2))
+}

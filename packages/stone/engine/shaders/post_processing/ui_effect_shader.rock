@@ -1,0 +1,27 @@
+value UiEffectCompositeU {
+    tint: Vec4,
+    offset: Vec2,
+    source_size: Vec2,
+    strength: float,
+    alpha_strength: float,
+    premultiplied: bool
+}
+
+@shader(fragment)
+fn ui_effect_composite_frag(
+    @textures t: InputTex,
+    @uniform u: UiEffectCompositeU,
+    tc: Vec2
+) -> Vec4 {
+    let source_tc = tc - u.offset / u.source_size
+    if source_tc.x < 0.0 || source_tc.x > 1.0
+        || source_tc.y < 0.0 || source_tc.y > 1.0 {
+        return v(0.0, 0.0, 0.0, 0.0)
+    }
+    let source = texture(t.input_tex, source_tc)
+    let alpha_factor = if u.alpha_strength < 0.0 { u.strength } else { u.alpha_strength }
+    let alpha = source.a * u.tint.a * alpha_factor
+    let rgb = source.rgb * u.tint.rgb * u.strength
+    if u.premultiplied { return v(rgb * alpha, alpha) }
+    return v(rgb, alpha)
+}

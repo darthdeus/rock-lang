@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Native Nix ELF interpreters bypass nix-ld; SDL's dlopen needs its library path
+# before process startup. Keep Cargo's and the caller's libraries first.
+if [[ -n ${NIX_LD_LIBRARY_PATH:-} ]]; then
+    export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}${NIX_LD_LIBRARY_PATH}"
+fi
+
+exec "$@"
