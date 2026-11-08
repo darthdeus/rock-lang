@@ -696,12 +696,16 @@ impl<T: Clone + PartialEq> Agreed<T> {
         }
     }
 
-    fn assert_by(&mut self, owner: Owner, value: &T) {
+    fn assert_by(&mut self, owner: &Owner, value: &T) {
         self.total += 1;
         if *value == self.value {
-            self.owners.insert(owner);
+            // A body reaching the same callee from several sites asserts the
+            // fact once per site; only the first needs an owned key.
+            if !self.owners.contains(owner) {
+                self.owners.insert(owner.clone());
+            }
         } else {
-            self.dissent.insert(owner, value.clone());
+            self.dissent.insert(owner.clone(), value.clone());
         }
     }
 
@@ -2377,7 +2381,7 @@ impl InstanceGraph {
         for (to, subst) in &c.reached {
             index.subst_updates += 1;
             match self.index.subst.get_mut(to) {
-                Some(a) => a.assert_by(owner.clone(), subst),
+                Some(a) => a.assert_by(&owner, subst),
                 None => {
                     self.index
                         .subst
@@ -2390,7 +2394,7 @@ impl InstanceGraph {
         for (i, tree) in &c.bound_trees {
             index.trees_updates += 1;
             match self.index.trees.get_mut(i) {
-                Some(a) => a.assert_by(owner.clone(), tree),
+                Some(a) => a.assert_by(&owner, tree),
                 None => {
                     self.index
                         .trees
@@ -2423,11 +2427,18 @@ impl InstanceGraph {
         if let Some(from) = owner.instance() {
             for e in &c.edges {
                 index.preds_updates += 1;
-                self.index
-                    .preds
-                    .entry(e.to.clone())
-                    .or_default()
-                    .insert(from.clone());
+                match self.index.preds.get_mut(&e.to) {
+                    Some(preds) => {
+                        if !preds.contains(from) {
+                            preds.insert(from.clone());
+                        }
+                    }
+                    None => {
+                        self.index
+                            .preds
+                            .insert(e.to.clone(), FxHashSet::from_iter([from.clone()]));
+                    }
+                }
                 self.lost.remove(&e.to);
             }
         }
@@ -2458,7 +2469,12 @@ impl InstanceGraph {
         // so a body that reaches ITSELF -- any recursive function -- would
         // otherwise find itself absent at the moment it asked and re-walk
         // forever.
-        let reached: Vec<Instance> = c.reached.iter().map(|(to, _)| to.clone()).collect();
+        let reached: Vec<Instance> = {
+            let mut unique: Vec<&Instance> = c.reached.iter().map(|(to, _)| to).collect();
+            unique.sort();
+            unique.dedup();
+            unique.into_iter().cloned().collect()
+        };
         for (name, failure) in &c.always_emitted_holes {
             self.root_hole_dirty_names.insert(name.clone());
             self.root_hole_sites
@@ -2479,13 +2495,11 @@ impl InstanceGraph {
                 }
             }
         }
-        let mut demanded: Vec<Owner> = reached
+        let demanded: Vec<Owner> = reached
             .into_iter()
             .map(Owner::Instance)
             .filter(|o| !self.contributions.contains_key(o))
             .collect();
-        demanded.sort();
-        demanded.dedup();
         index.commit_ns = elapsed_ns(lane_start);
         (
             demanded,
