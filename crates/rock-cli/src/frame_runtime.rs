@@ -36,7 +36,7 @@ pub fn compile_frame_invocation(
     // Profiling tools inspect this diagnostic copy after the run. Execution uses
     // only the private file, so another invocation can safely replace this copy.
     rock_host::project::write_atomic_streamed(
-        &PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME),
+        PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME),
         |file| {
             std::io::copy(&mut std::fs::File::open(&compiled.lua_file)?, file)?;
             Ok(())
