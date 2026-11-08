@@ -33,6 +33,28 @@ use crate::skull_backend::{body_digit_flip, ms};
 #[cfg(test)]
 mod tests {
     #[test]
+    fn signature_edit_keeps_the_receiver_first() {
+        let orig = "pub fn T.get(pool, key: string) -> int { 1 }\n";
+        let f = super::FnStat {
+            file: String::new(),
+            name: String::new(),
+            line: 1,
+            name_off: orig.find("get").unwrap(),
+            span_start: 0,
+            span_end: orig.len(),
+            body_bytes: 0,
+            params: 2,
+            has_ret: true,
+            call_fan_in: 0,
+            mod_fan_in: 0,
+        };
+        assert_eq!(
+            super::make_sig_edit(orig, &f).as_deref(),
+            Some("pub fn T.get(pool, __lspx: int, key: string) -> int { 1 }\n")
+        );
+    }
+
+    #[test]
     fn missing_survey_source_is_an_error() {
         let path = "/tmp/rock-lsp-survey-missing-source.rock";
         let err = super::read_survey_source(path).expect_err("missing source must not be skipped");
@@ -287,16 +309,34 @@ fn make_body_edit(orig: &str, f: &FnStat) -> Option<String> {
 fn make_sig_edit(orig: &str, f: &FnStat) -> Option<String> {
     let paren = orig[f.name_off..f.span_end].find('(')? + f.name_off;
     let after = paren + 1;
-    let insert = if f.params == 0 {
-        "__lspx: int"
+    // `fn T.name(self, ..)`: the receiver has to stay first and untyped.
+    let (at, insert) = if orig[..f.name_off].ends_with('.') {
+        (end_of_first_param(orig, after)?, ", __lspx: int")
+    } else if f.params == 0 {
+        (after, "__lspx: int")
     } else {
-        "__lspx: int, "
+        (after, "__lspx: int, ")
     };
     let mut out = String::with_capacity(orig.len() + insert.len());
-    out.push_str(&orig[..after]);
+    out.push_str(&orig[..at]);
     out.push_str(insert);
-    out.push_str(&orig[after..]);
+    out.push_str(&orig[at..]);
     Some(out)
+}
+
+/// The byte offset ending the parameter that starts at `start`: its top-level
+/// `,` or the list's closing `)`.
+fn end_of_first_param(orig: &str, start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, c) in orig[start..].char_indices() {
+        match c {
+            '(' | '[' | '<' | '{' => depth += 1,
+            ',' | ')' if depth == 0 => return Some(start + i),
+            ')' | ']' | '>' | '}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// BROKEN edit: insert an unterminated `"` just inside the body -- reliably
