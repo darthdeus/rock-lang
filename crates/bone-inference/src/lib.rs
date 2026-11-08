@@ -27,6 +27,7 @@ use narrowing::{Narrow, Root, detect_null_narrow, infer_branch, path_key, stmt_g
 mod calls;
 mod defer;
 mod embed;
+mod exhaustive;
 mod expr;
 mod fields;
 mod iter;

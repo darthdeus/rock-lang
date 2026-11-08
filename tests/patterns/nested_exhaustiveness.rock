@@ -1,0 +1,205 @@
+// Exhaustive matches whose coverage only adds up across nested patterns:
+// tuples of bools, ints and enums, enum payloads, record and struct fields,
+// nullable values and or-patterns of tuples. None has a top-level
+// catch-all arm, so each must be accepted by the exhaustiveness check.
+
+enum Option<T> { None, Some(T) }
+enum Color { Red, Green, Blue }
+enum Shape { Circle(int), Rect(int, int) }
+enum Tagged { Point { x: int, y: int }, Empty }
+
+struct Pair { a: int, b: bool }
+
+fn bools(a: bool, b: bool) -> int {
+    return match (a, b) {
+        (true, true) => 1,
+        (true, false) => 2,
+        (false, true) => 3,
+        (false, false) => 4,
+    }
+}
+
+fn bools_wild(a: bool, b: bool) -> int {
+    return match (a, b) {
+        (true, _) => 1,
+        (false, true) => 2,
+        (false, false) => 3,
+    }
+}
+
+fn ints(a: int, b: int) -> int {
+    return match (a, b) {
+        (..=0, _) => 1,
+        (1.., ..=5) => 2,
+        (1.., 6..) => 3,
+    }
+}
+
+fn ints_binding(a: int, b: int) -> int {
+    return match (a, b) {
+        (0, y) => y,
+        (x, 0) => x,
+        (_, _) => 0,
+    }
+}
+
+fn colors(a: Color, b: Color) -> int {
+    return match (a, b) {
+        (Color::Red, Color::Red) => 1,
+        (Color::Red, _) => 2,
+        (Color::Green, Color::Blue) => 3,
+        (Color::Green, _) => 4,
+        (Color::Blue, c) => 5,
+    }
+}
+
+fn payload(o: Option<int>) -> int {
+    return match o {
+        Some(..=0) => 0,
+        Some(n) if n > 100 => 100,
+        Some(1..) => 1,
+        None => -1,
+    }
+}
+
+fn shapes(s: Shape) -> int {
+    return match s {
+        Shape::Circle(0) => 0,
+        Shape::Circle(r) => r,
+        Shape::Rect(0, h) => h,
+        Shape::Rect(w, ..=-1) => -w,
+        Shape::Rect(w, 0..) => w,
+    }
+}
+
+fn nested(p: ((int, bool), Option<bool>)) -> int {
+    return match p {
+        ((0, true), _) => 1,
+        ((_, false), Some(true)) => 2,
+        ((_, false), Some(false)) => 3,
+        ((_, _), Option::None) => 4,
+        ((_, true), Some(_)) => 5,
+    }
+}
+
+fn records(t: Tagged) -> int {
+    return match t {
+        Tagged::Point { x: 0, .. } => 0,
+        Tagged::Point { x, y: ..=0 } => x,
+        Tagged::Point { y: 1.., .. } => 1,
+        Tagged::Empty => -1,
+    }
+}
+
+fn structs(p: Pair) -> int {
+    return match p {
+        Pair { a: 0, b } => 0,
+        Pair { a, b: true } => a,
+        Pair { b: false, .. } => -1,
+    }
+}
+
+fn nullable(a: int?) -> int {
+    return match a {
+        null => -1,
+        0 => 0,
+        1.. => 1,
+        _ => 2,
+    }
+}
+
+fn or_of_tuples(a: bool, b: bool) -> int {
+    return match (a, b) {
+        (true, true) | (false, true) => 1,
+        (true, false) | (false, _) => 2,
+    }
+}
+
+fn strings(s: string, b: bool) -> int {
+    return match (s, b) {
+        ("a", true) => 1,
+        (_, true) => 2,
+        (_, false) => 3,
+    }
+}
+
+@test(output = "1 2 3 4")
+fn test_tuple_of_bools() {
+    print("{bools(true, true)} {bools(true, false)} {bools(false, true)} {bools(false, false)}")
+}
+
+@test(output = "1 2 3")
+fn test_tuple_of_bools_with_wildcard() {
+    print("{bools_wild(true, false)} {bools_wild(false, true)} {bools_wild(false, false)}")
+}
+
+@test(output = "1 2 3 7 4 0")
+fn test_tuple_of_ints() {
+    print("{ints(-3, 9)} {ints(2, 5)} {ints(2, 6)} {ints_binding(0, 7)} {ints_binding(4, 0)} {ints_binding(1, 1)}")
+}
+
+@test(output = "1 2 3 4 5")
+fn test_tuple_of_enums() {
+    let a = colors(Color::Red, Color::Red)
+    let b = colors(Color::Red, Color::Blue)
+    let c = colors(Color::Green, Color::Blue)
+    let d = colors(Color::Green, Color::Red)
+    let e = colors(Color::Blue, Color::Green)
+    print("{a} {b} {c} {d} {e}")
+}
+
+@test(output = "0 100 1 -1")
+fn test_enum_int_payload() {
+    print("{payload(Option::Some(-4))} {payload(Option::Some(500))} {payload(Option::Some(7))} {payload(Option::None)}")
+}
+
+@test(output = "0 3 4 -2 5")
+fn test_enum_tuple_payload() {
+    let a = shapes(Shape::Circle(0))
+    let b = shapes(Shape::Circle(3))
+    let c = shapes(Shape::Rect(0, 4))
+    let d = shapes(Shape::Rect(2, -1))
+    let e = shapes(Shape::Rect(5, 1))
+    print("{a} {b} {c} {d} {e}")
+}
+
+@test(output = "1 2 3 4 5")
+fn test_nested_tuples() {
+    let a = nested(((0, true), Option::None))
+    let b = nested(((3, false), Option::Some(true)))
+    let c = nested(((3, false), Option::Some(false)))
+    let d = nested(((3, false), Option::None))
+    let e = nested(((3, true), Option::Some(true)))
+    print("{a} {b} {c} {d} {e}")
+}
+
+@test(output = "0 4 1 -1")
+fn test_record_variant_fields() {
+    let a = records(Tagged::Point { x: 0, y: 9 })
+    let b = records(Tagged::Point { x: 4, y: -2 })
+    let c = records(Tagged::Point { x: 4, y: 2 })
+    let d = records(Tagged::Empty)
+    print("{a} {b} {c} {d}")
+}
+
+@test(output = "0 6 -1")
+fn test_struct_fields() {
+    print("{structs(Pair { a: 0, b: false })} {structs(Pair { a: 6, b: true })} {structs(Pair { a: 6, b: false })}")
+}
+
+@test(output = "-1 0 1 2")
+fn test_nullable() {
+    print("{nullable(null)} {nullable(0)} {nullable(8)} {nullable(-8)}")
+}
+
+@test(output = "1 2 1 2")
+fn test_or_pattern_of_tuples() {
+    print("{or_of_tuples(true, true)} {or_of_tuples(true, false)} {or_of_tuples(false, true)} {or_of_tuples(false, false)}")
+}
+
+@test(output = "1 2 3")
+fn test_strings_in_tuple() {
+    print("{strings("a", true)} {strings("b", true)} {strings("a", false)}")
+}
+
+fn main() {}

@@ -1462,11 +1462,9 @@ pub fn infer_expr_used(
 
             let mut result: Option<TyId> = None;
             let mut seen_unguarded_wildcard = false;
-            // Exhaustiveness bookkeeping: only UNGUARDED arms contribute, since a
-            // guarded arm may not fire. An unguarded `_`/binding arm catches the rest.
-            let mut exhaustive_via_catch_all = false;
-            let mut covered: FxHashSet<Ustr> = FxHashSet::default();
-            let mut covered_ints: Vec<(i128, i128)> = Vec::new();
+            // Exhaustiveness: only UNGUARDED arms contribute, since a guarded
+            // arm may not fire.
+            let mut unguarded: Vec<exhaustive::ArmPattern> = Vec::new();
 
             for arm_idx in arms {
                 let arm = c.body.match_arm_arena[arm_idx];
@@ -1490,17 +1488,11 @@ pub fn infer_expr_used(
                 if let Some(guard) = arm.guard {
                     let guard_ty = infer_expr(c, gamma, guard)?;
                     unify(gamma, guard_ty, gamma.workspace.builtins.bool(), expr_span)?;
-                } else if let Some(v) = tag {
-                    covered.insert(v);
                 } else {
-                    if matches!(
-                        c.body.pattern_arena[arm.pattern],
-                        Pattern::Wildcard | Pattern::Bind(_)
-                    ) {
-                        exhaustive_via_catch_all = true;
-                    }
-                    collect_covered_enum_variants(c, arm.pattern, &mut covered);
-                    collect_covered_int_ranges(c, arm.pattern, &mut covered_ints);
+                    unguarded.push(exhaustive::ArmPattern {
+                        pattern: arm.pattern,
+                        tag,
+                    });
                 }
 
                 let body_ty = infer_expr_used(c, gamma, arm.body, used)?;
@@ -1513,51 +1505,19 @@ pub fn infer_expr_used(
                 }
             }
 
-            // A `match` over an enum must cover every variant, and one over an
-            // `int` every value, unless an unguarded `_`/binding arm catches the
-            // rest; skull lowers an uncovered value to an unreachable block.
-            // Recovered (body_errors, not a hard `?`) so partial inference
-            // survives for the LSP, like the return-type mismatch. Message keeps
-            // the "Non-exhaustive match" prefix the LSP fill-arms code action
-            // links against.
-            if !exhaustive_via_catch_all {
-                let scrut_ty = resolve(gamma, scrut_ty, expr_span);
-                if matches!(gamma.get(scrut_ty), TypeExpr::Builtin(BuiltinTy::Int)) {
-                    let missing = missing_int_ranges(covered_ints);
-                    if !missing.is_empty() {
-                        let names = missing.join(", ");
-                        gamma.body_errors.push(CompilerError::new_with_label(
-                            expr_span,
-                            format!("Non-exhaustive match expression. Missing patterns: {names}"),
-                        ));
-                    }
-                } else if let TypeExpr::App {
-                    ctor: TypeCtor::Nominal(ename),
-                    ..
-                } = *gamma.get(scrut_ty)
-                {
-                    if let Some(eid) = resolve_enum(gamma, ename) {
-                        let missing: Vec<Ustr> = gamma.workspace.module(eid.module).enums[eid.def]
-                            .variants
-                            .iter()
-                            .map(|v| v.name)
-                            .filter(|n| !covered.contains(n))
-                            .collect();
-                        if !missing.is_empty() {
-                            let names = missing
-                                .iter()
-                                .map(|n| n.as_str())
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            gamma.body_errors.push(CompilerError::new_with_label(
-                                expr_span,
-                                format!(
-                                    "Non-exhaustive match expression. Missing patterns: {names}"
-                                ),
-                            ));
-                        }
-                    }
-                }
+            // Every value of the scrutinee must reach an arm; skull lowers an
+            // uncovered value to an unreachable block. Recovered (body_errors,
+            // not a hard `?`) so partial inference survives for the LSP, like
+            // the return-type mismatch. Message keeps the "Non-exhaustive
+            // match" prefix the LSP fill-arms code action links against.
+            let missing =
+                exhaustive::missing_match_patterns(c, gamma, scrut_ty, &unguarded, expr_span);
+            if !missing.is_empty() {
+                let names = missing.join(", ");
+                gamma.body_errors.push(CompilerError::new_with_label(
+                    expr_span,
+                    format!("Non-exhaustive match expression. Missing patterns: {names}"),
+                ));
             }
 
             match used {
