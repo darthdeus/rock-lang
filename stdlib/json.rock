@@ -1415,14 +1415,18 @@ fn json_record_finite_float(value: JsonValue) -> float? {
 
 inline(lua) fn __json_record_type<T>(sample: T) -> string = "error('json record type intrinsic reached runtime')"
 
-inline(lua) fn __json_record_adapter<T>(name: string, encode: fn(T) -> JsonValue,
-    decode: fn(JsonValue) -> T?) -> JsonRecordAdapter = """
-    return { __ty = 'JsonRecordAdapter', name = name, encode = encode, decode = decode }
-"""
+fn json_record_adapter_result<T>(decode: fn(JsonValue) -> T?, value: JsonValue) -> any? {
+    let result = decode(value) ?? return null
+    return materialize(result)
+}
 
 fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     decode: fn(JsonValue) -> T?) -> JsonRecordAdapter {
-    return __json_record_adapter(__json_record_type(sample), encode, decode)
+    return JsonRecordAdapter {
+        name: __json_record_type(sample),
+        encode: value => encode(cast<T>(value)),
+        decode: value => json_record_adapter_result(decode, value),
+    }
 }
 
 @nomangle inline(lua) fn __json_record_node(tag: string, item: any) -> JsonValue = """
@@ -1434,6 +1438,27 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 @nomangle inline(lua) fn __json_record_tag(value: any, tag: string) -> bool = "return type(value) == 'table' and value.__variant == tag"
 @nomangle inline(lua) fn __json_record_finite(n: float) -> bool = "return n == n and n ~= math.huge and n ~= -math.huge"
 
+@nomangle inline(lua) fn __json_record_native_get(source: any, name: string, prefix: string) -> any = """
+    local result = _G[name .. '_ct']()
+    for _, field in ipairs(_G.__ROCK_TYPE_TABLE[name].fields) do
+        local path = prefix .. field.name
+        local child = _G.__ROCK_TYPE_TABLE[field.type]
+        result[field.name] = child and child.kind == 'c_struct'
+            and __json_record_native_get(source, field.type, path .. '.') or source[path]
+    end
+    return result
+"""
+
+@nomangle inline(lua) fn __json_record_native_put(target: any, value: any, name: string, prefix: string) = """
+    for _, field in ipairs(_G.__ROCK_TYPE_TABLE[name].fields) do
+        local path = prefix .. field.name
+        local child = _G.__ROCK_TYPE_TABLE[field.type]
+        if child and child.kind == 'c_struct' then
+            __json_record_native_put(target, value[field.name], field.type, path .. '.')
+        else target[path] = value[field.name] end
+    end
+"""
+
 @nomangle inline(lua) fn __json_record_field_get(source: any, field: any) -> any = """
     local key = field.name
     if field.flat then
@@ -1444,6 +1469,9 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     end
     if not field.embed then return source[key] end
     if field.nullable and source[key] == nil then return nil end
+    if _G.__ROCK_TYPE_TABLE[field.type].kind == 'c_struct' then
+        return __json_record_native_get(source, field.type, key .. '.')
+    end
     local value, prefix = { __ty = field.type }, key .. '.'
     for name, item in pairs(source) do
         if type(name) == 'string' and name:sub(1, #prefix) == prefix then value[name:sub(#prefix + 1)] = item end
@@ -1460,7 +1488,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     elseif field.embed then
         if field.nullable then target[key] = value ~= nil and true or nil end
         if type(value) == 'cdata' then
-            for _, child in ipairs(_G.__ROCK_TYPE_TABLE[field.type].fields) do target[key .. '.' .. child.name] = value[child.name] end
+            __json_record_native_put(target, value, field.type, key .. '.')
         elseif value ~= nil then
             for name, item in pairs(value) do
                 if name ~= '__ty' then target[key .. '.' .. name] = item end
@@ -1500,6 +1528,39 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         if path:find('.', 1, true) then error('json record unsupported nested value payload', 0) end
         target[slot + i - 1] = value[path]
     end
+"""
+
+@nomangle inline(lua) fn __json_record_row_object(row: any, name: string) -> any = """
+    for _, field in ipairs(_G.__ROCK_TYPE_TABLE[name].fields) do
+        local child = _G.__ROCK_TYPE_TABLE[field.type]
+        if field.embed and field.nullable and row[field.name] == false then row[field.name] = nil end
+        if child and child.kind == 'value_table' and not field.embed
+            and (not field.nullable or row[field.name] ~= nil)
+            and type(row[field.name]) ~= 'table' then
+            local value, prefix = { __ty = field.type }, field.name .. '.'
+            for path, item in pairs(row) do
+                if path:sub(1, #prefix) == prefix then value[path:sub(#prefix + 1)] = item end
+            end
+            row[field.name] = __json_record_row_object(value, field.type)
+        end
+    end
+    return row
+"""
+
+@nomangle inline(lua) fn __json_record_row_leaf(value: any, path: string) -> any = """
+    if value[path] ~= nil then return value[path] end
+    local dot = path:find('.', 1, true)
+    if dot then
+        local child = value[path:sub(1, dot - 1)]
+        if type(child) == 'table' or type(child) == 'cdata' then
+            return __json_record_row_leaf(child, path:sub(dot + 1))
+        end
+    elseif type(value) == 'table' then
+        for _, field in ipairs(_G.__ROCK_TYPE_TABLE[value.__ty].fields) do
+            if field.name == path and field.embed and field.nullable then return false end
+        end
+    end
+    return nil
 """
 
 @nomangle inline(lua) fn __json_record_visit(codec: any, shape: any,
@@ -1543,16 +1604,32 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         end
         if reading and not __json_record_tag(value, 'Array') then return false end
         local items = reading and value[1] or value
-        if __rock_is_column_vec(items) or __rock_is_strided_vec(items) then
-            error('json record does not support column or strided arrays', 0)
+        local offsets = element and element.kind == 'value_table' and _G.__ROCK_STRIDED_ROWS[shape.elem.name]
+        local strided = __rock_is_strided_vec(items)
+        if __rock_is_column_vec(items) or (strided and not offsets) then
+            error('json record does not support this array storage', 0)
         end
+        local stride = 0
+        if offsets then for _, offset in pairs(offsets) do stride = math.max(stride, offset) end end
         local result = {}
         for i = 1, items.len do
-            local ok, decoded = __json_record_visit(codec, shape.elem, items._data[i], reading, seen, depth + 1)
+            local item = items._data[i]
+            if not reading and strided then
+                item = { __ty = shape.elem.name }
+                for path, offset in pairs(offsets) do item[path] = items._data[(i - 1) * stride + offset] end
+                item = __json_record_row_object(item, shape.elem.name)
+            end
+            local ok, decoded = __json_record_visit(codec, shape.elem, item, reading, seen, depth + 1)
             if not ok then return false end
-            result[i] = decoded
+            if reading and offsets then
+                for path, offset in pairs(offsets) do result[(i - 1) * stride + offset] = __json_record_row_leaf(decoded, path) end
+            else result[i] = decoded end
         end
-        if reading then return true, __json_record_vec(result, items.len) end
+        if reading then
+            local vec = __json_record_vec(result, items.len)
+            if offsets then vec['@vec'] = { repr = 'strided', elem = shape.elem.name, stride = stride, cap = items.len } end
+            return true, vec
+        end
         return true, __json_record_node('Array', __json_record_vec(result, items.len))
     end
     if kind == 'map' then
