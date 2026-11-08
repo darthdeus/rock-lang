@@ -1,10 +1,8 @@
-// parse_float corpus for the `--backend js` ratchet (T8d). `string.parse_float`
-// is `tonumber(s)`: a strict whole-string numeric parse returning `float?`
-// (null on failure). On JS `__parse_float` reproduces Lua tonumber's strict
-// semantics -- empty/whitespace-only -> null (JS `Number("")` is 0, a
-// divergence handled explicitly), a non-numeric tail -> null (NaN), else the
-// parsed double (decimals, exponents, `0x` hex, surrounding whitespace all
-// accepted). Pins crates/skull-codegen-js/tests/parse_float.rs.
+// `string.parse_float` is LuaJIT `tonumber(s)` on both backends: a strict
+// whole-string numeric parse returning `float?` (null on failure). JS
+// `__parse_float` reproduces it rather than deferring to `Number`, which reads
+// "" as 0 and disagrees on hex, inf/nan spellings and prefixes. Pins
+// crates/skull-codegen-js/tests/parse_float.rs.
 
 fn show(s: string) -> string {
     let r = s.parse_float()
@@ -41,4 +39,56 @@ fn test_arith() {
     let a = "3.5".parse_float() ?? 0.0
     let b = "3.5".parse_float() ?? 0.0
     print(tostring(a + b))
+}
+
+// LuaJIT's tonumber also reads inf/infinity/nan in any case with an optional
+// sign, signed and fractional hex with a binary exponent, and `0b` binary. It
+// rejects the `0o` octal prefix that JS `Number` accepts.
+@test
+fn test_non_finite_spellings() {
+    assert_eq(show("inf"), "inf")
+    assert_eq(show("-INF"), "-inf")
+    assert_eq(show("+Infinity"), "inf")
+    assert_eq(show("  -infinity  "), "-inf")
+    assert_eq(show("nan"), "nan")
+    assert_eq(show("-NaN"), "nan")
+    assert_eq(show("infinit"), "nil")
+    assert_eq(show("infx"), "nil")
+    assert_eq(show("nan(1)"), "nil")
+}
+
+@test
+fn test_hex_forms() {
+    assert_eq(show("-0x10"), "-16")
+    assert_eq(show("+0x10"), "16")
+    assert_eq(show("0X1F"), "31")
+    assert_eq(show("0x1.8"), "1.5")
+    assert_eq(show("0x.8"), "0.5")
+    assert_eq(show("0x1p4"), "16")
+    assert_eq(show("0x1P-2"), "0.25")
+    assert_eq(show("0x1.8p1"), "3")
+    assert_eq(show("0x1e3"), "483")
+    assert_eq(show("0x"), "nil")
+    assert_eq(show("0x."), "nil")
+    assert_eq(show("0x1p"), "nil")
+    assert_eq(show("0x-1"), "nil")
+    assert_eq(show("0xG"), "nil")
+}
+
+@test
+fn test_prefixes_and_signs() {
+    assert_eq(show("0b101"), "5")
+    assert_eq(show("-0B11"), "-3")
+    assert_eq(show("0b102"), "nil")
+    assert_eq(show("0b1.1"), "nil")
+    assert_eq(show("0o17"), "nil")
+    assert_eq(show("-0"), "-0")
+    assert_eq(show("+.5"), "0.5")
+    assert_eq(show("1."), "1")
+    assert_eq(show("."), "nil")
+    assert_eq(show("1e"), "nil")
+    assert_eq(show("+-1"), "nil")
+    assert_eq(show("- 5"), "nil")
+    assert_eq(show("1_0"), "nil")
+    assert_eq(show("1e400"), "inf")
 }

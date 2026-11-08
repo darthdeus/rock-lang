@@ -1632,14 +1632,27 @@ function __rock_format_float(v) {
   s = s.replace(/0+$/, "").replace(/\.$/, "");
   return s;
 }
-// Lua `tonumber(s)`: a strict whole-string numeric parse (int/float/exponent/
-// `0x` hex, surrounding whitespace trimmed), nil on anything else. JS `Number`
-// agrees EXCEPT it reads an empty/whitespace-only string as 0 (handled here as
-// null) and yields NaN (-> null) for a non-numeric tail. Rock nil is `null`.
+// LuaJIT `tonumber(s)`: a strict whole-string parse, nil (Rock `null`) on
+// anything else. Surrounding C-locale whitespace and one sign are allowed
+// before decimal, `0x` hex (fraction and `p` exponent allowed), `0b` binary,
+// or inf/infinity/nan in any case. JS `Number` differs on each of those
+// (no signed hex, no hex fractions, no inf/nan spellings, accepts `0o`,
+// Unicode whitespace, and reads "" as 0), so only plain decimals reach it.
 function __parse_float(s) {
-  if (typeof s !== "string" || s.trim() === "") return null;
-  var n = Number(s);
-  return n !== n ? null : n;
+  if (typeof s !== "string") return null;
+  var m = /^[ \t\n\v\f\r]*([+-]?)([0-9A-Za-z.+-]+)[ \t\n\v\f\r]*$/.exec(s);
+  if (m === null) return null;
+  var neg = m[1] === "-", body = m[2], n, h;
+  if (/^(inf|infinity)$/i.test(body)) n = Infinity;
+  else if (/^nan$/i.test(body)) return NaN;
+  else if ((h = /^0[xX]([0-9a-fA-F]*)(?:\.([0-9a-fA-F]*))?(?:[pP]([+-]?[0-9]+))?$/.exec(body)) !== null) {
+    var frac = h[2] || "", digits = h[1] + frac;
+    if (digits === "") return null;
+    n = parseInt(digits, 16) * Math.pow(2, (h[3] ? Number(h[3]) : 0) - 4 * frac.length);
+  } else if (/^0[bB][01]+$/.test(body)) n = parseInt(body.slice(2), 2);
+  else if (/^([0-9]+\.?[0-9]*|\.[0-9]+)([eE][+-]?[0-9]+)?$/.test(body)) n = Number(body);
+  else return null;
+  return neg ? -n : n;
 }
 // stdlib from_codepoint: the same range and surrogate checks as luajit. JS
 // strings are UTF-16, so the code point becomes UTF-16 text (as a literal does)
