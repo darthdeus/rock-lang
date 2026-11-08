@@ -275,7 +275,7 @@ fn every_js_production_route_enters_the_shared_session() {
     );
     let overlay_start = source.find("pub fn emit_overlay(").unwrap();
     let overlay_end = source[overlay_start..]
-        .find("\nfn static_cell_key(")
+        .find("\nfn collect_statics(")
         .map(|offset| overlay_start + offset)
         .expect("emit_overlay has a following private helper");
     let overlay = &source[overlay_start..overlay_end];

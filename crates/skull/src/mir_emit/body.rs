@@ -35,14 +35,6 @@ pub(super) enum BodyMutation {
     SetupLaneSchedule(SetupLaneSchedule),
 }
 
-/// A `static` cell's reload key: rendered type + initializer content hash. Equal
-/// keys mean "same meaning, preserve the live cell"; a changed key triggers a
-/// reset + re-init. Shared by `assemble` and `assemble_overlay` so complete and
-/// incremental publication compare initializer meaning identically.
-pub(super) fn static_cell_key(sc: &skull_mir::mir::StaticCell) -> String {
-    format!("{}@{:x}", sc.type_str, sc.init_hash)
-}
-
 /// The statically-resolved callees referenced by a (post-inline) MIR function —
 /// the callees still CALLED after inlining (their bodies could flip eligibility
 /// on a future edit). Unioned with the driver's spliced set to form the chunk's

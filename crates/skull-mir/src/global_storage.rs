@@ -204,6 +204,35 @@ pub fn static_cell_storage_keys(
     ))
 }
 
+/// The reload key of a lowered static: its type and initializer. An overlay
+/// re-runs a static's initializer only when this key changed.
+pub fn static_cell_key(cell: &StaticCell) -> String {
+    format!("{}@{:x}", cell.type_str, cell.init_hash)
+}
+
+/// A `static` cell as the last build left it: its reload key and storage keys.
+#[derive(Clone)]
+pub struct StaticBaseline {
+    pub key: String,
+    pub value_slot: String,
+    pub done_slot: String,
+}
+
+impl StaticBaseline {
+    pub fn of(
+        ws: &Workspace,
+        interner: &crate::monoty::MonoInterner,
+        cell: &StaticCell,
+    ) -> Result<Self, String> {
+        let (value_slot, done_slot) = static_cell_storage_keys(ws, interner, cell)?;
+        Ok(Self {
+            key: static_cell_key(cell),
+            value_slot,
+            done_slot,
+        })
+    }
+}
+
 /// The storage key of every value cell and done-flag among `cells`, by cell
 /// name.
 pub fn static_storage_slots<'a>(

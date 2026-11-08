@@ -19,6 +19,7 @@ use skull_mir::code_identity::{
     CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema,
 };
 use skull_mir::decorator::{DecoratorTable, SimValues, decorator_symbol};
+use skull_mir::global_storage::StaticBaseline;
 use skull_mir::instance::Instance;
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
 use skull_mir::mangle::{ident_of_key, symbol_of_key};
@@ -3530,7 +3531,12 @@ pub fn emit_program_cached(
         .chunks
         .values()
         .flat_map(|chunk| chunk.statics.iter())
-        .map(|cell| Ok((cell.cell, JsStaticBaseline::of(ws, scx.interner(), cell)?)))
+        .map(|cell| {
+            Ok((
+                cell.cell,
+                StaticBaseline::of(ws, scx.interner(), cell).map_err(err)?,
+            ))
+        })
         .collect::<Result<_, CompilerError>>()?;
     let program = JsProgram {
         program: build.program.clone(),
@@ -4048,30 +4054,6 @@ impl JsProgram {
     }
 }
 
-/// A `static` cell as the last build left it: its reload key and storage keys.
-#[derive(Clone)]
-struct JsStaticBaseline {
-    key: String,
-    value_slot: String,
-    done_slot: String,
-}
-
-impl JsStaticBaseline {
-    fn of(
-        ws: &Workspace,
-        interner: &skull_mir::monoty::MonoInterner,
-        cell: &skull_mir::mir::StaticCell,
-    ) -> Result<Self, CompilerError> {
-        let (value_slot, done_slot) =
-            skull_mir::global_storage::static_cell_storage_keys(ws, interner, cell).map_err(err)?;
-        Ok(Self {
-            key: static_cell_key(cell),
-            value_slot,
-            done_slot,
-        })
-    }
-}
-
 #[derive(Clone)]
 struct JsChunk {
     js: String,
@@ -4103,7 +4085,7 @@ struct ProgramBuild {
 pub struct JsEmitCache {
     build: ProgramBuild,
     changed_since_full: HashSet<FuncRef>,
-    static_keys: HashMap<ustr::Ustr, JsStaticBaseline>,
+    static_keys: HashMap<ustr::Ustr, StaticBaseline>,
     shader_contributions: HashMap<
         (
             bone_semantic::prelude::ModuleId,
@@ -4392,7 +4374,7 @@ pub fn emit_overlay_with_span_edits(
             continue;
         };
         for cell in &chunk.statics {
-            let base = JsStaticBaseline::of(ws, cache.scx.interner(), cell)?;
+            let base = StaticBaseline::of(ws, cache.scx.interner(), cell).map_err(err)?;
             if cache
                 .static_keys
                 .get(&cell.cell)
@@ -4415,7 +4397,7 @@ pub fn emit_overlay_with_span_edits(
         .values()
         .flat_map(|chunk| chunk.statics.iter().map(|cell| cell.cell))
         .collect();
-    let mut dropped: Vec<JsStaticBaseline> = Vec::new();
+    let mut dropped: Vec<StaticBaseline> = Vec::new();
     cache.static_keys.retain(|cell, base| {
         let keep = live.contains(cell);
         if !keep {
@@ -4475,10 +4457,6 @@ pub fn emit_overlay_with_span_edits(
 
     cache.build = current;
     Ok(JsReload::Overlay(out))
-}
-
-fn static_cell_key(cell: &skull_mir::mir::StaticCell) -> String {
-    format!("{}@{:x}", cell.type_str, cell.init_hash)
 }
 
 fn collect_statics(function: &MirFunc) -> Vec<skull_mir::mir::StaticCell> {
