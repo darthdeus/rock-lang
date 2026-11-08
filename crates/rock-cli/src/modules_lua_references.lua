@@ -149,10 +149,10 @@ local function references(fn, result, captures)
         elseif op == "MOV" or op == "ISTC" or op == "ISFC" then
             state[a] = input[c]
         elseif op == "TGETS" or op == "TSETS" then
-            if input[b] then
-                result.fields[i.key] = true
-                if op == "TGETS" and i.key == "_G" then state[a] = true end
-            end
+            if input[b] then result.fields[i.key] = true end
+            -- `x._G` is the environment whatever `x` is: `package.loaded._G`
+            -- reaches it without any tracked register.
+            if op == "TGETS" and i.key == "_G" then state[a] = true end
             if op == "TSETS" and input[a] then unknown(op) end
         elseif op == "TGETV" or op == "TSETV" or op == "TGETB" or op == "TSETB" then
             if input[b] and (op == "TGETV" or op == "TSETV") then dynamic(op) end
@@ -184,6 +184,12 @@ local function references(fn, result, captures)
                 for reg in pairs(input) do
                     if reg >= a then unknown(op); state[reg] = nil end
                 end
+            end
+            -- `getfenv(..)` returns an environment; its first result lands in
+            -- the call's base register.
+            local fn_def = op == "CALL" and b >= 2 and last_def(pc, a)
+            if fn_def and fn_def.op == "GGET" and fn_def.key == "getfenv" then
+                state[a] = true
             end
         elseif op:sub(1, 3) == "RET" then
             local last = (op == "RET0" and a - 1) or (op == "RET1" and a)

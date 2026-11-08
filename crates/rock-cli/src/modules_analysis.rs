@@ -1053,4 +1053,32 @@ mod tests {
             "pub 0123456789std::abcdefghij : xyz)"
         );
     }
+
+    fn census_of(src: &str) -> LuaRefs {
+        let body = LuaBody {
+            params: Vec::new(),
+            returns_value: false,
+            src: Ustr::from(src),
+        };
+        lua_references(&[body]).unwrap().pop().unwrap()
+    }
+
+    /// Every route to the global environment names its fields: `_G` (the
+    /// control), `getfenv`, and `package.loaded._G`. A field read through an
+    /// untracked route was neither listed nor reported unresolved.
+    #[test]
+    fn the_raw_abi_census_follows_every_route_to_the_environment() {
+        for src in [
+            "return _G.mob_speed",
+            "return getfenv(1).mob_speed",
+            "local env = getfenv()\nreturn env.mob_speed",
+            "return package.loaded._G.mob_speed",
+            "local g = package.loaded[\"_G\"]\ng.mob_speed = 1",
+        ] {
+            let refs = census_of(src);
+            assert_eq!(refs.error, None, "{src}");
+            assert_eq!(refs.via_g, vec!["mob_speed".to_string()], "{src}: {refs:?}");
+            assert!(refs.unresolved.is_empty(), "{src}: {refs:?}");
+        }
+    }
 }
