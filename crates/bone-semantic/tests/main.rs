@@ -6,3 +6,4 @@ mod enum_variant_spans;
 mod operator_table;
 mod query_generation;
 mod structural;
+mod type_equivalence;

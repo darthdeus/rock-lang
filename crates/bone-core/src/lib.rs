@@ -16,5 +16,6 @@ pub mod hir;
 pub mod identity_storage;
 pub mod modules;
 pub mod suspension;
+pub mod type_equiv;
 pub mod type_sources;
 pub mod workspace;
