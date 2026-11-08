@@ -1,0 +1,54 @@
+// A `ref` borrowed from an Arena row: writes reach the row, and a row the
+// borrow did not name keeps its own value.
+//
+// A `value` row is stored flat, so its borrow travels as the data column and
+// a slot; a `struct` row's borrow is the row itself.
+
+value BorrowCell { n: int }
+struct BorrowRow { n: int }
+
+@test(output = "11\n11")
+fn a_value_row_borrow_writes_through() {
+    let a: Arena<BorrowCell> = arena_new()
+    let h = a.insert(BorrowCell { n: 10 })
+    let cell: ref BorrowCell = a.borrow(h).unwrap()
+    cell.n = 11
+    print(cell.n)
+    print(h.get().unwrap().n)
+}
+
+@test(output = "10\n20")
+fn a_value_row_borrow_leaves_a_sibling_row_alone() {
+    let a: Arena<BorrowCell> = arena_new()
+    let h = a.insert(BorrowCell { n: 10 })
+    let cell: ref BorrowCell = a.borrow(h).unwrap()
+    let other = a.insert(BorrowCell { n: 20 })
+    print(cell.n)
+    print(other.get().unwrap().n)
+}
+
+// `clear` replaces the columns, so a borrow from before it addresses the
+// retired column, not the row inserted after.
+@test(output = "20\ntrue")
+fn a_value_row_borrow_from_before_clear_does_not_reach_a_new_row() {
+    let a: Arena<BorrowCell> = arena_new()
+    let h = a.insert(BorrowCell { n: 10 })
+    let cell: ref BorrowCell = a.borrow(h).unwrap()
+    a.clear()
+    let fresh = a.insert(BorrowCell { n: 20 })
+    cell.n = 11
+    print(fresh.get().unwrap().n)
+    print(h.get() == null)
+}
+
+@test(output = "20\ntrue")
+fn a_struct_row_borrow_does_not_reach_the_row_that_reuses_its_slot() {
+    let a: Arena<BorrowRow> = arena_new()
+    let h = a.insert(BorrowRow { n: 10 })
+    let row: ref BorrowRow = a.borrow(h).unwrap()
+    a.remove(h)
+    let fresh = a.insert(BorrowRow { n: 20 })
+    row.n = 11
+    print(fresh.get().unwrap().n)
+    print(h.get() == null)
+}
