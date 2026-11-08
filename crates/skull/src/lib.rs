@@ -15,7 +15,6 @@
 pub mod allocation_report;
 pub mod coroutine_emit;
 pub mod graph_snapshot;
-pub mod inline_stats;
 pub mod mem2reg_stats;
 pub mod mir_emit;
 pub mod shader_artifact;
@@ -23,8 +22,6 @@ pub mod site_join;
 
 /// Emitted callee shape, shared by CLI sessions and the Lua printer.
 pub use skull_codegen_lua::{CalleeBindingMode, callee_binding_is_bound, callee_binding_mode};
-
-pub use skull_codegen_lua::emitted_body_name;
 
 /// Whether emitted Lua carries LuaJIT line directives (`ROCK_SKULL_LINE_DIRECTIVES`).
 pub use skull_codegen_lua::line_directives_mode;

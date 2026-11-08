@@ -14,5 +14,4 @@ workspace = true
 rock-core = { path = "../rock-core" }
 ustr = { workspace = true }
 ordered-float = { workspace = true }
-atomic_refcell = { workspace = true }
 itertools = { workspace = true }

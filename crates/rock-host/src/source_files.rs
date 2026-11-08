@@ -85,20 +85,12 @@ fn source_files_from_dir_impl<P: AsRef<Path>>(
     let paths = crate::project::find_rock_files_at_path(source_dir)?;
 
     // Each file does read_to_string + preprocess. Paths are already canonical
-    // (find_rock_files_at_path canonicalizes the base dir). Parallel by default;
-    // the `sequential` feature loads serially so a sampling profile of the front
-    // end (rock iter-parse / iter-tokenize) carries no rayon pool/teardown frames
-    // -- this is the only par_iter on that path, so gating it keeps the global
-    // rayon pool from ever spinning up.
+    // (find_rock_files_at_path canonicalizes the base dir).
     let load = |path: &String| source_file_from_canonical_path(Path::new(path), preprocess);
-
-    #[cfg(not(feature = "sequential"))]
     let loaded: Result<Vec<_>> = {
         use rayon::prelude::*;
         paths.par_iter().map(load).collect()
     };
-    #[cfg(feature = "sequential")]
-    let loaded: Result<Vec<_>> = paths.iter().map(load).collect();
 
     let files = loaded?
         .into_iter()

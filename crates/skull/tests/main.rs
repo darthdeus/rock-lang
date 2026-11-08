@@ -139,8 +139,6 @@ mod inline_body_column_map_param;
 mod graph_contributions;
 #[path = "inline_lua_column_container_param_sentinel.rs"]
 mod inline_lua_column_container_param_sentinel;
-#[path = "inline_stats.rs"]
-mod inline_stats;
 #[path = "inline_value_specialization.rs"]
 mod inline_value_specialization;
 #[path = "live_call_conversion.rs"]

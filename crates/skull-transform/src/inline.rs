@@ -104,7 +104,7 @@ struct CalleeBody {
     /// top-level blocks of the caller; the driver adds them to its top-level set.
     reachable: Vec<Idx<Block>>,
     /// Reachable inst count of the (cleaned) body — the code each splice copies.
-    /// Diagnostic only (drives `skull-inline-stats`); not used by the policy.
+    /// Diagnostic only (feeds the inline census); not used by the policy.
     insts: usize,
     /// Iterator-bounded body, which has no standalone placeholder-bearing emit.
     bounded: bool,
@@ -124,7 +124,7 @@ struct CalleeBody {
     coalescable_params: Vec<bool>,
 }
 
-/// One splice the inliner performed, for the `skull-inline-stats` diagnostic
+/// One splice the inliner performed, for the inline census
 /// (`inline_functions_with_plans` returns these alongside its dependency set). Records the
 /// callee whose body was copied in, its shape, and how much code it added.
 pub struct SpliceRecord {

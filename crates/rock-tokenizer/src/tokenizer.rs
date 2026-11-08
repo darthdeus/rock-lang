@@ -111,13 +111,6 @@ fn single_char_token(ch: char) -> Option<TokenKind> {
 }
 
 impl<'a> Tokenizer<'a> {
-    /// Create a tokenizer from a SourceFile Arc (convenience method for tests and utils)
-    pub fn from_source_file(input: &'a str, source_file: &Arc<AtomicRefCell<SourceFile>>) -> Self {
-        let file_path = source_file.borrow().file.to_id_path();
-        let file_ustr: Ustr = file_path.into();
-        Self::new(input, file_ustr)
-    }
-
     pub fn new(input: &'a str, source_file: Ustr) -> Self {
         let current = decode_at(input.as_bytes(), 0).map(|(c, _)| c);
 
