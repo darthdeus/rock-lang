@@ -344,7 +344,23 @@ fn typed_json_uses_declared_scalar_enum_adapters_and_embedded_values() {
         r#"
 enum Kind { First, Second }
 nobox value Tint { red: float, visible: bool }
-struct Packet { kind: Kind, tint: Tint, spare: Tint? }
+nobox value Point { x: int, y: int }
+nobox value Marker { point: Point, tint: Tint }
+value Key { namespace: string, name: string }
+nobox value Label { name: string, marker: Marker?, key: Key }
+struct Packet { kind: Kind, tint: Tint, spare: Tint?, marker: Marker, backup: Marker?, rows: [Label] }
+fn marker_encode(value: Marker) -> JsonValue {
+    return json_array([json_int(value.point.x), json_int(value.point.y),
+        json_float(value.tint.red), json_bool(value.tint.visible)])
+}
+fn marker_decode(value: JsonValue) -> Marker? {
+    let fields = json_as_array(value) ?? return null
+    if fields.len() != 4 { return null }
+    return Marker { point: Point { x: json_as_int(fields[0]) ?? return null,
+        y: json_as_int(fields[1]) ?? return null },
+        tint: Tint { red: json_as_float(fields[2]) ?? return null,
+            visible: json_as_bool(fields[3]) ?? return null } }
+}
 fn kind_encode(value: Kind) -> JsonValue { return json_str(if value == Kind::First { "a" } else { "b" }) }
 fn kind_decode(value: JsonValue) -> Kind? {
     let key = json_as_str(value) ?? return null
@@ -353,12 +369,29 @@ fn kind_decode(value: JsonValue) -> Kind? {
     return null
 }
 fn main() {
-    let codec = JsonRecordCodec { adapters: [json_record_adapter(Kind::First, kind_encode, kind_decode)] }
-    let source = Packet { kind: Kind::Second, tint: Tint { red: 0.5, visible: false }, spare: null }
+    let key = Key { namespace: "sample", name: "record" }
+    let marker = Marker { point: Point { x: 7, y: -3 }, tint: Tint { red: 0.25, visible: false } }
+    let codec = JsonRecordCodec { adapters: [json_record_adapter(Kind::First, kind_encode, kind_decode),
+        json_record_adapter(marker, marker_encode, marker_decode)] }
+    let source = Packet { kind: Kind::Second, tint: Tint { red: 0.5, visible: false }, spare: null, marker, backup: marker,
+        rows: [Label { name: "first", marker, key }, Label { name: "empty", marker: null, key }] }
     let wire = json_record_encode(codec, source)
     assert(json_as_str(json_field(wire, "kind").unwrap()).unwrap() == "b")
     let copy = json_record_decode(codec, wire, source).unwrap()
     assert(copy == source)
+    assert(json_encode(json_field(wire, "marker").unwrap()) == "[7,-3,0.25,false]")
+    assert(copy.backup.unwrap().point.y == -3 && !copy.backup.unwrap().tint.visible)
+    assert(copy.rows.len() == 2 && copy.rows[0].marker.unwrap().point.x == 7)
+    assert(copy.rows[1].marker == null && copy.rows[1].key == key)
+    copy.rows.push(Label { name: "added", marker, key })
+    copy.rows[0] = Label { name: "changed", marker: null, key }
+    assert(source.rows.len() == 2 && source.rows[0].name == "first")
+    assert(copy.rows[2].marker.unwrap().tint.red == 0.25)
+    json_as_object(wire).unwrap()["backup"] = json_null()
+    assert(json_record_decode(codec, wire, source).unwrap().backup == null)
+    json_as_object(wire).unwrap()["marker"] = json_str("invalid")
+    assert(json_record_decode(codec, wire, source) == null)
+    json_as_object(wire).unwrap()["marker"] = marker_encode(marker)
     json_as_object(wire).unwrap()["kind"] = json_str("unknown")
     assert(json_record_decode(codec, wire, source) == null)
     print("ok")
