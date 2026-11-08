@@ -5,6 +5,10 @@ use crate::*;
 
 pub static COMMANDS: &[&CliCommand] = &[
     &CliCommand {
+        name: "stone",
+        route: Route::Backend(Operation::Stone),
+    },
+    &CliCommand {
         name: "check",
         route: Route::Direct(bone_compile),
     },
@@ -246,6 +250,15 @@ pub static SKULL: BackendSpec = BackendSpec {
     tagline: "skull is a bone-HIR codegen",
     omitted: None,
     operations: &[
+        (Operation::Stone, |cx| {
+            let path = cx.get_project_dir_or_current()?;
+            crate::stone_watch::do_stone_watch(
+                &path,
+                cx.args.quiet,
+                &cx.args.app_args,
+                Backend::Skull,
+            )
+        }),
         (Operation::Test, |cx| {
             let files = cx.get_test_files()?;
             let filter = cx.test_filter()?;
@@ -336,25 +349,33 @@ fn js_run(_: &CommandContext) -> Result<()> {
 pub static OPTION_RULES: &[OptionRule] = &[OptionRule::TestFilter, OptionRule::SkipGpu];
 
 pub const RUNTIME_SERVICES: registry::RuntimeServices = registry::RuntimeServices {
-    resolve_project_dir: |path| Ok(std::path::PathBuf::from(path)),
-    is_game_project: |_| Ok(false),
-    configured_runtime_dir: |_| Ok(None),
-    build_engine_libs: |_| unavailable("engine build"),
-    runtime_command: |command, _| command,
-    prepare_test,
-    prepare_unit: |_| Ok(()),
-    prepare_sound_bank: |_| Ok(None),
-    sound_project_path: |_| Ok(None),
-    prepare_run: |_| Ok(()),
-    launch: |_, program, emits_main| crate::compile_cmd::run_lua_program("", program, emits_main),
-    // Compiler-only artifacts have no host globals, including incremental output.
-    program_preamble: |_, _| Ok(String::new()),
-    program_host: |_| {
-        Ok(registry::ProgramHost {
-            preamble: String::new(),
-            setup: "",
-        })
+    resolve_project_dir: rock_engine_host::project::resolve_project_dir,
+    is_game_project: rock_engine_host::project::is_game_project,
+    configured_runtime_dir: rock_engine_host::project::configured_stone_dir,
+    build_engine_libs: rock_engine_host::engine_build::build_engine_libs,
+    runtime_command: |command, purpose| {
+        use registry::RuntimeProcess::*;
+        let lua = matches!(purpose, LuaRun { .. } | LuaStdin | LuaTest | LuaBytecode);
+        let trace = matches!(purpose, LuaRun { .. } | LuaTest);
+        let mut command = rock_engine_host::runtime::configure_command(
+            command,
+            lua,
+            trace,
+            matches!(purpose, LuaRun { .. }),
+        );
+        if matches!(purpose, LuaTest | LuaRun { headless: true }) {
+            command.env("STONE_HEADLESS", "1");
+        }
+        command
     },
+    prepare_test,
+    prepare_unit: crate::stone_runtime::prepare_unit,
+    prepare_sound_bank: crate::package::prepare_sound_bank,
+    sound_project_path: crate::package::sound_project_path_for,
+    prepare_run: crate::stone_runtime::prepare_run,
+    launch: crate::stone_runtime::launch,
+    program_preamble: crate::stone_runtime::program_preamble,
+    program_host: crate::stone_runtime::program_host,
     // An unfiltered compiler build needs no private selection policy.
     resolve_sim_specs: |names, selection| {
         if selection.is_empty() {

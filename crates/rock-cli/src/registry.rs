@@ -165,17 +165,10 @@ pub enum RuntimeProcess {
     },
 }
 
-/// The binary's runtime policy for public compile, cache and run callers.
-/// Game artifacts and process placement cross this seam; their implementations
-/// live in the private host. The public default supplies plain compiler services.
-///
-/// Runtime preparation belongs to the private binary. Public executors call
-/// this same installed service table;
-/// there is no packaging implementation or fallback in rock-cli. The signatures
-/// use paths, runtime inputs and JSON so private module types never cross
-/// the boundary.
+/// Runtime preparation and execution shared by compiler and game commands.
+/// Embedders may override process placement and project-specific test policy.
 pub struct RuntimeServices {
-    /// Expand private project names without exposing monorepo layout to callers.
+    /// Resolve a project argument against the configured project roots.
     pub resolve_project_dir: fn(&str) -> Result<std::path::PathBuf>,
     /// Host-owned project recognition, shared by watch and production emission.
     pub is_game_project: fn(&std::path::Path) -> Result<bool>,
