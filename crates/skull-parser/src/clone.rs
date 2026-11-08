@@ -83,6 +83,7 @@ fn clone_stmt(ast: &mut Ast, s: Idx<StatementData>) -> Idx<StatementData> {
                     annotations: p.annotations.clone(),
                 })
                 .collect(),
+            params_span: f.params_span,
             return_ty: f.return_ty.map(|t| clone_type(ast, t)),
             body: clone_block(ast, f.body),
         }),

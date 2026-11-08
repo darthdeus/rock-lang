@@ -1612,7 +1612,7 @@ impl<'a> Parser<'a> {
         receiver_surface: Option<(Ident, usize)>,
         receiver_ty: Option<Idx<TypeExprData>>,
     ) -> PResult<Item> {
-        let params = self.parse_params(receiver_ty)?;
+        let (params, params_span) = self.parse_params(receiver_ty)?;
         self.skip_comments(); // `f() /* c */ -> T`
         let return_ty = if self.eat(TokenKind::Arrow) {
             Some(self.parse_type()?)
@@ -1692,6 +1692,7 @@ impl<'a> Parser<'a> {
                 name,
                 generics,
                 params,
+                params_span,
                 return_ty,
                 body,
                 is_macro,
@@ -1858,7 +1859,11 @@ impl<'a> Parser<'a> {
     /// Parse a `(name: T [= default] [...], ...)` parameter list. When
     /// `receiver_ty` is `Some` (D-form), the FIRST param is a bare identifier
     /// with no annotation, typed by the receiver path.
-    fn parse_params(&mut self, receiver_ty: Option<Idx<TypeExprData>>) -> PResult<Vec<Param>> {
+    fn parse_params(
+        &mut self,
+        receiver_ty: Option<Idx<TypeExprData>>,
+    ) -> PResult<(Vec<Param>, Span)> {
+        let open = self.span();
         self.expect(TokenKind::OpenParen)?;
         let mut params = Vec::new();
         if let Some(ty) = receiver_ty {
@@ -1918,7 +1923,7 @@ impl<'a> Parser<'a> {
         }
         self.skip_comments();
         self.expect(TokenKind::CloseParen)?;
-        Ok(params)
+        Ok((params, self.span_from(open)))
     }
 
     /// `struct Name<gen> { field: T [= default], ... }` or `value Name`.
@@ -2117,7 +2122,7 @@ impl<'a> Parser<'a> {
         }
         let name = self.expect_ident()?;
         let params = if self.kind() == TokenKind::OpenParen {
-            self.parse_params(None)?
+            self.parse_params(None)?.0
         } else {
             Vec::new()
         };
@@ -2777,7 +2782,7 @@ impl<'a> Parser<'a> {
         if self.kind() == TokenKind::LessThan {
             return Err(self.err("nested functions cannot be generic (v1)"));
         }
-        let params = self.parse_params(None)?;
+        let (params, params_span) = self.parse_params(None)?;
         self.skip_comments();
         let return_ty = if self.eat(TokenKind::Arrow) {
             Some(self.parse_type()?)
@@ -2797,6 +2802,7 @@ impl<'a> Parser<'a> {
                 keyword_span: Some(start),
                 name,
                 params,
+                params_span,
                 return_ty,
                 body,
             }),

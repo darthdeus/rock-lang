@@ -72,6 +72,7 @@ fn graft_fn(src: &Ast, dst: &mut Ast, f: &FunctionDef) -> FunctionDef {
         name: f.name.clone(),
         generics: graft_generics(src, dst, &f.generics),
         params: f.params.iter().map(|p| graft_param(src, dst, p)).collect(),
+        params_span: f.params_span,
         return_ty: f.return_ty.map(|t| graft_type(src, dst, t)),
         body: match &f.body {
             FunctionBody::Rock(b) => FunctionBody::Rock(graft_block(src, dst, *b)),
@@ -209,6 +210,7 @@ fn graft_stmt(src: &Ast, dst: &mut Ast, s: Idx<StatementData>) -> Idx<StatementD
                     annotations: p.annotations.clone(),
                 })
                 .collect(),
+            params_span: f.params_span,
             return_ty: f.return_ty.map(|t| graft_type(src, dst, t)),
             body: graft_block(src, dst, f.body),
         }),

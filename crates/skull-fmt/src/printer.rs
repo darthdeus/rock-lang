@@ -396,23 +396,12 @@ impl<'a> Printer<'a> {
             return self.raw(f.span);
         }
 
-        // A block comment in the signature (`fn f(a, /* c */ b) -> /* c */ T`)
-        // has no structural home -- slice the signature verbatim (keeping the
-        // body structural). The body's `{` re-emitted by `block`.
         let block = f.body.rock_block().unwrap();
         let sig_start = f.keyword_span.unwrap_or(f.span);
-        let body_open = self.ast.b(&block).span.offset_range.0;
-        if sig_start.line_range.0 == self.ast.b(&block).span.line_range.0
-            && self
-                .trivia
-                .has_block_comment_in(sig_start.offset_range.0, body_open)
+        if let Some(sig) =
+            self.verbatim_signature(sig_start, f.params_span, self.ast.b(&block).span)
         {
-            let sig = self.slice_range(sig_start.offset_range.0, body_open);
-            return Doc::concat([
-                Doc::text(sig.trim_end().to_string()),
-                Doc::text(" "),
-                self.block(block),
-            ]);
+            return Doc::concat([sig, self.block(block)]);
         }
 
         let keyword = if f.is_macro { "macro" } else { "fn" };
@@ -428,11 +417,11 @@ impl<'a> Printer<'a> {
             sig.push(Doc::text("."));
             sig.push(Doc::text(kw(f.name.name)));
             sig.push(self.generics(&f.generics[k..]));
-            sig.push(self.params_impl(&f.params, true));
+            sig.push(self.params_impl(&f.params, f.params_span, true));
         } else {
             sig.push(Doc::text(kw(f.name.name)));
             sig.push(self.generics(&f.generics));
-            sig.push(self.params(&f.params));
+            sig.push(self.params_impl(&f.params, f.params_span, false));
         }
         if let Some(ret) = f.return_ty {
             sig.push(Doc::text(" -> "));
@@ -474,6 +463,29 @@ impl<'a> Printer<'a> {
         Doc::concat(parts)
     }
 
+    /// `head {}` for a struct or enum with no entries, keeping any comment the
+    /// parser dropped from between the braces.
+    fn empty_body(&self, head: Doc, span: Span) -> Doc {
+        let (open_line, close_line) = span.line_range;
+        let (lo, hi) = span.offset_range;
+        if self.trivia.has_inline_block_comment_in(lo, hi)
+            || self
+                .trivia
+                .trailing_comment(open_line)
+                .is_some_and(|(_, _, offset)| offset < hi)
+        {
+            return self.raw(span);
+        }
+        if self
+            .trivia
+            .has_own_line_comment_between(open_line, close_line)
+        {
+            let body = self.comma_block(Vec::new(), Some((open_line, close_line)), "{", "}");
+            return Doc::concat([head, body]);
+        }
+        Doc::concat([head, Doc::text("{}")])
+    }
+
     fn struct_def(&self, s: &StructDef) -> Doc {
         let prefix = if s.is_nobox {
             "nobox value "
@@ -489,7 +501,7 @@ impl<'a> Printer<'a> {
             Doc::text(" "),
         ]);
         if s.fields.is_empty() {
-            return Doc::concat([head, Doc::text("{}")]);
+            return self.empty_body(head, s.span);
         }
         // Preserve the author's layout: a definition on one source line stays
         // inline (`struct Pt { x: int, y: int }`); multi-line expands.
@@ -536,7 +548,7 @@ impl<'a> Printer<'a> {
             Doc::text(" "),
         ]);
         if e.variants.is_empty() {
-            return Doc::concat([head, Doc::text("{}")]);
+            return self.empty_body(head, e.span);
         }
         if e.span.line_range.0 == e.span.line_range.1 {
             let inner = Doc::join(Doc::text(", "), e.variants.iter().map(|v| self.variant(v)));
@@ -672,16 +684,39 @@ impl<'a> Printer<'a> {
         ])
     }
 
-    fn params(&self, params: &[Param]) -> Doc {
-        self.params_impl(params, false)
+    /// A signature holding a comment [`Self::params_impl`] has no place for,
+    /// sliced from the keyword up to the body's `{`: any comment outside the
+    /// parentheses, or a block comment sharing a line inside them. A line
+    /// comment outside them would swallow the `{`, so the brace moves down.
+    fn verbatim_signature(&self, start: Span, params: Span, body: Span) -> Option<Doc> {
+        let sig_start = start.offset_range.0;
+        let body_open = body.offset_range.0;
+        let (open, close) = params.offset_range;
+        let line_comment = self.trivia.has_line_comment_in(sig_start, open)
+            || self.trivia.has_line_comment_in(close, body_open);
+        if !line_comment
+            && !self.trivia.has_block_comment_in(sig_start, open)
+            && !self.trivia.has_block_comment_in(close, body_open)
+            && !self.trivia.has_inline_block_comment_in(open, close)
+        {
+            return None;
+        }
+        let sig = Doc::text(
+            self.slice_range(sig_start, body_open)
+                .trim_end()
+                .to_string(),
+        );
+        let separator = if line_comment {
+            hardline()
+        } else {
+            Doc::text(" ")
+        };
+        Some(Doc::concat([sig, separator]))
     }
 
     /// `bare_first` (D-form) prints param 0 as just its name -- the receiver's
     /// type comes from the path in the signature, not the param annotation.
-    fn params_impl(&self, params: &[Param], bare_first: bool) -> Doc {
-        if params.is_empty() {
-            return Doc::text("()");
-        }
+    fn params_impl(&self, params: &[Param], params_span: Span, bare_first: bool) -> Doc {
         let param_doc = |p: &Param, bare: bool| {
             let mut parts = self.leading_annotations(&p.annotations);
             parts.push(Doc::text(kw(p.name.name)));
@@ -698,17 +733,25 @@ impl<'a> Printer<'a> {
             }
             Doc::concat(parts)
         };
-        // A param trailing comment (`ox: float,  // offset x`) or a standalone
-        // comment between parameters forces the comment-preserving multi-line
-        // layout. The parser drops the standalone form, so recover it from the
-        // source interval spanned by the parameter list.
-        let first_line = params.first().unwrap().span.line_range.0;
-        let last_line = params.last().unwrap().span.line_range.1;
-        let has_standalone_comments = !self
+        // A param trailing comment (`ox: float,  // offset x`), a comment on the
+        // `(` line or an own-line comment anywhere between the parentheses
+        // forces the comment-preserving multi-line layout. The parser drops the
+        // last two, so recover them from the source interval.
+        let (open_line, close_line) = params_span.line_range;
+        let (open_offset, close_offset) = params_span.offset_range;
+        let open_comment = self
             .trivia
-            .standalone_comments_between(first_line.saturating_sub(1), last_line)
-            .is_empty();
-        if has_standalone_comments
+            .trailing_comment(open_line)
+            .filter(|(_, _, offset)| {
+                *offset < close_offset
+                    && self.slice_range(open_offset + 1, *offset).trim().is_empty()
+            })
+            .map(|(text, _, _)| text);
+        let has_own_line_comments = self
+            .trivia
+            .has_own_line_comment_between(open_line, close_line);
+        if has_own_line_comments
+            || open_comment.is_some()
             || params
                 .iter()
                 .any(|p| self.claimed_trailing_comment(p.span).is_some())
@@ -724,9 +767,11 @@ impl<'a> Printer<'a> {
                     )
                 })
                 .collect();
-            let body_span =
-                has_standalone_comments.then_some((first_line.saturating_sub(1), last_line + 1));
-            return self.comma_block(entries, body_span, "(", ")");
+            let open = open_comment.map_or_else(|| "(".to_string(), |text| format!("( //{text}"));
+            return self.comma_block(entries, Some((open_line, close_line)), &open, ")");
+        }
+        if params.is_empty() {
+            return Doc::text("()");
         }
         let items = params
             .iter()
@@ -962,9 +1007,9 @@ impl<'a> Printer<'a> {
     /// The last entry gets a trailing comma iff the author wrote one (preserve,
     /// not normalize -- the comma is cosmetic in the source-driven layout world).
     /// When `body_span` is `Some((open, close))` -- the lines of the enclosing
-    /// `{` and `}` -- standalone `//` comments the parser dropped inside the body
-    /// are recovered by position; `None` disables recovery (struct literals
-    /// deliberately drop interior comments, matching the corpus).
+    /// delimiters -- standalone comments the parser dropped inside the body are
+    /// recovered by position, with or without entries; `None` skips the search,
+    /// for callers that know the body holds none.
     fn comma_block(
         &self,
         entries: Vec<(Doc, usize, Span)>,
@@ -1063,7 +1108,8 @@ impl<'a> Printer<'a> {
         }
         // Trailing standalone comments between the last entry and the `}` --
         // `//` own-line and own-line `/* */`, in source-line order.
-        if let (Some((_, close)), Some(prev)) = (body_span, prev_end) {
+        if let Some((open_line, close)) = body_span {
+            let prev = prev_end.unwrap_or(open_line);
             let mut tail: Vec<(usize, Doc)> = self
                 .trivia
                 .standalone_comments_between(prev, close)
@@ -1074,8 +1120,11 @@ impl<'a> Printer<'a> {
                 tail.push((l, Doc::text(self.slice_range(s, e).to_string())));
             }
             tail.sort_by_key(|(l, _)| *l);
-            for (_, d) in tail {
-                body.push(hardline());
+            for (i, (_, d)) in tail.into_iter().enumerate() {
+                // The body already opened with a line break.
+                if i > 0 || prev_end.is_some() {
+                    body.push(hardline());
+                }
                 body.push(d);
             }
         }
@@ -1427,10 +1476,16 @@ impl<'a> Printer<'a> {
     }
 
     fn nested_fn_stmt(&self, f: &NestedFn) -> Doc {
+        let sig_start = f.keyword_span.unwrap_or(f.span);
+        if let Some(sig) =
+            self.verbatim_signature(sig_start, f.params_span, self.ast.b(&f.body).span)
+        {
+            return Doc::concat([sig, self.block(f.body)]);
+        }
         let mut sig = vec![
             Doc::text("fn "),
             Doc::text(kw(f.name.name)),
-            self.params(&f.params),
+            self.params_impl(&f.params, f.params_span, false),
         ];
         if let Some(ret) = f.return_ty {
             sig.push(Doc::text(" -> "));

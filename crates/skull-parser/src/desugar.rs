@@ -167,6 +167,7 @@ fn synth_newtype_operators(ast: &mut Ast) {
                     },
                     generics: Vec::new(),
                     params: vec![mk_param(pa_ty, "a"), mk_param(pb_ty, "b")],
+                    params_span: sp,
                     return_ty: Some(return_ty),
                     body: FunctionBody::Inline(
                         FnBackend::Lua,

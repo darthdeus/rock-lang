@@ -5,7 +5,7 @@
 //! and recovered here by source line.
 
 use rock_tokenizer::{TokenKind, Tokenizer};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound;
 use ustr::Ustr;
 
@@ -31,6 +31,8 @@ pub struct Trivia {
     /// Tokens other than comments, commas and newlines, by start offset; a `)`
     /// carries its `(end offset, 0-based line)`.
     code: BTreeMap<usize, Option<(usize, usize)>>,
+    /// Start offsets of every `//` comment, trailing or standalone.
+    line_comments: BTreeSet<usize>,
 }
 
 struct BlockComment {
@@ -54,6 +56,7 @@ impl Trivia {
         let mut standalone = BTreeMap::new();
         let mut block = BTreeMap::new();
         let mut code = BTreeMap::new();
+        let mut line_comments = BTreeSet::new();
         // Track the last line on which we saw a non-comment token, so a comment
         // sharing that line is classified as trailing.
         let mut code_on_line: Option<usize> = None;
@@ -92,12 +95,14 @@ impl Trivia {
                             },
                         );
                     } else if code_on_line == Some(line) {
+                        line_comments.insert(lo);
                         trailing
                             .insert(line, (text.as_str().to_string(), tok.span.col_range.0, lo));
                     } else if lines
                         .get(line)
                         .is_some_and(|l| l.trim_start().starts_with("//"))
                     {
+                        line_comments.insert(lo);
                         standalone.insert(line, text.as_str().to_string());
                     }
                 }
@@ -116,6 +121,7 @@ impl Trivia {
             blank,
             block,
             code,
+            line_comments,
         })
     }
 
@@ -170,6 +176,31 @@ impl Trivia {
             .range((Bound::Included(lo), Bound::Excluded(hi)))
             .next()
             .is_some()
+    }
+
+    /// True if a block comment sharing its line with code or another comment
+    /// starts within `[lo, hi)`.
+    pub fn has_inline_block_comment_in(&self, lo: usize, hi: usize) -> bool {
+        self.block
+            .range((Bound::Included(lo), Bound::Excluded(hi)))
+            .any(|(_, b)| !b.own_line)
+    }
+
+    /// True if a `//` comment starts within `[lo, hi)`.
+    pub fn has_line_comment_in(&self, lo: usize, hi: usize) -> bool {
+        self.line_comments
+            .range((Bound::Included(lo), Bound::Excluded(hi)))
+            .next()
+            .is_some()
+    }
+
+    /// True if an own-line comment of either form sits on a line strictly
+    /// between `after` and `before` (0-based, exclusive).
+    pub fn has_own_line_comment_between(&self, after: usize, before: usize) -> bool {
+        !self.standalone_comments_between(after, before).is_empty()
+            || !self
+                .own_line_block_comments_between(after, before)
+                .is_empty()
     }
 
     /// The block comment (start, end) immediately preceding `offset` -- i.e. the

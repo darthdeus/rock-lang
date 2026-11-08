@@ -7,18 +7,18 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-struct Case {
-    file: String,
-    name: String,
-    input: String,
+pub(crate) struct Case {
+    pub(crate) file: String,
+    pub(crate) name: String,
+    pub(crate) input: String,
     expected: String,
 }
 
-fn corpus_dir() -> PathBuf {
+pub(crate) fn corpus_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fmt")
 }
 
-fn collect_fmt_files(dir: &Path, out: &mut Vec<PathBuf>) {
+pub(crate) fn collect_fmt_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -35,7 +35,7 @@ fn collect_fmt_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// Split a `.rock.fmt` file into cases. A case is `//=== TEST CASE: name ===`
 /// then input then `//=== EXPECTED ===`+output OR `//=== NO CHANGE ===`
 /// (output == input).
-fn parse_cases(file: &str, text: &str) -> Vec<Case> {
+pub(crate) fn parse_cases(file: &str, text: &str) -> Vec<Case> {
     let mut cases = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;

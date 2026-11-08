@@ -478,6 +478,8 @@ pub struct NestedFn {
     pub keyword_span: Option<Span>,
     pub name: Ident,
     pub params: Vec<Param>,
+    /// `(` through `)`, so the formatter can find the comments inside.
+    pub params_span: Span,
     pub return_ty: Option<Idx<TypeExprData>>,
     pub body: Idx<BlockData>,
 }
@@ -639,6 +641,8 @@ pub struct FunctionDef {
     pub name: Ident,
     pub generics: Vec<Generic>,
     pub params: Vec<Param>,
+    /// `(` through `)`, so the formatter can find the comments inside.
+    pub params_span: Span,
     pub return_ty: Option<Idx<TypeExprData>>,
     pub body: FunctionBody,
     pub is_macro: bool,
