@@ -46,8 +46,7 @@ pub fn semantic_pass(
     aliases: &NsAliases,
     gate: ClosureGate,
 ) -> Result<Workspace, CompilerError> {
-    let ws =
-        bone_semantic::semantic_passes::semantic_pass_into(Workspace::default(), modules, aliases)?;
+    let ws = bone_semantic::semantic_passes::semantic_pass_without_closure_gate(modules, aliases)?;
     if gate == ClosureGate::Enforce {
         bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
     }

@@ -16,3 +16,4 @@ pub mod prelude;
 // navigation queries (definition/references) live in the bone-query crate.
 pub mod query;
 pub mod semantic_passes;
+pub mod stdlib_base;

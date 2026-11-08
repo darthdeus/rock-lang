@@ -823,16 +823,7 @@ impl Session {
             declared_facts: FxHashMap::default(),
         };
         session.warm_contributions = session.warm.iter().map(contribute).collect();
-        session.warm_names = session
-            .warm_contributions
-            .iter()
-            .flat_map(|c| c.items.iter())
-            .filter_map(|item| match item {
-                bone_semantic::semantic_passes::ScopeItem::Def { name, .. } => Some(*name),
-                _ => None,
-            })
-            .chain(bone_core::modules::std_exported_intrinsic_types().map(ustr))
-            .collect();
+        session.warm_names = bone_semantic::stdlib_base::warm_names(&session.warm_contributions);
 
         // Parse each file once for its prints/macros AND keep the module to feed
         // lowering directly -- avoids a second parse via `combined_unexpanded`,
@@ -1426,31 +1417,10 @@ impl Session {
         }
     }
 
-    /// Whether the user file `ast` defines nothing, and no macro, under a
-    /// name a warm module defines (or an intrinsic type name): a legacy
-    /// file's items, a v1 file's bare-keyed operator functions, and any
-    /// file's macros. A v1 file's other definitions are keyed by DefKey and
-    /// cannot collide.
+    /// Whether the user file `ast` can reach no warm lowering
+    /// ([`bone_semantic::stdlib_base::apart_from`]).
     fn apart_from_warm(&self, ast: &Ast, contribution: &FragmentContribution) -> bool {
-        use bone_semantic::semantic_passes::ScopeItem;
-        fn apart(items: &[ScopeItem], legacy: bool, warm: &FxHashSet<Ustr>) -> bool {
-            items.iter().all(|item| match item {
-                ScopeItem::Def { name, kind, .. } => {
-                    let bare =
-                        legacy || (*kind == "callable" && name.as_str().starts_with("__op_"));
-                    !(bare && warm.contains(name))
-                }
-                ScopeItem::Module { items, .. } => apart(items, legacy, warm),
-                ScopeItem::Use(_) => true,
-            })
-        }
-        apart(
-            &contribution.items,
-            ast.dialect == Dialect::Legacy,
-            &self.warm_names,
-        ) && macro_defs(ast)
-            .iter()
-            .all(|m| !self.warm_names.contains(&m.name))
+        bone_semantic::stdlib_base::apart_from(&self.warm_names, ast, contribution)
     }
 
     /// Every file's namespace contribution in module order: the warm modules,

@@ -1117,10 +1117,17 @@ pub fn semantic_pass_with_aliases(
 /// reads [`api_closure_requirements`] itself (the migrate planner grows an
 /// export set until the closure is satisfied). Every compile path takes the
 /// gated pass.
+///
+/// When `rock_modules` begin with the process stdlib and no user module can
+/// change it, the pass starts from the stdlib checked once per process
+/// ([`crate::stdlib_base`]) and leaves that stdlib prefix unexpanded.
 pub fn semantic_pass_without_closure_gate(
     rock_modules: &mut [Ast],
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<Workspace, CompilerError> {
+    if let Some(pass) = crate::stdlib_base::semantic_pass(rock_modules, aliases) {
+        return pass;
+    }
     semantic_pass_into(Workspace::default(), rock_modules, aliases)
 }
 
