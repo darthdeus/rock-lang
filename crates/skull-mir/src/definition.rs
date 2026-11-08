@@ -16,6 +16,16 @@ pub fn is_artifact_definition(decorator: &bone_semantic::hir::DecoratorDef) -> b
         .any(|ann| ann.is_builtin("artifact_definition"))
 }
 
+/// A typed catalog accessor: the compiler defines its body from the
+/// definition plan, so no backend mapping or Rock body supplies it.
+pub fn is_artifact_catalog_accessor(function: &bone_semantic::hir::Function) -> bool {
+    function.is_extern
+        && function
+            .annotations
+            .iter()
+            .any(|ann| ann.is_builtin("artifact_catalog"))
+}
+
 pub fn is_compiler_owned_decorator(decorator: &bone_semantic::hir::DecoratorDef) -> bool {
     is_artifact_definition(decorator)
         || decorator

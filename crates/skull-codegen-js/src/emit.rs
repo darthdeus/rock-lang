@@ -7801,6 +7801,11 @@ pub enum JsSupply {
 /// including the portable `map_new` body. Unmarked same-name user functions
 /// remain ordinary callees.
 pub fn js_supply(ws: &Workspace, cf: &bone_semantic::hir::Function) -> Option<JsSupply> {
+    // `definition_plan_stage_js` defines the accessor under its own symbol.
+    if skull_mir::definition::is_artifact_catalog_accessor(cf) {
+        let symbol = ustr::Ustr::from(skull_mir::mangle::mangle_fn(ws, cf).as_str());
+        return Some(JsSupply::Global(symbol.as_str()));
+    }
     match JsIntrinsics(ws).lookup(cf) {
         Some(Emission::Template(tmpl)) => Some(JsSupply::Template(tmpl)),
         Some(Emission::Global(name)) => Some(JsSupply::Global(name)),

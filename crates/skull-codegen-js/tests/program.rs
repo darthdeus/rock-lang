@@ -668,3 +668,39 @@ fn inline_js_specializations_emit_in_a_stable_order() {
         );
     }
 }
+
+// A test closure that calls a typed catalog accessor reaches it as an ordinary
+// callee; the accessor has no Rock body and no intrinsic-table entry, because
+// the definition-plan stage defines it under its own symbol.
+#[test]
+fn closure_calling_a_typed_catalog_accessor_emits() {
+    let ws = ws_with(
+        r#"
+struct WidgetDef { value: int }
+@artifact_definition(catalog="widgets", key_param="key")
+deco init widget(key: string) {}
+@artifact_catalog(catalog="widgets")
+@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
+fn root() -> int { return widget_definition_plan().len }
+"#,
+    );
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module");
+    let (fid, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "root")
+        .expect("root");
+    let root = skull_mir::mir::FuncRef {
+        module: mid,
+        func: fid,
+    };
+    let js = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())])
+        .map_err(|e| e.message)
+        .expect("accessor call emits");
+    assert!(js.contains("widget_definition_plan()"), "{js}");
+}
