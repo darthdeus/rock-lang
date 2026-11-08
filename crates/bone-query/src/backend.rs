@@ -2335,7 +2335,7 @@ impl BoneWorkspace {
         let recv_hints = proj
             .fallbacks
             .result(
-                skull_parser::parse_module(src, Ustr::from(path)),
+                proj.session.parse_buffer(path, src),
                 "inlay",
                 path,
                 "parse receiver hints",
@@ -3877,7 +3877,7 @@ fn reparse_with_project(
         "combined-module parse",
         "use live workspace",
     )?;
-    reparse_with_project_inner(&combined, path, munged, fallbacks, request)
+    reparse_with_project_inner(session, &combined, path, munged, fallbacks, request)
 }
 
 /// Analyze one completion munge: apply it as a speculative Session variant
@@ -3918,6 +3918,7 @@ pub(crate) fn analyze_variant<R>(
 }
 
 fn reparse_with_project_inner(
+    session: &Session,
     combined: &[skull_parser::Ast],
     path: &str,
     munged: &str,
@@ -3937,7 +3938,7 @@ fn reparse_with_project_inner(
     // gates on) -- so completion still resolves from the best-effort tree (backlog
     // #21). Only a hard tokenizer failure is `Err`/`None` here.
     let parsed = reports.result(
-        skull_parser::parse_module(munged, Ustr::from(path)),
+        session.parse_buffer(path, munged),
         request,
         path,
         "parse recovery source",
@@ -3945,7 +3946,7 @@ fn reparse_with_project_inner(
     )?;
     modules.push(parsed.clone());
     if let Some(ws) = reports.result(
-        bone_semantic::semantic_passes::semantic_pass(&mut modules),
+        bone_semantic::semantic_passes::semantic_pass_with_aliases(&mut modules, &session.aliases),
         request,
         path,
         "project semantic recovery",

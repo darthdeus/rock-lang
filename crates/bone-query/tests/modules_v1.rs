@@ -1369,3 +1369,46 @@ fn qualified_nullable_annotations_are_not_expression_holes() {
             .any(|d| d.message.contains("hole"))
     );
 }
+
+// -- inlay hints --------------------------------------------------------------
+
+fn inlay_labels(bone: &BoneWorkspace, path: &str) -> Vec<String> {
+    let all = lsp_types::Range::new(Position::new(0, 0), Position::new(1000, 0));
+    bone.inlay_hints(path, all)
+        .into_iter()
+        .map(|h| match h.label {
+            lsp_types::InlayHintLabel::String(s) => s,
+            lsp_types::InlayHintLabel::LabelParts(parts) => {
+                parts.into_iter().map(|p| p.value).collect()
+            }
+        })
+        .collect()
+}
+
+/// A v1 file that enters the session with a hard tokenizer error has no live
+/// module, so inlay hints come from the recovery reparse of the buffer. That
+/// reparse must read the file as its package does: read as legacy it lost its
+/// `pub mod` header and `use` items, and `area` typed as `<error>`. The
+/// control breaks the same file recoverably, so the session itself answers.
+#[test]
+fn recovery_reparse_reads_a_v1_buffer_as_its_package_does() {
+    let head = "pub mod extra;\n\nuse super::shapes::area;\n\npub fn more() -> int {\n    let n = area(2)\n    n\n}\n\nfn broken() {\n";
+    for (tail, live) in [("    let q = (1\n", true), ("    let q = \"abc\n", false)] {
+        let project = V1Project::new();
+        let mut bone = project.open();
+        let text = format!("{head}{tail}");
+        std::fs::write(project.dir.path().join("extra.rock"), &text).unwrap();
+        let extra = project.path("extra.rock");
+        let diags = bone.update(&extra, text);
+        assert!(
+            !errors_in(&diags, &extra).is_empty(),
+            "the buffer is broken"
+        );
+        let labels = inlay_labels(&bone, &extra);
+        assert_eq!(
+            labels.first().map(String::as_str),
+            Some(": int"),
+            "`let n = area(2)` (live session: {live}): {labels:?}"
+        );
+    }
+}

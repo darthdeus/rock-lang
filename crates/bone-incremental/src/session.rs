@@ -951,6 +951,15 @@ impl Session {
         }
     }
 
+    /// Parse `text` as a buffer of `path`, with the dialect and package a
+    /// stored copy of it carries. A recovery reparse of an editor buffer goes
+    /// through here: parsed as legacy, a v1 file loses its module header and
+    /// `use` items.
+    pub fn parse_buffer(&self, path: &str, text: &str) -> Result<Ast, CompilerError> {
+        let (dialect, package, global_policy) = self.facts_of(path);
+        parse_with_facts(text, ustr(path), dialect, package, global_policy)
+    }
+
     /// Declare the dialect and owning package of a file that enters the
     /// session after [`Session::new`] -- the editor opening a file the batch
     /// load did not see. Its manifest decides both, exactly as for a file of
