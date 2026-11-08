@@ -1587,9 +1587,7 @@ fn main() { let a = ident(1) }
         .substitution(&inst)
         .expect("ident instance kept no substitution")
         .clone();
-    let with = g
-        .interner()
-        .with_mut(|a| concrete_body::convert_body(a, &ws, inf, body, &subst));
+    let with = concrete_body::convert_body(g.interner(), &ws, inf, body, &subst);
     assert_eq!(
         with.failures.len(),
         0,
@@ -1598,9 +1596,7 @@ fn main() { let a = ident(1) }
     );
     assert!(with.examined() > 0);
 
-    let without = g
-        .interner()
-        .with_mut(|a| concrete_body::convert_body(a, &ws, inf, body, &Default::default()));
+    let without = concrete_body::convert_body(g.interner(), &ws, inf, body, &Default::default());
     assert!(
         !without.failures.is_empty(),
         "an EMPTY substitution converted every slot of a generic body, so the \

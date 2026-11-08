@@ -608,6 +608,11 @@ impl MonoArena {
         &self.tys[id.index()]
     }
 
+    /// The id `ty` already has, without interning it.
+    pub fn lookup(&self, ty: &MonoTy) -> Option<MonoTyId> {
+        self.interned.get(ty).copied()
+    }
+
     pub fn intern(&mut self, ty: MonoTy) -> MonoTyId {
         self.intern_attempts += 1;
         if let Some(id) = self.interned.get(&ty) {
@@ -739,12 +744,20 @@ pub struct MonoInterner {
     read_acqs: std::sync::atomic::AtomicU64,
     local_read_hits: std::sync::atomic::AtomicU64,
     write_acqs: std::sync::atomic::AtomicU64,
+    /// Interns answered without the write lock, from the worker-local cache
+    /// or a shared read; the arena's own attempt counter sees only the
+    /// write path.
+    shared_intern_hits: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Default)]
 struct MonoReadCache {
     arena_gen: u64,
     tys: Vec<Option<Rc<MonoTy>>>,
+    /// Types this worker has interned before, so a repeat intern takes no
+    /// lock and touches no shared counter; the arena is monotonic, so an id
+    /// learned once stays right for the generation.
+    ids: FxHashMap<MonoTy, MonoTyId>,
 }
 
 impl MonoReadCache {
@@ -752,6 +765,7 @@ impl MonoReadCache {
         if self.arena_gen != arena_gen {
             self.arena_gen = arena_gen;
             self.tys.clear();
+            self.ids.clear();
         }
     }
 
@@ -811,6 +825,7 @@ impl MonoInterner {
             read_acqs: std::sync::atomic::AtomicU64::new(0),
             local_read_hits: std::sync::atomic::AtomicU64::new(0),
             write_acqs: std::sync::atomic::AtomicU64::new(0),
+            shared_intern_hits: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -822,19 +837,78 @@ impl MonoInterner {
         self.len() == 0
     }
 
+    /// Intern `ty`, taking the write lock only when it is new. Almost every
+    /// intern during a build names a type that is already there (the graph
+    /// walk and the concrete-plan conversion run on rayon workers and keep
+    /// meeting the same types), so a shared read first keeps those workers
+    /// from serializing on the one arena.
     pub fn intern(&self, ty: MonoTy) -> MonoTyId {
-        self.write_acqs
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        self.arena.write().expect("mono arena poisoned").intern(ty)
+        MONO_READ_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.reset_for(self.arena_gen);
+            if let Some(id) = cache.ids.get(&ty) {
+                self.shared_intern_hits
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return *id;
+            }
+            let id = match self.with(|a| a.lookup(&ty)) {
+                Some(id) => {
+                    self.shared_intern_hits
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    id
+                }
+                None => {
+                    self.write_acqs
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.arena
+                        .write()
+                        .expect("mono arena poisoned")
+                        .intern(ty.clone())
+                }
+            };
+            cache.ids.insert(ty, id);
+            id
+        })
     }
 
-    /// One lock acquisition for a whole argument list, which is how an
+    /// [`Self::intern`] over a whole argument list, which is how an
     /// instance's arguments arrive.
     pub fn intern_all(&self, tys: impl IntoIterator<Item = MonoTy>) -> Vec<MonoTyId> {
-        self.write_acqs
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let mut arena = self.arena.write().expect("mono arena poisoned");
-        tys.into_iter().map(|ty| arena.intern(ty)).collect()
+        tys.into_iter().map(|ty| self.intern(ty)).collect()
+    }
+
+    /// [`MonoArena::convert`] through [`Self::intern`]: the conversion itself
+    /// holds no lock.
+    pub fn convert(
+        &self,
+        ws: &Workspace,
+        inf: &BodyInference,
+        ty: TyId,
+        subst: &MonoSubst,
+    ) -> Result<MonoTyId, MonoTyReason> {
+        Ok(self.intern(convert(ws, inf, ty, subst)?))
+    }
+
+    /// [`MonoArena::convert_decl`] through [`Self::intern`].
+    pub fn convert_decl(
+        &self,
+        ws: &Workspace,
+        ty: TyId,
+        subst: &MonoSubst,
+    ) -> Result<MonoTyId, MonoTyReason> {
+        Ok(self.intern(convert_decl(ws, ty, subst)?))
+    }
+
+    /// [`MonoArena::convert_counting`] through [`Self::intern`].
+    pub fn convert_counting(
+        &self,
+        ws: &Workspace,
+        inf: &BodyInference,
+        ty: TyId,
+        subst: &MonoSubst,
+        bound: &mut usize,
+    ) -> Result<MonoTyId, MonoTyReason> {
+        Ok(self.intern(convert_counting(ws, inf, ty, subst, bound)?))
     }
 
     /// The type an id names. Returns an OWNED [`MonoTy`] because the arena is
@@ -908,6 +982,7 @@ impl MonoInterner {
             let (at, new) = a.intern_stats();
             (at, new, a.len() as u64)
         });
+        let intern_attempts = intern_attempts + self.shared_intern_hits.load(Ordering::Relaxed);
         MonoInternerStats {
             // Subtract the read this snapshot itself just took.
             read_acqs: self.read_acqs.load(Ordering::Relaxed).saturating_sub(1),

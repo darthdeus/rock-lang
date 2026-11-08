@@ -267,9 +267,14 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
             && census.mono_write_acqs > 0
             && census.mono_read_acqs > 0
             && census.mono_interner_self_ns > 0
-            && census.mono_timed_mutation_calls > 0
-            && census.mono_timed_mutation_calls == census.mono_write_acqs,
+            && census.mono_timed_mutation_calls > 0,
         "graph interner census is empty: {census:?}"
+    );
+    // The interner takes its write lock only for a type it has not seen, so
+    // the walk's timed interner calls exceed the write acquisitions.
+    assert!(
+        census.mono_write_acqs <= census.mono_timed_mutation_calls,
+        "more write acquisitions than interner calls: {census:?}"
     );
     assert!(
         census.contribution_reached > 0

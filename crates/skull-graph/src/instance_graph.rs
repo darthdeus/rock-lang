@@ -41,7 +41,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use skull_mir::lower::{ContainerFamily, ContainerPlan, RepArena};
 use skull_mir::mangle::mangle_fn;
 use skull_mir::mir::FuncRef;
-use skull_mir::monoty::{MonoArena, MonoInterner, MonoSubst, MonoTyId, MonoTyReason};
+use skull_mir::monoty::{MonoInterner, MonoSubst, MonoTyId, MonoTyReason};
 
 /// The identity vocabulary now lives in `skull-mir` ([`skull_mir::instance`]),
 /// low enough that emission can key its bodies on it. This module remains the
@@ -498,13 +498,13 @@ impl Walk<'_> {
         self.timing_enabled.then(Instant::now)
     }
 
-    fn with_interner_mut<R>(&mut self, f: impl FnOnce(&mut MonoArena) -> R) -> R {
+    fn with_interner<R>(&mut self, f: impl FnOnce(&MonoInterner) -> R) -> R {
         if !self.timing_enabled {
-            return self.interner.with_mut(f);
+            return f(self.interner);
         }
         let started = Instant::now();
         self.out.timing.mono_timed_mutation_calls += 1;
-        let result = self.interner.with_mut(f);
+        let result = f(self.interner);
         self.out.timing.mono_interner_self_ns += started.elapsed().as_nanos() as u64;
         result
     }
@@ -4867,7 +4867,7 @@ fn record_call_impl(
     }
     let cf = &ws.module(callee.module).functions[callee.func];
     let conversion_start = w.timer();
-    let instantiated = w.with_interner_mut(|a| {
+    let instantiated = w.with_interner(|a| {
         instantiate(a, ws, inf, callee.module, callee.func, cf, bindings, subst)
     });
     add_elapsed(
@@ -5122,9 +5122,8 @@ fn record_witness(
     let callee = rep;
     let cf = &ws.module(callee.module).functions[callee.func];
     let conversion_start = w.timer();
-    let instantiated = w.with_interner_mut(|a| {
-        instantiate_witness(a, ws, inf, resolved, cf, &witness.generics, subst)
-    });
+    let instantiated = w
+        .with_interner(|a| instantiate_witness(a, ws, inf, resolved, cf, &witness.generics, subst));
     add_elapsed(
         &mut w.out.timing.signature_type_conversion_ns,
         conversion_start,
@@ -5453,8 +5452,8 @@ fn record_bound_next(
         w.out.always_emitted_seeds += 1;
     }
     let conversion_start = w.timer();
-    let instantiated = w
-        .with_interner_mut(|a| instantiate_witness(a, ws, inf, resolved, cf, next_generics, subst));
+    let instantiated =
+        w.with_interner(|a| instantiate_witness(a, ws, inf, resolved, cf, next_generics, subst));
     add_elapsed(
         &mut w.out.timing.signature_type_conversion_ns,
         conversion_start,
@@ -5588,7 +5587,7 @@ fn walk_bound_tree(
 /// the CALLER's substitution, plus the substitution to walk the callee's body
 /// with. This is the transitive-instantiation step.
 fn instantiate(
-    arena: &mut MonoArena,
+    interner: &MonoInterner,
     ws: &Workspace,
     inf: &BodyInference,
     callee_module: ModuleId,
@@ -5634,7 +5633,7 @@ fn instantiate(
             }
             Err(reason) => return Err(convert_fail(reason)),
         };
-        args.push(arena.intern(ty.clone()));
+        args.push(interner.intern(ty.clone()));
         callee_subst.insert(var, ty);
     }
     Ok((args, callee_subst))
@@ -5734,7 +5733,7 @@ fn generic_parameter_is_observable(
 /// route `spec_key_from_next_generics` takes -- a shape comes from a
 /// declaration, never from the body's own inference.
 fn instantiate_witness(
-    arena: &mut MonoArena,
+    interner: &MonoInterner,
     ws: &Workspace,
     inf: &BodyInference,
     resolved: &Function,
@@ -5767,7 +5766,7 @@ fn instantiate_witness(
             return Err(Fail::Unresolved("witness-generic-unbound"));
         };
         let ty = skull_mir::monoty::convert(ws, inf, *bound, caller_subst).map_err(convert_fail)?;
-        args.push(arena.intern(ty.clone()));
+        args.push(interner.intern(ty.clone()));
         callee_subst.insert(cvar, ty);
     }
     Ok((args, callee_subst))

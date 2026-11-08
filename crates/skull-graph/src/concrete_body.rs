@@ -40,7 +40,7 @@ use skull_mir::concrete::{
     ConcreteSignatureHandle, ConcreteTypeTables,
 };
 use skull_mir::mir::FuncRef;
-use skull_mir::monoty::{MonoArena, MonoCtor, MonoSubst, MonoTy, MonoTyId, MonoTyReason, TyEnv};
+use skull_mir::monoty::{MonoCtor, MonoInterner, MonoSubst, MonoTy, MonoTyId, MonoTyReason, TyEnv};
 use ustr::Ustr;
 
 use crate::instance_graph::{
@@ -1058,7 +1058,7 @@ impl Converted {
 /// a different one and watch the generic slots go unbound, which is the only
 /// perturbation that moves this arm without moving the walk that produced it.
 pub fn convert_body(
-    arena: &mut MonoArena,
+    arena: &MonoInterner,
     ws: &Workspace,
     inf: &BodyInference,
     body: &Body,
@@ -1074,7 +1074,7 @@ pub fn convert_body(
     let mut conversions = 0usize;
     let conversions_ref = &mut conversions;
     let mut convert_memo =
-        |arena: &mut MonoArena, ty: TyId, generics_bound: &mut usize| match memo.entry(ty) {
+        |arena: &MonoInterner, ty: TyId, generics_bound: &mut usize| match memo.entry(ty) {
             std::collections::hash_map::Entry::Occupied(hit) => match hit.get() {
                 Ok((id, delta)) => {
                     *generics_bound += delta;
@@ -1255,7 +1255,8 @@ fn concrete_signature(
     subst: &MonoSubst,
 ) -> Result<ConcreteSignature, MonoTyReason> {
     let f = &ws.module(inst.func.module).functions[inst.func.func];
-    g.interner().with_mut(|arena| {
+    let arena = g.interner();
+    {
         let params = f
             .param_decls
             .iter()
@@ -1275,7 +1276,7 @@ fn concrete_signature(
             param_tuple_spelled,
             result,
         })
-    })
+    }
 }
 
 fn declared_tuple_param(ws: &Workspace, ty: TyId) -> Result<bool, MonoTyReason> {
@@ -1315,9 +1316,7 @@ fn concrete_tables(
     stats: &mut ConcreteBuildStats,
     timing_enabled: bool,
 ) -> Result<ConcreteTypeTables, MonoTyReason> {
-    let mut converted = g
-        .interner()
-        .with_mut(|arena| convert_body(arena, ws, inf, body, subst));
+    let mut converted = convert_body(g.interner(), ws, inf, body, subst);
     for failure in &converted.failures {
         if !matches!(failure.reason, MonoTyReason::UnresolvedInfer(_)) {
             return Err(failure.reason.clone());
@@ -1402,7 +1401,8 @@ fn concrete_struct_field_types(
             };
             subst.insert(var, param.clone());
         }
-        let fields = g.interner().with_mut(|arena| {
+        let arena = g.interner();
+        let fields = {
             def.fields
                 .iter()
                 .map(|field| {
@@ -1412,7 +1412,7 @@ fn concrete_struct_field_types(
                         .map(|ty| (field.name, ty))
                 })
                 .collect::<Result<FxHashMap<_, _>, _>>()
-        })?;
+        }?;
         out.insert(expr, fields);
     }
     if let Some(started) = started {
@@ -1454,36 +1454,36 @@ fn concrete_ty_types(
     }
     stats.type_nodes_examined += nodes.len();
     let started = timing_enabled.then(bone_core::prelude::Instant::now);
-    g.interner()
-        .with_mut(|arena| {
-            nodes
-                .into_iter()
-                .filter_map(|ty| {
-                    let converted = if let Some(cached) = memo.get(&ty) {
-                        stats.type_node_memo_hits += 1;
-                        cached.clone()
-                    } else {
-                        stats.type_node_conversion_attempts += 1;
-                        let converted = arena.convert(ws, inf, ty, subst);
-                        memo.insert(ty, converted.clone().map(|id| (id, 0)));
-                        converted.map(|id| (id, 0))
-                    };
-                    match converted {
-                        Ok((id, _)) => Some(Ok((ty, id))),
-                        Err(MonoTyReason::UnresolvedInfer(_)) => {
-                            stats.type_node_unresolved += 1;
-                            None
-                        }
-                        Err(reason) => Some(Err(reason)),
+    let arena = g.interner();
+    {
+        nodes
+            .into_iter()
+            .filter_map(|ty| {
+                let converted = if let Some(cached) = memo.get(&ty) {
+                    stats.type_node_memo_hits += 1;
+                    cached.clone()
+                } else {
+                    stats.type_node_conversion_attempts += 1;
+                    let converted = arena.convert(ws, inf, ty, subst);
+                    memo.insert(ty, converted.clone().map(|id| (id, 0)));
+                    converted.map(|id| (id, 0))
+                };
+                match converted {
+                    Ok((id, _)) => Some(Ok((ty, id))),
+                    Err(MonoTyReason::UnresolvedInfer(_)) => {
+                        stats.type_node_unresolved += 1;
+                        None
                     }
-                })
-                .collect::<Result<rustc_hash::FxHashMap<_, _>, _>>()
-        })
-        .inspect(|_| {
-            if let Some(started) = started {
-                stats.type_nodes_ns += started.elapsed().as_nanos() as u64;
-            }
-        })
+                    Err(reason) => Some(Err(reason)),
+                }
+            })
+            .collect::<Result<rustc_hash::FxHashMap<_, _>, _>>()
+    }
+    .inspect(|_| {
+        if let Some(started) = started {
+            stats.type_nodes_ns += started.elapsed().as_nanos() as u64;
+        }
+    })
 }
 
 fn collect_type_nodes(ws: &Workspace, inf: &BodyInference, ty: TyId, out: &mut FxHashSet<TyId>) {
@@ -2001,9 +2001,7 @@ fn prepare_instance(
         (0, 0)
     };
     let started = bone_core::prelude::Instant::now();
-    let converted = g
-        .interner()
-        .with_mut(|arena| convert_body(arena, ws, inf, body, &subst));
+    let converted = convert_body(g.interner(), ws, inf, body, &subst);
     let convert_time = started.elapsed();
     facts.expr_examined = converted.expr_examined;
     facts.binding_examined = converted.binding_examined;
@@ -2969,27 +2967,33 @@ fn build_published_impl(
     let expansion_time = t_expansion.elapsed();
 
     let t_preparation = bone_core::prelude::Instant::now();
-    let mut prepared = expanded
-        .iter()
-        .cloned()
-        .map(|instance| prepare_instance(ws, g, instance, timing_enabled))
-        .collect::<Vec<_>>();
-    let always_inputs = g
+    // Each preparation converts one body's types; the interner takes its
+    // write lock only for a type it has not seen, so the bodies convert in
+    // parallel. Both collects keep the input order, so the published tables
+    // do not depend on the schedule.
+    let always_owners = g
         .contributions
         .keys()
         .enumerate()
         .filter_map(|(order, owner)| match owner {
-            Owner::AlwaysEmitted(module, body_owner) => Some(prepare_always(
-                ws,
-                g,
-                order,
-                *module,
-                *body_owner,
-                timing_enabled,
-            )),
+            Owner::AlwaysEmitted(module, body_owner) => Some((order, *module, *body_owner)),
             Owner::Instance(_) => None,
         })
         .collect::<Vec<_>>();
+    let (mut prepared, always_inputs) = {
+        use bone_core::prelude::*;
+        let prepared = expanded
+            .into_par_iter()
+            .map(|instance| prepare_instance(ws, g, instance, timing_enabled))
+            .collect::<Vec<_>>();
+        let always_inputs = always_owners
+            .into_par_iter()
+            .map(|(order, module, body_owner)| {
+                prepare_always(ws, g, order, module, body_owner, timing_enabled)
+            })
+            .collect::<Vec<_>>();
+        (prepared, always_inputs)
+    };
     let preparation_time = t_preparation.elapsed();
 
     let publication_instances = prepared
