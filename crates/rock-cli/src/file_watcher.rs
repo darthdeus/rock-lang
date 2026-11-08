@@ -695,6 +695,18 @@ mod macos {
         hash: [u8; 32],
         verified_at: SystemTime,
     }
+    /// Keep the path in the message itself: the CLI prints only the top of
+    /// an error chain, and a bare OS error does not say what was missing.
+    fn path_error(error: std::io::Error, operation: &str, path: &Path) -> anyhow::Error {
+        std::io::Error::new(
+            error.kind(),
+            format!("{operation} {}: {error}", path.display()),
+        )
+        .into()
+    }
+    fn stat_error(error: std::io::Error, path: &Path) -> anyhow::Error {
+        path_error(error, "watch", path)
+    }
     fn content_hash(path: &Path) -> std::io::Result<[u8; 32]> {
         let mut file = std::fs::File::open(path)?;
         let mut hash = Sha256::new();
@@ -788,7 +800,7 @@ mod macos {
             let metadata = match std::fs::metadata(root) {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(stat_error(error, root)),
             };
             let identity = (metadata.dev(), metadata.ino());
             // Follow directory links, but never recurse back into an ancestor.
@@ -802,7 +814,7 @@ mod macos {
                     self.directories.remove(root);
                     return Ok(());
                 }
-                Err(error) => return Err(error.into()),
+                Err(error) => return Err(stat_error(error, root)),
             };
             let reread = match self.directories.get(root) {
                 None => true,
@@ -816,12 +828,14 @@ mod macos {
                 {
                     self.directory_reads += 1;
                 }
-                for entry in std::fs::read_dir(root)? {
-                    let entry = entry?;
+                for entry in std::fs::read_dir(root).map_err(|error| stat_error(error, root))? {
+                    let entry = entry.map_err(|error| stat_error(error, root))?;
                     let path = entry.path();
-                    let kind = entry.file_type()?;
+                    let kind = entry
+                        .file_type()
+                        .map_err(|error| stat_error(error, &path))?;
                     let metadata = if kind.is_symlink() {
-                        Some(std::fs::metadata(&path)?)
+                        Some(std::fs::metadata(&path).map_err(|error| stat_error(error, &path))?)
                     } else {
                         None
                     };
@@ -883,7 +897,7 @@ mod macos {
                     }
                     Ok(_) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(stat_error(error, &root)),
                 }
             }
             self.directories.retain(|path, _| visited.contains(path));
@@ -930,7 +944,7 @@ mod macos {
                         }
                         continue;
                     }
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(stat_error(error, path)),
                 };
                 let old = self.files.get(path);
                 let stamps_equal = old.is_some_and(|old| old.stamp == stamp);
@@ -944,7 +958,7 @@ mod macos {
                     // Atomic saves can replace the path between stat and open;
                     // leave the prior state intact for the next scan.
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(error) => return Err(error.into()),
+                    Err(error) => return Err(stat_error(error, path)),
                 };
                 let relevant = if stamps_equal {
                     old.is_some_and(|old| old.hash != hash)
@@ -1040,18 +1054,27 @@ mod macos {
         paths: Vec<PathBuf>,
         change_tx: Sender<FileChangeEvent>,
     ) -> Result<MacHandle> {
-        // Exact inputs may not exist yet; canonicalize their containing directory.
+        // Exact inputs, and even their directories, may not exist yet: an
+        // installed SDK has no tmp/ for its restart trigger. Canonicalize the
+        // nearest existing ancestor; every scan stats the rest afresh.
         let canonical = |path: PathBuf| -> Result<PathBuf> {
-            if path.exists() {
-                return Ok(path.canonicalize()?);
-            }
-            let parent = path
-                .parent()
-                .ok_or_else(|| anyhow::anyhow!("watch path has no parent"))?;
-            Ok(parent.canonicalize()?.join(
-                path.file_name()
-                    .ok_or_else(|| anyhow::anyhow!("watch path has no name"))?,
-            ))
+            let absolute = std::path::absolute(&path)
+                .map_err(|error| path_error(error, "resolve watch path", &path))?;
+            let existing = absolute
+                .ancestors()
+                .find(|ancestor| ancestor.exists())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("no ancestor of watch path {} exists", path.display())
+                })?;
+            let rest = absolute
+                .strip_prefix(existing)
+                .expect("an ancestor prefixes its descendant");
+            let mut resolved = existing
+                .canonicalize()
+                .map_err(|error| path_error(error, "canonicalize watch path", existing))?;
+            // `join("")` would append a separator, turning a file into a directory path.
+            resolved.extend(rest.components());
+            Ok(resolved)
         };
         let roots = paths
             .into_iter()
@@ -1335,6 +1358,32 @@ mod macos {
                 assert_eq!(event.paths, HashSet::from([restart.clone()]));
                 assert!(event.is_restart_trigger);
             }
+        }
+        /// An installed SDK has no `tmp/`, so the restart trigger's directory
+        /// is created only when someone requests a restart.
+        #[cfg(target_os = "macos")]
+        #[test]
+        fn restart_file_in_a_missing_directory_is_watched_until_created() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path().canonicalize().unwrap();
+            let restart = root.join("sdk/tmp/restart.txt");
+            let manifest = root.join("Cargo.lock");
+            std::fs::write(&manifest, "").unwrap();
+            let (tx, rx) = channel();
+            let _handle = start(
+                FileWatcherConfig {
+                    restart_files: vec![restart.clone()],
+                    ..Default::default()
+                },
+                vec![root.join("game"), manifest],
+                tx,
+            )
+            .unwrap();
+            std::fs::create_dir_all(restart.parent().unwrap()).unwrap();
+            std::fs::write(&restart, "trigger").unwrap();
+            let event = rx.recv_timeout(test_utils::HANG_BACKSTOP).unwrap();
+            assert_eq!(event.paths, HashSet::from([restart]));
+            assert!(event.is_restart_trigger);
         }
         #[test]
         fn unreadable_input_does_not_consume_another_files_edit() {
