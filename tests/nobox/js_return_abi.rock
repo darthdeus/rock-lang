@@ -475,3 +475,100 @@ co fn op_in_coroutine(seed: IV) -> Coroutine<int> {
     assert_eq(v.y, 2)
     assert_eq(__order_trace_read(), "12")
 }
+
+// --- bound calls, nullable phis, changed widths and trampolined captures ------
+//
+// Each case below goes RED under the capture-before-call mutation. Asserted
+// values are distinct from every other wire in this file.
+
+nobox value W4 { a: int, b: int, c: int, d: int }
+
+fn mk_wide(a: int) -> W4 { return W4 { a: a, b: a + 1, c: a + 2, d: a + 3 } }
+
+// A user iterator whose `next` returns a nobox element, reached through an
+// `I: Iterator<NV>` bound and through a `for` loop rather than a direct call.
+struct NvGen { cur: int, hi: int }
+
+fn NvGen.next(it) -> (bool, NV) {
+    if it.cur >= it.hi { return (false, NV { x: 0, y: 0 }) }
+    let v = NV { x: it.cur * 3, y: it.cur * 5 }
+    it.cur = it.cur + 1
+    return (true, v)
+}
+
+fn bound_total<I: Iterator<NV>>(it: I) -> int {
+    let t = 0
+    loop {
+        let (ok, v) = it.next()
+        if !ok { break }
+        let seed = mk_wide(9000)
+        t = t + v.x * 100 + v.y + seed.d - 9003
+    }
+    return t
+}
+
+@test fn iterator_bound_next_captures_its_own_leaves() {
+    // rows (0,0) (3,5) (6,10)
+    assert_eq(bound_total(NvGen { cur: 0, hi: 3 }), 915)
+}
+
+@test fn for_loop_over_a_nobox_iterator() {
+    let t = 0
+    for v in (NvGen { cur: 1, hi: 3 }) {
+        let seed = mk(4321)
+        t = t + v.x * 100 + v.y + seed.y - 8642
+    }
+    assert_eq(t, 915)
+}
+
+// Two nullable call results joined through `if` values: the hit arm's leaves
+// and the miss arm's absence must both come from their own call.
+fn maybe_phi(a: int) -> NV? {
+    if a > 0 { return NV { x: a, y: a * 7 } }
+    return null
+}
+
+@test fn nullable_phi_of_two_calls() {
+    let seed = mk_wide(8000)
+    let k = 3
+    let v = if k > 2 { maybe_phi(611) } else { maybe_phi(-1) }
+    let w = if k > 5 { maybe_phi(612) } else { maybe_phi(-1) }
+    assert_eq(v?.y ?? -1, 4277)
+    assert_eq(w?.y ?? -1, -1)
+    assert_eq(seed.d, 8003)
+}
+
+// A four-leaf publish, a two-leaf one, then four again: a capture that read the
+// bank late would see a neighbour's leftover high slots.
+@test fn changed_width_captures_are_independent() {
+    let w = mk_wide(7100)
+    let n = mk(7200)
+    let w2 = mk_wide(7300)
+    assert_eq(n.y, 14400)
+    assert_eq(w.d, 7103)
+    assert_eq(w.b, 7101)
+    assert_eq(w2.c, 7302)
+}
+
+// A CALLER shaped for the block trampoline (a nested loop in an or-pattern
+// arm): one capture happens before the arm and is read after it, the other
+// inside the arm. `multi_value_capture_inside_a_trampolined_caller` in
+// skull-codegen-js/tests/trampoline_fallback.rs pins that the fallback fires.
+fn trampolined_caller(sel: int) -> int {
+    let v = mk(6400 + sel)
+    let out = match sel {
+        1 | 2 | 3 => {
+            let acc = 0
+            let i = 0
+            while i < 4 { acc = acc + i; i = i + 1 }
+            let w = mk(6500)
+            acc + w.y - 13000
+        }
+        _ => 100
+    }
+    return out * 100000 + v.y
+}
+
+@test fn trampoline_cross_case_capture() {
+    assert_eq(trampolined_caller(2), 612804)
+}

@@ -186,6 +186,42 @@ fn multi_value_return_through_fallback() {
     eval_int(&js, "root", 67);
 }
 
+// The CALLER trampolines, so a multi-value capture sits inside a switch case
+// and its leaf temps are read from a later case. A per-case `let` for a capture
+// cell would leave the later read undefined.
+#[test]
+fn multi_value_capture_inside_a_trampolined_caller() {
+    let ws = ws_with(
+        "fn pair(a: int) -> (int, int) { return (a, a * 2) }\n\
+         fn root() -> int {\n\
+             let sel = 2\n\
+             let (p, q) = pair(31)\n\
+             let out = match sel {\n\
+                 1 | 2 | 3 => {\n\
+                     let acc = 0\n\
+                     let i = 0\n\
+                     while i < 4 { acc = acc + i; i = i + 1 }\n\
+                     let (r, s) = pair(acc + 40)\n\
+                     r * 1000 + s\n\
+                 }\n\
+                 _ => 0\n\
+             }\n\
+             return out * 1000 + p * 100 + q\n\
+         }",
+    );
+    let js = emit_closure(&ws, "root").expect("trampolined caller should emit");
+    assert!(
+        js.contains("switch (__bb"),
+        "expected the caller to trampoline:\n{js}"
+    );
+    assert!(
+        js.contains("= __rock_ret1;"),
+        "expected a scratch-slot capture:\n{js}"
+    );
+    // pair(46) = (46, 92); pair(31) = (31, 62).
+    eval_int(&js, "root", (46 * 1000 + 92) * 1000 + 31 * 100 + 62);
+}
+
 // Untouched by construction: a body the structurer handles emits NO trampoline.
 // The fallback fires only PAST the structured path, so currently-passing
 // emission is byte-unchanged.
