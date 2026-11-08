@@ -2217,14 +2217,11 @@ fn enum_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
     out
 }
 
-/// The fn generic type param the cursor is on, identified by its shared
-/// `ty_arena` slot: every use of `T` in the fn resolves to the single
-/// `TypeExpr::Generic` allocated at declaration (`declare_generics`), so slot
-/// identity gives exact per-fn scoping -- a same-named `T` on another fn is a
-/// different slot. Covers the `<T>` declaration name (via `ty_spans`) and any
-/// annotation use (via `node_index`). Struct/enum generics are NOT matched:
-/// their payload/field types lower without a body, so use sites aren't
-/// enumerable and a decl-only rename would produce broken code.
+/// The generic type param the cursor is on: a fn's `<T>` declaration name (via
+/// `ty_spans`) or any annotation use (via `node_index`), including a use in a
+/// struct field or enum payload. Uses are matched by the variable id of their
+/// `TypeExpr::Generic`, so a same-named `T` elsewhere is a different param; the
+/// slot alone is not enough, since `T?` copies the generic.
 fn generic_param_at(
     ws: &Workspace,
     mid: ModuleId,
@@ -2232,13 +2229,11 @@ fn generic_param_at(
 ) -> Option<(ModuleId, Idx<hir::TypeExpr>)> {
     let module = ws.modules.get(mid.index())?;
 
-    for f in module.functions.values() {
-        for g in &f.generics {
-            if let TyId::Static(gm, gi) = g {
-                let decl = ws.modules.get(gm.index()).and_then(|m| m.ty_spans.get(*gi));
-                if decl.is_some_and(|sp| span_contains(sp, offset)) {
-                    return Some((*gm, *gi));
-                }
+    for g in module.functions.values().flat_map(|f| &f.generics) {
+        if let TyId::Static(gm, gi) = g {
+            let decl = ws.modules.get(gm.index()).and_then(|m| m.ty_spans.get(*gi));
+            if decl.is_some_and(|sp| span_contains(sp, offset)) {
+                return Some((*gm, *gi));
             }
         }
     }
@@ -2264,7 +2259,41 @@ fn generic_param_at(
     }
 }
 
-/// Every reference to the fn generic at `(gmid, gidx)`: the `<T>` declaration
+/// Every generic parameter a module declares on its fns, structs and enums.
+fn declared_generics(module: &hir::Module) -> impl Iterator<Item = &TyId> {
+    module
+        .functions
+        .values()
+        .flat_map(|f| &f.generics)
+        .chain(module.structs.values().flat_map(|s| &s.generics))
+        .chain(module.enums.values().flat_map(|e| &e.generics))
+}
+
+/// The `<T>` name that declares the generic at `(gmid, gidx)`, which may be a
+/// copy of the declared slot.
+fn generic_decl_span(ws: &Workspace, gmid: ModuleId, gidx: Idx<hir::TypeExpr>) -> Option<Span> {
+    let m = ws.modules.get(gmid.index())?;
+    let hir::TypeExpr::Generic(var, _) = m.ty_arena[gidx] else {
+        return None;
+    };
+    declared_generics(m).find_map(|g| match g {
+        TyId::Static(gm, gi)
+            if *gm == gmid
+                && matches!(m.ty_arena[*gi], hir::TypeExpr::Generic(v, _) if v == var) =>
+        {
+            m.ty_spans.get(*gi).copied()
+        }
+        _ => None,
+    })
+}
+
+/// The declaration of the generic parameter the cursor is on.
+pub fn generic_param_def(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Span> {
+    let (gmid, gidx) = generic_param_at(ws, mid, offset)?;
+    generic_decl_span(ws, gmid, gidx)
+}
+
+/// Every reference to the generic at `(gmid, gidx)`: the `<T>` declaration
 /// name plus every annotation occurrence (params, return, nested type args,
 /// `T?` wrappers), matched by shared-slot identity. Sites are clipped to the
 /// leading name token.
@@ -2272,10 +2301,11 @@ fn generic_param_references(ws: &Workspace, gmid: ModuleId, gidx: Idx<hir::TypeE
     let Some(m) = ws.modules.get(gmid.index()) else {
         return Vec::new();
     };
-    let hir::TypeExpr::Generic(_, gname) = m.ty_arena[gidx] else {
+    let hir::TypeExpr::Generic(var, gname) = m.ty_arena[gidx] else {
         return Vec::new();
     };
     let len = gname.as_str().len();
+    let is_param = |idx: Idx<hir::TypeExpr>| matches!(m.ty_arena[idx], hir::TypeExpr::Generic(v, _) if v == var);
 
     let mut out: Vec<Span> = Vec::new();
     let mut push = |sp: Span| {
@@ -2288,8 +2318,8 @@ fn generic_param_references(ws: &Workspace, gmid: ModuleId, gidx: Idx<hir::TypeE
         }
     };
 
-    if let Some(decl) = m.ty_spans.get(gidx) {
-        push(*decl);
+    if let Some(decl) = generic_decl_span(ws, gmid, gidx) {
+        push(decl);
     }
 
     for body in m.bodies.values() {
@@ -2300,8 +2330,8 @@ fn generic_param_references(ws: &Workspace, gmid: ModuleId, gidx: Idx<hir::TypeE
             if tmid != gmid {
                 continue;
             }
-            let hits =
-                idx == gidx || matches!(m.ty_arena[idx], hir::TypeExpr::Nullable(ii) if ii == gidx);
+            let hits = is_param(idx)
+                || matches!(m.ty_arena[idx], hir::TypeExpr::Nullable(ii) if is_param(ii));
             if hits {
                 push(Span {
                     file: m.file,

@@ -167,3 +167,61 @@ fn generic_calls_navigate_and_rename_with_the_function() {
         [(0, 3), (2, 10), (2, 22), (2, 31)]
     );
 }
+
+#[test]
+fn goto_definition_on_a_generic_parameter_reaches_its_declaration() {
+    let src =
+        "fn f<T>(a: T, b: T?) -> [T?] { [b] }\nstruct S<U> { v: U, w: U? }\nenum E<V> { A(V) }\n";
+    let bone = workspace(src);
+    let expect = [
+        ("a: T", 3, (0, 5, "T")),
+        ("b: T", 3, (0, 5, "T")),
+        ("[T?", 1, (0, 5, "T")),
+        ("v: U", 3, (1, 9, "U")),
+        ("w: U", 3, (1, 9, "U")),
+        ("A(V", 2, (2, 7, "V")),
+    ];
+    for (needle, extra, (line, col, name)) in expect {
+        let found = bone
+            .definition(PATH, at(src, needle, extra))
+            .unwrap_or_else(|| panic!("no definition for {needle}"));
+        assert_eq!(text(src, &found), (line, col, name.to_string()), "{needle}");
+    }
+}
+
+#[test]
+fn renaming_a_generic_parameter_reaches_its_nullable_uses() {
+    let src = "fn f<T>(a: T, b: T?) -> [T?] { [b] }\n";
+    let bone = workspace(src);
+    let all = [(0, 5), (0, 11), (0, 17), (0, 25)];
+    for (needle, extra) in [("<T>", 1), ("a: T", 3), ("b: T", 3), ("[T?", 1)] {
+        assert_eq!(
+            renamed_sites(&bone, at(src, needle, extra)),
+            all,
+            "{needle}"
+        );
+    }
+}
+
+#[test]
+fn renaming_a_struct_or_enum_generic_from_a_use_reaches_every_use() {
+    let src =
+        "struct S<T> { v: T, w: [T], x: T?, y: T? = null }\nenum E<Z> { A(Z), B { q: [Z] } }\n";
+    let bone = workspace(src);
+    let fields = [(0, 9), (0, 17), (0, 24), (0, 31), (0, 38)];
+    for (needle, extra) in [("v: T", 3), ("x: T", 3), ("y: T", 3)] {
+        assert_eq!(
+            renamed_sites(&bone, at(src, needle, extra)),
+            fields,
+            "{needle}"
+        );
+    }
+    let variants = [(1, 7), (1, 14), (1, 26)];
+    for (needle, extra) in [("A(Z", 2), ("[Z", 1)] {
+        assert_eq!(
+            renamed_sites(&bone, at(src, needle, extra)),
+            variants,
+            "{needle}"
+        );
+    }
+}

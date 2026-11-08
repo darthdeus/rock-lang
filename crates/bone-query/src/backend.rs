@@ -1276,7 +1276,9 @@ impl BoneWorkspace {
         let pat_def = raw
             .as_ref()
             .and_then(|ast| crate::query::enum_variant_pattern_def(ws, ast, offset));
-        let span = pat_def.or_else(|| gaps::definition(ws, mid, inf, offset))?;
+        let span = pat_def
+            .or_else(|| crate::query::generic_param_def(ws, mid, offset))
+            .or_else(|| gaps::definition(ws, mid, inf, offset))?;
         self.location_from_span(proj, &span)
     }
 
