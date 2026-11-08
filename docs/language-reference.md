@@ -3,6 +3,22 @@
 This reference covers selected advanced features. Start with the
 [language guide](guide.md) for the basic syntax and types.
 
+## No-box values
+
+Mark a value struct `nobox` to require that the compiler does not implicitly
+box values of that type:
+
+```rock
+nobox value Point { x: float, y: float }
+```
+
+The compiler reports an error when a use would require implicit boxing. For a
+boundary that needs a boxed value, such as an opaque foreign call or `inspect`,
+write `materialize(point)` explicitly. Materialization permits boxing; an
+optimizer may eliminate a box whose allocation is not observable. Some
+otherwise unboxed uses may still be rejected when their representation is not
+supported.
+
 ## Default type parameters
 
 Structs, enums and newtypes may give trailing type parameters defaults:
