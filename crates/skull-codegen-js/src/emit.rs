@@ -4313,17 +4313,20 @@ pub fn emit_overlay_with_span_edits(
     changed_specs.sort_by(|left, right| left.name.cmp(&right.name));
     removed_specs.sort_by(|left, right| left.name.cmp(&right.name));
 
-    let mut changed_now = HashSet::new();
-    for (fref, chunk) in &current.chunks {
-        if cache
-            .build
-            .chunks
-            .get(fref)
-            .is_none_or(|previous| previous.js != chunk.js)
-        {
-            changed_now.insert(*fref);
-        }
-    }
+    let mut changed_now: Vec<FuncRef> = current
+        .chunks
+        .iter()
+        .filter(|(fref, chunk)| {
+            cache
+                .build
+                .chunks
+                .get(fref)
+                .is_none_or(|previous| previous.js != chunk.js)
+        })
+        .map(|(fref, _)| *fref)
+        .collect();
+    // The static resets below are emitted in this order.
+    changed_now.sort_by_key(|fref| definition_order(*fref));
     let changed_consts: HashSet<ustr::Ustr> = current
         .const_chunks
         .iter()
@@ -4409,7 +4412,7 @@ pub fn emit_overlay_with_span_edits(
     }
 
     let mut order: Vec<FuncRef> = cache.changed_since_full.iter().copied().collect();
-    order.sort_by_key(|fref| (fref.module.index(), u32::from(fref.func.into_raw())));
+    order.sort_by_key(|fref| definition_order(*fref));
     for fref in &order {
         if let Some(chunk) = current.chunks.get(fref) {
             out.push_str(&chunk.js);
@@ -4451,6 +4454,10 @@ pub fn emit_overlay_with_span_edits(
 
     cache.build = current;
     Ok(JsReload::Overlay(out))
+}
+
+fn definition_order(fref: FuncRef) -> (usize, u32) {
+    (fref.module.index(), u32::from(fref.func.into_raw()))
 }
 
 fn collect_statics(function: &MirFunc) -> Vec<skull_mir::mir::StaticCell> {

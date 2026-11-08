@@ -773,3 +773,44 @@ fn unrelated_body_overlay_restages_unchanged_generic_callback_with_concrete_abi(
     ));
     assert_eq!(output.trim(), "10 1\n10 2");
 }
+
+#[test]
+fn static_resets_for_several_edited_functions_emit_in_a_stable_order() {
+    let source = |init: u32| {
+        let mut text = String::new();
+        let mut calls = Vec::new();
+        for i in 0..8 {
+            text.push_str(&format!(
+                "@nomangle fn hot{i}() -> int {{\n\
+                     static count = {}\n\
+                     count += 1\n\
+                     count\n\
+                 }}\n",
+                init + i
+            ));
+            calls.push(format!("hot{i}()"));
+        }
+        text.push_str(&format!("fn main() {{ print({}) }}\n", calls.join(" + ")));
+        text
+    };
+    let before = ws_with(&source(1));
+    let after = ws_with(&source(100));
+    let mid = function(&before, "main").module;
+    let edited: Vec<_> = (0..8)
+        .map(|i| {
+            let f = function(&after, &format!("hot{i}"));
+            (f.module, BodyOwner::Function(f.func))
+        })
+        .collect();
+    let overlay = || {
+        let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
+        skull_codegen_js::emit::emit_overlay(&after, mid, &mut cache, &edited)
+            .unwrap()
+            .expect_overlay()
+    };
+    let first = overlay();
+    assert_eq!(first.matches("] = false;").count(), 8, "{first}");
+    for _ in 0..16 {
+        assert_eq!(overlay(), first);
+    }
+}
