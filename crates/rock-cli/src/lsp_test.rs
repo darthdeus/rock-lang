@@ -3455,22 +3455,39 @@ mod stderr_log_tests {
 mod runner_tests {
     use super::*;
 
-    /// Write an executable stub server that records each spawn in
-    /// `<dir>/invocations` and prints `reply`, so a fixture's verdict comes
-    /// from the runner's reply handling rather than from the compiler.
+    /// Records each spawn in `invocations` and prints `reply`, both next to
+    /// the path it was run through.
+    const STUB_SCRIPT: &str =
+        "#!/bin/sh\ndir=\"${0%/*}\"\necho \"$@\" >> \"$dir/invocations\"\ncat \"$dir/reply\"\n";
+
+    /// The one stub script every test links to, kept beside the test binary.
+    /// macOS scans each new executable on its first run, which costs up to
+    /// half a second, so a fresh script per fixture made these tests slow.
+    fn shared_stub_script() -> &'static Path {
+        static STUB: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        STUB.get_or_init(|| {
+            let exe = std::env::current_exe().unwrap();
+            let path = exe.parent().unwrap().join("rock-lsp-test-stub.sh");
+            if std::fs::read_to_string(&path).ok().as_deref() != Some(STUB_SCRIPT) {
+                #[cfg(unix)]
+                test_utils::write_executable(&path, STUB_SCRIPT);
+                #[cfg(not(unix))]
+                std::fs::write(&path, STUB_SCRIPT).unwrap();
+            }
+            path
+        })
+    }
+
+    /// A stub server in `dir` that records each spawn in `<dir>/invocations`
+    /// and prints `reply`, so a fixture's verdict comes from the runner's
+    /// reply handling rather than from the compiler.
     fn stub_server(dir: &Path, reply: &str) -> PathBuf {
-        let marker = dir.join("invocations");
+        std::fs::write(dir.join("reply"), reply).unwrap();
         let path = dir.join("stub-rock");
-        let quoted = reply.replace('\'', r"'\''");
-        let script = format!(
-            "#!/bin/sh\necho \"$@\" >> '{}'\nprintf '%s' '{}'\n",
-            marker.display(),
-            quoted
-        );
         #[cfg(unix)]
-        test_utils::write_executable(&path, &script);
+        std::os::unix::fs::symlink(shared_stub_script(), &path).unwrap();
         #[cfg(not(unix))]
-        std::fs::write(&path, script).unwrap();
+        std::fs::copy(shared_stub_script(), &path).unwrap();
         path
     }
 
