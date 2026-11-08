@@ -36,7 +36,6 @@ use ustr::Ustr;
 #[cfg(not(feature = "sequential"))]
 struct WorkerMode {
     inline_off: bool,
-    ablation: skull_mir::ablation::Context,
     allocation_report: bool,
     allocation_activation: bool,
     mem2reg_census: bool,
@@ -47,7 +46,6 @@ impl WorkerMode {
     fn capture() -> Self {
         Self {
             inline_off: skull_transform::inline_off_active(),
-            ablation: skull_mir::ablation::current_context(),
             allocation_report: crate::allocation_report::enabled(),
             allocation_activation: crate::allocation_report::activation_enabled(),
             mem2reg_census: crate::mem2reg_stats::enabled(),
@@ -57,7 +55,6 @@ impl WorkerMode {
     fn enter(&self) -> WorkerScope {
         WorkerScope {
             _inline: self.inline_off.then(skull_transform::inline_off_guard),
-            _ablation: skull_mir::ablation::enter_context(self.ablation.clone()),
             _allocation_report: crate::allocation_report::scope(self.allocation_report),
             _allocation_activation: crate::allocation_report::activation_scope(
                 self.allocation_activation,
@@ -70,7 +67,6 @@ impl WorkerMode {
 #[cfg(not(feature = "sequential"))]
 struct WorkerScope {
     _inline: Option<skull_transform::InlineOffGuard>,
-    _ablation: skull_mir::ablation::ContextGuard,
     _allocation_report: crate::allocation_report::Scope,
     _allocation_activation: crate::allocation_report::ActivationScope,
     _mem2reg_census: crate::mem2reg_stats::Scope,
@@ -5135,9 +5131,7 @@ fn graph_rejection_error(
         FxHashMap<&crate::instance_graph::Instance, Vec<&crate::instance_graph::Edge>>,
     > = None;
     for rejection in graph.rejections() {
-        let caller = &ws.module(rejection.at.func.module).functions[rejection.at.func.func];
         if rejection.kind == crate::instance_graph::RejectionKind::IdentityInOrdinaryStorage {
-            // A language rejection, not a totality gap: fatal in ablation runs too.
             let callers = callers.get_or_insert_with(|| {
                 let mut map: FxHashMap<_, Vec<_>> = FxHashMap::default();
                 for edge in graph.edges() {
@@ -5148,42 +5142,6 @@ fn graph_rejection_error(
             if let Some(err) = identity_instance_rejection_error(ws, graph, callers, rejection) {
                 return Some(err);
             }
-            continue;
-        }
-        if skull_mir::ablation::enabled() {
-            let category = match rejection.kind {
-                crate::instance_graph::RejectionKind::ChangingInstanceRecursion => {
-                    skull_mir::ablation::FatalCategory::PolymorphicGrowth
-                }
-                crate::instance_graph::RejectionKind::GenericFnValue
-                | crate::instance_graph::RejectionKind::UnconstrainedTypeVar => {
-                    skull_mir::ablation::FatalCategory::MissingGraphEdge
-                }
-                crate::instance_graph::RejectionKind::ConcreteTypeUnavailable => {
-                    skull_mir::ablation::FatalCategory::CompilerInvariant
-                }
-                crate::instance_graph::RejectionKind::IdentityInOrdinaryStorage => {
-                    unreachable!("identity rejections are handled before ablation")
-                }
-            };
-            skull_mir::ablation::note_examined();
-            skull_mir::ablation::record(
-                category,
-                if rejection.kind == crate::instance_graph::RejectionKind::ChangingInstanceRecursion
-                {
-                    caller.name.as_str().to_string()
-                } else {
-                    rejection
-                        .message
-                        .split('`')
-                        .nth(1)
-                        .unwrap_or(caller.name.as_str())
-                        .to_string()
-                },
-                caller.name.as_str(),
-                rejection.span,
-                rejection.message.clone(),
-            );
             continue;
         }
         if is_stdlib_module_file(ws.module(rejection.at.func.module).file.as_str()) {
@@ -9453,14 +9411,11 @@ fn main() {
     static INLINE_OFF: std::sync::Mutex<()> = std::sync::Mutex::new(());
     static INLINE_CENSUS: std::sync::Mutex<()> = std::sync::Mutex::new(());
     #[allow(dead_code)]
-    struct InlineOff(skull_transform::InlineOffGuard, skull_mir::ablation::Scope);
+    struct InlineOff(skull_transform::InlineOffGuard);
 
     impl InlineOff {
         fn on() -> Self {
-            Self(
-                skull_transform::inline_off_guard(),
-                skull_mir::ablation::scope(true),
-            )
+            Self(skull_transform::inline_off_guard())
         }
     }
 
@@ -9469,16 +9424,7 @@ fn main() {
 
     impl InlineOn {
         fn on() -> Self {
-            let guard = INLINE_OFF.lock().unwrap_or_else(|e| e.into_inner());
-            skull_mir::ablation::clear();
-            skull_mir::ablation::set_enabled(false);
-            Self(guard)
-        }
-    }
-
-    impl Drop for InlineOn {
-        fn drop(&mut self) {
-            skull_mir::ablation::clear();
+            Self(INLINE_OFF.lock().unwrap_or_else(|e| e.into_inner()))
         }
     }
 

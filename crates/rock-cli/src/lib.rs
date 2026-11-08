@@ -30,7 +30,6 @@ pub use std::sync::mpsc::channel;
 pub use std::time::Duration;
 pub use ustr::Ustr;
 
-pub mod ablation_report;
 pub mod allocator;
 pub mod backend_stats;
 pub mod bone_backend;

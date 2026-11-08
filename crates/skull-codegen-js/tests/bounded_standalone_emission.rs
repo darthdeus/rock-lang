@@ -6,18 +6,6 @@
 //!
 use crate::common::ws_with;
 
-struct ModeGuard(
-    #[allow(dead_code)] crate::common::InlineOffGuard,
-    #[allow(dead_code)] skull_mir::ablation::Scope,
-);
-
-impl ModeGuard {
-    fn on() -> Self {
-        let inline = crate::common::InlineOffGuard::on();
-        ModeGuard(inline, skull_mir::ablation::scope(true))
-    }
-}
-
 fn emit_js(ws: &bone_semantic::inference::Workspace) -> Result<String, String> {
     let mid = *ws
         .module_ids
@@ -64,7 +52,7 @@ fn main() {
 /// `next` inside that definition -- which is the whole content of D-1.
 #[test]
 fn a_bounded_body_emits_standalone_to_js_with_inlining_disabled() {
-    let _g = ModeGuard::on();
+    let _g = crate::common::InlineOffGuard::on();
     let js = emit_js(&ws_with(BOUNDED))
         .expect("a bounded body must emit standalone to JS under its demand");
     let def = js
@@ -97,7 +85,7 @@ fn a_bounded_body_emits_standalone_to_js_with_inlining_disabled() {
 /// program, which says nothing about bounded bodies.
 #[test]
 fn an_unbounded_body_emits_to_js_with_inlining_disabled() {
-    let _g = ModeGuard::on();
+    let _g = crate::common::InlineOffGuard::on();
     let err = emit_js(&ws_with(CONCRETE)).err();
     assert!(
         err.is_none(),

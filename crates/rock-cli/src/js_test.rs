@@ -107,12 +107,7 @@ pub fn js_test(paths: &[String]) -> Result<()> {
             );
         }
     }
-    // Before the exit below, for the same reason `skull_test` reports here:
-    // `process::exit` runs no destructor and never returns to `main`.
-    let ablation_fatals = crate::ablation_report::report("rock test --backend js");
-
-    if summary.tests_failed > 0 || summary.unit_failures > 0 || ablation_fatals {
-        // Plain exit: the census above already drained the registry.
+    if summary.tests_failed > 0 || summary.unit_failures > 0 {
         crate::invocation_log::exit(1);
     }
     Ok(())
@@ -578,10 +573,10 @@ pub fn js_run(path: &str) -> Result<()> {
     let program = build_run_program(&emitted);
     match crate::js_runner::run_node_code_streaming(&program) {
         Ok(0) => Ok(()),
-        Ok(code) => crate::ablation_report::exit_with_census(code),
+        Ok(code) => crate::invocation_log::exit(code),
         Err(e) => {
             log::error!(target: "JS", "node run failed: {}", e.message);
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     }
 }
@@ -593,7 +588,7 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
         Ok(s) => s,
         Err(e) => {
             log::error!(target: "JS", "cannot read {}: {}", path, e);
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     };
     let user = match skull_parser::parse_module(&src, ustr::Ustr::from(path)) {
@@ -603,7 +598,7 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
                 "{}",
                 crate::skull_backend::render_file_errs(path, &src, &[e])
             );
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     };
     let user_file = user.file;
@@ -614,14 +609,14 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
                 "{}",
                 crate::skull_backend::render_file_errs(path, &src, &errs)
             );
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     };
     // Single-file runs resolve from the file's enclosing project (walk-up), so
     // a file inside a [build.vars] project behaves the same on both backends.
     if let Err(e) = crate::comptime::stamp_workspace(&mut ws, std::path::Path::new(path)) {
         log::error!(target: "JS", "build var resolution failed for {}: {:#}", path, e);
-        crate::ablation_report::exit_with_census(1);
+        crate::invocation_log::exit(1);
     }
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
     match skull_codegen_js::emit::emit_program(&ws, user_mid) {
@@ -631,7 +626,7 @@ fn emit_js_program_single(path: &str) -> skull_codegen_js::emit::JsProgram {
                 "{}",
                 crate::skull_backend::render_file_errs(path, &src, &[e])
             );
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     }
 }
@@ -653,7 +648,7 @@ pub(crate) fn emit_js_program_project(
         Ok(emitted) => emitted,
         Err(e) => {
             eprintln!("{e}");
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     }
 }

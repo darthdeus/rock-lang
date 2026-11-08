@@ -557,7 +557,7 @@ pub fn bone_check_single(path: &str, command: &str, iters: usize) -> Result<()> 
         Ok(s) => s,
         Err(e) => {
             log::error!(target: "BONE", "cannot read {}: {}", path, e);
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     };
 
@@ -576,7 +576,7 @@ pub fn bone_check_single(path: &str, command: &str, iters: usize) -> Result<()> 
 
     if let Some(errs) = first_err {
         eprintln!("{}", render_source_errs(&src, &errs));
-        crate::ablation_report::exit_with_census(1);
+        crate::invocation_log::exit(1);
     }
 
     log::info!(target: "BONE", "{} type-checks ({})", path, command);
@@ -626,7 +626,7 @@ fn bone_check_project(path: &str, command: &str, iters: usize) -> Result<()> {
 
     if let Some(errs) = first_err {
         eprintln!("{}", render_errs(&sources, &errs));
-        crate::ablation_report::exit_with_census(1);
+        crate::invocation_log::exit(1);
     }
 
     log::info!(target: "BONE", "{} type-checks ({})", path, command);

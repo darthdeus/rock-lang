@@ -185,7 +185,7 @@ pub fn launch(dir: &str, lua: &GameProgram, emits_main: bool) -> Result<()> {
     if !std::env::var("ROCK_SKIP_ENGINE_BUILD").is_ok_and(|v| v == "1") {
         if let Err(e) = rock_engine_host::engine_build::build_engine_libs(dir) {
             log::error!(target: "SKULL", "engine build failed: {}", e);
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     }
     // A fresh baseline must not reload an overlay from an earlier session.
@@ -198,7 +198,7 @@ pub fn launch(dir: &str, lua: &GameProgram, emits_main: bool) -> Result<()> {
         &lua_file.with_file_name("incremental.lua"),
     ) {
         log::error!(target: "SKULL", "cannot write {}: {}", lua_file.display(), e);
-        crate::ablation_report::exit_with_census(1);
+        crate::invocation_log::exit(1);
     }
     // No timeout: games run an infinite frame loop.
     exec_luajit_file(&lua_file, None, &[])
@@ -262,7 +262,7 @@ fn exec_luajit_file(
 
     crate::child_lifetime::release_bound_child(pid);
     if !status.success() {
-        crate::ablation_report::exit_with_census(status.code().unwrap_or(1));
+        crate::invocation_log::exit(status.code().unwrap_or(1));
     }
     Ok(())
 }

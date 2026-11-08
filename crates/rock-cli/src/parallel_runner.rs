@@ -214,8 +214,7 @@ where
 /// Not the rayon pool: compiler passes fan out on it, and a pool thread
 /// blocked in one unit's join may steal another whole unit, nesting a second
 /// compile inside the first's thread-local state (compile records, caches).
-/// Workers get the compiler stack and the caller's ablation census, which is
-/// otherwise per thread.
+/// Workers get the compiler stack.
 pub fn map_in_order<T, R, F>(items: &[T], threads: usize, work: F) -> Vec<R>
 where
     T: Sync,
@@ -224,15 +223,13 @@ where
 {
     let threads = threads.clamp(1, items.len().max(1));
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let ablation = skull_mir::ablation::current_context();
     let mut indexed: Vec<(usize, R)> = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..threads)
             .map(|_| {
-                let (next, work, ablation) = (&next, &work, ablation.clone());
+                let (next, work) = (&next, &work);
                 std::thread::Builder::new()
                     .stack_size(rock_core::nesting::COMPILER_STACK_BYTES)
                     .spawn_scoped(scope, move || {
-                        let _ablation = skull_mir::ablation::enter_context(ablation);
                         let mut done = Vec::new();
                         loop {
                             let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -267,12 +264,5 @@ mod tests {
             i
         });
         assert_eq!(out, items);
-    }
-
-    #[test]
-    fn map_in_order_workers_record_into_the_callers_ablation_census() {
-        let _census = skull_mir::ablation::scope(true);
-        super::map_in_order(&[(); 6], 3, |_| skull_mir::ablation::note_examined());
-        assert_eq!(skull_mir::ablation::examined(), 6);
     }
 }

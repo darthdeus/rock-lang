@@ -3346,26 +3346,6 @@ pub fn validate_no_residual_bound_calls(
                         .get(&iid)
                         .is_some_and(|i| !i.args.is_empty());
                     if fn_has_bounds(callee) && !named {
-                        // Totality ablation: this rejection IS the ablation's
-                        // unsupported-surface population, and it fires from
-                        // production's own check rather than from
-                        // `ablation_decline` -- so record it here or the
-                        // taxonomy would report zero for the category with the
-                        // largest real membership.
-                        skull_mir::ablation::record(
-                            skull_mir::ablation::FatalCategory::UnsupportedSurface,
-                            callee.name.as_str(),
-                            f.name.as_str(),
-                            // The CALL's span. `callee.name_span` collapsed
-                            // every site of one bounded callee onto its
-                            // declaration, so the census reported 27 declaration
-                            // spans as though they were call sites.
-                            mf.inst_spans.get(iid).copied().unwrap_or(callee.name_span),
-                            "an `Iterator`-bounded call that neither spliced nor specialized: \
-                             the shared body cannot serve it (its placeholder `next` calls are \
-                             resolved per instantiation), and no demand names a standalone copy \
-                             (plan S 12)",
-                        );
                         return Err(CompilerError::new_no_location(format!(
                             "`{}` calls `Iterator`-bounded `{}` in a context that cannot inline \
                              it, and the call was not specialized either -- so nothing serves \

@@ -35,13 +35,13 @@ pub fn run_lua_program(preamble: &str, lua: &GameProgram, emits_main: bool) -> R
             // returning Ok is how `rock run` used to exit 0 on a dead program.
             if !run.success {
                 log::error!(target: "SKULL", "program exited with a runtime error");
-                crate::ablation_report::exit_with_census(1);
+                crate::invocation_log::exit(1);
             }
             Ok(())
         }
         Err(e) => {
             log::error!(target: "SKULL", "runtime error: {}", e.message);
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     }
 }

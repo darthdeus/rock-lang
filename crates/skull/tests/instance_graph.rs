@@ -568,12 +568,7 @@ fn main() { let c = ticker(); let _ = c.resume() }
 ///
 /// This holds BY CONSTRUCTION -- `instance_graph::build` walks bone's HIR and
 /// inference and never runs the inliner -- and "by construction" is a claim
-/// about code that can be edited, which is what this pins. The scoped ablation
-/// context is the same mode that a `ROCK_MONO_ABLATION` process run installs.
-///
-/// Corpus result recorded alongside it: all 23 project digests are identical
-/// between a normal `rock mono-manifest .` and one under
-/// `ROCK_MONO_ABLATION=1`.
+/// about code that can be edited, which is what this pins.
 #[test]
 fn the_manifest_is_stable_with_inlining_disabled() {
     let src = r#"
@@ -590,13 +585,12 @@ fn main() {
     let roots = skull::mir_emit::emission_roots(&ws, None);
 
     let (normal, normal_text) = {
-        let _mode = crate::common::AblationGuard::off();
         let normal = instance_graph::build(&ws, roots.clone(), false);
         let normal_text = instance_graph::render_manifest(&ws, &normal);
         (normal, normal_text)
     };
     let (no_inline_text, no_inline_rev) = {
-        let _mode = crate::common::AblationGuard::on();
+        let _mode = crate::common::InlineOffGuard::on();
         let no_inline = instance_graph::build(&ws, roots.clone(), false);
         let no_inline_text = instance_graph::render_manifest(&ws, &no_inline);
         // Perturbed order AND inlining disabled, the two S 0g knobs together.

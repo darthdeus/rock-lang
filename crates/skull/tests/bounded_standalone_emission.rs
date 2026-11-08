@@ -19,9 +19,7 @@ use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
 
-use crate::common::{
-    AblationGuard as ModeGuard, InlineOffGuard, definitions_matching, function_body,
-};
+use crate::common::{InlineOffGuard, definitions_matching, function_body};
 
 static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_stdlib::stdlib_files()
@@ -139,7 +137,6 @@ fn specialization<'a>(lua: &'a str, prefix: &str, what: &str) -> &'a str {
 #[test]
 fn a_bounded_body_emits_standalone_with_inlining_disabled() {
     let _inline = InlineOffGuard::on();
-    let _g = ModeGuard::on();
     let lua = emit(BOUNDED).expect("a bounded body must emit standalone under its demand");
     let symbol = specialization(&lua, "total_", "specialized definition of `total`");
     let body = body_of(&lua, symbol);
@@ -173,7 +170,6 @@ fn a_bounded_body_emits_standalone_with_inlining_disabled() {
 #[test]
 fn a_witness_that_is_itself_bounded_resolves_from_the_leafs_sub_tree() {
     let _inline = InlineOffGuard::on();
-    let _g = ModeGuard::on();
     let lua = emit(NESTED).expect("a bounded witness of a bounded body must emit standalone");
     let symbol = specialization(&lua, "next_MapIter_", "`MapIter.next` specialization");
     let body = body_of(&lua, symbol);
@@ -192,7 +188,6 @@ fn a_witness_that_is_itself_bounded_resolves_from_the_leafs_sub_tree() {
 #[test]
 fn an_unbounded_body_emits_with_inlining_disabled() {
     let _inline = InlineOffGuard::on();
-    let _g = ModeGuard::on();
     let err = emit_err(CONCRETE);
     assert!(
         err.is_none(),

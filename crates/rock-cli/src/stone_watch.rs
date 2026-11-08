@@ -52,14 +52,11 @@ kill -KILL -{} 2>/dev/null  # Kill process group
                         "failed to spawn macOS orphan-prevention monitor (parent {parent_pid}, child {child_pid}): {e}"
                     );
                 }
-                // `_exit`, not `exit` and NEVER the census-printing exit. These
-                // are `fork` children of a multithreaded process (rayon builds a
-                // global pool), so they must touch nothing the parent owns: the
-                // ablation registry is behind a `Mutex` that another thread may
-                // have held at fork time, and the census is the PARENT's to
-                // report. Routing these through it printed inherited results --
-                // twice, once per child -- and `exit` would additionally flush
-                // the parent's inherited stdio buffers.
+                // `_exit`, not `exit`. These are `fork` children of a
+                // multithreaded process (rayon builds a global pool), so they
+                // must touch nothing the parent owns: a lock another thread held
+                // at fork time stays held, and `exit` would flush the parent's
+                // inherited stdio buffers.
                 libc::_exit(0);
             } else {
                 // First child exits immediately. Same reasoning as above.

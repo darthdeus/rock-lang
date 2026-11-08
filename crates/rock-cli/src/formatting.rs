@@ -106,7 +106,7 @@ pub fn do_fmt(paths: &[String], in_place: bool, check: bool) -> Result<()> {
     }
 
     if check && needs_formatting {
-        crate::ablation_report::exit_with_census(1);
+        crate::invocation_log::exit(1);
     }
 
     if in_place && !check && formatted_count > 0 {

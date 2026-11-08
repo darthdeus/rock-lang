@@ -559,22 +559,6 @@ pub fn run_luajit(prog: &str, tag: &str) -> String {
     stdout.trim().to_string()
 }
 
-pub struct AblationGuard(#[allow(dead_code)] skull_mir::ablation::Scope);
-
-impl AblationGuard {
-    pub fn on() -> Self {
-        Self::set(true)
-    }
-
-    pub fn off() -> Self {
-        Self::set(false)
-    }
-
-    fn set(on: bool) -> Self {
-        AblationGuard(skull_mir::ablation::scope(on))
-    }
-}
-
 pub struct InlineOffGuard(#[allow(dead_code)] skull_transform::InlineOffGuard);
 
 impl InlineOffGuard {

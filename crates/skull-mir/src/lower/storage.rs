@@ -939,30 +939,7 @@ impl Builder<'_> {
             })
             .collect();
         match serving.as_slice() {
-            [one] => {
-                // Totality ablation: a SYNTHESIZED call. It has no call expr, so
-                // it can never appear in `call_generic_bindings` and never
-                // passes through `call_spec`, so an ablation that only watched
-                // those would miss it. A generic entry
-                // reached this way has no instantiation record at all.
-                if crate::ablation::enabled() {
-                    let f = &self.ws.module(one.module).functions[one.func];
-                    if !f.generics.is_empty() {
-                        crate::ablation::note_examined();
-                        crate::ablation::record(
-                            crate::ablation::FatalCategory::MissingGraphEdge,
-                            f.name.as_str(),
-                            self.f.name.as_str(),
-                            f.name_span,
-                            "a COMPILER-SYNTHESIZED stdlib call (`stdlib_funcref`/`call_spine`, \
-                             the column intercept): it has no call expr, so no \
-                             `call_generic_bindings` entry can exist and the generic entry \
-                             reaches its shared body with no instantiation record",
-                        );
-                    }
-                }
-                Ok(*one)
-            }
+            [one] => Ok(*one),
             [] => Err(gap(format!(
                 "stdlib `{name}` has no body serving the {:?} backend",
                 self.scx.target
@@ -1863,7 +1840,7 @@ impl Builder<'_> {
             .cur_expr
             .ok_or_else(|| gap(format!("dispatch helper `{name}` has no source expression")))?;
         self.with_site_op(crate::site::SiteOp::Dispatched { name, path }, |b| {
-            let direct = b.plan_direct_call(expr, func)?;
+            let direct = b.plan_direct_call(expr)?;
             let call = b.emit_cur(Inst::Call { func, args });
             b.record_call(call, func, &direct)?;
             Ok(call)

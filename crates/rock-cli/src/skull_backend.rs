@@ -1654,7 +1654,7 @@ pub fn skull_shader(
         Ok(source) => source,
         Err(e) => {
             log::error!(target: "SHADER", "cannot load {}: {}", path, e);
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     };
     let src = source.contents;
@@ -1666,7 +1666,7 @@ pub fn skull_shader(
         Ok(u) => u,
         Err(e) => {
             eprintln!("{}", render_file_errs(path, &src, &[e]));
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     };
     user.package = source.package;
@@ -1676,7 +1676,7 @@ pub fn skull_shader(
         Ok(ws) => ws,
         Err(errs) => {
             eprintln!("{}", render_file_errs(path, &src, &errs));
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     };
     let user_mid = crate::bone_backend::entry_module_id(&ws, user_file);
@@ -1707,14 +1707,14 @@ pub fn skull_shader(
             Ok(root) => root,
             Err(e) => {
                 eprintln!("{}", render_file_errs(path, &src, &[e]));
-                crate::ablation_report::exit_with_census(1);
+                crate::invocation_log::exit(1);
             }
         };
         let frag = match skull_codegen_glsl::resolve_root(&ws, user_mid, &roots[1]) {
             Ok(root) => root,
             Err(e) => {
                 eprintln!("{}", render_file_errs(path, &src, &[e]));
-                crate::ablation_report::exit_with_census(1);
+                crate::invocation_log::exit(1);
             }
         };
         match emit_shader_program_with_view(
@@ -1730,7 +1730,7 @@ pub fn skull_shader(
             Ok(g) => g,
             Err(e) => {
                 eprintln!("{}", render_file_errs(path, &src, &[e]));
-                crate::ablation_report::exit_with_census(1);
+                crate::invocation_log::exit(1);
             }
         }
     } else {
@@ -1750,7 +1750,7 @@ pub fn skull_shader(
                 Ok(root) => root,
                 Err(e) => {
                     eprintln!("{}", render_file_errs(path, &src, &[e]));
-                    crate::ablation_report::exit_with_census(1);
+                    crate::invocation_log::exit(1);
                 }
             };
             emit_shader_program_with_view(
@@ -1768,14 +1768,14 @@ pub fn skull_shader(
                 Ok(root_refs) => root_refs,
                 Err(e) => {
                     eprintln!("{}", render_file_errs(path, &src, &[e]));
-                    crate::ablation_report::exit_with_census(1);
+                    crate::invocation_log::exit(1);
                 }
             };
             let session = match skull_codegen_glsl::shader_library_session(&ws, root_refs) {
                 Ok(session) => session,
                 Err(e) => {
                     eprintln!("{}", render_file_errs(path, &src, &[e]));
-                    crate::ablation_report::exit_with_census(1);
+                    crate::invocation_log::exit(1);
                 }
             };
             skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &session.view)
@@ -1784,7 +1784,7 @@ pub fn skull_shader(
             Ok(g) => g,
             Err(e) => {
                 eprintln!("{}", render_file_errs(path, &src, &[e]));
-                crate::ablation_report::exit_with_census(1);
+                crate::invocation_log::exit(1);
             }
         }
     };
@@ -1856,7 +1856,7 @@ pub fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {
         Ok(s) => s,
         Err(e) => {
             log::error!(target: "SKULL", "cannot read {}: {}", path, e);
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     };
     match skull_emit(path, &src) {
@@ -1877,7 +1877,7 @@ pub fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {
         }
         Err(errs) => {
             eprintln!("{}", render_file_errs(path, &src, &errs));
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     }
 }
@@ -2105,14 +2105,14 @@ pub fn skull_run(path: &str) -> Result<()> {
         Ok(s) => s,
         Err(e) => {
             log::error!(target: "SKULL", "cannot read {}: {}", path, e);
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     };
     let (lua, emits_main) = match skull_emit(path, &src) {
         Ok(l) => l,
         Err(errs) => {
             eprintln!("{}", render_file_errs(path, &src, &errs));
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     };
     let program = if emits_main {
@@ -2130,13 +2130,13 @@ pub fn skull_run(path: &str) -> Result<()> {
             // returning Ok is how `rock run` used to exit 0 on a dead program.
             if !run.success {
                 log::error!(target: "SKULL", "program exited with a runtime error");
-                crate::ablation_report::exit_with_census(1);
+                crate::invocation_log::exit(1);
             }
             Ok(())
         }
         Err(e) => {
             log::error!(target: "SKULL", "runtime error: {}", e.message);
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     }
 }
@@ -2176,7 +2176,7 @@ fn skull_emit_project(dir: &str) -> Result<(GameProgram, bool)> {
         Ok(inputs) => inputs,
         Err(e) => {
             log::error!(target: "SKULL", "build var resolution failed for project {}: {:#}", dir, e);
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     };
     skull_emit_project_with_inputs(dir, inputs)
@@ -2195,7 +2195,7 @@ fn skull_emit_project_with_inputs(
         Ok(s) => s,
         Err(e) => {
             log::error!(target: "SKULL", "cannot load project {}: {}", dir, e);
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     };
     // Game build: drop test-only files (tests/ dirs) so a compile error in a
@@ -2213,7 +2213,7 @@ fn skull_emit_project_with_inputs(
         Ok(v) => v,
         Err(errs) => {
             eprintln!("{}", render_project_errs(&sources, &errs));
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     };
 
@@ -2250,7 +2250,7 @@ fn skull_emit_project_with_inputs(
                     log::error!(target: "SKULL", "bone type-check failed for project {}", dir)
                 }
             }
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     };
     crate::compile_measurements::emission(&emit);
@@ -2259,7 +2259,7 @@ fn skull_emit_project_with_inputs(
         write_allocation_report(allocation_report_path.as_deref(), &emit.allocation_report)
     {
         log::error!(target: "SKULL", "cannot write allocation report for {}: {:#}", dir, e);
-        crate::ablation_report::exit_with_census(1);
+        crate::invocation_log::exit(1);
     }
     let emits_main = emit.emits_main;
     let (lua, skipped) = (emit.lua, emit.skipped);
@@ -2277,7 +2277,7 @@ fn skull_emit_project_with_inputs(
         Err(error) => {
             eprintln!("{}", render_project_err(&sources, &error));
             log::error!(target: "SKULL", "global accessor planning failed for {}", dir);
-            crate::ablation_report::exit_with_census(1);
+            crate::invocation_log::exit(1);
         }
     };
     // The bone Workspace is dead once `lua` is built -- this is a terminal
@@ -2944,12 +2944,8 @@ pub fn skull_test(
         err_failed += f;
     }
 
-    // The totality-ablation census, before the exit below: this path leaves the process
-    // with `process::exit`, which runs no destructor and never returns to
-    // `main`, so a report installed only there would silently never print.
     crate::invocation_log::note_phase("error_suite", err_start.elapsed().as_millis() as u64);
     crate::invocation_log::note_counts(&[("lsp_failed", lsp_failed), ("error_failed", err_failed)]);
-    let ablation_fatals = crate::ablation_report::report("rock test");
 
     if let Some(filter) = filter.filter(|_| tests_total == 0) {
         anyhow::bail!(
@@ -2959,15 +2955,7 @@ pub fn skull_test(
         );
     }
 
-    if tests_failed > 0
-        || test_fails > 0
-        || failed > 0
-        || lsp_failed > 0
-        || err_failed > 0
-        || ablation_fatals
-    {
-        // Plain exit: the census above already drained the registry, so routing
-        // this through `exit_with_census` would print an empty second one.
+    if tests_failed > 0 || test_fails > 0 || failed > 0 || lsp_failed > 0 || err_failed > 0 {
         crate::invocation_log::exit(1);
     }
     Ok(())

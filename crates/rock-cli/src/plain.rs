@@ -44,7 +44,7 @@ pub static COMMANDS: &[&CliCommand] = &[
                 Ok(_) => Ok(()),
                 Err(e) => {
                     log::error!(target: "FMT", "{}", e);
-                    rock_cli::ablation_report::exit_with_census(1);
+                    rock_cli::invocation_log::exit(1);
                 }
             }
         }),

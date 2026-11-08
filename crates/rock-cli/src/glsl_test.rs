@@ -127,7 +127,7 @@ pub fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
         );
     }
     if total_failed > 0 || summary.unit_failures > 0 {
-        crate::ablation_report::exit_with_census(1);
+        crate::invocation_log::exit(1);
     }
     Ok(())
 }
@@ -676,7 +676,7 @@ pub fn shader_validate(dirs: &[String], skip_gpu: bool) -> Result<()> {
         }
     }
     if any_failed {
-        crate::ablation_report::exit_with_census(1);
+        crate::invocation_log::exit(1);
     }
     Ok(())
 }

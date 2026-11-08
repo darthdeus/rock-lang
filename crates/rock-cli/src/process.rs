@@ -62,10 +62,6 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
     // ROCK_LOG.
     rock_log::init();
 
-    // `ROCK_MONO_ABLATION=1`: the totality ablation. Off by default and read
-    // once here so every later consult is an atomic load rather than an env lookup.
-    skull_mir::ablation::init_from_env();
-
     if let Some(name) = std::env::args().nth(1) {
         if !name.starts_with('-') && CliCommand::named(&name).is_none() {
             eprintln!("Error: command `{name}` is unavailable in this build");
@@ -185,15 +181,8 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
 
     let context = CommandContext::new(args);
     let outcome = context.run();
-    // The ablation census prints even when the command itself failed: a build
-    // that died partway still recorded every fatal it reached, and discarding
-    // them would make the taxonomy depend on how far the build got.
-    let had_fatals = rock_cli::ablation_report::report("whole run");
     if let Err(e) = outcome {
         log::error!(target: "CLI", "{}", e);
-        rock_cli::invocation_log::exit(1);
-    }
-    if had_fatals {
         rock_cli::invocation_log::exit(1);
     }
 

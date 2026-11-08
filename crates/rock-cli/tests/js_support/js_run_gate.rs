@@ -256,13 +256,9 @@ fn main() {
 }
 "#;
 
-// An `Iterator`-bounded body must be emitted STANDALONE at each
-// instantiation, on BOTH backends, when inlining is disabled -- which is what
-// the ablation mode does.
-//
-// Two instantiations on purpose. One would be satisfied by a body that
-// hard-codes a single `next`; two different element types force the placeholder
-// to resolve per instantiation, which is the substitution D-1 adds.
+// An `Iterator`-bounded body with two instantiations must give the same answer
+// on both backends. Two different element types force the placeholder `next`
+// to resolve per instantiation.
 const BOUNDED_STANDALONE: &str = r#"
 fn total<I: Iterator<int>>(it: I) -> int {
     let s = 0
@@ -283,34 +279,8 @@ fn main() {
 }
 "#;
 
-/// The program's own stdout, with the ablation census stripped.
-///
-/// The census is on stdout, the same stream the program prints to, so comparing
-/// raw output across backends would compare two censuses as well -- and those
-/// legitimately differ (the backends examine different call populations).
-fn without_census(out: &str) -> String {
-    out.lines()
-        .take_while(|l| !l.contains("Stage-0e totality ablation"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn run_ablated(backend: Option<&str>, path: &std::path::Path) -> (String, bool) {
-    let mut cmd = crate::command::rock_bin();
-    cmd.args(["run", path.to_str().unwrap()]);
-    if let Some(b) = backend {
-        cmd.args(["--backend", b]);
-    }
-    cmd.env("ROCK_MONO_ABLATION", "1");
-    let out = cmd.output().expect("spawn rock");
-    (
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        out.status.success(),
-    )
-}
-
 #[test]
-fn a_bounded_body_runs_on_both_backends_with_inlining_disabled() {
+fn a_bounded_body_runs_on_both_backends() {
     if !node_available() {
         eprintln!("SKIP: node not found");
         return;
@@ -320,31 +290,12 @@ fn a_bounded_body_runs_on_both_backends_with_inlining_disabled() {
     let path = dir.join("bounded.rock");
     std::fs::write(&path, BOUNDED_STANDALONE).unwrap();
 
-    // The CONTROL, and it runs first: with the mode OFF the inliner splices the
-    // bounded body, so this is the answer both backends have always produced.
-    // Without it a matching pair below could be two identically-wrong runs.
-    let (spliced, ok) = run(None, &path);
-    assert!(ok, "luajit run (inlining ON) failed:\n{spliced}");
-    assert_eq!(spliced, "6 2\n", "the control's own answer drifted");
-
-    // Exit STATUS is not the oracle here: the mode is deliberately fatal
-    // whenever it records anything, and the stdlib records plenty, so a
-    // perfectly correct run exits non-zero. The program's own stdout is the
-    // result, and it is asserted rather than the status.
-    let (lua_out, _) = run_ablated(None, &path);
-    let (js_out, _) = run_ablated(Some("js"), &path);
-
-    assert_eq!(
-        without_census(&lua_out).trim(),
-        "6 2",
-        "luajit emitted the bounded bodies standalone but got the wrong answer"
-    );
-    assert_eq!(
-        without_census(&js_out).trim(),
-        "6 2",
-        "js emitted the bounded bodies standalone but got the wrong answer -- \
-         this is the arm a per-backend rejection sentinel cannot see"
-    );
+    let (lua_out, ok) = run(None, &path);
+    assert!(ok, "luajit run failed:\n{lua_out}");
+    assert_eq!(lua_out, "6 2\n");
+    let (js_out, ok) = run(Some("js"), &path);
+    assert!(ok, "js run failed:\n{js_out}");
+    assert_eq!(js_out, "6 2\n");
 }
 
 fn both_backends(name: &str, src: &str, expected: &str) {

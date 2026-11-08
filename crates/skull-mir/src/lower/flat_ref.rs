@@ -830,7 +830,7 @@ impl<'a> Builder<'a> {
         let any_named = arg_idxs
             .iter()
             .any(|a| self.body.arg_names.contains_key(a) || self.body.spread_args.contains(a));
-        let dc = self.plan_direct_call(e, func)?;
+        let dc = self.plan_direct_call(e)?;
         let plan = self
             .flat_call_plan(e)?
             .ok_or_else(|| self.gap_here("flat `ref` call has no flat plan"))?;

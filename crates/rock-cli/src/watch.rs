@@ -68,7 +68,7 @@ pub fn reexec_current_binary() -> Result<()> {
     #[cfg(not(unix))]
     {
         std::process::Command::new(exe).args(args).spawn()?;
-        crate::ablation_report::exit_with_census(0);
+        crate::invocation_log::exit(0);
     }
 }
 

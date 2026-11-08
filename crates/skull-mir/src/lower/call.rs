@@ -96,56 +96,6 @@ impl Builder<'_> {
         Ok(Some(self.rebuild_from_leaves(&shape, &leaves, &mut 0)))
     }
 
-    fn record_concrete_ablation(&self, e: Idx<Expr>, func: FuncRef) {
-        if !crate::ablation::enabled() {
-            return;
-        }
-        let callee = &self.ws.module(func.module).functions[func.func];
-        if callee.generics.is_empty() {
-            return;
-        }
-        crate::ablation::note_examined();
-        let plan = self.concrete_plan;
-        let site = crate::site::Site {
-            domain: self.cur_domain.clone(),
-            expr: e,
-            op: self.cur_op.clone(),
-        };
-        let span = self
-            .body
-            .expr_spans
-            .get(e)
-            .copied()
-            .unwrap_or(callee.name_span);
-        let (category, detail) = if callee.inline_body.is_some() || callee.is_extern {
-            (
-                crate::ablation::FatalCategory::TargetBoundary,
-                "the selected body is supplied by a target boundary rather than a Rock instance",
-            )
-        } else if let Some(reason) = plan.failed_sites.get(&site) {
-            let category = if reason.contains("recursion") || reason.contains("depth") {
-                crate::ablation::FatalCategory::PolymorphicGrowth
-            } else if reason.contains("unconstrained") {
-                crate::ablation::FatalCategory::MissingGraphEdge
-            } else {
-                crate::ablation::FatalCategory::CompilerInvariant
-            };
-            (
-                category,
-                "the concrete graph recorded a failed generic call site before MIR lowering",
-            )
-        } else {
-            return;
-        };
-        crate::ablation::record(
-            category,
-            callee.name.as_str(),
-            self.f.name.as_str(),
-            span,
-            detail,
-        );
-    }
-
     pub(crate) fn concrete_callee_for_site(
         &self,
         e: Idx<Expr>,
@@ -1032,11 +982,7 @@ impl Builder<'_> {
     /// The delivery decision comes first because the ABI plan depends on it: a
     /// served instantiation targets the specialized definition, whose parameter
     /// list is what the caller's argument splat has to match.
-    pub(crate) fn plan_direct_call(
-        &mut self,
-        e: Idx<Expr>,
-        func: FuncRef,
-    ) -> Result<DirectCall, CompilerError> {
+    pub(crate) fn plan_direct_call(&mut self, e: Idx<Expr>) -> Result<DirectCall, CompilerError> {
         // A dispatched helper shares the hole's expression, not its user call's bound tree.
         let tree = if matches!(self.cur_op, crate::site::SiteOp::DirectCall) {
             self.inf
@@ -1049,7 +995,6 @@ impl Builder<'_> {
         // IDENTITY, computed beside the delivery decision and independent of it.
         // A call the policy declines to specialize still names exactly one
         // concrete instance, and this is where it says which.
-        self.record_concrete_ablation(e, func);
         let callee_inst = self
             .concrete_callee_for_site(e)?
             .ok_or_else(|| self.gap_here("direct call has no concrete callee identity"))?;
@@ -1178,7 +1123,7 @@ impl Builder<'_> {
         // specialized call -- even on the boxed (non-scalar-ABI) path, because the
         // specialized body still differs (e.g. a `native_buffer_alloc<T>` ctype
         // resolves) though the param/return ABI is unchanged.
-        let dc = self.plan_direct_call(e, func)?;
+        let dc = self.plan_direct_call(e)?;
         let callee = &self.ws.module(func.module).functions[func.func];
         // Resolve phantom before tuple flattening can project from its nil placeholder.
         if arg_idxs.is_empty()
@@ -1518,7 +1463,7 @@ impl Builder<'_> {
         recv: Idx<Inst>,
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
-        let dc = self.plan_direct_call(e, func)?;
+        let dc = self.plan_direct_call(e)?;
         self.reject_flat_return_outside_direct_call(e, &dc.callee_inst)?;
         if !dc.plan.uses_scalar_abi() {
             let mut argv = vec![recv];

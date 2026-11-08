@@ -20,8 +20,6 @@ mod allocation_report;
 
 mod nested_box_boundary;
 
-#[path = "ablation_totality.rs"]
-mod ablation_totality;
 #[path = "arena_column_oracle.rs"]
 mod arena_column_oracle;
 #[path = "artifact_fingerprint.rs"]
