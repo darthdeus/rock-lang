@@ -1260,8 +1260,6 @@ function _log_throttled_with_now_impl(now_sec, level, category, msg, interval_se
   __rock_log_throttle[site] = now_sec;
   __rock_log_emit(level, category, msg, wall_clock);
 }
-// Ties order differently from the luajit sibling (JS sort is stable, table.sort
-// is not); the counts themselves match.
 function log_suppression_summary() {
   __rock_log_init();
   if (__rock_log_summary_done) return;
@@ -1277,7 +1275,7 @@ function log_suppression_summary() {
   collect(__rock_log_dedup);
   collect(__rock_log_counts);
   if (rows.length === 0) return;
-  rows.sort(function(a, b) { return b.n - a.n; });
+  rows.sort(function(a, b) { return b.n - a.n || (a.site < b.site ? -1 : a.site > b.site ? 1 : 0); });
   for (var i = 0; i < rows.length; i++) {
     var r = rows[i];
     var rec = __rock_log_sites[r.site] || "|";

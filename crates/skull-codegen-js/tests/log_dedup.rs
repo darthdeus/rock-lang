@@ -109,3 +109,15 @@ fn log_warn_sites_obey_the_level_gate() {
         "[E] kept\n[W] shown\n[W] suppressed x2 at wk: shown",
     );
 }
+
+// Equal counts order by site name, as the luajit summary does, not by insertion.
+#[test]
+fn log_summary_breaks_count_ties_by_site() {
+    eval_log(
+        "fn root() { log_reset_dedup(); log_set_level(0); \
+         log_once(\"B\", \"b\", \"zz\"); log_once(\"B\", \"b\", \"zz\"); \
+         log_once(\"A\", \"a\", \"aa\"); log_once(\"A\", \"a\", \"aa\"); \
+         log_suppression_summary() }",
+        "[B] b\n[A] a\n[A] suppressed x2 at aa: a\n[B] suppressed x2 at zz: b",
+    );
+}
