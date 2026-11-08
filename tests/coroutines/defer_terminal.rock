@@ -160,3 +160,51 @@ fn test_co_defer_terminal_coverage() {
     let e = contains_str(LOG, "defer-error")
     print("done:{d} killed:{k} error:{e}")
 }
+
+// A defer that fires on kill() reads its locals' values at the kill, and a
+// kill inside an inner block runs that block's defer before the outer one.
+global KL: string = ""
+
+co fn kill_reads_current() -> Coroutine<int> {
+    let x = 1
+    defer { KL = KL + "x{x}" }
+    x = 2
+    yield 1
+    x = 3
+    yield 2
+}
+
+co fn kill_nested_scopes() -> Coroutine<int> {
+    defer { KL = KL + "outer" }
+    {
+        let y = 1
+        defer { KL = KL + "inner{y}," }
+        y = 4
+        yield 1
+    }
+    yield 2
+}
+
+@test
+fn test_kill_defer_reads_the_value_at_the_kill() {
+    KL = ""
+    let c = kill_reads_current()
+    resume(c)
+    kill(c)
+    assert_eq(KL, "x2")
+    KL = ""
+    let d = kill_reads_current()
+    resume(d)
+    resume(d)
+    kill(d)
+    assert_eq(KL, "x3")
+}
+
+@test
+fn test_kill_inside_inner_block_runs_inner_then_outer() {
+    KL = ""
+    let c = kill_nested_scopes()
+    resume(c)
+    kill(c)
+    assert_eq(KL, "inner4,outer")
+}

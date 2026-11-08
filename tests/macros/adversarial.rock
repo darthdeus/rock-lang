@@ -4,23 +4,9 @@
 // Failures here are real findings — don't soften the assertion to make it
 // pass; investigate.
 //
-// As of 2026-05-06: 13/14 pass.
-//   PASS: hygiene of body-introduced locals; side-effect dedup; fragment
-//         kinds accept any expr (ident is currently permissive too — both
-//         resolve to TYPE_ANY); macros calling macros recursively expand;
-//         macros in if-branches and as args to fns; multi-arity dispatch;
-//         mixed macro+fn overload sets.
-//   FAIL: test_hygiene_body_resolves_to_def_scope — bare identifiers in
-//         macro bodies (referencing globals/fns) resolve at the *caller's*
-//         scope rather than the definition site. Real hygiene limit.
-//         Workaround: pick names
-//         the caller is unlikely to shadow. Real fix needs name resolution
-//         to qualify globals at definition time (e.g. emit `_G.X` for
-//         globals during macro-body codegen).
-//
-// Other findings logged inline:
-//   - @inline forbids param mutation, which blocks `swap!(x, y)`-style
-//     macros.
+// Bare identifiers in a macro body resolve at the call site; a macro reads a
+// global through `_G.name` (test_hygiene_body_resolves_to_def_scope) and a
+// caller binding through `^name`.
 
 global SIDE_EFFECT_COUNTER: int = 0
 
@@ -31,10 +17,21 @@ fn next_counter() -> int {
 
 // === HYGIENE ===
 
-// Inline-pass interaction: KNOWN LIMITATION — the @inline path forbids
-// mutating params, so a `swap!(x, y)` style macro that assigns through
-// `ident` params errors at definition time. Real fix needs the macro
-// system to opt out of the param-mutation check (legitimate for macros).
+// A macro can assign through its params: the substituted caller places are
+// written, and the body-local temporary cannot capture a caller `t`.
+macro swap_places(a: expr, b: expr) {
+    let t = a
+    a = b
+    b = t
+}
+
+@test
+fn test_macro_assigns_through_params() {
+    let x = 1
+    let t = 2
+    swap_places(x, t)
+    assert(x == 2 && t == 1, "swap writes both caller locals")
+}
 
 // Hygiene: macro body introduces a local with same name as caller's local.
 macro reads_local_temp(x: expr) -> int {
@@ -240,7 +237,5 @@ fn test_arity_dispatch_3_arms() {
 
 // === MACRO + FN MIXED OVERLOAD SET ===
 //
-// Macro/fn name collisions are now a compile error
-// (`MacroExpansionPass` rejects them at registration). Negative test
-// lives in `tests/macros/name_collision_error.rock` — it asserts the
-// diagnostic via `@expect_error`.
+// Macro/fn name collisions are a compile error, pinned by
+// `tests/errors/macro_name_collides_with_fn.rock.err`.
