@@ -410,6 +410,12 @@ fn unfilled_expression_hole_is_a_warning() {
         .find(|d| d.message.contains("expression hole"))
         .unwrap_or_else(|| panic!("expr hole should warn, got: {diags:?}"));
     assert_eq!(hole.severity, Some(lsp_types::DiagnosticSeverity::WARNING));
+    assert_eq!(
+        hole.code,
+        Some(lsp_types::NumberOrString::String(
+            "unfilled_expression_hole".into()
+        ))
+    );
     assert!(
         hole.message.contains("expecting int"),
         "msg: {}",

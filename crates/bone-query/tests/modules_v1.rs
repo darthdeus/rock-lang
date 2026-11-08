@@ -1302,3 +1302,68 @@ fn an_allow_legacy_providers_definition_is_offered_with_an_import() {
     assert_eq!(edits[0].new_text, "use x_lib::wander;\n");
     assert_eq!(edits[0].range.start, Position::new(0, 0));
 }
+
+#[test]
+fn qualified_nullable_annotations_are_not_expression_holes() {
+    let project = V1Project::new();
+    std::fs::write(
+        project.dir.path().join("shapes.rock"),
+        "pub mod shapes;\npub struct Cell<T> { pub value: T }\n",
+    )
+    .unwrap();
+    let main = project.path("main.rock");
+    let source = "fn main() {\n\
+        let absent: shapes::Cell<int>? = null\n\
+        let unit: shapes::Cell<()>? = null\n\
+        let actual: shapes::Cell<int>? = ?\n\
+        }\n";
+    std::fs::write(&main, source).unwrap();
+    let mut bone = BoneWorkspace::new();
+    let updated = bone.update(&main, source.to_string());
+    let diagnostics = bone.diagnostics_for(&main);
+    assert!(
+        diagnostics
+            .iter()
+            .all(|d| d.severity != Some(lsp_types::DiagnosticSeverity::ERROR)),
+        "{diagnostics:?}"
+    );
+    let actual = pos_of(source, "= ?", 0, 2);
+    for diagnostics in [
+        diagnostics,
+        updated
+            .into_iter()
+            .find(|(path, _)| path == &main)
+            .unwrap()
+            .1,
+    ] {
+        let holes: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| d.message.contains("expression hole"))
+            .collect();
+        assert_eq!(
+            holes.len(),
+            1,
+            "only the unfinished initializer is a hole: {holes:?}"
+        );
+        assert_eq!(holes[0].range.start, actual);
+    }
+    for occurrence in 0..3 {
+        let nullable = pos_of(source, ">?", occurrence, 1);
+        assert!(
+            bone.hole_info(&main, nullable).is_none(),
+            "nullable annotation #{occurrence} is not a hole"
+        );
+    }
+    assert!(
+        bone.hole_info(&main, actual)
+            .unwrap()
+            .starts_with("Expression hole expecting:")
+    );
+    bone.update(&main, source.replace("= ?", "= null"));
+    assert!(
+        !bone
+            .diagnostics_for(&main)
+            .iter()
+            .any(|d| d.message.contains("hole"))
+    );
+}

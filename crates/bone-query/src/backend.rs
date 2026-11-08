@@ -262,7 +262,7 @@ impl BoneProject {
     fn reparse_user_file(&self, path: &str, request: &'static str) -> Option<skull_parser::Ast> {
         let uf = self.session.files.get(path)?;
         self.fallbacks.result(
-            skull_parser::parse_module(&uf.text, Ustr::from(path)),
+            skull_parser::parse_module_with_dialect(&uf.text, Ustr::from(path), uf.dialect),
             request,
             path,
             "parse stored source",
@@ -5435,6 +5435,8 @@ fn hole_diagnostics_for(proj: &BoneProject, path: &str) -> Option<Vec<Diagnostic
             Diagnostic {
                 range: line_index.range(src, span.offset_range.0, span.offset_range.1),
                 severity: Some(severity),
+                code: matches!(kind, crate::query::HoleKind::Expr)
+                    .then(|| lsp_types::NumberOrString::String("unfilled_expression_hole".into())),
                 source: Some("bone".to_string()),
                 message,
                 ..Default::default()
