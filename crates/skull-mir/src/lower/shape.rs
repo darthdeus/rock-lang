@@ -10,6 +10,7 @@
 
 use super::*;
 
+use bone_core::type_equiv::TyRef;
 use bone_semantic::hir::{BuiltinTy, Expr, TyId, TypeCtor, TypeExpr, VariantPayload};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::Idx;
@@ -1409,9 +1410,9 @@ pub(crate) fn value_struct_field_tys(ws: &Workspace, name: Ustr) -> Option<Vec<(
     Some(sd.fields.iter().map(|f| (f.name, f.ty)).collect())
 }
 
-/// Variant names of `enum_name` whose payload is a single type rendering to
-/// `want`. Zero -> no match; more than one -> ambiguous.
-pub(crate) fn variants_for_payload(ws: &Workspace, enum_name: Ustr, want: &str) -> Vec<Ustr> {
+/// Variant names of `enum_name` whose payload is a single type equivalent to
+/// the static type `want`. Zero -> no match; more than one -> ambiguous.
+pub(crate) fn variants_for_payload(ws: &Workspace, enum_name: Ustr, want: TyId) -> Vec<Ustr> {
     let Some(&eid) = ws.enums_by_name.get(&enum_name) else {
         return Vec::new();
     };
@@ -1419,7 +1420,9 @@ pub(crate) fn variants_for_payload(ws: &Workspace, enum_name: Ustr, want: &str) 
     ed.variants
         .iter()
         .filter(|v| match &v.payload {
-            VariantPayload::Tuple(tys) if tys.len() == 1 => ws.render(None, tys[0]) == want,
+            VariantPayload::Tuple(tys) if tys.len() == 1 => {
+                ws.types_equivalent(TyRef::of_static(tys[0]), TyRef::of_static(want))
+            }
             _ => false,
         })
         .map(|v| v.name)
@@ -1439,7 +1442,7 @@ pub(crate) fn struct_expand_variants(
     let mut out = Vec::with_capacity(field_tys.len());
     for (field, fty) in field_tys {
         let want = ws.render(None, *fty);
-        match variants_for_payload(ws, enum_name, &want).as_slice() {
+        match variants_for_payload(ws, enum_name, *fty).as_slice() {
             [v] => out.push(*v),
             [] => {
                 return Err(format!(

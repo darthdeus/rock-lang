@@ -50,3 +50,18 @@ value S { x: float }
 fn main() {
     let _ = bad(S { x: 1.0 })
 }
+
+//=== TEST CASE: nominal_field_vs_same_named_generic_payload_Generic ===
+// `A(T)` carries E's generic parameter, not the struct `T`; the two only
+// render alike.
+value T { x: float }
+enum E<T> { A(T), I(int) }
+value S { t: T, n: int }
+
+@struct_expand inline(lua) fn epairs<P>(u: P) -> [(string, E<float>)] = """
+    error("compiler-expanded")
+"""
+
+fn main() {
+    let _ = epairs(S { t: T { x: 2.5 }, n: 3 })
+}

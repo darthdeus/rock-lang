@@ -154,6 +154,53 @@ fn build() -> int { let ps = dpairs(S { x: 1.0 }); return ps.len() }
     );
 }
 
+// The variant payload `A(T)` is the enum's generic parameter, not the struct
+// `T` that happens to share its name. Both render as "T"; matching them stored
+// a `T` value where `E<float>` expects a float.
+#[test]
+fn rejects_nominal_field_against_same_named_generic_payload() {
+    let src = r#"
+value T { x: float }
+enum E<T> { A(T), I(int) }
+value S { t: T, n: int }
+@struct_expand inline(lua) fn epairs<P>(u: P) -> [(string, E<float>)] = """
+    error("phantom")
+"""
+fn build() -> int { let ps = epairs(S { t: T { x: 2.5 }, n: 3 }); return ps.len() }
+"#;
+    let err = try_emit_module(src).expect_err("a nominal `T` is not the generic payload `T`");
+    assert!(
+        err.message.contains("field `t: T` has no variant of `E`"),
+        "{}",
+        err.message
+    );
+}
+
+// The enum and the struct live in different modules, so the payload and field
+// types sit in different arenas; the same `V2` must still match.
+#[test]
+fn matches_payload_types_across_modules() {
+    let lib = r#"
+value V2 { x: float, y: float }
+enum U { F(float), Vv(V2) }
+"#;
+    let src = r#"
+value AU { alpha: float, pos: V2 }
+@struct_expand inline(lua) fn upairs<T>(u: T) -> [(string, U)] = """
+    error("phantom")
+"""
+fn build(a: float) -> int {
+    let ps = upairs(AU { alpha: a, pos: V2 { x: a, y: 4.0 } })
+    return ps.len()
+}
+"#;
+    let lua = crate::common::try_emit_with_stdlib_module(lib, src).expect("cross-module expand");
+    let body = function_body(&lua, "build");
+    for needle in ["__variant = (\"F\")", "__variant = (\"Vv\")"] {
+        assert!(body.contains(needle), "missing `{needle}` in:\n{body}");
+    }
+}
+
 #[test]
 fn rejects_return_type_not_pairs() {
     let src = r#"
