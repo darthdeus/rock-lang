@@ -1310,9 +1310,14 @@ fn to_string(value: uint) -> string { return tostring(value) }
 
 fn to_string(value: float) -> string {
     let str_value = tostring(value)
-    // Ensure floats always show decimal point for Lua compatibility
-    if str_value.find(".") == -1 { return str_value + ".0" }
-    return str_value
+    // Mark integral values as floats. Exponent forms ("1e+16") and
+    // non-finite values ("inf", "nan") already read as floats; a ".0"
+    // suffix would make them unparseable.
+    for i in 0..str_value.len() {
+        let c = str_value.unit_at(i)
+        if (c < 48 || c > 57) && !(i == 0 && c == 45) { return str_value }
+    }
+    return str_value + ".0"
 }
 
 // `to_string(string)` is the identity via @expand — does NOT allocate.

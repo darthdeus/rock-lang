@@ -533,6 +533,14 @@ is the core; `upper`, `lower`, `repeat`, `starts_with`, `ends_with`,
 `replace`, `pad_left`, `pad_right`, `lines` and `parse_float` work the
 same way.
 
+`print` renders a float with at most 14 significant digits and no
+trailing zeros: `3.0` prints as `3`, `1e16` as `1e+16`, and non-finite
+values as `inf`, `-inf` and `nan`. `{x}` with no format spec keeps at
+most 4 decimals (`{3.14159}` is `3.1416`). `to_string(x)` gives the
+`print` text, but adds `.0` when that text is only digits and an
+optional minus, so `to_string(3.0)` is `"3.0"` while `to_string(1e16)`
+stays `"1e+16"`.
+
 ```rock
 // Strings interpolate `{expr}`; write `{{` for a literal brace.
 // Offsets count bytes. The stdlib adds split, trim and friends.

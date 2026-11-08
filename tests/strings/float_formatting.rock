@@ -179,3 +179,26 @@ fn test_tostring_of_large_ints() {
     assert_eq(tostring(same_int(4294967296)), "4294967296")
     assert_eq("{same_int(123456789012345)}", "1.2345678901234e+14")
 }
+
+// `to_string(float)` marks an integral value with ".0", but only when the
+// `%.14g` text is plain digits with an optional minus. Exponent forms and
+// non-finite values already read as floats and must pass through unchanged.
+@test
+fn test_to_string_float_appends_point_zero_only_to_plain_digits() {
+    assert_eq(to_string(same_float(3.0)), "3.0")
+    assert_eq(to_string(same_float(-3.0)), "-3.0")
+    assert_eq(to_string(same_float(0.0)), "0.0")
+    assert_eq(to_string(same_float(-0.0)), "-0.0")
+    assert_eq(to_string(same_float(1000000.0)), "1000000.0")
+    assert_eq(to_string(same_float(2.5)), "2.5")
+    assert_eq(to_string(same_float(-0.125)), "-0.125")
+    assert_eq(to_string(same_float(0.1) + same_float(0.2)), "0.3")
+    assert_eq(to_string(same_float(1e16)), "1e+16")
+    assert_eq(to_string(same_float(1e-7)), "1e-07")
+    assert_eq(to_string(same_float(-1.5e300)), "-1.5e+300")
+    assert_eq(to_string(same_float(1.0) / same_float(0.0)), "inf")
+    assert_eq(to_string(same_float(-1.0) / same_float(0.0)), "-inf")
+    assert_eq(to_string(same_float(0.0) / same_float(0.0)), "nan")
+    assert_eq(same_float(1e16).to_string(), "1e+16")
+    assert_eq(same_float(4.0).to_string(), "4.0")
+}
