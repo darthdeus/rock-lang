@@ -3115,23 +3115,58 @@ impl InstanceGraph {
         self.run_stats.root_hole_names_examined += root_holes.names_examined;
         self.run_stats.root_hole_decls_examined += root_holes.decls_examined;
 
-        let previous_recursion_starts =
+        let mut previous_recursion_starts =
             self.retract_recursion_findings(&touched_instances, &touched_decls);
-        self.run_stats.recursion_findings_retracted += previous_recursion_starts.len();
-        let mut recursion_seeds = touched_instances.clone();
-        recursion_seeds.extend(previous_recursion_starts);
-        recursion_seeds.extend(touched_decls.iter().flat_map(|decl| {
-            self.index
-                .decl_instances
-                .get(&decl.0)
-                .into_iter()
-                .flatten()
-                .cloned()
-        }));
-        recursion_seeds = self.recursion_seed_closure(recursion_seeds);
-        self.run_stats.recursion_seed_subjects = recursion_seeds.len();
+        // A full build reports only the first start of each declaration, so a
+        // finding's declaration is the unit that must be re-searched: dropping
+        // one can expose a disconnected start of the same declaration, and a
+        // new one can displace a later start that nothing here touched.
+        let mut recursion_decls: BTreeSet<DeclKey> = previous_recursion_starts
+            .iter()
+            .map(|start| DeclKey(start.func))
+            .collect();
         let (starts, findings) =
-            detect_changing_instance_recursion_local(self, ws, &recursion_seeds);
+            loop {
+                let mut recursion_seeds = touched_instances.clone();
+                recursion_seeds.extend(previous_recursion_starts.iter().cloned());
+                recursion_seeds.extend(touched_decls.iter().chain(&recursion_decls).flat_map(
+                    |decl| {
+                        self.index
+                            .decl_instances
+                            .get(&decl.0)
+                            .into_iter()
+                            .flatten()
+                            .cloned()
+                    },
+                ));
+                recursion_seeds = self.recursion_seed_closure(recursion_seeds);
+                self.run_stats.recursion_seed_subjects = recursion_seeds.len();
+                let (starts, findings) =
+                    detect_changing_instance_recursion_local(self, ws, &recursion_seeds);
+                let displaced: BTreeSet<DeclKey> = findings
+                    .iter()
+                    .map(|finding| DeclKey(finding.rejection.at.func))
+                    .filter(|decl| !recursion_decls.contains(decl))
+                    .collect();
+                if displaced.is_empty() {
+                    break (starts, findings);
+                }
+                for decl in displaced {
+                    let retained: Vec<Instance> = self
+                        .recursion_by_decl
+                        .get(&decl)
+                        .into_iter()
+                        .flatten()
+                        .cloned()
+                        .collect();
+                    for at in retained {
+                        self.remove_recursion_finding(&at);
+                        previous_recursion_starts.insert(at);
+                    }
+                    recursion_decls.insert(decl);
+                }
+            };
+        self.run_stats.recursion_findings_retracted += previous_recursion_starts.len();
         self.recursion_starts = starts;
         self.run_stats.recursion_findings_derived += findings.len();
         for finding in findings {

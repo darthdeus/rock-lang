@@ -2441,3 +2441,69 @@ fn relay<T>(x: [T]) -> int { return 0 }
     assert_eq!(count(&case), 0);
     case.assert_matches_fresh("recursion removed through a helper");
 }
+
+/// Issue #7. `walk` has two DISCONNECTED changing-recursion regions, one per
+/// iterator witness. A full build reports only the first start per declaration,
+/// so the second region's finding is suppressed while the first exists.
+/// Retracting the first must expose the second on the incremental path too,
+/// even though nothing the edit touched reaches it.
+#[test]
+fn retracting_one_recursion_witness_exposes_a_disconnected_alternative() {
+    let recursive = r#"
+fn walk<I: Iterator<int>>(it: I) -> int {
+    let n = 0
+    for v in it { n = n + v }
+    return n
+}
+struct ItA { i: int }
+fn ItA.next(it) -> (bool, int) { return (false, walk(ItC { i: 0 })) }
+struct ItB { i: int }
+fn ItB.next(it) -> (bool, int) { return (false, walk(ItD { i: 0 })) }
+struct ItC { i: int }
+fn ItC.next(it) -> (bool, int) { return (false, 0) }
+struct ItD { i: int }
+fn ItD.next(it) -> (bool, int) { return (false, 0) }
+"#;
+    let retracted = recursive.replace("walk(ItC { i: 0 })", "0");
+    // `walk<ItC>` stays reached from `main`, so the edit removes only the
+    // edge that witnessed the first finding: no instance of `walk` enters or
+    // leaves, and nothing seeds the `ItB` region through its declaration.
+    let main =
+        "fn main() { print(\"{walk(ItA { i: 0 })} {walk(ItB { i: 0 })} {walk(ItC { i: 0 })}\") }\n";
+    let at = |case: &Case| -> Vec<String> {
+        case.graph
+            .rejections()
+            .filter(|r| r.kind == RejectionKind::ChangingInstanceRecursion)
+            .map(|r| case.identity(&r.at))
+            .collect()
+    };
+    let mut case = Case::new(main, recursive);
+    let before = at(&case);
+    assert_eq!(before.len(), 1, "fixture findings: {before:?}");
+    assert!(
+        before[0].contains("ItA"),
+        "the fixture must report the region the edit retracts first: {before:?}"
+    );
+
+    let stats = case.edit(LIB, &retracted);
+    assert!(stats.census.recursion_findings_retracted > 0);
+    let after = at(&case);
+    let fresh = graph_of(case.ws());
+    let fresh_at: Vec<String> = fresh
+        .rejections()
+        .filter(|r| r.kind == RejectionKind::ChangingInstanceRecursion)
+        .map(|r| instance_key(case.ws(), &fresh, &r.at))
+        .collect();
+    assert_eq!(fresh_at.len(), 1, "a full build reports the ItB region");
+    assert_eq!(
+        after, fresh_at,
+        "incremental and full recursion findings differ"
+    );
+    case.assert_matches_fresh("recursion witness retracted");
+
+    // Restoring the first witness must move the finding back: a full build
+    // reports only the first start per declaration.
+    case.edit(LIB, recursive);
+    assert_eq!(at(&case), before, "the restored witness did not win again");
+    case.assert_matches_fresh("recursion witness restored");
+}
