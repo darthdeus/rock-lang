@@ -21,7 +21,6 @@ use bone_semantic::hir::Function;
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 
 pub mod emit;
-mod structure;
 
 /// (declaration key, arity) -> JS emission. Keys are source names or declared
 /// signature mangles for independently mapped overloads. Single source for both

@@ -17,8 +17,6 @@
 //! spec, keyed by the callee's mangled signature (name +
 //! GLSL param types) -- the future `@intrinsic` GLSL column.
 
-mod structure;
-
 pub use skull_mir::shader_ir::GlslProfile;
 
 use bone_semantic::hir::{AnnoValue, BuiltinTy, Function, StructDef, TyId, TypeCtor, TypeExpr};
@@ -26,11 +24,14 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
-use skull_codegen_shader::{const_lit, structure::LoopRegion};
+use skull_codegen_shader::const_lit;
 use skull_graph::instance_graph::{InstanceGraph, SiteOutcome};
 pub use skull_graph::shader::ShaderLibraryView;
 use skull_graph::shader::{ShaderProgram, ShaderProgramView, ShaderStageView};
 use skull_mir::cfg::reverse_postorder;
+use skull_mir::cfg::structure::{
+    self, CountedBound, CountedLoop, LoopRegion, LoopShapes, Structure,
+};
 use skull_mir::concrete::{ConcreteBodyPlan, ConcretePlans, ConcreteSignature};
 use skull_mir::gpu_layout::{
     ArrayMemberDecl, AttrKind, SamplerKind, UniformArrayBlockPlan, UniformBlockPlan, WireKind,
@@ -51,7 +52,6 @@ use skull_mir::shader_ir::{
 use skull_parser::CompilerError;
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use structure::Structure;
 use ustr::Ustr;
 
 /// A tier-0 GLSL type. Everything else is rejected by the profile pass.
@@ -794,7 +794,7 @@ struct FnEmit<'a> {
     /// expanded once per swizzle component.
     value_name: HashMap<Idx<Inst>, String>,
     /// Loop headers matching the range-`for` shape -> their counted-loop info.
-    counted: HashMap<Idx<Block>, LoopInfo>,
+    counted: HashMap<Idx<Block>, CountedLoop>,
     /// Other natural-loop headers (general `while`) -> their region.
     general: HashMap<Idx<Block>, LoopRegion>,
     /// Dominators / post-dominators / natural loops.
@@ -1008,16 +1008,6 @@ struct MainOut {
 /// The fragment output field that is written to `gl_FragDepth`.
 const FRAG_DEPTH_FIELD: &str = "FragDepth";
 
-#[derive(Clone, Copy)]
-struct LoopInfo {
-    slot: Idx<Cell>,
-    bound: Idx<Inst>,
-    inclusive: bool,
-    body_entry: Idx<Block>,
-    latch: Idx<Block>,
-    exit: Idx<Block>,
-}
-
 /// The enclosing loop's jump targets, mirroring skull-mir's `loop_targets`:
 /// `Goto(cont)` -> `continue`, `Goto(brk)` -> `break`.
 #[derive(Clone, Copy, Default)]
@@ -1098,23 +1088,10 @@ fn emit_fn_def_with(
         }
     }
 
-    let st = structure::analyze(mf);
-    let mut counted = HashMap::default();
-    let mut general = HashMap::default();
-    for (&h, region) in &st.loops {
-        // The range-`for` fast path is valid only when the header's own `Branch`
-        // IS the loop test (its else is the real exit). A `while i < N && ..`
-        // header also looks like `i < N` with an `i + 1` latch, but its exit lies
-        // inside the loop -- that one takes the general path.
-        match match_counted_loop(mf, h) {
-            Some(li) if li.exit == region.exit && region.body.contains(&li.latch) => {
-                counted.insert(h, li);
-            }
-            _ => {
-                general.insert(h, region.clone());
-            }
-        }
-    }
+    // GLSL emits every loop as `while (true) { <test>; if (!c) break; .. }`, so
+    // a test-less `loop {}` stays unregistered and rejects in the walker.
+    let st = structure::analyze(mf, LoopShapes::TestedOnly);
+    let (counted, general) = structure::split_loops(mf, &st, CountedBound::Any);
 
     let mut e = FnEmit {
         ws,
@@ -2479,7 +2456,7 @@ impl FnEmit<'_> {
         Ok(())
     }
 
-    fn emit_counted(&mut self, li: LoopInfo) -> Result<(), CompilerError> {
+    fn emit_counted(&mut self, li: CountedLoop) -> Result<(), CompilerError> {
         let slot = self.cell_name[&li.slot].clone();
         let bound = self.render_val(li.bound)?;
         let cmp = if li.inclusive { "<=" } else { "<" };
@@ -2574,77 +2551,6 @@ impl FnEmit<'_> {
             }
         }
     }
-}
-
-// --- counted-loop recognition (mirrors skull-codegen-lua's, for the range-for
-// shape lower_for_range emits) ------------------------------------------------
-
-/// `Some(LoopInfo)` iff `h` is a `for i in lo..hi` header: a `Branch` on
-/// `IntLt/IntLeq(load slot, bound)`, entered by exactly a preheader + a
-/// pure-increment latch (`load slot; 1; add; store slot; goto h`). The `slot`
-/// cell must be `loop_binding` -- desugar provenance that only `lower_for_range`
-/// sets, so a `while i < n { ..; i = i + 1 }` (manual counter) is NOT mistaken
-/// for a range-for and takes the general path instead.
-fn match_counted_loop(f: &MirFunc, h: Idx<Block>) -> Option<LoopInfo> {
-    let Term::Branch {
-        cond,
-        then_bb,
-        else_bb,
-    } = f.blocks[h].term
-    else {
-        return None;
-    };
-    let (slot, bound, inclusive) = match &f.insts[cond] {
-        Inst::IntLt(a, b) => (load_cell(f, *a)?, *b, false),
-        Inst::IntLeq(a, b) => (load_cell(f, *a)?, *b, true),
-        _ => return None,
-    };
-    if !f.cells[slot].loop_binding {
-        return None;
-    }
-    // Find the pure-increment latch among h's goto-preds.
-    let mut latch = None;
-    for (bid, blk) in f.blocks.iter() {
-        if blk.term == Term::Goto(h) && is_incr_latch(f, bid, slot) {
-            latch = Some(bid);
-        }
-    }
-    let latch = latch?;
-    Some(LoopInfo {
-        slot,
-        bound,
-        inclusive,
-        body_entry: then_bb,
-        latch,
-        exit: else_bb,
-    })
-}
-
-fn load_cell(f: &MirFunc, iid: Idx<Inst>) -> Option<Idx<Cell>> {
-    match f.insts[iid] {
-        Inst::Load(c) => Some(c),
-        _ => None,
-    }
-}
-
-/// `p`: `vj = load slot; one = 1; vinc = vj + one; store slot = vinc; goto h`.
-fn is_incr_latch(f: &MirFunc, p: Idx<Block>, slot: Idx<Cell>) -> bool {
-    let ins = &f.blocks[p].insts;
-    // The store to slot must be an increment of slot by 1.
-    for &iid in ins {
-        if let Inst::Store { cell, value } = f.insts[iid] {
-            if cell == slot {
-                if let Inst::IntAdd(a, b) = f.insts[value] {
-                    let is_one = |x: Idx<Inst>| matches!(f.insts[x], Inst::Const(Lit::Int(1)));
-                    let loads_slot =
-                        |x: Idx<Inst>| matches!(f.insts[x], Inst::Load(c) if c == slot);
-                    return (loads_slot(a) && is_one(b)) || (loads_slot(b) && is_one(a));
-                }
-                return false;
-            }
-        }
-    }
-    false
 }
 
 // --- public API --------------------------------------------------------------

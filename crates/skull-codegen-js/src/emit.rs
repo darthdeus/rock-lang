@@ -13,6 +13,9 @@ use std::fmt::Write as _;
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::{Idx, RawIdx};
+use skull_mir::cfg::structure::{
+    self, CountedBound, CountedLoop, LoopRegion, LoopShapes, Structure,
+};
 use skull_mir::code_identity::{
     CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema,
 };
@@ -29,7 +32,6 @@ use skull_graph::target_projection;
 use skull_parser::{CompilerError, Span};
 use ustr::Ustr;
 
-use crate::structure::{self, LoopRegion, Structure};
 use crate::{JsIntrinsics, fill_template};
 
 fn raw<T>(idx: Idx<T>) -> u32 {
@@ -620,7 +622,7 @@ pub fn emit_fn_with_callees(
         return Err(err("JS subset: coroutine fn not supported"));
     }
     let (use_count, inlinable) = compute_inlinable(mf);
-    let st = structure::analyze(mf);
+    let st = structure::analyze(mf, LoopShapes::AllowHeaderless);
     // A range-`for` (`loop_binding` slot + pure-increment latch) emits as a real
     // JS `for (; slot < bound; slot = slot + 1)`: `continue` there re-runs the
     // increment, which a `while (true)` shape cannot express (a bare `continue`
@@ -628,18 +630,7 @@ pub fn emit_fn_with_callees(
     // shape would walk into it repeatedly. Every other natural loop takes the
     // general `while (true)` path, whose header effects re-materialize through
     // the value model so a cell read+written across the back-edge does not fold.
-    let mut counted: HashMap<Idx<Block>, LoopInfo> = HashMap::new();
-    let mut general: HashMap<Idx<Block>, LoopRegion> = HashMap::new();
-    for (&h, region) in &st.loops {
-        match match_counted_loop(mf, h) {
-            Some(li) if li.exit == region.exit && region.body.contains(&li.latch) => {
-                counted.insert(h, li);
-            }
-            _ => {
-                general.insert(h, region.clone());
-            }
-        }
-    }
+    let (counted, general) = structure::split_loops(mf, &st, CountedBound::InlineOnly);
     let unwind = mf.registers_defer_cleanup(&reachable_blocks(mf));
     let mut em = Emitter {
         ws,
@@ -749,9 +740,9 @@ pub fn emit_fn_trampoline(
         globals,
         use_count,
         inlinable,
-        structure: structure::Structure::empty(mf.blocks.len()),
-        counted: HashMap::new(),
-        general: HashMap::new(),
+        structure: Structure::empty(mf.blocks.len()),
+        counted: Default::default(),
+        general: Default::default(),
         active: HashSet::new(),
         visited: HashSet::new(),
         loop_stack: Vec::new(),
@@ -989,9 +980,9 @@ struct Emitter<'a> {
     /// Dominators / immediate post-dominators / natural loops.
     structure: Structure,
     /// Range-`for` headers -> their counted-loop info (the `for (;;)` fast path).
-    counted: HashMap<Idx<Block>, LoopInfo>,
+    counted: rustc_hash::FxHashMap<Idx<Block>, CountedLoop>,
     /// Other natural-loop headers -> their region (general `while (true)` path).
-    general: HashMap<Idx<Block>, LoopRegion>,
+    general: rustc_hash::FxHashMap<Idx<Block>, LoopRegion>,
     /// Loop headers currently being emitted, so the header-region walk (a
     /// compound `while a && b` condition) does not re-wrap the header as a fresh
     /// loop.
@@ -1050,17 +1041,6 @@ struct LoopFrame {
     cont: Idx<Block>,
     brk: Idx<Block>,
     header: Idx<Block>,
-}
-
-/// A recognized range-`for` loop (the shape `lower_for_range` emits).
-#[derive(Clone, Copy)]
-struct LoopInfo {
-    slot: Idx<Cell>,
-    bound: Idx<Inst>,
-    inclusive: bool,
-    body_entry: Idx<Block>,
-    latch: Idx<Block>,
-    exit: Idx<Block>,
 }
 
 impl Emitter<'_> {
@@ -1517,7 +1497,7 @@ impl Emitter<'_> {
     /// and bound were initialized in the preheader (hoisted cells), so the `for`
     /// init clause is empty. `continue` targets the latch (the `for` increment
     /// runs it); `break` targets the exit.
-    fn emit_counted(&mut self, header: Idx<Block>, li: LoopInfo) -> Result<(), CompilerError> {
+    fn emit_counted(&mut self, header: Idx<Block>, li: CountedLoop) -> Result<(), CompilerError> {
         let slot = cell_name(self.mf, li.slot);
         // The bound is a `Load` of a hoisted preheader cell (or a const),
         // rendered inline so it never depends on a header-block temp we skip.
@@ -3089,77 +3069,6 @@ impl Emitter<'_> {
             ))),
         }
     }
-}
-
-// --- counted-loop recognition (mirrors skull-codegen-glsl's / -lua's, for the
-// range-for shape `lower_for_range` emits) -------------------------------------
-
-/// `Some(LoopInfo)` iff `h` is a `for i in lo..hi` header: a `Branch` on
-/// `IntLt/IntLeq(load slot, bound)` where the `slot` cell is `loop_binding`
-/// (desugar provenance only `lower_for_range` sets, so a manual
-/// `while i < n { ..; i = i + 1 }` is NOT mistaken for a range-for) and `h` has a
-/// pure-increment latch. The bound must render inline (a `Load` of a hoisted
-/// preheader cell, or a const) since the counted path skips the header block.
-fn match_counted_loop(f: &MirFunc, h: Idx<Block>) -> Option<LoopInfo> {
-    let Term::Branch {
-        cond,
-        then_bb,
-        else_bb,
-    } = f.blocks[h].term
-    else {
-        return None;
-    };
-    let (slot, bound, inclusive) = match &f.insts[cond] {
-        Inst::IntLt(a, b) => (load_cell(f, *a)?, *b, false),
-        Inst::IntLeq(a, b) => (load_cell(f, *a)?, *b, true),
-        _ => return None,
-    };
-    if !f.cells[slot].loop_binding {
-        return None;
-    }
-    if !matches!(f.insts[bound], Inst::Load(_) | Inst::Const(_)) {
-        return None; // non-inline bound would reference a skipped header temp
-    }
-    let mut latch = None;
-    for (bid, blk) in f.blocks.iter() {
-        if blk.term == Term::Goto(h) && is_incr_latch(f, bid, slot) {
-            latch = Some(bid);
-        }
-    }
-    let latch = latch?;
-    Some(LoopInfo {
-        slot,
-        bound,
-        inclusive,
-        body_entry: then_bb,
-        latch,
-        exit: else_bb,
-    })
-}
-
-fn load_cell(f: &MirFunc, iid: Idx<Inst>) -> Option<Idx<Cell>> {
-    match f.insts[iid] {
-        Inst::Load(c) => Some(c),
-        _ => None,
-    }
-}
-
-/// `p`: `load slot; 1; slot + 1; store slot; goto h` -- a pure `slot += 1` latch.
-fn is_incr_latch(f: &MirFunc, p: Idx<Block>, slot: Idx<Cell>) -> bool {
-    for &iid in &f.blocks[p].insts {
-        if let Inst::Store { cell, value } = f.insts[iid] {
-            if cell == slot {
-                if let Inst::IntAdd(a, b) = f.insts[value] {
-                    let is_one = |x: Idx<Inst>| matches!(f.insts[x], Inst::Const(Lit::Int(1)));
-                    let loads_slot =
-                        |x: Idx<Inst>| matches!(f.insts[x], Inst::Load(c) if c == slot);
-                    return (loads_slot(a) && is_one(b)) || (loads_slot(b) && is_one(a));
-                }
-                return false;
-            }
-        }
-    }
-    false
 }
 
 /// Deterministic JS name for a co-emitted callee -- the SHARED mangle keyed on

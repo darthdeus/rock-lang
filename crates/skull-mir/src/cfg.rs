@@ -185,12 +185,11 @@ pub fn dominates(idom: &HashMap<Idx<Block>, Idx<Block>>, a: Idx<Block>, b: Idx<B
     }
 }
 
+pub mod structure;
+
 /// Dense-index CFG primitives for the relooper backends (JS, GLSL), which need
 /// structured goto-free output and work over `usize` node indices rather than
-/// arena ids. The policy layers built on these -- post-dominators, natural-loop
-/// registration, and the `Structure` each backend hands its walker -- stay in
-/// the backend crates: they encode per-target structuring decisions, not shared
-/// analysis.
+/// arena ids. [`structure`] builds the relooper analysis on top of these.
 pub mod dense {
     use super::successors;
     use crate::mir::{Block, MirFunc};
