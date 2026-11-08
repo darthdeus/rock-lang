@@ -1628,6 +1628,35 @@ impl<'a> Printer<'a> {
                     Doc::text(" "),
                     Doc::join(Doc::text(" "), args.iter().map(|a| self.expr(a.value))),
                 ]),
+                CallSyntax::Macro => Doc::concat([
+                    self.expr(*func),
+                    Doc::text("!"),
+                    self.call_args(args, data.span),
+                ]),
+                CallSyntax::MethodMacro if !args.is_empty() => {
+                    // The arg list's layout follows the method's own span, not
+                    // the receiver's (see `method_chain`).
+                    let method = self.ast.e(func).span;
+                    let own_span = Span {
+                        line_range: (method.line_range.0, data.span.line_range.1),
+                        col_range: (method.col_range.0, data.span.col_range.1),
+                        offset_range: (method.offset_range.0, data.span.offset_range.1),
+                        ..data.span
+                    };
+                    Doc::concat([
+                        self.receiver(args[0].value),
+                        Doc::text("."),
+                        self.expr(*func),
+                        Doc::text("!"),
+                        self.call_args(&args[1..], own_span),
+                    ])
+                }
+                CallSyntax::TypeArgs => Doc::concat([
+                    self.expr(*func),
+                    Doc::text("<"),
+                    Doc::join(Doc::text(", "), args.iter().map(|a| self.expr(a.value))),
+                    Doc::text(">"),
+                ]),
                 _ if !generic_args.is_empty() => Doc::concat([
                     self.expr(*func),
                     Doc::text("<"),

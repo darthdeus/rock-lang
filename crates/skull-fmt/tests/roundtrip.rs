@@ -266,3 +266,44 @@ fn call_splat_roundtrips() {
         assert_eq!(once, skull_fmt::format_code(&once));
     }
 }
+
+/// Format `source` and require: unchanged output, a fixed point, and a clean
+/// reparse to the same s-expression.
+fn assert_format_keeps(source: &str) {
+    let original = skull_parser::parse_module_clean(source, "<source>".into()).unwrap();
+    let once = skull_fmt::format_code(source);
+    assert_eq!(once, source);
+    let formatted = skull_parser::parse_module_clean(&once, "<formatted>".into())
+        .unwrap_or_else(|e| panic!("formatted output must parse: {e:?}\n{once}"));
+    assert!(formatted.recovery_errors.is_empty(), "{once}");
+    assert_eq!(original.module_sexp(), formatted.module_sexp(), "{once}");
+    assert_eq!(once, skull_fmt::format_code(&once));
+}
+
+/// The `!` of a macro call enables type-shaped argument parsing, so neither
+/// `m!(Foo<int>)` nor the method form `recv.m!(a)` may be respelled as a plain
+/// call (`m(Foo(int))`, `m(recv, a)`).
+#[test]
+fn macro_call_bang_is_kept() {
+    for line in [
+        "let a = m!(1, 2)",
+        "let a = m!()",
+        "let b = x.m!(a)",
+        "let b = x.m!()",
+        "let b = x.y.m!(a, 2)",
+        "let b = f(1).m!(a)",
+        "let c = x.m!(a).n!(b).k!()",
+        "let c = x.m!(a).n(b).k!()",
+        "let c = x.n(b).m!(a)",
+        "let d = m!(Foo<int>, [int], (int, string), int?)",
+        "let d = m!(Map<int, Box<int>>)",
+        "let e = x.m!(Map<int, string>)",
+        "let e = x.m!([Box<int>])",
+        "let f = m!(n!(1), x.k!(2))",
+        "let f = m!(x.n!(Foo<int>))",
+        "let g = m!(...rest)",
+        "let h = x.m!(a) + n!(b)",
+    ] {
+        assert_format_keeps(&format!("fn f() {{\n    {line}\n}}\n"));
+    }
+}

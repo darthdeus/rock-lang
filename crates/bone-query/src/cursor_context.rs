@@ -117,6 +117,19 @@ struct RecordCtx {
     value_field: Option<(String, bool)>,
 }
 
+/// A call the byte scanner treats as a paren-arg context: every form that
+/// resolves as a plain call except the no-parens one, plus `@` calls.
+fn is_paren_call(syntax: &CallSyntax) -> bool {
+    matches!(
+        syntax,
+        CallSyntax::Normal
+            | CallSyntax::At
+            | CallSyntax::Macro
+            | CallSyntax::MethodMacro
+            | CallSyntax::TypeArgs
+    )
+}
+
 impl CursorAst {
     /// Parse the best munge of `src` at `offset`. Ladder: the two insertion
     /// munges, the token-replacement munge, then the raw buffer -- preferring
@@ -742,7 +755,7 @@ impl CursorAst {
             // Operator calls (`a + |`) and the no-parens surface form are not
             // paren-arg contexts for the byte scanner; keep parity for now
             // (NoParens is a candidate improvement, noted in the plan doc).
-            if !matches!(syntax, CallSyntax::Normal | CallSyntax::At) {
+            if !is_paren_call(syntax) {
                 continue;
             }
             if ci == 0 {
@@ -994,7 +1007,7 @@ impl CursorAst {
             let ExprKind::FunctionCall { func, syntax, .. } = &self.expr(node).kind else {
                 continue;
             };
-            if !matches!(syntax, CallSyntax::Normal | CallSyntax::At) {
+            if !is_paren_call(syntax) {
                 continue;
             }
             let (ExprKind::FieldAccess(recv, _) | ExprKind::SafeNavigation(recv, _)) =
@@ -1007,10 +1020,8 @@ impl CursorAst {
                 // `a.b().m(|`: the receiver is a call -- its type is the last
                 // method's unique return type.
                 ExprKind::FunctionCall {
-                    func: rf,
-                    syntax: CallSyntax::Normal | CallSyntax::At,
-                    ..
-                } => match &self.expr(*rf).kind {
+                    func: rf, syntax, ..
+                } if is_paren_call(syntax) => match &self.expr(*rf).kind {
                     ExprKind::Ident(id) => ReceiverAnchor::ChainCall(id.name.to_string()),
                     ExprKind::FieldAccess(_, m) | ExprKind::SafeNavigation(_, m) => {
                         ReceiverAnchor::ChainCall(m.name.to_string())

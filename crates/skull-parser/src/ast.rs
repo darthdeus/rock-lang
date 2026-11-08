@@ -44,6 +44,16 @@ pub enum CallSyntax {
     /// treats it the same -- but kept distinct so the formatter can re-emit the
     /// no-parens spelling instead of normalizing to `foo(a, b)`.
     NoParens,
+    /// Sigil macro call `name!(args)`. Resolves like `Normal`; kept so the
+    /// formatter re-emits the `!` that enables type-shaped arg parsing.
+    Macro,
+    /// Method-form sigil macro call `recv.name!(args)`, desugared at parse
+    /// time to `name(recv, args)`: the receiver is the first arg. Resolves
+    /// like `Normal`.
+    MethodMacro,
+    /// Type-shaped sigil arg `Name<A, B>`, parsed as a call of `Name` on the
+    /// type args so `expr_to_type_expr` can recover the type.
+    TypeArgs,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

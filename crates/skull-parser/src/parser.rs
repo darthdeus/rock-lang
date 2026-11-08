@@ -1076,7 +1076,8 @@ impl<'a> Parser<'a> {
     }
 
     /// `name!(args)` in expression position — the args are extended-parsed
-    /// (type-shaped forms survive as exprs), but the result is a plain call.
+    /// (type-shaped forms survive as exprs); the result is a call marked
+    /// `CallSyntax::Macro`, which resolves like a plain call.
     fn parse_sigil_call(&mut self, func: Idx<ExprData>) -> PResult<Idx<ExprData>> {
         let start = self.ast.exprs[func].span;
         self.expect(TokenKind::OpenParen)?;
@@ -1109,7 +1110,7 @@ impl<'a> Parser<'a> {
                 func,
                 generic_args: Vec::new(),
                 args,
-                syntax: CallSyntax::Normal,
+                syntax: CallSyntax::Macro,
             },
         ))
     }
@@ -1192,7 +1193,7 @@ impl<'a> Parser<'a> {
                         func,
                         generic_args: Vec::new(),
                         args: targs,
-                        syntax: CallSyntax::Normal,
+                        syntax: CallSyntax::TypeArgs,
                     },
                 ))
             }
@@ -2893,7 +2894,7 @@ impl<'a> Parser<'a> {
             }
 
             // Sigil macro call `name!(args)` — `!` before `(` enables extended
-            // (type-shaped) arg parsing; renders as an ordinary call. A UFCS
+            // (type-shaped) arg parsing; resolves as an ordinary call. A UFCS
             // receiver `recv.method!(args)` desugars to `method(recv, args)` at
             // parse time (eager, so the macro pass needs no UFCS knowledge).
             if op == TokenKind::Bang && self.peek_kind() == TokenKind::OpenParen {
@@ -2909,8 +2910,10 @@ impl<'a> Parser<'a> {
                         let func = self.ast.expr(method.span, ExprKind::Ident(method));
                         let call = self.parse_sigil_call(func)?;
                         // Prepend the receiver as the first argument (UFCS).
-                        if let ExprKind::FunctionCall { args, .. } = &mut self.ast.exprs[call].kind
+                        if let ExprKind::FunctionCall { args, syntax, .. } =
+                            &mut self.ast.exprs[call].kind
                         {
+                            *syntax = CallSyntax::MethodMacro;
                             args.insert(
                                 0,
                                 FunctionCallArg {
