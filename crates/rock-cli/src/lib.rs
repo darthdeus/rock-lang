@@ -30,6 +30,7 @@ pub use std::sync::mpsc::channel;
 pub use std::time::Duration;
 pub use ustr::Ustr;
 
+pub mod allocation_join;
 pub mod allocator;
 pub mod backend_stats;
 pub mod bone_backend;
@@ -44,6 +45,7 @@ mod error_test;
 pub mod file_watcher;
 mod formatting;
 pub mod glsl_test;
+pub mod image_snapshot;
 pub mod invocation_log;
 #[cfg(feature = "backend-js")]
 mod js_runner;
