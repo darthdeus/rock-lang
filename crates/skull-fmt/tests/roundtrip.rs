@@ -192,6 +192,25 @@ fn split_statements_keep_their_boundaries() {
     }
 }
 
+/// Explicit call type arguments and one-element tuples survive formatting.
+#[test]
+fn call_type_arguments_and_single_tuples_are_kept() {
+    for source in [
+        "fn f() {\n    let nb = native_buffer_alloc<WideLeaf>(1)\n}\n",
+        "fn f() {\n    let k = key<T>()\n}\n",
+        "fn f() {\n    let m = Map<string, int>()\n}\n",
+        "fn f() {\n    let r = a.b<int>(1).c(2).d()\n}\n",
+        "fn f() {\n    let r = a.b(1).c<int>(2).d()\n}\n",
+        "fn f() {\n    let single = (5,)\n}\n",
+    ] {
+        let original = skull_parser::parse_module_clean(source, "<source>".into()).unwrap();
+        let once = skull_fmt::format_code(source);
+        let formatted = skull_parser::parse_module_clean(&once, "<formatted>".into()).unwrap();
+        assert_eq!(original.module_sexp(), formatted.module_sexp(), "{once}");
+        assert_eq!(once, skull_fmt::format_code(&once));
+    }
+}
+
 /// A tight `..` must not fuse with a neighbouring `.` into `...`.
 #[test]
 fn range_operator_next_to_a_dot_keeps_its_spaces() {

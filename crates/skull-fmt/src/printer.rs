@@ -1593,7 +1593,10 @@ impl<'a> Printer<'a> {
             }
 
             ExprKind::FunctionCall {
-                func, args, syntax, ..
+                func,
+                args,
+                syntax,
+                generic_args,
             } => match syntax {
                 // Overloadable operators (`+ - * / %` ...) are parsed as calls
                 // with binary syntax -- render them infix. A multi-line binary is
@@ -1616,6 +1619,16 @@ impl<'a> Printer<'a> {
                     self.expr(*func),
                     Doc::text(" "),
                     Doc::join(Doc::text(" "), args.iter().map(|a| self.expr(a.value))),
+                ]),
+                _ if !generic_args.is_empty() => Doc::concat([
+                    self.expr(*func),
+                    Doc::text("<"),
+                    Doc::join(
+                        Doc::text(", "),
+                        generic_args.iter().map(|t| self.type_expr(*t)),
+                    ),
+                    Doc::text(">"),
+                    self.call_args(args, data.span),
                 ]),
                 _ => self.call(*func, args, data.span),
             },
@@ -2108,12 +2121,15 @@ impl<'a> Printer<'a> {
             };
             segs.push((method.name, cur_args, own_span));
             // Continue the spine only while the receiver is itself a method call.
+            // A receiver call with explicit type arguments ends the spine: a
+            // chain segment has no place for `<T>`.
             if let ExprKind::FunctionCall {
                 func: rf,
                 args: ra,
                 syntax: CallSyntax::Normal,
-                ..
+                generic_args,
             } = &self.ast.e(recv).kind
+                && generic_args.is_empty()
             {
                 if matches!(&self.ast.e(rf).kind, ExprKind::FieldAccess(..)) {
                     cur_func = *rf;
@@ -2284,13 +2300,15 @@ impl<'a> Printer<'a> {
     }
 
     fn tuple(&self, items: &[Idx<ExprData>], span: Span) -> Doc {
-        // Preserve the author's layout (tuples never take a trailing comma): a
-        // single-line tuple stays inline; a multi-line one expands one per line.
+        // Preserve the author's layout (a tuple takes a trailing comma only with
+        // one element, where `(x)` would be a parenthesized `x`): a single-line
+        // tuple stays inline; a multi-line one expands one per line.
+        let trailing = if items.len() == 1 { "," } else { "" };
         if span.line_range.0 == span.line_range.1 {
             return Doc::concat([
                 Doc::text("("),
                 Doc::join(Doc::text(", "), items.iter().map(|i| self.expr(*i))),
-                Doc::text(")"),
+                Doc::text(format!("{trailing})")),
             ]);
         }
         Doc::concat([
@@ -2301,6 +2319,7 @@ impl<'a> Printer<'a> {
                     Doc::concat([Doc::text(","), hardline()]),
                     items.iter().map(|i| self.expr(*i)),
                 ),
+                Doc::text(trailing),
             ])),
             hardline(),
             Doc::text(")"),
