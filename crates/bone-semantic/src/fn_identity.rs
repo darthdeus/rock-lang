@@ -67,7 +67,7 @@ fn facts(ws: &Workspace, function: &Function, body: &Body, bi: &BodyInference) -
     let generics = generic_vars(ws, function, body);
     let mut compared = FxHashSet::default();
     let mut forwards = Vec::new();
-    for (id, expr) in body.expr_arena.iter() {
+    for expr in body.expr_arena.values() {
         if let Expr::BinOp {
             op: BinOp::Eq | BinOp::NotEq,
             lhs,
@@ -88,14 +88,14 @@ fn facts(ws: &Workspace, function: &Function, body: &Body, bi: &BodyInference) -
                 }
             }
         }
-        if let (Some(&callee), Some(bindings)) = (
-            bi.resolved_overload_calls.get(&id),
-            bi.call_generic_bindings.get(&id),
-        ) {
-            for (j, &ty) in bindings.iter().enumerate() {
-                if let Some(i) = own_generic(ws, bi, &generics, ty) {
-                    forwards.push((callee, j, i));
-                }
+    }
+    for (id, bindings) in &bi.call_generic_bindings {
+        let Some(&callee) = bi.resolved_overload_calls.get(id) else {
+            continue;
+        };
+        for (j, &ty) in bindings.iter().enumerate() {
+            if let Some(i) = own_generic(ws, bi, &generics, ty) {
+                forwards.push((callee, j, i));
             }
         }
     }
@@ -174,14 +174,11 @@ pub fn check_generic_fn_eq(ws: &mut Workspace) {
         }
         let mut found = Vec::new();
         for (mid, owner, body, bi) in inferred_bodies(ws) {
-            if bi.call_generic_bindings.is_empty() {
-                continue;
-            }
-            for (id, _) in body.expr_arena.iter() {
-                let (Some(&callee), Some(bindings)) = (
-                    bi.resolved_overload_calls.get(&id),
-                    bi.call_generic_bindings.get(&id),
-                ) else {
+            // Sorted so a body's rejections come in expression order.
+            let mut calls: Vec<_> = bi.call_generic_bindings.iter().collect();
+            calls.sort_unstable_by_key(|(id, _)| id.into_raw().into_u32());
+            for (&id, bindings) in calls {
+                let Some(&callee) = bi.resolved_overload_calls.get(&id) else {
                     continue;
                 };
                 let Some(compared) = summary.get(&callee) else {
