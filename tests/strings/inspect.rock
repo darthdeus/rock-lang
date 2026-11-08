@@ -167,13 +167,13 @@ struct AllNull { a: int?, b: string? }
 struct SomeNull { a: int, b: string?, c: int? }
 struct NoNull { a: int, b: string }
 
-@nomangle inline(lua) fn __brace_open() -> string = """
-    return "{"
-"""
+fn __brace_open() -> string {
+    return from_codepoint(123)
+}
 
-@nomangle inline(lua) fn __brace_close() -> string = """
-    return "}"
-"""
+fn __brace_close() -> string {
+    return from_codepoint(125)
+}
 
 @test
 fn test_all_fields_null() {

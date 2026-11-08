@@ -25,6 +25,10 @@ inline(lua) fn frames_same(a: Coroutine<int>, b: Coroutine<int>) -> bool = """
     return rawequal(a, b)
 """
 
+inline(js) fn frames_same(a: Coroutine<int>, b: Coroutine<int>) -> bool = """
+    return a === b;
+"""
+
 @test
 fn two_spawns_of_one_co_fn_are_distinct_frames() {
     let a = ticker()

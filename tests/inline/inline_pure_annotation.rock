@@ -6,6 +6,8 @@
 
 @pure
 inline(lua) fn lua_abs(n: int) -> int = "if n < 0 then return -n else return n end"
+@pure
+inline(js) fn lua_abs(n: int) -> int = "return n < 0 ? -n : n;"
 
 @inline
 fn triple(x: int) -> int {

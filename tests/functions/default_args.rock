@@ -252,15 +252,17 @@ fn nomangle_param_default_int_omitted() {
 // The above tests pass even if the body-side default check is broken,
 // because Rock call sites inject defaults. The body-side `if x == nil
 // then ... end` is a safety net for callers that bypass mangling
-// (raw Lua, FFI). Exercise it by calling from inline(lua) with the
+// (raw Lua or JS, FFI). Exercise it by calling from an inline body with the
 // default omitted.
 
-@nomangle inline(lua) fn call_defaulted_int_raw_lua() -> int =
+@nomangle inline(lua) fn call_defaulted_int_raw() -> int =
     "return defaulted_int(8)"
+@nomangle inline(js) fn call_defaulted_int_raw() -> int =
+    "return defaulted_int(8);"
 
 @test(output = "15")
 fn nomangle_param_default_int_body_check_fires() {
-    print(call_defaulted_int_raw_lua())
+    print(call_defaulted_int_raw())
 }
 
 @test(output = "10")

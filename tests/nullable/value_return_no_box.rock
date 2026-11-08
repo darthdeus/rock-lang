@@ -232,6 +232,7 @@ fn nullable_return_mixed_boxed_equality() -> bool {
 }
 
 @scalar_abi inline(lua) fn inline_return_pair(pair: ReturnPair?) -> ReturnPair? = "return pair;"
+@scalar_abi inline(js) fn inline_return_pair(pair: ReturnPair?) -> ReturnPair? = "return pair;"
 @test(returns = true)
 fn nullable_return_inline_scalar_boundary() -> bool {
     return inline_return_pair(null) == null

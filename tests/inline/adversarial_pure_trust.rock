@@ -13,6 +13,8 @@
 // ────────────────────────────────────────────────────────────────────
 @pure @nomangle
 inline(lua) fn lua_abs(x: int) -> int = "return math.abs(x)"
+@pure @nomangle
+inline(js) fn lua_abs(x: int) -> int = "return Math.abs(x);"
 
 @test(output = "10")
 fn test_pure_inline_lua_honest() {

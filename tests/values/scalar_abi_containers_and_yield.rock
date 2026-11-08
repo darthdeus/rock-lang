@@ -126,14 +126,16 @@ fn global_sum() -> int {
     return __global_side_effect()
 }
 
-// Side-effect accumulator via inline(lua) globals.
-inline(lua) fn __reset_side_effect() = """
-    _G.__v_phase4_acc = 0
-"""
+// Side-effect accumulator in a global.
+global SIDE_EFFECT_ACC: int = 0
 
-inline(lua) fn __global_side_effect() -> int = """
-    return _G.__v_phase4_acc or 0
-"""
+fn __reset_side_effect() {
+    SIDE_EFFECT_ACC = 0
+}
+
+fn __global_side_effect() -> int {
+    return SIDE_EFFECT_ACC
+}
 
 fn record_sum(v: V2) -> V2 {
     // Side effect: add to accumulator, return v unchanged.
@@ -141,9 +143,9 @@ fn record_sum(v: V2) -> V2 {
     return v
 }
 
-inline(lua) fn __add_to_acc(n: int) = """
-    _G.__v_phase4_acc = (_G.__v_phase4_acc or 0) + n
-"""
+fn __add_to_acc(n: int) {
+    SIDE_EFFECT_ACC = SIDE_EFFECT_ACC + n
+}
 
 @test(output = "7")
 fn test_defer_value_call() {

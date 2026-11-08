@@ -11,6 +11,8 @@
 
 @debug_impure
 inline(lua) fn trace_int(n: int) = "-- trace {n}"
+@debug_impure
+inline(js) fn trace_int(n: int) = "/* trace {n} */"
 
 // A `@pure` fn that calls `trace_int`. Without @debug_impure, this
 // would be a compile error because inline(lua) isn't verifiable. With

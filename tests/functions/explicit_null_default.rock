@@ -137,15 +137,16 @@ fn other_defaults_unchanged() {
     assert_eq(plain(1, null), 1)
 }
 
-// The same rule across an `inline(lua)` wrapper and a decorator argument.
+// The same rule across an inline wrapper and a decorator argument.
 
-inline(lua) fn lua_seeded(n: int? = 7) -> int = "return n == nil and -1 or n"
+inline(lua) fn host_seeded(n: int? = 7) -> int = "return n == nil and -1 or n"
+inline(js) fn host_seeded(n: int? = 7) -> int = "return n == null ? -1 : n;"
 
 @test
-fn inline_lua_default() {
-    assert_eq(lua_seeded(), 7)
-    assert_eq(lua_seeded(3), 3)
-    assert_eq(lua_seeded(null), -1)
+fn inline_host_default() {
+    assert_eq(host_seeded(), 7)
+    assert_eq(host_seeded(3), 3)
+    assert_eq(host_seeded(null), -1)
 }
 
 global REG: [string] = []
