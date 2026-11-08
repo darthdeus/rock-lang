@@ -342,10 +342,7 @@ pub(crate) fn references(ws: &Workspace) -> Vec<Ref> {
     };
 
     let mut out = Vec::new();
-    for m in &ws.modules {
-        if m.id == ModuleId::builtin() {
-            continue;
-        }
+    for m in ws.source_modules() {
         for (idx, te) in m.ty_arena.iter() {
             if let Some(name) = nominal(te) {
                 out.push(Ref {

@@ -377,12 +377,7 @@ fn main() {
             .expect("parse"),
         ];
         let mut ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
-        let mid = ws
-            .modules
-            .iter()
-            .find(|module| module.id != ModuleId::builtin())
-            .expect("test module")
-            .id;
+        let mid = ws.source_modules().next().expect("test module").id;
         let gid = ws
             .module(mid)
             .globals
@@ -539,9 +534,7 @@ fn main() {
     }
 
     fn ref_for(ws: &Workspace, name: &str) -> FuncRef {
-        ws.modules
-            .iter()
-            .filter(|module| module.id != ModuleId::builtin())
+        ws.source_modules()
             .find_map(|module| {
                 module
                     .functions
@@ -593,12 +586,7 @@ fn main() {
         mutation: BodyMutation,
     ) -> Result<(Workspace, SkullEmitCache, MirEmit), CompilerError> {
         let ws = workspace();
-        let mid = ws
-            .modules
-            .iter()
-            .find(|m| m.id != ModuleId::builtin())
-            .expect("test module")
-            .id;
+        let mid = ws.source_modules().next().expect("test module").id;
         let (emit, cache) = FullEmit::program().mutation(mutation).run(&ws, mid)?;
         Ok((ws, cache, emit))
     }
@@ -731,12 +719,7 @@ fn main() { let result = first() }
                 .expect("parse"),
         ];
         let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
-        let mid = ws
-            .modules
-            .iter()
-            .find(|m| m.id != ModuleId::builtin())
-            .expect("test module")
-            .id;
+        let mid = ws.source_modules().next().expect("test module").id;
         let (emit, cache) = emit_full(&ws, mid).expect("intact emission");
         let stats = cache.scx.abi_plan_stats();
         let (hits, misses) = (stats.hits(), stats.requests() - stats.hits());
@@ -794,12 +777,7 @@ fn main() { let result = first() }
     fn concrete_result_order_preserves_emitted_lua_bytes() {
         let _inline = InlineOn::on();
         let ws = workspace();
-        let mid = ws
-            .modules
-            .iter()
-            .find(|module| module.id != ModuleId::builtin())
-            .expect("test module")
-            .id;
+        let mid = ws.source_modules().next().expect("test module").id;
         let (canonical, _) = FullEmit::program()
             .mutation(BodyMutation::ConcreteResultOrder(
                 skull_graph::concrete_body::BuildResultOrder::Canonical,
@@ -826,12 +804,7 @@ fn main() { let result = first() }
             .expect("parse"),
         ];
         let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
-        let mid = ws
-            .modules
-            .iter()
-            .find(|m| m.id != ModuleId::builtin())
-            .expect("test module")
-            .id;
+        let mid = ws.source_modules().next().expect("test module").id;
         let (_, cache) = FullEmit::program()
             .mutation(BodyMutation::SkipAbiPlanPublish)
             .run(&ws, mid)
@@ -1452,12 +1425,7 @@ fn main() { let result = outer(1) }
                 .expect("parse"),
         ];
         let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
-        let mid = ws
-            .modules
-            .iter()
-            .find(|m| m.id != ModuleId::builtin())
-            .expect("test module")
-            .id;
+        let mid = ws.source_modules().next().expect("test module").id;
         let (emit, _) = emit_full(&ws, mid).expect("nested emission");
         assert!(
             emit.attribution.lower.mir_instruction_allocations

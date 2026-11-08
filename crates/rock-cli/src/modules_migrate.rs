@@ -886,7 +886,7 @@ fn owners(ws: &Workspace, t: &Target, file_pkg: &HashMap<Ustr, u32>) -> BTreeSet
         Target::Unrecorded(_) | Target::Field { .. } => Vec::new(),
     };
     mids.into_iter()
-        .filter(|m| *m != ModuleId::builtin())
+        .filter(|m| !m.is_builtin())
         .filter_map(|m| file_pkg.get(&ws.module(m).file).copied())
         .collect()
 }
@@ -899,8 +899,7 @@ fn p_def_spans(
     file_pkg: &HashMap<Ustr, u32>,
     p_id: u32,
 ) -> Vec<(Ustr, usize)> {
-    let in_p =
-        |m: ModuleId| m != ModuleId::builtin() && file_pkg.get(&ws.module(m).file) == Some(&p_id);
+    let in_p = |m: ModuleId| !m.is_builtin() && file_pkg.get(&ws.module(m).file) == Some(&p_id);
     let mut out = Vec::new();
     match t {
         Target::Fn(mid, fid) => {

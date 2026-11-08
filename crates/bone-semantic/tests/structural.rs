@@ -204,12 +204,7 @@ fn main_body_errors(src: &str) -> Vec<CompilerError> {
 
 fn body_errors(src: &str, name: &str) -> Vec<CompilerError> {
     let ws = check(src).expect("semantic_pass");
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let (fn_idx, _) = ws
         .module(mid)
         .functions
@@ -354,12 +349,7 @@ fn float_div_hint_span_points_at_the_division() {
 fn main() { let x: int = 2.0 * (3 / 4) }
 "#;
     let ws = check(src).expect("semantic_pass");
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let (main_idx, _) = ws
         .module(mid)
         .functions
@@ -487,12 +477,7 @@ fn nested_block_does_not_leak_into_outer_statements() {
     let src = "fn f() -> int {\n    let a = 1\n    let c = {\n        let b = 2\n        b\n    }\n    c\n}";
     let ws = check(src).unwrap();
 
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let hir = ws.module(mid);
 
     let (f_idx, _) = hir.functions.iter().next().expect("one function");
@@ -525,12 +510,7 @@ fn lambda_param_default_does_not_leak_into_fn_params() {
         ),
     ] {
         let ws = check(src).unwrap_or_else(|e| panic!("{src}: {e:?}"));
-        let mid = ws
-            .modules
-            .iter()
-            .find(|m| m.id != ModuleId::builtin())
-            .expect("one user module")
-            .id;
+        let mid = ws.source_modules().next().expect("one user module").id;
         let hir = ws.module(mid);
         let (f_idx, _) = hir.functions.iter().next().expect("one function");
         let fbody = &hir.bodies[&BodyOwner::Function(f_idx)];
@@ -553,12 +533,7 @@ fn nested_interpolation_does_not_leak_into_outer_parts() {
         "fn f(x: int, ok: bool) -> string {\n    \"a: {if ok { \"{x}\" } else { \"no\" }}\"\n}";
     let ws = check(src).unwrap();
 
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let hir = ws.module(mid);
 
     let (f_idx, _) = hir.functions.iter().next().expect("one function");
@@ -608,12 +583,7 @@ fn good() -> int { return 3 }
 fn broken_two() -> bool { return 42 }";
     let ws = check(src).expect("body-level type errors must not abort semantic_pass");
 
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let hir = ws.module(mid);
 
     let fn_owner = |name: &str| {
@@ -666,12 +636,7 @@ fn recorded_errors<'a>(
     ws: &'a bone_semantic::inference::Workspace,
     fn_name: &str,
 ) -> &'a [CompilerError] {
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let hir = ws.module(mid);
     let (idx, _) = hir
         .functions
@@ -787,12 +752,7 @@ fn good() -> int { return 3 }"#;
     let ws = check(src)
         .expect("global/struct-default/decorator body errors must not abort semantic_pass");
 
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let hir = ws.module(mid);
 
     let (good_idx, _) = hir
@@ -875,12 +835,7 @@ fn rock_fn() -> int { return 3 }"#;
     }
 
     // per-kind pins on the user module
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let hir = ws.module(mid);
 
     let fn_owner = |name: &str| {
@@ -975,12 +930,7 @@ fn nested() -> int {
 fn flat() -> int { return 1 }";
     let ws = check(src).unwrap();
 
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let hir = ws.module(mid);
 
     let scopes_of = |name: &str| {
@@ -1021,12 +971,7 @@ deco init d {
 fn f() -> int { return 3 }"#;
     let ws = check(src).unwrap();
 
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let hir = ws.module(mid);
 
     let (global_idx, _) = hir
@@ -1068,12 +1013,7 @@ fn f() -> int { return 3 }"#;
 fn body_annotations_do_not_touch_module_ty_arena() {
     let ty_arena_len = |src: &str| {
         let ws = check(src).unwrap();
-        let mid = ws
-            .modules
-            .iter()
-            .find(|m| m.id != ModuleId::builtin())
-            .expect("one user module")
-            .id;
+        let mid = ws.source_modules().next().expect("one user module").id;
         ws.module(mid).ty_arena.len()
     };
 
@@ -1318,7 +1258,7 @@ fn bone_rejects(src: &str) -> bool {
     // and returns Ok rather than fail-fasting), so an interface / lowering error
     // is a rejection just as much as an inference error or a hard `Err`.
     ws.modules.iter().any(|m| {
-        m.id != ModuleId::builtin()
+        !m.id.is_builtin()
             && (!m.interface_errors.is_empty()
                 || !m.lowering_errors.is_empty()
                 || ws
@@ -1664,11 +1604,7 @@ fn ref_type_survives_lowering_and_inference() {
         "struct Player { hp: int }\nfn identity(player: ref Player) -> ref Player { player }",
     )
     .expect("ref signature type checks");
-    let module = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .unwrap();
+    let module = ws.source_modules().next().unwrap();
     let (_, identity) = module
         .functions
         .iter()
@@ -1982,11 +1918,7 @@ fn main(player: ref Player) { damage(player) }
 #[test]
 fn nobox_marker_reaches_typed_struct() {
     let ws = check("nobox value V { x: int }").expect("nobox value type checks");
-    let module = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .unwrap();
+    let module = ws.source_modules().next().unwrap();
     let struct_idx = module.struct_by_name[&Ustr::from("V")];
     assert!(module.structs[struct_idx].is_value);
     assert!(module.structs[struct_idx].is_nobox);
@@ -2037,10 +1969,7 @@ fn redundant_null_coalesce_rejected() {
 fn all_err_msgs(src: &str) -> Vec<String> {
     let ws = check(src).expect("body-level errors are collected, not fatal");
     let mut msgs = Vec::new();
-    for m in ws.modules.iter() {
-        if m.id == ModuleId::builtin() {
-            continue;
-        }
+    for m in ws.source_modules() {
         if let Some(inf) = ws.inference(m.id) {
             for errs in inf.errors.values() {
                 for e in errs {
@@ -2141,12 +2070,7 @@ fn main() {
 }
 "#;
     let ws = check(src).expect("body errors are collected, not aborted");
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let inf = ws.inference(mid).expect("user module inferred");
     let msgs: Vec<&str> = inf
         .errors
@@ -2334,12 +2258,7 @@ fn main() {
 }
 "#;
     let ws = check(src).expect("body errors are collected, not aborted");
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let inf = ws.inference(mid).expect("user module inferred");
     let msgs: Vec<&str> = inf
         .errors
@@ -2382,12 +2301,7 @@ fn main() {
 }
 "#;
     let ws = check(src).expect("body errors are collected, not aborted");
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let inf = ws.inference(mid).expect("user module inferred");
     let msgs: Vec<&str> = inf
         .errors
@@ -2445,12 +2359,7 @@ fn annotation_float_args_lower_as_float() {
          @test(returns = -2.5)\nfn b() -> float { return -2.5 }\n",
     )
     .unwrap();
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let mut got = vec![];
     for (_, f) in ws.module(mid).functions.iter() {
         for ann in &f.annotations {
@@ -2475,12 +2384,7 @@ fn annotation_float_args_lower_as_float() {
 #[test]
 fn param_annotations_survive_lowering() {
     let ws = check("fn f(@size(32) xs: int, plain: int) -> int { return xs + plain }\n").unwrap();
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let (_, f) = ws
         .module(mid)
         .functions
@@ -2511,12 +2415,7 @@ fn param_annotations_survive_lowering() {
 #[test]
 fn field_annotations_survive_lowering() {
     let ws = check("value V { @flat id: int, pos: float }\n").unwrap();
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let s = ws
         .module(mid)
         .structs
@@ -2550,12 +2449,7 @@ fn main() {
     let i = pick(1, 2)
 }"#;
     let ws = check(src).expect("clean check");
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let hir = ws.module(mid);
     let (main_idx, _) = hir
         .functions

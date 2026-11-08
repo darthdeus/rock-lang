@@ -227,9 +227,7 @@ fn assemble_overlay(
             reach: FxHashSet<Ustr>,
         }
         let mut const_items: Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> = ws
-            .modules
-            .iter()
-            .filter(|m| m.id != ModuleId::builtin())
+            .source_modules()
             .flat_map(|m| {
                 m.globals
                     .iter()

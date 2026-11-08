@@ -296,16 +296,9 @@ fn lint_rejects(
         .iter()
         .map(|(n, c)| (ustr::Ustr::from(n.as_str()), c.as_str()))
         .collect();
-    // Same rule as the build pass (`lint_pass::warm_module_ids`): everything the
-    // case did not author is stdlib, and stdlib is scanned but never reported on.
-    let warm: rustc_hash::FxHashSet<bone_core::prelude::ModuleId> = ws
-        .modules
-        .iter()
-        .filter(|m| {
-            m.id != bone_core::prelude::ModuleId::builtin() && !sources.contains_key(&m.file)
-        })
-        .map(|m| m.id)
-        .collect();
+    // The build pass's rule: everything the case did not author is stdlib,
+    // and stdlib is scanned but never reported on.
+    let warm = skull::pipeline::warm_module_ids(ws, &sources);
     bone_lints::lint_workspace(ws, &warm, true, &sources, &crate::registry::lint_options())
         .iter()
         .find(|f| f.level() == rock_core::errors::CompilerErrorLevel::Error)

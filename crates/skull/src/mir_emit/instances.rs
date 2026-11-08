@@ -223,10 +223,7 @@ pub(super) fn view_driven_specialized_chunks(
     let mut built: FxHashMap<Instance, Chunk> = FxHashMap::default();
     let mut errs: Vec<(String, CompilerError)> = Vec::new();
     let mut pending: Vec<Instance> = initial.iter().map(|d| d.inst.clone()).collect();
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
+    for module in ws.source_modules() {
         for (fid, f) in module.functions.iter() {
             let self_ref = FuncRef {
                 module: module.id,

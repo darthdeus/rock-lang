@@ -51,12 +51,7 @@ fn f(c: Color, s: Shape) -> int {
     }
 }";
     let ws = check(src);
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let hir = ws.module(mid);
     let (f_idx, _) = hir
         .functions

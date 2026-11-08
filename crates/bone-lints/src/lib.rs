@@ -117,7 +117,7 @@ fn candidate_bindings(body: &Body, variants: &FxHashSet<Ustr>) -> Vec<Idx<Bindin
 /// position (`None =>`) lowers to a `Let` binding of that name; the lint must
 /// not report those as unused variables.
 pub fn enum_variant_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> FxHashSet<Ustr> {
-    user_modules(ws, warm)
+    ws.user_modules(warm)
         .flat_map(|m| m.enums.iter())
         .flat_map(|(_, e)| e.variants.iter().map(|v| v.name))
         .collect()
@@ -601,7 +601,7 @@ impl LintDependencyIndex {
             action_policy: policy,
             ..Self::default()
         };
-        for module in user_modules(ws, warm) {
+        for module in ws.user_modules(warm) {
             index
                 .declaration_fingerprints
                 .insert(module.file, declaration_fingerprint(ws, module));
@@ -635,7 +635,7 @@ impl LintDependencyIndex {
                 }
             }
         }
-        for module in user_modules(ws, warm) {
+        for module in ws.user_modules(warm) {
             for (owner, body) in module.bodies.iter() {
                 let body_key = (module.id, *owner);
                 let edges = body_edges(ws, module.id, *owner, body, &index.function_names)
@@ -654,7 +654,8 @@ impl LintDependencyIndex {
     }
 
     fn build_action_rows(&mut self, ws: &Workspace, warm: &FxHashSet<ModuleId>) {
-        for module in user_modules(ws, warm)
+        for module in ws
+            .user_modules(warm)
             .filter(|module| is_production_action_module(module.file, self.action_policy))
         {
             for (_, global) in module
@@ -667,7 +668,10 @@ impl LintDependencyIndex {
             }
         }
         let declared: FxHashSet<Ustr> = self.action_declarations.keys().copied().collect();
-        for module in user_modules(ws, warm).filter(|module| !is_test_module(module.file)) {
+        for module in ws
+            .user_modules(warm)
+            .filter(|module| !is_test_module(module.file))
+        {
             for (owner, body) in &module.bodies {
                 let edges =
                     action_edges_in_body(module, *owner, body, &declared, self.action_policy);
@@ -721,7 +725,7 @@ impl LintDependencyIndex {
                 invalidation.names.insert(declaration.name);
             }
         }
-        for module in user_modules(ws, &FxHashSet::default()) {
+        for module in ws.user_modules(&FxHashSet::default()) {
             if changed_files.contains(&module.file) {
                 invalidation
                     .names
@@ -736,7 +740,7 @@ impl LintDependencyIndex {
                     .insert((declaration.file, declaration.span.offset_range.0));
             }
         }
-        for module in user_modules(ws, &FxHashSet::default()) {
+        for module in ws.user_modules(&FxHashSet::default()) {
             if !invalidation
                 .names
                 .iter()
@@ -784,7 +788,7 @@ impl LintDependencyIndex {
                 }
             }
         }
-        for module in user_modules(ws, &FxHashSet::default()) {
+        for module in ws.user_modules(&FxHashSet::default()) {
             if !changed_files.contains(&module.file) {
                 continue;
             }
@@ -993,7 +997,8 @@ impl LintDependencyIndex {
             }
         }
 
-        let current_functions: Vec<FunctionKey> = user_modules(ws, warm)
+        let current_functions: Vec<FunctionKey> = ws
+            .user_modules(warm)
             .filter(|module| changed_files.contains(&module.file))
             .flat_map(|module| {
                 module
@@ -1203,7 +1208,7 @@ impl LintDependencyIndex {
                 invalidation.locations.insert((file, span.offset_range.0));
             }
         }
-        for module in user_modules(ws, &FxHashSet::default()) {
+        for module in ws.user_modules(&FxHashSet::default()) {
             if !changed_files.contains(&module.file)
                 || !is_production_action_module(module.file, self.action_policy)
             {
@@ -1245,7 +1250,7 @@ impl LintDependencyIndex {
         for action in removed {
             self.action_declarations.remove(&action);
         }
-        for module in user_modules(ws, &FxHashSet::default()) {
+        for module in ws.user_modules(&FxHashSet::default()) {
             if !changed_files.contains(&module.file)
                 || !is_production_action_module(module.file, self.action_policy)
             {
@@ -1817,7 +1822,7 @@ impl IncrementalLintCache {
 
         let mut files = FxHashSet::default();
         if invalidation.is_some() && self.dependency.action_declarations.is_empty() {
-            if let Some(module) = user_modules(ws, warm).find(|module| {
+            if let Some(module) = ws.user_modules(warm).find(|module| {
                 is_production_action_module(module.file, self.dependency.action_policy)
             }) {
                 if let Some((_, function)) = module.functions.iter().next() {
@@ -1968,12 +1973,7 @@ impl IncrementalLintCache {
             timed: self.timing_enabled,
             ..LintCacheStats::default()
         };
-        let workspace_files: FxHashSet<Ustr> = ws
-            .modules
-            .iter()
-            .filter(|m| m.id != ModuleId::builtin())
-            .map(|m| m.file)
-            .collect();
+        let workspace_files: FxHashSet<Ustr> = ws.source_modules().map(|m| m.file).collect();
         let report_files: FxHashSet<Ustr> = sources.keys().copied().collect();
         let metadata_changed = self.initialized
             && (self.is_bin != is_bin
@@ -2536,7 +2536,8 @@ impl IncrementalLintCache {
         self.variants = enum_variant_names(ws, warm);
         self.workspace_files = workspace_files;
         self.report_files = report_files;
-        self.report_order = user_modules(ws, warm)
+        self.report_order = ws
+            .user_modules(warm)
             .filter(|module| sources.contains_key(&module.file))
             .map(|module| module.file)
             .collect();
@@ -2602,7 +2603,7 @@ impl IncrementalLintCache {
                     .push(finding.clone());
             }
         }
-        for module in user_modules(ws, warm) {
+        for module in ws.user_modules(warm) {
             if !sources.contains_key(&module.file) {
                 continue;
             }
@@ -3145,10 +3146,8 @@ fn workspace_findings_by_file_census(
             CensusFamily::UnusedFn,
             t.elapsed(),
             findings.len(),
-            user_modules(ws, warm).count(),
-            ws.modules
-                .iter()
-                .filter(|m| m.id != ModuleId::builtin() && !warm.contains(&m.id))
+            ws.user_modules(warm).count(),
+            ws.user_modules(warm)
                 .flat_map(|m| m.bodies.values())
                 .count(),
             derived,
@@ -3170,10 +3169,8 @@ fn workspace_findings_by_file_census(
                 CensusFamily::ActionCaller,
                 t.elapsed(),
                 0,
-                user_modules(ws, warm).count(),
-                ws.modules
-                    .iter()
-                    .filter(|m| m.id != ModuleId::builtin() && !warm.contains(&m.id))
+                ws.user_modules(warm).count(),
+                ws.user_modules(warm)
                     .flat_map(|m| m.bodies.values())
                     .count(),
                 findings.len(),
@@ -3197,7 +3194,7 @@ fn workspace_findings_by_file_census(
         CensusFamily::BackendSibling,
         t.elapsed(),
         sibling_findings.len(),
-        user_modules(ws, warm).count(),
+        ws.user_modules(warm).count(),
         0,
         derived,
     );
@@ -3219,10 +3216,8 @@ fn workspace_findings_by_file_census(
             CensusFamily::ActionCaller,
             t.elapsed(),
             0,
-            user_modules(ws, warm).count(),
-            ws.modules
-                .iter()
-                .filter(|m| m.id != ModuleId::builtin() && !warm.contains(&m.id))
+            ws.user_modules(warm).count(),
+            ws.user_modules(warm)
                 .flat_map(|m| m.bodies.values())
                 .count(),
             findings.len(),
@@ -3305,7 +3300,7 @@ fn lint_workspace_inner(
         FxHashSet::default()
     };
     let mut out = Vec::new();
-    for module in user_modules(ws, warm) {
+    for module in ws.user_modules(warm) {
         let Some(&src) = sources.get(&module.file) else {
             continue;
         };
@@ -3736,7 +3731,7 @@ pub fn backend_sibling_mismatches_by_file(
 fn spans_two_backends(ws: &Workspace, decls: &[(ModuleId, Idx<Function>)]) -> bool {
     let mut seen: Option<&'static str> = None;
     for &(mid, fid) in decls {
-        if mid == ModuleId::builtin() {
+        if mid.is_builtin() {
             continue;
         }
         let Some(b) = backend_name(ws.module(mid).functions[fid].backend) else {
@@ -3770,7 +3765,7 @@ fn sibling_set_mismatches(
     }
     let infos: Vec<SiblingDecl> = decls
         .iter()
-        .filter(|(mid, _)| *mid != ModuleId::builtin())
+        .filter(|(mid, _)| !mid.is_builtin())
         .map(|&(mid, fid)| sibling_decl(ws, mid, fid))
         .collect();
 
@@ -3870,7 +3865,7 @@ pub fn unused_fns_by_file(
 
     let mut reachable: FxHashSet<(ModuleId, Idx<Function>)> = FxHashSet::default();
     let mut stack: Vec<(ModuleId, Idx<Function>)> = Vec::new();
-    for module in user_modules(ws, warm) {
+    for module in ws.user_modules(warm) {
         for (fid, f) in module.functions.iter() {
             if is_root(f) && reachable.insert((module.id, fid)) {
                 stack.push((module.id, fid));
@@ -3904,7 +3899,7 @@ pub fn unused_fns_by_file(
     }
 
     let mut out: FxHashMap<Ustr, Vec<UnusedFn>> = FxHashMap::default();
-    for module in user_modules(ws, warm) {
+    for module in ws.user_modules(warm) {
         for (fid, f) in module.functions.iter() {
             // A derived newtype operator is not user surface: there is no
             // declaration to delete and its span points at the `newtype` line.
@@ -4029,25 +4024,12 @@ fn user_fn_names(
     warm: &FxHashSet<ModuleId>,
 ) -> FxHashMap<Ustr, Vec<(ModuleId, Idx<Function>)>> {
     let mut map: FxHashMap<Ustr, Vec<(ModuleId, Idx<Function>)>> = FxHashMap::default();
-    for module in user_modules(ws, warm) {
+    for module in ws.user_modules(warm) {
         for (fid, f) in module.functions.iter() {
             map.entry(f.name).or_default().push((module.id, fid));
         }
     }
     map
-}
-
-/// The workspace's user modules -- everything except the builtin module and the
-/// warm stdlib (`warm`, the session's `warm_mids`). Warm modules carry real
-/// paths now, so they can't be told apart by file id; `warm` is the authoritative
-/// signal. Passing an empty set (tests / whole-workspace CLI) lints every module.
-fn user_modules<'a>(
-    ws: &'a Workspace,
-    warm: &'a FxHashSet<ModuleId>,
-) -> impl Iterator<Item = &'a Module> {
-    ws.modules
-        .iter()
-        .filter(move |m| m.id != ModuleId::builtin() && !warm.contains(&m.id))
 }
 
 /// Unused-var findings across every non-stdlib body in the workspace. A
@@ -4056,7 +4038,7 @@ fn user_modules<'a>(
 pub fn unused_vars(ws: &Workspace) -> Vec<UnusedVar> {
     let warm = FxHashSet::default();
     let variants = enum_variant_names(ws, &warm);
-    user_modules(ws, &warm)
+    ws.user_modules(&warm)
         .flat_map(|module| unused_vars_in_module(module, &variants))
         .collect()
 }
@@ -4193,7 +4175,7 @@ fn variant_args_pure(body: &Body, args: &bone_core::hir::VariantArgs) -> bool {
 /// single file's bodies instead.
 pub fn unused_pure_exprs(ws: &Workspace) -> Vec<UnusedPureExpr> {
     let warm = FxHashSet::default();
-    user_modules(ws, &warm)
+    ws.user_modules(&warm)
         .flat_map(|m| m.bodies.values())
         .flat_map(unused_pure_exprs_in_body)
         .collect()
@@ -4328,7 +4310,7 @@ fn head_ty(ws: &Workspace, bi: &BodyInference, ty: TyId) -> (TyId, TypeExpr) {
 pub fn transmute_of_nullable(ws: &Workspace) -> Vec<TransmuteOfNullable> {
     let warm = FxHashSet::default();
     let mut out = Vec::new();
-    for module in user_modules(ws, &warm) {
+    for module in ws.user_modules(&warm) {
         let inf = ws.inference(module.id);
         for (owner, body) in module.bodies.iter() {
             let bi = inf.and_then(|i| i.per_fn.get(owner));
@@ -4573,7 +4555,8 @@ pub fn action_caller_gaps(
     warm: &FxHashSet<ModuleId>,
     policy: &'static ActionLayerPolicy,
 ) -> Vec<ActionCallerGap> {
-    let declarations: Vec<(Ustr, Ustr, Span)> = user_modules(ws, warm)
+    let declarations: Vec<(Ustr, Ustr, Span)> = ws
+        .user_modules(warm)
         .filter(|module| is_production_action_module(module.file, Some(policy)))
         .flat_map(|module| {
             module
@@ -4585,7 +4568,8 @@ pub fn action_caller_gaps(
         .collect();
 
     if declarations.is_empty() {
-        let Some(module) = user_modules(ws, warm)
+        let Some(module) = ws
+            .user_modules(warm)
             .find(|module| is_production_action_module(module.file, Some(policy)))
         else {
             return Vec::new();
@@ -4604,7 +4588,10 @@ pub fn action_caller_gaps(
 
     let declared: FxHashSet<Ustr> = declarations.iter().map(|(name, _, _)| *name).collect();
     let mut callers: FxHashSet<Ustr> = FxHashSet::default();
-    for module in user_modules(ws, warm).filter(|module| !is_test_module(module.file)) {
+    for module in ws
+        .user_modules(warm)
+        .filter(|module| !is_test_module(module.file))
+    {
         for (owner, body) in &module.bodies {
             callers.extend(action_edges_in_body(
                 module,
@@ -4896,7 +4883,7 @@ fn tail_sink(module: &Module, owner: &BodyOwner) -> Option<EscapeKind> {
 pub fn row_escapes(ws: &Workspace) -> Vec<RowEscape> {
     let warm = FxHashSet::default();
     let mut out = Vec::new();
-    for module in user_modules(ws, &warm) {
+    for module in ws.user_modules(&warm) {
         let inf = ws.inference(module.id);
         for (owner, body) in module.bodies.iter() {
             let bi = inf.and_then(|i| i.per_fn.get(owner));
@@ -4908,7 +4895,7 @@ pub fn row_escapes(ws: &Workspace) -> Vec<RowEscape> {
 
 pub fn nominal_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> FxHashSet<Ustr> {
     let mut out = FxHashSet::default();
-    for m in user_modules(ws, warm) {
+    for m in ws.user_modules(warm) {
         out.extend(m.struct_by_name.keys().copied());
         out.extend(m.enums_by_name.keys().copied());
         out.extend(m.newtypes_by_name.keys().copied());
@@ -5050,7 +5037,7 @@ fn render_place(body: &Body, e: Idx<Expr>) -> Option<String> {
 pub fn task_null_abandon(ws: &Workspace) -> Vec<TaskNullAbandon> {
     let warm = FxHashSet::default();
     let mut out = Vec::new();
-    for module in user_modules(ws, &warm) {
+    for module in ws.user_modules(&warm) {
         let inf = ws.inference(module.id);
         for (owner, body) in module.bodies.iter() {
             out.extend(task_null_abandon_in_body(

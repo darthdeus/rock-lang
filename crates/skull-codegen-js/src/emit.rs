@@ -3333,10 +3333,7 @@ fn js_root_plan(
     let decorators = DecoratorTable::collect(ws);
     let mut named = extra_roots.to_vec();
     let mut seen: HashSet<FuncRef> = named.iter().map(|(fr, _)| *fr).collect();
-    for module in ws.modules.iter() {
-        if module.id == bone_semantic::prelude::ModuleId::builtin() {
-            continue;
-        }
+    for module in ws.source_modules() {
         for (fid, f) in module.functions.iter() {
             if decorators.is_decorated(f) {
                 let fr = FuncRef {
@@ -3575,10 +3572,7 @@ fn build_program_session(
     scx: &skull_mir::lower::ScalarCtx,
     extra_roots: &[(FuncRef, String)],
 ) -> Result<(ProgramBuild, JsSession, JsRootPlan), CompilerError> {
-    for module in ws.modules.iter() {
-        if module.id == bone_semantic::prelude::ModuleId::builtin() {
-            continue;
-        }
+    for module in ws.source_modules() {
         if let Some((why, span)) = skull_mir::lower::map_key_rejection(ws, module.id) {
             return Err(CompilerError::new_with_label(
                 span,
@@ -6143,9 +6137,7 @@ fn nullary_main(ws: &Workspace, user_mid: bone_semantic::prelude::ModuleId) -> O
 /// call set makes the choice provably safe regardless.
 fn safe_self_ref(ws: &Workspace, mf: &MirFunc) -> FuncRef {
     let targets: HashSet<FuncRef> = skull_mir::reach::call_targets(mf).into_iter().collect();
-    ws.modules
-        .iter()
-        .filter(|m| m.id != bone_semantic::prelude::ModuleId::builtin())
+    ws.source_modules()
         .flat_map(|m| {
             m.functions.iter().map(move |(fid, _)| FuncRef {
                 module: m.id,
@@ -6318,11 +6310,7 @@ fn build_const_global_names(
     scx: &skull_mir::lower::ScalarCtx,
 ) -> HashSet<ustr::Ustr> {
     let mut names = HashSet::new();
-    for module in ws
-        .modules
-        .iter()
-        .filter(|m| m.id != bone_semantic::prelude::ModuleId::builtin())
-    {
+    for module in ws.source_modules() {
         for (_, global) in module.globals.iter().filter(|(_, g)| g.is_const) {
             names.insert(global.name);
             if let Ok(plan) = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, global.ty) {

@@ -1519,11 +1519,8 @@ impl Session {
             return FxHashSet::default();
         }
         self.ws
-            .modules
-            .iter()
-            .filter(|m| {
-                m.id != except && m.id != ModuleId::builtin() && !self.warm_mids.contains(&m.id)
-            })
+            .user_modules(&self.warm_mids)
+            .filter(|m| m.id != except)
             .filter(|m| {
                 delta.fragments.contains(&m.file) || m.scope_probes.iter().any(|p| delta.hits(p))
             })
@@ -1627,12 +1624,8 @@ impl Session {
         // (re)appears with this edit re-lowers its previously-dangling users and
         // clears them. User modules only: warm/builtin are never keyed in
         // `self.files`, so a warm module reaching the re-parse loop would panic.
-        for m in self.ws.modules.iter() {
-            if m.id != mid
-                && m.id != ModuleId::builtin()
-                && !self.warm_mids.contains(&m.id)
-                && !m.interface_errors.is_empty()
-            {
+        for m in self.ws.user_modules(&self.warm_mids) {
+            if m.id != mid && !m.interface_errors.is_empty() {
                 to_relower.insert(m.id);
             }
         }
@@ -1919,7 +1912,7 @@ impl Session {
         self.dependents_iface.clear();
 
         for (mid, inf) in self.ws.inferences_iter() {
-            if mid == ModuleId::builtin() || self.warm_mids.contains(&mid) {
+            if !Workspace::is_user_module(mid, &self.warm_mids) {
                 continue;
             }
 
@@ -1940,11 +1933,8 @@ impl Session {
         // Cache from the lowered HIR, not inference -- a module with no inference
         // (e.g. a body-error-only module) still has interface deps. Kept interfaces
         // need no arena walk; `retain_modules` invalidates the replaced ones.
-        for module in self.ws.modules.iter() {
+        for module in self.ws.user_modules(&self.warm_mids) {
             let mid = module.id;
-            if mid == ModuleId::builtin() || self.warm_mids.contains(&mid) {
-                continue;
-            }
             let names = self
                 .module_iface_dep_names
                 .entry(mid)
@@ -1961,7 +1951,7 @@ impl Session {
     /// because a body edit changes ONLY the edited module's outgoing deps (its
     /// interface is unchanged, so no other module's deps move).
     pub fn update_dependents_for(&mut self, mid: ModuleId) {
-        if mid == ModuleId::builtin() || self.warm_mids.contains(&mid) {
+        if !Workspace::is_user_module(mid, &self.warm_mids) {
             return;
         }
 

@@ -2112,10 +2112,7 @@ impl BoneWorkspace {
         // and needs no canonicalization round-trip. The warm stdlib is included
         // (written under its real path, `editor_path`), so `vec_push` & co. are
         // jump-to-by-name; only the builtin (pathless) module is excluded.
-        for m in ws.modules.iter() {
-            if m.id == ModuleId::builtin() {
-                continue;
-            }
+        for m in ws.source_modules() {
             let mid = m.id;
             let file = editor_path(m.file.as_str()).into_owned();
             // Function `signature:`/`returns:` fields, looked up per function by

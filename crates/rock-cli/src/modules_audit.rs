@@ -547,7 +547,7 @@ fn owner_of(
     file_pkg: &HashMap<ustr::Ustr, u32>,
     mid: ModuleId,
 ) -> std::result::Result<Owner, String> {
-    if mid == ModuleId::builtin() {
+    if mid.is_builtin() {
         return Ok(Owner::Builtin);
     }
     let file = ws.module(mid).file;

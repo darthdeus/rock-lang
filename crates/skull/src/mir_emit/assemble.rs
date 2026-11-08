@@ -228,9 +228,7 @@ impl Assembly {
     ) -> (String, Vec<(Ustr, Ustr, String)>) {
         let mut pending_inits: Vec<(Ustr, Ustr, String)> = Vec::new();
         let global_items: Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> = ws
-            .modules
-            .iter()
-            .filter(|m| m.id != ModuleId::builtin())
+            .source_modules()
             .flat_map(|m| m.globals.iter().map(move |(gid, _)| (m.id, gid)))
             .collect();
         let global_keys = global_items.clone();
@@ -264,10 +262,7 @@ impl Assembly {
         cache: &SkullEmitCache,
         needed_foreign: &FxHashSet<Instance>,
     ) -> Result<(), CompilerError> {
-        for module in ws.modules.iter() {
-            if module.id == ModuleId::builtin() {
-                continue;
-            }
+        for module in ws.source_modules() {
             let mid = module.id;
             for (fid, f) in module.functions.iter() {
                 let self_ref = FuncRef {
@@ -551,10 +546,7 @@ fn collect_needed_foreign(
 ) -> FxHashSet<Instance> {
     let mut needed_foreign: FxHashSet<Instance> = FxHashSet::default();
     needed_foreign.extend(always_emitted_calls.iter().map(|f| shared(*f)));
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
+    for module in ws.source_modules() {
         for (fid, f) in module.functions.iter() {
             let self_ref = FuncRef {
                 module: module.id,
@@ -715,10 +707,7 @@ fn emitted_bodies(
     specialized_instances: Vec<Instance>,
 ) -> FxHashSet<Instance> {
     let mut emitted_bodies: FxHashSet<Instance> = FxHashSet::default();
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
+    for module in ws.source_modules() {
         for (fid, f) in module.functions.iter() {
             if f.backend == bone_semantic::hir::FnBackend::Js {
                 continue;

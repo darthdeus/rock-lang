@@ -780,7 +780,7 @@ fn full_codegen_ctx(
 /// function rather than just the emitted set: a duplicate Lua param is illegal
 /// regardless of which filter would have reached the body.
 fn reject_abi_param_collisions(ws: &Workspace, scx: &skull_mir::lower::ScalarCtx, cg: &CodegenCtx) {
-    for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+    for m in ws.source_modules() {
         for (fid, _) in m.functions.iter() {
             let fref = FuncRef {
                 module: m.id,
@@ -813,9 +813,7 @@ fn emit_full_chunks(
     CompilerError,
 > {
     let fn_items: Vec<(FuncRef, &bone_semantic::hir::Function)> = ws
-        .modules
-        .iter()
-        .filter(|m| m.id != ModuleId::builtin())
+        .source_modules()
         .flat_map(|m| {
             m.functions.iter().filter_map(move |(fid, f)| {
                 let self_ref = FuncRef {

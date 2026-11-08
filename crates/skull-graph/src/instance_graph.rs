@@ -1848,7 +1848,7 @@ impl InstanceGraph {
     /// owners in their own right.
     fn always_emitted_owners(&self, ws: &Workspace) -> Vec<Owner> {
         let mut out = Vec::new();
-        for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+        for module in ws.source_modules() {
             let Some(inference) = ws.inference(module.id) else {
                 continue;
             };

@@ -80,10 +80,7 @@ fn is_global_emission_root(f: &bone_semantic::hir::Function, decorators: &Decora
 /// to dispatch cannot drift.
 pub fn collect_sim_fns(ws: &Workspace) -> Vec<(Ustr, &bone_semantic::hir::Function, String)> {
     let mut sims = Vec::new();
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
+    for module in ws.source_modules() {
         for (_fid, f) in module.functions.iter() {
             let Some(wire) = skull_mir::lifecycle::sim_wire_name(f) else {
                 continue;
@@ -146,9 +143,7 @@ fn register_sim_candidates(ws: &Workspace) -> Vec<FuncRef> {
 /// (a `co fn(body: fn(P) -> Coroutine<Wait>) -> Coroutine<Wait>`) resolves the
 /// argument when the runner starts the sim and awaits the body with it.
 fn sim_entry_providers(ws: &Workspace) -> Vec<FuncRef> {
-    ws.modules
-        .iter()
-        .filter(|m| m.id != ModuleId::builtin())
+    ws.source_modules()
         .flat_map(|m| {
             m.functions
                 .iter()
@@ -188,19 +183,14 @@ pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef
 pub(super) fn explicit_and_global_roots(ws: &Workspace, explicit: &[FuncRef]) -> Vec<FuncRef> {
     let decorators = DecoratorTable::collect(ws);
     let mut roots = explicit.to_vec();
-    roots.extend(
-        ws.modules
-            .iter()
-            .filter(|m| m.id != ModuleId::builtin())
-            .flat_map(|m| {
-                m.functions.iter().filter_map(|(fid, f)| {
-                    is_global_emission_root(f, &decorators).then_some(FuncRef {
-                        module: m.id,
-                        func: fid,
-                    })
-                })
-            }),
-    );
+    roots.extend(ws.source_modules().flat_map(|m| {
+        m.functions.iter().filter_map(|(fid, f)| {
+            is_global_emission_root(f, &decorators).then_some(FuncRef {
+                module: m.id,
+                func: fid,
+            })
+        })
+    }));
     roots.sort_by_key(|f| (f.module.index(), f.func.into_raw()));
     roots.dedup();
     roots
@@ -289,10 +279,7 @@ fn emission_roots_with_census(
 ) -> Vec<FuncRef> {
     let decorators = DecoratorTable::collect(ws);
     let mut roots = Vec::new();
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
+    for module in ws.source_modules() {
         if let Some(census) = census.as_deref_mut() {
             census.modules_examined += 1;
             census.functions_examined += module.functions.len();

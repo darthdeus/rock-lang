@@ -168,10 +168,9 @@ pub fn shape_diff(old: &ShapeHashes, new: &ShapeHashes) -> Vec<String> {
 
 /// The single user module id (everything in the workspace but the builtin one).
 pub fn user_module_id(ws: &Workspace) -> Result<ModuleId, CompilerError> {
-    ws.modules
-        .iter()
+    ws.source_modules()
         .map(|m| m.id)
-        .find(|m| *m != ModuleId::builtin())
+        .next()
         .ok_or_else(|| CompilerError::new_no_location("skull: no user module after semantic_pass"))
 }
 /// A `@test` function discovered in a module: its LOGICAL name (the DefKey --

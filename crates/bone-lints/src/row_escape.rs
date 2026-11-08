@@ -77,7 +77,7 @@ pub fn row_population(
     report: &FxHashSet<Ustr>,
 ) -> RowPopulation {
     let mut pop = RowPopulation::default();
-    for module in crate::user_modules(ws, warm) {
+    for module in ws.user_modules(warm) {
         if !report.is_empty() && !report.contains(&module.file) {
             continue;
         }

@@ -457,7 +457,8 @@ impl Workspace {
 
     /// The source modules outside `warm` (a session's warm stdlib set; an
     /// empty set selects every source module). The user code an editor
-    /// session owns, re-lowers and lints.
+    /// session owns, re-lowers and lints. Warm modules carry real paths, so
+    /// `warm`, not the file id, is what tells them apart.
     pub fn user_modules<'a>(
         &'a self,
         warm: &'a FxHashSet<ModuleId>,

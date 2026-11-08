@@ -113,9 +113,8 @@ pub fn check_modules(
 /// Modules the lint pass treats as warm (scanned, never reported): every
 /// module whose file is not one of this build's own `sources`.
 pub fn warm_module_ids(ws: &Workspace, sources: &FxHashMap<Ustr, &str>) -> FxHashSet<ModuleId> {
-    ws.modules
-        .iter()
-        .filter(|m| m.id != ModuleId::builtin() && !sources.contains_key(&m.file))
+    ws.source_modules()
+        .filter(|m| !sources.contains_key(&m.file))
         .map(|m| m.id)
         .collect()
 }

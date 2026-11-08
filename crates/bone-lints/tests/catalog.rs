@@ -133,12 +133,7 @@ fn warm_modules_are_not_reported_on() {
     // never reported. Marking the only module warm must yield nothing.
     let src = "fn dead() -> int { 1 }\nfn main() {\n    let unread = 5\n}";
     let ws = semantic_pass(&mut [parse(src)]).expect("typechecks");
-    let warm: FxHashSet<ModuleId> = ws
-        .modules
-        .iter()
-        .filter(|m| m.id != ModuleId::builtin())
-        .map(|m| m.id)
-        .collect();
+    let warm: FxHashSet<ModuleId> = ws.source_modules().map(|m| m.id).collect();
     let mut sources = FxHashMap::default();
     sources.insert(Ustr::from(FILE), src);
     assert!(lint_workspace(&ws, &warm, true, &sources, &Default::default()).is_empty());
@@ -155,7 +150,7 @@ fn per_class_entry_points_skip_a_warm_module() {
         .modules
         .iter()
         .map(|m| m.id)
-        .find(|&id| id != ModuleId::builtin())
+        .find(|&id| !id.is_builtin())
         .expect("one user module");
     assert_eq!(
         bone_lints::flat_findings(&ws, &FxHashSet::default(), mid, src).len(),

@@ -1,7 +1,6 @@
 use bone_semantic::hir::{AnnoValue, TyId, TypeCtor, TypeExpr};
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::CompilerError;
-use bone_semantic::prelude::ModuleId;
 use ustr::Ustr;
 
 use crate::code_identity::CodeIdentity;
@@ -237,7 +236,7 @@ pub fn collect_complete(ws: &Workspace) -> Result<DefinitionPlan, CompilerError>
 pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
     let mut roles = std::collections::HashMap::new();
     let mut census = DefinitionCensus::default();
-    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+    for module in ws.source_modules() {
         for (_, decorator) in module.decorators.iter() {
             let Some(ann) = metadata(decorator)? else {
                 continue;
@@ -267,7 +266,7 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
             });
     }
 
-    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+    for module in ws.source_modules() {
         for (fid, function) in module.functions.iter() {
             let Some(ann) = annotation(&function.annotations, "artifact_catalog")? else {
                 continue;
@@ -367,7 +366,7 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
     let mut entries = Vec::new();
     let mut ordinal = 0usize;
     let mut seen = std::collections::HashMap::<(Ustr, Ustr), Ustr>::new();
-    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+    for module in ws.source_modules() {
         for (fid, function) in module.functions.iter() {
             for application in &function.annotations {
                 let application_key = application.resolved_name.unwrap_or(application.name.name);

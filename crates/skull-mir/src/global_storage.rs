@@ -9,7 +9,6 @@ use std::collections::BTreeMap;
 
 use bone_semantic::hir::FnBackend;
 use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::ModuleId;
 use ustr::Ustr;
 
 use crate::code_identity::logical_def_key;
@@ -46,7 +45,7 @@ pub fn global_storage_keys(
     scx: &ScalarCtx,
 ) -> Result<BTreeMap<Ustr, String>, String> {
     let mut keys = BTreeMap::new();
-    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+    for module in ws.source_modules() {
         for (_, global) in module.globals.iter().filter(|(_, g)| !g.is_const) {
             let identity = global_identity(module.file, global.name);
             let plan = GlobalPlan::for_declared_type(ws, scx, global.ty)
@@ -89,7 +88,7 @@ pub fn global_directory(
     mut slot_of: impl FnMut(Ustr) -> Option<String>,
 ) -> Result<Vec<GlobalDirectoryEntry>, String> {
     let mut entries = Vec::new();
-    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+    for module in ws.source_modules() {
         for (_, global) in module.globals.iter().filter(|(_, g)| !g.is_const) {
             let identity = global_identity(module.file, global.name);
             let plan = GlobalPlan::for_declared_type(ws, scx, global.ty)
@@ -130,7 +129,7 @@ pub fn global_directory(
 /// different global or hold a value of a different shape.
 pub fn global_layout_id(ws: &Workspace, scx: &ScalarCtx) -> Result<String, String> {
     let mut rows = Vec::new();
-    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+    for module in ws.source_modules() {
         for (_, global) in module.globals.iter().filter(|(_, g)| !g.is_const) {
             let identity = global_identity(module.file, global.name);
             let plan = GlobalPlan::for_declared_type(ws, scx, global.ty)

@@ -30,7 +30,7 @@ fn ws_of(src: &str) -> (Workspace, ModuleId) {
         .modules
         .iter()
         .map(|m| m.id)
-        .find(|m| *m != ModuleId::builtin())
+        .find(|m| !m.is_builtin())
         .expect("user module survives");
     (ws, mid)
 }

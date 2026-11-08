@@ -2,7 +2,7 @@
 //! here because `query` now lives in bone-query; `bone`'s own structural tests
 //! cover everything that doesn't need a query.
 
-use bone_semantic::prelude::{BodyOwner, ModuleId, Ustr};
+use bone_semantic::prelude::{BodyOwner, Ustr};
 use bone_semantic::semantic_passes::semantic_pass;
 
 // A body relowered after its inference was cached must trip the generation
@@ -18,12 +18,7 @@ fn stale_body_generation_panics_at_type_at() {
     let module = skull_parser::parse_module_clean(src, Ustr::from("<query_generation>")).unwrap();
     let mut ws = semantic_pass(&mut [module]).unwrap();
 
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     let (f_idx, _) = ws
         .module(mid)
         .functions

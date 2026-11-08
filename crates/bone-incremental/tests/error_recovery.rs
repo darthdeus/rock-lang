@@ -36,7 +36,7 @@ fn ws_of(src: &str) -> (Workspace, ModuleId) {
         .modules
         .iter()
         .map(|m| m.id)
-        .find(|m| *m != ModuleId::builtin())
+        .find(|m| !m.is_builtin())
         .expect("user module survives");
     (ws, mid)
 }
@@ -74,7 +74,7 @@ fn signature_lowering_error_recovers() {
         .modules
         .iter()
         .map(|m| m.id)
-        .find(|m| *m != ModuleId::builtin())
+        .find(|m| !m.is_builtin())
         .expect("user module");
     let m = &ws.modules[mid.index()];
     assert!(
@@ -103,7 +103,7 @@ fn field_lowering_error_recovers() {
         .modules
         .iter()
         .map(|m| m.id)
-        .find(|m| *m != ModuleId::builtin())
+        .find(|m| !m.is_builtin())
         .expect("user module");
     assert!(
         ws.modules[mid.index()]
@@ -131,7 +131,7 @@ fn global_unknown_type_recovers() {
         .modules
         .iter()
         .map(|m| m.id)
-        .find(|m| *m != ModuleId::builtin())
+        .find(|m| !m.is_builtin())
         .expect("user module");
     assert!(
         ws.modules[mid.index()]
@@ -191,7 +191,7 @@ fn recovered_body_error_surfaces_and_commits() {
         .modules
         .iter()
         .map(|m| m.id)
-        .find(|m| *m != ModuleId::builtin())
+        .find(|m| !m.is_builtin())
         .expect("the module is committed (body errors do not revert)");
     assert!(
         ws.modules[mid.index()]

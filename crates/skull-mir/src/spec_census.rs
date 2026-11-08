@@ -13,7 +13,6 @@
 
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::ModuleId;
 
 use crate::lower::shape_census_support::concrete_calls_in_body;
 use crate::mir::FuncRef;
@@ -64,10 +63,7 @@ impl PartialOrd for ConcreteCall {
 pub fn concrete_calls(ws: &Workspace) -> (Vec<ConcreteCall>, usize) {
     let mut out = Vec::new();
     let mut rejected = 0usize;
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
+    for module in ws.source_modules() {
         let Some(ir) = ws.inference(module.id) else {
             continue;
         };

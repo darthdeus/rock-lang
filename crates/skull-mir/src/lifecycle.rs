@@ -251,11 +251,9 @@ fn global_locations(
 }
 
 fn user_function_named(ws: &Workspace, name: Ustr) -> bool {
-    ws.functions_by_name.get(&name).is_some_and(|functions| {
-        functions
-            .iter()
-            .any(|(module, _)| *module != ModuleId::builtin())
-    })
+    ws.functions_by_name
+        .get(&name)
+        .is_some_and(|functions| functions.iter().any(|(module, _)| !module.is_builtin()))
 }
 
 fn ordered_global_locations(
@@ -384,7 +382,7 @@ fn dependency_names_for_const(
             && user_function
             && ws.functions_by_name.get(&name).is_some_and(|functions| {
                 functions.iter().any(|(module, function)| {
-                    *module != ModuleId::builtin()
+                    !module.is_builtin()
                         && bone_semantic::hir::operator_entry(crate::mangle::declared_name(
                             name.as_str(),
                         ))
@@ -544,11 +542,8 @@ pub fn collect_with_artifact(
 
 pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
     let sim_wires_by_module = ws
-        .modules
-        .iter()
-        .filter(|module| {
-            module.id != ModuleId::builtin() && is_sim_fixture_module(module.file.as_str())
-        })
+        .source_modules()
+        .filter(|module| is_sim_fixture_module(module.file.as_str()))
         .filter_map(|module| {
             let wires = module
                 .functions
@@ -560,7 +555,7 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
         .collect::<std::collections::HashMap<_, _>>();
     let mut roles = std::collections::HashMap::new();
     let mut census = LifecycleCensus::default();
-    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+    for module in ws.source_modules() {
         for (did, deco) in module.decorators.iter() {
             let Some(meta) = deco.annotations.iter().find(|a| a.is_builtin("lifecycle")) else {
                 continue;
@@ -614,7 +609,7 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
     let mut entries = Vec::new();
     let mut ordinal = 0usize;
     let mut seen = std::collections::HashSet::<(CodeIdentity, Ustr)>::new();
-    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+    for module in ws.source_modules() {
         for (fid, f) in module.functions.iter() {
             for app in &f.annotations {
                 let app_key = app.resolved_name.unwrap_or(app.name.name);

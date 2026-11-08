@@ -1480,15 +1480,11 @@ pub fn collect_package_test_fns(
     ws: &bone_semantic::inference::Workspace,
     dir: &str,
 ) -> std::result::Result<Vec<(skull_mir::mir::FuncRef, skull::SkullTest)>, CompilerError> {
-    use bone_semantic::prelude::ModuleId;
     let root = std::path::Path::new(dir)
         .canonicalize()
         .unwrap_or_else(|_| std::path::PathBuf::from(dir));
     let mut out = Vec::new();
-    for m in ws.modules.iter() {
-        if m.id == ModuleId::builtin() {
-            continue;
-        }
+    for m in ws.source_modules() {
         let under = std::path::Path::new(m.file.as_str())
             .canonicalize()
             .map(|c| c.starts_with(&root))
@@ -2314,10 +2310,8 @@ fn build_global_nobox_accessors(
     scx: &skull_mir::lower::ScalarCtx,
     rows: &mut std::collections::BTreeMap<String, Vec<String>>,
 ) -> std::result::Result<(), CompilerError> {
-    use bone_semantic::prelude::ModuleId;
-
     let state_slots = skull::mir_emit::lua_global_state_slots(ws, scx)?;
-    for m in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+    for m in ws.source_modules() {
         for (_gid, g) in m.globals.iter().filter(|(_, global)| !global.is_const) {
             let Some(acc) = skull_mir::lower::nobox_global_accessor_shape(ws, scx, g.ty)
                 .map_err(|e| CompilerError::new_no_location(e.message))?
@@ -2474,14 +2468,10 @@ pub struct SimDescriptor {
 }
 
 pub fn collect_sim_descriptors(ws: &bone_semantic::inference::Workspace) -> Vec<SimDescriptor> {
-    use bone_core::prelude::ModuleId;
     use bone_semantic::hir::AnnoValue;
 
     let mut sims = Vec::new();
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
+    for module in ws.source_modules() {
         for (fid, f) in module.functions.iter() {
             let Some(wire) = skull_mir::lifecycle::sim_wire_name(f) else {
                 continue;

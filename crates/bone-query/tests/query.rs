@@ -17,12 +17,7 @@ fn ws_of(src: &str) -> (Workspace, ModuleId) {
     let module =
         skull_parser::parse_module_clean(src, Ustr::from("<query-test>")).expect("parse_rock");
     let ws = semantic_pass(&mut [module]).expect("semantic_pass");
-    let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
-        .expect("one user module")
-        .id;
+    let mid = ws.source_modules().next().expect("one user module").id;
     (ws, mid)
 }
 

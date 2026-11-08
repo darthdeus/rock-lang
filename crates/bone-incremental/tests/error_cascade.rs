@@ -53,7 +53,7 @@ fn type_at_offset(src: &str, off: usize) -> Option<String> {
         .modules
         .iter()
         .map(|m| m.id)
-        .find(|m| *m != ModuleId::builtin())
+        .find(|m| !m.is_builtin())
         .expect("user module survives");
     let inf = ws.inference(mid).expect("inference for user module");
     let at = bone_semantic::query::type_at(&ws, mid, inf, off)?;

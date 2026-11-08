@@ -80,9 +80,8 @@ pub fn check_types(src: &str) -> Result<(), String> {
 
     // the single user module: everything in the workspace except the builtin one
     let mid = ws
-        .modules
-        .iter()
-        .find(|m| m.id != ModuleId::builtin())
+        .source_modules()
+        .next()
         .ok_or_else(|| "no user module after semantic_pass".to_string())?
         .id;
 

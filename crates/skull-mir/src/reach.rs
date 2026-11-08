@@ -122,11 +122,7 @@ pub fn symbol_references(
 ) -> FxHashMap<Ustr, HashSet<Ustr>> {
     use bone_semantic::hir::BodyOwner;
     let mut deps: FxHashMap<Ustr, HashSet<Ustr>> = FxHashMap::default();
-    for module in ws
-        .modules
-        .iter()
-        .filter(|m| m.id != bone_semantic::prelude::ModuleId::builtin())
-    {
+    for module in ws.source_modules() {
         let Some(inf) = ws.inference(module.id) else {
             continue;
         };

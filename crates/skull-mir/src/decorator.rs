@@ -154,10 +154,7 @@ impl DecoratorTable {
         target: FnBackend,
     ) -> Vec<DecoratorApplication<'w>> {
         let mut out = Vec::new();
-        for module in ws.modules.iter() {
-            if module.id == ModuleId::builtin() {
-                continue;
-            }
+        for module in ws.source_modules() {
             for (fid, f) in module.functions.iter() {
                 if !serves(f, target) {
                     continue;
@@ -210,10 +207,7 @@ impl DecoratorTable {
         sims: SimValues<'_>,
         artifact: &mut CodeArtifact,
     ) {
-        for module in ws.modules.iter() {
-            if module.id == ModuleId::builtin() {
-                continue;
-            }
+        for module in ws.source_modules() {
             for (fid, f) in module.functions.iter() {
                 if !serves(f, target) {
                     continue;
