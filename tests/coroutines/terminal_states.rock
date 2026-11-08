@@ -246,3 +246,21 @@ fn test_self_kill_then_yield_stays_dead_flat_enum_channel() {
         print("status={st} log={KC_LOG} defer={KC_DEFER}")
     }
 }
+
+// A hook with an empty body has no body site of its own; it takes its
+// identity from the registration lambda.
+co fn empty_hook() -> Coroutine<int> {
+    on_killed {
+    }
+    yield 1
+    yield 2
+}
+
+@test(output = "first=1 status=dead")
+fn test_empty_on_killed_hook_kills_cleanly() {
+    let c = empty_hook()
+    let first = resume(c)
+    kill(c)
+    let st = status(c)
+    print("first={first} status={st}")
+}

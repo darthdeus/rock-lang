@@ -15,9 +15,7 @@ use comfy_la_arena::{Idx, RawIdx};
 use skull_mir::cfg::structure::{
     self, CountedBound, CountedLoop, LoopRegion, LoopShapes, Structure,
 };
-use skull_mir::code_identity::{
-    CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema,
-};
+use skull_mir::code_identity::{CodeArtifact, CodeIdentity};
 use skull_mir::decorator::{DecoratorTable, SimValues, decorator_symbol};
 use skull_mir::global_storage::StaticBaseline;
 use skull_mir::instance::Instance;
@@ -71,18 +69,6 @@ fn finish_body(ws: &Workspace, mf: &mut MirFunc, name: &str) {
     skull_transform::recover_counted_loops(ws, mf);
     for nf in &mut mf.nested_fns {
         skull_transform::recover_counted_loops(ws, nf);
-    }
-}
-
-fn collect_nested_code_identities(
-    mf: &MirFunc,
-    out: &mut HashSet<skull_mir::code_identity::CodeIdentity>,
-) {
-    for nested in &mf.nested_fns {
-        if let Some(identity) = &nested.code_identity {
-            out.insert(identity.clone());
-        }
-        collect_nested_code_identities(nested, out);
     }
 }
 
@@ -5270,7 +5256,7 @@ fn emit_lowered_fn(
                 reason.bucket()
             ))
         })?;
-        return emit_coroutine_js(ws, interner, &plan, mf, names, hoisted, gctx);
+        return emit_coroutine_js(ws, interner, &plan, concrete, mf, names, hoisted, gctx);
     }
     let out = emit_body_with_nested(ws, mf, js_name, names, hoisted, gctx)?;
     let mut code_artifact = js_code_artifact(ws, mf);
@@ -7089,147 +7075,45 @@ fn js_code_artifact(ws: &Workspace, mf: &MirFunc) -> CodeArtifact {
     CodeArtifact::from_mir_tree_with_volatile_vars(mf, &ws.comptime_inputs.volatile_vars)
 }
 
-/// Emit a `co fn` for JS: the shared coroutine pipeline (`transform_coroutine`
-/// -> `convert_closures_framed` -> `materialize_frame`) then the trampoline
-/// step, hoisted-lambda siblings, hook/defer aux trampolines over the shared
-/// arena, and the JS ctor (the exact Lua ctor contract: the object IS the
-/// frame; `__resume`/`__advance` drive the step; `JS_CORO_RUNTIME` supplies
-/// `__rock_coroutine_kill`/`__rock_coroutine_run_defers`/`error`).
-fn add_coroutine_code_values(
-    ws: &Workspace,
-    interner: &skull_mir::monoty::MonoInterner,
-    plan: &skull_mir::lower::CoroutinePlan,
-    lowered: &skull_transform::CoroLowered,
-    artifact: &mut CodeArtifact,
-    defer_funcs: &[MirFunc],
-    hook_funcs: &[(&'static str, MirFunc)],
-) -> (Option<String>, String, Vec<String>, Vec<String>) {
-    let root = lowered.step.code_identity.as_ref().expect("co fn identity");
-    let owner = root.owner().expect("co fn owner");
-    let root_compatibility = artifact
-        .entries
-        .get(root)
-        .expect("co fn artifact entry")
-        .compatibility
-        .clone();
-    let generated_compatibility = |role: &str| CodeCompatibility {
-        call_abi: format!("coroutine:{role};{}", root_compatibility.call_abi),
-        capture: CaptureSchema::empty(),
-        frame: root_compatibility.frame.clone(),
-        lambda_topology: root_compatibility.lambda_topology,
-    };
-    let mut generated = |role: &str, body: &str| {
-        let identity = CodeIdentity::Generated {
-            enclosing: owner.clone(),
-            role: Ustr::from(role),
-        };
-        artifact.add_generated_value(identity.clone(), generated_compatibility(role), body);
-        identity.logical_key(ws, interner)
-    };
-    let resume_body = plan.resume();
-    let resume_key = generated("resume", &resume_body);
-    let advance_key = plan.advance().map(|body| generated("advance", &body));
-    let defer_keys = defer_funcs
-        .iter()
-        .map(|aux| {
-            let identity = aux.code_identity.clone().expect("defer identity");
-            artifact.mark_value(identity.clone());
-            identity.logical_key(ws, interner)
-        })
-        .collect();
-    let hook_keys = hook_funcs
-        .iter()
-        .map(|(_, aux)| {
-            let identity = aux.code_identity.clone().expect("hook identity");
-            artifact.mark_value(identity.clone());
-            identity.logical_key(ws, interner)
-        })
-        .collect();
-    (advance_key, resume_key, defer_keys, hook_keys)
-}
-
+/// Emit a `co fn` for JS: the shared preparation
+/// ([`skull_transform::prepare_coroutine`]), `materialize_frame` on the step,
+/// then the trampoline step, hoisted-lambda siblings, hook/defer aux
+/// trampolines over the shared arena, and the JS ctor (the exact Lua ctor
+/// contract: the object IS the frame; `__resume`/`__advance` drive the step;
+/// `JS_CORO_RUNTIME` supplies `__rock_coroutine_kill`/
+/// `__rock_coroutine_run_defers`/`error`).
 fn emit_coroutine_js(
     ws: &Workspace,
     interner: &skull_mir::monoty::MonoInterner,
     plan: &skull_mir::lower::CoroutinePlan,
+    concrete: &skull_mir::concrete::ConcreteBodyPlan,
     mf: &MirFunc,
     callees: &CalleeNames,
     hoisted: &HashSet<ustr::Ustr>,
     globals: &GlobalCtx,
 ) -> Result<(String, CodeArtifact), CompilerError> {
-    let channel = plan.channel.as_ref();
-    let mut lowered = skull_transform::transform_coroutine(mf, channel, plan.has_return_value());
     let resume_arg = mf
         .resume_arg
         .ok_or_else(|| err("co fn must carry a resume-arg cell"))?;
-    let step_name = plan.step();
-    // Convert detached hook/defer regions as ordinary functions. Their own
-    // lambda parameters and locals stay ordinary cells; only root-owned cells
-    // are materialized through the coroutine state table.
-    let frame_info = lowered.root_frame_info();
-    let defer_entries: Vec<Idx<Block>> = lowered
-        .step
-        .coro_defers
-        .iter()
-        .map(|(_, entry)| *entry)
-        .collect();
-    let hook_entries: Vec<(&'static str, Idx<Block>)> = lowered
-        .hooks
-        .iter()
-        .map(|(kind, entry)| (kind.slot(), *entry))
-        .collect();
-    let mut defer_funcs = Vec::with_capacity(defer_entries.len());
-    for (k, &entry) in defer_entries.iter().enumerate() {
-        let aux_name = plan.defer(k);
-        defer_funcs.push(skull_transform::lower_detached_region(
-            &lowered.step,
-            entry,
-            &aux_name,
-            &frame_info,
-        ));
-    }
-    let mut hook_funcs = Vec::with_capacity(hook_entries.len());
-    for &(slot, entry) in &hook_entries {
-        let aux_name = plan.hook(slot);
-        hook_funcs.push((
-            slot,
-            skull_transform::lower_detached_region(&lowered.step, entry, &aux_name, &frame_info),
-        ));
-    }
-    skull_transform::erase_detached_lambdas(
-        &mut lowered.step,
-        defer_entries
-            .iter()
-            .copied()
-            .chain(hook_entries.iter().map(|(_, entry)| *entry)),
-    );
-    skull_transform::convert_closures_framed(
-        &mut lowered.step,
-        &step_name,
-        Some(&frame_info),
-        Some((&lowered.step_tree, &lowered.step_own)),
-    );
-    let mut detached_identities = HashSet::new();
-    for aux in &defer_funcs {
-        collect_nested_code_identities(aux, &mut detached_identities);
-    }
-    for (_, aux) in &hook_funcs {
-        collect_nested_code_identities(aux, &mut detached_identities);
-    }
-    lowered.step.nested_fns.retain(|nested| {
-        nested
-            .code_identity
-            .as_ref()
-            .is_none_or(|id| !detached_identities.contains(id))
-    });
+    let source = concrete
+        .function_instance()
+        .ok_or_else(|| err("a coroutine emission plan must own a function instance"))?
+        .func;
+    let source_func = &ws.module(source.module).functions[source.func];
+    let skull_transform::PreparedCoroutine {
+        mut lowered,
+        step_name,
+        named_nested,
+        defers,
+        hooks,
+        code_artifact,
+        keys,
+    } = skull_transform::prepare_coroutine(ws, interner, source_func, plan, mf, &|_| {})?;
     // This coroutine's hoisted lambda names are referenced only from its own
     // bodies, so extend the program set locally.
     let mut hoisted = hoisted.clone();
     hoisted.extend(lowered.step.nested_fns.iter().map(|nf| nf.name));
-    for aux in defer_funcs
-        .iter()
-        .chain(hook_funcs.iter().map(|(_, aux)| aux))
-    {
+    for aux in defers.iter().chain(hooks.iter().map(|(_, aux)| aux)) {
         hoisted.extend(aux.nested_fns.iter().map(|nf| nf.name));
     }
     // Materialize only the root region; detached regions were materialized when
@@ -7241,47 +7125,9 @@ fn emit_coroutine_js(
         lowered.s_cell,
         lowered.frame_plan.slots(),
     );
-    let mut code_artifact = js_code_artifact(ws, &lowered.step);
-    code_artifact.set_body_names(&lowered.step, &step_name);
-    if let Some(identity) = &lowered.step.code_identity {
-        if let Some(entry) = code_artifact.entries.get_mut(identity) {
-            entry.body_name = Some(Ustr::from(plan.base()));
-            let mut slots: Vec<u32> = lowered.frame_plan.slots().values().copied().collect();
-            slots.sort_unstable();
-            slots.dedup();
-            entry.compatibility.frame = Some(FrameSchema { slots });
-        }
-    }
-    for aux in &defer_funcs {
-        let mut artifact = js_code_artifact(ws, aux);
-        artifact.set_body_names(aux, aux.name.as_str());
-        code_artifact.merge(artifact);
-    }
-    for (_, aux) in &hook_funcs {
-        let mut artifact = js_code_artifact(ws, aux);
-        artifact.set_body_names(aux, aux.name.as_str());
-        code_artifact.merge(artifact);
-    }
-    // Step, defer and hook regions share this coroutine's owner but computed
-    // their lambda topologies from disjoint populations; present one value
-    // per owner before the generated entries inherit the root's. Must precede
-    // `add_coroutine_code_values`, which copies the root topology.
-    code_artifact.unify_owner_topologies();
-    let (advance_key, resume_key, defer_keys, hook_keys) = add_coroutine_code_values(
-        ws,
-        interner,
-        plan,
-        &lowered,
-        &mut code_artifact,
-        &defer_funcs,
-        &hook_funcs,
-    );
     let mut globals = globals.clone();
     register_code_slots(ws, interner, &lowered.step, &mut globals);
-    for aux in &defer_funcs {
-        register_code_slots(ws, interner, aux, &mut globals);
-    }
-    for (_, aux) in &hook_funcs {
+    for aux in defers.iter().chain(hooks.iter().map(|(_, aux)| aux)) {
         register_code_slots(ws, interner, aux, &mut globals);
     }
     let mut out = emit_fn_trampoline(
@@ -7295,78 +7141,39 @@ fn emit_coroutine_js(
         &[lowered.s_cell, resume_arg],
         false,
     )?;
-    // Hoisted lambda siblings are frame-free ordinary fns (their frame accesses
-    // are already `e.c<S>.c<slot>` MIR) -- the normal structured path.
+    // Named nested fns finish like an ordinary body's; hoisted lambda siblings
+    // are frame-free ordinary fns (their frame accesses are already
+    // `e.c<S>.c<slot>` MIR) -- the normal structured path.
     let mut nested = std::mem::take(&mut lowered.step.nested_fns);
-    for nf in nested.iter_mut() {
+    for nf in &mut nested[..named_nested] {
         skull_transform::cleanup_with_nobox(ws, nf)?;
         skull_transform::recover_counted_loops(ws, nf);
+    }
+    let bodies = nested.iter().chain(
+        defers
+            .iter()
+            .chain(hooks.iter().map(|(_, aux)| aux))
+            .flat_map(|aux| std::iter::once(aux).chain(aux.nested_fns.iter())),
+    );
+    for body in bodies {
         out.push_str(&emit_fn_with_callees(
             ws,
-            nf,
-            nf.name.as_str(),
+            body,
+            body.name.as_str(),
             callees,
             &hoisted,
             &globals,
         )?);
     }
     lowered.step.nested_fns = nested;
-    for mut aux in defer_funcs {
-        skull_transform::cleanup_with_nobox(ws, &mut aux)?;
-        out.push_str(&emit_fn_with_callees(
-            ws,
-            &aux,
-            aux.name.as_str(),
-            callees,
-            &hoisted,
-            &globals,
-        )?);
-        let mut nested = std::mem::take(&mut aux.nested_fns);
-        for nf in nested.iter_mut() {
-            skull_transform::cleanup_with_nobox(ws, nf)?;
-            skull_transform::recover_counted_loops(ws, nf);
-            out.push_str(&emit_fn_with_callees(
-                ws,
-                nf,
-                nf.name.as_str(),
-                callees,
-                &hoisted,
-                &globals,
-            )?);
-        }
-    }
-    for (_, mut aux) in hook_funcs {
-        skull_transform::cleanup_with_nobox(ws, &mut aux)?;
-        out.push_str(&emit_fn_with_callees(
-            ws,
-            &aux,
-            aux.name.as_str(),
-            callees,
-            &hoisted,
-            &globals,
-        )?);
-        let mut nested = std::mem::take(&mut aux.nested_fns);
-        for nf in nested.iter_mut() {
-            skull_transform::cleanup_with_nobox(ws, nf)?;
-            skull_transform::recover_counted_loops(ws, nf);
-            out.push_str(&emit_fn_with_callees(
-                ws,
-                nf,
-                nf.name.as_str(),
-                callees,
-                &hoisted,
-                &globals,
-            )?);
-        }
-    }
     out.push_str(&emit_js_constructor(
         plan,
         &step_name,
         &lowered,
-        advance_key.as_deref(),
-        &resume_key,
-        &defer_keys,
-        &hook_keys,
+        keys.advance.as_deref(),
+        &keys.resume,
+        &keys.defers,
+        &keys.hooks,
     )?);
     Ok((out, code_artifact))
 }

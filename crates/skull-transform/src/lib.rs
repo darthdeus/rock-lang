@@ -7,6 +7,7 @@ mod cleanup;
 mod closure;
 mod copy_prop;
 mod coroutine;
+mod coroutine_prepare;
 mod detached;
 mod forl;
 mod frame;
@@ -27,6 +28,9 @@ pub(crate) use copy_prop::resolve_subst;
 pub use coroutine::{
     CoroLowered, CoroutineFramePlan, STATE, transform_coroutine,
     transform_coroutine_with_nonescaping_lambdas,
+};
+pub use coroutine_prepare::{
+    CoroutineKeys, PreparedCoroutine, convert_named_nested_closures, prepare_coroutine,
 };
 pub use detached::{
     LoweredDetachedRegion, erase_detached_lambdas, lower_detached_region,

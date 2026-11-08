@@ -4,8 +4,6 @@
 //! this module is the Lua-printing consumer (unfuck #57: the transform crate is
 //! printer-free).
 
-use std::collections::HashSet;
-
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::CompilerError;
 use comfy_la_arena::Idx;
@@ -13,112 +11,13 @@ use rustc_hash::FxHashSet;
 use skull_codegen_lua::{
     CodegenCtx, FrameCtx, LuaEmission, emit_named_framed, emit_named_framed_with_allocation_sites,
 };
-use skull_mir::code_identity::{
-    CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema, LambdaSiteId,
-};
+use skull_mir::code_identity::CodeArtifact;
 use skull_mir::lower::CoroutinePlan;
 use skull_mir::mir::*;
-use skull_transform::{CoroLowered, STATE};
-use ustr::Ustr;
+use skull_transform::{CoroLowered, PreparedCoroutine, STATE};
 
 fn raw<T>(i: Idx<T>) -> u32 {
     i.into_raw().into()
-}
-
-fn collect_nested_code_identities(mf: &MirFunc, out: &mut HashSet<CodeIdentity>) {
-    for nested in &mf.nested_fns {
-        if let Some(identity) = &nested.code_identity {
-            out.insert(identity.clone());
-        }
-        collect_nested_code_identities(nested, out);
-    }
-}
-
-fn hook_registration_site(
-    source: &MirFunc,
-    kind: CoroHookKind,
-    entry: Idx<Block>,
-) -> Option<LambdaSiteId> {
-    source.insts.iter().find_map(|(_, inst)| {
-        let Inst::CoroHook {
-            kind: registered,
-            lambda,
-        } = inst
-        else {
-            return None;
-        };
-        if *registered != kind {
-            return None;
-        }
-        let Inst::Lambda {
-            entry: lambda_entry,
-            ..
-        } = &source.insts[*lambda]
-        else {
-            return None;
-        };
-        if *lambda_entry != entry {
-            return None;
-        }
-        source
-            .inst_spans
-            .get(*lambda)
-            .copied()
-            .and_then(LambdaSiteId::from_span)
-    })
-}
-
-fn add_coroutine_code_values(
-    ws: &Workspace,
-    interner: &skull_mir::monoty::MonoInterner,
-    plan: &CoroutinePlan,
-    lowered: &CoroLowered,
-    artifact: &mut CodeArtifact,
-    defer_funcs: &[MirFunc],
-    hook_funcs: &[(CoroHookKind, MirFunc)],
-) -> (Option<String>, String, Vec<String>, Vec<String>) {
-    let root = lowered.step.code_identity.as_ref().expect("co fn identity");
-    let owner = root.owner().expect("co fn owner");
-    let root_compatibility = artifact
-        .entries
-        .get(root)
-        .expect("co fn artifact entry")
-        .compatibility
-        .clone();
-    let generated_compatibility = |role: &str| CodeCompatibility {
-        call_abi: format!("coroutine:{role};{}", root_compatibility.call_abi),
-        capture: CaptureSchema::empty(),
-        frame: root_compatibility.frame.clone(),
-        lambda_topology: root_compatibility.lambda_topology,
-    };
-    let mut generated = |role: &str, body: &str| {
-        let identity = CodeIdentity::Generated {
-            enclosing: owner.clone(),
-            role: Ustr::from(role),
-        };
-        artifact.add_generated_value(identity.clone(), generated_compatibility(role), body);
-        identity.logical_key(ws, interner)
-    };
-    let resume_body = plan.resume();
-    let resume_key = generated("resume", &resume_body);
-    let advance_key = plan.advance().map(|body| generated("advance", &body));
-    let defer_keys = defer_funcs
-        .iter()
-        .map(|aux| {
-            let identity = aux.code_identity.clone().expect("defer identity");
-            artifact.mark_value(identity.clone());
-            identity.logical_key(ws, interner)
-        })
-        .collect();
-    let hook_keys = hook_funcs
-        .iter()
-        .map(|(_, aux)| {
-            let identity = aux.code_identity.clone().expect("hook identity");
-            artifact.mark_value(identity.clone());
-            identity.logical_key(ws, interner)
-        })
-        .collect();
-    (advance_key, resume_key, defer_keys, hook_keys)
 }
 
 pub fn emit_coroutine_with_artifact(
@@ -139,296 +38,110 @@ pub fn emit_coroutine_with_artifact(
     CompilerError,
 > {
     let interner = scx.interner();
-    // A co fn yielding a flat enum threads through the frame-slot channel (0 alloc
-    // per yield); the channel's shape drives both the slot writes (transform) and
-    // the generic/boxed `resume()` rebuild (constructor).
-    let channel = plan.channel.as_ref();
-    let mut lowered = skull_transform::transform_coroutine(func, channel, plan.has_return_value());
+    let PreparedCoroutine {
+        mut lowered,
+        step_name,
+        named_nested,
+        defers,
+        hooks,
+        code_artifact,
+        keys,
+    } = skull_transform::prepare_coroutine(ws, interner, source_func, plan, func, &|name| {
+        ctx.mint_synthetic(name.to_string());
+    })?;
     let frame = FrameCtx {
         s_cell: lowered.s_cell,
         fields: lowered.frame_plan.fields().iter().copied().collect(),
         slots: lowered.frame_plan.slots().clone(),
     };
-    // `__resume`/`__advance` are minted by `emit_constructor` from the plan --
-    // check them here (the only place with `ctx`) for their collision side-effect.
-    // Whether an `__advance` exists is the plan's answer, not a second reading of
-    // the channel.
-    ctx.mint_synthetic(plan.resume());
-    if let Some(advance) = plan.advance() {
-        ctx.mint_synthetic(advance);
-    }
-    let step_name = ctx.mint_synthetic(plan.step());
-    // S3: route both the STEP and every
-    // detached region through the shared closure-conversion pass. Detached
-    // regions become ordinary MirFuncs, so their own lambda parameters and
-    // locals cannot accidentally be rendered as coroutine frame fields.
-    let frame_info = lowered.root_frame_info();
-    let defer_entries: Vec<Idx<Block>> = lowered
-        .step
-        .coro_defers
-        .iter()
-        .map(|(_, entry)| *entry)
-        .collect();
-    let hook_entries: Vec<(CoroHookKind, Idx<Block>)> = lowered.hooks.clone();
-    let mut defer_funcs = Vec::with_capacity(defer_entries.len());
-    for (k, &entry) in defer_entries.iter().enumerate() {
-        let dname = ctx.mint_synthetic(plan.defer(k));
-        defer_funcs.push(skull_transform::lower_detached_region(
-            &lowered.step,
-            entry,
-            &dname,
-            &frame_info,
-        ));
-    }
-    let mut hook_funcs = Vec::with_capacity(hook_entries.len());
-    for (kind, entry) in &hook_entries {
-        let hname = ctx.mint_synthetic(plan.hook(kind.slot()));
-        let mut aux =
-            skull_transform::lower_detached_region(&lowered.step, *entry, &hname, &frame_info);
-        // A hook without a body site uses its registration lambda's source site.
-        if aux.code_identity.is_none() {
-            let enclosing = func.code_identity.as_ref().and_then(CodeIdentity::owner);
-            let site = hook_registration_site(func, *kind, *entry);
-            let (Some(enclosing), Some(site)) = (enclosing, site) else {
-                return Err(CompilerError::new_with_label(
-                    source_func.name_span,
-                    format!(
-                        "coroutine hook `{}` has no source identity at its registration lambda",
-                        kind.slot()
-                    ),
-                ));
-            };
-            aux.code_identity = Some(CodeIdentity::Nested {
-                enclosing,
-                site,
-                name: aux.name,
-            });
-            let mut slots: Vec<u32> = lowered.frame_plan.slots().values().copied().collect();
-            slots.sort_unstable();
-            aux.code_compatibility = Some(CodeCompatibility {
-                call_abi: format!("detached:{}", aux.name),
-                capture: CaptureSchema::empty(),
-                frame: Some(FrameSchema { slots }),
-                lambda_topology: Default::default(),
-            });
-        }
-        hook_funcs.push((*kind, aux));
-    }
-    skull_transform::erase_detached_lambdas(
-        &mut lowered.step,
-        defer_entries
-            .iter()
-            .copied()
-            .chain(hook_entries.iter().map(|(_, entry)| *entry)),
-    );
-    let pre_nested = lowered.step.nested_fns.len();
-    crate::mir_emit::convert_named_nested_closures(ctx, &mut lowered.step.nested_fns[..pre_nested]);
-    skull_transform::convert_closures_framed(
-        &mut lowered.step,
-        &step_name,
-        Some(&frame_info),
-        Some((&lowered.step_tree, &lowered.step_own)),
-    );
-    let mut detached_identities = HashSet::new();
-    for aux in &defer_funcs {
-        collect_nested_code_identities(aux, &mut detached_identities);
-    }
-    for (_, aux) in &hook_funcs {
-        collect_nested_code_identities(aux, &mut detached_identities);
-    }
-    lowered.step.nested_fns.retain(|nested| {
-        nested
-            .code_identity
-            .as_ref()
-            .is_none_or(|id| !detached_identities.contains(id))
-    });
-    // Route each pass-hoisted `<step>__lambda<k>` through the synthetic-name
-    // collision guard (a user fn colliding with the minted name must reject).
-    for nf in lowered.step.nested_fns[pre_nested..].iter() {
-        ctx.mint_synthetic(nf.name.to_string());
-    }
-    skull_transform::validate_no_residual_bound_calls(ws, source_func, &lowered.step)?;
-    let mut allocation_bodies = Vec::new();
-    let step_emission = emit_coroutine_body(
+    let mut out = CoroutineLua {
         ws,
         ctx,
         interner,
-        &step_name,
-        plan.base(),
-        &lowered.step,
-        Some(&frame),
-    );
-    let step_lua = step_emission.lua;
-    if let Some(body) = step_emission.body {
-        allocation_bodies.push(body);
-    }
-    // Hoisted lambda bodies: frame-free sibling fns (the pass materialized their
-    // frame accesses as `e.c<S>.c<slot>`, so they need no `FrameCtx`). cleanup
-    // drops the clone's dead ROOT-region insts; a co fn's loops are recovered by
-    // codegen's relooper (`recognize_counted_loops`), same as the step -- so no
-    // `recover_counted_loops` transform here (unlike an ordinary fn's nested_fns).
-    let mut nested_luas = String::new();
+        lua: String::new(),
+        allocation_bodies: Vec::new(),
+    };
+    out.emit(&step_name, plan.base(), &lowered.step, Some(&frame));
+    // Named nested fns take the ordinary nested-fn path; hoisted lambda bodies
+    // are frame-free siblings (their frame accesses are already
+    // `e.c<S>.c<slot>` MIR), so they need no `FrameCtx`.
     let mut nested_deps = FxHashSet::default();
     let mut nested_statics = lowered.step.statics.clone();
     let mut nested_times = crate::mir_emit::PhaseTimes::default();
     let mut hoisted = std::mem::take(&mut lowered.step.nested_fns);
-    let (named_nested, lambda_nested) = hoisted.split_at_mut(pre_nested);
+    let (named, lambdas) = hoisted.split_at_mut(named_nested);
     crate::mir_emit::emit_nested_fns(
         ws,
         ctx,
         scx,
-        named_nested,
+        named,
         &lowered.step.statics,
         &mut nested_deps,
         &mut nested_statics,
-        &mut allocation_bodies,
-        &mut nested_luas,
+        &mut out.allocation_bodies,
+        &mut out.lua,
         &mut nested_times,
     )?;
-    for nf in lambda_nested.iter_mut() {
-        skull_transform::cleanup_with_nobox(ws, nf)?;
-        let emission = emit_coroutine_body(
-            ws,
-            ctx,
-            interner,
-            nf.name.as_str(),
-            nf.name.as_str(),
-            nf,
-            None,
-        );
-        nested_luas.push_str(&emission.lua);
-        if let Some(body) = emission.body {
-            allocation_bodies.push(body);
-        }
+    for nf in lambdas.iter() {
+        out.emit(&nf.name, &nf.name, nf, None);
     }
     lowered.step.nested_fns = hoisted;
     // Terminal-cleanup defers and lifecycle hooks are ordinary functions, with
     // their converted lambda siblings emitted beside them.
-    let mut code_artifact = CodeArtifact::from_mir_tree_with_volatile_vars(
-        &lowered.step,
-        &ws.comptime_inputs.volatile_vars,
-    );
-    code_artifact.set_body_names(&lowered.step, &step_name);
-    if let Some(identity) = &lowered.step.code_identity {
-        if let Some(entry) = code_artifact.entries.get_mut(identity) {
-            entry.body_name = Some(Ustr::from(plan.base()));
-            let mut slots: Vec<u32> = lowered.frame_plan.slots().values().copied().collect();
-            slots.sort_unstable();
-            slots.dedup();
-            entry.compatibility.frame = Some(FrameSchema { slots });
+    for aux in defers.iter().chain(hooks.iter().map(|(_, aux)| aux)) {
+        out.emit(&aux.name, &aux.name, aux, None);
+        for nf in &aux.nested_fns {
+            out.emit(&nf.name, &nf.name, nf, None);
         }
     }
-    for aux in &defer_funcs {
-        let mut artifact =
-            CodeArtifact::from_mir_tree_with_volatile_vars(aux, &ws.comptime_inputs.volatile_vars);
-        artifact.set_body_names(aux, aux.name.as_str());
-        code_artifact.merge(artifact);
-    }
-    for (_, aux) in &hook_funcs {
-        let mut artifact =
-            CodeArtifact::from_mir_tree_with_volatile_vars(aux, &ws.comptime_inputs.volatile_vars);
-        artifact.set_body_names(aux, aux.name.as_str());
-        code_artifact.merge(artifact);
-    }
-    // Step, defer and hook regions share this coroutine's owner but computed
-    // their lambda topologies from disjoint populations; present one value
-    // per owner before the generated entries inherit the root's. Must precede
-    // `add_coroutine_code_values`, which copies the root topology.
-    code_artifact.unify_owner_topologies();
-    let (advance_key, resume_key, defer_keys, hook_keys) = add_coroutine_code_values(
-        ws,
-        interner,
-        plan,
-        &lowered,
-        &mut code_artifact,
-        &defer_funcs,
-        &hook_funcs,
-    );
-    let mut defer_luas = String::new();
-    for mut aux in defer_funcs {
-        skull_transform::cleanup_with_nobox(ws, &mut aux)?;
-        let emission = emit_coroutine_body(
-            ws,
-            ctx,
-            interner,
-            aux.name.as_str(),
-            aux.name.as_str(),
-            &aux,
-            None,
-        );
-        defer_luas.push_str(&emission.lua);
-        if let Some(body) = emission.body {
-            allocation_bodies.push(body);
-        }
-        let mut nested = std::mem::take(&mut aux.nested_fns);
-        for nf in nested.iter_mut() {
-            skull_transform::cleanup_with_nobox(ws, nf)?;
-            let emission = emit_coroutine_body(
-                ws,
-                ctx,
-                interner,
-                nf.name.as_str(),
-                nf.name.as_str(),
-                nf,
-                None,
-            );
-            defer_luas.push_str(&emission.lua);
-            if let Some(body) = emission.body {
-                allocation_bodies.push(body);
-            }
-        }
-    }
-    let mut hook_luas = String::new();
-    for (_, mut aux) in hook_funcs {
-        skull_transform::cleanup_with_nobox(ws, &mut aux)?;
-        let emission = emit_coroutine_body(
-            ws,
-            ctx,
-            interner,
-            aux.name.as_str(),
-            aux.name.as_str(),
-            &aux,
-            None,
-        );
-        hook_luas.push_str(&emission.lua);
-        if let Some(body) = emission.body {
-            allocation_bodies.push(body);
-        }
-        let mut nested = std::mem::take(&mut aux.nested_fns);
-        for nf in nested.iter_mut() {
-            skull_transform::cleanup_with_nobox(ws, nf)?;
-            let emission = emit_coroutine_body(
-                ws,
-                ctx,
-                interner,
-                nf.name.as_str(),
-                nf.name.as_str(),
-                nf,
-                None,
-            );
-            hook_luas.push_str(&emission.lua);
-            if let Some(body) = emission.body {
-                allocation_bodies.push(body);
-            }
-        }
-    }
-    let ctor = emit_constructor(
+    out.lua.push_str(&emit_constructor(
         plan,
         &step_name,
         &lowered,
-        advance_key.as_deref(),
-        &resume_key,
-        &defer_keys,
-        &hook_keys,
-    );
-    let _ = lowered.num_states;
+        keys.advance.as_deref(),
+        &keys.resume,
+        &keys.defers,
+        &keys.hooks,
+    ));
     Ok((
-        format!("{step_lua}{nested_luas}{defer_luas}{hook_luas}{ctor}"),
+        out.lua,
         code_artifact,
-        allocation_bodies,
+        out.allocation_bodies,
         nested_deps,
         nested_statics,
     ))
+}
+
+struct CoroutineLua<'a> {
+    ws: &'a Workspace,
+    ctx: &'a CodegenCtx,
+    interner: &'a skull_mir::monoty::MonoInterner,
+    lua: String,
+    allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
+}
+
+impl CoroutineLua<'_> {
+    fn emit(
+        &mut self,
+        emitted_name: &str,
+        diagnostic_name: &str,
+        func: &MirFunc,
+        frame: Option<&FrameCtx>,
+    ) {
+        let emission = emit_coroutine_body(
+            self.ws,
+            self.ctx,
+            self.interner,
+            emitted_name,
+            diagnostic_name,
+            func,
+            frame,
+        );
+        self.lua.push_str(&emission.lua);
+        if let Some(body) = emission.body {
+            self.allocation_bodies.push(body);
+        }
+    }
 }
 
 struct CoroutineBodyEmission {

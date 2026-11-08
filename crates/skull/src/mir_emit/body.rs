@@ -615,16 +615,10 @@ pub(crate) fn emit_nested_fns(
     Ok(())
 }
 
-pub(crate) fn convert_named_nested_closures(cg: &CodegenCtx, nested: &mut [MirFunc]) {
-    for nf in nested {
-        let pre_nested = nf.nested_fns.len();
-        let name = nf.name;
-        skull_transform::convert_closures(nf, name.as_str());
-        for child in &nf.nested_fns[pre_nested..] {
-            cg.mint_synthetic(child.name.to_string());
-        }
-        convert_named_nested_closures(cg, &mut nf.nested_fns[..pre_nested]);
-    }
+fn convert_named_nested_closures(cg: &CodegenCtx, nested: &mut [MirFunc]) {
+    skull_transform::convert_named_nested_closures(nested, &|name| {
+        cg.mint_synthetic(name.to_string());
+    });
 }
 
 /// Emit the flat list of pass-produced hoisted lambda bodies (`convert_closures`
