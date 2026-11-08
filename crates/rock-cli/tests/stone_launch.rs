@@ -491,7 +491,7 @@ exit 97
                     .unwrap(),
             );
         }
-        let start = std::time::Instant::now();
+        let start = rock_core::clock::Instant::now();
         while !["first", "second"]
             .iter()
             .all(|name| root.path().join(format!("{name}-{cache}.ready")).exists())
