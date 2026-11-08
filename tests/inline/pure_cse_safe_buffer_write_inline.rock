@@ -7,10 +7,8 @@ value Vert {
     py: float,
 }
 
-@nomangle inline(lua) fn __nb_alloc_Vert(n: int) -> Ptr<Vert> = 'return ffi.new("Vert[?]", n)'
-
 fn native_buffer_vert(n: int) -> NativeBuffer<Vert> {
-    return NativeBuffer { ptr: __nb_alloc_Vert(n), len: n }
+    return native_buffer_alloc(n)
 }
 
 @inline

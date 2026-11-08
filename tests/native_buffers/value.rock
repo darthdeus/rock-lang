@@ -1,5 +1,6 @@
-// NativeBuffer<T: value>: user-supplied per-type allocators and accessors
-// for value struct types, and slot stores `buf[i] = <value expr>` whose RHS
+// NativeBuffer<T: value>: allocation through `native_buffer_alloc` or a
+// user-supplied per-type allocator, accessors for value struct types, and
+// slot stores `buf[i] = <value expr>` whose RHS
 // takes many shapes (calls, field reads, `if`, defaults, side effects,
 // aliasing reads of the slot being written).
 
@@ -15,16 +16,18 @@ value Pair {
     second: V2,
 }
 
+fn nb_v2(n: int) -> NativeBuffer<V2> {
+    return native_buffer_alloc(n)
+}
+
 @nomangle inline(lua) fn __nb_alloc_V2(n: int) -> Ptr<V2> = 'return ffi.new("V2[?]", n)'
 
-fn nb_v2(n: int) -> NativeBuffer<V2> {
+fn nb_v2_user(n: int) -> NativeBuffer<V2> {
     return NativeBuffer { ptr: __nb_alloc_V2(n), len: n }
 }
 
-@nomangle inline(lua) fn __nb_alloc_Pair(n: int) -> Ptr<Pair> = 'return ffi.new("Pair[?]", n)'
-
 fn nb_pair(n: int) -> NativeBuffer<Pair> {
-    return NativeBuffer { ptr: __nb_alloc_Pair(n), len: n }
+    return native_buffer_alloc(n)
 }
 
 fn make_v2(a: float, b: float) -> V2 {
@@ -44,7 +47,7 @@ inline(lua) fn nb_set(b: NativeBuffer<V2>, i: int, v: V2) = "b.ptr[i] = v"
 
 @test(output = "3\n7\n11\n13", backends = "lua")
 fn test_native_buffer_value() {
-    let buf = nb_v2(4)
+    let buf = nb_v2_user(4)
     nb_set(buf, 0, V2 { x: 3, y: 7 })
     nb_set(buf, 1, V2 { x: 11, y: 13 })
 
@@ -188,10 +191,8 @@ fn test_if_nested_value_field() {
 value NestPair { a: V2, b: V2 }
 value Quad { lo: NestPair, hi: NestPair }
 
-@nomangle inline(lua) fn __nb_alloc_Quad(n: int) -> Ptr<Quad> = 'return ffi.new("Quad[?]", n)'
-
 fn nb_quad(n: int) -> NativeBuffer<Quad> {
-    return NativeBuffer { ptr: __nb_alloc_Quad(n), len: n }
+    return native_buffer_alloc(n)
 }
 
 // Three levels of value-struct nesting in a single literal.
@@ -321,13 +322,20 @@ fn test_slot_write_in_lambda() {
 
 // -- Evaluation order and side effects --
 
-@nomangle inline(lua) fn record_call(tag: string) -> float = """
-    table.insert(_G.__rec, tag)
-    return 1.0
-"""
+global REC: string = ""
 
-@nomangle inline(lua) fn init_record() = "_G.__rec = {}"
-@nomangle inline(lua) fn dump_record() -> string = "return table.concat(_G.__rec, ',')"
+fn record_call(tag: string) -> float {
+    REC = if REC == "" { tag } else { "{REC},{tag}" }
+    return 1.0
+}
+
+fn init_record() {
+    REC = ""
+}
+
+fn dump_record() -> string {
+    return REC
+}
 
 // Struct-literal field RHS evaluation follows source order, not
 // declaration order.
@@ -376,12 +384,16 @@ fn test_nested_literal_side_effect_order() {
     put("\n")
 }
 
-@nomangle inline(lua) fn next_group_id() -> float = """
-    _G.__id = (_G.__id or 0) + 1
-    return _G.__id
-"""
+global GROUP_ID: float = 0.0
 
-@nomangle inline(lua) fn init_group_id() = "_G.__id = 0"
+fn next_group_id() -> float {
+    GROUP_ID = GROUP_ID + 1.0
+    return GROUP_ID
+}
+
+fn init_group_id() {
+    GROUP_ID = 0.0
+}
 
 // A multi-field group `V { x + y: expr }` evaluates the shared RHS once
 // and assigns the same value to every named field. If it ran twice,
@@ -399,13 +411,20 @@ fn test_multi_field_group_evaluates_once() {
     put("{v.y}")
 }
 
-@nomangle inline(lua) fn bump_counter() -> float = """
-    _G.__se_count = (_G.__se_count or 0) + 1
-    return _G.__se_count
-"""
+global SE_COUNT: float = 0.0
 
-@nomangle inline(lua) fn init_counter() = "_G.__se_count = 0"
-@nomangle inline(lua) fn read_counter() -> float = "return _G.__se_count or 0"
+fn bump_counter() -> float {
+    SE_COUNT = SE_COUNT + 1.0
+    return SE_COUNT
+}
+
+fn init_counter() {
+    SE_COUNT = 0.0
+}
+
+fn read_counter() -> float {
+    return SE_COUNT
+}
 
 // The same multi-field group, counting RHS evaluations directly.
 @test(output = "count=1")
@@ -424,10 +443,8 @@ value Holder {
     b: float,
 }
 
-@nomangle inline(lua) fn __nb_alloc_Holder(n: int) -> Ptr<Holder> = 'return ffi.new("Holder[?]", n)'
-
 fn nb_holder(n: int) -> NativeBuffer<Holder> {
-    return NativeBuffer { ptr: __nb_alloc_Holder(n), len: n }
+    return native_buffer_alloc(n)
 }
 
 // An omitted field with a struct-literal default produces the same leaves
@@ -460,10 +477,8 @@ value Tagged {
     c: int = next_id(),
 }
 
-@nomangle inline(lua) fn __nb_alloc_Tagged(n: int) -> Ptr<Tagged> = 'return ffi.new("Tagged[?]", n)'
-
 fn nb_tagged(n: int) -> NativeBuffer<Tagged> {
-    return NativeBuffer { ptr: __nb_alloc_Tagged(n), len: n }
+    return native_buffer_alloc(n)
 }
 
 // Side-effecting defaults of omitted fields run in declaration order,
@@ -496,10 +511,8 @@ value Boxed {
     n: int,
 }
 
-@nomangle inline(lua) fn __nb_alloc_Boxed(n: int) -> Ptr<Boxed> = 'return ffi.new("Boxed[?]", n)'
-
 fn nb_boxed(n: int) -> NativeBuffer<Boxed> {
-    return NativeBuffer { ptr: __nb_alloc_Boxed(n), len: n }
+    return native_buffer_alloc(n)
 }
 
 // A default that is a nested literal with side-effecting leaves: `n: 42`
@@ -560,10 +573,8 @@ value Rect {
     br: V2,
 }
 
-@nomangle inline(lua) fn __nb_alloc_Rect(n: int) -> Ptr<Rect> = 'return ffi.new("Rect[?]", n)'
-
 fn native_buffer_rect(n: int) -> NativeBuffer<Rect> {
-    return NativeBuffer { ptr: __nb_alloc_Rect(n), len: n }
+    return native_buffer_alloc(n)
 }
 
 fn make_rect(a: float, b: float, c: float, d: float) -> Rect {

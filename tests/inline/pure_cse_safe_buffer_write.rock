@@ -7,10 +7,8 @@ value V2 {
     y: float,
 }
 
-@nomangle inline(lua) fn __nb_alloc_V2(n: int) -> Ptr<V2> = 'return ffi.new("V2[?]", n)'
-
 fn native_buffer_v2(n: int) -> NativeBuffer<V2> {
-    return NativeBuffer { ptr: __nb_alloc_V2(n), len: n }
+    return native_buffer_alloc(n)
 }
 
 @pure fn make_v2(a: float) -> V2 {

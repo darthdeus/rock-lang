@@ -137,10 +137,8 @@ fn test_fn_roundtrip_still_copies() {
 
 value V2 { x: float, y: float }
 
-@nomangle inline(lua) fn __nb_alloc_V2(n: int) -> Ptr<V2> = 'return ffi.new("V2[?]", n)'
-
 fn nb_v2(n: int) -> NativeBuffer<V2> {
-    return NativeBuffer { ptr: __nb_alloc_V2(n), len: n }
+    return native_buffer_alloc(n)
 }
 
 // A whole-value read bound to a local is a COPY: mutating the source slot
