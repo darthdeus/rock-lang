@@ -912,3 +912,24 @@ fn plain_lua_line_directives_reject_a_release_channel() {
         text(&out)
     );
 }
+
+#[test]
+fn run_lets_a_program_outlive_the_test_runner_timeout() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("slow.rock"),
+        r#"inline(lua) fn busy_wait(seconds: float) = """
+    local deadline = os.clock() + seconds
+    while os.clock() < deadline do end
+"""
+fn main() {
+    busy_wait(2.5)
+    print("done")
+}
+"#,
+    )
+    .unwrap();
+    let out = invoke(root.path(), &["run", "slow.rock"]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert!(text(&out).contains("done"), "{}", text(&out));
+}

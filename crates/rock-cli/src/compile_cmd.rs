@@ -1,9 +1,11 @@
 use std::time::Duration;
 
+/// Run an emitted program to completion. A real program may run as long as it
+/// needs; only test harnesses impose a timeout.
 pub fn run_lua_code(
     code: &str,
 ) -> std::result::Result<rock_host::lua_runner::LuaRun, rock_core::CompilerError> {
-    run_lua_code_with_timeout(code, Some(Duration::from_millis(1800)))
+    run_lua_code_with_timeout(code, None)
 }
 
 pub fn run_lua_code_with_timeout(
