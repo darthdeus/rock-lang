@@ -1522,7 +1522,15 @@ impl<'a> Printer<'a> {
             }
             ExprKind::Not(x) => Doc::concat([Doc::text("!"), self.expr(*x)]),
             ExprKind::BitNot(x) => Doc::concat([Doc::text("~"), self.expr(*x)]),
-            ExprKind::UnaryMinus(x) => Doc::concat([Doc::text("-"), self.expr(*x)]),
+            // `- -1` must not print as the pre-decrement `--1`.
+            ExprKind::UnaryMinus(x) => {
+                let sign = if self.slice(self.ast.e(x).span).starts_with('-') {
+                    "- "
+                } else {
+                    "-"
+                };
+                Doc::concat([Doc::text(sign), self.expr(*x)])
+            }
             ExprKind::QuestionMark(x) => Doc::concat([self.expr(*x), Doc::text("?")]),
             ExprKind::PreIncrement(x) => Doc::concat([Doc::text("++"), self.expr(*x)]),
             ExprKind::PostIncrement(x) => Doc::concat([self.expr(*x), Doc::text("++")]),

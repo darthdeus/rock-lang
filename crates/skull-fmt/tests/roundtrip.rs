@@ -214,6 +214,21 @@ fn call_type_arguments_and_single_tuples_are_kept() {
     }
 }
 
+/// A unary minus over a negative operand must not fuse into `--`.
+#[test]
+fn unary_minus_over_a_negative_operand_keeps_its_space() {
+    for source in [
+        "fn f() {\n    return - -1\n}\n",
+        "fn f() {\n    let x = sin(- -1.3) - - --y\n}\n",
+    ] {
+        let original = skull_parser::parse_module_clean(source, "<source>".into()).unwrap();
+        let once = skull_fmt::format_code(source);
+        let formatted = skull_parser::parse_module_clean(&once, "<formatted>".into()).unwrap();
+        assert_eq!(original.module_sexp(), formatted.module_sexp(), "{once}");
+        assert_eq!(once, skull_fmt::format_code(&once));
+    }
+}
+
 /// A tight `..` must not fuse with a neighbouring `.` into `...`.
 #[test]
 fn range_operator_next_to_a_dot_keeps_its_spaces() {
