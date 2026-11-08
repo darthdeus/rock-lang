@@ -1,0 +1,234 @@
+@test
+fn hitch_image_upload_column_uses_native_upload_time() {
+    residency_owner_test_fixture("c", paths => {
+        let image = acquire_image_asset(paths[0], watch: false)
+        residency_flush_required()
+        assert(image_load_ready(image))
+        let native = stone_get_image_frame_stats()
+        HITCH = hitch_ledger_new()
+        HITCH.enabled = true
+        HITCH.warmup_frames = 10
+        hitch_frame_record(1, 20.0, 0.0, false)
+        assert_eq(nb_get(HITCH.upload_us, 0), native.upload_us,
+            "the upload column measures native upload work, not decoder waiting")
+        assert_eq(nb_get(HITCH.load_us, 0), native.load_us, "synchronous load work has its own column")
+        assert_eq(nb_get(HITCH.decode_wait_us, 0), native.wait_us, "decode waiting has its own column")
+    })
+}
+
+@test
+fn residency_owner_last_release_demotes() {
+    residency_owner_test_fixture("6", paths => {
+        let image = acquire_image_asset(paths[0], watch: false)
+        assert(release_image_asset(paths[0]))
+        assert_eq(stone_native_handle_state("image", image.0), 1,
+            "last release keeps the unowned handle cached")
+    })
+}
+
+@test
+fn residency_owner_each_acquire_of_one_path_is_one_owner() {
+    residency_owner_test_fixture("4", paths => {
+        let loaded = load_image_asset(paths[1])
+        assert(loaded.0 != 0)
+        assert_eq(load_image_asset(paths[1]), loaded, "a static load of one path reuses its handle")
+        let image = acquire_image_asset(paths[0], TextureFilter::Linear, watch: false)
+        assert(image.0 != 0)
+        assert_eq(acquire_image_asset(paths[0], TextureFilter::Linear, watch: false), image,
+            "a second acquire of one path shares its handle")
+        assert_eq(image_asset_acquire_count(paths[0]), 2)
+        assert(release_image_asset(paths[0]))
+        residency_set_budget(0)
+        residency_trim()
+        assert_eq(stone_native_handle_state("image", image.0), 1,
+            "the remaining owner keeps the image through budget pressure")
+        residency_set_budget(residency_live_bytes(image))
+        assert(release_image_asset(paths[0]))
+        assert_eq(acquire_image_asset(paths[0], TextureFilter::Linear, watch: false), image,
+            "reacquiring a released image reuses its retained handle")
+        assert(release_image_asset(paths[0]))
+        residency_set_budget(0)
+        residency_trim()
+        assert_eq(stone_native_handle_state("image", image.0), 0, "the last release makes it evictable")
+    })
+}
+
+@test
+fn residency_owner_trim_least_touched_first() {
+    residency_owner_test_fixture("7", paths => {
+        let old = acquire_image_asset(paths[0], watch: false)
+        let new = acquire_image_asset(paths[1], TextureFilter::Linear, watch: false)
+        let bytes = residency_live_bytes(new)
+        assert(release_image_asset(paths[0]))
+        assert(release_image_asset(paths[1]))
+        residency_set_budget(bytes)
+        residency_trim()
+        assert_eq(stone_native_handle_state("image", old.0), 0, "oldest cached identity is trimmed")
+        assert_eq(stone_native_handle_state("image", new.0), 1, "trim stops when the remainder fits")
+    })
+}
+
+@test
+fn residency_profile_evictions_reach_perf_json() {
+    residency_owner_test_fixture("a", paths => {
+        let image = acquire_image_asset(paths[0], watch: false)
+        let bytes = residency_live_bytes(image)
+        assert(release_image_asset(paths[0]))
+        residency_set_budget(0)
+        residency_trim()
+        let residency = json_field(json_decode(perf_resources_json()).unwrap(), "residency").unwrap()
+        assert_eq(json_as_int(json_field(residency, "evictions") ?? json_null()).unwrap(), 1,
+            "the measured window's image eviction is reported")
+        assert_eq(json_as_int(json_field(residency, "evicted_bytes") ?? json_null()).unwrap(), bytes,
+            "evicted bytes are the evicted image's resident bytes")
+    })
+}
+
+@test
+fn residency_owner_references_survive_trim() {
+    residency_owner_test_fixture("8", paths => {
+        let held = acquire_image_asset(paths[0], watch: false)
+        let cached = acquire_image_asset(paths[1], TextureFilter::Linear, watch: false)
+        assert(release_image_asset(paths[1]))
+        residency_set_budget(0)
+        residency_trim()
+        assert_eq(stone_native_handle_state("image", held.0), 1, "a reference is a guarantee")
+        assert_eq(stone_native_handle_state("image", cached.0), 0, "the unreferenced neighbor is evicted")
+        assert(release_image_asset(paths[0]))
+    })
+}
+
+@test
+fn residency_owner_static_load_survives_another_release() {
+    residency_owner_test_fixture("f", paths => {
+        let image = load_image_asset(paths[0])
+        assert_eq(acquire_image_asset(paths[0], watch: false), image)
+        assert(release_image_asset(paths[0]))
+        residency_set_budget(0)
+        residency_trim()
+        assert_eq(stone_native_handle_state("image", image.0), 1,
+            "a static load keeps its handle after another holder's last release")
+    })
+}
+
+@test
+fn residency_owner_prefetched_image_is_evictable() {
+    residency_owner_test_fixture("1", paths => {
+        let image = residency_prefetch(ResidencyRequest { path: paths[0] })
+        assert(image.0 != 0, "the prefetch submits")
+        residency_set_budget(0)
+        residency_trim()
+        assert_eq(stone_native_handle_state("image", image.0), 0,
+            "a prefetch nobody acquired is an ordinary LRU entry")
+        assert_eq(residency_state(paths[0]), ResidencyState::Absent)
+    })
+}
+
+@test
+fn residency_owner_prefetch_marks_a_cached_image_recently_used() {
+    residency_owner_test_fixture("2", paths => {
+        let old = acquire_image_asset(paths[0], watch: false)
+        let new = acquire_image_asset(paths[1], TextureFilter::Linear, watch: false)
+        assert(release_image_asset(paths[0]))
+        assert(release_image_asset(paths[1]))
+        let loads = stone_get_image_profile_stats().load_calls
+        assert_eq(residency_prefetch(ResidencyRequest { path: paths[0] }), old,
+            "a cached prefetch returns the cached image")
+        assert_eq(stone_get_image_profile_stats().load_calls, loads, "a cached prefetch submits no load")
+        residency_set_budget(residency_live_bytes(old))
+        residency_trim()
+        assert_eq(stone_native_handle_state("image", new.0), 0, "the least recently used entry goes first")
+        assert_eq(stone_native_handle_state("image", old.0), 1, "the prefetched entry is most recent")
+    })
+}
+
+@test
+fn residency_owner_evictor_budget_is_independent() {
+    residency_owner_test_fixture("9", paths => {
+        let image = acquire_image_asset(paths[0], watch: false)
+        assert(release_image_asset(paths[0]))
+        let usage = 90
+        let limit = 30
+        let calls = 0
+        let requested = 0
+        residency_register_evictor("test", () => usage, () => limit, bytes => {
+            calls += 1
+            requested = bytes
+            usage -= bytes
+            return bytes
+        })
+        residency_trim()
+        assert_eq(calls, 1)
+        assert_eq(requested, 60, "evictor releases exactly its independent overage")
+        residency_trim()
+        assert_eq(calls, 1, "at-budget evictor is not called")
+        limit = 40
+        residency_trim()
+        assert_eq(calls, 1, "under-budget evictor is not called")
+        assert_eq(stone_native_handle_state("image", image.0), 1, "evictor runs with a nonempty under-budget LRU")
+        residency_set_budget(0)
+        residency_trim()
+        usage = 77
+        limit = 22
+        residency_trim()
+        assert_eq(calls, 2, "evictor also runs with an empty LRU")
+        assert_eq(requested, 55, "fresh queries determine the new exact overage")
+    })
+}
+
+@test
+fn residency_owner_prefetch_acquire_is_a_hit() {
+    residency_owner_test_fixture("0", paths => {
+        let prefetched = residency_prefetch(ResidencyRequest { path: paths[0] })
+        stone_flush_image_uploads()
+        let loads = stone_get_image_profile_stats().load_calls
+        let misses = residency_frame_stats().misses
+        let hit = acquire_image_asset(paths[0], watch: false)
+        assert_eq(hit, prefetched, "the prefetched identity is the acquired one")
+        assert_eq(stone_get_image_profile_stats().load_calls, loads, "reacquire submits no decode")
+        assert_eq(residency_frame_stats().misses, misses, "reacquire counts no miss")
+    })
+}
+
+@test
+fn residency_owner_miss_wait_classifies_at_half_frame() {
+    residency_owner_test_fixture("c", paths => {
+        let image = acquire_image_asset(paths[0], watch: false)
+        residency_flush_required()
+        let waited = residency_frame_stats().miss_wait_us
+        assert(waited > 0, "the Required miss accounts its prepare wait")
+        // Keep the exact boundary representable independently of native wait jitter.
+        RESIDENCY_FRAME_MISS_WAIT_US = 10000
+        assert_eq(hitch_classify(20.0, 0.0, 1.0, 0.0,
+            0.0, 0, 0, waited), "residency", "a half-frame miss wait precedes upload attribution")
+        assert(RESIDENCY_FRAME_WAIT_PATHS.join(";").contains(paths[0]), "the missed path accompanies the frame")
+        HITCH = hitch_ledger_new()
+        HITCH.enabled = true
+        HITCH.threshold_ms = 0.0
+        HITCH.warmup_frames = 0
+        // Recording is the seam under test; skip its wall-second log budget.
+        HITCH.log_second = floor(stone_get_time()) as int
+        HITCH.log_used = HITCH_LOG_LINES_PER_SECOND
+        // A second draw required the same image before its load completed.
+        RESIDENCY_FRAME_WAIT_PATHS.push(paths[0])
+        hitch_frame_record(1, 20.0, 0.0, false)
+        assert_eq(HITCH.cause[0], "residency", "the slow-frame ring records the miss cause")
+        assert_eq(HITCH.residency_paths[0], paths[0], "the ring names the path it waited for once")
+        assert_eq(hitch_count_for("residency"), 1, "the window and lifetime use the same cause")
+        assert(image_load_ready(image))
+    })
+}
+
+@test
+fn residency_owner_prefetch_promotes_without_a_miss() {
+    residency_owner_test_fixture("e", paths => {
+        let before = residency_frame_stats().misses
+        let image = residency_prefetch(ResidencyRequest { path: paths[0] })
+        assert_eq(residency_state(paths[0]), ResidencyState::Loading, "prefetch is unpublished until pumped")
+        assert_eq(acquire_image_asset(paths[0], watch: false), image)
+        residency_flush_required()
+        assert_eq(residency_state(paths[0]), ResidencyState::Resident, "Required promotion publishes before passes")
+        assert_eq(residency_frame_stats().misses, before, "promotion reuses the submitted decode")
+        assert(residency_frame_stats().miss_wait_us > 0, "promotion accounts its wait")
+    })
+}

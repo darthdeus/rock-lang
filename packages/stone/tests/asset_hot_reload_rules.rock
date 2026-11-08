@@ -1,0 +1,81 @@
+use stone::*
+
+// Hot reload through the watcher's dispatch (reload_changed_asset) replaces
+// the resource behind a stable backend handle, so every Image or Font held in
+// game state keeps drawing. Watcher detection itself is the Rust test in
+// stone-rs/src/asset_watcher.rs.
+
+fn hot_reload_tmp(name: string) -> string {
+    return (env_var("ROCK_TEST_TMP") ?? env_var("TMPDIR") ?? "/tmp") + "/rock-hot-reload-" + name
+}
+
+@test
+fn image_hot_reload_redecodes_into_the_same_handle() {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    let path = hot_reload_tmp("image.png")
+    residency_owner_test_isolated(() => {
+        assert(image_data_encode(new_image_data(2, 2), "png", path), "encode the initial 2x2 png")
+        let img = load_image_asset(path)
+        let handle = img.0
+        assert(handle != 0, "the initial image loads")
+        assert(stone_get_image_size(handle) == (2, 2), "the initial size is 2x2")
+
+        assert(image_data_encode(new_image_data(4, 4), "png", path), "encode the replacement 4x4 png")
+        reload_changed_asset(path)
+        assert_eq(img.0, handle, "the handle survives the reload")
+        let (w, h) = stone_get_image_size(handle)
+        assert(w == 4 && h == 4, "the reload re-decodes the new file into the handle, got {w}x{h}")
+
+        assert(!stone_reload_image(999999, path), "reloading an unknown handle fails cleanly")
+    }, () => { let _ = remove_file(path) })
+}
+
+fn hot_reload_repo_file(relative: string) -> string {
+    return stone_file_read(relative) ?? ""
+}
+
+// Reloading the same file keeps the metrics; a different font behind the same
+// path keeps the handle and changes the metrics, which proves a re-raster; a
+// corrupt file fails and keeps the old atlas.
+@test
+fn font_hot_reload_rerasterizes_into_the_same_backend() {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    assert(stone_text_init())
+    load_pending_shader_sources()
+    let tmp = hot_reload_tmp("font.ttf")
+    let font_a = hot_reload_repo_file(project_asset_path("@engine/assets/fonts/DroidSans.ttf"))
+    let font_b = hot_reload_repo_file("{STONE_SOURCE_DIR}/tests/fixtures/pixel.ttf")
+    assert(font_a != "" && font_b != "" && font_a != font_b, "two distinct fixture fonts read")
+    let font: Font? = null
+    world_fixture_with_cleanup(() => {
+        assert(stone_file_write(tmp, font_a), "write the temp font (A)")
+        let loaded = load_font(tmp, 16).unwrap()
+        font = loaded
+        let backend = loaded.data().unwrap().backend_id
+        let raster = loaded.data().unwrap().pixel_size
+        assert(backend != 0, "font A loads")
+        let text = "Hello World 123"
+        let width_a = loaded.measure(text, 16.0).x
+        assert(width_a > 0.0, "font A measures")
+
+        reload_changed_asset(tmp)
+        assert_eq(loaded.data().unwrap().backend_id, backend, "the backend survives an in-place reload")
+        assert_eq(loaded.measure(text, 16.0).x, width_a, "reloading the same font keeps the metrics")
+
+        assert(stone_file_write(tmp, font_b), "write the temp font (B)")
+        reload_changed_asset(tmp)
+        assert_eq(loaded.data().unwrap().backend_id, backend, "the backend survives a content change")
+        let width_b = loaded.measure(text, 16.0).x
+        assert(width_b != width_a, "reloading a different font changes the metrics ({width_a} -> {width_b})")
+
+        assert(stone_file_write(tmp, "not a font"), "corrupt the temp font")
+        assert(!stone_reload_font_ffi(backend, tmp, raster), "reloading a corrupt font fails")
+        assert_eq(loaded.data().unwrap().backend_id, backend, "a failed reload keeps the font handle")
+        assert_eq(loaded.measure(text, 16.0).x, width_b, "a failed reload keeps the old atlas metrics")
+    }, () => {
+        if font != null { unload_font(font.unwrap()) }
+        let _ = remove_file(tmp)
+    })
+}

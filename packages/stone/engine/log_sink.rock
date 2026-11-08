@@ -1,0 +1,40 @@
+// Logging platform sink (stone-side). The portable logging API + dedup/throttle
+// logic live in the stdlib (stdlib/unified.rock); this file supplies the one
+// stone-specific piece the plan evicts: the FFI seam into the single rock-log
+// sink/level. The stdlib calls through `_G.__rock_log_sink` / `_level_source` /
+// `_level_sink`; here we install them. When stone is absent (rock test / rock
+// run) nothing installs and the stdlib keeps its portable print() fallback.
+
+inline(lua) fn __rock_install_log_sink() -> bool = """
+    _G.__rock_log_sink = function(level, category, msg, wall_clock)
+        if _G.stone ~= nil then
+            stone.stone_log(level, category or "", msg, wall_clock and 1 or 0)
+        elseif category and #category > 0 then
+            print("[" .. category .. "] " .. msg)
+        else
+            print(msg)
+        end
+    end
+    _G.__rock_log_level_source = function()
+        if _G.stone ~= nil then return stone.stone_log_get_level() end
+        return nil
+    end
+    _G.__rock_log_level_sink = function(level)
+        if _G.stone ~= nil then stone.stone_log_set_level(level) end
+    end
+    return true
+"""
+
+// Install at module load -- runs at main.lua top level, before main()/
+// stone_init(), so every post-init log routes to stone. Pre-install logs
+// happen only before stone is loaded at all, where the stdlib print fallback
+// is exactly what the old `_G.stone`-nil branch did.
+const __rock_log_sink_installed: bool = __rock_install_log_sink()
+
+// A deduped/throttled site that kept firing is invisible in the stream by
+// construction -- the totals only exist in the counters. Dump them as the
+// process winds down, so a run that hid 38k dropped draws says so without
+// anyone having had to watch for it.
+@shutdown fn __log_suppression_summary_at_exit() {
+    log_suppression_summary()
+}

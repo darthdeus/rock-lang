@@ -1,0 +1,43 @@
+@test
+fn pixel_readback_color_poll_preserves_every_stored_channel() {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    let saved_target = CURRENT_CANVAS_HANDLE
+    let canvases = stone_get_graphics_stats().canvases
+    let readbacks = stone_native_live_handles("pixel_readback").unwrap()
+    defer {
+        set_canvas_handle(saved_target)
+        assert_eq(stone_get_graphics_stats().canvases, canvases,
+            "color readback fixture releases its canvases on success and failure")
+        assert_eq(stone_native_live_handles("pixel_readback").unwrap(), readbacks,
+            "color readback fixture releases its slots on success and failure")
+    }
+    for format in ["rgba8", "rgba16f", "rgba32f"] {
+        let canvas = new_canvas(2, 2, format)
+        defer { destroy_canvas(canvas) }
+        let slot = pixel_readback_new()
+        defer { pixel_readback_destroy(slot) }
+        set_canvas(canvas)
+        clear_screen(1.75, -0.125, 0.3, 0.625)
+        set_canvas_handle(saved_target)
+        assert(pixel_readback_color_poll(slot) == null,
+            "an unsubmitted color slot has no result")
+        pixel_readback_submit(slot, canvas, 1, 0)
+        let result: Vec4? = null
+        let deadline = stone_get_time() + 5.0
+        while result == null && stone_get_time() < deadline {
+            result = pixel_readback_color_poll(slot)
+        }
+        assert(result != null, "{format}: the fenced pixel did not complete")
+        let rgba = result.unwrap()
+        let expected = canvas_read_region(canvas, 1, 0, 1, 1).rgba
+        assert_eq(rgba.x, expected[0], "{format}: red matches the synchronous read")
+        assert_eq(rgba.y, expected[1], "{format}: green matches the synchronous read")
+        assert_eq(rgba.z, expected[2], "{format}: blue matches the synchronous read")
+        assert_eq(rgba.w, expected[3], "{format}: alpha matches the synchronous read")
+        assert(pixel_readback_color_poll(slot) == null,
+            "a complete color result is consumed exactly once")
+        assert_eq(pixel_readback_in_flight(slot), 0,
+            "consumption retires the submitted read")
+    }
+}

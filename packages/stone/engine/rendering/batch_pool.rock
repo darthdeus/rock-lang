@@ -1,0 +1,170 @@
+// A pool owns its rows; its entries and every draw cache hold weak handles.
+pub value RenderBatchPool {
+    rows: Arena<RenderBatch>,
+    entries: Map<string, Entity<RenderBatch>>,
+}
+
+// Cached weak handles are inline leaves of their owner, so refreshing a
+// submission does not allocate an Entity table in either stored field.
+pub nobox value RenderBatchHandle {
+    present: bool = false,
+    scene_id: int = 0,
+    arena_id: int = 0,
+    slot: int = 0,
+    generation: int = 0,
+}
+
+pub fn render_batch_handle(entity: Entity<RenderBatch>) -> RenderBatchHandle {
+    return RenderBatchHandle {
+        present: true,
+        scene_id: entity._scene_id,
+        arena_id: entity._arena_id,
+        slot: entity._slot,
+        generation: entity._generation,
+    }
+}
+
+pub fn RenderBatchHandle.entity(handle) -> Entity<RenderBatch>? {
+    if !handle.present { return null }
+    return Entity {
+        _scene_id: handle.scene_id,
+        _arena_id: handle.arena_id,
+        _slot: handle.slot,
+        _generation: handle.generation,
+    }
+}
+
+// Ambient overrides cross every UI primitive. Keep the optional scope in
+// scalar lanes instead of boxing the pool and its Arena on each push/pop.
+pub nobox value RenderBatchScope {
+    scene_id: int = 0,
+    arena_id: int = 0,
+    entries: Map<string, Entity<RenderBatch>>? = null,
+}
+
+pub fn render_batch_scope(pool: RenderBatchPool) -> RenderBatchScope {
+    return RenderBatchScope {
+        scene_id: pool.rows._scene_id,
+        arena_id: pool.rows._arena_id,
+        entries: pool.entries,
+    }
+}
+
+pub fn RenderBatchScope.active(scope) -> bool { return scope.entries != null }
+
+pub fn RenderBatchScope.pool(scope) -> RenderBatchPool {
+    return RenderBatchPool {
+        rows: Arena { _scene_id: scope.scene_id, _arena_id: scope.arena_id },
+        entries: scope.entries.unwrap(),
+    }
+}
+
+pub fn render_batch_pool_new() -> RenderBatchPool {
+    return RenderBatchPool { rows: arena_new(), entries: map_new() }
+}
+
+pub fn render_batch_pool_same(a: RenderBatchPool, b: RenderBatchPool) -> bool {
+    return a.rows._scene_id == b.rows._scene_id && a.rows._arena_id == b.rows._arena_id
+}
+
+pub fn RenderBatchPool.get(pool, key: string) -> RenderBatch? {
+    let handle = pool.entries.get(key) ?? return null
+    return pool.rows.get(handle)
+}
+
+pub fn RenderBatchPool.contains(pool, key: string) -> bool {
+    return pool.entries.contains(key)
+}
+
+pub fn RenderBatchPool.len(pool) -> int { return pool.entries.len() }
+pub fn RenderBatchPool.keys(pool) -> [string] { return pool.entries.keys() }
+pub fn RenderBatchPool.values(pool) -> [Entity<RenderBatch>] { return pool.entries.values() }
+pub fn RenderBatchPool.keys_into(pool, keys: [string]) -> [string] {
+    return pool.entries.keys_into(keys)
+}
+
+// The flush order. `cache` holds the previous sorted keys; while the pool has
+// the same key set (custom draws re-queue the same keys every frame) it is
+// returned as is, which costs a lookup per key instead of a string sort.
+pub fn RenderBatchPool.sorted_keys_into(pool, cache: [string]) -> [string] {
+    if cache.len() == pool.entries.len() {
+        let same = true
+        for key in cache {
+            if !pool.entries.contains(key) { same = false; break }
+        }
+        if same { return cache }
+    }
+    return pool.entries.keys_into(cache)
+}
+
+pub fn RenderBatchPool.insert(pool, key: string, handle: Entity<RenderBatch>) -> Entity<RenderBatch> {
+    if let previous = pool.entries.get(key) {
+        if previous == handle { return handle }
+        render_batch_retire(pool.rows, previous)
+    }
+    assert(pool.rows.contains(handle), "RenderBatch belongs to another pool")
+    let row = pool.rows.get(handle).unwrap()
+    row.handle = render_batch_handle(handle)
+    row.pooled = true
+    pool.entries.insert(key, handle)
+    return handle
+}
+
+fn render_batch_retire(rows: Arena<RenderBatch>, handle: Entity<RenderBatch>) {
+    let batch = rows.get(handle) ?? return
+    batch.pooled = false
+    // Arena.remove retains vacant payloads for reuse. Detach captured graphs
+    // and foreign buffers so a retired slot does not extend their lifetime.
+    // A vacant row holds the RenderBatch defaults, so the reuse paths
+    // (submit_mesh_into, queue_custom_draw_into) set only required fields.
+    batch.custom_draw = null
+    batch.verts = __DUMMY_VERTEX_BUF
+    batch.capacity = 0
+    reset_batch_geometry(batch)
+    batch.fan_ranges = null
+    batch.fan_capacity = 0
+    batch.parametric_count = 0
+    batch.parametric_frame = -1
+    batch.external_verts = false
+    batch.mesh_frame = -1
+    batch.text_batch = false
+    batch.unlit = false
+    batch.sampling = TextureFilter::Nearest
+    batch.normal_sampling = TextureFilter::Nearest
+    batch.surface_sampling = TextureFilter::Nearest
+    batch.normal = null
+    batch.surface = null
+    batch.auxiliary = null
+    batch.material = null
+    batch.last_used_frame = 0
+    batch.order = 0
+    batch.ui_group = 0
+    batch.ui_group_base_z = 0
+    batch.surface_outputs = WorldSurfaceOutputs::Automatic
+    batch.retained_mesh = null
+    batch.geometry_bindings = null
+    batch.geometry_block = null
+    batch.pipeline = null
+    batch.block = null
+    batch.block_frame = -1
+    batch.parametric_0 = null
+    batch.parametric_1 = null
+    batch.parametric_2 = null
+    let _ = handle.remove()
+}
+
+pub fn RenderBatchPool.remove(pool, key: string) {
+    let handle = pool.entries.get(key) ?? return
+    pool.entries.remove(key)
+    render_batch_retire(pool.rows, handle)
+}
+
+pub fn RenderBatchPool.clear(pool) {
+    for (_key, handle) in pool.entries { render_batch_retire(pool.rows, handle) }
+    pool.entries.clear()
+}
+
+pub fn render_batch_pool_destroy(pool: RenderBatchPool) {
+    pool.clear()
+    let _ = arena_destroy(pool.rows)
+}

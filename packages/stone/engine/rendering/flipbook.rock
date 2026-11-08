@@ -1,0 +1,19 @@
+// Flipbook sheets: a row-major cols x rows grid of equal-size frames.
+// The grid is per-sheet data declared where the sheet is chosen -- a
+// hardcoded grid constant in a draw loop is the bug class this replaces
+// (a 64-frame sheet read as 8 variation columns plays 8 of 64 frames).
+
+pub value FrameGrid { cols: int, rows: int }
+
+pub @pure fn frame_count(g: FrameGrid) -> int { return g.cols * g.rows }
+
+// Pixel source rect of row-major `frame`. Loud on a sheet the grid does
+// not divide evenly -- the wrong grid otherwise crops silently.
+pub fn frame_grid_rect(g: FrameGrid, dims: IVec2, frame: int) -> IRect {
+    if dims.x % g.cols != 0 || dims.y % g.rows != 0 {
+        log_once("FLIPBOOK", "sheet {dims.x}x{dims.y} not divisible by grid {g.cols}x{g.rows}")
+    }
+    let fw = dims.x ./ g.cols
+    let fh = dims.y ./ g.rows
+    return irect((frame % g.cols) * fw, (frame ./ g.cols) * fh, fw, fh)
+}

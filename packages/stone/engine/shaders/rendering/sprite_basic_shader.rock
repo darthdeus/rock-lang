@@ -1,0 +1,42 @@
+// The basic sprite program (formerly the embedded default program in
+// stone-rs/src/sprite.rs), authored in Rock: compiled in-game via
+// `rock_shader(sprite_basic_vert, sprite_basic_frag)` -- no committed GLSL.
+// Serves the immediate shape path (submit_immediate_shape) when no world/UI
+// camera pass is bound.
+//
+// VERTEX-FORMAT LOCKSTEP: the @attr field order fixes attribute locations 0,1,2
+// (aPos, aTexCoord, aColor), matching the sprite VAO and the reflected mesh
+// VAO (whose extra attributes this program does not read, like the embedded
+// program it replaces). Do not
+// reorder.
+//
+// The matrices arrive as the ENGINE block at binding 0 (`engine_uniforms`);
+// the standalone/immediate path fills it with a pixel ortho and identity view.
+
+pub value SpriteBasicVert {
+    aPos: Vec2f,
+    aTexCoord: Vec2f,
+    aColor: Vec4f,
+}
+
+value SpriteBasicVary {
+    position: Vec4,
+    TexCoord: Vec2,
+    VertexColor: Vec4,
+}
+
+@shader(vertex)
+fn sprite_basic_vert(@attr a: SpriteBasicVert, @engine e: EngineU) -> SpriteBasicVary {
+    return SpriteBasicVary {
+        position: e.uProjection * e.uView * v(a.aPos.to_f64(), 0.0, 1.0),
+        TexCoord: a.aTexCoord.to_f64(),
+        VertexColor: a.aColor.to_f64(),
+    }
+}
+
+@shader(fragment)
+fn sprite_basic_frag(vary: SpriteBasicVary, @textures t: MainTex) -> Vec4 {
+    let tex_color = texture(t.uTexture, vary.TexCoord)
+    if tex_color.w < 0.1 { discard() }
+    return tex_color * vary.VertexColor
+}

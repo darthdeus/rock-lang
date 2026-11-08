@@ -1,0 +1,60 @@
+struct SharedTextureTestTex { uSharedTest: Sampler2D }
+
+@shader(fragment)
+fn shared_texture_test_frag(@textures t: SharedTextureTestTex, tc: Vec2) -> Vec4 {
+    return texture(t.uSharedTest, tc)
+}
+
+@test
+fn shared_shader_texture_rebinds_after_other_programs_and_updates_while_active() {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    let saved_canvas = CURRENT_CANVAS_HANDLE
+    let saved_shader = WATCHER.current_shader_name
+    let saved_blend = CURRENT_BLEND
+    let state = stone_gl_pass_state_begin()
+    assert(state != 0)
+    let shader = pipeline(rock_shader(shared_texture_test_frag)).shader_name
+    let red = new_canvas(2, 2, "rgba8")
+    let blue = new_canvas(2, 2, "rgba8")
+    let out = new_canvas(2, 2, "rgba8")
+    defer {
+        shader_clear_shared_textures(shader)
+        end_shader()
+        set_canvas_handle(saved_canvas)
+        set_blend_mode(saved_blend)
+        if let prior = saved_shader { set_shader(prior) }
+        assert(stone_gl_pass_state_end(state))
+        destroy_canvas(out)
+        destroy_canvas(blue)
+        destroy_canvas(red)
+    }
+    with_canvas(red, () => clear_screen(1.0, 0.0, 0.0, 1.0))
+    with_canvas(blue, () => clear_screen(0.0, 0.0, 1.0, 1.0))
+    shader_set_shared_texture(shader, "uSharedTest", sampled_canvas(red))
+    with_canvas(out, () => {
+        unset_depth_mode()
+        set_blend_mode(BlendMode::Replace)
+        set_shader(shader)
+        assert_eq(audit_texture_slots_for_draw(shader), 0, "initial activation binds the shared input")
+        draw_fullscreen_quad()
+        assert(read_canvas_pixel(out, 0, 0) > 0.99, "the registered input is sampled")
+
+        set_shader(BLIT_PIPELINE.shader_name)
+        shader_bind_sampled_for_activation(BLIT_PIPELINE.shader_name, "input_tex", sampled_canvas(blue), TextureFilter::Nearest)
+        assert_eq(audit_texture_slots_for_draw(BLIT_PIPELINE.shader_name), 0, "the interfering program binds its input")
+        draw_fullscreen_quad()
+        assert(read_canvas_pixel(out, 0, 0) < 0.01, "another program overwrites the same texture unit")
+
+        set_shader(shader)
+        assert_eq(audit_texture_slots_for_draw(shader), 0, "reactivation rebinds the shared input")
+        draw_fullscreen_quad()
+        assert(read_canvas_pixel(out, 0, 0) > 0.99, "reactivation restores the registered input")
+
+        shader_set_shared_texture(shader, "uSharedTest", sampled_canvas(blue))
+        assert_eq(audit_texture_slots_for_draw(shader), 0, "replacement keeps the activation bound")
+        draw_fullscreen_quad()
+        assert(read_canvas_pixel(out, 0, 0) < 0.01, "replacement updates the current activation")
+        end_shader()
+    })
+}

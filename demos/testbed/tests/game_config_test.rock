@@ -1,0 +1,5 @@
+@test
+fn game_config_is_resizable_by_default() {
+    let config = GameConfig {}
+    assert(config.resizable)
+}

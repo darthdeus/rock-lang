@@ -1,0 +1,118 @@
+pub const LAYER_BACKGROUND: int = 0
+pub const LAYER_WORLD_BACK: int = 1
+// Sort tier between world-back (floor/walls) and the main world layer
+// (characters): lets cast shadows draw on top of the floor but underneath
+// the body. Depth behavior is NOT tied to this number -- a batch names its
+// own DepthMode (shadows use TestNoWrite).
+pub const LAYER_WORLD_SHADOW: int = 2
+pub const LAYER_WORLD: int = 3
+pub const LAYER_WORLD_FRONT: int = 4
+pub const LAYER_WORLD_TOP: int = 5
+pub const LAYER_UI_BACK: int = 10
+pub const LAYER_UI: int = 11
+pub const LAYER_UI_FRONT: int = 12
+pub const LAYER_DEBUG: int = 20
+
+const DEFAULT_RENDER_LAYER: int = LAYER_WORLD
+pub const DEFAULT_SHAPE_LAYER: int = LAYER_DEBUG
+
+// The one blend enum. Batches carry it (batch-key segment), and the
+// pass / set_blend_mode path takes it too -- so an unknown blend mode
+// is unrepresentable rather than a silently-wrong string (the "lighten"
+// bug: set_blend_mode's string fallback quietly turned lighten into
+// REPLACE for months, 56c024b77).
+pub enum BlendMode {
+    Alpha,       // src*a + dst*(1-a): the default
+    Additive,    // src*a + dst: alpha scales the contribution -- torches, fading glows
+    Accumulate,  // src + dst: alpha IGNORED -- HDR accumulation, bloom pyramid levels
+    Multiply,    // src*dst: shadows, tints
+    Lighten,     // per-channel max (GL_MAX): overlapping lights
+    Replace,     // no blend: opaque overwrite
+    Premultiplied, // src + dst*(1-src.a), including the coverage channel
+}
+
+// Enum -> FFI int for stone_set_blend_mode_i. The int contract is
+// mirrored in stone-rs (fn stone_set_blend_mode_i); keep them in sync.
+pub fn blend_mode_to_int(b: BlendMode) -> int {
+    match b {
+        BlendMode::Alpha => 0,
+        BlendMode::Additive => 1,
+        BlendMode::Multiply => 2,
+        BlendMode::Lighten => 3,
+        BlendMode::Replace => 4,
+        BlendMode::Accumulate => 5,
+        BlendMode::Premultiplied => 6,
+    }
+}
+
+// Batch-key segment: distinct per mode so unlike-blend batches never
+// merge. The blend analogue of depth_key.
+pub fn blend_key(b: BlendMode) -> string {
+    match b {
+        BlendMode::Alpha => "alpha",
+        BlendMode::Additive => "add",
+        BlendMode::Multiply => "multiply",
+        BlendMode::Lighten => "lighten",
+        BlendMode::Replace => "replace",
+        BlendMode::Accumulate => "accum",
+        BlendMode::Premultiplied => "premult",
+    }
+}
+
+// GL depth-pipeline state for a batch -- the depth analogue of BlendMode.
+// Chosen by intent at draw time; no layer number or derivation picks it.
+pub enum DepthMode {
+    Off,          // test disabled: no test, no write (flat base -- floors)
+    AlwaysWrite,  // test always-passes + write: opaque backdrop (walls)
+    TestWrite,    // lequal + write: depth-sorted solids (sprites, props)
+    TestNoWrite,  // lequal + no write: sits under solids (shadows, decals, UI)
+}
+
+// Whether a mode writes depth -- the occluder set the entity-id pass keeps.
+fn depth_writes(d: DepthMode) -> bool {
+    match d {
+        DepthMode::AlwaysWrite => true,
+        DepthMode::TestWrite => true,
+        DepthMode::Off => false,
+        DepthMode::TestNoWrite => false,
+    }
+}
+
+// Batch-key segment: distinct per mode so unlike-depth batches never merge.
+fn depth_key(d: DepthMode) -> string {
+    match d {
+        DepthMode::Off => "no_depth",
+        DepthMode::AlwaysWrite => "depth_aw",
+        DepthMode::TestWrite => "depth_rw",
+        DepthMode::TestNoWrite => "depth_ro",
+    }
+}
+
+pub enum FillMode { Outline, Fill }
+
+// Shared render state for a batch lookup: the batch layer reads texture +
+// these fields to pick a RenderBatch. Carried by the ensure_ui_batch /
+// batch_key callers (UI + sprite/text paths); the hot world verbs pass
+// the same fields flat through ensure_batch_of instead.
+pub value RenderProps {
+    z_layer: int = DEFAULT_RENDER_LAYER,
+    // Explicit paint order WITHIN a z layer (batch-key segment right
+    // after z). Same-z same-order batches fall back to texture-key order,
+    // which is an asset-load accident -- set order when two same-z
+    // batches overlap (e.g. UI chrome sprites at 1 over shape fills at 0).
+    order: int = 0,
+    pixel_snap: bool = false,
+    blend: BlendMode = BlendMode::Alpha,
+    depth: DepthMode = DepthMode::TestWrite,
+    // How the texture is sampled, same contract as Material.sampling: null
+    // uses the source's declared default, an explicit value overrides it.
+    // Rides the batch key through batch_key_state once resolved and is bound
+    // with the texture, so two samplings of one image are two draws.
+    sampling: TextureFilter? = null,
+    // Optional color-pass shader override. Batch-affecting (sh key segment);
+    // consumed by the UI pool's program-switching flush (render_ui_batches).
+    // Custom shaders must consume the batched Vertex layout -- see
+    // RenderBatch.pipeline.
+    pipeline: Pipeline? = null,
+    text_batch: bool = false,
+}

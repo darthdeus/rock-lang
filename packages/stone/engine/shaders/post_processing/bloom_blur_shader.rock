@@ -1,0 +1,31 @@
+// Separable 7-tap Gaussian blur (bloom chain): sigma = radius/2,
+// `direction` picks the axis, `resolution` converts taps to UV offsets.
+//
+// Compiled in-game via `rock_shader(bloom_blur_frag)` (single-arg
+// fullscreen form); `InputTex` is the Pass slot group
+// (input_tex 0) and BloomBlurU the block (BLUR_PIPELINE + bloom passes).
+
+value BloomBlurU {
+    radius: float,
+    direction: Vec2,
+    resolution: float
+}
+
+@shader(fragment)
+fn bloom_blur_frag(@textures t: InputTex, @uniform u: BloomBlurU, tc: Vec2) -> Vec4 {
+    let sum = v(0.0, 0.0, 0.0, 0.0)
+    let sigma = max(u.radius / 2.0, 0.25)
+    let weight_sum = 0.0
+    let blur_rad = 3
+
+    for i in -blur_rad..blur_rad+1 {
+        let offset = int_to_float(i)
+        let weight = exp(-(offset * offset) / (2.0 * sigma * sigma))
+        let shift = u.direction * offset / u.resolution
+
+        sum += texture(t.input_tex, tc + shift) * weight
+        weight_sum += weight
+    }
+
+    return sum / weight_sum
+}

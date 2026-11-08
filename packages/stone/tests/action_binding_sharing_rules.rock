@@ -1,0 +1,35 @@
+@test
+fn action_shared_defaults_require_a_declared_pair_and_shared_default_chord() {
+    let chord = key_bind("escape")
+    let a = ActionEntry { handle: ActionDef("share_a"), defaults: [chord],
+        bindings: [chord], ui: true, override_active: false, shared_defaults_with: ["share_b"] }
+    let b = ActionEntry { handle: ActionDef("share_b"), defaults: [chord],
+        bindings: [chord], ui: true, override_active: false }
+    let c = ActionEntry { handle: ActionDef("share_c"), defaults: [chord],
+        bindings: [chord], ui: true, override_active: false }
+    assert(action_entries_share_default(a, b, chord), "an explicitly shared default is allowed")
+    assert(action_entries_share_default(b, a, chord), "registration order does not matter")
+    assert(!action_entries_share_default(a, c, chord), "a third holder is still a conflict")
+    assert(!action_entries_share_default(a, b, key_bind("f10")), "new chords are not exempt")
+    let changed = ActionEntry { handle: b.handle, defaults: [key_bind("f10")],
+        bindings: [chord], ui: true, override_active: false }
+    assert(!action_entries_share_default(a, changed, chord), "the chord must be a default of both holders")
+}
+
+@test
+fn binding_overlay_refusal_preserves_custom_and_unknown_entries() {
+    let original = bindings_sparse_json()
+    let action = action_new("overlay_refusal_probe", [key_bind("f9")])
+    defer {
+        action_remove(action)
+        let _ = load_bindings_overlay_json(original)
+    }
+    assert(load_bindings_overlay_json("{{\"version\":1,\"actions\":{{\"future_overlay_action\" : [ {{ \"kind\": \"future\", \"data\": 7 }} ]}}}}"),
+        "an unknown action remains loadable")
+    action_rebind(action, [key_bind("f10")])
+    let before = bindings_sparse_json()
+    for raw in ["not json", "{{\"version\":2,\"actions\":{{}}}}", "{{\"version\":1,\"actions\":[]}}", "null"] {
+        assert(!load_bindings_overlay_json(raw), "invalid overlays are refused")
+        assert_eq(bindings_sparse_json(), before, "refusal preserves custom bindings and opaque action bytes")
+    }
+}

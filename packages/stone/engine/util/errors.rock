@@ -1,0 +1,61 @@
+struct Errors {
+    until_clear: Map<string, ErrorItem>,
+}
+
+struct ErrorItem {
+    message: string,
+    pos: Vec2?,
+    offset: Vec2,
+}
+
+global ERRORS: Errors = Errors {
+    until_clear: map_new()
+}
+
+pub fn error_until_clear(key: string, message: string, pos: Vec2? = null, offset: Vec2 = zero()) {
+    ERRORS.until_clear.insert(key, ErrorItem {
+        message: message,
+        pos: pos,
+        offset: offset
+    })
+}
+
+pub fn error_clear(key: string) {
+    ERRORS.until_clear.remove(key)
+
+    ()
+}
+
+pub fn draw_errors_world() {
+    if ERRORS.until_clear.is_empty() { return }
+
+    for (_, error_item) in ERRORS.until_clear {
+        if error_item.pos != null {
+            let pos = error_item.pos.unwrap()
+            let message = error_item.message
+            draw_text(message, pos + error_item.offset, 8.0, RED)
+
+            // print("Error at position: {inspect(pos)} - {message}")
+            // } else {
+            //     print("Error without position: {key} - {error_item.message}")
+        }
+    }
+
+    ()
+}
+
+fn draw_errors_ui() {
+    if ERRORS.until_clear.is_empty() { return }
+
+    let line_height = 20
+
+    let final_message = "Errors:"
+
+    for (key, message) in ERRORS.until_clear {
+        final_message = "{final_message}\\n- {key}: {message.message}"
+    }
+
+    ui_centered_top(v(300)).text(final_message, line_height, RED.darken(0.8))
+
+    ()
+}

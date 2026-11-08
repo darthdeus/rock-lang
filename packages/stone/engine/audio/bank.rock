@@ -1,0 +1,389 @@
+const SOUND_BANK_SCHEMA_VERSION: int = 2
+
+pub newtype SoundEventHandle(int)
+
+// A layer names its variant pool by handle: the pool's last-played memory is
+// shared by the layer's immediate plays and its queued (offset) plays.
+pub global SOUND_BANK_POOLS: Arena<MultiSound> = arena_new()
+
+pub value SoundBankLayer {
+    bank: Entity<MultiSound>,
+    volume: float,
+    speed: float,
+    offset: float,
+}
+
+pub value SoundBankStep {
+    layers: [SoundBankLayer],
+}
+
+pub value SoundBankEvent {
+    id: string,
+    bus: int = STONE_BUS_SFX,
+    steps: [SoundBankStep],
+}
+
+pub struct SoundBank {
+    version: int,
+    events: [SoundBankEvent],
+    dependencies: [string],
+}
+
+value PendingSoundLayer {
+    bank: Entity<MultiSound>,
+    volume: float,
+    speed: float,
+    decay: float,
+    bus: int,
+    pitch_jitter: float,
+    spatial: bool,
+    pan: float,
+    site: string,
+    due_at: float,
+    order: int,
+}
+
+global SOUND_BANK_PENDING: [PendingSoundLayer] = []
+global SOUND_BANK_PENDING_ORDER: int = 0
+
+fn sound_bank_release_events(events: [SoundBankEvent]) {
+    for event in events {
+        for step in event.steps {
+            for layer in step.layers {
+                if let pool = layer.bank.remove() {
+                    unload_multisound(pool)
+                } else {
+                    log_error("SOUND", "sound bank layer released twice")
+                }
+            }
+        }
+    }
+}
+
+fn sound_bank_abort(events: [SoundBankEvent], path: string, reason: string) -> SoundBank? {
+    sound_bank_release_events(events)
+    log_error("SOUND", "sound bank {path} rejected: {reason}")
+    return null
+}
+
+fn sound_bank_layer_number(value: JsonValue, key: string, fallback: float, event_id: string, step_index: int) -> float? {
+    let field = json_field(value, key)
+    if field == null || json_is_null(field.unwrap()) { return fallback }
+    let number = json_as_float(field.unwrap())
+    if number == null {
+        log_error("SOUND", "sound bank event {event_id} step {step_index} '{key}' is not a number")
+        return null
+    }
+    return number.unwrap()
+}
+
+fn sound_bank_bad_number(value: float, positive: bool) -> bool {
+    if is_nan(value) || value == 1.0 / 0.0 || value == -1.0 / 0.0 { return true }
+    if positive { return value <= 0.0 }
+    return value < 0.0
+}
+
+fn sound_bank_source_recipe(value: JsonValue, path: string) -> SoundRecipe? {
+    let frames = json_as_int(json_field(value, "frames") ?? json_null()) ?? return null
+    let rate = json_as_int(json_field(value, "rate") ?? json_null()) ?? return null
+    let channels = json_as_int(json_field(value, "channels") ?? json_null()) ?? return null
+    let digest = json_as_str(json_field(value, "digest") ?? json_null()) ?? return null
+    if frames <= 0 || rate <= 0 || channels <= 0 || digest.len() != 64 {
+        log_error("SOUND", "sound bank recipe for {path} has invalid dimensions")
+        return null
+    }
+    return SoundRecipe { frames, rate, channels, digest }
+}
+
+fn sound_bank_parse_layer(value: JsonValue, event_id: string, step_index: int,
+                          recipes: JsonValue, normalizations: JsonValue) -> SoundBankLayer? {
+    let sources_value = json_field(value, "sources") ?? return null
+    let source_values = json_as_array(sources_value) ?? return null
+    if source_values.len() == 0 { return null }
+
+    let volume = sound_bank_layer_number(value, "volume", 1.0, event_id, step_index) ?? return null
+    let speed = sound_bank_layer_number(value, "speed", 1.0, event_id, step_index) ?? return null
+    let offset = sound_bank_layer_number(value, "offset", 0.0, event_id, step_index) ?? return null
+    if sound_bank_bad_number(volume, false) || sound_bank_bad_number(speed, true)
+        || sound_bank_bad_number(offset, false) { return null }
+    let stream_field = json_field(value, "stream")
+    let stream = if stream_field == null || json_is_null(stream_field.unwrap()) { false } else {
+        json_as_bool(stream_field.unwrap()) ?? {
+            log_error("SOUND", "sound bank event {event_id} step {step_index} 'stream' is not a boolean")
+            return null
+        }
+    }
+
+    let source_paths: [string] = vec_new()
+    for source_value in source_values {
+        let source = json_as_str(source_value)
+            ?? return null
+        if source.trim() == "" { return null }
+        if let recipe = json_field(recipes, source) {
+            if sound_bank_source_recipe(recipe, source) == null {
+                log_error("SOUND", "sound bank event {event_id} step {step_index} has an invalid recipe for {source}")
+                return null
+            }
+        }
+        source_paths.push(source)
+    }
+    let pool = load_multisound_available(source_paths, recipes, stream)
+    for source in pool.sources {
+        let path = source.data()?.path ?? ""
+        let record = json_field(normalizations, path)
+        let gain = if record == null { null } else { json_as_float(json_field(record.unwrap(), "gain") ?? json_null()) }
+        if gain == null || sound_bank_bad_number(gain.unwrap(), false) {
+            unload_multisound(pool)
+            log_error("SOUND", "sound bank event {event_id} has no valid normalization for {path}")
+            return null
+        }
+        pool.gains.push(gain.unwrap())
+    }
+    let bank = SOUND_BANK_POOLS.insert(pool)
+    return SoundBankLayer { bank, volume, speed, offset }
+}
+
+pub fn sound_bank_load(path: string) -> SoundBank? {
+    let text = file_read(path) ?? return null
+    return sound_bank_decode(text, path)
+}
+
+pub fn sound_bank_decode(text: string, path: string) -> SoundBank? {
+    let root = json_decode(text) ?? {
+        log_error("SOUND", "sound bank {path} is not valid JSON")
+        return null
+    }
+    let version = jv_int(json_field(root, "version"), -1)
+    if version != SOUND_BANK_SCHEMA_VERSION {
+        log_error("SOUND", "sound bank {path} has unsupported schema version {version}")
+        return null
+    }
+    let event_values = json_as_array(json_field(root, "events") ?? {
+        log_error("SOUND", "sound bank {path} has no events")
+        return null
+    }) ?? {
+        log_error("SOUND", "sound bank {path}.events is not an array")
+        return null
+    }
+    let recipes = json_field(root, "recipes") ?? json_null()
+    let normalizations = json_field(root, "normalizations") ?? {
+        log_error("SOUND", "sound bank {path} has no source normalizations")
+        return null
+    }
+    if event_values.len() == 0 {
+        log_error("SOUND", "sound bank {path} has no events")
+        return null
+    }
+
+    let events: [SoundBankEvent] = vec_new()
+    for (source_event_index, event_value) in event_values.enumerate() {
+        let id = json_as_str(json_field(event_value, "id") ?? {
+            return sound_bank_abort(events, path, "event {source_event_index} has no ID")
+        }) ?? return sound_bank_abort(events, path, "event {source_event_index} ID is not a string")
+        if id.trim() == "" {
+            return sound_bank_abort(events, path, "event {source_event_index} ID is empty")
+        }
+        for existing in events {
+            if existing.id == id {
+                return sound_bank_abort(events, path, "duplicate event ID {id}")
+            }
+        }
+        let event_id = id + ""
+        let bus_name = json_as_str(json_field(event_value, "bus") ?? json_null()) ?? ""
+        let bus = match bus_name {
+            "sfx" => STONE_BUS_SFX,
+            "ui" => STONE_BUS_UI,
+            "foley" => STONE_BUS_FOLEY,
+            "ambience" => STONE_BUS_AMBIENCE,
+            "music" => STONE_BUS_MUSIC,
+            _ => return sound_bank_abort(events, path, "event {event_id} has unknown bus '{bus_name}'"),
+        }
+        let event_index = events.len()
+        let owned_id = id.clone_into(events.storage)
+        events.push(SoundBankEvent { id: owned_id, bus, steps: vec_new() })
+        let step_values = json_as_array(json_field(event_value, "steps") ?? {
+            return sound_bank_abort(events, path, "event {event_id} has no steps")
+        }) ?? return sound_bank_abort(events, path, "event {event_id}.steps is not an array")
+        if step_values.len() == 0 {
+            return sound_bank_abort(events, path, "event {event_id} has no steps")
+        }
+        for (step_index, step_value) in step_values.enumerate() {
+            let parsed_step_index = events[event_index].steps.len()
+            events[event_index].steps.push(SoundBankStep { layers: vec_new() })
+            let layer_values = json_as_array(json_field(step_value, "layers") ?? {
+                return sound_bank_abort(events, path, "event {event_id} step {step_index} has no layers")
+            }) ?? return sound_bank_abort(events, path, "event {event_id} step {step_index}.layers is not an array")
+            if layer_values.len() == 0 {
+                return sound_bank_abort(events, path, "event {event_id} step {step_index} has no layers")
+            }
+            for layer_value in layer_values {
+                let layer = sound_bank_parse_layer(layer_value, event_id, step_index, recipes, normalizations)
+                    ?? return sound_bank_abort(events, path, "event {event_id} step {step_index} has an invalid layer")
+                events[event_index].steps[parsed_step_index].layers.push(layer)
+            }
+        }
+    }
+    let dependencies: [string] = vec_new()
+    let seen: Map<string, bool> = map_new()
+    for event in events {
+        for step in event.steps {
+            for layer in step.layers {
+                let pool = layer.bank.get() ?? continue
+                for source in pool.sources {
+                    let dependency = source.data()?.path ?? ""
+                    if dependency != "" && !seen.contains(dependency) {
+                        seen.insert(dependency, true)
+                        dependencies.push(dependency)
+                    }
+                }
+            }
+        }
+    }
+    return SoundBank { version, events, dependencies }
+}
+
+pub fn sound_bank_release(bank: SoundBank) {
+    sound_bank_release_events(bank.events)
+}
+
+// The variant pool a loaded layer plays from. Null only after its bank was
+// released.
+pub fn sound_bank_layer_pool(layer: SoundBankLayer) -> MultiSound? {
+    return layer.bank.get()
+}
+
+pub fn sound_bank_event_handle(bank: SoundBank, id: string) -> SoundEventHandle? {
+    for (index, event) in bank.events.enumerate() {
+        if event.id == id { return SoundEventHandle(index) }
+    }
+    return null
+}
+
+fn sound_bank_reset_pending_order_if_idle() {
+    if SOUND_BANK_PENDING.len() == 0 { SOUND_BANK_PENDING_ORDER = 0 }
+}
+
+pub fn sound_bank_clear_pending() {
+    SOUND_BANK_PENDING = vec_new()
+    sound_bank_reset_pending_order_if_idle()
+}
+
+pub fn sound_bank_pending_count() -> int { return SOUND_BANK_PENDING.len() }
+
+fn sound_bank_queue_layer(layer: SoundBankLayer, volume: float, speed: float,
+                          decay: float, bus: int, pitch_jitter: float,
+                          spatial: bool, pan: float, site: string) {
+    SOUND_BANK_PENDING.push(PendingSoundLayer {
+        bank: layer.bank,
+        volume: layer.volume * volume,
+        speed: layer.speed * speed,
+        decay,
+        bus,
+        pitch_jitter,
+        spatial,
+        pan,
+        site,
+        due_at: time + layer.offset,
+        order: SOUND_BANK_PENDING_ORDER,
+    })
+    SOUND_BANK_PENDING_ORDER += 1
+}
+
+fn sound_bank_play_pending(index: int) {
+    let pending = SOUND_BANK_PENDING[index]
+    let remaining: [PendingSoundLayer] = vec_new()
+    for (other_index, other) in SOUND_BANK_PENDING.enumerate() {
+        if other_index != index { remaining.push(other) }
+    }
+    SOUND_BANK_PENDING = remaining
+    // Its bank was released while the layer waited: the sounds are gone, and a
+    // play would have been silent anyway.
+    let pool = pending.bank.get() ?? {
+        sound_bank_reset_pending_order_if_idle()
+        log_error("SOUND", "pending sound layer lost its bank before firing")
+        return
+    }
+    _play_random_sound_impl(pool, pending.volume, pending.speed, pending.decay,
+        pending.bus, pending.pitch_jitter, false, pending.spatial, pending.pan, pending.site)
+    sound_bank_reset_pending_order_if_idle()
+}
+
+pub @update(stage = 6)
+fn sound_bank_update_pending() {
+    while true {
+        let selected = -1
+        let selected_due = 0.0
+        let selected_order = 0
+        for (index, pending) in SOUND_BANK_PENDING.enumerate() {
+            if pending.due_at > time { continue }
+            if selected < 0 || pending.due_at < selected_due
+                || (pending.due_at == selected_due && pending.order < selected_order) {
+                selected = index
+                selected_due = pending.due_at
+                selected_order = pending.order
+            }
+        }
+        if selected < 0 { return }
+        sound_bank_play_pending(selected)
+    }
+}
+
+macro sound_bank_play_step(bank: expr, handle: expr, step_index: expr) {
+    _sound_bank_play_step(bank, handle, step_index, 1.0, 1.0, 0.0,
+        -1, 0.0, 0.0, false, 0.0, __SITE__)
+}
+
+// `pitch_jitter` detunes each layer on its own roll; `level_jitter` (dB either
+// way) is rolled once per play and scales every layer of it, so the event
+// gets louder or softer as a whole rather than coming apart.
+macro sound_bank_play_step_with(bank: expr, handle: expr, step_index: expr,
+                                volume: expr = 1.0, speed: expr = 1.0,
+                                decay: expr = 0.0, bus: expr = -1,
+                                pitch_jitter: expr = 0.0, level_jitter: expr = 0.0) {
+    _sound_bank_play_step(bank, handle, step_index, volume, speed, decay,
+        bus, pitch_jitter, level_jitter, false, 0.0, __SITE__)
+}
+
+macro sound_bank_play_step_spatial(bank: expr, handle: expr, step_index: expr,
+                                   mix: expr, volume: expr = 1.0,
+                                   speed: expr = 1.0, decay: expr = 0.0,
+                                   bus: expr = -1,
+                                   pitch_jitter: expr = 0.0,
+                                   level_jitter: expr = 0.0) {
+    _sound_bank_play_step_spatial(bank, handle, step_index, mix, volume, speed,
+        decay, bus, pitch_jitter, level_jitter, __SITE__)
+}
+
+pub fn _sound_bank_play_step_spatial(bank: SoundBank, handle: SoundEventHandle,
+                                 step_index: int, mix: SpatialSoundMix,
+                                 volume: float, speed: float, decay: float,
+                                 bus: int, pitch_jitter: float,
+                                 level_jitter: float, site: string) -> bool {
+    if mix.gain <= 0.0 { return false }
+    return _sound_bank_play_step(bank, handle, step_index, volume * mix.gain,
+        speed, decay, bus, pitch_jitter, level_jitter, true, mix.pan, site)
+}
+
+pub fn _sound_bank_play_step(bank: SoundBank, handle: SoundEventHandle, step_index: int,
+                         volume_in: float, speed: float, decay: float, bus: int,
+                         pitch_jitter: float, level_jitter: float, spatial: bool,
+                         pan: float, site: string) -> bool {
+    let event = bank.events.get(handle.0) ?? return false
+    if step_index < 0 || step_index >= event.steps.len() { return false }
+    let routed_bus = if bus < 0 { event.bus } else { bus }
+    let volume = if level_jitter > 0.0 {
+        volume_in * decibels(presentation_random_range(-level_jitter, level_jitter))
+    } else { volume_in }
+    for layer in event.steps[step_index].layers {
+        if layer.offset <= 0.0 {
+            // Only a released bank has no pool, and its sounds are gone.
+            let pool = layer.bank.get() ?? continue
+            _play_random_sound_impl(pool, layer.volume * volume,
+                layer.speed * speed, decay, routed_bus, pitch_jitter, false, spatial, pan, site)
+        } else {
+            sound_bank_queue_layer(layer, volume, speed, decay, routed_bus, pitch_jitter,
+                spatial, pan, site)
+        }
+    }
+    return true
+}

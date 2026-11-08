@@ -1,0 +1,240 @@
+use stone::*
+
+// Material batch resolution, Material.pipeline through the world and DrawList
+// flushes, and the acquire_mesh / retain_mesh lifecycles, rendered through the
+// production world flush (render_batches) in an owned scene scope.
+
+fn world_flush_fixture(body: fn() -> ()) {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    let view = resolve_frame_view(v(64.0, 64.0), iv(64, 64),
+        Camera2D { visible_world_width: 20.0 }, RenderConfig {}).unwrap()
+    let failure = world_fixture_raised(() => { with_scene_render_scope(view, body) }, world_fixture_traceback)
+    assert(failure == null, failure ?? "")
+}
+
+// One world frame: flush, read the red channel at each world position, then
+// start the next frame the way the frame loop does.
+fn world_flush_frame(points: [Vec2]) -> [float] {
+    render_batches()
+    let out: [float] = []
+    for p in points {
+        let texel = world_to_scene_texel(p)
+        out.push(read_canvas_pixel(screen_canvas, int(texel.x), int(texel.y)))
+    }
+    clear_batches()
+    return out
+}
+
+fn world_flush_black_image() -> Image {
+    let data = new_owned_image_data(8, 8)
+    for y in 0..8 {
+        for x in 0..8 { image_data_set_pixel(data, x, y, 0.0, 0.0, 0.0, 1.0) }
+    }
+    let image = new_owned_image_from_data(data, TextureFilter::Nearest)
+    release_owned_image_data(data)
+    return image
+}
+
+@shader(fragment)
+fn world_flush_white_frag(vary: SpriteVary, @textures t: MainTex) -> Vec4 {
+    if texture(t.uTexture, vary.TexCoord).w < 0.1 { discard() }
+    return v(1.0, 1.0, 1.0, 1.0)
+}
+
+value WorldFlushValueU { value: float }
+
+@shader(fragment)
+fn world_flush_value_frag(_vary: SpriteVary, @uniform u: WorldFlushValueU) -> Vec4 {
+    return v(u.value, u.value, u.value, 1.0)
+}
+
+fn world_flush_fixture_pipeline() -> Pipeline {
+    return pipeline(rock_shader(sprite_batch_vert, world_flush_white_frag))
+}
+
+// Identical batch-affecting properties resolve to the same pooled batch as
+// draw_sprite, the cache holds across draws, and a with_draw_pool override
+// bypasses the cache instead of poisoning it.
+@test
+fn material_draws_share_the_draw_sprite_batch_and_respect_pool_overrides() {
+    world_flush_fixture(() => {
+        let white = sampled_image(WHITE_PIXEL.unwrap())
+        let m = material(white, layer: 7)
+        defer { let _ = retire_material(m) }
+        assert(m.borrow().unwrap().cached_batch == null, "a fresh material has no cached batch")
+
+        m.draw_material(v(0, 0), irect(0, 0, 1, 1))
+        let cached = m.borrow().unwrap().cached_batch
+        assert(cached != null, "the first draw caches the default-pool batch")
+        let b = cached.unwrap().borrow().unwrap()
+        let base = b.count
+        assert(base > 0, "the first draw appended vertices")
+
+        m.draw_material(v(1, 0), irect(0, 0, 1, 1))
+        assert_eq(b.count, base * 2, "the second draw appends to the cached batch")
+
+        draw_sprite(white, v(2, 0), irect(0, 0, 1, 1), layer: 7)
+        assert_eq(b.count, base * 3, "draw_sprite with identical properties lands in the material's batch")
+
+        let user_pool = render_batch_pool_new()
+        defer render_batch_pool_destroy(user_pool)
+        with_draw_pool(user_pool, () => { m.draw_material(v(3, 0), irect(0, 0, 1, 1)) })
+        assert_eq(b.count, base * 3, "an override draw leaves the cached batch untouched")
+        assert_eq(user_pool.len(), 1, "an override draw lands in the override pool")
+        assert(m.borrow().unwrap().cached_batch.unwrap().borrow().unwrap() == b,
+            "the cache still points at the default-pool batch")
+        clear_batches()
+    })
+}
+
+// A black texture is white through the fixture pipeline and black through the
+// default shader, giving each flush an independent control.
+@test
+fn material_pipeline_is_honored_by_world_and_draw_list_flushes() {
+    world_flush_fixture(() => {
+        let probe = world_flush_fixture_pipeline()
+        let black = world_flush_black_image()
+        defer release_owned_image(black)
+        let custom = material(sampled_image(black), layer: 19, depth: DepthMode::Off, pipeline: probe)
+        let plain = material(sampled_image(black), layer: 19, depth: DepthMode::Off, unlit: true)
+        defer {
+            let _ = retire_material(custom)
+            let _ = retire_material(plain)
+        }
+        let c = camera_world_center()
+        let custom_pos = c + v(-5.0, 0.0)
+        let plain_pos = c + v(5.0, 0.0)
+        custom.draw_material(custom_pos, irect(0, 0, 8, 8), dest_size: v(6.0, 6.0))
+        assert(retire_material(custom))
+        assert(custom.borrow() == null, "queued draws do not retain their material")
+        plain.draw_material(plain_pos, irect(0, 0, 8, 8), dest_size: v(6.0, 6.0))
+        let px = world_flush_frame([custom_pos, plain_pos])
+        assert(px[1] < 0.05, "the default shader draws the black control (plain={px[1]:.3})")
+        assert(px[0] > 0.9, "the world flush draws the material through its pipeline (custom={px[0]:.3})")
+
+        let shader = rock_shader(sprite_batch_vert, world_flush_value_frag)
+        let per_draw = pipeline(shader)
+        draw_sprite(sampled_image(black), custom_pos, dest_size: v(6.0, 6.0),
+            depth: DepthMode::Off, pipeline: per_draw,
+            block: frame_pass_block(shader, WorldFlushValueU { value: 0.2 }))
+        draw_sprite(sampled_image(black), plain_pos, dest_size: v(6.0, 6.0),
+            depth: DepthMode::Off, pipeline: per_draw,
+            block: frame_pass_block(shader, WorldFlushValueU { value: 0.8 }))
+        let values = world_flush_frame([custom_pos, plain_pos])
+        assert(values[0] < 0.4 && values[1] > 0.6,
+            "one-shot draws of the same shader retain independent uniform values")
+
+        let dl_mat = material(sampled_image(black), depth: DepthMode::Off, pipeline: probe)
+        defer { let _ = retire_material(dl_mat) }
+        let dl_canvas = new_canvas(64, 64, "rgba8")
+        let dl = draw_list_new(canvas: dl_canvas, space: DrawSpace::Target)
+        defer {
+            draw_list_destroy(dl)
+            destroy_canvas(dl_canvas)
+        }
+        with_draw_pool(dl.batches, () => {
+            dl_mat.draw_material(v(0.0, 0.0), irect(0, 0, 8, 8), dest_size: v(200.0, 200.0))
+        })
+        assert(retire_material(dl_mat))
+        assert(dl_mat.borrow() == null, "an explicit pool also owns its queued draw")
+        draw_list_flush(dl)
+        let dl_px = read_canvas_pixel(dl_canvas, 32, 32)
+        assert(dl_px > 0.9, "the DrawList flush draws the material through its pipeline (dl={dl_px:.3})")
+    })
+}
+
+// acquire: registered at acquire, read at flush, recycled through MESH_FREE
+// and reused the next frame.
+@test
+fn acquired_mesh_renders_at_flush_and_recycles_its_buffer() {
+    world_flush_fixture(() => {
+        let white = sampled_image(WHITE_PIXEL.unwrap())
+        let pos = camera_world_center()
+        let m1 = acquire_mesh(world, white, capacity: 64, z: 19, depth: DepthMode::Off)
+        sprite_mesh_add(m1, pos, irect(0, 0, 1, 1), v(4.0, 4.0))
+        assert_eq(MESH_PENDING.len(), 1, "an acquired mesh is pending until the flush")
+        {
+            let saved_batches = RENDER_BATCHES
+            defer { RENDER_BATCHES = saved_batches }
+            RENDER_BATCHES = render_batch_pool_new()
+            defer render_batch_pool_destroy(RENDER_BATCHES)
+            assert(has_pending_batches(), "an acquired mesh alone makes an otherwise empty pool pending")
+        }
+        render_batches()
+        assert_eq(MESH_PENDING.len(), 0, "the flush drains pending meshes")
+        let texel = world_to_scene_texel(pos)
+        let lit = read_canvas_pixel(screen_canvas, int(texel.x), int(texel.y))
+        assert(lit > 0.5, "the acquired-mesh quad rendered (r={lit:.3})")
+        clear_batches()
+
+        let free_before = MESH_FREE.len()
+        assert(free_before >= 1, "the next frame start recycles the buffer ({free_before})")
+        let m2 = acquire_mesh(world, white, capacity: 64, z: 19, depth: DepthMode::Off)
+        assert_eq(MESH_FREE.len(), free_before - 1, "an acquire reuses a pooled buffer")
+        assert(m2.capacity >= 64 && m2.count == 0, "the reused buffer is reconfigured clean")
+        recycle_pending_meshes()
+    })
+}
+
+// retain: dirty on creation, refill clears dirty, draw_mesh renders without a
+// refill, invalidate re-marks dirty.
+@test
+fn retained_mesh_renders_across_frames_without_refill() {
+    world_flush_fixture(() => {
+        let pos = camera_world_center()
+        let rm = retain_mesh(sampled_image(WHITE_PIXEL.unwrap()), capacity: 64, layer: 19, depth: DepthMode::Off)
+        defer retained_mesh_gpu_release(rm)
+        assert(rm.dirty, "a retained mesh starts dirty")
+        rm.refill_begin()
+        rm.add(pos, irect(0, 0, 1, 1), v(4.0, 4.0))
+        assert(!rm.dirty, "refill clears dirty")
+
+        rm.draw_mesh()
+        let r1 = world_flush_frame([pos])[0]
+        rm.draw_mesh()
+        let r2 = world_flush_frame([pos])[0]
+        assert(r1 > 0.5 && r2 > 0.5, "the retained quad renders across frames without refill (r1={r1:.3} r2={r2:.3})")
+        assert_eq(rm.mesh.count, 6, "retained contents survive draws")
+
+        // The depth key is the raw world anchor y; the shader remaps it against
+        // the camera bounds per frame, which keeps retained vertices
+        // camera-independent.
+        assert(abs(rm.mesh.vbo[0].pivot_y - pos.y) < 0.001,
+            "vertex pivot_y is the raw world anchor y ({rm.mesh.vbo[0].pivot_y} vs {pos.y})")
+
+        rm.invalidate()
+        assert(rm.dirty, "invalidate marks dirty")
+    })
+}
+
+@test
+fn shared_meshes_separate_rendering_identity_and_flush_lifetime() {
+    world_flush_fixture(() => {
+        let white = sampled_image(WHITE_PIXEL.unwrap())
+        let additive = acquire_mesh(world, white, capacity: 128,
+            blend: BlendMode::Additive, shared: true)
+        assert(same_ref(acquire_mesh(world, white, capacity: 128,
+            blend: BlendMode::Additive, shared: true), additive),
+            "identical shared requests reuse one pending mesh")
+        assert_eq(MESH_PENDING.len(), 1)
+        let alpha = acquire_mesh(world, white, capacity: 128, shared: true)
+        assert(!same_ref(alpha, additive) && alpha.blend == BlendMode::Alpha,
+            "different blending keeps its own geometry")
+        let larger = acquire_mesh(world, white, capacity: 512,
+            blend: BlendMode::Additive, shared: true)
+        assert(!same_ref(larger, additive), "different capacity requests remain separate")
+        let independent = acquire_mesh(world, white, capacity: 128,
+            blend: BlendMode::Additive)
+        assert(!same_ref(independent, additive), "ordinary acquisition remains independent")
+        assert_eq(MESH_PENDING.len(), 4)
+        flush_acquired_meshes()
+        assert_eq(MESH_PENDING.len(), 0)
+        let after_flush = acquire_mesh(world, white, capacity: 128,
+            blend: BlendMode::Additive, shared: true)
+        assert(!same_ref(after_flush, additive), "consumed meshes cannot receive later geometry")
+        assert_eq(MESH_PENDING.len(), 1)
+        recycle_pending_meshes()
+        assert_eq(MESH_PENDING.len(), 0, "a skipped flush expires at frame cleanup")
+    })
+}

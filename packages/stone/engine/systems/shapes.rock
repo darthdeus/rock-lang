@@ -1,0 +1,254 @@
+// Generic spatial shape types. `layer` is an opaque game-defined query tag;
+// the engine attaches no meaning to specific values -- games own their
+// category constants. `blocks_light` is the engine's ONLY
+// semantic property: shadow/visibility raycasts (shadows.rock) collect and
+// hit-test only shapes with it set, so a shape opts into casting shadows
+// regardless of which query layer it lives on.
+struct Shape<T> {
+    is_circle: bool,
+    pos: Vec2,
+
+    w: float,
+    h: float,
+
+    layer: int,
+    blocks_light: bool = false,
+    data: T,
+}
+
+pub struct Hit<T> {
+    data: T,
+    point: Vec2,
+    distance: float,
+}
+
+pub struct PrefabSprite {
+    image_key: string,
+    source: IRect,
+}
+
+pub struct Prefab {
+    // Identity
+    name: string,
+
+    // Position (for instances)
+    pos: Vec2,
+
+    // Visuals
+    sprite: PrefabSprite,
+    anim: SpriteAnimationState?,
+    is_image_static: bool,
+
+    // Gameplay
+    has_collider: bool,
+    pickable: bool,
+
+
+    // Type/behavior
+    ty: int,
+    ctor: int,
+    tick: (Prefab) -> () = p => {},
+}
+
+
+// WORLD is a DERIVED index, rebuilt from the authoritative tilemap and props
+// every frame. Adds return nothing on purpose: a handle into a structure that
+// is wiped each frame is the stale-handle bug class this replaced.
+pub global WORLD: SpatialHash<Entity<Prefab>?> = spatial_hash_new(8.0)
+
+@update(stage = 0)
+fn update_world_clear() {
+    spatial_hash_begin(WORLD)
+}
+
+// Bucketing must see every entry, so it runs after all fill (stage 30) and
+// before the earliest query (stage 40). Querying before this point trips the
+// assert in `sh_begin_query` rather than silently returning nothing.
+@update(stage = 31)
+fn update_world_build() {
+    spatial_hash_build(WORLD)
+}
+
+pub @inline
+fn line_intersects_circle(
+    start: Vec2,
+    line_end: Vec2,
+    circle_pos: Vec2,
+    radius: float
+) -> (Vec2, float)? {
+    // Vector from start to end
+    let dx = line_end.x - start.x
+    let dy = line_end.y - start.y
+
+    // Vector from circle center to start
+    let fx = start.x - circle_pos.x
+    let fy = start.y - circle_pos.y
+
+    // Coefficients for at^2 + bt + c = 0
+    let a = dx * dx + dy * dy
+    let b = 2.0 * (fx * dx + fy * dy)
+    let c = (fx * fx + fy * fy) - radius * radius
+
+    // Discriminant
+    let disc = b * b - 4.0 * a * c
+
+    if disc < 0.0 {
+        // No real roots -> segment does not hit circle
+        return null
+    }
+
+    let sqrt_disc = sqrt(disc)
+    // Two possible intersection "parameters" along the line
+    let t1 = (-b - sqrt_disc) / (2.0 * a)
+    let t2 = (-b + sqrt_disc) / (2.0 * a)
+
+    // Find the closest valid intersection
+    let t: float? = null
+
+    if t1 >= 0.0 && t1 <= 1.0 { t = t1 }
+
+    if t2 >= 0.0 && t2 <= 1.0 {
+        if t == null || t2 < t.unwrap() { t = t2 }
+    }
+
+    if t == null { return null }
+
+    // Calculate intersection point
+    let t_val = t.unwrap()
+    let hit_x = start.x + dx * t_val
+    let hit_y = start.y + dy * t_val
+    let hit_point = v(hit_x, hit_y)
+
+    // Calculate distance
+    let distance = start.distance(hit_point)
+
+    return (hit_point, distance)
+}
+
+pub @inline
+fn line_intersects_rect(
+    start: Vec2,
+    line_end: Vec2,
+    rect_pos: Vec2,
+    rect_size: Vec2
+) -> (Vec2, float)? {
+    // Compute AABB half-extents and min/max
+    let half_w = rect_size.x * 0.5
+    let half_h = rect_size.y * 0.5
+
+    let min_x = rect_pos.x - half_w
+    let max_x = rect_pos.x + half_w
+    let min_y = rect_pos.y - half_h
+    let max_y = rect_pos.y + half_h
+
+    // Direction of the segment
+    let dx = line_end.x - start.x
+    let dy = line_end.y - start.y
+
+    // Parametric range [t_min, t_max]
+    let t_min = 0.0
+    let t_max = 1.0
+
+    let epsilon = 0.000001
+
+    // --- Clip against X-slab ---
+    let dx_abs = dx.abs()
+    if dx_abs < epsilon {
+        // If parallel in X, start.x must lie within [min_x, max_x]
+        if start.x < min_x || start.x > max_x { return null }
+    } else {
+        let inv_dx = 1.0 / dx
+        let t1 = (min_x - start.x) * inv_dx
+        let t2 = (max_x - start.x) * inv_dx
+
+        // Determine near/far on X
+        let t_near = if t1 < t2 { t1 } else { t2 }
+        let t_far = if t1 < t2 { t2 } else { t1 }
+
+        // If the interval [t_near, t_far] misses [t_min, t_max], no intersection
+        if t_near > t_max || t_far < t_min { return null }
+        // Narrow the parametric range
+        if t_near > t_min { t_min = t_near }
+        if t_far < t_max { t_max = t_far }
+    }
+
+    // --- Clip against Y-slab ---
+    let dy_abs = dy.abs()
+    if dy_abs < epsilon {
+        // If parallel in Y, start.y must lie within [min_y, max_y]
+        if start.y < min_y || start.y > max_y { return null }
+    } else {
+        let inv_dy = 1.0 / dy
+        let t1y = (min_y - start.y) * inv_dy
+        let t2y = (max_y - start.y) * inv_dy
+
+        // Determine near/far on Y
+        let t_near_y = if t1y < t2y { t1y } else { t2y }
+        let t_far_y = if t1y < t2y { t2y } else { t1y }
+
+        if t_near_y > t_max || t_far_y < t_min { return null }
+        if t_near_y > t_min { t_min = t_near_y }
+        if t_far_y < t_max { t_max = t_far_y }
+    }
+
+    // Calculate intersection point at t_min
+    let hit_x = start.x + (line_end.x - start.x) * t_min
+    let hit_y = start.y + (line_end.y - start.y) * t_min
+    let hit_point = v(hit_x, hit_y)
+
+    // Calculate distance
+    let distance = start.distance(hit_point)
+
+    return (hit_point, distance)
+}
+
+// Sprite animation stepping. The STATE is a stone-core value type; advancing
+// it reads the frame delta, which is session state, so the stepping is here.
+
+pub fn update_anim_state(state: SpriteAnimationState) {
+    let anim = state.current_anim
+
+    let frame_time: float = state.frame_time_override
+    if frame_time == 0 {
+        frame_time = anim.frame_time
+    }
+
+    state.time += dt
+
+    if state.time > frame_time {
+        state.time = 0
+        state.frame = state.frame + 1
+    }
+
+    if state.frame >= anim.frame_count {
+        if anim.looping {
+            state.frame = 0
+        } else {
+            state.is_finished = true
+            state.frame = anim.frame_count - 1
+        }
+    }
+
+    // if frame >= anim.frame_count {
+    //     if anim.loop {
+    //         frame = frame - anim.frame_count
+    //         // TODO: doesn't work for some reason
+    //         // null
+    //     } else {
+    //         // swapping these doesn't work either, different else type
+    //         state.is_finished = true
+    //         frame = anim.frame_count - 1
+    //     }
+    // }
+}
+
+pub fn current_anim_frame(state: SpriteAnimationState) -> IRect {
+    let anim = state.current_anim
+
+    return IRect {
+        x: anim.start.x + state.frame * anim.step,
+        y: anim.start.y,
+        w: anim.start.w,
+        h: anim.start.h
+    }
+}

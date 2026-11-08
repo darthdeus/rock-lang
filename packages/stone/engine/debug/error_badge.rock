@@ -1,0 +1,130 @@
+// Development only: every ERROR and WARN record this process logged, Rust or
+// Rock, shows on screen instead of only in stderr. Shipping builds embed their
+// assets, so ASSET_DEV_MODE keeps it out of them; a bounded run has no one
+// watching and would carry it into captures, so it opts in with
+// STONE_DEV_ERROR_BADGE=1. Warnings stay off the badge unless
+// STONE_DEV_ERROR_BADGE_WARNINGS=1 opts in.
+const DEV_ERROR_BADGE_Z: int = 30000
+const DEV_ERROR_BADGE_SIZE: Vec2 = v(150.0, 26.0)
+const DEV_ERROR_BADGE_ROWS: int = 8
+// Rows kept for warnings when errors alone would fill the list.
+const DEV_ERROR_BADGE_WARNING_ROWS: int = 2
+const DEV_ERROR_BADGE_PADDING: float = 12.0
+const DEV_ERROR_BADGE_ROW_HEIGHT: float = 20.0
+const DEV_ERROR_BADGE_LIST_WIDTH: float = 640.0
+const DEV_ERROR_BADGE_FONT_SIZE: float = 14.0
+const DEV_ERROR_BADGE_BG: Color = color(0.12, 0.02, 0.02, 0.92)
+const DEV_ERROR_BADGE_FG: Color = color(1.0, 0.55, 0.5, 1.0)
+const DEV_WARNING_BADGE_BG: Color = color(0.12, 0.08, 0.01, 0.92)
+const DEV_WARNING_BADGE_FG: Color = color(1.0, 0.8, 0.4, 1.0)
+
+fn dev_error_badge_count(n: int, noun: string) -> string {
+    return if n == 1 { "1 {noun}" } else { "{n} {noun}s" }
+}
+
+pub fn dev_error_badge_label(errors: int, warnings: int) -> string {
+    if warnings == 0 { return dev_error_badge_count(errors, "error") }
+    if errors == 0 { return dev_error_badge_count(warnings, "warning") }
+    return "{dev_error_badge_count(errors, "error")}, {dev_error_badge_count(warnings, "warning")}"
+}
+
+// At least DEV_ERROR_BADGE_SIZE wide, and wide enough for its label.
+pub fn dev_error_badge_width(label: string) -> float {
+    return max(DEV_ERROR_BADGE_SIZE.x,
+        measure_ui(label, DEV_ERROR_BADGE_FONT_SIZE).x + 2.0 * DEV_ERROR_BADGE_PADDING)
+}
+
+pub fn dev_error_badge_rect(width: float) -> UiRect {
+    return ui_full_screen().inset(10.0).take_top_center(v(width, DEV_ERROR_BADGE_SIZE.y))
+        .at_z(DEV_ERROR_BADGE_Z)
+}
+
+pub fn dev_error_badge_row_text(count: string, target: string, message: string) -> string {
+    return "x{count} [{target}] {message}"
+}
+
+global DEV_ERROR_BADGE_EXPANDED: bool = false
+// A host recording mode hides the badge from the picture; records still log.
+pub global DEV_ERROR_BADGE_SUPPRESSED: bool = false
+
+fn dev_error_badge_enabled() -> bool {
+    if !ASSET_DEV_MODE { return false }
+    static watched = os_getenv("STONE_DEV_ERROR_BADGE") == "1" || !runner_bounded_run()
+    return watched
+}
+
+fn dev_error_badge_warnings_shown() -> bool {
+    static shown = os_getenv("STONE_DEV_ERROR_BADGE_WARNINGS") == "1"
+    return shown
+}
+
+pub @post_imgui_draw
+fn draw_dev_error_badge() {
+    if !dev_error_badge_enabled() || DEV_ERROR_BADGE_SUPPRESSED { return }
+    let errors = stone_log_record_total(0)
+    let warnings = if dev_error_badge_warnings_shown() { stone_log_record_total(1) } else { 0 }
+    if errors == 0 && warnings == 0 { return }
+    static label_errors = -1
+    static label_warnings = -1
+    static label = ""
+    static label_width = 0.0
+    if errors != label_errors || warnings != label_warnings {
+        label_errors = errors
+        label_warnings = warnings
+        label = dev_error_badge_label(errors, warnings)
+        label_width = dev_error_badge_width(label)
+    }
+    let badge = dev_error_badge_rect(label_width)
+    let bg = if errors > 0 { DEV_ERROR_BADGE_BG } else { DEV_WARNING_BADGE_BG }
+    let fg = if errors > 0 { DEV_ERROR_BADGE_FG } else { DEV_WARNING_BADGE_FG }
+    let id = ui_id("stone_dev_error_badge", "badge")
+    ui_mouse_item(id, badge)
+    if ui_clicked(id) { DEV_ERROR_BADGE_EXPANDED = !DEV_ERROR_BADGE_EXPANDED }
+    badge.fill(bg)
+    badge.text(label, DEV_ERROR_BADGE_FONT_SIZE, fg)
+    if !DEV_ERROR_BADGE_EXPANDED { return }
+
+    let error_rows = dev_error_badge_rows(0, "error")
+    let warning_rows = if warnings > 0 { dev_error_badge_rows(1, "warning") } else { [] }
+    let warning_take = min(warning_rows.len(),
+        max(DEV_ERROR_BADGE_WARNING_ROWS, DEV_ERROR_BADGE_ROWS - error_rows.len()))
+    let error_take = min(error_rows.len(), DEV_ERROR_BADGE_ROWS - warning_take)
+    let rows: [string] = []
+    let colors: [Color] = []
+    for i in 0..error_take {
+        rows.push(error_rows[i])
+        colors.push(DEV_ERROR_BADGE_FG)
+    }
+    for i in 0..warning_take {
+        rows.push(warning_rows[i])
+        colors.push(DEV_WARNING_BADGE_FG)
+    }
+    let screen = ui_full_screen().inset(10.0).skip_top(DEV_ERROR_BADGE_SIZE.y + 4.0)
+    let width = min(DEV_ERROR_BADGE_LIST_WIDTH, screen.w)
+    let list = screen.take_top_center(v(width, rows.len() as float * DEV_ERROR_BADGE_ROW_HEIGHT))
+        .at_z(DEV_ERROR_BADGE_Z)
+    list.fill(DEV_ERROR_BADGE_BG)
+    // Rows are cut to fit: an overflowing UiRect.text logs an ERROR, which the
+    // badge would then count every frame.
+    let room = width - 8.0
+    for i in 0..rows.len() {
+        let row = list.skip_top(i as float * DEV_ERROR_BADGE_ROW_HEIGHT).take_top(DEV_ERROR_BADGE_ROW_HEIGHT)
+        row.inset(4.0).text(ui_fit_text(rows[i], room, DEV_ERROR_BADGE_FONT_SIZE, ellipsis: true),
+            DEV_ERROR_BADGE_FONT_SIZE,
+            colors[i], align: TextAlign::Left)
+    }
+}
+
+fn dev_error_badge_rows(level: int, noun: string) -> [string] {
+    let rows: [string] = []
+    for line in stone_log_records_text(level, DEV_ERROR_BADGE_ROWS).split("\n") {
+        if line == "" { continue }
+        let fields = line.split("\t")
+        rows.push(if fields.len() >= 3 {
+            dev_error_badge_row_text(fields[0], fields[1], fields[2])
+        } else if fields.len() == 2 {
+            "{fields[1]} older kinds of {noun} dropped from this list"
+        } else { line })
+    }
+    return rows
+}

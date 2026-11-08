@@ -1,0 +1,239 @@
+
+
+// Hot reload system - tracks main.lua modification time and reloads on change
+global hot_reload_last_modtime: float = 0.0
+pub global hot_reload_script_path: string = ""
+
+// Incremental overlay (skull two-file split): a body edit re-dofiles only a
+// small `incremental.lua` (changed bodies plus transactional CodeRef slot
+// publication) instead of the whole main.lua. Empty path / 0 modtime when
+// there's no overlay (rock-compiled games).
+pub global hot_reload_incremental_path: string = ""
+global hot_reload_incremental_modtime: float = 0.0
+
+// The game source dir this process booted with, and the count of chunks
+// refused for naming a different one. `tmp/main.lua` is one shared slot per
+// worktree, so a concurrent `rock frame`/`run`/`perf` writes the very file
+// this watcher polls -- and the running game would clear its systems and boot
+// the intruder's code.
+pub global hot_reload_boot_source_dir: string = ""
+pub global hot_reload_refused_count: int = 0
+pub global hot_reload_full_count: int = 0
+
+// Only `rock stone` runs the file watcher -- it sets STONE_HOT_RELOAD=1 on
+// the game process. sim/run/frame/perf run the same frame loop but must
+// never poll or dofile an overlay (a stale incremental.lua would otherwise
+// shadow the fresh main.lua). The overlay-wipe on every full main.lua write
+// already prevents a stale load; this is the matching front gate.
+inline(lua) fn __hot_reload_enabled() -> bool = """
+    return os.getenv("STONE_HOT_RELOAD") == "1"
+"""
+
+// The identity the compiler stamps as line 1 of a game main.lua
+// (`skull_backend::skull_game_preamble`). Empty for a chunk carrying no such
+// line, which `hot_reload_chunk_is_ours` treats as foreign. The literal is
+// escaped on the way out, so unescape before comparing against the live value.
+inline(lua) fn read_chunk_source_dir(path: string) -> string = """
+    local f = io.open(path, "r")
+    if not f then return "" end
+    local line = f:read("*l")
+    f:close()
+    if not line then return "" end
+    local dir = line:match('^__ROCK_GAME_SOURCE_DIR = "(.*)"$')
+    if not dir then return "" end
+    return (dir:gsub('\\(.)', '%1'))
+"""
+
+pub inline(lua) fn current_game_source_dir() -> string = """
+    return _G.__ROCK_GAME_SOURCE_DIR or ""
+"""
+
+// Whether a chunk on disk may be loaded over the running game: it must name
+// the same game this process booted as. Plain equality on purpose -- an
+// UNIDENTIFIED process (a chunk with no preamble) then admits only another
+// unidentified chunk and refuses every game build, instead of accepting
+// anything because it has nothing to compare against. What it cannot tell
+// apart is two unidentified chunks, which `check_hot_reload` warns about once.
+pub @pure
+fn hot_reload_chunk_is_ours(boot_dir: string, chunk_dir: string) -> bool {
+    return chunk_dir == boot_dir
+}
+
+fn check_hot_reload() {
+    // Gated to `rock stone` (and an explicit opt-in on a pushed-script target
+    // like iOS); every other command leaves this a no-op. Whether a watchable
+    // file actually exists is settled below by the modtime probe rather than
+    // inferred from how the chunk was loaded -- an embedded runner serving a
+    // script pushed to disk is watchable, and a baked-in chunk simply has no
+    // path to resolve.
+    if !__hot_reload_enabled() { return }
+
+    // Get the path of the current script on first run
+    if hot_reload_script_path == "" {
+        hot_reload_script_path = get_script_path()
+        hot_reload_boot_source_dir = current_game_source_dir()
+        if hot_reload_boot_source_dir == "" {
+            log_once("HOTRELOAD", "this chunk carries no game identity, so the reload gate can only refuse identified builds -- two unidentified chunks are indistinguishable")
+        }
+        // The skull two-file split writes a sibling `incremental.lua`; for
+        // rock-compiled games this path simply never exists (we skip it below).
+        hot_reload_incremental_path = hot_reload_script_path.replace("main.lua", "incremental.lua")
+        log_debug("HOT RELOAD", "Watching {hot_reload_script_path} (+ incremental.lua)")
+    }
+
+    // Ctrl+F5 forces a full hot reload. Bare F5 is game input (mag's
+    // per-summon command row), so the reload requires the modifier.
+    if stone_is_key_down("f5") && (stone_is_key_down("lctrl") || stone_is_key_down("rctrl")) {
+        log_debug("HOT RELOAD", "Manual reload triggered by Ctrl+F5")
+        do_hot_reload()
+        return
+    }
+
+    let modtime_opt = file_modtime(hot_reload_script_path)
+    if is_null(modtime_opt) {
+        // log_once: this polls every frame, so the file vanishing would
+        // spam ~60x/sec. One line tells the user hot reload is dead.
+        log_once("HOTRELOAD", "watched script {hot_reload_script_path} not found; hot reload disabled until file appears")
+        return
+    }
+
+    let modtime = modtime_opt.unwrap()
+
+    if hot_reload_last_modtime == 0.0 {
+        // First time - just record the time
+        hot_reload_last_modtime = modtime
+        return
+    }
+
+    // FULL reload wins: a main.lua change is an interface/structural rebuild,
+    // which also WIPES incremental.lua. Sync the overlay's modtime so the same
+    // tick doesn't also fire a (now stale/empty) light reload.
+    if modtime > hot_reload_last_modtime {
+        hot_reload_last_modtime = modtime
+        let incr_now = file_modtime(hot_reload_incremental_path)
+        hot_reload_incremental_modtime = if is_null(incr_now) { 0.0 } else { incr_now.unwrap() }
+        do_hot_reload()
+        return
+    }
+
+    // LIGHT reload: only incremental.lua changed (a body edit). The overlay is
+    // WIPED at startup (modtime 0), so its first appearance is a real change ->
+    // reload (no "just record" guard like main.lua, which exists at startup).
+    let incr_opt = file_modtime(hot_reload_incremental_path)
+    if !is_null(incr_opt) {
+        let incr = incr_opt.unwrap()
+        if incr > hot_reload_incremental_modtime {
+            hot_reload_incremental_modtime = incr
+            do_incremental_reload()
+        }
+    }
+}
+
+// Light reload for a body edit: the overlay carries changed fn defs and CodeRef
+// slot publication, so preserved lifecycle registries observe compatible bodies
+// through the same dofile -- no HOT_RELOAD guard dance and no @init bodies re-run.
+fn do_incremental_reload() {
+    let t = stone_get_time()
+    let (success, err) = pcall_dofile(hot_reload_incremental_path)
+    if !success {
+        log_error("HOT RELOAD", "incremental: {err}")
+        sim_reload_terminal("failed")
+        return
+    }
+    // Wire before callbacks so @on_reload hooks see a re-wired world.
+    run_wire_systems()
+    __rock_fire_hot_reload_callbacks()
+    // Flight recorder: mark the tick where code changed (determinism warning).
+    // Body edit -> shape-safe (full=false): a loop re-derives A from boot.
+    log_info("HOT RELOAD", "incremental reload: {(stone_get_time() - t) * 1000.0}ms")
+    sim_reload_terminal("applied")
+}
+
+pub fn do_hot_reload() {
+    log_debug("HOT RELOAD", "Reloading {hot_reload_script_path}...")
+
+    let reload_start = stone_get_time()
+
+    // Identity before parse: load_chunk stashes the compiled function, so a
+    // refusal after it would leave a foreign chunk waiting for the next
+    // run_loaded_chunk.
+    let chunk_dir = read_chunk_source_dir(hot_reload_script_path)
+    if !hot_reload_chunk_is_ours(hot_reload_boot_source_dir, chunk_dir) {
+        hot_reload_refused_count = hot_reload_refused_count + 1
+        let found = if chunk_dir == "" { "a chunk with no game identity" } else { chunk_dir }
+        let mine = if hot_reload_boot_source_dir == "" { "no game (this chunk has no identity either)" } else { hot_reload_boot_source_dir }
+        log_error("HOT RELOAD", "refused: {hot_reload_script_path} now holds {found}, but this session is {mine}. Something else wrote the path this game was launched on; the running game is unchanged. Re-run that command with --output, or restart this session to pick up your own build.")
+        return
+    }
+
+    // Parse before touching anything. clear_all_systems() below is
+    // unrecoverable if what follows won't load -- the game would keep running
+    // with zero systems registered. Under `rock stone` the compiler only
+    // writes main.lua on success, but a pushed chunk (iOS) has no such gate,
+    // so a truncated transfer lands here as a parse error.
+    let (parsed, parse_err) = load_chunk(hot_reload_script_path)
+    if !parsed {
+        log_error("HOT RELOAD", "parse failed, keeping the running code: {parse_err}")
+        return
+    }
+
+    // Snapshot which logical init entries existed before publication.
+    // After the reload, any name absent from this snapshot is newly added
+    // and its body should run (it missed the original run_init_systems call).
+    let prev_init_names: Map<string, bool> = map_new()
+    for sys in lifecycle_systems("early_init") { prev_init_names[sys.key] = true }
+    for sys in lifecycle_systems("init") { prev_init_names[sys.key] = true }
+    for sys in lifecycle_systems("late_init") { prev_init_names[sys.key] = true }
+
+    // Clear system registries to avoid duplicate registrations
+    clear_all_systems()
+
+    // Set flag to skip initialization code
+    set_global_bool("HOT_RELOAD", true)
+
+    // Don't use tuple unpacking here because the function gets redefined during reload
+    let dofile_start = stone_get_time()
+    let (success, err) = run_loaded_chunk(hot_reload_script_path)
+    let dofile_ms = (stone_get_time() - dofile_start) * 1000.0
+
+    if !success {
+        // Parse already succeeded, so this is a failure partway through the
+        // chunk's top level: the registries are cleared and only partially
+        // repopulated. Say so plainly -- the symptom (a live but inert game)
+        // does not otherwise point back here.
+        log_error("HOT RELOAD", "execution failed; keeping the published lifecycle plan and CodeRefs: {err}")
+    }
+
+    // Always clear flag after reload attempt
+    set_global_bool("HOT_RELOAD", false)
+
+    if success {
+        hot_reload_full_count = hot_reload_full_count + 1
+
+        // Run bodies of newly added init systems. The decorator_init_code that
+        // The newly published plan contains both old and new init entries. We
+        // call only additions; old ones already ran and may not be idempotent.
+        for sys in lifecycle_systems("early_init") {
+            if prev_init_names.get(sys.key) == null { sys.func(0) }
+        }
+        for sys in lifecycle_systems("init") {
+            if prev_init_names.get(sys.key) == null { sys.func(0) }
+        }
+        for sys in lifecycle_systems("late_init") {
+            if prev_init_names.get(sys.key) == null { sys.func(0) }
+        }
+
+        // The shared selector chooses plain wires and changed gated wires after
+        // this publication, matching the boot order: inits first, then wire.
+        run_wire_systems()
+
+        // Fire user-registered on_hot_reload callbacks (e.g. buff reapply,
+        // cache re-hydration) last, so they react to a fully re-wired world.
+        // Callbacks that re-register via on_hot_reload land in the next
+        // reload's list, not this pass.
+        __rock_fire_hot_reload_callbacks()
+    }
+
+    let total_ms = (stone_get_time() - reload_start) * 1000.0
+    log_info("HOT RELOAD", "time dofile: {dofile_ms}ms | total: {total_ms}ms")
+}

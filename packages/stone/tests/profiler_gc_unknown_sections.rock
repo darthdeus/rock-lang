@@ -1,0 +1,359 @@
+// Profiler globals and native counters belong to the process, not a test shard.
+inline(lua) fn profiler_test_process(entry: string, which: int) = """
+    local function quote(s) return "'" .. s:gsub("'", "'\\''") .. "'" end
+    local library_key = ffi.os == "OSX" and "DYLD_LIBRARY_PATH" or "LD_LIBRARY_PATH"
+    local library_env = library_key .. "=" .. quote(assert(os.getenv(library_key)))
+    local path = assert(os.getenv("ROCK_TEST_TMP")) .. "/" .. entry .. "-" .. which .. ".log"
+    local script = "assert(loadfile(" .. string.format("%q", arg[0]) .. "))(); "
+        .. "jit.off(); jit.flush(); " .. entry .. "(" .. which .. "); io.write('PROFILER_PROCESS_PASS')"
+    local executable_index = -1
+    while arg[executable_index - 1] do executable_index = executable_index - 1 end
+    local status = os.execute("env " .. library_env .. " ROCK_TEST_SHARD_TESTS='' "
+        .. quote(arg[executable_index]) .. " -e " .. quote(script) .. " > " .. quote(path) .. " 2>&1")
+    local file = assert(io.open(path, "rb"))
+    local log = file:read("*a")
+    file:close()
+    assert(os.remove(path))
+    assert(status == 0 and log:find("PROFILER_PROCESS_PASS", 1, true), log)
+"""
+
+fn profiler_gc_unknown_fixture(body: fn()) {
+    let running = lua_gc_is_running()
+    let enabled = ENGINE.profiler_enabled
+    defer {
+        profiler_allocator_shutdown()
+        GC_WIN_SECTION_REGISTRY_FROZEN = false
+        GC_WIN_N = 0
+        PROF_OPEN_TOP = 0
+        ENGINE.profiler_enabled = enabled
+        if running { __gc_restart() } else { __gc_collect_stop() }
+    }
+    lua_alloc_split_init()
+    init_profiler()
+    ENGINE.profiler_enabled = true
+    PROFILER_SECTIONS_OFF = 0
+    GC_WIN_N = 1
+    GC_WIN_START = 1
+    GC_WIN_FRAME = 0
+    body()
+}
+
+fn profiler_gc_late_admitted() {
+    profiler_gc_unknown_fixture(() => {
+        // Admitted before the freeze, so the path warm-up below is not itself a
+        // late claim.
+        let probe = section_id("late.probe")
+        profile_frame_begin()
+        profile_frame_end()
+        assert(GC_WIN_SECTION_REGISTRY_FROZEN, "the window froze admission")
+        let capacity = GC_WIN_LATE_POOL_CAPACITY
+        assert(capacity >= 4, "the frozen window reserved a late admission pool")
+        let admitted_before = SECTION_COUNT
+        let rows_before = SECTION_NAMES.len()
+        assert(rows_before >= admitted_before + capacity, "reserved rows are preallocated")
+
+        profile_frame_begin()
+        // Names this frame introduces after the freeze: clean, zone, child, work
+        // and observation.
+        let claimed = 5
+        // Warm profile_begin itself: its first call pays setup the registry does
+        // not own, and that cost belongs to the admitted probe section.
+        profile_begin("late.probe")
+        profile_end("late.probe")
+        // The registration is measured by the window's own gross-request cursor:
+        // a never-seen section entered and left with nothing else inside can only
+        // reconcile to zero self allocation if claiming its row costs nothing.
+        profile_begin("late.clean")
+        profile_end("late.clean")
+        profile_begin("late.zone")
+        let payload: [string] = []
+        for i in 0..16 { payload.push("late-{i}") }
+        profile_begin("late.child")
+        profile_end("late.child")
+        profile_end("late.zone")
+        assert_eq(payload.len(), 16)
+        profile_work("late.work", 7)
+        profile_observation("late.observation", 1.0)
+        profile_declare_section("late.declaration")
+        profile_frame_end()
+
+        assert(GC_WIN_ACCOUNTING_VALID, "late admission keeps the window trustworthy")
+        assert_eq(GC_WIN_UNKNOWN_SECTIONS, 0, "a late section is not an unknown section")
+        assert_eq(GC_WIN_LATE_POOL_EXHAUSTED, 0, "the pool has room")
+        assert_eq(GC_WIN_LATE_SECTIONS, claimed, "every late row is counted once")
+        assert_eq(SECTION_COUNT, admitted_before + claimed, "late rows come from the pool")
+        assert_eq(SECTION_NAMES.len(), rows_before, "reserved rows are reused, not regrown")
+
+        let clean = section_id("late.clean")
+        let zone = section_id("late.zone")
+        assert(zone >= 0, "a late section resolves")
+        assert(section_is_late(zone), "a late section is flagged late")
+        assert(!section_is_late(probe), "an early section is not flagged late")
+        assert_eq(nb_get(GC_WIN_SECTION_EXCLUSIVE_KB, clean), 0.0,
+            "a late section claim allocates nothing")
+        assert_eq(nb_get(GC_WIN_SECTION_CALLS, clean), 1, "the clean late event is counted")
+        assert_eq(nb_get(GC_WIN_SECTION_CALLS, zone), 1, "the late event is counted")
+        assert(nb_get(GC_WIN_SECTION_EXCLUSIVE_KB, zone) > 0.0,
+            "allocation inside a late section is attributed to it")
+        assert_eq(profile_section_count("late.zone"), 1, "late timing reaches its report")
+        assert(profile_section_mean_ms("late.zone") >= 0.0, "late timing is readable")
+        assert_eq(section_work_metric(section_id("late.work")).sum, 7.0,
+            "late work uses the same work rows")
+        assert(is_null(SECTION_IDS.get("late.declaration")),
+            "a declaration inside the window is not retained as early admission")
+
+        let stats = collect_hierarchical_stats()
+        let reported = false
+        for row in stats {
+            if row.name == "late.zone" {
+                reported = true
+                assert(row.late, "the reported late section is flagged")
+                assert(row.gc_events > 0, "the late section reports its window events")
+            }
+        }
+        assert(reported, "a late section is reported like any other")
+        let diagnostic = gc_window_pretty_summary()
+        assert(diagnostic.contains("late sections 5/{capacity}"), "the summary counts late sections")
+        assert(diagnostic.contains("pool exhausted 0"), "the summary reports no exhaustion")
+
+        // The Map joins late names at unfreeze, so later lookups are the ordinary
+        // path and the section stays attributed for the next window.
+        assert(!GC_WIN_SECTION_REGISTRY_FROZEN, "the finished window releases the registry")
+        assert_eq(SECTION_IDS.get("late.zone").unwrap(), zone, "late names join the intern table")
+        profile_frame_begin()
+        profile_begin("late.zone")
+        profile_end("late.zone")
+        profile_frame_end()
+        assert_eq(profile_section_count("late.zone"), 2, "a late section keeps measuring")
+        init_profiler()
+        assert(is_null(SECTION_IDS.get("late.zone")), "a reset drops late admission state")
+        assert_eq(SECTION_COUNT, 0, "a reset drops the admitted population")
+    })
+}
+
+fn profiler_gc_late_exhaustion() {
+    profiler_gc_unknown_fixture(() => {
+        profile_frame_begin()
+        profile_frame_end()
+        assert(GC_WIN_SECTION_REGISTRY_FROZEN, "the window froze admission")
+        let capacity = GC_WIN_LATE_POOL_CAPACITY
+        let admitted_before = SECTION_COUNT
+        for i in 0..capacity {
+            assert(section_id("late.pool.{i}") >= 0, "the pool admits {i} of {capacity}")
+        }
+        assert_eq(SECTION_COUNT, admitted_before + capacity, "the pool is exactly its capacity")
+        assert_eq(GC_WIN_LATE_POOL_EXHAUSTED, 0, "a full pool is not yet exhaustion")
+        let refused = section_id("late.pool.overflow")
+        assert_eq(refused, -1, "a full pool refuses the next section")
+        assert_eq(GC_WIN_LATE_POOL_EXHAUSTED, 1, "exhaustion is counted")
+        assert_eq(GC_WIN_UNKNOWN_SECTIONS, 1, "an unadmitted name is still unknown")
+        profile_begin("late.pool.overflow")
+        profile_end("late.pool.overflow")
+        assert_eq(GC_WIN_LATE_POOL_EXHAUSTED, 2, "every refusal is counted")
+        assert_eq(GC_WIN_UNKNOWN_SECTIONS, 2, "every refusal is attributed to no section")
+        assert_eq(PROF_OPEN_TOP, 0, "a refused late scope still closes its event")
+        assert_eq(GC_WIN_LATE_SECTIONS, capacity, "refusals never consume a row")
+        profile_frame_end()
+        let diagnostic = gc_window_pretty_summary()
+        assert(diagnostic.contains("late sections {capacity}/{capacity}"),
+            "the summary reports the pool population")
+        assert(diagnostic.contains("pool exhausted 2"), "the summary reports the refusals")
+        assert(diagnostic.contains("late.pool.overflow"), "the refused name is named")
+        assert(!GC_WIN_ACCOUNTING_VALID, "an unadmitted section keeps the window invalid")
+    })
+}
+
+fn profiler_gc_unknown_warmup() {
+    profiler_gc_unknown_fixture(() => {
+        PERF_FRAME_CAPTURE = true
+        perf_scenario_wait("section_admission")
+        perf_scenario_window("steady", 2, 4)
+        perf_scenario_ready("section_admission")
+        perf_outer_frame_boundary(1, stone_get_time())
+        profile_frame_begin()
+        assert(PROFILER.warmup_start_time >= 0.0,
+            "warmup starts on the first frame, not before asset startup")
+        profile_frame_end()
+        assert(!GC_WIN_SECTION_REGISTRY_FROZEN && PROFILER_ALLOC_COUNTER_OWNER == 0,
+            "a requested start inside warmup cannot freeze section admission")
+        assert(profiler_gc_window_pending(), "a perf cap cannot truncate warmup admission")
+        let outer = section_id("admitted.outer")
+        let child = section_id("admitted.child")
+        perf_outer_frame_boundary(2, stone_get_time())
+        profile_frame_begin()
+        profile_frame_end()
+        perf_outer_frame_boundary(3, stone_get_time())
+        profile_frame_begin()
+        profile_frame_end()
+        assert(GC_WIN_SECTION_REGISTRY_FROZEN, "collection starts after warmup")
+        assert(profiler_gc_window_pending(), "a perf cap cannot truncate active collection")
+        profile_frame_begin()
+        profile_begin("admitted.outer")
+        profile_begin("admitted.child")
+        let payload: [string] = []
+        for i in 0..16 { payload.push("payload-{i}") }
+        profile_end("admitted.child")
+        profile_end("admitted.outer")
+        profile_frame_end()
+        assert_eq(payload.len(), 16)
+        assert(GC_WIN_ACCOUNTING_VALID, "fully admitted accounting is valid")
+        assert(!profiler_gc_window_pending(), "completed collection releases bounded perf exit")
+        assert_eq(GC_WIN_FRAME_SAMPLES, GC_WIN_N, "every selected frame is reported")
+        assert_eq(nb_get(GC_WIN_SECTION_CALLS, outer), 1)
+        assert_eq(nb_get(GC_WIN_SECTION_CALLS, child), 1)
+        assert(nb_get(GC_WIN_SECTION_EXCLUSIVE_KB, child) > 0.0, "real child allocation is attributed")
+        assert(abs(GC_WIN_RESULT - GC_WIN_SECTION_EXCLUSIVE_SUM_RESULT - GC_WIN_UNSECTIONED_RESULT) < 0.01,
+            "exclusive attribution reconciles against the native gross-request oracle")
+        assert(abs(nb_get(GC_WIN_SECTION_INCLUSIVE_KB, outer)
+            - nb_get(GC_WIN_SECTION_EXCLUSIVE_KB, outer)
+            - nb_get(GC_WIN_SECTION_INCLUSIVE_KB, child)) < 0.01,
+            "child allocation is not double-counted as parent self allocation")
+    })
+}
+
+fn profiler_gc_unknown_cleanup() {
+    for was_running in [false, true] {
+        if was_running { __gc_restart() } else { __gc_collect_stop() }
+        for fail in [false, true] {
+            let result = (world_fixture_raised(() => {
+                profiler_gc_unknown_fixture(() => {
+                    profile_frame_begin()
+                    profile_frame_end()
+                    assert(GC_WIN_SECTION_REGISTRY_FROZEN && PROFILER_ALLOC_COUNTER_OWNER == 2)
+                    if fail { error("intentional profiler cleanup failure") }
+                    profiler_allocator_shutdown()
+                    assert(!GC_WIN_SECTION_REGISTRY_FROZEN && PROFILER_ALLOC_COUNTER_OWNER == 0,
+                        "aborted collection releases the registry and native counter")
+                    assert_eq(lua_gc_is_running(), was_running,
+                        "aborted collection preserves the incoming collector state")
+                })
+            }) ?? "")
+            assert(if fail { result.contains("intentional profiler cleanup failure") } else { result == "" },
+                "unexpected cleanup result: {result}")
+            assert_eq(lua_gc_is_running(), was_running, "fixture restores GC on success and failure")
+            assert(!GC_WIN_SECTION_REGISTRY_FROZEN && PROFILER_ALLOC_COUNTER_OWNER == 0)
+            let before = lua_alloc_call_count()
+            let probe: [int] = [1, 2, 3]
+            let after = lua_alloc_call_count()
+            assert_eq(probe.len(), 3)
+            assert_eq(after, before, "teardown actually stops native allocation capture")
+        }
+        profiler_gc_unknown_fixture(() => {
+            let _ = section_id("admitted.empty")
+            profile_frame_begin()
+            profile_frame_end()
+            profile_frame_begin()
+            profile_begin("admitted.empty")
+            profile_end("admitted.empty")
+            profile_frame_end()
+            assert(GC_WIN_ACCOUNTING_VALID)
+            assert_eq(lua_gc_is_running(), was_running,
+                "successful collection preserves the incoming collector state")
+        })
+    }
+}
+
+fn profiler_gc_unknown_capture(names: [string]) {
+    for name in names { let _ = section_id(name) }
+}
+
+fn profiler_gc_unknown_bounded() {
+    profiler_gc_unknown_fixture(() => {
+        let names: [string] = ["late.escaped\"\\\n", "x".repeat(300)]
+        for i in 0..(MAX_GC_WINDOW_UNKNOWN_NAMES + 5) { names.push("late-{i}") }
+        // Warm the exact discovery loop and install the callback before capture.
+        // Freezing without the window's reserved rows is the exhaustion path, so
+        // every one of these names is refused and has to stay attributed to the
+        // unsectioned bucket.
+        stone_lua_counter_install()
+        GC_WIN_SECTION_REGISTRY_FROZEN = true
+        profiler_gc_unknown_capture(names)
+        gc_window_clear_accounting()
+        GC_WIN_FRAME = GC_WIN_START
+        profiler_gc_unknown_capture(names)
+        let _ = gc_window_unknown_sections_json()
+        gc_window_clear_accounting()
+        stone_lua_counter_begin()
+        stone_lua_counter_end()
+        stone_lua_counter_begin()
+        profiler_gc_unknown_capture(names)
+        profiler_gc_unknown_capture(names)
+        let during = gc_window_unknown_sections_json()
+        stone_lua_counter_end()
+        let calls = lua_alloc_call_count()
+        assert_eq(during, "null", "report formatting is refused during collection")
+        assert_eq(calls, 0, "bounded discovery retains references without Lua allocation")
+        assert_eq(GC_WIN_UNKNOWN_NAME_COUNT, MAX_GC_WINDOW_UNKNOWN_NAMES)
+        assert_eq(GC_WIN_UNKNOWN_SECTIONS, names.len() * 2, "every rejection is counted")
+        GC_WIN_FRAME += GC_WIN_N
+        GC_WIN_SECTION_REGISTRY_FROZEN = false
+        let diagnostic = gc_window_unknown_sections_json()
+        let json = json_decode(diagnostic).unwrap()
+        let rows = json_as_array(json_field(json, "sections").unwrap()).unwrap()
+        assert_eq(rows.len(), MAX_GC_WINDOW_UNKNOWN_NAMES, "diagnostics stay bounded")
+        let hits = json_as_int(json_field(json, "unretained_hits").unwrap()).unwrap()
+        for row in rows {
+            hits += json_as_int(json_field(row, "hits").unwrap()).unwrap()
+        }
+        assert_eq(hits, GC_WIN_UNKNOWN_SECTIONS, "retained and unretained hits account for all rejections")
+        assert_eq(json_as_str(json_field(rows[0], "name").unwrap()).unwrap(), names[0],
+            "control characters survive JSON encoding")
+        assert_eq(json_as_str(json_field(rows[1], "name").unwrap()).unwrap().len(), 256,
+            "long diagnostic names have a bounded output prefix")
+        assert_eq(json_as_int(json_field(rows[1], "name_bytes").unwrap()).unwrap(), names[1].len(),
+            "the prefix reports the original name length")
+        gc_window_clear_accounting()
+        assert_eq(GC_WIN_UNKNOWN_SECTIONS, 0)
+        assert_eq(GC_WIN_UNKNOWN_NAME_COUNT, 0)
+        assert(!gc_window_unknown_sections_json().contains("late.escaped"),
+            "the next window releases retained name references")
+    })
+}
+
+fn profiler_gc_declared_work() {
+    profile_declare_section("declared.work")
+    let declared = SECTION_COUNT
+    profile_declare_section("declared.work")
+    assert_eq(SECTION_COUNT, declared, "declaration is idempotent")
+    profiler_gc_unknown_fixture(() => {
+        let registered = SECTION_COUNT
+        let rows = SECTION_NAMES.len()
+        profile_frame_begin()
+        profile_frame_end()
+        profile_frame_begin()
+        profile_work("declared.work", 7)
+        profile_frame_end()
+        assert(GC_WIN_ACCOUNTING_VALID, "declared work survives profiler reset and first emits inside capture")
+        assert_eq(GC_WIN_UNKNOWN_SECTIONS, 0)
+        assert_eq(SECTION_COUNT, registered, "capture never admits a name it declared early")
+        assert(SECTION_NAMES.len() > rows, "the frozen window reserved its late rows")
+        let id = SECTION_IDS.get("declared.work").unwrap()
+        assert_eq(section_work_metric(id).count, 1, "declaration records no fake work samples")
+        assert_eq(section_work_metric(id).sum, 7.0)
+        assert_eq(GC_WIN_SECTION_EXCLUSIVE_SUM_RESULT, 0.0, "work units do not claim allocation")
+        assert(abs(GC_WIN_RESULT - GC_WIN_UNSECTIONED_RESULT) < 0.01,
+            "all gross requests remain accounted without timing sections")
+    })
+}
+
+@nomangle fn profiler_gc_unknown_case(which: int) {
+    if which == 0 { profiler_gc_late_admitted() }
+    if which == 1 { profiler_gc_unknown_warmup() }
+    if which == 2 { profiler_gc_unknown_cleanup() }
+    if which == 3 { profiler_gc_unknown_bounded() }
+    if which == 4 { profiler_gc_declared_work() }
+    if which == 5 { profiler_gc_late_exhaustion() }
+}
+
+@test
+fn profiler_gc_late_sections_are_attributed_without_allocating() { profiler_test_process("profiler_gc_unknown_case", 0) }
+@test
+fn profiler_gc_unknown_sections_wait_for_warmup_and_account_exclusively() { profiler_test_process("profiler_gc_unknown_case", 1) }
+@test
+fn profiler_gc_unknown_sections_cleanup_on_success_and_failure() { profiler_test_process("profiler_gc_unknown_case", 2) }
+@test
+fn profiler_gc_unknown_sections_are_bounded_and_allocation_free() { profiler_test_process("profiler_gc_unknown_case", 3) }
+@test
+fn profiler_gc_declared_work_is_admitted_before_capture() { profiler_test_process("profiler_gc_unknown_case", 4) }
+@test
+fn profiler_gc_late_pool_exhaustion_is_reported() { profiler_test_process("profiler_gc_unknown_case", 5) }

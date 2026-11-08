@@ -1,0 +1,89 @@
+// UI ghosts -- retained afterimages of skinned widgets. A feel fx (or
+// any UI code) pushes {skin, rect}; an anchored push also retains its world
+// point and design-space offset. The ghost redraws the skin fading and
+// slightly growing for `duration`, independent of the widget that
+// spawned it -- the widget (or its whole panel) can vanish the same
+// frame and the feedback still plays out. Same decoupling as
+// UI_PARTICLES: stepped every frame, no world_frozen gate, draws into
+// the z-sorted UI pool at the rect's z (caller picks via .at_z).
+// A UI ghost simulation pins this visibility and hit-testing behavior.
+
+// The dissolve uniform set, declared here because it is a CONVENTION the engine
+// writes and a game's shader reads (mag's `ui_dissolve_frag`) -- the same
+// relation `UiSdfBarU` has to `ui_sdf_bar_frag`. A packer needs a concrete type,
+// so the type must be engine-owned for the engine to fill the block.
+pub value UiDissolveU {
+    uDissolve: float,
+}
+
+pub struct UiGhost {
+    skin: Entity<UiSkin>,
+    rect: UiRect,
+    world_anchor: Vec2? = null,
+    world_offset: Vec2 = v(0.0, 0.0),
+    duration: float,
+    grow: float,
+    // Optional dissolve-style pipeline: the ghost draws through it and
+    // feeds `uDissolve` (age fraction, 0 whole -> 1 gone) per frame.
+    // null = plain alpha fade on the default shader.
+    pipeline: Pipeline? = null,
+    age: float = 0.0,
+}
+
+pub global UI_GHOSTS: Arena<UiGhost> = arena_new()
+
+@reset
+fn reset_ui_ghosts() {
+    UI_GHOSTS.clear()
+}
+
+// grow: design px the rect expands (per side) over the full fade.
+pub fn ui_ghost_push(skin: Entity<UiSkin>, r: UiRect, duration: float = 0.15, grow: float = 6.0, pipeline: Pipeline? = null) {
+    UI_GHOSTS.insert(UiGhost { skin: skin, rect: r, duration: duration, grow: grow, pipeline: pipeline })
+}
+
+pub fn ui_ghost_push_at_world(skin: Entity<UiSkin>, world_anchor: Vec2, r: UiRect,
+                          duration: float = 0.15, grow: float = 6.0,
+                          pipeline: Pipeline? = null) {
+    let projected = ui_at_world(world_anchor, v(0.0, 0.0), v(0.0, 0.0))
+    UI_GHOSTS.insert(UiGhost {
+        skin: skin,
+        rect: r,
+        world_anchor: world_anchor,
+        world_offset: v(r.x - projected.x, r.y - projected.y),
+        duration: duration,
+        grow: grow,
+        pipeline: pipeline,
+    })
+}
+
+pub @update(stage = 80)
+fn update_ui_ghosts() {
+    for (e, g) in UI_GHOSTS {
+        if let anchor = g.world_anchor {
+            if let view = resolve_active_view() {
+                let projected = world_to_screen_in(view, anchor) / view.ui_scale
+                g.rect = UiRect {
+                    ..g.rect,
+                    x: projected.x + g.world_offset.x,
+                    y: projected.y + g.world_offset.y,
+                }
+            }
+        }
+        g.age += dt
+        let t = g.age / g.duration
+
+        if t >= 1.0 {
+            e.remove()
+        } else {
+            let skin = g.skin.get().unwrap()
+            if g.pipeline != null {
+                let pl = g.pipeline.unwrap()
+                let batch = g.rect.inset(-(g.grow * t)).skin_batch(skin, WHITE.alpha(1.0 - t), pipeline: pl)
+                batch_block(batch, pl.shader_name, UiDissolveU { uDissolve: t })
+            } else {
+                g.rect.inset(-(g.grow * t)).skin(skin, WHITE.alpha(1.0 - t))
+            }
+        }
+    }
+}

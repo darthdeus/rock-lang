@@ -1,0 +1,46 @@
+// Tier-0 shared CPU/GPU math, callable from Rock shaders and CPU Rock code
+// alike. Keep these strictly tier 0 (float/int/bool/Vec2/3/4 + tier-0 math) so
+// the profile pass accepts them.
+
+pub @inline @pure fn remap(value: float, min1: float, max1: float, min2: float, max2: float) -> float {
+    return min2 + (value - min1) * (max2 - min2) / (max1 - min1)
+}
+
+pub @inline @pure fn map01(value: float, min1: float, max1: float) -> float {
+    return remap(value, min1, max1, 0.0, 1.0)
+}
+
+// Engine alias kept for existing CPU callers; same as map01.
+pub @inline @pure fn remap_to_01(value: float, min1: float, max1: float) -> float {
+    return map01(value, min1, max1)
+}
+
+// Component-wise form of `fract(sin(vec2(dot(p, k0), dot(p, k1))))`: GLSL's sin
+// and fract are per-component, so this is bit-identical to the vector form.
+pub @pure fn random2(p: Vec2) -> Vec2 {
+    let da = p.dot(v(127.32, 231.4))
+    let db = p.dot(v(12.3, 146.3))
+    return v(fract(sin(da)), fract(sin(db)))
+}
+
+// Not @pure: accumulates `dist` across the loop and calls the (unannotated) `min`.
+// The GLSL profile pass does not require @pure -- GLSL fns mutate locals freely.
+pub fn worley2(p: Vec2) -> float {
+    let dist = 1.0
+    let i_p = v(floor(p.x), floor(p.y))
+    let f_p = v(fract(p.x), fract(p.y))
+    for y in -1..2 {
+        for x in -1..2 {
+            let n = v(int_to_float(x), int_to_float(y))
+            let diff = n + random2(i_p + n) - f_p
+            dist = min(dist, diff.length())
+        }
+    }
+    return dist
+}
+
+fn flame_worley2(p: Vec2, time: float) -> float {
+    let n1 = 1.0 - worley2(p - v(0.0, time * 1.4))
+    let n2 = 1.0 - worley2(p * 2.3 - v(1.7, time * 2.4))
+    return n1 * 0.6 + n2 * 0.4
+}

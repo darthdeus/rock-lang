@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# Isolate window tests on Xvfb with a minimal i3 and fresh settings directories.
+set -euo pipefail
+
+fail() {
+    echo "private-display: $*" >&2
+    exit 1
+}
+
+[[ $# -gt 0 ]] || fail "usage: private-display <command> [args...]"
+
+xvfb_bin=$(command -v Xvfb || true)
+[[ -n $xvfb_bin ]] || fail "Xvfb not found on PATH; window tests need a private X server (xorg-server) and this tool never falls back to the inherited display"
+i3_bin=$(command -v i3 || true)
+[[ -n $i3_bin ]] || fail "i3 not found on PATH; window tests need a reparenting WM on the private display and this tool never falls back to a WM-less display"
+i3msg_bin=$(command -v i3-msg || true)
+[[ -n $i3msg_bin ]] || fail "i3-msg not found on PATH; needed to wait until i3 owns the private display"
+
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/private-display.XXXXXX")
+display_file="$scratch/display"
+log_file="$scratch/xvfb.log"
+i3_log="$scratch/i3.log"
+i3_config="$scratch/i3-config"
+i3_pid_file="$scratch/i3pid"
+lease="$scratch/lease"
+xvfb_pid=""
+i3_pid=""
+child_pid=""
+watcher_pid=""
+
+cleanup() {
+    if [[ -n $watcher_pid ]]; then
+        kill "$watcher_pid" 2>/dev/null || true
+        wait "$watcher_pid" 2>/dev/null || true
+    fi
+    if [[ -n $i3_pid ]] && kill -0 "$i3_pid" 2>/dev/null; then
+        kill "$i3_pid" 2>/dev/null || true
+        for _ in $(seq 1 100); do
+            kill -0 "$i3_pid" 2>/dev/null || break
+            sleep 0.05
+        done
+        kill -KILL "$i3_pid" 2>/dev/null || true
+        wait "$i3_pid" 2>/dev/null || true
+    fi
+    if [[ -n $xvfb_pid ]] && kill -0 "$xvfb_pid" 2>/dev/null; then
+        kill "$xvfb_pid" 2>/dev/null || true
+        wait "$xvfb_pid" 2>/dev/null || true
+    fi
+    rm -rf "$scratch"
+}
+trap cleanup EXIT
+
+# i3, Xvfb and i3-msg are system binaries: start and probe them without the
+# caller's LD_LIBRARY_PATH. Nix-store SDL2/loader directories can break i3's glib
+# (undefined symbol: g_dir_unref), killing the WM the focus tests need.
+# The test child below keeps the full environment.
+# Foreground probes only. The backgrounded servers below inline their own
+# `env -u ...` instead of calling this: a backgrounded function call makes
+# $! a subshell waiting on env, the cleanup kill misses the real server,
+# and Xvfb+i3 leak orphaned.
+scrub_env() {
+    env -u LD_LIBRARY_PATH -u DYLD_LIBRARY_PATH "$@"
+}
+# Server spawns below inline `env -u ...` directly (no function call) so
+# $! is the server itself.
+
+# -noreset keeps the server alive across client disconnects: a test that runs
+# two sequential child processes otherwise races the server reset and its
+# second XOpenDisplay fails. Xvfb's own stderr (xkbcomp keymap chatter) stays
+# out of the test output but is printed if the server fails to come up.
+env -u LD_LIBRARY_PATH -u DYLD_LIBRARY_PATH \
+    "$xvfb_bin" -displayfd 3 -screen 0 "${PRIVATE_DISPLAY_SCREEN:-1920x1080x24}" \
+    -nolisten tcp -noreset 3>"$display_file" 2>"$log_file" &
+xvfb_pid=$!
+
+# -displayfd writes the first free display number; read it instead of guessing.
+for _ in $(seq 1 400); do
+    [[ -s $display_file ]] && break
+    kill -0 "$xvfb_pid" 2>/dev/null || fail "Xvfb exited before reporting a display: $(cat "$log_file")"
+    sleep 0.05
+done
+[[ -s $display_file ]] || fail "Xvfb did not report a display within 20s: $(cat "$log_file")"
+display_number=$(tr -dc '0-9' < "$display_file")
+[[ -n $display_number ]] || fail "Xvfb reported no display number"
+
+export DISPLAY=":$display_number"
+# The private server has no session bus, keyring or compositor behind it.
+unset WAYLAND_DISPLAY XAUTHORITY
+# llvmpipe is the only GL driver Xvfb offers, and its rasterizer thread pool
+# deadlocks in screen teardown when many test processes create screens at
+# once: the main thread joins threads parked on a barrier. Serial
+# rasterization renders the same pixels without the thread pool.
+export LP_NUM_THREADS="${LP_NUM_THREADS:-0}"
+
+# Per-binary XDG isolation: the author's ~/.config/stone/window.toml pins
+# `display = 2`, which would throw test windows at the third monitor.
+mkdir -p "$scratch/xdg-config" "$scratch/xdg-state"
+export XDG_CONFIG_HOME="$scratch/xdg-config"
+export XDG_STATE_HOME="$scratch/xdg-state"
+
+# Generated i3 config: only the stone float rule and border none (the
+# author's desktop rule), no bar, no autostart. An explicit -c also skips
+# i3's first-run wizard.
+cat > "$i3_config" <<'EOF'
+font pango:monospace 8
+for_window [class="^stone$"] floating enable, border none
+EOF
+
+env -u LD_LIBRARY_PATH -u DYLD_LIBRARY_PATH \
+    "$i3_bin" -c "$i3_config" >"$i3_log" 2>&1 &
+i3_pid=$!
+echo "$i3_pid" > "$i3_pid_file"
+
+# i3-msg reaches i3 over the IPC socket path i3 publishes on the root
+# window, so success means i3 owns this display. Fail loudly instead of
+# running focus tests against a display with no WM.
+for _ in $(seq 1 400); do
+    kill -0 "$i3_pid" 2>/dev/null || fail "i3 exited before owning $DISPLAY: $(cat "$i3_log")"
+    if scrub_env "$i3msg_bin" -t get_version >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+scrub_env "$i3msg_bin" -t get_version >/dev/null 2>&1 \
+    || fail "i3 did not own $DISPLAY within 20s: $(cat "$i3_log")"
+
+# SIGKILL cannot be trapped, so a watcher stops i3 and Xvfb when this script
+# dies without running cleanup (nextest's hang backstop escalates to SIGKILL).
+# It blocks on a FIFO this script holds open, so the watcher needs no polling
+# child of its own; EOF means the writer is gone.
+mkfifo "$lease"
+exec 9<> "$lease"
+(
+    exec 9>&-
+    exec 8< "$lease"
+    while read -r -t 1 -u 8 _ || (( $? > 128 )); do :; done
+    if [[ -f "$i3_pid_file" ]]; then
+        kill "$(cat "$i3_pid_file")" 2>/dev/null || true
+    fi
+    kill "$xvfb_pid" 2>/dev/null || true
+) &
+watcher_pid=$!
+
+# The child runs in the background so a timeout signal is handled while the
+# test is still running instead of after it returns.
+"$@" <&0 9>&- &
+child_pid=$!
+
+forward() {
+    trap - INT TERM HUP
+    kill -s "$1" "$child_pid" 2>/dev/null || true
+    for _ in $(seq 1 100); do
+        kill -0 "$child_pid" 2>/dev/null || break
+        sleep 0.05
+    done
+    kill -KILL "$child_pid" 2>/dev/null || true
+    wait "$child_pid" 2>/dev/null || true
+    exit "$2"
+}
+trap 'forward INT 130' INT
+trap 'forward TERM 143' TERM
+trap 'forward HUP 129' HUP
+
+status=0
+wait "$child_pid" || status=$?
+trap - INT TERM HUP
+exit "$status"

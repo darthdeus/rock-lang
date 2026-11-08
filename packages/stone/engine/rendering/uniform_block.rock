@@ -1,0 +1,847 @@
+// A shader's std140 `@uniform` block, as the compiler laid it out.
+//
+// The compiler owns the layout; this file owns the memory. Registration binds
+// the block to a binding point, verifies the driver agrees with the plan, and
+// allocates ONE scratch buffer with its two typed views. Thereafter
+// `set_uniform_block` packs the caller's value straight into those views and
+// uploads the whole block.
+//
+// Names are a GL-only concept -- the block's members are resolved by name once,
+// at link time, and never again.
+
+// A block binds at the index its param ROLE gives it -- `@engine` 0, the vertex
+// group 1, the fragment group 2 -- shipped explicitly by the compiler, so a
+// program without an `@engine` group leaves slot 0 empty rather than sliding its
+// own block into it. `glBindBufferBase` binds to a GLOBAL index, so these are
+// re-bound per program switch in `stone_set_shader` -- two programs may both use
+// index 0.
+
+// Cast typed views once at registration. Keep scratch alive in this struct:
+// ffi.cast pointers do not anchor their target allocation.
+pub struct ShaderUniformBlock {
+    block: string,
+    // Where it actually bound. Kept rather than recomputed from list position:
+    // slot 0 is reserved for `@engine`, so position and binding are no longer
+    // the same number.
+    binding: int,
+    size: int,
+    fingerprint: int,
+    // The block's member names. Not used to bind anything -- the whole point is
+    // that binding is by slot -- but `GL_ACTIVE_UNIFORMS` enumerates block
+    // members too, so the by-name Pass validation needs to know which active
+    // uniforms are unreachable by name.
+    members: [string],
+    // Per member, parallel to `members`, straight from the compiler. A member
+    // with capacity 0 is a scalar: nothing may be array-written into it, and
+    // `array_block_push` rejects rather than treating it as a one-element array.
+    offsets: [int],
+    kinds: [int],
+    capacities: [int],
+    strides: [int],
+    scratch: NativeBufferU8,
+    fv: Ptr<float>,
+    iv: Ptr<int>,
+    // How many times this block has been uploaded, ever. The array lane's only
+    // oracle for "once per ACTIVATION, not once per batch": re-copying identical
+    // contents every batch is invisible to a pixel test, because the pixels are
+    // the same either way. Cleared by nothing -- a sim reads the delta across a
+    // window it drives itself.
+    uploads: int,
+    // Which screen-space engine block this scratch holds, or 0 for "packed by
+    // something else". `set_engine_uniforms` stamps it and is the only reader;
+    // every other packer clears it in `__upload_resolved_block`, so a block
+    // type that shares EngineU's layout cannot leave a stale stamp behind.
+    engine_stamp: int = 0,
+}
+
+// The binding index reserved for the `@engine` block, mirroring the compiler's
+// `UNIFORM_BLOCK_BINDING_ENGINE`. Reserved whether or not a program has one, so
+// a block arriving here is either the engine's or a mistake.
+const UNIFORM_BLOCK_BINDING_ENGINE: int = 0
+
+// The rest of the compiler's reserved bindings, mirrored. Each slot means one
+// thing whether or not a given program declares it -- that is what makes "the
+// engine block is at 0" and "this program's fragment arrays are at 4"
+// answerable without knowing what else the program declares.
+//
+// The per-stage SCALAR groups are here for the same reason, even though nothing
+// binds them by number: a caller asking how often a binding was uploaded needs
+// to name it, and a literal 2 at that call site is the sort of number this whole
+// lane exists to stop people writing.
+const UNIFORM_BLOCK_BINDING_VERTEX: int = 1
+pub const UNIFORM_BLOCK_BINDING_FRAGMENT: int = 2
+pub const UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS: int = 3
+pub const UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS: int = 4
+
+// `EngineU`'s layout identity, as the compiler computed it. Derived from the
+// type itself rather than written down, so a member added to `EngineU` moves
+// this with it.
+pub fn engine_block_fingerprint() -> int {
+    return uniform_block_id(engine_uniforms(v(0.0, 0.0)))
+}
+
+// The slot-0 policy, as a predicate rather than an inline condition: every other
+// way a registration can fail (a driver bind that rejects, a layout that does
+// not match the plan) also drops the entry, so "the program has no blocks" is
+// NOT a discriminant for this rule. Testing the policy directly is -- see
+// `bitgun/tests/sims/engine_block_binding.rock`.
+pub fn engine_binding_is_foreign(binding: int, fingerprint: int) -> bool {
+    return binding == UNIFORM_BLOCK_BINDING_ENGINE && fingerprint != engine_block_fingerprint()
+}
+
+pub struct ShaderUniformBlocks {
+    blocks: [ShaderUniformBlock],
+    by_fingerprint: Map<int, ShaderUniformBlock>,
+    by_name: Map<string, ShaderUniformBlock>,
+    by_binding: Map<int, ShaderUniformBlock>,
+    member_names: Map<string, bool>,
+}
+
+// Per shader key -> its blocks and lookup indexes. Assigned UNCONDITIONALLY at
+// registration (including the empty case, which REMOVES) -- a reloaded chunk
+// inherits whatever it does not assign, so a build that dropped a group would
+// otherwise keep the previous build's buffer, sized and fingerprinted for a
+// layout that no longer exists.
+pub global SHADER_UNIFORM_BLOCKS: Map<string, ShaderUniformBlocks> = map_new()
+
+// Which block a packed value belongs to. With one block per program the shader
+// name was enough; with one per STAGE it is not, and the value's TYPE is what
+// distinguishes them -- so the caller's expansion supplies its layout
+// fingerprint and the lookup matches on that.
+pub fn shader_block_by_fingerprint(shader_name: string, fingerprint: int) -> ShaderUniformBlock? {
+    // `if let` emits one nil guard; check-then-unwrap emits two, and the
+    // second is a trace exit on a value already proven non-null.
+    if let entry = SHADER_UNIFORM_BLOCKS.get(shader_name) {
+        return entry.by_fingerprint.get(fingerprint)
+    }
+    return null
+}
+
+fn shader_block_by_name(shader_name: string, block_name: string) -> ShaderUniformBlock? {
+    // `if let` emits one nil guard; check-then-unwrap emits two, and the
+    // second is a trace exit on a value already proven non-null.
+    if let entry = SHADER_UNIFORM_BLOCKS.get(shader_name) {
+        return entry.by_name.get(block_name)
+    }
+    return null
+}
+
+const SEMANTIC_WIRE_KIND_F32: int = 0
+const SEMANTIC_WIRE_KIND_F32X2: int = 1
+const SEMANTIC_WIRE_KIND_F32X3: int = 2
+const SEMANTIC_WIRE_KIND_F32X4: int = 3
+const SEMANTIC_WIRE_KIND_I32: int = 4
+const SEMANTIC_WIRE_KIND_U32: int = 7
+const SEMANTIC_WIRE_KIND_BOOL32: int = 5
+const SEMANTIC_WIRE_KIND_MAT4: int = 6
+
+fn semantic_uniform_components(kind: int) -> int {
+    if kind == SEMANTIC_WIRE_KIND_F32 { return 1 }
+    if kind == SEMANTIC_WIRE_KIND_F32X2 { return 2 }
+    if kind == SEMANTIC_WIRE_KIND_F32X3 { return 3 }
+    if kind == SEMANTIC_WIRE_KIND_F32X4 { return 4 }
+    if kind == SEMANTIC_WIRE_KIND_I32 || kind == SEMANTIC_WIRE_KIND_U32
+        || kind == SEMANTIC_WIRE_KIND_BOOL32 { return 1 }
+    if kind == SEMANTIC_WIRE_KIND_MAT4 { return 16 }
+    return 0
+}
+
+fn semantic_uniform_leaf_kind(leaf: CanonicalUniformLeaf) -> int {
+    match leaf {
+        CanonicalUniformLeaf::Float(_) => return SEMANTIC_WIRE_KIND_F32,
+        CanonicalUniformLeaf::Int(_) => return SEMANTIC_WIRE_KIND_I32,
+        CanonicalUniformLeaf::Uint(_) => return SEMANTIC_WIRE_KIND_U32,
+        CanonicalUniformLeaf::Bool(_) => return SEMANTIC_WIRE_KIND_BOOL32,
+    }
+}
+
+fn semantic_uniform_packet_matches(
+    packet: SemanticUniformBlock,
+    block: SemanticShaderBlock,
+) -> bool {
+    if block.role.contains("array_") || packet.fingerprint != block.fingerprint { return false }
+    let at = 0
+    for member in block.members {
+        let components = semantic_uniform_components(member.kind)
+        if components == 0 { return false }
+        let expected = if member.kind == SEMANTIC_WIRE_KIND_I32 {
+            SEMANTIC_WIRE_KIND_I32
+        } else if member.kind == SEMANTIC_WIRE_KIND_U32 {
+            SEMANTIC_WIRE_KIND_U32
+        } else if member.kind == SEMANTIC_WIRE_KIND_BOOL32 {
+            SEMANTIC_WIRE_KIND_BOOL32
+        } else {
+            SEMANTIC_WIRE_KIND_F32
+        }
+        for _ in 0..components {
+            if at >= packet.leaves.len() || semantic_uniform_leaf_kind(packet.leaves[at]) != expected {
+                return false
+            }
+            at += 1
+        }
+    }
+    return at == packet.leaves.len()
+}
+
+fn semantic_uniform_physical_block(
+    shader_name: string,
+    block: SemanticShaderBlock,
+) -> ShaderUniformBlock? {
+    let physical = shader_block_by_name(shader_name, block.name) ?? return null
+    if physical.members.len() != block.members.len() { return null }
+    for (i, member) in enumerate(block.members) {
+        if physical.members[i] != member.name || physical.kinds[i] != member.kind { return null }
+    }
+    return physical
+}
+
+fn new_owned_semantic_block(
+    shader_name: string,
+    packet: SemanticUniformBlock,
+    site: string,
+) -> OwnedUniformBlock? {
+    let interface = selected_shader_interface(shader_name) ?? return null
+    if interface.blocks.len() != 1 || !semantic_uniform_packet_matches(packet, interface.blocks[0]) {
+        log_once("SHADER", "semantic block `{shader_name}` does not match its selected interface", site)
+        return null
+    }
+    let physical = semantic_uniform_physical_block(shader_name, interface.blocks[0]) ?? return null
+    let bytes = native_buffer_u8(physical.size)
+    let out = OwnedUniformBlock {
+        size: physical.size,
+        fingerprint: physical.fingerprint,
+        bytes: bytes,
+        fv: __ub_float_view(bytes.ptr),
+        iv: __ub_int_view(bytes.ptr),
+    }
+    let at = 0
+    for (i, kind) in enumerate(physical.kinds) {
+        let components = semantic_uniform_components(kind)
+        let base = (physical.offsets[i] / 4) as int
+        for component in 0..components {
+            let leaf = packet.leaves[at]
+            let slot = base + component
+            match leaf {
+                CanonicalUniformLeaf::Float(value) => __ub_write_float(out.fv, slot, value),
+                CanonicalUniformLeaf::Int(value) => __ub_write_int(out.iv, slot, value),
+                CanonicalUniformLeaf::Uint(value) => __ub_write_int(out.iv, slot, bitcast<int>(value)),
+                CanonicalUniformLeaf::Bool(value) => __ub_write_int(out.iv, slot, if value { 1 } else { 0 }),
+            }
+            at += 1
+        }
+    }
+    return out
+}
+
+pub fn shader_uniform_block_count(shader_name: string) -> int {
+    let entry = SHADER_UNIFORM_BLOCKS.get(shader_name)
+    if entry == null { return 0 }
+    return entry.unwrap().blocks.len()
+}
+
+// Native C shader registration has already bound and driver-validated these
+// blocks before the generated publication hook runs. The Rock-side registry
+// still needs scratch storage for its packers, but must not bind a second GL
+// buffer for the same program.
+fn native_uniform_blocks(decls: [UniformBlockDecl]) -> [ShaderUniformBlock] {
+    let live: [ShaderUniformBlock] = vec_new()
+    for d in decls {
+        let scratch = native_buffer_u8(d.size)
+        live.push(ShaderUniformBlock {
+            block: d.name,
+            binding: d.binding,
+            size: d.size,
+            fingerprint: d.fingerprint,
+            members: d.members,
+            offsets: d.offsets,
+            kinds: d.kinds,
+            capacities: d.capacities,
+            strides: d.strides,
+            scratch: scratch,
+            fv: __ub_float_view(scratch.ptr),
+            iv: __ub_int_view(scratch.ptr),
+            uploads: 0,
+        })
+    }
+    return live
+}
+
+pub inline(lua) fn __ub_float_view(p: PtrU8) -> Ptr<float> = 'return ffi.cast("float*", p)'
+
+// Read one packed float back out. Inspection only (the pool-identity sims);
+// nothing on the flush path reads a block it wrote.
+pub inline(lua) fn __ub_read_float(p: Ptr<float>, i: int) -> float = "return p[i]"
+inline(lua) fn __ub_int_view(p: PtrU8) -> Ptr<int> = 'return ffi.cast("int32_t*", p)'
+
+// The member-name blob `stone_shader_check_uniform_block_layout` reads: NUL
+// separated, NUL terminated, with its byte length passed alongside.
+inline(lua) fn __ub_join_names(names: [string]) -> string = """
+    local parts = {}
+    for i = 1, names.len do parts[i] = names._data[i] end
+    return table.concat(parts, string.char(0)) .. string.char(0)
+"""
+
+inline(lua) fn __ub_str_len(s: string) -> int = "return #s"
+
+// Pointer element access for the array lane's strided scatter. `Ptr<T>` is not
+// indexable in Rock, and the scalar lane never needed these -- its packer is a
+// compiler expansion that writes through the views in generated code.
+pub inline(lua) fn __ub_write_float(p: Ptr<float>, i: int, v: float) = "p[i] = v"
+inline(lua) fn __ub_read_int(p: Ptr<int>, i: int) -> int = "return p[i]"
+inline(lua) fn __ub_write_int(p: Ptr<int>, i: int, v: int) = "p[i] = v"
+
+// Ask the driver where it actually put each member, and compare against the
+// plan. A PARTIAL oracle by construction: GL may optimize an inactive member
+// away and report no index, and those are skipped rather than failed, so full
+// coverage needs a shader that reads every field.
+//
+// This is what makes hot-reload layout drift loud instead of silent garbage.
+//
+// An ARRAY member is queried as `name[0]`, not `name`. GL enumerates a block's
+// array member under its zeroth element, and the bare spelling is accepted only
+// on some drivers -- where it is not, the lookup misses, the member is treated
+// as optimized-out and SKIPPED, and the check silently verifies nothing. For an
+// array block that is every member, which is the one case where the skip is not
+// partial coverage but a dead oracle.
+fn check_uniform_block_layout(sid: ShaderId, block: string, members: [string], offsets: [int],
+                              capacities: [int], size: int) -> bool {
+    let query: [string] = vec_new()
+    for (i, m) in enumerate(members) {
+        query.push(if capacities[i] > 0 { "{m}[0]" } else { m })
+    }
+    let blob = __ub_join_names(query)
+    let buf = native_buffer_int(offsets.len())
+    for (i, off) in enumerate(offsets) {
+        buf[i] = off
+    }
+    return stone_shader_check_uniform_block_layout(
+        transmute(sid.0), block, blob, __ub_str_len(blob), buf.ptr, offsets.len(), size
+    )
+}
+
+// Bind a CANDIDATE program's blocks and allocate their scratch, WITHOUT
+// touching any live registration. Returns null if the program is not fit to go
+// live -- a foreign block at the engine slot, a block the driver will not bind,
+// or a layout the driver disagrees with.
+fn build_uniform_blocks(key: string, sid: ShaderId, decls: [UniformBlockDecl]) -> [ShaderUniformBlock]? {
+    let live: [ShaderUniformBlock] = vec_new()
+    for d in decls {
+        // Slot 0 is the ENGINE's, and this is the check that makes "@engine is
+        // fixed and engine-owned" real rather than a comment. The COMPILER
+        // deliberately does not know `EngineU` by name -- that would be engine
+        // policy inside the language -- so it reserves the slot and ships a
+        // fingerprint, and the answer to "is it the engine's own?" is decided
+        // here, at registration.
+        //
+        // At registration and not at the draw-time unfilled-block gate: that
+        // gate only fires AFTER a program draws, and never at all for a program
+        // that registers and is never drawn.
+        if engine_binding_is_foreign(d.binding, d.fingerprint) {
+            log_error("SHADER", "uniform block: `{key}` declares `{d.name}` at the engine binding, but its layout is not the engine's `EngineU` -- @engine is fixed and engine-owned, so nothing would ever fill it")
+            return null
+        }
+        if !stone_shader_bind_uniform_block(transmute(sid.0), key, d.name, d.binding, d.size, d.fingerprint) {
+            log_error("SHADER", "uniform block: `{key}` failed to bind block `{d.name}`")
+            return null
+        }
+        if !check_uniform_block_layout(sid, d.name, d.members, d.offsets, d.capacities, d.size) {
+            log_error("SHADER", "uniform block: `{key}` block `{d.name}` does not match the compiler's layout")
+            return null
+        }
+        let scratch = native_buffer_u8(d.size)
+        live.push(ShaderUniformBlock {
+            block: d.name,
+            binding: d.binding,
+            size: d.size,
+            fingerprint: d.fingerprint,
+            members: d.members,
+            offsets: d.offsets,
+            kinds: d.kinds,
+            capacities: d.capacities,
+            strides: d.strides,
+            scratch: scratch,
+            fv: __ub_float_view(scratch.ptr),
+            iv: __ub_int_view(scratch.ptr),
+            uploads: 0,
+        })
+    }
+    return live
+}
+
+// Publish a validated program's blocks. Assigned UNCONDITIONALLY, including the
+// empty case (which REMOVES) -- a reloaded chunk inherits whatever it does not
+// assign, so a build that dropped a group would otherwise keep the previous
+// build's buffer, sized and fingerprinted for a layout that no longer exists.
+fn publish_uniform_blocks(key: string, live: [ShaderUniformBlock]) {
+    SHADER_UNIFORM_BLOCKS.remove(key)
+    if live.len() > 0 {
+        let by_fingerprint: Map<int, ShaderUniformBlock> = map_new()
+        let by_name: Map<string, ShaderUniformBlock> = map_new()
+        let by_binding: Map<int, ShaderUniformBlock> = map_new()
+        let member_names: Map<string, bool> = map_new()
+        for b in live {
+            by_fingerprint.insert(b.fingerprint, b)
+            by_name.insert(b.block, b)
+            by_binding.insert(b.binding, b)
+            for member in b.members {
+                member_names.insert(member, true)
+            }
+        }
+        SHADER_UNIFORM_BLOCKS.insert(key, ShaderUniformBlocks {
+            blocks: live,
+            by_fingerprint: by_fingerprint,
+            by_name: by_name,
+            by_binding: by_binding,
+            member_names: member_names,
+        })
+    }
+}
+
+// Whether `name` is a member of `shader_name`'s uniform block, and so cannot be
+// reached by `glGetUniformLocation` at all.
+//
+// `GL_ACTIVE_UNIFORMS` enumerates block members alongside loose uniforms, so a
+// by-name consumer sees them, asks for a location, gets -1 and writes nothing.
+// The compiler's member list is the authority on which those are.
+fn shader_uniform_is_block_member(shader_name: string, name: string) -> bool {
+    let entry = SHADER_UNIFORM_BLOCKS.get(shader_name)
+    if entry == null { return false }
+    return entry.unwrap().member_names.contains(name)
+}
+
+// Upload the scratch the public setter just packed. Keep this separate from
+// the packer so the caller can resolve and validate the runtime block first.
+//
+// `log_once` and not `log_error`: this runs per frame, and a broken upload
+// would otherwise emit a line per frame forever. Macro callers pass their own
+// source site explicitly.
+fn __upload_uniform_block(key: string, b: ShaderUniformBlock, site: string) {
+    let h = get_shader_handle(key)
+    if h == 0 {
+        log_once("SHADER", "set_uniform_block: `{key}` has no live shader", site)
+        return
+    }
+    if !stone_shader_upload_uniform_block(h, b.scratch.ptr, b.size, b.fingerprint) {
+        log_once("SHADER", "set_uniform_block: `{key}` upload rejected", site)
+        return
+    }
+    b.uploads += 1
+}
+
+// --- The array lane -------------------------------------------------------
+//
+// An array block is filled by an ORDERED payload: the caller pushes one
+// pointer+count per member, in the compiler's member order, and never spells a
+// name, an offset or a binding number. That is the rule the texture lane
+// settled on (`slot_inputs` over `inputs`) and it is here for the same reason --
+// a caller-chosen number is what lets two bindings collide silently.
+//
+// Order is enforced rather than trusted: the caller holds a cursor, each push
+// targets the member the cursor is on, and `array_block_upload` refuses a
+// payload that did not reach every member. A block uploaded with a member
+// missing would read whatever the last frame left there, which is precisely the
+// unfilled-block failure this lane already learned to make loud.
+
+// The compiler's wire-kind codes, mirrored. Kept as one table with one reader
+// so the correspondence is stated once; a `push` whose declared kind disagrees
+// with the caller's verb REJECTS, which is what turns this mapping from a claim
+// into something every draw exercises.
+pub const WIRE_KIND_F32: int = 0
+pub const WIRE_KIND_F32X2: int = 1
+pub const WIRE_KIND_F32X4: int = 3
+pub const WIRE_KIND_I32: int = 4
+const WIRE_KIND_U32: int = 7
+
+// Components per element for a wire kind, or 0 if it is not one an array holds.
+fn wire_kind_components(kind: int) -> int {
+    if kind == WIRE_KIND_F32 { return 1 }
+    if kind == WIRE_KIND_F32X2 { return 2 }
+    if kind == WIRE_KIND_F32X4 { return 4 }
+    if kind == WIRE_KIND_I32 { return 1 }
+    return 0
+}
+
+// Find `shader_name`'s array block at `binding`.
+//
+// Null when the program declares no such block -- a normal state for a shader
+// with no `@size(N)` params, and the caller's own business, so this does not
+// log. The callers that MUST find one assert it.
+pub fn array_block_find(shader_name: string, binding: int) -> ShaderUniformBlock? {
+    let entry = SHADER_UNIFORM_BLOCKS.get(shader_name)
+    if entry == null { return null }
+    return entry.unwrap().by_binding.get(binding)
+}
+
+// The shared body of the typed pushes: bounds-check against the compiler's
+// declared capacity and kind, then scatter `count` elements into std140's
+// strided slots.
+//
+// A strided scatter and not a memcpy, because std140 gives EVERY array element
+// a 16-byte slot whatever it holds: a `float[16]` is 16 floats spaced four
+// floats apart, not 16 contiguous ones. Only a `Vec4` array happens to be
+// contiguous, which is exactly why a `Vec4`-only fixture cannot catch a stride
+// bug (backlog 21).
+pub fn __array_push(shader_name: string, b: ShaderUniformBlock, cursor: int,
+                want_kind: int, src_f: Ptr<float>?, src_i: Ptr<int>?,
+                count: int, site: string) -> int {
+    if cursor >= b.members.len() {
+        log_once("SHADER", "array_block_push: `{shader_name}` block `{b.block}` has {b.members.len()} members; pushed more", site)
+        return -1
+    }
+    let i = cursor
+    let name = b.members[i]
+    let capacity = b.capacities[i]
+    if capacity == 0 {
+        log_once("SHADER", "array_block_push: `{b.block}.{name}` is not an array member", site)
+        return -1
+    }
+    if b.kinds[i] != want_kind {
+        log_once("SHADER", "array_block_push: `{b.block}.{name}` is wire kind {b.kinds[i]}, pushed as {want_kind}", site)
+        return -1
+    }
+    if count < 0 || count > capacity {
+        log_once("SHADER", "array_block_push: `{b.block}.{name}` holds {capacity} elements, pushed {count}", site)
+        return -1
+    }
+    let comps = wire_kind_components(want_kind)
+    // Both the offset and the stride are BYTES from the compiler; the views are
+    // 4-byte typed, so the index arithmetic divides once, here.
+    let base = b.offsets[i] ./ 4
+    let step = b.strides[i] ./ 4
+    let e = 0
+    while e < count {
+        let dst = base + e * step
+        let src = e * comps
+        let c = 0
+        while c < comps {
+            if src_i != null {
+                __ub_write_int(b.iv, dst + c, __ub_read_int(src_i.unwrap(), src + c))
+            } else if src_f != null {
+                __ub_write_float(b.fv, dst + c, __ub_read_float(src_f.unwrap(), src + c))
+            }
+            c += 1
+        }
+        e += 1
+    }
+    return i + 1
+}
+
+// One member of a deferred ordered payload -- a `Pass`'s arrays, where the
+// pushes cannot be written as a straight-line sequence because the pass is a
+// DESCRIPTION built in one place and run in another.
+//
+// The kind travels with the pointer so the same rejection applies as to a
+// direct push: a payload whose kind disagrees with the shader's declaration is
+// refused, not reinterpreted.
+pub struct PassArrayMember {
+    kind: int,
+    src_f: Ptr<float>? = null,
+    src_i: Ptr<int>? = null,
+    count: int,
+}
+
+pub fn pass_array_vec4(src: Ptr<float>, count: int) -> PassArrayMember {
+    return PassArrayMember { kind: WIRE_KIND_F32X4, src_f: src, count: count }
+}
+
+// Push a deferred payload into `shader_name`'s fragment array block and upload
+// it. Called from `run_pass_body` once the program is current.
+//
+// An empty payload against a shader that HAS an array block is left alone here
+// rather than half-filled: the draw-time unfilled-block gate is what reports it,
+// and it reports every such program uniformly instead of only the pass ones.
+fn apply_pass_arrays(shader_name: string, payload: [PassArrayMember], site: string) {
+    if payload.len() == 0 { return }
+    let block = array_block_find(shader_name, UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS)
+    if block == null {
+        log_once("SHADER", "pass arrays: `{shader_name}` declares no fragment array block, but the pass supplies {payload.len()} member(s)", site)
+        return
+    }
+    let found = block.unwrap()
+    let cursor = 0
+    for m in payload {
+        cursor = __array_push(shader_name, found, cursor,
+            m.kind, m.src_f, m.src_i, m.count, site)
+        if cursor < 0 { return }
+    }
+    array_block_upload(shader_name, found, cursor, site)
+}
+
+macro array_block_push_float(shader: expr, block: expr, cursor: expr, src: expr, count: expr) {
+    cursor = __array_push(shader, block, cursor, WIRE_KIND_F32, src, null, count, __SITE__)
+    cursor >= 0
+}
+
+macro array_block_push_vec2(shader: expr, block: expr, cursor: expr, src: expr, count: expr) {
+    cursor = __array_push(shader, block, cursor, WIRE_KIND_F32X2, src, null, count, __SITE__)
+    cursor >= 0
+}
+
+macro array_block_push_vec4(shader: expr, block: expr, cursor: expr, src: expr, count: expr) {
+    cursor = __array_push(shader, block, cursor, WIRE_KIND_F32X4, src, null, count, __SITE__)
+    cursor >= 0
+}
+
+macro array_block_push_int(shader: expr, block: expr, cursor: expr, src: expr, count: expr) {
+    cursor = __array_push(shader, block, cursor, WIRE_KIND_I32, null, src, count, __SITE__)
+    cursor >= 0
+}
+
+// Upload the whole array block, once the payload is complete.
+//
+// A short payload REFUSES rather than uploading what it has: the members the
+// caller did not reach would keep the previous activation's contents, and the
+// shader would read them as though they were this activation's -- stale light
+// positions on the right entities, which no oracle short of a pixel diff against
+// a known scene would notice.
+pub fn array_block_upload(
+    shader_name: string, b: ShaderUniformBlock, cursor: int, site: string
+) -> bool {
+    if cursor != b.members.len() {
+        log_once("SHADER", "array_block_upload: `{shader_name}` block `{b.block}` has {b.members.len()} members, payload supplied {cursor}", site)
+        return false
+    }
+    let h = get_shader_handle(shader_name)
+    if h == 0 {
+        log_once("SHADER", "array_block_upload: `{shader_name}` has no live shader", site)
+        return false
+    }
+    if !stone_shader_upload_uniform_block(h, b.scratch.ptr, b.size, b.fingerprint) {
+        log_once("SHADER", "array_block_upload: `{shader_name}` upload rejected", site)
+        return false
+    }
+    b.uploads += 1
+    return true
+}
+
+// How many times a program's block at `binding` has been uploaded, or -1 when
+// the program has no block there.
+//
+// The structural oracle for upload FREQUENCY. A pixel test cannot see the
+// difference between uploading once per activation and once per batch -- the
+// contents are identical either way -- so a sim drives a known number of draws
+// and reads this.
+//
+// Generic over the binding rather than array-only, because the array number
+// means nothing on its own: "the array block moved by 1" is equally consistent
+// with the frame having drawn one batch. The claim is that the arrays move LESS
+// than the per-draw work, so the per-draw work has to be MEASURED -- and the
+// scalar block at binding 2 is the population that measures it.
+pub fn shader_block_uploads(shader_name: string, binding: int) -> int {
+    let entry = SHADER_UNIFORM_BLOCKS.get(shader_name)
+    if entry == null { return -1 }
+    let block = entry.unwrap().by_binding.get(binding)
+    if block == null { return -1 }
+    return block.unwrap().uploads
+}
+
+// A block packed by a DESCRIPTION of a draw, uploaded when that draw happens.
+//
+// A `Pass` (the bloom pyramid builds a list and runs it later) and a
+// `RenderBatch` (queued during update, flushed at render) are both descriptions,
+// while a uniform block is immediate GL state. Several of them drive ONE shader
+// with different values -- every pyramid level, every sdf_bar on screen -- so
+// they cannot share that shader's single scratch: the last pack would win for
+// all of them. Each owner therefore holds its own packed bytes, uploaded against
+// its own draw. Allocated once per owner (the bloom chain is cached, batches are
+// pooled), so this is not per-frame.
+pub struct OwnedUniformBlock {
+    size: int,
+    fingerprint: int,
+    bytes: NativeBufferU8,
+    fv: Ptr<float>,
+    iv: Ptr<int>,
+}
+
+pub fn new_owned_block(shader_name: string, fingerprint: int, site: string) -> OwnedUniformBlock? {
+    let entry = shader_block_by_fingerprint(shader_name, fingerprint)
+    if entry == null {
+        log_once("SHADER", "`{shader_name}` has no uniform block with this layout", site)
+        return null
+    }
+    let b = entry.unwrap()
+    let bytes = native_buffer_u8(b.size)
+    return OwnedUniformBlock {
+        size: b.size,
+        fingerprint: b.fingerprint,
+        bytes: bytes,
+        fv: __ub_float_view(bytes.ptr),
+        iv: __ub_int_view(bytes.ptr),
+    }
+}
+
+// Upload an owner's packed block. Called once the owner's program is current
+// and its buffer bound -- `run_pass_body` after `set_shader`, the batch flush
+// from `apply_batch_uniforms`.
+fn upload_owned_block(shader_name: string, b: OwnedUniformBlock) {
+    let h = get_shader_handle(shader_name)
+    if h == 0 { return }
+    if !stone_shader_upload_uniform_block(h, b.bytes.ptr, b.size, b.fingerprint) {
+        log_once("SHADER", "owned block: `{shader_name}` upload rejected")
+        return
+    }
+    // Counted against the REGISTERED block even though the bytes are the
+    // owner's: the counter answers "how often does this binding get rewritten",
+    // and an upload path it cannot see is a hole that makes it lie later. The
+    // lookup is a scan of the program's handful of blocks, next to a GL upload.
+    let entry = shader_block_by_fingerprint(shader_name, b.fingerprint)
+    if entry != null {
+        entry.unwrap().uploads += 1
+    }
+}
+
+// The `Pass.block` form of `set_uniform_block`: pack now, upload at draw.
+// Keep this a macro so `u` is evaluated only after block allocation succeeds.
+macro pass_block(shader_name: expr, u: expr) {
+    let pb = new_owned_block(shader_name, uniform_block_id(u), __SITE__)
+    if pb != null {
+        let packed = pb.unwrap()
+        pack_uniform_block(packed.fv, packed.iv, u)
+    }
+    pb
+}
+
+// Frame command blocks share the same packed representation as persistent
+// owners, but their storage returns to this arena after the queued passes run.
+pub global FRAME_UNIFORM_BLOCKS: [OwnedUniformBlock] = []
+pub global FRAME_UNIFORM_BLOCK_FRAME: int = -1
+pub global FRAME_UNIFORM_BLOCK_CURSOR: int = 0
+
+pub fn new_frame_owned_block(shader_name: string, fingerprint: int, site: string) -> OwnedUniformBlock? {
+    if FRAME_UNIFORM_BLOCK_FRAME != RENDER_FRAME {
+        FRAME_UNIFORM_BLOCK_FRAME = RENDER_FRAME
+        FRAME_UNIFORM_BLOCK_CURSOR = 0
+    }
+
+    let found = -1
+    let i = FRAME_UNIFORM_BLOCK_CURSOR
+    while i < FRAME_UNIFORM_BLOCKS.len() {
+        if FRAME_UNIFORM_BLOCKS[i].fingerprint == fingerprint {
+            found = i
+            break
+        }
+        i += 1
+    }
+
+    if found < 0 {
+        let fresh = new_owned_block(shader_name, fingerprint, site) ?? return null
+        FRAME_UNIFORM_BLOCKS.push(fresh)
+        found = FRAME_UNIFORM_BLOCKS.len() - 1
+    }
+
+    if found != FRAME_UNIFORM_BLOCK_CURSOR {
+        let swap = FRAME_UNIFORM_BLOCKS[FRAME_UNIFORM_BLOCK_CURSOR]
+        FRAME_UNIFORM_BLOCKS[FRAME_UNIFORM_BLOCK_CURSOR] = FRAME_UNIFORM_BLOCKS[found]
+        FRAME_UNIFORM_BLOCKS[found] = swap
+    }
+    let out = FRAME_UNIFORM_BLOCKS[FRAME_UNIFORM_BLOCK_CURSOR]
+    FRAME_UNIFORM_BLOCK_CURSOR += 1
+    return out
+}
+
+macro frame_pass_block(shader_name: expr, u: expr) {
+    let pb = new_frame_owned_block(shader_name, uniform_block_id(u), __SITE__)
+    if pb != null {
+        let packed = pb.unwrap()
+        pack_uniform_block(packed.fv, packed.iv, u)
+    }
+    pb
+}
+
+macro gpu_draw_uniform_payload(draw: expr, shader_name: expr, u: expr) {
+    if GPU_TRACE_ON {
+        draw.semantic_block = uniform_values(u)
+        draw.block = null
+    } else {
+        draw.semantic_block = null
+        draw.block = frame_pass_block(shader_name, u)
+    }
+}
+
+// Reuse bytes the owner already holds if they match this layout, else allocate.
+// Batches and meshes are POOLED and a slot serves whatever draw lands on it, so
+// the fingerprint -- not the slot -- decides whether the held bytes fit. Reusing
+// them is why a steady-state frame packs into an allocation it already had,
+// which is the same reason the flat setters exist on this lane.
+pub fn owned_block_for(held: OwnedUniformBlock?, shader_name: string, fingerprint: int, site: string) -> OwnedUniformBlock? {
+    if held != null && held.unwrap().fingerprint == fingerprint { return held }
+    return new_owned_block(shader_name, fingerprint, site)
+}
+
+// The `RenderBatch` form: pack now, upload when the flush reaches this batch.
+// `block_frame` carries the flat store's staleness rule -- an occurrence slot
+// reused by a different draw must not upload last frame's pack.
+macro batch_block(b: expr, shader_name: expr, u: expr) {
+    let bb = owned_block_for(b.block, shader_name, uniform_block_id(u), __SITE__)
+    if bb != null {
+        let packed = bb.unwrap()
+        pack_uniform_block(packed.fv, packed.iv, u)
+        b.block = bb
+        b.block_frame = RENDER_FRAME
+    }
+}
+
+// The `SpriteMesh` form. An acquired mesh is a description too: it is filled
+// during update and forwards its block onto the batch `submit_mesh_into` builds
+// for it, so two acquires of the same shader keep their own values.
+macro mesh_block(m: expr, shader_name: expr, u: expr) {
+    let mb = owned_block_for(m.block, shader_name, uniform_block_id(u), __SITE__)
+    if mb != null {
+        let packed = mb.unwrap()
+        pack_uniform_block(packed.fv, packed.iv, u)
+        m.block = mb
+        m.block_frame = RENDER_FRAME
+    }
+}
+
+// The packing lane the public wrappers share: pack `u` into an ALREADY
+// RESOLVED block entry and upload it. They differ only in what they do when the
+// lookup misses, so this is everything after it.
+//
+// Takes `site` explicitly so macro callers can preserve their caller location.
+//
+// Takes the block by value, not as an optional: both callers have already
+// proven it non-null, and unwrapping it again here is the second nil guard the
+// notes on `shader_block_by_fingerprint` warn about -- a trace exit on the hot
+// per-block upload path, on a value nothing can have made null since.
+fn __upload_resolved_block<T>(
+    shader_name: string,
+    entry: ShaderUniformBlock,
+    u: T,
+    site: string
+) {
+    pack_uniform_block(entry.fv, entry.iv, u)
+    // The scratch now holds whatever `u` was. `set_engine_uniforms` stamps it
+    // again on the way out when that was the engine block; clearing here is
+    // what keeps the stamp honest for every other packer, including one whose
+    // block type happens to share the engine block's layout and so resolves to
+    // this same entry.
+    entry.engine_stamp = 0
+    __upload_uniform_block(shader_name, entry, site)
+}
+
+// Pack `u` into `shader_name`'s block and upload it. A missing block is a
+// caller error here -- the set-then-draw shape -- so it logs.
+pub fn set_uniform_block<T>(shader_name: string, u: T) {
+    if let entry = shader_block_by_fingerprint(shader_name, uniform_block_id(u)) {
+        __upload_resolved_block(shader_name, entry.unwrap(), u, __SITE__)
+    } else {
+        log_once("SHADER", "set_uniform_block: `{shader_name}` has no uniform block with this layout", __SITE__)
+    }
+}
+
+// The same upload for a caller whose shader may legitimately NOT declare this
+// block -- a custom pipeline declaring its own group, which is a normal state
+// rather than the missed set-then-draw `set_uniform_block` warns about.
+//
+// `u` is named twice but EVALUATED once, inside the branch: `uniform_block_id`
+// reads only its expression's TYPE and never lowers it (pinned by
+// `crates/skull/tests/uniform_block_pack.rs`). That is what keeps the value off
+// the hot path when the block is absent, and why this is not
+// `if block_present { set_uniform_block(..) }` -- that form looks the
+// fingerprint up twice and builds the value regardless.
+macro set_uniform_block_if_present(shader_name: expr, u: expr) {
+    if let entry = shader_block_by_fingerprint(shader_name, uniform_block_id(u)) {
+        __upload_resolved_block(shader_name, entry.unwrap(), u, __SITE__)
+    }
+}

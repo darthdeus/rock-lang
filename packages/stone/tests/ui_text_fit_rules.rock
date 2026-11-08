@@ -1,0 +1,47 @@
+fn ui_text_fit_with_font(body: fn()) {
+    let saved = DEFAULT_FONT
+    let font = load_font_metrics(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 48,
+        extra: "\u{00e9}").unwrap()
+    DEFAULT_FONT = font
+    defer { DEFAULT_FONT = saved; unload_font(font) }
+    body()
+}
+
+fn ui_text_fit_width(text: string) -> float { return measure_ui(text, 12.0).x }
+
+@test
+fn ui_fit_text_keeps_text_that_fits() {
+    ui_text_fit_with_font(() => {
+        let room = ui_text_fit_width("Fireball")
+        assert_eq(ui_fit_text("Fireball", room, 12.0), "Fireball", "exact fit is kept")
+        assert_eq(ui_fit_text("Fireball", room, 12.0, ellipsis: true), "Fireball",
+            "fitting text takes no ellipsis")
+        assert_eq(ui_fit_text("", 0.0, 12.0, ellipsis: true), "", "empty text stays empty")
+    })
+}
+
+@test
+fn ui_fit_text_cuts_overflow_to_the_longest_fitting_prefix() {
+    ui_text_fit_with_font(() => {
+        assert_eq(ui_fit_text("Fireball", ui_text_fit_width("Fire"), 12.0), "Fire",
+            "plain cut keeps the longest prefix that fits")
+        assert_eq(ui_fit_text("Fireball", ui_text_fit_width("Fir..."), 12.0, ellipsis: true),
+            "Fir...", "the ellipsis is measured with the prefix")
+        assert_eq(ui_fit_text("Fireball", 0.0, 12.0), "", "no room keeps nothing")
+        assert_eq(ui_fit_text("Fireball", 0.0, 12.0, ellipsis: true), "...",
+            "no room still marks the cut")
+    })
+}
+
+@test
+fn ui_fit_text_cuts_on_whole_glyphs() {
+    ui_text_fit_with_font(() => {
+        let e = "\u{00e9}"
+        let text = e + e + e + e + e
+        let plain = ui_fit_text(text, ui_text_fit_width(e + e) + 0.5 * ui_text_fit_width(e), 12.0)
+        assert_eq(plain, e + e, "a plain cut never splits a multi-byte glyph")
+        let marked = ui_fit_text(text, ui_text_fit_width(e + "...") + 0.5 * ui_text_fit_width(e),
+            12.0, ellipsis: true)
+        assert_eq(marked, e + "...", "an ellipsis cut never splits a multi-byte glyph")
+    })
+}

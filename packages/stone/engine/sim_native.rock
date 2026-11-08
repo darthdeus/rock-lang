@@ -1,0 +1,71 @@
+
+// Rock's reader of the native resource ledger (`stone-rs/src/native_ledger.rs`):
+// which classes exist, which handles of each are live, and the id accounting
+// that checks a class's live set against the allocator. Sim fixtures read it.
+
+// The class list comes from the engine, never from a second list here.
+pub fn sim_native_classes() -> [string] {
+    let out: [string] = []
+    for i in 0..stone_native_class_count() {
+        let name = stone_native_class_name(i)
+        if name == null {
+            log_error("SIM", "native ledger class {i} has no name")
+            continue
+        }
+        out.push(name.unwrap())
+    }
+    return out
+}
+
+// A class the engine does not know is a refusal, not an empty set.
+pub fn sim_native_live(class: string) -> string {
+    let live = stone_native_live_handles(class)
+    if live == null {
+        log_error("SIM", "native ledger: unknown resource class '{class}'")
+        return "?"
+    }
+    return live.unwrap()
+}
+
+pub fn sim_native_split(csv: string) -> [string] {
+    if csv == "" { return [] }
+    return csv.split(",")
+}
+
+pub fn sim_native_contains(handles: [string], handle: string) -> bool {
+    for h in handles {
+        if h == handle { return true }
+    }
+    return false
+}
+
+// One field of one class's id-accounting row, or -1 when the report has no such
+// class or field. Three states for the reason the ledger's own entry points
+// have three: 0 is a legitimate value for every field here, so a two-state
+// answer would read a drifted class name as a clean count.
+pub fn sim_native_id_field(class: string, field: string) -> int {
+    let report = stone_native_id_accounting()
+    if report == null { return -1 }
+    for row in report.unwrap().split("; ") {
+        if !row.starts_with(class + ":") { continue }
+        for kv in row.split(":")[1].split(",") {
+            let parts = kv.split("=")
+            if parts[0] == field { return parts[1].parse_int() ?? -1 }
+        }
+    }
+    return -1
+}
+
+// One field of the accounting SUMMARY (`classes`, `issued`, `live`, `retired`,
+// `unaccounted`, `unissued`), or -1 when absent. `classes` is the denominator a
+// caller must assert: a summary of zero classes reports zero of everything else
+// and reads exactly like a clean world.
+pub fn sim_native_id_total(field: string) -> int {
+    let report = stone_native_id_accounting()
+    if report == null { return -1 }
+    for kv in report.unwrap().split("; ")[0].split(" ") {
+        let parts = kv.split("=")
+        if parts[0] == field { return parts[1].parse_int() ?? -1 }
+    }
+    return -1
+}

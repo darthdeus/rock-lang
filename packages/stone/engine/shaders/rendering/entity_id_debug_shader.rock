@@ -1,0 +1,32 @@
+// Entity-id debug overlay (ENGINE.debug_draw_entity_id, outline.rock): samples
+// the visible_id canvas and hashes each id to a distinct RGB; id<=0 discards.
+//
+// Compiled in-game via `rock_shader(entity_id_debug_frag)` (single-arg
+// fullscreen form); `EntityIdTex` is the Pass slot group
+// (id_buffer 0).
+
+// An INTEGER sampler group: the id canvas is r32i, and reading it through a
+// float sampler is undefined rather than lossy.
+struct EntityIdTex {
+    id_buffer: ISampler2D,
+}
+
+@shader(fragment)
+fn entity_id_debug_frag(@textures t: EntityIdTex, tc: Vec2) -> Vec4 {
+    let id = texture_id(t.id_buffer, tc)
+    if id <= 0 {
+        discard()
+    }
+
+    let idf = int_to_float(id)
+    let c = v(
+        fract(idf * 0.613 + 0.1),
+        fract(idf * 0.337 + 0.5),
+        fract(idf * 0.879 + 0.3),
+    )
+    // Per-channel remap [0,1] -> [0.3,1.0] (= GLSL mix(0.3, 1.0, c)); lerp's
+    // vec overloads take a scalar t, so the vec-factor mix is written out.
+    let shade = v(0.3, 0.3, 0.3) + c * 0.7
+
+    return v(shade, 0.85)
+}

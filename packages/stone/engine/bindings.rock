@@ -1,0 +1,1233 @@
+pub newtype Image(int)
+pub newtype ImageData(int)
+pub newtype ShaderId(int)
+// Retained GPU mesh upload (`rendering/gpu_mesh.rock`).
+pub newtype MeshId(int)
+pub struct SoundData {
+    backend_id: int,
+    // Asset-relative source path; used to match the changed file on hot reload.
+    // "" for sounds with no watchable file (music streams from disk).
+    path: string,
+}
+pub value Sound {
+    handle: Entity<SoundData>,
+}
+global SOUND_REGISTRY: Arena<SoundData> = arena_new()
+
+// Resolve a Sound to its SoundData. Returns null for a stale handle
+// (sound was unloaded). Callers should `?? return` on null.
+pub fn data(self: Sound) -> SoundData? {
+    return self.handle.get()
+}
+
+pub newtype CanvasId(int)
+// The handle identifies native storage; width/height are a value snapshot.
+// GL resize preserves the handle but returns a new snapshot. Retained sampler
+// bindings must use sampled_texture_matches_canvas; cached sampling uniforms
+// must also key backing dimensions and active extents. Attachments live in
+// the host registry.
+pub value Canvas {
+    handle: CanvasId,
+    width: float,
+    height: float,
+}
+
+// The zero canvas. `handle.0 == 0` is already the engine's spelling for "no
+// canvas" -- every primitive guards on it (destroy, bind, set_canvas_active,
+// resize, liveness) -- so a slot that is filled later starts here instead of
+// unset, and a reader never has to tell "not allocated yet" from "gone".
+pub const NO_CANVAS: Canvas = Canvas { handle: CanvasId(0), width: 0.0, height: 0.0 }
+
+pub enum SampledTexture {
+    Image(Image),
+    Canvas(Canvas),
+}
+
+// Persistent authored color canvases (for example stain snapshots) are sRGB;
+// render targets are linear by default. This is color-slot metadata, never data-slot decoding.
+pub global SRGB_COLOR_CANVASES: Map<int, bool> = map_new()
+
+pub fn canvas_color_srgb(canvas: Canvas) {
+    SRGB_COLOR_CANVASES[canvas.handle.0] = true
+}
+
+pub fn sampled_color_srgb(source: SampledTexture) -> bool {
+    match source {
+        SampledTexture::Image(_) => return true,
+        SampledTexture::Canvas(canvas) => return SRGB_COLOR_CANVASES.get(canvas.handle.0) ?? false,
+    }
+}
+
+// The filter each logical Image was declared with at its producing boundary.
+// A draw with no explicit sampling reads its default from here, so an
+// unregistered handle is a producer bug, not a reason to guess: guessing
+// Nearest is invisible on the pixel-art path and wrong everywhere else.
+// Keyed by the IMAGE-REGISTRY handle -- a Canvas carries a raw GL texture id
+// from a different space and never appears here.
+global IMAGE_SAMPLING: Map<int, TextureFilter> = map_new()
+
+// Every producing boundary calls this: asset loads, ImageData uploads, the
+// white pixel, and font atlases.
+pub fn register_image(handle: int, sampling: TextureFilter) -> Image {
+    // Creation failed. Recording `sampling` against 0 would redeclare the
+    // shared sentinel for every other holder of it, so a failed Linear load
+    // would turn the white pixel Linear process-wide. The caller's own
+    // handle-0 check reports the failure.
+    if handle == 0 {
+        return Image(0)
+    }
+    // A handle's declaration is write-once. Two producers disagreeing about
+    // one texture is a bug in them, and taking the later write would make the
+    // answer depend on load order.
+    let existing = IMAGE_SAMPLING.get(handle)
+    if existing != null && existing.unwrap() != sampling {
+        error("register_image: Image({handle}) is already declared {existing.unwrap()}; it cannot be redeclared {sampling}")
+    }
+    IMAGE_SAMPLING.insert(handle, sampling)
+    return Image(handle)
+}
+
+// Image(0) is the "no texture" sentinel (an unloaded font atlas slot, a
+// RectBatch's default, a failed load). It resolves to the white pixel at
+// submit, so it is registered rather than left to fault.
+fn register_image_sentinel() {
+    IMAGE_SAMPLING.insert(0, TextureFilter::Nearest)
+}
+
+pub @inline
+fn image_sampling(image: Image) -> TextureFilter {
+    let declared = IMAGE_SAMPLING.get(image.0)
+    if declared == null {
+        error("image_sampling: Image({image.0}) was never registered -- every image-producing boundary must call register_image")
+    }
+    return declared.unwrap()
+}
+
+pub fn sampled_image(image: Image) -> SampledTexture {
+    return SampledTexture::Image(image)
+}
+
+pub fn sampled_canvas(canvas: Canvas) -> SampledTexture {
+    return SampledTexture::Canvas(canvas)
+}
+
+// Interpolation emits `tostring`, which LuaJIT records without a loop. The
+// earlier digit loop was straight-line only below 1000; handles pass that in a
+// long session, and every root trace building a batch key (`sampled_texture_key`,
+// `batch_key_of`) then aborted `inner loop in root trace` against it
+// A negative handle still yields "", as it always has.
+pub fn gpu_handle_text(handle: CanvasId) -> string {
+    let n = handle.0
+    if n < 0 { return "" }
+    return "{n}"
+}
+
+pub fn sampled_texture_default_sampling(texture: SampledTexture) -> TextureFilter {
+    match texture {
+        SampledTexture::Image(image) => return image_sampling(image),
+        SampledTexture::Canvas(_canvas) => return TextureFilter::Nearest,
+    }
+}
+
+pub fn resolve_sampling(texture: SampledTexture, override: TextureFilter?) -> TextureFilter {
+    return override ?? sampled_texture_default_sampling(texture)
+}
+
+pub fn sampled_texture_dims(texture: SampledTexture) -> IVec2 {
+    match texture {
+        SampledTexture::Image(image) => return image_dims(image),
+        SampledTexture::Canvas(canvas) => return iv(int(canvas.width), int(canvas.height)),
+    }
+}
+
+pub fn sampled_texture_is_live(texture: SampledTexture) -> bool {
+    match texture {
+        SampledTexture::Image(image) => {
+            if image.0 == 0 { return false }
+            return stone_image_exists(image.0)
+        }
+        SampledTexture::Canvas(canvas) => return canvas_is_live(canvas),
+    }
+}
+
+// Failed decodes publish a complete diagnostic checker, but never claim residency.
+pub fn sampled_texture_complete(texture: SampledTexture) -> bool {
+    if !sampled_texture_is_live(texture) { return false }
+    match texture {
+        SampledTexture::Image(image) => return image_load_ready(image) || image_load_decode_failed(image),
+        SampledTexture::Canvas(_) => return true,
+    }
+}
+
+pub fn sampled_texture_key(texture: SampledTexture) -> string {
+    match texture {
+        SampledTexture::Image(image) => return "image:{gpu_handle_text(CanvasId(image.0))}",
+        SampledTexture::Canvas(canvas) => return "canvas:{gpu_handle_text(canvas.handle)}",
+    }
+}
+
+pub fn sampled_texture_sampler_key(texture: SampledTexture) -> int {
+    match texture {
+        SampledTexture::Image(image) => return image.0,
+        SampledTexture::Canvas(_canvas) => return 0,
+    }
+}
+
+pub fn sampled_texture_backend_key(texture: SampledTexture) -> int {
+    match texture {
+        SampledTexture::Image(image) => return image.0,
+        SampledTexture::Canvas(canvas) => return canvas.handle.0,
+    }
+}
+
+pub fn sampled_texture_kind(texture: SampledTexture) -> int {
+    match texture {
+        SampledTexture::Image(_image) => return 0,
+        SampledTexture::Canvas(_canvas) => return 1,
+    }
+}
+
+pub fn sampled_texture_render_keys(texture: SampledTexture) -> (int, int, int) {
+    match texture {
+        SampledTexture::Image(image) => return (0, image.0, image.0),
+        SampledTexture::Canvas(canvas) => return (1, canvas.handle.0, 0),
+    }
+}
+
+fn sampled_texture_is_empty(texture: SampledTexture) -> bool {
+    match texture {
+        SampledTexture::Image(image) => return image.0 == 0,
+        SampledTexture::Canvas(_canvas) => return false,
+    }
+}
+
+pub fn sampled_texture_is_canvas(source: SampledTexture, canvas: Canvas) -> bool {
+    match source {
+        SampledTexture::Image(_image) => return false,
+        SampledTexture::Canvas(actual) => return actual.handle.0 == canvas.handle.0,
+    }
+}
+
+// Whether a retained binding still describes `canvas`. A resize keeps the
+// handle, and the pass executor derives input 0's UV scale from the extent the
+// bound Canvas value carries, so a cached binding must match both.
+pub fn sampled_texture_matches_canvas(source: SampledTexture, canvas: Canvas) -> bool {
+    match source {
+        SampledTexture::Image(_image) => return false,
+        SampledTexture::Canvas(actual) => return actual.handle.0 == canvas.handle.0
+            && actual.width == canvas.width && actual.height == canvas.height,
+    }
+}
+
+fn bind_sampled_texture_to_unit(texture: SampledTexture, unit: int) -> bool {
+    match texture {
+        SampledTexture::Image(image) => return stone_bind_image_texture_to_unit(image.0, unit),
+        SampledTexture::Canvas(canvas) => return stone_bind_canvas_texture_to_unit(canvas.handle.0, unit),
+    }
+}
+
+pub fn image_data_rgba8(data: ImageData, width: int, height: int) -> NativeBufferU8 {
+    let rgba = native_buffer_u8(width * height * 4)
+    if !stone_image_data_read_rgba(data.0, rgba.ptr, width * height) {
+        error("image_data_rgba8: ImageData({data.0}) has no live {width}x{height} extent")
+    }
+    return rgba
+}
+
+pub fn new_image_from_data(data: ImageData, sampling: TextureFilter = TextureFilter::Nearest) -> Image {
+    return register_image(
+        stone_new_image_from_data(data.0, texture_filter_to_int(sampling)), sampling)
+}
+
+// An ordinary decoded asset uploaded as a native texture. Returns its raw
+// handle, or 0.
+// `exact_texels` declares that this file's texels are read individually rather
+// than sampled as colour, which withholds `STONE_IMAGE_MAX_SIDE` from it.
+// `deferred` lets the frame's flush skip this decode; it publishes through the
+// budgeted pump (`image_load_ready`).
+pub enum ImageAssetFormat { Rgba8, DepthRg8, R8, MaterialRg8 }
+
+pub fn load_image_handle(resolved: string, sampling: TextureFilter, exact_texels: bool = false,
+    deferred: bool = false, format: ImageAssetFormat = ImageAssetFormat::Rgba8,
+    logical_size: IVec2? = null) -> int {
+    let flags = (if exact_texels { IMAGE_LOAD_EXACT_TEXELS } else { 0 })
+        + (if deferred { IMAGE_LOAD_DEFERRED } else { 0 })
+        + (if format == ImageAssetFormat::DepthRg8 { IMAGE_LOAD_DEPTH_RG8 } else { 0 })
+        + (if format == ImageAssetFormat::MaterialRg8 { IMAGE_LOAD_MATERIAL_RG8 } else { 0 })
+    if format == ImageAssetFormat::R8 {
+        error("load_image_handle: R8 is reserved for native coverage images")
+    }
+    let size = logical_size ?? iv(0, 0)
+    return stone_load_image(resolved, texture_filter_to_int(sampling), flags, size.x, size.y)
+}
+
+// Re-decode `path` into the texture `image` already names, keeping the handle so
+// every Image scattered through game state stays valid. False is a refusal the
+// caller reports.
+pub fn reload_image(image: Image, path: string) -> bool {
+    return stone_reload_image(image.0, path)
+}
+
+// True once a load's pixels are published.
+pub fn image_load_ready(image: Image) -> bool {
+    return stone_image_ready(image.0)
+}
+
+// Makes the next flush wait for a deferred load; false when it was not pending
+// as deferred (already published or already required).
+pub fn image_load_require(image: Image) -> bool {
+    return stone_image_require(image.0)
+}
+
+// Whether the image's deferred decode failed.
+pub fn image_load_decode_failed(image: Image) -> bool {
+    return stone_image_decode_failed(image.0)
+}
+
+// Decoded bytes of loads not yet published.
+pub fn image_loads_pending_bytes() -> int {
+    return stone_image_pending_bytes()
+}
+
+pub fn destroy_image(image: Image) {
+    if image.0 == 0 { return }
+    // A handle another path already retired is skipped.
+    if !sampled_texture_is_live(SampledTexture::Image(image)) {
+        IMAGE_SAMPLING.remove(image.0)
+        return
+    }
+    stone_unload_image(image.0)
+    IMAGE_SAMPLING.remove(image.0)
+}
+
+// REPEAT wrap supports scrolling UVs on standalone images.
+// Standalone images only -- an atlas region cannot repeat.
+pub fn image_set_wrap(img: Image, wrap_repeat: bool) {
+    if !stone_image_set_wrap(img.0, wrap_repeat) {
+        error("image_set_wrap: invalid image handle {img.0}")
+    }
+}
+
+fn create_white_pixel_image() -> Image {
+    return register_image(stone_get_white_image(), TextureFilter::Nearest)
+}
+
+pub fn image_data_set_pixel(
+    data: ImageData,
+    x: int,
+    y: int,
+    r: float,
+    g: float,
+    b: float,
+    a: float
+) {
+    stone_image_data_set_pixel(data.0, x, y, r, g, b, a)
+}
+
+pub fn image_data_get_pixel(data: ImageData, x: int, y: int) -> (float, float, float, float) {
+    return stone_image_data_get_pixel(data.0, x, y)
+}
+
+pub fn image_replace_pixels(image: Image, data: ImageData) {
+    if !stone_image_update_from_data(image.0, data.0) {
+        log_once("IMAGE", "image_replace_pixels: stone_image_update_from_data rejected (stale handle or size mismatch)", "image_replace_pixels_fail")
+    }
+}
+
+// Window functions - call Stone directly
+inline(lua) fn set_window_title(title: string) = "stone.stone_set_window_title(nil, title)"
+
+// Input functions - call Stone directly
+fn get_mouse_x() -> float {
+    let pos = stone_get_mouse_position()
+    return transmute(pos.x)
+}
+
+fn get_mouse_y() -> float {
+    let pos = stone_get_mouse_position()
+    return transmute(pos.y)
+}
+
+fn is_mouse_button_down(button: float) -> bool {
+    return stone_is_mouse_button_down(transmute(button))
+}
+
+pub fn is_key_held(key: string) -> bool {
+    return stone_is_key_down(key)
+}
+
+pub fn new_image_data(width: int, height: int) -> ImageData {
+    return ImageData(stone_create_image_data(width, height))
+}
+
+// Encode an ImageData to disk via the `image` crate (stone-rs).
+// `format` parameter retained for API stability; the codec is selected
+// from the file extension by `image::save_buffer`. Today only PNG is
+// exercised. `filename` is asset-relative by default (mirrors
+// load_image_asset); absolute paths pass through asset_path unchanged.
+pub fn image_data_encode(data: ImageData, format: string, filename: string) -> bool {
+    let _ = format
+    return stone_image_data_save_png(data.0, asset_path(filename))
+}
+
+// Decode a PNG (or any format `image` recognizes) from an asset path into a
+// fresh ImageData handle. Returns null on failure. `filename` follows
+// the same asset-relative convention as load_image_asset.
+pub fn load_image_data(filename: string) -> ImageData? {
+    let handle = stone_image_data_load_png(asset_path(filename))
+    if handle == 0 {
+        return null
+    }
+    return ImageData(handle)
+}
+
+pub fn load_image_data_bytes(bytes: NativeBufferU8) -> ImageData? {
+    if bytes.len <= 0 { return null }
+    let handle = stone_image_data_load_png_bytes(bytes.ptr, bytes.len)
+    if handle == 0 { return null }
+    return ImageData(handle)
+}
+
+// Graphics functions - call Stone C API directly
+pub fn clear_screen(r: float, g: float, b: float, a: float) {
+    stone_clear_canvas(r, g, b, a)
+}
+
+// Point a sampler uniform at a texture unit. Under `@textures` this runs once
+// per slot at link time, never per draw.
+inline(lua) fn stone_shader_set_texture(shader: ShaderId, name: string, unit: int) = """
+    stone.stone_shader_set_texture(shader, name, unit)
+"""
+
+pub fn get_screen_width() -> float {
+    let (w, _) = stone_get_window_size()
+    return float(w)
+}
+
+pub fn get_screen_height() -> float {
+    let (_, h) = stone_get_window_size()
+    return float(h)
+}
+
+// Rock-side shadow of the GL blend state. Every set_blend_mode call
+// updates it, so with_blend_mode can restore the caller's PRIOR mode
+// with no stone-side state-read API (same trick as CURRENT_RENDER_POOL,
+// see with_draw_pool). Engine boots in Alpha.
+pub global CURRENT_BLEND: BlendMode = BlendMode::Alpha
+
+// Blend mode - typed enum over the FFI int (blend_mode_to_int mirrors
+// the Rust match). An unknown mode is unrepresentable, which is exactly
+// the class that produced the silent lighten->replace bug (56c024b77).
+pub fn set_blend_mode(mode: BlendMode) {
+    CURRENT_BLEND = mode
+    stone_set_blend_mode_i(blend_mode_to_int(mode))
+}
+
+// Audio loading - use Stone C API. A failed FFI load yields a Sound with
+// backend_id=0; play_sound silently no-ops on it. "static" admits PCM;
+// "stream" admits the encoded file and decodes per voice (looped beds).
+pub fn load_audio(path: string, ty: string, recipe: SoundRecipe? = null) -> Sound {
+    let full_path = asset_path(path)
+    let sound_source = ty == "static" || ty == "stream"
+    let frames = recipe?.frames ?? 0
+    let rate = recipe?.rate ?? 0
+    let channels = recipe?.channels ?? 0
+    let id = if ty == "static" {
+        stone_load_sound_deferred(full_path, frames, rate, channels)
+    } else if ty == "stream" {
+        stone_load_sound_stream(full_path, frames, rate, channels)
+    } else {
+        stone_load_music(full_path)
+    }
+    if id == 0 {
+        // Keyed on the PATH -- see the same note in assets.rock's image loader.
+        // The native loader logs the cause; the path goes on the second line
+        // so every failed sound is one counted row.
+        log_once("AUDIO", "audio asset failed to load; its sounds are silent\n{path} (asset_path: {full_path})", "load_audio:{path}")
+    }
+    // Only sound sources reload in place (music streams from disk on play), so
+    // only they carry a path + get watched.
+    let watch_path = if sound_source { path } else { "" }
+    let entity = SOUND_REGISTRY.insert(SoundData { backend_id: id, path: watch_path })
+    if id != 0 && recipe != null { sound_residency_register_recipe(id, recipe.unwrap()) }
+    // Static PCM starts decoding now so the whole bank is resident shortly
+    // after boot; streams admit when a loop first wants them.
+    if id != 0 && ty == "static" { let _ = stone_sound_admit(id) }
+    // Not in a sim: nobody is editing assets there, and registering the
+    // watch is real work -- MAG's bank names 112 sources across 31 directories,
+    // which is 31 `notify` FSEvents streams plus a `canonicalize` per source,
+    // measured at 50ms of a boot. A sim that tests reloading declares its watch
+    // through `watch_exact_file`, which calls `stone_watch_asset` directly and
+    // is untouched by this.
+    if ASSET_DEV_MODE && sound_source && id != 0
+        && !sim_mode_active() {
+        stone_watch_asset(full_path)
+    }
+    return Sound { handle: entity }
+}
+
+fn sound_known(sound: Sound) -> bool {
+    let d = sound.data() ?? return false
+    return d.backend_id != 0
+}
+
+// Admitted for playback: resident PCM, or a stream source's encoded file.
+// `stone_sound_resident` alone answers whether PCM is held.
+pub fn sound_resident(sound: Sound) -> bool {
+    let d = sound.data() ?? return false
+    return d.backend_id != 0 && stone_sound_playable(d.backend_id)
+}
+
+pub fn sound_is_stream(sound: Sound) -> bool {
+    let d = sound.data() ?? return false
+    return d.backend_id != 0 && stone_sound_stream_bytes(d.backend_id) >= 0
+}
+
+// Audio volume control - no-op for now
+pub @pure
+fn set_volume(_volume: float) {}
+
+// Direct Stone C API for image dimensions
+pub @inline
+fn image_dims(image: Image) -> IVec2 {
+    let (w, h) = stone_get_image_size(image.0)
+    return IVec2 { x: w, y: h }
+}
+
+// Whether this image holds the native headers-only white texel.
+pub fn image_is_stub(image: Image) -> bool {
+    return stone_image_is_stub(image.0)
+}
+
+// What GL actually holds: one texel for a stub, otherwise the extent after
+// `STONE_IMAGE_MAX_SIDE`. An exact-texel declaration exempts real images from
+// the cap. Use `image_is_stub` to distinguish the two load outcomes.
+//
+// A DIAGNOSTIC for fixtures. Nothing that draws may read it: frame rects and
+// UVs come from `image_dims`, which is what makes a reduction invisible.
+pub fn image_storage_dims(image: Image) -> IVec2 {
+    let (w, h) = stone_image_storage_size(image.0)
+    return IVec2 { x: w, y: h }
+}
+
+// Stored GL bytes for this handle, including its mip levels when present.
+// Stone owns the format, stored extent and mip accounting.
+pub fn image_storage_bytes(image: Image) -> int {
+    if image.0 == 0 { return 0 }
+    return stone_get_image_byte_len(image.0)
+}
+
+pub fn image_storage_format(image: Image) -> ImageAssetFormat {
+    if image.0 == 0 { return ImageAssetFormat::Rgba8 }
+    match stone_get_image_format(image.0) {
+        0 => ImageAssetFormat::Rgba8,
+        1 => ImageAssetFormat::DepthRg8,
+        2 => ImageAssetFormat::R8,
+        3 => ImageAssetFormat::MaterialRg8,
+        _ => {
+            error("image_storage_format: unknown native image handle {image.0}")
+            // error raises at runtime; the value only completes the match type.
+            return ImageAssetFormat::Rgba8
+        }
+    }
+}
+
+// One playing instance of a Sound, addressable while it plays. Voice(0) is
+// the "never started" sentinel (muted by the audio gate, stale Sound handle,
+// or audio unavailable); every method below is a harmless no-op on it, since
+// 0 is never minted as a real voice id.
+pub newtype Voice(int)
+
+pub fn active(self: Voice) -> bool {
+    return stone_voice_active(self.0)
+}
+pub fn stop(self: Voice) -> bool {
+    return stone_voice_stop(self.0)
+}
+
+// Gain composes with the global SFX volume; speed resamples, so pitch and
+// duration move together. Both take effect on a playing voice within ~5ms,
+// which is what makes a per-frame sweep from a `co fn` audible as a ramp.
+pub fn set_gain(self: Voice, gain: float) -> bool {
+    return stone_voice_set_gain(self.0, gain)
+}
+pub fn set_pan(self: Voice, pan: float) -> bool {
+    return stone_voice_set_pan(self.0, pan)
+}
+pub fn set_speed(self: Voice, speed: float) -> bool { return stone_voice_set_speed(self.0, speed) }
+
+// `volume` scales this play alone; `speed` is a playback ratio, so it moves
+// pitch and duration together the way a tape does -- 0.5 is an octave down at
+// twice the length. `decay` caps this play at N seconds of what you HEAR (so it
+// is measured after `speed`, not on the source) and ramps it linearly to
+// silence across that time. It is the knob for a slowed sample, which otherwise
+// drones: stretching a waveform makes its sustain longer, it does not make it
+// decay. 0 plays the sample untouched.
+//
+// Those three shape the play at its START; a Voice changes it while it runs;
+// the BUS shapes everything on it at once, downstream. Three ranges of one
+// mechanism, which is why they all go through one impl rather than each owning
+// a play path.
+//
+// A macro over `_play_sound_impl` so the SFX log can name WHO played a sound,
+// not just which file: `__SITE__` in a macro body resolves to the macro
+// CALLER's position. A wrapper that wants to be transparent (play_random_sound,
+// a game's own sfx_* helper) calls the impl with the site it was given rather
+// than the macro, so the row names the gameplay code and not the wrapper.
+macro play_sound(sound: expr, volume: expr = 1.0, speed: expr = 1.0, decay: expr = 0.0) {
+    _play_sound_impl(sound, STONE_BUS_SFX, volume, speed, decay, false, __SITE__)
+}
+
+// Start `sound` and keep hold of the voice, so it can be swept, stopped or
+// probed while it plays. `play_sound` is this with the handle discarded --
+// one mechanism, two ergonomics. A macro for the same __SITE__ reason.
+macro play_voice(sound: expr, volume: expr = 1.0, speed: expr = 1.0, decay: expr = 0.0) {
+    _play_sound_impl(sound, STONE_BUS_SFX, volume, speed, decay, false, __SITE__)
+}
+
+// Start `sound` on a specific bus (STONE_BUS_*). play_voice is the SFX-bus
+// default; music and ambience want their own so a duck or a master fade can
+// address them separately.
+macro play_voice_on(sound: expr, bus: expr, volume: expr = 1.0, speed: expr = 1.0, decay: expr = 0.0) {
+    _play_sound_impl(sound, bus, volume, speed, decay, false, __SITE__)
+}
+
+// Target gain for a bus, slewed engine-side over ~10ms so a per-frame value
+// from a `co fn` ramps instead of zippering.
+pub fn bus_set_gain(bus: int, gain: float) -> bool {
+    return stone_bus_set_gain(bus, gain)
+}
+
+// Samples this bus has produced. Monotonic while the bus is live and being
+// pulled -- lets a headless test see a bus is alive without capturing audio.
+pub fn bus_samples_pulled(bus: int) -> int {
+    return stone_bus_samples_pulled(bus)
+}
+
+// This bus's target gain -- what was last asked for. The applied value slews
+// toward it sample-side and is not reachable from here.
+pub fn bus_gain(bus: int) -> float {
+    return stone_bus_gain(bus)
+}
+
+// This bus's meter, post-fader -- what the bus is contributing to the mix, not
+// what is playing into it, so a ducked or turned-down bus reads low. An
+// envelope maintained sample-side: rises instantly to a new peak, falls at
+// 20dB/sec. Reading is a plain load, so poll it as often or as rarely as you
+// like and from as many places -- do NOT add falloff on top, the smoothing has
+// already happened on the clock that owns the signal. Above 1.0 is clipping;
+// nothing limits the sum.
+pub fn bus_peak(bus: int) -> float {
+    return stone_bus_peak(bus)
+}
+
+// How many ducks have been fired on this bus. The envelope's SHAPE runs on
+// the audio thread and is not reachable from here; this answers the half a
+// game gets wrong -- whether an event ducked, and which bus it ducked.
+pub fn bus_duck_count(bus: int) -> int {
+    return stone_bus_duck_count(bus)
+}
+
+// Lowpass insert. Cutoff is the automation target: set it per frame from a
+// `co fn` and the engine slews it in log2(Hz). BUS_LOWPASS_OPEN is the
+// transparent position, so a sweep to it is "filter off".
+pub const BUS_LOWPASS_OPEN: float = 19845.0
+
+pub fn bus_set_lowpass(bus: int, cutoff_hz: float, q: float) -> bool {
+    return stone_bus_set_lowpass(bus, cutoff_hz, q)
+}
+
+pub fn bus_lowpass_cutoff(bus: int) -> float {
+    return stone_bus_lowpass_cutoff(bus)
+}
+
+// Soft-clip drive. `drive` >= 1 is pre-gain, `mix` 0..1 blends against dry,
+// so mix 0 is transparent -- ramp mix up with a pumped spell.
+pub fn bus_set_distortion(bus: int, drive: float, mix: float) -> bool {
+    return stone_bus_set_distortion(bus, drive, mix)
+}
+
+pub fn bus_set_reverb(bus: int, enabled: bool, room_size: float, damping: float, wet: float, dry: float, width: float) -> bool {
+    return stone_bus_set_reverb(bus, enabled, room_size, damping, wet, dry, width)
+}
+
+// Duck `bus` to `depth` over `attack_secs`, then recover over `release_secs`.
+// Fire-and-forget: the envelope runs engine-side, so a caller doesn't hold it
+// open per frame. Re-triggering restarts the attack, so repeated hits re-duck.
+pub fn bus_duck(bus: int, depth: float, attack_secs: float, release_secs: float) -> bool {
+    return stone_bus_duck(bus, depth, attack_secs, release_secs)
+}
+
+// THE single funnel: every sound in every game arrives here, which is what
+// lets one record site cover the lot.
+pub fn _play_sound_impl(sound: Sound, bus: int, volume: float, speed: float, decay: float,
+                    looped: bool, site: string, spatial: bool = false,
+                    pan: float = 0.0) -> Voice {
+    let muted = audio_gate_muted()
+    let d = sound.data() ?? {
+        sfx_log_record(sound, bus, volume, speed, decay, looped, spatial, pan,
+            muted, site, false, 0)
+        return Voice(0)
+    }
+    let known = d.backend_id != 0
+    let sync_decode_us = 0
+    if known && !stone_audio_stub_active() && !stone_sound_playable(d.backend_id) {
+        // A stream source admits its encoded file and starts on a later play;
+        // static PCM still decoding from load finishes here instead.
+        if stone_sound_stream_bytes(d.backend_id) >= 0 { let _ = sound_residency_admit(sound) }
+        else { sync_decode_us = sound_residency_decode_sync(sound) }
+    }
+    let resident = known && stone_sound_playable(d.backend_id)
+    // Logged before the playback gate: muted and headless runs still expose
+    // misses and synchronous decode cost, alongside actual residency.
+    sfx_log_record(sound, bus, volume, speed, decay, looped, spatial, pan,
+        muted, site, resident, sync_decode_us)
+    if muted || !resident { return Voice(0) }
+    return Voice(stone_play_sound(d.backend_id, bus, volume, speed, decay, looped,
+        spatial, pan))
+}
+
+// Length of the sample in seconds at its own rate, before any playback speed.
+// 0 for an unloaded handle.
+pub fn sound_duration(sound: Sound) -> float {
+    let d = sound.data() ?? return 0.0
+    return stone_get_sound_duration(d.backend_id)
+}
+
+// Peak-amplitude envelope: `buckets` spans of the sample data, each reduced to
+// its loudest sample. The shape of the waveform, which is what answers
+// "attack or sustain?" and "does this sample already carry its own tail?"
+// without playing it. Fills `out` and returns how many buckets were written --
+// 0 for an unloaded or unresident handle. An unresident query asks for async
+// admission, so a later query can draw resident PCM without a synchronous decode.
+//
+// Peaks are 0..1 for normalized source material but NOT clamped: a hot sample
+// exceeds 1 and a consumer scaling a display height has to handle that.
+pub fn sound_peaks(sound: Sound, out: NativeBuffer<float>, buckets: int) -> int {
+    let d = sound.data() ?? return 0
+    if d.backend_id == 0 || buckets <= 0 { return 0 }
+    if stone_sound_resident(d.backend_id) {
+        return stone_get_sound_peaks(d.backend_id, out.ptr, buckets)
+    }
+    let _ = sound_residency_admit(sound)
+    return 0
+}
+
+// Stops every voice of this asset, not one instance -- use Voice.stop for that.
+pub fn stop_sound(sound: Sound) {
+    let d = sound.data() ?? return
+    stone_stop_sound(d.backend_id)
+}
+
+// Free the underlying audio resource and invalidate this Sound handle.
+// Any other Sound that referenced this Entity is now stale (play_sound
+// becomes a silent no-op via the missing HashMap entry on the Rust side).
+// Idempotent: calling on a stale handle returns without effect.
+fn unload_sound(sound: Sound) {
+    let d = sound.data() ?? return
+    let backend_id = d.backend_id
+    let released = true
+    if backend_id != 0 { released = stone_unload_sound(backend_id) }
+    sound_residency_forget(sound)
+    sound.handle.remove()
+    if !released {
+        error("unload_sound could not release live sound {backend_id}")
+    }
+}
+
+// Direct Stone C API for canvas creation
+fn canvas_format_code(format: string) -> int {
+    if format == "rgba16f" { return STONE_CANVAS_RGBA16F }
+    if format == "rgba32f" { return STONE_CANVAS_RGBA32F }
+    if format == "r32i" { return STONE_CANVAS_R32I }
+    if format != "rgba8" {
+        log_once("CANVAS", "unknown canvas format '{format}' -- using rgba8")
+    }
+    return STONE_CANVAS_RGBA8
+}
+
+pub fn new_canvas(width: float, height: float, format: string) -> Canvas {
+    let code = canvas_format_code(format)
+    let handle = stone_create_canvas(transmute(width), transmute(height), code, false)
+    if handle == 0 { error("new_canvas: backend refused canvas creation") }
+    return Canvas {
+        handle: CanvasId(handle),
+        width: width,
+        height: height,
+    }
+}
+
+// Whether the host registry still knows this canvas. A Canvas value outlives
+// the canvas it names -- it is a plain struct -- so a consumer holding one from
+// before a destroy or a target rebuild has to ask.
+pub fn canvas_is_live(canvas: Canvas) -> bool {
+    if canvas.handle.0 == 0 { return false }
+    return stone_canvas_exists(canvas.handle.0)
+}
+
+pub fn canvas_has_depth(canvas: Canvas) -> bool {
+    return stone_canvas_has_depth(canvas.handle.0)
+}
+
+// Create a canvas with specified format and depth buffer
+pub fn new_canvas_with_depth(width: float, height: float, format: string) -> Canvas {
+    let code = canvas_format_code(format)
+    let handle = stone_create_canvas(transmute(width), transmute(height), code, true)
+    if handle == 0 { error("new_canvas_with_depth: backend refused canvas creation") }
+    return Canvas {
+        handle: CanvasId(handle),
+        width: width,
+        height: height,
+    }
+}
+
+fn set_shader_raw(shader: ShaderId) {
+    stone_set_shader(transmute(shader.0))
+}
+
+pub fn unset_shader() {
+    // Clears to "no shader" (CURRENT_SHADER = none). The default sprite
+    // program is NOT a "current shader": the standalone draw paths
+    // (stone_sprite_draw_texture, stone_draw_mesh) bind it and set its
+    // matrices at draw time when nothing is bound. Re-binding it here
+    // made the driver revalidate its vertex shader against whatever VAO
+    // each pass boundary left current (NVIDIA recompile, khr id 131218).
+    stone_set_shader(0)
+}
+
+fn new_shader_safe(source: string) -> (ShaderId?, string?) {
+    let handle = stone_create_shader_from_combined(source)
+    if handle == 0 {
+        // Stone-side already logged GL compile errors; this surfaces the fact
+        // that we returned null rather than silently transmuting a 0 handle
+        // into an "ShaderId" that fails at draw time. log_once because callers
+        // (e.g. hot-reload) may retry every frame on a broken shader source.
+        log_once("SHADER", "stone_create_shader_from_combined returned 0; emitting null ShaderId (compile errors above)")
+        return (null, "Shader compilation failed - check console for errors")
+    }
+    return (ShaderId(handle), null)
+}
+
+// Rock-side shadow of the bound FBO handle (0 = window backbuffer).
+// Scoped passes and canvas brackets restore this handle on exit.
+pub global CURRENT_CANVAS_HANDLE: int = 0
+
+// Bind a raw FBO handle and update the shadow (0 = window backbuffer).
+// Lets a caller restore a captured CURRENT_CANVAS_HANDLE without a Canvas.
+fn set_canvas_handle(handle: int) {
+    CURRENT_CANVAS_HANDLE = handle
+    stone_set_canvas(handle)
+}
+
+// Refuses rather than returning on the selected path: a no-op binder leaves the
+// PREVIOUS target bound, so the caller's body draws to the wrong surface with
+// nothing to report it.
+pub fn set_canvas(canvas: Canvas) {
+    set_canvas_handle(canvas.handle.0)
+}
+
+// Re-specify a canvas's storage at a new extent, KEEPING its handle, its FBO
+// and its texture objects. Returns the canvas at its new size, or null when the
+// backend cannot do it -- the caller then destroys and creates, which is what
+// every path did before this existed.
+//
+// Why a caller would want the handle kept: a scene target set rebuilt by
+// destroy-and-create destroys nineteen canvases and mints nineteen new ids, so
+// every holder of an old handle is left with a dead one. A resize reallocates
+// storage only.
+pub fn resize_canvas(canvas: Canvas, width: float, height: float) -> Canvas? {
+    if canvas.handle.0 == 0 { return null }
+    if !canvas_is_live(canvas) { return null }
+    if !stone_canvas_resize(canvas.handle.0, transmute(width), transmute(height)) { return null }
+    return Canvas { handle: canvas.handle, width: width, height: height }
+}
+
+pub fn destroy_canvas(canvas: Canvas) {
+    CANVAS_ACTIVE.remove(canvas.handle.0)
+    SRGB_COLOR_CANVASES.remove(canvas.handle.0)
+    if canvas.handle.0 == 0 { return }
+    stone_destroy_canvas(canvas.handle.0)
+}
+
+pub fn unset_canvas() {
+    set_canvas_handle(0)
+}
+
+pub fn read_canvas_pixel(canvas: Canvas, x: int, y: int) -> float {
+    sim_draw_on_demand()
+    sim_submit_guard("read_canvas_pixel")
+    return stone_read_canvas_pixel(canvas.handle.0, x, y)
+}
+
+/// A readback of a rectangle of a canvas, addressed in canvas coordinates.
+pub value CanvasPixels {
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    canvas_width: int,
+    canvas_height: int,
+    rgba: NativeBuffer<float>,
+}
+
+pub fn canvas_read_pixels(canvas: Canvas) -> CanvasPixels {
+    return canvas_read_region(canvas, 0, 0, stone_canvas_active_w(canvas.handle.0),
+        stone_canvas_active_h(canvas.handle.0))
+}
+
+/// One readback of the rect (x, y, w, h), clamped to the canvas. A per-texel
+/// `read_canvas_pixel` synchronizes with the GPU on every call; a loop over
+/// texels reads the region once and samples it with `canvas_pixel_channel`.
+pub fn canvas_read_region(canvas: Canvas, x: int, y: int, w: int, h: int) -> CanvasPixels {
+    sim_draw_on_demand()
+    sim_submit_guard("canvas_read_region")
+    let canvas_width = stone_canvas_active_w(canvas.handle.0)
+    let canvas_height = stone_canvas_active_h(canvas.handle.0)
+    if canvas_width <= 0 || canvas_height <= 0 { error("canvas_read_region requires a live canvas") }
+    let lo_x = min(max(x, 0), canvas_width)
+    let lo_y = min(max(y, 0), canvas_height)
+    let width = min(max(x + w, lo_x), canvas_width) - lo_x
+    let height = min(max(y + h, lo_y), canvas_height) - lo_y
+    let rgba = native_buffer_float(max(width * height * 4, 1))
+    if width > 0 && height > 0 && stone_canvas_read_region_rgba32f(canvas.handle.0, lo_x, lo_y,
+        width, height, rgba.ptr, rgba.len) != width * height * 4 {
+        error("canvas_read_region failed")
+    }
+    return CanvasPixels {
+        x: lo_x, y: lo_y, width: width, height: height,
+        canvas_width: canvas_width, canvas_height: canvas_height, rgba: rgba,
+    }
+}
+
+/// A sample outside the canvas reads 0.0, as `read_canvas_pixel` does; one
+/// inside the canvas but outside the region read is a caller error.
+pub fn canvas_pixel_channel(pixels: CanvasPixels, x: int, y: int, channel: int) -> float {
+    if x < 0 || y < 0 || x >= pixels.canvas_width || y >= pixels.canvas_height
+        || channel < 0 || channel > 3 { return 0.0 }
+    let local_x = x - pixels.x
+    let local_y = y - pixels.y
+    if local_x < 0 || local_y < 0 || local_x >= pixels.width || local_y >= pixels.height {
+        error("canvas_pixel_channel: ({x}, {y}) is outside the region read at ({pixels.x}, {pixels.y}) {pixels.width}x{pixels.height}")
+    }
+    return pixels.rgba[(local_y * pixels.width + local_x) * 4 + channel]
+}
+
+pub fn canvas_read_rgba8(canvas: Canvas, out: NativeBufferU8) -> int {
+    sim_draw_on_demand()
+    if out.len <= 0 { return -1 }
+    sim_submit_guard("canvas_read_rgba8")
+    return stone_canvas_read_rgba8(canvas.handle.0, out.ptr, out.len)
+}
+
+pub fn canvas_upload_rgba8(canvas: Canvas, pixels: NativeBufferU8) -> bool {
+    if pixels.len <= 0 { return false }
+    return stone_canvas_upload_rgba8(canvas.handle.0, pixels.ptr, pixels.len)
+}
+
+fn read_canvas_nearest_id(canvas: Canvas, x: int, y: int, side: int) -> int {
+    sim_draw_on_demand()
+    return stone_read_canvas_nearest_id(canvas.handle.0, x, y, side)
+}
+
+// Largest magnitude an entity id survives exactly. Ids ride to the GPU as an
+// f32 vertex attribute (batch.rock), exact only to 2^24; the integer readback
+// below fixes TRANSPORT precision, not that submission limit.
+pub const EXACT_ENTITY_ID_MAX: int = 16777216
+
+pub fn entity_id_within_exact_range(id: int) -> bool {
+    return id >= -EXACT_ENTITY_ID_MAX && id <= EXACT_ENTITY_ID_MAX
+}
+
+/// An exact integer readback of a rectangle of an R32I canvas, addressed in
+/// canvas coordinates. Unlike CanvasPixels (f32, lossy above 2^24), ids
+/// survive exactly, including 16777217 and the i32 extremes.
+pub value CanvasIds {
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    canvas_width: int,
+    canvas_height: int,
+    ids: NativeBuffer<int>,
+}
+
+pub fn canvas_read_ids(canvas: Canvas) -> CanvasIds {
+    return canvas_read_region_i32(canvas, 0, 0, stone_canvas_active_w(canvas.handle.0),
+        stone_canvas_active_h(canvas.handle.0))
+}
+
+/// One exact integer readback of the rect (x, y, w, h), clamped to the canvas.
+/// Refuses (errors) a non-R32I canvas, an empty rect, or a native refusal.
+pub fn canvas_read_region_i32(canvas: Canvas, x: int, y: int, w: int, h: int) -> CanvasIds {
+    sim_draw_on_demand()
+    sim_submit_guard("canvas_read_region_i32")
+    let canvas_width = stone_canvas_active_w(canvas.handle.0)
+    let canvas_height = stone_canvas_active_h(canvas.handle.0)
+    if canvas_width <= 0 || canvas_height <= 0 { error("canvas_read_region_i32 requires a live canvas") }
+    let lo_x = min(max(x, 0), canvas_width)
+    let lo_y = min(max(y, 0), canvas_height)
+    let width = min(max(x + w, lo_x), canvas_width) - lo_x
+    let height = min(max(y + h, lo_y), canvas_height) - lo_y
+    if width <= 0 || height <= 0 { error("canvas_read_region_i32 requires a nonempty rect") }
+    let ids = native_buffer_int(width * height)
+    if stone_canvas_read_region_i32(canvas.handle.0, lo_x, lo_y,
+        width, height, ids.ptr, ids.len) != width * height {
+        error("canvas_read_region_i32 failed")
+    }
+    return CanvasIds {
+        x: lo_x, y: lo_y, width: width, height: height,
+        canvas_width: canvas_width, canvas_height: canvas_height, ids: ids,
+    }
+}
+
+/// A sample outside the canvas reads 0, as `read_canvas_pixel` does; one
+/// inside the canvas but outside the region read is a caller error.
+pub fn canvas_id_at(pixels: CanvasIds, x: int, y: int) -> int {
+    if x < 0 || y < 0 || x >= pixels.canvas_width || y >= pixels.canvas_height { return 0 }
+    let local_x = x - pixels.x
+    let local_y = y - pixels.y
+    if local_x < 0 || local_y < 0 || local_x >= pixels.width || local_y >= pixels.height {
+        error("canvas_id_at: ({x}, {y}) is outside the region read at ({pixels.x}, {pixels.y}) {pixels.width}x{pixels.height}")
+    }
+    return pixels.ids[local_y * pixels.width + local_x]
+}
+
+pub fn read_depth_pixel(canvas: Canvas, x: int, y: int) -> float {
+    sim_draw_on_demand()
+    return stone_read_depth_pixel(canvas.handle.0, x, y)
+}
+
+// Async pixel readback. The slot holds a pair of PBOs behind the scenes;
+// each read returns the pixel that was at (x, y) one frame ago. Allocate once
+// per logical reader (globals are a good home); sharing one slot between two
+// call sites will alias.
+pub newtype PixelReadbackId(int)
+pub struct PixelReadback {
+    handle: PixelReadbackId,
+}
+
+pub fn pixel_readback_new() -> PixelReadback {
+    return PixelReadback { handle: PixelReadbackId(stone_pixel_readback_new(0)) }
+}
+
+pub fn pixel_readback_area_new(side: int) -> PixelReadback {
+    return PixelReadback { handle: PixelReadbackId(stone_pixel_readback_area_new(side)) }
+}
+
+pub fn pixel_readback_depth_new() -> PixelReadback {
+    return PixelReadback { handle: PixelReadbackId(stone_pixel_readback_new(1)) }
+}
+
+// Submit an async read for this slot. Call when `canvas` is quiescent
+// (no pending writes) — typically early in a frame before any rendering
+// to it. The result becomes available via pixel_readback_consume next
+// frame (one frame stale).
+pub fn pixel_readback_submit(slot: PixelReadback, canvas: Canvas, x: int, y: int) {
+    sim_draw_on_demand()
+    stone_pixel_readback_submit(slot.handle.0, canvas.handle.0, x, y)
+}
+
+pub fn pixel_readback_submit_area(slot: PixelReadback, canvas: Canvas, x: int, y: int, side: int) {
+    sim_draw_on_demand()
+    stone_pixel_readback_submit_area(slot.handle.0, canvas.handle.0, x, y, side)
+}
+
+// Return the value submitted last frame. First-call / missed-submit returns
+// the channel sentinel (0.0 color / 1.0 depth).
+pub fn pixel_readback_consume(slot: PixelReadback) -> float {
+    return stone_pixel_readback_consume(slot.handle.0)
+}
+
+// Poll a single color pixel without waiting for its fence. A complete RGBA
+// value is returned once; pending work leaves the caller's publication alone.
+pub fn pixel_readback_color_poll(slot: PixelReadback) -> Vec4? {
+    static rgba: NativeBuffer<float> = native_buffer_float(4)
+    let status = stone_pixel_readback_poll_rgba(slot.handle.0, rgba.ptr, rgba.len)
+    if status == -1 { return null }
+    assert(status == 1, "asynchronous color pixel readback failed ({status})")
+    return v(rgba[0], rgba[1], rgba[2], rgba[3])
+}
+
+pub fn pixel_readback_in_flight(slot: PixelReadback) -> int {
+    return stone_pixel_readback_in_flight(slot.handle.0)
+}
+
+pub fn pixel_readback_reset_contents(slot: PixelReadback) {
+    let _ = stone_pixel_readback_reset_contents(slot.handle.0)
+}
+
+pub fn pixel_readback_destroy(slot: PixelReadback) {
+    stone_pixel_readback_destroy(slot.handle.0)
+}
+
+pub fn set_depth_mode(compare_mode: string, write: bool) {
+    stone_set_depth_mode(compare_mode, write)
+}
+pub fn unset_depth_mode() {
+    // "always" + !write is the only argument pair that takes the
+    // gl.disable(DEPTH_TEST) branch in stone_set_depth_mode. Passing an
+    // empty string used to fall through to "enable depth test with
+    // func=ALWAYS", which works by accident on color targets with a depth
+    // attachment but misbehaves on depthless canvases (like the outline
+    // target mask pass) where some drivers discard fragments unpredictably.
+    stone_set_depth_mode("always", false)
+}
+
+// Draw a fullscreen quad in NDC (-1..1) using the currently-bound shader.
+// Used for post-process passes: bind the shader, set its input samplers via
+// bind_sampled(), then call this. The shader's vertex stage must use
+// `gl_Position = vec4(aPos, 0.0, 1.0)` (raw NDC, no uProjection/uView).
+pub @inline inline(lua) fn draw_fullscreen_quad() = "stone.stone_draw_fullscreen_quad()"
+
+// The active-local UV transform for the next fullscreen draw: the sampled
+// target's active rectangle as a fraction of its capacity. The pass executor
+// owns this; a shader never derives normalized UVs from the backing texture.
+@inline inline(lua) fn set_fullscreen_uv_scale(sx: float, sy: float) = "stone.stone_set_fullscreen_uv_scale(sx, sy)"
+
+
+// Draw a sampleable source at (x, y) with the given size as an immediate
+// sprite batch. Used for debug overlays and presenting a game's source.
+//
+// `sampling` is the declaration, not a hint. Nearest by default -- a canvas
+// blitted 1:1 wants it, and a magnified present is the caller who says Linear.
+// Canvas sources always use CLAMP_TO_EDGE; Image sources use their declared
+// wrap state.
+pub fn draw_sampled_texture(texture: SampledTexture, x: float, y: float, w: float, h: float,
+    sampling: TextureFilter = TextureFilter::Nearest) {
+    let dims = sampled_texture_dims(texture)
+    draw_image_immediate(texture, v(x + w / 2.0, y + h / 2.0), v(w, h),
+        source: irect(0, 0, dims.x, dims.y), sampling: sampling)
+}
+
+// ------------------------------------------------------------------
+// Font UFCS methods
+// ------------------------------------------------------------------
+// Use these when you want to render with a specific font (loaded via
+// load_font). For the default font, top-level `measure_text` /
+// `draw_text_*` / `stone_draw_text` continue to work and route to
+// DEFAULT_FONT internally.
+
+// Compatibility display sizes are atlas-em units; UI cap-height policy is a
+// separate UiRect contract and does not alter this legacy API.
+pub fn font_scale(font: Font, display_size: float) -> float {
+    let d = font.data() ?? return 0.0
+    return display_size * FONT_RENDER_SCALE / (d.pixel_size as float)
+}
+
+pub fn measure(font: Font, text: string, display_size: float) -> Vec2 {
+    let d = font.data() ?? return Vec2 { x: 0.0, y: 0.0 }
+    return stone_measure_text_vec2_for(d.backend_id, text, font_scale(font, display_size))
+}
+
+fn width(font: Font, text: string, display_size: float) -> float {
+    return measure(font, text, display_size).x
+}
+
+fn height(font: Font, display_size: float) -> float {
+    let d = font.data() ?? return 0.0
+    // TODO: what is the 1.2 here?
+    return (d.pixel_size as float) * font_scale(font, display_size) * 1.2
+}
+
+pub fn draw_text(font: Font, space: DrawSpace, text: string, x: float, y: float, display_size: float, color: Color) {
+    let d = font.data() ?? return
+    let s = font_scale(font, display_size)
+    stone_draw_text_for(space, d.backend_id, text, x, y, s, s, color.r, color.g, color.b, color.a)
+}
+
+// Filesystem functions - call Stone directly
+pub fn get_save_directory() -> string {
+    // For Stone, use working directory as save directory
+    return stone_get_working_directory()
+}
+
+pub fn get_working_directory() -> string {
+    return stone_get_working_directory()
+}
+
+pub fn get_executable_path() -> string {
+    return stone_get_executable_path()
+}
+
+pub @pure
+fn get_game_identity() -> string {
+    return "rockgun"  // Game identity
+}
+
+pub @inline inline(lua) fn os_time() -> int = "os.time()"
+
+pub @nomangle @inline inline(lua) fn os_getenv(var: string) -> string? = "os.getenv(var)"
+
+// This process's id from the C runtime; the declaration is idempotent so a
+// second call after another cdef of getpid stays harmless.
+pub inline(lua) fn os_getpid() -> int = """
+    pcall(ffi.cdef, "int getpid(void);")
+    return tonumber(ffi.C.getpid())
+"""
+
+// Write a process environment variable. A value has to be visible to
+// `os.getenv`, to native code reading getenv, and to processes `shell()`
+// spawns; the C runtime's environment is the one mechanism all three already
+// read, so there is no second overlay to keep in sync.
+//
+// The setter is platform-specific: `setenv(3)` does not exist in the Windows
+// CRT, where `_putenv_s` is the writer that `getenv` reads back. On Windows
+// this reaches the CRT environment; code going through the Win32 block
+// directly (`GetEnvironmentVariable`) is not covered.
+//
+// A failed write is fatal rather than ignored: silently keeping the previous
+// value would point an entry at the PREVIOUS entry's `$OUT`.
+pub @nomangle inline(lua) fn os_setenv(var: string, value: string) = """
+    if _G.__rock_setenv == nil then
+        local ffi = require("ffi")
+        if ffi.os == "Windows" then
+            ffi.cdef[[int _putenv_s(const char *name, const char *value);]]
+            local put = ffi.C._putenv_s
+            _G.__rock_setenv = function(name, v) return put(name, v) end
+        else
+            ffi.cdef[[int setenv(const char *name, const char *value, int overwrite);]]
+            local set = ffi.C.setenv
+            _G.__rock_setenv = function(name, v) return set(name, v, 1) end
+        end
+    end
+    local rc = _G.__rock_setenv(var, value)
+    if rc ~= 0 then
+        error("os_setenv('" .. tostring(var) .. "') failed with rc=" .. tostring(rc))
+    end
+"""
+
+pub @nomangle
+fn get_app_args() -> [string] {
+    let out: [string] = vec_new()
+    let raw = __app_args_raw()
+    for i in 0..table_len(raw) {
+        let s: string = cast(table_get(raw, i + 1))
+        out.push(s)
+    }
+    return out
+}
+
+// The bare 1-indexed Lua `arg` table. Building the Vec on the Rock side keeps
+// `vec_new`/`vec_push` out of opaque text, where the boxed `_data` layout they
+// mint is not a contract the caller can rely on.
+inline(lua) fn __app_args_raw() -> any = "return arg or {}"
+
+// Write a string to stdout and flush immediately.
+// Unlike print(), this guarantees the data reaches the OS even when the process
+// exits via _exit() (which skips C stdio buffer flushing).
+@nomangle
+inline(lua) fn stone_write_stdout(s: string) = """
+    io.write(s)
+    io.flush()
+"""
+
+// Returns nil for any error (missing file, permission denied, anything that
+// makes stone_file_modtime return -1 from the C side). The distinction
+// between missing-vs-permission-denied is intentionally collapsed at this
+// layer; if the difference matters, call stone_file_read for a path-level
+// existence check before reading the modtime.
+fn file_modtime(path: string) -> float? {
+    let t = stone_file_modtime(path)
+    if t < 0.0 { return null }
+    return t
+}

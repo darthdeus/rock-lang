@@ -1,0 +1,311 @@
+// Versioned observation at consumption. Disabled hooks allocate no payloads.
+pub global UI_SUBMISSION_PROBE_ON: bool = false
+pub global UI_SUBMISSION_PROBE_WINDOWLESS: bool = false
+// Only an explicit begin roots the payload builders in the emitted program.
+global UI_SUBMISSION_PROBE_BATCH_HOOK: (fn(string, RenderBatch, string, Vec2?))? = null
+global UI_SUBMISSION_PROBE_TEXT_HOOK: (fn(TextLayoutEmissionProbe, string))? = null
+global UI_SUBMISSION_PROBE_PASS_HOOK: (fn(GpuPass))? = null
+global UI_SUBMISSION_PROBE_DRAW_HOOK: (fn(GpuDraw, GpuFullscreenGeometry))? = null
+global UI_SUBMISSION_PROBE_GLYPH_HOOK: (fn(RenderBatch, TextLayout, TextGlyph, GlyphPose?, Vec2, int, GlyphData, float))? = null
+global UI_SUBMISSION_PROBE_REFUSAL_HOOK: (fn(string, string))? = null
+
+extern(ffi, "stone") fn stone_ui_probe_context(phase: string, pass: string, surface: string, space: string)
+
+pub fn ui_submission_probe_context(phase: string, pass: string, surface: string, space: string) {
+    stone_ui_probe_context(phase, pass, surface, space)
+}
+
+extern(ffi, "stone") fn stone_ui_probe_begin(windowless: bool)
+extern(ffi, "stone") fn stone_ui_probe_stop()
+pub extern(ffi, "stone") fn stone_ui_probe_accept(kind: string, key: string, detail: string) -> int
+pub extern(ffi, "stone") fn stone_ui_probe_expect_vertices(id: int, vertices: Ptr<Vertex>, count: int, stride: int) -> bool
+extern(ffi, "stone") fn stone_ui_probe_observe(kind: string, detail: string) -> bool
+extern(ffi, "stone") fn stone_ui_probe_custom_consumed()
+pub extern(ffi, "stone") fn stone_ui_probe_end_operation()
+extern(ffi, "stone") fn stone_ui_probe_refuse(kind: string, detail: string) -> bool
+pub extern(ffi, "stone") fn stone_ui_probe_check_population(accepted: int, refused: int, observed: int) -> bool
+pub extern(ffi, "stone") fn stone_ui_probe_check(expected: int) -> bool
+pub extern(ffi, "stone") fn stone_ui_probe_accepted() -> int
+pub extern(ffi, "stone") fn stone_ui_probe_consumed() -> int
+pub extern(ffi, "stone") fn stone_ui_probe_z(index: int) -> int
+pub extern(ffi, "stone") fn stone_ui_probe_vertex(index: int, lane: int) -> float
+pub extern(ffi, "stone") fn stone_ui_probe_write(path: string) -> bool
+pub extern(ffi, "stone") fn stone_ui_probe_retire(kind: string, handle: uint) -> bool
+pub extern(ffi, "stone") fn stone_ui_probe_resource(kind: string, handle: uint, source: string, generation: int) -> bool
+
+pub fn ui_submission_probe_begin(windowless: bool = false) {
+    UI_SUBMISSION_PROBE_BATCH_HOOK = ui_submission_probe_batch
+    UI_SUBMISSION_PROBE_TEXT_HOOK = ui_submission_probe_text
+    UI_SUBMISSION_PROBE_PASS_HOOK = ui_submission_probe_pass
+    UI_SUBMISSION_PROBE_DRAW_HOOK = ui_submission_probe_draw
+    UI_SUBMISSION_PROBE_GLYPH_HOOK = ui_submission_probe_glyph
+    UI_SUBMISSION_PROBE_REFUSAL_HOOK = ui_submission_probe_refusal
+    UI_SUBMISSION_PROBE_ON = true
+    UI_SUBMISSION_PROBE_WINDOWLESS = windowless
+    stone_ui_probe_begin(windowless)
+}
+
+pub fn ui_submission_probe_stop() {
+    UI_SUBMISSION_PROBE_ON = false
+    UI_SUBMISSION_PROBE_BATCH_HOOK = null
+    UI_SUBMISSION_PROBE_TEXT_HOOK = null
+    UI_SUBMISSION_PROBE_PASS_HOOK = null
+    UI_SUBMISSION_PROBE_DRAW_HOOK = null
+    UI_SUBMISSION_PROBE_GLYPH_HOOK = null
+    UI_SUBMISSION_PROBE_REFUSAL_HOOK = null
+    UI_SUBMISSION_PROBE_WINDOWLESS = false
+    stone_ui_probe_stop()
+}
+
+pub fn ui_submission_probe_write_if_requested(name: string) {
+    let directory = env_var("ROCK_UI_TRACE_DIR")
+    if directory == null { return }
+    if !stone_ui_probe_write("{directory.unwrap()}/{name}.json") { error("UI probe could not write requested trace") }
+}
+
+fn ui_probe_texture(texture: SampledTexture) -> JsonValue {
+    let m: Map<string, JsonValue> = map_new()
+    match texture {
+        SampledTexture::Image(image) => { m["kind"] = json_str("image"); m["handle"] = json_int(image.0 as int) },
+        SampledTexture::Canvas(canvas) => { m["kind"] = json_str("canvas"); m["handle"] = json_int(canvas.handle.0) },
+    }
+    return json_object(m)
+}
+
+fn ui_probe_optional_texture(texture: SampledTexture?) -> JsonValue {
+    return if texture != null { ui_probe_texture(texture.unwrap()) } else { json_null() }
+}
+
+fn ui_probe_vec2(p: Vec2) -> JsonValue { return json_array([json_float(p.x), json_float(p.y)]) }
+fn ui_probe_rect(r: Rect) -> JsonValue {
+    return json_array([json_float(r.x), json_float(r.y), json_float(r.w), json_float(r.h)])
+}
+
+fn ui_probe_frozen_view() -> JsonValue {
+    let resolved = RENDER_VIEW
+    if resolved == null { return json_null() }
+    let view = resolved.unwrap()
+    let m: Map<string, JsonValue> = map_new()
+    m["logical"] = ui_probe_vec2(view.logical_size)
+    m["drawable"] = json_array([json_int(view.drawable_size.x), json_int(view.drawable_size.y)])
+    m["scene"] = json_array([json_int(view.scene_size.x), json_int(view.scene_size.y)])
+    m["capacity"] = json_array([json_int(view.scene_capacity.x), json_int(view.scene_capacity.y)])
+    m["source_rect"] = ui_probe_rect(view.scene_source_rect)
+    m["output_rect"] = ui_probe_rect(view.scene_output_rect)
+    m["output_viewport"] = json_array([json_int(view.scene_output_viewport.x), json_int(view.scene_output_viewport.y), json_int(view.scene_output_viewport.w), json_int(view.scene_output_viewport.h)])
+    m["world_size"] = ui_probe_vec2(view.world_view_size)
+    m["world_to_scene"] = json_float(view.world_to_scene_scale)
+    m["world_to_output"] = json_float(view.world_to_output_scale)
+    m["camera"] = ui_probe_vec2(view.resolved_camera_center)
+    m["ui_scale"] = json_float(view.ui_scale)
+    m["ui_raster"] = json_array([json_int(view.ui_raster_size.x), json_int(view.ui_raster_size.y)])
+    return json_object(m)
+}
+
+fn ui_probe_leaves(values: [CanonicalUniformLeaf]) -> JsonValue {
+    let leaves: [JsonValue] = []
+    for leaf in values {
+        match leaf {
+            CanonicalUniformLeaf::Float(f) => leaves.push(json_array([json_str("float"), json_float(f)])),
+            CanonicalUniformLeaf::Int(i) => leaves.push(json_array([json_str("int"), json_int(i)])),
+            CanonicalUniformLeaf::Uint(i) => leaves.push(json_array([json_str("uint"), json_str("{i}")])),
+            CanonicalUniformLeaf::Bool(b) => leaves.push(json_array([json_str("bool"), json_bool(b)])),
+        }
+    }
+    return json_array(leaves)
+}
+
+fn ui_submission_probe_batch(key: string, batch: RenderBatch, shader: string, extent: Vec2?) {
+    let m: Map<string, JsonValue> = map_new()
+    m["frame"] = json_int(RENDER_FRAME)
+    m["phase"] = json_null()
+    m["pass"] = json_null()
+    m["surface"] = json_null()
+    m["space"] = json_null()
+    m["frozen_view"] = ui_probe_frozen_view()
+    let target: Map<string, JsonValue> = map_new()
+    target["kind"] = json_str(if CURRENT_CANVAS_HANDLE == 0 { "window" } else { "canvas" })
+    target["handle"] = json_int(CURRENT_CANVAS_HANDLE)
+    m["target"] = json_object(target)
+    m["projection_extent"] = if extent != null { ui_probe_vec2(extent.unwrap()) } else { json_null() }
+    m["active_extent"] = json_null()
+    m["viewport"] = json_null()
+    m["clip"] = json_null()
+    m["convention"] = json_null()
+    let segments = key.split("|")
+    let tail = segments[segments.len() - 1]
+    m["occurrence"] = if tail.starts_with("u#") || tail.starts_with("q#") { json_str(tail) } else { json_null() }
+    m["z"] = json_int(batch.z_layer)
+    m["order"] = json_int(batch.order)
+    m["group"] = json_int(batch.ui_group)
+    m["group_base_z"] = json_int(batch.ui_group_base_z)
+    m["blend"] = json_str(blend_mode_name(batch.blend))
+    m["depth"] = json_str(depth_mode_name(batch.depth))
+    m["sampling"] = json_int(texture_filter_to_int(batch.sampling))
+    m["normal_sampling"] = json_int(texture_filter_to_int(batch.normal_sampling))
+    m["surface_sampling"] = json_int(texture_filter_to_int(batch.surface_sampling))
+    m["texture"] = ui_probe_texture(batch.texture)
+    m["normal"] = ui_probe_optional_texture(batch.normal)
+    m["surface"] = ui_probe_optional_texture(batch.surface)
+    m["auxiliary"] = ui_probe_optional_texture(batch.auxiliary)
+    m["material"] = ui_probe_optional_texture(batch.material)
+    m["shader"] = json_str(shader)
+    m["pixel_snap"] = json_bool(batch.pixel_snap)
+    m["unlit"] = json_bool(batch.unlit)
+    m["text"] = json_bool(batch.text_batch)
+    let retained: Map<string, JsonValue> = map_new()
+    if batch.retained_mesh != null {
+        retained["kind"] = json_str("mesh")
+        retained["handle"] = json_int(batch.retained_mesh.unwrap().0)
+    }
+    m["retained_mesh"] = if batch.retained_mesh != null { json_object(retained) } else { json_null() }
+    let kind = if batch.custom_draw != null { "custom" } else { "batch" }
+    let id = stone_ui_probe_accept(kind, key, json_encode(json_object(m)))
+    if id < 0 { error("UI probe rejected batch metadata") }
+    if batch.count > 0 && batch.retained_mesh == null {
+        if !stone_ui_probe_expect_vertices(id, batch.verts.ptr, batch.count, vertex_stride(batch.verts)) {
+            error("UI probe rejected batch vertex snapshot")
+        }
+    }
+}
+
+fn ui_submission_probe_text(probe: TextLayoutEmissionProbe, source: string) {
+    let m: Map<string, JsonValue> = map_new()
+    m["frame"] = json_int(probe.frame)
+    m["source"] = json_str(source)
+    m["consumer"] = json_str(probe.consumer_key)
+    m["admitted"] = json_int(probe.admitted_count)
+    m["layout_glyphs"] = json_int(probe.layout_glyph_count)
+    m["emitted"] = json_int(probe.emitted_count)
+    let instance: Map<string, JsonValue> = map_new()
+    instance["kind"] = json_str("font_instance")
+    instance["handle"] = json_int(probe.instance_id)
+    m["instance"] = json_object(instance)
+    m["origin"] = ui_probe_vec2(probe.origin)
+    m["logical_bounds"] = ui_probe_rect(probe.logical_bounds)
+    m["ink_bounds"] = ui_probe_rect(probe.layout_ink_bounds)
+    m["emitted_bounds"] = ui_probe_rect(probe.emitted_bounds)
+    m["target_cap_height"] = json_float(probe.target_pixel_cap_height)
+    m["required_em"] = json_float(probe.required_pixel_em)
+    m["selected_em"] = json_int(probe.selected_pixel_em)
+    m["source_cap_height"] = json_float(probe.source_cap_height)
+    if !stone_ui_probe_observe("text_emission", json_encode(json_object(m))) { error("UI probe rejected text observation") }
+}
+
+fn ui_submission_probe_pass(p: GpuPass) {
+    let m: Map<string, JsonValue> = map_new()
+    m["frame"] = json_int(RENDER_FRAME)
+    m["viewport"] = json_array([json_int(p.viewport.x), json_int(p.viewport.y), json_int(p.viewport.w), json_int(p.viewport.h)])
+    let target: Map<string, JsonValue> = map_new()
+    match p.target {
+        GpuTarget::Window => { target["kind"] = json_str("window"); target["handle"] = json_int(0); m["active_extent"] = json_null() },
+        GpuTarget::Canvas(c) => { target["kind"] = json_str("canvas"); target["handle"] = json_int(c.handle.0); m["active_extent"] = json_array([json_int(canvas_active(c).x), json_int(canvas_active(c).y)]) },
+    }
+    m["target"] = json_object(target)
+    m["clip"] = json_null()
+    m["frozen_view"] = ui_probe_frozen_view()
+    m["attachments"] = json_str(semantic_attachment_wire(p))
+    if !stone_ui_probe_observe("semantic_pass", json_encode(json_object(m))) { error("UI probe rejected pass observation") }
+}
+
+fn ui_submission_probe_draw(d: GpuDraw, g: GpuFullscreenGeometry) {
+    let m: Map<string, JsonValue> = map_new()
+    m["frame"] = json_int(RENDER_FRAME)
+    m["shader"] = json_str(d.shader)
+    m["blend"] = json_str(blend_mode_name(d.blend))
+    let blocks: [JsonValue] = []
+    if let packet = d.semantic_block {
+        let row: Map<string, JsonValue> = map_new()
+        row["fingerprint"] = json_str("{packet.fingerprint}")
+        row["leaves"] = ui_probe_leaves(packet.leaves)
+        blocks.push(json_object(row))
+    }
+    m["uniforms"] = json_array(blocks)
+    let bindings: [JsonValue] = []
+    for b in d.bindings {
+        let row: Map<string, JsonValue> = map_new()
+        row["slot"] = json_int(b.slot)
+        row["resource"] = ui_probe_texture(b.resource)
+        row["sampling"] = json_int(texture_filter_to_int(b.filter))
+        row["repeat"] = json_bool(b.wrap_repeat)
+        bindings.push(json_object(row))
+    }
+    m["bindings"] = json_array(bindings)
+    m["color_write"] = json_array([json_bool(d.color_write.r), json_bool(d.color_write.g), json_bool(d.color_write.b), json_bool(d.color_write.a)])
+    m["uv"] = json_array([json_float(g.u0), json_float(g.v0), json_float(g.u1), json_float(g.v1)])
+    if stone_ui_probe_accept("fullscreen", d.shader, json_encode(json_object(m))) < 0 { error("UI probe rejected draw metadata") }
+}
+
+fn ui_submission_probe_glyph(batch: RenderBatch, layout: TextLayout, glyph: TextGlyph,
+    pose: GlyphPose?, origin: Vec2, instance: int, raw: GlyphData, scale: float) {
+    let m: Map<string, JsonValue> = map_new()
+    m["frame"] = json_int(RENDER_FRAME)
+    m["source"] = json_str(layout.text)
+    m["source_start"] = json_int(glyph.source_index)
+    m["source_end"] = json_int(text_codepoint_end(layout.text, glyph.source_index))
+    m["codepoint"] = json_int(text_codepoint_at(layout.text, glyph.source_index))
+    m["glyph"] = json_int(glyph.glyph)
+    m["face"] = json_int(glyph.face)
+    let instance_ref: Map<string, JsonValue> = map_new()
+    instance_ref["kind"] = json_str("font_instance")
+    instance_ref["handle"] = json_int(instance)
+    m["instance"] = json_object(instance_ref)
+    m["origin"] = ui_probe_vec2(origin)
+    m["glyph_origin"] = ui_probe_vec2(glyph.origin)
+    m["pivot"] = ui_probe_vec2(glyph.pivot)
+    m["advance"] = json_float(glyph.advance)
+    m["ink"] = ui_probe_rect(glyph.ink)
+    m["ascent"] = json_float(layout.ascent)
+    m["descent"] = json_float(layout.descent)
+    m["line_height"] = json_float(layout.line_height)
+    m["line_count"] = json_int(layout.line_count)
+    m["alignment"] = ui_probe_vec2(text_align_fracs(layout.alignment))
+    m["alignment_offset"] = ui_probe_vec2(layout.alignment_offset)
+    m["pose_translation"] = if pose != null { ui_probe_vec2(pose.unwrap().translation) } else { json_null() }
+    m["pose_scale"] = if pose != null { ui_probe_vec2(pose.unwrap().scale) } else { json_null() }
+    m["pose_rotation"] = if pose != null { json_float(pose.unwrap().rotation) } else { json_null() }
+    m["layout_scale"] = json_float(scale)
+    m["raster_metrics"] = json_array([json_float(raw.width), json_float(raw.height), json_float(raw.bearing_x), json_float(raw.bearing_y), json_float(raw.advance)])
+    m["uv"] = json_array([json_float(raw.u0), json_float(raw.v0), json_float(raw.u1), json_float(raw.v1)])
+    m["texture"] = ui_probe_texture(batch.texture)
+    m["vertex_first"] = json_int(batch.count)
+    m["vertex_count"] = json_int(6)
+    if layout.font != null {
+        let data = layout.font.unwrap().data()
+        if data != null {
+            m["font_path"] = json_str(data.unwrap().path)
+            let font_ref: Map<string, JsonValue> = map_new()
+            font_ref["kind"] = json_str("font")
+            font_ref["handle"] = json_int(data.unwrap().backend_id)
+            m["font"] = json_object(font_ref)
+            m["native_em"] = json_int(data.unwrap().native_em)
+            m["cap_height"] = json_float(data.unwrap().cap_height)
+        }
+    }
+    let key = ""
+    let pool = current_ui_pool()
+    for candidate in pool.keys() {
+        let stored = pool.get(candidate) ?? continue
+        if stored.handle == batch.handle {
+            if key != "" { error("UI probe glyph buffer belongs to multiple batch keys") }
+            key = candidate
+        }
+    }
+    m["batch_key"] = json_str(key)
+    if !stone_ui_probe_observe("glyph", json_encode(json_object(m))) { error("UI probe rejected glyph observation") }
+}
+
+pub fn ui_submission_probe_refusal(kind: string, reason: string) {
+    if !UI_SUBMISSION_PROBE_ON { return }
+    let m: Map<string, JsonValue> = map_new()
+    m["frame"] = json_int(RENDER_FRAME)
+    m["reason"] = json_str(reason)
+    if !stone_ui_probe_refuse(kind, json_encode(json_object(m))) { error("UI probe rejected refusal observation") }
+}
+
+// Keep legacy identity-container construction inside its owning package.
+// The fixture still crosses the ordinary validator and executor entry point.
+pub fn ui_submission_probe_empty_pass(viewport: GpuRect) -> bool {
+    return submit_pass(GpuPass { target: GpuTarget::Window, load: GpuLoad::Load,
+        viewport: viewport, draws: [] })
+}

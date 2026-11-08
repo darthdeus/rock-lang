@@ -1,0 +1,70 @@
+// RenderBatch vertex-buffer growth goes through one shared 2x helper:
+// append_vertex grows at capacity, reserve_vertices grows until capacity
+// fits. Both double identically and both refuse evicted (parked) storage.
+
+fn render_batch_growth_tiny(capacity: int) -> RenderBatch {
+    return RenderBatch {
+        texture: SampledTexture::Image(Image(0)),
+        verts: native_buffer_vertex(capacity),
+        count: 0,
+        capacity: capacity,
+        blend: BlendMode::Alpha,
+        pixel_snap: false,
+        z_layer: 0,
+        depth: DepthMode::Off,
+    }
+}
+
+fn render_batch_growth_fill(batch: RenderBatch, n: int) {
+    reserve_vertices(batch, n)
+    let base = batch.count
+    for i in 0..n {
+        let k = base + i
+        batch.verts[k] = vert(k as float, k as float + 0.5, 0.0, 0.0,
+            1.0, 0.0, 0.0, 1.0, k as float)
+    }
+    batch.count = base + n
+}
+
+@test
+fn render_batch_reserve_past_capacity_doubles_and_keeps_contents() {
+    let batch = render_batch_growth_tiny(2)
+    render_batch_growth_fill(batch, 2)
+    let x0 = batch.verts[0].pos.x
+    let y1 = batch.verts[1].pos.y
+    reserve_vertices(batch, 6)
+    assert_eq(batch.capacity, 8, "two shared 2x steps fit count 2 plus 6 more")
+    assert_eq(batch.count, 2, "growth moves no vertex")
+    assert_eq(batch.verts[0].pos.x, x0, "growth keeps the first vertex")
+    assert_eq(batch.verts[1].pos.y, y1, "growth keeps the second vertex")
+    batch.verts[2] = vert(9.0, 8.5, 0.0, 0.0, 0.0, 1.0, 0.0, 1.0, 2.0)
+    batch.count = 3
+    assert_eq(batch.verts[2].pos.x, 9.0,
+        "post-growth writes address the new storage through fresh leaf views")
+    let small = render_batch_growth_tiny(2)
+    render_batch_growth_fill(small, 2)
+    append_vertex(small, v(4.0, 5.0), 0.0, 0.0,
+        Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, 6.0, 7)
+    assert_eq(small.capacity, 4, "the append path doubles through the shared helper")
+    assert_eq(small.count, 3, "the append lands past the old capacity")
+    assert_eq(small.verts[2].pos.x, 4.0,
+        "the appended vertex reads back through fresh leaf views")
+    assert_eq(small.verts[0].pos.x, 0.0, "append growth keeps the earlier contents")
+    let parked = render_batch_growth_tiny(2)
+    parked.verts = __DUMMY_VERTEX_BUF
+    parked.capacity = 0
+    parked.count = 0
+    let reserve_failure = world_fixture_raised(() => {
+        reserve_vertices(parked, 6)
+    })
+    assert(reserve_failure != null, "reserving into evicted storage raises")
+    assert(reserve_failure.unwrap().contains("evicted"),
+        "the reserve error names the evicted storage")
+    let append_failure = world_fixture_raised(() => {
+        append_vertex(parked, v(1.0, 1.0), 0.0, 0.0,
+            Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 }, 0.0, 0)
+    })
+    assert(append_failure != null, "appending into evicted storage raises")
+    assert(append_failure.unwrap().contains("evicted"),
+        "the append error names the evicted storage")
+}

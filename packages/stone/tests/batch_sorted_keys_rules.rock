@@ -1,0 +1,35 @@
+// The flush walks batches in sorted-key order. The sorted list is reused while
+// the pool holds the same key set and rebuilt when it changes.
+
+fn batch_sorted_keys_test_insert(pool: RenderBatchPool, key: string) {
+    let row = pool.rows.insert(RenderBatch {
+        texture: SampledTexture::Image(Image(0)),
+        verts: __DUMMY_VERTEX_BUF,
+        count: 0,
+        capacity: 1,
+        blend: BlendMode::Alpha,
+        pixel_snap: false,
+        z_layer: 0,
+        depth: DepthMode::Off,
+    })
+    let _ = pool.insert(key, row)
+}
+
+@test
+fn sorted_batch_keys_follow_the_key_set() {
+    let pool = render_batch_pool_new()
+    let cache: [string] = []
+    batch_sorted_keys_test_insert(pool, "b")
+    batch_sorted_keys_test_insert(pool, "a")
+    assert_eq(pool.sorted_keys_into(cache), ["a", "b"], "keys come back sorted")
+    assert_eq(pool.sorted_keys_into(cache), ["a", "b"], "an unchanged pool keeps its order")
+    batch_sorted_keys_test_insert(pool, "c")
+    assert_eq(pool.sorted_keys_into(cache), ["a", "b", "c"], "an added key is included")
+    pool.remove("b")
+    batch_sorted_keys_test_insert(pool, "0")
+    assert_eq(pool.sorted_keys_into(cache), ["0", "a", "c"],
+        "a same-size set with different keys is re-sorted")
+    pool.remove("0")
+    assert_eq(pool.sorted_keys_into(cache), ["a", "c"], "a removed key is dropped")
+    pool.clear()
+}

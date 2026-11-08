@@ -1,0 +1,10 @@
+// Frame-clock sugar for the stdlib Envelope (struct + step_by live in
+// stdlib/unified.rock next to the ease family).
+
+pub fn Envelope.step(e, goal: float) -> float {
+    return e.step_by(goal, dt)
+}
+
+pub fn Envelope.step(e, on: bool) -> float {
+    return e.step_by(if on { 1.0 } else { 0.0 }, dt)
+}

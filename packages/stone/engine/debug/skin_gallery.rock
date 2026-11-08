@@ -1,0 +1,428 @@
+// Live skin gallery: browse every PNG under the game's assets/ui/,
+// preview it as a UiSkin (9-sliced at several sizes, or whole for
+// fixed-aspect assets) with corner + content guides, and tweak the
+// slice metadata from the keyboard until it looks right. Toggle with
+// Ctrl+U (when debug keys are enabled).
+//
+// Tweaks live in SKIN_GALLERY (a preserved global), so they survive an
+// engine hot reload. Press C to dump every entry's numbers to the log
+// for pasting into the game's skin instances / sg_default_skin below.
+
+const SKIN_GALLERY_REPEAT_DELAY: float = 0.3
+const SKIN_GALLERY_REPEAT_INTERVAL: float = 0.05
+const SG_FIELD_COUNT: int = 7
+
+pub struct SkinGalleryEntry {
+    name: string,
+    skin: Entity<UiSkin>,
+}
+
+pub struct SkinGalleryState {
+    enabled: bool,
+    initialized: bool,
+    entries: [SkinGalleryEntry],
+    idx: int,
+    scroll: int,
+    field: int,            // 0/1 corner.x/y, 2-5 pad l/t/r/b, 6 scale
+    repeat_dir: int,
+    repeat_timer: float,
+    env_checked: bool,
+}
+
+pub global SKIN_GALLERY: SkinGalleryState = SkinGalleryState {
+    enabled: false,
+    initialized: false,
+    entries: vec_new(),
+    idx: 0,
+    scroll: 0,
+    field: 0,
+    repeat_dir: 0,
+    repeat_timer: 0.0,
+    env_checked: false,
+}
+
+// The game seeds the gallery from its own skin globals (unfuck #35), so
+// the gallery previews EXACTLY what the game renders -- no drift between
+// a live Ctrl+U tweak, the gallery defaults, and the game's skin file.
+// Keyed by "<Asset>.png". Seeded skins are shared by reference, so a
+// gallery tweak lands in the game's global too. Games without a skin
+// file fall back to sg_default_skin's generic guess.
+pub global SKIN_GALLERY_SEED: Map<string, Entity<UiSkin>> = map_new()
+
+pub fn skin_gallery_seed(name: string, s: Entity<UiSkin>) {
+    SKIN_GALLERY_SEED[name] = s
+}
+
+// Generic guess for a game with no skin file: corner ~ 1/8 of the
+// smaller dim (clamped), pad ~ 0.6 of that -- enough to preview without
+// gross smear. Tune live (C-dump) or add it to a skin file. The old
+// per-asset number tables lived here and drifted against mag's skins
+// (unfuck #35); they are gone, a seeded game's own instances are the
+// single source.
+fn sg_default_skin(img: Image) -> Entity<UiSkin> {
+    let d = img.image_dims()
+    let c = to_int(clamp(float(min(d.x, d.y)) / 8.0, 8.0, 64.0))
+    let p = float(c) * 0.6
+    let s = UiSkin { image: sampled_image(img), source: irect(0, 0, d.x, d.y), corner: iv(c, c), scale: 0.25 }
+    s.pad_l = p
+    s.pad_t = p
+    s.pad_r = p
+    s.pad_b = p
+    return ui_skin_create(s)
+}
+
+// Which source the entry list comes from. A game that seeds its skins
+// drives the gallery entirely from them; only a game with no skin file
+// reaches the directory walk. Pure in the seed count so a test can pick
+// the arm directly -- no game in the tree has an assets/ui and no seeds,
+// so the fallback is driven by emptying the seed map instead.
+pub @pure fn sg_seeded_mode(seed_count: int) -> bool {
+    return seed_count > 0
+}
+
+// Seeded: the game's own skins, which already hold the image the game
+// loaded and the filter it declared. The gallery loads NOTHING here --
+// walking assets/ui would re-load whatever else lives there under the
+// gallery's own default filter, and a second load cannot redeclare one
+// (mag's splash logos are Linear, so Ctrl+U killed the frame).
+pub fn sg_load_entries(s: SkinGalleryState) {
+    let entries: [SkinGalleryEntry] = vec_new()
+
+    if sg_seeded_mode(SKIN_GALLERY_SEED.len()) {
+        let names = SKIN_GALLERY_SEED.keys()
+        sort(names, n => n)
+        for n in names {
+            entries.push(SkinGalleryEntry { name: n, skin: SKIN_GALLERY_SEED[n] })
+        }
+    } else {
+        let names: [string] = vec_new()
+        for path in asset_list_dir("assets/ui") {
+            if path.lower().ends_with(".png") { names.push(path) }
+        }
+        sort(names, n => n)
+        for path in names {
+            // Prefer the handle the GAME loaded: the gallery does not own
+            // what it finds in that directory, and a load redeclaring the
+            // filter is a hard error (a Linear splash logo beside the kit).
+            let parts = path.split("/")
+            let name = parts[parts.len() - 1]
+            let img = image_asset_cached(path) ?? load_image_asset(path)
+            entries.push(SkinGalleryEntry { name: name, skin: sg_default_skin(img) })
+        }
+    }
+
+    s.entries = entries
+    s.idx = 0
+    s.scroll = 0
+}
+
+fn sg_dump(s: SkinGalleryState) {
+    for e in s.entries {
+        let sk = e.skin.get().unwrap()
+        log_info("SKIN", "{e.name}: corner=iv({sk.corner.x}, {sk.corner.y}) pad l/t/r/b={sk.pad_l}/{sk.pad_t}/{sk.pad_r}/{sk.pad_b} scale={sk.scale}")
+    }
+}
+
+fn sg_adjust(s: SkinGalleryState, dir: int) {
+    let sk = s.entries[s.idx].skin.get().unwrap()
+    let step = if tool_key_down(ToolKey::LeftShift) || tool_key_down(ToolKey::RightShift) { 8 } else { 1 }
+    let f = s.field
+    if f == 0 { sk.corner = iv(max(sk.corner.x + dir * step, 0), sk.corner.y) }
+    else if f == 1 { sk.corner = iv(sk.corner.x, max(sk.corner.y + dir * step, 0)) }
+    else if f == 2 { sk.pad_l = max(sk.pad_l + float(dir * step), 0.0) }
+    else if f == 3 { sk.pad_t = max(sk.pad_t + float(dir * step), 0.0) }
+    else if f == 4 { sk.pad_r = max(sk.pad_r + float(dir * step), 0.0) }
+    else if f == 5 { sk.pad_b = max(sk.pad_b + float(dir * step), 0.0) }
+    else { sk.scale = max(sk.scale + float(dir) * 0.025 * float(step), 0.025) }
+}
+
+// Held-key repeat for left/right value tweaks (edge-press only would
+// make dialing a pad in by 40px unbearable).
+fn sg_adjust_dir(s: SkinGalleryState) -> int {
+    if tool_key_pressed(ToolKey::Right) {
+        s.repeat_dir = 1
+        s.repeat_timer = SKIN_GALLERY_REPEAT_DELAY
+        return 1
+    }
+    if tool_key_pressed(ToolKey::Left) {
+        s.repeat_dir = -1
+        s.repeat_timer = SKIN_GALLERY_REPEAT_DELAY
+        return -1
+    }
+    let held = if s.repeat_dir > 0 { tool_key_down(ToolKey::Right) } else if s.repeat_dir < 0 { tool_key_down(ToolKey::Left) } else { false }
+    if !held {
+        s.repeat_dir = 0
+        return 0
+    }
+    s.repeat_timer = s.repeat_timer - dt
+    if s.repeat_timer <= 0.0 {
+        s.repeat_timer = SKIN_GALLERY_REPEAT_INTERVAL
+        return s.repeat_dir
+    }
+    return 0
+}
+
+pub fn sg_set_enabled(s: SkinGalleryState, on: bool) {
+    s.enabled = on
+    if on {
+        if !s.initialized {
+            sg_load_entries(s)
+            s.initialized = true
+        }
+    }
+}
+
+// A reload re-derives the game's skin instances and re-seeds
+// SKIN_GALLERY_SEED (when the game wires skins via @wire). Handles stay
+// stable across the rewrite, so entries built earlier still alias the game's
+// rows -- but un-dumped tweaks reset to source values, and the kit membership
+// may have changed. Invalidate only: the rebuild happens lazily (next open,
+// or next update tick if currently open), which is AFTER the game's own
+// wire re-seeded. C-dump before editing source.
+@wire
+fn sg_wire_invalidate() {
+    SKIN_GALLERY.initialized = false
+}
+
+@update(stage = 116)
+fn update_skin_gallery() {
+    let s = SKIN_GALLERY
+
+    // Open-during-reload: the wire invalidation above can't rebuild in
+    // place (it would race the game's re-seed), so catch up here. Keep
+    // the cursor -- the selected entry is usually the one being edited.
+    if s.enabled && !s.initialized {
+        let idx = s.idx
+        sg_load_entries(s)
+        if s.entries.len > 0 { s.idx = min(max(idx, 0), s.entries.len - 1) }
+        s.initialized = true
+    }
+
+    // Headless/screenshot entry: open on startup without a keypress.
+    // "1" just opens; an asset filename opens with that entry selected.
+    if !s.env_checked {
+        s.env_checked = true
+        let env = os_getenv("SKIN_GALLERY")
+        if env != null {
+            sg_set_enabled(s, true)
+            for (i, e) in enumerate(s.entries) {
+                if e.name == env { s.idx = i }
+            }
+        }
+    }
+
+    let ctrl = tool_ctrl_held()
+    if debug_keys_enabled() && ctrl && tool_key_pressed(ToolKey::U) {
+        sg_set_enabled(s, !s.enabled)
+    }
+
+    if !s.enabled { return }
+
+    if tool_key_pressed(ToolKey::Escape) {
+        sg_set_enabled(s, false)
+        return
+    }
+
+    if ctrl && tool_key_pressed(ToolKey::R) { sg_load_entries(s) }
+    if tool_key_pressed(ToolKey::C) { sg_dump(s) }
+    if s.entries.len == 0 { return }
+
+    if tool_key_pressed(ToolKey::Down) { s.idx = min(max(s.idx + 1, 0), s.entries.len - 1) }
+    if tool_key_pressed(ToolKey::Up) { s.idx = min(max(s.idx - 1, 0), s.entries.len - 1) }
+    if mouse_wheel_delta != 0 {
+        s.idx = min(max(s.idx - mouse_wheel_delta, 0), s.entries.len - 1)
+        mouse_wheel_delta = 0
+    }
+
+    if tool_key_pressed(ToolKey::Tab) {
+        s.field = s.field + 1
+        if s.field >= SG_FIELD_COUNT { s.field = 0 }
+    }
+
+    let dir = sg_adjust_dir(s)
+    if dir != 0 { sg_adjust(s, dir) }
+}
+
+fn sg_field_label(sk: UiSkin, f: int) -> string {
+    if f == 0 { return "corner.x {sk.corner.x}" }
+    if f == 1 { return "corner.y {sk.corner.y}" }
+    if f == 2 { return "pad_l {sk.pad_l}" }
+    if f == 3 { return "pad_t {sk.pad_t}" }
+    if f == 4 { return "pad_r {sk.pad_r}" }
+    if f == 5 { return "pad_b {sk.pad_b}" }
+    return "scale {sk.scale}"
+}
+
+// One preview: the skin, then guides one z up so they sit above the
+// sprites (same-z sprites draw at order 1, over shape fills).
+fn sg_draw_one(sk: UiSkin, r: UiRect, label: string) {
+    r.skin(sk)
+    let gz = r.z + 1
+    r.at_z(gz).outline(color(0.30, 0.50, 0.90, 0.8), 1.0)
+    let sliceable = sk.corner.x > 0 || sk.corner.y > 0
+    if sliceable {
+        let cx = min(sk.corner.x * sk.scale, r.w / 2)
+        let cy = min(sk.corner.y * sk.scale, r.h / 2)
+        let g = color(1.0, 0.35, 0.35, 0.8)
+        ui_rect(r.x + cx, r.y, 1.0, r.h).at_z(gz).fill(g)
+        ui_rect(r.x + r.w - cx, r.y, 1.0, r.h).at_z(gz).fill(g)
+        ui_rect(r.x, r.y + cy, r.w, 1.0).at_z(gz).fill(g)
+        ui_rect(r.x, r.y + r.h - cy, r.w, 1.0).at_z(gz).fill(g)
+    }
+    let content = r.at_z(gz).content(sk)
+    content.outline(color(0.35, 0.90, 0.45, 0.8), 1.0)
+    if sliceable {
+        content.text("Sample", 16.0, WHITE, TextAlign::Center)
+    }
+    ui_rect(r.x, r.y + r.h + 2.0, max(r.w, 120.0), 16.0).at_z(gz)
+        .text(label, 12.0, color(0.60, 0.65, 0.75, 1.0), TextAlign::TopLeft)
+}
+
+fn sg_draw_list(s: SkinGalleryState, panel: UiRect) {
+    panel.fill(color(0.10, 0.11, 0.15, 0.96))
+
+    let list = panel.inset(8.0)
+    let row_h = 24.0
+    let rows = to_int(list.h / row_h)
+    if rows < 1 { rows = 1 }
+    let n = s.entries.len
+
+    let scroll = s.scroll
+    if s.idx < scroll { scroll = s.idx }
+    if s.idx >= scroll + rows { scroll = s.idx - rows + 1 }
+    if scroll < 0 { scroll = 0 }
+    let last = min(scroll + rows, n)
+
+    let clicked = -1
+    for i in scroll..last {
+        let row = list.take_top(row_h)
+        list = list.skip_top(row_h)
+        let hov = row.hovered()
+        if i == s.idx {
+            row.fill(color(0.28, 0.34, 0.52, 1.0))
+        } else if hov {
+            row.fill(color(0.16, 0.18, 0.26, 1.0))
+        }
+        if hov && is_mouse_pressed(MOUSE_BUTTON_LEFT) { clicked = i }
+        let sk = s.entries[i].skin.get().unwrap()
+        let tag = if sk.corner.x > 0 || sk.corner.y > 0 { "9s" } else { "fx" }
+        let txt_col = if i == s.idx { WHITE } else { color(0.78, 0.80, 0.86, 1.0) }
+        row.skip_left(6.0).text("{tag}  {s.entries[i].name}", 14.0, txt_col, TextAlign::Left)
+    }
+    s.scroll = scroll
+    if clicked >= 0 { s.idx = clicked }
+}
+
+// Widgets preview: the skin as a live widget set. Button
+// states are force-tinted via skin_button_draw so a headless screenshot
+// shows all four without a cursor; progress bars expose the content-pad
+// fill channel (the acceptance check for the bar-measurement pass).
+fn sg_draw_widgets(sk: UiSkin, area: UiRect) {
+    let x = area.x
+    let y = area.y
+    let sliceable = sk.corner.x > 0 || sk.corner.y > 0
+
+    if sliceable {
+        let states = [ButtonState::Normal, ButtonState::Hovered, ButtonState::Pressed, ButtonState::Disabled]
+        let labels = ["Normal", "Hover", "Press", "Disabled"]
+        let bw = 150.0
+        let bh = 50.0
+        let bgap = 18.0
+        for i in 0..4 {
+            let br = UiRect { x: x + float(i) * (bw + bgap), y: y, w: bw, h: bh, z: area.z }
+            skin_button_draw(br, labels[i], sk, states[i], 16.0)
+        }
+        y = y + bh + 30.0
+    }
+
+    let ratios = [0.0, 0.4, 1.0]
+    let pw = 200.0
+    let ph = 40.0
+    let pgap = 24.0
+    for i in 0..3 {
+        let pr = UiRect { x: x + float(i) * (pw + pgap), y: y, w: pw, h: ph, z: area.z }
+        skin_progress(pr, ratios[i], sk, color(0.30, 0.75, 0.45, 1.0))
+        ui_rect(pr.x, pr.y + ph + 2.0, pw, 14.0).at_z(area.z)
+            .text("ratio {ratios[i]}", 12.0, color(0.60, 0.65, 0.75, 1.0), TextAlign::TopLeft)
+    }
+}
+
+fn sg_draw_preview(s: SkinGalleryState, e: SkinGalleryEntry, area: UiRect) {
+    let sk = e.skin.get().unwrap()
+
+    let fields = area.take_top(24.0)
+    for f in 0..SG_FIELD_COUNT {
+        let cell = fields.take_left(150.0)
+        fields = fields.skip_left(154.0)
+        if f == s.field { cell.fill(color(0.28, 0.34, 0.52, 1.0)) }
+        let txt_col = if f == s.field { WHITE } else { color(0.75, 0.78, 0.85, 1.0) }
+        cell.skip_left(4.0).text(sg_field_label(sk, f), 14.0, txt_col, TextAlign::Left)
+    }
+
+    let ns = native_size(sk)
+    area.skip_top(28.0).take_top(20.0)
+        .text("{e.name}   src {sk.source.w}x{sk.source.h}   native {to_int(ns.x)}x{to_int(ns.y)} design px", 14.0, color(0.55, 0.90, 0.60, 1.0), TextAlign::Left)
+
+    let body = area.skip_top(56.0)
+    let sliceable = sk.corner.x > 0 || sk.corner.y > 0
+
+    let variants: [Vec2] = vec_new()
+    variants.push(ns)
+    if sliceable {
+        variants.push(v(ns.x * 2.2, ns.y))
+        variants.push(v(ns.x, ns.y * 2.0))
+        variants.push(v(ns.x * 1.5, ns.y * 1.5))
+        variants.push(v(max(ns.x * 0.5, 24.0), max(ns.y * 0.5, 24.0)))
+    } else {
+        variants.push(v(ns.x * 2.0, ns.y * 2.0))
+    }
+
+    let gap = 30.0
+    let cx = body.x
+    let cy = body.y
+    let row_h = 0.0
+    for vs in variants {
+        let w = min(vs.x, body.w)
+        let h = min(vs.y, body.h)
+        if cx + w > body.x + body.w && cx > body.x {
+            cx = body.x
+            cy = cy + row_h + gap
+            row_h = 0.0
+        }
+        sg_draw_one(sk, UiRect { x: cx, y: cy, w: w, h: h, z: body.z }, "{to_int(w)}x{to_int(h)}")
+        cx = cx + w + gap
+        if h > row_h { row_h = h }
+    }
+
+    let wy = cy + row_h + 48.0
+    ui_rect(body.x, wy - 20.0, body.w, 16.0)
+        .text("widgets (button states + skin_progress 0/0.4/1.0)", 12.0, color(0.55, 0.60, 0.72, 1.0), TextAlign::Left)
+    sg_draw_widgets(sk, UiRect { x: body.x, y: wy, w: body.w, h: 200.0, z: body.z })
+}
+
+@late_draw(stage = 96)
+fn draw_skin_gallery() {
+    let s = SKIN_GALLERY
+    if !s.enabled { return }
+
+    let sd = screen_design()
+    let base_z = 480
+
+    ui_full_screen().at_z(base_z).fill(color(0.06, 0.06, 0.09, 0.97))
+
+    let m = 20.0
+    ui_rect(m, m, sd.x - m * 2, 24.0).at_z(base_z + 2)
+        .text("SKIN GALLERY   Ctrl+U/Esc close   Up/Down asset   Tab field   Left/Right adjust (Shift x8)   C dump   Ctrl+R rescan", 14.0, color(0.85, 0.87, 0.95, 1.0), TextAlign::Left)
+
+    if s.entries.len == 0 {
+        ui_rect(m, 60.0, 800.0, 40.0).at_z(base_z + 2)
+            .text("No skins: the game seeded none and assets/ui holds no PNGs", 18.0, color(1.0, 0.5, 0.5, 1.0), TextAlign::Left)
+        return
+    }
+
+    let list_w = 280.0
+    let top = 56.0
+    sg_draw_list(s, ui_rect(m, top, list_w, sd.y - top - m).at_z(base_z + 2))
+    sg_draw_preview(s, s.entries[s.idx],
+        ui_rect(m + list_w + 16.0, top, sd.x - m * 2 - list_w - 16.0, sd.y - top - m).at_z(base_z + 2))
+}

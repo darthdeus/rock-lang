@@ -1,0 +1,133 @@
+// Overflowed begins are dropped from the event bank. Their ends must unwind
+// only the dropped scopes, never a still-open recorded scope.
+
+fn profiler_overflow_fixture(body: fn()) {
+    let enabled = ENGINE.profiler_enabled
+    defer {
+        init_profiler()
+        ENGINE.profiler_enabled = enabled
+    }
+    init_profiler()
+    ENGINE.profiler_enabled = true
+    PROFILER_SECTIONS_OFF = 0
+    GC_WIN_N = 0
+    body()
+}
+
+fn profiler_overflow_open(event: int, open: int, depth: int, why: string) {
+    assert_eq(PROF_OPEN_TOP, open, "{why}: recorded open scopes")
+    assert_eq(nb_get(PROF_OPEN_STACK, 0), event, "{why}: the recorded parent stays outermost")
+    assert_eq(nb_get(PROF_CUR.end_t, event), 0.0, "{why}: the recorded parent is not stamped")
+    assert_eq(PROFILER.current_depth, depth, "{why}: nesting depth")
+}
+
+// Opens a recorded parent, fills the remaining bank with balanced children,
+// then drops `names` as nested begins and unwinds them innermost first.
+fn profiler_overflow_unwind(names: [string]) {
+    profile_frame_begin()
+    profile_begin("overflow.parent")
+    while PROF_CUR.count < MAX_PROFILE_ENTRIES {
+        profile_begin("overflow.child")
+        profile_end("overflow.child")
+    }
+    for i in 1..PROF_CUR.count {
+        assert_eq(nb_get(PROF_CUR.parent_event, i), 0, "a recorded child names its parent")
+        assert_eq(nb_get(PROF_CUR.depth, i), 1, "a recorded child sits under its parent")
+    }
+    profiler_overflow_open(0, 1, 1, "bank full")
+
+    for name in names { profile_begin(name) }
+    assert_eq(PROF_CUR.count, MAX_PROFILE_ENTRIES, "storage stays bounded")
+    assert_eq(PROF_CUR.dropped, names.len(), "every overflowed begin is counted")
+    profiler_overflow_open(0, 1, 1 + names.len(), "dropped scopes open")
+
+    let i = names.len() - 1
+    while i >= 0 {
+        profile_end(names[i])
+        profiler_overflow_open(0, 1, 1 + i, "dropped {names[i]} at level {i} ended")
+        i = i - 1
+    }
+
+    profile_end("overflow.parent")
+    assert_eq(PROF_OPEN_TOP, 0, "the parent's own end closes it")
+    assert_eq(PROFILER.current_depth, 0)
+    let stamped = nb_get(PROF_CUR.end_t, 0)
+    assert(stamped > 0.0 && stamped >= nb_get(PROF_CUR.start_t, 0), "the parent is stamped")
+    profile_end("overflow.parent")
+    assert_eq(nb_get(PROF_CUR.end_t, 0), stamped, "a stray end cannot stamp the parent again")
+    assert_eq(PROFILER.current_depth, 0)
+    profile_frame_end()
+    assert_eq(PROF_LAST.dropped, names.len(), "the frame keeps its dropped-event diagnostic")
+
+    profile_frame_begin()
+    assert_eq(PROF_CUR.dropped, 0, "the successor frame starts clean")
+    assert_eq(PROF_DROPPED_TOP, 0, "the successor frame has no dropped scopes")
+    profile_begin("overflow.parent")
+    profile_begin("overflow.parent")
+    assert_eq(PROF_CUR.count, 2, "the successor frame records again")
+    assert_eq(nb_get(PROF_CUR.parent_event, 1), 0)
+    assert_eq(nb_get(PROF_CUR.depth, 1), 1)
+    profile_end("overflow.parent")
+    profiler_overflow_open(0, 1, 1, "successor inner end")
+    assert(nb_get(PROF_CUR.end_t, 1) > 0.0, "the successor inner scope closes itself")
+    profile_end("overflow.parent")
+    assert_eq(PROF_OPEN_TOP, 0, "the successor parent closes")
+    profile_frame_end()
+    assert_eq(PROF_LAST.dropped, 0)
+}
+
+fn profiler_overflow_same_name() {
+    profiler_overflow_fixture(() => { profiler_overflow_unwind(["overflow.parent"]) })
+}
+
+fn profiler_overflow_nested() {
+    profiler_overflow_fixture(() => {
+        profiler_overflow_unwind(["overflow.parent", "overflow.parent", "overflow.parent"])
+    })
+    profiler_overflow_fixture(() => {
+        profiler_overflow_unwind(["overflow.parent", "overflow.child", "overflow.parent"])
+    })
+}
+
+fn profiler_overflow_cleanup() {
+    let enabled = ENGINE.profiler_enabled
+    let result = (world_fixture_raised(() => {
+        profiler_overflow_fixture(() => {
+            profile_frame_begin()
+            profile_begin("overflow.parent")
+            while PROF_CUR.count < MAX_PROFILE_ENTRIES {
+                profile_begin("overflow.child")
+                profile_end("overflow.child")
+            }
+            profile_begin("overflow.parent")
+            error("intentional profiler overflow failure")
+        })
+    }) ?? "")
+    assert(result.contains("intentional profiler overflow failure"), "unexpected result: {result}")
+    assert_eq(ENGINE.profiler_enabled, enabled, "the fixture restores the profiler switch")
+    assert_eq(PROF_CUR.count, 0, "the fixture releases the event bank")
+    assert_eq(PROF_CUR.dropped, 0, "the fixture clears the dropped count")
+    assert_eq(PROF_OPEN_TOP, 0, "the fixture clears the open stack")
+    assert_eq(PROF_DROPPED_TOP, 0, "the fixture clears the dropped scopes")
+    assert_eq(PROFILER.current_depth, 0, "the fixture clears the depth")
+    profiler_overflow_same_name()
+}
+
+@nomangle fn profiler_overflow_case(which: int) {
+    if which == 0 { profiler_overflow_same_name() }
+    if which == 1 { profiler_overflow_nested() }
+    if which == 2 { profiler_overflow_cleanup() }
+}
+
+@test
+fn profiler_overflow_dropped_same_name_end_keeps_recorded_parent_open() {
+    profiler_test_process("profiler_overflow_case", 0)
+}
+@test
+fn profiler_overflow_dropped_nesting_levels_unwind_without_closing_parent() {
+    profiler_test_process("profiler_overflow_case", 1)
+}
+@test
+fn profiler_overflow_fixture_cleans_up_after_failure() {
+    profiler_test_process("profiler_overflow_case", 2)
+}

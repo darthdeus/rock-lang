@@ -1,0 +1,242 @@
+// Stone itself has no dependency host to initialize its native IO bindings.
+inline(lua) fn history_persistence_test_directory() -> string = """
+    local path = os.tmpname()
+    assert(os.remove(path))
+    return path
+"""
+
+fn history_persistence_test_directory_created() -> string {
+    setup_stone()
+    let path = history_persistence_test_directory()
+    assert(create_directory(path))
+    return path
+}
+
+fn history_publication_failure_fixture(check: fn(SnapshotHistory, string, string) -> ()) {
+    let dir = history_persistence_test_directory_created()
+    let path = dir + "/history.jsonl"
+    let level = dir + "/level.json"
+    defer {
+        let _ = remove_file(level)
+        let _ = remove_file(path)
+        let _ = remove_dir(path)
+        let _ = remove_file(path + ".compact.tmp")
+        let _ = remove_dir(path + ".compact.tmp")
+        assert(remove_dir(dir), "publication fixture removes its files on success and failure")
+    }
+    let state = snapshot_history_empty(2)
+    snapshot_history_ensure_root(state, json_encode(json_str("original")))
+    assert(snapshot_history_commit(state, json_encode(json_str("first edit")), "first"))
+    assert(snapshot_history_commit(state, json_encode(json_str("second edit")), "second"))
+    check(state, path, level)
+}
+
+@test
+fn snapshot_history_failed_publication_saves_document_and_preserves_ids() {
+    history_publication_failure_fixture((state, path, level) => {
+        let before = snapshot_history_clone(state)
+        let document = state.nodes[state.current].snap
+        assert(create_directory(path), "history checkpoint destination is blocked")
+        let publication = snapshot_history_publish(state, path, level, document, checkpoint: true)
+        assert(!publication.done && !file_exists(level),
+            "publication returns before writing the document")
+        while !snapshot_history_publication_poll(publication, true) {}
+        assert_eq(file_read(level) ?? "", document,
+            "failed history publication still saves the production current document")
+        assert(publication.history_failed && publication.failed && publication.failures > 0,
+            "history failure is reported to the editor status consumer")
+        let errors = stone_log_records_text(0, stone_log_record_total(0))
+        assert(errors.contains("SNAPSHOT") && errors.contains(path),
+            "shared logger reports the failed history path")
+        assert(remove_dir(path))
+        let retry = snapshot_history_publish(state, path, checkpoint: true)
+        while !snapshot_history_publication_poll(retry, true) {}
+        assert(!retry.failed, "history publication retries successfully")
+        let reopened = snapshot_history_load(path, state.max_nodes, false).unwrap()
+        for (i, node) in enumerate(before.nodes) {
+            assert_eq(state.nodes[i].pid, node.pid, "checkpoint preserves the observed in-memory ID")
+            assert_eq(reopened.nodes[i].pid, node.pid, "checkpoint persists the observed ID")
+        }
+        assert_eq(state.next_pid, before.next_pid, "publication preserves the next unused ID")
+    })
+    let raised = world_fixture_raised(() => {
+        history_publication_failure_fixture((state, path, level) => {
+            assert(false, "publication fixture intentional failure")
+        })
+    })
+    assert(raised != null && raised.unwrap().contains("publication fixture intentional failure"),
+        "fixture cleanup runs before an intentional failure reaches its caller")
+}
+
+@test
+fn snapshot_history_clean_retries_failed_checkpoint_before_append() {
+    let dir = history_persistence_test_directory_created()
+    let state = snapshot_history_empty(10)
+    let original = json_encode(json_str("document"))
+    snapshot_history_ensure_root(state, original)
+    let path = dir + "/clean-checkpoint.jsonl"
+    assert(snapshot_history_save(state, path, checkpoint: true), "original history exists")
+    assert(create_directory(path + ".compact.tmp"), "checkpoint failure fixture created")
+    snapshot_history_clean(state, original + " ")
+    assert(!snapshot_history_save(state, path, checkpoint: true), "replacement checkpoint fails")
+    assert(remove_dir(path + ".compact.tmp"), "checkpoint can be retried")
+    assert(snapshot_history_commit(state, original + "  ", "new edit"), "new edit follows replacement root")
+    assert(snapshot_history_save(state, path), "publication retries the replacement checkpoint")
+    let loaded = snapshot_history_load(path, 10, false)
+    assert(loaded != null, "subsequent publication remains readable")
+    if let reopened = loaded {
+        assert_eq(reopened.nodes.len(), 2, "file contains only the replacement chain")
+        assert_eq(reopened.nodes[0].snap, original + " ", "replacement root persists")
+    }
+    assert(remove_file(path))
+    assert(remove_dir(dir))
+}
+
+@test
+fn snapshot_history_first_commit_is_a_complete_file() {
+    let dir = history_persistence_test_directory_created()
+    let state = snapshot_history_empty(10)
+    let first = json_encode(json_str("document"))
+    snapshot_history_ensure_root(state, first, "")
+    let second = first + " "
+    assert(snapshot_history_commit(state, second, "edit"), "history has a parent and child")
+    let path = dir + "/first-commit.jsonl"
+    assert(!file_exists(path), "history file does not exist yet")
+    assert(snapshot_history_save(state, path), "first history publication succeeds")
+    let loaded = snapshot_history_load(path, 10, false)
+    assert(loaded != null, "first publication can be reopened")
+    if let restored = loaded {
+        assert_eq(restored.nodes.len(), 2, "first publication includes the root")
+        assert_eq(restored.current, 1, "first publication includes the cursor")
+    }
+    assert(file_append(path, "torn-record"), "interrupted append fixture written")
+    let recovered = snapshot_history_load(path, 10).unwrap()
+    let _ = snapshot_history_jump(recovered, 0)
+    assert(snapshot_history_save(recovered, path, pointer: true), "cursor can be published after recovery")
+    let reopened = snapshot_history_load(path, 10, false).unwrap()
+    assert_eq(reopened.current, 0, "recovery leaves a file safe for subsequent appends")
+    assert(remove_file(path))
+    assert(remove_dir(dir))
+}
+
+@test
+fn snapshot_history_legacy_validation_does_not_rewrite_source() {
+    let dir = history_persistence_test_directory_created()
+    let path = dir + "/legacy-read.jsonl"
+    let entry: Map<string, JsonValue> = map_new()
+    entry["pid"] = json_int(0)
+    entry["ppid"] = json_int(-1)
+    entry["label"] = json_str("start")
+    entry["snap"] = json_str("document")
+    let node: Map<string, JsonValue> = map_new()
+    node["n"] = json_object(entry)
+    let cursor: Map<string, JsonValue> = map_new()
+    cursor["c"] = json_int(0)
+    let raw = json_encode(json_object(node)) + "\n" + json_encode(json_object(cursor)) + "\n"
+    assert(file_write(path, raw), "legacy WAL written")
+    let loaded = snapshot_history_load(path, 10, false)
+    assert(loaded != null, "legacy WAL is readable")
+    assert_eq(loaded.unwrap().storage_version, 1, "reader reports the legacy format")
+    assert_eq(file_read(path) ?? "", raw, "validation read does not upgrade the source")
+    assert_eq(loaded.unwrap().nodes[loaded.unwrap().current].snap, "document")
+    assert(remove_file(path))
+    assert(remove_dir(dir))
+}
+
+@test
+fn snapshot_history_prune_keeps_the_current_lane_and_first_future() {
+    let history = snapshot_history_empty(10)
+    snapshot_history_ensure_root(history, "root")
+    assert_eq(snapshot_history_commit(history, "a", "A"), true)
+    assert_eq(snapshot_history_commit(history, "b", "B"), true)
+    let _back_to_a = snapshot_history_jump(history, snapshot_history_undo_target(history, "b" != history.nodes[history.current].snap) ?? -1)
+    assert_eq(history.nodes[history.current].label, "A")
+    assert_eq(snapshot_history_commit(history, "c", "C"), true)
+    assert_eq(snapshot_history_commit(history, "d", "D"), true)
+    let _back_to_c = snapshot_history_jump(history, snapshot_history_undo_target(history, "d" != history.nodes[history.current].snap) ?? -1)
+    assert_eq(snapshot_history_commit(history, "e", "E"), true)
+    let _back_to_c_again = snapshot_history_jump(history, snapshot_history_undo_target(history, "e" != history.nodes[history.current].snap) ?? -1)
+    assert_eq(history.nodes[history.current].label, "C",
+        "undo after a fork returns to the live node")
+    assert_eq(history.nodes.len(), 6, "the pre-prune tree retains both branches")
+
+    assert_eq(snapshot_history_prune(history), true, "a forked history can be pruned")
+    assert_eq(history.nodes.len(), 4, "prune keeps root, ancestors, and first future")
+    assert_eq(history.nodes[0].label, "start", "prune keeps the root")
+    assert_eq(history.nodes[1].label, "A", "prune keeps the ancestor")
+    assert_eq(history.nodes[2].label, "C", "prune keeps the current node")
+    assert_eq(history.nodes[3].label, "D", "prune keeps the first redo future")
+    assert_eq(history.nodes[history.current].label, "C",
+        "prune remaps the current pointer")
+    assert_eq(snapshot_history_prune(history), false,
+        "pruning an already linear lane is a no-op")
+
+    let redo = snapshot_history_jump(history, snapshot_history_redo_target(history) ?? -1)
+    assert_eq(redo != null, true, "the surviving future remains redoable")
+    assert_eq(history.nodes[history.current].label, "D",
+        "redo follows the surviving future")
+    let _undo_d = snapshot_history_jump(history, snapshot_history_undo_target(history, "d" != history.nodes[history.current].snap) ?? -1)
+    let _undo_c = snapshot_history_jump(history, snapshot_history_undo_target(history, "c" != history.nodes[history.current].snap) ?? -1)
+    assert_eq(history.nodes[history.current].label, "A",
+        "undo walks back through the retained ancestors")
+}
+
+@test
+fn snapshot_history_clean_uses_live_snapshot_and_starts_a_new_tree() {
+    let tree = snapshot_history_empty(10)
+    snapshot_history_ensure_root(tree, "root")
+    snapshot_history_commit(tree, "a", "A")
+    snapshot_history_commit(tree, "b", "B")
+    snapshot_history_jump(tree, snapshot_history_undo_target(tree, "b" != tree.nodes[tree.current].snap) ?? -1)
+    snapshot_history_clean(tree, "live uncommitted edit")
+    assert_eq(tree.nodes.len(), 1, "single baseline node")
+    assert_eq(tree.current, 0, "current is the new root")
+    assert_eq(tree.nodes[0].label, "start", "baseline labeled start")
+    assert_eq(tree.nodes[0].parent, -1, "baseline is a root")
+    assert_eq(tree.nodes[0].children.len(), 0, "no future")
+    assert_eq(tree.nodes[0].snap, "live uncommitted edit", "clean captures its live input")
+    assert_eq(snapshot_history_jump(tree, snapshot_history_undo_target(tree, "live uncommitted edit" != tree.nodes[tree.current].snap) ?? -1) == null, true)
+    assert_eq(snapshot_history_jump(tree, snapshot_history_redo_target(tree) ?? -1) == null, true)
+}
+
+@test
+fn snapshot_history_forks_preserve_both_futures() {
+    let tree = snapshot_history_empty(10)
+    snapshot_history_ensure_root(tree, "root")
+    snapshot_history_commit(tree, "a", "A")
+    snapshot_history_commit(tree, "b", "B")
+    snapshot_history_jump(tree, snapshot_history_undo_target(tree, "b" != tree.nodes[tree.current].snap) ?? -1)
+    snapshot_history_commit(tree, "c", "C")
+    assert_eq(tree.nodes.len(), 4, "root plus three strokes; no branch destroyed")
+    assert_eq(tree.nodes[1].children.len(), 2, "A has both futures: B and C")
+    let b = snapshot_history_jump(tree, 2)
+    assert_eq(b != null, true)
+    assert_eq(b.unwrap().snap, "b", "the abandoned branch remains reachable")
+    let c = snapshot_history_jump(tree, 3)
+    assert_eq(c != null, true)
+    assert_eq(c.unwrap().snap, "c", "the newer branch remains reachable")
+    snapshot_history_jump(tree, 1)
+    let latest = snapshot_history_jump(tree, snapshot_history_redo_target(tree) ?? -1)
+    assert_eq(latest != null, true)
+    assert_eq(latest.unwrap().snap, "c", "redo chooses the most recent branch")
+}
+
+@test
+fn snapshot_history_clamps_linear_roots_and_old_forks() {
+    let tree = snapshot_history_empty(3)
+    snapshot_history_ensure_root(tree, "root")
+    snapshot_history_commit(tree, "a", "A")
+    snapshot_history_commit(tree, "b", "B")
+    snapshot_history_commit(tree, "c", "C")
+    assert_eq(tree.nodes.len(), 3, "clamped to maximum nodes")
+    assert_eq(tree.nodes[0].label, "A", "root collapsed into A")
+    assert_eq(tree.nodes[0].parent, -1, "A is the new root")
+    assert_eq(tree.nodes[tree.current].label, "C", "current remains the newest stroke")
+    snapshot_history_jump(tree, snapshot_history_undo_target(tree, "c" != tree.nodes[tree.current].snap) ?? -1)
+    snapshot_history_commit(tree, "d", "D")
+    snapshot_history_commit(tree, "e", "E")
+    assert_eq(tree.nodes.len(), 3, "fork clamp holds the cap")
+    assert_eq(tree.nodes[0].label, "B", "B is the root after collapses")
+    assert_eq(tree.nodes[0].children.len(), 1, "abandoned branch C is pruned")
+    assert_eq(tree.nodes[tree.current].label, "E", "current rides the active branch")
+}

@@ -1,0 +1,517 @@
+// Two seconds of a 440 Hz sine as 16-bit stereo 44.1 kHz PCM: a real WAV the
+// decoder reads, large enough that a synchronous decode has a measurable wait.
+inline(lua) fn sound_residency_write_wav(path: string) = """
+    local function u16(v) return string.char(v % 256, math.floor(v / 256) % 256) end
+    local function u32(v) return u16(v % 65536) .. u16(math.floor(v / 65536)) end
+    local frames = 2 * 44100
+    local data_len = frames * 4
+    local parts = { "RIFF", u32(36 + data_len), "WAVEfmt ", u32(16), u16(1), u16(2),
+        u32(44100), u32(44100 * 4), u16(4), u16(16), "data", u32(data_len) }
+    for i = 0, frames - 1 do
+        local s = math.floor(math.sin(i * 2 * math.pi * 440 / 44100) * 12000 + 0.5)
+        local frame = u16(s % 65536)
+        parts[#parts + 1] = frame .. frame
+    end
+    local file = assert(io.open(path, "wb"))
+    assert(file:write(table.concat(parts)))
+    assert(file:close())
+"""
+
+fn sound_residency_wav_path() -> string {
+    let dir = (env_var("ROCK_TEST_TMP") ?? env_var("TMPDIR") ?? "/tmp") + "/rock-sound-residency"
+    let _ = create_directory(dir)
+    let path = dir + "/tone.wav"
+    sound_residency_write_wav(path)
+    return path
+}
+
+fn sound_residency_test_sound() -> Sound {
+    return load_sound_asset(sound_residency_wav_path())
+}
+
+// A static sound queues its decode when it loads, and a one-shot that plays
+// before that decode published decodes synchronously and plays: a miss is
+// late, never silent. The audio stub decodes nothing on either path.
+@test
+fn unresident_one_shot_decodes_synchronously_and_plays() {
+    let saved_sfx = SFX_LOG.clone()
+    let saved_sfx_head = SFX_LOG_HEAD
+    let saved_sfx_seq = SFX_LOG_SEQ
+    let saved_metrics = sound_residency_metrics()
+    let saved_quiet = STONE_QUIET
+    let sound: Sound? = null
+    defer {
+        SFX_LOG = saved_sfx
+        SFX_LOG_HEAD = saved_sfx_head
+        SFX_LOG_SEQ = saved_sfx_seq
+        sound_residency_restore_metrics(saved_metrics)
+        STONE_QUIET = saved_quiet
+        if let source = sound { sound_residency_unload(source) }
+    }
+    STONE_QUIET = true
+    assert(stone_audio_init(), "the audio host initializes for the late decode fixture")
+    sound = sound_residency_test_sound()
+    let source = sound.unwrap()
+    let backend_id = source.data().unwrap().backend_id
+    assert(backend_id != 0, "the generated sound fixture has a live backend handle")
+    assert(!stone_sound_resident(backend_id), "the queued load decode has not published yet")
+    let _ = _play_sound_impl(source, STONE_BUS_SFX, 1.0, 1.0, 0.0, false, "late_decode_test")
+    let row = sfx_log_recent(0).unwrap()
+    if stone_audio_stub_active() {
+        assert(!stone_sound_resident(backend_id), "the audio stub plays without decoding")
+        return
+    }
+    assert(row.resident, "the play decoded its sound instead of dropping it")
+    assert(row.sync_decode_us > 0, "the late decode's wait is logged on the play row")
+    assert_eq(sound_residency_metrics().sync_decodes, saved_metrics.sync_decodes + 1,
+        "the late decode is counted")
+}
+
+@test
+fn sound_duration_reads_recipe_without_resident_pcm() {
+    let sound: Sound? = null
+    defer {
+        if let source = sound { sound_residency_unload(source) }
+    }
+    assert(stone_audio_init(), "the audio host initializes for the sound recipe fixture")
+    sound = sound_residency_test_sound()
+    let source = sound.unwrap()
+    let backend_id = source.data().unwrap().backend_id
+    assert(backend_id != 0, "the generated sound fixture has a live backend handle")
+    assert(!stone_sound_resident(backend_id), "a loaded recipe begins without decoded samples")
+    assert(sound_duration(source) > 0.0,
+        "a sound with packaged frame metadata reports a positive duration")
+    assert(!stone_sound_resident(backend_id), "reading duration does not admit sound PCM")
+}
+
+@test
+fn sound_sync_decode_wait_reaches_residency_hitch_stats() {
+    let saved_frame_paths = RESIDENCY_FRAME_WAIT_PATHS.clone()
+    let saved_frame_wait = RESIDENCY_FRAME_MISS_WAIT_US
+    let saved_profile_wait = RESIDENCY_PROFILE_MISS_WAIT_US
+    let saved_metrics = sound_residency_metrics()
+    let sound: Sound? = null
+    defer {
+        RESIDENCY_FRAME_WAIT_PATHS = saved_frame_paths
+        RESIDENCY_FRAME_MISS_WAIT_US = saved_frame_wait
+        RESIDENCY_PROFILE_MISS_WAIT_US = saved_profile_wait
+        sound_residency_restore_metrics(saved_metrics)
+        if let source = sound { sound_residency_unload(source) }
+    }
+    assert(stone_audio_init(), "the audio host initializes for the residency timing fixture")
+    sound = sound_residency_test_sound()
+    let source = sound.unwrap()
+    let backend_id = source.data().unwrap().backend_id
+    assert(backend_id != 0, "the generated sound fixture has a live backend handle")
+    let path = source.data().unwrap().path
+    let frame_before = RESIDENCY_FRAME_MISS_WAIT_US
+    let profile_before = RESIDENCY_PROFILE_MISS_WAIT_US
+    let waited = sound_residency_decode_sync(source)
+    assert(waited > 0, "the decoded sample has a measurable synchronous wait")
+    assert_eq(RESIDENCY_FRAME_MISS_WAIT_US - frame_before, waited,
+        "the measured decoder wait is visible in the current residency frame")
+    assert_eq(RESIDENCY_PROFILE_MISS_WAIT_US - profile_before, waited,
+        "the measured decoder wait is visible to residency profiling")
+    assert(RESIDENCY_FRAME_WAIT_PATHS.len() > saved_frame_paths.len(),
+        "the synchronous sound decode contributes a residency wait path")
+    let row = RESIDENCY_FRAME_WAIT_PATHS[RESIDENCY_FRAME_WAIT_PATHS.len() - 1]
+    assert_eq(row, "sound:{path}", "the wait path names the decoded sound source")
+}
+
+@test
+fn sound_bank_pending_layers_fire_and_clear() {
+    let saved_rng = random_get_state()
+    let saved_presentation_rng = presentation_random_get_state()
+    let saved_pending = SOUND_BANK_PENDING.clone()
+    let saved_order = SOUND_BANK_PENDING_ORDER
+    let saved_sfx = SFX_LOG.clone()
+    let saved_sfx_head = SFX_LOG_HEAD
+    let saved_sfx_seq = SFX_LOG_SEQ
+    let saved_sync_decodes = SOUND_RESIDENCY_SYNC_DECODES
+    let saved_sync_decode_us = SOUND_RESIDENCY_SYNC_DECODE_US
+    let saved_quiet = STONE_QUIET
+    let sound: Sound? = null
+    let pool: Entity<MultiSound>? = null
+    let fixture_active = false
+    let cleaned = false
+    defer {
+        if !cleaned {
+            if fixture_active { sound_bank_clear_pending() }
+            SOUND_BANK_PENDING = saved_pending
+            SOUND_BANK_PENDING_ORDER = saved_order
+            SFX_LOG = saved_sfx
+            SFX_LOG_HEAD = saved_sfx_head
+            SFX_LOG_SEQ = saved_sfx_seq
+            random_set_state(saved_rng)
+            presentation_random_set_state(saved_presentation_rng)
+            STONE_QUIET = saved_quiet
+            if let handle = pool {
+                if let stored = handle.remove() { unload_multisound(stored) }
+            } else {
+                if let source = sound { sound_residency_unload(source) }
+            }
+            SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
+            SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
+        }
+    }
+    assert_eq(sound_bank_pending_count(), 0,
+        "the pending-layer fixture starts without other queued layers")
+    assert_eq(saved_order, 0,
+        "an empty production pending queue starts with a clean ordering sequence")
+    fixture_active = true
+    STONE_QUIET = true
+    assert(stone_audio_init(), "the audio host initializes for the resident PCM fixture")
+    sound = sound_residency_test_sound()
+    let source = sound.unwrap()
+    let backend_id = source.data().unwrap().backend_id
+    assert(backend_id != 0, "the generated sound fixture has a live backend handle")
+    assert(stone_sound_decode_sync(backend_id) >= 0,
+        "the production decoder makes the offset source resident")
+    pool = SOUND_BANK_POOLS.insert(MultiSound { sources: [source], gains: [1.0] })
+    let bank = SoundBank {
+        version: SOUND_BANK_SCHEMA_VERSION,
+        events: [SoundBankEvent {
+            id: "fixture.pending",
+            bus: STONE_BUS_SFX,
+            steps: [SoundBankStep { layers: [SoundBankLayer {
+                bank: pool.unwrap(), volume: 1.0, speed: 1.0, offset: 0.2,
+            }]}],
+        }],
+        dependencies: [],
+    }
+
+    assert(_sound_bank_play_step(bank, SoundEventHandle(0), 0, 1.0, 1.0,
+        0.0, STONE_BUS_SFX, 0.0, 0.0, false, 0.0,
+        "sound_bank_pending_test"), "the production step queues its offset layer")
+    sound_bank_play_pending(0)
+    assert_eq(SOUND_BANK_PENDING_ORDER, 0,
+        "firing the last pending layer releases its ordering sequence")
+
+    assert(_sound_bank_play_step(bank, SoundEventHandle(0), 0, 1.0, 1.0,
+        0.0, STONE_BUS_SFX, 0.0, 0.0, false, 0.0,
+        "sound_bank_pending_test"), "the production step queues the next layer")
+    sound_bank_clear_pending()
+    assert_eq(SOUND_BANK_PENDING_ORDER, 0,
+        "clearing the last pending layer releases its ordering sequence")
+    assert(source.data() != null, "clearing a pending reference leaves the bank-owned source live")
+    let fire_seq = SFX_LOG_SEQ
+    assert(_sound_bank_play_step(bank, SoundEventHandle(0), 0, 1.0, 1.0,
+        0.0, STONE_BUS_SFX, 0.0, 0.0, false, 0.0,
+        "sound_residency_pending_fire_test"), "the production step queues the delayed source again")
+    let pending_before_fire = sound_bank_pending_count()
+    sound_bank_play_pending(0)
+    assert_eq(SOUND_BANK_PENDING_ORDER, 0,
+        "firing the final production layer releases its ordering sequence")
+    assert_eq(SFX_LOG_SEQ, fire_seq + pending_before_fire,
+        "firing the queued production layers reaches the playback funnel")
+    let fired = sfx_log_recent(0).unwrap()
+    assert_eq(fired.path, source.data().unwrap().path,
+        "the pending firing row names the bank-owned source rather than a fixture-only marker")
+    sound_bank_clear_pending()
+    SOUND_BANK_PENDING = saved_pending
+    SOUND_BANK_PENDING_ORDER = saved_order
+    if let handle = pool {
+        if let stored = handle.remove() { unload_multisound(stored) }
+    } else {
+        if let source = sound { sound_residency_unload(source) }
+    }
+    SFX_LOG = saved_sfx
+    SFX_LOG_HEAD = saved_sfx_head
+    SFX_LOG_SEQ = saved_sfx_seq
+    random_set_state(saved_rng)
+    presentation_random_set_state(saved_presentation_rng)
+    STONE_QUIET = saved_quiet
+    SOUND_RESIDENCY_SYNC_DECODES = saved_sync_decodes
+    SOUND_RESIDENCY_SYNC_DECODE_US = saved_sync_decode_us
+    cleaned = true
+    assert_eq(SOUND_BANK_PENDING.len(), saved_pending.len(),
+        "the pending sound fixture restores the prior queue")
+    assert_eq(SOUND_BANK_PENDING_ORDER, saved_order,
+        "the pending sound fixture restores the pending owner sequence")
+    assert(SFX_LOG_HEAD == saved_sfx_head && SFX_LOG_SEQ == saved_sfx_seq
+        && SFX_LOG == saved_sfx,
+        "the pending sound fixture restores its prior SFX log")
+    assert(SOUND_RESIDENCY_SYNC_DECODES == saved_sync_decodes
+        && SOUND_RESIDENCY_SYNC_DECODE_US == saved_sync_decode_us,
+        "the pending sound fixture restores residency metrics")
+}
+
+@test
+fn sound_bank_normalized_gain_reaches_immediate_and_pending_playback() {
+    let saved_rng = random_get_state()
+    let saved_presentation_rng = presentation_random_get_state()
+    let saved_pending = SOUND_BANK_PENDING.clone()
+    let saved_order = SOUND_BANK_PENDING_ORDER
+    let saved_sfx = SFX_LOG.clone()
+    let saved_sfx_head = SFX_LOG_HEAD
+    let saved_sfx_seq = SFX_LOG_SEQ
+    let saved_metrics = sound_residency_metrics()
+    let saved_quiet = STONE_QUIET
+    let bank: SoundBank? = null
+    let shared_key = ""
+    let shared_refs_before = 0
+    let fixture_active = false
+    let cleaned = false
+    defer {
+        if !cleaned {
+            if fixture_active { sound_bank_clear_pending() }
+            if let live = bank { sound_bank_release(live) }
+            if shared_key != "" {
+                if let shared = SOUND_RESIDENCY_SHARED_SOURCES.get(shared_key) {
+                    let extras = max(0, shared.references - shared_refs_before)
+                    for _ in 0..extras { sound_residency_release_shared(shared.sound) }
+                }
+            }
+            SOUND_BANK_PENDING = saved_pending
+            SOUND_BANK_PENDING_ORDER = saved_order
+            SFX_LOG = saved_sfx
+            SFX_LOG_HEAD = saved_sfx_head
+            SFX_LOG_SEQ = saved_sfx_seq
+            random_set_state(saved_rng)
+            presentation_random_set_state(saved_presentation_rng)
+            STONE_QUIET = saved_quiet
+            sound_residency_restore_metrics(saved_metrics)
+        }
+    }
+    assert_eq(sound_bank_pending_count(), 0,
+        "the normalization fixture starts without other queued layers")
+    fixture_active = true
+    STONE_QUIET = true
+    assert(stone_audio_init(), "the audio host initializes for the normalized source fixture")
+    let path = sound_residency_wav_path()
+    shared_key = asset_path(path)
+    if let shared = SOUND_RESIDENCY_SHARED_SOURCES.get(shared_key) {
+        shared_refs_before = shared.references
+    }
+    let normalizations = "{{\"" + path + "\":{{\"gain\":0.25}}}}"
+    let fixture = "{{\"version\":2,\"normalizations\":" + normalizations
+        + ",\"events\":[{{\"id\":\"fixture.normalized\",\"bus\":\"ui\",\"steps\":["
+        + "{{\"layers\":[{{\"sources\":[\"" + path + "\"]}},"
+        + "{{\"sources\":[\"" + path + "\"],\"offset\":0.2}}]}}]}}]}}"
+    bank = sound_bank_decode(fixture, "normalized source fixture")
+    assert(bank != null, "a source with its normalization decodes")
+    sfx_log_clear()
+
+    assert(_sound_bank_play_step(bank.unwrap(), SoundEventHandle(0), 0, 1.0, 1.0,
+        0.0, -1, 0.0, 0.0, false, 0.0,
+        "sound_residency_normalized_gain_test"),
+        "the production step plays its immediate source and queues its offset source")
+    assert_eq(sound_bank_pending_count(), 1,
+        "the offset source waits for its scheduled firing point")
+    let immediate = sfx_log_recent(0).unwrap()
+    assert_eq(immediate.volume, 0.25,
+        "the immediate SFX log records the selected source normalization gain")
+    assert_eq(immediate.bus, STONE_BUS_UI,
+        "the default bank route reaches playback with the event's UI bus")
+
+    sound_bank_play_pending(0)
+    let queued = sfx_log_recent(0).unwrap()
+    assert_eq(queued.volume, 0.25,
+        "queued playback retains the selected source normalization gain")
+    assert_eq(queued.bus, STONE_BUS_UI,
+        "queued playback retains the event's UI bus")
+
+    let refs_before_rejection = 0
+    if let shared = SOUND_RESIDENCY_SHARED_SOURCES.get(shared_key) {
+        refs_before_rejection = shared.references
+    }
+    let missing_normalization = "{{\"version\":2,\"normalizations\":{{}},\"events\":["
+        + "{{\"id\":\"fixture.missing_normalization\",\"bus\":\"sfx\",\"steps\":["
+        + "{{\"layers\":[{{\"sources\":[\"" + path + "\"]}}]}}]}}]}}"
+    assert(sound_bank_decode(missing_normalization, "missing normalization fixture") == null,
+        "a loaded source without a normalization rejects the candidate bank")
+    let refs_after_rejection = 0
+    if let shared = SOUND_RESIDENCY_SHARED_SOURCES.get(shared_key) {
+        refs_after_rejection = shared.references
+    }
+    assert_eq(refs_after_rejection, refs_before_rejection,
+        "rejecting a source without normalization releases its shared source reference")
+
+    sound_bank_release(bank.unwrap())
+    bank = null
+    let refs_after_release = 0
+    if let shared = SOUND_RESIDENCY_SHARED_SOURCES.get(shared_key) {
+        refs_after_release = shared.references
+    }
+    assert_eq(refs_after_release, shared_refs_before,
+        "releasing the valid bank restores its prior shared source references")
+    sound_bank_clear_pending()
+    SOUND_BANK_PENDING = saved_pending
+    SOUND_BANK_PENDING_ORDER = saved_order
+    SFX_LOG = saved_sfx
+    SFX_LOG_HEAD = saved_sfx_head
+    SFX_LOG_SEQ = saved_sfx_seq
+    random_set_state(saved_rng)
+    presentation_random_set_state(saved_presentation_rng)
+    STONE_QUIET = saved_quiet
+    sound_residency_restore_metrics(saved_metrics)
+    cleaned = true
+    assert_eq(sound_bank_pending_count(), saved_pending.len(),
+        "the normalization fixture restores the prior pending queue")
+    assert_eq(SOUND_BANK_PENDING_ORDER, saved_order,
+        "the normalization fixture restores the pending owner sequence")
+    assert(SFX_LOG == saved_sfx && SFX_LOG_HEAD == saved_sfx_head
+        && SFX_LOG_SEQ == saved_sfx_seq,
+        "the normalization fixture restores its prior SFX log")
+}
+
+@test
+fn sound_bank_stream_layer_admits_its_encoded_file_without_pcm() {
+    let path = sound_residency_wav_path()
+    let saved_metrics = sound_residency_metrics()
+    let bank: SoundBank? = null
+    let cleaned = false
+    defer {
+        if !cleaned {
+            if let live = bank { sound_bank_release(live) }
+            sound_residency_restore_metrics(saved_metrics)
+        }
+    }
+    assert(stone_audio_init(), "the audio host initializes for the stream fixture")
+    let file_bytes = (file_read(path) ?? "").len()
+    assert(file_bytes > 0, "the generated sound fixture is readable")
+    bank = sound_bank_decode("{{\"version\":2,\"normalizations\":{{\"" + path + "\":{{\"gain\":1}}}},\"events\":[{{\"id\":\"fixture.bed\",\"bus\":\"sfx\",\"steps\":[{{\"layers\":[{{\"sources\":[\"" + path + "\"],\"stream\":true}}]}}]}}]}}", "stream fixture")
+    assert(bank != null, "a bank with a stream layer decodes")
+    let pool = sound_bank_layer_pool(bank.unwrap().events[0].steps[0].layers[0]).unwrap()
+    let source = pool.sources[0]
+    let backend = source.data().unwrap().backend_id
+    assert(sound_is_stream(source), "the authored stream layer loads a stream source")
+    assert(!sound_resident(source), "a stream source starts unadmitted")
+    assert(!sound_residency_loop_ready(pool), "an unadmitted bed cannot start its loop")
+
+    assert(sound_residency_admit(source), "the stream source accepts admission")
+    let deadline = stone_get_time() + 10.0
+    while !sound_resident(source) && stone_get_time() < deadline {
+        stone_service_sound_admissions()
+        stone_delay(1)
+    }
+    assert(sound_resident(source), "admission makes the stream source playable")
+    assert(!stone_sound_resident(backend), "the admitted stream holds no PCM")
+    assert(sound_residency_loop_ready(pool), "an admitted bed starts its loop from the encoded file")
+    let reported = -1
+    let format = ""
+    for row in asset_report_rows() {
+        if row.kind != "sound" { continue }
+        for row_path in row.paths {
+            if row_path == path {
+                reported = row.cpu_bytes
+                format = row.format
+            }
+        }
+    }
+    assert_eq(format, "encoded-stream", "the asset report names the stream's held format")
+    assert_eq(reported, file_bytes, "the asset report counts exactly the encoded file")
+
+    sound_bank_release(bank.unwrap())
+    bank = null
+    sound_residency_restore_metrics(saved_metrics)
+    cleaned = true
+}
+
+// A native slot freed behind the registry's back must not unload silently:
+// sound_residency_unload finishes the Rock-side cleanup, then raises naming
+// unload_sound and the refused backend id. A stale handle stays a no-op.
+@test
+fn unload_sound_surfaces_a_refused_native_unload() {
+    let saved_metrics = sound_residency_metrics()
+    let sound: Sound? = null
+    world_fixture_with_cleanup(() => {
+        assert(stone_audio_init(), "the audio host initializes for the unload refusal fixture")
+        sound = sound_residency_test_sound()
+        let loaded = sound.unwrap()
+        let backend = loaded.data().unwrap().backend_id
+        assert(backend != 0, "the generated sound fixture has a live backend handle")
+        sound_residency_register_recipe(backend,
+            SoundRecipe { frames: 1, rate: 44100, channels: 1, digest: "test:unload-refusal" })
+        assert(stone_unload_sound(backend),
+            "the fixture frees its native slot first")
+        let failure = world_fixture_raised(() => {
+            sound_residency_unload(loaded)
+        })
+        sound = null
+        let message = failure ?? "the call returned normally after a refused native unload"
+        assert(message.contains("unload_sound"),
+            "the refusal names unload_sound (got: {message})")
+        assert(message.contains("{backend}"),
+            "the refusal names the backend id (got: {message})")
+        assert(loaded.data() == null,
+            "the refusal still drops the registry entry")
+        assert(!SOUND_RESIDENCY_RECIPES.contains(backend),
+            "the refusal still drops the recipe")
+    }, () => {
+        if let source = sound { sound_residency_unload(source) }
+        sound_residency_restore_metrics(saved_metrics)
+    })
+}
+
+@test
+fn sound_residency_unload_covers_success_backend_zero_and_stale() {
+    let saved_metrics = sound_residency_metrics()
+    let sound: Sound? = null
+    let stub: Sound? = null
+    let cleaned = false
+    defer {
+        if !cleaned {
+            if let source = sound { sound_residency_unload(source) }
+            if let missing = stub { sound_residency_unload(missing) }
+            sound_residency_restore_metrics(saved_metrics)
+        }
+    }
+    assert(stone_audio_init(), "the audio host initializes for the unload coverage fixture")
+    sound = sound_residency_test_sound()
+    let loaded = sound.unwrap()
+    let backend = loaded.data().unwrap().backend_id
+    assert(backend != 0, "the generated sound fixture has a live backend handle")
+    sound_residency_unload(loaded)
+    sound = null
+    assert(loaded.data() == null, "a successful unload retires the entity")
+    let stale = world_fixture_raised(() => {
+        sound_residency_unload(loaded)
+    })
+    assert(stale == null,
+        "a repeated unload of a stale handle stays silent (got: {stale ?? "<none>"})")
+    stub = load_sound_asset("/nonexistent/missing-fixture.wav")
+    let missing = stub.unwrap()
+    assert(missing.data().unwrap().backend_id == 0,
+        "a missing asset loads as a backend-zero stub")
+    let stub_failure = world_fixture_raised(() => {
+        sound_residency_unload(missing)
+    })
+    stub = null
+    assert(stub_failure == null,
+        "a backend-zero stub unloads without a native release (got: {stub_failure ?? "<none>"})")
+    assert(missing.data() == null, "the stub unload still retires the entity")
+    let stub_stale = world_fixture_raised(() => {
+        sound_residency_unload(missing)
+    })
+    assert(stub_stale == null,
+        "a repeated unload of a retired stub stays silent (got: {stub_stale ?? "<none>"})")
+    sound_residency_restore_metrics(saved_metrics)
+    cleaned = true
+}
+
+@test
+fn sound_unload_fixture_failure_restores_state() {
+    let saved_metrics = sound_residency_metrics()
+    let sound: Sound? = null
+    let failure = world_fixture_raised(() => {
+        world_fixture_with_cleanup(() => {
+            assert(stone_audio_init(), "the audio host initializes for the failure fixture")
+            sound = sound_residency_test_sound()
+            error("intentional sound unload fixture failure")
+        }, () => {
+            if let source = sound { sound_residency_unload(source) }
+            sound_residency_restore_metrics(saved_metrics)
+        })
+    })
+    let message = failure ?? "fixture returned without the deliberate failure"
+    assert(message.contains("intentional sound unload fixture failure"),
+        "the failure surfaces (got: {message})")
+    assert(sound != null && sound.unwrap().data() == null,
+        "a failed check unloads its sound")
+    let again = sound_residency_test_sound()
+    assert(again.data() != null, "a failed check leaves later loads working")
+    sound = again
+    sound_residency_unload(again)
+    sound = null
+}

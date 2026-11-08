@@ -1,0 +1,19 @@
+@test
+fn polygon_clip_reuses_buffers_without_crossing_the_rectangle() {
+    let source = [v(-1.0, -0.5), v(3.0, 0.25), v(3.0, 2.5), v(-1.0, 1.5)]
+    let out: [Vec2] = []
+    let scratch: [Vec2] = []
+    for x in [0.0, 2.0] {
+        polygon_clip_rect_into(source, v(x, 0.0), v(x + 1.0, 1.0), out, scratch)
+        assert(out.len() >= 3, "the polygon intersects each selected cell")
+        for p in out {
+            assert(p.x >= x && p.x <= x + 1.0 && p.y >= 0.0 && p.y <= 1.0,
+                "clipped vertices stay within the selected cell")
+        }
+    }
+    polygon_clip_rect_into(source, v(5.0, 5.0), v(6.0, 6.0), out, scratch)
+    assert_eq(out.len(), 0, "a later disjoint clip clears reused output")
+    let original = polygon_clip_rect(source, v(0.0, 0.0), v(1.0, 1.0))
+    assert(original.len() >= 3, "the allocating API still returns a clipped polygon")
+    for p in original { assert(p.x >= 0.0 && p.x <= 1.0 && p.y >= 0.0 && p.y <= 1.0) }
+}

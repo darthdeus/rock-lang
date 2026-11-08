@@ -1,0 +1,112 @@
+// The cimgui bindings are a compile-time input of stone, not a runtime asset.
+// The initializer is a global so it runs before any game global initializer.
+
+@nomangle
+inline(lua) fn __imgui_prelude_init(
+    cdef: string,
+    master: string,
+    enums: string,
+    wrap: string,
+    init: string,
+) -> bool = """
+    if _G.__imgui_install_stub == nil then
+        _G.__imgui_install_stub = function()
+            local _noop = function() end
+            local _true = function() return true end
+            local _false = function() return false end
+            -- `C` is the raw cimgui namespace, indexed as a TABLE (imgui.C.igGetIO_Nil())
+            -- the catch-all __index below would hand back a function and throw. The
+            -- IO record is a real table so ConfigFlags reads as a number and writes
+            -- stick; unknown fields read false ("imgui wants nothing").
+            local _io = setmetatable(
+                {WantCaptureMouse = false, WantCaptureKeyboard = false,
+                 WantTextInput = false, KeyShift = false, ConfigFlags = 0},
+                {__index = function() return false end})
+            local _C = setmetatable(
+                {igGetIO_Nil = function() return _io end},
+                {__index = function() return _noop end})
+            -- Enum names must answer nil, not the catch-all function:
+            -- tool-key resolution compares them against numbers.
+            local _enum_names = {}
+            local _live = _G.imgui
+            if type(_live) == "table" and _live.__stone_stub ~= true then
+                for k, v in pairs(_live) do
+                    if type(k) == "string" and type(v) == "number" then _enum_names[k] = true end
+                end
+            end
+            _G.imgui = setmetatable({
+                C = _C,
+                __stone_stub = true,
+                Begin = _true, BeginChild_Str = _true,
+                Button = _false, TreeNode_Str = _false,
+                InputText = _false, SliderFloat = _false, SliderFloat2 = _false, SliderFloat4 = _false,
+                ColorEdit4 = _false, ColorPicker4 = _false, ImageButton = _false,
+                IsWindowHovered = _false, IsAnyItemHovered = _false,
+                GetMousePos = function() return {x=0, y=0} end,
+                ImVec2_Float = function(x, y) return {x=x or 0, y=y or 0} end,
+                ImVec4_Float = function(r, g, b, a) return {x=r or 0, y=g or 0, z=b or 0, w=a or 0} end,
+                ImGuiHoveredFlags_AnyWindow = 0,
+            }, {__index = function(_, k)
+                if _enum_names[k] then return nil end
+                return _noop
+            end})
+        end
+    end
+    if _G.imgui == nil then
+        package.preload["cimgui.cdef"] = assert(loadstring(cdef, "cimgui.cdef"))
+        package.preload["cimgui.master"] = assert(loadstring(master, "cimgui.master"))
+        package.preload["cimgui.enums"] = assert(loadstring(enums, "cimgui.enums"))
+        package.preload["cimgui.wrap"] = assert(loadstring(wrap, "cimgui.wrap"))
+
+        local _ok, _result = xpcall(function(...)
+            local _init = assert(loadstring(init, "cimgui.init"))
+            return _init(...)
+        end, debug.traceback, "cimgui")
+        if _ok then
+            _G.imgui = _result
+            do
+                local ffi = require("ffi")
+                if ffi.os == "Linux" or ffi.os == "OSX" then
+                    -- pcall: dlopen may already be cdef'd by another binding;
+                    -- redefinition throws but ffi.C.dlopen works either way.
+                    pcall(ffi.cdef, "void *dlopen(const char *filename, int flags);")
+                    local RTLD_NOW, RTLD_NOLOAD, RTLD_NODELETE, name
+                    if ffi.os == "OSX" then
+                        RTLD_NOW, RTLD_NOLOAD, RTLD_NODELETE = 2, 0x10, 0x80
+                        name = "libcimgui_complete.dylib"
+                    else
+                        RTLD_NOW, RTLD_NOLOAD, RTLD_NODELETE = 2, 4, 0x1000
+                        name = "libcimgui_complete.so"
+                    end
+                    -- NULL result (lib not loaded under this name) is fine: there
+                    -- is nothing to pin, and nothing registered an atexit handler.
+                    ffi.C.dlopen(name, RTLD_NOW + RTLD_NOLOAD + RTLD_NODELETE)
+                end
+            end
+        else
+            error("[cimgui prelude] init failed. ImGui is required. " ..
+                "Configure the native library search path before launching the game.\n" .. tostring(_result), 0)
+        end
+    end
+    return true
+"""
+
+// Called by the runner when stone_imgui_init fails: the real table would
+// leave every direct imgui.C call site a path into cimgui with no live
+// context, so it is replaced with an inert stub.
+inline(lua) fn __imgui_note_platform_init_failed() = """
+    _G.__imgui_install_stub()
+"""
+
+// A previous platform-init failure may have replaced the live bindings.
+inline(lua) fn __imgui_bindings_live() -> bool = """
+    return _G.imgui ~= nil and _G.imgui.__stone_stub ~= true
+"""
+
+const __IMGUI_PRELUDE_READY: bool = __imgui_prelude_init(
+    embed_string("prebuilt/cimgui/cdef.lua"),
+    embed_string("prebuilt/cimgui/master.lua"),
+    embed_string("prebuilt/cimgui/enums.lua"),
+    embed_string("prebuilt/cimgui/wrap.lua"),
+    embed_string("prebuilt/cimgui/init.lua"),
+)

@@ -1,0 +1,72 @@
+struct CanvasManager {
+    canvases: Map<string, ManagedCanvas>,
+}
+
+struct ManagedCanvas {
+    id: string,
+    canvas: Canvas,
+    width: float,
+    height: float,
+    format: string,
+}
+
+global CANVAS_MANAGER: CanvasManager = CanvasManager {
+    canvases: map_new()
+}
+
+pub fn managed_canvas(id: string, width: float, height: float, format: string = "rgba8") -> string {
+    let canvas = new_canvas(width, height, format)
+
+    let managed = ManagedCanvas {
+        id: id,
+        canvas: canvas,
+        width: width,
+        height: height,
+        format: format
+    }
+
+    CANVAS_MANAGER.canvases.insert(id, managed)
+
+    log_debug("CANVAS", "Created managed canvas: {id} ({width}x{height}, format: {format})")
+
+    return id
+}
+
+pub fn get_canvas(canvas_id: string) -> Canvas? {
+    if let managed = CANVAS_MANAGER.canvases.get(canvas_id) { return managed.canvas }
+    return null
+}
+
+pub fn get_or_create_canvas(id: string, width: float, height: float, format: string = "rgba8") -> Canvas {
+    let managed = CANVAS_MANAGER.canvases.get(id)
+
+    if managed == null {
+        managed_canvas(id, width, height, format)
+        return get_canvas(id).unwrap()
+    }
+
+    let m = managed.unwrap()
+    if m.width != width || m.height != height {
+        resize_canvas(id, width, height)
+        return get_canvas(id).unwrap()
+    }
+
+    return m.canvas
+}
+
+fn resize_canvas(canvas_id: string, new_width: float, new_height: float) {
+    let managed = CANVAS_MANAGER.canvases.get(canvas_id)
+    if managed != null {
+        let old_canvas = managed.canvas
+        let new_canvas = new_canvas(new_width, new_height, managed.format)
+
+        managed.canvas = new_canvas
+        managed.width = new_width
+        managed.height = new_height
+        destroy_canvas(old_canvas)
+
+        log_debug("CANVAS", "Resized canvas: {canvas_id} to {new_width}x{new_height}")
+    } else {
+        log_warn("CANVAS", "Canvas not found for resizing: {canvas_id}")
+    }
+}

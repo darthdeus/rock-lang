@@ -1,0 +1,363 @@
+// Renderer-independent mote state and physics shared by world ticks and Stone.
+
+const MOTE_TRAIL_N: int = 16
+
+pub nobox value MoteWorldPoint {
+    x: float,
+    y: float,
+    z: float,
+}
+
+pub @inline @pure
+fn mote_world_point(point: Vec3) -> MoteWorldPoint {
+    return MoteWorldPoint { x: point.x, y: point.y, z: point.z }
+}
+
+pub @inline @pure
+fn MoteWorldPoint.vec3(point) -> Vec3 {
+    return v(point.x, point.y, point.z)
+}
+
+pub @pure operator +(point: MoteWorldPoint, offset: Vec3) -> MoteWorldPoint {
+    return mote_world_point(point.vec3() + offset)
+}
+
+pub @pure operator -(point: MoteWorldPoint, other: MoteWorldPoint) -> Vec3 {
+    return point.vec3() - other.vec3()
+}
+
+pub @pure operator -(point: MoteWorldPoint, other: Vec3) -> Vec3 {
+    return point.vec3() - other
+}
+
+pub @pure operator -(point: Vec3, other: MoteWorldPoint) -> Vec3 {
+    return point - other.vec3()
+}
+
+pub struct Mote {
+    pos: MoteWorldPoint,
+    vel: Vec3,
+    group: int = 0,
+    persistent: bool = true,
+    lifetime: float = 0.0,
+    total_lifetime: float = 0.0,
+    seed: float = 0.0,
+    tint: Color = WHITE,
+    size: float = 0.07,
+    // The last MOTE_TRAIL_N positions as a ring: `trail_head` is the next slot
+    // to overwrite once the ring is full.
+    trail: [MoteWorldPoint] = [],
+    trail_head: int = 0,
+    // Ballistic lane. A mote with no floor ignores all three and drifts as
+    // before; one with a floor collides with that plane, keeping
+    // `restitution` of its vertical speed and `floor_friction` of its
+    // horizontal speed per contact.
+    floor_z: float? = null,
+    restitution: float = 0.0,
+    floor_friction: float = 1.0,
+    // Per-mote scales on the GLOBAL mood, so one lane can opt out of the
+    // shared feel without a second mood. A falling body wants neither the
+    // drift damping nor the curl noise the wisps are built on.
+    drag: float = 1.0,
+    curl: float = 1.0,
+    // Zero uses the shared mood; persistent followers can set their own cap.
+    max_speed: float = 0.0,
+}
+
+pub enum MoteEffectorKind {
+    Attract,
+    Repulse,
+    Vortex,
+    Path,
+    Spring,
+    Gravity,
+}
+
+pub value MoteEffector {
+    kind: MoteEffectorKind,
+    pos: Vec3,
+    axis: Vec3,
+    strength: float,
+    falloff: float,
+    group: int,
+    path: [Vec3]?,
+    flow: float,
+}
+
+// Global motion feel, mutated per-frame by the game's intent layer
+// (tighten + speed up while channeling, sag when drained, ...).
+pub struct MoteMood {
+    max_speed: float,
+    damping: float,
+    curl_strength: float,
+    curl_scale: float,
+}
+
+
+pub fn default_mote_mood() -> MoteMood {
+    return MoteMood {
+        max_speed: 6.0,
+        damping: 2.5,
+        curl_strength: 1.5,
+        curl_scale: 0.7,
+    }
+}
+
+
+pub fn mote_repulse_into(effectors: [MoteEffector], pos: Vec3, strength: float,
+                     falloff: float, group: int = -1) {
+    effectors.push(MoteEffector {
+        kind: MoteEffectorKind::Repulse,
+        pos: pos,
+        axis: v(0.0, 0.0, 1.0),
+        strength: strength,
+        falloff: falloff,
+        group: group,
+        path: null,
+        flow: 0.0,
+    })
+}
+
+
+pub fn mote_spring_into(effectors: [MoteEffector], pos: Vec3, strength: float,
+                    group: int = -1) {
+    effectors.push(MoteEffector {
+        kind: MoteEffectorKind::Spring,
+        pos: pos,
+        axis: v(0.0, 0.0, 1.0),
+        strength: strength,
+        falloff: 0.0,
+        group: group,
+        path: null,
+        flow: 0.0,
+    })
+}
+
+
+pub fn mote_vortex_into(effectors: [MoteEffector], center: Vec3, axis: Vec3,
+                    swirl: float, falloff: float, group: int = -1) {
+    effectors.push(MoteEffector {
+        kind: MoteEffectorKind::Vortex,
+        pos: center,
+        axis: axis.normalize(),
+        strength: swirl,
+        falloff: falloff,
+        group: group,
+        path: null,
+        flow: 0.0,
+    })
+}
+
+
+@pure fn mote_falloff(d: float, falloff: float) -> float {
+    let x = d / falloff
+    return 1.0 / (1.0 + x * x)
+}
+
+@pure fn mote_hash3(x: float, y: float, z: float) -> float {
+    let phase = (x * 127.1 + y * 311.7 + z * 74.7) * 0.15915494309189535
+    // Reduce to [-0.5, 0.5) before the polynomial.
+    let u = phase - floor(phase + 0.5)
+    let y = 16.0 * u * (0.5 - abs(u))
+    let h = y * (0.775 + 0.225 * abs(y)) * 43758.5453
+    return h - floor(h)
+}
+
+@pure fn mote_value_noise(p: Vec3) -> float {
+    let ix = floor(p.x)
+    let iy = floor(p.y)
+    let iz = floor(p.z)
+    let fx = p.x - ix
+    let fy = p.y - iy
+    let fz = p.z - iz
+    let ux = fx * fx * (3.0 - 2.0 * fx)
+    let uy = fy * fy * (3.0 - 2.0 * fy)
+    let uz = fz * fz * (3.0 - 2.0 * fz)
+
+    let c000 = mote_hash3(ix, iy, iz)
+    let c100 = mote_hash3(ix + 1.0, iy, iz)
+    let c010 = mote_hash3(ix, iy + 1.0, iz)
+    let c110 = mote_hash3(ix + 1.0, iy + 1.0, iz)
+    let c001 = mote_hash3(ix, iy, iz + 1.0)
+    let c101 = mote_hash3(ix + 1.0, iy, iz + 1.0)
+    let c011 = mote_hash3(ix, iy + 1.0, iz + 1.0)
+    let c111 = mote_hash3(ix + 1.0, iy + 1.0, iz + 1.0)
+
+    let x00 = c000 + (c100 - c000) * ux
+    let x10 = c010 + (c110 - c010) * ux
+    let x01 = c001 + (c101 - c001) * ux
+    let x11 = c011 + (c111 - c011) * ux
+    let y0 = x00 + (x10 - x00) * uy
+    let y1 = x01 + (x11 - x01) * uy
+    return y0 + (y1 - y0) * uz
+}
+
+// Curl of three offset noise potentials via finite differences --
+// divergence-free, so motes drift along organic paths without bunching.
+fn mote_curl(p: Vec3) -> Vec3 {
+    let eps = 0.1
+
+    let dp3dy = 0.0
+    let dp2dz = 0.0
+    let dp1dz = 0.0
+    let dp3dx = 0.0
+    let dp2dx = 0.0
+    let dp1dy = 0.0
+
+    // Bound the recorded body to one derivative instead of twelve inlined
+    // noise samples to keep the LuaJIT trace within its register budget.
+    // Keep each base offset and epsilon as separate additions, as before.
+    for derivative in 0..6 {
+        let q = p
+        let offset = v(0.0, 0.0, 0.0)
+        if derivative == 0 {
+            q = v(p.x + 83.1, p.y + 9.7, p.z + 55.5)
+            offset = v(0.0, eps, 0.0)
+        } else if derivative == 1 {
+            q = v(p.x + 31.4, p.y + 47.2, p.z + 12.9)
+            offset = v(0.0, 0.0, eps)
+        } else if derivative == 2 {
+            offset = v(0.0, 0.0, eps)
+        } else if derivative == 3 {
+            q = v(p.x + 83.1, p.y + 9.7, p.z + 55.5)
+            offset = v(eps, 0.0, 0.0)
+        } else if derivative == 4 {
+            q = v(p.x + 31.4, p.y + 47.2, p.z + 12.9)
+            offset = v(eps, 0.0, 0.0)
+        } else {
+            offset = v(0.0, eps, 0.0)
+        }
+        let difference = mote_value_noise(q + offset) - mote_value_noise(q - offset)
+        if derivative == 0 { dp3dy = difference }
+        else if derivative == 1 { dp2dz = difference }
+        else if derivative == 2 { dp1dz = difference }
+        else if derivative == 3 { dp3dx = difference }
+        else if derivative == 4 { dp2dx = difference }
+        else { dp1dy = difference }
+    }
+
+    let inv = 1.0 / (2.0 * eps)
+    return v(
+        (dp3dy - dp2dz) * inv,
+        (dp1dz - dp3dx) * inv,
+        (dp2dx - dp1dy) * inv
+    )
+}
+
+fn mote_effector_force(ef: MoteEffector, m: Mote) -> Vec3 {
+    if ef.kind == MoteEffectorKind::Attract || ef.kind == MoteEffectorKind::Repulse {
+        let delta = ef.pos - m.pos
+        let d = delta.length()
+        if d < 0.0001 { return v(0.0, 0.0, 0.0) }
+        let s = ef.strength * mote_falloff(d, ef.falloff)
+        if ef.kind == MoteEffectorKind::Repulse { s = -1.0 * s }
+        return delta * (s / d)
+    }
+
+    if ef.kind == MoteEffectorKind::Spring {
+        return (ef.pos - m.pos) * ef.strength
+    }
+
+    if ef.kind == MoteEffectorKind::Gravity {
+        return ef.axis * ef.strength
+    }
+
+    if ef.kind == MoteEffectorKind::Vortex {
+        let r = m.pos - ef.pos
+        let r_perp = r - ef.axis * r.dot(ef.axis)
+        let rp_len = r_perp.length()
+        if rp_len < 0.0001 { return v(0.0, 0.0, 0.0) }
+        let tangent = ef.axis.cross(r_perp).normalize()
+        return tangent * (ef.strength * mote_falloff(rp_len, ef.falloff))
+    }
+
+    // Path
+    if ef.path != null && ef.path.len() > 0 {
+        let pts = ef.path
+        let nearest = 0
+        let nearest_d = (m.pos - pts[0]).length()
+        for i in 1..pts.len() {
+            let d = (m.pos - pts[i]).length()
+            if d < nearest_d {
+                nearest_d = d
+                nearest = i
+            }
+        }
+        let ahead = max(1, int(ef.flow))
+        let target = pts[(nearest + ahead) % pts.len()]
+        let delta = target - m.pos
+        let d = delta.length()
+        if d < 0.0001 { return v(0.0, 0.0, 0.0) }
+        return delta * (ef.strength * mote_falloff(nearest_d, ef.falloff) / d)
+    }
+
+    return v(0.0, 0.0, 0.0)
+}
+
+// The integrator. One loop serves every mote arena: a second copy would be a
+// second set of physics to keep in step, and the authoritative wisps must move
+// exactly as the decorative motes do or the digest pins the wrong dynamics.
+// The caller decides WHEN its arena advances, which is the whole point --
+// authoritative arenas advance in the simulation tick, decorative ones here.
+pub fn mote_integrate_arena_in(arena: Arena<Mote>, effectors: [MoteEffector],
+                           mood: MoteMood, tick_dt: float) {
+    for (e, m) in arena {
+        let force = v(0.0, 0.0, 0.0)
+
+        // The filter is positive, not a `continue`: a `continue` emits a
+        // SECOND backward goto to this header, LuaJIT starts an independent
+        // root trace at each, and the two then abort `inner loop in root
+        // trace` against one another -- as does the enclosing MOTES walk.
+        // Which effectors are summed, and in what order, is
+        // unchanged.
+        for ef in effectors {
+            if ef.group == -1 || ef.group == m.group {
+                force = force + mote_effector_force(ef, m)
+            }
+        }
+
+        if mood.curl_strength > 0.0 && m.curl > 0.0 {
+            let np = v(
+                (m.pos.x + m.seed) * mood.curl_scale,
+                (m.pos.y + m.seed * 0.7) * mood.curl_scale,
+                (m.pos.z + m.seed * 1.3) * mood.curl_scale
+            )
+            force = force + mote_curl(np) * (mood.curl_strength * m.curl)
+        }
+
+        m.vel = m.vel + force * tick_dt
+        m.vel = m.vel / (1.0 + mood.damping * m.drag * tick_dt)
+        let speed = m.vel.length()
+        let speed_limit = if m.max_speed > 0.0 { m.max_speed } else { mood.max_speed }
+        if speed > speed_limit {
+            m.vel = m.vel * (speed_limit / speed)
+        }
+        m.pos = m.pos + m.vel * tick_dt
+
+        // Floor contact resolves AFTER integration, so a step that would end
+        // below the plane lands on it instead of tunnelling for a frame.
+        if m.floor_z != null {
+            let fz = m.floor_z.unwrap()
+            if m.pos.z < fz {
+                m.pos = MoteWorldPoint { x: m.pos.x, y: m.pos.y, z: fz }
+                if m.vel.z < 0.0 {
+                    m.vel = v(m.vel.x * m.floor_friction,
+                              m.vel.y * m.floor_friction,
+                              -m.vel.z * m.restitution)
+                }
+            }
+        }
+
+        if m.trail.len() < MOTE_TRAIL_N {
+            m.trail.push(m.pos)
+        } else {
+            m.trail[m.trail_head] = m.pos
+        }
+        m.trail_head = (m.trail_head + 1) % MOTE_TRAIL_N
+
+        if !m.persistent {
+            m.lifetime -= tick_dt
+            if m.lifetime <= 0.0 { e.remove() }
+        }
+    }
+}

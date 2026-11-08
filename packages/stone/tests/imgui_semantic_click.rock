@@ -1,0 +1,128 @@
+inline(lua) fn imgui_click_test_context() -> any = """
+    local live_imgui = _G.imgui
+    assert(live_imgui.__stone_stub ~= true, 'semantic click requires live cimgui')
+    local previous = imgui.GetCurrentContext()
+    assert(imgui.CreateContext(nil) ~= nil, 'semantic click context')
+    local io = imgui.C.igGetIO_Nil()
+    io.DisplaySize.x, io.DisplaySize.y = 1280, 720
+    io.DeltaTime = 1 / 60
+    io.IniFilename = nil
+    io.BackendFlags = bit.bor(io.BackendFlags, imgui.ImGuiBackendFlags_RendererHasTextures)
+    return previous
+"""
+
+inline(lua) fn imgui_click_test_destroy_context(previous: any) = """
+    imgui.DestroyContext(nil)
+    imgui.SetCurrentContext(previous)
+"""
+
+inline(lua) fn imgui_click_test_context_identity() -> string = """
+    return tostring(imgui.GetCurrentContext())
+"""
+
+inline(lua) fn imgui_click_test_new_frame() = "imgui.NewFrame()"
+
+inline(lua) fn imgui_click_test_render() -> int = """
+    imgui.Render()
+    return imgui.GetDrawData().TotalVtxCount
+"""
+
+inline(lua) fn imgui_click_test_center_visible() -> bool = """
+    local a, b = imgui.GetItemRectMin(), imgui.GetItemRectMax()
+    local center = imgui.ImVec2_Float((a.x + b.x) * 0.5, (a.y + b.y) * 0.5)
+    return imgui.IsRectVisible_Vec2(center, imgui.ImVec2_Float(center.x + 1, center.y + 1))
+"""
+
+fn imgui_click_test_draw(wide: bool) -> (bool, bool, int) {
+    frame_seq += 1
+    imgui_click_test_new_frame()
+    imgui_set_next_window_pos(v(40.0, 80.0))
+    imgui_set_next_window_size(v(320.0, 240.0))
+    let hit = false
+    let center_visible = false
+    let open = imgui_begin_window("Clipped semantic click", 0)
+    if open {
+        if imgui_begin_child_scroll("clipped_click_rows", v(0.0, 80.0)) {
+            imgui_dummy(v(1.0, 64.0))
+            hit = imgui_button_sized("Bottom row", v(if wide { 600.0 } else { 160.0 }, 40.0))
+            imgui_test_note_item("stone/semantic/clipped-bottom")
+            center_visible = imgui_click_test_center_visible()
+            imgui_dummy(v(1.0, 100.0))
+        }
+        imgui_end_child()
+    }
+    imgui_end()
+    return (hit, center_visible, imgui_click_test_render())
+}
+
+fn imgui_click_test_fixture(fail: bool = false, wide: bool = false) {
+    let previous = imgui_click_test_context()
+    let old_frame = frame_seq
+    let old_record = IMGUI_RECORD_BODIES
+    let old_items = IMGUI_TEST_ITEMS
+    let old_bodies = IMGUI_BODIES_RAN
+    let old_target = IMGUI_TEST_REVEAL_TARGET
+    defer {
+        imgui_click_test_destroy_context(previous)
+        frame_seq = old_frame
+        IMGUI_RECORD_BODIES = old_record
+        IMGUI_TEST_ITEMS = old_items
+        IMGUI_BODIES_RAN = old_bodies
+        IMGUI_TEST_REVEAL_TARGET = old_target
+    }
+    IMGUI_RECORD_BODIES = true
+    IMGUI_TEST_ITEMS = map_new()
+    IMGUI_BODIES_RAN = map_new()
+    IMGUI_TEST_REVEAL_TARGET = ""
+    for _ in 0..2 { imgui_click_test_draw(wide) }
+    let (_, center_visible, vertices) = imgui_click_test_draw(wide)
+    let target = "stone/semantic/clipped-bottom"
+    assert(vertices > 0, "live cimgui emitted the scroll child's geometry")
+    assert(imgui_test_item_current(target) && !IMGUI_TEST_ITEMS[target].whole,
+        "the bottom row overlaps the child but is clipped by its edge")
+    assert(!center_visible, "the native child clip excludes the requested click point")
+    if wide {
+        let item = IMGUI_TEST_ITEMS[target]
+        assert(item.max.x - item.min.x > item.clip_max.x - item.clip_min.x,
+            "the native item cannot fit wholly inside its child's horizontal clip")
+    }
+    if fail { error("intentional semantic click fixture failure") }
+    let click = imgui_test_click_at(target, if wide { 0.1 } else { 0.5 }, 0.5)
+    let activated = false
+    for _ in 0..12 {
+        click.resume()
+        let (hit, _, _) = imgui_click_test_draw(wide)
+        activated = activated || hit
+        if click.completed() { break }
+    }
+    assert(click.completed() && click.last_error() == null,
+        "the production semantic click completes without a coroutine error")
+    assert(activated, "the semantic click scrolls and activates the real bottom row button")
+}
+
+@test
+fn imgui_semantic_click_reveals_bottom_clipped_row() {
+    imgui_click_test_fixture()
+}
+
+@test
+fn imgui_semantic_click_reveals_point_in_oversized_row() {
+    imgui_click_test_fixture(wide: true)
+}
+
+@test
+fn imgui_semantic_click_fixture_restores_on_failure() {
+    let context = imgui_click_test_context_identity()
+    let frame = frame_seq
+    let record = IMGUI_RECORD_BODIES
+    let items = IMGUI_TEST_ITEMS
+    let bodies = IMGUI_BODIES_RAN
+    let target = IMGUI_TEST_REVEAL_TARGET
+    let failure = world_fixture_raised(() => { imgui_click_test_fixture(true) })
+    assert(failure != null && failure.unwrap().contains("intentional semantic click fixture failure"))
+    assert_eq(imgui_click_test_context_identity(), context)
+    assert_eq(frame_seq, frame)
+    assert_eq(IMGUI_RECORD_BODIES, record)
+    assert(IMGUI_TEST_ITEMS == items && IMGUI_BODIES_RAN == bodies)
+    assert_eq(IMGUI_TEST_REVEAL_TARGET, target)
+}

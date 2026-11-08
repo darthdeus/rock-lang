@@ -1,0 +1,113 @@
+// The tween value a coroutine can wait on (`Wait::Tween`) and its easing. The
+// named-tween registry that `start_tween`/`update_tweens` drive stays in
+// stone/engine/systems/tween.rock, since it is host state.
+
+pub value Tween {
+    id: string,
+    elapsed: float,
+    duration: float,
+    easing: int,
+
+    from: float,
+    to: float,
+}
+
+pub fn tween_current(item: Tween) -> float {
+    let t = clamp(item.elapsed / item.duration, 0.0, 1.0)
+
+    let v = t
+
+    if item.easing == EASE_LINEAR {
+        v = t
+    } else if item.easing == EASE_IN_QUAD {
+        v = ease_in_quad(t)
+    } else if item.easing == EASE_OUT_QUAD {
+        v = ease_out_quad(t)
+    } else if item.easing == EASE_IN_OUT_QUAD {
+        v = ease_in_out_quad(t)
+    } else if item.easing == EASE_IN_CUBIC {
+        v = ease_in_cubic(t)
+    } else if item.easing == EASE_OUT_CUBIC {
+        v = ease_out_cubic(t)
+    } else if item.easing == EASE_IN_OUT_CUBIC {
+        v = ease_in_out_cubic(t)
+    } else if item.easing == EASE_IN_QUART {
+        v = ease_in_quart(t)
+    } else if item.easing == EASE_OUT_QUART {
+        v = ease_out_quart(t)
+    } else if item.easing == EASE_IN_OUT_QUART {
+        v = ease_in_out_quart(t)
+    } else if item.easing == EASE_IN_QUINT {
+        v = ease_in_quint(t)
+    } else if item.easing == EASE_OUT_QUINT {
+        v = ease_out_quint(t)
+    } else if item.easing == EASE_IN_OUT_QUINT {
+        v = ease_in_out_quint(t)
+    } else if item.easing == EASE_IN_SINE {
+        v = ease_in_sine(t)
+    } else if item.easing == EASE_OUT_SINE {
+        v = ease_out_sine(t)
+    } else if item.easing == EASE_IN_OUT_SINE {
+        v = ease_in_out_sine(t)
+    } else if item.easing == EASE_IN_EXPO {
+        v = ease_in_expo(t)
+    } else if item.easing == EASE_OUT_EXPO {
+        v = ease_out_expo(t)
+    } else if item.easing == EASE_IN_OUT_EXPO {
+        v = ease_in_out_expo(t)
+    } else if item.easing == EASE_IN_CIRC {
+        v = ease_in_circ(t)
+    } else if item.easing == EASE_OUT_CIRC {
+        v = ease_out_circ(t)
+    } else if item.easing == EASE_IN_OUT_CIRC {
+        v = ease_in_out_circ(t)
+    } else {
+        v = t
+    }
+
+    v = remap_01_range(v, item.from, item.to)
+
+    return v
+}
+pub fn current(item: Tween) -> float { return tween_current(item) }
+
+pub @pure fn remap_01_range(value: float, from: float, to: float) -> float {
+    return from + (to - from) * value
+}
+
+pub const EASE_LINEAR: int = 0
+
+// Quadratic
+pub const EASE_IN_QUAD: int = 1
+pub const EASE_OUT_QUAD: int = 2
+pub const EASE_IN_OUT_QUAD: int = 3
+
+// Cubic
+pub const EASE_IN_CUBIC: int = 4
+pub const EASE_OUT_CUBIC: int = 5
+pub const EASE_IN_OUT_CUBIC: int = 6
+
+// Quartic
+pub const EASE_IN_QUART: int = 7
+pub const EASE_OUT_QUART: int = 8
+pub const EASE_IN_OUT_QUART: int = 9
+
+// Quintic
+pub const EASE_IN_QUINT: int = 10
+pub const EASE_OUT_QUINT: int = 11
+pub const EASE_IN_OUT_QUINT: int = 12
+
+// Sine
+pub const EASE_IN_SINE: int = 13
+pub const EASE_OUT_SINE: int = 14
+pub const EASE_IN_OUT_SINE: int = 15
+
+// Exponential
+pub const EASE_IN_EXPO: int = 16
+pub const EASE_OUT_EXPO: int = 17
+pub const EASE_IN_OUT_EXPO: int = 18
+
+// Circular
+pub const EASE_IN_CIRC: int = 19
+pub const EASE_OUT_CIRC: int = 20
+pub const EASE_IN_OUT_CIRC: int = 21

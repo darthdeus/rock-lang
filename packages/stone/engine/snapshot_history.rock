@@ -1,0 +1,639 @@
+// v2 moved the snapshot out of the node record and onto its own raw line.
+pub const SNAPSHOT_HISTORY_VERSION: int = 2
+
+pub value SnapshotHistoryNode {
+    snap: string,
+    label: string,
+    parent: int,
+    children: [int],
+    pid: int,
+    metadata: string,
+}
+
+pub struct SnapshotHistory {
+    nodes: [SnapshotHistoryNode],
+    current: int,
+    next_pid: int,
+    log_records: int,
+    max_nodes: int,
+    storage_version: int = SNAPSHOT_HISTORY_VERSION,
+    needs_checkpoint: bool = false,
+}
+
+pub fn snapshot_history_empty(max_nodes: int) -> SnapshotHistory {
+    return SnapshotHistory {
+        nodes: [],
+        current: -1,
+        next_pid: 0,
+        log_records: 0,
+        max_nodes,
+    }
+}
+
+// Whether a root already exists. Callers that build their snapshot eagerly
+// (an argument is evaluated before the call) ask this first, so a per-frame
+// ensure does not pay for a snapshot that ensure_root would discard.
+pub fn snapshot_history_has_root(history: SnapshotHistory) -> bool {
+    return history.nodes.len() > 0
+}
+
+pub fn snapshot_history_ensure_root(history: SnapshotHistory, snap: string, metadata: string = "") {
+    if history.nodes.len() > 0 { return }
+    history.nodes.push(SnapshotHistoryNode {
+        snap,
+        label: "start",
+        parent: -1,
+        children: [],
+        pid: snapshot_history_alloc_pid(history),
+        metadata,
+    })
+    history.current = 0
+}
+
+pub fn snapshot_history_commit(history: SnapshotHistory, snap: string, label: string, metadata: string = "") -> bool {
+    if history.nodes.len() == 0 { return false }
+    if snap == history.nodes[history.current].snap { return false }
+    snapshot_history_insert(history, snap, label, metadata)
+    return true
+}
+
+// Asset-backed editors compare their payloads before inserting an unencoded node.
+pub fn snapshot_history_insert(history: SnapshotHistory, snap: string, label: string, metadata: string = "") {
+    history.nodes.push(SnapshotHistoryNode {
+        snap, label, parent: history.current, children: [],
+        pid: snapshot_history_alloc_pid(history), metadata,
+    })
+    let idx = history.nodes.len() - 1
+    history.nodes[history.current].children.push(idx)
+    history.current = idx
+    snapshot_history_clamp(history)
+}
+
+pub fn snapshot_history_jump(history: SnapshotHistory, idx: int) -> SnapshotHistoryNode? {
+    if idx < 0 || idx >= history.nodes.len() { return null }
+    history.current = idx
+    return history.nodes[idx]
+}
+
+// Choosing a target does not move the cursor: payload owners restore first,
+// then call snapshot_history_jump only after restoration succeeds.
+pub fn snapshot_history_undo_target(history: SnapshotHistory, live_changed: bool = false) -> int? {
+    if history.nodes.len() == 0 { return null }
+    if live_changed { return history.current }
+    let parent = history.nodes[history.current].parent
+    return if parent >= 0 { parent } else { null }
+}
+
+pub fn snapshot_history_redo_target(history: SnapshotHistory) -> int? {
+    if history.nodes.len() == 0 { return null }
+    let children = history.nodes[history.current].children
+    return if children.len() > 0 { children[children.len() - 1] } else { null }
+}
+
+pub fn snapshot_history_clamp(history: SnapshotHistory) {
+    if history.nodes.len() <= history.max_nodes { return }
+
+    let dead: Map<int, bool> = map_new()
+    let live = history.nodes.len()
+    let root = 0
+    while live > history.max_nodes {
+        let children = snapshot_history_live_children(history, root, dead)
+        if children.len() == 1 && root != history.current {
+            dead[root] = true
+            live -= 1
+            root = children[0]
+            continue
+        }
+        let victim = -1
+        for i in 0..history.nodes.len() {
+            if dead.contains(i) || i == history.current { continue }
+            if snapshot_history_live_children(history, i, dead).len() == 0 {
+                victim = i
+                break
+            }
+        }
+        if victim < 0 { break }
+        dead[victim] = true
+        live -= 1
+    }
+    snapshot_history_rebuild(history, dead)
+}
+
+// Deep copy, for callers that must be able to roll back a destructive edit.
+// Holding the old `nodes` array is NOT enough: snapshot_history_rebuild swaps in
+// a fresh array but rewrites parent/children on the surviving node objects,
+// which the old array still points at.
+pub fn snapshot_history_clone(history: SnapshotHistory) -> SnapshotHistory {
+    let nodes: [SnapshotHistoryNode] = []
+    for node in history.nodes {
+        let children: [int] = []
+        for child in node.children { children.push(child) }
+        nodes.push(SnapshotHistoryNode {
+            snap: node.snap,
+            label: node.label,
+            parent: node.parent,
+            children,
+            pid: node.pid,
+            metadata: node.metadata,
+        })
+    }
+    return SnapshotHistory {
+        nodes,
+        current: history.current,
+        next_pid: history.next_pid,
+        log_records: history.log_records,
+        max_nodes: history.max_nodes,
+        storage_version: history.storage_version,
+        needs_checkpoint: history.needs_checkpoint,
+    }
+}
+
+pub fn snapshot_history_clone_into(history: SnapshotHistory, storage: Storage) -> SnapshotHistory {
+    return SnapshotHistory {
+        nodes: history.nodes.clone_into(storage),
+        current: history.current,
+        next_pid: history.next_pid,
+        log_records: history.log_records,
+        max_nodes: history.max_nodes,
+        storage_version: history.storage_version,
+        needs_checkpoint: history.needs_checkpoint,
+    }
+}
+
+pub fn snapshot_history_prune(history: SnapshotHistory) -> bool {
+    if history.nodes.len() == 0 { return false }
+    let keep: Map<int, bool> = map_new()
+    let p = history.current
+    while p >= 0 {
+        keep[p] = true
+        p = history.nodes[p].parent
+    }
+    let d = history.current
+    while history.nodes[d].children.len() > 0 {
+        d = history.nodes[d].children[0]
+        keep[d] = true
+    }
+    let dead: Map<int, bool> = map_new()
+    for i in 0..history.nodes.len() {
+        if !keep.contains(i) { dead[i] = true }
+    }
+    if dead.is_empty() { return false }
+    snapshot_history_rebuild(history, dead)
+    return true
+}
+
+pub fn snapshot_history_clean(history: SnapshotHistory, snap: string, metadata: string = "") {
+    history.needs_checkpoint = true
+    history.nodes = [SnapshotHistoryNode {
+        snap,
+        label: "start",
+        parent: -1,
+        children: [],
+        pid: snapshot_history_alloc_pid(history),
+        metadata,
+    }]
+    history.current = 0
+}
+
+pub struct SnapshotHistoryPublication {
+    done: bool = false,
+    progressed: bool = false,
+    failed: bool = false,
+    history_failed: bool = false,
+    failures: int = 0,
+    wal_written: bool = false,
+    checkpoint: bool = false,
+    checkpoint_required: bool = false,
+    skip_history: bool = false,
+    history: SnapshotHistory? = null,
+    snapshot: SnapshotHistory? = null,
+    path: string = "",
+    records: [string] = [],
+    level_path: string = "",
+    level_text: string = "",
+    quest_path: string = "",
+    quest_text: string = "",
+    phase: int = 0,
+    cursor: int = 0,
+    write_job: int = 0,
+    record_count: int = 0,
+}
+
+// Captures topology before returning; all file writes and replacement run off-thread.
+pub fn snapshot_history_publish(history: SnapshotHistory, path: string,
+    level_path: string = "", level_text: string = "",
+    quest_path: string = "", quest_text: string = "",
+    checkpoint: bool = false, pointer: bool = false) -> SnapshotHistoryPublication {
+    let publication = SnapshotHistoryPublication {
+        history, path, level_path, level_text, quest_path, quest_text,
+    }
+    publication.checkpoint = checkpoint || !file_exists(path)
+        || snapshot_history_checkpoint_due(history, if pointer { 1 } else { 2 })
+    if history.nodes.len() == 0 {
+        snapshot_history_publication_fail(publication, path, true)
+        publication.phase = 1
+        return publication
+    }
+    if publication.checkpoint {
+        publication.snapshot = snapshot_history_clone(history)
+        publication.record_count = history.nodes.len() + 1
+    } else {
+        let node = history.nodes[history.current]
+        let parent_pid = if node.parent >= 0 { history.nodes[node.parent].pid } else { -1 }
+        let append = snapshot_history_publish_node(history, if pointer { null } else { node },
+            parent_pid, node.pid, path, level_path, level_text, quest_path, quest_text)
+        append.history = history
+        append.record_count = history.log_records + (if pointer { 1 } else { 2 })
+        return append
+    }
+    return publication
+}
+
+// MAG finishes encoding after the node has been inserted; its captured parent PID
+// remains valid even if later clamping removes the parent from the live tree.
+pub fn snapshot_history_publish_node(history: SnapshotHistory, node: SnapshotHistoryNode?, parent_pid: int, pid: int,
+    path: string, level_path: string, level_text: string,
+    quest_path: string, quest_text: string, blocked: bool = false) -> SnapshotHistoryPublication {
+    let publication = SnapshotHistoryPublication { path, level_path, level_text, quest_path, quest_text }
+    if path != "" {
+        let exists = stone_file_exists_status(path)
+        publication.checkpoint_required = blocked || exists <= 0 || history.needs_checkpoint
+            || history.storage_version != SNAPSHOT_HISTORY_VERSION
+        if exists < 0 { snapshot_history_publication_fail(publication, path, true) }
+        publication.skip_history = publication.checkpoint_required
+    }
+    let text = snapshot_history_cursor_record(pid)
+    if let value = node {
+        if !snapshot_history_snap_is_line(value.snap) {
+            snapshot_history_publication_fail(publication, path, true)
+            publication.phase = 1
+            return publication
+        }
+        text = snapshot_history_node_record(value, parent_pid, pid) + text
+    }
+    publication.records = [text]
+    return publication
+}
+
+pub fn snapshot_history_checkpoint_due(history: SnapshotHistory, added_records: int = 0) -> bool {
+    return history.needs_checkpoint || history.storage_version != SNAPSHOT_HISTORY_VERSION
+        || history.log_records + added_records > history.nodes.len() * 2
+}
+
+fn snapshot_history_publication_fail(publication: SnapshotHistoryPublication, path: string, history: bool) {
+    publication.failed = true
+    publication.failures += 1
+    if history {
+        publication.history_failed = true
+        if let state = publication.history { state.needs_checkpoint = true }
+    }
+    let kind = if history { "history" } else { "document" }
+    log_error("SNAPSHOT", "{kind} publication failed: {path}")
+}
+
+// Each poll submits or retires at most one IO job. Only explicit completion
+// boundaries pass wait=true; editor updates never wait for a disk operation.
+pub fn snapshot_history_publication_poll(publication: SnapshotHistoryPublication, wait: bool = false) -> bool {
+    if publication.done { return true }
+    publication.progressed = true
+    if publication.write_job != 0 {
+        let result = stone_file_write_poll(publication.write_job, wait)
+        if result == 0 { publication.progressed = false; return false }
+        publication.write_job = 0
+        if result < 0 {
+            snapshot_history_publication_fail(publication,
+                if publication.phase == 0 { publication.path }
+                else if publication.phase == 1 { publication.level_path } else { publication.quest_path },
+                publication.phase == 0)
+            if publication.phase == 0 && publication.checkpoint {
+                let temporary = publication.path + ".compact.tmp"
+                if file_exists(temporary) && !remove_file(temporary) {
+                    log_error("SNAPSHOT", "failed to remove incomplete checkpoint: {temporary}")
+                }
+            }
+            publication.phase += 1
+        } else if publication.phase == 0 {
+            publication.cursor += 1
+        } else { publication.phase += 1 }
+        return false
+    }
+    if publication.phase == 0 {
+        if publication.path == "" || publication.skip_history { publication.phase = 1; return false }
+        let count = if let snapshot = publication.snapshot { snapshot.nodes.len() + 2 }
+            else { publication.records.len() }
+        if publication.cursor < count {
+            let text = ""
+            if let snapshot = publication.snapshot {
+                if publication.cursor == 0 { text = "{{\"v\":{SNAPSHOT_HISTORY_VERSION}}}\n" }
+                else if publication.cursor <= snapshot.nodes.len() {
+                    let node = snapshot.nodes[publication.cursor - 1]
+                    if !snapshot_history_snap_is_line(node.snap) {
+                        snapshot_history_publication_fail(publication, publication.path, true)
+                        publication.phase = 1
+                        return false
+                    }
+                    text = snapshot_history_record_node(snapshot, node)
+                } else { text = snapshot_history_record_current(snapshot) }
+            } else { text = publication.records[publication.cursor] }
+            publication.write_job = file_write_async(
+                if publication.checkpoint { publication.path + ".compact.tmp" } else { publication.path },
+                text, !publication.checkpoint || publication.cursor > 0)
+        } else if publication.checkpoint && publication.cursor == count {
+            publication.write_job = stone_file_rename_async(publication.path + ".compact.tmp", publication.path)
+        } else {
+            publication.wal_written = true
+            if let state = publication.history {
+                state.log_records = publication.record_count
+                state.storage_version = SNAPSHOT_HISTORY_VERSION
+                state.needs_checkpoint = false
+            }
+            publication.phase = 1
+        }
+    } else if publication.phase == 1 {
+        if publication.level_path == "" { publication.phase = 2 }
+        else if publication.quest_path != "" {
+            publication.write_job = file_write_pair_async(publication.level_path, publication.level_text,
+                publication.quest_path, publication.quest_text)
+            publication.quest_path = ""
+        } else { publication.write_job = file_write_async(publication.level_path, publication.level_text) }
+    } else if publication.phase == 2 {
+        if publication.quest_path == "" { publication.phase = 3 }
+        else { publication.write_job = file_write_async(publication.quest_path, publication.quest_text) }
+    } else { publication.done = true }
+    if publication.write_job < 0 {
+        publication.write_job = 0
+        snapshot_history_publication_fail(publication,
+            if publication.phase == 0 { publication.path }
+            else if publication.phase == 1 { publication.level_path } else { publication.quest_path },
+            publication.phase == 0)
+        publication.phase += 1
+    }
+    return publication.done
+}
+
+pub fn snapshot_history_publication_drain(publication: SnapshotHistoryPublication) -> bool {
+    while !snapshot_history_publication_poll(publication, true) {}
+    return !publication.failed
+}
+
+// A missing path disables persistence for an in-memory history.
+pub fn snapshot_history_save(history: SnapshotHistory, path: string?,
+    checkpoint: bool = false, pointer: bool = false) -> bool {
+    let target = path ?? return true
+    return snapshot_history_publication_drain(snapshot_history_publish(history,
+        target, checkpoint: checkpoint, pointer: pointer))
+}
+
+pub fn snapshot_history_load(path: string, max_nodes: int, upgrade: bool = true) -> SnapshotHistory? {
+    let raw = file_read(path) ?? return null
+    return snapshot_history_load_raw(raw.unwrap(), max_nodes, path, upgrade)
+}
+
+pub fn snapshot_history_load_raw(raw: string, max_nodes: int, path: string, upgrade: bool = true) -> SnapshotHistory? {
+    if max_nodes < 1 { return null }
+    let lines = raw.split("\n")
+    let last_nonempty = -1
+    for (i, line) in enumerate(lines) {
+        if line != "" { last_nonempty = i }
+    }
+
+    // Absent header means v1, where the snapshot lived escaped inside the node
+    // record. Read the version before anything else: it decides how many lines
+    // a node record spans.
+    let version = 1
+    for line in lines {
+        if line == "" { continue }
+        let head = json_decode(line) ?? break
+        let vfield = json_field(head.unwrap(), "v")
+        if vfield != null {
+            let v = snapshot_history_int(vfield.unwrap()) ?? return null
+            version = v.unwrap()
+        }
+        break
+    }
+    if version < 1 || version > SNAPSHOT_HISTORY_VERSION { return null }
+
+    let by_pid: Map<int, SnapshotHistoryNode> = map_new()
+    let order: [int] = []
+    let current_pid = -1
+    let max_pid = -1
+    let records = 0
+    // v2 only: the pid whose snapshot line is expected next.
+    let pending_snap = -1
+    let needs_checkpoint = false
+    for (i, line) in enumerate(lines) {
+        if line == "" { continue }
+        if pending_snap >= 0 {
+            by_pid[pending_snap].snap = line
+            pending_snap = -1
+            continue
+        }
+        let parsed = json_decode(line)
+        if parsed == null {
+            if i == last_nonempty { needs_checkpoint = true; break }
+            return null
+        }
+        let record = parsed.unwrap()
+        let nfield = json_field(record, "n")
+        if nfield == null {
+            let cfield = json_field(record, "c")
+            if cfield != null {
+                let c = snapshot_history_int(cfield.unwrap()) ?? return null
+                current_pid = c.unwrap()
+                records += 1
+            }
+            continue
+        }
+        let entry = nfield.unwrap()
+        let pid = snapshot_history_field_int(entry, "pid") ?? return null
+        let parent = snapshot_history_field_int(entry, "ppid") ?? return null
+        let label = snapshot_history_field_string(entry, "label") ?? return null
+        let p = pid.unwrap()
+        if p < 0 || by_pid.contains(p) { return null }
+        let metadata = snapshot_history_metadata(entry) ?? return null
+        let snap = if version >= 2 {
+            ""
+        } else {
+            (snapshot_history_field_string(entry, "snap") ?? return null).unwrap()
+        }
+        by_pid[p] = SnapshotHistoryNode {
+            snap,
+            label: label.unwrap(),
+            parent: parent.unwrap(),
+            children: [],
+            pid: p,
+            metadata: metadata.unwrap(),
+        }
+        order.push(p)
+        records += 1
+        if p > max_pid { max_pid = p }
+        if version >= 2 { pending_snap = p }
+    }
+    // A snapshot line is stored unparsed, so a torn one -- half written, or
+    // missing entirely because the crash landed between the node header and it
+    // -- would survive to the first undo. Only the last record can be torn;
+    // validating it costs one decode and keeps the guarantee the v1 loader gave
+    // for free. An absent snapshot reaches this as "", which fails the same way.
+    if version >= 2 && order.len() > 0 {
+        let tail = order[order.len() - 1]
+        if json_decode(by_pid[tail].snap) == null {
+            needs_checkpoint = true
+            let _ = order.pop()
+            records -= 1
+        }
+    }
+    if order.len() == 0 { return null }
+
+    let index_of: Map<int, int> = map_new()
+    for (i, pid) in enumerate(order) { index_of[pid] = i }
+    let nodes: [SnapshotHistoryNode] = []
+    for (i, pid) in enumerate(order) {
+        let node = by_pid[pid]
+        let parent = node.parent
+        // On disk `parent` is a pid; in memory it is the parent's index.
+        let parent_index = -1
+        if parent == -1 {
+            if i != 0 { return null }
+        } else {
+            if parent < 0 || !index_of.contains(parent) { return null }
+            parent_index = index_of[parent]
+            if parent_index >= i { return null }
+        }
+        nodes.push(node)
+        nodes[i].parent = parent_index
+    }
+    for i in 0..nodes.len() {
+        let parent = nodes[i].parent
+        if parent >= 0 { nodes[parent].children.push(i) }
+    }
+    if current_pid < 0 || !index_of.contains(current_pid) { return null }
+    let history = SnapshotHistory {
+        nodes,
+        current: index_of[current_pid],
+        next_pid: max_pid + 1,
+        // The records actually read, not a checkpoint-shaped guess: understating
+        // this hides accumulated pointer churn from snapshot_history_maybe_compact,
+        // which is why a WAL could never trigger its own compaction.
+        log_records: records,
+        max_nodes,
+        storage_version: version,
+        needs_checkpoint,
+    }
+    // Appends must not mix formats inside one file, so an older WAL is upgraded
+    // before anyone can append to it. A failed upgrade is not fatal -- the
+    // history in hand is still good -- but it must not pass silently.
+    if upgrade && (version < SNAPSHOT_HISTORY_VERSION || needs_checkpoint) {
+        if !snapshot_history_save(history, path, checkpoint: true) {
+            log_error("SNAPSHOT", "failed to checkpoint loaded WAL v{version}: {path}")
+        }
+    }
+    return history
+}
+
+pub fn snapshot_history_record_node(history: SnapshotHistory, node: SnapshotHistoryNode) -> string {
+    return snapshot_history_node_record(
+        node,
+        if node.parent >= 0 { history.nodes[node.parent].pid } else { -1 },
+        node.pid,
+    )
+}
+
+// A node is two lines: a small header, then the snapshot VERBATIM. Storing the
+// snapshot as a JSON string instead would escape it -- 26% of a mag level's
+// bytes are quotes -- and force the loader to unescape all of them to reach the
+// one snapshot it restores. Raw, the loader keeps the line as-is and pays
+// nothing. Safe because the snapshot is compact `json_encode` output, whose
+// control-character escaping means it can never contain a literal newline;
+// snapshot_history_snap_is_line enforces that rather than trusting it.
+pub fn snapshot_history_node_record(node: SnapshotHistoryNode, ppid: int, pid: int) -> string {
+    let entry: Map<string, JsonValue> = map_new()
+    entry["pid"] = json_int(pid)
+    entry["ppid"] = json_int(ppid)
+    entry["label"] = json_str(node.label)
+    if node.metadata != "" { entry["metadata"] = json_str(node.metadata) }
+    let record: Map<string, JsonValue> = map_new()
+    record["n"] = json_object(entry)
+    return json_encode(json_object(record)) + "\n" + node.snap + "\n"
+}
+
+fn snapshot_history_snap_is_line(snap: string) -> bool {
+    return snap.find("\n") < 0
+}
+
+pub fn snapshot_history_record_current(history: SnapshotHistory) -> string {
+    return snapshot_history_cursor_record(history.nodes[history.current].pid)
+}
+
+fn snapshot_history_cursor_record(pid: int) -> string {
+    let record: Map<string, JsonValue> = map_new()
+    record["c"] = json_int(pid)
+    return json_encode(json_object(record)) + "\n"
+}
+
+fn snapshot_history_alloc_pid(history: SnapshotHistory) -> int {
+    let pid = history.next_pid
+    history.next_pid += 1
+    return pid
+}
+
+fn snapshot_history_live_children(history: SnapshotHistory, index: int, dead: Map<int, bool>) -> [int] {
+    let out: [int] = []
+    for child in history.nodes[index].children {
+        if !dead.contains(child) { out.push(child) }
+    }
+    return out
+}
+
+fn snapshot_history_rebuild(history: SnapshotHistory, dead: Map<int, bool>) {
+    let remap: Map<int, int> = map_new()
+    let nodes: [SnapshotHistoryNode] = []
+    for i in 0..history.nodes.len() {
+        if dead.contains(i) { continue }
+        remap[i] = nodes.len()
+        nodes.push(history.nodes[i])
+    }
+    for i in 0..nodes.len() {
+        let node = nodes[i]
+        nodes[i].parent = if node.parent >= 0 && !dead.contains(node.parent) { remap[node.parent] } else { -1 }
+        let children: [int] = []
+        for child in node.children {
+            if !dead.contains(child) { children.push(remap[child]) }
+        }
+        nodes[i].children = children
+    }
+    history.nodes = nodes
+    history.current = remap[history.current]
+}
+
+// A record with no `metadata` field is a legacy one that carried its keys at
+// the top level (mag's selection rects, `sb`/`sa`), so the entry IS the
+// metadata -- everything except the snapshot. Re-encoding the snapshot too, as
+// this used to, retained a second copy of the whole level per node and
+// compaction wrote that copy back to disk, permanently.
+pub fn snapshot_history_metadata(entry: JsonValue) -> string? {
+    let metadata = json_field(entry, "metadata")
+    if metadata != null { return json_as_str(metadata.unwrap()) }
+    let fields = json_as_object(entry) ?? return ""
+    let rest: Map<string, JsonValue> = map_new()
+    for key in keys(fields.unwrap()) {
+        if key == "snap" { continue }
+        rest[key] = fields.unwrap()[key]
+    }
+    return json_encode(json_object(rest))
+}
+
+fn snapshot_history_field_int(v: JsonValue, key: string) -> int? {
+    return snapshot_history_int(json_field(v, key) ?? return null)
+}
+
+fn snapshot_history_field_string(v: JsonValue, key: string) -> string? {
+    let field = json_field(v, key) ?? return null
+    return json_as_str(field)
+}
+
+fn snapshot_history_int(v: JsonValue) -> int? {
+    match v {
+        JsonValue::Int(i) => return i,
+        _ => return null,
+    }
+}

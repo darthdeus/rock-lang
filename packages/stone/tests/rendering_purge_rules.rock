@@ -1,0 +1,100 @@
+@test
+fn rendering_purge_mote_groups_accumulate_and_expire() {
+    let saved_motes = MOTES
+    let saved_effectors = MOTE_EFFECTORS
+    let saved_mood = MOTE_MOOD
+    let saved_mode = WORLD_MODE
+    let saved_dt = dt
+    MOTES = arena_new()
+    defer {
+        assert(arena_destroy(MOTES))
+        MOTES = saved_motes
+        MOTE_EFFECTORS = saved_effectors
+        MOTE_MOOD = saved_mood
+        WORLD_MODE = saved_mode
+        dt = saved_dt
+    }
+    MOTE_EFFECTORS = []
+    MOTE_MOOD = MoteMood { max_speed: 1000.0, damping: 0.0, curl_strength: 0.0, curl_scale: 0.0 }
+    WORLD_MODE = WorldModeState { editor_mode_enabled: false, game_paused: false, menu_active: false }
+    dt = 0.1
+    let a = MOTES.insert(Mote { pos: mote_world_point(v(0, 0, 10)), vel: v(0, 0, 0), group: 1, curl: 0.0 })
+    let b = MOTES.insert(Mote { pos: mote_world_point(v(0, 0, 10)), vel: v(0, 0, 0), group: 2, curl: 0.0 })
+    let c = MOTES.insert(Mote { pos: mote_world_point(v(0, 0, 10)), vel: v(0, 0, 0), group: 3, curl: 0.0 })
+    mote_gravity(10.0, group: 1)
+    mote_gravity(10.0, group: 1)
+    mote_gravity(10.0, group: 2)
+    update_motes()
+    assert_eq(a.get().unwrap().vel.z, 2.0 * b.get().unwrap().vel.z, "named effectors add")
+    assert(b.get().unwrap().vel.z < c.get().unwrap().vel.z, "other groups stay untouched")
+    assert_eq(c.get().unwrap().vel.z, 0.0, "unnamed group has no force")
+    assert_eq(MOTE_EFFECTORS.len(), 0, "effectors live for one tick")
+    let velocity = a.get().unwrap().vel.z
+    update_motes()
+    assert_eq(a.get().unwrap().vel.z, velocity, "an expired effector cannot accelerate again")
+    mote_gravity(10.0)
+    update_motes()
+    assert_eq(a.get().unwrap().vel.z - velocity, c.get().unwrap().vel.z, "ungrouped gravity reaches every group")
+}
+
+@test
+fn rendering_purge_frame_view_integer_scale_and_shared_phase() {
+    let art = CrispArtRaster { asset_ppwu: 32.0, max_scale: 4 }
+    let view = resolve_frame_view(v(1280, 800), iv(1280, 800),
+        Camera2D { center: v(12.3456, 7.8901), visible_world_width: 20.0 },
+        RenderConfig { scene: SceneRaster::CrispArt(art) }).unwrap()
+    let scale = view.world_to_scene_scale
+    assert_eq(scale / art.asset_ppwu, round(scale / art.asset_ppwu), "art density uses integer rungs")
+    let origin = world_to_scene_texel_in(view, v(0.5, 0.5))
+    assert(abs(origin.x - round(origin.x)) > 0.01, "camera exercises fractional phase")
+    for y in 0..8 {
+        for x in 0..8 {
+            let delta = world_to_scene_texel_in(view, v(x as float + 0.5, y as float + 0.5)) - origin
+            assert(abs(delta.x - round(delta.x)) < 0.001 && abs(delta.y - round(delta.y)) < 0.001,
+                "all tile centers share a fractional phase")
+        }
+    }
+}
+
+@test
+fn rendering_purge_frame_view_scene_output_composition() {
+    for center in [v(1.234, 2.345), v(1.235, 2.346)] {
+        let view = resolve_frame_view(v(960, 540), iv(1920, 1080),
+            Camera2D { center, visible_world_width: 20.0 },
+            RenderConfig { scene: SceneRaster::CrispArt(CrispArtRaster { asset_ppwu: 32.0, max_scale: 4 }) }).unwrap()
+        let point = center + v(1.2, 0.3)
+        let scene = world_to_scene_texel_in(view, point)
+        let output = world_to_screen_in(view, point)
+        let back = output_to_scene_texel(view, output).unwrap()
+        assert((v(scene.x, view.scene_size.y as float - scene.y) - back).length() < 0.0001,
+            "bottom-up scene and top-down output transforms compose")
+        assert((screen_to_world_in(view, output) - point).length() < 0.0001, "output inverse preserves world coordinates")
+    }
+}
+
+fn rendering_purge_contains(outer: Rect, inner: Rect) -> bool {
+    return inner.x >= outer.x && inner.y >= outer.y
+        && inner.x + inner.w <= outer.x + outer.w && inner.y + inner.h <= outer.y + outer.h
+}
+
+@test
+fn rendering_purge_text_effect_bounds_contain_ink_shadow_and_filter() {
+    font_residency_test_host()
+    let font = load_font(FONT_RESIDENCY_PATH, 48, raster: FontRasterPolicy::Fixed).unwrap()
+    defer { unload_font(font) }
+    let layout = text_layout_build(font, "AB", 96.0, 1.0, align: TextAlign::TopLeft)
+    let input = text_art_glyph_input(layout, TextArtFollow::GlyphPoses,
+        text_layout_identity_poses(layout), WHITE, consumer_key: "rendering-purge")
+    for offset in [v(-42, 36), v(42, -36)] {
+        let bounds = text_art_glyph_effect_bounds(input, TextArtStyle {
+            shadow: WHITE, shadow_offset: offset, shadow_strength: 1.0, shadow_levels: 4,
+            emission: WHITE, emission_strength: 3.0, bloom_levels: 4,
+        })
+        assert(bounds.raster_ink.w > 0.0 && bounds.raster_ink.h > 0.0, "real font supplies ink")
+        assert(rendering_purge_contains(bounds.source, bounds.raster_ink), "source contains ink")
+        assert(rendering_purge_contains(bounds.output, bounds.source), "output contains source")
+        assert(rendering_purge_contains(bounds.output, bounds.shadow), "output contains shadow support")
+        assert(rendering_purge_contains(bounds.output, bounds.bloom), "output contains filter support")
+        assert(bounds.bloom.x < bounds.source.x && bounds.bloom.w > bounds.source.w, "filter extends beyond ink")
+    }
+}

@@ -1,0 +1,460 @@
+pub value UiBakeEffect {
+    enabled: bool,
+    radius: float,
+    iterations: int = 1,
+    include_source: bool = true,
+    offset: Vec2,
+    tint: Color,
+    strength: float,
+    sampling: TextureFilter,
+}
+
+pub struct UiEffectWorkspace {
+    name: string,
+    format: string,
+    extent: IVec2 = iv(0, 0),
+    source: Canvas? = null,
+    horizontal: Canvas? = null,
+    vertical: Canvas? = null,
+}
+
+pub value UiBakeStats {
+    extent: IVec2,
+    bytes: int,
+    bake_count: int,
+    last_bake_ms: float,
+    last_call_ms: float,
+    pass_count: int,
+    pass_total: int,
+    scratch_extent: IVec2,
+    scratch_bytes: int,
+    scratch_canvas_count: int,
+    owned_canvas_count: int,
+    cache_hit: bool,
+}
+
+pub struct UiBake<T> {
+    name: string,
+    format: string,
+    canvas: Canvas? = null,
+    draw_list: DrawList,
+    pool_retired: bool = false,
+    inputs: T? = null,
+    semantic_inputs: bool = false,
+    extent: IVec2 = iv(0, 0),
+    epoch: int = -1,
+    bake_count: int = 0,
+    last_bake_ms: float = -1.0,
+    last_call_ms: float = -1.0,
+    last_pass_count: int = 0,
+    pass_total: int = 0,
+    cache_hit: bool = false,
+    effect: UiBakeEffect? = null,
+    workspace: UiEffectWorkspace? = null,
+}
+
+global UI_BAKE_EPOCH: int = 0
+
+fn ui_bake_pixel_bytes(format: string) -> int {
+    if format == "rgba8" { return 4 }
+    if format == "rgba16f" { return 8 }
+    error("UiBake requires rgba8 or rgba16f, got '{format}'")
+    return 0
+}
+
+pub fn ui_bake_new<T>(name: string, format: string = "rgba8") -> UiBake<T> {
+    ui_bake_pixel_bytes(format)
+    return UiBake {
+        name: name,
+        format: format,
+        draw_list: draw_list_new(
+            space: DrawSpace::Target,
+            default_z: LAYER_UI,
+            name: "ui_bake:{name}",
+        ),
+    }
+}
+
+pub fn ui_bake_canvas<T>(bake: UiBake<T>) -> Canvas? {
+    let canvas = bake.canvas ?? return null
+    if !canvas_is_live(canvas) { return null }
+    return canvas
+}
+
+pub fn ui_bake_count<T>(bake: UiBake<T>) -> int {
+    return bake.bake_count
+}
+
+fn ui_effect_workspace_new(name: string, format: string) -> UiEffectWorkspace {
+    return UiEffectWorkspace { name: name, format: format }
+}
+
+fn ui_effect_workspace_destroy(workspace: UiEffectWorkspace) {
+    if workspace.source != null {
+        let canvas = workspace.source.unwrap()
+        if canvas_is_live(canvas) { destroy_canvas(canvas) }
+    }
+    if workspace.horizontal != null {
+        let canvas = workspace.horizontal.unwrap()
+        if canvas_is_live(canvas) { destroy_canvas(canvas) }
+    }
+    if workspace.vertical != null {
+        let canvas = workspace.vertical.unwrap()
+        if canvas_is_live(canvas) { destroy_canvas(canvas) }
+    }
+    workspace.source = null
+    workspace.horizontal = null
+    workspace.vertical = null
+    workspace.extent = iv(0, 0)
+}
+
+fn ui_effect_workspace_ensure(workspace: UiEffectWorkspace, extent: IVec2) -> bool {
+    if extent.x <= 0 || extent.y <= 0 { return false }
+    let ready = workspace.extent == extent
+        && workspace.source != null
+        && workspace.horizontal != null
+        && workspace.vertical != null
+        && canvas_is_live(workspace.source.unwrap())
+        && canvas_is_live(workspace.horizontal.unwrap())
+        && canvas_is_live(workspace.vertical.unwrap())
+    if ready { return true }
+
+    ui_effect_workspace_destroy(workspace)
+    workspace.source = new_canvas(extent.x as float, extent.y as float, workspace.format)
+    workspace.horizontal = new_canvas(extent.x as float, extent.y as float, workspace.format)
+    workspace.vertical = new_canvas(extent.x as float, extent.y as float, workspace.format)
+    workspace.extent = extent
+    return true
+}
+
+fn ui_effect_workspace_canvas_count(workspace: UiEffectWorkspace) -> int {
+    let count = 0
+    if workspace.source != null && canvas_is_live(workspace.source.unwrap()) { count += 1 }
+    if workspace.horizontal != null && canvas_is_live(workspace.horizontal.unwrap()) { count += 1 }
+    if workspace.vertical != null && canvas_is_live(workspace.vertical.unwrap()) { count += 1 }
+    return count
+}
+
+fn ui_effect_workspace_bytes(workspace: UiEffectWorkspace) -> int {
+    return ui_effect_workspace_canvas_count(workspace)
+        * workspace.extent.x * workspace.extent.y * ui_bake_pixel_bytes(workspace.format)
+}
+
+pub fn ui_bake_workspace<T>(bake: UiBake<T>) -> UiEffectWorkspace {
+    if bake.workspace == null {
+        bake.workspace = ui_effect_workspace_new("{bake.name}:effects", bake.format)
+    }
+    return bake.workspace.unwrap()
+}
+
+pub fn ui_bake_stats<T>(bake: UiBake<T>) -> UiBakeStats {
+    let live = ui_bake_canvas(bake) != null
+    let extent = if live { bake.extent } else { iv(0, 0) }
+    let scratch_extent = if bake.workspace != null {
+        let workspace = bake.workspace.unwrap()
+        if ui_effect_workspace_canvas_count(workspace) > 0 { workspace.extent } else { iv(0, 0) }
+    } else { iv(0, 0) }
+    let scratch_count = if bake.workspace != null {
+        ui_effect_workspace_canvas_count(bake.workspace.unwrap())
+    } else { 0 }
+    let scratch_bytes = if bake.workspace != null {
+        ui_effect_workspace_bytes(bake.workspace.unwrap())
+    } else { 0 }
+    return UiBakeStats {
+        extent: extent,
+        bytes: extent.x * extent.y * ui_bake_pixel_bytes(bake.format),
+        bake_count: bake.bake_count,
+        last_bake_ms: bake.last_bake_ms,
+        last_call_ms: bake.last_call_ms,
+        pass_count: bake.last_pass_count,
+        pass_total: bake.pass_total,
+        scratch_extent: scratch_extent,
+        scratch_bytes: scratch_bytes,
+        scratch_canvas_count: scratch_count,
+        owned_canvas_count: (if live { 1 } else { 0 }) + scratch_count,
+        cache_hit: bake.cache_hit,
+    }
+}
+
+pub fn ui_bake_destroy<T>(bake: UiBake<T>) {
+    draw_list_destroy(bake.draw_list)
+    bake.pool_retired = true
+    let canvas = ui_bake_canvas(bake)
+    if canvas != null { destroy_canvas(canvas.unwrap()) }
+    if bake.workspace != null { ui_effect_workspace_destroy(bake.workspace.unwrap()) }
+    bake.canvas = null
+    bake.draw_list.canvas = null
+    bake.inputs = null
+    bake.semantic_inputs = false
+    bake.effect = null
+    bake.workspace = null
+    bake.extent = iv(0, 0)
+    bake.epoch = -1
+    bake.cache_hit = false
+}
+
+pub @nomangle
+@on_reload
+fn ui_bake_invalidate_all() {
+    UI_BAKE_EPOCH += 1
+}
+
+pub fn ui_bake_clear_canvas(canvas: Canvas) {
+    with_canvas(
+        canvas,
+        () => {
+            clear_screen(0.0, 0.0, 0.0, 0.0)
+        }
+    )
+}
+
+fn ui_bake_effect_matches<T>(bake: UiBake<T>, effect: UiBakeEffect?) -> bool {
+    if effect == null { return bake.effect == null }
+    if bake.effect == null { return false }
+    return bake.effect.unwrap() == effect.unwrap()
+}
+
+// A paint callback and its equality policy stay fixed for one bake owner.
+pub fn ui_bake_inputs_equal<T>(a: T, b: T, equal: ((T, T) -> bool)? = null) -> bool {
+    return if equal == null { a == b } else { equal.unwrap()(a, b) }
+}
+
+fn ui_bake_cache_matches<T>(
+    bake: UiBake<T>,
+    extent: IVec2,
+    inputs: T,
+    effect: UiBakeEffect?,
+    inputs_equal: ((T, T) -> bool)? = null
+) -> bool {
+    return ui_bake_canvas(bake) != null
+        && bake.extent == extent
+        && bake.inputs != null
+        && bake.semantic_inputs == (inputs_equal != null)
+        && ui_bake_inputs_equal(bake.inputs.unwrap(), inputs, inputs_equal)
+        && ui_bake_effect_matches(bake, effect)
+        && bake.epoch == UI_BAKE_EPOCH
+}
+
+fn ui_bake_mark_success<T>(
+    bake: UiBake<T>,
+    extent: IVec2,
+    inputs: T,
+    effect: UiBakeEffect?,
+    pass_count: int,
+    started: float,
+    inputs_equal: ((T, T) -> bool)? = null
+) {
+    bake.inputs = inputs.clone_into(map_storage(bake.draw_list.batches.entries))
+    bake.semantic_inputs = inputs_equal != null
+    bake.effect = effect
+    bake.extent = extent
+    bake.epoch = UI_BAKE_EPOCH
+    bake.bake_count += 1
+    bake.last_pass_count = pass_count
+    bake.pass_total += pass_count
+    bake.last_bake_ms = (stone_get_time() - started) * 1000.0
+}
+
+fn ui_bake_render_plain<T>(
+    bake: UiBake<T>,
+    extent: IVec2,
+    inputs: T,
+    effect: UiBakeEffect?,
+    paint: (DrawList, T) -> (),
+    inputs_equal: ((T, T) -> bool)? = null
+) -> bool {
+    let started = stone_get_time()
+    let old_canvas = ui_bake_canvas(bake)
+    let replace = old_canvas == null || bake.extent != extent
+    let target = if replace {
+        new_canvas(extent.x as float, extent.y as float, bake.format)
+    } else { old_canvas.unwrap() }
+
+    bake.draw_list.canvas = target
+    draw_list_clear(bake.draw_list)
+    paint(bake.draw_list, inputs)
+    if !draw_list_gl_is_admitted(bake.draw_list) {
+        draw_list_clear(bake.draw_list)
+        bake.draw_list.canvas = old_canvas
+        if replace { destroy_canvas(target) }
+        return false
+    }
+
+    ui_bake_clear_canvas(target)
+    draw_list_flush(bake.draw_list)
+    draw_list_clear(bake.draw_list)
+    if replace {
+        if old_canvas != null { destroy_canvas(old_canvas.unwrap()) }
+        bake.canvas = target
+    }
+    bake.draw_list.canvas = target
+    ui_bake_mark_success(bake, extent, inputs, effect, 0, started, inputs_equal)
+    return true
+}
+
+pub fn ui_bake_try<T>(bake: UiBake<T>, extent: IVec2, inputs: T,
+    paint: (DrawList, T) -> (), inputs_equal: ((T, T) -> bool)? = null) -> bool {
+    if extent.x <= 0 || extent.y <= 0 {
+        error("UiBake '{bake.name}' requires a positive extent, got {extent.x}x{extent.y}")
+    }
+    if bake.pool_retired {
+        bake.draw_list.batches = render_batch_pool_new()
+        bake.pool_retired = false
+    }
+    bake.cache_hit = false
+    if bake.workspace != null {
+        ui_effect_workspace_destroy(bake.workspace.unwrap())
+        bake.workspace = null
+    }
+    let call_started = stone_get_time()
+    if ui_bake_cache_matches(bake, extent, inputs, null, inputs_equal) {
+        bake.cache_hit = true
+        bake.last_call_ms = (stone_get_time() - call_started) * 1000.0
+        return true
+    }
+
+    let ok = ui_bake_render_plain(bake, extent, inputs, null, paint, inputs_equal)
+    bake.last_call_ms = (stone_get_time() - call_started) * 1000.0
+    return ok
+}
+
+pub fn ui_bake_ensure<T>(
+    bake: UiBake<T>,
+    extent: IVec2,
+    inputs: T,
+    paint: (DrawList, T) -> (),
+    inputs_equal: ((T, T) -> bool)? = null
+) -> Canvas {
+    if !ui_bake_try(bake, extent, inputs, paint, inputs_equal) {
+        let old = ui_bake_canvas(bake)
+        if old == null {
+            error("UiBake '{bake.name}' plain execution was rejected before a valid snapshot existed")
+            return bake.canvas.unwrap()
+        }
+        return old.unwrap()
+    }
+    return bake.canvas.unwrap()
+}
+
+pub fn ui_bake_try_effect<T>(
+    bake: UiBake<T>,
+    extent: IVec2,
+    inputs: T,
+    effect: UiBakeEffect,
+    paint: (DrawList, T) -> ()
+) -> bool {
+    if extent.x <= 0 || extent.y <= 0 {
+        error("UiBake '{bake.name}' requires a positive extent, got {extent.x}x{extent.y}")
+    }
+    if effect.iterations <= 0 { return false }
+    if bake.pool_retired {
+        bake.draw_list.batches = render_batch_pool_new()
+        bake.pool_retired = false
+    }
+    bake.cache_hit = false
+    let call_started = stone_get_time()
+    if ui_bake_cache_matches(bake, extent, inputs, effect) {
+        bake.cache_hit = true
+        bake.last_call_ms = (stone_get_time() - call_started) * 1000.0
+        return true
+    }
+    if !effect.enabled {
+        if bake.workspace != null {
+            ui_effect_workspace_destroy(bake.workspace.unwrap())
+            bake.workspace = null
+        }
+        let ok = ui_bake_render_plain(bake, extent, inputs, effect, paint)
+        bake.last_call_ms = (stone_get_time() - call_started) * 1000.0
+        return ok
+    }
+
+    let workspace = ui_bake_workspace(bake)
+    if !ui_effect_workspace_ensure(workspace, extent) { return false }
+    let source = workspace.source ?? return false
+    let horizontal = workspace.horizontal ?? return false
+    let vertical = workspace.vertical ?? return false
+    let started = call_started
+    let old_canvas = ui_bake_canvas(bake)
+    let replace = old_canvas == null || bake.extent != extent
+    let target = if replace {
+        new_canvas(extent.x as float, extent.y as float, bake.format)
+    } else { old_canvas.unwrap() }
+
+    bake.draw_list.canvas = source
+    draw_list_clear(bake.draw_list)
+    ui_bake_clear_canvas(source)
+    paint(bake.draw_list, inputs)
+    if !draw_list_gl_is_admitted(bake.draw_list) {
+        draw_list_clear(bake.draw_list)
+        bake.draw_list.canvas = old_canvas
+        if replace { destroy_canvas(target) }
+        return false
+    }
+    draw_list_flush(bake.draw_list)
+    draw_list_clear(bake.draw_list)
+
+    let blur_input = sampled_canvas(source)
+    let iteration = 0
+    while iteration < effect.iterations {
+        if !sampled_separable_blur(
+            blur_input, horizontal, vertical, extent,
+            effect.radius, 1.0, effect.sampling) {
+            if replace { destroy_canvas(target) }
+            return false
+        }
+        blur_input = sampled_canvas(vertical)
+        iteration += 1
+    }
+    let original = Pass {
+        pipeline: BLIT_PIPELINE,
+        slot_inputs: [(sampled_canvas(source), effect.sampling)],
+        output: target,
+        clear: null,
+        blend: BlendMode::Alpha,
+    }
+    if effect.include_source {
+        if !pass_is_admitted(original) {
+            if replace { destroy_canvas(target) }
+            return false
+        }
+    }
+    if !composite_sampled_texture(
+        sampled_canvas(vertical), target, extent, effect.sampling,
+        effect.tint, effect.offset, effect.strength) {
+        if replace { destroy_canvas(target) }
+        return false
+    }
+    if effect.include_source {
+        let original = run_pass(original)
+        if !original {
+            if replace { destroy_canvas(target) }
+            return false
+        }
+    }
+
+    if replace && old_canvas != null { destroy_canvas(old_canvas.unwrap()) }
+    bake.canvas = target
+    bake.draw_list.canvas = target
+    ui_bake_mark_success(bake, extent, inputs, effect,
+        effect.iterations * 2 + 1 + (if effect.include_source { 1 } else { 0 }), started)
+    bake.last_call_ms = (stone_get_time() - call_started) * 1000.0
+    return true
+}
+
+pub fn ui_bake_ensure_effect<T>(
+    bake: UiBake<T>,
+    extent: IVec2,
+    inputs: T,
+    effect: UiBakeEffect,
+    paint: (DrawList, T) -> ()
+) -> Canvas {
+    if !ui_bake_try_effect(bake, extent, inputs, effect, paint) {
+        let old = ui_bake_canvas(bake)
+        if old == null {
+            error("UiBake '{bake.name}' effect execution was rejected before a valid snapshot existed")
+            return bake.canvas.unwrap()
+        }
+        return old.unwrap()
+    }
+    return bake.canvas.unwrap()
+}

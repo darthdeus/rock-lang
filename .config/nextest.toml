@@ -1,0 +1,10 @@
+experimental = ["wrapper-scripts"]
+
+[scripts.wrapper.private-display]
+command = { command-line = "scripts/private-display", relative-to = "workspace-root" }
+target-runner = "within-wrapper"
+
+[[profile.default.scripts]]
+filter = 'binary(window_visibility) | binary(window_presentation) | binary(window_fullscreen_toggle) | binary(x11_focus) | binary(imgui_frontier_abi) | binary(gpu_host_lifetime) | binary(depth_mode) | binary(shader_lifetime)'
+platform = 'cfg(target_os = "linux")'
+run-wrapper = "private-display"

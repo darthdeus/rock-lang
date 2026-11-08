@@ -1,0 +1,713 @@
+// A DrawList owns a batch pool and routes drawing verbs through it. Built-in
+// lists alias the existing world and UI pools; user lists own fresh pools.
+// The optional canvas selects the destination, while `space` selects world
+// camera coordinates or coordinates relative to that destination.
+
+// What a list's coordinates MEAN.
+//
+// `Target` is the destination's own declared extent: logical window units for
+// the output, virtual texels for a pixel-perfect scene, canvas units for a
+// user canvas. The backend viewport may hold more drawable pixels; that does
+// not change the submitted coordinates.
+pub enum DrawSpace {
+    World,
+    Target,
+}
+
+// WHERE a list lands, which picks the emission core. `Scene` goes through the
+// world batch pool and is post-processed and presented with the scene;
+// `Output` goes through the px_* core after presentation. Space and
+// destination are independent: world-space content can land on the output
+// (an overlay rasterized at output density) and target-space content can land
+// on the composite (virtual-pixel UI presented with the scene).
+//
+// The three are three SURFACES, not three phases. `Scene` is the scene canvas
+// before post-processing, so its content is an HDR input to the chain and is
+// bloomed and graded with the world. `Composite` is COMPOSITE_CANVAS after the
+// chain and the outline overlay: final LDR pixels at scene resolution, which
+// the present then upscales. `Output` is the window itself, after the present,
+// the only surface never resampled.
+pub enum DrawDest {
+    Scene,
+    Composite,
+    Output,
+}
+
+pub struct DrawList {
+    space: DrawSpace,
+    dest: DrawDest,
+    name: string,    // diagnostic only — surfaced in debug labels later
+    default_z: int,  // applied when caller leaves `z: 0` (the sentinel)
+
+    // Debug overlay content renders fullbright (unlit batch, bound as
+    // uUnlit in the color pass). Rides the batch key.
+    unlit: bool,
+
+    // True when `batches` is this list's own Map rather than an alias of a
+    // global pool, so verbs bracket with `with_draw_pool` to route the
+    // shared draw_* paths into it.
+    owns_pool: bool,
+
+    // Batch pool this DrawList drains into. For built-ins, aliases the
+    // corresponding global (world / gizmo → RENDER_BATCHES; screen →
+    // UI_RENDER_BATCHES) so every existing direct-global caller (and
+    // the existing render_batches / render_ui_batches flushers)
+    // continues to find the same entries. User DrawLists own their own
+    // pool owner.
+    batches: RenderBatchPool,
+
+    // Render target. `null` means "default screen canvas, bound by the
+    // frame-level flusher". User DrawLists created via draw_list_new
+    // with an explicit canvas bind here at flush time.
+    canvas: Canvas?,
+}
+
+// Default outline/line thickness for a World-space verb, in WORLD units.
+// World verbs take world thickness and output verbs take output thickness --
+// neither converts the other's units. This is the hairline the world verbs
+// have always drawn; it is a default, not a conversion factor.
+const WORLD_HAIRLINE: float = 1.0 / 16.0
+
+// `z: 0` in any verb means "use this DrawList's default layer". Allows
+// callers to write `world.sprite(...)` without thinking about layer
+// constants for the common case, while still permitting `world.sprite(
+// ..., z: LAYER_WORLD_FG)` for explicit control.
+pub @pure
+fn resolve_z(dl: DrawList, z: int) -> int {
+    if z == 0 { dl.default_z } else { z }
+}
+
+pub global world: DrawList = DrawList {
+    space: DrawSpace::World,
+    dest: DrawDest::Scene,
+    name: "world",
+    default_z: DEFAULT_RENDER_LAYER,
+    unlit: false,
+    owns_pool: false,
+    batches: RENDER_BATCHES,
+    canvas: null,
+}
+
+pub global screen: DrawList = DrawList {
+    space: DrawSpace::Target,
+    dest: DrawDest::Output,
+    name: "screen",
+    default_z: LAYER_UI,
+    unlit: false,
+    owns_pool: false,
+    batches: UI_RENDER_BATCHES,
+    canvas: null,
+}
+
+// World-anchored content rasterized at OUTPUT density, after the scene is
+// presented: nameplates, damage numbers, world-sized labels that must stay
+// crisp under a coarse scene raster. Coordinates and extents are world units
+// like `world`; the destination is the output like `screen`.
+pub global world_overlay: DrawList = DrawList {
+    space: DrawSpace::World,
+    dest: DrawDest::Output,
+    name: "world_overlay",
+    default_z: LAYER_UI,
+    unlit: false,
+    owns_pool: false,
+    batches: UI_RENDER_BATCHES,
+    canvas: null,
+}
+
+// Virtual-texel UI: authored on the scene's own grid, so one unit becomes
+// `present_scale` output pixels. The COARSE list -- pixel-accurate to the
+// game's grid rather than the display's, which is what puts a pixel-art HUD on
+// the same grid and phase as the art without per-call scale math.
+pub global pixel_screen: DrawList = DrawList {
+    space: DrawSpace::Target,
+    dest: DrawDest::Composite,
+    name: "pixel_screen",
+    default_z: LAYER_UI,
+    unlit: false,
+    // Its own pool: the UI pool drains onto the window after the present, and
+    // this one drains into the composite before it.
+    owns_pool: true,
+    batches: render_batch_pool_new(),
+    canvas: null,
+}
+
+// World-space DrawList for transient debug visuals (gizmos): hitboxes,
+// path traces, value labels, etc. Shares world's pool (RENDER_BATCHES);
+// the only runtime distinction is `default_z: LAYER_DEBUG` so gizmos
+// sort above game content. Promotion to its own pool is deferred until
+// there's a measured need.
+//
+// Not named `debug` — that shadows Lua's standard `debug` library, and
+// Stone's libstone loader calls `debug.getinfo(2, "S")` on startup.
+pub global gizmo: DrawList = DrawList {
+    space: DrawSpace::World,
+    dest: DrawDest::Scene,
+    name: "gizmo",
+    default_z: LAYER_DEBUG,
+    unlit: true,
+    owns_pool: false,
+    batches: RENDER_BATCHES,
+    canvas: null,
+}
+
+// ─────────────────── user-owned DrawLists ───────────────────
+//
+// Each call allocates a fresh Map, so a user DrawList doesn't interfere
+// with world's pool or with other user lists. Intended for effects that
+// want a private render surface — e.g. a blood-splat canvas that
+// accumulates projectile hits across frames.
+//
+// Verbs route via `with_draw_pool(dl.batches, ...)`, so every verb --
+// including `dl.text`, whose world glyphs are an ordinary vertex batch --
+// writes into the owned pool.
+pub fn draw_list_new(
+    canvas: Canvas? = null,
+    space: DrawSpace = DrawSpace::World,
+    default_z: int = DEFAULT_RENDER_LAYER,
+    name: string = "user"
+) -> DrawList {
+    return DrawList {
+        space: space,
+        // A user list drains through the sprite-batch path into its own
+        // canvas, so its emission core is the scene one whatever its space.
+        dest: DrawDest::Scene,
+        name: name,
+        default_z: default_z,
+        unlit: false,
+        owns_pool: true,
+        batches: render_batch_pool_new(),
+        canvas: canvas,
+    }
+}
+
+// Flush a DrawList's pool to the currently bound canvas (or `dl.canvas`
+// if set). Draws each admitted batch in z-order.
+//
+// Does NOT clear the pool — caller clears via `draw_list_clear(dl)` when
+// appropriate (e.g. once per frame for transient content, never for an
+// accumulating canvas).
+pub fn draw_list_flush(dl: DrawList) {
+    // Not `.len() == 0`: batches are pooled across frames, so an emptied pool
+    // keeps its keys.
+    if !pool_has_pending(dl.batches) { return }
+
+    // Factor the draw loop into a closure so we can bracket it with
+    // `with_canvas` when a user DrawList owns a canvas, without
+    // duplicating the body. `with_canvas` guarantees set_canvas /
+    // unset_canvas are paired even if the body early-returns —
+    // robust against future edits in a way the previous manual
+    // has_canvas bool wasn't.
+    let body = () => {
+        draw_list_flush_body(dl)
+    }
+
+    if dl.canvas != null {
+        with_canvas(dl.canvas.unwrap(), body)
+    } else {
+        body()
+    }
+}
+
+fn draw_list_gl_is_admitted(dl: DrawList) -> bool {
+    for (_, batch_row) in dl.batches.entries {
+        let batch = batch_row.borrow().unwrap()
+        if batch.custom_draw != null { return false }
+        // An undrawn mesh row lingers one discard with no vertices.
+        if batch.count == 0 { continue }
+        if batch.external_verts { return false }
+        if !sampled_texture_is_live(batch.texture) { return false }
+        if batch.normal != null && !sampled_texture_is_live(batch.normal.unwrap()) {
+            return false
+        }
+        let shader = if batch.pipeline != null {
+            batch.pipeline.unwrap().shader_name
+        } else { sprite_batch_shader }
+        if get_shader_handle(shader) == 0 { return false }
+    }
+    return true
+}
+
+fn setup_draw_list_shader(shader: string, dl: DrawList, yb: Vec2) {
+    // Same reason as `setup_ui_pass_shader`: a DrawList shares the sprite batch
+    // program, and a by-name write cannot reach a block member.
+    let u = ui_frag_uniforms()
+    // One lookup, not two: `if present { set }` repeats the fingerprint search
+    // that `set_uniform_block` does anyway, which is the form the macro's own
+    // note warns against.
+    set_uniform_block_if_present(shader, u)
+
+    match dl.space {
+        DrawSpace::World => {
+            let view = RENDER_VIEW ?? return
+            set_camera(camera_offset_in(view), view.world_to_scene_scale)
+            set_engine_uniforms(shader, yb)
+        }
+        // Target coordinates are the destination's own units, so the transform
+        // is identity against the bound target's ortho -- but WHICH ortho
+        // depends on what happens to the target afterwards. The composite and
+        // user canvases are sampled with a flip, so authored top-left content
+        // needs the pre-compensating convention or it comes back mirrored.
+        // Selected here, never inferred from canvas binding: world geometry
+        // renders into canvases too and needs the ordinary one.
+        DrawSpace::Target => {
+            // Identity view; pixel-space ortho projection.
+            reset_camera()
+            let convention = if dl.dest == DrawDest::Composite || dl.canvas != null {
+                TargetConvention::PresentSource
+            } else {
+                TargetConvention::Direct
+            }
+            set_engine_uniforms(shader, yb, convention)
+        }
+    }
+}
+
+// Private: the per-flush draw loop. Assumes the target canvas (if
+// any) is already bound and gets unbound by the caller. Built-in
+// DrawLists run this directly against the currently-active canvas
+// (set by the frame-level flusher); user DrawLists run it inside a
+// `with_canvas` block.
+fn draw_list_flush_body(dl: DrawList) {
+    static sort_keys: [string] = []
+    let keys = dl.batches.keys_into(sort_keys)
+
+    with_shader(
+        sprite_batch_shader,
+        () => {
+            let yb = camera_y_bounds()
+            setup_draw_list_shader(sprite_batch_shader, dl, yb)
+
+            let active_shader = sprite_batch_shader
+            let current_depth = DepthMode::Off
+            let entry_blend = CURRENT_BLEND
+            let current_blend = entry_blend
+            unset_depth_mode()
+
+            for key in keys {
+                let batch_opt = dl.batches.get(key) ?? continue
+                let batch = batch_opt.unwrap()
+
+                if batch.depth != current_depth {
+                    apply_depth_mode(batch.depth)
+                    current_depth = batch.depth
+                }
+
+                if batch.blend != current_blend {
+                    set_blend_mode(batch.blend)
+                    current_blend = batch.blend
+                }
+
+
+                if batch.custom_draw != null {
+                    let target = CURRENT_CANVAS_HANDLE
+                    batch.custom_draw.unwrap()()
+                    restore_after_custom_draw(target, batch.depth, batch.blend)
+                    active_shader = ""
+                    continue
+                }
+
+                if batch.count == 0 { continue }
+
+                let want = if batch.pipeline != null {
+                    batch.pipeline.unwrap().shader_name
+                } else {
+                    sprite_batch_shader
+                }
+                if want != active_shader {
+                    set_shader(want)
+                    setup_draw_list_shader(want, dl, yb)
+                    active_shader = want
+                }
+
+                apply_batch_uniforms(active_shader, batch)
+                bind_batch_samplers(active_shader, batch)
+
+                draw_batch_mesh(batch)
+                release_batch_samplers(active_shader, batch)
+            }
+
+            if current_depth != DepthMode::Off { unset_depth_mode() }
+
+            if current_blend != entry_blend { set_blend_mode(entry_blend) }
+
+            if active_shader != sprite_batch_shader {
+                // Re-bind the default program so the bracket unwinds from
+                // the state it set up.
+                set_shader(sprite_batch_shader)
+            }
+
+            reset_camera()
+        }
+    )
+}
+
+// Drop this list's queued commands. Pooled vertex batches keep their buffers
+// (`discard_pool_batches`); closures are removed, and so are the foreign
+// vbos of meshes that stopped drawing.
+pub fn draw_list_clear(dl: DrawList) {
+    discard_pool_batches(dl.batches)
+}
+
+pub fn draw_list_destroy(dl: DrawList) {
+    assert(dl.owns_pool, "only an owned DrawList can retire its pool")
+    render_batch_pool_destroy(dl.batches)
+}
+
+// Drain `pixel_screen` into the composite: after the post chain and the
+// outline overlay have finished writing it, before the present upscales it.
+// Binding the canvas is what makes the identity camera mean virtual texels --
+// stone_set_canvas viewports to the canvas's ACTIVE extent and reports it as
+// CURRENT_TARGET_SIZE, which is the scene size, so the ortho is the scene grid.
+fn flush_pixel_screen() {
+    if !pool_has_pending(pixel_screen.batches) { return }
+    let dst = COMPOSITE_CANVAS ?? {
+        // A grade chain with no canvas output already blitted to the window,
+        // so there is no composite left to draw into. Dropping the queue
+        // silently would leak it into the next frame.
+        log_once("RENDER", "pixel_screen has queued content but the frame wrote the window directly; nothing to composite into")
+        draw_list_clear(pixel_screen)
+        return
+    }
+    with_canvas(dst, () => draw_list_flush_body(pixel_screen))
+    draw_list_clear(pixel_screen)
+}
+
+// ─────────────────────────── verbs ───────────────────────────
+//
+// Each verb dispatches on the destination and forwards to that emission
+// core: Scene through the world batch route (deferred, into the ambient world
+// pool), Output and Composite through the px_* / queue_ui_text_scaled
+// primitives into the z-sorted UI pool `in_ui_pool` selects. A World list on
+// the Output takes neither directly — it queues, and world_overlay.rock
+// projects at flush.
+//
+// Pivot defaults differ on purpose: world.sprite is center-anchored
+// (matches gameplay convention), screen.sprite is top-left-anchored
+// (matches UI convention). See plan doc open question §8.
+
+// Conditionally bracket `body` with `with_draw_pool(dl.batches, ...)`
+// when the DrawList owns its pool. Built-in DrawLists fall through —
+// their `batches` field already aliases RENDER_BATCHES so the bracket
+// would be a no-op. Used by every world-space verb below.
+fn in_pool(dl: DrawList, body: fn() -> ()) {
+    if dl.owns_pool { with_draw_pool(dl.batches, body) } else { body() }
+}
+
+// A World list landing on the Output cannot emit at the call: its coordinates
+// need the frozen render view, which does not exist until updates finish. Its
+// verbs queue (rendering/world_overlay.rock) and the flush projects them.
+// Every other combination emits now.
+fn dl_deferred(dl: DrawList) -> bool {
+    return dl.dest == DrawDest::Output && dl.space == DrawSpace::World
+}
+
+// Output z, with the sentinel resolved. Lines, circles and text default above
+// UI shapes; rects and sprites pass z through so a caller can stack under them.
+fn output_z(z: int) -> int {
+    return if z == 0 { UI_TEXT_Z_LAYER } else { z }
+}
+
+// Which emission core a list's verbs go through. `Scene` is the world batch
+// core (deferred, shader-projected, post-processed); `Composite` and `Output`
+// are both the target-pixel core and differ only in which pool they drain
+// into, which `in_ui_pool` handles. One exhaustive match so a fourth
+// destination has to declare its core here rather than falling into a
+// wildcard at seven verb sites.
+fn dl_target_core(dl: DrawList) -> bool {
+    return match dl.dest {
+        DrawDest::Scene => false
+        DrawDest::Composite => true
+        DrawDest::Output => true
+    }
+}
+
+// Bracket the target-pixel core onto a list's own UI pool. `screen` and the
+// world overlay drain the global pool onto the window; `pixel_screen` drains
+// its own into the composite.
+fn in_ui_pool(dl: DrawList, body: fn() -> ()) {
+    if dl.dest == DrawDest::Composite { with_ui_pool(dl.batches, body) } else { body() }
+}
+
+pub fn with_draw_list_ui_pool(dl: DrawList, body: fn() -> ()) {
+    if !dl.owns_pool {
+        error("with_draw_list_ui_pool requires an owned DrawList")
+        return
+    }
+    with_ui_pool_for_draw_list(dl.batches, body)
+}
+
+// A World verb's thickness is world units; a Target verb's is the
+// destination's own units. Neither converts the other's.
+fn dl_thickness(dl: DrawList, thickness: float?) -> float {
+    let t = thickness ?? return match dl.space {
+        DrawSpace::World => WORLD_HAIRLINE
+        DrawSpace::Target => 1.0
+    }
+    return t
+}
+
+// Screen rects queue into UI_RENDER_BATCHES at z (default 0 = under
+// text at UI_TEXT_Z_LAYER). Callers who need to stack a UI overlay
+// above text (e.g. a drag cursor above a panel) pass z > 1.
+pub fn rect(dl: DrawList, pos: Vec2, size: Vec2, color: Color, z: int = 0) {
+    if dl_deferred(dl) { return overlay_rect(pos, size, color, z) }
+    if dl_target_core(dl) { return in_ui_pool(dl, () => px_fill(pos, size, color, z)) }
+    let center = if dl.space == DrawSpace::Target { pos + size / 2 } else { pos }
+    in_pool(dl, () => push_draw_rect(center, size, color, "fill", 0, resolve_z(dl, z), unlit: dl.unlit))
+}
+
+pub @intrinsic fn stone_screen_rect(pos: Vec2, size: Vec2, color: Color) {
+    screen.rect(pos, size, color)
+}
+
+// Outlined rect. Thickness is in the list's own units (world units for a
+// World list, destination units for a Target one). The scene path shares the
+// inset-border core with the flat draw_rect_outline verb: outer edge on the
+// rect bounds, inner edge one thickness inside.
+pub fn rect_outline(
+    dl: DrawList,
+    pos: Vec2,
+    size: Vec2,
+    color: Color,
+    thickness: float? = null,
+    z: int = 0
+) {
+    if dl_deferred(dl) { return overlay_rect_outline(pos, size, color, dl_thickness(dl, thickness), z) }
+    let w = dl_thickness(dl, thickness)
+    if dl_target_core(dl) { return in_ui_pool(dl, () => px_outline(pos, size, color, w, z)) }
+    let center = if dl.space == DrawSpace::Target { pos + size / 2 } else { pos }
+    in_pool(dl, () => emit_rect(center, size, color, 0, resolve_z(dl, z), FillMode::Outline, DepthMode::Off, thickness: w, unlit: dl.unlit))
+}
+
+// Sprite. Pivot defaults differ between world (center) and screen
+// (top-left). Caller can override.
+pub fn sprite(
+    dl: DrawList,
+    img: SampledTexture,
+    pos: Vec2,
+    src: IRect? = null,
+    dest_size: Vec2? = null,
+    color: Color = WHITE,
+    pivot: Vec2? = null,
+    z: int = 0
+) {
+    if dl_deferred(dl) {
+        let s = src ?? full_image_rect(img)
+        return overlay_sprite(img, pos, s, dest_size ?? sprite_default_world_size(s), color, pivot ?? PIVOT_CENTER, z)
+    }
+    if dl_target_core(dl) {
+        // The target-pixel core, not the world sprite path. Dest defaults to
+        // source px 1:1 (output pixels for `screen`, virtual texels for
+        // `pixel_screen`); z passes through like rect() (0 = under text);
+        // sprites sit at order 1 within their z.
+        let s = src ?? full_image_rect(img)
+        let d = dest_size ?? v(s.w, s.h)
+        return in_ui_pool(
+            dl,
+            () => {
+                ui_draw_sprite_topleft(img, pos - d * (pivot ?? PIVOT_TOP_LEFT), s, d, color, z_layer: z)
+                ()
+            }
+        )
+    }
+    let depth = if dl.space == DrawSpace::Target {
+        DepthMode::Off
+    } else {
+        DepthMode::TestWrite
+    }
+    in_pool(
+        dl,
+        () => draw_sprite(img, pos, source: src, dest_size: dest_size,
+            pivot: pivot ?? PIVOT_CENTER, color: color, layer: resolve_z(dl, z),
+            depth: depth, unlit: dl.unlit)
+    )
+}
+
+// Text. `z` on an Output list routes into queue_ui_text's z_layer so callers
+// can stack text against other z-bucketed UI content. `align` defaults per
+// space, like sprite's pivot: world text is left-aligned on its baseline,
+// output text hangs from its top-left corner. It sits AFTER `z` because
+// positional callers already pass z sixth. Without `family`, every
+// destination uses DEFAULT_FONT; an explicit family selects regular glyphs
+// through the shared resolver. Deferred overlay text is single-line and sized
+// in cap-height world units for either family choice.
+pub @intrinsic fn text(
+    dl: DrawList,
+    text: string,
+    pos: Vec2,
+    size: float = 1.0,
+    color: Color = WHITE,
+    z: int = 0,
+    align: TextAlign? = null,
+    family: TextFamily? = null
+) {
+    if dl.space == DrawSpace::Target && dl.dest == DrawDest::Scene {
+        let fam = text_family_or_default(family)
+        let layout = resolve_plain_text_layout(fam, text, size, 1.0,
+            "DrawList.text.target_canvas")
+        let canvas_align = align ?? TextAlign::TopLeft
+        let off = text_align_offset(canvas_align)
+        let canvas_trailing = (layout.lines.len - 1) as float * layout.line_height
+        let start = v(pos.x + off.x * layout.width,
+            text_anchored_y(pos.y, text_align_fracs(canvas_align).y,
+                layout.height, layout.ascent,
+                resolved_plain_cap_height(layout), canvas_trailing))
+        return in_pool(dl, () => emit_plain_text_layout(
+            layout, TextPlacement::Target, start, resolve_z(dl, z), color))
+    }
+    if dl_deferred(dl) {
+        return overlay_text(text, pos, size, color, align ?? TextAlign::Left,
+            z, family: family)
+    }
+    if dl_target_core(dl) {
+        let text_align = align ?? TextAlign::TopLeft
+        let off = text_align_offset(text_align)
+        if family != null {
+            let rs = if dl.dest == DrawDest::Composite { 1.0 } else { FONT_RENDER_SCALE }
+            let layout = resolve_plain_text_layout(family.unwrap(), text, size,
+                rs, "DrawList.text")
+            let core_trailing = (layout.lines.len - 1) as float * layout.line_height
+            let start = v(pos.x + off.x * layout.width,
+                text_anchored_y(pos.y, text_align_fracs(text_align).y,
+                    layout.height, layout.ascent,
+                    resolved_plain_cap_height(layout), core_trailing))
+            return in_ui_pool(dl, () => emit_plain_text_layout(layout,
+                TextPlacement::Output, start, output_z(z), color))
+        }
+        let f = DEFAULT_FONT ?? return
+        // `screen` is authored in logical output units, where
+        // FONT_RENDER_SCALE is the window/DPI factor; `pixel_screen` is
+        // authored in scene texels, which are already the destination's own
+        // units and take no window factor at all.
+        let composite = dl.dest == DrawDest::Composite
+        let rs = if composite { 1.0 } else { FONT_RENDER_SCALE }
+        let physical = if composite { 1.0 } else { text_output_raster_density() }
+        return in_ui_pool(dl, () => queue_ui_text_scaled(
+            f, text, pos, size, color, v(), output_z(z), rs, text_align, physical))
+    }
+    // World text is a normal vertex batch (queue_world_text -> ensure_batch_of
+    // -> current pool), so the pool bracket routes user-list glyphs like every
+    // other verb.
+    if family != null {
+        in_pool(dl, () => draw_text(text, pos, size, color,
+            align: align ?? TextAlign::Left, layer: resolve_z(dl, z), family: family))
+    } else {
+        in_pool(dl, () => draw_scene_text(text, pos, size, color,
+            align: align ?? TextAlign::Left, layer: resolve_z(dl, z)))
+    }
+}
+
+// Colored spans on one line. Target-space lists use the UI pool; world Scene
+// lists use the generated atlas through the ordinary world sprite batch.
+// `scale` multiplies `size`; the deferred world overlay applies it to the
+// glyph quads so an animating scale keeps one layout.
+pub fn rich_text(
+    dl: DrawList,
+    spans: [TextSpan],
+    pos: Vec2,
+    size: float = 1.0,
+    family: TextFamily? = null,
+    z: int = 0,
+    align: TextAlign? = null,
+    shadow: bool = false,
+    baseline_anchor: bool = false,
+    scale: float = 1.0
+) {
+    if dl.space == DrawSpace::World && dl.dest == DrawDest::Scene {
+        let fam = text_family_or_default(family)
+        let runs = resolve_world_text_spans(fam, spans, size * scale,
+            "DrawList.rich_text.world")
+        let (w, _ascent, h) = measure_resolved_runs(runs)
+        let off = text_align_offset(align ?? TextAlign::TopLeft)
+        let baseline = if baseline_anchor {
+            v(pos.x + off.x * w, pos.y)
+        } else { world_text_anchor(pos, v(w, h), off) }
+        in_pool(
+            dl,
+            () => emit_resolved_runs(runs, TextPlacement::World, baseline,
+                0.0, resolve_z(dl, z))
+        )
+        return
+    }
+    if dl_deferred(dl) {
+        let fam = text_family_or_default(family)
+        return overlay_rich_text(spans, pos, size, fam,
+            align ?? TextAlign::TopLeft, z, shadow,
+            baseline_anchor: baseline_anchor, scale: scale)
+    }
+    if !dl_target_core(dl) {
+        error("DrawList.rich_text: unsupported list {draw_space_label(dl.space)}/{draw_dest_label(dl.dest)}")
+    }
+    let fam = text_family_or_default(family)
+    let composite = dl.dest == DrawDest::Composite
+    let rs = if composite { 1.0 } else { FONT_RENDER_SCALE }
+    let physical = if composite { 1.0 } else { text_output_raster_density() }
+    let runs = resolve_text_spans(fam, spans, size * scale, rs,
+        "DrawList.rich_text", physical)
+    let (w, ascent, h) = measure_resolved_runs(runs)
+    let start = rich_text_aligned_start(pos, w, ascent, h,
+        align ?? TextAlign::TopLeft, baseline_anchor,
+        resolved_runs_cap_height(runs))
+    in_ui_pool(dl, () => emit_resolved_runs(runs, TextPlacement::Output,
+        start, ascent, output_z(z)))
+}
+
+@pure fn draw_space_label(space: DrawSpace) -> string {
+    return match space {
+        DrawSpace::World => "World"
+        DrawSpace::Target => "Target"
+    }
+}
+
+@pure fn draw_dest_label(dest: DrawDest) -> string {
+    return match dest {
+        DrawDest::Scene => "Scene"
+        DrawDest::Composite => "Composite"
+        DrawDest::Output => "Output"
+    }
+}
+
+pub fn line(dl: DrawList, a: Vec2, b: Vec2, color: Color, width: float? = null, z: int = 0) {
+    if dl_deferred(dl) { return overlay_line(a, b, color, dl_thickness(dl, width), z) }
+    let w = dl_thickness(dl, width)
+    if dl_target_core(dl) { return in_ui_pool(dl, () => px_line(a, b, color, w, output_z(z))) }
+    in_pool(dl, () => emit_line(a, b, color, w, 0, resolve_z(dl, z), DepthMode::Off, unlit: dl.unlit))
+}
+
+pub fn circle(dl: DrawList, center: Vec2, radius: float, color: Color, z: int = 0) {
+    if dl_deferred(dl) { return overlay_circle(center, radius, color, z) }
+    if dl_target_core(dl) { return in_ui_pool(dl, () => px_circle(center, radius, color, output_z(z))) }
+    in_pool(dl, () => emit_circle(center, radius, color, 0, resolve_z(dl, z), FillMode::Fill, DepthMode::Off, unlit: dl.unlit))
+}
+
+// Outlined circle. Thickness is in the list's own units, like rect_outline.
+pub fn circle_outline(
+    dl: DrawList,
+    center: Vec2,
+    radius: float,
+    color: Color,
+    thickness: float? = null,
+    z: int = 0
+) {
+    if dl_deferred(dl) { return overlay_circle_outline(center, radius, color, dl_thickness(dl, thickness), z) }
+    let w = dl_thickness(dl, thickness)
+    if dl_target_core(dl) { return in_ui_pool(dl, () => px_circle_outline(center, radius, color, w, output_z(z))) }
+    in_pool(dl, () => emit_circle(center, radius, color, 0, resolve_z(dl, z), FillMode::Outline, DepthMode::Off, thickness: w, unlit: dl.unlit))
+}
+
+// Escape hatch — closure runs during batch iteration at the specified
+// z. World/gizmo route through `queue_custom_draw` (RENDER_BATCHES,
+// color pass only); user DrawLists write into `dl.batches` so
+// `draw_list_flush(dl)` picks it up; screen queues into the UI pool
+// and runs during render_ui_batches (identity camera, after
+// post-processing) — screen-space z semantics like every screen verb.
+//
+// A World list defers this one too, even though there are no coordinates to
+// project. Both queues are dropped at frame start now, so the closure cannot
+// outlive its frame either way; queueing keeps every world_overlay verb on one
+// path, and keeps the deferral rule stated once rather than per verb.
+pub fn custom(dl: DrawList, draw_fn: fn() -> (), z: int = 0) {
+    if dl_deferred(dl) { return overlay_custom(draw_fn, z) }
+    if dl_target_core(dl) { return queue_custom_draw_into(dl.batches, draw_fn, z, depth: DepthMode::Off) }
+    in_pool(dl, () => queue_custom_draw(draw_fn, resolve_z(dl, z)))
+}

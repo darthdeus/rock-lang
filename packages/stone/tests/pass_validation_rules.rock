@@ -1,0 +1,140 @@
+use stone::*
+
+// Production tonemap sampler order and the non-finite debug overlay over
+// real Inf/NaN texels. Loose-uniform validation retired with the by-name API.
+
+fn pass_rules_fixture(body: fn()) {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    let saved_canvas = CURRENT_CANVAS_HANDLE
+    let saved_frame = frame_seq
+    let saved_weight = ENGINE.exposure_weight
+    defer {
+        set_canvas_handle(saved_canvas)
+        frame_seq = saved_frame
+        ENGINE.exposure_weight = saved_weight
+    }
+    body()
+}
+
+fn pass_rules_flat_canvas(size: int, level: float) -> Canvas {
+    let c = new_canvas(size, size, "rgba16f")
+    with_canvas(c, () => { clear_screen(level, level, level, 1.0) })
+    return c
+}
+
+// A transposed sampler binding still compiles, links and draws; only the
+// pixels separate it. With bloom intensity 0 the output is the scene alone,
+// so a bright scene and black bloom are maximally far apart.
+@test
+fn tonemap_slot_payload_and_input_order() {
+    pass_rules_fixture(() => {
+        ENGINE.exposure_weight = null
+        let size = 32
+        let bright = pass_rules_flat_canvas(size, 0.6)
+        let black = pass_rules_flat_canvas(size, 0.0)
+        let out = new_canvas(size, size, "rgba16f")
+        defer {
+            destroy_canvas(bright)
+            destroy_canvas(black)
+            destroy_canvas(out)
+        }
+        let mid = size ./ 2
+
+        let valid = Pass {
+            pipeline: TONEMAP_PIPELINE,
+            slot_inputs: [(sampled_canvas(bright), TextureFilter::Nearest), (sampled_canvas(black), TextureFilter::Linear)],
+        }
+        assert(pass_input_rejection(valid) == "", "an exact slot payload admits both samplers")
+        assert(pass_input_rejection(Pass { pipeline: TONEMAP_PIPELINE }) != "",
+            "a grouped pass with no slot payload is rejected")
+        let short = Pass { pipeline: TONEMAP_PIPELINE, slot_inputs: [(sampled_canvas(bright), TextureFilter::Nearest)] }
+        assert(pass_input_rejection(short) != "", "a short slot payload is rejected")
+
+        assert(submit_tonemap(bright, black, out, 1.0, 0.0), "the production tonemap submits")
+        let lit = read_canvas_pixel(out, mid, mid)
+        assert(lit > 0.2, "a 0.6 scene with bloom off is lit (got {lit:.5})")
+
+        assert(submit_tonemap(black, bright, out, 1.0, 0.0), "the swapped-input control submits")
+        let dark = read_canvas_pixel(out, mid, mid)
+        assert(dark < 0.05, "the swapped order reads the black canvas as the scene (got {dark:.5})")
+
+        with_canvas(black, () => {
+            assert(submit_tonemap(bright, black, out, 1.0, 0.0))
+            clear_screen(0.75, 0.75, 0.75, 1.0)
+        })
+        assert(abs(read_canvas_pixel(black, mid, mid) - 0.75) < 0.01,
+            "a nested pass restores its caller's target for subsequent draws")
+    })
+}
+
+value NfInjectU { zero: float, zero2: float, ceil: float }
+
+// Inf and NaN come from dividing by runtime-zero uniforms so the driver cannot
+// fold them to finite values. Two distinct zeros: the driver cannot prove
+// `1/zero` and `1/zero2` equal, so `inf - inf2` survives as NaN.
+@shader(fragment)
+fn nf_inject_frag(@uniform u: NfInjectU, tc: Vec2) -> Vec4 {
+    let inf = 1.0 / u.zero
+    let inf2 = 1.0 / u.zero2
+    if tc.x < 0.25 {
+        return v(inf, 0.0, 0.0, 1.0)
+    } else if tc.x < 0.5 {
+        return v(0.0, inf - inf2, 0.0, 1.0)
+    } else if tc.x < 0.75 {
+        return v(u.ceil, u.ceil, u.ceil, 1.0)
+    } else {
+        return v(0.5, 0.5, 0.5, 1.0)
+    }
+}
+
+fn nf_pixel(c: Canvas, x: int, y: int) -> (float, float, float, float) {
+    return (stone_read_canvas_pixel_channel(c.handle.0, x, y, 0),
+        stone_read_canvas_pixel_channel(c.handle.0, x, y, 1),
+        stone_read_canvas_pixel_channel(c.handle.0, x, y, 2),
+        stone_read_canvas_pixel_channel(c.handle.0, x, y, 3))
+}
+
+// Compile and link cannot catch a driver that miscompiles the bvec ops; real
+// Inf/NaN texels through the overlay can.
+@test
+fn nonfinite_overlay_flags_inf_nan_and_near_ceiling_texels() {
+    pass_rules_fixture(() => {
+        let size = 64
+        let src = new_canvas(float(size), float(size), "rgba16f")
+        let out = new_canvas(float(size), float(size), "rgba8")
+        defer {
+            destroy_canvas(src)
+            destroy_canvas(out)
+        }
+        let inject = pipeline(rock_shader(nf_inject_frag))
+        assert(run_pass(Pass {
+            pipeline: inject,
+            block: pass_block(inject.shader_name, NfInjectU { zero: 0.0, zero2: 0.0, ceil: 61000.0 }),
+            output: src,
+            clear: color(0.0, 0.0, 0.0, 1.0),
+            blend: BlendMode::Replace,
+        }), "the injection pass draws")
+        assert(run_pass(Pass {
+            pipeline: NONFINITE_PIPELINE,
+            slot_inputs: [(sampled_canvas(src), TextureFilter::Nearest)],
+            output: out,
+            clear: color(0.0, 0.0, 0.0, 1.0),
+            blend: BlendMode::Replace,
+        }), "the overlay pass draws")
+
+        let y = 32
+        let (r0, g0, b0, a0) = nf_pixel(out, 8, y)
+        let (r1, g1, b1, a1) = nf_pixel(out, 24, y)
+        let (r2, g2, b2, a2) = nf_pixel(out, 40, y)
+        let (r3, g3, b3, a3) = nf_pixel(out, 56, y)
+        assert(r0 > 0.5 && g0 < 0.5 && b0 < 0.5 && a0 > 0.5,
+            "Inf in R flags red (r={r0:.2} g={g0:.2} b={b0:.2})")
+        assert(r1 < 0.5 && g1 > 0.5 && b1 < 0.5 && a1 > 0.5,
+            "NaN in G flags green (r={r1:.2} g={g1:.2} b={b1:.2})")
+        assert(r2 > 0.5 && g2 > 0.5 && b2 < 0.5 && a2 > 0.5,
+            "near-ceiling flags yellow (r={r2:.2} g={g2:.2} b={b2:.2})")
+        assert(r3 < 0.2 && g3 < 0.2 && b3 < 0.2 && a3 > 0.5,
+            "a finite normal texel dims to luma (r={r3:.2} g={g3:.2} b={b3:.2})")
+    })
+}

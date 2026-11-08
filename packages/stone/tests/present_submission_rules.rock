@@ -1,0 +1,176 @@
+fn present_test_fixture(body: fn(Canvas, Canvas) -> ()) {
+    assert(!UI_SUBMISSION_PROBE_ON, "the fixture must not replace an active probe")
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    let src = new_canvas(16.0, 16.0, "rgba8")
+    let out = new_canvas(16.0, 16.0, "rgba8")
+    let saved_composite = COMPOSITE_CANVAS
+    let saved_view = RENDER_VIEW
+    let saved_enabled = ENGINE.profiler_enabled
+    let saved_sections = PROFILER_SECTIONS_OFF
+    let saved_frozen = GC_WIN_SECTION_REGISTRY_FROZEN
+    let saved_ids = SECTION_IDS
+    let saved_names = SECTION_NAMES
+    let saved_count = SECTION_COUNT
+    let saved_late = SECTION_LATE
+    let saved_frozen_first = SECTION_FROZEN_FIRST
+    let saved_metrics = SECTION_METRICS
+    let saved_time = SECTION_TIME
+    let saved_request = SECTION_REQUEST_KB
+    let saved_work = SECTION_WORK
+    let saved_observation = SECTION_OBSERVATION
+    let saved_windows = SECTION_WINDOWS
+    let saved_last_seconds = SECTION_LAST_SECONDS
+    let saved_profiler = PROFILER
+    let saved_log = PROF_CUR
+    let saved_stack = PROF_OPEN_STACK
+    let saved_top = PROF_OPEN_TOP
+    world_fixture_with_cleanup(() => {
+        RENDER_VIEW = resolve_frame_view(v(16, 16), iv(16, 16),
+            Camera2D { center: v(0, 0), visible_world_width: 16.0 },
+            RenderConfig { scene: SceneRaster::Native })
+        ENGINE.profiler_enabled = true
+        PROFILER_SECTIONS_OFF = 0
+        // Use real section registration without changing the caller's metrics
+        // or depending on an active GC window's late-section diagnostics.
+        GC_WIN_SECTION_REGISTRY_FROZEN = false
+        SECTION_IDS = map_new()
+        SECTION_NAMES = vec_new()
+        SECTION_COUNT = 0
+        SECTION_LATE = native_buffer_int(MAX_PROFILE_ENTRIES)
+        SECTION_FROZEN_FIRST = -1
+        SECTION_METRICS = arena_new()
+        SECTION_TIME = vec_new()
+        SECTION_REQUEST_KB = vec_new()
+        SECTION_WORK = vec_new()
+        SECTION_OBSERVATION = vec_new()
+        SECTION_WINDOWS = vec_new()
+        SECTION_LAST_SECONDS = native_buffer_float(MAX_PROFILE_ENTRIES)
+        PROFILER = new_profiler()
+        PROF_CUR = entry_log_new()
+        PROF_OPEN_STACK = native_buffer_int(MAX_PROFILE_ENTRIES)
+        PROF_OPEN_TOP = 0
+        ui_submission_probe_begin()
+        body(src, out)
+    }, () => {
+        ui_submission_probe_stop()
+        COMPOSITE_CANVAS = saved_composite
+        RENDER_VIEW = saved_view
+        ENGINE.profiler_enabled = saved_enabled
+        PROFILER_SECTIONS_OFF = saved_sections
+        GC_WIN_SECTION_REGISTRY_FROZEN = saved_frozen
+        SECTION_IDS = saved_ids
+        SECTION_NAMES = saved_names
+        SECTION_COUNT = saved_count
+        SECTION_LATE = saved_late
+        SECTION_FROZEN_FIRST = saved_frozen_first
+        SECTION_METRICS = saved_metrics
+        SECTION_TIME = saved_time
+        SECTION_REQUEST_KB = saved_request
+        SECTION_WORK = saved_work
+        SECTION_OBSERVATION = saved_observation
+        SECTION_WINDOWS = saved_windows
+        SECTION_LAST_SECONDS = saved_last_seconds
+        PROFILER = saved_profiler
+        PROF_CUR = saved_log
+        PROF_OPEN_STACK = saved_stack
+        PROF_OPEN_TOP = saved_top
+        destroy_canvas(out)
+        destroy_canvas(src)
+    })
+}
+
+@test
+fn present_submission_refusal_is_observable_and_retryable() {
+    present_test_fixture((src, out) => {
+        with_canvas(src, () => { stone_clear_canvas(0.0, 0.0, 0.0, 1.0) })
+        with_canvas(out, () => { stone_clear_canvas(1.0, 1.0, 1.0, 1.0) })
+        let valid_view = RENDER_VIEW.unwrap()
+        let invalid_view = resolve_frame_view(v(16, 16), iv(16, 16),
+            Camera2D { center: v(0, 0), visible_world_width: 16.0 },
+            RenderConfig { scene: SceneRaster::Native }).unwrap()
+        invalid_view.scene_output_viewport.w = 0
+        RENDER_VIEW = invalid_view
+        COMPOSITE_CANVAS = src
+        let refusal = ""
+        UI_SUBMISSION_PROBE_REFUSAL_HOOK = (kind, reason) => {
+            refusal = reason
+            ui_submission_probe_refusal(kind, reason)
+        }
+        let failure = world_fixture_raised(() => { present_composite(GpuTarget::Canvas(out)) }, world_fixture_traceback)
+        assert(failure != null, "a refused final composite must raise")
+        assert(failure.unwrap().contains("present_composite"), "the error names the failing operation: {failure.unwrap()}")
+        assert(refusal != "" && failure.unwrap().contains(refusal), "the error carries the actual admission reason")
+        assert(PROF_CUR.count > 0, "profiling was active during the refused present")
+        assert_eq(PROF_OPEN_TOP, 0, "refusal closes the profiling bracket before raising")
+        assert_eq(PROFILER.current_depth, 0, "refusal restores profiling depth")
+        assert(COMPOSITE_CANVAS != null && COMPOSITE_CANVAS.unwrap().handle == src.handle,
+            "a composite that did not execute remains pending")
+        assert(stone_ui_probe_check_population(0, 1, 0), "refusal never enters the executor")
+        assert(read_canvas_pixel(out, 8, 8) > 0.9, "refusal leaves the target untouched")
+
+        RENDER_VIEW = valid_view
+        present_composite(GpuTarget::Canvas(out))
+        assert(COMPOSITE_CANVAS == null, "successful offscreen presentation consumes the pending composite")
+        assert(read_canvas_pixel(out, 8, 8) < 0.1, "the valid composite actually renders its black source")
+        assert_eq(PROF_OPEN_TOP, 0)
+        assert_eq(PROFILER.current_depth, 0)
+        assert(stone_ui_probe_check(1), "one valid composite was consumed")
+
+        COMPOSITE_CANVAS = src
+        present_composite()
+        assert(COMPOSITE_CANVAS == null, "the valid window path also consumes its composite")
+        assert(stone_ui_probe_check(2), "window and offscreen composites both execute")
+        assert_eq(PROF_OPEN_TOP, 0)
+        assert_eq(PROFILER.current_depth, 0)
+    })
+}
+
+@test
+fn present_submission_fixture_restores_after_assertion_failure() {
+    let saved_composite = COMPOSITE_CANVAS
+    let saved_view = RENDER_VIEW
+    let saved_enabled = ENGINE.profiler_enabled
+    let saved_sections = PROFILER_SECTIONS_OFF
+    let saved_frozen = GC_WIN_SECTION_REGISTRY_FROZEN
+    let saved_ids = SECTION_IDS
+    let saved_names = SECTION_NAMES
+    let saved_count = SECTION_COUNT
+    let saved_late = SECTION_LATE
+    let saved_frozen_first = SECTION_FROZEN_FIRST
+    let saved_metrics = SECTION_METRICS
+    let saved_time = SECTION_TIME
+    let saved_request = SECTION_REQUEST_KB
+    let saved_work = SECTION_WORK
+    let saved_observation = SECTION_OBSERVATION
+    let saved_windows = SECTION_WINDOWS
+    let saved_last_seconds = SECTION_LAST_SECONDS
+    let saved_profiler = PROFILER
+    let saved_log = PROF_CUR
+    let saved_stack = PROF_OPEN_STACK
+    let saved_top = PROF_OPEN_TOP
+    let failure = world_fixture_raised(() => {
+        present_test_fixture((src, out) => {
+            COMPOSITE_CANVAS = src
+            present_composite(GpuTarget::Canvas(out))
+            COMPOSITE_CANVAS = src
+            assert(false, "intentional present fixture assertion failure")
+        })
+    }, world_fixture_traceback)
+    assert(failure != null && failure.unwrap().contains("intentional present fixture assertion failure"))
+    assert(COMPOSITE_CANVAS == saved_composite && RENDER_VIEW == saved_view)
+    assert_eq(ENGINE.profiler_enabled, saved_enabled)
+    assert_eq(PROFILER_SECTIONS_OFF, saved_sections)
+    assert_eq(GC_WIN_SECTION_REGISTRY_FROZEN, saved_frozen)
+    assert(SECTION_IDS == saved_ids && SECTION_NAMES == saved_names && SECTION_METRICS == saved_metrics)
+    assert_eq(SECTION_COUNT, saved_count)
+    assert(SECTION_LATE == saved_late && SECTION_FROZEN_FIRST == saved_frozen_first)
+    assert(SECTION_TIME == saved_time && SECTION_REQUEST_KB == saved_request
+        && SECTION_WORK == saved_work && SECTION_OBSERVATION == saved_observation)
+    assert(SECTION_WINDOWS == saved_windows && SECTION_LAST_SECONDS == saved_last_seconds)
+    assert(PROFILER == saved_profiler && PROF_CUR == saved_log && PROF_OPEN_STACK == saved_stack)
+    assert_eq(PROF_OPEN_TOP, saved_top)
+    assert(!UI_SUBMISSION_PROBE_ON && !UI_SUBMISSION_PROBE_WINDOWLESS)
+    assert(UI_SUBMISSION_PROBE_REFUSAL_HOOK == null && UI_SUBMISSION_PROBE_PASS_HOOK == null
+        && UI_SUBMISSION_PROBE_DRAW_HOOK == null, "fixture cleanup removes its probe hooks")
+}

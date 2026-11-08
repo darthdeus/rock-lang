@@ -1,0 +1,1066 @@
+
+// Rock-as-sim runtime.
+//
+// Sims are Rock `co fn`s decorated with `@sim`; the runner starts one by
+// name from `ROCK_RUN_SIM` and polls it through the real game loop. The
+// body drives the game directly (call game fns, inject input via
+// `key`/`click`, assert with `sim_expect`/`sim_eq_*`) and reports results
+// to the Rust runner over the `__SIM__`-prefixed stderr side channel.
+//
+// Only `co` functions can yield. Runtime functions here are ordinary functions
+// and cannot advance frames; the sim body yields inline (`yield wait_frame()`)
+// at frame boundaries.
+
+// --- registry --------------------------------------------------------------
+
+// Sim entry: a zero-arg co fn returning Coroutine<Wait>. Registered
+// once at @init; the runner picks one by name from ROCK_RUN_SIM. A sim
+// declared with one parameter (MAG's `world: Scene<WorldState>`) arrives here
+// already wrapped by the game's `@sim_entry` provider, which resolves the
+// argument when the entry starts, so this registry never names a game type.
+global SIMS: Map<string, () -> Coroutine<Wait>> = map_new()
+
+fn register_sim(name: string, body: () -> Coroutine<Wait>) {
+    SIMS[name] = body
+}
+
+// Mutating hooks register cleanup on their first write. The callbacks keep
+// their captured originals until teardown, including when the sim coroutine
+// errors.
+pub @nomangle inline(lua) fn sim_defer_cleanup(cleanup: fn() -> ()) = """
+    if _G.__rock_sim_cleanup_running then
+        error("sim cleanup cannot register another cleanup", 0)
+    end
+    local callbacks = _G.__rock_sim_cleanups
+    if not callbacks then callbacks = {}; _G.__rock_sim_cleanups = callbacks end
+    callbacks[#callbacks + 1] = cleanup
+"""
+
+// Drain at the entry's end, even for a failed entry. One broken cleanup does
+// not prevent the others from returning their state.
+pub @nomangle inline(lua) fn sim_cleanup_run() = """
+    local callbacks = _G.__rock_sim_cleanups
+    _G.__rock_sim_cleanups = nil
+    if not callbacks then return end
+    _G.__rock_sim_cleanup_running = true
+    local failures = {}
+    for i = #callbacks, 1, -1 do
+        local ok, err = pcall(callbacks[i])
+        if not ok then failures[#failures + 1] = tostring(err) end
+    end
+    _G.__rock_sim_cleanup_running = nil
+    if #failures > 0 then error(table.concat(failures, "; cleanup: "), 0) end
+"""
+
+@nomangle inline(lua) fn sim_cleanup_try_run() -> string = """
+    local ok, err = pcall(sim_cleanup_run)
+    if ok then return "" end
+    return tostring(err)
+"""
+
+inline(lua) fn sim_publish_active_name(name: string) = "_G.__ROCK_ACTIVE_SIM = name"
+
+// Live handle for the running sim. The runner sets this in `sim_start_entry`
+// after @init; the main loop calls `runner_sim_advance` each frame to close
+// the entry off and exit. `null` when no sim is selected.
+global SIM_HANDLE: Coroutine<Wait>? = null
+
+// The sim body's task, outside the world-owned Arena registry, with its own
+// clock.
+global SIM_TASK: Task? = null
+
+// The one sim this process runs, from `ROCK_RUN_SIM`, and its runaway bound
+// in game ticks from `FRAME_COUNT` (<= 0 disables). Every sim, and every part
+// of a comma chain, is its own fresh process.
+global SIM_NAME: string = ""
+pub global SIM_FRAME_BUDGET: int = -1
+// Game ticks, rather than native loop iterations, measure a sim budget. A
+// watcher wait is deliberately a frozen frame, so wall-clock host work cannot
+// consume the sim's game-time budget.
+global SIM_ENTRY_TICK_START: int = 0
+// The runner frame the entry started after, for its frame count.
+global SIM_ENTRY_FRAME_START: int = 0
+// When the entry started, in microseconds of host time, for its own frame
+// rate line: the runner's overall FPS line also covers boot.
+global SIM_ENTRY_WALL_START_US: int = 0
+
+// Per-entry frame phase totals. The runner samples the already-computed frame
+// timing once after each successful frame and emits the aggregate at the
+// entry's end. Integer microseconds keep this probe allocation-free and
+// avoid per-frame side-channel traffic. `render_cpu_us` ends at pre-swap;
+// `present_us` is separate because it may contain a synchronization wait and
+// neither value is a GPU-time measurement.
+global SIM_ENTRY_TIMING_FRAMES: int = 0
+global SIM_ENTRY_TIMING_DRAW_FRAMES: int = 0
+global SIM_ENTRY_TIMING_SUBMITTED_FRAMES: int = 0
+global SIM_ENTRY_TIMING_LOGIC_US: int = 0
+global SIM_ENTRY_TIMING_RENDER_CPU_US: int = 0
+global SIM_ENTRY_TIMING_PRESENT_US: int = 0
+
+// The request id and terminal status bridge the sim-side request to the
+// production hot-reload watcher. The Rust runner accounts for the same events;
+// these globals only let the coroutine stop burning simulated frames while the
+// watcher is pending.
+global SIM_RELOAD_NEXT_ID: int = 0
+global SIM_RELOAD_PENDING_ID: int = -1
+global SIM_RELOAD_LAST_ID: int = -1
+global SIM_RELOAD_LAST_STATUS: string = ""
+
+// Fixed dt fed to the game loop when a sim is running, in seconds.
+// Sims read game time off `dt` / `time` (`stone/engine/runner.rock`),
+// so substituting a constant here decouples game time from wall-clock
+// and lets the loop advance at compute speed instead of vsync speed.
+// 1/60 matches the @60fps mental model sim authors already write
+// against. Override at sim start via `SIM_DT` env var.
+pub global SIM_FIXED_DT: float = 1.0 / 60.0
+
+// The Unix second every `get_timestamp()` reports under a sim. A real instant
+// (2026-01-01T00:00:00Z) so a persisted stamp still reads as a plausible date
+// rather than 1970, and fixed so two runs write the same bytes.
+pub const SIM_FIXED_EPOCH: int = 1767225600
+
+// Perf mode (`rock perf`, PERF_MODE=1) feeds the same fixed dt so a
+// frame-bounded run ends on a byte-identical scene -- without it, gameplay
+// advances by wall-clock dt and the final-frame graphics.draw_calls varies
+// run-to-run (mag measured 63-76 on one binary), so the render-bench draw
+// gate had to degrade to report-only. Latched in `runner.rock`; override
+// via `PERF_DT`.
+global PERF_FIXED_DT_ENABLED: bool = false
+global PERF_FIXED_DT: float = 1.0 / 60.0
+
+// When true, the runner skips world + screen draw (canvas clear, draw
+// systems, post-processing, ImGui) and only does update systems +
+// event polling each frame. Default-on for sims since most don't need
+// pixels; sims using `image_snapshot` opt out via
+// `@sim_env("SIM_DRAW", "on_demand")`. Set by `sim_apply_draw_mode` at
+// boot from the `SIM_DRAW` env var.
+pub global SIM_SKIP_RENDER: bool = false
+
+// `SIM_DRAW=commands`: the draw phase RUNS (every @draw and @late_draw
+// body, the batch builders, imgui's frame) and nothing is submitted to the
+// GPU -- no clear, no batch render, no post chain, no imgui render, no
+// present. For sims whose observable is Rock state written during the draw
+// phase (imgui semantic targets, hover registration, draw counters); their
+// process needs no image pixels, so it boots with the asset stub. Readers
+// of a rendered result (`read_canvas_pixel`, `take_screenshot`, the id
+// canvas, window probes) fail loud under it.
+pub global SIM_SKIP_SUBMIT: bool = false
+
+// A `SIM_DRAW=on_demand` sim draws on demand: the runner skips its ordinary
+// draw, and a picture reader (`sim_draw_on_demand`) draws once when the
+// previous frame left no picture. A reader inside update therefore draws the
+// world part-way through this frame's update. State written only by draw
+// (hit areas, selection maps, draw counters) needs `drawn_frame` before it is
+// read, or `@sim_env("SIM_DRAW", "every_frame")` for the whole sim.
+// `ROCK_SIM_DRAW_EVERY_FRAME=1` turns it off for a run, the A/B arm.
+pub global SIM_DRAW_ON_DEMAND: bool = false
+global SIM_DRAWN_THROUGH_FRAME: int = -1
+global SIM_ORDINARY_DRAW_FRAME: int = -1
+global SIM_DEMAND_DRAW_FRAME: int = -1
+// Read by MAG's opportunistic canvas reap, which a demand draw must skip.
+pub global SIM_DEMAND_DRAWING: bool = false
+
+// A reader of a rendered result under `SIM_DRAW=commands` gets no
+// frame: fail by name rather than hand back a stale or zero value that a
+// sim could pass on (the black-frame trap the rendering audit found).
+fn sim_submit_guard(reader: string) {
+    if SIM_SKIP_SUBMIT {
+        error("{reader} under SIM_DRAW=commands: nothing is submitted or presented; declare @sim_env(\"SIM_DRAW\", \"on_demand\") for a GPU result")
+    }
+}
+
+// Whether this process can never put a pixel on a surface anyone reads: a sim
+// that skips the world and screen draw. `SIM_DRAW` is read once at boot,
+// so it is a property of the PROCESS and may gate boot-time work.
+//
+// `submit` is deliberately NOT included: that mode runs the whole draw phase
+// and only withholds GPU submission, so anything the draw phase touches must
+// still exist.
+//
+// The one oracle for the question. Read it only at boot and latch the result:
+// a fixture can pause drawing mid-run, so a live read lies to a process that
+// draws again. `scene_targets_latch_boot_policy` latches it, and MAG's
+// boot-time lighting admission reads it; a second spelling of "this process
+// never draws" would be free to disagree.
+pub fn sim_process_never_draws() -> bool {
+    return sim_mode_active() && SIM_SKIP_RENDER
+}
+
+// Resolve the sim's draw capability and cadence once at boot. Runtime flags
+// remain mutable for fixtures that temporarily pause drawing.
+fn sim_apply_draw_mode() {
+    let mode = os_getenv("SIM_DRAW") ?? "none"
+    if mode != "none" && mode != "commands" && mode != "on_demand" && mode != "every_frame" {
+        error("SIM_DRAW `{mode}` is not one of none, commands, on_demand, every_frame")
+    }
+    SIM_SKIP_RENDER = mode == "none"
+    SIM_SKIP_SUBMIT = mode == "commands"
+    SIM_DRAW_ON_DEMAND = mode == "on_demand" && sim_mode_active()
+        && os_getenv("ROCK_SIM_DRAW_EVERY_FRAME") != "1"
+}
+
+// Start the sim at frame `frame`. Logs an error and exits the process with
+// code 2 if the name is registered nowhere -- a silent miss would let the
+// game keep running and look like a passing sim that didn't do anything.
+fn sim_start_entry(frame: int) {
+    imgui_sim_reset_layout()
+    sim_publish_active_name(SIM_NAME)
+    // The entry starts eagerly, before the main loop sets the run's policy.
+    TEXT_MISSING_GLYPH_POLICY = text_missing_glyph_policy_for_run(true, -1, -1.0)
+    SIM_ENTRY_TICK_START = current_tick
+    SIM_ENTRY_FRAME_START = frame
+    SIM_END_REQUESTED = false
+    SIM_ENTRY_WALL_START_US = int(round(stone_get_time() * 1000000.0))
+    SIM_ENTRY_TIMING_FRAMES = 0
+    SIM_ENTRY_TIMING_DRAW_FRAMES = 0
+    SIM_ENTRY_TIMING_SUBMITTED_FRAMES = 0
+    SIM_DRAWN_THROUGH_FRAME = -1
+    SIM_ORDINARY_DRAW_FRAME = -1
+    SIM_DEMAND_DRAW_FRAME = -1
+    SIM_DEMAND_DRAWING = false
+    SIM_ENTRY_TIMING_LOGIC_US = 0
+    SIM_ENTRY_TIMING_RENDER_CPU_US = 0
+    SIM_ENTRY_TIMING_PRESENT_US = 0
+    SIM_RELOAD_NEXT_ID = 0
+    SIM_RELOAD_PENDING_ID = -1
+    SIM_RELOAD_LAST_ID = -1
+    SIM_RELOAD_LAST_STATUS = ""
+    let size = drawable_size()
+    sim_emit("{{\"op\":\"entry_start\",\"name\":\"" + SIM_NAME
+        + "\",\"runtime\":{{\"width\":" + to_string(size.x)
+        + ",\"height\":" + to_string(size.y)
+        + ",\"jit\":\"" + jit_status_string() + "\"}}}}")
+    sim_alloc_census_begin()
+
+    let entry = SIMS.get(SIM_NAME)
+    if entry == null {
+        sim_emit("{{\"op\":\"error\",\"message\":\"unknown sim: " + SIM_NAME + "\"}}")
+        // Exit so the harness sees the failure rather than a green frame.
+        os_exit(2)
+    }
+
+    let handle = entry.unwrap()()
+    SIM_HANDLE = handle
+    let driver = CoroutinePoller {
+        clock: task_clock_follow_host(task_clock_new()),
+    }
+    SIM_TASK = start(handle, driver)
+}
+
+fn sim_entry_diagnostic_timing(frame_ok: bool) -> FrameDiagnosticTiming {
+    // A failed frame did not publish phase samples; recent metrics are stale.
+    if !frame_ok {
+        return FrameDiagnosticTiming { logic_ms: 0.0, render_ms: 0.0, present_ms: 0.0 }
+    }
+    return frame_diagnostic_timing()
+}
+
+fn sim_entry_frame_timing(phase: FrameDiagnosticTiming) {
+    if SIM_HANDLE == null { return () }
+    SIM_ENTRY_TIMING_FRAMES += 1
+    SIM_ENTRY_TIMING_LOGIC_US += int(round(max(0.0, phase.logic_ms) * 1000.0))
+    SIM_ENTRY_TIMING_RENDER_CPU_US += int(round(max(0.0, phase.render_ms) * 1000.0))
+    SIM_ENTRY_TIMING_PRESENT_US += int(round(max(0.0, phase.present_ms) * 1000.0))
+    if SIM_ORDINARY_DRAW_FRAME == RENDER_FRAME || SIM_DEMAND_DRAW_FRAME == RENDER_FRAME {
+        SIM_ENTRY_TIMING_DRAW_FRAMES += 1
+        if !SIM_SKIP_SUBMIT { SIM_ENTRY_TIMING_SUBMITTED_FRAMES += 1 }
+    }
+}
+
+fn sim_entry_frame_timing_json() -> string {
+    return "{{\"frames\":" + to_string(SIM_ENTRY_TIMING_FRAMES)
+        + ",\"draw_frames\":" + to_string(SIM_ENTRY_TIMING_DRAW_FRAMES)
+        + ",\"submitted_frames\":" + to_string(SIM_ENTRY_TIMING_SUBMITTED_FRAMES)
+        + ",\"logic_us\":" + to_string(SIM_ENTRY_TIMING_LOGIC_US)
+        + ",\"render_cpu_us\":" + to_string(SIM_ENTRY_TIMING_RENDER_CPU_US)
+        + ",\"present_us\":" + to_string(SIM_ENTRY_TIMING_PRESENT_US) + "}}"
+}
+
+fn sim_elapsed_us(start: float) -> int {
+    return int(round(max(0.0, stone_get_time() - start) * 1000000.0))
+}
+
+// The fixed dt the runner feeds while a sim is in flight, from `SIM_DT`.
+// Empty/unset is the 1/60 default.
+fn sim_apply_fixed_dt() {
+    SIM_FIXED_DT = 1.0 / 60.0
+    let dt_override = os_getenv("SIM_DT")
+    if dt_override != null && dt_override.unwrap() != "" {
+        if let parsed = dt_override.unwrap().parse_float() {
+            SIM_FIXED_DT = parsed.unwrap()
+        } else {
+            error("SIM_DT `{dt_override.unwrap()}` is not a number; keeping the 1/60 default")
+        }
+    }
+}
+
+// Resolve the sim this process runs and the runner-owned config that depends
+// on it. Called during init, BEFORE the rest of boot: the vsync/frame-budget
+// decisions downstream need to know a sim is coming. Starts nothing -- see
+// `runner_begin_sim`.
+fn runner_load_sim() {
+    SIM_NAME = os_getenv("ROCK_RUN_SIM") ?? ""
+    if SIM_NAME == "" { return }
+    SIM_FRAME_BUDGET = get_env_int("FRAME_COUNT", -1)
+    sim_apply_fixed_dt()
+    sim_apply_draw_mode()
+}
+
+inline(lua) fn sim_collect_boot_garbage() = "collectgarbage(\"collect\")"
+
+// Open the entry's envelope, immediately before the main loop.
+//
+// This is deliberately the LAST thing boot does. Anything the process logs on
+// its way up -- the environment banner especially -- belongs to the process,
+// not to the sim's record.
+fn runner_begin_sim() {
+    if SIM_NAME == "" { return }
+    // Boot/admission is finished; the entry and its frames keep the normal
+    // collector pacing and pay no repeated full collection.
+    sim_collect_boot_garbage()
+    sim_publish_log_clock()
+    sim_start_entry(0)
+}
+
+// Publish the throttle/dedup clock from engine `time`, the value
+// `frame_core_pre_update` will install on the next frame anyway.
+//
+// Needed at the entry start because a frame is exactly what has NOT happened
+// yet: `sim_start_entry` ends in `run(handle)`, so the entry's opening
+// statements execute before any restamp. Leaving the override unset is not
+// neutral -- `__rock_log_now` then falls through to `os.clock()`, process CPU
+// time, so a site stamped during boot compares against a different clock.
+fn sim_publish_log_clock() {
+    log_set_now(time)
+}
+
+// Tear down every subprocess the entry left behind and fail the entry if one
+// could not be released. Ownership is the REGISTRY's, so `stone_proc_reset`
+// decides what to tear down. Run inside the entry's envelope so a leak is the
+// entry's failure rather than a line in the process log after its verdict is
+// sealed.
+fn sim_teardown_procs() {
+    let failed = stone_proc_reset()
+    let held = stone_proc_occupied_count()
+    if failed == 0 && held == 0 { return }
+    sim_emit("{{\"op\":\"expect_fail\",\"message\":\"subprocess teardown left "
+        + to_string(held) + " slot(s) occupied (" + to_string(failed)
+        + " could not be terminated)\",\"actual\":\"" + to_string(held)
+        + "\",\"expected\":\"0\"}}")
+}
+
+// Idempotent safety net for a process that ends without reaching an entry end --
+// a boot failure, or an `os_exit` from another guard. What a sim's RESULT
+// depends on is the per-entry teardown above.
+@shutdown fn sim_shutdown_procs() {
+    if !sim_mode_active() { return }
+    let failed = stone_proc_reset()
+    if failed > 0 {
+        log_error("SIM", "{failed} subprocess(es) could not be terminated at shutdown")
+    }
+}
+
+// Close the entry when its coroutine is terminal or it has burned its frame
+// budget; true means the process should exit.
+fn runner_sim_advance(frame: int) -> bool {
+    if SIM_HANDLE == null { return false }
+    // The poller removes an errored entry but retains this raw handle, so an
+    // error is terminal here just like natural coroutine completion.
+    let state = status(SIM_HANDLE.unwrap())
+    let terminal = state == "dead" || state == "errored" || SIM_END_REQUESTED
+    let over = SIM_FRAME_BUDGET > 0 && (current_tick - SIM_ENTRY_TICK_START) > SIM_FRAME_BUDGET
+    if !terminal && !over { return false }
+    perf_outer_frame_close(stone_get_time())
+    let frame_count = frame - SIM_ENTRY_FRAME_START
+    let entry_secs = max(0.0, stone_get_time() - float(SIM_ENTRY_WALL_START_US) / 1000000.0)
+    if frame_count > 0 && entry_secs > 0.0 {
+        log_wall_clock("FPS", "sim {SIM_NAME}: avg={format_float(float(frame_count) / entry_secs, 0, 1)} "
+            + "({frame_count} frames in {format_float(entry_secs, 0, 3)}s, "
+            + "{format_float(entry_secs * 1000.0 / float(frame_count), 0, 2)}ms/frame)")
+    }
+
+    // `stop_sim()` ran during this frame's UPDATE; its checks read what the
+    // frame's DRAW phase produced, so they are taken HERE -- after present, and
+    // before the entry's envelope closes.
+    sim_finish_stop()
+
+    let frame_timing = sim_entry_frame_timing_json()
+    let cleanup_error = sim_cleanup_try_run()
+    if cleanup_error != "" {
+        sim_expect(false, "sim cleanup failed: {cleanup_error}")
+    }
+    sim_teardown_procs()
+    sim_emit("{{\"op\":\"entry_end\",\"name\":\"" + SIM_NAME
+        + "\",\"frame_count\":" + to_string(frame_count)
+        + ",\"frame_timing\":" + frame_timing + "}}")
+    return true
+}
+
+// True when the current game process is running under the sim harness
+// (i.e. spawned by `rock sim ...` or the watcher's `--sim` arg). Game
+// code that performs irreversible side effects -- writing to the
+// authored level file, sending network requests, mutating user
+// settings -- should gate on this so sims that drive the real input
+// path (clicks, keys) cannot accidentally clobber committed state.
+//
+// Symmetric to `screenshot_mode_active()` (MAG_SCREENSHOT) and uses
+// the same env-driven check that `runner_maybe_start_sim` reads.
+pub fn sim_mode_active() -> bool {
+    let name = os_getenv("ROCK_RUN_SIM") ?? return false
+    return name.unwrap() != ""
+}
+
+// A sim is a bounded run, so vsync is latched off at boot. Lifting the latch
+// and replaying the boot request lets a sim see vsync as an interactive window
+// starts.
+pub fn sim_lift_vsync_latch(boot_vsync: int) {
+    stone_force_vsync_off(0)
+    engine_set_vsync(boot_vsync)
+}
+
+pub fn sim_restore_vsync_latch() {
+    engine_latch_vsync_off()
+}
+
+// --- side-channel protocol -------------------------------------------------
+
+// Emit a complete record in one write; foreign stderr writers may still leave
+// a prefix, which the runner strips before validating the JSON. All operations,
+// including snapshots, use this emitter. JSON braces in literals
+// use `{{` / `}}` to escape Rock's `{}` interpolation.
+//
+// `site` is appended into the JSON object as `,"site":"<file>:<line>"`
+// before the closing `}`. Callers pass it explicitly so wrappers
+// forward the user's site rather than letting the inner emit
+// re-substitute to the wrapper's location. Path-escaping is skipped:
+// `__SITE__` substitutes raw absolute paths and POSIX paths don't
+// contain `"` or `\`.
+//
+// Public surface is the macro overloads: `sim_emit(json)` auto-injects
+// `__SITE__`, `sim_emit(json, site)` takes an explicit site (used by
+// every wrapper to forward its own site through).
+//
+// The C write is declared once per process: every `ffi.cdef` parse allocates
+// fresh ctypes, so declaring it per marker overflowed LuaJIT's ctype table in
+// long sims (#942). `_G` keeps the memo across hot reloads.
+inline(lua) fn _sim_emit_impl(json_line: string, site: string) = """
+    local write = _G.__rock_sim_marker_write
+    if write == nil then
+        local ffi = require("ffi")
+        if ffi.os == "Windows" then
+            ffi.cdef[[int _write(int fd, const void *buf, unsigned int count);]]
+            write = ffi.C._write
+        else
+            ffi.cdef[[intptr_t write(int fd, const void *buf, size_t count);]]
+            write = ffi.C.write
+        end
+        _G.__rock_sim_marker_write = write
+    end
+    local prefix = json_line:sub(1, -2)
+    local line = "__SIM__ " .. prefix .. ',"site":"' .. site .. '"}\n'
+    assert(write(2, line, #line) == #line, "sim marker write failed")
+"""
+
+macro sim_emit(json_line: expr) {
+    _sim_emit_impl(json_line, __SITE__)
+}
+
+macro sim_emit(json_line: expr, site: expr) {
+    _sim_emit_impl(json_line, site)
+}
+
+// Hard process exit. Used by the sim runner when the requested sim
+// name doesn't resolve -- a silent return would let the game keep
+// running and look like a passing empty sim.
+pub inline(lua) fn os_exit(code: int) = """
+    os.exit(code)
+"""
+
+// --- runtime fns the sim body calls ----------------------------------------
+
+// Yield N frames. Idiomatic shape: `frame(2)` advances two game frames
+// while the sim coroutine sits suspended in the poller. `n=1` matches
+// the .sim DSL's `frame` directive default; smaller bodies can write
+// `yield wait_frame()` directly.
+pub co fn frame(n: int = 1) -> Coroutine<Wait> {
+    let i = 0
+    while i < n {
+        yield wait_frame()
+        i = i + 1
+    }
+}
+
+// Whether the runner skips this frame's ordinary draw: `SIM_SKIP_RENDER`, or
+// an on-demand sim with no drawn frame or queued capture pending.
+fn sim_frame_skips_draw() -> bool {
+    if SIM_SKIP_RENDER { return true }
+    if !SIM_DRAW_ON_DEMAND || RENDER_FRAME <= SIM_DRAWN_THROUGH_FRAME { return false }
+    return SCREENSHOT_PENDING.len() == 0 && !FRAME_STREAM_PENDING
+}
+
+// Picture readers call this before reading. It draws when the previous frame
+// left no picture; once per frame, and never from inside a draw.
+pub fn sim_draw_on_demand() {
+    if !SIM_DRAW_ON_DEMAND || SIM_SKIP_RENDER || SIM_DEMAND_DRAWING { return }
+    if SIM_ORDINARY_DRAW_FRAME >= RENDER_FRAME - 1 || SIM_DEMAND_DRAW_FRAME == RENDER_FRAME { return }
+    SIM_DEMAND_DRAW_FRAME = RENDER_FRAME
+    sim_demand_draw_flagged()
+}
+
+// Split out so only an actual draw enters the defer's protected call; the
+// early returns above run on every picture read.
+fn sim_demand_draw_flagged() {
+    SIM_DEMAND_DRAWING = true
+    defer { SIM_DEMAND_DRAWING = false }
+    sim_demand_draw()
+}
+
+// Draw this frame and the next `n - 1` ordinarily, then resume: for a sim
+// that reads state the draw writes, or progress made per drawn frame.
+pub co fn drawn_frame(n: int = 1) -> Coroutine<Wait> {
+    SIM_DRAWN_THROUGH_FRAME = max(SIM_DRAWN_THROUGH_FRAME, RENDER_FRAME + n - 1)
+    await frame(n)
+}
+
+// Yield enough frames to advance `s` seconds of game time. Reads the
+// current `SIM_FIXED_DT` so authors can think in seconds (`frame_secs(8.0)`)
+// instead of pre-computing frame counts (`frame(480)`). Rounds up so a
+// sub-frame remainder still gets one extra tick.
+pub co fn frame_secs(s: float) -> Coroutine<Wait> {
+    let n = ((s / SIM_FIXED_DT) + 0.999) as int
+    let i = 0
+    while i < n {
+        yield wait_frame()
+        i = i + 1
+    }
+}
+
+// Yield until `pred` returns true, capped at `max_frames`. Constructor
+// (returns a Wait); the sim body still writes the explicit yield:
+// `yield wait_for(60) @ { SEG_INIT_FOR_PATH != "" }`. Wraps
+// `wait_until` from `stone/engine/systems/coroutines.rock` -- existing
+// users keep working, this is the plan-API spelling.
+pub fn wait_for(max_frames: int, pred: () -> bool) -> Wait {
+    return wait_until(max_frames, pred)
+}
+
+pub fn _set_env_impl(key: string, value: string, site: string) {
+    _sim_emit_impl("{{\"op\":\"set_env\",\"key\":\"" + key + "\",\"value\":\"" + value + "\"}}", site)
+}
+macro set_env(key: expr, value: expr) {
+    _set_env_impl(key, value, __SITE__)
+}
+
+pub fn _start_game_impl(name: string, site: string) {
+    _sim_emit_impl("{{\"op\":\"start_game\",\"name\":\"" + name + "\"}}", site)
+}
+macro start_game(name: expr) {
+    _start_game_impl(name, __SITE__)
+}
+
+// One exclusion channel. The runner records the reason and treats the sim as
+// excluded rather than holding it to `stop_sim()`, so a sim that can only decide
+// at runtime that it must not run -- an opt-in fixture, a paused lane, a missing
+// renderer -- reports as excluded instead of as a pass that asserted nothing.
+pub fn _sim_exclude_impl(reason: string, site: string) {
+    _sim_emit_impl("{{\"op\":\"exclude\",\"reason\":\"" + reason + "\"}}", site)
+    stop_sim()
+}
+macro sim_exclude(reason: expr) {
+    _sim_exclude_impl(reason, __SITE__)
+}
+
+// A sim that reaches stop_sim() without a check fails, unless it declares
+// why: its log or artifacts are checked by another test (a seed of a
+// seed/probe pair, a measurement read by a Rust gate).
+pub fn _sim_no_checks_impl(reason: string, site: string) {
+    _sim_emit_impl("{{\"op\":\"no_checks\",\"reason\":\"" + reason + "\"}}", site)
+}
+macro sim_no_checks(reason: expr) {
+    _sim_no_checks_impl(reason, __SITE__)
+}
+
+
+// system (same path SDL events take), yields a frame so @update sees
+// `is_key_pressed` true, releases, yields again so input_end_frame
+// rolls keys_down_last forward. Injects through Stone's input system
+// (the same path SDL events take), advancing frames via coroutine yields.
+//
+// Call sites in sim bodies: `await key("space")`. Plain `key("...")`
+// is a compile error (await required for co fn).
+pub co fn _key_impl(name: string, site: string) -> Coroutine<Wait> {
+    _sim_emit_impl("{{\"op\":\"key\",\"name\":\"" + name + "\"}}", site)
+    on_key_pressed(name, "", false)
+    yield wait_frame()
+    on_key_released(name)
+    yield wait_frame()
+}
+macro key(name: expr) -> Coroutine<Wait> {
+    _key_impl(name, __SITE__)
+}
+
+co fn _pad_impl(button: string, site: string) -> Coroutine<Wait> {
+    _sim_emit_impl("{{\"op\":\"pad\",\"button\":\"" + button + "\"}}", site)
+    on_pad_pressed(button)
+    yield wait_frame()
+    on_pad_released(button)
+    yield wait_frame()
+}
+macro pad(button: expr) -> Coroutine<Wait> {
+    _pad_impl(button, __SITE__)
+}
+
+co fn _pad_axis_impl(axis: string, value: float, site: string) -> Coroutine<Wait> {
+    _sim_emit_impl("{{\"op\":\"pad_axis\",\"axis\":\"" + axis + "\",\"value\":" + to_string(value) + "}}", site)
+    on_pad_axis(axis, value)
+    yield wait_frame()
+    on_pad_axis(axis, 0.0)
+    yield wait_frame()
+}
+macro pad_axis(axis: expr, value: expr) -> Coroutine<Wait> {
+    _pad_axis_impl(axis, value, __SITE__)
+}
+
+// Synthetic click, in-process. Sets the sim mouse override so
+// `mouse_screen()` reports the synthetic position, then injects
+// press/release with a frame yield between them.
+pub co fn _click_impl(x: float, y: float, site: string) -> Coroutine<Wait> {
+    _sim_emit_impl("{{\"op\":\"click\",\"x\":" + to_string(x) + ",\"y\":" + to_string(y) + "}}", site)
+    sim_mouse_override = Vec2 { x: x, y: y }
+    on_mouse_pressed(x, y, 1)
+    yield wait_frame()
+    on_mouse_released(x, y, 1)
+    yield wait_frame()
+    sim_mouse_override = null
+}
+macro click(x: expr, y: expr) -> Coroutine<Wait> {
+    _click_impl(x, y, __SITE__)
+}
+
+// Pointer helpers for scripted captures. Unlike `click`, they leave
+// `sim_mouse_override` set, so a drawn cursor stays where the script put it
+// between steps.
+// Step `i` of `frames` of an eased glide from `from` to `to`; a capture that
+// records its own frames steps the pointer with it.
+pub fn mouse_glide_point(from: Vec2, to: Vec2, i: int, frames: int) -> Vec2 {
+    return from + (to - from) * ease_in_out_cubic(float(i) / float(frames))
+}
+pub co fn _mouse_glide_impl(to: Vec2, frames: int, site: string) -> Coroutine<Wait> {
+    _sim_emit_impl("{{\"op\":\"mouse_glide\",\"x\":" + to_string(to.x) + ",\"y\":" + to_string(to.y)
+        + ",\"frames\":" + to_string(frames) + "}}", site)
+    let from = mouse_screen()
+    for i in 1..frames + 1 {
+        sim_mouse_override = mouse_glide_point(from, to, i, frames)
+        yield wait_frame()
+    }
+    sim_mouse_override = to
+}
+macro mouse_glide(to: expr, frames: expr) -> Coroutine<Wait> {
+    _mouse_glide_impl(to, frames, __SITE__)
+}
+
+pub co fn _mouse_glide_world_impl(world: Vec2, frames: int, site: string) -> Coroutine<Wait> {
+    _sim_emit_impl("{{\"op\":\"mouse_glide_world\",\"x\":" + to_string(world.x) + ",\"y\":" + to_string(world.y)
+        + ",\"frames\":" + to_string(frames) + "}}", site)
+    let from = mouse_screen()
+    for i in 1..frames + 1 {
+        sim_mouse_override = mouse_glide_point(from, world_to_screen(world), i, frames)
+        yield wait_frame()
+    }
+}
+macro mouse_glide_world(world: expr, frames: expr) -> Coroutine<Wait> {
+    _mouse_glide_world_impl(world, frames, __SITE__)
+}
+
+pub co fn _mouse_hold_click_impl(frames: int, site: string) -> Coroutine<Wait> {
+    let at = mouse_screen()
+    _sim_emit_impl("{{\"op\":\"mouse_hold_click\",\"x\":" + to_string(at.x) + ",\"y\":" + to_string(at.y)
+        + ",\"frames\":" + to_string(frames) + "}}", site)
+    sim_mouse_override = at
+    on_mouse_pressed(at.x, at.y, 1)
+    for _ in 0..frames { yield wait_frame() }
+    on_mouse_released(at.x, at.y, 1)
+    yield wait_frame()
+}
+macro mouse_hold_click(frames: expr) -> Coroutine<Wait> {
+    _mouse_hold_click_impl(frames, __SITE__)
+}
+
+// PNG snapshot of the current backbuffer. Writes a temp file the
+// runner picks up + diffs against `<sim_source>.snap/<name>.png`.
+// Tolerance is the maximum normalized mean RGBA delta in any 32x32-pixel
+// block (`rock-dev-cli` image_diff). Per-channel deltas of 1 or less count
+// as zero. A local change is averaged only within its block, not the full frame.
+// Image snapshots gate scene-wide regressions; use focused sim expects for
+// local behavior (canonical: bitgun material_batch).
+// HEADLESS GL still has a real framebuffer, so readback works the
+// same as in screenshot mode.
+//
+// Fails loud when SIM_SKIP_RENDER is on: without rendering the
+// framebuffer is whatever was last drawn (typically empty / init
+// noise), so a quiet image_snapshot would just fail the diff with
+// a misleading "tol exceeded" message. Authors using image_snapshot
+// must add `@sim_env("SIM_DRAW", "on_demand")` to their @sim decl.
+pub fn _image_snapshot_impl(name: string, tol: float, site: string) {
+    sim_draw_on_demand()
+    if SIM_SKIP_SUBMIT {
+        _sim_emit_impl("{{\"op\":\"error\",\"message\":\"image_snapshot('" + name
+            + "') called with SIM_DRAW=commands -- nothing is presented. "
+            + "Declare @sim_env(\\\"SIM_DRAW\\\", \\\"on_demand\\\") for a pixel result.\"}}", site)
+        return
+    }
+    if SIM_SKIP_RENDER {
+        _sim_emit_impl("{{\"op\":\"error\",\"message\":\"image_snapshot('" + name
+            + "') called with SIM_DRAW=none -- framebuffer is stale. "
+            + "Add @sim_env(\\\"SIM_DRAW\\\", \\\"on_demand\\\") to the @sim decl.\"}}", site)
+        return
+    }
+    let (w, h) = stone_get_drawable_size()
+    let path = "tmp/sim_image_snapshot_" + name + ".png"
+    let ok = stone_save_screenshot(path, w, h, ENGINE.screenshot_max_size)
+    _sim_emit_image_snapshot_impl(name, path, tol, ok, site)
+}
+macro image_snapshot(name: expr) {
+    _image_snapshot_impl(name, 0.001, __SITE__)
+}
+macro image_snapshot(name: expr, tol: expr) {
+    _image_snapshot_impl(name, tol, __SITE__)
+}
+
+@nomangle fn _sim_emit_image_snapshot_impl(name: string, path: string, tol: float, ok: bool, site: string) {
+    _sim_emit_impl("{{\"op\":\"image_snapshot\",\"name\":\"" + name
+        + "\",\"path\":\"" + path + "\",\"tol\":" + to_string(tol)
+        + ",\"ok\":" + to_string(ok) + "}}", site)
+}
+
+// Per-sim tempdir path. The runner allocates one on entry and exports
+// it as the `OUT` env var; chained sims share it. Used both directly
+// in Rock (`tmpdir() + "/foo"`) and via shell expansion in `shell()`
+// commands (which inherit the env).
+pub inline(lua) fn tmpdir() -> string = """
+    return os.getenv("OUT") or ""
+"""
+
+// Run a shell command, fail on nonzero exit. Inherits the runner's
+// env, so `$OUT` expands as expected. Use for fixture setup
+// (cp/mv/touch/rm). Output streams pass
+// through to the parent stderr so failures are debuggable.
+pub fn _shell_impl(cmd: string, site: string) {
+    let ok = sim_shell_run(cmd)
+    let op = if ok { "expect_ok" } else { "expect_fail" }
+    _sim_emit_impl("{{\"op\":\"" + op + "\",\"message\":\"shell: " + sim_json_escape(cmd) + "\"}}", site)
+}
+macro shell(cmd: expr) {
+    _shell_impl(cmd, __SITE__)
+}
+
+@nomangle inline(lua) fn sim_shell_run(cmd: string) -> bool = """
+    -- Run with LD_LIBRARY_PATH cleared. The game process sets it to the
+    -- vendored gamelibs dir, and a shelled-out tool would otherwise inherit
+    -- it and load those bundled libs instead of its own. `env -u` makes the
+    -- tool use its own libs. Every shell() command starts with a real
+    -- binary (cp/mv/python3/printf), so the prefix is safe.
+    cmd = "env -u LD_LIBRARY_PATH " .. cmd
+    -- LuaJIT 5.1 returns nil/string from os.execute when shell exits non-zero,
+    -- 0/<exit-code> on 5.2+. Treat a truthy first return as success.
+    local ok = os.execute(cmd)
+    if ok == nil then return false end
+    if ok == true then return true end
+    if type(ok) == "number" then return ok == 0 end
+    return true
+"""
+
+// inline(lua) bodies are RAW text -- what you type here IS the Lua source.
+// Patterns/replacements below are Lua-level escapes: '\\' is one backslash
+// char, '\n' one newline char. (The previous doubled form escaped the
+// two-char SEQUENCE backslash-n, never a real newline -- latent until
+// reload_edit sent the first multi-line payload.)
+// Every control character is escaped: a raw one makes the marker invalid JSON,
+// which the runner rejects for the whole invocation.
+@nomangle inline(lua) fn sim_json_escape(s: string) -> string = """
+    return (s:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('%c', function(c)
+        return string.format('\\u%04x', c:byte())
+    end))
+"""
+
+// Mid-sim hot-reload injection asks the runner to apply an IN-MEMORY
+// find/replace to a project source, recompile it
+// through the real incremental path, and write the resulting overlay next to
+// the running main.lua. The sim must opt into the reload watcher with
+// @sim_env("STONE_HOT_RELOAD", "1") and then observe the effect with a
+// `yield wait_for(...)` on something the edited body changes. BodyOnly edits
+// only -- the runner rejects an edit that routes to an interface/structural
+// rebuild. `find` must match exactly once in the file's current text.
+pub fn _reload_edit_impl(file: string, find: string, replace: string, site: string) {
+    if SIM_RELOAD_PENDING_ID >= 0 {
+        _sim_emit_impl("{{\"op\":\"expect_fail\",\"message\":\"reload_edit issued while request "
+            + to_string(SIM_RELOAD_PENDING_ID) + " is still pending\"}}", site)
+        return
+    }
+    let request_id = SIM_RELOAD_NEXT_ID
+    SIM_RELOAD_NEXT_ID = SIM_RELOAD_NEXT_ID + 1
+    SIM_RELOAD_PENDING_ID = request_id
+    _sim_emit_impl("{{\"op\":\"reload_edit\",\"file\":\"" + sim_json_escape(file)
+        + "\",\"find\":\"" + sim_json_escape(find)
+        + "\",\"replace\":\"" + sim_json_escape(replace)
+        + "\",\"request_id\":" + to_string(request_id) + "}}", site)
+}
+macro reload_edit(file: expr, find: expr, replace: expr) {
+    _reload_edit_impl(file, find, replace, __SITE__)
+}
+
+fn sim_reload_pending() -> bool {
+    return SIM_RELOAD_PENDING_ID >= 0
+}
+
+fn sim_reload_terminal(status: string) {
+    if SIM_RELOAD_PENDING_ID < 0 { return }
+    let request_id = SIM_RELOAD_PENDING_ID
+    SIM_RELOAD_PENDING_ID = -1
+    SIM_RELOAD_LAST_ID = request_id
+    SIM_RELOAD_LAST_STATUS = status
+    _sim_emit_impl("{{\"op\":\"reload_terminal\",\"request_id\":"
+        + to_string(request_id) + ",\"status\":\"" + status + "\"}}", "")
+}
+
+// Defer removing a path until the runner has recorded the entry's artifact
+// manifest, so a file the sim wrote under `$OUT` still appears in it.
+pub fn _cleanup_path_impl(path: string, site: string) {
+    _sim_emit_impl("{{\"op\":\"cleanup_path\",\"path\":\"" + sim_json_escape(path) + "\"}}", site)
+}
+macro cleanup_path(path: expr) {
+    _cleanup_path_impl(path, __SITE__)
+}
+
+// Print a plain informational line to the sim runner output.
+// Unlike Rock's print(), this surfaces in the runner's progress stream.
+pub fn _sim_log_impl(message: string, site: string) {
+    _sim_emit_impl("{{\"op\":\"log\",\"message\":\"" + sim_json_escape(message) + "\"}}", site)
+}
+macro sim_log(message: expr) {
+    _sim_log_impl(message, __SITE__)
+}
+
+// Assertion. v1 takes a manual message arg. Source-text capture is a
+// possible future addition to `__SITE__` (e.g. `__CALL_SOURCE__`).
+pub fn _sim_expect_impl(cond: bool, message: string, site: string) {
+    let op = if cond { "expect_ok" } else { "expect_fail" }
+    _sim_emit_impl("{{\"op\":\"" + op + "\",\"message\":\"" + sim_json_escape(message) + "\"}}", site)
+}
+
+// The passing and failing records every comparison assertion emits. Every
+// string is escaped here, so an assertion cannot write an invalid marker.
+fn sim_emit_ok(message: string, site: string) {
+    _sim_emit_impl("{{\"op\":\"expect_ok\",\"message\":\"" + sim_json_escape(message) + "\"}}", site)
+}
+
+fn sim_emit_fail(message: string, actual: string, expected: string, site: string) {
+    _sim_emit_impl("{{\"op\":\"expect_fail\",\"message\":\"" + sim_json_escape(message)
+        + "\",\"actual\":\"" + sim_json_escape(actual)
+        + "\",\"expected\":\"" + sim_json_escape(expected) + "\"}}", site)
+}
+macro sim_expect(cond: expr, message: expr) {
+    _sim_expect_impl(cond, message, __SITE__)
+}
+
+// Equality assertions that report both sides on failure. Per-primitive
+// because Rock generics don't carry `==` for arbitrary T. Same shape as
+// `sim_eq_*`/`sim_gt_*` family below.
+pub fn _sim_eq_float_impl(actual: float, expected: float, message: string, site: string) {
+    if actual == expected {
+        sim_emit_ok(message, site)
+    } else {
+        sim_emit_fail(message, to_string(actual), to_string(expected), site)
+    }
+}
+macro sim_eq_float(actual: expr, expected: expr, message: expr) {
+    _sim_eq_float_impl(actual, expected, message, __SITE__)
+}
+
+pub fn _sim_eq_int_impl(actual: int, expected: int, message: string, site: string) {
+    if actual == expected {
+        sim_emit_ok(message, site)
+    } else {
+        sim_emit_fail(message, to_string(actual), to_string(expected), site)
+    }
+}
+macro sim_eq_int(actual: expr, expected: expr, message: expr) {
+    _sim_eq_int_impl(actual, expected, message, __SITE__)
+}
+
+pub fn _sim_eq_bool_impl(actual: bool, expected: bool, message: string, site: string) {
+    if actual == expected {
+        sim_emit_ok(message, site)
+    } else {
+        sim_emit_fail(message, to_string(actual), to_string(expected), site)
+    }
+}
+macro sim_eq_bool(actual: expr, expected: expr, message: expr) {
+    _sim_eq_bool_impl(actual, expected, message, __SITE__)
+}
+
+pub fn _sim_eq_str_impl(actual: string, expected: string, message: string, site: string) {
+    if actual == expected {
+        sim_emit_ok(message, site)
+    } else {
+        sim_emit_fail(message, actual, expected, site)
+    }
+}
+macro sim_eq_str(actual: expr, expected: expr, message: expr) {
+    _sim_eq_str_impl(actual, expected, message, __SITE__)
+}
+
+// Ordering assertions. Same emit shape as sim_eq_*: failure includes
+// actual + a stringified expected ("> 30", "in [29, 31]") so the diff
+// reads correctly in the runner's multi-line output.
+pub fn _sim_gt_float_impl(actual: float, threshold: float, message: string, site: string) {
+    if actual > threshold {
+        sim_emit_ok(message, site)
+    } else {
+        sim_emit_fail(message, to_string(actual), "> " + to_string(threshold), site)
+    }
+}
+macro sim_gt_float(actual: expr, threshold: expr, message: expr) {
+    _sim_gt_float_impl(actual, threshold, message, __SITE__)
+}
+
+pub fn _sim_ge_float_impl(actual: float, threshold: float, message: string, site: string) {
+    if actual >= threshold {
+        sim_emit_ok(message, site)
+    } else {
+        sim_emit_fail(message, to_string(actual), ">= " + to_string(threshold), site)
+    }
+}
+macro sim_ge_float(actual: expr, threshold: expr, message: expr) {
+    _sim_ge_float_impl(actual, threshold, message, __SITE__)
+}
+
+pub fn _sim_lt_float_impl(actual: float, threshold: float, message: string, site: string) {
+    if actual < threshold {
+        sim_emit_ok(message, site)
+    } else {
+        sim_emit_fail(message, to_string(actual), "< " + to_string(threshold), site)
+    }
+}
+macro sim_lt_float(actual: expr, threshold: expr, message: expr) {
+    _sim_lt_float_impl(actual, threshold, message, __SITE__)
+}
+
+pub fn _sim_le_float_impl(actual: float, threshold: float, message: string, site: string) {
+    if actual <= threshold {
+        sim_emit_ok(message, site)
+    } else {
+        sim_emit_fail(message, to_string(actual), "<= " + to_string(threshold), site)
+    }
+}
+macro sim_le_float(actual: expr, threshold: expr, message: expr) {
+    _sim_le_float_impl(actual, threshold, message, __SITE__)
+}
+
+// Inclusive on both ends.
+pub fn _sim_between_float_impl(actual: float, low: float, high: float, message: string, site: string) {
+    if actual >= low && actual <= high {
+        sim_emit_ok(message, site)
+    } else {
+        sim_emit_fail(message, to_string(actual), "in [" + to_string(low) + ", " + to_string(high) + "]", site)
+    }
+}
+macro sim_between_float(actual: expr, low: expr, high: expr, message: expr) {
+    _sim_between_float_impl(actual, low, high, message, __SITE__)
+}
+
+// Approx-equal float assertion. Mirrors the .sim runner's `~=` operator
+// (run_sim.rs:568): pass within `max(rel * |expected|, abs_min)`.
+pub fn _sim_approx_float_impl(actual: float, expected: float, rel: float, abs_min: float, message: string, site: string) {
+    let diff = actual - expected
+    let tol = (rel * expected.abs()).max(abs_min)
+    if diff.abs() < tol {
+        sim_emit_ok(message, site)
+    } else {
+        sim_emit_fail(message, to_string(actual), to_string(expected) + " (tol=" + to_string(tol) + ")", site)
+    }
+}
+macro sim_approx_float(actual: expr, expected: expr, rel: expr, abs_min: expr, message: expr) {
+    _sim_approx_float_impl(actual, expected, rel, abs_min, message, __SITE__)
+}
+
+// Where `stop_sim()` was called, held until the frame it was called in has
+// finished DRAWING. Empty when this entry has not stopped.
+global SIM_STOP_SITE: string = ""
+global SIM_STOP_PENDING: bool = false
+
+pub fn _stop_sim_impl(site: string) {
+    // Recorded, not run. Every check below reads state the frame's DRAW phase
+    // produces, and a sim's statements run in UPDATE -- so sampling here reads
+    // the frame before this one. For a one-frame sim that is no frame at all:
+    // the counts were 0, the sim PASSED, and the engine then logged
+    // `2 uniform block(s) drawn with but never filled` about draws that had not
+    // happened yet when the verdict was taken. `sim_finish_stop` runs them at
+    // the end of the frame loop instead, which is after the draws.
+    SIM_STOP_SITE = site
+    SIM_STOP_PENDING = true
+}
+
+// The deferred half of `stop_sim`, run from `runner_sim_advance` once the
+// entry's last frame has been drawn and presented.
+//
+// It emits `stop` LAST, after whatever it found, so the op order a consumer
+// sees is the same one the synchronous version produced.
+fn sim_finish_stop() {
+    let stop_sim_reached = SIM_STOP_PENDING
+    let census = sim_alloc_census_json(stop_sim_reached, !SIM_SKIP_RENDER)
+    if !SIM_STOP_PENDING {
+        if census != "" {
+            _sim_emit_impl(census, "stone/engine/sim.rock:928")
+        }
+        return
+    }
+    SIM_STOP_PENDING = false
+    let site = SIM_STOP_SITE
+    SIM_STOP_SITE = ""
+
+    // Implicit invariant on every sim: the whole run stayed GL-clean.
+    // DebugGl checks buffer allocations in every build and other calls in debug.
+    // STONE_GL_PANIC=1 RUST_BACKTRACE=1 locates other failing calls in debug;
+    // required allocations return failure directly instead of panicking across FFI.
+    let gl_errors = stone_gl_error_count()
+    if gl_errors > 0 {
+        _sim_emit_impl("{{\"op\":\"expect_fail\",\"message\":\"GL errors during run (repro: STONE_GL_PANIC=1 RUST_BACKTRACE=1)\",\"actual\":\"{gl_errors}\",\"expected\":\"0\"}}", site)
+    }
+    // Same invariant for shader compile/link failures, which set no GL error and
+    // so pass the check above while every draw through the program is skipped.
+    let shader_errors = stone_shader_error_count()
+    if shader_errors > 0 {
+        _sim_emit_impl("{{\"op\":\"expect_fail\",\"message\":\"shader compile/link failures during run (see the [SHADER] errors above)\",\"actual\":\"{shader_errors}\",\"expected\":\"0\"}}", site)
+    }
+    // Same invariant for a uniform block nothing ever filled: a block member has
+    // no location, so a by-name setter aimed at one writes nothing and the
+    // shader reads zeroes -- silent, and invisible to any oracle that does not
+    // sample the affected pixels.
+    let unfilled = stone_unfilled_uniform_block_count()
+    if unfilled > 0 {
+        _sim_emit_impl("{{\"op\":\"expect_fail\",\"message\":\"uniform blocks drawn with but never filled (see the [SHADER] errors above)\",\"actual\":\"{unfilled}\",\"expected\":\"0\"}}", site)
+    }
+    let unfilled_textures = stone_unfilled_texture_slot_count()
+    if unfilled_textures > 0 {
+        _sim_emit_impl("{{\"op\":\"expect_fail\",\"message\":\"texture slots drawn with but never filled (see the [SHADER] errors above)\",\"actual\":\"{unfilled_textures}\",\"expected\":\"0\"}}", site)
+    }
+    if census != "" {
+        _sim_emit_impl(census, "stone/engine/sim.rock:928")
+    }
+    _sim_emit_impl("{{\"op\":\"stop\"}}", site)
+}
+macro stop_sim() {
+    _stop_sim_impl(__SITE__)
+}
+
+// Set by `sim_end_entry`: the runner ends this entry after the current frame
+// as though its coroutine had returned.
+global SIM_END_REQUESTED: bool = false
+
+// Ends the entry after this frame from anywhere below the sim's coroutine, so
+// a helper can finish a sim early without every caller returning. Call
+// `stop_sim()` first for the stop checks; the caller should then only yield.
+pub fn sim_end_entry() {
+    SIM_END_REQUESTED = true
+}

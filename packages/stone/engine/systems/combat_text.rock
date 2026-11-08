@@ -1,0 +1,765 @@
+pub enum WorldTextStyle { Damage, Compact, CastWord, Speech, Narration, SideStack }
+
+pub struct WorldTextColumn {
+    spans: [TextSpan],
+    present_spans: [TextSpan] = [],
+    align: TextAlign = TextAlign::Left,
+}
+
+pub struct WorldTextRow {
+    columns: [WorldTextColumn],
+    // Lets a caller fold a later value into this row instead of adding one.
+    merge_key: string = "",
+    amount: float = 0.0,
+}
+
+pub value WorldTextRowLayout {
+    column_offsets: [float],
+    column_widths: [float],
+    height: float,
+}
+
+// Per-frame animation readout: computed fresh on every read, never retained.
+// A value (not a struct) so the five leaves travel the scalar ABI instead of
+// materializing one table per sample on the update/draw path.
+pub value WorldTextSample {
+    offset: Vec2,
+    opacity: float,
+    scale: float,
+    complete: bool,
+}
+
+pub struct WorldTextDisplay {
+    spans: [TextSpan],
+    present_spans: [TextSpan] = [],
+    rows: [WorldTextRow] = [],
+    row_offsets: [float] = [],
+    row_layouts: [WorldTextRowLayout] = [],
+    pos: Vec2?,
+    follow: (() -> Vec2?)? = null,
+
+    offset: Vec2,
+    font_size: float,
+    style: WorldTextStyle,
+    collision_key: string,
+    composition_slot: int = 0,
+    top_zone_slot: int = 0,
+    anchor_key: string,
+    amount: float = 0.0,
+    hit_count: int = 0,
+    contributions: int = 1,
+
+    merge_recipient_key: string = "",
+    merge_source_key: string = "",
+    merge_mechanism_key: string = "",
+    merge_ability_key: string = "",
+    merge_effect_instance_key: string = "",
+    accept_until: float = 0.0,
+    priority: int = 0,
+    pulse_until: float = 0.0,
+    pulse_duration: float = 0.0,
+    pulse_color: Color = WHITE,
+    pulse_span_indices: [int] = [],
+    is_damage: bool = false,
+
+    lifetime_cur: float,
+    lifetime_max: float,
+    animation_offset: Vec2 = v(0, 0),
+    opacity_cur: float = 1.0,
+    drawn_screen: Vec2 = v(0, 0),
+    phrase_size: Vec2 = v(0, 0),
+    composition_offset: Vec2 = v(0, 0),
+    backdrop_draw: ((WorldTextDisplay, FrameView, WorldTextSample) -> ())? = null,
+}
+
+pub global WORLD_TEXT: Arena<WorldTextDisplay> = arena_new()
+pub global WORLD_TEXT_COMPLETED_CONTRIBUTIONS: int = 0
+
+pub const WORLD_TEXT_SIZE: float = 0.75
+const WORLD_TEXT_DAMAGE_LANE_PX: float = 16.0
+const WORLD_TEXT_DAMAGE_OUTER_LANE_PX: float = 8.0
+const WORLD_TEXT_DAMAGE_RISE_PX: float = 9.0
+const WORLD_TEXT_DAMAGE_ROW_PX: float = 5.0
+const WORLD_TEXT_COMPACT_LANE_PX: float = 6.0
+const WORLD_TEXT_COMPACT_BASE_PX: float = 4.0
+const WORLD_TEXT_COMPACT_RISE_PX: float = 2.0
+const WORLD_TEXT_COMPACT_ROW_PX: float = 7.0
+const WORLD_TEXT_CAST_WORD_BASE_PX: float = 14.0
+const WORLD_TEXT_CAST_WORD_ROW_PX: float = 8.0
+const WORLD_TEXT_SPEECH_LANE_PX: float = 4.0
+const WORLD_TEXT_SPEECH_BASE_PX: float = 11.0
+const WORLD_TEXT_SPEECH_RISE_PX: float = 1.5
+const WORLD_TEXT_SPEECH_ROW_PX: float = 9.0
+const WORLD_TEXT_NARRATION_BASE_PX: float = 11.0
+const WORLD_TEXT_NARRATION_RISE_PX: float = 2.0
+const WORLD_TEXT_NARRATION_ROW_PX: float = 10.0
+const WORLD_TEXT_NARRATION_PAD_X_PX: float = 5.0
+const WORLD_TEXT_NARRATION_PAD_Y_PX: float = 2.0
+const WORLD_TEXT_TOP_ZONE_GAP_PX: float = 4.0
+const WORLD_TEXT_TOP_ZONE_ROW_PX: float = 9.0
+pub const WORLD_TEXT_SIDE_X_PX: float = 34.0
+const WORLD_TEXT_SIDE_BASE_PX: float = 3.0
+const WORLD_TEXT_SIDE_ROW_GAP_PX: float = 1.0
+const WORLD_TEXT_SIDE_COLUMN_GAP_PX: float = 2.0
+pub const WORLD_TEXT_SIDE_FLIGHT_SECS: float = 0.18
+const WORLD_TEXT_COMPOSITION_RESPONSE: float = 12.0
+// Output-raster world text stays crisp, but belongs behind every screen-space
+// UI surface in the shared z-sorted pool.
+pub const WORLD_TEXT_Z_LAYER: int = -1
+// Narration is a scene caption, not transient combat feedback. Its plate and
+// type sit above entity bars while ordinary world text keeps the shared
+// behind-UI ordering.
+pub const WORLD_TEXT_NARRATION_PLATE_Z: int = 1
+pub const WORLD_TEXT_NARRATION_TEXT_Z: int = 2
+
+pub fn world_text_z_for_style(style: WorldTextStyle) -> int {
+    return if style == WorldTextStyle::Narration {
+        WORLD_TEXT_NARRATION_TEXT_Z
+    } else { WORLD_TEXT_Z_LAYER }
+}
+
+pub fn world_text_narration_plate_size(c: WorldTextDisplay) -> Vec2 {
+    let pad = world_px * v(WORLD_TEXT_NARRATION_PAD_X_PX,
+        WORLD_TEXT_NARRATION_PAD_Y_PX)
+    return c.phrase_size + pad * 2.0
+}
+
+pub fn world_text_narration_plate_center(c: WorldTextDisplay, anchor: Vec2) -> Vec2 {
+    return anchor + v(0.0, world_text_narration_plate_size(c).y * 0.5)
+}
+
+fn world_text_lane_for_ordinal(ordinal: int) -> int {
+    if ordinal == 0 { return 0 }
+    let distance = ((ordinal + 1) / 2) as int
+    return if ordinal % 2 == 1 { -distance } else { distance }
+}
+
+fn world_text_composition_slot(collision_key: string) -> int {
+    if collision_key == "" { return 0 }
+    let limit = WORLD_TEXT.len() + 1
+    for ordinal in 0..limit {
+        let slot = world_text_lane_for_ordinal(ordinal)
+        let occupied = false
+        for (_, c) in WORLD_TEXT {
+            if c.collision_key == collision_key && c.composition_slot == slot {
+                occupied = true
+            }
+        }
+        if !occupied { return slot }
+    }
+    return world_text_lane_for_ordinal(limit)
+}
+
+fn world_text_uses_top_zone(style: WorldTextStyle) -> bool {
+    return style == WorldTextStyle::Damage || style == WorldTextStyle::Speech
+}
+
+fn world_text_top_zone_slot(anchor_key: string, style: WorldTextStyle) -> int {
+    if anchor_key == "" || !world_text_uses_top_zone(style) { return 0 }
+    let limit = WORLD_TEXT.len() + 1
+    for slot in 0..limit {
+        let occupied = false
+        for (_, c) in WORLD_TEXT {
+            if c.anchor_key == anchor_key && world_text_uses_top_zone(c.style)
+                && c.top_zone_slot == slot {
+                occupied = true
+            }
+        }
+        if !occupied { return slot }
+    }
+    return limit
+}
+
+fn world_text_ease_out(t: float) -> float {
+    let u = 1.0 - clamp(t, 0.0, 1.0)
+    return 1.0 - u * u
+}
+
+fn world_text_lane_ordinal(slot: int) -> int {
+    if slot == 0 { return 0 }
+    let distance = abs(slot)
+    return if slot < 0 { distance * 2 - 1 } else { distance * 2 }
+}
+
+fn world_text_damage_lane_px(slot: int) -> float {
+    if slot == 0 { return 0.0 }
+    let distance = abs(slot) as float
+    let magnitude = WORLD_TEXT_DAMAGE_LANE_PX
+        + (distance - 1.0) * WORLD_TEXT_DAMAGE_OUTER_LANE_PX
+    return if slot < 0 { -magnitude } else { magnitude }
+}
+
+pub fn world_text_sample_in_lane(style: WorldTextStyle, slot: int,
+                             age: float, lifetime: float) -> WorldTextSample {
+    let t = clamp(age / max(lifetime, 0.0001), 0.0, 1.0)
+    let fade_start = match style {
+        WorldTextStyle::Damage => 0.62,
+        WorldTextStyle::Compact => 0.68,
+        WorldTextStyle::CastWord => 0.72,
+        WorldTextStyle::Speech => 0.78,
+        WorldTextStyle::Narration => 0.82,
+        WorldTextStyle::SideStack => 0.78,
+    }
+    let opacity = if t <= fade_start { 1.0 } else {
+        clamp((1.0 - t) / (1.0 - fade_start), 0.0, 1.0)
+    }
+    let travel = world_text_ease_out(t)
+    let fan = world_text_ease_out(clamp(t / 0.32, 0.0, 1.0))
+    let offset = match style {
+        WorldTextStyle::Damage => v(
+            world_px * world_text_damage_lane_px(slot) * fan,
+            world_px * (WORLD_TEXT_DAMAGE_RISE_PX * travel - world_text_lane_ordinal(slot) as float * WORLD_TEXT_DAMAGE_ROW_PX * fan),
+        ),
+        WorldTextStyle::Compact => v(
+            world_px * slot as float * WORLD_TEXT_COMPACT_LANE_PX * fan,
+            world_px * (WORLD_TEXT_COMPACT_BASE_PX + WORLD_TEXT_COMPACT_RISE_PX * travel + world_text_lane_ordinal(slot) as float * WORLD_TEXT_COMPACT_ROW_PX * fan),
+        ),
+        WorldTextStyle::CastWord => v(
+            0.0,
+            world_px * (WORLD_TEXT_CAST_WORD_BASE_PX + travel + world_text_lane_ordinal(slot) as float * WORLD_TEXT_CAST_WORD_ROW_PX * fan),
+        ),
+        WorldTextStyle::Speech => v(
+            world_px * slot as float * WORLD_TEXT_SPEECH_LANE_PX * fan,
+            world_px * (WORLD_TEXT_SPEECH_BASE_PX + WORLD_TEXT_SPEECH_RISE_PX * travel + world_text_lane_ordinal(slot) as float * WORLD_TEXT_SPEECH_ROW_PX * fan),
+        ),
+        WorldTextStyle::Narration => v(
+            0.0,
+            world_px * (WORLD_TEXT_NARRATION_BASE_PX
+                + WORLD_TEXT_NARRATION_RISE_PX * travel),
+        ),
+        WorldTextStyle::SideStack => {
+            let flight = world_text_ease_out(clamp(age / min(max(lifetime, 0.0001),
+                WORLD_TEXT_SIDE_FLIGHT_SECS), 0.0, 1.0))
+            v(
+                world_px * WORLD_TEXT_SIDE_X_PX * flight,
+                world_px * WORLD_TEXT_SIDE_BASE_PX,
+            )
+        }
+    }
+    let scale = 1.0
+    if style == WorldTextStyle::Damage {
+        if t < 0.10 {
+            scale = 0.86 + world_text_ease_out(t / 0.10) * 0.30
+        } else if t < 0.28 {
+            scale = 1.16 - world_text_ease_out((t - 0.10) / 0.18) * 0.16
+        }
+    }
+    return WorldTextSample {
+        offset,
+        opacity,
+        scale,
+        complete: t >= 1.0,
+    }
+}
+
+pub fn WorldTextDisplay.world_pos(c) -> Vec2 {
+    if let follow = c.follow {
+        if let position = follow() {
+            c.pos = position
+            return position
+        }
+    }
+    if c.pos != null { return c.pos.unwrap() }
+    return zero()
+}
+
+pub fn WorldTextDisplay.animation_sample(c) -> WorldTextSample {
+    return world_text_sample_in_lane(c.style, c.composition_slot,
+        c.lifetime_cur, c.lifetime_max)
+}
+
+pub fn WorldTextDisplay.world_anchor(c) -> Vec2 {
+    let sample = c.animation_sample()
+    return c.world_pos() + c.offset + sample.offset + c.composition_offset
+}
+
+pub fn WorldTextDisplay.screen_target_in(c, view: FrameView) -> Vec2 {
+    return world_to_screen_in(view, c.world_anchor())
+}
+
+pub fn world_text_plain_text(c: WorldTextDisplay) -> string {
+    let text = ""
+    for span in c.spans { text = text + span.text }
+    return text
+}
+
+pub fn world_text_pulse_color(base: Color, c: WorldTextDisplay, index: int,
+                          opacity: float = 1.0) -> Color {
+    if c.pulse_until <= time || c.pulse_duration <= 0.0 {
+        return base.alpha(base.a * opacity)
+    }
+    let remaining = clamp((c.pulse_until - time) / c.pulse_duration, 0.0, 1.0)
+    let strength = 0.0
+    for changed in c.pulse_span_indices {
+        if changed == index { strength = 1.0 }
+    }
+    if c.pulse_span_indices.len() == 0 { strength = 0.65 }
+    return base.lerp(c.pulse_color, remaining * strength).alpha(base.a * opacity)
+}
+
+pub fn world_text_present_spans(c: WorldTextDisplay, opacity: float = 1.0) -> [TextSpan] {
+    while c.present_spans.len() > c.spans.len() { let _ = c.present_spans.pop() }
+    for i in 0..c.spans.len() {
+        let span = c.spans[i]
+        let style = TextStyle {
+            color: world_text_pulse_color(span.style.color, c, i, opacity),
+            bold: span.style.bold,
+            italic: span.style.italic,
+        }
+        if i == c.present_spans.len() {
+            c.present_spans.push(TextSpan { text: span.text, style })
+        } else {
+            c.present_spans[i].text = span.text
+            c.present_spans[i].style = style
+        }
+    }
+    return c.present_spans
+}
+
+pub fn world_text_update_spans(c: WorldTextDisplay, spans: [TextSpan], changed_indices: [int]) {
+    c.spans = spans
+    c.phrase_size = measure_world_rich_text(spans, c.font_size)
+    c.pulse_span_indices = changed_indices
+    c.pulse_until = time + c.pulse_duration
+}
+
+fn world_text_row_layouts(rows: [WorldTextRow], size: float) -> [WorldTextRowLayout] {
+    let column_widths: [float] = []
+    let layouts: [WorldTextRowLayout] = []
+    for row in rows {
+        let row_ascent = 0.0
+        let row_descent = 0.0
+        for i in 0..row.columns.len() {
+            let (width, ascent, height) = measure_world_rich_text_metrics(
+                row.columns[i].spans, size)
+            if i == column_widths.len() {
+                column_widths.push(width)
+            } else {
+                column_widths[i] = max(column_widths[i], width)
+            }
+            row_ascent = max(row_ascent, ascent)
+            row_descent = max(row_descent, max(height - ascent, 0.0))
+        }
+        layouts.push(WorldTextRowLayout {
+            column_offsets: [],
+            column_widths,
+            height: row_ascent + row_descent,
+        })
+    }
+
+    for row_index in 0..rows.len() {
+        let row = rows[row_index]
+        let offsets: [float] = []
+        let x = 0.0
+        for i in 0..row.columns.len() {
+            offsets.push(x)
+            x += column_widths[i]
+            if i + 1 < row.columns.len() {
+                x += world_px * WORLD_TEXT_SIDE_COLUMN_GAP_PX
+            }
+        }
+        layouts[row_index].column_offsets = offsets
+        layouts[row_index].column_widths = column_widths
+    }
+    return layouts
+}
+
+fn world_text_row_offsets(layouts: [WorldTextRowLayout]) -> [float] {
+    let offsets: [float] = []
+    for _layout in layouts { offsets.push(0.0) }
+    let y = 0.0
+    for reverse in 0..layouts.len() {
+        let i = layouts.len() - reverse - 1
+        offsets[i] = y
+        y += layouts[i].height
+        if i > 0 { y += world_px * WORLD_TEXT_SIDE_ROW_GAP_PX }
+    }
+    return offsets
+}
+
+// Replaces a live display's rows and the plain spans that describe them,
+// keeping its age, position and animation.
+pub fn world_text_set_rows(c: WorldTextDisplay, rows: [WorldTextRow], spans: [TextSpan]) {
+    c.rows = rows
+    c.row_layouts = world_text_row_layouts(rows, c.font_size)
+    c.row_offsets = world_text_row_offsets(c.row_layouts)
+    c.spans = spans
+}
+
+pub fn world_text_row_count(c: WorldTextDisplay) -> int {
+    return if c.rows.len() > 0 { c.rows.len() } else { 1 }
+}
+
+fn world_text_phrase_at(anchor_key: string) -> WorldTextDisplay? {
+    if anchor_key == "" { return null }
+    for (_, c) in WORLD_TEXT {
+        if c.anchor_key == anchor_key && c.style == WorldTextStyle::CastWord { return c }
+    }
+    return null
+}
+
+pub fn world_text_composition_target(c: WorldTextDisplay) -> Vec2 {
+    if c.style == WorldTextStyle::Narration {
+        return v(0.0, world_px * c.composition_slot as float
+            * WORLD_TEXT_NARRATION_ROW_PX)
+    }
+    if c.style != WorldTextStyle::Damage && c.style != WorldTextStyle::Speech { return v() }
+    let phrase = world_text_phrase_at(c.anchor_key) ?? return v()
+    let desired_y = phrase.phrase_size.y + world_px * (WORLD_TEXT_CAST_WORD_BASE_PX
+        + WORLD_TEXT_TOP_ZONE_GAP_PX
+        + c.top_zone_slot as float * WORLD_TEXT_TOP_ZONE_ROW_PX)
+    return v(0.0, desired_y - c.animation_sample().offset.y)
+}
+
+fn world_text_make_narration_room(anchor_key: string) {
+    for (_, c) in WORLD_TEXT {
+        if c.anchor_key == anchor_key && c.style == WorldTextStyle::Narration {
+            c.composition_slot += 1
+        }
+    }
+}
+
+pub fn world_text_spawn_impl(
+    text: string,
+    position: Vec2?,
+    follow: (() -> Vec2?)?,
+    offset: Vec2,
+    color: Color,
+    lifetime_max: float,
+    font_size: float
+) {
+    world_text_spawn_impl([text_span(text, color)], position, follow, offset, lifetime_max, font_size,
+        WorldTextStyle::Compact, "", "", 0.0, 0, 1, 0)
+}
+
+fn world_text_claim_display() -> WorldTextDisplay {
+    let entity = WORLD_TEXT.reuse_retained_entity()
+    if is_null(entity) {
+        entity = WORLD_TEXT.insert(WorldTextDisplay {
+            spans: [],
+            pos: null,
+            offset: zero(),
+            font_size: WORLD_TEXT_SIZE,
+            style: WorldTextStyle::Compact,
+            collision_key: "",
+            anchor_key: "",
+            lifetime_cur: 0.0,
+            lifetime_max: 0.0,
+        })
+    }
+    return entity.unwrap().get().unwrap()
+}
+
+fn world_text_reset_display(
+    c: WorldTextDisplay,
+    spans: [TextSpan],
+    rows: [WorldTextRow],
+    row_offsets: [float],
+    row_layouts: [WorldTextRowLayout],
+    position: Vec2?,
+    follow: (() -> Vec2?)?,
+    offset: Vec2,
+    lifetime_max: float,
+    font_size: float,
+    style: WorldTextStyle,
+    collision_key: string,
+    composition_slot: int,
+    top_zone_slot: int,
+    anchor_key: string,
+    amount: float,
+    hit_count: int,
+    contributions: int,
+    priority: int,
+    pulse_duration: float,
+    pulse_color: Color,
+    pulse_span_indices: [int],
+    phrase_size: Vec2,
+    backdrop_draw: ((WorldTextDisplay, FrameView, WorldTextSample) -> ())? = null
+) -> WorldTextDisplay {
+    c.spans = spans
+    c.rows = rows
+    c.row_offsets = row_offsets
+    c.row_layouts = row_layouts
+    c.pos = position
+    c.follow = follow
+    c.offset = offset
+    c.font_size = font_size
+    c.style = style
+    c.collision_key = collision_key
+    c.composition_slot = composition_slot
+    c.top_zone_slot = top_zone_slot
+    c.anchor_key = anchor_key
+    c.amount = amount
+    c.hit_count = hit_count
+    c.contributions = contributions
+    c.merge_recipient_key = ""
+    c.merge_source_key = ""
+    c.merge_mechanism_key = ""
+    c.merge_ability_key = ""
+    c.merge_effect_instance_key = ""
+    c.accept_until = 0.0
+    c.priority = priority
+    c.pulse_until = if pulse_duration > 0.0 { time + pulse_duration } else { 0.0 }
+    c.pulse_duration = pulse_duration
+    c.pulse_color = pulse_color
+    c.pulse_span_indices = pulse_span_indices
+    c.is_damage = false
+    c.lifetime_cur = 0.0
+    c.lifetime_max = lifetime_max
+    c.animation_offset = zero()
+    c.opacity_cur = 1.0
+    c.drawn_screen = zero()
+    c.phrase_size = phrase_size
+    c.composition_offset = zero()
+    c.backdrop_draw = backdrop_draw
+    return c
+}
+
+pub fn world_text_spawn_impl(
+    spans: [TextSpan],
+    position: Vec2?,
+    follow: (() -> Vec2?)?,
+    offset: Vec2,
+    lifetime_max: float,
+    font_size: float,
+    style: WorldTextStyle,
+    collision_key: string,
+    anchor_key: string,
+    amount: float,
+    hit_count: int,
+    contributions: int,
+    priority: int = 0,
+    pulse_duration: float = 0.0,
+    pulse_color: Color = WHITE,
+    pulse_span_indices: [int] = [],
+    rows: [WorldTextRow] = [],
+    backdrop_draw: ((WorldTextDisplay, FrameView, WorldTextSample) -> ())? = null
+) {
+    let composition_slot = if style == WorldTextStyle::Narration {
+        world_text_make_narration_room(anchor_key)
+        0
+    } else { world_text_composition_slot(collision_key) }
+    let top_zone_slot = world_text_top_zone_slot(anchor_key, style)
+    let row_layouts = world_text_row_layouts(rows, font_size)
+    let row_offsets = world_text_row_offsets(row_layouts)
+    let phrase_size = if style == WorldTextStyle::CastWord
+            || style == WorldTextStyle::Narration {
+        measure_world_rich_text(spans, font_size)
+    } else { zero() }
+    world_text_reset_display(world_text_claim_display(), spans, rows, row_offsets, row_layouts,
+        position, follow, offset, lifetime_max, font_size, style, collision_key,
+        composition_slot, top_zone_slot, anchor_key, amount, hit_count, contributions, priority,
+        pulse_duration, pulse_color, pulse_span_indices, phrase_size, backdrop_draw)
+}
+
+pub fn world_text_spawn_following_meta_rich(
+    spans: [TextSpan],
+    follow: () -> Vec2?,
+    offset: Vec2,
+    lifetime_max: float,
+    style: WorldTextStyle,
+    collision_key: string,
+    anchor_key: string,
+    amount: float,
+    hit_count: int,
+    contributions: int,
+    priority: int = 0,
+    font_size: float = WORLD_TEXT_SIZE,
+    pulse_duration: float = 0.0,
+    pulse_color: Color = WHITE,
+    pulse_span_indices: [int] = [],
+    rows: [WorldTextRow] = [],
+    backdrop_draw: ((WorldTextDisplay, FrameView, WorldTextSample) -> ())? = null
+) {
+    world_text_spawn_impl(spans, null, follow, offset, lifetime_max, font_size,
+        style, collision_key, anchor_key, amount, hit_count, contributions, priority,
+        pulse_duration, pulse_color, pulse_span_indices, rows, backdrop_draw)
+}
+
+pub fn world_text_spawn_following_damage_rich(
+    spans: [TextSpan],
+    follow: () -> Vec2?,
+    offset: Vec2,
+    lifetime_max: float,
+    style: WorldTextStyle,
+    collision_key: string,
+    anchor_key: string,
+    amount: float,
+    hit_count: int,
+    contributions: int,
+    merge_recipient_key: string,
+    merge_source_key: string,
+    merge_mechanism_key: string,
+    merge_ability_key: string,
+    merge_effect_instance_key: string,
+    accept_until: float,
+    priority: int,
+    pulse_duration: float,
+    font_size: float = WORLD_TEXT_SIZE
+) {
+    let composition_slot = world_text_composition_slot(collision_key)
+    let top_zone_slot = world_text_top_zone_slot(anchor_key, style)
+    let c = world_text_reset_display(world_text_claim_display(), spans, [], [], [], null, follow, offset,
+        lifetime_max, font_size, style, collision_key, composition_slot, top_zone_slot, anchor_key,
+        amount, hit_count, contributions, priority, pulse_duration, WHITE, [],
+        zero())
+    c.merge_recipient_key = merge_recipient_key
+    c.merge_source_key = merge_source_key
+    c.merge_mechanism_key = merge_mechanism_key
+    c.merge_ability_key = merge_ability_key
+    c.merge_effect_instance_key = merge_effect_instance_key
+    c.accept_until = accept_until
+    c.is_damage = true
+}
+
+pub fn world_text_spawn(text: string, position: Vec2?, color: Color) {
+    world_text_spawn_impl(text, position, null, v(0, 2.0), color, 1.0, WORLD_TEXT_SIZE)
+}
+
+pub fn world_text_spawn(text: string, position: Vec2?, offset: Vec2, color: Color) {
+    world_text_spawn_impl(text, position, null, offset, color, 1.0, WORLD_TEXT_SIZE)
+}
+
+pub fn world_text_spawn(text: string, position: Vec2?, offset: Vec2, color: Color, lifetime_max: float) {
+    world_text_spawn_impl(text, position, null, offset, color, lifetime_max, WORLD_TEXT_SIZE)
+}
+
+pub fn world_text_spawn(
+    text: string,
+    position: Vec2?,
+    offset: Vec2,
+    color: Color,
+    lifetime_max: float,
+    font_size: float
+) {
+    world_text_spawn_impl(text, position, null, offset, color, lifetime_max, font_size)
+}
+
+pub fn world_text_complete_display(e: Entity<WorldTextDisplay>) -> bool {
+    let c = e.get() ?? return false
+    WORLD_TEXT_COMPLETED_CONTRIBUTIONS += c.contributions
+    e.remove()
+    return true
+}
+
+pub @reset
+fn reset_world_text() {
+    WORLD_TEXT.clear()
+    WORLD_TEXT_COMPLETED_CONTRIBUTIONS = 0
+}
+
+@init
+fn init_world_text() {
+}
+
+pub @update(stage = 150)
+fn update_world_text() {
+    for (e, c) in WORLD_TEXT {
+        c.lifetime_cur += dt
+        let sample = c.animation_sample()
+        c.animation_offset = sample.offset
+        c.opacity_cur = sample.opacity
+        let target = world_text_composition_target(c)
+        let response = min(dt * WORLD_TEXT_COMPOSITION_RESPONSE, 1.0)
+        c.composition_offset += (target - c.composition_offset) * response
+        if sample.complete {
+            world_text_complete_display(e)
+        }
+    }
+}
+
+// Animation and pulse scale over the display's base font size.
+pub fn world_text_present_scale(c: WorldTextDisplay, sample: WorldTextSample) -> float {
+    let pulse_scale = 1.0
+    if c.style != WorldTextStyle::CastWord
+        && c.pulse_until > time && c.pulse_duration > 0.0 {
+        let remaining = clamp((c.pulse_until - time) / c.pulse_duration, 0.0, 1.0)
+        pulse_scale += remaining * remaining * 0.22
+    }
+    return sample.scale * pulse_scale
+}
+
+pub fn world_text_present_size(c: WorldTextDisplay) -> float {
+    return c.font_size * world_text_present_scale(c, c.animation_sample())
+}
+
+pub fn world_text_present_column(column: WorldTextColumn, opacity: float) -> [TextSpan] {
+    while column.present_spans.len() > column.spans.len() {
+        let _ = column.present_spans.pop()
+    }
+    for i in 0..column.spans.len() {
+        let span = column.spans[i]
+        let style = TextStyle {
+                color: span.style.color.alpha(span.style.color.a * opacity),
+                bold: span.style.bold,
+                italic: span.style.italic,
+        }
+        if i == column.present_spans.len() {
+            column.present_spans.push(TextSpan { text: span.text, style })
+        } else {
+            column.present_spans[i].text = span.text
+            column.present_spans[i].style = style
+        }
+    }
+    return column.present_spans
+}
+
+fn world_text_column_anchor_offset(align: TextAlign, width: float) -> float {
+    return match align {
+        TextAlign::TopCenter | TextAlign::Center | TextAlign::BottomCenter => width * 0.5,
+        TextAlign::TopRight | TextAlign::Right | TextAlign::BottomRight => width,
+        _ => 0.0,
+    }
+}
+
+fn world_text_column_world_align(align: TextAlign) -> TextAlign {
+    return match align {
+        TextAlign::TopCenter | TextAlign::Center | TextAlign::BottomCenter => TextAlign::BottomCenter,
+        TextAlign::TopRight | TextAlign::Right | TextAlign::BottomRight => TextAlign::BottomRight,
+        _ => TextAlign::BottomLeft,
+    }
+}
+
+pub @late_draw
+fn draw_world_text() {
+    let view = RENDER_VIEW ?? return
+    for (_e, c) in WORLD_TEXT {
+        let sample = c.animation_sample()
+        c.animation_offset = sample.offset
+        c.opacity_cur = sample.opacity
+        let anchor = c.world_anchor()
+        c.drawn_screen = world_overlay_anchor_of(view, anchor)
+        let scale = world_text_present_scale(c, sample)
+        if c.rows.len() > 0 {
+            for i in 0..c.rows.len() {
+                let row = c.rows[i]
+                let layout = c.row_layouts[i]
+                for j in 0..row.columns.len() {
+                    let column = row.columns[j]
+                    let x = layout.column_offsets[j]
+                        + world_text_column_anchor_offset(column.align, layout.column_widths[j])
+                    let column_anchor = anchor + v(x, c.row_offsets[i])
+                    world_overlay.rich_text(world_text_present_column(column, sample.opacity),
+                        column_anchor, c.font_size,
+                        z: WORLD_TEXT_Z_LAYER,
+                        align: world_text_column_world_align(column.align), shadow: true,
+                        baseline_anchor: true, scale: scale)
+                }
+            }
+        } else {
+            let spans = world_text_present_spans(c, sample.opacity)
+            if c.backdrop_draw != null {
+                c.backdrop_draw.unwrap()(c, view, sample)
+            }
+            let text_anchor = if c.style == WorldTextStyle::Narration {
+                world_text_narration_plate_center(c, anchor)
+            } else { anchor }
+            let text_align = if c.style == WorldTextStyle::Narration {
+                TextAlign::Center
+            } else { TextAlign::BottomCenter }
+            world_overlay.rich_text(spans, text_anchor, c.font_size,
+                z: world_text_z_for_style(c.style),
+                align: text_align, shadow: true, scale: scale)
+        }
+    }
+}

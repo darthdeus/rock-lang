@@ -1,0 +1,76 @@
+pub struct Particle {
+    pos: Vec2,
+    vel: Vec2,
+    lifetime: float,
+
+    sprite: SampledTexture,
+    source: IRect,
+    tint: Color,
+
+    // UI-space draws only (emit_ui_particle): pos is design px.
+    z: int = 0,
+    scale: float = 1.0,
+    blend: BlendMode = BlendMode::Alpha,
+
+    tick: (Particle) -> (),
+}
+
+pub global PARTICLES: Arena<Particle> = arena_new()
+
+// UI-space particles: same sim, design-px positions, drawn into the
+// z-sorted UI pool. Ticks through pause/editor freeze (menu juice).
+pub global UI_PARTICLES: Arena<Particle> = arena_new()
+
+@reset
+fn reset_particles() {
+    PARTICLES.clear()
+    UI_PARTICLES.clear()
+}
+
+// `pos`/`vel`/`scale` are DESIGN units, not screen px -- update_ui_particles
+// scales by ui_effective_scale() at draw. Feeding a screen-px position (a
+// `screen.rect`-space layout, mouse_screen(), a raw px widget coord) puts the
+// burst at `scale` times the intended offset, with no error anywhere.
+pub fn emit_ui_particle(particle: Particle) {
+    UI_PARTICLES.insert(particle)
+}
+
+fn particle_step(e: Entity<Particle>, p: Particle) {
+    p.pos += p.vel * dt
+    p.lifetime -= dt
+
+    if p.lifetime <= 0 {
+        e.remove()
+    }
+
+    let t = p.tick
+
+    t(p)
+}
+
+@update(stage = 80)
+fn update_particles() {
+    if world_frozen() { return }
+
+    for (e, p) in PARTICLES {
+        particle_step(e, p)
+
+        draw_sprite(p.sprite, p.pos, p.source, color: p.tint)
+    }
+}
+
+// No world_frozen gate: pause/editor freeze the world sim, not UI juice.
+@update(stage = 80)
+fn update_ui_particles() {
+    let s = ui_effective_scale()
+
+    for (e, p) in UI_PARTICLES {
+        particle_step(e, p)
+
+        let size = v(p.source.w * p.scale, p.source.h * p.scale)
+        ui_draw_sprite_topleft(
+            p.sprite, (p.pos - size * 0.5) * s, p.source, size * s,
+            p.tint, z_layer: p.z, blend: p.blend,
+        )
+    }
+}

@@ -1,0 +1,28 @@
+[package]
+name = "stone"
+version = "0.1.0"
+type = "lib"
+
+# The shared value types (IVec2, Vec2, Rect, Color and their math) live in
+# stone-core so a package can use them without the engine runtime. A legacy
+# consumer of stone reaches them through this edge; a v1 consumer declares its
+# own stone-core dependency, because `pub(package) use` does not re-export.
+
+[dependencies]
+stone-core = { package = "stone-core" }
+stone-native = { package = "stone-native" }
+
+[language]
+modules = "v1"
+identity_storage = "exempt"
+
+[build]
+channels = ["dev", "direct"]
+default_channel = "dev"
+
+[build.vars]
+GIT_SHA = { builtin = "source_revision" }
+BUILD_UNIX = { cmd = "date +%s", volatile = true }
+BUILD_DATE = { cmd = "date -u '+%Y-%m-%d %H:%M'", volatile = true }
+CHANNEL = { builtin = "channel" }
+PLATFORM = { builtin = "platform" }

@@ -1,0 +1,21 @@
+// The F3 JIT toggle must read the live runtime flag: a shadow global starts
+// at true even when the runtime went off through STONE_NO_JIT, so the first toggle would switch the wrong way. The
+// oracle is `jit.status()` itself, read independently of any engine global.
+inline(lua) fn jit_toggle_test_runtime_enabled() -> bool = "return jit ~= nil and jit.status() == true"
+
+inline(lua) fn jit_toggle_test_has_jit() -> bool = "return jit ~= nil"
+
+@test
+fn jit_toggle_follows_runtime_state() {
+    assert(jit_toggle_test_has_jit(), "stone tests run under LuaJIT")
+    let was_on = jit_toggle_test_runtime_enabled()
+    defer { jit_set_enabled(was_on) }
+    assert_eq(jit_set_enabled(false), "OFF", "disabling the runtime reports OFF")
+    assert(!jit_toggle_test_runtime_enabled(), "the runtime is really off before the toggle")
+    toggle_jit_enabled()
+    assert(jit_toggle_test_runtime_enabled(), "toggle from runtime-off turns the runtime ON")
+    toggle_jit_enabled()
+    assert(!jit_toggle_test_runtime_enabled(), "toggle from runtime-on turns the runtime off")
+    jit_set_enabled(was_on)
+    assert(jit_toggle_test_runtime_enabled() == was_on, "the test restores the runtime it found")
+}

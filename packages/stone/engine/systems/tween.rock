@@ -1,0 +1,83 @@
+// The Tween value, its easing and the EASE_* constants live in
+// stone-core/tween.rock; this file owns the host's named-tween registry.
+
+pub global TWEEN: Map<string, Tween> = map_new()
+
+pub fn start_tween(
+    tween_id: string,
+    duration: float,
+    easing: int = EASE_LINEAR,
+    from: float = 0,
+    to: float = 1
+) {
+    let tween = Tween {
+        id: tween_id,
+        elapsed: 0.0,
+        duration: duration,
+        easing: easing,
+        from: from,
+        to: to
+    }
+
+    TWEEN.insert(tween_id, tween)
+}
+
+pub fn get_tween(tween_id: string) -> float? {
+    let item = TWEEN.get(tween_id)
+
+    if item != null {
+        return (item.current() : float?)
+
+    } else {
+        return (null : float?)
+    }
+}
+
+@update(stage = 15)
+fn update_tweens() {
+    for (tween_id, tween) in TWEEN {
+
+        TWEEN[tween_id].elapsed += dt
+
+        if TWEEN[tween_id].elapsed >= tween.duration {
+            TWEEN.remove(tween_id)
+
+            ()
+        }
+    }
+
+}
+
+// remap / map01 / remap_to_01 moved to the shared tier-0 math module
+// stone/engine/shaders/common/utils_math.rock (they are also compiled to GLSL).
+
+
+// Frame-rate-independent emission cadence. `advance(step)` returns how many
+// times to fire for `step` seconds at `rate` events/second, accumulating an
+// internal `dt` -- so a burst that owes 3 events at low FPS gets 3, and
+// density is unchanged from 60 to 144. Counts `time`, not frames, so it's
+// identical under variable and fixed timestep. Pairs with a `static` local
+// so an emitter carries its gate in place:
+//
+//   static gate = rate_gate(25)
+//   for _ in 0..gate.advance(dt) { spawn_glint(pos) }
+pub struct RateGate {
+    rate: float,
+    accum: float = 0,
+}
+
+pub fn rate_gate(rate: float) -> RateGate {
+    return RateGate { rate: rate }
+}
+
+// Advance by an explicit time step; returns how many events are owed.
+pub fn RateGate.advance(g, step: float) -> int {
+    g.accum += step
+    let interval = 1.0 / g.rate
+    let n = 0
+    while g.accum >= interval {
+        g.accum -= interval
+        n += 1
+    }
+    return n
+}

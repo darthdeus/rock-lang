@@ -1,0 +1,144 @@
+// The host side of the coroutine scheduler. The scheduler itself (Task, Wait,
+// TaskClock, CoroutinePoller, poll/tick and the combinators) is in
+// stone-core/tasks.rock and takes every clock and poller explicitly. This file
+// owns the engine's clock and poller and the host-default overloads that bind
+// them, so engine and game code keep writing `start(co)` and `run(co)`.
+
+// The engine's clock mirrors Stone's time globals. The runner syncs it when it
+// commits frame time; `host_task_clock()` syncs it again so a task started
+// before the first frame reads the current globals.
+
+pub global HOST_TASK_CLOCK: TaskClock = task_clock_new()
+
+pub fn host_task_clock_begin_tick() {
+    HOST_TASK_CLOCK.state().frame += 1
+}
+
+// The sim driver has its own task clock. It follows host frames while the session-owned host clock counts only game ticks.
+fn task_clock_follow_host(clock: TaskClock) -> TaskClock {
+    task_clock_set(clock, dt, time, frame_seq)
+    return clock
+}
+
+pub fn host_task_clock() -> TaskClock {
+    let state = HOST_TASK_CLOCK.state()
+    state.dt = dt
+    state.time = time
+    return HOST_TASK_CLOCK
+}
+
+pub global POLLER: CoroutinePoller = CoroutinePoller { clock: HOST_TASK_CLOCK }
+
+// Pump the global poller before all game `@update` systems (default
+// stage = 0). Sim coroutines must inject input (key/click) BEFORE
+// consumers like `update_casting` read it in the same frame; production
+// coroutines just want to advance early. No game has cause to control
+// this position -- they all want it first -- so stone owns it. A second
+// same-frame pump is a no-op: `poll` stamps its clock frame and the
+// poller skips any task already advanced this frame.
+@update(stage = -100)
+fn pump_coroutine_poller() {
+    coroutine_poller_update(POLLER)
+    if let task = SIM_TASK {
+        if status(task.coroutine) == "suspended" {
+            let _ = task_clock_follow_host(task.clock())
+            let _ = tick(task, dt)
+        }
+    }
+}
+
+// -- Host-default overloads: the core forms with the engine clock/poller. --
+
+pub fn start<R>(coroutine: Coroutine<Wait, R>, delay: float = 0) -> Task<R> {
+    let _ = host_task_clock()
+    return start(coroutine, POLLER, delay)
+}
+
+pub fn race2(a: Coroutine<Wait>, b: Coroutine<Wait>) -> Coroutine<Wait, int> {
+    let _ = host_task_clock()
+    return race2(a, b, POLLER)
+}
+
+pub fn race3(a: Coroutine<Wait>, b: Coroutine<Wait>, c: Coroutine<Wait>) -> Coroutine<Wait, int> {
+    let _ = host_task_clock()
+    return race3(a, b, c, POLLER)
+}
+
+pub fn race_all(cos: [Coroutine<Wait>]) -> Coroutine<Wait, int> {
+    let _ = host_task_clock()
+    return race_all(cos, POLLER)
+}
+
+pub fn join2<A, B>(a: Coroutine<Wait, A>, b: Coroutine<Wait, B>) -> Coroutine<Wait, (A, B)> {
+    let _ = host_task_clock()
+    return join2(a, b, POLLER)
+}
+
+pub fn join3<A, B, C>(a: Coroutine<Wait, A>, b: Coroutine<Wait, B>,
+    c: Coroutine<Wait, C>) -> Coroutine<Wait, (A, B, C)> {
+    let _ = host_task_clock()
+    return join3(a, b, c, POLLER)
+}
+
+pub fn join_all<R>(cos: [Coroutine<Wait, R>]) -> Coroutine<Wait, [R]> {
+    let _ = host_task_clock()
+    return join_all(cos, POLLER)
+}
+
+pub fn timeout<R>(coroutine: Coroutine<Wait, R>, secs: float) -> Coroutine<Wait, R?> {
+    let _ = host_task_clock()
+    return timeout(coroutine, secs, POLLER)
+}
+
+pub fn timeout_frames<R>(coroutine: Coroutine<Wait, R>, frames: int) -> Coroutine<Wait, R?> {
+    let _ = host_task_clock()
+    return timeout_frames(coroutine, frames, POLLER)
+}
+
+pub fn poll_co_owned(fetch: () -> Task?, clear: (() -> ())? = null) {
+    poll_co_owned(POLLER, fetch, clear)
+}
+
+/// Fire-and-forget: start the coroutine and let the engine poller drive it to
+/// completion. Returns the handle -- watch it (`completed`) or `stop(t)` it if
+/// you care, ignore it if you don't.
+pub fn run(coroutine: Coroutine<Wait>, delay: float = 0) -> Task {
+    let _ = host_task_clock()
+    return run(POLLER, coroutine, delay)
+}
+
+pub fn run_while<T>(coroutine: Coroutine<Wait>, e: Entity<T>, delay: float = 0) -> Task {
+    let _ = host_task_clock()
+    return run_while(POLLER, coroutine, e, delay)
+}
+
+pub fn run_into<T>(o: T, f: FieldRef<T, Task?>, coroutine: Coroutine<Wait>) -> Task {
+    let _ = host_task_clock()
+    return run_into(POLLER, o, f, coroutine)
+}
+
+pub fn run_into<T>(e: Entity<T>, f: FieldRef<T, Task?>, coroutine: Coroutine<Wait>) -> Task {
+    let _ = host_task_clock()
+    return run_into(POLLER, e, f, coroutine)
+}
+
+// The room drives its poller. Close runs task cleanup before resources retire;
+// discard invalidates tasks without resuming their cleanup.
+pub fn scene_poller(b: SceneBuilder, clock: TaskClock = host_task_clock()) -> CoroutinePoller {
+    let poller = CoroutinePoller { clock }
+    b.on_close(() => coroutine_poller_clear(poller))
+    b.on_retire(() => { let _ = coroutine_poller_retire(poller) })
+    return poller
+}
+
+/// Post-hot-reload driver: fires the `on_hot_reload` hook on every live
+/// coroutine the engine poller tracks. Registered via `@on_reload` so the
+/// decorator-init re-runs on every `dofile`, keeping the callback list
+/// populated through the `clear_all_systems()` -> `dofile` -> fire-callbacks
+/// cycle. `@nomangle` is required by `@on_reload` (the callback is re-resolved
+/// by name on each fire).
+@nomangle
+@on_reload
+fn fire_live_coroutine_hot_reloads() {
+    coroutine_poller_fire_hot_reloads(POLLER)
+}

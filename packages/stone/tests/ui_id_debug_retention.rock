@@ -1,0 +1,177 @@
+struct UiIdRetentionSnapshot {
+    mouse: UiMouseState,
+    focus: UiFocusState,
+    debug: UiIdDebug,
+    rebind_consumed: bool,
+}
+
+fn ui_id_retention_isolate() -> UiIdRetentionSnapshot {
+    let saved = UiIdRetentionSnapshot {
+        mouse: UI_MOUSE,
+        focus: UI_FOCUS,
+        debug: UI_ID_DEBUG,
+        rebind_consumed: REBIND_INPUT_CONSUMED,
+    }
+    UI_MOUSE = UiMouseState {
+        last: vec_new(),
+        last_count: 0,
+        cur: vec_new(),
+        cur_count: 0,
+        hot: 0,
+        hot_prev: 0,
+        active: 0,
+        clicked: 0,
+        was_down: false,
+        press_event: false,
+        anchor_x: 0.0,
+        anchor_y: 0.0,
+        anchor_w: 0.0,
+        anchor_h: 0.0,
+        anchor_ctx: 0,
+        anchor_ref_h: 0.0,
+    }
+    UI_FOCUS = UiFocusState {
+        last: vec_new(),
+        last_count: 0,
+        cur: vec_new(),
+        cur_count: 0,
+        scope: "",
+        nav_mode: false,
+        focused_ids: map_new(),
+        focused_idx: map_new(),
+        live_id: 0,
+        confirmed_id: 0,
+        up: null,
+        down_act: null,
+        left: null,
+        right: null,
+        confirm: null,
+        back: null,
+        up_was: false,
+        down_was: false,
+        confirm_was: false,
+        held_since: 0.0,
+        last_fire: 0.0,
+        prev_mouse: v(-1.0, -1.0),
+        left_was: false,
+        right_was: false,
+        lr_held_since: 0.0,
+        lr_last_fire: 0.0,
+        lr_dir: 0,
+    }
+    UI_ID_DEBUG = UiIdDebug {
+        enabled: false,
+        scopes: map_new(),
+        labels: map_new(),
+        seen: map_new(),
+        dupes: 0,
+        hash_collisions: 0,
+        last_dupe_name: "",
+    }
+    return saved
+}
+
+fn ui_id_retention_restore(saved: UiIdRetentionSnapshot) {
+    UI_MOUSE = saved.mouse
+    UI_FOCUS = saved.focus
+    UI_ID_DEBUG = saved.debug
+    REBIND_INPUT_CONSUMED = saved.rebind_consumed
+}
+
+@test
+fn ui_id_debug_maps_hold_one_frame_of_mints() {
+    let saved = ui_id_retention_isolate()
+    defer { ui_id_retention_restore(saved) }
+    ui_id_debug_set_enabled(true)
+
+    // Thirty frames of twenty entity-keyed mints, every label fresh:
+    // production clears the debug maps each frame before systems re-mint.
+    let frames = 30
+    let per_frame = 20
+    for frame in 0..frames {
+        ui_mouse_begin_frame()
+        ui_focus_begin_frame()
+        for i in 0..per_frame {
+            ui_id("churn", "mob:{frame}:{i}")
+        }
+    }
+    assert(UI_ID_DEBUG.scopes.len() <= per_frame,
+        "the scope map holds one frame of mints after thirty frames of churn")
+    assert(UI_ID_DEBUG.labels.len() <= per_frame,
+        "the label map holds one frame of mints after thirty frames of churn")
+    assert_eq(UI_ID_DEBUG.dupes, 0,
+        "churned mints report no duplicate registrations")
+}
+
+@test
+fn ui_id_debug_detector_reports_enabled_rules() {
+    let saved = ui_id_retention_isolate()
+    defer { ui_id_retention_restore(saved) }
+    ui_id_debug_set_enabled(true)
+
+    let dupes = UI_ID_DEBUG.dupes
+    let hash_collisions = UI_ID_DEBUG.hash_collisions
+    let dual_id = ui_id("debug_rules", "dual")
+    let rect = ui_rect(100.0, 100.0, 50.0, 50.0)
+    ui_mouse_item(dual_id, rect)
+    ui_focus_item(dual_id, rect, "debug_rules")
+    ui_mouse_begin_frame()
+    ui_focus_begin_frame()
+    assert_eq(UI_ID_DEBUG.dupes, dupes,
+        "ui_id_collision: one id in the mouse and focus lists is not a duplicate")
+
+    let mouse_id = ui_id("debug_rules", "mouse")
+    ui_mouse_item(mouse_id, rect)
+    ui_mouse_item(mouse_id, rect)
+    ui_mouse_begin_frame()
+    assert_eq(UI_ID_DEBUG.dupes, dupes + 1,
+        "ui_id_collision: repeated mouse registration is reported")
+    assert_eq(UI_ID_DEBUG.last_dupe_name, "debug_rules/mouse",
+        "ui_id_collision: the duplicate report keeps its scope and label")
+
+    let focus_id = ui_id("debug_rules", "focus")
+    ui_focus_item(focus_id, rect, "debug_rules")
+    ui_focus_item(focus_id, rect, "debug_rules")
+    ui_focus_begin_frame()
+    assert_eq(UI_ID_DEBUG.dupes, dupes + 2,
+        "ui_id_collision: repeated focus registration is reported")
+
+    let h1 = ui_id("scope", "oB1oTRA35oD")
+    let h2 = ui_id("scope", "qs3G8fno658w")
+    assert_eq(h1, h2, "ui_id_collision: the production hash returns the colliding id")
+    assert_eq(UI_ID_DEBUG.hash_collisions, hash_collisions + 1,
+        "ui_id_collision: distinct strings with one id are reported")
+
+    ui_id_debug_set_enabled(false)
+    assert_eq(UI_ID_DEBUG.scopes.len(), 0, "disabling recording releases scope entries")
+    assert_eq(UI_ID_DEBUG.labels.len(), 0, "disabling recording releases label entries")
+    assert_eq(UI_ID_DEBUG.seen.len(), 0, "disabling recording releases list entries")
+}
+
+@test
+fn ui_id_debug_flag_disables_map_recording() {
+    let saved = ui_id_retention_isolate()
+    defer { ui_id_retention_restore(saved) }
+    ui_id_debug_set_enabled(false)
+
+    let dupes = UI_ID_DEBUG.dupes
+    let hash_collisions = UI_ID_DEBUG.hash_collisions
+    let mouse_id = ui_id("debug_off", "same")
+    assert_eq(UI_ID_DEBUG.scopes.len(), 0,
+        "disabled id minting does not record a scope")
+    assert_eq(UI_ID_DEBUG.labels.len(), 0,
+        "disabled id minting does not record a label")
+    ui_mouse_item(mouse_id, ui_rect(100.0, 100.0, 50.0, 50.0))
+    ui_mouse_item(mouse_id, ui_rect(100.0, 100.0, 50.0, 50.0))
+    ui_focus_item(mouse_id, ui_rect(100.0, 100.0, 50.0, 50.0), "debug_off")
+    ui_focus_item(mouse_id, ui_rect(100.0, 100.0, 50.0, 50.0), "debug_off")
+    ui_mouse_begin_frame()
+    ui_focus_begin_frame()
+
+    assert_eq(UI_ID_DEBUG.scopes.len(), 0, "disabled frames keep the scope map empty")
+    assert_eq(UI_ID_DEBUG.labels.len(), 0, "disabled frames keep the label map empty")
+    assert_eq(UI_ID_DEBUG.seen.len(), 0, "disabled frames skip list tracking")
+    assert_eq(UI_ID_DEBUG.dupes, dupes, "disabled frames do not count duplicates")
+    assert_eq(UI_ID_DEBUG.hash_collisions, hash_collisions,
+        "disabled mints do not count hash collisions")
+}

@@ -1,0 +1,917 @@
+// Batched rect drawing via NativeBuffer + stone_draw_mesh.
+//
+// RectBatch is a caller-owned primitive: push screen-space rects with one
+// texture and blend mode, then flush when ready. For general UI use the
+// z-sorted UI_RENDER_BATCHES pool instead (screen.rect / UiRect carve).
+//
+// Semantics note: DEFERRED. Calls do not reach the GPU until a flush.
+// For immediate-mode draws (canvas switches, shader changes, pixel
+// readback) use draw_rect_immediate / draw_circle_immediate /
+// draw_line_immediate (draw.rock) -- they build verts engine-side and
+// submit via stone_draw_mesh before returning.
+
+pub const RECT_BATCH_VERTS_PER_RECT: int = 6
+
+// The one-draw camera clear lives in engine_uniforms.rock
+// (begin/end_cleared_camera), which owns the stash slot this flush used to
+// keep here as `RECT_BATCH_SAVED_VIEW`.
+
+// THE sprite vertex layout. One owner: this field order IS the GPU attribute
+// layout, for the CPU writers here, for the GL binding (derived per draw via
+// `@vertex_expand`, so nothing in stone-rs restates it) and for the shaders
+// that declare it as their `@attr` param (sprite_batch, outline_target).
+// Value types are C-layout cdata and pack tightly with matching alignment,
+// so `NativeBuffer<Vertex>` = `ffi.new("Vertex[?]", n)` IS the GPU vertex
+// buffer layout — no schema indirection, and the emitted ffi.offsetof
+// assertions abort at chunk load if that stops being true.
+//
+// `color` is a Vec4 and not a `Color`: an attribute must be a
+// float/int/VecN, and a Color-typed @attr also fails in the shader BODY
+// (`expected Vec4, found Color`), so the shader half could not consume it.
+// @nomangle: the vertex buffers' `ffi.new`/`ffi.sizeof` strings spell `Vertex`.
+pub @nomangle value Vertex {
+    pos: Vec2f,
+    uv: Vec2f,
+    color: Vec4f,
+    pivot_y: f32,
+    entity_id: f32,
+    colorize: f32,
+    // A per-primitive anchor a game's shader may compare against, such as the
+    // footprint corner of the wall section the vertex belongs to. Writers that
+    // need it stamp it after emission; everything else leaves it zero.
+    section: Vec2f = Vec2f { x: 0.0, y: 0.0 },
+}
+
+pub @inline fn native_buffer_vertex(n: int) -> NativeBuffer<Vertex> {
+    return native_buffer_alloc(n)
+}
+
+inline(lua) fn __copy_vertex_buffer_prefix(
+    source: NativeBuffer<Vertex>, target: NativeBuffer<Vertex>, count: int,
+) -> NativeBuffer<Vertex> = """
+    local bytes = count * ffi.sizeof("Vertex")
+    if bytes > 0 then ffi.copy(target.ptr, source.ptr, bytes) end
+    return target
+"""
+
+// Wrapper around stone_draw_mesh that accepts Ptr<Vertex> and casts to
+// float* internally. The extern signature takes Ptr<float> because
+// that's the historical layout; Vertex is binary-compatible.
+@nomangle inline(lua) fn __stone_draw_mesh_vertex_raw(
+    p: Ptr<Vertex>, vertex_count: int, stride: int,
+    attr_sizes: Ptr<int>, attr_count: int, texture_kind: int, texture: int, fan_ranges: NativeBuffer<int>?, fan_count: int
+) -> int = """
+    if fan_count > 0 then
+        return stone.stone_draw_mesh_fans(ffi.cast("float*", p), vertex_count, stride, attr_sizes, attr_count, texture_kind, texture, fan_ranges.ptr, fan_count)
+    end
+    return stone.stone_draw_mesh(ffi.cast("float*", p), vertex_count, stride, attr_sizes, attr_count, texture_kind, texture)
+"""
+
+// THE submit for every sprite-format draw: the GL side owns no layout, so the
+// stride and the per-attribute component counts are derived here from `Vertex`
+// itself (`@vertex_expand`). Reordering
+// Vertex's fields moves the GL binding with them.
+//
+// Takes the buffer rather than its `.ptr` because the derivation reads the
+// element type, which a Ptr<Vertex> also carries but the expansion contract
+// spells as FlatVec/NativeBuffer. The int* scratch is per-call-site static: the
+// FFI edge wants a C array, and the counts are a compile-time constant, so it
+// is filled once and reused for the process' lifetime.
+pub @nomangle fn __stone_draw_mesh_vertex(
+    buf: NativeBuffer<Vertex>, vertex_count: int, texture_kind: int, texture: int,
+    fan_ranges: NativeBuffer<int>? = null, fan_count: int = 0
+) -> int {
+    static sizes = native_buffer_int(16)
+    static attr_count = 0
+    if attr_count == 0 {
+        let counts = vertex_attr_sizes(buf)
+        for (i, c) in enumerate(counts) {
+            sizes[i] = c
+        }
+        attr_count = counts.len()
+    }
+    let result = __stone_draw_mesh_vertex_raw(
+        buf.ptr, vertex_count, vertex_stride(buf), sizes.ptr, attr_count,
+        texture_kind, texture, fan_ranges, fan_count)
+    if result >= 0 {
+        audit_implicit_texture_slot(result != 0)
+    }
+    return result
+}
+
+// THE submit for every sprite-format draw that owns its sampling. Bind and
+// release are a strict pair and live here rather than at the five call sites:
+// the sampler is per-unit GL state, so a leaked one re-filters every later draw
+// on unit 0 and an inherited one re-filters THIS draw. The scalar texture
+// signature keeps the table-backed SampledTexture off this submit boundary.
+fn draw_mesh_sampled(
+    buf: NativeBuffer<Vertex>, vertex_count: int, texture_kind: int, texture: int,
+    sampler_key: int, sampling: TextureFilter,
+    fan_ranges: NativeBuffer<int>? = null, fan_count: int = 0
+) -> int {
+    stone_bind_sampler(0, texture_filter_to_int(sampling), sampler_key)
+    let result = __stone_draw_mesh_vertex(buf, vertex_count, texture_kind, texture, fan_ranges, fan_count)
+    stone_bind_sampler(0, -1, 0)
+    return result
+}
+
+@nomangle inline(lua) fn __stone_mesh_create_vertex_raw(
+    p: Ptr<Vertex>, vertex_count: int, stride: int,
+    attr_sizes: Ptr<int>, attr_count: int,
+) -> int = """
+    return stone.stone_mesh_create(1, ffi.cast("float*", p), vertex_count, stride, attr_sizes, attr_count)
+"""
+
+fn retained_sprite_mesh_upload(buf: NativeBuffer<Vertex>, vertex_count: int) -> MeshId {
+    static sizes = native_buffer_int(16)
+    static attr_count = 0
+    if attr_count == 0 {
+        let counts = vertex_attr_sizes(buf)
+        for (i, c) in enumerate(counts) { sizes[i] = c }
+        attr_count = counts.len()
+    }
+    let handle = __stone_mesh_create_vertex_raw(
+        buf.ptr, vertex_count, vertex_stride(buf), sizes.ptr, attr_count)
+    if handle == 0 { error("retained SpriteMesh GPU upload was rejected") }
+    return MeshId(handle)
+}
+
+fn draw_retained_mesh_sampled(mesh: MeshId, image: Image, sampling: TextureFilter) -> int {
+    stone_bind_sampler(0, texture_filter_to_int(sampling), image.0)
+    let result = stone_mesh_draw(mesh.0, image.0, -1)
+    if result >= 0 { audit_implicit_texture_slot(result != 0) }
+    stone_bind_sampler(0, -1, 0)
+    return result
+}
+
+// `stone_draw_mesh` binds `texture` to unit 0 on whatever program is current, so
+// for a `@textures` group slot 0 IS that bind -- there is no Rock bind site to
+// mark, and this submit is the only place that knows it happened. Marking here
+// rather than at the five call sites keeps one account of the implicit lane.
+//
+// `stone_draw_mesh` returns whether its own registry lookup produced and bound
+// a texture; a nonzero logical handle is not evidence of either. A negative
+// result means no draw happened and is filtered at the call site.
+fn audit_implicit_texture_slot(texture_bound: bool) {
+    let shader_name = WATCHER.current_shader_name ?? return
+    if texture_bound {
+        mark_texture_slot_filled(shader_name, 0)
+    }
+    audit_texture_slots_for_draw(shader_name)
+}
+
+pub struct RectBatch {
+    vbo: NativeBuffer<Vertex>,  // contiguous typed cdata, one slot per vertex
+    capacity: int,         // max rects
+    count: int,            // vertices pushed since last flush (6 per rect)
+    texture: SampledTexture, // empty Image source = lazy-resolve to white
+    target: Canvas? = null,
+    convention: TargetConvention = TargetConvention::PresentSource,
+    blend: BlendMode = BlendMode::Alpha,
+    // How that texture is sampled: null uses the source's declared default.
+    // The flush binds whatever this resolves to, so the draw never inherits the
+    // unit's leftover GL state either way.
+    sampling: TextureFilter? = null,
+}
+
+// Allocate a new batch sized for `capacity` rects. Safe to call at module
+// load — does not require Stone to be initialized. Texture defaults to 0
+// (white pixel), resolved lazily on first flush.
+pub fn rect_batch_new(capacity: int, sampling: TextureFilter? = null,
+    target: Canvas? = null, convention: TargetConvention = TargetConvention::PresentSource,
+    blend: BlendMode = BlendMode::Alpha) -> RectBatch {
+    let vbo = native_buffer_vertex(capacity * RECT_BATCH_VERTS_PER_RECT)
+    RectBatch {
+        vbo: vbo,
+        capacity: capacity,
+        count: 0,
+        texture: sampled_image(Image(0)),
+        target: target,
+        convention: convention,
+        sampling: sampling,
+        blend: blend,
+    }
+}
+
+// Variant that binds a specific texture. Don't pass Image(0) (reserved
+// sentinel for "use white pixel"); use rect_batch_new() for the default.
+pub fn rect_batch_new_textured(capacity: int, texture: SampledTexture,
+    sampling: TextureFilter? = null, target: Canvas? = null,
+    convention: TargetConvention = TargetConvention::PresentSource,
+    blend: BlendMode = BlendMode::Alpha) -> RectBatch {
+    let vbo = native_buffer_vertex(capacity * RECT_BATCH_VERTS_PER_RECT)
+    RectBatch {
+        vbo: vbo,
+        capacity: capacity,
+        count: 0,
+        texture: texture,
+        target: target,
+        convention: convention,
+        sampling: sampling,
+        blend: blend,
+    }
+}
+
+pub fn rect_batch_set_target(
+    b: RectBatch, target: Canvas, convention: TargetConvention = TargetConvention::PresentSource,
+) {
+    b.target = target
+    b.convention = convention
+}
+
+// `capacity` counts rects; the buffer holds RECT_BATCH_VERTS_PER_RECT each.
+// Preserve emitted vertices before the caller appends the next rectangle.
+@nomangle fn __grow_sprite_mesh_buf(m: SpriteMesh) {
+    let new_cap = m.capacity * 2
+    let target = native_buffer_vertex(new_cap * RECT_BATCH_VERTS_PER_RECT)
+    m.vbo = __copy_vertex_buffer_prefix(m.vbo, target, m.count)
+    m.capacity = new_cap
+}
+
+@nomangle fn __grow_rect_batch_buf(b: RectBatch) {
+    let new_cap = b.capacity * 2
+    let target = native_buffer_vertex(new_cap * RECT_BATCH_VERTS_PER_RECT)
+    b.vbo = __copy_vertex_buffer_prefix(b.vbo, target, b.count)
+    b.capacity = new_cap
+}
+
+pub fn rect_batch_reset(b: RectBatch) {
+    b.count = 0
+}
+
+// One vertex, built from scalars. Leaf addressing lowers `buf[i] = vert(..)`
+// to the same `view[i*10 + k]` float stores the flat idiom wrote by hand, with
+// no Vertex_ct/Vec2_ct materialized -- so the layout comes from the struct
+// instead of from argument order, at no allocation (measured:
+// benchmarks/value-scalarize/sprite_vertex_store_ab.rock).
+pub @pure fn vert(
+    x: float, y: float, u: float, v_: float,
+    r: float, g: float, b: float, a: float,
+    py: float = 0.0, eid: float = 0.0,
+    colorize: float = 0.0,
+) -> Vertex {
+    return Vertex {
+        pos: Vec2f { x: x, y: y },
+        uv: Vec2f { x: u, y: v_ },
+        color: Vec4f { x: r, y: g, z: b, w: a },
+        pivot_y: py,
+        entity_id: eid,
+        colorize: colorize,
+    }
+}
+
+// Push one colored rect. Two triangles, 6 vertices.
+// Grows the buffer 2x if the batch is at capacity.
+pub fn rect_batch_push(b: RectBatch,
+    x: float, y: float, w: float, h: float,
+    r: float, g: float, bl: float, a: float,
+) {
+    if b.count >= b.capacity * RECT_BATCH_VERTS_PER_RECT {
+        __grow_rect_batch_buf(b)
+    }
+    __rect_batch_push_textured_quad4(b.vbo, b.count,
+        v(x, y), v(x + w, y), v(x + w, y + h), v(x, y + h),
+        0.5, 0.5, 0.5, 0.5, r, g, bl, a)
+    b.count = b.count + RECT_BATCH_VERTS_PER_RECT
+}
+
+// The one RectBatch quad writer: corners TL, TR, BR, BL as two triangles
+// (TL, TR, BR) and (TL, BR, BL). Untextured pushes sample the white pixel at
+// uv 0.5.
+fn __rect_batch_push_textured_quad4(
+    buf: NativeBuffer<Vertex>, vi: int,
+    tl: Vec2, tr: Vec2, br: Vec2, bl: Vec2,
+    u1: float, v1: float, u2: float, v2: float,
+    r: float, g: float, b: float, a: float,
+) {
+    buf[vi]     = vert(tl.x, tl.y, u1, v1, r, g, b, a)
+    buf[vi + 1] = vert(tr.x, tr.y, u2, v1, r, g, b, a)
+    buf[vi + 2] = vert(br.x, br.y, u2, v2, r, g, b, a)
+    buf[vi + 3] = vert(tl.x, tl.y, u1, v1, r, g, b, a)
+    buf[vi + 4] = vert(br.x, br.y, u2, v2, r, g, b, a)
+    buf[vi + 5] = vert(bl.x, bl.y, u1, v2, r, g, b, a)
+}
+
+// Push one textured rect with atlas UVs. Same geometry as rect_batch_push
+// but samples the bound texture instead of the white pixel. V is NOT flipped
+// here — pass v1/v2 in whatever orientation matches your texture; for the
+// standard sprite shader with Y-up world space you typically want
+// V(top) < V(bottom) swapped.
+pub fn rect_batch_push_textured(b: RectBatch,
+    x: float, y: float, w: float, h: float,
+    u1: float, v1: float, u2: float, v2: float,
+    r: float, g: float, bl: float, a: float,
+) {
+    if b.count >= b.capacity * RECT_BATCH_VERTS_PER_RECT {
+        __grow_rect_batch_buf(b)
+    }
+    __rect_batch_push_textured_quad4(b.vbo, b.count,
+        v(x, y), v(x + w, y), v(x + w, y + h), v(x, y + h),
+        u1, v1, u2, v2, r, g, bl, a)
+    b.count = b.count + RECT_BATCH_VERTS_PER_RECT
+}
+
+pub fn rect_batch_push_textured_quad4(b: RectBatch,
+    tl: Vec2, tr: Vec2, br: Vec2, bl: Vec2,
+    u1: float, v1: float, u2: float, v2: float,
+    r: float, g: float, blue: float, a: float,
+) {
+    if b.count >= b.capacity * RECT_BATCH_VERTS_PER_RECT {
+        __grow_rect_batch_buf(b)
+    }
+    __rect_batch_push_textured_quad4(b.vbo, b.count, tl, tr, br, bl,
+        u1, v1, u2, v2, r, g, blue, a)
+    b.count = b.count + RECT_BATCH_VERTS_PER_RECT
+}
+
+// Push one colored triangle. 3 vertices, half the geometry of a quad
+// push. Same vertex layout (pos + uv + color + zeros for the
+// pivot/entity_id tail), so the GPU draw is identical
+// to a rect — no shader changes needed.
+fn __rect_batch_push_triangle_verts(
+    buf: NativeBuffer<Vertex>, vi: int,
+    x1: float, y1: float, x2: float, y2: float, x3: float, y3: float,
+    r: float, g: float, bl: float, a: float,
+) {
+    buf[vi]     = vert(x1, y1, 0.5, 0.5, r, g, bl, a)
+    buf[vi + 1] = vert(x2, y2, 0.5, 0.5, r, g, bl, a)
+    buf[vi + 2] = vert(x3, y3, 0.5, 0.5, r, g, bl, a)
+}
+
+// Push one colored triangle. Three vertices in any winding order
+// (back-face culling is off for 2D). Grows the buffer 2x if the batch
+// doesn't have room for 3 more verts.
+pub fn rect_batch_push_triangle(b: RectBatch,
+    x1: float, y1: float, x2: float, y2: float, x3: float, y3: float,
+    r: float, g: float, bl: float, a: float,
+) {
+    if b.count + 3 > b.capacity * RECT_BATCH_VERTS_PER_RECT {
+        __grow_rect_batch_buf(b)
+    }
+    __rect_batch_push_triangle_verts(b.vbo, b.count, x1, y1, x2, y2, x3, y3, r, g, bl, a)
+    b.count = b.count + 3
+}
+
+fn rect_batch_push_circle(b: RectBatch, pos: Vec2, radius: float,
+    r: float, g: float, bl: float, a: float) {
+    let segments = 32
+    while b.count + segments * 3 > b.capacity * RECT_BATCH_VERTS_PER_RECT {
+        __grow_rect_batch_buf(b)
+    }
+    for i in 0..segments {
+        let angle1 = (i as float) * 2.0 * PI / (segments as float)
+        let angle2 = (((i + 1) % segments) as float) * 2.0 * PI / (segments as float)
+        b.vbo[b.count] = vert(pos.x, pos.y, 0.5, 0.5, r, g, bl, a)
+        b.vbo[b.count + 1] = vert(
+            pos.x + cos(angle1) * radius, pos.y + sin(angle1) * radius,
+            0.5, 0.5, r, g, bl, a)
+        b.vbo[b.count + 2] = vert(
+            pos.x + cos(angle2) * radius, pos.y + sin(angle2) * radius,
+            0.5, 0.5, r, g, bl, a)
+        b.count = b.count + 3
+    }
+}
+
+pub fn rect_batch_push_line(b: RectBatch, start: Vec2, end: Vec2, width: float,
+    r: float, g: float, bl: float, a: float) {
+    let dx = end.x - start.x
+    let dy = end.y - start.y
+    let length = sqrt(dx * dx + dy * dy)
+    if length <= 0.0 { return }
+    let half = width * 0.5
+    let nx = -dy / length * half
+    let ny = dx / length * half
+    let tl = v(start.x + nx, start.y + ny)
+    let tr = v(end.x + nx, end.y + ny)
+    let br = v(end.x - nx, end.y - ny)
+    let blv = v(start.x - nx, start.y - ny)
+    while b.count + 6 > b.capacity * RECT_BATCH_VERTS_PER_RECT {
+        __grow_rect_batch_buf(b)
+    }
+    __rect_batch_push_textured_quad4(b.vbo, b.count, tl, tr, br, blv,
+        0.5, 0.5, 0.5, 0.5, r, g, bl, a)
+    b.count = b.count + 6
+}
+
+// Four inset thin rects forming an outline. Cheaper than stroking a path
+// because the 2D shape shader has no line-width uniform.
+pub fn rect_batch_push_outline(b: RectBatch,
+    x: float, y: float, w: float, h: float, thickness: float,
+    r: float, g: float, bl: float, a: float,
+) {
+    rect_batch_push(b, x, y, w, thickness, r, g, bl, a)                      // top
+    rect_batch_push(b, x, y + h - thickness, w, thickness, r, g, bl, a)      // bottom
+    rect_batch_push(b, x, y, thickness, h, r, g, bl, a)                      // left
+    rect_batch_push(b, x + w - thickness, y, thickness, h, r, g, bl, a)      // right
+}
+
+pub fn rect_batch_flush(b: RectBatch) {
+    if b.count == 0 { return }
+    if b.target != null {
+        let target = b.target.unwrap()
+        if !canvas_is_live(target) {
+            error("RectBatch flush names a dead target canvas")
+            return
+        }
+    }
+    let tex = if sampled_texture_is_empty(b.texture) {
+        sampled_image(WHITE_PIXEL.unwrap())
+    } else { b.texture }
+    let count = b.count
+    let sampling = resolve_sampling(tex, b.sampling)
+    if b.target != null {
+        // Brackets closure-free (as `run_pass`): a closure per bracket allocates
+        // on every flush and the hot loops that flush record through the chain.
+        let prior_blend = CURRENT_BLEND
+        let prior_canvas = CURRENT_CANVAS_HANDLE
+        set_blend_mode(b.blend)
+        set_canvas(b.target.unwrap())
+        set_shader(sprite_basic_shader)
+        if get_shader_handle(sprite_basic_shader) != 0 {
+            // Pin: rect_batch_target_restores_the_camera.
+            begin_cleared_camera()
+            // FBO rows use the direct authored-y projection.
+            set_engine_uniforms(sprite_basic_shader, v(0.0, 1.0),
+                TargetConvention::Direct)
+            draw_mesh_sampled(b.vbo, count, sampled_texture_kind(tex),
+                sampled_texture_backend_key(tex),
+                sampled_texture_sampler_key(tex), sampling)
+            end_cleared_camera()
+        }
+        end_shader()
+        set_canvas_handle(prior_canvas)
+        set_blend_mode(prior_blend)
+    } else {
+        let texture_kind = sampled_texture_kind(tex)
+        let texture_key = sampled_texture_backend_key(tex)
+        let sampler_key = sampled_texture_sampler_key(tex)
+        // Bracketed closure-free like the target path: a closure here
+        // allocates on every flush (#948).
+        let shader_state = begin_immediate_shader()
+        if shader_state != 0 {
+            let _ = draw_mesh_sampled(b.vbo, count,
+                texture_kind, texture_key, sampler_key, sampling)
+        }
+        end_immediate_shader(shader_state)
+    }
+    b.count = 0
+}
+
+// (The former Layer 2 — an engine-managed shared UI batch with its own
+// pre-text flush — is gone. Screen-space UI rects/text/sprites all queue
+// into UI_RENDER_BATCHES and z-sort together: `screen.rect(..., z:)` or
+// the UiRect carve API, which carries a per-rect z. Caller-owned
+// RectBatches below remain for custom textures / mid-frame state changes.)
+
+// ────────────────────────────────────────────────────────────────────────
+// SpriteMesh — world-space textured batch that hooks into RENDER_BATCHES
+// ────────────────────────────────────────────────────────────────────────
+//
+// Use for hot loops that would otherwise emit thousands of `draw_sprite`
+// calls with the same texture (e.g. a tile grid). Lifecycles are
+// ENGINE-OWNED (mesh_pool.rock): `acquire_mesh` for per-frame content,
+// `retain_mesh` for fill-on-change content. sprite_mesh_new/add are the
+// building blocks those wrap; there is no manual reset/submit API.
+// At flush time, `render_batches` picks the mesh up like any other
+// layered draw, so ordering / depth / blend mode are respected.
+//
+// Limitations (v1):
+//   * `sprite_mesh_add` accepts a per-sprite tint for retained masks.
+//   * `sprite_mesh_add` defaults its y-sort key to `pos.y`; callers with a
+//     deliberate per-sprite key can pass `py` or use `sprite_mesh_add_quad`.
+//   * No outline / entity_id. Fine for tile grids; not for mobs/player.
+//   * After submit, don't `add` to the same batch in the same frame:
+//     the queued closure reads the captured count but the buffer is shared.
+//     Create two batches if you need two passes.
+//   * Overflowing capacity reallocs the buffer 2x (__grow_sprite_mesh_buf),
+//     same as a RenderBatch. Sizing up-front still avoids the copy.
+
+pub struct SpriteMesh {
+    shared_capacity: int = -1,
+    vbo: NativeBuffer<Vertex>,  // contiguous cdata, one slot per vertex
+    // The pool row this mesh submits through, kept while the mesh draws
+    // every frame, and the key it is entered under (`batch_entry_key`).
+    batch: RenderBatchHandle = RenderBatchHandle {},
+    batch_entry_key: string = "",
+    // The last built batch key and its inputs; a steady mesh reuses it.
+    batch_key: string = "",
+    batch_key_counter: int = -1,
+    batch_key_z: int = 0,
+    batch_key_order: int = 0,
+    batch_key_shader: string = "",
+    batch_key_depth: DepthMode = DepthMode::Off,
+    batch_key_blend: BlendMode = BlendMode::Alpha,
+    batch_key_sampling: TextureFilter = TextureFilter::Nearest,
+    capacity: int,            // max rects
+    count: int,               // vertex count since last submit (6 per rect)
+    texture: SampledTexture,
+    normal: SampledTexture? = null,
+    surface: SampledTexture? = null,
+    // Optional custom material input on caller-owned meshes (uAuxiliaryTex).
+    auxiliary: SampledTexture? = null,
+    material: SampledTexture? = null,
+    // Cached atlas dims + precomputed recip/inset so sprite_mesh_add can
+    // do UV math without touching FFI or ENGINE globals per call. Shaved
+    // 14,400 image_dims() FFI crossings per frame for life's tile grid.
+    tex_w: float,
+    tex_h: float,
+    inset_x: float,
+    inset_y: float,
+    z_layer: int,
+    depth: DepthMode,
+    blend: BlendMode,
+    order: int = 0,           // intra-layer sub-sort (see RenderProps.order)
+    // Same meaning as draw_sprite's `sampling:`: null uses the source's
+    // declared filter. Resolved at submit, not here, so a mesh built before
+    // its image is registered still resolves against the live declaration.
+    sampling: TextureFilter? = null,
+    // Same meaning as draw_sprite's `unlit:` -- see RenderBatch.unlit.
+    unlit: bool = false,
+    // Color-pass shader override, forwarded onto the submitted batch. Same contract as RenderBatch.pipeline: the shader
+    // consumes the batched Vertex layout and owns the y-sort remap.
+    pipeline: Pipeline? = null,
+    // The pipeline's `@uniform` block, packed by `mesh_block` and forwarded
+    // onto the submitted batch. `block_frame` is why a pooled mesh re-acquired
+    // without a `mesh_block` call does not forward the previous acquire's pack.
+    block: OwnedUniformBlock? = null,
+    block_frame: int = -1,
+    surface_outputs: WorldSurfaceOutputs = WorldSurfaceOutputs::Automatic,
+}
+
+pub fn sprite_mesh_new(
+    img: SampledTexture,
+    capacity: int = 16384,
+    z_layer: int = DEFAULT_RENDER_LAYER,
+    depth: DepthMode = DepthMode::TestWrite,
+    blend: BlendMode = BlendMode::Alpha,
+    order: int = 0,
+    unlit: bool = false,
+    normal: SampledTexture? = null,
+    surface: SampledTexture? = null,
+    pipeline: Pipeline? = null,
+    sampling: TextureFilter? = null,
+) -> SpriteMesh {
+    let dims = sampled_texture_dims(img)
+    let tw = float(dims.x)
+    let th = float(dims.y)
+    let vbo = native_buffer_vertex(capacity * RECT_BATCH_VERTS_PER_RECT)
+    SpriteMesh {
+        vbo: vbo,
+        capacity: capacity,
+        count: 0,
+            texture: img,
+            normal: normal,
+            surface: surface,
+            sampling: sampling,
+        tex_w: tw,
+        tex_h: th,
+        inset_x: ENGINE.texel_bleed_prevention / tw,
+        inset_y: ENGINE.texel_bleed_prevention / th,
+        z_layer: z_layer,
+        depth: depth,
+        blend: blend,
+        order: order,
+        unlit: unlit,
+        pipeline: pipeline,
+    }
+}
+
+
+fn __sprite_mesh_push_verts(
+    buf: NativeBuffer<Vertex>, vi: int,
+    x1: float, x2: float, y1: float, y2: float,
+    u1: float, u2: float, v1: float, v2: float,
+    py: float,
+    r: float, g: float, b: float, a: float,
+) {
+    // Tri 1: TL, TR, BR (V-flip: world-top samples atlas-top)
+    buf[vi]     = vert(x1, y2, u1, v1, r, g, b, a, py)
+    buf[vi + 1] = vert(x2, y2, u2, v1, r, g, b, a, py)
+    buf[vi + 2] = vert(x2, y1, u2, v2, r, g, b, a, py)
+    // Tri 2: BL, TL, BR
+    buf[vi + 3] = vert(x1, y1, u1, v2, r, g, b, a, py)
+    buf[vi + 4] = vert(x1, y2, u1, v1, r, g, b, a, py)
+    buf[vi + 5] = vert(x2, y1, u2, v2, r, g, b, a, py)
+}
+
+// 4-corner variant: an ARBITRARY quad (a sheared parallelogram for grid-
+// aligned walls). Corners a=TL b=TR c=BR d=BL map to the src rect's corners;
+// UVs V-flipped like the rect writer. Same 6-vert / 2-tri layout.
+fn __sprite_mesh_push_quad4(
+    buf: NativeBuffer<Vertex>, vi: int,
+    ax: float, ay: float, bx: float, by: float,
+    cx: float, cy: float, dx: float, dy: float,
+    u1: float, u2: float, v1: float, v2: float,
+    cr: float, cg: float, cb: float, ca: float,
+    py: float,
+    colorize: float,
+    corner_alpha: Vec4?, corner_colorize: Vec4?, corner_u: Vec4?, corner_v: Vec4?,
+) {
+    let aa = ca * if let alpha = corner_alpha { alpha.x } else { 1.0 }
+    let ba = ca * if let alpha = corner_alpha { alpha.y } else { 1.0 }
+    let cca = ca * if let alpha = corner_alpha { alpha.z } else { 1.0 }
+    let da = ca * if let alpha = corner_alpha { alpha.w } else { 1.0 }
+    let ac = if let value = corner_colorize { value.x } else { colorize }
+    let bc = if let value = corner_colorize { value.y } else { colorize }
+    let cc = if let value = corner_colorize { value.z } else { colorize }
+    let dc = if let value = corner_colorize { value.w } else { colorize }
+    let au = if let uv = corner_u { uv.x } else { u1 }
+    let bu = if let uv = corner_u { uv.y } else { u2 }
+    let cu = if let uv = corner_u { uv.z } else { u2 }
+    let du = if let uv = corner_u { uv.w } else { u1 }
+    let av = if let uv = corner_v { uv.x } else { v1 }
+    let bv = if let uv = corner_v { uv.y } else { v1 }
+    let cv = if let uv = corner_v { uv.z } else { v2 }
+    let dv = if let uv = corner_v { uv.w } else { v2 }
+
+    // Tri 1: a(TL), b(TR), c(BR).
+    buf[vi]     = vert(ax, ay, au, av, cr, cg, cb, aa, py, colorize: ac)
+    buf[vi + 1] = vert(bx, by, bu, bv, cr, cg, cb, ba, py, colorize: bc)
+    buf[vi + 2] = vert(cx, cy, cu, cv, cr, cg, cb, cca, py, colorize: cc)
+    // Tri 2: d(BL), a(TL), c(BR)
+    buf[vi + 3] = vert(dx, dy, du, dv, cr, cg, cb, da, py, colorize: dc)
+    buf[vi + 4] = vert(ax, ay, au, av, cr, cg, cb, aa, py, colorize: ac)
+    buf[vi + 5] = vert(cx, cy, cu, cv, cr, cg, cb, cca, py, colorize: cc)
+}
+
+// Ribbon cross-section writer: stitches the PREVIOUS vertex pair (a) to
+// the new pair (b) as two triangles. Unlike the quad writers, uv and
+// color vary per cross-section -- a trail's V slides with time and its
+// tint lerps along the strip, so neither can be a per-batch constant.
+// Ground-world Y also varies per cross-section for airborne ribbons.
+fn __sprite_mesh_push_segment(
+    buf: NativeBuffer<Vertex>, vi: int,
+    alx: float, aly: float, alu: float, alv: float,
+    arx: float, ary: float, aru: float, arv: float,
+    ar: float, ag: float, ab: float, aa: float,
+    blx: float, bly: float, blu: float, blv: float,
+    brx: float, bry: float, bru: float, brv: float,
+    br_: float, bg: float, bb: float, ba: float,
+    a_py: float, b_py: float,
+) {
+    // Tri 1: a_left, a_right, b_right
+    buf[vi]     = vert(alx, aly, alu, alv, ar,  ag, ab, aa, a_py)
+    buf[vi + 1] = vert(arx, ary, aru, arv, ar,  ag, ab, aa, a_py)
+    buf[vi + 2] = vert(brx, bry, bru, brv, br_, bg, bb, ba, b_py)
+    // Tri 2: b_left, a_left, b_right
+    buf[vi + 3] = vert(blx, bly, blu, blv, br_, bg, bb, ba, b_py)
+    buf[vi + 4] = vert(alx, aly, alu, alv, ar,  ag, ab, aa, a_py)
+    buf[vi + 5] = vert(brx, bry, bru, brv, br_, bg, bb, ba, b_py)
+}
+
+// Add one ribbon segment: the quad spanning cross-section `a` (the
+// previous pair) and `b` (the new pair). Each of the four vertices carries
+// its own UV, so the caller owns texture orientation (the Trail's along/
+// cross-section axis choice). Raw UVs -- no atlas rect, no texel inset: a
+// trail texture is a standalone image, and insetting would break the seam
+// where the scroll axis wraps.
+pub fn sprite_mesh_add_segment(
+    m: SpriteMesh,
+    a_left: Vec2, a_left_uv: Vec2, a_right: Vec2, a_right_uv: Vec2, a_color: Color,
+    b_left: Vec2, b_left_uv: Vec2, b_right: Vec2, b_right_uv: Vec2, b_color: Color,
+    a_py: float = 0.0, b_py: float = 0.0,
+) {
+    if m.count >= m.capacity * RECT_BATCH_VERTS_PER_RECT {
+        __grow_sprite_mesh_buf(m)
+    }
+
+    __sprite_mesh_push_segment(
+        m.vbo, m.count,
+        a_left.x, a_left.y, a_left_uv.x, a_left_uv.y,
+        a_right.x, a_right.y, a_right_uv.x, a_right_uv.y,
+        a_color.r, a_color.g, a_color.b, a_color.a,
+        b_left.x, b_left.y, b_left_uv.x, b_left_uv.y,
+        b_right.x, b_right.y, b_right_uv.x, b_right_uv.y,
+        b_color.r, b_color.g, b_color.b, b_color.a,
+        a_py, b_py,
+    )
+
+    m.count = m.count + RECT_BATCH_VERTS_PER_RECT
+}
+
+// Push one textured, world-space quad. Mirrors draw_sprite's pivot math
+// and V-flip so output lines up with the existing sprite shader.
+//
+// The y-sort key is the RAW world anchor y, same as the sprite path
+// (add_sprite_vertices_of); the shader remaps against the camera
+// bounds per frame. Batches with depth Off ignore it; TestWrite
+// batches get correct per-tile occlusion for free. sprite_mesh_add_quad
+// keeps an explicit `py` param -- an arbitrary quad has no single
+// anchor (flat-panel walls share one tile-anchor y across 3 quads).
+pub fn sprite_mesh_add(
+    m: SpriteMesh,
+    pos: Vec2,
+    src: IRect,
+    dest_size: Vec2,
+    pivot: Vec2 = PIVOT_CENTER,
+    py: float? = null,
+    tint: Color = WHITE,
+) {
+    if m.count >= m.capacity * RECT_BATCH_VERTS_PER_RECT {
+        __grow_sprite_mesh_buf(m)
+    }
+
+    // Geometric center from anchor pos + pivot (matches add_sprite_vertices).
+    let hw = dest_size.x / 2.0
+    let hh = dest_size.y / 2.0
+    let cx = pos.x + (0.5 - pivot.x) * dest_size.x
+    let cy = pos.y + (0.5 - pivot.y) * dest_size.y
+
+    let x1 = cx - hw
+    let x2 = cx + hw
+    let y1 = cy - hh
+    let y2 = cy + hh
+
+    // UVs: texel inset matches ENGINE.texel_bleed_prevention. V is
+    // flipped (v(top) = v2, v(bot) = v1) for Y-up world. Atlas dims and
+    // inset are cached on the batch (sprite_mesh_new) to avoid an FFI
+    // image_dims() call per tile.
+    let u1 = (float(src.x) + m.inset_x) / m.tex_w
+    let v1 = (float(src.y) + m.inset_y) / m.tex_h
+    let u2 = (float(src.x + src.w) - m.inset_x) / m.tex_w
+    let v2 = (float(src.y + src.h) - m.inset_y) / m.tex_h
+
+    let depth = if py != null { py.unwrap() } else { pos.y }
+
+    // vi is now in Vertex units (not floats) — one slot per vertex.
+    let vi = m.count
+
+    __sprite_mesh_push_verts(m.vbo, vi, x1, x2, y1, y2, u1, u2, v1, v2, depth,
+        tint.r, tint.g, tint.b, tint.a)
+
+    m.count = m.count + RECT_BATCH_VERTS_PER_RECT
+}
+
+// Add an ARBITRARY 4-corner textured quad to the mesh -- a sheared
+// parallelogram for grid-aligned walls, or any quad. Corners in TL, TR, BR,
+// BL order (screen space); the projection lives entirely in these positions,
+// not the texture. `src` selects the texture region (flat, un-sheared).
+// `py` is the per-quad depth sort key: the RAW world anchor y (the
+// shader remaps -- pass e.g. the owning tile's pos.y, NOT a remapped
+// [0,1] value).
+// Optional corner lanes use the same TL, TR, BR, BL order. Alpha multiplies
+// tint.a; colorize replaces the scalar; U/V replace normalized atlas UVs
+// independently, without texel inset (custom shaders may use them as data).
+pub fn sprite_mesh_add_quad(
+    m: SpriteMesh,
+    tl: Vec2, tr: Vec2, br: Vec2, bl: Vec2,
+    src: IRect,
+    py: float = 0.0,
+    tint: Color = WHITE,
+    colorize: float = 0.0,
+    corner_alpha: Vec4? = null,
+    corner_colorize: Vec4? = null,
+    corner_u: Vec4? = null,
+    corner_v: Vec4? = null,
+) {
+    if m.count >= m.capacity * RECT_BATCH_VERTS_PER_RECT {
+        __grow_sprite_mesh_buf(m)
+    }
+
+    let u1 = (float(src.x) + m.inset_x) / m.tex_w
+    let v1 = (float(src.y) + m.inset_y) / m.tex_h
+    let u2 = (float(src.x + src.w) - m.inset_x) / m.tex_w
+    let v2 = (float(src.y + src.h) - m.inset_y) / m.tex_h
+
+    let vi = m.count
+    __sprite_mesh_push_quad4(m.vbo, vi,
+        tl.x, tl.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y,
+        u1, u2, v1, v2, tint.r, tint.g, tint.b, tint.a, py, colorize,
+        corner_alpha, corner_colorize, corner_u, corner_v)
+
+    m.count = m.count + RECT_BATCH_VERTS_PER_RECT
+}
+
+// Pool-parameterized submit core: acquire_mesh's flush and
+// RetainedMesh.draw funnel here (mesh_pool.rock owns all lifecycles).
+//
+// Queues the mesh's pre-filled vbo as a CLOSURE-FREE vertex batch, drawn via
+// __stone_draw_mesh_vertex in all three passes (color / entity-id /
+// outline-mask). Each submission takes the next CUSTOM_DRAW_COUNTER value,
+// so its key is unique in the frame and never merges with a pooled vertex
+// batch sharing its texture/z. The row persists while the mesh draws every
+// frame; the helpers stay small so the per-mesh loop traces.
+fn submit_mesh_into(
+    pool: RenderBatchPool, m: SpriteMesh, retained_mesh: MeshId? = null,
+) {
+    if m.count == 0 { return }
+    CUSTOM_DRAW_COUNTER = CUSTOM_DRAW_COUNTER + 1
+    // Resolved before the key, same rule as ensure_batch_of.
+    let eff = resolve_sampling(m.texture, m.sampling)
+    let key = mesh_batch_key(m, eff)
+    let handle = mesh_batch_row(pool, m, key)
+    let batch = handle.borrow().unwrap()
+    mesh_render_batch_sync(batch, m, retained_mesh, eff)
+    batch.mesh_frame = RENDER_FRAME
+}
+
+// Padded counter: unpadded sorts mesh_10 before mesh_2 (see
+// queue_custom_draw_into). Shader segment sits where batch_key_of puts it
+// (before the texture slot), so program switches land at group boundaries
+// instead of once per mesh interleaved among default-shader batches.
+fn mesh_batch_key(m: SpriteMesh, eff: TextureFilter) -> string {
+    let sh = if m.pipeline != null { m.pipeline.unwrap().shader_name } else { "0" }
+    if m.batch_key_counter == CUSTOM_DRAW_COUNTER && m.batch_key_z == m.z_layer
+        && m.batch_key_order == m.order && m.batch_key_shader == sh
+        && m.batch_key_depth == m.depth && m.batch_key_blend == m.blend
+        && m.batch_key_sampling == eff {
+        return m.batch_key
+    }
+    let key = "{batch_key_prefix(m.z_layer, m.order)}|sh{sh}|mesh_{draw_counter_key(CUSTOM_DRAW_COUNTER)}|{batch_key_state(m.depth, m.blend, false, eff)}"
+    m.batch_key = key
+    m.batch_key_counter = CUSTOM_DRAW_COUNTER
+    m.batch_key_z = m.z_layer
+    m.batch_key_order = m.order
+    m.batch_key_shader = sh
+    m.batch_key_depth = m.depth
+    m.batch_key_blend = m.blend
+    m.batch_key_sampling = eff
+    return key
+}
+
+// The mesh's row in `pool`, entered under `key`. A mesh that keeps its frame
+// position finds its row already there; one whose key moved re-enters it.
+fn mesh_batch_row(pool: RenderBatchPool, m: SpriteMesh, key: string) -> Entity<RenderBatch> {
+    if let cached = m.batch.entity() {
+        if pool.rows.contains(cached) {
+            if let entered = pool.entries.get(key) {
+                if entered == cached { return cached }
+            }
+            return mesh_batch_reenter(pool, m, cached, key)
+        }
+    }
+    let reused = pool.rows.reuse_retained_entity()
+    let handle = if reused != null {
+        mesh_batch_row_init(reused.unwrap().borrow().unwrap())
+        reused.unwrap()
+    } else {
+        pool.rows.insert(mesh_render_batch(m))
+    }
+    m.batch = render_batch_handle(handle)
+    m.batch_entry_key = key
+    return pool.insert(key, handle)
+}
+
+// Another submission may already hold the old key this frame; only an entry
+// still naming this row leaves the map.
+fn mesh_batch_reenter(
+    pool: RenderBatchPool, m: SpriteMesh, handle: Entity<RenderBatch>, key: string,
+) -> Entity<RenderBatch> {
+    if let entered = pool.entries.get(m.batch_entry_key) {
+        if entered == handle { pool.entries.remove(m.batch_entry_key) }
+    }
+    m.batch_entry_key = key
+    return pool.insert(key, handle)
+}
+
+// The fields every mesh row holds that mesh_render_batch_sync never changes.
+fn mesh_batch_row_init(batch: RenderBatch) {
+    batch.custom_draw = null
+    batch.pixel_snap = false
+    batch.surface_sampling = TextureFilter::Nearest
+    batch.external_verts = true
+}
+
+pub fn mesh_render_batch(m: SpriteMesh) -> RenderBatch {
+    let batch = RenderBatch {
+        verts: m.vbo,
+        count: m.count,
+        capacity: m.count,
+        texture: m.texture,
+        blend: m.blend,
+        pixel_snap: false,
+        z_layer: m.z_layer,
+        depth: m.depth,
+    }
+    mesh_batch_row_init(batch)
+    mesh_render_batch_sync(batch, m, null, resolve_sampling(m.texture, m.sampling))
+    return batch
+}
+
+fn mesh_render_batch_sync(
+    batch: RenderBatch, m: SpriteMesh, retained_mesh: MeshId?, eff: TextureFilter,
+) {
+    batch.verts = m.vbo
+    batch.count = m.count
+    batch.capacity = m.count
+    batch.retained_mesh = retained_mesh
+    batch.texture = m.texture
+    batch.blend = m.blend
+    batch.z_layer = m.z_layer
+    batch.depth = m.depth
+    batch.unlit = m.unlit || m.blend == BlendMode::Additive
+    batch.sampling = eff
+    batch.normal_sampling = if m.sampling != null || m.normal == null {
+        eff
+    } else {
+        sampled_texture_default_sampling(m.normal.unwrap())
+    }
+    batch.normal = m.normal
+    batch.surface = m.surface
+    batch.auxiliary = m.auxiliary
+    batch.material = m.material
+    batch.surface_outputs = m.surface_outputs
+    batch.pipeline = m.pipeline
+    batch.block = m.block
+    batch.block_frame = m.block_frame
+}

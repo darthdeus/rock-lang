@@ -1,0 +1,155 @@
+use stone::*
+
+struct DrawListMaterialTex {
+    uTexture: Sampler2D,
+    uMaterialTex: Sampler2D,
+}
+
+@shader(fragment)
+fn draw_list_material_frag(vary: SpriteVary, @textures t: DrawListMaterialTex) -> Vec4 {
+    return texture(t.uTexture, vary.TexCoord) * texture(t.uMaterialTex, v(0.49, 0.5))
+}
+
+@nomangle inline(lua) fn __draw_list_material_finally(body: fn() -> (), cleanup: fn() -> ()) = """
+    local result = world_fixture_call(body, debug.traceback)
+    local cleaned = world_fixture_call(cleanup)
+    if not result.ok then error(result.value, 0) end
+    if not cleaned.ok then error(cleaned.value, 0) end
+"""
+
+fn draw_list_material_edge(first: Color, second: Color) -> Image {
+    let data = new_owned_image_data(2, 1)
+    image_data_set_pixel(data, 0, 0, first.r, first.g, first.b, first.a)
+    image_data_set_pixel(data, 1, 0, second.r, second.g, second.b, second.a)
+    let image = new_owned_image_from_data(data, TextureFilter::Linear)
+    release_owned_image_data(data)
+    return image
+}
+
+fn draw_list_material_quad(
+    dl: DrawList,
+    shader: string?,
+    source: SampledTexture?,
+    z: int,
+    x: float
+) {
+    with_draw_pool(dl.batches, () => {
+        let batch = ensure_batch_of(sampled_image(WHITE_PIXEL.unwrap()), z,
+            BlendMode::Replace, false, DepthMode::Off,
+            pipeline: if shader != null { pipeline(shader.unwrap()) } else { null })
+        batch.material = source
+        add_rect_vertices_of(batch, v(x, 4.0), v(8.0, 8.0), WHITE, FillMode::Fill, 0.0, 0)
+    })
+}
+
+fn draw_list_material_pixel(target: Canvas, x: int, expected: Color) {
+    assert(abs(stone_read_canvas_pixel_channel(target.handle.0, x, 4, 0) - expected.r) < 0.01,
+        "DrawList material red channel belongs to this batch")
+    assert(abs(stone_read_canvas_pixel_channel(target.handle.0, x, 4, 1) - expected.g) < 0.01,
+        "DrawList material green channel belongs to this batch")
+    assert(abs(stone_read_canvas_pixel_channel(target.handle.0, x, 4, 2) - expected.b) < 0.01,
+        "DrawList material blue channel belongs to this batch")
+}
+
+fn draw_list_material_fixture(fail_after_draw: bool) {
+    let saved_white = WHITE_PIXEL
+    let saved_canvas = CURRENT_CANVAS_HANDLE
+    let saved_shader = WATCHER.current_shader_name
+    let saved_blend = CURRENT_BLEND
+    let saved_pool = CURRENT_RENDER_POOL
+    let white = draw_list_material_edge(WHITE, WHITE)
+    let red = draw_list_material_edge(RED, BLUE)
+    let green = draw_list_material_edge(GREEN, BLUE)
+    let target = new_canvas(24.0, 8.0, "rgba8")
+    let dl = draw_list_new(target, DrawSpace::Target)
+    let shader = rock_shader(sprite_batch_vert, draw_list_material_frag)
+    WHITE_PIXEL = white
+    let restore = () => {
+        // The intentional rejection escapes with_canvas/with_shader before their tails.
+        for slot in 0..shader_texture_slot_count(shader) { sampler_release_unit(slot) }
+        set_canvas_handle(saved_canvas)
+        if saved_shader != null { set_shader(saved_shader.unwrap()) } else { unset_shader() }
+        WATCHER.current_shader_name = saved_shader
+        set_blend_mode(saved_blend)
+        unset_depth_mode()
+        reset_camera()
+        CURRENT_RENDER_POOL = saved_pool
+    }
+    __draw_list_material_finally(
+        () => {
+            load_pending_shader_sources()
+            assert(get_shader_handle(shader) != 0)
+            draw_list_material_quad(dl, shader, sampled_image(red), 1, 4.0)
+            // Arbitrary custom state must not prevent the following material rebind.
+            dl.custom(
+                () => {
+                    unset_shader()
+                    set_canvas_handle(saved_canvas)
+                },
+                z: 2
+            )
+            draw_list_material_quad(dl, shader, sampled_image(green), 3, 12.0)
+            draw_list_material_quad(dl, null, null, 4, 20.0)
+            draw_list_flush(dl)
+            // Linear source images must still use the material lane's nearest policy.
+            draw_list_material_pixel(target, 4, RED)
+            draw_list_material_pixel(target, 12, GREEN)
+            draw_list_material_pixel(target, 20, WHITE)
+
+            draw_list_clear(dl)
+            draw_list_material_quad(dl, shader, sampled_image(green), 1, 4.0)
+            draw_list_material_quad(dl, shader, sampled_image(red), 2, 12.0)
+            draw_list_flush(dl)
+            assert(!stone_sampler_bound(shader_texture_slot_if_present(shader, "uMaterialTex")),
+                "DrawList releases its per-batch material sampler")
+            draw_list_material_pixel(target, 4, GREEN)
+            draw_list_material_pixel(target, 12, RED)
+
+            draw_list_clear(dl)
+            draw_list_material_quad(dl, shader, sampled_image(red), 1, 4.0)
+            draw_list_material_quad(dl, shader, null, 2, 12.0)
+            draw_list_material_quad(dl, null, null, 3, 20.0)
+            let rejected = world_fixture_raised(() => {
+                __draw_list_material_finally(() => draw_list_flush(dl), restore)
+            })
+            assert(rejected != null && rejected.unwrap().contains("material sampler requires an explicit texture"),
+                "an earlier material cannot satisfy a later required material input")
+            assert_eq(CURRENT_CANVAS_HANDLE, saved_canvas)
+            assert_eq(CURRENT_BLEND, saved_blend)
+            draw_list_clear(dl)
+            draw_list_material_quad(dl, null, null, 1, 20.0)
+            draw_list_flush(dl)
+            draw_list_material_pixel(target, 20, WHITE)
+            if fail_after_draw { error("intentional DrawList material fixture failure") }
+        },
+        () => {
+            restore()
+            draw_list_destroy(dl)
+            destroy_canvas(target)
+            WHITE_PIXEL = saved_white
+            release_owned_image(green)
+            release_owned_image(red)
+            release_owned_image(white)
+        }
+    )
+}
+
+@test
+fn draw_list_material_batches_bind_independently_and_reject_missing_inputs() {
+    assert(stone_gpu_host_ensure())
+    draw_list_material_fixture(false)
+    let before = stone_get_graphics_stats()
+    let saved_white = WHITE_PIXEL
+    let saved_canvas = CURRENT_CANVAS_HANDLE
+    let saved_shader = WATCHER.current_shader_name
+    let saved_blend = CURRENT_BLEND
+    let failed = world_fixture_raised(() => draw_list_material_fixture(true))
+    assert(failed != null && failed.unwrap().contains("intentional DrawList material fixture failure"))
+    let after = stone_get_graphics_stats()
+    assert_eq(after.images, before.images, "fixture releases images after failure")
+    assert_eq(after.canvases, before.canvases, "fixture releases canvases after failure")
+    assert_eq(WHITE_PIXEL, saved_white, "fixture restores the shared white image after failure")
+    assert_eq(CURRENT_CANVAS_HANDLE, saved_canvas)
+    assert_eq(WATCHER.current_shader_name, saved_shader)
+    assert_eq(CURRENT_BLEND, saved_blend)
+}

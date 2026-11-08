@@ -1,0 +1,148 @@
+// ScreenCanvas — persistent GPU-drawn screen-space accumulator.
+//
+// A reusable primitive for "accumulate visual state across frames and
+// composite the result into the game's final image." This is the GPU
+// analogue of bitgun's CPU-side blood_canvas.
+// A ScreenCanvas owns a Canvas and one caller-owned RectBatch. Both renderers
+// consume the same authored stamp stream; only the RectBatch executor differs.
+//
+// Why screen-space and not world-space: the camera view today
+// derives its ortho projection from the window size, not the bound
+// canvas size (see stone-rs/src/sprite.rs:287-300). A world-space
+// canvas sized differently from the window would render shapes at the
+// wrong scale. Screen-space keeps the projection trivially correct
+// because the canvas is initialized at `screen_size()`. World-space
+// stamping is a follow-up gated on exposing projection control to Rock.
+//
+// All coordinates are in **window-logical screen pixels** — matching
+// `screen_size()` and `mouse_screen()`. The canvas is allocated at
+// `screen_size()` and keeps that authored extent across window resizes.
+//
+// Intended use:
+//
+//     global TRAIL: ScreenCanvas? = null
+//
+//     @init fn init() { TRAIL = screen_canvas_new("mouse_trail") }
+//
+//     @late_draw fn draw() {
+//         let sc = TRAIL.unwrap()
+//         if mouse_moved { sc.stamp_circle(mouse_screen(), 4, color(1, 0, 0, 0.3)) }
+//         screen_canvas_flush(sc)      // write pending stamps into the canvas
+//         screen_canvas_present(sc)    // composite the canvas onto the frame
+//     }
+//
+// The canvas PERSISTS — stamps accumulate frame after frame. Call
+// `screen_canvas_clear(sc)` to wipe (drops queued-but-not-yet-
+// flushed stamps too).
+//
+pub @intrinsic fn screen_canvas_supported() -> bool { return true }
+
+pub struct ScreenCanvas {
+    batch: RectBatch,
+    canvas_id: string,
+}
+
+// Create a fresh screen-sized canvas with an optional initial fill.
+// Allocates via the existing `managed_canvas` registry. The manager does
+// not resize canvases: a canvas keeps the size it was created with until
+// its owner reallocates it.
+//
+// HiDPI note: `screen_size()` returns the SDL *window* size (logical
+// pixels, via `stone_get_window_size`). Every other engine canvas in
+// `runner.rock` also allocates at logical size, and stamping uses
+// logical coords, so the pipeline is internally consistent.
+pub fn screen_canvas_new(id: string, initial_color: Color = color(0, 0, 0, 0)) -> ScreenCanvas {
+    let size = screen_size()
+    managed_canvas(id, size.x, size.y, "rgba8")
+    let canvas = get_canvas(id).unwrap()
+
+    let batch = rect_batch_new(128, target: canvas,
+        convention: TargetConvention::PresentSource)
+
+    // One-time init clear. After this, the canvas is never auto-cleared
+    // — callers explicitly wipe via `screen_canvas_clear`.
+    with_canvas(canvas, () => {
+        clear_screen(initial_color.r, initial_color.g, initial_color.b, initial_color.a)
+    })
+
+    return ScreenCanvas {
+        batch: batch,
+        canvas_id: id,
+    }
+}
+
+fn screen_canvas_canvas(sc: ScreenCanvas) -> Canvas? {
+    let canvas_opt = get_canvas(sc.canvas_id)
+    if canvas_opt == null {
+        error("ScreenCanvas names an unknown canvas")
+        return null
+    }
+    let canvas = canvas_opt.unwrap()
+    if !canvas_is_live(canvas) {
+        error("ScreenCanvas names a dead canvas")
+        return null
+    }
+    return canvas
+}
+
+fn screen_canvas_batch(sc: ScreenCanvas) -> RectBatch? {
+    let canvas_opt = screen_canvas_canvas(sc)
+    if canvas_opt == null { return null }
+    let canvas = canvas_opt.unwrap()
+    rect_batch_set_target(sc.batch, canvas, TargetConvention::PresentSource)
+    return sc.batch
+}
+
+// Queue a filled rectangle stamp. Coordinates are in screen pixels.
+// The rectangle API takes top-left coordinates.
+fn screen_canvas_stamp_rect(sc: ScreenCanvas, pos: Vec2, size: Vec2, color: Color) {
+    let batch = screen_canvas_batch(sc) ?? return
+    rect_batch_push(batch, pos.x, pos.y, size.x, size.y, color.r, color.g, color.b, color.a)
+}
+
+// Queue a filled circle stamp at screen pixel coordinates.
+fn screen_canvas_stamp_circle(sc: ScreenCanvas, pos: Vec2, radius: float, color: Color) {
+    let batch = screen_canvas_batch(sc) ?? return
+    rect_batch_push_circle(batch, pos, radius, color.r, color.g, color.b, color.a)
+}
+
+// Queue a line stamp between two screen points.
+fn screen_canvas_stamp_line(sc: ScreenCanvas, a: Vec2, b: Vec2, color: Color) {
+    let batch = screen_canvas_batch(sc) ?? return
+    rect_batch_push_line(batch, a, b, 1.0,
+        color.r, color.g, color.b, color.a)
+}
+
+// Flush queued stamps into the canvas. Stamps accumulate into the
+// canvas texture; the canvas is NOT cleared here.
+pub fn screen_canvas_flush(sc: ScreenCanvas) {
+    let batch = screen_canvas_batch(sc) ?? return
+    rect_batch_flush(batch)
+}
+
+// Composite the accumulated canvas onto whatever framebuffer is
+// currently bound. Uses the shared sampled-texture sprite
+// pipeline. Intended to be called during `@late_draw` so the overlay
+// sits above world content but under ImGui.
+pub fn screen_canvas_present(sc: ScreenCanvas, pos: Vec2 = v(0, 0)) {
+    let canvas = screen_canvas_canvas(sc) ?? return
+    draw_sampled_texture(sampled_canvas(canvas), pos.x, pos.y, canvas.width, canvas.height)
+}
+
+// Wipe the accumulated canvas and drop any queued stamps.
+pub fn screen_canvas_clear(sc: ScreenCanvas, color: Color = color(0, 0, 0, 0)) {
+    let canvas = screen_canvas_canvas(sc) ?? return
+    rect_batch_reset(sc.batch)
+
+
+    with_canvas(canvas, () => {
+        clear_screen(color.r, color.g, color.b, color.a)
+    })
+}
+
+// Bare-name UFCS wrappers for screen_canvas_*.
+pub fn stamp_rect(sc: ScreenCanvas, pos: Vec2, size: Vec2, color: Color) { screen_canvas_stamp_rect(sc, pos, size, color) }
+pub fn stamp_circle(sc: ScreenCanvas, pos: Vec2, radius: float, color: Color) { screen_canvas_stamp_circle(sc, pos, radius, color) }
+pub fn stamp_line(sc: ScreenCanvas, a: Vec2, b: Vec2, color: Color) { screen_canvas_stamp_line(sc, a, b, color) }
+pub fn flush(sc: ScreenCanvas) { screen_canvas_flush(sc) }
+pub fn clear(sc: ScreenCanvas, color: Color = color(0, 0, 0, 0)) { screen_canvas_clear(sc, color) }

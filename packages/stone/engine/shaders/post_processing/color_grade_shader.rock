@@ -1,0 +1,45 @@
+// Final color grade over the tonemapped image (a FINAL_PASSES
+// pipeline; see pass.rock queue_final_pass). Runs in LDR, after
+// ACES + exposure.
+//
+//   tint       -- per-channel multiply (vec4, alpha ignored)
+//   saturation -- 1.0 neutral, 0.0 grayscale, >1.0 oversaturated
+//   midtone_power -- 1.0 neutral, <1.0 lifts midtones with black anchored
+//   highlight_gain -- 1.0 neutral, scales the mapped luminance
+//
+// Tint and saturation MUST be set explicitly: an unset vec4/float uniform
+// is zero, which blacks the frame (same trap as bloom threshold).
+//
+// Compiled in-game via `rock_shader(color_grade_frag)` (single-arg
+// fullscreen form); `SceneTex` is the Pass slot group
+// (scene_tex 0) and ColorGradeU the block (COLOR_GRADE_PIPELINE).
+
+pub value ColorGradeU {
+    tint: Vec4,
+    saturation: float,
+    midtone_power: float = 1.0,
+    highlight_gain: float = 1.0,
+}
+
+// Keep black anchored and scale RGB together so the curve changes brightness,
+// not hue or spatial detail. Neutral defaults preserve existing grade callers.
+pub @pure fn color_grade_luminance_curve(rgb: Vec3, power: float, gain: float) -> Vec3 {
+    if power == 1.0 && gain == 1.0 { return rgb }
+    let luminance = max(0.0, rgb.dot(v(0.2126, 0.7152, 0.0722)))
+    let mapped = pow(luminance, max(power, 0.01)) * gain
+    return rgb * (mapped / max(luminance, 0.00001))
+}
+
+@shader(fragment)
+fn color_grade_frag(@textures t: SceneTex, @uniform u: ColorGradeU, tc: Vec2) -> Vec4 {
+    let scene = texture(t.scene_tex, tc)
+
+    // Rec. 709 luma for the desaturation pivot.
+    let luma = scene.rgb.dot(v(0.2126, 0.7152, 0.0722))
+    let graded = v(luma, luma, luma).lerp(scene.rgb, u.saturation)
+
+    graded = color_grade_luminance_curve(graded, u.midtone_power, u.highlight_gain)
+    graded *= u.tint.rgb
+
+    return v(graded, scene.a)
+}

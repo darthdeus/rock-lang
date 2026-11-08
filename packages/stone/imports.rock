@@ -1,0 +1,4 @@
+// Dependency names every file of this package sees (spec 8.7). Written by
+// `rock modules migrate`; review and narrow as the package is subdivided.
+pub(package) use stone_core::*;
+pub(package) use stone_native::*;

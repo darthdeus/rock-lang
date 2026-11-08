@@ -1,0 +1,52 @@
+// Rendered-output probes: a window rect captured every frame, PRE-SWAP (the
+// post-swap back buffer is undefined), so a sim can assert on the pixels the
+// player actually saw -- present blit, UI pool, everything included. This is
+// the ground-truth layer for motion/seam oracles; a model recomputed from
+// game state cannot see a rendering bug. Zero cost while no probe exists.
+
+pub struct WindowProbe {
+    x: int,
+    y: int,
+    w: int,
+    h: int,
+    buf: NativeBufferU8,
+    captures: int,
+}
+
+pub global WINDOW_PROBES: Arena<WindowProbe> = arena_new()
+
+pub fn window_probe_new(x: int, y: int, w: int, h: int) -> Entity<WindowProbe> {
+    sim_submit_guard("window_probe_new")
+    return WINDOW_PROBES.insert(WindowProbe {
+        x: x, y: y, w: w, h: h,
+        buf: native_buffer_u8(w * h * 4),
+        captures: 0,
+    })
+}
+
+// Runner calls this immediately before the swap; a probe created this frame
+// has captures == 0 until the frame it was alive for has rendered.
+fn capture_window_probes() {
+    for (_e, p) in WINDOW_PROBES {
+        stone_read_window_rect(p.x, p.y, p.w, p.h, p.buf.ptr)
+        p.captures += 1
+    }
+}
+
+// Channel c (0=r 1=g 2=b 3=a) at rect-local (dx, dy), as the stored byte.
+// What a conformance oracle compares: two backends either wrote the same byte
+// or they did not, with no float threshold to hide a divergence behind.
+pub fn WindowProbe.byte(p, dx: int, dy: int, c: int) -> int {
+    sim_draw_on_demand()
+    return p.buf[(dy * p.w + dx) * 4 + c]
+}
+
+// The same channel in [0, 1], for measures built out of several channels.
+pub fn WindowProbe.channel(p, dx: int, dy: int, c: int) -> float {
+    return p.byte(dx, dy, c) as float / 255.0
+}
+
+@reset
+fn reset_window_probes() {
+    WINDOW_PROBES.clear()
+}

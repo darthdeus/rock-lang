@@ -1,0 +1,70 @@
+pub mod test_support;
+
+// Package fixtures use the host filesystem without importing the engine.
+pub inline(lua) fn world_fixture_read(path: string) -> string? = """
+    local file, err = io.open(path, "rb")
+    if not file then error(err, 0) end
+    local data, read_err = file:read("*a")
+    local ok, close_err = file:close()
+    if not data then error(read_err, 0) end
+    if not ok then error(close_err, 0) end
+    return data
+"""
+
+// Lets the alloc wrapper of mag-world/tests/run_expedition_soak.py sample the Lua heap at fixed ticks.
+pub inline(lua) fn world_fixture_tick_mark(tick: int) = "if SOAK_MARK then SOAK_MARK(tick) end"
+
+pub inline(lua) fn world_fixture_log_capture() = """
+    _G.__world_fixture_previous_sink = _G.__rock_log_sink
+    _G.__world_fixture_logs = {}
+    _G.__rock_log_sink = function(level, category, message)
+        if level == 0 then
+            table.insert(_G.__world_fixture_logs, message)
+        end
+    end
+"""
+
+pub inline(lua) fn world_fixture_log_count() -> int = "return #_G.__world_fixture_logs"
+pub inline(lua) fn world_fixture_throttled_log_count() -> int = """
+    local count = 0
+    for _, n in pairs(__rock_log_counts or {}) do count = count + n end
+    return count
+"""
+pub inline(lua) fn world_fixture_log_text() -> string = "return table.concat(_G.__world_fixture_logs, \"\\n\")"
+pub inline(lua) fn world_fixture_log_restore() = """
+    _G.__rock_log_sink = _G.__world_fixture_previous_sink
+    _G.__world_fixture_previous_sink = nil
+    _G.__world_fixture_logs = nil
+"""
+
+// Native fixtures also use error objects as stop signals. Keep the raw value;
+// a handler, when supplied, runs before unwinding to retain the failing stack.
+pub @nomangle inline(lua) fn world_fixture_call(body: fn() -> (),
+        handler: (fn(any) -> any)? = null) -> any = """
+    local ok, value
+    if handler == nil then ok, value = pcall(body)
+    else ok, value = xpcall(body, handler) end
+    return { ok = ok, value = value }
+"""
+
+// A fixture catches failed checks before its ordinary defer restores resources.
+pub @nomangle inline(lua) fn world_fixture_raised(body: fn() -> (),
+        handler: (fn(any) -> any)? = null) -> string? = """
+    local result = world_fixture_call(body, handler)
+    if result.ok then return nil end
+    return tostring(result.value)
+"""
+
+pub @nomangle inline(lua) fn world_fixture_traceback(err: any) -> any = "return debug.traceback(err, 2)"
+
+// Keep raw errors for rethrow, while reporting both body and cleanup failures.
+pub inline(lua) fn world_fixture_with_cleanup(body: fn() -> (), cleanup: fn() -> (),
+        handler: (fn(any) -> any)? = null) = """
+    local result = world_fixture_call(body, handler)
+    local cleaned = world_fixture_call(cleanup)
+    if not result.ok then
+        if not cleaned.ok then error(tostring(result.value) .. "; cleanup: " .. tostring(cleaned.value), 0) end
+        error(result.value, 0)
+    end
+    if not cleaned.ok then error(cleaned.value, 0) end
+"""

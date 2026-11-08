@@ -1,0 +1,46 @@
+inline(lua) fn ui_flow_split_glyph_bytes() -> string = "return string.char(195, 10, 169)"
+inline(lua) fn ui_flow_truncated_glyph_bytes() -> string = "return string.char(195)"
+
+fn ui_flow_admission_with_font(body: fn()) {
+    let saved = DEFAULT_FONT
+    let font = load_font_metrics(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 48,
+        extra: "\u{00e9}").unwrap()
+    DEFAULT_FONT = font
+    defer { DEFAULT_FONT = saved; unload_font(font) }
+    body()
+}
+
+@test
+fn ui_plain_flow_preserves_tolerant_glyph_admission() {
+    ui_flow_admission_with_font(() => {
+        for text in [ui_flow_split_glyph_bytes(), ui_flow_truncated_glyph_bytes(),
+                "a " + ui_flow_truncated_glyph_bytes() + " b"] {
+            for width in [1.0, 800.0] {
+                let flow = ui_text_flow(text, width, 12.0)
+                assert_eq(flow.size == measure_ui(flow.text, 12.0), true,
+                    "plain wrapping retains plain renderer admission")
+                assert_eq(flow.text.replace("\n", " ").contains(ui_flow_truncated_glyph_bytes()), true,
+                    "plain flow preserves authored bytes")
+            }
+        }
+    })
+}
+
+@test
+fn ui_rich_and_explicit_family_flow_keep_strict_glyph_admission() {
+    ui_flow_admission_with_font(() => {
+        let font = DEFAULT_FONT.unwrap()
+        for text in [ui_flow_split_glyph_bytes(), ui_flow_truncated_glyph_bytes()] {
+            let rich_error = world_fixture_raised(() => {
+                let _ = ui_rich_flow([text_span(text)], 1.0, 12.0)
+            })
+            assert(rich_error != null, "rich flow rejects malformed glyphs before paragraph normalization")
+            for family in [TextFamily { regular: font }, TextFamily { regular: font, fallbacks: [font] }] {
+                let family_error = world_fixture_raised(() => {
+                    let _ = ui_text_flow(text, 1.0, 12.0, family)
+                })
+                assert(family_error != null, "explicit-family plain flow retains strict renderer admission")
+            }
+        }
+    })
+}

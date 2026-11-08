@@ -1,0 +1,122 @@
+// Retained GPU mesh objects, instancing optional -- Rock wrapper over the
+// stone_mesh_* C API. Base verts
+// and optional per-instance data are STATIC_DRAW uploads at creation time;
+// draw runs under the currently bound shader (with_shader), so use it for
+// custom-shader geometry, not the sprite path.
+
+pub struct GpuMesh {
+    handle: MeshId,
+    vert_count: int,
+    inst_count: int,
+}
+
+fn __gpu_mesh_mode(mode: string) -> int {
+    if mode == "fan" { return 0 }
+    if mode == "triangles" { return 1 }
+    error("gpu_mesh: unknown mode '{mode}' (want fan|triangles)")
+    return -1
+}
+
+// Copy a Rock [int] into ffi scratch for the const int* FFI edge.
+fn __gpu_mesh_sizes(attr_sizes: [int], sizes: NativeBuffer<int>) {
+    if attr_sizes.len() == 0 || attr_sizes.len() > 16 {
+        error("gpu_mesh: {attr_sizes.len()} attribute sizes (want 1..16)")
+    }
+    for (i, s) in enumerate(attr_sizes) {
+        sizes[i] = s
+    }
+}
+
+// The vertex layout of a buffer's ELEMENT, derived from its value struct at
+// compile time (`@vertex_expand`). The
+// pair replaces hand-written `stride, [components..]` at a call site, which is
+// a second statement of a layout the struct already makes -- and which a field
+// reorder silently invalidates, since the numbers stay valid-looking while every
+// attribute rebinds to a neighbour's bytes.
+//
+// Both come from one `vertex_plan`, so they cannot drift from each other, and
+// the expansion rejects a layout the float-unit form cannot state (an integer
+// attribute, or a field off its cumulative position). The CPU bodies never run
+// -- the calls are compiler-replaced; reaching one is a hard error, never a
+// silent fallback.
+pub @vertex_expand inline(lua) fn vertex_stride<T>(buf: FlatVec<T>) -> int = """
+    error("vertex_stride is compiler-expanded")
+"""
+
+pub @vertex_expand inline(lua) fn vertex_attr_sizes<T>(buf: FlatVec<T>) -> [int] = """
+    error("vertex_attr_sizes is compiler-expanded")
+"""
+
+// The NativeBuffer overloads: the expansion reads the ELEMENT type and accepts
+// either container, but a signature only admits the one it names, and the two
+// vertex stores in this engine are split across both (FlatVec for instance
+// data, NativeBuffer<Vertex> for the sprite batch).
+pub @vertex_expand inline(lua) fn vertex_stride<T>(buf: NativeBuffer<T>) -> int = """
+    error("vertex_stride is compiler-expanded")
+"""
+
+pub @vertex_expand inline(lua) fn vertex_attr_sizes<T>(buf: NativeBuffer<T>) -> [int] = """
+    error("vertex_attr_sizes is compiler-expanded")
+"""
+
+// attr_sizes are explicit at v0; A2c derives them from the @instance
+// struct's field layout (same sequential-location contract).
+pub fn gpu_mesh_new(
+    verts: Ptr<float>,
+    vert_count: int,
+    stride: int,
+    attr_sizes: [int],
+    mode: string,
+) -> GpuMesh {
+    static sizes = native_buffer_int(16)
+    __gpu_mesh_sizes(attr_sizes, sizes)
+    let handle = stone_mesh_create(
+        __gpu_mesh_mode(mode), verts, vert_count, stride,
+        sizes.ptr, attr_sizes.len())
+    if handle == 0 {
+        error("gpu_mesh_new: stone_mesh_create rejected (see MESH log)")
+    }
+    return GpuMesh {
+        handle: MeshId(handle),
+        vert_count: vert_count,
+        inst_count: 0,
+    }
+}
+
+// Instance attribs continue after the base attribs, divisor 1. count 0 is
+// valid (draws nothing); calling twice on one mesh is a v0 reject C-side.
+pub fn gpu_mesh_set_instances(
+    m: GpuMesh,
+    data: Ptr<float>,
+    count: int,
+    stride: int,
+    attr_sizes: [int],
+) {
+    static sizes = native_buffer_int(16)
+    __gpu_mesh_sizes(attr_sizes, sizes)
+    stone_mesh_set_instances(m.handle.0, data, count, stride, sizes.ptr, attr_sizes.len())
+    m.inst_count = count
+}
+
+// count < 0 = all instances; ignored for non-instanced meshes.
+//
+// THE account of the retained-mesh lane's texture slots, the twin of
+// `__stone_draw_mesh_vertex` for the sprite-format lane. `stone_mesh_draw`
+// binds `tex` to unit 0 itself and reports whether its own registry lookup
+// produced a texture -- a nonzero handle is not evidence of either, and a
+// second lookup here would be a different opinion about the same fact. A
+// negative result means nothing was drawn and owes no audit.
+pub fn gpu_mesh_draw(m: GpuMesh, tex: Image, count: int = -1) {
+    let result = stone_mesh_draw(m.handle.0, tex.0, count)
+    if result < 0 { return }
+    let shader_name = WATCHER.current_shader_name ?? return
+    if result != 0 {
+        mark_texture_slot_filled(shader_name, 0)
+    }
+    audit_texture_slots_for_draw(shader_name)
+}
+
+pub fn gpu_mesh_free(m: GpuMesh) {
+    stone_mesh_free(m.handle.0)
+    m.handle = MeshId(0)
+}

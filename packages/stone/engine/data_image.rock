@@ -1,0 +1,261 @@
+// Data-only graph capture/materialization for the boot cache. Aliases and cycles
+// remain shared within each fresh graph. Compiler-described storage is captured
+// as bytes with its identity; value cdata and value-table behavior are
+// reconstructed from the compiler metadata. Callables, runtime handles, raw
+// pointers and other host objects are outside this contract.
+@nomangle inline(lua) fn __stone_install_data_image() = """
+    if _G.__stone_data_image then return end
+    -- The compiler's description of `x`'s storage, or nil if `x` is not one.
+    local function storage_desc(x)
+        local reg = _G.__ROCK_NB_STORAGE
+        if not reg then return nil end
+        local ok, ct = pcall(function() return tostring(ffi.typeof(x)) end)
+        return ok and reg[ct] or nil
+    end
+
+    -- Scalar ctypes have a fixed byte representation. Other cdata needs a
+    -- compiler descriptor; pointers and undescribed aggregates are rejected.
+    local SCALAR_CTYPE = {}
+    for _, n in ipairs({
+        "bool", "char", "signed char", "unsigned char",
+        "short", "unsigned short", "int", "unsigned int",
+        "long", "unsigned long", "long long", "unsigned long long",
+        "int8_t", "uint8_t", "int16_t", "uint16_t",
+        "int32_t", "uint32_t", "int64_t", "uint64_t",
+        "float", "double", "long double",
+    }) do SCALAR_CTYPE["ctype<" .. n .. ">"] = true end
+    local function is_scalar_cdata(x)
+        local ok, ct = pcall(function() return tostring(ffi.typeof(x)) end)
+        return ok and SCALAR_CTYPE[ct] == true
+    end
+
+    -- This table's storage fields, and the leaf VIEWS that actually exist over
+    -- them: `{ field, cast, key }` per view, plus a field -> storage-key map.
+    --
+    -- A view is identified by what it IS, not by where it sits. Holding storage
+    -- makes a table a candidate, but a field is only that storage's view when it
+    -- carries a cdata of the descriptor's own cast type addressing the storage's
+    -- base -- which is also true of a zero-length buffer's view, where no
+    -- interior address exists to test. Co-location is not enough on its own:
+    -- `__vf` is a legal user field name, and a table holding a vertex buffer may
+    -- perfectly well carry an unrelated `__vf` number, which must be imaged as
+    -- the value it is rather than dropped and re-minted as a float pointer.
+    local function storage_shape(x)
+        local keys = nil
+        for k, v in pairs(x) do
+            if type(v) == "cdata" and storage_desc(v) then
+                keys = keys or {}
+                keys[#keys + 1] = k
+            end
+        end
+        if not keys then return nil, nil, nil end
+        table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+
+        local views, by_field = nil, nil
+        for _, k in ipairs(keys) do
+            local storage = x[k]
+            local base = ffi.cast("uintptr_t", storage)
+            for field, cast_ty in pairs(storage_desc(storage).views) do
+                local v = x[field]
+                if type(v) == "cdata" and ffi.istype(cast_ty, v)
+                   and ffi.cast("uintptr_t", v) == base then
+                    views = views or {}
+                    by_field = by_field or {}
+                    views[#views + 1] = { field = field, cast = cast_ty, key = k }
+                    by_field[field] = k
+                end
+            end
+        end
+        return keys, views, by_field
+    end
+    -- The field the walk last entered, formatted only when an error names it:
+    -- a large capture walks millions of fields, and formatting each one
+    -- eagerly was a measured part of its cost.
+    local function last_path(ctx)
+        if not ctx.last_owner then return nil end
+        return ctx.last_owner .. "." .. tostring(ctx.last_key)
+    end
+    local function plain(t)
+        return t == "nil" or t == "boolean" or t == "number" or t == "string"
+    end
+    local function dc(x, seen, ctx)
+        local t = type(x)
+        if plain(t) then return x end
+        local image_mode = ctx.image_mode
+        local code_kind = _G.__rock_code_ref_kind and _G.__rock_code_ref_kind(x) or nil
+        if t == "function" or code_kind ~= nil then
+            error("boot data cannot hold callable values; path=" .. tostring(last_path(ctx)), 0)
+        end
+        if t ~= "table" and t ~= "cdata" then
+            error("boot data cannot hold " .. t .. "; path=" .. tostring(last_path(ctx)), 0)
+        end
+        if t == "table" then
+            local storage_ref = rawget(x, "__stone_image_storage_ref")
+            if storage_ref ~= nil then
+                if image_mode ~= "materialize" then
+                    error("data image: image storage marker reached outside materialization", 0)
+                end
+                local record = ctx.image_storage and ctx.image_storage[storage_ref]
+                if not record then
+                    error("image has an unknown storage identity " .. tostring(storage_ref), 0)
+                end
+                local fresh = ctx.storage[storage_ref]
+                if not fresh then
+                    local count = #record.bytes / record.elem_size
+                    fresh = ffi.new(record.ctype .. "[?]", count)
+                    ffi.copy(fresh, record.bytes, #record.bytes)
+                    ctx.storage[storage_ref] = fresh
+                end
+                return fresh
+            end
+            local value_ref = rawget(x, "__stone_image_value_cdata")
+            if value_ref ~= nil then
+                if image_mode ~= "materialize" then
+                    error("data image: image value marker reached outside materialization", 0)
+                end
+                local out = ffi.new(value_ref.ctype)
+                ffi.copy(out, value_ref.bytes, #value_ref.bytes)
+                return out
+            end
+            local scalar_ref = rawget(x, "__stone_image_scalar_cdata")
+            if scalar_ref ~= nil then
+                if image_mode ~= "materialize" then
+                    error("data image: image scalar marker reached outside materialization", 0)
+                end
+                local out = ffi.new(scalar_ref.ctype .. "[1]")
+                ffi.copy(out, scalar_ref.bytes, #scalar_ref.bytes)
+                return out[0]
+            end
+        end
+        -- Value-struct cdata is captured as bytes and copied through its ctor;
+        -- returning the source would let an inline(lua) leaf write corrupt the
+        -- image. Cold path; an unknown ctype still fails closed below.
+        if t == "cdata" then
+            if image_mode ~= "capture" then
+                error("data image contains physical cdata outside its logical marker", 0)
+            end
+            local info = __rock_c_struct_of(x)
+            if info then
+                return {
+                    __stone_image_value_cdata = {
+                        ctype = info.name,
+                        bytes = ffi.string(x, ffi.sizeof(x)),
+                    }
+                }
+            end
+            local desc = storage_desc(x)
+            if desc then
+                local record = ctx.storage[x]
+                if not record then
+                    ctx.next_storage_id = (ctx.next_storage_id or 0) + 1
+                    record = {
+                        id = ctx.next_storage_id,
+                        ctype = desc.ctype,
+                        elem_size = desc.elem_size,
+                        bytes = ffi.string(x, ffi.sizeof(x)),
+                    }
+                    ctx.storage[x] = record
+                    ctx.storage_records[record.id] = record
+                end
+                return { __stone_image_storage_ref = record.id }
+            end
+            local ct = tostring(ffi.typeof(x))
+            -- A POINTER is writable -- `p[0] = v` stores through it -- and no
+            -- caller can prove what it addresses, so every mode rejects it.
+            if ct:find("%*") then
+                error("data image: '" .. (ctx.global or "?")
+                    .. "' holds a raw " .. ct .. " pointer. A pointer is writable and "
+                    .. "nothing proves what it addresses, so the walk cannot copy it.")
+            end
+            if is_scalar_cdata(x) then
+                local size = ffi.sizeof(x)
+                local ctype = ct:gsub("^ctype<", ""):gsub(">$", "")
+                local copy = ffi.new(ctype .. "[1]", x)
+                return {
+                    __stone_image_scalar_cdata = {
+                        ctype = ctype,
+                        bytes = ffi.string(copy, size),
+                    }
+                }
+            end
+            error("data image: '" .. (ctx.global or "?")
+                .. "' holds a " .. ct .. " cdata the walk cannot model. Only a boxed "
+                .. "C scalar is captured by value and only compiler-described storage "
+                .. "is imaged; a struct, union or undescribed array is writable in "
+                .. "place and would corrupt the copy.")
+        end
+        if image_mode ~= "capture" then
+            local unit = __rock_enum_unit(rawget(x, "__ty"), rawget(x, "__variant"))
+            if unit then return unit end
+        end
+        local hit = seen[x]
+        if hit then return hit end
+        local who = ctx.global or "?"
+        local rt = x.__ty
+        -- An image outlives the process that captured it, so it cannot name a
+        -- live Scene, Arena or Entity.
+        if image_mode == "capture" and (rt == "Scene" or rt == "Arena" or rt == "Entity") then
+            error("image capture cannot hold the " .. rt .. " in '" .. who .. "'", 0)
+        end
+        -- Value-table metatables are compiler-owned behavior, reconstructed by type.
+        local ti = rt and __rock_field_declaration(x)
+        local is_value_table = ti ~= nil and ti.kind == "value_table"
+        if getmetatable(x) ~= nil and not is_value_table then
+            error("boot data cannot hold an unmodeled metatable; path=" .. tostring(last_path(ctx)), 0)
+        end
+        local mt = is_value_table and getmetatable(x) or nil
+        if image_mode == "capture" then
+            mt = nil
+        elseif is_value_table and mt == nil and image_mode == "materialize" then
+            mt = rawget(_G, "__rock_vt_" .. rt)
+            if mt == nil then
+                error("image materialize: value struct '" .. tostring(rt)
+                    .. "' has no __rock_vt_ metatable; path=" .. tostring(last_path(ctx)), 0)
+            end
+        end
+        local o = {}
+        seen[x] = o
+        -- One scan: which fields of THIS table are storage, and which fields are
+        -- genuinely views over that storage.
+        local storage_keys, views, view_fields = nil, nil, nil
+        -- Logical images carry their storage shape marker; live storage is
+        -- rejected later in this walk.
+        if image_mode == "capture" then
+            storage_keys, views, view_fields = storage_shape(x)
+        end
+        if image_mode == "materialize" then
+            local shape = rawget(x, "__stone_image_storage_shape")
+            if shape then
+                storage_keys, views, view_fields = shape.keys, shape.views, {}
+                for _, view in ipairs(views or {}) do view_fields[view.field] = view.key end
+            end
+        end
+        for k, v in pairs(x) do
+            -- A real leaf view is DERIVED from the storage beside it, so a
+            -- capture does not image it and materialize does not rebuild it.
+            -- Anything that is not one of those views -- including a field
+            -- merely SPELLED `__vf` -- is an ordinary value and is copied.
+            if __rock_field_selected(x, k, "image", view_fields) then
+                ctx.last_owner = who; ctx.last_key = k
+                if not plain(type(k)) then
+                    o[dc(k, seen, ctx)] = dc(v, seen, ctx)
+                elseif plain(type(v)) then
+                    o[k] = v
+                else
+                    o[k] = dc(v, seen, ctx)
+                end
+            end
+        end
+        if image_mode == "capture" and storage_keys then
+            o.__stone_image_storage_shape = { keys = storage_keys, views = views }
+        end
+        if mt ~= nil then setmetatable(o, mt) end
+        return o
+    end
+    _G.__stone_data_image = function(value, seen, ctx)
+        if not ctx or (ctx.image_mode ~= "capture" and ctx.image_mode ~= "materialize") then
+            error("data image requires capture or materialize mode", 0)
+        end
+        return dc(value, seen, ctx)
+    end
+"""

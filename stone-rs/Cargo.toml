@@ -1,0 +1,96 @@
+[package]
+name = "stone-rs"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+anyhow = { workspace = true }
+rock-visual-bank = { workspace = true }
+libc = "0.2"
+fs-err = { workspace = true }
+once_cell = { workspace = true }
+log = { workspace = true }
+rock-log = { workspace = true }
+stone-gl = { path = "../crates/stone-gl" }
+stone-imgui-abi = { path = "../stone-imgui-abi" }
+
+# Cross-platform filesystem watcher for asset hot reload (same crates the
+# compiler's rock-cli/src/file_watcher.rs uses).
+notify = { workspace = true }
+notify-debouncer-full = { workspace = true }
+
+# SDL2 for windowing, input, events
+sdl2 = { version = "0.38" }
+stone-capture = { path = "../crates/stone-capture" }
+
+# OpenGL wrapper - works with any loader
+glow = "0.17"
+
+# Pure Rust image loading (replaces SDL2_image)
+image = { version = "0.25", default-features = false, features = ["png", "bmp", "jpeg"] }
+
+# Boot decodes ~200 images and 89% of that is CPU decode; the pool in
+# image_decode.rs fans it out while GL uploads stay on the GL thread.
+rayon = { workspace = true }
+
+# Glyph outlines + path rasterization. ttf-parser reads outlines, zeno
+# rasterizes and strokes them; synthesis (embolden, oblique) happens on the
+# outline before rasterizing, which fontdue's bitmap-only API cannot express.
+ttf-parser = "0.25"
+zeno = "0.3"
+
+# For safe casting of slices to byte arrays
+bytemuck = "1.14"
+
+# Pure Rust audio (replaces SoLoud/SDL_mixer)
+rodio = { version = "0.22", default-features = false, features = ["wav", "vorbis", "mp3", "playback"] }
+
+# High-quality Freeverb reverb algorithm
+freeverb = "0.2"
+
+# Small TOML reader for asset catalogs (pac/assets.toml). We expose
+# stone_assets_load_json which re-emits the parsed value as JSON so the
+# Rock side can decode via stdlib/json.rock without a TOML parser of its own.
+toml = "0.8"
+serde_json = "1"
+uuid = { workspace = true }
+ureq = "3.3"
+hmac = "0.12"
+sha2 = "0.10"
+
+[dev-dependencies]
+gamelibs = { workspace = true }
+# tests/image_decode.rs bakes its own PNG fixtures rather than depending on a
+# game's assets, so it needs the encoder side of the same crate.
+image = { version = "0.25", default-features = false, features = ["png"] }
+tempfile = "3.0"
+# Independent oracle for the glyph rasterizer: the ttf-parser/zeno path must
+# agree with fontdue on unmodified glyphs. Not a runtime dependency.
+fontdue = "0.9"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11 = { version = "2.21", features = ["xlib", "xtest"] }
+
+[target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
+arboard = "3.6.1"
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+serial_test = "3"
+
+[[example]]
+name = "macos_focus_teardown"
+test = false
+
+[features]
+bundled-sdl2 = ["sdl2/bundled", "sdl2/static-link"]
+
+[build-dependencies]
+gamelibs = { workspace = true }

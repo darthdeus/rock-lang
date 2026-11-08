@@ -1,0 +1,82 @@
+// The engine's generic UI shader pair and the SDF progress bar behind
+// `UiRect.sdf_bar` (stone/engine/ui/rect.rock). Authored in Rock; the compiler
+// generates the GLSL and registers the pipeline in-game via `rock_shader(...)`
+// at the call site -- no committed GENERATED .glsl, no offline `rock shader`
+// step. Field/param names ARE the binding contract: the UI batch supplies
+// aPos/aTexCoord attributes and uProjection/uView uniforms. Mag's own fragments
+// and every pipeline instance stay game-side.
+
+pub value QuadVert { aPos: Vec2, aTexCoord: Vec2, aColor: Vec4 }
+pub value UiVary   { position: Vec4, TexCoord: Vec2, Color: Vec4 }
+pub value UiParamVary { position: Vec4, TexCoord: Vec2, @flat ParamIndex: float }
+
+pub @shader(vertex)
+fn ui_vert(@attr a: QuadVert, @engine e: EngineU) -> UiVary {
+    let clip = e.uProjection * e.uView * Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }
+    return UiVary { position: clip, TexCoord: a.aTexCoord, Color: a.aColor }
+}
+
+pub @shader(vertex)
+fn ui_param_vert(@attr a: Vertex, @engine e: EngineU) -> UiParamVary {
+    let clip = e.uProjection * e.uView * v(a.pos.to_f64(), 0.0, 1.0)
+    return UiParamVary {
+        position: clip,
+        TexCoord: a.uv.to_f64(),
+        ParamIndex: a.colorize,
+    }
+}
+
+// Signed distance to a rounded box centered at origin, half-extents b,
+// corner radius r. <0 inside, >0 outside. Shared by the SDF bar and the game
+// fragments that round their own panels.
+pub fn sd_round_box(p: Vec2, b: Vec2, r: float) -> float {
+    let qx = abs(p.x) - b.x + r
+    let qy = abs(p.y) - b.y + r
+    let outside = v(max(qx, 0.0), max(qy, 0.0))
+    return min(max(qx, qy), 0.0) + outside.length() - r
+}
+
+// -- ui_sdf_bar: rounded-rect progress bar, AA'd via the box SDF, with a
+// traveling shimmer on the filled span. Works in "height units" (y in
+// [-0.5, 0.5], x scaled by aspect) so corners stay crisp at any size.
+
+// `UiSdfBarU` is declared in stone/engine/ui/rect.rock: the bar's uniform set
+// is the convention `UiRect.sdf_bar` writes, and more than one game consumes
+// it, so the shader ships beside the engine type it serves.
+
+pub @shader(fragment)
+fn ui_sdf_bar_frag(
+    vary: UiParamVary,
+    @engine e: EngineU,
+    @size(256) uQuad0: UniformArray<Vec4>,
+    @size(256) uQuad1: UniformArray<Vec4>,
+    @size(256) uQuad2: UniformArray<Vec4>
+) -> Vec4 {
+    let idx = vary.ParamIndex as int
+    let p0 = at(uQuad0, idx)
+    let fill = at(uQuad1, idx)
+    let bg = at(uQuad2, idx)
+    let aspect = p0.x / p0.y
+    let p = v((vary.TexCoord.x - 0.5) * aspect, vary.TexCoord.y - 0.5)
+    let half_b = v(aspect * 0.5, 0.5)
+    let rad = p0.w / p0.y * 3.0
+    let d = sd_round_box(p, half_b, rad)
+    let aa = fwidth(d)
+    let shape = 1.0 - smoothstep(-aa, aa, d)
+    if shape < 0.01 { discard() }
+    // Fill up to uRatio (left-to-right), bg beyond, AA'd at the edge.
+    let fe = fwidth(vary.TexCoord.x)
+    let fill_mask = 1.0 - smoothstep(p0.z - fe, p0.z + fe, vary.TexCoord.x)
+    let cr = lerp(bg.x, fill.x, fill_mask)
+    let cg = lerp(bg.y, fill.y, fill_mask)
+    let cb = lerp(bg.z, fill.z, fill_mask)
+    let ca = lerp(bg.w, fill.w, fill_mask)
+    // Subtle traveling shimmer on the filled span (keeps uTime live).
+    if fill_mask > 0.5 {
+        let sh = 0.06 * sin((vary.TexCoord.x * 6.0 - e.uEngineTime * 2.0) * 3.14159)
+        cr = cr + sh * fill.x
+        cg = cg + sh * fill.y
+        cb = cb + sh * fill.z
+    }
+    return Vec4 { x: cr, y: cg, z: cb, w: ca * shape }
+}

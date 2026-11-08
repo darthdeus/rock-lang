@@ -1,0 +1,129 @@
+pub global mouse_wheel_delta: int = 0
+
+// World text anchors quantize to whole canvas pixels. See GameConfig.
+pub global WORLD_TEXT_SNAP: bool = true
+// World text renders at whole multiples of the font's authored em. See
+// GameConfig.world_text_quantize_em.
+pub global WORLD_TEXT_QUANTIZE_EM: bool = false
+// Opt-in (GameConfig.cap_height_fonts): when true, the UI text path
+// (.text / measure_text / queue_ui_text) treats `size` as a cap-height
+// pixel target instead of an em-nominal size. Off by default so games
+// tuned to the legacy em unit are unaffected until they migrate.
+pub global CAP_HEIGHT_FONTS: bool = false
+pub global FONT_COVERAGE_OVERSAMPLING: float = FONT_COVERAGE_OVERSAMPLING_DEFAULT
+pub global FONT_RENDER_SCALE: float = 1.0
+pub global world_px: float = 1.0 / 16
+
+// Accumulated impact energy, 0..1. Amplitude is its SQUARE, so a shake decays
+// the way a struck thing rings down rather than the way a motor spins down --
+// linear amplitude reads as the camera being switched off.
+pub global CAMERA_TRAUMA: float = 0.0
+// Resolved once per frame in update_camera_shake, never per call: the frame
+// view folds it into resolved_camera_center, and every consumer of that
+// center has to agree, or the id buffer and the colour pass disagree about
+// where the world is.
+pub global CAMERA_SHAKE_OFFSET: Vec2 = v(0.0, 0.0)
+
+// Peak displacement in WORLD UNITS at full trauma -- a tile at mag's scale, so
+// keep it small. This is a hard bound, not a target: it is what lets a
+// precision game shake at all.
+pub const CAMERA_SHAKE_MAX: float = 0.18
+// Scales the shake where trauma becomes an offset; 0 keeps the camera still
+// (a staged clip) while trauma and its other readers carry on.
+pub global CAMERA_SHAKE_SCALE: float = 1.0
+const CAMERA_TRAUMA_DECAY: float = 2.2
+const CAMERA_SHAKE_FREQ: float = 26.0
+
+pub fn add_camera_trauma(amount: float) {
+    CAMERA_TRAUMA = clamp(CAMERA_TRAUMA + amount, 0, 1)
+}
+
+// Two incommensurate sines rather than a per-frame random: white noise is a
+// buzz whose character changes with the frame rate, and it cannot be sampled
+// twice in a frame for the same answer. Bounded by 1 by construction.
+@pure fn shake_axis(t: float, seed: float) -> float {
+    return sin(t + seed) * 0.6 + sin(t * 1.7 + seed * 3.1) * 0.4
+}
+
+pub @update(stage = 0) fn update_camera_shake() {
+    if CAMERA_TRAUMA <= 0 {
+        CAMERA_SHAKE_OFFSET = v(0.0, 0.0)
+        return
+    }
+
+    CAMERA_TRAUMA = clamp(CAMERA_TRAUMA - CAMERA_TRAUMA_DECAY * dt, 0, 1)
+
+    let amp = CAMERA_SHAKE_MAX * CAMERA_SHAKE_SCALE * CAMERA_TRAUMA * CAMERA_TRAUMA
+    let t = time * CAMERA_SHAKE_FREQ
+
+    CAMERA_SHAKE_OFFSET = v(shake_axis(t, 0.0), shake_axis(t, 17.0)) * amp
+}
+
+// The world-render translation for a view, in world units: what
+// stone_set_camera takes as its offset, paired with view.world_to_scene_scale.
+// The scene_source_rect term places a CrispArt symmetric crop -- without it
+// the world sits half a texel off inside its own raster.
+pub @pure fn camera_offset_in(view: FrameView) -> Vec2 {
+    let src = view.scene_source_rect
+    let s = view.world_to_scene_scale
+    // stone_set_camera measures X from the raster's left edge and Y from its
+    // BOTTOM, so the Y margin is the one below the source rect.
+    let bottom = (view.scene_size.y as float) - src.y - src.h
+    return v(
+        -view.resolved_camera_center.x + view.world_view_size.x / 2.0 + src.x / s,
+        -view.resolved_camera_center.y + view.world_view_size.y / 2.0 + bottom / s,
+    )
+}
+
+// A world point in the stored scene image, in the top-left coordinates canvas
+// readback takes. Presentation flips this image vertically, so increasing
+// world Y moves up in the presented view and down in the stored image.
+pub @pure fn world_to_scene_texel_in(view: FrameView, p: Vec2) -> Vec2 {
+    return (p + camera_offset_in(view)) * view.world_to_scene_scale
+}
+
+// The world-render translation under the view the world last rendered with.
+pub fn camera_offset() -> Vec2 {
+    let view = RENDER_VIEW ?? return v(0.0, 0.0)
+    return camera_offset_in(view)
+}
+
+// The same conversion against the view the world last rendered under -- the
+// raster the pixels actually landed in, so canvas readback and pixel
+// assertions convert through this rather than through presented output.
+pub fn world_to_scene_texel(p: Vec2) -> Vec2 {
+    let view = RENDER_VIEW ?? return v(0.0, 0.0)
+    return world_to_scene_texel_in(view, p)
+}
+
+// Scene texels per world unit under that same view.
+pub fn scene_scale() -> float {
+    let view = RENDER_VIEW ?? return 0.0
+    return view.world_to_scene_scale
+}
+
+pub fn camera_world_center() -> Vec2 {
+    let view = RENDER_VIEW ?? return active_camera().center
+    return view.resolved_camera_center
+}
+
+pub fn camera_world_viewport_size() -> Vec2 {
+    let view = RENDER_VIEW ?? return v(0.0, 0.0)
+    return view.world_view_size
+}
+
+// Returns the world-Y screen bounds packed into a Vec2: `.x` = min,
+// `.y` = max. NOT a position — a `value` Vec2 is used deliberately
+// instead of an `(float, float)` tuple: a tuple return is always a
+// fresh Lua heap table per call, whereas a non-nullable `value` return
+// scalarizes through the Rock call (zero alloc when it doesn't escape;
+// worst case a SINK-elided Vec2_ct). This is called per-sprite in
+// add_sprite_vertices_of.
+pub fn camera_y_bounds() -> Vec2 {
+    let center = camera_world_center()
+    let half_size = camera_world_viewport_size() / 2
+    let y_screen_min = center.y - half_size.y - 3
+    let y_screen_max = center.y + half_size.y + 3
+
+    return v(y_screen_min, y_screen_max)
+}

@@ -1,0 +1,622 @@
+// A uniform-grid spatial hash over shapes, rebuilt from scratch each frame.
+//
+// Entries are bucketed by a counting sort into one flat `sorted` array with
+// per-cell ranges, rather than a vector per cell: one contiguous scan per cell
+// on query, and no per-cell allocation on rebuild. Every buffer keeps its
+// capacity across rebuilds; only the logical counts reset.
+//
+// Geometry is stored in retained scalar columns and payloads are kept in a
+// separate retained vector. The grid decides WHICH entries get tested, never
+// which ones count as a hit.
+//
+// Cell coordinates are biased into a non-negative range and packed into one
+// integer. Both fit well inside a double's exact-integer range, so the key is
+// reversible rather than a hash -- two distinct cells can never collide into
+// one bucket.
+const SH_FAR: float = 1.0e30
+const SH_CELL_BIAS: int = 16777216
+const SH_CELL_STRIDE: int = 33554432
+
+pub struct SpatialHash<T> {
+    cell_size: float,
+
+    is_circle: [bool],
+    pos_x: [float],
+    pos_y: [float],
+    w: [float],
+    h: [float],
+    layer: [int],
+    blocks_light: [bool],
+    payload: [T],
+    shape_count: int,
+
+    cell_of: Map<int, int>,
+    cell_count: int,
+    counts: [int],
+    starts: [int],
+    fill: [int],
+    sorted: [int],
+    sorted_count: int,
+
+    // Per-entry query stamp: an entry occupying several cells is emitted once
+    // per query, without allocating a set.
+    stamp: [int],
+    query_id: int,
+
+    built: bool,
+}
+
+pub fn spatial_hash_new<T>(cell_size: float = 8.0) -> SpatialHash<T> {
+    return SpatialHash {
+        cell_size: cell_size,
+        is_circle: vec_new(),
+        pos_x: vec_new(),
+        pos_y: vec_new(),
+        w: vec_new(),
+        h: vec_new(),
+        layer: vec_new(),
+        blocks_light: vec_new(),
+        payload: vec_new(),
+        shape_count: 0,
+        cell_of: map_new(),
+        cell_count: 0,
+        counts: vec_new(),
+        starts: vec_new(),
+        fill: vec_new(),
+        sorted: vec_new(),
+        sorted_count: 0,
+        stamp: vec_new(),
+        query_id: 0,
+        built: false,
+    }
+}
+
+fn sh_cell_key(cx: int, cy: int) -> int {
+    return (cx + SH_CELL_BIAS) * SH_CELL_STRIDE + (cy + SH_CELL_BIAS)
+}
+
+fn sh_cell_coord(world: float, cell_size: float) -> int {
+    return int(floor(world / cell_size))
+}
+
+// Write at `i`, growing by one only when `i` is exactly the end. Keeps the
+// backing capacity across rebuilds instead of reallocating.
+fn sh_put_int(v: [int], i: int, x: int) {
+    if i < vec_len(v) { v.set(i, x) } else { vec_push(v, x) }
+}
+
+fn sh_put_float(v: [float], i: int, x: float) {
+    if i < vec_len(v) { v.set(i, x) } else { vec_push(v, x) }
+}
+
+fn sh_put_bool(v: [bool], i: int, x: bool) {
+    if i < vec_len(v) { v.set(i, x) } else { vec_push(v, x) }
+}
+
+fn sh_put_payload<T>(v: [T], i: int, x: T) {
+    if i < vec_len(v) { v.set(i, x) } else { vec_push(v, x) }
+}
+
+// Counting-sort placement writes at scattered offsets, not in order, so the
+// output array must be sized before the placing pass rather than grown at the
+// write.
+fn sh_ensure_int(v: [int], n: int) {
+    for _ in vec_len(v)..n { vec_push(v, 0) }
+}
+
+// The entry's true AABB half-extents. Every exact test a query can apply is
+// bounded by this box, so an entry can never be a hit in a cell it was not
+// bucketed into.
+fn sh_reach_half_x<T>(sh: SpatialHash<T>, entry: int) -> float {
+    if sh.is_circle[entry] { return sh.w[entry] }
+    return sh.w[entry] * 0.5
+}
+
+fn sh_reach_half_y<T>(sh: SpatialHash<T>, entry: int) -> float {
+    if sh.is_circle[entry] { return sh.w[entry] }
+    return sh.h[entry] * 0.5
+}
+
+fn sh_shape_min_x<T>(sh: SpatialHash<T>, entry: int) -> float {
+    return sh.pos_x[entry] - sh_reach_half_x(sh, entry)
+}
+
+fn sh_shape_max_x<T>(sh: SpatialHash<T>, entry: int) -> float {
+    return sh.pos_x[entry] + sh_reach_half_x(sh, entry)
+}
+
+fn sh_shape_min_y<T>(sh: SpatialHash<T>, entry: int) -> float {
+    return sh.pos_y[entry] - sh_reach_half_y(sh, entry)
+}
+
+fn sh_shape_max_y<T>(sh: SpatialHash<T>, entry: int) -> float {
+    return sh.pos_y[entry] + sh_reach_half_y(sh, entry)
+}
+
+// --- fill ---
+
+pub fn spatial_hash_begin<T>(sh: SpatialHash<T>) {
+    sh.payload.clear()
+    sh.cell_of.clear()
+    sh.shape_count = 0
+    sh.cell_count = 0
+    sh.sorted_count = 0
+    sh.built = false
+}
+
+fn spatial_hash_add_entry<T>(sh: SpatialHash<T>, is_circle: bool, pos: Vec2,
+                             w: float, h: float, layer: int,
+                             data: T, blocks_light: bool) {
+    sh_put_bool(sh.is_circle, sh.shape_count, is_circle)
+    sh_put_float(sh.pos_x, sh.shape_count, pos.x)
+    sh_put_float(sh.pos_y, sh.shape_count, pos.y)
+    sh_put_float(sh.w, sh.shape_count, w)
+    sh_put_float(sh.h, sh.shape_count, h)
+    sh_put_int(sh.layer, sh.shape_count, layer)
+    sh_put_bool(sh.blocks_light, sh.shape_count, blocks_light)
+    sh_put_payload(sh.payload, sh.shape_count, data)
+    sh_put_int(sh.stamp, sh.shape_count, -1)
+    sh.shape_count += 1
+    sh.built = false
+}
+
+pub fn spatial_hash_add_circle<T>(sh: SpatialHash<T>, pos: Vec2, radius: float, layer: int, data: T, blocks_light: bool = false) {
+    spatial_hash_add_entry(sh, true, pos, radius, radius, layer, data, blocks_light)
+}
+
+pub fn spatial_hash_add_rect<T>(sh: SpatialHash<T>, pos: Vec2, w: float, h: float, layer: int, data: T, blocks_light: bool = false) {
+    spatial_hash_add_entry(sh, false, pos, w, h, layer, data, blocks_light)
+}
+
+// --- build ---
+
+// Assigns `key` a dense cell slot, creating one if this is its first entry.
+fn sh_intern_cell<T>(sh: SpatialHash<T>, key: int) -> int {
+    let existing = sh.cell_of.get(key)
+    if existing != null { return existing.unwrap() }
+
+    let slot = sh.cell_count
+    sh.cell_of[key] = slot
+    sh_put_int(sh.counts, slot, 0)
+    sh.cell_count = slot + 1
+    return slot
+}
+
+// Counting sort: count per cell, prefix-sum into starts, then place. Two
+// passes over the entries, one contiguous output array.
+pub fn spatial_hash_build<T>(sh: SpatialHash<T>) {
+    let cs = sh.cell_size
+
+    for i in 0..sh.shape_count {
+        let cx0 = sh_cell_coord(sh_shape_min_x(sh, i), cs)
+        let cx1 = sh_cell_coord(sh_shape_max_x(sh, i), cs)
+        let cy0 = sh_cell_coord(sh_shape_min_y(sh, i), cs)
+        let cy1 = sh_cell_coord(sh_shape_max_y(sh, i), cs)
+
+        // A shape smaller than a cell usually lands inside one, and then both
+        // nested loops trip exactly once. Measured on mag's combat bench: 4,080
+        // of 4,080 entries into these loops had a trip count of 1, which is a
+        // loop header LuaJIT starts a root trace at and then aborts, because
+        // the loop leaves on the very iteration being recorded. Handling the
+        // single cell before the nest keeps that header off the hot path.
+        // The body is repeated rather than shared through a helper on purpose:
+        // a two-line helper called once per shape is exactly the shape that
+        // becomes its own trace root and aborts returning to this frame, which
+        // is the same class this branch exists to remove.
+        if cx0 == cx1 && cy0 == cy1 {
+            let slot = sh_intern_cell(sh, sh_cell_key(cx0, cy0))
+            sh.counts.set(slot, sh.counts[slot] + 1)
+            continue
+        }
+
+        for cx in cx0..(cx1 + 1) {
+            for cy in cy0..(cy1 + 1) {
+                let slot = sh_intern_cell(sh, sh_cell_key(cx, cy))
+                sh.counts.set(slot, sh.counts[slot] + 1)
+            }
+        }
+    }
+
+    let total = 0
+    for slot in 0..sh.cell_count {
+        sh_put_int(sh.starts, slot, total)
+        sh_put_int(sh.fill, slot, 0)
+        total += sh.counts[slot]
+    }
+    sh_put_int(sh.starts, sh.cell_count, total)
+    sh.sorted_count = total
+    sh_ensure_int(sh.sorted, total)
+
+    for i in 0..sh.shape_count {
+        let cx0 = sh_cell_coord(sh_shape_min_x(sh, i), cs)
+        let cx1 = sh_cell_coord(sh_shape_max_x(sh, i), cs)
+        let cy0 = sh_cell_coord(sh_shape_min_y(sh, i), cs)
+        let cy1 = sh_cell_coord(sh_shape_max_y(sh, i), cs)
+
+        // Same single-cell path as the counting pass above, and it has to stay
+        // in step with it: the two passes must agree on every shape's cells or
+        // the counting sort writes outside the range it reserved.
+        if cx0 == cx1 && cy0 == cy1 {
+            if let found = sh.cell_of.get(sh_cell_key(cx0, cy0)) {
+                let at = sh.starts[found] + sh.fill[found]
+                sh.sorted.set(at, i)
+                sh.fill.set(found, sh.fill[found] + 1)
+            }
+            continue
+        }
+
+        for cx in cx0..(cx1 + 1) {
+            for cy in cy0..(cy1 + 1) {
+                let found = sh.cell_of.get(sh_cell_key(cx, cy))
+                if found == null { continue }
+                let slot = found.unwrap()
+                let at = sh.starts[slot] + sh.fill[slot]
+                sh.sorted.set(at, i)
+                sh.fill.set(slot, sh.fill[slot] + 1)
+            }
+        }
+    }
+
+    sh.built = true
+}
+
+pub fn spatial_hash_len<T>(sh: SpatialHash<T>) -> int {
+    return sh.shape_count
+}
+
+pub fn spatial_hash_payload_len<T>(sh: SpatialHash<T>) -> int {
+    return vec_len(sh.payload)
+}
+
+// Total entry-to-cell placements. Exceeds `len` exactly when shapes span
+// several cells, which is what the query stamp deduplicates.
+pub fn spatial_hash_placements<T>(sh: SpatialHash<T>) -> int {
+    return sh.sorted_count
+}
+
+pub fn spatial_hash_cell_count<T>(sh: SpatialHash<T>) -> int {
+    return sh.cell_count
+}
+
+// --- query ---
+
+// Candidate iteration is open-coded per query rather than shared, because each
+// query needs a different exact test and Rock has no zero-cost callback here.
+// The three share `sh_begin_query` and the stamp discipline.
+fn sh_begin_query<T>(sh: SpatialHash<T>) -> int {
+    assert(sh.built, "spatial hash queried before spatial_hash_build")
+    sh.query_id += 1
+    return sh.query_id
+}
+
+fn sh_seen<T>(sh: SpatialHash<T>, entry: int, qid: int) -> bool {
+    if sh.stamp[entry] == qid { return true }
+    sh.stamp.set(entry, qid)
+    return false
+}
+
+fn sh_circle_hits_entry<T>(sh: SpatialHash<T>, entry: int,
+                           pos: Vec2, radius: float) -> bool {
+    let shape_pos = v(sh.pos_x[entry], sh.pos_y[entry])
+    if sh.is_circle[entry] {
+        return shape_pos.distance(pos) < (sh.w[entry] + radius)
+    }
+    let closest_x = clamp(pos.x, shape_pos.x - sh.w[entry] * 0.5,
+        shape_pos.x + sh.w[entry] * 0.5)
+    let closest_y = clamp(pos.y, shape_pos.y - sh.h[entry] * 0.5,
+        shape_pos.y + sh.h[entry] * 0.5)
+    return pos.distance(v(closest_x, closest_y)) < radius
+}
+
+fn sh_rect_hits_entry<T>(sh: SpatialHash<T>, entry: int,
+                         pos: Vec2, half: Vec2) -> bool {
+    let shape_pos = v(sh.pos_x[entry], sh.pos_y[entry])
+    if sh.is_circle[entry] {
+        let closest_x = clamp(shape_pos.x, pos.x - half.x, pos.x + half.x)
+        let closest_y = clamp(shape_pos.y, pos.y - half.y, pos.y + half.y)
+        return shape_pos.distance(v(closest_x, closest_y)) < sh.w[entry]
+    }
+    let overlap_x = half.x + sh.w[entry] * 0.5 - abs(pos.x - shape_pos.x)
+    let overlap_y = half.y + sh.h[entry] * 0.5 - abs(pos.y - shape_pos.y)
+    return overlap_x > 0 && overlap_y > 0
+}
+
+fn sh_layer_matches<T>(sh: SpatialHash<T>, entry: int, layer: int?) -> bool {
+    if layer == null { return true }
+    return sh.layer[entry] == layer.unwrap()
+}
+
+// Every entry overlapping the circle, each returned at most once. Results are
+// live entry indices and remain valid until the next begin.
+pub fn spatial_hash_query_circle_all<T>(sh: SpatialHash<T>, pos: Vec2, radius: float,
+                                    layer: int?, result: [int]) {
+    result.clear()
+    let qid = sh_begin_query(sh)
+    let cs = sh.cell_size
+
+    let cx0 = sh_cell_coord(pos.x - radius, cs)
+    let cx1 = sh_cell_coord(pos.x + radius, cs)
+    let cy0 = sh_cell_coord(pos.y - radius, cs)
+    let cy1 = sh_cell_coord(pos.y + radius, cs)
+
+    for cx in cx0..(cx1 + 1) {
+        for cy in cy0..(cy1 + 1) {
+            let found = sh.cell_of.get(sh_cell_key(cx, cy))
+            if found == null { continue }
+            let slot = found.unwrap()
+
+            for at in sh.starts[slot]..sh.starts[slot + 1] {
+                let entry = sh.sorted[at]
+                if sh_seen(sh, entry, qid) { continue }
+                if !sh_layer_matches(sh, entry, layer) { continue }
+                if sh_circle_hits_entry(sh, entry, pos, radius) { result.push(entry) }
+            }
+        }
+    }
+}
+
+pub fn spatial_hash_query_circle_all<T>(sh: SpatialHash<T>, pos: Vec2, radius: float,
+                                    layer: int?) -> [int] {
+    let result: [int] = []
+    spatial_hash_query_circle_all(sh, pos, radius, layer, result)
+    return result
+}
+
+// The closest overlapping entry by centre distance, or null.
+pub fn spatial_hash_query_circle<T>(sh: SpatialHash<T>, pos: Vec2, radius: float, layer: int?) -> int? {
+    let best: int? = null
+    let best_dist = 0.0
+    let qid = sh_begin_query(sh)
+    let cs = sh.cell_size
+
+    let cx0 = sh_cell_coord(pos.x - radius, cs)
+    let cx1 = sh_cell_coord(pos.x + radius, cs)
+    let cy0 = sh_cell_coord(pos.y - radius, cs)
+    let cy1 = sh_cell_coord(pos.y + radius, cs)
+
+    for cx in cx0..(cx1 + 1) {
+        for cy in cy0..(cy1 + 1) {
+            let found = sh.cell_of.get(sh_cell_key(cx, cy))
+            if found == null { continue }
+            let slot = found.unwrap()
+
+            for at in sh.starts[slot]..sh.starts[slot + 1] {
+                let entry = sh.sorted[at]
+                if sh_seen(sh, entry, qid) { continue }
+                if !sh_layer_matches(sh, entry, layer) { continue }
+                if !sh_circle_hits_entry(sh, entry, pos, radius) { continue }
+
+                let d = v(sh.pos_x[entry], sh.pos_y[entry]).distance(pos)
+                if best == null || d < best_dist {
+                    best = entry
+                    best_dist = d
+                }
+            }
+        }
+    }
+
+    return best
+}
+
+// Every entry overlapping the rect, each returned at most once.
+pub fn spatial_hash_query_rect<T>(sh: SpatialHash<T>, pos: Vec2, size: Vec2,
+                              layer: int?, result: [int]) {
+    result.clear()
+    let qid = sh_begin_query(sh)
+    let cs = sh.cell_size
+    let half = size * 0.5
+
+    let cx0 = sh_cell_coord(pos.x - half.x, cs)
+    let cx1 = sh_cell_coord(pos.x + half.x, cs)
+    let cy0 = sh_cell_coord(pos.y - half.y, cs)
+    let cy1 = sh_cell_coord(pos.y + half.y, cs)
+
+    for cx in cx0..(cx1 + 1) {
+        for cy in cy0..(cy1 + 1) {
+            let found = sh.cell_of.get(sh_cell_key(cx, cy))
+            if found == null { continue }
+            let slot = found.unwrap()
+
+            for at in sh.starts[slot]..sh.starts[slot + 1] {
+                let entry = sh.sorted[at]
+                if sh_seen(sh, entry, qid) { continue }
+                if !sh_layer_matches(sh, entry, layer) { continue }
+                if sh_rect_hits_entry(sh, entry, pos, half) { result.push(entry) }
+            }
+        }
+    }
+
+}
+
+pub fn spatial_hash_query_rect<T>(sh: SpatialHash<T>, pos: Vec2, size: Vec2,
+                              layer: int?) -> [int] {
+    let result: [int] = []
+    spatial_hash_query_rect(sh, pos, size, layer, result)
+    return result
+}
+
+// --- raycast ---
+
+// Amanatides-Woo grid traversal: visit the cells the segment crosses in order,
+// nearest first, and stop as soon as the best hit so far is closer than the
+// next cell's entry point. An entry is bucketed into every cell its extent
+// overlaps, so the cell containing a hit point always holds the entry that
+// produced it -- which is what makes the in-order early exit sound.
+//
+// Distances are carried as the segment parameter t in [0, 1] so they compare
+// directly against the traversal boundaries.
+fn spatial_hash_raycast_impl<T>(
+    sh: SpatialHash<T>,
+    start: Vec2,
+    line_end: Vec2,
+    layer: int?,
+    blocking_only: bool
+) -> Hit<T>? {
+    let qid = sh_begin_query(sh)
+    if sh.shape_count == 0 { return null }
+    let cs = sh.cell_size
+
+    let dx = line_end.x - start.x
+    let dy = line_end.y - start.y
+    let seg_len = start.distance(line_end)
+
+    let result: Hit<T>? = null
+    let best_t = SH_FAR
+
+    let cx = sh_cell_coord(start.x, cs)
+    let cy = sh_cell_coord(start.y, cs)
+    let cx_end = sh_cell_coord(line_end.x, cs)
+    let cy_end = sh_cell_coord(line_end.y, cs)
+
+    let step_x = 0
+    let t_max_x = SH_FAR
+    let t_delta_x = SH_FAR
+    if dx > 0.0 {
+        step_x = 1
+        t_max_x = (((cx + 1) as float) * cs - start.x) / dx
+        t_delta_x = cs / dx
+    } else if dx < 0.0 {
+        step_x = -1
+        t_max_x = ((cx as float) * cs - start.x) / dx
+        t_delta_x = -cs / dx
+    }
+
+    let step_y = 0
+    let t_max_y = SH_FAR
+    let t_delta_y = SH_FAR
+    if dy > 0.0 {
+        step_y = 1
+        t_max_y = (((cy + 1) as float) * cs - start.y) / dy
+        t_delta_y = cs / dy
+    } else if dy < 0.0 {
+        step_y = -1
+        t_max_y = ((cy as float) * cs - start.y) / dy
+        t_delta_y = -cs / dy
+    }
+
+    // Exactly the number of cells a DDA can visit, so the walk is bounded by
+    // construction rather than by a float comparison.
+    let max_steps = abs(cx_end - cx) + abs(cy_end - cy) + 2
+
+    for _step in 0..max_steps {
+        let found = sh.cell_of.get(sh_cell_key(cx, cy))
+        if found != null {
+            let slot = found.unwrap()
+            for at in sh.starts[slot]..sh.starts[slot + 1] {
+                let entry = sh.sorted[at]
+                if sh_seen(sh, entry, qid) { continue }
+
+                let matches = if blocking_only {
+                    sh.blocks_light[entry]
+                } else {
+                    sh_layer_matches(sh, entry, layer)
+                }
+                if !matches { continue }
+
+                let shape_pos = v(sh.pos_x[entry], sh.pos_y[entry])
+                if sh.is_circle[entry] {
+                    if let hit_info = line_intersects_circle(start, line_end,
+                                                             shape_pos, sh.w[entry]) {
+                        let (point, distance) = hit_info
+                        let t = if seg_len > 0.0 { distance / seg_len } else { 0.0 }
+                        if t < best_t {
+                            best_t = t
+                            result = Hit {
+                                data: spatial_hash_payload(sh, entry),
+                                point: point,
+                                distance: distance,
+                            }
+                        }
+                    }
+                } else {
+                    if let hit_info = line_intersects_rect(start, line_end,
+                                                           shape_pos,
+                                                           v(sh.w[entry], sh.h[entry])) {
+                        let (point, distance) = hit_info
+                        let t = if seg_len > 0.0 { distance / seg_len } else { 0.0 }
+                        if t < best_t {
+                            best_t = t
+                            result = Hit {
+                                data: spatial_hash_payload(sh, entry),
+                                point: point,
+                                distance: distance,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let t_next = if t_max_x < t_max_y { t_max_x } else { t_max_y }
+        if result != null && best_t <= t_next { break }
+        if t_next > 1.0 { break }
+
+        if t_max_x < t_max_y {
+            cx += step_x
+            t_max_x += t_delta_x
+        } else {
+            cy += step_y
+            t_max_y += t_delta_y
+        }
+    }
+
+    return result
+}
+
+pub fn spatial_hash_raycast<T>(sh: SpatialHash<T>, start: Vec2, line_end: Vec2, layer: int?) -> Hit<T>? {
+    return spatial_hash_raycast_impl(sh, start, line_end, layer, false)
+}
+
+pub fn spatial_hash_raycast_blocking<T>(sh: SpatialHash<T>, start: Vec2, line_end: Vec2) -> Hit<T>? {
+    return spatial_hash_raycast_impl(sh, start, line_end, null, true)
+}
+
+pub fn spatial_hash_payload<T>(sh: SpatialHash<T>, i: int) -> T {
+    assert(i >= 0 && i < sh.shape_count, "spatial hash index out of range")
+    return sh.payload[i]
+}
+
+pub fn spatial_hash_is_circle<T>(sh: SpatialHash<T>, i: int) -> bool {
+    assert(i >= 0 && i < sh.shape_count, "spatial hash index out of range")
+    return sh.is_circle[i]
+}
+
+pub fn spatial_hash_pos<T>(sh: SpatialHash<T>, i: int) -> Vec2 {
+    assert(i >= 0 && i < sh.shape_count, "spatial hash index out of range")
+    return v(sh.pos_x[i], sh.pos_y[i])
+}
+
+pub fn spatial_hash_width<T>(sh: SpatialHash<T>, i: int) -> float {
+    assert(i >= 0 && i < sh.shape_count, "spatial hash index out of range")
+    return sh.w[i]
+}
+
+pub fn spatial_hash_height<T>(sh: SpatialHash<T>, i: int) -> float {
+    assert(i >= 0 && i < sh.shape_count, "spatial hash index out of range")
+    return sh.h[i]
+}
+
+pub fn spatial_hash_layer<T>(sh: SpatialHash<T>, i: int) -> int {
+    assert(i >= 0 && i < sh.shape_count, "spatial hash index out of range")
+    return sh.layer[i]
+}
+
+pub fn spatial_hash_blocks_light<T>(sh: SpatialHash<T>, i: int) -> bool {
+    assert(i >= 0 && i < sh.shape_count, "spatial hash index out of range")
+    return sh.blocks_light[i]
+}
+
+pub fn spatial_hash_contains<T>(sh: SpatialHash<T>, i: int, point: Vec2) -> bool {
+    let pos = spatial_hash_pos(sh, i)
+    if spatial_hash_is_circle(sh, i) {
+        return pos.distance(point) < spatial_hash_width(sh, i)
+    }
+    let half_w = spatial_hash_width(sh, i) * 0.5
+    let half_h = spatial_hash_height(sh, i) * 0.5
+    return point.x >= pos.x - half_w && point.x <= pos.x + half_w
+        && point.y >= pos.y - half_h && point.y <= pos.y + half_h
+}
+
+pub fn spatial_hash_add_rect<T>(sh: SpatialHash<T>, pos: Vec2, size: Vec2, layer: int, data: T, blocks_light: bool = false) {
+    spatial_hash_add_rect(sh, pos, size.x, size.y, layer, data, blocks_light)
+}

@@ -1,0 +1,135 @@
+global PRESENT_COMMAND_TEST_RETAINED: GpuPass? = null
+
+fn present_command_allocation_window(source: Canvas, target: Canvas) -> (float, int) {
+    __gc_collect_stop()
+    stone_lua_counter_install()
+    stone_lua_counter_begin()
+    let kb0 = lua_alloc_gross_request_kb()
+    let calls0 = lua_alloc_allocation_call_count()
+    for _ in 0..1024 {
+        PRESENT_COMMAND_TEST_RETAINED = present_composite_command(GpuTarget::Canvas(target), source,
+            GpuRect { x: 0, y: 0, w: 8, h: 8 })
+    }
+    let kb = lua_alloc_gross_request_kb() - kb0
+    let calls = lua_alloc_allocation_call_count() - calls0
+    stone_lua_counter_end()
+    __gc_restart()
+    return (kb, calls)
+}
+
+@test
+fn present_command_refresh_and_observer_ownership() {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    let source = new_canvas(8.0, 8.0, "rgba8")
+    let other = new_canvas(16.0, 16.0, "rgba8")
+    let trace = GPU_TRACE_ON
+    let inspector = ENGINE.show_pipeline_inspector
+    let probe = UI_SUBMISSION_PROBE_ON
+    let cached = PRESENT_COMPOSITE_COMMAND
+    PRESENT_COMPOSITE_COMMAND = null
+    world_fixture_with_cleanup(() => {
+        for mode in 0..4 {
+            GPU_TRACE_ON = mode == 1
+            ENGINE.show_pipeline_inspector = mode == 2
+            UI_SUBMISSION_PROBE_ON = mode == 3
+            let first = present_composite_command(GpuTarget::Window, source,
+                GpuRect { x: 0, y: 0, w: 8, h: 8 })
+            let next = present_composite_command(GpuTarget::Canvas(source), other,
+                GpuRect { x: 1, y: 2, w: 4, h: 5 })
+            assert(sampled_texture_matches_canvas(next.draws[0].bindings[0].resource, other),
+                "next present binds the current source and its extent")
+            assert_eq(next.viewport.x, 1)
+            assert_eq(next.viewport.h, 5)
+            assert_eq(next.target, GpuTarget::Canvas(source))
+            assert_eq(next.draws[0].bindings[0].filter, TextureFilter::Linear)
+            if mode != 0 {
+                assert(sampled_texture_matches_canvas(first.draws[0].bindings[0].resource, source),
+                    "observer-owned command must not change after the next present")
+                assert_eq(first.target, GpuTarget::Window)
+                assert_eq(first.viewport.w, 8)
+                GPU_TRACE_ON = false
+                ENGINE.show_pipeline_inspector = false
+                UI_SUBMISSION_PROBE_ON = false
+                let _ = present_composite_command(GpuTarget::Window, source,
+                    GpuRect { x: 0, y: 0, w: 8, h: 8 })
+                assert(sampled_texture_matches_canvas(next.draws[0].bindings[0].resource, other),
+                    "turning observers off must not recycle their last retained command")
+                assert_eq(next.viewport.h, 5)
+            }
+        }
+    }, () => {
+        GPU_TRACE_ON = trace
+        ENGINE.show_pipeline_inspector = inspector
+        UI_SUBMISSION_PROBE_ON = probe
+        PRESENT_COMMAND_TEST_RETAINED = null
+        PRESENT_COMPOSITE_COMMAND = cached
+        destroy_canvas(source)
+        destroy_canvas(other)
+    }, world_fixture_traceback)
+}
+
+@test
+fn present_command_warmed_allocation_rule() {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    let source = new_canvas(8.0, 8.0, "rgba8")
+    let target = new_canvas(8.0, 8.0, "rgba8")
+    let trace = GPU_TRACE_ON
+    let inspector = ENGINE.show_pipeline_inspector
+    let probe = UI_SUBMISSION_PROBE_ON
+    let cached = PRESENT_COMPOSITE_COMMAND
+    PRESENT_COMPOSITE_COMMAND = null
+    world_fixture_with_cleanup(() => {
+        GPU_TRACE_ON = false
+        ENGINE.show_pipeline_inspector = false
+        UI_SUBMISSION_PROBE_ON = false
+        assert(jit_status_string().starts_with("on"), "allocation witness requires JIT on")
+        let _ = present_command_allocation_window(source, target)
+        let (kb_a, calls_a) = present_command_allocation_window(source, target)
+        let (kb_b, calls_b) = present_command_allocation_window(source, target)
+        let kb = min(kb_a, kb_b)
+        let calls = min(calls_a, calls_b)
+        log_info("PERF", "PRESENT_COMMAND operations=1024 kb={kb} calls={calls}")
+        assert(kb < 256.0, "warmed presentation avoids rebuilding command containers: {kb} KiB")
+    }, () => {
+        GPU_TRACE_ON = trace
+        ENGINE.show_pipeline_inspector = inspector
+        UI_SUBMISSION_PROBE_ON = probe
+        PRESENT_COMMAND_TEST_RETAINED = null
+        PRESENT_COMPOSITE_COMMAND = cached
+        destroy_canvas(source)
+        destroy_canvas(target)
+    }, world_fixture_traceback)
+}
+
+@test
+fn present_command_executes_current_source() {
+    ui_blit_test_fixture((source, target) => {
+        let composite = COMPOSITE_CANVAS
+        let cached = PRESENT_COMPOSITE_COMMAND
+        let inspector = ENGINE.show_pipeline_inspector
+        PRESENT_COMPOSITE_COMMAND = null
+        ENGINE.show_pipeline_inspector = false
+        world_fixture_with_cleanup(() => {
+            for round in 0..2 {
+                set_canvas(source)
+                stone_clear_canvas(if round == 0 { 0.0 } else { 1.0 },
+                    if round == 0 { 1.0 } else { 0.0 }, 0.0, 1.0)
+                unset_canvas()
+                let before = stone_get_graphics_stats().draw_calls
+                COMPOSITE_CANVAS = source
+                present_composite(GpuTarget::Canvas(target))
+                assert_eq(stone_get_graphics_stats().draw_calls, before + 1,
+                    "each presentation executes exactly one draw")
+                assert_eq(read_canvas_pixel(target, 4, 4), read_canvas_pixel(source, 2, 2),
+                    "the reused present samples this call's pixels")
+                assert(COMPOSITE_CANVAS == null, "presentation consumes the pending composite")
+            }
+        }, () => {
+            COMPOSITE_CANVAS = composite
+            PRESENT_COMPOSITE_COMMAND = cached
+            ENGINE.show_pipeline_inspector = inspector
+        }, world_fixture_traceback)
+    })
+}

@@ -1,0 +1,46 @@
+// The immediate text pipeline shader (stone-rs/src/text.rs), authored in Rock:
+// compiled in-game via `rock_shader(text_vert, text_frag)` -- no committed GLSL.
+// text.rs draws through this program: it resolves the registry program by the
+// handle Rock passes (get_shader_handle(text_shader)) and binds the GL_RED glyph
+// atlas to unit 0, which is `TextTex`'s slot 0 -- `bind_texture_slots` points the
+// sampler there at link time rather than leaning on GLSL's default. textColor
+// and the matrices both arrive as BLOCKS, uploaded by `stone_draw_text_for`
+// before the draw; neither is reachable by name.
+//
+// VERTEX-FORMAT LOCKSTEP: the two Vec2 @attr fields fix attribute locations 0,1
+// (pos, texcoord), matching text.rs's interleaved [pos.xy, tex.xy] vertex buffer
+// (stride 16: loc 0 offset 0, loc 1 offset 8). The old single packed-vec4 attr
+// is gone; the bytes are unchanged.
+
+value TextVert {
+    pos: Vec2,
+    texcoord: Vec2,
+}
+
+value TextVary {
+    position: Vec4,
+    TexCoords: Vec2,
+}
+
+// text.rs binds the font atlas to unit 0, so `text` must be the only field.
+struct TextTex {
+    text: Sampler2D,
+}
+
+value TextFragU {
+    textColor: Vec4,
+}
+
+@shader(vertex)
+fn text_vert(@attr a: TextVert, @engine e: EngineU) -> TextVary {
+    return TextVary {
+        position: e.uProjection * e.uView * v(a.pos, 0.0, 1.0),
+        TexCoords: a.texcoord,
+    }
+}
+
+@shader(fragment)
+fn text_frag(vary: TextVary, @uniform u: TextFragU, @textures t: TextTex) -> Vec4 {
+    // Single-channel (GL_RED) atlas sampled into alpha, tinted by textColor.
+    return u.textColor * v(1.0, 1.0, 1.0, texture(t.text, vary.TexCoords).r)
+}

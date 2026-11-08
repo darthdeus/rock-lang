@@ -37,6 +37,10 @@ members = [
     "crates/skull-fmt",
     "crates/skull-parser",
     "crates/test-utils",
+    "crates/stone-capture",
+    "crates/stone-gl",
+    "stone-imgui-abi",
+    "stone-rs",
 ]
 
 # Keep plain cargo build/test usable without the optional SDL2 runner, and
@@ -79,6 +83,9 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/darthdeus/rock-lang"
 
 [workspace.dependencies]
+gamelibs = { path = "crates/gamelibs" }
+rock-visual-bank = { path = "crates/rock-visual-bank" }
+uuid = { version = "1.0", features = ["v4"] }
 sound-core = { path = "crates/sound-core" }
 symphonia = { version = "0.5.5", default-features = false, features = ["aiff", "flac", "mp3", "ogg", "pcm", "vorbis", "wav"] }
 
@@ -180,3 +187,6 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+[patch.crates-io]
+rodio = { git = "https://github.com/darthdeus/comfy-rodio.git", rev = "b82c3ce2fda2d8521eb2f54c9f0545546fd09e50" }

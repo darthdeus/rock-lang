@@ -1,0 +1,1036 @@
+pub value TextArtStyle {
+    shadow: Color = BLACK,
+    shadow_offset: Vec2 = v(),
+    shadow_strength: float = 1.0,
+    shadow_levels: int = 3,
+    shadow_scatter: float = 0.62,
+    emission: Color = WHITE,
+    emission_strength: float = 0.0,
+    bloom_levels: int = 3,
+    bloom_threshold: float = 1.0,
+    bloom_knee: float = 0.5,
+    bloom_scatter: float = 0.68,
+    face: Color = WHITE,
+}
+
+pub value TextArtRadianceMaterial {
+    pipeline: Pipeline,
+    block: OwnedUniformBlock?,
+}
+
+pub value TextArtSourceMaterial {
+    pipeline: Pipeline,
+    block: OwnedUniformBlock?,
+    key: string,
+}
+
+pub struct TextArtMaterial {
+    pipeline: Pipeline,
+    block: OwnedUniformBlock?,
+    key: string,
+    // Slot 0 is the TextArt source, transformed when source_data is requested.
+    // These borrowed inputs
+    // occupy compiler-owned slots 1..N in declaration order.
+    additional_inputs: [(SampledTexture, TextureFilter)] = [],
+    radiance: TextArtRadianceMaterial? = null,
+    // Static data replaces slot 0 for the custom face and radiance passes.
+    source_data: TextArtSourceMaterial? = null,
+}
+
+pub enum TextArtFollow {
+    StaticRun,
+    GlyphPoses,
+}
+
+
+pub struct TextArtGlyphInput {
+    layout: TextLayout,
+    consumer_key: string,
+    origin: Vec2,
+    follow: TextArtFollow,
+    poses: [GlyphPose],
+    tint: Color,
+    z_layer: int,
+}
+
+pub fn text_art_glyph_input(
+    layout: TextLayout,
+    follow: TextArtFollow,
+    poses: [GlyphPose],
+    tint: Color = WHITE,
+    z_layer: int = UI_TEXT_Z_LAYER,
+    consumer_key: string = "",
+    origin: Vec2 = v()
+) -> TextArtGlyphInput {
+    text_layout_validate_poses(layout, poses)
+    return TextArtGlyphInput {
+        layout: layout,
+        consumer_key: consumer_key,
+        origin: origin,
+        follow: follow,
+        poses: if follow == TextArtFollow::StaticRun { [] } else { poses },
+        tint: tint,
+        z_layer: z_layer,
+    }
+}
+
+pub fn text_art_glyph_paint(dl: DrawList, input: TextArtGlyphInput) {
+    let poses: [GlyphPose]? = if input.follow == TextArtFollow::StaticRun {
+        null
+    } else { input.poses }
+    with_ui_pool(
+        dl.batches,
+        () => {
+            let _ = text_layout_emit(
+                input.layout, input.origin, input.tint, input.z_layer, poses,
+                input.consumer_key)
+        }
+    )
+}
+
+// Diagnostic only; paint identity compares the input structurally, so this
+// description is formatted at the error site and never on the retained path.
+fn text_art_glyph_description(input: TextArtGlyphInput) -> string {
+    let follow = if input.follow == TextArtFollow::StaticRun { "static" } else { "posed" }
+    return "{follow}:{text_layout_cache_key(input.layout)}"
+}
+
+pub fn text_art_glyph_paint_equal(a: TextArtGlyphInput, b: TextArtGlyphInput) -> bool {
+    return text_art_glyph_paint_equal_at(a, b, a.origin)
+}
+
+fn text_art_glyph_paint_equal_at(
+    a: TextArtGlyphInput, b: TextArtGlyphInput, origin: Vec2
+) -> bool {
+    // TextLayout holds mutable raster/batch caches that do not change paint.
+    return a.consumer_key == b.consumer_key
+        && origin == b.origin && a.tint == b.tint && a.z_layer == b.z_layer
+        && a.follow == b.follow
+        && (a.follow == TextArtFollow::StaticRun || a.poses == b.poses)
+        && text_art_glyph_layout_equal(a.layout, b.layout)
+}
+
+fn text_art_glyph_layout_equal(a: TextLayout, b: TextLayout) -> bool {
+    return a.font == b.font && a.text == b.text && a.face == b.face
+        && a.glyphs == b.glyphs && a.logical_bounds == b.logical_bounds
+        && a.ink_bounds == b.ink_bounds && a.ascent == b.ascent && a.descent == b.descent
+        && a.line_height == b.line_height && a.line_count == b.line_count
+        && a.admitted_count == b.admitted_count && a.alignment == b.alignment
+        && a.alignment_offset == b.alignment_offset
+        && a.raster_authored_cap_height == b.raster_authored_cap_height
+        && a.raster_layout_to_target_scale == b.raster_layout_to_target_scale
+        && a.raster_physical_target_scale == b.raster_physical_target_scale
+        && a.raster_target_cap_height == b.raster_target_cap_height
+        && a.coverage_oversampling == b.coverage_oversampling
+        && a.raster_metric_scale_x == b.raster_metric_scale_x
+        && a.raster_metric_scale_y == b.raster_metric_scale_y
+}
+
+pub struct TextArtWorkspace {
+    extent: IVec2,
+    shadow_requested_levels: int,
+    bloom_requested_levels: int,
+    composite: Canvas,
+    emission: Canvas,
+    shadow: [Canvas],
+    bloom: [Canvas],
+    shadow_source_handle: int = 0,
+    shadow_source_generation: int = -1,
+    shadow_scatter: float = -1.0,
+}
+
+pub struct TextArtStats {
+    extent: IVec2,
+    shadow_requested_levels: int,
+    bloom_requested_levels: int,
+    shadow_allocated_levels: int,
+    bloom_allocated_levels: int,
+    bake_count: int,
+    pass_count: int,
+    cache_hit: bool,
+    surface_source_bake_count: int,
+    shadow_source_bake_count: int,
+    surface_source_cache_hit: bool,
+    shadow_source_cache_hit: bool,
+    source_data_bake_count: int,
+    source_data_cache_hit: bool,
+    shadow_pyramid_bake_count: int,
+    shadow_pyramid_cache_hit: bool,
+}
+
+pub struct TextArt<T> {
+    name: string,
+    source: UiBake<T>,
+    shadow_source: UiBake<T>? = null,
+    output: Canvas? = null,
+    workspace: TextArtWorkspace? = null,
+    inputs: T? = null,
+    shadow_inputs: T? = null,
+    semantic_inputs: bool = false,
+    style: TextArtStyle? = null,
+    surface_key: string = "",
+    extent: IVec2 = iv(0, 0),
+    epoch: int = -1,
+    bake_count: int = 0,
+    pass_count: int = 0,
+    cache_hit: bool = false,
+    surface_source_cache_hit: bool = false,
+    shadow_source_cache_hit: bool = false,
+    source_data: Canvas? = null,
+    source_data_key: string = "",
+    source_data_source_bake_count: int = -1,
+    source_data_bake_count: int = 0,
+    source_data_cache_hit: bool = false,
+    shadow_pyramid_bake_count: int = 0,
+    shadow_pyramid_cache_hit: bool = false,
+}
+
+pub value TextArtRasterDemand {
+    glyph_population: int,
+    target_footprint: Vec2,
+    source_footprint: Vec2,
+    authored_cap_height: float,
+    layout_to_target_scale: float,
+    physical_target_scale: float,
+    max_pose_scale: float,
+    coverage_oversampling: float,
+    target_pixel_cap_height: float,
+    required_pixel_em: float,
+    coverage_bucket: int,
+}
+
+pub value TextArtAtlasInstance {
+    instance_id: int,
+    bucket: int,
+    pixel_size: int,
+    atlas_width: int,
+    atlas_height: int,
+    byte_cost: int,
+    glyph_population: int,
+    generation_count: int,
+    source_cap_height: float,
+}
+
+pub value TextArtEffectBounds {
+    layout_ink: Rect,
+    raster_ink: Rect,
+    source: Rect,
+    shadow: Rect,
+    bloom: Rect,
+    output: Rect,
+    origin: Vec2,
+    extent: IVec2,
+    filter_support: float,
+    shadow_support: float,
+    bloom_support: float,
+    target_scale: float,
+    coverage_oversampling: float,
+}
+
+const TEXT_ART_COVERAGE_BUCKETS: [int] = [16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048]
+pub global TEXT_ART_SELECTED_BUCKETS: Map<string, int> = map_new()
+global TEXT_ART_LAST_DEMAND_POPULATION: int = 0
+pub global TEXT_ART_LAST_INSTANCE_ID: int = 0
+pub global TEXT_ART_LAST_TARGET_CAP_HEIGHT: float = 0.0
+pub global TEXT_ART_LAST_REQUIRED_PIXEL_EM: float = 0.0
+global TEXT_ART_LAST_SELECTED_PIXEL_EM: int = 0
+pub global TEXT_ART_LAST_SOURCE_CAP_HEIGHT: float = 0.0
+global TEXT_ART_LAST_BYTE_COST: int = 0
+pub global TEXT_ART_CONSUMER_KEY_FORMATS: int = 0
+
+fn text_art_nonfinite(value: float) -> bool {
+    return is_nan(value) || value == 1.0 / 0.0 || value == -1.0 / 0.0
+}
+
+pub fn text_art_raster_demand_valid(
+    authored_cap_height: float,
+    layout_to_target_scale: float,
+    max_pose_scale: float,
+    coverage_oversampling: float
+) -> bool {
+    return authored_cap_height > 0.0 && layout_to_target_scale > 0.0
+        && max_pose_scale > 0.0 && font_coverage_oversampling_valid(coverage_oversampling)
+        && !text_art_nonfinite(authored_cap_height)
+        && !text_art_nonfinite(layout_to_target_scale)
+        && !text_art_nonfinite(max_pose_scale)
+}
+
+fn text_art_require_demand(
+    authored_cap_height: float,
+    layout_to_target_scale: float,
+    max_pose_scale: float,
+    coverage_oversampling: float
+) {
+    if !text_art_raster_demand_valid(authored_cap_height, layout_to_target_scale,
+        max_pose_scale, coverage_oversampling) {
+        error("TextArt raster demand requires finite positive cap, target scale, pose scale, and coverage oversampling at least 1.0")
+    }
+}
+
+fn text_art_font_cap_height_ratio(font: Font) -> float {
+    let data = font.data() ?? return 1.0
+    let idx = data.backend_id - 1
+    if idx < 0 || idx >= FONT_UNIT_SIZES.len || idx >= FONT_UNIT_CAP_HEIGHTS.len {
+        error("TextArt font {data.backend_id} has no unit cap-height metrics")
+    }
+    let em = FONT_UNIT_SIZES[idx]
+    let cap = FONT_UNIT_CAP_HEIGHTS[idx]
+    if em <= 0.0 || cap <= 0.0 || text_art_nonfinite(em) || text_art_nonfinite(cap) {
+        error("TextArt font {data.backend_id} has invalid unit cap-height metrics")
+    }
+    return cap / em
+}
+
+fn text_art_required_pixel_em_for(font: Font, target_pixel_cap_height: float) -> float {
+    if target_pixel_cap_height <= 0.0 || text_art_nonfinite(target_pixel_cap_height) {
+        error("TextArt target cap-height demand must be finite and positive")
+    }
+    return target_pixel_cap_height / text_art_font_cap_height_ratio(font)
+}
+
+pub fn text_art_coverage_bucket_for_ppem(required_pixel_em: float) -> int {
+    if required_pixel_em <= 0.0 || text_art_nonfinite(required_pixel_em) {
+        error("TextArt required pixel-em demand must be finite and positive")
+    }
+    for bucket in TEXT_ART_COVERAGE_BUCKETS {
+        if required_pixel_em <= bucket as float { return bucket }
+    }
+    error("TextArt required pixel-em demand exceeds the supported atlas bucket range")
+    return 0
+}
+
+pub fn text_art_coverage_bucket_with_hysteresis_ppem(
+    previous_bucket: int,
+    required_pixel_em: float
+) -> int {
+    let desired = text_art_coverage_bucket_for_ppem(required_pixel_em)
+    if previous_bucket <= 0 { return desired }
+    let previous_index = -1
+    for i in 0..TEXT_ART_COVERAGE_BUCKETS.len {
+        if TEXT_ART_COVERAGE_BUCKETS[i] == previous_bucket { previous_index = i; break }
+    }
+    if previous_index < 0 { return desired }
+    if desired > previous_bucket { return desired }
+    if desired == previous_bucket { return previous_bucket }
+    let lower = TEXT_ART_COVERAGE_BUCKETS[max(0, previous_index - 1)] as float
+    if required_pixel_em <= lower * 0.85 { return desired }
+    return previous_bucket
+}
+
+pub fn text_art_raster_demand_for(
+    font: Font,
+    text: string,
+    authored_cap_height: float,
+    layout_to_target_scale: float,
+    max_pose_scale: float = 1.0,
+    coverage_oversampling: float = 1.0
+) -> TextArtRasterDemand {
+    text_art_require_demand(authored_cap_height, layout_to_target_scale,
+        max_pose_scale, coverage_oversampling)
+    let data = font.data() ?? return TextArtRasterDemand {
+        glyph_population: 0,
+        target_footprint: v(),
+        source_footprint: v(),
+        authored_cap_height: authored_cap_height,
+        layout_to_target_scale: layout_to_target_scale,
+        physical_target_scale: 1.0,
+        max_pose_scale: max_pose_scale,
+        coverage_oversampling: coverage_oversampling,
+        target_pixel_cap_height: 0.0,
+        required_pixel_em: 0.0,
+        coverage_bucket: 0,
+    }
+    let target_layout = text_layout_build(font, text, authored_cap_height, layout_to_target_scale)
+    target_layout.coverage_oversampling = coverage_oversampling
+    let poses = text_layout_identity_poses(target_layout)
+    for i in 0..poses.len {
+        let pose = poses[i]
+        poses[i] = GlyphPose {
+            glyph_index: pose.glyph_index,
+            source_index: pose.source_index,
+            glyph: pose.glyph,
+            translation: pose.translation,
+            scale: v(max_pose_scale, max_pose_scale),
+            rotation: pose.rotation,
+        }
+    }
+    let demand = text_layout_raster_demand(target_layout, poses)
+    let source_footprint = measure_text_of(
+        font, text, data.pixel_size as float, 1.0)
+    return TextArtRasterDemand {
+        glyph_population: demand.glyph_population,
+        target_footprint: demand.target_footprint,
+        source_footprint: source_footprint,
+        authored_cap_height: demand.authored_cap_height,
+        layout_to_target_scale: demand.layout_to_target_scale,
+        physical_target_scale: demand.physical_target_scale,
+        max_pose_scale: demand.max_pose_scale,
+        coverage_oversampling: demand.coverage_oversampling,
+        target_pixel_cap_height: demand.target_pixel_cap_height,
+        required_pixel_em: demand.required_pixel_em,
+        coverage_bucket: demand.coverage_bucket,
+    }
+}
+
+pub fn text_art_raster_demand_probe(
+    font: Font,
+    text: string,
+    authored_cap_height: float,
+    target_scale: float
+) -> TextArtRasterDemand {
+    return text_art_raster_demand_for(font, text, authored_cap_height, target_scale)
+}
+
+pub fn text_art_atlas_instance_for(
+    font: Font,
+    demand: TextArtRasterDemand,
+    consumer_key: string = ""
+) -> TextArtAtlasInstance {
+    let data = font.data() ?? return TextArtAtlasInstance {
+        instance_id: 0, bucket: 0, pixel_size: 0, atlas_width: 0, atlas_height: 0, byte_cost: 0,
+        glyph_population: demand.glyph_population, generation_count: 0, source_cap_height: 0.0,
+    }
+    let stateful = consumer_key != ""
+    let key = if stateful {
+        TEXT_ART_CONSUMER_KEY_FORMATS += 1
+        "{data.backend_id}:{consumer_key}"
+    } else { "" }
+    let previous = if stateful { TEXT_ART_SELECTED_BUCKETS.get(key) } else { null }
+    let bucket = if stateful {
+        text_art_coverage_bucket_with_hysteresis_ppem(
+            if previous == null { 0 } else { previous.unwrap() },
+            demand.required_pixel_em)
+    } else {
+        text_art_coverage_bucket_for_ppem(demand.required_pixel_em)
+    }
+    if stateful { TEXT_ART_SELECTED_BUCKETS.insert(key, bucket) }
+    let id = stone_ensure_font_atlas_instance_ffi(data.backend_id, bucket)
+    if id == 0 { error("TextArt could not create the requested raster atlas instance") }
+    TEXT_ART_LAST_DEMAND_POPULATION = demand.glyph_population
+    TEXT_ART_LAST_INSTANCE_ID = id
+    TEXT_ART_LAST_TARGET_CAP_HEIGHT = demand.target_pixel_cap_height
+    TEXT_ART_LAST_REQUIRED_PIXEL_EM = demand.required_pixel_em
+    let size = stone_get_font_instance_size(id, FFI_INT_OUT_1.ptr, FFI_INT_OUT_2.ptr)
+    if !size { error("TextArt atlas instance {id} did not publish dimensions") }
+    let pixel_size = stone_get_font_instance_pixel_size_ffi(id)
+    let source_cap_height = pixel_size as float * text_art_font_cap_height_ratio(font)
+    TEXT_ART_LAST_SELECTED_PIXEL_EM = pixel_size
+    TEXT_ART_LAST_SOURCE_CAP_HEIGHT = source_cap_height
+    TEXT_ART_LAST_BYTE_COST = stone_get_font_instance_byte_len(id)
+    return TextArtAtlasInstance {
+        instance_id: id,
+        bucket: bucket,
+        pixel_size: pixel_size,
+        atlas_width: FFI_INT_OUT_1.ptr.read(),
+        atlas_height: FFI_INT_OUT_2.ptr.read(),
+        byte_cost: stone_get_font_instance_byte_len(id),
+        glyph_population: demand.glyph_population,
+        generation_count: text_art_atlas_instance_count(font),
+        source_cap_height: source_cap_height,
+    }
+}
+
+pub fn text_art_atlas_instance_count(font: Font) -> int {
+    let data = font.data() ?? return 0
+    return stone_font_atlas_instance_count_ffi(data.backend_id)
+}
+
+
+pub fn text_art_rect_union(a: Rect, b: Rect) -> Rect {
+    if a.w <= 0.0 || a.h <= 0.0 { return b }
+    if b.w <= 0.0 || b.h <= 0.0 { return a }
+    let lo = v(min(a.x, b.x), min(a.y, b.y))
+    let hi = v(max(a.x + a.w, b.x + b.w), max(a.y + a.h, b.y + b.h))
+    return rect(lo.x, lo.y, hi.x - lo.x, hi.y - lo.y)
+}
+
+fn text_art_rect_expand(bounds: Rect, padding: float) -> Rect {
+    return rect(bounds.x - padding, bounds.y - padding,
+        bounds.w + padding * 2.0, bounds.h + padding * 2.0)
+}
+
+fn text_art_glyph_followed_bounds(input: TextArtGlyphInput) -> Rect {
+    if input.follow == TextArtFollow::StaticRun { return input.layout.ink_bounds }
+    text_layout_validate_poses(input.layout, input.poses)
+    let bounds = rect(0.0, 0.0, 0.0, 0.0)
+    for i in 0..input.layout.glyphs.len {
+        bounds = text_art_rect_union(bounds,
+            text_layout_glyph_bounds(input.layout, i, input.poses))
+    }
+    return bounds
+}
+
+pub fn text_art_glyph_raster_bounds(input: TextArtGlyphInput) -> Rect {
+    let poses: [GlyphPose]? = if input.follow == TextArtFollow::StaticRun {
+        null
+    } else { input.poses }
+    let font = input.layout.font ?? return rect(0.0, 0.0, 0.0, 0.0)
+    let demand = text_layout_raster_demand(input.layout, poses)
+    let instance = text_art_atlas_instance_for(font, demand, input.consumer_key)
+    let instance_id = instance.instance_id
+    let source_pixel_size = instance.pixel_size as float
+    let bounds = rect(0.0, 0.0, 0.0, 0.0)
+    for i in 0..input.layout.glyphs.len {
+        let glyph_face = input.layout.glyphs[i].face
+        let glyph_id = input.layout.glyphs[i].glyph
+        let glyph_origin = input.layout.glyphs[i].origin
+        let glyph_pivot = input.layout.glyphs[i].pivot
+        if !text_layout_instance_glyph(instance_id, glyph_face, glyph_id) { continue }
+        let raw = text_layout_instance_glyph_data()
+        if raw.width <= 0.0 || raw.height <= 0.0 { continue }
+        let pose = text_layout_pose_at(input.layout, i, poses)
+        let a = text_layout_raster_quad_point(
+            input.layout, glyph_origin, glyph_pivot, raw,
+            source_pixel_size, pose, v(), 0)
+        let b = text_layout_raster_quad_point(
+            input.layout, glyph_origin, glyph_pivot, raw,
+            source_pixel_size, pose, v(), 1)
+        let c = text_layout_raster_quad_point(
+            input.layout, glyph_origin, glyph_pivot, raw,
+            source_pixel_size, pose, v(), 2)
+        let d = text_layout_raster_quad_point(
+            input.layout, glyph_origin, glyph_pivot, raw,
+            source_pixel_size, pose, v(), 3)
+        let lo = v(min(min(a.x, b.x), min(c.x, d.x)),
+            min(min(a.y, b.y), min(c.y, d.y)))
+        let hi = v(max(max(a.x, b.x), max(c.x, d.x)),
+            max(max(a.y, b.y), max(c.y, d.y)))
+        bounds = text_art_rect_union(bounds,
+            rect(lo.x, lo.y, hi.x - lo.x, hi.y - lo.y))
+    }
+    return bounds
+}
+
+fn text_art_pyramid_support(
+    levels: int, target_scale: float, coverage_oversampling: float) -> float {
+    let reach = 2.0
+    let i = 1
+    while i < levels {
+        reach *= 2.0
+        i += 1
+    }
+    return reach * target_scale * coverage_oversampling
+}
+
+pub fn text_art_glyph_effect_bounds(
+    input: TextArtGlyphInput,
+    style: TextArtStyle,
+    shadow_input: TextArtGlyphInput? = null
+) -> TextArtEffectBounds {
+    let layout_ink = input.layout.ink_bounds
+    let retained_source = text_art_glyph_followed_bounds(input)
+    let raster_ink = text_art_glyph_raster_bounds(input)
+    let source = text_art_rect_union(retained_source, raster_ink)
+    if source.w <= 0.0 || source.h <= 0.0 {
+        let description = text_art_glyph_description(input)
+        error("TextArt '{description}' has no retained glyph ink bounds")
+    }
+    let target_scale = max(abs(input.layout.raster_layout_to_target_scale), 1.0)
+    let coverage_oversampling = font_coverage_oversampling_require(
+        input.layout.coverage_oversampling)
+    let filter_support = target_scale * coverage_oversampling
+    let shadow_support = text_art_pyramid_support(
+        style.shadow_levels, target_scale, coverage_oversampling)
+    let bloom_support = text_art_pyramid_support(
+        style.bloom_levels, target_scale, coverage_oversampling) + filter_support
+    let shadow_source = if shadow_input == null {
+        source
+    } else {
+        text_art_glyph_raster_bounds(shadow_input.unwrap())
+    }
+    let shadow = text_art_rect_expand(
+        rect(shadow_source.x + style.shadow_offset.x,
+            shadow_source.y + style.shadow_offset.y,
+            shadow_source.w, shadow_source.h),
+        shadow_support + filter_support
+    )
+    let bloom = text_art_rect_expand(source, bloom_support)
+    let face = text_art_rect_expand(source, filter_support)
+    let output = text_art_rect_union(text_art_rect_union(face, shadow), bloom)
+    let extent = iv(max(1, int(ceil(output.w))), max(1, int(ceil(output.h))))
+    return TextArtEffectBounds {
+        layout_ink: layout_ink,
+        raster_ink: raster_ink,
+        source: source,
+        shadow: shadow,
+        bloom: bloom,
+        output: output,
+        origin: v(-output.x, -output.y),
+        extent: extent,
+        filter_support: filter_support,
+        shadow_support: shadow_support,
+        bloom_support: bloom_support,
+        target_scale: target_scale,
+        coverage_oversampling: coverage_oversampling,
+    }
+}
+
+fn text_art_glyph_shifted_input(
+    input: TextArtGlyphInput, origin: Vec2, cached: TextArtGlyphInput?
+) -> TextArtGlyphInput {
+    // The retained snapshot already owns the shifted record on cache hits.
+    if cached != null && text_art_glyph_paint_equal_at(input, cached.unwrap(), origin) {
+        return cached.unwrap()
+    }
+    return TextArtGlyphInput { ..input, origin: origin }
+}
+
+pub fn text_art_glyph_ensure(
+    art: TextArt<TextArtGlyphInput>,
+    input: TextArtGlyphInput,
+    style: TextArtStyle,
+    shadow_input: TextArtGlyphInput? = null
+) -> Canvas {
+    let bounds = text_art_glyph_effect_bounds(input, style, shadow_input)
+    let shifted = text_art_glyph_shifted_input(input, bounds.origin, art.inputs)
+    let shifted_shadow: TextArtGlyphInput? = if shadow_input == null {
+        null
+    } else {
+        text_art_glyph_shifted_input(shadow_input.unwrap(), bounds.origin, art.shadow_inputs)
+    }
+    return text_art_ensure(art, bounds.extent, shifted, style,
+        text_art_glyph_paint, shifted_shadow,
+        inputs_equal: text_art_glyph_paint_equal)
+}
+
+pub fn text_art_new<T>(name: string, source_format: string = "rgba8") -> TextArt<T> {
+    return TextArt {
+        name: name,
+        source: ui_bake_new("{name}:source", source_format),
+    }
+}
+
+fn text_art_validate_levels(name: string, kind: string, levels: int) {
+    if levels < 1 || levels > PYRAMID_MAX_LEVELS {
+        error("TextArt '{name}' requested {kind} levels {levels}; supported range is 1..{PYRAMID_MAX_LEVELS}")
+    }
+}
+
+pub fn text_art_workspace_new(extent: IVec2, style: TextArtStyle) -> TextArtWorkspace {
+    let shadow = create_pyramid_levels(extent.x, extent.y, style.shadow_levels)
+    let bloom = create_pyramid_levels(max(1, extent.x ./ 2), max(1, extent.y ./ 2),
+        style.bloom_levels)
+    return TextArtWorkspace {
+        extent: extent,
+        shadow_requested_levels: style.shadow_levels,
+        bloom_requested_levels: style.bloom_levels,
+        composite: new_canvas(extent.x as float, extent.y as float, "rgba16f"),
+        emission: new_canvas(extent.x as float, extent.y as float, "rgba16f"),
+        shadow: shadow,
+        bloom: bloom,
+    }
+}
+
+fn text_art_workspace_destroy(workspace: TextArtWorkspace) {
+    destroy_canvas(workspace.composite)
+    destroy_canvas(workspace.emission)
+    for canvas in workspace.shadow { destroy_canvas(canvas) }
+    for canvas in workspace.bloom { destroy_canvas(canvas) }
+}
+
+fn text_art_workspace_live(workspace: TextArtWorkspace) -> bool {
+    if !canvas_is_live(workspace.composite) || !canvas_is_live(workspace.emission) {
+        return false
+    }
+    for canvas in workspace.shadow {
+        if !canvas_is_live(canvas) { return false }
+    }
+    for canvas in workspace.bloom {
+        if !canvas_is_live(canvas) { return false }
+    }
+    return true
+}
+
+fn text_art_workspace_matches(
+    workspace: TextArtWorkspace,
+    extent: IVec2,
+    style: TextArtStyle
+) -> bool {
+    return workspace.extent == extent
+        && workspace.shadow_requested_levels == style.shadow_levels
+        && workspace.bloom_requested_levels == style.bloom_levels
+        && text_art_workspace_live(workspace)
+}
+
+fn text_art_shadow_cache_matches(workspace: TextArtWorkspace, source: Canvas,
+    source_generation: int, style: TextArtStyle) -> bool {
+    return workspace.shadow_source_handle == source.handle.0
+        && workspace.shadow_source_generation == source_generation
+        && workspace.shadow_requested_levels == style.shadow_levels
+        && workspace.shadow_scatter == style.shadow_scatter
+}
+
+fn text_art_cache_matches<T>(
+    art: TextArt<T>,
+    extent: IVec2,
+    inputs: T,
+    shadow_inputs: T?,
+    style: TextArtStyle,
+    surface_key: string = "",
+    inputs_equal: ((T, T) -> bool)? = null
+) -> bool {
+    if shadow_inputs == null && art.shadow_inputs != null { return false }
+    if shadow_inputs != null {
+        if art.shadow_inputs == null { return false }
+        if !ui_bake_inputs_equal(art.shadow_inputs.unwrap(), shadow_inputs.unwrap(),
+            inputs_equal) { return false }
+    }
+    if ui_bake_canvas(art.source) == null { return false }
+    if shadow_inputs != null {
+        if art.shadow_source == null
+            || ui_bake_canvas(art.shadow_source.unwrap()) == null { return false }
+    }
+    return art.output != null
+        && canvas_is_live(art.output.unwrap())
+        && art.workspace != null
+        && text_art_workspace_live(art.workspace.unwrap())
+        && art.extent == extent
+        && art.inputs != null
+        && art.semantic_inputs == (inputs_equal != null)
+        && ui_bake_inputs_equal(art.inputs.unwrap(), inputs, inputs_equal)
+        && art.style != null
+        && art.style.unwrap() == style
+        && art.surface_key == surface_key
+        && art.epoch == UI_BAKE_EPOCH
+}
+
+fn text_art_material_inputs(
+    surface_source: Canvas,
+    surface: TextArtMaterial,
+    source_data: Canvas?,
+) -> [(SampledTexture, TextureFilter)] {
+    let primary = source_data ?? surface_source
+    let sampling = if source_data == null { TextureFilter::Linear }
+        else { TextureFilter::Nearest }
+    let inputs: [(SampledTexture, TextureFilter)] = [(sampled_canvas(primary), sampling)]
+    for input in surface.additional_inputs { inputs.push(input) }
+    return inputs
+}
+
+fn text_art_source_data_ensure<T>(art: TextArt<T>, extent: IVec2,
+    source: Canvas, material: TextArtSourceMaterial?) -> Canvas? {
+    art.source_data_cache_hit = false
+    if material == null {
+        text_art_source_data_release(art)
+        return null
+    }
+    let spec = material.unwrap()
+    let live = art.source_data != null && canvas_is_live(art.source_data.unwrap())
+    let same_extent = live && art.source_data.unwrap().width == extent.x as float
+        && art.source_data.unwrap().height == extent.y as float
+    if same_extent && art.source_data_key == spec.key
+        && art.source_data_source_bake_count == art.source.bake_count {
+        art.source_data_cache_hit = true
+        return art.source_data
+    }
+    let target = if same_extent { art.source_data.unwrap() }
+        else { new_canvas(extent.x as float, extent.y as float, "rgba16f") }
+    if !run_pass(Pass {
+        pipeline: spec.pipeline,
+        slot_inputs: [(sampled_canvas(source), TextureFilter::Linear)],
+        block: spec.block,
+        output: target,
+        clear: color(0.0, 0.0, 0.0, 0.0),
+        blend: BlendMode::Replace,
+    }) {
+        if !same_extent { destroy_canvas(target) }
+        error("TextArt '{art.name}' source-data pass was refused")
+    }
+    if !same_extent && live { destroy_canvas(art.source_data.unwrap()) }
+    art.source_data = target
+    art.source_data_key = spec.key
+    art.source_data_source_bake_count = art.source.bake_count
+    art.source_data_bake_count += 1
+    return target
+}
+
+pub fn text_art_source_data_release<T>(art: TextArt<T>) {
+    if art.source_data != null && canvas_is_live(art.source_data.unwrap()) {
+        destroy_canvas(art.source_data.unwrap())
+    }
+    art.source_data = null
+    art.source_data_key = ""
+    art.source_data_source_bake_count = -1
+    art.source_data_cache_hit = false
+}
+
+pub fn text_art_passes(
+    shadow_source: Canvas,
+    surface_source: Canvas,
+    target: Canvas,
+    workspace: TextArtWorkspace,
+    style: TextArtStyle,
+    surface: TextArtMaterial? = null,
+    source_data: Canvas? = null,
+    reuse_shadow: bool = false,
+) -> [Pass]? {
+    if surface != null && surface.unwrap().source_data != null && source_data == null {
+        error("TextArt material requires its prepared source data")
+    }
+    let passes: [Pass] = vec_new()
+
+    if !reuse_shadow {
+        for pass in blur_pyramid_passes(shadow_source, workspace.shadow, style.shadow_scatter) {
+            passes.push(pass)
+        }
+    }
+
+    let emission = sampled_texture_composite_pass(
+        sampled_canvas(surface_source), workspace.emission, workspace.extent,
+        TextureFilter::Linear, style.emission, v(), style.emission_strength,
+        BlendMode::Replace, 0.0) ?? return null
+    passes.push(emission)
+
+    if surface != null && surface.unwrap().radiance != null {
+        let radiance = surface.unwrap().radiance.unwrap()
+        passes.push(Pass {
+            pipeline: radiance.pipeline,
+            slot_inputs: text_art_material_inputs(surface_source, surface.unwrap(), source_data),
+            block: radiance.block,
+            output: workspace.emission,
+            clear: null,
+            blend: BlendMode::Premultiplied,
+        })
+    }
+
+    for pass in bloom_pyramid_passes(workspace.emission, workspace.bloom,
+        style.bloom_threshold, style.bloom_knee, style.bloom_scatter) {
+        passes.push(pass)
+    }
+
+    let shadow = sampled_texture_composite_pass(
+        sampled_canvas(workspace.shadow[0]), workspace.composite, workspace.extent,
+        TextureFilter::Linear, style.shadow, style.shadow_offset,
+        1.0, BlendMode::Replace, style.shadow_strength, true) ?? return null
+    passes.push(shadow)
+
+    let face = if surface == null {
+        sampled_texture_composite_pass(
+            sampled_canvas(surface_source), workspace.composite, workspace.extent,
+            TextureFilter::Linear, style.face, v(), 1.0,
+            BlendMode::Premultiplied, 1.0, true) ?? return null
+    } else {
+        Pass {
+            pipeline: surface.unwrap().pipeline,
+            slot_inputs: text_art_material_inputs(surface_source, surface.unwrap(), source_data),
+            block: surface.unwrap().block,
+            output: workspace.composite,
+            clear: null,
+            blend: BlendMode::Premultiplied,
+        }
+    }
+    passes.push(face)
+
+    passes.push(Pass {
+        pipeline: TEXT_ART_RESOLVE_PIPELINE,
+        slot_inputs: [
+            (sampled_canvas(workspace.composite), TextureFilter::Linear),
+            (sampled_canvas(workspace.emission), TextureFilter::Linear),
+            (sampled_canvas(workspace.bloom[0]), TextureFilter::Linear),
+            (sampled_canvas(surface_source), TextureFilter::Linear),
+        ],
+        output: target,
+        clear: null,
+        blend: BlendMode::Replace,
+    })
+    return passes
+}
+
+fn text_art_run_passes(passes: [Pass]) -> bool {
+    for pass in passes {
+        if !pass_is_admitted(pass) { return false }
+    }
+    for pass in passes {
+        if !run_pass(pass) { return false }
+    }
+    return true
+}
+
+fn text_art_try<T>(
+    art: TextArt<T>,
+    extent: IVec2,
+    inputs: T,
+    style: TextArtStyle,
+    paint: (DrawList, T) -> (),
+    shadow_inputs: T? = null,
+    surface: TextArtMaterial? = null,
+    inputs_equal: ((T, T) -> bool)? = null
+) -> bool {
+    if extent.x <= 0 || extent.y <= 0 {
+        error("TextArt '{art.name}' requires a positive extent, got {extent.x}x{extent.y}")
+    }
+    text_art_validate_levels(art.name, "shadow", style.shadow_levels)
+    text_art_validate_levels(art.name, "bloom", style.bloom_levels)
+    art.cache_hit = false
+    art.shadow_pyramid_cache_hit = false
+    let source = ui_bake_ensure(art.source, extent, inputs, paint, inputs_equal)
+    art.surface_source_cache_hit = art.source.cache_hit
+    let shadow_source = if shadow_inputs != null {
+        if art.shadow_source == null {
+            art.shadow_source = ui_bake_new("{art.name}:shadow_source")
+        }
+        let bake = art.shadow_source.unwrap()
+        let canvas = ui_bake_ensure(bake, extent, shadow_inputs.unwrap(), paint,
+            inputs_equal)
+        art.shadow_source_cache_hit = bake.cache_hit
+        canvas
+    } else {
+        art.shadow_source_cache_hit = art.source.cache_hit
+        source
+    }
+    let surface_key = if surface == null { "" } else { surface.unwrap().key }
+    let source_material = if surface == null { null } else { surface.unwrap().source_data }
+    let source_data = text_art_source_data_ensure(art, extent, source, source_material)
+    if source_material != null { surface_key += ":source_data:{source_material.unwrap().key}" }
+    if text_art_cache_matches(art, extent, inputs, shadow_inputs, style, surface_key,
+        inputs_equal) && (source_data == null || art.source_data_cache_hit) {
+        art.cache_hit = true
+        art.shadow_pyramid_cache_hit = true
+        return true
+    }
+
+    let replace_workspace = art.workspace == null
+        || !text_art_workspace_matches(art.workspace.unwrap(), extent, style)
+    let workspace = if replace_workspace {
+        text_art_workspace_new(extent, style)
+    } else { art.workspace.unwrap() }
+    let shadow_generation = if shadow_inputs == null { art.source.bake_count }
+        else { art.shadow_source.unwrap().bake_count }
+    let reuse_shadow = !replace_workspace && text_art_shadow_cache_matches(
+        workspace, shadow_source, shadow_generation, style)
+
+    let old_output = art.output
+    let replace_output = old_output == null || art.extent != extent
+        || !canvas_is_live(old_output.unwrap())
+    let target = if replace_output {
+        new_canvas(extent.x as float, extent.y as float, "rgba16f")
+    } else { old_output.unwrap() }
+
+    let passes = text_art_passes(shadow_source, source, target, workspace, style,
+        surface, source_data, reuse_shadow)
+    if passes == null || !text_art_run_passes(passes.unwrap()) {
+        if replace_output { destroy_canvas(target) }
+        if replace_workspace { text_art_workspace_destroy(workspace) }
+        return false
+    }
+
+    if replace_output && old_output != null { destroy_canvas(old_output.unwrap()) }
+    if replace_workspace && art.workspace != null {
+        text_art_workspace_destroy(art.workspace.unwrap())
+    }
+    workspace.shadow_source_handle = shadow_source.handle.0
+    workspace.shadow_source_generation = shadow_generation
+    workspace.shadow_scatter = style.shadow_scatter
+    art.shadow_pyramid_cache_hit = reuse_shadow
+    if !reuse_shadow { art.shadow_pyramid_bake_count += 1 }
+    art.output = target
+    art.workspace = workspace
+    art.inputs = inputs.clone_into(map_storage(art.source.draw_list.batches.entries))
+    art.semantic_inputs = inputs_equal != null
+    art.shadow_inputs = if shadow_inputs != null {
+        let shadow = art.shadow_source.unwrap()
+        shadow_inputs.unwrap().clone_into(map_storage(shadow.draw_list.batches.entries))
+    } else { null }
+    art.style = style
+    art.surface_key = surface_key
+    art.extent = extent
+    art.epoch = UI_BAKE_EPOCH
+    art.bake_count += 1
+    art.pass_count = passes.unwrap().len()
+    return true
+}
+
+pub fn text_art_ensure<T>(
+    art: TextArt<T>,
+    extent: IVec2,
+    inputs: T,
+    style: TextArtStyle,
+    paint: (DrawList, T) -> (),
+    shadow_inputs: T? = null,
+    surface: TextArtMaterial? = null,
+    inputs_equal: ((T, T) -> bool)? = null
+) -> Canvas {
+    if !text_art_try(art, extent, inputs, style, paint, shadow_inputs, surface,
+        inputs_equal) {
+        let old = art.output
+        if old == null {
+            error("TextArt '{art.name}' execution was rejected before a valid snapshot existed")
+            return art.output.unwrap()
+        }
+        return old.unwrap()
+    }
+    return art.output.unwrap()
+}
+
+pub fn text_art_stats<T>(art: TextArt<T>) -> TextArtStats {
+    let shadow_requested = if art.workspace != null {
+        art.workspace.unwrap().shadow_requested_levels
+    } else { 0 }
+    let bloom_requested = if art.workspace != null {
+        art.workspace.unwrap().bloom_requested_levels
+    } else { 0 }
+    let shadow_allocated = if art.workspace != null {
+        art.workspace.unwrap().shadow.len()
+    } else { 0 }
+    let bloom_allocated = if art.workspace != null {
+        art.workspace.unwrap().bloom.len()
+    } else { 0 }
+    return TextArtStats {
+        extent: if art.output != null && canvas_is_live(art.output.unwrap()) {
+            art.extent
+        } else { iv(0, 0) },
+        shadow_requested_levels: shadow_requested,
+        bloom_requested_levels: bloom_requested,
+        shadow_allocated_levels: shadow_allocated,
+        bloom_allocated_levels: bloom_allocated,
+        bake_count: art.bake_count,
+        pass_count: art.pass_count,
+        cache_hit: art.cache_hit,
+        surface_source_bake_count: art.source.bake_count,
+        shadow_source_bake_count: if art.shadow_source != null {
+            art.shadow_source.unwrap().bake_count
+        } else { art.source.bake_count },
+        surface_source_cache_hit: art.surface_source_cache_hit,
+        shadow_source_cache_hit: art.shadow_source_cache_hit,
+        source_data_bake_count: art.source_data_bake_count,
+        source_data_cache_hit: art.source_data_cache_hit,
+        shadow_pyramid_bake_count: art.shadow_pyramid_bake_count,
+        shadow_pyramid_cache_hit: art.shadow_pyramid_cache_hit,
+    }
+}
+
+pub fn text_art_emission_canvas<T>(art: TextArt<T>) -> Canvas? {
+    if art.workspace == null { return null }
+    let canvas = art.workspace.unwrap().emission
+    return if canvas_is_live(canvas) { canvas } else { null }
+}
+
+pub fn text_art_shadow_canvas<T>(art: TextArt<T>) -> Canvas? {
+    if art.workspace == null || art.workspace.unwrap().shadow.len() == 0 { return null }
+    let canvas = art.workspace.unwrap().shadow[0]
+    return if canvas_is_live(canvas) { canvas } else { null }
+}
+
+pub fn text_art_destroy<T>(art: TextArt<T>) {
+    ui_bake_destroy(art.source)
+    if art.shadow_source != null { ui_bake_destroy(art.shadow_source.unwrap()) }
+    if art.output != null && canvas_is_live(art.output.unwrap()) {
+        destroy_canvas(art.output.unwrap())
+    }
+    if art.workspace != null { text_art_workspace_destroy(art.workspace.unwrap()) }
+    text_art_source_data_release(art)
+    art.output = null
+    art.workspace = null
+    art.inputs = null
+    art.shadow_inputs = null
+    art.semantic_inputs = false
+    art.shadow_source = null
+    art.style = null
+    art.surface_key = ""
+    art.extent = iv(0, 0)
+    art.epoch = -1
+    art.cache_hit = false
+    art.surface_source_cache_hit = false
+    art.shadow_source_cache_hit = false
+    art.shadow_pyramid_cache_hit = false
+}

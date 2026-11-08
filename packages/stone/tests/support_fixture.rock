@@ -1,0 +1,29 @@
+pub use stone_native::test_support::{world_fixture_call, world_fixture_raised,
+    world_fixture_with_cleanup, world_fixture_traceback};
+
+// The native runner booted in this process as stone_run_game boots it, for a
+// test that drives run_one_frame. Run it in a fresh process
+// (profiler_test_process): the runner's clocks, renderer and profiler are
+// process state no fixture restores.
+fn native_runner_test_boot(title: string) -> (StoneWindow, GameConfig) {
+    setup_stone()
+    let config = GameConfig { title: title, width: 16, height: 16,
+        font_path: project_asset_path("@engine/assets/fonts/DroidSans.ttf"), vsync: 0 }
+    native_engine_configure(config)
+    let window = stone_init_window(config.title, 0, 0, 16, 16, 0, false, 0).unwrap()
+    native_engine_imgui_boot(window)
+    assert(IMGUI_READY)
+    native_engine_window_boot()
+    load_pending_shader_sources()
+    native_engine_font_boot(config)
+    native_engine_render_boot()
+    run_early_init_systems()
+    run_init_systems()
+    run_late_init_systems()
+    run_wire_systems()
+    stone_init_done()
+    init_profiler()
+    input_resolve_authority()
+    timeline_init()
+    return (window, config)
+}

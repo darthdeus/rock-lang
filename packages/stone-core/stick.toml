@@ -1,0 +1,19 @@
+[package]
+name = "stone-core"
+version = "0.1.0"
+type = "lib"
+
+# The value types every Rock project shares -- vectors, rects, colors and the
+# math over them. Extracted from stone so a package can speak in IVec2 and Color
+# without pulling in a window, a renderer, an audio device or the filesystem.
+#
+# stone depends on this, so a game that depends on stone keeps seeing these
+# names with no manifest change of its own.
+
+[language]
+modules = "v1"
+identity_storage = "exempt"
+
+[build]
+channels = ["dev", "steam", "itch", "direct"]
+default_channel = "dev"

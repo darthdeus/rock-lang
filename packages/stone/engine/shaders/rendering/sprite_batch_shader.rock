@@ -1,0 +1,100 @@
+// Unlit world/UI sprites with shared depth and picking outputs.
+
+pub value SpriteVary {
+    position: Vec4,
+    TexCoord: Vec2,
+    Color: Vec4,
+    Colorize: float,
+    WorldPosition: Vec2,
+    @flat EntityId: float,
+    @flat Section: Vec2 = v(0.0, 0.0),
+}
+
+// The window depth [0,1] of a sprite whose ground point is at world y `pivot_y`.
+pub fn sprite_batch_depth01(pivot_y: float, y_bounds: Vec2) -> float {
+    return clamp((pivot_y - y_bounds.x) / max(y_bounds.y - y_bounds.x, 0.0001), 0.0, 1.0)
+}
+
+pub fn sprite_batch_position(clip: Vec4, pivot_y: float, y_bounds: Vec2) -> Vec4 {
+    return v(clip.xy, sprite_batch_depth01(pivot_y, y_bounds) * 2.0 - 1.0, clip.w)
+}
+
+pub @shader(vertex)
+fn sprite_batch_vert(@attr a: Vertex, @engine e: EngineU) -> SpriteVary {
+    let clip = e.uProjection * e.uView * v(a.pos.to_f64(), 0.0, 1.0)
+    return SpriteVary {
+        position: sprite_batch_position(clip, a.pivot_y, e.uYBounds),
+        TexCoord: a.uv.to_f64(),
+        Color: a.color.to_f64(),
+        Colorize: a.colorize,
+        WorldPosition: a.pos.to_f64(),
+        EntityId: a.entity_id,
+        Section: a.section.to_f64(),
+    }
+}
+
+pub value SpriteFragU {
+    uLinearWorld: bool = false,
+    uTextureSrgb: bool = false,
+    uColorFiltered: bool = false,
+    uHasSurfaceMask: bool,
+}
+
+pub value SpriteBatchOut {
+    FragColor: Vec4,
+    // R32I id attachment: integer output, written by overwrite (blending is
+    // ignored on integer color buffers per spec).
+    FragId: int,
+}
+
+pub const SPRITE_ALPHA_CUTOFF: float = 0.1
+
+// The draw binds its colour texture to slot zero.
+pub struct SpriteBatchTex {
+    uTexture: Sampler2D,
+    uSurfaceTex: Sampler2D,
+}
+
+pub @pure fn sprite_surface_id(surface: Vec4, entity_id: int) -> int {
+    if entity_id != 0 || surface.a < SPRITE_ALPHA_CUTOFF { return entity_id }
+    let height = int(floor(clamp(surface.y, 0.0, 1.0) * 255.0 + 0.5))
+    return -1 - height - (if surface.x >= 0.5 { 256 } else { 0 })
+}
+
+pub @pure fn sprite_surface_decode(id: int) -> Vec4 {
+    let surface_code = -id - 1
+    let cap = surface_code >= 256
+    let height = int_to_float(surface_code % 256) / 255.0
+    return v(if cap { 0.0 } else { 1.0 }, if cap { 1.0 } else { 0.0 }, 0.0, height)
+}
+
+pub fn sprite_color_texture(source: Sampler2D, uv: Vec2, linear: bool, encoded: bool, filtered: bool) -> Vec4 {
+    return if linear && encoded { texture_srgb(source, uv, filtered) } else { texture(source, uv) }
+}
+
+pub fn sprite_color_tint(value: Vec4, linear: bool) -> Vec4 {
+    return if linear { srgb_color(value) } else { value }
+}
+
+pub fn sprite_batch_lit_color(tex_color: Vec4, vertex_color: Vec4, colorize: float, lighting: Vec3, linear: bool) -> Vec4 {
+    let base = tex_color.rgb * vertex_color.rgb
+    let weights = if linear { v(0.2126, 0.7152, 0.0722) } else { v(0.299, 0.587, 0.114) }
+    let luminance = tex_color.rgb.dot(weights)
+    let colorized = v(luminance, luminance, luminance) * vertex_color.rgb
+    let rgb = base.lerp(colorized, clamp(colorize, 0.0, 1.0))
+    let illumination = if linear { max(lighting, v(0.0, 0.0, 0.0)) } else { clamp(lighting, 0.0, 6.0) }
+    return v(rgb * illumination, tex_color.w * vertex_color.w)
+}
+
+
+@shader(fragment)
+fn sprite_batch_frag(vary: SpriteVary, @uniform u: SpriteFragU, @textures tex: SpriteBatchTex) -> SpriteBatchOut {
+    let tex_color = sprite_color_texture(tex.uTexture, vary.TexCoord, u.uLinearWorld, u.uTextureSrgb, u.uColorFiltered)
+    if tex_color.w < SPRITE_ALPHA_CUTOFF { discard() }
+    let entity_id = vary.EntityId as int
+    if u.uHasSurfaceMask { entity_id = sprite_surface_id(texture(tex.uSurfaceTex, vary.TexCoord), entity_id) }
+    return SpriteBatchOut {
+        FragColor: sprite_batch_lit_color(tex_color, sprite_color_tint(vary.Color, u.uLinearWorld), vary.Colorize, v(1.0,1.0,1.0), u.uLinearWorld),
+        FragId: entity_id,
+    }
+}

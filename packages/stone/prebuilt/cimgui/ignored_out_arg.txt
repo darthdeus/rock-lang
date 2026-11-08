@@ -1,0 +1,41 @@
+ImFontAtlas_AddCustomRect: ImFontAtlasRect* out_r
+ImFontAtlas_GetCustomRect: ImFontAtlasRect* out_r
+ImFont_CalcTextSizeA: const char** out_remaining
+ImGuiDockNode_Rect: ImRect* pOut
+ImGuiTextRange_split: ImVector_ImGuiTextRange* out
+ImGuiViewportP_GetBuildWorkRect: ImRect* pOut
+ImGuiViewportP_GetMainRect: ImRect* pOut
+ImGuiViewportP_GetWorkRect: ImRect* pOut
+ImGuiWindow_MenuBarRect: ImRect* pOut
+ImGuiWindow_Rect: ImRect* pOut
+ImGuiWindow_TitleBarRect: ImRect* pOut
+ImTextureData_GetTexRef: ImTextureRef* pOut
+igAddDrawListToDrawDataEx: ImVector_ImDrawListPtr* out_list
+igButtonBehavior: bool* out_hovered
+igButtonBehavior: bool* out_held
+igDebugNodeDrawCmdShowMeshAndBoundingBox: ImDrawList* out_draw_list
+igDockBuilderCopyNode: ImVector_ImGuiID* out_node_remap_pairs
+igFindHoveredWindowEx: ImGuiWindow** out_hovered_window
+igFindHoveredWindowEx: ImGuiWindow** out_hovered_window_under_moving_window
+igGetPopupAllowedExtentRect: ImRect* pOut
+igGetWindowScrollbarRect: ImRect* pOut
+igImFontAtlasGetMouseCursorTexData: ImVec2[2] out_uv_border
+igImFontAtlasGetMouseCursorTexData: ImVec2[2] out_uv_fill
+igImFontAtlasTextureGetSizeEstimate: ImVec2i* pOut
+igImFontCalcTextSizeEx: const char** out_remaining
+igImFormatStringToTempBuffer: const char** out_buf
+igImFormatStringToTempBuffer: const char** out_buf_end
+igImFormatStringToTempBufferV: const char** out_buf
+igImFormatStringToTempBufferV: const char** out_buf_end
+igImTextCharFromUtf8: unsigned int* out_char
+igImTextCharToUtf8: char[5] out_buf
+igImTextStrFromUtf8: ImWchar* out_buf
+igImTextStrFromUtf8: int out_buf_size
+igImTextStrToUtf8: char* out_buf
+igImTextStrToUtf8: int out_buf_size
+igSliderBehavior: ImRect* out_grab_bb
+igTabItemLabelAndCloseButton: bool* out_just_closed
+igTabItemLabelAndCloseButton: bool* out_text_clipped
+igTableGetCellBgRect: ImRect* pOut
+igWindowRectAbsToRel: ImRect* pOut
+igWindowRectRelToAbs: ImRect* pOut

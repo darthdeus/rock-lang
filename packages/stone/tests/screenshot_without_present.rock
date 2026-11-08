@@ -1,0 +1,15 @@
+@test
+fn a_screenshot_request_with_no_present_fails_instead_of_returning_pixels() {
+    let path = tmpdir() + "/capture-without-present.png"
+    let completions: Vec<bool> = vec_new()
+    let failures = SCREENSHOT_CAPTURE_FAILURES
+    let completed = SCREENSHOT_COMPLETED_COUNT
+    take_screenshot(path, -1, (_path, ok) => { completions.push(ok) })
+    assert_eq(completions.len(), 0, "a request is answered only by a present")
+    screenshot_fail_pending("no presented frame before shutdown")
+    assert_eq(completions.len(), 1, "an unanswered request is failed, not dropped")
+    assert(!completions[0], "the unanswered request reports failure")
+    assert_eq(SCREENSHOT_CAPTURE_FAILURES, failures + 1, "the failure is counted")
+    assert_eq(SCREENSHOT_COMPLETED_COUNT, completed, "no capture is reported as completed")
+    assert(!file_exists(path), "no stale or blank file is written")
+}

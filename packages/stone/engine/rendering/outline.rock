@@ -1,0 +1,785 @@
+global CURRENT_OUTLINE_ID: int = 0
+
+// A pure data record (entity id + style numbers): value semantics so
+// deferred-draw closures can capture it by value instead of borrowing a row.
+pub value Outline {
+    entity_id: int,
+    color: Color = WHITE,
+    // Style of the outline on parts of the target that are *occluded* by
+    // something in front of them in the color pass. When null, the outline
+    // pipeline falls back to a dimmed fade of `color` via
+    // `default_occluded_fade`, so games that don't care don't have to set
+    // this — a red sprite automatically gets a dim red occluded outline.
+    occluded_color: Color? = null,
+    width: float = 1.0,
+    // Flame-scroll style: 0 = plain flat outline; > 0 renders the band as
+    // scrolling fire of that intensity (> 1 saturates toward white; the
+    // overlay composites after post-processing, so pair with a glow light
+    // for a bloom-like halo). Games pulse this per frame (e.g. with cast
+    // progress).
+    flame: float = 0.0,
+    flame_speed: float = 1.0,
+    // Null uses host time for live UI feedback; world effects supply their clock.
+    flame_time: float? = null,
+}
+
+// Style fallback globals for games that don't want per-entity colors. Slot 0
+// of the uniform arrays uploaded to outline_detect_shader holds these, and
+// the shader uses it when a silhouette id has no registered style.
+pub global OUTLINE_RADIUS: float = 7.0
+const OUTLINE_COLOR: Color = GREEN
+const OUTLINE_COLOR_OCCLUDED: Color = color(0.2, 0.6, 0.2, 0.8)
+const OUTLINE_FLAME: float = 0.0
+
+// Style capacity, independent of picking-id magnitude. Slot 0 is fallback;
+// the other slots form a bounded hash table keyed by picking id. Keep in
+// sync with the @size(256) shader arrays.
+pub const OUTLINE_MAX_ENTRIES: int = 256
+
+pub value OutlineEntry {
+    color: Color,
+    occluded_color: Color,
+    width: float,
+    flame: float,
+    flame_phase: float,
+}
+
+// Per-frame registry of every entity that a draw call opted into outlining
+// for the current frame. Populated by `register_outline_entry`, flushed to
+// shader uniforms at the start of
+// `apply_outline_overlay`, and retired with the mask after the frame.
+pub global OUTLINE_ENTRIES: Map<int, OutlineEntry> = map_new()
+pub global OUTLINE_ENTRIES_LAST: Map<int, OutlineEntry> = map_new()
+
+// More simultaneously outlined entities than the uniform table can hold
+// retain the explicit fallback style and its scan radius.
+global OUTLINE_FALLBACK_SLOT_USED: bool = false
+
+// Hoist the recipes reused by every outline pass.
+pub global OUTLINE_DETECT_PIPELINE: Pipeline = pipeline(outline_detect_shader)
+global ENTITY_ID_DEBUG_PIPELINE: Pipeline = pipeline(entity_id_debug_shader)
+
+// Persistent flat vec4 slot buffers (r,g,b,a per entity), sized once to
+// OUTLINE_MAX_ENTRIES*4 and refilled in place each frame (see
+// apply_outline_overlay). Flat float storage, not [Color]: a Vec-of-value
+// cell must ffi.new-box each element on write, and the upload then
+// re-flattened it back to a float array -- a per-frame box+unbox round
+// trip on 256 slots x3. Writing scalars straight into these buffers and
+// uploading .ptr as the pass's vec4 array payload skips both.
+global OUTLINE_COLOR_SLOTS: NativeBuffer<float> = native_buffer_float(OUTLINE_MAX_ENTRIES * 4)
+global OUTLINE_OCCLUDED_SLOTS: NativeBuffer<float> = native_buffer_float(OUTLINE_MAX_ENTRIES * 4)
+// Width + flame packed as (width, flame, flame_phase, entity_id) per vec4 -- separate float
+// arrays blew the GL uniform-register budget; see outline_params in
+// outline_detect_shader.rock.
+global OUTLINE_PARAM_SLOTS: NativeBuffer<float> = native_buffer_float(OUTLINE_MAX_ENTRIES * 4)
+
+fn retire_outline_commands(snapshot: bool) {
+    let mask_verts = discard_mask_batches(OUTLINE_MASK_BATCHES)
+    if snapshot {
+        OUTLINE_MASK_VERTS_LAST = mask_verts
+        let previous = OUTLINE_ENTRIES_LAST
+        OUTLINE_ENTRIES_LAST = OUTLINE_ENTRIES
+        OUTLINE_ENTRIES = previous
+    }
+    CURRENT_OUTLINE_ID = 0
+    OUTLINE_ENTRIES.clear()
+    OUTLINE_FALLBACK_SLOT_USED = false
+}
+
+pub fn next_outline_id() -> int {
+    CURRENT_OUTLINE_ID += 1
+    return CURRENT_OUTLINE_ID
+}
+
+pub fn maybe_make_outline(enabled: bool, color: Color = WHITE, width: float = 1.0, flame: float = 0.0, flame_speed: float = 1.0) -> Outline? {
+    if enabled {
+        return Outline {
+            entity_id: next_outline_id(),
+            color: color,
+            width: width,
+            flame: flame,
+            flame_speed: flame_speed,
+        }
+    } else {
+        return null
+    }
+}
+
+// Default derivation from outline color to occluded color when the user
+// didn't supply one. Matches "dim + slightly more transparent" — the
+// occluded portion stays color-matched to the visible portion so a red
+// enemy reads red-through-walls, a blue ally reads blue-through-walls.
+// Games wanting a uniform occluded style (everything dim gray, say) can
+// opt out by setting `occluded_color` per-entity.
+@pure
+fn default_occluded_fade(c: Color) -> Color {
+    return color(c.r * 0.4, c.g * 0.4, c.b * 0.4, c.a * 0.7)
+}
+
+// Called for every draw with a non-null Outline. Records per-entity color data
+// so `apply_outline_overlay` can upload it
+// to the shader. Picking ids are sparse scene identities, not uniform slots.
+fn register_outline_entry(entity_id: int, outline: Outline) {
+    if entity_id <= 0 { return }
+    if OUTLINE_ENTRIES.len() >= OUTLINE_MAX_ENTRIES - 1 && OUTLINE_ENTRIES.get(entity_id) == null {
+        log_warn("OUTLINE", "outline style capacity exceeded; entity {entity_id} uses fallback")
+        OUTLINE_FALLBACK_SLOT_USED = true
+        return
+    }
+
+    let occluded = outline.occluded_color ?? default_occluded_fade(outline.color)
+    OUTLINE_ENTRIES.insert(entity_id, OutlineEntry {
+        color: outline.color,
+        occluded_color: occluded,
+        width: outline.width,
+        flame: outline.flame,
+        flame_phase: outline_flame_phase(outline),
+    })
+}
+
+fn outline_flame_phase(outline: Outline) -> float {
+    return (outline.flame_time ?? shader_clock()) * outline.flame_speed
+}
+
+// Write one vec4 (r,g,b,a) into a flat float slot buffer. Scalar stores
+// into the NativeBuffer -- no Color box.
+pub fn write_vec4_slot(buf: NativeBuffer<float>, slot: int, x: float, y: float, z: float, w: float) {
+    let base = slot * 4
+    buf[base] = x
+    buf[base + 1] = y
+    buf[base + 2] = z
+    buf[base + 3] = w
+}
+
+pub fn write_color_slot(buf: NativeBuffer<float>, slot: int, c: Color) {
+    write_vec4_slot(buf, slot, c.r, c.g, c.b, c.a)
+}
+
+// Cached outline detect pass. Fixed-shape; the only varying inputs are
+// outline_radius, the debug_classify toggle, and the canvas views. The three
+// vec4 slot buffers are stable NativeBuffer refs whose contents are rewritten in place each frame -- the cached Pass
+// reads the current bytes at upload, so it never needs to rebuild for them.
+// Rebuild only on a keyed change (cache-by-key, same as the bloom chain).
+pub nobox value OutlinePassKey {
+    linear_world: bool = false,
+    // Bump on any change to the Pass SHAPE the key doesn't otherwise capture
+    // (a new uniform, an input swap, an output/clear change). OUTLINE_PASS /
+    // OUTLINE_PASS_KEY are hot-reload-preserved globals, so a Pass built by an
+    // older engine survives a reload; without a shape signal in the key the
+    // reconstructed key would still match it and hand back a stale Pass missing
+    // the new uniform (R7's force_visible: a stale per-frame Pass would leave
+    // the shared detect program's force_visible at whatever the ad-hoc path set
+    // it to -> scene outlines classify every edge visible).
+    shape_version: int,
+    radius: float,
+    see_through_id: int = 0,
+    classify: float,
+    target: CanvasViewKey,
+    visible: CanvasViewKey,
+    // The composite the overlay blends into (0 = the bound framebuffer). It
+    // moves with the present path, and a cached Pass pointed at last frame's
+    // target would draw the outlines into a canvas nothing presents.
+    output: CanvasViewKey,
+    // In the key on purpose: it tracks the camera, so a walking player rebuilds
+    // the Pass. Standing still costs nothing, and a stale origin would drag the
+    // flame noise across every outlined sprite. Held as scalars because `Vec2`
+    // is nobox and the key materializes into the nullable globals below.
+    noise_origin_x: float,
+    noise_origin_y: float,
+    // The scissor rect, held as scalars for the same reason the noise origin
+    // is. In the key because the cached Pass CARRIES it: a stale rect would
+    // confine the draw to where the outlined content was on an earlier frame,
+    // which reads as an outline that lags the sprite it wraps. It is quantised
+    // (OUTLINE_SCISSOR_QUANTUM), so motion inside a cell does not rebuild.
+    // Defaulted so the ad-hoc path, which has no scissor and shares this key,
+    // states only what it uses.
+    scissor_on: bool = false,
+    scissor_x: int = 0,
+    scissor_y: int = 0,
+    scissor_w: int = 0,
+    scissor_h: int = 0,
+}
+
+const OUTLINE_PASS_SHAPE_VERSION: int = 9
+
+global OUTLINE_PASS: Pass? = null
+global OUTLINE_PASS_KEY: OutlinePassKey? = null
+
+// Build an outline-detect Pass reading `mask`/`visible` id canvases and
+// writing into `output` (null = the currently-bound composite target). The
+// slot buffers carry per-entity color/width, hashed by the mask's entity id.
+// force_visible > 0 paints every edge in the visible style (the ad-hoc path,
+// which has no visible-id buffer). Premultiplied-alpha blend: the outline
+// shader returns premultiplied colors so the compositor straight-adds them;
+// run_pass restores the engine default on exit.
+pub fn build_outline_detect_pass(
+    mask: Canvas,
+    visible: Canvas,
+    output: Canvas?,
+    clear: Color?,
+    radius: float,
+    classify: float,
+    force_visible: float,
+    color_slots: NativeBuffer<float>,
+    occluded_slots: NativeBuffer<float>,
+    param_slots: NativeBuffer<float>,
+    noise_origin: Vec2 = v(0.0, 0.0),
+    linear_world: bool = false,
+    // Null covers the whole output, which is what the ad-hoc silhouette path
+    // and every sim that builds this pass by hand want: they render one
+    // caller-owned canvas whose whole extent is the silhouette's.
+    scissor: IRect? = null,
+    // A visible id that classifies as the target (see EngineState).
+    see_through_id: int = 0,
+) -> Pass {
+    return Pass {
+        pipeline: OUTLINE_DETECT_PIPELINE,
+        // Slot order: target_mask 0, visible_id 1 (OutlineDetectTex field order).
+        slot_inputs: [(sampled_canvas(mask), TextureFilter::Nearest), (sampled_canvas(visible), TextureFilter::Nearest)],
+        // ORDER IS THE CONTRACT: these must match `outline_detect_frag`'s
+        // `@size(N)` param order; nothing here names a member.
+        array_payload: [
+            pass_array_vec4(color_slots.ptr, OUTLINE_MAX_ENTRIES),
+            pass_array_vec4(occluded_slots.ptr, OUTLINE_MAX_ENTRIES),
+            pass_array_vec4(param_slots.ptr, OUTLINE_MAX_ENTRIES),
+        ],
+        block: pass_block(OUTLINE_DETECT_PIPELINE.shader_name, OutlineDetectU {
+            linear_world: linear_world,
+            outline_radius: radius,
+            debug_classify: classify,
+            force_visible: force_visible,
+            noise_origin: noise_origin,
+            see_through_id: see_through_id,
+        }),
+        output: output,
+        clear: clear,
+        scissor: scissor,
+        blend: BlendMode::Alpha,
+    }
+}
+
+fn outline_pass_key(radius: float, classify: float, noise_origin: Vec2, output: Canvas?, scissor: IRect?) -> OutlinePassKey {
+    let has_scissor = scissor != null
+    let rect = scissor ?? IRect { x: 0, y: 0, w: 0, h: 0 }
+    return OutlinePassKey {
+        linear_world: ENGINE.linear_world,
+        shape_version: OUTLINE_PASS_SHAPE_VERSION,
+        radius: radius, classify: classify,
+        see_through_id: ENGINE.outline_see_through_id,
+        target: canvas_view_key(outline_target_canvas),
+        visible: canvas_view_key(visible_id_canvas),
+        output: canvas_view_key(output ?? NO_CANVAS),
+        noise_origin_x: noise_origin.x,
+        noise_origin_y: noise_origin.y,
+        scissor_on: has_scissor,
+        scissor_x: rect.x,
+        scissor_y: rect.y,
+        scissor_w: rect.w,
+        scissor_h: rect.h,
+    }
+}
+
+fn outline_pass_cached(radius: float, classify: float, noise_origin: Vec2, output: Canvas?, scissor: IRect?) -> Pass {
+    // Keep the comparison key out of the miss continuation: its canvas leaves
+    // otherwise stay live across every equality guard in LuaJIT snapshots.
+    if OUTLINE_PASS != null && OUTLINE_PASS_KEY != null && OUTLINE_PASS_KEY.unwrap() == outline_pass_key(radius, classify, noise_origin, output, scissor) {
+        return OUTLINE_PASS.unwrap()
+    }
+    let key = outline_pass_key(radius, classify, noise_origin, output, scissor)
+    let p = build_outline_detect_pass(
+        outline_target_canvas, visible_id_canvas, output, null,
+        radius, classify, 0.0,
+        OUTLINE_COLOR_SLOTS, OUTLINE_OCCLUDED_SLOTS, OUTLINE_PARAM_SLOTS,
+        noise_origin, linear_world: ENGINE.linear_world, scissor: scissor,
+        see_through_id: ENGINE.outline_see_through_id,
+    )
+    OUTLINE_PASS_KEY = key
+    OUTLINE_PASS = p
+    return p
+}
+
+// STONE_OUTLINE_FORCE=1 runs the detect pass over whatever the mask holds, so
+// that the screen-wide scan can be priced on a frame that outlines nothing.
+// That makes it the one case where an empty mask pool still has to be CLEARED
+// and still has to be scanned, which is why the mask pass's empty-pool skip
+// (batch.rock) reads this too. One oracle rather than a second `os_getenv` that
+// could drift from this one.
+fn outline_force_scan() -> bool {
+    static forced = os_getenv("STONE_OUTLINE_FORCE") == "1"
+    return forced
+}
+
+// Frames on which the detect pass actually ran. Sims assert against it in both
+// directions: the pass must not run over an id buffer nothing wrote, and it
+// must still run when there IS world geometry.
+pub global OUTLINE_OVERLAY_RUNS: int = 0
+
+// The scan radius the last detect pass ran with. Sims pin it to the widths in
+// use, because the scan is the pass's whole cost: (2r+1)^2 fetches per
+// fragment, screen-wide.
+pub global OUTLINE_LAST_SCAN_RADIUS: float = 0.0
+
+// The scissor rect the last detect pass ran under, in the output canvas's own
+// pixels with GL's bottom-left origin; null when the pass covered the whole
+// target (no mask bounds, or the forced diagnostic scan).
+// The outline-scissor simulation pins both its coverage and its size.
+pub global OUTLINE_LAST_SCISSOR: IRect? = null
+
+// Texel grid the scissor rect is rounded OUTWARD onto. The rect is part of the
+// detect pass's cache key, so an unquantised one would rebuild the Pass on
+// every texel an outlined sprite moves; growing it to a 16-texel grid instead
+// costs a rim of fragments that discard anyway and holds the cache still while
+// the content moves inside its cell.
+pub const OUTLINE_SCISSOR_QUANTUM: int = 16
+
+// World-space AABB of the geometry this frame's silhouette mask pass draws,
+// as four scalars plus a validity flag -- a Vec2 pair would box on every
+// compare, and this walks every mask vertex. Invalid means "cover the whole
+// target", which is what the pass did before it was bounded.
+//
+// Stamped from the POOL, not from the push sites. The pool is the one place
+// that has seen every push -- sprite, ellipse and polygon alike -- so a future
+// push site cannot forget to widen a bound it never touches; and the stamp is
+// taken where the mask pass reads the pool, after the last push of the frame
+// and before frame-end retirement truncates it.
+global OUTLINE_MASK_BOUNDS_VALID: bool = false
+global OUTLINE_MASK_BOUNDS_MIN_X: float = 0.0
+global OUTLINE_MASK_BOUNDS_MIN_Y: float = 0.0
+global OUTLINE_MASK_BOUNDS_MAX_X: float = 0.0
+global OUTLINE_MASK_BOUNDS_MAX_Y: float = 0.0
+
+fn stamp_outline_mask_bounds(pool: RenderBatchPool) {
+    let min_x = 1000000000.0
+    let min_y = 1000000000.0
+    let max_x = -1000000000.0
+    let max_y = -1000000000.0
+    for (_key, batch_row) in pool.entries {
+        let batch = batch_row.borrow().unwrap()
+        let n = batch.count
+        if n == 0 { continue }
+        let verts = batch.verts
+        let i = 0
+        while i < n {
+            let x = verts[i].pos.x
+            let y = verts[i].pos.y
+            if x < min_x { min_x = x }
+            if x > max_x { max_x = x }
+            if y < min_y { min_y = y }
+            if y > max_y { max_y = y }
+            i += 1
+        }
+    }
+    OUTLINE_MASK_BOUNDS_VALID = min_x <= max_x
+    OUTLINE_MASK_BOUNDS_MIN_X = min_x
+    OUTLINE_MASK_BOUNDS_MIN_Y = min_y
+    OUTLINE_MASK_BOUNDS_MAX_X = max_x
+    OUTLINE_MASK_BOUNDS_MAX_Y = max_y
+}
+
+@pure fn outline_scissor_floor_to(value: float, q: int) -> int {
+    return int(floor(value / float(q))) * q
+}
+
+@pure fn outline_scissor_ceil_to(value: float, q: int) -> int {
+    return int(ceil(value / float(q))) * q
+}
+
+// The rectangle of `output` the detect pass has to cover: this frame's mask
+// geometry in scene texels, dilated by the scan radius, rounded outward onto
+// the quantisation grid and clipped to the output's ACTIVE rectangle. In GL's
+// bottom-left-origin pixels, which is what `Pass.scissor` takes.
+//
+// A fragment becomes an outline pixel only when a silhouette neighbour lies
+// within the scan radius -- that is the shader's own acceptance test -- so
+// every fragment outside this rect runs the whole (2r+1)^2 loop and discards.
+// Confining the draw to it is therefore pixel-identical to covering the
+// drawable, and is the pass's whole cost.
+fn outline_detect_scissor(view: FrameView, scan_radius: float, output: Canvas) -> IRect? {
+    if !OUTLINE_MASK_BOUNDS_VALID { return null }
+    let active = canvas_active(output)
+    if active.x <= 0 || active.y <= 0 { return null }
+
+    // Through the SAME transform the mask pass renders with, so the rect and
+    // the silhouette inside it cannot be derived differently.
+    let lo = world_to_scene_texel_in(view, v(OUTLINE_MASK_BOUNDS_MIN_X, OUTLINE_MASK_BOUNDS_MIN_Y))
+    let hi = world_to_scene_texel_in(view, v(OUTLINE_MASK_BOUNDS_MAX_X, OUTLINE_MASK_BOUNDS_MAX_Y))
+    // One texel over the radius: the mask quad is rasterised onto whole texels
+    // and the scan steps in whole texels, so the band can reach one further out
+    // than the vertex arithmetic alone says.
+    let pad = scan_radius + 1.0
+    let x0 = min(lo.x, hi.x) - pad
+    let x1 = max(lo.x, hi.x) + pad
+    // Top-left-origin scene texels -- world_to_scene_texel_in's convention, the
+    // one the pixel readbacks use. The flip to GL rows is below.
+    let t0 = min(lo.y, hi.y) - pad
+    let t1 = max(lo.y, hi.y) + pad
+
+    let q = OUTLINE_SCISSOR_QUANTUM
+    let gx0 = outline_scissor_floor_to(x0, q)
+    let gx1 = outline_scissor_ceil_to(x1, q)
+    let gt0 = outline_scissor_floor_to(t0, q)
+    let gt1 = outline_scissor_ceil_to(t1, q)
+
+    // GL measures the scissor from the target's BOTTOM while the rect above is
+    // top-left-origin, so the row range inverts here. Getting this backwards
+    // scissors the outline away instead of rendering it somewhere wrong, which
+    // is why the sim asserts the band pixels and not just the rect.
+    let x = max(0, gx0)
+    let y = max(0, active.y - gt1)
+    let w = min(active.x, gx1) - x
+    let h = min(active.y, active.y - gt0) - y
+    if w <= 0 || h <= 0 {
+        // The mask is entirely outside the active rectangle; there is nothing
+        // to draw, and an empty scissor says so rather than covering the frame.
+        return IRect { x: 0, y: 0, w: 0, h: 0 }
+    }
+    return IRect { x: x, y: y, w: w, h: h }
+}
+
+// The world origin in scene texels, behind its own call frame ON PURPOSE.
+// `camera_offset_in` is @pure, so spelled inline it expands to nine `view`
+// field reads that live in apply_outline_overlay's own Lua locals -- and the
+// emitter clears those only after the call they feed RETURNS. Inside the
+// run_pass argument they are therefore live across every guard in
+// outline_pass_cached, twenty floats against LuaJIT's sixteen-register budget,
+// so the cache-key compare's side trace can never be assembled
+// (`NYI: register coalescing too complex`).
+// A separate frame pops them before the pass is resolved. Do not @pure or
+// @inline this, and do not fold it back into the call.
+fn outline_noise_origin(view: FrameView) -> Vec2 {
+    return camera_offset_in(view) * view.world_to_scene_scale
+}
+
+fn apply_outline_overlay() {
+    // The detect pass samples visible_id_canvas, which ONLY the MRT color pass
+    // writes. Without an id target attached (no float canvases -- every iOS
+    // context today) it samples an unwritten buffer, finds no silhouette edges
+    // and draws nothing -- while still paying a fullscreen neighbour scan.
+    // Measured on an iPhone 16: 22 of the frame's 24 ms of GPU, for no output.
+    // The same flag already gates the geometry side in batch.rock.
+    // STONE_OUTLINE_FORCE=1 runs the pass anyway (against blank ids) to price
+    // the fullscreen scan on contexts that skip it; STONE_OUTLINE_RADIUS caps
+    // the scan ceiling. Diagnostics for the GLES outline-restoration budget.
+    let force_scan = outline_force_scan()
+    if !mrt_id_attached && !force_scan {
+        log_warn_once("RENDER", "outline overlay skipped: no MRT id target, so the detect pass would scan an id buffer nothing wrote")
+        return
+    }
+    // Attached but unwritten: a UI-only frame draws no world geometry, so the
+    // ids are the pass's own clear. Same wasted fullscreen scan, different
+    // reason -- R32I attach succeeds on GLES, so the guard above stands aside.
+    if !outline_ids_written && !force_scan {
+        return
+    }
+
+    let view = RENDER_VIEW ?? return
+
+    // Ids written but nothing outlined: the mask the detect pass scans is the
+    // clear render_silhouette_mask just wrote, so every fragment finds no
+    // silhouette neighbour and discards. The guard above stands aside because
+    // it asks whether the WORLD drew, and a game that draws a world every
+    // frame and outlines something only on hover answers yes on every frame.
+    // Measured on an M1 at 3360x2100: 31.4 of the frame's 91.9 ms of GPU for
+    // no output.
+    if outline_mask_written || force_scan {
+        OUTLINE_OVERLAY_RUNS = OUTLINE_OVERLAY_RUNS + 1
+        apply_outline_detect(view, force_scan)
+    }
+
+    // Outside the gate on purpose: this is the id-buffer visualiser, whose
+    // input is the color pass's ids, not the silhouette mask.
+    if ENGINE.debug_draw_entity_id {
+        run_pass(Pass {
+            pipeline: ENTITY_ID_DEBUG_PIPELINE,
+            slot_inputs: [(sampled_canvas(visible_id_canvas), TextureFilter::Nearest)],
+            output: COMPOSITE_CANVAS,
+            clear: null,
+        })
+    }
+}
+
+fn apply_outline_detect(view: FrameView, force_scan: bool) {
+    profile_begin("outline_overlay")
+
+    // Reuse the existing uniform storage; only outlined entities occupy slots.
+    // params.w carries the picking id so collisions never borrow another style.
+    write_color_slot(OUTLINE_COLOR_SLOTS, 0, OUTLINE_COLOR)
+    write_color_slot(OUTLINE_OCCLUDED_SLOTS, 0, OUTLINE_COLOR_OCCLUDED)
+    write_vec4_slot(OUTLINE_PARAM_SLOTS, 0, OUTLINE_RADIUS, OUTLINE_FLAME, 0.0, 0.0)
+    for i in 1..OUTLINE_MAX_ENTRIES { OUTLINE_PARAM_SLOTS[i * 4 + 3] = 0.0 }
+    let active_w = 0.0
+    for (id, e) in OUTLINE_ENTRIES {
+        let slot = (id - 1) % (OUTLINE_MAX_ENTRIES - 1) + 1
+        while OUTLINE_PARAM_SLOTS[slot * 4 + 3] != 0.0 {
+            slot = slot % (OUTLINE_MAX_ENTRIES - 1) + 1
+        }
+        write_color_slot(OUTLINE_COLOR_SLOTS, slot, e.color)
+        write_color_slot(OUTLINE_OCCLUDED_SLOTS, slot, e.occluded_color)
+        write_vec4_slot(OUTLINE_PARAM_SLOTS, slot, e.width, e.flame, e.flame_phase, id as float)
+        if e.width > active_w { active_w = e.width }
+    }
+
+    let classify_flag = if ENGINE.debug_outline_classify { 1.0 } else { 0.0 }
+
+    static radius_override = get_env_int("STONE_OUTLINE_RADIUS", 0)
+    let ceiling = if radius_override > 0 { float(radius_override) } else { OUTLINE_RADIUS }
+    // The scan is the pass's whole cost -- (2r+1)^2 fetches per fragment,
+    // screen-wide -- and a neighbour farther out than its entity's width is
+    // rejected by the shader's band test anyway, so the radius only has to
+    // reach the widest width in use: 25 fetches for a 2-texel hover outline
+    // instead of 225. Whole texels, so the pass
+    // key changes only when a width crosses one. Slot 0's band is OUTLINE_RADIUS
+    // wide, so a capacity overflow keeps the ceiling; the forced
+    // diagnostic scan exists to price the ceiling.
+    let scan_radius = if force_scan || OUTLINE_FALLBACK_SLOT_USED {
+        ceiling
+    } else {
+        min(ceiling, max(1.0, ceil(active_w)))
+    }
+    OUTLINE_LAST_SCAN_RADIUS = scan_radius
+
+    // The scan is paid per COVERED fragment, so bound the draw to the
+    // fragments that can produce output: this frame's silhouettes dilated by
+    // the radius. Two cases keep the whole target -- the forced diagnostic
+    // scan, which exists to price the screen-wide ceiling; and a
+    // frame whose composite is the bound framebuffer rather than a canvas,
+    // because binding the output is the only place a scissor can be applied.
+    let scissor: IRect? = null
+    if !force_scan && COMPOSITE_CANVAS != null {
+        scissor = outline_detect_scissor(view, scan_radius, COMPOSITE_CANVAS.unwrap())
+    }
+    OUTLINE_LAST_SCISSOR = scissor
+
+    // Into the composite the present blit will upscale, so the outline is
+    // magnified by the same sharp-bilinear as the sprite it wraps. Drawn to
+    // the window instead it would be resampled on its own terms and slide
+    // against that sprite by up to a canvas texel.
+    let noise_origin = outline_noise_origin(view)
+    run_pass(outline_pass_cached(scan_radius, classify_flag,
+        noise_origin, COMPOSITE_CANVAS, scissor))
+
+    profile_end("outline_overlay")
+}
+
+// ─────────────── ad-hoc silhouette-to-canvas primitive (R7) ───────────────
+//
+// Render the outlined silhouette of a caller-provided sprite set into a
+// caller-owned canvas, reusing the per-frame mask + detect machinery. A
+// closure-free begin/push/end bracket (a `draw: fn()` param forces a per-call
+// capturing-closure alloc -- the FNEW trace-abort class run_pass was engineered
+// to avoid). See outline_canvas_begin for the public entry + constraints.
+
+// All ad-hoc mask sprites share this id, so the caller's whole sprite set
+// reads as one merged silhouette. Any positive id works; the style is bound
+// to this slot (and slot 0 as fallback) each call.
+const ADHOC_OUTLINE_ID: int = 1
+
+// Mask geometry pool for the ad-hoc path -- separate from the per-frame
+// OUTLINE_MASK_BATCHES so an ad-hoc call never touches the frame's outline
+// state. Texture-keyed; truncated at outline_canvas_begin and idle-swept on
+// the batch-pool cadence (sweep_idle_mask_batches, batch.rock).
+global ADHOC_MASK_BATCHES: RenderBatchPool = render_batch_pool_new()
+
+// Dedicated style slot buffers for the ad-hoc detect pass -- kept apart from
+// the per-frame OUTLINE_*_SLOTS so the two never race on shared contents.
+// Cross-function (written in outline_canvas_end, referenced by cached passes),
+// so they stay global (per the R7 static-locals carve-out).
+global ADHOC_COLOR_SLOTS: NativeBuffer<float> = native_buffer_float(OUTLINE_MAX_ENTRIES * 4)
+global ADHOC_OCCLUDED_SLOTS: NativeBuffer<float> = native_buffer_float(OUTLINE_MAX_ENTRIES * 4)
+global ADHOC_PARAM_SLOTS: NativeBuffer<float> = native_buffer_float(OUTLINE_MAX_ENTRIES * 4)
+
+// Open-bracket state (outline_canvas_begin -> outline_canvas_end). Cross-
+// function by nature, so global.
+global ADHOC_IN_BRACKET: bool = false
+global ADHOC_TARGET: Canvas? = null
+global ADHOC_STYLE: Outline? = null
+global ADHOC_CAM_OFFSET: Vec2 = v(0.0, 0.0)
+global ADHOC_CAM_SCALE: float = 1.0
+global ADHOC_SAVED_CANVAS: int = 0
+global ADHOC_FRAME: int = -1
+
+fn outline_bracket_clear() {
+    ADHOC_IN_BRACKET = false
+    ADHOC_TARGET = null
+    ADHOC_STYLE = null
+    ADHOC_SAVED_CANVAS = 0
+    ADHOC_FRAME = -1
+}
+
+fn outline_bracket_reject_stale() -> bool {
+    if !ADHOC_IN_BRACKET || ADHOC_FRAME == frame_seq { return false }
+    log_once("OUTLINE", "outline canvas bracket crossed a frame boundary -- discarded without restoring its saved canvas")
+    outline_bracket_clear()
+    let _ = discard_mask_batches(ADHOC_MASK_BATCHES)
+    return true
+}
+
+// One capacity-sized r32i mask canvas (entity ids) plus its detect Pass. The
+// canvas-view contract supersedes the old size-keyed cache: capacity grows
+// monotonically to cover the largest target seen, and each call renders into
+// the active subrectangle matching that call's target. Two differently-sized
+// callers alternating therefore share one allocation instead of thrashing a
+// destroy/create per switch, with no eviction cadence to tune.
+pub struct AdhocIntermediate {
+    canvas: Canvas,
+    pass: Pass? = null,
+    pass_key: OutlinePassKey? = null,
+}
+pub global ADHOC_INTERMEDIATE: AdhocIntermediate? = null
+
+// The intermediate's GPU canvas handle, or 0 before first use. Reallocation
+// is the thing worth observing, so it is exposed rather than reconstructed.
+pub fn adhoc_intermediate_handle() -> int {
+    let it = ADHOC_INTERMEDIATE ?? return 0
+    return it.canvas.handle.0
+}
+
+fn adhoc_intermediate(w: int, h: int) -> AdhocIntermediate {
+    let existing = ADHOC_INTERMEDIATE
+    if existing != null {
+        let it = existing.unwrap()
+        if !canvas_is_live(it.canvas) {
+            ADHOC_INTERMEDIATE = null
+            render_batch_pool_destroy(ADHOC_MASK_BATCHES)
+            ADHOC_MASK_BATCHES = render_batch_pool_new()
+        } else if int(it.canvas.width) >= w && int(it.canvas.height) >= h {
+            set_canvas_active(it.canvas, w, h)
+            return it
+        } else {
+            // Grow to cover both the old capacity and this request, so the
+            // sequence of sizes a caller happens to use cannot cycle allocations.
+            w = max(w, int(it.canvas.width))
+            h = max(h, int(it.canvas.height))
+            destroy_canvas(it.canvas)
+        }
+    }
+    let it = AdhocIntermediate { canvas: new_canvas(float(w), float(h), "r32i") }
+    set_canvas_active(it.canvas, w, h)
+    ADHOC_INTERMEDIATE = it
+    return it
+}
+
+// Begin an ad-hoc silhouette-to-canvas bracket. Issue outline_silhouette_sprite
+// pushes, then outline_canvas_end() to render the merged silhouette's outline
+// into `target`. Everything renders in the "visible" style -- there is no
+// per-scene visible-id input, so occlusion is not classified.
+//
+// Camera: set explicitly from cam_offset/cam_scale (NOT the game camera), so
+// the caller controls where sprites land in an arbitrary-sized `target`. The
+// world-camera projection derives from the bound target's size, so passing the
+// game camera into a differently-sized target would mis-scale.
+//
+// `target` should be rgba8 if the caller intends to read it back or save_png
+// (full-buffer readback + stone_canvas_save_png are RGBA8-only). The
+// intermediate mask is r32i. `target` is cleared to transparent by
+// outline_canvas_end; only outline pixels are written (the detect shader
+// discards the rest).
+//
+// Begin, pushes and end must share a frame. A stale bracket is discarded
+// without restoring an earlier frame's binding; a nested same-frame begin
+// is logged and ignored.
+pub fn outline_canvas_begin(target: Canvas, style: Outline, cam_offset: Vec2, cam_scale: float) {
+    let _ = outline_bracket_reject_stale()
+    if ADHOC_IN_BRACKET {
+        log_once("OUTLINE", "outline_canvas_begin called with a bracket already open; call outline_canvas_end first -- nested begin ignored")
+        return
+    }
+    ADHOC_IN_BRACKET = true
+    ADHOC_FRAME = frame_seq
+    ADHOC_TARGET = target
+    ADHOC_STYLE = style
+    ADHOC_CAM_OFFSET = cam_offset
+    ADHOC_CAM_SCALE = cam_scale
+    // Restore the bracket-entry target even if the caller changes targets
+    // between begin and end. Individual passes restore their own entry target.
+    ADHOC_SAVED_CANVAS = CURRENT_CANVAS_HANDLE
+    let _ = discard_mask_batches(ADHOC_MASK_BATCHES)
+}
+
+// Push one sprite into the open bracket's silhouette. The entity id is fixed
+// (ADHOC_OUTLINE_ID) so the whole set merges into one silhouette. Outside a
+// bracket this is a logged error, not a silent write into stale state.
+pub fn outline_silhouette_sprite(
+    image: SampledTexture,
+    pos: Vec2,
+    source: IRect? = null,
+    dest_size: Vec2? = null,
+    pivot: Vec2 = v(0.5, 0.5),
+    rotation: float = 0.0,
+    flip_x: bool = false,
+    flip_y: bool = false,
+    color: Color = WHITE,
+) {
+    if outline_bracket_reject_stale() { return }
+    if !ADHOC_IN_BRACKET {
+        log_once("OUTLINE", "outline_silhouette_sprite called outside an outline_canvas_begin/end bracket -- ignored")
+        return
+    }
+    push_silhouette_mask_quad(
+        ADHOC_MASK_BATCHES, image, pos, source, dest_size, pivot, rotation,
+        flip_x, flip_y, color, 0.0, ADHOC_OUTLINE_ID,
+    )
+}
+
+// Close the bracket: render the merged silhouette's mask, edge-detect it into
+// `target`, reset the shared program's force_visible (A1), and restore the
+// caller's canvas binding (A2). End without a matching begin is a logged error.
+pub fn outline_canvas_end() {
+    if outline_bracket_reject_stale() { return }
+    if !ADHOC_IN_BRACKET {
+        log_once("OUTLINE", "outline_canvas_end called without a matching outline_canvas_begin -- ignored")
+        return
+    }
+    let target = ADHOC_TARGET.unwrap()
+    let style = ADHOC_STYLE.unwrap()
+
+    let occluded = style.occluded_color ?? default_occluded_fade(style.color)
+    let phase = outline_flame_phase(style)
+    write_color_slot(ADHOC_COLOR_SLOTS, 0, style.color)
+    write_color_slot(ADHOC_OCCLUDED_SLOTS, 0, occluded)
+    write_vec4_slot(ADHOC_PARAM_SLOTS, 0, style.width, style.flame, phase, 0.0)
+    write_color_slot(ADHOC_COLOR_SLOTS, ADHOC_OUTLINE_ID, style.color)
+    write_color_slot(ADHOC_OCCLUDED_SLOTS, ADHOC_OUTLINE_ID, occluded)
+    write_vec4_slot(ADHOC_PARAM_SLOTS, ADHOC_OUTLINE_ID, style.width, style.flame, phase, ADHOC_OUTLINE_ID as float)
+
+    let it = adhoc_intermediate(int(target.width), int(target.height))
+    // The drawn count belongs to the per-frame path's mask flag; this bracket
+    // renders on its own caller's demand and is never gated on it.
+    let _ = render_silhouette_mask(ADHOC_MASK_BATCHES, it.canvas, ADHOC_CAM_OFFSET, ADHOC_CAM_SCALE)
+
+    let radius = max(style.width, 1.0)
+    run_pass(adhoc_detect_pass(it, target, radius))
+
+    set_canvas_handle(ADHOC_SAVED_CANVAS)
+
+    outline_bracket_clear()
+}
+
+// Detect Pass for this size's intermediate, cached on the intermediate and
+// rebuilt when the input/output canvas view or radius changes.
+fn adhoc_detect_pass(it: AdhocIntermediate, target: Canvas, radius: float) -> Pass {
+    // Its own camera, deliberately not the game one (outline_canvas_begin).
+    let adhoc_origin = ADHOC_CAM_OFFSET * ADHOC_CAM_SCALE
+    let key = OutlinePassKey {
+        linear_world: ENGINE.linear_world,
+        shape_version: OUTLINE_PASS_SHAPE_VERSION,
+        radius: radius, classify: 0.0,
+        target: canvas_view_key(it.canvas),
+        visible: canvas_view_key(it.canvas),
+        output: canvas_view_key(target),
+        noise_origin_x: adhoc_origin.x,
+        noise_origin_y: adhoc_origin.y,
+    }
+    if it.pass != null && it.pass_key != null && it.pass_key.unwrap() == key {
+        return it.pass.unwrap()
+    }
+    let p = build_outline_detect_pass(
+        it.canvas, it.canvas, target, color(0.0, 0.0, 0.0, 0.0),
+        radius, 0.0, 1.0,
+        ADHOC_COLOR_SLOTS, ADHOC_OCCLUDED_SLOTS, ADHOC_PARAM_SLOTS,
+        adhoc_origin,
+    )
+    it.pass_key = key
+    it.pass = p
+    return p
+}

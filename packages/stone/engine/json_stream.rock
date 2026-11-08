@@ -1,0 +1,201 @@
+pub nobox value JsonEncodeFrame {
+    value: JsonValue,
+    index: int = -1,
+    scan: int = 0,
+    scanned: bool = false,
+    multiline: bool = false,
+    object_keys: [string]? = null,
+}
+
+pub struct JsonEncodeJob {
+    stack: [JsonEncodeFrame] = [],
+    chunks: [string] = [],
+    pretty: bool = false,
+    parts: [string] = [],
+    key_buffers: [[string]] = [],
+}
+
+pub fn json_encode_job(value: JsonValue, pretty: bool = false) -> JsonEncodeJob {
+    return JsonEncodeJob { stack: [JsonEncodeFrame { value }], pretty }
+}
+
+pub fn json_encode_job_done(job: JsonEncodeJob) -> bool { return job.stack.len() == 0 }
+
+pub fn json_encode_job_result(job: JsonEncodeJob) -> string {
+    if !json_encode_job_done(job) { error("JSON encoding is incomplete") }
+    return join(job.chunks, "")
+}
+
+pub fn json_encode_job_advance(job: JsonEncodeJob, budget: int) -> int {
+    job.parts.clear()
+    let spent = json_encode_job_advance_into(job, budget, job.parts)
+    if job.parts.len() > 0 { job.chunks.push(join(job.parts, "")) }
+    job.parts.clear()
+    return spent
+}
+
+// Appends unjoined tokens to caller-owned scratch. The save writer drains it
+// before advancing again; the public chunk/result API retains its old shape.
+pub fn json_encode_job_advance_into(job: JsonEncodeJob, budget: int,
+                                    parts: [string]) -> int {
+    let spent = 0
+    while spent < budget && job.stack.len() > 0 {
+        let level = job.stack.len() - 1
+        let frame = job.stack[level]
+        let value = frame.value
+        let index = frame.index
+        let scan = frame.scan
+        let scanned = frame.scanned
+        let multiline = frame.multiline
+        let object_keys = frame.object_keys
+        // Keep cursor lanes local until descent, completion or budget exhaustion.
+        // Avoid copying every cursor lane after each string byte slice or scan.
+        while spent < budget && job.stack.len() == level + 1 {
+            match value {
+                Str(s) => {
+                    if index < 0 {
+                        parts.push("\"")
+                        index = 0
+                        spent += 1
+                    } else if index < s.len() {
+                        let end = min(index + min(budget - spent, 256), s.len())
+                        let part = if index == 0 && end == s.len() { s }
+                            else { s.substring(index, end) }
+                        json_encode_job_string_part(part, parts)
+                        spent += end - index
+                        index = end
+                    } else {
+                        parts.push("\"")
+                        let _ = job.stack.pop()
+                        spent += 1
+                    }
+                },
+                Array(items) => {
+                    if job.pretty && !scanned {
+                        if scan < items.len() {
+                            match items[scan] {
+                                Array(_) => { multiline = true; scanned = true },
+                                Object(_) => { multiline = true; scanned = true },
+                                _ => {}
+                            }
+                            scan += 1
+                        } else { scanned = true }
+                    } else if index < 0 {
+                        parts.push(if multiline { "[\n" } else { "[" })
+                        index = 0
+                    } else if index < items.len() {
+                        if index > 0 { parts.push(if multiline { ",\n" } else { "," }) }
+                        if multiline { parts.push(json_indent(level + 1)) }
+                        let child = items[index]
+                        let used = json_encode_job_leaf(child, parts, budget - spent - 1)
+                        if used == 0 { job.stack.push(JsonEncodeFrame { value: child }) }
+                        spent += used
+                        index += 1
+                    } else {
+                        if multiline { parts.push("\n" + json_indent(level)) }
+                        parts.push("]")
+                        let _ = job.stack.pop()
+                    }
+                    spent += 1
+                },
+                Object(values) => {
+                    if object_keys == null {
+                        while job.key_buffers.len() <= level { job.key_buffers.push([]) }
+                        // keys_into already sorts string keys in canonical byte order.
+                        object_keys = values.keys_into(job.key_buffers[level])
+                    }
+                    let keys = object_keys.unwrap()
+                    if job.pretty && !scanned {
+                        if scan < keys.len() {
+                            match values[keys[scan]] {
+                                Array(_) => { multiline = true; scanned = true },
+                                Object(_) => { multiline = true; scanned = true },
+                                _ => {}
+                            }
+                            scan += 1
+                        } else { scanned = true }
+                    } else if index < 0 {
+                        parts.push(if multiline { "{{\n" } else { "{{" })
+                        index = 0
+                    } else if index < keys.len() {
+                        if index > 0 { parts.push(if multiline { ",\n" } else { "," }) }
+                        if multiline { parts.push(json_indent(level + 1)) }
+                        let key = keys[index]
+                        parts.push(encode_string(key))
+                        parts.push(if multiline { ": " } else { ":" })
+                        let child = values[key]
+                        let used = json_encode_job_leaf(child, parts, budget - spent - 1)
+                        if used == 0 { job.stack.push(JsonEncodeFrame { value: child }) }
+                        spent += used
+                        index += 1
+                    } else {
+                        if multiline { parts.push("\n" + json_indent(level)) }
+                        parts.push("}}")
+                        let _ = job.stack.pop()
+                    }
+                    spent += 1
+                },
+                _ => {
+                    parts.push(json_encode(value))
+                    let _ = job.stack.pop()
+                    spent += 1
+                }
+            }
+        }
+        if level < job.stack.len() {
+            job.stack[level] = JsonEncodeFrame { value, index, scan, scanned, multiline, object_keys }
+        }
+    }
+    return spent
+}
+
+pub fn json_encode_job_take_output(job: JsonEncodeJob) -> string {
+    let output = join(job.chunks, "")
+    job.chunks.clear()
+    return output
+}
+
+fn json_encode_job_string_part(s: string, parts: [string]) {
+    let start = 0
+    let index = 0
+    while index < s.len() {
+        let unit = s.unit_at(index)
+        if unit < 32 || unit == 34 || unit == 92 {
+            if start < index { parts.push(s.substring(start, index)) }
+            if unit == 34 { parts.push("\\\"") }
+            else if unit == 92 { parts.push("\\\\") }
+            else if unit == 8 { parts.push("\\b") }
+            else if unit == 9 { parts.push("\\t") }
+            else if unit == 10 { parts.push("\\n") }
+            else if unit == 12 { parts.push("\\f") }
+            else if unit == 13 { parts.push("\\r") }
+            else { parts.push("\\u" + hex4(unit)) }
+            start = index + 1
+        }
+        index += 1
+    }
+    if start == 0 {
+        if s.len() > 0 { parts.push(s) }
+    } else if start < s.len() { parts.push(s.substring(start, s.len())) }
+}
+
+// A leaf that fits this slice need not be boxed into a traversal frame. Charge
+// the same opening/string/closing units as the general cursor path.
+fn json_encode_job_leaf(value: JsonValue, parts: [string], budget: int) -> int {
+    if budget <= 0 { return 0 }
+    match value {
+        Array(_) => return 0,
+        Object(_) => return 0,
+        Str(s) => {
+            if s.len() + 2 > budget || s.len() > 256 { return 0 }
+            parts.push("\"")
+            json_encode_job_string_part(s, parts)
+            parts.push("\"")
+            return s.len() + 2
+        },
+        _ => {
+            parts.push(json_encode(value))
+            return 1
+        }
+    }
+}

@@ -1,0 +1,24 @@
+@test
+fn sim_failed_frame_does_not_reuse_phase_samples() {
+    metric_add(FRAME_LOGIC_CPU, 1.0)
+    metric_add(FRAME_RENDER_CPU, 2.0)
+    metric_add(FRAME_PRESENT, 3.0)
+    let recent = frame_diagnostic_timing()
+    assert(recent.logic_ms > 0.0 && recent.render_ms > 0.0 && recent.present_ms > 0.0)
+    let failed = sim_entry_diagnostic_timing(false)
+    assert_eq(failed.logic_ms, 0.0)
+    assert_eq(failed.render_ms, 0.0)
+    assert_eq(failed.present_ms, 0.0)
+}
+
+@test
+fn sim_successful_frame_keeps_phase_samples() {
+    metric_add(FRAME_LOGIC_CPU, 3.0)
+    metric_add(FRAME_RENDER_CPU, 2.0)
+    metric_add(FRAME_PRESENT, 1.0)
+    let recent = frame_diagnostic_timing()
+    let completed = sim_entry_diagnostic_timing(true)
+    assert_eq(completed.logic_ms, recent.logic_ms)
+    assert_eq(completed.render_ms, recent.render_ms)
+    assert_eq(completed.present_ms, recent.present_ms)
+}

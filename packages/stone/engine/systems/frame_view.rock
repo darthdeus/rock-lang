@@ -1,0 +1,399 @@
+// Camera framing, scene raster policy, and the one resolved per-frame view.
+
+// The public 2D camera. Zoom is expressed as visible world width; the
+// framing aspect derives the height. Editor mode owns another Camera2D and
+// selects it -- editor fields do not live inside the game camera.
+pub struct Camera2D {
+    center: Vec2 = v(0.0, 0.0),
+    visible_world_width: float = 20.0,
+}
+
+pub value CrispArtRaster {
+    asset_ppwu: float,
+    max_scale: int,
+}
+
+// How the scene raster is sized relative to the drawable, and how it is
+// presented. Replaces the combinable render-resolution / camera-snap /
+// letterbox / present-shift flags.
+pub enum SceneRaster {
+    // Physical drawable resolution.
+    Native,
+    // round(drawable * k), 0 < k <= 1. Quality/fill cost only; framing is
+    // unchanged.
+    OutputScale(float),
+    // Largest integral art-density rung up to max_scale that fits the
+    // drawable, else the drawable-native floor (which waives the integral
+    // guarantee).
+    CrispArt(CrispArtRaster),
+    // One fixed virtual target, texel-snapped translation, largest integer
+    // present scale that fits, letterboxed remainder.
+    PixelPerfect(IVec2),
+}
+
+pub value UiScale {
+    reference_height: float = 1080.0,
+    user_scale: float = 1.0,
+    raster_scale: float = 1.0,
+}
+
+pub value RenderConfig {
+    scene: SceneRaster = SceneRaster::Native,
+    ui: UiScale = UiScale {},
+}
+
+// Every derived per-frame value, resolved together exactly once.
+//
+// `scene_output_rect` is top-left/Y-down logical output units;
+// `scene_output_viewport` is the same rectangle in bottom-left drawable
+// pixels for GL; `scene_source_rect` is top-left/Y-down scene texels, and
+// the active scene occupies [0, scene_size) at the top-left of
+// `scene_capacity`.
+pub struct FrameView {
+    logical_size: Vec2,
+    drawable_size: IVec2,
+    scene_size: IVec2,
+    scene_capacity: IVec2,
+    scene_source_rect: Rect,
+    scene_output_rect: Rect,
+    scene_output_viewport: IRect,
+    world_view_size: Vec2,
+    world_to_scene_scale: float,
+    world_to_output_scale: float,
+    resolved_camera_center: Vec2,
+    ui_scale: float,
+    ui_raster_size: IVec2,
+}
+
+// Fit the largest integral art-density rung <= max_scale whose ceiled
+// candidate extent fits the drawable on BOTH axes. Returns the density
+// (art px per world unit), or 0 when no rung fits.
+fn crisp_art_density(art: CrispArtRaster, world_view: Vec2, drawable: IVec2) -> float {
+    let s = art.max_scale
+    while s >= 1 {
+        let density = art.asset_ppwu * (s as float)
+        // The same ceiled candidate the resolver allocates: fit selection and
+        // allocation must never repeat the product with different rounding.
+        let cw = ceil(world_view.x * density)
+        let ch = ceil(world_view.y * density)
+        if cw <= (drawable.x as float) && ch <= (drawable.y as float) {
+            return density
+        }
+        s -= 1
+    }
+    return 0.0
+}
+
+// Resolve every derived value from the frame's surfaces, the camera, and
+// the render config. Null = Suspended: a zero-sized/minimized logical or
+// drawable surface has no view, and rendering skips the frame rather than
+// dividing by zero.
+pub fn resolve_frame_view(
+    logical_size: Vec2,
+    drawable_size: IVec2,
+    cam: Camera2D,
+    config: RenderConfig,
+) -> FrameView? {
+    if logical_size.x <= 0.0 || logical_size.y <= 0.0 { return null }
+    if drawable_size.x <= 0 || drawable_size.y <= 0 { return null }
+    if cam.visible_world_width <= 0.0 {
+        log_once("RENDER", "camera visible_world_width must be > 0 (got {cam.visible_world_width}); frame suspended")
+        return null
+    }
+
+    let vww = cam.visible_world_width
+
+    // Framing aspect. PixelPerfect frames to its FIXED virtual target, so
+    // ultrawide output pillarboxes instead of growing virtual width; every
+    // other profile frames to the drawable/output aspect, which is known
+    // before scene sizing. Scene rounding never feeds back into framing.
+    let framing = v(drawable_size.x as float, drawable_size.y as float)
+    match config.scene {
+        SceneRaster::PixelPerfect(target) => {
+            framing = v(target.x as float, target.y as float)
+        },
+        _ => (),
+    }
+    let world_view = v(vww, vww * framing.y / framing.x)
+
+    // Scene raster: active extent, allocated capacity, and the source
+    // rectangle that reconciles a ceiled extent with the exact framing.
+    let scene = drawable_size
+    let capacity = drawable_size
+    let source = rect(0.0, 0.0, drawable_size.x as float, drawable_size.y as float)
+    let scene_scale = (drawable_size.x as float) / vww
+
+    match config.scene {
+        SceneRaster::Native => (),
+        SceneRaster::OutputScale(k) => {
+            if k <= 0.0 || k > 1.0 {
+                log_once("RENDER", "OutputScale({k}) is outside the supported 0 < k <= 1 range; clamping")
+            }
+            let kk = clamp(k, 0.0001, 1.0)
+            scene = iv(
+                max(1, int(round((drawable_size.x as float) * kk))),
+                max(1, int(round((drawable_size.y as float) * kk))),
+            )
+            capacity = scene
+            source = rect(0.0, 0.0, scene.x as float, scene.y as float)
+            scene_scale = (scene.x as float) / vww
+        },
+        SceneRaster::CrispArt(art) => {
+            // Capacity is the profile's bounded worst case, allocated once;
+            // camera zoom moves the ACTIVE rectangle inside it, never the
+            // allocation.
+            capacity = drawable_size
+            let density = crisp_art_density(art, world_view, drawable_size)
+            if density > 0.0 {
+                // Density wins over integer scene extent: keep the exact
+                // asset_ppwu * scale transform and crop the sub-texel surplus
+                // symmetrically out of the presentation source rectangle.
+                let exact_w = world_view.x * density
+                let exact_h = world_view.y * density
+                scene = iv(max(1, int(ceil(exact_w))), max(1, int(ceil(exact_h))))
+                source = rect(
+                    ((scene.x as float) - exact_w) / 2.0,
+                    ((scene.y as float) - exact_h) / 2.0,
+                    exact_w, exact_h,
+                )
+                scene_scale = density
+            } else {
+                // No rung fits: drawable-native, integral art density
+                // explicitly waived. Framing never changes to make a rung fit.
+                scene = drawable_size
+                source = rect(0.0, 0.0, scene.x as float, scene.y as float)
+                scene_scale = (scene.x as float) / vww
+            }
+        },
+        SceneRaster::PixelPerfect(target) => {
+            scene = iv(max(1, target.x), max(1, target.y))
+            capacity = scene
+            source = rect(0.0, 0.0, scene.x as float, scene.y as float)
+            scene_scale = (scene.x as float) / vww
+            if scene_scale != round(scene_scale) {
+                log_once("RENDER", "PixelPerfect({scene.x}x{scene.y}) with visible_world_width {vww} resolves to {scene_scale} pixels per world unit, which is not integral -- fix the target size or the camera width")
+            }
+        },
+    }
+
+    // Presentation. Continuous profiles fill the output; PixelPerfect
+    // presents at the largest integer scale that fits and letterboxes the
+    // remainder (1x centered crop when the drawable is smaller than the
+    // target, which lands a negative origin here rather than a second case).
+    let view_px = irect(0, 0, drawable_size.x, drawable_size.y)
+    match config.scene {
+        SceneRaster::PixelPerfect(_) => {
+            let s = floor(min(
+                (drawable_size.x as float) / (scene.x as float),
+                (drawable_size.y as float) / (scene.y as float),
+            ))
+            if s < 1.0 { s = 1.0 }
+            let pw = int(s) * scene.x
+            let ph = int(s) * scene.y
+            // Y is resolved from the BOTTOM so the GL viewport and the
+            // top-left rect below describe the same rectangle when the
+            // remainder is odd.
+            let bottom = floor(((drawable_size.y - ph) as float) / 2.0)
+            view_px = irect(
+                int(floor(((drawable_size.x - pw) as float) / 2.0)),
+                int(bottom),
+                pw, ph,
+            )
+        },
+        _ => (),
+    }
+
+    // Drawable -> logical, per axis, with the GL bottom-left origin flipped
+    // to the top-left/Y-down output convention. Callers never apply device
+    // pixel ratio or an FBO flip themselves.
+    let lx = logical_size.x / (drawable_size.x as float)
+    let ly = logical_size.y / (drawable_size.y as float)
+    let out_rect = rect(
+        (view_px.x as float) * lx,
+        ((drawable_size.y - view_px.y - view_px.h) as float) * ly,
+        (view_px.w as float) * lx,
+        (view_px.h as float) * ly,
+    )
+
+    // PixelPerfect quantizes the resolved translation onto the target texel
+    // grid; every continuous profile leaves the camera where it is.
+    let center = cam.center
+    match config.scene {
+        SceneRaster::PixelPerfect(_) => {
+            center = v(round(cam.center.x * scene_scale) / scene_scale,
+                       round(cam.center.y * scene_scale) / scene_scale)
+        },
+        _ => (),
+    }
+
+    return FrameView {
+        logical_size: logical_size,
+        drawable_size: drawable_size,
+        scene_size: scene,
+        scene_capacity: capacity,
+        scene_source_rect: source,
+        scene_output_rect: out_rect,
+        scene_output_viewport: view_px,
+        world_view_size: world_view,
+        world_to_scene_scale: scene_scale,
+        world_to_output_scale: out_rect.w / world_view.x,
+        resolved_camera_center: center,
+        ui_scale: logical_size.y / config.ui.reference_height * config.ui.user_scale,
+        ui_raster_size: iv(
+            max(1, int(round((drawable_size.x as float) * clamp(config.ui.raster_scale, 0.01, 1.0)))),
+            max(1, int(round((drawable_size.y as float) * clamp(config.ui.raster_scale, 0.01, 1.0)))),
+        ),
+    }
+}
+
+// ─────────────── explicit view conversions ───────────────
+//
+// The `_in(view, ...)` forms are the only projection primitives. Code that
+// mutates a camera and needs a conversion against that new camera in the
+// same update resolves a fresh view and passes it here; it must not mutate
+// a global half-resolved view.
+
+// World -> logical output units (top-left origin, Y-down). Extrapolates
+// through letterbox bars, which is useful for unconstrained cursor math.
+pub @pure
+fn world_to_screen_in(view: FrameView, p: Vec2) -> Vec2 {
+    let s = view.world_to_output_scale
+    let half = view.world_view_size / 2.0
+    let c = view.resolved_camera_center
+    return v(
+        view.scene_output_rect.x + (p.x - c.x + half.x) * s,
+        view.scene_output_rect.y + (half.y - (p.y - c.y)) * s,
+    )
+}
+
+// Logical output units -> world. Exact inverse of world_to_screen_in,
+// including through letterbox bars.
+pub @pure
+fn screen_to_world_in(view: FrameView, p: Vec2) -> Vec2 {
+    let s = view.world_to_output_scale
+    let half = view.world_view_size / 2.0
+    let c = view.resolved_camera_center
+    return v(
+        (p.x - view.scene_output_rect.x) / s - half.x + c.x,
+        half.y - (p.y - view.scene_output_rect.y) / s + c.y,
+    )
+}
+
+// Logical output point -> scene texel (top-left/Y-down, active-rect local).
+// Null outside the presented scene rectangle, so picking in a letterbox bar
+// or outside a cropped 1x pixel-perfect image returns no entity.
+pub @pure
+fn output_to_scene_texel(view: FrameView, p: Vec2) -> Vec2? {
+    let r = view.scene_output_rect
+    if r.w <= 0.0 || r.h <= 0.0 { return null }
+    let u = (p.x - r.x) / r.w
+    let t = (p.y - r.y) / r.h
+    if u < 0.0 || u >= 1.0 || t < 0.0 || t >= 1.0 { return null }
+    let src = view.scene_source_rect
+    return v(src.x + u * src.w, src.y + t * src.h)
+}
+
+// Design-space UI extent of this frame's output. Height is the reference
+// height (times 1/user_scale); width flexes with the aspect, so an
+// ultrawide display exposes more design width instead of stretching.
+pub @pure
+fn design_size_in(view: FrameView) -> Vec2 {
+    if view.ui_scale <= 0.0 { return v(0.0, 0.0) }
+    return view.logical_size / view.ui_scale
+}
+
+// ─────────────── live frame state ───────────────
+
+// The game camera, and the editor's own. The engine selects between them on
+// WORLD_MODE.editor_mode_enabled; editor framing does not live inside the game
+// camera.
+pub global camera: Camera2D = Camera2D { center: v(0.0, 0.0), visible_world_width: 40.0 }
+pub global editor_camera: Camera2D = Camera2D { center: v(0.0, 0.0), visible_world_width: 30.0 }
+
+// Runtime-mutable raster/UI configuration. A change is resolved at the next
+// render boundary, so a frame never observes half of an old and half of a
+// new configuration.
+pub global RENDER_CONFIG: RenderConfig = RenderConfig {}
+
+// The view whose pixels the player last saw. Ordinary update-stage input,
+// picking, and unqualified projection use it.
+pub global PRESENTED_VIEW: FrameView? = null
+// Resolved after update systems have positioned the camera, before draw
+// systems and the render flush. World rendering and deferred world anchors
+// use it; after a successful present it becomes PRESENTED_VIEW.
+pub global RENDER_VIEW: FrameView? = null
+
+pub fn active_camera() -> Camera2D {
+    if WORLD_MODE.editor_mode_enabled { return editor_camera }
+    return camera
+}
+
+// Resolve a view for the active camera against this frame's surfaces. Shake
+// offsets the resolved center, so it is applied here and stays resolved once
+// per frame rather than being re-derived at every conversion.
+pub fn resolve_active_view() -> FrameView? {
+    let cam = active_camera()
+    return resolve_frame_view(
+        screen_size(),
+        drawable_size(),
+        Camera2D {
+            center: cam.center - CAMERA_SHAKE_OFFSET,
+            visible_world_width: cam.visible_world_width,
+        },
+        RENDER_CONFIG,
+    )
+}
+
+// Resolve a view for an EXPLICIT camera against this frame's surfaces. Code
+// that changes a camera and needs a conversion against the new camera in the
+// same update resolves through this and passes the result to the `_in` forms;
+// it must not mutate a global half-resolved view.
+pub fn resolve_view_for(cam: Camera2D) -> FrameView? {
+    return resolve_frame_view(screen_size(), drawable_size(), cam, RENDER_CONFIG)
+}
+
+fn refresh_render_view() {
+    RENDER_VIEW = resolve_active_view()
+}
+
+// After a successful present, what was rendered is what the player sees.
+fn promote_presented_view() {
+    let v = RENDER_VIEW ?? return
+    PRESENTED_VIEW = v
+}
+
+// Whether a promotion changed the window the player sees. A first promotion is
+// not a change: boot resolved everything against that window already.
+fn presented_window_changed(before: FrameView?, after: FrameView?) -> bool {
+    let a = before ?? return false
+    let b = after ?? return false
+    return a.logical_size != b.logical_size || a.drawable_size != b.drawable_size
+}
+
+// Seed both roles before any @init code converts or allocates.
+fn init_frame_views() {
+    RENDER_VIEW = resolve_active_view()
+    PRESENTED_VIEW = RENDER_VIEW
+}
+
+// The active scene raster extent -- what the world pass renders into.
+pub fn render_size() -> Vec2 {
+    let view = RENDER_VIEW ?? return v(0.0, 0.0)
+    return v(view.scene_size.x as float, view.scene_size.y as float)
+}
+
+// The no-argument spellings, against the presented view. They were in the
+// math module until stone-core was split out; PRESENTED_VIEW is session state.
+
+// Unqualified projection means the view whose pixels the player last saw.
+// Draw and late-draw code projects against the render view instead, with the
+// explicit `_in(view, ...)` forms; there is no phase-sniffing wrapper.
+pub fn world_to_screen(pos: Vec2) -> Vec2 {
+    let view = PRESENTED_VIEW ?? return v(0.0, 0.0)
+    return world_to_screen_in(view, pos)
+}
+
+pub fn screen_to_world(a: Vec2) -> Vec2 {
+    let view = PRESENTED_VIEW ?? return v(0.0, 0.0)
+    return screen_to_world_in(view, a)
+}

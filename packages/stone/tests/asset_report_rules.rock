@@ -1,0 +1,434 @@
+// Asset accounting reports: one JSON document of every
+// live asset with its memory, written periodically or on events, viewed by
+// tools/asset-report/index.html. The dump builds on residency_dump /
+// residency_census; byte counts the engine could not expose got the small FFI
+// each of these tests pins.
+
+fn asset_report_test_host() {
+    setup_stone()
+    assert(stone_gpu_host_ensure())
+    assert(stone_text_init())
+}
+
+fn asset_report_test_object(digest_char: string, name: string) -> string {
+    let root = (env_var("TMPDIR") ?? "/tmp") + "/rock-asset-report-test"
+    let eat = root + "/.eat"
+    let dir = eat + "/" + digest_char.repeat(64)
+    let _ = create_directory(root)
+    let _ = create_directory(eat)
+    let _ = create_directory(dir)
+    let data = new_image_data(4, 2)
+    image_data_set_pixel(data, 1, 1, 1.0, 0.5, 0.0, 1.0)
+    let path = "{dir}/{name}.png"
+    assert(image_data_encode(data, "png", path), "fixture {path} written")
+    stone_destroy_image_data(data.0)
+    return path
+}
+
+fn asset_report_test_png(name: string, w: int, h: int) -> string {
+    let dir = (env_var("TMPDIR") ?? "/tmp") + "/rock-asset-report-test"
+    let _ = create_directory(dir)
+    let data = new_image_data(w, h)
+    image_data_set_pixel(data, 1, 1, 1.0, 0.5, 0.0, 1.0)
+    let path = "{dir}/{name}.png"
+    assert(image_data_encode(data, "png", path), "fixture {path} written")
+    stone_destroy_image_data(data.0)
+    return path
+}
+
+fn asset_report_find(rows: [AssetReportRow], kind: string, identity: string) -> AssetReportRow? {
+    for row in rows {
+        if row.kind == kind && row.identity == identity { return row }
+    }
+    return null
+}
+
+@test
+fn asset_report_canvas_census_counts_a_live_canvas() {
+    asset_report_test_host()
+    let before = stone_get_live_canvas_count()
+    let canvas = new_canvas(48.0, 24.0, "rgba8")
+    assert(canvas_is_live(canvas))
+    assert_eq(stone_get_live_canvas_count(), before + 1)
+    let seen = false
+    for index in 0..stone_get_live_canvas_count() {
+        if stone_get_live_canvas_handle(index) == canvas.handle.0 { seen = true }
+    }
+    assert(seen, "the live canvas census enumerates the created canvas")
+    let report = stone_canvas_report(canvas.handle.0)
+    assert(report != null, "a live canvas reports its storage")
+    let storage = report.unwrap()
+    assert_eq(storage.width, 48)
+    assert_eq(storage.height, 24)
+    assert_eq(storage.format, STONE_CANVAS_RGBA8)
+    assert(stone_canvas_report(0) == null, "an unknown canvas reports nothing")
+    assert(stone_get_live_canvas_handle(-1) == 0)
+    assert(stone_get_live_canvas_handle(1000000) == 0)
+    destroy_canvas(canvas)
+    assert(!canvas_is_live(canvas))
+    assert_eq(stone_get_live_canvas_count(), before)
+    assert(stone_canvas_report(canvas.handle.0) == null,
+        "a destroyed canvas leaves the census")
+}
+
+@test
+fn asset_report_mesh_bytes_count_the_uploaded_buffers() {
+    asset_report_test_host()
+    let before = stone_get_live_mesh_count()
+    let vertices = native_buffer_float(8)
+    stone_reset_frame_stats()
+    let mesh = gpu_mesh_new(vertices.ptr, 4, 2, [2], "fan")
+    let stats = stone_get_graphics_stats()
+    assert_eq(stats.retained_upload_calls, 1, "base geometry uploads once")
+    assert_eq(stone_get_live_mesh_count(), before + 1)
+    assert_eq(stone_mesh_bytes(mesh.handle.0), stats.retained_upload_bytes,
+        "mesh bytes are the retained upload the frame stats counted")
+    let instances = native_buffer_float(6)
+    gpu_mesh_set_instances(mesh, instances.ptr, 3, 2, [2])
+    let grown = stone_get_graphics_stats()
+    assert_eq(stone_mesh_bytes(mesh.handle.0), grown.retained_upload_bytes,
+        "mesh bytes include the instance buffer")
+    let seen = false
+    for index in 0..stone_get_live_mesh_count() {
+        if stone_get_live_mesh_handle(index) == mesh.handle.0 { seen = true }
+    }
+    assert(seen, "the live mesh census enumerates the created mesh")
+    assert_eq(stone_mesh_bytes(0), 0, "an unknown mesh holds no bytes")
+    gpu_mesh_free(mesh)
+    assert_eq(stone_get_live_mesh_count(), before)
+    assert_eq(stone_mesh_bytes(mesh.handle.0), 0, "a freed mesh leaves the census")
+}
+
+// A fresh process contains the runner's clocks, renderer and profiler even
+// when an assertion fails; none of that state can leak into another @test.
+@nomangle
+fn asset_report_frame_stats_entry(which: int) {
+    let (window, config) = native_runner_test_boot("frame-stats-test")
+    defer { let _ = stone_teardown() }
+    SIM_SKIP_RENDER = which % 2 == 1 && which != 5
+    let vertices = native_buffer_float(8)
+    let mesh = gpu_mesh_new(vertices.ptr, 4, 2, [2], "fan")
+    defer { gpu_mesh_free(mesh) }
+    let bytes = stone_mesh_bytes(mesh.handle.0)
+    assert(bytes > 0)
+
+    if which == 4 {
+        PERF_TIMELINE_ENABLED = true
+        PERF_PHASES = perf_phase_log_new()
+        let phase = perf_phase_begin("test.boot_upload")
+        let path = asset_report_test_png("boot", 256, 256)
+        let image = acquire_image_asset(path, watch: false)
+        defer { assert(release_image_asset(path)) }
+        stone_flush_image_uploads()
+        let dims = image_dims(image)
+        let expected = dims.x * dims.y * 4
+        assert(expected > 0)
+        stone_begin_frame()
+        perf_phase_end(phase)
+        assert_eq(perf_phase_upload_get(phase), expected as float,
+            "boot uploads survive the frame boundary in the timeline")
+        let early_phase = perf_phase_begin("test.early_upload")
+        let early_path = asset_report_test_png("early", 32, 32)
+        let early_image = acquire_image_asset(early_path, watch: false)
+        defer { assert(release_image_asset(early_path)) }
+        stone_flush_image_uploads()
+        let early_dims = image_dims(early_image)
+        let early_bytes = early_dims.x * early_dims.y * 4
+        assert(early_bytes > 0)
+        SIM_SKIP_RENDER = true
+        let (running, _) = run_one_frame(0, stone_get_time(), window, config)
+        assert(running)
+        stone_end_frame()
+        perf_phase_end(early_phase)
+        assert_eq(perf_phase_upload_get(early_phase), early_bytes as float,
+            "uploads before the shared core are counted once in the timeline")
+        assert_eq(stone_get_image_frame_stats().upload_bytes, early_bytes,
+            "the shared core preserves the frame's image counters")
+        let total = PERF_PHASES.upload_base + early_bytes
+        stone_begin_frame()
+        assert_eq(PERF_PHASES.upload_base, total,
+            "the next boundary carries only the completed frame's uploads")
+        return
+    }
+
+    for frame in 0..2 {
+        stone_begin_frame()
+        assert_eq(stone_get_graphics_stats().retained_upload_calls, 0,
+            "frame start discards boot and previous-frame uploads")
+        if frame == 0 && which != 5 {
+            let early = gpu_mesh_new(vertices.ptr, 4, 2, [2], "fan")
+            gpu_mesh_free(early)
+        }
+        let before = stone_get_graphics_stats()
+        let (running, _) = run_one_frame(frame, stone_get_time(), window, config)
+        assert(running)
+        // Normal-frame control: work after the shared core always survives.
+        let late = gpu_mesh_new(vertices.ptr, 4, 2, [2], "fan")
+        gpu_mesh_free(late)
+        stone_end_frame()
+        assert_eq(LAST_FRAME_GFX.retained_upload_calls, before.retained_upload_calls + 1,
+            "completed frames retain uploads before and after the shared core")
+        assert_eq(LAST_FRAME_GFX.retained_upload_bytes, before.retained_upload_bytes + bytes)
+    }
+}
+
+@test
+fn asset_report_frame_stats_retain_early_work_native() {
+    profiler_test_process("asset_report_frame_stats_entry", 0)
+}
+
+@test
+fn asset_report_frame_stats_retain_early_work_native_without_draw() {
+    profiler_test_process("asset_report_frame_stats_entry", 1)
+}
+
+@test
+fn asset_report_frame_stats_normal_frame_control() {
+    profiler_test_process("asset_report_frame_stats_entry", 5)
+}
+
+@test
+fn asset_report_frame_stats_preserve_boot_upload_timeline() {
+    profiler_test_process("asset_report_frame_stats_entry", 4)
+}
+
+@test
+fn asset_report_font_cpu_counts_the_ttf_bytes() {
+    asset_report_test_host()
+    load_pending_shader_sources()
+    let before = 0
+    for row in asset_report_rows() { if row.kind == "font_atlas" { before += row.gpu_bytes } }
+    let native_before = stone_get_live_image_bytes()
+    let font = load_font(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 24,
+        raster: FontRasterPolicy::Fixed).unwrap()
+    defer { if font.data() != null { unload_font(font) } }
+    let backend = font.data().unwrap().backend_id
+    let held = stone_font_data_len(backend)
+    assert(held > 1000, "a loaded font retains its TTF bytes (held={held})")
+    assert_eq(stone_font_data_len(backend), held, "the count is stable")
+    assert_eq(stone_font_data_len(0), -1, "an unknown font has no bytes")
+    assert_eq(stone_font_data_len(1000000), -1)
+    assert(stone_ensure_font_atlas_instance_ffi(backend, 48) != 0, "a second atlas size is resident")
+    let after = 0
+    for row in asset_report_rows() { if row.kind == "font_atlas" { after += row.gpu_bytes } }
+    assert_eq(after - before, stone_get_live_image_bytes() - native_before,
+        "font rows count each physical atlas once, including the compatibility alias")
+    unload_font(font)
+    assert_eq(stone_font_data_len(backend), -1, "an unloaded font holds nothing")
+}
+
+@test
+fn asset_report_music_bytes_count_the_encoded_track() {
+    asset_report_test_host()
+    assert(stone_audio_init())
+    // Absolute: load_audio resolves relatives against the game dir, which is
+    // stone here; this fixture has a repository-owned absolute path.
+    let track = "{STONE_SOURCE_DIR}/tests/fixtures/tone.ogg"
+    let sound = load_audio(track, "music")
+    let backend = sound.data().unwrap().backend_id
+    assert(backend != 0, "the track loads under its handle")
+    // The track is held compressed: the stored bytes are the file's bytes.
+    let file = io_read_text_file(track)
+    assert(file != null, "the fixture track reads back")
+    assert_eq(stone_music_byte_len(backend), file.unwrap().len())
+    assert_eq(stone_music_byte_len(0), -1)
+    assert_eq(stone_music_byte_len(1000000), -1)
+    assert(stone_unload_music(backend))
+    assert(SOUND_REGISTRY.remove(sound.handle) != null)
+}
+
+@test
+fn asset_report_rows_cover_every_loaded_kind() {
+    asset_report_test_host()
+    load_pending_shader_sources()
+    assert(stone_audio_init())
+    let path = asset_report_test_object("c", "soil")
+    let soil = acquire_image_asset(path, watch: false)
+    assert(soil.0 != 0)
+    stone_flush_image_uploads()
+    let image_bytes_before_canvas = stone_get_live_image_bytes()
+    let mip_bytes_before_canvas = stone_get_live_mip_bytes()
+    let canvas_bytes_before_canvas = stone_get_live_canvas_bytes()
+    let canvas = new_canvas(16.0, 8.0, "rgba8")
+    assert_eq(stone_get_live_canvas_bytes() - canvas_bytes_before_canvas, 16 * 8 * 4,
+        "the native canvas counter includes its allocated color target")
+    assert_eq(stone_get_live_image_bytes(), image_bytes_before_canvas,
+        "canvas allocation does not change the image level-zero counter")
+    assert_eq(stone_get_live_mip_bytes(), mip_bytes_before_canvas,
+        "canvas allocation does not change the image mip counter")
+    let vertices = native_buffer_float(8)
+    let mesh = gpu_mesh_new(vertices.ptr, 4, 2, [2], "fan")
+    let font = load_font(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 24,
+        raster: FontRasterPolicy::Fixed).unwrap()
+    let backend_font = font.data().unwrap().backend_id
+    let cue = "{STONE_SOURCE_DIR}/tests/fixtures/tone.ogg"
+    let sound = load_audio(cue, "static")
+    let backend_sound = sound.data().unwrap().backend_id
+    // The stub registers an empty buffer; reload decodes for real even under
+    // the stub, so this row's PCM bytes are honestly nonzero.
+    assert(stone_reload_sound(backend_sound, cue))
+    let pixels = new_owned_image_data(3, 1)
+    let owned = new_owned_image_from_data(pixels)
+    release_owned_image_data(pixels)
+
+    let rows = asset_report_rows()
+    let image = asset_report_find(rows, "source_texture",
+        image_identity(asset_path(path), TextureFilter::Nearest)).unwrap()
+    assert_eq(image.gpu_bytes, 4 * 2 * 4, "the 4x2 fixture prices its texels")
+    assert_eq(image.gpu_basis, "counted")
+    assert_eq(image.width, 4)
+    assert_eq(image.height, 2)
+    assert(image.paths.len() == 1 && image.paths[0] == path)
+    assert_eq(image.state, "resident")
+    assert(image.refs >= 1)
+
+    let canvas_row = asset_report_find(rows, "canvas", "canvas:{canvas.handle.0}").unwrap()
+    assert_eq(canvas_row.gpu_bytes, 16 * 8 * 4)
+    assert_eq(canvas_row.gpu_basis, "counted")
+    let memory = residency_census()
+    assert_eq(memory.live_total_bytes,
+        memory.live_image_bytes + memory.live_mip_bytes + memory.live_canvas_bytes,
+        "the live total is the sum of the separately reported GPU counters")
+
+    let mesh_row = asset_report_find(rows, "mesh", "mesh:{mesh.handle.0}").unwrap()
+    assert_eq(mesh_row.gpu_bytes, 4 * 2 * 4, "four 2-float verts at 4 bytes each")
+    assert_eq(mesh_row.gpu_basis, "counted")
+
+    let atlas = asset_report_find(rows, "font_atlas", "font:{backend_font}#instance0").unwrap()
+    assert(atlas.gpu_bytes > 0, "the compat atlas holds nonzero bytes")
+    assert_eq(atlas.gpu_basis, "counted")
+    let metrics = asset_report_find(rows, "font_atlas", "font:{backend_font}#metrics").unwrap()
+    assert(metrics.cpu_bytes > 1000, "the font row carries the retained TTF bytes")
+
+    let pcm = asset_report_find(rows, "sound", "sound:{backend_sound}").unwrap()
+    let samples = stone_sound_sample_count(backend_sound)
+    assert(samples > 0, "the reload decoded samples")
+    assert_eq(pcm.cpu_bytes, samples * 4, "PCM bytes are decoded f32 samples")
+    assert_eq(pcm.cpu_basis, "counted")
+
+    let generated = asset_report_find(rows, "generated_texture",
+        "generated:image:{owned.0}").unwrap()
+    assert_eq(generated.gpu_bytes, 3 * 1 * 4)
+
+    release_owned_image(owned)
+    assert(stone_unload_sound(backend_sound))
+    assert(SOUND_REGISTRY.remove(sound.handle) != null)
+    unload_font(font)
+    gpu_mesh_free(mesh)
+    destroy_canvas(canvas)
+    assert(release_image_asset(path))
+    assert(remove_file(path))
+}
+
+@test
+fn asset_report_kind_totals_equal_the_residency_census() {
+    asset_report_test_host()
+    let path = asset_report_test_object("d", "soil")
+    let soil = acquire_image_asset(path, watch: false)
+    assert(soil.0 != 0)
+    let totals = asset_report_totals()
+    let census = residency_census()
+    let found = false
+    for total in totals {
+        if total.kind != "source_texture" { continue }
+        found = true
+        assert_eq(total.gpu_bytes, census.bytes,
+            "the image-kind total is the census over the same rows")
+        assert_eq(total.rows, census.handles)
+    }
+    assert(found, "the dump totals its source textures")
+    assert(release_image_asset(path))
+    assert(remove_file(path))
+}
+
+@test
+fn asset_report_json_is_a_valid_stable_document() {
+    asset_report_test_host()
+    let path = asset_report_test_object("e", "soil")
+    let soil = acquire_image_asset(path, watch: false)
+    assert(soil.0 != 0)
+    let identity = image_identity(asset_path(path), TextureFilter::Nearest)
+    let first = asset_report_json(7, "test-event")
+    let second = asset_report_json(7, "test-event")
+    assert_eq(first, second, "the same moment encodes the same document")
+    assert(first.contains("asset-report/1"), "the schema marker travels with the doc")
+    assert(first.contains(identity), "the loaded fixture is in the doc")
+    assert(first.contains("\"event\": \"test-event\""), "the event names the dump")
+    assert(first.contains("\"frame\": 7"), "the frame stamps the dump")
+    assert(first.contains("\"source_texture\""), "the image kind is totaled")
+    assert(first.contains("\"crosscheck\""), "the native cross-check travels with the doc")
+    assert(first.contains("\"live_image_bytes\": {stone_get_live_image_bytes()}"),
+        "the report records level-zero image storage")
+    assert(first.contains("\"live_mip_bytes\": {stone_get_live_mip_bytes()}"),
+        "the report records mip storage")
+    assert(first.contains("\"live_canvas_bytes\": {stone_get_live_canvas_bytes()}"),
+        "the report records canvas storage")
+    assert(first.contains("\"live_texture_bytes\": {stone_get_live_texture_bytes()}"),
+        "the report records the combined live GPU total")
+    assert(release_image_asset(path))
+    assert(remove_file(path))
+}
+
+@test
+fn asset_report_writer_records_events_and_an_index() {
+    asset_report_test_host()
+    let dir = (env_var("TMPDIR") ?? "/tmp") + "/rock-asset-report-writer"
+    let _ = create_directory(dir)
+    assert(!asset_report_armed(), "reporting is off by default")
+    assert(!asset_report_event("nope"), "an event with no sink writes nothing")
+    asset_report_configure(dir, 2)
+    assert(asset_report_armed())
+    let path = asset_report_test_object("f", "soil")
+    let _ = acquire_image_asset(path, watch: false)
+    assert(asset_report_event("arrival"))
+    let frame = RENDER_FRAME
+    let doc = io_read_text_file("{dir}/{frame}-arrival.json")
+    assert(doc != null, "the event dump lands at <frame>-<event>.json")
+    let identity = image_identity(asset_path(path), TextureFilter::Nearest)
+    assert(doc.unwrap().contains(identity), "the event dump holds the live fixture")
+    let index = io_read_text_file("{dir}/index.json")
+    assert(index != null, "the writer keeps an index")
+    assert(index.unwrap().contains("{frame}-arrival.json"), "the index lists the dump")
+    asset_report_frame_tick()
+    let periodic = io_read_text_file("{dir}/{frame}-periodic.json")
+    assert(periodic != null, "the interval tick writes a periodic dump")
+    assert(periodic.unwrap().contains(identity))
+    asset_report_disarm()
+    assert(!asset_report_armed(), "disarming restores the default")
+    assert(!asset_report_event("nope"), "a disarmed event writes nothing")
+    assert(release_image_asset(path))
+    assert(remove_file(path))
+    assert(remove_file("{dir}/{frame}-arrival.json"))
+    assert(remove_file("{dir}/{frame}-periodic.json"))
+    assert(remove_file("{dir}/index.json"))
+}
+
+@test
+fn live_texture_bytes_include_mip_chain_and_canvas_storage() {
+    asset_report_test_host()
+    let path = asset_report_test_png("accounting-rg8", 7, 5)
+    let total = stone_get_live_texture_bytes()
+    let images = stone_get_live_image_bytes()
+    let mips = stone_get_live_mip_bytes()
+    let canvases = stone_get_live_canvas_bytes()
+    {
+        let image = load_image_handle(path, TextureFilter::MipStable,
+            exact_texels: true, format: ImageAssetFormat::DepthRg8)
+        assert(image != 0, "accounting requires a real RG8 image")
+        defer { stone_unload_image(image) }
+        stone_flush_image_uploads()
+        assert(stone_image_storage_size(image) == (7, 5), "accounting uses full-size storage")
+        let canvas = new_canvas(13, 7, "rgba8")
+        defer { destroy_canvas(canvas) }
+        // RG8 levels are 7x5, 3x2 and 1x1; the canvas has RGBA8 texels.
+        assert_eq(stone_get_image_byte_len(image), 84)
+        assert_eq(stone_get_live_image_bytes() - images, 70)
+        assert_eq(stone_get_live_mip_bytes() - mips, 14)
+        assert_eq(stone_get_live_canvas_bytes() - canvases, 364)
+        assert_eq(stone_get_live_texture_bytes() - total, 448)
+    }
+    assert_eq(stone_get_live_image_bytes(), images)
+    assert_eq(stone_get_live_mip_bytes(), mips)
+    assert_eq(stone_get_live_canvas_bytes(), canvases)
+    assert_eq(stone_get_live_texture_bytes(), total, "teardown releases all fixture storage")
+}

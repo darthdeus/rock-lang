@@ -1,0 +1,472 @@
+// Decorator-Based System Registration
+//
+// Provides decorators for automatic system registration.
+// Systems are functions that get called at specific lifecycle points:
+//
+// Initialization (runs once at startup, in this order):
+// - @early_init: Load assets (images, sounds, fonts)
+// - @init: Main initialization (can use loaded assets)
+// - @late_init: Things that depend on game state being initialized
+// - @wire: Idempotent wiring (install callbacks, derive config) -- unlike the
+//   phases above, re-runs after EVERY hot reload so wired state tracks edits
+//
+// Per-frame (runs every frame):
+// - @update: Game logic, called via run_update_systems()
+// - @late_update: After all updates, called via run_late_update_systems()
+// - @prepare: Presentation state derived from this frame's logic, after the
+//   view is frozen and before @draw, called via run_prepare_systems(). Runs on
+//   every frame the runner would draw, including frozen frames and a rendered
+//   sim's frames that skip their draw.
+// - @draw: Rendering to screen_canvas, called via run_draw_systems()
+// - @late_draw: Screen-space UI after post-processing, called via run_late_draw_systems()
+// - @post_imgui_draw: Final screen-space UI, after ImGui where present
+//
+// Other:
+// - @reset: Called when resetting game state via run_reset_systems()
+// - @window_resized: Called once a resized window is the presented one, and
+//   when a sim entry sizes its window, via run_window_resized_systems()
+//
+// Stage-based ordering (lower stages run first):
+//   @update           -> default stage 100
+//   @update(stage=10) -> explicit stage 10
+//   @draw             -> default stage 100
+//   @draw(stage=10)   -> explicit stage 10
+
+// ============================================================================
+// System Registries
+// ============================================================================
+
+pub value LifecycleDependency {
+    key: string,
+    fingerprint: string,
+}
+
+// `func` is a compiler-synthesized thunk of one uniform signature for every
+// entry, process- and scene-owned alike (`crates/skull/src/mir_emit.rs`,
+// `crates/skull-codegen-js/src/emit.rs`): a process thunk ignores its
+// argument and invokes the zero-argument process system; a scene thunk
+// resolves `scene_id`'s live root and invokes the statically checked
+// `fn(T) -> ()`. Callable storage is never `any`, and dispatch never asks a
+// value its runtime type -- membership in a type's live population (below)
+// is the only test a scene thunk performs.
+pub value LifecycleSystem {
+    func: fn(int) -> (),
+    name: string,
+    key: string,
+    stage: int,
+    owner: string,
+    root_type: string?,
+    qualification: string,
+    body_fingerprint: string,
+    dependencies: [LifecycleDependency],
+}
+
+inline(lua) fn lifecycle_wire_schedule_all() = "__rock_lifecycle_schedule_all_wires()"
+inline(lua) fn lifecycle_wire_take(key: string) -> bool = "return __rock_lifecycle_take_wire(key)"
+
+pub inline(lua) fn lifecycle_systems(phase: string) -> [LifecycleSystem] = "return (_G.__ROCK_LIFECYCLE_PLAN or {})[phase] or {len=0,_data={}}"
+// Same trusted pure boundary as `lifecycle_systems` above: a read-only
+// probe of the compiler-published, load-time-fixed lifecycle plan table.
+inline(lua) fn lifecycle_phase_has_scene(phase: string) -> bool = "local p = (_G.__ROCK_LIFECYCLE_PLAN or {})[phase]; return p ~= nil and (p.scene_owned or 0) > 0"
+
+@inline
+// Every frame-phase runner goes through these two so the hitch ledger sees
+// each system's own wall time (two clock reads).
+fn run_process_system_timed(system: LifecycleSystem, phase: string) {
+    let t0 = hitch_system_begin()
+    system.func(0)
+    hitch_system_end(system.name, phase, t0)
+}
+
+fn run_scene_system_timed(system: LifecycleSystem, phase: string) {
+    let t0 = hitch_system_begin()
+    run_frame_lifecycle_system(system)
+    hitch_system_end(system.name, phase, t0)
+}
+
+fn run_frame_lifecycle_system(system: LifecycleSystem) {
+    if system.owner == "process" {
+        system.func(0)
+        return
+    }
+    assert(system.owner == "scene", "unsupported lifecycle owner {system.owner}")
+    assert(!is_null(system.root_type), "scene lifecycle {system.name} has no root type")
+    let population = __scene_type_population(system.root_type.unwrap())
+    let population_len = __scene_type_population_length(system.root_type.unwrap())
+    for i in 0..population_len {
+        system.func(population[i])
+    }
+}
+
+// ============================================================================
+// Decorators (using deco keyword syntax)
+// ============================================================================
+
+/// @early_init - Register a function to load assets early
+/// Runs before @init, use for loading images, sounds, fonts
+/// Usage: @early_init fn load_assets() { ... }
+pub @lifecycle(phase="early_init", owner="process")
+deco init early_init {}
+
+/// @init - Register a function to be called during initialization
+/// Runs after @early_init, can use loaded assets
+/// Usage: @init fn my_init() { ... }
+pub @lifecycle(phase="init", owner="process")
+deco init init {}
+
+/// @update - Register a function to be called during update
+/// Usage: @update fn my_update(dt: float) { ... }
+///        @update(stage=10) fn my_early_update(dt: float) { ... }
+pub @lifecycle(phase="update", owner="process", stage_param="stage")
+deco init update(stage: int = 100) {}
+
+/// Runs once for every live Scene whose root has the target method's type.
+/// Usage: @scene_update fn LevelState.update(level) { ... }
+pub @lifecycle(phase="update", owner="scene", stage_param="stage")
+deco init scene_update(stage: int = 100) {}
+
+/// @late_init - Register a function to be called after game_load()
+/// Use for systems that depend on assets loaded in game_load()
+/// Usage: @late_init fn my_late_init() { ... }
+pub @lifecycle(phase="late_init", owner="process")
+deco init late_init {}
+
+/// @wire - Register an idempotent wiring function. Plain wires run once at boot
+/// after @late_init and after every compatible reload. `onchange=[CONST, ...]`
+/// wires also run for fresh process startup, then only when their body
+/// or compiler-owned const closure changes. Contract: cheap + idempotent;
+/// assign, don't accumulate. Expensive one-time work stays in @init.
+/// Usage: @wire fn install_ui_feel() { ... }
+pub @lifecycle(phase="wire", owner="process")
+deco init wire {}
+
+/// @late_update - Register a function to be called after run_update_systems()
+/// Usage: @late_update fn my_late_update() { ... }
+///        @late_update(stage=10) fn my_early_late_update() { ... }
+pub @lifecycle(phase="late_update", owner="process", stage_param="stage")
+deco init late_update(stage: int = 100) {}
+
+/// @prepare - Register a function that prepares presentation state: GPU
+/// caches and builds the draw reads, after the render view is frozen and
+/// before @draw. Unlike @draw it also runs on frames that skip drawing, so
+/// work paced per frame keeps pace with the logic. World preparation passes
+/// it queues run at the end of the stage.
+/// Usage: @prepare fn my_prepare() { ... }
+///        @prepare(stage=10) fn my_early_prepare() { ... }
+pub @lifecycle(phase="prepare", owner="process", stage_param="stage")
+deco init prepare(stage: int = 100) {}
+
+/// @draw - Register a function to be called during rendering
+/// Runs after updates, use for all rendering code
+/// Usage: @draw fn my_draw() { ... }
+///        @draw(stage=10) fn my_early_draw() { ... }
+pub @lifecycle(phase="draw", owner="process", stage_param="stage")
+deco init draw(stage: int = 100) {}
+
+/// @late_draw - Register a function to draw after post-processing
+/// Draws to screen (canvas 0) in screen-space coordinates.
+/// Usage: @late_draw fn draw_ui() { ... }
+///        @late_draw(stage=10) fn draw_early_ui() { ... }
+///        @late_draw(stage=10) fn update_ui_state() { ... }
+pub @lifecycle(phase="late_draw", owner="process", stage_param="stage")
+deco init late_draw(stage: int = 100) {}
+
+/// @post_imgui_draw - Register final screen-space UI, drawn after ImGui where present
+/// Usage: @post_imgui_draw fn draw_overlay() { ... }
+pub @lifecycle(phase="post_imgui_draw", owner="process", stage_param="stage")
+deco init post_imgui_draw(stage: int = 100) {}
+
+/// @reset - Register a function to be called during reset
+/// Usage: @reset fn my_reset() { ... }
+pub @lifecycle(phase="reset", owner="process")
+deco init reset {}
+
+/// @window_resized - Register a function that re-derives state resolved from the
+/// window size. Runs after the first present at a new size, when screen and
+/// design-space conversions already describe the new window, so boot-time
+/// derivations can follow the window instead of being fixed at the size the
+/// process booted at.
+/// Usage: @window_resized fn my_layout_follow() { ... }
+pub @lifecycle(phase="window_resized", owner="process")
+deco init window_resized {}
+
+/// @shutdown - Register a function to be called before the GL context is destroyed.
+/// Use this to release GPU resources (e.g. video handles, custom FBOs).
+/// Usage: @shutdown fn my_cleanup() { ... }
+///        @shutdown(stage=900) fn close_last() { ... }
+pub @lifecycle(phase="shutdown", owner="process", stage_param="stage")
+deco init shutdown(stage: int = 100) {}
+
+// ============================================================================
+// System Runners
+// ============================================================================
+
+// Runs one boot phase.
+fn run_boot_phase(phase: string) {
+    let systems = lifecycle_systems(phase)
+    let count = systems.len()
+    if count == 0 { return }
+    log_debug("SYSTEMS", "Running {count} {phase} systems...")
+    for system in systems {
+        let system_phase = perf_phase_begin(system.name)
+        system.func(0)
+        perf_phase_end(system_phase)
+    }
+    // Required phase-local images must be ready for the next phase's draws
+    // and pixel readback. Explicit Prefetch work stays with the paced pump.
+    let uploads_phase = perf_phase_begin("texture_uploads")
+    stone_flush_image_uploads()
+    perf_phase_end(uploads_phase)
+    log_debug("SYSTEMS", "{phase} complete")
+}
+
+/// Call all registered early_init systems (loads assets)
+fn run_early_init_systems() {
+    run_boot_phase("early_init")
+}
+
+/// Call all registered init systems (main initialization)
+fn run_init_systems() {
+    run_boot_phase("init")
+}
+
+/// Call all registered late_init systems
+/// Use @late_init for systems that depend on game state being initialized
+fn run_late_init_systems() {
+    run_boot_phase("late_init")
+}
+
+fn run_wire_phase() {
+    let systems = lifecycle_systems("wire")
+    let count = systems.len()
+    if count == 0 { return }
+    log_debug("SYSTEMS", "Running {count} wire systems...")
+    for system in systems {
+        if lifecycle_wire_take(system.key) { system.func(0) }
+    }
+    stone_flush_image_uploads()
+    log_debug("SYSTEMS", "wire complete")
+}
+
+/// Run hooks selected by the last successful artifact publication.
+fn run_wire_systems() {
+    run_wire_phase()
+}
+
+
+/// Call all registered update systems in stage order
+/// Systems are automatically profiled if ENGINE.systems_profiling_enabled is true
+/// Note: Systems use the global `dt` variable for delta time
+pub fn run_update_systems() {
+    let systems = lifecycle_systems("update")
+    let count = systems.len()
+    if count == 0 {
+        return
+    }
+
+    if !lifecycle_phase_has_scene("update") {
+        if ENGINE.systems_profiling_enabled {
+            for system in systems {
+                profile_begin(system.name)
+                run_process_system_timed(system, "update")
+                profile_end(system.name)
+            }
+        } else {
+            for system in systems { run_process_system_timed(system, "update") }
+        }
+        return
+    }
+    __scene_begin_update_phase()
+    if ENGINE.systems_profiling_enabled {
+        for system in systems {
+            profile_begin(system.name)
+            run_scene_system_timed(system, "update")
+            profile_end(system.name)
+        }
+    } else {
+        for system in systems {
+            run_scene_system_timed(system, "update")
+        }
+    }
+}
+
+/// Call all registered late_update systems in stage order
+/// Runs after run_update_systems()
+fn run_late_update_systems() {
+    let systems = lifecycle_systems("late_update")
+    let count = systems.len()
+    if count == 0 {
+        return
+    }
+
+    // Run systems in stage order with optional profiling
+    if ENGINE.systems_profiling_enabled {
+        for system in systems {
+            profile_begin(system.name)
+            run_process_system_timed(system, "late_update")
+            profile_end(system.name)
+        }
+    } else {
+        for system in systems {
+            run_process_system_timed(system, "late_update")
+        }
+    }
+}
+
+/// Call all registered prepare systems in stage order
+fn run_prepare_systems() {
+    let systems = lifecycle_systems("prepare")
+    if systems.len() == 0 { return }
+    if ENGINE.systems_profiling_enabled {
+        for system in systems {
+            profile_begin(system.name)
+            run_process_system_timed(system, "prepare")
+            profile_end(system.name)
+        }
+    } else {
+        for system in systems {
+            run_process_system_timed(system, "prepare")
+        }
+    }
+}
+
+/// Call all registered draw systems in stage order
+fn run_draw_systems() {
+    let systems = lifecycle_systems("draw")
+    let count = systems.len()
+    if count == 0 {
+        return
+    }
+
+    if ENGINE.systems_profiling_enabled {
+        for system in systems {
+            profile_begin(system.name)
+            run_process_system_timed(system, "draw")
+            profile_end(system.name)
+        }
+    } else {
+        for system in systems {
+            run_process_system_timed(system, "draw")
+        }
+    }
+}
+
+fn run_late_draw_systems() {
+    let systems = lifecycle_systems("late_draw")
+    let count = systems.len()
+    if count == 0 {
+        return
+    }
+
+    if ENGINE.systems_profiling_enabled {
+        for system in systems {
+            profile_begin(system.name)
+            run_process_system_timed(system, "late_draw")
+            profile_end(system.name)
+        }
+    } else {
+        for system in systems {
+            run_process_system_timed(system, "late_draw")
+        }
+    }
+}
+
+
+fn run_post_imgui_draw_systems() {
+    let systems = lifecycle_systems("post_imgui_draw")
+    if systems.len() == 0 { return }
+    if ENGINE.systems_profiling_enabled {
+        for system in systems {
+            profile_begin(system.name)
+            run_process_system_timed(system, "post_imgui_draw")
+            profile_end(system.name)
+        }
+    } else {
+        for system in systems {
+            run_process_system_timed(system, "post_imgui_draw")
+        }
+    }
+}
+
+/// Call all registered shutdown systems (before GL context is destroyed)
+pub fn run_shutdown_systems() {
+    let systems = lifecycle_systems("shutdown")
+    let count = systems.len()
+    if count > 0 {
+        log_debug("SYSTEMS", "Running {count} shutdown systems...")
+        for system in systems {
+            let started = stone_get_time()
+            system.func(0)
+            shutdown_stage_finished(system.name, started)
+        }
+        log_debug("SYSTEMS", "Shutdown complete")
+    }
+}
+
+/// Call all registered window_resized systems
+fn run_window_resized_systems() {
+    for system in lifecycle_systems("window_resized") {
+        system.func(0)
+    }
+}
+
+/// Call all registered reset systems
+pub fn run_reset_systems() {
+    let systems = lifecycle_systems("reset")
+    let count = systems.len()
+    if count > 0 {
+        log_debug("SYSTEMS", "Running {count} reset systems...")
+        for system in systems {
+            system.func(0)
+        }
+        log_debug("SYSTEMS", "Reset complete")
+    }
+}
+
+// ============================================================================
+// Debug/Introspection
+// ============================================================================
+
+/// Print all registered systems (only when ROCK_LOG=debug or higher)
+fn print_registered_systems() {
+    if log_get_level() < 3 { return }
+
+    log_debug("SYSTEMS", "=== Registered Systems ===")
+
+    let phases = ["early_init", "init", "late_init", "wire", "update", "late_update", "prepare", "draw", "late_draw", "post_imgui_draw", "reset", "shutdown", "window_resized"]
+    for phase in phases {
+        let systems = lifecycle_systems(phase)
+        log_debug("SYSTEMS", "{phase} systems ({systems.len()}):")
+        for system in systems {
+            log_debug("SYSTEMS", "  - [{system.stage}] {system.name}")
+        }
+    }
+
+    log_debug("SYSTEMS", "==========================")
+}
+
+/// Clear every registry that gets re-populated on dofile (i.e. every
+/// `deco init` push-target plus codegen-emitted decorator_init_code
+/// targets like SIMS). Engine calls this before `pcall_dofile` on hot
+/// reload so registries start empty and the decorator re-runs land
+/// into clean tables instead of accumulating duplicates.
+///
+/// **Maintenance contract:** any new `deco init` body that pushes into
+/// a global must add a clear here. There is no automatic discovery yet.
+/// Things NOT to clear: registries populated by
+/// `@init` body code (those bodies do not re-run on reload, so clearing
+/// them would erase the registration permanently).
+fn clear_all_systems() {
+    SIMS.clear()
+    __rock_clear_hot_reload_callbacks()
+}
+
+// Shutdown has left the frame loop; name slow stages even in ordinary runs.
+pub fn shutdown_stage_finished(name: string, started: float) {
+    let ms = round((stone_get_time() - started) * 10000.0) / 10.0
+    if ms >= 100.0 || name == "total" || os_getenv("STONE_SHUTDOWN_TIMING") == "1" {
+        log_info("SHUTDOWN", "{name}: {ms} ms")
+    } else {
+        log_debug("SHUTDOWN", "{name}: {ms} ms")
+    }
+}

@@ -1,0 +1,41 @@
+// Transport is keyed by live owner identity, outside replay.
+
+pub inline(lua) fn native_flow_handle<W>(owner: W, key: int) -> int = """
+    local owners = _G.__stone_flow_owners
+    local context = owners and owners[owner]
+    return context and context.jobs[key] or 0
+"""
+
+pub inline(lua) fn native_flow_handle_set<W>(owner: W, key: int, handle: int) = """
+    local owners = _G.__stone_flow_owners
+    local context = owners and owners[owner]
+    if handle == 0 then
+        if context then context.jobs[key] = nil end
+        return
+    end
+    if not owners then
+        owners = setmetatable({}, { __mode = "k" })
+        _G.__stone_flow_owners = owners
+    end
+    if not context then
+        local jobs = {}
+        local guard = newproxy(true)
+        getmetatable(guard).__gc = function()
+            for _, pending in pairs(jobs) do stone.stone_flow_cancel(pending) end
+        end
+        context = { jobs = jobs, guard = guard }
+        owners[owner] = context
+    end
+    context.jobs[key] = handle
+"""
+
+pub inline(lua) fn native_flow_handles_reset<W>(owner: W) = """
+    local owners = _G.__stone_flow_owners
+    local context = owners and owners[owner]
+    if not context then return end
+    for key, handle in pairs(context.jobs) do
+        stone.stone_flow_cancel(handle)
+        context.jobs[key] = nil
+    end
+    owners[owner] = nil
+"""

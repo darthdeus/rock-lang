@@ -1,0 +1,179 @@
+use stone::*
+
+// The outline detect pass driven directly (build_outline_detect_pass) over
+// hand-rendered r32i target_mask and visible_id canvases. Readback goes through
+// a saved PNG so rows read top-down.
+
+const OUTLINE_DETECT_VISIBLE: Color = color(0.0, 1.0, 0.0, 1.0)
+const OUTLINE_DETECT_OCCLUDED: Color = color(1.0, 0.0, 0.0, 1.0)
+
+fn outline_detect_readback(out: Canvas, name: string) -> ImageData {
+    let path = (env_var("ROCK_TEST_TMP") ?? env_var("TMPDIR") ?? "/tmp") + "/rock-" + name + ".png"
+    assert(stone_canvas_save_png(out.handle.0, path), "the detect output saves as PNG")
+    return load_image_data(path) ?? {
+        assert(false, "the saved detect output reloads")
+        return new_owned_image_data(1, 1)
+    }
+}
+
+fn outline_detect_slot(colors: NativeBuffer<float>, occluded: NativeBuffer<float>,
+        params: NativeBuffer<float>, slot: int, entity_id: int, width: float) {
+    write_color_slot(colors, slot, OUTLINE_DETECT_VISIBLE)
+    write_color_slot(occluded, slot, OUTLINE_DETECT_OCCLUDED)
+    write_vec4_slot(params, slot, width, 0.0, 0.0, entity_id as float)
+}
+
+fn outline_detect_quad(pool: RenderBatchPool, white: SampledTexture, pos: Vec2, size: Vec2, id: int) {
+    push_silhouette_mask_quad(pool, white, pos, null, size, v(0.5, 0.5), 0.0, false, false, WHITE, 0.0, id)
+}
+
+// Visible and occluded counts on one row, split at the canvas midline.
+value OutlineDetectRow { g_left: int = 0, r_left: int = 0, g_right: int = 0, r_right: int = 0 }
+
+fn outline_detect_row(img: ImageData, row: int, from: int, to: int, mid: int) -> OutlineDetectRow {
+    let g_left = 0
+    let r_left = 0
+    let g_right = 0
+    let r_right = 0
+    for x in from..to {
+        let (r, g, _b, a) = image_data_get_pixel(img, x, row)
+        if a > 0.5 && g > 0.5 && r < 0.5 {
+            if x < mid { g_left += 1 } else { g_right += 1 }
+        }
+        if a > 0.5 && r > 0.5 && g < 0.5 {
+            if x < mid { r_left += 1 } else { r_right += 1 }
+        }
+    }
+    return OutlineDetectRow { g_left: g_left, r_left: r_left, g_right: g_right, r_right: r_right }
+}
+
+fn outline_detect_opaque_run(img: ImageData, x0: int, y0: int, dx: int, dy: int, n: int) -> int {
+    let run = 0
+    for i in 0..n {
+        let (_r, _g, _b, a) = image_data_get_pixel(img, x0 + dx * i, y0 + dy * i)
+        if a > 0.5 { run += 1 }
+    }
+    return run
+}
+
+// Sprite A (id 1, wide band) is partly covered by non-outlined B (id 2), which
+// is in visible_id but not target_mask; C (id 256, narrow band) is fully visible.
+@test
+fn outline_detect_classifies_occlusion_and_keeps_each_entitys_width() {
+    outline_canvas_fixture((white) => {
+        let size = 128
+        let scale = 32.0
+        let off = float(size) / (2.0 * scale)
+        let mask = new_canvas(float(size), float(size), "r32i")
+        let visible = new_canvas(float(size), float(size), "r32i")
+        let out = new_canvas(float(size), float(size), "rgba8")
+        defer {
+            destroy_canvas(mask)
+            destroy_canvas(visible)
+            destroy_canvas(out)
+        }
+        let mask_pool = render_batch_pool_new()
+        outline_detect_quad(mask_pool, white, v(0, 0.5), v(2, 1), 1)
+        outline_detect_quad(mask_pool, white, v(0, -1.5), v(0.75, 0.75), 256)
+        // Later pushes win, so B covers A's right half.
+        let vis_pool = render_batch_pool_new()
+        outline_detect_quad(vis_pool, white, v(0, 0.5), v(2, 1), 1)
+        outline_detect_quad(vis_pool, white, v(0.75, 0.5), v(2, 1), 2)
+        outline_detect_quad(vis_pool, white, v(0, -1.5), v(0.75, 0.75), 256)
+        render_silhouette_mask(mask_pool, mask, v(off, off), scale)
+        render_silhouette_mask(vis_pool, visible, v(off, off), scale)
+        defer {
+            render_batch_pool_destroy(mask_pool)
+            render_batch_pool_destroy(vis_pool)
+        }
+
+        let colors = native_buffer_float(OUTLINE_MAX_ENTRIES * 4)
+        let occluded = native_buffer_float(OUTLINE_MAX_ENTRIES * 4)
+        let params = native_buffer_float(OUTLINE_MAX_ENTRIES * 4)
+        let radius = 8.0
+        outline_detect_slot(colors, occluded, params, 0, 0, radius)
+        outline_detect_slot(colors, occluded, params, 1, 1, 6.0)
+        // 256 hashes to slot 1, which A holds, so its narrow style lives in slot 2.
+        outline_detect_slot(colors, occluded, params, 2, 256, 2.0)
+
+        run_pass(build_outline_detect_pass(mask, visible, out, color(0.0, 0.0, 0.0, 0.0),
+            radius, 0.0, 0.0, colors, occluded, params))
+        let img = outline_detect_readback(out, "outline_detect_classify")
+        let a_row = outline_detect_row(img, 80, 0, size, 64)
+        assert(a_row.g_left > 0 && a_row.r_left == 0,
+            "A's uncovered left edge classifies visible (green {a_row.g_left}, red {a_row.r_left})")
+        assert(a_row.r_right > 0 && a_row.g_right == 0,
+            "A's B-covered right edge classifies occluded (red {a_row.r_right}, green {a_row.g_right})")
+        let a_band = outline_detect_opaque_run(img, 97, 80, 1, 0, 28)
+        assert(a_band >= 5, "wide entity A shows a thick band ({a_band} px)")
+        // Nothing else draws in rows 28..56 below C.
+        let c_band = outline_detect_opaque_run(img, 64, 28, 0, 1, 28)
+        assert(c_band > 0 && c_band <= 3, "narrow entity C's band keeps its own width ({c_band} px)")
+
+        run_pass(build_outline_detect_pass(mask, visible, out, color(0.0, 0.0, 0.0, 0.0),
+            radius, 0.0, 0.0, colors, occluded, params, see_through_id: 2))
+        let through = outline_detect_row(outline_detect_readback(out, "outline_detect_see_through"),
+            80, 64, size, size)
+        assert(through.g_left > 0 && through.r_left == 0,
+            "see-through cover never hides the target (green {through.g_left}, red {through.r_left})")
+    })
+}
+
+fn outline_detect_id_canvas(white: SampledTexture, size: int, scale: float, x: float, id: int) -> Canvas {
+    let canvas = new_canvas(float(size), float(size), "r32i")
+    let pool = render_batch_pool_new()
+    defer { render_batch_pool_destroy(pool) }
+    outline_detect_quad(pool, white, v(x, 0.0), v(1.0, 1.0), id)
+    let off = float(size) / (2.0 * scale)
+    render_silhouette_mask(pool, canvas, v(off, off), scale)
+    return canvas
+}
+
+fn outline_detect_ring_halves(img: ImageData, size: int) -> (int, int) {
+    let left = outline_detect_opaque_run(img, 0, size ./ 2, 1, 0, size ./ 2)
+    let right = outline_detect_opaque_run(img, size ./ 2, size ./ 2, 1, 0, size - size ./ 2)
+    return (left, right)
+}
+
+// The integer-sampler lane (isampler2D over r32i, read with texture_id) has
+// its own slot order. One silhouette of the same id sits on each side; only
+// the canvas bound to target_mask contributes, so the ring shows which side
+// that slot received.
+@test
+fn outline_detect_reads_target_mask_and_visible_id_in_slot_order() {
+    outline_canvas_fixture((white) => {
+        let size = 128
+        let scale = 32.0
+        let radius = 4.0
+        let left_ids = outline_detect_id_canvas(white, size, scale, -1.0, 1)
+        let right_ids = outline_detect_id_canvas(white, size, scale, 1.0, 1)
+        let out = new_canvas(float(size), float(size), "rgba8")
+        defer {
+            destroy_canvas(left_ids)
+            destroy_canvas(right_ids)
+            destroy_canvas(out)
+        }
+        let colors = native_buffer_float(OUTLINE_MAX_ENTRIES * 4)
+        let occluded = native_buffer_float(OUTLINE_MAX_ENTRIES * 4)
+        let params = native_buffer_float(OUTLINE_MAX_ENTRIES * 4)
+        for slot in [0, 1] { outline_detect_slot(colors, occluded, params, slot, slot, radius) }
+
+        let probe = build_outline_detect_pass(left_ids, right_ids, out, null, radius, 0.0, 0.0,
+            colors, occluded, params)
+        assert_eq(pass_input_rejection(probe), "",
+            "an exact slot payload admits both isampler2D bindings")
+        assert(pass_input_rejection(Pass { pipeline: OUTLINE_DETECT_PIPELINE, block: probe.block }) != "",
+            "without a slot payload the two-slot pass is rejected")
+
+        run_pass(build_outline_detect_pass(left_ids, right_ids, out, color(0.0, 0.0, 0.0, 0.0),
+            radius, 0.0, 0.0, colors, occluded, params))
+        let (a_left, a_right) = outline_detect_ring_halves(outline_detect_readback(out, "outline_detect_order_a"), size)
+        run_pass(build_outline_detect_pass(right_ids, left_ids, out, color(0.0, 0.0, 0.0, 0.0),
+            radius, 0.0, 0.0, colors, occluded, params))
+        let (b_left, b_right) = outline_detect_ring_halves(outline_detect_readback(out, "outline_detect_order_b"), size)
+        assert(a_left > 0 && a_right == 0,
+            "target_mask's silhouette is the one ringed (left {a_left}, right {a_right})")
+        assert(b_right > 0 && b_left == 0,
+            "swapping the canvases rings the other silhouette (left {b_left}, right {b_right})")
+    })
+}

@@ -1,0 +1,123 @@
+// Decoder policy is latched on first use.
+inline(lua) fn cw7_image_stub_process(stubbed: bool) = """
+    local function quote(s) return "'" .. s:gsub("'", "'\\''") .. "'" end
+    local mode = stubbed and "1" or "0"
+    -- macOS strips DYLD_* at the shell boundary; reapply it at exec.
+    local library_key = ffi.os == "OSX" and "DYLD_LIBRARY_PATH" or "LD_LIBRARY_PATH"
+    local library_env = library_key .. "=" .. quote(assert(os.getenv(library_key)))
+    local path = assert(os.getenv("ROCK_TEST_TMP")) .. "/cw7-image-stub-" .. mode .. ".log"
+    local script = "assert(loadfile(" .. string.format("%q", arg[0]) .. "))(); "
+        .. "cw7_loaded_image_stub_case(" .. tostring(stubbed) .. "); "
+        .. "io.write('CW7_IMAGE_STUB_PASS')"
+    local executable_index = -1
+    while arg[executable_index - 1] do executable_index = executable_index - 1 end
+    local status = os.execute("env " .. library_env .. " ROCK_TEST_SHARD_TESTS='' STONE_ASSET_STUB=" .. mode
+        .. " STONE_IMAGE_MAX_SIDE=2 "
+        .. quote(arg[executable_index]) .. " -e " .. quote(script) .. " > " .. quote(path) .. " 2>&1")
+    local file = assert(io.open(path, "rb"))
+    local log = file:read("*a")
+    file:close()
+    assert(os.remove(path))
+    assert(status == 0 and log:find("CW7_IMAGE_STUB_PASS", 1, true), log)
+"""
+
+@nomangle inline(lua) fn cw7_with_stub_policy(value: string, body: fn()) = """
+    ffi.cdef[[int cw7_setenv(const char *, const char *, int) __asm__("setenv");
+        int cw7_unsetenv(const char *) __asm__("unsetenv");]]
+    local saved = os.getenv("STONE_ASSET_STUB")
+    assert(ffi.C.cw7_setenv("STONE_ASSET_STUB", value, 1) == 0)
+    local result = world_fixture_call(body)
+    local restored = saved and ffi.C.cw7_setenv("STONE_ASSET_STUB", saved, 1)
+        or ffi.C.cw7_unsetenv("STONE_ASSET_STUB")
+    assert(restored == 0, "restore STONE_ASSET_STUB")
+    if not result.ok then error(result.value, 0) end
+"""
+
+// Legal JPEG metadata segments put the size header beyond the bounded
+// native header probe while keeping the complete file decodable.
+inline(lua) fn cw7_late_header_jpeg(path: string) = """
+    local hex = ([=[
+        ffd8ffe000104a46494600010100000100010000ffdb004300080606070605080707070909080a0c140d0c0b0b0c1912
+        130f141d1a1f1e1d1a1c1c20242e2720222c231c1c2837292c30313434341f27393d38323c2e333432ffc0000b080004
+        000801011100ffc4001f0000010501010101010100000000000000000102030405060708090a0bffc400b51000020103
+        03020403050504040000017d01020300041105122131410613516107227114328191a1082342b1c11552d1f024336272
+        82090a161718191a25262728292a3435363738393a434445464748494a535455565758595a636465666768696a737475
+        767778797a838485868788898a92939495969798999aa2a3a4a5a6a7a8a9aab2b3b4b5b6b7b8b9bac2c3c4c5c6c7c8c9
+        cad2d3d4d5d6d7d8d9dae1e2e3e4e5e6e7e8e9eaf1f2f3f4f5f6f7f8f9faffda0008010100003f002bffd9
+    ]=]):gsub("%s+", "")
+    local jpeg = hex:gsub("..", function(pair) return string.char(tonumber(pair, 16)) end)
+    assert(jpeg:sub(1, 2) == string.char(255, 216))
+    local app = string.char(255, 225, 255, 255) .. string.rep(string.char(0), 65533)
+    local file = assert(io.open(path, "wb"))
+    assert(file:write(jpeg:sub(1, 2), app, app, jpeg:sub(3)))
+    assert(file:close())
+"""
+
+@nomangle fn cw7_loaded_image_stub_case(stubbed: bool) {
+    let original_policy = env_var("STONE_ASSET_STUB")
+    let opposite = if stubbed { "0" } else { "1" }
+    let cleanup_error = (world_fixture_raised(() => {
+        cw7_with_stub_policy(opposite, () => { error("cw7 intentional cleanup failure") })
+    }) ?? "")
+    assert(cleanup_error.contains("cw7 intentional cleanup failure"))
+    assert_eq(env_var("STONE_ASSET_STUB"), original_policy,
+        "a failing body restores process policy")
+
+    residency_owner_test_fixture("c", paths => {
+        let path = paths[0]
+        let image = load_image_cached(path, path, watch: false)
+        assert(image.0 != 0)
+        stone_flush_image_uploads()
+        assert(image_storage_dims(image) != image_dims(image),
+            "both cases store fewer texels than their logical extent")
+        assert_eq(image_is_stub(image), stubbed, "the loaded image owns stub provenance")
+        assert(!image_is_stub(Image(0)), "an unknown handle is not a loaded stub")
+        let declared = Image(0)
+        let result = (world_fixture_raised(() => {
+            cw7_with_stub_policy(opposite, () => {
+                assert_eq(image_is_stub(image), stubbed,
+                    "changing process policy cannot change a loaded image's provenance")
+                declared = load_image_cached(path, path, watch: false, exact_texels: true)
+            })
+        }) ?? "")
+        assert_eq(env_var("STONE_ASSET_STUB"), original_policy,
+            "cache acceptance and rejection restore process policy")
+        if stubbed {
+            assert_eq(result, "", "a loaded stub remains reusable after process policy changes")
+            assert_eq(declared, image, "exact-texel reuse preserves the loaded identity")
+
+            let fallback_path = env_var("ROCK_TEST_TMP").unwrap() + "/cw7-late-header.jpg"
+            paths.push(fallback_path)
+            cw7_late_header_jpeg(fallback_path)
+            assert(stone_probe_image_size(fallback_path) == null,
+                "fixture requires the real loader's full-decode fallback")
+            let decoded = stone_get_image_profile_stats().decoded_bytes
+            let real = load_image_cached(fallback_path, fallback_path, watch: false)
+            assert(real.0 != 0)
+            stone_flush_image_uploads()
+            assert(stone_get_image_profile_stats().decoded_bytes > decoded,
+                "the stub-mode fallback actually decoded pixels")
+            assert(!image_is_stub(real), "the decoded image owns real pixels in a stub-mode process")
+            assert(image_storage_dims(real) != image_dims(real), "the fallback's real pixels were capped")
+            let refused = (world_fixture_raised(() => {
+                let _ = load_image_cached(fallback_path, fallback_path,
+                    watch: false, exact_texels: true)
+            }) ?? "")
+            assert(refused.contains("needs its own texels"),
+                "a real decode fallback cannot inherit the neighboring stub's exemption: {refused}")
+        } else {
+            assert(result.contains("needs its own texels"),
+                "a capped real image is rejected even when the process now requests stubs: {result}")
+        }
+    })
+}
+
+@test
+fn cw7_loaded_stub_cache_uses_image_provenance() {
+    cw7_image_stub_process(true)
+}
+
+@test
+fn cw7_capped_real_cache_uses_image_provenance() {
+    cw7_image_stub_process(false)
+}

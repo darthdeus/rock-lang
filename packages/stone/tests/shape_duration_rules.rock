@@ -1,0 +1,131 @@
+use stone::*
+
+// A duration only defers a shape: the retained draw must honor the same
+// options as the immediate one.
+
+const SHAPE_DURATION_LINE_LAYER: int = 3
+const SHAPE_DURATION_CIRCLE_LAYER: int = 5
+const SHAPE_DURATION_SHADER: string = "shape_duration_line_shader"
+
+fn shape_duration_batch(pool: RenderBatchPool, layer: int) -> RenderBatch {
+    let found: RenderBatch? = null
+    for key in pool.keys() {
+        let batch = pool.get(key).unwrap()
+        if batch.z_layer == layer && batch.count > 0 {
+            assert(found == null, "one populated batch on layer {layer}")
+            found = batch
+        }
+    }
+    assert(found != null, "a populated batch on layer {layer}")
+    return found.unwrap()
+}
+
+fn shape_duration_mask_count(mask: RenderBatchPool) -> int {
+    let total = 0
+    for key in mask.keys() { total = total + mask.get(key).unwrap().count }
+    return total
+}
+
+fn shape_duration_draw(duration: float?, outline_id: int) {
+    draw_line(v(1.0, 1.0), v(6.0, 3.0), GREEN, width: 0.5,
+        layer: SHAPE_DURATION_LINE_LAYER, duration: duration, unlit: true,
+        pipeline: pipeline(SHAPE_DURATION_SHADER),
+        outline: Outline { entity_id: outline_id, color: RED, width: 2.0 })
+    draw_circle(v(10.0, 4.0), 2.0, BLUE, layer: SHAPE_DURATION_CIRCLE_LAYER,
+        duration: duration, unlit: true)
+}
+
+fn shape_duration_assert_drawn(pool: RenderBatchPool, mask: RenderBatchPool, outline_id: int, what: string) {
+    let line = shape_duration_batch(pool, SHAPE_DURATION_LINE_LAYER)
+    assert(line.unlit, "{what} line keeps unlit")
+    assert(line.pipeline != null && line.pipeline.unwrap().shader_name == SHAPE_DURATION_SHADER,
+        "{what} line keeps its pipeline")
+    let entry = OUTLINE_ENTRIES.get(outline_id)
+    assert(entry != null && entry.unwrap().color == RED && entry.unwrap().width == 2.0,
+        "{what} line registers its outline")
+    // The silhouette is the line's own geometry entered under the outline id.
+    assert_eq(shape_duration_mask_count(mask), line.count, "{what} line silhouette matches its geometry")
+
+    let circle = shape_duration_batch(pool, SHAPE_DURATION_CIRCLE_LAYER)
+    assert(circle.unlit, "{what} circle keeps unlit")
+    assert(circle.pipeline == null, "{what} circle uses the default pipeline")
+}
+
+fn shape_duration_clear(pool: RenderBatchPool, mask: RenderBatchPool) {
+    pool.clear()
+    mask.clear()
+    OUTLINE_ENTRIES.clear()
+}
+
+fn shape_duration_fixture(fail_after_draw: bool) {
+    let saved_dt = dt
+    let saved_items = duration_items
+    let saved_entries = OUTLINE_ENTRIES
+    let saved_mask = OUTLINE_MASK_BATCHES
+    let saved_pool = CURRENT_RENDER_POOL
+    let saved_white = WHITE_PIXEL
+    let data = new_owned_image_data(1, 1)
+    image_data_set_pixel(data, 0, 0, 1.0, 1.0, 1.0, 1.0)
+    let white = new_owned_image_from_data(data, TextureFilter::Nearest)
+    release_owned_image_data(data)
+    let pool = render_batch_pool_new()
+    let mask = render_batch_pool_new()
+    WHITE_PIXEL = white
+    dt = 0.25
+    duration_items = []
+    OUTLINE_ENTRIES = map_new()
+    OUTLINE_MASK_BATCHES = mask
+    CURRENT_RENDER_POOL = render_batch_scope(pool)
+    let failure = world_fixture_raised(() => {
+        shape_duration_draw(null, 7)
+        shape_duration_assert_drawn(pool, mask, 7, "untimed")
+        assert_eq(duration_items.len(), 0, "an untimed draw retains nothing")
+        shape_duration_clear(pool, mask)
+
+        shape_duration_draw(1.0, 9)
+        assert_eq(pool.len(), 0, "a timed draw defers to the duration update")
+        update_duration_items()
+        shape_duration_assert_drawn(pool, mask, 9, "timed")
+        shape_duration_clear(pool, mask)
+
+        update_duration_items()
+        assert_eq(duration_items.len(), 2, "both shapes stay retained before expiry")
+        shape_duration_assert_drawn(pool, mask, 9, "retained")
+        if fail_after_draw { error("intentional shape duration fixture failure") }
+    }, world_fixture_traceback)
+    CURRENT_RENDER_POOL = saved_pool
+    OUTLINE_MASK_BATCHES = saved_mask
+    OUTLINE_ENTRIES = saved_entries
+    duration_items = saved_items
+    dt = saved_dt
+    WHITE_PIXEL = saved_white
+    render_batch_pool_destroy(mask)
+    render_batch_pool_destroy(pool)
+    release_owned_image(white)
+    if let message = failure { error(message) }
+}
+
+@test
+fn timed_shapes_keep_their_draw_options() {
+    assert(stone_gpu_host_ensure())
+    let failure = world_fixture_raised(() => {
+        shape_duration_fixture(false)
+        let saved_dt = dt
+        let saved_items = duration_items.len()
+        let saved_entries = OUTLINE_ENTRIES
+        let saved_mask = OUTLINE_MASK_BATCHES
+        let saved_pool = current_render_pool()
+        let saved_white = WHITE_PIXEL
+        let before = stone_get_graphics_stats()
+        let failed = world_fixture_raised(() => shape_duration_fixture(true), world_fixture_traceback)
+        assert(failed != null && failed.unwrap().contains("intentional shape duration fixture failure"))
+        assert_eq(dt, saved_dt, "fixture restores dt after failure")
+        assert_eq(duration_items.len(), saved_items, "fixture restores retained draws after failure")
+        assert(OUTLINE_ENTRIES == saved_entries, "fixture restores outline entries after failure")
+        assert(render_batch_pool_same(OUTLINE_MASK_BATCHES, saved_mask), "fixture restores the outline mask pool")
+        assert(render_batch_pool_same(current_render_pool(), saved_pool), "fixture restores the draw pool")
+        assert_eq(WHITE_PIXEL, saved_white, "fixture restores the shared white image")
+        assert_eq(stone_get_graphics_stats().images, before.images, "fixture releases its image after failure")
+    }, world_fixture_traceback)
+    if let message = failure { error(message) }
+}

@@ -1,0 +1,328 @@
+// Scrolling-texture ribbon trails. One strip of
+// shared cross-section vertex pairs along a moving point's history --
+// consecutive segments share their vertices, so there are no joint gaps
+// or double-blended overlaps the way per-segment quads produce.
+
+// Which texture axis runs ALONG the ribbon (the scroll axis); the other
+// spans the cross-section. AlongU is the default because it matches how
+// trail textures are authored -- a soft-edge profile down the texture's
+// V, uniform along U (Unity's TrailRenderer convention). Under AlongU the
+// cross-section samples V, so those edges feather naturally, and the U
+// scroll shows lengthwise detail. AlongV is the transpose, for a texture
+// whose profile runs along U instead.
+pub enum TrailAxis {
+    AlongU,
+    AlongV,
+}
+
+pub struct Trail {
+    // Committed checkpoints, tail -> most recent. The live head (`head`,
+    // below) is drawn as one more point past the last checkpoint and moves
+    // every frame, so the leading edge tracks the emitter smoothly instead
+    // of snapping forward a whole `spacing` at each commit.
+    positions: [Vec2] = [],
+    head: Vec2 = zero(),
+    has_head: bool = false,
+    // Position of the most recent committed checkpoint; a new one drops
+    // once the head has moved `spacing` past it.
+    last_commit_at: Vec2 = zero(),
+    // Depth-sort/test key per drawn point (parallel to `positions`, plus
+    // `head_depth_y` for the live head). Defaults to the point's own y; a
+    // caller drawing LIFTED geometry (a mote hovering above its ground
+    // tile) passes the GROUND y via trail_update's `depth_y`, so the ribbon
+    // occludes at the same line as its emitter, not its visual position.
+    depth_ys: [float] = [],
+    head_depth_y: float = 0.0,
+    last_commit_depth_y: float = 0.0,
+    width: float = 1.0,
+    // World-space length of the ribbon; the tail is trimmed past it.
+    trail_length: float = 10.0,
+    max_vertices: int = 64,
+    // Head tint (color_start) lerps to tail tint (color_end) along the strip.
+    color_start: Color = WHITE,
+    color_end: Color = Color { r: 1, g: 1, b: 1, a: 0 },
+    // Texture units per second of game time, along the scroll axis.
+    scroll_speed: float = 1.0,
+    axis: TrailAxis = TrailAxis::AlongU,
+    blend: BlendMode = BlendMode::Additive,
+    // Depth mode for the ribbon mesh. Off (default) draws over everything;
+    // TestNoWrite occludes against the depth buffer (walls) without writing
+    // it, the ground-decal convention -- pair it with a per-point `depth_y`.
+    depth: DepthMode = DepthMode::Off,
+    z_layer: int = 0,
+    // Disabled trails stop accumulating and shrink from the tail, so a
+    // dead emitter's ribbon drains instead of vanishing.
+    enabled: bool = true,
+}
+
+// The ctor owns the REPEAT flag: the scroll coordinate leaves [0,1] as the
+// trail scrolls, and a caller that forgot this would silently get clamped
+// smearing instead of tiling. Trail textures must be standalone images --
+// atlas regions cannot repeat. The caller keeps the
+// image in platform memory and supplies it again when drawing.
+pub fn trail_new(
+    texture: Image,
+    width: float = 1.0,
+    trail_length: float = 10.0,
+    max_vertices: int = 64,
+    color_start: Color = WHITE,
+    color_end: Color = Color { r: 1, g: 1, b: 1, a: 0 },
+    scroll_speed: float = 1.0,
+    axis: TrailAxis = TrailAxis::AlongU,
+    blend: BlendMode = BlendMode::Additive,
+    depth: DepthMode = DepthMode::Off,
+    z_layer: int = 0,
+) -> Trail {
+    image_set_wrap(texture, true)
+    return Trail {
+        width: width,
+        trail_length: trail_length,
+        max_vertices: max_vertices,
+        color_start: color_start,
+        color_end: color_end,
+        scroll_speed: scroll_speed,
+        axis: axis,
+        blend: blend,
+        depth: depth,
+        z_layer: z_layer,
+    }
+}
+
+pub fn trail_spacing(t: Trail) -> float {
+    return t.trail_length / float(t.max_vertices)
+}
+
+// Total polyline length, tail to head.
+fn trail_polyline_length(t: Trail) -> float {
+    let total = 0.0
+    let i = 1
+    while i < t.positions.len() {
+        total += t.positions[i].distance(t.positions[i - 1])
+        i += 1
+    }
+    return total
+}
+
+fn trail_trim(t: Trail) {
+    while t.positions.len() > 2 && trail_polyline_length(t) > t.trail_length {
+        t.positions.remove_at(0)
+        t.depth_ys.remove_at(0)
+    }
+    while t.positions.len() > t.max_vertices {
+        t.positions.remove_at(0)
+        t.depth_ys.remove_at(0)
+    }
+}
+
+// `depth_y` is the y used for depth sort/test at this point (null -> pos.y).
+// The ribbon is DRAWN at `pos` but TESTED at `depth_y`, so lifted geometry
+// (a mote hovering above ground) can occlude at its ground line.
+pub fn trail_update(t: Trail, pos: Vec2, depth_y: float? = null) {
+    let dy = depth_y ?? pos.y
+
+    if !t.enabled {
+        // Drain from the tail; the frozen head keeps the leading edge in
+        // place as the strip shrinks toward it.
+        if t.positions.len() > 0 {
+            t.positions.remove_at(0)
+            t.depth_ys.remove_at(0)
+        } else {
+            t.has_head = false
+        }
+        return
+    }
+
+    if !t.has_head {
+        t.positions.push(pos)
+        t.depth_ys.push(dy)
+        t.head = pos
+        t.head_depth_y = dy
+        t.last_commit_at = pos
+        t.last_commit_depth_y = dy
+        t.has_head = true
+        return
+    }
+
+    // The head moves every frame -- this is the smooth leading edge. It is
+    // not a checkpoint; checkpoints are the fixed points it leaves behind.
+    t.head = pos
+    t.head_depth_y = dy
+
+    let spacing = trail_spacing(t)
+    let moved = pos.distance(t.last_commit_at)
+    if moved < spacing {
+        return
+    }
+
+    // A fast frame can cover several spacings; committing only the endpoint
+    // would leave a long straight chord whose cross-sections span it,
+    // pinching the ribbon. Drop the intermediate checkpoints too, with their
+    // depth key interpolated by distance along the covered chord.
+    let dir = (pos - t.last_commit_at).normalize()
+    let base_depth = t.last_commit_depth_y
+    let steps = int(moved / spacing)
+    if steps > t.max_vertices {
+        steps = t.max_vertices
+    }
+    let i = 1
+    while i <= steps {
+        let frac = (spacing * float(i)) / moved
+        t.positions.push(t.last_commit_at + dir * (spacing * float(i)))
+        t.depth_ys.push(base_depth + (dy - base_depth) * frac)
+        i += 1
+    }
+    t.last_commit_depth_y = base_depth + (dy - base_depth) * ((spacing * float(steps)) / moved)
+    t.last_commit_at = t.last_commit_at + dir * (spacing * float(steps))
+
+    trail_trim(t)
+}
+
+// UV for a cross-section's left/right edge. `along` is the scroll
+// coordinate (0 at the tail, +pct + time*scroll toward the head); `edge`
+// is 0 (left) or 1 (right). AlongU puts scroll on U and the cross-section
+// on V (edges feather from a V-profile texture); AlongV is the transpose.
+//
+// Branch-free on purpose: `su`/`sv` are the axis decision made ONCE above
+// the segment loop (`trail_axis_select`). A `match` on the axis here was a
+// side exit inside that loop with ~24 floats live, which LuaJIT can never
+// compile (16-float register budget),
+// so the first trail of the other axis aborted the exit 152 times per
+// parent trace, 456 a run. Multiplying by an exact 0/1 selects exactly.
+@pure fn trail_uv(su: float, sv: float, along: float, edge: float) -> Vec2 {
+    return v(along * su + edge * sv, edge * su + along * sv)
+}
+
+// (su, sv) = (1, 0) for AlongU, (0, 1) for AlongV: the one branch on the
+// axis, taken before any segment float is live.
+@pure fn trail_axis_select(axis: TrailAxis) -> (float, float) {
+    return match axis {
+        TrailAxis::AlongU => (1.0, 0.0),
+        TrailAxis::AlongV => (0.0, 1.0),
+    }
+}
+
+// Total length of the drawn polyline (committed checkpoints + live head).
+fn trail_drawn_length(t: Trail) -> float {
+    let np = t.positions.len()
+    let n = np + 1
+    let total = 0.0
+    let j = 1
+    while j < n {
+        let pa = if j - 1 < np { t.positions[j - 1] } else { t.head }
+        let pb = if j < np { t.positions[j] } else { t.head }
+        total += pb.distance(pa)
+        j += 1
+    }
+    return total
+}
+
+fn trail_batch_add_segment(
+    batch: RenderBatch,
+    a_left: Vec2, a_left_uv: Vec2, a_right: Vec2, a_right_uv: Vec2, a_color: Color,
+    b_left: Vec2, b_left_uv: Vec2, b_right: Vec2, b_right_uv: Vec2, b_color: Color,
+    py: float, offset: Vec2,
+) {
+    reserve_vertices(batch, RECT_BATCH_VERTS_PER_RECT)
+    __sprite_mesh_push_segment(
+        batch.verts, batch.count,
+        a_left.x + offset.x, a_left.y + offset.y, a_left_uv.x, a_left_uv.y,
+        a_right.x + offset.x, a_right.y + offset.y, a_right_uv.x, a_right_uv.y,
+        a_color.r, a_color.g, a_color.b, a_color.a,
+        b_left.x + offset.x, b_left.y + offset.y, b_left_uv.x, b_left_uv.y,
+        b_right.x + offset.x, b_right.y + offset.y, b_right_uv.x, b_right_uv.y,
+        b_color.r, b_color.g, b_color.b, b_color.a,
+        py, py,
+    )
+    batch.count += RECT_BATCH_VERTS_PER_RECT
+}
+
+// Emit the ribbon into the compatible world batch. The polyline is the
+// committed checkpoints followed by the live head, so index np
+// (== positions.len()) is the head.
+//
+// `pct` is anchored to WORLD DISTANCE from the head (1 at the head, 0 a
+// full trail_length behind it), NOT to point-count fraction. Point-count
+// fraction stretches the taper, color, and texture as the trail grows from
+// nothing -- a young short strip would show the entire gradient compressed,
+// then unspool it over the first seconds. Distance-anchoring keeps the
+// density constant: a young trail simply shows the head end of the gradient
+// and extends the tail backward into it.
+// `phase` is seconds on the emitter's owning clock, so scrolling shares its admission.
+pub fn trail_draw(t: Trail, texture: Image, phase: float, dl: DrawList = world, offset: Vec2 = zero(),
+                  pipeline: Pipeline? = null) {
+    if !t.has_head { return }
+    let np = t.positions.len()
+    let n = np + 1
+    if n < 2 { return }
+
+    let world_pool = dl.space == DrawSpace::World && dl.dest == DrawDest::Scene && !dl.owns_pool
+    assert(world_pool,
+        "trail_draw on the '{dl.name}' DrawList requires a World+Scene DrawList backed by the engine world pool")
+    let batch = ensure_world_sprite_batch(
+        sampled_image(texture), resolve_z(dl, t.z_layer), t.blend, false, t.depth,
+        pipeline: pipeline, unlit: t.blend == BlendMode::Additive, shared_pipeline: pipeline != null,
+    )
+
+    let scroll_offset = phase * t.scroll_speed
+    let total_len = trail_drawn_length(t)
+
+    // Carried previous cross-section; `has_prev` gates the first segment.
+    let prev_left = zero()
+    let prev_right = zero()
+    let prev_along = 0.0
+    let prev_color = t.color_end
+    let has_prev = false
+
+    // Distance walked from the tail, so pct can be anchored to the head.
+    let cum = 0.0
+    let prev_p = if np > 0 { t.positions[0] } else { t.head }
+
+    let (su, sv) = trail_axis_select(t.axis)
+
+    let i = 0
+    while i < n {
+        let p = if i < np { t.positions[i] } else { t.head }
+        let dkey = if i < np { t.depth_ys[i] } else { t.head_depth_y }
+        cum += p.distance(prev_p)
+        prev_p = p
+
+        // Forward difference, except at the head which reuses the last
+        // committed segment's direction. i-1 is always a checkpoint.
+        let nextp = if i + 1 < np { t.positions[i + 1] } else { t.head }
+        let a = if i + 1 < n { p } else { t.positions[i - 1] }
+        let b = if i + 1 < n { nextp } else { p }
+        let seg = b - a
+        if seg.length() < 0.0001 {
+            i += 1
+            continue
+        }
+        let dir = seg.normalize()
+        let perp = v(-dir.y, dir.x)
+
+        let dist_from_head = total_len - cum
+        let pct = clamp(1.0 - dist_from_head / t.trail_length, 0.0, 1.0)
+        let half = t.width * pct * 0.5
+        let left = p - perp * half
+        let right = p + perp * half
+        let color = t.color_end.lerp(t.color_start, pct)
+        let along = scroll_offset + pct
+
+        if has_prev {
+            trail_batch_add_segment(
+                batch,
+                prev_left, trail_uv(su, sv, prev_along, 0.0),
+                prev_right, trail_uv(su, sv, prev_along, 1.0), prev_color,
+                left, trail_uv(su, sv, along, 0.0),
+                right, trail_uv(su, sv, along, 1.0), color,
+                dkey + offset.y, offset,
+            )
+        }
+
+        prev_left = left
+        prev_right = right
+        prev_along = along
+        prev_color = color
+        has_prev = true
+        i += 1
+    }
+}

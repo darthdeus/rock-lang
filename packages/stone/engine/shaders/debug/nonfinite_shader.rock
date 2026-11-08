@@ -1,0 +1,34 @@
+// Non-finite debug overlay (STONE_NONFINITE, post_process.rock): flags texels
+// that hold Inf/NaN per channel so the stage that PRODUCED a bad value is
+// visible directly. red = R bad, green = G bad, blue = B bad, white = all three;
+// finite-but-near-the-rgba16f-ceiling texels flash yellow; everything else
+// renders as a heavily dimmed luma for context.
+//
+// Compiled in-game via `rock_shader(nonfinite_frag)` (single-arg fullscreen
+// form); `SrcTex` is the Pass slot group (src_tex 0,
+// NONFINITE_PIPELINE).
+// The auto-generated fullscreen vertex is byte-identical to the hand-GLSL this
+// replaced (NDC-passthrough aPos/aTexCoord).
+
+pub @shader(fragment)
+fn nonfinite_frag(@textures t: SrcTex, tc: Vec2) -> Vec4 {
+    let c = texture(t.src_tex, tc)
+
+    let bad = bvec3(
+        isinf(c.r) || isnan(c.r),
+        isinf(c.g) || isnan(c.g),
+        isinf(c.b) || isnan(c.b),
+    )
+
+    if any(bad) {
+        return v(to_vec3(bad), 1.0)
+    } else if any(greater_than(c.rgb.abs(), v(60000.0, 60000.0, 60000.0))) {
+        // Finite but within a hair of the rgba16f ceiling (65504): the input a
+        // downstream op tips over into Inf.
+        return v(1.0, 1.0, 0.0, 1.0)
+    } else {
+        let luma = c.rgb.dot(v(0.2126, 0.7152, 0.0722))
+        let d = luma * 0.05
+        return v(d, d, d, 1.0)
+    }
+}

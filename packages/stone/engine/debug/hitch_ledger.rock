@@ -1,0 +1,378 @@
+// Always-on hitch ledger. One bounded record per frame from what the frame
+// already computed (the phase timers), plus O(1) reads: the Lua heap size,
+// the trace-recorder counters, and image load, upload, and decode-wait timings. Every frame over the
+// threshold after warm-up is classified from its own record and logged, a
+// five-second summary counts causes, and `HITCH_LEDGER_PATH` dumps the ring
+// at exit. The section profiler stays off: the second tier is the slowest
+// lifecycle system per frame, timed around the call the systems runner
+// already makes (two clock reads per system).
+//
+// `HITCH_LEDGER=0` disables everything; `HITCH_MS` is the threshold
+// (default 25 ms: a missed 60 Hz vblank, not an on-time frame);
+// `HITCH_WARMUP_FRAMES` skips the recorder's warm-up window.
+//
+// PERF_GC_STEPS adds measured collector entry/atomic time from the optional
+// diagnostic LuaJIT. Ordinary runs retain the heap-drop heuristic; absent
+// collector timings are unknown, never reported as zero.
+
+pub const HITCH_RING_FRAMES: int = 600
+
+const HITCH_GC_DROP_KB: float = 256.0
+const HITCH_ALLOC_BURST_KB: float = 4096.0
+const HITCH_JIT_EVENTS: int = 8
+const HITCH_LOG_LINES_PER_SECOND: int = 4
+const HITCH_LOG_RESIDENCY_NAMES: int = 3
+
+pub struct HitchLedger {
+    enabled: bool,
+    threshold_ms: float,
+    warmup_frames: int,
+    dump_path: string,
+    // The ring. `count` records written; slot = count % HITCH_RING_FRAMES.
+    frame: NativeBuffer<int>,
+    frame_ms: NativeBuffer<float>,
+    logic_ms: NativeBuffer<float>,
+    render_ms: NativeBuffer<float>,
+    present_ms: NativeBuffer<float>,
+    heap_kb: NativeBuffer<float>,
+    heap_delta_kb: NativeBuffer<float>,
+    gc: NativeBuffer<float>,
+    starts: NativeBuffer<int>,
+    aborts: NativeBuffer<int>,
+    load_us: NativeBuffer<int>,
+    upload_us: NativeBuffer<int>,
+    decode_wait_us: NativeBuffer<int>,
+    residency_us: NativeBuffer<int>,
+    residency_paths: [string],
+    slow_ms: NativeBuffer<float>,
+    slow_name: [string],
+    cause: [string],
+    count: int,
+    // Previous frame's heap sample and process-wide trace counts
+    // (`jit_trace_count_of`), for the per-frame deltas.
+    last_heap_kb: float,
+    last_starts: int,
+    last_aborts: int,
+    last_compiles: int,
+    last_flushes: int,
+    // Tier two scratch for the frame in flight.
+    cur_slow_ms: float,
+    cur_slow_name: string,
+    cur_slow_phase: string,
+    // Window and lifetime tallies by cause.
+    win_hitches: int,
+    win_gc: int,
+    win_alloc: int,
+    win_jit: int,
+    win_present: int,
+    win_upload: int,
+    win_residency: int,
+    win_logic: int,
+    win_render: int,
+    total_hitches: int,
+    total_gc: int,
+    total_alloc: int,
+    total_jit: int,
+    total_present: int,
+    total_upload: int,
+    total_residency: int,
+    total_logic: int,
+    total_render: int,
+    last_cause: string,
+    last_slow_name: string,
+    last_logic_system: string,
+    // Log budget: at most HITCH_LOG_LINES_PER_SECOND lines per wall second.
+    log_second: int,
+    log_used: int,
+}
+
+fn hitch_ledger_new() -> HitchLedger {
+    let names: [string] = []
+    let causes: [string] = []
+    let residency_paths: [string] = []
+    for _ in 0..HITCH_RING_FRAMES {
+        names.push("")
+        causes.push("")
+        residency_paths.push("")
+    }
+    return HitchLedger {
+        enabled: os_getenv("HITCH_LEDGER") != "0",
+        threshold_ms: get_env_float("HITCH_MS", 25.0),
+        warmup_frames: get_env_int("HITCH_WARMUP_FRAMES", 600),
+        dump_path: os_getenv("HITCH_LEDGER_PATH") ?? "",
+        frame: native_buffer_int(HITCH_RING_FRAMES),
+        frame_ms: native_buffer_float(HITCH_RING_FRAMES),
+        logic_ms: native_buffer_float(HITCH_RING_FRAMES),
+        render_ms: native_buffer_float(HITCH_RING_FRAMES),
+        present_ms: native_buffer_float(HITCH_RING_FRAMES),
+        heap_kb: native_buffer_float(HITCH_RING_FRAMES),
+        heap_delta_kb: native_buffer_float(HITCH_RING_FRAMES),
+        gc: native_buffer_float(HITCH_RING_FRAMES * GC_STEP_FIELDS),
+        starts: native_buffer_int(HITCH_RING_FRAMES),
+        aborts: native_buffer_int(HITCH_RING_FRAMES),
+        load_us: native_buffer_int(HITCH_RING_FRAMES),
+        upload_us: native_buffer_int(HITCH_RING_FRAMES),
+        decode_wait_us: native_buffer_int(HITCH_RING_FRAMES),
+        residency_us: native_buffer_int(HITCH_RING_FRAMES),
+        residency_paths: residency_paths,
+        slow_ms: native_buffer_float(HITCH_RING_FRAMES),
+        slow_name: names,
+        cause: causes,
+        count: 0,
+        last_starts: jit_trace_count_of("starts"),
+        last_aborts: jit_trace_count_of("aborts"),
+        last_compiles: jit_trace_count_of("compiles"),
+        last_flushes: jit_trace_count_of("flushes"),
+        last_heap_kb: -1.0,
+        cur_slow_ms: 0.0,
+        cur_slow_name: "",
+        cur_slow_phase: "",
+        win_hitches: 0, win_gc: 0, win_alloc: 0, win_jit: 0, win_present: 0,
+        win_upload: 0, win_residency: 0, win_logic: 0, win_render: 0,
+        total_hitches: 0, total_gc: 0, total_alloc: 0, total_jit: 0,
+        total_present: 0, total_upload: 0, total_residency: 0, total_logic: 0, total_render: 0,
+        last_cause: "",
+        last_slow_name: "",
+        last_logic_system: "",
+        log_second: -1,
+        log_used: 0,
+    }
+}
+
+pub global HITCH: HitchLedger = hitch_ledger_new()
+
+// Tier two: called around every lifecycle system by the systems runner.
+fn hitch_system_begin() -> float {
+    if !HITCH.enabled && !PERF_FRAME_CAPTURE { return 0.0 }
+    return stone_get_time()
+}
+
+fn hitch_system_end(name: string, phase: string, t0: float) {
+    if !HITCH.enabled && !PERF_FRAME_CAPTURE { return }
+    let ms = (stone_get_time() - t0) * 1000.0
+    if ms > HITCH.cur_slow_ms {
+        HITCH.cur_slow_ms = ms
+        HITCH.cur_slow_name = name
+        HITCH.cur_slow_phase = phase
+    }
+}
+
+// Which record explains the frame. Present and upload waits are outside
+// Lua; a heap drop means a sweep finished inside this frame; a heap burst
+// is allocation; a start or abort burst is the recorder; otherwise the
+// slower CPU phase, named by its slowest system.
+fn hitch_classify(frame_ms: float, logic_ms: float, render_ms: float,
+                  present_ms: float, heap_delta_kb: float, starts: int,
+                  aborts: int, upload_us: int) -> string {
+    let half = frame_ms * 0.5
+    if present_ms >= half { return "present" }
+    if (RESIDENCY_FRAME_MISS_WAIT_US as float) >= half * 1000.0 { return "residency" }
+    if (upload_us as float) >= half * 1000.0 { return "upload" }
+    if GC_STEP_ENABLED {
+        if nb_get(GC_STEP_FRAME, 0) + nb_get(GC_STEP_FRAME, 2) >= half { return "gc" }
+    } else if heap_delta_kb <= -HITCH_GC_DROP_KB { return "gc" }
+    if starts >= HITCH_JIT_EVENTS || aborts >= HITCH_JIT_EVENTS { return "jit" }
+    if heap_delta_kb >= HITCH_ALLOC_BURST_KB { return "alloc" }
+    if logic_ms >= render_ms { return "logic" }
+    return "render"
+}
+
+fn hitch_tally(cause: string) {
+    HITCH.win_hitches += 1
+    HITCH.total_hitches += 1
+    if cause == "gc" { HITCH.win_gc += 1; HITCH.total_gc += 1 }
+    else if cause == "alloc" { HITCH.win_alloc += 1; HITCH.total_alloc += 1 }
+    else if cause == "jit" { HITCH.win_jit += 1; HITCH.total_jit += 1 }
+    else if cause == "present" { HITCH.win_present += 1; HITCH.total_present += 1 }
+    else if cause == "residency" { HITCH.win_residency += 1; HITCH.total_residency += 1 }
+    else if cause == "upload" { HITCH.win_upload += 1; HITCH.total_upload += 1 }
+    else if cause == "logic" { HITCH.win_logic += 1; HITCH.total_logic += 1 }
+    else { HITCH.win_render += 1; HITCH.total_render += 1 }
+}
+
+// Several draws can require one image before its load completes, so a frame's
+// wait list repeats paths; keep each once, in first-wait order.
+fn hitch_distinct_paths(paths: [string]) -> [string] {
+    let seen: Map<string, bool> = map_new()
+    let out: [string] = vec_new()
+    for path in paths {
+        if seen.contains(path) { continue }
+        seen[path] = true
+        out.push(path)
+    }
+    return out
+}
+
+// The log line names the first few files; the ledger TSV keeps every path.
+fn hitch_residency_log_summary(paths: [string]) -> string {
+    let names: [string] = vec_new()
+    for path in paths {
+        if names.len() == HITCH_LOG_RESIDENCY_NAMES { break }
+        let parts = path.split("/")
+        names.push(parts[parts.len() - 1])
+    }
+    let more = paths.len() - names.len()
+    let tail = if more > 0 { ",+{more}" } else { "" }
+    return "{paths.len()}({names.join(",")}{tail})"
+}
+
+fn hitch_log_allowed(now: float) -> bool {
+    let second = floor(now) as int
+    if second != HITCH.log_second {
+        HITCH.log_second = second
+        HITCH.log_used = 0
+    }
+    if HITCH.log_used >= HITCH_LOG_LINES_PER_SECOND { return false }
+    HITCH.log_used += 1
+    return true
+}
+
+// Called once per completed frame by the runner, after the phase timers
+// for this frame are final.
+fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) {
+    if !HITCH.enabled && !PERF_FRAME_CAPTURE { return }
+    gc_step_frame_close()
+    let phase = frame_diagnostic_timing()
+    let heap_kb = lua_gc_kb()
+    let heap_delta_kb = if HITCH.last_heap_kb < 0.0 { 0.0 } else { heap_kb - HITCH.last_heap_kb }
+    HITCH.last_heap_kb = heap_kb
+    let total_starts = jit_trace_count_of("starts")
+    let total_aborts = jit_trace_count_of("aborts")
+    let starts = total_starts - HITCH.last_starts
+    let aborts = total_aborts - HITCH.last_aborts
+    HITCH.last_starts = total_starts
+    HITCH.last_aborts = total_aborts
+    let total_compiles = jit_trace_count_of("compiles")
+    let total_flushes = jit_trace_count_of("flushes")
+    let compiles = total_compiles - HITCH.last_compiles
+    let flushes = total_flushes - HITCH.last_flushes
+    HITCH.last_compiles = total_compiles
+    HITCH.last_flushes = total_flushes
+    let image_stats = stone_get_image_frame_stats()
+    let load_us = image_stats.load_us
+    let upload_us = image_stats.upload_us
+    let decode_wait_us = image_stats.wait_us
+    if measured { perf_record_frame(frame, t_ms, frame_ms, heap_kb, heap_delta_kb, starts, compiles, aborts, flushes, image_stats) }
+    let slow_ms = HITCH.cur_slow_ms
+    let slow_name = HITCH.cur_slow_name
+    let slow_phase = HITCH.cur_slow_phase
+    HITCH.cur_slow_ms = 0.0
+    HITCH.cur_slow_name = ""
+    HITCH.cur_slow_phase = ""
+
+    let slot = HITCH.count % HITCH_RING_FRAMES
+    HITCH.count += 1
+    nb_set(HITCH.frame, slot, frame)
+    nb_set(HITCH.frame_ms, slot, frame_ms)
+    nb_set(HITCH.logic_ms, slot, phase.logic_ms)
+    nb_set(HITCH.render_ms, slot, phase.render_ms)
+    nb_set(HITCH.present_ms, slot, phase.present_ms)
+    nb_set(HITCH.heap_kb, slot, heap_kb)
+    nb_set(HITCH.heap_delta_kb, slot, heap_delta_kb)
+    if GC_STEP_ENABLED {
+        for c in 0..GC_STEP_FIELDS { nb_set(HITCH.gc, slot * GC_STEP_FIELDS + c, nb_get(GC_STEP_FRAME, c)) }
+    }
+    nb_set(HITCH.starts, slot, starts)
+    nb_set(HITCH.aborts, slot, aborts)
+    nb_set(HITCH.load_us, slot, load_us)
+    nb_set(HITCH.upload_us, slot, upload_us)
+    nb_set(HITCH.decode_wait_us, slot, decode_wait_us)
+    nb_set(HITCH.residency_us, slot, RESIDENCY_FRAME_MISS_WAIT_US)
+    HITCH.residency_paths[slot] = ""
+    nb_set(HITCH.slow_ms, slot, slow_ms)
+    HITCH.slow_name[slot] = slow_name
+    HITCH.cause[slot] = ""
+
+    if !HITCH.enabled || frame <= HITCH.warmup_frames || frame_ms < HITCH.threshold_ms { return }
+    let residency_paths = if !PERF_FRAME_CAPTURE && RESIDENCY_FRAME_WAIT_PATHS.len() > 0 {
+        hitch_distinct_paths(RESIDENCY_FRAME_WAIT_PATHS)
+    } else {
+        vec_new()
+    }
+    HITCH.residency_paths[slot] = residency_paths.join(";")
+    let cause = hitch_classify(frame_ms, phase.logic_ms, phase.render_ms,
+        phase.present_ms, heap_delta_kb, starts, aborts, upload_us)
+    HITCH.cause[slot] = cause
+    HITCH.last_cause = cause
+    HITCH.last_slow_name = slow_name
+    if cause == "logic" || cause == "render" { HITCH.last_logic_system = slow_name }
+    hitch_tally(cause)
+
+    if PERF_FRAME_CAPTURE || !hitch_log_allowed(stone_get_time()) { return }
+    let ms = format_float(frame_ms, 0, 1)
+    let l = format_float(phase.logic_ms, 0, 1)
+    let r = format_float(phase.render_ms, 0, 1)
+    let p = format_float(phase.present_ms, 0, 1)
+    let h = format_float(heap_kb / 1024.0, 0, 1)
+    let dh = format_float(heap_delta_kb / 1024.0, 0, 2)
+    let s = format_float(slow_ms, 0, 1)
+    log_info("HITCH", "frame={frame} ms={ms} cause={cause} logic={l} render={r} present={p} heap={h}MB dheap={dh}MB starts={starts} aborts={aborts} load_us={load_us} upload_us={upload_us} decode_wait_us={decode_wait_us} residency_us={RESIDENCY_FRAME_MISS_WAIT_US} residency_paths={hitch_residency_log_summary(residency_paths)} slowest={slow_phase}:{slow_name} {s}ms")
+}
+
+// The five-second window line, appended beside the FPS window. Empty when
+// nothing crossed the threshold, so a quiet window logs nothing extra.
+fn hitch_window_summary() -> string {
+    if !HITCH.enabled || HITCH.win_hitches == 0 { return "" }
+    let s = "hitches={HITCH.win_hitches} gc={HITCH.win_gc} alloc={HITCH.win_alloc} jit={HITCH.win_jit} present={HITCH.win_present} upload={HITCH.win_upload} residency={HITCH.win_residency} logic={HITCH.win_logic} render={HITCH.win_render}"
+    HITCH.win_hitches = 0
+    HITCH.win_gc = 0
+    HITCH.win_alloc = 0
+    HITCH.win_jit = 0
+    HITCH.win_present = 0
+    HITCH.win_residency = 0
+    HITCH.win_upload = 0
+    HITCH.win_logic = 0
+    HITCH.win_render = 0
+    return s
+}
+
+// Sim and tooling accessors.
+pub fn hitch_total() -> int { return HITCH.total_hitches }
+pub fn hitch_last_logic_system() -> string { return HITCH.last_logic_system }
+pub fn hitch_count_for(cause: string) -> int {
+    if cause == "gc" { return HITCH.total_gc }
+    if cause == "alloc" { return HITCH.total_alloc }
+    if cause == "jit" { return HITCH.total_jit }
+    if cause == "present" { return HITCH.total_present }
+    if cause == "residency" { return HITCH.total_residency }
+    if cause == "upload" { return HITCH.total_upload }
+    if cause == "logic" { return HITCH.total_logic }
+    if cause == "render" { return HITCH.total_render }
+    return 0
+}
+
+// Dump the ring as a TSV at exit when `HITCH_LEDGER_PATH` is set. Returns
+// the rows written, or -1 when the path could not be opened; the caller
+// logs either way, so a run that asked for a file never silently lacks one.
+fn hitch_ledger_flush() {
+    if !HITCH.enabled || HITCH.dump_path == "" { return }
+    let n = min(HITCH.count, HITCH_RING_FRAMES)
+    let first = if HITCH.count > HITCH_RING_FRAMES { HITCH.count - HITCH_RING_FRAMES } else { 0 }
+    let sb = sb_new()
+    sb_push(sb, "frame\tframe_ms\tlogic_ms\trender_ms\tpresent_ms\theap_kb\theap_delta_kb\tstarts\taborts\tupload_us\tresidency_us\tresidency_paths\tslowest_ms\tslowest\tcause\tgc_step_ms\tgc_atomic_ms\tgc_full_ms\tgc_steps\tgc_atomics\tgc_fulls\tgc_max_step_ms\tgc_phase_start\tgc_phase_end\tgc_heap_start_kb\tgc_heap_end_kb\tgc_request_kb\tgc_ms_per_kb\tload_us\tdecode_wait_us\n")
+    for k in 0..n {
+        let i = (first + k) % HITCH_RING_FRAMES
+        let row = "{nb_get(HITCH.frame, i)}\t{nb_get(HITCH.frame_ms, i)}\t{nb_get(HITCH.logic_ms, i)}\t{nb_get(HITCH.render_ms, i)}\t{nb_get(HITCH.present_ms, i)}\t{nb_get(HITCH.heap_kb, i)}\t{nb_get(HITCH.heap_delta_kb, i)}\t{nb_get(HITCH.starts, i)}\t{nb_get(HITCH.aborts, i)}\t{nb_get(HITCH.upload_us, i)}\t{nb_get(HITCH.residency_us, i)}\t{HITCH.residency_paths[i]}\t{nb_get(HITCH.slow_ms, i)}\t{HITCH.slow_name[i]}\t{HITCH.cause[i]}"
+        sb_push(sb, row)
+        for c in 0..GC_STEP_FIELDS {
+            let n = nb_get(HITCH.gc, i * GC_STEP_FIELDS + c)
+            sb_push(sb, if GC_STEP_ENABLED && n >= 0.0 { "\t{n}" } else { "\tnull" })
+        }
+        sb_push(sb, "\t{nb_get(HITCH.load_us, i)}\t{nb_get(HITCH.decode_wait_us, i)}")
+        sb_push(sb, "\n")
+    }
+    let written = __hitch_write_file(HITCH.dump_path, sb_build(sb))
+    if !written {
+        log_error("HITCH", "could not write the hitch ledger to {HITCH.dump_path}")
+        return
+    }
+    log_info("HITCH", "ledger: {n} rows -> {HITCH.dump_path} (hitches={HITCH.total_hitches} gc={HITCH.total_gc} alloc={HITCH.total_alloc} jit={HITCH.total_jit} present={HITCH.total_present} upload={HITCH.total_upload} residency={HITCH.total_residency} logic={HITCH.total_logic} render={HITCH.total_render})")
+}
+
+@nomangle inline(lua) fn __hitch_write_file(path: string, text: string) -> bool = """
+    local f = io.open(path, "w")
+    if f == nil then return false end
+    f:write(text)
+    f:close()
+    return true
+"""

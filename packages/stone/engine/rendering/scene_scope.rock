@@ -1,0 +1,534 @@
+// Explicit scene rendering owns its targets and commands; the live runner
+// keeps its pools and pending work even if the caller raises during a draw.
+struct SceneRenderSaved0 {
+    render_view: FrameView?,
+    outline_target_canvas: Canvas,
+    screen_canvas: Canvas,
+    screen_canvas_2: Canvas,
+    visible_id_canvas: Canvas,
+    world_material_canvas: Canvas?,
+    world_normal_canvas: Canvas?,
+    world_surface_owner_canvas: Canvas?,
+    mrt_id_attached: bool,
+    render_batches: RenderBatchPool,
+    render_batch_sort_keys: [string],
+    outline_mask_batches: RenderBatchPool,
+    mesh_pending: [SpriteMesh],
+    mesh_free: [SpriteMesh],
+    mesh_in_flight: [SpriteMesh],
+    world_prepare_passes: [Pass],
+    scene_passes: [Pass],
+    scene_passes_run_last: int,
+    world_batch_fast: Map<int, [string]>,
+    batch_occ: Map<string, Occ>,
+    parametric_batch_cursor: Map<string, ParametricCursor>,
+    batch_key_builds: int,
+}
+
+struct SceneRenderSaved1 {
+    world_batch_key_builds: int,
+    pool_births: int,
+    custom_draw_counter: int,
+    render_batch_flushes: int,
+    post_scene_batches_pending: bool,
+    outline_ids_written: bool,
+    outline_mask_written: bool,
+    outline_mask_bounds_valid: bool,
+    outline_mask_bounds_min_x: float,
+    outline_mask_bounds_min_y: float,
+    outline_mask_bounds_max_x: float,
+    outline_mask_bounds_max_y: float,
+    frame_uniform_blocks: [OwnedUniformBlock],
+    frame_uniform_block_frame: int,
+    frame_uniform_block_cursor: int,
+    current_render_pool: RenderBatchScope,
+    current_canvas_handle: int,
+    current_blend: BlendMode,
+    white_pixel: Image?,
+}
+
+struct SceneRenderSaved2 {
+    camera_view: Mat4,
+    engine_block_packs: int,
+    engine_block_stamp: int,
+    engine_block_key_valid: bool,
+    engine_block_key_w: float,
+    engine_block_key_h: float,
+    engine_block_key_present_source: bool,
+    engine_block_key_yb_x: float,
+    engine_block_key_yb_y: float,
+    engine_block_key_sb_x: float,
+    engine_block_key_sb_y: float,
+    engine_block_key_time: float,
+    canvas_active: Map<int, IVec2>,
+    texture_slot_filled: Map<string, int>,
+    texture_slot_activation: Map<string, int>,
+    unfilled_texture_slot_count: int,
+    image_map: Map<string, Image>,
+}
+
+inline(lua) fn scene_render_try(body: fn() -> ()) -> string? = """
+    local ok, err = xpcall(body, debug.traceback)
+    if ok then return nil end
+    return tostring(err)
+"""
+
+pub fn with_scene_render_scope(view: FrameView, body: fn() -> ()) {
+    let saved0 = scene_render_save0()
+    let saved1 = scene_render_save1()
+    let saved2 = scene_render_save2()
+    let saved_world_pool = world.batches
+    let saved_gizmo_pool = gizmo.batches
+    let saved_shader = WATCHER.current_shader_name
+    // A nested render must keep its caller's snapshots alive until restoration.
+    // Reuse storage by nesting depth rather than allocating every shader block
+    // again for each first-use chunk rendered by the prefetcher.
+    static block_snapshots: [[SceneRenderBlockSaved]] = []
+    static block_depth = 0
+    if block_snapshots.len() == block_depth { block_snapshots.push([]) }
+    let blocks = scene_render_blocks_save(block_snapshots[block_depth])
+    block_depth += 1
+    defer { block_depth -= 1 }
+    let debug_stats = ENGINE.debug_graphics_stats
+    let inspector = ENGINE.show_pipeline_inspector
+    let profiler_enabled = ENGINE.profiler_enabled
+    let white_data: ImageData? = null
+    let white_image: Image? = null
+    let targets: [Canvas] = []
+    let pools: [RenderBatchPool] = []
+    let cleanup_error: string? = null
+    let failure = scene_render_try(() => {
+        RENDER_VIEW = view
+        outline_target_canvas = new_canvas(view.scene_size.x,view.scene_size.y,"r32i")
+        targets.push(outline_target_canvas)
+        screen_canvas = new_canvas_with_depth(view.scene_size.x, view.scene_size.y, "rgba16f")
+        targets.push(screen_canvas)
+        screen_canvas_2 = new_canvas(view.scene_size.x, view.scene_size.y, "rgba16f")
+        targets.push(screen_canvas_2)
+        visible_id_canvas = new_canvas(view.scene_size.x, view.scene_size.y, "r32i")
+        targets.push(visible_id_canvas)
+        mrt_id_attached = stone_canvas_attach_id_target(screen_canvas.handle.0, visible_id_canvas.handle.0)
+        assert(mrt_id_attached, "scene render scope attaches the picking target")
+        world_material_canvas = null
+        world_normal_canvas = null
+        world_surface_owner_canvas = null
+        RENDER_BATCHES = render_batch_pool_new()
+        pools.push(RENDER_BATCHES)
+        OUTLINE_MASK_BATCHES = render_batch_pool_new()
+        pools.push(OUTLINE_MASK_BATCHES)
+        world.batches = RENDER_BATCHES
+        gizmo.batches = RENDER_BATCHES
+        CURRENT_RENDER_POOL = RenderBatchScope {}
+        RENDER_BATCH_SORT_KEYS = []
+        MESH_PENDING = []
+        MESH_FREE = []
+        MESH_IN_FLIGHT = []
+        CANVAS_ACTIVE = map_new()
+        TEXTURE_SLOT_FILLED = map_new()
+        TEXTURE_SLOT_ACTIVATION = map_new()
+        IMAGE_MAP = map_new()
+        WORLD_BATCH_FAST = map_new()
+        BATCH_OCC = map_new()
+        PARAMETRIC_BATCH_CURSOR = map_new()
+        WORLD_PREPARE_PASSES = []
+        SCENE_PASSES = []
+        FRAME_UNIFORM_BLOCKS = []
+        FRAME_UNIFORM_BLOCK_FRAME = -1
+        FRAME_UNIFORM_BLOCK_CURSOR = 0
+        white_data = new_owned_image_data(1,1)
+        image_data_set_pixel(white_data.unwrap(),0,0,1.0,1.0,1.0,1.0)
+        white_image = new_owned_image_from_data(white_data.unwrap(),TextureFilter::Nearest)
+        WHITE_PIXEL = white_image
+        ENGINE.debug_graphics_stats = false
+        ENGINE.show_pipeline_inspector = false
+        ENGINE.profiler_enabled = false
+        body()
+    })
+    {
+        defer {
+            scene_render_restore1(saved1)
+            scene_render_restore0(saved0)
+            world.batches = saved_world_pool
+            gizmo.batches = saved_gizmo_pool
+            // Rebind while marks are private: set_shader clears its activation map.
+            if let shader = saved_shader { set_shader(shader) } else { end_shader() }
+            scene_render_restore2(saved2)
+            ENGINE.debug_graphics_stats = debug_stats
+            ENGINE.show_pipeline_inspector = inspector
+            ENGINE.profiler_enabled = profiler_enabled
+            set_canvas_handle(saved1.current_canvas_handle)
+            set_blend_mode(saved1.current_blend)
+        }
+        cleanup_error = scene_render_try(() => {
+            scene_render_blocks_restore(blocks)
+            for c in [world_surface_owner_canvas, world_normal_canvas, world_material_canvas] {
+                if let target = c { destroy_canvas(target) }
+            }
+            for pool in pools { render_batch_pool_destroy(pool) }
+            for target in targets { destroy_canvas(target) }
+            if let image = white_image { release_owned_image(image) }
+            if let pixels = white_data { release_owned_image_data(pixels) }
+        })
+    }
+    assert(failure == null && cleanup_error == null, "scene render: {failure ?? ""} {cleanup_error ?? ""}")
+}
+
+struct SceneRenderBlockSaved {
+    shader: string,
+    entry: ShaderUniformBlock,
+    bytes: NativeBufferU8,
+    gpu_bytes: NativeBufferU8,
+    uploads: int,
+    engine_stamp: int,
+}
+
+fn scene_render_blocks_save(saved: [SceneRenderBlockSaved] = []) -> [SceneRenderBlockSaved] {
+    let count = 0
+    for (shader, group) in SHADER_UNIFORM_BLOCKS {
+        for entry in group.blocks {
+            if count == saved.len() {
+                saved.push(SceneRenderBlockSaved { shader, entry,
+                    bytes: native_buffer_u8(entry.size),
+                    gpu_bytes: native_buffer_u8(entry.size),
+                    uploads: entry.uploads, engine_stamp: entry.engine_stamp })
+            }
+            let block = saved[count]
+            // Registration can replace or resize blocks between scope entries.
+            block.shader = shader
+            block.entry = entry
+            if block.bytes.len != entry.size {
+                block.bytes = native_buffer_u8(entry.size)
+                block.gpu_bytes = native_buffer_u8(entry.size)
+            }
+            for i in 0..entry.size { block.bytes[i] = entry.scratch[i] }
+            let snapshot_phase = perf_phase_begin("uniform.snapshot")
+            let read = stone_shader_snapshot_uniform_block(get_shader_handle(shader), entry.block, block.gpu_bytes.ptr, entry.size)
+            perf_phase_end(snapshot_phase)
+            assert(read,
+                "scene render scope captures the program uniform bytes")
+            block.uploads = entry.uploads
+            block.engine_stamp = entry.engine_stamp
+            count += 1
+        }
+    }
+    while saved.len() > count { let _ = saved.pop() }
+    return saved
+}
+
+fn scene_render_blocks_restore(saved: [SceneRenderBlockSaved]) {
+    for block in saved {
+        if block.entry.uploads == block.uploads && block.entry.engine_stamp == block.engine_stamp { continue }
+        for i in 0..block.entry.size { block.entry.scratch[i] = block.bytes[i] }
+        assert(stone_shader_upload_uniform_block(get_shader_handle(block.shader),
+            block.gpu_bytes.ptr, block.entry.size, block.entry.fingerprint),
+            "scene render scope restores the program's uniform bytes")
+        block.entry.uploads = block.uploads
+        block.entry.engine_stamp = block.engine_stamp
+    }
+}
+
+fn scene_render_save0() -> SceneRenderSaved0 {
+    return SceneRenderSaved0 {
+        render_view: RENDER_VIEW,
+        outline_target_canvas: outline_target_canvas,
+        screen_canvas: screen_canvas,
+        screen_canvas_2: screen_canvas_2,
+        visible_id_canvas: visible_id_canvas,
+        world_material_canvas: world_material_canvas,
+        world_normal_canvas: world_normal_canvas,
+        world_surface_owner_canvas: world_surface_owner_canvas,
+        mrt_id_attached: mrt_id_attached,
+        render_batches: RENDER_BATCHES,
+        render_batch_sort_keys: RENDER_BATCH_SORT_KEYS,
+        outline_mask_batches: OUTLINE_MASK_BATCHES,
+        mesh_pending: MESH_PENDING,
+        mesh_free: MESH_FREE,
+        mesh_in_flight: MESH_IN_FLIGHT,
+        world_prepare_passes: WORLD_PREPARE_PASSES,
+        scene_passes: SCENE_PASSES,
+        scene_passes_run_last: SCENE_PASSES_RUN_LAST,
+        world_batch_fast: WORLD_BATCH_FAST,
+        batch_occ: BATCH_OCC,
+        parametric_batch_cursor: PARAMETRIC_BATCH_CURSOR,
+        batch_key_builds: BATCH_KEY_BUILDS,
+    }
+}
+
+fn scene_render_restore0(saved0: SceneRenderSaved0) {
+    RENDER_VIEW = saved0.render_view
+    outline_target_canvas = saved0.outline_target_canvas
+    screen_canvas = saved0.screen_canvas
+    screen_canvas_2 = saved0.screen_canvas_2
+    visible_id_canvas = saved0.visible_id_canvas
+    world_material_canvas = saved0.world_material_canvas
+    world_normal_canvas = saved0.world_normal_canvas
+    world_surface_owner_canvas = saved0.world_surface_owner_canvas
+    mrt_id_attached = saved0.mrt_id_attached
+    RENDER_BATCHES = saved0.render_batches
+    RENDER_BATCH_SORT_KEYS = saved0.render_batch_sort_keys
+    OUTLINE_MASK_BATCHES = saved0.outline_mask_batches
+    MESH_PENDING = saved0.mesh_pending
+    MESH_FREE = saved0.mesh_free
+    MESH_IN_FLIGHT = saved0.mesh_in_flight
+    WORLD_PREPARE_PASSES = saved0.world_prepare_passes
+    SCENE_PASSES = saved0.scene_passes
+    SCENE_PASSES_RUN_LAST = saved0.scene_passes_run_last
+    WORLD_BATCH_FAST = saved0.world_batch_fast
+    BATCH_OCC = saved0.batch_occ
+    PARAMETRIC_BATCH_CURSOR = saved0.parametric_batch_cursor
+    BATCH_KEY_BUILDS = saved0.batch_key_builds
+}
+
+fn scene_render_save1() -> SceneRenderSaved1 {
+    return SceneRenderSaved1 {
+        world_batch_key_builds: WORLD_BATCH_KEY_BUILDS,
+        pool_births: POOL_BIRTHS,
+        custom_draw_counter: CUSTOM_DRAW_COUNTER,
+        render_batch_flushes: RENDER_BATCH_FLUSHES,
+        post_scene_batches_pending: POST_SCENE_BATCHES_PENDING,
+        outline_ids_written: outline_ids_written,
+        outline_mask_written: outline_mask_written,
+        outline_mask_bounds_valid: OUTLINE_MASK_BOUNDS_VALID,
+        outline_mask_bounds_min_x: OUTLINE_MASK_BOUNDS_MIN_X,
+        outline_mask_bounds_min_y: OUTLINE_MASK_BOUNDS_MIN_Y,
+        outline_mask_bounds_max_x: OUTLINE_MASK_BOUNDS_MAX_X,
+        outline_mask_bounds_max_y: OUTLINE_MASK_BOUNDS_MAX_Y,
+        frame_uniform_blocks: FRAME_UNIFORM_BLOCKS,
+        frame_uniform_block_frame: FRAME_UNIFORM_BLOCK_FRAME,
+        frame_uniform_block_cursor: FRAME_UNIFORM_BLOCK_CURSOR,
+        current_render_pool: CURRENT_RENDER_POOL,
+        current_canvas_handle: CURRENT_CANVAS_HANDLE,
+        current_blend: CURRENT_BLEND,
+        white_pixel: WHITE_PIXEL,
+    }
+}
+
+fn scene_render_restore1(saved1: SceneRenderSaved1) {
+    WORLD_BATCH_KEY_BUILDS = saved1.world_batch_key_builds
+    POOL_BIRTHS = saved1.pool_births
+    CUSTOM_DRAW_COUNTER = saved1.custom_draw_counter
+    RENDER_BATCH_FLUSHES = saved1.render_batch_flushes
+    POST_SCENE_BATCHES_PENDING = saved1.post_scene_batches_pending
+    outline_ids_written = saved1.outline_ids_written
+    outline_mask_written = saved1.outline_mask_written
+    OUTLINE_MASK_BOUNDS_VALID = saved1.outline_mask_bounds_valid
+    OUTLINE_MASK_BOUNDS_MIN_X = saved1.outline_mask_bounds_min_x
+    OUTLINE_MASK_BOUNDS_MIN_Y = saved1.outline_mask_bounds_min_y
+    OUTLINE_MASK_BOUNDS_MAX_X = saved1.outline_mask_bounds_max_x
+    OUTLINE_MASK_BOUNDS_MAX_Y = saved1.outline_mask_bounds_max_y
+    FRAME_UNIFORM_BLOCKS = saved1.frame_uniform_blocks
+    FRAME_UNIFORM_BLOCK_FRAME = saved1.frame_uniform_block_frame
+    FRAME_UNIFORM_BLOCK_CURSOR = saved1.frame_uniform_block_cursor
+    CURRENT_RENDER_POOL = saved1.current_render_pool
+    WHITE_PIXEL = saved1.white_pixel
+}
+
+fn scene_render_save2() -> SceneRenderSaved2 {
+    return SceneRenderSaved2 {
+        camera_view: CAMERA_VIEW,
+        engine_block_packs: ENGINE_BLOCK_PACKS,
+        engine_block_stamp: ENGINE_BLOCK_STAMP,
+        engine_block_key_valid: ENGINE_BLOCK_KEY_VALID,
+        engine_block_key_w: ENGINE_BLOCK_KEY_W,
+        engine_block_key_h: ENGINE_BLOCK_KEY_H,
+        engine_block_key_present_source: ENGINE_BLOCK_KEY_PRESENT_SOURCE,
+        engine_block_key_yb_x: ENGINE_BLOCK_KEY_YB_X,
+        engine_block_key_yb_y: ENGINE_BLOCK_KEY_YB_Y,
+        engine_block_key_sb_x: ENGINE_BLOCK_KEY_SB_X,
+        engine_block_key_sb_y: ENGINE_BLOCK_KEY_SB_Y,
+        engine_block_key_time: ENGINE_BLOCK_KEY_TIME,
+        canvas_active: CANVAS_ACTIVE,
+        texture_slot_filled: TEXTURE_SLOT_FILLED,
+        texture_slot_activation: TEXTURE_SLOT_ACTIVATION,
+        unfilled_texture_slot_count: UNFILLED_TEXTURE_SLOT_COUNT,
+        image_map: IMAGE_MAP,
+    }
+}
+
+fn scene_render_restore2(saved2: SceneRenderSaved2) {
+    CAMERA_VIEW = saved2.camera_view
+    ENGINE_BLOCK_PACKS = saved2.engine_block_packs
+    ENGINE_BLOCK_STAMP = saved2.engine_block_stamp
+    ENGINE_BLOCK_KEY_VALID = saved2.engine_block_key_valid
+    ENGINE_BLOCK_KEY_W = saved2.engine_block_key_w
+    ENGINE_BLOCK_KEY_H = saved2.engine_block_key_h
+    ENGINE_BLOCK_KEY_PRESENT_SOURCE = saved2.engine_block_key_present_source
+    ENGINE_BLOCK_KEY_YB_X = saved2.engine_block_key_yb_x
+    ENGINE_BLOCK_KEY_YB_Y = saved2.engine_block_key_yb_y
+    ENGINE_BLOCK_KEY_SB_X = saved2.engine_block_key_sb_x
+    ENGINE_BLOCK_KEY_SB_Y = saved2.engine_block_key_sb_y
+    ENGINE_BLOCK_KEY_TIME = saved2.engine_block_key_time
+    CANVAS_ACTIVE = saved2.canvas_active
+    TEXTURE_SLOT_FILLED = saved2.texture_slot_filled
+    TEXTURE_SLOT_ACTIVATION = saved2.texture_slot_activation
+    UNFILLED_TEXTURE_SLOT_COUNT = saved2.unfilled_texture_slot_count
+    IMAGE_MAP = saved2.image_map
+}
+
+fn scene_render_expect_restored0(saved: SceneRenderSaved0) {
+    let actual = scene_render_save0()
+    assert(actual.outline_target_canvas == saved.outline_target_canvas, "scene render restores outline target")
+    assert(actual.render_view == saved.render_view, "scene render restores render_view")
+    assert(actual.screen_canvas == saved.screen_canvas, "scene render restores screen_canvas")
+    assert(actual.screen_canvas_2 == saved.screen_canvas_2, "scene render restores screen_canvas_2")
+    assert(actual.visible_id_canvas == saved.visible_id_canvas, "scene render restores visible_id_canvas")
+    assert(actual.world_material_canvas == saved.world_material_canvas, "scene render restores world_material_canvas")
+    assert(actual.world_normal_canvas == saved.world_normal_canvas, "scene render restores world_normal_canvas")
+    assert(actual.world_surface_owner_canvas == saved.world_surface_owner_canvas, "scene render restores world_surface_owner_canvas")
+    assert(actual.mrt_id_attached == saved.mrt_id_attached, "scene render restores mrt_id_attached")
+    assert(actual.render_batches == saved.render_batches, "scene render restores render_batches")
+    assert(actual.render_batch_sort_keys == saved.render_batch_sort_keys, "scene render restores render_batch_sort_keys")
+    assert(actual.outline_mask_batches == saved.outline_mask_batches, "scene render restores outline_mask_batches")
+    assert(actual.mesh_pending == saved.mesh_pending, "scene render restores mesh_pending")
+    assert(actual.mesh_free == saved.mesh_free, "scene render restores mesh_free")
+    assert(actual.mesh_in_flight == saved.mesh_in_flight, "scene render restores mesh_in_flight")
+    assert(actual.world_prepare_passes == saved.world_prepare_passes, "scene render restores world_prepare_passes")
+    assert(actual.scene_passes == saved.scene_passes, "scene render restores scene_passes")
+    assert(actual.scene_passes_run_last == saved.scene_passes_run_last, "scene render restores scene_passes_run_last")
+    assert(actual.world_batch_fast == saved.world_batch_fast, "scene render restores world_batch_fast")
+    assert(actual.batch_occ == saved.batch_occ, "scene render restores batch_occ")
+    assert(actual.parametric_batch_cursor == saved.parametric_batch_cursor, "scene render restores parametric_batch_cursor")
+    assert(actual.batch_key_builds == saved.batch_key_builds, "scene render restores batch_key_builds")
+}
+
+fn scene_render_expect_restored1(saved: SceneRenderSaved1) {
+    let actual = scene_render_save1()
+    assert(actual.world_batch_key_builds == saved.world_batch_key_builds, "scene render restores world_batch_key_builds")
+    assert(actual.pool_births == saved.pool_births, "scene render restores pool_births")
+    assert(actual.custom_draw_counter == saved.custom_draw_counter, "scene render restores custom_draw_counter")
+    assert(actual.render_batch_flushes == saved.render_batch_flushes, "scene render restores render_batch_flushes")
+    assert(actual.post_scene_batches_pending == saved.post_scene_batches_pending, "scene render restores post_scene_batches_pending")
+    assert(actual.outline_ids_written == saved.outline_ids_written, "scene render restores outline_ids_written")
+    assert(actual.outline_mask_written == saved.outline_mask_written, "scene render restores outline_mask_written")
+    assert(actual.outline_mask_bounds_valid == saved.outline_mask_bounds_valid, "scene render restores outline_mask_bounds_valid")
+    assert(actual.outline_mask_bounds_min_x == saved.outline_mask_bounds_min_x, "scene render restores outline_mask_bounds_min_x")
+    assert(actual.outline_mask_bounds_min_y == saved.outline_mask_bounds_min_y, "scene render restores outline_mask_bounds_min_y")
+    assert(actual.outline_mask_bounds_max_x == saved.outline_mask_bounds_max_x, "scene render restores outline_mask_bounds_max_x")
+    assert(actual.outline_mask_bounds_max_y == saved.outline_mask_bounds_max_y, "scene render restores outline_mask_bounds_max_y")
+    assert(actual.frame_uniform_blocks == saved.frame_uniform_blocks, "scene render restores frame_uniform_blocks")
+    assert(actual.frame_uniform_block_frame == saved.frame_uniform_block_frame, "scene render restores frame_uniform_block_frame")
+    assert(actual.frame_uniform_block_cursor == saved.frame_uniform_block_cursor, "scene render restores frame_uniform_block_cursor")
+    assert(actual.current_render_pool == saved.current_render_pool, "scene render restores current_render_pool")
+    assert(actual.current_canvas_handle == saved.current_canvas_handle, "scene render restores current_canvas_handle")
+    assert(actual.current_blend == saved.current_blend, "scene render restores current_blend")
+    assert(actual.white_pixel == saved.white_pixel, "scene render restores white_pixel")
+}
+
+fn scene_render_expect_restored2(saved: SceneRenderSaved2) {
+    let actual = scene_render_save2()
+    assert(actual.camera_view == saved.camera_view, "scene render restores camera_view")
+    assert(actual.engine_block_packs == saved.engine_block_packs, "scene render restores engine_block_packs")
+    assert(actual.engine_block_stamp == saved.engine_block_stamp, "scene render restores engine_block_stamp")
+    assert(actual.engine_block_key_valid == saved.engine_block_key_valid, "scene render restores engine_block_key_valid")
+    assert(actual.engine_block_key_w == saved.engine_block_key_w, "scene render restores engine_block_key_w")
+    assert(actual.engine_block_key_h == saved.engine_block_key_h, "scene render restores engine_block_key_h")
+    assert(actual.engine_block_key_present_source == saved.engine_block_key_present_source, "scene render restores engine_block_key_present_source")
+    assert(actual.engine_block_key_yb_x == saved.engine_block_key_yb_x, "scene render restores engine_block_key_yb_x")
+    assert(actual.engine_block_key_yb_y == saved.engine_block_key_yb_y, "scene render restores engine_block_key_yb_y")
+    assert(actual.engine_block_key_sb_x == saved.engine_block_key_sb_x, "scene render restores engine_block_key_sb_x")
+    assert(actual.engine_block_key_sb_y == saved.engine_block_key_sb_y, "scene render restores engine_block_key_sb_y")
+    assert(actual.engine_block_key_time == saved.engine_block_key_time, "scene render restores engine_block_key_time")
+    assert(actual.canvas_active == saved.canvas_active, "scene render restores canvas_active")
+    assert(actual.texture_slot_filled == saved.texture_slot_filled, "scene render restores texture_slot_filled")
+    assert(actual.texture_slot_activation == saved.texture_slot_activation, "scene render restores texture_slot_activation")
+    assert(actual.unfilled_texture_slot_count == saved.unfilled_texture_slot_count, "scene render restores unfilled_texture_slot_count")
+    assert(actual.image_map == saved.image_map, "scene render restores image_map")
+}
+
+fn scene_render_expect_blocks_restored(saved: [SceneRenderBlockSaved]) {
+    for block in saved {
+        assert(block.entry.uploads == block.uploads, "scene scope preserves block upload count")
+        assert(block.entry.engine_stamp == block.engine_stamp, "scene scope preserves block stamp")
+        let gpu = native_buffer_u8(block.entry.size)
+        assert(stone_shader_read_uniform_block(get_shader_handle(block.shader),block.entry.block,gpu.ptr,block.entry.size),
+            "scene scope reads restored GPU bytes")
+        for i in 0..block.entry.size {
+            assert(block.entry.scratch[i] == block.bytes[i], "scene scope preserves scratch bytes")
+            assert(gpu[i] == block.gpu_bytes[i], "scene scope preserves GPU bytes")
+        }
+    }
+}
+
+fn scene_render_scope_restore_case(fail: bool) {
+    setup_stone()
+    assert(stone_gpu_host_ensure(), "scene scope acquires the shared GPU host")
+    assert(stone_text_init())
+    load_pending_shader_sources()
+    let font = load_font(project_asset_path("@engine/assets/fonts/DroidSans.ttf"), 24,
+        raster: FontRasterPolicy::Fixed).unwrap()
+    defer { unload_font(font) }
+    let prior_camera = CAMERA_VIEW
+    let prior_inspector = ENGINE.show_pipeline_inspector
+    let prior_profiler = ENGINE.profiler_enabled
+    let prior_shader = WATCHER.current_shader_name
+    let prior_activations = TEXTURE_SLOT_ACTIVATION
+    let failure = scene_render_try(() => {
+        set_camera(v(13.0,17.0),3.0)
+        ENGINE.show_pipeline_inspector = true
+        ENGINE.profiler_enabled = true
+        TEXTURE_SLOT_ACTIVATION = map_new()
+        set_shader(BLIT_PIPELINE.shader_name)
+        mark_texture_slot_activation(BLIT_PIPELINE.shader_name,0)
+        let activation = TEXTURE_SLOT_ACTIVATION.get(BLIT_PIPELINE.shader_name) ?? 0
+        let shader = WATCHER.current_shader_name
+        let saved0 = scene_render_save0()
+        let saved1 = scene_render_save1()
+        let saved2 = scene_render_save2()
+        let blocks = scene_render_blocks_save()
+        let inspector = ENGINE.show_pipeline_inspector
+        let profiler = ENGINE.profiler_enabled
+        let pass_log = PIPELINE_PASS_LOG
+        let pass_count = pass_log.len()
+        let arenas = arena_live_count()
+        let canvases = stone_get_graphics_stats().canvases
+        let view = resolve_frame_view(v(64,64),iv(64,64),Camera2D {},RENDER_CONFIG).unwrap()
+        let body_error = scene_render_try(() => {
+            with_scene_render_scope(view, () => {
+                let _ = ensure_world_surface_owner_canvas()
+                set_canvas(screen_canvas)
+                set_camera(v(7.0,9.0),2.0)
+                set_engine_uniforms(sprite_batch_shader,v(0.0,1.0))
+                let text_uploads = shader_block_uploads(text_shader, 2)
+                stone_draw_text_for(DrawSpace::Target, font.data().unwrap().backend_id,
+                    "scope", 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 1.0)
+                stone_draw_text_ex_for(DrawSpace::Target, font.data().unwrap().backend_id,
+                    "scope", 0.0, 24.0, 1.0, 1.0, 0.0, 1.0, 0.0, 1.0, 18.0)
+                assert(shader_block_uploads(text_shader, 2) > text_uploads,
+                    "immediate native text goes through tracked block uploads")
+                queue_scene_pass(Pass { pipeline: BLIT_PIPELINE,
+                    slot_inputs: [(sampled_canvas(screen_canvas_2),TextureFilter::Nearest)],
+                    output: screen_canvas, blend: BlendMode::Replace })
+                run_scene_passes()
+                if fail { assert(false, "intentional scene scope failure") }
+            })
+        })
+        if fail {
+            assert(body_error != null && body_error.unwrap().contains("intentional scene scope failure"),
+                "the scope rethrows the intentional failure after restoration")
+        } else { assert(body_error == null, body_error ?? "") }
+        scene_render_expect_restored0(saved0)
+        scene_render_expect_restored1(saved1)
+        scene_render_expect_restored2(saved2)
+        scene_render_expect_blocks_restored(blocks)
+        assert_eq(TEXTURE_SLOT_ACTIVATION.get(BLIT_PIPELINE.shader_name) ?? 0,activation,
+            "scene scope preserves the caller's texture activation marks")
+        assert(WATCHER.current_shader_name == shader, "scene scope preserves the caller's active shader")
+        assert(ENGINE.show_pipeline_inspector == inspector, "scene scope preserves inspector enablement")
+        assert(ENGINE.profiler_enabled == profiler, "scene scope preserves profiler enablement")
+        assert(PIPELINE_PASS_LOG == pass_log && PIPELINE_PASS_LOG.len() == pass_count,
+            "scene scope does not mutate the live inspector capture")
+        assert(arena_live_count() == arenas, "scene render retires its owned pools")
+        assert(stone_get_graphics_stats().canvases == canvases, "scene render retires its owned targets")
+    })
+    CAMERA_VIEW = prior_camera
+    ENGINE.show_pipeline_inspector = prior_inspector
+    ENGINE.profiler_enabled = prior_profiler
+    if let shader = prior_shader { set_shader(shader) } else { end_shader() }
+    TEXTURE_SLOT_ACTIVATION = prior_activations
+    assert(failure == null,failure ?? "")
+}
+
+@test
+fn scene_render_scope_restores_after_completed_body() { scene_render_scope_restore_case(false) }
+@test
+fn scene_render_scope_restores_after_failed_body() { scene_render_scope_restore_case(true) }

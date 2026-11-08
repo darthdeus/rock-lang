@@ -1,0 +1,92 @@
+// ACES tonemap + bloom composite: HDR scene + blurred bloom -> LDR.
+//
+// Compiled in-game via `rock_shader(tonemap_frag)` (single-arg fullscreen
+// form); `scene_tex`, `bloom_tex`, `exposure` are the
+// Pass binding names (TONEMAP_PIPELINE).
+
+pub value TonemapU {
+    exposure: float,
+    // Scales the bloom contribution only; 0 makes bloom_tex genuinely
+    // ignored, which is what the no-bloom path binds.
+    bloom_intensity: float,
+    // TexCoord addresses scene_tex's active rectangle; bloom_tex's active
+    // fraction of ITS capacity differs by the pyramid's rounding, so the
+    // executor hands over the ratio rather than letting this derive UVs from
+    // either backing texture size.
+    bloom_uv: Vec2,
+    // ...and equal fractions still do not map centre to centre, because the
+    // two textures have different texel sizes: at the last output pixel the
+    // scaled coordinate lands PAST bloom_tex's last active texel centre, and
+    // a linear tap there blends in the stale margin. Clamp into the active
+    // texel-centre box.
+    bloom_uv_lo: Vec2,
+    bloom_uv_hi: Vec2,
+}
+
+pub @pure fn aces_film(x: Vec3) -> Vec3 {
+    let a = 2.51
+    let b = 0.03
+    let c = 2.43
+    let d = 0.59
+    let e = 0.14
+
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0)
+}
+
+// Field order IS the slot: scene_tex 0, bloom_tex 1.
+struct TonemapTex {
+    scene_tex: Sampler2D,
+    bloom_tex: Sampler2D,
+}
+
+@shader(fragment)
+fn tonemap_frag(@textures t: TonemapTex, @uniform u: TonemapU, tc: Vec2) -> Vec4 {
+    let scene_pixel = texture(t.scene_tex, tc)
+    // scene_tex and bloom_tex are the same orientation: canvas->canvas hops
+    // preserve content (identity fullscreen quad), so the bloom chain leaves
+    // its result aligned with the raw scene.
+    let bloom_pixel = texture(t.bloom_tex, clamp(tc * u.bloom_uv, u.bloom_uv_lo, u.bloom_uv_hi))
+
+    let combined = scene_pixel.rgb + bloom_pixel.rgb * u.bloom_intensity
+
+    combined *= u.exposure
+
+    combined = aces_film(combined)
+
+    return v(combined, scene_pixel.a)
+}
+
+// The per-pixel variant: `weight_tex` (red) mixes a second exposure in, in
+// stops, so a game can expose two regions of one frame for their own light.
+// Bound only while the game supplies a weight (ENGINE.exposure_weight); a
+// frame without one runs tonemap_frag unchanged.
+pub value TonemapSplitU {
+    exposure: float,
+    bloom_intensity: float,
+    bloom_uv: Vec2,
+    bloom_uv_lo: Vec2,
+    bloom_uv_hi: Vec2,
+    // log2 of the weighted exposure over `exposure`.
+    weighted_stops: float,
+    // The weight's active fraction and texel-centre clamp, as for bloom_tex.
+    weight_uv: Vec2,
+    weight_uv_lo: Vec2,
+    weight_uv_hi: Vec2,
+}
+
+struct TonemapSplitTex {
+    scene_tex: Sampler2D,
+    bloom_tex: Sampler2D,
+    weight_tex: Sampler2D,
+}
+
+@shader(fragment)
+fn tonemap_split_frag(@textures t: TonemapSplitTex, @uniform u: TonemapSplitU, tc: Vec2) -> Vec4 {
+    let scene_pixel = texture(t.scene_tex, tc)
+    let bloom_pixel = texture(t.bloom_tex, clamp(tc * u.bloom_uv, u.bloom_uv_lo, u.bloom_uv_hi))
+    let weight = texture(t.weight_tex, clamp(tc * u.weight_uv, u.weight_uv_lo, u.weight_uv_hi)).r
+    let combined = scene_pixel.rgb + bloom_pixel.rgb * u.bloom_intensity
+    combined *= u.exposure * pow(2.0, weight * u.weighted_stops)
+    combined = aces_film(combined)
+    return v(combined, scene_pixel.a)
+}
