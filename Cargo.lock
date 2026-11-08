@@ -170,6 +170,7 @@ dependencies = [
  "itertools",
  "nonmax",
  "rayon",
+ "rock-core",
  "rust-lapper",
  "rustc-hash",
  "skull-parser",
@@ -1942,6 +1943,7 @@ dependencies = [
 name = "rock-stdlib"
 version = "0.1.0"
 dependencies = [
+ "rock-core",
  "tempfile",
 ]
 

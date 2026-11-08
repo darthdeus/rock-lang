@@ -208,13 +208,12 @@ pub fn stdlib_source(name: &str) -> &'static str {
         .contents
 }
 
-/// The source-file id the loaders give stdlib file `name`. Bone reads the
-/// compiler-owned `std` package and the std-only primitives from this
-/// spelling (`bone_core::modules::is_stdlib_module_file`), so every host that
-/// feeds bone the stdlib -- the CLI and the editor alike -- keys it this way.
-pub fn stdlib_file_id(name: &str) -> String {
-    format!("<stdlib>/{name}")
-}
+/// Stdlib source identity: the loaders key every stdlib file by
+/// [`stdlib_file_id`], and bone reads the compiler-owned `std` package and the
+/// std-only primitives back through [`is_stdlib_module_file`]. Defined in
+/// `rock-core` so the semantic crates share it without depending on the
+/// embedded stdlib sources.
+pub use rock_core::{is_stdlib_module_file, stdlib_file_id, stdlib_file_name};
 
 /// The stdlib compiled into the binary: what [`stdlib_files`] serves when no
 /// rung resolves on disk. `display_path` names no real file; on wasm it is

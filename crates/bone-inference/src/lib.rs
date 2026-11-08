@@ -449,9 +449,8 @@ pub fn check_function(
         .annotations
         .iter()
         .find(|annotation| annotation.is_builtin("frame_ref_source"));
-    let file = module.file.as_str();
-    let is_arena_stdlib = bone_core::modules::is_stdlib_module_file(file)
-        && (file.ends_with("/arena.rock") || file.ends_with(":arena.rock>"));
+    let is_arena_stdlib =
+        bone_core::modules::stdlib_file_name(module.file.as_str()) == Some("arena.rock");
     if let Some(annotation) = frame_ref_source
         && !is_arena_stdlib
     {

@@ -34,13 +34,12 @@ fn files(list: &[(&str, &str)]) -> Files {
         .collect()
 }
 
-/// True if `mid` is a warm stdlib module. Stdlib files are stamped
-/// `<bone-stdlib:NAME>`; with an opaque id, stdlib-ness is read off the
-/// module's file, not the id.
+/// True if `mid` is a warm stdlib module. With an opaque id, stdlib-ness is
+/// read off the module's file, not the id.
 fn is_stdlib_mid(ws: &Workspace, mid: ModuleId) -> bool {
     ws.modules
         .get(mid.index())
-        .is_some_and(|m| m.file.as_str().starts_with("<bone-stdlib:"))
+        .is_some_and(|m| rock_stdlib::is_stdlib_module_file(m.file.as_str()))
 }
 
 fn parse_files(files: &Files) -> Result<Vec<skull_parser::Ast>, CompilerError> {
@@ -1886,7 +1885,7 @@ fn stdlib_warm_modules() -> Vec<skull_parser::Ast> {
     rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
-            let file = Ustr::from(format!("<bone-stdlib:{}>", f.name).as_str());
+            let file = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
             skull_parser::parse_module_clean(f.contents, file)
                 .unwrap_or_else(|e| panic!("stdlib {} must parse: {e:?}", f.name))
         })

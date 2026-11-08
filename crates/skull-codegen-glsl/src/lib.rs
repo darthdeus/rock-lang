@@ -6455,7 +6455,7 @@ mod assertion_flip_tests {
         let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
-                let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
                 skull_parser::parse_module(f.contents, id).expect("stdlib parse")
             })
             .collect();
@@ -7153,7 +7153,7 @@ mod value_test_shader {
         let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
-                let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
                 skull_parser::parse_module(f.contents, id).expect("stdlib parse")
             })
             .collect();

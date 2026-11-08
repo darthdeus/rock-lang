@@ -12,7 +12,7 @@ use bone_core::identity_storage::{
 pub use bone_core::identity_storage::{
     IdentityNode, IdentityPosition, IdentityStorageViolation, IdentityTypes, identity_violation_in,
 };
-use bone_core::modules::is_stdlib_module_file;
+use bone_core::modules::stdlib_file_name;
 use bone_core::suspension::{SuspensionPolicy, uses_after_suspension};
 use bone_core::workspace::BodyInference;
 
@@ -469,9 +469,9 @@ fn used_binding(body: &Body, at: Idx<Expr>) -> Option<Idx<BindingInfo>> {
 }
 
 fn is_stdlib_file_named(module: &Module, stem: &str) -> bool {
-    let file = module.file.as_str();
-    is_stdlib_module_file(file)
-        && (file.ends_with(&format!("/{stem}.rock")) || file.ends_with(&format!(":{stem}.rock>")))
+    stdlib_file_name(module.file.as_str())
+        .and_then(|name| name.strip_suffix(".rock"))
+        .is_some_and(|name| name == stem)
 }
 
 /// The stdlib arena file: the one module that implements the privileged row

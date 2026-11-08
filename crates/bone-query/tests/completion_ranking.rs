@@ -1369,6 +1369,38 @@ fn tests_dir_symbols_rank_normally_inside_test_files() {
     );
 }
 
+#[test]
+fn project_dir_named_stdlib_keeps_project_proximity() {
+    // Stdlib ownership comes from the loader's source id, not from a `stdlib`
+    // path component: a project's own `stdlib/` directory is project code.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"sp\"\n").unwrap();
+    std::fs::create_dir(dir.path().join("stdlib")).unwrap();
+    std::fs::write(
+        dir.path().join("main.rock"),
+        "fn game() {\n  aaa_h\n  ab\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("stdlib").join("helpers.rock"),
+        "fn aaa_helper() {}\n",
+    )
+    .unwrap();
+    let main = bone_query::canonicalize_lenient(&dir.path().join("main.rock").to_string_lossy());
+    let mut bone = BoneWorkspace::new();
+    bone.update(&main, std::fs::read_to_string(&main).unwrap());
+    let prox = |bone: &mut BoneWorkspace, pos: Position, label: &str| {
+        let items = bone.completion(&main, pos);
+        let it = items
+            .iter()
+            .find(|c| c.label == label)
+            .unwrap_or_else(|| panic!("no completion `{label}`"));
+        it.sort_text.as_deref().expect("sort_text").as_bytes()[PROX_DIGIT] as char
+    };
+    assert_eq!(prox(&mut bone, Position::new(1, 7), "aaa_helper"), '1');
+    assert_eq!(prox(&mut bone, Position::new(2, 4), "abs"), '3');
+}
+
 // -- Priors: proximity + scope recency (late tiebreak, post-fine) ------------
 
 /// sort_text digit at `idx` (0-based) for `label` at the cursor.

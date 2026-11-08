@@ -192,7 +192,7 @@ fn compile_cache_source_fingerprint_support_sha256(
     for file in files {
         let contents: Cow<'_, [u8]> = if let Some(name) = file
             .strip_prefix("stdlib/")
-            .or_else(|| file.strip_prefix("<stdlib>/"))
+            .or_else(|| rock_stdlib::stdlib_file_name(file))
         {
             let stdlib_file = rock_stdlib::stdlib_files()
                 .iter()

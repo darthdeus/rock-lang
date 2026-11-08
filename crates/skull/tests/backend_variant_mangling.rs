@@ -30,7 +30,7 @@ fn return_only_overloads_in_separate_modules_are_rejected() {
         .map(|label| label.span.file.as_str())
         .collect();
     assert!(
-        files.contains(&"<test>") && files.contains(&"<stdlib:probe>"),
+        files.contains(&"<test>") && files.contains(&rock_stdlib::stdlib_file_id("probe").as_str()),
         "{files:?}"
     );
 }

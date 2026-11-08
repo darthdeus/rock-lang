@@ -396,9 +396,8 @@ pub(crate) fn resolve_checked_inputs(
         ws,
         &mut inputs,
         |file| {
-            if let Some(name) = file
-                .strip_prefix("<stdlib>/")
-                .or_else(|| file.strip_prefix("stdlib/"))
+            if let Some(name) =
+                rock_stdlib::stdlib_file_name(file).or_else(|| file.strip_prefix("stdlib/"))
             {
                 return rock_stdlib::stdlib_files()
                     .iter()

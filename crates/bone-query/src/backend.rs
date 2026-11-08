@@ -2173,7 +2173,7 @@ impl BoneWorkspace {
                 let f = def_file.as_str();
                 if f == path {
                     0
-                } else if f.starts_with('<') || f.split(['/', '\\']).any(|s| s == "stdlib") {
+                } else if rock_stdlib::is_stdlib_module_file(f) || f.starts_with('<') {
                     3
                 } else if f.starts_with(&root) {
                     1
@@ -5470,7 +5470,7 @@ pub(crate) fn user_module_for_path(ws: &Workspace, path: &str) -> Option<ModuleI
         for m in ws
             .modules
             .iter()
-            .filter(|m| !m.file.as_str().contains("stdlib"))
+            .filter(|m| !rock_stdlib::is_stdlib_module_file(m.file.as_str()))
         {
             eprintln!("[lsp-debug]   have non-stdlib module file={:?}", m.file);
         }

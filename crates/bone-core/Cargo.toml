@@ -21,6 +21,7 @@ itertools = { workspace = true }
 nonmax = { workspace = true }
 
 skull-parser = { path = "../skull-parser" }
+rock-core = { workspace = true }
 
 [lints]
 workspace = true

@@ -146,7 +146,7 @@ fn every_js_entry_is_backed_by_a_declared_intrinsic() {
     let modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
-            let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+            let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
             skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
         })
         .collect();

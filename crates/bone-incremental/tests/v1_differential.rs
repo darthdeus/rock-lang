@@ -55,13 +55,19 @@ fn legacy(path: &str, text: &str) -> SessionFile {
 /// is the `std` package and its names are the v1 prelude (tier 5). Every gate
 /// builds with it so a count would show a rebuild that re-inferred the warm
 /// modules.
-const WARM_PATH: &str = "<bone-stdlib:epoch_warm>";
+fn warm_path() -> String {
+    rock_stdlib::stdlib_file_id("epoch_warm")
+}
 const WARM: &str = "fn warm_one() -> int {\n    1\n}\n\nfn warm_two() -> int {\n    2\n}\n";
 
 fn warm() -> Vec<Ast> {
     vec![
-        skull_parser::parse_module_with_dialect(WARM, Ustr::from(WARM_PATH), Dialect::Legacy)
-            .expect("warm parses"),
+        skull_parser::parse_module_with_dialect(
+            WARM,
+            Ustr::from(warm_path().as_str()),
+            Dialect::Legacy,
+        )
+        .expect("warm parses"),
     ]
 }
 
@@ -995,7 +1001,7 @@ fn a_legacy_definition_of_a_std_name_added_leaves_the_v1_call_on_std() {
         .map(|r| r.4)
         .collect();
     assert!(
-        selected.iter().all(|s| s.starts_with(WARM_PATH)),
+        selected.iter().all(|s| s.starts_with(&warm_path())),
         "{selected:?}"
     );
 }
@@ -1599,7 +1605,7 @@ fn a_user_type_named_like_a_warm_type_builds_like_a_fresh_build() {
         vec![
             skull_parser::parse_module_with_dialect(
                 warm_text,
-                Ustr::from("<bone-stdlib:collide_warm>"),
+                Ustr::from(rock_stdlib::stdlib_file_id("collide_warm").as_str()),
                 Dialect::Legacy,
             )
             .expect("warm parses"),

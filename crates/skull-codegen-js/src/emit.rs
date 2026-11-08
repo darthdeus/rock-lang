@@ -8366,7 +8366,7 @@ mod tests {
         let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
             .iter()
             .map(|file| {
-                let id = Ustr::from(format!("<stdlib:{}>", file.name).as_str());
+                let id = Ustr::from(rock_stdlib::stdlib_file_id(file.name).as_str());
                 skull_parser::parse_module_clean(file.contents, id).expect("stdlib parse")
             })
             .collect();

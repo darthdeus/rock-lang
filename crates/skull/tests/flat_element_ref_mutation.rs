@@ -64,7 +64,7 @@ fn emit_past_relocatable_ref_rule(source: &str) -> String {
         .map(|file| {
             skull_parser::parse_module_clean(
                 file.contents,
-                ustr::Ustr::from(format!("<stdlib:{}>", file.name).as_str()),
+                ustr::Ustr::from(rock_stdlib::stdlib_file_id(file.name).as_str()),
             )
             .expect("stdlib parse")
         })

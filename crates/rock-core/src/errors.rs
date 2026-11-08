@@ -230,7 +230,7 @@ pub fn render_all(errs: &[CompilerError], sources: &SourceFiles) -> String {
             .any(|source| source.borrow().file.to_id_path() == error.location.file.as_str())
     };
     let frameless = |error: &CompilerError| {
-        error.location.file.as_str().contains("<stdlib>") && !has_source(error)
+        crate::is_stdlib_module_file(error.location.file.as_str()) && !has_source(error)
     };
 
     let (unframed, framed): (Vec<&CompilerError>, Vec<&CompilerError>) =

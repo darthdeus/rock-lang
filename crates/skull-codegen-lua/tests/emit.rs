@@ -639,7 +639,7 @@ fn emit_clean_with(src: &str, fn_name: &str, configure: impl FnOnce(&mut Codegen
         rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
-                let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
                 skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
             })
             .collect()
@@ -690,7 +690,7 @@ fn run(src: &str, driver: &str) -> String {
         rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
-                let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
                 skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
             })
             .collect()
@@ -864,7 +864,7 @@ fn emit_std(src: &str, fn_name: &str) -> String {
         rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
-                let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
                 skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
             })
             .collect()
@@ -1544,7 +1544,7 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
         rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
-                let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
                 skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
             })
             .collect()
@@ -2011,7 +2011,7 @@ fn emit_clean_bound_checked(
         rock_stdlib::stdlib_files()
             .iter()
             .map(|f| {
-                let id = ustr::Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+                let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
                 skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
             })
             .collect()

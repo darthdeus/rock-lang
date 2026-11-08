@@ -7,7 +7,7 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
-            let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
             skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
         })
         .collect()
@@ -22,7 +22,7 @@ static STDLIB_NOBOX_VEC2: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .iter()
         .map(|f| {
             let src = f.contents.replace("\nvalue Vec2 {", "\nnobox value Vec2 {");
-            let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
             skull_parser::parse_module_clean(&src, id).expect("stdlib parse")
         })
         .collect()

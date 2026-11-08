@@ -11,7 +11,7 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .map(|f| {
             skull_parser::parse_module_clean(
                 f.contents,
-                Ustr::from(format!("<stdlib:{}>", f.name).as_str()),
+                Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str()),
             )
             .expect("stdlib parse")
         })

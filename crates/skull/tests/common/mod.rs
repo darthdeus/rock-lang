@@ -11,7 +11,7 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
     rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
-            let id = Ustr::from(format!("<stdlib:{}>", f.name).as_str());
+            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
             skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
         })
         .collect()
@@ -446,7 +446,11 @@ pub fn try_emit_with_stdlib_module(
 ) -> Result<String, skull_parser::CompilerError> {
     let mut modules = STDLIB.clone();
     modules.push(
-        skull_parser::parse_module_clean(lib, Ustr::from("<stdlib:probe>")).expect("parse lib"),
+        skull_parser::parse_module_clean(
+            lib,
+            Ustr::from(rock_stdlib::stdlib_file_id("probe").as_str()),
+        )
+        .expect("parse lib"),
     );
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
@@ -461,7 +465,11 @@ pub fn try_emit_with_stdlib_module(
 pub fn ws_with_stdlib_module(lib: &str, src: &str) -> Workspace {
     let mut modules = STDLIB.clone();
     modules.push(
-        skull_parser::parse_module_clean(lib, Ustr::from("<stdlib:probe>")).expect("parse lib"),
+        skull_parser::parse_module_clean(
+            lib,
+            Ustr::from(rock_stdlib::stdlib_file_id("probe").as_str()),
+        )
+        .expect("parse lib"),
     );
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");

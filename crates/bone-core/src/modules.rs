@@ -23,13 +23,9 @@ pub const STD_PACKAGE_NAME: &str = "std";
 /// Their canonical keys are the bare spellings, just like legacy definitions.
 pub const STD_INTRINSIC_TYPES: &[&str] = &["FieldRef", "ReadFieldRef", "WriteFieldRef"];
 
-/// Whether a source file id uses an established stdlib file-id spelling.
-/// The loader owns these ids; do not infer stdlib ownership from linked files.
-pub fn is_stdlib_module_file(file: &str) -> bool {
-    file.starts_with("<bone-stdlib:")
-        || file.starts_with("<stdlib:")
-        || file.starts_with("<stdlib>/")
-}
+/// Stdlib ownership is read from the loader's source-file id, never inferred
+/// from linked files or path components.
+pub use rock_core::{is_stdlib_module_file, stdlib_file_name};
 
 /// Intrinsic recognition is keyed by the canonical DefKey, not by a path's
 /// display tail. A v1 definition such as `other::FieldRef` therefore cannot
