@@ -384,16 +384,8 @@ fn exact_body_edit_has_no_full_concrete_or_artifact_rebuild() {
         "body-only route scanned all owners: {stats:?}"
     );
     assert_eq!(
-        stats.broad_concrete_scans, 0,
-        "body-only route scanned all concrete entries: {stats:?}"
-    );
-    assert_eq!(
         stats.artifact_scalar_context_builds, 0,
         "artifact repair rebuilt the maintained scalar context: {stats:?}"
-    );
-    assert_eq!(
-        stats.broad_artifact_scans, 0,
-        "body-only route scanned all artifact chunks: {stats:?}"
     );
     assert_eq!(
         stats.broad_candidate_scans, 0,
@@ -640,6 +632,73 @@ fn removing_the_last_edge_retracts_concrete_and_artifact_entries_locally() {
         incremental.lua, fresh.lua,
         "local removal diverged from fresh emission"
     );
+}
+
+/// The retained fast paths of a body edit (the root cache, the invalidated
+/// candidate keys, the cached fingerprint rows) against their full-scan
+/// equivalents. One edit sequence -- an inlined callee's body, a generic
+/// instance removed, another added -- runs through a default cache and a
+/// `set_full_scans` cache. Both must produce the same incremental Lua as a
+/// fresh emit, and the same overlay and artifact fingerprint as each other.
+#[test]
+fn full_scans_agree_with_the_retained_fast_paths_over_an_edit_sequence() {
+    let v0 = "@inline\nfn helper() -> int { 3 }\n\
+              fn leaf<T>(x: T) -> T { x }\n\
+              fn use_it() -> int { let a = leaf(1)\n helper() }\n\
+              fn main() { let x = use_it() }";
+    let steps = [
+        (v0.replace("{ 3 }", "{ 5 }"), "helper"),
+        (
+            v0.replace("{ 3 }", "{ 5 }")
+                .replace("let a = leaf(1)\n ", ""),
+            "use_it",
+        ),
+        (
+            v0.replace("{ 3 }", "{ 5 }")
+                .replace("let a = leaf(1)", "let a = leaf(\"s\")"),
+            "use_it",
+        ),
+        (v0.replace("leaf(1)", "leaf(\"s\")"), "helper"),
+    ];
+    let ws0 = ws_of(v0);
+    let mid = skull::user_module_id(&ws0).unwrap();
+    let cache = |full_scans: bool| {
+        let (_, mut cache) = emit_full(&ws0, mid).expect("emit_full v0");
+        cache.set_full_scans(full_scans);
+        cache
+    };
+    let (mut incremental_fast, mut incremental_full) = (cache(false), cache(true));
+    let (mut overlay_fast, mut overlay_full) = (cache(false), cache(true));
+    for (step, (src, edited)) in steps.iter().enumerate() {
+        let ws = ws_of(src);
+        let reinferred = [body_id(&ws, edited)];
+        let fast = emit_incremental(&ws, &mut incremental_fast, &reinferred).expect("fast");
+        let full = emit_incremental(&ws, &mut incremental_full, &reinferred).expect("full scans");
+        let fresh = emit_full(&ws, skull::user_module_id(&ws).unwrap())
+            .expect("fresh")
+            .0;
+        assert_eq!(fast.lua, fresh.lua, "step {step}: fast path != fresh");
+        assert_eq!(full.lua, fresh.lua, "step {step}: full scans != fresh");
+        assert_eq!(
+            fast.artifact_fingerprint, full.artifact_fingerprint,
+            "step {step}: incremental fingerprints differ"
+        );
+        let (fast_stats, full_stats) = (
+            incremental_fast.repair_stats(),
+            incremental_full.repair_stats(),
+        );
+        assert!(
+            fast_stats.root_functions_examined == 0 && full_stats.root_functions_examined > 0,
+            "step {step}: only the full-scan cache enumerates roots: {fast_stats:?} {full_stats:?}"
+        );
+        let fast = emit_overlay(&ws, &mut overlay_fast, &reinferred);
+        let full = emit_overlay(&ws, &mut overlay_full, &reinferred);
+        assert_eq!(fast.lua, full.lua, "step {step}: overlays differ");
+        assert_eq!(
+            fast.artifact_fingerprint, full.artifact_fingerprint,
+            "step {step}: overlay fingerprints differ"
+        );
+    }
 }
 
 #[test]

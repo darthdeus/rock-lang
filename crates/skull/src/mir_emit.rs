@@ -3015,6 +3015,8 @@ pub struct SkullEmitCache {
     selected_sim_functions: Option<FxHashSet<Ustr>>,
     repair_stats: IncrementalRepairStats,
     body_edit_rollback: Option<BodyEditRollback>,
+    /// See [`SkullEmitCache::set_full_scans`].
+    full_scans: bool,
 }
 
 /// Structural work performed by the last body-only cache update. The counters
@@ -3037,8 +3039,6 @@ pub struct IncrementalRepairStats {
     pub artifact_chunks_removed: usize,
     pub full_artifact_view_realizations: usize,
     pub broad_owner_scans: usize,
-    pub broad_concrete_scans: usize,
-    pub broad_artifact_scans: usize,
     pub broad_candidate_scans: usize,
     pub root_requests: usize,
     pub root_modules_examined: usize,
@@ -7344,6 +7344,7 @@ fn emit_full_in_with_mutation(
         selected_sim_functions,
         repair_stats: IncrementalRepairStats::default(),
         body_edit_rollback: None,
+        full_scans: false,
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let graph_census = cache.graph.run_stats;
@@ -7453,6 +7454,17 @@ impl SkullEmitCache {
 
     pub fn repair_stats(&self) -> IncrementalRepairStats {
         self.repair_stats
+    }
+
+    /// Route later body edits through the full-scan equivalents of the
+    /// retained fast paths: the root set is re-enumerated from every module
+    /// instead of read from the root cache, the inline candidate table is
+    /// rebuilt from every candidate key instead of the invalidated ones, and an
+    /// overlay's artifact fingerprint is recomputed from scratch and must match
+    /// the cached one. Off by default; tests turn it on to check that both
+    /// routes produce the same output.
+    pub fn set_full_scans(&mut self, on: bool) {
+        self.full_scans = on;
     }
 
     pub fn begin_body_edit_transaction(
@@ -8061,6 +8073,7 @@ impl SkullEmitCache {
         let shader_roots_changed = previous_shader_roots != current_shader_roots;
         let mut root_added = Vec::new();
         let mut root_removed = Vec::new();
+        let roots_before = cache.full_scans.then(|| cache.roots.roots.clone());
         if shader_roots_changed {
             let mut current_roots = cache.roots.roots.clone();
             for root in previous_shader_roots
@@ -8092,7 +8105,7 @@ impl SkullEmitCache {
         cache.roots.shader_roots = current_shader_roots;
         // The full root enumerator remains an oracle for tests and verification;
         // the body route consumes the retained root cache above.
-        let forced_roots = if std::env::var_os("SKULL_FORCE_ROOT_SCAN").is_some() {
+        let forced_roots = if let Some(previous_roots) = roots_before {
             let mut census = RootEnumerationCensus::default();
             let roots = all_roots_with_census(
                 ws,
@@ -8103,7 +8116,6 @@ impl SkullEmitCache {
             cache.repair_stats.root_functions_examined = census.functions_examined;
             cache.repair_stats.root_modules_examined = census.modules_examined;
             cache.repair_stats.root_reseeds = census.roots_reseeded;
-            let previous_roots = cache.roots.roots.clone();
             root_added = roots
                 .iter()
                 .filter(|root| !previous_roots.contains(root))
@@ -8157,7 +8169,6 @@ impl SkullEmitCache {
         cache.repair_stats.full_concrete_rebuilds = crate::concrete_body::build_invocations()
             .saturating_sub(concrete_builds_before)
             as usize;
-        cache.repair_stats.broad_concrete_scans = concrete_update.broad_scans;
         cache.repair_stats.concrete_update_ns = t_concrete.elapsed().as_nanos() as u64;
         let _graph_ms = Duration::from_nanos(
             cache.repair_stats.graph_update_ns
@@ -8180,19 +8191,6 @@ impl SkullEmitCache {
             .saturating_add(update.added.len())
             .saturating_add(update.removed.len());
         let artifact_realize_before = crate::artifact::realize_invocations();
-        if std::env::var_os("SKULL_FORCE_ARTIFACT_REALIZE").is_some() {
-            let _ = crate::artifact::realize(
-                ws,
-                &cache.graph,
-                &crate::artifact::ArtifactRequest::new(
-                    crate::target_projection::LUAJIT_DESKTOP,
-                    forced_roots
-                        .as_deref()
-                        .unwrap_or(cache.roots.roots.as_slice()),
-                )
-                .with_scalar_context(&cache.scx),
-            );
-        }
         let artifact_update = cache.lua_view.update_local_with_root_delta(
             ws,
             &cache.graph,
@@ -8220,7 +8218,6 @@ impl SkullEmitCache {
             crate::artifact::realize_invocations().saturating_sub(artifact_realize_before) as usize;
         cache.repair_stats.full_artifact_view_realizations =
             cache.repair_stats.artifact_realize_invocations;
-        cache.repair_stats.broad_artifact_scans = artifact_update.broad_scans;
         cache.repair_stats.artifact_update_ns = t_artifact.elapsed().as_nanos() as u64;
 
         let scx = &cache.scx;
@@ -8277,7 +8274,7 @@ impl SkullEmitCache {
         let warm_keys: Vec<Instance> = warm_keys.into_iter().collect();
         let t_candidate = Instant::now();
         let previous_candidate_table = cache.inline_cache.candidate_table();
-        let force_candidate_scan = std::env::var_os("SKULL_FORCE_CANDIDATE_SCAN").is_some();
+        let force_candidate_scan = cache.full_scans;
         let mut candidate_census = CandidateBuildStats::default();
         let candidate_table = build_inline_candidate_table_with_census(
             ws,
@@ -8899,7 +8896,7 @@ fn assemble_overlay(
     .map_err(|error| {
         CompilerError::new_no_location(format!("Artifact fingerprint generation failed: {error}"))
     })?;
-    if std::env::var_os("SKULL_FORCE_FINGERPRINT_SCAN").is_some() {
+    if cache.full_scans {
         let fresh = self::artifact_fingerprint(
             ws,
             &cache.scx,

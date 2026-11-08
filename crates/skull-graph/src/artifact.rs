@@ -673,10 +673,6 @@ pub struct ArtifactUpdateStats {
     /// Rows traversed in the connected reverse indexes while retracting and
     /// reinstalling local publications, inline dependencies, and findings.
     pub local_index_rows_examined: usize,
-    /// Whole-output scans performed by a local update. The ordinary delta path
-    /// keeps this at zero; a nonzero value is a structural finding, not a
-    /// timing claim.
-    pub broad_scans: usize,
     pub scalar_context_builds: usize,
 }
 
@@ -725,19 +721,6 @@ fn publication_candidates(ws: &Workspace, req: &ArtifactRequest<'_>) -> BTreeMap
 }
 
 impl ArtifactView {
-    fn forced_broad_scan_count(&self) -> usize {
-        if std::env::var_os("SKULL_FORCE_ARTIFACT_BROAD_SCAN").is_none() {
-            return 0;
-        }
-        self.realization.keys().count()
-            + self
-                .index
-                .publication_users
-                .values()
-                .map(BTreeSet::len)
-                .sum::<usize>()
-    }
-
     /// Apply graph deltas to this target without re-realizing the workspace.
     /// The retained view owns the indexes needed to retract an old owner and
     /// install its replacement; unchanged owners keep their immutable output.
@@ -817,7 +800,6 @@ impl ArtifactView {
         root_added: &BTreeSet<DeclKey>,
         root_removed: &BTreeSet<DeclKey>,
     ) -> ArtifactUpdateStats {
-        let broad_scans = self.forced_broad_scan_count();
         let mut local_index_rows_examined = 0;
         let mut root_subjects = BTreeSet::new();
         for decl in root_added.iter().chain(root_removed) {
@@ -849,7 +831,6 @@ impl ArtifactView {
                 iterations: 0,
                 root_entries_examined: 0,
                 local_index_rows_examined,
-                broad_scans,
                 scalar_context_builds: 0,
             };
         }
@@ -1014,7 +995,6 @@ impl ArtifactView {
                 iterations: subjects.len() + local_index_rows_examined,
                 root_entries_examined,
                 local_index_rows_examined,
-                broad_scans,
                 scalar_context_builds: 0,
             };
         }
@@ -1165,7 +1145,6 @@ impl ArtifactView {
             iterations: dirty.len() + reachable_dirty.len() + local_index_rows_examined,
             root_entries_examined,
             local_index_rows_examined,
-            broad_scans,
             scalar_context_builds: usize::from(scalar_context.get().is_some()),
         }
     }

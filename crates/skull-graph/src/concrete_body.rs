@@ -399,7 +399,6 @@ pub struct ConcreteUpdateStats {
     pub derived: usize,
     pub reused: usize,
     pub retracted: usize,
-    pub broad_scans: usize,
     pub candidate_keys_added: BTreeSet<Instance>,
     pub candidate_keys_removed: BTreeSet<Instance>,
 }
@@ -525,13 +524,6 @@ impl ConcreteBodies {
             .min_by(|(left, _), (right, _)| concrete_owner_order(left, right))
     }
 
-    fn forced_broad_scan_count(&self) -> usize {
-        if std::env::var_os("SKULL_FORCE_CONCRETE_BROAD_SCAN").is_none() {
-            return 0;
-        }
-        self.instance_facts.keys().count() + self.always_facts.keys().count()
-    }
-
     pub fn update_local(
         &mut self,
         ws: &Workspace,
@@ -553,7 +545,6 @@ impl ConcreteBodies {
         edits: &[SpanEdit],
     ) -> ConcreteUpdateStats {
         self.shift_fact_spans(edits);
-        let broad_scans = self.forced_broad_scan_count();
         let before = self.instance_facts.len() + self.always_facts.len();
         let mut instance_subjects = revisited.clone();
         instance_subjects.extend(removed.iter().cloned());
@@ -691,7 +682,6 @@ impl ConcreteBodies {
             before,
             candidate_keys_added,
             candidate_keys_removed,
-            broad_scans,
         }
     }
 
