@@ -97,8 +97,12 @@ impl<'a> Printer<'a> {
 
     pub fn module(&self) -> Doc {
         // The `mod a::b;` file header (v1) prints first, verbatim: it has no
-        // internal layout decisions.
-        let header = self.ast.module_header.as_ref().map(|h| self.raw(h.span));
+        // internal layout decisions. Its span ends before the `;`.
+        let header = self
+            .ast
+            .module_header
+            .as_ref()
+            .map(|h| Doc::concat([self.raw(h.span), Doc::text(";")]));
         // Render every item, then preserve hand-aligned runs of adjacent items
         // verbatim (sfx.rock's aligned `global` declarations) before assembling.
         let item_spans: Vec<Span> = self.ast.items.iter().map(|it| it.span).collect();

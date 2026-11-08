@@ -72,6 +72,22 @@ fn modules_v1_forms_roundtrip() {
     }
 }
 
+/// The v1 `mod a::b;` file header keeps its `;` and is followed by one
+/// blank line.
+#[test]
+fn v1_file_header_keeps_its_semicolon() {
+    let cfg = skull_fmt::FormatConfig::default();
+    for src in [
+        "mod main;\n\nuse super::helpers::shout;\n\nfn main() {\n    print(shout(\"hi\"))\n}\n",
+        "pub mod a::b;\n\n// lead\nfn f() {\n    g()\n}\n",
+        "private mod secret;\n\npub fn f() {\n    g()\n}\n",
+    ] {
+        let once = skull_fmt::try_format_with_dialect(src, &cfg, Dialect::V1)
+            .unwrap_or_else(|e| panic!("format failed for {src:?}: {e}"));
+        assert_eq!(once, src);
+    }
+}
+
 /// A visibility ahead of an item's annotations survives formatting.
 #[test]
 fn v1_visibility_on_an_annotated_item_is_kept() {
