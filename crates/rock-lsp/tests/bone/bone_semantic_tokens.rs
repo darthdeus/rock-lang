@@ -136,3 +136,38 @@ fn struct_name_decodes_as_struct() {
         "`Pt` must decode as STRUCT under the advertised legend"
     );
 }
+
+/// A delta must reproduce the new array when applied the way a client does,
+/// when the edit changes the number of lines and tokens.
+#[test]
+fn delta_edits_apply_across_a_multi_line_edit() {
+    use rock_lsp::semantic_tokens::semantic_tokens_delta_edits;
+
+    let before = "fn f() {\n    /* a\n       b */\n    let x = 1\n    print(x)\n}\n";
+    let after = "fn f() {\n    let inserted = 2\n    /* a\n    b\n    c */\n    let x = 1\n\n    print(x + inserted)\n}\n";
+    for (old, new) in [
+        (tokens(before), tokens(after)),
+        (tokens(after), tokens(before)),
+    ] {
+        let flatten = |toks: &[SemanticToken]| -> Vec<u32> {
+            toks.iter()
+                .flat_map(|t| {
+                    [
+                        t.delta_line,
+                        t.delta_start,
+                        t.length,
+                        t.token_type,
+                        t.token_modifiers_bitset,
+                    ]
+                })
+                .collect()
+        };
+        let mut applied = flatten(&old);
+        for edit in semantic_tokens_delta_edits(&old, &new).into_iter().rev() {
+            let start = edit.start as usize;
+            let inserted = flatten(&edit.data.unwrap_or_default());
+            applied.splice(start..start + edit.delete_count as usize, inserted);
+        }
+        assert_eq!(applied, flatten(&new));
+    }
+}

@@ -2501,19 +2501,6 @@ impl BoneWorkspace {
                 .map(|t| &t.kind)
                 .find(|k| !matches!(k, rock_tokenizer::TokenKind::Comment(_)));
 
-            // Range request: emit only tokens whose start is inside the viewport.
-            if let Some((lo, hi)) = range {
-                let off = tok.span.offset_range.0;
-                if off < lo || off >= hi {
-                    continue;
-                }
-            }
-
-            // LSP tokens are single-line; skip a token that spans lines (block
-            // comment / multi-line string).
-            if tok.span.line_range.0 != tok.span.line_range.1 {
-                continue;
-            }
             let Some((token_type, token_modifiers_bitset)) = classify_token(
                 &tok.kind,
                 next_kind,
@@ -2535,60 +2522,67 @@ impl BoneWorkspace {
                 }
                 _ => token_type,
             };
-            let line = tok.span.line_range.0 as u32;
-            let start = tok.span.col_range.0 as u32;
-            let length = tok.span.col_range.1.saturating_sub(tok.span.col_range.0) as u32;
-            if length == 0 {
-                continue;
-            }
-            // An interpolated string splits into literal segments (STRING,
-            // incl. the braces) and hole expressions colored as what they are
-            // (the hole's root classification from the offset map; the token
-            // is single-line here, so char-based `col_range` math is safe).
-            let mut pieces: Vec<(u32, u32, u32, u32)> = Vec::new();
-            if token_type == TT_STRING {
-                let (ts, te) = tok.span.offset_range;
-                let mut cur = start;
-                for h in hir
-                    .interp_holes
-                    .iter()
-                    .filter(|h| h.offset_range.0 >= ts && h.offset_range.1 <= te)
-                {
-                    let (hs, he) = (h.col_range.0 as u32, h.col_range.1 as u32);
-                    if hs > cur {
-                        pieces.push((cur, hs - cur, TT_STRING, 0));
+            for segment in token_line_segments(src, tok) {
+                // Range request: emit only pieces starting inside the viewport.
+                if let Some((lo, hi)) = range {
+                    if segment.lo < lo || segment.lo >= hi {
+                        continue;
                     }
-                    let (tt, mods) = hir
-                        .by_offset
-                        .get(&h.offset_range.0)
-                        .copied()
-                        .unwrap_or((TT_VARIABLE, 0));
-                    pieces.push((hs, he - hs, tt, mods));
-                    cur = he;
                 }
-                if !pieces.is_empty() && start + length > cur {
-                    pieces.push((cur, start + length - cur, TT_STRING, 0));
+                let SingleLine {
+                    line,
+                    start,
+                    length,
+                    lo: ts,
+                    hi: te,
+                } = segment;
+                // An interpolated string splits into literal segments (STRING,
+                // incl. the braces) and hole expressions colored as what they
+                // are (the hole's root classification from the offset map).
+                let mut pieces: Vec<(u32, u32, u32, u32)> = Vec::new();
+                if token_type == TT_STRING {
+                    let mut cur = start;
+                    for h in hir
+                        .interp_holes
+                        .iter()
+                        .filter(|h| h.offset_range.0 >= ts && h.offset_range.1 <= te)
+                    {
+                        let (hs, he) = (h.col_range.0 as u32, h.col_range.1 as u32);
+                        if hs > cur {
+                            pieces.push((cur, hs - cur, TT_STRING, 0));
+                        }
+                        let (tt, mods) = hir
+                            .by_offset
+                            .get(&h.offset_range.0)
+                            .copied()
+                            .unwrap_or((TT_VARIABLE, 0));
+                        pieces.push((hs, he - hs, tt, mods));
+                        cur = he;
+                    }
+                    if !pieces.is_empty() && start + length > cur {
+                        pieces.push((cur, start + length - cur, TT_STRING, 0));
+                    }
                 }
-            }
-            if pieces.is_empty() {
-                pieces.push((start, length, token_type, token_modifiers_bitset));
-            }
-            for (col, len, tt, mods) in pieces {
-                let delta_line = line.saturating_sub(prev_line);
-                let delta_start = if delta_line == 0 {
-                    col.saturating_sub(prev_start)
-                } else {
-                    col
-                };
-                data.push(SemanticToken {
-                    delta_line,
-                    delta_start,
-                    length: len,
-                    token_type: tt,
-                    token_modifiers_bitset: mods,
-                });
-                prev_line = line;
-                prev_start = col;
+                if pieces.is_empty() {
+                    pieces.push((start, length, token_type, token_modifiers_bitset));
+                }
+                for (col, len, tt, mods) in pieces {
+                    let delta_line = line.saturating_sub(prev_line);
+                    let delta_start = if delta_line == 0 {
+                        col.saturating_sub(prev_start)
+                    } else {
+                        col
+                    };
+                    data.push(SemanticToken {
+                        delta_line,
+                        delta_start,
+                        length: len,
+                        token_type: tt,
+                        token_modifiers_bitset: mods,
+                    });
+                    prev_line = line;
+                    prev_start = col;
+                }
             }
         }
         SemanticTokens {
@@ -2601,6 +2595,57 @@ impl BoneWorkspace {
 /// Token-type legend: the index of each [`SemanticTokenType`] is the
 /// `token_type` value emitted by [`BoneWorkspace::semantic_tokens`]. A server
 /// advertises this in its `SemanticTokensLegend`.
+/// One line of a token: LSP semantic tokens cannot span lines.
+struct SingleLine {
+    line: u32,
+    start: u32,
+    length: u32,
+    lo: usize,
+    hi: usize,
+}
+
+/// The non-empty pieces of `tok`, one per source line it covers. Columns and
+/// lengths count scalar values, as `col_range` does.
+fn token_line_segments(src: &str, tok: &rock_tokenizer::Token) -> Vec<SingleLine> {
+    let (first_line, last_line) = tok.span.line_range;
+    let (lo, hi) = tok.span.offset_range;
+    if first_line == last_line {
+        let (start, end) = tok.span.col_range;
+        return vec![SingleLine {
+            line: first_line as u32,
+            start: start as u32,
+            length: end.saturating_sub(start) as u32,
+            lo,
+            hi,
+        }]
+        .into_iter()
+        .filter(|s| s.length > 0)
+        .collect();
+    }
+    let mut offset = lo;
+    src[lo..hi]
+        .split_inclusive('\n')
+        .enumerate()
+        .filter_map(|(i, raw)| {
+            let lo = offset;
+            offset += raw.len();
+            let text = raw.trim_end_matches('\n').trim_end_matches('\r');
+            let length = text.chars().count() as u32;
+            (length > 0).then_some(SingleLine {
+                line: (first_line + i) as u32,
+                start: if i == 0 {
+                    tok.span.col_range.0 as u32
+                } else {
+                    0
+                },
+                length,
+                lo,
+                hi: lo + text.len(),
+            })
+        })
+        .collect()
+}
+
 pub fn semantic_tokens_legend() -> Vec<SemanticTokenType> {
     vec![
         SemanticTokenType::KEYWORD,        // 0
