@@ -1409,14 +1409,18 @@ fn write_fixture_project(test: &LspTest) -> Result<(PathBuf, PathBuf)> {
         .chars()
         .map(|c| if c == ' ' || c == '/' { '_' } else { c })
         .collect();
+    // Fixture names repeat across files and fixtures run in parallel, so the
+    // directory carries the process and a counter; the file keeps the name.
+    static NEXT_PROJECT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT_PROJECT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let proj = test_dir.join(format!("{safe_name}-{}-{n}", std::process::id()));
+    fs_err::create_dir_all(&proj)?;
 
     // Multi-file tests get their own subdirectory containing `stick.toml` plus
     // every `FILE:` entry. The primary file (the one with the cursor marker)
     // is the path passed to the rock-lsp CLI. `project.toml` in the spec is
     // translated to `stick.toml` since that's Rock's real project manifest.
     if !test.files.is_empty() {
-        let proj = test_dir.join(&safe_name);
-        fs_err::create_dir_all(&proj)?;
         for (name, content) in &test.files {
             // Skip user-supplied manifests — we write our own below so the
             // format matches what rock-lsp's stick.toml parser expects.
@@ -1445,8 +1449,6 @@ fn write_fixture_project(test: &LspTest) -> Result<(PathBuf, PathBuf)> {
         // otherwise pick up sibling fixtures' symbols and race against their
         // parallel create/delete. Isolating per test makes the project bound
         // to exactly this file.
-        let proj = test_dir.join(&safe_name);
-        fs_err::create_dir_all(&proj)?;
         fs_err::write(
             proj.join("stick.toml"),
             "[package]\nname = \"lsp_test\"\nversion = \"0.1.0\"\n",
@@ -4024,6 +4026,22 @@ fn main() {\n\
             let message = parse_error_of(&fixture);
             assert!(message.contains("expected `TEST:`"), "{header}: {message}");
         }
+    }
+
+    /// Fixtures run in parallel and their names repeat across files, so two
+    /// runs of the same fixture must not share a project directory.
+    #[test]
+    fn fixtures_with_the_same_name_get_separate_project_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.rock.lsp");
+        std::fs::write(&path, HOVER_FIXTURE).unwrap();
+        let test = parse_lsp_test_file(&path).unwrap().remove(0);
+        let (file_a, proj_a) = write_fixture_project(&test).unwrap();
+        let (file_b, proj_b) = write_fixture_project(&test).unwrap();
+        let _ = std::fs::remove_dir_all(&proj_a);
+        let _ = std::fs::remove_dir_all(&proj_b);
+        assert_ne!(proj_a, proj_b);
+        assert_eq!(file_a.file_name(), file_b.file_name());
     }
 
     /// Prose notes before and between blocks are documentation, not fixtures.
