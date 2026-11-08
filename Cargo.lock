@@ -2524,7 +2524,6 @@ version = "0.1.0"
 name = "stone-rs"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "arboard",
  "bytemuck",
  "fontdue",
@@ -2542,7 +2541,6 @@ dependencies = [
  "once_cell",
  "rayon",
  "rock-log",
- "rock-visual-bank",
  "rodio",
  "sdl2",
  "serde_json",
