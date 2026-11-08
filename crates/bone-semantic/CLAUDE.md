@@ -76,7 +76,8 @@ guarding the reader can't un-dangle a child index that's already wrong.
 bone's `Failed to unify ...` / `index out of bounds` errors often carry no span,
 and `semantic_pass` is fail-fast, so the failing fn isn't named. Locate it by
 stubbing Rock-bodied fns to `inline(lua)` (bone skips inline bodies; signatures
-stay so callers still resolve), then probing via `BONE_STDLIB_PROBE`: (1) stub
+stay so callers still resolve) in a copy of `stdlib/`, then probing by running
+`rock check` on a trivial file with `ROCK_STDLIB_DIR` pointing at the copy: (1) stub
 ALL Rock fns -> if clean, the bug is in one; (2) **stub-all-EXCEPT-each-fn** and
 flag the ones that reproduce -- this finds ALL culprits. Do NOT
 binary-search-by-stubbing: it assumes a single culprit and silently

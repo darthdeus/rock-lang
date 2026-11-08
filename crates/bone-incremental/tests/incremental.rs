@@ -2848,7 +2848,7 @@ fn f(p: P) -> int {{
 // leak-prone shape (nominal-typed signatures across several fns). The cheap
 // `body_edit_does_not_grow_module_ty_arena` is the always-on version.
 #[test]
-#[ignore]
+#[ignore = "stress test: 100k edits take minutes; run with --ignored"]
 fn stress_100k_edits_arena_flat() {
     let v = |b: &str| {
         format!(

@@ -167,28 +167,6 @@ fn legacy_only_workspace_keeps_the_std_namespace() {
     assert!(ws.fragment_scopes.is_empty());
 }
 
-/// Measurement harness, not a guard: runs `unified.rock` (or the file in
-/// `BONE_STDLIB_PROBE`) through `semantic_pass` and panics with the first
-/// strict-lowering wall. Run with `--ignored` to see the next stdlib gap.
-#[test]
-#[ignore]
-fn probe_stdlib_first_wall() {
-    let bundled = rock_stdlib::stdlib_source("unified.rock");
-    let owned = std::env::var("BONE_STDLIB_PROBE")
-        .ok()
-        .map(|p| std::fs::read_to_string(p).expect("read BONE_STDLIB_PROBE"));
-    let src: &str = owned.as_deref().unwrap_or(bundled);
-    let srcs: &[(&str, &str)] = &[("unified.rock", src)];
-    let module = parse_rock(src).expect_pretty("parse_rock", srcs);
-    match semantic_pass(&mut [module]) {
-        Ok(_) => println!("PROBE: stdlib loaded clean"),
-        Err(e) => panic!(
-            "PROBE first wall:\n{}",
-            bone_semantic::test_support::render_err(srcs, &e)
-        ),
-    }
-}
-
 // `+` is declared inline so the add tests need no stdlib.
 const INT_ADD: &str = "@pure @inline operator(lua) +(a: int, b: int) -> int = \"return a + b\"\n";
 

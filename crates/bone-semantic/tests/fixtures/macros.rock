@@ -8,7 +8,7 @@
 //!
 //! Bodies here stay self-contained (comparisons / blocks / lets only) so they
 //! typecheck without stdlib. Real stdlib macros (assert_eq, log_*) reference
-//! `error`/`tostring`/`+` and are covered by the probe_stdlib_first_wall harness.
+//! `error`/`tostring`/`+` and are covered by every compile that loads the stdlib.
 
 // Single-arg macro, body is one expression. `pos(n)` -> `n > 0`.
 //- macro_single_arg
