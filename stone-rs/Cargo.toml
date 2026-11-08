@@ -9,8 +9,6 @@ repository.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-anyhow = { workspace = true }
-rock-visual-bank = { workspace = true }
 libc = "0.2"
 fs-err = { workspace = true }
 once_cell = { workspace = true }

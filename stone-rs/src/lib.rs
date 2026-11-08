@@ -351,7 +351,6 @@ mod telemetry;
 mod text;
 mod ui_submission_probe;
 mod uniform_block;
-mod visual_bank;
 pub mod window_placement;
 pub mod window_report;
 #[cfg(target_os = "macos")]

@@ -32,8 +32,6 @@ pub @nomangle inline(lua) fn stone_native_library_path() -> string = """
 pub @nomangle inline(lua) fn stone_native_load() = """
     if not _G.__stone_native_ffi_defined then
         ffi.cdef[[
-        const char* stone_visual_bank_decode(const uint8_t* data, size_t len);
-        const char* stone_visual_geometry_decode(const uint8_t* data, size_t len, uint32_t width, uint32_t height, uint32_t cell_width, uint32_t cell_height, uint32_t frames, uint32_t directions);
         uint8_t stone_actor_query_rect(const int* records, int64_t len, const int* candidates, int64_t candidate_len, int min_x, int min_y, int max_x, int max_y, uint8_t include_uninstalled, int* output, int64_t output_len);
         double stone_terrain_noise(double x, double y);
         double stone_terrain_random(double x, double y, double stream, double seed);
@@ -153,16 +151,6 @@ pub inline(lua) fn meadow_snapshot_get(buffer: NativeBufferU8, index: int) -> fl
 pub extern(ffi, "stone") fn stone_terrain_noise(x: float, y: float) -> float
 pub extern(ffi, "stone") fn stone_terrain_random(x: float, y: float, stream: float, seed: float) -> float
 pub extern(ffi, "stone") fn stone_terrain_field(a: float, b: float, c: float, d: float, e: float, f: float, g: float, h: float, i: float, x: float, y: float, wx: float, wy: float, noisy: int) -> float
-
-// Native validation returns JSON for conversion through the public JSON reader.
-pub inline(lua) fn native_visual_bank_decode(raw: string) -> string = """
-    return ffi.string(stone.stone_visual_bank_decode(raw, #raw))
-"""
-
-pub inline(lua) fn native_visual_geometry_decode(raw: string, width: int, height: int,
-    cell_width: int, cell_height: int, frames: int, directions: int) -> string = """
-    return ffi.string(stone.stone_visual_geometry_decode(raw, #raw, width, height, cell_width, cell_height, frames, directions))
-"""
 
 // A process-local wire namespace; copied state retains its existing value.
 pub inline(lua) fn native_identity_new() -> int = """

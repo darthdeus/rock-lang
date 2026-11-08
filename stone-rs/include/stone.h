@@ -12,12 +12,6 @@ extern "C" {
 
 #include "stone_ui_submission_probe.h"
 
-/* Copy the reply before issuing another native query on this thread. */
-const char* stone_visual_bank_decode(const uint8_t* data, size_t len);
-const char* stone_visual_geometry_decode(const uint8_t* data, size_t len,
-    uint32_t width, uint32_t height, uint32_t cell_width, uint32_t cell_height,
-    uint32_t frames, uint32_t directions);
-
 typedef struct StoneWindow StoneWindow;
 
 typedef enum StoneEventType {
