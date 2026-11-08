@@ -1,0 +1,93 @@
+// A frame over the stall threshold names its sections from the per-frame
+// section history, by the frame number the perf record carries.
+fn perf_stall_sections_frame(update_s: float, child_s: float, render_s: float) {
+    profile_frame_begin()
+    profile_begin("stall.update")
+    let update = PROF_CUR.count - 1
+    profile_begin("stall.update.child")
+    let child = PROF_CUR.count - 1
+    profile_end("stall.update.child")
+    profile_end("stall.update")
+    profile_begin("stall.render")
+    let render = PROF_CUR.count - 1
+    profile_end("stall.render")
+    nb_set(PROF_CUR.start_t, update, 1.0)
+    nb_set(PROF_CUR.end_t, update, 1.0 + update_s)
+    nb_set(PROF_CUR.start_t, child, 1.001)
+    nb_set(PROF_CUR.end_t, child, 1.001 + child_s)
+    nb_set(PROF_CUR.start_t, render, 2.0)
+    nb_set(PROF_CUR.end_t, render, 2.0 + render_s)
+    profile_frame_end()
+}
+
+fn perf_stall_sections_report() -> JsonValue {
+    let report = json_decode(profiler_perf_json()).unwrap()
+    return json_field(report, "stall_sections") ?? json_null()
+}
+
+@nomangle
+fn perf_stall_sections_entry(_which: int) {
+    PERF_FRAME_CAPTURE = true
+    PERF_SECTION_HISTORY = false
+    init_profiler()
+    ENGINE.profiler_enabled = true
+    PROFILER_SECTIONS_OFF = 0
+    GC_WIN_N = 0
+    assert(json_is_null(perf_stall_sections_report()), "no section history, no stall sections")
+
+    PERF_SECTION_HISTORY = true
+    init_profiler()
+    ENGINE.profiler_enabled = true
+    PROFILER_SECTIONS_OFF = 0
+    GC_WIN_N = 0
+    HITCH = hitch_ledger_new()
+    PERF_RECORDS = perf_records_new()
+    perf_scenario_wait("synthetic")
+    perf_scenario_window("fighting", 1, 3)
+    perf_scenario_ready("synthetic")
+    // Frame 10 is the single warmup frame; its stall must not be exported.
+    perf_outer_frame_boundary(10, 0.0)
+    perf_stall_sections_frame(0.040, 0.030, 0.001)
+    assert(!PROFILER.warmup_active, "the declared warmup frame completed")
+    perf_outer_frame_boundary(11, 0.100)
+    perf_stall_sections_frame(0.002, 0.001, 0.001)
+    perf_outer_frame_boundary(12, 0.116)
+    perf_stall_sections_frame(0.030, 0.025, 0.003)
+    perf_outer_frame_boundary(13, 0.156)
+    perf_stall_sections_frame(0.002, 0.001, 0.001)
+    perf_outer_frame_boundary(14, 0.172)
+    assert_eq(PERF_RECORDS.count, 3, "three measured frames were recorded")
+    assert_eq(SECTION_HISTORY_FIRST_FRAME, 11, "history sample 0 is the first measured frame")
+
+    let stalls = perf_stall_sections_report()
+    assert(!json_is_null(stalls), "section history exports stall sections")
+    assert_eq(json_as_float(json_field(stalls, "threshold_ms").unwrap()).unwrap(), 33.0)
+    assert_eq(json_as_bool(json_field(stalls, "complete").unwrap()).unwrap(), true)
+    let rows = json_as_array(json_field(stalls, "rows").unwrap()).unwrap()
+    assert_eq(rows.len(), 1, "only the 40 ms frame is a stall: {json_encode(stalls)}")
+    let row = rows[0]
+    assert_eq(json_as_int(json_field(row, "frame").unwrap()).unwrap(), 12)
+    assert(abs(json_as_float(json_field(row, "frame_ms").unwrap()).unwrap() - 40.0) < 0.001)
+    let sections = json_as_array(json_field(row, "sections").unwrap()).unwrap()
+    assert_eq(sections.len(), 3, "every timed section of the frame is listed: {json_encode(row)}")
+    let names: [string] = []
+    for section in sections { names.push(json_as_str(json_field(section, "name").unwrap()).unwrap()) }
+    assert_eq(names.join(","), "stall.update,stall.update.child,stall.render", "sections sort by inclusive ms")
+    assert(abs(json_as_float(json_field(sections[0], "ms").unwrap()).unwrap() - 30.0) < 0.001)
+    assert(abs(json_as_float(json_field(sections[1], "ms").unwrap()).unwrap() - 25.0) < 0.001)
+    assert_eq(json_as_int(json_field(sections[0], "depth").unwrap()).unwrap(), 0)
+    assert_eq(json_as_int(json_field(sections[1], "depth").unwrap()).unwrap(), 1)
+
+    // A record whose frame has no history sample cannot name sections.
+    SECTION_HISTORY_FIRST_FRAME = 13
+    let misaligned = perf_stall_sections_report()
+    assert_eq(json_as_bool(json_field(misaligned, "complete").unwrap()).unwrap(), false)
+    let misaligned_row = json_as_array(json_field(misaligned, "rows").unwrap()).unwrap()[0]
+    assert(json_is_null(json_field(misaligned_row, "sections") ?? json_null()),
+        "a frame outside the history window exports null sections")
+}
+
+@test
+fn perf_stall_frames_name_their_sections() {
+    profiler_test_process("perf_stall_sections_entry", 0)
+}
