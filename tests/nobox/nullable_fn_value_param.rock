@@ -69,6 +69,10 @@ fn apply_or(f: ((Vec2) -> Vec2)?, p: Vec2) -> float {
     return 1.0, 2.0
 """
 
+@scalar_abi inline(js) fn mk_v() -> Vec2 = """
+    return __rock_publish(1.0, 2.0);
+"""
+
 @test fn scalar_abi_body_through_a_nullable_fn_value() {
     assert_eq(call_or(mk_v, -1.0), 1.0)
     assert_eq(call_or(null, -1.0), -1.0)

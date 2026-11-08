@@ -647,6 +647,9 @@ struct ArtifactIndex {
     site_counts: FxHashMap<Instance, usize>,
     fn_values_by_caller: FxHashMap<Instance, FxHashSet<Instance>>,
     fn_value_users: FxHashMap<Instance, FxHashSet<Instance>>,
+    /// Realizable instances an always-emitted body takes as a value. They have
+    /// no caller instance, so `fn_value_users` cannot hold them.
+    always_fn_values: FxHashSet<Instance>,
     severed_by_caller: FxHashMap<Instance, Vec<Severed>>,
     exclusions: FxHashMap<Instance, Exclusion>,
     symbol_users: FxHashMap<String, FxHashSet<Instance>>,
@@ -958,6 +961,17 @@ impl ArtifactView {
             self.roots.remove(i);
             self.declared_roots.remove(i);
         }
+        let mut always_fn_values_changed = false;
+        for i in &subjects {
+            let was = self.index.always_fn_values.remove(i);
+            let now = g.instances.contains(i)
+                && g.is_always_emitted_fn_value(i)
+                && self.index.realizable[i].is_ok();
+            if now {
+                self.index.always_fn_values.insert(i.clone());
+            }
+            always_fn_values_changed |= was != now;
+        }
         for i in subjects.iter().filter(|i| g.instances.contains(*i)) {
             local_index_rows_examined += 1;
             let declared = self.index.root_decls.contains(&DeclKey(i.func));
@@ -984,6 +998,7 @@ impl ArtifactView {
             && !realization_changed
             && !roots_changed
             && !root_delta_changed
+            && !always_fn_values_changed
             && added.is_empty()
             && removed.is_empty()
         {
@@ -1193,6 +1208,9 @@ impl ArtifactView {
         }
         self.publisher_lanes.remove(i);
         self.missing_substitutions.remove(i);
+        if !self.index.fn_value_users.contains_key(i) {
+            self.fn_value_targets.remove(i);
+        }
         if let Some(values) = self.index.fn_values_by_caller.get(i).cloned() {
             for callee in values {
                 if let Some(users) = self.index.fn_value_users.get_mut(&callee) {
@@ -1252,6 +1270,9 @@ impl ArtifactView {
             for callee in values {
                 self.fn_value_targets.insert(callee.clone());
             }
+        }
+        if self.index.always_fn_values.contains(i) {
+            self.fn_value_targets.insert(i.clone());
         }
         if g.concreteness(i) == Concreteness::Missing {
             self.missing_substitutions.insert(i.clone());
@@ -2110,7 +2131,14 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     for r in &roots {
         admit(r, &mut instances, &mut realization, &mut queue);
     }
-    let mut fn_value_targets: BTreeSet<Instance> = BTreeSet::new();
+    // A function named by a global initializer or a decorator body is a value
+    // take with no caller instance, so the site walk below cannot see it.
+    index.always_fn_values = roots
+        .iter()
+        .filter(|r| g.is_always_emitted_fn_value(r))
+        .cloned()
+        .collect();
+    let mut fn_value_targets: BTreeSet<Instance> = index.always_fn_values.iter().cloned().collect();
     while let Some(caller) = queue.pop_front() {
         sites_walked += index.site_counts.get(&caller).copied().unwrap_or(0);
         let Some(sites) = index.outgoing.get(&caller) else {

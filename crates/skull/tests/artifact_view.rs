@@ -2518,3 +2518,76 @@ fn fresh_artifact_indexes_each_graph_site_once() {
         "the fixture did not retain a site-bearing body"
     );
 }
+
+fn fn_value_target_names(ws: &Workspace, view: &artifact::ArtifactView) -> Vec<String> {
+    let mut names: Vec<String> = view
+        .fn_value_targets
+        .iter()
+        .map(|i| {
+            ws.module(i.func.module).functions[i.func.func]
+                .name
+                .to_string()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+const GLOBAL_FN_VALUE_V1: &str = "fn inc(x: int) -> int { return x + 1 }\n\
+fn dec(x: int) -> int { return x - 1 }\n\
+global F: fn(int) -> int = inc\n\
+fn main() { print(\"{F(1)} {dec(1)}\") }";
+const GLOBAL_FN_VALUE_V2: &str = "fn inc(x: int) -> int { return x + 1 }\n\
+fn dec(x: int) -> int { return x - 1 }\n\
+global F: fn(int) -> int = dec\n\
+fn main() { print(\"{F(1)} {dec(1)}\") }";
+
+// A global initializer has no caller instance, so its value take is not a site
+// the per-caller fn-value walk reaches. The program still stores the function.
+#[test]
+fn a_function_named_by_a_global_initializer_is_a_fn_value_target() {
+    let ws = check(GLOBAL_FN_VALUE_V1);
+    let (g, roots) = graph_for(&ws);
+    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
+    assert_eq!(fn_value_target_names(&ws, &view), ["inc"]);
+}
+
+// Re-pointing the initializer at a function that was already an instance
+// changes no instance's own body, so only the always-emitted owner is affected.
+#[test]
+fn local_global_initializer_fn_value_retarget_matches_fresh_view() {
+    let ws1 = check(GLOBAL_FN_VALUE_V1);
+    let roots = skull::mir_emit::emission_roots(&ws1, Some("/project"));
+    let mut graph = instance_graph::build(&ws1, roots.clone(), false);
+    let request = ArtifactRequest::new(LUAJIT_DESKTOP, &roots);
+    let mut local = artifact::realize(&ws1, &graph, &request);
+    assert_eq!(fn_value_target_names(&ws1, &local), ["inc"]);
+
+    let ws2 = check(GLOBAL_FN_VALUE_V2);
+    let module = *ws2
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
+    let global = ws2
+        .module(module)
+        .globals
+        .iter()
+        .find(|(_, g)| g.name.as_str() == "F")
+        .map(|(gid, _)| (module, BodyOwner::Global(gid)))
+        .expect("global F");
+    let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &[global], &[]);
+    let fresh_roots = skull::mir_emit::emission_roots(&ws2, Some("/project"));
+    let fresh_graph = instance_graph::build(&ws2, fresh_roots.clone(), false);
+    let fresh_request = ArtifactRequest::new(LUAJIT_DESKTOP, &fresh_roots);
+    let fresh = artifact::realize(&ws2, &fresh_graph, &fresh_request);
+    local.update_local(
+        &ws2,
+        &graph,
+        &fresh_request,
+        &update.revisited,
+        &update.added,
+        &update.removed,
+    );
+    assert_eq!(fn_value_target_names(&ws2, &fresh), ["dec"]);
+    assert_eq!(local.fn_value_targets, fresh.fn_value_targets);
+}

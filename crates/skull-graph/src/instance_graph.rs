@@ -769,6 +769,10 @@ pub struct InstanceGraph {
     pub run_stats: RunStats,
     last_run_owners: BTreeSet<Owner>,
     last_run_retracted: BTreeSet<Owner>,
+    /// Instances an always-emitted owner rooted before or after this run's
+    /// re-walk. Its owner is not an instance, so without these the instances
+    /// whose root status or fn-value status moved would not be revisited.
+    last_run_always_targets: BTreeSet<Instance>,
     delta_added: BTreeSet<Instance>,
     delta_removed: BTreeSet<Instance>,
     /// Constructions the model refuses that no single body produced:
@@ -1769,6 +1773,7 @@ impl InstanceGraph {
             run_stats: RunStats::default(),
             last_run_owners: BTreeSet::new(),
             last_run_retracted: BTreeSet::new(),
+            last_run_always_targets: BTreeSet::new(),
             delta_added: BTreeSet::new(),
             delta_removed: BTreeSet::new(),
             index: Indices::default(),
@@ -1881,6 +1886,7 @@ impl InstanceGraph {
         if track_incremental_state {
             self.last_run_owners.clear();
             self.last_run_retracted.clear();
+            self.last_run_always_targets.clear();
         }
         let mono_before = self.interner.stats();
         if include_missing_roots {
@@ -2366,6 +2372,14 @@ impl InstanceGraph {
     ) -> (Vec<Owner>, InstallTiming) {
         let uninstall_start = timing_enabled.then(Instant::now);
         let replaced = self.contributions.contains_key(&owner);
+        if track_incremental_state && owner.instance().is_none() {
+            if let Some(old) = self.contributions.get(&owner) {
+                self.last_run_always_targets
+                    .extend(old.always_emitted_targets.iter().cloned());
+            }
+            self.last_run_always_targets
+                .extend(c.always_emitted_targets.iter().cloned());
+        }
         let root_hole_rows_retracted = self
             .contributions
             .get(&owner)
@@ -3352,6 +3366,12 @@ impl InstanceGraph {
             .cloned()
             .collect();
         revisited.extend(added.iter().cloned());
+        revisited.extend(
+            self.last_run_always_targets
+                .iter()
+                .filter(|instance| self.instances.contains(*instance))
+                .cloned(),
+        );
         UpdateStats {
             affected: affected.len(),
             expanded: run.expanded,
@@ -3653,6 +3673,23 @@ impl InstanceGraph {
     /// **Owner-local**: is this instance rooted by an always-emitted body?
     pub fn is_always_emitted_target(&self, i: &Instance) -> bool {
         self.index.always_emitted.contains_key(i)
+    }
+
+    /// Does an always-emitted body take this instance as a VALUE
+    /// (`SiteOp::FnValue`) rather than calling it? Such a site has no caller
+    /// instance, so it never reaches an artifact's per-caller fn-value index.
+    pub fn is_always_emitted_fn_value(&self, i: &Instance) -> bool {
+        let Some(owners) = self.index.always_emitted.get(i) else {
+            return false;
+        };
+        owners.iter().any(|owner| {
+            self.contributions.get(owner).is_some_and(|c| {
+                c.always_call_sites.iter().any(|(site, record)| {
+                    site.op == SiteOp::FnValue
+                        && matches!(&record.outcome, SiteOutcome::Resolved(to) if to == i)
+                })
+            })
+        })
     }
 
     pub fn always_emitted_targets(&self) -> impl Iterator<Item = &Instance> {

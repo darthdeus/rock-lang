@@ -17,6 +17,10 @@ inline(lua) fn twice(a: float) -> float = """
     return a * 2.0
 """
 
+inline(js) fn twice(a: float) -> float = """
+    return a * 2.0;
+"""
+
 struct Holder { f: (string, int) -> string }
 
 global EQ: (int, int) -> bool = rawequal

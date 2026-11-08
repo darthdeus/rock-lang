@@ -6625,13 +6625,24 @@ fn register_fn_values_from_view(
     st: &mut WorklistState,
     surfaces: &mut HashSet<ustr::Ustr>,
 ) -> Result<(), CompilerError> {
-    let fn_value_ids: Vec<Idx<Inst>> = mf
+    let mut fn_value_ids: Vec<Idx<Inst>> = mf
         .call_sites
         .iter()
         .filter_map(|(&iid, call_site)| {
             (call_site.site.op == skull_graph::instance_graph::SiteOp::FnValue).then_some(iid)
         })
         .collect();
+    // A global initializer or decorator body has no owner instance, so its
+    // mints carry no call site. A fn value is never generic, so its base
+    // instance is the graph's resolution.
+    let mut ownerless: Vec<(Idx<Inst>, FuncRef)> = mf
+        .fn_value_symbols
+        .iter()
+        .filter(|(iid, _)| !mf.call_sites.contains_key(iid))
+        .map(|(&iid, &fr)| (iid, fr))
+        .collect();
+    ownerless.sort_by_key(|(iid, _)| iid.into_raw().into_u32());
+    fn_value_ids.extend(ownerless.iter().map(|(iid, _)| *iid));
     for iid in fn_value_ids {
         let surface = match &mf.insts[iid] {
             Inst::Global(surface) => *surface,
@@ -6642,7 +6653,11 @@ fn register_fn_values_from_view(
             }
         };
         surfaces.insert(surface);
-        let Some(instance) = st.names.instance_for_site(ws, mf, iid) else {
+        let instance = match mf.call_sites.contains_key(&iid) {
+            true => st.names.instance_for_site(ws, mf, iid),
+            false => st.names.base_instance(ws, mf.fn_value_symbols[&iid]),
+        };
+        let Some(instance) = instance else {
             return Err(err(format!(
                 "JS: function value `{surface}` has no shared InstanceGraph resolution"
             )));
