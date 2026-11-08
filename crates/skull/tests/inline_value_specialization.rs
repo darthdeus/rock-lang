@@ -113,3 +113,27 @@ fn non_inline_generic_chain_uses_concrete_native_buffer_instance() {
         "the transitive concrete instance must own the native-buffer ctype, got:\n{lua}"
     );
 }
+
+#[test]
+fn inlined_numeric_parameters_preserve_float_coercions() {
+    let lua = emit_module(
+        r#"
+fn fit(w: int, h: int, available: float) -> Vec2 {
+    let width = 256
+    let height = max(1, (width as float * h as float / w as float) as int)
+    let size = v(width as float, height as float)
+    let factor = min(1.0, available / size.x)
+    return size * factor
+}
+fn main() {
+    let small = fit(128, 64, 32.0)
+    let large = fit(128, 64, 512.0)
+    print("{small.x as int} {small.y as int} {large.x as int} {large.y as int}")
+}
+"#,
+    );
+    assert_eq!(
+        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "float-coercion").trim(),
+        "32 16 256 128"
+    );
+}
