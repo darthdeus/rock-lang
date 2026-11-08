@@ -1,0 +1,27 @@
+[package]
+name = "rock-engine-host"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rock-visual-bank = { path = "../rock-visual-bank" }
+gamelibs = { path = "../gamelibs" }
+rock-host = { workspace = true }
+anyhow = { workspace = true }
+fs-err = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha1 = "0.10"
+walkdir = { workspace = true }
+log = { workspace = true }
+tempfile = "3.0"
+
+[dev-dependencies]
+basic-toml = "0.1"
+test-utils = { workspace = true }

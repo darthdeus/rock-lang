@@ -1,6 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/gamelibs",
+    "crates/rock-visual-bank",
+    "crates/rock-engine-host",
     "crates/rock-cli",
     "crates/skull",
     "crates/skull-codegen-shader",
