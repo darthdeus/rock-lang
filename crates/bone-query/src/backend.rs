@@ -26,6 +26,7 @@ use lsp_types::{
     SignatureInformation, SymbolInformation, SymbolKind, TextEdit, Uri, WorkspaceEdit,
 };
 
+use bone_core::type_equiv::TyRef;
 use bone_incremental::session::{Session, SessionFile, UpdateTier};
 use bone_semantic::inference::{self, Gamma};
 use bone_semantic::prelude::{
@@ -4704,16 +4705,16 @@ impl<'a> ExpectedArg<'a> {
 }
 
 /// The return TyId shared by ALL accessible overloads of `name`, or None if the
-/// overloads disagree / any lacks a return type. Agreement is decided on the
-/// RENDERED form (structural sameness across overloads' Static arenas), but
-/// the TyId is what flows on -- the typed compare never re-parses the string.
+/// overloads disagree / any lacks a return type. Agreement is semantic type
+/// equivalence across the overloads' Static arenas, so two overloads' own
+/// generic `T` (or a generic `T` and a struct `T`) disagree.
 pub(crate) fn fn_unique_return_ty_in_scope(
     ws: &Workspace,
     name: &str,
     frag: Option<&bone_core::modules::FragmentScope>,
 ) -> Option<TyId> {
     let n = Ustr::from(name);
-    let mut ret: Option<(TyId, String)> = None;
+    let mut ret: Option<TyId> = None;
     for m in ws.modules.iter() {
         let Some(fns) = m.functions_by_name.get(&n) else {
             continue;
@@ -4726,15 +4727,14 @@ pub(crate) fn fn_unique_return_ty_in_scope(
             }
             let f = &ws.modules[fmid.index()].functions[*fid];
             let t = f.return_ty?;
-            let r = ws.render(None, t);
-            match &ret {
-                None => ret = Some((t, r)),
-                Some((_, prev)) if *prev == r => {}
+            match ret {
+                None => ret = Some(t),
+                Some(prev) if ws.types_equivalent(TyRef::of_static(prev), TyRef::of_static(t)) => {}
                 Some(_) => return None, // overloads disagree -> can't decide
             }
         }
     }
-    ret.map(|(t, _)| t)
+    ret
 }
 
 /// Start offsets of the arg segments that begin before `offset`, within the
@@ -5990,6 +5990,113 @@ mod tests {
         let [m, _] = completion_munges(src, off);
         assert!(m.contains("__rock_completion__"), "got: {m:?}");
         assert!(m.contains("fn dist(p: P)"), "tail dropped: {m:?}");
+    }
+
+    fn equivalence_ws(files: &[(&str, &str)]) -> Workspace {
+        let mut modules: Vec<_> = files
+            .iter()
+            .map(|(file, src)| skull_parser::parse_module_clean(src, Ustr::from(file)).unwrap())
+            .collect();
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).unwrap()
+    }
+
+    fn unique_return(files: &[(&str, &str)], name: &str) -> Option<String> {
+        let ws = equivalence_ws(files);
+        fn_unique_return_ty_in_scope(&ws, name, None).map(|t| ws.render(None, t))
+    }
+
+    fn first_param(ws: &Workspace, name: &str) -> TyId {
+        ws.modules
+            .iter()
+            .flat_map(|m| m.functions.iter())
+            .find(|(_, f)| f.name.as_str() == name)
+            .map(|(_, f)| f.param_decls[0].ty)
+            .unwrap()
+    }
+
+    #[test]
+    fn vec_ufcs_methods_match_the_element_by_type_equivalence() {
+        let ws = equivalence_ws(&[
+            (
+                "a",
+                "struct T { x: int }\n\
+                 fn on_t(xs: [T]) {}\n\
+                 fn on_int(xs: [int]) {}",
+            ),
+            ("b", "fn nominal(xs: [T]) {}\nfn generic<T>(xs: [T]) {}"),
+        ]);
+        let elem_of = |name: &str| {
+            let p0 = first_param(&ws, name);
+            let bone_semantic::hir::TypeExpr::App { mut params, .. } = ty_of(&ws, None, p0) else {
+                panic!("`{name}` takes a Vec");
+            };
+            TyRef::of_static(p0.with_idx(params.next().unwrap()))
+        };
+        let methods = |elem| {
+            let mut names: Vec<String> = crate::query::ufcs_methods(&ws, Ustr::from("Vec"), elem)
+                .into_iter()
+                .map(|m| m.name)
+                .filter(|n| n.starts_with("on_"))
+                .collect();
+            names.sort();
+            names
+        };
+        // The struct `T` element spelled in another module's arena.
+        assert_eq!(methods(Some(elem_of("nominal"))), ["on_t"]);
+        // A generic `T` element renders like the struct but is not it.
+        assert!(methods(Some(elem_of("generic"))).is_empty());
+    }
+
+    #[test]
+    fn field_ref_fields_match_by_type_equivalence() {
+        let ws = equivalence_ws(&[
+            (
+                "a",
+                "struct V { x: int }\n\
+                 struct V2 { x: float }\n\
+                 struct Owner { a: V, b: [V2?], c: int }",
+            ),
+            ("b", "fn shared(x: [V2?]) {}\nfn generic<V>(x: V) {}"),
+        ]);
+        let owner = Ustr::from("Owner");
+        // The same `[V2?]` spelled in another module's arena.
+        assert_eq!(
+            fields_of_type(&ws, owner, first_param(&ws, "shared")),
+            vec![Ustr::from("b")]
+        );
+        // A generic `V` renders like the struct `V` but is not it.
+        assert!(fields_of_type(&ws, owner, first_param(&ws, "generic")).is_empty());
+    }
+
+    #[test]
+    fn unique_return_requires_agreeing_overloads() {
+        let src = "fn mk(x: int) -> int { x }\nfn mk(x: string) -> float { 1.0 }";
+        assert_eq!(unique_return(&[("a", src)], "mk"), None);
+        let src = "fn mk(x: int) -> [int] { [x] }\nfn mk(x: string) -> [int] { [] }";
+        assert_eq!(unique_return(&[("a", src)], "mk").as_deref(), Some("[int]"));
+    }
+
+    #[test]
+    fn unique_return_agrees_across_module_arenas() {
+        let a = "struct V2 { x: float }\nfn mk(x: int) -> [V2?] { [] }";
+        let b = "fn mk(x: string) -> [V2?] { [] }";
+        assert_eq!(
+            unique_return(&[("a", a), ("b", b)], "mk").as_deref(),
+            Some("[V2?]")
+        );
+    }
+
+    #[test]
+    fn unique_return_keeps_a_generic_apart_from_a_same_named_nominal() {
+        // Both overloads render their return as `T`: one is the struct, the
+        // other the overload's own generic parameter.
+        let src = "struct T { x: int }\n\
+                   fn mk(x: int) -> T { T { x } }\n\
+                   fn mk<T>(x: T) -> T { x }";
+        assert_eq!(unique_return(&[("a", src)], "mk"), None);
+        // Two overloads' generic parameters are distinct as well.
+        let src = "fn mk<T>(x: T, y: int) -> T { x }\nfn mk<T>(x: T) -> T { x }";
+        assert_eq!(unique_return(&[("a", src)], "mk"), None);
     }
 }
 

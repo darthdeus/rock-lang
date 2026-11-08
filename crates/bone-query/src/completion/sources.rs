@@ -8,6 +8,7 @@ use std::collections::HashMap;
 
 use lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat};
 
+use bone_core::type_equiv::TyRef;
 use bone_incremental::session::Session;
 use bone_semantic::prelude::{
     Idx, InferenceResult, ModuleId, TyId, Workspace, is_intrinsic_key, is_intrinsic_key_in,
@@ -58,11 +59,11 @@ pub(crate) fn callee_param_names_in_scope(
     out
 }
 
-/// Struct `t_name`'s field names whose declared type renders exactly as
-/// `v_str` -- the field-set a `FieldRef<t_name, V>` slot admits (typechecker
-/// invariance). Deduped, first-seen order. Shared by the arg-position field-ref
+/// Struct `t_name`'s field names whose declared type is equivalent to the
+/// static type `v` -- the field-set a `FieldRef<t_name, V>` slot admits
+/// (typechecker invariance). Deduped, first-seen order. Shared by the arg-position field-ref
 /// path and the method-selection-time pre-fill in `build_member_items`.
-pub(crate) fn fields_of_type(ws: &Workspace, t_name: Ustr, v_str: &str) -> Vec<Ustr> {
+pub(crate) fn fields_of_type(ws: &Workspace, t_name: Ustr, v: TyId) -> Vec<Ustr> {
     let mut seen: std::collections::HashSet<Ustr> = std::collections::HashSet::new();
     let mut out = Vec::new();
     for m in ws.modules.iter() {
@@ -70,7 +71,7 @@ pub(crate) fn fields_of_type(ws: &Workspace, t_name: Ustr, v_str: &str) -> Vec<U
             continue;
         };
         for fld in &m.structs[idx].fields {
-            if ws.render(None, fld.ty) != v_str {
+            if !ws.types_equivalent(TyRef::of_static(fld.ty), TyRef::of_static(v)) {
                 continue;
             }
             if seen.insert(fld.name) {
@@ -130,7 +131,7 @@ fn fieldref_slot_owner(
     recv_var: Option<bone_semantic::hir::VarId>,
     recv_owner: Option<Ustr>,
     sibling_owner: impl FnOnce(Ustr) -> Option<Ustr>,
-) -> Option<(Ustr, String)> {
+) -> Option<(Ustr, TyId)> {
     use bone_semantic::hir::{TypeCtor, TypeExpr};
     let p = f.param_decls.get(pi)?;
     let (t_idx, v_idx) = match ty_of(ws, None, p.ty) {
@@ -145,7 +146,7 @@ fn fieldref_slot_owner(
         }
         _ => return None,
     };
-    let v_str = ws.render(None, p.ty.with_idx(v_idx));
+    let v = p.ty.with_idx(v_idx);
     let owner = match ty_of(ws, None, p.ty.with_idx(t_idx)) {
         TypeExpr::App {
             ctor: TypeCtor::Nominal(n),
@@ -160,7 +161,7 @@ fn fieldref_slot_owner(
         }
         _ => return None,
     };
-    Some((owner, v_str))
+    Some((owner, v))
 }
 
 /// Bind a generic named `gname` from a PRECEDING paren arg's inferred type --
@@ -232,7 +233,7 @@ pub(crate) fn field_ref_arg_completions(
     let recv_offset = usize::from(recv_end.is_some());
 
     // First overload whose `arg_idx` slot resolves to a FieldRef with >=1 field.
-    let (t_name, v_str) = ws.modules.iter().find_map(|m| {
+    let (t_name, v) = ws.modules.iter().find_map(|m| {
         m.functions_by_name
             .get(&name)?
             .iter()
@@ -244,17 +245,18 @@ pub(crate) fn field_ref_arg_completions(
                 }
                 let f = &ws.modules[fmid.index()].functions[*fid];
                 let (recv_var, recv_owner) = receiver_owner_binding(ws, f, recv_struct, recv_elem);
-                let (owner, v_str) =
+                let (owner, v) =
                     fieldref_slot_owner(ws, f, arg_idx, recv_var, recv_owner, |gname| {
                         sibling_owner_bind(ws, path, src, offset, arg_idx, recv_offset, f, gname)
                     })?;
-                (!fields_of_type(ws, owner, &v_str).is_empty()).then_some((owner, v_str))
+                (!fields_of_type(ws, owner, v).is_empty()).then_some((owner, v))
             })
     })?;
 
     let pfx = prefix.as_bytes();
     let mut out = Vec::new();
-    for fld_name in fields_of_type(ws, t_name, &v_str) {
+    let v_str = ws.render(None, v);
+    for fld_name in fields_of_type(ws, t_name, v) {
         if !(prefix.is_empty() || admit(fld_name.as_bytes(), pfx)) {
             continue;
         }
@@ -1593,15 +1595,14 @@ fn field_ref_slot(
     let (recv_var, recv_owner) = receiver_owner_binding(ws, f, Some(recv_struct), recv_elem);
     let recv_owner = recv_owner?;
     for pi in 1..f.param_decls.len() {
-        let Some((owner, v_str)) =
-            fieldref_slot_owner(ws, f, pi, recv_var, Some(recv_owner), |_| None)
+        let Some((owner, v)) = fieldref_slot_owner(ws, f, pi, recv_var, Some(recv_owner), |_| None)
         else {
             continue;
         };
         if owner != recv_owner {
             continue;
         }
-        let fields = fields_of_type(ws, owner, &v_str);
+        let fields = fields_of_type(ws, owner, v);
         if !fields.is_empty() {
             return Some((pi - 1, fields));
         }
@@ -1709,9 +1710,9 @@ fn build_member_items(
     offset: usize,
     fields: Vec<(String, String, Option<TyId>)>,
     recv_struct: Option<Ustr>,
-    // Receiver's rendered element type for a Vec (`[Vec2]` -> "Vec2"); filters
-    // UFCS methods to those whose element unifies. None for nominal receivers.
-    vec_elem: Option<String>,
+    // Receiver's element type for a Vec (`[Vec2]` -> `Vec2`); filters UFCS
+    // methods to those whose element matches. None for nominal receivers.
+    vec_elem: Option<TyRef<'_>>,
     // Receiver's sole type-arg struct (`Entity<Glyph>` -> "Glyph"); the FieldRef
     // owner `T` binds through it on wrapper-receiver overloads (`e.run_into(.co)`).
     recv_elem: Option<Ustr>,
@@ -1730,7 +1731,7 @@ fn build_member_items(
         // callable as `recv.method(...)`. Surfaced alongside fields, as rock does.
         // Non-struct receivers have no nominal UFCS methods.
         let methods = recv_struct
-            .map(|name| crate::query::ufcs_methods_in_scope(ws, name, vec_elem.as_deref(), frag))
+            .map(|name| crate::query::ufcs_methods_in_scope(ws, name, vec_elem, frag))
             .unwrap_or_default();
         if fields.is_empty() && methods.is_empty() {
             return Vec::new();

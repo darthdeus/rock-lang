@@ -69,3 +69,15 @@ fn fills_a_struct_literal_written_as_a_bare_match_arm_body() {
         "the missing field `y` must be filled: {t:?}"
     );
 }
+
+#[test]
+fn generic_binding_does_not_shorthand_a_same_named_struct_field() {
+    // The param's type is f's generic `T`; the field's is the struct `T`.
+    // Both render as `T`, but `P { x }` would not typecheck.
+    let src = "struct T { v: int }\nstruct P { x: T }\nfn f<T>(x: T) {\n    let p = P {  }\n}\n";
+    let t = fill(src, Position::new(3, 15));
+    assert!(
+        t.contains("x: ?"),
+        "generic binding must not shorthand: {t:?}"
+    );
+}

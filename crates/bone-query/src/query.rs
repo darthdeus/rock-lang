@@ -1,3 +1,4 @@
+use bone_core::type_equiv::TyRef;
 use bone_semantic::hir::{BindingKind, Function};
 use bone_semantic::{hir::NodeRef, prelude::*};
 use skull_parser::Ast;
@@ -3116,18 +3117,18 @@ pub(crate) fn struct_members_of_receiver_expr(
 ) -> Option<(
     Vec<(String, String, Option<TyId>)>,
     Ustr,
-    Option<String>,
+    Option<TyRef<'_>>,
     Option<Ustr>,
 )> {
     let inf = ws.inference(mid)?;
     let ta = bone_semantic::query::type_at(ws, mid, inf, recv_end.checked_sub(1)?)?;
     let (fields, sname) = struct_fields_of_ty(ws, ta.body, ta.ty)?;
-    let vec_elem = array_elem_ty(ws, ta.body, ta.ty).map(|e| ws.render(ta.body, e));
+    let vec_elem = array_elem_ty(ws, ta.body, ta.ty).map(|e| TyRef::new(ta.body, e));
     let sole_arg = sole_type_arg_struct(ws, ta.body, ta.ty);
     Some((fields, sname, vec_elem, sole_arg))
 }
 
-/// Rendered ELEMENT type of a Vec receiver (`POS_HIST: [Vec2]` -> "Vec2"), for
+/// ELEMENT type of a Vec receiver (`POS_HIST: [Vec2]` -> `Vec2`), for
 /// element-aware UFCS filtering on the name-walk FALLBACK. Resolves the
 /// single-binding / global head (the common Vec receiver); `None` for a
 /// multi-segment receiver, so its UFCS filtering degrades to name-only there.
@@ -3135,16 +3136,16 @@ pub(crate) fn struct_members_of_receiver_expr(
 /// broken parse); the primary path computes `vec_elem` from the inferred type
 /// (`struct_members_of_receiver_expr`), so element filtering is exact for every
 /// receiver shape outside the fallback.
-pub(crate) fn receiver_vec_elem(
-    ws: &Workspace,
+pub(crate) fn receiver_vec_elem<'a>(
+    ws: &'a Workspace,
     mid: ModuleId,
     offset: usize,
     segments: &[String],
-) -> Option<String> {
+) -> Option<TyRef<'a>> {
     let [head] = segments else { return None };
     let module = ws.modules.get(mid.index())?;
     // Binding (param / local / inferred): its resolved type lives in the
-    // inference arena, so `render(Some(bi), ..)` is correct.
+    // inference arena, so it pairs with that body.
     if let Some(owner) = module.body_at(offset) {
         if let (Some(body), Some(bi)) = (
             module.bodies.get(&owner),
@@ -3153,7 +3154,7 @@ pub(crate) fn receiver_vec_elem(
             if let Some(b_idx) = find_binding_by_name(body, head, offset) {
                 if let Some(&ty) = bi.binding_types.get(b_idx) {
                     if let Some(elem) = array_elem_ty(ws, Some(bi), ty) {
-                        return Some(ws.render(Some(bi), elem));
+                        return Some(TyRef::new(Some(bi), elem));
                     }
                 }
             }
@@ -3171,7 +3172,7 @@ pub(crate) fn receiver_vec_elem(
                 .find_map(|m| m.global_by_name.get(&name).map(|g| m.globals[*g].ty))
         })?;
     let elem = array_elem_ty(ws, None, gty)?;
-    Some(ws.render(None, elem))
+    Some(TyRef::of_static(elem))
 }
 
 /// `(struct name, inferred type args)` if `ty` is a nominal-struct `App`
@@ -4051,13 +4052,13 @@ pub struct UfcsMethod {
 /// Skips compiler-generated `__` ops. Mirrors rock, which surfaces these in
 /// `recv.` member completion.
 ///
-/// `recv_elem` is the receiver's rendered ELEMENT type for a Vec receiver
-/// (`[Vec2]` -> "Vec2"); when set, a candidate whose first param is `[E']`
+/// `recv_elem` is the receiver's ELEMENT type for a Vec receiver
+/// (`[Vec2]` -> `Vec2`); when set, a candidate whose first param is `[E']`
 /// survives only if `E'` is generic (a polymorphic Vec op like `push`) or its
 /// element matches -- so `[Vec2]` doesn't offer `apply_status([Status])`, but a
 /// `[string]` receiver still gets `join([string])`. `None` (nominal receivers,
 /// or an unresolved Vec element) keeps name-only matching.
-pub fn ufcs_methods(ws: &Workspace, name: Ustr, recv_elem: Option<&str>) -> Vec<UfcsMethod> {
+pub fn ufcs_methods(ws: &Workspace, name: Ustr, recv_elem: Option<TyRef<'_>>) -> Vec<UfcsMethod> {
     ufcs_methods_in_scope(ws, name, recv_elem, None)
 }
 
@@ -4067,7 +4068,7 @@ pub fn ufcs_methods(ws: &Workspace, name: Ustr, recv_elem: Option<&str>) -> Vec<
 pub fn ufcs_methods_in_scope(
     ws: &Workspace,
     name: Ustr,
-    recv_elem: Option<&str>,
+    recv_elem: Option<TyRef<'_>>,
     frag: Option<&bone_core::modules::FragmentScope>,
 ) -> Vec<UfcsMethod> {
     let mut out = Vec::new();
@@ -4171,13 +4172,13 @@ fn fn_first_param_is_iter_bound(ws: &Workspace, f: &hir::Function) -> bool {
 }
 
 /// Whether a Vec UFCS candidate whose first param is `[E']` applies to a
-/// receiver with rendered element `want`: `E'` generic (matches any element)
-/// or `E'` renders to `want`. `p0_ty` is `Static` (param types are).
-fn vec_param_elem_matches(ws: &Workspace, p0_ty: TyId, want: &str) -> bool {
+/// receiver with element `want`: `E'` generic (matches any element) or `E'`
+/// equivalent to `want`. `p0_ty` is `Static` (param types are).
+fn vec_param_elem_matches(ws: &Workspace, p0_ty: TyId, want: TyRef<'_>) -> bool {
     match array_elem_ty(ws, None, p0_ty) {
         Some(elem) => {
             matches!(deref_ty(ws, None, elem), Some(hir::TypeExpr::Generic(..)))
-                || ws.render(None, elem) == want
+                || ws.types_equivalent(TyRef::of_static(elem), want)
         }
         None => false,
     }
@@ -4386,7 +4387,8 @@ pub fn struct_fields_fill(
     let module = ws.modules.get(mid.index())?;
     let owner = module.body_at(offset)?;
     let body = module.bodies.get(&owner)?;
-    inf.per_fn.get(&owner)?; // require inference on this body (parity w/ match_arms_fill)
+    // Require inference on this body (parity w/ match_arms_fill).
+    let bi = inf.per_fn.get(&owner)?;
 
     // Smallest struct literal covering the cursor.
     let mut best: Option<(usize, Idx<hir::Expr>)> = None;
@@ -4433,12 +4435,12 @@ pub fn struct_fields_fill(
     // in-scope binding matches its name AND type (the innermost binding of that
     // name, so a wrong-type shadow doesn't false-match), else a `field: ?` hole.
     let scope = locals_in_scope(ws, mid, inf, offset);
-    let innermost_ty = |fname: Ustr| -> Option<&str> {
+    let innermost_ty = |fname: Ustr| -> Option<TyId> {
         scope
             .iter()
             .filter(|(name, ..)| *name == fname)
             .max_by_key(|(.., end)| *end)
-            .map(|(_, _, ty, ..)| ty.as_str())
+            .and_then(|(_, _, _, ty, _)| *ty)
     };
 
     let missing: Vec<String> = sdef
@@ -4446,7 +4448,10 @@ pub fn struct_fields_fill(
         .iter()
         .filter(|f| !f.has_default && !present.contains(&f.name))
         .map(|f| {
-            if innermost_ty(f.name) == Some(ws.render(None, f.ty).as_str()) {
+            let matches = innermost_ty(f.name).is_some_and(|t| {
+                ws.types_equivalent(TyRef::new(Some(bi), t), TyRef::of_static(f.ty))
+            });
+            if matches {
                 f.name.to_string() // shorthand: `field`
             } else {
                 format!("{}: ?", f.name)
