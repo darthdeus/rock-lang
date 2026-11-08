@@ -152,6 +152,22 @@ fn single_line_containers_with_multiline_children_reach_a_fixed_point() {
     }
 }
 
+/// A tight `..` must not fuse with a neighbouring `.` into `...`.
+#[test]
+fn range_operator_next_to_a_dot_keeps_its_spaces() {
+    for source in [
+        "fn f() {\n    print(src .. .w.f0)\n}\n",
+        "fn f() {\n    let r = a..b\n}\n",
+    ] {
+        let original = skull_parser::parse_module_clean(source, "<source>".into()).unwrap();
+        let once = skull_fmt::format_code(source);
+        let formatted = skull_parser::parse_module_clean(&once, "<formatted>".into())
+            .unwrap_or_else(|e| panic!("formatted range must parse: {e:?}\n{once}"));
+        assert!(formatted.recovery_errors.is_empty(), "{once}");
+        assert_eq!(original.module_sexp(), formatted.module_sexp(), "{once}");
+    }
+}
+
 /// Call splats print in the prefix form the parser accepts (`f(...rest)`).
 #[test]
 fn call_splat_roundtrips() {

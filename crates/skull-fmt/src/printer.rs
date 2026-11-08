@@ -40,6 +40,21 @@ impl<'a> Printer<'a> {
         }
     }
 
+    /// The separator for an infix operator. The range operator `..` is set
+    /// tight (`a..b`) unless an operand edge is a `.`, which would fuse into
+    /// `...`; everything else gets one space on each side.
+    fn binop_sep(&self, op: &TokenKind, left: Idx<ExprData>, right: Idx<ExprData>) -> Doc {
+        match op {
+            TokenKind::DoubleDot
+                if !self.slice(self.ast.e(&left).span).ends_with('.')
+                    && !self.slice(self.ast.e(&right).span).starts_with('.') =>
+            {
+                Doc::text("..")
+            }
+            other => Doc::text(format!(" {} ", binop_str(other))),
+        }
+    }
+
     fn slice(&self, span: Span) -> &str {
         let (b0, b1) = span.offset_range;
         self.slice_range(b0, b1)
@@ -1536,7 +1551,11 @@ impl<'a> Printer<'a> {
                 if data.span.line_range.0 != data.span.line_range.1 {
                     self.raw(data.span)
                 } else {
-                    Doc::concat([self.expr(*left), binop_sep(op), self.expr(*right)])
+                    Doc::concat([
+                        self.expr(*left),
+                        self.binop_sep(op, *left, *right),
+                        self.expr(*right),
+                    ])
                 }
             }
 
@@ -1552,7 +1571,7 @@ impl<'a> Printer<'a> {
                     } else {
                         Doc::concat([
                             self.expr(args[0].value),
-                            binop_sep(op),
+                            self.binop_sep(op, args[0].value, args[1].value),
                             self.expr(args[1].value),
                         ])
                     }
@@ -2821,15 +2840,6 @@ fn normalize_int(s: &str) -> String {
         out
     } else {
         s.to_string()
-    }
-}
-
-/// The separator for an infix operator. The range operator `..` is set tight
-/// (`a..b`); everything else gets one space on each side.
-fn binop_sep(op: &TokenKind) -> Doc {
-    match op {
-        TokenKind::DoubleDot => Doc::text(".."),
-        other => Doc::text(format!(" {} ", binop_str(other))),
     }
 }
 
