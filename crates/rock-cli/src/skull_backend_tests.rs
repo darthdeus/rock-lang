@@ -3083,6 +3083,74 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         }
     }
 
+    /// A bounded fn exists only as splices, so its lambda reaches closure
+    /// conversion in the caller, keyed by the caller and the lambda's source
+    /// site. Switching the caller to another existing instance keeps that key
+    /// and changes the call ABI, so the ABI has to cross the splice for the
+    /// compatibility gate to see the change. Only the lambda's result wire
+    /// differs here: the parameter count feeds the lambda topology, which would
+    /// reject the edit on its own.
+    #[test]
+    fn spliced_lambda_abi_change_requests_safe_restart() {
+        let prog = |args: &str| {
+            format!(
+                "nobox value Pair {{ a: int, b: int }}\n\
+                 fn fwd<T, I: Iterator<T>>(it: I, seed: T) -> int {{\n  let f: fn(int) -> T? = x => null\n  let same = f(0)\n  return if same == null {{ 1 }} else {{ 2 }}\n}}\n\
+                 @nomangle\n\
+                 fn keep_int() {{ print(\"{{fwd([1].iter(), 1)}}\") }}\n\
+                 @nomangle\n\
+                 fn keep_pair() {{ print(\"{{fwd([Pair {{ a: 1, b: 2 }}].iter(), Pair {{ a: 1, b: 2 }})}}\") }}\n\
+                 @nomangle\n\
+                 fn edited() {{ print(\"{{fwd({args})}}\") }}\n"
+            )
+        };
+        let v0 = prog("[1].iter(), 1");
+        let same_abi = prog("[2].iter(), 2");
+        let new_abi = prog("[Pair { a: 3, b: 4 }].iter(), Pair { a: 3, b: 4 }");
+
+        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mid = skull::user_module_id(session.workspace()).unwrap();
+        let (full0, mut cache) =
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        assert!(
+            !full0.lua.contains("missing-lambda-abi"),
+            "a spliced lambda must keep its call ABI"
+        );
+
+        let result = session.update_file("main.rock", &same_abi).expect("update");
+        assert!(matches!(
+            result.tier,
+            bone_incremental::session::UpdateTier::BodyOnly
+        ));
+        if let Err(err) =
+            skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred)
+        {
+            panic!(
+                "an edit that keeps the lambda ABI must overlay: {}",
+                err.message
+            );
+        }
+
+        let result = session.update_file("main.rock", &new_abi).expect("update");
+        assert!(matches!(
+            result.tier,
+            bone_incremental::session::UpdateTier::BodyOnly
+        ));
+        let err = match skull::mir_emit::emit_overlay(
+            session.workspace(),
+            &mut cache,
+            &result.reinferred,
+        ) {
+            Ok(_) => panic!("a changed lambda call ABI must not overlay"),
+            Err(err) => err,
+        };
+        assert!(
+            err.message.contains("safe restart"),
+            "an incompatible lambda must request the safe restart path, got: {}",
+            err.message
+        );
+    }
+
     /// A lambda-local edit leaves the coroutine frame stamp stable, but changes
     /// the compatibility record for its escaping lambda body. It must request a
     /// safe restart rather than redirect a retained CodeRef.

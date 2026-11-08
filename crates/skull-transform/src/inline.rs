@@ -2924,6 +2924,20 @@ fn import_spec_bindings(
             func.code_value_identities.insert(new_id, identity.clone());
         }
     }
+    // A spliced lambda is closure-converted in the caller, which reads its call
+    // ABI from these tables for the hot-reload compatibility record.
+    for (old_id, fingerprint) in &callee.lambda_abi_fingerprints {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.lambda_abi_fingerprints
+                .insert(new_id, fingerprint.clone());
+        }
+    }
+    for (old_id, representation) in &callee.lambda_abi_representations {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.lambda_abi_representations
+                .insert(new_id, representation.clone());
+        }
+    }
     for (name, identity) in &callee.nested_fn_identities {
         let name = nested_names.get(name).copied().unwrap_or(*name);
         func.nested_fn_identities.insert(name, identity.clone());
