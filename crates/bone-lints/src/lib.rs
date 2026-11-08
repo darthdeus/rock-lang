@@ -3357,16 +3357,19 @@ fn filter_suppressed_findings_with_entries_timed(
 fn suppression_entries(source: &str) -> FxHashSet<(usize, &'static str)> {
     let mut allow = FxHashSet::default();
     for (n, line) in source.lines().enumerate() {
-        // Every allow comment starts at a `//`, so search for one once per
-        // line rather than once per lint.
-        let Some(first) = line.find("//") else {
-            continue;
-        };
-        let comments = &line[first..];
-        for &lint in KNOWN_LINTS {
-            if parse_allow_comment(comments, lint) {
-                allow.insert((n, lint));
+        // The `rock: allow(` head does not depend on the lint, so parse it once
+        // per comment and only then try each lint name.
+        let mut rest = line;
+        while let Some(pos) = find_comment_start(rest) {
+            let after = &rest[pos + 2..];
+            if let Some(args) = allow_comment_args(after) {
+                for &lint in KNOWN_LINTS {
+                    if allow_args_name(args, lint) {
+                        allow.insert((n, lint));
+                    }
+                }
             }
+            rest = after;
         }
     }
     allow
@@ -3555,9 +3558,9 @@ fn filter_suppressed_census<F: LintFinding>(
 /// a misspelled name simply won't match.
 fn parse_allow_comment(line: &str, lint_name: &str) -> bool {
     let mut rest = line;
-    while let Some(pos) = rest.find("//") {
+    while let Some(pos) = find_comment_start(rest) {
         let after = &rest[pos + 2..];
-        if allow_body_matches(after, lint_name) {
+        if allow_comment_args(after).is_some_and(|args| allow_args_name(args, lint_name)) {
             return true;
         }
         rest = after;
@@ -3565,20 +3568,25 @@ fn parse_allow_comment(line: &str, lint_name: &str) -> bool {
     false
 }
 
-fn allow_body_matches(s: &str, lint_name: &str) -> bool {
-    let Some(s) = s.trim_start().strip_prefix("rock") else {
-        return false;
-    };
-    let Some(s) = s.trim_start().strip_prefix(':') else {
-        return false;
-    };
-    let Some(s) = s.trim_start().strip_prefix("allow") else {
-        return false;
-    };
-    let Some(s) = s.trim_start().strip_prefix('(') else {
-        return false;
-    };
-    let Some(rest) = s.trim_start().strip_prefix(lint_name) else {
+/// Byte offset of the first `//` in `s`. A plain byte scan: lines are short,
+/// and a substring searcher's setup cost dominated this per-line call.
+fn find_comment_start(s: &str) -> Option<usize> {
+    s.as_bytes().windows(2).position(|pair| pair == b"//")
+}
+
+/// The argument text after `rock: allow(` (whitespace-tolerant), if `s` starts
+/// with that head.
+fn allow_comment_args(s: &str) -> Option<&str> {
+    let s = s.trim_start().strip_prefix("rock")?;
+    let s = s.trim_start().strip_prefix(':')?;
+    let s = s.trim_start().strip_prefix("allow")?;
+    let s = s.trim_start().strip_prefix('(')?;
+    Some(s.trim_start())
+}
+
+/// Whether allow arguments `args` name `lint_name` first.
+fn allow_args_name(args: &str, lint_name: &str) -> bool {
+    let Some(rest) = args.strip_prefix(lint_name) else {
         return false;
     };
     matches!(
