@@ -27,6 +27,7 @@ log = { workspace = true }
 skull-parser = { workspace = true }
 skull-graph = { workspace = true }
 skull-codegen-lua = { workspace = true }
+rock-stdlib = { workspace = true }
 
 [lints]
 workspace = true

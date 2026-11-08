@@ -842,7 +842,37 @@ struct UseIndex {
     affected: HashSet<UseSite>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// The last inlined caller's maintained index, diffed against a fresh
+    /// build: `(missing, stale)` value-use pairs, as debug strings.
+    static USE_INDEX_DRIFT: std::cell::RefCell<(Vec<String>, Vec<String>)> =
+        Default::default();
+}
+
 impl UseIndex {
+    #[cfg(test)]
+    fn record_drift(&self, func: &MirFunc) {
+        let pairs = |index: &UseIndex| -> HashSet<(Idx<Inst>, UseSite)> {
+            index
+                .users
+                .iter()
+                .flat_map(|(value, sites)| sites.iter().map(move |site| (*value, *site)))
+                .collect()
+        };
+        let describe = |(value, site): &(Idx<Inst>, UseSite)| match site {
+            UseSite::Inst(iid) => format!("{value:?} used by {iid:?} {:?}", func.insts[*iid]),
+            UseSite::Term(bid) => format!("{value:?} used by term of {bid:?}"),
+        };
+        let fresh = pairs(&UseIndex::build(func));
+        let kept = pairs(self);
+        let mut missing: Vec<String> = fresh.difference(&kept).map(describe).collect();
+        let mut stale: Vec<String> = kept.difference(&fresh).map(describe).collect();
+        missing.sort();
+        stale.sort();
+        USE_INDEX_DRIFT.with(|drift| *drift.borrow_mut() = (missing, stale));
+    }
+
     fn build(func: &MirFunc) -> Self {
         let mut index = Self::default();
         for (bid, block) in func.blocks.iter() {
@@ -874,6 +904,13 @@ impl UseIndex {
         func.insts[iid].uses_each(&mut |value| {
             self.add_use(value, UseSite::Inst(iid));
         });
+    }
+
+    /// Index every instruction allocated at or after arena position `mark`.
+    fn add_insts_from(&mut self, func: &MirFunc, mark: usize) {
+        for (iid, _) in func.insts.iter().skip(mark) {
+            self.add_inst(func, iid);
+        }
     }
 
     fn remove_inst(&mut self, func: &MirFunc, iid: Idx<Inst>) {
@@ -2868,6 +2905,8 @@ fn splice_straight(
     let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id());
     let coalesced_cells = coalesce_overrides(func, cand, &args, scratch);
     let maps = clone_cells_insts(func, callee, scratch);
+    // The bound element repack allocates after the clone, outside `inst_ids`.
+    let repack_mark = func.insts.len();
     resolve_cloned_bound_calls(
         func,
         callee,
@@ -2883,6 +2922,7 @@ fn splice_straight(
     for &iid in &scratch.inst_ids {
         uses.add_inst(func, iid);
     }
+    uses.add_insts_from(func, repack_mark);
 
     // The call leaves the block, so its argument uses disappear. Its result
     // users remain indexed until the exact binding below replaces them.
@@ -2984,6 +3024,8 @@ fn splice_general(
     let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id());
     let coalesced_cells = coalesce_overrides(func, cand, &args, scratch);
     let maps = clone_all(func, callee, scratch);
+    // The bound element repack allocates after the clone, outside `inst_ids`.
+    let repack_mark = func.insts.len();
     resolve_cloned_bound_calls(
         func,
         callee,
@@ -2999,6 +3041,7 @@ fn splice_general(
     for &iid in &scratch.inst_ids {
         uses.add_inst(func, iid);
     }
+    uses.add_insts_from(func, repack_mark);
     for &bid in scratch.block_map.values() {
         uses.add_term(func, bid);
     }
@@ -3290,6 +3333,8 @@ fn inline_functions_inner(
         let mut seen: HashSet<ustr::Ustr> = HashSet::default();
         func.statics.retain(|sc| seen.insert(sc.cell));
     }
+    #[cfg(test)]
+    uses.record_drift(func);
     scan_stats.add(std::mem::take(&mut cache.census));
     for record in &records {
         if record.straight {
@@ -3567,6 +3612,147 @@ mod tests {
             }
         );
         assert_eq!(func.blocks[else_bb].term, Term::Return(vec![to]));
+    }
+
+    /// Issue #5: `bound::repack_bound_next_element` allocates the element's
+    /// leaf loads, its rebuilt aggregate and the store into the element cell
+    /// AFTER the splice cloned the callee. The splice's `UseIndex` must cover
+    /// those users like every other instruction it adds.
+    ///
+    /// Consistent plans never reach the repack on this path: the lowering sees
+    /// the same element shape as the witness and splits the element itself.
+    /// The witness result is therefore perturbed to `(bool, Pair)` under an
+    /// `Iterator<int>` body, the same disagreement the standalone rewrite's
+    /// plan test uses, so the production splice has to rebuild a `Pair`.
+    #[test]
+    fn use_index_covers_bound_element_repack_after_splice() {
+        let src = r#"
+nobox value Pair { x: int, y: int }
+struct Counter { n: int }
+fn next(c: Counter) -> (bool, int) {
+    if c.n >= 3 { return (false, 0) }
+    c.n = c.n + 1
+    return (true, c.n)
+}
+fn sum_all<I: Iterator<int>>(it: I) -> int {
+    let s = 0
+    for x in it { s = s + 1 }
+    return s
+}
+fn top() -> int { return sum_all(Counter { n: 0 }) }
+"#;
+        let mut modules: Vec<_> = rock_stdlib::stdlib_files()
+            .iter()
+            .map(|file| {
+                let id = Ustr::from(rock_stdlib::stdlib_file_id(file.name).as_str());
+                skull_parser::parse_module_clean(file.contents, id).expect("stdlib parse")
+            })
+            .collect();
+        modules.push(
+            skull_parser::parse_module_clean(src, Ustr::from("<repack-index>")).expect("parse"),
+        );
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<repack-index>"))
+            .expect("module");
+        let (fid, _) = ws
+            .module(mid)
+            .functions
+            .iter()
+            .find(|(_, f)| f.name.as_str() == "top")
+            .expect("top");
+        let top = FuncRef {
+            module: mid,
+            func: fid,
+        };
+        let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
+        let graph = skull_graph::instance_graph::build_in(
+            &ws,
+            vec![top],
+            false,
+            std::sync::Arc::clone(&interner),
+        );
+        let concrete = skull_graph::concrete_body::build(&ws, &graph);
+        let scx = ScalarCtx::new(&ws).sharing(std::sync::Arc::clone(&interner));
+
+        let witness = concrete
+            .plans
+            .values()
+            .flat_map(|plan| plan.bound_tree.next.values())
+            .find_map(|next| match next {
+                skull_mir::bound::ResolvedBoundNext::Concrete { instance, .. } => {
+                    Some(instance.clone())
+                }
+                skull_mir::bound::ResolvedBoundNext::CallerGeneric(_) => None,
+            })
+            .expect("fixture has no concrete bound witness");
+        // A context plans each callee ABI once. Lowering the bounded body from
+        // the intact plans settles the witness ABI the lowering sizes the
+        // element from, so only the repack's own signature read sees the
+        // perturbation below.
+        for plan in concrete.plans.values() {
+            if !plan.bound_tree.is_empty() {
+                skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &concrete.plans)
+                    .expect("intact bounded body");
+            }
+        }
+        let pair = skull_mir::monoty::MonoTy::App {
+            ctor: skull_mir::monoty::MonoCtor::Nominal(Ustr::from("Pair")),
+            params: Vec::new(),
+        };
+        let wrong_result = interner.intern(skull_mir::monoty::MonoTy::Tuple(vec![
+            skull_mir::monoty::MonoTy::Bool,
+            pair,
+        ]));
+        let mut plans = (*concrete.plans).clone();
+        for (inst, plan) in plans.iter_mut() {
+            let plan = std::sync::Arc::make_mut(plan);
+            if *inst == witness {
+                std::sync::Arc::make_mut(&mut plan.signature).result = Some(wrong_result);
+            }
+            let sites: Vec<_> = plan
+                .callees
+                .iter()
+                .filter(|(_, callee)| **callee == witness)
+                .map(|(site, _)| site.clone())
+                .collect();
+            for site in sites {
+                let signature = plan
+                    .callee_signatures
+                    .get_mut(&site)
+                    .expect("witness site signature");
+                std::sync::Arc::make_mut(signature).result = Some(wrong_result);
+            }
+        }
+
+        let plan = plans.get(&Instance::base(top)).expect("top plan");
+        let mut func = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &plans)
+            .expect("lower top");
+        let mut cache = InlineCache::default();
+        inline_functions_with_plans(&ws, &scx, top, &mut func, &mut cache, &plans)
+            .expect("inline top");
+
+        let rebuilt = func.blocks.iter().any(|(_, block)| {
+            block.insts.iter().any(|iid| {
+                matches!(
+                    &func.insts[*iid],
+                    Inst::MakeValueStruct {
+                        form: ValueCtorForm::Leaves,
+                        ..
+                    }
+                )
+            })
+        });
+        assert!(
+            rebuilt,
+            "the splice did not repack a splatted bound element"
+        );
+        let (missing, stale) = USE_INDEX_DRIFT.with(|drift| drift.borrow().clone());
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "inliner UseIndex drifted from the caller body\nmissing: {missing:#?}\nstale: {stale:#?}"
+        );
     }
 
     #[test]

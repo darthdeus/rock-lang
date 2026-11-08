@@ -2447,6 +2447,7 @@ dependencies = [
  "bone-semantic",
  "comfy-la-arena",
  "log",
+ "rock-stdlib",
  "rustc-hash",
  "skull-codegen-lua",
  "skull-graph",
