@@ -157,81 +157,110 @@ pub enum ShaderLanguage {
     Glsl,
 }
 
-/// Emit the whole workspace. `user_mid` is the entry module. Registered shaders
-/// emit Core330 for desktop OpenGL.
+/// Emit the whole workspace once. `user_mid` is the entry module. Registered
+/// shaders emit Core330 for desktop OpenGL. See [`FullEmit`] for the other
+/// build kinds and options.
 pub fn emit_workspace_mir(ws: &Workspace, user_mid: ModuleId) -> Result<MirEmit, CompilerError> {
-    emit_workspace_mir_in(ws, user_mid, None)
+    FullEmit::one_shot()
+        .run(ws, user_mid)
+        .map(|(emit, _cache)| emit)
 }
 
-/// [`emit_workspace_mir`] for a PROJECT build: `project_root` is the target's
-/// directory, so modules outside it (a stick.toml dependency such as a host library) are
-/// libraries and prune down to what the project reaches. See [`is_library_module`].
-pub fn emit_workspace_mir_in(
+/// Full emit: populate the chunk cache for every retained ordinary/coroutine
+/// body, then assemble. Byte-identical to the pre-cache emit. Returns the cache
+/// so a later [`emit_incremental`] can reuse the unchanged chunks.
+///
+/// The per-body chunk emit runs in PARALLEL ([`par_map_with`], one
+/// [`InlineCache`](skull_transform::InlineCache) per rayon worker) by default;
+/// `--features sequential` forces single-threaded iteration. The cache is keyed by
+/// [`FuncRef`], so the (nondeterministic) insertion order never reaches the output
+/// — `assemble` walks modules in source order and pulls by key.
+pub fn emit_full(
     ws: &Workspace,
     user_mid: ModuleId,
-    project_root: Option<&str>,
-) -> Result<MirEmit, CompilerError> {
-    emit_workspace_mir_in_for_renderer(ws, user_mid, project_root, RendererTarget::Gl)
-}
-
-pub fn emit_workspace_mir_in_for_renderer(
-    ws: &Workspace,
-    user_mid: ModuleId,
-    project_root: Option<&str>,
-    renderer_target: RendererTarget,
-) -> Result<MirEmit, CompilerError> {
-    let _allocation_environment = crate::allocation_report::environment_scope();
-    emit_full_in_with_mutation(
-        ws,
-        user_mid,
-        project_root,
-        BodyMutation::None,
-        renderer_target,
-        FullBuild::OneShotProgram,
-        ShapeOverrides::default(),
-    )
-    .map(|(emit, _cache)| emit)
-}
-
-/// Sim receipt emission keeps the shared workspace but roots only selected
-/// sims, their registry dependencies, main and the global roots.
-pub fn emit_full_for_selected_sims(
-    ws: &Workspace,
-    user_mid: ModuleId,
-    project_root: Option<&str>,
-    renderer_target: RendererTarget,
-    sims: &[String],
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    let _allocation_environment = crate::allocation_report::environment_scope();
-    emit_full_in_with_mutation(
-        ws,
-        user_mid,
-        project_root,
-        BodyMutation::None,
-        renderer_target,
-        FullBuild::SelectedSims(sims),
-        ShapeOverrides::default(),
-    )
+    FullEmit::program().run(ws, user_mid)
 }
 
-/// [`emit_workspace_mir`] for a package's `rock test` program, rooted at its
-/// `tests`. See [`BuildKind::PackageTest`].
-pub fn emit_workspace_mir_for_package_test(
-    ws: &Workspace,
-    user_mid: ModuleId,
-    tests: &[FuncRef],
-) -> Result<MirEmit, CompilerError> {
-    let _allocation_environment = crate::allocation_report::environment_scope();
-    emit_full_in_with_mutation(
-        ws,
-        user_mid,
-        None,
-        BodyMutation::None,
-        RendererTarget::Gl,
-        FullBuild::PackageTest(tests),
-        ShapeOverrides::default(),
-    )
-    .map(|(emit, _cache)| emit)
+/// One full emit: the build kind it starts from, refined by the builder methods.
+#[derive(Clone, Copy)]
+pub struct FullEmit<'a> {
+    build: FullBuild<'a>,
+    project_root: Option<&'a str>,
+    renderer_target: RendererTarget,
+    shapes: ShapeOverrides,
+    mutation: BodyMutation,
+}
+
+impl<'a> FullEmit<'a> {
+    fn new(build: FullBuild<'a>) -> Self {
+        Self {
+            build,
+            project_root: None,
+            renderer_target: RendererTarget::Gl,
+            shapes: ShapeOverrides::default(),
+            mutation: BodyMutation::None,
+        }
+    }
+
+    /// A program that may be reloaded in place. The returned cache serves
+    /// later [`emit_incremental`] and [`emit_overlay`] builds.
+    pub fn program() -> Self {
+        Self::new(FullBuild::Program)
+    }
+
+    /// A program emitted once. Its graph, plans and chunks are released during
+    /// assembly, so the returned cache cannot serve a later build.
+    pub fn one_shot() -> Self {
+        Self::new(FullBuild::OneShotProgram)
+    }
+
+    /// A package's `rock test` program, rooted at its `tests`. See
+    /// [`BuildKind::PackageTest`].
+    pub fn package_test(tests: &'a [FuncRef]) -> Self {
+        Self::new(FullBuild::PackageTest(tests))
+    }
+
+    /// Sim receipt emission keeps the shared workspace but roots only selected
+    /// sims, their registry dependencies, main and the global roots.
+    pub fn selected_sims(sims: &'a [String]) -> Self {
+        Self::new(FullBuild::SelectedSims(sims))
+    }
+
+    /// Scope the build to a PROJECT directory: modules outside it (a
+    /// stick.toml dependency such as a host library) are libraries and prune
+    /// down to what the project reaches. See [`is_library_module`].
+    pub fn project_root(mut self, project_root: Option<&'a str>) -> Self {
+        self.project_root = project_root;
+        self
+    }
+
+    pub fn renderer(mut self, renderer_target: RendererTarget) -> Self {
+        self.renderer_target = renderer_target;
+        self
+    }
+
+    /// Explicit emitted shapes, for tests that must emit several shapes in
+    /// one process.
+    pub fn shapes(mut self, shapes: ShapeOverrides) -> Self {
+        self.shapes = shapes;
+        self
+    }
+
+    #[cfg(test)]
+    fn mutation(mut self, mutation: BodyMutation) -> Self {
+        self.mutation = mutation;
+        self
+    }
+
+    pub fn run(
+        self,
+        ws: &Workspace,
+        user_mid: ModuleId,
+    ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+        let _allocation_environment = crate::allocation_report::environment_scope();
+        emit_full_build(ws, user_mid, self)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,22 +278,6 @@ pub enum BuildKind {
     PackageTest,
 }
 
-/// Full emit: populate the chunk cache for every retained ordinary/coroutine
-/// body, then assemble. Byte-identical to the pre-cache emit. Returns the cache
-/// so a later [`emit_incremental`] can reuse the unchanged chunks.
-///
-/// The per-body chunk emit runs in PARALLEL ([`par_map_with`], one
-/// [`InlineCache`](skull_transform::InlineCache) per rayon worker) by default;
-/// `--features sequential` forces single-threaded iteration. The cache is keyed by
-/// [`FuncRef`], so the (nondeterministic) insertion order never reaches the output
-/// — `assemble` walks modules in source order and pulls by key.
-pub fn emit_full(
-    ws: &Workspace,
-    user_mid: ModuleId,
-) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    emit_full_in_for_renderer(ws, user_mid, None, RendererTarget::Gl)
-}
-
 /// Emitted-shape overrides for one emit, for a test that must drive two
 /// shapes in one test binary. `Default` -- `None` everywhere -- is the
 /// production path.
@@ -279,25 +292,6 @@ pub struct ShapeOverrides {
     /// Overrides `ROCK_SKULL_LINE_DIRECTIVES`
     /// (`skull_codegen_lua::CodegenCtx::set_line_directives`).
     pub line_directives: Option<bool>,
-}
-
-/// [`emit_full`] under explicit emitted shapes. For tests that must emit
-/// several shapes in one process.
-pub fn emit_full_with_shapes(
-    ws: &Workspace,
-    user_mid: ModuleId,
-    shapes: ShapeOverrides,
-) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    let _allocation_environment = crate::allocation_report::environment_scope();
-    emit_full_in_with_mutation(
-        ws,
-        user_mid,
-        None,
-        BodyMutation::None,
-        RendererTarget::Gl,
-        FullBuild::Program,
-        shapes,
-    )
 }
 
 /// Absolutize `project_root` so it can be path-component-matched against module file
@@ -329,31 +323,4 @@ fn canonical_project_root(
         )));
     }
     Ok(Some(abs))
-}
-
-/// [`emit_full`] scoped to a project directory; see [`is_library_module`].
-pub fn emit_full_in(
-    ws: &Workspace,
-    user_mid: ModuleId,
-    project_root: Option<&str>,
-) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    emit_full_in_for_renderer(ws, user_mid, project_root, RendererTarget::Gl)
-}
-
-pub fn emit_full_in_for_renderer(
-    ws: &Workspace,
-    user_mid: ModuleId,
-    project_root: Option<&str>,
-    renderer_target: RendererTarget,
-) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    let _allocation_environment = crate::allocation_report::environment_scope();
-    emit_full_in_with_mutation(
-        ws,
-        user_mid,
-        project_root,
-        BodyMutation::None,
-        renderer_target,
-        FullBuild::Program,
-        ShapeOverrides::default(),
-    )
 }

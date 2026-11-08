@@ -44,10 +44,10 @@ pub(super) struct StaticBaseline {
 pub struct SkullEmitCache {
     pub(super) chunks: FxHashMap<Instance, Result<Chunk, CompilerError>>,
     pub(super) concrete: crate::concrete_body::ConcreteBodies,
-    /// **The authoritative instance graph, built EAGERLY by `emit_full_in`
+    /// **The authoritative instance graph, built EAGERLY by the full build
     /// before any chunk is lowered, and retained across body edits.**
     ///
-    /// `emit_full_in` mints the arena, builds this graph into it FIRST, and
+    /// The full build mints the arena, builds this graph into it FIRST, and
     /// hands the same `Arc<MonoInterner>` to `scx` (`ScalarCtx::sharing`) --
     /// that order is load-bearing, because an `Instance` the graph minted has
     /// to mean something to lowering. There is no lazy/first-edit path: a
@@ -59,7 +59,7 @@ pub struct SkullEmitCache {
     /// which would invalidate every `Instance` key in this cache.
     pub(super) graph: crate::instance_graph::InstanceGraph,
     /// The Lua artifact's realization of `graph`, from the SAME roots
-    /// `emit_full_in` builds the graph from. Recomputed by every full/edit
+    /// the full build builds the graph from. Recomputed by every full/edit
     /// cycle that touches the graph, so it never drifts from what emission
     /// actually discovers.
     pub(super) lua_view: crate::artifact::ArtifactView,

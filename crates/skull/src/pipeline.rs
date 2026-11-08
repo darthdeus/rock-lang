@@ -163,12 +163,11 @@ pub trait CompileHost {
         entry: ModuleId,
         target: EmitTarget,
     ) -> Result<MirEmit, CompilerError> {
-        crate::mir_emit::emit_workspace_mir_in_for_renderer(
-            ws,
-            entry,
-            target.project_root,
-            target.renderer,
-        )
+        crate::mir_emit::FullEmit::one_shot()
+            .project_root(target.project_root)
+            .renderer(target.renderer)
+            .run(ws, entry)
+            .map(|(emit, _cache)| emit)
     }
 }
 

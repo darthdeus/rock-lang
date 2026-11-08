@@ -599,7 +599,7 @@ fn main() {
             .find(|m| m.id != ModuleId::builtin())
             .expect("test module")
             .id;
-        let (emit, cache) = emit_full_in_with_test_mutation(&ws, mid, mutation)?;
+        let (emit, cache) = FullEmit::program().mutation(mutation).run(&ws, mid)?;
         Ok((ws, cache, emit))
     }
 
@@ -650,11 +650,10 @@ fn main() {
             .get(&Ustr::from("<bound-plan-test>"))
             .expect("test module");
         let body = ref_for(&ws, "total");
-        let err = match emit_full_in_with_test_mutation(
-            &ws,
-            mid,
-            BodyMutation::ClearBoundPlan { body },
-        ) {
+        let err = match FullEmit::program()
+            .mutation(BodyMutation::ClearBoundPlan { body })
+            .run(&ws, mid)
+        {
             Ok(_) => panic!("emission ignored the poisoned concrete bound plan"),
             Err(err) => err,
         };
@@ -673,18 +672,16 @@ fn main() {
             .get(&Ustr::from("<coroutine-plan-test>"))
             .expect("test module");
         let body = ref_for(&ws, "worker");
-        let (intact, intact_cache) =
-            emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None).expect("intact emission");
+        let (intact, intact_cache) = emit_full(&ws, mid).expect("intact emission");
         let symbol = Instance::base(body).symbol(&ws, intact_cache.scx.interner());
         assert!(
             intact.lua.contains(&format!("function {symbol}__advance(")),
             "the intact coroutine fixture must exercise the concrete yield channel"
         );
-        let err = match emit_full_in_with_test_mutation(
-            &ws,
-            mid,
-            BodyMutation::ClearCoroutineResultPlan { body },
-        ) {
+        let err = match FullEmit::program()
+            .mutation(BodyMutation::ClearCoroutineResultPlan { body })
+            .run(&ws, mid)
+        {
             Ok(_) => panic!("emission ignored the poisoned coroutine result plan"),
             Err(err) => err,
         };
@@ -704,11 +701,10 @@ fn main() {
             .get(&Ustr::from("<bound-plan-test>"))
             .expect("test module");
         let body = ref_for(&ws, "total");
-        let err = match emit_full_in_with_test_mutation(
-            &ws,
-            mid,
-            BodyMutation::ClearIteratorWitnessInstance { body },
-        ) {
+        let err = match FullEmit::program()
+            .mutation(BodyMutation::ClearIteratorWitnessInstance { body })
+            .run(&ws, mid)
+        {
             Ok(_) => panic!("emission ignored the missing concrete iterator witness instance"),
             Err(err) => err,
         };
@@ -741,8 +737,7 @@ fn main() { let result = first() }
             .find(|m| m.id != ModuleId::builtin())
             .expect("test module")
             .id;
-        let (emit, cache) =
-            emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None).expect("intact emission");
+        let (emit, cache) = emit_full(&ws, mid).expect("intact emission");
         let stats = cache.scx.abi_plan_stats();
         let (hits, misses) = (stats.hits(), stats.requests() - stats.hits());
         assert!(
@@ -805,22 +800,18 @@ fn main() { let result = first() }
             .find(|module| module.id != ModuleId::builtin())
             .expect("test module")
             .id;
-        let (canonical, _) = emit_full_in_with_test_mutation(
-            &ws,
-            mid,
-            BodyMutation::ConcreteResultOrder(
+        let (canonical, _) = FullEmit::program()
+            .mutation(BodyMutation::ConcreteResultOrder(
                 skull_graph::concrete_body::BuildResultOrder::Canonical,
-            ),
-        )
-        .expect("canonical emission");
-        let (reverse, _) = emit_full_in_with_test_mutation(
-            &ws,
-            mid,
-            BodyMutation::ConcreteResultOrder(
+            ))
+            .run(&ws, mid)
+            .expect("canonical emission");
+        let (reverse, _) = FullEmit::program()
+            .mutation(BodyMutation::ConcreteResultOrder(
                 skull_graph::concrete_body::BuildResultOrder::Reverse,
-            ),
-        )
-        .expect("reverse emission");
+            ))
+            .run(&ws, mid)
+            .expect("reverse emission");
         assert!(!canonical.lua.is_empty(), "fixture emitted no Lua artifact");
         assert_eq!(canonical.lua, reverse.lua);
     }
@@ -841,9 +832,10 @@ fn main() { let result = first() }
             .find(|m| m.id != ModuleId::builtin())
             .expect("test module")
             .id;
-        let (_, cache) =
-            emit_full_in_with_test_mutation(&ws, mid, BodyMutation::SkipAbiPlanPublish)
-                .expect("the bypass must still take the fallback path");
+        let (_, cache) = FullEmit::program()
+            .mutation(BodyMutation::SkipAbiPlanPublish)
+            .run(&ws, mid)
+            .expect("the bypass must still take the fallback path");
         let stats = cache.scx.abi_plan_stats();
         let witness = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             assert!(
@@ -1007,8 +999,7 @@ fn main() { let result = first() }
             .module_ids
             .get(&Ustr::from("<inline-census-test>"))
             .expect("census test module");
-        let (emit, _) =
-            emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None).expect("intact emission");
+        let (emit, _) = emit_full(&ws, mid).expect("intact emission");
         let census = &emit.attribution.inline.census;
         assert!(
             census.candidate_requests > 0
@@ -1157,8 +1148,7 @@ fn main() { let result = first() }
             .module_ids
             .get(&Ustr::from("<inline-census-test>"))
             .expect("census test module");
-        let (emit, _) =
-            emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None).expect("intact emission");
+        let (emit, _) = emit_full(&ws, mid).expect("intact emission");
         let population = &emit.attribution.inline.population;
         assert!(
             population.candidate_published_keys > 0
@@ -1240,8 +1230,7 @@ fn main() { let result = first() }
             .get(&Ustr::from("<specialized-test>"))
             .expect("specialized test module");
         let (specialized_emit, _) =
-            emit_full_in_with_test_mutation(&specialized, specialized_mid, BodyMutation::None)
-                .expect("specialized emission");
+            emit_full(&specialized, specialized_mid).expect("specialized emission");
         let specialized_population = &specialized_emit.attribution.inline.population;
         assert!(
             specialized_population.specialized_consumer_keys > 0
@@ -1381,8 +1370,7 @@ fn main() { let result = first() }
             .module_ids
             .get(&Ustr::from("<inline-cross-block-test>"))
             .expect("cross-block test module");
-        let (emit, _) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
-            .expect("cross-block emission");
+        let (emit, _) = emit_full(&ws, mid).expect("cross-block emission");
         assert!(
             !emit.lua.contains("identity("),
             "the straight callee must still inline in the cross-block fixture"
@@ -1402,9 +1390,7 @@ fn main() { let result = first() }
             .module_ids
             .get(&Ustr::from("<bound-plan-test>"))
             .expect("bounded test module");
-        let (bounded_emit, _) =
-            emit_full_in_with_test_mutation(&bounded, bounded_mid, BodyMutation::None)
-                .expect("bounded emission");
+        let (bounded_emit, _) = emit_full(&bounded, bounded_mid).expect("bounded emission");
         assert!(
             bounded_emit.attribution.counted_loop.bodies_with_work > 0,
             "counted-loop recovery did not report a rewritten body: {:?}",
@@ -1426,9 +1412,7 @@ fn main() { let result = first() }
             .module_ids
             .get(&Ustr::from("<closure-test>"))
             .expect("closure test module");
-        let (closure_emit, _) =
-            emit_full_in_with_test_mutation(&closure, closure_mid, BodyMutation::None)
-                .expect("closure emission");
+        let (closure_emit, _) = emit_full(&closure, closure_mid).expect("closure emission");
         assert!(
             closure_emit.attribution.closure.bodies_with_work > 0,
             "closure conversion did not report a hoisted body: {:?}",
@@ -1446,8 +1430,7 @@ fn main() { let result = first() }
             .get(&Ustr::from("<specialized-test>"))
             .expect("specialized test module");
         let (specialized_emit, _) =
-            emit_full_in_with_test_mutation(&specialized, specialized_mid, BodyMutation::None)
-                .expect("specialized emission");
+            emit_full(&specialized, specialized_mid).expect("specialized emission");
         assert!(
             specialized_emit.attribution.inline.specialized_splices > 0,
             "the specialized fixture did not reach specialized inline splicing: {:?}",
@@ -1475,8 +1458,7 @@ fn main() { let result = outer(1) }
             .find(|m| m.id != ModuleId::builtin())
             .expect("test module")
             .id;
-        let (emit, _) =
-            emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None).expect("nested emission");
+        let (emit, _) = emit_full(&ws, mid).expect("nested emission");
         assert!(
             emit.attribution.lower.mir_instruction_allocations
                 > emit.attribution.lower.instructions_visited,
@@ -1494,12 +1476,12 @@ fn main() { let result = outer(1) }
             .module_ids
             .get(&Ustr::from("<setup-lane-test>"))
             .expect("setup test module");
-        let (emit, cache) = emit_full_in_with_test_mutation(
-            &ws,
-            mid,
-            BodyMutation::SetupLaneSchedule(SetupLaneSchedule::Handshake),
-        )
-        .expect("setup lane emission");
+        let (emit, cache) = FullEmit::program()
+            .mutation(BodyMutation::SetupLaneSchedule(
+                SetupLaneSchedule::Handshake,
+            ))
+            .run(&ws, mid)
+            .expect("setup lane emission");
         let lanes = emit.setup_lanes;
         assert!(
             lanes.cpu_population > 0 && lanes.shader_population > 0 && lanes.abi_population > 0,
@@ -1534,8 +1516,7 @@ fn main() { let result = outer(1) }
             .module_ids
             .get(&Ustr::from("<setup-lane-test>"))
             .expect("setup test module");
-        let (emit, _) = emit_full_in_with_test_mutation(&ws, mid, BodyMutation::None)
-            .expect("setup lane emission");
+        let (emit, _) = emit_full(&ws, mid).expect("setup lane emission");
         let lanes = emit.setup_lanes;
         assert!(
             lanes.cpu_population > 0 && lanes.shader_population > 0 && lanes.abi_population > 0,
@@ -1562,7 +1543,9 @@ fn main() { let result = outer(1) }
             .get(&Ustr::from("<setup-lane-test>"))
             .expect("setup test module");
         let emit = |schedule| {
-            emit_full_in_with_test_mutation(&ws, mid, BodyMutation::SetupLaneSchedule(schedule))
+            FullEmit::program()
+                .mutation(BodyMutation::SetupLaneSchedule(schedule))
+                .run(&ws, mid)
                 .expect("setup lane emission")
         };
         let (cpu_first, cpu_cache) = emit(SetupLaneSchedule::CpuFirst);

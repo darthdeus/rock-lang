@@ -132,22 +132,6 @@ pub(super) struct ShaderRegistrations {
     pub(super) keys: BTreeSet<String>,
 }
 
-#[cfg(test)]
-pub(super) fn emit_full_in_with_test_mutation(
-    ws: &Workspace,
-    user_mid: ModuleId,
-    mutation: BodyMutation,
-) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
-    emit_full_in_with_mutation(
-        ws,
-        user_mid,
-        None,
-        mutation,
-        RendererTarget::Gl,
-        FullBuild::Program,
-        ShapeOverrides::default(),
-    )
-}
 /// Setup timings in run order, reported ahead of assembly's own phases.
 #[derive(Default)]
 struct SetupPhases(Vec<(&'static str, Duration)>);
@@ -947,15 +931,18 @@ impl SkullEmitCache {
     }
 }
 
-pub(super) fn emit_full_in_with_mutation(
+pub(super) fn emit_full_build(
     ws: &Workspace,
     user_mid: ModuleId,
-    project_root: Option<&str>,
-    mutation: BodyMutation,
-    renderer_target: RendererTarget,
-    build: FullBuild<'_>,
-    shapes: ShapeOverrides,
+    options: FullEmit<'_>,
 ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+    let FullEmit {
+        build,
+        project_root,
+        renderer_target,
+        shapes,
+        mutation,
+    } = options;
     let mut setup_phases = SetupPhases::default();
     let project_root = setup_phases.timed("setup: validation+context", || {
         let project_root = canonical_project_root(ws, project_root)?;

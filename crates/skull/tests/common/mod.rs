@@ -262,7 +262,9 @@ pub fn emit_module_shaped(
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     let mid = *ws.module_ids.get(&Ustr::from(file)).expect("module id");
-    skull::mir_emit::emit_full_with_shapes(&ws, mid, shapes)
+    skull::mir_emit::FullEmit::program()
+        .shapes(shapes)
+        .run(&ws, mid)
         .map(|(emit, _cache)| emit.lua)
         .expect("emit under explicit shapes")
 }

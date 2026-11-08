@@ -161,7 +161,9 @@ impl skull::pipeline::CompileHost for PackageTestHost<'_> {
     ) -> std::result::Result<skull::mir_emit::MirEmit, CompilerError> {
         let test_fns = collect_package_test_fns(ws, self.test_dir)?;
         let roots = test_fns.iter().map(|(func, _)| *func).collect::<Vec<_>>();
-        skull::mir_emit::emit_workspace_mir_for_package_test(ws, entry, &roots)
+        skull::mir_emit::FullEmit::package_test(&roots)
+            .run(ws, entry)
+            .map(|(emit, _cache)| emit)
     }
 }
 
@@ -3237,15 +3239,15 @@ impl IncrementalProject {
             let mid = skull::user_module_id(ws).map_err(no_user_module)?;
             let selected = select_sims(ws)?;
             let (emit, c) = if let Some(selected) = selected {
-                skull::mir_emit::emit_full_for_selected_sims(
-                    ws,
-                    mid,
-                    Some(dir),
-                    renderer_target,
-                    &selected,
-                )
+                skull::mir_emit::FullEmit::selected_sims(&selected)
+                    .project_root(Some(dir))
+                    .renderer(renderer_target)
+                    .run(ws, mid)
             } else {
-                skull::mir_emit::emit_full_in_for_renderer(ws, mid, Some(dir), renderer_target)
+                skull::mir_emit::FullEmit::program()
+                    .project_root(Some(dir))
+                    .renderer(renderer_target)
+                    .run(ws, mid)
             }
             .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
             let allocation_report_path = allocation_report_path_from_env();
@@ -3565,15 +3567,13 @@ impl IncrementalProject {
             let lua = {
                 let ws = self.project.workspace();
                 let mid = skull::user_module_id(ws).map_err(no_user_module)?;
-                let (emit, c) = skull::mir_emit::emit_full_in_for_renderer(
-                    ws,
-                    mid,
-                    Some(self.project.dir()),
-                    self.renderer_target,
-                )
-                .map_err(|e| {
-                    anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e))
-                })?;
+                let (emit, c) = skull::mir_emit::FullEmit::program()
+                    .project_root(Some(self.project.dir()))
+                    .renderer(self.renderer_target)
+                    .run(ws, mid)
+                    .map_err(|e| {
+                        anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e))
+                    })?;
                 if self
                     .cache
                     .global_layout()
@@ -3741,13 +3741,11 @@ impl IncrementalProject {
         let (lua, cache, artifact_fingerprint, emits_main) = {
             let ws = self.project.workspace();
             let mid = skull::user_module_id(ws).map_err(no_user_module)?;
-            let (emit, c) = skull::mir_emit::emit_full_in_for_renderer(
-                ws,
-                mid,
-                Some(self.project.dir()),
-                self.renderer_target,
-            )
-            .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
+            let (emit, c) = skull::mir_emit::FullEmit::program()
+                .project_root(Some(self.project.dir()))
+                .renderer(self.renderer_target)
+                .run(ws, mid)
+                .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
             let artifact_fingerprint = emit.artifact_fingerprint.clone();
             let emits_main = emit.emits_main;
             let lua =

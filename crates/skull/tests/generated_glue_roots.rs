@@ -130,7 +130,9 @@ fn shared_prefix_dependency_retains_only_reached_bodies() {
         .module_ids
         .get(&Ustr::from("/tmp/rock-mono-project/main.rock"))
         .expect("project module");
-    let (emit, mut cache) = skull::mir_emit::emit_full_in(&ws, mid, Some("/tmp/rock-mono-project"))
+    let (emit, mut cache) = skull::mir_emit::FullEmit::program()
+        .project_root(Some("/tmp/rock-mono-project"))
+        .run(&ws, mid)
         .expect("pruned dependency bodies must not require lowering plans");
     let unused = Instance::base(fn_ref(&ws, "unused_dependency_body"));
     let reached = Instance::base(fn_ref(&ws, "reached_dependency_body"));
@@ -177,7 +179,9 @@ fn shared_prefix_dependency_retains_only_reached_bodies() {
         !cache.lua_view().retains(&removed),
         "cached roots must not pin sibling bodies"
     );
-    let fresh = skull::mir_emit::emit_full_in(&edited, main.module, Some("/tmp/rock-mono-project"))
+    let fresh = skull::mir_emit::FullEmit::program()
+        .project_root(Some("/tmp/rock-mono-project"))
+        .run(&edited, main.module)
         .expect("fresh emission after removing the dependency call")
         .0;
     assert_eq!(incremental.lua, fresh.lua);
@@ -377,7 +381,9 @@ fn a_shared_prefix_alone_does_not_validate_the_project_root() {
         .module_ids
         .get(&Ustr::from("/tmp/rock-mono-project/main.rock"))
         .unwrap();
-    let result = skull::mir_emit::emit_full_in(&ws, mid, Some("/tmp/rock-mono"));
+    let result = skull::mir_emit::FullEmit::program()
+        .project_root(Some("/tmp/rock-mono"))
+        .run(&ws, mid);
     assert!(
         result.is_err(),
         "textual prefixes must not validate a nonexistent project root"
@@ -395,9 +401,10 @@ fn nested_project_sources_keep_uncalled_public_functions() {
         }],
     );
     let mid = *ws.module_ids.get(&Ustr::from(file)).expect("nested module");
-    let (emit, cache) =
-        skull::mir_emit::emit_full_in(&ws, mid, Some("/tmp/rock-root-contract/app"))
-            .expect("a nested source validates its project root");
+    let (emit, cache) = skull::mir_emit::FullEmit::program()
+        .project_root(Some("/tmp/rock-root-contract/app"))
+        .run(&ws, mid)
+        .expect("a nested source validates its project root");
     let api = Instance::base(fn_ref(&ws, "root_contract::helpers::uncalled_api"));
     assert!(
         cache.lua_view().retains(&api),
@@ -434,7 +441,9 @@ fn shared_prefix_dependency_keeps_bare_name_api_roots() {
         .module_ids
         .get(&Ustr::from("/tmp/rock-mono-project/main.rock"))
         .expect("project module");
-    let (emit, cache) = skull::mir_emit::emit_full_in(&ws, mid, Some("/tmp/rock-mono-project"))
+    let (emit, cache) = skull::mir_emit::FullEmit::program()
+        .project_root(Some("/tmp/rock-mono-project"))
+        .run(&ws, mid)
         .expect("dependency API emission");
     let api = Instance::base(fn_ref(&ws, "external_api"));
     assert!(

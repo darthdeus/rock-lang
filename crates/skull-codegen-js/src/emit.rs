@@ -3300,7 +3300,7 @@ fn emit_ginit_with_nested(
 /// an `Instance` is an identity only relative to its arena, so every graph,
 /// view, name, and delivery structure in one session reads the same interner.
 ///
-/// The luajit driver already owns its own (`skull::mir_emit::emit_full_in`);
+/// The luajit driver already owns its own (`skull::mir_emit::FullEmit`);
 /// this is that same rule for JS.
 fn js_scx(ws: &Workspace) -> skull_mir::lower::ScalarCtx {
     skull_mir::lower::ScalarCtx::new(ws).with_target(bone_semantic::hir::FnBackend::Js)

@@ -1563,7 +1563,7 @@ pub fn build(ws: &Workspace, roots: Vec<FuncRef>, perturb: bool) -> InstanceGrap
 
 /// [`build`] against an arena the caller already owns.
 ///
-/// THE entry production uses: `emit_full_in` retains both the graph and the
+/// THE entry production uses: `skull::mir_emit::FullEmit` retains both the graph and the
 /// `ScalarCtx` that lowers against it, and they must share one arena or an
 /// `Instance` minted by the graph means nothing to emission.
 pub fn build_in(

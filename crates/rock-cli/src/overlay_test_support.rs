@@ -124,9 +124,11 @@ pub fn direct_overlay(root: &str, target_suffix: &str, edited: &str) -> String {
             .expect("session");
     let renderer = skull::mir_emit::RendererTarget::Gl;
     let mid = skull::user_module_id(session.workspace()).expect("user module");
-    let (_, mut cache) =
-        skull::mir_emit::emit_full_in_for_renderer(session.workspace(), mid, Some(root), renderer)
-            .expect("fresh emit");
+    let (_, mut cache) = skull::mir_emit::FullEmit::program()
+        .project_root(Some(root))
+        .renderer(renderer)
+        .run(session.workspace(), mid)
+        .expect("fresh emit");
     let update = session.update_file(&target, edited).expect("edit");
     assert!(matches!(
         update.tier,
