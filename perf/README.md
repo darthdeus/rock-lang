@@ -27,9 +27,19 @@ user path.
 ```sh
 perf/run.py                       # build, measure HEAD, append, print deltas
 perf/run.py --no-build --runs 5   # quicker, reuse the existing release binary
+perf/run.py --quick --no-build    # about 10 s: iterate on a change, see deltas
 perf/report.py                    # write perf/report.html from the history
-perf/backfill.py --since 2026-11-01 --step 5   # measure past commits
+perf/backfill.py --from 7d1204f0 --step 10   # measure past commits
 ```
+
+`--quick` runs 3 hyperfine runs and 3 iterations on `packages/stone` only,
+skips the LSP survey, and writes to `quick.jsonl` beside the main history so
+iteration rows never enter the tracked series. `--only cold,incremental`
+narrows any run to the metric groups named (`cold`, `phases`,
+`incremental`, `lsp`). Each run prints its headline numbers with the
+percentage change from the previous row in the same file, so the loop while
+working on a change is: edit, `cargo build --release -p rock-cli --bin rock`,
+`perf/run.py --quick --no-build`, read the deltas.
 
 `perf/report.html` is generated and not committed. Open it in a browser; the
 corpus selector switches every chart and the table.

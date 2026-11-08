@@ -181,32 +181,39 @@ def summarize_lsp(report):
     return out
 
 
+GROUPS = ("cold", "phases", "incremental", "lsp")
+
+
 def measure_corpus(rock, repo, corpus_dir, args, env):
     corpus = {}
-    with tempfile.TemporaryDirectory(prefix="rock-perf-") as tmp:
-        out = Path(tmp) / "out.lua"
-        corpus["cold_compile"], err = hyperfine(
-            f"{rock} compile {corpus_dir} --output {out}", args.runs, args.warmup_runs, env, repo)
+    warmup = str(min(2, args.iters))
+    if "cold" in args.only:
+        with tempfile.TemporaryDirectory(prefix="rock-perf-") as tmp:
+            out = Path(tmp) / "out.lua"
+            corpus["cold_compile"], err = hyperfine(
+                f"{rock} compile {corpus_dir} --output {out}", args.runs, args.warmup_runs, env, repo)
+            if err:
+                corpus["cold_compile_error"] = err
+            corpus["cold_check"], err = hyperfine(
+                f"{rock} check {corpus_dir}", args.runs, args.warmup_runs, env, repo)
+            if err:
+                corpus["cold_check_error"] = err
+
+    if "phases" in args.only:
+        report, err = run_json(rock, ["backend-stats", corpus_dir, "--iters", str(args.iters),
+                                      "--warmup", warmup], env, repo)
+        corpus["backend_stats"] = summarize_backend_stats(report) if report else None
         if err:
-            corpus["cold_compile_error"] = err
-        corpus["cold_check"], err = hyperfine(
-            f"{rock} check {corpus_dir}", args.runs, args.warmup_runs, env, repo)
+            corpus["backend_stats_error"] = err
+
+    if "incremental" in args.only:
+        report, err = run_json(rock, ["incremental-stats", corpus_dir, "--iters", str(args.iters),
+                                      "--warmup", warmup], env, repo)
+        corpus["incremental"] = summarize_incremental(report) if report else None
         if err:
-            corpus["cold_check_error"] = err
+            corpus["incremental_error"] = err
 
-    report, err = run_json(rock, ["backend-stats", corpus_dir, "--iters", str(args.iters),
-                                  "--warmup", "2"], env, repo)
-    corpus["backend_stats"] = summarize_backend_stats(report) if report else None
-    if err:
-        corpus["backend_stats_error"] = err
-
-    report, err = run_json(rock, ["incremental-stats", corpus_dir, "--iters", str(args.iters),
-                                  "--warmup", "2"], env, repo)
-    corpus["incremental"] = summarize_incremental(report) if report else None
-    if err:
-        corpus["incremental_error"] = err
-
-    if not args.skip_lsp:
+    if "lsp" in args.only and not args.skip_lsp:
         report, err = run_json(rock, ["lsp-survey", corpus_dir, "--iters", str(args.lsp_iters),
                                       "--warmup", "2"], env, repo)
         corpus["lsp"] = summarize_lsp(report) if report else None
@@ -278,7 +285,9 @@ def main():
     parser.add_argument("--bin", help="rock binary; default builds target/release/rock in --repo")
     parser.add_argument("--no-build", action="store_true",
                         help="use the existing target/release/rock without rebuilding")
-    parser.add_argument("--history", type=Path, default=default_history())
+    parser.add_argument("--history", type=Path,
+                        help="history file; default history.jsonl, or quick.jsonl for --quick, "
+                             "under $ROCK_PERF_HISTORY's directory or ~/.local/share/rock-lang/perf")
     parser.add_argument("--corpus", action="append", metavar="NAME=DIR",
                         help="project to measure, relative to --corpus-root (repeatable)")
     parser.add_argument("--corpus-root", help="checkout the corpora are read from; default --repo. "
@@ -289,11 +298,27 @@ def main():
                         help="timed iterations for backend-stats and incremental-stats")
     parser.add_argument("--lsp-iters", type=int, default=15)
     parser.add_argument("--skip-lsp", action="store_true")
+    parser.add_argument("--only", default=",".join(GROUPS),
+                        help="metric groups to measure, comma-separated: " + ", ".join(GROUPS))
+    parser.add_argument("--quick", action="store_true",
+                        help="iterate fast: 3 runs, 3 iters, no LSP survey, the stone corpus only "
+                             "(about 10 s with --no-build); rows are tagged quick")
     parser.add_argument("--note", default="")
     parser.add_argument("--dry-run", action="store_true", help="print the row; do not append")
     args = parser.parse_args()
 
     repo = Path(args.repo).resolve()
+    if args.quick:
+        args.runs, args.warmup_runs, args.iters, args.skip_lsp = 3, 1, 3, True
+        args.corpus = args.corpus or ["stone=packages/stone"]
+    if args.history is None:
+        args.history = default_history()
+        if args.quick:
+            args.history = args.history.with_name("quick.jsonl")
+    args.only = {g.strip() for g in args.only.split(",")}
+    unknown = args.only - set(GROUPS)
+    if unknown:
+        sys.exit(f"unknown --only group(s): {', '.join(sorted(unknown))}")
     if shutil.which("hyperfine") is None:
         sys.exit("hyperfine is required (brew install hyperfine)")
     corpus_root = Path(args.corpus_root).resolve() if args.corpus_root else repo
@@ -321,7 +346,7 @@ def main():
 
     env = measurement_env()
     started = time.time()
-    row = dict(schema=SCHEMA, **rev, measured_at=started, note=args.note,
+    row = dict(schema=SCHEMA, **rev, measured_at=started, note=args.note, quick=args.quick,
                machine=dict(arch=platform.machine(), system=platform.system(),
                             cpus=os.cpu_count(), load_before=os.getloadavg()[0]),
                settings=dict(runs=args.runs, iters=args.iters, lsp_iters=args.lsp_iters),
@@ -332,7 +357,8 @@ def main():
     row["machine"]["load_after"] = os.getloadavg()[0]
     row["elapsed_s"] = time.time() - started
     row["status"] = "ok" if all(
-        c.get("cold_compile") for c in row["corpora"].values()) else "partial"
+        c.get("cold_compile") or "cold" not in args.only
+        for c in row["corpora"].values()) else "partial"
 
     print_summary(row, previous_row(args.history, rev["sha"]))
     if args.dry_run:
