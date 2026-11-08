@@ -5,7 +5,7 @@
 //! "callee not found" in user code -- so any syntax error, recovered or not,
 //! fails the whole load with an error naming the file.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use rock_core::CompilerError;
 use rock_stdlib::StdlibFile;
@@ -14,67 +14,116 @@ use ustr::Ustr;
 use crate::Ast;
 
 /// The process's stdlib ([`rock_stdlib::stdlib_files`]) parsed in load order
-/// under the stdlib session ids. Parsed once.
-pub fn cached() -> &'static Result<Vec<Ast>, CompilerError> {
-    static STDLIB: LazyLock<Result<Vec<Ast>, CompilerError>> =
-        LazyLock::new(|| parse(rock_stdlib::stdlib_files()));
+/// under the stdlib session ids. Parsed once and shared, never edited: a
+/// module set holds it by reference ([`ModuleSet`]), so a cache over its
+/// checked form recognizes it by identity ([`is_process_stdlib`]).
+pub fn cached() -> &'static Result<Arc<[Ast]>, CompilerError> {
+    static STDLIB: LazyLock<Result<Arc<[Ast]>, CompilerError>> =
+        LazyLock::new(|| parse(rock_stdlib::stdlib_files()).map(Arc::from));
     &STDLIB
 }
 
-/// An owned copy of [`cached`], for a compile that consumes its modules.
-pub fn modules() -> Result<Vec<Ast>, CompilerError> {
-    cached().clone()
+/// Whether `stdlib` is the process stdlib itself ([`cached`]), not a copy or
+/// another parse.
+pub fn is_process_stdlib(stdlib: &Arc<[Ast]>) -> bool {
+    cached()
+        .as_ref()
+        .is_ok_and(|cached| Arc::ptr_eq(cached, stdlib))
 }
 
-/// Whether `modules` begin with every module of [`cached`], each exactly as
-/// parsed: same file, facts and tree, and no recorded error. A cache over the
-/// stdlib's checked form may stand in for such a prefix; one a caller edited
-/// or expanded is compared, not trusted by its file id.
-pub fn is_prefix_of(modules: &[Ast]) -> bool {
-    let Ok(stdlib) = cached() else {
-        return false;
-    };
-    modules.len() >= stdlib.len()
-        && stdlib
-            .iter()
-            .zip(modules)
-            .all(|(parsed, given)| same_parse(parsed, given))
+/// A compile's module set: a shared stdlib prefix, held by reference and
+/// never edited, then the modules a build owns. A pass that must edit the
+/// prefix (expand its macros) takes an owned copy first ([`Self::make_owned`]).
+#[derive(Clone, Debug)]
+pub struct ModuleSet {
+    shared: Arc<[Ast]>,
+    owned: Vec<Ast>,
 }
 
-/// Structural equality of two clean parses.
-fn same_parse(a: &Ast, b: &Ast) -> bool {
-    // Destructured so a new field must be considered here.
-    let Ast {
-        file,
-        dialect,
-        package,
-        module_header,
-        global_policy,
-        exprs,
-        stmts,
-        blocks,
-        types,
-        items,
-        recovery_errors,
-        macro_param_refs,
-    } = a;
-    *file == b.file
-        && *dialect == b.dialect
-        && *package == b.package
-        && *module_header == b.module_header
-        && *global_policy == b.global_policy
-        && recovery_errors.is_empty()
-        && b.recovery_errors.is_empty()
-        && macro_param_refs.len() == b.macro_param_refs.len()
-        && macro_param_refs
-            .iter()
-            .zip(&b.macro_param_refs)
-            .all(|(x, y)| x.name == y.name && x.spans == y.spans)
-        && *items == b.items
-        && *exprs == b.exprs
-        && *stmts == b.stmts
-        && *blocks == b.blocks
-        && *types == b.types
+impl ModuleSet {
+    /// The process stdlib with `user` modules after it. A stdlib that does
+    /// not parse is the error.
+    pub fn with_stdlib(user: impl IntoIterator<Item = Ast>) -> Result<Self, CompilerError> {
+        let stdlib = cached().as_ref().map_err(Clone::clone)?;
+        Ok(Self::new(stdlib.clone(), user.into_iter().collect()))
+    }
+
+    /// `owned` modules after the shared `prefix`.
+    pub fn new(prefix: Arc<[Ast]>, owned: Vec<Ast>) -> Self {
+        Self {
+            shared: prefix,
+            owned,
+        }
+    }
+
+    /// A set of modules all owned, with no shared prefix.
+    pub fn owned(modules: Vec<Ast>) -> Self {
+        Self::new(Arc::from([]), modules)
+    }
+
+    /// The shared prefix (empty once [`Self::make_owned`] ran).
+    pub fn shared(&self) -> &Arc<[Ast]> {
+        &self.shared
+    }
+
+    /// The modules after the shared prefix.
+    pub fn rest(&self) -> &[Ast] {
+        &self.owned
+    }
+
+    pub fn rest_mut(&mut self) -> &mut [Ast] {
+        &mut self.owned
+    }
+
+    /// Append an owned module.
+    pub fn push(&mut self, module: Ast) {
+        self.owned.push(module);
+    }
+
+    /// Every module, the shared prefix first.
+    pub fn iter(&self) -> std::iter::Chain<std::slice::Iter<'_, Ast>, std::slice::Iter<'_, Ast>> {
+        self.shared.iter().chain(&self.owned)
+    }
+
+    pub fn len(&self) -> usize {
+        self.shared.len() + self.owned.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Every module as one owned slice, copying the shared prefix in on the
+    /// first call.
+    pub fn make_owned(&mut self) -> &mut [Ast] {
+        if !self.shared.is_empty() {
+            let mut all = self.shared.to_vec();
+            all.append(&mut self.owned);
+            self.owned = all;
+            self.shared = Arc::from([]);
+        }
+        &mut self.owned
+    }
+
+    /// The shared prefix and the modules after it.
+    pub fn into_parts(self) -> (Arc<[Ast]>, Vec<Ast>) {
+        (self.shared, self.owned)
+    }
+
+    /// Every module, owned.
+    pub fn into_vec(mut self) -> Vec<Ast> {
+        self.make_owned();
+        self.owned
+    }
+}
+
+impl<'a> IntoIterator for &'a ModuleSet {
+    type Item = &'a Ast;
+    type IntoIter = std::iter::Chain<std::slice::Iter<'a, Ast>, std::slice::Iter<'a, Ast>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
 }
 
 /// Parse `files` as a stdlib. The first file that does not parse cleanly is

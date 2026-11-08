@@ -2,6 +2,7 @@ use bone_core::modules::{
     DefKind, FragmentScope, LegacyImports, LegacyProjection, NsNode, NsPackage, NsVisibility,
     STD_PACKAGE_ID, STD_PACKAGE_NAME, UsePathRef, is_stdlib_module_file,
 };
+use skull_parser::stdlib::ModuleSet;
 use skull_parser::{Ast, Item, ItemKind};
 
 use bone_core::annotations::{AnnoPos, validate_annotations};
@@ -1103,32 +1104,35 @@ pub fn semantic_pass(rock_modules: &mut [Ast]) -> Result<Workspace, CompilerErro
 
 /// [`semantic_pass`] with the host graph's dependency-alias tables, so a v1
 /// package resolves its dependencies under the names its manifest declared.
-/// Legacy-only workspaces pass the default (empty) input.
+/// Legacy-only workspaces pass the default (empty) input. Every module is
+/// lowered; a set that begins with the shared process stdlib goes through
+/// [`semantic_pass_without_closure_gate`] instead.
 pub fn semantic_pass_with_aliases(
     rock_modules: &mut [Ast],
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<Workspace, CompilerError> {
-    let ws = semantic_pass_without_closure_gate(rock_modules, aliases)?;
+    let ws = semantic_pass_into(Workspace::default(), rock_modules, aliases)?;
     pass_validate_api_closure(&ws)?;
     Ok(ws)
 }
 
-/// [`semantic_pass_with_aliases`] without the public-API closure gate, for a tool that
-/// reads [`api_closure_requirements`] itself (the migrate planner grows an
-/// export set until the closure is satisfied). Every compile path takes the
-/// gated pass.
+/// The semantic pass over `modules` without the public-API closure gate, for
+/// a caller that applies it (the compile pipeline) or reads
+/// [`api_closure_requirements`] itself (the migrate planner grows an export
+/// set until the closure is satisfied).
 ///
-/// When `rock_modules` begin with the process stdlib and no user module can
-/// change it, the pass starts from the stdlib checked once per process
-/// ([`crate::stdlib_base`]) and leaves that stdlib prefix unexpanded.
+/// When the shared prefix of `modules` is the process stdlib and no user
+/// module can change it, the pass starts from the stdlib checked once per
+/// process ([`crate::stdlib_base`]) and leaves the prefix shared and
+/// unexpanded. Otherwise the whole set is made owned and lowered.
 pub fn semantic_pass_without_closure_gate(
-    rock_modules: &mut [Ast],
+    modules: &mut ModuleSet,
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<Workspace, CompilerError> {
-    if let Some(pass) = crate::stdlib_base::semantic_pass(rock_modules, aliases) {
+    if let Some(pass) = crate::stdlib_base::semantic_pass(modules, aliases) {
         return pass;
     }
-    semantic_pass_into(Workspace::default(), rock_modules, aliases)
+    semantic_pass_into(Workspace::default(), modules.make_owned(), aliases)
 }
 
 /// [`semantic_pass`] enforcing identity storage in unpackaged files: the bone
@@ -1162,7 +1166,7 @@ pub fn semantic_pass_into(
 ) -> Result<Workspace, CompilerError> {
     let _span = tracing::info_span!("bone_semantic_pass").entered();
 
-    build_namespaces(&mut ws, rock_modules, aliases)?;
+    build_namespaces(&mut ws, &*rock_modules, aliases)?;
     expand_and_desugar(&mut ws, rock_modules)?;
     lower_and_infer(&mut ws, rock_modules)?;
 
@@ -1320,24 +1324,25 @@ fn scope_items(items: &[Item]) -> Vec<ScopeItem> {
 /// definition under its canonical DefKey, and records per-fragment import
 /// scopes for the resolver. Legacy files contribute nothing here and keep
 /// today's bare-name keys and diagnostics.
-pub fn build_namespaces(
+pub fn build_namespaces<'a>(
     ws: &mut Workspace,
-    rock_modules: &[Ast],
+    rock_modules: impl IntoIterator<Item = &'a Ast> + Clone,
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<(), CompilerError> {
     // Legacy workspaces do not consult the modules-v1 namespace. Avoid cloning
     // every legacy item into FragmentContribution just to skip it again.
-    if !rock_modules.iter().any(|module| {
+    if !rock_modules.clone().into_iter().any(|module| {
         module.dialect == skull_parser::Dialect::V1 && !is_stdlib_module_file(module.file.as_str())
     }) {
         for module in rock_modules
-            .iter()
+            .clone()
+            .into_iter()
             .filter(|module| is_stdlib_module_file(module.file.as_str()))
         {
             let contribution = contribute(module);
             register_stdlib_items(ws, &contribution)?;
         }
-        for module in rock_modules.iter().filter(|module| {
+        for module in rock_modules.into_iter().filter(|module| {
             module.dialect == skull_parser::Dialect::Legacy
                 && !is_stdlib_module_file(module.file.as_str())
         }) {
@@ -1345,7 +1350,8 @@ pub fn build_namespaces(
         }
         return Ok(());
     }
-    let contributions: Vec<FragmentContribution> = rock_modules.iter().map(contribute).collect();
+    let contributions: Vec<FragmentContribution> =
+        rock_modules.into_iter().map(contribute).collect();
     assemble_namespaces(ws, &contributions.iter().collect_vec(), aliases)
 }
 

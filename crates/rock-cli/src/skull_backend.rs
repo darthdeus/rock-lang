@@ -67,9 +67,9 @@ enum CliComptime<'a> {
 impl skull::pipeline::CompileHost for CliCompileHost<'_> {
     fn aliases(
         &mut self,
-        modules: &[skull_parser::Ast],
+        modules: &skull_parser::stdlib::ModuleSet,
     ) -> std::result::Result<bone_core::modules::NsAliases, CompilerError> {
-        crate::bone_backend::aliases_for_modules(modules)
+        crate::bone_backend::aliases_for_modules(modules.iter())
     }
 
     fn comptime_inputs(
@@ -124,7 +124,7 @@ struct PackageTestHost<'a> {
 impl skull::pipeline::CompileHost for PackageTestHost<'_> {
     fn aliases(
         &mut self,
-        modules: &[skull_parser::Ast],
+        modules: &skull_parser::stdlib::ModuleSet,
     ) -> std::result::Result<bone_core::modules::NsAliases, CompilerError> {
         self.inner.aliases(modules)
     }
@@ -268,7 +268,7 @@ pub fn skull_workspace_timed(
             return (false, times);
         }
     };
-    let aliases = match crate::bone_backend::aliases_for_modules(&modules) {
+    let aliases = match crate::bone_backend::aliases_for_modules(modules.iter()) {
         Ok(aliases) => aliases,
         Err(error) => {
             times.semantic = t.elapsed();
@@ -339,10 +339,10 @@ pub fn skull_workspace_timed(
 /// to a `ModuleId` via `bone_backend::entry_module_id` once the workspace exists.
 ///
 /// Unlike the single-file path, the embedded compiler stdlib is NOT pulled from
-/// `discover_sources` — bone supplies its own via `skull_parser::stdlib::modules()`.
+/// `discover_sources` — bone supplies its own, shared ([`skull::pipeline::with_stdlib`]).
 pub fn skull_assemble_project(
     sources: &SourceFiles,
-) -> std::result::Result<(Vec<skull_parser::Ast>, ustr::Ustr), Vec<CompilerError>> {
+) -> std::result::Result<(skull_parser::stdlib::ModuleSet, ustr::Ustr), Vec<CompilerError>> {
     let (user_modules, entry_file, _parse) = crate::bone_backend::parse_user_modules(sources)?;
     let modules = skull::pipeline::with_stdlib(user_modules).map_err(|e| vec![e])?;
     Ok((modules, entry_file))

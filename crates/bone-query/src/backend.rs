@@ -19,7 +19,7 @@ use rename_guard::check_new_name;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use lsp_types::{
     CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity, DocumentHighlight,
@@ -438,7 +438,7 @@ pub struct BoneWorkspace {
     /// roots remain retryable so fixing the manifest or dependency can recover.
     source_load_errors: HashMap<PathBuf, String>,
     /// A stdlib replacing the process one ([`Self::with_stdlib`]).
-    stdlib: Option<Result<Vec<skull_parser::Ast>, CompilerError>>,
+    stdlib: Option<Result<Arc<[skull_parser::Ast]>, CompilerError>>,
     /// Verbatim editor path -> canonical path. Project discovery keys modules
     /// by the canonicalized path (`project_sources`), but LSP clients send the
     /// URI-decoded spelling (`C:\...` not `\\?\C:\...`; `/./` segments), so
@@ -634,12 +634,12 @@ impl BoneWorkspace {
             self.projects.is_empty(),
             "the stdlib must precede project loading"
         );
-        self.stdlib = Some(stdlib);
+        self.stdlib = Some(stdlib.map(Arc::from));
         self
     }
 
     /// The stdlib every session warms from, or why it did not load.
-    fn stdlib(&self) -> &Result<Vec<skull_parser::Ast>, CompilerError> {
+    fn stdlib(&self) -> &Result<Arc<[skull_parser::Ast]>, CompilerError> {
         self.stdlib
             .as_ref()
             .unwrap_or_else(|| skull_parser::stdlib::cached())
@@ -3861,7 +3861,7 @@ fn reparse_with_project(
         "combined-module parse",
         "use live workspace",
     )?;
-    reparse_with_project_inner(session, &combined, path, munged, fallbacks, request)
+    reparse_with_project_inner(session, combined, path, munged, fallbacks, request)
 }
 
 /// Analyze one completion munge: apply it as a speculative Session variant
@@ -3903,7 +3903,7 @@ pub(crate) fn analyze_variant<R>(
 
 fn reparse_with_project_inner(
     session: &Session,
-    combined: &[skull_parser::Ast],
+    combined: skull_parser::stdlib::ModuleSet,
     path: &str,
     munged: &str,
     reports: &FallbackReports,
@@ -3911,11 +3911,13 @@ fn reparse_with_project_inner(
 ) -> Option<Workspace> {
     // Project-wide pass: every module except the current file, plus the munge.
     // Resolves cross-file / dependency types (an `IVec2` engine param, etc.).
-    let mut modules: Vec<skull_parser::Ast> = combined
-        .iter()
-        .filter(|a| a.file.as_str() != path)
-        .cloned()
-        .collect();
+    // The warm prefix stays shared unless the current file is one of them.
+    let (warm, mut users) = if combined.shared().iter().any(|a| a.file.as_str() == path) {
+        (Arc::from([]), combined.into_vec())
+    } else {
+        combined.into_parts()
+    };
+    users.retain(|a| a.file.as_str() != path);
     // The munge is a half-typed buffer (missing bracket, `recv.` mid-edit). The
     // parse is total -- skull-parser drops the broken statement and keeps the rest
     // (the recovery error stays on `recovery_errors`, which the LSP path never
@@ -3928,9 +3930,18 @@ fn reparse_with_project_inner(
         "parse recovery source",
         "use live workspace",
     )?;
-    modules.push(parsed.clone());
+    users.push(parsed.clone());
+    let mut modules = skull_parser::stdlib::ModuleSet::new(warm, users);
+    let checked = bone_semantic::semantic_passes::semantic_pass_without_closure_gate(
+        &mut modules,
+        &session.aliases,
+    )
+    .and_then(|ws| {
+        bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
+        Ok(ws)
+    });
     if let Some(ws) = reports.result(
-        bone_semantic::semantic_passes::semantic_pass_with_aliases(&mut modules, &session.aliases),
+        checked,
         request,
         path,
         "project semantic recovery",

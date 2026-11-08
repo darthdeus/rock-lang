@@ -146,8 +146,7 @@ fn run_bone(sources: &SourceFiles, iters: usize, warmup: usize) -> BoneStats {
         }
         stats.times.parse += times.parse;
         stats.times.semantic += times.semantic;
-        stats.times.stdlib_clone += times.stdlib_clone;
-        stats.times.stdlib_extend += times.stdlib_extend;
+        stats.times.stdlib_assemble += times.stdlib_assemble;
         stats.times.semantic_call += times.semantic_call;
         // bone's per-phase split lives on the checked Workspace.
         if let Ok(ws) = &res {
@@ -618,7 +617,7 @@ fn json_report(
             "parse_ms": ms(bone.times.parse),
             "semantic_ms": ms(bone.times.semantic),
             "semantic_call_ms": ms(bone.times.semantic_call),
-            "stdlib_clone_ms": ms(bone.times.stdlib_clone),
+            "stdlib_assemble_ms": ms(bone.times.stdlib_assemble),
             "teardown_ms": ms(bone.times.semantic_call.saturating_sub(bone_phase_sum)),
             "phases": phases(&bone.phases, ""),
         },
@@ -666,12 +665,8 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
         "BONE (parse + semantic[lower+check], whole workspace)".bold()
     );
     println!(
-        "  stdlib clone   : {:>9.3} ms  (in semantic; per-run harness cost)",
-        ms(bone.times.stdlib_clone)
-    );
-    println!(
-        "  stdlib extend  : {:>9.3} ms  (in semantic)",
-        ms(bone.times.stdlib_extend)
+        "  stdlib assemble: {:>9.3} ms  (in semantic; per-run harness cost)",
+        ms(bone.times.stdlib_assemble)
     );
     println!(
         "  parse          : {:>9.3} ms  (excluded from A/B)",

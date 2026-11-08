@@ -104,12 +104,10 @@ fn rock_shader_pair_with_inline_js_register_sibling_emits() {
 }
 
 fn qualified_register_workspace(registrations: &[&str]) -> bone_core::workspace::Workspace {
-    let mut modules = skull::pipeline::with_stdlib([skull_parser::parse_module_clean(
-        SHADER_SRC,
-        ustr::Ustr::from("<test>"),
-    )
-    .expect("shader source")])
-    .expect("stdlib");
+    let mut users = vec![
+        skull_parser::parse_module_clean(SHADER_SRC, ustr::Ustr::from("<test>"))
+            .expect("shader source"),
+    ];
     for (index, registration) in registrations.iter().enumerate() {
         let mut module = skull_parser::parse_module_clean_with_dialect(
             &format!("mod registry{index};\n{registration}"),
@@ -122,9 +120,15 @@ fn qualified_register_workspace(registrations: &[&str]) -> bone_core::workspace:
             self_name: "shaders".into(),
             identity_storage: Default::default(),
         });
-        modules.push(module);
+        users.push(module);
     }
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("workspace");
+    let mut modules = skull::pipeline::with_stdlib(users).expect("stdlib");
+    let ws = skull::pipeline::semantic_pass(
+        &mut modules,
+        &Default::default(),
+        skull::pipeline::ClosureGate::Enforce,
+    )
+    .expect("workspace");
     let errors: Vec<_> = ws
         .inferences
         .iter()

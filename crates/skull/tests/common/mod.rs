@@ -4,18 +4,24 @@
 //! module once; its test modules import helpers through `crate::common`.
 
 use bone_semantic::inference::Workspace;
-use std::sync::LazyLock;
 use ustr::Ustr;
 
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
+/// The shared process stdlib with `src` parsed as `file` after it.
+fn with_stdlib(src: &str, file: &str) -> skull_parser::stdlib::ModuleSet {
+    let user = skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse");
+    skull_parser::stdlib::ModuleSet::with_stdlib([user]).expect("stdlib parses")
+}
+
+/// The gated semantic pass every compile runs.
+fn semantic_pass(
+    modules: &mut skull_parser::stdlib::ModuleSet,
+) -> Result<Workspace, skull_parser::CompilerError> {
+    skull::pipeline::semantic_pass(
+        modules,
+        &Default::default(),
+        skull::pipeline::ClosureGate::Enforce,
+    )
+}
 
 /// Panic if bone recorded any type/lowering/interface error. `semantic_pass`
 /// returns `Ok` with per-body diagnostics recorded on the workspace, so a
@@ -53,13 +59,12 @@ pub fn bone_rejections(src: &str) -> Vec<String> {
 
 /// [`bone_rejections`] with each error's location and labels.
 pub fn bone_rejection_errors(src: &str) -> Vec<skull_parser::CompilerError> {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
+    let mut modules = with_stdlib(src, "<test>");
     // BOTH channels. `semantic_pass` returns `Err` for a violation it treats as
     // fatal (a struct-field annotation is one) and RECORDS the rest on the
     // workspace; reading only the recorded set turns the fatal ones into a
     // panic inside the helper rather than a rejection the caller can assert.
-    let ws = match bone_semantic::semantic_passes::semantic_pass(&mut modules) {
+    let ws = match semantic_pass(&mut modules) {
         Ok(ws) => ws,
         Err(e) => return vec![e],
     };
@@ -82,9 +87,8 @@ pub fn bone_rejection_errors(src: &str) -> Vec<skull_parser::CompilerError> {
 /// `%`/arithmetic ops resolve to their stdlib helpers -- else the using fns fail
 /// to lower and are silently skipped.
 pub fn emit_mir(src: &str) -> skull::mir_emit::MirEmit {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mut modules = with_stdlib(src, "<test>");
+    let ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
@@ -94,10 +98,8 @@ pub fn emit_mir_with_inputs(
     src: &str,
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> skull::mir_emit::MirEmit {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let mut ws =
-        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mut modules = with_stdlib(src, "<test>");
+    let mut ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws.comptime_inputs = inputs;
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
@@ -108,10 +110,8 @@ pub fn try_emit_mir_with_inputs(
     src: &str,
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> Result<skull::mir_emit::MirEmit, skull_parser::CompilerError> {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let mut ws =
-        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mut modules = with_stdlib(src, "<test>");
+    let mut ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws.comptime_inputs = inputs;
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
@@ -121,9 +121,8 @@ pub fn try_emit_mir_with_inputs(
 /// A workspace of `src` (the `<test>` module) over the real stdlib -- for tests
 /// that inspect stdlib declarations (e.g. `@intrinsic` annotations).
 pub fn ws_with_stdlib(src: &str) -> Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
+    let mut modules = with_stdlib(src, "<test>");
+    semantic_pass(&mut modules).expect("semantic_pass")
 }
 
 /// Emitted Lua for `src` (the common case; `emit_mir(src).lua`).
@@ -144,7 +143,7 @@ pub struct V1Fragment<'a> {
 /// package tag the host's graph stamps, so its definitions register under their
 /// DefKeys (`<package>::<module path>::<name>`) instead of bare names.
 pub fn ws_v1_package(package: &str, fragments: &[V1Fragment]) -> Workspace {
-    let mut modules = STDLIB.clone();
+    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
     for fragment in fragments {
         let mut module = skull_parser::parse_module_clean_with_dialect(
             fragment.src,
@@ -159,7 +158,7 @@ pub fn ws_v1_package(package: &str, fragments: &[V1Fragment]) -> Workspace {
         });
         modules.push(module);
     }
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws
 }
@@ -181,10 +180,8 @@ pub fn try_emit_module_with(
     src: &str,
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> Result<String, skull_parser::CompilerError> {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let mut ws =
-        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mut modules = with_stdlib(src, "<test>");
+    let mut ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws.comptime_inputs = inputs;
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
@@ -199,10 +196,8 @@ pub fn try_emit_module_with_file(
     file: &str,
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> Result<String, skull_parser::CompilerError> {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse"));
-    let mut ws =
-        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mut modules = with_stdlib(src, file);
+    let mut ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws.comptime_inputs = inputs;
     let mid = *ws.module_ids.get(&Ustr::from(file)).expect("module id");
@@ -213,9 +208,8 @@ pub fn try_emit_module_with_file(
 /// reserved synthetic-name collision) instead of `.expect`ing success. Semantic
 /// errors still panic (a malformed test, not what these cases probe).
 pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError> {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mut modules = with_stdlib(src, "<test>");
+    let ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
@@ -226,10 +220,11 @@ pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError>
 pub fn try_emit_module_enforcing_identity_storage(
     src: &str,
 ) -> Result<String, skull_parser::CompilerError> {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(&mut modules)
-        .expect("semantic_pass");
+    let modules = with_stdlib(src, "<test>");
+    let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(
+        &mut modules.into_vec(),
+    )
+    .expect("semantic_pass");
     assert_no_bone_errors(&ws);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
@@ -257,9 +252,8 @@ pub fn emit_module_shaped(
     file: &str,
     shapes: skull::mir_emit::ShapeOverrides,
 ) -> String {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mut modules = with_stdlib(src, file);
+    let ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     let mid = *ws.module_ids.get(&Ustr::from(file)).expect("module id");
     skull::mir_emit::FullEmit::program()
@@ -444,7 +438,7 @@ pub fn try_emit_with_stdlib_module(
     lib: &str,
     src: &str,
 ) -> Result<String, skull_parser::CompilerError> {
-    let mut modules = STDLIB.clone();
+    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
     modules.push(
         skull_parser::parse_module_clean(
             lib,
@@ -453,7 +447,7 @@ pub fn try_emit_with_stdlib_module(
         .expect("parse lib"),
     );
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
@@ -463,7 +457,7 @@ pub fn try_emit_with_stdlib_module(
 /// case needs a body the emission-root predicate classifies as LIBRARY (and
 /// therefore prunable) rather than as own-project source.
 pub fn ws_with_stdlib_module(lib: &str, src: &str) -> Workspace {
-    let mut modules = STDLIB.clone();
+    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
     modules.push(
         skull_parser::parse_module_clean(
             lib,
@@ -472,13 +466,13 @@ pub fn ws_with_stdlib_module(lib: &str, src: &str) -> Workspace {
         .expect("parse lib"),
     );
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws
 }
 
 pub fn ws_with_dependency_module(lib: &str, src: &str) -> Workspace {
-    let mut modules = STDLIB.clone();
+    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
     modules.push(
         skull_parser::parse_module_clean(
             lib,
@@ -490,7 +484,7 @@ pub fn ws_with_dependency_module(lib: &str, src: &str) -> Workspace {
         skull_parser::parse_module_clean(src, Ustr::from("/tmp/rock-mono-project/main.rock"))
             .expect("parse"),
     );
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws
 }

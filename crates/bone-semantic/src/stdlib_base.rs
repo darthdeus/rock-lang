@@ -12,6 +12,7 @@
 
 use std::sync::OnceLock;
 
+use skull_parser::stdlib::ModuleSet;
 use skull_parser::{Ast, ItemKind, MacroRegistry, collect_registry, cook_one};
 
 use crate::prelude::*;
@@ -89,8 +90,8 @@ fn base() -> Option<&'static StdlibBase> {
 
 fn build() -> Option<StdlibBase> {
     let stdlib = skull_parser::stdlib::cached().as_ref().ok()?;
-    let registry = collect_registry(stdlib);
-    let mut cooked = stdlib.clone();
+    let registry = collect_registry(stdlib.iter());
+    let mut cooked = stdlib.to_vec();
     cooked
         .par_iter_mut()
         .for_each(|ast| cook_one(ast, &registry));
@@ -145,27 +146,26 @@ impl StdlibBase {
 }
 
 /// The semantic pass over `modules` from the shared stdlib base, or `None`
-/// when it does not apply: `modules` must begin with the process stdlib as
-/// parsed ([`skull_parser::stdlib::is_prefix_of`]) and every other module
-/// must be admitted. The result equals a combined pass from a default
-/// workspace. The stdlib prefix of `modules` is left as parsed; only the
-/// user modules are expanded.
+/// when it does not apply: the shared prefix of `modules` must be the process
+/// stdlib itself ([`skull_parser::stdlib::is_process_stdlib`]) and every
+/// other module must be admitted. The result equals a combined pass from a
+/// default workspace. The prefix stays shared and unexpanded; only the user
+/// modules are expanded.
 pub(crate) fn semantic_pass(
-    modules: &mut [Ast],
+    modules: &mut ModuleSet,
     aliases: &bone_core::modules::NsAliases,
 ) -> Option<Result<Workspace, CompilerError>> {
-    if !skull_parser::stdlib::is_prefix_of(modules) {
+    if !skull_parser::stdlib::is_process_stdlib(modules.shared()) {
         return None;
     }
     let base = base()?;
-    let stdlib_len = base.files.len();
-    if !modules[stdlib_len..].iter().all(|user| base.admits(user)) {
+    if !modules.rest().iter().all(|user| base.admits(user)) {
         return None;
     }
     let mut ws = base.workspace();
     Some((|| {
-        crate::semantic_passes::build_namespaces(&mut ws, modules, aliases)?;
-        let users = &mut modules[stdlib_len..];
+        crate::semantic_passes::build_namespaces(&mut ws, modules.iter(), aliases)?;
+        let users = modules.rest_mut();
         let timer = Instant::now();
         users
             .par_iter_mut()

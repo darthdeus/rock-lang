@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use skull_parser::stdlib::ModuleSet;
 use skull_parser::{
     Ast, Dialect, FunctionBody, GlobalPolicy, ItemKind, MacroRegistry, PackageTag,
     check_macro_call_labels, check_macro_call_labels_in, check_macro_name_uniqueness,
@@ -297,7 +300,8 @@ enum WarmBase {
 #[derive(Clone, Debug)]
 pub struct Session {
     pub ws: Workspace,
-    pub warm: Vec<Ast>,
+    /// Shared, never edited: a build that must expand them copies them.
+    pub warm: Arc<[Ast]>,
     pub warm_mids: FxHashSet<ModuleId>,
     pub paths: Vec<String>,
     pub files: FxHashMap<String, UserFile>,
@@ -493,10 +497,10 @@ pub enum FileDiff {
 /// on the pre-expansion module set (macros still present). The same gates
 /// `check_modules` applies on the CLI compile path, so CLI / LSP rebuilds
 /// refuse the same programs. Returns the first offender.
-fn reject_macro_name_collisions(modules: &[Ast]) -> Result<(), CompilerError> {
-    match check_macro_name_uniqueness(modules)
+fn reject_macro_name_collisions(modules: &ModuleSet) -> Result<(), CompilerError> {
+    match check_macro_name_uniqueness(modules.iter())
         .into_iter()
-        .chain(check_macro_call_labels(modules))
+        .chain(check_macro_call_labels(modules.iter()))
         .next()
     {
         Some(e) => Err(e),
@@ -790,10 +794,11 @@ impl Session {
     /// input `semantic_pass_with_aliases` takes. A legacy-only session passes
     /// the default (empty) table.
     pub fn new(
-        warm: Vec<Ast>,
+        warm: impl Into<Arc<[Ast]>>,
         files: Vec<SessionFile>,
         aliases: &bone_core::modules::NsAliases,
     ) -> Result<Self, CompilerError> {
+        let warm: Arc<[Ast]> = warm.into();
         let mut ws = Workspace::default();
 
         let warm_mids: FxHashSet<ModuleId> =
@@ -892,9 +897,8 @@ impl Session {
             user_modules.push(module);
         }
 
-        let mut unexpanded = session.warm.clone();
-        unexpanded.extend(user_modules);
-        session.registry = collect_registry(&unexpanded);
+        let unexpanded = ModuleSet::new(session.warm.clone(), user_modules);
+        session.registry = collect_registry(unexpanded.iter());
         reject_macro_name_collisions(&unexpanded)?;
 
         let registry = session.registry.clone();
@@ -910,14 +914,13 @@ impl Session {
     /// path (`rebuild_users`) feeds to `expand_and_desugar`. The AST is transient
     /// (not persisted), so this re-parses; it runs only on the O(workspace)
     /// fallback, where a parse per file is in line with the from-scratch cost.
-    pub fn combined_unexpanded(&self) -> Result<Vec<Ast>, CompilerError> {
-        let mut combined = self.warm.clone();
-
-        for path in &self.paths {
-            combined.push(self.parse_stored(ustr(path))?);
-        }
-
-        Ok(combined)
+    pub fn combined_unexpanded(&self) -> Result<ModuleSet, CompilerError> {
+        let users = self
+            .paths
+            .iter()
+            .map(|path| self.parse_stored(ustr(path)))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ModuleSet::new(self.warm.clone(), users))
     }
 
     /// The dialect and owning package recorded for `path`: a held file's own,
@@ -1348,13 +1351,14 @@ impl Session {
     /// only the user files. Returns the workspace and the user modules' ids.
     fn build(
         &mut self,
-        mut unexpanded: Vec<Ast>,
+        unexpanded: ModuleSet,
         registry: &MacroRegistry,
     ) -> Result<(Workspace, Vec<ModuleId>), CompilerError> {
+        debug_assert!(Arc::ptr_eq(unexpanded.shared(), &self.warm));
         let warm_len = self.warm.len();
         // Read from the ASTs being built, not the stored `UserFile`s, so the
         // build is a function of the texts alone.
-        let users = &unexpanded[warm_len..];
+        let users = unexpanded.rest();
         let user_contributions: Vec<FragmentContribution> = users.iter().map(contribute).collect();
         let independent = users
             .iter()
@@ -1366,8 +1370,8 @@ impl Session {
             None
         };
         let (mut ws, mut lowered, first_user) = match base {
-            Some(base) => (base, unexpanded.split_off(warm_len), 0),
-            None => (Workspace::default(), unexpanded, warm_len),
+            Some(base) => (base, unexpanded.into_parts().1, 0),
+            None => (Workspace::default(), unexpanded.into_vec(), warm_len),
         };
         let contributions: Vec<&FragmentContribution> = self
             .warm_contributions
@@ -1397,7 +1401,7 @@ impl Session {
     fn warm_alone(&mut self, registry: &MacroRegistry) -> Option<&Workspace> {
         if matches!(self.warm_base, WarmBase::Unbuilt) {
             let mut ws = Workspace::default();
-            let mut cooked = self.warm.clone();
+            let mut cooked = self.warm.to_vec();
             cooked
                 .par_iter_mut()
                 .for_each(|ast| cook_one(ast, registry));
@@ -1839,7 +1843,7 @@ impl Session {
         // the last-good ws on any failure makes the session queryable after a failed
         // rebuild instead of crash-on-next-touch.
         let unexpanded = self.combined_unexpanded()?;
-        let registry = collect_registry(&unexpanded);
+        let registry = collect_registry(unexpanded.iter());
         reject_macro_name_collisions(&unexpanded)?;
         let (mut ws, user_mids) = self.build(unexpanded, &registry)?;
         // Host-resolved build variables, set once on the workspace when the

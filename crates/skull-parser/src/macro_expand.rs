@@ -90,7 +90,7 @@ impl MacroRegistry {
 /// Collect every macro overload defined across `modules` into a reusable
 /// registry. Read-only over `modules` (templates graft into their own arenas),
 /// so the caller keeps its un-expanded ASTs intact for later re-cooking.
-pub fn collect_registry(modules: &[Ast]) -> MacroRegistry {
+pub fn collect_registry<'a>(modules: impl IntoIterator<Item = &'a Ast>) -> MacroRegistry {
     MacroRegistry(build_registry(modules))
 }
 
@@ -103,9 +103,11 @@ pub fn collect_registry(modules: &[Ast]) -> MacroRegistry {
 /// so it never collides. Cross-module: all parsed modules share one namespace,
 /// so this runs over the full parsed set before expansion erases the macro defs.
 /// Run on the pre-expansion modules (expansion drops the `is_macro` items).
-pub fn check_macro_name_uniqueness(modules: &[Ast]) -> Vec<CompilerError> {
+pub fn check_macro_name_uniqueness<'a>(
+    modules: impl IntoIterator<Item = &'a Ast> + Clone,
+) -> Vec<CompilerError> {
     let mut fn_names: HashSet<Ustr> = HashSet::new();
-    for m in modules {
+    for m in modules.clone() {
         for item in &m.items {
             if let ItemKind::Function(f) = &item.kind {
                 if !f.is_macro {
@@ -145,10 +147,12 @@ pub fn check_macro_name_uniqueness(modules: &[Ast]) -> Vec<CompilerError> {
 ///
 /// Without this, a bad label leaves the call UNEXPANDED and the user sees
 /// "missing function `foo`" -- a true rejection naming the wrong cause.
-pub fn check_macro_call_labels(modules: &[Ast]) -> Vec<CompilerError> {
-    let reg = build_registry(modules);
+pub fn check_macro_call_labels<'a>(
+    modules: impl IntoIterator<Item = &'a Ast> + Clone,
+) -> Vec<CompilerError> {
+    let reg = build_registry(modules.clone());
     modules
-        .iter()
+        .into_iter()
         .flat_map(|m| call_label_errors(m, &reg))
         .collect()
 }
@@ -246,7 +250,7 @@ pub fn expand_one(ast: &mut Ast, registry: &MacroRegistry) {
 
 /// Expand every macro call across the workspace, then drop the macro defs.
 pub fn expand_macros(modules: &mut [Ast]) {
-    let registry = collect_registry(modules);
+    let registry = collect_registry(modules.iter());
     // Each module expands independently against the immutable prebuilt registry
     // (see `expand_one`), so the per-module work parallelizes -- and on real
     // workspaces a macro like `log_once` is called from ~half the modules, so
@@ -292,7 +296,7 @@ fn fragment_kind(ast: &Ast, ty: Idx<TypeExprData>) -> Option<Frag> {
     }
 }
 
-fn build_registry(modules: &[Ast]) -> Registry {
+fn build_registry<'a>(modules: impl IntoIterator<Item = &'a Ast>) -> Registry {
     let mut reg: Registry = HashMap::new();
     for m in modules {
         for item in &m.items {

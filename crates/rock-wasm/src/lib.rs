@@ -187,7 +187,10 @@ struct PlaygroundHost<'a> {
 }
 
 impl CompileHost for PlaygroundHost<'_> {
-    fn aliases(&mut self, _modules: &[skull_parser::Ast]) -> Result<NsAliases, CompilerError> {
+    fn aliases(
+        &mut self,
+        _modules: &skull_parser::stdlib::ModuleSet,
+    ) -> Result<NsAliases, CompilerError> {
         Ok(NsAliases::default())
     }
 

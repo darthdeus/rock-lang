@@ -5,12 +5,14 @@ use std::sync::atomic::Ordering;
 
 use bone_semantic::prelude::*;
 use bone_semantic::semantic_passes::{semantic_pass_into, semantic_pass_without_closure_gate};
-use skull_parser::Ast;
+use skull_parser::stdlib::ModuleSet;
 
-fn with_stdlib(user: &str) -> Vec<Ast> {
-    let mut modules = skull_parser::stdlib::modules().expect("stdlib parses");
-    modules.push(skull_parser::parse_module(user, Ustr::from("<test>")).expect("user parses"));
-    modules
+fn user_module(user: &str) -> skull_parser::Ast {
+    skull_parser::parse_module(user, Ustr::from("<test>")).expect("user parses")
+}
+
+fn with_stdlib(user: &str) -> ModuleSet {
+    ModuleSet::with_stdlib([user_module(user)]).expect("stdlib parses")
 }
 
 fn reused(ws: &Workspace) -> bool {
@@ -56,7 +58,7 @@ fn sorted(items: impl Iterator<Item = String>) -> Vec<String> {
 
 /// Check `user` both ways; return whether the base served it.
 fn assert_same_as_combined(user: &str) -> bool {
-    let mut combined = with_stdlib(user);
+    let mut combined = with_stdlib(user).into_vec();
     let expected = semantic_pass_into(Workspace::default(), &mut combined, &Default::default())
         .map(|ws| render(&ws))
         .map_err(|e| e.message);
@@ -113,14 +115,41 @@ fn a_user_module_that_can_reach_the_stdlib_lowers_with_it() {
 }
 
 #[test]
-fn an_edited_stdlib_prefix_is_not_reused() {
-    let mut modules = with_stdlib("fn main() {}\n");
-    modules[0].items.pop();
-    assert!(!skull_parser::stdlib::is_prefix_of(&modules));
-    let mut modules = with_stdlib("fn main() {}\n");
-    modules.swap(0, 1);
-    assert!(!skull_parser::stdlib::is_prefix_of(&modules));
-    assert!(skull_parser::stdlib::is_prefix_of(&with_stdlib(
-        "fn main() {}\n"
-    )));
+fn only_the_shared_process_stdlib_is_reused() {
+    let program = "fn main() -> int { 1 + 2 }\n";
+    let stdlib = skull_parser::stdlib::cached()
+        .as_ref()
+        .expect("stdlib parses");
+    // A copy equal to the process stdlib is not it: the base is recognized by
+    // identity, never by comparing trees.
+    let copy: std::sync::Arc<[skull_parser::Ast]> = stdlib.to_vec().into();
+    let mut modules = ModuleSet::new(copy, vec![user_module(program)]);
+    let ws = semantic_pass_without_closure_gate(&mut modules, &Default::default()).unwrap();
+    assert!(!reused(&ws));
+    // An owned stdlib prefix is lowered with the user module.
+    let mut modules = with_stdlib(program);
+    modules.make_owned();
+    let ws = semantic_pass_without_closure_gate(&mut modules, &Default::default()).unwrap();
+    assert!(!reused(&ws));
+    // The shared prefix itself is reused and left shared and untouched.
+    let mut modules = with_stdlib(program);
+    let ws = semantic_pass_without_closure_gate(&mut modules, &Default::default()).unwrap();
+    assert!(reused(&ws));
+    assert!(std::sync::Arc::ptr_eq(modules.shared(), stdlib));
+}
+
+#[test]
+fn a_fallback_pass_leaves_the_shared_stdlib_unexpanded() {
+    // A user macro forces the combined pass, which expands every module: the
+    // shared stdlib must be copied first, not edited in place.
+    let stdlib = skull_parser::stdlib::cached()
+        .as_ref()
+        .expect("stdlib parses");
+    let before = stdlib.iter().map(|ast| ast.items.len()).collect::<Vec<_>>();
+    let mut modules =
+        with_stdlib("macro twice(x: int) -> int { x + x }\nfn main() -> int { twice(2) }\n");
+    semantic_pass_without_closure_gate(&mut modules, &Default::default()).unwrap();
+    assert!(modules.shared().is_empty());
+    let after = stdlib.iter().map(|ast| ast.items.len()).collect::<Vec<_>>();
+    assert_eq!(before, after);
 }

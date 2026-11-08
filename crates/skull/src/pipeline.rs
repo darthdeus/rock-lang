@@ -8,26 +8,25 @@ use bone_core::modules::NsAliases;
 use bone_semantic::inference::{ComptimeInputs, Workspace};
 use bone_semantic::prelude::{FxHashMap, FxHashSet, ModuleId};
 use rock_core::errors::CompilerErrorLevel;
+use skull_parser::stdlib::ModuleSet;
 use skull_parser::{Ast, CompilerError};
 use ustr::Ustr;
 
 use crate::mir_emit::{MirEmit, RendererTarget};
 
-/// The stdlib with `user` modules appended: the module set every
-/// non-incremental compile checks. A stdlib that does not parse is the error
-/// ([`skull_parser::stdlib::modules`], the loader the editor shares).
-pub fn with_stdlib(user: impl IntoIterator<Item = Ast>) -> Result<Vec<Ast>, CompilerError> {
-    let mut modules = skull_parser::stdlib::modules()?;
-    modules.extend(user);
-    Ok(modules)
+/// The shared process stdlib with `user` modules after it: the module set
+/// every non-incremental compile checks. A stdlib that does not parse is the
+/// error ([`skull_parser::stdlib::cached`], the loader the editor shares).
+pub fn with_stdlib(user: impl IntoIterator<Item = Ast>) -> Result<ModuleSet, CompilerError> {
+    ModuleSet::with_stdlib(user)
 }
 
 /// Every recovered syntax error across `modules`, in module order. Parsing is
 /// total, so a compile refuses a program with any syntax error here; the
 /// editor keeps the partial tree and shows the same errors as diagnostics.
-pub fn syntax_errors(modules: &[Ast]) -> Vec<CompilerError> {
+pub fn syntax_errors<'a>(modules: impl IntoIterator<Item = &'a Ast>) -> Vec<CompilerError> {
     modules
-        .iter()
+        .into_iter()
         .flat_map(|m| m.recovery_errors.iter().cloned())
         .collect()
 }
@@ -42,7 +41,7 @@ pub enum ClosureGate {
 
 /// Lower and type-check `modules`.
 pub fn semantic_pass(
-    modules: &mut [Ast],
+    modules: &mut ModuleSet,
     aliases: &NsAliases,
     gate: ClosureGate,
 ) -> Result<Workspace, CompilerError> {
@@ -59,22 +58,22 @@ pub fn semantic_pass(
 /// errors beside the workspace, since `semantic_pass` succeeding means
 /// "lowered and checked", not "no type errors".
 pub fn check_modules(
-    modules: &mut [Ast],
+    modules: &mut ModuleSet,
     gate: ClosureGate,
-    aliases: impl FnOnce(&[Ast]) -> Result<NsAliases, CompilerError>,
+    aliases: impl FnOnce(&ModuleSet) -> Result<NsAliases, CompilerError>,
 ) -> Result<(Workspace, Vec<CompilerError>), Vec<CompilerError>> {
-    let syntax = syntax_errors(modules);
+    let syntax = syntax_errors(modules.iter());
     if !syntax.is_empty() {
         return Err(syntax);
     }
     // Macro names must be unique against function names (call-position
     // ambiguity), and a macro argument label must name a parameter: both are
     // checked before expansion drops the macro defs and the labels.
-    let macro_dupes = skull_parser::check_macro_name_uniqueness(modules);
+    let macro_dupes = skull_parser::check_macro_name_uniqueness(modules.iter());
     if !macro_dupes.is_empty() {
         return Err(macro_dupes);
     }
-    let macro_labels = skull_parser::check_macro_call_labels(modules);
+    let macro_labels = skull_parser::check_macro_call_labels(modules.iter());
     if !macro_labels.is_empty() {
         return Err(macro_labels);
     }
@@ -83,7 +82,7 @@ pub fn check_modules(
     // Expansion recovers: a macro that must not expand records the reason on
     // `recovery_errors` and leaves the call in place. That reason explains
     // any type error the unexpanded call caused, so it reports first.
-    let expanded_syntax = syntax_errors(modules);
+    let expanded_syntax = syntax_errors(modules.iter());
     if !expanded_syntax.is_empty() {
         return Err(expanded_syntax);
     }
@@ -115,7 +114,7 @@ pub fn split_findings(
 /// What a compile needs from its host.
 pub trait CompileHost {
     /// Dependency alias tables for the module set.
-    fn aliases(&mut self, modules: &[Ast]) -> Result<NsAliases, CompilerError>;
+    fn aliases(&mut self, modules: &ModuleSet) -> Result<NsAliases, CompilerError>;
     /// The build inputs (`build_var` values, `embed_string` files), resolved
     /// once the program has type-checked.
     fn comptime_inputs(&mut self) -> Result<ComptimeInputs, CompilerError>;
@@ -213,7 +212,7 @@ pub fn compile_source(
 /// Compile an assembled module set (stdlib included) whose program starts in
 /// the module parsed from `entry`.
 pub fn compile_modules(
-    mut modules: Vec<Ast>,
+    mut modules: ModuleSet,
     entry: Ustr,
     target: EmitTarget<'_>,
     host: &mut dyn CompileHost,

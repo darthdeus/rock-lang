@@ -31,31 +31,27 @@ pub struct BonePhaseTimes {
     /// Fused lower + check (`bone_semantic::semantic_passes::semantic_pass`). bone does not expose
     /// a lower/check boundary publicly.
     pub semantic: Duration,
-    /// Cloning the (LazyLock-cached, pre-parsed) stdlib modules — a per-run
-    /// harness cost incurred before `semantic_pass`, counted *within* `semantic`.
-    /// Only set by the whole-workspace path (`bone_workspace_timed`).
-    pub stdlib_clone: Duration,
-    /// Appending the user modules onto the stdlib module list, also within
-    /// `semantic` and before `semantic_pass`.
-    pub stdlib_extend: Duration,
+    /// Assembling the user modules behind the shared, pre-parsed stdlib — a
+    /// per-run harness cost incurred before `semantic_pass`, counted *within*
+    /// `semantic`. Only set by the whole-workspace path (`bone_workspace_timed`).
+    pub stdlib_assemble: Duration,
     /// The `semantic_pass` call measured from the caller, so it includes bone's
     /// own teardown (dropping the input ASTs at fn return) that bone's internal
-    /// phase timers can't see. `stdlib_clone + stdlib_extend + semantic_call ==
-    /// semantic`; `semantic_call == sum(bone phases) + teardown`.
+    /// phase timers can't see. `stdlib_assemble + semantic_call ~= semantic`;
+    /// `semantic_call == sum(bone phases) + teardown`.
     pub semantic_call: Duration,
 }
 
 impl BonePhaseTimes {
     pub fn total(&self) -> Duration {
-        // stdlib_clone/extend are sub-components of `semantic`, not additive.
+        // stdlib_assemble is a sub-component of `semantic`, not additive.
         self.parse + self.semantic
     }
 
     fn add(&mut self, other: &BonePhaseTimes) {
         self.parse += other.parse;
         self.semantic += other.semantic;
-        self.stdlib_clone += other.stdlib_clone;
-        self.stdlib_extend += other.stdlib_extend;
+        self.stdlib_assemble += other.stdlib_assemble;
         self.semantic_call += other.semantic_call;
     }
 }
@@ -106,12 +102,12 @@ pub(crate) fn render_errs(sources: &SourceFiles, errs: &[CompilerError]) -> Stri
 
 /// Bone's namespace facts for a parsed module set, through the loader the
 /// editor shares ([`rock_host::program_inputs::ns_aliases_for_sources`]).
-pub(crate) fn aliases_for_modules(
-    modules: &[skull_parser::Ast],
+pub(crate) fn aliases_for_modules<'a>(
+    modules: impl IntoIterator<Item = &'a skull_parser::Ast>,
 ) -> std::result::Result<bone_core::modules::NsAliases, CompilerError> {
     rock_host::program_inputs::ns_aliases_for_sources(
         modules
-            .iter()
+            .into_iter()
             .map(|m| (m.file.as_str(), m.dialect, m.package.as_ref())),
     )
 }
@@ -121,7 +117,7 @@ pub(crate) fn aliases_for_modules(
 /// carries EVERY diagnostic of the first failing gate (all syntax errors,
 /// else all type errors) so the CLI reports the same set the LSP shows.
 pub fn check_modules(
-    modules: &mut [skull_parser::Ast],
+    modules: &mut skull_parser::stdlib::ModuleSet,
 ) -> std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>> {
     let (ws, errs) = check_modules_gated(modules, ClosureGate::Enforce)?;
     if !errs.is_empty() {
@@ -136,7 +132,7 @@ pub fn check_modules(
 /// (`api_closure_requirements`). Every other gate is the same; the body
 /// errors come back beside the workspace instead of replacing it.
 pub fn check_modules_for_tools(
-    modules: &mut [skull_parser::Ast],
+    modules: &mut skull_parser::stdlib::ModuleSet,
 ) -> std::result::Result<
     (bone_semantic::inference::Workspace, Vec<CompilerError>),
     Vec<CompilerError>,
@@ -145,13 +141,13 @@ pub fn check_modules_for_tools(
 }
 
 fn check_modules_gated(
-    modules: &mut [skull_parser::Ast],
+    modules: &mut skull_parser::stdlib::ModuleSet,
     gate: ClosureGate,
 ) -> std::result::Result<
     (bone_semantic::inference::Workspace, Vec<CompilerError>),
     Vec<CompilerError>,
 > {
-    skull::pipeline::check_modules(modules, gate, aliases_for_modules)
+    skull::pipeline::check_modules(modules, gate, |modules| aliases_for_modules(modules.iter()))
 }
 
 /// [`check_modules`] over the stdlib + `user`: the common "I just parsed user
@@ -165,7 +161,7 @@ pub fn check_with_stdlib(
 
 /// A bone incremental `Session` warmed with the stdlib — the watch/hot-reload
 /// counterpart to [`check_with_stdlib`]. Every `Session::new` site passes the
-/// same `skull_parser::stdlib::modules()` warm set; funnel them here.
+/// same shared `skull_parser::stdlib::cached()` warm set; funnel them here.
 ///
 /// This form does NOT resolve comptime inputs; it is for type-check-only
 /// sessions (bone watch, iter benches, LSP survey, tests). A session whose
@@ -177,7 +173,10 @@ pub(crate) fn bone_session(
     // from the same facts `aliases_for_modules` reads off a parsed set: the
     // root package's manifest, reached through the file that carries graph id 0.
     let aliases = aliases_for_session(&files)?;
-    bone_incremental::session::Session::new(skull_parser::stdlib::modules()?, files, &aliases)
+    let stdlib = skull_parser::stdlib::cached()
+        .as_ref()
+        .map_err(Clone::clone)?;
+    bone_incremental::session::Session::new(stdlib.clone(), files, &aliases)
 }
 
 /// [`aliases_for_modules`] for a session's file list, which is not parsed yet.
@@ -364,15 +363,12 @@ pub(crate) fn bone_workspace_timed(
 
     let t_sem = Instant::now();
     let t = Instant::now();
-    let mut modules = match skull_parser::stdlib::modules() {
+    let mut modules = match skull::pipeline::with_stdlib(user_modules) {
         Ok(modules) => modules,
         Err(error) => return (Err(vec![error]), times),
     };
-    times.stdlib_clone = t.elapsed();
-    let t = Instant::now();
-    modules.extend(user_modules);
-    times.stdlib_extend = t.elapsed();
-    let aliases = match aliases_for_modules(&modules) {
+    times.stdlib_assemble = t.elapsed();
+    let aliases = match aliases_for_modules(modules.iter()) {
         Ok(aliases) => aliases,
         Err(error) => return (Err(vec![error]), times),
     };
@@ -767,7 +763,7 @@ pub fn short_path(path: &str) -> String {
 
 /// The batch semantic pass with the API-closure gate the build enforces.
 pub fn semantic_pass_with_aliases(
-    modules: &mut [skull_parser::Ast],
+    modules: &mut skull_parser::stdlib::ModuleSet,
     aliases: &bone_core::modules::NsAliases,
 ) -> std::result::Result<bone_semantic::inference::Workspace, CompilerError> {
     skull::pipeline::semantic_pass(modules, aliases, ClosureGate::Enforce)
