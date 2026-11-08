@@ -5,7 +5,7 @@
 //! spans there (`index_macro_param_refs`, the read-side twin of `subst_in_item`).
 //! The IDE just finds the group covering the cursor.
 
-use skull_parser::ast::ExprKind;
+use skull_parser::ast::{ExprKind, ItemKind};
 use skull_parser::{Ast, MacroRegistry, Span};
 
 /// All occurrences (decl + template uses) of the macro parameter the cursor is
@@ -44,4 +44,18 @@ pub fn macro_invocation_def(ast: &Ast, registry: &MacroRegistry, offset: usize) 
         }
     }
     None
+}
+
+/// Whether `offset` is on a macro's name in `ast`: a macro definition's name
+/// or an invocation that expands to a macro. Expansion erases both before
+/// bone sees the module, so no reference walk can find every use of one.
+pub fn on_macro_name(ast: &Ast, registry: &MacroRegistry, offset: usize) -> bool {
+    let on_def = ast.items.iter().any(|item| {
+        let ItemKind::Function(f) = &item.kind else {
+            return false;
+        };
+        let (start, end) = f.name.span.offset_range;
+        f.is_macro && start <= offset && offset < end
+    });
+    on_def || macro_invocation_def(ast, registry, offset).is_some()
 }

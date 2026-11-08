@@ -1905,7 +1905,31 @@ impl BoneWorkspace {
         path: &str,
         offset: usize,
     ) -> Result<Vec<crate::query::RefSite>, RenameRefusal> {
-        Ok(self.rename_sites(proj, path, offset))
+        if let Some(ast) = proj.reparse_user_file(path, "rename") {
+            if macro_refs::on_macro_name(&ast, &proj.session.registry, offset) {
+                return Err(RenameRefusal(
+                    "cannot rename a macro: expansion erases its uses before analysis, \
+                     so rename cannot find them all"
+                        .to_string(),
+                ));
+            }
+        }
+        let sites = self.rename_sites(proj, path, offset);
+        let text_of = |f: &str| proj.texts.get(f).map(|s| s.as_str());
+        let spelled = |span: &Span| {
+            text_of(span.file.as_str())
+                .and_then(|t| t.get(span.offset_range.0..span.offset_range.1))
+        };
+        let here = sites.iter().find(|s| {
+            s.span.file.as_str() == path
+                && s.span.offset_range.0 <= offset
+                && offset < s.span.offset_range.1
+        });
+        let Some(old) = here.or(sites.first()).and_then(|s| spelled(&s.span)) else {
+            return Ok(sites);
+        };
+        rename_guard::check_spellings(&sites, old, &text_of)?;
+        Ok(sites)
     }
 
     // -- Feature: document symbols (stubbed: crate::query::document_symbols) ---------
