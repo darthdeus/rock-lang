@@ -152,3 +152,21 @@ fn copied_code_ref_env_shares_logical_slot() {
         "{program}"
     );
 }
+
+// A column-stored Vec cannot enter the opaque `clone_into` body, which would
+// walk `_data`; the shared lowering copies each column instead, as on luajit.
+// The copy owns its columns: writing the original afterwards leaves it alone.
+#[test]
+fn clone_into_copies_column_vec_storage() {
+    let src = "fn root() -> int {\n\
+                   let owner: [int] = []\n\
+                   let points = [Vec2 { x: 1.0, y: 2.0 }, Vec2 { x: 3.0, y: 4.0 }]\n\
+                   let copied = points.clone_into(owner.storage)\n\
+                   points[0] = Vec2 { x: 9.0, y: 10.0 }\n\
+                   copied.push(Vec2 { x: 5.0, y: 6.0 })\n\
+                   return int(copied[0].x) * 100 + copied.len() * 10 + points.len()\n\
+               }";
+    let ws = ws_with(src);
+    let js = emit_closure(&ws, "root").expect("column clone_into emits");
+    eval_int(&js, "root", 132);
+}

@@ -487,11 +487,15 @@ impl Builder<'_> {
         // On Lua a value with no mutable heap storage is already the owner's
         // copy, so `clone_into` is its argument; the inline body allocated a
         // `seen` table per call even for a string. C keeps the call: its
-        // strings are bytes the destination owner must own.
+        // strings are bytes the destination owner must own. A column or
+        // strided Vec is copied per column on JS as well: the opaque body would
+        // walk `_data`, which that storage does not have.
+        let gc_target = matches!(
+            self.scx.target(),
+            bone_semantic::hir::FnBackend::Lua | bone_semantic::hir::FnBackend::Js
+        );
         if let Callee::Unresolved { name, .. } = callee {
-            if name.as_str() == "clone_into"
-                && self.scx.target() == bone_semantic::hir::FnBackend::Lua
-            {
+            if name.as_str() == "clone_into" && gc_target {
                 if let [value, storage] = arg_idxs[..] {
                     let positional = arg_idxs.iter().all(|a| {
                         !self.body.arg_names.contains_key(a) && !self.body.spread_args.contains(a)
@@ -523,6 +527,7 @@ impl Builder<'_> {
                         }
                     }
                     if positional
+                        && self.scx.target() == bone_semantic::hir::FnBackend::Lua
                         && self.resolves_to_inline_builtin(e, name)
                         && self
                             .concrete_expr_ty(value)
