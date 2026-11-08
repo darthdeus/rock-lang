@@ -340,3 +340,48 @@ fn spaced_unary_minus_over_a_number_keeps_its_shape() {
         assert_format_keeps(&format!("fn f() {{\n    {line}\n}}\n"));
     }
 }
+
+fn assert_formats_to(source: &str, expected: &str) {
+    let formatted = skull_fmt::format_code(source);
+    assert_eq!(formatted, expected);
+    assert_eq!(skull_fmt::format_code(&formatted), formatted, "fixed point");
+}
+
+fn assert_stable(source: &str) {
+    assert_formats_to(source, source);
+}
+
+/// `f $ x` ends at its argument, so a comment after it trails the statement
+/// and not the argument.
+#[test]
+fn comment_after_a_dollar_call_stays_on_the_statement() {
+    assert_formats_to(
+        "fn f() {\n    assert $ g(x) // why\n}\n",
+        "fn f() {\n    assert(g(x))  // why\n}\n",
+    );
+    assert_formats_to(
+        "fn f() {\n    let y = assert $ 1 // why\n}\n",
+        "fn f() {\n    let y = assert(1)  // why\n}\n",
+    );
+}
+
+#[test]
+fn comment_after_a_multi_line_dollar_argument_appears_once() {
+    let formatted =
+        skull_fmt::format_code("fn f() {\n    assert $ g(\n        x\n    ) // why\n}\n");
+    assert_eq!(formatted.matches("// why").count(), 1, "{formatted}");
+    assert_eq!(skull_fmt::format_code(&formatted), formatted, "fixed point");
+}
+
+/// A comment inside the head's parentheses belongs to the argument, not to
+/// the `@` that follows them.
+#[test]
+fn comment_on_the_last_argument_of_an_at_head_appears_once() {
+    assert_stable("fn f() {\n    g(\n        a // why\n    ) @ print(1)\n}\n");
+}
+
+#[test]
+fn comments_after_the_last_argument_of_an_at_head_survive() {
+    assert_stable("fn f() {\n    g(\n        a,\n        // why\n    ) @ print(1)\n}\n");
+    assert_stable("fn f() {\n    g(\n        a,\n    ) @ // why\n    print(1)\n}\n");
+}

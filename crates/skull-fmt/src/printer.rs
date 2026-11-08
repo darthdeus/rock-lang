@@ -972,6 +972,19 @@ impl<'a> Printer<'a> {
         open: &str,
         close: &str,
     ) -> Doc {
+        self.comma_block_before(entries, body_span, open, close, usize::MAX)
+    }
+
+    /// [`Self::comma_block`] whose entries claim only trailing comments that
+    /// start before byte offset `comment_limit`.
+    fn comma_block_before(
+        &self,
+        entries: Vec<(Doc, usize, Span)>,
+        body_span: Option<(usize, usize)>,
+        open: &str,
+        close: &str,
+        comment_limit: usize,
+    ) -> Doc {
         let mut body = vec![hardline()];
         let mut prev_end: Option<usize> = None;
         let mut last_off: Option<usize> = None;
@@ -1031,7 +1044,7 @@ impl<'a> Printer<'a> {
             // Only the entry the comment actually trails claims it: with several
             // entries on one source line (`0, 1, 2,  // Front`) the whitespace-
             // between check leaves it to the last one.
-            if let Some((text, col)) = self.claimed_trailing_comment(espan) {
+            if let Some((text, col)) = self.claimed_comment_before(espan, comment_limit) {
                 body.push(self.sentinel(text, col, 'A'));
             }
             prev_end = Some(end);
@@ -1955,15 +1968,21 @@ impl<'a> Printer<'a> {
         let (head, head_span) = if others.is_empty() {
             (self.expr(func), f)
         } else {
-            // The head call's own span (callee .. last non-lambda arg), NOT the
-            // whole `f(args) @ {...}` span -- otherwise the multi-line `@`-block
-            // makes the preserve check expand the head call's args.
+            // The head call's own span (callee .. closing paren), NOT the whole
+            // `f(args) @ {...}` span -- otherwise the multi-line `@`-block makes
+            // the preserve check expand the head call's args. The `@` overwrote
+            // the call's span, so find the `)` again: comments before it belong
+            // to the arguments, comments after it to the `@`.
             let last = self.ast.e(&others.last().unwrap().value).span;
+            let (end, end_line) = self
+                .trivia
+                .close_paren_after(last.offset_range.1)
+                .unwrap_or((last.offset_range.1, last.line_range.1));
             let head_span = Span {
                 file: f.file,
-                line_range: (f.line_range.0, last.line_range.1),
+                line_range: (f.line_range.0, end_line),
                 col_range: (f.col_range.0, last.col_range.1),
-                offset_range: (f.offset_range.0, last.offset_range.1),
+                offset_range: (f.offset_range.0, end),
             };
             (self.call(func, others, head_span), head_span)
         };
@@ -2050,9 +2069,12 @@ impl<'a> Printer<'a> {
         // standalone comment among the args, forces the comment-preserving multi-
         // line layout.
         let arg_span = |a: &FunctionCallArg| self.ast.e(&a.value).span;
+        // A `f $ x` call ends at its argument, so a comment after that argument
+        // trails the enclosing statement instead.
+        let call_end = span.offset_range.1;
         let has_comments = args
             .iter()
-            .any(|a| self.claimed_trailing_comment(arg_span(a)).is_some())
+            .any(|a| self.claimed_comment_before(arg_span(a), call_end).is_some())
             || !self
                 .trivia
                 .standalone_comments_between(span.line_range.0, span.line_range.1)
@@ -2112,7 +2134,7 @@ impl<'a> Printer<'a> {
             } else {
                 None
             };
-            return self.comma_block(entries, body, "(", ")");
+            return self.comma_block_before(entries, body, "(", ")", call_end);
         }
         // A non-trailing block lambda can expand while formatting. Break its
         // argument list with it so the next pass sees the same call layout.
@@ -2923,6 +2945,15 @@ impl<'a> Printer<'a> {
             .chars()
             .all(|c| c.is_whitespace() || c == ';' || c == ',')
             .then_some((text, col))
+    }
+
+    /// [`Self::claimed_trailing_comment`], for a comment that starts before
+    /// byte offset `limit`.
+    fn claimed_comment_before(&self, span: Span, limit: usize) -> Option<(&str, usize)> {
+        let (_, _, offset) = self.trivia.trailing_comment(span.line_range.1)?;
+        (offset < limit)
+            .then(|| self.claimed_trailing_comment(span))
+            .flatten()
     }
 
     fn with_trailing_comment(&self, doc: Doc, span: Span, mode: char) -> Doc {

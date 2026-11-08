@@ -28,6 +28,9 @@ pub struct Trivia {
     /// never dropped). The formatter treats a construct that carries one as a
     /// "preserve verbatim" trigger.
     block: BTreeMap<usize, BlockComment>,
+    /// Tokens other than comments, commas and newlines, by start offset; a `)`
+    /// carries its `(end offset, 0-based line)`.
+    code: BTreeMap<usize, Option<(usize, usize)>>,
 }
 
 struct BlockComment {
@@ -50,11 +53,20 @@ impl Trivia {
         let mut trailing = HashMap::new();
         let mut standalone = BTreeMap::new();
         let mut block = BTreeMap::new();
+        let mut code = BTreeMap::new();
         // Track the last line on which we saw a non-comment token, so a comment
         // sharing that line is classified as trailing.
         let mut code_on_line: Option<usize> = None;
         for tok in &tokens {
             let line = tok.span.line_range.0;
+            if !matches!(
+                tok.kind,
+                TokenKind::Comment(_) | TokenKind::Comma | TokenKind::Newline
+            ) {
+                let close = (tok.kind == TokenKind::CloseParen)
+                    .then_some((tok.span.offset_range.1, tok.span.line_range.1));
+                code.insert(tok.span.offset_range.0, close);
+            }
             match &tok.kind {
                 TokenKind::Comment(text) => {
                     let (lo, hi) = tok.span.offset_range;
@@ -103,6 +115,7 @@ impl Trivia {
             standalone,
             blank,
             block,
+            code,
         })
     }
 
@@ -112,6 +125,17 @@ impl Trivia {
         self.trailing
             .get(&line)
             .map(|(t, c, o)| (t.as_str(), *c, *o))
+    }
+
+    /// The `)` that closes an argument list whose last argument ends at
+    /// `offset`: `(end offset, 0-based line)`. `None` when other code comes
+    /// first, as after the argument of a `f $ x` call.
+    pub fn close_paren_after(&self, offset: usize) -> Option<(usize, usize)> {
+        let (_, close) = self
+            .code
+            .range((Bound::Included(offset), Bound::Unbounded))
+            .next()?;
+        *close
     }
 
     /// Standalone `//` comments on lines strictly between `after` and `before`
