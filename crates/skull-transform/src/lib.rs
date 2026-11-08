@@ -46,7 +46,7 @@ pub use inline::{
     inline_functions_with_plans, inline_off_active, inline_off_guard,
     validate_no_residual_bound_calls,
 };
-pub use mem2reg::{Mem2RegCensus, Mem2RegPromotion, mem2reg_census, promote_direct_cells};
+pub use mem2reg::{Mem2RegPromotion, promote_direct_cells};
 
 pub const STATE: &str = "__state";
 

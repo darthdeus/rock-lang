@@ -9,7 +9,6 @@
 pub mod allocation_report;
 pub mod coroutine_emit;
 pub mod graph_snapshot;
-pub mod mem2reg_stats;
 pub mod mir_emit;
 pub mod shader_artifact;
 pub mod site_join;

@@ -35,14 +35,6 @@ fn render(a: int) -> string {
             .any(|body| !body.direct_sites.is_empty()),
         "the byte-identical reported build still needs a populated manifest",
     );
-    assert!(
-        reported
-            .allocation_report
-            .bodies
-            .values()
-            .all(|body| body.mem2reg_census.is_none()),
-        "ordinary allocation reporting must not pay for the separate mem2reg census",
-    );
 }
 
 #[test]

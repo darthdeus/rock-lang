@@ -200,8 +200,6 @@ mod line_directives;
 mod loop_scoped_locals;
 #[path = "mangle_rename_hot_reload.rs"]
 mod mangle_rename_hot_reload;
-#[path = "mem2reg_stats.rs"]
-mod mem2reg_stats;
 #[path = "modules_lifecycle.rs"]
 mod modules_lifecycle;
 #[path = "modules_state_identity.rs"]

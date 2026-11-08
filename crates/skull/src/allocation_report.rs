@@ -201,8 +201,6 @@ pub struct AllocationCallEdge {
 pub struct AllocationBody {
     pub emitted_name: String,
     pub diagnostic_name: String,
-    /// Populated only by the separate mem2reg diagnostic scope.
-    pub mem2reg_census: Option<skull_transform::Mem2RegCensus>,
     pub direct_sites: Vec<AllocationSite>,
     pub call_edges: Vec<AllocationCallEdge>,
 }
@@ -550,8 +548,6 @@ pub(crate) fn collect_emitted_body(
     Some(AllocationBody {
         emitted_name: emitted_name.to_string(),
         diagnostic_name: diagnostic_name.to_string(),
-        mem2reg_census: (crate::mem2reg_stats::enabled() && !func.is_coroutine)
-            .then(|| skull_transform::mem2reg_census(func)),
         direct_sites,
         call_edges: call_edges
             .into_iter()

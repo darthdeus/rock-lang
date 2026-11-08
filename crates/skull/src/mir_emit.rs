@@ -38,7 +38,6 @@ struct WorkerMode {
     inline_off: bool,
     allocation_report: bool,
     allocation_activation: bool,
-    mem2reg_census: bool,
 }
 
 #[cfg(not(feature = "sequential"))]
@@ -48,7 +47,6 @@ impl WorkerMode {
             inline_off: skull_transform::inline_off_active(),
             allocation_report: crate::allocation_report::enabled(),
             allocation_activation: crate::allocation_report::activation_enabled(),
-            mem2reg_census: crate::mem2reg_stats::enabled(),
         }
     }
 
@@ -59,7 +57,6 @@ impl WorkerMode {
             _allocation_activation: crate::allocation_report::activation_scope(
                 self.allocation_activation,
             ),
-            _mem2reg_census: crate::mem2reg_stats::scope(self.mem2reg_census),
         }
     }
 }
@@ -69,7 +66,6 @@ struct WorkerScope {
     _inline: Option<skull_transform::InlineOffGuard>,
     _allocation_report: crate::allocation_report::Scope,
     _allocation_activation: crate::allocation_report::ActivationScope,
-    _mem2reg_census: crate::mem2reg_stats::Scope,
 }
 
 #[cfg(not(feature = "sequential"))]
