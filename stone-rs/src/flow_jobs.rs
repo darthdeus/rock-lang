@@ -152,7 +152,7 @@ impl FlowService {
             || data
                 .reserved_bytes
                 .checked_add(work.reserved_bytes)
-                .map_or(true, |bytes| bytes > MAX_FLOW_BYTES)
+                .is_none_or(|bytes| bytes > MAX_FLOW_BYTES)
         {
             return false;
         }
@@ -791,7 +791,7 @@ mod tests {
         let height = 2;
         let mut walkable = padded_snapshot(width, height, true);
         // Block the east elbow. The southeast tile must be reached around it.
-        walkable[(0 + 1) * (width + 2) + (1 + 1)] = 0;
+        walkable[(width + 2) + 2] = 0;
         let result = compute_flow(width, height, 0, 0, 64, &walkable);
 
         assert_eq!(result.distances[1 + width], 2.0);
@@ -861,7 +861,7 @@ mod tests {
         let width = 3;
         let height = 3;
         let mut walkable = padded_snapshot(width, height, true);
-        walkable[1 + (1 * (width + 2))] = 0;
+        walkable[1 + (width + 2)] = 0;
         let result = compute_flow(width, height, 0, 0, 64, &walkable);
 
         assert_eq!(result.distances[0], FLOW_UNREACHABLE);

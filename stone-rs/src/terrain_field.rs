@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const FIELD_FAR: f32 = 1_000_000.0;
-const FIELD_DIAG: f64 = 1.41421356_f64;
+const FIELD_DIAG: f64 = std::f64::consts::SQRT_2;
 
 #[inline]
 fn cancelled(cancellation: &AtomicBool, stopping: &AtomicBool) -> bool {

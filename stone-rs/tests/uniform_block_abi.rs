@@ -67,9 +67,7 @@ fn cdef_params(src: &str, name: &str) -> Vec<String> {
             // Drop the parameter NAME, keep the type -- `const char* block_name`
             // -> `const char*`, `int size` -> `int`.
             let p = p.trim();
-            let cut = p
-                .rfind(|c: char| c == ' ' || c == '*')
-                .expect("a typed param");
+            let cut = p.rfind([' ', '*']).expect("a typed param");
             p[..=cut].trim().to_string()
         })
         .collect()

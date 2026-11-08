@@ -106,21 +106,6 @@ struct ImGuiIoCapturePrefix {
     want_text_input: bool,
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn imgui_io_capture_prefix_matches_cimgui_want_text_input_offset() {
-        assert_eq!(
-            std::mem::offset_of!(super::ImGuiIoCapturePrefix, _want_capture_mouse),
-            184
-        );
-        assert_eq!(
-            std::mem::offset_of!(super::ImGuiIoCapturePrefix, want_text_input),
-            186
-        );
-    }
-}
-
 #[link(name = "cimgui_complete")]
 extern "C" {
     fn igCreateContext(shared_font_atlas: *mut ImFontAtlas) -> *mut ImGuiContext;
@@ -1763,5 +1748,20 @@ pub extern "C" fn stone_imgui_window_add_image_quad(
             ImVec2 { x: uv4_x, y: uv4_y },
             col,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn imgui_io_capture_prefix_matches_cimgui_want_text_input_offset() {
+        assert_eq!(
+            std::mem::offset_of!(super::ImGuiIoCapturePrefix, _want_capture_mouse),
+            184
+        );
+        assert_eq!(
+            std::mem::offset_of!(super::ImGuiIoCapturePrefix, want_text_input),
+            186
+        );
     }
 }

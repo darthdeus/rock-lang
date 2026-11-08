@@ -368,7 +368,7 @@ pub extern "C" fn stone_ui_probe_custom_consumed() {
         return;
     }
     consumed("custom_complete", json!({"restored": true}));
-    crate::with_gl(|gl| device_state(gl));
+    crate::with_gl(device_state);
 }
 
 #[no_mangle]

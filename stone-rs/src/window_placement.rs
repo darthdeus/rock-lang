@@ -5,12 +5,13 @@
 //!     > machine config [default] > game default (the requested size/pos)
 //! then the fit clamp limits whatever this produces.
 //!
-//! Two files, split by who writes them (neither is checked into the repo):
-//!   - saved geometry (engine-written state):
-//!       $XDG_STATE_HOME|~/.local/state/stone/window-geometry.json
-//!   - machine config (hand-written): $XDG_CONFIG_HOME|~/.config/stone/window.toml
-//! One convention on every platform (macOS included), so there is a single
-//! path to reason about. Headless never reads or writes either file.
+//! Two files, split by who writes them (neither is checked into the repo).
+//! Saved geometry is `stone/window-geometry.json` under `$XDG_STATE_HOME`
+//! (default `~/.local/state`). Machine config is `stone/window.toml` under
+//! `$XDG_CONFIG_HOME` (default `~/.config`).
+//!
+//! Both follow one convention on every platform (macOS included), so there is
+//! a single path to reason about. Headless never reads or writes either file.
 //!
 //! The machine config also carries `imgui_scale` (game section over default)
 //! for a display that misreports its density; `STONE_IMGUI_SCALE` outranks it.
@@ -476,7 +477,7 @@ pub fn saved_geometry(
             return None;
         }
     };
-    let entry = root.get(&saved_key(game_slug, topo))?;
+    let entry = root.get(saved_key(game_slug, topo))?;
     let x = entry.get("x")?.as_i64()? as i32;
     let y = entry.get("y")?.as_i64()? as i32;
     let w = entry.get("w")?.as_i64()? as i32;
@@ -836,7 +837,7 @@ display = 1
     fn topology_signature_is_order_independent_and_count_sensitive() {
         let a = disp(0, (0, 0, 1440, 900));
         let b = disp(1, (1440, 0, 2560, 1440));
-        let one = topology_signature(&[a.clone()]);
+        let one = topology_signature(std::slice::from_ref(&a));
         let two = topology_signature(&[a.clone(), b.clone()]);
         let two_rev = topology_signature(&[b, a]);
         assert_ne!(one, two);

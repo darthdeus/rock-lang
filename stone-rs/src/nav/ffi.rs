@@ -236,7 +236,9 @@ fn place(space: int, x: int, y: int) -> Place {
 fn links(values: &[NativeNavIntWire]) -> IdxVec<NavLinkInput> {
     assert_eq!(values.len() % 8, 0, "navigation link record length");
     values
-        .chunks_exact(8)
+        .as_chunks::<8>()
+        .0
+        .iter()
         .map(|v| NavLinkInput {
             from: place(v[0].value(), v[1].value(), v[2].value()),
             to: place(v[3].value(), v[4].value(), v[5].value()),
@@ -263,7 +265,9 @@ pub unsafe extern "C" fn stone_nav_create(
         let layout = input(layout, layout_len);
         assert_eq!(layout.len() % 3, 0, "navigation space record length");
         let spaces: Vec<_> = layout
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|v| NavSpaceLayout {
                 space: SpaceId {
                     value: v[0].value(),
@@ -637,7 +641,7 @@ pub unsafe extern "C" fn stone_nav_route_restore(
             "navigation route position is out of range"
         );
         let mut route = Vec::with_capacity(route_len as usize);
-        for v in values.chunks_exact(3) {
+        for v in values.as_chunks::<3>().0 {
             let tile = NavRouteTile {
                 x: v[0].value(),
                 y: v[1].value(),
@@ -802,7 +806,9 @@ pub unsafe extern "C" fn stone_nav_layout_valid(
             return 0;
         }
         let spaces: Vec<_> = values
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|v| NavSpaceLayout {
                 space: SpaceId {
                     value: v[0].value(),

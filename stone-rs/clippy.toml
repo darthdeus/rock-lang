@@ -1,0 +1,2 @@
+# The native runtime uses the system clock; the workspace clock rule is for compiler/wasm code.
+disallowed-types = []

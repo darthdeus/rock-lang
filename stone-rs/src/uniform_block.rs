@@ -133,9 +133,11 @@ const STATE_FLOATS: usize = 40;
 
 fn leading_floats(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .take(STATE_FLOATS)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .map(|c| f32::from_le_bytes(*c))
         .collect()
 }
 

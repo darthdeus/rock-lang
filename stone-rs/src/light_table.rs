@@ -69,7 +69,7 @@ fn pointer_range<T>(pointer: *const T, len: usize) -> Option<(usize, usize)> {
     if len == 0 {
         return Some((0, 0));
     }
-    if pointer.is_null() || (pointer as usize) % align_of::<T>() != 0 {
+    if pointer.is_null() || !(pointer as usize).is_multiple_of(align_of::<T>()) {
         return None;
     }
     let bytes = len.checked_mul(size_of::<T>())?;

@@ -66,6 +66,10 @@ thread_local! { static READER: RefCell<Reader> = RefCell::new(Reader::default())
 
 /// LuaJIT calls this module loader with the live `lua_State*`. It installs
 /// only the health reader; the allocation counter keeps its own loader.
+///
+/// # Safety
+/// A non-null `state` must be a live LuaJIT state on its owning thread, with a
+/// writable stack.
 #[no_mangle]
 pub unsafe extern "C" fn luaopen_stone_lua_jit_health(state: *mut crate::LuaState) -> c_int {
     if !state.is_null() {

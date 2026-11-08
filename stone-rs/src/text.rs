@@ -235,8 +235,7 @@ pub extern "C" fn stone_text_init() -> bool {
             });
         }
     });
-    let prior_fonts: Vec<FontEntry> =
-        FONTS.with(|f| f.borrow_mut().drain(..).filter_map(|opt| opt).collect());
+    let prior_fonts: Vec<FontEntry> = FONTS.with(|f| f.borrow_mut().drain(..).flatten().collect());
     if !prior_fonts.is_empty() {
         delete_font_textures(&prior_fonts);
     }
@@ -327,7 +326,7 @@ pub extern "C" fn stone_text_shutdown() {
         }
     });
     FONTS.with(|fonts| {
-        let drained: Vec<FontEntry> = fonts.borrow_mut().drain(..).filter_map(|opt| opt).collect();
+        let drained: Vec<FontEntry> = fonts.borrow_mut().drain(..).flatten().collect();
         forget_instance_images(&drained);
         delete_font_textures(&drained);
     });
@@ -501,9 +500,9 @@ fn rasterize_glyphs_with(
     for face in Face::ALL {
         let synth = face.synth(1.0);
         let table = &mut glyph_unit[face.index()];
-        for slot in 0..table.len() {
+        for (slot, entry) in table.iter_mut().enumerate() {
             if let Some(ch) = charset.char_at(slot) {
-                table[slot] = unit_font.glyph_unit_metrics(ch, synth);
+                *entry = unit_font.glyph_unit_metrics(ch, synth);
             }
         }
     }
@@ -946,15 +945,10 @@ fn build_instance_rasters(
                     .collect::<Vec<_>>()
             })
     });
-    let Some(descriptors) = descriptors else {
-        return None;
-    };
+    let descriptors = descriptors?;
     let mut built = Vec::with_capacity(descriptors.len());
     for (index, pixel_size, texture) in descriptors {
-        let Some(raster) = rasterize_glyphs(font_data, pixel_size, faces, charset, source_path)
-        else {
-            return None;
-        };
+        let raster = rasterize_glyphs(font_data, pixel_size, faces, charset, source_path)?;
         #[cfg(test)]
         if fail_dependent_raster_for_test() {
             return None;
@@ -2503,10 +2497,7 @@ pub extern "C" fn stone_get_font_instance_glyph_info(
     if out.is_null() || char_code < 0 {
         return false;
     }
-    let Some(face) = usize::try_from(face)
-        .ok()
-        .and_then(|face| Face::from_index(face))
-    else {
+    let Some(face) = usize::try_from(face).ok().and_then(Face::from_index) else {
         return false;
     };
     with_atlas_instance(instance_id, false, |instance| {
@@ -3102,12 +3093,12 @@ mod offgrid_tests {
 
         // 48 is on-grid (a clean multiple of the pixel grid).
         assert!(
-            grid_gray_fraction(&font, 48.0) <= GRID_CLEAN,
+            grid_gray_fraction(font, 48.0) <= GRID_CLEAN,
             "expected 48px near-binary, got {:.3}",
-            grid_gray_fraction(&font, 48.0)
+            grid_gray_fraction(font, 48.0)
         );
         assert!(
-            offgrid_report(&font, 48, "pixel").is_none(),
+            offgrid_report(font, 48, "pixel").is_none(),
             "48px should not warn (it is a clean multiple)"
         );
 
@@ -3115,7 +3106,7 @@ mod offgrid_tests {
         // size that the detector flags -- proves the fire path works, not
         // just the early-out.
         let fired: Vec<i32> = (12..=64)
-            .filter(|&px| offgrid_report(&font, px, "pixel").is_some())
+            .filter(|&px| offgrid_report(font, px, "pixel").is_some())
             .collect();
         assert!(
             !fired.is_empty(),
@@ -3130,7 +3121,7 @@ mod offgrid_tests {
         let font = FALLBACK_FONT;
         for px in (12..=64).step_by(4) {
             assert!(
-                offgrid_report(&font, px, "DroidSans").is_none(),
+                offgrid_report(font, px, "DroidSans").is_none(),
                 "smooth font should never warn (px={})",
                 px
             );

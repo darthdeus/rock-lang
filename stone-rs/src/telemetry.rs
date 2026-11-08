@@ -389,6 +389,7 @@ impl TelemetryRootLock {
         fs::create_dir_all(&reports)?;
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(reports.join(".telemetry.lock"))?;
@@ -406,6 +407,7 @@ impl ConsentJournalLock {
         fs::create_dir_all(&reports)?;
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(reports.join(".telemetry-consent.lock"))?;
@@ -1350,9 +1352,7 @@ impl UploadWorker {
                             continue;
                         }
                     }
-                    None if upload_at.map_or(true, |deadline| Instant::now() < deadline) => {
-                        continue
-                    }
+                    None if upload_at.is_none_or(|deadline| Instant::now() < deadline) => continue,
                     None => {}
                 }
 
@@ -2300,6 +2300,7 @@ mod tests {
         let mut client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
         fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(&client.events_path)
             .unwrap()
@@ -2323,6 +2324,7 @@ mod tests {
         let mut client = TelemetryClient::open(&root, identity(), "", "", false).unwrap();
         fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(&client.events_path)
             .unwrap()
@@ -2349,6 +2351,7 @@ mod tests {
         let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
         fs::OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(&spool.events_path)
             .unwrap()
@@ -3731,6 +3734,7 @@ mod tests {
         let drain = TelemetryDrain::open(&root, "steam").unwrap();
         let mut quarantine = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .write(true)
             .open(&drain.quarantine_path)
             .unwrap();

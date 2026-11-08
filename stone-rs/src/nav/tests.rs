@@ -107,11 +107,12 @@ fn nav_shortcut_erases_a_loop_longer_than_its_neighbor_window() {
         space: SpaceId { value: 1 },
         origin: iv(0, 0),
         blocked: IdxVec::from(blocked),
-        ..NavTestSpace::default()
     };
     let graph = nav_test_graph(std::slice::from_ref(&input), &[], 8);
-    let mut plan = NavPlan::default();
-    plan.si = 0;
+    let mut plan = NavPlan {
+        si: 0,
+        ..NavPlan::default()
+    };
     for (x, y) in [
         (7, 1),
         (7, 2),

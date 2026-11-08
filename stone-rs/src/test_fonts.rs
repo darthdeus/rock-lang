@@ -90,7 +90,7 @@ fn pixel_bitmap(cp: u32) -> [[bool; PIXEL_COLS]; PIXEL_ROWS] {
         for (col, cell) in line.iter_mut().enumerate() {
             let h = (cp.wrapping_mul(2654435761) ^ ((row * 7 + col) as u32).wrapping_mul(40503))
                 .rotate_left(row as u32 + 3);
-            *cell = col == 0 || h % 3 != 0;
+            *cell = col == 0 || !h.is_multiple_of(3);
         }
     }
     bits

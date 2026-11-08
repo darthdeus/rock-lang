@@ -1139,7 +1139,7 @@ fn read_pbo(
     fmt: PixelFmt,
     rect: ReadRect,
     center: (i32, i32),
-    mut rgba_out: Option<&mut [f32; 4]>,
+    rgba_out: Option<&mut [f32; 4]>,
 ) -> (c_float, bool) {
     let sentinel = slot.channel.sentinel();
     let mut result = sentinel;
@@ -1168,7 +1168,7 @@ fn read_pbo(
                 (ReadShape::Pixel, _) => pixel_component(slice, fmt, 0),
             };
             if matches!(shape, ReadShape::Pixel) && matches!(slot.channel, Channel::Color) {
-                if let Some(rgba_out) = rgba_out.as_deref_mut() {
+                if let Some(rgba_out) = rgba_out {
                     let mut rgba = [0.0; 4];
                     for (channel, value) in rgba.iter_mut().enumerate() {
                         *value = pixel_component(slice, fmt, channel);

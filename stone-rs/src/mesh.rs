@@ -230,7 +230,7 @@ pub extern "C" fn stone_mesh_set_instances(
     attr_sizes: *const c_int,
     attr_count: c_int,
 ) {
-    if data.is_null() || count < 0 || count > 10_000_000 {
+    if data.is_null() || !(0..=10_000_000).contains(&count) {
         crate::log_once!(
             "MESH",
             "stone_mesh_set_instances: invalid data ({} instances)",
@@ -490,7 +490,7 @@ mod layout_tests {
     fn validate_layout_does_not_allocate_for_maximum_attribute_count() {
         let attributes = [1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4];
         let live_before = crate::text::retained_bytes::live();
-        let layout = validate_layout("test", 40, attributes.as_ptr(), attributes.len() as i32)
+        let _layout = validate_layout("test", 40, attributes.as_ptr(), attributes.len() as i32)
             .expect("valid layout");
         let live_after = crate::text::retained_bytes::live();
 
@@ -498,6 +498,5 @@ mod layout_tests {
             live_after, live_before,
             "validation retains no heap allocation"
         );
-        drop(layout);
     }
 }

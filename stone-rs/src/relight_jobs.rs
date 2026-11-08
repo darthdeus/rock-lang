@@ -343,7 +343,7 @@ mod tests {
     fn occupancy_region_uses_rgba_and_reversed_sample_rows() {
         let old = vec![0; 8 * 8 * 4];
         let mut next = old.clone();
-        next[(1 * 8 + 6) * 4 + 3] = 1;
+        next[(8 + 6) * 4 + 3] = 1;
         next[(6 * 8 + 1) * 4] = 1;
         let result = diff(8, 2, 1, &old, next, &AtomicBool::new(false)).unwrap();
         assert_eq!(result.region, [-1.0, -1.0, 2.0, 2.0]);

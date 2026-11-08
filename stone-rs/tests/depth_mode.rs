@@ -135,6 +135,10 @@ fn invalid_utf8_depth_name_is_rejected_before_gl_mutation() {
 
 #[test]
 #[serial]
+#[expect(
+    clippy::assertions_on_constants,
+    reason = "This fixture verifies host teardown after assertion failure."
+)]
 fn depth_fixture_cleans_up_after_failed_assertion() {
     let headless = std::env::var_os("STONE_HEADLESS");
     let failure = std::panic::catch_unwind(|| {
