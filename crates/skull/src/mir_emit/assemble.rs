@@ -188,9 +188,10 @@ impl Assembly {
     }
 
     /// Decorator DEFINITIONS, workspace-wide: each `deco <name> { .. }` -> a fn
-    /// `__deco_<name>(target, <params>)`. `deco_map` is built up front (sequential,
-    /// cheap) because an application usually names a decorator declared in another
-    /// module; the definition bodies themselves lower+emit in parallel.
+    /// `__deco_<name>(target, <params>)`. Unlike JS, Lua emits every
+    /// program-defined decorator, applied or not. The table is built up front
+    /// (sequential, cheap) because an application usually names a decorator
+    /// declared in another module; the bodies lower+emit in parallel.
     fn push_decorator_definitions(
         &mut self,
         ws: &Workspace,
