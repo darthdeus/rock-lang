@@ -337,9 +337,26 @@ impl<'a> LowerCtx<'a> {
                     self.use_tree_refs(frag, child, &full, root, out);
                 }
             }
-            skull_parser::UseSuffix::Bind
-            | skull_parser::UseSuffix::Glob
-            | skull_parser::UseSuffix::Operator { .. } => {}
+            // The selector names the operator family under its internal name,
+            // the same path the import binds.
+            skull_parser::UseSuffix::Operator { op, alias } => {
+                full.push(op.name);
+                if let Some(target) = self.use_leaf_target(frag, root, &full) {
+                    out.push(hir::PathSegmentRef {
+                        span: op.span,
+                        target,
+                        alias: false,
+                    });
+                    if let Some(alias) = alias {
+                        out.push(hir::PathSegmentRef {
+                            span: alias.span,
+                            target,
+                            alias: true,
+                        });
+                    }
+                }
+            }
+            skull_parser::UseSuffix::Bind | skull_parser::UseSuffix::Glob => {}
         }
     }
 

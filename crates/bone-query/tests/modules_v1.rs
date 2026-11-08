@@ -1412,3 +1412,35 @@ fn recovery_reparse_reads_a_v1_buffer_as_its_package_does() {
         );
     }
 }
+
+/// `use p::operator(+);` imports the `+` family under its internal name. Its
+/// glyph segment lands on the operator, as a named use item's leaf lands on
+/// what it names, and so does an alias of it.
+#[test]
+fn an_operator_use_item_segment_lands_on_the_operator() {
+    let project = V1Project::new();
+    let shapes_text =
+        format!("{SHAPES}\npub operator +(a: Box, b: Box) -> int {{\n    a.w + b.w\n}}\n");
+    std::fs::write(project.dir.path().join("shapes.rock"), &shapes_text).unwrap();
+    let main_text = MAIN.replace(
+        "use shapes::*;\n",
+        "use shapes::*;\nuse shapes::operator(+);\nuse shapes::operator(+) as plus;\n",
+    );
+    std::fs::write(project.dir.path().join("main.rock"), &main_text).unwrap();
+    let mut bone = BoneWorkspace::new();
+    let main = project.path("main.rock");
+    let diags = bone.update(&main, main_text.clone());
+    assert_eq!(errors_in(&diags, &main), Vec::<String>::new());
+    for (needle, into) in [("operator(+);", 9), ("operator(+) as", 9), ("plus;", 1)] {
+        let loc = bone
+            .definition(&main, pos_of(&main_text, needle, 0, into))
+            .unwrap_or_else(|| panic!("no definition at `{needle}` +{into}"));
+        let (path, covered) = located_text(&loc);
+        assert_eq!(file_name(&path), "shapes.rock");
+        assert_eq!(covered, "+", "`{needle}` +{into}");
+    }
+    assert_eq!(
+        definition_line(&bone, &main, &main_text, "shapes::operator(+);", 0, 1),
+        ("shapes.rock".into(), 0)
+    );
+}
