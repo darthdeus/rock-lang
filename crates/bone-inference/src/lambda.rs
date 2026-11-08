@@ -81,6 +81,10 @@ pub(crate) fn infer_lambda(
     // let body_ty = resolve(gamma, body_ty, expr_span);
 
     let ret_var = gamma.fresh_callsite_var(*Q_R, expr_span);
+    let iter_result = gamma.iter_result_lambda == Some(body);
+    if iter_result {
+        gamma.iter_result_lambda = None;
+    }
 
     let expects_unit = expected_ret.is_some_and(|r| {
         let r = resolve(gamma, r, expr_span);
@@ -88,6 +92,7 @@ pub(crate) fn infer_lambda(
     });
 
     let saved_ret = gamma.declared_ret_ty.replace(ret_var);
+    let saved_returns = gamma.lambda_returns.replace(Vec::new());
     let saved_coro = gamma.coroutine_ret.take();
     let saved_ref_source = std::mem::replace(&mut gamma.allow_frame_ref_return_place, false);
     // A lambda body runs at CALL time, after arbitrary intervening effects, and a
@@ -111,13 +116,38 @@ pub(crate) fn infer_lambda(
     gamma.refined_nonnull.extend(saved_globals);
     gamma.coroutine_ret = saved_coro;
     gamma.declared_ret_ty = saved_ret;
+    let returns = std::mem::replace(&mut gamma.lambda_returns, saved_returns).unwrap_or_default();
     gamma.allow_frame_ref_return_place = saved_ref_source;
     let body_ty = body_res?;
 
     reject_ref_captures(c, gamma, expr_span)?;
 
     unify(gamma, ret_var, body_ty, expr_span)?;
-    let ret_ty = resolve(gamma, ret_var, expr_span);
+    let mut ret_ty = resolve(gamma, ret_var, expr_span);
+    if iter_result && let Some((witness, it_ty)) = implicit_iter_target(c, gamma, ret_ty, expr_span)
+    {
+        // Every value the lambda can produce is wrapped in `iter`: the tail and
+        // each `return`. MIR lowers through an `if`'s arms and a block's tail
+        // to the leaf values, so the witness goes on those leaves.
+        let mut leaves = Vec::new();
+        result_leaves(c, body, &mut leaves);
+        for r in returns {
+            result_leaves(c, r, &mut leaves);
+        }
+        for leaf in leaves {
+            let produces_value = match gamma.out.expr_types.get(leaf).copied() {
+                Some(t) => {
+                    let t = resolve(gamma, t, expr_span);
+                    !matches!(*gamma.get(t), TypeExpr::Builtin(BuiltinTy::Never))
+                }
+                None => false,
+            };
+            if produces_value {
+                gamma.out.implicit_iter_args.insert(leaf, witness.clone());
+            }
+        }
+        ret_ty = it_ty;
+    }
 
     let mut texps = Vec::with_capacity(param_tys.len());
 
@@ -158,4 +188,26 @@ pub(crate) fn make_fn_ty(gamma: &mut Gamma, param_tys: &[TyId], ret: TyId, span:
         ret: ret_idx,
     });
     TyId::Local(idx)
+}
+
+/// The expressions whose values a result position `e` produces, looking
+/// through a block's tail and both arms of an `if` -- the same places MIR's
+/// return lowering looks through.
+fn result_leaves(c: BodyCtx, e: Idx<Expr>, out: &mut Vec<Idx<Expr>>) {
+    match c.body.expr_arena[e] {
+        Expr::Block { tail, .. } => {
+            if let Some(t) = tail {
+                result_leaves(c, t, out);
+            }
+        }
+        Expr::If {
+            then_branch,
+            else_branch: Some(else_branch),
+            ..
+        } => {
+            result_leaves(c, then_branch, out);
+            result_leaves(c, else_branch, out);
+        }
+        _ => out.push(e),
+    }
 }

@@ -164,6 +164,9 @@ Combinators such as `map`, `filter`, `take`, `skip`, `chain` and `flat_map`
 are lazy. Terminals such as `collect`, `reduce`, `find`, `any`, `all`, `count`
 and `sum` consume the iterator. A collection can be passed directly to an
 iterator-bounded function when its `iter` method supplies the iterator.
+The same holds for a lambda's result where the callee expects an iterator,
+so `[1, 2].flat_map(n => [n, n])` iterates each returned Vec; a named fn
+returning a Vec goes through a lambda (`n => pair(n)`).
 Iterator-bounded calls in coroutine bodies are currently rejected.
 
 ## Compile-time inputs

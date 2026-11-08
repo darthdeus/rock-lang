@@ -127,11 +127,11 @@ fn coerced_chain_in_string_interp() {
     assert_eq(msg, "has_big=true")
 }
 
-// flat_map: the receiver coerces like any `Iterator`-bounded argument, for
+// flat_map: the receiver coerces like any `Iterator`-bounded argument, and a
+// lambda callback that returns a Vec has its result coerced the same way, for
 // non-nullable, nullable and nobox elements alike, against the explicit-iter
-// control. The callback's RESULT is not an argument and does not coerce:
-// `[1, 2].flat_map(n => [n, n])` is rejected for every element kind (see
-// tests/errors/flat_map_callback_result_not_coerced.rock.err).
+// control. A named fn returning a Vec is passed through a lambda; on its own
+// it is rejected (tests/errors/flat_map_fn_value_callback_result.rock.err).
 nobox value FmV2 { x: float, y: float }
 
 fn fm_pair(n: int) -> VecIter<int> { return [n, n].iter() }
@@ -159,4 +159,51 @@ fn flat_map_coerced_receiver_nullable_elements() {
 fn flat_map_coerced_receiver_nobox_elements() {
     let a = [FmV2 { x: 1.0, y: 2.0 }, FmV2 { x: 3.0, y: 4.0 }]
     assert_eq(a.flat_map(fm_pair_v2).map(v => v.y).sum_f(), 12.0)
+}
+
+fn fm_vec(n: int) -> [int] { return [n, n] }
+fn fm_vec_opt(n: int?) -> [int?] { return [n, n] }
+fn fm_vec_v2(v: FmV2) -> [FmV2] { return [v, FmV2 { x: v.y, y: v.x }] }
+
+@test(output = "1 1 2 2 3 3")
+fn flat_map_vec_callback_lambda() {
+    let out = [1, 2, 3].flat_map(n => [n, n]).map(n => "{n}").collect()
+    print(join(out, " "))
+}
+
+@test
+fn flat_map_vec_callback_lambda_over_named_fn() {
+    assert_eq([1, 2, 3].flat_map(n => fm_vec(n)).sum(), 12)
+    assert_eq([1, 2, 3].iter().flat_map(n => fm_vec(n)).count(), 6)
+}
+
+@test
+fn flat_map_vec_callback_block_lambda() {
+    let out = [1, 2, 3].flat_map(n => {
+        if n == 2 { return [] }
+        return [n, n * 10]
+    }).collect()
+    assert_eq(out.len(), 4)
+    assert_eq(out[3], 30)
+    assert_eq([1, 2, 3].flat_map(n => if n > 1 { [n, n] } else { [] }).sum(), 10)
+}
+
+@test
+fn flat_map_vec_callback_nullable_elements() {
+    let a: [int?] = [1, null, 3]
+    assert_eq(a.flat_map(n => fm_vec_opt(n)).count(), 6)
+    assert_eq(a.flat_map(n => fm_vec_opt(n)).filter(x => x == null).count(), 2)
+    assert_eq(a.flat_map(n => [n, null]).filter(x => x == null).count(), 4)
+}
+
+@test
+fn flat_map_vec_callback_nobox_elements() {
+    let a = [FmV2 { x: 1.0, y: 2.0 }, FmV2 { x: 3.0, y: 4.0 }]
+    assert_eq(a.flat_map(v => fm_vec_v2(v)).map(v => v.x).sum_f(), 10.0)
+    assert_eq(a.flat_map(v => [v, v]).map(v => v.y).sum_f(), 12.0)
+}
+
+@test
+fn flat_map_explicit_iter_in_callback_still_works() {
+    assert_eq([1, 2].flat_map(n => [n, n].iter()).count(), 4)
 }

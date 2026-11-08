@@ -1,0 +1,22 @@
+//! Error: a `flat_map` callback's Vec result coerces to an iterator only when
+//!        the callback is a lambda, whose result expressions can be wrapped
+//!        in `iter`. A named fn returning a Vec is rejected with the two
+//!        spellings that work (tests/iterators/implicit_coercion.rock).
+//! Tags: iterators, coercion, flat_map
+
+//=== TEST CASE: named_fn_vec_result_Generic ===
+fn pair(n: int) -> [int] { return [n, n] }
+
+fn main() {
+    //! expect: this callback returns `[int]`, not an iterator; only a lambda's result is coerced
+    print([1, 2].flat_map(pair).count())
+}
+
+//=== TEST CASE: named_fn_nullable_vec_result_Generic ===
+fn pair(n: int?) -> [int?] { return [n, n] }
+
+fn main() {
+    let a: [int?] = [1, null]
+    //! expect: this callback returns `[int?]`, not an iterator
+    print(a.flat_map(pair).count())
+}

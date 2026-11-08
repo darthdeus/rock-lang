@@ -3562,7 +3562,8 @@ fn FlattenIter<IO: Iterator<II>, II: Iterator<T>, T>.next(it) -> (bool, T) {
     return (false, phantom())
 }
 
-// map each element to an iterator, then concatenate them all.
+// map each element to an iterator, then concatenate them all. A lambda
+// callback may return a collection instead: its result coerces through `iter`.
 @inline
 fn flat_map<IO: Iterator<T>, T, II: Iterator<U>, U>(it: IO, f: fn(T) -> II) -> FlattenIter<MapIter<IO, T, II>, II, U> {
     return flatten(map(it, f))

@@ -1827,11 +1827,24 @@ pub(crate) fn commit_selected_call(
                         coerced = true;
                     }
                 }
+                // A callback whose result is an `Iterator`-bounded generic
+                // (`flat_map`'s `fn(T) -> II`): a lambda's iterable result
+                // coerces like a bounded arg.
+                let iter_result = !coerced
+                    && matches!(*gamma.get(pty_decl), TypeExpr::Function { ret, .. }
+                        if declared_is_bounded_generic(gamma, pty_decl.with_idx(ret), &bounded_vars));
+                if iter_result && let Expr::Lambda { body, .. } = c.body.expr_arena[arg] {
+                    gamma.iter_result_lambda = Some(body);
+                }
                 if !coerced {
                     match preinferred.get(&arg) {
                         Some(&aty) => coerce(gamma, aty, pty, c.body.expr_spans[arg])?,
                         None => check_expr(c, gamma, arg, pty, c.body.expr_spans[arg])?,
                     }
+                }
+                gamma.iter_result_lambda = None;
+                if iter_result && !matches!(c.body.expr_arena[arg], Expr::Lambda { .. }) {
+                    reject_iterable_fn_value_result(c, gamma, arg, span)?;
                 }
                 if let Some(&aty) = gamma.out.expr_types.get(arg) {
                     reject_redundant_unwrap(
@@ -1903,6 +1916,37 @@ pub(crate) fn commit_selected_call(
     let ret_ty = substitute(gamma, ret_ty, &subs, span)?;
 
     Ok(resolve(gamma, ret_ty, span))
+}
+
+/// A fn value has no result expression to wrap in `iter`, so only a lambda's
+/// iterable result coerces at a bounded result position. Say so, rather than
+/// report that the Vec is not an iterator.
+fn reject_iterable_fn_value_result(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    arg: Idx<Expr>,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let Some(aty) = gamma.out.expr_types.get(arg).copied() else {
+        return Ok(());
+    };
+    let aty = resolve(gamma, aty, span);
+    let TypeExpr::Function { ret, .. } = *gamma.get(aty) else {
+        return Ok(());
+    };
+    let ret = aty.with_idx(ret);
+    let snap = gamma.out.checkpoint();
+    let iterable = implicit_iter_target(c, gamma, ret, span).is_some();
+    gamma.out.rollback_to(snap);
+    if iterable {
+        let rendered = gamma.workspace.render(Some(&gamma.out), ret);
+        comp_error!(
+            c.body.expr_spans[arg],
+            "this callback returns `{}`, not an iterator; only a lambda's result is coerced -- pass `x => f(x)` or return `.iter()`",
+            rendered
+        );
+    }
+    Ok(())
 }
 
 /// An `@unwraps` parameter strips the nullable off its argument, so passing a

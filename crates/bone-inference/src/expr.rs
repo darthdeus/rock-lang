@@ -21,6 +21,9 @@ pub(crate) fn infer_statement(
             // returned lambda has to record the type of the hole it fills, or the
             // body and every indirect call site derive different fn-value ABIs
             // from it. Same rule the `let` arm below already follows.
+            if let (Some(e), Some(returns)) = (e, gamma.lambda_returns.as_mut()) {
+                returns.push(*e);
+            }
             match (e, gamma.declared_ret_ty) {
                 (Some(e), Some(declared)) => {
                     check_expr(c, gamma, *e, declared, c.body.statement_spans[s])?;
@@ -154,6 +157,7 @@ pub(crate) fn infer_statement(
             // enclosing return-context is saved and restored around it.
             let saved_ret = gamma.declared_ret_ty.take();
             let saved_coro = gamma.coroutine_ret.take();
+            let saved_returns = gamma.lambda_returns.take();
             let saved_ref_source =
                 std::mem::replace(&mut gamma.allow_frame_ref_return_place, false);
             let saved_globals: Vec<Narrow> = gamma
@@ -204,6 +208,7 @@ pub(crate) fn infer_statement(
             gamma.refined_nonnull.extend(saved_globals);
             gamma.coroutine_ret = saved_coro;
             gamma.declared_ret_ty = saved_ret;
+            gamma.lambda_returns = saved_returns;
             gamma.allow_frame_ref_return_place = saved_ref_source;
             result?;
 
@@ -1653,6 +1658,9 @@ pub fn infer_expr_used(
 
         Expr::Return(e) => {
             // Checked, not inferred-then-coerced -- see `Statement::Return`.
+            if let (Some(e), Some(returns)) = (e, gamma.lambda_returns.as_mut()) {
+                returns.push(*e);
+            }
             match (e, gamma.declared_ret_ty) {
                 (Some(e), Some(declared)) => {
                     check_expr(c, gamma, *e, declared, expr_span)?;

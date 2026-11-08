@@ -148,6 +148,13 @@ pub struct Gamma<'a> {
     pub(crate) allow_frame_ref_return_place: bool,
     pub(crate) ref_binding_provenance: FxHashMap<Idx<BindingInfo>, RefProvenance>,
 
+    /// The body of a lambda passed where the callee wants an `Iterator`-bounded
+    /// result (`flat_map`'s `fn(T) -> II`): an iterable result coerces to its
+    /// iterator, as an argument at a bounded param does. Taken by `infer_lambda`.
+    pub(crate) iter_result_lambda: Option<Idx<Expr>>,
+    /// The values of the `return`s in the innermost lambda being inferred.
+    pub(crate) lambda_returns: Option<Vec<Idx<Expr>>>,
+
     pub out: BodyInference,
 }
 
@@ -184,6 +191,9 @@ impl<'a> Gamma<'a> {
 
             allow_frame_ref_return_place: false,
             ref_binding_provenance: Default::default(),
+
+            iter_result_lambda: None,
+            lambda_returns: None,
 
             out: BodyInference {
                 body_generation: body.generation,
