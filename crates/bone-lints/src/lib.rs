@@ -2825,10 +2825,40 @@ fn by_file_from_findings(findings: &[Finding]) -> FxHashMap<Ustr, Vec<Finding>> 
     by_file
 }
 
+/// The lines of `source` containing `allow`, numbered and trimmed exactly as
+/// `str::lines` yields them. Every suppression comment names `allow`, so the
+/// scanners below visit only these instead of splitting the whole file.
+fn allow_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut line_no = 0;
+    let mut counted_to = 0;
+    let mut next_from = 0;
+    source.match_indices("allow").filter_map(move |(at, _)| {
+        if at < next_from {
+            return None;
+        }
+        let start = source[..at].rfind('\n').map_or(0, |i| i + 1);
+        let newline = source[at..].find('\n').map(|i| at + i);
+        let end = newline.unwrap_or(source.len());
+        line_no += source.as_bytes()[counted_to..start]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count();
+        counted_to = start;
+        next_from = end;
+        let line = &source[start..end];
+        // `str::lines` strips a carriage return only before a line feed.
+        let line = match newline {
+            Some(_) => line.strip_suffix('\r').unwrap_or(line),
+            None => line,
+        };
+        Some((line_no, line))
+    })
+}
+
 fn suppression_fingerprint(source: &str) -> u64 {
     let mut hash = 1469598103934665603u64;
-    for line in source.lines() {
-        if line.contains("rock") && line.contains("allow") {
+    for (_, line) in allow_lines(source) {
+        if line.contains("rock") {
             for byte in line.as_bytes() {
                 hash ^= u64::from(*byte);
                 hash = hash.wrapping_mul(1099511628211);
@@ -3356,7 +3386,7 @@ fn filter_suppressed_findings_with_entries_timed(
 
 fn suppression_entries(source: &str) -> FxHashSet<(usize, &'static str)> {
     let mut allow = FxHashSet::default();
-    for (n, line) in source.lines().enumerate() {
+    for (n, line) in allow_lines(source) {
         // The `rock: allow(` head does not depend on the lint, so parse it once
         // per comment and only then try each lint name.
         let mut rest = line;
@@ -5041,4 +5071,31 @@ pub fn task_null_abandon(ws: &Workspace) -> Vec<TaskNullAbandon> {
 /// Classifiers that key on a spelling (`main`, `Task`) must read this.
 fn declared_name(name: &str) -> &str {
     name.rsplit("::").next().unwrap_or(name)
+}
+
+#[cfg(test)]
+mod allow_lines_tests {
+    use super::allow_lines;
+
+    #[test]
+    fn matches_str_lines_on_allow_lines() {
+        for source in [
+            "",
+            "allow",
+            "a\nallow allow\r\nb\nx // rock: allow(unused_var)\r",
+            "\r\nallow\r\n\nallow\rmid\nend allow\n",
+            "one\ntwo\n// rock: allow(a)\n// rock: allow(b) allow\nallow",
+        ] {
+            let expected: Vec<(usize, &str)> = source
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| line.contains("allow"))
+                .collect();
+            assert_eq!(
+                allow_lines(source).collect::<Vec<_>>(),
+                expected,
+                "{source:?}"
+            );
+        }
+    }
 }
