@@ -52,7 +52,7 @@ fn v2_from_lua_array() -> [V2] {
     return __rock_vec_from_lua_array(raw_v2_array(), 2)
 }
 
-@test(output = "columns\nV2\n4\n4\n7")
+@test(output = "columns\nV2\n4\n4\n7", backends = "lua")
 fn test_vec_new_with_capacity_then_push() {
     let a: [V2] = vec_new_with_capacity(4)
     print(column_header_repr(a))
@@ -63,7 +63,7 @@ fn test_vec_new_with_capacity_then_push() {
     print(a[0].x)
 }
 
-@test(output = "2\n2\n1\n9\ntrue")
+@test(output = "2\n2\n1\n9\ntrue", backends = "lua")
 fn test_clone_copies_every_column() {
     let a: [V2] = [V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }]
     let b = a.clone()
@@ -101,7 +101,7 @@ fn test_sort_permutes_every_column_in_lockstep() {
     }
 }
 
-@test(output = "true\n2")
+@test(output = "true\n2", backends = "lua")
 fn test_to_lua_array_materializes_elements() {
     let a: [V2] = [V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }]
     let raw = __rock_vec_to_lua_array(a)
@@ -109,7 +109,7 @@ fn test_to_lua_array_materializes_elements() {
     print(a.len)
 }
 
-@test(output = "true")
+@test(output = "true", backends = "lua")
 fn test_to_lua_array_materializes_nested_cdata_enum() {
     let a: [WithPayload] = [WithPayload { payload: Payload::B(7), n: 3 }]
     let raw = __rock_vec_to_lua_array(a)
@@ -124,7 +124,7 @@ fn test_inspect_renders_logical_elements() {
     print(inspect(a))
 }
 
-@test(output = "columns\nDataField\nVec {{ DataField {{ _data: 4, x: 9 }} }}")
+@test(output = "columns\nDataField\nVec {{ DataField {{ _data: 4, x: 9 }} }}", backends = "lua")
 fn test_value_data_field_does_not_collide_with_vec_representation() {
     let a: [DataField] = [DataField { _data: 4.0, x: 9.0 }]
     print(column_header_repr(a))
@@ -172,7 +172,7 @@ fn test_column_sort_preserves_key_callback_semantics() {
     print(column_calls == boxed_calls)
 }
 
-@test(output = "3")
+@test(output = "3", backends = "lua")
 fn test_column_sort_materializes_each_element_once() {
     let a: [V2] = [
         V2 { x: 3.0, y: 0.0 },
@@ -188,7 +188,7 @@ fn test_column_sort_materializes_each_element_once() {
 // a fn value taking a `nobox` value takes its LEAVES -- so the sort feeds the
 // columns straight to the key and builds nothing. The count is the point: `3`
 // here would mean the mark is being honored by a box the verifier waved through.
-@test(output = "0\n1\n10\n2\n20\n3\n30")
+@test(output = "0\n1\n10\n2\n20\n3\n30", backends = "lua")
 fn test_nobox_column_sort_materializes_nothing() {
     let a: [NP] = [NP { x: 3.0, y: 30.0 }, NP { x: 1.0, y: 10.0 }, NP { x: 2.0, y: 20.0 }]
     begin_materialization_count("NP_ct")
@@ -235,7 +235,7 @@ fn test_nobox_column_sort_with_a_nested_leaf() {
     }
 }
 
-@test(output = "columns\nV2\n2\n1\n4")
+@test(output = "columns\nV2\n2\n1\n4", backends = "lua")
 fn test_spread_literal_keeps_column_representation() {
     let a: [V2] = [...(
         V2 { x: 1.0, y: 2.0 },
@@ -248,7 +248,7 @@ fn test_spread_literal_keeps_column_representation() {
     print(a[1].y)
 }
 
-@test(output = "columns\nV2\n2\n5\n8")
+@test(output = "columns\nV2\n2\n5\n8", backends = "lua")
 fn test_lua_array_bridge_builds_column_representation() {
     let a = v2_from_lua_array()
     print(column_header_repr(a))

@@ -309,7 +309,7 @@ inline(lua) fn handle_alloc_end() -> float = """
     return bytes
 """
 
-@test
+@test(backends = "lua")
 fn handle_comparisons_do_not_allocate_carriers() {
     let e: Entity<EqTag> = Entity { _scene_id: 1, _arena_id: 2, _slot: 3, _generation: 4 }
     let xs = [e]

@@ -34,7 +34,7 @@ global TRUST_HOLDER: TrustHolder = TrustHolder { p: TrustV2 { x: 1.0, y: 1.0 }, 
 // `["p.x"]` / `["p.y"]` keys -- assigning `.p` sets a key nobody reads.
 //
 // CORRECT would be `p.x == 9.0` (the write taking effect) or a loud rejection.
-@test(returns = 1099)
+@test(returns = 1099, backends = "lua")
 fn nobox_field_write_from_an_opaque_body_vanishes_while_its_sibling_lands_sentinel() -> int {
     trust_poke_field_and_sibling()
     // 1 * 1000 + 99 == 1099 pins BOTH halves: the stale field and the live tag.

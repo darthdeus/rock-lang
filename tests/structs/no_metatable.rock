@@ -11,7 +11,7 @@ struct PointZ { x: int, y: int }
     return getmetatable(p) == nil and __rock_get_type(p) == "PointZ"
 """
 
-@test(output = "true")
+@test(output = "true", backends = "lua")
 fn struct_has_no_metatable() {
     print(__test_struct_no_mt())
 }

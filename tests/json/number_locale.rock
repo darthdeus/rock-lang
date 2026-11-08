@@ -32,7 +32,7 @@ fn with_hostile_locale(body: fn() -> ()) -> bool {
     return installed
 }
 
-@test
+@test(backends = "lua")
 fn test_decode_float_ignores_numeric_locale() {
     let ran = with_hostile_locale(
         () => {
@@ -49,7 +49,7 @@ fn test_decode_float_ignores_numeric_locale() {
     assert(ran, "no comma-decimal locale on this host -- the arm proved nothing")
 }
 
-@test
+@test(backends = "lua")
 fn test_decode_number_forms_ignore_numeric_locale() {
     let ran = with_hostile_locale(
         () => {
@@ -79,7 +79,7 @@ fn test_decode_number_forms_ignore_numeric_locale() {
 // The control: integers have no decimal separator, so they are the arm that
 // must pass even with the defect present. If this one ever goes red the cause
 // is not the locale.
-@test
+@test(backends = "lua")
 fn test_decode_int_under_hostile_locale() {
     let ran = with_hostile_locale(
         () => {

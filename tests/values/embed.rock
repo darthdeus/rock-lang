@@ -291,7 +291,7 @@ fn nested_nullable_present_inner_roundtrips() {
     assert_eq(probe_m(), 1)
 }
 
-@test
+@test(backends = "lua")
 fn nested_nullable_presence_slot_tracks_the_inner_field() {
     fill_present()
     assert_eq(inner_presence_absent(T), false)
@@ -364,7 +364,7 @@ fn slot_keys_of(m: Mid?) -> string {
     return slot_keys(m)
 }
 
-@test
+@test(backends = "lua")
 fn a_rebuilt_child_carries_the_canonical_flat_slots() {
     // Names the SHAPE, not just the values it happens to read back: a rebuilt
     // `Mid` must key its embedded inner exactly as `Mid { .. }` does -- a dotted
@@ -474,14 +474,14 @@ fn embedded_child_flat_enum_closure_payload_roundtrips() {
     assert_eq(read_embedded(), -2)
 }
 
-@test
+@test(backends = "lua")
 fn embedded_child_flat_enum_uses_one_encoding() {
     arm_embedded()
     assert_eq(raw_subslot_tag(EMB), "Secs")
     assert_eq(raw_composed_key_absent(EMB), true)
 }
 
-@test
+@test(backends = "lua")
 fn ctor_writes_the_flat_encoding_too() {
     // The ctor was the other half of the split: it boxed the enum under the
     // composed key, so a never-stored field read stale from construction.

@@ -26,7 +26,7 @@ inline(lua) fn scale_v2_inline(v: V2, factor: float) -> V2 = """
 return __rock_create_struct("V2", { x = v.x * factor, y = v.y * factor })
 """
 
-@test(output = "40\n80")
+@test(output = "40\n80", backends = "lua")
 fn test_nested_value_call_non_last_arg() {
     // `make_v2()` in NON-LAST arg position. Callee `scale_v2_inline`
     // expects a single cdata V2; without a pack, Lua truncates the
@@ -154,14 +154,14 @@ value IV2 { x: int, y: int }
 @inline
 inline(lua) fn make_v(x: int, y: int) -> IV2 = "return IV2_ct(x, y)"
 
-@test
+@test(backends = "lua")
 fn test_let_inline_lua_value_call() {
     let v = make_v(7, 9)
     assert_eq(v.x, 7)
     assert_eq(v.y, 9)
 }
 
-@test
+@test(backends = "lua")
 fn test_let_inline_lua_value_call_field_use() {
     let v = make_v(3, 4)
     assert_eq(v.x + v.y, 7)

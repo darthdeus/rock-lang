@@ -12,7 +12,7 @@
     return __rock_get_type(v) or "<nil>"
 """
 
-@test(output = "Vec")
+@test(output = "Vec", backends = "lua")
 fn vec_identifiable_without_metatable() {
     let v: [int] = vec_new()
     print(__test_ty_no_mt(v))

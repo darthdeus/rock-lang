@@ -63,23 +63,23 @@ fn overload_resolution_with_named_and_positional() {
     print(foo(7, b: 8))
 }
 
-@test(output = "8")
+@test(output = "8", backends = "lua")
 fn simple_inline_lua() {
     print(double(4))
 }
 
-@test(output = "Hello, Rock\nFooBar")
+@test(output = "Hello, Rock\nFooBar", backends = "lua")
 fn inline_lua_with_strings() {
     print(shout("Hello, ", "Rock"))
     print(shout("Foo", "Bar"))
 }
 
-@test(output = "foobar")
+@test(output = "foobar", backends = "lua")
 fn multiple_inline_lua_functions() {
     print("{f1()}{f2()}")
 }
 
-@test(output = "HELLO!")
+@test(output = "HELLO!", backends = "lua")
 fn inline_lua_string_manipulation() {
     print(scream("hello"))
 }

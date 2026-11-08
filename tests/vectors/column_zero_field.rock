@@ -4,7 +4,7 @@ value Empty {}
 @nomangle inline(lua) fn zero_column_header_elem(v: any) -> string = "return v[\"@vec\"].elem"
 @nomangle inline(lua) fn zero_column_header_cap(v: any) -> int = "return v[\"@vec\"].cap"
 
-@test(output = "columns\nEmpty\n3\n3\nEmpty {{ }}")
+@test(output = "columns\nEmpty\n3\n3\nEmpty {{ }}", backends = "lua")
 fn test_zero_field_value_has_header_without_a_leaf_column() {
     let a: [Empty] = [Empty {}, Empty {}, Empty {}]
     print(zero_column_header_repr(a))

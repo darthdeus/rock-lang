@@ -26,7 +26,7 @@ value TestKey {
     local c = 0; for _ in pairs(t) do c = c + 1 end; return c
 """
 
-@test
+@test(backends = "lua")
 fn test_ffi_string_fresh_instances_collide() {
     let t = __new_t()
     let s = __new_scratch()
@@ -35,7 +35,7 @@ fn test_ffi_string_fresh_instances_collide() {
     assert_eq(v.unwrap(), 42)
 }
 
-@test
+@test(backends = "lua")
 fn test_ffi_string_different_bytes_different_bucket() {
     let t = __new_t()
     let s = __new_scratch()
@@ -46,7 +46,7 @@ fn test_ffi_string_different_bytes_different_bucket() {
     assert_eq(__get(t, s, TestKey { x: 2, y: 1 }).unwrap(), 200)
 }
 
-@test
+@test(backends = "lua")
 fn test_ffi_string_zero_and_negative_bytes() {
     // Keys with NUL bytes and negative values — ffi.string is length-bound,
     // not NUL-terminated, so NULs are fine. Negative ints → 0xffff.. bytes.
@@ -61,7 +61,7 @@ fn test_ffi_string_zero_and_negative_bytes() {
     assert_eq(__get(t, s, TestKey { x: 0, y: -1 }).unwrap(), 3)
 }
 
-@test
+@test(backends = "lua")
 fn test_ffi_string_large_map() {
     let t = __new_t()
     let s = __new_scratch()

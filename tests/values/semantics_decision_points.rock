@@ -99,7 +99,7 @@ global C3_G: Pt = Pt { x: 5, y: 0 }
 
 // A scalar-leaf write is discarded at EVERY caller shape, not just the
 // scalarized one -- the boundary copies uniformly.
-@test(output = "5 5 5 5 5")
+@test(output = "5 5 5 5 5", backends = "lua")
 fn c3_scalar_leaf_write_is_discarded_every_shape() {
     let a = c3_mk(5)
     c3_poke(a)
@@ -115,7 +115,7 @@ fn c3_scalar_leaf_write_is_discarded_every_shape() {
 }
 
 // The GC tier copies its scalar leaves too.
-@test(output = "5 5")
+@test(output = "5 5", backends = "lua")
 fn c3_gc_tier_scalar_leaf_write_is_discarded() {
     let g = GcM { m: map_new(), n: 5 }
     c3_poke_gc(g)
@@ -126,7 +126,7 @@ fn c3_gc_tier_scalar_leaf_write_is_discarded() {
 
 // ...but a REFERENCE leaf is shared, so a write through it reaches the caller.
 // This is the half of the contract that can corrupt state.
-@test(output = "777 777")
+@test(output = "777 777", backends = "lua")
 fn c3_reference_leaf_is_shared_and_write_aliases() {
     let g = GcM { m: map_new(), n: 5 }
     g.m[1] = 1

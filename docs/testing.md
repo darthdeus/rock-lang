@@ -100,6 +100,16 @@ comma-separated patterns select multiple matches. A filter selecting no tests
 fails. Without a filter, a file with no `@test` functions can succeed with zero
 tests: check the reported count, not only the exit status.
 
+A test that only makes sense on some backends names them with
+`@test(backends = "lua")`; the value is a comma-separated list of `lua`, `js`
+and `glsl`, and it combines with the other arguments
+(`@test(output = "3", backends = "lua")`). Other backends neither compile nor
+run the test. Use it only when the test is about the backend itself: LuaJIT
+FFI, Lua tables, metatables or GC, the Lua physical layout, or the
+`inline(lua)` mechanism. A test that fails on JS because of an emitter gap or a
+Lua-only helper with a portable twin stays unmarked, so it keeps showing as a
+JS skip. An unknown backend name is a compile error.
+
 For detailed Lua test failures:
 
 ```sh
@@ -118,7 +128,10 @@ correctness. Exercise both backends when changing shared lowering behavior.
 CI runs the `tests/` corpus on both backends. On JS, a test the backend
 cannot compile is reported as skipped, and CI fails if the skip count rises
 above `JS_MAX_SKIPS` in `.github/workflows/ci.yml`. When a change removes
-skips, lower that number to the new count.
+skips, lower that number to the new count. Tests marked for other backends
+with `@test(backends = ...)` are counted separately (`N skipped, M not for js`
+in the summary) and are outside the cap. With `ROCK_TEST_VERBOSE=1`, the JS
+run lists each skipped test with its reasons.
 
 ## Corpus layout
 

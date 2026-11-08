@@ -29,7 +29,7 @@ nobox value NP { x: float, y: float }
     return table.concat(ks, ",")
 """
 
-@test(output = "columns")
+@test(output = "columns", backends = "lua")
 fn test_nullable_column_is_column_stored() {
     let a: [NP?] = [NP { x: 1.0, y: 2.0 }, null]
     print(column_header_repr(a))
@@ -45,7 +45,7 @@ fn test_literal_with_a_null_element() {
 
 // The presence column IS the storage, not a derived read: an absent element
 // stores `false` presence with nil leaves, a present one `true` with real ones.
-@test(output = "true\n1\nfalse\ntrue")
+@test(output = "true\n1\nfalse\ntrue", backends = "lua")
 fn test_presence_column_storage() {
     let a: [NP?] = [NP { x: 1.0, y: 2.0 }, null]
     print("{column_presence_at(a, 1)}")
@@ -189,7 +189,7 @@ fn test_enumerate_binds_presence() {
 
 nobox value NP3 { a: float, b: float, c: float }
 
-@test(output = "columns\n3\ntrue")
+@test(output = "columns\n3\ntrue", backends = "lua")
 fn test_three_leaf_payload_is_at_the_budget_and_still_columns() {
     let v: [NP3?] = [NP3 { a: 1.0, b: 2.0, c: 3.0 }, null]
     print(column_header_repr(v))
@@ -199,7 +199,7 @@ fn test_three_leaf_payload_is_at_the_budget_and_still_columns() {
 
 nobox value NP4 { a: float, b: float, c: float, d: float }
 
-@test(output = "columns\n4\ntrue")
+@test(output = "columns\n4\ntrue", backends = "lua")
 fn test_four_leaf_payload_is_past_the_budget_and_still_columns() {
     let v: [NP4?] = [NP4 { a: 1.0, b: 2.0, c: 3.0, d: 4.0 }, null]
     print(column_header_repr(v))
@@ -217,7 +217,7 @@ fn test_four_leaf_payload_is_past_the_budget_and_still_columns() {
 nobox value NV2c { x: float, y: float }
 nobox value Optc { pos: NV2c? }
 
-@test(output = "@p,pos,pos.x,pos.y")
+@test(output = "@p,pos,pos.x,pos.y", backends = "lua")
 fn test_top_level_and_nested_presence_columns_coexist() {
     let a: [Optc?] = [Optc { pos: NV2c { x: 1.0, y: 2.0 } }, null]
     print(column_keys(a))

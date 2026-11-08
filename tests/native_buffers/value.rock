@@ -42,7 +42,7 @@ fn make_v2(a: float, b: float) -> V2 {
 inline(lua) fn nb_get(b: NativeBuffer<V2>, i: int) -> V2 = "return b.ptr[i]"
 inline(lua) fn nb_set(b: NativeBuffer<V2>, i: int, v: V2) = "b.ptr[i] = v"
 
-@test(output = "3\n7\n11\n13")
+@test(output = "3\n7\n11\n13", backends = "lua")
 fn test_native_buffer_value() {
     let buf = nb_v2(4)
     nb_set(buf, 0, V2 { x: 3, y: 7 })

@@ -138,7 +138,7 @@ inline(lua) fn copy_resource_shared() -> any = "return newproxy(false)"
 
 struct ResourceCopyPair { first: any, second: any }
 
-@test
+@test(backends = "lua")
 fn deepcopy_preserves_resource_aliases_with_independent_ownership() {
     let shared = copy_resource_shared()
     assert(copy_resource_same(shared, deepcopy(shared)), "unmanaged userdata retains its shared semantics")
@@ -176,14 +176,14 @@ inline(lua) fn __test_copy_plain_ok(orig: any, copy: any) -> bool = """
         and getmetatable(copy) == nil
 """
 
-@test(output = "true")
+@test(output = "true", backends = "lua")
 fn table_copy_keeps_metatable() {
     let t = __test_make_metatabled()
     let c = table_copy(t)
     print(__test_copy_keeps_mt(t, c))
 }
 
-@test(output = "true")
+@test(output = "true", backends = "lua")
 fn table_copy_plain_table_has_no_metatable() {
     let t: any = __test_make_plain()
     let c = table_copy(t)

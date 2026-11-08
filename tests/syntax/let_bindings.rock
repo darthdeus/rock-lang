@@ -56,7 +56,7 @@ inline(lua) fn test_keywords(end: int, function: string) -> string = """
     return tostring(__rock_end) .. __rock_function  -- Keep Lua syntax in extern block
 """
 
-@test(output = "42test")
+@test(output = "42test", backends = "lua")
 fn test_keyword_names_in_extern_functions() {
     print(test_keywords(42, "test"))
 }

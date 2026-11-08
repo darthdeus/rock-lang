@@ -42,7 +42,7 @@ inline(lua) fn coerced_int_tostring() -> string = """
     return tostring(tonumber(event.key))
 """
 
-@test
+@test(backends = "lua")
 fn cdata_leaks_LL_suffix_without_tonumber() {
     assert_eq(cdata_int_tostring(), "42LL")
     assert_eq(coerced_int_tostring(), "42")

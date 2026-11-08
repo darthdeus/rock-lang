@@ -68,7 +68,7 @@ inline(lua) fn mat4_float_at(m: Mat4, i: int) -> float = """
     return p[i]
 """
 
-@test
+@test(backends = "lua")
 fn mat4_column_major_memory() {
     let m = Mat4 {
         c0: v(0.0, 1.0, 2.0, 3.0),

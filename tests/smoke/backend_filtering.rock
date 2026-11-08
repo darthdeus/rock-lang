@@ -27,7 +27,7 @@ fn display_info() {
 // Backend-specific intrinsics
 inline(lua) fn get_table_size(t: any) -> int = """local count = 0; for _ in pairs(t) do count = count + 1 end; return count"""
 
-@test
+@test(backends = "lua")
 fn test_backend_filtering() {
     let platform = get_platform_name()
 

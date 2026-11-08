@@ -11,7 +11,7 @@
 // No-return-type form (statement-only call).
 @inline inline(lua) fn my_seed(n: int) = "math.randomseed(n)"
 
-@test
+@test(backends = "lua")
 fn test_lua_annotation_math() {
     assert_eq(my_sin(0.0), 0.0, "sin(0) == 0")
     assert_eq(my_cos(0.0), 1.0, "cos(0) == 1")
@@ -19,13 +19,13 @@ fn test_lua_annotation_math() {
     assert_eq(my_abs_f(-4.5), 4.5, "abs(-4.5) == 4.5")
 }
 
-@test
+@test(backends = "lua")
 fn test_lua_annotation_string() {
     assert_eq(my_upper("abc"), "ABC", "upper")
     assert_eq(my_lower("XYZ"), "xyz", "lower")
 }
 
-@test
+@test(backends = "lua")
 fn test_lua_annotation_void() {
     my_seed(42)
     print("seeded")

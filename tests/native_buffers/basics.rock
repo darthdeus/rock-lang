@@ -93,7 +93,7 @@ fn large_buffer() {
     assert(nb_get(buf, n - 1) == 2.75)
 }
 
-@test
+@test(backends = "lua")
 fn ffi_pass_through() {
     // The .ptr field must be usable as a raw C pointer by FFI-declared
     // functions. We simulate that here by passing buf.ptr into a Lua

@@ -39,21 +39,21 @@ fn rock_bodied() -> NV2 {
     return true, 1.0, 2.0
 """
 
-@test fn opted_in_leaf_return_round_trips() {
+@test(backends = "lua") fn opted_in_leaf_return_round_trips() {
     let a = leaves()
     assert_eq(a.x + a.y, 7.0)
     let b = leaves_fixed_name()
     assert_eq(b.x + b.y, 11.0)
 }
 
-@test fn non_opaque_and_unmarked_returns_are_untouched() {
+@test(backends = "lua") fn non_opaque_and_unmarked_returns_are_untouched() {
     let c = rock_bodied()
     assert_eq(c.x + c.y, 15.0)
     let d = unmarked_boxed()
     assert_eq(d.x + d.y, 19.0)
 }
 
-@test fn opted_in_tuple_element_still_splats() {
+@test(backends = "lua") fn opted_in_tuple_element_still_splats() {
     let (ok, p) = leaves_in_tuple()
     assert(ok)
     assert_eq(p.x + p.y, 3.0)

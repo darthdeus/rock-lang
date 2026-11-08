@@ -10,13 +10,13 @@
 // One-arg: the parameter name is substituted with the argument expression.
 @inline inline(lua) fn expand_tostr(x: int) -> string = "return tostring(x)"
 
-@test
+@test(backends = "lua")
 fn test_expand_zero_arg() {
     let tb = get_traceback()
     assert(tb.len() > 0, "traceback should be non-empty")
 }
 
-@test
+@test(backends = "lua")
 fn test_expand_one_arg() {
     let s = expand_tostr(99)
     assert_eq(s, "99", "tostring(x) should give \"99\"")
@@ -30,7 +30,7 @@ macro site_paren() -> string {
     _site_paren_impl(__SITE__)
 }
 
-@test
+@test(backends = "lua")
 fn test_expand_with_macro_and_site_literal() {
     // The macro expands at the call line below, injecting
     // "expand_annotation.rock:<line>" as the impl arg.

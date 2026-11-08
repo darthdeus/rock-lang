@@ -85,7 +85,7 @@ fn adv_last_positional_scalarized() {
 
 // ----- 4. Value-returning call into cdata-ABI inline(lua) callee. -----
 
-@test(output = "11\n23")
+@test(output = "11\n23", backends = "lua")
 fn adv_cdata_callee_gets_packed() {
     let r = shift_v2_inline(make_v2(10.0, 20.0), 1.0, 3.0)
     print("{r.x.floor()}")

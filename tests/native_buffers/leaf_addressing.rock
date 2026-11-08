@@ -311,7 +311,7 @@ fn test_generic_element_falls_back() {
 // quietly change storage.
 @nomangle inline(lua) fn __vert_pos_x_via_ptr(p: Ptr<Vert>, i: int) -> float = "return p[i].pos.x"
 
-@test(output = "3 7")
+@test(output = "3 7", backends = "lua")
 fn test_raw_pointer_sees_leaf_writes() {
     let buf = vert_buffer(2)
     buf[0] = make_vert(3.0, 0.0, 0)

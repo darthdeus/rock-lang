@@ -5,14 +5,14 @@
 inline(lua) fn _poke_int(buf: any, v: int) = "buf[0] = v"
 inline(lua) fn _poke_float(buf: any, v: float) = "buf[0] = v"
 
-@test
+@test(backends = "lua")
 fn int_out_roundtrip() {
     let out = ffi_out_int()
     _poke_int(out, 42)
     assert(out.read() == 42)
 }
 
-@test
+@test(backends = "lua")
 fn float_out_roundtrip() {
     let out = ffi_out_float()
     _poke_float(out, 3.25)

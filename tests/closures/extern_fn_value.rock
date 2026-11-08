@@ -28,16 +28,16 @@ global TWICE: (float) -> float = twice
 
 fn apply(f: (string, int) -> string, s: string, n: int) -> string { return f(s, n) }
 
-@test fn bare_extern_direct() { assert(rawequal(7, 7)) }
-@test fn bare_extern_in_local() { let g = rawequal; assert(g(7, 7)) }
-@test fn bare_extern_via_global() { let g = EQ; assert(g(7, 7)) }
+@test(backends = "lua") fn bare_extern_direct() { assert(rawequal(7, 7)) }
+@test(backends = "lua") fn bare_extern_in_local() { let g = rawequal; assert(g(7, 7)) }
+@test(backends = "lua") fn bare_extern_via_global() { let g = EQ; assert(g(7, 7)) }
 
-@test fn ffi_extern_direct() { assert_eq(rep("ab", 2), "abab") }
-@test fn ffi_extern_in_local() { let g = rep; assert_eq(g("ab", 2), "abab") }
-@test fn ffi_extern_as_arg() { assert_eq(apply(rep, "ab", 2), "abab") }
-@test fn ffi_extern_via_global() { let g = REP; assert_eq(g("ab", 2), "abab") }
-@test fn ffi_extern_via_global_vec() { let g = REPS[0]; assert_eq(g("ab", 2), "abab") }
-@test fn ffi_extern_via_struct_field() { let g = HELD.f; assert_eq(g("ab", 2), "abab") }
+@test(backends = "lua") fn ffi_extern_direct() { assert_eq(rep("ab", 2), "abab") }
+@test(backends = "lua") fn ffi_extern_in_local() { let g = rep; assert_eq(g("ab", 2), "abab") }
+@test(backends = "lua") fn ffi_extern_as_arg() { assert_eq(apply(rep, "ab", 2), "abab") }
+@test(backends = "lua") fn ffi_extern_via_global() { let g = REP; assert_eq(g("ab", 2), "abab") }
+@test(backends = "lua") fn ffi_extern_via_global_vec() { let g = REPS[0]; assert_eq(g("ab", 2), "abab") }
+@test(backends = "lua") fn ffi_extern_via_struct_field() { let g = HELD.f; assert_eq(g("ab", 2), "abab") }
 
 @test fn value_param_fn_via_global() { let g = TAKE_P; assert_eq(g(P { x: 1.0, y: 2.0 }), 3.0) }
 @test fn inline_lua_fn_via_global() { let g = TWICE; assert_eq(g(3.0), 6.0) }
