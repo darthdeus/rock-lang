@@ -110,7 +110,7 @@ fn initially_hidden_session_applies_saved_placement_on_first_show() {
             "STONE_HEADLESS",
             "STONE_IMMEDIATE_SHOW",
         ];
-        let before: Vec<_> = keys.iter().map(|key| std::env::var_os(key)).collect();
+        let before: Vec<_> = keys.iter().map(std::env::var_os).collect();
         for fail in [true, false] {
             let temp = tempfile::tempdir().expect("isolated geometry state");
             let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -128,7 +128,7 @@ fn initially_hidden_session_applies_saved_placement_on_first_show() {
                 .env_remove("STONE_NO_WINDOW_FIT")
                 .output()
                 .expect("launch isolated saved-geometry fixture");
-            let after: Vec<_> = keys.iter().map(|key| std::env::var_os(key)).collect();
+            let after: Vec<_> = keys.iter().map(std::env::var_os).collect();
             assert_eq!(
                 after, before,
                 "geometry child preserves caller environment after success and failure"

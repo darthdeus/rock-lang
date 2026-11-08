@@ -1485,10 +1485,7 @@ pub extern "C" fn stone_service_sound_admissions() -> i64 {
         }
 
         let mut scheduled = Vec::new();
-        loop {
-            let Some(handle) = audio.pending_sound_admissions.front().copied() else {
-                break;
-            };
+        while let Some(handle) = audio.pending_sound_admissions.front().copied() {
             let Some(sound) = audio.sounds.get(&handle) else {
                 audio.pending_sound_admissions.pop_front();
                 continue;
@@ -2647,6 +2644,30 @@ fn with_bus(bus: u32, f: impl FnOnce(&Bus)) -> bool {
         false
     })
 }
+/// Set Freeverb reverb effect for sounds
+/// - enabled: whether to apply reverb to sounds
+/// - room_size: 0.0-1.0 (larger = more reverb)
+/// - damping: 0.0-1.0 (higher = darker sound)
+/// - wet: 0.0-1.0 (reverb signal level)
+/// - dry: 0.0-1.0 (original signal level)
+/// - width: 0.0-1.0 (stereo width)
+///
+/// Reverb on the MASTER bus. Was a per-voice wrapper applied at play time,
+/// which meant it only ever reached sounds started after it was switched on
+/// and never reached music at all; as a master insert it reaches everything,
+/// including already-playing voices. Signature unchanged, so games need no
+/// edit. Use `stone_bus_set_reverb` to put reverb on a specific bus.
+#[no_mangle]
+pub extern "C" fn stone_set_reverb(
+    enabled: bool,
+    room_size: c_float,
+    damping: c_float,
+    wet: c_float,
+    dry: c_float,
+    width: c_float,
+) {
+    stone_bus_set_reverb(BUS_MASTER, enabled, room_size, damping, wet, dry, width);
+}
 
 #[cfg(test)]
 mod tests {
@@ -2710,8 +2731,8 @@ mod tests {
             return;
         }
         // (environment, opens no device, skips decoding)
-        let cases: &[(&[(&str, &str)], bool, bool)] = &[
-            (&[], false, false),
+        let cases = &[
+            (&[] as &[(&str, &str)], false, false),
             (&[("STONE_HEADLESS", "1")], true, false),
             (&[("PERF_MODE", "1")], true, false),
             (&[("ROCK_RUN_SIM", "fixture")], true, false),
@@ -3683,27 +3704,4 @@ mod tests {
             "and the meter still reads the real mix, which sims assert on"
         );
     }
-}
-/// Set Freeverb reverb effect for sounds
-/// - enabled: whether to apply reverb to sounds
-/// - room_size: 0.0-1.0 (larger = more reverb)
-/// - damping: 0.0-1.0 (higher = darker sound)
-/// - wet: 0.0-1.0 (reverb signal level)
-/// - dry: 0.0-1.0 (original signal level)
-/// - width: 0.0-1.0 (stereo width)
-/// Reverb on the MASTER bus. Was a per-voice wrapper applied at play time,
-/// which meant it only ever reached sounds started after it was switched on
-/// and never reached music at all; as a master insert it reaches everything,
-/// including already-playing voices. Signature unchanged, so games need no
-/// edit. Use `stone_bus_set_reverb` to put reverb on a specific bus.
-#[no_mangle]
-pub extern "C" fn stone_set_reverb(
-    enabled: bool,
-    room_size: c_float,
-    damping: c_float,
-    wet: c_float,
-    dry: c_float,
-    width: c_float,
-) {
-    stone_bus_set_reverb(BUS_MASTER, enabled, room_size, damping, wet, dry, width);
 }

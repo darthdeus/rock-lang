@@ -403,6 +403,7 @@ impl GpuTimer {
     /// - `>= 0.0` GPU ms of that frame's root scope (from a few frames ago),
     /// - `-1.0` no result ready yet,
     /// - `-2.0` timer queries unsupported on this context.
+    ///
     /// Scope samples of the same frame are aggregated as a side effect.
     pub fn poll_ms(&mut self, gl: &DebugGl) -> f32 {
         self.ensure_init(gl);

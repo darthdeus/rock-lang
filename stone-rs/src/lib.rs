@@ -176,6 +176,10 @@ unsafe extern "C" fn stone_lua_counting_alloc(
 /// LuaJIT calls this module loader with the live `lua_State*`. Installing the
 /// wrapper here avoids changing the bundled LuaJIT ABI or counting native/GPU
 /// allocations that are outside the Lua allocator.
+///
+/// # Safety
+/// A non-null `state` must be a live LuaJIT state on its owning thread. Its
+/// allocator and allocator userdata must remain valid for the state's lifetime.
 #[no_mangle]
 pub unsafe extern "C" fn luaopen_stone_lua_alloc_counter(state: *mut LuaState) -> c_int {
     if state.is_null() {
@@ -2896,19 +2900,19 @@ fn set_fullscreen_impl(window: &mut StoneWindow, mode: c_int) -> bool {
     if window.window.fullscreen_state() == fullscreen {
         return false;
     }
-    if fullscreen != sdl2::video::FullscreenType::Off {
-        if window.window_mode.get() == window_placement::WindowMode::Windowed {
-            let (wx, wy) = window.window.position();
-            let (ww, wh) = window.window.size();
-            let display = window.window.display_index().ok();
-            window
-                .windowed_bounds
-                .set(window_placement::WindowedBounds {
-                    pos: (wx, wy),
-                    size: (ww as i32, wh as i32),
-                    display,
-                });
-        }
+    if fullscreen != sdl2::video::FullscreenType::Off
+        && window.window_mode.get() == window_placement::WindowMode::Windowed
+    {
+        let (wx, wy) = window.window.position();
+        let (ww, wh) = window.window.size();
+        let display = window.window.display_index().ok();
+        window
+            .windowed_bounds
+            .set(window_placement::WindowedBounds {
+                pos: (wx, wy),
+                size: (ww as i32, wh as i32),
+                display,
+            });
     }
     if let Err(e) = window.window.set_fullscreen(fullscreen) {
         log_once!("VIDEO", "set_fullscreen (mode={}) failed: {}", mode, e);
@@ -3561,7 +3565,8 @@ fn effective_borders(queried: Option<window_report::Borders>) -> window_report::
 
 /// Resolve remembered placement: env override
 /// > saved geometry > machine config [game.<slug>] > [default] > game default
-/// (the passed `base`). Reads three sources once; logs the winning provenance
+///
+/// The supplied default is `base`. Reads three sources once; logs the winning provenance
 /// when any source overrode the default. Callers gate this on !headless.
 fn resolve_window_geometry(
     title: &str,

@@ -683,6 +683,46 @@ pub(crate) fn encode_test_png(width: u32, height: u32, pixels: &[u8]) -> Vec<u8>
     encoded.into_inner()
 }
 
+/// Fill a clipped rectangle without one FFI call per pixel.
+#[no_mangle]
+pub extern "C" fn stone_image_data_fill_rect_rgba8(
+    handle: u64,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    r: i32,
+    g: i32,
+    b: i32,
+    a: i32,
+) -> bool {
+    if width < 0 || height < 0 || [r, g, b, a].iter().any(|v| !(0..=255).contains(v)) {
+        return false;
+    }
+    IMAGE_DATAS.with(|ids| {
+        let mut ids = ids.borrow_mut();
+        let Some(image) = ids.get_mut(&handle) else {
+            return false;
+        };
+        let x0 = (x as i64).clamp(0, image.width as i64) as usize;
+        let x1 = (x as i64 + width as i64).clamp(0, image.width as i64) as usize;
+        let y0 = (y as i64).clamp(0, image.height as i64) as usize;
+        let y1 = (y as i64 + height as i64).clamp(0, image.height as i64) as usize;
+        let rgba = [r as u8, g as u8, b as u8, a as u8];
+        for row in y0..y1 {
+            for pixel in image.data
+                [(row * image.width as usize + x0) * 4..(row * image.width as usize + x1) * 4]
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+            {
+                pixel.copy_from_slice(&rgba);
+            }
+        }
+        true
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -777,42 +817,4 @@ mod tests {
         );
         stone_destroy_image_data(handle);
     }
-}
-
-/// Fill a clipped rectangle without one FFI call per pixel.
-#[no_mangle]
-pub extern "C" fn stone_image_data_fill_rect_rgba8(
-    handle: u64,
-    x: i32,
-    y: i32,
-    width: i32,
-    height: i32,
-    r: i32,
-    g: i32,
-    b: i32,
-    a: i32,
-) -> bool {
-    if width < 0 || height < 0 || [r, g, b, a].iter().any(|v| !(0..=255).contains(v)) {
-        return false;
-    }
-    IMAGE_DATAS.with(|ids| {
-        let mut ids = ids.borrow_mut();
-        let Some(image) = ids.get_mut(&handle) else {
-            return false;
-        };
-        let x0 = (x as i64).clamp(0, image.width as i64) as usize;
-        let x1 = (x as i64 + width as i64).clamp(0, image.width as i64) as usize;
-        let y0 = (y as i64).clamp(0, image.height as i64) as usize;
-        let y1 = (y as i64 + height as i64).clamp(0, image.height as i64) as usize;
-        let rgba = [r as u8, g as u8, b as u8, a as u8];
-        for row in y0..y1 {
-            for pixel in image.data
-                [(row * image.width as usize + x0) * 4..(row * image.width as usize + x1) * 4]
-                .chunks_exact_mut(4)
-            {
-                pixel.copy_from_slice(&rgba);
-            }
-        }
-        true
-    })
 }

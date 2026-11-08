@@ -129,22 +129,21 @@ pub(super) fn nav_refine(
 }
 
 pub(super) fn nav_window_tile(g: &NavGraph, c1: int, c2: int, x: int, y: int) -> int {
-    let c;
-    if x >= g.cluster_wx[c1]
+    let c = if x >= g.cluster_wx[c1]
         && y >= g.cluster_wy[c1]
         && x < g.cluster_wx[c1] + g.cluster_size
         && y < g.cluster_wy[c1] + g.cluster_size
     {
-        c = c1;
+        c1
     } else if x >= g.cluster_wx[c2]
         && y >= g.cluster_wy[c2]
         && x < g.cluster_wx[c2] + g.cluster_size
         && y < g.cluster_wy[c2] + g.cluster_size
     {
-        c = c2;
+        c2
     } else {
         return -1;
-    }
+    };
     let si = g.cluster_space[c];
     g.space_tile_base[si] + (y - g.space_oy[si]) * SPACE_SIZE + x - g.space_ox[si]
 }

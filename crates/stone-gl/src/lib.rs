@@ -88,13 +88,23 @@ pub fn debug_groups_supported(major: u32, minor: u32, has_khr_debug: bool) -> bo
 
 /// Wrapper around glow::Context that checks required buffer storage allocations
 /// in every build and other GL calls in debug builds.
+///
+/// # Safety
+///
+/// Unsafe calls require the native context to be alive and current on this thread,
+/// with the called operation supported. Object handles and uniform locations must
+/// belong to this context (or its share group where GL permits) and be valid for the operation.
+/// Bindings, formats and buffer ranges must satisfy the selected GL operation;
+/// error checks do not validate host-memory access or extend resource lifetimes.
 pub struct DebugGl {
     gl: glow::Context,
 }
 
+pub type DrawCaptureHook = unsafe fn(&DebugGl, &str, &[i64]);
+
 thread_local! {
     // Native capture state belongs to the rendering thread, as do its GL contexts.
-    static DRAW_CAPTURE: std::cell::Cell<Option<unsafe fn(&DebugGl, &str, &[i64])>> = const { std::cell::Cell::new(None) };
+    static DRAW_CAPTURE: std::cell::Cell<Option<DrawCaptureHook>> = const { std::cell::Cell::new(None) };
 }
 
 impl DebugGl {
@@ -102,10 +112,14 @@ impl DebugGl {
         Self { gl }
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_sampler_parameter_i32(&self, sampler: glow::Sampler, name: u32) -> i32 {
         self.gl.get_sampler_parameter_i32(sampler, name)
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_framebuffer_attachment_parameter_i32(
         &self,
         target: u32,
@@ -116,7 +130,7 @@ impl DebugGl {
             .get_framebuffer_attachment_parameter_i32(target, attachment, name)
     }
 
-    pub fn set_capture(&self, hook: Option<unsafe fn(&DebugGl, &str, &[i64])>) {
+    pub fn set_capture(&self, hook: Option<DrawCaptureHook>) {
         DRAW_CAPTURE.with(|capture| capture.set(hook));
     }
 
@@ -198,11 +212,15 @@ impl DebugGl {
 
 // Implement GL methods with automatic error checking
 impl DebugGl {
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn clear_color(&self, r: f32, g: f32, b: f32, a: f32) {
         self.gl.clear_color(r, g, b, a);
         self.check_error("clear_color");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn clear(&self, mask: u32) {
         self.capture("clear", &[mask as i64]);
         self.gl.clear(mask);
@@ -211,6 +229,9 @@ impl DebugGl {
 
     /// glClearBufferiv -- the only defined way to clear an integer color
     /// buffer (glClear on one is undefined per spec).
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// `values` must contain every component read for the selected buffer.
     pub unsafe fn clear_buffer_i32_slice(&self, target: u32, draw_buffer: u32, values: &[i32]) {
         self.capture(
             "clear_buffer_i32_slice",
@@ -228,52 +249,74 @@ impl DebugGl {
         self.check_error("clear_buffer_i32_slice");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn viewport(&self, x: i32, y: i32, width: i32, height: i32) {
         self.gl.viewport(x, y, width, height);
         self.check_error("viewport");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn use_program(&self, program: Option<glow::Program>) {
         self.gl.use_program(program);
         self.check_error("use_program");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn bind_vertex_array(&self, vao: Option<glow::VertexArray>) {
         self.gl.bind_vertex_array(vao);
         self.check_error("bind_vertex_array");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn bind_buffer(&self, target: u32, buffer: Option<glow::Buffer>) {
         self.gl.bind_buffer(target, buffer);
         self.check_error("bind_buffer");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn bind_texture(&self, target: u32, texture: Option<glow::Texture>) {
         self.gl.bind_texture(target, texture);
         self.check_error("bind_texture");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn bind_framebuffer(&self, target: u32, framebuffer: Option<glow::Framebuffer>) {
         self.gl.bind_framebuffer(target, framebuffer);
         self.check_error("bind_framebuffer");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn bind_renderbuffer(&self, target: u32, renderbuffer: Option<glow::Renderbuffer>) {
         self.gl.bind_renderbuffer(target, renderbuffer);
         self.check_error("bind_renderbuffer");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn active_texture(&self, texture: u32) {
         self.gl.active_texture(texture);
         self.check_error("active_texture");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// Enabled vertex attributes must cover the requested vertex range.
     pub unsafe fn draw_arrays(&self, mode: u32, first: i32, count: i32) {
         self.capture("draw_arrays", &[mode as i64, first as i64, count as i64]);
         self.gl.draw_arrays(mode, first, count);
         self.check_error("draw_arrays");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// Enabled vertex and instance attributes must cover the requested ranges.
     pub unsafe fn draw_arrays_instanced(
         &self,
         mode: u32,
@@ -295,31 +338,43 @@ impl DebugGl {
         self.check_error("draw_arrays_instanced");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn vertex_attrib_divisor(&self, index: u32, divisor: u32) {
         self.gl.vertex_attrib_divisor(index, divisor);
         self.check_error("vertex_attrib_divisor");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn enable(&self, cap: u32) {
         self.gl.enable(cap);
         self.check_error("enable");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn scissor(&self, x: i32, y: i32, width: i32, height: i32) {
         self.gl.scissor(x, y, width, height);
         self.check_error("scissor");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn disable(&self, cap: u32) {
         self.gl.disable(cap);
         self.check_error("disable");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn blend_func(&self, sfactor: u32, dfactor: u32) {
         self.gl.blend_func(sfactor, dfactor);
         self.check_error("blend_func");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn blend_func_separate(
         &self,
         src_rgb: u32,
@@ -332,21 +387,29 @@ impl DebugGl {
         self.check_error("blend_func_separate");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn blend_equation(&self, mode: u32) {
         self.gl.blend_equation(mode);
         self.check_error("blend_equation");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn blend_equation_separate(&self, rgb: u32, alpha: u32) {
         self.gl.blend_equation_separate(rgb, alpha);
         self.check_error("blend_equation_separate");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn depth_func(&self, func: u32) {
         self.gl.depth_func(func);
         self.check_error("depth_func");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn depth_mask(&self, flag: bool) {
         self.gl.depth_mask(flag);
         self.check_error("depth_mask");
@@ -355,39 +418,58 @@ impl DebugGl {
     /// Read back the states a `glClear` is gated by, so a caller that has to
     /// open them can put them back. Used by canvas creation, which clears the
     /// new target and may run mid-render.
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn is_enabled(&self, cap: u32) -> bool {
         let v = self.gl.is_enabled(cap);
         self.check_error("is_enabled");
         v
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// `parameter` must select a single boolean result.
     pub unsafe fn get_parameter_bool(&self, parameter: u32) -> bool {
         let v = self.gl.get_parameter_bool(parameter);
         self.check_error("get_parameter_bool");
         v
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// `N` must cover every component written by `parameter`.
     pub unsafe fn get_parameter_bool_array<const N: usize>(&self, parameter: u32) -> [bool; N] {
         let v = self.gl.get_parameter_bool_array::<N>(parameter);
         self.check_error("get_parameter_bool_array");
         v
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// `out` must cover every component written by `parameter`.
     pub unsafe fn get_parameter_f32_slice(&self, parameter: u32, out: &mut [f32]) {
         self.gl.get_parameter_f32_slice(parameter, out);
         self.check_error("get_parameter_f32_slice");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn cull_face(&self, mode: u32) {
         self.gl.cull_face(mode);
         self.check_error("cull_face");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn front_face(&self, mode: u32) {
         self.gl.front_face(mode);
         self.check_error("front_face");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// The bound index buffer must cover the offset/count/type, and all referenced vertices must
+    /// be valid.
     pub unsafe fn draw_elements(&self, mode: u32, count: i32, element_type: u32, offset: i32) {
         self.capture(
             "draw_elements",
@@ -402,6 +484,8 @@ impl DebugGl {
         self.check_error("draw_elements");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_matrix_3_f32_slice(
         &self,
         location: Option<&glow::UniformLocation>,
@@ -414,16 +498,22 @@ impl DebugGl {
     }
 
     #[allow(dead_code)]
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_error(&self) -> u32 {
         self.gl.get_error()
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_active_uniforms(&self, program: glow::Program) -> u32 {
         let result = self.gl.get_active_uniforms(program);
         self.check_error("get_active_uniforms");
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_active_uniform(
         &self,
         program: glow::Program,
@@ -434,6 +524,8 @@ impl DebugGl {
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_uniform_block_index(
         &self,
         program: glow::Program,
@@ -444,11 +536,15 @@ impl DebugGl {
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_block_binding(&self, program: glow::Program, index: u32, binding: u32) {
         self.gl.uniform_block_binding(program, index, binding);
         self.check_error("uniform_block_binding");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_active_uniform_block_parameter_i32(
         &self,
         program: glow::Program,
@@ -462,6 +558,8 @@ impl DebugGl {
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_uniform_indices(
         &self,
         program: glow::Program,
@@ -472,6 +570,8 @@ impl DebugGl {
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_active_uniforms_parameter(
         &self,
         program: glow::Program,
@@ -485,11 +585,15 @@ impl DebugGl {
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn bind_buffer_base(&self, target: u32, index: u32, buffer: Option<glow::Buffer>) {
         self.gl.bind_buffer_base(target, index, buffer);
         self.check_error("bind_buffer_base");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn bind_buffer_range(
         &self,
         target: u32,
@@ -503,11 +607,15 @@ impl DebugGl {
         self.check_error("bind_buffer_range");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn tex_buffer(&self, target: u32, internal_format: u32, buffer: glow::Buffer) {
         self.gl.tex_buffer(target, internal_format, Some(buffer));
         self.check_error("tex_buffer");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn transform_feedback_varyings(
         &self,
         program: glow::Program,
@@ -519,22 +627,30 @@ impl DebugGl {
         self.check_error("transform_feedback_varyings");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn begin_transform_feedback(&self, primitive_mode: u32) {
         self.gl.begin_transform_feedback(primitive_mode);
         self.check_error("begin_transform_feedback");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn end_transform_feedback(&self) {
         self.gl.end_transform_feedback();
         self.check_error("end_transform_feedback");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_parameter_string(&self, parameter: u32) -> String {
         let result = self.gl.get_parameter_string(parameter);
         self.check_error("get_parameter_string");
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_uniform_location(
         &self,
         program: glow::Program,
@@ -545,6 +661,9 @@ impl DebugGl {
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// The output slice must cover every component of the selected uniform.
     pub unsafe fn get_uniform_f32(
         &self,
         program: glow::Program,
@@ -556,18 +675,25 @@ impl DebugGl {
     }
 
     #[allow(dead_code)]
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// `parameter` must select a single integer result.
     pub unsafe fn get_parameter_i32(&self, parameter: u32) -> i32 {
         let result = self.gl.get_parameter_i32(parameter);
         self.check_error("get_parameter_i32");
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_buffer_parameter_i32(&self, target: u32, parameter: u32) -> i32 {
         let result = self.gl.get_buffer_parameter_i32(target, parameter);
         self.check_error("get_buffer_parameter_i32");
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_parameter_indexed_i32(&self, parameter: u32, index: u32) -> i32 {
         let result = self.gl.get_parameter_indexed_i32(parameter, index);
         self.check_error("get_parameter_indexed_i32");
@@ -575,6 +701,8 @@ impl DebugGl {
     }
 
     #[allow(dead_code)]
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_tex_parameter_i32(&self, target: u32, parameter: u32) -> i32 {
         let result = self.gl.get_tex_parameter_i32(target, parameter);
         self.check_error("get_tex_parameter_i32");
@@ -582,6 +710,8 @@ impl DebugGl {
     }
 
     #[allow(dead_code)]
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_tex_level_parameter_i32(
         &self,
         target: u32,
@@ -596,26 +726,37 @@ impl DebugGl {
     }
 
     #[allow(dead_code)]
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// `out` must cover every component written by `parameter`.
     pub unsafe fn get_parameter_i32_slice(&self, parameter: u32, out: &mut [i32]) {
         self.gl.get_parameter_i32_slice(parameter, out);
         self.check_error("get_parameter_i32_slice");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_1_i32(&self, location: Option<&glow::UniformLocation>, x: i32) {
         self.gl.uniform_1_i32(location, x);
         self.check_error("uniform_1_i32");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_1_f32(&self, location: Option<&glow::UniformLocation>, x: f32) {
         self.gl.uniform_1_f32(location, x);
         self.check_error("uniform_1_f32");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_2_f32(&self, location: Option<&glow::UniformLocation>, x: f32, y: f32) {
         self.gl.uniform_2_f32(location, x, y);
         self.check_error("uniform_2_f32");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_3_f32_slice(
         &self,
         location: Option<&glow::UniformLocation>,
@@ -625,6 +766,8 @@ impl DebugGl {
         self.check_error("uniform_3_f32_slice");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_3_f32(
         &self,
         location: Option<&glow::UniformLocation>,
@@ -636,6 +779,8 @@ impl DebugGl {
         self.check_error("uniform_3_f32");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_4_f32(
         &self,
         location: Option<&glow::UniformLocation>,
@@ -648,6 +793,9 @@ impl DebugGl {
         self.check_error("uniform_4_f32");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// The output slice must cover every component of the selected uniform.
     pub unsafe fn get_uniform_i32(
         &self,
         program: glow::Program,
@@ -658,6 +806,8 @@ impl DebugGl {
         self.check_error("get_uniform_i32");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_1_i32_slice(
         &self,
         location: Option<&glow::UniformLocation>,
@@ -667,6 +817,8 @@ impl DebugGl {
         self.check_error("uniform_1_i32_slice");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_2_i32_slice(
         &self,
         location: Option<&glow::UniformLocation>,
@@ -676,6 +828,8 @@ impl DebugGl {
         self.check_error("uniform_2_i32_slice");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_3_i32_slice(
         &self,
         location: Option<&glow::UniformLocation>,
@@ -685,6 +839,8 @@ impl DebugGl {
         self.check_error("uniform_3_i32_slice");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_4_i32_slice(
         &self,
         location: Option<&glow::UniformLocation>,
@@ -694,6 +850,8 @@ impl DebugGl {
         self.check_error("uniform_4_i32_slice");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_matrix_2_f32_slice(
         &self,
         location: Option<&glow::UniformLocation>,
@@ -705,6 +863,8 @@ impl DebugGl {
         self.check_error("uniform_matrix_2_f32_slice");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_1_f32_slice(
         &self,
         location: Option<&glow::UniformLocation>,
@@ -714,6 +874,8 @@ impl DebugGl {
         self.check_error("uniform_1_f32_slice");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_2_f32_slice(
         &self,
         location: Option<&glow::UniformLocation>,
@@ -723,6 +885,8 @@ impl DebugGl {
         self.check_error("uniform_2_f32_slice");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_4_f32_slice(
         &self,
         location: Option<&glow::UniformLocation>,
@@ -732,6 +896,8 @@ impl DebugGl {
         self.check_error("uniform_4_f32_slice");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn uniform_matrix_4_f32_slice(
         &self,
         location: Option<&glow::UniformLocation>,
@@ -743,6 +909,10 @@ impl DebugGl {
         self.check_error("uniform_matrix_4_f32_slice");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// A vertex buffer must be bound; offset, stride and format must describe valid storage for
+    /// subsequent draws.
     pub unsafe fn vertex_attrib_pointer_f32(
         &self,
         index: u32,
@@ -757,16 +927,22 @@ impl DebugGl {
         self.check_error("vertex_attrib_pointer_f32");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn enable_vertex_attrib_array(&self, index: u32) {
         self.gl.enable_vertex_attrib_array(index);
         self.check_error("enable_vertex_attrib_array");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn disable_vertex_attrib_array(&self, index: u32) {
         self.gl.disable_vertex_attrib_array(index);
         self.check_error("disable_vertex_attrib_array");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn buffer_data_u8_slice(
         &self,
         target: u32,
@@ -777,6 +953,8 @@ impl DebugGl {
         self.checked_error("buffer_data_u8_slice")
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn buffer_data_size(
         &self,
         target: u32,
@@ -787,6 +965,11 @@ impl DebugGl {
         self.checked_error("buffer_data_size")
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// The range and access flags must be valid for the bound buffer. Check the returned pointer
+    /// before use; obey its access permissions, synchronization requirements and mapping
+    /// lifetime.
     pub unsafe fn map_buffer_range(
         &self,
         target: u32,
@@ -799,28 +982,40 @@ impl DebugGl {
         ptr
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn fence_sync(&self, condition: u32, flags: u32) -> Result<glow::Fence, String> {
         let result = self.gl.fence_sync(condition, flags);
         self.check_error("fence_sync");
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn client_wait_sync(&self, fence: glow::Fence, flags: u32, timeout: i32) -> u32 {
         let result = self.gl.client_wait_sync(fence, flags, timeout);
         self.check_error("client_wait_sync");
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn delete_sync(&self, fence: glow::Fence) {
         self.gl.delete_sync(fence);
         self.check_error("delete_sync");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// The bound buffer must be mapped; no access through its mapped pointer may follow this
+    /// call.
     pub unsafe fn unmap_buffer(&self, target: u32) {
         self.gl.unmap_buffer(target);
         self.check_error("unmap_buffer");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn buffer_sub_data_u8_slice(&self, target: u32, offset: i32, data: &[u8]) {
         self.gl.buffer_sub_data_u8_slice(target, offset, data);
         self.check_error("buffer_sub_data_u8_slice");
@@ -828,6 +1023,8 @@ impl DebugGl {
 
     /// Desktop GL only: `glGetBufferSubData` does not exist in GLES, which is
     /// why nothing on the render path uses it.
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_buffer_sub_data(&self, target: u32, offset: i32, dst: &mut [u8]) {
         self.gl.get_buffer_sub_data(target, offset, dst);
         self.check_error("get_buffer_sub_data");
@@ -875,68 +1072,101 @@ impl DebugGl {
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn delete_texture(&self, texture: glow::Texture) {
         self.gl.delete_texture(texture);
         self.check_error("delete_texture");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn delete_framebuffer(&self, framebuffer: glow::Framebuffer) {
         self.gl.delete_framebuffer(framebuffer);
         self.check_error("delete_framebuffer");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn delete_renderbuffer(&self, renderbuffer: glow::Renderbuffer) {
         self.gl.delete_renderbuffer(renderbuffer);
         self.check_error("delete_renderbuffer");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn delete_vertex_array(&self, vao: glow::VertexArray) {
         self.gl.delete_vertex_array(vao);
         self.check_error("delete_vertex_array");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn delete_buffer(&self, buffer: glow::Buffer) {
         self.gl.delete_buffer(buffer);
         self.check_error("delete_buffer");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn delete_shader(&self, shader: glow::Shader) {
         self.gl.delete_shader(shader);
         self.check_error("delete_shader");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn delete_program(&self, program: glow::Program) {
         self.gl.delete_program(program);
         self.check_error("delete_program");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn tex_parameter_i32(&self, target: u32, parameter: u32, value: i32) {
         self.gl.tex_parameter_i32(target, parameter, value);
         self.check_error("tex_parameter_i32");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn create_sampler(&self) -> Result<glow::Sampler, String> {
         let r = self.gl.create_sampler();
         self.check_error("create_sampler");
         r
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn sampler_parameter_i32(&self, sampler: glow::Sampler, parameter: u32, value: i32) {
         self.gl.sampler_parameter_i32(sampler, parameter, value);
         self.check_error("sampler_parameter_i32");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn sampler_parameter_f32(&self, sampler: glow::Sampler, parameter: u32, value: f32) {
         self.gl.sampler_parameter_f32(sampler, parameter, value);
         self.check_error("sampler_parameter_f32");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn bind_sampler(&self, unit: u32, sampler: Option<glow::Sampler>) {
         self.gl.bind_sampler(unit, sampler);
         self.check_error("bind_sampler");
     }
 
     #[allow(dead_code)]
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// Supplied pixel data must cover the transfer under the current unpack alignment, row length and skip
+    /// state. Slice data requires no unpack buffer bound; a buffer offset requires a sufficiently
+    /// sized unpack buffer.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preserve the OpenGL operation signature"
+    )]
     pub unsafe fn tex_image_2d(
         &self,
         target: u32,
@@ -964,6 +1194,15 @@ impl DebugGl {
     }
 
     #[allow(dead_code)]
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// Supplied pixel data must cover the transfer under the current unpack alignment, row length and skip
+    /// state. Slice data requires no unpack buffer bound; a buffer offset requires a sufficiently
+    /// sized unpack buffer.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preserve the OpenGL operation signature"
+    )]
     pub unsafe fn tex_sub_image_2d(
         &self,
         target: u32,
@@ -982,6 +1221,8 @@ impl DebugGl {
         self.check_error("tex_sub_image_2d");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn framebuffer_texture_2d(
         &self,
         target: u32,
@@ -995,6 +1236,8 @@ impl DebugGl {
         self.check_error("framebuffer_texture_2d");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn framebuffer_renderbuffer(
         &self,
         target: u32,
@@ -1007,6 +1250,8 @@ impl DebugGl {
         self.check_error("framebuffer_renderbuffer");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn renderbuffer_storage(
         &self,
         target: u32,
@@ -1019,6 +1264,8 @@ impl DebugGl {
         self.check_error("renderbuffer_storage");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn renderbuffer_storage_multisample(
         &self,
         target: u32,
@@ -1032,6 +1279,12 @@ impl DebugGl {
         self.check_error("renderbuffer_storage_multisample");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preserve the OpenGL operation signature"
+    )]
     pub unsafe fn blit_framebuffer(
         &self,
         src_x0: i32,
@@ -1066,62 +1319,91 @@ impl DebugGl {
         self.check_error("blit_framebuffer");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn check_framebuffer_status(&self, target: u32) -> u32 {
         let result = self.gl.check_framebuffer_status(target);
         self.check_error("check_framebuffer_status");
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn shader_source(&self, shader: glow::Shader, source: &str) {
         self.gl.shader_source(shader, source);
         self.check_error("shader_source");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn compile_shader(&self, shader: glow::Shader) {
         self.gl.compile_shader(shader);
         self.check_error("compile_shader");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_shader_compile_status(&self, shader: glow::Shader) -> bool {
         let result = self.gl.get_shader_compile_status(shader);
         self.check_error("get_shader_compile_status");
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_shader_info_log(&self, shader: glow::Shader) -> String {
         let result = self.gl.get_shader_info_log(shader);
         self.check_error("get_shader_info_log");
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn attach_shader(&self, program: glow::Program, shader: glow::Shader) {
         self.gl.attach_shader(program, shader);
         self.check_error("attach_shader");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn link_program(&self, program: glow::Program) {
         self.gl.link_program(program);
         self.check_error("link_program");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_program_link_status(&self, program: glow::Program) -> bool {
         let result = self.gl.get_program_link_status(program);
         self.check_error("get_program_link_status");
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_program_info_log(&self, program: glow::Program) -> String {
         let result = self.gl.get_program_info_log(program);
         self.check_error("get_program_info_log");
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn pixel_store_i32(&self, storage: u32, value: i32) {
         self.gl.pixel_store_i32(storage, value);
         self.check_error("pixel_store_i32");
     }
 
     #[allow(dead_code)]
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// The destination must cover the transfer under the current pack alignment, row length and
+    /// skip state. Slice data requires no pack buffer bound; a buffer offset requires a
+    /// sufficiently sized pack buffer.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preserve the OpenGL operation signature"
+    )]
     pub unsafe fn read_pixels(
         &self,
         x: i32,
@@ -1137,6 +1419,10 @@ impl DebugGl {
     }
 
     #[allow(dead_code)]
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
+    /// The destination must cover the full texture level under the current pack state. Slice data
+    /// requires no pack buffer bound; a buffer offset requires a sufficiently sized pack buffer.
     pub unsafe fn get_tex_image(
         &self,
         target: u32,
@@ -1150,28 +1436,38 @@ impl DebugGl {
     }
 
     #[allow(dead_code)]
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn finish(&self) {
         self.gl.finish();
         self.check_error("finish");
     }
 
     #[allow(dead_code)]
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn flush(&self) {
         self.gl.flush();
         self.check_error("flush");
     }
 
     #[allow(dead_code)]
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn generate_mipmap(&self, target: u32) {
         self.gl.generate_mipmap(target);
         self.check_error("generate_mipmap");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn clear_depth_f32(&self, depth: f32) {
         self.gl.clear_depth_f32(depth);
         self.check_error("clear_depth_f32");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn color_mask(&self, red: bool, green: bool, blue: bool, alpha: bool) {
         self.gl.color_mask(red, green, blue, alpha);
         self.check_error("color_mask");
@@ -1179,6 +1475,8 @@ impl DebugGl {
 
     // --- MRT (multiple render targets) --------------------------------------
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn draw_buffers(&self, buffers: &[u32]) {
         self.gl.draw_buffers(buffers);
         self.check_error("draw_buffers");
@@ -1186,39 +1484,53 @@ impl DebugGl {
 
     // --- Query objects (GPU timer; GL_TIME_ELAPSED) -------------------------
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn create_query(&self) -> Result<glow::Query, String> {
         let result = self.gl.create_query();
         self.check_error("create_query");
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn delete_query(&self, query: glow::Query) {
         self.gl.delete_query(query);
         self.check_error("delete_query");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn begin_query(&self, target: u32, query: glow::Query) {
         self.gl.begin_query(target, query);
         self.check_error("begin_query");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn end_query(&self, target: u32) {
         self.gl.end_query(target);
         self.check_error("end_query");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_query_parameter_u32(&self, query: glow::Query, parameter: u32) -> u32 {
         let result = self.gl.get_query_parameter_u32(query, parameter);
         self.check_error("get_query_parameter_u32");
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_query_parameter_u64(&self, query: glow::Query, parameter: u32) -> u64 {
         let result = self.gl.get_query_parameter_u64(query, parameter);
         self.check_error("get_query_parameter_u64");
         result
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn query_counter(&self, query: glow::Query, target: u32) {
         self.gl.query_counter(query, target);
         self.check_error("query_counter");
@@ -1226,22 +1538,30 @@ impl DebugGl {
 
     // --- KHR_debug groups and labels (gated by supports_debug_groups) -------
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn push_debug_group(&self, message: &str) {
         self.gl
             .push_debug_group(glow::DEBUG_SOURCE_APPLICATION, 0, message);
         self.check_error("push_debug_group");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn pop_debug_group(&self) {
         self.gl.pop_debug_group();
         self.check_error("pop_debug_group");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn object_label(&self, identifier: u32, name: u32, label: &str) {
         self.gl.object_label(identifier, name, Some(label));
         self.check_error("object_label");
     }
 
+    /// # Safety
+    /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_object_label(&self, identifier: u32, name: u32) -> String {
         let label = self.gl.get_object_label(identifier, name);
         self.check_error("get_object_label");

@@ -60,12 +60,12 @@ fn build_fan_indices(
     ranges: &[i32],
     indices: &mut Vec<u32>,
 ) -> Result<(), &'static str> {
-    if ranges.len() % 2 != 0 {
+    if !ranges.len().is_multiple_of(2) {
         return Err("incomplete fan range");
     }
     let mut cursor = 0;
     let mut count = vertices;
-    for range in ranges.chunks_exact(2) {
+    for range in ranges.as_chunks::<2>().0 {
         if range[0] < 0 || range[1] <= 0 {
             return Err("invalid fan range");
         }
@@ -74,7 +74,7 @@ fn build_fan_indices(
         let end = first
             .checked_add(segments + 1)
             .ok_or("fan range overflow")?;
-        if first < cursor || end > vertices || (first - cursor) % 3 != 0 {
+        if first < cursor || end > vertices || !(first - cursor).is_multiple_of(3) {
             return Err("fan range overlaps or leaves an incomplete triangle");
         }
         count = count
@@ -82,13 +82,13 @@ fn build_fan_indices(
             .ok_or("index count overflow")?;
         cursor = end;
     }
-    if (vertices - cursor) % 3 != 0 {
+    if !(vertices - cursor).is_multiple_of(3) {
         return Err("incomplete triangle after fan");
     }
     indices.clear();
     indices.reserve(count);
     cursor = 0;
-    for range in ranges.chunks_exact(2) {
+    for range in ranges.as_chunks::<2>().0 {
         let first = range[0] as usize;
         let segments = range[1] as usize;
         indices.extend((cursor..first).map(|i| i as u32));

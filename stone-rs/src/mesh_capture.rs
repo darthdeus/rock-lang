@@ -187,9 +187,11 @@ pub(crate) unsafe fn record(
         bytes
     });
     let sample: Vec<u32> = data
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .take(44)
-        .map(|b| u32::from_ne_bytes([b[0], b[1], b[2], b[3]]))
+        .map(|b| u32::from_ne_bytes(*b))
         .collect();
     let value = json!({
         "framebuffer": fbo, "color_attachment": attachment(glow::COLOR_ATTACHMENT0),

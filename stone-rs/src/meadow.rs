@@ -148,8 +148,10 @@ unsafe fn doubles(ptr: *const u8, len: i32) -> Option<Vec<f64>> {
     }
     Some(
         slice::from_raw_parts(ptr, len as usize)
-            .chunks_exact(8)
-            .map(|v| f64::from_ne_bytes(v.try_into().unwrap()))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|v| f64::from_ne_bytes(*v))
             .collect(),
     )
 }
@@ -443,7 +445,7 @@ pub unsafe extern "C" fn stone_meadow_sort(blades: *mut f32, count: i32) -> i32 
     }
     let count = count as usize;
     if blades.is_null()
-        || (blades as usize) % std::mem::align_of::<Blade>() != 0
+        || !(blades as usize).is_multiple_of(std::mem::align_of::<Blade>())
         || count > isize::MAX as usize / std::mem::size_of::<Blade>()
     {
         return -1;

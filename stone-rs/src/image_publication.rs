@@ -318,6 +318,23 @@ pub extern "C" fn stone_image_pending_bytes() -> i64 {
     PUBLICATIONS.with(|p| i64::try_from(p.borrow().pending_bytes()).unwrap_or(i64::MAX))
 }
 
+// Stop publishing decoded images while held, so a request submitted under a
+// hold stays PENDING. Balanced: an unmatched release panics.
+#[no_mangle]
+pub extern "C" fn stone_image_publication_hold(hold: bool) {
+    PUBLICATIONS.with(|p| {
+        let mut p = p.borrow_mut();
+        if hold {
+            p.hold += 1;
+        } else {
+            p.hold = p
+                .hold
+                .checked_sub(1)
+                .expect("balanced image publication hold");
+        }
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -787,21 +804,4 @@ mod tests {
             assert_eq!(p.pending_bytes(), 16);
         });
     }
-}
-
-// Stop publishing decoded images while held, so a request submitted under a
-// hold stays PENDING. Balanced: an unmatched release panics.
-#[no_mangle]
-pub extern "C" fn stone_image_publication_hold(hold: bool) {
-    PUBLICATIONS.with(|p| {
-        let mut p = p.borrow_mut();
-        if hold {
-            p.hold += 1;
-        } else {
-            p.hold = p
-                .hold
-                .checked_sub(1)
-                .expect("balanced image publication hold");
-        }
-    });
 }

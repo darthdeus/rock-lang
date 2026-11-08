@@ -198,6 +198,7 @@ fn read_override(root: &Path, path: &str, prefix: Option<usize>) -> OverrideRead
 ///   1. `<exe_dir>/mods/<path>` on disk — player override of a SHIPPED asset.
 ///   2. embedded registry — fire release assets.
 ///   3. `<path>` on disk relative to cwd — dev mode / loose files.
+///
 /// `None` for misses or logged I/O errors. Single asset-byte source for every
 /// loader (image/audio/font/file_read) so priority can't drift.
 ///

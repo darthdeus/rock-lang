@@ -376,10 +376,7 @@ impl DirectoryBarriers {
                 if failure.should_fail() {
                     outcome = Some(DirectoryBarrierError {
                         directory: directory.clone(),
-                        error: std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "injected directory barrier failure",
-                        ),
+                        error: std::io::Error::other("injected directory barrier failure"),
                     });
                     break;
                 }
@@ -1267,10 +1264,7 @@ fn write_pair(
             // Injected: the second name is renamed into place but its durability
             // acknowledgement fails, so both destinations roll back.
             restore_previous(second, &second_before, id, 3, barriers)?;
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "injected post-publish sync failure",
-            ));
+            return Err(std::io::Error::other("injected post-publish sync failure"));
         }
         Ok(())
     })();
@@ -1424,10 +1418,7 @@ fn execute_transaction(
                     return JobResult::Failure;
                 }
                 if control.take_publish_sync_failure() {
-                    let error = std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "injected post-publish sync failure",
-                    );
+                    let error = std::io::Error::other("injected post-publish sync failure");
                     log_io_error("publish durability", &write.path, &error);
                     cancellation.complete();
                     return JobResult::DurabilityUncertain;

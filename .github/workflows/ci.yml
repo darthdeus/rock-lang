@@ -19,7 +19,7 @@ jobs:
       - name: Install native build and test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsdl2-dev libasound2-dev pkg-config clang xvfb i3 mesa-utils libgl1-mesa-dri
+          sudo apt-get install -y libsdl2-dev libasound2-dev libxtst-dev pkg-config clang xvfb i3 mesa-utils libgl1-mesa-dri
       - name: Install native bundle
         run: |
           python3 scripts/gamelibs.py sync
@@ -43,10 +43,8 @@ jobs:
         run: command -v luajit && luajit -v
       - name: Build workspace
         run: cargo build --locked --workspace
-      - name: Compiler Clippy
-        run: cargo clippy --locked --workspace --exclude stone-rs --exclude stone-gl --exclude stone-capture --exclude stone-imgui-abi --all-targets -- -D warnings
-      - name: Native Clippy diagnostics
-        run: cargo clippy --locked -p stone-rs -p stone-gl -p stone-capture -p stone-imgui-abi --all-targets -- -W clippy::approx_constant
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Test compiler workspace
         run: cargo test --locked --workspace --exclude stone-rs --exclude stone-gl --exclude stone-capture --exclude stone-imgui-abi
       - name: Test native runtime

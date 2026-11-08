@@ -220,8 +220,8 @@ pub(super) fn nav_graph_advance(g: &NavGraph, q: &mut NavQuery, budget: int) -> 
             nav_query_begin(g, q, &plan);
         }
         spent += match q.phase {
-            NAV_Q_START => nav_query_attach_start(g, q, &mut plan),
-            NAV_Q_GOAL => nav_query_attach_goal(g, q, &mut plan),
+            NAV_Q_START => nav_query_attach_start(g, q, &plan),
+            NAV_Q_GOAL => nav_query_attach_goal(g, q, &plan),
             NAV_Q_CHECK => nav_query_check(g, q, &mut plan),
             NAV_Q_SEARCH => nav_query_search(g, q, &mut plan, budget - spent),
             NAV_Q_MATERIALIZE => nav_materialize(g, q, &mut plan),

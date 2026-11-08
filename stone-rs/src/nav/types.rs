@@ -577,23 +577,12 @@ impl Default for NavPlan {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct NavGoalAttachment {
     pub teleports: int,
     pub nodes: IdxVec<int>,
     pub costs: IdxVec<int>,
     pub work: int,
-}
-
-impl Default for NavGoalAttachment {
-    fn default() -> Self {
-        Self {
-            teleports: Default::default(),
-            nodes: IdxVec::default(),
-            costs: IdxVec::default(),
-            work: Default::default(),
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -613,19 +602,10 @@ impl Default for NavArea {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct NavAreaRoute {
     pub areas: IdxVec<int>,
     pub cost: int,
-}
-
-impl Default for NavAreaRoute {
-    fn default() -> Self {
-        Self {
-            areas: IdxVec::default(),
-            cost: 0,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -657,7 +637,7 @@ impl Default for NavAreaPair {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct NavWorkCounters {
     pub requests: int,
     pub repeated_attachments: int,
@@ -666,20 +646,6 @@ pub struct NavWorkCounters {
     pub hits: int,
     pub misses: int,
     pub evictions: int,
-}
-
-impl Default for NavWorkCounters {
-    fn default() -> Self {
-        Self {
-            requests: 0,
-            repeated_attachments: 0,
-            derivations: 0,
-            searches: 0,
-            hits: 0,
-            misses: 0,
-            evictions: 0,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -715,21 +681,10 @@ impl Default for NavAreas {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct NavHeap {
     pub f: IdxVec<int>,
     pub g: IdxVec<int>,
     pub n: IdxVec<int>,
     pub count: int,
-}
-
-impl Default for NavHeap {
-    fn default() -> Self {
-        Self {
-            f: IdxVec::default(),
-            g: IdxVec::default(),
-            n: IdxVec::default(),
-            count: 0,
-        }
-    }
 }

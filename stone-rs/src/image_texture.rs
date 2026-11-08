@@ -288,24 +288,25 @@ impl ImageFormat {
     }
 
     pub(crate) fn pack_rgba8(self, rgba: &[u8]) -> Option<Cow<'_, [u8]>> {
-        if rgba.len() % 4 != 0 {
+        if !rgba.len().is_multiple_of(4) {
             return None;
         }
+        let pixels = rgba.as_chunks::<4>().0;
         match self {
             Self::Rgba8 => Some(Cow::Borrowed(rgba)),
-            Self::R8 => Some(Cow::Owned(rgba.chunks_exact(4).map(|p| p[0]).collect())),
+            Self::R8 => Some(Cow::Owned(pixels.iter().map(|p| p[0]).collect())),
             Self::DepthRg8 => Some(Cow::Owned(
-                rgba.chunks_exact(4).flat_map(|p| [p[0], p[1]]).collect(),
+                pixels.iter().flat_map(|p| [p[0], p[1]]).collect(),
             )),
             Self::MaterialRg8 => Some(Cow::Owned(
-                rgba.chunks_exact(4).flat_map(|p| [p[1], p[2]]).collect(),
+                pixels.iter().flat_map(|p| [p[1], p[2]]).collect(),
             )),
         }
     }
 
     pub(crate) fn pack_rgba8_owned(self, rgba: Vec<u8>) -> Option<Vec<u8>> {
         if self == Self::Rgba8 {
-            if rgba.len() % 4 == 0 {
+            if rgba.len().is_multiple_of(4) {
                 Some(rgba)
             } else {
                 None
@@ -415,8 +416,8 @@ fn upload_decode_placeholder(id: u64) {
     }
     let mut rgba = vec![0u8; len];
     let row = sw as usize;
-    for (i, px) in rgba.chunks_exact_mut(4).enumerate() {
-        let bright = ((i % row) / 2 + (i / row) / 2) % 2 == 0;
+    for (i, px) in rgba.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let bright = ((i % row) / 2 + (i / row) / 2).is_multiple_of(2);
         px.copy_from_slice(if bright {
             &DECODE_FAILED_BRIGHT
         } else {
@@ -817,16 +818,15 @@ pub extern "C" fn stone_load_image(
         crate::image_publication::RequestClass::Required
     };
     let exact_texels = flags & LOAD_EXACT_TEXELS != 0 || format != ImageFormat::Rgba8;
-    let id = load_image(
+
+    load_image(
         path,
         filter_mode,
         exact_texels,
         format,
         class,
         declared_size,
-    );
-
-    id
+    )
 }
 
 fn load_image(
@@ -2121,7 +2121,7 @@ mod relight_rg8_gl_tests {
             glow::RG8 as i32,
             "depth uses sized GL_RG8 storage"
         );
-        for (index, actual) in packed.chunks_exact(2).enumerate() {
+        for (index, actual) in packed.as_chunks::<2>().0.iter().enumerate() {
             assert_eq!(
                 actual[0],
                 control[index * 4],
@@ -2179,7 +2179,7 @@ mod relight_rg8_gl_tests {
             "odd-width readback restores its GL pack state"
         );
         let odd_control = read_rgba(odd_rgba_control, 5, 3);
-        for (index, actual) in odd_packed.chunks_exact(2).enumerate() {
+        for (index, actual) in odd_packed.as_chunks::<2>().0.iter().enumerate() {
             assert_eq!(
                 actual[0],
                 odd_control[index * 4],
@@ -2456,7 +2456,7 @@ mod relight_rg8_gl_tests {
             [false, false, true, true, false],
         ];
         for (y, row) in pixels.chunks_exact(w as usize * 4).enumerate() {
-            for (x, actual) in row.chunks_exact(4).enumerate() {
+            for (x, actual) in row.as_chunks::<4>().0.iter().enumerate() {
                 let source = if bright[y][x] {
                     DECODE_FAILED_BRIGHT
                 } else {
@@ -2469,7 +2469,7 @@ mod relight_rg8_gl_tests {
                     ImageFormat::R8 => [source[0], 0, 0, 255],
                 };
                 assert_eq!(
-                    actual, expected,
+                    *actual, expected,
                     "failure shader lanes at ({x},{y}) for {format:?}"
                 );
             }

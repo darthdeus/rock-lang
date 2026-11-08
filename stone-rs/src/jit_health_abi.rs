@@ -236,8 +236,10 @@ mod tests {
         0
     }
     fn pair(mut f: impl FnMut(&mut Snapshot)) -> (Snapshot, Snapshot) {
-        let mut prev = Snapshot::default();
-        prev.version = VERSION;
+        let prev = Snapshot {
+            version: VERSION,
+            ..Snapshot::default()
+        };
         let mut cur = prev;
         f(&mut cur);
         (prev, cur)
