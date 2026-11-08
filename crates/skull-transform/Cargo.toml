@@ -10,15 +10,15 @@ description = "Control-flow transforms, inlining and coroutine lowering"
 
 # skull-transform: CFG->CFG passes over skull-mir's cell IR. The coroutine pass
 # (`co fn` -> stackless state machine) lives here, separated from the IR + the
-# dumb printers (bone-mir-faithful plan crate split). Deps: skull-mir (IR),
-# skull-codegen-lua (emit the transformed step + the constructor).
+# dumb printers (bone-mir-faithful plan crate split). Deps: skull-mir (IR).
+# skull-codegen-lua is a dev-dependency only: tests emit Lua to check the
+# transformed output.
 
 [dependencies]
 bone-core = { workspace = true }
 rustc-hash = { workspace = true }
 comfy-la-arena = { workspace = true }
 skull-mir = { workspace = true }
-skull-codegen-lua = { workspace = true }
 bone-semantic = { workspace = true }
 ustr = { workspace = true }
 log = { workspace = true }
@@ -26,6 +26,7 @@ log = { workspace = true }
 [dev-dependencies]
 skull-parser = { workspace = true }
 skull-graph = { workspace = true }
+skull-codegen-lua = { workspace = true }
 
 [lints]
 workspace = true
