@@ -12,11 +12,12 @@
 //! behind an undeclared dependency or a narrower visibility is reported.
 //! Nothing adds a dependency, `allow_legacy`, or visibility.
 //!
-//! The semantic pass stops at the first interface error, and a body at its
-//! first unresolved name, so names arrive a few at a time: the planner works
-//! in rounds, re-checking the edited text in memory until no new name
-//! surfaces. A name with nothing to import keeps hiding the names after it
-//! in its body until the author resolves it. Safety is
+//! Lowering reports every unresolved bare name of a body and of the
+//! signatures in one pass, so one check finds the names to import. A few
+//! positions, such as a generic type constructor, a variant's enum or a global's
+//! initializer, still stop at their first name, so the planner re-checks the
+//! edited text in memory while a round planned a new import, up to
+//! [`MAX_ROUNDS`]. Safety is
 //! migrate's check (`modules_analysis::sites`): every site the baseline
 //! resolved must resolve to the same target in the candidate, and the
 //! candidate may have no error the baseline lacked. An explicit import of a
@@ -50,11 +51,9 @@ use crate::modules_migrate::Mode;
 
 const EXIT_NOT_CLEAN: i32 = 3;
 const EXIT_ANALYSIS_FAILED: i32 = 4;
-/// A round only continues when it planned a new import, and a body reports
-/// only its first unresolved name (an interface error hides the whole
-/// program), so the rounds follow the longest such chain; the cap only
-/// guards the loop.
-const MAX_ROUNDS: usize = 64;
+/// A round only continues when it planned a new import. Only a name in a
+/// position that still stops lowering can hide another, so a chain is short.
+const MAX_ROUNDS: usize = 4;
 
 pub fn run(target: &Path, mode: Mode, format: Format) -> Result<i32> {
     let outcome = plan(target);
