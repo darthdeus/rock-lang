@@ -420,13 +420,9 @@ pub extern "C" fn stone_imgui_new_frame() {
 ///
 /// While the app has keyboard focus and no button is held, the SDL2 backend's
 /// NewFrame rebuilds the pointer as the global pointer minus
-/// SDL_GetWindowPosition. SDL reports a window it flags fullscreen at its
-/// display's origin, and SDL2 on X11 keeps that flag when the WM takes the
-/// window out of fullscreen (it ignores a _NET_WM_STATE that drops it). The
-/// window can then be resized and moved while every ImGui hit lands off by
-/// its real origin (card #878). Under the same condition this replaces that
-/// pointer with the window-relative one SDL takes from motion events, and
-/// with "no pointer" while the pointer is outside the window.
+/// SDL_GetWindowPosition. Use SDL's window-relative motion state directly,
+/// preserving hover while the WM changes the window geometry or fullscreen
+/// state. Outside the window, feed "no pointer" instead.
 unsafe fn feed_window_relative_pointer(window: *mut sdl2::sys::SDL_Window) {
     use sdl2::sys::{SDL_GetKeyboardFocus, SDL_GetMouseFocus, SDL_GetMouseState};
 
