@@ -33,7 +33,7 @@ fn arg_lit(a: f64) -> String {
 
 /// Emit `name`'s fallback body and evaluate `name_fb(args)` under node.
 fn eval_fallback(
-    ws: &bone_semantic::inference::Workspace,
+    ws: &bone_core::workspace::Workspace,
     name: &str,
     arity: usize,
     args: &[f64],

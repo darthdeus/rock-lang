@@ -23,8 +23,8 @@
 //! Correlating them by span could not even detect a disagreement -- several of
 //! these share one span, which is the whole reason the operation is in the key.
 
-use bone_semantic::hir::Expr;
-use bone_semantic::prelude::Idx;
+use bone_core::hir::Expr;
+use bone_core::prelude::Idx;
 
 /// WHICH operation of a body a callee was resolved for.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
@@ -101,8 +101,8 @@ pub enum SiteDomain {
     /// declaration-keyed domain collapses two obligations onto one and the
     /// second silently reads the first's answer.
     StructDefaults(
-        bone_semantic::prelude::ModuleId,
-        Idx<bone_semantic::hir::StructDef>,
+        bone_core::prelude::ModuleId,
+        Idx<bone_core::hir::StructDef>,
         Vec<crate::monoty::MonoTy>,
     ),
 }

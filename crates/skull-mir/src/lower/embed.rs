@@ -73,7 +73,7 @@ impl Builder<'_> {
             else {
                 break;
             };
-            if self.scx.target == bone_semantic::hir::FnBackend::Lua
+            if self.scx.target == bone_core::hir::FnBackend::Lua
                 && !self.scx.values_first_class
                 && self.is_value_struct(sname)
                 && self.is_mutable_place(owner)?

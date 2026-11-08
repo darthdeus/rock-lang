@@ -215,11 +215,11 @@ impl Builder<'_> {
                 ctor: crate::monoty::MonoCtor::Nominal(name),
                 ..
             } => {
-                if bone_semantic::prelude::is_intrinsic_key(*name, "Arena") {
+                if bone_core::modules::is_intrinsic_key(*name, "Arena") {
                     Some(ContainerFamily::Arena)
-                } else if bone_semantic::prelude::is_intrinsic_key(*name, "NativeBuffer") {
+                } else if bone_core::modules::is_intrinsic_key(*name, "NativeBuffer") {
                     Some(ContainerFamily::NativeBuffer)
-                } else if bone_semantic::prelude::is_intrinsic_key(*name, "FlatVec") {
+                } else if bone_core::modules::is_intrinsic_key(*name, "FlatVec") {
                     Some(ContainerFamily::FlatVec)
                 } else {
                     None
@@ -252,7 +252,7 @@ impl Builder<'_> {
                 Ok(Some((rendered, physical)))
             }
             ContainerStorage::LeafAddressed { .. }
-                if self.scx.target == bone_semantic::hir::FnBackend::Js && !leaf_views_rebuilt =>
+                if self.scx.target == bone_core::hir::FnBackend::Js && !leaf_views_rebuilt =>
             {
                 let elem = plan
                     .ffi_element_name(&arena)

@@ -39,7 +39,7 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
-fn ws_of(src: &str) -> bone_semantic::inference::Workspace {
+fn ws_of(src: &str) -> bone_core::workspace::Workspace {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
@@ -296,7 +296,7 @@ fn the_wire_and_value_walkers_agree_on_every_shape() {
         assert_eq!(
             plan.leaf_paths(),
             RepArena::default()
-                .nominal_value_leaf_paths_required(&ws, bone_semantic::hir::FnBackend::Any, n,)
+                .nominal_value_leaf_paths_required(&ws, bone_core::hir::FnBackend::Any, n,)
                 .expect("a value struct has leaf paths")
                 .iter()
                 .map(|u| u.to_string())

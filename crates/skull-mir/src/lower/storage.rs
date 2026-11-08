@@ -267,7 +267,7 @@ impl Builder<'_> {
             base: vec,
             field: Ustr::from("len"),
         });
-        if self.scx.target() == bone_semantic::hir::FnBackend::Lua {
+        if self.scx.target() == bone_core::hir::FnBackend::Lua {
             self.call_spine("__rock_stride_reserve", vec![vec, len])?;
         }
         // The appended row is the old length, counted from 0.
@@ -692,7 +692,7 @@ impl Builder<'_> {
         &mut self,
         target: Idx<Expr>,
     ) -> Result<Option<(Idx<Inst>, Idx<Inst>, Ustr, PlaceBundle)>, CompilerError> {
-        if self.scx.target != bone_semantic::hir::FnBackend::Js {
+        if self.scx.target != bone_core::hir::FnBackend::Js {
             return Ok(None);
         }
         let Expr::FieldAccess { base, field } = self.body.expr_arena[target] else {
@@ -2076,6 +2076,6 @@ impl Builder<'_> {
     /// a HOLEY array in V8, which forfeits the packed-double fast path the whole
     /// layout is measured against.
     pub(crate) fn column_base_is_one(&self) -> bool {
-        self.scx.target != bone_semantic::hir::FnBackend::Js
+        self.scx.target != bone_core::hir::FnBackend::Js
     }
 }

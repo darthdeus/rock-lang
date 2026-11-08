@@ -41,7 +41,7 @@ use crate::instance::Instance;
 use crate::mangle::{symbol_of_key, type_symbol};
 use crate::mir::{FuncRef, Lit, MirFunc};
 use crate::monoty::MonoInterner;
-use bone_semantic::inference::Workspace;
+use bone_core::workspace::Workspace;
 use std::sync::Arc;
 
 /// A graphics pipeline stage.

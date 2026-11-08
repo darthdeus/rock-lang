@@ -15,7 +15,7 @@ use super::*;
 /// instantiation it never delivered, and the callee was then reached at its
 /// declaration with no body to serve it.
 pub(crate) struct DirectCall {
-    pub(crate) tree: Option<bone_semantic::prelude::BoundTree>,
+    pub(crate) tree: Option<bone_core::prelude::BoundTree>,
     /// The concrete body delivered by this call, when it has one. An
     /// [`Instance`](crate::instance::Instance) is the delivery identity rather
     /// than a key plus a reconstructed substitution.
@@ -33,7 +33,7 @@ impl Builder<'_> {
     ) -> Result<Option<ValueRepr>, CompilerError> {
         let func = self.resolve_funcref(e, name)?;
         let module = self.ws.module(func.module);
-        if !bone_semantic::prelude::is_stdlib_module_file(module.file.as_str())
+        if !bone_core::modules::is_stdlib_module_file(module.file.as_str())
             || module.functions[func.func].inline_body.is_none()
         {
             return Ok(None);
@@ -387,7 +387,7 @@ impl Builder<'_> {
         let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
         if matches!(
             self.scx.target(),
-            bone_semantic::hir::FnBackend::Lua | bone_semantic::hir::FnBackend::Js
+            bone_core::hir::FnBackend::Lua | bone_core::hir::FnBackend::Js
         ) {
             if let Callee::Unresolved { name, .. } = callee {
                 if name.as_str() == "field_get" {
@@ -492,7 +492,7 @@ impl Builder<'_> {
         // walk `_data`, which that storage does not have.
         let gc_target = matches!(
             self.scx.target(),
-            bone_semantic::hir::FnBackend::Lua | bone_semantic::hir::FnBackend::Js
+            bone_core::hir::FnBackend::Lua | bone_core::hir::FnBackend::Js
         );
         if let Callee::Unresolved { name, .. } = callee {
             if name.as_str() == "clone_into" && gc_target {
@@ -527,7 +527,7 @@ impl Builder<'_> {
                         }
                     }
                     if positional
-                        && self.scx.target() == bone_semantic::hir::FnBackend::Lua
+                        && self.scx.target() == bone_core::hir::FnBackend::Lua
                         && self.resolves_to_inline_builtin(e, name)
                         && self
                             .concrete_expr_ty(value)
@@ -1144,7 +1144,7 @@ impl Builder<'_> {
         } else {
             self.reject_nobox_opaque_value_return(e, func, &dc.callee_inst)?;
         }
-        let lua_opaque = self.call_scx.target() == bone_semantic::hir::FnBackend::Lua
+        let lua_opaque = self.call_scx.target() == bone_core::hir::FnBackend::Lua
             && callee.inline_body.is_some()
             && !callee.generics.is_empty()
             && !callee
@@ -2836,7 +2836,7 @@ impl Builder<'_> {
             .nominal_value_storage_required(self.ws, self.scx.target, shape.name)
             .map_err(|e| self.gap_here(e.message))?;
         let native_aliases = native_aliases
-            && self.scx.target == bone_semantic::hir::FnBackend::Lua
+            && self.scx.target == bone_core::hir::FnBackend::Lua
             && storage == ValueStorage::CData;
         if storage == ValueStorage::LeafTable || native_aliases {
             for path in value_leaf_paths(shape) {

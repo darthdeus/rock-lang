@@ -27,9 +27,9 @@ pub fn backend_variant(
     ws: &Workspace,
     name: ustr::Ustr,
     rep: FuncRef,
-    target: bone_semantic::hir::FnBackend,
+    target: bone_core::hir::FnBackend,
 ) -> Result<FuncRef, NoServingBinding> {
-    use bone_semantic::hir::FnBackend;
+    use bone_core::hir::FnBackend;
     if target == FnBackend::Any {
         return Ok(rep);
     }
@@ -75,7 +75,7 @@ pub fn backend_variant(
 pub fn backend_variant_instance(
     ws: &Workspace,
     inst: &crate::instance::Instance,
-    target: bone_semantic::hir::FnBackend,
+    target: bone_core::hir::FnBackend,
 ) -> Result<crate::instance::Instance, NoServingBinding> {
     let f = &ws.module(inst.func.module).functions[inst.func.func];
     let func = backend_variant(ws, f.name, inst.func, target)?;
@@ -137,10 +137,10 @@ pub fn backend_variant_group(ws: &Workspace, member: FuncRef) -> Vec<FuncRef> {
 pub fn sibling_variant(
     ws: &Workspace,
     rep: FuncRef,
-    target: bone_semantic::hir::FnBackend,
+    target: bone_core::hir::FnBackend,
     exact: bool,
 ) -> Option<FuncRef> {
-    use bone_semantic::hir::FnBackend;
+    use bone_core::hir::FnBackend;
     for candidate in backend_variant_group(ws, rep) {
         if candidate == rep {
             continue;
@@ -1109,8 +1109,8 @@ impl Builder<'_> {
     pub(crate) fn value_literal_repr(
         &mut self,
         name: Ustr,
-        fields: comfy_la_arena::IdxRange<bone_semantic::hir::StructLitField>,
-        bases: comfy_la_arena::IdxRange<bone_semantic::hir::Expr>,
+        fields: comfy_la_arena::IdxRange<bone_core::hir::StructLitField>,
+        bases: comfy_la_arena::IdxRange<bone_core::hir::Expr>,
     ) -> Result<ValueRepr, CompilerError> {
         // Functional-update base: evaluate once (before fields). A Group base
         // projects its parts directly (no cdata); a boxed base reads fields off
@@ -1390,9 +1390,9 @@ impl Builder<'_> {
         e: Idx<Expr>,
         name: ustr::Ustr,
         rep: FuncRef,
-        target: bone_semantic::hir::FnBackend,
+        target: bone_core::hir::FnBackend,
     ) -> Result<FuncRef, CompilerError> {
-        use bone_semantic::hir::FnBackend;
+        use bone_core::hir::FnBackend;
         match target {
             FnBackend::Lua => Err(CompilerError::new_with_label(
                 self.body.expr_spans[e],

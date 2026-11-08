@@ -27,9 +27,9 @@ use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
-use bone_semantic::hir::Function;
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::{CompilerError, Span};
+use bone_core::hir::Function;
+use bone_core::prelude::{CompilerError, Span};
+use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::cfg::{PredMap, predecessors, reachable_blocks_from, reverse_postorder, successors};
 use skull_mir::mir::*;
@@ -690,8 +690,8 @@ fn reserved_namespace_collision(name: &str, span: Span, sink: &mut Vec<(String, 
 }
 
 fn scalar_constants(ws: &Workspace) -> HashMap<ustr::Ustr, Lit> {
-    use bone_semantic::hir::{Body, BodyOwner, Callee, Expr};
-    use bone_semantic::inference::BodyInference;
+    use bone_core::hir::{Body, BodyOwner, Callee, Expr};
+    use bone_core::workspace::BodyInference;
     use skull_mir::monoty::{MonoSubst, MonoTy, convert};
 
     struct Folder<'a> {
@@ -2600,13 +2600,13 @@ fn write_cell_local(out: &mut String, func: &MirFunc, colors: &[u32], c: Idx<Cel
     }
 }
 
-fn cell_is_uint(ws: &Workspace, ty: Option<bone_semantic::prelude::TyId>) -> bool {
-    let Some(bone_semantic::prelude::TyId::Static(module, index)) = ty else {
+fn cell_is_uint(ws: &Workspace, ty: Option<bone_core::prelude::TyId>) -> bool {
+    let Some(bone_core::prelude::TyId::Static(module, index)) = ty else {
         return false;
     };
     matches!(
         ws.module(module).ty_arena[index],
-        bone_semantic::hir::TypeExpr::Builtin(bone_semantic::hir::BuiltinTy::Uint)
+        bone_core::hir::TypeExpr::Builtin(bone_core::hir::BuiltinTy::Uint)
     )
 }
 
@@ -4437,7 +4437,7 @@ impl Emitter<'_> {
     ) -> bool {
         // Only a lua-targeted inline body can splice into lua output (a js body
         // would be nonsense here).
-        let Some((bone_semantic::hir::FnBackend::Lua, body)) = callee.inline_body else {
+        let Some((bone_core::hir::FnBackend::Lua, body)) = callee.inline_body else {
             return false;
         };
         let ann = |n: &str| callee.annotations.iter().any(|a| a.name.name.as_str() == n);
@@ -5877,7 +5877,7 @@ impl Emitter<'_> {
             let eid = self.ws.enums_by_name[&ty];
             let mut groups = EnumBoxGroups::new();
             for variant in &self.ws.modules[eid.module.index()].enums[eid.def].variants {
-                if matches!(variant.payload, bone_semantic::hir::VariantPayload::Unit) {
+                if matches!(variant.payload, bone_core::hir::VariantPayload::Unit) {
                     continue;
                 }
                 let layout = shape.box_layout(self.ws, variant.name);

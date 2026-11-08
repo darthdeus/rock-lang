@@ -46,7 +46,7 @@ impl Builder<'_> {
                 payload,
                 MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(n), ..
-                } if bone_semantic::prelude::is_intrinsic_key(*n, "FlatVec")
+                } if bone_core::modules::is_intrinsic_key(*n, "FlatVec")
             );
         }
         false
@@ -66,9 +66,9 @@ impl Builder<'_> {
                 ctor: crate::monoty::MonoCtor::Nominal(name),
                 ..
             } => {
-                if bone_semantic::prelude::is_intrinsic_key(*name, "NativeBuffer") {
+                if bone_core::modules::is_intrinsic_key(*name, "NativeBuffer") {
                     ContainerFamily::NativeBuffer
-                } else if bone_semantic::prelude::is_intrinsic_key(*name, "FlatVec") {
+                } else if bone_core::modules::is_intrinsic_key(*name, "FlatVec") {
                     ContainerFamily::FlatVec
                 } else {
                     return Ok(None);

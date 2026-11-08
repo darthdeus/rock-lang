@@ -1,6 +1,6 @@
 use super::*;
 
-use bone_semantic::hir::{TypeExpr, VarId};
+use bone_core::hir::{TypeExpr, VarId};
 
 #[test]
 fn missing_wire_slot_rejects_instead_of_boxing() {
@@ -135,7 +135,7 @@ fn invalid_logical_type_bindings_reject_with_callee_spans() {
         &ws,
         spec_inf(&ws, mid, "id"),
         fref,
-        &[bone_semantic::prelude::TyId::Local(unresolved)],
+        &[bone_core::prelude::TyId::Local(unresolved)],
         &SpecSubst::default(),
     )
     .expect_err("an unresolved inference variable must reject");

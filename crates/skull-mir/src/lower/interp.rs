@@ -13,9 +13,9 @@ impl Builder<'_> {
     /// mis-format). An empty interpolation is the `""` const.
     pub(crate) fn lower_interp(
         &mut self,
-        parts: IdxRange<bone_semantic::hir::InterpPart>,
+        parts: IdxRange<bone_core::hir::InterpPart>,
     ) -> Result<Idx<Inst>, CompilerError> {
-        use bone_semantic::hir::InterpPart;
+        use bone_core::hir::InterpPart;
         let mut acc: Option<Idx<Inst>> = None;
         for p in parts {
             let s = match self.body.interp_part_arena[p] {
@@ -38,7 +38,7 @@ impl Builder<'_> {
     fn lower_interp_hole(
         &mut self,
         expr: Idx<Expr>,
-        spec: Option<bone_semantic::hir::InterpSpec>,
+        spec: Option<bone_core::hir::InterpSpec>,
     ) -> Result<Idx<Inst>, CompilerError> {
         match spec {
             None if self.dispatch().structural_route(expr).is_some() => {
@@ -302,7 +302,7 @@ impl Builder<'_> {
         &mut self,
         expr: Idx<Expr>,
         v: Idx<Inst>,
-        spec: &bone_semantic::hir::InterpSpec,
+        spec: &bone_core::hir::InterpSpec,
     ) -> Result<Idx<Inst>, CompilerError> {
         // Same `Nullable`-peel guard as `stringify`: a null with a spec would reach
         // `string.format("%.2f", nil)`. A null has nothing to pad or round, so it
@@ -319,7 +319,7 @@ impl Builder<'_> {
         &mut self,
         expr: Idx<Expr>,
         v: Idx<Inst>,
-        spec: &bone_semantic::hir::InterpSpec,
+        spec: &bone_core::hir::InterpSpec,
     ) -> Result<Idx<Inst>, CompilerError> {
         // Every decision below -- which helper is called, and the flags the
         // printf rendering reads -- comes from the ONE plan the instance walk
@@ -386,7 +386,7 @@ impl Builder<'_> {
     pub(crate) fn pad_to_width(
         &mut self,
         out: Idx<Inst>,
-        spec: &bone_semantic::hir::InterpSpec,
+        spec: &bone_core::hir::InterpSpec,
     ) -> Result<Idx<Inst>, CompilerError> {
         let w = match (spec.width, spec.width_expr) {
             (Some(w), _) => self.emit_cur(Inst::Const(Lit::Int(w as i64))),
@@ -407,7 +407,7 @@ impl Builder<'_> {
     /// or `-1` (none).
     pub(crate) fn lower_precision(
         &mut self,
-        spec: &bone_semantic::hir::InterpSpec,
+        spec: &bone_core::hir::InterpSpec,
     ) -> Result<Idx<Inst>, CompilerError> {
         match (spec.precision, spec.precision_expr) {
             (Some(p), _) => Ok(self.emit_cur(Inst::Const(Lit::Int(p as i64)))),

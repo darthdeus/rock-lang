@@ -10,7 +10,7 @@
 //! exist; emitted bodies use `from_concrete_plan`, whose result and channel
 //! come from the selected concrete signature.
 
-use bone_semantic::inference::Workspace;
+use bone_core::workspace::Workspace;
 
 use super::{YieldChannel, coroutine_yield_channel_mono};
 use crate::concrete::{ConcreteBodyPlan, ConcreteSignature};

@@ -22,12 +22,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::OnceLock;
 
-use bone_semantic::hir::{
+use bone_core::hir::{
     BinOp, BindingInfo, BindingPattern, Body, BodyOwner, BuiltinTy, Callee, Expr, Function,
     MatchArm, Pattern, Statement, TyId, TypeCtor, TypeExpr, VariantArgs, VariantPayload,
 };
-use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::{BoundNext, ForIterInfo, ModuleId, Span};
+use bone_core::prelude::{BoundNext, ForIterInfo, ModuleId, Span};
+use bone_core::workspace::{BodyInference, Workspace};
 use comfy_la_arena::{Idx, IdxRange, RawIdx};
 use skull_parser::CompilerError;
 use ustr::Ustr;
@@ -311,8 +311,8 @@ pub(crate) fn required_wire_slot<T>(
 
 /// Whether a fn with backend `b` can serve codegen `target`: an `Any` (portable
 /// Rock) body serves every target, else the backend must match exactly.
-fn serves_target(b: bone_semantic::hir::FnBackend, target: bone_semantic::hir::FnBackend) -> bool {
-    use bone_semantic::hir::FnBackend;
+fn serves_target(b: bone_core::hir::FnBackend, target: bone_core::hir::FnBackend) -> bool {
+    use bone_core::hir::FnBackend;
     b == FnBackend::Any || b == target
 }
 
@@ -518,7 +518,7 @@ pub struct ScalarCtx {
     /// call whose only binding is a JS decl; `Js` swaps a call to its JS sibling
     /// when the collapsed representative is a luajit-native variant. `Any`
     /// disables the filtering entirely (the GLSL backend + generic/test callers).
-    target: bone_semantic::hir::FnBackend,
+    target: bone_core::hir::FnBackend,
     /// **The build's one type arena.**
     ///
     /// An [`Instance`](crate::instance::Instance) is an identity only while one
@@ -614,7 +614,7 @@ impl ScalarCtx {
             values_first_class: false,
             native_flat_enums: false,
             row_value_containers: false,
-            target: bone_semantic::hir::FnBackend::Lua,
+            target: bone_core::hir::FnBackend::Lua,
             interner: std::sync::Arc::new(crate::monoty::MonoInterner::new()),
             rep_arena: std::sync::Arc::new(abi::RepArena::default()),
             abi_plans: abi::AbiPlanCache::default(),
@@ -731,11 +731,11 @@ impl ScalarCtx {
     /// EMITTER's own declaration selection rather than restate it -- the site
     /// join compares a target-selected sibling against the target-neutral
     /// graph's representative through `backend_variant`.
-    pub fn target(&self) -> bone_semantic::hir::FnBackend {
+    pub fn target(&self) -> bone_core::hir::FnBackend {
         self.target
     }
 
-    pub fn with_target(mut self, target: bone_semantic::hir::FnBackend) -> Self {
+    pub fn with_target(mut self, target: bone_core::hir::FnBackend) -> Self {
         self.target = target;
         self
     }
@@ -748,7 +748,7 @@ impl ScalarCtx {
     pub fn new_values_first_class(ws: &Workspace) -> Self {
         let mut scx = Self::new(ws);
         scx.values_first_class = true;
-        scx.target = bone_semantic::hir::FnBackend::Any;
+        scx.target = bone_core::hir::FnBackend::Any;
         scx
     }
 
@@ -992,7 +992,7 @@ enum FmtPiece {
 /// for specs with no printf equivalent (custom fill / center alignment) — the
 /// caller gaps so we never silently mis-format. Mirrors old skull `fmt_pieces`.
 fn fmt_pieces(
-    spec: &bone_semantic::hir::InterpSpec,
+    spec: &bone_core::hir::InterpSpec,
     inferred_ty: Option<char>,
     skip_width: bool,
     skip_pad_attrs: bool,
@@ -1072,7 +1072,7 @@ fn raw(b: Idx<BindingInfo>) -> u32 {
 
 /// The `NativeBuffer*` nominal type names (T-typed + phantom-size variants).
 fn is_native_buffer(name: Ustr) -> bool {
-    bone_semantic::prelude::is_intrinsic_key_in(
+    bone_core::modules::is_intrinsic_key_in(
         name,
         &[
             "NativeBuffer",
@@ -1159,7 +1159,7 @@ fn static_owner_tag(
 /// the initializer's meaning changes, and editing code elsewhere in the fn
 /// leaves it untouched (the cell is preserved across that reload).
 fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map::DefaultHasher) {
-    use bone_semantic::hir::{Callee, Expr, InterpPart, VariantArgs};
+    use bone_core::hir::{Callee, Expr, InterpPart, VariantArgs};
     use std::hash::Hash;
     macro_rules! go {
         ($x:expr) => {
@@ -1451,7 +1451,7 @@ fn hash_init_stmt(
     s: Idx<Statement>,
     h: &mut std::collections::hash_map::DefaultHasher,
 ) {
-    use bone_semantic::hir::Statement;
+    use bone_core::hir::Statement;
     use std::hash::Hash;
     macro_rules! go {
         ($x:expr) => {
@@ -1510,7 +1510,7 @@ pub fn lower_instance_with_plans(
 /// Reject a specialized bounded body whose witness tree was lost before any
 /// lowering consumer can interpret its placeholder calls.
 pub fn validate_concrete_bound_plan(
-    func: &bone_semantic::hir::Function,
+    func: &bone_core::hir::Function,
     plan: &ConcreteBodyPlan,
 ) -> Result<(), CompilerError> {
     if func.generic_bounds.iter().any(Option::is_some) && plan.bound_tree.is_empty() {
@@ -1796,7 +1796,7 @@ fn lower_global_inner(
     scx: &ScalarCtx,
     call_scx: &ScalarCtx,
     mid: ModuleId,
-    gid: Idx<bone_semantic::hir::GlobalDef>,
+    gid: Idx<bone_core::hir::GlobalDef>,
     name: Ustr,
     concrete_plan: &ConcreteBodyPlan,
     concrete_plans: &ConcretePlans,
@@ -2106,7 +2106,7 @@ fn lower_decorator_inner(
     ws: &Workspace,
     scx: &ScalarCtx,
     mid: ModuleId,
-    did: Idx<bone_semantic::hir::DecoratorDef>,
+    did: Idx<bone_core::hir::DecoratorDef>,
     name: Ustr,
     concrete_plan: &ConcreteBodyPlan,
     concrete_plans: &ConcretePlans,
@@ -3263,7 +3263,7 @@ impl Builder<'_> {
         else {
             return Ok(());
         };
-        if !bone_semantic::prelude::is_intrinsic_key(*name, "Coroutine") {
+        if !bone_core::modules::is_intrinsic_key(*name, "Coroutine") {
             return Ok(());
         }
         let Some(result) = params.get(1) else {
@@ -3297,7 +3297,7 @@ impl Builder<'_> {
     /// value lowering. In particular, distributing a destination across a defer
     /// would duplicate cleanup and can move snapshot conversion across cleanup.
     fn lower_return(&mut self, opt: Option<Idx<Expr>>) -> Result<(), CompilerError> {
-        let direct = self.scx.target == bone_semantic::hir::FnBackend::Lua
+        let direct = self.scx.target == bone_core::hir::FnBackend::Lua
             && !self.f.is_coroutine
             && self.ret_rep.is_some()
             && self.defers.iter().all(Vec::is_empty);
@@ -3849,7 +3849,7 @@ pub fn map_key_rejection(ws: &Workspace, mid: ModuleId) -> Option<(String, Span)
 fn nominal_is_gc_value(ws: &Workspace, name: Ustr) -> bool {
     map_is_value_struct(ws, name)
         && !matches!(
-            crate::lower::declared_value_storage(ws, bone_semantic::hir::FnBackend::Lua, name),
+            crate::lower::declared_value_storage(ws, bone_core::hir::FnBackend::Lua, name),
             Some(ValueStorage::CData)
         )
 }
@@ -4019,10 +4019,10 @@ pub struct ShaderCollection {
 fn shader_stage_of(f: &Function) -> Option<&'static str> {
     let ann = f.annotations.iter().find(|a| a.is_builtin("shader"))?;
     match ann.args.first().map(|a| &a.value) {
-        Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "vertex" => {
+        Some(bone_core::hir::AnnoValue::Ident(id)) if id.name.as_str() == "vertex" => {
             Some("vertex")
         }
-        Some(bone_semantic::hir::AnnoValue::Ident(id)) if id.name.as_str() == "fragment" => {
+        Some(bone_core::hir::AnnoValue::Ident(id)) if id.name.as_str() == "fragment" => {
             Some("fragment")
         }
         _ => None,
@@ -4742,7 +4742,7 @@ pub(crate) mod shape_census_support {
     use super::shape::{SpecSubst, callee_instance_subst, spec_key_from_subst};
     use crate::mir::FuncRef;
     use crate::monoty::MonoTy;
-    use bone_semantic::inference::{BodyInference, Workspace};
+    use bone_core::workspace::{BodyInference, Workspace};
 
     /// Every complete generic call identity in this body, plus the count of
     /// compiler-state sites that could not state one.

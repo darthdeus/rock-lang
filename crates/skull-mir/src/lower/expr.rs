@@ -62,7 +62,7 @@ impl Builder<'_> {
         let outer_expr = self.cur_expr.replace(e);
         // Structured targets consume the materialized logical diamonds: their
         // structurizer cannot yet recover every direct short-circuit CFG.
-        let direct = self.scx.target == bone_semantic::hir::FnBackend::Lua;
+        let direct = self.scx.target == bone_core::hir::FnBackend::Lua;
         let result = (|| {
             match self.body.expr_arena[e] {
                 // Logical left operands always use condition coercion; their
@@ -361,7 +361,7 @@ impl Builder<'_> {
             Expr::Global(name) if self.ws.functions_by_name.contains_key(&name) => {
                 let fref = self.resolve_funcref(e, name)?;
                 self.reject_fn_value_abi_mismatch(e, fref)?;
-                let sym = if self.scx.target == bone_semantic::hir::FnBackend::Js {
+                let sym = if self.scx.target == bone_core::hir::FnBackend::Js {
                     name.to_string()
                 } else {
                     self.fn_value_symbol(e, name)?
@@ -843,11 +843,11 @@ impl Builder<'_> {
                 let to_float = self
                     .concrete_ty_id(target)
                     .is_some_and(|ty| matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Float));
-                if kind == bone_semantic::hir::AsKind::Bitcast && to_int && from_uint {
+                if kind == bone_core::hir::AsKind::Bitcast && to_int && from_uint {
                     Ok(self.emit_cur(Inst::UintBitcastInt(v)))
-                } else if kind == bone_semantic::hir::AsKind::Bitcast && to_uint && from_int {
+                } else if kind == bone_core::hir::AsKind::Bitcast && to_uint && from_int {
                     Ok(self.emit_cur(Inst::IntBitcastUint(v)))
-                } else if kind == bone_semantic::hir::AsKind::Bitcast {
+                } else if kind == bone_core::hir::AsKind::Bitcast {
                     Err(CompilerError::new_with_label(
                         self.cur_span.unwrap_or_else(Span::unknown),
                         "bitcast requires an `int` and a `uint` operand/target".to_string(),
@@ -1672,7 +1672,7 @@ impl Builder<'_> {
                     && matches!(
                         self.field_base_ty(base),
                         Some(TypeExpr::App { ctor: TypeCtor::Nominal(name), .. })
-                            if bone_semantic::prelude::is_descriptor_key(name)
+                            if bone_core::modules::is_descriptor_key(name)
                     ) =>
             {
                 self.descriptor_field_store(target, base, field, value)?;
@@ -2605,7 +2605,7 @@ impl Builder<'_> {
     pub(crate) fn safe_nav_let_repr(
         &mut self,
         receiver: Idx<Expr>,
-        binding: Idx<bone_semantic::hir::BindingInfo>,
+        binding: Idx<bone_core::hir::BindingInfo>,
         body: Idx<Expr>,
         shape: RetSlot,
     ) -> Result<ValueRepr, CompilerError> {
@@ -2691,7 +2691,7 @@ impl Builder<'_> {
     pub(crate) fn lower_safe_nav_let(
         &mut self,
         receiver: Idx<Expr>,
-        binding: Idx<bone_semantic::hir::BindingInfo>,
+        binding: Idx<bone_core::hir::BindingInfo>,
         body: Idx<Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
         let recv = self.lower_safe_nav_receiver(receiver)?;

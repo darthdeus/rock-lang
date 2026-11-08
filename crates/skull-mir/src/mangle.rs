@@ -17,9 +17,9 @@
 //! collision (two distinct signatures mangling alike, or a mangled name equal to
 //! an exempt bare name) is rejected, never silently renamed.
 
-use bone_semantic::hir::{self, Function, TyId, TypeExpr};
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::Span;
+use bone_core::hir::{self, Function, TyId, TypeExpr};
+use bone_core::prelude::Span;
+use bone_core::workspace::Workspace;
 use skull_parser::CompilerError;
 
 /// The mangle separator. A single `_`; see the module docs for why.

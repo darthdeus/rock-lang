@@ -62,7 +62,7 @@ fn reject(src: &str, root: &str, needle: &str) {
 /// shape the real web stubs use.
 fn lanes(src: &str, name: &str) -> usize {
     let ws = ws_with(src);
-    let scx = ScalarCtx::new(&ws).with_target(bone_semantic::hir::FnBackend::Js);
+    let scx = ScalarCtx::new(&ws).with_target(bone_core::hir::FnBackend::Js);
     let mid = *ws
         .module_ids
         .get(&ustr::Ustr::from("<test>"))

@@ -30,9 +30,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use bone_semantic::hir::{BindingInfo, Body, BodyOwner, Expr, TypeExpr};
-use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::{Span, TyId};
+use bone_core::hir::{BindingInfo, Body, BodyOwner, Expr, TypeExpr};
+use bone_core::prelude::{Span, TyId};
+use bone_core::workspace::{BodyInference, Workspace};
 use comfy_la_arena::{ArenaMap, Idx};
 use rustc_hash::{FxHashMap, FxHashSet};
 use skull_mir::concrete::{
@@ -2090,7 +2090,7 @@ fn prepare_instance(
 
 struct PreparedAlways {
     order: usize,
-    module: bone_semantic::prelude::ModuleId,
+    module: bone_core::prelude::ModuleId,
     body_owner: BodyOwner,
     owner: Option<ConcreteOwner>,
     types: Option<ConcreteTypeTables>,
@@ -2100,7 +2100,7 @@ struct PreparedAlways {
 }
 
 fn concrete_owner_for(
-    module: bone_semantic::prelude::ModuleId,
+    module: bone_core::prelude::ModuleId,
     body_owner: BodyOwner,
 ) -> Option<ConcreteOwner> {
     match body_owner {
@@ -2123,7 +2123,7 @@ fn prepare_always(
     ws: &Workspace,
     g: &InstanceGraph,
     order: usize,
-    module: bone_semantic::prelude::ModuleId,
+    module: bone_core::prelude::ModuleId,
     body_owner: BodyOwner,
     timing_enabled: bool,
 ) -> PreparedAlways {

@@ -5,8 +5,8 @@
 
 use rustc_hash::FxHashSet as HashSet;
 
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::CompilerError;
+use bone_core::prelude::CompilerError;
+use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::code_identity::{
     CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema, LambdaSiteId,
@@ -52,7 +52,7 @@ pub struct PreparedCoroutine {
 pub fn prepare_coroutine(
     ws: &Workspace,
     interner: &skull_mir::monoty::MonoInterner,
-    source_func: &bone_semantic::hir::Function,
+    source_func: &bone_core::hir::Function,
     plan: &CoroutinePlan,
     func: &MirFunc,
     reserve: &dyn Fn(&str),

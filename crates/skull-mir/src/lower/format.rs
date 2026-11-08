@@ -7,7 +7,7 @@
 //! walk reads the same tree's [`FmtNode::obligations`].
 use super::*;
 use crate::monoty::{MonoSubst, convert_decl};
-use bone_semantic::hir::VariantPayload;
+use bone_core::hir::VariantPayload;
 
 /// How an absent nullable payload prints: Rock's spelling, not the backend's.
 const NULL_TEXT: &str = "null";
@@ -109,7 +109,7 @@ pub fn formats_structurally(ws: &Workspace, name: Ustr) -> bool {
 }
 
 fn handle_fields(name: Ustr) -> Option<&'static [(&'static str, &'static str)]> {
-    use bone_semantic::prelude::is_intrinsic_key;
+    use bone_core::modules::is_intrinsic_key;
     if is_intrinsic_key(name, "Entity") {
         Some(&[
             ("scene", "_scene_id"),

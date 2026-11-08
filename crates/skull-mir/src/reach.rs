@@ -19,7 +19,7 @@
 //! native stack.
 
 use crate::mir::{Block, FuncRef, Inst, MirFunc};
-use bone_semantic::prelude::CompilerError;
+use bone_core::prelude::CompilerError;
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap, FxHashSet as HashSet};
 use std::hash::Hash;
@@ -117,10 +117,8 @@ pub fn transitive_global_reads(
 ///
 /// An overlay uses it to find the `const` initializers an edit affects, so it is
 /// the same reference information goto-def and the re-inference cascade use.
-pub fn symbol_references(
-    ws: &bone_semantic::inference::Workspace,
-) -> FxHashMap<Ustr, HashSet<Ustr>> {
-    use bone_semantic::hir::BodyOwner;
+pub fn symbol_references(ws: &bone_core::workspace::Workspace) -> FxHashMap<Ustr, HashSet<Ustr>> {
+    use bone_core::hir::BodyOwner;
     let mut deps: FxHashMap<Ustr, HashSet<Ustr>> = FxHashMap::default();
     for module in ws.source_modules() {
         let Some(inf) = ws.inference(module.id) else {
@@ -468,14 +466,14 @@ pub fn call_targets(mf: &MirFunc) -> Vec<FuncRef> {
 /// Each demand also carries the bound-conformance tree the callee's own
 /// placeholders resolve through, resolved HERE -- in the body that records it,
 /// where its inference arena is in scope. That is what lets a demand travel to
-/// a standalone emission at all: a raw [`bone_semantic::prelude::BoundTree`] is
+/// a standalone emission at all: a raw [`bone_core::prelude::BoundTree`] is
 /// stated in this body's `TyId`s and means nothing anywhere else.
 pub fn spec_bound_calls(
-    ws: &bone_semantic::inference::Workspace,
+    ws: &bone_core::workspace::Workspace,
     mf: &MirFunc,
     out: &mut Vec<crate::bound::SpecDemand>,
 ) -> Result<(), CompilerError> {
-    let empty = bone_semantic::prelude::BoundTree::default();
+    let empty = bone_core::prelude::BoundTree::default();
     let empty_resolved = crate::bound::ResolvedBoundTree::default();
     for bid in emitted_blocks(mf) {
         for &iid in &mf.blocks[bid].insts {

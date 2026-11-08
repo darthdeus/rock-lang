@@ -4,14 +4,14 @@
 //! each slot's type under the instance's substitution, and the sites bone
 //! already reports for the unsubstituted body are left to bone.
 
-use bone_semantic::hir::{Body, Function};
-use bone_semantic::identity_storage::{
+use bone_core::hir::{Body, Function};
+use bone_core::identity_storage::{
     identity_body_sites, identity_body_sites_with, identity_violation_in, BodySlotTypes,
     IdentityNode, IdentityPosition, IdentityStorageKind, IdentityStorageSite,
     IdentityStorageViolation, IdentityTypes,
 };
-use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::TyId;
+use bone_core::prelude::TyId;
+use bone_core::workspace::{BodyInference, Workspace};
 use rustc_hash::FxHashSet;
 use skull_mir::monoty::{MonoCtor, MonoSubst, MonoTy};
 

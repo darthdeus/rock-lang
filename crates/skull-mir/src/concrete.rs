@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use bone_semantic::hir::{BindingInfo, Expr};
-use bone_semantic::prelude::ModuleId;
+use bone_core::hir::{BindingInfo, Expr};
+use bone_core::prelude::ModuleId;
 use comfy_la_arena::{ArenaMap, Idx};
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
@@ -43,7 +43,7 @@ pub struct ConcreteTypeTables {
     /// being migrated. The expression and binding maps remain the primary
     /// ownership; this index prevents a second substitution lookup while a
     /// query starts from one of those concrete slots.
-    pub ty_types: FxHashMap<bone_semantic::prelude::TyId, MonoTyId>,
+    pub ty_types: FxHashMap<bone_core::prelude::TyId, MonoTyId>,
     /// Declared field types for each concrete value-struct literal. The field
     /// declaration lives outside the body's inference arena, so its concrete
     /// type cannot be recovered from `ty_types` alone.
@@ -59,7 +59,7 @@ impl ConcreteTypeTables {
         self.binding_types.get(binding).copied()
     }
 
-    pub fn ty_type(&self, ty: bone_semantic::prelude::TyId) -> Option<MonoTyId> {
+    pub fn ty_type(&self, ty: bone_core::prelude::TyId) -> Option<MonoTyId> {
         self.ty_types.get(&ty).copied()
     }
 

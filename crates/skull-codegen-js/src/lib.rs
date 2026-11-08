@@ -17,7 +17,7 @@
 //! the diff there only proves both emit paths produce runnable JS (logged in
 //! optional backend risk).
 
-use bone_semantic::hir::Function;
+use bone_core::hir::Function;
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 
 pub mod emit;
@@ -1893,7 +1893,7 @@ pub fn assemble_prelude(
 }
 
 /// The JS intrinsic table, with the workspace needed to match signature keys.
-pub struct JsIntrinsics<'a>(pub &'a bone_semantic::inference::Workspace);
+pub struct JsIntrinsics<'a>(pub &'a bone_core::workspace::Workspace);
 
 impl IntrinsicTable for JsIntrinsics<'_> {
     fn backend(&self) -> &'static str {
@@ -1945,7 +1945,7 @@ impl skull_mir::intrinsics::BackendRealization for JsBackendRealization {
     fn backend(&self) -> &'static str {
         "js"
     }
-    fn supplies(&self, ws: &bone_semantic::inference::Workspace, f: &Function) -> bool {
+    fn supplies(&self, ws: &bone_core::workspace::Workspace, f: &Function) -> bool {
         emit::js_supply(ws, f).is_some()
     }
 }

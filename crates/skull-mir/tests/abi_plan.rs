@@ -36,7 +36,7 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
-fn ws_of(src: &str) -> bone_semantic::inference::Workspace {
+fn ws_of(src: &str) -> bone_core::workspace::Workspace {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
@@ -45,7 +45,7 @@ fn ws_of(src: &str) -> bone_semantic::inference::Workspace {
     ws
 }
 
-fn func_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
+fn func_ref(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
     let overloads = ws
         .functions_by_name
         .get(&Ustr::from(name))
@@ -67,7 +67,7 @@ fn nominal(name: &str) -> MonoTy {
 }
 
 fn lower_test_roots(
-    ws: &bone_semantic::inference::Workspace,
+    ws: &bone_core::workspace::Workspace,
     roots: &[FuncRef],
 ) -> (ScalarCtx, skull_graph::concrete_body::ConcreteBodies) {
     let interner = Arc::new(skull_mir::monoty::MonoInterner::new());
@@ -79,7 +79,7 @@ fn lower_test_roots(
 }
 
 fn lower_test_root(
-    ws: &bone_semantic::inference::Workspace,
+    ws: &bone_core::workspace::Workspace,
     scx: &ScalarCtx,
     bodies: &skull_graph::concrete_body::ConcreteBodies,
     fref: FuncRef,
@@ -511,7 +511,7 @@ fn nested_opaque_tuple_elements_keep_one_physical_slot() {
     let id = arena
         .plan(
             &ws,
-            bone_semantic::hir::FnBackend::Lua,
+            bone_core::hir::FnBackend::Lua,
             &outer,
             RepUse::Return,
             &RepUseFacts {
@@ -537,7 +537,7 @@ fn a_representation_id_cannot_cross_build_arenas() {
     let left_id = left
         .plan(
             &ws,
-            bone_semantic::hir::FnBackend::Lua,
+            bone_core::hir::FnBackend::Lua,
             &MonoTy::Float,
             RepUse::Value,
             &RepUseFacts::default(),
@@ -547,7 +547,7 @@ fn a_representation_id_cannot_cross_build_arenas() {
     right
         .plan(
             &ws,
-            bone_semantic::hir::FnBackend::Lua,
+            bone_core::hir::FnBackend::Lua,
             &MonoTy::Float,
             RepUse::Value,
             &RepUseFacts::default(),
@@ -572,7 +572,7 @@ fn container_storage_uses_the_element_representation_plan() {
     };
     let plan = ContainerPlan::for_type(
         &ws,
-        bone_semantic::hir::FnBackend::Lua,
+        bone_core::hir::FnBackend::Lua,
         &arena,
         ContainerFamily::Vec,
         &ty,
@@ -619,7 +619,7 @@ fn element_rep_plan_owns_ffi_column_admission() {
     };
     let vec = ContainerPlan::for_type(
         &ws,
-        bone_semantic::hir::FnBackend::Lua,
+        bone_core::hir::FnBackend::Lua,
         &arena,
         ContainerFamily::Vec,
         &vec_ty,
@@ -633,7 +633,7 @@ fn element_rep_plan_owns_ffi_column_admission() {
     let enum_rep = arena
         .plan(
             &ws,
-            bone_semantic::hir::FnBackend::Lua,
+            bone_core::hir::FnBackend::Lua,
             &nominal("E"),
             RepUse::Boundary,
             &RepUseFacts::default(),
@@ -663,7 +663,7 @@ fn column_element_plan_carries_the_nobox_guarantee() {
     };
     let marked = ContainerPlan::for_type(
         &ws,
-        bone_semantic::hir::FnBackend::Lua,
+        bone_core::hir::FnBackend::Lua,
         &arena,
         ContainerFamily::Vec,
         &marked,
@@ -673,7 +673,7 @@ fn column_element_plan_carries_the_nobox_guarantee() {
     .expect("marked value vector must use columns");
     let unmarked = ContainerPlan::for_type(
         &ws,
-        bone_semantic::hir::FnBackend::Lua,
+        bone_core::hir::FnBackend::Lua,
         &arena,
         ContainerFamily::Vec,
         &unmarked,
@@ -714,7 +714,7 @@ fn leaf_places_carry_the_container_element_representation() {
     };
     let plan = ContainerPlan::for_type(
         &ws,
-        bone_semantic::hir::FnBackend::Lua,
+        bone_core::hir::FnBackend::Lua,
         &arena,
         ContainerFamily::NativeBuffer,
         &ty,
@@ -722,7 +722,7 @@ fn leaf_places_carry_the_container_element_representation() {
     .expect("a NativeBuffer value must have a concrete container plan");
     assert!(plan.is_leaf_addressed());
     let address = arena
-        .nominal_leaf_addresses(&ws, bone_semantic::hir::FnBackend::Lua, Ustr::from("V2"))
+        .nominal_leaf_addresses(&ws, bone_core::hir::FnBackend::Lua, Ustr::from("V2"))
         .expect("V2 has a leaf address plan")
         .into_iter()
         .next()
@@ -826,7 +826,7 @@ fn concrete_rep_planner_is_total_over_the_logical_type_vocabulary() {
         arena
             .plan(
                 &ws,
-                bone_semantic::hir::FnBackend::Lua,
+                bone_core::hir::FnBackend::Lua,
                 ty,
                 RepUse::Parameter,
                 &facts,
@@ -837,7 +837,7 @@ fn concrete_rep_planner_is_total_over_the_logical_type_vocabulary() {
     let rejected = arena
         .plan(
             &ws,
-            bone_semantic::hir::FnBackend::Lua,
+            bone_core::hir::FnBackend::Lua,
             &MonoTy::App {
                 ctor: MonoCtor::Array,
                 params: vec![MonoTy::Int],
@@ -854,7 +854,7 @@ fn concrete_rep_planner_is_total_over_the_logical_type_vocabulary() {
     let rejected_nominal = arena
         .plan(
             &ws,
-            bone_semantic::hir::FnBackend::Lua,
+            bone_core::hir::FnBackend::Lua,
             &nominal("Gc"),
             RepUse::Parameter,
             &facts,
@@ -958,7 +958,7 @@ fn aggregate_value_projection_has_an_owned_value_context() {
     let id = arena
         .plan(
             &ws,
-            bone_semantic::hir::FnBackend::Lua,
+            bone_core::hir::FnBackend::Lua,
             &nominal("V2"),
             RepUse::Value,
             &RepUseFacts::default(),
@@ -1033,7 +1033,7 @@ fn nominal_value_storage_is_owned_by_the_rep_plan() {
     let ws = ws_of("value Boxed { text: string, tag: int }\n");
     let arena = RepArena::default();
     let id = arena
-        .plan_nominal_value(&ws, bone_semantic::hir::FnBackend::Lua, Ustr::from("Boxed"))
+        .plan_nominal_value(&ws, bone_core::hir::FnBackend::Lua, Ustr::from("Boxed"))
         .expect("a GC-carrying value must have an explicit physical plan");
     let plan = arena.get(id);
     assert_eq!(plan.value_storage(), Some(ValueStorage::GcTable));
@@ -1042,7 +1042,7 @@ fn nominal_value_storage_is_owned_by_the_rep_plan() {
         arena
             .nominal_value_storage_required(
                 &ws,
-                bone_semantic::hir::FnBackend::Lua,
+                bone_core::hir::FnBackend::Lua,
                 Ustr::from("Boxed")
             )
             .expect("the required storage plan must exist"),
@@ -1058,7 +1058,7 @@ fn nominal_value_leaf_paths_are_owned_by_the_rep_plan() {
         arena
             .nominal_value_leaf_paths_required(
                 &ws,
-                bone_semantic::hir::FnBackend::Lua,
+                bone_core::hir::FnBackend::Lua,
                 Ustr::from("Boxed"),
             )
             .expect("the required leaf-path plan must exist"),
@@ -1078,7 +1078,7 @@ fn nominal_value_presence_flags_are_owned_by_the_rep_plan() {
         arena
             .nominal_value_leaf_presence_flags_required(
                 &ws,
-                bone_semantic::hir::FnBackend::Lua,
+                bone_core::hir::FnBackend::Lua,
                 Ustr::from("Boxed"),
             )
             .expect("the required presence plan must exist"),
@@ -1091,7 +1091,7 @@ fn nominal_leaf_addresses_are_owned_by_the_rep_plan() {
     let ws = ws_of("value V2 { x: float, y: float }\nvalue Boxed { pos: V2, tag: int }\n");
     let arena = RepArena::default();
     let addresses = arena
-        .nominal_leaf_addresses(&ws, bone_semantic::hir::FnBackend::Lua, Ustr::from("Boxed"))
+        .nominal_leaf_addresses(&ws, bone_core::hir::FnBackend::Lua, Ustr::from("Boxed"))
         .expect("the concrete value plan must own nonzero leaf addresses");
     assert_eq!(
         addresses
@@ -1108,7 +1108,7 @@ fn nominal_c_layout_is_owned_by_the_rep_plan() {
     let ws = ws_of("value Mixed { on: bool, count: int, scale: f32 }");
     let arena = RepArena::default();
     let (leaves, size, align) = arena
-        .nominal_leaf_layout(&ws, bone_semantic::hir::FnBackend::Lua, Ustr::from("Mixed"))
+        .nominal_leaf_layout(&ws, bone_core::hir::FnBackend::Lua, Ustr::from("Mixed"))
         .expect("the concrete value plan must own the validated C layout");
     assert_eq!(
         leaves.iter().map(|leaf| leaf.path).collect::<Vec<_>>(),
@@ -1132,7 +1132,7 @@ fn nominal_c_layout_aligns_nested_fields_before_recurse() {
     let (leaves, size, align) = arena
         .nominal_leaf_layout(
             &ws,
-            bone_semantic::hir::FnBackend::Lua,
+            bone_core::hir::FnBackend::Lua,
             Ustr::from("SpriteFragU"),
         )
         .expect("the nested C layout must be representable");
@@ -1171,14 +1171,8 @@ fn shared_struct_field_plan_is_required_and_fail_closed() {
     let holder = Ustr::from("Holder");
     let child = Ustr::from("child");
     let direct = Ustr::from("direct");
-    let plan = struct_field_plan(
-        &ws,
-        bone_semantic::hir::FnBackend::Lua,
-        holder,
-        child,
-        false,
-    )
-    .expect("known struct field must have a plan");
+    let plan = struct_field_plan(&ws, bone_core::hir::FnBackend::Lua, holder, child, false)
+        .expect("known struct field must have a plan");
     assert_eq!(plan.inline_child(), Some(Ustr::from("Child")));
     assert!(
         plan.nullable(),
@@ -1187,7 +1181,7 @@ fn shared_struct_field_plan_is_required_and_fail_closed() {
     assert_eq!(
         struct_field_plan(
             &ws,
-            bone_semantic::hir::FnBackend::Lua,
+            bone_core::hir::FnBackend::Lua,
             holder,
             Ustr::from("n"),
             false
@@ -1196,19 +1190,13 @@ fn shared_struct_field_plan_is_required_and_fail_closed() {
         .inline_child(),
         Some(Ustr::from("N"))
     );
-    let direct_plan = struct_field_plan(
-        &ws,
-        bone_semantic::hir::FnBackend::Lua,
-        holder,
-        direct,
-        false,
-    )
-    .expect("known primitive field must have a plan");
+    let direct_plan = struct_field_plan(&ws, bone_core::hir::FnBackend::Lua, holder, direct, false)
+        .expect("known primitive field must have a plan");
     assert!(direct_plan.is_direct());
     assert_eq!(direct_plan.direct_child(), None);
     let nested_plan = struct_field_plan(
         &ws,
-        bone_semantic::hir::FnBackend::Lua,
+        bone_core::hir::FnBackend::Lua,
         Ustr::from("Outer"),
         Ustr::from("inner"),
         false,
@@ -1219,7 +1207,7 @@ fn shared_struct_field_plan_is_required_and_fail_closed() {
     assert_eq!(
         struct_field_plan(
             &ws,
-            bone_semantic::hir::FnBackend::Lua,
+            bone_core::hir::FnBackend::Lua,
             holder,
             Ustr::from("coroutine"),
             false,
@@ -1231,7 +1219,7 @@ fn shared_struct_field_plan_is_required_and_fail_closed() {
 
     let missing_struct = struct_field_plan(
         &ws,
-        bone_semantic::hir::FnBackend::Lua,
+        bone_core::hir::FnBackend::Lua,
         Ustr::from("Missing"),
         child,
         false,
@@ -1244,7 +1232,7 @@ fn shared_struct_field_plan_is_required_and_fail_closed() {
 
     let missing_field = struct_field_plan(
         &ws,
-        bone_semantic::hir::FnBackend::Lua,
+        bone_core::hir::FnBackend::Lua,
         holder,
         Ustr::from("missing"),
         false,
@@ -1256,18 +1244,11 @@ fn shared_struct_field_plan_is_required_and_fail_closed() {
     );
 
     let sid = *ws.struct_by_name.get(&holder).expect("holder declaration");
-    ws.modules[sid.module.index()].structs[sid.def].fields[0].ty =
-        bone_semantic::prelude::TyId::Local(comfy_la_arena::Idx::from_raw(
-            comfy_la_arena::RawIdx::from(0),
-        ));
-    let unresolved = struct_field_plan(
-        &ws,
-        bone_semantic::hir::FnBackend::Lua,
-        holder,
-        child,
-        false,
-    )
-    .expect_err("an unresolved field type must reject");
+    ws.modules[sid.module.index()].structs[sid.def].fields[0].ty = bone_core::prelude::TyId::Local(
+        comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from(0)),
+    );
+    let unresolved = struct_field_plan(&ws, bone_core::hir::FnBackend::Lua, holder, child, false)
+        .expect_err("an unresolved field type must reject");
     assert!(unresolved.message.contains("resolved type"), "{unresolved}");
 }
 

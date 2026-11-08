@@ -27,7 +27,7 @@ fn nominal(name: &str) -> MonoTy {
 
 fn fref(n: u32) -> FuncRef {
     FuncRef {
-        module: bone_semantic::prelude::ModuleId::builtin(),
+        module: bone_core::prelude::ModuleId::builtin(),
         func: comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from(n)),
     }
 }

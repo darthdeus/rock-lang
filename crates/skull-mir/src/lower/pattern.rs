@@ -426,7 +426,7 @@ impl Builder<'_> {
         variant: Ustr,
         i: usize,
     ) -> Option<Ustr> {
-        use bone_semantic::hir::VariantPayload;
+        use bone_core::hir::VariantPayload;
         let eid = self.ws.enums_by_name.get(&enum_name)?;
         let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
         let v = ed.variants.iter().find(|v| v.name == variant)?;
@@ -544,7 +544,7 @@ impl Builder<'_> {
         variant: Ustr,
         i: usize,
     ) -> Option<ValueShape> {
-        use bone_semantic::hir::VariantPayload;
+        use bone_core::hir::VariantPayload;
         let en = enum_name?;
         let shape = EnumPlan::for_name(self.ws, en).and_then(|plan| plan.flat().cloned())?;
         let eid = self.ws.enums_by_name.get(&en)?;

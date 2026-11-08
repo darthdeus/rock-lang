@@ -18,7 +18,7 @@ fn an_all_float_element_plans_exactly_the_flat_slot_scheme() {
     let name = ustr::Ustr::from("Vertex");
     let k = value_struct_all_float_leaf_count(&ws, name).expect("Vertex is all-float");
     let plan = RepArena::default()
-        .nominal_leaf_addresses(&ws, bone_semantic::hir::FnBackend::Js, name)
+        .nominal_leaf_addresses(&ws, bone_core::hir::FnBackend::Js, name)
         .expect("Vertex has a leaf plan");
     assert_eq!(plan.len(), k, "one leaf per f32 slot");
     for (i, a) in plan.iter().enumerate() {
@@ -41,7 +41,7 @@ fn double_fields_keep_the_float64_leaf_layout() {
     let name = ustr::Ustr::from("Wide");
     let arena = RepArena::default();
     let (leaves, size, align) = arena
-        .nominal_leaf_layout(&ws, bone_semantic::hir::FnBackend::Js, name)
+        .nominal_leaf_layout(&ws, bone_core::hir::FnBackend::Js, name)
         .expect("Wide has a C leaf layout");
     assert_eq!(
         leaves
@@ -53,7 +53,7 @@ fn double_fields_keep_the_float64_leaf_layout() {
     assert_eq!((size, align), (16, 8));
 
     let plan = arena
-        .nominal_leaf_addresses(&ws, bone_semantic::hir::FnBackend::Js, name)
+        .nominal_leaf_addresses(&ws, bone_core::hir::FnBackend::Js, name)
         .expect("Wide has leaf addresses");
     assert_eq!(
         plan.iter()
@@ -77,7 +77,7 @@ fn a_mixed_width_element_strides_each_view_in_its_own_units() {
     let plan = RepArena::default()
         .nominal_leaf_addresses(
             &ws,
-            bone_semantic::hir::FnBackend::Js,
+            bone_core::hir::FnBackend::Js,
             ustr::Ustr::from("Flags"),
         )
         .expect("Flags has a leaf plan");

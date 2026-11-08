@@ -1,5 +1,5 @@
-use bone_semantic::hir::BodyOwner;
-use bone_semantic::inference::Workspace;
+use bone_core::hir::BodyOwner;
+use bone_core::workspace::Workspace;
 use skull_mir::mir::FuncRef;
 
 fn workspace(source: &str) -> Workspace {

@@ -7,7 +7,7 @@
 //! - a lua-only non-host-mapped fn reached from JS still rejects.
 use crate::common::{node, ws_with};
 
-fn emit_program_js(ws: &bone_semantic::inference::Workspace) -> Result<String, String> {
+fn emit_program_js(ws: &bone_core::workspace::Workspace) -> Result<String, String> {
     let mid = *ws
         .module_ids
         .get(&ustr::Ustr::from("<test>"))

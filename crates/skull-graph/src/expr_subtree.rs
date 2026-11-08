@@ -11,10 +11,10 @@
 //! [`covers_body`] is the runtime half: the union of a defaults body's field
 //! subtrees must be its whole arena, and the census reports any residue.
 
-use bone_semantic::hir::{
+use bone_core::hir::{
     BindingPattern, Body, Callee, Expr, MatchArm, Pattern, Statement, VariantArgs,
 };
-use bone_semantic::prelude::{FxHashSet, Idx};
+use bone_core::prelude::{FxHashSet, Idx};
 
 /// Every expression in `root`'s subtree, `root` included.
 pub fn expr_subtree(body: &Body, root: Idx<Expr>) -> FxHashSet<Idx<Expr>> {
@@ -48,8 +48,7 @@ fn walk_expr(body: &Body, e: Idx<Expr>, out: &mut FxHashSet<Idx<Expr>>) {
         }
         Expr::InterpolatedString(parts) => {
             for p in parts {
-                if let bone_semantic::hir::InterpPart::Value { expr, spec } =
-                    &body.interp_part_arena[p]
+                if let bone_core::hir::InterpPart::Value { expr, spec } = &body.interp_part_arena[p]
                 {
                     walk_expr(body, *expr, out);
                     if let Some(spec) = spec {

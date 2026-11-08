@@ -413,29 +413,6 @@ pub(crate) fn reject_value_struct_field_write(
     );
 }
 
-/// The component indices of a VALID swizzle read on `struct_name` -- the
-/// arity/alphabet rules of `vec_swizzle_ty` with the errors collapsed to None.
-/// Callers (assignment rejection, MIR expansion) key off "would this read as a
-/// swizzle"; invalid shapes surface through the read-path diagnostics instead.
-pub fn vec_swizzle_components(struct_name: &str, field: &str) -> Option<Vec<usize>> {
-    let arity = if bone_core::modules::is_intrinsic_key(Ustr::from(struct_name), "Vec2") {
-        2
-    } else if bone_core::modules::is_intrinsic_key(Ustr::from(struct_name), "Vec3") {
-        3
-    } else if bone_core::modules::is_intrinsic_key(Ustr::from(struct_name), "Vec4") {
-        4
-    } else {
-        return None;
-    };
-    if field.is_empty() || field.len() > 4 {
-        return None;
-    }
-    let xyzw: Option<Vec<usize>> = field.chars().map(|ch| "xyzw".find(ch)).collect();
-    let rgba: Option<Vec<usize>> = field.chars().map(|ch| "rgba".find(ch)).collect();
-    let idxs = xyzw.or(rgba)?;
-    idxs.iter().all(|&i| i < arity).then_some(idxs)
-}
-
 pub(crate) fn tuple_or_newtype_index_ty(
     gamma: &mut Gamma,
     tuple_ty: TyId,

@@ -3,9 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use bone_semantic::hir::{FnBackend, TypeCtor, TypeExpr};
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::TyId;
+use bone_core::hir::{FnBackend, TypeCtor, TypeExpr};
+use bone_core::prelude::TyId;
+use bone_core::workspace::Workspace;
 use ustr::Ustr;
 
 use super::shape::{GcFieldEq, declared_value_storage, static_ty};
@@ -280,7 +280,7 @@ pub fn struct_field_plan(
         .struct_by_name
         .get(&child_name)
         .map(|sid| &ws.modules[sid.module.index()].structs[sid.def]);
-    let known_nominal = bone_semantic::prelude::is_intrinsic_key(child_name, "Coroutine")
+    let known_nominal = bone_core::modules::is_intrinsic_key(child_name, "Coroutine")
         || child.is_some()
         || ws.enums_by_name.contains_key(&child_name)
         || ws.newtypes_by_name.contains_key(&child_name);

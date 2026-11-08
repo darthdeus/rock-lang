@@ -18,11 +18,11 @@ description = "Cell-based control-flow IR, lowering and backend layout contracts
 bone-core = { workspace = true }
 comfy-la-arena = { workspace = true }
 rustc-hash = { workspace = true }
-bone-semantic = { workspace = true }
 skull-parser = { workspace = true }
 ustr = { workspace = true }
 
 [dev-dependencies]
+bone-semantic = { workspace = true }
 ustr = { workspace = true }
 # Source of the real stdlib (`__op_*` overloads etc.) so arithmetic snippets
 # resolve in lowering tests, exactly as the real corpus loads it.

@@ -27,7 +27,7 @@
 use crate::common::ws_with;
 use skull_mir::mir::FuncRef;
 
-fn emit(ws: &bone_semantic::inference::Workspace, root: &str) -> String {
+fn emit(ws: &bone_core::workspace::Workspace, root: &str) -> String {
     let mid = *ws
         .module_ids
         .get(&ustr::Ustr::from("<test>"))

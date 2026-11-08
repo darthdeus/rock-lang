@@ -20,9 +20,9 @@
 //! is lowered under. `Builder` delegates every predicate below to it rather
 //! than keeping a second copy, so there is no second answer to diverge.
 
-use bone_semantic::hir::{BinOp, Body, BuiltinTy, Expr, InterpSpec, TyId, TypeCtor, TypeExpr};
-use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::Idx;
+use bone_core::hir::{BinOp, Body, BuiltinTy, Expr, InterpSpec, TyId, TypeCtor, TypeExpr};
+use bone_core::prelude::Idx;
+use bone_core::workspace::{BodyInference, Workspace};
 use std::rc::Rc;
 use ustr::Ustr;
 
@@ -51,7 +51,7 @@ pub struct DispatchCtx<'a> {
     pub lower_timing_enabled: bool,
     pub interner: Option<&'a crate::monoty::MonoInterner>,
     pub rep_arena: &'a RepArena,
-    pub target: bone_semantic::hir::FnBackend,
+    pub target: bone_core::hir::FnBackend,
     /// Logical substitution for the target-neutral graph walk. Concrete
     /// lowering sets this to `None` because every type decision must come from
     /// its concrete plan.
@@ -593,7 +593,7 @@ impl<'a> DispatchCtx<'a> {
             return ed
                 .variants
                 .iter()
-                .all(|v| matches!(v.payload, bone_semantic::hir::VariantPayload::Unit));
+                .all(|v| matches!(v.payload, bone_core::hir::VariantPayload::Unit));
         }
         if self.concrete_plan.is_some() {
             return false;
@@ -611,7 +611,7 @@ impl<'a> DispatchCtx<'a> {
         let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
         ed.variants
             .iter()
-            .all(|v| matches!(v.payload, bone_semantic::hir::VariantPayload::Unit))
+            .all(|v| matches!(v.payload, bone_core::hir::VariantPayload::Unit))
     }
 
     pub fn eq_is_scalar(&self, e: Idx<Expr>) -> bool {
@@ -765,7 +765,7 @@ impl<'a> DispatchCtx<'a> {
     /// of either name is an ordinary call.
     pub fn tostring_route(&self, call: Idx<Expr>) -> Option<(Idx<Expr>, StringifyRoute)> {
         let Expr::Call {
-            callee: bone_semantic::hir::Callee::Unresolved { name, .. },
+            callee: bone_core::hir::Callee::Unresolved { name, .. },
             args,
             ..
         } = &self.body.expr_arena[call]
@@ -977,7 +977,7 @@ impl<'a> DispatchCtx<'a> {
             if ln == rn {
                 return if matches!(
                     self.target,
-                    bone_semantic::hir::FnBackend::Any | bone_semantic::hir::FnBackend::Js
+                    bone_core::hir::FnBackend::Any | bone_core::hir::FnBackend::Js
                 ) {
                     EqRoute::Structural
                 } else {

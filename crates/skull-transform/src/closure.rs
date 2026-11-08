@@ -964,7 +964,7 @@ mod tests {
         use skull_mir::instance::Instance;
 
         let owner = Instance::base(skull_mir::mir::FuncRef {
-            module: bone_semantic::prelude::ModuleId::builtin(),
+            module: bone_core::prelude::ModuleId::builtin(),
             func: comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from_u32(0)),
         });
         let site_a = LambdaSiteId {
@@ -1082,7 +1082,7 @@ mod tests {
         use skull_mir::instance::Instance;
 
         let owner = Instance::base(skull_mir::mir::FuncRef {
-            module: bone_semantic::prelude::ModuleId::builtin(),
+            module: bone_core::prelude::ModuleId::builtin(),
             func: comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from_u32(0)),
         });
         let owner = CodeOwner::Instance(owner);

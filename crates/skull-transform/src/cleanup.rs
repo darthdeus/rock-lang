@@ -2,8 +2,8 @@ use crate::copy_prop::{CopyProp, copy_propagate_analysis, resolve_subst};
 use crate::native_buffer::scalarize_native_buffer_stores;
 use crate::sroa::scalarize_struct_cells_once;
 use crate::visit::{raw, remap_inst, remap_term};
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::CompilerError;
+use bone_core::prelude::CompilerError;
+use bone_core::workspace::Workspace;
 use comfy_la_arena::{Idx, RawIdx};
 use skull_mir::mir::*;
 

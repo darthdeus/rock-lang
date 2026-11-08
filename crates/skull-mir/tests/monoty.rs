@@ -9,9 +9,9 @@
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
-use bone_semantic::hir::BodyOwner;
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::ModuleId;
+use bone_core::hir::BodyOwner;
+use bone_core::prelude::ModuleId;
+use bone_core::workspace::Workspace;
 use skull_mir::monoty::{MonoArena, MonoCtor, MonoSubst, MonoTy, MonoTyReason};
 use ustr::Ustr;
 

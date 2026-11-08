@@ -14,6 +14,9 @@ use crate::prelude::*;
 use crate::workspace::{BodyInference, Workspace};
 use skull_parser::IdentityStorage;
 
+mod sites;
+pub use sites::*;
+
 pub const IDENTITY_STORAGE_ANNOTATION: &str = "identity_storage";
 /// The Arena and Scene registries' erasure capability: a stdlib function whose
 /// body may erase an identity to `any`.

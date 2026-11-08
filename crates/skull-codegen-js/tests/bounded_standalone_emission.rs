@@ -6,7 +6,7 @@
 //!
 use crate::common::ws_with;
 
-fn emit_js(ws: &bone_semantic::inference::Workspace) -> Result<String, String> {
+fn emit_js(ws: &bone_core::workspace::Workspace) -> Result<String, String> {
     let mid = *ws
         .module_ids
         .get(&ustr::Ustr::from("<test>"))

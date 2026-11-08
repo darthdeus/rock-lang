@@ -3,8 +3,8 @@
 //! body. Every verdict-shaped consumer (the CLI, test harnesses) must ask here,
 //! or it counts broken bodies as passing.
 
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::CompilerError;
+use bone_core::prelude::CompilerError;
+use bone_core::workspace::Workspace;
 
 /// All body-level type errors from a checked workspace, in source order
 /// (`(file, offset)` -- bone stores them per `BodyOwner` in hash maps, so map

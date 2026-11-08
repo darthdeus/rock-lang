@@ -14,11 +14,12 @@ use ustr::ustr;
 
 // Compilation storage + inference result structs now live in bone-core; re-export
 // them through the historical `bone::inference::*` path so consumers don't churn.
+pub use bone_core::modules::vec_swizzle_components;
 pub use bone_core::modules::{AccessSite, NsVisibility, PackageId};
 pub use bone_core::workspace::{
     BodyInference, ComptimeInputs, ComptimeVarValue, InferenceResult, Substitutions, Workspace,
 };
-pub use fields::{AccessDenied, FieldAccessNeed, field_access, vec_swizzle_components};
+pub use fields::{AccessDenied, FieldAccessNeed, field_access};
 
 mod narrowing;
 

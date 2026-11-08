@@ -38,7 +38,7 @@ impl PlaceBundle {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContainerPlan {
-    target: bone_semantic::hir::FnBackend,
+    target: bone_core::hir::FnBackend,
     family: ContainerFamily,
     storage: ContainerStorage,
     leaf_addresses: Option<Vec<LeafAddr>>,
@@ -81,7 +81,7 @@ impl ContainerPlan {
                     ..
                 },
             ) if family == ContainerFamily::Arena
-                && bone_semantic::prelude::is_intrinsic_key(*name, "Arena") =>
+                && bone_core::modules::is_intrinsic_key(*name, "Arena") =>
             {
                 true
             }
@@ -91,21 +91,21 @@ impl ContainerPlan {
                     ctor: crate::monoty::MonoCtor::Nominal(name),
                     ..
                 },
-            ) if bone_semantic::prelude::is_intrinsic_key(*name, "NativeBuffer") => true,
+            ) if bone_core::modules::is_intrinsic_key(*name, "NativeBuffer") => true,
             (
                 ContainerFamily::FlatVec,
                 crate::monoty::MonoTy::App {
                     ctor: crate::monoty::MonoCtor::Nominal(name),
                     ..
                 },
-            ) if bone_semantic::prelude::is_intrinsic_key(*name, "FlatVec") => true,
+            ) if bone_core::modules::is_intrinsic_key(*name, "FlatVec") => true,
             _ => false,
         }
     }
 
     pub fn for_type(
-        ws: &bone_semantic::inference::Workspace,
-        target: bone_semantic::hir::FnBackend,
+        ws: &bone_core::workspace::Workspace,
+        target: bone_core::hir::FnBackend,
         arena: &RepArena,
         family: ContainerFamily,
         ty: &crate::monoty::MonoTy,
@@ -145,7 +145,7 @@ impl ContainerPlan {
                     ctor: crate::monoty::MonoCtor::Nominal(name),
                     params,
                 },
-            ) if bone_semantic::prelude::is_intrinsic_key(*name, "Arena") => {
+            ) if bone_core::modules::is_intrinsic_key(*name, "Arena") => {
                 let element = params.first().ok_or_else(|| RepError {
                     span: None,
                     message: "Arena has no element type".into(),
@@ -160,9 +160,9 @@ impl ContainerPlan {
                     params,
                 },
             ) if (family == ContainerFamily::NativeBuffer
-                && bone_semantic::prelude::is_intrinsic_key(*name, "NativeBuffer"))
+                && bone_core::modules::is_intrinsic_key(*name, "NativeBuffer"))
                 || (family == ContainerFamily::FlatVec
-                    && bone_semantic::prelude::is_intrinsic_key(*name, "FlatVec")) =>
+                    && bone_core::modules::is_intrinsic_key(*name, "FlatVec")) =>
             {
                 let element = params.first().ok_or_else(|| RepError {
                     span: None,
@@ -275,8 +275,8 @@ impl ContainerPlan {
     /// storage. Reflection reads rows through this; it is the plan lowering
     /// stores by, not a restatement of it.
     pub fn strided_struct_row_offsets(
-        ws: &bone_semantic::inference::Workspace,
-        target: bone_semantic::hir::FnBackend,
+        ws: &bone_core::workspace::Workspace,
+        target: bone_core::hir::FnBackend,
         name: ustr::Ustr,
     ) -> Option<Vec<(ustr::Ustr, usize)>> {
         use crate::monoty::{MonoCtor, MonoTy};

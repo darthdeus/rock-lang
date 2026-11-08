@@ -40,7 +40,7 @@ impl Builder<'_> {
         let rhs_repr = self.lower_expr_repr(rhs)?;
         let rhs_leaves =
             self.repr_to_storage_leaves(&rhs_repr, shape, "value equality right operand")?;
-        let equal = if shape.nullable && self.scx.target() == bone_semantic::hir::FnBackend::Lua {
+        let equal = if shape.nullable && self.scx.target() == bone_core::hir::FnBackend::Lua {
             let left_absent = self.emit_cur(Inst::Not(lhs_leaves[0]));
             let right_absent = self.emit_cur(Inst::Not(rhs_leaves[0]));
             let result = self.f.new_cell(None);
@@ -247,7 +247,7 @@ impl Builder<'_> {
                 // per comparison; comparing the leaves is the same answer, since
                 // that metamethod is the field-wise `==` over the same leaves.
                 // Lua only: native C compares its own handle and struct layouts.
-                let same_value = self.scx.target() == bone_semantic::hir::FnBackend::Lua
+                let same_value = self.scx.target() == bone_core::hir::FnBackend::Lua
                     && !self.scx.values_first_class
                     && matches!(
                         (self.dispatch().value_struct_name(lhs), self.dispatch().value_struct_name(rhs)),

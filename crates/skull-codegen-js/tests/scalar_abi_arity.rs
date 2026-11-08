@@ -153,7 +153,7 @@ fn main() {
         skull_graph::instance_graph::build_in(&ws, vec![main], false, Arc::clone(&interner));
     let concrete = skull_graph::concrete_body::build(&ws, &graph);
     let scx = ScalarCtx::new(&ws)
-        .with_target(bone_semantic::hir::FnBackend::Js)
+        .with_target(bone_core::hir::FnBackend::Js)
         .sharing(interner);
     // A control on the fixture itself: `take` from the tests above HAS a default,
     // so its window is strictly wider at the same arity. Without this the
@@ -207,7 +207,7 @@ fn main() {
     );
     let dconcrete = skull_graph::concrete_body::build(&with_default, &dgraph);
     let dscx = ScalarCtx::new(&with_default)
-        .with_target(bone_semantic::hir::FnBackend::Js)
+        .with_target(bone_core::hir::FnBackend::Js)
         .sharing(dinterner);
     let dabi = dconcrete
         .plans

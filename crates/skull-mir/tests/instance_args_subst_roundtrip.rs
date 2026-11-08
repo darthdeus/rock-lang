@@ -34,7 +34,7 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
-fn ws_of(src: &str) -> bone_semantic::inference::Workspace {
+fn ws_of(src: &str) -> bone_core::workspace::Workspace {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
@@ -51,7 +51,7 @@ fn main() {
 }
 "#;
 
-fn decl(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
+fn decl(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
     let mid = *ws
         .module_ids
         .get(&Ustr::from("<test>"))

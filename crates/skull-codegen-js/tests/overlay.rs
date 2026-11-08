@@ -1,8 +1,8 @@
 use crate::common::ws_with;
-use bone_semantic::hir::BodyOwner;
+use bone_core::hir::BodyOwner;
 use skull_mir::mir::FuncRef;
 
-fn function(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
+fn function(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
     let mid = *ws
         .module_ids
         .get(&ustr::Ustr::from("<test>"))
@@ -20,11 +20,11 @@ fn function(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
 }
 
 fn global(
-    ws: &bone_semantic::inference::Workspace,
+    ws: &bone_core::workspace::Workspace,
     name: &str,
 ) -> (
-    bone_semantic::prelude::ModuleId,
-    bone_semantic::prelude::Idx<bone_semantic::hir::GlobalDef>,
+    bone_core::prelude::ModuleId,
+    bone_core::prelude::Idx<bone_core::hir::GlobalDef>,
 ) {
     let mid = *ws
         .module_ids
@@ -815,11 +815,11 @@ fn static_resets_for_several_edited_functions_emit_in_a_stable_order() {
     }
 }
 
-fn build_date_inputs(value: &str, volatile: bool) -> bone_semantic::inference::ComptimeInputs {
-    let mut inputs = bone_semantic::inference::ComptimeInputs::default();
+fn build_date_inputs(value: &str, volatile: bool) -> bone_core::workspace::ComptimeInputs {
+    let mut inputs = bone_core::workspace::ComptimeInputs::default();
     inputs.vars.insert(
         ustr::Ustr::from("BUILD_DATE"),
-        bone_semantic::inference::ComptimeVarValue {
+        bone_core::workspace::ComptimeVarValue {
             value: value.to_string(),
             secret: false,
         },
@@ -831,7 +831,7 @@ fn build_date_inputs(value: &str, volatile: bool) -> bone_semantic::inference::C
 }
 
 fn body_fingerprints(
-    inputs: bone_semantic::inference::ComptimeInputs,
+    inputs: bone_core::workspace::ComptimeInputs,
 ) -> std::collections::BTreeMap<String, u64> {
     let mut ws = ws_with(
         r#"

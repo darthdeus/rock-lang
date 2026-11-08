@@ -21,11 +21,12 @@ rustc-hash = { workspace = true }
 skull-mir = { workspace = true }
 skull-graph = { workspace = true }
 skull-codegen-shader = { workspace = true }
-bone-semantic = { workspace = true }
+bone-core = { workspace = true }
 skull-parser = { workspace = true }
 ustr = { workspace = true }
 
 [dev-dependencies]
+bone-semantic = { workspace = true }
 rock-stdlib = { workspace = true }
 
 [lints]

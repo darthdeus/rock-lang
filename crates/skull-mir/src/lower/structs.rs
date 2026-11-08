@@ -19,8 +19,8 @@ impl Builder<'_> {
         &mut self,
         e: Idx<Expr>,
         name: Ustr,
-        fields: comfy_la_arena::IdxRange<bone_semantic::hir::StructLitField>,
-        bases: comfy_la_arena::IdxRange<bone_semantic::hir::Expr>,
+        fields: comfy_la_arena::IdxRange<bone_core::hir::StructLitField>,
+        bases: comfy_la_arena::IdxRange<bone_core::hir::Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
         self.with_value_lending(false, |s| {
             s.lower_struct_literal_owned(e, name, fields, bases)
@@ -31,8 +31,8 @@ impl Builder<'_> {
         &mut self,
         e: Idx<Expr>,
         name: Ustr,
-        fields: comfy_la_arena::IdxRange<bone_semantic::hir::StructLitField>,
-        bases: comfy_la_arena::IdxRange<bone_semantic::hir::Expr>,
+        fields: comfy_la_arena::IdxRange<bone_core::hir::StructLitField>,
+        bases: comfy_la_arena::IdxRange<bone_core::hir::Expr>,
     ) -> Result<Idx<Inst>, CompilerError> {
         // Functional-update base (`Struct { ..base, .. }`): evaluate once, before
         // fields (source order), and read unwritten fields off it. Inference
@@ -199,7 +199,7 @@ impl Builder<'_> {
         name: Ustr,
         mut fields: Vec<(Ustr, Idx<Inst>)>,
     ) -> Result<Vec<(Ustr, Idx<Inst>)>, CompilerError> {
-        if !bone_semantic::prelude::is_intrinsic_key(name, "NativeBuffer") {
+        if !bone_core::modules::is_intrinsic_key(name, "NativeBuffer") {
             return Ok(fields);
         }
         // The element comes from the literal's own inferred type, the same
@@ -542,7 +542,7 @@ impl Builder<'_> {
     fn struct_default_args(
         &mut self,
         struct_name: Ustr,
-        sid: bone_semantic::prelude::StructId,
+        sid: bone_core::prelude::StructId,
     ) -> Result<Vec<crate::monoty::MonoTy>, CompilerError> {
         let generics = crate::struct_defaults::declared_generics(self.ws, sid);
         if generics == 0 {
@@ -1421,7 +1421,7 @@ impl Builder<'_> {
         }
         if let Some(ty) = self.concrete_expr_ty(base) {
             let name = ty.peel_nullable().0.nominal()?;
-            return bone_semantic::inference::vec_swizzle_components(name.as_str(), field.as_str());
+            return bone_core::modules::vec_swizzle_components(name.as_str(), field.as_str());
         }
         None
     }

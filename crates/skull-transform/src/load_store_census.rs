@@ -9,8 +9,8 @@
 
 use crate::nobox::cleanup_with_nobox;
 use crate::visit::raw;
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::CompilerError;
+use bone_core::prelude::CompilerError;
+use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::mir::*;
 

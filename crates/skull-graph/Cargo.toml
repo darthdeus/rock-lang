@@ -17,7 +17,6 @@ sequential = ["bone-core/sequential"]
 # from is the driver's job, so `emission_roots` stays in `skull`.
 [dependencies]
 bone-core = { workspace = true }
-bone-semantic = { workspace = true }
 skull-mir = { workspace = true }
 skull-parser = { workspace = true }
 comfy-la-arena = { workspace = true }
@@ -25,6 +24,9 @@ ustr = { workspace = true }
 rustc-hash = { workspace = true }
 log = { workspace = true }
 rayon = { workspace = true }
+
+[dev-dependencies]
+bone-semantic = { workspace = true }
 
 [lints]
 workspace = true

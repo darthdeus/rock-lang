@@ -10,9 +10,9 @@
 
 use super::*;
 
+use bone_core::hir::{BuiltinTy, Expr, TyId, TypeCtor, TypeExpr, VariantPayload};
 use bone_core::type_equiv::TyRef;
-use bone_semantic::hir::{BuiltinTy, Expr, TyId, TypeCtor, TypeExpr, VariantPayload};
-use bone_semantic::inference::Workspace;
+use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use ustr::Ustr;
 
@@ -23,8 +23,8 @@ use crate::monoty::{MonoCtor, MonoTy};
 /// descriptor (`Ptr`, `NativeBuffer`) is a `value` whose representation the
 /// backend supplies: on Lua, the one host slot holding the cdata or the buffer
 /// table with its leaf views, which a copy shares and never rebuilds.
-pub fn has_value_plan(sd: &bone_semantic::hir::StructDef) -> bool {
-    sd.is_value && !bone_semantic::prelude::is_descriptor_key(sd.name)
+pub fn has_value_plan(sd: &bone_core::hir::StructDef) -> bool {
+    sd.is_value && !bone_core::modules::is_descriptor_key(sd.name)
 }
 
 /// `Some(k)` iff `name` is a GC-free `value` struct whose every flattened
@@ -1007,7 +1007,7 @@ pub(crate) fn value_shape(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
 /// callers must not rediscover `_ct`, `_vt` or `_lct` from field syntax.
 pub(crate) fn declared_value_storage(
     ws: &Workspace,
-    _target: bone_semantic::hir::FnBackend,
+    _target: bone_core::hir::FnBackend,
     name: Ustr,
 ) -> Option<ValueStorage> {
     planned_value(ws, name).map(|plan| plan.storage)
@@ -2696,7 +2696,7 @@ pub fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Option<Yield
     else {
         return None;
     };
-    if !bone_semantic::prelude::is_intrinsic_key(*name, "Coroutine") {
+    if !bone_core::modules::is_intrinsic_key(*name, "Coroutine") {
         return None;
     }
     let MonoTy::App {

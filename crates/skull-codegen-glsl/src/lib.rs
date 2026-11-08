@@ -19,9 +19,9 @@
 
 pub use skull_mir::shader_ir::GlslProfile;
 
-use bone_semantic::hir::{AnnoValue, BuiltinTy, Function, StructDef, TyId, TypeCtor, TypeExpr};
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::{FnList, ModuleId, Span};
+use bone_core::hir::{AnnoValue, BuiltinTy, Function, StructDef, TyId, TypeCtor, TypeExpr};
+use bone_core::prelude::{FnList, ModuleId, Span};
+use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_codegen_shader::const_lit;
@@ -4639,13 +4639,13 @@ struct FragShape {
     frag_depth: bool,
 }
 
-fn has_anno(annos: &[bone_semantic::hir::Annotation], name: &str) -> bool {
+fn has_anno(annos: &[bone_core::hir::Annotation], name: &str) -> bool {
     annos.iter().any(|a| a.name.name.as_str() == name)
 }
 
 /// The int argument of an `@name(N)` annotation, if present (arity/type are
 /// registry-validated upstream).
-fn anno_int(annos: &[bone_semantic::hir::Annotation], name: &str) -> Option<i64> {
+fn anno_int(annos: &[bone_core::hir::Annotation], name: &str) -> Option<i64> {
     annos
         .iter()
         .find(|a| a.name.name.as_str() == name)
@@ -4729,7 +4729,7 @@ struct ArrayParam {
 /// or budget rejection.
 fn classify_array_param(
     ws: &Workspace,
-    pd: &bone_semantic::hir::ParamDecl,
+    pd: &bone_core::hir::ParamDecl,
     i: usize,
     span: Span,
     stage: &str,
@@ -4928,7 +4928,7 @@ const PARAM_ROLES: [&str; 4] = ["attr", "instance", "uniform", "engine"];
 /// `@textures` is exclusive with the other param roles -- a group is a binding
 /// set of its own, not attribute or uniform-block data.
 fn reject_conflicting_texture_role(
-    annos: &[bone_semantic::hir::Annotation],
+    annos: &[bone_core::hir::Annotation],
     name: Ustr,
     span: Span,
     stage: &str,

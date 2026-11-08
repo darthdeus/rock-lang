@@ -1,6 +1,6 @@
-use bone_semantic::hir::{AnnoValue, BodyOwner, Expr};
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::{CompilerError, Idx, ModuleId};
+use bone_core::hir::{AnnoValue, BodyOwner, Expr};
+use bone_core::prelude::{CompilerError, Idx, ModuleId};
+use bone_core::workspace::Workspace;
 use ustr::Ustr;
 
 use crate::code_identity::CodeArtifact;
@@ -160,7 +160,7 @@ fn phase_rank(phase: Ustr) -> Option<u8> {
         .map(|rank| rank as u8)
 }
 
-pub fn sim_wire_name(function: &bone_semantic::hir::Function) -> Option<Ustr> {
+pub fn sim_wire_name(function: &bone_core::hir::Function) -> Option<Ustr> {
     let annotation = function
         .annotations
         .iter()
@@ -203,7 +203,7 @@ pub fn scene_root_type_key(root_type: &MonoTy) -> Option<String> {
     }
 }
 
-fn string_arg(ann: &bone_semantic::hir::Annotation, name: &str) -> Option<Ustr> {
+fn string_arg(ann: &bone_core::hir::Annotation, name: &str) -> Option<Ustr> {
     ann.args.iter().find_map(|a| {
         (a.name.as_ref().is_some_and(|n| n.name.as_str() == name))
             .then_some(match a.value {
@@ -214,7 +214,7 @@ fn string_arg(ann: &bone_semantic::hir::Annotation, name: &str) -> Option<Ustr> 
     })
 }
 
-fn int_expr(body: &bone_semantic::hir::Body, e: Idx<bone_semantic::hir::Expr>) -> Option<i64> {
+fn int_expr(body: &bone_core::hir::Body, e: Idx<bone_core::hir::Expr>) -> Option<i64> {
     match body.expr_arena[e] {
         Expr::Int(n) => Some(n),
         Expr::UnaryMinus(inner, _) => int_expr(body, inner)?.checked_neg(),
@@ -225,7 +225,7 @@ fn int_expr(body: &bone_semantic::hir::Body, e: Idx<bone_semantic::hir::Expr>) -
 fn global_identity(
     ws: &Workspace,
     module: ModuleId,
-    global: Idx<bone_semantic::hir::GlobalDef>,
+    global: Idx<bone_core::hir::GlobalDef>,
 ) -> CodeIdentity {
     CodeIdentity::Artifact(CodeOwner::Artifact {
         kind: CodeOwnerKind::Global,
@@ -234,10 +234,7 @@ fn global_identity(
     })
 }
 
-fn global_locations(
-    ws: &Workspace,
-    name: Ustr,
-) -> Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> {
+fn global_locations(ws: &Workspace, name: Ustr) -> Vec<(ModuleId, Idx<bone_core::hir::GlobalDef>)> {
     ws.modules
         .iter()
         .filter_map(|module| {
@@ -259,7 +256,7 @@ fn user_function_named(ws: &Workspace, name: Ustr) -> bool {
 fn ordered_global_locations(
     ws: &Workspace,
     names: impl IntoIterator<Item = Ustr>,
-) -> Result<Vec<(Ustr, ModuleId, Idx<bone_semantic::hir::GlobalDef>)>, CompilerError> {
+) -> Result<Vec<(Ustr, ModuleId, Idx<bone_core::hir::GlobalDef>)>, CompilerError> {
     let mut out = Vec::new();
     for name in names {
         let locations = global_locations(ws, name);
@@ -281,7 +278,7 @@ fn wire_dependency_identities(
     ws: &Workspace,
     names: &[skull_parser::Ident],
     resolved_names: Option<&[Ustr]>,
-    span: bone_semantic::prelude::Span,
+    span: bone_core::prelude::Span,
 ) -> Result<Vec<CodeIdentity>, CompilerError> {
     let mut seen = std::collections::HashSet::new();
     let mut identities = Vec::with_capacity(names.len());
@@ -349,8 +346,8 @@ fn wire_dependency_identities(
 fn dependency_names_for_const(
     ws: &Workspace,
     module: ModuleId,
-    global: Idx<bone_semantic::hir::GlobalDef>,
-) -> Result<Vec<(Ustr, ModuleId, Idx<bone_semantic::hir::GlobalDef>)>, CompilerError> {
+    global: Idx<bone_core::hir::GlobalDef>,
+) -> Result<Vec<(Ustr, ModuleId, Idx<bone_core::hir::GlobalDef>)>, CompilerError> {
     let Some(inference) = ws
         .inference(module)
         .and_then(|inference| inference.per_fn.get(&BodyOwner::Global(global)))
@@ -383,7 +380,7 @@ fn dependency_names_for_const(
             && ws.functions_by_name.get(&name).is_some_and(|functions| {
                 functions.iter().any(|(module, function)| {
                     !module.is_builtin()
-                        && bone_semantic::hir::operator_entry(crate::mangle::declared_name(
+                        && bone_core::hir::operator_entry(crate::mangle::declared_name(
                             name.as_str(),
                         ))
                         .is_none()
@@ -445,7 +442,7 @@ fn dependency_closure(
 
 fn wire_qualification(
     ws: &Workspace,
-    app: &bone_semantic::hir::Annotation,
+    app: &bone_core::hir::Annotation,
     phase: Ustr,
 ) -> Result<LifecycleQualification, CompilerError> {
     // `wire` is a compiler-owned lifecycle role, not a globally reserved
@@ -717,7 +714,7 @@ pub fn collect(ws: &Workspace) -> Result<LifecyclePlan, CompilerError> {
                     }
                     _ => unreachable!("validated lifecycle owner"),
                 };
-                if f.backend != bone_semantic::hir::FnBackend::Any {
+                if f.backend != bone_core::hir::FnBackend::Any {
                     return Err(CompilerError::new_with_label(
                         f.span,
                         format!(

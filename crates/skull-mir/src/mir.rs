@@ -23,9 +23,9 @@
 //! The taxonomy grows as lowering phases land (constructors, container ops,
 //! cast, stringify/format, inline-lua) — see the plan's phase checklist.
 
+use bone_core::hir::TyId;
 use bone_core::prelude::Instant;
-use bone_semantic::hir::TyId;
-use bone_semantic::prelude::Span;
+use bone_core::prelude::Span;
 use comfy_la_arena::{Arena, Idx};
 use std::sync::Arc;
 use ustr::Ustr;
@@ -101,8 +101,8 @@ pub fn column_elem_rep_plans(
 /// "MIR `Call` carries `FuncRef`, NOT a string".)
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FuncRef {
-    pub module: bone_semantic::prelude::ModuleId,
-    pub func: Idx<bone_semantic::hir::Function>,
+    pub module: bone_core::prelude::ModuleId,
+    pub func: Idx<bone_core::hir::Function>,
 }
 
 /// A literal value.
@@ -1128,7 +1128,7 @@ pub struct StaticCell {
     pub done_flag: Ustr,
     /// Declared/inferred source type, resolved through the owning concrete
     /// body's type table by typed native backends.
-    pub ty: Option<bone_semantic::prelude::TyId>,
+    pub ty: Option<bone_core::prelude::TyId>,
     /// Source binding name and declaration ordinal are the logical identity
     /// within the owning callable; synthesized cell names are realization only.
     pub logical_name: Ustr,
@@ -1206,17 +1206,17 @@ pub struct MirFunc {
     /// conversion. It contains no backend symbol or build-local RepId.
     pub code_abi_fingerprint: Option<String>,
     /// Function-value ABI witnesses keyed by the pre-conversion lambda inst.
-    pub lambda_abi_fingerprints: bone_semantic::prelude::FxHashMap<Idx<Inst>, String>,
+    pub lambda_abi_fingerprints: bone_core::prelude::FxHashMap<Idx<Inst>, String>,
     pub lambda_abi_representations:
-        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
+        bone_core::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
     /// Concrete logical target for each named function-value mint.
     pub code_value_identities:
-        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::code_identity::CodeIdentity>,
+        bone_core::prelude::FxHashMap<Idx<Inst>, crate::code_identity::CodeIdentity>,
     /// Identities of source-named nested functions keyed by their hoisted
     /// backend spelling. The spelling is only the lookup key during lowering;
     /// the stored value remains compiler-owned.
     pub nested_fn_identities:
-        bone_semantic::prelude::FxHashMap<Ustr, crate::code_identity::CodeIdentity>,
+        bone_core::prelude::FxHashMap<Ustr, crate::code_identity::CodeIdentity>,
     pub code_compatibility: Option<crate::code_identity::CodeCompatibility>,
     /// The build-owned representation catalog used by every plan-tagged value
     /// constructor in this function and its nested functions.
@@ -1225,13 +1225,13 @@ pub struct MirFunc {
     /// Callee-entry comparisons that ask whether a declared parameter was
     /// omitted. Backends with typed parameters cannot use the Lua/JS nil
     /// sentinel and consume this provenance through their own call ABI.
-    pub param_default_guards: bone_semantic::prelude::FxHashMap<Idx<Inst>, usize>,
+    pub param_default_guards: bone_core::prelude::FxHashMap<Idx<Inst>, usize>,
     /// Source parameter indices whose scalar literal defaults are supplied by
     /// direct calls instead of entering the default-fill branch.
     pub param_default_materialized: std::collections::HashSet<usize>,
     /// Default expression roots keyed by source parameter index. Placement
     /// callers need the callee-owned value when a wire slot is omitted.
-    pub param_default_values: bone_semantic::prelude::FxHashMap<usize, Vec<Idx<Inst>>>,
+    pub param_default_values: bone_core::prelude::FxHashMap<usize, Vec<Idx<Inst>>>,
     /// Opt-in timing for arena growth attribution.
     pub lower_timing_enabled: bool,
     pub lower_attribution: crate::lower::LowerAttribution,
@@ -1291,8 +1291,7 @@ pub struct MirFunc {
     /// when the inliner splices it here. Keys are remapped on splice; entries
     /// whose tree leaves are `CallerGeneric` stay placeholders until THIS fn is
     /// itself spliced at a concrete root.
-    pub bound_trees:
-        bone_semantic::prelude::FxHashMap<Idx<Inst>, bone_semantic::prelude::BoundTree>,
+    pub bound_trees: bone_core::prelude::FxHashMap<Idx<Inst>, bone_core::prelude::BoundTree>,
     /// The same fact for a call a STANDALONE substitution produced: the `sub` of
     /// the resolved leaf that retargeted it, so the demand this body files for
     /// that callee carries the callee's own resolution.
@@ -1305,7 +1304,7 @@ pub struct MirFunc {
     /// later standalone demand or nested splice does not re-derive another
     /// body's fact.
     pub resolved_bound_trees:
-        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::bound::ResolvedBoundTree>,
+        bone_core::prelude::FxHashMap<Idx<Inst>, crate::bound::ResolvedBoundTree>,
     /// Per call inst that the caller lowered with a scalarized delivery ABI:
     /// **the concrete callee body it targets**. The inliner reads it to splice
     /// the matching concrete snapshot; a surviving (un-spliced) entry is a
@@ -1316,7 +1315,7 @@ pub struct MirFunc {
     /// KEY, so the symbol a call renderer spells and the symbol the definition
     /// was emitted under come from one object rather than from two derivations
     /// of one encoder.
-    pub spec_bindings: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::instance::Instance>,
+    pub spec_bindings: bone_core::prelude::FxHashMap<Idx<Inst>, crate::instance::Instance>,
     /// Per call inst: the CONCRETE INSTANCE it targets.
     ///
     /// Separate from [`Self::spec_bindings`], and deliberately so: that map is
@@ -1326,24 +1325,24 @@ pub struct MirFunc {
     /// the policy decided, so a call that keeps the shared body still states
     /// which instance it means. Reading the delivery record as identity is what
     /// made a declined specialization indistinguishable from an unknown callee.
-    pub callee_instances: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::instance::Instance>,
+    pub callee_instances: bone_core::prelude::FxHashMap<Idx<Inst>, crate::instance::Instance>,
     /// The ABI plan the call lowering used for each direct call. This is kept
     /// beside identity because reconstructing it from a later, possibly mutated
     /// owner would make an ABI corruption look self-consistent.
     pub call_abi_plans:
-        bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::BackendFnAbiPlanHandle>,
+        bone_core::prelude::FxHashMap<Idx<Inst>, crate::lower::BackendFnAbiPlanHandle>,
     /// The owned function-type representation used by an indirect call. A
     /// function value has no declaration `Instance`, so its physical signature
     /// is carried directly beside the `CallValue`/`CallValueMulti` instruction.
-    pub call_rep_plans: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
+    pub call_rep_plans: bone_core::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
     /// The result width of each multi-value call whose wire is a flat element
     /// `ref` (`vec, slot`) or a call to a hoisted flat variant. Neither has a
     /// declaration plan that states it, so the lowering records it here.
-    pub flat_call_lanes: bone_semantic::prelude::FxHashMap<Idx<Inst>, usize>,
+    pub flat_call_lanes: bone_core::prelude::FxHashMap<Idx<Inst>, usize>,
     /// The owned capture transport for each closure creation instruction. The
     /// closure transform consumes this instead of re-deriving captures from the
     /// rewritten CFG.
-    pub closure_env_plans: bone_semantic::prelude::FxHashMap<Idx<Inst>, ClosureEnvPlan>,
+    pub closure_env_plans: bone_core::prelude::FxHashMap<Idx<Inst>, ClosureEnvPlan>,
     /// Placeholder [`Inst::CallBoundMulti`]s whose element the LOWERING already
     /// split into leaf cells: `dests` is sized to the real return arity and the
     /// loop pattern is bound to the leaves, so the splice must leave both alone.
@@ -1352,7 +1351,7 @@ pub struct MirFunc {
     /// dests either way, which is exactly the shape a repack must still correct
     /// when lowering could NOT resolve it. So the fact is recorded rather than
     /// re-inferred.
-    pub bound_next_split: bone_semantic::prelude::FxHashSet<Idx<Inst>>,
+    pub bound_next_split: bone_core::prelude::FxHashSet<Idx<Inst>>,
     /// Nested `fn`s declared in this fn's body, each lowered to its own MirFunc
     /// with a private `__local_*` name. Emitted as sibling top-level Lua fns by
     /// `mir_emit`; a call/value-ref resolves to the name (zero closure alloc).
@@ -1364,12 +1363,12 @@ pub struct MirFunc {
     /// stamping only the constructions lowering itself emits would miss exactly
     /// those. Keys are remapped on splice, like [`Self::spec_bindings`];
     /// transform-synthesized instructions simply have no entry.
-    pub inst_spans: bone_semantic::prelude::ArenaMap<Idx<Inst>, bone_semantic::prelude::Span>,
+    pub inst_spans: bone_core::prelude::ArenaMap<Idx<Inst>, bone_core::prelude::Span>,
     /// Concrete logical types for source-produced value constructors.
     /// Representation plans intentionally erase nominal generic arguments, so
     /// native backends consume this build-owned identity instead of guessing
     /// them from a constructor's field shape.
-    pub inst_logical_types: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::monoty::MonoTyId>,
+    pub inst_logical_types: bone_core::prelude::FxHashMap<Idx<Inst>, crate::monoty::MonoTyId>,
     /// **Which callee obligation of the source body each call instruction is**
     /// (plan S 9, Stage 3). The join key between a lowered call and the callee
     /// `skull::concrete_body::ConcreteBody` already resolved for that site, so
@@ -1384,7 +1383,7 @@ pub struct MirFunc {
     /// for every call form, so a missing entry means the call was emitted
     /// outside any expression rather than that a recording site was forgotten.
     /// Keys are remapped on splice, like [`Self::spec_bindings`].
-    pub call_sites: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::site::CallSite>,
+    pub call_sites: bone_core::prelude::FxHashMap<Idx<Inst>, crate::site::CallSite>,
     /// Instructions that MINT a workspace function's emitted SYMBOL as a value
     /// (`let f = adder`, an `adder` argument, a `func: adder` field), and which
     /// function each names.
@@ -1395,7 +1394,7 @@ pub struct MirFunc {
     /// value spells nothing, so the only way a wrong function can be NAMED is
     /// through one of these -- which makes it the population that has to join,
     /// rather than the `CallValue` that consumes it.
-    pub fn_value_symbols: bone_semantic::prelude::FxHashMap<Idx<Inst>, FuncRef>,
+    pub fn_value_symbols: bone_core::prelude::FxHashMap<Idx<Inst>, FuncRef>,
     /// The emitted names of nested fns THIS body hoists to top level. Their
     /// symbols are the owning instance's own output rather than a callee
     /// declaration's, which is what separates them from

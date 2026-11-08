@@ -6,9 +6,9 @@ use skull_mir::lower::{ScalarCtx, lower_instance_with_plans};
 use skull_mir::monoty::MonoInterner;
 
 fn lower_test_root(
-    ws: &bone_semantic::inference::Workspace,
-    mid: bone_semantic::prelude::ModuleId,
-    fid: comfy_la_arena::Idx<bone_semantic::hir::Function>,
+    ws: &bone_core::workspace::Workspace,
+    mid: bone_core::prelude::ModuleId,
+    fid: comfy_la_arena::Idx<bone_core::hir::Function>,
 ) -> Result<skull_mir::mir::MirFunc, skull_parser::CompilerError> {
     let root = skull_mir::mir::FuncRef {
         module: mid,

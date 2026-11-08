@@ -19,10 +19,10 @@ bone-core = { workspace = true }
 comfy-la-arena = { workspace = true }
 rustc-hash = { workspace = true }
 skull-mir = { workspace = true }
-bone-semantic = { workspace = true }
 ustr = { workspace = true }
 
 [dev-dependencies]
+bone-semantic = { workspace = true }
 ustr = { workspace = true }
 rock-host = { workspace = true }
 rock-stdlib = { workspace = true }

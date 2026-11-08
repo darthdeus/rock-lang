@@ -27,7 +27,7 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         .collect()
 });
 
-fn ws_of(src: &str) -> bone_semantic::inference::Workspace {
+fn ws_of(src: &str) -> bone_core::workspace::Workspace {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
@@ -45,7 +45,7 @@ fn main() {
 }
 "#;
 
-fn decl(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
+fn decl(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
     let mid = *ws
         .module_ids
         .get(&Ustr::from("<test>"))
@@ -240,10 +240,10 @@ fn an_instance_substitution_binds_each_declared_generic_to_its_own_argument() {
         .iter()
         .map(|g| {
             match ws.module(pair.module).ty_arena[match g {
-                bone_semantic::prelude::TyId::Static(_, idx) => *idx,
+                bone_core::prelude::TyId::Static(_, idx) => *idx,
                 other => panic!("declared generic is not static: {other:?}"),
             }] {
-                bone_semantic::hir::TypeExpr::Generic(var, _) => var,
+                bone_core::hir::TypeExpr::Generic(var, _) => var,
                 ref other => panic!("declared generic is not a Generic: {other:?}"),
             }
         })

@@ -35,8 +35,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use bone_semantic::hir::{FnBackend, Function};
-use bone_semantic::inference::Workspace;
+use bone_core::hir::{FnBackend, Function};
+use bone_core::workspace::Workspace;
 use skull_mir::intrinsics::{self, BackendRealization};
 use skull_mir::mir::FuncRef;
 
@@ -1999,7 +1999,7 @@ fn class_or_reject(
 fn has_rock_body(ws: &Workspace, decl: FuncRef) -> bool {
     ws.module(decl.module)
         .bodies
-        .contains_key(&bone_semantic::hir::BodyOwner::Function(decl.func))
+        .contains_key(&bone_core::hir::BodyOwner::Function(decl.func))
 }
 
 /// Realize the shared `g` for `req`. Read-only in the type system, not just by

@@ -21,9 +21,9 @@ pub fn require_luajit() {
 }
 
 pub fn lower_test_ref(
-    ws: &bone_semantic::inference::Workspace,
-    mid: bone_semantic::prelude::ModuleId,
-    fid: comfy_la_arena::Idx<bone_semantic::hir::Function>,
+    ws: &bone_core::workspace::Workspace,
+    mid: bone_core::prelude::ModuleId,
+    fid: comfy_la_arena::Idx<bone_core::hir::Function>,
 ) -> Result<(MirFunc, Arc<MonoInterner>), skull_parser::CompilerError> {
     lower_test_ref_with_graph(ws, mid, fid).map(|(func, interner, _)| (func, interner))
 }
@@ -32,9 +32,9 @@ pub fn lower_test_ref(
 /// that needs the call edges as well as the body (the tail-call shape reads
 /// them through `skull_codegen_lua::callees_on_cycles`).
 pub fn lower_test_ref_with_graph(
-    ws: &bone_semantic::inference::Workspace,
-    mid: bone_semantic::prelude::ModuleId,
-    fid: comfy_la_arena::Idx<bone_semantic::hir::Function>,
+    ws: &bone_core::workspace::Workspace,
+    mid: bone_core::prelude::ModuleId,
+    fid: comfy_la_arena::Idx<bone_core::hir::Function>,
 ) -> Result<(MirFunc, Arc<MonoInterner>, instance_graph::InstanceGraph), skull_parser::CompilerError>
 {
     let root = FuncRef {
@@ -62,7 +62,7 @@ pub fn lower_test_ref_with_graph(
 /// production spells it (`skull::mir_emit::call_sccs`).
 pub fn call_sccs(
     graph: &instance_graph::InstanceGraph,
-) -> bone_semantic::prelude::FxHashMap<FuncRef, u32> {
+) -> bone_core::prelude::FxHashMap<FuncRef, u32> {
     skull_codegen_lua::call_sccs(
         graph
             .contributions

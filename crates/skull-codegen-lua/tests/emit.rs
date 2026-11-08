@@ -2003,7 +2003,7 @@ fn emit_clean_bound(src: &str, fn_name: &str) -> String {
 fn emit_clean_bound_checked(
     src: &str,
     fn_name: &str,
-    check: impl FnOnce(&bone_semantic::inference::Workspace, &skull_mir::mir::MirFunc),
+    check: impl FnOnce(&bone_core::workspace::Workspace, &skull_mir::mir::MirFunc),
 ) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {

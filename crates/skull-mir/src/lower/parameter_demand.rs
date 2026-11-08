@@ -1,6 +1,6 @@
 //! Conservative field demand before parameter expansion. Unsupported operations
 //! retain the declared transport; this is not an effect or alias analysis.
-use bone_semantic::hir::{Body, Callee, Expr, Pattern, Statement, VariantArgs};
+use bone_core::hir::{Body, Callee, Expr, Pattern, Statement, VariantArgs};
 use comfy_la_arena::Idx;
 use std::collections::HashSet;
 use ustr::Ustr;
@@ -11,7 +11,7 @@ pub(super) fn fields(body: &Body) -> Option<Vec<Option<HashSet<Ustr>>>> {
     fn pattern(
         body: &Body,
         p: Idx<Pattern>,
-        params: &[Idx<bone_semantic::hir::BindingInfo>],
+        params: &[Idx<bone_core::hir::BindingInfo>],
         demand: &mut [Option<HashSet<Ustr>>],
     ) -> Option<()> {
         match body.pattern_arena[p] {
@@ -51,7 +51,7 @@ pub(super) fn fields(body: &Body) -> Option<Vec<Option<HashSet<Ustr>>>> {
     fn visit(
         body: &Body,
         e: Idx<Expr>,
-        params: &[Idx<bone_semantic::hir::BindingInfo>],
+        params: &[Idx<bone_core::hir::BindingInfo>],
         demand: &mut [Option<HashSet<Ustr>>],
     ) -> Option<()> {
         match body.expr_arena[e] {

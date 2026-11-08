@@ -27,7 +27,7 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
 });
 
 /// Type-check `src` over the real stdlib and hand back the workspace.
-fn ws_of(src: &str) -> bone_semantic::inference::Workspace {
+fn ws_of(src: &str) -> bone_core::workspace::Workspace {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");

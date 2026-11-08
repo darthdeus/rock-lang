@@ -7,8 +7,8 @@
 
 use std::collections::BTreeMap;
 
-use bone_semantic::hir::FnBackend;
-use bone_semantic::inference::Workspace;
+use bone_core::hir::FnBackend;
+use bone_core::workspace::Workspace;
 use ustr::Ustr;
 
 use crate::code_identity::logical_def_key;

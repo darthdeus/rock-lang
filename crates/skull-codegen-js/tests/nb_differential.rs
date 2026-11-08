@@ -1,7 +1,7 @@
 //! The JS NativeBuffer checked-store shim (`__nb_checked_set`), run under
 //! node.
 
-use bone_semantic::inference::Workspace;
+use bone_core::workspace::Workspace;
 use skull_codegen_js::JS_NB_CHECK_SHIMS;
 use skull_mir::mir::FuncRef;
 

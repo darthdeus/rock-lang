@@ -12,7 +12,7 @@
 use super::call::DirectCall;
 use super::*;
 use crate::instance::Instance;
-use bone_semantic::hir::InterpPart;
+use bone_core::hir::InterpPart;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum FlatStorage {

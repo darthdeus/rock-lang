@@ -2,30 +2,22 @@
 //! A package's manifest declares its migration exemption; the compiler
 //! otherwise enforces the same rules for every package.
 
-use bone_core::escape::lambda_is_nonescaping;
-use bone_core::identity_storage::{
-    IDENTITY_ERASURE_ANNOTATION, IDENTITY_STORAGE_ANNOTATION, IdentityStorageVia,
-    identity_body_storage_violation, identity_body_violation, identity_local_storage_violation,
-    identity_root_storage_violation, identity_storage_field_violation, identity_storage_violation,
-    is_identity_storage_edge, is_identity_storage_field,
+use super::{
+    IDENTITY_ERASURE_ANNOTATION, IDENTITY_STORAGE_ANNOTATION, IdentityPosition, IdentityStorageVia,
+    IdentityStorageViolation, identity_body_storage_violation, identity_body_violation,
+    identity_local_storage_violation, identity_root_storage_violation, identity_storage_exemption,
+    identity_storage_field_violation, identity_storage_violation, is_identity_storage_edge,
+    is_identity_storage_field,
 };
-pub use bone_core::identity_storage::{
-    IdentityNode, IdentityPosition, IdentityStorageViolation, IdentityTypes, identity_violation_in,
-};
-use bone_core::modules::stdlib_file_name;
-use bone_core::suspension::{SuspensionPolicy, uses_after_suspension};
-use bone_core::workspace::BodyInference;
-
+use crate::escape::lambda_is_nonescaping;
 use crate::hir::{
     BindingInfo, BindingKind, Callee, Expr, Function, Module, TypeCtor, TypeExpr, VariantArgs,
     VariantPayload,
 };
+use crate::modules::stdlib_file_name;
 use crate::prelude::*;
-
-pub use bone_core::identity_storage::{
-    IdentityStorageExemption, RUST_EMBEDDED_PACKAGES, STDLIB_PACKAGE, UNPACKAGED_PROGRAMS,
-    identity_storage_exemption, identity_storage_package,
-};
+use crate::suspension::{SuspensionPolicy, uses_after_suspension};
+use crate::workspace::BodyInference;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum IdentityStorageKind {
@@ -510,7 +502,7 @@ fn capability_errors(module: &Module) -> Vec<CompilerError> {
     errs
 }
 
-pub(crate) fn check_identity_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
+pub fn check_identity_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
     let mut errs = Vec::new();
     for module in ws.modules.iter() {
         if !fresh.contains(&module.id) {

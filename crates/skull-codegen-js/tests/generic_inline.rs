@@ -16,7 +16,7 @@ value Pair { x: int, y: int }
 }
 "#;
 
-fn root(ws: &bone_semantic::inference::Workspace) -> FuncRef {
+fn root(ws: &bone_core::workspace::Workspace) -> FuncRef {
     let mid = *ws
         .module_ids
         .get(&ustr::Ustr::from("<test>"))
@@ -101,7 +101,7 @@ fn generic_inline_instances_keep_abi_publishers_calls_and_runtime_together() {
         ),
     );
     let scx = ScalarCtx::new(&ws)
-        .with_target(bone_semantic::hir::FnBackend::Js)
+        .with_target(bone_core::hir::FnBackend::Js)
         .sharing(graph.interner().clone());
     let mut parameter_widths = Vec::new();
     let mut publisher_widths = Vec::new();

@@ -7,8 +7,8 @@
 //! the same injection and must produce the same key, or the two describe
 //! different things and the join reports a hole that is really a disagreement.
 
-use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::StructId;
+use bone_core::prelude::StructId;
+use bone_core::workspace::{BodyInference, Workspace};
 use ustr::Ustr;
 
 use crate::monoty::{self, MonoCtor, MonoSubst, MonoTy, MonoTyReason};
@@ -77,7 +77,7 @@ pub fn args_at(
     ws: &Workspace,
     inf: &BodyInference,
     subst: &MonoSubst,
-    e: comfy_la_arena::Idx<bone_semantic::hir::Expr>,
+    e: comfy_la_arena::Idx<bone_core::hir::Expr>,
     struct_name: Ustr,
     generics: usize,
 ) -> Result<Args, ArgsError> {

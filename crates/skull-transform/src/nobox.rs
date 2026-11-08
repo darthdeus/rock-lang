@@ -3,8 +3,8 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use crate::cleanup::{cleanup_in, dce, drop_f32_rounding_into_float_views};
 use crate::mem2reg::promote_direct_cells;
 use crate::visit::{remap_inst, remap_term};
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::CompilerError;
+use bone_core::prelude::CompilerError;
+use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::mir::*;
 use ustr::Ustr;
@@ -18,7 +18,7 @@ use ustr::Ustr;
 pub fn nobox_materialization_violations(
     ws: &Workspace,
     func: &MirFunc,
-) -> Vec<(String, Option<bone_semantic::prelude::Span>)> {
+) -> Vec<(String, Option<bone_core::prelude::Span>)> {
     let mut out = Vec::new();
     // Closure conversion retains cloned, unreachable parent/sibling blocks.
     // Follow the emission oracle, including unhoisted coroutine lambdas/hooks.

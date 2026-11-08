@@ -4,10 +4,10 @@
 //! population.
 
 use crate::common::ws_with;
-use bone_semantic::hir::BodyOwner;
+use bone_core::hir::BodyOwner;
 use skull_mir::mir::FuncRef;
 
-fn function(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
+fn function(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
     let mid = *ws
         .module_ids
         .get(&ustr::Ustr::from("<test>"))

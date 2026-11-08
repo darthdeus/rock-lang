@@ -20,8 +20,8 @@ use std::cell::Cell as ThreadCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::{BoundTree, CompilerError};
+use bone_core::prelude::{BoundTree, CompilerError};
+use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::concrete::ConcretePlans;
 use skull_mir::instance::Instance;
@@ -3523,7 +3523,7 @@ fn inline_functions_inner(
 
 /// Whether the fn declares any `Iterator` bound on its generics -- such a fn has
 /// no standalone emission (it exists only inlined at its call sites).
-pub fn fn_has_bounds(f: &bone_semantic::hir::Function) -> bool {
+pub fn fn_has_bounds(f: &bone_core::hir::Function) -> bool {
     f.generic_bounds.iter().any(Option::is_some)
 }
 
@@ -3541,7 +3541,7 @@ pub fn fn_has_bounds(f: &bone_semantic::hir::Function) -> bool {
 /// Shared by the luajit driver (`skull::mir_emit`) and the JS closure emitter.
 pub fn validate_no_residual_bound_calls(
     ws: &Workspace,
-    f: &bone_semantic::hir::Function,
+    f: &bone_core::hir::Function,
     mf: &MirFunc,
 ) -> Result<(), CompilerError> {
     // Walk block inst-lists, not the raw arena: a splice drops the consumed call

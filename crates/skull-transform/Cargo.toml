@@ -19,11 +19,11 @@ bone-core = { workspace = true }
 rustc-hash = { workspace = true }
 comfy-la-arena = { workspace = true }
 skull-mir = { workspace = true }
-bone-semantic = { workspace = true }
 ustr = { workspace = true }
 log = { workspace = true }
 
 [dev-dependencies]
+bone-semantic = { workspace = true }
 skull-parser = { workspace = true }
 skull-graph = { workspace = true }
 skull-codegen-lua = { workspace = true }

@@ -6,9 +6,9 @@
 //! own emitters render inline; no target ABI, source text or backend crate enters
 //! the plan.
 
-use bone_semantic::hir::{BodyOwner, BuiltinTy, Expr, Function, TyId, TypeCtor, TypeExpr};
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::Span;
+use bone_core::hir::{BodyOwner, BuiltinTy, Expr, Function, TyId, TypeCtor, TypeExpr};
+use bone_core::prelude::Span;
+use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use skull_mir::concrete::{ConcretePlans, ConcreteSignature};
@@ -221,7 +221,7 @@ fn const_lit_depth(ws: &Workspace, name: Ustr, depth: usize) -> Option<Lit> {
 
 fn fold_const_expr(
     ws: &Workspace,
-    body: &bone_semantic::hir::Body,
+    body: &bone_core::hir::Body,
     expr: Idx<Expr>,
     depth: usize,
 ) -> Option<Lit> {

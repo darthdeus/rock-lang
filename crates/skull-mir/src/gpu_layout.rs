@@ -38,9 +38,9 @@
 //! touches, which is why they are separate functions and not one parameterized
 //! walk.
 
-use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr};
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::{Span, TyId};
+use bone_core::hir::{BuiltinTy, TypeCtor, TypeExpr};
+use bone_core::prelude::{Span, TyId};
+use bone_core::workspace::Workspace;
 use skull_parser::CompilerError;
 use ustr::Ustr;
 
@@ -145,9 +145,9 @@ fn sampler_kind(ws: &Workspace, ty: TyId) -> Option<SamplerKind> {
             ctor: TypeCtor::Nominal(n),
             ..
         }) => {
-            if bone_semantic::prelude::is_intrinsic_key(n, "Sampler2D") {
+            if bone_core::modules::is_intrinsic_key(n, "Sampler2D") {
                 Some(SamplerKind::Float)
-            } else if bone_semantic::prelude::is_intrinsic_key(n, "ISampler2D") {
+            } else if bone_core::modules::is_intrinsic_key(n, "ISampler2D") {
                 Some(SamplerKind::Int)
             } else {
                 None
@@ -453,19 +453,19 @@ pub fn wire_kind(ws: &Workspace, ty: TyId) -> Option<WireKind> {
             ctor: TypeCtor::Nominal(n),
             ..
         }) => {
-            if bone_semantic::prelude::is_intrinsic_key(n, "Vec2")
-                || bone_semantic::prelude::is_intrinsic_key(n, "Vec2f")
+            if bone_core::modules::is_intrinsic_key(n, "Vec2")
+                || bone_core::modules::is_intrinsic_key(n, "Vec2f")
             {
                 Some(WireKind::F32x2)
-            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec3")
-                || bone_semantic::prelude::is_intrinsic_key(n, "Vec3f")
+            } else if bone_core::modules::is_intrinsic_key(n, "Vec3")
+                || bone_core::modules::is_intrinsic_key(n, "Vec3f")
             {
                 Some(WireKind::F32x3)
-            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec4")
-                || bone_semantic::prelude::is_intrinsic_key(n, "Vec4f")
+            } else if bone_core::modules::is_intrinsic_key(n, "Vec4")
+                || bone_core::modules::is_intrinsic_key(n, "Vec4f")
             {
                 Some(WireKind::F32x4)
-            } else if bone_semantic::prelude::is_intrinsic_key(n, "Mat4") {
+            } else if bone_core::modules::is_intrinsic_key(n, "Mat4") {
                 Some(WireKind::Mat4)
             } else {
                 None
@@ -536,7 +536,7 @@ pub fn uniform_group_members(
                 .unwrap_or_else(|| "that type".to_string());
             // A sampler is the one non-wire field with an obvious fix, and
             // putting the texture beside the scalars is a plausible mistake.
-            if bone_semantic::prelude::is_intrinsic_key_in(
+            if bone_core::modules::is_intrinsic_key_in(
                 Ustr::from(ty_name.as_str()),
                 &["Sampler2D", "ISampler2D"],
             ) {
@@ -836,16 +836,16 @@ fn attr_kind(ws: &Workspace, ty: TyId) -> Option<AttrKind> {
             ctor: TypeCtor::Nominal(n),
             ..
         }) => {
-            if bone_semantic::prelude::is_intrinsic_key(n, "Vec2")
-                || bone_semantic::prelude::is_intrinsic_key(n, "Vec2f")
+            if bone_core::modules::is_intrinsic_key(n, "Vec2")
+                || bone_core::modules::is_intrinsic_key(n, "Vec2f")
             {
                 Some(AttrKind::F32x2)
-            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec3")
-                || bone_semantic::prelude::is_intrinsic_key(n, "Vec3f")
+            } else if bone_core::modules::is_intrinsic_key(n, "Vec3")
+                || bone_core::modules::is_intrinsic_key(n, "Vec3f")
             {
                 Some(AttrKind::F32x3)
-            } else if bone_semantic::prelude::is_intrinsic_key(n, "Vec4")
-                || bone_semantic::prelude::is_intrinsic_key(n, "Vec4f")
+            } else if bone_core::modules::is_intrinsic_key(n, "Vec4")
+                || bone_core::modules::is_intrinsic_key(n, "Vec4f")
             {
                 Some(AttrKind::F32x4)
             } else {

@@ -122,7 +122,7 @@ pub fn eval_str(runtime: &[&str], defs: &str, root: &str, expect: &str) {
 }
 
 /// The `<test>` module's fn named `name`.
-pub fn test_fn_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
+pub fn test_fn_ref(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
     let mid = *ws
         .module_ids
         .get(&ustr::Ustr::from("<test>"))
@@ -139,25 +139,22 @@ pub fn test_fn_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> Func
 }
 
 /// Emit the `<test>` fn `root` and its callee closure to JS.
-pub fn emit_closure(
-    ws: &bone_semantic::inference::Workspace,
-    root: &str,
-) -> Result<String, String> {
+pub fn emit_closure(ws: &bone_core::workspace::Workspace, root: &str) -> Result<String, String> {
     skull_codegen_js::emit::emit_with_closure(ws, &[(test_fn_ref(ws, root), root.to_string())])
         .map_err(|e| e.message)
 }
 
 /// Build the stdlib workspace (parse + semantic pass).
-pub fn stdlib_ws() -> bone_semantic::inference::Workspace {
+pub fn stdlib_ws() -> bone_core::workspace::Workspace {
     ws_with("fn main() {}")
 }
 
 /// Stdlib workspace plus `src` as the `<test>` module.
-pub fn ws_with(src: &str) -> bone_semantic::inference::Workspace {
+pub fn ws_with(src: &str) -> bone_core::workspace::Workspace {
     ws_with_named("<test>", src)
 }
 
-pub fn ws_with_named(file: &str, src: &str) -> bone_semantic::inference::Workspace {
+pub fn ws_with_named(file: &str, src: &str) -> bone_core::workspace::Workspace {
     let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
         .iter()
         .map(|f| {
@@ -173,9 +170,9 @@ pub fn ws_with_named(file: &str, src: &str) -> bone_semantic::inference::Workspa
 /// helper here makes every JS MIR fixture exercise the same entry as the
 /// production emitter, including the callee table and shared type arena.
 pub fn lower_test_ref(
-    ws: &bone_semantic::inference::Workspace,
-    mid: bone_semantic::prelude::ModuleId,
-    fid: comfy_la_arena::Idx<bone_semantic::hir::Function>,
+    ws: &bone_core::workspace::Workspace,
+    mid: bone_core::prelude::ModuleId,
+    fid: comfy_la_arena::Idx<bone_core::hir::Function>,
 ) -> MirFunc {
     let root = FuncRef {
         module: mid,
@@ -197,10 +194,7 @@ pub fn lower_test_ref(
 }
 
 /// Lower the fn named `name` in the `<test>` module (must be unique there).
-pub fn lower_test_fn(
-    ws: &bone_semantic::inference::Workspace,
-    name: &str,
-) -> skull_mir::mir::MirFunc {
+pub fn lower_test_fn(ws: &bone_core::workspace::Workspace, name: &str) -> skull_mir::mir::MirFunc {
     let mid = *ws
         .module_ids
         .get(&ustr::Ustr::from("<test>"))
@@ -216,7 +210,7 @@ pub fn lower_test_fn(
 /// Lower the fn named `name` in the `<test>` module and emit it to JS under its
 /// own name. Panics if the fn is missing or emit rejects (the reject message is
 /// surfaced so a red test records it).
-pub fn emit_user(ws: &bone_semantic::inference::Workspace, name: &str) -> String {
+pub fn emit_user(ws: &bone_core::workspace::Workspace, name: &str) -> String {
     let mf = lower_test_fn(ws, name);
     skull_codegen_js::emit::emit_fn(ws, &mf, name)
         .unwrap_or_else(|e| panic!("emit `{name}`: {}", e.message))
@@ -224,7 +218,7 @@ pub fn emit_user(ws: &bone_semantic::inference::Workspace, name: &str) -> String
 
 /// [`emit_user`] but returns the reject message instead of panicking (for
 /// red-first observation and reject-shape pins).
-pub fn emit_user_err(ws: &bone_semantic::inference::Workspace, name: &str) -> String {
+pub fn emit_user_err(ws: &bone_core::workspace::Workspace, name: &str) -> String {
     let mf = lower_test_fn(ws, name);
     match skull_codegen_js::emit::emit_fn(ws, &mf, name) {
         Ok(js) => panic!("expected `{name}` to reject, got:\n{js}"),
@@ -236,7 +230,7 @@ pub fn emit_user_err(ws: &bone_semantic::inference::Workspace, name: &str) -> St
 /// params, under the JS name `<name>_fb`. Panics if none matches or emit fails.
 /// The Vec overloads (multi-value return) reject, so the first that emits is the
 /// scalar one.
-pub fn emit_scalar(ws: &bone_semantic::inference::Workspace, name: &str, arity: usize) -> String {
+pub fn emit_scalar(ws: &bone_core::workspace::Workspace, name: &str, arity: usize) -> String {
     for &mid in ws.module_ids.values() {
         let module = ws.module(mid);
         for (fid, f) in module.functions.iter() {

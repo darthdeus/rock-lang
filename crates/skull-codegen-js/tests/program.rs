@@ -9,7 +9,7 @@
 
 use crate::common::{node, ws_with, ws_with_named};
 
-fn emit_program(ws: &bone_semantic::inference::Workspace) -> String {
+fn emit_program(ws: &bone_core::workspace::Workspace) -> String {
     let mid = *ws
         .module_ids
         .get(&ustr::Ustr::from("<test>"))

@@ -32,7 +32,7 @@ fn node_eval_int(defs: &str, call: &str) -> i64 {
 }
 
 /// Co-emit `root` and its plain-Rock callees into one JS program.
-fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> String {
+fn emit_closure(ws: &bone_core::workspace::Workspace, root: &str) -> String {
     crate::common::emit_closure(ws, root).unwrap_or_else(|e| panic!("closure emit `{root}`: {e}"))
 }
 

@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
-use bone_semantic::inference::Workspace;
+use bone_core::workspace::Workspace;
 use comfy_la_arena::{Idx, RawIdx};
 use skull_mir::cfg::structure::{
     self, CountedBound, CountedLoop, LoopRegion, LoopShapes, Structure,
@@ -113,7 +113,7 @@ fn sited_err((msg, site): (String, Option<Span>)) -> CompilerError {
 /// siblings. Mirrors the luajit path: a body with several sinks reports several
 /// findings, so neither backend's count of what is left is a floor.
 fn nobox_errs(
-    ws: &bone_semantic::inference::Workspace,
+    ws: &bone_core::workspace::Workspace,
     mf: &skull_mir::mir::MirFunc,
 ) -> Result<(), CompilerError> {
     // Name the body: the span often points into an INLINED stdlib body, and a
@@ -170,13 +170,13 @@ fn cell_name(mf: &MirFunc, cell: Idx<Cell>) -> String {
     format!("c{}", mf.emit_cell_id(cell))
 }
 
-fn cell_is_uint(ws: &Workspace, ty: Option<bone_semantic::prelude::TyId>) -> bool {
-    let Some(bone_semantic::prelude::TyId::Static(module, index)) = ty else {
+fn cell_is_uint(ws: &Workspace, ty: Option<bone_core::prelude::TyId>) -> bool {
+    let Some(bone_core::prelude::TyId::Static(module, index)) = ty else {
         return false;
     };
     matches!(
         ws.module(module).ty_arena[index],
-        bone_semantic::hir::TypeExpr::Builtin(bone_semantic::hir::BuiltinTy::Uint)
+        bone_core::hir::TypeExpr::Builtin(bone_core::hir::BuiltinTy::Uint)
     )
 }
 
@@ -2763,7 +2763,7 @@ impl Emitter<'_> {
         };
         let plan = skull_mir::lower::struct_field_plan(
             self.ws,
-            bone_semantic::hir::FnBackend::Js,
+            bone_core::hir::FnBackend::Js,
             name,
             f.name,
             false,
@@ -2861,7 +2861,7 @@ impl Emitter<'_> {
                     ))
                 })?;
             let child_rep = arena
-                .plan_nominal_value(self.ws, bone_semantic::hir::FnBackend::Js, child)
+                .plan_nominal_value(self.ws, bone_core::hir::FnBackend::Js, child)
                 .map_err(|e| err(e.message))?;
             let inner = self.render_leaf_form_value_struct(child, child_rep, sub)?;
             parts.push(format!("{}: {inner}", js_key(head)?));
@@ -3127,7 +3127,7 @@ pub fn emit_with_closure(
     let hoisted = collect_hoisted(&bodies);
     let struct_registry = skull_mir::lower::StructRegistryPlan::for_bodies(
         ws,
-        bone_semantic::hir::FnBackend::Js,
+        bone_core::hir::FnBackend::Js,
         &bodies,
     )
     .map_err(|error| err(error.message))?;
@@ -3285,7 +3285,7 @@ fn emit_ginit_with_nested(
 /// The luajit driver already owns its own (`skull::mir_emit::FullEmit`);
 /// this is that same rule for JS.
 fn js_scx(ws: &Workspace) -> skull_mir::lower::ScalarCtx {
-    skull_mir::lower::ScalarCtx::new(ws).with_target(bone_semantic::hir::FnBackend::Js)
+    skull_mir::lower::ScalarCtx::new(ws).with_target(bone_core::hir::FnBackend::Js)
 }
 
 #[derive(Clone)]
@@ -3395,7 +3395,7 @@ fn new_js_session(
 ) -> JsSession {
     let graph =
         skull_graph::instance_graph::build_in(ws, roots.to_vec(), false, scx.interner_handle());
-    let mappings = artifact::ArtifactMappings::for_backend(bone_semantic::hir::FnBackend::Js)
+    let mappings = artifact::ArtifactMappings::for_backend(bone_core::hir::FnBackend::Js)
         .with_supply(&crate::JsBackendRealization);
     let view = artifact::realize(
         ws,
@@ -3418,10 +3418,7 @@ fn update_js_session(
     ws: &Workspace,
     session: &mut JsSession,
     roots: &[FuncRef],
-    changed: &[(
-        bone_semantic::prelude::ModuleId,
-        bone_semantic::hir::BodyOwner,
-    )],
+    changed: &[(bone_core::prelude::ModuleId, bone_core::hir::BodyOwner)],
     edits: &[skull_graph::instance_graph::TextEditDelta],
 ) {
     let before = session.graph.instances.len();
@@ -3448,7 +3445,7 @@ fn update_js_session(
         &update.revisited_owners,
         edits,
     );
-    let mappings = artifact::ArtifactMappings::for_backend(bone_semantic::hir::FnBackend::Js)
+    let mappings = artifact::ArtifactMappings::for_backend(bone_core::hir::FnBackend::Js)
         .with_supply(&crate::JsBackendRealization);
     let request = artifact::ArtifactRequest::new(target_projection::JAVASCRIPT_WEB, roots)
         .with_mappings(mappings)
@@ -3476,7 +3473,7 @@ fn update_js_session(
 
 pub fn emit_program(
     ws: &Workspace,
-    user_mid: bone_semantic::prelude::ModuleId,
+    user_mid: bone_core::prelude::ModuleId,
 ) -> Result<JsProgram, CompilerError> {
     let scx = js_scx(ws);
     // The program entry: a nullary `main` in the entry module. Passed as the
@@ -3500,7 +3497,7 @@ pub fn emit_program(
 
 pub fn emit_program_cached(
     ws: &Workspace,
-    user_mid: bone_semantic::prelude::ModuleId,
+    user_mid: bone_core::prelude::ModuleId,
 ) -> Result<(JsProgram, JsEmitCache), CompilerError> {
     let scx = js_scx(ws);
     let mut extra = Vec::new();
@@ -3608,7 +3605,7 @@ fn assemble_program_core(
     // them as top-level calls it emits whole-stdlib, which JS cannot). Their
     // callees/globals feed the shared worklists BEFORE the drain.
     let mut deco_bodies: Vec<(String, MirFunc)> = Vec::new();
-    for (mid, did) in decorators.applied_definitions(ws, bone_semantic::hir::FnBackend::Js) {
+    for (mid, did) in decorators.applied_definitions(ws, bone_core::hir::FnBackend::Js) {
         let d = &ws.module(mid).decorators[did];
         let deco_name = decorator_symbol(d.def_key.as_str());
         let owner = skull_mir::concrete::ConcreteOwner::Decorator {
@@ -3698,7 +3695,7 @@ fn assemble_program_core(
     let hoisted = collect_hoisted(&bodies);
     let struct_registry = skull_mir::lower::StructRegistryPlan::for_bodies(
         ws,
-        bone_semantic::hir::FnBackend::Js,
+        bone_core::hir::FnBackend::Js,
         &bodies,
     )
     .map_err(|error| err(error.message))?;
@@ -3860,7 +3857,7 @@ fn assemble_program_core(
     combine_rejections(rejections)?;
     decorators.mark_generated_code_values(
         ws,
-        bone_semantic::hir::FnBackend::Js,
+        bone_core::hir::FnBackend::Js,
         SimValues::All,
         &mut code_artifact,
     );
@@ -3982,8 +3979,8 @@ fn shader_register_sibling(ws: &Workspace) -> Result<Option<FuncRef>, CompilerEr
         let mut matches = cands.iter().filter(|(m, f)| {
             let cf = &ws.module(*m).functions[*f];
             if js_sibling {
-                cf.backend == bone_semantic::hir::FnBackend::Js
-                    && (matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _)))
+                cf.backend == bone_core::hir::FnBackend::Js
+                    && (matches!(cf.inline_body, Some((bone_core::hir::FnBackend::Js, _)))
                         || cf.is_extern)
             } else {
                 cf.inline_body.is_none() && !cf.is_extern
@@ -4062,10 +4059,7 @@ pub struct JsEmitCache {
     changed_since_full: HashSet<FuncRef>,
     static_keys: HashMap<ustr::Ustr, StaticBaseline>,
     shader_contributions: HashMap<
-        (
-            bone_semantic::prelude::ModuleId,
-            bone_semantic::hir::BodyOwner,
-        ),
+        (bone_core::prelude::ModuleId, bone_core::hir::BodyOwner),
         Vec<skull_mir::lower::ShaderPair>,
     >,
     root_plan: JsRootPlan,
@@ -4128,30 +4122,24 @@ impl JsReload {
 
 pub fn emit_overlay(
     ws: &Workspace,
-    user_mid: bone_semantic::prelude::ModuleId,
+    user_mid: bone_core::prelude::ModuleId,
     cache: &mut JsEmitCache,
-    reinferred: &[(
-        bone_semantic::prelude::ModuleId,
-        bone_semantic::hir::BodyOwner,
-    )],
+    reinferred: &[(bone_core::prelude::ModuleId, bone_core::hir::BodyOwner)],
 ) -> Result<JsReload, CompilerError> {
     emit_overlay_with_span_edits(ws, user_mid, cache, reinferred, &[])
 }
 
 pub fn emit_overlay_with_span_edits(
     ws: &Workspace,
-    user_mid: bone_semantic::prelude::ModuleId,
+    user_mid: bone_core::prelude::ModuleId,
     cache: &mut JsEmitCache,
-    reinferred: &[(
-        bone_semantic::prelude::ModuleId,
-        bone_semantic::hir::BodyOwner,
-    )],
+    reinferred: &[(bone_core::prelude::ModuleId, bone_core::hir::BodyOwner)],
     edits: &[skull_graph::instance_graph::TextEditDelta],
 ) -> Result<JsReload, CompilerError> {
     if reinferred.iter().any(|(_, owner)| {
         !matches!(
             owner,
-            bone_semantic::hir::BodyOwner::Function(_) | bone_semantic::hir::BodyOwner::Global(_)
+            bone_core::hir::BodyOwner::Function(_) | bone_core::hir::BodyOwner::Global(_)
         )
     }) {
         return Ok(JsReload::FullRequired);
@@ -4182,11 +4170,11 @@ pub fn emit_overlay_with_span_edits(
     let changed_funcs: Vec<FuncRef> = reinferred
         .iter()
         .filter_map(|(mid, owner)| match owner {
-            bone_semantic::hir::BodyOwner::Function(func) => Some(FuncRef {
+            bone_core::hir::BodyOwner::Function(func) => Some(FuncRef {
                 module: *mid,
                 func: *func,
             }),
-            bone_semantic::hir::BodyOwner::Global(_) => None,
+            bone_core::hir::BodyOwner::Global(_) => None,
             _ => None,
         })
         .collect();
@@ -4515,7 +4503,7 @@ fn add_inline_js_body(bodies: &mut Vec<JsInlineBody>, instance: Instance, decl: 
 }
 
 fn opaque_js_global_names(ws: &Workspace, body: &JsInlineBody) -> Vec<ustr::Ustr> {
-    let Some((bone_semantic::hir::FnBackend::Js, source)) =
+    let Some((bone_core::hir::FnBackend::Js, source)) =
         ws.module(body.decl.module).functions[body.decl.func].inline_body
     else {
         return Vec::new();
@@ -4586,11 +4574,11 @@ impl<'a> WorklistState<'a> {
                 .get(&key)
                 .map_or(requested, |realized| realized.decl);
             let f = &ws.module(fr.module).functions[fr.func];
-            if matches!(f.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
+            if matches!(f.inline_body, Some((bone_core::hir::FnBackend::Js, _))) {
                 if seen.insert(fr) {
                     add_inline_js_body(&mut inline_js, key, fr);
                 }
-            } else if !(f.is_extern && f.backend == bone_semantic::hir::FnBackend::Js) {
+            } else if !(f.is_extern && f.backend == bone_core::hir::FnBackend::Js) {
                 if seen.insert(fr) {
                     queue.push(fr);
                 }
@@ -4793,7 +4781,7 @@ fn emit_inline_js_fn(
             .join(", "),
     };
     let src = match f.inline_body {
-        Some((bone_semantic::hir::FnBackend::Js, s)) => s.to_string(),
+        Some((bone_core::hir::FnBackend::Js, s)) => s.to_string(),
         _ => String::new(),
     };
     // The publisher contract is checked against the selected body's ABI. The
@@ -5101,7 +5089,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
                 .ws
                 .module(site.module)
                 .bodies
-                .get(&bone_semantic::hir::BodyOwner::Global(site.gid))
+                .get(&bone_core::hir::BodyOwner::Global(site.gid))
                 .and_then(|body| body.root)
                 .is_none() =>
             {
@@ -5795,7 +5783,7 @@ fn emit_inspect_ty(
 /// `E::V`, a tuple `E::V { [1] = .. }`, a record `E::V { f = .. }` with its
 /// fields sorted. Name-sorted, emitted from declarations.
 fn emit_inspect_cdata_enums(ws: &Workspace) -> Result<String, CompilerError> {
-    use bone_semantic::hir::VariantPayload;
+    use bone_core::hir::VariantPayload;
 
     let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
     names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -5859,8 +5847,8 @@ fn emit_inspect_cdata_enums(ws: &Workspace) -> Result<String, CompilerError> {
 /// from declarations, independently of which enum constructors need singleton
 /// globals, so an inspect reached through a flattened field always has metadata.
 fn emit_inspect_enum_payloads(ws: &Workspace) -> Result<String, CompilerError> {
-    use bone_semantic::hir::{TypeCtor, TypeExpr, VariantPayload};
-    use bone_semantic::prelude::TyId;
+    use bone_core::hir::{TypeCtor, TypeExpr, VariantPayload};
+    use bone_core::prelude::TyId;
 
     let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
     names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
@@ -6090,7 +6078,7 @@ fn nested_value_field_struct_name(
     };
     let plan = skull_mir::lower::struct_field_plan(
         ws,
-        bone_semantic::hir::FnBackend::Js,
+        bone_core::hir::FnBackend::Js,
         parent,
         f.name,
         false,
@@ -6105,7 +6093,7 @@ fn nested_value_field_struct_name(
 
 /// The entry module's nullary `main`, if it defines one -- the program entry.
 /// Matched by declared name: a modules-v1 entry's key is `<package>::main`.
-fn nullary_main(ws: &Workspace, user_mid: bone_semantic::prelude::ModuleId) -> Option<FuncRef> {
+fn nullary_main(ws: &Workspace, user_mid: bone_core::prelude::ModuleId) -> Option<FuncRef> {
     ws.module(user_mid)
         .functions
         .iter()
@@ -6139,8 +6127,8 @@ fn safe_self_ref(ws: &Workspace, mf: &MirFunc) -> FuncRef {
 /// A JS literal for a `@deco` annotation arg value (the JS analog of skull's
 /// `annotation_value_lua`): the same value classes, rendered in JS syntax. A
 /// non-literal (`AnnoValue::Other`) yields `None` (the caller rejects).
-pub fn annotation_value_js(v: &bone_semantic::hir::AnnoValue) -> Option<String> {
-    use bone_semantic::hir::AnnoValue as A;
+pub fn annotation_value_js(v: &bone_core::hir::AnnoValue) -> Option<String> {
+    use bone_core::hir::AnnoValue as A;
     Some(match v {
         A::Int(i) => i.to_string(),
         A::Float(f) => js_number(*f).ok()?,
@@ -6159,9 +6147,9 @@ pub fn annotation_value_js(v: &bone_semantic::hir::AnnoValue) -> Option<String> 
 /// are JS-specific.
 fn decorator_call_args_js(
     ws: &Workspace,
-    module: bone_semantic::prelude::ModuleId,
-    decorator: Idx<bone_semantic::hir::DecoratorDef>,
-    ann: &bone_semantic::hir::Annotation,
+    module: bone_core::prelude::ModuleId,
+    decorator: Idx<bone_core::hir::DecoratorDef>,
+    ann: &bone_core::hir::Annotation,
 ) -> Result<Vec<String>, CompilerError> {
     use skull_mir::decorator::DecoArg;
     let d = &ws.module(module).decorators[decorator];
@@ -6195,7 +6183,7 @@ fn decorator_application_lines_js(
     names: &CalleeNames,
 ) -> Result<String, CompilerError> {
     let mut out = String::new();
-    for app in decorators.applications(ws, bone_semantic::hir::FnBackend::Js) {
+    for app in decorators.applications(ws, bone_core::hir::FnBackend::Js) {
         let (dmid, did) = app.decorator;
         let instance = Instance::base(app.func);
         let _js_fn = names.get(&instance).ok_or_else(|| {
@@ -6225,8 +6213,8 @@ fn decorator_application_lines_js(
 /// The definition site of a module-level global (for lowering its initializer).
 #[derive(Clone, Copy)]
 struct GlobalSite {
-    module: bone_semantic::prelude::ModuleId,
-    gid: Idx<bone_semantic::hir::GlobalDef>,
+    module: bone_core::prelude::ModuleId,
+    gid: Idx<bone_core::hir::GlobalDef>,
 }
 
 /// A lowered global initializer: `__G.<name> = <init_name>()` runs the `mf` body.
@@ -6259,7 +6247,7 @@ fn global_init_js_name(name: ustr::Ustr) -> String {
 /// un-populated init value -- an emit-and-hope divergence. Reads of these reject
 /// (SKIP) rather than silently diverge.
 fn decorator_populated_globals(ws: &Workspace) -> HashSet<ustr::Ustr> {
-    use bone_semantic::hir::{BodyOwner, Expr};
+    use bone_core::hir::{BodyOwner, Expr};
     let mut set = HashSet::new();
     for module in &ws.modules {
         for (did, _) in module.decorators.iter() {
@@ -6438,12 +6426,12 @@ fn schedule_residual_calls(
         if js_supply(ws, cf).is_some() {
             continue;
         }
-        if matches!(cf.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
+        if matches!(cf.inline_body, Some((bone_core::hir::FnBackend::Js, _))) {
             st.seen.insert(selected);
             add_inline_js_body(&mut st.inline_js, instance.clone(), selected);
             continue;
         }
-        if cf.is_extern && cf.backend == bone_semantic::hir::FnBackend::Js {
+        if cf.is_extern && cf.backend == bone_core::hir::FnBackend::Js {
             continue;
         }
         if cf.inline_body.is_some() || cf.is_extern {
@@ -6546,10 +6534,10 @@ fn register_fn_values_from_view(
             None => {}
         }
         st.gctx.fns.entry(surface).or_insert(js_name);
-        if f.is_extern && f.backend == bone_semantic::hir::FnBackend::Js {
+        if f.is_extern && f.backend == bone_core::hir::FnBackend::Js {
             continue;
         }
-        if matches!(f.inline_body, Some((bone_semantic::hir::FnBackend::Js, _))) {
+        if matches!(f.inline_body, Some((bone_core::hir::FnBackend::Js, _))) {
             st.seen.insert(selected);
             add_inline_js_body(&mut st.inline_js, instance.clone(), selected);
         } else if f.inline_body.is_some() || f.is_extern {
@@ -6806,7 +6794,7 @@ fn global_init_line(
 /// `enum_runtime_defs`; only referenced names are emitted, and the defs tolerate
 /// duplication across concatenated per-test programs (`var` redeclare, same value).
 fn build_enum_global_defs(ws: &Workspace) -> HashMap<ustr::Ustr, String> {
-    use bone_semantic::hir::VariantPayload;
+    use bone_core::hir::VariantPayload;
     let mut out = HashMap::new();
     for module in ws.modules.iter() {
         for (_, e) in module.enums.iter() {
@@ -6873,7 +6861,7 @@ fn embed_view_expr(
         let key = format!("{prefix}.{}", f.name);
         let plan = skull_mir::lower::struct_field_plan(
             ws,
-            bone_semantic::hir::FnBackend::Js,
+            bone_core::hir::FnBackend::Js,
             ty_name,
             f.name,
             true,
@@ -6950,7 +6938,7 @@ fn build_inspect_ty_defs(
                 .map(|f| {
                     let plan = skull_mir::lower::struct_field_plan(
                         ws,
-                        bone_semantic::hir::FnBackend::Js,
+                        bone_core::hir::FnBackend::Js,
                         *name,
                         f.name,
                         false,
@@ -6973,7 +6961,7 @@ fn build_inspect_ty_defs(
             ));
             continue;
         }
-        let mut fields: Vec<&bone_semantic::hir::StructFieldDef> = s.fields.iter().collect();
+        let mut fields: Vec<&bone_core::hir::StructFieldDef> = s.fields.iter().collect();
         fields.sort_by(|a, b| a.name.as_str().cmp(b.name.as_str()));
         let pairs: Vec<String> = fields
             .iter()
@@ -6981,7 +6969,7 @@ fn build_inspect_ty_defs(
                 let n = js_string_lit(f.name.as_str())?;
                 let plan = skull_mir::lower::struct_field_plan(
                     ws,
-                    bone_semantic::hir::FnBackend::Js,
+                    bone_core::hir::FnBackend::Js,
                     *name,
                     f.name,
                     false,
@@ -7043,7 +7031,7 @@ fn build_vt_eq_defs(
         // A GC-table box keys an inline child's leaves by dotted path.
         let cmps: Vec<String> = if *storage == skull_mir::lower::ValueStorage::GcTable {
             let fields =
-                skull_mir::lower::gc_table_fields(ws, bone_semantic::hir::FnBackend::Js, *name)
+                skull_mir::lower::gc_table_fields(ws, bone_core::hir::FnBackend::Js, *name)
                     .map_err(|e| err(e.message))?;
             let mut cmps = Vec::new();
             for f in &fields {
@@ -7345,7 +7333,7 @@ pub fn required_arg_count(
     abi: &skull_mir::lower::BackendFnAbiPlan,
     arity: usize,
 ) -> usize {
-    use bone_semantic::hir::BodyOwner;
+    use bone_core::hir::BodyOwner;
     let fr = abi.decl();
     let defaults: Vec<bool> = ws
         .module(fr.module)
@@ -7387,7 +7375,7 @@ pub enum JsSupply {
 /// the artifact view. Declaration-keyed mappings win before any declared body,
 /// including the portable `map_new` body. Unmarked same-name user functions
 /// remain ordinary callees.
-pub fn js_supply(ws: &Workspace, cf: &bone_semantic::hir::Function) -> Option<JsSupply> {
+pub fn js_supply(ws: &Workspace, cf: &bone_core::hir::Function) -> Option<JsSupply> {
     // `definition_plan_stage_js` defines the accessor under its own symbol.
     if skull_mir::definition::is_artifact_catalog_accessor(cf) {
         let symbol = ustr::Ustr::from(skull_mir::mangle::mangle_fn(ws, cf).as_str());
@@ -7713,7 +7701,7 @@ mod tests {
             &graph,
             &artifact::ArtifactRequest::new(target_projection::JAVASCRIPT_WEB, &roots)
                 .with_mappings(artifact::ArtifactMappings::for_backend(
-                    bone_semantic::hir::FnBackend::Js,
+                    bone_core::hir::FnBackend::Js,
                 ))
                 .with_symbols(&artifact::REALIZED_SYMBOLS),
         );
@@ -7772,7 +7760,7 @@ fn main() {
             &graph,
             &artifact::ArtifactRequest::new(target_projection::JAVASCRIPT_WEB, &[main])
                 .with_mappings(artifact::ArtifactMappings::for_backend(
-                    bone_semantic::hir::FnBackend::Js,
+                    bone_core::hir::FnBackend::Js,
                 ))
                 .with_symbols(&artifact::REALIZED_SYMBOLS),
         );
@@ -7798,7 +7786,7 @@ fn main() {
             &graph,
             &artifact::ArtifactRequest::new(target_projection::JAVASCRIPT_WEB, &[main])
                 .with_mappings(artifact::ArtifactMappings::for_backend(
-                    bone_semantic::hir::FnBackend::Js,
+                    bone_core::hir::FnBackend::Js,
                 ))
                 .with_symbols(&artifact::REALIZED_SYMBOLS),
         );

@@ -9,9 +9,9 @@
 //! which annotation names which definition, which definitions a program emits,
 //! and which applications it registers at load.
 
-use bone_semantic::hir::{AnnoValue, Annotation, BodyOwner, DecoratorDef, FnBackend, Function};
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::ModuleId;
+use bone_core::hir::{AnnoValue, Annotation, BodyOwner, DecoratorDef, FnBackend, Function};
+use bone_core::prelude::ModuleId;
+use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap, FxHashSet};
 use skull_parser::CompilerError;

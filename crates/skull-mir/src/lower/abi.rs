@@ -23,9 +23,9 @@ use bone_core::prelude::Instant;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use bone_semantic::hir::{FnBackend, Function};
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::Span;
+use bone_core::hir::{FnBackend, Function};
+use bone_core::prelude::Span;
+use bone_core::workspace::Workspace;
 use ustr::Ustr;
 
 use super::{
@@ -292,7 +292,7 @@ impl GlobalPlan {
     pub fn for_declared_type(
         ws: &Workspace,
         scx: &ScalarCtx,
-        ty: bone_semantic::prelude::TyId,
+        ty: bone_core::prelude::TyId,
     ) -> Result<Self, RepError> {
         let ty = crate::monoty::convert_decl(ws, ty, &SpecSubst::default()).map_err(|reason| {
             RepError {
@@ -2484,7 +2484,7 @@ pub fn requires_concrete_body_plan(ws: &Workspace, inst: &crate::instance::Insta
         && ws
             .module(inst.func.module)
             .bodies
-            .contains_key(&bone_semantic::hir::BodyOwner::Function(inst.func.func))
+            .contains_key(&bone_core::hir::BodyOwner::Function(inst.func.func))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2505,12 +2505,12 @@ impl AbiMode {
     }
 }
 
-fn declared_tuple_spelled(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> bool {
+fn declared_tuple_spelled(ws: &Workspace, ty: bone_core::prelude::TyId) -> bool {
     match super::static_ty(ws, ty) {
-        Some(bone_semantic::hir::TypeExpr::Tuple { .. }) => true,
-        Some(bone_semantic::hir::TypeExpr::Nullable(inner)) => matches!(
+        Some(bone_core::hir::TypeExpr::Tuple { .. }) => true,
+        Some(bone_core::hir::TypeExpr::Nullable(inner)) => matches!(
             super::static_ty(ws, ty.with_idx(inner)),
-            Some(bone_semantic::hir::TypeExpr::Tuple { .. })
+            Some(bone_core::hir::TypeExpr::Tuple { .. })
         ),
         _ => false,
     }
@@ -2518,7 +2518,7 @@ fn declared_tuple_spelled(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> b
 
 fn declared_mono_type(
     ws: &Workspace,
-    ty: bone_semantic::prelude::TyId,
+    ty: bone_core::prelude::TyId,
     subst: &SpecSubst,
 ) -> Result<Option<crate::monoty::MonoTy>, RepError> {
     match crate::monoty::convert_decl(ws, ty, subst) {
@@ -2840,7 +2840,7 @@ impl BackendFnAbiPlan {
     }
 
     fn narrow_parameter_transport(&mut self, ws: &Workspace, scx: &ScalarCtx) {
-        use bone_semantic::hir::BodyOwner;
+        use bone_core::hir::BodyOwner;
         // Field demand does not read default expressions, so defaults keep the
         // full transport here.
         if !self.permits_parameter_transport(ws, scx, false) {
@@ -3123,7 +3123,7 @@ mod wide_value_cut_tests {
 #[cfg(test)]
 mod rep_read_cache_tests {
     use super::*;
-    use bone_semantic::hir::FnBackend;
+    use bone_core::hir::FnBackend;
 
     /// Two live arenas mint the same numeric ids for different plans; the
     /// worker-local cache must never serve one arena's plan for the other's id.

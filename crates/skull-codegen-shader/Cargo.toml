@@ -8,7 +8,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-bone-semantic = { workspace = true }
+bone-core = { workspace = true }
 comfy-la-arena = { workspace = true }
 rustc-hash = { workspace = true }
 skull-mir = { workspace = true }

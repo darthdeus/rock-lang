@@ -11,8 +11,8 @@
 //! A call with an incomplete enclosing substitution has no concrete identity
 //! and is omitted; it is counted as unresolved by the caller-side census.
 
-use bone_semantic::hir::BodyOwner;
-use bone_semantic::inference::Workspace;
+use bone_core::hir::BodyOwner;
+use bone_core::workspace::Workspace;
 
 use crate::lower::shape_census_support::concrete_calls_in_body;
 use crate::mir::FuncRef;

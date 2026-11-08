@@ -26,7 +26,7 @@
 
 use crate::gpu_layout::{AttrKind, vertex_attrs};
 use crate::lower::RepArena;
-use bone_semantic::inference::Workspace;
+use bone_core::workspace::Workspace;
 use skull_parser::CompilerError;
 use ustr::Ustr;
 

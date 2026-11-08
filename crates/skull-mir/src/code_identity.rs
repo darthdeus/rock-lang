@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use bone_semantic::prelude::Span;
+use bone_core::prelude::Span;
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap, FxHashSet};
 use ustr::Ustr;
@@ -118,7 +118,7 @@ impl CodeIdentity {
     /// and deliberately excludes backend symbols, arena indices and pointers.
     pub fn logical_key(
         &self,
-        ws: &bone_semantic::inference::Workspace,
+        ws: &bone_core::workspace::Workspace,
         interner: &MonoInterner,
     ) -> String {
         let instance_key = |instance: &Instance| {
@@ -358,7 +358,7 @@ pub struct StagedCodeSlot<'a> {
 /// The escaping entries of `source` in logical-key order, each with the body
 /// that realizes it. An escaping entry without an emitted body is an error.
 pub fn staged_code_slots<'a>(
-    ws: &bone_semantic::inference::Workspace,
+    ws: &bone_core::workspace::Workspace,
     interner: &MonoInterner,
     source: impl IntoIterator<Item = &'a CodeEntry>,
 ) -> Result<Vec<StagedCodeSlot<'a>>, String> {
@@ -1572,7 +1572,7 @@ impl Fnv64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bone_semantic::prelude::ModuleId;
+    use bone_core::prelude::ModuleId;
     use comfy_la_arena::{Idx, RawIdx};
 
     fn declaration() -> crate::mir::FuncRef {

@@ -2,7 +2,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::scope;
 use crate::visit::{raw, top_level_blocks};
-use bone_semantic::prelude::CompilerError;
+use bone_core::prelude::CompilerError;
 use comfy_la_arena::{Idx, RawIdx};
 use skull_mir::mir::*;
 

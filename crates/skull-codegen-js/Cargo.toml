@@ -17,12 +17,13 @@ skull-mir = { workspace = true }
 skull-graph = { workspace = true }
 rustc-hash = { workspace = true }
 skull-transform = { workspace = true }
-bone-semantic = { workspace = true }
+bone-core = { workspace = true }
 skull-parser = { workspace = true }
 comfy-la-arena = { workspace = true }
 ustr = { workspace = true }
 
 [dev-dependencies]
+bone-semantic = { workspace = true }
 rock-stdlib = { workspace = true }
 skull = { workspace = true }
 skull-parser = { workspace = true }

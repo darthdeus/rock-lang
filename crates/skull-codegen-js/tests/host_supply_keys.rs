@@ -71,7 +71,7 @@ fn same_name_user_declarations_are_not_host_supplies() {
 
 #[test]
 fn map_get_key_is_checked_independently_of_native_buffer_get() {
-    use bone_semantic::hir::{TyId, TypeCtor, TypeExpr};
+    use bone_core::hir::{TyId, TypeCtor, TypeExpr};
     let mut ws = stdlib_ws();
     let mut map_get = None;
     for (mi, module) in ws.modules.iter().enumerate() {

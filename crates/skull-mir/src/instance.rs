@@ -12,7 +12,7 @@
 //! Nothing here mints an arena-free instance of the same shape -- that would be
 //! the second identity this stage exists to remove.
 
-use bone_semantic::inference::Workspace;
+use bone_core::workspace::Workspace;
 
 use crate::mir::FuncRef;
 use crate::monoty::{MonoInterner, MonoSubst, MonoTy, MonoTyId};

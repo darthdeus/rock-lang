@@ -34,9 +34,9 @@
 //! the instance graph's cheap equality, and never becomes a second
 //! representation of a type.
 
-use bone_semantic::hir::{BuiltinTy, TypeCtor, TypeExpr, VarId};
-use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::TyId;
+use bone_core::hir::{BuiltinTy, TypeCtor, TypeExpr, VarId};
+use bone_core::prelude::TyId;
+use bone_core::workspace::{BodyInference, Workspace};
 use rustc_hash::FxHashMap;
 use std::rc::Rc;
 use ustr::Ustr;
@@ -436,7 +436,7 @@ impl std::fmt::Display for NewtypeResolutionError {
 /// instantiations as the cycle key. Generic arguments are converted in their
 /// current environment before they are bound into the next declaration.
 pub fn resolve_newtype_chain(ws: &Workspace, ty: MonoTy) -> Result<MonoTy, NewtypeResolutionError> {
-    use bone_semantic::hir::TypeExpr;
+    use bone_core::hir::TypeExpr;
 
     const MAX_STEPS: usize = 256;
 

@@ -9,7 +9,7 @@
 //! resolve), or reject loudly if none is reachable.
 use crate::common::ws_with;
 
-fn emit_program_js(ws: &bone_semantic::inference::Workspace) -> Result<String, String> {
+fn emit_program_js(ws: &bone_core::workspace::Workspace) -> Result<String, String> {
     let mid = *ws
         .module_ids
         .get(&ustr::Ustr::from("<test>"))
@@ -103,7 +103,7 @@ fn rock_shader_pair_with_inline_js_register_sibling_emits() {
     );
 }
 
-fn qualified_register_workspace(registrations: &[&str]) -> bone_semantic::inference::Workspace {
+fn qualified_register_workspace(registrations: &[&str]) -> bone_core::workspace::Workspace {
     let mut modules = skull::pipeline::with_stdlib([skull_parser::parse_module_clean(
         SHADER_SRC,
         ustr::Ustr::from("<test>"),

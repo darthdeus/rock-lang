@@ -2330,6 +2330,7 @@ dependencies = [
 name = "skull-codegen-glsl"
 version = "0.1.0"
 dependencies = [
+ "bone-core",
  "bone-semantic",
  "comfy-la-arena",
  "rock-stdlib",
@@ -2345,6 +2346,7 @@ dependencies = [
 name = "skull-codegen-js"
 version = "0.1.0"
 dependencies = [
+ "bone-core",
  "bone-semantic",
  "comfy-la-arena",
  "rock-stdlib",
@@ -2378,7 +2380,7 @@ dependencies = [
 name = "skull-codegen-shader"
 version = "0.1.0"
 dependencies = [
- "bone-semantic",
+ "bone-core",
  "comfy-la-arena",
  "rock-host",
  "rock-stdlib",

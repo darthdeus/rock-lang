@@ -15,7 +15,7 @@ use ustr::Ustr;
 
 fn fref(module: u32, func: u32) -> FuncRef {
     FuncRef {
-        module: bone_semantic::prelude::ModuleId::new(module),
+        module: bone_core::prelude::ModuleId::new(module),
         func: Idx::from_raw(func.into()),
     }
 }

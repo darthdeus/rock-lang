@@ -89,7 +89,7 @@ impl Builder<'_> {
             // call has no instance-graph site, which only JS checks strictly.
             // Adding that site would let JS take the walk too.
             if !self.scx.row_value_containers
-                && self.scx.target() == bone_semantic::hir::FnBackend::Lua
+                && self.scx.target() == bone_core::hir::FnBackend::Lua
                 && let Some(collection) = enumerated_collection.filter(|&c| self.iter_is_arena(c))
             {
                 return self.lower_for_arena(&vars, collection, body, true);
@@ -502,7 +502,7 @@ impl Builder<'_> {
                 .peel_nullable()
                 .0
                 .nominal()
-                .is_some_and(|name| bone_semantic::prelude::is_intrinsic_key(name, "Arena"));
+                .is_some_and(|name| bone_core::modules::is_intrinsic_key(name, "Arena"));
         }
         false
     }

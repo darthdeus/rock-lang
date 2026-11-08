@@ -55,7 +55,7 @@ pub struct ExecutionTargetSpec {
     /// The `FnBackend` whose declarations this artifact emits, when it has one.
     /// `None` is a target with no Rock-level backend of its own: it realizes
     /// the PORTABLE subset and no verbatim body at all.
-    pub backend: Option<bone_semantic::hir::FnBackend>,
+    pub backend: Option<bone_core::hir::FnBackend>,
     pub caps: Capabilities,
 }
 
@@ -159,7 +159,7 @@ pub const GLSL_330: ShaderTargetSpec =
 /// The luajit execution backend.
 pub const LUAJIT: ExecutionTargetSpec = ExecutionTargetSpec {
     kind: ExecutionBackend::LuaJit,
-    backend: Some(bone_semantic::hir::FnBackend::Lua),
+    backend: Some(bone_core::hir::FnBackend::Lua),
     pointer_width: 64,
     caps: Capabilities {
         foreign_symbols: true,
@@ -174,7 +174,7 @@ pub const LUAJIT: ExecutionTargetSpec = ExecutionTargetSpec {
 /// The browser execution backend.
 pub const JAVASCRIPT: ExecutionTargetSpec = ExecutionTargetSpec {
     kind: ExecutionBackend::JavaScript,
-    backend: Some(bone_semantic::hir::FnBackend::Js),
+    backend: Some(bone_core::hir::FnBackend::Js),
     pointer_width: 64,
     caps: Capabilities {
         foreign_symbols: false,

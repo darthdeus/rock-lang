@@ -33,9 +33,9 @@
 use bone_core::prelude::Instant;
 use std::collections::{BTreeMap, BTreeSet};
 
-use bone_semantic::hir::{Body, BodyOwner, Function, TypeExpr, VarId};
-use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::{BoundNext, IterWitness, ModuleId, Span, TyId};
+use bone_core::hir::{Body, BodyOwner, Function, TypeExpr, VarId};
+use bone_core::prelude::{BoundNext, IterWitness, ModuleId, Span, TyId};
+use bone_core::workspace::{BodyInference, Workspace};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap, FxHashSet};
 use skull_mir::lower::{ContainerFamily, ContainerPlan, RepArena};
@@ -225,12 +225,7 @@ enum BoundRoot {
 }
 
 impl BoundRoot {
-    fn site(
-        self,
-        domain: SiteDomain,
-        expr: Idx<bone_semantic::hir::Expr>,
-        path: Vec<usize>,
-    ) -> Site {
+    fn site(self, domain: SiteDomain, expr: Idx<bone_core::hir::Expr>, path: Vec<usize>) -> Site {
         Site {
             domain,
             expr,
@@ -4460,16 +4455,16 @@ fn walk_body_edges(
     w: &mut Walk,
     ws: &Workspace,
     inf: &BodyInference,
-    body: Option<&bone_semantic::hir::Body>,
+    body: Option<&bone_core::hir::Body>,
     from: Option<&Instance>,
     subst: &MonoSubst,
     // WHICH arena the sites recorded here index, and -- for a foreign one --
     // which of its expressions this owner actually reaches. `None` is the whole
     // body, which is what an own-domain walk always wants.
     domain: &SiteDomain,
-    only: Option<&FxHashSet<Idx<bone_semantic::hir::Expr>>>,
+    only: Option<&FxHashSet<Idx<bone_core::hir::Expr>>>,
 ) {
-    let reached = |e: Idx<bone_semantic::hir::Expr>| only.is_none_or(|s| s.contains(&e));
+    let reached = |e: Idx<bone_core::hir::Expr>| only.is_none_or(|s| s.contains(&e));
     if let Some(body) = body {
         w.out.body_exprs_scanned += body.expr_arena.len();
     }
@@ -4478,9 +4473,8 @@ fn walk_body_edges(
     w.out.bound_tree_rows += inf.bound_call_trees.len();
     w.out.bound_call_rows += inf.bound_calls.len();
     w.out.iterator_rows += inf.for_iter_protocol.len();
-    let mut resolved_calls: FxHashMap<Idx<bone_semantic::hir::Expr>, Instance> =
-        FxHashMap::default();
-    let mut calls: Vec<(Idx<bone_semantic::hir::Expr>, (ModuleId, Idx<Function>))> = inf
+    let mut resolved_calls: FxHashMap<Idx<bone_core::hir::Expr>, Instance> = FxHashMap::default();
+    let mut calls: Vec<(Idx<bone_core::hir::Expr>, (ModuleId, Idx<Function>))> = inf
         .resolved_overload_calls
         .iter()
         .map(|(e, r)| (*e, *r))
@@ -4580,7 +4574,7 @@ fn walk_body_edges(
             }
         }
 
-        let mut failures: Vec<(Idx<bone_semantic::hir::Expr>, MonoTyReason)> = Vec::new();
+        let mut failures: Vec<(Idx<bone_core::hir::Expr>, MonoTyReason)> = Vec::new();
         let conversion_start = w.timer();
         let sites = compiler_generated_sites(
             ws,
@@ -4698,7 +4692,7 @@ fn walk_body_edges(
         }
     }
 
-    let mut implicit: Vec<(Idx<bone_semantic::hir::Expr>, &IterWitness)> = inf
+    let mut implicit: Vec<(Idx<bone_core::hir::Expr>, &IterWitness)> = inf
         .implicit_iter_args
         .iter()
         .map(|(e, w)| (*e, w))
@@ -4725,10 +4719,7 @@ fn walk_body_edges(
         );
     }
 
-    let mut trees: Vec<(
-        Idx<bone_semantic::hir::Expr>,
-        &bone_semantic::prelude::BoundTree,
-    )> = inf
+    let mut trees: Vec<(Idx<bone_core::hir::Expr>, &bone_core::prelude::BoundTree)> = inf
         .bound_call_trees
         .iter()
         .map(|(e, tree)| (*e, tree))
@@ -4756,7 +4747,7 @@ fn walk_body_edges(
         }
     }
 
-    let mut bound_calls: Vec<(Idx<bone_semantic::hir::Expr>, usize)> =
+    let mut bound_calls: Vec<(Idx<bone_core::hir::Expr>, usize)> =
         inf.bound_calls.iter().map(|(e, idx)| (*e, *idx)).collect();
     bound_calls.sort_by_key(|(e, _)| *e);
     for (e, gidx) in bound_calls.into_iter().filter(|(e, _)| reached(*e)) {
@@ -4793,10 +4784,7 @@ fn walk_body_edges(
         w.record_site(from, site, SiteOutcome::Resolved(resolved.callee), span);
     }
 
-    let mut iters: Vec<(
-        Idx<bone_semantic::hir::Expr>,
-        &bone_semantic::prelude::ForIterInfo,
-    )> = inf
+    let mut iters: Vec<(Idx<bone_core::hir::Expr>, &bone_core::prelude::ForIterInfo)> = inf
         .for_iter_protocol
         .iter()
         .map(|(e, info)| (*e, info))
@@ -4848,7 +4836,7 @@ fn record_call(
     from: Option<&Instance>,
     subst: &MonoSubst,
     callee: FuncRef,
-    bindings: Option<&Vec<bone_semantic::prelude::TyId>>,
+    bindings: Option<&Vec<bone_core::prelude::TyId>>,
     kind: EdgeKind,
     span: Span,
     site: Site,
@@ -4867,7 +4855,7 @@ fn record_call_impl(
     from: Option<&Instance>,
     subst: &MonoSubst,
     callee: FuncRef,
-    bindings: Option<&Vec<bone_semantic::prelude::TyId>>,
+    bindings: Option<&Vec<bone_core::prelude::TyId>>,
     kind: EdgeKind,
     span: Span,
     site: Site,
@@ -5235,7 +5223,7 @@ fn walk_struct_default_edges(
     from: Option<&Instance>,
     subst: &MonoSubst,
 ) {
-    use bone_semantic::hir::Expr as E;
+    use bone_core::hir::Expr as E;
     // One entry per (struct, ARGUMENTS, omitted field) this instance reaches,
     // deduplicated: two literals of one struct omitting one field are one
     // obligation set, but `Box<int> {}` and `Box<string> {}` are two -- the
@@ -5250,7 +5238,7 @@ fn walk_struct_default_edges(
         Key,
         (
             ModuleId,
-            Idx<bone_semantic::hir::StructDef>,
+            Idx<bone_core::hir::StructDef>,
             Vec<skull_mir::monoty::MonoTy>,
             BTreeSet<ustr::Ustr>,
         ),
@@ -5273,7 +5261,7 @@ fn walk_struct_default_edges(
         &Body,
         &BodyInference,
         MonoSubst,
-        Option<FxHashSet<Idx<bone_semantic::hir::Expr>>>,
+        Option<FxHashSet<Idx<bone_core::hir::Expr>>>,
     )> = vec![(body, top_inf, subst.clone(), None)];
     // How many omitted fields each key was last scanned with. A second literal
     // of one struct can omit a field the first wrote, so a set that GREW must be
@@ -5346,7 +5334,7 @@ fn walk_struct_default_edges(
             let Some(dinf) = ws.inference(*module).and_then(|ir| ir.per_fn.get(&owner)) else {
                 continue;
             };
-            let mut sub: FxHashSet<Idx<bone_semantic::hir::Expr>> = FxHashSet::default();
+            let mut sub: FxHashSet<Idx<bone_core::hir::Expr>> = FxHashSet::default();
             for f in fields {
                 let Some(root) = defaults.field_defaults.get(f) else {
                     continue;
@@ -5366,7 +5354,7 @@ fn walk_struct_default_edges(
         let Some(inf) = ws.inference(module).and_then(|ir| ir.per_fn.get(&owner)) else {
             continue;
         };
-        let mut reached: FxHashSet<Idx<bone_semantic::hir::Expr>> = FxHashSet::default();
+        let mut reached: FxHashSet<Idx<bone_core::hir::Expr>> = FxHashSet::default();
         for f in &fields {
             let Some(root) = defaults.field_defaults.get(f) else {
                 continue;
@@ -5406,7 +5394,7 @@ fn record_bound_next(
     next: &BoundNext,
     span: Span,
     kind: EdgeKind,
-    expr: Idx<bone_semantic::hir::Expr>,
+    expr: Idx<bone_core::hir::Expr>,
     root: BoundRoot,
     domain: &SiteDomain,
     path: &[usize],
@@ -5557,9 +5545,9 @@ fn walk_bound_tree(
     inf: &BodyInference,
     from: Option<&Instance>,
     subst: &MonoSubst,
-    tree: &bone_semantic::prelude::BoundTree,
+    tree: &bone_core::prelude::BoundTree,
     span: Span,
-    expr: Idx<bone_semantic::hir::Expr>,
+    expr: Idx<bone_core::hir::Expr>,
     root: BoundRoot,
     domain: &SiteDomain,
     path: &[usize],
@@ -5604,7 +5592,7 @@ fn instantiate(
     callee_module: ModuleId,
     callee_func: Idx<Function>,
     callee: &Function,
-    bindings: Option<&Vec<bone_semantic::prelude::TyId>>,
+    bindings: Option<&Vec<bone_core::prelude::TyId>>,
     caller_subst: &MonoSubst,
 ) -> Result<(Vec<MonoTyId>, MonoSubst), Fail> {
     if callee.generics.is_empty() {
@@ -5749,7 +5737,7 @@ fn instantiate_witness(
     inf: &BodyInference,
     resolved: &Function,
     callee: &Function,
-    record: &FxHashMap<bone_semantic::hir::VarId, bone_semantic::prelude::TyId>,
+    record: &FxHashMap<bone_core::hir::VarId, bone_core::prelude::TyId>,
     caller_subst: &MonoSubst,
 ) -> Result<(Vec<MonoTyId>, MonoSubst), Fail> {
     if callee.generics.is_empty() {
@@ -5834,9 +5822,9 @@ fn convert_fail(r: MonoTyReason) -> Fail {
 fn fn_value_sites(
     ws: &Workspace,
     inf: &BodyInference,
-    body: &bone_semantic::hir::Body,
-) -> Vec<(Idx<bone_semantic::hir::Expr>, FuncRef)> {
-    use bone_semantic::hir::{Callee, Expr as E};
+    body: &bone_core::hir::Body,
+) -> Vec<(Idx<bone_core::hir::Expr>, FuncRef)> {
+    use bone_core::hir::{Callee, Expr as E};
     let mut called_values: BTreeSet<u32> = BTreeSet::new();
     for (_, expr) in body.expr_arena.iter() {
         if let E::Call {
@@ -5883,7 +5871,7 @@ fn fn_value_sites(
 
 /// One synthesized-call site, resolved against its instance.
 struct GeneratedSite {
-    expr: Idx<bone_semantic::hir::Expr>,
+    expr: Idx<bone_core::hir::Expr>,
     name: &'static str,
 }
 
@@ -5915,7 +5903,7 @@ fn descriptor_typed(
     ws: &Workspace,
     inf: &BodyInference,
     subst: &MonoSubst,
-    base: Idx<bone_semantic::hir::Expr>,
+    base: Idx<bone_core::hir::Expr>,
 ) -> bool {
     let Some(ty) = inf.expr_types.get(base) else {
         return true;
@@ -5934,14 +5922,14 @@ fn descriptor_typed(
             MonoTy::App {
                 ctor: MonoCtor::Nominal(name),
                 ..
-            } => return bone_semantic::prelude::is_descriptor_key(name),
+            } => return bone_core::modules::is_descriptor_key(name),
             _ => return false,
         };
     }
 }
 
 fn sort_entry(
-    ws: &bone_semantic::inference::Workspace,
+    ws: &bone_core::workspace::Workspace,
     cond: StorageCond,
     elem: &skull_mir::mir::ColumnElem,
 ) -> &'static str {
@@ -5984,17 +5972,17 @@ fn map_index_entries(store: Option<Option<bool>>) -> (Vec<&'static str>, bool) {
 fn compiler_generated_sites(
     ws: &Workspace,
     inf: &BodyInference,
-    body: &bone_semantic::hir::Body,
+    body: &bone_core::hir::Body,
     subst: &MonoSubst,
     examined: &mut usize,
-    failures: &mut Vec<(Idx<bone_semantic::hir::Expr>, MonoTyReason)>,
+    failures: &mut Vec<(Idx<bone_core::hir::Expr>, MonoTyReason)>,
     approximated: &mut usize,
 ) -> Vec<GeneratedSite> {
-    use bone_semantic::hir::{Callee, Expr as E};
+    use bone_core::hir::{Callee, Expr as E};
     let rep_arena = RepArena::default();
     // The receiver's CONCRETE type under this instance's substitution, which is
     // what the storage condition is asked about.
-    let verdict = |recv: Idx<bone_semantic::hir::Expr>, cond: StorageCond| -> CondVerdict {
+    let verdict = |recv: Idx<bone_core::hir::Expr>, cond: StorageCond| -> CondVerdict {
         if cond == StorageCond::Always {
             return CondVerdict::Holds(None);
         }
@@ -6015,7 +6003,7 @@ fn compiler_generated_sites(
                 }
                 ContainerPlan::for_type(
                     ws,
-                    bone_semantic::hir::FnBackend::Any,
+                    bone_core::hir::FnBackend::Any,
                     &rep_arena,
                     ContainerFamily::Vec,
                     &mono,
@@ -6027,7 +6015,7 @@ fn compiler_generated_sites(
                 }
                 ContainerPlan::for_type(
                     ws,
-                    bone_semantic::hir::FnBackend::Any,
+                    bone_core::hir::FnBackend::Any,
                     &rep_arena,
                     ContainerFamily::Vec,
                     &mono,
@@ -6039,7 +6027,7 @@ fn compiler_generated_sites(
                 }
                 ContainerPlan::for_type(
                     ws,
-                    bone_semantic::hir::FnBackend::Any,
+                    bone_core::hir::FnBackend::Any,
                     &rep_arena,
                     ContainerFamily::Map,
                     &mono,
@@ -6063,7 +6051,7 @@ fn compiler_generated_sites(
     // generic here means the substitution is incomplete, not that the element is
     // legitimately opaque. Reading any of them as "boxed" would let a zero edge
     // count mean "the sites were discarded".
-    let mut settle = |recv, cond, e: Idx<bone_semantic::hir::Expr>| -> Option<Option<_>> {
+    let mut settle = |recv, cond, e: Idx<bone_core::hir::Expr>| -> Option<Option<_>> {
         *examined += 1;
         match verdict(recv, cond) {
             CondVerdict::Holds(elem) => Some(elem),
@@ -6077,10 +6065,8 @@ fn compiler_generated_sites(
     // `m[k] = v` is the one index position that lowers through
     // `map_column_store`; the value expression is what decides whether the
     // absent arm (`__map_col_free`) exists at all.
-    let mut stored_through: FxHashMap<
-        Idx<bone_semantic::hir::Expr>,
-        Idx<bone_semantic::hir::Expr>,
-    > = FxHashMap::default();
+    let mut stored_through: FxHashMap<Idx<bone_core::hir::Expr>, Idx<bone_core::hir::Expr>> =
+        FxHashMap::default();
     for (_, expr) in body.expr_arena.iter() {
         if let E::Assign { target, value } = expr {
             stored_through.insert(*target, *value);
@@ -6088,7 +6074,7 @@ fn compiler_generated_sites(
     }
     // Whether the stored value can be null. `None` means its type did not
     // convert, which keeps both arms -- see [`map_index_entries`].
-    let stored_nullable = |value: Idx<bone_semantic::hir::Expr>| -> Option<bool> {
+    let stored_nullable = |value: Idx<bone_core::hir::Expr>| -> Option<bool> {
         let ty = inf.expr_types.get(value)?;
         let mono = skull_mir::monoty::convert(ws, inf, *ty, subst).ok()?;
         Some(mono.peel_nullable().1)
@@ -6198,11 +6184,11 @@ fn compiler_generated_sites(
 fn dispatched_sites(
     ws: &Workspace,
     inf: &BodyInference,
-    body: &bone_semantic::hir::Body,
+    body: &bone_core::hir::Body,
     subst: &MonoSubst,
     domain: &SiteDomain,
 ) -> Vec<(Site, &'static str)> {
-    use bone_semantic::hir::{BinOp, Expr as E, InterpPart};
+    use bone_core::hir::{BinOp, Expr as E, InterpPart};
     let rep_arena = RepArena::default();
     let dcx = skull_mir::lower::DispatchCtx {
         ws,
@@ -6215,7 +6201,7 @@ fn dispatched_sites(
         lower_timing_enabled: false,
         interner: None,
         rep_arena: &rep_arena,
-        target: bone_semantic::hir::FnBackend::Any,
+        target: bone_core::hir::FnBackend::Any,
         logical_subst: Some(subst),
         values_first_class: false,
     };
@@ -6321,8 +6307,8 @@ pub fn stdlib_entry_representative(ws: &Workspace, name: &str) -> Option<FuncRef
 /// THE compatibility test -- the walk, the boundary pass and every artifact
 /// view ask this one, so "does this declaration serve me" cannot be answered
 /// two ways.
-pub fn serves(decl: bone_semantic::hir::FnBackend, target: bone_semantic::hir::FnBackend) -> bool {
-    use bone_semantic::hir::FnBackend;
+pub fn serves(decl: bone_core::hir::FnBackend, target: bone_core::hir::FnBackend) -> bool {
+    use bone_core::hir::FnBackend;
     decl == FnBackend::Any || target == FnBackend::Any || decl == target
 }
 
@@ -6429,7 +6415,7 @@ pub fn opaque_boundary_roots_for_decls(
             let owner = DeclKey(member);
             let targets = roots.entry(owner).or_insert_with(FxHashSet::default);
             let f = &ws.module(member.module).functions[member.func];
-            let Some((bone_semantic::hir::FnBackend::Js, body)) = f.inline_body else {
+            let Some((bone_core::hir::FnBackend::Js, body)) = f.inline_body else {
                 continue;
             };
             let text = body.as_str();

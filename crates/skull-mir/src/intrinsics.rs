@@ -16,9 +16,9 @@
 //! emission is a compile-time [`ExpandKind`] on every backend, recognized at MIR
 //! lowering rather than any per-backend table.
 
-use bone_semantic::hir::Function;
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::ModuleId;
+use bone_core::hir::Function;
+use bone_core::prelude::ModuleId;
+use bone_core::workspace::Workspace;
 use skull_parser::CompilerError;
 use std::collections::HashSet;
 use ustr::Ustr;

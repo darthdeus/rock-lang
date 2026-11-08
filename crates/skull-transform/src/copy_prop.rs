@@ -1,7 +1,7 @@
 use rustc_hash::FxHashSet as HashSet;
 
 use crate::visit::{raw, top_level_blocks};
-use bone_semantic::inference::Workspace;
+use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::mir::*;
 
@@ -154,7 +154,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                         && ws.is_some_and(|ws| {
                             let module = ws.module(target.module);
                             let f = &module.functions[target.func];
-                            bone_semantic::prelude::is_stdlib_module_file(module.file.as_str())
+                            bone_core::modules::is_stdlib_module_file(module.file.as_str())
                                 && f.name.as_str() == "__nb_checked_index"
                                 && f.inline_body.is_some()
                                 && f.annotations.iter().any(|a| a.is_builtin("nomangle"))

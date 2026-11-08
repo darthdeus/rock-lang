@@ -8,8 +8,8 @@
 //! record the callee's own specialization, and correct the element the
 //! placeholder's fixed `(bool, E)` arity could not describe.
 
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::CompilerError;
+use bone_core::prelude::CompilerError;
+use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::bound::ResolvedBoundNext;
 use skull_mir::concrete::ConcretePlans;

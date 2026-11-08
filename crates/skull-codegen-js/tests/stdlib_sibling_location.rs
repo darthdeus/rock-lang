@@ -59,11 +59,10 @@ fn a_stdlib_sibling_pair_agrees_on_arity() {
             }
             let name = fun.name.name.to_string();
             match fun.body {
-                FunctionBody::Inline(bone_semantic::hir::FnBackend::Lua, _) => {
+                FunctionBody::Inline(bone_core::hir::FnBackend::Lua, _) => {
                     lua.insert(name, fun.params.len());
                 }
-                FunctionBody::ExternJs
-                | FunctionBody::Inline(bone_semantic::hir::FnBackend::Js, _) => {
+                FunctionBody::ExternJs | FunctionBody::Inline(bone_core::hir::FnBackend::Js, _) => {
                     js.insert(name, fun.params.len());
                 }
                 _ => {}
@@ -103,11 +102,11 @@ fn sibling_facts_with(
         };
         let is_js = matches!(
             f.body,
-            FunctionBody::ExternJs | FunctionBody::Inline(bone_semantic::hir::FnBackend::Js, _)
+            FunctionBody::ExternJs | FunctionBody::Inline(bone_core::hir::FnBackend::Js, _)
         );
         let is_lua = matches!(
             f.body,
-            FunctionBody::Inline(bone_semantic::hir::FnBackend::Lua, _)
+            FunctionBody::Inline(bone_core::hir::FnBackend::Lua, _)
         ) || (native_side && matches!(f.body, FunctionBody::Ffi(..)));
         if is_js != want_js || (!is_js && !is_lua) {
             continue;

@@ -6,7 +6,7 @@
 //! byte-compares stdout line by line -- luajit is the oracle, no hand-pinned
 //! expectations to rot. Needs `node` and `luajit`.
 
-use bone_semantic::inference::Workspace;
+use bone_core::workspace::Workspace;
 use skull_mir::mir::FuncRef;
 
 const FIXTURE: &str = include_str!("fixtures/number_format.rock");

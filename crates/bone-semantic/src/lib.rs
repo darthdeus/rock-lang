@@ -1,6 +1,6 @@
 pub mod defs;
 pub mod fn_identity;
-pub mod identity_storage;
+pub use bone_core::identity_storage;
 pub mod relocation;
 mod value_recursion;
 pub use bone_core::hir;

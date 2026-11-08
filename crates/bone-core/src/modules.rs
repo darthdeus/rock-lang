@@ -56,6 +56,29 @@ pub fn is_intrinsic_key(key: Ustr, spelling: &str) -> bool {
     key.as_str() == spelling
 }
 
+/// The component indices of a VALID swizzle read on `struct_name` -- the
+/// arity/alphabet rules of `vec_swizzle_ty` with the errors collapsed to None.
+/// Callers (assignment rejection, MIR expansion) key off "would this read as a
+/// swizzle"; invalid shapes surface through the read-path diagnostics instead.
+pub fn vec_swizzle_components(struct_name: &str, field: &str) -> Option<Vec<usize>> {
+    let arity = if is_intrinsic_key(Ustr::from(struct_name), "Vec2") {
+        2
+    } else if is_intrinsic_key(Ustr::from(struct_name), "Vec3") {
+        3
+    } else if is_intrinsic_key(Ustr::from(struct_name), "Vec4") {
+        4
+    } else {
+        return None;
+    };
+    if field.is_empty() || field.len() > 4 {
+        return None;
+    }
+    let xyzw: Option<Vec<usize>> = field.chars().map(|ch| "xyzw".find(ch)).collect();
+    let rgba: Option<Vec<usize>> = field.chars().map(|ch| "rgba".find(ch)).collect();
+    let idxs = xyzw.or(rgba)?;
+    idxs.iter().all(|&i| i < arity).then_some(idxs)
+}
+
 /// The intrinsic type former whose canonical key is `key`, if any.
 pub fn intrinsic_type(key: Ustr) -> Option<IntrinsicType> {
     STD_INTRINSIC_TYPES

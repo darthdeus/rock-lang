@@ -1,6 +1,6 @@
-use bone_semantic::hir::{AnnoValue, TyId, TypeCtor, TypeExpr};
-use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::CompilerError;
+use bone_core::hir::{AnnoValue, TyId, TypeCtor, TypeExpr};
+use bone_core::prelude::CompilerError;
+use bone_core::workspace::Workspace;
 use ustr::Ustr;
 
 use crate::code_identity::CodeIdentity;
@@ -8,7 +8,7 @@ use crate::instance::Instance;
 use crate::mir::FuncRef;
 use crate::monoty::{MonoSubst, MonoTy, convert_decl};
 
-pub fn is_artifact_definition(decorator: &bone_semantic::hir::DecoratorDef) -> bool {
+pub fn is_artifact_definition(decorator: &bone_core::hir::DecoratorDef) -> bool {
     decorator
         .annotations
         .iter()
@@ -17,7 +17,7 @@ pub fn is_artifact_definition(decorator: &bone_semantic::hir::DecoratorDef) -> b
 
 /// A typed catalog accessor: the compiler defines its body from the
 /// definition plan, so no backend mapping or Rock body supplies it.
-pub fn is_artifact_catalog_accessor(function: &bone_semantic::hir::Function) -> bool {
+pub fn is_artifact_catalog_accessor(function: &bone_core::hir::Function) -> bool {
     function.is_extern
         && function
             .annotations
@@ -25,7 +25,7 @@ pub fn is_artifact_catalog_accessor(function: &bone_semantic::hir::Function) -> 
             .any(|ann| ann.is_builtin("artifact_catalog"))
 }
 
-pub fn is_compiler_owned_decorator(decorator: &bone_semantic::hir::DecoratorDef) -> bool {
+pub fn is_compiler_owned_decorator(decorator: &bone_core::hir::DecoratorDef) -> bool {
     is_artifact_definition(decorator)
         || decorator
             .annotations
@@ -81,7 +81,7 @@ struct Role {
     key_param: Ustr,
 }
 
-fn string_arg(ann: &bone_semantic::hir::Annotation, name: &str) -> Option<Ustr> {
+fn string_arg(ann: &bone_core::hir::Annotation, name: &str) -> Option<Ustr> {
     ann.args.iter().find_map(|arg| {
         (arg.name.as_ref().is_some_and(|n| n.name.as_str() == name)).then_some(match arg.value {
             AnnoValue::String(value) => Some(value),
@@ -91,9 +91,9 @@ fn string_arg(ann: &bone_semantic::hir::Annotation, name: &str) -> Option<Ustr> 
 }
 
 fn annotation<'a>(
-    annotations: &'a [bone_semantic::hir::Annotation],
+    annotations: &'a [bone_core::hir::Annotation],
     name: &str,
-) -> Result<Option<&'a bone_semantic::hir::Annotation>, CompilerError> {
+) -> Result<Option<&'a bone_core::hir::Annotation>, CompilerError> {
     let mut found = annotations.iter().filter(|ann| ann.is_builtin(name));
     let first = found.next();
     if let Some(second) = found.next() {
@@ -132,7 +132,7 @@ fn artifact_definition_type(ws: &Workspace, return_ty: TyId) -> Option<TyId> {
     else {
         return None;
     };
-    if !bone_semantic::prelude::is_intrinsic_key(name, "ArtifactDefinition") {
+    if !bone_core::modules::is_intrinsic_key(name, "ArtifactDefinition") {
         return None;
     }
     let mut params = params.into_iter();
@@ -141,8 +141,8 @@ fn artifact_definition_type(ws: &Workspace, return_ty: TyId) -> Option<TyId> {
 }
 
 fn metadata(
-    decorator: &bone_semantic::hir::DecoratorDef,
-) -> Result<Option<&bone_semantic::hir::Annotation>, CompilerError> {
+    decorator: &bone_core::hir::DecoratorDef,
+) -> Result<Option<&bone_core::hir::Annotation>, CompilerError> {
     let mut found = decorator
         .annotations
         .iter()
@@ -162,8 +162,8 @@ fn metadata(
 
 fn role_for(
     ws: &Workspace,
-    decorator: &bone_semantic::hir::DecoratorDef,
-    ann: &bone_semantic::hir::Annotation,
+    decorator: &bone_core::hir::DecoratorDef,
+    ann: &bone_core::hir::Annotation,
 ) -> Result<Role, CompilerError> {
     let Some(catalog) = string_arg(ann, "catalog") else {
         return Err(CompilerError::new_with_label(
@@ -383,7 +383,7 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                         ),
                     ));
                 }
-                if function.backend != bone_semantic::hir::FnBackend::Any {
+                if function.backend != bone_core::hir::FnBackend::Any {
                     return Err(CompilerError::new_with_label(
                         function.span,
                         format!(

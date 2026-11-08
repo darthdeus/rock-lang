@@ -22,8 +22,8 @@ static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
 fn workspace(
     src: &str,
 ) -> (
-    bone_semantic::inference::Workspace,
-    bone_semantic::prelude::ModuleId,
+    bone_core::workspace::Workspace,
+    bone_core::prelude::ModuleId,
 ) {
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));

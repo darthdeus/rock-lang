@@ -30,12 +30,12 @@ pub(crate) enum DeferMode {
 }
 
 impl DeferMode {
-    pub(crate) fn for_body(is_coroutine: bool, target: bone_semantic::hir::FnBackend) -> Self {
+    pub(crate) fn for_body(is_coroutine: bool, target: bone_core::hir::FnBackend) -> Self {
         if is_coroutine {
             DeferMode::CoFlag
         } else if matches!(
             target,
-            bone_semantic::hir::FnBackend::Lua | bone_semantic::hir::FnBackend::Js
+            bone_core::hir::FnBackend::Lua | bone_core::hir::FnBackend::Js
         ) {
             DeferMode::Unwind
         } else {

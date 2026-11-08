@@ -55,7 +55,7 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use bone_semantic::inference::Workspace;
+use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use skull_mir::mir::*;
 

@@ -9,7 +9,7 @@ use crate::common::ws_with;
 use rustc_hash::FxHashSet;
 use std::sync::Arc;
 
-fn function(ws: &bone_semantic::inference::Workspace, name: &str) -> skull_mir::mir::FuncRef {
+fn function(ws: &bone_core::workspace::Workspace, name: &str) -> skull_mir::mir::FuncRef {
     let module = *ws
         .module_ids
         .get(&ustr::Ustr::from("<test>"))
@@ -23,7 +23,7 @@ fn function(ws: &bone_semantic::inference::Workspace, name: &str) -> skull_mir::
     skull_mir::mir::FuncRef { module, func }
 }
 
-fn emit_program_js(ws: &bone_semantic::inference::Workspace) -> Result<String, String> {
+fn emit_program_js(ws: &bone_core::workspace::Workspace) -> Result<String, String> {
     let mid = *ws
         .module_ids
         .get(&ustr::Ustr::from("<test>"))
@@ -112,7 +112,7 @@ fn main() {
             &roots,
         )
         .with_mappings(
-            skull_graph::artifact::ArtifactMappings::for_backend(bone_semantic::hir::FnBackend::Js)
+            skull_graph::artifact::ArtifactMappings::for_backend(bone_core::hir::FnBackend::Js)
                 .with_supply(&skull_codegen_js::JsBackendRealization),
         )
         .with_symbols(&skull_graph::artifact::REALIZED_SYMBOLS),

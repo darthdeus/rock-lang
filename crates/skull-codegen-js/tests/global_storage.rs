@@ -1,5 +1,5 @@
 use crate::common::ws_with;
-use bone_semantic::hir::BodyOwner;
+use bone_core::hir::BodyOwner;
 
 const FIXTURE: &str = r#"
 global COUNTER: int = 0

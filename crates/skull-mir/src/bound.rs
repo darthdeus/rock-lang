@@ -1,7 +1,7 @@
 //! A bound-conformance tree with every leaf carried in terms an emitted body
 //! can read on its own.
 //!
-//! [`bone_semantic::prelude::BoundTree`] is stated in the CALLER's vocabulary:
+//! [`bone_core::prelude::BoundTree`] is stated in the CALLER's vocabulary:
 //! `BoundNext::Concrete::next_generics` maps a callee `VarId` to a `TyId` in the
 //! caller's own type arena. That is exactly what a splice needs -- it runs where
 //! the caller's [`BodyInference`] is in scope -- and it is why a raw tree cannot
@@ -16,7 +16,7 @@
 //! makes it sound to key by emitted body and to CHECK for agreement when two
 //! sites demand the same one.
 
-use bone_semantic::inference::{BodyInference, Workspace};
+use bone_core::workspace::{BodyInference, Workspace};
 
 use crate::instance::Instance;
 use crate::monoty::MonoInterner;
@@ -126,8 +126,8 @@ impl DemandMap {
 
 pub fn concrete_body_ctx<'a>(
     ws: &'a Workspace,
-    mid: bone_semantic::prelude::ModuleId,
-    owner: bone_semantic::hir::BodyOwner,
+    mid: bone_core::prelude::ModuleId,
+    owner: bone_core::hir::BodyOwner,
     incoming: &'a ResolvedBoundTree,
     interner: &'a MonoInterner,
 ) -> BoundCtx<'a> {

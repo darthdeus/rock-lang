@@ -6,7 +6,7 @@
 //! GLSL (it emits straight from the order and has no forward declarations), so
 //! it gets tested here against a call graph shaped to expose it.
 
-use bone_semantic::prelude::CompilerError;
+use bone_core::prelude::CompilerError;
 use skull_mir::reach::{ReachPolicy, walk};
 
 /// A call graph over integer nodes, with the traversal recorded.

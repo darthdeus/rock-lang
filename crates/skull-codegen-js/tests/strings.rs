@@ -6,7 +6,7 @@
 //! runner; these pin the shape.
 use crate::common::ws_with;
 
-fn emit(ws: &bone_semantic::inference::Workspace, name: &str) -> String {
+fn emit(ws: &bone_core::workspace::Workspace, name: &str) -> String {
     let mf = crate::common::lower_test_fn(ws, name);
     skull_codegen_js::emit::emit_fn(ws, &mf, name)
         .unwrap_or_else(|e| panic!("emit `{name}`: {}", e.message))
