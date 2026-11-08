@@ -174,6 +174,10 @@ enum Dense { A(int), B(int, int) }
     return not ok
 """
 
+@nomangle inline(js) fn raises(f: fn()) -> bool = """
+    try { __rock_call(f); return false; } catch (e) { return true; }
+"""
+
 @test(output = "true true true true true")
 fn unused_out_of_range_reads_raise_on_every_tier() {
     let boxed = raises(() => {

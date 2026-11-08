@@ -1909,6 +1909,12 @@ impl Emitter<'_> {
                     let line = format!("{};", self.render_inst_expr(iid)?);
                     self.push(&line);
                 }
+                // The shared element check of a column or strided read
+                // likewise stays when every leaf read was dropped.
+                Inst::VecCheckedIndex { .. } if self.use_count[raw(iid) as usize] == 0 => {
+                    let line = format!("{};", self.render_inst_expr(iid)?);
+                    self.push(&line);
+                }
                 // A used, non-inlinable value inst: materialize it at its
                 // program position as `let v<raw> = <expr>` so cell reads capture
                 // their value here and effectful calls keep their order. Its use
