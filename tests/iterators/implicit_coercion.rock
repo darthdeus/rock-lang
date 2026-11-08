@@ -126,3 +126,37 @@ fn coerced_chain_in_string_interp() {
     let msg = "has_big={v.any(_ > 2)}"
     assert_eq(msg, "has_big=true")
 }
+
+// flat_map: the receiver coerces like any `Iterator`-bounded argument, for
+// non-nullable, nullable and nobox elements alike, against the explicit-iter
+// control. The callback's RESULT is not an argument and does not coerce:
+// `[1, 2].flat_map(n => [n, n])` is rejected for every element kind (see
+// tests/errors/flat_map_callback_result_not_coerced.rock.err).
+nobox value FmV2 { x: float, y: float }
+
+fn fm_pair(n: int) -> VecIter<int> { return [n, n].iter() }
+fn fm_pair_opt(n: int?) -> VecIter<int?> { return [n, n].iter() }
+fn fm_pair_v2(v: FmV2) -> VecIter<FmV2> { return [v, v].iter() }
+
+@test
+fn flat_map_explicit_iter_control() {
+    assert_eq([1, 2, 3].iter().flat_map(fm_pair).count(), 6)
+}
+
+@test
+fn flat_map_coerced_receiver() {
+    assert_eq([1, 2, 3].flat_map(fm_pair).count(), 6)
+}
+
+@test
+fn flat_map_coerced_receiver_nullable_elements() {
+    let a: [int?] = [1, null, 3]
+    assert_eq(a.flat_map(fm_pair_opt).count(), 6)
+    assert_eq(a.flat_map(fm_pair_opt).filter(x => x == null).count(), 2)
+}
+
+@test
+fn flat_map_coerced_receiver_nobox_elements() {
+    let a = [FmV2 { x: 1.0, y: 2.0 }, FmV2 { x: 3.0, y: 4.0 }]
+    assert_eq(a.flat_map(fm_pair_v2).map(v => v.y).sum_f(), 12.0)
+}

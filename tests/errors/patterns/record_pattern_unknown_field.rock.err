@@ -1,0 +1,32 @@
+//! Error: a record pattern naming a field its struct or record variant does
+//!        not declare is rejected by the front end, so no lowering ever reads
+//!        an absent field (which a table backend would read back as nil).
+//! Tags: patterns, records, fields
+
+//=== TEST CASE: struct_destructure_unknown_field_Generic ===
+struct P { x: int }
+
+fn f(p: P) -> int {
+    //! expect: struct `P` has no field `z`
+    match p {
+        P { z } => return z
+    }
+    return 0
+}
+
+fn main() { print(f(P { x: 1 })) }
+
+//=== TEST CASE: record_variant_other_variants_field_Generic ===
+enum E { A { a: int }, B { b: int } }
+
+fn g(e: E) -> int {
+    //! expect: record variant `A` has no field `b`
+    match e {
+        E::A { b } => return b,
+        E::B { b } => return b,
+    }
+    return 0
+}
+
+fn main() { print(g(E::A { a: 1 })) }
+

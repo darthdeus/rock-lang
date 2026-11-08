@@ -323,3 +323,59 @@ fn test_multi_defer_lambda_early_return() {
     let b = multi_defer_lambda(false)
     print("a={a} b={b} R={R5}")
 }
+
+// ============================================
+// Defer and locals. A defer body reads its locals when it RUNS, at scope
+// exit, not when it is registered; it sees the binding in scope at the
+// `defer`, not a later shadow; a loop body's defer runs once per iteration,
+// on `continue` and `break` too; and a `return` value is computed before
+// the defers run.
+// ============================================
+
+global DL: string = ""
+
+fn dl(s: string) { DL = DL + s }
+
+fn defer_reads_the_exit_value() {
+    let x = 1
+    defer { dl("{x}") }
+    x = 2
+}
+
+fn defer_ignores_a_later_shadow() {
+    let x = 1
+    defer { dl("{x}") }
+    let x = 5
+    dl("{x}")
+}
+
+fn defer_per_loop_iteration() {
+    for i in 0..4 {
+        defer { dl("d{i}") }
+        if i == 1 { continue }
+        if i == 2 { break }
+        dl("b{i}")
+    }
+}
+
+fn defer_after_return_value() -> int {
+    let x = 1
+    defer { x = 10 }
+    return x
+}
+
+fn defer_in_a_block_sees_its_local() {
+    let x = 1
+    {
+        let y = x + 1
+        defer { dl("y{y}") }
+        y = 7
+    }
+    dl("x{x}")
+}
+
+@test fn test_defer_reads_the_exit_value() { DL = ""; defer_reads_the_exit_value(); assert_eq(DL, "2") }
+@test fn test_defer_ignores_a_later_shadow() { DL = ""; defer_ignores_a_later_shadow(); assert_eq(DL, "51") }
+@test fn test_defer_per_loop_iteration() { DL = ""; defer_per_loop_iteration(); assert_eq(DL, "b0d0d1d2") }
+@test fn test_defer_after_return_value() { assert_eq(defer_after_return_value(), 1) }
+@test fn test_defer_in_a_block_sees_its_local() { DL = ""; defer_in_a_block_sees_its_local(); assert_eq(DL, "y7x1") }
