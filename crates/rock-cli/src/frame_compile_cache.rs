@@ -403,7 +403,7 @@ fn load_cached(
 
 /// Install `source` as the run's `main.lua` and wipe the overlay beside it, as
 /// a full compile does.
-fn materialize(source: &Path, destination: &Path) -> Result<()> {
+pub(super) fn materialize(source: &Path, destination: &Path) -> Result<()> {
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
@@ -411,12 +411,7 @@ fn materialize(source: &Path, destination: &Path) -> Result<()> {
         std::io::copy(&mut std::fs::File::open(source)?, file)?;
         Ok(())
     })
-    .with_context(|| {
-        format!(
-            "materialize cached frame artifact at {}",
-            destination.display()
-        )
-    })?;
+    .with_context(|| format!("materialize frame artifact at {}", destination.display()))?;
     crate::skull_backend::wipe_overlay(&destination.with_file_name("incremental.lua"))
 }
 
