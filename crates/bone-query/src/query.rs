@@ -1165,6 +1165,70 @@ pub fn references<'t>(
     Vec::new()
 }
 
+/// What kind of symbol [`references`] resolves at `offset`, in the same
+/// order it tries them. Rename uses it to decide which names opaque code
+/// (an `inline(lua)` body, a `@nomangle` caller) can reach by spelling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RenameSubject {
+    /// A local, parameter or pattern binding.
+    Binding,
+    /// A function; the name every overload shares.
+    Function(Ustr),
+    /// A global; emitted under its own name.
+    Global(Ustr),
+    /// A struct field; emitted as the table key of the same name.
+    Field,
+    /// A struct (`Some`) or enum name; emitted in runtime type tags.
+    Type(Option<Ustr>),
+    /// Anything else references resolves (generic parameters, enum variants,
+    /// newtypes, record-variant fields, decorators), or nothing.
+    Other,
+}
+
+pub fn rename_subject(
+    ws: &Workspace,
+    mid: ModuleId,
+    inf: &InferenceResult,
+    offset: usize,
+) -> RenameSubject {
+    if local_references(ws, mid, offset).is_some() {
+        return RenameSubject::Binding;
+    }
+    if generic_param_at(ws, mid, offset).is_some() || enum_variant_at(ws, mid, offset).is_some() {
+        return RenameSubject::Other;
+    }
+    if enum_at(ws, mid, offset).is_some() {
+        return RenameSubject::Type(None);
+    }
+    if newtype_decl_at(ws, mid, offset).is_some() {
+        return RenameSubject::Other;
+    }
+    if let Some(name) = struct_at(ws, mid, inf, offset) {
+        if enum_def_by_name(ws, name).is_some() {
+            return RenameSubject::Type(None);
+        }
+        if newtype_declared(ws, name) {
+            return RenameSubject::Other;
+        }
+        return RenameSubject::Type(Some(name));
+    }
+    if struct_field_at(ws, mid, inf, offset).is_some() {
+        return RenameSubject::Field;
+    }
+    if variant_field_at(ws, mid, offset).is_some() {
+        return RenameSubject::Other;
+    }
+    if let Some((fmid, fid)) = function_target(ws, mid, inf, offset) {
+        if let Some(m) = ws.modules.get(fmid.index()) {
+            return RenameSubject::Function(m.functions[fid].name);
+        }
+    }
+    if let Some(name) = global_at(ws, mid, offset) {
+        return RenameSubject::Global(name);
+    }
+    RenameSubject::Other
+}
+
 fn newtype_declared(ws: &Workspace, name: Ustr) -> bool {
     ws.modules
         .iter()

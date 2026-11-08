@@ -1929,6 +1929,17 @@ impl BoneWorkspace {
             return Ok(sites);
         };
         rename_guard::check_spellings(&sites, old, &text_of)?;
+        let ws = proj.session.workspace();
+        let subject = user_module_for_path(ws, path)
+            .and_then(|mid| Some((mid, ws.inference(mid)?)))
+            .map_or(crate::query::RenameSubject::Other, |(mid, inf)| {
+                // On a caller's named-arg label the subject is the parameter.
+                match crate::query::named_arg_param_at(ws, mid, inf, offset, &text_of) {
+                    Some(_) => crate::query::RenameSubject::Binding,
+                    None => crate::query::rename_subject(ws, mid, inf, offset),
+                }
+            });
+        rename_guard::check_opaque(ws, subject, &sites, old, &text_of)?;
         Ok(sites)
     }
 
