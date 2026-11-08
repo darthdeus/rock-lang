@@ -2068,7 +2068,13 @@ impl BoneWorkspace {
             } else {
                 src.to_string()
             };
-            reparse_with_project(proj, path, &balance_delimiters(fixed), "completion")
+            reparse_with_project(
+                &proj.session,
+                &proj.fallbacks,
+                path,
+                &balance_delimiters(fixed),
+                "completion",
+            )
         } else {
             None
         };
@@ -3346,7 +3352,13 @@ impl BoneWorkspace {
         // dropped the module, so hints still show during partial edits (#21).
         let live = proj.session.workspace();
         let fallback_ws: Option<Workspace> = if user_module_for_path(live, path).is_none() {
-            reparse_with_project(proj, path, &balance_delimiters(src.to_string()), "inlay")
+            reparse_with_project(
+                &proj.session,
+                &proj.fallbacks,
+                path,
+                &balance_delimiters(src.to_string()),
+                "inlay",
+            )
         } else {
             None
         };
@@ -4896,19 +4908,20 @@ fn line_prefix_is_blank(src: &str, offset: usize) -> bool {
 /// the current file with balanced source. A single-file semantic pass is the
 /// last recovery rung when project analysis fails.
 fn reparse_with_project(
-    proj: &BoneProject,
+    session: &Session,
+    fallbacks: &FallbackReports,
     path: &str,
     munged: &str,
     request: &'static str,
 ) -> Option<Workspace> {
-    let combined = proj.fallbacks.result(
-        proj.session.combined_unexpanded(),
+    let combined = fallbacks.result(
+        session.combined_unexpanded(),
         request,
         path,
         "combined-module parse",
         "use live workspace",
     )?;
-    reparse_with_project_inner(&combined, path, munged, &proj.fallbacks, request)
+    reparse_with_project_inner(&combined, path, munged, fallbacks, request)
 }
 
 /// Analyze one completion munge: apply it as a speculative Session variant
