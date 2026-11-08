@@ -626,6 +626,12 @@ pub fn UiRect.sprite_quad(
     return batch
 }
 
+fn ui_shader_require_pixel_vertices(pl: Pipeline) {
+    if shader_uses_compiler_fullscreen_vertex(pl.shader_name) {
+        error("UI shader `{pl.shader_name}` uses fullscreen clip-space vertices; supply an explicit UI vertex stage")
+    }
+}
+
 // Full-rect quad through a custom pipeline: TexCoord runs 0..1 across
 // the rect over the white-pixel texture, so texture() is white and a
 // procedural shader works from TexCoord alone. The flush switches programs
@@ -633,6 +639,7 @@ pub fn UiRect.sprite_quad(
 // Vertex layout and gets the UI pass camera (pixel ortho, identity view).
 // A Rock `@uniform` block goes through `shader_quad` + `batch_block`.
 pub fn UiRect.shader(r, pl: Pipeline, order: int = 1) -> UiRect {
+    ui_shader_require_pixel_vertices(pl)
     let s = ui_to_screen(r)
     let prev = ui_ctx_push(r)
     ui_draw_sprite_topleft(sampled_image(WHITE_PIXEL.unwrap()), v(s.x, s.y), irect(0, 0, 1, 1), v(s.w, s.h),
@@ -645,6 +652,7 @@ pub fn UiRect.shader(r, pl: Pipeline, order: int = 1) -> UiRect {
 // white-pixel texture, so the shader works from TexCoord alone. Returns the
 // occurrence-keyed batch so the caller can pack its `@uniform` block onto it.
 pub fn UiRect.shader_quad(r, pipeline: Pipeline, order: int = 1) -> RenderBatch {
+    ui_shader_require_pixel_vertices(pipeline)
     let s = ui_to_screen(r)
     // The rect's own context decides which pool the quad lands in; a composite
     // rect emitted into the output pool draws at the wrong scale on the wrong
