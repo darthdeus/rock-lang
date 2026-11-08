@@ -100,8 +100,7 @@ fn collect_preserves_presence() -> int {
     return b.len * 100 + (py(b[0]) + py(b[1])) as int
 }
 
-// A top-level fn rather than a lambda: a LAMBDA returning a `nobox` value is a
-// separate open gap (mechanism L1) that would mask this one.
+// A top-level fn here; the lambda spelling follows below.
 fn swap_opt(v: Vec2?) -> Vec2? {
     if v != null { return Vec2 { x: v.y, y: v.x } }
     return null
@@ -114,6 +113,14 @@ fn element_survives_a_map_to_itself() -> int {
     // x of the swapped first (3) in the tens, the middle still absent (0), the
     // swapped third's x (5) in the units -- a lost presence bit would make the
     // middle a struct of nils and fault, a swapped leaf would move a digit.
+    return (px(b[0]) * 10.0 + px(b[1]) + px(b[2])) as int
+}
+
+// The same map through a LAMBDA returning the nullable nobox value.
+@test(returns = 35)
+fn element_survives_a_lambda_map_to_itself() -> int {
+    let a: [Vec2?] = [Vec2 { x: 1.0, y: 3.0 }, null, Vec2 { x: 2.0, y: 5.0 }]
+    let b = a.map((v: Vec2?) => if v != null { Vec2 { x: v.y, y: v.x } } else { null }).collect()
     return (px(b[0]) * 10.0 + px(b[1]) + px(b[2])) as int
 }
 

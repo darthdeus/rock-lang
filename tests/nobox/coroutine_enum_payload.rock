@@ -1,0 +1,129 @@
+// Enum payloads holding a nobox value inside a `co fn`: yielded through the
+// flat-enum yield channel, returned through `result()`, matched across a yield,
+// and a plain nobox local held across a yield. Each has an unmarked twin.
+//
+// Yielding or returning a BARE nobox value from a `co fn` is not built yet and
+// is pinned in tests/errors/nobox_unbuilt_positions.rock.err.
+
+nobox value NV { x: int, y: int }
+value BV { x: int, y: int }
+enum E { A(NV), B(int) }
+enum BE { A(BV), B(int) }
+
+fn score(e: E?) -> int {
+    if e == null { return -1 }
+    match e.unwrap() {
+        E::A(p) => { return p.x * 10 + p.y }
+        E::B(n) => { return n }
+    }
+}
+
+fn bscore(e: BE?) -> int {
+    if e == null { return -1 }
+    match e.unwrap() {
+        BE::A(p) => { return p.x * 10 + p.y }
+        BE::B(n) => { return n }
+    }
+}
+
+co fn yield_e(k: int) -> Coroutine<E> {
+    yield E::A(NV { x: k, y: k + 1 })
+    yield E::B(k * 10)
+}
+
+co fn yield_be(k: int) -> Coroutine<BE> {
+    yield BE::A(BV { x: k, y: k + 1 })
+    yield BE::B(k * 10)
+}
+
+@test(output = "34 30 -1 / 34 30 -1")
+fn a_coroutine_yields_an_enum_with_a_nobox_payload() {
+    let c = yield_e(3)
+    let a = score(c.resume())
+    let b = score(c.resume())
+    let d = score(c.resume())
+    let bc = yield_be(3)
+    let ba = bscore(bc.resume())
+    let bb = bscore(bc.resume())
+    let bd = bscore(bc.resume())
+    print("{a} {b} {d} / {ba} {bb} {bd}")
+}
+
+co fn ret_e(k: int) -> Coroutine<int, E> {
+    yield k
+    return E::A(NV { x: k, y: 2 })
+}
+
+co fn ret_be(k: int) -> Coroutine<int, BE> {
+    yield k
+    return BE::A(BV { x: k, y: 2 })
+}
+
+@test(output = "5 52 / 5 52")
+fn a_coroutine_returns_an_enum_with_a_nobox_payload() {
+    let c = ret_e(5)
+    let a = c.resume() ?? -1
+    let _d = c.resume()
+    let bc = ret_be(5)
+    let ba = bc.resume() ?? -1
+    let _bd = bc.resume()
+    print("{a} {score(c.result())} / {ba} {bscore(bc.result())}")
+}
+
+co fn read_payloads(es: [E]) -> Coroutine<int> {
+    for e in es {
+        match e {
+            E::A(p) => { yield p.x * 10 + p.y }
+            E::B(n) => { yield n }
+        }
+    }
+}
+
+@test(output = "34 7")
+fn payload_reads_between_yields() {
+    let c = read_payloads([E::A(NV { x: 3, y: 4 }), E::B(7)])
+    let a = c.resume() ?? -1
+    let b = c.resume() ?? -1
+    print("{a} {b}")
+}
+
+co fn hold_enum_across_yield(e: E) -> Coroutine<int> {
+    yield 0
+    match e {
+        E::A(p) => { yield p.x * 10 + p.y }
+        E::B(n) => { yield n }
+    }
+}
+
+co fn hold_benum_across_yield(e: BE) -> Coroutine<int> {
+    yield 0
+    match e {
+        BE::A(p) => { yield p.x * 10 + p.y }
+        BE::B(n) => { yield n }
+    }
+}
+
+@test(output = "0 56 / 0 56")
+fn an_enum_param_is_matched_after_a_yield() {
+    let c = hold_enum_across_yield(E::A(NV { x: 5, y: 6 }))
+    let a = c.resume() ?? -1
+    let b = c.resume() ?? -1
+    let bc = hold_benum_across_yield(BE::A(BV { x: 5, y: 6 }))
+    let ba = bc.resume() ?? -1
+    let bb = bc.resume() ?? -1
+    print("{a} {b} / {ba} {bb}")
+}
+
+co fn hold_nv_across_yield(p: NV) -> Coroutine<int> {
+    let q = NV { x: p.x + 1, y: p.y + 1 }
+    yield 0
+    yield q.x * 10 + q.y
+}
+
+@test(output = "0 67")
+fn a_nobox_local_is_read_after_a_yield() {
+    let c = hold_nv_across_yield(NV { x: 5, y: 6 })
+    let a = c.resume() ?? -1
+    let b = c.resume() ?? -1
+    print("{a} {b}")
+}

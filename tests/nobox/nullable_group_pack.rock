@@ -1,0 +1,217 @@
+// A nullable nobox value is its leaves plus a presence leaf. Each shape below
+// packs one into a nullable position and must keep ABSENCE distinct from a
+// present row: nested constructors, coalescing, index places, tuple returns,
+// fn-value arguments and fn fields. Every nobox case has an unmarked twin that
+// must answer the same.
+
+nobox value NV { x: int, y: int }
+nobox value Outer { a: NV, k: int }
+value BV { x: int, y: int }
+value BOuter { a: BV, k: int }
+
+fn opt_nv(k: int) -> NV? {
+    if k < 0 { return null }
+    return NV { x: k, y: k + 1 }
+}
+
+fn opt_bv(k: int) -> BV? {
+    if k < 0 { return null }
+    return BV { x: k, y: k + 1 }
+}
+
+// --- nested constructors ---
+
+fn opt_outer(k: int) -> Outer? {
+    if k < 0 { return null }
+    return Outer { a: NV { x: k, y: k * 2 }, k: 9 }
+}
+
+fn opt_bouter(k: int) -> BOuter? {
+    if k < 0 { return null }
+    return BOuter { a: BV { x: k, y: k * 2 }, k: 9 }
+}
+
+@test(output = "3 6 9 -1 -1 / 3 6 9 -1 -1")
+fn a_nested_ctor_packs_into_a_nullable_return() {
+    let p = opt_outer(3)
+    let q = opt_outer(-1)
+    let bp = opt_bouter(3)
+    let bq = opt_bouter(-1)
+    print("{p?.a?.x ?? -1} {p?.a?.y ?? -1} {p?.k ?? -1} {q?.a?.x ?? -1} {q?.k ?? -1} / {bp?.a?.x ?? -1} {bp?.a?.y ?? -1} {bp?.k ?? -1} {bq?.a?.x ?? -1} {bq?.k ?? -1}")
+}
+
+// One constructor used both as an inner operand and on its own.
+@test(output = "4 5 4 5 7")
+fn a_ctor_used_inside_and_alone() {
+    let inner = NV { x: 4, y: 5 }
+    let o: Outer? = Outer { a: inner, k: 7 }
+    let alone: NV? = inner
+    print("{o?.a?.x ?? -1} {o?.a?.y ?? -1} {alone?.x ?? -1} {alone?.y ?? -1} {o?.k ?? -1}")
+}
+
+@test(output = "4 5 4 5 7")
+fn an_unmarked_ctor_used_inside_and_alone() {
+    let inner = BV { x: 4, y: 5 }
+    let o: BOuter? = BOuter { a: inner, k: 7 }
+    let alone: BV? = inner
+    print("{o?.a?.x ?? -1} {o?.a?.y ?? -1} {alone?.x ?? -1} {alone?.y ?? -1} {o?.k ?? -1}")
+}
+
+// --- coalescing a nullable into a nullable ---
+
+@test(output = "-1 2 3")
+fn coalescing_two_absent_operands_stays_absent() {
+    let a: NV? = opt_nv(-1) ?? opt_nv(-1)
+    let b: NV? = opt_nv(-1) ?? opt_nv(2)
+    let c: NV? = opt_nv(3) ?? opt_nv(-1)
+    print("{a?.x ?? -1} {b?.x ?? -1} {c?.x ?? -1}")
+}
+
+@test(output = "-1 2 3")
+fn unmarked_coalescing_two_absent_operands_stays_absent() {
+    let a: BV? = opt_bv(-1) ?? opt_bv(-1)
+    let b: BV? = opt_bv(-1) ?? opt_bv(2)
+    let c: BV? = opt_bv(3) ?? opt_bv(-1)
+    print("{a?.x ?? -1} {b?.x ?? -1} {c?.x ?? -1}")
+}
+
+// --- an index place against a local binding of the same element ---
+//
+// `xs[0] != null` does not refine the index place for either kind of value, so
+// the place reads through `?.`; the local binding refines normally.
+
+@test(output = "1 2 -1 / 1 2 -1")
+fn an_index_place_agrees_with_its_local_binding() {
+    let xs: [NV?] = [NV { x: 1, y: 2 }, null]
+    let r0 = xs[0]?.x ?? -1
+    let r1 = xs[0]?.y ?? -1
+    let r2 = xs[1]?.x ?? -1
+    let e0 = xs[0]
+    let e1 = xs[1]
+    let l0 = if e0 != null { e0.x } else { -1 }
+    let l1 = if e0 != null { e0.y } else { -1 }
+    let l2 = if e1 != null { e1.x } else { -1 }
+    print("{r0} {r1} {r2} / {l0} {l1} {l2}")
+}
+
+@test(output = "1 2 -1 / 1 2 -1")
+fn an_unmarked_index_place_agrees_with_its_local_binding() {
+    let xs: [BV?] = [BV { x: 1, y: 2 }, null]
+    let r0 = xs[0]?.x ?? -1
+    let r1 = xs[0]?.y ?? -1
+    let r2 = xs[1]?.x ?? -1
+    let e0 = xs[0]
+    let e1 = xs[1]
+    let l0 = if e0 != null { e0.x } else { -1 }
+    let l1 = if e0 != null { e0.y } else { -1 }
+    let l2 = if e1 != null { e1.x } else { -1 }
+    print("{r0} {r1} {r2} / {l0} {l1} {l2}")
+}
+
+// --- tuple-return projection ---
+
+fn pair_opt(k: int) -> (NV?, int) { return (opt_nv(k), k * 10) }
+
+fn pair_bopt(k: int) -> (BV?, int) { return (opt_bv(k), k * 10) }
+
+@test(output = "2 3 20 -1 -10 / 2 3 20 -1 -10")
+fn a_tuple_return_projects_a_nullable_slot() {
+    let p = pair_opt(2)
+    let q = pair_opt(-1)
+    let bp = pair_bopt(2)
+    let bq = pair_bopt(-1)
+    print("{p.0?.x ?? -1} {p.0?.y ?? -1} {p.1} {q.0?.x ?? -1} {q.1} / {bp.0?.x ?? -1} {bp.0?.y ?? -1} {bp.1} {bq.0?.x ?? -1} {bq.1}")
+}
+
+@test(output = "2 -1")
+fn a_tuple_return_projects_without_a_binding() {
+    print("{pair_opt(2).0?.x ?? -1} {pair_opt(-1).0?.x ?? -1}")
+}
+
+// --- a generic fn returning `T?` at a nobox `T` ---
+
+fn first<T>(xs: [T]) -> T? {
+    if xs.len == 0 { return null }
+    return xs[0]
+}
+
+@test(output = "3 -1 3 -1")
+fn a_generic_nullable_return_at_a_nobox_type() {
+    let xs: [NV] = [NV { x: 3, y: 4 }]
+    let ys: [NV] = []
+    let bs: [BV] = [BV { x: 3, y: 4 }]
+    let bz: [BV] = []
+    print("{first(xs)?.x ?? -1} {first(ys)?.x ?? -1} {first(bs)?.x ?? -1} {first(bz)?.x ?? -1}")
+}
+
+// --- lambdas and named fns returning a nullable nobox, as arguments ---
+
+fn apply_opt(f: (int) -> NV?, k: int) -> int {
+    let r = f(k)
+    if r == null { return -1 }
+    return r.x * 10 + r.y
+}
+
+fn apply_bopt(f: (int) -> BV?, k: int) -> int {
+    let r = f(k)
+    if r == null { return -1 }
+    return r.x * 10 + r.y
+}
+
+@test(output = "34 -1 34 -1")
+fn a_lambda_argument_returns_a_nullable_nobox() {
+    let a = apply_opt((k: int) => if k > 0 { NV { x: k, y: k + 1 } } else { null }, 3)
+    let b = apply_opt((k: int) => if k > 0 { NV { x: k, y: k + 1 } } else { null }, -3)
+    let c = apply_bopt((k: int) => if k > 0 { BV { x: k, y: k + 1 } } else { null }, 3)
+    let d = apply_bopt((k: int) => if k > 0 { BV { x: k, y: k + 1 } } else { null }, -3)
+    print("{a} {b} {c} {d}")
+}
+
+@test(output = "34 -1")
+fn a_named_fn_argument_returns_a_nullable_nobox() {
+    print("{apply_opt(opt_nv, 3)} {apply_opt(opt_nv, -3)}")
+}
+
+// A stored `() -> NV` cannot adopt a `() -> NV?` ABI directly (pinned in
+// tests/errors/nobox_fn_return_nullable_coercion.rock.err); a lambda adapter is
+// the accepted spelling. The unmarked fn value coerces directly.
+fn accepts_nullable_nv(callback: () -> NV?) -> int { return callback()?.x ?? -1 }
+
+fn accepts_nullable_bv(callback: () -> BV?) -> int { return callback()?.x ?? -1 }
+
+@test(output = "7 -1 7")
+fn a_lambda_adapts_a_nobox_return_to_a_nullable_one() {
+    let cb: () -> NV = () => NV { x: 7, y: 9 }
+    let bcb: () -> BV = () => BV { x: 7, y: 9 }
+    print("{accepts_nullable_nv(() => cb())} {accepts_nullable_nv(() => null)} {accepts_nullable_bv(bcb)}")
+}
+
+// --- fn-valued struct fields ---
+
+struct Maker { f: (int) -> NV?, g: (int) -> NV }
+struct BMaker { f: (int) -> BV?, g: (int) -> BV }
+
+fn mk_nv(k: int) -> NV { return NV { x: k, y: k * 3 } }
+
+fn mk_bv(k: int) -> BV { return BV { x: k, y: k * 3 } }
+
+@test(output = "5 6 -1 2 6 / 5 6 -1 2 6")
+fn fn_fields_return_nobox_values() {
+    let m = Maker { f: opt_nv, g: mk_nv }
+    let a = m.f(5)
+    let b = m.f(-5)
+    let c = m.g(2)
+    let bm = BMaker { f: opt_bv, g: mk_bv }
+    let ba = bm.f(5)
+    let bb = bm.f(-5)
+    let bc = bm.g(2)
+    print("{a?.x ?? -1} {a?.y ?? -1} {b?.x ?? -1} {c.x} {c.y} / {ba?.x ?? -1} {ba?.y ?? -1} {bb?.x ?? -1} {bc.x} {bc.y}")
+}
+
+struct LMaker { f: (int) -> NV? }
+
+@test(output = "7 -1")
+fn a_lambda_stored_in_a_fn_field() {
+    let m = LMaker { f: (k: int) => if k > 0 { NV { x: k, y: 0 } } else { null } }
+    print("{m.f(7)?.x ?? -1} {m.f(-7)?.x ?? -1}")
+}

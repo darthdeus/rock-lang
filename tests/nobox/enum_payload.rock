@@ -148,3 +148,45 @@ fn retain_payload(event: Event) -> [Payload] { return [event.payload] }
         Payload::Text(text) => text.len(),
     }, 8)
 }
+
+// A NULLABLE enum whose variant carries a nobox payload: absence, the widened
+// variant and the scalar sibling all come back through one `E?` return. The
+// unmarked twin answers the same.
+fn maybe_u(k: int) -> U? {
+    if k < 0 { return null }
+    if k == 0 { return U::F(5.0) }
+    return U::V2(P { x: k as float, y: (k * 2) as float })
+}
+
+fn read_maybe_u(u: U?) -> int {
+    if u == null { return -1 }
+    match u.unwrap() {
+        U::V2(p) => { return (p.x * 10.0 + p.y) as int }
+        U::F(f) => { return f as int }
+    }
+}
+
+fn maybe_bu(k: int) -> BU? {
+    if k < 0 { return null }
+    if k == 0 { return BU::F(5.0) }
+    return BU::V2(BP { x: k as float, y: (k * 2) as float })
+}
+
+fn read_maybe_bu(u: BU?) -> int {
+    if u == null { return -1 }
+    match u.unwrap() {
+        BU::V2(p) => { return (p.x * 10.0 + p.y) as int }
+        BU::F(f) => { return f as int }
+    }
+}
+
+@test(output = "36 5 -1 / 36 5 -1")
+fn a_nullable_enum_with_a_nobox_payload_keeps_absence() {
+    let a = read_maybe_u(maybe_u(3))
+    let b = read_maybe_u(maybe_u(0))
+    let c = read_maybe_u(maybe_u(-1))
+    let d = read_maybe_bu(maybe_bu(3))
+    let e = read_maybe_bu(maybe_bu(0))
+    let f = read_maybe_bu(maybe_bu(-1))
+    print("{a} {b} {c} / {d} {e} {f}")
+}
