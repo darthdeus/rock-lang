@@ -2615,6 +2615,11 @@ mod tests {
                 }
             }
         });
+        let mut timing = test_upload_timing();
+        // Keep the first request in flight until the child publishes withdrawal.
+        // Otherwise timed-out retries can sit in the server's accept backlog and
+        // be mistaken for requests sent after withdrawal.
+        timing.request_timeout = Duration::from_secs(30);
         let worker = UploadWorker::start_with_timing(
             &root,
             TelemetryTransport {
@@ -2623,7 +2628,7 @@ mod tests {
                 game: "mag".into(),
                 channel: "steam".into(),
             },
-            test_upload_timing(),
+            timing,
         )
         .unwrap();
         let events_path = spool.events_path.clone();
@@ -3331,9 +3336,10 @@ mod tests {
         let address = listener.local_addr().unwrap();
         listener.set_nonblocking(true).unwrap();
         let (uploaded_tx, uploaded_rx) = mpsc::channel();
+        let stop_server = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop_server);
         let server = std::thread::spawn(move || {
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
+            while !server_stop.load(Ordering::SeqCst) {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
                         let body = read_http_request(&mut stream);
@@ -3349,7 +3355,6 @@ mod tests {
                         return;
                     }
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline, "full body never flushed");
                         std::thread::sleep(Duration::from_millis(2));
                     }
                     Err(error) => panic!("test server failed: {error}"),
@@ -3357,7 +3362,7 @@ mod tests {
             }
         });
         let mut timing = test_upload_timing();
-        timing.flush_window = Duration::from_secs(30);
+        timing.flush_window = Duration::from_secs(3600);
         let mut client = TelemetryClient::open_with_timing(
             &root,
             identity(),
@@ -3373,10 +3378,14 @@ mod tests {
             client.record_stat(&name, seq).unwrap();
         }
 
-        let uploaded = uploaded_rx.recv_timeout(Duration::from_secs(1));
+        // Start the receive backstop after the append worker has persisted the
+        // rows. The hour-long flush window cannot account for this upload.
+        client.flush().unwrap();
+        let uploaded = uploaded_rx.recv_timeout(Duration::from_secs(10));
         client.finish(StopMode::Discard);
+        stop_server.store(true, Ordering::SeqCst);
         server.join().unwrap();
-        let body = uploaded.unwrap();
+        let body = uploaded.expect("durable full body never flushed");
 
         assert!(body.len() <= MAX_BODY_BYTES);
         assert!(body.len() > MAX_BODY_BYTES / 2);
