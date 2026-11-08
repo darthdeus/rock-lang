@@ -7,6 +7,7 @@ mod metric_add_window;
 mod no_stdlib;
 mod package_test_program_shape;
 mod plain_process;
+mod stone_program_identity;
 
 // `rock --backend js` integration tests: the node run/test executor over pure
 // Rock programs, plus the luajit controls the parity arms compare against.

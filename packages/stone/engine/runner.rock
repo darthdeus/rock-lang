@@ -1851,12 +1851,21 @@ pub @nomangle inline(lua) fn jit_trace_abort_bucket_key(
 // Capture the generated root while its initializer is on the stack. Walking
 // its prototypes is deferred until profiling, before the measured window.
 @nomangle inline(lua) fn __stone_jit_program_identity_init(source: string) -> bool = """
+    local own = debug.getinfo(1, "S")
+    local stripped = own.linedefined == 0
     local root
     local level = 1
     while true do
         local info = debug.getinfo(level, "fS")
         if not info then break end
-        if info.what == "main" then root = info.func; break end
+        -- Stripping removes the main-frame tag and gives every prototype the
+        -- loaded chunk's source. Do not capture an outer host wrapper's main.
+        if stripped then
+            if info.what == "Lua" and info.source == own.source then root = info.func end
+        elseif info.what == "main" then
+            root = info.func
+            break
+        end
         level = level + 1
     end
     assert(root, "loaded program root unavailable for JIT attribution")
