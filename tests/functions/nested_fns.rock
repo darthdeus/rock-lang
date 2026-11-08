@@ -125,3 +125,19 @@ fn named_args() -> int {
 fn test_nested_fn_named_args_land_in_their_slot() {
     print("{named_args()}")
 }
+
+// --- A specialized generic fn converts its nested fn's lambdas ---
+
+fn apply_ten(f: fn(int) -> int, x: int) -> int { return f(x) }
+
+fn generic_with_nested<T>(tag: T, n: int) -> int {
+    fn scaled(x: int) -> int {
+        return apply_ten((v) => v * 10, x)
+    }
+    return scaled(n)
+}
+
+@test(output = "30 40")
+fn test_generic_nested_fn_lambda() {
+    print("{generic_with_nested(1.5, 3)} {generic_with_nested(\"a\", 4)}")
+}

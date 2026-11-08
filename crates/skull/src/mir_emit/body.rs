@@ -353,98 +353,41 @@ pub(super) fn emit_body_chunk_with_mutation(
         chunk.attribution = attribution;
         return Ok(chunk);
     }
-    // Inline eligible direct calls before cleanup so a hot loop traces with no
-    // per-call frame.
-    let before_inline = (mf.insts.len(), mf.blocks.len(), mf.cells.len());
-    let ti = Instant::now();
-    let (spliced, splices, scan_stats) = skull_transform::inline_functions_with_plans(
-        ws,
-        scx,
-        self_ref,
-        &mut mf,
-        inline_cache,
-        &concrete.plans,
-    )?;
-    let mut scan_stats = scan_stats;
-    if let Some(instance) = ordinary_instance {
-        scan_stats.ordinary_keys.push(instance);
-    }
-    times.inline = ti.elapsed();
-    attribution.inline.add_records(&splices);
-    attribution.inline.ordinary_splices += splices.len();
-    attribution.inline.add_scan(scan_stats);
-    times.inline_work = !splices.is_empty();
-    attribution.inline.add_allocations(
-        before_inline,
-        (mf.insts.len(), mf.blocks.len(), mf.cells.len()),
-    );
-    let mut deps: FxHashSet<FuncRef> = spliced.into_iter().collect();
-    let cleanup_before = mir_live_instructions(&mf);
-    let tc = Instant::now();
-    // drop dead values + dead-cell stores
-    skull_transform::cleanup_with_nobox_census(
-        ws,
-        &mut mf,
-        before_inline.0,
-        inline_cache
-            .census_enabled()
-            .then_some(&mut attribution.inline.census.load_store),
-    )?;
-    times.cleanup = tc.elapsed();
-    let cleanup_after = mir_live_instructions(&mf);
-    attribution.inline.cleanup_live_before += cleanup_before;
-    attribution.inline.cleanup_live_after += cleanup_after;
-    times.cleanup_work = cleanup_after != cleanup_before;
-    // Shared closure conversion:
-    // every `Inst::Lambda` in this ORDINARY fn becomes a `MakeEnv` record / bare
-    // `Global` + a hoisted sibling in `nested_fns`. Runs AFTER inline+cleanup,
-    // BEFORE FORL recovery (matching the JS pipeline) so a loop lifted into a
-    // lambda body is FORL-recovered in the split fn. Coroutines skip this (their
-    // `Inst::Lambda`s convert at codegen via `FrameCtx`/`HoistPlan` -- S3).
-    let name = mangle_fn(ws, f);
-    let pre_nested = mf.nested_fns.len();
-    let tclosure = Instant::now();
-    skull_transform::convert_closures(&mut mf, &name);
-    times.closure = tclosure.elapsed();
-    times.closure_work = mf.nested_fns.len() > pre_nested;
-    // Route each pass-hoisted `<name>__lambda<k>` through the synthetic-name
-    // collision guard now that they enter the Lua global namespace (a user fn
-    // named `foo__lambda0` must reject, not silently clobber). The pass appends
-    // its lambda bodies after any named nested `fn`s, so guard only the new tail.
-    for nf in &mf.nested_fns[pre_nested..] {
-        cg.mint_synthetic(nf.name.to_string());
-    }
-    convert_named_nested_closures(cg, &mut mf.nested_fns[..pre_nested]);
-    let counted_before = mf.blocks.len();
-    let tcounted = Instant::now();
-    skull_transform::recover_counted_loops(ws, &mut mf); // desugared iter loops -> FORL shape
-    times.counted_loop = tcounted.elapsed();
-    times.counted_loop_work = mf.blocks.len() > counted_before;
-    // Hoisted bodies inline in their own right, and only HERE. The inliner scans a
-    // caller's top-level blocks and never a closure sub-CFG, because a cell used in
-    // a lambda body is an upvalue and splicing there piles onto LuaJIT's 60-upvalue
-    // cap. Once `convert_closures` has split those bodies out they are ordinary
-    // standalone functions with their own top-level CFG, so that reason is gone --
-    // running the pass before the split would hit it, running it after does not.
-    //
-    // Correctness, not just an optimization: a call the lowerer gave the
+    // The shared chain: inline (so a hot loop traces with no per-call frame),
+    // cleanup, closure conversion, FORL recovery, then inlining into the
+    // hoisted bodies. Hoisted bodies inline only after conversion has split
+    // them out: the inliner never scans a closure sub-CFG, where a cell is an
+    // upvalue and splicing piles onto LuaJIT's 60-upvalue cap. That second
+    // inline is correctness, not just speed: a call the lowerer gave the
     // specialized scalar ABI has no serviceable shared body, and for a
-    // column-stored element the shared `next` reads a `_data` that does not exist.
-    let mut hoisted_work = InlineWork::default();
-    inline_hoisted_bodies(
-        ws,
+    // column-stored element the shared `next` reads a `_data` that does not
+    // exist. Each minted `<name>__lambda<k>` goes through the synthetic-name
+    // collision guard, so a user fn named `foo__lambda0` rejects.
+    let name = mangle_fn(ws, f);
+    let mut stats = ChainStats::new(&mut times, &mut attribution.inline);
+    stats.ordinary = true;
+    stats.ordinary_key = ordinary_instance;
+    let inliner = skull_transform::body_chain::Inliner {
         scx,
         self_ref,
-        &mut mf.nested_fns,
-        inline_cache,
-        &concrete.plans,
-        &mut deps,
-        &mut times,
-        &mut hoisted_work,
-    )
-    .map_err(|msg| CompilerError::new_with_label(f.name_span, msg))?;
-    times.hoisted_inline_work = hoisted_work.accepted_splices > 0;
-    attribution.inline.add(hoisted_work);
+        cache: inline_cache,
+        plans: &concrete.plans,
+    };
+    let opts = skull_transform::body_chain::ChainOptions {
+        reserve: &|name| {
+            cg.mint_synthetic(name.to_string());
+        },
+        counted_loops: skull_transform::body_chain::CountedLoops::Root,
+        inline_hoisted: true,
+    };
+    let mut deps =
+        skull_transform::body_chain::prepare_body(ws, inliner, &mut mf, &name, &opts, &mut stats)
+            .map_err(|e| match e.pass {
+            skull_transform::body_chain::BodyPass::HoistedInline => {
+                CompilerError::new_with_label(f.name_span, e.error.message)
+            }
+            _ => e.error,
+        })?;
     let tv = Instant::now();
     skull_transform::validate_no_residual_bound_calls(ws, f, &mf)?;
     let mut specs = Vec::new();
@@ -615,18 +558,27 @@ pub(crate) fn emit_nested_fns(
     Ok(())
 }
 
-fn convert_named_nested_closures(cg: &CodegenCtx, nested: &mut [MirFunc]) {
-    skull_transform::convert_named_nested_closures(nested, &|name| {
-        cg.mint_synthetic(name.to_string());
-    });
+/// The shared chain for a decorator or global-initializer body: cleanup and
+/// closure conversion, with no inlining and no counted-loop recovery.
+pub(super) fn convert_unit_body(
+    ws: &Workspace,
+    cg: &CodegenCtx,
+    mf: &mut MirFunc,
+    name: &str,
+    times: &mut PhaseTimes,
+) -> Result<(), CompilerError> {
+    let opts = skull_transform::body_chain::ChainOptions {
+        reserve: &|name| {
+            cg.mint_synthetic(name.to_string());
+        },
+        counted_loops: skull_transform::body_chain::CountedLoops::Skip,
+        inline_hoisted: false,
+    };
+    let mut work = InlineWork::default();
+    let mut stats = ChainStats::new(times, &mut work);
+    skull_transform::body_chain::convert_body(ws, mf, name, &opts, &mut stats).map_err(|e| e.error)
 }
 
-/// Emit the flat list of pass-produced hoisted lambda bodies (`convert_closures`
-/// appends one `MirFunc` per live lambda, nested ones included) as sibling
-/// top-level fns appended to `out`. Used by the decorator/global-init units, which
-/// -- unlike [`emit_nested_fns`] -- fold no deps/statics (their `UnitOut` tracks
-/// neither) and run no `recover_counted_loops` (their loops recover at codegen,
-/// same as the co-fn step).
 /// The `static` cells of a hoisted-lambda tree, for the callers that emit it
 /// through [`emit_pass_nested_fns`] and so do not fold them along the way.
 fn collect_nested_statics(nested: &[MirFunc], out: &mut Vec<skull_mir::mir::StaticCell>) {
@@ -636,6 +588,10 @@ fn collect_nested_statics(nested: &[MirFunc], out: &mut Vec<skull_mir::mir::Stat
     }
 }
 
+/// Emit the hoisted bodies (`convert_closures` appends one `MirFunc` per live
+/// lambda, nested ones included; a named nested fn holds its own) as sibling
+/// top-level fns appended to `out`. Unlike [`emit_nested_fns`] this folds no
+/// deps/statics and runs no `recover_counted_loops`.
 pub(super) fn emit_pass_nested_fns(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -692,6 +648,19 @@ pub(super) fn emit_pass_nested_fns(
         let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(emit);
         times.regalloc += regalloc;
         times.regalloc_work |= regalloc > Duration::ZERO;
+        // A named nested fn keeps its own hoisted lambdas.
+        let mut children = std::mem::take(&mut nf.nested_fns);
+        emit_pass_nested_fns(
+            ws,
+            cg,
+            scx,
+            &mut children,
+            inherited_statics,
+            allocation_bodies.as_deref_mut(),
+            out,
+            times,
+        )?;
+        nf.nested_fns = children;
     }
     Ok(())
 }
@@ -1050,111 +1019,20 @@ fn prepare_instance_body_with_attribution(
 ) -> Result<(FxHashSet<FuncRef>, PhaseTimes, InlineWork), CompilerError> {
     let mut times = PhaseTimes::default();
     let mut work = InlineWork::default();
-    let before = (mf.insts.len(), mf.blocks.len(), mf.cells.len());
-    let ti = Instant::now();
-    let (spliced, records, scan_stats) =
-        skull_transform::inline_functions_with_plans(ws, scx, fref, mf, cache, concrete_plans)?;
-    times.inline = ti.elapsed();
-    times.inline_work = !records.is_empty();
-    work.add_records(&records);
-    work.add_scan(scan_stats);
-    work.add_allocations(before, (mf.insts.len(), mf.blocks.len(), mf.cells.len()));
-    let cleanup_before = mir_live_instructions(mf);
-    let tc = Instant::now();
-    skull_transform::cleanup_with_nobox_census(
+    let inliner = skull_transform::body_chain::Inliner {
+        scx,
+        self_ref: fref,
+        cache,
+        plans: concrete_plans,
+    };
+    let spliced = skull_transform::body_chain::prepare_body(
         ws,
+        inliner,
         mf,
-        before.0,
-        cache
-            .census_enabled()
-            .then_some(&mut work.census.load_store),
-    )?;
-    times.cleanup = tc.elapsed();
-    let cleanup_after = mir_live_instructions(mf);
-    work.cleanup_live_before += cleanup_before;
-    work.cleanup_live_after += cleanup_after;
-    times.cleanup_work = cleanup_after != cleanup_before;
-    let tclosure = Instant::now();
-    let nested_before = mf.nested_fns.len();
-    skull_transform::convert_closures(mf, name);
-    times.closure = tclosure.elapsed();
-    times.closure_work = mf.nested_fns.len() > nested_before;
-    let counted_before = mf.blocks.len();
-    let tcounted = Instant::now();
-    skull_transform::recover_counted_loops(ws, mf);
-    times.counted_loop = tcounted.elapsed();
-    times.counted_loop_work = mf.blocks.len() > counted_before;
-    Ok((spliced.into_iter().collect(), times, work))
-}
-
-/// Run the inliner over a hoisted-body tree (named nested `fn`s and the lambda
-/// bodies `convert_closures` appends), depth-first so a lambda nested in a lambda
-/// is reached too. Splices fold into the enclosing chunk's `deps`: the chunk now
-/// contains a copy of each spliced callee's body, so an edit to that callee has to
-/// invalidate this chunk.
-fn inline_hoisted_bodies(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    self_ref: FuncRef,
-    nested: &mut [MirFunc],
-    inline_cache: &mut skull_transform::InlineCache,
-    concrete_plans: &skull_mir::concrete::ConcretePlans,
-    deps: &mut FxHashSet<FuncRef>,
-    times: &mut PhaseTimes,
-    work: &mut InlineWork,
-) -> Result<(), String> {
-    for nf in nested.iter_mut() {
-        // Flat variants embed source without going through an inline splice.
-        if let Some(source) = nf.flat_variant_source {
-            deps.insert(source);
-        }
-        let before = (nf.insts.len(), nf.blocks.len(), nf.cells.len());
-        let ti = Instant::now();
-        let (spliced, records, scan_stats) = skull_transform::inline_functions_with_plans(
-            ws,
-            scx,
-            self_ref,
-            nf,
-            inline_cache,
-            concrete_plans,
-        )
-        .map_err(|e| e.message)?;
-        times.hoisted_inline += ti.elapsed();
-        work.add_records(&records);
-        work.hoisted_splices += records.len();
-        work.add_scan(scan_stats);
-        times.hoisted_inline_work |= !records.is_empty();
-        work.add_allocations(before, (nf.insts.len(), nf.blocks.len(), nf.cells.len()));
-        deps.extend(spliced);
-        let cleanup_before = mir_live_instructions(nf);
-        let tc = Instant::now();
-        skull_transform::cleanup_with_nobox_census(
-            ws,
-            nf,
-            before.0,
-            inline_cache
-                .census_enabled()
-                .then_some(&mut work.census.load_store),
-        )
-        .map_err(|e| e.message)?;
-        times.cleanup += tc.elapsed();
-        let cleanup_after = mir_live_instructions(nf);
-        work.cleanup_live_before += cleanup_before;
-        work.cleanup_live_after += cleanup_after;
-        times.cleanup_work |= cleanup_after != cleanup_before;
-        let mut children = std::mem::take(&mut nf.nested_fns);
-        inline_hoisted_bodies(
-            ws,
-            scx,
-            self_ref,
-            &mut children,
-            inline_cache,
-            concrete_plans,
-            deps,
-            times,
-            work,
-        )?;
-        nf.nested_fns = children;
-    }
-    Ok(())
+        name,
+        &skull_transform::body_chain::ChainOptions::PLAIN,
+        &mut ChainStats::new(&mut times, &mut work),
+    )
+    .map_err(|e| e.error)?;
+    Ok((spliced, times, work))
 }

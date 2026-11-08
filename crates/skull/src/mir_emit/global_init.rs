@@ -291,27 +291,15 @@ pub(super) fn emit_global_unit(
             out.attribution.mir_instructions = mf.insts.len();
             out.attribution.lower_facts = mf.lower_attribution.clone();
             out.times.lower_work = out.attribution.mir_instructions > 0;
-            let cleanup_before = mir_live_instructions(&mf);
-            let tc = Instant::now();
-            if let Err(e) = skull_transform::cleanup_with_nobox(ws, &mut mf) {
-                out.hard_error = Some(e);
-                return out;
-            }
-            out.times.cleanup = tc.elapsed();
-            out.times.cleanup_work = mir_live_instructions(&mf) != cleanup_before;
             // A global-initializer body can carry lambdas (e.g. a `[TileDef]`
             // literal with fn fields) -- route them through the shared pass, same
             // as an ordinary fn. Their global reads are NOT init-ordering
             // constraints (the fn value is stored, not called at init), so `refs`
             // is computed on the post-pass `mf` where those reads live in the
             // hoisted siblings, not the main body.
-            let pre_nested = mf.nested_fns.len();
-            let tclosure = Instant::now();
-            skull_transform::convert_closures(&mut mf, &init_name);
-            out.times.closure = tclosure.elapsed();
-            out.times.closure_work = mf.nested_fns.len() > pre_nested;
-            for nf in &mf.nested_fns[pre_nested..] {
-                cg.mint_synthetic(nf.name.to_string());
+            if let Err(e) = convert_unit_body(ws, cg, &mut mf, &init_name, &mut out.times) {
+                out.hard_error = Some(e);
+                return out;
             }
             let owner = bone_semantic::hir::BodyOwner::Global(gid);
             let plan = concrete_plan.expect("a lowered global has a concrete plan");

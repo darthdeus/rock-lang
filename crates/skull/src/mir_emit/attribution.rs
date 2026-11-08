@@ -433,6 +433,105 @@ pub(super) fn mir_live_instructions(mf: &MirFunc) -> usize {
     mf.blocks.iter().map(|(_, block)| block.insts.len()).sum()
 }
 
+/// Times each pass of the shared body chain and records its inline work, for
+/// `rock backend-stats`.
+pub(super) struct ChainStats<'a> {
+    pub(super) times: &'a mut PhaseTimes,
+    pub(super) work: &'a mut InlineWork,
+    /// Root splices count as ordinary (a declaration, not a specialization).
+    pub(super) ordinary: bool,
+    /// The ordinary instance the root scan is credited to.
+    pub(super) ordinary_key: Option<Instance>,
+    started: Instant,
+    before: (usize, usize, usize),
+}
+
+impl<'a> ChainStats<'a> {
+    pub(super) fn new(times: &'a mut PhaseTimes, work: &'a mut InlineWork) -> Self {
+        Self {
+            times,
+            work,
+            ordinary: false,
+            ordinary_key: None,
+            started: Instant::now(),
+            before: (0, 0, 0),
+        }
+    }
+}
+
+impl skull_transform::body_chain::PassObserver for ChainStats<'_> {
+    fn begin(&mut self, pass: skull_transform::body_chain::BodyPass, mf: &MirFunc) {
+        use skull_transform::body_chain::BodyPass;
+        self.before = match pass {
+            BodyPass::Inline | BodyPass::HoistedInline => {
+                (mf.insts.len(), mf.blocks.len(), mf.cells.len())
+            }
+            BodyPass::Cleanup => (mir_live_instructions(mf), 0, 0),
+            BodyPass::Closure => (mf.nested_fns.len(), 0, 0),
+            BodyPass::CountedLoop => (mf.blocks.len(), 0, 0),
+        };
+        self.started = Instant::now();
+    }
+
+    fn inlined(
+        &mut self,
+        pass: skull_transform::body_chain::BodyPass,
+        records: &[skull_transform::SpliceRecord],
+        mut scan: skull_transform::InlineScanStats,
+    ) {
+        use skull_transform::body_chain::BodyPass;
+        self.work.add_records(records);
+        if pass == BodyPass::HoistedInline {
+            self.work.hoisted_splices += records.len();
+            self.times.hoisted_inline_work |= !records.is_empty();
+        } else {
+            if let Some(instance) = &self.ordinary_key {
+                scan.ordinary_keys.push(instance.clone());
+            }
+            if self.ordinary {
+                self.work.ordinary_splices += records.len();
+            }
+            self.times.inline_work |= !records.is_empty();
+        }
+        self.work.add_scan(scan);
+    }
+
+    fn load_store(&mut self) -> Option<&mut skull_transform::LoadStoreCensus> {
+        Some(&mut self.work.census.load_store)
+    }
+
+    fn end(&mut self, pass: skull_transform::body_chain::BodyPass, mf: &MirFunc) {
+        use skull_transform::body_chain::BodyPass;
+        let elapsed = self.started.elapsed();
+        let now = (mf.insts.len(), mf.blocks.len(), mf.cells.len());
+        match pass {
+            BodyPass::Inline => {
+                self.times.inline += elapsed;
+                self.work.add_allocations(self.before, now);
+            }
+            BodyPass::HoistedInline => {
+                self.times.hoisted_inline += elapsed;
+                self.work.add_allocations(self.before, now);
+            }
+            BodyPass::Cleanup => {
+                let after = mir_live_instructions(mf);
+                self.times.cleanup += elapsed;
+                self.times.cleanup_work |= after != self.before.0;
+                self.work.cleanup_live_before += self.before.0;
+                self.work.cleanup_live_after += after;
+            }
+            BodyPass::Closure => {
+                self.times.closure += elapsed;
+                self.times.closure_work |= mf.nested_fns.len() > self.before.0;
+            }
+            BodyPass::CountedLoop => {
+                self.times.counted_loop += elapsed;
+                self.times.counted_loop_work |= mf.blocks.len() > self.before.0;
+            }
+        }
+    }
+}
+
 fn duration_us(duration: Duration) -> u64 {
     duration.as_micros().max(1) as u64
 }

@@ -2,6 +2,7 @@
 //! propagation, DCE, SROA), closure conversion, counted-loop recovery,
 //! inlining, and the coroutine state-machine transform.
 
+pub mod body_chain;
 pub mod bound;
 mod cleanup;
 mod closure;

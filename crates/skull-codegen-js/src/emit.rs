@@ -37,16 +37,17 @@ fn raw<T>(idx: Idx<T>) -> u32 {
     idx.into_raw().into()
 }
 
-fn convert_closures(mf: &mut MirFunc, name: &str) {
-    for nested in &mut mf.nested_fns {
-        let nested_name = nested.name;
-        convert_closures(nested, nested_name.as_str());
-    }
-    skull_transform::convert_closures(mf, name);
-}
+/// JS runs counted-loop recovery over the bodies conversion hoisted here; it
+/// has no render-time nested pass to do it later, and never inlines into them.
+const JS_CHAIN: skull_transform::body_chain::ChainOptions<'static> =
+    skull_transform::body_chain::ChainOptions {
+        reserve: &|_| {},
+        counted_loops: skull_transform::body_chain::CountedLoops::RootAndNested,
+        inline_hoisted: false,
+    };
 
-/// The pass chain every inlined body takes before discovery and emission:
-/// inline, cleanup, then [`finish_body`].
+/// The shared pass chain every inlined body takes before discovery and
+/// emission.
 fn prepare_body(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -54,22 +55,22 @@ fn prepare_body(
     mf: &mut MirFunc,
     name: &str,
     cache: &mut skull_transform::InlineCache,
-    concrete: &skull_mir::concrete::ConcretePlans,
+    plans: &skull_mir::concrete::ConcretePlans,
 ) -> Result<(), CompilerError> {
-    skull_transform::inline_functions_with_plans(ws, scx, self_ref, mf, cache, concrete)?;
-    skull_transform::cleanup_with_nobox(ws, mf)?;
-    finish_body(ws, mf, name);
-    Ok(())
+    let inliner = skull_transform::body_chain::Inliner {
+        scx,
+        self_ref,
+        cache,
+        plans,
+    };
+    skull_transform::body_chain::prepare_body(ws, inliner, mf, name, &JS_CHAIN, &mut ())
+        .map(|_| ())
+        .map_err(|e| e.error)
 }
 
-/// Closure conversion, then counted-loop recovery over the body and the
-/// bodies conversion hoisted.
-fn finish_body(ws: &Workspace, mf: &mut MirFunc, name: &str) {
-    convert_closures(mf, name);
-    skull_transform::recover_counted_loops(ws, mf);
-    for nf in &mut mf.nested_fns {
-        skull_transform::recover_counted_loops(ws, nf);
-    }
+/// The shared chain for a body that is not inlined.
+fn convert_body(ws: &Workspace, mf: &mut MirFunc, name: &str) -> Result<(), CompilerError> {
+    skull_transform::body_chain::convert_body(ws, mf, name, &JS_CHAIN, &mut ()).map_err(|e| e.error)
 }
 
 /// The module-global surface an emitted body may reference through `Inst::Global`
@@ -5114,11 +5115,10 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             }
         };
         let Some(mut mf) = lowered else { return Ok(()) };
-        if let Err(e) = skull_transform::cleanup_with_nobox(self.ws, &mut mf) {
+        if let Err(e) = convert_body(self.ws, &mut mf, &init_name) {
             self.st.reject(&init_name, e);
             return Ok(());
         }
-        finish_body(self.ws, &mut mf, &init_name);
         let mut findings: Vec<CompilerError> = Vec::new();
         collect(&mut findings, nobox_errs(self.ws, &mf));
         for nf in &mf.nested_fns {

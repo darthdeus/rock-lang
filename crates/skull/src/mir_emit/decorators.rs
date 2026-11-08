@@ -42,22 +42,10 @@ pub(super) fn emit_decorator_unit(
             out.attribution.mir_instructions = mf.insts.len();
             out.attribution.lower_facts = mf.lower_attribution.clone();
             out.times.lower_work = out.attribution.mir_instructions > 0;
-            let cleanup_before = mir_live_instructions(&mf);
-            let tc = Instant::now();
-            if let Err(e) = skull_transform::cleanup_with_nobox(ws, &mut mf) {
+            // Decorator bodies can carry lambdas too -- convert like an ordinary fn.
+            if let Err(e) = convert_unit_body(ws, cg, &mut mf, &deco_name, &mut out.times) {
                 out.hard_error = Some(e);
                 return out;
-            }
-            out.times.cleanup = tc.elapsed();
-            out.times.cleanup_work = mir_live_instructions(&mf) != cleanup_before;
-            // Decorator bodies can carry lambdas too -- convert like an ordinary fn.
-            let pre_nested = mf.nested_fns.len();
-            let tclosure = Instant::now();
-            skull_transform::convert_closures(&mut mf, &deco_name);
-            out.times.closure = tclosure.elapsed();
-            out.times.closure_work = mf.nested_fns.len() > pre_nested;
-            for nf in &mf.nested_fns[pre_nested..] {
-                cg.mint_synthetic(nf.name.to_string());
             }
             let owner = bone_semantic::hir::BodyOwner::Decorator(did);
             let plan = concrete_plan.expect("a lowered decorator has a concrete plan");
