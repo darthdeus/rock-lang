@@ -101,6 +101,25 @@ fn main() {
 OPERATION: code_action
 ---
 EXPECTED:
+NO_ACTION: Inline local `x`
+===
+
+TEST: inline_side_effecting_initializer_with_one_use
+TYPE: code_action
+---
+fn get_value() -> int {
+    print("Getting value")
+    return 42
+}
+
+fn main() {
+    let «start»x«end» = get_value()
+    print(x)
+}
+---
+OPERATION: code_action
+---
+EXPECTED:
 ACTION_TITLE: Inline local `x`
 RESULT:
 fn get_value() -> int {
@@ -110,7 +129,95 @@ fn get_value() -> int {
 
 fn main() {
     print(get_value())
-    print(get_value())
+}
+===
+
+TEST: no_inline_of_a_side_effecting_initializer_used_in_a_loop
+TYPE: code_action
+---
+fn get_value() -> int {
+    print("Getting value")
+    return 42
+}
+
+fn main() {
+    let «start»x«end» = get_value()
+    for i in 0..3 {
+        print(x + i)
+    }
+}
+---
+OPERATION: code_action
+---
+EXPECTED:
+NO_ACTION: Inline local `x`
+===
+
+TEST: no_inline_of_a_side_effecting_initializer_used_in_a_closure
+TYPE: code_action
+---
+fn get_value() -> int {
+    print("Getting value")
+    return 42
+}
+
+fn main() {
+    let «start»x«end» = get_value()
+    let f = () => x
+    print(f())
+}
+---
+OPERATION: code_action
+---
+EXPECTED:
+NO_ACTION: Inline local `x`
+===
+
+TEST: no_inline_of_an_indexing_initializer_with_two_uses
+TYPE: code_action
+---
+fn main() {
+    let xs = [1, 2, 3]
+    let «start»x«end» = xs[0]
+    print(x)
+    print(x)
+}
+---
+OPERATION: code_action
+---
+EXPECTED:
+NO_ACTION: Inline local `x`
+===
+
+TEST: inline_pure_field_arithmetic_with_two_uses
+TYPE: code_action
+---
+struct Point {
+    x: int
+    y: int
+}
+
+fn main() {
+    let p = Point { x: 1, y: 2 }
+    let «start»s«end» = p.x + p.y
+    print(s)
+    print(s)
+}
+---
+OPERATION: code_action
+---
+EXPECTED:
+ACTION_TITLE: Inline local `s`
+RESULT:
+struct Point {
+    x: int
+    y: int
+}
+
+fn main() {
+    let p = Point { x: 1, y: 2 }
+    print(p.x + p.y)
+    print(p.x + p.y)
 }
 ===
 

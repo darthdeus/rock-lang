@@ -4461,6 +4461,9 @@ pub struct InlineLocalSites {
 /// When `offset` is on a `let x = <init>` binding or any of its uses, the data
 /// to inline it. None for params / `for` vars / tuple- and newtype-lets (only a
 /// plain single-binding `let` is inlineable) or when the cursor is elsewhere.
+/// Also None when the initializer is not pure and inlining would change how
+/// often it runs: no use, several uses, or a use inside a loop, closure,
+/// nested function or `defer` that does not also hold the `let`.
 pub fn inline_local(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<InlineLocalSites> {
     let module = ws.modules.get(mid.index())?;
     let owner = module.body_at(offset)?;
@@ -4486,12 +4489,87 @@ pub fn inline_local(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Inli
         }
     }
 
+    if !init_is_pure(body, value)
+        && (uses.len() != 1 || uses_rerun_outside_let(body, let_span, &uses))
+    {
+        return None;
+    }
+
     Some(InlineLocalSites {
         var: body.binding_arena[b].name,
         let_span,
         init_span,
         uses,
         parenthesize,
+    })
+}
+
+/// Whether evaluating `e` more than once, or not at all, is unobservable:
+/// literals, names, field access and arithmetic over pure operands. Calls,
+/// method calls, indexing and anything that allocates are not.
+fn init_is_pure(body: &hir::Body, e: Idx<hir::Expr>) -> bool {
+    match &body.expr_arena[e] {
+        hir::Expr::Unit
+        | hir::Expr::Null
+        | hir::Expr::Int(_)
+        | hir::Expr::Float(_)
+        | hir::Expr::Bool(_)
+        | hir::Expr::String(_)
+        | hir::Expr::Var(_)
+        | hir::Expr::Global(_)
+        | hir::Expr::SiblingRef(_) => true,
+        hir::Expr::FieldAccess { base, .. }
+        | hir::Expr::SafeNav { base, .. }
+        | hir::Expr::TupleIndex { tuple: base, .. }
+        | hir::Expr::UnaryMinus(base, _)
+        | hir::Expr::Not(base, _)
+        | hir::Expr::BitNot(base) => init_is_pure(body, *base),
+        hir::Expr::BinOp { lhs, rhs, .. } => init_is_pure(body, *lhs) && init_is_pure(body, *rhs),
+        // Binary arithmetic lowers to a call of its `__op_*` operator function.
+        hir::Expr::Call {
+            callee: hir::Callee::Unresolved { name, .. },
+            args,
+            ..
+        } => {
+            let op = name.as_str().rsplit("::").next().unwrap_or_default();
+            op.starts_with("__op_") && args.clone().all(|arg| init_is_pure(body, arg))
+        }
+        _ => false,
+    }
+}
+
+/// Whether any use sits in a region that can run a different number of times
+/// than the `let` itself: a loop body, a closure, a nested function or a
+/// `defer`. A region that also holds the `let` re-runs the initializer too.
+fn uses_rerun_outside_let(body: &hir::Body, let_span: Span, uses: &[Span]) -> bool {
+    let contains = |outer: Span, inner: Span| {
+        outer.offset_range.0 <= inner.offset_range.0 && inner.offset_range.1 <= outer.offset_range.1
+    };
+    let mut regions: Vec<Span> = Vec::new();
+    for (i, statement) in body.statement_arena.iter() {
+        match statement {
+            // The iterable is evaluated once; only the body repeats.
+            hir::Statement::For {
+                body: loop_body, ..
+            } => {
+                regions.extend(body.expr_spans.get(*loop_body).copied());
+            }
+            hir::Statement::While { .. }
+            | hir::Statement::WhileLet { .. }
+            | hir::Statement::Fn { .. }
+            | hir::Statement::Defer(_) => {
+                regions.extend(body.statement_spans.get(i).copied());
+            }
+            _ => {}
+        }
+    }
+    for (e, expr) in body.expr_arena.iter() {
+        if matches!(expr, hir::Expr::Lambda { .. }) {
+            regions.extend(body.expr_spans.get(e).copied());
+        }
+    }
+    regions.iter().any(|&region| {
+        !contains(region, let_span) && uses.iter().any(|&use_span| contains(region, use_span))
     })
 }
 

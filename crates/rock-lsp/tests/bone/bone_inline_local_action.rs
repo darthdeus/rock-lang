@@ -35,7 +35,7 @@ fn offered_on_a_use_and_leaves_an_atomic_init_unparenthesized() {
     let src = "\
 fn f(v: int) -> int {
     let y = g(v)
-    return y + y
+    return y + 1
 }
 fn g(a: int) -> int { a }
 ";
@@ -45,7 +45,22 @@ fn g(a: int) -> int { a }
     let out = apply_all(src, action);
     assert_eq!(
         out,
-        "fn f(v: int) -> int {\n    return g(v) + g(v)\n}\nfn g(a: int) -> int { a }\n"
+        "fn f(v: int) -> int {\n    return g(v) + 1\n}\nfn g(a: int) -> int { a }\n"
+    );
+}
+
+#[test]
+fn no_action_when_a_call_initializer_has_two_uses() {
+    let src = "\
+fn f(v: int) -> int {
+    let y = g(v)
+    return y + y
+}
+fn g(a: int) -> int { a }
+";
+    assert!(
+        inline_action(&run(src, 1, 8)).is_none(),
+        "inlining would call g twice"
     );
 }
 

@@ -46,6 +46,9 @@ struct LspTest {
     /// For code actions: the title of the action to apply. Its result is
     /// compared against `expected_code`.
     action_title: Option<String>,
+    /// For code actions: `NO_ACTION:` asserts that no action titled
+    /// `action_title` is offered, so there is no result to compare.
+    action_absent: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -639,6 +642,7 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
         let mut rename_lines: Vec<String> = Vec::new();
         let mut expected_files: Vec<(String, String)> = Vec::new();
         let mut action_title: Option<String> = None;
+        let mut action_absent = false;
         let mut result_lines: Option<Vec<String>> = None;
 
         // Multi-file EXPECTED uses `FILE: name / --- / content / ---` blocks
@@ -671,25 +675,34 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                     rename_lines.push(line.to_string());
                 } else if test_type == "code_action" {
                     // `ACTION_TITLE: <title>`, then `RESULT:` and the whole
-                    // file after the action's edit is applied.
+                    // file after the action's edit is applied; or a lone
+                    // `NO_ACTION: <title>` for an action that must not be
+                    // offered.
                     if let Some(result) = &mut result_lines {
                         result.push(line.to_string());
-                    } else if let Some(title) = line.strip_prefix("ACTION_TITLE:") {
+                    } else if let Some((title, absent)) = line
+                        .strip_prefix("ACTION_TITLE:")
+                        .map(|t| (t, false))
+                        .or_else(|| line.strip_prefix("NO_ACTION:").map(|t| (t, true)))
+                    {
                         if action_title.is_some() {
                             return Err(fixture_error(
                                 path,
                                 &name,
-                                "more than one `ACTION_TITLE:`",
+                                "more than one `ACTION_TITLE:` or `NO_ACTION:`",
                             ));
                         }
                         action_title = Some(title.trim().to_string());
+                        action_absent = absent;
                     } else if line.trim() == "RESULT:" {
                         result_lines = Some(Vec::new());
                     } else if !line.trim().is_empty() {
                         return Err(fixture_error(
                             path,
                             &name,
-                            format!("expected `ACTION_TITLE:` or `RESULT:`, found {line:?}"),
+                            format!(
+                                "expected `ACTION_TITLE:`, `NO_ACTION:` or `RESULT:`, found {line:?}"
+                            ),
                         ));
                     }
                 } else if test_type == "hover" || test_type == "inlay_hints" {
@@ -759,13 +772,23 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                 return Err(fixture_error(
                     path,
                     &name,
-                    "code action has no `ACTION_TITLE:`",
+                    "code action has no `ACTION_TITLE:` or `NO_ACTION:`",
                 ));
             }
-            let Some(result) = result_lines else {
-                return Err(fixture_error(path, &name, "code action has no `RESULT:`"));
-            };
-            expected_code = Some(result.join("\n"));
+            match (action_absent, result_lines) {
+                (true, Some(_)) => {
+                    return Err(fixture_error(
+                        path,
+                        &name,
+                        "`NO_ACTION:` has no result; drop `RESULT:`",
+                    ));
+                }
+                (true, None) => {}
+                (false, None) => {
+                    return Err(fixture_error(path, &name, "code action has no `RESULT:`"));
+                }
+                (false, Some(result)) => expected_code = Some(result.join("\n")),
+            }
         }
 
         // An EXPECTED block with nothing in it asserts nothing, so the
@@ -773,6 +796,7 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
         if expected.iter().all(|e| e.trim().is_empty())
             && expected_code.is_none()
             && expected_files.is_empty()
+            && !action_absent
         {
             return Err(fixture_error(path, &name, "EXPECTED block is empty"));
         }
@@ -788,6 +812,7 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
             expected_code,
             expected_files,
             action_title,
+            action_absent,
         });
     }
 
@@ -2163,17 +2188,14 @@ fn request_code_actions(
 
 /// Check a `textDocument/codeAction` response against the fixture: the action
 /// titled `ACTION_TITLE:` must be offered, and applying its edit to the
-/// fixture's code must give exactly the `RESULT:` text.
+/// fixture's code must give exactly the `RESULT:` text. A `NO_ACTION:` title
+/// must not be offered at all.
 fn check_code_action_reply(test: &LspTest, uri: &str, reply: &serde_json::Value) -> Result<bool> {
     let request = format!("code_action test '{}'", test.name);
     let title = test
         .action_title
         .as_deref()
         .ok_or_else(|| anyhow::anyhow!("{request}: fixture has no ACTION_TITLE"))?;
-    let expected = test
-        .expected_code
-        .as_deref()
-        .ok_or_else(|| anyhow::anyhow!("{request}: fixture has no RESULT"))?;
     if let Some(error) = reply.get("error") {
         return Err(anyhow::anyhow!(
             "{request}: server answered with an error: {error}"
@@ -2189,7 +2211,20 @@ fn check_code_action_reply(test: &LspTest, uri: &str, reply: &serde_json::Value)
             ));
         }
     };
-    let Some(action) = actions.iter().find(|a| action_title(a) == Some(title)) else {
+    let found = actions.iter().find(|a| action_title(a) == Some(title));
+    if test.action_absent {
+        if found.is_some() {
+            return Err(anyhow::anyhow!(
+                "{request}: the server offered {title:?}, which must not be offered"
+            ));
+        }
+        return Ok(true);
+    }
+    let expected = test
+        .expected_code
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("{request}: fixture has no RESULT"))?;
+    let Some(action) = found else {
         let offered: Vec<&str> = actions.iter().filter_map(action_title).collect();
         return Err(anyhow::anyhow!(
             "{request}: no action titled {title:?}; the server offered {offered:?}"
@@ -4226,6 +4261,44 @@ fn main() {
         assert!(other.contains("Inline local `y`"), "{other}");
     }
 
+    const NO_ACTION_FIXTURE: &str = "TEST: stub no inline
+TYPE: code_action
+---
+fn main() {
+    let «start»x«end» = 1 + 2
+    print(x * x)
+}
+---
+OPERATION: code_action
+---
+EXPECTED:
+NO_ACTION: Inline local `x`
+===
+";
+
+    #[test]
+    fn a_no_action_fixture_passes_only_when_the_action_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.rock.lsp");
+        std::fs::write(&path, NO_ACTION_FIXTURE).unwrap();
+        let test = parse_lsp_test_file(&path).unwrap().pop().unwrap();
+        assert!(test.action_absent);
+        assert_eq!(test.action_title.as_deref(), Some("Inline local `x`"));
+        assert!(
+            check_code_action_reply(&test, URI, &serde_json::json!({"id": 2, "result": null}))
+                .unwrap()
+        );
+        let offered = check_code_action_reply(&test, URI, &inline_reply("(1 + 2)"))
+            .unwrap_err()
+            .to_string();
+        assert!(offered.contains("must not be offered"), "{offered}");
+
+        let with_result = NO_ACTION_FIXTURE.replace("===", "RESULT:\nfn main() {}\n===");
+        std::fs::write(&path, with_result).unwrap();
+        let err = parse_lsp_test_file(&path).unwrap_err().to_string();
+        assert!(err.contains("drop `RESULT:`"), "{err}");
+    }
+
     #[test]
     fn a_malformed_code_action_reply_fails() {
         let test = code_action_test();
@@ -4281,7 +4354,7 @@ fn main() {
         let without_result = CODE_ACTION_FIXTURE.replace("RESULT:\n", "");
         let message = parse_error_of(&without_result);
         assert!(
-            message.contains("expected `ACTION_TITLE:` or `RESULT:`"),
+            message.contains("expected `ACTION_TITLE:`, `NO_ACTION:` or `RESULT:`"),
             "{message}"
         );
         let title_only = CODE_ACTION_FIXTURE
