@@ -1540,11 +1540,12 @@ impl<'a> Printer<'a> {
             ]),
 
             ExprKind::FieldAccess(x, field) => {
-                Doc::concat([self.expr(*x), Doc::text(format!(".{}", kw(field.name)))])
+                Doc::concat([self.receiver(*x), Doc::text(format!(".{}", kw(field.name)))])
             }
-            ExprKind::SafeNavigation(x, field) => {
-                Doc::concat([self.expr(*x), Doc::text(format!("?.{}", kw(field.name)))])
-            }
+            ExprKind::SafeNavigation(x, field) => Doc::concat([
+                self.receiver(*x),
+                Doc::text(format!("?.{}", kw(field.name))),
+            ]),
             ExprKind::Index(x, idx) => Doc::concat([
                 self.expr(*x),
                 Doc::text("["),
@@ -1672,6 +1673,17 @@ impl<'a> Printer<'a> {
             | ExprKind::IfLetChain { .. }
             | ExprKind::SafeNavigationLet { .. }
             | ExprKind::YieldDelegate(_) => self.raw(data.span),
+        }
+    }
+
+    /// A member access receiver. A postfix `?` receiver keeps a space before
+    /// the `.`/`?.`, or it would fuse into `?.`/`??` and change the access.
+    fn receiver(&self, x: Idx<ExprData>) -> Doc {
+        let d = self.expr(x);
+        if matches!(self.ast.e(&x).kind, ExprKind::QuestionMark(_)) {
+            Doc::concat([d, Doc::text(" ")])
+        } else {
+            d
         }
     }
 
@@ -2110,7 +2122,7 @@ impl<'a> Printer<'a> {
             (self.expr(base), &segs[..])
         } else {
             (
-                Doc::concat([self.expr(base), seg_doc(&segs[0])]),
+                Doc::concat([self.receiver(base), seg_doc(&segs[0])]),
                 &segs[1..],
             )
         };
