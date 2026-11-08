@@ -5527,8 +5527,10 @@ fn check_scalar_abi(
                         continue;
                     }
                 };
-                if argc < required || argc > arity {
-                    let cf = &ws.module(callee.module).functions[callee.func];
+                let cf = &ws.module(callee.module).functions[callee.func];
+                // A variadic surplus is passed past the declared params, as the
+                // luajit emitter passes it; only the lower bound is an ABI fact.
+                if argc < required || (argc > arity && !cf.is_variadic) {
                     findings.push(err(format!(
                         "JS subset: value-struct scalar ABI mismatch calling {what}`{}` \
                          ({argc} args vs {required}..={arity} params)",
