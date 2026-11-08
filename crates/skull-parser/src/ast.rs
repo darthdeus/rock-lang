@@ -51,6 +51,11 @@ pub enum CallSyntax {
     /// time to `name(recv, args)`: the receiver is the first arg. Resolves
     /// like `Normal`.
     MethodMacro,
+    /// `name!(args) @ rhs`: a `Macro` call that took a trailing `@` lambda.
+    AtMacro,
+    /// `recv.name!(args) @ rhs`: a `MethodMacro` call that took a trailing `@`
+    /// lambda.
+    AtMethodMacro,
     /// Type-shaped sigil arg `Name<A, B>`, parsed as a call of `Name` on the
     /// type args so `expr_to_type_expr` can recover the type.
     TypeArgs,

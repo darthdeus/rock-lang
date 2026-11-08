@@ -126,6 +126,8 @@ fn is_paren_call(syntax: &CallSyntax) -> bool {
             | CallSyntax::At
             | CallSyntax::Macro
             | CallSyntax::MethodMacro
+            | CallSyntax::AtMacro
+            | CallSyntax::AtMethodMacro
             | CallSyntax::TypeArgs
     )
 }

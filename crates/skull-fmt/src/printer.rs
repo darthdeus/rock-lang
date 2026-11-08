@@ -1642,7 +1642,9 @@ impl<'a> Printer<'a> {
                         ])
                     }
                 }
-                CallSyntax::At => self.at_call(*func, args, data.span),
+                CallSyntax::At | CallSyntax::AtMacro | CallSyntax::AtMethodMacro => {
+                    self.at_call(*func, generic_args, args, syntax, data.span)
+                }
                 // No-parens surface form (`start_game "demo"` == `start_game("demo")`):
                 // re-emit it as `callee arg arg` rather than normalizing to parens.
                 CallSyntax::NoParens => Doc::concat([
@@ -1679,16 +1681,9 @@ impl<'a> Printer<'a> {
                     Doc::join(Doc::text(", "), args.iter().map(|a| self.expr(a.value))),
                     Doc::text(">"),
                 ]),
-                _ if !generic_args.is_empty() => Doc::concat([
-                    self.expr(*func),
-                    Doc::text("<"),
-                    Doc::join(
-                        Doc::text(", "),
-                        generic_args.iter().map(|t| self.type_expr(*t)),
-                    ),
-                    Doc::text(">"),
-                    self.call_args(args, data.span),
-                ]),
+                _ if !generic_args.is_empty() => {
+                    self.generic_call(*func, generic_args, args, data.span)
+                }
                 _ => self.call(*func, args, data.span),
             },
 
@@ -1956,7 +1951,33 @@ impl<'a> Printer<'a> {
     /// `f(args) @ rhs` -- the parser desugars this to `f(args, () => rhs)` with
     /// `At` syntax, so the last arg is the synthesized `@`-lambda. Reconstruct
     /// the surface form (normalizing `@` spacing).
-    fn at_call(&self, func: Idx<ExprData>, args: &[FunctionCallArg], span: Span) -> Doc {
+    fn generic_call(
+        &self,
+        func: Idx<ExprData>,
+        generic_args: &[Idx<TypeExprData>],
+        args: &[FunctionCallArg],
+        span: Span,
+    ) -> Doc {
+        Doc::concat([
+            self.expr(func),
+            Doc::text("<"),
+            Doc::join(
+                Doc::text(", "),
+                generic_args.iter().map(|t| self.type_expr(*t)),
+            ),
+            Doc::text(">"),
+            self.call_args(args, span),
+        ])
+    }
+
+    fn at_call(
+        &self,
+        func: Idx<ExprData>,
+        generic_args: &[Idx<TypeExprData>],
+        args: &[FunctionCallArg],
+        syntax: &CallSyntax,
+        span: Span,
+    ) -> Doc {
         let Some((lam, others)) = args.split_last() else {
             return self.raw(span);
         };
@@ -1965,26 +1986,51 @@ impl<'a> Printer<'a> {
         };
         let body = *body;
         let f = self.ast.e(&func).span;
-        let (head, head_span) = if others.is_empty() {
-            (self.expr(func), f)
-        } else {
-            // The head call's own span (callee .. closing paren), NOT the whole
-            // `f(args) @ {...}` span -- otherwise the multi-line `@`-block makes
-            // the preserve check expand the head call's args. The `@` overwrote
-            // the call's span, so find the `)` again: comments before it belong
-            // to the arguments, comments after it to the `@`.
-            let last = self.ast.e(&others.last().unwrap().value).span;
-            let (end, end_line) = self
-                .trivia
-                .close_paren_after(last.offset_range.1)
-                .unwrap_or((last.offset_range.1, last.line_range.1));
-            let head_span = Span {
-                file: f.file,
-                line_range: (f.line_range.0, end_line),
-                col_range: (f.col_range.0, last.col_range.1),
-                offset_range: (f.offset_range.0, end),
-            };
-            (self.call(func, others, head_span), head_span)
+        // A method macro's receiver is argument 0 and sits before the callee.
+        let written_args = match syntax {
+            CallSyntax::AtMethodMacro if !others.is_empty() => &others[1..],
+            _ => others,
+        };
+        let head_span = match written_args.last() {
+            None => f,
+            Some(last) => {
+                // The head call's own span (callee .. closing paren), NOT the
+                // whole `f(args) @ {...}` span -- otherwise the multi-line
+                // `@`-block makes the preserve check expand the head call's
+                // args. The `@` overwrote the call's span, so find the `)`
+                // again: comments before it belong to the arguments, comments
+                // after it to the `@`.
+                let last = self.ast.e(&last.value).span;
+                let (end, end_line) = self
+                    .trivia
+                    .close_paren_after(last.offset_range.1)
+                    .unwrap_or((last.offset_range.1, last.line_range.1));
+                Span {
+                    file: f.file,
+                    line_range: (f.line_range.0, end_line),
+                    col_range: (f.col_range.0, last.col_range.1),
+                    offset_range: (f.offset_range.0, end),
+                }
+            }
+        };
+        let head = match syntax {
+            CallSyntax::AtMethodMacro if !others.is_empty() => Doc::concat([
+                self.receiver(others[0].value),
+                Doc::text("."),
+                self.expr(func),
+                Doc::text("!"),
+                self.call_args(written_args, head_span),
+            ]),
+            CallSyntax::AtMacro => Doc::concat([
+                self.expr(func),
+                Doc::text("!"),
+                self.call_args(written_args, head_span),
+            ]),
+            _ if !generic_args.is_empty() => {
+                self.generic_call(func, generic_args, others, head_span)
+            }
+            _ if others.is_empty() => self.expr(func),
+            _ => self.call(func, others, head_span),
         };
         let stmts = &self.ast.b(&body).statements;
         let rhs_expr = if !self.block_has_braces(body) {

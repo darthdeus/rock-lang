@@ -385,3 +385,25 @@ fn comments_after_the_last_argument_of_an_at_head_survive() {
     assert_stable("fn f() {\n    g(\n        a,\n        // why\n    ) @ print(1)\n}\n");
     assert_stable("fn f() {\n    g(\n        a,\n    ) @ // why\n    print(1)\n}\n");
 }
+
+/// The `@` form must not erase the spelling of the call it extends: the `!`
+/// is what enables type-shaped macro arguments.
+#[test]
+fn at_form_keeps_the_macro_sigil() {
+    for source in [
+        "fn f() {\n    m!(1) @ print(1)\n}\n",
+        "fn f() {\n    m!() @ x\n}\n",
+        "fn f() {\n    m!(Pair<int, int>, [int]) @ {\n        print(1)\n        print(2)\n    }\n}\n",
+        "fn f() {\n    o.m!(1) @ print(1)\n}\n",
+        "fn f() {\n    o.m!() @ x\n}\n",
+        "fn f() {\n    o.m!(Pair<int, int>) @ {\n        print(1)\n        print(2)\n    }\n}\n",
+    ] {
+        assert_stable(source);
+    }
+}
+
+#[test]
+fn at_form_keeps_explicit_generic_arguments() {
+    assert_stable("fn f() {\n    g<int>(1) @ print(1)\n}\n");
+    assert_stable("fn f() {\n    g<int>() @ print(1)\n}\n");
+}

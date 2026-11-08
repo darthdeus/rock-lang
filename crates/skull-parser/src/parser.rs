@@ -3436,7 +3436,11 @@ impl<'a> Parser<'a> {
             let new_span = self.node_span(left, body_span);
             if let ExprKind::FunctionCall { args, syntax, .. } = &mut self.ast.exprs[left].kind {
                 args.push(lambda_arg);
-                *syntax = CallSyntax::At;
+                *syntax = match syntax {
+                    CallSyntax::Macro => CallSyntax::AtMacro,
+                    CallSyntax::MethodMacro => CallSyntax::AtMethodMacro,
+                    _ => CallSyntax::At,
+                };
             }
             self.ast.exprs[left].span = new_span;
             Ok(left)
