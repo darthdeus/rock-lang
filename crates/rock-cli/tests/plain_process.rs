@@ -930,12 +930,11 @@ fn main() {
 #[test]
 fn public_frame_and_perf_options_preserve_their_units_and_defaults() {
     let parse = |argv: &[&str]| {
-        rock_cli::Args::from_arg_matches(
-            &rock_cli::Args::command()
+        rock_cli::Args::from_matches(
+            rock_cli::Args::command()
                 .try_get_matches_from(argv)
                 .unwrap(),
         )
-        .unwrap()
     };
     let frame = parse(&["rock", "frame", "game"]);
     assert_eq!(frame.frames, 1);
