@@ -117,7 +117,7 @@ fn a_compile_appends_a_budget_whose_levels_sum_to_the_wall() {
     assert_eq!(record["totals"]["source_files"], 2);
 
     let budget = &record["budget"];
-    assert_eq!(budget["name"], "process");
+    assert_eq!(budget["name"], "compile");
     let mut names = Vec::new();
     check_sums(budget, &mut names);
     let wall = record["wall_ms"].as_f64().unwrap();
@@ -153,25 +153,17 @@ fn a_compile_appends_a_budget_whose_levels_sum_to_the_wall() {
     );
 
     let fan_out = child(codegen, "fan-out");
-    let cpu = fan_out["cpu_ms"].as_f64().expect("fan-out cpu_ms");
-    let cpu_sum: f64 = fan_out["cpu"]
-        .as_array()
-        .expect("fan-out cpu breakdown")
-        .iter()
-        .map(|p| p["cpu_ms"].as_f64().unwrap())
-        .sum();
+    assert!(fan_out["threads"].as_u64().unwrap() >= 1);
+    let cpu = codegen["unit_cpu_ms"]
+        .as_f64()
+        .expect("codegen unit_cpu_ms");
+    let passes = codegen["unit_cpu"].as_array().expect("per-pass unit time");
+    let cpu_sum: f64 = passes.iter().map(|p| p["cpu_ms"].as_f64().unwrap()).sum();
     assert!(
         (cpu - cpu_sum).abs() < 1e-6,
         "cpu {cpu} vs breakdown {cpu_sum}"
     );
-    assert!(
-        fan_out["cpu"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|p| p["name"] == "lower hir->mir")
-    );
-    assert!(fan_out["idle_ms"].as_f64().unwrap() >= 0.0);
+    assert!(passes.iter().any(|p| p["name"] == "lower hir->mir"));
 
     let assembly = child(codegen, "assembly");
     child(assembly, "initializers");

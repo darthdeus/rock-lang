@@ -10,7 +10,7 @@ file. Every node's wall time is the sum of its children (the `other` child is
 the remainder), so the percentages are of the whole process and a phase that
 grows shows up without anyone having added a timer for it. The emit fan-out
 also lists the summed per-unit time of each pass, which overlaps across
-workers: compare those with each other and with the window's idle time.
+workers: compare those with each other and across commits, not with wall.
 """
 import argparse
 import json
@@ -55,8 +55,10 @@ def render(node, total, depth=0, lines=None):
     lines = [] if lines is None else lines
     pct = 100 * node["wall_ms"] / total if total else 0
     extra = ""
-    if "cpu_ms" in node:
-        extra = f"  cpu {node['cpu_ms']:.1f} ms on {node.get('threads')} threads, idle {node['idle_ms']:.1f} ms"
+    if "threads" in node:
+        extra = f"  on {node['threads']} threads"
+    if "unit_cpu_ms" in node:
+        extra += f"  unit cpu {node['unit_cpu_ms']:.1f} ms summed over all lowered bodies"
     if "scaffold_ms" in node:
         extra += f"  (scaffold {node['scaffold_ms']:.1f} ms inside)"
     lines.append(f"{'  ' * depth}{node['name']:<32} {node['wall_ms']:9.1f} ms {pct:5.1f}%{extra}")
@@ -66,8 +68,8 @@ def render(node, total, depth=0, lines=None):
         render(child, total, depth + 1, lines)
     for branch in node.get("branches", []):
         lines.append(f"{'  ' * (depth + 1)}| {branch['name']:<30} {branch['wall_ms']:9.1f} ms (overlapping lane)")
-    for pass_ in node.get("cpu", []):
-        lines.append(f"{'  ' * (depth + 1)}~ {pass_['name']:<30} {pass_['cpu_ms']:9.1f} ms cpu")
+    for pass_ in node.get("unit_cpu", []):
+        lines.append(f"{'  ' * (depth + 1)}~ {pass_['name']:<30} {pass_['cpu_ms']:9.1f} ms unit cpu")
     return lines
 
 
@@ -77,10 +79,9 @@ def flatten(node, prefix=""):
     out = {path: node["wall_ms"]}
     for child in node.get("children", []):
         out.update(flatten(child, path))
-    if "cpu_ms" in node:
-        out[path + "#cpu"] = node["cpu_ms"]
-        out[path + "#idle"] = node["idle_ms"]
-        for pass_ in node.get("cpu", []):
+    if "unit_cpu_ms" in node:
+        out[path + "#cpu"] = node["unit_cpu_ms"]
+        for pass_ in node.get("unit_cpu", []):
             out[f"{path}#cpu/{pass_['name']}"] = pass_["cpu_ms"]
     return out
 

@@ -2,9 +2,9 @@
 //! line per compile. The record's `budget` is a tree in which every node's
 //! `wall_ms` is the sum of its children, with an explicit `other` child for
 //! the remainder, so a serial tail cannot hide between two timers. Phase
-//! boundaries are wall time; the emit fan-out also carries the summed
-//! per-unit time of each pass (`cpu`), which overlaps across workers and is
-//! comparable only with the window it ran in.
+//! boundaries are wall time; codegen also carries the summed per-unit time of
+//! each emit pass (`unit_cpu`), which overlaps across workers and is
+//! comparable between passes and commits, not with a wall window.
 //!
 //! `perf/run.py` reads these records into the compiler's performance history.
 
@@ -242,23 +242,8 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
         }
         let setup = Node::sum_of("setup", setup);
 
-        let cpu_total: Duration = cpu.iter().map(|(_, d)| *d).sum();
-        let threads = threads() as u32;
         let mut fan_out = Node::leaf("fan-out", fan_out_window);
-        fan_out.extra.insert("threads".into(), json!(threads));
-        fan_out.extra.insert("cpu_ms".into(), json!(ms(cpu_total)));
-        fan_out.extra.insert(
-            "idle_ms".into(),
-            json!(ms((fan_out_window * threads).saturating_sub(cpu_total))),
-        );
-        fan_out.extra.insert(
-            "cpu".into(),
-            Value::Array(
-                cpu.iter()
-                    .map(|(name, d)| json!({"name": name, "cpu_ms": ms(*d)}))
-                    .collect(),
-            ),
-        );
+        fan_out.extra.insert("threads".into(), json!(threads()));
 
         let mut assembly = Node::parent("assembly", assembly_window, assembly);
         if let Some(scaffold) = scaffold {
@@ -267,7 +252,23 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
                 .extra
                 .insert("scaffold_ms".into(), json!(ms(scaffold)));
         }
-        let codegen = Node::parent(&codegen.name, codegen.wall, vec![setup, fan_out, assembly]);
+        let mut codegen = Node::parent(&codegen.name, codegen.wall, vec![setup, fan_out, assembly]);
+        // Per-pass unit time summed over every lowered body: the fan-out, but
+        // also the decorators, globals and specializations assembly lowers
+        // serially. It overlaps across workers, so it is comparable between
+        // passes and across commits, not with any wall window.
+        let cpu_total: Duration = cpu.iter().map(|(_, d)| *d).sum();
+        codegen
+            .extra
+            .insert("unit_cpu_ms".into(), json!(ms(cpu_total)));
+        codegen.extra.insert(
+            "unit_cpu".into(),
+            Value::Array(
+                cpu.iter()
+                    .map(|(name, d)| json!({"name": name, "cpu_ms": ms(*d)}))
+                    .collect(),
+            ),
+        );
         pending.phases.push(codegen);
         pending.record["totals"]["concrete_plans"] = json!(emit.compile_counts.concrete_plans);
         pending.record["totals"]["chunks"] = json!(emit.compile_counts.chunks);
@@ -283,7 +284,7 @@ fn finish(status: &str) {
         .flatten();
     let Some(mut pending) = pending else { return };
     let wall = pending.started.elapsed();
-    let budget = Node::parent("process", wall, std::mem::take(&mut pending.phases));
+    let budget = Node::parent("compile", wall, std::mem::take(&mut pending.phases));
     pending.record["status"] = json!(status);
     pending.record["wall_ms"] = json!(ms(budget.wall));
     pending.record["peak_rss_bytes"] = crate::allocator::process_memory()["peak_rss_bytes"].clone();

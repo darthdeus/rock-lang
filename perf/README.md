@@ -45,10 +45,11 @@ working on a change is: edit, `cargo build --release -p rock-cli --bin rock`,
 ## The time budget
 
 `ROCK_COMPILE_STATS=<file>` makes `rock compile` append one JSON record with a
-`budget` tree: process, then discovery, parse+stdlib, semantic, prepare,
+`budget` tree: compile, then discovery, parse+stdlib, semantic, prepare,
 codegen, write; codegen splits into the serial setup phases, the body
-fan-out (wall window, summed per-pass unit time and the idle time that leaves
-on the worker pool) and the serial assembly steps. Every node's `wall_ms` is
+fan-out window and the serial assembly steps, and carries the per-pass unit
+time summed over every lowered body (the fan-out and the bodies assembly
+lowers serially). Every node's `wall_ms` is
 the sum of its children, with an `other` child for the remainder, so a phase
 nobody timed shows up as growth in `other` rather than vanishing.
 
@@ -58,8 +59,8 @@ perf/budget.py --record stats.jsonl      # print a record written elsewhere
 ```
 
 `perf/run.py` records the same tree per corpus (`--only budget`) and the
-report charts its main nodes over commits. Compare the fan-out's summed unit
-times with each other, never with the wall time.
+report charts its main nodes over commits. Compare the summed unit times
+with each other and across commits, never with a wall window.
 
 `perf/report.html` is generated and not committed. Open it in a browser; the
 corpus selector switches every chart and the table.
