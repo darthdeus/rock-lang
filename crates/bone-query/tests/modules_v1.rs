@@ -1061,7 +1061,10 @@ fn rename_edits(
     pos: Position,
     new_name: &str,
 ) -> Vec<(String, u32, String, String)> {
-    let edit = bone.rename(path, pos, new_name).expect("renameable");
+    let edit = bone
+        .rename(path, pos, new_name)
+        .expect("no refusal")
+        .expect("renameable");
     let mut out = Vec::new();
     for (uri, edits) in edit.changes.unwrap_or_default() {
         let file = uri.to_file_path().unwrap();
@@ -1152,6 +1155,7 @@ fn renaming_an_alias_renames_only_that_files_uses_of_it() {
         assert_eq!(edits, want, "renaming at `{needle}`");
         let range = bone
             .prepare_rename(&main, pos_of(MAIN, needle, 0, into))
+            .expect("no refusal")
             .expect("an alias is renameable");
         assert_eq!(
             range.end.character - range.start.character,

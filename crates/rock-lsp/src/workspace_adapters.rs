@@ -164,9 +164,10 @@ pub fn prepare_rename_workspace(
     params: &TextDocumentPositionParams,
 ) -> Result<Option<PrepareRenameResponse>> {
     let file_path = get_file_path_from_params(params)?;
+    // A refusal becomes the request's error, which editors show as the reason.
     Ok(workspace
         .bone
-        .prepare_rename(&file_path, params.position)
+        .prepare_rename(&file_path, params.position)?
         .map(PrepareRenameResponse::Range))
 }
 
@@ -177,5 +178,5 @@ pub fn do_rename_workspace(
 ) -> Result<Option<WorkspaceEdit>> {
     let file_path = get_file_path_from_params(&params.text_document_position)?;
     let pos = params.text_document_position.position;
-    Ok(workspace.bone.rename(&file_path, pos, &params.new_name))
+    Ok(workspace.bone.rename(&file_path, pos, &params.new_name)?)
 }

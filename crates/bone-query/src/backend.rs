@@ -11,6 +11,10 @@
 mod completion;
 pub mod gaps;
 mod macro_refs;
+mod rename_guard;
+
+pub use rename_guard::RenameRefusal;
+use rename_guard::check_new_name;
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -1796,11 +1800,22 @@ impl BoneWorkspace {
 
     // -- Feature: rename + prepare-rename (stubbed: gaps::references) --------
 
-    pub fn prepare_rename(&self, path: &str, pos: Position) -> Option<Range> {
+    /// The identifier range a rename at `pos` would rewrite: `Ok(None)` when
+    /// nothing there is renameable, `Err` when the symbol is renameable in
+    /// principle but not safely (the reason says why).
+    pub fn prepare_rename(
+        &self,
+        path: &str,
+        pos: Position,
+    ) -> Result<Option<Range>, RenameRefusal> {
         let path_c = self.canon(path);
         let path = path_c.as_str();
-        let proj = self.project(path)?;
-        let src = proj.texts.get(path)?;
+        let Some(proj) = self.project(path) else {
+            return Ok(None);
+        };
+        let Some(src) = proj.texts.get(path) else {
+            return Ok(None);
+        };
         let offset = offset_at_line_col(src, pos.line, pos.character);
         // Reuse the exact reference resolution `rename` uses, so prepare-rename
         // and rename can never disagree: the token is renameable iff it has
@@ -1809,30 +1824,39 @@ impl BoneWorkspace {
         // at a declaration name ("nothing to rename" on `fn foo`), and the whole
         // enclosing `Call` span at a callee (prefilling `foo(args)`, not `foo`).
         let here = self
-            .rename_sites(proj, path, offset)
+            .rename_plan(proj, path, offset)?
             .into_iter()
             .map(|s| s.span)
             .find(|s| {
                 s.file.as_str() == path && s.offset_range.0 <= offset && offset < s.offset_range.1
-            })?;
-        Some(range_from_offsets(
-            src,
-            here.offset_range.0,
-            here.offset_range.1,
-        ))
+            });
+        Ok(here.map(|here| range_from_offsets(src, here.offset_range.0, here.offset_range.1)))
     }
 
-    pub fn rename(&self, path: &str, pos: Position, new_name: &str) -> Option<WorkspaceEdit> {
+    /// The edits renaming the symbol at `pos` to `new_name`: `Ok(None)` when
+    /// nothing there is renameable, `Err` when the rename cannot be done
+    /// safely or `new_name` is not an identifier.
+    pub fn rename(
+        &self,
+        path: &str,
+        pos: Position,
+        new_name: &str,
+    ) -> Result<Option<WorkspaceEdit>, RenameRefusal> {
         let path_c = self.canon(path);
         let path = path_c.as_str();
-        let proj = self.project(path)?;
-        let src = proj.texts.get(path)?;
+        let Some(proj) = self.project(path) else {
+            return Ok(None);
+        };
+        let Some(src) = proj.texts.get(path) else {
+            return Ok(None);
+        };
         let offset = offset_at_line_col(src, pos.line, pos.character);
         // Rename rewrites the whole (shared) overloaded name, not one overload.
-        let sites = self.rename_sites(proj, path, offset);
+        let sites = self.rename_plan(proj, path, offset)?;
         if sites.is_empty() {
-            return None;
+            return Ok(None);
         }
+        check_new_name(new_name)?;
 
         #[expect(
             clippy::mutable_key_type,
@@ -1862,10 +1886,20 @@ impl BoneWorkspace {
                 new_text,
             });
         }
-        Some(WorkspaceEdit {
+        Ok(Some(WorkspaceEdit {
             changes: Some(changes),
             ..Default::default()
-        })
+        }))
+    }
+
+    /// The sites a rename at `offset` rewrites, or why it must not run.
+    fn rename_plan(
+        &self,
+        proj: &BoneProject,
+        path: &str,
+        offset: usize,
+    ) -> Result<Vec<crate::query::RefSite>, RenameRefusal> {
+        Ok(self.rename_sites(proj, path, offset))
     }
 
     // -- Feature: document symbols (stubbed: crate::query::document_symbols) ---------

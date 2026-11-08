@@ -1025,6 +1025,7 @@ fn rename_rewrites_local_decl_and_uses_precisely() {
     let bone = fresh(src);
     let edit = bone
         .rename(PATH, Position::new(2, 14), "n")
+        .expect("no refusal")
         .expect("rename a local");
     let edits = edit.changes.expect("changes").into_values().next().unwrap();
     assert_eq!(edits.len(), 3, "decl + two uses");
@@ -1040,7 +1041,10 @@ fn rename_rewrites_local_decl_and_uses_precisely() {
 }
 
 fn rename_lines(bone: &BoneWorkspace, pos: Position, new_name: &str, name_len: usize) -> Vec<u32> {
-    let edit = bone.rename(PATH, pos, new_name).expect("rename");
+    let edit = bone
+        .rename(PATH, pos, new_name)
+        .expect("no refusal")
+        .expect("rename");
     let mut lines: Vec<u32> = edit
         .changes
         .expect("changes")
@@ -1134,6 +1138,7 @@ fn rename_newtype_edits_decl_and_ctor_in_file_only() {
     let bone = fresh(src);
     let edit = bone
         .rename(PATH, Position::new(0, 9), "Hp")
+        .expect("no refusal")
         .expect("newtype rename resolves");
     #[expect(
         clippy::mutable_key_type,
@@ -1155,6 +1160,7 @@ fn prepare_rename_on_a_function_definition_name_returns_the_name_range() {
     // `load_image_asset` on line 0 spans chars 3..19.
     let range = bone
         .prepare_rename(PATH, Position::new(0, 10))
+        .expect("no refusal")
         .expect("prepare_rename on a function decl name must offer a rename");
     assert_eq!(range.start, Position::new(0, 3), "range starts at the name");
     assert_eq!(
@@ -1175,6 +1181,7 @@ fn prepare_rename_on_a_call_site_ranges_just_the_name_not_the_whole_call() {
     // the whole call runs to char 33.
     let range = bone
         .prepare_rename(PATH, Position::new(4, 14))
+        .expect("no refusal")
         .expect("prepare_rename on a call site must offer a rename");
     assert_eq!(
         range.start,
@@ -1195,6 +1202,7 @@ fn prepare_rename_on_a_local_binding_ranges_the_identifier() {
     let bone = fresh(src);
     let range = bone
         .prepare_rename(PATH, Position::new(1, 7))
+        .expect("no refusal")
         .expect("prepare_rename on a local binding");
     assert_eq!(range.start, Position::new(1, 6));
     assert_eq!(range.end, Position::new(1, 11), "spans `count` (5 chars)");

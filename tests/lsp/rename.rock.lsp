@@ -149,13 +149,31 @@ fn main() {
 TEST: rename_to_keyword_error
 TYPE: rename
 ---
-let «start»foo«end» = 42
+fn main() {
+    let «start»foo«end» = 42
+    print(foo)
+}
 ---
 OPERATION: rename
 NEW_NAME: fn
 ---
 EXPECTED:
-let foo = 42
+REFUSED: cannot rename to `fn`: not an identifier
+===
+
+TEST: rename_to_several_tokens_error
+TYPE: rename
+---
+fn main() {
+    let «start»foo«end» = 42
+    print(foo)
+}
+---
+OPERATION: rename
+NEW_NAME: 1 bad
+---
+EXPECTED:
+REFUSED: cannot rename to `1 bad`: not an identifier
 ===
 
 TEST: rename_generic_type_parameter

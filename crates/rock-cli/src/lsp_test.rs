@@ -49,6 +49,9 @@ struct LspTest {
     /// For code actions: `NO_ACTION:` asserts that no action titled
     /// `action_title` is offered, so there is no result to compare.
     action_absent: bool,
+    /// For rename: `REFUSED: <text>` asserts the server declines the rename
+    /// with an error containing `<text>` and edits nothing.
+    rename_refused: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -643,6 +646,7 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
         let mut expected_files: Vec<(String, String)> = Vec::new();
         let mut action_title: Option<String> = None;
         let mut action_absent = false;
+        let mut rename_refused: Option<String> = None;
         let mut result_lines: Option<Vec<String>> = None;
 
         // Multi-file EXPECTED uses `FILE: name / --- / content / ---` blocks
@@ -671,8 +675,28 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                 // an error rather than an expectation that silently vanishes.
                 if test_type == "rename" {
                     // Raw capture; snippet-vs-full-code is decided after the
-                    // loop from the first non-empty line.
-                    rename_lines.push(line.to_string());
+                    // loop from the first non-empty line. `REFUSED:` stands
+                    // alone, so it takes no code with it.
+                    if let Some(reason) = line.strip_prefix("REFUSED:") {
+                        if rename_refused.is_some() || !rename_lines.is_empty() {
+                            return Err(fixture_error(
+                                path,
+                                &name,
+                                "`REFUSED:` must be the whole EXPECTED block",
+                            ));
+                        }
+                        rename_refused = Some(reason.trim().to_string());
+                    } else if rename_refused.is_some() {
+                        if !line.trim().is_empty() {
+                            return Err(fixture_error(
+                                path,
+                                &name,
+                                "`REFUSED:` must be the whole EXPECTED block",
+                            ));
+                        }
+                    } else {
+                        rename_lines.push(line.to_string());
+                    }
                 } else if test_type == "code_action" {
                     // `ACTION_TITLE: <title>`, then `RESULT:` and the whole
                     // file after the action's edit is applied; or a lone
@@ -797,6 +821,7 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
             && expected_code.is_none()
             && expected_files.is_empty()
             && !action_absent
+            && rename_refused.as_deref().is_none_or(str::is_empty)
         {
             return Err(fixture_error(path, &name, "EXPECTED block is empty"));
         }
@@ -813,6 +838,7 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
             expected_files,
             action_title,
             action_absent,
+            rename_refused,
         });
     }
 
@@ -1204,6 +1230,34 @@ fn fixture_reply_kind(test_type: &str) -> Option<ReplyKind> {
         "code_action" => ReplyKind::CodeAction,
         _ => return None,
     })
+}
+
+/// The refusal half of a rename reply. A fixture that expects `REFUSED:` needs
+/// an `error` containing its text and no edits; any other fixture fails on an
+/// `error`, so an unexpected refusal is not mistaken for an empty rename.
+fn check_rename_refusal(test: &LspTest, request: &str, json: &serde_json::Value) -> Result<()> {
+    let error = json.get("error").and_then(|e| e.as_str());
+    let edits = json
+        .get("changes")
+        .and_then(|c| c.as_object())
+        .is_some_and(|c| {
+            c.values()
+                .any(|e| e.as_array().is_some_and(|a| !a.is_empty()))
+        });
+    match (&test.rename_refused, error) {
+        (Some(want), Some(got)) if got.contains(want.as_str()) && !edits => Ok(()),
+        (Some(want), Some(got)) if !got.contains(want.as_str()) => Err(anyhow::anyhow!(
+            "{request}: rename refused with {got:?}, which does not contain {want:?}"
+        )),
+        (Some(_), Some(_)) => Err(anyhow::anyhow!(
+            "{request}: a refused rename still returned edits; raw reply: {json}"
+        )),
+        (Some(want), None) => Err(anyhow::anyhow!(
+            "{request}: rename was not refused (expected {want:?}); raw reply: {json}"
+        )),
+        (None, Some(got)) => Err(anyhow::anyhow!("{request}: rename refused: {got}")),
+        (None, None) => Ok(()),
+    }
 }
 
 /// Decode a fixture reply. A reply is JSON by contract, so one that does not
@@ -1941,7 +1995,10 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
         ReplyKind::Rename => {
             // For rename tests, apply the text edits and check the resulting code
             let json = decode_reply(&request, &stdout)?;
-            if let Some(changes) = json.get("changes").and_then(|c| c.as_object()) {
+            check_rename_refusal(test, &request, &json)?;
+            if test.rename_refused.is_some() {
+                // Refused as expected: nothing to apply.
+            } else if let Some(changes) = json.get("changes").and_then(|c| c.as_object()) {
                 // Multi-file rename: apply edits per file, compare against
                 // expected per-file content.
                 if !test.expected_files.is_empty() {
@@ -4297,6 +4354,47 @@ NO_ACTION: Inline local `x`
         std::fs::write(&path, with_result).unwrap();
         let err = parse_lsp_test_file(&path).unwrap_err().to_string();
         assert!(err.contains("drop `RESULT:`"), "{err}");
+    }
+
+    #[test]
+    fn a_refused_rename_fixture_needs_the_error_and_no_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.rock.lsp");
+        let (head, _) = RENAME_FIXTURE.split_once("EXPECTED:\n").unwrap();
+        let refused = format!("{head}EXPECTED:\nREFUSED: opaque body\n===\n");
+        std::fs::write(&path, &refused).unwrap();
+        let test = parse_lsp_test_file(&path).unwrap().pop().unwrap();
+        assert_eq!(test.rename_refused.as_deref(), Some("opaque body"));
+        let edit = serde_json::json!([{"range": {}, "new_text": "total"}]);
+        let check = |reply: serde_json::Value| check_rename_refusal(&test, "rename", &reply);
+        check(serde_json::json!({"changes": {}, "error": "an opaque body names it"})).unwrap();
+        let cases = [
+            (serde_json::json!({"changes": {}}), "was not refused"),
+            (
+                serde_json::json!({"changes": {}, "error": "something else"}),
+                "does not contain",
+            ),
+            (
+                serde_json::json!({"changes": {"f": edit}, "error": "opaque body"}),
+                "still returned edits",
+            ),
+        ];
+        for (reply, want) in cases {
+            let err = check(reply).unwrap_err().to_string();
+            assert!(err.contains(want), "{err}");
+        }
+
+        std::fs::write(&path, RENAME_FIXTURE).unwrap();
+        let plain = parse_lsp_test_file(&path).unwrap().pop().unwrap();
+        let err = check_rename_refusal(&plain, "rename", &serde_json::json!({"error": "no"}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("rename refused: no"), "{err}");
+
+        let trailing = refused.replace("REFUSED: opaque body\n", "REFUSED: opaque body\nfn x\n");
+        std::fs::write(&path, trailing).unwrap();
+        let err = parse_lsp_test_file(&path).unwrap_err().to_string();
+        assert!(err.contains("whole EXPECTED block"), "{err}");
     }
 
     #[test]

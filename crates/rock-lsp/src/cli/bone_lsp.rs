@@ -671,18 +671,23 @@ pub fn prepare_rename(
     bone.update(&file_path, src);
 
     let pos = Position::new(line - 1, column - 1);
-    let range = bone.prepare_rename(&file_path, pos).map(|r| {
+    let prepared = bone.prepare_rename(&file_path, pos);
+    let refusal = prepared.as_ref().err().map(|r| r.to_string());
+    let range = prepared.ok().flatten().map(|r| {
         json!({
             "start": { "line": r.start.line, "character": r.start.character },
             "end":   { "line": r.end.line,   "character": r.end.character },
         })
     });
 
-    let output = json!({
+    let mut output = json!({
         "file": file_path,
         "backend": "bone",
         "range": range.unwrap_or(serde_json::Value::Null),
     });
+    if let Some(refusal) = refusal {
+        output["error"] = json!(refusal);
+    }
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }
@@ -702,7 +707,9 @@ pub fn rename(
 
     let pos = Position::new(line - 1, column - 1);
     let mut changes = serde_json::Map::new();
-    if let Some(edit) = bone.rename(&file_path, pos, new_name) {
+    let renamed = bone.rename(&file_path, pos, new_name);
+    let refusal = renamed.as_ref().err().map(|r| r.to_string());
+    if let Some(edit) = renamed.ok().flatten() {
         if let Some(ch) = edit.changes {
             for (uri, edits) in ch {
                 // Shape matches the harness applier: { range, new_text }.
@@ -723,7 +730,10 @@ pub fn rename(
         }
     }
 
-    let output = json!({ "backend": "bone", "changes": changes });
+    let mut output = json!({ "backend": "bone", "changes": changes });
+    if let Some(refusal) = refusal {
+        output["error"] = json!(refusal);
+    }
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
 }

@@ -49,6 +49,7 @@ fn probe(src: &str, ident: &str) -> Probe {
 
     let rn = |p| {
         bone.rename(PATH, p, "renamed")
+            .expect("no refusal")
             .and_then(|we| we.changes)
             .map(|c| c.values().map(|v| v.len()).sum::<usize>())
             .unwrap_or(0)
