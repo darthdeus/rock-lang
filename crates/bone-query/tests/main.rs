@@ -46,6 +46,8 @@ mod interface_relower_staleness;
 mod interp_hole_spans;
 #[path = "line_index.rs"]
 mod line_index;
+#[path = "lint_columns_after_body_edit.rs"]
+mod lint_columns_after_body_edit;
 #[path = "macro_call_site_sentinel.rs"]
 mod macro_call_site_sentinel;
 #[path = "macro_goto_definition.rs"]

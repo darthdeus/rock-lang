@@ -2880,10 +2880,6 @@ fn shift_span(mut span: Span, edit: &TextEditDelta) -> Span {
     span.offset_range.1 = shift_value(span.offset_range.1, edit.byte_delta);
     span.line_range.0 = shift_value(span.line_range.0, edit.line_delta);
     span.line_range.1 = shift_value(span.line_range.1, edit.line_delta);
-    if edit.line_delta == 0 {
-        span.col_range.0 = shift_value(span.col_range.0, edit.byte_delta);
-        span.col_range.1 = shift_value(span.col_range.1, edit.byte_delta);
-    }
     span
 }
 
