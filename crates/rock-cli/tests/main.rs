@@ -4,6 +4,7 @@ mod backend_stats_summary;
 mod fix_imports;
 mod gpu_process;
 mod guide;
+mod host_api;
 mod lsp_code_action;
 mod metric_add_window;
 mod modules_display_paths;
