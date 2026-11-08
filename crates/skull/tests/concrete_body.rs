@@ -862,6 +862,46 @@ fn main() {
     );
 }
 
+/// Each owner's plan keeps exactly the foreign domains it counted as unique,
+/// so the unique total is the sum of the published per-owner tables. An
+/// owner's own-body sites are requests but never foreign tables.
+#[test]
+fn foreign_domain_unique_counts_only_published_foreign_tables() {
+    let (_ws, _g, bodies) = bodies_of(
+        r#"
+fn seed<T>() -> T? { return null }
+struct Box<T> { value: T? = seed() }
+fn twice(x: int) -> int { return x + x }
+fn main() {
+    let a: Box<int> = Box {}
+    let b: Box<string> = Box {}
+    let c: Box<int> = Box {}
+    print("{a.value} {b.value} {c.value} {twice(1)} {twice(2)}")
+}
+"#,
+    );
+    let census = bodies.census();
+    let published: usize = bodies
+        .plans
+        .values()
+        .map(|plan| plan.foreign_domains.len())
+        .chain(
+            bodies
+                .always_plans
+                .values()
+                .map(|plan| plan.foreign_domains.len()),
+        )
+        .sum();
+    assert_eq!(
+        census.foreign_domain_unique, published,
+        "foreign unique must count published struct-default tables only: {census:?}"
+    );
+    assert!(
+        census.foreign_domain_requests > census.foreign_domain_unique,
+        "own-body sites are requests on top of the foreign tables: {census:?}"
+    );
+}
+
 #[test]
 fn production_plan_keeps_distinct_struct_default_domains() {
     let (ws, g, bodies) = bodies_of(

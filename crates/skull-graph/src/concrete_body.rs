@@ -2217,13 +2217,15 @@ where
     let mut out = BTreeMap::new();
     for domain in domains {
         stats.foreign_domain_requests += 1;
+        // An own-body site needs no foreign table; it is never inserted, so
+        // counting it here would make every such request look unique.
+        let SiteDomain::StructDefaults(..) = domain else {
+            continue;
+        };
         if out.contains_key(&domain) {
             continue;
         }
         stats.foreign_domain_unique += 1;
-        let SiteDomain::StructDefaults(..) = domain else {
-            continue;
-        };
         let tables = published
             .get(&domain)
             .ok_or(MonoTyReason::NoNode)?
