@@ -3179,6 +3179,9 @@ fn build_published_impl(
                 .get((per_inst.len().saturating_sub(1)) * p / 100)
                 .map_or(std::time::Duration::ZERO, |(_, duration)| *duration)
         };
+        // The owner records are authoritative; the compatibility fields on
+        // `out` are only filled by an explicit snapshot, so read the fold.
+        let totals = out.aggregate_facts();
         let top: Vec<String> = per_inst
             .iter()
             .rev()
@@ -3203,11 +3206,11 @@ fn build_published_impl(
              foreign domains {}/{} ({:?}), signatures {}/{} cloned-slots {} ({:?})",
             per_inst.len(),
             unique_decls.len(),
-            out.generic_bodies,
+            totals.generic_bodies,
             out.plans.len(),
-            out.gaps.len(),
-            out.expr_examined,
-            out.binding_examined,
+            totals.gaps.len(),
+            totals.expr_examined,
+            totals.binding_examined,
             t_convert,
             t_callee,
             t_plan,
@@ -3230,21 +3233,21 @@ fn build_published_impl(
             unique_slot_tyids,
             intern_after.intern_attempts - intern_before.intern_attempts,
             intern_after.intern_new - intern_before.intern_new,
-            out.build_stats.type_nodes_examined,
-            out.build_stats.type_node_conversion_attempts,
-            out.build_stats.type_node_memo_hits,
-            out.build_stats.type_node_unresolved,
-            std::time::Duration::from_nanos(out.build_stats.type_nodes_ns),
-            out.build_stats.struct_literals_examined,
-            out.build_stats.struct_field_conversion_attempts,
-            std::time::Duration::from_nanos(out.build_stats.struct_fields_ns),
-            out.build_stats.foreign_domain_requests,
-            out.build_stats.foreign_domain_unique,
-            std::time::Duration::from_nanos(out.build_stats.foreign_domains_ns),
-            out.signature_requests,
+            totals.build_stats.type_nodes_examined,
+            totals.build_stats.type_node_conversion_attempts,
+            totals.build_stats.type_node_memo_hits,
+            totals.build_stats.type_node_unresolved,
+            std::time::Duration::from_nanos(totals.build_stats.type_nodes_ns),
+            totals.build_stats.struct_literals_examined,
+            totals.build_stats.struct_field_conversion_attempts,
+            std::time::Duration::from_nanos(totals.build_stats.struct_fields_ns),
+            totals.build_stats.foreign_domain_requests,
+            totals.build_stats.foreign_domain_unique,
+            std::time::Duration::from_nanos(totals.build_stats.foreign_domains_ns),
+            totals.signature_requests,
             out.signature_derivations,
-            out.signature_slots_cloned,
-            std::time::Duration::from_nanos(out.build_stats.signature_ns),
+            totals.signature_slots_cloned,
+            std::time::Duration::from_nanos(totals.build_stats.signature_ns),
         );
         log::debug!(
             "concrete merge detail: candidate refs {} rows {:?}, plans {:?}, bodies {:?}, \
