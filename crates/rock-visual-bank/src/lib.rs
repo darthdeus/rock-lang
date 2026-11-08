@@ -56,6 +56,18 @@ pub struct SurfaceLine {
     pub cell: [u32; 2],
     pub pivot: [f32; 2],
     pub camera: Camera,
+    #[serde(default)]
+    pub skin_mask: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub studio: Option<Studio>,
+}
+
+/// Authored lighting paired with a relightable surface. The view LUT is shared by the consumer.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Studio {
+    pub radiance_range: f32,
+    pub skin: bool,
 }
 
 /// One camera and presentation scale per character; layers retain their body id.
@@ -83,12 +95,16 @@ impl Camera {
     /// Admission checks reconstruction data. Intersecting `ground_y` is a
     /// world-placement operation; independent views can look along the floor.
     pub fn validate(&self) -> Result<()> {
+        self.validate_views(DIRECTION_COUNT)
+    }
+
+    fn validate_views(&self, count: usize) -> Result<()> {
         anyhow::ensure!(self.ground_y.is_finite(), "camera ground_y must be finite");
         anyhow::ensure!(
-            self.bases.len() == DIRECTION_COUNT,
+            self.bases.len() == count,
             "camera has {} bases, expected {}",
             self.bases.len(),
-            DIRECTION_COUNT
+            count
         );
         anyhow::ensure!(
             self.bases.iter().all(
@@ -380,11 +396,19 @@ pub fn mask_file(mask: &str) -> String {
 pub fn sheet_files(line: &Line) -> Vec<String> {
     let mut files: Vec<String> = match line {
         Line::Character(_) => Vec::new(),
-        Line::Animation(_) | Line::Surface(_) => RELIGHT_CHANNELS
+        Line::Animation(_) => RELIGHT_CHANNELS
             .iter()
             .map(|channel| format!("{channel}.png"))
             .chain([SHEET_GEOMETRY.to_string()])
             .collect(),
+        Line::Surface(surface) => RELIGHT_CHANNELS.iter()
+            .map(|channel| format!("{channel}.png"))
+            .chain([SHEET_GEOMETRY.to_string()])
+            .chain(surface.studio.as_ref().into_iter().flat_map(|studio| {
+                ["painted.png", "radiance.png"].into_iter()
+                    .chain(studio.skin.then_some(["skin-albedo.png", "skin-diffuse.png", "skin-specular.png"]).into_iter().flatten())
+                    .map(str::to_string)
+            })).collect(),
         Line::Prop(prop) => ["albedo.png", "normal.png", "material.png"]
             .into_iter()
             .map(str::to_string)
@@ -480,7 +504,13 @@ pub fn check_line(line: &Line) -> Result<()> {
                 "size and cell must be non-zero"
             );
             anyhow::ensure!(finite(&surface.pivot), "pivot must be finite");
-            surface.camera.validate()?;
+            let views = surface.camera.bases.len();
+            anyhow::ensure!(views == 1 || views == DIRECTION_COUNT, "surface requires one or eight camera bases");
+            surface.camera.validate_views(views)?;
+            if let Some(studio) = &surface.studio {
+                anyhow::ensure!(studio.radiance_range.is_finite() && studio.radiance_range > 0.0,
+                    "studio radiance range must be finite and positive");
+            }
         }
         Line::Animation(a) => {
             anyhow::ensure!(
@@ -959,6 +989,57 @@ mod tests {
             problems.is_empty(),
             "surface admission must not require character animations: {problems:?}"
         );
+    }
+
+    #[test]
+    fn single_view_studio_surface_contract() {
+        let raw = json!({"kind":"surface", "id":"relief", "dir":"0".repeat(64),
+            "size":[2,2], "cell":[2,2], "pivot":[0.5,0.5], "skin_mask":true,
+            "studio":{"skin":true,"radiance_range":16.0},
+            "camera":{"ground_y":0.0,"bases":[
+                [0.,0.,0.,1.,0.,0.,0.,1.,0.,0.,0.,-1.]]}});
+        let line: Line = serde_json::from_value(raw.clone()).unwrap();
+        check_line(&line).unwrap();
+        let files = sheet_files(&line);
+        for name in ["painted.png", "radiance.png", "skin-albedo.png", "skin-diffuse.png", "skin-specular.png"] {
+            assert!(files.contains(&name.to_string()), "missing {name}");
+        }
+        let root = std::env::temp_dir().join(format!("surface-bank-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&root).unwrap();
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+        let _cleanup = Cleanup(root.clone());
+        for name in &files {
+            if name.ends_with(".png") { image::RgbaImage::new(2, 2).save(root.join(name)).unwrap(); }
+        }
+        std::fs::write(root.join(SHEET_GEOMETRY), serde_json::to_vec(&json!({
+            "rects":[[0,0,2,2,0,0,0]], "joints":{}
+        })).unwrap()).unwrap();
+        let spec = sheet_spec(&line).unwrap().unwrap();
+        check_sheet(&root, &spec).unwrap();
+        std::fs::remove_file(root.join("radiance.png")).unwrap();
+        assert!(check_sheet(&root, &spec).unwrap_err().iter().any(|p| p.contains("radiance.png")));
+        image::RgbaImage::new(1, 2).save(root.join("radiance.png")).unwrap();
+        assert!(check_sheet(&root, &spec).unwrap_err().iter().any(|p| p.contains("expected 2x2")));
+        image::RgbaImage::new(2, 2).save(root.join("radiance.png")).unwrap();
+        std::fs::write(root.join(SHEET_GEOMETRY), serde_json::to_vec(&json!({
+            "rects":[[0,0,2,2,0,0,0],[0,0,2,2,0,0,0]], "joints":{}
+        })).unwrap()).unwrap();
+        assert!(check_sheet(&root, &spec).is_err());
+        let mut bad = raw.clone();
+        bad["camera"]["bases"] = json!([]);
+        assert!(check_line(&serde_json::from_value(bad).unwrap()).is_err());
+        let mut bad = raw;
+        bad["studio"]["radiance_range"] = json!(0.0);
+        assert!(check_line(&serde_json::from_value(bad).unwrap()).is_err());
+        let mut character: Line = serde_json::from_value(json!({
+            "kind":"character", "id":"actor", "draw_size":1.0,"padding_px":0.0,
+            "camera":{"ground_y":0.0,"bases":[[0.,0.,0.,1.,0.,0.,0.,1.,0.,0.,0.,-1.]]}
+        })).unwrap();
+        assert!(check_line(&character).is_err());
+        if let Line::Character(c) = &mut character { c.camera.bases = vec![c.camera.bases[0]; DIRECTION_COUNT]; }
+        check_line(&character).unwrap();
     }
 
     #[test]
