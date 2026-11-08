@@ -1234,7 +1234,8 @@ impl<'a> Parser<'a> {
 
     /// After `extern`, read the optional `(ffi, "lib")` / `(lua)` / `(js)`
     /// specifier and return the body kind for the (body-less) declaration. A bare
-    /// `extern` is C; an unknown backend name rejects fail-closed.
+    /// `extern` (or `extern(c)`) names an existing Lua global, as `extern(lua)`
+    /// does; an unknown backend name rejects fail-closed.
     fn parse_extern_specifier(&mut self) -> PResult<FunctionBody> {
         if self.kind() != TokenKind::OpenParen {
             return Ok(FunctionBody::ExternC);
