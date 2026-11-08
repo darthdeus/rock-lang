@@ -743,9 +743,8 @@ pub fn resolve(lines: &[Line]) -> (BankIndex<'_>, Vec<String>) {
         }
     }
     for &(id, label) in index.animations.keys() {
-        match index.characters.get(id) {
-            None => problems.push(format!("animation {id:?}/{label:?} has no character line")),
-            Some(_) => {}
+        if !index.characters.contains_key(id) {
+            problems.push(format!("animation {id:?}/{label:?} has no character line"));
         }
     }
     (index, problems)
