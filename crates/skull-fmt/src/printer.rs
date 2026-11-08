@@ -1900,7 +1900,7 @@ impl<'a> Printer<'a> {
                 return Doc::concat([Doc::text(".."), v]);
             }
             let v = if a.is_splat {
-                Doc::concat([v, Doc::text("...")])
+                Doc::concat([Doc::text("..."), v])
             } else {
                 v
             };

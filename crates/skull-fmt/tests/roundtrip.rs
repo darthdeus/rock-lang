@@ -125,3 +125,21 @@ fn closure_followed_by_another_argument_reaches_a_fixed_point() {
         }
     }
 }
+
+/// Call splats print in the prefix form the parser accepts (`f(...rest)`).
+#[test]
+fn call_splat_roundtrips() {
+    for source in [
+        "macro sum_of(x: expr, rest: ...expr) -> int {\n    x + sum_of(...rest)\n}\n",
+        "macro fwd(rest: ...expr) -> int { sum_of!(...rest) }\n",
+        "fn f(xs: ...int) {\n    g(1, ...xs)\n}\n",
+    ] {
+        let original = skull_parser::parse_module_clean(source, "<source>".into()).unwrap();
+        let once = skull_fmt::format_code(source);
+        let formatted = skull_parser::parse_module_clean(&once, "<formatted>".into())
+            .unwrap_or_else(|e| panic!("formatted splat must parse: {e:?}\n{once}"));
+        assert!(formatted.recovery_errors.is_empty(), "{once}");
+        assert_eq!(original.module_sexp(), formatted.module_sexp(), "{once}");
+        assert_eq!(once, skull_fmt::format_code(&once));
+    }
+}
