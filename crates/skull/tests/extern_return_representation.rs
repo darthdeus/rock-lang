@@ -200,14 +200,13 @@ fn main() { print("x") }
     );
 }
 
-/// `newtype A(B); newtype B(A)` COMPILES, so the alias walk has to terminate on
-/// its own rather than trusting the typechecker to have refused the shape.
-/// Termination is by visited identity and not by a step cap, which is why
-/// `ret_deep` above -- `Pair<Pair<int>>`, legitimately visiting `Pair` twice
-/// with different arguments -- still resolves.
+/// A newtype cycle wraps itself by value, so it has no finite representation
+/// and the front end rejects the definitions before the extern's alias walk
+/// sees them. The walk still terminates by visited identity on its own (see
+/// `ret_deep` above, which visits `Pair` twice with different arguments).
 #[test]
-fn a_self_referential_alias_rejects_instead_of_spinning() {
-    let msg = reject(
+fn a_self_referential_alias_rejects_at_definition() {
+    let errs = crate::common::bone_rejections(
         r#"
 newtype A(B)
 newtype B(A)
@@ -216,18 +215,17 @@ fn main() { print("x") }
 "#,
     );
     assert!(
-        msg.contains("ret_cycle") && msg.contains("contains itself"),
-        "a newtype cycle must reject as a cycle, got:\n{msg}"
+        errs.iter()
+            .any(|e| e.contains("recursive value type: A -> B -> A")),
+        "a newtype cycle must reject as a cycle, got: {errs:?}"
     );
 }
 
-/// A generic alias cycle must be caught by IDENTITY, not by running out of
-/// steps: `X<T>(Y<T>); Y<U>(X<U>)` revisits `X` with the same instantiation, and
-/// the visited key is built from a normalized form precisely so that repeat is
-/// recognizable across arenas.
+/// A generic alias cycle is the same cycle with arguments: `X<T>(Y<T>)` and
+/// `Y<U>(X<U>)` wrap each other by value whatever `T` is.
 #[test]
-fn a_generic_alias_cycle_is_recognized_as_a_cycle() {
-    let msg = reject(
+fn a_generic_alias_cycle_rejects_at_definition() {
+    let errs = crate::common::bone_rejections(
         r#"
 newtype X<T>(Y<T>)
 newtype Y<U>(X<U>)
@@ -236,9 +234,9 @@ fn main() { print("x") }
 "#,
     );
     assert!(
-        msg.contains("ret_gcycle") && msg.contains("contains itself"),
-        "a generic cycle must be reported as a cycle rather than as an exhausted \
-         alias chain, got:\n{msg}"
+        errs.iter()
+            .any(|e| e.contains("recursive value type: X -> Y -> X")),
+        "a generic newtype cycle must reject as a cycle, got: {errs:?}"
     );
 }
 

@@ -1,0 +1,95 @@
+//! Error: a `value` is stored inline wherever it is held, so a value type that
+//!        embeds itself by value, directly or through other values, has no
+//!        finite layout. It is rejected where it is defined, however it is
+//!        used, and a nullable link does not break the cycle. Recursion must
+//!        go through a reference or a handle.
+//! Tags: value, layout, recursion
+
+//=== TEST CASE: direct_self_RecursiveValue ===
+//! expect: recursive value type: Node -> Node; use a reference or handle
+value Node { v: int, next: Node }
+
+fn main() {
+    print("unreachable")
+}
+
+//=== TEST CASE: nullable_self_RecursiveValue ===
+//! expect: recursive value type: Chain -> Chain; use a reference or handle
+value Chain { n: int, next: Chain? }
+
+fn main() {
+    print("unused")
+}
+
+//=== TEST CASE: nullable_self_read_only_RecursiveValue ===
+//! expect: recursive value type: Chain -> Chain
+value Chain { n: int, next: Chain?, xs: [int] }
+struct ChainHolder { c: Chain }
+
+fn main() {
+    let h = ChainHolder { c: Chain { n: 0, next: Chain { n: 1, next: null, xs: [] }, xs: [] } }
+    print(h.c.next?.n ?? -1)
+}
+
+//=== TEST CASE: two_type_cycle_RecursiveValue ===
+//! expect: recursive value type: A -> B -> A; use a reference or handle
+value A { b: B? }
+value B { a: A }
+
+fn main() {
+    print("unused")
+}
+
+//=== TEST CASE: three_type_cycle_RecursiveValue ===
+//! expect: recursive value type: P -> Q -> R -> P; use a reference or handle
+value P { q: Q }
+value Q { r: R? }
+value R { p: P? }
+
+fn main() {
+    print("unused")
+}
+
+//=== TEST CASE: generic_instantiation_RecursiveValue ===
+//! expect: recursive value type: Node -> Box<Node> -> Node; use a reference or handle
+value Box<T> { t: T }
+value Node { v: int, child: Box<Node>? }
+
+fn main() {
+    print("unused")
+}
+
+//=== TEST CASE: nested_generic_instantiation_RecursiveValue ===
+//! expect: recursive value type: Node -> Pair<int, Wrap<Node>> -> Node
+value Wrap<T> { inner: T? }
+value Pair<A, B> { a: A, b: B }
+value Node { p: Pair<int, Wrap<Node>> }
+
+fn main() {
+    print("unused")
+}
+
+//=== TEST CASE: generic_self_RecursiveValue ===
+//! expect: recursive value type: Tree -> Tree
+value Tree<T> { v: T, left: Tree<T>? }
+
+fn main() {
+    print("unused")
+}
+
+//=== TEST CASE: tuple_field_RecursiveValue ===
+//! expect: recursive value type: Node -> Node
+value Node { v: int, pair: (int, Node)? }
+
+fn main() {
+    print("unused")
+}
+
+//=== TEST CASE: newtype_RecursiveValue ===
+//! expect: recursive value type: Node -> NodeId -> Node
+newtype NodeId(Node)
+value Node { v: int, parent: NodeId? }
+
+fn main() {
+    print("unused")
+}

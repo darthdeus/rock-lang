@@ -667,27 +667,7 @@ fn main() {
 }
 "#;
 
-/// A copy of a recursive value must own its `Chain?` child, and so that
-/// child's child, to any depth; the Lua lowering unrolls copies at compile
-/// time and has no runtime copier, so it rejects the copy instead of sharing
-/// the child. The C backend rejects the type's by-value layout.
-#[test]
-fn a_recursive_value_copy_rejects() {
-    let err = crate::common::try_emit_module(RECURSIVE_VALUE_COPY)
-        .expect_err("a recursive value copy must not share its child");
-    assert!(
-        err.message.contains("recursive value type `Chain`"),
-        "the rejection must name the recursive type, got: {}",
-        err.message
-    );
-}
-
-/// The control: reading through a recursive value, and a copy that never
-/// escapes, need no copy of the child.
-#[test]
-fn a_recursive_value_read_compiles() {
-    let lua = emit_module(
-        r#"
+const RECURSIVE_VALUE_READ: &str = r#"
 value Chain { n: int, next: Chain?, xs: [int] }
 struct ChainHolder { c: Chain }
 fn main() {
@@ -695,13 +675,22 @@ fn main() {
     let c = h.c
     print(c.next?.n ?? -1)
 }
-"#,
-    );
-    assert_eq!(
-        run_luajit(
-            &format!("{lua}\nmain()\n"),
-            "value_scalarize_recursive_read"
-        ),
-        "1"
-    );
+"#;
+
+/// A value that embeds itself by value, even through `Chain?`, has no finite
+/// layout, so the front end rejects its definition. The verdict must not
+/// depend on whether the program copies the value or only reads through it.
+#[test]
+fn a_recursive_value_rejects_at_definition_whatever_its_use() {
+    for (use_kind, src) in [
+        ("copy", RECURSIVE_VALUE_COPY),
+        ("read", RECURSIVE_VALUE_READ),
+    ] {
+        let errs = crate::common::bone_rejections(src);
+        assert_eq!(
+            errs,
+            ["recursive value type: Chain -> Chain; use a reference or handle"],
+            "the {use_kind} program must be rejected for the definition alone"
+        );
+    }
 }

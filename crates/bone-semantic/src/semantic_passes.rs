@@ -468,6 +468,7 @@ pub fn lower_modules(
     }
 
     check_embed_site_legality(ws, &ids);
+    crate::value_recursion::check_value_recursion(ws, &ids);
     check_frame_ref_storage(ws, &ids);
     crate::identity_storage::check_identity_storage(ws, &ids);
 

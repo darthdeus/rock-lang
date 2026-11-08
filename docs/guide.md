@@ -145,6 +145,11 @@ so a function cannot mutate its caller's copy. Fields of a value held
 in a local cannot be assigned in place; replace the whole value. The
 math types (`Vec2`, `Vec3`, `Vec4`, `Mat4`) are value types.
 
+A value is stored inline, so it cannot contain itself by value, even
+as `T?` or through other values: `value Node { next: Node? }` is a
+compile error. Recurse through a reference instead, such as a Vec, a
+Map, an enum or an `Entity<T>` handle.
+
 ```rock
 // `value` types look like structs but copy on assignment and on calls,
 // and their fields cannot be mutated in place: replace them wholesale.
