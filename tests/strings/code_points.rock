@@ -1,0 +1,96 @@
+// Code points through string literals, chars() and from_codepoint on both
+// backends. Literals here are real UTF-8 source text: a JS string literal is
+// UTF-16 while luajit's is bytes, so this is where the two representations
+// meet. len, unit_at and find/substring offsets count native units (luajit
+// bytes, JS UTF-16 units), so they are asserted only where the two agree or as
+// round trips through the string primitives.
+
+fn code_points(s: string) -> [int] {
+    let cps: [int] = []
+    for cp in s.chars() { cps.push(cp) }
+    return cps
+}
+
+@test
+fn test_literal_chars_cover_every_utf8_width() {
+    // 1-byte a, 2-byte e-acute, 3-byte euro, 4-byte emoji, 1-byte b.
+    let cps = code_points("aé€😀b")
+    assert_eq(cps.len(), 5)
+    assert_eq(cps[0], 0x61)
+    assert_eq(cps[1], 0xE9)
+    assert_eq(cps[2], 0x20AC)
+    assert_eq(cps[3], 0x1F600)
+    assert_eq(cps[4], 0x62)
+}
+
+@test
+fn test_literal_char_count_by_width() {
+    assert_eq(code_points("ééé").len(), 3)
+    assert_eq(code_points("€€").len(), 2)
+    assert_eq(code_points("😀😀😀😀").len(), 4)
+    assert_eq(code_points("").len(), 0)
+}
+
+@test
+fn test_from_codepoint_equals_literal() {
+    assert(from_codepoint(0xE9) == "é")
+    assert(from_codepoint(0x20AC) == "€")
+    assert(from_codepoint(0x1F600) == "😀")
+    assert(from_codepoint(0x7F) == "\u{7F}")
+    assert(from_codepoint(0x80) == "\u{80}")
+    assert(from_codepoint(0x7FF) == "\u{7FF}")
+    assert(from_codepoint(0x800) == "\u{800}")
+    assert(from_codepoint(0xFFFF) == "\u{FFFF}")
+    assert(from_codepoint(0x10000) == "\u{10000}")
+    assert(from_codepoint(0x10FFFF) == "\u{10FFFF}")
+}
+
+@test
+fn test_from_codepoint_round_trips_through_chars() {
+    let cps = [0x41, 0x7F, 0x80, 0xE9, 0x7FF, 0x800, 0x20AC, 0xD7FF, 0xE000, 0xFFFF, 0x10000, 0x1F600, 0x10FFFF]
+    let sb = sb_new()
+    for cp in cps { sb_push(sb, from_codepoint(cp)) }
+    let back = code_points(sb_build(sb))
+    assert_eq(back.len(), cps.len())
+    for i in 0..cps.len() { assert_eq(back[i], cps[i]) }
+}
+
+@test(output = "aé€😀b")
+fn test_from_codepoint_prints_as_text() {
+    let sb = sb_new()
+    for cp in [0x61, 0xE9, 0x20AC, 0x1F600, 0x62] { sb_push(sb, from_codepoint(cp)) }
+    print(sb_build(sb))
+}
+
+@test
+fn test_native_offsets_round_trip() {
+    let s = "aé€😀b"
+    // Whatever unit the backend counts in, offsets feed back into substring.
+    assert(s.substring(0, s.len()) == s)
+    let at = s.find("€")
+    assert(at > 0)
+    assert(s.substring(at, s.len()) == "€😀b")
+    assert(s.substring(0, at) == "aé")
+    assert(s.ends_with("😀b"))
+    assert(s.starts_with("aé"))
+    assert_eq(code_points(s.substring(at, s.len())).len(), 3)
+}
+
+@test
+fn test_ascii_lengths_and_units_agree() {
+    let s = "rock!"
+    assert_eq(s.len(), 5)
+    assert_eq(s.unit_at(0), 0x72)
+    assert_eq(s.unit_at(4), 0x21)
+    assert_eq(s.unit_at(5), 0)
+    assert_eq(from_codepoint(0x41).len(), 1)
+    assert_eq(from_codepoint(0x41).unit_at(0), 0x41)
+}
+
+@test
+fn test_split_and_join_keep_multibyte_text() {
+    let parts = "é,€,😀".split(",")
+    assert_eq(parts.len(), 3)
+    assert(parts[2] == "😀")
+    assert(parts.join("|") == "é|€|😀")
+}

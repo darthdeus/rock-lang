@@ -100,9 +100,9 @@ fn string.trim(s) -> string {
     return table.concat(parts._data, separator, 1, parts.len)
 """
 
-// Code-point iterator over the native units (UTF-8 decode on luajit). Yields
-// code points as ints; the portable way to walk real characters. Costs
-// nothing when unused.
+// Code-point iterator over the native units (UTF-8 decode on luajit, UTF-16
+// on JS). Yields code points as ints; the portable way to walk real
+// characters. Costs nothing when unused.
 struct CharsIter {
     s: string,
     i: int,
@@ -119,22 +119,35 @@ fn CharsIter.next(it) -> (bool, int) {
     if b0 < 0x80 {
         it.i = it.i + 1
         return (true, b0)
-    } else if b0 < 0xE0 {
-        let b1 = it.s.unit_at(it.i + 1)
-        it.i = it.i + 2
-        return (true, (b0 - 0xC0) * 0x40 + (b1 - 0x80))
-    } else if b0 < 0xF0 {
-        let b1 = it.s.unit_at(it.i + 1)
-        let b2 = it.s.unit_at(it.i + 2)
-        it.i = it.i + 3
-        return (true, (b0 - 0xE0) * 0x1000 + (b1 - 0x80) * 0x40 + (b2 - 0x80))
-    } else {
-        let b1 = it.s.unit_at(it.i + 1)
-        let b2 = it.s.unit_at(it.i + 2)
-        let b3 = it.s.unit_at(it.i + 3)
-        it.i = it.i + 4
-        return (true, (b0 - 0xF0) * 0x40000 + (b1 - 0x80) * 0x1000 + (b2 - 0x80) * 0x40 + (b3 - 0x80))
     }
+    let cp = __char_decode(it.s, it.i, b0)
+    it.i = it.i + __char_units(b0, cp)
+    return (true, cp)
+}
+
+// The non-ASCII code point whose first native unit `b0` sits at `i`. This is
+// the UTF-8 decode over luajit bytes; the JS sibling in js.rock decodes UTF-16,
+// because a JS string literal is UTF-16 text, not a byte string.
+fn __char_decode(s: string, i: int, b0: int) -> int {
+    if b0 < 0xE0 {
+        let b1 = s.unit_at(i + 1)
+        return (b0 - 0xC0) * 0x40 + (b1 - 0x80)
+    } else if b0 < 0xF0 {
+        let b1 = s.unit_at(i + 1)
+        let b2 = s.unit_at(i + 2)
+        return (b0 - 0xE0) * 0x1000 + (b1 - 0x80) * 0x40 + (b2 - 0x80)
+    }
+    let b1 = s.unit_at(i + 1)
+    let b2 = s.unit_at(i + 2)
+    let b3 = s.unit_at(i + 3)
+    return (b0 - 0xF0) * 0x40000 + (b1 - 0x80) * 0x1000 + (b2 - 0x80) * 0x40 + (b3 - 0x80)
+}
+
+// Native units in the non-ASCII code point `cp` that starts with unit `b0`.
+fn __char_units(b0: int, cp: int) -> int {
+    if b0 < 0xE0 { return 2 }
+    if b0 < 0xF0 { return 3 }
+    return 4
 }
 
 // ---------------------------------------------------------------------------

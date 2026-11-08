@@ -105,6 +105,8 @@
 // prelude: __arena_store_mut
 // prelude: __arena_store_or_dead
 // prelude: __arena_store_or_empty
+// prelude: __char_decode
+// prelude: __char_units
 // prelude: __debug_traceback
 // prelude: __descriptor_with
 // prelude: __entity_arena

@@ -15,6 +15,11 @@
 
 @inline inline(js) fn format_float_roundtrip(value: float) -> string = "return String(value);"
 
+// UTF-16 siblings of the chars() helpers in strings.rock. A lone surrogate
+// decodes to itself, one unit wide.
+@inline inline(js) fn __char_decode(s: string, i: int, b0: int) -> int = "return s.codePointAt(i);"
+@inline inline(js) fn __char_units(b0: int, cp: int) -> int = "return cp > 0xFFFF ? 2 : 1;"
+
 // The shared slot core. Its luajit sibling in `unified.rock` is the contract;
 // this is the same free list over a 0-based JS array. Column Maps are a luajit
 // storage form, so on this backend the only consumer is `Arena<T>`.

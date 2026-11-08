@@ -1,5 +1,20 @@
-// Surrogate pair for the emoji at U+1F600 must decode to a 4-byte UTF-8 sequence.
+// Surrogate pair for the emoji at U+1F600 decodes to one code point.
 @test
+fn test_json_surrogate_pair_is_one_code_point() {
+    let decoded = json_decode("\"\\ud83d\\ude00\"")
+    let s = json_as_str(decoded.unwrap()).unwrap()
+    assert(s == "\u{1F600}")
+    let cps: [int] = []
+    for cp in s.chars() { cps.push(cp) }
+    assert_eq(cps.len(), 1)
+    assert_eq(cps[0], 0x1F600)
+}
+
+// The byte layouts below are luajit's string representation (UTF-8 bytes).
+// JS strings are UTF-16; tests/strings/code_points.rock covers both backends.
+
+// Surrogate pair for the emoji at U+1F600 must decode to a 4-byte UTF-8 sequence.
+@test(backends = "lua")
 fn test_json_surrogate_pair_emoji() {
     let decoded = json_decode("\"\\ud83d\\ude00\"")
     assert(decoded != null)
@@ -13,7 +28,7 @@ fn test_json_surrogate_pair_emoji() {
     assert_eq(result.unit_at(3), 0x80)
 }
 
-@test
+@test(backends = "lua")
 fn test_from_codepoint_1byte_boundary() {
     let a = from_codepoint(0x7F)
     assert_eq(a.len(), 1)
@@ -25,7 +40,7 @@ fn test_from_codepoint_1byte_boundary() {
     assert_eq(b.unit_at(1), 0x80)
 }
 
-@test
+@test(backends = "lua")
 fn test_from_codepoint_2byte_boundary() {
     let a = from_codepoint(0x7FF)
     assert_eq(a.len(), 2)
@@ -39,7 +54,7 @@ fn test_from_codepoint_2byte_boundary() {
     assert_eq(b.unit_at(2), 0x80)
 }
 
-@test
+@test(backends = "lua")
 fn test_from_codepoint_3byte_boundary() {
     let a = from_codepoint(0xFFFF)
     assert_eq(a.len(), 3)
@@ -55,7 +70,7 @@ fn test_from_codepoint_3byte_boundary() {
     assert_eq(b.unit_at(3), 0x80)
 }
 
-@test
+@test(backends = "lua")
 fn test_from_codepoint_max() {
     let a = from_codepoint(0x10FFFF)
     assert_eq(a.len(), 4)

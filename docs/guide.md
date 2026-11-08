@@ -527,9 +527,11 @@ fn main() {
 ## Strings
 
 String literals interpolate `{expr}`; write `{{` for a literal brace.
-Offsets and lengths count bytes. The method list below is the core;
-`upper`, `lower`, `repeat`, `starts_with`, `ends_with`, `replace`,
-`pad_left`, `pad_right`, `lines` and `parse_float` work the same way.
+Offsets and lengths count bytes (UTF-16 units on the JS backend);
+`chars()` yields Unicode code points on both. The method list below
+is the core; `upper`, `lower`, `repeat`, `starts_with`, `ends_with`,
+`replace`, `pad_left`, `pad_right`, `lines` and `parse_float` work the
+same way.
 
 ```rock
 // Strings interpolate `{expr}`; write `{{` for a literal brace.

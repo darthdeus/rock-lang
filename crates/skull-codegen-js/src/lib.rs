@@ -222,7 +222,7 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
     ("__op_ne", 2, Emission::Template("(!__op_eq($1, $2))")),
     ("len", 1, Emission::Template("$1.length")),
     ("float", 1, Emission::Template("$1")),
-    // The runtime encoder preserves Lua UTF-8 byte-string units.
+    // The runtime encoder checks the code point like luajit, then emits UTF-16.
     (
         "from_codepoint",
         1,
@@ -1634,16 +1634,14 @@ function __parse_float(s) {
   var n = Number(s);
   return n !== n ? null : n;
 }
-// Byte-faithful UTF-8 encoder (stdlib from_codepoint): each output char code is
-// one UTF-8 byte, so the result is a luajit-shaped byte-string that `chars()`
-// decodes back to the same code point on both backends.
+// stdlib from_codepoint: the same range and surrogate checks as luajit. JS
+// strings are UTF-16, so the code point becomes UTF-16 text (as a literal does)
+// rather than one char per UTF-8 byte, which would print as mojibake and
+// compare unequal to the same literal.
 function __from_codepoint(cp) {
   if (cp < 0 || cp > 0x10FFFF) throw new Error("from_codepoint: codepoint out of range: " + cp);
   if (cp >= 0xD800 && cp <= 0xDFFF) throw new Error("from_codepoint: surrogate is not a code point: " + cp);
-  if (cp < 0x80) return String.fromCharCode(cp);
-  if (cp < 0x800) return String.fromCharCode(0xC0 + Math.floor(cp / 0x40), 0x80 + (cp % 0x40));
-  if (cp < 0x10000) return String.fromCharCode(0xE0 + Math.floor(cp / 0x1000), 0x80 + (Math.floor(cp / 0x40) % 0x40), 0x80 + (cp % 0x40));
-  return String.fromCharCode(0xF0 + Math.floor(cp / 0x40000), 0x80 + (Math.floor(cp / 0x1000) % 0x40), 0x80 + (Math.floor(cp / 0x40) % 0x40), 0x80 + (cp % 0x40));
+  return String.fromCodePoint(cp);
 }
 // The `{x:spec}` string-interpolation format helpers (stdlib/strings.rock,
 // @nomangle inline(lua)). ASCII fill/sep. `__rock_fmt_pad` pads `s` to `width`
