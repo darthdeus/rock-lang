@@ -251,17 +251,48 @@ fn strip_markers(raw: &str) -> (String, Option<usize>) {
     (clean, cursor_pos)
 }
 
-/// Parse a single FILES: / FILE: block sequence until the next `OPERATION:` or
-/// `EXPECTED:` line. Returns the collected files (name, content) with all
-/// cursor markers stripped, plus the cursor position if any.
+/// A malformed-fixture error naming the file and the test. Every input the
+/// parser cannot read lands here: a fixture that is skipped instead would
+/// drop out of the run and its absence would pass unnoticed.
+fn fixture_error(path: &Path, name: &str, msg: impl std::fmt::Display) -> anyhow::Error {
+    anyhow::anyhow!("{}: test '{}': {}", path.display(), name, msg)
+}
+
+/// Consume a block's remaining lines through its `===` terminator (or the end
+/// of the file). A `TEST:` line before `===` means the terminator is missing,
+/// which would merge two fixtures.
+fn skip_to_block_end<'a, I>(
+    lines: &mut std::iter::Peekable<I>,
+    path: &Path,
+    name: &str,
+) -> Result<()>
+where
+    I: Iterator<Item = &'a str>,
+{
+    while let Some(line) = lines.peek() {
+        if line.starts_with("TEST:") {
+            return Err(fixture_error(path, name, "block has no closing `===`"));
+        }
+        if lines.next().unwrap().starts_with("===") {
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+/// Parse a single FILES: / FILE: block sequence until the next line starting
+/// with one of `stop_prefixes`. Returns the collected files (name, content)
+/// with all cursor markers stripped, plus the cursor position if any.
 #[allow(clippy::type_complexity)]
 fn parse_files_block<'a, I>(
     lines: &mut std::iter::Peekable<I>,
     stop_prefixes: &[&str],
-) -> (
+    path: &Path,
+    name: &str,
+) -> Result<(
     Vec<(String, String)>,
     Option<(String, usize, usize)>, // (file_name, line, char)
-)
+)>
 where
     I: Iterator<Item = &'a str>,
 {
@@ -278,7 +309,7 @@ where
             break;
         }
         if let Some(rest) = line.strip_prefix("FILE:") {
-            let name = rest.trim().to_string();
+            let file_name = rest.trim().to_string();
             lines.next();
             // consume leading `---`
             if lines.peek().map(|l| l.starts_with("---")).unwrap_or(false) {
@@ -299,20 +330,73 @@ where
                 let (clean, cursor_pos) = strip_markers(raw);
                 if let Some(c) = cursor_pos {
                     if cursor.is_none() {
-                        cursor = Some((name.clone(), file_line_num, c));
+                        cursor = Some((file_name.clone(), file_line_num, c));
                     }
                 }
                 content_lines.push(clean);
                 file_line_num += 1;
             }
-            files.push((name, content_lines.join("\n")));
-        } else {
-            // Blank line or stray text inside FILES: block — skip.
+            files.push((file_name, content_lines.join("\n")));
+        } else if line.trim().is_empty() {
             lines.next();
+        } else {
+            return Err(fixture_error(
+                path,
+                name,
+                format!("expected `FILE:` in a files block, found {line:?}"),
+            ));
         }
     }
 
-    (files, cursor)
+    if files.is_empty() {
+        return Err(fixture_error(
+            path,
+            name,
+            "files block has no `FILE:` entries",
+        ));
+    }
+    Ok((files, cursor))
+}
+
+/// The position a positional operation runs at: an explicit `POSITION:` line,
+/// else the code block's cursor marker. A fixture with neither has nowhere to
+/// send the request.
+fn operation_position<'a, I>(
+    lines: &mut std::iter::Peekable<I>,
+    cursor: Option<(usize, usize)>,
+    path: &Path,
+    name: &str,
+    op_type: &str,
+) -> Result<(usize, usize)>
+where
+    I: Iterator<Item = &'a str>,
+{
+    if let Some(pos_line) = lines.next_if(|l| l.starts_with("POSITION:")) {
+        return parse_position(pos_line).map_err(|e| fixture_error(path, name, e));
+    }
+    cursor.ok_or_else(|| {
+        fixture_error(
+            path,
+            name,
+            format!("OPERATION '{op_type}' needs a `POSITION:` line or a cursor marker"),
+        )
+    })
+}
+
+/// Whether a line outside any block is shaped like part of a fixture: a
+/// `---`/`===` delimiter or an upper-case `KEYWORD:` such as `TYPE:`, or any
+/// spelling of `test:`.
+fn looks_like_directive(line: &str) -> bool {
+    let line = line.trim_start();
+    if line.starts_with("---") || line.starts_with("===") {
+        return true;
+    }
+    let Some((keyword, _)) = line.split_once(':') else {
+        return false;
+    };
+    let keyword = keyword.trim();
+    keyword.eq_ignore_ascii_case("test")
+        || (!keyword.is_empty() && keyword.chars().all(|c| c.is_ascii_uppercase() || c == '_'))
 }
 
 /// Parse an LSP test file
@@ -322,606 +406,525 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
     let mut lines = contents.lines().peekable();
 
     while let Some(line) = lines.next() {
-        if line.starts_with("TEST:") {
-            let name = line.strip_prefix("TEST:").unwrap().trim().to_string();
-
-            // Parse test type
-            let test_type = if let Some(next_line) = lines.next() {
-                if next_line.starts_with("TYPE:") {
-                    next_line.strip_prefix("TYPE:").unwrap().trim().to_string()
-                } else {
-                    continue;
-                }
-            } else {
-                continue;
-            };
-
-            // A TYPE the harness cannot decode is refused here, naming itself: a
-            // dropped fixture is a vacuous pass, and comparing its raw reply
-            // would accept output the server never shaped. `edit_sequence`
-            // fixtures are read by `parse_edit_sequence_tests`, and `code_action`
-            // is skipped below because no subcommand answers it.
-            let type_kind = fixture_reply_kind(&test_type);
-            if type_kind.is_none() && test_type != "edit_sequence" && test_type != "code_action" {
+        let Some(name) = line.strip_prefix("TEST:") else {
+            // Prose notes between blocks are allowed. A line shaped like a
+            // fixture directive is a mangled header, and the block under it
+            // would be skipped along with the prose.
+            if looks_like_directive(line) {
                 return Err(anyhow::anyhow!(
-                    "{}: test '{}' has TYPE '{}', which has no reply decoder",
-                    path.display(),
-                    name,
-                    test_type
+                    "{}: expected `TEST:` before {line:?}",
+                    path.display()
                 ));
             }
+            continue;
+        };
+        let name = name.trim().to_string();
 
-            // Multi-file mode: `FILES:` after `TYPE:` instead of a code block.
-            let is_multi_file = lines.peek().map(|l| l.trim() == "FILES:").unwrap_or(false);
+        let test_type = match lines.next() {
+            Some(next_line) if next_line.starts_with("TYPE:") => {
+                next_line.strip_prefix("TYPE:").unwrap().trim().to_string()
+            }
+            Some(next_line) => {
+                return Err(fixture_error(
+                    path,
+                    &name,
+                    format!("expected `TYPE:` after `TEST:`, found {next_line:?}"),
+                ));
+            }
+            None => return Err(fixture_error(path, &name, "file ends before `TYPE:`")),
+        };
 
-            let mut files: Vec<(String, String)> = Vec::new();
-            let mut primary_file = String::new();
-            let mut cursor_line: Option<usize> = None;
-            let mut cursor_char: Option<usize> = None;
-            let mut code = String::new();
+        // A TYPE the harness cannot decode is refused here, naming itself: a
+        // dropped fixture is a vacuous pass, and comparing its raw reply
+        // would accept output the server never shaped. `edit_sequence`
+        // fixtures are read by `parse_edit_sequence_tests`, and `code_action`
+        // is skipped by name because no subcommand answers it.
+        let type_kind = fixture_reply_kind(&test_type);
+        if type_kind.is_none() && test_type != "edit_sequence" && test_type != "code_action" {
+            return Err(anyhow::anyhow!(
+                "{}: test '{}' has TYPE '{}', which has no reply decoder",
+                path.display(),
+                name,
+                test_type
+            ));
+        }
+        if test_type == "edit_sequence" || test_type == "code_action" {
+            skip_to_block_end(&mut lines, path, &name)?;
+            continue;
+        }
 
-            if is_multi_file {
-                lines.next(); // consume `FILES:`
-                let (parsed_files, cur) = parse_files_block(&mut lines, &["OPERATION:"]);
-                if let Some((fname, l, c)) = cur {
-                    primary_file = fname.clone();
-                    cursor_line = Some(l);
-                    cursor_char = Some(c);
-                    // Primary file code is the one holding the cursor marker.
-                    for (name, content) in &parsed_files {
-                        if name == &fname {
-                            code = content.clone();
-                            break;
-                        }
-                    }
-                }
-                files = parsed_files;
-            } else {
-                // Skip separator
-                if let Some(sep) = lines.next() {
-                    if !sep.starts_with("---") {
-                        continue;
-                    }
-                }
+        // Multi-file mode: `FILES:` after `TYPE:` instead of a code block.
+        let is_multi_file = lines.peek().map(|l| l.trim() == "FILES:").unwrap_or(false);
 
-                // Collect code until we hit the next separator
-                let mut code_lines = Vec::new();
-                let mut line_num = 0;
+        let mut files: Vec<(String, String)> = Vec::new();
+        let mut primary_file = String::new();
+        let mut cursor: Option<(usize, usize)> = None;
+        let mut code = String::new();
 
-                while let Some(line) = lines.peek() {
-                    if line.starts_with("---") {
-                        lines.next();
+        if is_multi_file {
+            lines.next(); // consume `FILES:`
+            let (parsed_files, cur) = parse_files_block(&mut lines, &["OPERATION:"], path, &name)?;
+            if let Some((fname, l, c)) = cur {
+                primary_file = fname.clone();
+                cursor = Some((l, c));
+                // Primary file code is the one holding the cursor marker.
+                for (file_name, content) in &parsed_files {
+                    if file_name == &fname {
+                        code = content.clone();
                         break;
                     }
-                    let line = lines.next().unwrap();
-                    let (clean, cursor_pos) = strip_markers(line);
-                    if let Some(c) = cursor_pos {
-                        if cursor_line.is_none() {
-                            cursor_line = Some(line_num);
-                            cursor_char = Some(c);
-                        }
-                    }
-                    code_lines.push(clean);
-                    line_num += 1;
                 }
-
-                code = code_lines.join("\n");
             }
-
-            // Parse operation
-            let operation_text;
-            let operation = if let Some(op_line) = lines.next() {
-                if op_line.starts_with("OPERATION:") {
-                    let op_type = op_line.strip_prefix("OPERATION:").unwrap().trim();
-                    operation_text = op_type.to_string();
-
-                    // Some operations don't need positions
-                    match op_type {
-                        "inlay_hints" | "semantic_tokens" | "full_document"
-                        | "document_symbols" => {
-                            // These operations work on the full document
-                            match op_type {
-                                "inlay_hints" => LspOperation::InlayHints,
-                                "semantic_tokens" | "full_document" => LspOperation::SemanticTokens,
-                                "document_symbols" => LspOperation::DocumentSymbols,
-                                _ => continue,
-                            }
-                        }
-                        "workspace_symbols" => {
-                            // Workspace symbols needs a query
-                            let query = if let Some(query_line) = lines.peek() {
-                                if query_line.starts_with("QUERY:") {
-                                    let query_line = lines.next().unwrap();
-                                    query_line
-                                        .strip_prefix("QUERY:")
-                                        .unwrap()
-                                        .trim()
-                                        .to_string()
-                                } else {
-                                    String::new()
-                                }
-                            } else {
-                                String::new()
-                            };
-                            LspOperation::WorkspaceSymbols { query }
-                        }
-                        _ => {
-                            // Other operations need a position
-                            let (line, character) = if let Some(pos_line) = lines.peek() {
-                                if pos_line.starts_with("POSITION:") {
-                                    let pos_line = lines.next().unwrap();
-                                    parse_position(pos_line)?
-                                } else if let (Some(l), Some(c)) = (cursor_line, cursor_char) {
-                                    (l, c)
-                                } else {
-                                    continue;
-                                }
-                            } else if let (Some(l), Some(c)) = (cursor_line, cursor_char) {
-                                (l, c)
-                            } else {
-                                continue;
-                            };
-
-                            match op_type {
-                                "completion" => LspOperation::Completion { line, character },
-                                "goto_definition" => {
-                                    LspOperation::GotoDefinition { line, character }
-                                }
-                                "goto_type_definition" => {
-                                    LspOperation::GotoTypeDefinition { line, character }
-                                }
-                                "hover" => LspOperation::Hover { line, character },
-                                "references" => LspOperation::References { line, character },
-                                "code_action" => {
-                                    // The rock-lsp CLI has no `code-actions`
-                                    // subcommand, so these tests cannot run.
-                                    // Skip at parse time rather than failing
-                                    // loudly — matches the prior silent no-op
-                                    // behaviour. When code-action CLI support
-                                    // is added, remove this skip.
-                                    let _ = line;
-                                    let _ = character;
-                                    continue;
-                                }
-                                "signature_help" => LspOperation::SignatureHelp { line, character },
-                                "rename" => {
-                                    // For rename, we need to parse the new name
-                                    // Look for NEW_NAME: in the next line
-                                    if let Some(name_line) = lines.peek() {
-                                        if name_line.starts_with("NEW_NAME:") {
-                                            let name_line = lines.next().unwrap();
-                                            let new_name = name_line
-                                                .strip_prefix("NEW_NAME:")
-                                                .unwrap()
-                                                .trim()
-                                                .to_string();
-                                            LspOperation::Rename {
-                                                line,
-                                                character,
-                                                new_name,
-                                            }
-                                        } else {
-                                            // Default new name if not specified
-                                            LspOperation::Rename {
-                                                line,
-                                                character,
-                                                new_name: "renamed".to_string(),
-                                            }
-                                        }
-                                    } else {
-                                        LspOperation::Rename {
-                                            line,
-                                            character,
-                                            new_name: "renamed".to_string(),
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    return Err(anyhow::anyhow!(
-                                        "{}: test '{}' has OPERATION '{}', which has no reply decoder",
-                                        path.display(),
-                                        name,
-                                        op_type
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    continue;
+            files = parsed_files;
+        } else {
+            match lines.next() {
+                Some(sep) if sep.starts_with("---") => {}
+                Some(sep) => {
+                    return Err(fixture_error(
+                        path,
+                        &name,
+                        format!("expected `---` or `FILES:` after `TYPE:`, found {sep:?}"),
+                    ));
                 }
-            } else {
-                continue;
-            };
-
-            // The TYPE names the decoder and the OPERATION names the request; a
-            // fixture whose halves disagree would run one request through another
-            // type's validator.
-            if let Some(type_kind) = type_kind {
-                if type_kind != operation.reply_kind() {
-                    return Err(anyhow::anyhow!(
-                        "{}: test '{}' has TYPE '{}' but OPERATION '{}' answers a {:?} reply",
-                        path.display(),
-                        name,
-                        test_type,
-                        operation_text,
-                        operation.reply_kind()
+                None => {
+                    return Err(fixture_error(
+                        path,
+                        &name,
+                        "file ends before the code block",
                     ));
                 }
             }
 
-            // Skip separator if present
-            if let Some(line) = lines.peek() {
+            // Collect code until the closing separator.
+            let mut code_lines = Vec::new();
+            let mut closed = false;
+            for line in lines.by_ref() {
                 if line.starts_with("---") {
-                    lines.next();
+                    closed = true;
+                    break;
                 }
-            }
-
-            // Parse expected results
-            let mut expected = Vec::new();
-            let mut expected_code: Option<String> = None;
-            let mut rename_lines: Vec<String> = Vec::new();
-            let mut expected_files: Vec<(String, String)> = Vec::new();
-            if let Some(exp_line) = lines.next() {
-                if exp_line.starts_with("EXPECTED:") {
-                    // Multi-file EXPECTED uses `FILE: name / --- / content / ---` blocks
-                    // up to `===`. Detect by peeking for `FILE:`.
-                    let is_multi_expected = is_multi_file
-                        && lines
-                            .peek()
-                            .map(|l| {
-                                l.starts_with("FILE:")
-                                    || (l.starts_with("---") && {
-                                        // Peek one more: not straightforward with
-                                        // `Peekable`, so just allow the `---` leader.
-                                        true
-                                    })
-                            })
-                            .unwrap_or(false);
-
-                    if is_multi_expected {
-                        let (parsed, _cur) = parse_files_block(&mut lines, &["==="]);
-                        expected_files = parsed;
-                        // Consume `===`
-                        if lines.peek().map(|l| l.starts_with("===")).unwrap_or(false) {
-                            lines.next();
-                        }
-                    } else {
-                        // FOOT-GUN: every new TYPE: must have a matching branch
-                        // below, or its expected lines will silently be dropped
-                        // and the test will no-op. See the compiler contract.
-                        while let Some(line) = lines.peek() {
-                            if line.starts_with("===") {
-                                lines.next();
-                                break;
-                            }
-                            let line = lines.next().unwrap();
-                            if test_type == "rename" {
-                                // Raw capture; snippet-vs-full-code is decided
-                                // after the loop from the first non-empty line.
-                                rename_lines.push(line.to_string());
-                            } else if line.starts_with("- ") {
-                                expected.push(line.strip_prefix("- ").unwrap().to_string());
-                            } else if line.starts_with("file:")
-                                || line.starts_with("line:")
-                                || line.starts_with("character:")
-                                || line.starts_with("min_tokens:")
-                            {
-                                expected.push(line.to_string());
-                            } else if (test_type == "goto_definition"
-                                || test_type == "goto_type_definition"
-                                || test_type == "references")
-                                && line.trim().eq_ignore_ascii_case("none")
-                            {
-                                // `EXPECTED: none` — this request should return no
-                                // targets (goto-def/type-def/references).
-                                expected.push("none".to_string());
-                            } else if test_type == "hover" {
-                                // For hover tests, include all lines as expected content
-                                expected.push(line.to_string());
-                            } else if test_type == "inlay_hints" {
-                                // Expected block is a re-rendering of the source
-                                // with `«hint::LABEL»` markers inline. Validator
-                                // parses these into (line, col, label) triples.
-                                expected.push(line.to_string());
-                            } else if test_type == "signature_help" {
-                                // Bare signature strings like `greet(name: string,
-                                // times: int)` match any returned signature. A
-                                // line starting with `ACTIVE:` matches the
-                                // *active* signature only (used to verify overload
-                                // resolution picked the right arm).
-                                if !line.trim().is_empty() {
-                                    expected.push(line.to_string());
-                                }
-                            }
-                        }
+                let (clean, cursor_pos) = strip_markers(line);
+                if let Some(c) = cursor_pos {
+                    if cursor.is_none() {
+                        cursor = Some((code_lines.len(), c));
                     }
                 }
+                code_lines.push(clean);
             }
+            if !closed {
+                return Err(fixture_error(
+                    path,
+                    &name,
+                    "file ends before the code block's closing `---`",
+                ));
+            }
+            code = code_lines.join("\n");
+        }
 
-            // Single-file rename EXPECTED comes in two shapes: a `- snippet`
-            // list (substring-matched) or the full post-rename file content
-            // (compared exactly -- a snippet match can't catch missed sites).
-            if test_type == "rename" && expected_files.is_empty() {
-                let snippet_style = rename_lines
-                    .iter()
-                    .find(|l| !l.trim().is_empty())
-                    .is_some_and(|l| l.starts_with("- "));
-                if snippet_style {
-                    expected.extend(
-                        rename_lines
-                            .iter()
-                            .filter_map(|l| l.strip_prefix("- ").map(str::to_string)),
-                    );
-                } else {
-                    expected_code = Some(rename_lines.join("\n"));
+        let op_type = match lines.next() {
+            Some(op_line) => match op_line.strip_prefix("OPERATION:") {
+                Some(op) => op.trim(),
+                None => {
+                    return Err(fixture_error(
+                        path,
+                        &name,
+                        format!("expected `OPERATION:` after the code block, found {op_line:?}"),
+                    ));
+                }
+            },
+            None => return Err(fixture_error(path, &name, "file ends before `OPERATION:`")),
+        };
+        let at = |lines: &mut std::iter::Peekable<_>| {
+            operation_position(lines, cursor, path, &name, op_type)
+        };
+        let operation = match op_type {
+            "inlay_hints" => LspOperation::InlayHints,
+            "semantic_tokens" | "full_document" => LspOperation::SemanticTokens,
+            "document_symbols" => LspOperation::DocumentSymbols,
+            "workspace_symbols" => {
+                let query = match lines.next_if(|l| l.starts_with("QUERY:")) {
+                    Some(q) => q.strip_prefix("QUERY:").unwrap().trim().to_string(),
+                    None => String::new(),
+                };
+                LspOperation::WorkspaceSymbols { query }
+            }
+            "completion" => {
+                let (line, character) = at(&mut lines)?;
+                LspOperation::Completion { line, character }
+            }
+            "goto_definition" => {
+                let (line, character) = at(&mut lines)?;
+                LspOperation::GotoDefinition { line, character }
+            }
+            "goto_type_definition" => {
+                let (line, character) = at(&mut lines)?;
+                LspOperation::GotoTypeDefinition { line, character }
+            }
+            "hover" => {
+                let (line, character) = at(&mut lines)?;
+                LspOperation::Hover { line, character }
+            }
+            "references" => {
+                let (line, character) = at(&mut lines)?;
+                LspOperation::References { line, character }
+            }
+            "signature_help" => {
+                let (line, character) = at(&mut lines)?;
+                LspOperation::SignatureHelp { line, character }
+            }
+            "rename" => {
+                let (line, character) = at(&mut lines)?;
+                let new_name = match lines.next_if(|l| l.starts_with("NEW_NAME:")) {
+                    Some(n) => n.strip_prefix("NEW_NAME:").unwrap().trim().to_string(),
+                    None => "renamed".to_string(),
+                };
+                LspOperation::Rename {
+                    line,
+                    character,
+                    new_name,
                 }
             }
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "{}: test '{}' has OPERATION '{}', which has no reply decoder",
+                    path.display(),
+                    name,
+                    op_type
+                ));
+            }
+        };
 
-            tests.push(LspTest {
-                name,
-                test_type,
-                code,
-                files,
-                primary_file,
-                operation,
-                expected,
-                expected_code,
-                expected_files,
-            });
+        // The TYPE names the decoder and the OPERATION names the request; a
+        // fixture whose halves disagree would run one request through another
+        // type's validator.
+        if let Some(type_kind) = type_kind {
+            if type_kind != operation.reply_kind() {
+                return Err(anyhow::anyhow!(
+                    "{}: test '{}' has TYPE '{}' but OPERATION '{}' answers a {:?} reply",
+                    path.display(),
+                    name,
+                    test_type,
+                    op_type,
+                    operation.reply_kind()
+                ));
+            }
         }
+
+        // Skip separator if present
+        lines.next_if(|l| l.starts_with("---"));
+
+        match lines.next() {
+            Some(exp_line) if exp_line.starts_with("EXPECTED:") => {}
+            Some(exp_line) => {
+                return Err(fixture_error(
+                    path,
+                    &name,
+                    format!("expected `EXPECTED:` after the operation, found {exp_line:?}"),
+                ));
+            }
+            None => return Err(fixture_error(path, &name, "file ends before `EXPECTED:`")),
+        }
+
+        let mut expected = Vec::new();
+        let mut expected_code: Option<String> = None;
+        let mut rename_lines: Vec<String> = Vec::new();
+        let mut expected_files: Vec<(String, String)> = Vec::new();
+
+        // Multi-file EXPECTED uses `FILE: name / --- / content / ---` blocks
+        // up to `===`.
+        let is_multi_expected = is_multi_file
+            && lines
+                .peek()
+                .is_some_and(|l| l.starts_with("FILE:") || l.starts_with("---"));
+
+        if is_multi_expected {
+            let (parsed, _cur) = parse_files_block(&mut lines, &["===", "TEST:"], path, &name)?;
+            expected_files = parsed;
+            if lines.next_if(|l| l.starts_with("===")).is_none() && lines.peek().is_some() {
+                return Err(fixture_error(path, &name, "block has no closing `===`"));
+            }
+        } else {
+            // The last block may end at the end of the file without `===`.
+            for line in lines.by_ref() {
+                if line.starts_with("===") {
+                    break;
+                }
+                if line.starts_with("TEST:") {
+                    return Err(fixture_error(path, &name, "block has no closing `===`"));
+                }
+                // Every TYPE needs a branch here; a line no branch claims is
+                // an error rather than an expectation that silently vanishes.
+                if test_type == "rename" {
+                    // Raw capture; snippet-vs-full-code is decided after the
+                    // loop from the first non-empty line.
+                    rename_lines.push(line.to_string());
+                } else if test_type == "hover" || test_type == "inlay_hints" {
+                    // Hover: every line is expected content. Inlay hints: the
+                    // block re-renders the source with `«hint::LABEL»`
+                    // markers inline, parsed into (line, col, label) triples.
+                    expected.push(line.to_string());
+                } else if let Some(item) = line.strip_prefix("- ") {
+                    expected.push(item.to_string());
+                } else if line.starts_with("file:")
+                    || line.starts_with("line:")
+                    || line.starts_with("character:")
+                    || line.starts_with("min_tokens:")
+                {
+                    expected.push(line.to_string());
+                } else if (test_type == "goto_definition"
+                    || test_type == "goto_type_definition"
+                    || test_type == "references")
+                    && line.trim().eq_ignore_ascii_case("none")
+                {
+                    // `EXPECTED: none` -- this request should return no
+                    // targets (goto-def/type-def/references).
+                    expected.push("none".to_string());
+                } else if (test_type == "document_symbols" || test_type == "workspace_symbols")
+                    && line.contains(':')
+                {
+                    // `Name: Kind`, the same item a `- Name: Kind` line gives.
+                    expected.push(line.to_string());
+                } else if test_type == "signature_help" && !line.trim().is_empty() {
+                    // Bare signature strings like `greet(name: string,
+                    // times: int)` match any returned signature. A line
+                    // starting with `ACTIVE:` matches the *active* signature
+                    // only (used to verify overload resolution picked the
+                    // right arm).
+                    expected.push(line.to_string());
+                } else if !line.trim().is_empty() {
+                    return Err(fixture_error(
+                        path,
+                        &name,
+                        format!("unrecognised `{test_type}` expectation {line:?}"),
+                    ));
+                }
+            }
+        }
+
+        // Single-file rename EXPECTED comes in two shapes: a `- snippet`
+        // list (substring-matched) or the full post-rename file content
+        // (compared exactly -- a snippet match can't catch missed sites).
+        if test_type == "rename" && expected_files.is_empty() {
+            let snippet_style = rename_lines
+                .iter()
+                .find(|l| !l.trim().is_empty())
+                .is_some_and(|l| l.starts_with("- "));
+            if snippet_style {
+                expected.extend(
+                    rename_lines
+                        .iter()
+                        .filter_map(|l| l.strip_prefix("- ").map(str::to_string)),
+                );
+            } else if rename_lines.iter().any(|l| !l.trim().is_empty()) {
+                expected_code = Some(rename_lines.join("\n"));
+            }
+        }
+
+        // An EXPECTED block with nothing in it asserts nothing, so the
+        // fixture would pass whatever the server answered.
+        if expected.iter().all(|e| e.trim().is_empty())
+            && expected_code.is_none()
+            && expected_files.is_empty()
+        {
+            return Err(fixture_error(path, &name, "EXPECTED block is empty"));
+        }
+
+        tests.push(LspTest {
+            name,
+            test_type,
+            code,
+            files,
+            primary_file,
+            operation,
+            expected,
+            expected_code,
+            expected_files,
+        });
     }
 
     Ok(tests)
 }
 
-/// Parse edit sequence tests from a test file
+/// The two numbers of a `LINE:COL` or `LINE, COL` pair, or `None` when the text
+/// is not exactly two unsigned integers.
+fn parse_pair(text: &str, sep: char) -> Option<(usize, usize)> {
+    let (a, b) = text.split_once(sep)?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+/// The step mode a `STEP N ...:` header names, with `body` as the text it
+/// types or the document it installs.
+fn parse_step_mode(header: &str, body: String) -> Option<StepMode> {
+    let header = header.trim().strip_suffix(':')?;
+    let Some(open) = header.find('(') else {
+        return Some(StepMode::FullReplace { code: body });
+    };
+    let inner = header[open + 1..].strip_suffix(')')?.trim();
+    if let Some(coords) = inner.strip_prefix("type at ") {
+        let (line, col) = parse_pair(coords, ':')?;
+        Some(StepMode::TypeAt {
+            line,
+            col,
+            text: body,
+        })
+    } else if let Some(rest) = inner.strip_prefix("delete at ") {
+        let (coords, count) = rest.split_once(',')?;
+        let (line, col) = parse_pair(coords, ':')?;
+        Some(StepMode::DeleteAt {
+            line,
+            col,
+            count: count.trim().parse().ok()?,
+        })
+    } else {
+        None
+    }
+}
+
+/// The request a `CHECK:` line names, or `None` when it names none the runner
+/// sends or its position does not parse.
+fn parse_check_operation(op: &str) -> Option<EditStepOperation> {
+    match op {
+        "semantic_tokens" => return Some(EditStepOperation::SemanticTokens),
+        "diagnostics" => return Some(EditStepOperation::Diagnostics),
+        _ => {}
+    }
+    let (kind, args) = op.split_once('(')?;
+    let (line, character) = parse_pair(args.strip_suffix(')')?, ',')?;
+    match kind.trim() {
+        "completion" => Some(EditStepOperation::Completion { line, character }),
+        "hover" => Some(EditStepOperation::Hover { line, character }),
+        "references" => Some(EditStepOperation::References { line, character }),
+        _ => None,
+    }
+}
+
+/// Parse edit sequence tests from a test file. `parse_lsp_test_file` has
+/// already checked the block structure; this rejects malformed steps and
+/// checks, which would otherwise drop out of the sequence unnoticed.
 fn parse_edit_sequence_tests(path: &Path) -> Result<Vec<EditSequenceTest>> {
     let contents = std::fs::read_to_string(path)?;
     let mut tests = Vec::new();
     let mut lines = contents.lines().peekable();
 
     while let Some(line) = lines.next() {
-        if !line.starts_with("TEST:") {
+        let Some(name) = line.strip_prefix("TEST:") else {
             continue;
-        }
-        let name = line.strip_prefix("TEST:").unwrap().trim().to_string();
+        };
+        let name = name.trim().to_string();
 
-        // Parse test type
         let test_type = match lines.next() {
             Some(next_line) if next_line.starts_with("TYPE:") => {
                 next_line.strip_prefix("TYPE:").unwrap().trim().to_string()
             }
-            _ => continue,
+            _ => return Err(fixture_error(path, &name, "expected `TYPE:` after `TEST:`")),
         };
 
         if test_type != "edit_sequence" {
-            // Skip non-edit_sequence tests - consume until ===
-            for line in lines.by_ref() {
-                if line.starts_with("===") {
-                    break;
-                }
-            }
+            skip_to_block_end(&mut lines, path, &name)?;
             continue;
         }
 
-        // Skip separator after TYPE
-        if let Some(sep) = lines.next() {
-            if !sep.starts_with("---") {
-                continue;
+        match lines.next() {
+            Some(sep) if sep.starts_with("---") => {}
+            other => {
+                return Err(fixture_error(
+                    path,
+                    &name,
+                    format!("expected `---` after `TYPE:`, found {other:?}"),
+                ));
             }
         }
 
         let mut steps = Vec::new();
 
         // Parse steps until ===
-        while let Some(&next) = lines.peek() {
+        while let Some(next) = lines.next() {
             if next.starts_with("===") {
-                lines.next();
                 break;
             }
-
-            if next.starts_with("STEP") {
-                let step_line = lines.next().unwrap(); // consume the STEP line
-
-                // Parse step mode from the STEP line
-                // Formats:
-                //   STEP N:                          -> FullReplace
-                //   STEP N (type at LINE:COL):       -> TypeAt
-                //   STEP N (delete at LINE:COL, N):  -> DeleteAt
-                let step_mode_hint = if let Some(paren_start) = step_line.find('(') {
-                    let paren_content = &step_line[paren_start..];
-                    Some(paren_content.to_string())
-                } else {
-                    None
-                };
-
-                // Collect body lines until ---
-                let mut code_lines = Vec::new();
-                while let Some(line) = lines.peek() {
-                    if line.starts_with("---") {
-                        lines.next();
-                        break;
-                    }
-                    code_lines.push(lines.next().unwrap().to_string());
-                }
-                let body = code_lines.join("\n");
-
-                // Determine the step mode
-                let mode = if let Some(ref hint) = step_mode_hint {
-                    if hint.contains("type at") {
-                        // Parse (type at LINE:COL):
-                        let coords = hint
-                            .trim_start_matches(|c: char| c != 't')
-                            .strip_prefix("type at ")
-                            .and_then(|s| s.strip_suffix("):"))
-                            .or_else(|| {
-                                hint.trim_start_matches(|c: char| c != 't')
-                                    .strip_prefix("type at ")
-                                    .and_then(|s| s.strip_suffix(")"))
-                            })
-                            .unwrap_or("0:0");
-                        let parts: Vec<&str> = coords.split(':').collect();
-                        let line = parts
-                            .first()
-                            .and_then(|s| s.trim().parse().ok())
-                            .unwrap_or(0);
-                        let col = parts
-                            .get(1)
-                            .and_then(|s| s.trim().parse().ok())
-                            .unwrap_or(0);
-                        StepMode::TypeAt {
-                            line,
-                            col,
-                            text: body,
-                        }
-                    } else if hint.contains("delete at") {
-                        // Parse (delete at LINE:COL, COUNT):
-                        let inner = hint
-                            .trim_start_matches(|c: char| c != 'd')
-                            .strip_prefix("delete at ")
-                            .and_then(|s| s.strip_suffix("):"))
-                            .or_else(|| {
-                                hint.trim_start_matches(|c: char| c != 'd')
-                                    .strip_prefix("delete at ")
-                                    .and_then(|s| s.strip_suffix(")"))
-                            })
-                            .unwrap_or("0:0, 1");
-                        let parts: Vec<&str> = inner.split(',').collect();
-                        let coords: Vec<&str> =
-                            parts.first().unwrap_or(&"0:0").split(':').collect();
-                        let line = coords
-                            .first()
-                            .and_then(|s| s.trim().parse().ok())
-                            .unwrap_or(0);
-                        let col = coords
-                            .get(1)
-                            .and_then(|s| s.trim().parse().ok())
-                            .unwrap_or(0);
-                        let count = parts
-                            .get(1)
-                            .and_then(|s| s.trim().parse().ok())
-                            .unwrap_or(1);
-                        StepMode::DeleteAt { line, col, count }
-                    } else {
-                        StepMode::FullReplace { code: body }
-                    }
-                } else {
-                    StepMode::FullReplace { code: body }
-                };
-
-                // Parse checks for this step
-                let mut checks = Vec::new();
-                while let Some(line) = lines.peek() {
-                    if line.starts_with("STEP") || line.starts_with("===") {
-                        break;
-                    }
-                    if line.starts_with("CHECK:") {
-                        let check_line = lines.next().unwrap();
-                        let op_str = check_line.strip_prefix("CHECK:").unwrap().trim();
-
-                        let operation = match op_str {
-                            "semantic_tokens" => EditStepOperation::SemanticTokens,
-                            "diagnostics" => EditStepOperation::Diagnostics,
-                            _ if op_str.starts_with("completion") => {
-                                // CHECK: completion(line, char)
-                                if let Some(params) = op_str
-                                    .strip_prefix("completion(")
-                                    .and_then(|s| s.strip_suffix(')'))
-                                {
-                                    let parts: Vec<&str> = params.split(',').collect();
-                                    if parts.len() == 2 {
-                                        let line = parts[0].trim().parse().unwrap_or(0);
-                                        let character = parts[1].trim().parse().unwrap_or(0);
-                                        EditStepOperation::Completion { line, character }
-                                    } else {
-                                        continue;
-                                    }
-                                } else {
-                                    continue;
-                                }
-                            }
-                            _ if op_str.starts_with("hover") => {
-                                if let Some(params) = op_str
-                                    .strip_prefix("hover(")
-                                    .and_then(|s| s.strip_suffix(')'))
-                                {
-                                    let parts: Vec<&str> = params.split(',').collect();
-                                    if parts.len() == 2 {
-                                        let line = parts[0].trim().parse().unwrap_or(0);
-                                        let character = parts[1].trim().parse().unwrap_or(0);
-                                        EditStepOperation::Hover { line, character }
-                                    } else {
-                                        continue;
-                                    }
-                                } else {
-                                    continue;
-                                }
-                            }
-                            _ if op_str.starts_with("references") => {
-                                if let Some(params) = op_str
-                                    .strip_prefix("references(")
-                                    .and_then(|s| s.strip_suffix(')'))
-                                {
-                                    let parts: Vec<&str> = params.split(',').collect();
-                                    if parts.len() == 2 {
-                                        let line = parts[0].trim().parse().unwrap_or(0);
-                                        let character = parts[1].trim().parse().unwrap_or(0);
-                                        EditStepOperation::References { line, character }
-                                    } else {
-                                        continue;
-                                    }
-                                } else {
-                                    continue;
-                                }
-                            }
-                            _ => {
-                                lines.next();
-                                continue;
-                            }
-                        };
-
-                        // Parse EXPECTED: section
-                        let mut expected = Vec::new();
-                        if let Some(exp_line) = lines.peek() {
-                            if exp_line.starts_with("EXPECTED:") {
-                                lines.next();
-                                while let Some(line) = lines.peek() {
-                                    if line.starts_with("---")
-                                        || line.starts_with("STEP")
-                                        || line.starts_with("===")
-                                        || line.starts_with("CHECK:")
-                                    {
-                                        break;
-                                    }
-                                    let line = lines.next().unwrap();
-                                    if line.starts_with("- ") {
-                                        expected.push(line.strip_prefix("- ").unwrap().to_string());
-                                    } else if !line.trim().is_empty() {
-                                        expected.push(line.to_string());
-                                    }
-                                }
-                            }
-                        }
-
-                        checks.push(EditStepCheck {
-                            operation,
-                            expected,
-                        });
-                    } else {
-                        lines.next();
-                    }
-                }
-
-                steps.push(EditStep { mode, checks });
-            } else {
-                lines.next(); // skip unrecognized lines
+            if next.trim().is_empty() || next.starts_with("---") {
+                continue;
             }
+            if !next.starts_with("STEP") {
+                return Err(fixture_error(
+                    path,
+                    &name,
+                    format!("expected `STEP` in an edit sequence, found {next:?}"),
+                ));
+            }
+
+            // Formats:
+            //   STEP N:                          -> FullReplace
+            //   STEP N (type at LINE:COL):       -> TypeAt
+            //   STEP N (delete at LINE:COL, N):  -> DeleteAt
+            let step_line = next;
+
+            // Collect body lines until ---
+            let mut code_lines = Vec::new();
+            for line in lines.by_ref() {
+                if line.starts_with("---") {
+                    break;
+                }
+                code_lines.push(line.to_string());
+            }
+            let mode = parse_step_mode(step_line, code_lines.join("\n")).ok_or_else(|| {
+                fixture_error(path, &name, format!("malformed step header {step_line:?}"))
+            })?;
+
+            // Parse checks for this step
+            let mut checks = Vec::new();
+            while let Some(line) = lines.peek() {
+                if line.starts_with("STEP") || line.starts_with("===") {
+                    break;
+                }
+                let line = lines.next().unwrap();
+                if line.trim().is_empty() || line.starts_with("---") {
+                    continue;
+                }
+                let Some(op_str) = line.strip_prefix("CHECK:") else {
+                    return Err(fixture_error(
+                        path,
+                        &name,
+                        format!("expected `CHECK:` after a step, found {line:?}"),
+                    ));
+                };
+                let op_str = op_str.trim();
+                let operation = parse_check_operation(op_str).ok_or_else(|| {
+                    fixture_error(path, &name, format!("malformed check `CHECK: {op_str}`"))
+                })?;
+
+                let mut expected = Vec::new();
+                if lines.next_if(|l| l.starts_with("EXPECTED:")).is_some() {
+                    while let Some(line) = lines.peek() {
+                        if line.starts_with("---")
+                            || line.starts_with("STEP")
+                            || line.starts_with("===")
+                            || line.starts_with("CHECK:")
+                        {
+                            break;
+                        }
+                        let line = lines.next().unwrap();
+                        if let Some(item) = line.strip_prefix("- ") {
+                            expected.push(item.to_string());
+                        } else if !line.trim().is_empty() {
+                            expected.push(line.to_string());
+                        }
+                    }
+                }
+
+                checks.push(EditStepCheck {
+                    operation,
+                    expected,
+                });
+            }
+
+            steps.push(EditStep { mode, checks });
         }
 
-        if !steps.is_empty() {
-            tests.push(EditSequenceTest { name, steps });
+        if steps.is_empty() {
+            return Err(fixture_error(path, &name, "edit sequence has no steps"));
         }
+        tests.push(EditSequenceTest { name, steps });
     }
 
     Ok(tests)
@@ -1149,6 +1152,44 @@ fn reply_array<'a>(
     json.get(key)
         .and_then(|v| v.as_array())
         .ok_or_else(|| anyhow::anyhow!("{request}: reply has no `{key}` array; raw reply: {raw}"))
+}
+
+/// The name of a symbol's `kind`. The server sends the numeric LSP
+/// `SymbolKind`; a name is accepted as is.
+fn symbol_kind_name(kind: &serde_json::Value) -> Option<&str> {
+    if let Some(name) = kind.as_str() {
+        return Some(name);
+    }
+    const NAMES: [&str; 26] = [
+        "File",
+        "Module",
+        "Namespace",
+        "Package",
+        "Class",
+        "Method",
+        "Property",
+        "Field",
+        "Constructor",
+        "Enum",
+        "Interface",
+        "Function",
+        "Variable",
+        "Constant",
+        "String",
+        "Number",
+        "Boolean",
+        "Array",
+        "Object",
+        "Key",
+        "Null",
+        "EnumMember",
+        "Struct",
+        "Event",
+        "Operator",
+        "TypeParameter",
+    ];
+    let index = usize::try_from(kind.as_u64()?).ok()?.checked_sub(1)?;
+    NAMES.get(index).copied()
 }
 
 /// Run a single LSP test
@@ -1772,7 +1813,7 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
 
                         let kind_matches = sym
                             .get("kind")
-                            .and_then(|k| k.as_str())
+                            .and_then(symbol_kind_name)
                             .map(|k| k.to_lowercase().contains(&expected_kind.to_lowercase()))
                             .unwrap_or(false);
 
@@ -3499,6 +3540,212 @@ EXPECTED:\n\
         assert!(
             message.contains("OPERATION 'teleport'") && message.contains("stub unknown operation"),
             "{message}"
+        );
+    }
+
+    /// The rename fixture whose code block opens with `--` instead of `---`.
+    /// It used to vanish from the run without a word.
+    const BAD_DELIMITER_FIXTURE: &str = "\
+TEST: stub bad delimiter\n\
+TYPE: rename\n\
+--\n\
+fn main() {\n\
+    let «start»count«end» = 1\n\
+}\n\
+---\n\
+OPERATION: rename\n\
+NEW_NAME: total\n\
+---\n\
+EXPECTED:\n\
+fn main() {\n\
+    let total = 1\n\
+}\n\
+===\n";
+
+    #[test]
+    fn a_malformed_code_block_delimiter_is_a_parse_error_naming_the_fixture() {
+        let message = parse_error_of(BAD_DELIMITER_FIXTURE);
+        assert!(
+            message.contains("stub bad delimiter") && message.contains("fixture.rock.lsp"),
+            "{message}"
+        );
+    }
+
+    /// Each reachable malformed shape, as (fixture, text the error must carry).
+    /// Every one used to drop its fixture, or an expectation in it, silently.
+    #[test]
+    fn every_malformed_block_is_a_parse_error_naming_the_fixture() {
+        let hover_with = |operation_and_expected: &str| {
+            format!(
+                "TEST: stub malformed\nTYPE: hover\n---\nfn main() {{\n    main()\n}}\n---\n{operation_and_expected}"
+            )
+        };
+        let cases = [
+            (
+                "TEST: stub malformed\n---\nfn main() {}\n".to_string(),
+                "expected `TYPE:`",
+            ),
+            ("TEST: stub malformed\n".to_string(), "before `TYPE:`"),
+            (
+                "TEST: stub malformed\nTYPE: hover\n---\nfn main() {}\n".to_string(),
+                "closing `---`",
+            ),
+            (
+                hover_with("EXPECTED:\nfn main()\n===\n"),
+                "expected `OPERATION:`",
+            ),
+            (
+                hover_with("OPERATION: hover\nEXPECTED:\nfn main()\n===\n"),
+                "needs a `POSITION:` line or a cursor marker",
+            ),
+            (
+                hover_with("OPERATION: hover\nPOSITION: line=1\nEXPECTED:\nfn main()\n===\n"),
+                "Invalid position format",
+            ),
+            (
+                hover_with("OPERATION: hover\nPOSITION: line=1, character=4\nfn main()\n===\n"),
+                "expected `EXPECTED:`",
+            ),
+            (
+                hover_with("OPERATION: hover\nPOSITION: line=1, character=4\nEXPECTED:\n\n===\n"),
+                "EXPECTED block is empty",
+            ),
+            (
+                hover_with(
+                    "OPERATION: hover\nPOSITION: line=1, character=4\nEXPECTED:\nfn main()\n\nTEST: next\nTYPE: hover\n",
+                ),
+                "no closing `===`",
+            ),
+            (
+                "TEST: stub malformed\nTYPE: completion\n---\nfn main() {\n    ma«cursor»\n}\n---\nOPERATION: completion\nEXPECTED:\nmain\n===\n"
+                    .to_string(),
+                "unrecognised `completion` expectation \"main\"",
+            ),
+            (
+                "TEST: stub malformed\nTYPE: hover\nFILES:\nstray text\nFILE: a.rock\n---\nfn main() {}\n---\nOPERATION: hover\n"
+                    .to_string(),
+                "expected `FILE:` in a files block",
+            ),
+            (
+                "TEST: stub malformed\nTYPE: edit_sequence\n---\nSTEP 1:\nfn main() {}\n---\n\nTEST: next\n"
+                    .to_string(),
+                "no closing `===`",
+            ),
+        ];
+        for (fixture, needle) in cases {
+            let message = parse_error_of(&fixture);
+            assert!(
+                message.contains("stub malformed") && message.contains(needle),
+                "fixture {fixture:?}: error {message:?} must name the test and say {needle:?}"
+            );
+        }
+    }
+
+    /// A mangled `TEST:` header between blocks would take its block with it.
+    /// Whatever the header looks like, the `TYPE:` line under it is caught.
+    #[test]
+    fn a_mangled_test_header_between_blocks_is_a_parse_error() {
+        for header in [
+            "test: stub mangled",
+            "TEST stub mangled",
+            "Tset: stub mangled",
+        ] {
+            let fixture = format!("{HOVER_FIXTURE}\n{header}\nTYPE: hover\n");
+            let message = parse_error_of(&fixture);
+            assert!(message.contains("expected `TEST:`"), "{header}: {message}");
+        }
+    }
+
+    /// Prose notes before and between blocks are documentation, not fixtures.
+    #[test]
+    fn prose_between_blocks_is_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.rock.lsp");
+        let fixture = format!(
+            "Notes on this file.\n\n{HOVER_FIXTURE}\nPINNED BUG (sentinel): a note.\n\n{COMPLETION_FIXTURE}"
+        );
+        std::fs::write(&path, fixture).unwrap();
+        let tests = parse_lsp_test_file(&path).unwrap();
+        assert_eq!(tests.len(), 2);
+    }
+
+    /// The edit-sequence parser rejects malformed steps and checks instead of
+    /// dropping them from the sequence.
+    #[test]
+    fn a_malformed_edit_sequence_step_or_check_is_a_parse_error() {
+        let sequence =
+            |body: &str| format!("TEST: stub sequence\nTYPE: edit_sequence\n---\n{body}===\n");
+        let cases = [
+            (
+                sequence("STEP 1:\nfn main() {}\n---\nCHECK: hover(1)\n"),
+                "malformed check `CHECK: hover(1)`",
+            ),
+            (
+                sequence("STEP 1:\nfn main() {}\n---\nCHECK: teleport\n"),
+                "malformed check `CHECK: teleport`",
+            ),
+            (
+                sequence(
+                    "STEP 1:\nfn main() {}\n---\nCHECK: semantic_tokens\n---\nSTEP 2 (type at 1):\nx\n---\n",
+                ),
+                "malformed step header",
+            ),
+            (
+                sequence("STEP 1:\nfn main() {}\n---\nstray text\n"),
+                "expected `CHECK:`",
+            ),
+            (sequence("stray text\n"), "expected `STEP`"),
+            (sequence(""), "has no steps"),
+        ];
+        for (fixture, needle) in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("fixture.rock.lsp");
+            std::fs::write(&path, &fixture).unwrap();
+            let message = parse_edit_sequence_tests(&path)
+                .expect_err("the sequence must be rejected when it is parsed")
+                .to_string();
+            assert!(
+                message.contains("stub sequence") && message.contains(needle),
+                "fixture {fixture:?}: error {message:?} must name the test and say {needle:?}"
+            );
+        }
+    }
+
+    /// `Name: Kind` lines without a `- ` used to be dropped, leaving the
+    /// symbol fixtures with nothing to assert. The server sends numeric kinds.
+    #[test]
+    fn bare_symbol_lines_are_checked_against_numeric_kinds() {
+        let fixture = "\
+TEST: stub symbols\n\
+TYPE: document_symbols\n\
+---\n\
+struct Widget {\n\
+}\n\
+---\n\
+OPERATION: document_symbols\n\
+EXPECTED:\n\
+Widget: Struct\n\
+===\n";
+        let (result, _) =
+            run_against_stub(fixture, r#"{"symbols": [{"name": "Widget", "kind": 23}]}"#);
+        assert_eq!(
+            (result.passed, result.failed),
+            (1, 0),
+            "{:?}",
+            result.failed_test_details
+        );
+        let (result, _) =
+            run_against_stub(fixture, r#"{"symbols": [{"name": "Widget", "kind": 12}]}"#);
+        assert_eq!(
+            (result.passed, result.failed),
+            (0, 1),
+            "a Function is not a Struct"
+        );
+        let (result, _) = run_against_stub(fixture, r#"{"symbols": []}"#);
+        assert_eq!(
+            (result.passed, result.failed),
+            (0, 1),
+            "an empty reply lacks Widget"
         );
     }
 

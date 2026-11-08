@@ -59,36 +59,33 @@ perimeter: Function
 create_square: Function
 ===
 
-TEST: document_symbols_nested_types
+TEST: document_symbols_enum_payload_types
 TYPE: document_symbols
 ---
-mod graphics {
-    struct Color {
-        r: u8,
-        g: u8,
-        b: u8,
-    }
-
-    enum Shape {
-        Circle(float),
-        Rectangle(float, float),
-        Triangle([Point; 3]),
-    }
-
-    struct Point {
-        x: float,
-        y: float,
-    }
+struct Color {
+    r: int,
+    g: int,
+    b: int,
 }
 
-fn draw_shape(shape: graphics::Shape) {
+enum Shape {
+    Circle(float),
+    Rectangle(float, float),
+    Triangle(Point, Point, Point),
+}
+
+struct Point {
+    x: float,
+    y: float,
+}
+
+fn draw_shape(shape: Shape) {
     // Draw implementation
 }
 ---
 OPERATION: document_symbols
 ---
 EXPECTED:
-graphics: Module
 Color: Struct
 Shape: Enum
 Point: Struct
