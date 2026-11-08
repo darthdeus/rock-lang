@@ -4,16 +4,6 @@
 //!
 //! The Lua control lives in `js_backend_externs_lua.rs`.
 
-use std::process::Command;
-
-fn node_available() -> bool {
-    Command::new("node")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 // `plus_one` and `triple` each carry a lua + js body under one name+signature;
 // the two bodies are written differently (Lua `x + 1` vs JS `x + 1`, `x * 3` two
 // ways) but yield the same values, so a byte-identical result proves each backend
@@ -52,8 +42,7 @@ fn same_name_backend_pair_runs_on_both() {
     let path = dir.join("pair.rock");
     std::fs::write(&path, GATE).unwrap();
 
-    if !node_available() {
-        eprintln!("SKIP node half: node not found");
+    if !crate::command::require_node() {
         return;
     }
     // node binds the inline(js) variant.
@@ -90,8 +79,7 @@ fn sibling_pair_as_fn_value_binds_each_backend() {
     let path = dir.join("value.rock");
     std::fs::write(&path, VALUE_GATE).unwrap();
 
-    if !node_available() {
-        eprintln!("SKIP node half: node not found");
+    if !crate::command::require_node() {
         return;
     }
     let (js_out, js_ok) = run(Some("js"), &path);

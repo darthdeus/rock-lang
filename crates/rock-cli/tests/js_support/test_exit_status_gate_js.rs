@@ -1,13 +1,3 @@
-use std::process::Command;
-
-fn node_available() -> bool {
-    Command::new("node")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 fn run_test(src: &str) -> (String, bool) {
     let dir = tempfile::tempdir().expect("tempdir");
     let file = dir.path().join("probe.rock");
@@ -39,8 +29,7 @@ fn genuinely_passing() {
 /// same failing input. Pin the agreement so a future divergence is loud.
 #[test]
 fn js_backend_agrees_on_exit_status() {
-    if !node_available() {
-        eprintln!("SKIP js_backend_agrees_on_exit_status: node not available");
+    if !crate::command::require_node() {
         return;
     }
     let (text, ok) = run_test(FAILING_ASSERT);

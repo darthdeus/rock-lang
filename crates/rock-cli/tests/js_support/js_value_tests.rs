@@ -3,14 +3,6 @@
 //! mismatch FAILs and matching int/float/bool values pass -- the same
 //! `test_protocol::compare_value` the luajit path compares through.
 
-fn node_available() -> bool {
-    std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 fn run_src(src: &str) -> rock_cli::js_test::JsSuiteSummary {
     let dir = tempfile::tempdir().expect("tempdir");
     let file = dir.path().join("val.rock");
@@ -21,8 +13,7 @@ fn run_src(src: &str) -> rock_cli::js_test::JsSuiteSummary {
 
 #[test]
 fn js_value_mismatch_fails() {
-    if !node_available() {
-        eprintln!("SKIP js_value_mismatch_fails: `node` not on PATH");
+    if !crate::command::require_node() {
         return;
     }
     let summary = run_src("@test(returns = 43)\nfn r() -> int { return 42 }\n");
@@ -36,8 +27,7 @@ fn js_value_mismatch_fails() {
 
 #[test]
 fn js_value_tests_pass_int_float_bool() {
-    if !node_available() {
-        eprintln!("SKIP js_value_tests_pass_int_float_bool: `node` not on PATH");
+    if !crate::command::require_node() {
         return;
     }
     let summary = run_src(

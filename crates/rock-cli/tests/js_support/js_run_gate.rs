@@ -7,16 +7,6 @@
 //! gate -> emit_program -> node stream) is exercised, and pins the cross-backend
 //! parity `rock run` promises.
 
-use std::process::Command;
-
-fn node_available() -> bool {
-    Command::new("node")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 // Exercises: a registry global (SYSTEMS) populated by a `deco init` at module
 // load, two `@system`-applied fns (alpha with a literal `stage = 5`, beta
 // defaulted), a ginit dependency chain (DERIVED reads BASE), a co fn, and a
@@ -95,8 +85,7 @@ fn main() {
 
 #[test]
 fn scalarized_coalesce_field_runs_on_both_backends() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     let dir = std::env::temp_dir().join("rock_js_run_gate_coalesce_value_field");
@@ -120,8 +109,7 @@ fn scalarized_coalesce_field_runs_on_both_backends() {
 
 #[test]
 fn js_run_matches_luajit_end_to_end() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     let dir = std::env::temp_dir().join("rock_js_run_gate");
@@ -154,8 +142,7 @@ fn js_run_matches_luajit_end_to_end() {
 // runs `main` end to end, byte-identical to the luajit `rock run` of the dir.
 #[test]
 fn js_run_project_dir_matches_luajit() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     let dir = std::env::temp_dir().join("rock_js_run_gate_proj");
@@ -189,8 +176,7 @@ fn js_run_project_dir_matches_luajit() {
 // must still be sized for it.
 #[test]
 fn js_run_value_row_borrow_runs_on_both_backends() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     let dir = std::env::temp_dir().join("rock_js_run_gate_value_row_borrow");
@@ -222,8 +208,7 @@ fn js_run_value_row_borrow_runs_on_both_backends() {
 // (`<package>::main`), so the entry must be found by its declared name.
 #[test]
 fn js_run_modules_v1_bin_package_runs_main() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     let dir = std::env::temp_dir().join("rock_js_run_gate_modules_v1_bin");
@@ -247,8 +232,7 @@ fn js_run_modules_v1_bin_package_runs_main() {
 // applications), matching luajit -- and prints nothing, exiting cleanly.
 #[test]
 fn js_run_no_main_is_load_effects_only() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     let dir = std::env::temp_dir().join("rock_js_run_gate_nomain");
@@ -340,8 +324,7 @@ fn main() {
 
 #[test]
 fn a_bounded_body_runs_on_both_backends() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     let dir = std::env::temp_dir().join("rock_js_run_gate_bounded");
@@ -375,8 +358,7 @@ fn both_backends(name: &str, src: &str, expected: &str) {
 
 #[test]
 fn a_generic_coroutine_at_a_column_element_runs_on_both_backends() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     both_backends("gen_co_column", GENERIC_CO_COLUMN, "2 3\n");
@@ -384,8 +366,7 @@ fn a_generic_coroutine_at_a_column_element_runs_on_both_backends() {
 
 #[test]
 fn a_generic_coroutine_at_a_boxed_element_runs_on_both_backends() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     both_backends("gen_co_boxed", GENERIC_CO_BOXED, "2 3\n");
@@ -417,8 +398,7 @@ fn main() {
 
 #[test]
 fn a_specialized_coroutine_with_a_capturing_lambda_runs_on_both_backends() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     both_backends("gen_co_lambda", GENERIC_CO_LAMBDA, "12\n");
@@ -504,8 +484,7 @@ fn main() {
 
 #[test]
 fn safe_nav_on_a_value_receiver_runs_on_both_backends() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     both_backends("safe_nav_value", SAFE_NAV_VALUE_RECEIVER, "300\n-1\n");
@@ -513,8 +492,7 @@ fn safe_nav_on_a_value_receiver_runs_on_both_backends() {
 
 #[test]
 fn safe_nav_on_a_struct_receiver_runs_on_both_backends() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     both_backends("safe_nav_struct", SAFE_NAV_STRUCT_RECEIVER, "300\n-1\n");
@@ -522,8 +500,7 @@ fn safe_nav_on_a_struct_receiver_runs_on_both_backends() {
 
 #[test]
 fn a_refined_value_receiver_runs_on_both_backends() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     both_backends("safe_nav_refined", REFINED_VALUE_RECEIVER, "300\n-1\n");
@@ -639,8 +616,7 @@ fn main() {
 
 #[test]
 fn a_generic_call_from_a_coroutine_hook_runs_on_both_backends() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     both_backends("co_hook_generic", CO_HOOK_GENERIC, "1 killed\n");
@@ -648,8 +624,7 @@ fn a_generic_call_from_a_coroutine_hook_runs_on_both_backends() {
 
 #[test]
 fn a_generic_call_from_a_coroutine_lambda_runs_on_both_backends() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     both_backends("co_lambda_generic", CO_LAMBDA_GENERIC, "1 lam\n");
@@ -657,8 +632,7 @@ fn a_generic_call_from_a_coroutine_lambda_runs_on_both_backends() {
 
 #[test]
 fn a_generic_call_from_a_coroutine_body_runs_on_both_backends() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     both_backends("co_body_generic", CO_BODY_GENERIC, "1 body\n");
@@ -666,8 +640,7 @@ fn a_generic_call_from_a_coroutine_body_runs_on_both_backends() {
 
 #[test]
 fn a_generic_call_from_a_coroutine_defer_runs_on_both_backends() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     both_backends("co_defer_generic", CO_DEFER_GENERIC, "1 defer\n");
@@ -675,8 +648,7 @@ fn a_generic_call_from_a_coroutine_defer_runs_on_both_backends() {
 
 #[test]
 fn a_non_generic_call_from_a_coroutine_hook_runs_on_both_backends() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     both_backends("co_hook_nongeneric", CO_HOOK_NON_GENERIC, "1\n");
@@ -700,8 +672,7 @@ fn main() {
 
 #[test]
 fn a_non_generic_iterator_witness_runs_on_both_backends() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::command::require_node() {
         return;
     }
     both_backends("non_generic_witness", NON_GENERIC_WITNESS, "5\n");

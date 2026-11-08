@@ -214,12 +214,7 @@ fn explicit_null_overrides_default_at_lua_boundaries() {
 
 #[test]
 fn explicit_null_overrides_default_on_js() {
-    if std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("SKIP explicit_null_overrides_default_on_js: `node` not on PATH");
+    if !crate::command::require_node() {
         return;
     }
     let dir = tempfile::tempdir().expect("fixture dir");

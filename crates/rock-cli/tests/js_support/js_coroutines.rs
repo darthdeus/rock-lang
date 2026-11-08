@@ -3,22 +3,13 @@
 //! Runs identically on luajit; the JS trampoline emission must match -- no
 //! skips.
 
-fn node_available() -> bool {
-    std::process::Command::new("node")
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 // The corpus file, copied to a temp file so the run sees only this unit and
 // runs it in-process.
 const CORPUS: &str = include_str!("../../../../tests/coroutines/js_coroutines.rock");
 
 #[test]
 fn js_coroutines_run_green_under_node() {
-    if !node_available() {
-        eprintln!("SKIP js_coroutines_run_green_under_node: `node` not on PATH");
+    if !crate::command::require_node() {
         return;
     }
     let dir = tempfile::tempdir().expect("fixture dir");
