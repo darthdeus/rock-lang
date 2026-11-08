@@ -48,6 +48,18 @@ global BASE: P = P { x: 3, y: 4 }
     assert_eq(DERIVED.y, 4)
 }
 
+// The same edge one call away: the leaf reads sit in a callee, so only the
+// transitive global-read closure sees them, and it reports LEAF names that
+// still have to resolve back to the owning global.
+fn later_sum() -> int { return LATER.x + LATER.y }
+
+global VIA_CALL: int = later_sum()
+global LATER: P = P { x: 5, y: 6 }
+
+@test fn init_reading_nobox_leaves_through_a_call_runs_after_their_global() {
+    assert_eq(VIA_CALL, 11)
+}
+
 // A write through the global has to reach the same leaves the initializer set,
 // or the init could be correct and every later read still wrong.
 @test fn nobox_global_reassigned_after_init() {
