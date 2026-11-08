@@ -1,0 +1,174 @@
+// A compound assignment `place op= value` evaluates every subexpression of
+// the place (base, index, receiver) exactly once, as `++` does. Each test
+// counts the calls to an effectful index or base and checks the stored value.
+
+value Pair { a: int, b: float }
+// Two scalar fields: `[Pt]` is column-stored.
+value Pt { x: int, y: int }
+value Inner { a: float, n: int }
+value Outer { lo: Inner, hi: Inner, tag: int }
+nobox value NV { x: float, y: float }
+value Vert { pos: NV, uv: NV, id: int, w: float }
+value V2 { x: float, y: float }
+
+fn __op_add(a: V2, b: V2) -> V2 { V2 { x: a.x + b.x, y: a.y + b.y } }
+
+struct Holder { n: int, xs: [int] }
+
+global CALLS: int = 0
+
+fn at(i: int) -> int {
+    CALLS += 1
+    return i
+}
+
+fn key(k: string) -> string {
+    CALLS += 1
+    return k
+}
+
+fn holder_of(h: Holder) -> Holder {
+    CALLS += 1
+    return h
+}
+
+@test(output = "1 11\n1 7\n1 14\n1 4\n3 3")
+fn test_vec_of_int_every_operator() {
+    let v: [int] = [0, 10, 0]
+    CALLS = 0
+    v[at(1)] += 1
+    print("{CALLS} {v[1]}")
+    CALLS = 0
+    v[at(1)] -= 4
+    print("{CALLS} {v[1]}")
+    CALLS = 0
+    v[at(1)] *= 2
+    print("{CALLS} {v[1]}")
+    let f: [float] = [0.0, 8.0]
+    CALLS = 0
+    f[at(1)] /= 2.0
+    print("{CALLS} {f[1].floor()}")
+    CALLS = 0
+    let total = 0
+    for k in 0..3 {
+        v[at(k)] += k
+        total += 1
+    }
+    print("{CALLS} {total}")
+}
+
+@test(output = "1 6\n1 3")
+fn test_vec_of_value_struct_field() {
+    let ps: [Pair] = [Pair { a: 1, b: 1.5 }, Pair { a: 5, b: 2.0 }]
+    CALLS = 0
+    ps[at(1)].a += 1
+    print("{CALLS} {ps[1].a}")
+    CALLS = 0
+    ps[at(0)].b *= 2.0
+    print("{CALLS} {ps[0].b.floor()}")
+}
+
+@test(output = "1 9\n1 -2")
+fn test_column_vec_field() {
+    let pts: [Pt] = []
+    pts.push(Pt { x: 1, y: 2 })
+    pts.push(Pt { x: 4, y: 5 })
+    CALLS = 0
+    pts[at(1)].y += 4
+    print("{CALLS} {pts[1].y}")
+    CALLS = 0
+    pts[at(0)].x -= 3
+    print("{CALLS} {pts[0].x}")
+}
+
+@test(output = "1 2\n1 3")
+fn test_vec_of_overloaded_value() {
+    let vs: [V2] = [V2 { x: 0.0, y: 0.0 }, V2 { x: 1.0, y: 2.0 }]
+    CALLS = 0
+    vs[at(1)] += V2 { x: 1.0, y: 1.0 }
+    print("{CALLS} {vs[1].x.floor()}")
+    print("{CALLS} {vs[1].y.floor()}")
+}
+
+@test(output = "nested 1 10\ntop 1 1\nnobox-leaf 1 1\ntop-float 1 2\nincdec 1 2\nscalar 1 6")
+fn test_native_buffer_places() {
+    let buf: NativeBuffer<Outer> = native_buffer_alloc(1)
+    let vb: NativeBuffer<Vert> = native_buffer_alloc(1)
+    let ib: NativeBuffer<int> = native_buffer_alloc(1)
+    buf[0] = Outer { lo: Inner { a: 0.0, n: 0 }, hi: Inner { a: 0.0, n: 0 }, tag: 0 }
+    vb[0] = Vert { pos: NV { x: 0.0, y: 0.0 }, uv: NV { x: 0.0, y: 0.0 }, id: 1, w: 0.0 }
+    ib[0] = 3
+    CALLS = 0
+    buf[at(0)].lo.n += 10
+    print("nested {CALLS} {buf[0].lo.n}")
+    CALLS = 0
+    buf[at(0)].tag += 1
+    print("top {CALLS} {buf[0].tag}")
+    CALLS = 0
+    vb[at(0)].pos.x += 1.0
+    print("nobox-leaf {CALLS} {vb[0].pos.x.floor()}")
+    CALLS = 0
+    vb[at(0)].w -= -2.0
+    print("top-float {CALLS} {vb[0].w.floor()}")
+    CALLS = 0
+    vb[at(0)].id++
+    print("incdec {CALLS} {vb[0].id}")
+    CALLS = 0
+    ib[at(0)] *= 2
+    print("scalar {CALLS} {ib[0]}")
+}
+
+@test(output = "1 4\n1 12")
+fn test_map_index() {
+    let m: Map<string, int> = map_new()
+    insert(m, "k", 3)
+    CALLS = 0
+    m[key("k")] += 1
+    print("{CALLS} {unwrap(get(m, \"k\"))}")
+    CALLS = 0
+    m[key("k")] *= 3
+    print("{CALLS} {unwrap(get(m, \"k\"))}")
+}
+
+@test(output = "2 8\n2 7")
+fn test_nested_index() {
+    let grid: [[int]] = [[0, 0], [0, 5]]
+    CALLS = 0
+    grid[at(1)][at(1)] += 3
+    print("{CALLS} {grid[1][1]}")
+    let ps: [[Pair]] = [[Pair { a: 4, b: 0.0 }]]
+    CALLS = 0
+    ps[at(0)][at(0)].a += 3
+    print("{CALLS} {ps[0][0].a}")
+}
+
+@test(output = "1 3\n1 8\n1 2")
+fn test_call_receiver() {
+    let h = Holder { n: 1, xs: [0, 4] }
+    CALLS = 0
+    holder_of(h).n += 2
+    print("{CALLS} {h.n}")
+    CALLS = 0
+    holder_of(h).xs[at(1)] += 4
+    print("{CALLS - 1} {h.xs[1]}")
+    CALLS = 0
+    h.xs[at(0)] += 2
+    print("{CALLS} {h.xs[0]}")
+}
+
+@test(output = "1 5")
+fn test_method_call_receiver() {
+    let h = Holder { n: 1, xs: [0] }
+    CALLS = 0
+    h.holder_of().n *= 5
+    print("{CALLS} {h.n}")
+}
+
+@test(output = "2 1")
+fn test_effectful_value_runs_once() {
+    let v: [int] = [0]
+    CALLS = 0
+    v[0] += at(1)
+    v[at(0)] -= 0
+    print("{CALLS} {v[0]}")
+}

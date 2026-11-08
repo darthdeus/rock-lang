@@ -138,6 +138,11 @@ pub struct LowerCtx<'a> {
     /// `&self` helpers.
     pub scope_probes: std::cell::RefCell<Vec<bone_core::modules::ScopeProbe>>,
     pub resolutions: ResolutionCache,
+    /// Place subexpressions of the compound assignment being lowered that were
+    /// already evaluated into a temporary, keyed by the source node's address:
+    /// lowering such a node again yields a read of its temporary, so the place
+    /// can be both read and written without evaluating it twice.
+    pub place_temps: Vec<(usize, Idx<BindingInfo>)>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -540,6 +545,14 @@ impl<'a> LowerCtx<'a> {
                 (name, hir::CallFamily::merged(name, file))
             }
         }
+    }
+
+    fn place_temp(&self, e: &ExprData) -> Option<Idx<BindingInfo>> {
+        let key = e as *const ExprData as usize;
+        self.place_temps
+            .iter()
+            .find(|(k, _)| *k == key)
+            .map(|&(_, b)| b)
     }
 
     pub fn next_var_id(&mut self) -> VarId {
@@ -1484,6 +1497,10 @@ pub fn lower_expr_value(
     use hir::Expr;
     use skull_parser::ExprKind;
 
+    if let Some(binding) = ctx.place_temp(e) {
+        return Ok(Expr::Var(binding));
+    }
+
     if !matches!(&e.kind, ExprKind::Lambda { .. } | ExprKind::Block(_))
         && is_placeholder_lambda(a, e)
     {
@@ -1856,6 +1873,15 @@ pub fn lower_expr_value(
 
                 _ => unreachable!(),
             };
+
+            if !lvalue_has_safe_nav(a, left) {
+                let temps = compound_place_temps(a, left);
+                if !temps.is_empty() {
+                    return lower_compound_assign_with_temps(
+                        ctx, a, body, scope, e, op_fn, left, right, &temps,
+                    );
+                }
+            }
 
             let target = lower_expr(ctx, a, body, scope, a.e(left))?;
             // The same callee resolution as the binary operator call, so
@@ -2411,6 +2437,9 @@ pub fn lower_expr(
     e: &skull_parser::ExprData,
 ) -> Result<Idx<hir::Expr>, CompilerError> {
     ctx.capture_iterator_families();
+    if let Some(binding) = ctx.place_temp(e) {
+        return Ok(ctx.alloc_expr(body, Expr::Var(binding), e.span));
+    }
     if let ExprKind::Block(b) = &e.kind {
         let saved = ctx.placeholder_forbidden;
         ctx.placeholder_forbidden = true;
@@ -2979,6 +3008,7 @@ pub fn relower_function_in_place(
             placeholder_forbidden: false,
             scope_probes: Default::default(),
             resolutions: Default::default(),
+            place_temps: Vec::new(),
         };
 
         let (func, body, errors) = build_function(&mut ctx, a, f, annotations)?;
@@ -3030,6 +3060,7 @@ pub fn relower_function_in_place(
         placeholder_forbidden: false,
         scope_probes: Default::default(),
         resolutions: Default::default(),
+        place_temps: Vec::new(),
     };
 
     let mut body = Body::default();
@@ -4208,6 +4239,172 @@ fn classify_anno_value(a: &Ast, e: Idx<ExprData>) -> hir::AnnoValue {
 
         _ => hir::AnnoValue::Other,
     }
+}
+
+/// The subexpressions of a compound-assignment place that `place op= value`
+/// must evaluate into temporaries before it reads and writes the place: every
+/// index and every non-place base (a call, a method call), in evaluation
+/// order. Empty when none of them has an effect, so the common pure place
+/// (`v[i] += 1`) keeps the plain `place = place op value` desugar. Once one
+/// part needs a temporary, every earlier and later part gets one too (except
+/// literals), so the evaluation order of the parts is unchanged.
+fn compound_place_temps(a: &Ast, place: &Idx<ExprData>) -> Vec<Idx<ExprData>> {
+    use skull_parser::ExprKind;
+
+    fn walk(a: &Ast, e: &Idx<ExprData>, root: bool, out: &mut Vec<Idx<ExprData>>) {
+        match &a.e(e).kind {
+            ExprKind::Paren(o) => walk(a, o, root, out),
+            ExprKind::FieldAccess(o, _) => walk(a, o, false, out),
+            ExprKind::Index(o, i) => {
+                walk(a, o, false, out);
+                out.push(*i);
+            }
+            ExprKind::Ident(_) | ExprKind::QualifiedIdent { .. } | ExprKind::Path { .. } => {}
+            // A non-place root is not assignable; leave it to the ordinary
+            // diagnostics rather than assigning to a temporary.
+            _ if root => {}
+            _ => out.push(*e),
+        }
+    }
+
+    let mut parts = Vec::new();
+    walk(a, place, true, &mut parts);
+    if parts.iter().all(|p| expr_is_pure(a, p)) {
+        return Vec::new();
+    }
+    parts.retain(|p| !expr_is_literal(a, p));
+    parts
+}
+
+fn expr_is_literal(a: &Ast, e: &Idx<ExprData>) -> bool {
+    use skull_parser::ExprKind;
+
+    matches!(
+        &a.e(e).kind,
+        ExprKind::Int(..)
+            | ExprKind::Float(_)
+            | ExprKind::String(_)
+            | ExprKind::Bool(_)
+            | ExprKind::Null
+            | ExprKind::Unit
+    )
+}
+
+/// Whether evaluating `e` twice is indistinguishable from evaluating it once:
+/// names, literals, field and index reads, and operators over such operands.
+/// Both evaluations of a compound place happen before its right-hand side,
+/// so nothing can change in between.
+fn expr_is_pure(a: &Ast, e: &Idx<ExprData>) -> bool {
+    use skull_parser::ExprKind;
+
+    match &a.e(e).kind {
+        ExprKind::Ident(_) | ExprKind::QualifiedIdent { .. } | ExprKind::Path { .. } => true,
+        _ if expr_is_literal(a, e) => true,
+        ExprKind::Paren(o)
+        | ExprKind::FieldAccess(o, _)
+        | ExprKind::Not(o)
+        | ExprKind::BitNot(o)
+        | ExprKind::UnaryMinus(o) => expr_is_pure(a, o),
+        ExprKind::Index(o, i) => expr_is_pure(a, o) && expr_is_pure(a, i),
+        ExprKind::BinOp { left, op, right } => {
+            !matches!(
+                op,
+                TokenKind::Assign
+                    | TokenKind::AddAssign
+                    | TokenKind::SubAssign
+                    | TokenKind::MulAssign
+                    | TokenKind::DivAssign
+            ) && expr_is_pure(a, left)
+                && expr_is_pure(a, right)
+        }
+        ExprKind::FunctionCall {
+            args,
+            syntax: skull_parser::CallSyntax::Binary(_),
+            ..
+        } => args.iter().all(|arg| expr_is_pure(a, &arg.value)),
+        _ => false,
+    }
+}
+
+/// `place op= value` whose place has effectful parts:
+/// `{ let t1 = part1; ...; place' = place' op value }`, where `place'` reads
+/// each part from its temporary.
+#[allow(clippy::too_many_arguments)]
+fn lower_compound_assign_with_temps(
+    ctx: &mut LowerCtx,
+    a: &Ast,
+    body: &mut Body,
+    scope: Idx<Scope>,
+    e: &ExprData,
+    op_fn: &str,
+    left: &Idx<ExprData>,
+    right: &Idx<ExprData>,
+    temps: &[Idx<ExprData>],
+) -> Result<Expr, CompilerError> {
+    let scope = body.alloc_child_scope(scope);
+    let saved = ctx.place_temps.len();
+    let result = (|| {
+        let mut statements = Vec::with_capacity(temps.len() + 1);
+        for part in temps {
+            let part = a.e(part);
+            let value = lower_expr(ctx, a, body, scope, part)?;
+            let binding = body.binding_arena.alloc(BindingInfo {
+                name: ustr("__place"),
+                kind: BindingKind::Let,
+                declared_ty: None,
+                span: part.span,
+            });
+            body.binding_spans.insert(binding, part.span);
+            statements.push((
+                Statement::Let {
+                    name: binding,
+                    value,
+                },
+                part.span,
+            ));
+            ctx.place_temps
+                .push((part as *const ExprData as usize, binding));
+        }
+
+        let target = lower_expr(ctx, a, body, scope, a.e(left))?;
+        let (callee_key, family) = ctx.resolve_callee_family(ustr(op_fn), e.span)?;
+        let args = lower_exprs(ctx, a, body, scope, [left, right].into_iter())?;
+        let call = ctx.alloc_expr(
+            body,
+            Expr::Call {
+                callee: Callee::Unresolved {
+                    name: callee_key,
+                    name_span: e.span,
+                },
+                args,
+                generic_args: IdxRange::new_empty(),
+                family,
+            },
+            e.span,
+        );
+        let assign = ctx.alloc_expr(
+            body,
+            Expr::Assign {
+                target,
+                value: call,
+            },
+            e.span,
+        );
+        statements.push((Statement::Expr(assign), e.span));
+
+        let mut range: Option<(Idx<Statement>, Idx<Statement>)> = None;
+        for (s, span) in statements {
+            let id = body.alloc_statement(s, span);
+            range = Some((range.map_or(id, |r| r.0), id));
+        }
+        let (first, last) = range.expect("at least the assignment statement");
+        Ok(Expr::Block {
+            statements: IdxRange::new_inclusive(first..=last),
+            tail: None,
+        })
+    })();
+    ctx.place_temps.truncate(saved);
+    result
 }
 
 fn lvalue_has_safe_nav(a: &Ast, e: &Idx<ExprData>) -> bool {

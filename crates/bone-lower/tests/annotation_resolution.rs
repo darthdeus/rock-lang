@@ -113,6 +113,7 @@ fn lower_annotation(
         placeholder_forbidden: false,
         scope_probes: Default::default(),
         resolutions: Default::default(),
+        place_temps: Vec::new(),
     };
     let item = ast.items.last().unwrap();
     let annotations = match &item.kind {
