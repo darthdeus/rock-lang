@@ -282,6 +282,7 @@ impl Args {
             .arg(Arg::new("quiet").long("quiet").action(ArgAction::SetTrue)
                 .help("Disable timing output (Phase Timing, IO Breakdown)"))
             .arg(Arg::new("perf-format").long("format").default_value("pretty")
+                .value_parser(["pretty", "json"])
                 .help("Output format for reports and module tools: \"pretty\" (default) or \"json\"."))
             .arg(Arg::new("type-validation").long("type-validation").action(ArgAction::SetTrue)
                 .help("Enable type validation warnings for unresolved types after inference"))
@@ -510,3 +511,24 @@ pub mod sim_observability;
 pub mod sim_report;
 
 mod sdk_check;
+
+#[cfg(test)]
+mod completion_tests {
+    #[test]
+    fn shell_completions_offer_the_report_formats() {
+        let mut out = Vec::new();
+        clap_complete::generate(
+            clap_complete::Shell::Bash,
+            &mut crate::Args::command(),
+            "rock",
+            &mut out,
+        );
+        let script = String::from_utf8(out).expect("the completion script is text");
+        let format_arm = script
+            .split("--format)")
+            .nth(1)
+            .expect("the script completes --format");
+        let values = format_arm.lines().nth(1).unwrap_or_default();
+        assert!(values.contains("pretty json"), "{values}");
+    }
+}
