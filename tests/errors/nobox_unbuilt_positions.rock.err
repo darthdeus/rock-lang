@@ -1,0 +1,91 @@
+//! Error: SENTINEL FILE -- like nobox_container_gaps.rock.err, every case here
+//!        is an UNBUILT representation, not a rejection we want to keep. Each
+//!        position below has no leaf representation for a `nobox` value, so the
+//!        value would box and the guarantee rejects it. When the mechanism lands
+//!        the case stops rejecting, THIS FILE GOES RED, and the author must
+//!        DELETE the case and add a positive `.rock` test in its place.
+//!
+//!        The unmarked twin of every case compiles and runs on both backends,
+//!        and the nearby shapes that DO work are covered elsewhere: an enum
+//!        payload yielded or returned from a `co fn`
+//!        (`tests/nobox/coroutine_enum_payload.rock`), a nobox global
+//!        (`tests/nobox/global_leaf_init.rock`), a concrete reference struct
+//!        field holding a nobox value (`tests/nobox/nested_ctor.rock`), and a
+//!        generic fn returning `T?` at a nobox `T`
+//!        (`tests/nobox/nullable_group_pack.rock`).
+//! Tags: nobox, coroutines, statics, newtypes, generics
+
+//=== TEST CASE: coroutine_yields_a_bare_nobox_value_Generic ===
+// The yield channel threads flat-enum leaves through frame slots; a bare value
+// has no channel and rides the boxed `resume()` result.
+//! expect: nobox value `NV` survived lowering as an implicit materialization
+nobox value NV { x: int, y: int }
+co fn gen(k: int) -> Coroutine<NV> {
+    yield NV { x: k, y: k + 1 }   // ERROR: the yield value boxes
+}
+fn main() {
+    let c = gen(1)
+    print("{c.resume()?.x ?? -1}")
+}
+
+//=== TEST CASE: coroutine_returns_a_bare_nobox_value_Generic ===
+// `result()` reads one frame cell.
+//! expect: nobox value `NV` survived lowering as an implicit materialization
+nobox value NV { x: int, y: int }
+co fn finish(k: int) -> Coroutine<int, NV> {
+    yield k
+    return NV { x: k, y: 2 }   // ERROR: the result boxes
+}
+fn main() {
+    let c = finish(1)
+    let _a = c.resume()
+    let _b = c.resume()
+    print("{c.result()?.x ?? -1}")
+}
+
+//=== TEST CASE: static_local_holding_a_nobox_value_Generic ===
+// A `static` local is one private global cell plus a done flag. A nobox global
+// is one global per leaf; statics do not use that layout yet.
+//! expect: nobox value `NV` survived lowering as an implicit materialization
+nobox value NV { x: int, y: int }
+fn bump() -> int {
+    static s = NV { x: 1, y: 2 }   // ERROR: the static cell boxes
+    s = NV { x: s.x + 1, y: s.y }
+    return s.x
+}
+fn main() { print("{bump()}") }
+
+//=== TEST CASE: newtype_wrapping_a_nobox_value_Generic ===
+// A newtype is erased to what it wraps, but the value-shape oracles key on the
+// nominal name and do not see through the newtype to the nobox leaves.
+//! expect: nobox value `NV` survived lowering as an implicit materialization
+nobox value NV { x: int, y: int }
+newtype NT(NV)
+fn mk(k: int) -> NT {
+    return NT(NV { x: k, y: k + 1 })   // ERROR: the wrapped value boxes
+}
+fn main() {
+    let NT(v) = mk(4)
+    print("{v.x}")
+}
+
+//=== TEST CASE: generic_newtype_at_a_nobox_type_Generic ===
+//! expect: nobox value `NV` survived lowering as an implicit materialization
+nobox value NV { x: int, y: int }
+newtype GBox<T>(T)
+fn mk(k: int) -> GBox<NV>? {
+    if k < 0 { return null }
+    return GBox(NV { x: k, y: 7 })   // ERROR: the wrapped value boxes
+}
+fn main() { print("{mk(2) == null}") }
+
+//=== TEST CASE: generic_struct_field_at_a_nobox_type_Generic ===
+// A generic `T` field is one slot whatever `T` is, so `Wrap<NV>` would hold a
+// box. The concrete `struct W { v: NV }` splices the leaves and works.
+//! expect: nobox value `NV` survived lowering as an implicit materialization
+nobox value NV { x: int, y: int }
+struct Wrap<T> { v: T }
+fn wrap(k: int) -> Wrap<NV> {
+    return Wrap { v: NV { x: k, y: 1 } }   // ERROR: the generic field boxes
+}
+fn main() { print("{wrap(8).v.x}") }
