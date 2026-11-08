@@ -18,6 +18,15 @@ pub mod stick;
 
 static SOURCE_ROOT: std::sync::OnceLock<&'static std::path::Path> = std::sync::OnceLock::new();
 
+/// Supply the binary host's source fallback before the first call to `rock_dir`.
+pub fn install_source_root(root: &'static std::path::Path) {
+    assert_eq!(
+        *SOURCE_ROOT.get_or_init(|| root),
+        root,
+        "source root already installed"
+    );
+}
+
 /// Resolve the Rock root directory from environment, exe path, CWD, or a host fallback.
 pub fn resolve_rock_dir_with(
     env_override: Option<String>,
