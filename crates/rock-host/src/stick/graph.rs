@@ -13,6 +13,7 @@ use anyhow::{Context, Result, anyhow};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use rock_core::package_aliases::{NsAliases, PackageAliases};
 use rock_core::source_code::Dialect;
 
 use super::{StickConfig, dependency_matches_channel};
@@ -435,6 +436,27 @@ impl PackageGraph {
         &self.packages
     }
 
+    /// Every package's self name and declared dependency aliases, keyed by
+    /// package id: the table bone's namespace resolver reads. The batch
+    /// compile and the incremental session both build from this one method.
+    pub fn ns_aliases(&self) -> NsAliases {
+        NsAliases {
+            packages: self
+                .packages
+                .iter()
+                .map(|node| PackageAliases {
+                    id: node.id.0,
+                    self_name: ustr::Ustr::from(node.self_name.as_str()),
+                    aliases: node
+                        .dependencies
+                        .iter()
+                        .map(|edge| (ustr::Ustr::from(edge.alias.as_str()), edge.target.0))
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+
     /// Postorder dependency order (providers first), root last: the order
     /// source discovery loads packages in.
     pub fn load_order(&self) -> &[PackageId] {
@@ -517,6 +539,37 @@ mod tests {
             format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\n{body}"),
         )
         .expect("write manifest");
+    }
+
+    #[test]
+    fn ns_aliases_keep_package_ids_self_names_and_declared_aliases() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("app");
+        let lib = tmp.path().join("lib");
+        write_manifest(&lib, "shared-lib", "\n[language]\nmodules = \"v1\"\n");
+        write_manifest(
+            &root,
+            "app",
+            "\n[language]\nmodules = \"v1\"\n\n[dependencies]\nmy-lib = { path = \"../lib\" }\n",
+        );
+
+        let graph = PackageGraph::build(&root).expect("graph builds");
+        let aliases = graph.ns_aliases();
+        let expected = NsAliases {
+            packages: vec![
+                PackageAliases {
+                    id: 0,
+                    self_name: "app".into(),
+                    aliases: vec![("my_lib".into(), 1)],
+                },
+                PackageAliases {
+                    id: 1,
+                    self_name: "shared_lib".into(),
+                    aliases: vec![],
+                },
+            ],
+        };
+        assert_eq!(aliases, expected);
     }
 
     #[test]

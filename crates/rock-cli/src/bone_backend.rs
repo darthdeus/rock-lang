@@ -154,8 +154,13 @@ pub(crate) fn aliases_for_modules(
         }
     };
 
-    bone_query::package_aliases::for_manifest_dir(&manifest_dir)
-        .map_err(CompilerError::new_no_location)
+    rock_host::stick::graph::PackageGraph::build(&manifest_dir)
+        .map(|graph| graph.ns_aliases())
+        .map_err(|error| {
+            CompilerError::new_no_location(format!(
+                "cannot build package graph for modules-v1 aliases: {error}"
+            ))
+        })
 }
 
 /// The host's binding of [`skull::pipeline::check_modules`]: its alias

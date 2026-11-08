@@ -7,6 +7,7 @@ pub mod compile_stats;
 pub mod errors;
 pub mod module_id;
 pub mod nesting;
+pub mod package_aliases;
 pub mod source_code;
 pub mod source_files;
 pub mod source_id;

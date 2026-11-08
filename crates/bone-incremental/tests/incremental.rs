@@ -2710,7 +2710,7 @@ fn fuzz_session_fixture_package_graph() {
         "fixture graph must include a dependency package"
     );
 
-    let aliases = bone_query::package_aliases::from_graph(&graph);
+    let aliases = graph.ns_aliases();
     let mut h = Harness::with_warm_aliases(stdlib_warm_modules(), all_files, 13, aliases);
 
     let seed = fuzz_seed();

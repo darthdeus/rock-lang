@@ -280,20 +280,8 @@ pub struct UsePathRef {
 }
 
 /// Host-supplied alias tables (one entry per package), so cross-package
-/// resolution uses the graph's dependency names rather than guessing. The
-/// CLI derives this from the PackageGraph; tests construct it directly.
-#[derive(Clone, Debug, Default)]
-pub struct NsAliases {
-    pub packages: Vec<PackageAliases>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct PackageAliases {
-    pub id: PackageId,
-    pub self_name: Ustr,
-    /// alias -> target package id.
-    pub aliases: Vec<(Ustr, PackageId)>,
-}
+/// resolution uses the graph's dependency names rather than guessing.
+pub use rock_core::package_aliases::{NsAliases, PackageAliases};
 
 /// One v1 definition made visible to a legacy compilation unit. The key stays
 /// canonical so calls and type lookups retain the definition site's identity.

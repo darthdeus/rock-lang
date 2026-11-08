@@ -892,7 +892,7 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
             let _ = writeln!(o, "  {unknown}: {e}");
         }
         Ok(graph) => {
-            let aliases = bone_query::package_aliases::from_graph(graph);
+            let aliases = graph.ns_aliases();
             let _ = writeln!(o, "\npackage graph {}", tag(Status::Exact));
             for node in graph.packages() {
                 let root_mark = if node.id == graph.root() {
@@ -1416,7 +1416,7 @@ fn render_json(report: &Report, verdict: &Verdict) -> Value {
             json!({ "status": "unknown", "reason": "package graph failed" }),
         ),
         Ok(graph) => {
-            let aliases = bone_query::package_aliases::from_graph(graph);
+            let aliases = graph.ns_aliases();
             let packages: Vec<Value> = graph
                 .packages()
                 .iter()

@@ -663,7 +663,7 @@ impl BoneWorkspace {
             let graph = project_graph(root);
             let aliases = graph
                 .as_ref()
-                .map(crate::package_aliases::from_graph)
+                .map(rock_host::stick::graph::PackageGraph::ns_aliases)
                 // Scratch roots need no aliases; graph failures were logged by project_graph.
                 .unwrap_or_default();
             BoneProject {
@@ -772,7 +772,7 @@ impl BoneWorkspace {
         let graph = project_graph(&root);
         let aliases = graph
             .as_ref()
-            .map(crate::package_aliases::from_graph)
+            .map(rock_host::stick::graph::PackageGraph::ns_aliases)
             // Scratch roots need no aliases; graph failures were logged by project_graph.
             .unwrap_or_default();
         match Session::new(warm_stdlib(), files, &aliases) {
