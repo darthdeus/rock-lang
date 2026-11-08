@@ -588,6 +588,11 @@ and its descendants unless exported. Here `super::` addresses the parent
 module, so `main` reaches its sibling through `super::helpers::shout`:
 
 ```rock
+// This file contributes to the logical module named by its `mod` header,
+// then imports what it needs with `use`. Run the whole directory:
+//
+//     rock run .
+//
 mod main;
 
 use super::helpers::shout;
@@ -598,6 +603,7 @@ fn main() {
 ```
 
 ```rock
+// Items default to visibility in their module and its descendants.
 mod helpers;
 
 pub fn shout(s: string) -> string {
