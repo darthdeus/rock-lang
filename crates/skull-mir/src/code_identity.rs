@@ -348,7 +348,81 @@ pub struct CodeArtifact {
     pub census: CodeIdentityCensus,
 }
 
+/// One escaping CodeRef a program stages into its slot table.
+pub struct StagedCodeSlot<'a> {
+    pub key: String,
+    pub body: Ustr,
+    pub call_abi: &'a str,
+}
+
+/// The escaping entries of `source` in logical-key order, each with the body
+/// that realizes it. An escaping entry without an emitted body is an error.
+pub fn staged_code_slots<'a>(
+    ws: &bone_semantic::inference::Workspace,
+    interner: &MonoInterner,
+    source: impl IntoIterator<Item = &'a CodeEntry>,
+) -> Result<Vec<StagedCodeSlot<'a>>, String> {
+    let mut entries: Vec<_> = source
+        .into_iter()
+        .filter(|entry| entry.escaping)
+        .map(|entry| (entry.identity.logical_key(ws, interner), entry))
+        .collect();
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries
+        .into_iter()
+        .map(|(key, entry)| match entry.body_name {
+            Some(body) => Ok(StagedCodeSlot {
+                key,
+                body,
+                call_abi: entry.compatibility.call_abi.as_str(),
+            }),
+            None => Err(format!("Rock CodeRef `{key}` has no emitted body")),
+        })
+        .collect()
+}
+
+/// How a full program brackets its CodeRef slot table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CodeSlotPublication {
+    /// The program publishes its slots once staging is done.
+    pub publish: bool,
+    /// Staging must be opened by an explicit begin, because no escaping entry
+    /// is staged to open it.
+    pub explicit_begin: bool,
+}
+
 impl CodeArtifact {
+    pub fn has_escaping(&self) -> bool {
+        self.entries.values().any(|entry| entry.escaping)
+    }
+
+    /// Slots are published when anything can hold a CodeRef: an escaping value,
+    /// a definition catalog, or a lifecycle declaration.
+    pub fn publication(
+        &self,
+        has_definition_plan: bool,
+        has_lifecycle_plan: bool,
+    ) -> CodeSlotPublication {
+        let escaping = self.has_escaping();
+        let publish = escaping || has_definition_plan || has_lifecycle_plan;
+        CodeSlotPublication {
+            publish,
+            explicit_begin: publish && !escaping,
+        }
+    }
+
+    /// The census must be total before any slot is staged.
+    pub fn check_stageable(&self) -> Result<(), String> {
+        if self.census.is_total() {
+            Ok(())
+        } else {
+            Err(format!(
+                "cannot stage incomplete Rock CodeRef census: {:?}",
+                self.census
+            ))
+        }
+    }
+
     pub fn body_fingerprint(&self, identity: &CodeIdentity) -> Option<u64> {
         self.entries
             .get(identity)

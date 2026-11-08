@@ -116,11 +116,7 @@ fn assemble_overlay(
 
     let d_definitions = t_definitions.elapsed();
     let t_code_slot_stage = Instant::now();
-    let has_code_slots = cache
-        .code_artifact
-        .entries
-        .values()
-        .any(|entry| entry.escaping);
+    let has_code_slots = cache.code_artifact.has_escaping();
     let code_slot_stage = code_slot_registration_lua_entries(
         ws,
         &cache.scx,
@@ -489,15 +485,8 @@ pub fn emit_overlay_with_span_edits(
         .map(|chunk| &chunk.code_artifact)
         .collect();
     let next_code_artifact = cache.code_artifact.with_replacements(&replacements);
-    let initialize_code_slots = !cache
-        .code_artifact
-        .entries
-        .values()
-        .any(|entry| entry.escaping)
-        && next_code_artifact
-            .entries
-            .values()
-            .any(|entry| entry.escaping);
+    let initialize_code_slots =
+        !cache.code_artifact.has_escaping() && next_code_artifact.has_escaping();
     let d_replacements = t_replacements.elapsed();
     if !cache.code_artifact.compatible_overlay(&next_code_artifact) {
         return Err(CompilerError::new_no_location(

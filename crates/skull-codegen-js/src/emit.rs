@@ -3893,8 +3893,9 @@ fn assemble_program_core(
     let has_definition_plan = !definition_plan.catalogs.is_empty();
     let code_slot_stage = code_slot_registration_js(ws, scx.interner(), &code_artifact)?;
     out.push_str(&code_slot_stage);
-    if (has_definition_plan || lifecycle_plan.census.declarations > 0)
-        && !code_artifact.entries.values().any(|entry| entry.escaping)
+    if code_artifact
+        .publication(has_definition_plan, lifecycle_plan.census.declarations > 0)
+        .explicit_begin
     {
         out.push_str("__rock_code_slot_begin();\n");
     }
@@ -4048,10 +4049,7 @@ impl JsProgram {
     /// True when a callable escapes as a code ref, so the prelude needs the
     /// full code-slot call helper (see [`crate::assemble_prelude`]).
     pub fn has_code_refs(&self) -> bool {
-        self.code_artifact
-            .entries
-            .values()
-            .any(|entry| entry.escaping)
+        self.code_artifact.has_escaping()
     }
 }
 
@@ -4379,11 +4377,7 @@ pub fn emit_overlay_with_span_edits(
     }
     cache.changed_since_full.extend(changed_now.iter().copied());
 
-    let has_code_slots = current
-        .code_artifact
-        .entries
-        .values()
-        .any(|entry| entry.escaping);
+    let has_code_slots = current.code_artifact.has_escaping();
     let mut out = String::from("// skull JS incremental overlay\n");
     out.push_str("try {\n");
     let affected_consts = affected_const_names(ws, &changed_consts, &current.const_order);
@@ -5562,36 +5556,22 @@ fn code_slot_registration_js(
     interner: &skull_mir::monoty::MonoInterner,
     artifact: &CodeArtifact,
 ) -> Result<String, CompilerError> {
-    if !artifact.census.is_total() {
-        return Err(err(format!(
-            "cannot stage incomplete Rock CodeRef census: {:?}",
-            artifact.census
-        )));
-    }
-    let mut entries: Vec<_> = artifact
-        .entries
-        .values()
-        .filter(|entry| entry.escaping)
-        .collect();
-    entries.sort_by_key(|entry| entry.identity.logical_key(ws, interner));
-    if entries.is_empty() {
+    artifact.check_stageable().map_err(err)?;
+    let slots =
+        skull_mir::code_identity::staged_code_slots(ws, interner, artifact.entries.values())
+            .map_err(err)?;
+    if slots.is_empty() {
         return Ok(String::new());
     }
     let mut out = String::new();
     out.push_str("__rock_code_slot_begin();\n");
-    for entry in entries {
-        let Some(body) = entry.body_name else {
-            return Err(err(format!(
-                "Rock CodeRef `{}` has no emitted body",
-                entry.identity.logical_key(ws, interner)
-            )));
-        };
+    for slot in slots {
         writeln!(
             out,
             "__rock_code_slot_stage_one({}, {}, {});",
-            js_string_lit(&entry.identity.logical_key(ws, interner))?,
-            body,
-            js_string_lit(&entry.compatibility.call_abi)?,
+            js_string_lit(&slot.key)?,
+            slot.body,
+            js_string_lit(slot.call_abi)?,
         )
         .expect("writing a String cannot fail");
     }
@@ -5603,9 +5583,9 @@ fn code_slot_publish_js(
     has_definition_plan: bool,
     has_lifecycle_plan: bool,
 ) -> &'static str {
-    if artifact.entries.values().any(|entry| entry.escaping)
-        || has_definition_plan
-        || has_lifecycle_plan
+    if artifact
+        .publication(has_definition_plan, has_lifecycle_plan)
+        .publish
     {
         "__rock_code_slot_publish();\n"
     } else {

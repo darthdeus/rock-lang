@@ -903,9 +903,11 @@ pub(super) fn assemble(
         crate::allocation_report::AllocationReport::default()
     };
     let code_artifact = &asm.code_artifact;
-    let has_code_slot_publication = code_artifact.entries.values().any(|entry| entry.escaping)
-        || !definition_plan.catalogs.is_empty()
-        || lifecycle_plan.census.declarations > 0;
+    let publication = code_artifact.publication(
+        !definition_plan.catalogs.is_empty(),
+        lifecycle_plan.census.declarations > 0,
+    );
+    let has_code_slot_publication = publication.publish;
     let global_layout = skull_mir::global_storage::global_layout_id(ws, scx)
         .map_err(CompilerError::new_no_location)?;
     let static_count = asm
@@ -940,7 +942,7 @@ pub(super) fn assemble(
         "__rock_code_slot_stage_part",
         &code_slot_stage,
     ));
-    if has_code_slot_publication && !code_artifact.entries.values().any(|entry| entry.escaping) {
+    if publication.explicit_begin {
         out.push_str("__rock_code_slot_begin()\n");
     }
     let definition_plan_stage = match early_stage {
@@ -1031,12 +1033,9 @@ fn code_slot_registration_lua(
     scx: &skull_mir::lower::ScalarCtx,
     artifact: &skull_mir::code_identity::CodeArtifact,
 ) -> Result<String, CompilerError> {
-    if !artifact.census.is_total() {
-        return Err(CompilerError::new_no_location(format!(
-            "cannot stage incomplete Rock CodeRef census: {:?}",
-            artifact.census
-        )));
-    }
+    artifact
+        .check_stageable()
+        .map_err(CompilerError::new_no_location)?;
     code_slot_registration_lua_entries(ws, scx, artifact.entries.values(), false)
 }
 
@@ -1046,41 +1045,33 @@ pub(super) fn code_slot_registration_lua_entries<'a>(
     source: impl IntoIterator<Item = &'a skull_mir::code_identity::CodeEntry>,
     begin_when_empty: bool,
 ) -> Result<String, CompilerError> {
-    let entries: Vec<_> = source.into_iter().filter(|entry| entry.escaping).collect();
-    if entries.is_empty() {
+    let slots = skull_mir::code_identity::staged_code_slots(ws, scx.interner(), source)
+        .map_err(CompilerError::new_no_location)?;
+    if slots.is_empty() {
         return Ok(if begin_when_empty {
             "__rock_code_slot_begin()\n".to_string()
         } else {
             String::new()
         });
     }
-    let mut entries = entries;
-    entries.sort_by_key(|entry| entry.identity.logical_key(ws, scx.interner()));
     // Thousands of slots share a few hundred call ABIs, so each distinct ABI is
     // spelled once in a table. `do ... end` keeps that local out of the
     // enclosing function's local budget.
     let mut abi_index: FxHashMap<&str, usize> = FxHashMap::default();
     let mut abis = String::new();
     let mut stages = String::new();
-    for entry in entries {
-        let Some(body) = entry.body_name else {
-            return Err(CompilerError::new_no_location(format!(
-                "Rock CodeRef `{}` has no emitted body",
-                entry.identity.logical_key(ws, scx.interner())
-            )));
-        };
-        let abi = entry.compatibility.call_abi.as_str();
+    for slot in slots {
         let next = abi_index.len() + 1;
-        let index = *abi_index.entry(abi).or_insert_with(|| {
-            writeln!(abis, "{},", skull_codegen_lua::lua_string(abi))
+        let index = *abi_index.entry(slot.call_abi).or_insert_with(|| {
+            writeln!(abis, "{},", skull_codegen_lua::lua_string(slot.call_abi))
                 .expect("writing a String cannot fail");
             next
         });
         writeln!(
             stages,
             "__rock_code_slot_stage({}, {}, __rock_code_slot_abis[{index}])",
-            skull_codegen_lua::lua_string(&entry.identity.logical_key(ws, scx.interner())),
-            body,
+            skull_codegen_lua::lua_string(&slot.key),
+            slot.body,
         )
         .expect("writing a String cannot fail");
     }
@@ -1137,9 +1128,9 @@ pub(super) fn code_slot_publish_lua(
     has_definition_plan: bool,
     has_lifecycle_plan: bool,
 ) -> &'static str {
-    if artifact.entries.values().any(|entry| entry.escaping)
-        || has_definition_plan
-        || has_lifecycle_plan
+    if artifact
+        .publication(has_definition_plan, has_lifecycle_plan)
+        .publish
     {
         "__rock_code_slot_publish()\n"
     } else {
