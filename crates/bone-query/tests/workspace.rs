@@ -1198,6 +1198,16 @@ fn prepare_rename_on_a_local_binding_ranges_the_identifier() {
 }
 
 #[test]
+fn a_const_global_is_a_constant_symbol_and_a_mutable_one_a_variable() {
+    let src = "const LIMIT: int = 3\nglobal count: int = 0\nfn main() {}\n";
+    let bone = fresh(src);
+    let syms = bone.document_symbols(PATH);
+    let kind_of = |name: &str| syms.iter().find(|s| s.name == name).map(|s| s.kind);
+    assert_eq!(kind_of("LIMIT"), Some(lsp_types::SymbolKind::CONSTANT));
+    assert_eq!(kind_of("count"), Some(lsp_types::SymbolKind::VARIABLE));
+}
+
+#[test]
 fn document_symbols_lists_top_level_items() {
     let src = "struct Point { x: int }\nenum Color { Red }\nglobal MAX: int = 9\nfn main() {\n  let q = 1\n}\n";
     let bone = fresh(src);

@@ -3088,7 +3088,7 @@ impl BoneWorkspace {
                 DocumentSymbol {
                     name: s.name,
                     detail: None,
-                    kind: symbol_kind(s.kind),
+                    kind: entry_symbol_kind(s.kind, s.is_const),
                     tags: None,
                     deprecated: None,
                     range,
@@ -3166,7 +3166,7 @@ impl BoneWorkspace {
                     #[allow(deprecated)]
                     target.push(SymbolInformation {
                         name: s.name,
-                        kind: symbol_kind(s.kind),
+                        kind: entry_symbol_kind(s.kind, s.is_const),
                         tags: None,
                         deprecated: None,
                         location: Location {
@@ -5480,6 +5480,14 @@ fn ctags_kind(k: SymCat) -> Option<char> {
         SymCat::Newtype => Some('t'),
         SymCat::Global => Some('v'),
         SymCat::Variant | SymCat::Local | SymCat::Param | SymCat::Field | SymCat::Keyword => None,
+    }
+}
+
+fn entry_symbol_kind(kind: SymCat, is_const: bool) -> SymbolKind {
+    if is_const {
+        SymbolKind::CONSTANT
+    } else {
+        symbol_kind(kind)
     }
 }
 

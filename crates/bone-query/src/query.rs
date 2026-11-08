@@ -4892,6 +4892,9 @@ pub struct SymbolEntry {
     pub name: String,
     pub kind: SymCat,
     pub span: Span,
+    /// A `const` global, as opposed to a mutable `global`. Both are
+    /// `SymCat::Global`, but an editor shows them as different symbol kinds.
+    pub is_const: bool,
 }
 
 #[derive(Clone)]
@@ -5700,28 +5703,29 @@ pub fn document_symbols(ws: &Workspace, mid: ModuleId) -> Vec<SymbolEntry> {
     };
 
     let mut out = Vec::new();
-    let mut push = |name: ustr::Ustr, kind: SymCat, span: Span| {
+    let mut push = |name: ustr::Ustr, kind: SymCat, span: Span, is_const: bool| {
         out.push(SymbolEntry {
             name: name.to_string(),
             kind,
             span,
+            is_const,
         });
     };
 
     for (_, f) in m.functions.iter() {
-        push(f.name, SymCat::Function, f.span);
+        push(f.name, SymCat::Function, f.span, false);
     }
     for (_, s) in m.structs.iter() {
-        push(s.name, SymCat::Struct, s.span);
+        push(s.name, SymCat::Struct, s.span, false);
     }
     for (_, e) in m.enums.iter() {
-        push(e.name, SymCat::Enum, e.span);
+        push(e.name, SymCat::Enum, e.span, false);
     }
     for (_, n) in m.newtypes.iter() {
-        push(n.name, SymCat::Newtype, n.span);
+        push(n.name, SymCat::Newtype, n.span, false);
     }
     for (_, g) in m.globals.iter() {
-        push(g.name, SymCat::Global, g.span);
+        push(g.name, SymCat::Global, g.span, g.is_const);
     }
 
     out
