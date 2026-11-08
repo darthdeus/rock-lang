@@ -93,3 +93,98 @@ fn method_with_args_is_terminal_not_traversed() {
         ],
     );
 }
+
+#[test]
+fn capped_paths_preserve_distance_spelling_and_terminal_metadata() {
+    let index = index_of(
+        "struct Goal { value: int }
+        struct X { g: Goal }
+        struct Root { z: Goal, a: X, b: X }
+        fn bridge(root: Root) -> X { root.a }
+        fn finish(root: Root, n: int) -> Goal { root.z }
+        fn mk(x: X) -> Goal { x.g }
+",
+    );
+    for (wanted, expected) in [
+        (
+            vec!["Goal".to_string()],
+            vec![
+                "finish",
+                "z",
+                "a.g",
+                "a.mk",
+                "b.g",
+                "b.mk",
+                "bridge().g",
+                "bridge().mk",
+            ],
+        ),
+        (
+            vec!["X".to_string(), "Goal".to_string()],
+            vec![
+                "a",
+                "b",
+                "bridge",
+                "finish",
+                "z",
+                "a.g",
+                "a.mk",
+                "b.g",
+                "b.mk",
+                "bridge().g",
+                "bridge().mk",
+            ],
+        ),
+    ] {
+        for cap in 0..=expected.len() + 1 {
+            let result = index.paths_to("Root?", &wanted, cap);
+            assert_eq!(
+                result
+                    .paths
+                    .iter()
+                    .map(|p| p.suffix.as_str())
+                    .collect::<Vec<_>>(),
+                expected[..cap.min(expected.len())],
+                "cap {cap}, targets {wanted:?}"
+            );
+            assert_eq!(result.truncated, cap < expected.len());
+            for path in result.paths {
+                assert_eq!(
+                    path.is_method,
+                    path.suffix.ends_with("mk")
+                        || path.suffix == "finish"
+                        || path.suffix == "bridge"
+                );
+                assert_eq!(path.takes_args, path.suffix == "finish");
+                assert_eq!(
+                    path.via_call,
+                    path.is_method || path.suffix.starts_with("bridge()")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn field_and_method_with_same_name_rank_by_complete_suffix() {
+    let index = index_of(
+        "struct Goal { value: int }
+        struct X { goal: Goal }
+        struct Root { a: X }
+        fn a(root: Root) -> X { root.a }
+",
+    );
+    for cap in 0..=3 {
+        let result = index.paths_to("Root", &["Goal".to_string()], cap);
+        let expected = ["a().goal", "a.goal"];
+        assert_eq!(
+            result
+                .paths
+                .iter()
+                .map(|p| p.suffix.as_str())
+                .collect::<Vec<_>>(),
+            expected[..cap.min(2)]
+        );
+        assert_eq!(result.truncated, cap < 2);
+    }
+}

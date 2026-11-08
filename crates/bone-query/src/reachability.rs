@@ -1,19 +1,7 @@
-//! Type-reachability index for type-directed completion.
-//!
-//! Inside `f(|)` with a known expected param type `E`, we want every in-scope
-//! path that PRODUCES an `E` -- through struct fields, UFCS method returns, and
-//! mixtures (`player.movable.to_ivec()`). The graph (nodes = types, edges =
-//! field accesses and method returns) is a pure function of the type graph, so
-//! it is built once per Interface-tier change and reused across body keystrokes.
-//!
-//! Reachability of *types* is a transitive closure (the `reaches` DP table).
-//! But completion inserts a *path string*, and path enumeration is a different
-//! complexity class (a diamond `T->A->E`, `T->B->E` has 2 paths; k chained
-//! diamonds have 2^k) -- memoizing the reachable SET does not collapse that. So
-//! `reaches` is used as a PRUNING ORACLE: the query is a guided DFS that
-//! descends an edge only when its target still reaches `E`, with a simple-path
-//! cycle guard (no depth cap) and a UX result cap. Heuristic backlog:
-//! completion pipeline contract.
+//! Type-directed completion over field and UFCS return edges. The index is
+//! reused across body edits. Type reachability alone cannot bound the number
+//! of access paths: chained diamonds have exponentially many simple paths.
+//! Query search therefore keeps ranked partition minima rather than all paths.
 
 use bone_core::modules::{FragmentScope, NsVisibility};
 use bone_semantic::prelude::*;
@@ -80,17 +68,14 @@ pub struct ReachResult {
 /// Edges out of each type, plus the transitive closure used to prune the
 /// per-keystroke path search.
 pub struct ReachabilityIndex {
+    #[cfg(test)]
+    search_visits: std::sync::atomic::AtomicUsize,
     edges: HashMap<Ustr, Vec<Edge>>,
     /// `reaches[T]` = every type reachable from `T` with its shortest distance.
-    /// The pruning oracle for the on-demand deep-path DFS (`paths_to`), NOT the
-    /// path store.
+    /// Prunes searches; it does not store access paths.
     reaches: HashMap<Ustr, HashMap<Ustr, u16>>,
-    /// `arg_paths[S]` = every depth-`<= ARG_PATH_DEPTH` access path from a value
-    /// of type `S` to any type, materialized at build time. Shallow paths don't
-    /// explode (bounded by out-degree^depth), so unlike deep paths they CAN be
-    /// stored and queried as a lookup -- which is what the per-keystroke
-    /// call-through arg expansion does (`arg_paths_from`), instead of the
-    /// per-call guided DFS `paths_to` runs. Built once per inference change.
+    /// Shallow call-through argument paths, cached independently of the
+    /// expected-type search because their depth is bounded at build time.
     arg_paths: HashMap<Ustr, Vec<ReachPath>>,
 }
 
@@ -210,6 +195,8 @@ impl ReachabilityIndex {
         }
 
         ReachabilityIndex {
+            #[cfg(test)]
+            search_visits: Default::default(),
             edges,
             reaches,
             arg_paths,
@@ -256,9 +243,7 @@ impl ReachabilityIndex {
             .is_some_and(|d| expected.iter().any(|e| d.contains_key(e)))
     }
 
-    /// Every path from a value of `root_ty` to a value of one of `expected`,
-    /// guided-DFS pruned by the closure, simple-path cycle-guarded, ranked by
-    /// (distance, suffix) and capped at `cap`.
+    /// Simple paths ranked by (distance, suffix), retaining at most `cap`.
     pub fn paths_to(&self, root_ty: &str, expected: &[String], cap: usize) -> ReachResult {
         self.paths_to_impl(root_ty, expected, cap, None)
     }
@@ -282,147 +267,199 @@ impl ReachabilityIndex {
         cap: usize,
         visibility: Option<(&Workspace, &FragmentScope)>,
     ) -> ReachResult {
+        #[cfg(test)]
+        self.search_visits
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         let root = Ustr::from(root_ty.strip_suffix('?').unwrap_or(root_ty));
-        // Node keys are canonical nominal names (no nullable `?`), so match the
-        // expected types the same way -- a nullable link can still satisfy a
-        // non-null target (the user can null-check / `?.`).
+        // Nullable links share nominal keys; callers supply any null check.
         let want: Vec<Ustr> = expected
             .iter()
             .map(|s| Ustr::from(s.strip_suffix('?').unwrap_or(s)))
             .collect();
-        let mut out: Vec<ReachPath> = Vec::new();
-        // Bail unless this root can actually reach a wanted type -- avoids any
-        // DFS for the many scalar / unrelated roots.
-        if !self.edges.contains_key(&root) || !self.reaches_any(root, &want) {
-            return ReachResult {
-                paths: out,
-                truncated: false,
-            };
+        let mut result = ReachResult {
+            paths: Vec::new(),
+            truncated: false,
+        };
+        if !self.reaches_any(root, &want) {
+            return result;
         }
-        let mut on_path: HashSet<Ustr> = HashSet::new();
-        on_path.insert(root);
-        self.dfs(
-            root,
-            String::new(),
-            0,
-            false,
-            &want,
-            &mut on_path,
-            &mut out,
-            &[],
-            &[],
-            visibility,
-        );
+        let mut pending = std::collections::BTreeMap::new();
+        let mut serial = 0usize;
+        let prefix = Vec::new();
+        let blocked = HashSet::new();
+        if let Some(path) = self.shortest_path(root, &want, &prefix, &blocked, visibility) {
+            pending.insert(
+                (path.len(), self.path_suffix(&path, false), serial),
+                (path, prefix, blocked),
+            );
+        }
+        while let Some((_, (path, prefix, blocked))) = pending.pop_first() {
+            if result.paths.len() == cap {
+                result.truncated = true;
+                break;
+            }
+            result.paths.push(self.materialize_path(&path));
+            // Partition alternatives by their first different edge (or stop).
+            // Each partition contributes only its minimum, so we never enumerate
+            // every path before applying the requested rank/cap.
+            for split in prefix.len()..=path.len() {
+                let alternative_prefix = path[..split].to_vec();
+                let mut alternative_blocked = if split == prefix.len() {
+                    blocked.clone()
+                } else {
+                    HashSet::new()
+                };
+                alternative_blocked.insert(path.get(split).map(|(_, edge)| *edge));
+                if let Some(alternative) = self.shortest_path(
+                    root,
+                    &want,
+                    &alternative_prefix,
+                    &alternative_blocked,
+                    visibility,
+                ) {
+                    serial += 1;
+                    pending.insert(
+                        (
+                            alternative.len(),
+                            self.path_suffix(&alternative, false),
+                            serial,
+                        ),
+                        (alternative, alternative_prefix, alternative_blocked),
+                    );
+                    // A partition whose minimum is already outside the remaining
+                    // result slots cannot contribute an earlier result later.
+                    let remaining = cap.saturating_sub(result.paths.len()).saturating_add(1);
+                    if pending.len() > remaining {
+                        pending.pop_last();
+                    }
+                }
+            }
+        }
+        result
+    }
 
-        out.sort_by(|a, b| a.dist.cmp(&b.dist).then_with(|| a.suffix.cmp(&b.suffix)));
-        let truncated = out.len() > cap;
-        out.truncate(cap);
-        ReachResult {
-            paths: out,
-            truncated,
+    fn path_suffix(&self, path: &[(Ustr, usize)], continuing: bool) -> String {
+        path.iter()
+            .enumerate()
+            .map(|(i, (node, edge))| {
+                let edge = &self.edges[node][*edge];
+                if matches!(edge.kind, EdgeKind::Method { .. })
+                    && (continuing || i + 1 < path.len())
+                {
+                    format!("{}()", edge.label)
+                } else {
+                    edge.label.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
+    fn materialize_path(&self, path: &[(Ustr, usize)]) -> ReachPath {
+        let edges: Vec<_> = path
+            .iter()
+            .map(|(node, edge)| &self.edges[node][*edge])
+            .collect();
+        let last = edges.last().expect("reach paths have an edge");
+        ReachPath {
+            suffix: self.path_suffix(path, false),
+            final_ty: last.target.to_string(),
+            is_method: matches!(last.kind, EdgeKind::Method { .. }),
+            takes_args: matches!(last.kind, EdgeKind::Method { takes_args: true }),
+            via_call: edges
+                .iter()
+                .any(|e| matches!(e.kind, EdgeKind::Method { .. })),
+            dist: path.len() as u16,
+            method_members: edges.iter().filter_map(|e| e.method).collect(),
+            field_members: edges.iter().filter_map(|e| e.field.clone()).collect(),
         }
     }
 
-    fn dfs(
+    fn shortest_path(
         &self,
-        cur: Ustr,
-        prefix: String,
-        depth: u16,
-        prefix_call: bool,
+        root: Ustr,
         want: &[Ustr],
-        on_path: &mut HashSet<Ustr>,
-        out: &mut Vec<ReachPath>,
-        method_members: &[MethodRef],
-        field_members: &[FieldRef],
+        prefix: &[(Ustr, usize)],
+        blocked: &HashSet<Option<usize>>,
         visibility: Option<(&Workspace, &FragmentScope)>,
-    ) {
-        let Some(outs) = self.edges.get(&cur) else {
-            return;
-        };
-        for e in outs {
-            let mut next_methods = method_members.to_vec();
-            if let Some(method) = e.method {
-                next_methods.push(method);
+    ) -> Option<Vec<(Ustr, usize)>> {
+        let last = prefix.last().map(|(node, edge)| &self.edges[node][*edge]);
+        let start = last.map_or(root, |edge| edge.target);
+        if !prefix.is_empty() && want.contains(&start) && !blocked.contains(&None) {
+            return Some(prefix.to_vec());
+        }
+        if last.is_some_and(|edge| matches!(edge.kind, EdgeKind::Method { takes_args: true })) {
+            return None;
+        }
+        let prefix_nodes: HashSet<_> = prefix.iter().map(|(node, _)| *node).collect();
+        // Include the separator: `a().x` sorts before `a.x`, although `a`
+        // sorts before `a()` when compared without their continuations.
+        let key = (prefix.len(), format!("{}.", self.path_suffix(prefix, true)));
+        let mut best = HashMap::from([(start, key.clone())]);
+        let mut pending =
+            std::collections::BTreeMap::from([((key.0, key.1, 0usize), (start, prefix.to_vec()))]);
+        let mut serial = 0usize;
+        let mut goal: Option<(usize, String, Vec<(Ustr, usize)>)> = None;
+        while let Some(((distance, spelling, _), (node, path))) = pending.pop_first() {
+            if best.get(&node) != Some(&(distance, spelling)) {
+                continue;
             }
-            let mut next_fields = field_members.to_vec();
-            if let Some(field) = &e.field {
-                next_fields.push(field.clone());
+            if goal.as_ref().is_some_and(|(len, _, _)| distance + 1 > *len) {
+                break;
             }
-            if let Some((ws, frag)) = visibility {
-                if !methods_admitted(ws, frag, &next_methods)
-                    || !fields_admitted(ws, frag, &next_fields)
+            #[cfg(test)]
+            self.search_visits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some(edges) = self.edges.get(&node) else {
+                continue;
+            };
+            for (index, edge) in edges.iter().enumerate() {
+                if (node == start && blocked.contains(&Some(index)))
+                    || prefix_nodes.contains(&edge.target)
+                    || edge.target == node
+                    || path.iter().any(|(from, _)| *from == edge.target)
                 {
                     continue;
                 }
-            }
-            // Simple-path cycle guard: never re-enter a type already on this
-            // path. Finiteness comes from here, not a depth cap.
-            if on_path.contains(&e.target) {
-                continue;
-            }
-            let seg_label = match e.kind {
-                EdgeKind::Field => e.label.clone(),
-                EdgeKind::Method { .. } => format!("{}()", e.label),
-            };
-            let leaf_suffix = if prefix.is_empty() {
-                e.label.clone()
-            } else {
-                format!("{prefix}.{}", e.label)
-            };
-
-            // Productive leaf: this edge's target IS a wanted type.
-            if want.contains(&e.target) {
-                let (is_method, takes_args) = match e.kind {
-                    EdgeKind::Field => (false, false),
-                    EdgeKind::Method { takes_args } => (true, takes_args),
-                };
-                out.push(ReachPath {
-                    suffix: leaf_suffix.clone(),
-                    final_ty: e.target.to_string(),
-                    is_method,
-                    takes_args,
-                    via_call: prefix_call || is_method,
-                    dist: depth + 1,
-                    method_members: next_methods.clone(),
-                    field_members: next_fields.clone(),
-                });
-            }
-
-            // Descend only through TRAVERSABLE edges (fields + no-arg methods)
-            // whose target still reaches a wanted type -- the closure prunes
-            // every dead branch, so only productive paths are walked.
-            let traversable = matches!(
-                e.kind,
-                EdgeKind::Field | EdgeKind::Method { takes_args: false }
-            );
-            if traversable && self.reaches_any(e.target, want) {
-                let hop_call = matches!(e.kind, EdgeKind::Method { .. });
-                let descend_prefix = if prefix.is_empty() {
-                    seg_label
-                } else {
-                    format!("{prefix}.{seg_label}")
-                };
-                on_path.insert(e.target);
-                self.dfs(
-                    e.target,
-                    descend_prefix,
-                    depth + 1,
-                    prefix_call || hop_call,
-                    want,
-                    on_path,
-                    out,
-                    &next_methods,
-                    &next_fields,
-                    visibility,
-                );
-                on_path.remove(&e.target);
+                if let Some((ws, frag)) = visibility {
+                    if edge.method.as_ref().is_some_and(|method| {
+                        !methods_admitted(ws, frag, std::slice::from_ref(method))
+                    }) || edge.field.as_ref().is_some_and(|field| {
+                        !fields_admitted(ws, frag, std::slice::from_ref(field))
+                    }) {
+                        continue;
+                    }
+                }
+                let mut next = path.clone();
+                next.push((node, index));
+                if want.contains(&edge.target) {
+                    let suffix = self.path_suffix(&next, false);
+                    if goal
+                        .as_ref()
+                        .is_none_or(|(len, old, _)| (next.len(), &suffix) < (*len, old))
+                    {
+                        goal = Some((next.len(), suffix, next.clone()));
+                    }
+                }
+                if matches!(edge.kind, EdgeKind::Method { takes_args: true })
+                    || !self.reaches_any(edge.target, want)
+                {
+                    continue;
+                }
+                let key = (next.len(), format!("{}.", self.path_suffix(&next, true)));
+                if best.get(&edge.target).is_none_or(|old| &key < old) {
+                    best.insert(edge.target, key.clone());
+                    serial += 1;
+                    pending.insert((key.0, key.1, serial), (edge.target, next));
+                }
             }
         }
+        goal.map(|(_, _, path)| path)
     }
 }
 
 /// Build-time enumeration of every depth-`<= ARG_PATH_DEPTH` access path from
-/// `cur` to any type (simple-path cycle-guarded). Mirrors `dfs`'s suffix shaping
+/// `cur` to any type (simple-path cycle-guarded). Uses the query suffix shaping
 /// (`suffix` is the bare access path; `is_method`/`takes_args` let the caller
 /// render the final `()`), but is UNGUIDED (no `want` target -- it records every
 /// reachable type, since the query's wanted type isn't known at build time) and
@@ -559,5 +596,43 @@ fn struct_name_of_ty(ws: &Workspace, ty: TyId) -> Option<Ustr> {
             struct_name_of_ty(ws, TyId::Static(m, *inner))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn requested_cap_bounds_work_on_layered_diamonds() {
+        let mut source = "struct Goal { value: int }\n".to_string();
+        for level in 0..10 {
+            let next = if level == 9 {
+                "Goal".to_string()
+            } else {
+                format!("N{}", level + 1)
+            };
+            source.push_str(&format!("struct N{level} {{ a: {next}, b: {next} }}\n"));
+        }
+        let module = skull_parser::parse_module_clean(&source, Ustr::from("<reach-test>")).unwrap();
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut [module]).unwrap();
+        let index = ReachabilityIndex::build(&ws);
+        let result = index.paths_to("N0", &["Goal".to_string()], 1);
+        assert_eq!(
+            result
+                .paths
+                .iter()
+                .map(|p| p.suffix.as_str())
+                .collect::<Vec<_>>(),
+            ["a.a.a.a.a.a.a.a.a.a"]
+        );
+        assert!(result.truncated);
+        let visits = index
+            .search_visits
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            visits <= 144,
+            "one result must not enumerate all 1024 paths: {visits} visits"
+        );
     }
 }
