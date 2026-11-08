@@ -226,7 +226,6 @@ pub fn server_capabilities() -> ServerCapabilities {
                 supported: Some(true),
                 change_notifications: Some(lsp_types::OneOf::Left(true)),
             }),
-            file_operations: None,
         }),
         // Always listed (nvim will not send a command the server left
         // undeclared); completions only bear the command while

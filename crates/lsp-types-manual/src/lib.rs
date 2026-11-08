@@ -128,14 +128,8 @@ pub mod error_codes;
 pub mod notification;
 pub mod request;
 
-mod call_hierarchy;
-pub use call_hierarchy::*;
-
 mod code_action;
 pub use code_action::*;
-
-mod code_lens;
-pub use code_lens::*;
 
 mod color;
 pub use color::*;
@@ -143,26 +137,11 @@ pub use color::*;
 mod completion;
 pub use completion::*;
 
-mod document_diagnostic;
-pub use document_diagnostic::*;
-
 mod document_highlight;
 pub use document_highlight::*;
 
-mod document_link;
-pub use document_link::*;
-
 mod document_symbols;
 pub use document_symbols::*;
-
-mod notebook;
-pub use notebook::*;
-
-mod file_operations;
-pub use file_operations::*;
-
-mod folding_range;
-pub use folding_range::*;
 
 mod formatting;
 pub use formatting::*;
@@ -173,17 +152,6 @@ pub use hover::*;
 mod inlay_hint;
 pub use inlay_hint::*;
 
-mod inline_value;
-pub use inline_value::*;
-
-#[cfg(feature = "proposed")]
-mod inline_completion;
-#[cfg(feature = "proposed")]
-pub use inline_completion::*;
-
-mod moniker;
-pub use moniker::*;
-
 mod progress;
 pub use progress::*;
 
@@ -193,34 +161,20 @@ pub use references::*;
 mod rename;
 pub use rename::*;
 
-pub mod selection_range;
-pub use selection_range::*;
-
 mod semantic_tokens;
 pub use semantic_tokens::*;
 
 mod signature_help;
 pub use signature_help::*;
 
-mod type_hierarchy;
-pub use type_hierarchy::*;
-
-mod linked_editing;
-pub use linked_editing::*;
-
 mod window;
 pub use window::*;
-
-mod workspace_diagnostic;
-pub use workspace_diagnostic::*;
 
 mod workspace_folders;
 pub use workspace_folders::*;
 
 mod workspace_symbols;
 pub use workspace_symbols::*;
-
-pub mod lsif;
 
 mod trace;
 pub use trace::*;
@@ -1523,29 +1477,10 @@ pub struct WorkspaceClientCapabilities {
     /// @since 3.16.0
     pub semantic_tokens: Option<SemanticTokensWorkspaceClientCapabilities>,
 
-    /// Capabilities specific to the code lens requests scoped to the workspace.
-    ///
-    /// @since 3.16.0
-    pub code_lens: Option<CodeLensWorkspaceClientCapabilities>,
-
-    /// The client has support for file requests/notifications.
-    ///
-    /// @since 3.16.0
-    pub file_operations: Option<WorkspaceFileOperationsClientCapabilities>,
-
-    /// Client workspace capabilities specific to inline values.
-    ///
-    /// @since 3.17.0
-    pub inline_value: Option<InlineValueWorkspaceClientCapabilities>,
-
     /// Client workspace capabilities specific to inlay hints.
     ///
     /// @since 3.17.0
     pub inlay_hint: Option<InlayHintWorkspaceClientCapabilities>,
-
-    /// Client workspace capabilities specific to diagnostics.
-    /// since 3.17.0
-    pub diagnostic: Option<DiagnosticWorkspaceClientCapabilities>,
 }
 
 impl_lsp_struct!(
@@ -1562,11 +1497,7 @@ impl_lsp_struct!(
         workspace_folders: bool = "workspaceFolders",
         configuration: bool = "configuration",
         semantic_tokens: SemanticTokensWorkspaceClientCapabilities = "semanticTokens",
-        code_lens: CodeLensWorkspaceClientCapabilities = "codeLens",
-        file_operations: WorkspaceFileOperationsClientCapabilities = "fileOperations",
-        inline_value: InlineValueWorkspaceClientCapabilities = "inlineValue",
         inlay_hint: InlayHintWorkspaceClientCapabilities = "inlayHint",
-        diagnostic: DiagnosticWorkspaceClientCapabilities = "diagnostic",
     }
 );
 
@@ -1817,12 +1748,6 @@ pub struct TextDocumentClientCapabilities {
     /// Capabilities specific to the `textDocument/codeAction`
     pub code_action: Option<CodeActionClientCapabilities>,
 
-    /// Capabilities specific to the `textDocument/codeLens`
-    pub code_lens: Option<CodeLensClientCapabilities>,
-
-    /// Capabilities specific to the `textDocument/documentLink`
-    pub document_link: Option<DocumentLinkClientCapabilities>,
-
     /// Capabilities specific to the `textDocument/documentColor` and the
     /// `textDocument/colorPresentation` request.
     pub color_provider: Option<DocumentColorClientCapabilities>,
@@ -1833,57 +1758,13 @@ pub struct TextDocumentClientCapabilities {
     /// Capabilities specific to `textDocument/publishDiagnostics`.
     pub publish_diagnostics: Option<PublishDiagnosticsClientCapabilities>,
 
-    /// Capabilities specific to `textDocument/foldingRange` requests.
-    pub folding_range: Option<FoldingRangeClientCapabilities>,
-
-    /// Capabilities specific to the `textDocument/selectionRange` request.
-    ///
-    /// @since 3.15.0
-    pub selection_range: Option<SelectionRangeClientCapabilities>,
-
-    /// Capabilities specific to `textDocument/linkedEditingRange` requests.
-    ///
-    /// @since 3.16.0
-    pub linked_editing_range: Option<LinkedEditingRangeClientCapabilities>,
-
-    /// Capabilities specific to the various call hierarchy requests.
-    ///
-    /// @since 3.16.0
-    pub call_hierarchy: Option<CallHierarchyClientCapabilities>,
-
     /// Capabilities specific to the `textDocument/semanticTokens/*` requests.
     pub semantic_tokens: Option<SemanticTokensClientCapabilities>,
-
-    /// Capabilities specific to the `textDocument/moniker` request.
-    ///
-    /// @since 3.16.0
-    pub moniker: Option<MonikerClientCapabilities>,
-
-    /// Capabilities specific to the various type hierarchy requests.
-    ///
-    /// @since 3.17.0
-    pub type_hierarchy: Option<TypeHierarchyClientCapabilities>,
-
-    /// Capabilities specific to the `textDocument/inlineValue` request.
-    ///
-    /// @since 3.17.0
-    pub inline_value: Option<InlineValueClientCapabilities>,
 
     /// Capabilities specific to the `textDocument/inlayHint` request.
     ///
     /// @since 3.17.0
     pub inlay_hint: Option<InlayHintClientCapabilities>,
-
-    /// Capabilities specific to the diagnostic pull model.
-    ///
-    /// @since 3.17.0
-    pub diagnostic: Option<DiagnosticClientCapabilities>,
-
-    /// Capabilities specific to the `textDocument/inlineCompletion` request.
-    ///
-    /// @since 3.18.0
-    #[cfg(feature = "proposed")]
-    pub inline_completion: Option<InlineCompletionClientCapabilities>,
 }
 
 impl_lsp_struct!(
@@ -1905,21 +1786,11 @@ impl_lsp_struct!(
         type_definition: GotoCapability = "typeDefinition",
         implementation: GotoCapability = "implementation",
         code_action: CodeActionClientCapabilities = "codeAction",
-        code_lens: CodeLensClientCapabilities = "codeLens",
-        document_link: DocumentLinkClientCapabilities = "documentLink",
         color_provider: DocumentColorClientCapabilities = "colorProvider",
         rename: RenameClientCapabilities = "rename",
         publish_diagnostics: PublishDiagnosticsClientCapabilities = "publishDiagnostics",
-        folding_range: FoldingRangeClientCapabilities = "foldingRange",
-        selection_range: SelectionRangeClientCapabilities = "selectionRange",
-        linked_editing_range: LinkedEditingRangeClientCapabilities = "linkedEditingRange",
-        call_hierarchy: CallHierarchyClientCapabilities = "callHierarchy",
         semantic_tokens: SemanticTokensClientCapabilities = "semanticTokens",
-        moniker: MonikerClientCapabilities = "moniker",
-        type_hierarchy: TypeHierarchyClientCapabilities = "typeHierarchy",
-        inline_value: InlineValueClientCapabilities = "inlineValue",
         inlay_hint: InlayHintClientCapabilities = "inlayHint",
-        diagnostic: DiagnosticClientCapabilities = "diagnostic",
     }
 );
 
@@ -1931,11 +1802,6 @@ pub struct ClientCapabilities {
 
     /// Text document specific client capabilities.
     pub text_document: Option<TextDocumentClientCapabilities>,
-
-    /// Capabilities specific to the notebook document support.
-    ///
-    /// @since 3.17.0
-    pub notebook_document: Option<NotebookDocumentClientCapabilities>,
 
     /// Window specific client capabilities.
     pub window: Option<WindowClientCapabilities>,
@@ -1963,9 +1829,6 @@ impl serde::Serialize for ClientCapabilities {
         if self.text_document.is_some() {
             hint += 1;
         }
-        if self.notebook_document.is_some() {
-            hint += 1;
-        }
         if self.window.is_some() {
             hint += 1;
         }
@@ -1985,9 +1848,6 @@ impl serde::Serialize for ClientCapabilities {
         }
         if let Some(ref v) = self.text_document {
             map.serialize_entry("textDocument", v)?;
-        }
-        if let Some(ref v) = self.notebook_document {
-            map.serialize_entry("notebookDocument", v)?;
         }
         if let Some(ref v) = self.window {
             map.serialize_entry("window", v)?;
@@ -2026,9 +1886,6 @@ impl<'de> serde::Deserialize<'de> for ClientCapabilities {
                         }
                         "textDocument" => {
                             result.text_document = Some(map.next_value()?);
-                        }
-                        "notebookDocument" => {
-                            result.notebook_document = Some(map.next_value()?);
                         }
                         "window" => {
                             result.window = Some(map.next_value()?);
@@ -2517,15 +2374,6 @@ pub struct ServerCapabilities {
     /// Defines how text documents are synced.
     pub text_document_sync: Option<TextDocumentSyncCapability>,
 
-    /// Defines how notebook documents are synced.
-    ///
-    /// @since 3.17.0
-    pub notebook_document_sync:
-        Option<OneOf<NotebookDocumentSyncOptions, NotebookDocumentSyncRegistrationOptions>>,
-
-    /// Capabilities specific to `textDocument/selectionRange` requests.
-    pub selection_range_provider: Option<SelectionRangeProviderCapability>,
-
     /// The server provides hover support.
     pub hover_provider: Option<HoverProviderCapability>,
 
@@ -2559,9 +2407,6 @@ pub struct ServerCapabilities {
     /// The server provides code actions.
     pub code_action_provider: Option<CodeActionProviderCapability>,
 
-    /// The server provides code lens.
-    pub code_lens_provider: Option<CodeLensOptions>,
-
     /// The server provides document formatting.
     pub document_formatting_provider: Option<OneOf<bool, DocumentFormattingOptions>>,
 
@@ -2574,14 +2419,8 @@ pub struct ServerCapabilities {
     /// The server provides rename support.
     pub rename_provider: Option<OneOf<bool, RenameOptions>>,
 
-    /// The server provides document link support.
-    pub document_link_provider: Option<DocumentLinkOptions>,
-
     /// The server provides color provider support.
     pub color_provider: Option<ColorProviderCapability>,
-
-    /// The server provides folding provider support.
-    pub folding_range_provider: Option<FoldingRangeProviderCapability>,
 
     /// The server provides go to declaration support.
     pub declaration_provider: Option<DeclarationCapability>,
@@ -2592,40 +2431,13 @@ pub struct ServerCapabilities {
     /// Workspace specific server capabilities
     pub workspace: Option<WorkspaceServerCapabilities>,
 
-    /// Call hierarchy provider capabilities.
-    pub call_hierarchy_provider: Option<CallHierarchyServerCapability>,
-
     /// Semantic tokens server capabilities.
     pub semantic_tokens_provider: Option<SemanticTokensServerCapabilities>,
-
-    /// Whether server provides moniker support.
-    pub moniker_provider: Option<OneOf<bool, MonikerServerCapabilities>>,
-
-    /// The server provides linked editing range support.
-    ///
-    /// @since 3.16.0
-    pub linked_editing_range_provider: Option<LinkedEditingRangeServerCapabilities>,
-
-    /// The server provides inline values.
-    ///
-    /// @since 3.17.0
-    pub inline_value_provider: Option<OneOf<bool, InlineValueServerCapabilities>>,
 
     /// The server provides inlay hints.
     ///
     /// @since 3.17.0
     pub inlay_hint_provider: Option<OneOf<bool, InlayHintServerCapabilities>>,
-
-    /// The server has support for pull model diagnostics.
-    ///
-    /// @since 3.17.0
-    pub diagnostic_provider: Option<DiagnosticServerCapabilities>,
-
-    /// The server provides inline completions.
-    ///
-    /// @since 3.18.0
-    #[cfg(feature = "proposed")]
-    pub inline_completion_provider: Option<OneOf<bool, InlineCompletionOptions>>,
 
     /// Experimental server capabilities.
     pub experimental: Option<Value>,
@@ -2640,12 +2452,6 @@ impl serde::Serialize for ServerCapabilities {
         }
         if let Some(ref v) = self.text_document_sync {
             map.serialize_entry("textDocumentSync", v)?;
-        }
-        if let Some(ref v) = self.notebook_document_sync {
-            map.serialize_entry("notebookDocumentSync", v)?;
-        }
-        if let Some(ref v) = self.selection_range_provider {
-            map.serialize_entry("selectionRangeProvider", v)?;
         }
         if let Some(ref v) = self.hover_provider {
             map.serialize_entry("hoverProvider", v)?;
@@ -2680,9 +2486,6 @@ impl serde::Serialize for ServerCapabilities {
         if let Some(ref v) = self.code_action_provider {
             map.serialize_entry("codeActionProvider", v)?;
         }
-        if let Some(ref v) = self.code_lens_provider {
-            map.serialize_entry("codeLensProvider", v)?;
-        }
         if let Some(ref v) = self.document_formatting_provider {
             map.serialize_entry("documentFormattingProvider", v)?;
         }
@@ -2695,14 +2498,8 @@ impl serde::Serialize for ServerCapabilities {
         if let Some(ref v) = self.rename_provider {
             map.serialize_entry("renameProvider", v)?;
         }
-        if let Some(ref v) = self.document_link_provider {
-            map.serialize_entry("documentLinkProvider", v)?;
-        }
         if let Some(ref v) = self.color_provider {
             map.serialize_entry("colorProvider", v)?;
-        }
-        if let Some(ref v) = self.folding_range_provider {
-            map.serialize_entry("foldingRangeProvider", v)?;
         }
         if let Some(ref v) = self.declaration_provider {
             map.serialize_entry("declarationProvider", v)?;
@@ -2713,30 +2510,11 @@ impl serde::Serialize for ServerCapabilities {
         if let Some(ref v) = self.workspace {
             map.serialize_entry("workspace", v)?;
         }
-        if let Some(ref v) = self.call_hierarchy_provider {
-            map.serialize_entry("callHierarchyProvider", v)?;
-        }
         if let Some(ref v) = self.semantic_tokens_provider {
             map.serialize_entry("semanticTokensProvider", v)?;
         }
-        if let Some(ref v) = self.moniker_provider {
-            map.serialize_entry("monikerProvider", v)?;
-        }
-        if let Some(ref v) = self.linked_editing_range_provider {
-            map.serialize_entry("linkedEditingRangeProvider", v)?;
-        }
-        if let Some(ref v) = self.inline_value_provider {
-            map.serialize_entry("inlineValueProvider", v)?;
-        }
         if let Some(ref v) = self.inlay_hint_provider {
             map.serialize_entry("inlayHintProvider", v)?;
-        }
-        if let Some(ref v) = self.diagnostic_provider {
-            map.serialize_entry("diagnosticProvider", v)?;
-        }
-        #[cfg(feature = "proposed")]
-        if let Some(ref v) = self.inline_completion_provider {
-            map.serialize_entry("inlineCompletionProvider", v)?;
         }
         if let Some(ref v) = self.experimental {
             map.serialize_entry("experimental", v)?;
@@ -2765,12 +2543,6 @@ impl<'de> serde::Deserialize<'de> for ServerCapabilities {
                         }
                         "textDocumentSync" => {
                             result.text_document_sync = Some(map.next_value()?);
-                        }
-                        "notebookDocumentSync" => {
-                            result.notebook_document_sync = Some(map.next_value()?);
-                        }
-                        "selectionRangeProvider" => {
-                            result.selection_range_provider = Some(map.next_value()?);
                         }
                         "hoverProvider" => {
                             result.hover_provider = Some(map.next_value()?);
@@ -2805,9 +2577,6 @@ impl<'de> serde::Deserialize<'de> for ServerCapabilities {
                         "codeActionProvider" => {
                             result.code_action_provider = Some(map.next_value()?);
                         }
-                        "codeLensProvider" => {
-                            result.code_lens_provider = Some(map.next_value()?);
-                        }
                         "documentFormattingProvider" => {
                             result.document_formatting_provider = Some(map.next_value()?);
                         }
@@ -2820,14 +2589,8 @@ impl<'de> serde::Deserialize<'de> for ServerCapabilities {
                         "renameProvider" => {
                             result.rename_provider = Some(map.next_value()?);
                         }
-                        "documentLinkProvider" => {
-                            result.document_link_provider = Some(map.next_value()?);
-                        }
                         "colorProvider" => {
                             result.color_provider = Some(map.next_value()?);
-                        }
-                        "foldingRangeProvider" => {
-                            result.folding_range_provider = Some(map.next_value()?);
                         }
                         "declarationProvider" => {
                             result.declaration_provider = Some(map.next_value()?);
@@ -2838,30 +2601,11 @@ impl<'de> serde::Deserialize<'de> for ServerCapabilities {
                         "workspace" => {
                             result.workspace = Some(map.next_value()?);
                         }
-                        "callHierarchyProvider" => {
-                            result.call_hierarchy_provider = Some(map.next_value()?);
-                        }
                         "semanticTokensProvider" => {
                             result.semantic_tokens_provider = Some(map.next_value()?);
                         }
-                        "monikerProvider" => {
-                            result.moniker_provider = Some(map.next_value()?);
-                        }
-                        "linkedEditingRangeProvider" => {
-                            result.linked_editing_range_provider = Some(map.next_value()?);
-                        }
-                        "inlineValueProvider" => {
-                            result.inline_value_provider = Some(map.next_value()?);
-                        }
                         "inlayHintProvider" => {
                             result.inlay_hint_provider = Some(map.next_value()?);
-                        }
-                        "diagnosticProvider" => {
-                            result.diagnostic_provider = Some(map.next_value()?);
-                        }
-                        #[cfg(feature = "proposed")]
-                        "inlineCompletionProvider" => {
-                            result.inline_completion_provider = Some(map.next_value()?);
                         }
                         "experimental" => {
                             result.experimental = Some(map.next_value()?);
@@ -2882,8 +2626,6 @@ impl<'de> serde::Deserialize<'de> for ServerCapabilities {
 pub struct WorkspaceServerCapabilities {
     /// The server supports workspace folder.
     pub workspace_folders: Option<WorkspaceFoldersServerCapabilities>,
-
-    pub file_operations: Option<WorkspaceFileOperationsServerCapabilities>,
 }
 
 impl_lsp_struct!(
@@ -2891,7 +2633,6 @@ impl_lsp_struct!(
     required {},
     optional {
         workspace_folders: WorkspaceFoldersServerCapabilities = "workspaceFolders",
-        file_operations: WorkspaceFileOperationsServerCapabilities = "fileOperations",
     }
 );
 

@@ -9,11 +9,6 @@ type OrigTagSupport = lsp_types::TagSupport<lsp_types::CompletionItemTag>;
 type ForkTagSupport = lsp_types_manual::TagSupport<lsp_types_manual::CompletionItemTag>;
 
 type_test!(
-    NotebookCellKindTest,
-    NotebookCellKind,
-    gen_notebook_cell_kind
-);
-type_test!(
     HoverClientCapabilitiesTest,
     HoverClientCapabilities,
     gen_hover_client_capabilities
@@ -101,16 +96,6 @@ type_test!(
     PositionEncodingKind,
     gen_position_encoding_kind
 );
-type_test!(
-    NotebookDocumentFilterTest,
-    NotebookDocumentFilter,
-    gen_notebook_document_filter
-);
-type_test!(
-    NotebookSelectorTest,
-    NotebookSelector,
-    gen_notebook_selector
-);
 type_test!(SemanticTokensTest, SemanticTokens, gen_semantic_tokens);
 type_test!(
     TagSupportTest,
@@ -118,41 +103,6 @@ type_test!(
     OrigTagSupport,
     ForkTagSupport,
     gen_tag_support
-);
-type_test!(
-    LsifVertexTest,
-    LsifVertex,
-    lsp_types::lsif::Vertex,
-    lsp_types_manual::lsif::Vertex,
-    gen_lsif_vertex
-);
-type_test!(
-    LsifToolInfoTest,
-    LsifToolInfo,
-    lsp_types::lsif::ToolInfo,
-    lsp_types_manual::lsif::ToolInfo,
-    gen_lsif_tool_info
-);
-type_test!(
-    LsifRangeBasedDocumentSymbolTest,
-    LsifRangeBasedDocumentSymbol,
-    lsp_types::lsif::RangeBasedDocumentSymbol,
-    lsp_types_manual::lsif::RangeBasedDocumentSymbol,
-    gen_lsif_range_based_symbol
-);
-type_test!(
-    LsifDefinitionTagTest,
-    LsifDefinitionTag,
-    lsp_types::lsif::DefinitionTag,
-    lsp_types_manual::lsif::DefinitionTag,
-    gen_lsif_definition_tag
-);
-type_test!(
-    LsifDeclarationTagTest,
-    LsifDeclarationTag,
-    lsp_types::lsif::DeclarationTag,
-    lsp_types_manual::lsif::DeclarationTag,
-    gen_lsif_declaration_tag
 );
 
 type_test!(
@@ -200,7 +150,6 @@ type_test!(
 
 fn all_tests() -> Vec<Box<dyn TypeTest>> {
     vec![
-        Box::new(NotebookCellKindTest),
         Box::new(HoverClientCapabilitiesTest),
         Box::new(HoverTest),
         Box::new(SemanticTokensFullOptionsTest),
@@ -225,15 +174,8 @@ fn all_tests() -> Vec<Box<dyn TypeTest>> {
         Box::new(PrepareRenameResponseTest),
         Box::new(WatchKindTest),
         Box::new(PositionEncodingKindTest),
-        Box::new(NotebookDocumentFilterTest),
-        Box::new(NotebookSelectorTest),
         Box::new(SemanticTokensTest),
         Box::new(TagSupportTest),
-        Box::new(LsifVertexTest),
-        Box::new(LsifToolInfoTest),
-        Box::new(LsifRangeBasedDocumentSymbolTest),
-        Box::new(LsifDefinitionTagTest),
-        Box::new(LsifDeclarationTagTest),
         Box::new(RequestIdTest),
         Box::new(ResponseErrorTest),
         Box::new(LspRequestTest),

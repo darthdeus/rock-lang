@@ -2,12 +2,6 @@ use rand::rngs::StdRng;
 use rand::Rng;
 use serde_json::{json, Value};
 
-// ── notebook ─────────────────────────────────────────────────────────────────
-
-pub fn gen_notebook_cell_kind(_rng: &mut StdRng) -> Vec<Value> {
-    vec![json!(1), json!(2)]
-}
-
 // ── primitives ────────────────────────────────────────────────────────────────
 
 pub fn gen_position(rng: &mut StdRng) -> Value {
@@ -430,147 +424,11 @@ pub fn gen_position_encoding_kind(_rng: &mut StdRng) -> Vec<Value> {
     ]
 }
 
-// ── NotebookDocumentFilter ────────────────────────────────────────────────────
-// Custom impl: ByType (notebookType req), ByScheme (scheme req), ByPattern
-// (pattern req). Matches the first present in field-precedence order.
-
-pub fn gen_notebook_document_filter(_rng: &mut StdRng) -> Vec<Value> {
-    vec![
-        // ByType and mixed-field cases pin upstream's untagged-enum behavior.
-        json!({ "notebookType": "jupyter" }),
-        json!({ "notebookType": "jupyter", "scheme": "file", "pattern": "*.ipynb" }),
-        json!({ "notebook_type": "jupyter" }),
-        json!({ "notebook_type": 42, "scheme": "file" }),
-        // ByScheme alone
-        json!({ "scheme": "file" }),
-        json!({ "scheme": "file", "pattern": "*.ipynb" }),
-        // ByPattern alone
-        json!({ "pattern": "*.ipynb" }),
-        // empty — both reject
-        json!({}),
-        // wrong-type field — both reject
-        json!({ "notebookType": 42 }),
-        // A malformed optional field cannot be silently discarded to select
-        // another untagged-enum arm.
-        json!({ "notebookType": 42, "scheme": "file" }),
-        json!({ "scheme": 42, "pattern": "*.ipynb" }),
-        json!({ "scheme": "file", "pattern": 42 }),
-    ]
-}
-
-pub fn gen_notebook_selector(_rng: &mut StdRng) -> Vec<Value> {
-    vec![
-        json!({ "notebook": "jupyter" }),
-        json!({ "cells": [{ "language": "rust" }] }),
-        json!({ "notebook": null, "cells": [{ "language": "rust" }] }),
-        json!({ "notebook": 42, "cells": [{ "language": "rust" }] }),
-        json!({ "notebook": "jupyter", "cells": [{ "language": 1 }] }),
-    ]
-}
-
 pub fn gen_semantic_tokens(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!({ "data": [] }),
         json!({ "data": [], "resultId": null }),
         json!({ "data": [], "resultId": 123 }),
-    ]
-}
-
-pub fn gen_lsif_tool_info(_rng: &mut StdRng) -> Vec<Value> {
-    vec![
-        json!({ "name": "rock-lsp" }),
-        json!({ "name": "rock-lsp", "args": ["--stdio"] }),
-        json!({ "name": "rock-lsp", "args": "--stdio" }),
-        json!({ "name": "rock-lsp", "version": 1 }),
-    ]
-}
-
-pub fn gen_lsif_range_based_symbol(_rng: &mut StdRng) -> Vec<Value> {
-    vec![
-        json!({ "id": 1 }),
-        json!({ "id": "symbol", "children": [{ "id": 2 }] }),
-        json!({ "id": 1, "children": "bad" }),
-    ]
-}
-
-pub fn gen_lsif_definition_tag(rng: &mut StdRng) -> Vec<Value> {
-    let range = gen_range(rng);
-    vec![
-        json!({ "text": "symbol", "kind": 1, "fullRange": range }),
-        json!({ "text": "symbol", "kind": 1, "fullRange": range, "deprecated": "yes" }),
-        json!({ "text": "symbol", "kind": 1, "fullRange": range, "detail": 7 }),
-    ]
-}
-
-pub fn gen_lsif_declaration_tag(rng: &mut StdRng) -> Vec<Value> {
-    let range = gen_range(rng);
-    vec![
-        json!({ "text": "symbol", "kind": 1, "fullRange": range }),
-        json!({ "text": "symbol", "kind": 1, "fullRange": range, "deprecated": "yes" }),
-        json!({ "text": "symbol", "kind": 1, "fullRange": range, "detail": 7 }),
-    ]
-}
-
-// ── LSIF Vertex ────────────────────────────────────────────────────────────────
-// Tagged enum keyed by "label". Many variants — sample the high-signal ones:
-//  - simple-label-only (definitionResult etc.)
-//  - merge-style (metaData, project, document)
-//  - explicit "result" field (foldingRangeResult, hoverResult, ...)
-//  - dollar-prefix label ("$event")
-//  - unknown label — both error
-
-pub fn gen_lsif_vertex(rng: &mut StdRng) -> Vec<Value> {
-    let r = gen_range(rng);
-    vec![
-        // label-only variants
-        json!({ "label": "definitionResult" }),
-        json!({ "label": "declarationResult" }),
-        json!({ "label": "typeDefinitionResult" }),
-        json!({ "label": "referenceResult" }),
-        json!({ "label": "implementationResult" }),
-        // metaData (PositionEncoding optional, version + projectRoot etc.)
-        json!({
-            "label": "metaData",
-            "version": "0.6.0",
-            "projectRoot": "file:///tmp",
-            "positionEncoding": "utf-16",
-            "toolInfo": { "name": "rock-lsp", "args": [], "version": "0.1" }
-        }),
-        // project
-        json!({ "label": "project", "kind": "rust", "resource": "file:///tmp/proj" }),
-        // document
-        json!({ "label": "document", "uri": "file:///tmp/a.rs", "languageId": "rust" }),
-        // range without tag
-        json!({ "label": "range", "start": r["start"], "end": r["end"] }),
-        // range with reference tag
-        json!({
-            "label": "range",
-            "start": r["start"], "end": r["end"],
-            "tag": { "type": "reference", "text": "foo" }
-        }),
-        // Invalid known tag payloads must not be ignored.
-        json!({
-            "label": "range",
-            "start": r["start"], "end": r["end"],
-            "tag": { "type": "definition", "text": "foo", "kind": 1,
-                "fullRange": r, "deprecated": "yes" }
-        }),
-        // $event
-        json!({ "label": "$event", "kind": "begin", "scope": "document", "data": "id-1" }),
-        // foldingRangeResult — explicit "result" array
-        json!({
-            "label": "foldingRangeResult",
-            "result": [{ "startLine": 0, "endLine": 5 }]
-        }),
-        // diagnosticResult
-        json!({
-            "label": "diagnosticResult",
-            "result": [{ "range": r.clone(), "message": "x" }]
-        }),
-        // unknown label — both error
-        json!({ "label": "bogusLabel" }),
-        // missing label — both error
-        json!({ "version": "0.6.0" }),
     ]
 }
 

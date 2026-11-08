@@ -58,19 +58,6 @@ macro_rules! lsp_notification {
         $crate::notification::PublishDiagnostics
     };
 
-    ("notebookDocument/didOpen") => {
-        $crate::notification::DidOpenNotebookDocument
-    };
-    ("notebookDocument/didChange") => {
-        $crate::notification::DidChangeNotebookDocument
-    };
-    ("notebookDocument/didSave") => {
-        $crate::notification::DidSaveNotebookDocument
-    };
-    ("notebookDocument/didClose") => {
-        $crate::notification::DidCloseNotebookDocument
-    };
-
     ("workspace/didChangeConfiguration") => {
         $crate::notification::DidChangeConfiguration
     };
@@ -82,15 +69,6 @@ macro_rules! lsp_notification {
     };
     ("$/progress") => {
         $crate::notification::Progress
-    };
-    ("workspace/didCreateFiles") => {
-        $crate::notification::DidCreateFiles
-    };
-    ("workspace/didRenameFiles") => {
-        $crate::notification::DidRenameFiles
-    };
-    ("workspace/didDeleteFiles") => {
-        $crate::notification::DidDeleteFiles
     };
 }
 
@@ -244,34 +222,6 @@ impl Notification for DidSaveTextDocument {
     const METHOD: &'static str = "textDocument/didSave";
 }
 
-#[derive(Debug)]
-pub enum DidOpenNotebookDocument {}
-impl Notification for DidOpenNotebookDocument {
-    type Params = DidOpenNotebookDocumentParams;
-    const METHOD: &'static str = "notebookDocument/didOpen";
-}
-
-#[derive(Debug)]
-pub enum DidChangeNotebookDocument {}
-impl Notification for DidChangeNotebookDocument {
-    type Params = DidChangeNotebookDocumentParams;
-    const METHOD: &'static str = "notebookDocument/didChange";
-}
-
-#[derive(Debug)]
-pub enum DidSaveNotebookDocument {}
-impl Notification for DidSaveNotebookDocument {
-    type Params = DidSaveNotebookDocumentParams;
-    const METHOD: &'static str = "notebookDocument/didSave";
-}
-
-#[derive(Debug)]
-pub enum DidCloseNotebookDocument {}
-impl Notification for DidCloseNotebookDocument {
-    type Params = DidCloseNotebookDocumentParams;
-    const METHOD: &'static str = "notebookDocument/didClose";
-}
-
 /// The watched files notification is sent from the client to the server when the client detects changes to files and folders
 /// watched by the language client (note although the name suggest that only file events are sent it is about file system events which include folders as well).
 /// It is recommended that servers register for these file system events using the registration mechanism.
@@ -323,33 +273,6 @@ impl Notification for WorkDoneProgressCancel {
     const METHOD: &'static str = "window/workDoneProgress/cancel";
 }
 
-/// The did create files notification is sent from the client to the server when files were created from within the client.
-#[derive(Debug)]
-pub enum DidCreateFiles {}
-
-impl Notification for DidCreateFiles {
-    type Params = CreateFilesParams;
-    const METHOD: &'static str = "workspace/didCreateFiles";
-}
-
-/// The did rename files notification is sent from the client to the server when files were renamed from within the client.
-#[derive(Debug)]
-pub enum DidRenameFiles {}
-
-impl Notification for DidRenameFiles {
-    type Params = RenameFilesParams;
-    const METHOD: &'static str = "workspace/didRenameFiles";
-}
-
-/// The did delete files notification is sent from the client to the server when files were deleted from within the client.
-#[derive(Debug)]
-pub enum DidDeleteFiles {}
-
-impl Notification for DidDeleteFiles {
-    type Params = DeleteFilesParams;
-    const METHOD: &'static str = "workspace/didDeleteFiles";
-}
-
 #[cfg(test)]
 mod test {
     use super::*;
@@ -391,9 +314,6 @@ mod test {
         check_macro!("workspace/didChangeConfiguration");
         check_macro!("workspace/didChangeWatchedFiles");
         check_macro!("workspace/didChangeWorkspaceFolders");
-        check_macro!("workspace/didCreateFiles");
-        check_macro!("workspace/didRenameFiles");
-        check_macro!("workspace/didDeleteFiles");
     }
 
     #[test]

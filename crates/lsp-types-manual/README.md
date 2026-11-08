@@ -1,5 +1,13 @@
 # lsp-types [![Build Status](https://travis-ci.org/gluon-lang/lsp-types.svg?branch=master)](https://travis-ci.org/gluon-lang/lsp-types) [![Documentation](https://docs.rs/lsp-types/badge.svg)](https://docs.rs/crate/lsp-types)
 
+> **Rock fork.** This crate is a hand-maintained fork of upstream
+> [lsp-types](https://github.com/gluon-lang/lsp-types) 0.97.0 with manual serde
+> impls; `lsp-serde-test` checks it against upstream. Protocol modules nothing
+> in the Rock workspace used were removed (LSIF, notebooks, call and type
+> hierarchy, code lens, document links, folding and selection ranges, linked
+> editing, monikers, inline values and completions, pull diagnostics and file
+> operations), along with their requests, notifications and capability fields.
+
 Types useful for interacting with a [language server](https://code.visualstudio.com/blogs/2016/06/27/common-language-protocol).
 
 Supports Language Server Protocol (LSP) version 3.16.0.

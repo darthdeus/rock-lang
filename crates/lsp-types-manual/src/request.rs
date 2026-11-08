@@ -72,18 +72,6 @@ macro_rules! lsp_request {
     ("textDocument/codeAction") => {
         $crate::request::CodeActionRequest
     };
-    ("textDocument/codeLens") => {
-        $crate::request::CodeLensRequest
-    };
-    ("codeLens/resolve") => {
-        $crate::request::CodeLensResolve
-    };
-    ("textDocument/documentLink") => {
-        $crate::request::DocumentLinkRequest
-    };
-    ("documentLink/resolve") => {
-        $crate::request::DocumentLinkResolve
-    };
     ("workspace/applyEdit") => {
         $crate::request::ApplyWorkspaceEdit
     };
@@ -105,9 +93,6 @@ macro_rules! lsp_request {
     ("textDocument/colorPresentation") => {
         $crate::request::ColorPresentationRequest
     };
-    ("textDocument/foldingRange") => {
-        $crate::request::FoldingRangeRequest
-    };
     ("textDocument/prepareRename") => {
         $crate::request::PrepareRenameRequest
     };
@@ -117,9 +102,6 @@ macro_rules! lsp_request {
     ("textDocument/typeDefinition") => {
         $crate::request::GotoTypeDefinition
     };
-    ("textDocument/selectionRange") => {
-        $crate::request::SelectionRangeRequest
-    };
     ("workspace/workspaceFolders") => {
         $crate::request::WorkspaceFoldersRequest
     };
@@ -128,24 +110,6 @@ macro_rules! lsp_request {
     };
     ("window/workDoneProgress/create") => {
         $crate::request::WorkDoneProgressCreate
-    };
-    ("callHierarchy/incomingCalls") => {
-        $crate::request::CallHierarchyIncomingCalls
-    };
-    ("callHierarchy/outgoingCalls") => {
-        $crate::request::CallHierarchyOutgoingCalls
-    };
-    ("textDocument/moniker") => {
-        $crate::request::MonikerRequest
-    };
-    ("textDocument/linkedEditingRange") => {
-        $crate::request::LinkedEditingRange
-    };
-    ("textDocument/prepareCallHierarchy") => {
-        $crate::request::CallHierarchyPrepare
-    };
-    ("textDocument/prepareTypeHierarchy") => {
-        $crate::request::TypeHierarchyPrepare
     };
     ("textDocument/semanticTokens/full") => {
         $crate::request::SemanticTokensFullRequest
@@ -159,44 +123,11 @@ macro_rules! lsp_request {
     ("textDocument/inlayHint") => {
         $crate::request::InlayHintRequest
     };
-    ("textDocument/inlineValue") => {
-        $crate::request::InlineValueRequest
-    };
-    ("textDocument/diagnostic") => {
-        $crate::request::DocumentDiagnosticRequest
-    };
-    ("workspace/diagnostic") => {
-        $crate::request::WorkspaceDiagnosticRequest
-    };
-    ("workspace/diagnostic/refresh") => {
-        $crate::request::WorkspaceDiagnosticRefresh
-    };
-    ("typeHierarchy/supertypes") => {
-        $crate::request::TypeHierarchySupertypes
-    };
-    ("typeHierarchy/subtypes") => {
-        $crate::request::TypeHierarchySubtypes
-    };
-    ("workspace/willCreateFiles") => {
-        $crate::request::WillCreateFiles
-    };
-    ("workspace/willRenameFiles") => {
-        $crate::request::WillRenameFiles
-    };
-    ("workspace/willDeleteFiles") => {
-        $crate::request::WillDeleteFiles
-    };
     ("workspace/semanticTokens/refresh") => {
         $crate::request::SemanticTokensRefresh
     };
-    ("workspace/codeLens/refresh") => {
-        $crate::request::CodeLensRefresh
-    };
     ("workspace/inlayHint/refresh") => {
         $crate::request::InlayHintRefreshRequest
-    };
-    ("workspace/inlineValue/refresh") => {
-        $crate::request::InlineValueRefreshRequest
     };
     ("codeAction/resolve") => {
         $crate::request::CodeActionResolveRequest
@@ -520,48 +451,6 @@ impl Request for CodeActionResolveRequest {
     const METHOD: &'static str = "codeAction/resolve";
 }
 
-/// The code lens request is sent from the client to the server to compute code lenses for a given text document.
-#[derive(Debug)]
-pub enum CodeLensRequest {}
-
-impl Request for CodeLensRequest {
-    type Params = CodeLensParams;
-    type Result = Option<Vec<CodeLens>>;
-    const METHOD: &'static str = "textDocument/codeLens";
-}
-
-/// The code lens resolve request is sent from the client to the server to resolve the command for a
-/// given code lens item.
-#[derive(Debug)]
-pub enum CodeLensResolve {}
-
-impl Request for CodeLensResolve {
-    type Params = CodeLens;
-    type Result = CodeLens;
-    const METHOD: &'static str = "codeLens/resolve";
-}
-
-/// The document links request is sent from the client to the server to request the location of links in a document.
-#[derive(Debug)]
-pub enum DocumentLinkRequest {}
-
-impl Request for DocumentLinkRequest {
-    type Params = DocumentLinkParams;
-    type Result = Option<Vec<DocumentLink>>;
-    const METHOD: &'static str = "textDocument/documentLink";
-}
-
-/// The document link resolve request is sent from the client to the server to resolve the target of
-/// a given document link.
-#[derive(Debug)]
-pub enum DocumentLinkResolve {}
-
-impl Request for DocumentLinkResolve {
-    type Params = DocumentLink;
-    type Result = DocumentLink;
-    const METHOD: &'static str = "documentLink/resolve";
-}
-
 /// The document formatting request is sent from the server to the client to format a whole document.
 #[derive(Debug)]
 pub enum Formatting {}
@@ -591,20 +480,6 @@ impl Request for OnTypeFormatting {
     type Params = DocumentOnTypeFormattingParams;
     type Result = Option<Vec<TextEdit>>;
     const METHOD: &'static str = "textDocument/onTypeFormatting";
-}
-
-/// The linked editing request is sent from the client to the server to return for a given position in a document
-/// the range of the symbol at the position and all ranges that have the same content.
-/// Optionally a word pattern can be returned to describe valid contents. A rename to one of the ranges can be applied
-/// to all other ranges if the new content is valid. If no result-specific word pattern is provided, the word pattern from
-/// the client’s language configuration is used.
-#[derive(Debug)]
-pub enum LinkedEditingRange {}
-
-impl Request for LinkedEditingRange {
-    type Params = LinkedEditingRangeParams;
-    type Result = Option<LinkedEditingRanges>;
-    const METHOD: &'static str = "textDocument/linkedEditingRange";
 }
 
 /// The rename request is sent from the client to the server to perform a workspace-wide rename of a symbol.
@@ -639,16 +514,6 @@ impl Request for ColorPresentationRequest {
     const METHOD: &'static str = "textDocument/colorPresentation";
 }
 
-/// The folding range request is sent from the client to the server to return all folding ranges found in a given text document.
-#[derive(Debug)]
-pub enum FoldingRangeRequest {}
-
-impl Request for FoldingRangeRequest {
-    type Params = FoldingRangeParams;
-    type Result = Option<Vec<FoldingRange>>;
-    const METHOD: &'static str = "textDocument/foldingRange";
-}
-
 /// The prepare rename request is sent from the client to the server to setup and test the validity of a rename operation
 /// at a given location.
 #[derive(Debug)]
@@ -658,17 +523,6 @@ impl Request for PrepareRenameRequest {
     type Params = TextDocumentPositionParams;
     type Result = Option<PrepareRenameResponse>;
     const METHOD: &'static str = "textDocument/prepareRename";
-}
-
-#[derive(Debug)]
-#[cfg(feature = "proposed")]
-pub enum InlineCompletionRequest {}
-
-#[cfg(feature = "proposed")]
-impl Request for InlineCompletionRequest {
-    type Params = InlineCompletionParams;
-    type Result = Option<InlineCompletionResponse>;
-    const METHOD: &'static str = "textDocument/inlineCompletion";
 }
 
 /// The workspace/workspaceFolders request is sent from the server to the client to fetch the current open list of
@@ -692,47 +546,6 @@ impl Request for WorkDoneProgressCreate {
     type Params = WorkDoneProgressCreateParams;
     type Result = ();
     const METHOD: &'static str = "window/workDoneProgress/create";
-}
-
-/// The selection range request is sent from the client to the server to return
-/// suggested selection ranges at given positions. A selection range is a range
-/// around the cursor position which the user might be interested in selecting.
-///
-/// A selection range in the return array is for the position in the provided parameters at the same index.
-/// Therefore `positions[i]` must be contained in `result[i].range`.
-///
-/// Typically, but not necessary, selection ranges correspond to the nodes of the
-/// syntax tree.
-pub enum SelectionRangeRequest {}
-
-impl Request for SelectionRangeRequest {
-    type Params = SelectionRangeParams;
-    type Result = Option<Vec<SelectionRange>>;
-    const METHOD: &'static str = "textDocument/selectionRange";
-}
-
-pub enum CallHierarchyPrepare {}
-
-impl Request for CallHierarchyPrepare {
-    type Params = CallHierarchyPrepareParams;
-    type Result = Option<Vec<CallHierarchyItem>>;
-    const METHOD: &'static str = "textDocument/prepareCallHierarchy";
-}
-
-pub enum CallHierarchyIncomingCalls {}
-
-impl Request for CallHierarchyIncomingCalls {
-    type Params = CallHierarchyIncomingCallsParams;
-    type Result = Option<Vec<CallHierarchyIncomingCall>>;
-    const METHOD: &'static str = "callHierarchy/incomingCalls";
-}
-
-pub enum CallHierarchyOutgoingCalls {}
-
-impl Request for CallHierarchyOutgoingCalls {
-    type Params = CallHierarchyOutgoingCallsParams;
-    type Result = Option<Vec<CallHierarchyOutgoingCall>>;
-    const METHOD: &'static str = "callHierarchy/outgoingCalls";
 }
 
 pub enum SemanticTokensFullRequest {}
@@ -772,46 +585,6 @@ impl Request for SemanticTokensRefresh {
     const METHOD: &'static str = "workspace/semanticTokens/refresh";
 }
 
-/// The workspace/codeLens/refresh request is sent from the server to the client.
-/// Servers can use it to ask clients to refresh the code lenses currently shown in editors.
-/// As a result the client should ask the server to recompute the code lenses for these editors.
-/// This is useful if a server detects a configuration change which requires a re-calculation of all code lenses.
-/// Note that the client still has the freedom to delay the re-calculation of the code lenses if for example an editor is currently not visible.
-pub enum CodeLensRefresh {}
-
-impl Request for CodeLensRefresh {
-    type Params = ();
-    type Result = ();
-    const METHOD: &'static str = "workspace/codeLens/refresh";
-}
-
-/// The will create files request is sent from the client to the server before files are actually created as long as the creation is triggered from within the client. The request can return a WorkspaceEdit which will be applied to workspace before the files are created. Please note that clients might drop results if computing the edit took too long or if a server constantly fails on this request. This is done to keep creates fast and reliable.
-pub enum WillCreateFiles {}
-
-impl Request for WillCreateFiles {
-    type Params = CreateFilesParams;
-    type Result = Option<WorkspaceEdit>;
-    const METHOD: &'static str = "workspace/willCreateFiles";
-}
-
-/// The will rename files request is sent from the client to the server before files are actually renamed as long as the rename is triggered from within the client. The request can return a WorkspaceEdit which will be applied to workspace before the files are renamed. Please note that clients might drop results if computing the edit took too long or if a server constantly fails on this request. This is done to keep renames fast and reliable.
-pub enum WillRenameFiles {}
-
-impl Request for WillRenameFiles {
-    type Params = RenameFilesParams;
-    type Result = Option<WorkspaceEdit>;
-    const METHOD: &'static str = "workspace/willRenameFiles";
-}
-
-/// The will delete files request is sent from the client to the server before files are actually deleted as long as the deletion is triggered from within the client. The request can return a WorkspaceEdit which will be applied to workspace before the files are deleted. Please note that clients might drop results if computing the edit took too long or if a server constantly fails on this request. This is done to keep deletes fast and reliable.
-pub enum WillDeleteFiles {}
-
-impl Request for WillDeleteFiles {
-    type Params = DeleteFilesParams;
-    type Result = Option<WorkspaceEdit>;
-    const METHOD: &'static str = "workspace/willDeleteFiles";
-}
-
 /// The show document request is sent from a server to a client to ask the client to display a particular document in the user interface.
 pub enum ShowDocument {}
 
@@ -819,14 +592,6 @@ impl Request for ShowDocument {
     type Params = ShowDocumentParams;
     type Result = ShowDocumentResult;
     const METHOD: &'static str = "window/showDocument";
-}
-
-pub enum MonikerRequest {}
-
-impl Request for MonikerRequest {
-    type Params = MonikerParams;
-    type Result = Option<Vec<Moniker>>;
-    const METHOD: &'static str = "textDocument/moniker";
 }
 
 /// The inlay hints request is sent from the client to the server to compute inlay hints for a given
@@ -863,109 +628,6 @@ impl Request for InlayHintRefreshRequest {
     type Params = ();
     type Result = ();
     const METHOD: &'static str = "workspace/inlayHint/refresh";
-}
-
-/// The inline value request is sent from the client to the server to compute inline values for a
-/// given text document that may be rendered in the editor at the end of lines.
-pub enum InlineValueRequest {}
-
-impl Request for InlineValueRequest {
-    type Params = InlineValueParams;
-    type Result = Option<Vec<InlineValue>>;
-    const METHOD: &'static str = "textDocument/inlineValue";
-}
-
-/// The `workspace/inlineValue/refresh` request is sent from the server to the client. Servers can
-/// use it to ask clients to refresh the inline values currently shown in editors. As a result the
-/// client should ask the server to recompute the inline values for these editors. This is useful if
-/// a server detects a configuration change which requires a re-calculation of all inline values.
-/// Note that the client still has the freedom to delay the re-calculation of the inline values if
-/// for example an editor is currently not visible.
-pub enum InlineValueRefreshRequest {}
-
-impl Request for InlineValueRefreshRequest {
-    type Params = ();
-    type Result = ();
-    const METHOD: &'static str = "workspace/inlineValue/refresh";
-}
-
-/// The text document diagnostic request is sent from the client to the server to ask the server to
-/// compute the diagnostics for a given document. As with other pull requests the server is asked
-/// to compute the diagnostics for the currently synced version of the document.
-#[derive(Debug)]
-pub enum DocumentDiagnosticRequest {}
-
-impl Request for DocumentDiagnosticRequest {
-    type Params = DocumentDiagnosticParams;
-    type Result = DocumentDiagnosticReportResult;
-    const METHOD: &'static str = "textDocument/diagnostic";
-}
-
-/// The workspace diagnostic request is sent from the client to the server to ask the server to
-/// compute workspace wide diagnostics which previously where pushed from the server to the client.
-/// In contrast to the document diagnostic request the workspace request can be long running and is
-/// not bound to a specific workspace or document state. If the client supports streaming for the
-/// workspace diagnostic pull it is legal to provide a document diagnostic report multiple times
-/// for the same document URI. The last one reported will win over previous reports.
-#[derive(Debug)]
-pub enum WorkspaceDiagnosticRequest {}
-
-impl Request for WorkspaceDiagnosticRequest {
-    type Params = WorkspaceDiagnosticParams;
-    const METHOD: &'static str = "workspace/diagnostic";
-    type Result = WorkspaceDiagnosticReportResult;
-}
-
-/// The `workspace/diagnostic/refresh` request is sent from the server to the client. Servers can
-/// use it to ask clients to refresh all needed document and workspace diagnostics. This is useful
-/// if a server detects a project wide configuration change which requires a re-calculation of all
-/// diagnostics.
-#[derive(Debug)]
-pub enum WorkspaceDiagnosticRefresh {}
-
-impl Request for WorkspaceDiagnosticRefresh {
-    type Params = ();
-    type Result = ();
-    const METHOD: &'static str = "workspace/diagnostic/refresh";
-}
-
-/// The type hierarchy request is sent from the client to the server to return a type hierarchy for
-/// the language element of given text document positions. Will return null if the server couldn’t
-/// infer a valid type from the position. The type hierarchy requests are executed in two steps:
-///
-/// 1. first a type hierarchy item is prepared for the given text document position.
-/// 2. for a type hierarchy item the supertype or subtype type hierarchy items are resolved.
-pub enum TypeHierarchyPrepare {}
-
-impl Request for TypeHierarchyPrepare {
-    type Params = TypeHierarchyPrepareParams;
-    type Result = Option<Vec<TypeHierarchyItem>>;
-    const METHOD: &'static str = "textDocument/prepareTypeHierarchy";
-}
-
-/// The `typeHierarchy/supertypes` request is sent from the client to the server to resolve the
-/// supertypes for a given type hierarchy item. Will return null if the server couldn’t infer a
-/// valid type from item in the params. The request doesn’t define its own client and server
-/// capabilities. It is only issued if a server registers for the
-/// `textDocument/prepareTypeHierarchy` request.
-pub enum TypeHierarchySupertypes {}
-
-impl Request for TypeHierarchySupertypes {
-    type Params = TypeHierarchySupertypesParams;
-    type Result = Option<Vec<TypeHierarchyItem>>;
-    const METHOD: &'static str = "typeHierarchy/supertypes";
-}
-
-/// The `typeHierarchy/subtypes` request is sent from the client to the server to resolve the
-/// subtypes for a given type hierarchy item. Will return null if the server couldn’t infer a valid
-/// type from item in the params. The request doesn’t define its own client and server capabilities.
-/// It is only issued if a server registers for the textDocument/prepareTypeHierarchy request.
-pub enum TypeHierarchySubtypes {}
-
-impl Request for TypeHierarchySubtypes {
-    type Params = TypeHierarchySubtypesParams;
-    type Result = Option<Vec<TypeHierarchyItem>>;
-    const METHOD: &'static str = "typeHierarchy/subtypes";
 }
 
 #[cfg(test)]
@@ -1011,54 +673,31 @@ mod test {
         check_macro!("textDocument/documentHighlight");
         check_macro!("textDocument/documentSymbol");
         check_macro!("textDocument/codeAction");
-        check_macro!("textDocument/codeLens");
-        check_macro!("textDocument/documentLink");
         check_macro!("textDocument/rangeFormatting");
         check_macro!("textDocument/onTypeFormatting");
         check_macro!("textDocument/formatting");
         check_macro!("textDocument/rename");
         check_macro!("textDocument/documentColor");
         check_macro!("textDocument/colorPresentation");
-        check_macro!("textDocument/foldingRange");
         check_macro!("textDocument/prepareRename");
         check_macro!("textDocument/implementation");
-        check_macro!("textDocument/selectionRange");
         check_macro!("textDocument/typeDefinition");
-        check_macro!("textDocument/moniker");
-        check_macro!("textDocument/linkedEditingRange");
-        check_macro!("textDocument/prepareCallHierarchy");
-        check_macro!("textDocument/prepareTypeHierarchy");
         check_macro!("textDocument/semanticTokens/full");
         check_macro!("textDocument/semanticTokens/full/delta");
         check_macro!("textDocument/semanticTokens/range");
         check_macro!("textDocument/inlayHint");
-        check_macro!("textDocument/inlineValue");
-        check_macro!("textDocument/diagnostic");
 
         check_macro!("workspace/applyEdit");
         check_macro!("workspace/symbol");
         check_macro!("workspace/executeCommand");
         check_macro!("workspace/configuration");
-        check_macro!("workspace/diagnostic");
-        check_macro!("workspace/diagnostic/refresh");
-        check_macro!("workspace/willCreateFiles");
-        check_macro!("workspace/willRenameFiles");
-        check_macro!("workspace/willDeleteFiles");
         check_macro!("workspace/workspaceFolders");
         check_macro!("workspace/semanticTokens/refresh");
-        check_macro!("workspace/codeLens/refresh");
         check_macro!("workspace/inlayHint/refresh");
-        check_macro!("workspace/inlineValue/refresh");
 
-        check_macro!("callHierarchy/incomingCalls");
-        check_macro!("callHierarchy/outgoingCalls");
         check_macro!("codeAction/resolve");
-        check_macro!("codeLens/resolve");
         check_macro!("completionItem/resolve");
-        check_macro!("documentLink/resolve");
         check_macro!("inlayHint/resolve");
-        check_macro!("typeHierarchy/subtypes");
-        check_macro!("typeHierarchy/supertypes");
         check_macro!("workspaceSymbol/resolve");
     }
 
