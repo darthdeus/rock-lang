@@ -821,7 +821,7 @@ pub(super) fn assemble(
     // Factory lowering is the last concrete-plan reader. Keep its text in the
     // original output slot, but release one-shot plans before copying definitions.
     let early_definition_stage = if lifetime == CacheLifetime::OneShot {
-        let plan = collect_definition_plan(ws)?;
+        let plan = skull_mir::definition::collect_complete(ws)?;
         let stage =
             definition_plan_stage_lua(ws, &cache.cg, &cache.scx, &cache.concrete.plans, &plan)?;
         let plans = cache.concrete.plans.len() + cache.concrete.always_plans.len();
@@ -893,7 +893,7 @@ pub(super) fn assemble(
     );
     let (definition_plan, early_stage) = match early_definition_stage {
         Some((plan, stage)) => (plan, Some(stage)),
-        None => (collect_definition_plan(ws)?, None),
+        None => (skull_mir::definition::collect_complete(ws)?, None),
     };
     let lifecycle_plan = skull_mir::lifecycle::collect_with_artifact(ws, &asm.code_artifact)?;
     if lifecycle_plan.census.applications != lifecycle_plan.census.admitted {
@@ -1147,19 +1147,6 @@ pub(super) fn code_slot_publish_lua(
     }
 }
 
-fn collect_definition_plan(
-    ws: &Workspace,
-) -> Result<skull_mir::definition::DefinitionPlan, CompilerError> {
-    let plan = skull_mir::definition::collect(ws)?;
-    if plan.census.applications != plan.census.admitted {
-        return Err(CompilerError::new_no_location(format!(
-            "incomplete DefinitionPlan census: {:?}",
-            plan.census
-        )));
-    }
-    Ok(plan)
-}
-
 fn definition_plan_stage_lua(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -1171,8 +1158,7 @@ fn definition_plan_stage_lua(
         return Ok(String::new());
     }
     let mut out = String::new();
-    let mut entries_by_catalog: std::collections::BTreeMap<Ustr, Vec<_>> =
-        std::collections::BTreeMap::new();
+    let entries_by_catalog = plan.entries_by_catalog();
     let mut materializers = std::collections::BTreeMap::new();
     for entry in &plan.entries {
         let skull_mir::code_identity::CodeIdentity::Named(factory) = &entry.identity else {
@@ -1188,10 +1174,6 @@ fn definition_plan_stage_lua(
             return Err(error);
         }
         materializers.insert(entry.identity.clone(), body);
-        entries_by_catalog
-            .entry(entry.catalog)
-            .or_default()
-            .push(entry);
     }
     for catalog_plan in &plan.catalogs {
         if let Some(accessor) = catalog_plan.accessor {
@@ -1255,11 +1237,7 @@ pub(super) fn lifecycle_plan_stage_lua(
         return String::new();
     }
     let mut out = String::from("__rock_lifecycle_plan_stage({\n");
-    let mut phases: std::collections::BTreeMap<Ustr, Vec<_>> = std::collections::BTreeMap::new();
-    for entry in &plan.entries {
-        phases.entry(entry.phase).or_default().push(entry);
-    }
-    for (phase, entries) in phases {
+    for (phase, entries) in plan.entries_by_phase() {
         let scene_owned = entries
             .iter()
             .filter(|entry| entry.owner.as_str() == "scene")

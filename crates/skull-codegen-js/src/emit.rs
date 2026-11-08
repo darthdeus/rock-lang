@@ -3883,13 +3883,7 @@ fn assemble_program_core(
         SimValues::All,
         &mut code_artifact,
     );
-    let definition_plan = skull_mir::definition::collect(ws)?;
-    if definition_plan.census.applications != definition_plan.census.admitted {
-        return Err(err(format!(
-            "incomplete DefinitionPlan census: {:?}",
-            definition_plan.census
-        )));
-    }
+    let definition_plan = skull_mir::definition::collect_complete(ws)?;
     let lifecycle_plan = skull_mir::lifecycle::attach_artifact(lifecycle_skeleton, &code_artifact)?;
     let has_definition_plan = !definition_plan.catalogs.is_empty();
     let code_slot_stage = code_slot_registration_js(ws, scx.interner(), &code_artifact)?;
@@ -5576,7 +5570,7 @@ fn definition_plan_stage_js(
         return Ok(String::new());
     }
     let mut out = String::new();
-    let mut entries_by_catalog: BTreeMap<ustr::Ustr, Vec<_>> = BTreeMap::new();
+    let entries_by_catalog = plan.entries_by_catalog();
     let mut materializers = BTreeMap::new();
     for entry in &plan.entries {
         let skull_mir::code_identity::CodeIdentity::Named(factory) = &entry.identity else {
@@ -5585,10 +5579,6 @@ fn definition_plan_stage_js(
         let mut mf = skull_mir::lower::lower_definition_factory(ws, scx, concrete, factory)?;
         skull_transform::cleanup_with_nobox(ws, &mut mf)?;
         materializers.insert(entry.identity.clone(), emit_fn(ws, &mf, "")?);
-        entries_by_catalog
-            .entry(entry.catalog)
-            .or_default()
-            .push(entry);
     }
     for catalog_plan in &plan.catalogs {
         if let Some(accessor) = catalog_plan.accessor {
@@ -5657,11 +5647,7 @@ fn lifecycle_plan_stage_js(
         return Ok(String::new());
     }
     let mut out = String::from("__rock_lifecycle_plan_stage({\n");
-    let mut phases: BTreeMap<ustr::Ustr, Vec<_>> = BTreeMap::new();
-    for entry in &plan.entries {
-        phases.entry(entry.phase).or_default().push(entry);
-    }
-    for (phase, entries) in phases {
+    for (phase, entries) in plan.entries_by_phase() {
         let scene_owned = entries
             .iter()
             .filter(|entry| entry.owner.as_str() == "scene")

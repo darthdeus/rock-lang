@@ -69,6 +69,15 @@ pub struct LifecyclePlan {
 }
 
 impl LifecyclePlan {
+    /// The entries of each phase, in plan order.
+    pub fn entries_by_phase(&self) -> std::collections::BTreeMap<Ustr, Vec<&LifecycleEntry>> {
+        let mut out: std::collections::BTreeMap<Ustr, Vec<&LifecycleEntry>> = Default::default();
+        for entry in &self.entries {
+            out.entry(entry.phase).or_default().push(entry);
+        }
+        out
+    }
+
     pub fn structure_changed(&self, next: &Self) -> bool {
         if self.entries.len() != next.entries.len() {
             return true;

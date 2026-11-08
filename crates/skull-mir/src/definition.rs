@@ -65,6 +65,17 @@ pub struct DefinitionPlan {
     pub census: DefinitionCensus,
 }
 
+impl DefinitionPlan {
+    /// The entries of each catalog, in declaration order.
+    pub fn entries_by_catalog(&self) -> std::collections::BTreeMap<Ustr, Vec<&DefinitionEntry>> {
+        let mut out: std::collections::BTreeMap<Ustr, Vec<&DefinitionEntry>> = Default::default();
+        for entry in &self.entries {
+            out.entry(entry.catalog).or_default().push(entry);
+        }
+        out
+    }
+}
+
 #[derive(Clone)]
 struct Role {
     catalog: Ustr,
@@ -209,6 +220,18 @@ fn role_for(
         ));
     }
     Ok(Role { catalog, key_param })
+}
+
+/// [`collect`], refusing a plan that did not admit every application.
+pub fn collect_complete(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
+    let plan = collect(ws)?;
+    if plan.census.applications != plan.census.admitted {
+        return Err(CompilerError::new_no_location(format!(
+            "incomplete DefinitionPlan census: {:?}",
+            plan.census
+        )));
+    }
+    Ok(plan)
 }
 
 pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
