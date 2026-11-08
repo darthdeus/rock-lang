@@ -2,8 +2,6 @@ const SESSION_RETENTION: std::time::Duration = std::time::Duration::from_secs(7 
 
 use crate::compiler_watch::is_compiler_source;
 use crate::*;
-#[cfg(target_os = "macos")]
-use std::process::Command;
 use std::process::{Child, Stdio};
 
 #[cfg(target_os = "macos")]

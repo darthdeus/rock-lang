@@ -13,7 +13,7 @@ fn main() {
 mod macos {
     use std::ffi::OsString;
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -108,7 +108,7 @@ mod macos {
     }
 
     impl Witness {
-        fn spawn(executable: &PathBuf, root: &PathBuf, label: &str) -> Self {
+        fn spawn(executable: &Path, root: &Path, label: &str) -> Self {
             let bundle = root.join(format!("witness-{label}.app"));
             let contents = bundle.join("Contents");
             let executable_name = format!("focus-witness-{label}");

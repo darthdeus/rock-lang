@@ -773,6 +773,7 @@ pub mod x11_focus {
 
 /// Attempts a single window move gets before stone leaves the position to the
 /// WM.
+#[cfg(target_os = "linux")]
 const MOVE_ATTEMPTS: u32 = 3;
 
 /// Move the window through the platform position path.
