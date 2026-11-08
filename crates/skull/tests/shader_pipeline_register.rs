@@ -16,19 +16,6 @@ use skull::mir_emit::{
     MirEmit, SkullEmitCache, emit_full, emit_incremental, emit_overlay as emit_overlay_result,
 };
 
-/// Explicit global-shape coverage. Bound overlays are also exercised by the
-/// callee-binding runtime tests and the production CLI overlay harness.
-fn emit_full_global(
-    ws: &Workspace,
-    mid: ModuleId,
-) -> Result<(MirEmit, SkullEmitCache), skull_parser::CompilerError> {
-    skull::mir_emit::emit_full_with_callee_binding(
-        ws,
-        mid,
-        skull_codegen_lua::CalleeBindingMode::Global,
-    )
-}
-
 fn emit_overlay(
     ws: &Workspace,
     cache: &mut SkullEmitCache,
@@ -235,7 +222,7 @@ fn incremental_shader_edit_stays_byte_identical() {
 fn overlay_carries_edited_shader_registration() {
     let ws1 = ws_with_stdlib(&src_with_frag("1.0"));
     let mid1 = test_mid(&ws1);
-    let (_full1, mut cache) = emit_full_global(&ws1, mid1).expect("emit_full v1");
+    let (_full1, mut cache) = emit_full(&ws1, mid1).expect("emit_full v1");
 
     let ws2 = ws_with_stdlib(&src_with_frag("0.5"));
     let reinferred = vec![frag_body_id(&ws2)];
@@ -262,7 +249,7 @@ fn unrelated_body_overlay_omits_shader_registrations() {
     );
     let ws = ws_with_stdlib(&src);
     let mid = test_mid(&ws);
-    let (_full, mut cache) = emit_full_global(&ws, mid).expect("emit_full");
+    let (_full, mut cache) = emit_full(&ws, mid).expect("emit_full");
     let overlay = emit_overlay(
         &ws,
         &mut cache,
@@ -286,7 +273,7 @@ fn src_with_shader_helper(x: &str) -> String {
 fn shader_helper_overlay_carries_affected_registration() {
     let ws1 = ws_with_stdlib(&src_with_shader_helper("1.0"));
     let mid1 = test_mid(&ws1);
-    let (_full, mut cache) = emit_full_global(&ws1, mid1).expect("emit_full v1");
+    let (_full, mut cache) = emit_full(&ws1, mid1).expect("emit_full v1");
 
     let ws2 =
         ws_with_stdlib(&src_with_shader_helper("1.0").replace("return x }", "return x * 0.5 }"));
@@ -326,7 +313,7 @@ fn src_with_optional_call(include_call: bool) -> String {
 fn new_shader_callsite_overlay_carries_registration() {
     let ws1 = ws_with_stdlib(&src_with_optional_call(false));
     let mid1 = test_mid(&ws1);
-    let (_full, mut cache) = emit_full_global(&ws1, mid1).expect("emit_full without callsite");
+    let (_full, mut cache) = emit_full(&ws1, mid1).expect("emit_full without callsite");
 
     let ws2 = ws_with_stdlib(&src_with_optional_call(true));
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id_named(&ws2, "shader_choice")]);
@@ -444,7 +431,7 @@ fn mixed_reemission_byte_identical() {
 fn single_arg_overlay_carries_registration() {
     let ws = ws_with_stdlib(MIXED_SRC);
     let mid = test_mid(&ws);
-    let (_full, mut cache) = emit_full_global(&ws, mid).expect("emit_full");
+    let (_full, mut cache) = emit_full(&ws, mid).expect("emit_full");
     let reinferred = vec![body_id_named(&ws, "fs_frag")];
     let overlay = emit_overlay(&ws, &mut cache, &reinferred);
     assert!(

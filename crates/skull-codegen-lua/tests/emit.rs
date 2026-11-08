@@ -7,7 +7,7 @@
 
 mod common;
 
-use skull_codegen_lua::{CalleeBindingMode, CodegenCtx, LoopShape, TailCallShape, emit_function};
+use skull_codegen_lua::{CodegenCtx, emit_function};
 use skull_mir::mir::FuncRef;
 
 /// Lower `fn_name` from `modules` (last = the user `<test>` module), emit Lua.
@@ -53,12 +53,6 @@ fn emit_dump_with(
 fn emit(src: &str, fn_name: &str) -> String {
     let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
     emit_dump(vec![ast], fn_name)
-}
-
-/// [`emit`] under an explicit bounds-checked index shape.
-fn emit_indexed(src: &str, fn_name: &str, shape: skull_codegen_lua::IndexShape) -> String {
-    let ast = skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse");
-    emit_dump_with(vec![ast], fn_name, |ctx| ctx.set_index_shape(shape))
 }
 
 #[test]
@@ -635,12 +629,7 @@ print('effects-ok')
 /// assert allocation-shape claims (a dead `MakeTuple` left by the raw lowering is
 /// removed here, so `no table` assertions reflect what actually runs).
 fn emit_clean(src: &str, fn_name: &str) -> String {
-    emit_clean_shaped(src, fn_name, TailCallShape::All)
-}
-
-/// [`emit_clean`] with an explicit emitted tail-call shape.
-fn emit_clean_shaped(src: &str, fn_name: &str, shape: TailCallShape) -> String {
-    emit_clean_with(src, fn_name, |ctx| ctx.set_tail_call_shape(shape))
+    emit_clean_with(src, fn_name, |_| {})
 }
 
 /// [`emit_clean`] under a context `configure` adjusts first.
@@ -668,11 +657,10 @@ fn emit_clean_with(src: &str, fn_name: &str, configure: impl FnOnce(&mut Codegen
         .iter()
         .find(|(_, f)| f.name.as_str() == fn_name)
         .expect("function by name");
-    let (mut func, interner, graph) = common::lower_test_ref_with_graph(&ws, mid, fid)
+    let (mut func, interner, _) = common::lower_test_ref_with_graph(&ws, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     skull_transform::cleanup(&mut func).unwrap();
     let mut ctx = CodegenCtx::new(&ws);
-    ctx.set_recursive_callees(common::cycle_callees(&graph));
     configure(&mut ctx);
     emit_function(
         &ws,
@@ -692,48 +680,11 @@ fn emit_clean_with(src: &str, fn_name: &str, configure: impl FnOnce(&mut Codegen
 /// return its trimmed stdout. This keeps inlining disabled and delivers the
 /// residual stdlib instances instead of depending on a splice for completeness.
 /// Panics if luajit is absent: a host without it must fail these tests, never pass them.
+///
+/// Assembled the way `skull::mir_emit::assemble` assembles a program: every
+/// definition first, then the callee binding pass in component-rank order,
+/// with the components populated from this harness's own instance graph.
 fn run(src: &str, driver: &str) -> String {
-    run_shaped(src, driver, TailCallShape::All)
-}
-
-/// [`run`] with an explicit emitted tail-call shape. `recursive_callees` is
-/// populated from this harness's own instance graph exactly as
-/// `skull::mir_emit` populates it from the whole-program one, so
-/// [`TailCallShape::Cycles`] is exercised against real call edges.
-fn run_shaped(src: &str, driver: &str, shape: TailCallShape) -> String {
-    run_shaped_bound(src, driver, shape, CalleeBindingMode::Global)
-}
-
-/// [`run`] under an explicit emitted loop shape.
-fn run_looped(src: &str, driver: &str, loops: LoopShape) -> String {
-    run_shaped_bound_looped(
-        src,
-        driver,
-        TailCallShape::All,
-        CalleeBindingMode::Global,
-        loops,
-    )
-}
-
-/// [`run_shaped`] with an explicit callee-binding mode, assembled the way
-/// `skull::mir_emit::assemble` assembles a program: every definition first,
-/// then the binding pass in component-rank order.
-fn run_shaped_bound(
-    src: &str,
-    driver: &str,
-    shape: TailCallShape,
-    binding: CalleeBindingMode,
-) -> String {
-    run_shaped_bound_looped(src, driver, shape, binding, LoopShape::Goto)
-}
-
-fn run_shaped_bound_looped(
-    src: &str,
-    driver: &str,
-    shape: TailCallShape,
-    binding: CalleeBindingMode,
-    loops: LoopShape,
-) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         rock_stdlib::stdlib_files()
@@ -753,9 +704,6 @@ fn run_shaped_bound_looped(
         .get(&ustr::Ustr::from("<test>"))
         .expect("user module id");
     let mut ctx = CodegenCtx::new(&ws);
-    ctx.set_tail_call_shape(shape);
-    ctx.set_callee_binding(binding);
-    ctx.set_loop_shape(loops);
     let roots = ws
         .module(mid)
         .functions
@@ -767,7 +715,6 @@ fn run_shaped_bound_looped(
         .collect();
     let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
     let graph = skull_graph::instance_graph::build_in(&ws, roots, false, interner.clone());
-    ctx.set_recursive_callees(common::cycle_callees(&graph));
     ctx.set_call_sccs(common::call_sccs(&graph));
     let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(interner);
     let concrete = skull_graph::concrete_body::build(&ws, &graph);
@@ -1319,7 +1266,6 @@ fn uint_checks_bind_shared_helpers_as_upvalues() {
     let lua = emit_clean_bound(
         "fn checked(value: float, count: uint) -> uint { (value as uint) << count }",
         "checked",
-        CalleeBindingMode::Upvalue,
     );
     assert!(
         lua.contains("function(__rock_checked_u32, __rock_u32_shift_count) return function"),
@@ -1372,12 +1318,7 @@ values._data[1] = 1
 assert(right_once(values) == 0 and values._data[1] == 3)
 return true
 end)()"#;
-    for binding in [CalleeBindingMode::Global, CalleeBindingMode::Upvalue] {
-        assert_eq!(
-            run_shaped_bound(src, driver, TailCallShape::All, binding),
-            "true"
-        );
-    }
+    assert_eq!(run(src, driver), "true");
 }
 
 #[test]
@@ -1598,11 +1539,6 @@ end
 /// `iter`/`next` is only spliced (and its cursor struct scalarized) once the
 /// inliner has run, which `emit_clean` does NOT do.
 fn emit_inlined(src: &str, fn_name: &str) -> String {
-    emit_inlined_shaped(src, fn_name, LoopShape::Goto)
-}
-
-/// [`emit_inlined`] under an explicit emitted loop shape.
-fn emit_inlined_shaped(src: &str, fn_name: &str, loops: LoopShape) -> String {
     use std::sync::LazyLock;
     static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         rock_stdlib::stdlib_files()
@@ -1664,8 +1600,7 @@ fn emit_inlined_shaped(src: &str, fn_name: &str, loops: LoopShape) -> String {
     skull_transform::recover_counted_loops(&ws, &mut func);
     let name = skull_codegen_lua::mangle_fn(&ws, &ws.module(mid).functions[fid]);
     skull_transform::convert_closures(&mut func, &name);
-    let mut ctx = CodegenCtx::new(&ws);
-    ctx.set_loop_shape(loops);
+    let ctx = CodegenCtx::new(&ws);
     emit_function(&ws, &ctx, scx.interner(), self_ref, &func, None)
 }
 
@@ -1768,11 +1703,8 @@ fn for_vec_backed_iter_inline_emits_forl() {
         lua.contains("for "),
         "vec-backed desugared loop must print as a numeric `for` (bound hoisted):\n{lua}"
     );
-    // The element read's own bounds guard (`i >= v.len then __rock_vec_oob`)
-    // is the one `>=` the body may keep.
     assert!(
-        !lua.lines()
-            .any(|l| l.contains(">=") && !l.contains("__rock_vec_oob(")),
+        !lua.lines().any(|l| l.contains(">=")),
         "the slot exit-compare must be absorbed into the `for` header:\n{lua}"
     );
 }
@@ -2012,148 +1944,66 @@ fn loop_scoped_registers_are_never_killed_outside_their_loop() {
     );
 }
 
-// -- Emitted tail-call shape (ROCK_SKULL_TAIL_CALLS) ------------------------
+// -- Emitted tail calls -----------------------------------------------------
 //
-// `do return f(...) end` compiles to `CALLT`, which LuaJIT's recorder counts
-// against `loopunroll` in `lj_record_tailcall`; the switch exists so the
-// alternative shapes can be measured on the trace-pressure benchmark. Dropping
-// the forward does not introduce an emitted form: it leaves the ordinary path
-// to write the same `r<N> = f(args)` / `do return r<N> end` a call outside tail
-// position already emits.
+// A call in tail position is forwarded as `do return f(...) end`, which keeps
+// Lua's tail-call elimination for recursive calls.
 
-/// A leaf call in tail position: `all` forwards it, `none` does not, and
-/// `cycles` does not either because the callee is on no call cycle.
 #[test]
-fn a_non_recursive_tail_call_follows_the_shape_switch() {
+fn a_tail_call_is_forwarded() {
     let src = "fn leaf(a: int) -> int { a + 1 }\nfn forward(a: int) -> int { return leaf(a) }";
-
-    let all = emit_clean_shaped(src, "forward", TailCallShape::All);
+    let lua = emit_clean(src, "forward");
     assert!(
-        all.contains("do return leaf_int(c0) end"),
-        "expected the forwarded tail call:\n{all}"
+        lua.contains("do return leaf_int(c0) end"),
+        "expected the forwarded tail call:\n{lua}"
     );
-
-    for shape in [TailCallShape::None, TailCallShape::Cycles] {
-        let lua = emit_clean_shaped(src, "forward", shape);
-        assert!(
-            lua.contains("r0 = leaf_int(c0)") && lua.contains("do return r0 end"),
-            "expected a non-tail call under {shape:?}:\n{lua}"
-        );
-        assert!(
-            !lua.contains("do return leaf_int"),
-            "expected no forwarded tail call under {shape:?}:\n{lua}"
-        );
-    }
 }
 
-/// A self-recursive tail call keeps the shape under `cycles` -- that is the
-/// whole point of the shape, since losing it turns an unbounded tail recursion
-/// into a Lua stack overflow.
 #[test]
-fn a_self_recursive_tail_call_keeps_its_shape_under_cycles() {
+fn a_self_recursive_tail_call_is_forwarded() {
     let src = "fn down(n: int, acc: int) -> int { if n == 0 { return acc }\n  return down(n - 1, acc + 1) }";
-
-    for shape in [TailCallShape::All, TailCallShape::Cycles] {
-        let lua = emit_clean_shaped(src, "down", shape);
-        assert!(
-            lua.contains("do return down_int_int("),
-            "expected the recursive tail call kept under {shape:?}:\n{lua}"
-        );
-    }
-    let none = emit_clean_shaped(src, "down", TailCallShape::None);
+    let lua = emit_clean(src, "down");
     assert!(
-        !none.contains("do return down_int_int("),
-        "expected no forwarded tail call under None:\n{none}"
+        lua.contains("do return down_int_int("),
+        "expected the recursive tail call kept:\n{lua}"
     );
 }
 
-/// Mutual recursion is a two-node component, so both legs stay tail calls under
-/// `cycles`. A single self-edge check would miss this.
+/// The runtime obligation: a tail recursion deeper than the Lua stack survives.
+/// Measured on the shipped LuaJIT, a non-tail recursion overflows between
+/// 10,000 and 60,000 frames, so 200,000 is a real witness rather than a margin.
 #[test]
-fn a_mutually_recursive_tail_call_keeps_its_shape_under_cycles() {
-    let src = "fn is_even(n: int) -> bool { if n == 0 { return true }\n  return is_odd(n - 1) }\n\
-               fn is_odd(n: int) -> bool { if n == 0 { return false }\n  return is_even(n - 1) }";
-
-    let even = emit_clean_shaped(src, "is_even", TailCallShape::Cycles);
-    assert!(
-        even.contains("do return is_odd_int("),
-        "expected the mutual-recursion leg kept under Cycles:\n{even}"
-    );
-    let odd = emit_clean_shaped(src, "is_odd", TailCallShape::Cycles);
-    assert!(
-        odd.contains("do return is_even_int("),
-        "expected the mutual-recursion leg kept under Cycles:\n{odd}"
-    );
-}
-
-/// The runtime obligation: a tail recursion deeper than the Lua stack survives
-/// under every shape that claims to preserve tail-call elimination. Measured on
-/// the shipped LuaJIT, a non-tail recursion overflows between 10,000 and 60,000
-/// frames, so 200,000 is a real witness rather than a margin.
-#[test]
-fn deep_tail_recursion_survives_the_tco_preserving_shapes() {
+fn deep_tail_recursion_survives() {
     let src = "fn count_down(n: int, acc: int) -> int { if n == 0 { return acc }\n  return count_down(n - 1, acc + 1) }";
-    for shape in [TailCallShape::All, TailCallShape::Cycles] {
-        assert_eq!(
-            run_shaped(src, "count_down(200000, 0)", shape),
-            "200000",
-            "deep tail recursion must survive {shape:?}"
-        );
-    }
+    assert_eq!(run(src, "count_down(200000, 0)"), "200000");
 }
 
-/// `None` is a measurement arm, not a shippable default: it drops the shape at
-/// the recursive call too. Pinned so the reason the default is not `None` stays
-/// visible in the suite rather than only in the plan document.
 #[test]
-fn deep_tail_recursion_overflows_under_the_measurement_only_shape() {
-    let src = "fn count_down(n: int, acc: int) -> int { if n == 0 { return acc }\n  return count_down(n - 1, acc + 1) }";
-    assert_eq!(
-        run_shaped(src, "(pcall(count_down, 200000, 0))", TailCallShape::None),
-        "false",
-        "None must lose tail-call elimination -- otherwise the switch is not reaching the site"
-    );
-}
-
-/// Multiple-return forwarding is a value contract, not a tail-call one: it must
-/// deliver the same values under every shape.
-#[test]
-fn a_multi_return_forward_delivers_the_same_values_under_every_shape() {
+fn a_multi_return_forward_delivers_its_values() {
     let src = "fn pair(a: int) -> (int, int) { (a, a + 1) }\n\
                fn forward_pair(a: int) -> (int, int) { return pair(a) }\n\
                fn total(a: int) -> int { let (x, y) = forward_pair(a); x * 100 + y }";
-    for shape in [
-        TailCallShape::All,
-        TailCallShape::None,
-        TailCallShape::Cycles,
-    ] {
-        assert_eq!(
-            run_shaped(src, "total(7)", shape),
-            "708",
-            "multi-return forwarding must not change with {shape:?}"
-        );
-    }
+    assert_eq!(run(src, "total(7)"), "708");
 }
 
 // --- Callee binding as immutable upvalues ------------------
 //
-// `CalleeBindingMode::Upvalue` defines a function as a factory whose parameters
+// Callee binding defines a function as a factory whose parameters
 // are named exactly like the callees they replace, so the body text is
 // unchanged and every call reads an immutable upvalue (2 constant-pool slots on
 // GC64) instead of a global (5, plus a guard). The assembler emits the
 // matching `<name> = __rock_mk_<name>(<callees>)` line after every definition.
 
-/// [`emit_clean`] under an explicit callee-binding mode, with the call-graph
-/// components populated from this harness's own instance graph exactly as
+/// [`emit_clean`] with its callee binding plan, the call-graph components
+/// populated from this harness's own instance graph exactly as
 /// `skull::mir_emit` populates them from the whole-program one.
-fn emit_clean_bound(src: &str, fn_name: &str, mode: CalleeBindingMode) -> String {
-    emit_clean_bound_checked(src, fn_name, mode, |_, _| {})
+fn emit_clean_bound(src: &str, fn_name: &str) -> String {
+    emit_clean_bound_checked(src, fn_name, |_, _| {})
 }
 
 fn emit_clean_bound_checked(
     src: &str,
     fn_name: &str,
-    mode: CalleeBindingMode,
     check: impl FnOnce(&bone_semantic::inference::Workspace, &skull_mir::mir::MirFunc),
 ) -> String {
     use std::sync::LazyLock;
@@ -2188,8 +2038,6 @@ fn emit_clean_bound_checked(
     skull_transform::cleanup(&mut func).unwrap();
     check(&ws, &func);
     let mut ctx = CodegenCtx::new(&ws);
-    ctx.set_callee_binding(mode);
-    ctx.set_recursive_callees(common::cycle_callees(&graph));
     ctx.set_call_sccs(common::call_sccs(&graph));
     let name = skull_codegen_lua::mangle_fn(&ws, &ws.module(mid).functions[fid]);
     let plan = skull_codegen_lua::callee_binding_plan(&ws, &ctx, &interner, &name, self_ref, &func);
@@ -2204,7 +2052,7 @@ fn emit_clean_bound_checked(
 #[test]
 fn callee_binding_ignores_calls_removed_by_cleanup() {
     let src = "fn discarded(a: int) -> int { a + 2 }\nfn live(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { if false { discarded(a) } else { live(a) } }";
-    let lua = emit_clean_bound_checked(src, "caller", CalleeBindingMode::Upvalue, |ws, func| {
+    let lua = emit_clean_bound_checked(src, "caller", |ws, func| {
         use skull_mir::mir::Inst;
         let is_discarded = |inst: &Inst| {
             matches!(inst,
@@ -2232,21 +2080,13 @@ fn callee_binding_ignores_calls_removed_by_cleanup() {
         !lua.contains("discarded_int"),
         "discarded call must not be bound:\n{lua}"
     );
-    assert_eq!(
-        run_shaped_bound(
-            src,
-            "caller(7)",
-            TailCallShape::All,
-            CalleeBindingMode::Upvalue
-        ),
-        "8"
-    );
+    assert_eq!(run(src, "caller(7)"), "8");
 }
 
 #[test]
 fn callee_binding_ignores_discarded_uint_helpers() {
     let src = "fn checked(value: float, count: uint) -> uint { if false { (value as uint) << count } else { count } }";
-    let lua = emit_clean_bound_checked(src, "checked", CalleeBindingMode::Upvalue, |_, func| {
+    let lua = emit_clean_bound_checked(src, "checked", |_, func| {
         assert!(
             func.insts
                 .iter()
@@ -2258,15 +2098,7 @@ fn callee_binding_ignores_discarded_uint_helpers() {
         !lua.contains(skull_codegen_lua::CALLEE_FACTORY_PREFIX),
         "discarded validators must not create a factory:\n{lua}"
     );
-    assert_eq!(
-        run_shaped_bound(
-            src,
-            "checked(-1, 3)",
-            TailCallShape::All,
-            CalleeBindingMode::Upvalue
-        ),
-        "3"
-    );
+    assert_eq!(run(src, "checked(-1, 3)"), "3");
 }
 
 #[test]
@@ -2305,30 +2137,12 @@ global METADATA: Map<string, SlotMetadata> = map_new()
         ),
     ] {
         let src = format!("{prelude}{body}");
-        let lua = emit_clean_bound(&src, name, CalleeBindingMode::Upvalue);
+        let lua = emit_clean_bound(&src, name);
         assert!(
             !lua.contains("SlotMetadata_vt("),
             "{name} must not materialize a fresh wrapper:\n{lua}"
         );
     }
-}
-
-/// Under the global-lookup shape the emitted definition is a bare
-/// `function <name>(..)` and no factory exists. This is the shape every other
-/// test in this file pins, so binding must not reach it.
-#[test]
-fn callee_binding_global_mode_emits_no_factory() {
-    let src =
-        "fn leaf(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { leaf(a) + leaf(a + 1) }";
-    let lua = emit_clean_bound(src, "caller", CalleeBindingMode::Global);
-    assert!(
-        lua.starts_with("function caller_int("),
-        "expected the unbound definition:\n{lua}"
-    );
-    assert!(
-        !lua.contains(skull_codegen_lua::CALLEE_FACTORY_PREFIX),
-        "expected no factory under Global:\n{lua}"
-    );
 }
 
 /// The bound shape: a factory named for the function, one parameter per
@@ -2338,8 +2152,8 @@ fn callee_binding_global_mode_emits_no_factory() {
 fn callee_binding_upvalue_wraps_the_body_in_a_factory() {
     let src =
         "fn leaf(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { leaf(a) + leaf(a + 1) }";
-    let global = emit_clean_bound(src, "caller", CalleeBindingMode::Global);
-    let bound = emit_clean_bound(src, "caller", CalleeBindingMode::Upvalue);
+    let unbound = emit_clean(src, "caller");
+    let bound = emit_clean_bound(src, "caller");
     assert!(
         bound.starts_with("__rock_mk_caller_int = function(leaf_int) return function("),
         "expected the factory header:\n{bound}"
@@ -2350,7 +2164,7 @@ fn callee_binding_upvalue_wraps_the_body_in_a_factory() {
     );
     // The body is the ONLY copy and is byte-identical to the unbound one: the
     // factory parameter is named like the global, so no call site is rewritten.
-    let body = global
+    let body = unbound
         .strip_prefix("function caller_int")
         .expect("unbound definition")
         .trim_end_matches('\n');
@@ -2367,7 +2181,7 @@ fn callee_binding_excludes_same_component_callees() {
     let src = "fn leaf(a: int) -> int { a + 1 }\n\
                fn is_even(n: int) -> bool { if n == 0 { return true }\n  is_odd(n - 1) }\n\
                fn is_odd(n: int) -> bool { if n == 0 { return leaf(n) == 1 }\n  is_even(n - 1) }";
-    let bound = emit_clean_bound(src, "is_odd", CalleeBindingMode::Upvalue);
+    let bound = emit_clean_bound(src, "is_odd");
     assert!(
         bound.starts_with("__rock_mk_is_odd_int = function(leaf_int) return "),
         "expected only the off-component callee bound:\n{bound}"
@@ -2384,7 +2198,7 @@ fn callee_binding_excludes_same_component_callees() {
 fn callee_binding_excludes_self_recursion() {
     let src = "fn leaf(a: int) -> int { a + 1 }\n\
                fn down(n: int) -> int { if n == 0 { return leaf(0) }\n  down(n - 1) }";
-    let bound = emit_clean_bound(src, "down", CalleeBindingMode::Upvalue);
+    let bound = emit_clean_bound(src, "down");
     assert!(
         bound.starts_with("__rock_mk_down_int = function(leaf_int) return "),
         "expected the self-recursive call left global:\n{bound}"
@@ -2409,7 +2223,7 @@ fn callee_binding_caps_at_the_lua_upvalue_limit() {
         src.push_str(&format!("  t = t + leaf{i:03}(a)\n"));
     }
     src.push_str("  t\n}\n");
-    let bound = emit_clean_bound(&src, "caller", CalleeBindingMode::Upvalue);
+    let bound = emit_clean_bound(&src, "caller");
     let header = bound.lines().next().expect("factory header");
     let params = header
         .split_once("= function(")
@@ -2438,23 +2252,18 @@ fn callee_binding_caps_at_the_lua_upvalue_limit() {
     // binding would make this program fail to load at all.
     let expected: i64 = (0..count as i64).map(|i| 7 + i).sum();
     assert_eq!(
-        run_shaped_bound(
-            &src,
-            "caller(7)",
-            TailCallShape::All,
-            CalleeBindingMode::Upvalue
-        ),
+        run(&src, "caller(7)"),
         expected.to_string(),
         "a body with more bindable callees than LuaJIT allows upvalues must still load and run"
     );
 }
 
-/// The bound program must COMPUTE the same results as the global one, through
-/// real LuaJIT, over the two shapes the binding rule is about: a mutually
-/// recursive pair (whose legs stay global lookups) and a call through a
-/// function value (which has no statically known callee at all).
+/// The bound program computes the right results through real LuaJIT over the
+/// two shapes the binding rule is about: a mutually recursive pair (whose legs
+/// stay global lookups) and a call through a function value (which has no
+/// statically known callee at all).
 #[test]
-fn callee_binding_upvalue_computes_what_global_computes() {
+fn callee_binding_computes_through_recursion_and_function_values() {
     let src = "fn leaf(a: int) -> int { a * 3 + 1 }\n\
                fn is_even(n: int) -> bool { if n == 0 { return true }\n  is_odd(n - 1) }\n\
                fn is_odd(n: int) -> bool { if n == 0 { return false }\n  is_even(n - 1) }\n\
@@ -2465,13 +2274,12 @@ fn callee_binding_upvalue_computes_what_global_computes() {
                  if is_odd(a + 1) { t = t + 1000 }\n\
                  t + leaf(a)\n\
                }";
-    for driver in ["total(6)", "total(7)", "total(0)"] {
-        let global = run_shaped_bound(src, driver, TailCallShape::All, CalleeBindingMode::Global);
-        let bound = run_shaped_bound(src, driver, TailCallShape::All, CalleeBindingMode::Upvalue);
-        assert_eq!(
-            bound, global,
-            "`{driver}` must not depend on the emitted callee shape"
-        );
+    for (driver, expected) in [
+        ("total(6)", "1160"),
+        ("total(7)", "69"),
+        ("total(0)", "1106"),
+    ] {
+        assert_eq!(run(src, driver), expected, "`{driver}`");
     }
 }
 
@@ -2518,200 +2326,30 @@ fn backward_gotos(lua: &str) -> Vec<String> {
         .collect()
 }
 
-// --- ROCK_SKULL_LOOP_SHAPE=structured: a natural loop is a Lua `while` ---
-//
-// LuaJIT's parser gives a backward `goto` a `BC_LOOP` with `bc_j == -1` and no
-// bytecode range, so `rec_setup_root` leaves `bc_min` unset and a root trace
-// started at such a loop records past the loop's exit. `while true do .. end`
-// gets a real range. These pin the emitted shape that buys it.
-
-/// One simple `while`: the header LABEL stays outside the block so an entering
-/// `goto` is still legal, the header's STATEMENTS are the first ones inside it,
-/// and the back edge is gone -- the body falls off the end.
-#[test]
-fn structured_while_is_a_lua_while_with_the_header_label_outside() {
-    let lua = emit_inlined_shaped(
-        "fn mysum(n: int) -> int { let t = 0; let i = 1; while i <= n { t = t + i; i = i + 1 }; t }",
-        "mysum",
-        LoopShape::Structured,
-    );
-    assert!(
-        lua.contains("  ::bb1::\n  while true do\n"),
-        "header label belongs outside the `while`:\n{lua}"
-    );
-    assert!(
-        backward_gotos(&lua).is_empty(),
-        "no back edge may remain:\n{lua}"
-    );
-    assert!(
-        lua.contains("  ::lc1::\n  end\n"),
-        "continue label closes the body:\n{lua}"
-    );
-}
-
-/// A `continue` is a second back edge. Both become FORWARD `goto`s to the
-/// continue label; a backward one would give LuaJIT a second, rangeless
-/// `BC_LOOP` inside the loop the `while` is there to close.
-#[test]
-fn structured_continue_is_a_forward_goto_to_the_continue_label() {
-    let lua = emit_inlined_shaped(
-        "fn f(n: int) -> int { let t = 0; let i = 0; while i < n { i = i + 1; if i % 3 == 0 { continue }; t = t + i }; t }",
-        "f",
-        LoopShape::Structured,
-    );
-    let labels = label_lines(&lua);
-    let jumps: Vec<(usize, String)> = goto_refs(&lua)
-        .into_iter()
-        .filter(|(_, t)| t.starts_with("lc"))
-        .collect();
-    assert_eq!(
-        jumps.len(),
-        1,
-        "one explicit continue jump expected:\n{lua}"
-    );
-    let (at, target) = &jumps[0];
-    assert!(*at < labels[target], "a continue must jump FORWARD:\n{lua}");
-    assert!(
-        backward_gotos(&lua).is_empty(),
-        "no back edge may remain:\n{lua}"
-    );
-}
-
-/// Several exit targets need no dispatch: Lua forbids jumping INTO a block, not
-/// out of one, so each exit stays the plain `goto` it already was.
-#[test]
-fn structured_several_exits_stay_plain_gotos_out_of_the_block() {
-    let lua = emit_inlined_shaped(
-        "fn f(n: int) -> int { let t = 0; let i = 0; while true { i = i + 1; if i > n { break }; if t > 40 { return 0 - t }; t = t + i }; t }",
-        "f",
-        LoopShape::Structured,
-    );
-    let close = lua
-        .lines()
-        .position(|l| l.trim() == "end")
-        .expect("the `while` closes");
-    let labels = label_lines(&lua);
-    let mut exits: Vec<String> = goto_refs(&lua)
-        .into_iter()
-        .filter(|(at, t)| *at < close && labels.get(t).is_some_and(|l| *l > close))
-        .map(|(_, t)| t)
-        .collect();
-    exits.sort();
-    exits.dedup();
-    assert!(
-        exits.len() >= 2,
-        "two distinct exit targets expected, got {exits:?}:\n{lua}"
-    );
-    assert!(
-        backward_gotos(&lua).is_empty(),
-        "no back edge may remain:\n{lua}"
-    );
-}
-
 /// An iterator loop nested inside another loop: its preheader is reachable
 /// from its body through the enclosing back edge, which a body-reachability
 /// split read as a second back edge and bailed on. Back edges are the head's
 /// predecessors that the head DOMINATES; the preheader never is. Both loops
-/// print as counted `for`s and no backward goto survives, under either loop
-/// shape.
+/// print as counted `for`s and no backward goto survives.
 #[test]
 fn nested_iterator_loop_is_recovered_as_a_counted_for() {
     let src = "\
 struct B { slot: int }\n\
 struct D { bindings: [B] }\n\
 fn f(ds: [D]) -> int { for d in ds { for b in d.bindings { if b.slot < 0 { return 1 } } }; 0 }";
-    for shape in [LoopShape::Goto, LoopShape::Structured] {
-        let lua = emit_inlined_shaped(src, "f", shape);
-        let fors = lua
-            .lines()
-            .filter(|l| l.trim_start().starts_with("for "))
-            .count();
-        assert_eq!(
-            fors, 2,
-            "both iterator loops must print as counted `for`s ({shape:?}):\n{lua}"
-        );
-        assert!(
-            backward_gotos(&lua).is_empty(),
-            "no back edge may remain ({shape:?}):\n{lua}"
-        );
-        assert!(
-            !lua.contains("while true do"),
-            "nothing is left for the structured shape ({shape:?}):\n{lua}"
-        );
-    }
-}
-
-/// `expand_for` is untouched: a recognized counted loop prints as a Lua `for`
-/// under BOTH shapes, and both loops here are recognized.
-#[test]
-fn structured_preserves_the_counted_for_exactly() {
-    let src = "\
-struct B { slot: int }\n\
-struct D { bindings: [B] }\n\
-fn f(ds: [D]) -> int { for d in ds { for b in d.bindings { if b.slot < 0 { return 1 } } }; 0 }";
-    let goto = emit_inlined_shaped(src, "f", LoopShape::Goto);
-    let structured = emit_inlined_shaped(src, "f", LoopShape::Structured);
-    let fors = |s: &str| {
-        s.lines()
-            .filter(|l| l.trim_start().starts_with("for c"))
-            .count()
-    };
-    assert_eq!(fors(&goto), 2, "two counted `for`s expected:\n{goto}");
+    let lua = emit_inlined(src, "f");
+    let fors = lua
+        .lines()
+        .filter(|l| l.trim_start().starts_with("for "))
+        .count();
     assert_eq!(
-        fors(&structured),
-        fors(&goto),
-        "the counted `for` must survive:\n{structured}"
+        fors, 2,
+        "both iterator loops must print as counted `for`s:\n{lua}"
     );
-}
-
-/// The default shape emits the same BYTES it emitted before the switch existed.
-#[test]
-fn goto_shape_emission_is_byte_identical_to_the_default() {
-    for src in [
-        "fn a(n: int) -> int { let t = 0; let i = 1; while i <= n { t = t + i; i = i + 1 }; t }",
-        "fn b(n: int) -> int { let t = 0; let i = 0; while i < n { i = i + 1; if i % 3 == 0 { continue }; t = t + i }; t }",
-        "fn c(n: int) -> int { let t = 0; let i = 0; while true { i = i + 1; if i > n { break }; t = t + i }; t }",
-    ] {
-        let name = &src[3..4];
-        assert_eq!(
-            emit_inlined_shaped(src, name, LoopShape::Goto),
-            emit_inlined(src, name),
-            "the explicit `goto` shape must be the default's bytes"
-        );
-    }
-}
-
-/// The deeper oracle: real LuaJIT runs both shapes and agrees, over nested
-/// loops, `continue`, an early `break` and an early `return`.
-#[test]
-fn structured_and_goto_shapes_compute_the_same_under_luajit() {
-    let src = "\
-@nomangle fn probe(n: int) -> int {\n\
-    let total = 0\n\
-    let i = 0\n\
-    while i < n {\n\
-        i = i + 1\n\
-        if i % 4 == 0 { continue }\n\
-        let j = 0\n\
-        while true {\n\
-            j = j + 1\n\
-            if j > i { break }\n\
-            if j % 3 == 0 { continue }\n\
-            total = total + j\n\
-            if total > 900 { return total }\n\
-        }\n\
-        total = total + 1\n\
-    }\n\
-    total\n\
-}";
-    for n in ["3", "11", "40"] {
-        let driver = format!("probe({n})");
-        assert_eq!(
-            run_looped(src, &driver, LoopShape::Structured),
-            run_looped(src, &driver, LoopShape::Goto),
-            "the two shapes disagree at n={n}"
-        );
-    }
+    assert!(
+        backward_gotos(&lua).is_empty(),
+        "no back edge may remain:\n{lua}"
+    );
 }
 
 /// The recovered nested iterator loop computes what the goto loop computed:
@@ -2736,58 +2374,10 @@ fn probe(stop: int) -> int {\n\
     assert_eq!(run(src, "probe(1)"), "-1000");
 }
 
-/// The shipped shape calls the stdlib helper: the inline shape measured as a
-/// redistribution of aborts in representative workloads, not a reduction.
 #[test]
-fn vec_index_read_calls_the_checked_helper_by_default() {
+fn vec_index_read_calls_the_checked_helper() {
     let lua = emit("fn f(xs: [int], i: int) -> int { return xs[i] }", "f");
     assert!(lua.contains("__vec_checked_get("), "{lua}");
-    assert!(!lua.contains("__rock_vec_oob("), "{lua}");
-}
-
-/// Under `ROCK_SKULL_INDEX_SHAPE=inline`, a Vec read whose operands are
-/// registers or cells spells its bounds check inline -- the guard, the cold
-/// out-of-line error call, then the raw `_data` read -- instead of calling
-/// `__vec_checked_get`.
-#[test]
-fn vec_index_read_inlines_the_bounds_check() {
-    let lua = emit_indexed(
-        "fn f(xs: [int], i: int) -> int { return xs[i] }",
-        "f",
-        skull_codegen_lua::IndexShape::Inline,
-    );
-    assert!(!lua.contains("__vec_checked_get("), "{lua}");
-    assert!(lua.contains("__rock_vec_oob("), "{lua}");
-    assert!(lua.contains("._data["), "{lua}");
-    assert!(lua.contains(".len then"), "{lua}");
-}
-
-/// A Vec store with register/cell base and index spells the same guard and
-/// then a raw `_data` store; the stored value is evaluated once.
-#[test]
-fn vec_index_store_inlines_the_bounds_check() {
-    let lua = emit_indexed(
-        "fn f(xs: [int], i: int, v: int) { xs[i] = v }",
-        "f",
-        skull_codegen_lua::IndexShape::Inline,
-    );
-    assert!(!lua.contains("__vec_checked_set("), "{lua}");
-    assert!(lua.contains("__rock_vec_oob("), "{lua}");
-    assert!(lua.contains("._data["), "{lua}");
-}
-
-/// The inline shape names each operand twice, so a base that renders as a
-/// folded expression (here an allocating vec literal) must keep the call:
-/// duplicating it would allocate twice.
-#[test]
-fn vec_index_with_folded_base_keeps_the_checked_call() {
-    let lua = emit_indexed(
-        "fn f(i: int) -> int { return [1, 2, 3][i] }",
-        "f",
-        skull_codegen_lua::IndexShape::Inline,
-    );
-    assert!(lua.contains("__vec_checked_get("), "{lua}");
-    assert!(!lua.contains("__rock_vec_oob("), "{lua}");
 }
 
 #[test]

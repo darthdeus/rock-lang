@@ -1,19 +1,10 @@
 use crate::common::{emit_mir, mangled_name, run_luajit, ws_with_stdlib};
-use skull::mir_emit::{ShapeOverrides, emit_full_with_shapes};
-use skull_codegen_lua::CalleeBindingMode;
 use ustr::Ustr;
 
-/// The fixture emitted under an explicit callee-binding shape and storage-cell
-/// switch, so one process can pin both spellings of a mutable-global access.
-fn emit_shaped(src: &str, binding: CalleeBindingMode, state_cell: Option<bool>) -> String {
+fn emit_program(src: &str) -> String {
     let ws = ws_with_stdlib(src);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    let shapes = ShapeOverrides {
-        callee_binding: Some(binding),
-        state_cell,
-        ..ShapeOverrides::default()
-    };
-    emit_full_with_shapes(&ws, mid, shapes).expect("emit").0.lua
+    skull::mir_emit::emit_full(&ws, mid).expect("emit").0.lua
 }
 
 const FIXTURE: &str = r#"
@@ -32,9 +23,9 @@ fn main() {
 #[test]
 fn lua_global_slots_are_dense_numeric_realizations() {
     let emitted = emit_mir(FIXTURE);
-    let global_walk = emit_shaped(FIXTURE, CalleeBindingMode::Global, None);
+    let lua = emit_program(FIXTURE);
     assert!(
-        global_walk.contains("__rock_globals[5]"),
+        lua.contains("__rock_state_cell[5]"),
         "the fixture global must use its compact numeric Lua slot"
     );
     assert!(
@@ -111,16 +102,16 @@ print(first ~= second and second ~= third
     assert_eq!(run_luajit(&program, "rng_suffix"), "true");
 }
 
-// --- The storage cell under the bound shape -----------------
+// --- The storage cell -----------------
 //
-// Under `CalleeBindingMode::Upvalue` a mutable-global access reads the global
-// storage through one chunk-level local, `__rock_state_cell`, instead of the
+// A mutable-global access reads the global storage through one chunk-level
+// local, `__rock_state_cell`, instead of the
 // `_G.__rock_globals` lookup. The table is never replaced, so the cell never
 // needs updating after the program assigns it.
 
 #[test]
-fn bound_emission_reads_globals_through_the_storage_cell() {
-    let lua = emit_shaped(FIXTURE, CalleeBindingMode::Upvalue, None);
+fn emission_reads_globals_through_the_storage_cell() {
+    let lua = emit_program(FIXTURE);
     assert!(
         lua.contains("\nlocal __rock_state_cell\n"),
         "the prelude must declare the cell as a chunk-level local:\n{}",
@@ -132,25 +123,8 @@ fn bound_emission_reads_globals_through_the_storage_cell() {
     );
     assert!(
         !lua.contains("__rock_globals[5]"),
-        "no access may keep the `_G` lookup under the bound shape"
+        "no access may keep the `_G` lookup"
     );
-}
-
-#[test]
-fn global_emission_reads_the_storage_table() {
-    let lua = emit_shaped(FIXTURE, CalleeBindingMode::Global, None);
-    assert!(lua.contains("__rock_globals[5]"));
-    assert!(
-        !lua.contains("__rock_state_cell["),
-        "an overlay-capable build must never read a chunk-level cell"
-    );
-}
-
-#[test]
-fn state_cell_switch_off_reads_the_storage_table_under_bound_emission() {
-    let lua = emit_shaped(FIXTURE, CalleeBindingMode::Upvalue, Some(false));
-    assert!(lua.contains("__rock_globals[5]"));
-    assert!(!lua.contains("__rock_state_cell["));
 }
 
 // --- The storage table sized at creation --
@@ -166,7 +140,7 @@ fn state_cell_switch_off_reads_the_storage_table_under_bound_emission() {
 
 #[test]
 fn the_program_opens_sized_storage_before_initializing() {
-    let lua = emit_shaped(FIXTURE, CalleeBindingMode::Upvalue, None);
+    let lua = emit_program(FIXTURE);
     // COUNTER is slot 5 (`lua_global_slots_are_dense_numeric_realizations`):
     // the array fixpoint is the next power of two above the highest slot, plus
     // one for index 0; the hash part has a 16-node floor.
@@ -208,7 +182,7 @@ fn the_program_opens_sized_storage_before_initializing() {
 /// and the table is the one the first load sized.
 #[test]
 fn a_reloaded_program_keeps_live_globals_and_its_storage_table() {
-    let lua = emit_shaped(FIXTURE, CalleeBindingMode::Upvalue, None);
+    let lua = emit_program(FIXTURE);
     let bump = mangled_name(&lua, "bump");
     let program = format!(
         "{lua}

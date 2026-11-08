@@ -288,8 +288,8 @@ mod uniform_block_pack;
 mod user_fn_emit_rejection;
 #[path = "valid_type_identity.rs"]
 mod valid_type_identity;
-#[path = "value_ctor_splice.rs"]
-mod value_ctor_splice;
+#[path = "value_ctor.rs"]
+mod value_ctor;
 #[path = "value_leaf_layout.rs"]
 mod value_leaf_layout;
 #[path = "value_push_generic_boundary.rs"]

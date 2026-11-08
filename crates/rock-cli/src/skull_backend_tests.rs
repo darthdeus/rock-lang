@@ -468,7 +468,8 @@ mod incremental_watch_tests {
         }
     }
 
-    fn run_fuzz(seed: u64, n_fns: usize, steps: usize, binding: skull::CalleeBindingMode) {
+    /// `run_values` also executes both artifacts under LuaJIT after each edit.
+    fn run_fuzz(seed: u64, n_fns: usize, steps: usize, run_values: bool) {
         let mut rng = Rng(seed.max(1));
         // Start: a mix of consts and call edges so inlining is exercised from step 0.
         let mut bodies: Vec<Body> = (0..n_fns)
@@ -484,8 +485,7 @@ mod incremental_watch_tests {
         let mut session = bone_session(files(&render(&bodies))).expect("fuzz session init");
         let mid = skull::user_module_id(session.workspace()).unwrap();
         let (_init, mut cache) =
-            skull::mir_emit::emit_full_with_callee_binding(session.workspace(), mid, binding)
-                .expect("fuzz emit_full init");
+            skull::mir_emit::emit_full(session.workspace(), mid).expect("fuzz emit_full init");
         let names = (0..n_fns)
             .map(|i| {
                 let name = format!("f{i}");
@@ -530,65 +530,58 @@ mod incremental_watch_tests {
                     e.message
                 )
             });
-            let fresh =
-                skull::mir_emit::emit_full_with_callee_binding(session.workspace(), mid, binding)
-                    .unwrap_or_else(|e| {
-                        panic!("seed {seed} step {step}: emit_full failed: {}", e.message)
-                    })
-                    .0;
+            let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+                .unwrap_or_else(|e| {
+                    panic!("seed {seed} step {step}: emit_full failed: {}", e.message)
+                })
+                .0;
             let context = format!("seed {seed} step {step}: edited f{changed}");
-            match binding {
-                skull::CalleeBindingMode::Global => assert!(
-                    incremental.lua == fresh.lua,
-                    "{context}: incremental != fresh (reinferred={} bodies): {}\n{text}",
-                    result.reinferred.len(),
-                    super::first_diff_line(&incremental.lua, &fresh.lua),
-                ),
-                skull::CalleeBindingMode::Upvalue => {
-                    // Every edge in this small DAG is inlined. Arena tombstones
-                    // must not create captures for calls absent from emitted code.
-                    for name in &names {
-                        let factory = format!("__rock_mk_{name} = function(");
-                        assert!(
-                            !incremental.lua.contains(&factory),
-                            "{context}: incremental retained an inlined callee binding for {name}"
-                        );
-                        assert!(
-                            !fresh.lua.contains(&factory),
-                            "{context}: fresh retained an inlined callee binding for {name}"
-                        );
-                    }
-                    let mut values = Vec::<i64>::with_capacity(n_fns);
-                    for body in &bodies {
-                        values.push(match body {
-                            Body::Const(value) => *value,
-                            Body::Call(callee) => values[*callee],
-                        });
-                    }
-                    let expected = values
-                        .iter()
-                        .map(i64::to_string)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    assert_fuzz_values(
-                        &incremental.lua,
-                        &calls,
-                        &expected,
-                        &format!("{context}: incremental"),
-                    );
-                    assert_fuzz_values(&fresh.lua, &calls, &expected, &format!("{context}: fresh"));
-                }
+            assert!(
+                incremental.lua == fresh.lua,
+                "{context}: incremental != fresh (reinferred={} bodies): {}\n{text}",
+                result.reinferred.len(),
+                super::first_diff_line(&incremental.lua, &fresh.lua),
+            );
+            // Every edge in this small DAG is inlined. Arena tombstones must not
+            // create captures for calls absent from emitted code.
+            for name in &names {
+                let factory = format!("__rock_mk_{name} = function(");
+                assert!(
+                    !incremental.lua.contains(&factory),
+                    "{context}: incremental retained an inlined callee binding for {name}"
+                );
+                assert!(
+                    !fresh.lua.contains(&factory),
+                    "{context}: fresh retained an inlined callee binding for {name}"
+                );
             }
+            if !run_values {
+                continue;
+            }
+            let mut values = Vec::<i64>::with_capacity(n_fns);
+            for body in &bodies {
+                values.push(match body {
+                    Body::Const(value) => *value,
+                    Body::Call(callee) => values[*callee],
+                });
+            }
+            let expected = values
+                .iter()
+                .map(i64::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_fuzz_values(
+                &incremental.lua,
+                &calls,
+                &expected,
+                &format!("{context}: incremental"),
+            );
+            assert_fuzz_values(&fresh.lua, &calls, &expected, &format!("{context}: fresh"));
         }
     }
 
     fn fuzz_incremental_matches_fresh(seed: u64, steps: usize) {
-        run_fuzz(
-            seed.wrapping_mul(2654435761),
-            16,
-            steps,
-            skull::CalleeBindingMode::Global,
-        );
+        run_fuzz(seed.wrapping_mul(2654435761), 16, steps, false);
     }
 
     // A handful of deterministic seeds; each drives many valid body edits on a
@@ -635,12 +628,7 @@ mod incremental_watch_tests {
         // Keep the original failing seed and graph size; execution is bounded
         // because each edit launches LuaJIT for both incremental and fresh output.
         for seed in 1_u64..=2 {
-            run_fuzz(
-                seed.wrapping_mul(2654435761),
-                16,
-                12,
-                skull::CalleeBindingMode::Upvalue,
-            );
+            run_fuzz(seed.wrapping_mul(2654435761), 16, 12, true);
         }
     }
 
@@ -666,12 +654,8 @@ mod incremental_watch_tests {
         let factory = |caller: &str, callee: &str| {
             format!("__rock_mk_{caller} = function({callee}) return function(")
         };
-        let (before, mut cache) = skull::mir_emit::emit_full_with_callee_binding(
-            session.workspace(),
-            mid,
-            skull::CalleeBindingMode::Upvalue,
-        )
-        .expect("initial rank fixture emit");
+        let (before, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid)
+            .expect("initial rank fixture emit");
         assert!(
             before.lua.contains(&factory(&a, &x)),
             "initial a must capture x"
@@ -720,13 +704,9 @@ mod incremental_watch_tests {
                 &updated.reinferred,
             )
             .expect("incremental rank fixture emit");
-            let fresh = skull::mir_emit::emit_full_with_callee_binding(
-                session.workspace(),
-                mid,
-                skull::CalleeBindingMode::Upvalue,
-            )
-            .expect("fresh rank fixture emit")
-            .0;
+            let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
+                .expect("fresh rank fixture emit")
+                .0;
             assert!(
                 !incremental
                     .lua

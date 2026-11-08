@@ -615,34 +615,6 @@ pub struct CodegenCtx {
     /// Compiler-assigned storage slots for mutable globals.
     state_slots: HashMap<ustr::Ustr, u32>,
     scalar_constants: HashMap<ustr::Ustr, Lit>,
-    /// Every function that lies on a call cycle, from the whole-program instance
-    /// graph projected onto declarations. Read ONLY by
-    /// [`TailCallShape::Cycles`]; empty on any path that never populated it,
-    /// which makes that shape degrade to [`TailCallShape::All`] rather than to
-    /// the unsafe direction.
-    recursive_callees: HashSet<FuncRef>,
-    /// The emitted shape for a call in tail position. Read from
-    /// `ROCK_SKULL_TAIL_CALLS` once per context rather than once per emitted
-    /// block, so a test can drive all three shapes in one process.
-    tail_calls: TailCallShape,
-    /// The emitted shape for a call to another emitted function. Read from
-    /// `ROCK_SKULL_CALLEE_BINDING` once per context, same as `tail_calls`.
-    callee_binding: CalleeBindingMode,
-    /// Whether a mutable-global access under the bound shape reads the global
-    /// storage through a chunk-level upvalue cell instead of reading
-    /// `_G.__rock_globals`. Read from
-    /// `ROCK_SKULL_STATE_CELL` once per context; only effective under
-    /// [`CalleeBindingMode::Upvalue`], see [`CodegenCtx::state_cell`].
-    state_cell: bool,
-    /// The emitted shape for a natural loop that is not a counted `for`. Read
-    /// from `ROCK_SKULL_LOOP_SHAPE` once per context, same as `tail_calls`.
-    loops: LoopShape,
-    /// The emitted shape for a GC-tier `value` struct construction. Read from
-    /// `ROCK_SKULL_VALUE_CTOR` once per context, same as `tail_calls`.
-    value_ctor: ValueCtorShape,
-    /// The emitted shape for a bounds-checked Vec access. Read from
-    /// `ROCK_SKULL_INDEX_SHAPE` once per context, same as `tail_calls`.
-    index_shape: IndexShape,
     /// Every function's strongly connected component number over the
     /// whole-program call graph, from [`call_sccs`]. Read ONLY by
     /// [`callee_binding_plan`]; empty on any path that never populated it,
@@ -668,13 +640,6 @@ impl Clone for CodegenCtx {
             rejections: Mutex::new(self.rejections.lock().expect("rejection sink").clone()),
             state_slots: self.state_slots.clone(),
             scalar_constants: self.scalar_constants.clone(),
-            recursive_callees: self.recursive_callees.clone(),
-            tail_calls: self.tail_calls,
-            callee_binding: self.callee_binding,
-            state_cell: self.state_cell,
-            loops: self.loops,
-            value_ctor: self.value_ctor,
-            index_shape: self.index_shape,
             call_sccs: self.call_sccs.clone(),
             frame_limits: self.frame_limits,
             line_directives: self.line_directives,
@@ -909,13 +874,6 @@ impl CodegenCtx {
             rejections: Mutex::new(collisions),
             state_slots,
             scalar_constants: scalar_constants(ws),
-            recursive_callees: HashSet::default(),
-            tail_calls: tail_call_shape(),
-            callee_binding: callee_binding_mode(),
-            state_cell: state_cell_mode(),
-            loops: loop_shape(),
-            value_ctor: value_ctor_shape(),
-            index_shape: index_shape(),
             call_sccs: HashMap::default(),
             frame_limits: true,
             line_directives: line_directives_mode(),
@@ -923,83 +881,10 @@ impl CodegenCtx {
         }
     }
 
-    /// Override the emitted tail-call shape this context was built with. The
-    /// production path takes it from `ROCK_SKULL_TAIL_CALLS`; a test uses this
-    /// so one process can emit all three shapes.
-    pub fn set_tail_call_shape(&mut self, shape: TailCallShape) {
-        self.tail_calls = shape;
-    }
-
-    pub fn tail_call_shape(&self) -> TailCallShape {
-        self.tail_calls
-    }
-
-    /// Override the emitted callee-binding shape this context was built with.
-    /// Production reads `ROCK_SKULL_CALLEE_BINDING`; tests use this override
-    /// to compare both shapes in one process.
-    pub fn set_callee_binding(&mut self, mode: CalleeBindingMode) {
-        self.callee_binding = mode;
-    }
-
-    pub fn callee_binding(&self) -> CalleeBindingMode {
-        self.callee_binding
-    }
-
-    /// Override the storage-cell switch this context was built with. The
-    /// production path takes it from `ROCK_SKULL_STATE_CELL`; a test uses this
-    /// so one process can emit both shapes.
-    pub fn set_state_cell(&mut self, on: bool) {
-        self.state_cell = on;
-    }
-
-    /// Whether mutable-global accesses are emitted through the storage cell
-    /// (`__rock_state_cell[k]`) rather than a `_G.__rock_globals` read. This optimization is
-    /// enabled together with bound callees; overlays retain both optimizations.
-    pub fn state_cell(&self) -> bool {
-        self.state_cell && self.callee_binding == CalleeBindingMode::Upvalue
-    }
-
-    /// The table a mutable-global access indexes: the chunk-level cell under the
-    /// bound shape, else the `_G` lookup an overlay chunk can also perform.
+    /// The table a mutable-global access indexes: the chunk-level storage
+    /// cell every chunk (a full program or an overlay) declares.
     pub fn state_table(&self) -> &'static str {
-        if self.state_cell() {
-            STATE_CELL
-        } else {
-            "__rock_globals"
-        }
-    }
-
-    /// Override the emitted loop shape this context was built with. The
-    /// production path takes it from `ROCK_SKULL_LOOP_SHAPE`; a test uses this
-    /// so one process can emit both shapes.
-    pub fn set_loop_shape(&mut self, shape: LoopShape) {
-        self.loops = shape;
-    }
-
-    pub fn loop_shape(&self) -> LoopShape {
-        self.loops
-    }
-
-    /// Override the emitted value-ctor shape this context was built with. The
-    /// production path takes it from `ROCK_SKULL_VALUE_CTOR`; a test uses this
-    /// so one process can emit both shapes.
-    pub fn set_value_ctor_shape(&mut self, shape: ValueCtorShape) {
-        self.value_ctor = shape;
-    }
-
-    pub fn value_ctor_shape(&self) -> ValueCtorShape {
-        self.value_ctor
-    }
-
-    /// Override the emitted index shape this context was built with. The
-    /// production path takes it from `ROCK_SKULL_INDEX_SHAPE`; a test uses this
-    /// so one process can emit both shapes.
-    pub fn set_index_shape(&mut self, shape: IndexShape) {
-        self.index_shape = shape;
-    }
-
-    pub fn index_shape(&self) -> IndexShape {
-        self.index_shape
+        STATE_CELL
     }
 
     /// Turn the LuaJIT frame-limit rejection off for this context. ONLY the
@@ -1053,8 +938,7 @@ impl CodegenCtx {
     /// Record every function's call-graph strongly connected component. The
     /// caller owns the graph this is derived from (`skull::mir_emit` projects
     /// the whole-program instance graph onto declarations, which can only MERGE
-    /// components and so only ever binds less); codegen only reads the answer,
-    /// and only under [`CalleeBindingMode::Upvalue`].
+    /// components and so only ever binds less); codegen only reads the answer.
     pub fn set_call_sccs(&mut self, sccs: HashMap<FuncRef, u32>) {
         self.call_sccs = sccs;
     }
@@ -1063,20 +947,6 @@ impl CodegenCtx {
     /// this context was given does not mention it.
     pub fn scc_of(&self, func: FuncRef) -> Option<u32> {
         self.call_sccs.get(&func).copied()
-    }
-
-    /// Record the functions that lie on a call cycle. The caller owns the graph
-    /// this is derived from (`skull::mir_emit` projects the whole-program
-    /// instance graph onto declarations); codegen only reads the answer, and
-    /// only under `ROCK_SKULL_TAIL_CALLS=cycles`.
-    pub fn set_recursive_callees(&mut self, callees: HashSet<FuncRef>) {
-        self.recursive_callees = callees;
-    }
-
-    /// True if `func` lies on a call cycle, so a call to it can grow the Lua
-    /// stack without bound unless it stays a real tail call.
-    pub fn is_recursive_callee(&self, func: FuncRef) -> bool {
-        self.recursive_callees.contains(&func)
     }
 
     /// Mint a compiler-reserved synthetic top-level Lua name: a hoisted lambda
@@ -1262,7 +1132,7 @@ fn instruction_reference_counts(func: &MirFunc) -> Vec<u32> {
 }
 
 /// The strongly connected components of a `(caller, callee)` call-edge stream,
-/// the one Tarjan run behind both [`callees_on_cycles`] and [`call_sccs`].
+/// the Tarjan run behind [`call_sccs`].
 ///
 /// Components are numbered in Tarjan COMPLETION order, which is a reverse
 /// topological order of the condensation: a component is closed only after
@@ -1274,9 +1144,6 @@ struct CallComponents {
     nodes: Vec<FuncRef>,
     /// Node index -> component number.
     component: Vec<u32>,
-    /// Component number -> whether it is a genuine cycle (more than one member,
-    /// or a self-edge).
-    is_cycle: Vec<bool>,
 }
 
 fn tarjan_components(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> CallComponents {
@@ -1313,7 +1180,7 @@ fn tarjan_components(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> Cal
     let mut low = vec![0usize; n];
     let mut on_stack = vec![false; n];
     let mut component = vec![u32::MAX; n];
-    let mut is_cycle: Vec<bool> = Vec::new();
+    let mut next_component = 0u32;
     let mut members: Vec<usize> = Vec::new();
     let mut stack: Vec<usize> = Vec::new();
     let mut work: Vec<(usize, usize)> = Vec::new();
@@ -1359,46 +1226,21 @@ fn tarjan_components(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> Cal
                         break;
                     }
                 }
-                let id = is_cycle.len() as u32;
-                // A one-node component is on a cycle only through a self-edge.
-                is_cycle.push(members.len() > 1 || succ[v].contains(&v));
                 for &w in &members {
-                    component[w] = id;
+                    component[w] = next_component;
                 }
+                next_component += 1;
             }
             if let Some(&(parent, _)) = work.last() {
                 low[parent] = low[parent].min(low[v]);
             }
         }
     }
-    CallComponents {
-        nodes,
-        component,
-        is_cycle,
-    }
-}
-
-/// Every function that lies on a cycle of `edges`, the input
-/// `ROCK_SKULL_TAIL_CALLS=cycles` reads through
-/// [`CodegenCtx::set_recursive_callees`].
-///
-/// `edges` is a `(caller, callee)` stream; a function is on a cycle when its
-/// strongly connected component has more than one member or it calls itself.
-/// The caller supplies the graph, so the emitter never has to know how the
-/// program's call edges were discovered.
-pub fn callees_on_cycles(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> HashSet<FuncRef> {
-    let c = tarjan_components(edges);
-    c.nodes
-        .iter()
-        .zip(c.component.iter())
-        .filter(|(_, comp)| c.is_cycle[**comp as usize])
-        .map(|(f, _)| *f)
-        .collect()
+    CallComponents { nodes, component }
 }
 
 /// Each function's strongly connected component number over `edges`, the input
-/// `ROCK_SKULL_CALLEE_BINDING=upvalue` reads through
-/// [`CodegenCtx::set_call_sccs`]. Two functions share a number exactly when
+/// callee binding reads through [`CodegenCtx::set_call_sccs`]. Two functions share a number exactly when
 /// they are mutually reachable, and a callee's number is strictly lower than
 /// its caller's whenever they differ -- see [`CallComponents`].
 pub fn call_sccs(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> HashMap<FuncRef, u32> {
@@ -1408,76 +1250,6 @@ pub fn call_sccs(edges: impl IntoIterator<Item = (FuncRef, FuncRef)>) -> HashMap
         .copied()
         .zip(c.component.iter().copied())
         .collect()
-}
-
-/// Which calls in tail position keep Lua's `do return f(...) end` shape.
-///
-/// `do return f(...) end` compiles to `CALLT`, and LuaJIT's recorder counts
-/// every recorded `CALLT` against `loopunroll` (default 15) in
-/// `lj_record_tailcall`, so a trace that walks through more than 15 of them
-/// aborts with "loop unroll limit reached". A plain call is inlined by the
-/// recorder too, so dropping the shape does not stop inlining -- it moves the
-/// limit the trace hits (`lj_record_call` grows `baseslot` instead and trips
-/// "trace too deep" at 250 slots) and costs a real interpreter frame.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum TailCallShape {
-    /// Every call in tail position is `do return f(...) end`.
-    All,
-    /// No call keeps the shape. MEASUREMENT ONLY: this drops tail-call
-    /// elimination for recursive calls too, so an unbounded tail recursion
-    /// overflows the Lua stack (measured between 10,000 and 60,000 frames).
-    None,
-    /// Only a callee that lies on a call cycle keeps the shape, so genuine
-    /// recursion keeps tail-call elimination and a straight-line accessor or
-    /// draw chain does not.
-    Cycles,
-}
-
-/// `ROCK_SKULL_TAIL_CALLS` selects the emitted shape for a call in tail
-/// position: `all` (the default), `none`, or `cycles`. An unset or unrecognized
-/// value is `all`, so the switch can only be entered deliberately.
-pub fn tail_call_shape() -> TailCallShape {
-    static SHAPE: std::sync::OnceLock<TailCallShape> = std::sync::OnceLock::new();
-    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_TAIL_CALLS").as_deref() {
-        Ok("none") => TailCallShape::None,
-        Ok("cycles") => TailCallShape::Cycles,
-        _ => TailCallShape::All,
-    })
-}
-
-/// How a call to another EMITTED function is spelled inside a function body.
-///
-/// A global lookup (`GGET`) costs a trace 5 constant-pool slots per distinct
-/// callee on GC64 -- the name string (a GC constant, 2 slots), its `KSLOT`
-/// hash slot, and the resolved function object (2 more) -- plus the guard that
-/// the global still holds that function. LuaJIT's `maxirconst` limit is 500
-/// SLOTS, and "trace too long" (the limit being hit) can dominate trace aborts. An IMMUTABLE upvalue costs 2: only the function object, folded into
-/// the trace with no lookup and no guard.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum CalleeBindingMode {
-    /// Every call is a global lookup by the callee's emitted name.
-    Global,
-    /// A function that calls other emitted functions is defined as a FACTORY
-    /// (`__rock_mk_F = function(a, b) return function(..) .. end end`) whose
-    /// parameters are named exactly like the callees, so the body text is
-    /// unchanged and each call reads an immutable upvalue instead of a global.
-    /// A second pass binds `F = __rock_mk_F(a, b)` once every callee it
-    /// captures is final.
-    Upvalue,
-}
-
-/// `ROCK_SKULL_CALLEE_BINDING` selects the emitted shape for a call to another
-/// emitted function: `global` or `upvalue`. An unset or unrecognized value is
-/// the shipped default, so the switch can only be entered deliberately.
-pub fn callee_binding_mode() -> CalleeBindingMode {
-    static MODE: std::sync::OnceLock<CalleeBindingMode> = std::sync::OnceLock::new();
-    *MODE.get_or_init(
-        || match std::env::var("ROCK_SKULL_CALLEE_BINDING").as_deref() {
-            Ok("upvalue") => CalleeBindingMode::Upvalue,
-            Ok("global") => CalleeBindingMode::Global,
-            _ => DEFAULT_CALLEE_BINDING,
-        },
-    )
 }
 
 /// `ROCK_SKULL_LINE_DIRECTIVES=1` writes LuaJIT line directives into every
@@ -1498,199 +1270,33 @@ pub fn line_directives_mode() -> bool {
 /// state, so reloaded code compares against the same table.
 pub const OMITTED_ARG: &str = "__rock_omitted";
 
-/// Chunk-level local that every emitted function reads a mutable global through
-/// under the bound shape: the process's one global storage table,
-/// `_G.__rock_globals`. Each chunk (a full program or an overlay) declares its
-/// own and assigns the same table, so no upvalue ever needs rejoining.
+/// Chunk-level local that every emitted function reads a mutable global
+/// through: the process's one global storage table, `_G.__rock_globals`. Each
+/// chunk (a full program or an overlay) declares its own and assigns the same
+/// table, so no upvalue ever needs rejoining.
 pub const STATE_CELL: &str = "__rock_state_cell";
 
-/// `ROCK_SKULL_STATE_RESERVE=0` leaves the global storage table to grow lazily
-/// from `{}` instead of sizing it to its rehash fixpoint at creation, for A/B measurement.
-/// Default: on.
-pub fn state_reserve_mode() -> bool {
-    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| {
-        !matches!(
-            std::env::var("ROCK_SKULL_STATE_RESERVE").as_deref(),
-            Ok("0")
-        )
-    })
-}
-
-/// `ROCK_SKULL_STATE_CELL=0` keeps the `_G.__rock_globals` read under the
-/// bound shape, for A/B measurement. Anything else is the
-/// shipped default: on.
-pub fn state_cell_mode() -> bool {
-    static MODE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *MODE.get_or_init(|| !matches!(std::env::var("ROCK_SKULL_STATE_CELL").as_deref(), Ok("0")))
-}
-
-/// How a natural loop that is NOT a counted `for` is spelled.
+/// The return statements of a one-expression wrapper -- an `extern(ffi)`
+/// binding, a value-struct `_vt`/`_lct` ctor -- whose whole result is `expr`.
+/// Two-space indented, no trailing newline.
 ///
-/// LuaJIT's parser turns a backward `goto` into `BC_LOOP` with `bc_j == -1`
-/// (`lj_parse.c`, `parse_goto`: "No BC range check"). `rec_setup_root` then
-/// leaves `bc_min`/`bc_extent` at their no-limit defaults, so a root trace
-/// started at such a loop keeps recording past the loop's exit through the rest
-/// of the function until it hits a compiled loop, the unroll limit or the
-/// constant limit; and `rec_loop_interp`'s interpreted-inner-loop check is
-/// skipped, because it is guarded on `bc_j(*pc) != -1`. A `while true do .. end`
-/// gets `BC_LOOP` with a real range (`parse_while` patches it with
-/// `jmp_patchins`), so both paths see a closed loop.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum LoopShape {
-    /// Every non-counted loop stays labelled blocks plus a backward `goto`.
-    Goto,
-    /// Every natural loop the CFG can prove single-entry is wrapped in
-    /// `while true do .. end`, its back edges rewritten to a forward `goto` to a
-    /// continue label at the end of the loop body. Exits stay ordinary `goto`s
-    /// OUT of the block, which Lua allows; only jumping IN is forbidden, and the
-    /// single-entry proof is exactly what rules that out.
-    Structured,
-}
-
-/// `ROCK_SKULL_LOOP_SHAPE` selects the emitted shape for a natural loop that is
-/// not a counted `for`: `goto` or `structured`. An unset or unrecognized value
-/// is the shipped default, so the switch can only be entered deliberately.
-pub fn loop_shape() -> LoopShape {
-    static SHAPE: std::sync::OnceLock<LoopShape> = std::sync::OnceLock::new();
-    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_LOOP_SHAPE").as_deref() {
-        Ok("structured") => LoopShape::Structured,
-        Ok("goto") => LoopShape::Goto,
-        _ => DEFAULT_LOOP_SHAPE,
-    })
-}
-
-/// The shipped emitted loop shape.
-pub const DEFAULT_LOOP_SHAPE: LoopShape = LoopShape::Goto;
-
-/// How a GC-tier `value` struct construction is spelled at its use site.
-///
-/// [`ValueCtorShape::Call`] calls the chunk-level `<Name>_vt(..)` ctor, whose
-/// whole body is `return setmetatable({ .. }, <mt>)`. That call frame is what
-/// makes a four-field constructor hot enough to become a `rec_ret` TRACE ROOT --
-/// and its `return setmetatable(..)` is one
-/// `CALLT` against LuaJIT's 15-slot `loopunroll` budget in every trace that
-/// records it. [`ValueCtorShape::Splice`] writes the table constructor and the
-/// `setmetatable` at the use site instead, so there is no frame to root.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ValueCtorShape {
-    /// Every construction is a call to the chunk-level `<Name>_vt` ctor.
-    Call,
-    /// A GC-table (`_vt`) construction with declared fields is spliced in place.
-    /// The cdata (`_ct`) and leaf-table (`_lct`) tiers are untouched: `_ct` is an
-    /// `ffi.typeof` ctor with no Lua body to splice, and `_lct` carries the leaf
-    /// plan's presence tagging, which belongs in one place.
-    Splice,
-}
-
-/// `ROCK_SKULL_VALUE_CTOR` selects the emitted shape for a GC-tier `value`
-/// struct construction: `call` or `splice`. An unset or unrecognized value is
-/// the shipped default, so the switch can only be entered deliberately.
-pub fn value_ctor_shape() -> ValueCtorShape {
-    static SHAPE: std::sync::OnceLock<ValueCtorShape> = std::sync::OnceLock::new();
-    *SHAPE.get_or_init(|| match std::env::var("ROCK_SKULL_VALUE_CTOR").as_deref() {
-        Ok("splice") => ValueCtorShape::Splice,
-        Ok("call") => ValueCtorShape::Call,
-        _ => DEFAULT_VALUE_CTOR_SHAPE,
-    })
-}
-
-/// The shipped emitted value-ctor shape.
-pub const DEFAULT_VALUE_CTOR_SHAPE: ValueCtorShape = ValueCtorShape::Call;
-
-/// How a bounds-checked Vec element read, store or column index is spelled.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum IndexShape {
-    /// Every access calls the stdlib helper (`__vec_checked_get` and kin). In a
-    /// trace that is one callee constant per trace plus one frame-link constant
-    /// per site, and the helper's own entry is a trace root.
-    Call,
-    /// An access whose base and index render as bare names spells the check
-    /// itself: `if i < 0 or i >= v.len then __rock_vec_oob(v, i) end` and then
-    /// the raw `_data` access. An operand that is a folded expression keeps the
-    /// call, because the guard names each operand twice.
-    Inline,
-}
-
-/// `ROCK_SKULL_INDEX_SHAPE` selects the emitted shape for a bounds-checked Vec
-/// access: `call` or `inline`. An unset or unrecognized value is the shipped
-/// default, so the switch can only be entered deliberately.
-pub fn index_shape() -> IndexShape {
-    static SHAPE: std::sync::OnceLock<IndexShape> = std::sync::OnceLock::new();
-    *SHAPE.get_or_init(
-        || match std::env::var("ROCK_SKULL_INDEX_SHAPE").as_deref() {
-            Ok("call") => IndexShape::Call,
-            Ok("inline") => IndexShape::Inline,
-            _ => DEFAULT_INDEX_SHAPE,
-        },
-    )
-}
-
-/// How a one-expression wrapper -- an `extern(ffi)` binding, a value-struct
-/// `_vt`/`_lct` ctor -- hands its result back.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum WrapperRetShape {
-    /// `return lib.f(..)`: a `CALLT` into C. A root trace started at the
-    /// wrapper's entry cannot leave through it (`rec_ret` needs a real `RET`)
-    /// and aborts `leaving loop in root trace` every time it is tried.
-    Tail,
-    /// `local __rock_ret = lib.f(..)` then `return __rock_ret`: one bytecode
-    /// more, a real `RET`, and the root trace links out cleanly.
-    Local,
-}
-
-/// `ROCK_SKULL_WRAPPER_RET` selects the wrapper return shape: `tail` or
-/// `local`. An unset or unrecognized value is the shipped default, so the
-/// switch can only be entered deliberately.
-pub fn wrapper_ret_shape() -> WrapperRetShape {
-    static SHAPE: std::sync::OnceLock<WrapperRetShape> = std::sync::OnceLock::new();
-    *SHAPE.get_or_init(
-        || match std::env::var("ROCK_SKULL_WRAPPER_RET").as_deref() {
-            Ok("tail") => WrapperRetShape::Tail,
-            Ok("local") => WrapperRetShape::Local,
-            _ => DEFAULT_WRAPPER_RET_SHAPE,
-        },
-    )
-}
-
-/// The shipped wrapper return shape.
-pub const DEFAULT_WRAPPER_RET_SHAPE: WrapperRetShape = WrapperRetShape::Local;
-
-/// The return statement(s) of a wrapper whose whole result is `expr`, under
-/// [`wrapper_ret_shape`]. Two-space indented, no trailing newline. The local
-/// is a reserved `__rock` name so it can never shadow a wrapper parameter
-/// that `expr` reads.
+/// `return lib.f(..)` would be a `CALLT` into C: a root trace started at the
+/// wrapper's entry cannot leave through it (`rec_ret` needs a real `RET`) and
+/// aborts `leaving loop in root trace` every time it is tried. Returning
+/// through a local costs one bytecode and gives the trace a real `RET`. The
+/// local is a reserved `__rock` name so it can never shadow a wrapper
+/// parameter that `expr` reads.
 pub fn wrapper_return(expr: &str) -> String {
-    match wrapper_ret_shape() {
-        WrapperRetShape::Tail => format!("  return {expr}"),
-        WrapperRetShape::Local => format!("  local __rock_ret = {expr}\n  return __rock_ret"),
-    }
+    format!("  local __rock_ret = {expr}\n  return __rock_ret")
 }
-
-/// The shipped emitted index shape. `Inline` measured as a redistribution on
-/// representative workloads, not a reduction: the aborts that started inside the helper reappeared
-/// as leaving-loop roots at the callers' own `for` headers, and the first
-/// frames got no faster.
-pub const DEFAULT_INDEX_SHAPE: IndexShape = IndexShape::Call;
 
 /// The shared per-type metatable global of a GC-tier `value` struct -- the table
 /// every instance of `<name>` carries, so LuaJIT's `__eq` fires between any two
 /// of them. ONE spelling, read by the definition emitter
-/// (`skull::value_struct_gc_defs`) and by a spliced construction alike.
+/// (`skull::value_struct_gc_defs`).
 pub fn value_struct_metatable_name(name: &str) -> String {
     format!("__rock_vt_{name}")
 }
-
-/// Whether this process emits callees as bound upvalues.
-pub fn callee_binding_is_bound() -> bool {
-    callee_binding_mode() == CalleeBindingMode::Upvalue
-}
-
-/// The shipped emitted callee binding shape:
-/// the measurement (mean frame 5.73 ms -> 4.99 ms, "trace too long" aborts
-/// 1339 -> 386) settled `AUTHOR DECISION -- CALLEE BINDING DEFAULT` in favour
-/// of [`CalleeBindingMode::Upvalue`] on 2026-09-11.
-pub const DEFAULT_CALLEE_BINDING: CalleeBindingMode = CalleeBindingMode::Upvalue;
 
 /// LuaJIT's hard limit on upvalues per function prototype (`LJ_MAX_UPVAL`).
 /// A body with more bindable callees than this binds the first
@@ -1809,8 +1415,16 @@ pub fn call_target_symbol(
 }
 
 /// The binding plan for `func`, emitted under `name` for declaration
-/// `self_ref`, or `None` when nothing is bound (the body then emits exactly as
-/// it does under [`CalleeBindingMode::Global`]).
+/// `self_ref`, or `None` when nothing is bound (every call in the body is then
+/// a global lookup).
+///
+/// A global lookup (`GGET`) costs a trace 5 constant-pool slots per distinct
+/// callee on GC64 -- the name string (a GC constant, 2 slots), its `KSLOT`
+/// hash slot, and the resolved function object (2 more) -- plus the guard that
+/// the global still holds that function. LuaJIT's `maxirconst` limit is 500
+/// SLOTS, and "trace too long" (the limit being hit) can dominate trace
+/// aborts. An IMMUTABLE upvalue costs 2: only the function object, folded into
+/// the trace with no lookup and no guard.
 ///
 /// A callee is bound only when the emitter can PROVE it is an ordinary emitted
 /// Lua function whose global is final by the time this body's binding line
@@ -1841,9 +1455,6 @@ pub fn callee_binding_plan(
     self_ref: FuncRef,
     func: &MirFunc,
 ) -> Option<CalleeBindingPlan> {
-    if ctx.callee_binding != CalleeBindingMode::Upvalue {
-        return None;
-    }
     let rank = ctx.scc_of(self_ref);
     let mut captures: Vec<String> = Vec::new();
     let mut touches_state = false;
@@ -1902,11 +1513,7 @@ pub fn callee_binding_plan(
     }
     // A body that touches a mutable global captures the storage cell as an
     // upvalue too, against the same 60-upvalue limit the callees count toward.
-    let reserved = if ctx.state_cell() && touches_state {
-        1
-    } else {
-        0
-    };
+    let reserved = usize::from(touches_state);
     let limit = MAX_BOUND_CALLEES - reserved;
     let capped = captures.len() > limit;
     captures.truncate(limit);
@@ -1921,29 +1528,7 @@ pub fn callee_binding_plan(
     })
 }
 
-/// THE gate for the emitted tail-call shape. Returning false drops the forward,
-/// which leaves the ordinary emission path to write `r<N> = f(args)` followed by
-/// `do return r<N> end` -- the same statements a non-tail-position call already
-/// emits, so no new emitted form is introduced.
-fn keeps_tail_call(ctx: &CodegenCtx, call: &TailForwardCall) -> bool {
-    match ctx.tail_calls {
-        TailCallShape::All => true,
-        TailCallShape::None => false,
-        // A call through a function value has no statically known callee, so the
-        // call graph cannot prove it off every cycle.
-        TailCallShape::Cycles => match call {
-            TailForwardCall::Value { .. } => true,
-            TailForwardCall::Direct { func, .. } => ctx.is_recursive_callee(*func),
-        },
-    }
-}
-
-fn tail_forwards(
-    ws: &Workspace,
-    ctx: &CodegenCtx,
-    func: &MirFunc,
-    direct: bool,
-) -> Vec<Option<TailForward>> {
+fn tail_forwards(ws: &Workspace, func: &MirFunc, direct: bool) -> Vec<Option<TailForward>> {
     let mut forwards = vec![None; func.blocks.len()];
     let cell_references = cell_reference_counts(func);
     for (block_id, block) in func.blocks.iter() {
@@ -2031,16 +1616,6 @@ fn tail_forwards(
             suppressed: block.insts[first..].to_vec(),
             call,
         });
-    }
-    if ctx.tail_calls != TailCallShape::All {
-        for forward in forwards.iter_mut() {
-            if forward
-                .as_ref()
-                .is_some_and(|tail| !keeps_tail_call(ctx, &tail.call))
-            {
-                *forward = None;
-            }
-        }
     }
     forwards
 }
@@ -2302,7 +1877,7 @@ pub fn emit_named_framed_with_allocation_sites(
 ) -> LuaEmission {
     let sites = RefCell::new(Vec::new());
     // The header offset comes back from the emission rather than from a search
-    // for `function <name>`: under `CalleeBindingMode::Upvalue` the body's only
+    // for `function <name>`: a bound body's only
     // copy sits inside a factory and that spelling does not appear at all.
     let (lua, header_offset) = emit_named_framed_with_statics_impl(
         ws,
@@ -2437,7 +2012,7 @@ fn emit_named_framed_with_statics_impl(
             .expect("trace frame sink")
             .insert(name.to_string(), contributors);
     }
-    let tail_forwards = tail_forwards(ws, ctx, func, frame.is_none());
+    let tail_forwards = tail_forwards(ws, func, frame.is_none());
     let (call_arg_forwards, suppressed) = if frame.is_some() {
         // Coroutine lifting moves later uses into frame fields, outside the
         // ordinary cell reference count that proves a producer unobserved.
@@ -2490,9 +2065,9 @@ fn emit_named_framed_with_statics_impl(
     let estimated_body_bytes = func.insts.len() * 24;
     let mut out = String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
     out.push_str(&hoist_defs);
-    // Under `CalleeBindingMode::Upvalue` the definition becomes a factory whose
+    // With a binding plan the definition becomes a factory whose
     // parameters are named exactly like the callees they replace, so the body
-    // text below is byte-identical to the global-lookup shape and each call
+    // text below is byte-identical to an unbound body and each call
     // reads an immutable upvalue. `assemble` emits the matching
     // `<name> = <factory>(<captures>)` line once every capture is final.
     let header_offset = match bound {
@@ -2774,44 +2349,6 @@ fn const_hoist_uses_are_read_only(_ws: &Workspace, func: &MirFunc, cand: Idx<Ins
         Term::Switch { discr, .. } => *discr == cand,
         _ => false,
     })
-}
-
-/// Whether a construction may be written in place instead of called.
-///
-/// Only the GC-table tier (`_vt`), whose ctor body is exactly the table this
-/// splices; the cdata ctor is an `ffi.typeof` with no Lua body and the
-/// leaf-table ctor carries the plan's presence tagging, which stays in one
-/// place. A field literally named `__ty` would collide with the type tag the
-/// table carries, so that construction keeps its call rather than emit a table
-/// with a duplicate key.
-fn splice_is_admissible(suffix: &str, fields: &[(ustr::Ustr, Idx<Inst>)]) -> bool {
-    suffix == "_vt" && fields.iter().all(|(name, _)| name.as_str() != "__ty")
-}
-
-/// THE answer to "does this value construction emit a table literal rather
-/// than a `<Name>_vt(..)` call" -- read by the emitter that writes it and by
-/// the frame-limit model that counts the call's arity. Two seams for one
-/// question drift, and a model that guessed CALL for a spliced construction
-/// would over-count the frame and reject a program LuaJIT loads.
-fn value_ctor_is_spliced(ctx: &CodegenCtx, func: &MirFunc, inst: &Inst) -> bool {
-    let (Inst::MakeValueStruct {
-        representation,
-        form,
-        fields,
-        ..
-    }
-    | Inst::MaterializeValueStruct {
-        representation,
-        form,
-        fields,
-        ..
-    }) = inst
-    else {
-        return false;
-    };
-    ctx.value_ctor_shape() == ValueCtorShape::Splice
-        && ctor_suffix(func, *representation, *form)
-            .is_some_and(|suffix| splice_is_admissible(suffix, fields))
 }
 
 fn ctor_suffix(
@@ -3313,127 +2850,6 @@ fn slot_sound(
         }
     }
     stores == 2
-}
-
-// A loop that is not one of the counted shapes above stays labelled blocks plus
-// a backward `goto`, which LuaJIT's parser turns into `BC_LOOP` with
-// `bc_j == -1` and NO bytecode range (`lj_parse.c`, `parse_goto`). Under
-// [`LoopShape::Structured`] every natural loop whose body the CFG proves is
-// single-entry is wrapped in `while true do .. end` instead, so the `BC_LOOP`
-// carries the range `parse_while` patches into it.
-
-/// A natural loop, before the emitability checks.
-struct NaturalLoop {
-    header: Idx<Block>,
-    /// Blocks of the loop EXCLUDING the header: everything that reaches a latch
-    /// without crossing the header. The header is emitted as the first
-    /// statements inside the `while`, so it is never in this set.
-    region: HashSet<Idx<Block>>,
-}
-
-/// A natural loop the emitter spells as `while true do .. end`, keyed by header.
-struct StructuredLoop {
-    region: HashSet<Idx<Block>>,
-}
-
-/// Every natural loop of `func`: one per header of a back edge (an edge whose
-/// target dominates its source), with the union of that header's back edges as
-/// the body. A header with several latches (a `continue`) is ONE loop.
-fn natural_loops(
-    func: &MirFunc,
-    entry: Idx<Block>,
-    rpo: &[Idx<Block>],
-    all_preds: &PredMap,
-) -> Vec<NaturalLoop> {
-    let idom = skull_mir::cfg::dominators(func, entry);
-    let reach: HashSet<Idx<Block>> = rpo.iter().copied().collect();
-    let mut latches: HashMap<Idx<Block>, Vec<Idx<Block>>> = HashMap::default();
-    for &b in rpo {
-        successors(&func.blocks[b].term, |s| {
-            if reach.contains(&s) && skull_mir::cfg::dominates(&idom, s, b) {
-                latches.entry(s).or_default().push(b);
-            }
-        });
-    }
-    let mut out = Vec::new();
-    for &h in rpo {
-        let Some(ls) = latches.get(&h) else { continue };
-        let mut region: HashSet<Idx<Block>> = HashSet::default();
-        let mut stack: Vec<Idx<Block>> = Vec::new();
-        for &l in ls {
-            if l != h && region.insert(l) {
-                stack.push(l);
-            }
-        }
-        while let Some(b) = stack.pop() {
-            if let Some(ps) = all_preds.get(&b) {
-                for &p in ps {
-                    if p != h && region.insert(p) {
-                        stack.push(p);
-                    }
-                }
-            }
-        }
-        out.push(NaturalLoop { header: h, region });
-    }
-    out
-}
-
-/// Every natural loop of `func` that may be emitted as `while true do .. end`.
-///
-/// The proof obligations are exactly Lua's two block rules. A body block may be
-/// entered only from inside the loop, because its label moves inside the `while`
-/// and a `goto` may not jump into a block; the HEADER may be entered from
-/// anywhere, because its label stays outside. And two loops must nest, because
-/// a Lua block cannot interleave with another.
-fn recognize_structured_loops(
-    func: &MirFunc,
-    entry: Idx<Block>,
-    rpo: &[Idx<Block>],
-    counted: &HashMap<Idx<Block>, CountedLoop>,
-) -> HashMap<Idx<Block>, StructuredLoop> {
-    let (all_preds, _) = predecessors(func, rpo);
-    let mut kept: Vec<NaturalLoop> = Vec::new();
-    for nl in natural_loops(func, entry, rpo, &all_preds) {
-        if counted.contains_key(&nl.header) {
-            continue;
-        }
-        let single_entry = nl.region.iter().all(|b| {
-            all_preds
-                .get(b)
-                .is_none_or(|ps| ps.iter().all(|p| *p == nl.header || nl.region.contains(p)))
-        });
-        if !single_entry {
-            continue;
-        }
-        kept.push(nl);
-    }
-    // Proper nesting, pairwise: the block sets (header included) are disjoint or
-    // one contains the other. A reducible CFG always satisfies this; an
-    // interleaving pair would put one body's blocks on both sides of the other's
-    // `end`, so BOTH are dropped rather than guessing which to keep.
-    let blocks = |nl: &NaturalLoop| -> HashSet<Idx<Block>> {
-        nl.region.iter().copied().chain([nl.header]).collect()
-    };
-    let sets: Vec<HashSet<Idx<Block>>> = kept.iter().map(blocks).collect();
-    let mut bad = vec![false; kept.len()];
-    for i in 0..kept.len() {
-        for j in (i + 1)..kept.len() {
-            let (a, b) = (&sets[i], &sets[j]);
-            let overlaps = a.iter().any(|x| b.contains(x));
-            if overlaps && !a.is_subset(b) && !b.is_subset(a) {
-                bad[i] = true;
-                bad[j] = true;
-            }
-        }
-    }
-    let mut loops: HashMap<Idx<Block>, StructuredLoop> = HashMap::default();
-    for (i, nl) in kept.into_iter().enumerate() {
-        if !bad[i] {
-            loops.insert(nl.header, StructuredLoop { region: nl.region });
-        }
-    }
-    loops
 }
 
 /// Whether a value-producing inst is ALWAYS safe to tree-fold into its single use
@@ -4011,12 +3427,6 @@ fn render_scope(
     // RPO drives both block layout (preheader-before-header, for the relooper)
     // and the reachable set the regalloc colors over.
     let loops = recognize_counted_loops(func, rpo, frame);
-    // Only under the non-default shape: `goto` must cost nothing and emit the
-    // same bytes, so the analysis does not run at all.
-    let structured = match ctx.loop_shape() {
-        LoopShape::Goto => HashMap::default(),
-        LoopShape::Structured => recognize_structured_loops(func, entry, rpo, &loops),
-    };
     let t_ra = bone_core::prelude::Instant::now();
     // Counted-loop regions partition the coloring so loop-body temps get
     // body-scoped `local`s (see `ValueAlloc::color_scope`). Partitioning trades
@@ -4060,7 +3470,7 @@ fn render_scope(
     // Where each declared local dies, for the `<local> = nil` kills that keep
     // dead slots out of LuaJIT exit snapshots (see `regalloc::nil_kills`). A
     // coroutine `__step` keeps raw cell names and frame fields; it gets none.
-    let kills = if frame.is_some() || !nil_kill_enabled() {
+    let kills = if frame.is_some() {
         regalloc::NilKills::none(func)
     } else {
         let mut emits_nothing = inlinable.clone();
@@ -4263,8 +3673,6 @@ fn render_scope(
         cell_colors,
         frame,
         loops: &loops,
-        structured: &structured,
-        open_loops: HashSet::default(),
         rpo,
         inlinable,
         emitted: vec![false; func.blocks.len()],
@@ -4367,17 +3775,11 @@ fn check_frame_limits(
             results_unassigned[raw(call) as usize] = true;
         }
     }
-    let mut spliced_value_ctor = vec![false; func.insts.len()];
-    for (id, inst) in func.insts.iter() {
-        spliced_value_ctor[raw(id) as usize] = value_ctor_is_spliced(ctx, func, inst);
-    }
-
     let shape = frame_limits::EmittedShape {
         emits_nothing: &emits_nothing,
         results_unassigned: &results_unassigned,
         fixed_arity_override: &fixed_arity_override,
         return_replaced: &return_replaced,
-        spliced_value_ctor: &spliced_value_ctor,
     };
     let Some(overflow) = frame_limits::frame_overflow(func, rpo, &actives, &shape) else {
         return;
@@ -4610,13 +4012,6 @@ struct Emitter<'a> {
     /// Recognized counted loops, keyed by header — a goto into an un-emitted
     /// header expands a structured `for`.
     loops: &'a HashMap<Idx<Block>, CountedLoop>,
-    /// Natural loops emitted as `while true do .. end`, keyed by header. Empty
-    /// under [`LoopShape::Goto`], which is what makes that shape byte-identical.
-    structured: &'a HashMap<Idx<Block>, StructuredLoop>,
-    /// The headers of the `while` blocks currently open around the emission
-    /// point, innermost last. An edge to one of these is a back edge and must be
-    /// spelled as a FORWARD `goto` to that loop's continue label.
-    open_loops: HashSet<Idx<Block>>,
     /// Reverse-postorder block layout (loop bodies emit their region in RPO).
     rpo: &'a [Idx<Block>],
     /// Values tree-folded into their single use site (no register); referenced
@@ -4643,13 +4038,6 @@ struct Emitter<'a> {
     /// Where each statement starts and which instruction it renders, when the
     /// definition is numbered with line directives.
     line_marks: Option<&'a RefCell<Vec<LineMark>>>,
-}
-
-/// `ROCK_SKULL_NIL_KILL=0` turns the nil-kill emission off, so an abort census
-/// or a frame-time run can be compared against the same source without it.
-fn nil_kill_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("ROCK_SKULL_NIL_KILL").map_or(true, |v| v != "0"))
 }
 
 impl Emitter<'_> {
@@ -4776,10 +4164,6 @@ impl Emitter<'_> {
         if self.emitted[raw(bb) as usize] {
             return; // already emitted (e.g. as a loop body block)
         }
-        if self.structured.contains_key(&bb) {
-            self.expand_while(out, bb);
-            return;
-        }
         self.emitted[raw(bb) as usize] = true;
         self.write_block_label(out, bb);
         self.emit_block_contents(out, bb);
@@ -4791,17 +4175,9 @@ impl Emitter<'_> {
         out.push_str("::\n");
     }
 
-    /// The label an edge to `t` names: `t`'s own block label, or the continue
-    /// label of an enclosing `while` when `t` is that loop's header. The second
-    /// case is a back edge, and it MUST be a forward jump to the end of the loop
-    /// body: a backward `goto` would make LuaJIT emit its own rangeless
-    /// `BC_LOOP` inside the loop the `while` is there to close.
+    /// The label an edge to `t` names: `t`'s own block label.
     fn write_label_ref(&self, out: &mut String, t: Idx<Block>) {
-        out.push_str(if self.open_loops.contains(&t) {
-            "lc"
-        } else {
-            "bb"
-        });
+        out.push_str("bb");
         push_uint(out, self.func.emit_block_id(t));
     }
 
@@ -4872,14 +4248,6 @@ impl Emitter<'_> {
             if !self.emitted[raw(t) as usize] {
                 if self.loops.contains_key(&t) {
                     self.expand_for(out, t);
-                    return;
-                }
-                // The preheader falls straight into the `while`, so the entering
-                // edge costs no jump. An edge that is NOT the fall-through (a
-                // second entry, or a back edge from a block emitted after the
-                // loop) still reaches the header label, which sits outside it.
-                if self.structured.contains_key(&t) {
-                    self.expand_while(out, t);
                     return;
                 }
             }
@@ -4980,44 +4348,6 @@ impl Emitter<'_> {
         self.write_goto(out, exit);
     }
 
-    /// Emit a proven natural loop as `while true do <header> <body> ::lcN:: end`.
-    ///
-    /// The header's LABEL goes before the `while` and its STATEMENTS inside, so
-    /// an entering `goto` never jumps into the block (Lua forbids that) while the
-    /// loop-back edge still re-runs the condition. Every back edge is rewritten
-    /// to `goto lcN`, a forward jump to the continue label that closes the body;
-    /// exits stay ordinary `goto`s to labels outside, which Lua allows and the
-    /// single-entry proof in [`recognize_structured_loops`] is what makes safe.
-    fn expand_while(&mut self, out: &mut String, header: Idx<Block>) {
-        let region: HashSet<Idx<Block>> = self.structured[&header].region.iter().copied().collect();
-        self.emitted[raw(header) as usize] = true;
-        self.write_block_label(out, header);
-        out.push_str("  while true do\n");
-        self.open_loops.insert(header);
-        self.emit_block_contents(out, header);
-        for &bb in self.rpo {
-            if region.contains(&bb) {
-                self.emit_block(out, bb); // self-skips already-emitted blocks
-            }
-        }
-        self.open_loops.remove(&header);
-        let mut label = String::from("  ::lc");
-        push_uint(&mut label, self.func.emit_block_id(header));
-        // The last block emitted usually IS a latch, and its back edge is then a
-        // jump to the very next instruction. Dropping it is a pure deletion:
-        // falling off the end of the body is the same back edge. Only a
-        // whole-statement suffix at the loop body's own nesting level can match,
-        // because `expand_for`/`expand_while` both close with `end` first.
-        let jump = format!("{}\n", label.replacen("  ::", "  goto ", 1));
-        if out.ends_with(&jump) {
-            let keep = out.len() - jump.len();
-            out.truncate(keep);
-        }
-        label.push_str("::\n");
-        out.push_str(&label);
-        out.push_str("  end\n");
-    }
-
     fn emit_inst(&mut self, out: &mut String, id: Idx<Inst>) {
         // A tree-folded value emits NO statement; its expression is rendered at
         // its single use site by `opnd`.
@@ -5040,9 +4370,6 @@ impl Emitter<'_> {
         if matches!(&self.func.insts[id], Inst::Call { .. })
             && self.try_emit_inline_lua_splice(out, id)
         {
-            return;
-        }
-        if self.try_emit_inline_index(out, id) {
             return;
         }
         let inst = &self.func.insts[id];
@@ -5160,66 +4487,6 @@ impl Emitter<'_> {
     /// so it reads no more and evaluates no more than a plain operand does.
     fn plain_int_to_float(&self, id: Idx<Inst>) -> bool {
         matches!(self.func.insts[id], Inst::IntToFloat(x) if self.opnd_is_plain(x))
-    }
-
-    /// The inline index shape is selected and both operands may be named twice.
-    fn inline_index_operands(&self, base: Idx<Inst>, index: Idx<Inst>) -> bool {
-        self.ctx.index_shape() == IndexShape::Inline
-            && self.opnd_is_plain(base)
-            && self.opnd_is_plain(index)
-    }
-
-    /// `if i < 0 or i >= v.len then __rock_vec_oob(v, i) end`. The failing
-    /// branch is never recorded, so the message text lives in the one cold
-    /// stdlib function rather than in every indexing function's constants.
-    fn write_vec_bounds_guard(&self, out: &mut String, base: Idx<Inst>, index: Idx<Inst>) {
-        out.push_str("  if ");
-        self.write_opnd(out, index);
-        out.push_str(" < 0 or ");
-        self.write_opnd(out, index);
-        out.push_str(" >= ");
-        self.write_opnd(out, base);
-        out.push_str(".len then __rock_vec_oob(");
-        self.write_opnd(out, base);
-        out.push_str(", ");
-        self.write_opnd(out, index);
-        out.push_str(") end\n");
-    }
-
-    /// Emit a bounds-checked Vec read (`Inst::Index { kind: Vec }`) or column
-    /// index (`Inst::VecCheckedIndex`) as the inline guard followed by ONE
-    /// assignment, when the shape is selected and the operands are plain.
-    /// Returns false to let the caller emit the helper call. The destination
-    /// register usually aliases an operand, so the guard must read both
-    /// operands before anything is assigned.
-    fn try_emit_inline_index(&self, out: &mut String, id: Idx<Inst>) -> bool {
-        match &self.func.insts[id] {
-            Inst::Index {
-                base,
-                index,
-                kind: ContainerKind::Vec,
-            } if self.inline_index_operands(*base, *index) => {
-                self.write_vec_bounds_guard(out, *base, *index);
-                out.push_str("  ");
-                write_vname(out, self.func, &self.colors, id);
-                out.push_str(" = ");
-                self.write_opnd(out, *base);
-                out.push_str("._data[");
-                self.write_opnd(out, *index);
-                out.push_str(" + 1]\n");
-                true
-            }
-            Inst::VecCheckedIndex { vec, index } if self.inline_index_operands(*vec, *index) => {
-                self.write_vec_bounds_guard(out, *vec, *index);
-                out.push_str("  ");
-                write_vname(out, self.func, &self.colors, id);
-                out.push_str(" = ");
-                self.write_opnd(out, *index);
-                out.push_str(" + 1\n");
-                true
-            }
-            _ => false,
-        }
     }
 
     fn write_opnd(&self, out: &mut String, id: Idx<Inst>) {
@@ -5588,27 +4855,6 @@ impl Emitter<'_> {
                     );
                     return;
                 };
-                if value_ctor_is_spliced(self.ctx, self.func, inst) {
-                    // The `<Name>_vt` body, written here: same table, same shared
-                    // metatable, same field ORDER (so an effectful operand still
-                    // evaluates where the argument list put it) -- without the
-                    // call frame that becomes a trace root.
-                    out.push_str("setmetatable({ ");
-                    for (field, id) in fields.iter() {
-                        write_table_key(out, field.as_str());
-                        self.write_opnd(out, *id);
-                        out.push_str(", ");
-                    }
-                    let symbol = skull_mir::mangle::type_symbol(self.ws, *name);
-                    let _ = write!(out, "__ty = ");
-                    write_lua_string(out, symbol.as_str());
-                    let _ = write!(
-                        out,
-                        " }}, {})",
-                        value_struct_metatable_name(symbol.as_str())
-                    );
-                    return;
-                }
                 let _ = write!(
                     out,
                     "{}{suffix}(",
@@ -6037,24 +5283,13 @@ impl Emitter<'_> {
                         out.push_str(")\n");
                     }
                     ContainerKind::Vec => {
-                        if self.inline_index_operands(*base, *index) {
-                            self.write_vec_bounds_guard(out, *base, *index);
-                            out.push_str("  ");
-                            self.write_opnd(out, *base);
-                            out.push_str("._data[");
-                            self.write_opnd(out, *index);
-                            out.push_str(" + 1] = ");
-                            self.write_opnd(out, *value);
-                            out.push('\n');
-                        } else {
-                            out.push_str("  __vec_checked_set(");
-                            self.write_opnd(out, *base);
-                            out.push_str(", ");
-                            self.write_opnd(out, *index);
-                            out.push_str(", ");
-                            self.write_opnd(out, *value);
-                            out.push_str(")\n");
-                        }
+                        out.push_str("  __vec_checked_set(");
+                        self.write_opnd(out, *base);
+                        out.push_str(", ");
+                        self.write_opnd(out, *index);
+                        out.push_str(", ");
+                        self.write_opnd(out, *value);
+                        out.push_str(")\n");
                     }
                     // Raw 1-based write into one leaf column; the owning Vec's
                     // `len` was checked once by `VecCheckedIndex`.

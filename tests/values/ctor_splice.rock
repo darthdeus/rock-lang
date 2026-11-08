@@ -1,12 +1,8 @@
-// GC-tier `value` construction, spliced at the use site instead of called.
-//
-// `ROCK_SKULL_VALUE_CTOR=splice` writes `setmetatable({ .. }, __rock_vt_<Name>)`
-// where `call` (the shipped default) writes `<Name>_vt(..)`. Both must build the
-// same table, carry the SAME shared metatable -- LuaJIT fires `__eq` only when
-// both operands share the metamethod, so a mismatch here silently makes equal
-// values compare unequal -- and evaluate the field operands in the order the
-// argument list had them. Every test below asserts a runtime value, and passes
-// under both shapes.
+// GC-tier `value` construction through the `<Name>_vt(..)` ctor. Every value
+// must carry the SAME shared metatable -- LuaJIT fires `__eq` only when both
+// operands share the metamethod, so a mismatch here silently makes equal
+// values compare unequal -- and the field operands evaluate in the order the
+// argument list had them. Every test below asserts a runtime value.
 
 value Bag {
     xs: [int],

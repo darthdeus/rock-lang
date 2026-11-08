@@ -1,14 +1,9 @@
 //! The whole-program half of the callee binding: the
 //! assembled artifact's second pass and executable incremental rebinding.
-//!
-//! The mode comes from `emit_full_with_callee_binding`, not the environment:
-//! `ROCK_SKULL_CALLEE_BINDING` is read once per PROCESS and these tests share a
-//! binary with every other skull test.
 
-use skull::mir_emit::{emit_full_with_callee_binding, emit_overlay};
-use skull_codegen_lua::CalleeBindingMode;
+use skull::mir_emit::{emit_full, emit_overlay};
 
-use crate::common::{function_body, ws_with_stdlib};
+use crate::common::ws_with_stdlib;
 
 /// A program whose call graph has a chain (`top` -> `mid` -> `leaf`), a
 /// mutually recursive pair, and a leaf with no callees at all.
@@ -24,10 +19,7 @@ fn main() { let _ = top(3) }
 fn emit(src: &str) -> String {
     let ws = ws_with_stdlib(src);
     let mid = skull::user_module_id(&ws).unwrap();
-    emit_full_with_callee_binding(&ws, mid, CalleeBindingMode::Upvalue)
-        .expect("emit_full")
-        .0
-        .lua
+    emit_full(&ws, mid).expect("emit_full").0.lua
 }
 
 /// The byte offset of `needle`, which must occur exactly once.
@@ -91,37 +83,6 @@ fn binding_lines_are_ordered_callees_before_callers() {
     );
 }
 
-/// The emitted BODY is byte-identical in both shapes: the factory's parameters
-/// are named exactly like the globals they replace, so no call site is
-/// rewritten and a test that asserts body shape reads the same either way.
-/// `common::function_body` reads both, which is what lets the suite run under
-/// the switch.
-#[test]
-fn the_bound_body_is_byte_identical_to_the_unbound_one() {
-    let ws = ws_with_stdlib(SRC);
-    let mid = skull::user_module_id(&ws).unwrap();
-    let global = emit_full_with_callee_binding(&ws, mid, CalleeBindingMode::Global)
-        .expect("emit_full")
-        .0
-        .lua;
-    let bound = emit_full_with_callee_binding(&ws, mid, CalleeBindingMode::Upvalue)
-        .expect("emit_full")
-        .0
-        .lua;
-    for name in ["mid_int", "top_int"] {
-        let unbound_body = function_body(&global, name);
-        let bound_body = function_body(&bound, name);
-        let inner = unbound_body
-            .strip_prefix(&format!("function {name}"))
-            .expect("unbound definition")
-            .trim_end_matches('\n');
-        assert!(
-            bound_body.contains(inner),
-            "`{name}`'s body changed under binding:\n--- unbound ---\n{unbound_body}\n--- bound ---\n{bound_body}"
-        );
-    }
-}
-
 /// A mutually recursive pair shares one call-graph component, so neither leg is
 /// captured -- the condensation rank cannot order them and their closures do
 /// not exist yet.
@@ -149,28 +110,20 @@ fn a_mutually_recursive_pair_stays_a_global_lookup() {
 /// the caller that used to search for it wrote a chunk that defined the whole
 /// game and then ran nothing.
 #[test]
-fn emits_main_is_reported_under_both_shapes() {
+fn emits_main_is_reported() {
     let ws = ws_with_stdlib(SRC);
     let mid = skull::user_module_id(&ws).unwrap();
-    for binding in [CalleeBindingMode::Global, CalleeBindingMode::Upvalue] {
-        let emit = emit_full_with_callee_binding(&ws, mid, binding)
-            .expect("emit_full")
-            .0;
-        assert!(emit.emits_main, "`main` is defined, under {binding:?}");
-        if binding == CalleeBindingMode::Upvalue {
-            assert!(
-                !emit.lua.contains("function main("),
-                "the bound shape does not spell `function main(` -- which is why \
-                 searching the text for it is not the oracle"
-            );
-        }
-    }
+    let emit = emit_full(&ws, mid).expect("emit_full").0;
+    assert!(emit.emits_main, "`main` is defined");
+    assert!(
+        !emit.lua.contains("function main("),
+        "the bound shape does not spell `function main(` -- which is why \
+         searching the text for it is not the oracle"
+    );
 
     let no_main = ws_with_stdlib("fn leaf(a: int) -> int { a + 1 }\n");
     let mid = skull::user_module_id(&no_main).unwrap();
-    let emit = emit_full_with_callee_binding(&no_main, mid, CalleeBindingMode::Upvalue)
-        .expect("emit_full")
-        .0;
+    let emit = emit_full(&no_main, mid).expect("emit_full").0;
     assert!(!emit.emits_main, "no `main` is defined");
 }
 
@@ -208,8 +161,7 @@ fn bound_overlay_rebinds_transitive_callers_and_escaped_code_refs() {
     let v1 = format!("{SRC}\n@nomangle fn saved() -> fn(int) -> int {{ top }}\n");
     let ws1 = ws_with_stdlib(&v1);
     let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) =
-        emit_full_with_callee_binding(&ws1, mid, CalleeBindingMode::Upvalue).expect("full");
+    let (full, mut cache) = emit_full(&ws1, mid).expect("full");
     let v2 = v1.replace("a * 3 + 1", "a * 3 + 2");
     let ws2 = ws_with_stdlib(&v2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "leaf")]).expect("overlay");
@@ -229,8 +181,7 @@ fn bound_overlay_rebinds_a_residual_inline_caller_without_rebuilding_its_chunk()
     let v1 = over_budget_inline_caller_fixture(3);
     let ws1 = ws_with_stdlib(&v1);
     let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) =
-        emit_full_with_callee_binding(&ws1, mid, CalleeBindingMode::Upvalue).expect("full");
+    let (full, mut cache) = emit_full(&ws1, mid).expect("full");
 
     let v2 = over_budget_inline_caller_fixture(5);
     let ws2 = ws_with_stdlib(&v2);
@@ -257,8 +208,7 @@ fn bound_overlay_cells_read_the_live_global_storage() {
     let v1 = "global COUNT: int = 0\nfn delta(n: int) -> int { n + 1 }\n@nomangle fn bump() { COUNT = delta(COUNT) }\n";
     let ws1 = ws_with_stdlib(v1);
     let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) =
-        emit_full_with_callee_binding(&ws1, mid, CalleeBindingMode::Upvalue).expect("full");
+    let (full, mut cache) = emit_full(&ws1, mid).expect("full");
     let ws2 = ws_with_stdlib(&v1.replace("delta(COUNT)", "delta(COUNT) + 1"));
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "bump")]).expect("overlay");
     let script = format!(
@@ -277,8 +227,7 @@ fn bound_overlay_new_backedge_keeps_capture_binding_acyclic() {
     let v1 = "fn leaf(n: int) -> int { n }\nfn top(n: int) -> int { leaf(n) }\n@nomangle fn answer() -> int { top(3) }\n";
     let ws1 = ws_with_stdlib(v1);
     let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) =
-        emit_full_with_callee_binding(&ws1, mid, CalleeBindingMode::Upvalue).expect("full");
+    let (full, mut cache) = emit_full(&ws1, mid).expect("full");
     let ws2 = ws_with_stdlib(&v1.replace("{ n }", "{ if n == 0 { return 10 }\n top(n - 1) }"));
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "leaf")]).expect("overlay");
     let script = format!(
@@ -297,8 +246,7 @@ fn repeated_stripped_overlays_share_one_storage_table_and_old_closures_live() {
     let v1 = "global COUNT: int = 0\n@nomangle fn bump() { COUNT = COUNT + 1 }\n";
     let ws1 = ws_with_stdlib(v1);
     let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) =
-        emit_full_with_callee_binding(&ws1, mid, CalleeBindingMode::Upvalue).expect("full");
+    let (full, mut cache) = emit_full(&ws1, mid).expect("full");
     let ws2 = ws_with_stdlib(&v1.replace("COUNT + 1", "COUNT + 2"));
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "bump")]).expect("overlay");
     let script = format!(

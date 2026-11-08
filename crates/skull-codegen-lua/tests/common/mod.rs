@@ -58,20 +58,6 @@ pub fn lower_test_ref_with_graph(
     Ok((func, interner, graph))
 }
 
-/// The functions on a call cycle in `graph`, spelled the way production spells
-/// it (`skull::mir_emit::recursive_callees`).
-pub fn cycle_callees(
-    graph: &instance_graph::InstanceGraph,
-) -> bone_semantic::prelude::FxHashSet<FuncRef> {
-    skull_codegen_lua::callees_on_cycles(
-        graph
-            .contributions
-            .values()
-            .flat_map(|contribution| contribution.edges.iter())
-            .map(|edge| (edge.from.func, edge.to.func)),
-    )
-}
-
 /// Every function's call-graph component number in `graph`, spelled the way
 /// production spells it (`skull::mir_emit::call_sccs`).
 pub fn call_sccs(

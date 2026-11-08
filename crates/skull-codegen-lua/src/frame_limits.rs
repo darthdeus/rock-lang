@@ -164,9 +164,6 @@ pub(crate) struct EmittedShape<'a> {
     /// Blocks whose `Term::Return` is replaced by a tail call, so the returned
     /// values never occupy registers of their own.
     pub(crate) return_replaced: &'a [bool],
-    /// Value constructions the emitter splices as a table literal instead of
-    /// calling the `<Name>_vt` constructor.
-    pub(crate) spliced_value_ctor: &'a [bool],
 }
 
 fn raw<T>(i: Idx<T>) -> usize {
@@ -245,9 +242,6 @@ fn call_arity(func: &MirFunc, shape: &EmittedShape<'_>, id: Idx<Inst>) -> Option
         // `<Name>_ct(f0, .., fN)` / `<Name>_vt(..)`: the constructor's arity is
         // the value's leaf count, which is exactly what scales.
         Inst::MakeValueStruct { fields, .. } | Inst::MaterializeValueStruct { fields, .. } => {
-            if shape.spliced_value_ctor[raw(id)] {
-                return None;
-            }
             fields.len()
         }
         // `k, v = next(t, k)`.

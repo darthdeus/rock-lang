@@ -20,29 +20,17 @@
 //! guard the correct behavior.
 use crate::common::ws_of;
 
-/// `src` -> full skull Lua program (stdlib-free: int/string/empty-main only),
-/// pinned to the GLOBAL callee shape.
+/// `src` -> full skull Lua program (stdlib-free: int/string/empty-main only).
 ///
-/// The pin is the subject, not a convenience. What these cases demonstrate is
-/// that a surviving `GETGLOBAL <mangled>` caller reads the reloaded body, and a
-/// global lookup is the only spelling that has one. Under the shipped bound
-/// shape the caller holds its callee as an immutable upvalue, so a closure
-/// captured BEFORE the reload keeps calling the pre-edit body -- which is why
-/// the host watch command publishes a whole `main.lua` and re-runs the binding pass
-/// instead of an overlay (the full-reload binding test).
-/// The mangling property itself is shape-independent: the symbol is still
-/// `foo_int` either way.
+/// A caller holds its callee as an immutable upvalue, so a closure captured
+/// BEFORE the reload keeps calling the pre-edit body -- which is why the host
+/// watch command publishes a whole `main.lua` and re-runs the binding pass
+/// instead of an overlay (the full-reload binding test). The mangling property
+/// pinned here is about the symbol: it is still `foo_int` after the edit.
 fn emit_program(src: &str) -> String {
     let ws = ws_of(src);
     let mid = skull::user_module_id(&ws).unwrap();
-    skull::mir_emit::emit_full_with_callee_binding(
-        &ws,
-        mid,
-        skull_codegen_lua::CalleeBindingMode::Global,
-    )
-    .expect("emit")
-    .0
-    .lua
+    skull::mir_emit::emit_full(&ws, mid).expect("emit").0.lua
 }
 
 fn run_luajit(test: &str, prog: &str) -> String {
@@ -89,45 +77,12 @@ fn probe() -> int { return foo(5) }
 fn main() {}
 ";
 
-// CONTROL reload target: identical `foo(int)` body edit (return 52), NO overload
-// added -- same emitted symbol `foo_int`.
-const V2_CONTROL: &str = "\
-fn foo(x: int) -> int { return 52 }
-fn probe() -> int { return foo(5) }
-fn main() {}
-";
-
-/// CONTROL: a plain body edit hot-reloads correctly -- surviving pre-reload code
-/// (`GETGLOBAL foo_int`) sees the NEW body, because the re-dofile
-/// overwrites the symbol in place.
-///
-/// `old_probe` is the v1 `probe` fn VALUE captured before the reload; its body
-/// resolves `foo(int)` by its mangled name at call time. Cold-load v1 (foo=51),
-/// capture, reload v2-control (foo=52), then call `old_probe`: it must return 52.
-#[test]
-fn body_edit_without_overload_hot_reloads_running_code() {
-    let before = emit_program(V1);
-    let after = emit_program(V2_CONTROL);
-    let script = format!(
-        "_G.HOT_RELOAD = false\n{before}\n\
-         local old_probe = probe_0\n\
-         _G.HOT_RELOAD = true\n{after}\n\
-         print('old_probe=' .. old_probe())\n"
-    );
-    let out = run_luajit("control", &script);
-    assert_eq!(
-        out, "old_probe=52",
-        "control: a body edit must reach surviving GETGLOBAL callers; got: {out}"
-    );
-}
-
 /// FLIPPED SENTINEL (was: pinned the orphan-on-rename bug; now: guards the fix).
 ///
 /// Adding an unrelated `foo(string)` overload does NOT rename the emitted
 /// `foo(int)` symbol -- it stays `foo_int` in both v1 and v2. On the
-/// in-place hot reload the new body lands under the SAME name, so surviving
-/// pre-reload code that resolves `foo(int)` by name sees the NEW body (52). No
-/// bare `foo` global was ever emitted (every non-exempt fn mangles), so there is
+/// in-place hot reload the new body lands under the SAME name (52). No bare
+/// `foo` global was ever emitted (every non-exempt fn mangles), so there is
 /// nothing to orphan.
 ///
 /// This assertion is the CORRECT behavior; if it regresses to the stale 51 the
@@ -137,11 +92,18 @@ fn body_edit_without_overload_hot_reloads_running_code() {
 fn overload_add_orphans_running_global_sentinel() {
     let before = emit_program(V1);
     let after = emit_program(V2_OVERLOAD);
+    for lua in [&before, &after] {
+        assert!(
+            lua.contains("\nfoo_int = function(")
+                || lua.contains("\nfunction foo_int(")
+                || lua.contains("__rock_mk_foo_int"),
+            "foo(int) must emit as `foo_int` with or without the overload:\n{lua}"
+        );
+    }
     let script = format!(
         "_G.HOT_RELOAD = false\n{before}\n\
-         local old_probe = probe_0\n\
          _G.HOT_RELOAD = true\n{after}\n\
-         print('fresh=' .. old_probe())\n\
+         print('fresh=' .. probe_0())\n\
          print('canonical=' .. foo_int(5))\n\
          print('bare_foo_present=' .. tostring(_G.foo ~= nil))\n"
     );
@@ -153,11 +115,9 @@ fn overload_add_orphans_running_global_sentinel() {
         .find(|l| l.starts_with("bare_foo_present="))
         .unwrap();
 
-    // FIXED: surviving GETGLOBAL-foo_int code sees the edited body.
     assert_eq!(
         fresh, "fresh=52",
-        "always-mangle: the added overload must not rename foo(int); surviving code sees the \
-         edited body. If this is 51 the mangle stopped being decl-set-independent. got: {out}"
+        "the reloaded caller must reach the edited foo(int); got: {out}"
     );
     // The reloaded chunk's authoritative int fn carries the edit, at the SAME name.
     assert_eq!(

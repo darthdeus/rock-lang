@@ -29,8 +29,7 @@ use std::time::Duration;
 /// prelude, or simply not called under the load-only validity gate).
 /// Returns the emitted Lua and the emitter's own `emits_main`, which decides
 /// whether the caller appends the entry call. Not recovered from the text: the
-/// emitted spelling of a definition is the emitter's business and changes with
-/// `ROCK_SKULL_CALLEE_BINDING`.
+/// emitted spelling of a definition is the emitter's business.
 fn skull_emit(file: &str, src: &str) -> std::result::Result<(String, bool), Vec<CompilerError>> {
     let (lua, _, emits_main) = skull_emit_full(file, src).map_err(EmitFullErr::into_errs)?;
     Ok((lua, emits_main))
@@ -3033,7 +3032,7 @@ pub fn body_digit_flip(text: &str, name: &str) -> Option<String> {
 ///
 /// `emits_main` comes from the emitter, not from searching `emit_lua`: the
 /// emitted spelling of a definition is the emitter's business and has already
-/// changed once (`ROCK_SKULL_CALLEE_BINDING=upvalue` moves every body into a
+/// changed once (callee binding moves every body into a
 /// factory, so `function main(` appears nowhere), which left a chunk that
 /// defined the whole game and then ran nothing.
 pub(crate) fn skull_game_main<'a>(
@@ -3242,8 +3241,6 @@ pub struct IncrementalProject {
     /// `SkullReload::ShapeChanged` (full-reconstruction request) instead of writing
     /// (the compiler contract).
     shape_hashes: skull::ShapeHashes,
-    /// Full rebuilds retain the emitted shape of the original artifact.
-    callee_binding: skull::CalleeBindingMode,
     route_profile_enabled: bool,
     last_route_profile: Option<SkullRouteProfile>,
     artifact_fingerprint: String,
@@ -3335,13 +3332,7 @@ impl IncrementalProject {
                     &selected,
                 )
             } else {
-                skull::mir_emit::emit_full_in_for_renderer_with_callee_binding(
-                    ws,
-                    mid,
-                    Some(dir),
-                    renderer_target,
-                    None,
-                )
+                skull::mir_emit::emit_full_in_for_renderer(ws, mid, Some(dir), renderer_target)
             }
             .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
             crate::compile_measurements::emission(&emit);
@@ -3358,8 +3349,6 @@ impl IncrementalProject {
                 .map_err(|e| anyhow::anyhow!(render_project_err(project.sources(), &e)))?;
             (lua, c, artifact_fingerprint, emits_main)
         };
-        // Full rebuilds retain the shape of the session's original artifact.
-        let callee_binding = cache.callee_binding();
         let preamble = (RuntimeServices::registered().program_preamble)(dir, ProgramKind::Game)?;
         crate::compile_measurements::phase("prepare");
         write_full_main(&preamble, &lua, emits_main, main_path, incremental_path)?;
@@ -3373,7 +3362,6 @@ impl IncrementalProject {
             preamble,
             renderer_target,
             shape_hashes,
-            callee_binding,
             route_profile_enabled: std::env::var_os("ROCK_SKULL_ROUTE_PROFILE").is_some(),
             last_route_profile: None,
             artifact_fingerprint,
@@ -3676,12 +3664,11 @@ impl IncrementalProject {
             let lua = {
                 let ws = self.project.workspace();
                 let mid = skull::user_module_id(ws).map_err(no_user_module)?;
-                let (emit, c) = skull::mir_emit::emit_full_in_for_renderer_with_callee_binding(
+                let (emit, c) = skull::mir_emit::emit_full_in_for_renderer(
                     ws,
                     mid,
                     Some(self.project.dir()),
                     self.renderer_target,
-                    Some(self.callee_binding),
                 )
                 .map_err(|e| {
                     anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e))
@@ -3859,12 +3846,11 @@ impl IncrementalProject {
         let (lua, cache, artifact_fingerprint, emits_main) = {
             let ws = self.project.workspace();
             let mid = skull::user_module_id(ws).map_err(no_user_module)?;
-            let (emit, c) = skull::mir_emit::emit_full_in_for_renderer_with_callee_binding(
+            let (emit, c) = skull::mir_emit::emit_full_in_for_renderer(
                 ws,
                 mid,
                 Some(self.project.dir()),
                 self.renderer_target,
-                Some(self.callee_binding),
             )
             .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
             crate::compile_measurements::emission(&emit);
