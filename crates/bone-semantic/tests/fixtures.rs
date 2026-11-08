@@ -139,7 +139,11 @@ fn check_std_fixture(contents: &str) -> Result {
         let mut module = skull_parser::parse_module_with_dialect(
             file.src,
             bone_core::prelude::ustr(file.file),
-            file.dialect,
+            if file.modules_v1 {
+                skull_parser::Dialect::V1
+            } else {
+                skull_parser::Dialect::Legacy
+            },
         )
         .map_err(|e| format!("{}: {e}", file.file))?;
         module.package = file
