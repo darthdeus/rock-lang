@@ -10,7 +10,13 @@ modules = "v1"
 
 The choice is per package. An absent setting or `modules = "legacy"` keeps
 legacy flat lookup and syntax; unknown values are errors. Modules do not
-create runtime namespace objects or copies of definitions.
+create runtime namespace objects or copies of definitions. Aliases share the
+same definition and storage. Source visibility does not disable lifecycle
+discovery: private hooks remain discoverable, and aliases do not register the
+same hook twice. A custom decorator named like a builtin does not acquire the
+builtin's trusted identity. `pub` controls source access, not the emitted
+symbol's spelling; raw foreign-code references still need the appropriate ABI
+and name-retention contract.
 
 ## Membership and paths
 
