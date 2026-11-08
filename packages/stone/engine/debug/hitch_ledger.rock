@@ -1,15 +1,20 @@
 // Always-on hitch ledger. One bounded record per frame from what the frame
 // already computed (the phase timers), plus O(1) reads: the Lua heap size,
 // the trace-recorder counters, and image load, upload, and decode-wait timings. Every frame over the
-// threshold after warm-up is classified from its own record and logged, a
-// five-second summary counts causes, and `HITCH_LEDGER_PATH` dumps the ring
-// at exit. The section profiler stays off: the second tier is the slowest
+// threshold after warm-up is classified from its own record and counted, a
+// window line summarizes the causes every `HITCH_WINDOW_SECS`, and
+// `HITCH_LEDGER_PATH` dumps the ring at exit. A frame gets its own line
+// when the game explains it (any cause but `present`) or when it is at or
+// over `HITCH_LOUD_MS` whatever the cause: a present-bound miss under that
+// is the swap waiting on the display and carries no actionable field.
+// The section profiler stays off: the second tier is the slowest
 // lifecycle system per frame, timed around the call the systems runner
 // already makes (two clock reads per system).
 //
 // `HITCH_LEDGER=0` disables everything; `HITCH_MS` is the threshold
 // (default 25 ms: a missed 60 Hz vblank, not an on-time frame);
-// `HITCH_WARMUP_FRAMES` skips the recorder's warm-up window.
+// `HITCH_WARMUP_FRAMES` skips the recorder's warm-up window; `HITCH_LOUD_MS`
+// (default 50) and `HITCH_WINDOW_SECS` (default 60) tune the logging above.
 //
 // PERF_GC_STEPS adds measured collector entry/atomic time from the optional
 // diagnostic LuaJIT. Ordinary runs retain the heap-drop heuristic; absent
@@ -26,7 +31,11 @@ const HITCH_LOG_RESIDENCY_NAMES: int = 3
 pub struct HitchLedger {
     enabled: bool,
     threshold_ms: float,
+    loud_ms: float,
     warmup_frames: int,
+    window_secs: float,
+    // Wall time the current window started; negative until the first frame.
+    window_start: float,
     dump_path: string,
     // The ring. `count` records written; slot = count % HITCH_RING_FRAMES.
     frame: NativeBuffer<int>,
@@ -98,7 +107,10 @@ fn hitch_ledger_new() -> HitchLedger {
     return HitchLedger {
         enabled: os_getenv("HITCH_LEDGER") != "0",
         threshold_ms: get_env_float("HITCH_MS", 25.0),
+        loud_ms: get_env_float("HITCH_LOUD_MS", 50.0),
         warmup_frames: get_env_int("HITCH_WARMUP_FRAMES", 600),
+        window_secs: get_env_float("HITCH_WINDOW_SECS", 60.0),
+        window_start: -1.0,
         dump_path: os_getenv("HITCH_LEDGER_PATH") ?? "",
         frame: native_buffer_int(HITCH_RING_FRAMES),
         frame_ms: native_buffer_float(HITCH_RING_FRAMES),
@@ -216,6 +228,20 @@ fn hitch_residency_log_summary(paths: [string]) -> string {
     return "{paths.len()}({names.join(",")}{tail})"
 }
 
+fn hitch_logs_frame(cause: string, frame_ms: float) -> bool {
+    return cause != "present" || frame_ms >= HITCH.loud_ms
+}
+
+// Logs the window tally once per HITCH_WINDOW_SECS when the window had any
+// hitch, so a quiet window logs nothing. `now` is wall seconds.
+fn hitch_window_tick(now: float) {
+    if HITCH.window_start < 0.0 { HITCH.window_start = now; return }
+    if now - HITCH.window_start < HITCH.window_secs { return }
+    HITCH.window_start = now
+    let line = hitch_window_summary()
+    if line != "" { log_info("HITCH", "window: {line} secs={HITCH.window_secs}") }
+}
+
 fn hitch_log_allowed(now: float) -> bool {
     let second = floor(now) as int
     if second != HITCH.log_second {
@@ -283,7 +309,9 @@ fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) 
     HITCH.slow_name[slot] = slow_name
     HITCH.cause[slot] = ""
 
-    if !HITCH.enabled || frame <= HITCH.warmup_frames || frame_ms < HITCH.threshold_ms { return }
+    if !HITCH.enabled { return }
+    if !PERF_FRAME_CAPTURE { hitch_window_tick(t_ms / 1000.0) }
+    if frame <= HITCH.warmup_frames || frame_ms < HITCH.threshold_ms { return }
     let residency_paths = if !PERF_FRAME_CAPTURE && RESIDENCY_FRAME_WAIT_PATHS.len() > 0 {
         hitch_distinct_paths(RESIDENCY_FRAME_WAIT_PATHS)
     } else {
@@ -298,7 +326,7 @@ fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) 
     if cause == "logic" || cause == "render" { HITCH.last_logic_system = slow_name }
     hitch_tally(cause)
 
-    if PERF_FRAME_CAPTURE || !hitch_log_allowed(stone_get_time()) { return }
+    if PERF_FRAME_CAPTURE || !hitch_logs_frame(cause, frame_ms) || !hitch_log_allowed(stone_get_time()) { return }
     let ms = format_float(frame_ms, 0, 1)
     let l = format_float(phase.logic_ms, 0, 1)
     let r = format_float(phase.render_ms, 0, 1)
@@ -309,8 +337,8 @@ fn hitch_frame_record(frame: int, frame_ms: float, t_ms: float, measured: bool) 
     log_info("HITCH", "frame={frame} ms={ms} cause={cause} logic={l} render={r} present={p} heap={h}MB dheap={dh}MB starts={starts} aborts={aborts} load_us={load_us} upload_us={upload_us} decode_wait_us={decode_wait_us} residency_us={RESIDENCY_FRAME_MISS_WAIT_US} residency_paths={hitch_residency_log_summary(residency_paths)} slowest={slow_phase}:{slow_name} {s}ms")
 }
 
-// The five-second window line, appended beside the FPS window. Empty when
-// nothing crossed the threshold, so a quiet window logs nothing extra.
+// The window tally by cause, reset on read. Empty when nothing crossed the
+// threshold.
 fn hitch_window_summary() -> string {
     if !HITCH.enabled || HITCH.win_hitches == 0 { return "" }
     let s = "hitches={HITCH.win_hitches} gc={HITCH.win_gc} alloc={HITCH.win_alloc} jit={HITCH.win_jit} present={HITCH.win_present} upload={HITCH.win_upload} residency={HITCH.win_residency} logic={HITCH.win_logic} render={HITCH.win_render}"

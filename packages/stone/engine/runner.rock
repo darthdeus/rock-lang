@@ -654,8 +654,9 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
     let last_time = stone_get_time()
 
     // Every N seconds, emit "[FPS] avg=X p50=… p99=… max=… (Y frames in Z s)"
-    // when FPS_LOG=1, plus the window's hitch tally. Off by default: the
-    // overall line at exit and [SLOWFRAME]/[HITCH] still report regressions.
+    // when FPS_LOG=1. Off by default: the overall line at exit and
+    // [SLOWFRAME]/[HITCH] (which owns its own window line) still report
+    // regressions.
     // The JIT window counters (F2) share the window. FPS_INTERVAL (float
     // seconds, default 5.0) tunes
     // the report cadence -- bump to 60+ for long sim runs to keep logs sparse.
@@ -798,8 +799,6 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
                     let p99_str = format_float(fps_window.p99, 0, 1)
                     let max_str = format_float(fps_window.max, 0, 1)
                     log_wall_clock("FPS", "avg={avg_str} p50={p50_str}ms p99={p99_str}ms max={max_str}ms ({frames_in_window} frames in {elapsed}s)")
-                    let hitch_line = hitch_window_summary()
-                    if hitch_line != "" { log_info("HITCH", "window: {hitch_line}") }
                 }
                 if JIT_TRACE_LOG_ENABLED {
                     let (starts, aborts) = jit_trace_window_delta()
