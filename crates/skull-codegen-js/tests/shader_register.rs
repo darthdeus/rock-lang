@@ -108,7 +108,8 @@ fn qualified_register_workspace(registrations: &[&str]) -> bone_semantic::infere
         SHADER_SRC,
         ustr::Ustr::from("<test>"),
     )
-    .expect("shader source")]);
+    .expect("shader source")])
+    .expect("stdlib");
     for (index, registration) in registrations.iter().enumerate() {
         let mut module = skull_parser::parse_module_clean_with_dialect(
             &format!("mod registry{index};\n{registration}"),

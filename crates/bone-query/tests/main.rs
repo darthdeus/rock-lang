@@ -58,6 +58,8 @@ mod modules_v1;
 mod noncanonical_path;
 #[path = "phantom_block_sentinel.rs"]
 mod phantom_block_sentinel;
+#[path = "program_inputs.rs"]
+mod program_inputs;
 #[path = "query.rs"]
 mod query;
 #[path = "reachability.rs"]

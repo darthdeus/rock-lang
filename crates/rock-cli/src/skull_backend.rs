@@ -260,7 +260,14 @@ pub fn skull_workspace_timed(
     // Timed path: assemble via the shared helper but keep the `semantic_pass`
     // call explicit here (the verdict is a bool, not a gate, and the timer must
     // bracket exactly this call).
-    let mut modules = skull::pipeline::with_stdlib(user_modules);
+    let mut modules = match skull::pipeline::with_stdlib(user_modules) {
+        Ok(modules) => modules,
+        Err(error) => {
+            times.semantic = t.elapsed();
+            times.failure = Some(error);
+            return (false, times);
+        }
+    };
     let aliases = match crate::bone_backend::aliases_for_modules(&modules) {
         Ok(aliases) => aliases,
         Err(error) => {
@@ -332,12 +339,13 @@ pub fn skull_workspace_timed(
 /// to a `ModuleId` via `bone_backend::entry_module_id` once the workspace exists.
 ///
 /// Unlike the single-file path, the embedded compiler stdlib is NOT pulled from
-/// `discover_sources` — bone supplies its own via `skull::pipeline::stdlib_modules()`.
+/// `discover_sources` — bone supplies its own via `skull_parser::stdlib::modules()`.
 pub fn skull_assemble_project(
     sources: &SourceFiles,
 ) -> std::result::Result<(Vec<skull_parser::Ast>, ustr::Ustr), Vec<CompilerError>> {
     let (user_modules, entry_file, _parse) = crate::bone_backend::parse_user_modules(sources)?;
-    Ok((skull::pipeline::with_stdlib(user_modules), entry_file))
+    let modules = skull::pipeline::with_stdlib(user_modules).map_err(|e| vec![e])?;
+    Ok((modules, entry_file))
 }
 
 /// A Lua harness appended after the emitted module: it runs each `@test` fn with

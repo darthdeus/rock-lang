@@ -104,63 +104,16 @@ pub(crate) fn render_errs(sources: &SourceFiles, errs: &[CompilerError]) -> Stri
     rock_core::errors::render_all(&expanded, &sf)
 }
 
-/// Convert the already-resolved host package graph into bone's namespace
-/// facts. Source files carry dense graph ids, so deriving this once from the
-/// root package's manifest keeps v1 alias lookup tied to the same graph that
-/// selected the files. Synthetic and legacy-only module sets intentionally use
-/// the empty table.
+/// Bone's namespace facts for a parsed module set, through the loader the
+/// editor shares ([`rock_host::program_inputs::ns_aliases_for_sources`]).
 pub(crate) fn aliases_for_modules(
     modules: &[skull_parser::Ast],
 ) -> std::result::Result<bone_core::modules::NsAliases, CompilerError> {
-    let has_v1 = modules
-        .iter()
-        .any(|module| module.dialect == skull_parser::Dialect::V1 && module.package.is_some());
-    if !has_v1 {
-        return Ok(bone_core::modules::NsAliases::default());
-    }
-
-    let root = modules.iter().find(|module| {
-        module
-            .package
-            .as_ref()
-            .is_some_and(|package| package.id == 0)
-    });
-    let Some(root) = root else {
-        return Err(CompilerError::new_no_location(
-            "modules-v1 sources have no root package file from which to load dependency aliases",
-        ));
-    };
-    let mut manifest_dir = Path::new(root.file.as_str())
-        .parent()
-        .map(Path::to_path_buf);
-    let manifest_dir = loop {
-        let Some(dir) = manifest_dir.as_ref() else {
-            return Err(CompilerError::new_no_location(format!(
-                "cannot find stick.toml for modules-v1 root source `{}`",
-                root.file
-            )));
-        };
-        if dir.join("stick.toml").is_file() {
-            break dir.clone();
-        }
-        let Some(parent) = dir.parent() else {
-            manifest_dir = None;
-            continue;
-        };
-        if parent == dir {
-            manifest_dir = None;
-        } else {
-            manifest_dir = Some(parent.to_path_buf());
-        }
-    };
-
-    rock_host::stick::graph::PackageGraph::build(&manifest_dir)
-        .map(|graph| graph.ns_aliases())
-        .map_err(|error| {
-            CompilerError::new_no_location(format!(
-                "cannot build package graph for modules-v1 aliases: {error}"
-            ))
-        })
+    rock_host::program_inputs::ns_aliases_for_sources(
+        modules
+            .iter()
+            .map(|m| (m.file.as_str(), m.dialect, m.package.as_ref())),
+    )
 }
 
 /// The host's binding of [`skull::pipeline::check_modules`]: its alias
@@ -207,12 +160,12 @@ fn check_modules_gated(
 pub fn check_with_stdlib(
     user: impl IntoIterator<Item = skull_parser::Ast>,
 ) -> std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>> {
-    check_modules(&mut skull::pipeline::with_stdlib(user))
+    check_modules(&mut skull::pipeline::with_stdlib(user).map_err(|e| vec![e])?)
 }
 
 /// A bone incremental `Session` warmed with the stdlib — the watch/hot-reload
 /// counterpart to [`check_with_stdlib`]. Every `Session::new` site passes the
-/// same `skull::pipeline::stdlib_modules()` warm set; funnel them here.
+/// same `skull_parser::stdlib::modules()` warm set; funnel them here.
 ///
 /// This form does NOT resolve comptime inputs; it is for type-check-only
 /// sessions (bone watch, iter benches, LSP survey, tests). A session whose
@@ -224,7 +177,7 @@ pub(crate) fn bone_session(
     // from the same facts `aliases_for_modules` reads off a parsed set: the
     // root package's manifest, reached through the file that carries graph id 0.
     let aliases = aliases_for_session(&files)?;
-    bone_incremental::session::Session::new(skull::pipeline::stdlib_modules(), files, &aliases)
+    bone_incremental::session::Session::new(skull_parser::stdlib::modules()?, files, &aliases)
 }
 
 /// [`aliases_for_modules`] for a session's file list, which is not parsed yet.
@@ -237,18 +190,11 @@ pub(crate) fn bone_session(
 pub(crate) fn aliases_for_session(
     files: &[bone_incremental::session::SessionFile],
 ) -> std::result::Result<bone_core::modules::NsAliases, CompilerError> {
-    let stubs: Vec<skull_parser::Ast> = files
-        .iter()
-        .filter(|f| f.package.is_some())
-        .map(|f| skull_parser::Ast {
-            file: ustr::Ustr::from(f.path.as_str()),
-            dialect: f.dialect,
-            package: f.package.clone(),
-            global_policy: f.global_policy,
-            ..Default::default()
-        })
-        .collect();
-    aliases_for_modules(&stubs)
+    rock_host::program_inputs::ns_aliases_for_sources(
+        files
+            .iter()
+            .map(|f| (f.path.as_str(), f.dialect, f.package.as_ref())),
+    )
 }
 
 /// The session files for a discovered project: each file's text plus the
@@ -418,7 +364,10 @@ pub(crate) fn bone_workspace_timed(
 
     let t_sem = Instant::now();
     let t = Instant::now();
-    let mut modules = skull::pipeline::stdlib_modules();
+    let mut modules = match skull_parser::stdlib::modules() {
+        Ok(modules) => modules,
+        Err(error) => return (Err(vec![error]), times),
+    };
     times.stdlib_clone = t.elapsed();
     let t = Instant::now();
     modules.extend(user_modules);

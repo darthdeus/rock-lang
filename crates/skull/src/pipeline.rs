@@ -4,8 +4,6 @@
 //! inputs, the lint report set, where diagnostics go -- through
 //! [`CompileHost`]; it never decides whether a program compiles.
 
-use std::sync::LazyLock;
-
 use bone_core::modules::NsAliases;
 use bone_semantic::inference::{ComptimeInputs, Workspace};
 use bone_semantic::prelude::{FxHashMap, FxHashSet, ModuleId};
@@ -15,28 +13,13 @@ use ustr::Ustr;
 
 use crate::mir_emit::{MirEmit, RendererTarget};
 
-/// The parsed stdlib, in load order under the loader's stdlib ids. Parsed
-/// once per process and cloned per compile.
-pub fn stdlib_modules() -> Vec<Ast> {
-    static STDLIB: LazyLock<Vec<Ast>> = LazyLock::new(|| {
-        rock_stdlib::stdlib_files()
-            .iter()
-            .map(|f| {
-                let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-                skull_parser::parse_module(f.contents, id)
-                    .unwrap_or_else(|e| panic!("stdlib {} must parse: {e:?}", f.name))
-            })
-            .collect()
-    });
-    STDLIB.clone()
-}
-
 /// The stdlib with `user` modules appended: the module set every
-/// non-incremental compile checks.
-pub fn with_stdlib(user: impl IntoIterator<Item = Ast>) -> Vec<Ast> {
-    let mut modules = stdlib_modules();
+/// non-incremental compile checks. A stdlib that does not parse is the error
+/// ([`skull_parser::stdlib::modules`], the loader the editor shares).
+pub fn with_stdlib(user: impl IntoIterator<Item = Ast>) -> Result<Vec<Ast>, CompilerError> {
+    let mut modules = skull_parser::stdlib::modules()?;
     modules.extend(user);
-    modules
+    Ok(modules)
 }
 
 /// Every recovered syntax error across `modules`, in module order. Parsing is
@@ -224,7 +207,7 @@ pub fn compile_source(
     let user = skull_parser::parse_module(src, Ustr::from(file))
         .map_err(|e| CompileFailure::at(Stage::Parse, vec![e]))?;
     let entry = user.file;
-    let modules = with_stdlib([user]);
+    let modules = with_stdlib([user]).map_err(|e| CompileFailure::at(Stage::Parse, vec![e]))?;
     compile_modules(modules, entry, target, host)
 }
 

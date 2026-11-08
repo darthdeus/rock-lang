@@ -155,33 +155,6 @@ fn stdlib_texts() -> Vec<(String, String)> {
         .collect()
 }
 
-/// The real stdlib, parsed through skull-parser (bone's front end) under its
-/// session ids. Opening a stdlib buffer maps its path to the same id and so
-/// interns to the same `ModuleId` as the warm copy (`warm_mids` still
-/// distinguishes warm from user code for lints/ctags policy), so it's
-/// navigable and diagnosable without a second colliding module. Parsed once.
-fn warm_stdlib() -> Vec<skull_parser::Ast> {
-    static WARM: OnceLock<Vec<skull_parser::Ast>> = OnceLock::new();
-    WARM.get_or_init(|| {
-        rock_stdlib::stdlib_files()
-            .iter()
-            .filter_map(|f| {
-                let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-                match skull_parser::parse_module(f.contents, id) {
-                    Ok(m) => Some(m),
-                    Err(e) => {
-                        // A broken stdlib breaks every bone compile; surface it
-                        // loudly rather than silently dropping the module.
-                        log::error!("bone LSP: stdlib `{}` failed to parse: {e:?}", f.name);
-                        None
-                    }
-                }
-            })
-            .collect()
-    })
-    .clone()
-}
-
 // ---------------------------------------------------------------------------
 // BoneWorkspace: one Session per stick-project root
 // ---------------------------------------------------------------------------
@@ -275,21 +248,15 @@ impl BoneProject {
     }
 }
 
-/// The package graph for the project rooted at `root`, if it has a manifest.
-fn project_graph(root: &Path) -> Option<rock_host::stick::graph::PackageGraph> {
-    if !root.join("stick.toml").exists() {
-        return None;
-    }
-    match rock_host::stick::graph::PackageGraph::build(root) {
-        Ok(graph) => Some(graph),
-        Err(e) => {
-            log::warn!(
-                "bone LSP: package graph for `{}` does not build ({e}); its files read as legacy",
-                root.display()
-            );
-            None
-        }
-    }
+/// An error-level diagnostic at the top of a file for a program input that
+/// did not load (sources, stdlib, package graph): nothing in the file can be
+/// checked against the program a build would compile.
+fn load_error_diagnostic(message: String) -> Diagnostic {
+    bone_diagnostic(
+        Range::new(Position::new(0, 0), Position::new(0, 1)),
+        message,
+        rock_core::errors::CompilerErrorLevel::Error,
+    )
 }
 
 /// The `a::b::` path written right before `at` (the start of the identifier
@@ -470,6 +437,8 @@ pub struct BoneWorkspace {
     /// Discovery/read failures are distinct from a standalone source. Failed
     /// roots remain retryable so fixing the manifest or dependency can recover.
     source_load_errors: HashMap<PathBuf, String>,
+    /// A stdlib replacing the process one ([`Self::with_stdlib`]).
+    stdlib: Option<Result<Vec<skull_parser::Ast>, CompilerError>>,
     /// Verbatim editor path -> canonical path. Project discovery keys modules
     /// by the canonicalized path (`project_sources`), but LSP clients send the
     /// URI-decoded spelling (`C:\...` not `\\?\C:\...`; `/./` segments), so
@@ -657,22 +626,41 @@ impl BoneWorkspace {
         canon.parent().map(|d| d.to_path_buf()).unwrap_or(canon)
     }
 
-    fn project_mut(&mut self, root: &Path) -> &mut BoneProject {
-        let is_bin = stick_is_bin(root);
-        self.projects.entry(root.to_path_buf()).or_insert_with(|| {
-            let graph = project_graph(root);
-            let aliases = graph
-                .as_ref()
-                .map(rock_host::stick::graph::PackageGraph::ns_aliases)
-                // Scratch roots need no aliases; graph failures were logged by project_graph.
-                .unwrap_or_default();
-            BoneProject {
+    /// Replace the process stdlib this workspace warms its sessions from (a
+    /// host with its own stdlib, or a test of a broken one). Must precede
+    /// project loading.
+    pub fn with_stdlib(mut self, stdlib: Result<Vec<skull_parser::Ast>, CompilerError>) -> Self {
+        assert!(
+            self.projects.is_empty(),
+            "the stdlib must precede project loading"
+        );
+        self.stdlib = Some(stdlib);
+        self
+    }
+
+    /// The stdlib every session warms from, or why it did not load.
+    fn stdlib(&self) -> &Result<Vec<skull_parser::Ast>, CompilerError> {
+        self.stdlib
+            .as_ref()
+            .unwrap_or_else(|| skull_parser::stdlib::cached())
+    }
+
+    /// The project for `root`, created warm-only on first use. `Err` is why its
+    /// inputs (stdlib, package graph) did not load, for a diagnostic.
+    fn project_mut(&mut self, root: &Path) -> Result<&mut BoneProject, String> {
+        if !self.projects.contains_key(root) {
+            let graph =
+                rock_host::program_inputs::package_graph(root).map_err(|error| error.message)?;
+            let aliases = rock_host::program_inputs::ns_aliases(graph.as_ref());
+            let warm = self.stdlib().clone().map_err(|error| error.message)?;
+            // A warm-only session is valid even if the first file doesn't
+            // parse; the file is added by the update_file below.
+            let session = Session::new(warm, Vec::new(), &aliases)
+                .map_err(|error| format!("the stdlib does not check: {}", error.message))?;
+            let project = BoneProject {
                 fallbacks: Default::default(),
                 lint_options: self.lint_options.clone(),
-                // Warm-only session is always valid even if the first file
-                // doesn't parse; the file is added by the update_file below.
-                session: Session::new(warm_stdlib(), Vec::new(), &aliases)
-                    .expect("bone session warm-init (stdlib) must succeed"),
+                session,
                 texts: stdlib_texts().into_iter().collect(),
                 freq: None,
                 hole_cache: HashMap::new(),
@@ -682,12 +670,17 @@ impl BoneWorkspace {
                 call_through: None,
                 scoped_call_through: HashMap::new(),
                 visible_bindings: HashMap::new(),
-                is_bin,
+                is_bin: stick_is_bin(root),
                 root: root.to_path_buf(),
                 module_touched: HashMap::new(),
                 graph,
-            }
-        })
+            };
+            self.projects.insert(root.to_path_buf(), project);
+        }
+        Ok(self
+            .projects
+            .get_mut(root)
+            .expect("the project was inserted above"))
     }
 
     fn project(&self, path: &str) -> Option<&BoneProject> {
@@ -746,10 +739,22 @@ impl BoneWorkspace {
     /// so `update` won't re-index (and clobber unsaved buffers).
     fn batch_load_for_file(&mut self, file_path: &str) {
         let root = Self::root_for(file_path);
-        let files = match Self::project_sources(file_path) {
-            Ok(files) => files,
-            Err(cause) => {
-                let message = format!("Cannot load project sources for `{file_path}`: {cause}");
+        // The alias table the resolver needs comes from the same manifest that
+        // selected these files, so a v1 package in the editor resolves its
+        // dependencies exactly as a compile does. `root` is the deepest
+        // enclosing `stick.toml` directory, or a scratch file's own parent,
+        // whose missing manifest means the empty table.
+        let inputs = Self::project_sources(file_path)
+            .map_err(|cause| format!("Cannot load project sources for `{file_path}`: {cause}"))
+            .and_then(|files| {
+                let graph = rock_host::program_inputs::package_graph(&root)
+                    .map_err(|error| error.message)?;
+                let warm = self.stdlib().clone().map_err(|error| error.message)?;
+                Ok((files, graph, warm))
+            });
+        let (files, graph, warm) = match inputs {
+            Ok(inputs) => inputs,
+            Err(message) => {
                 log::error!("bone LSP: {message}");
                 self.source_load_errors.insert(root.clone(), message);
                 self.loaded_roots.remove(&root);
@@ -763,19 +768,8 @@ impl BoneWorkspace {
             .iter()
             .map(|f| (f.path.clone(), f.text.clone()))
             .collect();
-        // The alias table the resolver needs comes from the same graph that
-        // selected these files, so a v1 package in the editor resolves its
-        // dependencies exactly as a compile does.
-        // `root` is the deepest enclosing `stick.toml` directory, or a scratch
-        // file's own parent -- where there is no manifest the graph build fails
-        // and the empty table is correct (a standalone source owns no package).
-        let graph = project_graph(&root);
-        let aliases = graph
-            .as_ref()
-            .map(rock_host::stick::graph::PackageGraph::ns_aliases)
-            // Scratch roots need no aliases; graph failures were logged by project_graph.
-            .unwrap_or_default();
-        match Session::new(warm_stdlib(), files, &aliases) {
+        let aliases = rock_host::program_inputs::ns_aliases(graph.as_ref());
+        match Session::new(warm, files, &aliases) {
             Ok(session) => {
                 let texts: HashMap<String, String> =
                     stdlib_texts().into_iter().chain(file_texts).collect();
@@ -856,13 +850,7 @@ impl BoneWorkspace {
     fn source_load_diagnostic(&self, path: &str) -> Option<Diagnostic> {
         self.source_load_errors
             .get(&Self::root_for(path))
-            .map(|message| {
-                bone_diagnostic(
-                    Range::new(Position::new(0, 0), Position::new(0, 1)),
-                    message.clone(),
-                    rock_core::errors::CompilerErrorLevel::Error,
-                )
-            })
+            .map(|message| load_error_diagnostic(message.clone()))
     }
 
     /// Apply an editor edit (didOpen/didChange) for `path`. Returns diagnostics
@@ -897,7 +885,13 @@ impl BoneWorkspace {
         let on_disk = editor_path(path);
         let graph_path = fs_err::canonicalize(on_disk.as_ref())
             .unwrap_or_else(|_| PathBuf::from(on_disk.as_ref()));
-        let proj = self.project_mut(&root);
+        let proj = match self.project_mut(&root) {
+            Ok(proj) => proj,
+            Err(message) => {
+                log::error!("bone LSP: {message}");
+                return vec![(on_disk.into_owned(), vec![load_error_diagnostic(message)])];
+            }
+        };
         if proj.graph.as_ref().is_some_and(|graph| {
             graph
                 .package_of_file(&graph_path)

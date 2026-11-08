@@ -10,6 +10,7 @@ pub mod graft;
 pub mod macro_expand;
 pub mod parser;
 pub mod sexp;
+pub mod stdlib;
 
 pub use ast::*;
 pub use parser::Parser;

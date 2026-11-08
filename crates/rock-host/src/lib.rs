@@ -12,6 +12,7 @@ pub mod compiler_thp;
 pub mod lua_runner;
 pub mod preprocessor;
 pub mod process_management;
+pub mod program_inputs;
 pub mod project;
 pub mod source_files;
 pub mod stick;

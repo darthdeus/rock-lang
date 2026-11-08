@@ -33,7 +33,6 @@ skull-transform = { workspace = true }
 skull-parser = { workspace = true }
 bone-lints = { workspace = true }
 rock-core = { workspace = true }
-rock-stdlib = { workspace = true }
 comfy-la-arena = { workspace = true }
 ustr = { workspace = true }
 rustc-hash = { workspace = true }

@@ -93,7 +93,7 @@ pub fn do_backend_stats(input: &str, iters: usize, warmup: usize) -> Result<()> 
 
     // One source load, consumed by both backends so the input is identical. Both
     // type-check the whole set as one workspace (the only way cross-file
-    // references resolve); bone supplies the stdlib via `skull::pipeline::stdlib_modules`.
+    // references resolve); bone supplies the stdlib via `skull_parser::stdlib::modules`.
     let source_spec = crate::common::path_to_source_spec(input);
     let sources = crate::unified_compile::discover_sources(&source_spec)?;
     if sources.files.is_empty() {

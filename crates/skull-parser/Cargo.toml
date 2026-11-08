@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 rock-core = { path = "../rock-core" }
 rock-tokenizer = { path = "../rock-tokenizer" }
+rock-stdlib = { workspace = true }
 comfy-la-arena = { path = "../la-arena" }
 ustr = { workspace = true }
 ordered-float = { workspace = true }
