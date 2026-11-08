@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/sound-core",
     "crates/gamelibs",
     "crates/rock-visual-bank",
     "crates/rock-engine-host",
@@ -78,6 +79,9 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/darthdeus/rock-lang"
 
 [workspace.dependencies]
+sound-core = { path = "crates/sound-core" }
+symphonia = { version = "0.5.5", default-features = false, features = ["aiff", "flac", "mp3", "ogg", "pcm", "vorbis", "wav"] }
+
 clap_complete = "4.5"
 fs_extra = "1.3.0"
 notify = { version = "8.0.0", default-features = false }

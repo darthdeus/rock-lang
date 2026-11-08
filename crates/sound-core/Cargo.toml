@@ -1,0 +1,17 @@
+[package]
+name = "sound-core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+globset = "0.4.19"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["float_roundtrip"] }
+ebur128 = "=0.1.7"
+symphonia.workspace = true
+sha2 = "0.10"
+
+tempfile = "3"

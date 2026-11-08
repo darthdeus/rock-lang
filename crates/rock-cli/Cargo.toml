@@ -22,6 +22,13 @@ test-support = ["dep:test-utils"]
 sequential = ["bone-semantic/sequential", "skull/sequential", "bone-query/sequential"]
 
 [dependencies]
+rock-engine-host = { path = "../rock-engine-host" }
+rock-visual-bank = { path = "../rock-visual-bank" }
+gamelibs = { path = "../gamelibs" }
+sound-core = { workspace = true }
+globset = "0.4.19"
+rodio = { version = "0.22", default-features = false, features = ["mp3", "vorbis", "wav"] }
+
 test-utils = { workspace = true, optional = true }
 rock-host = { workspace = true }
 rock-stdlib = { workspace = true }
@@ -89,3 +96,10 @@ path = "tests/main.rs"
 name = "child_lifetime"
 path = "tests/child_lifetime.rs"
 harness = false
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["jobapi2", "winnt", "handleapi", "processthreadsapi"] }
+
+[[test]]
+name = "stone_launch"
+path = "tests/stone_launch.rs"

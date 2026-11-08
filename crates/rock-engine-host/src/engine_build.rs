@@ -993,7 +993,9 @@ fn validate_receipted_lib(dst_stem: &str) -> Result<bool> {
 
 pub fn build_engine_libs(game_path: &str) -> Result<()> {
     let optional = game_engine_libs(game_path)?;
-    build_libstone()?;
+    if crate::project::is_game_project(std::path::Path::new(game_path))? {
+        build_libstone()?;
+    }
     for lib in optional {
         build_optional_engine_lib(&lib)?;
     }

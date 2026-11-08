@@ -489,3 +489,15 @@ pub fn test_corpus_dir() -> std::path::PathBuf {
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod overlay_test_support;
+
+mod asset_selection;
+pub mod compile_cache;
+mod compiler_watch;
+pub mod frame_compile_cache;
+pub mod frame_runtime;
+pub mod game_compile;
+pub mod game_runtime;
+mod host_paths;
+pub mod package;
+pub mod stone_runtime;
+pub mod stone_watch;

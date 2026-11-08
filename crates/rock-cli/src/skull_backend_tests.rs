@@ -5619,8 +5619,11 @@ fn plain_luajit_without_runtime_layout() {
     let bin = root.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     std::os::unix::fs::symlink(&luajit, bin.join("luajit")).unwrap();
-    std::fs::write(root.path().join("plain.rock"),
-        "@test inline(lua) fn plain_child() = \"assert(os.getenv('STONE_HEADLESS') == nil); print('plain LuaJIT ran')\"\n").unwrap();
+    std::fs::write(
+        root.path().join("plain.rock"),
+        "@test inline(lua) fn plain_child() = \"print('plain LuaJIT ran')\"\n",
+    )
+    .unwrap();
     let mut failures = Vec::new();
     for use_override in [false, true] {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());

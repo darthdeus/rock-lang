@@ -24,11 +24,16 @@ pub fn luajit_path() -> PathBuf {
         return release_path;
     }
 
-    gamelibs::host_dir().join(if cfg!(target_os = "windows") {
+    let bundled = gamelibs::host_dir().join(if cfg!(target_os = "windows") {
         "bin/luajit.exe"
     } else {
         "bin/luajit"
-    })
+    });
+    if bundled.is_file() {
+        bundled
+    } else {
+        rock_host::project::luajit_path()
+    }
 }
 
 /// Get the library search path value for the current platform.

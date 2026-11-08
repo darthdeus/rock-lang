@@ -189,18 +189,11 @@ fn plain_compiler_process_without_private_runtime() {
     assert!(formatted.status.success(), "{}", text(&formatted));
     let checked = invoke(root.path(), &["fmt", "main.rock", "--check"]);
     assert!(checked.status.success(), "{}", text(&checked));
-    let unavailable = invoke(root.path(), &["stone", "main.rock"]);
-    assert!(!unavailable.status.success());
-    assert!(
-        text(&unavailable).contains("unavailable"),
-        "{}",
-        text(&unavailable)
-    );
     assert!(!root.path().join("prebuilt").exists());
 }
 
 #[test]
-fn library_uses_plain_services_without_installation() {
+fn library_resolves_game_services_without_private_registration() {
     use rock_cli::registry::{ProgramKind, RuntimeProcess, RuntimeServices};
     assert!(std::ptr::eq(
         rock_cli::CliCommand::all(),
@@ -209,7 +202,7 @@ fn library_uses_plain_services_without_installation() {
     let services = RuntimeServices::registered();
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("stone_ffi.rock"), "// engine marker\n").unwrap();
-    assert!(!(services.is_game_project)(root.path()).unwrap());
+    assert!((services.is_game_project)(root.path()).unwrap());
     assert!(
         (services.configured_runtime_dir)(root.path())
             .unwrap()
@@ -220,28 +213,26 @@ fn library_uses_plain_services_without_installation() {
             .unwrap()
             .is_empty()
     );
-    assert!(
-        (services.program_preamble)(".", ProgramKind::Game)
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        (services.build_engine_libs)(".")
-            .unwrap_err()
-            .to_string()
-            .contains("unavailable")
-    );
+    let preamble =
+        (services.program_preamble)(root.path().to_str().unwrap(), ProgramKind::Game).unwrap();
+    assert!(preamble.contains("__ROCK_GAME_SOURCE_DIR"));
+    assert!(preamble.contains(root.path().to_str().unwrap()));
     let mut command = Command::new("unused-runtime");
     command.arg("sentinel").env("PLAIN_WITNESS", "preserved");
     let command = (services.runtime_command)(command, RuntimeProcess::LuaTest);
-    assert_eq!(command.get_program(), "unused-runtime");
-    assert_eq!(command.get_args().collect::<Vec<_>>(), ["sentinel"]);
     assert_eq!(
-        command.get_envs().collect::<Vec<_>>(),
-        [(
-            std::ffi::OsStr::new("PLAIN_WITNESS"),
-            Some(std::ffi::OsStr::new("preserved"))
-        )]
+        command.get_program(),
+        rock_engine_host::runtime::luajit_path().as_os_str()
+    );
+    assert_eq!(command.get_args().collect::<Vec<_>>(), ["sentinel"]);
+    let env: std::collections::HashMap<_, _> = command.get_envs().collect();
+    assert_eq!(
+        env[std::ffi::OsStr::new("PLAIN_WITNESS")],
+        Some(std::ffi::OsStr::new("preserved"))
+    );
+    assert_eq!(
+        env[std::ffi::OsStr::new("STONE_HEADLESS")],
+        Some(std::ffi::OsStr::new("1"))
     );
 }
 
