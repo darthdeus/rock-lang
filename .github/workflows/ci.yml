@@ -65,7 +65,7 @@ jobs:
         # emitter catches up. Tests marked `@test(backends = "lua")` report as
         # "not for js" and are outside the cap.
         env:
-          JS_MAX_SKIPS: "29"
+          JS_MAX_SKIPS: "26"
         run: |
           set -o pipefail
           cargo run --locked -p rock-cli --bin rock -- test --backend js tests/ | tee "$RUNNER_TEMP/js-corpus.txt"

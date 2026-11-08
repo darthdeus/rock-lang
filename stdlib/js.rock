@@ -265,6 +265,23 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
   }
 """
 
+// Copy-on-write for a descriptor field write. The luajit sibling in
+// `unified.rock` is the contract: copies share the descriptor, so the write
+// lands on a fresh one whose leaf views are re-made over a new `ptr`.
+@nomangle inline(js) fn __descriptor_with(d: any, field: string, v: any) -> any = """
+  var out = Object.assign(Object.create(Object.getPrototypeOf(d)), d);
+  out[field] = v;
+  if (field === "ptr") {
+    for (var k in out) {
+      if (Object.prototype.hasOwnProperty.call(out, k) && k !== "ptr" &&
+          ArrayBuffer.isView(out[k])) {
+        out[k] = new out[k].constructor(v.buffer, v.byteOffset);
+      }
+    }
+  }
+  return out;
+"""
+
 // Mechanism G's leaf sort. The luajit sibling in `unified.rock` is the contract;
 // this is the same algorithm over 0-based columns and a 0-based `paths` array
 // (`MakeTuple` emits a JS array).

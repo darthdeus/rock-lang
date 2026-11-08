@@ -2037,3 +2037,32 @@ fn main() {
         "a synthesized call has no graph site: {c:?}"
     );
 }
+
+/// A descriptor field write copies the descriptor through `__descriptor_with`.
+/// The call takes the write's target as its site, and the graph models it
+/// there, so it joins even in statement position.
+#[test]
+fn a_descriptor_field_write_joins_its_copy_on_write_call() {
+    let c = census_of(
+        r#"
+struct Owner { nb: NativeBuffer<float> }
+global OWNED: NativeBuffer<float> = native_buffer_float(4)
+fn shrink(o: Owner) {
+    o.nb.len = 1
+    OWNED.len = 3
+}
+fn main() {
+    shrink(Owner { nb: native_buffer_float(2) })
+    print("{OWNED.len}")
+}
+"#,
+    );
+    assert!(
+        c.accounts(),
+        "accounting broken: {:?}",
+        c.accounting_failures()
+    );
+    let synth_joined = c.joined_by_op.get("synthesized").copied().unwrap_or(0);
+    assert!(synth_joined >= 2, "the two writes did not join: {c:?}");
+    assert!(c.unjoined.is_empty(), "a call did not join: {c:?}");
+}

@@ -1250,6 +1250,7 @@ impl Builder<'_> {
     /// the write builds a fresh descriptor and stores it back into `place`.
     fn descriptor_field_store(
         &mut self,
+        target: Idx<Expr>,
         place: Idx<Expr>,
         field: Ustr,
         value: Idx<Expr>,
@@ -1283,7 +1284,12 @@ impl Builder<'_> {
         };
         let key = self.emit_cur(Inst::Const(Lit::Str(field)));
         let v = self.lower_expr(value)?;
-        let fresh = self.call_spine("__descriptor_with", vec![old, key, v])?;
+        // The write's target names the site, which a statement-position
+        // assignment does not otherwise set.
+        let outer_expr = self.cur_expr.replace(target);
+        let fresh = self.call_spine("__descriptor_with", vec![old, key, v]);
+        self.cur_expr = outer_expr;
+        let fresh = fresh?;
         match owner {
             Owner::Field(b, key) => self.emit_cur(Inst::StoreField {
                 base: b,
@@ -1396,7 +1402,7 @@ impl Builder<'_> {
                             if bone_semantic::prelude::is_descriptor_key(name)
                     ) =>
             {
-                self.descriptor_field_store(base, field, value)?;
+                self.descriptor_field_store(target, base, field, value)?;
             }
             Expr::FieldAccess { base, field } => {
                 // `xs[i].x = v` / `xs[i].at.x = v` on a column-stored or strided

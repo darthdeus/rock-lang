@@ -1004,6 +1004,7 @@ impl InstanceGraph {
 /// Every runtime entry a synthesized call or an opaque body can name. Kept as ONE list so the inline-body
 /// scan and the synthesized-call table cannot drift about what the catalogue is.
 pub const ERASED_RUNTIME_ENTRIES: &[&str] = &[
+    DESCRIPTOR_WITH,
     "__map_col_clear",
     "__map_col_contains",
     "__map_col_free",
@@ -5867,6 +5868,41 @@ enum CondVerdict {
 /// the column and strided `("__vec_data_sort", ..)` arms): a `nobox` element
 /// applies the key to the LEAVES, everything else to the materialized element.
 /// A strided `nobox` struct row is those leaves; a strided enum row is not.
+/// The copy-on-write entry a descriptor field write synthesizes.
+pub const DESCRIPTOR_WITH: &str = "__descriptor_with";
+
+/// Whether `base` holds a stdlib descriptor (`Ptr`, `NativeBuffer`, ...)
+/// under this instance's substitution. A type that does not convert counts
+/// as one: an extra site costs an unused entry, a missing one a hole.
+fn descriptor_typed(
+    ws: &Workspace,
+    inf: &BodyInference,
+    subst: &MonoSubst,
+    base: Idx<bone_semantic::hir::Expr>,
+) -> bool {
+    let Some(ty) = inf.expr_types.get(base) else {
+        return true;
+    };
+    let Ok(mut mono) = skull_mir::monoty::convert(ws, inf, *ty, subst) else {
+        return true;
+    };
+    use skull_mir::monoty::{MonoCtor, MonoTy};
+    loop {
+        mono = match mono {
+            MonoTy::Nullable(inner) => *inner,
+            MonoTy::App {
+                ctor: MonoCtor::Ref,
+                mut params,
+            } if params.len() == 1 => params.remove(0),
+            MonoTy::App {
+                ctor: MonoCtor::Nominal(name),
+                ..
+            } => return bone_semantic::prelude::is_descriptor_key(name),
+            _ => return false,
+        };
+    }
+}
+
 fn sort_entry(
     ws: &bone_semantic::inference::Workspace,
     cond: StorageCond,
@@ -6094,6 +6130,19 @@ fn compiler_generated_sites(
                     continue;
                 }
                 out.extend(names.iter().map(|n| GeneratedSite { expr: e, name: n }));
+            }
+            // `d.f = v` on a stdlib descriptor copies it on write
+            // (`descriptor_field_store`); the call's site is the target.
+            E::Assign { target, .. } => {
+                let E::FieldAccess { base, .. } = body.expr_arena[*target] else {
+                    continue;
+                };
+                if descriptor_typed(ws, inf, subst, base) {
+                    out.push(GeneratedSite {
+                        expr: *target,
+                        name: DESCRIPTOR_WITH,
+                    });
+                }
             }
             _ => {}
         }
