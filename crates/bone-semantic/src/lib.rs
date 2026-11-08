@@ -1,4 +1,5 @@
 pub mod defs;
+pub mod fn_identity;
 pub mod identity_storage;
 pub mod relocation;
 pub use bone_core::hir;

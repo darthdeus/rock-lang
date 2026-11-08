@@ -5,7 +5,10 @@
 //!        meaningful (a capture-free lambda is one shared hoisted fn; a
 //!        capturing lambda is a fresh record per creation). The direct ban is
 //!        in tests/errors/fn_identity_compare.rock.err; this closes the
-//!        generic bypass at the call site (eq_compared_generics).
+//!        generic bypass at the call site (bone-semantic fn_identity).
+//!        Aliased operands: fn_identity_generic_let_alias.rock.err;
+//!        forwarding through another generic:
+//!        fn_identity_generic_transitive.rock.err.
 //! Tags: closures, fn-values, equality, generics
 
 //=== TEST CASE: generic_eq_capture_free_fn_arg_Generic ===
@@ -40,19 +43,17 @@ fn main() {
     if same(mk(), mk()) { print("same") }   // ERROR: nullable-fn identity via generic
 }
 
-// Aliasing ONE operand does not escape: the un-aliased `b` is still a direct
-// `T`-typed param, so the call-site read flags index 1 and rejects.
+// Aliasing ONE operand does not escape: `x` infers as `T`.
 //=== TEST CASE: generic_eq_single_unannotated_alias_Generic ===
 fn same<T>(a: T, b: T) -> bool { let x = a; return x == b }
 fn mk() -> fn() -> int { return () => 1 }
 
 fn main() {
-    if same(mk(), mk()) { print("same") }   // ERROR: `b` is still a direct T operand
+    if same(mk(), mk()) { print("same") }   // ERROR: `x` is still a T operand
 }
 
-// An ANNOTATED alias restores detection: `let y: T` carries a declared `T`, so
-// both operands read as T-typed even though both are aliased. (The unannotated
-// both-alias form escapes -- fn_identity_generic_let_alias.rock.err.)
+// ANNOTATED aliases are T-typed too. (The unannotated both-alias form:
+// fn_identity_generic_let_alias.rock.err.)
 //=== TEST CASE: generic_eq_annotated_both_alias_Generic ===
 fn same<T>(a: T, b: T) -> bool { let x: T = a; let y: T = b; return x == y }
 fn mk() -> fn() -> int { return () => 1 }

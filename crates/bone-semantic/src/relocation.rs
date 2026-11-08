@@ -414,7 +414,11 @@ impl<'a> BodyCtx<'a> {
     }
 }
 
-fn resolve(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<(TyId, TypeExpr)> {
+pub(crate) fn resolve(
+    ws: &Workspace,
+    bi: Option<&BodyInference>,
+    ty: TyId,
+) -> Option<(TyId, TypeExpr)> {
     let mut cur = ty;
     loop {
         let expr = match cur {
@@ -432,7 +436,11 @@ fn resolve(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<(TyId
 }
 
 /// `ty` under any `ref` and `?`.
-fn strip_ref(ws: &Workspace, bi: Option<&BodyInference>, ty: TyId) -> Option<(TyId, TypeExpr)> {
+pub(crate) fn strip_ref(
+    ws: &Workspace,
+    bi: Option<&BodyInference>,
+    ty: TyId,
+) -> Option<(TyId, TypeExpr)> {
     let (base, expr) = resolve(ws, bi, ty)?;
     match expr {
         TypeExpr::Nullable(inner) => strip_ref(ws, bi, base.with_idx(inner)),

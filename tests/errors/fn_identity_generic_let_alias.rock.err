@@ -1,30 +1,24 @@
-//! Error: KNOWN HOLE (let-alias) -- pinned, not yet closed. The call-site
-//!        fn-eq ban (eq_compared_generics) does a SYNTACTIC read of the callee
-//!        body: it only flags a generic param index whose `==`/`!=` operand is
-//!        a DIRECTLY-referenced `T`-typed binding (a param, or an ANNOTATED
-//!        `let x: T`). When BOTH operands are aliased through UNANNOTATED lets
-//!        (`let x = a; let y = b; x == y`), neither operand carries a declared
-//!        `T` type, so the read detects no eq-compared generic index and the
-//!        call is accepted. This is the same residual class as the accepted
-//!        `mk_t() == mk_t()` / `let a: any = mk(); a == b` shapes (only a
-//!        directly-referenced `T`-typed operand is detected) -- reaching it
-//!        needs the same inference-time call-graph fixpoint the transitive hole
-//!        does (tests/errors/fn_identity_generic_transitive.rock.err), i.e.
-//!        genuinely new machinery beyond the sanctioned call-site check.
-//!        Pinned by the fn-value equality contract.
-//!        REMOVE this TODO + the case below when the fixpoint lands.
-//!        NB: aliasing only ONE operand (`let x = a; x == b`) IS rejected --
-//!        the un-aliased `b` is still a direct `T` param (base-case coverage in
-//!        fn_identity_generic.rock.err). The ANNOTATED both-alias form
-//!        (`let x: T = a; let y: T = b`) is ALSO rejected (same file). Only the
-//!        both-operands-unannotated shape below escapes.
+//! Error: aliasing BOTH operands of a generic `==` through unannotated lets
+//!        does not hide the comparison. `let x = a` infers `x: T`, and the
+//!        generic fn-eq summary (bone-semantic fn_identity) reads each
+//!        operand's INFERRED type, not its declared one, so `x == y` still
+//!        compares `T` and a call instantiating `T` with a fn type is
+//!        rejected. Base cases: tests/errors/fn_identity_generic.rock.err.
 //! Tags: closures, fn-values, equality, generics
-//! TODO: unannotated both-operand let-alias generic fn-eq bypass is not yet rejected
 
 //=== TEST CASE: generic_eq_fn_arg_both_unannotated_alias_Generic ===
 fn same<T>(a: T, b: T) -> bool { let x = a; let y = b; return x == y }
 fn mk() -> fn() -> int { return () => 1 }
 
 fn main() {
-    if same(mk(), mk()) { print("same") }   // NOT YET rejected (let-alias hole)
+    if same(mk(), mk()) { print("same") }   // ERROR: aliases are still T-typed
+}
+
+//=== TEST CASE: generic_eq_fn_arg_call_operands_Generic ===
+fn mk_t<T>(x: T) -> T { return x }
+fn same<T>(a: T, b: T) -> bool { return mk_t(a) == mk_t(b) }
+fn mk() -> fn() -> int { return () => 1 }
+
+fn main() {
+    if same(mk(), mk()) { print("same") }   // ERROR: call operands infer as T
 }

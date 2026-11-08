@@ -1098,17 +1098,6 @@ pub fn coerce_to_interface(
     Ok(())
 }
 
-/// Read a `TyId` as a raw `TypeExpr` node without any inference state, from
-/// whichever arena owns it (`body` for locals, the owning module for statics).
-/// Safe for a shallow syntactic read: we only inspect leaf `Generic`/`Function`
-/// nodes, never copy a compound node into another arena (the reify invariant).
-pub(crate) fn peek_ty(ws: &Workspace, body: &Body, ty: TyId) -> TypeExpr {
-    match ty {
-        TyId::Static(m, i) => ws.module(m).ty_arena[i],
-        TyId::Local(i) => body.lowered_tys[i],
-    }
-}
-
 pub(crate) fn bound_var(gamma: &Gamma, ty: TyId) -> Option<VarId> {
     match *gamma.get(ty) {
         TypeExpr::Infer(var_id, _) => match gamma.out.substitutions.get(var_id) {

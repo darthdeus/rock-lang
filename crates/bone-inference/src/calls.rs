@@ -1306,79 +1306,6 @@ pub(crate) fn resolve_named_call_with_generics(
     Err(e)
 }
 
-/// Generic-param indices of `fid` that its body compares with `==`/`!=` via a
-/// directly-referenced binding of that generic type. The direct fn-eq ban is a
-/// static-type check at the `==` site (bone-inference Eq arm); a `T`-typed
-/// wrapper (`fn same<T>(a: T, b: T) { a == b }`) erases the fn type and slips
-/// past it. Recording these indices lets the call site reject when such a `T`
-/// resolves to a fn type.
-///
-/// A pure syntactic read of the callee's already-lowered body -- no inference
-/// state, so it is independent of the (parallel, cross-arena) inference order.
-/// `VarId` is the global generic identity, comparable across arenas even though
-/// `TyId`s are arena-scoped. Only DIRECT `T`-typed binding operands are caught;
-/// an operand like `mk_t() == mk_t()` (no `T`-typed binding) is missed, pinned
-/// as the any-cast bypass is. Transitive forwarding through a generic-to-generic
-/// call is a separate hole (tests/errors/fn_identity_generic_transitive.rock.err).
-pub(crate) fn eq_compared_generic_indices(
-    ws: &Workspace,
-    mid: ModuleId,
-    fid: Idx<Function>,
-) -> SmallVec<[usize; 2]> {
-    let mut out: SmallVec<[usize; 2]> = SmallVec::new();
-    let module = ws.module(mid);
-    let function = &module.functions[fid];
-    if function.generics.is_empty() {
-        return out;
-    }
-    // inline(lua)/extern fns have no Rock body to scan -- trusted.
-    let Some(body) = module.bodies.get(&BodyOwner::Function(fid)) else {
-        return out;
-    };
-
-    let mut gen_index: SmallVec<[(VarId, usize); 4]> = SmallVec::new();
-    for (i, &g) in function.generics.iter().enumerate() {
-        if let TypeExpr::Generic(var_id, _) = peek_ty(ws, body, g) {
-            gen_index.push((var_id, i));
-        }
-    }
-    if gen_index.is_empty() {
-        return out;
-    }
-
-    let operand_generic = |operand: Idx<Expr>| -> Option<usize> {
-        let Expr::Var(bid) = body.expr_arena[operand] else {
-            return None;
-        };
-        let decl = body.binding_arena[bid].declared_ty?;
-        let TypeExpr::Generic(var_id, _) = peek_ty(ws, body, decl) else {
-            return None;
-        };
-        gen_index
-            .iter()
-            .find(|(v, _)| *v == var_id)
-            .map(|(_, idx)| *idx)
-    };
-
-    for e in body.expr_arena.values() {
-        if let Expr::BinOp {
-            op: hir::BinOp::Eq | hir::BinOp::NotEq,
-            lhs,
-            rhs,
-        } = *e
-        {
-            for operand in [lhs, rhs] {
-                if let Some(idx) = operand_generic(operand) {
-                    if !out.contains(&idx) {
-                        out.push(idx);
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
 /// The method name as written at a method-syntax call: the receiver is
 /// `args[0]` for `recv.name(..)` and the `SafeNavCall` receiver for
 /// `recv?.name(..)`. `None` for a call written by name.
@@ -1925,24 +1852,6 @@ pub(crate) fn commit_selected_call(
             span,
         )?;
         gamma.out.bound_call_trees.insert(call_expr, bound_tree);
-    }
-
-    // Close the generic fn-eq bypass: a type param the callee `==`-compares must
-    // not be instantiated with a fn type here. The direct ban lives at the `==`
-    // site, but a `T`-typed wrapper erases the fn type past it; catch it once the
-    // args have unified `subs` to the concrete types. fn identity is not
-    // meaningful.
-    for idx in eq_compared_generic_indices(ws, callee_mid, callee_fn) {
-        let inst = substitute(gamma, function.generics[idx], &subs, span)?;
-        let inst = resolve(gamma, inst, span);
-        let peeled = peel_nullable(gamma, inst, span);
-        if matches!(*gamma.get(peeled), TypeExpr::Function { .. }) {
-            comp_error!(
-                span,
-                "Cannot compare fn values: `{}` compares a generic parameter with `==`/`!=`, but it is instantiated with a fn type here -- fn identity is not meaningful (a capture-free lambda is one shared fn; a capturing lambda is a fresh record per creation). Restructure around explicit keys",
-                function.name
-            );
-        }
     }
 
     // Persist the instantiation for skull's inliner call-site specialization.

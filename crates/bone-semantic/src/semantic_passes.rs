@@ -793,6 +793,7 @@ pub fn lower_and_infer(
 
     infer_modules(ws, &ids)?;
     crate::relocation::check_relocation(ws);
+    crate::fn_identity::check_generic_fn_eq(ws);
 
     Ok(ids)
 }

@@ -1048,6 +1048,7 @@ impl Session {
             // Whole-program: an edited callee can change an unchanged caller's
             // verdict.
             bone_semantic::relocation::check_relocation(&mut self.ws);
+            bone_semantic::fn_identity::check_generic_fn_eq(&mut self.ws);
         }
         Ok(result)
     }

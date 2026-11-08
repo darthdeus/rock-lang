@@ -131,3 +131,23 @@ fn test_same_value_through_generic() {
     let b = V { n: 3 }
     print("{same(a, b)}")
 }
+
+// Forwarding a generic into a `==`-comparing callee is fine for non-fn types:
+// only a fn instantiation is rejected
+// (tests/errors/fn_identity_generic_transitive.rock.err).
+fn same_via<T>(a: T, b: T) -> bool { return same(a, b) }
+
+@test(output = "true false")
+fn test_same_forwarded_through_generic() {
+    print("{same_via(2, 2)} {same_via(\"a\", \"b\")}")
+}
+
+// A generic null check is refinement, not identity: it accepts a fn type.
+fn is_set<T>(x: T?) -> bool { return x != null }
+
+@test(output = "true false")
+fn test_generic_null_check_on_fn() {
+    let f: (fn(int) -> int)? = add_one
+    let g: (fn(int) -> int)? = null
+    print("{is_set(f)} {is_set(g)}")
+}
