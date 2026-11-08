@@ -16,17 +16,17 @@ fn use_backend_specific() {
 //=== NO CHANGE ===
 
 //=== TEST CASE: extern_function_formatting ===
-extern fn malloc(size: int) -> any
-extern fn free(ptr: any)
-extern fn strlen(str: string) -> int
+extern(lua) fn malloc(size: int) -> any
+extern(lua) fn free(ptr: any)
+extern(lua) fn strlen(str: string) -> int
 
 //=== NO CHANGE ===
 
 //=== TEST CASE: consecutive_single_line_extern_functions ===
-extern fn open(path: string, mode: int) -> int
-extern fn close(fd: int) -> int
-extern fn read(fd: int, buf: any, count: int) -> int
-extern fn write(fd: int, buf: any, count: int) -> int
+extern(lua) fn open(path: string, mode: int) -> int
+extern(lua) fn close(fd: int) -> int
+extern(lua) fn read(fd: int, buf: any, count: int) -> int
+extern(lua) fn write(fd: int, buf: any, count: int) -> int
 
 //=== NO CHANGE ===
 
@@ -41,8 +41,8 @@ extern(lua) fn complex_lua_function(
 
 //=== NO CHANGE ===
 //=== TEST CASE: extern_function_preservation ===
-extern fn system_call(command: string) -> int
-extern fn get_environment_variable(name: string) -> string?
+extern(lua) fn system_call(command: string) -> int
+extern(lua) fn get_environment_variable(name: string) -> string?
 
 fn use_extern_functions() {
     let result = system_call("ls -la")

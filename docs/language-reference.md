@@ -58,6 +58,11 @@ locals; use a lambda for those. Self-recursion is supported, but forward and
 mutual recursion, generic parameters and annotations on nested functions are
 not.
 
+A body-less `extern` declaration names its backend: `extern(lua) fn` refers to
+an existing Lua global, `extern(js) fn` to a JS global, and
+`extern(ffi, "lib") fn` to a C symbol reached through LuaJIT FFI. A bare
+`extern` or `extern(c)` is rejected; both meant `extern(lua)`.
+
 A `static` local persists across calls and initializes the first time control
 reaches its declaration:
 

@@ -3773,7 +3773,7 @@ deco init widget(key: string) {}
 @lifecycle(phase="wire", owner="process")
 deco init wire {}
 @artifact_catalog(catalog="widgets")
-@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
 global WIDGET_STATES: Map<string, WidgetState> = map_new()
 @widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { callback: () => 1 } }
 @widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { callback: () => 2 } }
@@ -3800,7 +3800,7 @@ deco init widget(key: string) {}
 @lifecycle(phase="wire", owner="process")
 deco init wire {}
 @artifact_catalog(catalog="widgets")
-@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
 global WIDGET_STATES: Map<string, WidgetState> = map_new()
 @widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { callback: () => 20 } }
 @widget(key="gamma") fn make_gamma() -> WidgetDef { return WidgetDef { callback: () => 3 } }
@@ -3827,7 +3827,7 @@ deco init widget(key: string) {}
 @lifecycle(phase="wire", owner="process")
 deco init wire {}
 @artifact_catalog(catalog="widgets")
-@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
 global WIDGET_STATES: Map<string, WidgetState> = map_new()
 @widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { callback: () => 10 } }
 @widget(key="beta") fn make_beta() -> WidgetDef { return WidgetDef { callback: () => 30 } }

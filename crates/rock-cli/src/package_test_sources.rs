@@ -332,7 +332,7 @@ mod tests {
             "const x: int = effect()",
             "fn iter() {}",
             "fn __op_add() {}",
-            "extern fn host()",
+            "extern(lua) fn host()",
             "@update fn global_frame() {}",
         ] {
             assert!(

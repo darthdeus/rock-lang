@@ -28,8 +28,8 @@ fn census(src: &str) -> Vec<Finding> {
 #[test]
 fn finds_typechecked_raw_keyboard_and_mouse_sites() {
     let src = r#"
-extern fn is_key_pressed(key: string) -> bool
-extern fn is_mouse_down(button: int) -> bool
+extern(lua) fn is_key_pressed(key: string) -> bool
+extern(lua) fn is_mouse_down(button: int) -> bool
 
 fn gameplay() {
     if is_key_pressed("q") && is_mouse_down(1) { }
@@ -76,7 +76,7 @@ fn main() { gameplay(Action {}) }
 #[test]
 fn an_allow_comment_suppresses_only_the_census_site() {
     let src = r#"
-extern fn is_key_pressed(key: string) -> bool
+extern(lua) fn is_key_pressed(key: string) -> bool
 fn gameplay() {
     // rock: allow(action_layer_raw_input)
     if is_key_pressed("q") { }

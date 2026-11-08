@@ -1,0 +1,28 @@
+//! Error: an `extern` declaration names its backend. Bare `extern` and
+//!        `extern(c)` were aliases for `extern(lua)` (an existing Lua global,
+//!        no cdef), so they are rejected with that replacement named.
+//! Tags: parser, extern, ffi
+
+//=== TEST CASE: bare_extern_fn_Generic ===
+//! expect: bare `extern` was removed
+extern fn rawequal(a: int, b: int) -> bool
+
+fn main() { print(rawequal(1, 1)) }
+
+//=== TEST CASE: bare_extern_names_lua_replacement_Generic ===
+//! expect: write `extern(lua)` for an existing Lua global
+extern fn rawequal(a: int, b: int) -> bool
+
+fn main() { print(rawequal(1, 1)) }
+
+//=== TEST CASE: annotated_bare_extern_fn_Generic ===
+//! expect: bare `extern` was removed
+@intrinsic extern fn value_definition_plan() -> [int]
+
+fn main() {}
+
+//=== TEST CASE: extern_c_fn_Generic ===
+//! expect: `extern(c)` was removed
+extern(c) fn rawequal(a: int, b: int) -> bool
+
+fn main() { print(rawequal(1, 1)) }

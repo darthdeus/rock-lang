@@ -746,7 +746,7 @@ fn any_sink_rejects_at_the_argument() {
 const NOBOX_GENERIC_SINK: &str = r#"
 nobox value NV2 { x: float, y: float }
 
-extern fn generic_sink<T>(v: T)
+extern(lua) fn generic_sink<T>(v: T)
 
 fn bad(v: NV2) {
     generic_sink(v)
@@ -768,7 +768,7 @@ fn unspecialized_generic_sink_rejects() {
 const NOBOX_EXTERN_SINK: &str = r#"
 nobox value NV2 { x: float, y: float }
 
-extern fn foreign(v: NV2)
+extern(lua) fn foreign(v: NV2)
 
 fn bad(v: NV2) {
     foreign(v)

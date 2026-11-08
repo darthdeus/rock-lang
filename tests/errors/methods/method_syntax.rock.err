@@ -27,7 +27,7 @@ fn main() {}
 //=== TEST CASE: extern_dform_Generic ===
 // Extern fns are foreign symbols; they cannot declare a receiver path.
 struct Mob { hp: int }
-extern fn Mob.x(m: Mob) -> int
+extern(lua) fn Mob.x(m: Mob) -> int
 fn main() {}
 
 //=== TEST CASE: dup_generic_Generic ===

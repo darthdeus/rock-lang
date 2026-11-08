@@ -30,8 +30,8 @@
 // #end
 
 //=== COMMENTED OUT TEST CASE: varargs_in_extern_functions ===
-// extern fn printf(format: string, ...any) -> int
-// extern fn log_variadic(...any)
+// extern(lua) fn printf(format: string, ...any) -> int
+// extern(lua) fn log_variadic(...any)
 //
 // fn use_varargs() {
 //     printf("Hello %s %d", "world", 42)

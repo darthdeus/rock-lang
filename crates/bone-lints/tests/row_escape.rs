@@ -189,7 +189,7 @@ fn erasing_a_row_into_any_is_flagged() {
 fn passing_a_row_to_an_extern_is_flagged() {
     assert_eq!(
         kinds(
-            "extern fn host_take(m: Mob) -> int\nfn main() -> int {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    return host_take(m)\n}"
+            "extern(lua) fn host_take(m: Mob) -> int\nfn main() -> int {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    return host_take(m)\n}"
         ),
         vec![EscapeKind::FfiArg]
     );

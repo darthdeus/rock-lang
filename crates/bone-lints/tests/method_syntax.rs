@@ -86,7 +86,7 @@ fn skips_a_first_param_that_cannot_be_a_receiver_path() {
 fn an_extern_decl_is_never_flagged() {
     // The parser REJECTS a receiver path on an extern decl, so the suggested
     // rewrite would not compile.
-    let src = format!("{MOB}extern fn take(m: Mob)\nfn main() {{ take(Mob {{ hp: 1 }}) }}");
+    let src = format!("{MOB}extern(lua) fn take(m: Mob)\nfn main() {{ take(Mob {{ hp: 1 }}) }}");
     assert!(methods(&src).is_empty(), "{:?}", methods(&src));
 }
 

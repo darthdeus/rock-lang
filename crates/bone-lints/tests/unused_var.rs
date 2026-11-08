@@ -164,7 +164,7 @@ fn inline_lua_fn_params_are_not_flagged() {
 
 #[test]
 fn extern_fn_params_are_not_flagged() {
-    let src = "extern fn c_add(a: int, b: int) -> int";
+    let src = "extern(lua) fn c_add(a: int, b: int) -> int";
     assert!(names(src).is_empty(), "extern params are consumed by C");
 }
 

@@ -280,7 +280,7 @@ struct WidgetDef {{ value: int }}
 @artifact_definition(catalog="widgets", key_param="key")
 deco init widget(key: string) {{}}
 @artifact_catalog(catalog="widgets")
-@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
 @widget(key="{key}") fn make_alpha() -> WidgetDef {{ return WidgetDef {{ value: {value} }} }}
 fn main() {{}}
 "#

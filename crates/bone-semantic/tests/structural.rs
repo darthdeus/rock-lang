@@ -1788,7 +1788,7 @@ fn ref_cannot_cross_opaque_or_persistent_boundaries() {
         ),
         (
             "foreign parameter",
-            "struct Player { hp: int }\nextern fn host(player: ref Player)",
+            "struct Player { hp: int }\nextern(lua) fn host(player: ref Player)",
         ),
         (
             "ordinary array",

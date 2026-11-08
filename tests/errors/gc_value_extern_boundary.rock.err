@@ -9,7 +9,7 @@
 //=== TEST CASE: gc_value_extern_param_Generic ===
 value Bag { xs: [int], n: int }
 
-extern fn c_takes_bag(b: Bag) -> int
+extern(lua) fn c_takes_bag(b: Bag) -> int
 
 fn main() {
     print("{c_takes_bag(Bag { xs: [1], n: 2 })}")
@@ -18,7 +18,7 @@ fn main() {
 //=== TEST CASE: gc_value_extern_return_Generic ===
 value Pair<T> { a: T, b: T }
 
-extern fn c_makes_pair() -> Pair<int>
+extern(lua) fn c_makes_pair() -> Pair<int>
 
 fn main() {
     let p = c_makes_pair()

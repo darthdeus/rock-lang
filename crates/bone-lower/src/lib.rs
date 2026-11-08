@@ -3036,9 +3036,7 @@ fn lower_fn_body_into(
             *be,
         ),
 
-        skull_parser::FunctionBody::ExternC | skull_parser::FunctionBody::ExternLua => {
-            (None, None, true, None, hir::FnBackend::Lua)
-        }
+        skull_parser::FunctionBody::ExternLua => (None, None, true, None, hir::FnBackend::Lua),
 
         skull_parser::FunctionBody::ExternJs => (None, None, true, None, hir::FnBackend::Js),
 

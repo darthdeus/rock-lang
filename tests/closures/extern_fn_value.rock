@@ -1,11 +1,11 @@
-// A bare `extern fn` declares a name that ALREADY EXISTS as a Lua global (see
+// An `extern(lua) fn` declares a name that ALREADY EXISTS as a Lua global (see
 // `is_root` in skull/src/mir_emit.rs) -- it does not emit an `ffi.cdef`, so a
 // libc symbol like `floorf` is nil at every reference site, a direct call
 // included. `extern(ffi, "lib") fn` is the other form: it emits a wrapper
 // binding `lib.<name>`. Both are reachable as fn values, and the globals below
 // are the control that says so -- a global initializer is not a special case.
 
-extern fn rawequal(a: int, b: int) -> bool
+extern(lua) fn rawequal(a: int, b: int) -> bool
 
 extern(ffi, "string") fn rep(s: string, n: int) -> string
 

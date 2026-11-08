@@ -259,9 +259,9 @@ deco init widget(key: string) {}
 @artifact_definition(catalog="empty", key_param="key")
 deco init empty(key: string) {}
 @artifact_catalog(catalog="widgets")
-@intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
 @artifact_catalog(catalog="empty")
-@intrinsic extern fn empty_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+@intrinsic extern(lua) fn empty_definition_plan() -> [ArtifactDefinition<WidgetDef>]
 @widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
 fn main() {}
 "#,

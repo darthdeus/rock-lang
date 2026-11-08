@@ -58,7 +58,7 @@ fn main() {
 //=== TEST CASE: extern_fn_via_global_init_Generic ===
 nobox value P { x: float, y: float }
 
-extern fn take_p(p: P) -> float
+extern(lua) fn take_p(p: P) -> float
 
 global H: (P) -> float = take_p   // ERROR: an FFI boundary cannot splat leaves
 

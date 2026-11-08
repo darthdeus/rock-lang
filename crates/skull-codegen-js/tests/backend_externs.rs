@@ -236,7 +236,7 @@ fn a_bare_extern_cannot_be_taken_as_a_fn_value() {
     // either -- and it reaches a different arm than `extern(ffi, ..)`.
     let ws = ws_with(
         r#"
-extern fn rawequal(a: int, b: int) -> bool
+extern(lua) fn rawequal(a: int, b: int) -> bool
 fn main() { let g = rawequal; print("{g(7, 7)}") }
 "#,
     );

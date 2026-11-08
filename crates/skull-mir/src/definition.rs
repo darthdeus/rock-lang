@@ -305,7 +305,7 @@ pub fn collect(ws: &Workspace) -> Result<DefinitionPlan, CompilerError> {
                 return Err(CompilerError::new_with_label(
                     function.span,
                     format!(
-                        "artifact catalog accessor `{}` must be a compiler-owned @intrinsic extern fn with no parameters",
+                        "artifact catalog accessor `{}` must be a compiler-owned @intrinsic extern(..) fn with no parameters",
                         function.name
                     ),
                 ));
@@ -593,7 +593,7 @@ mod tests {
             &typed_source(
                 r#"
                 @artifact_catalog(catalog="widgets")
-                @intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+                @intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
                 @widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
                 "#,
             ),
@@ -612,7 +612,7 @@ mod tests {
             &typed_source(
                 r#"
                 @artifact_catalog(catalog="widgets")
-                @intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+                @intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
                 "#,
             ),
         )]);
@@ -629,7 +629,7 @@ mod tests {
             &typed_source(
                 r#"
                 @artifact_catalog(catalog="widgets")
-                @intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+                @intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<WidgetDef>]
                 @widget(key="alpha") fn make_alpha() -> int { return 1 }
                 "#,
             ),
@@ -645,7 +645,7 @@ mod tests {
             &typed_source(
                 r#"
                 @artifact_catalog(catalog="widgets")
-                @intrinsic extern fn widget_definition_plan() -> [ArtifactDefinition<fn(int) -> int?>]
+                @intrinsic extern(lua) fn widget_definition_plan() -> [ArtifactDefinition<fn(int) -> int?>]
                 @widget(key="collision") fn make_collision() -> (fn(int) -> int)? { return null }
                 "#,
             ),
@@ -662,7 +662,7 @@ mod tests {
             &typed_source(
                 r#"
                 @artifact_catalog(catalog="widgets")
-                @intrinsic extern fn widget_definition_plan() -> [int]
+                @intrinsic extern(lua) fn widget_definition_plan() -> [int]
                 @widget(key="alpha") fn make_alpha() -> WidgetDef { return WidgetDef { value: 1 } }
                 "#,
             ),
@@ -678,7 +678,7 @@ mod tests {
             &format!(
                 r#"{TYPED_PREFIX}
                     @artifact_catalog(catalog="missing")
-                    @intrinsic extern fn missing_definition_plan() -> [ArtifactDefinition<WidgetDef>]
+                    @intrinsic extern(lua) fn missing_definition_plan() -> [ArtifactDefinition<WidgetDef>]
                     fn main() {{}}
                 "#
             ),
@@ -694,9 +694,9 @@ mod tests {
             &typed_source(
                 r#"
                 @artifact_catalog(catalog="widgets")
-                @intrinsic extern fn first_plan() -> [ArtifactDefinition<WidgetDef>]
+                @intrinsic extern(lua) fn first_plan() -> [ArtifactDefinition<WidgetDef>]
                 @artifact_catalog(catalog="widgets")
-                @intrinsic extern fn second_plan() -> [ArtifactDefinition<WidgetDef>]
+                @intrinsic extern(lua) fn second_plan() -> [ArtifactDefinition<WidgetDef>]
                 "#,
             ),
         )]))

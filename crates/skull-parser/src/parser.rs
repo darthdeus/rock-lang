@@ -985,7 +985,7 @@ impl<'a> Parser<'a> {
                 let name = self.expect_ident()?;
                 self.finish_fn_def(name, start, true, false, None, FnBackend::Lua)
             }
-            // `extern [(ffi, "lib") | (lua) | (js)] fn ..` — body-less declaration.
+            // `extern((ffi, "lib") | (lua) | (js)) fn ..` — body-less declaration.
             TokenKind::Extern => {
                 self.advance();
                 let extern_body = self.parse_extern_specifier()?;
@@ -1232,13 +1232,17 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// After `extern`, read the optional `(ffi, "lib")` / `(lua)` / `(js)`
-    /// specifier and return the body kind for the (body-less) declaration. A bare
-    /// `extern` (or `extern(c)`) names an existing Lua global, as `extern(lua)`
-    /// does; an unknown backend name rejects fail-closed.
+    /// After `extern`, read the required `(ffi, "lib")` / `(lua)` / `(js)`
+    /// specifier and return the body kind for the (body-less) declaration. Bare
+    /// `extern` and `extern(c)` were aliases for `extern(lua)` and reject with
+    /// that replacement named; an unknown backend name rejects fail-closed.
     fn parse_extern_specifier(&mut self) -> PResult<FunctionBody> {
         if self.kind() != TokenKind::OpenParen {
-            return Ok(FunctionBody::ExternC);
+            return Err(self.err(
+                "bare `extern` was removed; name the backend: write `extern(lua)` for an \
+                 existing Lua global (what bare `extern` meant), `extern(js)` for a JS \
+                 global, or `extern(ffi, \"lib\")` for a C symbol",
+            ));
         }
         self.advance(); // `(`
         let kind = match self.kind() {
@@ -1262,12 +1266,14 @@ impl<'a> Parser<'a> {
                 FunctionBody::ExternJs
             }
             TokenKind::Ident(n) if n.as_str() == "c" => {
-                self.advance();
-                FunctionBody::ExternC
+                return Err(self.err(
+                    "`extern(c)` was removed; it named an existing Lua global, so write \
+                     `extern(lua)`; a C symbol goes through `extern(ffi, \"lib\")`",
+                ));
             }
             other => {
                 return Err(self.err(format!(
-                    "unknown extern backend {:?}; expected `ffi`, `lua`, `js`, or `c`",
+                    "unknown extern backend {:?}; expected `ffi`, `lua`, or `js`",
                     other
                 )));
             }
@@ -1648,8 +1654,8 @@ impl<'a> Parser<'a> {
                 FunctionBody::Inline(backend, src)
             } else {
                 // Only `extern fn` declares a body-less foreign symbol. Every other
-                // form reaching here is missing its body, and defaulting to
-                // `ExternC` made it a call to a Lua global that does not exist --
+                // form reaching here is missing its body, and defaulting to an
+                // extern made it a call to a Lua global that does not exist --
                 // accepted by the compiler, fatal at runtime.
                 let Some(eb) = extern_body else {
                     return Err(self.err(

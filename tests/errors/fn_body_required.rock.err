@@ -8,7 +8,7 @@
 // "attempt to call global 'c' (a nil value)". The comment there claimed the
 // non-extern callers never reached it; they did.
 //
-// A bare `extern fn f() -> int` (no body, no `= "..."`) is still legal and is
+// An `extern(lua) fn f() -> int` (no body, no `= "..."`) is still legal and is
 // covered positively in the extern suite -- this rejection is for the forms
 // that are NOT foreign declarations.
 

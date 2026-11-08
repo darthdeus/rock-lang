@@ -59,7 +59,7 @@ global dt: float = 1.0/60.0  // Floating-point division
 global image: Image
 
 // Extern function declaration
-extern fn length(v: FixVec2) -> int;
+extern(lua) fn length(v: FixVec2) -> int;
 
 // Math assignment tests
 @test(output = "10\n0\n25\n1", type_holes = [[0, "int"], [1, "int"], [2, "int"], [3, "int"]])

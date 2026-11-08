@@ -97,7 +97,7 @@ fn rock_externs_match_the_cdef_arity() {
         let needle = format!("fn {name}(");
         let at = src
             .find(&needle)
-            .unwrap_or_else(|| panic!("lib.rock no longer declares `extern fn {name}`"));
+            .unwrap_or_else(|| panic!("lib.rock no longer declares `extern(ffi, ..) fn {name}`"));
         let open = at + needle.len();
         let close = src[open..].find(')').expect("extern arg list ends") + open;
         let args = src[open..close].trim();
@@ -109,7 +109,7 @@ fn rock_externs_match_the_cdef_arity() {
         assert_eq!(
             got,
             want.len(),
-            "`extern fn {name}` takes {got} args but its cdef takes {}",
+            "`extern(ffi, ..) fn {name}` takes {got} args but its cdef takes {}",
             want.len()
         );
     }

@@ -108,7 +108,7 @@ fn caller_census_rejects_an_empty_production_declaration_population() {
 #[test]
 fn raw_input_classification_is_explicit_and_does_not_hide_the_live_census() {
     let src = r#"
-extern fn is_key_pressed(key: string) -> bool
+extern(lua) fn is_key_pressed(key: string) -> bool
 
 fn gameplay() {
     // action-layer: editor_tool_debug
@@ -135,7 +135,7 @@ fn main() { gameplay() }
 #[test]
 fn raw_input_classification_rejects_unknown_classes() {
     let src = r#"
-extern fn is_key_pressed(key: string) -> bool
+extern(lua) fn is_key_pressed(key: string) -> bool
 
 fn gameplay() {
     // action-layer: gameplay_exception
@@ -151,7 +151,7 @@ fn main() { gameplay() }
 #[test]
 fn raw_input_classification_rejects_multiple_queries_hidden_by_one_marker() {
     let src = r#"
-extern fn is_key_down(key: string) -> bool
+extern(lua) fn is_key_down(key: string) -> bool
 
 fn gameplay() {
     // action-layer: editor_tool_debug

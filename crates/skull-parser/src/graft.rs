@@ -76,7 +76,6 @@ fn graft_fn(src: &Ast, dst: &mut Ast, f: &FunctionDef) -> FunctionDef {
         body: match &f.body {
             FunctionBody::Rock(b) => FunctionBody::Rock(graft_block(src, dst, *b)),
             FunctionBody::Inline(be, s) => FunctionBody::Inline(*be, *s),
-            FunctionBody::ExternC => FunctionBody::ExternC,
             FunctionBody::ExternLua => FunctionBody::ExternLua,
             FunctionBody::ExternJs => FunctionBody::ExternJs,
             FunctionBody::Ffi(l) => FunctionBody::Ffi(*l),

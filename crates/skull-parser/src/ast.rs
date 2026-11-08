@@ -598,11 +598,8 @@ pub enum FunctionBody {
     /// `inline(<backend>) fn .. = """<src>"""` — raw backend source, emitted
     /// verbatim by that backend. Bare `inline` defaults to [`FnBackend::Lua`].
     Inline(FnBackend, Ustr),
-    /// `extern fn` / `extern(c) fn` -- an existing Lua global, lowered exactly
-    /// as `ExternLua`. No `ffi.cdef` is emitted; C symbols go through
-    /// `extern(ffi, "lib")`.
-    ExternC,
-    /// `extern(lua) fn` — named global Lua symbol.
+    /// `extern(lua) fn` — an existing Lua global. No `ffi.cdef` is emitted; C
+    /// symbols go through `extern(ffi, "lib")`.
     ExternLua,
     /// `extern(js) fn` — JS runtime-provided global symbol.
     ExternJs,

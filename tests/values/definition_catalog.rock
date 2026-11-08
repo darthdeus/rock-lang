@@ -8,7 +8,7 @@ value CatalogValueDef {
 deco init catalog_value(key: string) {}
 
 @artifact_catalog(catalog="value_definitions")
-@intrinsic extern fn value_definition_plan() -> [ArtifactDefinition<CatalogValueDef>]
+@intrinsic extern(lua) fn value_definition_plan() -> [ArtifactDefinition<CatalogValueDef>]
 
 @catalog_value(key="first")
 fn define_catalog_first() -> CatalogValueDef {

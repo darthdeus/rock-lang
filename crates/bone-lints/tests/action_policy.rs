@@ -44,7 +44,7 @@ fn caller_policy_controls_root_prefix_registration_and_diagnostic() {
 #[test]
 fn raw_input_policy_controls_query_population_and_classes() {
     let file = "game/player.rock";
-    let source = "extern fn read_button() -> bool\nextern fn other_button() -> bool\nfn main() {\n    // action-layer: pointer\n    if read_button() {}\n    if other_button() {}\n}\n";
+    let source = "extern(lua) fn read_button() -> bool\nextern(lua) fn other_button() -> bool\nfn main() {\n    // action-layer: pointer\n    if read_button() {}\n    if other_button() {}\n}\n";
     let ws = workspace(file, source);
     let sources = [(Ustr::from(file), source)].into_iter().collect();
     let options = LintOptions::only([

@@ -65,7 +65,7 @@ fn test_annotated_fn_is_a_root() {
 
 #[test]
 fn extern_fn_is_a_root() {
-    let src = "extern fn c_thing() -> int";
+    let src = "extern(lua) fn c_thing() -> int";
     assert!(
         names(src).is_empty(),
         "extern fn is called by name from FFI"

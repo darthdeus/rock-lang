@@ -1,4 +1,4 @@
-// Item-level macros: bodies that emit `fn` / `inline(lua) fn` / `extern fn` /
+// Item-level macros: bodies that emit `fn` / `inline(lua) fn` / `extern(lua) fn` /
 // `struct` declarations spliced into the caller's module. Invocations that
 // would discard part of an expansion are rejected in
 // `tests/errors/macro_invocation_destination.rock.err`.
