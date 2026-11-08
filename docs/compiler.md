@@ -21,6 +21,20 @@ an input is accepted.
   `skull-codegen-lua`, `skull-codegen-js` and `skull-codegen-glsl` emit their
   respective targets. `skull` coordinates these stages.
 
+## LSP investigation
+
+Completion ranking and its `sort_text` encoding share the field order in
+[`rank_key.rs`](../crates/bone-query/src/rank_key.rs); the
+[invariants](../crates/bone-query/src/invariants.rs) check that response order
+agrees with it. Use the current key and ranking tests when investigating a
+result, since client-side sorting can change the displayed order.
+
+`rock lsp-survey <project> --format json` profiles generated body, signature
+and broken edits through the workspace and reports their update tiers and
+latencies. It is an in-process measurement, not a JSON-RPC round trip. The
+Neovim plugin provides `:RockCapture [note]` for a local bug snapshot; see its
+[README](../editors/nvim/README.md).
+
 ## MIR and emission
 
 MIR is a typed control-flow graph. Mutable variables are cells read and written

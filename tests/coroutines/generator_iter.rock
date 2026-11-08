@@ -1,4 +1,4 @@
-// Generators-as-iterators (coroutine-vocabulary-plan.md PR2): a
+// Generators as iterators: a
 // `Coroutine<Y, R, ()>` iterates as itself through the stdlib structural
 // `next` adapter -- no `iter`, no syntax. Covers a delegating tree walk,
 // nullable-`Y` elements, and a lazy combinator chain over a generator.
