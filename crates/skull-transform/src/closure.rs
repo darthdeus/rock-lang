@@ -848,3 +848,350 @@ fn slot_in_scope(
         f
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::lower;
+
+    #[test]
+    fn closure_conversion_exposes_one_owned_environment_plan() {
+        let mut func = lower(
+            "fn f() -> int { let captured = 3; let g = () => captured; return g() }",
+            "f",
+        );
+        assert!(
+            func.insts
+                .iter()
+                .any(|(_, inst)| matches!(inst, Inst::Lambda { .. })),
+            "the closure fixture must have a nonzero lambda population"
+        );
+        convert_closures(&mut func, "f");
+        assert_eq!(
+            func.closure_env_plans.len(),
+            1,
+            "one lambda must have one env plan"
+        );
+        let plan = func
+            .closure_env_plans
+            .values()
+            .next()
+            .expect("closure env plan");
+        assert!(
+            !plan.captures().is_empty(),
+            "the closure environment must carry a capture"
+        );
+        assert!(
+            plan.env_cell().is_some(),
+            "a capturing closure must own an env cell"
+        );
+    }
+
+    #[test]
+    fn escaping_lambdas_get_distinct_owner_site_identities_and_census() {
+        let mut func = lower(
+            "fn f() -> int {\n\
+                 let captured = true\n\
+                 let a = () => captured\n\
+                 let b = () => captured\n\
+                 let c = () => 7\n\
+                 if a() { return 1 }\n\
+                 if b() { return 2 }\n\
+                 return c()\n\
+             }",
+            "f",
+        );
+        let owner = match func.code_identity.clone().expect("concrete owner") {
+            skull_mir::code_identity::CodeIdentity::Named(instance) => instance,
+            other => panic!("unexpected owner identity: {other:?}"),
+        };
+        convert_closures(&mut func, "f");
+        let artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&func);
+        let lambdas: Vec<_> = artifact
+            .entries
+            .keys()
+            .filter_map(|identity| match identity {
+                skull_mir::code_identity::CodeIdentity::Lambda { enclosing, site }
+                    if *enclosing
+                        == skull_mir::code_identity::CodeOwner::Instance(owner.clone()) =>
+                {
+                    Some(*site)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            lambdas.len(),
+            3,
+            "all escaping lambda bodies need identities"
+        );
+        assert_eq!(
+            lambdas
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3,
+            "source sites, not ordinals, distinguish identical-looking lambdas"
+        );
+        assert_eq!(artifact.census.lambda_values, 3);
+        assert_eq!(artifact.census.capturing_lambdas, 2);
+        assert_eq!(artifact.census.capture_free_lambdas, 1);
+        assert!(
+            artifact.census.is_total(),
+            "identity census: {:?}",
+            artifact.census
+        );
+    }
+
+    #[test]
+    fn lambda_topology_rejects_insertion_but_body_edits_keep_identity() {
+        use skull_mir::code_identity::{
+            CaptureSchema, CodeArtifact, CodeCompatibility, CodeEntry, CodeIdentity, LambdaSiteId,
+            LambdaTopologyFingerprint,
+        };
+        use skull_mir::instance::Instance;
+
+        let owner = Instance::base(skull_mir::mir::FuncRef {
+            module: bone_semantic::prelude::ModuleId::builtin(),
+            func: comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from_u32(0)),
+        });
+        let site_a = LambdaSiteId {
+            file: Ustr::from("f.rock"),
+            offset: 10,
+        };
+        let site_b = LambdaSiteId {
+            file: Ustr::from("f.rock"),
+            offset: 20,
+        };
+        let topology = LambdaTopologyFingerprint::from_sites(&[(site_a, 0), (site_b, 0)]);
+        let inserted = LambdaTopologyFingerprint::from_sites(&[
+            (site_a, 0),
+            (
+                LambdaSiteId {
+                    file: Ustr::from("f.rock"),
+                    offset: 15,
+                },
+                0,
+            ),
+            (site_b, 0),
+        ]);
+        let removed = LambdaTopologyFingerprint::from_sites(&[(site_b, 0)]);
+        let compat = |topology| CodeCompatibility {
+            call_abi: "params=[];result=none;lanes=0;scalar=false".to_string(),
+            capture: CaptureSchema::empty(),
+            frame: None,
+            lambda_topology: topology,
+        };
+        let id = CodeIdentity::Lambda {
+            enclosing: skull_mir::code_identity::CodeOwner::Instance(owner.clone()),
+            site: site_b,
+        };
+        let mut old = CodeArtifact::default();
+        old.insert(CodeEntry {
+            identity: id.clone(),
+            compatibility: compat(topology),
+            body_fingerprint: 1,
+            body_name: Some(Ustr::from("old")),
+            escaping: true,
+            capture_free: true,
+        });
+        let mut body_edit = CodeArtifact::default();
+        body_edit.insert(CodeEntry {
+            identity: id.clone(),
+            compatibility: compat(topology),
+            body_fingerprint: 2,
+            body_name: Some(Ustr::from("edited")),
+            escaping: true,
+            capture_free: true,
+        });
+        assert!(
+            old.compatible_overlay(&body_edit),
+            "body-only edit must retain the slot"
+        );
+        let mut topology_edit = CodeArtifact::default();
+        topology_edit.insert(CodeEntry {
+            identity: id,
+            compatibility: compat(inserted),
+            body_fingerprint: 3,
+            body_name: Some(Ustr::from("inserted")),
+            escaping: true,
+            capture_free: true,
+        });
+        assert!(
+            !old.compatible_overlay(&topology_edit),
+            "insertion before a lambda must fail closed"
+        );
+        let mut removal_edit = CodeArtifact::default();
+        removal_edit.insert(CodeEntry {
+            identity: CodeIdentity::Lambda {
+                enclosing: skull_mir::code_identity::CodeOwner::Instance(owner.clone()),
+                site: site_b,
+            },
+            compatibility: compat(removed),
+            body_fingerprint: 4,
+            body_name: Some(Ustr::from("removed")),
+            escaping: true,
+            capture_free: true,
+        });
+        assert!(
+            !old.compatible_overlay(&removal_edit),
+            "removing a lambda must fail closed"
+        );
+
+        let mut capture_edit = CodeArtifact::default();
+        let mut incompatible_capture = CaptureSchema::empty();
+        incompatible_capture.complete = false;
+        capture_edit.insert(CodeEntry {
+            identity: CodeIdentity::Lambda {
+                enclosing: skull_mir::code_identity::CodeOwner::Instance(owner),
+                site: site_b,
+            },
+            compatibility: CodeCompatibility {
+                capture: incompatible_capture,
+                ..compat(topology)
+            },
+            body_fingerprint: 5,
+            body_name: Some(Ustr::from("capture")),
+            escaping: true,
+            capture_free: false,
+        });
+        assert!(
+            !old.compatible_overlay(&capture_edit),
+            "incomplete capture schema must fail closed"
+        );
+    }
+
+    #[test]
+    fn owner_topology_ignores_non_lambda_entries_without_topology() {
+        use skull_mir::code_identity::{
+            CaptureSchema, CodeArtifact, CodeCompatibility, CodeEntry, CodeIdentity, CodeOwner,
+            LambdaSiteId, LambdaTopologyFingerprint,
+        };
+        use skull_mir::instance::Instance;
+
+        let owner = Instance::base(skull_mir::mir::FuncRef {
+            module: bone_semantic::prelude::ModuleId::builtin(),
+            func: comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from_u32(0)),
+        });
+        let owner = CodeOwner::Instance(owner);
+        let topology = LambdaTopologyFingerprint::from_sites(&[(
+            LambdaSiteId {
+                file: Ustr::from("f.rock"),
+                offset: 10,
+            },
+            0,
+        )]);
+        let compat = |lambda_topology| CodeCompatibility {
+            call_abi: "unit".to_string(),
+            capture: CaptureSchema::empty(),
+            frame: None,
+            lambda_topology,
+        };
+        let mut old = CodeArtifact::default();
+        old.insert(CodeEntry {
+            identity: CodeIdentity::Lambda {
+                enclosing: owner.clone(),
+                site: LambdaSiteId {
+                    file: Ustr::from("f.rock"),
+                    offset: 10,
+                },
+            },
+            compatibility: compat(topology),
+            body_fingerprint: 1,
+            body_name: Some(Ustr::from("lambda_old")),
+            escaping: true,
+            capture_free: true,
+        });
+        old.insert(CodeEntry {
+            identity: CodeIdentity::Nested {
+                enclosing: owner.clone(),
+                site: LambdaSiteId {
+                    file: Ustr::from("f.rock"),
+                    offset: 20,
+                },
+                name: Ustr::from("nested"),
+            },
+            compatibility: compat(LambdaTopologyFingerprint::default()),
+            body_fingerprint: 2,
+            body_name: Some(Ustr::from("nested_old")),
+            escaping: true,
+            capture_free: true,
+        });
+        let mut next = CodeArtifact::default();
+        next.insert(CodeEntry {
+            identity: CodeIdentity::Lambda {
+                enclosing: owner.clone(),
+                site: LambdaSiteId {
+                    file: Ustr::from("f.rock"),
+                    offset: 10,
+                },
+            },
+            compatibility: compat(topology),
+            body_fingerprint: 3,
+            body_name: Some(Ustr::from("lambda_new")),
+            escaping: true,
+            capture_free: true,
+        });
+        next.insert(CodeEntry {
+            identity: CodeIdentity::Nested {
+                enclosing: owner,
+                site: LambdaSiteId {
+                    file: Ustr::from("f.rock"),
+                    offset: 20,
+                },
+                name: Ustr::from("nested"),
+            },
+            compatibility: compat(LambdaTopologyFingerprint::default()),
+            body_fingerprint: 4,
+            body_name: Some(Ustr::from("nested_new")),
+            escaping: true,
+            capture_free: true,
+        });
+        assert!(old.compatible_overlay(&next));
+    }
+
+    #[test]
+    fn named_values_are_counted_but_direct_calls_do_not_acquire_slots() {
+        let mut direct = lower(
+            "fn target(x: int) -> int { return x }\n\
+             fn f() -> int { return target(1) }",
+            "f",
+        );
+        convert_closures(&mut direct, "f");
+        let direct_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&direct);
+        assert_eq!(direct_artifact.census.named_values, 0);
+        assert_eq!(direct_artifact.census.direct_call_only, 1);
+
+        let mut value = lower(
+            "fn target(x: int) -> int { return x }\n\
+             fn f() -> int { let callback = target; return callback(1) }",
+            "f",
+        );
+        convert_closures(&mut value, "f");
+        let value_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree(&value);
+        assert_eq!(value_artifact.census.named_values, 1);
+        assert_eq!(
+            value_artifact.census.unresolved_body, 1,
+            "the per-body artifact must expose an unjoined target"
+        );
+        assert!(
+            !value_artifact.census.is_total(),
+            "a partial artifact must not report a total census"
+        );
+    }
+
+    #[test]
+    fn foreign_function_values_remain_explicit_boundaries() {
+        let func = lower(
+            "inline(lua) fn foreign(x: int) -> int = \"return x\"\n\
+             fn f() -> int { let callback = foreign; return callback(1) }",
+            "f",
+        );
+        assert!(func.code_value_identities.is_empty());
+        assert_eq!(
+            func.fn_value_symbols.len(),
+            1,
+            "the foreign value still has a boundary symbol"
+        );
+    }
+}
