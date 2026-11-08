@@ -9,35 +9,15 @@
 //! An instanced mesh may pass attribute sizes `[2, 1, 1, 1]` by hand,
 //! derived from its fields. These tests exercise that layout contract.
 
-use std::sync::LazyLock;
+use crate::common::checked_ws_of;
 use ustr::Ustr;
 
 use skull_mir::gpu_layout::{
     AttrKind, SamplerKind, TextureSlots, VertexAttrs, texture_slots, vertex_attrs,
 };
 
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-/// Type-check `src` over the real stdlib and hand back the workspace.
-fn ws_of(src: &str) -> bone_core::workspace::Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let errs = skull_mir::verdict::body_errors(&ws);
-    assert!(errs.is_empty(), "fixture must type-check: {errs:?}");
-    ws
-}
-
 fn attrs_of(src: &str, struct_name: &str) -> VertexAttrs {
-    let ws = ws_of(src);
+    let ws = checked_ws_of(src);
     vertex_attrs(&ws, Ustr::from(struct_name)).expect("attributes must compute")
 }
 
@@ -103,7 +83,7 @@ fn vec3_has_three_components() {
 /// than admitting a field the GPU cannot receive.
 #[test]
 fn non_numeric_field_rejects() {
-    let ws = ws_of("value Bad { pos: Vec2, name: string }");
+    let ws = checked_ws_of("value Bad { pos: Vec2, name: string }");
     let e = vertex_attrs(&ws, Ustr::from("Bad")).expect_err("a string field must reject");
     let msg = format!("{e:?}");
     assert!(
@@ -116,7 +96,7 @@ fn non_numeric_field_rejects() {
 /// buffer at all.
 #[test]
 fn non_value_struct_rejects() {
-    let ws = ws_of("struct Boxed { pos: Vec2 }");
+    let ws = checked_ws_of("struct Boxed { pos: Vec2 }");
     let e = vertex_attrs(&ws, Ustr::from("Boxed")).expect_err("a boxed struct must reject");
     assert!(format!("{e:?}").contains("value"));
 }
@@ -127,7 +107,7 @@ fn non_value_struct_rejects() {
 // number bind one texture and drop the other, with nothing to report.
 
 fn slots_of(src: &str, struct_name: &str) -> TextureSlots {
-    let ws = ws_of(src);
+    let ws = checked_ws_of(src);
     texture_slots(&ws, Ustr::from(struct_name)).expect("slots must compute")
 }
 
@@ -163,7 +143,7 @@ fn int_samplers_are_a_distinct_kind() {
 /// and shift every following slot off by one.
 #[test]
 fn non_sampler_field_rejects() {
-    let ws = ws_of("struct Bad { tex: Sampler2D, scale: float }");
+    let ws = checked_ws_of("struct Bad { tex: Sampler2D, scale: float }");
     let e = texture_slots(&ws, Ustr::from("Bad")).expect_err("a float field must reject");
     let msg = format!("{e:?}");
     assert!(
@@ -176,7 +156,7 @@ fn non_sampler_field_rejects() {
 /// struct. A `value` struct would claim a C layout that cannot exist.
 #[test]
 fn value_struct_rejects() {
-    let ws = ws_of("value Bad { tex: Sampler2D }");
+    let ws = checked_ws_of("value Bad { tex: Sampler2D }");
     let e = texture_slots(&ws, Ustr::from("Bad")).expect_err("a value struct must reject");
     assert!(format!("{e:?}").contains("value"));
 }
@@ -185,6 +165,6 @@ fn value_struct_rejects() {
 /// zero-sampler binding group.
 #[test]
 fn empty_group_rejects() {
-    let ws = ws_of("struct Empty { }");
+    let ws = checked_ws_of("struct Empty { }");
     assert!(texture_slots(&ws, Ustr::from("Empty")).is_err());
 }

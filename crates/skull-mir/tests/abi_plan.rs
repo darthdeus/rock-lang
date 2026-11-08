@@ -11,8 +11,8 @@
 //! emitted, so a definition's parameter list and the call that targets it
 //! cannot come from two derivations that merely agree today.
 
+use crate::common::checked_ws_of;
 use std::sync::Arc;
-use std::sync::LazyLock;
 
 use skull_mir::concrete::{ConcreteBodyPlan, ConcreteOwner, ConcreteSignature, ConcreteTypeTables};
 use skull_mir::instance::Instance;
@@ -25,25 +25,6 @@ use skull_mir::lower::{
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn ws_of(src: &str) -> bone_core::workspace::Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let errs = skull_mir::verdict::body_errors(&ws);
-    assert!(errs.is_empty(), "fixture must type-check: {errs:?}");
-    ws
-}
 
 fn func_ref(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
     let overloads = ws
@@ -116,7 +97,7 @@ fn main() {
 /// there is no declaration-shaped shared body left to supply a second ABI.
 #[test]
 fn a_concrete_generic_body_states_its_owned_abi() {
-    let ws = ws_of(SRC);
+    let ws = checked_ws_of(SRC);
     let ident = func_ref(&ws, "ident");
     let main = func_ref(&ws, "main");
     let (scx, bodies) = lower_test_roots(&ws, &[main]);
@@ -153,7 +134,7 @@ fn a_concrete_generic_body_states_its_owned_abi() {
 /// above could pass on an oracle that answers only for generics.
 #[test]
 fn a_non_generic_body_states_its_abi_on_its_base_instance() {
-    let ws = ws_of(SRC);
+    let ws = checked_ws_of(SRC);
     let shift = func_ref(&ws, "shift");
 
     let (scx, bodies) = lower_test_roots(&ws, &[shift]);
@@ -168,7 +149,7 @@ fn a_non_generic_body_states_its_abi_on_its_base_instance() {
 
 #[test]
 fn concrete_plan_applies_fixed_name_guards_before_fn_value_narrowing() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         r#"
 nobox value V2 { x: float, y: float }
 @nomangle fn sink(v: V2) -> V2 { return v }
@@ -210,7 +191,7 @@ fn main() {
 
 #[test]
 fn concrete_plan_keeps_a_generic_bound_tuple_parameter_opaque() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         r#"
 nobox value V2 { x: float, y: float }
 @scalar_abi fn generic_tuple_take<T>(value: T) -> T { return value }
@@ -287,7 +268,7 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
 /// value, and a GC-carrying value exercise boxed and multi-lane answers.
 #[test]
 fn one_owned_representation_reaches_body_call_return_and_publisher() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         r#"
 nobox value Leaf { x: float, y: float }
 nobox value Nested { leaf: Leaf, z: float }
@@ -430,7 +411,7 @@ fn main() {
 
 #[test]
 fn function_value_uses_the_owned_signature_representation() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         r#"
 nobox value Leaf { x: float, y: float }
 @scalar_abi fn nested(v: Leaf) -> Leaf { return v }
@@ -484,7 +465,7 @@ fn main() {
 
 #[test]
 fn unit_function_values_share_the_no_result_abi() {
-    let ws = ws_of("fn sink() { print(\"ok\") }\n");
+    let ws = checked_ws_of("fn sink() { print(\"ok\") }\n");
     let scx = ScalarCtx::new(&ws);
     let sink = func_ref(&ws, "sink");
     let declaration = BackendFnAbiPlan::for_boundary_declaration(&ws, &scx, sink);
@@ -504,7 +485,7 @@ fn unit_function_values_share_the_no_result_abi() {
 
 #[test]
 fn nested_opaque_tuple_elements_keep_one_physical_slot() {
-    let ws = ws_of("fn main() { print(\"ok\") }\n");
+    let ws = checked_ws_of("fn main() { print(\"ok\") }\n");
     let arena = RepArena::default();
     let nested = MonoTy::Tuple(vec![MonoTy::Int, MonoTy::Float]);
     let outer = MonoTy::Tuple(vec![nested, MonoTy::Bool]);
@@ -531,7 +512,7 @@ fn nested_opaque_tuple_elements_keep_one_physical_slot() {
 
 #[test]
 fn a_representation_id_cannot_cross_build_arenas() {
-    let ws = ws_of("fn main() { print(\"ok\") }\n");
+    let ws = checked_ws_of("fn main() { print(\"ok\") }\n");
     let left = RepArena::default();
     let right = RepArena::default();
     let left_id = left
@@ -563,7 +544,7 @@ fn a_representation_id_cannot_cross_build_arenas() {
 
 #[test]
 fn container_storage_uses_the_element_representation_plan() {
-    let ws = ws_of("nobox value V2 { x: float, y: float }");
+    let ws = checked_ws_of("nobox value V2 { x: float, y: float }");
     let arena = RepArena::default();
     let element = nominal("V2");
     let ty = MonoTy::App {
@@ -590,7 +571,7 @@ fn container_storage_uses_the_element_representation_plan() {
 
 #[test]
 fn container_columns_carry_owned_element_identity() {
-    let ws = ws_of("value V2 { x: float, y: float }\nfn main() { print(\"ok\") }\n");
+    let ws = checked_ws_of("value V2 { x: float, y: float }\nfn main() { print(\"ok\") }\n");
     let scx = ScalarCtx::new(&ws);
     let arena = RepArena::default();
     let ty = MonoTy::App {
@@ -611,7 +592,7 @@ fn container_columns_carry_owned_element_identity() {
 
 #[test]
 fn element_rep_plan_owns_ffi_column_admission() {
-    let ws = ws_of("value V2 { x: float, y: float }\nenum E { A(int), B(int), None }\n");
+    let ws = checked_ws_of("value V2 { x: float, y: float }\nenum E { A(int), B(int), None }\n");
     let arena = RepArena::default();
     let vec_ty = MonoTy::App {
         ctor: MonoCtor::Array,
@@ -648,7 +629,7 @@ fn element_rep_plan_owns_ffi_column_admission() {
 
 #[test]
 fn column_element_plan_carries_the_nobox_guarantee() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         "nobox value N { x: float, y: float }\n\
          value B { x: float, y: float }\n",
     );
@@ -693,7 +674,7 @@ fn column_element_plan_carries_the_nobox_guarantee() {
 
 #[test]
 fn missing_bound_result_plan_is_an_explicit_error() {
-    let ws = ws_of("fn main() { print(\"ok\") }\n");
+    let ws = checked_ws_of("fn main() { print(\"ok\") }\n");
     let scx = ScalarCtx::new(&ws);
     let interner = skull_mir::monoty::MonoInterner::new();
     let result =
@@ -706,7 +687,7 @@ fn missing_bound_result_plan_is_an_explicit_error() {
 
 #[test]
 fn leaf_places_carry_the_container_element_representation() {
-    let ws = ws_of("nobox value V2 { x: float, y: float }");
+    let ws = checked_ws_of("nobox value V2 { x: float, y: float }");
     let arena = RepArena::default();
     let ty = MonoTy::App {
         ctor: MonoCtor::Nominal(Ustr::from("NativeBuffer")),
@@ -733,19 +714,19 @@ fn leaf_places_carry_the_container_element_representation() {
 
 #[test]
 fn enum_layout_is_selected_by_one_owned_plan() {
-    let cdata_ws = ws_of("enum E { A(int), B(int), None }");
+    let cdata_ws = checked_ws_of("enum E { A(int), B(int), None }");
     let cdata = EnumPlan::for_name(&cdata_ws, Ustr::from("E")).expect("enum plan");
     assert!(matches!(cdata.layout(), EnumLayout::Cdata(_)));
     assert!(cdata.cdata().is_some());
     assert!(cdata.flat().is_none());
 
-    let flat_ws = ws_of("nobox value P { x: int, y: int }\nenum E { Has(P), Nope }");
+    let flat_ws = checked_ws_of("nobox value P { x: int, y: int }\nenum E { Has(P), Nope }");
     let flat = EnumPlan::for_name(&flat_ws, Ustr::from("E")).expect("enum plan");
     assert!(matches!(flat.layout(), EnumLayout::Flat(_)));
     assert!(flat.flat().is_some());
     assert!(flat.cdata().is_none());
 
-    let unit_ws = ws_of("enum E { A, B }");
+    let unit_ws = checked_ws_of("enum E { A, B }");
     let unit = EnumPlan::for_name(&unit_ws, Ustr::from("E")).expect("enum plan");
     assert!(unit.is_payload_free());
     assert!(matches!(unit.layout(), EnumLayout::PayloadFree));
@@ -753,7 +734,7 @@ fn enum_layout_is_selected_by_one_owned_plan() {
 
 #[test]
 fn boundary_class_and_transport_contract_have_one_owner() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         r#"
 @nomangle inline(lua) fn boxed(v: int) -> int = "return v"
 @nomangle @scalar_abi inline(lua) fn scalar(v: int) -> int = "return v"
@@ -776,7 +757,7 @@ fn main() { print("{boxed(1)} {scalar(2)}") }
 
 #[test]
 fn an_opaque_boundary_uses_an_explicit_boundary_abi_plan() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         r#"
 nobox value V2 { x: float, y: float }
 @scalar_abi inline(lua) fn boundary(v: V2) -> V2 = "return v"
@@ -792,7 +773,7 @@ fn main() { boundary(V2 { x: 1.0, y: 2.0 }) }
 
 #[test]
 fn concrete_rep_planner_is_total_over_the_logical_type_vocabulary() {
-    let ws = ws_of("nobox value V2 { x: float, y: float }\nvalue Gc { text: string }");
+    let ws = checked_ws_of("nobox value V2 { x: float, y: float }\nvalue Gc { text: string }");
     let arena = RepArena::default();
     let valid = vec![
         MonoTy::Int,
@@ -869,7 +850,7 @@ fn concrete_rep_planner_is_total_over_the_logical_type_vocabulary() {
 
 #[test]
 fn function_value_plan_keeps_opaque_reference_parameters_explicit() {
-    let ws = ws_of("fn main() { print(\"ok\") }\n");
+    let ws = checked_ws_of("fn main() { print(\"ok\") }\n");
     let scx = ScalarCtx::new(&ws);
     let vec_int = MonoTy::App {
         ctor: MonoCtor::Array,
@@ -897,7 +878,7 @@ fn function_value_plan_keeps_opaque_reference_parameters_explicit() {
 
 #[test]
 fn function_value_plan_mode_is_part_of_the_owned_signature() {
-    let ws = ws_of("value V2 { x: float, y: float }\nfn main() { print(\"ok\") }\n");
+    let ws = checked_ws_of("value V2 { x: float, y: float }\nfn main() { print(\"ok\") }\n");
     let scx = ScalarCtx::new(&ws);
     let ty = MonoTy::Function {
         params: vec![nominal("V2")],
@@ -924,7 +905,7 @@ fn function_value_plan_mode_is_part_of_the_owned_signature() {
 
 #[test]
 fn first_class_function_values_match_first_class_boundary_declarations() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         r#"
 nobox value Leaf { x: float, y: float }
 fn named(value: Leaf) { print("ok") }
@@ -953,7 +934,7 @@ fn main() { print("main") }
 
 #[test]
 fn aggregate_value_projection_has_an_owned_value_context() {
-    let ws = ws_of("nobox value V2 { x: float, y: float }\nfn main() { print(\"ok\") }\n");
+    let ws = checked_ws_of("nobox value V2 { x: float, y: float }\nfn main() { print(\"ok\") }\n");
     let arena = RepArena::default();
     let id = arena
         .plan(
@@ -979,7 +960,7 @@ fn aggregate_value_projection_has_an_owned_value_context() {
 
 #[test]
 fn global_storage_uses_an_owned_value_plan() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         "nobox value G { x: float, y: float }\n\
          global state: G = G { x: 1.0, y: 2.0 }\n\
          fn main() { print(\"ok\") }\n",
@@ -1002,7 +983,7 @@ fn global_storage_uses_an_owned_value_plan() {
 
 #[test]
 fn column_storage_mir_carries_the_owned_nobox_fact() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         r#"
 value V2 { x: float, y: float }
 nobox value NV2 { x: float, y: float }
@@ -1030,7 +1011,7 @@ fn main() {
 
 #[test]
 fn nominal_value_storage_is_owned_by_the_rep_plan() {
-    let ws = ws_of("value Boxed { text: string, tag: int }\n");
+    let ws = checked_ws_of("value Boxed { text: string, tag: int }\n");
     let arena = RepArena::default();
     let id = arena
         .plan_nominal_value(&ws, bone_core::hir::FnBackend::Lua, Ustr::from("Boxed"))
@@ -1052,7 +1033,8 @@ fn nominal_value_storage_is_owned_by_the_rep_plan() {
 
 #[test]
 fn nominal_value_leaf_paths_are_owned_by_the_rep_plan() {
-    let ws = ws_of("value V2 { x: float, y: float }\nvalue Boxed { child: V2, tag: int }\n");
+    let ws =
+        checked_ws_of("value V2 { x: float, y: float }\nvalue Boxed { child: V2, tag: int }\n");
     let arena = RepArena::default();
     assert_eq!(
         arena
@@ -1072,7 +1054,9 @@ fn nominal_value_leaf_paths_are_owned_by_the_rep_plan() {
 
 #[test]
 fn nominal_value_presence_flags_are_owned_by_the_rep_plan() {
-    let ws = ws_of("nobox value V2 { x: float, y: float }\nvalue Boxed { child: V2?, tag: int }\n");
+    let ws = checked_ws_of(
+        "nobox value V2 { x: float, y: float }\nvalue Boxed { child: V2?, tag: int }\n",
+    );
     let arena = RepArena::default();
     assert_eq!(
         arena
@@ -1088,7 +1072,7 @@ fn nominal_value_presence_flags_are_owned_by_the_rep_plan() {
 
 #[test]
 fn nominal_leaf_addresses_are_owned_by_the_rep_plan() {
-    let ws = ws_of("value V2 { x: float, y: float }\nvalue Boxed { pos: V2, tag: int }\n");
+    let ws = checked_ws_of("value V2 { x: float, y: float }\nvalue Boxed { pos: V2, tag: int }\n");
     let arena = RepArena::default();
     let addresses = arena
         .nominal_leaf_addresses(&ws, bone_core::hir::FnBackend::Lua, Ustr::from("Boxed"))
@@ -1105,7 +1089,7 @@ fn nominal_leaf_addresses_are_owned_by_the_rep_plan() {
 
 #[test]
 fn nominal_c_layout_is_owned_by_the_rep_plan() {
-    let ws = ws_of("value Mixed { on: bool, count: int, scale: f32 }");
+    let ws = checked_ws_of("value Mixed { on: bool, count: int, scale: f32 }");
     let arena = RepArena::default();
     let (leaves, size, align) = arena
         .nominal_leaf_layout(&ws, bone_core::hir::FnBackend::Lua, Ustr::from("Mixed"))
@@ -1120,7 +1104,7 @@ fn nominal_c_layout_is_owned_by_the_rep_plan() {
 
 #[test]
 fn nominal_c_layout_aligns_nested_fields_before_recurse() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         "value V2 { x: f32, y: f32 }\n\
          value V4 { x: f32, y: f32, z: f32, w: f32 }\n\
          value SpriteFragU {\
@@ -1161,7 +1145,7 @@ fn nominal_c_layout_aligns_nested_fields_before_recurse() {
 
 #[test]
 fn shared_struct_field_plan_is_required_and_fail_closed() {
-    let mut ws = ws_of(
+    let mut ws = checked_ws_of(
         "struct Child { x: int }\n\
          value Inner { x: int }\n\
          value Outer { inner: Inner }\n\
@@ -1254,7 +1238,7 @@ fn shared_struct_field_plan_is_required_and_fail_closed() {
 
 #[test]
 fn direct_leaf_reader_compacts_parameter_transport() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         r#"
 value Sample { x: float, y: float, z: float }
 fn selected(v: Sample) -> float { return v.y }
@@ -1287,7 +1271,7 @@ fn main() -> float { return selected(Sample { x: 1.0, y: 2.0, z: 3.0 }) }
 
 #[test]
 fn demanded_top_level_field_retains_nested_layout_and_nobox_guarantee() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         r#"
 nobox value Inner { x: float, y: float }
 nobox value Outer { unused: float, kept: Inner, tail: float }
@@ -1315,7 +1299,7 @@ fn main(v: Outer) -> float { return selected(v) }
 
 #[test]
 fn whole_use_and_mutation_keep_complete_parameter_transport() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         r#"
 value Sample { x: float, y: float }
 fn identity(v: Sample) -> Sample { return v }
@@ -1336,7 +1320,7 @@ fn main(v: Sample) -> float { return mutate(identity(v)) }
 
 #[test]
 fn unused_aggregate_parameter_has_zero_transport_but_keeps_eager_call() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         r#"
 value Sample { x: float, y: float }
 fn selected(v: Sample) -> float { return 5.0 }
@@ -1356,7 +1340,7 @@ fn main() -> float { return selected(Sample { x: 1.0, y: 2.0 }) }
 
 #[test]
 fn fixed_names_nullable_and_defaulted_parameters_keep_complete_transport() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         r#"
 value Sample { x: float, y: float }
 @nomangle fn demand_fixed(v: Sample) -> float { return v.y }
@@ -1379,7 +1363,7 @@ fn demand_nullable(v: Sample?) -> Sample? { return v }
 
 #[test]
 fn safe_navigation_receiver_uses_the_same_compact_transport() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         r#"
 value Sample { x: float, y: float }
 fn demand_method(v: Sample) -> float { return v.y }
@@ -1399,7 +1383,7 @@ fn main(v: Sample?) -> float { return v?.demand_method() ?? 0.0 }
 
 #[test]
 fn match_parameter_demand_retains_nested_payload_and_guard_fields() {
-    let ws = ws_of(
+    let ws = checked_ws_of(
         r#"
 nobox value DemandPayload { a: int, b: int, c: int, d: int }
 enum DemandSubject { Present(DemandPayload), Empty }
@@ -1472,7 +1456,7 @@ fn demand_unit_match_caller(event: UnitMatchEvent) -> UnitMatchDirection? {{
 }}
 "#
     );
-    let ws = ws_of(&src);
+    let ws = checked_ws_of(&src);
     let caller = func_ref(&ws, "demand_unit_match_caller");
     let selected = func_ref(&ws, "demand_unit_match_direction");
     let (scx, bodies) = lower_test_roots(&ws, &[caller]);
@@ -1500,7 +1484,7 @@ fn nullable_child_expansion_respects_the_signature_lane_budget() {
         .map(|i| format!("child{i}: Token?"))
         .collect::<Vec<_>>()
         .join(", ");
-    let ws = ws_of(&format!(
+    let ws = checked_ws_of(&format!(
         r#"
 value Token {{ a: int, b: int, c: int, d: int }}
 nobox value Many {{ {fields} }}

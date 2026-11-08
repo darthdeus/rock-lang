@@ -1,5 +1,6 @@
 // One harness avoids linking the compiler into a separate binary per test file.
 mod abi_plan;
+mod common;
 mod demand_map;
 mod gpu_layout;
 mod instance_args_subst_roundtrip;

@@ -15,30 +15,13 @@
 //! `instance_identity.rs` is the other half: that going through the ARENA loses
 //! nothing either.
 
-use std::sync::LazyLock;
-
+use crate::common::ws_of;
 use skull_mir::instance::Instance;
 use skull_mir::lower::{spec_key_from_subst, spec_subst_from_key};
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::MonoInterner;
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn ws_of(src: &str) -> bone_core::workspace::Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
-}
 
 const SRC: &str = r#"
 value V2 { x: float, y: float }

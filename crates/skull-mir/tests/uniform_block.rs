@@ -23,33 +23,14 @@
 //! live in-tree structs (BloomBlurU, HeatShimmerU, SpriteFragU) disagree with
 //! their C layout, so each has a case below carrying both numbers.
 
-use std::sync::LazyLock;
+use crate::common::checked_ws_of;
 use ustr::Ustr;
 
 use skull_mir::gpu_layout::{LeafStore, UniformBlockPlan, WireKind, WireView, uniform_block};
 use skull_mir::lower::RepArena;
 
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn ws_of(src: &str) -> bone_core::workspace::Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let errs = skull_mir::verdict::body_errors(&ws);
-    assert!(errs.is_empty(), "fixture must type-check: {errs:?}");
-    ws
-}
-
 fn plan_of(src: &str, struct_name: &str) -> UniformBlockPlan {
-    let ws = ws_of(src);
+    let ws = checked_ws_of(src);
     uniform_block(&ws, Ustr::from(struct_name)).expect("block layout must compute")
 }
 
@@ -212,14 +193,14 @@ fn ui_sdf_bar_coincides_with_its_c_layout_in_offsets_but_not_size() {
 
 #[test]
 fn a_plain_struct_is_not_a_binding_group() {
-    let ws = ws_of("struct NotValue { a: float }");
+    let ws = checked_ws_of("struct NotValue { a: float }");
     let e = uniform_block(&ws, Ustr::from("NotValue")).expect_err("must reject");
     assert!(e.message.contains("value"), "got {}", e.message);
 }
 
 #[test]
 fn an_empty_group_binds_nothing() {
-    let ws = ws_of("value Empty {}");
+    let ws = checked_ws_of("value Empty {}");
     let e = uniform_block(&ws, Ustr::from("Empty")).expect_err("must reject");
     // Not a bare is_err(): a lookup failure would satisfy that too, and this
     // case is about the struct being FOUND and having nothing in it.
@@ -232,7 +213,7 @@ fn an_empty_group_binds_nothing() {
 /// pins and no shader reads.
 #[test]
 fn a_nested_user_struct_is_rejected_until_a_consumer_needs_it() {
-    let ws = ws_of("value Inner { a: float }\nvalue Outer { i: Inner, b: float }");
+    let ws = checked_ws_of("value Inner { a: float }\nvalue Outer { i: Inner, b: float }");
     let e = uniform_block(&ws, Ustr::from("Outer")).expect_err("must reject");
     assert!(
         e.message.contains("Inner"),
@@ -289,7 +270,7 @@ fn the_wire_and_value_walkers_agree_on_every_shape() {
         ("value C { a: Vec3, b: float, c: Vec4 }", "C"),
         ("value D { flag: bool, count: int, scale: float }", "D"),
     ] {
-        let ws = ws_of(src);
+        let ws = checked_ws_of(src);
         let n = Ustr::from(name);
         let plan = skull_mir::lower::uniform_block_checked(&ws, n)
             .unwrap_or_else(|e| panic!("`{name}` must pass the agreement check: {e}"));
@@ -502,7 +483,7 @@ fn a_block_at_the_portable_limit_is_accepted() {
 
 #[test]
 fn a_block_over_the_portable_limit_is_rejected() {
-    let ws = ws_of(&mat4_block_src(257));
+    let ws = checked_ws_of(&mat4_block_src(257));
     let e = uniform_block(&ws, Ustr::from("BigU"))
         .expect_err("16448 bytes exceeds the OpenGL guarantee of 16384 and must reject");
     let m = e.message.clone();
@@ -520,7 +501,7 @@ fn a_block_over_the_portable_limit_is_rejected() {
 /// carries the hint rather than a caller's own walk.
 #[test]
 fn a_sampler_in_a_uniform_group_names_the_fix() {
-    let ws = ws_of("value BadU { tint: Vec4, tex: Sampler2D }\nfn main() {}");
+    let ws = checked_ws_of("value BadU { tint: Vec4, tex: Sampler2D }\nfn main() {}");
     let msg = skull_mir::gpu_layout::uniform_group_members(&ws, ustr::Ustr::from("BadU"))
         .expect_err("a sampler field must reject")
         .message;
@@ -531,7 +512,7 @@ fn a_sampler_in_a_uniform_group_names_the_fix() {
 
     // CONTROL: the same group without the sampler classifies, so the message
     // above is about the field and not about the group being unreadable.
-    let ok = ws_of("value GoodU { tint: Vec4 }\nfn main() {}");
+    let ok = checked_ws_of("value GoodU { tint: Vec4 }\nfn main() {}");
     assert_eq!(
         skull_mir::gpu_layout::uniform_group_members(&ok, ustr::Ustr::from("GoodU"))
             .expect("a scalar group classifies")

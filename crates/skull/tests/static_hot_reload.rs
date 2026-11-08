@@ -11,13 +11,8 @@
 
 use bone_semantic::inference::Workspace;
 
-fn ws_of(src: &str) -> Workspace {
-    let module = skull_parser::parse_module_clean(src, ustr::Ustr::from("<t>")).expect("parse");
-    bone_semantic::semantic_passes::semantic_pass(&mut [module]).expect("semantic_pass")
-}
-
 fn emit_program(src: &str) -> String {
-    let ws = ws_of(src);
+    let ws = crate::common::ws_of(src);
     let mid = skull::user_module_id(&ws).unwrap();
     skull::mir_emit::emit_workspace_mir(&ws, mid)
         .expect("emit")

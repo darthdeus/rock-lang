@@ -6,25 +6,14 @@
 //! bounded depth here so a missing arm is found by the test rather than by a
 //! miscompile.
 
+use crate::common::STDLIB;
 use std::collections::BTreeSet;
-use std::sync::LazyLock;
 
 use bone_core::hir::BodyOwner;
 use bone_core::prelude::ModuleId;
 use bone_core::workspace::Workspace;
 use skull_mir::monoty::{MonoArena, MonoCtor, MonoSubst, MonoTy, MonoTyReason};
 use ustr::Ustr;
-
-/// The stdlib, parsed once. Needed for anything that resolves real types.
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
 
 fn check(src: &str) -> (Workspace, ModuleId) {
     let mut modules = STDLIB.clone();
