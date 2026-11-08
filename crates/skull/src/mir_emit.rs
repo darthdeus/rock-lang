@@ -67,18 +67,8 @@ struct WorkerScope {
     _allocation_activation: crate::allocation_report::ActivationScope,
 }
 
-#[cfg(not(feature = "sequential"))]
 fn par_map<T: Send, R: Send>(items: Vec<T>, f: impl Fn(T) -> R + Sync + Send) -> Vec<R> {
-    use rayon::prelude::*;
-    let mode = WorkerMode::capture();
-    items
-        .into_par_iter()
-        .map_init(move || mode.enter(), move |_, item| f(item))
-        .collect()
-}
-#[cfg(feature = "sequential")]
-fn par_map<T, R>(items: Vec<T>, f: impl Fn(T) -> R) -> Vec<R> {
-    items.into_iter().map(f).collect()
+    par_map_with(items, || (), move |_, item| f(item))
 }
 
 /// Like [`par_map`], but threads a per-worker mutable state `S` (built by `init`)

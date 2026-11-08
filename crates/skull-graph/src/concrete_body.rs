@@ -2661,28 +2661,15 @@ where
     U: Send,
     F: Fn(T) -> U + Send + Sync,
 {
-    #[cfg(feature = "sequential")]
-    {
-        items
-            .into_iter()
-            .map(|item| {
-                census.record();
-                f(item)
-            })
-            .collect()
-    }
-    #[cfg(not(feature = "sequential"))]
-    {
-        use rayon::prelude::*;
+    use bone_core::prelude::*;
 
-        items
-            .into_par_iter()
-            .map(|item| {
-                census.record();
-                f(item)
-            })
-            .collect()
-    }
+    items
+        .into_par_iter()
+        .map(|item| {
+            census.record();
+            f(item)
+        })
+        .collect()
 }
 
 #[cfg(not(feature = "sequential"))]

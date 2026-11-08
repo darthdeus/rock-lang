@@ -8,7 +8,7 @@ publish = false
 description = "Backend-neutral instance graph and concrete artifact plans"
 
 [features]
-sequential = []
+sequential = ["bone-core/sequential"]
 
 # The TARGET-NEUTRAL instance graph and the per-artifact views over it. It sits BELOW every backend so
 # each one realizes the same graph: `skull` (luajit driver),

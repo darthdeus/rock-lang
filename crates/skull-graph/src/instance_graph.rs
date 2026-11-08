@@ -1944,11 +1944,8 @@ impl InstanceGraph {
                     };
                     (owner, used_tree, c, elapsed_ns(started))
                 };
-                #[cfg(feature = "sequential")]
-                let prepared: Vec<_> = wave.into_iter().map(expand_owner).collect();
-                #[cfg(not(feature = "sequential"))]
                 let prepared: Vec<_> = {
-                    use rayon::prelude::*;
+                    use bone_core::prelude::*;
                     wave.into_par_iter().map(expand_owner).collect()
                 };
                 for (owner, mut used_tree, mut prepared_c, mut visit_ns) in prepared {
