@@ -47,6 +47,8 @@ skull = { workspace = true }
 skull-codegen-glsl = { workspace = true }
 skull-codegen-js = { workspace = true, optional = true }
 skull-mir = { workspace = true }
+skull-codegen-lua = { workspace = true }
+png = "0.18"
 lsp-types = { workspace = true }
 
 clap = { workspace = true }
