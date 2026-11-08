@@ -60,6 +60,8 @@ impl SourceFiles {
     /// lint and lsp paths keep working on the full set.
     pub fn production_only(&self, project_root: &Path) -> Result<SourceFiles, CompilerError> {
         let mut files = Vec::with_capacity(self.files.len());
+        // Every file shares one of a few roots; canonicalize each root once.
+        let mut canonical_roots: Vec<(&Path, Result<PathBuf, String>)> = Vec::new();
         for source in &self.files {
             let file = source.borrow();
             let path = file.file.to_id_path();
@@ -67,7 +69,16 @@ impl SourceFiles {
                 Some(tag) => (self.package_root(tag.id, &path), true),
                 None => (project_root, false),
             };
-            if !Self::is_test_only_path_for_source(&path, root, tagged)? {
+            let index = match canonical_roots.iter().position(|(known, _)| *known == root) {
+                Some(index) => index,
+                None => {
+                    let canonical = root.canonicalize().map_err(|error| error.to_string());
+                    canonical_roots.push((root, canonical));
+                    canonical_roots.len() - 1
+                }
+            };
+            let canonical_root = Self::canonical_root_for(&path, root, &canonical_roots[index].1)?;
+            if !Self::is_test_only_path_under(&path, root, canonical_root, tagged)? {
                 files.push(source.clone());
             }
         }
@@ -103,12 +114,30 @@ impl SourceFiles {
         root: &Path,
         tagged: bool,
     ) -> Result<bool, CompilerError> {
-        let canonical_root = root.canonicalize().map_err(|error| {
+        let canonical_root = root.canonicalize().map_err(|error| error.to_string());
+        let canonical_root = Self::canonical_root_for(path, root, &canonical_root)?;
+        Self::is_test_only_path_under(path, root, canonical_root, tagged)
+    }
+
+    fn canonical_root_for<'a>(
+        path: &str,
+        root: &Path,
+        canonical_root: &'a Result<PathBuf, String>,
+    ) -> Result<&'a Path, CompilerError> {
+        canonical_root.as_deref().map_err(|error| {
             CompilerError::new_no_location(format!(
                 "cannot classify source `{path}` against root `{}`: cannot canonicalize root: {error}",
                 root.display()
             ))
-        })?;
+        })
+    }
+
+    fn is_test_only_path_under(
+        path: &str,
+        root: &Path,
+        canonical_root: &Path,
+        tagged: bool,
+    ) -> Result<bool, CompilerError> {
         let canonical_path = match Path::new(path).canonicalize() {
             Ok(canonical) => canonical,
             Err(_) if !tagged => {
@@ -122,7 +151,7 @@ impl SourceFiles {
                 )));
             }
         };
-        let relative = match canonical_path.strip_prefix(&canonical_root) {
+        let relative = match canonical_path.strip_prefix(canonical_root) {
             Ok(relative) => relative,
             Err(_) if !tagged => {
                 // Untagged stdlib and loose files are not owned by this root.
