@@ -5,9 +5,12 @@
 //! - `ExpectPretty` renders any `Result<T, CompilerError>` failure through
 //!   rock's ariadne pipeline before panicking.
 
+// Both test harnesses include this module and each uses part of it.
+#![allow(dead_code)]
+
 use skull_parser::{parse_module, parse_module_with_dialect};
 
-use crate::prelude::*;
+use bone_semantic::prelude::*;
 
 pub fn render_err(sources: &[(&str, &str)], e: &CompilerError) -> String {
     let mut sf = SourceFiles::empty();
@@ -51,8 +54,9 @@ pub fn check_types(src: &str) -> Result<(), String> {
         return Err(stage("parse_rock", e.clone()));
     }
 
-    let ws = crate::semantic_passes::semantic_pass_enforcing_identity_storage(&mut [module])
-        .map_err(|e| stage("semantic_pass", e))?;
+    let ws =
+        bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage(&mut [module])
+            .map_err(|e| stage("semantic_pass", e))?;
 
     // `semantic_pass` Ok means "lowered and checked", not "no type errors" —
     // body-level errors are collected per BodyOwner. A fixture section fails
@@ -99,7 +103,7 @@ pub fn check_types(src: &str) -> Result<(), String> {
             return Err(stage("dump", dump_at(&ws, mid, inf, *start, *end)));
         }
 
-        let actual = crate::query::type_at(&ws, mid, inf, *start).ok_or_else(|| {
+        let actual = bone_semantic::query::type_at(&ws, mid, inf, *start).ok_or_else(|| {
             stage(
                 "type_at",
                 CompilerError::new_with_label(
@@ -318,7 +322,7 @@ fn check_types_packages_inner(
         aliases.packages.push(entry);
     }
 
-    let ws = crate::semantic_passes::semantic_pass_enforcing_identity_storage_with_aliases(
+    let ws = bone_semantic::semantic_passes::semantic_pass_enforcing_identity_storage_with_aliases(
         &mut modules,
         &aliases,
     )
@@ -360,7 +364,7 @@ fn check_types_packages_inner(
             if expected == "?" {
                 return Err("`?` dump markers are not supported in package fixtures".to_string());
             }
-            let actual = crate::query::type_at(&ws, mid, inf, *start).ok_or_else(|| {
+            let actual = bone_semantic::query::type_at(&ws, mid, inf, *start).ok_or_else(|| {
                 format!("no type at marker (expected `{expected}`) in {}", f.file)
             })?;
             let actual_str = ws.render(actual.body, actual.ty);

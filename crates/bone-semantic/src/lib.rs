@@ -12,9 +12,7 @@ pub use bone_lower as lower;
 #[macro_use]
 pub mod prelude;
 // `type_at` -- the position->type inference-inspection primitive bone's own
-// `//^` fixtures (test_support::check_types) and LSP hover both read. IDE
+// `//^` fixtures (see tests/test_support.rs) and LSP hover both read. IDE
 // navigation queries (definition/references) live in the bone-query crate.
 pub mod query;
 pub mod semantic_passes;
-
-pub mod test_support;

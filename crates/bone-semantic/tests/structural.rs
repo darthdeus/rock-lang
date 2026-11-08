@@ -3,8 +3,8 @@
 // cross-module wiring). Type-level behavior belongs in tests/fixtures/*.rock
 // instead.
 
+use crate::test_support::ExpectPretty;
 use bone_semantic::prelude::*;
-use bone_semantic::test_support::ExpectPretty;
 
 /// Parse a source string into a raw (uncooked) skull `Ast`. Shims rock's old
 /// `parse_rock`/`parse_rock_with_file` so call sites need no rewriting.
@@ -2136,7 +2136,7 @@ fn nullable_operator_diagnostic_labels_operands_without_an_overload_menu() {
 
 #[test]
 fn nullable_operator_diagnostic_preserves_accessibility_precedence() {
-    let files = bone_semantic::test_support::parse_embedded_files(
+    let files = crate::test_support::parse_embedded_files(
         r#"
 //-- lib.rock @pkg=lib,1 @v1
 pub value Number { pub n: int }
@@ -2147,7 +2147,7 @@ use lib::{Number, operator(*)};
 fn multiply(x: Number?, y: int) -> int { x * y }
 "#,
     );
-    let error = bone_semantic::test_support::check_types_embedded_with_stdlib(
+    let error = crate::test_support::check_types_embedded_with_stdlib(
         &files,
         &[(
             "<stdlib>/operators.rock",
@@ -2179,8 +2179,8 @@ use lib::{{f, g}};
 {app}
 "#
     );
-    let files = bone_semantic::test_support::parse_embedded_files(&src);
-    bone_semantic::test_support::check_types_embedded_with_stdlib(
+    let files = crate::test_support::parse_embedded_files(&src);
+    crate::test_support::check_types_embedded_with_stdlib(
         &files,
         &[("<stdlib>/probe.rock", "fn f(x: float) -> string { \"\" }")],
     )

@@ -1,4 +1,5 @@
 mod fixture_harness;
+mod test_support;
 
 type Result = std::result::Result<(), String>;
 
@@ -14,7 +15,7 @@ fn check_rock(file_name: &str, contents: &str) -> Result {
 
     if sections.is_empty() {
         // Bare fixture (no `//- name` markers) — whole file is one case.
-        if let Err(e) = bone_semantic::test_support::check_types(contents) {
+        if let Err(e) = crate::test_support::check_types(contents) {
             panic!("{}", e);
         }
     } else {
@@ -25,7 +26,7 @@ fn check_rock(file_name: &str, contents: &str) -> Result {
                 None => (section.name, false, None),
             };
             match (
-                bone_semantic::test_support::check_types(section.content),
+                crate::test_support::check_types(section.content),
                 expect_fail,
             ) {
                 (Ok(_), true) => {
@@ -123,7 +124,7 @@ fn check_std_fixture(contents: &str) -> Result {
         .iter()
         .find(|section| section.name == "v1_default_prelude")
         .expect("modules_std.rock needs a v1_default_prelude section");
-    let user_files = bone_semantic::test_support::parse_embedded_files(prelude.content);
+    let user_files = crate::test_support::parse_embedded_files(prelude.content);
     assert!(
         !user_files.is_empty(),
         "v1_default_prelude has no embedded file"
@@ -175,8 +176,8 @@ fn check_std_fixture(contents: &str) -> Result {
 fn check_modules_fixture(contents: &str) -> Result {
     let sections = test_utils::parse_sections(contents);
     if sections.is_empty() {
-        if let Err(e) = bone_semantic::test_support::check_types_embedded_with_stdlib(
-            &bone_semantic::test_support::parse_embedded_files(contents),
+        if let Err(e) = crate::test_support::check_types_embedded_with_stdlib(
+            &crate::test_support::parse_embedded_files(contents),
             stdlib_sources(),
         ) {
             panic!("{}", e);
@@ -203,9 +204,9 @@ fn check_modules_fixture(contents: &str) -> Result {
             }
             None => (section.name.to_string(), false, None, None),
         };
-        let files = bone_semantic::test_support::parse_embedded_files(section.content);
+        let files = crate::test_support::parse_embedded_files(section.content);
         match (
-            bone_semantic::test_support::check_types_embedded_with_stdlib(&files, stdlib_sources()),
+            crate::test_support::check_types_embedded_with_stdlib(&files, stdlib_sources()),
             expect_fail,
         ) {
             (Ok(_), true) => failures.push(format!("section `{name}` was marked @fail but passed")),

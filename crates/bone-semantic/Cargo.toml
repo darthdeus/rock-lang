@@ -22,10 +22,9 @@ bone-inference = { path = "../bone-inference" }
 skull-parser = { path = "../skull-parser" }
 rock-core = { path = "../rock-core" }
 
-test-utils = { path = "../test-utils" }
-
 [dev-dependencies]
 rock-stdlib = { path = "../rock-stdlib" }
+test-utils = { path = "../test-utils" }
 
 [[test]]
 name = "bone_semantic_tests"
