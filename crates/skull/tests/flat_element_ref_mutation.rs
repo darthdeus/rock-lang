@@ -229,3 +229,48 @@ fn main() {
         "the rejection must carry a source span: {err:?}"
     );
 }
+
+/// A flat `ref` binding is a container and a slot under one static storage
+/// key, so it rebinds only to an element stored the same way
+/// (`tests/values/flat_element_ref.rock` runs the supported rebindings). Each
+/// mixed pairing here, either way round, would otherwise need the binding's
+/// storage to vary at run time; the boxed-first one used to copy the flat
+/// element into the binding and silently drop every later write.
+#[test]
+fn rebinding_a_ref_across_storage_shapes_rejects() {
+    let cases = [
+        ("flat then boxed", "rebind(xs[0], h.cell)"),
+        ("boxed then flat", "rebind(h.cell, xs[0])"),
+        ("column then nested prefix", "rebind(xs[0], os[0].cell)"),
+    ];
+    for (label, call) in cases {
+        let source = format!(
+            r#"
+value Cell {{ v: int }}
+value Outer {{ cell: Cell, z: int }}
+struct Holder {{ cell: Cell }}
+fn rebind(a: ref Cell, b: ref Cell) -> int {{
+    let r: ref Cell = a
+    r = b
+    r.v += 1
+    return r.v
+}}
+fn main() {{
+    let xs: [Cell] = [Cell {{ v: 1 }}]
+    let os: [Outer] = [Outer {{ cell: Cell {{ v: 2 }}, z: 3 }}]
+    let h = Holder {{ cell: Cell {{ v: 4 }} }}
+    print("{{{call}}}")
+}}
+"#
+        );
+        let err = match try_emit_module(&source) {
+            Ok(_) => panic!("{label}: a rebinding across storage shapes must not emit"),
+            Err(err) => err,
+        };
+        assert!(err.message.contains("cannot reassign"), "{label}: {err:?}");
+        assert!(
+            !err.labels.is_empty(),
+            "{label}: the rejection must carry a source span: {err:?}"
+        );
+    }
+}

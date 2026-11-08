@@ -1352,21 +1352,53 @@ impl Builder<'_> {
                 let v = self.lower_expr(value)?;
                 self.emit_cur(Inst::StoreGlobal { name, value: v });
             }
-            // Rebinding a `ref` binding makes it a local value, which a binding
-            // to a flat element (a vec and a slot) cannot become.
+            // A binding to a flat element is a vec and a slot under one static
+            // key, so it can be rebound only to another element of that same
+            // storage: the return scan and every read through the binding
+            // address leaves by that key. Any other right-hand side (a boxed
+            // `ref`, differently stored element, or plain value) would need the
+            // binding's storage to vary at run time.
             Expr::Var(b) if self.flat_ref_binds.contains_key(&raw(b)) => {
-                return Err(CompilerError::new_with_label(
-                    self.body.expr_spans[target],
-                    "cannot reassign a `ref` to a flat-stored container element on the Lua \
-                     backend; assign its fields, or copy it into a local first"
-                        .to_string(),
-                ));
+                let key = self.flat_ref_binds[&raw(b)];
+                if self.classify_flat_ref(value)? != Some(key) {
+                    return Err(CompilerError::new_with_label(
+                        self.body.expr_spans[target],
+                        "cannot reassign a `ref` to a flat-stored container element on the Lua \
+                         backend except to another element stored the same way; assign its \
+                         fields, or copy it into a local first"
+                            .to_string(),
+                    ));
+                }
+                let val = self.lower_flat_ref(value)?;
+                let (vec, slot) = *self
+                    .flat_ref_cells
+                    .get(&raw(b))
+                    .ok_or_else(|| self.gap_here("flat `ref` binding has no cells"))?;
+                self.emit_cur(Inst::Store {
+                    cell: vec,
+                    value: val.vec,
+                });
+                self.emit_cur(Inst::Store {
+                    cell: slot,
+                    value: val.slot,
+                });
             }
             Expr::Var(b) => {
                 let cell = *self
                     .binds
                     .get(&raw(b))
                     .ok_or_else(|| gap("assignment to an unbound variable"))?;
+                // The boxed binding's cell can only hold a copy of a flat
+                // element, which would silently detach later writes from it.
+                if self.binding_is_ref(b) && self.classify_flat_ref(value)?.is_some() {
+                    return Err(CompilerError::new_with_label(
+                        self.body.expr_spans[target],
+                        "cannot reassign this `ref` to a flat-stored container element on the \
+                         Lua backend: it was bound to an element stored differently; assign its \
+                         fields, or copy it into a local first"
+                            .to_string(),
+                    ));
+                }
                 let expected = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty));
                 let v = self.lower_expr_with_expected(value, expected.as_deref())?;
                 let v = self.coerced_to_binding(v, value, b);

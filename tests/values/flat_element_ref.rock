@@ -395,3 +395,177 @@ fn fer_mutually_recursive_ref_return_writes_the_element() {
     assert(seen_boxed != boxed_before, "the boxed write is visible through the ref")
     assert_eq(boxed.cell.w, seen_boxed, "boxed value holds the write through the returned ref")
 }
+
+// Rebinding a local `ref` moves it to another element: writes before the
+// rebinding land in the first target, writes after it only in the second.
+fn fer_rebind_write(a: ref FerCell, b: ref FerCell) -> (int, int) {
+    let r: ref FerCell = a
+    r.w += 1
+    let first = r.w
+    r = b
+    r.w += 100
+    return (first, r.w)
+}
+
+fn fer_pick(a: ref FerCell, b: ref FerCell, second: bool) -> ref FerCell {
+    let r: ref FerCell = a
+    if second {
+        r = b
+    }
+    return r
+}
+
+fn fer_rebind_through_call(a: ref FerCell, b: ref FerCell) -> int {
+    let r: ref FerCell = a
+    r = fer_descend(b, 3)
+    return fer_bump(r)
+}
+
+// Alternates the target on every iteration, so each rebinding must replace
+// both the container and the slot the previous one left in the binding.
+fn fer_rebind_in_loop(a: ref FerCell, b: ref FerCell, n: int) -> int {
+    let r: ref FerCell = a
+    let total = 0
+    for i in 0..n {
+        r.w += 1
+        total += r.w
+        if i % 2 == 0 {
+            r = b
+        } else {
+            r = a
+        }
+    }
+    return total
+}
+
+fn fer_rebind_wide(a: ref FerWide, b: ref FerWide) -> int {
+    let r: ref FerWide = a
+    r = b
+    r.b += 10
+    return r.b
+}
+
+struct FerPair { a: FerCell, b: FerCell }
+
+@test
+fn fer_rebound_ref_writes_only_its_new_target() {
+    let xs: [FerCell] = []
+    xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
+    xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
+    xs.push(FerCell { inner: FerInner { v: 50 }, w: 60 })
+    let first_before = xs[0]
+    let second_before = xs[1]
+    let untouched = xs[2]
+    let (seen_first, seen_second) = fer_rebind_write(xs[0], xs[1])
+    assert(seen_first != first_before.w, "the write before rebinding is visible")
+    assert(seen_second != second_before.w, "the write after rebinding is visible")
+    assert_eq(xs[0].w, seen_first, "first target holds only the write before rebinding")
+    assert_eq(xs[1].w, seen_second, "second target holds the write after rebinding")
+    assert_eq(xs[0].inner.v, first_before.inner.v, "first target's sibling unchanged")
+    assert_eq(xs[1].inner.v, second_before.inner.v, "second target's sibling unchanged")
+    assert_eq(xs[2].w, untouched.w, "neighbouring element unchanged")
+}
+
+@test
+fn fer_rebound_ref_moves_between_containers() {
+    let xs: [FerCell] = [FerCell { inner: FerInner { v: 1 }, w: 2 }]
+    let ys: [FerCell] = [FerCell { inner: FerInner { v: 3 }, w: 4 }]
+    let m: Map<string, FerCell> = map_new()
+    m["a"] = FerCell { inner: FerInner { v: 5 }, w: 6 }
+    m["b"] = FerCell { inner: FerInner { v: 7 }, w: 8 }
+    let (vec_first, vec_second) = fer_rebind_write(xs[0], ys[0])
+    assert_eq(xs[0].w, vec_first, "first vec holds the write before rebinding")
+    assert_eq(ys[0].w, vec_second, "second vec holds the write after rebinding")
+    let (map_first, map_second) = fer_rebind_write(m["a"], m["b"])
+    assert_eq(m["a"].w, map_first, "first map value holds the write before rebinding")
+    assert_eq(m["b"].w, map_second, "second map value holds the write after rebinding")
+    assert_eq(m["b"].inner.v, 7, "map sibling unchanged")
+}
+
+@test
+fn fer_rebound_nested_prefix_ref_writes_its_new_target() {
+    let os: [FerOuter] = []
+    os.push(FerOuter { cell: FerCell { inner: FerInner { v: 1 }, w: 2 }, z: 3 })
+    os.push(FerOuter { cell: FerCell { inner: FerInner { v: 4 }, w: 5 }, z: 6 })
+    let (seen_first, seen_second) = fer_rebind_write(os[0].cell, os[1].cell)
+    assert_eq(os[0].cell.w, seen_first, "first nested target holds its write")
+    assert_eq(os[1].cell.w, seen_second, "second nested target holds its write")
+    assert_eq(os[0].z, 3, "owner's sibling leaf unchanged")
+    assert_eq(os[1].z, 6, "owner's sibling leaf unchanged")
+}
+
+@test
+fn fer_conditionally_rebound_ref_return_addresses_the_chosen_element() {
+    let xs: [FerCell] = []
+    xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
+    xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
+    let first = xs[0].w
+    let second = xs[1].w
+    let seen_second = fer_bump(fer_pick(xs[0], xs[1], true))
+    assert(seen_second != second, "the write through the chosen ref is visible")
+    assert_eq(xs[1].w, seen_second, "the chosen element holds the write")
+    assert_eq(xs[0].w, first, "the element not chosen is unchanged")
+    let seen_first = fer_bump(fer_pick(xs[0], xs[1], false))
+    assert(seen_first != first, "the write through the kept ref is visible")
+    assert_eq(xs[0].w, seen_first, "the kept element holds the write")
+    assert_eq(xs[1].w, seen_second, "the element not kept is unchanged")
+}
+
+@test
+fn fer_ref_rebound_to_a_ref_result_writes_that_element() {
+    let xs: [FerCell] = []
+    xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
+    xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
+    let first = xs[0].w
+    let seen = fer_rebind_through_call(xs[0], xs[1])
+    assert_eq(xs[1].w, seen, "the element the call returned holds the write")
+    assert_eq(xs[0].w, first, "the element bound first is unchanged")
+}
+
+@test
+fn fer_ref_rebound_in_a_loop_alternates_its_target() {
+    let xs: [FerCell] = []
+    xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
+    xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
+    let pair = FerPair { a: FerCell { inner: FerInner { v: 10 }, w: 20 }, b: FerCell { inner: FerInner { v: 30 }, w: 40 } }
+    let flat_total = fer_rebind_in_loop(xs[0], xs[1], 5)
+    let boxed_total = fer_rebind_in_loop(pair.a, pair.b, 5)
+    assert_eq(flat_total, boxed_total, "flat and boxed refs rebind alike")
+    assert_eq(xs[0].w, pair.a.w, "first element took the same writes as the boxed one")
+    assert_eq(xs[1].w, pair.b.w, "second element took the same writes as the boxed one")
+    assert_eq(xs[0].inner.v, 10, "sibling leaf unchanged")
+}
+
+@test
+fn fer_rebound_strided_row_ref_writes_its_new_row() {
+    let ws: [FerWide] = vec_new_with_capacity(4)
+    ws.push(FerWide { kind: 1, at: FerQ2 { x: 1.0, y: 2.0 }, a: 3, b: 4, c: 5 })
+    ws.push(FerWide { kind: 6, at: FerQ2 { x: 7.0, y: 8.0 }, a: 9, b: 10, c: 11 })
+    let first = ws[0].b
+    let seen = fer_rebind_wide(ws[0], ws[1])
+    assert(seen != 10, "the write through the rebound ref is visible")
+    assert_eq(ws[1].b, seen, "the second row holds the write")
+    assert_eq(ws[1].c, 11, "the second row's sibling is unchanged")
+    assert_eq(ws[0].b, first, "the first row is unchanged")
+}
+
+fn fer_rebind_param(a: ref FerCell, b: ref FerCell) -> int {
+    a.w += 1
+    a = b
+    a.w += 100
+    return a.w
+}
+
+@test
+fn fer_rebound_ref_parameter_writes_its_new_target() {
+    let xs: [FerCell] = []
+    xs.push(FerCell { inner: FerInner { v: 10 }, w: 20 })
+    xs.push(FerCell { inner: FerInner { v: 30 }, w: 40 })
+    let pair = FerPair { a: FerCell { inner: FerInner { v: 10 }, w: 20 }, b: FerCell { inner: FerInner { v: 30 }, w: 40 } }
+    let flat_seen = fer_rebind_param(xs[0], xs[1])
+    let boxed_seen = fer_rebind_param(pair.a, pair.b)
+    assert_eq(flat_seen, boxed_seen, "flat and boxed parameters rebind alike")
+    assert_eq(xs[0].w, pair.a.w, "first element took only the write before rebinding")
+    assert_eq(xs[1].w, flat_seen, "second element holds the write after rebinding")
+    assert_eq(xs[1].inner.v, 30, "sibling leaf unchanged")
+}
