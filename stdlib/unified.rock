@@ -2031,12 +2031,15 @@ fn next<Y, R>(c: Coroutine<Y, R, ()>) -> (bool, Y) {
 """
 
 // Fire the on_hot_reload hook on a live coroutine instance (if declared
-// and not already terminal). The engine's coroutine poller drives this
-// on every hot reload across all polled coroutines. Safe to call on any
-// handle — dead or hook-less coroutines no-op.
+// and not already terminal), then on the inner it is `await`ing, outermost
+// first. The engine's coroutine poller drives this on every hot reload
+// across all polled coroutines, and an awaited inner is never polled
+// itself. Safe to call on any handle — dead or hook-less coroutines no-op.
 @intrinsic inline(lua) fn fire_hot_reload<Y, R, N>(c: Coroutine<Y, R, N>) = """
-    if c.__state >= 0 and c.__on_hot_reload then
-        c.__on_hot_reload(c)
+    local __hr = c
+    while __hr and __hr.__state >= 0 do
+        if __hr.__on_hot_reload then __hr.__on_hot_reload(__hr) end
+        __hr = __hr.__inner
     end
 """
 

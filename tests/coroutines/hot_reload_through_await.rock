@@ -1,0 +1,65 @@
+// fire_hot_reload on an outer coroutine suspended in `await` reaches the
+// inner it is delegating to, outermost first. The engine's poller only holds
+// the outer, so without the chain an awaited inner's on_hot_reload hook never
+// runs on a reload. Once the await finished, only the outer hears it.
+
+global HR: [string] = []
+
+co fn hr_inner() -> Coroutine<int> {
+    on_hot_reload { HR.push("inner") }
+    yield 1
+    yield 2
+}
+
+co fn hr_middle() -> Coroutine<int> {
+    on_hot_reload { HR.push("middle") }
+    await hr_inner()
+}
+
+co fn hr_outer() -> Coroutine<int> {
+    on_hot_reload { HR.push("outer") }
+    await hr_middle()
+    yield 3
+}
+
+@test(output = "1 outer,middle,inner")
+fn test_fire_reaches_every_awaited_level() {
+    HR = []
+    let c = hr_outer()
+    let v = c.resume() ?? -1
+    fire_hot_reload(c)
+    print("{v} {HR.join(",")}")
+}
+
+@test(output = "3 outer")
+fn test_fire_after_await_finished_reaches_only_the_outer() {
+    HR = []
+    let c = hr_outer()
+    c.resume()
+    c.resume()
+    let v = c.resume() ?? -1
+    fire_hot_reload(c)
+    print("{v} {HR.join(",")}")
+}
+
+// An outer hook that kills its own coroutine takes the chain down before
+// the inner would be notified: a dead inner does not hear the reload.
+global SELF: Coroutine<int>? = null
+
+co fn hr_respawning() -> Coroutine<int> {
+    on_hot_reload {
+        HR.push("outer")
+        if let c = SELF { kill(c) }
+    }
+    await hr_inner()
+}
+
+@test(output = "outer dead")
+fn test_outer_hook_that_kills_stops_the_chain() {
+    HR = []
+    let c = hr_respawning()
+    SELF = c
+    c.resume()
+    fire_hot_reload(c)
+    print("{HR.join(",")} {c.status()}")
+}

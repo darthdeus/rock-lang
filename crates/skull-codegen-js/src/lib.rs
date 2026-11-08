@@ -363,7 +363,7 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
         "fire_hot_reload",
         1,
         Emission::Template(
-            "(function(c){ if (c.__state >= 0 && c.__on_hot_reload) __rock_call(c.__on_hot_reload,c); })($1)",
+            "(function(c){ while (c && c.__state >= 0) { if (c.__on_hot_reload) __rock_call(c.__on_hot_reload,c); c = c.__inner; } })($1)",
         ),
     ),
     (
