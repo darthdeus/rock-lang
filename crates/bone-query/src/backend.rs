@@ -1,14 +1,12 @@
-//! The bone-backed LSP path: one consolidated facade over the `bone`
-//! typechecker, selected by `ROCK_BACKEND=bone` / `--backend bone`.
+//! The LSP's facade over the `bone` typechecker.
 //!
 //! Each `*_workspace` handler calls the matching method here; the persistent
-//! server holds one [`BoneWorkspace`]. Everything
-//! bone can't answer yet lives in [`gaps`] -- that is the "fill in what's
-//! missing on bone" surface. See query facade contract.
+//! server holds one [`BoneWorkspace`]. [`gaps`] holds the thin delegations into
+//! `crate::query`.
 //!
-//! Consumes bone's public pipeline (`bone_incremental::session::Session`, `bone_semantic::query`)
-//! plus this crate's IDE-navigation queries (`crate::query`). bone source stays
-//! the engine author's; this crate is Claude-owned.
+//! Consumes bone's public pipeline (`bone_incremental::session::Session`,
+//! `bone_semantic::query`) plus this crate's IDE-navigation queries
+//! (`crate::query`).
 
 pub mod gaps;
 mod macro_refs;

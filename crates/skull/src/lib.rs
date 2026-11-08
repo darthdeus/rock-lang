@@ -1,16 +1,10 @@
-//! skull — the Claude-managed code-generation backend for `bone`'s HIR.
+//! skull: the default code-generation backend over `bone`'s typed HIR.
 //!
 //! skull consumes `bone` as a library (`parse_rock` -> `semantic_pass` ->
-//! `Workspace`), lowers the typed HIR to a **basic-block CFG** ([`mir`]), and
-//! emits **luajit** from it ([`emit_lua`]). It is a separate verification
-//! layer driving the user's manual `bone` work; bone will eventually pull from
-//! skull.
-//!
-//! Pipeline: bone HIR --[`lower`]--> MIR (CFG, light SSA) --[`emit_lua`]--> Lua.
-//! The CFG substrate is the foundation for real codegen passes (const-fold,
-//! copy-prop, DCE, and — once bone models `value` types — arg-SROA) and for
-//! retargeting (a JS backend would reloop/dispatch the same MIR). The long-term
-//! goal is `rock test tests --backend skull` at 100% as bone grows. See
+//! `Workspace`), lowers the typed HIR to the `skull-mir` cell-model CFG, runs
+//! the `skull-transform` passes over it, and assembles a LuaJIT program from
+//! the `skull-codegen-lua` output ([`mir_emit`]). The JS and GLSL backends
+//! read the same MIR.
 
 pub mod allocation_report;
 pub mod coroutine_emit;

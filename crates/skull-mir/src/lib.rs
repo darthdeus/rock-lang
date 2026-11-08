@@ -1,5 +1,4 @@
-//! skull-mir — the cell-model CFG IR (and, in later phases, the HIR->CFG
-//! lowering) for skull, the Claude-managed backend.
+//! skull-mir: the cell-model CFG IR and the HIR->CFG lowering for skull.
 //!
 //! Variables are mutable
 //! cells, expression results are single-use values, `Idx<Inst>` IS the value,

@@ -1,15 +1,8 @@
-//! skull backend integration for `rock-cli` (selected via `--backend skull`).
+//! skull backend integration for `rock-cli` (`--backend skull`, the default).
 //!
-//! skull is the Claude-managed codegen on top of `bone`'s HIR (see the `skull`
-//! crate + the compiler contract). Where `--backend bone` stops at type-checking,
-//! `--backend skull` goes one step further: it emits Lua from bone's HIR and
-//! (for `test`/`run`) executes it via luajit.
-//!
-//! A unit "passes" skull today iff: bone accepts it AND skull emits Lua that
-//! luajit loads without error. True `@test`-output execution is the next step
-//! and lands once bone has a prelude (`print`/`assert`) — until then most files
-//! are rejected at the bone stage, exactly like `--backend bone`. The long-term
-//! goal is `rock test tests --backend skull` at 100%.
+//! skull is the code generator over `bone`'s HIR (see the `skull` crate).
+//! Where `--backend bone` stops at type-checking, `--backend skull` emits Lua
+//! from bone's HIR and, for `test`/`run`, executes it with LuaJIT.
 
 use crate::Result;
 use crate::bone_backend::{categorize, short_path};

@@ -2511,8 +2511,7 @@ fn start_lsp_server(backend: crate::Backend, root_dir: &Path, name: &str) -> Res
     // notifications without an intervening request can fill the 64 KiB pipe
     // buffer (~5 KiB diagnostic notifications × 12+ unread keystrokes is
     // enough), wedge the server mid-`send`, and produce the
-    // `edit_sequence_stress` non-determinism investigated in TODO.md
-    // ("Sentinel: edit_sequence_stress"). The drainer below stuffs every
+    // `edit_sequence_stress` non-determinism. The drainer below stuffs every
     // incoming message onto an unbounded channel; `read_response` reads
     // from the channel instead of from stdout directly, so the server
     // never blocks waiting for us.
@@ -2534,8 +2533,7 @@ fn start_lsp_server(backend: crate::Backend, root_dir: &Path, name: &str) -> Res
     // Watchdog: kill the rock-lsp subprocess if it doesn't finish the test
     // within the timeout. Without this, a wedged server would block
     // `read_response` forever (no read-deadline on the pipe), and the
-    // parallel runner would stall the whole suite indefinitely. See
-    // sentinel in TODO.md for the racy stress-test that motivated this.
+    // parallel runner would stall the whole suite indefinitely.
     let timeout_secs: u64 = std::env::var("ROCK_LSP_TEST_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse().ok())

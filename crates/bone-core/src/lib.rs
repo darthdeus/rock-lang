@@ -3,9 +3,8 @@
 //! Pure data and storage with no dependency on lowering or the inference
 //! algorithm: the HIR data types, the id types (`ModuleId`/`StructId`/...), the
 //! `comp_error!`/`unify_fail!` macros, small utilities, and the parallelism
-//! shim. `lower` and `inference` both build on this; `Workspace` and the
-//! inference RESULT structs will move here too (so `lower` stops depending on
-//! `inference`).
+//! shim, plus `Workspace` and the inference result types. `lower` and
+//! `inference` both build on this.
 
 #[macro_use]
 pub mod prelude;

@@ -3,7 +3,7 @@ name = "rock-core"
 version = "0.1.0"
 edition = "2024"
 publish = false
-description = "Spans, diagnostics, the type representation, symbols, scopes and node ids"
+description = "Source positions, source files, diagnostics, module ids and compile stats"
 license.workspace = true
 repository.workspace = true
 

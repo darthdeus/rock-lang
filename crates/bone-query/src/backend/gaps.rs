@@ -6,8 +6,7 @@
 //! here are the delegations whose doc comments carry the coverage caveats
 //! (references: globals/generic-params pending) plus the
 //! inlay-hints profiling wrapper. A future not-yet-answerable feature gets its
-//! stub here again: safe empty result + the `crate::query::*` API to add +
-//! the checkbox in query facade contract.
+//! stub here again: a safe empty result plus the `crate::query::*` API to add.
 //!
 //! Bone-native inputs (`&Workspace`, `ModuleId`, `&InferenceResult`, byte
 //! `offset`) and outputs (`Span`s + neutral structs) only -- these know

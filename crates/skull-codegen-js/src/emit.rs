@@ -1,13 +1,11 @@
-//! Minimal MIR->JS emitter for the conformance
-//! subset: the scalar fallback bodies of the eight differential intrinsics,
-//! plus the NativeBuffer four-fn surface (TypedArray-backed `{ptr, len}`
-//! structs, checked `buf[i]` via the `__nb_checked_*` shim names --
-//! `crate::JS_NB_CHECK_SHIMS` supplies the bodies). Structured (goto-free) output modeled on the GLSL backend's
-//! `emit_seq`/`emit_branch`, NOT the goto-linear Lua backend -- JS, like GLSL,
-//! has no goto, so a `Branch` recovers into `if/else` and its arms rejoin at the
-//! block's immediate post-dominator. Any MIR op outside the subset is a spanned
-//! `CompilerError` (reject, don't emit-and-hope); the subset grows with the
-//! backend.
+//! The MIR->JS emitter. Output is structured (goto-free), modeled on the GLSL
+//! backend's `emit_seq`/`emit_branch` rather than the goto-linear Lua backend:
+//! JS, like GLSL, has no goto, so a `Branch` recovers into `if/else` and its
+//! arms rejoin at the block's immediate post-dominator. NativeBuffers are
+//! TypedArray-backed `{ptr, len}` structs with checked `buf[i]` through the
+//! `__nb_checked_*` shims (`crate::JS_NB_CHECK_SHIMS` supplies the bodies). A
+//! MIR op the emitter does not support is a spanned `CompilerError`, never
+//! emit-and-hope.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;

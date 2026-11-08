@@ -8,7 +8,7 @@ publish = false
 description = "Compiler driver, artifact assembly and incremental Lua emission"
 autotests = false
 
-# skull is the Claude-managed code-generation backend for `bone`'s HIR. It
+# skull is the default code-generation backend over `bone`'s HIR. It
 # consumes bone as a library (parse -> semantic_pass -> Workspace) and emits
 # Lua.
 

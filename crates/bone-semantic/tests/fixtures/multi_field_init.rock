@@ -32,8 +32,8 @@ fn f() -> Named {
 
 // Multi-field with a shared `null` value across (homogeneous) nullable fields.
 // The shared node is inferred once (assign_expr_type memoization); both fields
-// receive `int?`. (Heterogeneous fields are intentionally rejected -- see
-// TODO.md.)
+// receive `int?`. (Heterogeneous fields are intentionally
+// rejected.)
 //- struct_nullable_fields_shared_null
 struct OptPair { a: int?, b: int? }
 fn f() -> OptPair {

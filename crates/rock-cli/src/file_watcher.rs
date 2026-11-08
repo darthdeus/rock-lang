@@ -281,8 +281,8 @@ impl FileWatcher {
     /// source of truth for the settings these used to each hand-roll
     /// (and drift on): 100ms debounce to batch rapid editor saves,
     /// metadata events allowed so `touch` retriggers, `.rock`
-    /// extension, no restart inputs. Hosts supply restart inputs and extra extensions. See
-    /// TODO.md "Unify file-watcher configs".
+    /// extension, no restart inputs. Hosts supply restart inputs and extra
+    /// extensions.
     ///
     /// Only `debounce` differs from `FileWatcherConfig::default()`;
     /// the rest is spelled out so the canonical intent survives a
