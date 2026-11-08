@@ -102,3 +102,45 @@ fn global_layout_ignores_bodies_statics_and_source_order_but_tracks_globals_and_
         .replace("Boxed { x: 1, y: 2 }", "Boxed { x: 1, z: 2.0 }");
     assert_ne!(baseline.global_layout, emit_mir(&reshaped).global_layout);
 }
+
+/// The initializer keys (`type@hash`) a program's statics register.
+fn initializer_keys(lua: &str) -> Vec<String> {
+    lua.lines()
+        .filter_map(|line| line.strip_prefix("__rock_static_prepare("))
+        .map(|rest| rest.split('"').nth(5).unwrap().to_string())
+        .collect()
+}
+
+/// A reload keeps a static's cell only while its initializer means the same
+/// thing, so every part of the initializer that changes its value -- match
+/// and `if let` patterns, format specs -- must change its key.
+#[test]
+fn static_initializer_key_tracks_patterns_and_format_specs() {
+    let src = r#"
+global MODE: int = 1
+global N: int? = 1
+fn pick() -> string {
+    static by_match = match MODE { 1 => 10, _ => 0 }
+    static by_if_let = if let 1 = N { 1 } else { 0 }
+    static by_spec = "{1.5:.2f}"
+    return "{by_match} {by_if_let} {by_spec}"
+}
+fn main() { print(pick()) }
+"#;
+    let baseline = initializer_keys(&emit_mir(src).lua);
+    assert_eq!(baseline.len(), 3, "{baseline:?}");
+    for (i, (from, to)) in [
+        ("{ 1 => 10", "{ 2 => 10"),
+        ("if let 1 = N", "if let 2 = N"),
+        ("{1.5:.2f}", "{1.5:.3f}"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let edited = initializer_keys(&emit_mir(&src.replace(from, to)).lua);
+        assert_ne!(
+            baseline[i], edited[i],
+            "editing `{from}` to `{to}` kept the initializer key"
+        );
+    }
+}

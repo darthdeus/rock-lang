@@ -1220,9 +1220,13 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
                         tag!(130);
                         s.hash(h);
                     }
-                    InterpPart::Value { expr, .. } => {
+                    InterpPart::Value { expr, spec } => {
                         tag!(131);
                         go!(expr);
+                        if let Some(spec) = spec {
+                            tag!(132);
+                            hash_interp_spec(body, &spec, h);
+                        }
                     }
                 }
             }
@@ -1324,13 +1328,14 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
             }
         }
         Expr::IfLet {
+            pattern,
             value,
             then_branch,
             else_branch,
-            ..
         } => {
             tag!(34);
             go!(value);
+            hash_init_pattern(body, pattern, h);
             go!(then_branch);
             if let Some(x) = else_branch {
                 go!(x);
@@ -1354,6 +1359,7 @@ fn hash_init_expr(body: &Body, e: Idx<Expr>, h: &mut std::collections::hash_map:
             go!(scrutinee);
             for a in arms {
                 let arm = body.match_arm_arena[a];
+                hash_init_pattern(body, arm.pattern, h);
                 if let Some(g) = arm.guard {
                     go!(g);
                 }
@@ -1475,14 +1481,122 @@ fn hash_init_stmt(
             go!(cond);
             go!(b);
         }
-        Statement::WhileLet { value, body: b, .. } => {
+        Statement::WhileLet {
+            pattern,
+            value,
+            body: b,
+        } => {
             go!(value);
+            hash_init_pattern(body, pattern, h);
             go!(b);
         }
         Statement::Return(None)
         | Statement::Break
         | Statement::Continue
         | Statement::Comment(_) => (b'x').hash(h),
+    }
+}
+
+fn hash_interp_spec(
+    body: &Body,
+    spec: &bone_core::hir::InterpSpec,
+    h: &mut std::collections::hash_map::DefaultHasher,
+) {
+    use std::hash::Hash;
+    let bone_core::hir::InterpSpec {
+        precision,
+        precision_expr,
+        width,
+        width_expr,
+        alignment,
+        fill,
+        sign,
+        alternate,
+        zero_pad,
+        grouping,
+        format_type,
+    } = *spec;
+    (precision, width, alignment, fill, sign).hash(h);
+    (alternate, zero_pad, grouping, format_type).hash(h);
+    for e in [width_expr, precision_expr] {
+        e.is_some().hash(h);
+        if let Some(e) = e {
+            hash_init_expr(body, e, h);
+        }
+    }
+}
+
+/// [`hash_init_expr`] for a pattern: what it matches decides the value.
+fn hash_init_pattern(
+    body: &Body,
+    p: Idx<bone_core::hir::Pattern>,
+    h: &mut std::collections::hash_map::DefaultHasher,
+) {
+    use bone_core::hir::Pattern;
+    use std::hash::Hash;
+    match body.pattern_arena[p] {
+        Pattern::Wildcard => 50u16.hash(h),
+        Pattern::Bind(b) => {
+            51u16.hash(h);
+            body.binding_arena[b].name.hash(h);
+        }
+        Pattern::Literal(e) => {
+            52u16.hash(h);
+            hash_init_expr(body, e, h);
+        }
+        Pattern::Range {
+            start,
+            end,
+            inclusive,
+        } => {
+            53u16.hash(h);
+            inclusive.hash(h);
+            for e in [start, end] {
+                e.is_some().hash(h);
+                if let Some(e) = e {
+                    hash_init_expr(body, e, h);
+                }
+            }
+        }
+        Pattern::EnumVariant {
+            enum_name,
+            variant,
+            sub,
+            ..
+        } => {
+            54u16.hash(h);
+            (enum_name, variant).hash(h);
+            for s in sub {
+                hash_init_pattern(body, s, h);
+            }
+        }
+        Pattern::Record {
+            enum_name,
+            name,
+            fields,
+            rest,
+            ..
+        } => {
+            55u16.hash(h);
+            (enum_name, name, rest).hash(h);
+            for f in fields {
+                let f = body.record_pat_field_arena[f];
+                f.name.hash(h);
+                hash_init_pattern(body, f.pat, h);
+            }
+        }
+        Pattern::Tuple { elements } => {
+            56u16.hash(h);
+            for s in elements {
+                hash_init_pattern(body, s, h);
+            }
+        }
+        Pattern::Or { alternatives } => {
+            57u16.hash(h);
+            for s in alternatives {
+                hash_init_pattern(body, s, h);
+            }
+        }
     }
 }
 
