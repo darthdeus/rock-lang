@@ -638,3 +638,33 @@ fn main() -> int {
     );
     assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "11");
 }
+
+/// Interned type ids follow worker timing: graph expansion interns each
+/// owner's types on whichever worker expands it. Each `pick{i}` below is a
+/// separate owner in one parallel wave and instantiates the `inline(js)`
+/// generic at its own type, so an emission order keyed on those ids changes
+/// between runs. Every emission of the same input must be byte-identical.
+#[test]
+fn inline_js_specializations_emit_in_a_stable_order() {
+    let mut src = String::from("inline(js) fn tag<V>(value: V) -> int = \"return 1;\"\n");
+    let mut body = String::new();
+    for i in 0..32 {
+        src.push_str(&format!(
+            "struct Item{i} {{ v: int }}\nfn pick{i}() -> int {{ return tag(Item{i} {{ v: {i} }}) }}\n"
+        ));
+        body.push_str(&format!("    n += pick{i}()\n"));
+    }
+    src.push_str(&format!(
+        "fn main() -> int {{\n    let n = 0\n{body}    return n\n}}\n"
+    ));
+    let ws = ws_with(&src);
+    let first = emit_program(&ws);
+    assert_eq!(first.matches("\nfunction tag_").count(), 32, "{first}");
+    for _ in 0..16 {
+        assert_eq!(
+            emit_program(&ws),
+            first,
+            "JS emission order varies between runs"
+        );
+    }
+}

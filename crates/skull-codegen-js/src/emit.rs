@@ -4777,17 +4777,15 @@ impl<'a> WorklistState<'a> {
                     &b.1.name,
                 ))
         });
-        self.inline_js.sort_by(|left, right| {
+        // Not by `instance.args`: interned type ids follow worker timing, so
+        // the emitted name is the stable key within one declaration.
+        let names = &self.names;
+        self.inline_js.sort_by_cached_key(|body| {
             (
-                left.decl.module.index(),
-                u32::from(left.decl.func.into_raw()),
-                &left.instance.args,
+                body.decl.module.index(),
+                u32::from(body.decl.func.into_raw()),
+                names.get(&body.instance).cloned(),
             )
-                .cmp(&(
-                    right.decl.module.index(),
-                    u32::from(right.decl.func.into_raw()),
-                    &right.instance.args,
-                ))
         });
         self.ginits.sort_by_key(|g| g.order);
     }

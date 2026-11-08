@@ -404,3 +404,40 @@ fn main() {
         "a boundary (`{boundary_sym}`) must not be emitted as a Rock definition"
     );
 }
+
+/// Interned type ids follow worker timing: graph expansion interns each
+/// owner's types on whichever worker expands it. Each `pick{i}` is a separate
+/// owner in one parallel wave and instantiates the generics at its own type,
+/// so an emission order keyed on those ids would change between runs. Every
+/// emission of the same input must be byte-identical.
+#[test]
+fn specializations_emit_in_a_stable_order() {
+    let mut src = String::from(
+        "inline(lua) fn tag<V>(value: V) -> int = \"return 1\"\n\
+         fn count<V>(items: [V]) -> int {\n    let n = 0\n    for _x in items { n += tag(_x) }\n    return n\n}\n",
+    );
+    let mut body = String::new();
+    for i in 0..32 {
+        src.push_str(&format!(
+            "struct Item{i} {{ v: int }}\n\
+             fn pick{i}() -> int {{ return count([Item{i} {{ v: {i} }}]) }}\n"
+        ));
+        body.push_str(&format!("    n += pick{i}()\n"));
+    }
+    src.push_str(&format!(
+        "fn main() {{\n    let n = 0\n{body}    print(\"{{n}}\")\n}}\n"
+    ));
+    let first = emit_module(&src);
+    let specs = definition_names(&first)
+        .into_iter()
+        .filter(|name| name.starts_with("count_"))
+        .count();
+    assert_eq!(specs, 32, "{first}");
+    for _ in 0..16 {
+        assert_eq!(
+            emit_module(&src),
+            first,
+            "Lua emission order varies between runs"
+        );
+    }
+}
