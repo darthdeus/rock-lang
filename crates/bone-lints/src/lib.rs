@@ -3357,8 +3357,14 @@ fn filter_suppressed_findings_with_entries_timed(
 fn suppression_entries(source: &str) -> FxHashSet<(usize, &'static str)> {
     let mut allow = FxHashSet::default();
     for (n, line) in source.lines().enumerate() {
+        // Every allow comment starts at a `//`, so search for one once per
+        // line rather than once per lint.
+        let Some(first) = line.find("//") else {
+            continue;
+        };
+        let comments = &line[first..];
         for &lint in KNOWN_LINTS {
-            if parse_allow_comment(line, lint) {
+            if parse_allow_comment(comments, lint) {
                 allow.insert((n, lint));
             }
         }
