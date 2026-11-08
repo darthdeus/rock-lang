@@ -137,13 +137,14 @@ impl Builder<'_> {
         self.concrete_plans.contains_key(inst).then(|| inst.clone())
     }
 
-    pub(crate) fn concrete_callee_param_ty(
+    /// The concrete signature of the callee planned at `e`, checked against
+    /// the identity the caller resolved for the same site. Resolved once per
+    /// call so the per-argument readers below do not repeat the site lookups.
+    pub(crate) fn concrete_callee_signature(
         &self,
         e: Idx<Expr>,
         inst: &crate::instance::Instance,
-        pidx: usize,
-    ) -> Result<Option<std::rc::Rc<crate::monoty::MonoTy>>, CompilerError> {
-        let callee = &self.ws.module(inst.func.module).functions[inst.func.func];
+    ) -> Result<crate::concrete::ConcreteSignatureHandle, CompilerError> {
         let plan = self.concrete_plan;
         let site = crate::site::Site {
             domain: self.cur_domain.clone(),
@@ -153,20 +154,46 @@ impl Builder<'_> {
         if plan.callees.get(&site) != Some(inst) {
             return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
         }
-        let signature = if crate::lower::requires_concrete_body_plan(self.ws, inst)
+        if crate::lower::requires_concrete_body_plan(self.ws, inst)
             && crate::monoty::too_deep_to_instantiate(inst.arg_types(self.scx.interner()).iter())
                 .is_none()
         {
-            &self
-                .concrete_plans
-                .get(inst)
-                .ok_or_else(|| self.gap_here("concrete callee body plan is missing for its site"))?
-                .signature
+            Ok(std::sync::Arc::clone(
+                &self
+                    .concrete_plans
+                    .get(inst)
+                    .ok_or_else(|| {
+                        self.gap_here("concrete callee body plan is missing for its site")
+                    })?
+                    .signature,
+            ))
         } else {
             plan.callee_signatures
                 .get(&site)
-                .ok_or_else(|| self.gap_here("concrete callee signature is missing for its site"))?
-        };
+                .cloned()
+                .ok_or_else(|| self.gap_here("concrete callee signature is missing for its site"))
+        }
+    }
+
+    pub(crate) fn concrete_callee_param_ty(
+        &self,
+        e: Idx<Expr>,
+        inst: &crate::instance::Instance,
+        pidx: usize,
+    ) -> Result<Option<std::rc::Rc<crate::monoty::MonoTy>>, CompilerError> {
+        let signature = self.concrete_callee_signature(e, inst)?;
+        self.concrete_param_ty_of(&signature, inst, pidx)
+    }
+
+    /// Parameter `pidx` of an already resolved callee signature; a variadic
+    /// callee's trailing parameter covers every extra argument.
+    pub(crate) fn concrete_param_ty_of(
+        &self,
+        signature: &crate::concrete::ConcreteSignature,
+        inst: &crate::instance::Instance,
+        pidx: usize,
+    ) -> Result<Option<std::rc::Rc<crate::monoty::MonoTy>>, CompilerError> {
+        let callee = &self.ws.module(inst.func.module).functions[inst.func.func];
         let slot = signature.params.get(pidx).or_else(|| {
             callee
                 .is_variadic
@@ -187,34 +214,7 @@ impl Builder<'_> {
         e: Idx<Expr>,
         inst: &crate::instance::Instance,
     ) -> Result<Option<crate::monoty::MonoTy>, CompilerError> {
-        let plan = self.concrete_plan;
-        let site = crate::site::Site {
-            domain: self.cur_domain.clone(),
-            expr: e,
-            op: self.cur_op.clone(),
-        };
-        if plan.callees.get(&site) != Some(inst) {
-            return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
-        }
-        let signature = if crate::lower::requires_concrete_body_plan(self.ws, inst)
-            && crate::monoty::too_deep_to_instantiate(inst.arg_types(self.scx.interner()).iter())
-                .is_none()
-        {
-            &self
-                .concrete_plans
-                .get(inst)
-                .ok_or_else(|| {
-                    self.gap_here("concrete callee body plan is missing for its return")
-                })?
-                .signature
-        } else {
-            self.concrete_plan
-                .callee_signatures
-                .get(&site)
-                .ok_or_else(|| {
-                    self.gap_here("concrete callee signature is missing for its return")
-                })?
-        };
+        let signature = self.concrete_callee_signature(e, inst)?;
         Ok(signature
             .result
             .map(|id| self.concrete_mono_owned(id, ConcreteMonoConsumer::ReturnLowering)))
@@ -1234,11 +1234,14 @@ impl Builder<'_> {
             let param_count = self.ws.module(func.module).functions[func.func]
                 .param_decls
                 .len();
+            let signature = self.concrete_callee_signature(e, &dc.callee_inst).ok();
             let param_tys: Vec<_> = (0..param_count)
                 .map(|i| {
-                    self.concrete_callee_param_ty(e, &dc.callee_inst, i)
-                        .ok()
-                        .flatten()
+                    signature.as_ref().and_then(|signature| {
+                        self.concrete_param_ty_of(signature, &dc.callee_inst, i)
+                            .ok()
+                            .flatten()
+                    })
                 })
                 .collect();
             let args =
@@ -1260,12 +1263,13 @@ impl Builder<'_> {
         } else if any_named {
             self.reorder_named_args(e, arg_idxs, func, Some(&dc.callee_inst))?
         } else {
+            let signature = self.concrete_callee_signature(e, &dc.callee_inst)?;
             let mut args: Vec<Idx<Inst>> = arg_idxs
                 .iter()
                 .enumerate()
                 .map(|(i, &a)| {
                     let t = self
-                        .concrete_callee_param_ty(e, &dc.callee_inst, i)?
+                        .concrete_param_ty_of(&signature, &dc.callee_inst, i)?
                         .ok_or_else(|| {
                             self.gap_here("concrete call has no callee parameter type")
                         })?;

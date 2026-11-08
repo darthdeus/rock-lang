@@ -1193,6 +1193,9 @@ impl Builder<'_> {
             .map(|pd| pd.name)
             .collect();
         let mut slots: Vec<Option<Idx<Inst>>> = vec![None; param_names.len()];
+        let callee_signature = callee_inst
+            .map(|inst| self.concrete_callee_signature(e, inst))
+            .transpose()?;
         let mut next_pos = 0usize;
         for &a in arg_idxs {
             // Struct spread `..op`: decompose the operand into per-field values
@@ -1230,8 +1233,10 @@ impl Builder<'_> {
                     slots.len()
                 )));
             }
-            let t = match callee_inst
-                .map(|inst| self.concrete_callee_param_ty(e, inst, pidx))
+            let t = match callee_signature
+                .as_ref()
+                .zip(callee_inst)
+                .map(|(signature, inst)| self.concrete_param_ty_of(signature, inst, pidx))
                 .transpose()?
                 .flatten()
             {
