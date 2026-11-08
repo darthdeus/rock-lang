@@ -373,13 +373,7 @@ impl LintCensus {
 
 /// The coordinate delta produced by the same body edit that updates semantic
 /// spans. A cache never guesses from the new text: it consumes this metadata.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TextEditDelta {
-    pub file: Ustr,
-    pub at: usize,
-    pub byte_delta: isize,
-    pub line_delta: isize,
-}
+pub use bone_core::text_edit::TextEditDelta;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LintCacheUpdate {
@@ -2849,19 +2843,9 @@ fn suppression_fingerprint(source: &str) -> u64 {
 fn shift_findings(findings: &mut [Finding], edit: &TextEditDelta) -> usize {
     let mut shifted = 0;
     for finding in findings {
-        let mut moved = false;
-        if finding.error.location.file == edit.file && finding.error.location.offset >= edit.at {
-            finding.error.location.offset =
-                shift_value(finding.error.location.offset, edit.byte_delta);
-            finding.error.location.line = shift_value(finding.error.location.line, edit.line_delta);
-            moved = true;
-        }
+        let mut moved = edit.shift_line_col(&mut finding.error.location);
         for label in &mut finding.error.labels {
-            if label.span.file != edit.file || label.span.offset_range.0 < edit.at {
-                continue;
-            }
-            label.span = shift_span(label.span, edit);
-            moved = true;
+            moved |= edit.shift_span(&mut label.span);
         }
         if moved {
             if let Some(label) = finding.error.labels.first() {
@@ -2873,22 +2857,6 @@ fn shift_findings(findings: &mut [Finding], edit: &TextEditDelta) -> usize {
         }
     }
     shifted
-}
-
-fn shift_span(mut span: Span, edit: &TextEditDelta) -> Span {
-    span.offset_range.0 = shift_value(span.offset_range.0, edit.byte_delta);
-    span.offset_range.1 = shift_value(span.offset_range.1, edit.byte_delta);
-    span.line_range.0 = shift_value(span.line_range.0, edit.line_delta);
-    span.line_range.1 = shift_value(span.line_range.1, edit.line_delta);
-    span
-}
-
-fn shift_value(value: usize, delta: isize) -> usize {
-    if delta.is_negative() {
-        value.saturating_sub(delta.unsigned_abs())
-    } else {
-        value.saturating_add(delta as usize)
-    }
 }
 
 #[derive(Copy, Clone)]

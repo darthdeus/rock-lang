@@ -437,7 +437,7 @@ pub fn emit_overlay_with_span_edits(
     ws: &Workspace,
     cache: &mut SkullEmitCache,
     reinferred: &[(ModuleId, BodyOwner)],
-    edits: &[crate::instance_graph::SpanEdit],
+    edits: &[crate::instance_graph::TextEditDelta],
 ) -> Result<MirEmit, CompilerError> {
     cache.concrete.detach_plan_store();
     let t0 = Instant::now();

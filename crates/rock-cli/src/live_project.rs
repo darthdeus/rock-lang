@@ -10,7 +10,7 @@ pub enum LiveUpdate {
     NoChange,
     BodyOnly {
         reinferred: Vec<(ModuleId, BodyOwner)>,
-        span_edits: Vec<skull::instance_graph::SpanEdit>,
+        span_edits: Vec<skull::instance_graph::TextEditDelta>,
         cook_ms: f64,
     },
     Full {
@@ -485,18 +485,8 @@ impl LiveProject {
                     lint_reinferred.extend(update.reinferred.iter().copied());
                     reinferred.extend(update.reinferred);
                     if let Some(edit) = update.body_update.edit {
-                        span_edits.push(skull::instance_graph::SpanEdit {
-                            file: edit.file,
-                            at: edit.at,
-                            byte_delta: edit.byte_delta,
-                            line_delta: edit.line_delta,
-                        });
-                        lint_edits.push(bone_lints::TextEditDelta {
-                            file: edit.file,
-                            at: edit.at,
-                            byte_delta: edit.byte_delta,
-                            line_delta: edit.line_delta,
-                        });
+                        span_edits.push(edit);
+                        lint_edits.push(edit);
                     }
                 }
                 bone_incremental::session::UpdateTier::Interface

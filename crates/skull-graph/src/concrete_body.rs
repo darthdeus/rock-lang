@@ -44,8 +44,8 @@ use skull_mir::monoty::{MonoArena, MonoCtor, MonoSubst, MonoTy, MonoTyId, MonoTy
 use ustr::Ustr;
 
 use crate::instance_graph::{
-    boundary_class_for, function_body, is_spanless, shift_span, BoundaryClass, FunctionBody,
-    Instance, InstanceGraph, Owner, Site, SiteDomain, SiteOp, SiteOutcome, SpanEdit,
+    boundary_class_for, function_body, is_spanless, BoundaryClass, FunctionBody, Instance,
+    InstanceGraph, Owner, Site, SiteDomain, SiteOp, SiteOutcome, TextEditDelta,
 };
 use crate::target_projection::CpuTargetSpec;
 
@@ -534,7 +534,7 @@ impl ConcreteBodies {
         revisited: &BTreeSet<Instance>,
         removed: &BTreeSet<Instance>,
         revisited_owners: &BTreeSet<Owner>,
-        edits: &[SpanEdit],
+        edits: &[TextEditDelta],
     ) -> ConcreteUpdateStats {
         self.shift_fact_spans(edits);
         let before = self.instance_facts.len() + self.always_facts.len();
@@ -677,7 +677,7 @@ impl ConcreteBodies {
         }
     }
 
-    fn shift_fact_spans(&mut self, edits: &[SpanEdit]) {
+    fn shift_fact_spans(&mut self, edits: &[TextEditDelta]) {
         for edit in edits {
             for facts in self.instance_facts.values_mut() {
                 facts.shift_spans(edit);
@@ -1629,15 +1629,15 @@ fn concrete_owner_order(left: &ConcreteOwner, right: &ConcreteOwner) -> std::cmp
 }
 
 impl OwnerFacts {
-    fn shift_spans(&mut self, edit: &SpanEdit) {
+    fn shift_spans(&mut self, edit: &TextEditDelta) {
         for (_, failure) in &mut self.free_types {
-            shift_span(&mut failure.span, edit);
+            edit.shift_span(&mut failure.span);
         }
         for (_, untyped) in &mut self.untyped {
-            shift_span(&mut untyped.span, edit);
+            edit.shift_span(&mut untyped.span);
         }
         for hole in &mut self.callee_holes {
-            shift_span(&mut hole.span, edit);
+            edit.shift_span(&mut hole.span);
         }
     }
 

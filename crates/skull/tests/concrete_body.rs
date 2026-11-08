@@ -2301,7 +2301,7 @@ fn vanishing() -> int {
         panic!("main is not a function")
     };
     let new_main_span = ws2.module(module).functions[main_fid].span;
-    let span_edit = instance_graph::SpanEdit {
+    let span_edit = instance_graph::TextEditDelta {
         file: Ustr::from("<test>"),
         at: old_main_span.offset_range.1,
         byte_delta: new_main_span.offset_range.1 as isize - old_main_span.offset_range.1 as isize,

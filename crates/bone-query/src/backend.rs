@@ -972,14 +972,7 @@ impl BoneWorkspace {
                     UpdateTier::BodyOnly => {
                         lint_changed_files.insert(Ustr::from(path));
                         lint_reinferred.extend(upd.reinferred.iter().copied());
-                        if let Some(edit) = upd.body_update.edit {
-                            lint_edits.push(bone_lints::TextEditDelta {
-                                file: edit.file,
-                                at: edit.at,
-                                byte_delta: edit.byte_delta,
-                                line_delta: edit.line_delta,
-                            });
-                        }
+                        lint_edits.extend(upd.body_update.edit);
                     }
                     UpdateTier::Interface | UpdateTier::Scope | UpdateTier::FullUser => {
                         lint_full = true

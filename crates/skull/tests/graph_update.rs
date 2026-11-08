@@ -100,17 +100,7 @@ impl Case {
         );
         let ws = self.session.workspace();
         let roots = skull::mir_emit::emission_roots(ws, Some(PROJ));
-        let edits = res
-            .body_update
-            .edit
-            .into_iter()
-            .map(|edit| instance_graph::SpanEdit {
-                file: edit.file,
-                at: edit.at,
-                byte_delta: edit.byte_delta,
-                line_delta: edit.line_delta,
-            })
-            .collect::<Vec<_>>();
+        let edits = res.body_update.edit.into_iter().collect::<Vec<_>>();
         self.graph
             .update_bodies_with_edits(ws, roots, &res.reinferred, &edits)
     }

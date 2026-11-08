@@ -134,17 +134,7 @@ pub fn direct_overlay(root: &str, target_suffix: &str, edited: &str) -> String {
         update.tier,
         bone_incremental::session::UpdateTier::BodyOnly
     ));
-    let edits = update
-        .body_update
-        .edit
-        .iter()
-        .map(|edit| skull::instance_graph::SpanEdit {
-            file: edit.file,
-            at: edit.at,
-            byte_delta: edit.byte_delta,
-            line_delta: edit.line_delta,
-        })
-        .collect::<Vec<_>>();
+    let edits = update.body_update.edit.iter().copied().collect::<Vec<_>>();
     skull::mir_emit::emit_overlay_with_span_edits(
         session.workspace(),
         &mut cache,

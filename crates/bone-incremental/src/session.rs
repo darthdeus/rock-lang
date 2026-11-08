@@ -22,13 +22,7 @@ pub use bone_core::modules::NsAliases;
 pub type BodyId = (ModuleId, BodyOwner);
 
 /// The source-coordinate change carried with one incremental body update.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TextEditDelta {
-    pub file: Ustr,
-    pub at: usize,
-    pub byte_delta: isize,
-    pub line_delta: isize,
-}
+pub use bone_core::text_edit::TextEditDelta;
 
 /// The semantic part of a body-only update, kept separate from coordinate
 /// relocation so graph owners are not re-walked merely because spans moved.
@@ -2230,15 +2224,19 @@ impl Session {
 
         // --- commit: install the new prints, then relower under rebuild_or_revert
         // (on failure it restores the old file + full-rebuilds from text). ---
-        let new_prints = build_shifted_prints(old_prints, idx, np, delta, line_delta);
+        let item_shift = TextEditDelta {
+            file: ustr(path),
+            at: eo,
+            byte_delta: delta,
+            line_delta,
+        };
+        let new_prints = build_shifted_prints(old_prints, idx, np, &item_shift);
         // Keep macro def-lines accurate: shift those declared AFTER the edited
         // item by the same delta the prints got (the edited item is a non-macro
         // fn, so a macro is wholly before or wholly after its `eo` end offset).
         let mut new_macros = old_macros;
         for md in new_macros.iter_mut() {
-            if md.span.offset_range.0 >= eo {
-                shift_span(&mut md.span, delta, line_delta);
-            }
+            item_shift.shift_span(&mut md.span);
         }
         let previous = self.files.insert(
             path.to_string(),
@@ -2681,40 +2679,22 @@ fn locate_body_edit(prints: &[ItemPrint], es: usize, oe: usize) -> Option<usize>
     found
 }
 
-/// Shift a span's byte offsets + line numbers by the deltas (columns are left
-/// alone -- a kept top-level item after a body edit starts on a later line but
-/// the same column, mirroring `span_shift`'s reasoning).
-fn shift_span(s: &mut Span, byte_delta: isize, line_delta: isize) {
-    s.offset_range = (
-        (s.offset_range.0 as isize + byte_delta) as usize,
-        (s.offset_range.1 as isize + byte_delta) as usize,
-    );
-    s.line_range = (
-        (s.line_range.0 as isize + line_delta) as usize,
-        (s.line_range.1 as isize + line_delta) as usize,
-    );
-}
-
 /// New per-item prints after a body edit: items before `idx` are unchanged, `idx`
 /// is replaced with the re-parsed `np` (already absolute), and every item after
-/// `idx` shifts by `(byte_delta, line_delta)` -- so the next edit still locates
-/// correctly without a whole-file reparse.
+/// `idx` (all past `shift.at`) moves by `shift` -- so the next edit still
+/// locates correctly without a whole-file reparse.
 fn build_shifted_prints(
     mut prints: Vec<ItemPrint>,
     idx: usize,
     np: ItemPrint,
-    byte_delta: isize,
-    line_delta: isize,
+    shift: &TextEditDelta,
 ) -> Vec<ItemPrint> {
     for (i, p) in prints.iter_mut().enumerate() {
         if i > idx {
-            p.offset = (p.offset as isize + byte_delta) as usize;
-            shift_span(&mut p.item_span, byte_delta, line_delta);
+            p.offset = shift.shift_offset(p.offset);
+            shift.shift_span(&mut p.item_span);
             if let Some((a, b)) = p.body_range {
-                p.body_range = Some((
-                    (a as isize + byte_delta) as usize,
-                    (b as isize + byte_delta) as usize,
-                ));
+                p.body_range = Some((shift.shift_offset(a), shift.shift_offset(b)));
             }
         }
     }

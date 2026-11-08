@@ -5,42 +5,22 @@
 //! `shift_module_after_edit` is the one place that corrects them, so `type_at`,
 //! diagnostics, and navigation stay right without re-lowering the kept bodies.
 
+use bone_core::text_edit::TextEditDelta;
 use bone_semantic::{
     hir::{AnnoValue, Callee, Expr, Module, Pattern},
     prelude::*,
 };
 
-/// A text edit's offset/line delta, applied to stored spans at/after `at`.
-#[derive(Copy, Clone, Debug)]
-struct Shift {
-    at: usize,
-    byte_delta: isize,
-    line_delta: isize,
-}
+/// Adapts [`TextEditDelta`], the shared shift policy, to the walk below.
+struct Shift(TextEditDelta);
 
 impl Shift {
-    /// Shift one stored offset iff it sits at/after the edit point.
     fn off(&self, o: usize) -> usize {
-        if o >= self.at {
-            (o as isize + self.byte_delta) as usize
-        } else {
-            o
-        }
+        self.0.shift_offset(o)
     }
 
-    /// Move a span by the byte/line delta iff it starts at/after `at`.
-    /// `col_range` is intentionally left alone: every kept item after a body
-    /// edit begins on a later physical line (items are newline-separated), so
-    /// its column is unchanged; only a node sharing the edit's final line would
-    /// need it, which doesn't occur for top-level items.
     fn span(&self, s: &mut Span) {
-        if s.offset_range.0 >= self.at {
-            s.offset_range = (self.off(s.offset_range.0), self.off(s.offset_range.1));
-            s.line_range = (
-                (s.line_range.0 as isize + self.line_delta) as usize,
-                (s.line_range.1 as isize + self.line_delta) as usize,
-            );
-        }
+        self.0.shift_span(s);
     }
 
     /// Shift every span value in an arena map (expr / binding / statement / ty).
@@ -55,7 +35,8 @@ impl Shift {
 /// reused HIR but its absolute offsets are stale -- the text under it moved by
 /// `byte_delta` bytes / `line_delta` lines starting at byte `at`. Patch every
 /// offset carrier in the module so `type_at` / diagnostics / navigation stay
-/// correct without re-lowering the unchanged bodies.
+/// correct without re-lowering the unchanged bodies. Spans from other files
+/// (spliced in by a macro defined elsewhere) did not move and are kept.
 pub fn shift_module_after_edit(
     module: &mut Module,
     edited: BodyOwner,
@@ -63,11 +44,12 @@ pub fn shift_module_after_edit(
     byte_delta: isize,
     line_delta: isize,
 ) {
-    let sh = Shift {
+    let sh = Shift(TextEditDelta {
+        file: module.file,
         at,
         byte_delta,
         line_delta,
-    };
+    });
 
     // Kept bodies: reused HIR with stale absolute spans + node index. The edited
     // body is re-lowered fresh, so skip it.

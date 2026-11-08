@@ -3435,7 +3435,7 @@ fn update_js_session(
         bone_semantic::prelude::ModuleId,
         bone_semantic::hir::BodyOwner,
     )],
-    edits: &[skull_graph::instance_graph::SpanEdit],
+    edits: &[skull_graph::instance_graph::TextEditDelta],
 ) {
     let before = session.graph.instances.len();
     let previous_roots = session.roots.clone();
@@ -4159,7 +4159,7 @@ pub fn emit_overlay_with_span_edits(
         bone_semantic::prelude::ModuleId,
         bone_semantic::hir::BodyOwner,
     )],
-    edits: &[skull_graph::instance_graph::SpanEdit],
+    edits: &[skull_graph::instance_graph::TextEditDelta],
 ) -> Result<JsReload, CompilerError> {
     if reinferred.iter().any(|(_, owner)| {
         !matches!(

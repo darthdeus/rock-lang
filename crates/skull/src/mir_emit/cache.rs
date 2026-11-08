@@ -220,7 +220,7 @@ pub(super) struct RootCache {
 
 pub(super) struct BodyEditRollback {
     reinferred: Vec<(ModuleId, BodyOwner)>,
-    edits: Vec<crate::instance_graph::SpanEdit>,
+    edits: Vec<crate::instance_graph::TextEditDelta>,
     changed_since_full: FxHashSet<Instance>,
     changed_consts_since_full: FxHashSet<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)>,
     static_key_baseline: FxHashMap<Ustr, StaticBaseline>,
@@ -309,7 +309,7 @@ impl SkullEmitCache {
     pub fn begin_body_edit_transaction(
         &mut self,
         reinferred: &[(ModuleId, BodyOwner)],
-        edits: &[crate::instance_graph::SpanEdit],
+        edits: &[crate::instance_graph::TextEditDelta],
     ) {
         assert!(
             self.body_edit_rollback.is_none(),
@@ -359,7 +359,7 @@ impl SkullEmitCache {
         } = snapshot;
         let inverse_edits: Vec<_> = edits
             .iter()
-            .map(|edit| crate::instance_graph::SpanEdit {
+            .map(|edit| crate::instance_graph::TextEditDelta {
                 file: edit.file,
                 at: edit.at,
                 byte_delta: -edit.byte_delta,
@@ -838,7 +838,7 @@ impl SkullEmitCache {
         &mut self,
         ws: &Workspace,
         reinferred: &[(ModuleId, BodyOwner)],
-        edits: &[crate::instance_graph::SpanEdit],
+        edits: &[crate::instance_graph::TextEditDelta],
     ) -> Result<
         (
             FxHashSet<Instance>,

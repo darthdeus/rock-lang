@@ -664,13 +664,9 @@ pub struct Indices {
     pub span_owners: FxHashMap<ustr::Ustr, BTreeSet<Owner>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SpanEdit {
-    pub file: ustr::Ustr,
-    pub at: usize,
-    pub byte_delta: isize,
-    pub line_delta: isize,
-}
+/// The body edit's coordinate change; the graph moves its stored spans with
+/// the same policy as the session and the lint cache.
+pub use bone_core::text_edit::TextEditDelta;
 
 /// **One fact several owners assert, with the agreement kept rather than
 /// assumed.**
@@ -1523,20 +1519,6 @@ pub struct SpanCensus {
 /// with a zero line range is line 1 of a real file.
 pub fn is_spanless(span: &Span) -> bool {
     span.file.as_str() == "<unknown>"
-}
-
-pub(crate) fn shift_span(span: &mut Span, edit: &SpanEdit) {
-    if span.file != edit.file || span.offset_range.0 < edit.at {
-        return;
-    }
-    span.offset_range = (
-        (span.offset_range.0 as isize + edit.byte_delta) as usize,
-        (span.offset_range.1 as isize + edit.byte_delta) as usize,
-    );
-    span.line_range = (
-        (span.line_range.0 as isize + edit.line_delta) as usize,
-        (span.line_range.1 as isize + edit.line_delta) as usize,
-    );
 }
 
 #[derive(Debug, Default)]
@@ -3319,7 +3301,7 @@ impl InstanceGraph {
         ws: &Workspace,
         roots: Vec<FuncRef>,
         changed: &[(ModuleId, BodyOwner)],
-        edits: &[SpanEdit],
+        edits: &[TextEditDelta],
     ) -> UpdateStats {
         self.reseed_roots_for_update(ws, roots);
         self.update_bodies_after_roots(ws, changed, edits, Vec::new())
@@ -3334,7 +3316,7 @@ impl InstanceGraph {
         root_added: &[FuncRef],
         root_removed: &[FuncRef],
         changed: &[(ModuleId, BodyOwner)],
-        edits: &[SpanEdit],
+        edits: &[TextEditDelta],
     ) -> UpdateStats {
         let pending_roots = canonical_roots(ws, root_added.to_vec(), false)
             .into_iter()
@@ -3362,7 +3344,7 @@ impl InstanceGraph {
         &mut self,
         ws: &Workspace,
         changed: &[(ModuleId, BodyOwner)],
-        edits: &[SpanEdit],
+        edits: &[TextEditDelta],
         pending_roots: Vec<Owner>,
     ) -> UpdateStats {
         self.delta_added.clear();
@@ -3436,7 +3418,7 @@ impl InstanceGraph {
         }
     }
 
-    fn shift_contribution_spans(&mut self, edits: &[SpanEdit]) {
+    fn shift_contribution_spans(&mut self, edits: &[TextEditDelta]) {
         for edit in edits {
             let owners: Vec<Owner> = self
                 .index
@@ -3450,23 +3432,23 @@ impl InstanceGraph {
                     continue;
                 };
                 for edge in &mut contribution.edges {
-                    shift_span(&mut edge.span, edit);
+                    edit.shift_span(&mut edge.span);
                 }
                 for record in contribution
                     .call_sites
                     .values_mut()
                     .chain(contribution.always_call_sites.values_mut())
                 {
-                    shift_span(&mut record.span, edit);
+                    edit.shift_span(&mut record.span);
                 }
                 for unresolved in &mut contribution.unresolved {
-                    shift_span(&mut unresolved.span, edit);
+                    edit.shift_span(&mut unresolved.span);
                 }
                 for rejection in &mut contribution.rejections {
-                    shift_span(&mut rejection.span, edit);
+                    edit.shift_span(&mut rejection.span);
                 }
                 for (_, failure) in &mut contribution.always_emitted_holes {
-                    shift_span(&mut failure.span, edit);
+                    edit.shift_span(&mut failure.span);
                 }
             }
         }
