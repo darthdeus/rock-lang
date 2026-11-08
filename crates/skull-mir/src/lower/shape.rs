@@ -2510,7 +2510,7 @@ fn flat_payload_shape(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> Opt
         // The value's own shape plans its enum fields from scratch, without
         // `visiting`, so a payload that leads back to an enum being built
         // (`enum L { Cons(Cell) }`, `value Cell { tail: L }`) stays opaque.
-        if reaches_enum_in(ws, ty, visiting, &mut HashSet::new()) {
+        if reaches_enum_in(ws, ty, visiting, &mut HashSet::default()) {
             return None;
         }
         return sig_shape_of_nominal(ws, n);

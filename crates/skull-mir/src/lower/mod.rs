@@ -18,7 +18,10 @@
 
 use bone_core::prelude::Instant;
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+// Fx hashing: these maps are per-body scratch keyed by small ids and names,
+// where SipHash was a measurable share of lowering.
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::rc::Rc;
 use std::sync::OnceLock;
 
@@ -566,7 +569,7 @@ impl Clone for ScalarCtx {
 /// `name` is a function) — the way `let f = v2_sum` / passing `f` as an arg
 /// surfaces in HIR (a direct call's callee is a `Callee`, not an `Expr`).
 fn scan_body_value_refs(ws: &Workspace, body: &Body) -> HashSet<Ustr> {
-    let mut set = HashSet::new();
+    let mut set = HashSet::default();
     for (_, expr) in body.expr_arena.iter() {
         if let Expr::Global(name) = expr {
             if ws.functions_by_name.contains_key(name) {
@@ -579,9 +582,9 @@ fn scan_body_value_refs(ws: &Workspace, body: &Body) -> HashSet<Ustr> {
 
 impl ScalarCtx {
     pub fn new(ws: &Workspace) -> Self {
-        let mut taken_by_ref = HashSet::new();
-        let mut per_body: HashMap<(ModuleId, BodyOwner), HashSet<Ustr>> = HashMap::new();
-        let mut ref_counts: HashMap<Ustr, u32> = HashMap::new();
+        let mut taken_by_ref = HashSet::default();
+        let mut per_body: HashMap<(ModuleId, BodyOwner), HashSet<Ustr>> = HashMap::default();
+        let mut ref_counts: HashMap<Ustr, u32> = HashMap::default();
         for module in ws.modules.iter() {
             for (owner, body) in module.bodies.iter() {
                 let set = scan_body_value_refs(ws, body);
@@ -768,7 +771,7 @@ impl ScalarCtx {
         let old = self.per_body.remove(&key).unwrap_or_default();
         let new = match ws.module(mid).bodies.get(&owner) {
             Some(body) => scan_body_value_refs(ws, body),
-            None => HashSet::new(),
+            None => HashSet::default(),
         };
         let mut flipped = Vec::new();
         for name in old.difference(&new) {
@@ -873,8 +876,8 @@ pub fn scalar_abi_param_collisions(
     debug_assert_eq!(names.len(), origins.len(), "one derivation, two spellings");
 
     let mut out = Vec::new();
-    let mut seen: HashMap<&str, &str> = HashMap::new();
-    let mut reported: HashSet<&str> = HashSet::new();
+    let mut seen: HashMap<&str, &str> = HashMap::default();
+    let mut reported: HashSet<&str> = HashSet::default();
     for (name, origin) in names.iter().zip(origins.iter()) {
         match seen.get(name.as_str()) {
             Some(prev) if !reported.contains(name.as_str()) => {
@@ -1770,7 +1773,7 @@ fn lower_body(
         inf,
         f,
         cur,
-        binds: HashMap::new(),
+        binds: HashMap::default(),
         loop_targets: Vec::new(),
         used_break_targets: HashSet::default(),
         defers: Vec::new(),
@@ -1788,18 +1791,18 @@ fn lower_body(
         cur_domain: crate::site::SiteDomain::Own,
         cur_op: crate::site::SiteOp::DirectCall,
         site_owner: Some(subject.clone()),
-        group_binds: HashMap::new(),
-        owned_value_binds: HashSet::new(),
+        group_binds: HashMap::default(),
+        owned_value_binds: HashSet::default(),
         ref_borrowed_binds: std::cell::OnceCell::new(),
         value_copy_stack: Vec::new(),
-        borrowed_value_children: HashMap::new(),
-        shareable_value_boxes: HashSet::new(),
-        unshareable_value_cells: HashSet::new(),
+        borrowed_value_children: HashMap::default(),
+        shareable_value_boxes: HashSet::default(),
+        unshareable_value_cells: HashSet::default(),
         shallow_pack: false,
         lending_pack: false,
-        f32_round_exprs: HashSet::new(),
-        tuple_binds: HashMap::new(),
-        static_cells: HashMap::new(),
+        f32_round_exprs: HashSet::default(),
+        tuple_binds: HashMap::default(),
+        static_cells: HashMap::default(),
         // Lazy: only pay the param-type render/hash when the body has a static or
         // a nested fn (both bake the owner into a private global name that must be
         // distinct per overload). Keeps the tag off every other fn's compile.
@@ -1812,13 +1815,13 @@ fn lower_body(
         } else {
             func.name
         },
-        static_counters: HashMap::new(),
-        nested_fn_globals: HashMap::new(),
-        nested_fn_counters: HashMap::new(),
+        static_counters: HashMap::default(),
+        nested_fn_globals: HashMap::default(),
+        nested_fn_counters: HashMap::default(),
         presence_only: None,
-        flat_ref_binds: HashMap::new(),
-        flat_ref_cells: HashMap::new(),
-        flat_scan_lets: HashMap::new(),
+        flat_ref_binds: HashMap::default(),
+        flat_ref_cells: HashMap::default(),
+        flat_scan_lets: HashMap::default(),
         flat_ret: None,
         flat_variants: FlatVariants::for_root(subject.clone()),
         flat_arg_captures: Vec::new(),
@@ -2161,7 +2164,7 @@ fn validate_concrete_type_tables(
         }
     }
 
-    let mut seen = HashSet::new();
+    let mut seen = HashSet::default();
     for (expr, ty) in inf.expr_types.iter() {
         if tables.is_untyped_expr(expr) {
             continue;
@@ -2485,7 +2488,7 @@ impl<'a> Builder<'a> {
             inf,
             f,
             cur,
-            binds: HashMap::new(),
+            binds: HashMap::default(),
             loop_targets: Vec::new(),
             used_break_targets: HashSet::default(),
             defers: Vec::new(),
@@ -2502,26 +2505,26 @@ impl<'a> Builder<'a> {
             cur_domain: crate::site::SiteDomain::Own,
             cur_op: crate::site::SiteOp::DirectCall,
             site_owner: None,
-            group_binds: HashMap::new(),
-            owned_value_binds: HashSet::new(),
+            group_binds: HashMap::default(),
+            owned_value_binds: HashSet::default(),
             ref_borrowed_binds: std::cell::OnceCell::new(),
             value_copy_stack: Vec::new(),
-            borrowed_value_children: HashMap::new(),
-            shareable_value_boxes: HashSet::new(),
-            unshareable_value_cells: HashSet::new(),
+            borrowed_value_children: HashMap::default(),
+            shareable_value_boxes: HashSet::default(),
+            unshareable_value_cells: HashSet::default(),
             shallow_pack: false,
             lending_pack: false,
-            f32_round_exprs: HashSet::new(),
-            tuple_binds: HashMap::new(),
-            static_cells: HashMap::new(),
+            f32_round_exprs: HashSet::default(),
+            tuple_binds: HashMap::default(),
+            static_cells: HashMap::default(),
             static_owner,
-            static_counters: HashMap::new(),
-            nested_fn_globals: HashMap::new(),
-            nested_fn_counters: HashMap::new(),
+            static_counters: HashMap::default(),
+            nested_fn_globals: HashMap::default(),
+            nested_fn_counters: HashMap::default(),
             presence_only: None,
-            flat_ref_binds: HashMap::new(),
-            flat_ref_cells: HashMap::new(),
-            flat_scan_lets: HashMap::new(),
+            flat_ref_binds: HashMap::default(),
+            flat_ref_cells: HashMap::default(),
+            flat_scan_lets: HashMap::default(),
             flat_ret: None,
             flat_variants: FlatVariantsHandle::default(),
             flat_arg_captures: Vec::new(),
@@ -2986,7 +2989,7 @@ impl Builder<'_> {
             Expr::Int(v) => Some(Lit::Float(v as f64)),
             _ => None,
         };
-        let mut bindings = HashMap::new();
+        let mut bindings = HashMap::default();
         let (body, expr) = match body.expr_arena[expr] {
             Expr::Call {
                 callee: Callee::Unresolved { name, .. },
@@ -3082,7 +3085,7 @@ impl Builder<'_> {
         {
             return None;
         }
-        let mut values = HashMap::new();
+        let mut values = HashMap::default();
         for field in fields {
             let field = &body.struct_lit_field_arena[field];
             let value = match body.expr_arena[field.value] {
@@ -4124,7 +4127,7 @@ pub struct ShaderPair {
 pub struct ShaderCollection {
     pub pairs: Vec<ShaderPair>,
     pub callsites: Vec<(ModuleId, BodyOwner)>,
-    pub contributions: HashMap<(ModuleId, BodyOwner), Vec<ShaderPair>>,
+    pub contributions: std::collections::HashMap<(ModuleId, BodyOwner), Vec<ShaderPair>>,
 }
 
 /// The `@shader(<stage>)` stage of `f`, else `None`.
@@ -4683,8 +4686,8 @@ pub fn collect_shader_body(
 
 pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, CompilerError> {
     let mut by_key: BTreeMap<String, ShaderPair> = BTreeMap::new();
-    let mut callsites: HashSet<(ModuleId, BodyOwner)> = HashSet::new();
-    let mut contributions = HashMap::new();
+    let mut callsites: HashSet<(ModuleId, BodyOwner)> = HashSet::default();
+    let mut contributions = std::collections::HashMap::new();
     for &mid in ws.module_ids.values() {
         let module = ws.module(mid);
         for owner in module.bodies.keys() {
@@ -4728,7 +4731,7 @@ pub fn gpu_only_call_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compiler
         if caller_is_gpu {
             continue;
         }
-        let mut shader_expansion_args = HashSet::new();
+        let mut shader_expansion_args = HashSet::default();
         for (e, expr) in body.expr_arena.iter() {
             let Expr::Call {
                 callee: Callee::Unresolved { name, .. },

@@ -7,7 +7,7 @@ use ustr::Ustr;
 
 pub(super) fn fields(body: &Body) -> Option<Vec<Option<HashSet<Ustr>>>> {
     let params: Vec<_> = body.param_bindings.into_iter().collect();
-    let mut demand = vec![Some(HashSet::new()); params.len()];
+    let mut demand = vec![Some(HashSet::default()); params.len()];
     fn pattern(
         body: &Body,
         p: Idx<Pattern>,

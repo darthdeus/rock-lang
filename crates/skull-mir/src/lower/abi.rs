@@ -20,8 +20,8 @@
 //! across targets would be answering with another target's ABI.
 
 use bone_core::prelude::Instant;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use rustc_hash::FxHashMap as HashMap;
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use bone_core::hir::{FnBackend, Function};
 use bone_core::prelude::Span;
@@ -930,7 +930,7 @@ impl Eq for RepArenaInner {}
 /// allocated at a reused address can never serve each other's plans.
 #[derive(Debug)]
 pub struct RepArena {
-    inner: Mutex<RepArenaInner>,
+    inner: RwLock<RepArenaInner>,
     arena_id: u64,
     get_calls: std::sync::atomic::AtomicU64,
     local_get_hits: std::sync::atomic::AtomicU64,
@@ -943,7 +943,7 @@ impl Default for RepArena {
     fn default() -> Self {
         static ARENA_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
-            inner: Mutex::default(),
+            inner: RwLock::default(),
             arena_id: ARENA_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             get_calls: Default::default(),
             local_get_hits: Default::default(),
@@ -1206,7 +1206,7 @@ impl RepArena {
             }
             let id = self
                 .inner
-                .lock()
+                .read()
                 .expect("RepArena lock poisoned")
                 .by_key
                 .get(key)
@@ -1220,7 +1220,7 @@ impl RepArena {
 
     fn alias_key(&self, key: RepKey, id: RepId) {
         self.inner
-            .lock()
+            .write()
             .expect("RepArena lock poisoned")
             .by_key
             .insert(key.clone(), id);
@@ -1235,8 +1235,8 @@ impl RepArena {
         if std::ptr::eq(self, other) {
             return true;
         }
-        let left = self.inner.lock().expect("RepArena lock poisoned");
-        let right = other.inner.lock().expect("RepArena lock poisoned");
+        let left = self.inner.read().expect("RepArena lock poisoned");
+        let right = other.inner.read().expect("RepArena lock poisoned");
         *left == *right
     }
 
@@ -1280,7 +1280,7 @@ impl RepArena {
                 return *id;
             }
             let id = {
-                let mut inner = self.inner.lock().expect("RepArena lock poisoned");
+                let mut inner = self.inner.write().expect("RepArena lock poisoned");
                 match inner.by_key.get(&key) {
                     Some(id) => *id,
                     None => {
@@ -1406,7 +1406,7 @@ impl RepArena {
             }
             let plan = self
                 .inner
-                .lock()
+                .read()
                 .expect("RepArena lock poisoned")
                 .plans
                 .get(id.index as usize)
@@ -1427,7 +1427,7 @@ impl RepArena {
             intern_new: self.intern_new.load(Ordering::Relaxed),
             plans: self
                 .inner
-                .lock()
+                .read()
                 .expect("RepArena lock poisoned")
                 .plans
                 .len() as u64,
@@ -1439,7 +1439,7 @@ impl RepArena {
             return None;
         }
         self.inner
-            .lock()
+            .read()
             .expect("RepArena lock poisoned")
             .plans
             .get(id.index as usize)
@@ -1450,7 +1450,7 @@ impl RepArena {
     /// catalog and retain the plan ID they use; they do not reconstruct one
     /// from a nominal declaration.
     pub fn value_plan_catalog(&self) -> Vec<(Ustr, RepId)> {
-        let inner = self.inner.lock().expect("RepArena lock poisoned");
+        let inner = self.inner.read().expect("RepArena lock poisoned");
         inner
             .plans
             .iter()

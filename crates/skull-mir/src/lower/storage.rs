@@ -637,7 +637,7 @@ impl Builder<'_> {
                 hit.len()
             )));
         }
-        let mut views = HashMap::new();
+        let mut views = HashMap::default();
         for (place, leaf) in hit.iter().zip(leaves) {
             let a = place.address();
             let at = self.leaf_index(checked, a);
@@ -722,7 +722,7 @@ impl Builder<'_> {
     ) -> Idx<Inst> {
         let addr = place.address();
         let at = self.leaf_index(checked, addr);
-        let view = self.leaf_view(buf, addr.view_field, &mut HashMap::new());
+        let view = self.leaf_view(buf, addr.view_field, &mut HashMap::default());
         self.emit_cur(Inst::Index {
             base: view,
             index: at,
@@ -740,7 +740,7 @@ impl Builder<'_> {
     ) {
         let addr = place.address();
         let at = self.leaf_index(checked, addr);
-        let view = self.leaf_view(buf, addr.view_field, &mut HashMap::new());
+        let view = self.leaf_view(buf, addr.view_field, &mut HashMap::default());
         self.emit_cur(Inst::StoreIndex {
             base: view,
             index: at,
@@ -772,7 +772,7 @@ impl Builder<'_> {
             .map(|address| container.place(address).map_err(|e| gap(e.message)))
             .collect::<Result<_, _>>()?;
         let checked = self.nb_checked_index(buf, index)?;
-        let mut views = HashMap::new();
+        let mut views = HashMap::default();
         let leaves: Vec<Idx<Inst>> = plan
             .iter()
             .map(|place| {
@@ -823,7 +823,7 @@ impl Builder<'_> {
         // The check precedes every leaf write: checking after would let the
         // out-of-bounds writes happen first.
         let checked = self.nb_checked_index(buf, index)?;
-        let mut views = HashMap::new();
+        let mut views = HashMap::default();
         for (place, leaf) in plan.iter().zip(leaves) {
             let a = place.address();
             let at = self.leaf_index(checked, a);

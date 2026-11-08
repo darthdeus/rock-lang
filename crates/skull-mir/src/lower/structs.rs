@@ -49,10 +49,10 @@ impl Builder<'_> {
         let mut lit_box: Vec<(Ustr, Idx<Inst>)> = Vec::new();
         let mut lit_flat: Vec<(Ustr, FlatCells)> = Vec::new();
         let mut lit_embed: Vec<(Ustr, Vec<(Ustr, Idx<Inst>)>)> = Vec::new();
-        let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::new();
-        let mut flat_by_value: HashMap<u32, FlatCells> = HashMap::new();
+        let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::default();
+        let mut flat_by_value: HashMap<u32, FlatCells> = HashMap::default();
         let mut embed_by_value: HashMap<u32, (Option<Idx<Inst>>, Vec<(Ustr, Idx<Inst>)>)> =
-            HashMap::new();
+            HashMap::default();
         for fidx in fields {
             let lf = self.body.struct_lit_field_arena[fidx];
             let key: u32 = lf.value.into_raw().into();
@@ -697,7 +697,7 @@ impl Builder<'_> {
             .ok_or_else(|| gap("enum variant not in shape"))?;
         let tag_inst = self.emit_cur(Inst::Const(Lit::Int(tag)));
         // Map this variant's payload values onto their slot names.
-        let mut by_slot: HashMap<Ustr, Idx<Inst>> = HashMap::new();
+        let mut by_slot: HashMap<Ustr, Idx<Inst>> = HashMap::default();
         match args {
             VariantArgs::Unit => {}
             VariantArgs::Tuple(range) => {

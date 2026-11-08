@@ -429,8 +429,8 @@ impl Builder<'_> {
                 // A field GROUP (`Ty { a + b: expr }`) shares ONE value expr
                 // across several fields: lower each distinct one once, so the
                 // evaluation count is right and grouped leaves share it.
-                let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::new();
-                let mut flat_by_value: HashMap<u32, FlatCells> = HashMap::new();
+                let mut by_value: HashMap<u32, Idx<Inst>> = HashMap::default();
+                let mut flat_by_value: HashMap<u32, FlatCells> = HashMap::default();
                 let mut written: Vec<(Ustr, Idx<Expr>)> = Vec::new();
                 for fidx in fields {
                     let lf = self.body.struct_lit_field_arena[fidx];

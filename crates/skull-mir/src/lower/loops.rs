@@ -461,15 +461,15 @@ impl Builder<'_> {
     pub(crate) fn scrut_variants(&self, e: Idx<Expr>) -> HashSet<Ustr> {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let Some(name) = ty.peel_nullable().0.nominal() else {
-                return HashSet::new();
+                return HashSet::default();
             };
             if let Some(&eid) = self.ws.enums_by_name.get(&name) {
                 let ed = &self.ws.modules[eid.module.index()].enums[eid.def];
                 return ed.variants.iter().map(|v| v.name).collect();
             }
-            return HashSet::new();
+            return HashSet::default();
         }
-        HashSet::new()
+        HashSet::default()
     }
 
     /// The enum NAME of a scrutinee whose static type is an enum (`None` else) --

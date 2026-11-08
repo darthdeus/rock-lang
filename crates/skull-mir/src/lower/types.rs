@@ -395,7 +395,7 @@ impl Builder<'_> {
                     Some(other) => Some(self.pack(other.clone())?),
                 };
                 let mut explicit: Vec<(Ustr, ValueBundle)> = Vec::new();
-                let mut by_value: HashMap<u32, ValueBundle> = HashMap::new();
+                let mut by_value: HashMap<u32, ValueBundle> = HashMap::default();
                 for fidx in fields {
                     let lf = self.body.struct_lit_field_arena[fidx];
                     let key: u32 = lf.value.into_raw().into();
