@@ -51,7 +51,7 @@ fn draw_sprite(image: Image, pos: FixVec2, source: IRect? = null) {
         let dims = image_dims(image)
         irect(0, 0, dims.x, dims.y)
     } else {
-        source.unwrap()
+        source
     }
 
     let world_size = fixv(source.w ./ 16, source.h ./ 16)
@@ -108,9 +108,9 @@ fn test_if_expression_type_change_shadow() {
 
 // Helper for test 4
 fn process_nullable(a: int? = null, b: int? = null, c: int? = null) {
-    let a = if a == null { 10 } else { a.unwrap() }
-    let b = if b == null { 20 } else { b.unwrap() }
-    let c = if c == null { 30 } else { c.unwrap() }
+    let a = if a == null { 10 } else { a }
+    let b = if b == null { 20 } else { b }
+    let c = if c == null { 30 } else { c }
 
     print(a)
     print(b)
@@ -170,7 +170,7 @@ fn process_with_default(value: int? = null) -> int {
             0
         }
     } else {
-        value.unwrap()
+        value
     }
     return value
 }
@@ -284,7 +284,7 @@ fn process_text(text: string? = null) {
     let text = if text == null {
         "hello world"
     } else {
-        text.unwrap()
+        text
     }
 
     // Now text is non-nullable and we can use it
@@ -346,11 +346,11 @@ fn get_value(c: Container?) -> int {
     let value = if c == null {
         0
     } else {
-        let container_value = c.unwrap().value
+        let container_value = c.value
         if container_value == null {
             0
         } else {
-            container_value.unwrap()
+            container_value
         }
     }
     return value

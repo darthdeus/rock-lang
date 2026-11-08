@@ -60,7 +60,7 @@ pub fn ui_submission_probe_stop() {
 pub fn ui_submission_probe_write_if_requested(name: string) {
     let directory = env_var("ROCK_UI_TRACE_DIR")
     if directory == null { return }
-    if !stone_ui_probe_write("{directory.unwrap()}/{name}.json") { error("UI probe could not write requested trace") }
+    if !stone_ui_probe_write("{directory}/{name}.json") { error("UI probe could not write requested trace") }
 }
 
 fn ui_probe_texture(texture: SampledTexture) -> JsonValue {
@@ -73,7 +73,7 @@ fn ui_probe_texture(texture: SampledTexture) -> JsonValue {
 }
 
 fn ui_probe_optional_texture(texture: SampledTexture?) -> JsonValue {
-    return if texture != null { ui_probe_texture(texture.unwrap()) } else { json_null() }
+    return if texture != null { ui_probe_texture(texture) } else { json_null() }
 }
 
 fn ui_probe_vec2(p: Vec2) -> JsonValue { return json_array([json_float(p.x), json_float(p.y)]) }
@@ -84,7 +84,7 @@ fn ui_probe_rect(r: Rect) -> JsonValue {
 fn ui_probe_frozen_view() -> JsonValue {
     let resolved = RENDER_VIEW
     if resolved == null { return json_null() }
-    let view = resolved.unwrap()
+    let view = resolved
     let m: Map<string, JsonValue> = map_new()
     m["logical"] = ui_probe_vec2(view.logical_size)
     m["drawable"] = json_array([json_int(view.drawable_size.x), json_int(view.drawable_size.y)])
@@ -127,7 +127,7 @@ fn ui_submission_probe_batch(key: string, batch: RenderBatch, shader: string, ex
     target["kind"] = json_str(if CURRENT_CANVAS_HANDLE == 0 { "window" } else { "canvas" })
     target["handle"] = json_int(CURRENT_CANVAS_HANDLE)
     m["target"] = json_object(target)
-    m["projection_extent"] = if extent != null { ui_probe_vec2(extent.unwrap()) } else { json_null() }
+    m["projection_extent"] = if extent != null { ui_probe_vec2(extent) } else { json_null() }
     m["active_extent"] = json_null()
     m["viewport"] = json_null()
     m["clip"] = json_null()
@@ -261,9 +261,9 @@ fn ui_submission_probe_glyph(batch: RenderBatch, layout: TextLayout, glyph: Text
     m["line_count"] = json_int(layout.line_count)
     m["alignment"] = ui_probe_vec2(text_align_fracs(layout.alignment))
     m["alignment_offset"] = ui_probe_vec2(layout.alignment_offset)
-    m["pose_translation"] = if pose != null { ui_probe_vec2(pose.unwrap().translation) } else { json_null() }
-    m["pose_scale"] = if pose != null { ui_probe_vec2(pose.unwrap().scale) } else { json_null() }
-    m["pose_rotation"] = if pose != null { json_float(pose.unwrap().rotation) } else { json_null() }
+    m["pose_translation"] = if pose != null { ui_probe_vec2(pose.translation) } else { json_null() }
+    m["pose_scale"] = if pose != null { ui_probe_vec2(pose.scale) } else { json_null() }
+    m["pose_rotation"] = if pose != null { json_float(pose.rotation) } else { json_null() }
     m["layout_scale"] = json_float(scale)
     m["raster_metrics"] = json_array([json_float(raw.width), json_float(raw.height), json_float(raw.bearing_x), json_float(raw.bearing_y), json_float(raw.advance)])
     m["uv"] = json_array([json_float(raw.u0), json_float(raw.v0), json_float(raw.u1), json_float(raw.v1)])
@@ -271,15 +271,15 @@ fn ui_submission_probe_glyph(batch: RenderBatch, layout: TextLayout, glyph: Text
     m["vertex_first"] = json_int(batch.count)
     m["vertex_count"] = json_int(6)
     if layout.font != null {
-        let data = layout.font.unwrap().data()
+        let data = layout.font.data()
         if data != null {
-            m["font_path"] = json_str(data.unwrap().path)
+            m["font_path"] = json_str(data.path)
             let font_ref: Map<string, JsonValue> = map_new()
             font_ref["kind"] = json_str("font")
-            font_ref["handle"] = json_int(data.unwrap().backend_id)
+            font_ref["handle"] = json_int(data.backend_id)
             m["font"] = json_object(font_ref)
-            m["native_em"] = json_int(data.unwrap().native_em)
-            m["cap_height"] = json_float(data.unwrap().cap_height)
+            m["native_em"] = json_int(data.native_em)
+            m["cap_height"] = json_float(data.cap_height)
         }
     }
     let key = ""

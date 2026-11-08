@@ -45,7 +45,7 @@ pub fn get_or_create_canvas(id: string, width: float, height: float, format: str
         return get_canvas(id).unwrap()
     }
 
-    let m = managed.unwrap()
+    let m = managed
     if m.width != width || m.height != height {
         resize_canvas(id, width, height)
         return get_canvas(id).unwrap()

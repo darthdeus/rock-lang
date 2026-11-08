@@ -408,7 +408,7 @@ pub fn rect_batch_push_outline(b: RectBatch,
 pub fn rect_batch_flush(b: RectBatch) {
     if b.count == 0 { return }
     if b.target != null {
-        let target = b.target.unwrap()
+        let target = b.target
         if !canvas_is_live(target) {
             error("RectBatch flush names a dead target canvas")
             return
@@ -731,7 +731,7 @@ pub fn sprite_mesh_add(
     let u2 = (float(src.x + src.w) - m.inset_x) / m.tex_w
     let v2 = (float(src.y + src.h) - m.inset_y) / m.tex_h
 
-    let depth = if py != null { py.unwrap() } else { pos.y }
+    let depth = if py != null { py } else { pos.y }
 
     // vi is now in Vertex units (not floats) — one slot per vertex.
     let vi = m.count
@@ -810,7 +810,7 @@ fn submit_mesh_into(
 // (before the texture slot), so program switches land at group boundaries
 // instead of once per mesh interleaved among default-shader batches.
 fn mesh_batch_key(m: SpriteMesh, eff: TextureFilter) -> string {
-    let sh = if m.pipeline != null { m.pipeline.unwrap().shader_name } else { "0" }
+    let sh = if m.pipeline != null { m.pipeline.shader_name } else { "0" }
     if m.batch_key_counter == CUSTOM_DRAW_COUNTER && m.batch_key_z == m.z_layer
         && m.batch_key_order == m.order && m.batch_key_shader == sh
         && m.batch_key_depth == m.depth && m.batch_key_blend == m.blend
@@ -842,8 +842,8 @@ fn mesh_batch_row(pool: RenderBatchPool, m: SpriteMesh, key: string) -> Entity<R
     }
     let reused = pool.rows.reuse_retained_entity()
     let handle = if reused != null {
-        mesh_batch_row_init(reused.unwrap().borrow().unwrap())
-        reused.unwrap()
+        mesh_batch_row_init(reused.borrow().unwrap())
+        reused
     } else {
         pool.rows.insert(mesh_render_batch(m))
     }
@@ -904,7 +904,7 @@ fn mesh_render_batch_sync(
     batch.normal_sampling = if m.sampling != null || m.normal == null {
         eff
     } else {
-        sampled_texture_default_sampling(m.normal.unwrap())
+        sampled_texture_default_sampling(m.normal)
     }
     batch.normal = m.normal
     batch.surface = m.surface

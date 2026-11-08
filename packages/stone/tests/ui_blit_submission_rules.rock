@@ -34,10 +34,10 @@ fn ui_blit_test_fixture(body: fn(Canvas, Canvas) -> ()) {
         TEXT_OUTPUT_PRESENT_ORDER = saved_present
         GPU_TRACE_ON = saved_trace_on
         unset_canvas()
-        if out != null { destroy_canvas(out.unwrap()) }
-        if src != null { destroy_canvas(src.unwrap()) }
+        if out != null { destroy_canvas(out) }
+        if src != null { destroy_canvas(src) }
         set_canvas_handle(saved_canvas)
-        if saved_shader != null { set_shader(saved_shader.unwrap()) } else { unset_shader() }
+        if saved_shader != null { set_shader(saved_shader) } else { unset_shader() }
         WATCHER.current_shader_name = saved_shader
         CURRENT_BLEND = saved_blend
         assert(stone_gl_pass_state_end(scope), "restore the borrowed host's native state")
@@ -182,7 +182,7 @@ fn ui_blit_fixture_restores_after_assertion_failure() {
             assert(false, "intentional UI blit fixture assertion failure")
         })
     }, world_fixture_traceback)
-    assert(failure != null && failure.unwrap().contains("intentional UI blit fixture assertion failure"))
+    assert(failure != null && failure.contains("intentional UI blit fixture assertion failure"))
     assert(RENDER_VIEW == view && UI_RASTER_CANVAS == raster)
     assert(OUTPUT_HDR_CANVAS == hdr && OUTPUT_HDR_WRITTEN == written)
     assert(!UI_SUBMISSION_PROBE_ON && UI_SUBMISSION_PROBE_PASS_HOOK == null

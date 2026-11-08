@@ -115,9 +115,9 @@ fn safenav_find_and_remove() {
 
     let boss_entity = mobs.pairs().find(_.1.name == "Boss")?.0
     if boss_entity != null {
-        let mob = boss_entity.unwrap().get().unwrap()
+        let mob = boss_entity.get().unwrap()
         print("removed {mob.name}")
-        boss_entity.unwrap().remove()
+        boss_entity.remove()
     }
     print(mobs.len())
 }
@@ -304,7 +304,7 @@ fn safenav_if_let() {
     let o: Outer? = Outer { inner: Inner { value: 42 }, name: "x" }
     let val = o?.inner?.value
     if val != null {
-        print("found: {val.unwrap()}")
+        print("found: {val}")
     }
 
     let o2: Outer? = null
@@ -326,7 +326,7 @@ fn safenav_arena_filter_remove() {
     // Find and remove weak mobs
     let weak = mobs.pairs().find(_.1.health < 50)?.0
     if weak != null {
-        weak.unwrap().remove()
+        weak.remove()
     }
     print(mobs.len())
 
@@ -342,7 +342,7 @@ fn safenav_arena_find_pattern() {
 
     let boss_hp = mobs.pairs().find(_.1.name == "Boss")?.1?.health
     if boss_hp != null {
-        print("Boss hp: {boss_hp.unwrap()}")
+        print("Boss hp: {boss_hp}")
     }
 
     mobs.pairs().find(_.1.name == "Boss")?.0.unwrap().remove()

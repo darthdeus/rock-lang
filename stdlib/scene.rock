@@ -63,7 +63,7 @@ inline(lua) fn __rock_scene_type_key<T>() -> string = """
 fn __scene_state(scene_id: int) -> int {
     let st = __SCENE_REGISTRY.states.get(scene_id)
     if is_null(st) { return __SCENE_DEAD }
-    return st.unwrap()
+    return st
 }
 
 // THE physical resolution oracle: non-generic, so the element type is recovered
@@ -135,7 +135,7 @@ fn __scene_reserve() -> int {
 fn __scene_type_bucket_index(type_key: string) -> int {
     let existing = __SCENE_REGISTRY.type_bucket_lookup.get(type_key)
     if !is_null(existing) {
-        return existing.unwrap()
+        return existing
     }
     let empty: [int] = []
     let bucket_index = vec_len(__SCENE_REGISTRY.type_keys)
@@ -194,8 +194,8 @@ fn __scene_rebuild_type_buckets() {
     for i in 0..vec_len(__SCENE_REGISTRY.states) {
         if __SCENE_REGISTRY.states[i] == __SCENE_LIVE {
             let key = __SCENE_REGISTRY.root_type_key.get(i)
-            if !is_null(key) && key.unwrap() != "" {
-                __scene_type_bucket_insert(i, key.unwrap())
+            if !is_null(key) && key != "" {
+                __scene_type_bucket_insert(i, key)
             }
         }
     }
@@ -254,7 +254,7 @@ fn scene_create<T>(build: fn(SceneBuilder) -> T?) -> Scene<T>? {
         __scene_retire(id, true)
         return null
     }
-    __SCENE_REGISTRY.roots.set(id, __scene_root_erased(root.unwrap()))
+    __SCENE_REGISTRY.roots.set(id, __scene_root_erased(root))
     __SCENE_REGISTRY.states.set(id, __SCENE_LIVE)
     let type_key = __rock_scene_type_key<T>()
     __scene_type_bucket_insert(id, type_key)

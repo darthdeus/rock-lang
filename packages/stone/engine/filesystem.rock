@@ -34,7 +34,7 @@ pub fn io_clear_directory_recursive(path: string) {
         return
     }
     let listed = stone_list_directory(path) ?? return
-    for name in listed.unwrap() {
+    for name in listed {
         let child = "{path}/{name}"
         let removed = if stone_is_directory(child) {
             stone_remove_dir(child)

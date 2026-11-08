@@ -19,7 +19,7 @@ fn coroutine_for_v_in_buf() {
     print(c.resume() ?? -99)
     print(c.resume() ?? -99)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 co fn yield_with_index(buf: NativeBuffer<int>) -> Coroutine<int> {
@@ -39,7 +39,7 @@ fn coroutine_enumerate_tuple() {
     print(c.resume() ?? -99)
     print(c.resume() ?? -99)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 co fn yield_break_early(buf: NativeBuffer<int>) -> Coroutine<int> {
@@ -60,5 +60,5 @@ fn coroutine_break_inside_for() {
     print(c.resume() ?? -99)
     print(c.resume() ?? -99)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }

@@ -88,7 +88,7 @@ fn submission_state_case(fail: bool, trace: bool, depth_compare: string) {
             UI_SUBMISSION_PROBE_ON = probe_on
             UI_SUBMISSION_PROBE_DRAW_HOOK = probe_hook
             UI_SUBMISSION_PROBE_PASS_HOOK = pass_hook
-            assert(raised != null && raised.unwrap().contains("intentional semantic execution failure"),
+            assert(raised != null && raised.contains("intentional semantic execution failure"),
                 "the executor surfaces its original failure: {raised ?? "no error"}")
             assert_eq(calls, 2, "failure follows a draw that changed native state")
         } else {
@@ -123,7 +123,7 @@ fn submission_state_case(fail: bool, trace: bool, depth_compare: string) {
         unset_canvas()
         for c in [source, output, before, after] { destroy_canvas(c) }
         set_canvas_handle(entry_canvas)
-        if entry_shader != null { set_shader(entry_shader.unwrap()) } else { unset_shader() }
+        if entry_shader != null { set_shader(entry_shader) } else { unset_shader() }
         WATCHER.current_shader_name = entry_shader
         CURRENT_BLEND = entry_blend
         GPU_TRACE = entry_trace

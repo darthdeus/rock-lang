@@ -291,11 +291,11 @@ pub fn set_engine_uniforms(shader: string, yb: Vec2,
     // exits then needs them all in registers -- the largest single source of
     // `NYI: register coalescing too complex` in a combat frame.
     if let block = shader_block_by_fingerprint(shader, uniform_block_id(engine_uniforms(yb, convention))) {
-        let entry = block.unwrap()
+        let entry = block
         // Resolved once: the key and the block are built from the same extent,
         // and the default one is the bound target's, which a canvas bind moves.
         let target = if extent != null {
-            extent.unwrap()
+            extent
         } else {
             v(stone_current_target_width(), stone_current_target_height())
         }

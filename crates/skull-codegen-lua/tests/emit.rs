@@ -2115,8 +2115,8 @@ global METADATA: Map<string, SlotMetadata> = map_new()
             "lookup",
             r#"fn lookup(shader: string, name: string) -> int {
     let slots = METADATA.get(shader)
-    if slots == null || slots.unwrap().names.len() == 0 { return -1 }
-    return slots.unwrap().by_name.get(name) ?? -1
+    if slots == null || slots.names.len() == 0 { return -1 }
+    return slots.by_name.get(name) ?? -1
 }"#,
         ),
         (

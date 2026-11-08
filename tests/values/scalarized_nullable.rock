@@ -15,7 +15,7 @@ fn consume_or_default(dest: V2? = null) -> int {
     if dest == null {
         return -1
     }
-    let d = dest.unwrap()
+    let d = dest
     return d.x + d.y
 }
 

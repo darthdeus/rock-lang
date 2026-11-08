@@ -68,7 +68,7 @@ fn lookup_row(world: int, row: int) -> Facts {
 fn apply(lookup: Lookup<int>?, row: int) -> bool {
     let facts = lookup?.callback(1, row)
     if facts == null { return false }
-    return facts.unwrap().found && facts.unwrap().row == row
+    return facts.found && facts.row == row
 }
 
 fn main() {

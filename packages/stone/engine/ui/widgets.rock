@@ -301,7 +301,7 @@ pub fn focus_slider(r: UiRect, key: string, val: float, min_v: float, max_v: flo
     // value where it is rather than snapping to an edge.
     let mp = ui_ctx_target_pointer(a.ctx)
     if ui_active(id) && a.w > 0.0 && mp != null {
-        let t = clamp((mp.unwrap().x - a.x) / a.w, 0.0, 1.0)
+        let t = clamp((mp.x - a.x) / a.w, 0.0, 1.0)
         v = min_v + t * (max_v - min_v)
         if step > 0.0 {
             v = min_v + floor((v - min_v) / step + 0.5) * step

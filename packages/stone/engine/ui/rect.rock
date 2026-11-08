@@ -930,7 +930,7 @@ pub fn UiRect.text(
     let s = ui_to_screen(r)
     let ts = r.text_scale()
     if family != null {
-        let layout = resolve_plain_text_layout(family.unwrap(), text,
+        let layout = resolve_plain_text_layout(family, text,
             font_size, ts, "UiRect.text")
         let frac = text_align_fracs(align)
         let trailing = (layout.lines.len - 1) as float * layout.line_height
@@ -1155,7 +1155,7 @@ pub fn UiRect.rich_text(
             return r.rich_text_single_font_spans(
                 spans, font.unwrap(), font_size, align, shadow)
         }
-        let fam = family.unwrap()
+        let fam = family
         if fam.fallbacks.len() == 0 && spans.len() == 1 {
             return r.rich_text_single_font(
                 spans[0], fam.regular, font_size, align, shadow)
@@ -1201,7 +1201,7 @@ pub fn measure_rich_ui(spans: [TextSpan], font_size: float, family: TextFamily? 
         measure_rich_text_single_font(font.unwrap(), spans, font_size,
             FONT_RENDER_SCALE)
     } else {
-        let fam = family.unwrap()
+        let fam = family
         if fam.fallbacks.len() == 0 {
             measure_rich_text_single_font(fam.regular, spans, font_size,
                 FONT_RENDER_SCALE)
@@ -1223,7 +1223,7 @@ pub fn measure_rich_ui_text(text: string, color: Color, font_size: float,
         measure_rich_text_single_font_text(font.unwrap(), text, color, bold,
             italic, font_size, FONT_RENDER_SCALE)
     } else {
-        let fam = family.unwrap()
+        let fam = family
         if fam.fallbacks.len() == 0 {
             measure_rich_text_single_font_text(fam.regular, text, color, bold,
                 italic, font_size, FONT_RENDER_SCALE)

@@ -337,7 +337,7 @@ pub fn mote_integrate_arena_in(arena: Arena<Mote>, effectors: [MoteEffector],
         // Floor contact resolves AFTER integration, so a step that would end
         // below the plane lands on it instead of tunnelling for a frame.
         if m.floor_z != null {
-            let fz = m.floor_z.unwrap()
+            let fz = m.floor_z
             if m.pos.z < fz {
                 m.pos = MoteWorldPoint { x: m.pos.x, y: m.pos.y, z: fz }
                 if m.vel.z < 0.0 {

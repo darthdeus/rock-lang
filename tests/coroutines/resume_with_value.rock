@@ -22,7 +22,7 @@ fn test_resume_with_value_basic() {
     print(c.resume(0) ?? -1)   // 0  (body prints), body falls off
     print(c.resume(0) ?? -1)   // -1 -- body already terminated; resume returns null
     let last = c.resume(0)     // null -- body still terminated
-    if last == null { print("null") } else { print(last.unwrap()) }
+    if last == null { print("null") } else { print(last) }
 }
 
 // ---- Per-yield feedback in a loop: every resume binds its value ----
@@ -46,7 +46,7 @@ fn test_resume_with_value_loop() {
     print(c.resume(10) ?? -1)  // total += 10, yields 1
     print(c.resume(20) ?? -1)  // total += 20, yields 2
     let last = c.resume(30)    // total += 30 = 60, body returns
-    if last != null { print("unexpected={last.unwrap()}") }
+    if last != null { print("unexpected={last}") }
     let r = c.result()
-    if r != null { print("final={r.unwrap()}") } else { print("final=null") }
+    if r != null { print("final={r}") } else { print("final=null") }
 }

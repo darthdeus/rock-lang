@@ -579,7 +579,7 @@ pub @intrinsic fn stone_run_game(config: GameConfig) {
         // deterministic gate instead of a wall-clock-dependent snapshot.
         PERF_FIXED_DT_ENABLED = true
         if let ov = os_getenv("PERF_DT") {
-            if let parsed = ov.parse_float() { PERF_FIXED_DT = parsed.unwrap() }
+            if let parsed = ov.parse_float() { PERF_FIXED_DT = parsed }
         }
     }
     // JIT-trace logging from startup (same as the F2 hotkey) so trace-abort
@@ -1581,7 +1581,7 @@ fn run_one_frame(
 
     if _frame == TEST_IMAGE_LOAD_AT_FRAME {
         let path = os_getenv("STONE_TEST_IMAGE_LOAD_PATH")
-        if path != null { let _ = load_image_asset(path.unwrap()) }
+        if path != null { let _ = load_image_asset(path) }
     }
     // A fault whose condition is the upload queue itself, the shape MAG's run
     // admission asserts took: it repeats for as long as the queue stays full.

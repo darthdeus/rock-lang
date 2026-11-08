@@ -24,7 +24,7 @@ fn lookup_arena_style(a: Arena<Wrapper>, key: int) -> Wrapper? {
     // Simulates the actual pattern: arena entity lookup
     let e = a.pairs().find(_.1.value == key)
     if e == null { return null }
-    e.unwrap().1
+    e.1
 }
 
 @test

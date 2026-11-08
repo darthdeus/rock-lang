@@ -288,7 +288,7 @@ fn test_conditional_unwrap_patterns() {
     let maybe_val: int? = 42
     
     if maybe_val != null {
-        let unwrapped = maybe_val.unwrap()
+        let unwrapped = maybe_val
         if unwrapped > 40 {
             print("conditional unwrap success")
         }

@@ -30,7 +30,7 @@ fn test_for_vec_simple() {
     print(c.resume() ?? -99)
     print(c.resume() ?? -99)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Empty Vec: zero iterations ----
@@ -44,7 +44,7 @@ co fn yield_each_empty(items: [int]) -> Coroutine<int> {
 fn test_for_vec_empty() {
     let c = yield_each_empty([])
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Break inside for ----
@@ -61,7 +61,7 @@ fn test_for_break() {
     print(c.resume() ?? -1)
     print(c.resume() ?? -1)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Range iteration (numeric) ----
@@ -78,7 +78,7 @@ fn test_for_range_basic() {
     print(c.resume() ?? -1)
     print(c.resume() ?? -1)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Range with continue ----
@@ -95,7 +95,7 @@ fn test_for_range_continue() {
     print(c.resume() ?? -1)
     print(c.resume() ?? -1)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Empty range: lo >= hi ----
@@ -109,7 +109,7 @@ co fn yield_range_empty() -> Coroutine<int> {
 fn test_for_range_empty() {
     let c = yield_range_empty()
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Vec iteration inside a coroutine ----
@@ -128,7 +128,7 @@ fn test_for_vec() {
     print(c.resume() ?? -1)
     print(c.resume() ?? -1)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Arena iteration (yields {entity, data}) ----
@@ -150,7 +150,7 @@ fn test_for_arena() {
     print(c.resume() ?? -99)
     print(c.resume() ?? -99)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Vec<T?> with nullable elements: numeric-indexed iteration ----
@@ -159,7 +159,7 @@ co fn yield_with_nullable(items: [int?]) -> Coroutine<int> {
         if v == null {
             yield -1
         } else {
-            yield v.unwrap() * 10
+            yield v * 10
         }
     }
 }
@@ -172,7 +172,7 @@ fn test_for_vec_nullable() {
     print(c.resume() ?? -99)
     print(c.resume() ?? -99)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Vec enumerated with tuple binding ----
@@ -190,7 +190,7 @@ fn test_for_vec_enumerated() {
     print(c.resume() ?? -99)
     print(c.resume() ?? -99)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Map with tuple binding ----
@@ -230,7 +230,7 @@ fn test_for_vec_enumerated_single_binding() {
     print(c.resume() ?? -99)
     print(c.resume() ?? -99)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Arena enumerated with tuple binding ----
@@ -254,5 +254,5 @@ fn test_for_arena_enumerated() {
     print(c.resume() ?? -99)
     print(c.resume() ?? -99)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }

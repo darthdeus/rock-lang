@@ -169,7 +169,7 @@ const DRAW_BUFFERS_CLEAR_WITH_OWNER: int = 0b10011
 pub global world_material_canvas: Canvas? = null
 
 pub fn ensure_world_material_canvas() -> Canvas {
-    if world_material_canvas == null || !canvas_is_live(world_material_canvas.unwrap()) {
+    if world_material_canvas == null || !canvas_is_live(world_material_canvas) {
         let target = new_canvas(int(screen_canvas.width),int(screen_canvas.height),"rgba8")
         assert(stone_canvas_attach_color_target(screen_canvas.handle.0,target.handle.0,2),
             "world material attachment must match the live scene target")
@@ -185,7 +185,7 @@ pub fn ensure_world_material_canvas() -> Canvas {
 pub global world_normal_canvas: Canvas? = null
 
 pub fn ensure_world_normal_canvas() -> Canvas {
-    if world_normal_canvas == null || !canvas_is_live(world_normal_canvas.unwrap()) {
+    if world_normal_canvas == null || !canvas_is_live(world_normal_canvas) {
         let _ = ensure_world_material_canvas()
         let target = new_canvas(int(screen_canvas.width),int(screen_canvas.height),"rgba8")
         assert(stone_canvas_attach_color_target(screen_canvas.handle.0,target.handle.0,3),
@@ -202,7 +202,7 @@ pub fn ensure_world_normal_canvas() -> Canvas {
 pub global world_surface_owner_canvas: Canvas? = null
 
 pub fn ensure_world_surface_owner_canvas() -> Canvas {
-    if world_surface_owner_canvas == null || !canvas_is_live(world_surface_owner_canvas.unwrap()) {
+    if world_surface_owner_canvas == null || !canvas_is_live(world_surface_owner_canvas) {
         let _ = ensure_world_normal_canvas()
         let target = new_canvas(int(screen_canvas.width),int(screen_canvas.height),"r32i")
         assert(stone_canvas_attach_color_target(screen_canvas.handle.0,target.handle.0,4),
@@ -260,7 +260,7 @@ pub fn ensure_ui_raster_targets(view: FrameView) {
     // The output HDR layer is created by its first writer at this extent; a
     // stale one is dropped here so that writer re-creates it.
     if OUTPUT_HDR_CANVAS != null
-            && (!canvas_is_live(OUTPUT_HDR_CANVAS.unwrap())
+            && (!canvas_is_live(OUTPUT_HDR_CANVAS)
                 || OUTPUT_HDR_TARGET_SIZE != view.ui_raster_size) {
         output_hdr_release()
     }
@@ -269,13 +269,13 @@ pub fn ensure_ui_raster_targets(view: FrameView) {
     let scaled = view.ui_raster_size.x != view.drawable_size.x
         || view.ui_raster_size.y != view.drawable_size.y
     if !scaled {
-        if UI_RASTER_CANVAS != null { destroy_canvas(UI_RASTER_CANVAS.unwrap()) }
+        if UI_RASTER_CANVAS != null { destroy_canvas(UI_RASTER_CANVAS) }
         UI_RASTER_CANVAS = null
         UI_RASTER_TARGET_SIZE = iv(0, 0)
     } else if UI_RASTER_CANVAS == null
-            || !canvas_is_live(UI_RASTER_CANVAS.unwrap())
+            || !canvas_is_live(UI_RASTER_CANVAS)
             || UI_RASTER_TARGET_SIZE != view.ui_raster_size {
-        if UI_RASTER_CANVAS != null { destroy_canvas(UI_RASTER_CANVAS.unwrap()) }
+        if UI_RASTER_CANVAS != null { destroy_canvas(UI_RASTER_CANVAS) }
         UI_RASTER_CANVAS = new_canvas(view.ui_raster_size.x, view.ui_raster_size.y, "rgba8")
         UI_RASTER_TARGET_SIZE = view.ui_raster_size
     }
@@ -325,7 +325,7 @@ fn composite_scaled_ui(target: GpuTarget) {
 }
 
 fn output_hdr_release() {
-    if OUTPUT_HDR_CANVAS != null { destroy_canvas(OUTPUT_HDR_CANVAS.unwrap()) }
+    if OUTPUT_HDR_CANVAS != null { destroy_canvas(OUTPUT_HDR_CANVAS) }
     OUTPUT_HDR_CANVAS = null
     OUTPUT_HDR_WRITTEN = false
     OUTPUT_HDR_IDLE_FRAMES = 0
@@ -428,7 +428,7 @@ pub fn scene_target(existing: Canvas, rw: int, rh: int, format: string, with_dep
     // and puts the old storage back). Recreating is the right recovery; it is
     // logged with the handle and the extent that did it.
     let resized = resize_canvas(existing, rw, rh)
-    if resized != null { return resized.unwrap() }
+    if resized != null { return resized }
     if existing.handle.0 != 0 && canvas_is_live(existing) {
         log_once("RENDER", "scene target {existing.handle.0} could not be resized to {rw}x{rh}; recreating it")
     }
@@ -442,8 +442,8 @@ pub fn scene_target(existing: Canvas, rw: int, rh: int, format: string, with_dep
 // that asks for it.
 fn resize_lazy_scene_target(target: Canvas?, rw: int, rh: int) -> Canvas? {
     if target == null { return null }
-    let resized = resize_canvas(target.unwrap(), rw, rh)
-    if resized == null { destroy_canvas(target.unwrap()) }
+    let resized = resize_canvas(target, rw, rh)
+    if resized == null { destroy_canvas(target) }
     return resized
 }
 
@@ -642,9 +642,9 @@ fn set_scene_active_rects(scene: IVec2) {
     ] {
         set_canvas_active(c, scene.x, scene.y)
     }
-    if world_surface_owner_canvas != null { set_canvas_active(world_surface_owner_canvas.unwrap(),scene.x,scene.y) }
-    if world_normal_canvas != null { set_canvas_active(world_normal_canvas.unwrap(),scene.x,scene.y) }
-    if world_material_canvas != null { set_canvas_active(world_material_canvas.unwrap(),scene.x,scene.y) }
+    if world_surface_owner_canvas != null { set_canvas_active(world_surface_owner_canvas,scene.x,scene.y) }
+    if world_normal_canvas != null { set_canvas_active(world_normal_canvas,scene.x,scene.y) }
+    if world_material_canvas != null { set_canvas_active(world_material_canvas,scene.x,scene.y) }
     // Bloom's level 0 is already a half-step down from the scene.
     set_pyramid_active(BLOOM_LEVELS, pyramid_active_step(scene))
 }
@@ -763,12 +763,12 @@ global PICK_DEFER_SIDE: int = 0
 global PICK_ANSWER_POS: IVec2? = null
 
 fn flush_deferred_pick_submit() {
-    if PICK_DEFER_SLOT != null {
+    if let slot = PICK_DEFER_SLOT {
         if PICK_DEFER_SIDE > 0 {
-            pixel_readback_submit_area(PICK_DEFER_SLOT.unwrap(), visible_id_canvas,
+            pixel_readback_submit_area(slot, visible_id_canvas,
                 PICK_DEFER_POS.x, PICK_DEFER_POS.y, PICK_DEFER_SIDE)
         } else {
-            pixel_readback_submit(PICK_DEFER_SLOT.unwrap(), visible_id_canvas,
+            pixel_readback_submit(slot, visible_id_canvas,
                 PICK_DEFER_POS.x, PICK_DEFER_POS.y)
         }
         PICK_DEFER_SLOT = null
@@ -880,7 +880,7 @@ pub fn draw_rect(
     duration: float? = null
 ) {
     if duration != null {
-        _draw_rect_dur(pos, size, color, layer, depth, duration.unwrap())
+        _draw_rect_dur(pos, size, color, layer, depth, duration)
     } else {
         push_draw_rect(pos, size, color, "fill", 0, layer, depth)
     }
@@ -908,7 +908,7 @@ pub fn draw_circle_outline(
     thickness: float = 1.0 / 16.0
 ) {
     if duration != null {
-        _draw_circle_outline_dur(p, radius, color, entity_id, layer, depth, duration.unwrap(), thickness)
+        _draw_circle_outline_dur(p, radius, color, entity_id, layer, depth, duration, thickness)
     } else {
         draw_circle(p, radius, color, entity_id, layer, FillMode::Outline, depth, thickness: thickness)
     }
@@ -962,7 +962,7 @@ pub fn draw_circle(
     unlit: bool = false
 ) {
     if duration != null {
-        _draw_circle_dur(p, radius, color, entity_id, layer, mode, depth, duration.unwrap(), thickness, blend, z_off, outline, unlit)
+        _draw_circle_dur(p, radius, color, entity_id, layer, mode, depth, duration, thickness, blend, z_off, outline, unlit)
     } else {
         emit_circle(p, radius, color, entity_id, layer, mode, depth, thickness, blend: blend, z_off: z_off, unlit: unlit, outline: outline)
     }
@@ -1010,15 +1010,15 @@ pub fn emit_ellipse(
     let batch = ensure_batch_of(sampled_image(texture), layer, blend, false, depth,
         order: order, pipeline:pipeline, unlit: unlit || blend == BlendMode::Additive,
         shared_pipeline: pipeline != null)
-    let outline_entity_id = if outline != null { outline.unwrap().entity_id } else { 0 }
+    let outline_entity_id = if outline != null { outline.entity_id } else { 0 }
     let mask_entity_id = if entity_id != 0 { entity_id } else { outline_entity_id }
 
     if outline != null && mask_entity_id > 0 {
-        register_outline_entry(mask_entity_id, outline.unwrap())
+        register_outline_entry(mask_entity_id, outline)
     }
 
     // A custom vertex shader reads the expanded triangle payload.
-    let compact = pipeline == null || pipeline.unwrap().shader_name == sprite_batch_shader
+    let compact = pipeline == null || pipeline.shader_name == sprite_batch_shader
     add_ellipse_vertices_of(batch, p, radii, color, mode, entity_id,
         thickness: thickness, z_off: z_off, segments: segments, compact_native: compact)
 
@@ -1066,7 +1066,7 @@ pub fn draw_rect_outline(
     duration: float? = null
 ) {
     if duration != null {
-        _draw_rect_outline_dur(pos, size, color, layer, depth, duration.unwrap())
+        _draw_rect_outline_dur(pos, size, color, layer, depth, duration)
     } else {
         push_draw_rect(pos, size, color, "line", 0, layer, depth)
     }
@@ -1150,7 +1150,7 @@ pub fn draw_line(
     outline: Outline? = null
 ) {
     if duration != null {
-        _draw_line_dur(a, b, color, width, entity_id, layer, depth, duration.unwrap(), blend, order, z_off,
+        _draw_line_dur(a, b, color, width, entity_id, layer, depth, duration, blend, order, z_off,
             unlit, pipeline, outline)
     } else {
         emit_line(a, b, color, width, entity_id, layer, depth, unlit: unlit, blend: blend, order: order, z_off: z_off,
@@ -1223,11 +1223,11 @@ pub fn draw_polygon(
     outline: Outline? = null,
 ) {
     let batch = ensure_batch_of(sampled_image(WHITE_PIXEL.unwrap()), layer, BlendMode::Alpha, false, depth)
-    let outline_entity_id = if outline != null { outline.unwrap().entity_id } else { 0 }
+    let outline_entity_id = if outline != null { outline.entity_id } else { 0 }
     let mask_entity_id = if entity_id != 0 { entity_id } else { outline_entity_id }
 
     if outline != null && mask_entity_id > 0 {
-        register_outline_entry(mask_entity_id, outline.unwrap())
+        register_outline_entry(mask_entity_id, outline)
     }
 
     add_polygon_vertices_of(batch, vertices, color, mode, entity_id, py)
@@ -1266,7 +1266,7 @@ pub fn draw_text(
     if family != null {
         if duration != null {
             _draw_text_dur_family(text, pos, size, color, offset, label,
-                entity_id, layer, depth, duration.unwrap(), family.unwrap())
+                entity_id, layer, depth, duration, family)
         } else {
             push_draw_text(text, pos, size, color, offset, true, entity_id,
                 layer, depth, label, family: family)
@@ -1274,7 +1274,7 @@ pub fn draw_text(
         return
     }
     if duration != null {
-        _draw_text_dur(text, pos, size, color, offset, label, entity_id, layer, depth, duration.unwrap())
+        _draw_text_dur(text, pos, size, color, offset, label, entity_id, layer, depth, duration)
     } else {
         push_draw_text(text, pos, size, color, offset, true, entity_id, layer, depth, label)
     }
@@ -1327,7 +1327,7 @@ pub fn draw_scene_text(
     if duration != null {
         let owned = text.clone_into(duration_items.storage)
         _draw_text_dur(owned, pos, size, color, offset, label,
-            entity_id, layer, depth, duration.unwrap())
+            entity_id, layer, depth, duration)
     } else {
         push_draw_text(text, pos, size, color, offset, true, entity_id,
             layer, depth, label)
@@ -1383,7 +1383,7 @@ pub fn draw_text_top_left(
     if family != null {
         if duration != null {
             _draw_text_top_left_dur_family(text, pos, size, color, entity_id,
-                layer, depth, duration.unwrap(), family.unwrap())
+                layer, depth, duration, family)
         } else {
             push_draw_text(text, pos, size, color, v(0, 0), false, entity_id,
                 layer, depth, "top_left", family: family)
@@ -1391,7 +1391,7 @@ pub fn draw_text_top_left(
         return
     }
     if duration != null {
-        _draw_text_top_left_dur(text, pos, size, color, entity_id, layer, depth, duration.unwrap())
+        _draw_text_top_left_dur(text, pos, size, color, entity_id, layer, depth, duration)
     } else {
         push_draw_text(text, pos, size, color, v(0, 0), false, entity_id, layer, depth, "top_left")
     }
@@ -1507,7 +1507,7 @@ pub fn queue_world_text_at(text: string, pos: Vec2, size: float, color: Color, o
 // camera is unconditionally set.)
 fn push_draw_text(text: string, pos: Vec2, size: float, color: Color, offset: Vec2, shadow: bool, _entity_id: int, layer: int, depth: DepthMode, debug_label: string? = null, family: TextFamily? = null) {
     if family != null {
-        let selected = family.unwrap()
+        let selected = family
         let layout = resolve_plain_world_text_layout(selected, text,
             size, "draw_text")
         let em_wu = world_text_em_for(selected.regular, size)
@@ -1555,8 +1555,8 @@ fn push_draw_text(text: string, pos: Vec2, size: float, color: Color, offset: Ve
         draw_circle(pos, 0.15 * size, GREEN, layer: layer)
 
         if debug_label != null {
-            queue_world_text_at_for(font, debug_label.unwrap(), pos + v(0, -off_r * 0.5) + v(off_r / 32), size * 0.5, BLACK, offset, layer, depth)
-            queue_world_text_at_for(font, debug_label.unwrap(), pos + v(0, -off_r * 0.5), size * 0.5, GREEN.alpha(0.7), offset, layer, depth)
+            queue_world_text_at_for(font, debug_label, pos + v(0, -off_r * 0.5) + v(off_r / 32), size * 0.5, BLACK, offset, layer, depth)
+            queue_world_text_at_for(font, debug_label, pos + v(0, -off_r * 0.5), size * 0.5, GREEN.alpha(0.7), offset, layer, depth)
         }
     }
 }
@@ -1566,13 +1566,13 @@ fn push_draw_text(text: string, pos: Vec2, size: float, color: Color, offset: Ve
 pub fn draw_text_immediate(space: DrawSpace, text: string, pos: Vec2, size: float, color: Color, offset: Vec2 = v(), z_layer: int = UI_TEXT_Z_LAYER, family: TextFamily? = null) {
     if family != null {
         if space == DrawSpace::World {
-            let layout = resolve_plain_world_text_layout(family.unwrap(), text,
+            let layout = resolve_plain_world_text_layout(family, text,
                 size, "draw_text_immediate")
             let anchor = world_text_anchor(pos, v(layout.width, layout.height), offset)
             emit_plain_text_layout(layout, TextPlacement::World, anchor,
                 z_layer, color)
         } else {
-            let layout = resolve_plain_text_layout(family.unwrap(), text, size,
+            let layout = resolve_plain_text_layout(family, text, size,
                 FONT_RENDER_SCALE, "draw_text_immediate")
             let start = v(pos.x + offset.x * layout.width,
                 pos.y + offset.y * layout.height)
@@ -1644,8 +1644,8 @@ fn begin_immediate_shader() -> int {
         // is bound per DRAW -- the flush's bind belonged to the flush's own
         // draw, not to this one. An immediate shape carries no normal sheet.
         if let current = WATCHER.current_shader_name {
-            bind_sprite_normal_texture(current.unwrap(), null)
-            bind_sprite_surface_texture(current.unwrap(), null)
+            bind_sprite_normal_texture(current, null)
+            bind_sprite_surface_texture(current, null)
         }
         return 1
     }

@@ -96,7 +96,8 @@ fn first_match(h: Holder, xs: [int]) -> Tk? {
 fn held(h: Holder) -> bool { return h.t != null }
 
 fn first_a(h: Holder) -> int {
-    if h.t == null { return -1 }
+    // `held` does not narrow `h.t`, so these unwraps are not redundant.
+    if !held(h) { return -1 }
     return h.t.unwrap().st.a + h.t.unwrap().st.b
 }
 

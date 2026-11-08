@@ -127,6 +127,6 @@ fn nullable_nobox_sibling() {
     assert(h.row.tag == null, "tag cleared")
     h.row.tag = LrId { value: 9 }
     h.row.pos.x = 50
-    assert_eq(h.row.tag.unwrap().value, 9)
+    assert_eq(h.row.tag.value, 9)
     assert_eq(hs[0].row.pos, LrV2 { x: 50, y: 6 })
 }

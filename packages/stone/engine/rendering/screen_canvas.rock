@@ -77,7 +77,7 @@ fn screen_canvas_canvas(sc: ScreenCanvas) -> Canvas? {
         error("ScreenCanvas names an unknown canvas")
         return null
     }
-    let canvas = canvas_opt.unwrap()
+    let canvas = canvas_opt
     if !canvas_is_live(canvas) {
         error("ScreenCanvas names a dead canvas")
         return null
@@ -88,7 +88,7 @@ fn screen_canvas_canvas(sc: ScreenCanvas) -> Canvas? {
 fn screen_canvas_batch(sc: ScreenCanvas) -> RectBatch? {
     let canvas_opt = screen_canvas_canvas(sc)
     if canvas_opt == null { return null }
-    let canvas = canvas_opt.unwrap()
+    let canvas = canvas_opt
     rect_batch_set_target(sc.batch, canvas, TargetConvention::PresentSource)
     return sc.batch
 }

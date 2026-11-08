@@ -43,7 +43,7 @@ fn test_lambda_shadowing_with_continue_in_nested_closure() {
             // continue  // The continue statement is crucial to trigger the bug
             }
 
-            let mesh = mesh.unwrap()  // Shadow with non-nullable
+            let mesh = mesh  // Shadow with non-nullable
 
             // Direct call works
             draw_mesh(mesh)
@@ -62,7 +62,7 @@ fn test_lambda_shadowing_simple_case_works() {
     let mesh: Mesh? = Mesh { data: 42 }
 
     if mesh != null {
-        let mesh = mesh.unwrap()
+        let mesh = mesh
 
         // Both direct and lambda calls work
         draw_mesh(mesh)
@@ -79,7 +79,7 @@ fn test_lambda_shadowing_in_loop_works() {
         let mesh: Mesh? = Mesh { data: 42 }
 
         if mesh != null {
-            let mesh = mesh.unwrap()
+            let mesh = mesh
 
             // Both direct and lambda calls work
             draw_mesh(mesh)

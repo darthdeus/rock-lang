@@ -20,7 +20,7 @@ fn test_loop_with_break() {
     print(c.resume() ?? -1)
     print(c.resume() ?? -1)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Loop with zero iterations ----
@@ -28,7 +28,7 @@ fn test_loop_with_break() {
 fn test_loop_zero_iterations() {
     let c = yield_in_loop(0)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- while with yield ----

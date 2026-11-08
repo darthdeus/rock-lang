@@ -72,7 +72,7 @@ fn test_exhaustion_returns_null() {
     print(c.resume() ?? -1)
     print(c.resume() ?? -1)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Multiple independent instances ----
@@ -95,7 +95,7 @@ co fn no_yields() -> Coroutine<int> {
 fn test_zero_yields_returns_null_immediately() {
     let c = no_yields()
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Body with side effects but no yield ----
@@ -107,5 +107,5 @@ co fn side_effect_only() -> Coroutine<int> {
 fn test_side_effects_no_yield() {
     let c = side_effect_only()
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }

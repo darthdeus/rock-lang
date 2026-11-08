@@ -299,7 +299,7 @@ pub fn get_text_batch(font: Font) -> RenderBatch {
     let pool = current_ui_pool()
     if let cached = TEXT_BATCH_CACHES[idx] {
         let owner = TEXT_BATCH_POOLS[idx]
-        if owner != null && render_batch_pool_same(owner.unwrap(), pool) {
+        if owner != null && render_batch_pool_same(owner, pool) {
             if let batch = cached.get() { return batch }
         }
     }
@@ -452,12 +452,12 @@ fn text_layout_instance_glyph_cache_prepare(layout: TextLayout, instance_id: int
     let expected = layout.glyphs.len * TEXT_LAYOUT_INSTANCE_GLYPH_STRIDE
     if layout.instance_glyph_id == instance_id
         && layout.instance_glyph_data != null
-        && layout.instance_glyph_data.unwrap().len == expected { return () }
+        && layout.instance_glyph_data.len == expected { return () }
     // A layout drawn at an animated scale can move between atlas instances;
     // the per-glyph rows keep their shape, so refill the owned buffer.
     let cached = if layout.instance_glyph_data != null
-        && layout.instance_glyph_data.unwrap().len == expected {
-        layout.instance_glyph_data.unwrap()
+        && layout.instance_glyph_data.len == expected {
+        layout.instance_glyph_data
     } else { native_buffer_float(expected) }
     for i in 0..layout.glyphs.len {
         let base = i * TEXT_LAYOUT_INSTANCE_GLYPH_STRIDE
@@ -553,7 +553,7 @@ fn text_layout_emit_instance(
         let probe_demand = text_layout_raster_demand(layout, null, layout_scale)
         let source_cap_height = 0.0
         if layout.font != null {
-            let font = layout.font.unwrap()
+            let font = layout.font
             let data = font.data()
             if data != null {
                 source_cap_height = source_pixel_size as float
@@ -596,7 +596,7 @@ fn text_layout_emit_instance(
 fn text_layout_pose_max_scale(poses: [GlyphPose]?) -> float {
     if poses == null { return 1.0 }
     let largest = 1.0
-    for pose in poses.unwrap() {
+    for pose in poses {
         largest = max(largest, max(abs(pose.scale.x), abs(pose.scale.y)))
     }
     return largest
@@ -664,7 +664,7 @@ pub fn text_layout_emit(
     let font = layout.font ?? return false
     let fd = font.data() ?? return false
     if layout.glyphs.len == 0 { return false }
-    if poses != null { text_layout_validate_poses(layout, poses.unwrap()) }
+    if poses != null { text_layout_validate_poses(layout, poses) }
     let probe_text = text_layout_probe_text(layout)
     let probe_admitted_count = layout.admitted_count
     let probe_layout_glyph_count = layout.glyphs.len
@@ -788,7 +788,7 @@ fn text_layout_emit_world(
     let fd = data.data() ?? return false
     let idx = fd.backend_id - 1
     if idx < 0 || idx >= FONT_ATLASES.len || layout.glyphs.len == 0 { return false }
-    if poses != null { text_layout_validate_poses(layout, poses.unwrap()) }
+    if poses != null { text_layout_validate_poses(layout, poses) }
     profile_begin("text.layout.raster_demand")
     let demand = text_layout_raster_demand(layout, poses)
     profile_end("text.layout.raster_demand")
@@ -1330,8 +1330,8 @@ fn text_layout_source_step(text: string, i: int) -> int {
 fn text_layout_coverage_oversampling(font: Font?) -> float {
     let value = FONT_COVERAGE_OVERSAMPLING
     if font != null {
-        let data = font.unwrap().data()
-        if data != null && data.unwrap().raster == FontRasterPolicy::Fixed {
+        let data = font.data()
+        if data != null && data.raster == FontRasterPolicy::Fixed {
             value = FONT_COVERAGE_OVERSAMPLING_DEFAULT
         }
     }
@@ -1440,7 +1440,7 @@ pub fn text_layout_build_scaled(
     TEXT_LAYOUT_BUILD_CALLS += 1
     let data = font.data()
     if data == null { return text_layout_empty(font, text, face, align) }
-    let idx = data.unwrap().backend_id - 1
+    let idx = data.backend_id - 1
     if TEXT_MISSING_GLYPH_POLICY == TextMissingGlyphPolicy::Substitute
         && idx >= 0 && idx < FONT_CP_SLOTS.len && idx < GLYPH_CACHES.len
         && GLYPH_CACHES[idx].len > FACE_REGULAR
@@ -1660,7 +1660,7 @@ pub fn text_layout_build(
 ) -> TextLayout {
     let data = font.data()
     if data == null { return text_layout_empty(font, text, face, align) }
-    let idx = data.unwrap().backend_id - 1
+    let idx = data.backend_id - 1
     let divisor = font_size_divisor(idx)
     if divisor <= 0.0 {
         return text_layout_empty(font, text, face, align)
@@ -1758,7 +1758,7 @@ fn text_layout_variant_key(world_raster: bool, font_id: int, face: int,
 fn text_layout_cache_index_add(text: string, variant: int, index: int) {
     let variants = TEXT_LAYOUT_CACHE_INDEX.get(text)
     if variants != null {
-        let by_variant = variants.unwrap()
+        let by_variant = variants
         let entry = TEXT_LAYOUT_CACHE[index]
         entry.next_variant_slot = by_variant.get(variant).unwrap_or(-1)
         TEXT_LAYOUT_CACHE[index] = entry
@@ -2116,7 +2116,7 @@ pub fn glyph_pose_transform(
 
 fn text_layout_pose_at(layout: TextLayout, index: int, poses: [GlyphPose]?) -> GlyphPose? {
     if poses == null { return null }
-    let all = poses.unwrap()
+    let all = poses
     if all.len != layout.glyphs.len {
         error("text layout pose count {all.len} does not match glyph count {layout.glyphs.len}")
     }
@@ -2147,7 +2147,7 @@ fn text_layout_validate_poses(layout: TextLayout, poses: [GlyphPose]) {
 
 fn text_layout_pose_point(glyph_pivot: Vec2, point: Vec2, pose: GlyphPose?) -> Vec2 {
     if pose == null { return point }
-    let p = pose.unwrap()
+    let p = pose
     if p.translation == v() && p.scale == v(1.0, 1.0) && p.rotation == 0.0 {
         return point
     }
@@ -2175,7 +2175,7 @@ pub fn text_layout_glyph_bounds(layout: TextLayout, index: int, poses: [GlyphPos
 
 fn text_layout_cache_key(layout: TextLayout) -> string {
     let font_id = if layout.font == null { 0 } else {
-        layout.font.unwrap().data()?.backend_id
+        layout.font.data()?.backend_id
     }
     return "{font_id}:{layout.text}:{layout.face}:{layout.line_height:.5}:{layout.logical_bounds.x:.5}:{layout.logical_bounds.y:.5}:{layout.logical_bounds.w:.5}:{layout.logical_bounds.h:.5}:{layout.alignment_offset.x:.5}:{layout.alignment_offset.y:.5}"
 }
@@ -3204,7 +3204,7 @@ pub fn measure_text(text: string, font_size: float, family: TextFamily? = null,
     font: Font? = null) -> Vec2 {
     if font != null && family != null { error("measure_text: pass either font or family, not both") }
     if family != null {
-        return measure_plain_text_of(family.unwrap(), text, font_size,
+        return measure_plain_text_of(family, text, font_size,
             FONT_RENDER_SCALE)
     }
     let f = font ?? DEFAULT_FONT ?? return Vec2 { x: 0.0, y: 0.0 }

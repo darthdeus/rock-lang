@@ -31,7 +31,7 @@ pub fn draw_errors_world() {
 
     for (_, error_item) in ERRORS.until_clear {
         if error_item.pos != null {
-            let pos = error_item.pos.unwrap()
+            let pos = error_item.pos
             let message = error_item.message
             draw_text(message, pos + error_item.offset, 8.0, RED)
 

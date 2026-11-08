@@ -14,7 +14,7 @@ fn f32_of_0_7() -> float {
 fn test_float_leaf_round_trips_exactly_through_value_storage() {
     let m: Map<int, WideLeaf> = map_new()
     m[1] = WideLeaf { x: 0.7, n: 1 }
-    assert(m[1].unwrap().x == 0.7, "map float leaf narrowed: {m[1].unwrap().x}")
+    assert(m[1].x == 0.7, "map float leaf narrowed: {m[1].x}")
     let o: [WideLeaf?] = []
     o.push(WideLeaf { x: 0.7, n: 1 })
     assert(o[0].unwrap().x == 0.7, "nullable element float leaf narrowed: {o[0].unwrap().x}")
@@ -27,7 +27,7 @@ fn test_float_leaf_round_trips_exactly_through_value_storage() {
 fn test_f32_leaf_rounds_in_value_storage() {
     let m: Map<int, NarrowLeaf> = map_new()
     m[1] = NarrowLeaf { x: 0.7, n: 1 }
-    assert(m[1].unwrap().x == f32_of_0_7(), "map f32 leaf did not round: {m[1].unwrap().x}")
+    assert(m[1].x == f32_of_0_7(), "map f32 leaf did not round: {m[1].x}")
     let nb = native_buffer_alloc<NarrowLeaf>(1)
     nb[0] = NarrowLeaf { x: 0.7, n: 1 }
     assert(nb[0].x == f32_of_0_7(), "native buffer f32 leaf did not round: {nb[0].x}")

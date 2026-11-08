@@ -109,7 +109,7 @@ fn ui_flow(spans: [TextSpan], max_width: float, font_size: float,
         default.unwrap()
     }
     let flat = ""
-    let fallback = family != null && family.unwrap().fallbacks.len() > 0
+    let fallback = family != null && family.fallbacks.len() > 0
     if fallback {
         flow.fonts.push(font)
         for other in family.unwrap().fallbacks { flow.fonts.push(other) }

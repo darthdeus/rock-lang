@@ -35,9 +35,9 @@ co fn short_inner() -> Coroutine<int> {
 co fn pump_until_null() -> Coroutine<int> {
     let src = short_inner()
     let first = src.resume()
-    if first == null { yield -1 } else { yield first.unwrap() }
+    if first == null { yield -1 } else { yield first }
     let second = src.resume()
-    if second == null { yield -1 } else { yield second.unwrap() }
+    if second == null { yield -1 } else { yield second }
 }
 
 @test(output = "7\n-1")

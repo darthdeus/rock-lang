@@ -56,7 +56,7 @@ fn consume(p: Spec?, id: int) {
         print("{id} absent")
         return
     }
-    let s = p.unwrap()
+    let s = p
     print("{id} {s.x as int} {s.y as int}")
 }
 

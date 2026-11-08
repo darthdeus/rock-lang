@@ -221,7 +221,7 @@ fn parse_semantic_shader_wire(wire: string) -> SemanticShaderInterface? {
 
     let compute_line = semantic_line(lines, cursor, "compute", 2)
     if compute_line != null {
-        let compute_line = compute_line.unwrap()
+        let compute_line = compute_line
         if compute_line[1] != "some" || !has_compute_stage { return null }
         cursor += 1
         let workgroup = semantic_line(lines, cursor, "compute_workgroup", 4) ?? return null
@@ -359,7 +359,7 @@ pub fn selected_shader_interface(shader_name: string) -> SemanticShaderInterface
     let artifact_generation = GL_SHADER_ARTIFACT_GENERATIONS.get(shader_name) ?? return null
     let artifact_fingerprint = GL_SHADER_ARTIFACT_FINGERPRINTS.get(shader_name) ?? return null
     if semantic == null { return null }
-    let entry = semantic.unwrap()
+    let entry = semantic
     if entry.generation != artifact_generation || entry.interface.fingerprint != artifact_fingerprint { return null }
     return entry.interface
 }
@@ -490,7 +490,7 @@ pub @nomangle fn __rock_shader_register(key: string, src: string, texture_slots:
         log_error("SHADER", "rock_shader: compiler semantic wire is invalid for {key}")
         return
     }
-    let semantic = parsed_semantic.unwrap()
+    let semantic = parsed_semantic
     if semantic.fullscreen != fullscreen_vertex {
         log_error("SHADER", "rock_shader: compiler semantic geometry disagrees for {key}")
         return
@@ -503,7 +503,7 @@ pub @nomangle fn __rock_shader_register(key: string, src: string, texture_slots:
     // a program whose blocks are rejected must leave NO trace, and slots written
     // ahead of validation outlived the program they described.
     if let prev = REGISTERED_SHADER_HASHES.get(key) {
-        let p = prev.unwrap()
+        let p = prev
         // unchanged source AND layout -> no-op
         if p.src_hash == h.src_hash && p.block_fingerprint == h.block_fingerprint && p.fullscreen_vertex == h.fullscreen_vertex && p.semantic_fingerprint == h.semantic_fingerprint { return }
     }
@@ -528,7 +528,7 @@ pub @nomangle fn __rock_shader_register(key: string, src: string, texture_slots:
         log_error("SHADER", "native artifact semantic wire is invalid for {key}")
         return false
     }
-    let semantic = parsed_semantic.unwrap()
+    let semantic = parsed_semantic
     if semantic.fullscreen != fullscreen_vertex {
         log_error("SHADER", "native artifact geometry disagrees with its semantic wire for {key}")
         return false
@@ -538,7 +538,7 @@ pub @nomangle fn __rock_shader_register(key: string, src: string, texture_slots:
                                          block_member_kinds, block_member_capacities, block_member_strides)
     let h = ShaderRegistrationKey { src_hash: __shader_src_hash(src), block_fingerprint: __blocks_fingerprint(blocks), fullscreen_vertex: fullscreen_vertex, semantic_fingerprint: semantic.fingerprint }
     if let prev = REGISTERED_SHADER_HASHES.get(key) {
-        let p = prev.unwrap()
+        let p = prev
         if p.src_hash == h.src_hash && p.block_fingerprint == h.block_fingerprint && p.fullscreen_vertex == h.fullscreen_vertex && p.semantic_fingerprint == h.semantic_fingerprint
             && WATCHER.shaders.get(key) != null { return true }
     }
@@ -581,7 +581,7 @@ fn rock_shader_compile_now(key: string, src: string, h: ShaderRegistrationKey, t
         log_error("SHADER", "rock_shader: GL compile failed for {key}: {err}")
         return
     }
-    let sid = shader.unwrap()
+    let sid = shader
 
     // VALIDATE BEFORE PUBLISHING. A program that links is not yet fit to go
     // live: its engine slot may hold a foreign block, a block may fail to bind,
@@ -600,7 +600,7 @@ fn rock_shader_compile_now(key: string, src: string, h: ShaderRegistrationKey, t
         return
     }
 
-    publish_shader_registration(key, sid, h, texture_slots, fullscreen_vertex, semantic, live.unwrap())
+    publish_shader_registration(key, sid, h, texture_slots, fullscreen_vertex, semantic, live)
 }
 
 fn publish_shader_registration(key: string, sid: ShaderId, h: ShaderRegistrationKey,
@@ -610,7 +610,7 @@ fn publish_shader_registration(key: string, sid: ShaderId, h: ShaderRegistration
     if existing != null {
         // Remap under the same key: pipelines resolve the ShaderId through
         // WATCHER.shaders at draw time, so replacing the entry is what they see.
-        let superseded = existing.unwrap().shader
+        let superseded = existing.shader
         WATCHER.shaders.insert(key, WatcherShader { shader: sid })
         // The key is the only thing that named the old program, so remapping it
         // is what makes the program unreachable. Destroy AFTER the remap, so no
@@ -860,7 +860,7 @@ pub fn shader_texture_slot_if_present(shader_name: string, sampler: string) -> i
 
 fn shader_texture_slot_impl(shader_name: string, sampler: string, required: bool) -> int {
     let slots = SHADER_TEXTURE_SLOTS.get(shader_name)
-    if slots == null || slots.unwrap().names.len() == 0 {
+    if slots == null || slots.names.len() == 0 {
         if required {
             log_once("SHADER",
                 "`{shader_name}` declares no @textures group -- nothing can bind required sampler `{sampler}`",
@@ -868,8 +868,8 @@ fn shader_texture_slot_impl(shader_name: string, sampler: string, required: bool
         }
         return -1
     }
-    let slot = slots.unwrap().by_name.get(sampler)
-    if slot != null { return slot.unwrap() }
+    let slot = slots.by_name.get(sampler)
+    if slot != null { return slot }
     if required {
         log_once("SHADER",
             "`{shader_name}` has no sampler `{sampler}` in its @textures group",
@@ -882,7 +882,7 @@ fn shader_texture_slot_impl(shader_name: string, sampler: string, required: bool
 pub fn shader_texture_slot_names(shader_name: string) -> [string] {
     let slots = SHADER_TEXTURE_SLOTS.get(shader_name)
     if slots == null { return [] }
-    return slots.unwrap().names
+    return slots.names
 }
 
 // How many slots `shader_name`'s group declares; 0 when it has none. The
@@ -890,7 +890,7 @@ pub fn shader_texture_slot_names(shader_name: string) -> [string] {
 pub fn shader_texture_slot_count(shader_name: string) -> int {
     let slots = SHADER_TEXTURE_SLOTS.get(shader_name)
     if slots == null { return 0 }
-    return slots.unwrap().names.len()
+    return slots.names.len()
 }
 
 pub value ExactFileWatch {

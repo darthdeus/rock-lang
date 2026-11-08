@@ -63,7 +63,7 @@ fn a_mesh_that_stops_drawing_leaves_the_pool() {
     let dropped_row = dropped.batch.entity().unwrap()
     mesh_batch_retention_frame(pool, [kept])
     let empty = pool.get(mesh_batch_retention_key(4, 2))
-    assert(empty == null || empty.unwrap().count == 0,
+    assert(empty == null || empty.count == 0,
         "an undrawn mesh submits no vertices")
     mesh_batch_retention_frame(pool, [kept])
     assert(dropped_row.get() == null, "an undrawn mesh's row retires")

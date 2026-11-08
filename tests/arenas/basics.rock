@@ -273,7 +273,7 @@ fn ufcs_entity_get_after_remove() {
     let m2 = e2.get()
 
     if m2 != null {
-        print("found: {m2.unwrap().name}")
+        print("found: {m2.name}")
     }
     if m1 == null {
         print("not found")

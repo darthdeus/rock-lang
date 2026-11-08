@@ -71,7 +71,7 @@ fn nullable_func() -> int {
     }
     
     if holder.maybe_func != null {
-        assert_eq(holder.maybe_func.unwrap()(), 99)
+        assert_eq((holder.maybe_func)(), 99)
     }
 }
 
@@ -114,7 +114,7 @@ fn get_message() -> string {
     
     // This should work with nullable types
     if holder != null {
-        assert_eq(holder.unwrap().callback(), "hello")
+        assert_eq(holder.callback(), "hello")
     }
 }
 

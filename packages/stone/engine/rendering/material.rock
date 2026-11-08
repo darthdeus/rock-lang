@@ -63,7 +63,7 @@ pub fn material(
         pipeline: null,
     })
     if pipeline != null {
-        handle.get().unwrap().pipeline = pipeline_owned_in(pipeline.unwrap(), handle.storage())
+        handle.get().unwrap().pipeline = pipeline_owned_in(pipeline, handle.storage())
     }
     return handle
 }
@@ -105,17 +105,17 @@ pub fn material_resolve_batch(handle: Entity<Material>) -> RenderBatch {
 }
 
 fn material_resolve_batch_row(mat: Material) -> RenderBatch {
-    let cached = if mat.cached_batch != null { mat.cached_batch.unwrap().get() } else { null }
+    let cached = if mat.cached_batch != null { mat.cached_batch.get() } else { null }
     let batch = if CURRENT_RENDER_POOL.active() {
         ensure_batch_of(mat.image, mat.z_layer, mat.blend, mat.pixel_snap,
             mat.depth, order: mat.order, normal: mat.normal,
             pipeline: mat.pipeline,
             unlit: mat.unlit || mat.blend == BlendMode::Additive,
             sampling: mat.sampling, surface: mat.surface)
-    } else if cached != null && cached.unwrap().pooled
+    } else if cached != null && cached.pooled
             && (mat.cached_frame == RENDER_FRAME
                 || mat.pipeline == null) {
-        let b = cached.unwrap()
+        let b = cached
         b.last_used_frame = RENDER_FRAME
         b
     } else {

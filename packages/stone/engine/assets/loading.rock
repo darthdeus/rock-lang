@@ -174,7 +174,7 @@ pub fn asset_list_dir(relative_path: string) -> [string] {
         if !stone_is_directory(physical) { continue }
         let listed = stone_list_directory(physical)
         if listed == null { continue }
-        for name in listed.unwrap() {
+        for name in listed {
             if seen.get(name) == null {
                 seen.insert(name, true)
                 names.push(name)
@@ -494,7 +494,7 @@ pub fn load_image_cached(
         }
     }
     if cached != null {
-        let img = cached.unwrap()
+        let img = cached
         if image_storage_format(img) != format {
             error("load_image_asset: {canonical} is cached as {image_storage_format(img)}, requested {format}")
         }
@@ -676,7 +676,7 @@ fn load_multisound_available(paths: [string], recipes: JsonValue, stream: bool) 
     for path in paths {
         let recipe_value = json_field(recipes, path)
         let recipe: SoundRecipe? = if recipe_value == null { null }
-            else { sound_bank_source_recipe(recipe_value.unwrap(), path) }
+            else { sound_bank_source_recipe(recipe_value, path) }
         let source = sound_residency_load_shared(path, recipe, stream)
         if !sound_known(source) {
             sound_residency_release_shared(source)

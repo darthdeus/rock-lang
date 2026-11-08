@@ -200,7 +200,7 @@ pub fn residency_trim() {
         identity = entry.next
         let cached = IMAGE_CACHE.get(key)
         if cached == null { residency_cache_remove(key); continue }
-        let image = cached.unwrap()
+        let image = cached
         residency_cache_remove(key)
         let _ = RESIDENCY_CACHE.touches.remove(key)
         image_asset_evict(key, image.0)

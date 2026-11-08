@@ -142,7 +142,7 @@ pub fn random_sound_pick(multi_sound: MultiSound, speed: float = 1.0, pitch_jitt
     // a second mechanism doing the same job.
     let detuned = speed * semitones(presentation_random_range(-pitch_jitter, pitch_jitter))
 
-    return RandomSoundPick { sound: source_opt.unwrap(), speed: detuned, gain: multi_sound.gains.get(index) ?? 1.0 }
+    return RandomSoundPick { sound: source_opt, speed: detuned, gain: multi_sound.gains.get(index) ?? 1.0 }
 }
 
 pub fn _play_random_sound_impl(multi_sound: MultiSound, volume: float, speed: float,
@@ -152,7 +152,7 @@ pub fn _play_random_sound_impl(multi_sound: MultiSound, volume: float, speed: fl
     if pick == null { return Voice(0) }
     // The impl, not the macro: `site` is the caller's, and re-entering the macro
     // here would stamp every random play with this line instead.
-    let picked = pick.unwrap()
+    let picked = pick
     return _play_sound_impl(picked.sound, bus, volume * picked.gain, picked.speed, decay, looped,
         site, spatial, pan)
 }

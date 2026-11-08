@@ -152,7 +152,7 @@ fn run_pass_scoped(p: Pass, previous_shader: string?, retain_shader: bool) -> bo
         // every bind, so a rect set before this line would be thrown away, and
         // restoring the previous target below also restores its active rectangle.
         if p.scissor != null {
-            let r = p.scissor.unwrap()
+            let r = p.scissor
             stone_set_scissor(true, r.x, r.y, r.w, r.h)
         }
     } else if p.scissor != null {
@@ -163,7 +163,7 @@ fn run_pass_scoped(p: Pass, previous_shader: string?, retain_shader: bool) -> bo
         // True save/restore via the CURRENT_BLEND shadow -- inlined (not
         // with_blend_mode) to stay closure-free for the pass-loop trace.
         let prev = CURRENT_BLEND
-        set_blend_mode(p.blend.unwrap())
+        set_blend_mode(p.blend)
         run_pass_body(p, previous_shader == p.pipeline.shader_name, retain_shader)
         set_blend_mode(prev)
     } else {
@@ -187,7 +187,7 @@ fn pass_is_admitted(p: Pass) -> bool {
 // body / end_shader) for the same closure-free reason as `run_pass` above.
 fn run_pass_body(p: Pass, shader_bound: bool, retain_shader: bool) {
     if p.clear != null {
-        let c = p.clear.unwrap()
+        let c = p.clear
         clear_screen(c.r, c.g, c.b, c.a)
     }
 
@@ -198,7 +198,7 @@ fn run_pass_body(p: Pass, shader_bound: bool, retain_shader: bool) {
     }
 
     if p.block != null {
-        upload_owned_block(p.pipeline.shader_name, p.block.unwrap())
+        upload_owned_block(p.pipeline.shader_name, p.block)
     }
     apply_pass_arrays(p.pipeline.shader_name, p.array_payload, __SITE__)
     bind_pass_inputs(p)
@@ -244,11 +244,11 @@ pub fn pass_input_rejection(p: Pass) -> string {
             return "slot input names source {sampled_texture_key(si.0)}, which the registry no longer knows"
         }
         if !sampled_texture_complete(si.0) { return "slot input image is still uploading" }
-        if p.output != null && sampled_texture_is_canvas(si.0, p.output.unwrap()) {
+        if p.output != null && sampled_texture_is_canvas(si.0, p.output) {
             aliases_output = true
         }
     }
-    if p.output != null && !canvas_is_live(p.output.unwrap()) {
+    if p.output != null && !canvas_is_live(p.output) {
         return "output names canvas {p.output.unwrap().handle.0}, which the registry no longer knows"
     }
 
@@ -409,19 +409,19 @@ pub fn run_scene_passes() {
         }
 
         if reads_current {
-            if p.output != null && p.output.unwrap().handle.0 == current.handle.0 {
+            if p.output != null && p.output.handle.0 == current.handle.0 {
                 log_once("RENDER", "scene pass reads and writes the same canvas (GL feedback loop) -- read the current scene, write the partner (screen_canvas_2); skipping the pass")
                 continue
             }
             run_pass(p)
             SCENE_PASSES_RUN_LAST += 1
-            if p.output != null && p.output.unwrap().handle.0 == partner.handle.0 {
+            if p.output != null && p.output.handle.0 == partner.handle.0 {
                 let swap = current
                 current = partner
                 partner = swap
             }
         } else {
-            if p.output != null && p.output.unwrap().handle.0 == partner.handle.0 {
+            if p.output != null && p.output.handle.0 == partner.handle.0 {
                 log_once("RENDER", "scene pass writes the stale member of the screen_canvas pair (an earlier pass moved the scene) -- blend passes must target the canvas the scene currently lives in")
             }
             run_pass(p)

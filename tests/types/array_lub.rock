@@ -103,11 +103,11 @@ fn test_nullable_with_non_null() {
     // For non-null elements, unwrap to get the inner value
     if !val0.is_null() {
         let expected_val0: int? = 5
-        assert_eq(val0.unwrap(), expected_val0)
+        assert_eq(val0, expected_val0)
     }
     if !val1.is_null() {
         let expected_val1: int? = 10
-        assert_eq(val1.unwrap(), expected_val1)
+        assert_eq(val1, expected_val1)
     }
     // val2 is null, so we don't unwrap it
     assert(val2.is_null())

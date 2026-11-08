@@ -452,8 +452,8 @@ fn draw_sfx_timeline(now: float, hovered_seq: int) {
         let opt = sfx_log_recent(i)
         // Rows past the freeze are IN the ring; the frozen view just does not
         // draw them yet.
-        if opt != null && sfx_view_shows(opt.unwrap()) {
-            let e = opt.unwrap()
+        if opt != null && sfx_view_shows(opt) {
+            let e = opt
             if e.at >= t0 {
                 // Stack by recency so simultaneous plays do not draw on top of
                 // each other -- the overlap is the thing being looked for.
@@ -578,7 +578,7 @@ fn draw_sfx_browser() {
         // rather than silently editing a different sound than the one clicked.
         SFX_BROWSER_SEL_SEQ = 0
     } else {
-        let e = sel.unwrap()
+        let e = sel
         imgui_text("#{e.seq}  {e.path}")
         // Who asked for it. The path above says WHAT played; a bank shared by
         // several events reads identically on every row without this.
@@ -655,8 +655,8 @@ fn draw_sfx_browser() {
     let shown = sfx_log_len()
     for _ in 0..shown {
         let opt = sfx_log_recent(i)
-        if opt != null && sfx_view_shows(opt.unwrap()) {
-            let e = opt.unwrap()
+        if opt != null && sfx_view_shows(opt) {
+            let e = opt
             // ### is keyed to the PLAY NUMBER, not the row position, so a row's
             // buttons keep their imgui identity as new plays push it down the
             // list -- an id that shifts under a held mouse button retargets the

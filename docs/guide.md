@@ -271,7 +271,10 @@ a value is expected. There is no `switch`.
 Only `T?` can hold `null`; a plain `T` never is. `?.` evaluates to
 null instead of crashing when the receiver is null, `??` picks the
 right side when the left is null, and `?.let` runs a block only for a
-non-null value. `unwrap()` and `expect("why")` abort on null.
+non-null value. `unwrap()` and `expect("why")` abort on null. Like `??`
+and `?.`, they apply only to a value that can be null: on a plain `T`, or
+a `T?` already checked against null, the compiler rejects them as
+redundant.
 
 ```rock
 // A `T?` holds a `T` or `null`. `?.` stops at null instead of crashing,

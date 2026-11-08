@@ -415,7 +415,7 @@ value Box2 { tl: V2, w: float }
 """
 
 fn apply(f: ((Box2) -> float)?, r: Box2) -> float {
-    if f != null { return f.unwrap()(r) }
+    if f != null { return f(r) }
     return -1.0
 }
 

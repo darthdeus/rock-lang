@@ -236,7 +236,7 @@ fn new_owned_semantic_block(
 pub fn shader_uniform_block_count(shader_name: string) -> int {
     let entry = SHADER_UNIFORM_BLOCKS.get(shader_name)
     if entry == null { return 0 }
-    return entry.unwrap().blocks.len()
+    return entry.blocks.len()
 }
 
 // Native C shader registration has already bound and driver-validated these
@@ -406,7 +406,7 @@ fn publish_uniform_blocks(key: string, live: [ShaderUniformBlock]) {
 fn shader_uniform_is_block_member(shader_name: string, name: string) -> bool {
     let entry = SHADER_UNIFORM_BLOCKS.get(shader_name)
     if entry == null { return false }
-    return entry.unwrap().member_names.contains(name)
+    return entry.member_names.contains(name)
 }
 
 // Upload the scratch the public setter just packed. Keep this separate from
@@ -469,7 +469,7 @@ fn wire_kind_components(kind: int) -> int {
 pub fn array_block_find(shader_name: string, binding: int) -> ShaderUniformBlock? {
     let entry = SHADER_UNIFORM_BLOCKS.get(shader_name)
     if entry == null { return null }
-    return entry.unwrap().by_binding.get(binding)
+    return entry.by_binding.get(binding)
 }
 
 // The shared body of the typed pushes: bounds-check against the compiler's
@@ -515,9 +515,9 @@ pub fn __array_push(shader_name: string, b: ShaderUniformBlock, cursor: int,
         let c = 0
         while c < comps {
             if src_i != null {
-                __ub_write_int(b.iv, dst + c, __ub_read_int(src_i.unwrap(), src + c))
+                __ub_write_int(b.iv, dst + c, __ub_read_int(src_i, src + c))
             } else if src_f != null {
-                __ub_write_float(b.fv, dst + c, __ub_read_float(src_f.unwrap(), src + c))
+                __ub_write_float(b.fv, dst + c, __ub_read_float(src_f, src + c))
             }
             c += 1
         }
@@ -557,7 +557,7 @@ fn apply_pass_arrays(shader_name: string, payload: [PassArrayMember], site: stri
         log_once("SHADER", "pass arrays: `{shader_name}` declares no fragment array block, but the pass supplies {payload.len()} member(s)", site)
         return
     }
-    let found = block.unwrap()
+    let found = block
     let cursor = 0
     for m in payload {
         cursor = __array_push(shader_name, found, cursor,
@@ -630,9 +630,9 @@ pub fn array_block_upload(
 pub fn shader_block_uploads(shader_name: string, binding: int) -> int {
     let entry = SHADER_UNIFORM_BLOCKS.get(shader_name)
     if entry == null { return -1 }
-    let block = entry.unwrap().by_binding.get(binding)
+    let block = entry.by_binding.get(binding)
     if block == null { return -1 }
-    return block.unwrap().uploads
+    return block.uploads
 }
 
 // A block packed by a DESCRIPTION of a draw, uploaded when that draw happens.
@@ -659,7 +659,7 @@ pub fn new_owned_block(shader_name: string, fingerprint: int, site: string) -> O
         log_once("SHADER", "`{shader_name}` has no uniform block with this layout", site)
         return null
     }
-    let b = entry.unwrap()
+    let b = entry
     let bytes = native_buffer_u8(b.size)
     return OwnedUniformBlock {
         size: b.size,
@@ -686,7 +686,7 @@ fn upload_owned_block(shader_name: string, b: OwnedUniformBlock) {
     // lookup is a scan of the program's handful of blocks, next to a GL upload.
     let entry = shader_block_by_fingerprint(shader_name, b.fingerprint)
     if entry != null {
-        entry.unwrap().uploads += 1
+        entry.uploads += 1
     }
 }
 
@@ -695,7 +695,7 @@ fn upload_owned_block(shader_name: string, b: OwnedUniformBlock) {
 macro pass_block(shader_name: expr, u: expr) {
     let pb = new_owned_block(shader_name, uniform_block_id(u), __SITE__)
     if pb != null {
-        let packed = pb.unwrap()
+        let packed = pb
         pack_uniform_block(packed.fv, packed.iv, u)
     }
     pb
@@ -742,7 +742,7 @@ pub fn new_frame_owned_block(shader_name: string, fingerprint: int, site: string
 macro frame_pass_block(shader_name: expr, u: expr) {
     let pb = new_frame_owned_block(shader_name, uniform_block_id(u), __SITE__)
     if pb != null {
-        let packed = pb.unwrap()
+        let packed = pb
         pack_uniform_block(packed.fv, packed.iv, u)
     }
     pb
@@ -764,7 +764,7 @@ macro gpu_draw_uniform_payload(draw: expr, shader_name: expr, u: expr) {
 // them is why a steady-state frame packs into an allocation it already had,
 // which is the same reason the flat setters exist on this lane.
 pub fn owned_block_for(held: OwnedUniformBlock?, shader_name: string, fingerprint: int, site: string) -> OwnedUniformBlock? {
-    if held != null && held.unwrap().fingerprint == fingerprint { return held }
+    if held != null && held.fingerprint == fingerprint { return held }
     return new_owned_block(shader_name, fingerprint, site)
 }
 
@@ -774,7 +774,7 @@ pub fn owned_block_for(held: OwnedUniformBlock?, shader_name: string, fingerprin
 macro batch_block(b: expr, shader_name: expr, u: expr) {
     let bb = owned_block_for(b.block, shader_name, uniform_block_id(u), __SITE__)
     if bb != null {
-        let packed = bb.unwrap()
+        let packed = bb
         pack_uniform_block(packed.fv, packed.iv, u)
         b.block = bb
         b.block_frame = RENDER_FRAME
@@ -787,7 +787,7 @@ macro batch_block(b: expr, shader_name: expr, u: expr) {
 macro mesh_block(m: expr, shader_name: expr, u: expr) {
     let mb = owned_block_for(m.block, shader_name, uniform_block_id(u), __SITE__)
     if mb != null {
-        let packed = mb.unwrap()
+        let packed = mb
         pack_uniform_block(packed.fv, packed.iv, u)
         m.block = mb
         m.block_frame = RENDER_FRAME
@@ -824,7 +824,7 @@ fn __upload_resolved_block<T>(
 // caller error here -- the set-then-draw shape -- so it logs.
 pub fn set_uniform_block<T>(shader_name: string, u: T) {
     if let entry = shader_block_by_fingerprint(shader_name, uniform_block_id(u)) {
-        __upload_resolved_block(shader_name, entry.unwrap(), u, __SITE__)
+        __upload_resolved_block(shader_name, entry, u, __SITE__)
     } else {
         log_once("SHADER", "set_uniform_block: `{shader_name}` has no uniform block with this layout", __SITE__)
     }
@@ -842,6 +842,6 @@ pub fn set_uniform_block<T>(shader_name: string, u: T) {
 // fingerprint up twice and builds the value regardless.
 macro set_uniform_block_if_present(shader_name: expr, u: expr) {
     if let entry = shader_block_by_fingerprint(shader_name, uniform_block_id(u)) {
-        __upload_resolved_block(shader_name, entry.unwrap(), u, __SITE__)
+        __upload_resolved_block(shader_name, entry, u, __SITE__)
     }
 }

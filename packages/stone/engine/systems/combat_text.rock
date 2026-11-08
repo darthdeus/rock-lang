@@ -259,7 +259,7 @@ pub fn WorldTextDisplay.world_pos(c) -> Vec2 {
             return position
         }
     }
-    if c.pos != null { return c.pos.unwrap() }
+    if c.pos != null { return c.pos }
     return zero()
 }
 
@@ -749,7 +749,7 @@ fn draw_world_text() {
         } else {
             let spans = world_text_present_spans(c, sample.opacity)
             if c.backdrop_draw != null {
-                c.backdrop_draw.unwrap()(c, view, sample)
+                (c.backdrop_draw)(c, view, sample)
             }
             let text_anchor = if c.style == WorldTextStyle::Narration {
                 world_text_narration_plate_center(c, anchor)

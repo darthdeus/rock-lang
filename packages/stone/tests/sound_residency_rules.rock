@@ -507,7 +507,7 @@ fn sound_unload_fixture_failure_restores_state() {
     let message = failure ?? "fixture returned without the deliberate failure"
     assert(message.contains("intentional sound unload fixture failure"),
         "the failure surfaces (got: {message})")
-    assert(sound != null && sound.unwrap().data() == null,
+    assert(sound != null && sound.data() == null,
         "a failed check unloads its sound")
     let again = sound_residency_test_sound()
     assert(again.data() != null, "a failed check leaves later loads working")

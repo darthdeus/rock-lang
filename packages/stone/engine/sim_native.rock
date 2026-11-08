@@ -12,7 +12,7 @@ pub fn sim_native_classes() -> [string] {
             log_error("SIM", "native ledger class {i} has no name")
             continue
         }
-        out.push(name.unwrap())
+        out.push(name)
     }
     return out
 }
@@ -24,7 +24,7 @@ pub fn sim_native_live(class: string) -> string {
         log_error("SIM", "native ledger: unknown resource class '{class}'")
         return "?"
     }
-    return live.unwrap()
+    return live
 }
 
 pub fn sim_native_split(csv: string) -> [string] {
@@ -46,7 +46,7 @@ pub fn sim_native_contains(handles: [string], handle: string) -> bool {
 pub fn sim_native_id_field(class: string, field: string) -> int {
     let report = stone_native_id_accounting()
     if report == null { return -1 }
-    for row in report.unwrap().split("; ") {
+    for row in report.split("; ") {
         if !row.starts_with(class + ":") { continue }
         for kv in row.split(":")[1].split(",") {
             let parts = kv.split("=")
@@ -63,7 +63,7 @@ pub fn sim_native_id_field(class: string, field: string) -> int {
 pub fn sim_native_id_total(field: string) -> int {
     let report = stone_native_id_accounting()
     if report == null { return -1 }
-    for kv in report.unwrap().split("; ")[0].split(" ") {
+    for kv in report.split("; ")[0].split(" ") {
         let parts = kv.split("=")
         if parts[0] == field { return parts[1].parse_int() ?? -1 }
     }

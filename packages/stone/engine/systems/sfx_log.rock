@@ -205,7 +205,7 @@ fn sfx_log_span() -> float {
     let newest = sfx_log_recent(0)
     let oldest = sfx_log_recent(n - 1)
     if newest == null || oldest == null { return 0.0 }
-    return newest.unwrap().at - oldest.unwrap().at
+    return newest.at - oldest.at
 }
 
 // Newest first: `i` 0 is the most recent play. Null past the end.

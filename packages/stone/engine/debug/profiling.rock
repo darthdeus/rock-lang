@@ -1578,7 +1578,7 @@ fn section_admit(name: string) -> int {
 // while frozen and only over the contiguous late range.
 fn section_lookup(name: string) -> int {
     let existing = SECTION_IDS.get(name)
-    if !is_null(existing) { return existing.unwrap() }
+    if !is_null(existing) { return existing }
     let first = SECTION_FROZEN_FIRST
     if first < 0 { return -1 }
     for id in first..SECTION_COUNT {
@@ -2927,7 +2927,7 @@ pub fn prof_rebuild_rows() {
         for i in __rock_range(0, min(stats_list.len(), max_entries)) {
             let stats = stats_list.get(i)
             if !is_null(stats) {
-                let s = stats.unwrap()
+                let s = stats
                 let name_width = s.name.len() + s.depth * 2
                 max_name_width = max(max_name_width, name_width)
             }
@@ -2937,7 +2937,7 @@ pub fn prof_rebuild_rows() {
         for i in __rock_range(0, min(stats_list.len(), max_entries)) {
             let stats = stats_list.get(i)
             if is_null(stats) { continue }
-            let s = stats.unwrap()
+            let s = stats
             if s.count == 0 && s.work_count == 0 { continue }
 
             let mean_ms = round_to_places(s.mean * 1000.0, 2)
@@ -3388,7 +3388,7 @@ fn gpu_scopes_pretty() -> string {
         log_error("PROFILER", "gpu scope report is not JSON: {raw}")
         return ""
     }
-    let doc = parsed.unwrap()
+    let doc = parsed
     let status = json_as_str(json_field(doc, "status") ?? json_null()) ?? "?"
     if status == "off" { return "" }
     if status != "on" && status != "finish" { return "GPU scopes {status}\n\n" }

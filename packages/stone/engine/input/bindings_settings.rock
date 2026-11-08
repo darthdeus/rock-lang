@@ -151,7 +151,7 @@ fn bindings_apply_json(root: JsonValue) -> bool {
     if version != 1 { return false }
     let actions = json_as_object(json_field(root, "actions") ?? json_null()) ?? return false
     bindings_reset_registered_defaults()
-    let values = actions.unwrap()
+    let values = actions
     for name in keys(values) {
         let value = values[name]
         if !ACTIONS.contains(name) {
@@ -343,7 +343,7 @@ fn bindings_restore_json(raw: string) -> string? {
     if parsed == null {
         return "corrupt binding configuration"
     }
-    let owned = parsed.unwrap().clone_into(map_storage(BINDING_RAW_ACTIONS))
+    let owned = parsed.clone_into(map_storage(BINDING_RAW_ACTIONS))
     if !bindings_apply_json(owned) {
         return "unsupported binding configuration"
     }

@@ -160,7 +160,7 @@ fn maybe_u(k: int) -> U? {
 
 fn read_maybe_u(u: U?) -> int {
     if u == null { return -1 }
-    match u.unwrap() {
+    match u {
         U::V2(p) => { return (p.x * 10.0 + p.y) as int }
         U::F(f) => { return f as int }
     }
@@ -174,7 +174,7 @@ fn maybe_bu(k: int) -> BU? {
 
 fn read_maybe_bu(u: BU?) -> int {
     if u == null { return -1 }
-    match u.unwrap() {
+    match u {
         BU::V2(p) => { return (p.x * 10.0 + p.y) as int }
         BU::F(f) => { return f as int }
     }

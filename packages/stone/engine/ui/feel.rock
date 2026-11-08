@@ -95,13 +95,13 @@ pub fn ui_event(ev: UiEvent, at: Vec2 = v(0.0, 0.0), r: UiRect = UiRect { x: 0.0
     }
 
     let play = f.play ?? s.base.play
-    if play != null && play.unwrap()(ev) {
+    if play != null && play(ev) {
         s.plays_n = s.plays_n + 1
     }
 
     let fx = f.fx ?? s.base.fx
     if fx != null {
-        let cb = fx.unwrap()
+        let cb = fx
         cb(ev, at, r, skin, world_anchor)
     }
 }

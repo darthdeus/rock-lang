@@ -35,7 +35,7 @@ pub fn ui_presence_step(
         p.armed = true
         p.was_visible = visible
         if visible {
-            if rect != null { p.last_rect = rect.unwrap() }
+            if rect != null { p.last_rect = rect }
             p.last_world_anchor = world_anchor
             p.opening_age = p.opening_duration
         }
@@ -43,7 +43,7 @@ pub fn ui_presence_step(
     }
 
     if visible {
-        if rect != null { p.last_rect = rect.unwrap() }
+        if rect != null { p.last_rect = rect }
         p.last_world_anchor = world_anchor
         if !p.was_visible {
             p.opening_age = 0.0

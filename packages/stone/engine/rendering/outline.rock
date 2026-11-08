@@ -282,7 +282,7 @@ fn outline_pass_key(radius: float, classify: float, noise_origin: Vec2, output: 
 fn outline_pass_cached(radius: float, classify: float, noise_origin: Vec2, output: Canvas?, scissor: IRect?) -> Pass {
     // Keep the comparison key out of the miss continuation: its canvas leaves
     // otherwise stay live across every equality guard in LuaJIT snapshots.
-    if OUTLINE_PASS != null && OUTLINE_PASS_KEY != null && OUTLINE_PASS_KEY.unwrap() == outline_pass_key(radius, classify, noise_origin, output, scissor) {
+    if OUTLINE_PASS != null && OUTLINE_PASS_KEY != null && OUTLINE_PASS_KEY == outline_pass_key(radius, classify, noise_origin, output, scissor) {
         return OUTLINE_PASS.unwrap()
     }
     let key = outline_pass_key(radius, classify, noise_origin, output, scissor)
@@ -546,7 +546,7 @@ fn apply_outline_detect(view: FrameView, force_scan: bool) {
     // because binding the output is the only place a scissor can be applied.
     let scissor: IRect? = null
     if !force_scan && COMPOSITE_CANVAS != null {
-        scissor = outline_detect_scissor(view, scan_radius, COMPOSITE_CANVAS.unwrap())
+        scissor = outline_detect_scissor(view, scan_radius, COMPOSITE_CANVAS)
     }
     OUTLINE_LAST_SCISSOR = scissor
 
@@ -637,7 +637,7 @@ pub fn adhoc_intermediate_handle() -> int {
 fn adhoc_intermediate(w: int, h: int) -> AdhocIntermediate {
     let existing = ADHOC_INTERMEDIATE
     if existing != null {
-        let it = existing.unwrap()
+        let it = existing
         if !canvas_is_live(it.canvas) {
             ADHOC_INTERMEDIATE = null
             render_batch_pool_destroy(ADHOC_MASK_BATCHES)
@@ -770,8 +770,8 @@ fn adhoc_detect_pass(it: AdhocIntermediate, target: Canvas, radius: float) -> Pa
         noise_origin_x: adhoc_origin.x,
         noise_origin_y: adhoc_origin.y,
     }
-    if it.pass != null && it.pass_key != null && it.pass_key.unwrap() == key {
-        return it.pass.unwrap()
+    if it.pass != null && it.pass_key != null && it.pass_key == key {
+        return it.pass
     }
     let p = build_outline_detect_pass(
         it.canvas, it.canvas, target, color(0.0, 0.0, 0.0, 0.0),

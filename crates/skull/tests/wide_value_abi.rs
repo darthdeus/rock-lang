@@ -211,7 +211,7 @@ fn the_retained_old_abi_witness_still_fails_to_load() {
 fn cut_fixture(payload: usize, nullable: bool) -> String {
     let q = if nullable { "?" } else { "" };
     let read = if nullable {
-        "if u == null { return -1.0 }\n    return u.unwrap().f0"
+        "if u == null { return -1.0 }\n    return u.f0"
     } else {
         "return u.f0"
     };
@@ -512,7 +512,7 @@ fn main() {
     let multi = head(p) + head(q)
     let co = pipeline(w)
     let first = co.resume()
-    let yielded = if first == null { -1.0 } else { head(first.unwrap()) }
+    let yielded = if first == null { -1.0 } else { head(first) }
     let _ = co.resume()
     let finished = co.result() ?? -1.0
     print("{direct} {indirect} {closed} {generic} {method} {tailed} {multi} {yielded} {finished}")

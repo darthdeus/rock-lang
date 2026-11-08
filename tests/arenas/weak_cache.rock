@@ -131,7 +131,7 @@ fn weak_cache_record_copies_start_cold_and_retire_independently() {
     let boolean_owner = CacheOwner {}
     weak_cache_put(name, boolean_owner, false)
     let boolean_value: bool? = weak_cache_get(name, boolean_owner)
-    assert(boolean_value != null && !boolean_value.unwrap())
+    assert(boolean_value != null && !boolean_value)
     weak_cache_drop(name, boolean_owner)
     assert_eq(weak_cache_live(name), 0)
 }

@@ -27,7 +27,7 @@ fn nullable_iter(slots: EntitySlots) -> int {
     let total = 0
     for entity in slots.slots {
         if entity != null {
-            let mob = entity.unwrap().get() ?? return -3
+            let mob = entity.get() ?? return -3
             total += mob.hp
         }
     }

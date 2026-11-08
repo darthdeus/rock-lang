@@ -173,7 +173,7 @@ pub fn spatial_hash_add_rect<T>(sh: SpatialHash<T>, pos: Vec2, w: float, h: floa
 // Assigns `key` a dense cell slot, creating one if this is its first entry.
 fn sh_intern_cell<T>(sh: SpatialHash<T>, key: int) -> int {
     let existing = sh.cell_of.get(key)
-    if existing != null { return existing.unwrap() }
+    if existing != null { return existing }
 
     let slot = sh.cell_count
     sh.cell_of[key] = slot
@@ -249,7 +249,7 @@ pub fn spatial_hash_build<T>(sh: SpatialHash<T>) {
             for cy in cy0..(cy1 + 1) {
                 let found = sh.cell_of.get(sh_cell_key(cx, cy))
                 if found == null { continue }
-                let slot = found.unwrap()
+                let slot = found
                 let at = sh.starts[slot] + sh.fill[slot]
                 sh.sorted.set(at, i)
                 sh.fill.set(slot, sh.fill[slot] + 1)
@@ -323,7 +323,7 @@ fn sh_rect_hits_entry<T>(sh: SpatialHash<T>, entry: int,
 
 fn sh_layer_matches<T>(sh: SpatialHash<T>, entry: int, layer: int?) -> bool {
     if layer == null { return true }
-    return sh.layer[entry] == layer.unwrap()
+    return sh.layer[entry] == layer
 }
 
 // Every entry overlapping the circle, each returned at most once. Results are
@@ -343,7 +343,7 @@ pub fn spatial_hash_query_circle_all<T>(sh: SpatialHash<T>, pos: Vec2, radius: f
         for cy in cy0..(cy1 + 1) {
             let found = sh.cell_of.get(sh_cell_key(cx, cy))
             if found == null { continue }
-            let slot = found.unwrap()
+            let slot = found
 
             for at in sh.starts[slot]..sh.starts[slot + 1] {
                 let entry = sh.sorted[at]
@@ -378,7 +378,7 @@ pub fn spatial_hash_query_circle<T>(sh: SpatialHash<T>, pos: Vec2, radius: float
         for cy in cy0..(cy1 + 1) {
             let found = sh.cell_of.get(sh_cell_key(cx, cy))
             if found == null { continue }
-            let slot = found.unwrap()
+            let slot = found
 
             for at in sh.starts[slot]..sh.starts[slot + 1] {
                 let entry = sh.sorted[at]
@@ -415,7 +415,7 @@ pub fn spatial_hash_query_rect<T>(sh: SpatialHash<T>, pos: Vec2, size: Vec2,
         for cy in cy0..(cy1 + 1) {
             let found = sh.cell_of.get(sh_cell_key(cx, cy))
             if found == null { continue }
-            let slot = found.unwrap()
+            let slot = found
 
             for at in sh.starts[slot]..sh.starts[slot + 1] {
                 let entry = sh.sorted[at]
@@ -501,7 +501,7 @@ fn spatial_hash_raycast_impl<T>(
     for _step in 0..max_steps {
         let found = sh.cell_of.get(sh_cell_key(cx, cy))
         if found != null {
-            let slot = found.unwrap()
+            let slot = found
             for at in sh.starts[slot]..sh.starts[slot + 1] {
                 let entry = sh.sorted[at]
                 if sh_seen(sh, entry, qid) { continue }

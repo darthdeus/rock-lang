@@ -95,7 +95,7 @@ fn test_complex_short_circuit_case() {
     let layer: int? = null
 
     // This should not crash - the right side should not be evaluated
-    let result = layer != null && layer.unwrap() > 0
+    let result = layer != null && layer > 0
 
     assert_false(result, "Result should be false")
 }

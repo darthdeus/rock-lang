@@ -104,7 +104,7 @@ fn present_submission_refusal_is_observable_and_retryable() {
         assert(PROF_CUR.count > 0, "profiling was active during the refused present")
         assert_eq(PROF_OPEN_TOP, 0, "refusal closes the profiling bracket before raising")
         assert_eq(PROFILER.current_depth, 0, "refusal restores profiling depth")
-        assert(COMPOSITE_CANVAS != null && COMPOSITE_CANVAS.unwrap().handle == src.handle,
+        assert(COMPOSITE_CANVAS != null && COMPOSITE_CANVAS.handle == src.handle,
             "a composite that did not execute remains pending")
         assert(stone_ui_probe_check_population(0, 1, 0), "refusal never enters the executor")
         assert(read_canvas_pixel(out, 8, 8) > 0.9, "refusal leaves the target untouched")
@@ -157,7 +157,7 @@ fn present_submission_fixture_restores_after_assertion_failure() {
             assert(false, "intentional present fixture assertion failure")
         })
     }, world_fixture_traceback)
-    assert(failure != null && failure.unwrap().contains("intentional present fixture assertion failure"))
+    assert(failure != null && failure.contains("intentional present fixture assertion failure"))
     assert(COMPOSITE_CANVAS == saved_composite && RENDER_VIEW == saved_view)
     assert_eq(ENGINE.profiler_enabled, saved_enabled)
     assert_eq(PROFILER_SECTIONS_OFF, saved_sections)

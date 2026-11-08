@@ -108,13 +108,13 @@ fn line_intersects_circle(
     if t1 >= 0.0 && t1 <= 1.0 { t = t1 }
 
     if t2 >= 0.0 && t2 <= 1.0 {
-        if t == null || t2 < t.unwrap() { t = t2 }
+        if t == null || t2 < t { t = t2 }
     }
 
     if t == null { return null }
 
     // Calculate intersection point
-    let t_val = t.unwrap()
+    let t_val = t
     let hit_x = start.x + dx * t_val
     let hit_y = start.y + dy * t_val
     let hit_point = v(hit_x, hit_y)

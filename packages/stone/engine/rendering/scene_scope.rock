@@ -503,7 +503,7 @@ fn scene_render_scope_restore_case(fail: bool) {
             })
         })
         if fail {
-            assert(body_error != null && body_error.unwrap().contains("intentional scene scope failure"),
+            assert(body_error != null && body_error.contains("intentional scene scope failure"),
                 "the scope rethrows the intentional failure after restoration")
         } else { assert(body_error == null, body_error ?? "") }
         scene_render_expect_restored0(saved0)

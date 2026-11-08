@@ -48,7 +48,7 @@ fn test_nullable_function_null_case() {
     // Test non-null case  
     f = test_fn
     if f != null {
-        f.unwrap()()
+        f()
     }
 }
 

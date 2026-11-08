@@ -274,7 +274,7 @@ fn proof_new<K, V>() -> ProofMap<K, V> {
 fn ProofMap<K, V>.pset(m, key: K, value: V) {
     let existing = m.spine.get(key)
     if existing != null {
-        m.data.set(existing.unwrap(), value)
+        m.data.set(existing, value)
         return
     }
     let slot = 0
@@ -292,13 +292,13 @@ fn ProofMap<K, V>.pset(m, key: K, value: V) {
 fn ProofMap<K, V>.pget(m, key: K) -> V? {
     let slot = m.spine.get(key)
     if slot == null { return null }
-    return m.data[slot.unwrap()]
+    return m.data[slot]
 }
 
 fn ProofMap<K, V>.premove(m, key: K) -> V? {
     let slot = m.spine.get(key)
     if slot == null { return null }
-    let i = slot.unwrap()
+    let i = slot
     let old = m.data[i]
     m.free_indices.push(i)
     m.spine.remove(key)

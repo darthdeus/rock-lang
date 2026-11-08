@@ -40,7 +40,7 @@ co fn top(n: int) -> Coroutine<int> {
     let s = 0
     let v: int? = m.resume()
     while v != null {
-        s = s + v.unwrap()
+        s = s + v
         if s % 2 == 0 {
             yield s
         }
@@ -56,7 +56,7 @@ fn bench(rounds: int) -> int {
         let p = top(2000)
         let v: int? = p.resume()
         while v != null {
-            total = (total + v.unwrap()) % 1000003
+            total = (total + v) % 1000003
             v = p.resume()
         }
         r = r + 1

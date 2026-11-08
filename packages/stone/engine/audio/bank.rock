@@ -68,13 +68,13 @@ fn sound_bank_abort(events: [SoundBankEvent], path: string, reason: string) -> S
 
 fn sound_bank_layer_number(value: JsonValue, key: string, fallback: float, event_id: string, step_index: int) -> float? {
     let field = json_field(value, key)
-    if field == null || json_is_null(field.unwrap()) { return fallback }
-    let number = json_as_float(field.unwrap())
+    if field == null || json_is_null(field) { return fallback }
+    let number = json_as_float(field)
     if number == null {
         log_error("SOUND", "sound bank event {event_id} step {step_index} '{key}' is not a number")
         return null
     }
-    return number.unwrap()
+    return number
 }
 
 fn sound_bank_bad_number(value: float, positive: bool) -> bool {
@@ -107,8 +107,8 @@ fn sound_bank_parse_layer(value: JsonValue, event_id: string, step_index: int,
     if sound_bank_bad_number(volume, false) || sound_bank_bad_number(speed, true)
         || sound_bank_bad_number(offset, false) { return null }
     let stream_field = json_field(value, "stream")
-    let stream = if stream_field == null || json_is_null(stream_field.unwrap()) { false } else {
-        json_as_bool(stream_field.unwrap()) ?? {
+    let stream = if stream_field == null || json_is_null(stream_field) { false } else {
+        json_as_bool(stream_field) ?? {
             log_error("SOUND", "sound bank event {event_id} step {step_index} 'stream' is not a boolean")
             return null
         }
@@ -131,13 +131,13 @@ fn sound_bank_parse_layer(value: JsonValue, event_id: string, step_index: int,
     for source in pool.sources {
         let path = source.data()?.path ?? ""
         let record = json_field(normalizations, path)
-        let gain = if record == null { null } else { json_as_float(json_field(record.unwrap(), "gain") ?? json_null()) }
-        if gain == null || sound_bank_bad_number(gain.unwrap(), false) {
+        let gain = if record == null { null } else { json_as_float(json_field(record, "gain") ?? json_null()) }
+        if gain == null || sound_bank_bad_number(gain, false) {
             unload_multisound(pool)
             log_error("SOUND", "sound bank event {event_id} has no valid normalization for {path}")
             return null
         }
-        pool.gains.push(gain.unwrap())
+        pool.gains.push(gain)
     }
     let bank = SOUND_BANK_POOLS.insert(pool)
     return SoundBankLayer { bank, volume, speed, offset }

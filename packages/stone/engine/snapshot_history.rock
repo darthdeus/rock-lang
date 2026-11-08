@@ -386,7 +386,7 @@ pub fn snapshot_history_save(history: SnapshotHistory, path: string?,
 
 pub fn snapshot_history_load(path: string, max_nodes: int, upgrade: bool = true) -> SnapshotHistory? {
     let raw = file_read(path) ?? return null
-    return snapshot_history_load_raw(raw.unwrap(), max_nodes, path, upgrade)
+    return snapshot_history_load_raw(raw, max_nodes, path, upgrade)
 }
 
 pub fn snapshot_history_load_raw(raw: string, max_nodes: int, path: string, upgrade: bool = true) -> SnapshotHistory? {
@@ -404,10 +404,10 @@ pub fn snapshot_history_load_raw(raw: string, max_nodes: int, path: string, upgr
     for line in lines {
         if line == "" { continue }
         let head = json_decode(line) ?? break
-        let vfield = json_field(head.unwrap(), "v")
+        let vfield = json_field(head, "v")
         if vfield != null {
-            let v = snapshot_history_int(vfield.unwrap()) ?? return null
-            version = v.unwrap()
+            let v = snapshot_history_int(vfield) ?? return null
+            version = v
         }
         break
     }
@@ -433,36 +433,36 @@ pub fn snapshot_history_load_raw(raw: string, max_nodes: int, path: string, upgr
             if i == last_nonempty { needs_checkpoint = true; break }
             return null
         }
-        let record = parsed.unwrap()
+        let record = parsed
         let nfield = json_field(record, "n")
         if nfield == null {
             let cfield = json_field(record, "c")
             if cfield != null {
-                let c = snapshot_history_int(cfield.unwrap()) ?? return null
-                current_pid = c.unwrap()
+                let c = snapshot_history_int(cfield) ?? return null
+                current_pid = c
                 records += 1
             }
             continue
         }
-        let entry = nfield.unwrap()
+        let entry = nfield
         let pid = snapshot_history_field_int(entry, "pid") ?? return null
         let parent = snapshot_history_field_int(entry, "ppid") ?? return null
         let label = snapshot_history_field_string(entry, "label") ?? return null
-        let p = pid.unwrap()
+        let p = pid
         if p < 0 || by_pid.contains(p) { return null }
         let metadata = snapshot_history_metadata(entry) ?? return null
         let snap = if version >= 2 {
             ""
         } else {
-            (snapshot_history_field_string(entry, "snap") ?? return null).unwrap()
+            (snapshot_history_field_string(entry, "snap") ?? return null)
         }
         by_pid[p] = SnapshotHistoryNode {
             snap,
-            label: label.unwrap(),
-            parent: parent.unwrap(),
+            label: label,
+            parent: parent,
             children: [],
             pid: p,
-            metadata: metadata.unwrap(),
+            metadata: metadata,
         }
         order.push(p)
         records += 1
@@ -612,12 +612,12 @@ fn snapshot_history_rebuild(history: SnapshotHistory, dead: Map<int, bool>) {
 // compaction wrote that copy back to disk, permanently.
 pub fn snapshot_history_metadata(entry: JsonValue) -> string? {
     let metadata = json_field(entry, "metadata")
-    if metadata != null { return json_as_str(metadata.unwrap()) }
+    if metadata != null { return json_as_str(metadata) }
     let fields = json_as_object(entry) ?? return ""
     let rest: Map<string, JsonValue> = map_new()
-    for key in keys(fields.unwrap()) {
+    for key in keys(fields) {
         if key == "snap" { continue }
-        rest[key] = fields.unwrap()[key]
+        rest[key] = fields[key]
     }
     return json_encode(json_object(rest))
 }

@@ -285,11 +285,11 @@ fn sim_elapsed_us(start: float) -> int {
 fn sim_apply_fixed_dt() {
     SIM_FIXED_DT = 1.0 / 60.0
     let dt_override = os_getenv("SIM_DT")
-    if dt_override != null && dt_override.unwrap() != "" {
-        if let parsed = dt_override.unwrap().parse_float() {
-            SIM_FIXED_DT = parsed.unwrap()
+    if dt_override != null && dt_override != "" {
+        if let parsed = dt_override.parse_float() {
+            SIM_FIXED_DT = parsed
         } else {
-            error("SIM_DT `{dt_override.unwrap()}` is not a number; keeping the 1/60 default")
+            error("SIM_DT `{dt_override}` is not a number; keeping the 1/60 default")
         }
     }
 }
@@ -366,7 +366,7 @@ fn runner_sim_advance(frame: int) -> bool {
     if SIM_HANDLE == null { return false }
     // The poller removes an errored entry but retains this raw handle, so an
     // error is terminal here just like natural coroutine completion.
-    let state = status(SIM_HANDLE.unwrap())
+    let state = status(SIM_HANDLE)
     let terminal = state == "dead" || state == "errored" || SIM_END_REQUESTED
     let over = SIM_FRAME_BUDGET > 0 && (current_tick - SIM_ENTRY_TICK_START) > SIM_FRAME_BUDGET
     if !terminal && !over { return false }
@@ -407,7 +407,7 @@ fn runner_sim_advance(frame: int) -> bool {
 // the same env-driven check that `runner_maybe_start_sim` reads.
 pub fn sim_mode_active() -> bool {
     let name = os_getenv("ROCK_RUN_SIM") ?? return false
-    return name.unwrap() != ""
+    return name != ""
 }
 
 // A sim is a bounded run, so vsync is latched off at boot. Lifting the latch

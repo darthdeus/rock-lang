@@ -16,7 +16,7 @@ fn test_basic_unwrap_shadowing() {
         return
     }
 
-    let mesh = mesh.unwrap()
+    let mesh = mesh
 
     // This should work - mesh is now Mesh, not Mesh?
     draw_mesh(mesh)
@@ -27,7 +27,7 @@ fn test_unwrap_with_variable_usage() {
     let mesh: Mesh? = Mesh { data: 42 }
 
     if mesh != null {
-        let mesh = mesh.unwrap()
+        let mesh = mesh
         // Use the unwrapped mesh multiple times
         draw_mesh(mesh)
         draw_mesh(mesh)
@@ -40,7 +40,7 @@ fn process_optional_mesh(mesh: Mesh?) -> int {
         return -1
     }
 
-    let mesh = mesh.unwrap()
+    let mesh = mesh
     return mesh.data
 }
 
@@ -69,7 +69,7 @@ fn test_unwrap_with_closure() {
             continue
         }
 
-        let mesh = mesh.unwrap()
+        let mesh = mesh
 
         with_debug_group("test") @ draw_mesh(mesh)
     }

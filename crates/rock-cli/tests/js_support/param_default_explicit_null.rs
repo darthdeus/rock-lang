@@ -36,7 +36,7 @@ fn hinted(hint: Hint? = Hint { v: 1 }) -> int {
     if hint == null {
         return -1
     }
-    return hint.unwrap().v
+    return hint.v
 }
 
 @test
@@ -54,7 +54,7 @@ fn placed(at: V2? = V2 { x: 1, y: 2 }) -> int {
     if at == null {
         return -1
     }
-    let p = at.unwrap()
+    let p = at
     return p.x * 10 + p.y
 }
 
@@ -112,7 +112,7 @@ fn flag(on: bool? = true) -> int {
     if on == null {
         return -1
     }
-    return if on.unwrap() { 1 } else { 0 }
+    return if on { 1 } else { 0 }
 }
 
 fn label(s: string? = "dflt") -> string {

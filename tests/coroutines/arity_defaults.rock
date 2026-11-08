@@ -103,22 +103,22 @@ fn test_coroutine_arity_three_forms_unify() {
     let a = arity_one_explicit_unit()
     print(a.resume() ?? -1)         // 1
     let r1 = a.resume()
-    if r1 == null { print("null") } else { print(r1.unwrap()) }  // null
+    if r1 == null { print("null") } else { print(r1) }  // null
 
     let b = arity_two_explicit_unit_n()
     print(b.resume() ?? -1)         // 1
     let _r2 = b.resume()
     let rb = b.result()
-    if rb == null { print("null") } else { print("result={rb.unwrap()}") }  // result=done
+    if rb == null { print("null") } else { print("result={rb}") }  // result=done
 
     let c = arity_one_implicit()
     print(c.resume() ?? -1)         // 1
     let r3 = c.resume()
-    if r3 == null { print("null") } else { print(r3.unwrap()) }  // null
+    if r3 == null { print("null") } else { print(r3) }  // null
 
     let d = arity_two_implicit()
     print(d.resume() ?? -1)         // 1
     let _r4 = d.resume()
     let rd = d.result()
-    if rd == null { print("null") } else { print("result={rd.unwrap()}") }  // result=done
+    if rd == null { print("null") } else { print("result={rd}") }  // result=done
 }

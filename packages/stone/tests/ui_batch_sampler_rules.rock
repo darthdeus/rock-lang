@@ -142,7 +142,7 @@ fn ui_batch_sampler_fixture(fail_after_draw: bool) {
         TEXT_UI_FLUSH_ORDER = saved_flush_order
         CURRENT_UI_POOL = saved_pool
         set_canvas_handle(saved_canvas)
-        if saved_shader != null { set_shader(saved_shader.unwrap()) } else { unset_shader() }
+        if saved_shader != null { set_shader(saved_shader) } else { unset_shader() }
         WATCHER.current_shader_name = saved_shader
         set_blend_mode(saved_blend)
         unset_depth_mode()
@@ -304,7 +304,7 @@ fn ui_batch_secondary_samplers_released_after_draw() {
         TEXT_UI_FLUSH_ORDER = saved_flush_order
         CURRENT_UI_POOL = saved_pool
         set_canvas_handle(saved_canvas)
-        if saved_shader != null { set_shader(saved_shader.unwrap()) } else { unset_shader() }
+        if saved_shader != null { set_shader(saved_shader) } else { unset_shader() }
         WATCHER.current_shader_name = saved_shader
         set_blend_mode(saved_blend)
         unset_depth_mode()
@@ -416,7 +416,7 @@ fn ui_batch_sampler_fixture_restores_after_failure() {
     let saved_white = WHITE_PIXEL
     let failure = world_fixture_raised(() => ui_batch_sampler_fixture(true))
     assert(failure != null
-        && failure.unwrap().contains("intentional UI batch sampler fixture failure"))
+        && failure.contains("intentional UI batch sampler fixture failure"))
     let after = stone_get_graphics_stats()
     assert_eq(after.images, before.images, "fixture releases images after failure")
     assert_eq(after.canvases, before.canvases, "fixture releases canvases after failure")
@@ -466,7 +466,7 @@ fn ui_batch_secondary_sources_and_filters_reach_pixels() {
         TEXT_UI_FLUSH_ORDER = saved_flush_order
         CURRENT_UI_POOL = saved_pool
         set_canvas_handle(saved_canvas)
-        if saved_shader != null { set_shader(saved_shader.unwrap()) } else { unset_shader() }
+        if saved_shader != null { set_shader(saved_shader) } else { unset_shader() }
         WATCHER.current_shader_name = saved_shader
         set_blend_mode(saved_blend)
         unset_depth_mode()

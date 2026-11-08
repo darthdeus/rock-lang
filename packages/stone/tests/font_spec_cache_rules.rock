@@ -26,7 +26,7 @@ fn font_spec_cache_test_spec(path: string = project_asset_path("@engine/assets/f
 }
 
 fn font_spec_cache_test_cleanup(font: Font?, before: Map<string, bool>) {
-    if font != null { unload_font(font.unwrap()) }
+    if font != null { unload_font(font) }
     for (key, _) in FONT_SPEC_CACHE {
         if before.get(key) == null { FONT_SPEC_CACHE.remove(key) }
     }
@@ -81,7 +81,7 @@ fn font_spec_cache_fixture_failure_restores_state() {
     let message = failure ?? "fixture returned without the deliberate failure"
     assert(message.contains("intentional font spec cache fixture failure"),
         "the failure surfaces (got: {message})")
-    assert(probe != null && probe.unwrap().data() == null,
+    assert(probe != null && probe.data() == null,
         "a failed check unloads its font")
     let after = font_spec_cache_key_set()
     for (key, _) in after {

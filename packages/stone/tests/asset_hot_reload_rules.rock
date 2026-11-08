@@ -75,7 +75,7 @@ fn font_hot_reload_rerasterizes_into_the_same_backend() {
         assert_eq(loaded.data().unwrap().backend_id, backend, "a failed reload keeps the font handle")
         assert_eq(loaded.measure(text, 16.0).x, width_b, "a failed reload keeps the old atlas metrics")
     }, () => {
-        if font != null { unload_font(font.unwrap()) }
+        if font != null { unload_font(font) }
         let _ = remove_file(tmp)
     })
 }

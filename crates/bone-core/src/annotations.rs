@@ -159,7 +159,10 @@ fn validate_one(
             }
             Ok(())
         }
-        "instance" => {
+        // The callee strips the nullable off this argument (`unwrap`,
+        // `expect`, `unwrap_or`), so a non-nullable argument is a redundant
+        // call, rejected like `??` on a non-nullable.
+        "instance" | "unwraps" => {
             at(anno, pos, AnnoPos::Param)?;
             no_args(anno)
         }

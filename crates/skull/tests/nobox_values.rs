@@ -243,7 +243,7 @@ struct Player { pos: NV2, hp: int }
 fn absent(v: NV2? = null) -> bool { return v == null }
 fn sum(v: NV2? = null) -> float {
     if v == null { return -1.0 }
-    let u = v.unwrap()
+    let u = v
     return u.x + u.y
 }
 
@@ -257,7 +257,7 @@ fn to_local(p: Player) -> float {
     let q: NV2? = null
     q = p.pos
     if q == null { return -1.0 }
-    return q.unwrap().x
+    return q.x
 }
 
 fn main() {
@@ -293,9 +293,9 @@ struct Txt { pos: NV2?, t: float }
 fn spawn(p: NV2?) -> Txt { return Txt { pos: p, t: 1.0 } }
 fn spawn_literal() -> Txt { return Txt { pos: NV2 { x: 9.0, y: 8.0 }, t: 2.0 } }
 
-// The read half: presence test, then unwrap.
+// The read half: presence test, then a read through the narrowed field.
 fn read(c: Txt) -> float {
-    if c.pos != null { return c.pos.unwrap().x }
+    if c.pos != null { return c.pos.x }
     return -1.0
 }
 
@@ -538,7 +538,7 @@ fn via_sample(xs: [NV2]) -> NV2? { return xs.sample() }
 
 fn show(v: NV2?) -> float {
     if v == null { return -1.0 }
-    let u = v.unwrap()
+    let u = v
     return u.x * 10.0 + u.y
 }
 

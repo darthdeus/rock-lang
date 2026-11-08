@@ -213,8 +213,8 @@ fn test_lambda_find_element() {
     let bob = users.find(u => u.name == "Bob")
     
     if !is_null(bob) {
-        print(bob.unwrap().id)
-        print(bob.unwrap().name)
+        print(bob.id)
+        print(bob.name)
     }
     
     let dave = users.find(u => u.name == "Dave")

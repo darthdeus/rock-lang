@@ -64,7 +64,7 @@ fn snapshot_history_failed_publication_saves_document_and_preserves_ids() {
             assert(false, "publication fixture intentional failure")
         })
     })
-    assert(raised != null && raised.unwrap().contains("publication fixture intentional failure"),
+    assert(raised != null && raised.contains("publication fixture intentional failure"),
         "fixture cleanup runs before an intentional failure reaches its caller")
 }
 

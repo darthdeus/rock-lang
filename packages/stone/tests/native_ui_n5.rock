@@ -16,7 +16,7 @@ fn c_ui_text_art_cache_and_coverage() {
         text_art_anonymous_measurement_case(font, fail_after_measurement: true)
     })
     assert(measurement_error != null
-        && measurement_error.unwrap().contains("TextArt measurement fixture failure"))
+        && measurement_error.contains("TextArt measurement fixture failure"))
     assert_eq(TEXT_ART_SELECTED_BUCKETS.len(), consumers)
     assert_eq(TEXT_ART_CONSUMER_KEY_FORMATS, formats)
     let low = text_art_raster_demand_for(font, "N5", 20.0, 1.0)
@@ -60,7 +60,7 @@ fn c_ui_text_art_cache_and_coverage() {
     let raised = world_fixture_raised(() => {
         text_art_glyph_input_ownership_case(font, 2, fail_after_ensure: true)
     })
-    assert(raised != null && raised.unwrap().contains("TextArt ownership fixture failure"))
+    assert(raised != null && raised.contains("TextArt ownership fixture failure"))
     assert_eq(stone_get_graphics_stats().canvases, canvases,
         "ownership fixture retires its canvases on failure")
     text_art_destroy(art)

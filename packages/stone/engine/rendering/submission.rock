@@ -113,7 +113,7 @@ fn gpu_pass_rejection(p: GpuPass) -> string {
         if interface == null {
             return "draw names shader `{d.shader}`, whose selected-backend semantic metadata or artifact generation is not live"
         }
-        let interface = interface.unwrap()
+        let interface = interface
         if interface.outputs.len() != 1 {
             return "draw `{d.shader}` declares {interface.outputs.len()} color outputs but a pass has one target"
         }
@@ -134,7 +134,7 @@ fn gpu_pass_rejection(p: GpuPass) -> string {
             if block_count != 1 {
                 return "draw `{d.shader}` carries a canonical packet for {block_count} logical blocks"
             }
-            if !semantic_uniform_packet_matches(d.semantic_block.unwrap(), interface.blocks[0]) {
+            if !semantic_uniform_packet_matches(d.semantic_block, interface.blocks[0]) {
                 return "draw `{d.shader}` carries canonical uniform values that do not match its semantic block"
             }
             if semantic_uniform_physical_block(d.shader, interface.blocks[0]) == null {
@@ -145,7 +145,7 @@ fn gpu_pass_rejection(p: GpuPass) -> string {
                 return "draw `{d.shader}` omits its required uniform block"
             }
         } else {
-            let fp = d.block.unwrap().fingerprint
+            let fp = d.block.fingerprint
             if block_count == 0 || shader_block_by_fingerprint(d.shader, fp) == null {
                 return "draw `{d.shader}` carries a uniform block it does not declare"
             }
@@ -356,7 +356,7 @@ fn gpu_execute_gl_pass(p: GpuPass, traced: [GpuTracedDraw]?, to_window: bool) ->
     }
 
     if traced != null {
-        for t in traced.unwrap() { gpu_execute_draw_resolved(t.draw, t.geometry) }
+        for t in traced { gpu_execute_draw_resolved(t.draw, t.geometry) }
     } else if p.draws.len() == 1 {
         // Not a length guard: both arms execute every draw, and the loop below
         // is unchanged for every longer pass. Measured on mag's combat bench,
@@ -399,10 +399,10 @@ fn gpu_execute_draw_resolved(d: GpuDraw, g: GpuFullscreenGeometry) {
 
     set_shader(d.shader)
     if d.semantic_block != null {
-        let projected = new_owned_semantic_block(d.shader, d.semantic_block.unwrap(), __SITE__)
-        if projected != null { upload_owned_block(d.shader, projected.unwrap()) }
+        let projected = new_owned_semantic_block(d.shader, d.semantic_block, __SITE__)
+        if projected != null { upload_owned_block(d.shader, projected) }
     } else if d.block != null {
-        upload_owned_block(d.shader, d.block.unwrap())
+        upload_owned_block(d.shader, d.block)
     }
     for b in d.bindings {
         if bind_sampled_to_slot(b.resource, b.slot, b.filter) {
@@ -501,11 +501,11 @@ fn gpu_draw_text(t: GpuTracedDraw, physical: bool) -> string {
     let g = t.geometry
     out = out + "    geometry fullscreen cull=none uv=({g.u0},{g.v0})-({g.u1},{g.v1})\n"
     if d.semantic_block != null {
-        let b = d.semantic_block.unwrap()
+        let b = d.semantic_block
         if physical {
             let projected = new_owned_semantic_block(d.shader, b, "gpu_trace_text_physical")
             if projected != null {
-                let p = projected.unwrap()
+                let p = projected
                 out = out + "    block fingerprint={p.fingerprint:.0} size={p.size} bytes={gpu_hex(p.bytes, p.size)}\n"
             }
         } else {
@@ -524,7 +524,7 @@ fn gpu_draw_text(t: GpuTracedDraw, physical: bool) -> string {
             out = out + "\n"
         }
     } else if d.block != null {
-        let b = d.block.unwrap()
+        let b = d.block
         if physical {
             out = out + "    block fingerprint={b.fingerprint:.0} size={b.size} bytes={gpu_hex(b.bytes, b.size)}\n"
         } else {

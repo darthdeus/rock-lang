@@ -38,10 +38,10 @@ fn shape_duration_draw(duration: float?, outline_id: int) {
 fn shape_duration_assert_drawn(pool: RenderBatchPool, mask: RenderBatchPool, outline_id: int, what: string) {
     let line = shape_duration_batch(pool, SHAPE_DURATION_LINE_LAYER)
     assert(line.unlit, "{what} line keeps unlit")
-    assert(line.pipeline != null && line.pipeline.unwrap().shader_name == SHAPE_DURATION_SHADER,
+    assert(line.pipeline != null && line.pipeline.shader_name == SHAPE_DURATION_SHADER,
         "{what} line keeps its pipeline")
     let entry = OUTLINE_ENTRIES.get(outline_id)
-    assert(entry != null && entry.unwrap().color == RED && entry.unwrap().width == 2.0,
+    assert(entry != null && entry.color == RED && entry.width == 2.0,
         "{what} line registers its outline")
     // The silhouette is the line's own geometry entered under the outline id.
     assert_eq(shape_duration_mask_count(mask), line.count, "{what} line silhouette matches its geometry")
@@ -118,7 +118,7 @@ fn timed_shapes_keep_their_draw_options() {
         let saved_white = WHITE_PIXEL
         let before = stone_get_graphics_stats()
         let failed = world_fixture_raised(() => shape_duration_fixture(true), world_fixture_traceback)
-        assert(failed != null && failed.unwrap().contains("intentional shape duration fixture failure"))
+        assert(failed != null && failed.contains("intentional shape duration fixture failure"))
         assert_eq(dt, saved_dt, "fixture restores dt after failure")
         assert_eq(duration_items.len(), saved_items, "fixture restores retained draws after failure")
         assert(OUTLINE_ENTRIES == saved_entries, "fixture restores outline entries after failure")

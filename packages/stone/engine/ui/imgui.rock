@@ -4,7 +4,7 @@ fn image_source_to_uv12(image: Image, source: IRect? = null) -> (Vec2, Vec2) {
     let dims = image_dims(image)
     let real_source = irect(0, 0, dims.x, dims.y)
     if source != null {
-        real_source = source.unwrap()
+        real_source = source
     }
 
     let uv1 = v(real_source.x as float / dims.x, real_source.y as float / dims.y)
@@ -1518,7 +1518,7 @@ pub fn imgui_test_item_revealed(id: string, whole: bool, relative: Vec2?) -> boo
     let item = IMGUI_TEST_ITEMS[id]
     if whole && !item.whole { return false }
     if relative != null {
-        let point = imgui_test_item_point(id, relative.unwrap()) ?? return false
+        let point = imgui_test_item_point(id, relative) ?? return false
         return point.x >= item.clip_min.x && point.x < item.clip_max.x
             && point.y >= item.clip_min.y && point.y < item.clip_max.y
     }
@@ -1599,7 +1599,7 @@ pub co fn imgui_test_click_at(id: string, relative_x: float, relative_y: float) 
         error("imgui semantic target '{id}' is absent, stale, clipped, or empty")
         return
     }
-    let at = point.unwrap()
+    let at = point
     imgui_set_mouse_pos(at.x, at.y)
     await frame(1)
     imgui_inject_left_mouse_down()
@@ -1620,8 +1620,8 @@ pub co fn imgui_test_drag(id: string, from_fraction: Vec2, to_fraction: Vec2) ->
         error("imgui semantic target '{id}' is absent, stale, clipped, or empty")
         return
     }
-    let start = from.unwrap()
-    let finish = to.unwrap()
+    let start = from
+    let finish = to
     imgui_set_mouse_pos(start.x, start.y)
     await frame(1)
     imgui_inject_left_mouse_down()
@@ -1655,11 +1655,11 @@ pub co fn imgui_test_choose(id: string, label: string) -> Coroutine<Wait> {
         return
     }
     let combo = IMGUI_TEST_COMBOS.get(id)
-    if combo == null || frame_seq - combo.unwrap().frame > 1 {
+    if combo == null || frame_seq - combo.frame > 1 {
         error("imgui semantic target '{id}' has no current combo metadata")
         return
     }
-    let state = combo.unwrap()
+    let state = combo
     let target = -1
     for i in 0..state.items.len() {
         if state.items[i] == label { target = i; break }

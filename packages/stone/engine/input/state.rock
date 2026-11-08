@@ -118,7 +118,7 @@ global LAST_INPUT_DEVICE: InputDevice = InputDevice::KeyboardMouse
 
 pub fn input_note_last_device(event: InputDeviceEvent) {
     let device = input_classify_last_device(event)
-    if device != null { LAST_INPUT_DEVICE = device.unwrap() }
+    if device != null { LAST_INPUT_DEVICE = device }
 }
 
 pub fn input_last_device() -> InputDevice { return LAST_INPUT_DEVICE }
@@ -489,7 +489,7 @@ pub fn scancode_repeated(scan: string) -> bool {
 // input fixtures can override capture; otherwise the live ImGui host owns it.
 pub fn input_mouse_captured() -> bool {
     if IMGUI_MOUSE_CAPTURE_OVERRIDE != null {
-        return IMGUI_MOUSE_CAPTURE_OVERRIDE.unwrap()
+        return IMGUI_MOUSE_CAPTURE_OVERRIDE
     }
     return is_imgui_using_mouse()
 }

@@ -36,7 +36,7 @@ fn draw_list_material_quad(
     with_draw_pool(dl.batches, () => {
         let batch = ensure_batch_of(sampled_image(WHITE_PIXEL.unwrap()), z,
             BlendMode::Replace, false, DepthMode::Off,
-            pipeline: if shader != null { pipeline(shader.unwrap()) } else { null })
+            pipeline: if shader != null { pipeline(shader) } else { null })
         batch.material = source
         add_rect_vertices_of(batch, v(x, 4.0), v(8.0, 8.0), WHITE, FillMode::Fill, 0.0, 0)
     })
@@ -68,7 +68,7 @@ fn draw_list_material_fixture(fail_after_draw: bool) {
         // The intentional rejection escapes with_canvas/with_shader before their tails.
         for slot in 0..shader_texture_slot_count(shader) { sampler_release_unit(slot) }
         set_canvas_handle(saved_canvas)
-        if saved_shader != null { set_shader(saved_shader.unwrap()) } else { unset_shader() }
+        if saved_shader != null { set_shader(saved_shader) } else { unset_shader() }
         WATCHER.current_shader_name = saved_shader
         set_blend_mode(saved_blend)
         unset_depth_mode()
@@ -112,7 +112,7 @@ fn draw_list_material_fixture(fail_after_draw: bool) {
             let rejected = world_fixture_raised(() => {
                 __draw_list_material_finally(() => draw_list_flush(dl), restore)
             })
-            assert(rejected != null && rejected.unwrap().contains("material sampler requires an explicit texture"),
+            assert(rejected != null && rejected.contains("material sampler requires an explicit texture"),
                 "an earlier material cannot satisfy a later required material input")
             assert_eq(CURRENT_CANVAS_HANDLE, saved_canvas)
             assert_eq(CURRENT_BLEND, saved_blend)
@@ -144,7 +144,7 @@ fn draw_list_material_batches_bind_independently_and_reject_missing_inputs() {
     let saved_shader = WATCHER.current_shader_name
     let saved_blend = CURRENT_BLEND
     let failed = world_fixture_raised(() => draw_list_material_fixture(true))
-    assert(failed != null && failed.unwrap().contains("intentional DrawList material fixture failure"))
+    assert(failed != null && failed.contains("intentional DrawList material fixture failure"))
     let after = stone_get_graphics_stats()
     assert_eq(after.images, before.images, "fixture releases images after failure")
     assert_eq(after.canvases, before.canvases, "fixture releases canvases after failure")

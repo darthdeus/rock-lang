@@ -192,9 +192,9 @@ fn __ui_id_debug_track_mint(id: int, scope: string, label: string) {
     if prev_scope == null || prev_label == null {
         d.scopes[id] = scope
         d.labels[id] = label
-    } else if prev_scope.unwrap() != scope || prev_label.unwrap() != label {
+    } else if prev_scope != scope || prev_label != label {
         d.hash_collisions = d.hash_collisions + 1
-        let previous = "{prev_scope.unwrap()}/{prev_label.unwrap()}"
+        let previous = "{prev_scope}/{prev_label}"
         let current = "{scope}/{label}"
         log_once("ui", "ui_id hash collision: '{previous}' and '{current}' both hash to {id} -- rename one", current)
     }
@@ -234,7 +234,7 @@ fn __ui_id_report_dupe(id: int, list: string) {
     let scope = d.scopes.get(id)
     let label = d.labels.get(id)
     let name = if scope != null && label != null {
-        "{scope.unwrap()}/{label.unwrap()}"
+        "{scope}/{label}"
     } else { "id {id}" }
     d.last_dupe_name = name
     log_once("ui", "ui id collision: '{name}' registered more than once this frame ({list} list) -- scope/label must be unique", "{list}/{name}")

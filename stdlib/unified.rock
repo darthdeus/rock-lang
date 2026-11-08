@@ -1692,17 +1692,17 @@ inline(lua) fn __op_null_coalesce<T>(a: T?, b: T?) -> T? = """
 // Expands debug.traceback("", 2) inline — level 2 = caller of the enclosing function.
 @intrinsic @inline inline(lua) fn __debug_traceback() -> string = 'return debug.traceback("", 2)'
 
-@inline fn unwrap<T>(value: T?) -> T {
+@inline fn unwrap<T>(@unwraps value: T?) -> T {
     if value != null { return value }
     error("unwrap() called on null value\n" + __debug_traceback())
     return phantom()
 }
 
-fn unwrap_or<T>(value: T?, alt: T) -> T {
+fn unwrap_or<T>(@unwraps value: T?, alt: T) -> T {
     return value ?? alt
 }
 
-fn expect<T>(value: T?, message: string) -> T {
+fn expect<T>(@unwraps value: T?, message: string) -> T {
     if value != null { return value }
     error("expect() failed: " + message + "\n" + __debug_traceback())
     return phantom()
@@ -4193,7 +4193,7 @@ fn string.lines(s) -> [string] {
 fn string.parse_int(s) -> int? {
     let f = s.parse_float()
     if f == null { return null }
-    return int(floor(f.unwrap()))
+    return int(floor(f))
 }
 
 // Parse a float from a string. Returns null if the string is not a valid number.
@@ -4206,14 +4206,14 @@ fn string.parse_int(s) -> int? {
 fn get_env_int(var: string, default_val: int) -> int {
     let v = env_var(var)
     if v == null { return default_val }
-    return v.unwrap().parse_int() ?? default_val
+    return v.parse_int() ?? default_val
 }
 
 // Read an env var as float. Returns `default_val` if unset or unparseable.
 fn get_env_float(var: string, default_val: float) -> float {
     let v = env_var(var)
     if v == null { return default_val }
-    return v.unwrap().parse_float() ?? default_val
+    return v.parse_float() ?? default_val
 }
 
 // Durable decimal text that recovers the same IEEE double.

@@ -1,0 +1,64 @@
+//! Error: unwrap / expect / unwrap_or on a non-nullable value is redundant,
+//!        rejected the same way `x ?? d` on a non-nullable is
+//! Tags: types, null, nullable
+
+//=== TEST CASE: unwrap_method_Generic ===
+fn main() {
+    let x: int = 5
+    //! expect: argument of `unwrap` is not nullable -- the `unwrap` is redundant
+    print(x.unwrap())
+}
+
+//=== TEST CASE: unwrap_ufcs_Generic ===
+fn main() {
+    let x: int = 5
+    //! expect: argument of `unwrap` is not nullable -- the `unwrap` is redundant
+    print(unwrap(x))
+}
+
+//=== TEST CASE: expect_method_Generic ===
+fn main() {
+    let s = "hi"
+    //! expect: argument of `expect` is not nullable -- the `expect` is redundant
+    print(s.expect("present"))
+}
+
+//=== TEST CASE: expect_ufcs_Generic ===
+fn main() {
+    let s = "hi"
+    //! expect: argument of `expect` is not nullable -- the `expect` is redundant
+    print(expect(s, "present"))
+}
+
+//=== TEST CASE: unwrap_or_method_Generic ===
+fn main() {
+    let x: int = 5
+    //! expect: argument of `unwrap_or` is not nullable -- the `unwrap_or` is redundant
+    print(x.unwrap_or(0))
+}
+
+//=== TEST CASE: unwrap_or_ufcs_Generic ===
+fn main() {
+    let x: int = 5
+    //! expect: argument of `unwrap_or` is not nullable -- the `unwrap_or` is redundant
+    print(unwrap_or(x, 0))
+}
+
+//=== TEST CASE: unwrap_after_null_guard_Generic ===
+fn find() -> int? { return 3 }
+
+fn main() {
+    let x = find()
+    if x == null { return }
+    //! expect: argument of `unwrap` is not nullable -- the `unwrap` is redundant
+    print(x.unwrap())
+}
+
+//=== TEST CASE: unwrap_struct_value_Generic ===
+struct P { x: int }
+
+fn main() {
+    let p = P { x: 1 }
+    //! expect: argument of `unwrap` is not nullable -- the `unwrap` is redundant
+    print(p.unwrap().x)
+}

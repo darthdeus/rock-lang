@@ -15,7 +15,7 @@
 fn src() -> Vec2 { return v(1.0, 2.0) }
 
 fn call_or(f: (() -> Vec2)?, dx: float) -> float {
-    if f != null { return f.unwrap()().x }
+    if f != null { return f().x }
     return dx
 }
 
@@ -49,7 +49,7 @@ fn call_plain(f: () -> Vec2) -> float { return f().x }
 fn scale(p: Vec2) -> Vec2 { return v(p.x * 2.0, p.y * 2.0) }
 
 fn apply_or(f: ((Vec2) -> Vec2)?, p: Vec2) -> float {
-    if f != null { return f.unwrap()(p).x }
+    if f != null { return f(p).x }
     return -1.0
 }
 

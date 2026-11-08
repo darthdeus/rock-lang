@@ -1721,14 +1721,14 @@ pub(crate) fn commit_selected_call(
 
         let pty = substitute(gamma, param_tys[0], &subs, span)?;
         coerce(gamma, r, pty, span)?;
+        reject_redundant_unwrap(gamma, function, name, 0, r, span)?;
 
         1
     } else {
         0
     };
 
-    let pairs: Vec<(SlotFill, TyId)> = if function.is_variadic {
-        let velem = param_tys[param_tys.len() - 1];
+    let pairs: Vec<(SlotFill, usize)> = if function.is_variadic {
         let nfixed = (param_tys.len() - 1).saturating_sub(offset);
 
         if arg_list.len() < nfixed {
@@ -1748,9 +1748,9 @@ pub(crate) fn commit_selected_call(
                 (
                     SlotFill::Direct(arg),
                     if i < nfixed {
-                        param_tys[offset + i]
+                        offset + i
                     } else {
-                        velem
+                        param_tys.len() - 1
                     },
                 )
             })
@@ -1769,7 +1769,7 @@ pub(crate) fn commit_selected_call(
         slots
             .iter()
             .enumerate()
-            .filter_map(|(i, slot)| slot.map(|fill| (fill, param_tys[offset + i])))
+            .filter_map(|(i, slot)| slot.map(|fill| (fill, offset + i)))
             .collect()
     };
 
@@ -1780,7 +1780,8 @@ pub(crate) fn commit_selected_call(
     };
 
     let mut ref_call_args = Vec::new();
-    for (fill, pty_decl) in pairs {
+    for (fill, param_index) in pairs {
+        let pty_decl = param_tys[param_index];
         if has_bounds {
             check_iterator_bounds(
                 c,
@@ -1831,6 +1832,16 @@ pub(crate) fn commit_selected_call(
                         Some(&aty) => coerce(gamma, aty, pty, c.body.expr_spans[arg])?,
                         None => check_expr(c, gamma, arg, pty, c.body.expr_spans[arg])?,
                     }
+                }
+                if let Some(&aty) = gamma.out.expr_types.get(arg) {
+                    reject_redundant_unwrap(
+                        gamma,
+                        function,
+                        name,
+                        param_index,
+                        aty,
+                        c.body.expr_spans[arg],
+                    )?;
                 }
             }
             // A spread-supplied field: check the field's type against the param.
@@ -1892,6 +1903,31 @@ pub(crate) fn commit_selected_call(
     let ret_ty = substitute(gamma, ret_ty, &subs, span)?;
 
     Ok(resolve(gamma, ret_ty, span))
+}
+
+/// An `@unwraps` parameter strips the nullable off its argument, so passing a
+/// value already known to be non-null is redundant -- rejected like `x ?? d`.
+fn reject_redundant_unwrap(
+    gamma: &mut Gamma,
+    function: &Function,
+    name: Ustr,
+    param_index: usize,
+    arg_ty: TyId,
+    span: Span,
+) -> Result<(), CompilerError> {
+    let unwraps = function
+        .param_decls
+        .get(param_index)
+        .is_some_and(|p| p.annotations.iter().any(|a| a.is_builtin("unwraps")));
+    if unwraps && redundant_optional_on(gamma, arg_ty, span) {
+        comp_error!(
+            span,
+            "argument of `{}` is not nullable -- the `{}` is redundant",
+            name,
+            name
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn call_fn_value(

@@ -78,7 +78,7 @@ fn update_ui_ghosts() {
         } else {
             let skin = g.skin.get().unwrap()
             if g.pipeline != null {
-                let pl = g.pipeline.unwrap()
+                let pl = g.pipeline
                 let batch = g.rect.inset(-(g.grow * t)).skin_batch(skin, WHITE.alpha(1.0 - t), pipeline: pl)
                 batch_block(batch, pl.shader_name, UiDissolveU { uDissolve: t })
             } else {

@@ -80,8 +80,8 @@ pub fn register_image(handle: int, sampling: TextureFilter) -> Image {
     // one texture is a bug in them, and taking the later write would make the
     // answer depend on load order.
     let existing = IMAGE_SAMPLING.get(handle)
-    if existing != null && existing.unwrap() != sampling {
-        error("register_image: Image({handle}) is already declared {existing.unwrap()}; it cannot be redeclared {sampling}")
+    if existing != null && existing != sampling {
+        error("register_image: Image({handle}) is already declared {existing}; it cannot be redeclared {sampling}")
     }
     IMAGE_SAMPLING.insert(handle, sampling)
     return Image(handle)
@@ -449,7 +449,7 @@ pub fn load_audio(path: string, ty: string, recipe: SoundRecipe? = null) -> Soun
     // only they carry a path + get watched.
     let watch_path = if sound_source { path } else { "" }
     let entity = SOUND_REGISTRY.insert(SoundData { backend_id: id, path: watch_path })
-    if id != 0 && recipe != null { sound_residency_register_recipe(id, recipe.unwrap()) }
+    if id != 0 && recipe != null { sound_residency_register_recipe(id, recipe) }
     // Static PCM starts decoding now so the whole bank is resident shortly
     // after boot; streams admit when a loop first wants them.
     if id != 0 && ty == "static" { let _ = stone_sound_admit(id) }

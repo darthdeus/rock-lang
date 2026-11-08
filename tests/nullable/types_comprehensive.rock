@@ -244,7 +244,7 @@ fn test_multiple_nullable_types() {
 fn test_nested_nullable_operations() {
     let container = Opt { val: 42 }
     if container.val != null {
-        let unwrapped = container.val.unwrap()
+        let unwrapped = container.val
         print(unwrapped)
     }
 }

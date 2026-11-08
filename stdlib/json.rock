@@ -84,7 +84,7 @@ fn json_as_object(v: JsonValue) -> Map<string, JsonValue>? {
 fn json_field(v: JsonValue, key: string) -> JsonValue? {
     let m = json_as_object(v)
     if m == null { return null }
-    let mm = m.unwrap()
+    let mm = m
     if !mm.contains(key) { return null }
     return mm[key]
 }
@@ -434,7 +434,7 @@ fn parse_keyword(p: JsonParser, kw: string, value: JsonValue) -> JsonValue {
 fn parse_string_value(p: JsonParser) -> JsonValue {
     let s = parse_string_raw(p)
     if s == null { return JsonValue::Null }
-    return JsonValue::Str(s.unwrap())
+    return JsonValue::Str(s)
 }
 
 // Returns the decoded string and the offset reached, including on rejection.
@@ -462,9 +462,9 @@ fn parse_string_raw_at(src: string, at: int, materialize: bool = true) -> (strin
                 pos = pos + 1
                 return (plain, pos)
             }
-            if pos > segment_start { parts.unwrap().push(src.substring(segment_start, pos)) }
+            if pos > segment_start { parts.push(src.substring(segment_start, pos)) }
             pos = pos + 1
-            return (join(parts.unwrap(), ""), pos)
+            return (join(parts, ""), pos)
         }
         if b == 92 {
             if materialize && parts == null {
@@ -472,7 +472,7 @@ fn parse_string_raw_at(src: string, at: int, materialize: bool = true) -> (strin
                 if pos > body_start { fresh.push(src.substring(body_start, pos)) }
                 parts = fresh
             } else if parts != null && pos > segment_start {
-                parts.unwrap().push(src.substring(segment_start, pos))
+                parts.push(src.substring(segment_start, pos))
             }
             pos = pos + 1
             if pos >= len {
@@ -497,17 +497,17 @@ fn parse_string_raw_at(src: string, at: int, materialize: bool = true) -> (strin
                 if hi == null {
                     return (null, pos)
                 }
-                let cp = hi.unwrap()
+                let cp = hi
                 if cp >= 0xD800 && cp <= 0xDBFF {
                     if pos + 6 > len || src.unit_at(pos) != 92 || src.unit_at(pos + 1) != 117 {
                         return (null, pos)
                     }
                     let lo = parse_hex4_at(src, pos + 2)
-                    if lo == null || lo.unwrap() < 0xDC00 || lo.unwrap() > 0xDFFF {
+                    if lo == null || lo < 0xDC00 || lo > 0xDFFF {
                         return (null, pos)
                     }
                     pos = pos + 6
-                    cp = 0x10000 + (cp - 0xD800) * 0x400 + (lo.unwrap() - 0xDC00)
+                    cp = 0x10000 + (cp - 0xD800) * 0x400 + (lo - 0xDC00)
                 } else if cp >= 0xDC00 && cp <= 0xDFFF {
                     // JSON permits lone surrogates; we reject them as a decode
                     // failure (malformed input is data, not a programmer error).
@@ -656,7 +656,7 @@ fn parse_number(p: JsonParser) -> JsonValue {
     if is_float { return JsonValue::Float(p.src.parse_float_at(start, p.pos)) }
     let i = p.src.substring(start, p.pos).parse_int()
     if i == null { p.ok = false; return JsonValue::Null }
-    return JsonValue::Int(i.unwrap())
+    return JsonValue::Int(i)
 }
 
 fn parse_array_value(p: JsonParser) -> JsonValue {
@@ -713,7 +713,7 @@ fn parse_object_value(p: JsonParser) -> JsonValue {
         parse_skip_ws(p)
         let val = parse_value(p)
         if !p.ok { return JsonValue::Null }
-        insert(m, key.unwrap(), val)
+        insert(m, key, val)
         parse_skip_ws(p)
         if p.pos >= p.len {
             p.ok = false
@@ -785,8 +785,8 @@ fn jv_str_arr(v: JsonValue?, default_val: [string]) -> [string] {
 
 fn jv_int_pair(v: JsonValue?, def_w: int, def_h: int) -> (int, int) {
     if v == null { return (def_w, def_h) }
-    let arr_opt = json_as_array(v.unwrap()) ?? return (def_w, def_h)
-    let arr = arr_opt.unwrap()
+    let arr_opt = json_as_array(v) ?? return (def_w, def_h)
+    let arr = arr_opt
     if arr.len() < 2 { return (def_w, def_h) }
     let i = 0
     let out_w = def_w
@@ -1340,8 +1340,8 @@ fn json_reader_float_components_end(reader: JsonReader, size: int) -> (bool, flo
     assert(size == 2 || size == 3, "JSON coordinate tuples contain two or three components")
     if let value = reader.value {
         let values = json_as_array(value)
-        if values == null || values.unwrap().len() != size { return (false, null, null, null, reader.at) }
-        let items = values.unwrap()
+        if values == null || values.len() != size { return (false, null, null, null, reader.at) }
+        let items = values
         return (true, json_as_float(items[0]), json_as_float(items[1]),
             if size == 3 { json_as_float(items[2]) } else { null }, reader.at)
     }

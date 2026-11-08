@@ -16,7 +16,7 @@ struct Draw {
 
 fn source_name(source: Source?) -> string {
     if source == null { return "null" }
-    return match source.unwrap() {
+    return match source {
         Source::Image(_) => "image"
         Source::Canvas(_) => "canvas"
     }

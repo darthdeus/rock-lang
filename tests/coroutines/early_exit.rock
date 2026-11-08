@@ -18,7 +18,7 @@ fn test_early_return_true() {
     let c = early_return(true)
     print(c.resume() ?? -1)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 @test(output = "1\n2\n3")
@@ -41,7 +41,7 @@ co fn return_first(flag: bool) -> Coroutine<int> {
 fn test_return_before_any_yield() {
     let c = return_first(true)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- return inside nested loop ----
@@ -63,5 +63,5 @@ fn test_return_in_loop() {
     print(c.resume() ?? -1)
     print(c.resume() ?? -1)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }

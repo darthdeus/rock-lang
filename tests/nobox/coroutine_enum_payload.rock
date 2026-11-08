@@ -12,7 +12,7 @@ enum BE { A(BV), B(int) }
 
 fn score(e: E?) -> int {
     if e == null { return -1 }
-    match e.unwrap() {
+    match e {
         E::A(p) => { return p.x * 10 + p.y }
         E::B(n) => { return n }
     }
@@ -20,7 +20,7 @@ fn score(e: E?) -> int {
 
 fn bscore(e: BE?) -> int {
     if e == null { return -1 }
-    match e.unwrap() {
+    match e {
         BE::A(p) => { return p.x * 10 + p.y }
         BE::B(n) => { return n }
     }

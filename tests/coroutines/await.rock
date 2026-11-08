@@ -49,7 +49,7 @@ fn test_composition_basic() {
     print(c.resume() ?? -99)  // 3 (from inner)
     print(c.resume() ?? -99)  // 99 (back in outer)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Two sequential delegations ----
@@ -67,7 +67,7 @@ fn test_composition_sequential() {
     print(c.resume() ?? -99)
     print(c.resume() ?? -99)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Delegation to a coroutine that yields zero values ----
@@ -89,7 +89,7 @@ fn test_composition_silent_inner() {
     // outer advances to the next yield -- all in one resume.
     print(c.resume() ?? -99)
     let r = c.resume()
-    if r == null { print("null") } else { print(r.unwrap()) }
+    if r == null { print("null") } else { print(r) }
 }
 
 // ---- Return value capture: `let r = await inner()` ----
@@ -117,7 +117,7 @@ fn test_yield_star_return_capture() {
     print(c.resume() ?? -99)  // null sentinel; resume() returns int? -- just print -99
     let r = c.result()
     if r != null {
-        print("final=" + r.unwrap())
+        print("final=" + r)
     } else {
         print("final=null")
     }
@@ -156,10 +156,10 @@ fn test_yield_star_three_deep_forwarding_and_return() {
     print(c.resume() ?? -1)  // 20  (middle, after await completes)
     print(c.resume() ?? -1)  // 200 (outer, after await completes)
     let last = c.resume()
-    if last == null { print("null") } else { print(last.unwrap()) }
+    if last == null { print("null") } else { print(last) }
     let r = c.result()
     if r != null {
-        print("result={r.unwrap()}")
+        print("result={r}")
     } else {
         print("result=null")
     }
@@ -360,7 +360,7 @@ fn test_yield_star_flat_inner_error_propagates() {
     print(show(resume(c)))
     print(status(c))
     let err = last_error(c)
-    print(err != null && err.unwrap().contains("boom-flat"))
+    print(err != null && err.contains("boom-flat"))
 }
 
 co fn inner_scalar() -> Coroutine<int> {
@@ -378,7 +378,7 @@ fn show_int(v: int?) -> string {
     if v == null {
         return "nil"
     }
-    return "{v.unwrap()}"
+    return "{v}"
 }
 
 @test(output = "0\n1\nnil\nerrored\ntrue")
@@ -389,5 +389,5 @@ fn test_yield_star_scalar_inner_error_propagates() {
     print(show_int(resume(c)))
     print(status(c))
     let err = last_error(c)
-    print(err != null && err.unwrap().contains("boom-scalar"))
+    print(err != null && err.contains("boom-scalar"))
 }

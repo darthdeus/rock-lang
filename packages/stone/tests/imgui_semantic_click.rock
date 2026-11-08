@@ -119,7 +119,7 @@ fn imgui_semantic_click_fixture_restores_on_failure() {
     let bodies = IMGUI_BODIES_RAN
     let target = IMGUI_TEST_REVEAL_TARGET
     let failure = world_fixture_raised(() => { imgui_click_test_fixture(true) })
-    assert(failure != null && failure.unwrap().contains("intentional semantic click fixture failure"))
+    assert(failure != null && failure.contains("intentional semantic click fixture failure"))
     assert_eq(imgui_click_test_context_identity(), context)
     assert_eq(frame_seq, frame)
     assert_eq(IMGUI_RECORD_BODIES, record)

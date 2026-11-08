@@ -49,8 +49,8 @@ pub fn pipeline_inspector_frame_begin() {
 // Called per batch inside render_batches' color loop (guarded at the call
 // site so the hot path is a single branch when the window is closed).
 fn pipeline_inspector_record_batch(b: RenderBatch) {
-    let shader = if b.pipeline != null { b.pipeline.unwrap().shader_name } else { "default" }
-    let nm = if b.normal != null { sampled_texture_key(b.normal.unwrap()) } else { "" }
+    let shader = if b.pipeline != null { b.pipeline.shader_name } else { "default" }
+    let nm = if b.normal != null { sampled_texture_key(b.normal) } else { "" }
     PIPELINE_SNAPSHOT.push(BatchInfo {
         z_layer: b.z_layer,
         depth: b.depth,

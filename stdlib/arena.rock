@@ -122,7 +122,7 @@ fn __arena_store_or_dead<T>(arena: Arena<T>) -> ArenaStore<T> {
         let dead: ArenaStore<T> = cast(__arena_store_erased(__ARENA_DEAD_STORE))
         return dead
     }
-    return found.unwrap()
+    return found
 }
 
 @nomangle fn __arena_store_or_empty(scene_id: int, arena_id: int) -> any {
@@ -338,7 +338,7 @@ fn Arena<T>.borrow(arena, entity: Entity<T>) -> (ref T)? {
     if !__arena_owns(arena, entity) { return null }
     let found = __arena_store(arena)
     if found == null { return null }
-    let store = found.unwrap()
+    let store = found
     if !arena_slot_live(store, entity._slot, entity._generation) { return null }
     return store.data[entity._slot]
 }
@@ -347,14 +347,14 @@ fn Arena<T>.contains(arena, entity: Entity<T>) -> bool {
     if !__arena_owns(arena, entity) { return false }
     let found = __arena_store(arena)
     if found == null { return false }
-    return arena_slot_live(found.unwrap(), entity._slot, entity._generation)
+    return arena_slot_live(found, entity._slot, entity._generation)
 }
 
 fn Arena<T>.remove(arena, entity: Entity<T>) -> T? {
     if !__arena_owns(arena, entity) { return null }
     let found = __arena_store(arena)
     if found == null { return null }
-    let store = found.unwrap()
+    let store = found
     let slot = entity._slot
     if !arena_slot_live(store, slot, entity._generation) { return null }
     // `data[slot]` is left as-is: nothing reads a free slot (every read goes
@@ -369,7 +369,7 @@ fn Arena<T>.remove(arena, entity: Entity<T>) -> T? {
 fn Arena<T>.len(arena) -> int {
     let found = __arena_store(arena)
     if found == null { return 0 }
-    return found.unwrap().occupied_count
+    return found.occupied_count
 }
 
 // How many Arena incarnations the process registry is still holding backing for.
@@ -396,7 +396,7 @@ fn arena_registry_storage_bound() -> int {
 fn arena_slot_count<T>(arena: Arena<T>) -> int {
     let found = __arena_store(arena)
     if found == null { return 0 }
-    return vec_len(found.unwrap().occupied)
+    return vec_len(found.occupied)
 }
 
 // Copy allocator history for deterministic observers without exposing the
@@ -408,7 +408,7 @@ fn arena_generation_snapshot<T>(arena: Arena<T>) -> ArenaGenerationSnapshot {
             generations: [], free_indices: [], next_generation: 0,
         }
     }
-    let store = found.unwrap()
+    let store = found
     let generations: [int] = []
     for generation in store.generations {
         if generation < 0 { generations.push(-1 - generation) } else { generations.push(generation) }
@@ -438,7 +438,7 @@ fn Arena<T>.clear(arena) {
 fn Arena<T>.random(arena) -> (Entity<T>, T)? {
     let found = __arena_store(arena)
     if found == null { return null }
-    let store = found.unwrap()
+    let store = found
     let len = store.occupied_count
     if len == 0 { return null }
 

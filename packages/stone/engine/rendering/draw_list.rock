@@ -202,7 +202,7 @@ pub fn draw_list_flush(dl: DrawList) {
     }
 
     if dl.canvas != null {
-        with_canvas(dl.canvas.unwrap(), body)
+        with_canvas(dl.canvas, body)
     } else {
         body()
     }
@@ -216,11 +216,11 @@ fn draw_list_gl_is_admitted(dl: DrawList) -> bool {
         if batch.count == 0 { continue }
         if batch.external_verts { return false }
         if !sampled_texture_is_live(batch.texture) { return false }
-        if batch.normal != null && !sampled_texture_is_live(batch.normal.unwrap()) {
+        if batch.normal != null && !sampled_texture_is_live(batch.normal) {
             return false
         }
         let shader = if batch.pipeline != null {
-            batch.pipeline.unwrap().shader_name
+            batch.pipeline.shader_name
         } else { sprite_batch_shader }
         if get_shader_handle(shader) == 0 { return false }
     }
@@ -285,7 +285,7 @@ fn draw_list_flush_body(dl: DrawList) {
 
             for key in keys {
                 let batch_opt = dl.batches.get(key) ?? continue
-                let batch = batch_opt.unwrap()
+                let batch = batch_opt
 
                 if batch.depth != current_depth {
                     apply_depth_mode(batch.depth)
@@ -300,7 +300,7 @@ fn draw_list_flush_body(dl: DrawList) {
 
                 if batch.custom_draw != null {
                     let target = CURRENT_CANVAS_HANDLE
-                    batch.custom_draw.unwrap()()
+                    (batch.custom_draw)()
                     restore_after_custom_draw(target, batch.depth, batch.blend)
                     active_shader = ""
                     continue
@@ -309,7 +309,7 @@ fn draw_list_flush_body(dl: DrawList) {
                 if batch.count == 0 { continue }
 
                 let want = if batch.pipeline != null {
-                    batch.pipeline.unwrap().shader_name
+                    batch.pipeline.shader_name
                 } else {
                     sprite_batch_shader
                 }
@@ -564,7 +564,7 @@ pub @intrinsic fn text(
         let off = text_align_offset(text_align)
         if family != null {
             let rs = if dl.dest == DrawDest::Composite { 1.0 } else { FONT_RENDER_SCALE }
-            let layout = resolve_plain_text_layout(family.unwrap(), text, size,
+            let layout = resolve_plain_text_layout(family, text, size,
                 rs, "DrawList.text")
             let core_trailing = (layout.lines.len - 1) as float * layout.line_height
             let start = v(pos.x + off.x * layout.width,

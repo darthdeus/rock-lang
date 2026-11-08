@@ -2638,7 +2638,7 @@ pub fn unload_font(font: Font) {
     // so a same-slot match means DEFAULT_FONT is either this entity or already
     // stale -- and nulling a stale DEFAULT_FONT is the wanted outcome. Full
     // `equals` would leave the stale handle installed.
-    if cur != null && cur.unwrap().handle._slot == font.handle._slot {
+    if cur != null && cur.handle._slot == font.handle._slot {
         DEFAULT_FONT = null
     }
     if !released {
@@ -2882,7 +2882,7 @@ pub global sim_mouse_override: Vec2? = null
 
 pub @intrinsic fn mouse_screen() -> Vec2 {
     if sim_mouse_override != null {
-        return sim_mouse_override.unwrap()
+        return sim_mouse_override
     }
     return Vec2 {
         x: get_mouse_x(),

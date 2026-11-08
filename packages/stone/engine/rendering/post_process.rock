@@ -375,8 +375,8 @@ fn bloom_passes_cached(
         threshold: threshold, knee: knee,
         pyramid: pyramid_pass_key(screen_canvas, BLOOM_LEVELS, scatter),
     }
-    if BLOOM_PASSES != null && BLOOM_PASS_KEY != null && BLOOM_PASS_KEY.unwrap() == key {
-        return BLOOM_PASSES.unwrap()
+    if BLOOM_PASSES != null && BLOOM_PASS_KEY != null && BLOOM_PASS_KEY == key {
+        return BLOOM_PASSES
     }
 
     let passes = bloom_pyramid_passes(screen_canvas, BLOOM_LEVELS, threshold, knee, scatter)
@@ -400,7 +400,7 @@ pub fn submit_tonemap(
     let bloom_binding = GpuBinding { slot: 1, resource: SampledTexture::Canvas(bloom), filter: TextureFilter::Linear }
     let bindings = if weight != null {
         [scene_binding, bloom_binding,
-            GpuBinding { slot: 2, resource: SampledTexture::Canvas(weight.unwrap()), filter: TextureFilter::Linear }]
+            GpuBinding { slot: 2, resource: SampledTexture::Canvas(weight), filter: TextureFilter::Linear }]
     } else { [scene_binding, bloom_binding] }
     let draw = GpuDraw {
         shader: shader,
@@ -547,13 +547,13 @@ fn presented_scene_sample_capture() {
         PRESENTED_SCENE_SAMPLE = null
         return
     }
-    let canvas = composite.unwrap()
+    let canvas = composite
     if !canvas_is_live(canvas) {
         PRESENTED_SCENE_SAMPLE = null
         return
     }
     if OUTPUT_HDR_CANVAS != null
-        && OUTPUT_HDR_CANVAS.unwrap().handle == canvas.handle {
+        && OUTPUT_HDR_CANVAS.handle == canvas.handle {
         error("presented scene sample cannot alias OUTPUT_HDR_CANVAS")
     }
     PRESENTED_SCENE_CONTENT_GENERATION += 1
@@ -574,7 +574,7 @@ pub fn presented_scene_sample() -> PresentedSceneSample? {
         error("reflective TextArt requested a destroyed presented scene sample")
     }
     if OUTPUT_HDR_CANVAS != null
-        && OUTPUT_HDR_CANVAS.unwrap().handle == sample.canvas.handle {
+        && OUTPUT_HDR_CANVAS.handle == sample.canvas.handle {
         error("reflective TextArt presented scene sample aliases OUTPUT_HDR_CANVAS")
     }
     return sample
@@ -595,7 +595,7 @@ fn present_composite(target: GpuTarget = GpuTarget::Window) {
     // so the origin is the margin BELOW the rect.
     let origin = v(r.x, (view.scene_size.y as float) - r.y - r.h)
 
-    let pass = present_composite_command(target, src.unwrap(),
+    let pass = present_composite_command(target, src,
         GpuRect { x: vp.x, y: vp.y, w: vp.w, h: vp.h })
     let draw = pass.draws[0]
     gpu_draw_uniform_payload(draw, PRESENT_PIPELINE.shader_name, PresentU {
@@ -629,7 +629,7 @@ fn nonfinite_debug_canvas() -> Canvas? {
     let name = os_getenv("STONE_NONFINITE")
     if name == null { return null }
 
-    let n = name.unwrap()
+    let n = name
     if n == "" { return null }
     if n == "scene" { return screen_canvas }
 
@@ -670,7 +670,7 @@ global PRESENT_COMPOSITE_COMMAND: GpuPass? = null
 fn present_composite_command(target: GpuTarget, source: Canvas, viewport: GpuRect) -> GpuPass {
     let retained = gpu_submission_retains_commands()
     let pass = if !retained && PRESENT_COMPOSITE_COMMAND != null {
-        PRESENT_COMPOSITE_COMMAND.unwrap()
+        PRESENT_COMPOSITE_COMMAND
     } else {
         let draw = GpuDraw {
             shader: PRESENT_PIPELINE.shader_name,

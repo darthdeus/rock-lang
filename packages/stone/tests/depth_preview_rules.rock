@@ -93,7 +93,7 @@ fn depth_preview_fixture(body: fn() -> (), intentional_failure: bool = false) {
     assert_eq(stone_get_graphics_stats().canvases, canvases, "fixture releases canvases on success and failure")
     assert_eq(arena_live_count(), arenas, "fixture releases arenas on success and failure")
     if intentional_failure {
-        assert(failure != null && failure.unwrap().contains("intentional depth fixture failure"),
+        assert(failure != null && failure.contains("intentional depth fixture failure"),
             "fixture rethrows the injected failure")
     } else {
         assert(failure == null, failure ?? "")

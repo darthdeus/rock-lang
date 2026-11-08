@@ -97,7 +97,7 @@ fn check_hot_reload() {
         return
     }
 
-    let modtime = modtime_opt.unwrap()
+    let modtime = modtime_opt
 
     if hot_reload_last_modtime == 0.0 {
         // First time - just record the time
@@ -111,7 +111,7 @@ fn check_hot_reload() {
     if modtime > hot_reload_last_modtime {
         hot_reload_last_modtime = modtime
         let incr_now = file_modtime(hot_reload_incremental_path)
-        hot_reload_incremental_modtime = if is_null(incr_now) { 0.0 } else { incr_now.unwrap() }
+        hot_reload_incremental_modtime = if is_null(incr_now) { 0.0 } else { incr_now }
         do_hot_reload()
         return
     }
@@ -121,7 +121,7 @@ fn check_hot_reload() {
     // reload (no "just record" guard like main.lua, which exists at startup).
     let incr_opt = file_modtime(hot_reload_incremental_path)
     if !is_null(incr_opt) {
-        let incr = incr_opt.unwrap()
+        let incr = incr_opt
         if incr > hot_reload_incremental_modtime {
             hot_reload_incremental_modtime = incr
             do_incremental_reload()

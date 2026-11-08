@@ -189,8 +189,8 @@ fn main() {
     let destroyed = arena_destroy(units)
     let scene: Scene<World>? = scene_create((b) => build_world(b))
     if scene != null {
-        let world = scene.unwrap().get()
-        let closed = scene_close(scene.unwrap())
+        let world = scene.get()
+        let closed = scene_close(scene)
     }
     print("{count}")
 }

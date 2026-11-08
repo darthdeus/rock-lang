@@ -414,14 +414,14 @@ fn rb_pick(i: int) -> int? {
 fn test_if_let_value_is_if_expr() {
     let idx = 1
     if let e = if idx >= 0 { rb_pick(idx) } else { null } {
-        assert_eq(e.unwrap(), 7)
+        assert_eq(e, 7)
     } else {
         assert(false, "if-expr value should have bound")
     }
     // and the null path
     let neg = -1
     let hit = if let e = if neg >= 0 { rb_pick(neg) } else { null } {
-        e.unwrap()
+        e
     } else {
         -99
     }
@@ -432,7 +432,7 @@ fn test_if_let_value_is_if_expr() {
 fn test_if_let_value_is_match_expr() {
     let k = 1
     if let v = match k { 1 => rb_pick(0), _ => null } {
-        assert_eq(v.unwrap(), 7)
+        assert_eq(v, 7)
     } else {
         assert(false, "match-expr value should have bound")
     }
@@ -441,7 +441,7 @@ fn test_if_let_value_is_match_expr() {
 @test
 fn test_if_let_value_is_block_expr() {
     if let v = { let t = rb_pick(5); t } {
-        assert_eq(v.unwrap(), 7)
+        assert_eq(v, 7)
     } else {
         assert(false, "block-expr value should have bound")
     }

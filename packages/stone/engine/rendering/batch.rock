@@ -128,7 +128,7 @@ const PARAMETRIC_QUAD_CAP: int = 256
 // plan that produced them is the shader's, and the driver already checks it.
 pub fn batch_block_float(b: RenderBatch, offset: int, sentinel: float) -> float {
     if b.block == null || b.block_frame != RENDER_FRAME { return sentinel }
-    return __ub_read_float(b.block.unwrap().fv, offset ./ 4)
+    return __ub_read_float(b.block.fv, offset ./ 4)
 }
 
 // The per-batch uniform apply, shared by all three flush passes (world +
@@ -136,9 +136,9 @@ pub fn batch_block_float(b: RenderBatch, offset: int, sentinel: float) -> float 
 // the parametric quad arrays.
 fn apply_batch_uniforms(shader: string, b: RenderBatch) {
     if b.block != null && b.block_frame == RENDER_FRAME {
-        upload_owned_block(shader, b.block.unwrap())
+        upload_owned_block(shader, b.block)
     }
-    if b.geometry_block != null { upload_owned_block(shader, b.geometry_block.unwrap()) }
+    if b.geometry_block != null { upload_owned_block(shader, b.geometry_block) }
     apply_batch_parametric_arrays(shader, b)
 }
 
@@ -323,7 +323,7 @@ fn next_occurrence(base: string) -> int {
         BATCH_OCC.insert(base, Occ { frame: RENDER_FRAME, n: 1 })
         return 0
     }
-    let occ = existing.unwrap()
+    let occ = existing
     if occ.frame != RENDER_FRAME {
         occ.frame = RENDER_FRAME
         occ.n = 0
@@ -345,7 +345,7 @@ fn parametric_batch_slot(base: string) -> int {
             ParametricCursor { frame: RENDER_FRAME, slot: 0 })
         return 0
     }
-    let cursor = existing.unwrap()
+    let cursor = existing
     if cursor.frame != RENDER_FRAME {
         cursor.frame = RENDER_FRAME
         cursor.slot = 0
@@ -422,14 +422,14 @@ pub fn sampled_texture_same(a: SampledTexture, b: SampledTexture) -> bool {
 
 fn sampled_texture_optional_same(a: SampledTexture?, b: SampledTexture?) -> bool {
     if a == null || b == null { return a == null && b == null }
-    return sampled_texture_same(a.unwrap(), b.unwrap())
+    return sampled_texture_same(a, b)
 }
 
 fn pipeline_optional_same(a: Pipeline?, b: Pipeline?) -> bool {
     if a == null || b == null { return a == null && b == null }
-    return a.unwrap().shader_name == b.unwrap().shader_name
-        && a.unwrap().parametric_quads == b.unwrap().parametric_quads
-        && a.unwrap().after_scene == b.unwrap().after_scene
+    return a.shader_name == b.shader_name
+        && a.parametric_quads == b.parametric_quads
+        && a.after_scene == b.after_scene
 }
 
 // 32, not 16: a probe over one trace-pressure bench run saw a per-texture
@@ -589,8 +589,8 @@ pub fn sweep_idle_batches(pool: RenderBatchPool) {
     for key in stale {
         let b = pool.get(key)
         if b != null {
-            b.unwrap().pooled = false
-            batch_park_vertices(key, b.unwrap())
+            b.pooled = false
+            batch_park_vertices(key, b)
         }
         pool.remove(key)
     }
@@ -757,7 +757,7 @@ pub fn draw_batch_mesh(batch: RenderBatch) {
         SampledTexture::Image(image) => {
             if batch.retained_mesh != null {
                 draw_retained_mesh_sampled(
-                    batch.retained_mesh.unwrap(), image, batch.sampling)
+                    batch.retained_mesh, image, batch.sampling)
             } else {
                 draw_mesh_sampled(
                     batch.verts, batch.count, 0, image.0, image.0, batch.sampling,
@@ -840,16 +840,16 @@ pub fn batch_key_of(
     BATCH_KEY_BUILDS += 1
     let texture_key = sampled_texture_key(texture)
     let nm = if normal != null {
-        sampled_texture_key(normal.unwrap())
+        sampled_texture_key(normal)
     } else { "0" }
-    let sh = if pipeline != null { pipeline.unwrap().shader_name } else { "0" }
-    let pq = if pipeline != null && pipeline.unwrap().parametric_quads { "pq|" } else { "" }
-    let phase = if pipeline != null && pipeline.unwrap().after_scene { "after_scene|" } else { "" }
+    let sh = if pipeline != null { pipeline.shader_name } else { "0" }
+    let pq = if pipeline != null && pipeline.parametric_quads { "pq|" } else { "" }
+    let phase = if pipeline != null && pipeline.after_scene { "after_scene|" } else { "" }
     let lit_str = if unlit { "ul" } else { "lit" }
     let text_str = if text_batch { "text" } else { "notext" }
     let prefix = batch_key_group_prefix(z_layer, order, ui_group, ui_group_base_z)
     let base = "{prefix}|sh{sh}|{pq}{phase}{texture_key}|nm{nm}|{batch_key_state(depth, blend, pixel_snap, sampling)}|{lit_str}|{text_str}"
-    if surface != null { base = "{base}|surface{sampled_texture_key(surface.unwrap())}" }
+    if surface != null { base = "{base}|surface{sampled_texture_key(surface)}" }
 
     // Plain draws (no pipeline) share one key, so hundreds of quads merge into
     // a single draw call. A pipeline draw, whose `@uniform` block is per-batch
@@ -857,7 +857,7 @@ pub fn batch_key_of(
     // an animating value reuses one pooled vertex buffer across frames rather
     // than leaking one per value.
     if parametric_slot != null {
-        return "{base}|q#{parametric_slot.unwrap()}"
+        return "{base}|q#{parametric_slot}"
     }
     if shared_pipeline || pipeline == null {
         return base
@@ -902,7 +902,7 @@ fn queue_ordered_geometry_row(pool: RenderBatchPool, z_layer: int, blend: BlendM
     CUSTOM_DRAW_COUNTER = CUSTOM_DRAW_COUNTER + 1
     let key = "{batch_key_prefix(z_layer, order)}|custom_{draw_counter_key(CUSTOM_DRAW_COUNTER)}|{batch_key_state(depth, blend, false)}"
     let reused = pool.rows.reuse_retained_entity()
-    let handle = if reused != null { reused.unwrap() } else {
+    let handle = if reused != null { reused } else {
         pool.rows.insert(RenderBatch {
             texture: sampled_image(WHITE_PIXEL.unwrap()), verts: __DUMMY_VERTEX_BUF,
             count: 0, capacity: 1, blend: blend, pixel_snap: false,
@@ -1105,7 +1105,7 @@ fn ensure_batch_common(
     let eff_normal = if sampling != null || normal == null {
         eff
     } else {
-        sampled_texture_default_sampling(normal.unwrap())
+        sampled_texture_default_sampling(normal)
     }
     let fast = custom_draw == null && (pipeline == null || shared_pipeline)
         && render_batch_pool_same(pool, RENDER_BATCHES)
@@ -1781,7 +1781,7 @@ pub fn get_shader_handle(shader_name: string) -> int {
     let shaders = WATCHER.shaders
     let shader_item = shaders.get(shader_name)
     if shader_item != null {
-        transmute(shader_item.unwrap().shader.0)
+        transmute(shader_item.shader.0)
     } else {
         // Was d("ERROR: ...") spamming every frame for every draw call. log_once
         // ensures one diagnostic per missing shader name across the whole run;
@@ -1924,7 +1924,7 @@ pub fn render_batches(after_scene: bool = false) {
                     continue
                 }
 
-                let batch = batch.unwrap()
+                let batch = batch
                 let late = if let pipe = batch.pipeline { pipe.after_scene } else { false }
                 if late != after_scene {
                     if late && (batch.count > 0 || batch.custom_draw != null) { POST_SCENE_BATCHES_PENDING = true }
@@ -2013,7 +2013,7 @@ pub fn render_batches(after_scene: bool = false) {
 
                 if batch.custom_draw != null {
                     let target = CURRENT_CANVAS_HANDLE
-                    batch.custom_draw.unwrap()()
+                    (batch.custom_draw)()
                     restore_after_custom_draw(target, batch.depth, batch.blend)
                     // A custom_draw closure runs arbitrary GL and may change tracked
                     // state out-of-band. Invalidate the trackers so the next batch
@@ -2039,7 +2039,7 @@ pub fn render_batches(after_scene: bool = false) {
                 if batch.count == 0 { continue }
 
                 let want = if batch.pipeline != null {
-                    batch.pipeline.unwrap().shader_name
+                    batch.pipeline.shader_name
                 } else {
                     sprite_batch_shader
                 }
@@ -2525,7 +2525,7 @@ fn render_ui_batches_gl(
     profile_begin("screen.ui_flush.render_batches.loop")
     for key in sorted_keys {
         let batch = pool.get(key) ?? continue
-        let batch = batch.unwrap()
+        let batch = batch
 
         if !UI_SUBMISSION_PROBE_WINDOWLESS && batch.blend != current_blend {
             set_blend_mode(batch.blend)
@@ -2554,7 +2554,7 @@ fn render_ui_batches_gl(
         if batch.count == 0 { continue }
 
         let want = if batch.pipeline != null {
-            batch.pipeline.unwrap().shader_name
+            batch.pipeline.shader_name
         } else {
             sprite_batch_shader
         }
@@ -2637,7 +2637,7 @@ fn sprite_pipeline_has_material_output(p: Pipeline?) -> bool {
 
 fn sprite_pipeline_has_output(p: Pipeline?, location: int, kind: int) -> bool {
     if p == null { return location == 1 && kind == 4 }
-    let interface = selected_shader_interface(p.unwrap().shader_name) ?? return false
+    let interface = selected_shader_interface(p.shader_name) ?? return false
     for output in interface.outputs {
         if output.location == location && output.kind == kind { return true }
     }

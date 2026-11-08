@@ -98,13 +98,13 @@ fn load_display_settings() {
         apply_display_settings(DISPLAY_SETTINGS)
         return
     }
-    let parsed = json_decode(raw.unwrap())
+    let parsed = json_decode(raw)
     if parsed == null {
         log_error("DISPLAY", "corrupt {DISPLAY_SETTINGS_PATH}, using defaults")
         apply_display_settings(DISPLAY_SETTINGS)
         return
     }
-    DISPLAY_SETTINGS = display_settings_from_diff_json(parsed.unwrap())
+    DISPLAY_SETTINGS = display_settings_from_diff_json(parsed)
     apply_display_settings(DISPLAY_SETTINGS)
 }
 
@@ -190,7 +190,7 @@ fn display_settings_boot() {
     }
     let env_path = os_getenv("STONE_DISPLAY_SETTINGS")
     if env_path == null { return }
-    DISPLAY_SETTINGS_PATH = env_path.unwrap()
+    DISPLAY_SETTINGS_PATH = env_path
     log_info("DISPLAY", "STONE_DISPLAY_SETTINGS={DISPLAY_SETTINGS_PATH}: loading engine display settings")
     load_display_settings()
 }
@@ -212,7 +212,7 @@ fn display_settings_selftest() {
         log_error("DISPLAY", "selftest FAIL: re-decode of {encoded} was null")
         return
     }
-    let back = display_settings_from_diff_json(decoded.unwrap())
+    let back = display_settings_from_diff_json(decoded)
     let ok = back.display == s.display
         && display_mode_to_int(back.mode) == display_mode_to_int(s.mode)
         && back.resolution.x == s.resolution.x

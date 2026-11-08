@@ -398,7 +398,7 @@ pub fn text_art_atlas_instance_for(
     let previous = if stateful { TEXT_ART_SELECTED_BUCKETS.get(key) } else { null }
     let bucket = if stateful {
         text_art_coverage_bucket_with_hysteresis_ppem(
-            if previous == null { 0 } else { previous.unwrap() },
+            if previous == null { 0 } else { previous },
             demand.required_pixel_em)
     } else {
         text_art_coverage_bucket_for_ppem(demand.required_pixel_em)
@@ -536,7 +536,7 @@ pub fn text_art_glyph_effect_bounds(
     let shadow_source = if shadow_input == null {
         source
     } else {
-        text_art_glyph_raster_bounds(shadow_input.unwrap())
+        text_art_glyph_raster_bounds(shadow_input)
     }
     let shadow = text_art_rect_expand(
         rect(shadow_source.x + style.shadow_offset.x,
@@ -569,8 +569,8 @@ fn text_art_glyph_shifted_input(
     input: TextArtGlyphInput, origin: Vec2, cached: TextArtGlyphInput?
 ) -> TextArtGlyphInput {
     // The retained snapshot already owns the shifted record on cache hits.
-    if cached != null && text_art_glyph_paint_equal_at(input, cached.unwrap(), origin) {
-        return cached.unwrap()
+    if cached != null && text_art_glyph_paint_equal_at(input, cached, origin) {
+        return cached
     }
     return TextArtGlyphInput { ..input, origin: origin }
 }
@@ -586,7 +586,7 @@ pub fn text_art_glyph_ensure(
     let shifted_shadow: TextArtGlyphInput? = if shadow_input == null {
         null
     } else {
-        text_art_glyph_shifted_input(shadow_input.unwrap(), bounds.origin, art.shadow_inputs)
+        text_art_glyph_shifted_input(shadow_input, bounds.origin, art.shadow_inputs)
     }
     return text_art_ensure(art, bounds.extent, shifted, style,
         text_art_glyph_paint, shifted_shadow,
@@ -672,16 +672,16 @@ fn text_art_cache_matches<T>(
     if shadow_inputs == null && art.shadow_inputs != null { return false }
     if shadow_inputs != null {
         if art.shadow_inputs == null { return false }
-        if !ui_bake_inputs_equal(art.shadow_inputs.unwrap(), shadow_inputs.unwrap(),
+        if !ui_bake_inputs_equal(art.shadow_inputs, shadow_inputs,
             inputs_equal) { return false }
     }
     if ui_bake_canvas(art.source) == null { return false }
     if shadow_inputs != null {
         if art.shadow_source == null
-            || ui_bake_canvas(art.shadow_source.unwrap()) == null { return false }
+            || ui_bake_canvas(art.shadow_source) == null { return false }
     }
     return art.output != null
-        && canvas_is_live(art.output.unwrap())
+        && canvas_is_live(art.output)
         && art.workspace != null
         && text_art_workspace_live(art.workspace.unwrap())
         && art.extent == extent
@@ -714,8 +714,8 @@ fn text_art_source_data_ensure<T>(art: TextArt<T>, extent: IVec2,
         text_art_source_data_release(art)
         return null
     }
-    let spec = material.unwrap()
-    let live = art.source_data != null && canvas_is_live(art.source_data.unwrap())
+    let spec = material
+    let live = art.source_data != null && canvas_is_live(art.source_data)
     let same_extent = live && art.source_data.unwrap().width == extent.x as float
         && art.source_data.unwrap().height == extent.y as float
     if same_extent && art.source_data_key == spec.key
@@ -745,7 +745,7 @@ fn text_art_source_data_ensure<T>(art: TextArt<T>, extent: IVec2,
 }
 
 pub fn text_art_source_data_release<T>(art: TextArt<T>) {
-    if art.source_data != null && canvas_is_live(art.source_data.unwrap()) {
+    if art.source_data != null && canvas_is_live(art.source_data) {
         destroy_canvas(art.source_data.unwrap())
     }
     art.source_data = null
@@ -764,7 +764,7 @@ pub fn text_art_passes(
     source_data: Canvas? = null,
     reuse_shadow: bool = false,
 ) -> [Pass]? {
-    if surface != null && surface.unwrap().source_data != null && source_data == null {
+    if surface != null && surface.source_data != null && source_data == null {
         error("TextArt material requires its prepared source data")
     }
     let passes: [Pass] = vec_new()
@@ -781,11 +781,11 @@ pub fn text_art_passes(
         BlendMode::Replace, 0.0) ?? return null
     passes.push(emission)
 
-    if surface != null && surface.unwrap().radiance != null {
-        let radiance = surface.unwrap().radiance.unwrap()
+    if surface != null && surface.radiance != null {
+        let radiance = surface.radiance
         passes.push(Pass {
             pipeline: radiance.pipeline,
-            slot_inputs: text_art_material_inputs(surface_source, surface.unwrap(), source_data),
+            slot_inputs: text_art_material_inputs(surface_source, surface, source_data),
             block: radiance.block,
             output: workspace.emission,
             clear: null,
@@ -811,9 +811,9 @@ pub fn text_art_passes(
             BlendMode::Premultiplied, 1.0, true) ?? return null
     } else {
         Pass {
-            pipeline: surface.unwrap().pipeline,
-            slot_inputs: text_art_material_inputs(surface_source, surface.unwrap(), source_data),
-            block: surface.unwrap().block,
+            pipeline: surface.pipeline,
+            slot_inputs: text_art_material_inputs(surface_source, surface, source_data),
+            block: surface.block,
             output: workspace.composite,
             clear: null,
             blend: BlendMode::Premultiplied,
@@ -870,7 +870,7 @@ fn text_art_try<T>(
             art.shadow_source = ui_bake_new("{art.name}:shadow_source")
         }
         let bake = art.shadow_source.unwrap()
-        let canvas = ui_bake_ensure(bake, extent, shadow_inputs.unwrap(), paint,
+        let canvas = ui_bake_ensure(bake, extent, shadow_inputs, paint,
             inputs_equal)
         art.shadow_source_cache_hit = bake.cache_hit
         canvas
@@ -878,10 +878,10 @@ fn text_art_try<T>(
         art.shadow_source_cache_hit = art.source.cache_hit
         source
     }
-    let surface_key = if surface == null { "" } else { surface.unwrap().key }
-    let source_material = if surface == null { null } else { surface.unwrap().source_data }
+    let surface_key = if surface == null { "" } else { surface.key }
+    let source_material = if surface == null { null } else { surface.source_data }
     let source_data = text_art_source_data_ensure(art, extent, source, source_material)
-    if source_material != null { surface_key += ":source_data:{source_material.unwrap().key}" }
+    if source_material != null { surface_key += ":source_data:{source_material.key}" }
     if text_art_cache_matches(art, extent, inputs, shadow_inputs, style, surface_key,
         inputs_equal) && (source_data == null || art.source_data_cache_hit) {
         art.cache_hit = true
@@ -890,7 +890,7 @@ fn text_art_try<T>(
     }
 
     let replace_workspace = art.workspace == null
-        || !text_art_workspace_matches(art.workspace.unwrap(), extent, style)
+        || !text_art_workspace_matches(art.workspace, extent, style)
     let workspace = if replace_workspace {
         text_art_workspace_new(extent, style)
     } else { art.workspace.unwrap() }
@@ -901,22 +901,22 @@ fn text_art_try<T>(
 
     let old_output = art.output
     let replace_output = old_output == null || art.extent != extent
-        || !canvas_is_live(old_output.unwrap())
+        || !canvas_is_live(old_output)
     let target = if replace_output {
         new_canvas(extent.x as float, extent.y as float, "rgba16f")
     } else { old_output.unwrap() }
 
     let passes = text_art_passes(shadow_source, source, target, workspace, style,
         surface, source_data, reuse_shadow)
-    if passes == null || !text_art_run_passes(passes.unwrap()) {
+    if passes == null || !text_art_run_passes(passes) {
         if replace_output { destroy_canvas(target) }
         if replace_workspace { text_art_workspace_destroy(workspace) }
         return false
     }
 
-    if replace_output && old_output != null { destroy_canvas(old_output.unwrap()) }
+    if replace_output && old_output != null { destroy_canvas(old_output) }
     if replace_workspace && art.workspace != null {
-        text_art_workspace_destroy(art.workspace.unwrap())
+        text_art_workspace_destroy(art.workspace)
     }
     workspace.shadow_source_handle = shadow_source.handle.0
     workspace.shadow_source_generation = shadow_generation
@@ -929,14 +929,14 @@ fn text_art_try<T>(
     art.semantic_inputs = inputs_equal != null
     art.shadow_inputs = if shadow_inputs != null {
         let shadow = art.shadow_source.unwrap()
-        shadow_inputs.unwrap().clone_into(map_storage(shadow.draw_list.batches.entries))
+        shadow_inputs.clone_into(map_storage(shadow.draw_list.batches.entries))
     } else { null }
     art.style = style
     art.surface_key = surface_key
     art.extent = extent
     art.epoch = UI_BAKE_EPOCH
     art.bake_count += 1
-    art.pass_count = passes.unwrap().len()
+    art.pass_count = passes.len()
     return true
 }
 
@@ -957,26 +957,26 @@ pub fn text_art_ensure<T>(
             error("TextArt '{art.name}' execution was rejected before a valid snapshot existed")
             return art.output.unwrap()
         }
-        return old.unwrap()
+        return old
     }
     return art.output.unwrap()
 }
 
 pub fn text_art_stats<T>(art: TextArt<T>) -> TextArtStats {
     let shadow_requested = if art.workspace != null {
-        art.workspace.unwrap().shadow_requested_levels
+        art.workspace.shadow_requested_levels
     } else { 0 }
     let bloom_requested = if art.workspace != null {
-        art.workspace.unwrap().bloom_requested_levels
+        art.workspace.bloom_requested_levels
     } else { 0 }
     let shadow_allocated = if art.workspace != null {
-        art.workspace.unwrap().shadow.len()
+        art.workspace.shadow.len()
     } else { 0 }
     let bloom_allocated = if art.workspace != null {
-        art.workspace.unwrap().bloom.len()
+        art.workspace.bloom.len()
     } else { 0 }
     return TextArtStats {
-        extent: if art.output != null && canvas_is_live(art.output.unwrap()) {
+        extent: if art.output != null && canvas_is_live(art.output) {
             art.extent
         } else { iv(0, 0) },
         shadow_requested_levels: shadow_requested,
@@ -988,7 +988,7 @@ pub fn text_art_stats<T>(art: TextArt<T>) -> TextArtStats {
         cache_hit: art.cache_hit,
         surface_source_bake_count: art.source.bake_count,
         shadow_source_bake_count: if art.shadow_source != null {
-            art.shadow_source.unwrap().bake_count
+            art.shadow_source.bake_count
         } else { art.source.bake_count },
         surface_source_cache_hit: art.surface_source_cache_hit,
         shadow_source_cache_hit: art.shadow_source_cache_hit,
@@ -1001,23 +1001,23 @@ pub fn text_art_stats<T>(art: TextArt<T>) -> TextArtStats {
 
 pub fn text_art_emission_canvas<T>(art: TextArt<T>) -> Canvas? {
     if art.workspace == null { return null }
-    let canvas = art.workspace.unwrap().emission
+    let canvas = art.workspace.emission
     return if canvas_is_live(canvas) { canvas } else { null }
 }
 
 pub fn text_art_shadow_canvas<T>(art: TextArt<T>) -> Canvas? {
-    if art.workspace == null || art.workspace.unwrap().shadow.len() == 0 { return null }
-    let canvas = art.workspace.unwrap().shadow[0]
+    if art.workspace == null || art.workspace.shadow.len() == 0 { return null }
+    let canvas = art.workspace.shadow[0]
     return if canvas_is_live(canvas) { canvas } else { null }
 }
 
 pub fn text_art_destroy<T>(art: TextArt<T>) {
     ui_bake_destroy(art.source)
-    if art.shadow_source != null { ui_bake_destroy(art.shadow_source.unwrap()) }
-    if art.output != null && canvas_is_live(art.output.unwrap()) {
+    if art.shadow_source != null { ui_bake_destroy(art.shadow_source) }
+    if art.output != null && canvas_is_live(art.output) {
         destroy_canvas(art.output.unwrap())
     }
-    if art.workspace != null { text_art_workspace_destroy(art.workspace.unwrap()) }
+    if art.workspace != null { text_art_workspace_destroy(art.workspace) }
     text_art_source_data_release(art)
     art.output = null
     art.workspace = null

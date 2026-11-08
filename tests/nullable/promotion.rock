@@ -23,7 +23,7 @@ fn int_to_string(x: int) -> string {
 
 fn process_mixed(regular: int, nullable: int?) -> string {
     let r_str = "{regular}"
-    let n_str = if is_null(nullable) { "null" } else { "{nullable.unwrap()}" }
+    let n_str = if is_null(nullable) { "null" } else { "{nullable}" }
     return "{r_str}-{n_str}"
 }
 
@@ -87,7 +87,7 @@ fn nullable_promotion_through_vec_map() {
 fn nullable_promotion_complex_generic_scenario() {
     // Mixed promoted/null through map + the null branch of process_mixed.
     let numbers: [int?] = [promote_int(1), null, promote_int(3)]
-    let strings = numbers.iter().map(m => if is_null(m) { "null" } else { "{m.unwrap()}" }).collect()
+    let strings = numbers.iter().map(m => if is_null(m) { "null" } else { "{m}" }).collect()
 
     for s in strings {
         print(s)
