@@ -461,6 +461,7 @@ exit 97
                     String::from_utf8_lossy(&warm.stderr)
                 );
             }
+            std::fs::write(output.join("incremental.lua"), "stale overlay").unwrap();
             let log =
                 std::fs::File::create(root.path().join(format!("{name}-{cache}.log"))).unwrap();
             runs.0.push(
