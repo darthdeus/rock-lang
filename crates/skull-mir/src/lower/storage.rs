@@ -1886,6 +1886,24 @@ impl Builder<'_> {
     ) -> Result<(), CompilerError> {
         let bundle = self.lower_expr_repr(value)?;
         let repr = bundle.value();
+        // The instance graph decides the absent arm from the value's TYPE, so
+        // this does too: a null-checked binding keeps its presence lane, and a
+        // boxed source is a scalar, yet neither can be null here.
+        if self
+            .concrete_expr_ty(value)
+            .is_some_and(|ty| !ty.peel_nullable().1)
+        {
+            let stored = match repr {
+                ValueRepr::Scalar(s) => ValueBundle::new(
+                    elem.representation(),
+                    self.boxed_value_copy_repr(*s, elem.name, None)?,
+                ),
+                _ => bundle.clone(),
+            };
+            let slot = self.call_spine("__map_col_slot", vec![m, key])?;
+            let data = self.map_col_data(m);
+            return self.column_element_store_bundle(data, slot, &stored, elem);
+        }
         // A SCALAR here is a nullable value that never became a Group -- a literal
         // `null`, or a boxed source. Its presence is a runtime nil test, and the
         // leaves come from field reads off the box, which is why `boxed` defers

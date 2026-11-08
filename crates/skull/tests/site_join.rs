@@ -1999,3 +1999,41 @@ fn main() {
         "the domain leaked to the enclosing body: {c:?}"
     );
 }
+
+/// A column-Map store whose value cannot be null has no absent arm, whatever
+/// representation the value arrives in: a null-checked binding keeps its
+/// presence lane, and a boxed return is a scalar. The graph decides the store's
+/// entries from the value's type, so lowering must too, or the absent arm's
+/// `__map_col_free` call has no site.
+#[test]
+fn a_non_null_column_map_store_synthesizes_no_free() {
+    let c = census_of(
+        r#"
+value P { x: float, y: float }
+fn make(a: float) -> P { return P { x: a, y: a } }
+fn retain(m: Map<string, P>, v: P?) {
+    if v == null { return }
+    m["v"] = v
+}
+fn main() {
+    let m: Map<string, P> = map_new()
+    m["k"] = make(1.0)
+    retain(m, make(2.0))
+    print("{len(m)}")
+}
+"#,
+    );
+    assert!(
+        c.accounts(),
+        "accounting broken: {:?}",
+        c.accounting_failures()
+    );
+    assert_eq!(
+        c.unjoined
+            .get(&Unjoined::SiteNotInBody)
+            .copied()
+            .unwrap_or(0),
+        0,
+        "a synthesized call has no graph site: {c:?}"
+    );
+}
