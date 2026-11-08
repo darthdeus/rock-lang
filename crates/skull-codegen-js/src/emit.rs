@@ -3163,7 +3163,7 @@ pub fn emit_with_closure(
         match emit_ginit_with_nested(ws, g, &st.names, &hoisted, &st.gctx) {
             Ok(js) => {
                 out.push_str(&js);
-                let mut artifact = CodeArtifact::from_mir_tree(&g.mf);
+                let mut artifact = js_code_artifact(ws, &g.mf);
                 artifact.set_body_names(&g.mf, &g.init_name);
                 code_artifact.merge(artifact);
             }
@@ -3721,7 +3721,7 @@ fn assemble_program_core(
     let mut code_artifact = CodeArtifact::default();
     let mut all_statics = Vec::new();
     for (name, mf) in &deco_bodies {
-        let mut artifact = CodeArtifact::from_mir_tree(mf);
+        let mut artifact = js_code_artifact(ws, mf);
         artifact.set_body_names(mf, name);
         code_artifact.merge(artifact);
         all_statics.extend(collect_statics(mf));
@@ -3832,7 +3832,7 @@ fn assemble_program_core(
             }
         };
         out.push_str(&definition);
-        let mut artifact = CodeArtifact::from_mir_tree(&g.mf);
+        let mut artifact = js_code_artifact(ws, &g.mf);
         artifact.set_body_names(&g.mf, &g.init_name);
         code_artifact.merge(artifact);
         all_statics.extend(collect_statics(&g.mf));
@@ -5273,7 +5273,7 @@ fn emit_lowered_fn(
         return emit_coroutine_js(ws, interner, &plan, mf, names, hoisted, gctx);
     }
     let out = emit_body_with_nested(ws, mf, js_name, names, hoisted, gctx)?;
-    let mut code_artifact = CodeArtifact::from_mir_tree(mf);
+    let mut code_artifact = js_code_artifact(ws, mf);
     code_artifact.set_body_names(mf, js_name);
     Ok((out, code_artifact))
 }
@@ -7083,6 +7083,12 @@ fn build_vt_eq_defs(
     Ok(out)
 }
 
+/// The code identities of `mf` and its nested bodies. Volatile build values
+/// are metadata, so a changed build clock does not read as a body edit.
+fn js_code_artifact(ws: &Workspace, mf: &MirFunc) -> CodeArtifact {
+    CodeArtifact::from_mir_tree_with_volatile_vars(mf, &ws.comptime_inputs.volatile_vars)
+}
+
 /// Emit a `co fn` for JS: the shared coroutine pipeline (`transform_coroutine`
 /// -> `convert_closures_framed` -> `materialize_frame`) then the trampoline
 /// step, hoisted-lambda siblings, hook/defer aux trampolines over the shared
@@ -7235,7 +7241,7 @@ fn emit_coroutine_js(
         lowered.s_cell,
         lowered.frame_plan.slots(),
     );
-    let mut code_artifact = CodeArtifact::from_mir_tree(&lowered.step);
+    let mut code_artifact = js_code_artifact(ws, &lowered.step);
     code_artifact.set_body_names(&lowered.step, &step_name);
     if let Some(identity) = &lowered.step.code_identity {
         if let Some(entry) = code_artifact.entries.get_mut(identity) {
@@ -7247,12 +7253,12 @@ fn emit_coroutine_js(
         }
     }
     for aux in &defer_funcs {
-        let mut artifact = CodeArtifact::from_mir_tree(aux);
+        let mut artifact = js_code_artifact(ws, aux);
         artifact.set_body_names(aux, aux.name.as_str());
         code_artifact.merge(artifact);
     }
     for (_, aux) in &hook_funcs {
-        let mut artifact = CodeArtifact::from_mir_tree(aux);
+        let mut artifact = js_code_artifact(ws, aux);
         artifact.set_body_names(aux, aux.name.as_str());
         code_artifact.merge(artifact);
     }

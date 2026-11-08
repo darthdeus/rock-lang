@@ -814,3 +814,58 @@ fn static_resets_for_several_edited_functions_emit_in_a_stable_order() {
         assert_eq!(overlay(), first);
     }
 }
+
+fn build_date_inputs(value: &str, volatile: bool) -> bone_semantic::inference::ComptimeInputs {
+    let mut inputs = bone_semantic::inference::ComptimeInputs::default();
+    inputs.vars.insert(
+        ustr::Ustr::from("BUILD_DATE"),
+        bone_semantic::inference::ComptimeVarValue {
+            value: value.to_string(),
+            secret: false,
+        },
+    );
+    if volatile {
+        inputs.volatile_vars.insert(ustr::Ustr::from("BUILD_DATE"));
+    }
+    inputs
+}
+
+fn body_fingerprints(
+    inputs: bone_semantic::inference::ComptimeInputs,
+) -> std::collections::BTreeMap<String, u64> {
+    let mut ws = ws_with(
+        r#"
+global STAMP: string = build_var("BUILD_DATE")
+@nomangle fn stamp() -> string { return build_var("BUILD_DATE") }
+co fn ticker() -> Coroutine<int> {
+    STAMP = build_var("BUILD_DATE")
+    yield 1
+}
+fn main() {
+    STAMP = stamp()
+    let c = ticker()
+    c.resume()
+}
+"#,
+    );
+    ws.comptime_inputs = inputs;
+    let mid = function(&ws, "main").module;
+    let program = skull_codegen_js::emit::emit_program(&ws, mid).expect("JS program");
+    program
+        .code_artifact
+        .entries
+        .iter()
+        .map(|(identity, entry)| (format!("{identity:?}"), entry.body_fingerprint))
+        .collect()
+}
+
+#[test]
+fn volatile_build_values_do_not_change_js_body_fingerprints() {
+    let old = body_fingerprints(build_date_inputs("2026-08-23 10:00", true));
+    let new = body_fingerprints(build_date_inputs("2026-08-23 10:01", true));
+    assert!(old.len() >= 3, "global init, fn and co fn entries: {old:?}");
+    assert_eq!(old, new, "only volatile build metadata changed");
+    let before = body_fingerprints(build_date_inputs("2026-08-23 10:00", false));
+    let after = body_fingerprints(build_date_inputs("2026-08-23 10:01", false));
+    assert_ne!(before, after, "a non-volatile value is part of the body");
+}
