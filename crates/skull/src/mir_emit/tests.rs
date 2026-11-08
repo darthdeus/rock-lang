@@ -1138,6 +1138,58 @@ fn run(seed: int) -> int {
 fn main() { let result = run(4) }
 "#;
 
+    /// Splices accepted for `run`, whose last statement calls an @inline
+    /// callee either through a local (`let x = e; wide(x)`) or directly
+    /// (`wide(e)`), after `filler` dead locals that push the caller toward the
+    /// inliner's cell budget.
+    fn budget_shape_splices(filler: usize, through_local: bool) -> usize {
+        let mut src = String::from(
+            "@inline\nfn wide(n: int) -> int {\n    let a = n + 1\n    let b = a + n\n    return a + b\n}\n\nfn run(seed: int) -> int {\n",
+        );
+        for i in 0..filler {
+            src.push_str(&format!("    let f{i} = seed + {i}\n"));
+        }
+        if through_local {
+            src.push_str("    let x = seed * 2\n    return wide(x)\n}\n");
+        } else {
+            src.push_str("    return wide(seed * 2)\n}\n");
+        }
+        src.push_str("\nfn main() { let result = run(4) }\n");
+        let mut modules = STDLIB.clone();
+        modules.push(
+            skull_parser::parse_module_clean(&src, Ustr::from("<budget-shape>")).expect("parse"),
+        );
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<budget-shape>"))
+            .expect("budget test module");
+        let (emit, _) = emit_full(&ws, mid).expect("intact emission");
+        emit.attribution.inline.ordinary_splices
+    }
+
+    #[test]
+    fn cell_budget_admission_does_not_depend_on_argument_binding_shape() {
+        let _inline = InlineOn::on();
+        // Binding the argument to a local adds a caller cell, and coalescing the
+        // parameter onto it removes a template cell: the spliced total is the
+        // same, so the budget must admit both shapes alike at every size.
+        let mut seen = std::collections::BTreeSet::new();
+        for filler in 385..=400 {
+            let local = budget_shape_splices(filler, true);
+            let direct = budget_shape_splices(filler, false);
+            assert_eq!(
+                local, direct,
+                "budget admission differs by binding shape at {filler} filler locals"
+            );
+            seen.insert(local);
+        }
+        assert!(
+            seen.len() > 1,
+            "the window must straddle the cell budget: {seen:?}"
+        );
+    }
+
     #[test]
     fn cleanup_load_store_census_attributes_unlinked_operations_to_producers() {
         use skull_mir::mir::CellProducer;

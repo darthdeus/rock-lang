@@ -2111,6 +2111,7 @@ fn find_site(
     top: &HashSet<Idx<Block>>,
     resume: Option<(Idx<Block>, usize)>,
     cell_budget: usize,
+    pinned: &HashSet<Idx<Cell>>,
     concrete_plans: &ConcretePlans,
     scan_stats: &mut InlineScanStats,
 ) -> Result<Option<Site>, CompilerError> {
@@ -2190,8 +2191,16 @@ fn find_site(
             } else if !arity_ok(cand, &site) {
                 Some("candidate_arity_mismatch")
             } else if site.inst().args.is_empty()
-                && cell_budget + cand.template.source_cells > CELL_BUDGET
+                && cell_budget + cand.template.source_cells + cand.func.params.len() > CELL_BUDGET
+                && cell_budget + cand.template.source_cells + cand.func.params.len()
+                    - site_coalesced_cells(func, cand, &site, pinned)
+                    > CELL_BUDGET
             {
+                // Each argument is charged as if a caller local held it: one the
+                // splice coalesces already sits in a counted caller cell, any
+                // other costs one. `let x = e; f(x)` and `f(e)` then meet the
+                // budget at the same size, so binding a local without a cell
+                // cannot change what inlines.
                 Some("cell_budget")
             } else {
                 None
@@ -2205,6 +2214,17 @@ fn find_site(
         }
     }
     Ok(None)
+}
+
+/// How many of `cand`'s parameters the splice at `site` would coalesce.
+fn site_coalesced_cells(
+    func: &MirFunc,
+    cand: &CalleeBody,
+    site: &Site,
+    pinned: &HashSet<Idx<Cell>>,
+) -> usize {
+    let (Site::Single { bid, idx, args, .. } | Site::Multi { bid, idx, args, .. }) = site;
+    for_each_coalesced(func, cand, args, (*bid, *idx), pinned, |_, _| {})
 }
 
 /// Charge each callee parameter the splice copied (rather than coalesced onto
@@ -3373,6 +3393,7 @@ fn inline_functions_inner(
             &top,
             resume,
             cell_budget,
+            &pinned,
             concrete_plans,
             &mut scan_stats,
         )?
