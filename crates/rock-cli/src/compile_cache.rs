@@ -200,28 +200,14 @@ fn compile_cache_source_fingerprint_support_sha256(
                 .with_context(|| format!("source fingerprint support file stdlib/{name} is not in the selected stdlib"))?;
             Cow::Borrowed(stdlib_file.contents.as_bytes())
         } else {
-            let declared_path = std::path::Path::new(file);
-            let support_path = if declared_path.is_absolute() {
-                declared_path.to_path_buf()
-            } else {
-                inputs
-                    .embed_root
-                    .as_ref()
-                    .with_context(|| {
-                        format!("source fingerprint support file {file:?} requires an embed root")
-                    })?
-                    .join(declared_path)
-            };
-            let canonical_support = support_path.canonicalize().with_context(|| {
-                format!(
-                    "resolve source fingerprint support file {}",
-                    support_path.display()
-                )
-            })?;
+            let canonical_support = crate::comptime::resolve_source_fingerprint_support_path(
+                file,
+                inputs.embed_root.as_deref(),
+            )?;
             Cow::Owned(std::fs::read(&canonical_support).with_context(|| {
                 format!(
                     "read source fingerprint support file {}",
-                    support_path.display()
+                    canonical_support.display()
                 )
             })?)
         };
