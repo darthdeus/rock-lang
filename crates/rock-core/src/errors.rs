@@ -57,63 +57,12 @@ pub struct CompilerLabel {
 #[derive(Clone, Debug, PartialEq)]
 pub enum CompilerErrorKind {
     Generic,
-    MissingMethod,
-    MissingField,
-    DefaultArgPosition,
-    SymbolNotFound,
-    DuplicateSymbol {
-        name: String,
-        first_location: Option<LineCol>,
-    },
-
-    WrongNumberOfArgs {
-        expected: usize,
-        actual: usize,
-    },
-
-    InvalidChainedCompoundAssign,
-
-    IncompatibleNewtypeOperation,
-
-    DestructuringError,
-
-    AmbiguousMethodCall,
-
-    UnusedVariable {
-        name: String,
-    },
-
-    UnreachableCode,
-
-    UninitializedVariable {
-        name: String,
-    },
-
-    ConstraintViolation,
-
-    DuplicatePattern,
-
-    NullAssignmentToNonNullable {
-        type_name: String,
-    },
-
-    IntDivisionPromotionPrevented,
-
-    CodegenError {
-        message: String,
-    },
 
     /// A `nobox` value materialized implicitly. Distinct from a plain codegen
     /// rejection because it is a LANGUAGE GUARANTEE: the stdlib emit path may
     /// downgrade a codegen parity gap to a silent `skipped`, and must never
     /// downgrade this (a dropped body is a nil global at runtime).
     NoboxGuaranteeViolated,
-
-    // Control flow error kinds
-    ControlFlowInSubexpression,
-    MissingElseBranch,
-    InvalidContinue,
-    InvalidBreak,
 }
 
 #[derive(Clone, Debug)]
