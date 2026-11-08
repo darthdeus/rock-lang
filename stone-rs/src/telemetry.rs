@@ -628,9 +628,14 @@ fn append_transaction(
         .len();
     let result = file.write_all(bytes).and_then(|_| persist(&file));
     if let Err(error) = result {
-        let rollback = file
-            .set_len(original_len)
-            .and_then(|_| file.sync_all())
+        // Windows append handles cannot truncate; rollback needs a write handle.
+        let rollback = OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|writer| {
+                writer.set_len(original_len)?;
+                writer.sync_all()
+            })
             .and_then(|_| sync_parent(path));
         return match rollback {
             Ok(()) => Err(AppendFailure {
@@ -2425,24 +2430,26 @@ mod tests {
 
     #[test]
     fn failed_consent_persistence_cannot_publish_a_generation() {
-        let root = fresh_root();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
 
         let error =
-            begin_consent_generation_with_persist(&root, |_| Err(io::Error::other("sync failed")))
+            begin_consent_generation_with_persist(root, |_| Err(io::Error::other("sync failed")))
                 .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
-        assert_eq!(fs::read(consent_path(&root)).unwrap(), b"");
-        let generation = begin_consent_generation(&root).unwrap();
-        let stored = fs::read_to_string(consent_path(&root)).unwrap();
+        assert_eq!(fs::read(consent_path(root)).unwrap(), b"");
+        let generation = begin_consent_generation(root).unwrap();
+        let stored = fs::read_to_string(consent_path(root)).unwrap();
         assert_eq!(stored, format!("on {generation}\n"));
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn failed_event_persistence_rolls_back_before_reusing_the_sequence() {
-        let root = fresh_root();
-        let mut spool = TelemetrySpool::open(&root, identity()).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let mut spool = TelemetrySpool::open(root, identity()).unwrap();
+        spool.record_stat("before-failure", 0).unwrap();
 
         let error = spool
             .record_stat_with_persist("failed", 1, None, |_| Err(io::Error::other("sync failed")))
@@ -2450,11 +2457,12 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Other);
         spool.record_stat("after-recovery", 2).unwrap();
 
-        let rows = records(&root);
-        assert_eq!(rows.len(), 1);
+        let rows = records(root);
+        assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["seq"], 1);
-        assert_eq!(rows[0]["n"], "after-recovery");
-        std::fs::remove_dir_all(root).unwrap();
+        assert_eq!(rows[0]["n"], "before-failure");
+        assert_eq!(rows[1]["seq"], 2);
+        assert_eq!(rows[1]["n"], "after-recovery");
     }
 
     #[test]

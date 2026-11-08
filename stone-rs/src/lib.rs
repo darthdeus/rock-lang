@@ -548,7 +548,9 @@ pub mod x11_wm {
         static ERROR_COUNT: Cell<u64> = const { Cell::new(0) };
     }
 
-    fn x11_window(window: &sdl2::video::Window) -> Option<*mut x11::xlib::Display> {
+    fn x11_window(
+        window: &sdl2::video::Window,
+    ) -> Option<(*mut x11::xlib::Display, x11::xlib::Window)> {
         use sdl2::sys;
 
         let mut wm_info: sys::SDL_SysWMinfo = unsafe { std::mem::zeroed() };
@@ -559,11 +561,12 @@ pub mod x11_wm {
         {
             return None;
         }
-        let display = unsafe { wm_info.info.x11.display } as *mut x11::xlib::Display;
+        let xinfo = unsafe { wm_info.info.x11 };
+        let display = xinfo.display as *mut x11::xlib::Display;
         if display.is_null() {
             None
         } else {
-            Some(display)
+            Some((display, xinfo.window))
         }
     }
 
@@ -595,7 +598,7 @@ pub mod x11_wm {
     /// per display, so a re-initialized video subsystem gets it again.
     pub fn install_error_handler(window: &sdl2::video::Window) -> bool {
         static HANDLED_DISPLAY: AtomicPtr<std::ffi::c_void> = AtomicPtr::new(std::ptr::null_mut());
-        let Some(display) = x11_window(window) else {
+        let Some((display, _)) = x11_window(window) else {
             return false;
         };
         if HANDLED_DISPLAY.load(Ordering::SeqCst) == display as *mut std::ffi::c_void {
@@ -604,6 +607,85 @@ pub mod x11_wm {
         unsafe { x11::xlib::XSetErrorHandler(Some(handle)) };
         HANDLED_DISPLAY.store(display as *mut std::ffi::c_void, Ordering::SeqCst);
         true
+    }
+
+    /// Whether `_NET_WM_STATE` on the window lists `_NET_WM_STATE_FULLSCREEN`.
+    /// None when the window is not on X11 or the state cannot be read.
+    pub(super) fn net_wm_fullscreen(window: &sdl2::video::Window) -> Option<bool> {
+        use x11::xlib;
+
+        let (display, xwindow) = x11_window(window)?;
+        unsafe {
+            let state = xlib::XInternAtom(display, c"_NET_WM_STATE".as_ptr(), 0);
+            let fullscreen = xlib::XInternAtom(display, c"_NET_WM_STATE_FULLSCREEN".as_ptr(), 0);
+            let (mut actual_type, mut actual_format) = (0, 0);
+            let (mut items, mut bytes_after) = (0, 0);
+            let mut prop: *mut u8 = std::ptr::null_mut();
+            let status = xlib::XGetWindowProperty(
+                display,
+                xwindow,
+                state,
+                0,
+                1024,
+                0,
+                xlib::XA_ATOM,
+                &mut actual_type,
+                &mut actual_format,
+                &mut items,
+                &mut bytes_after,
+                &mut prop,
+            );
+            let listed = if status != xlib::Success as c_int || bytes_after != 0 {
+                crate::log_once!(
+                    "STONE",
+                    "cannot read the complete WM fullscreen state; keeping SDL state"
+                );
+                None
+            } else if actual_type == 0 {
+                Some(false)
+            } else if actual_type == xlib::XA_ATOM && actual_format == 32 && !prop.is_null() {
+                // Format-32 property data is an array of C long per Xlib ABI.
+                let atoms =
+                    std::slice::from_raw_parts(prop as *const std::ffi::c_ulong, items as usize);
+                Some(atoms.contains(&fullscreen))
+            } else {
+                crate::log_once!(
+                    "STONE",
+                    "invalid WM fullscreen state property; keeping SDL state"
+                );
+                None
+            };
+            if !prop.is_null() {
+                xlib::XFree(prop.cast());
+            }
+            listed
+        }
+    }
+
+    /// The window's position on the root window and its size, read from the X
+    /// server rather than SDL's cache. None when the window is not on X11.
+    pub(super) fn root_geometry(window: &sdl2::video::Window) -> Option<((i32, i32), (u32, u32))> {
+        use x11::xlib;
+
+        let (display, xwindow) = x11_window(window)?;
+        unsafe {
+            let mut attrs: xlib::XWindowAttributes = std::mem::zeroed();
+            if xlib::XGetWindowAttributes(display, xwindow, &mut attrs) == 0 {
+                return None;
+            }
+            let (mut x, mut y) = (0, 0);
+            let mut child: xlib::Window = 0;
+            if xlib::XTranslateCoordinates(
+                display, xwindow, attrs.root, 0, 0, &mut x, &mut y, &mut child,
+            ) == 0
+            {
+                return None;
+            }
+            Some((
+                (x, y),
+                (attrs.width.max(1) as u32, attrs.height.max(1) as u32),
+            ))
+        }
     }
 
     /// A marker for [`errors_since`].
@@ -854,6 +936,9 @@ pub struct StoneWindow {
     title: String,
     // Current display mode (windowed, maximized, fullscreen).
     window_mode: Cell<window_placement::WindowMode>,
+    // Ignore an unacknowledged fullscreen request when following WM exits.
+    #[cfg(target_os = "linux")]
+    wm_fullscreen_confirmed: Cell<bool>,
     // Last normal windowed bounds (for returning from fullscreen/maximized or across hide/show).
     windowed_bounds: Cell<window_placement::WindowedBounds>,
     // Captured window state when hidden.
@@ -1968,6 +2053,8 @@ pub extern "C" fn stone_create_window_ex(
         runtime_hidden: headless,
         title: title_str.to_string(),
         window_mode: Cell::new(initial_mode),
+        #[cfg(target_os = "linux")]
+        wm_fullscreen_confirmed: Cell::new(false),
         windowed_bounds: Cell::new(initial_windowed_bounds),
         saved_state_on_hide: RefCell::new(None),
         initial_hidden_boot: Cell::new(headless),
@@ -2033,6 +2120,13 @@ pub extern "C" fn stone_poll_event(event: *mut StoneEvent) -> bool {
             }
             let raw = unsafe { raw_uninit.assume_init() };
             let sdl_event = sdl2::event::Event::from_ll(raw);
+
+            #[cfg(target_os = "linux")]
+            if let sdl2::event::Event::Window { window_id, .. } = sdl_event {
+                if window_id == window.window.id() {
+                    follow_wm_fullscreen_exit(window);
+                }
+            }
 
             // Alt+Enter toggle fullscreen (repeat suppressed).
             // Intercept before ImGui and gameplay so it does not inject a Return keypress.
@@ -2526,7 +2620,7 @@ fn show_window_impl(requested_mode: Option<c_int>) {
                         }
                         _ => sdl2::video::FullscreenType::Off,
                     };
-                    if let Err(e) = window.window.set_fullscreen(fullscreen) {
+                    if let Err(e) = request_sdl_fullscreen(window, fullscreen) {
                         log_once!("VIDEO", "show window mode failed: {}", e);
                     }
                     window.window_mode.set(mode);
@@ -2538,9 +2632,7 @@ fn show_window_impl(requested_mode: Option<c_int>) {
                 }
                 window_placement::WindowMode::Maximized => {
                     window.window.show();
-                    let _ = window
-                        .window
-                        .set_fullscreen(sdl2::video::FullscreenType::Off);
+                    let _ = request_sdl_fullscreen(window, sdl2::video::FullscreenType::Off);
                     window.window.maximize();
                     window
                         .window_mode
@@ -2892,6 +2984,68 @@ pub extern "C" fn stone_force_vsync_off(force: c_int) {
     }
 }
 
+/// Runtime fullscreen requests go through here. A new request is unconfirmed
+/// until the WM lists it (see `follow_wm_fullscreen_exit`).
+fn request_sdl_fullscreen(
+    window: &mut StoneWindow,
+    mode: sdl2::video::FullscreenType,
+) -> Result<(), String> {
+    window.window.set_fullscreen(mode)?;
+    #[cfg(target_os = "linux")]
+    window.wm_fullscreen_confirmed.set(false);
+    Ok(())
+}
+
+/// Follow a WM's fullscreen exit after it has confirmed an SDL fullscreen
+/// request. SDL2 on X11 ignores a `_NET_WM_STATE` change that drops fullscreen,
+/// so SDL can keep reporting the display origin and old geometry. On exit,
+/// keep the WM's current size and position as the windowed bounds.
+#[cfg(target_os = "linux")]
+fn follow_wm_fullscreen_exit(window: &mut StoneWindow) {
+    if window.runtime_hidden || window.window.fullscreen_state() == sdl2::video::FullscreenType::Off
+    {
+        return;
+    }
+    match x11_wm::net_wm_fullscreen(&window.window) {
+        None => return,
+        Some(true) => {
+            window.wm_fullscreen_confirmed.set(true);
+            return;
+        }
+        Some(false) if !window.wm_fullscreen_confirmed.get() => return,
+        Some(false) => {}
+    }
+    let Some(((x, y), (w, h))) = x11_wm::root_geometry(&window.window) else {
+        crate::log_once!("STONE", "the WM took the window out of fullscreen but its X geometry is unreadable; SDL keeps its fullscreen state");
+        return;
+    };
+    // SDL records a position or size set while fullscreen as the windowed
+    // geometry it restores on leaving fullscreen.
+    move_window(&mut window.window, x, y);
+    if let Err(e) = window.window.set_size(w, h) {
+        ::log::error!(target: "STONE", "keeping the WM's size after it left fullscreen failed: {}", e);
+        return;
+    }
+    if let Err(e) = request_sdl_fullscreen(window, sdl2::video::FullscreenType::Off) {
+        ::log::error!(target: "STONE", "clearing fullscreen after the WM left it failed: {}", e);
+        return;
+    }
+    let pos = window.window.position();
+    window
+        .windowed_bounds
+        .set(window_placement::WindowedBounds {
+            pos,
+            size: (w as i32, h as i32),
+            display: window.window.display_index().ok(),
+        });
+    window
+        .window_mode
+        .set(window_placement::WindowMode::Windowed);
+    mark_window_change(WC_RESIZED);
+    mark_window_change(WC_MOVED);
+    ::log::info!(target: "STONE", "the WM took the window out of fullscreen: windowed at ({},{}) size {}x{}", pos.0, pos.1, w, h);
+}
+
 fn set_fullscreen_impl(window: &mut StoneWindow, mode: c_int) -> bool {
     let fullscreen = match mode {
         1 => sdl2::video::FullscreenType::Desktop,
@@ -2915,7 +3069,7 @@ fn set_fullscreen_impl(window: &mut StoneWindow, mode: c_int) -> bool {
                 display,
             });
     }
-    if let Err(e) = window.window.set_fullscreen(fullscreen) {
+    if let Err(e) = request_sdl_fullscreen(window, fullscreen) {
         log_once!("VIDEO", "set_fullscreen (mode={}) failed: {}", mode, e);
         false
     } else {
@@ -3288,13 +3442,11 @@ pub extern "C" fn stone_set_window_display(index: c_int) {
             // re-fullscreens on whichever display the window now sits on.
             let fs = window.window.fullscreen_state();
             if fs != sdl2::video::FullscreenType::Off {
-                let _ = window
-                    .window
-                    .set_fullscreen(sdl2::video::FullscreenType::Off);
+                let _ = request_sdl_fullscreen(window, sdl2::video::FullscreenType::Off);
             }
             move_window(&mut window.window, p.pos.0, p.pos.1);
             if fs != sdl2::video::FullscreenType::Off {
-                if let Err(e) = window.window.set_fullscreen(fs) {
+                if let Err(e) = request_sdl_fullscreen(window, fs) {
                     log_once!(
                         "VIDEO",
                         "stone_set_window_display: restore fullscreen failed: {}",
