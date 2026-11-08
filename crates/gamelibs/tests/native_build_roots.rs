@@ -129,7 +129,7 @@ fn native_build_script_finds_relocated_gamelibs_root() {
         "cached build ignored the removed installation"
     );
     assert!(
-        missing_log.contains("just sync-gamelibs"),
+        missing_log.contains("set ROCK_GAMELIBS_DIR"),
         "missing-cache remedy absent: {missing_log}"
     );
     assert!(
