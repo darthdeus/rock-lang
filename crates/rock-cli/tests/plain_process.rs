@@ -528,12 +528,7 @@ fn plain_parser_rejects_private_runtime_options() {
     let help = text(&help);
     for (option, value) in [
         ("--full-asset-jobs", Some("2")),
-        ("--frames", Some("30")),
-        ("--seconds", Some("1")),
         ("--warmup-seconds", Some("0")),
-        ("--gc-window", Some("10")),
-        ("--gc-window-start", Some("50")),
-        ("--gc-window-mode", Some("running")),
         ("--top", Some("10")),
         ("--sim-entry", Some("entry")),
         ("--allocation-census", Some("alloc.json")),
@@ -545,7 +540,6 @@ fn plain_parser_rejects_private_runtime_options() {
         ("--plan", None),
         ("--jobs-force", None),
         ("--multi-order", None),
-        ("--headless", None),
         ("--renderer", Some("gl")),
         ("--list", None),
         ("--dump-state", None),
@@ -553,7 +547,6 @@ fn plain_parser_rejects_private_runtime_options() {
         ("--port", Some("8000")),
         ("--single-file", None),
         ("--itch", None),
-        ("--jv", None),
         ("--agent-headless", None),
         ("--agent-access", None),
         ("--level", Some("catalog-entry")),
@@ -932,4 +925,46 @@ fn main() {
     let out = invoke(root.path(), &["run", "slow.rock"]);
     assert!(out.status.success(), "{}", text(&out));
     assert!(text(&out).contains("done"), "{}", text(&out));
+}
+
+#[test]
+fn public_frame_and_perf_options_preserve_their_units_and_defaults() {
+    let parse = |argv: &[&str]| {
+        rock_cli::Args::from_arg_matches(
+            &rock_cli::Args::command()
+                .try_get_matches_from(argv)
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let frame = parse(&["rock", "frame", "game"]);
+    assert_eq!(frame.frames, 1);
+    let perf = parse(&["rock", "perf", "game"]);
+    assert_eq!(perf.frames, 1200);
+    assert_eq!(perf.warmup, usize::MAX);
+    let perf = parse(&[
+        "rock",
+        "perf",
+        "game",
+        "--frames",
+        "7",
+        "--seconds",
+        "2.5",
+        "--warmup-frames",
+        "0",
+        "--gc-window",
+        "3",
+        "--gc-window-start",
+        "2",
+        "--gc-window-mode",
+        "running",
+        "--headless",
+        "--jv",
+    ]);
+    assert_eq!(perf.frames, 7);
+    assert_eq!(perf.seconds, Some(2.5));
+    assert_eq!(perf.warmup, 0);
+    assert_eq!((perf.gc_window, perf.gc_window_start), (3, 2));
+    assert_eq!(perf.gc_window_mode, "running");
+    assert!(perf.headless && perf.jv);
 }

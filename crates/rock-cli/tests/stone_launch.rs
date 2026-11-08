@@ -306,3 +306,76 @@ fn main() {{ wait_for_release() }}
         assert!(child.wait().unwrap().success());
     }
 }
+
+#[test]
+fn bounded_commands_run_an_external_stone_project() {
+    let fixture = tempfile::tempdir().unwrap();
+    let game = fixture.path().join("game");
+    std::fs::create_dir(&game).unwrap();
+    std::fs::write(
+        game.join("stick.toml"),
+        "[package]\nname = \"bounded-probe\"\n[dependencies]\nstone = { package = \"stone\" }\n[build.vars]\nGIT_SHA = \"probe\"\nBUILD_UNIX = \"0\"\nBUILD_DATE = \"test\"\nCHANNEL = { builtin = \"channel\" }\nPLATFORM = { builtin = \"platform\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        game.join("main.rock"),
+        r#"
+@init
+fn probe_init() {
+    if os_getenv("BOUNDED_FAIL") == "1" { error("bounded runtime sentinel") }
+}
+fn main() {
+    stone_run_game(GameConfig { title: "bounded-probe", width: 64, height: 64,
+        vsync: 0, clear_color: color(0.2, 0.3, 0.4, 1.0) })
+}
+"#,
+    )
+    .unwrap();
+    let screenshot = fixture.path().join("frame.png");
+    let run = |command: &str, fail: bool| {
+        let output = fixture.path().join(format!("{command}-{fail}"));
+        let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_rock"));
+        cmd.args([command, game.to_str().unwrap(), "--frames", "3", "--output"])
+            .arg(&output)
+            .current_dir(fixture.path())
+            .env(
+                "ROCK_DIR",
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            )
+            .env("STONE_SCREENSHOT_PATH", &screenshot)
+            .env("ROCK_FRAME_TIMEOUT_SECS", "120")
+            .env("BOUNDED_FAIL", if fail { "1" } else { "0" })
+            .env_remove("STONE_HOT_RELOAD")
+            .env_remove("FRAME_COUNT");
+        if command == "perf" {
+            cmd.args(["--warmup-frames", "0", "--format", "json"]);
+        }
+        let result = cmd.output().unwrap();
+        let diagnostic = format!(
+            "{}{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(result.status.success(), !fail, "{command}: {diagnostic}");
+        if fail {
+            assert!(
+                diagnostic.contains("bounded runtime sentinel"),
+                "{diagnostic}"
+            );
+        } else if command == "perf" {
+            let summary: serde_json::Value = serde_json::from_slice(&result.stdout)
+                .unwrap_or_else(|error| panic!("{error}: {diagnostic}"));
+            assert_eq!(summary["measurement"]["completed_frames"], 3, "{summary}");
+            assert_eq!(summary["scenario"]["complete"], true, "{summary}");
+            assert!(output.join("perf-summary.json").is_file());
+        }
+    };
+    run("frame", false);
+    assert_eq!(
+        &std::fs::read(&screenshot).unwrap()[..8],
+        b"\x89PNG\r\n\x1a\n"
+    );
+    run("perf", false);
+    run("frame", true);
+    run("perf", true);
+}

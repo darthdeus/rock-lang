@@ -5,6 +5,14 @@ use crate::*;
 
 pub static COMMANDS: &[&CliCommand] = &[
     &CliCommand {
+        name: "frame",
+        route: Route::Backend(Operation::Frame),
+    },
+    &CliCommand {
+        name: "perf",
+        route: Route::Backend(Operation::Perf),
+    },
+    &CliCommand {
         name: "stone",
         route: Route::Backend(Operation::Stone),
     },
@@ -250,6 +258,8 @@ pub static SKULL: BackendSpec = BackendSpec {
     tagline: "skull is a bone-HIR codegen",
     omitted: None,
     operations: &[
+        (Operation::Frame, crate::frame_commands::handle_frame),
+        (Operation::Perf, crate::frame_commands::handle_perf),
         (Operation::Stone, |cx| {
             let path = cx.get_project_dir_or_current()?;
             crate::stone_watch::do_stone_watch(
@@ -410,6 +420,7 @@ pub fn command_metadata(command: &CliCommand) -> registry::CommandMetadata {
                 | "watch"
                 | "lint"
                 | "fmt"
+                | "frame"
         ),
         compiler_process: if command.cli_name() == "check"
             || matches!(
@@ -465,8 +476,8 @@ pub static REGISTRATIONS: registry::Registrations = registry::Registrations {
     commands: COMMANDS,
     backends: BACKENDS,
     option_rules: OPTION_RULES,
-    arguments: |command| command,
-    decode_arguments: |_, _| {},
+    arguments: crate::frame_commands::arguments,
+    decode_arguments: crate::frame_commands::decode,
     command_metadata,
     invocation_context_keys: &[],
     compile_slot_policy: || Ok(None),
@@ -476,5 +487,8 @@ pub static REGISTRATIONS: registry::Registrations = registry::Registrations {
     sim_environment: None,
     runtime_services: &RUNTIME_SERVICES,
     // A public tool does not record working directories and branches unless asked.
-    initialize_process: |_| crate::invocation_log::require_explicit_log_path(),
+    initialize_process: |args| {
+        crate::invocation_log::require_explicit_log_path();
+        crate::frame_commands::initialize_process(args);
+    },
 };

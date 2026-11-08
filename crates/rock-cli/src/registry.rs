@@ -17,7 +17,7 @@ pub struct Registrations {
     pub action_layer_policy: Option<&'static ActionLayerPolicy>,
     pub commands: &'static [&'static CliCommand],
     pub backends: &'static [BackendSpec],
-    /// Add host-owned parser definitions; the plain compiler adds nothing.
+    /// Extend the public parser with host-owned definitions.
     pub arguments: fn(clap::Command) -> clap::Command,
     /// Decode only the options installed by this host's argument definitions.
     pub decode_arguments: fn(&clap::ArgMatches, &mut Args),
