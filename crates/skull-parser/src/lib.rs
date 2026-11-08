@@ -118,7 +118,7 @@ pub fn cook_one(ast: &mut Ast, registry: &macro_expand::MacroRegistry) {
 
 pub use macro_expand::{
     MacroRegistry, check_macro_call_labels, check_macro_call_labels_in,
-    check_macro_name_uniqueness, collect_registry,
+    check_macro_name_uniqueness, collect_registry, is_hygiene_name, macro_reach,
 };
 
 #[cfg(test)]

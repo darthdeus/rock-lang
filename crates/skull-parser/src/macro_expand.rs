@@ -76,6 +76,20 @@ type Registry = HashMap<Ustr, Vec<MacroTemplate>>;
 pub struct MacroRegistry(Registry);
 
 impl MacroRegistry {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// This registry with the macros `modules` define added after its own:
+    /// [`collect_registry`] over this registry's modules, then `modules`.
+    pub fn extended<'a>(&self, modules: impl IntoIterator<Item = &'a Ast>) -> MacroRegistry {
+        let mut reg = self.0.clone();
+        for (name, overloads) in build_registry(modules) {
+            reg.entry(name).or_default().extend(overloads);
+        }
+        MacroRegistry(reg)
+    }
+
     /// The definition name-span of the macro overload that `name(<argc args>)`
     /// expands to, selected by the SAME arity rule as expansion
     /// (`select_overload`), or None if no macro overload matches this arity --
@@ -93,6 +107,42 @@ impl MacroRegistry {
 pub fn collect_registry<'a>(modules: impl IntoIterator<Item = &'a Ast>) -> MacroRegistry {
     MacroRegistry(build_registry(modules))
 }
+
+/// Every name expanding `ast` against a registry can look up: each
+/// identifier and member name in its expressions, each top-level invocation,
+/// and each macro it defines.
+///
+/// Expansion looks a name up only for a call whose callee is an identifier
+/// or a member, and for a top-level invocation; a same-named macro elsewhere
+/// joins a module's own overloads. Every expression an expansion of these
+/// modules builds is copied from their arenas (the call's arguments, the
+/// grafted bodies, defaults and items of their macros), or renamed to a
+/// hygiene local ([`is_hygiene_name`]). So expanding a set of modules
+/// against a non-empty registry plus macros under none of the names the set
+/// reaches, and no hygiene name, expands every module as the registry alone
+/// does. (Against an empty registry a top-level invocation is not expanded
+/// at all; a set with one needs a registry that holds a macro.)
+pub fn macro_reach(ast: &Ast) -> impl Iterator<Item = Ustr> + '_ {
+    let exprs = ast.exprs.values().filter_map(|data| match &data.kind {
+        ExprKind::Ident(id) => Some(id.name),
+        ExprKind::FieldAccess(_, member) => Some(member.name),
+        _ => None,
+    });
+    let items = ast.items.iter().filter_map(|item| match &item.kind {
+        ItemKind::MacroInvocation { name, .. } => Some(name.name),
+        ItemKind::Function(f) if f.is_macro => Some(f.name.name),
+        _ => None,
+    });
+    exprs.chain(items)
+}
+
+/// Whether `name` is one expansion gives a renamed body local
+/// ([`fresh_local`]).
+pub fn is_hygiene_name(name: &str) -> bool {
+    name.starts_with(HYGIENE_PREFIX)
+}
+
+const HYGIENE_PREFIX: &str = "__inline_local_";
 
 /// A macro name must be UNIQUE against top-level FUNCTION names across the whole
 /// module set: `foo(...)` in call position is ambiguous when both a `macro foo`
@@ -1560,7 +1610,7 @@ type RenameScope = HashMap<Ustr, Ustr>;
 fn fresh_local(orig: Ustr, callsite: u32, counter: &mut u32) -> Ustr {
     let n = *counter;
     *counter += 1;
-    Ustr::from(&format!("__inline_local_{}_{}_{}", callsite, n, orig))
+    Ustr::from(&format!("{HYGIENE_PREFIX}{}_{}_{}", callsite, n, orig))
 }
 
 fn lookup_rename(stack: &[RenameScope], name: Ustr) -> Option<Ustr> {
@@ -2214,6 +2264,35 @@ mod tests {
     /// Re-cooking an already-expanded module is a no-op (defs gone, no call to a
     /// registered macro remains) -- the idempotency the incremental cache relies
     /// on when a body edit re-cooks a file.
+    #[test]
+    fn macro_reach_names_every_lookup_expansion_can_make() {
+        let ast = parse(
+            "macro m(f: ident, x: expr) -> int { f(x) }\n\
+             fn g(v: int) -> int { v.h() + m(k, v) }\n",
+            "a.rock",
+        );
+        let reach: HashSet<Ustr> = super::macro_reach(&ast).collect();
+        for name in ["m", "f", "h", "k", "v"] {
+            assert!(reach.contains(&Ustr::from(name)), "missing {name}");
+        }
+        assert!(!reach.contains(&Ustr::from("g")));
+    }
+
+    #[test]
+    fn an_extended_registry_matches_one_collected_over_both() {
+        let lib = parse("macro twice(x: expr) -> int { x + x }", "lib.rock");
+        let user = parse("macro thrice(x: expr) -> int { x + x + x }", "user.rock");
+        let caller = "fn f() -> int { twice(1) + thrice(2) }";
+        let expand = |registry: &MacroRegistry| {
+            let mut ast = parse(caller, "c.rock");
+            expand_one(&mut ast, registry);
+            ast.module_sexp()
+        };
+        let both = collect_registry([&lib, &user]);
+        let extended = collect_registry([&lib]).extended([&user]);
+        assert_eq!(expand(&both), expand(&extended));
+    }
+
     #[test]
     fn expand_one_is_idempotent() {
         let user = "fn f() -> int { twice(21) }";

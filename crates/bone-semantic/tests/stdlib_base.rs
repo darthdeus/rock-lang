@@ -101,13 +101,31 @@ fn reuse_matches_a_combined_pass() {
 }
 
 #[test]
+fn a_user_macro_the_stdlib_never_names_reuses_it() {
+    let programs = [
+        "macro twice(x: int) -> int { x + x }\nfn main() -> int { twice(2) }\n",
+        // Beside a stdlib macro call, and called through UFCS.
+        "macro twice(x: int) -> int { x + x }\nfn main() -> int { log_once(\"c\", \"m\")\n 3.twice() }\n",
+        // An expansion that fails reports the same way.
+        "macro twice(x: int) -> int { x + x }\nfn main() -> int { twice(\"s\") }\n",
+    ];
+    for program in programs {
+        assert!(assert_same_as_combined(program), "not reused:\n{program}");
+    }
+}
+
+#[test]
 fn a_user_module_that_can_reach_the_stdlib_lowers_with_it() {
     let programs = [
         // A user definition under a stdlib name joins or collides with it.
         "fn print(x: int) {}\nfn main() { print(1) }\n",
         "struct Vec2 { x: int }\nfn main() {}\n",
-        // A user macro could rewrite a stdlib call.
-        "macro twice(x: int) -> int { x + x }\nfn main() -> int { twice(2) }\n",
+        // A user macro under a name a stdlib body calls could rewrite it.
+        "macro key(x: int) -> int { x + x }\nfn main() -> int { key(2) }\n",
+        // A user overload of a stdlib macro joins its overloads.
+        "macro log_once(msg: expr) { print(msg) }\nfn main() { log_once(\"m\") }\n",
+        // A user macro under a name expansion gives a renamed local.
+        "macro __inline_local_0_0_x(x: int) -> int { x }\nfn main() -> int { __inline_local_0_0_x(1) }\n",
     ];
     for program in programs {
         assert!(!assert_same_as_combined(program), "reused:\n{program}");
@@ -140,14 +158,15 @@ fn only_the_shared_process_stdlib_is_reused() {
 
 #[test]
 fn a_fallback_pass_leaves_the_shared_stdlib_unexpanded() {
-    // A user macro forces the combined pass, which expands every module: the
-    // shared stdlib must be copied first, not edited in place.
+    // A user macro the stdlib names forces the combined pass, which expands
+    // every module: the shared stdlib must be copied first, not edited in
+    // place.
     let stdlib = skull_parser::stdlib::cached()
         .as_ref()
         .expect("stdlib parses");
     let before = stdlib.iter().map(|ast| ast.items.len()).collect::<Vec<_>>();
     let mut modules =
-        with_stdlib("macro twice(x: int) -> int { x + x }\nfn main() -> int { twice(2) }\n");
+        with_stdlib("macro key(x: int) -> int { x + x }\nfn main() -> int { key(2) }\n");
     semantic_pass_without_closure_gate(&mut modules, &Default::default()).unwrap();
     assert!(modules.shared().is_empty());
     let after = stdlib.iter().map(|ast| ast.items.len()).collect::<Vec<_>>();

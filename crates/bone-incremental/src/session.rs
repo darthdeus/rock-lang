@@ -284,8 +284,9 @@ fn changed_keys<V: PartialEq>(old: &FxHashMap<Ustr, V>, new: &FxHashMap<Ustr, V>
 /// overload joins its family), and a warm body that names something only a
 /// user file defines resolves only in a combined build. A build reuses the
 /// warm-alone state only when
-/// neither can happen: no user definition or macro takes a warm name
-/// (`Session::apart_from_warm`) and the warm-alone build is clean.
+/// neither can happen: no user definition takes a warm name, no user macro
+/// takes a name a warm expansion can look up (`Session::apart_from_warm`),
+/// and the warm-alone build is clean.
 /// Otherwise it lowers warm and user files together, as a fresh build does.
 #[derive(Clone, Debug)]
 enum WarmBase {
@@ -337,9 +338,8 @@ pub struct Session {
     /// instead of re-lowering the stdlib -- when that equals lowering them
     /// with the user files (see [`WarmBase`]).
     warm_base: WarmBase,
-    /// Every bare name a warm module defines, plus the intrinsic type names:
-    /// the names through which a user file can reach a warm lowering.
-    warm_names: FxHashSet<Ustr>,
+    /// The names through which a user file can reach a warm module.
+    warm_names: bone_semantic::stdlib_base::WarmNames,
     /// The warm modules' namespace contributions (the `std` root), computed
     /// once: warm ASTs are immutable. User files keep theirs on `UserFile`.
     warm_contributions: Vec<FragmentContribution>,
@@ -823,12 +823,13 @@ impl Session {
             warm_macros,
             aliases: aliases.clone(),
             warm_base: WarmBase::Unbuilt,
-            warm_names: FxHashSet::default(),
+            warm_names: Default::default(),
             warm_contributions: Vec::new(),
             declared_facts: FxHashMap::default(),
         };
         session.warm_contributions = session.warm.iter().map(contribute).collect();
-        session.warm_names = bone_semantic::stdlib_base::warm_names(&session.warm_contributions);
+        session.warm_names =
+            bone_semantic::stdlib_base::warm_names(&session.warm, &session.warm_contributions);
 
         // Parse each file once for its prints/macros AND keep the module to feed
         // lowering directly -- avoids a second parse via `combined_unexpanded`,
@@ -1399,6 +1400,13 @@ impl Session {
     /// The warm-alone workspace, built on first need; `None` when the warm
     /// modules alone are refused or report a diagnostic (see [`WarmBase`]).
     fn warm_alone(&mut self, registry: &MacroRegistry) -> Option<&Workspace> {
+        if matches!(self.warm_base, WarmBase::Unbuilt)
+            && let Some(ws) = bone_semantic::stdlib_base::checked_alone(&self.warm)
+        {
+            // The process stdlib, checked once per process: a build reaches
+            // here only when no user macro changes its expansion.
+            self.warm_base = WarmBase::Clean(Box::new(ws));
+        }
         if matches!(self.warm_base, WarmBase::Unbuilt) {
             let mut ws = Workspace::default();
             let mut cooked = self.warm.to_vec();

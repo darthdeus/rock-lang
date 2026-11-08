@@ -3,39 +3,74 @@
 //!
 //! A stdlib file consults no user scope, so its lowering and inference read
 //! user files only through the bare-name maps they share (types and generic
-//! arity, globals, overload families, decorators, macros). A user module that
-//! defines nothing under a stdlib name and no macro therefore leaves every
-//! stdlib module exactly as a combined pass would build it, and the pass can
-//! start from a copy of the stdlib-alone workspace and lower only the user
-//! modules. The incremental session reuses its warm modules on the same
-//! condition ([`apart_from`]).
+//! arity, globals, overload families, decorators), and its expansion reads
+//! them only through the macro registry. A user module that defines nothing
+//! under a stdlib name and no macro under a name a stdlib expansion can look
+//! up therefore leaves every stdlib module exactly as a combined pass would
+//! build it, and the pass can start from a copy of the stdlib-alone workspace
+//! and lower only the user modules. The incremental session reuses its warm
+//! modules on the same condition ([`apart_from`]).
 
+use std::borrow::Cow;
 use std::sync::OnceLock;
 
 use skull_parser::stdlib::ModuleSet;
-use skull_parser::{Ast, ItemKind, MacroRegistry, collect_registry, cook_one};
+use skull_parser::{
+    Ast, ItemKind, MacroRegistry, collect_registry, cook_one, is_hygiene_name, macro_reach,
+};
 
 use crate::prelude::*;
 use crate::semantic_passes::{FragmentContribution, ScopeItem, contribute};
 
-/// Every bare name the `warm` contributions define, plus the intrinsic type
-/// names: the names through which a user file can reach a warm lowering.
-pub fn warm_names<'a>(warm: impl IntoIterator<Item = &'a FragmentContribution>) -> FxHashSet<Ustr> {
-    warm.into_iter()
+/// The names through which a user file can reach the warm modules.
+#[derive(Clone, Debug, Default)]
+pub struct WarmNames {
+    /// Every bare name a warm module defines, plus the intrinsic type names:
+    /// the names through which a user definition reaches a warm lowering.
+    defs: FxHashSet<Ustr>,
+    /// Every name a warm module's expansion can look up
+    /// ([`skull_parser::macro_reach`]): a user macro under one could rewrite
+    /// a warm module.
+    macro_reach: FxHashSet<Ustr>,
+    /// Whether a user macro under no reached name leaves the warm modules'
+    /// expansion unchanged: false only when they invoke a macro at the top
+    /// level but define none, which expansion against a registry holding a
+    /// user macro alone would report.
+    admits_macros: bool,
+}
+
+/// [`WarmNames`] of the `warm` modules, whose namespace contributions are
+/// `contributions`.
+pub fn warm_names<'a>(
+    warm: &[Ast],
+    contributions: impl IntoIterator<Item = &'a FragmentContribution>,
+) -> WarmNames {
+    let defs = contributions
+        .into_iter()
         .flat_map(|c| c.items.iter())
         .filter_map(|item| match item {
             ScopeItem::Def { name, .. } => Some(*name),
             _ => None,
         })
         .chain(bone_core::modules::std_exported_intrinsic_types().map(ustr))
-        .collect()
+        .collect();
+    let invokes = warm
+        .iter()
+        .flat_map(|ast| &ast.items)
+        .any(|item| matches!(item.kind, ItemKind::MacroInvocation { .. }));
+    WarmNames {
+        defs,
+        macro_reach: warm.iter().flat_map(macro_reach).collect(),
+        admits_macros: !invokes || !collect_registry(warm).is_empty(),
+    }
 }
 
-/// Whether the user file `ast` defines nothing, and no macro, under one of
-/// `warm` names ([`warm_names`]): a legacy file's items, a v1 file's
-/// bare-keyed operator functions, and any file's macros. A v1 file's other
-/// definitions are keyed by DefKey and cannot collide.
-pub fn apart_from(warm: &FxHashSet<Ustr>, ast: &Ast, contribution: &FragmentContribution) -> bool {
+/// Whether the user file `ast` can reach no warm module ([`warm_names`]): it
+/// defines nothing under a warm name (a legacy file's items, a v1 file's
+/// bare-keyed operator functions, any file's macros; a v1 file's other
+/// definitions are keyed by DefKey and cannot collide), and no macro a warm
+/// expansion could look up.
+pub fn apart_from(warm: &WarmNames, ast: &Ast, contribution: &FragmentContribution) -> bool {
     fn apart(items: &[ScopeItem], legacy: bool, warm: &FxHashSet<Ustr>) -> bool {
         items.iter().all(|item| match item {
             ScopeItem::Def { name, kind, .. } => {
@@ -49,8 +84,13 @@ pub fn apart_from(warm: &FxHashSet<Ustr>, ast: &Ast, contribution: &FragmentCont
     apart(
         &contribution.items,
         ast.dialect == skull_parser::Dialect::Legacy,
-        warm,
-    ) && macro_names(ast).all(|name| !warm.contains(&name))
+        &warm.defs,
+    ) && macro_names(ast).all(|name| {
+        warm.admits_macros
+            && !warm.defs.contains(&name)
+            && !warm.macro_reach.contains(&name)
+            && !is_hygiene_name(name.as_str())
+    })
 }
 
 /// The names of the macros `ast` defines (the items the registry collects).
@@ -65,9 +105,10 @@ struct StdlibBase {
     /// The stdlib modules expanded, lowered and inferred alone, with no
     /// error anywhere.
     ws: Workspace,
-    /// The stdlib's own macros: every macro a qualifying pass sees.
+    /// The stdlib's own macros, which a qualifying pass extends with its
+    /// user modules' macros.
     registry: MacroRegistry,
-    names: FxHashSet<Ustr>,
+    names: WarmNames,
     files: FxHashSet<Ustr>,
 }
 
@@ -108,9 +149,19 @@ fn build() -> Option<StdlibBase> {
     Some(StdlibBase {
         ws,
         registry,
-        names: warm_names(&contributions),
+        names: warm_names(stdlib, &contributions),
         files: stdlib.iter().map(|ast| ast.file).collect(),
     })
+}
+
+/// The process stdlib expanded, lowered and inferred alone, when `warm` is
+/// the process stdlib itself and it checks cleanly: what a build over `warm`
+/// alone produces, already built.
+pub fn checked_alone(warm: &std::sync::Arc<[Ast]>) -> Option<Workspace> {
+    if !skull_parser::stdlib::is_process_stdlib(warm) {
+        return None;
+    }
+    base().map(StdlibBase::workspace)
 }
 
 /// Any lowering, interface or body error in `ws`.
@@ -126,12 +177,9 @@ fn has_errors(ws: &Workspace) -> bool {
 
 impl StdlibBase {
     /// Whether `user` leaves the stdlib modules as a combined pass builds
-    /// them: not a stdlib file itself, no macro, and apart from every stdlib
-    /// name.
+    /// them: not a stdlib file itself, and apart from every stdlib name.
     fn admits(&self, user: &Ast) -> bool {
-        !self.files.contains(&user.file)
-            && macro_names(user).next().is_none()
-            && apart_from(&self.names, user, &contribute(user))
+        !self.files.contains(&user.file) && apart_from(&self.names, user, &contribute(user))
     }
 
     /// A copy of the base workspace with its own reuse counters (a clone
@@ -162,6 +210,17 @@ pub(crate) fn semantic_pass(
     if !modules.rest().iter().all(|user| base.admits(user)) {
         return None;
     }
+    // A user macro is under no name the stdlib reaches, so the stdlib
+    // expands against this registry as against its own.
+    let registry = if modules
+        .rest()
+        .iter()
+        .any(|user| macro_names(user).next().is_some())
+    {
+        Cow::Owned(base.registry.extended(modules.rest()))
+    } else {
+        Cow::Borrowed(&base.registry)
+    };
     let mut ws = base.workspace();
     Some((|| {
         crate::semantic_passes::build_namespaces(&mut ws, modules.iter(), aliases)?;
@@ -169,7 +228,7 @@ pub(crate) fn semantic_pass(
         let timer = Instant::now();
         users
             .par_iter_mut()
-            .for_each(|ast| cook_one(ast, &base.registry));
+            .for_each(|ast| cook_one(ast, &registry));
         ws.log_time("macro_expand", timer);
         crate::semantic_passes::lower_and_infer(&mut ws, users)?;
         Ok(ws)
