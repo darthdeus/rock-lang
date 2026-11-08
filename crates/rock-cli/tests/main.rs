@@ -3,6 +3,7 @@
 mod gpu_process;
 mod guide;
 mod metric_add_window;
+mod no_stdlib;
 mod package_test_program_shape;
 mod plain_process;
 

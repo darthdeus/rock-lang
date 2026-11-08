@@ -268,7 +268,7 @@ impl Args {
             .arg(Arg::new("output").long("output").alias("out"))
             .arg(Arg::new("profile").long("profile"))
             .arg(Arg::new("no-stdlib").long("no-stdlib").action(ArgAction::SetTrue)
-                .help("Compile without the standard library"))
+                .help("Check, compile, run and test with no standard-library modules: stdlib declarations, including operators such as `+`, are undefined."))
             .arg(Arg::new("stdout").long("stdout").action(ArgAction::SetTrue)
                 .help("Print formatted output to stdout instead of updating files - for fmt command"))
             .arg(Arg::new("check").long("check").action(ArgAction::SetTrue)

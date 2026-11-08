@@ -186,6 +186,18 @@ pub fn stdlib_files() -> &'static [StdlibFile] {
     })
 }
 
+/// Serve no stdlib files for the rest of this process (`rock --no-stdlib`).
+/// Every compile path reads its stdlib modules through [`stdlib_files`], so
+/// this one switch removes them from check, compile, run and test alike.
+/// Errors if the stdlib was already loaded.
+pub fn exclude_stdlib() -> Result<(), &'static str> {
+    if FILES.set(Vec::new()).is_ok() || FILES.get().is_some_and(Vec::is_empty) {
+        Ok(())
+    } else {
+        Err("the stdlib was loaded before it could be excluded")
+    }
+}
+
 /// Contents of stdlib file `name` (one of [`STDLIB_NAMES`]). Panics on an
 /// unknown name: callers name a stdlib file they know exists.
 pub fn stdlib_source(name: &str) -> &'static str {
