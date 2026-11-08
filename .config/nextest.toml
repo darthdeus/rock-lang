@@ -8,3 +8,11 @@ target-runner = "within-wrapper"
 filter = 'binary(window_visibility) | binary(window_presentation) | binary(window_fullscreen_toggle) | binary(x11_focus) | binary(imgui_frontier_abi) | binary(gpu_host_lifetime) | binary(depth_mode) | binary(shader_lifetime)'
 platform = 'cfg(target_os = "linux")'
 run-wrapper = "private-display"
+
+[test-groups]
+stone-harness = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'test(/^stone_test_/)'
+test-group = 'stone-harness'
+slow-timeout = { period = "60s", terminate-after = 15 }

@@ -52,3 +52,9 @@ mod test_backends;
 mod test_exit_status_gate_js;
 
 mod native_commands;
+
+mod stone_harness;
+mod stone_test_comptime;
+mod stone_test_debounce;
+mod stone_test_decorator_cleanup;
+mod stone_test_endtoend;
