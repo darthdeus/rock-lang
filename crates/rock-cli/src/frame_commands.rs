@@ -31,8 +31,7 @@ pub fn do_perf(
     crate::package::check_project_assets(Path::new(path))?;
     // Perf runs of one tree (tools/perf-check runs several processes) share
     // one compile through the frame compile cache.
-    let compiled =
-        crate::frame_compile_cache::compile_game_for_frame(backend, path, &output, frames)?;
+    let (_invocation, compiled) = compile_frame_invocation(backend, path, &output, frames)?;
     let lua_file = &compiled.lua_file;
     rock_host::process_management::report_spawn_phase("runtime-prepare");
 
@@ -319,8 +318,7 @@ pub fn do_one_frame(
     use crate::common::ProcessManager;
 
     rock_host::process_management::report_spawn_phase("compile");
-    let compiled =
-        crate::frame_compile_cache::compile_game_for_frame(backend, path, &output, frames)?;
+    let (_invocation, compiled) = compile_frame_invocation(backend, path, &output, frames)?;
     let lua_file = &compiled.lua_file;
     rock_host::process_management::report_spawn_phase("runtime-prepare");
 

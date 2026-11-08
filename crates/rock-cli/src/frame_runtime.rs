@@ -15,6 +15,36 @@ pub fn compile_game_for_run(backend: Backend, path: &str, output: &str) -> Resul
     })
 }
 
+// Keep this directory alive until the child exits. The requested output directory
+// may also be targeted by a compiler, watcher or another bounded invocation.
+pub fn compile_frame_invocation(
+    backend: Backend,
+    path: &str,
+    output: &str,
+    frames: usize,
+) -> Result<(tempfile::TempDir, CompiledGame)> {
+    std::fs::create_dir_all(output)?;
+    let invocation = tempfile::Builder::new()
+        .prefix("frame-run-")
+        .tempdir_in(output)?;
+    let compiled = crate::frame_compile_cache::compile_game_for_frame(
+        backend,
+        path,
+        &invocation.path().to_string_lossy(),
+        frames,
+    )?;
+    // Profiling tools inspect this diagnostic copy after the run. Execution uses
+    // only the private file, so another invocation can safely replace this copy.
+    rock_host::project::write_atomic_streamed(
+        &PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME),
+        |file| {
+            std::io::copy(&mut std::fs::File::open(&compiled.lua_file)?, file)?;
+            Ok(())
+        },
+    )?;
+    Ok((invocation, compiled))
+}
+
 /// Everything a run compile needs before the compiler: project resolution,
 /// renderer feature, sound bank and engine libs.
 pub fn prepare_game_compile(path: &str) -> Result<()> {
