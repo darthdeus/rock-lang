@@ -2259,6 +2259,84 @@ fn multiply(x: Number?, y: int) -> int { x * y }
     );
 }
 
+/// Overload visibility belongs to the call being resolved, not to the body.
+/// `lib::f` contributes a public `f(int)` and a private `f(string)`; the std
+/// `f(float)` joins the bare family, while `std::f` names the std member
+/// alone. `g` has one public and one private overload, so a call sees a
+/// single visible candidate.
+fn check_overload_visibility(app: &str) -> Result<(), String> {
+    let src = format!(
+        r#"
+//-- lib.rock @pkg=lib,1 @v1
+pub fn f(n: int) -> int {{ n }}
+fn f(s: string) -> string {{ s }}
+pub fn g(n: int) -> int {{ n }}
+fn g(s: string) -> string {{ s }}
+//-- app.rock @pkg=app,2 @v1
+use lib::{{f, g}};
+{app}
+"#
+    );
+    let files = bone_semantic::test_support::parse_embedded_files(&src);
+    bone_semantic::test_support::check_types_embedded_with_stdlib(
+        &files,
+        &[("<stdlib>/probe.rock", "fn f(x: float) -> string { \"\" }")],
+    )
+}
+
+#[test]
+fn hidden_overload_diagnostic_survives_a_nested_same_name_call() {
+    let error =
+        check_overload_visibility("fn external() -> string { f(std::f(1.5)) }").unwrap_err();
+    assert!(
+        error.contains("No accessible overload for `f` with argument types (string); the matching overload is not accessible"),
+        "{error}"
+    );
+}
+
+#[test]
+fn hidden_overload_diagnostic_follows_a_separate_same_name_call() {
+    let error = check_overload_visibility(
+        "fn external() -> string {\n    let n = f(1)\n    let s = std::f(1.5)\n    f(s)\n}",
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("the matching overload is not accessible"),
+        "{error}"
+    );
+}
+
+#[test]
+fn interleaved_calls_of_one_spelling_resolve_independently() {
+    check_overload_visibility(
+        "fn external() -> int {\n    let a = f(1)\n    let s = std::f(1.5)\n    let b = f(f(2))\n    let t: string = f(1.5)\n    f(a)\n}",
+    )
+    .unwrap();
+}
+
+#[test]
+fn single_visible_candidate_with_a_hidden_member() {
+    check_overload_visibility("fn external() -> int { g(g(1)) }").unwrap();
+    let error = check_overload_visibility("fn external() -> string { g(\"x\") }").unwrap_err();
+    assert!(
+        error.contains("No accessible overload for `lib::g` with argument types (string); the matching overload is not accessible"),
+        "{error}"
+    );
+}
+
+#[test]
+fn no_fit_stays_distinct_from_a_hidden_match() {
+    for app in [
+        "fn external() -> int { f(true) }",
+        "fn external() -> int { g(true) }",
+        "fn external() -> int { f(f(true)) }",
+    ] {
+        let error = check_overload_visibility(app).unwrap_err();
+        assert!(error.contains("No overload for"), "{app}: {error}");
+        assert!(!error.contains("not accessible"), "{app}: {error}");
+    }
+}
+
 /// A cost TIE (the ambiguous case) must list the tied candidate signatures,
 /// same as the no-fit case: "Ambiguous overload for `two` with argument
 /// types (int, int)" alone doesn't tell the user WHICH candidates tied.

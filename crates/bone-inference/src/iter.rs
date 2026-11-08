@@ -621,13 +621,13 @@ pub(crate) fn resolve_unary_by_recv(
         None => CallFamily::from_name(name),
     };
     let candidates = resolve_callee(gamma, &family);
-    if candidates.is_empty() {
+    if candidates.visible.is_empty() {
         comp_error!(span, "no `{}` function in scope", name);
     }
     let recv_ty = resolve(gamma, recv_ty, span);
 
-    let (mid, fid) = if candidates.len() == 1 {
-        candidates[0]
+    let (mid, fid) = if candidates.visible.len() == 1 {
+        candidates.visible[0]
     } else {
         select_overload(
             c,

@@ -714,7 +714,7 @@ pub fn infer_expr_used(
             // still reject below.
             None => match &*collapse_backend_variants(
                 gamma,
-                &resolve_callee(gamma, &fn_value_family(c, e, *name)),
+                &resolve_callee(gamma, &fn_value_family(c, e, *name)).visible,
             ) {
                 [(mid, fid)] => {
                     let function = gamma.workspace.module(*mid).functions[*fid].clone();
@@ -1604,7 +1604,7 @@ pub fn infer_expr_used(
 
             let candidates = resolve_callee(gamma, &family);
 
-            if candidates.is_empty() {
+            if candidates.visible.is_empty() {
                 comp_error!(expr_span, "Function `{}` doens't exist", op_fn);
             }
 
@@ -1613,8 +1613,8 @@ pub fn infer_expr_used(
                 resolve(gamma, value_ty, expr_span),
             ];
 
-            let (mid, fid) = if candidates.len() == 1 {
-                candidates[0]
+            let (mid, fid) = if candidates.visible.len() == 1 {
+                candidates.visible[0]
             } else {
                 let mut arg_ty: FxHashMap<Idx<Expr>, TyId> = FxHashMap::default();
                 arg_ty.insert(target, arg_tys[0]);

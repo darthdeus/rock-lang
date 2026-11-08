@@ -3,12 +3,21 @@ use crate::hir::{FamilyTier, unary_operator_entry};
 use bone_core::modules::DefKind;
 use std::borrow::Cow;
 
-pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
+/// A call family's overloads as seen from the current access site.
+/// `hidden` holds the members the visibility filter removed; selection
+/// scores them only to tell an inaccessible matching overload apart from an
+/// ordinary no-fit.
+#[derive(Default)]
+pub(crate) struct Callees {
+    pub(crate) visible: FnList,
+    pub(crate) hidden: FnList,
+}
+
+pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> Callees {
     let name = family.key();
     let _span = tracing::info_span!("resolve_callee", name = %name).entered();
 
     let ws = gamma.workspace;
-    gamma.inaccessible_overloads.borrow_mut().remove(&name);
     match *family {
         CallFamily::Legacy(_) => member_overloads(gamma, name, None),
         CallFamily::Resolved { key, owner } => member_overloads(gamma, key, owner),
@@ -22,23 +31,11 @@ pub(crate) fn resolve_callee(gamma: &Gamma, family: &CallFamily) -> FnList {
                 .unwrap_or_else(|| {
                     panic!("merged family `{name}` of `{file}` was not recorded at lowering")
                 });
-            let mut out = FnList::default();
-            let mut inaccessible = FnList::default();
+            let mut out = Callees::default();
             for &member in members {
-                gamma
-                    .inaccessible_overloads
-                    .borrow_mut()
-                    .remove(&member.key);
-                out.extend(member_overloads(gamma, member.key, member.owner));
-                if let Some(hidden) = gamma.inaccessible_overloads.borrow().get(&member.key) {
-                    inaccessible.extend(hidden.iter().copied());
-                }
-            }
-            if !inaccessible.is_empty() {
-                gamma
-                    .inaccessible_overloads
-                    .borrow_mut()
-                    .insert(name, inaccessible);
+                let callees = member_overloads(gamma, member.key, member.owner);
+                out.visible.extend(callees.visible);
+                out.hidden.extend(callees.hidden);
             }
             out
         }
@@ -60,34 +57,28 @@ pub(crate) fn fn_value_family(c: BodyCtx, e: Idx<Expr>, name: Ustr) -> CallFamil
 /// every legacy file defining the name, and a v1 fragment reaches only the
 /// std view's or one provider's. The key is a dependency either way, so an
 /// overload added under it re-infers this caller.
-fn member_overloads(gamma: &Gamma, key: Ustr, owner: Option<PackageId>) -> FnList {
+fn member_overloads(gamma: &Gamma, key: Ustr, owner: Option<PackageId>) -> Callees {
     gamma.dep_acc.borrow_mut().insert(key);
     let ws = gamma.workspace;
     let Some(fns) = ws.functions_by_name.get(&key) else {
-        return FnList::default();
+        return Callees::default();
     };
     let site = gamma.access_site();
-    let mut visible = FnList::with_capacity(fns.len());
-    let mut inaccessible = FnList::default();
+    let mut out = Callees {
+        visible: FnList::with_capacity(fns.len()),
+        hidden: FnList::default(),
+    };
     for &(mid, fid) in fns {
         if !owned_by_view(ws, owner, mid) {
             continue;
         }
         if ws.callable_member_admits(key, mid, fid, site) {
-            visible.push((mid, fid));
+            out.visible.push((mid, fid));
         } else {
-            inaccessible.push((mid, fid));
+            out.hidden.push((mid, fid));
         }
     }
-    if !inaccessible.is_empty() {
-        gamma
-            .inaccessible_overloads
-            .borrow_mut()
-            .entry(key)
-            .or_default()
-            .extend(inaccessible);
-    }
-    visible
+    out
 }
 
 fn owned_by_view(ws: &Workspace, owner: Option<PackageId>, mid: ModuleId) -> bool {
@@ -408,7 +399,7 @@ pub(crate) fn select_overload(
     c: BodyCtx,
     gamma: &mut Gamma,
     family: CallFamily,
-    candidates: &[(ModuleId, Idx<Function>)],
+    callees: &Callees,
     recv_ty: Option<TyId>,
     args: &[Idx<Expr>],
     arg_ty: &FxHashMap<Idx<Expr>, TyId>,
@@ -420,7 +411,8 @@ pub(crate) fn select_overload(
         c,
         gamma,
         family,
-        candidates,
+        &callees.visible,
+        &callees.hidden,
         recv_ty,
         args,
         arg_ty,
@@ -436,6 +428,7 @@ pub(crate) fn select_overload_with_generics(
     gamma: &mut Gamma,
     family: CallFamily,
     candidates: &[(ModuleId, Idx<Function>)],
+    hidden: &[(ModuleId, Idx<Function>)],
     recv_ty: Option<TyId>,
     args: &[Idx<Expr>],
     arg_ty: &FxHashMap<Idx<Expr>, TyId>,
@@ -534,14 +527,8 @@ pub(crate) fn select_overload_with_generics(
                 .iter()
                 .map(|t| gamma.workspace.render(Some(&gamma.out), *t))
                 .join(", ");
-            let inaccessible = gamma
-                .inaccessible_overloads
-                .borrow()
-                .get(&name)
-                .cloned()
-                .unwrap_or_default();
             let mut hidden_bound_fail = None;
-            let hidden_fit = inaccessible.iter().any(|&(mid, fid)| {
+            let hidden_fit = hidden.iter().any(|&(mid, fid)| {
                 score_candidate_with_generics(
                     c,
                     gamma,
@@ -1356,7 +1343,10 @@ pub(crate) fn resolve_named_call_inner(
 ) -> Result<TyId, CompilerError> {
     let name = family.key();
     let _span = tracing::info_span!("named_call", name = %name).entered();
-    let all_candidates = resolve_callee(gamma, &family);
+    let Callees {
+        visible: all_candidates,
+        hidden,
+    } = resolve_callee(gamma, &family);
     let candidates: FnList = if generic_args.is_empty() {
         all_candidates
     } else {
@@ -1522,14 +1512,10 @@ pub(crate) fn resolve_named_call_inner(
 
     let mut preinferred: FxHashMap<Idx<Expr>, TyId> = FxHashMap::default();
 
-    let has_inaccessible_overloads = gamma
-        .inaccessible_overloads
-        .borrow()
-        .get(&name)
-        .is_some_and(|hidden| !hidden.is_empty());
-    let single = candidates.len() == 1
-        && !has_inaccessible_overloads
-        && unary_operator_entry(name.as_str()).is_none();
+    // A hidden member may be the one the arguments match, so only a family
+    // with nothing hidden may skip scoring.
+    let single =
+        candidates.len() == 1 && hidden.is_empty() && unary_operator_entry(name.as_str()).is_none();
     let (callee_mid, callee_fn) = if single {
         candidates[0]
     } else {
@@ -1568,6 +1554,7 @@ pub(crate) fn resolve_named_call_inner(
             gamma,
             family,
             &candidates,
+            &hidden,
             recv_override,
             &arg_list,
             &arg_ty,
