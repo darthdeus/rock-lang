@@ -107,16 +107,36 @@ pub fn ident_of_key(key: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
+thread_local! {
+    static IDENT_CACHE: std::cell::RefCell<rustc_hash::FxHashMap<ustr::Ustr, ustr::Ustr>> =
+        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
+}
+
+/// [`ident_of_key`] for an interned name, memoized per thread. The ident is a
+/// pure function of the name, and every call site of a function mangles its
+/// callee's name again, so the digest and formatting run once per name per
+/// worker instead of once per reference.
+pub fn ident_of_name(name: ustr::Ustr) -> ustr::Ustr {
+    IDENT_CACHE.with(|cache| {
+        if let Some(ident) = cache.borrow().get(&name) {
+            return *ident;
+        }
+        let ident = match ident_of_key(name.as_str()) {
+            std::borrow::Cow::Borrowed(_) => name,
+            std::borrow::Cow::Owned(owned) => ustr::Ustr::from(&owned),
+        };
+        cache.borrow_mut().insert(name, ident);
+        ident
+    })
+}
+
 /// [`ident_of_key`] for a name that is used as an emitted symbol: the Lua global
 /// a definition occupies, the `_G` key the state bridge installs under it, and
 /// the identifiers minted from it. The compiler's own maps stay keyed on the
 /// LOGICAL name (the DefKey), so this belongs where a name is WRITTEN into the
 /// artifact, never where one is looked up.
 pub fn symbol_of_key(name: ustr::Ustr) -> ustr::Ustr {
-    match ident_of_key(name.as_str()) {
-        std::borrow::Cow::Borrowed(_) => name,
-        std::borrow::Cow::Owned(owned) => ustr::Ustr::from(&owned),
-    }
+    ident_of_name(name)
 }
 
 /// The emitted symbol of the nominal type keyed `key`: its C typedef, `__ty`
@@ -166,7 +186,7 @@ pub fn mangle_fn(ws: &Workspace, f: &Function) -> String {
     // on the per-call-site codegen path; the old collect+join allocated N+2
     // strings + a vec per reference).
     let mut out = String::with_capacity(f.name.len() + 16);
-    out.push_str(&ident_of_key(f.name.as_str()));
+    out.push_str(ident_of_name(f.name).as_str());
     for pd in &f.param_decls {
         out.push_str(SEP);
         encode_into(ws, pd.ty, &mut out);
@@ -242,7 +262,7 @@ fn encode_into(ws: &Workspace, ty: TyId, out: &mut String) {
                 hir::TypeCtor::Nominal(name) => {
                     // A v1 nominal's name is its DefKey; the signature suffix is
                     // an identifier too, so it takes the same form.
-                    out.push_str(&ident_of_key(name.as_str()));
+                    out.push_str(ident_of_name(name).as_str());
                     if !params.is_empty() {
                         out.push_str(SEP);
                         append_args(out);

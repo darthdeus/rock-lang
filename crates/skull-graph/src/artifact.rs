@@ -2016,11 +2016,14 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // Realizability of every instance the graph holds, computed once. It is a
     // property of the DECLARATION and the artifact, independent of reachability.
     let mut realizable: FxHashMap<Instance, Result<Realized, Unrealizable>> = FxHashMap::default();
+    // A declaration's instances all realize the same way, so answer each
+    // declaration once; a generic-heavy program has several instances per decl.
+    let mut by_decl: FxHashMap<FuncRef, Result<Realized, Unrealizable>> = FxHashMap::default();
     for i in &g.instances {
-        realizable.insert(
-            i.clone(),
-            realize_decl(ws, i.func, &g.erased_entries, &target, &req.mappings),
-        );
+        let realized = *by_decl
+            .entry(i.func)
+            .or_insert_with(|| realize_decl(ws, i.func, &g.erased_entries, &target, &req.mappings));
+        realizable.insert(i.clone(), realized);
     }
 
     // The artifact's ROOTS: its emission roots that are realizable here, plus
