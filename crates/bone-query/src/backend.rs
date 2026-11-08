@@ -264,6 +264,17 @@ impl BoneProject {
         }
     }
 
+    /// Forget everything derived from the workspace's types and signatures;
+    /// the next completion request rebuilds it.
+    fn drop_type_caches(&mut self) {
+        self.reach = None;
+        self.fn_sigs = None;
+        self.call_through = None;
+        self.freq = None;
+        self.scoped_call_through.clear();
+        self.visible_bindings.clear();
+    }
+
     /// Queries needing surface syntax reparse the stored file; recovery errors
     /// stay on the partial AST and are already published by Session diagnostics.
     fn reparse_user_file(&self, path: &str, request: &'static str) -> Option<skull_parser::Ast> {
@@ -963,9 +974,10 @@ impl BoneWorkspace {
         // Tier governs the type-graph-derived caches (reachability index +
         // completion signature cache): both depend only on the type graph
         // (struct fields + fn signatures), which a `BodyOnly` edit cannot
-        // change -- so rebuild only on a non-`BodyOnly` edit (or the very first
-        // build), and reuse them across body keystrokes.
-        let mut rebuild_type_caches = proj.reach.is_none() || proj.fn_sigs.is_none();
+        // change -- so drop them only on a non-`BodyOnly` edit. The next
+        // completion rebuilds them, so a run of edits with no completion
+        // between them pays for none of it.
+        let mut drop_type_caches = false;
         // A file the session does not hold yet (created after the batch load,
         // or entering one by one after a failed batch) takes its dialect and
         // package from the manifest, exactly as the batch load's files did.
@@ -992,7 +1004,7 @@ impl BoneWorkspace {
         match proj.session.update_file(path, &text) {
             Ok(upd) => {
                 if !matches!(upd.tier, UpdateTier::BodyOnly | UpdateTier::NoChange) {
-                    rebuild_type_caches = true;
+                    drop_type_caches = true;
                 }
                 let ws = proj.session.workspace();
                 let touched: Vec<String> = upd
@@ -1009,18 +1021,8 @@ impl BoneWorkspace {
             }
             Err(e) => this_file_parse_err = Some(e),
         }
-        if rebuild_type_caches {
-            proj.scoped_call_through.clear();
-            proj.visible_bindings.clear();
-            proj.reach = Some(crate::reachability::ReachabilityIndex::build(
-                proj.session.workspace(),
-            ));
-            proj.fn_sigs = Some(build_fn_sigs(proj.session.workspace()));
-            proj.call_through = Some(build_call_through(
-                proj.session.workspace(),
-                proj.reach.as_ref().unwrap(),
-            ));
-            proj.freq = Some(build_freq_index(proj.session.workspace()));
+        if drop_type_caches {
+            proj.drop_type_caches();
         }
 
         let mut by_file: HashMap<String, Vec<Diagnostic>> = HashMap::new();
@@ -1145,12 +1147,7 @@ impl BoneWorkspace {
                     // interface edit. Drop every workspace-derived index,
                     // including fragment-scoped spellings, before the next
                     // completion request rebuilds them.
-                    proj.reach = None;
-                    proj.fn_sigs = None;
-                    proj.call_through = None;
-                    proj.scoped_call_through.clear();
-                    proj.visible_bindings.clear();
-                    proj.freq = None;
+                    proj.drop_type_caches();
                 }
                 Ok(_) => {}
                 Err(e) => log::error!("bone LSP: removing `{path}`: {}", e.message),

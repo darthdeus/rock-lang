@@ -23,8 +23,9 @@ struct Request<'a> {
     next_is_open_paren: bool,
 }
 
-/// The project caches the general pipeline reads, each built on interface
-/// edits; `None` on the one-shot CLI path, which builds throwaways.
+/// The project caches the general pipeline reads, each built by the first
+/// completion after an interface edit; `None` on the one-shot CLI path, which
+/// builds throwaways.
 struct Caches<'a> {
     reach: Option<&'a crate::reachability::ReachabilityIndex>,
     fn_sigs: Option<&'a HashMap<Ustr, String>>,
@@ -81,14 +82,22 @@ impl BoneWorkspace {
         // The cursor classification, computed ONCE (CompletionCx: the AST
         // classifier over the munge ladder plus every context consultation).
         let cx = classify(src, offset);
-        if let Some(items) = contextual_completions(session, reach.as_ref(), &rq, &cx) {
+        // Dropped by interface edits; the first completion after one rebuilds.
+        let ws = session.workspace();
+        let reach =
+            &*reach.get_or_insert_with(|| crate::reachability::ReachabilityIndex::build(ws));
+        if let Some(items) = contextual_completions(session, Some(reach), &rq, &cx) {
             return items;
         }
+        let ws = session.workspace();
+        let fn_sigs = &*fn_sigs.get_or_insert_with(|| build_fn_sigs(ws));
+        let freq = &*freq.get_or_insert_with(|| build_freq_index(ws));
+        let call_through = &*call_through.get_or_insert_with(|| build_call_through(ws, reach));
         let caches = Caches {
-            reach: reach.as_ref(),
-            fn_sigs: fn_sigs.as_ref(),
-            freq: freq.as_ref(),
-            call_through: call_through.as_ref(),
+            reach: Some(reach),
+            fn_sigs: Some(fn_sigs),
+            freq: Some(freq),
+            call_through: Some(call_through),
             scoped_call_through,
             visible_bindings,
         };

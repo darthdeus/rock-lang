@@ -1559,3 +1559,29 @@ fn assignment_rhs_to_a_local_type_directs_like_typed_let() {
         "Widget must outrank int at assign RHS: {labels:?}"
     );
 }
+
+#[test]
+fn completion_after_an_interface_edit_reads_the_new_signature() {
+    let source = |params: &str| {
+        format!("fn helper_fn({params}) -> int {{ 1 }}\nfn main() {{\n    helper\n}}\n")
+    };
+    let pos = Position::new(2, 10);
+    let detail = |bone: &mut BoneWorkspace| {
+        bone.completion(PATH, pos)
+            .into_iter()
+            .find(|item| item.label.starts_with("helper_fn"))
+            .and_then(|item| item.detail)
+            .expect("helper_fn is offered with its signature")
+    };
+    let mut bone = BoneWorkspace::new();
+
+    bone.update(PATH, source("a: int"));
+    assert!(detail(&mut bone).contains("a: int"));
+
+    bone.update(PATH, source("renamed: string"));
+    let after = detail(&mut bone);
+    assert!(
+        after.contains("renamed: string"),
+        "stale completion detail: {after}"
+    );
+}
