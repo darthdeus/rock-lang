@@ -1,0 +1,264 @@
+// Closures created inside a co fn's defer (or hook) block that capture
+// locals of that block. The step's scope-exit splice and the detached
+// cleanup copy share one hoisted body per lambda site, so both copies must
+// capture the block's locals the same way: boxed when written, by value
+// when only read, never through the coroutine frame.
+
+// ---- Closure mutates a defer-local ----
+co fn defer_local_mutation() -> Coroutine<int> {
+    defer {
+        let n = 5
+        let bump = () => { n = n + 1 }
+        bump()
+        print(n)
+    }
+    yield 1
+}
+
+@test(output = "1\n6")
+fn test_defer_closure_mutates_defer_local() {
+    let c = defer_local_mutation()
+    print(c.resume() ?? -1)
+    c.resume()
+}
+
+// ---- Killed before completion: the detached copy runs ----
+@test(output = "1\n6")
+fn test_killed_defer_closure_mutates_defer_local() {
+    let c = defer_local_mutation()
+    print(c.resume() ?? -1)
+    c.kill()
+}
+
+// ---- Closure reads a defer-local ----
+co fn defer_local_read() -> Coroutine<int> {
+    defer {
+        let n = 7
+        let get = () => n
+        print(get())
+    }
+    yield 1
+}
+
+@test(output = "1\n7")
+fn test_defer_closure_reads_defer_local() {
+    let c = defer_local_read()
+    print(c.resume() ?? -1)
+    c.resume()
+}
+
+// ---- Closure captures both a frame local and a defer-local ----
+co fn defer_mixed_capture() -> Coroutine<int> {
+    let base = 100
+    defer {
+        let n = 5
+        let bump = () => { n = n + base; base = base + 1 }
+        bump()
+        bump()
+        print(n)
+        print(base)
+    }
+    yield base
+    base = base + 10
+    yield base
+}
+
+@test(output = "100\n110\n226\n112")
+fn test_defer_closure_mixed_capture() {
+    let c = defer_mixed_capture()
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    c.resume()
+}
+
+@test(output = "100\n206\n102")
+fn test_killed_defer_closure_mixed_capture() {
+    let c = defer_mixed_capture()
+    print(c.resume() ?? -1)
+    c.kill()
+}
+
+// ---- Defer in an inner scope, with a yield after the splice ----
+co fn inner_scope_defer() -> Coroutine<int> {
+    let keep = () => 0
+    {
+        defer {
+            let n = 3
+            keep = () => { n = n + 1; n }
+            print(keep())
+        }
+        yield 1
+    }
+    yield 2
+    yield keep()
+}
+
+@test(output = "1\n4\n2\n5")
+fn test_inner_scope_defer_closure_survives_yield() {
+    let c = inner_scope_defer()
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+}
+
+// ---- Early return splices the defer a second time ----
+co fn early_return_defer(stop: bool) -> Coroutine<int> {
+    defer {
+        let n = 20
+        let bump = () => { n = n + 1 }
+        bump()
+        print(n)
+    }
+    yield 1
+    if stop {
+        return
+    }
+    yield 2
+}
+
+@test(output = "1\n21\n1\n2\n21")
+fn test_early_return_defer_closure() {
+    let a = early_return_defer(true)
+    print(a.resume() ?? -1)
+    a.resume()
+    let b = early_return_defer(false)
+    print(b.resume() ?? -1)
+    print(b.resume() ?? -1)
+    b.resume()
+}
+
+// ---- on_killed hook with a closure over a hook-local ----
+co fn hook_local() -> Coroutine<int> {
+    let base = 40
+    on_killed {
+        let n = 1
+        let bump = () => { n = n + base }
+        bump()
+        print(n)
+    }
+    yield 1
+    yield 2
+}
+
+@test(output = "1\n41")
+fn test_on_killed_closure_mutates_hook_local() {
+    let c = hook_local()
+    print(c.resume() ?? -1)
+    c.kill()
+}
+
+// ---- Two defers whose locals share a name ----
+co fn two_defers() -> Coroutine<int> {
+    defer {
+        let n = 1
+        let f = () => { n = n * 3 }
+        f()
+        print(n)
+    }
+    defer {
+        let n = 2
+        let f = () => n
+        print(f())
+    }
+    yield 1
+}
+
+@test(output = "1\n2\n3")
+fn test_two_defers_closures() {
+    let c = two_defers()
+    print(c.resume() ?? -1)
+    c.resume()
+}
+
+@test(output = "1\n2\n3")
+fn test_killed_two_defers_closures() {
+    let c = two_defers()
+    print(c.resume() ?? -1)
+    c.kill()
+}
+
+// ---- Closure in a loop inside a defer: the box spans several blocks ----
+co fn gen3() -> Coroutine<int> {
+    yield 1
+    yield 2
+    yield 3
+}
+
+co fn loop_in_defer() -> Coroutine<int> {
+    defer {
+        let total = 0
+        for v in 1..4 {
+            let add = () => { total = total + v }
+            add()
+        }
+        for v in gen3() {
+            let add = () => { total = total + v * 10 }
+            add()
+        }
+        print(total)
+    }
+    yield 1
+}
+
+@test(output = "1\n66")
+fn test_loop_in_defer_closure() {
+    let c = loop_in_defer()
+    print(c.resume() ?? -1)
+    c.resume()
+}
+
+@test(output = "1\n66")
+fn test_killed_loop_in_defer_closure() {
+    let c = loop_in_defer()
+    print(c.resume() ?? -1)
+    c.kill()
+}
+
+// ---- Defer registered in a loop body ----
+co fn defer_in_loop_body() -> Coroutine<int> {
+    for i in 0..2 {
+        defer {
+            let n = i
+            let f = () => { n = n + 10 }
+            f()
+            print(n)
+        }
+        yield i
+    }
+}
+
+@test(output = "0\n10\n1\n11")
+fn test_defer_in_loop_body_closure() {
+    let c = defer_in_loop_body()
+    print(c.resume() ?? -1)
+    print(c.resume() ?? -1)
+    c.resume()
+}
+
+// ---- A lambda's own defer inside a co fn's defer ----
+co fn lambda_defer_in_defer() -> Coroutine<int> {
+    defer {
+        let n = 1
+        let run = () => {
+            defer { n = n + 100 }
+            n = n + 1
+        }
+        run()
+        print(n)
+    }
+    yield 1
+}
+
+@test(output = "1\n102")
+fn test_lambda_defer_in_defer() {
+    let c = lambda_defer_in_defer()
+    print(c.resume() ?? -1)
+    c.resume()
+}
+
+@test(output = "1\n102")
+fn test_killed_lambda_defer_in_defer() {
+    let c = lambda_defer_in_defer()
+    print(c.resume() ?? -1)
+    c.kill()
+}

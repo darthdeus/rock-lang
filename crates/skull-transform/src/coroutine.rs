@@ -30,6 +30,7 @@ use crate::closure::FrameInfo;
 use crate::detached::detached_region_blocks;
 use crate::visit::{raw, remap_inst, remap_term, term_succs, term_value, top_level_blocks};
 use comfy_la_arena::Idx;
+use skull_mir::code_identity::LambdaSiteId;
 use skull_mir::mir::*;
 
 pub const STATE: &str = "__state";
@@ -351,6 +352,42 @@ fn cells_referenced_by_detached_regions(
     cells
 }
 
+/// Source sites of the lambdas inside detached defer/hook regions.
+///
+/// A defer's scope-exit splice in the step is a second lowering of the same
+/// body, so its lambdas share their sites, and thus their code identities and
+/// hoisted bodies, with the detached copy. The detached copy keeps the
+/// defer's own locals off the frame (boxed when a lambda writes them), so the
+/// splice must capture those locals the same way: pinning them to the frame
+/// for an escaping lambda would hand the shared body the frame where it
+/// expects a box or a value. A defer body cannot yield, so its locals never
+/// need the frame to survive a suspension.
+fn detached_lambda_sites(
+    func: &MirFunc,
+    entries: impl IntoIterator<Item = Idx<Block>>,
+) -> HashSet<LambdaSiteId> {
+    let mut sites = HashSet::default();
+    for entry in entries {
+        for block in detached_region_blocks(func, entry) {
+            for &id in &func.blocks[block].insts {
+                if matches!(func.insts[id], Inst::Lambda { .. })
+                    && let Some(site) = lambda_site(func, id)
+                {
+                    sites.insert(site);
+                }
+            }
+        }
+    }
+    sites
+}
+
+fn lambda_site(func: &MirFunc, lambda: Idx<Inst>) -> Option<LambdaSiteId> {
+    func.inst_spans
+        .get(lambda)
+        .copied()
+        .and_then(LambdaSiteId::from_span)
+}
+
 /// Values live into resume blocks, used to narrow the cross-block spill
 /// candidates to values that must survive a suspension rather than a branch.
 fn values_live_at_resume_blocks(
@@ -513,14 +550,23 @@ pub fn transform_coroutine_with_nonescaping_lambdas(
     let frame_cells: HashSet<Idx<Cell>> = {
         let root = crate::scope::ROOT;
         let root_owned = |cell: &Idx<Cell>| own.owner.get(cell).is_some_and(|&owner| owner == root);
+        let detached_sites = detached_lambda_sites(
+            &step,
+            step.coro_defers
+                .iter()
+                .map(|(_, entry)| *entry)
+                .chain(hooks.iter().map(|(_, entry)| *entry)),
+        );
         let captured_by_escaping_lambda = own
             .captures
             .iter()
             .enumerate()
             .filter(|(scope, _)| {
-                tree.scopes[*scope]
-                    .lambda
-                    .is_none_or(|lambda| !nonescaping_lambdas.contains(&lambda))
+                tree.scopes[*scope].lambda.is_none_or(|lambda| {
+                    !nonescaping_lambdas.contains(&lambda)
+                        && !lambda_site(&step, lambda)
+                            .is_some_and(|site| detached_sites.contains(&site))
+                })
             })
             .flat_map(|(_, cells)| cells.iter().copied())
             .collect::<HashSet<_>>();

@@ -466,7 +466,7 @@ pub fn convert_closures_framed(
             continue;
         }
         let owner = own.owner[&c];
-        let entry = tree.scopes[owner].entry;
+        let entry = scope_entry(mf, tree, owner);
         let is_param = tree.scopes[owner].params.contains(&c);
         let dest = entry_prepend.entry(entry).or_default();
         if is_param {
@@ -680,7 +680,7 @@ fn seeded_box_initializers(
     let mut cyclic = HashMap::default();
     for (c, sites) in accesses {
         let owner = own.owner[&c];
-        let scope = &tree.scopes[owner];
+        let entry = scope_entry(mf, tree, owner);
         for &(b, pos, id) in &sites {
             if !matches!(mf.insts[id], Inst::Store { cell, .. } if cell == c) {
                 continue;
@@ -691,7 +691,7 @@ fn seeded_box_initializers(
                 } else {
                     let idom = dominators
                         .entry(owner)
-                        .or_insert_with(|| skull_mir::cfg::dominators(mf, scope.entry));
+                        .or_insert_with(|| skull_mir::cfg::dominators(mf, entry));
                     skull_mir::cfg::dominates(idom, b, other)
                 }
             });
@@ -700,7 +700,7 @@ fn seeded_box_initializers(
             }
             // Entry allocation already repeats on entry backedges. Moving into
             // any other cycle would split a previously shared cell per iteration.
-            if b != scope.entry
+            if b != entry
                 && *cyclic.entry(b).or_insert_with(|| {
                     let mut pending = Vec::new();
                     skull_mir::cfg::successors(&mf.blocks[b].term, |s| pending.push(s));
@@ -723,6 +723,18 @@ fn seeded_box_initializers(
         }
     }
     seeded
+}
+
+/// Where a scope's body starts in `mf`. A coroutine step's scope tree is
+/// built before the yield rewrite, so its root entry is the first state's
+/// block; the rewritten step enters through its state dispatch, which is the
+/// only block that dominates every state.
+fn scope_entry(mf: &MirFunc, tree: &ScopeTree, scope: ScopeId) -> Idx<Block> {
+    if scope == crate::scope::ROOT {
+        mf.entry
+    } else {
+        tree.scopes[scope].entry
+    }
 }
 
 fn frame_schema(frame: Option<&FrameInfo>) -> Option<FrameSchema> {
