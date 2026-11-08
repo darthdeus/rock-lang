@@ -160,3 +160,45 @@ fn pure_adjusts_local_value_component(res: V2) -> V2 {
     s.y *= res.y / res.x
     return s
 }
+
+//=== TEST CASE: pure_interpolation_reads_global_Generic ===
+// A mutable global read inside an interpolated string is still a read.
+//! expect: reads global `SHOWN`
+global SHOWN: int = 0
+
+@pure
+fn bad_interpolates_global() -> string {
+    return "{SHOWN}"
+}
+
+//=== TEST CASE: pure_interpolation_format_spec_reads_global_Generic ===
+// So is one in a dynamic format precision.
+//! expect: reads global `DIGITS`
+global DIGITS: int = 2
+
+@pure
+fn bad_interpolates_precision(x: float) -> string {
+    return "{x:.{DIGITS}f}"
+}
+
+//=== TEST CASE: pure_safe_nav_call_arg_reads_global_Generic ===
+// The arguments of a `?.` method call are checked like any call's.
+//! expect: reads global `SCALE`
+global SCALE: int = 3
+struct Holder { v: int }
+fn times(h: Holder, k: int) -> int { h.v * k }
+
+@pure
+fn bad_safe_nav_arg(h: Holder?) -> int? {
+    return h?.times(SCALE)
+}
+
+//=== TEST CASE: pure_safe_nav_let_body_reads_global_Generic ===
+// The body of a `?.let` block is checked like any block.
+//! expect: reads global `OFFSET`
+global OFFSET: int = 1
+
+@pure
+fn bad_safe_nav_let(x: int?) -> int? {
+    return x?.let { x + OFFSET }
+}

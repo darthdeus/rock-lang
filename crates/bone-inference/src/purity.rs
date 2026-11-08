@@ -415,7 +415,7 @@ pub(crate) fn verify_pure_expr(
             ));
             go!(target);
         }
-        Expr::Call { callee, args, .. } => {
+        Expr::Call { .. } | Expr::SafeNavCall { .. } => {
             if let Some(&(mid, fid)) = resolved.get(&e) {
                 let callee_fn = &ws.module(mid).functions[fid];
                 if !fn_has_anno(callee_fn, "pure") && !fn_has_anno(callee_fn, "debug_impure") {
@@ -428,11 +428,37 @@ pub(crate) fn verify_pure_expr(
                     ));
                 }
             }
-            if let Callee::Value(ve) = callee {
-                go!(ve);
+            let (head, args) = match c.body.expr_arena[e] {
+                Expr::Call { callee, args, .. } => match callee {
+                    Callee::Value(ve) => (Some(ve), args),
+                    Callee::Local(_) | Callee::Unresolved { .. } => (None, args),
+                },
+                Expr::SafeNavCall { receiver, args, .. } => (Some(receiver), args),
+                _ => unreachable!("matched a call above"),
+            };
+            if let Some(head) = head {
+                go!(head);
             }
             for a in args {
                 go!(a);
+            }
+        }
+        Expr::SafeNavLet { receiver, body, .. } => {
+            go!(receiver);
+            go!(body);
+        }
+        Expr::InterpolatedString(parts) => {
+            for p in parts {
+                if let InterpPart::Value { expr, spec } = c.body.interp_part_arena[p] {
+                    go!(expr);
+                    for sub in spec
+                        .into_iter()
+                        .flat_map(|spec| [spec.width_expr, spec.precision_expr])
+                        .flatten()
+                    {
+                        go!(sub);
+                    }
+                }
             }
         }
         Expr::Block { statements, tail } => {
@@ -570,8 +596,6 @@ pub(crate) fn verify_pure_expr(
         // Match (incl. with-binding) and self-recursion are accepted: they are
         // referentially transparent. rock rejects match-bind / self-recursion
         // as scope-walker limitations; bone implements the intended rule.
-        // Remaining leaves (interpolation, safe-nav-let/call) carry no
-        // pinned side effect.
         _ => {}
     }
 }
