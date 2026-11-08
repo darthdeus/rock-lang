@@ -125,7 +125,21 @@ pub static COMMANDS: &[&CliCommand] = &[
         name: "backend-stats",
         route: Route::Direct(|cx| {
             let input = cx.get_path_or_current()?;
-            rock_cli::backend_stats::do_backend_stats(&input, cx.args.iters, cx.args.warmup)
+            let json = cx.args.perf_format == "json";
+            rock_cli::backend_stats::do_backend_stats(&input, cx.args.iters, cx.args.warmup, json)
+        }),
+    },
+    &CliCommand {
+        name: "incremental-stats",
+        route: Route::Direct(|cx| {
+            let path = cx.get_path_or_current()?;
+            let json = cx.args.perf_format == "json";
+            rock_cli::incremental_stats::incremental_stats(
+                &path,
+                cx.args.iters,
+                cx.args.warmup,
+                json,
+            )
         }),
     },
     &SHADER,

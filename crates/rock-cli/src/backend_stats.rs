@@ -88,7 +88,7 @@ struct SkullStats {
     concrete_stats: skull::concrete_body::ConcreteBuildStats,
 }
 
-pub fn do_backend_stats(input: &str, iters: usize, warmup: usize) -> Result<()> {
+pub fn do_backend_stats(input: &str, iters: usize, warmup: usize, json: bool) -> Result<()> {
     let iters = iters.max(1);
 
     // One source load, consumed by both backends so the input is identical. Both
@@ -106,7 +106,14 @@ pub fn do_backend_stats(input: &str, iters: usize, warmup: usize) -> Result<()> 
     let bone = run_bone(&sources, iters, warmup);
     let skull = run_skull(&sources, std::path::Path::new(input), iters, warmup);
 
-    print_report(input, iters, warmup, &bone, &skull);
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json_report(input, iters, warmup, &bone, &skull))?
+        );
+    } else {
+        print_report(input, iters, warmup, &bone, &skull);
+    }
     if skull.setup_failed || skull.emit_failed {
         let stage = if skull.setup_failed {
             "workspace setup"
@@ -576,6 +583,59 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             );
         }
     }
+}
+
+/// The machine-readable report: per-iteration means of the same boundary and
+/// phase timings the pretty report prints, without the one-run census lines.
+fn json_report(
+    input: &str,
+    iters: usize,
+    warmup: usize,
+    bone: &BoneStats,
+    skull: &SkullStats,
+) -> serde_json::Value {
+    let per = iters as f64;
+    let ms = |d: Duration| d.as_secs_f64() * 1000.0 / per;
+    let phases = |phases: &[(&'static str, Duration)], prefix: &str| -> serde_json::Value {
+        phases
+            .iter()
+            .filter_map(|(name, dur)| {
+                name.strip_prefix(prefix)
+                    .filter(|_| !prefix.is_empty() || !name.contains(": "))
+                    .map(|rest| (rest.to_string(), serde_json::json!(ms(*dur))))
+            })
+            .collect::<serde_json::Map<_, _>>()
+            .into()
+    };
+    let bone_phase_sum: Duration = bone.phases.iter().map(|(_, d)| *d).sum();
+    serde_json::json!({
+        "input": input,
+        "iters": iters,
+        "warmup": warmup,
+        "files": bone.files,
+        "bone": {
+            "ok": bone.ok,
+            "parse_ms": ms(bone.times.parse),
+            "semantic_ms": ms(bone.times.semantic),
+            "semantic_call_ms": ms(bone.times.semantic_call),
+            "stdlib_clone_ms": ms(bone.times.stdlib_clone),
+            "teardown_ms": ms(bone.times.semantic_call.saturating_sub(bone_phase_sum)),
+            "phases": phases(&bone.phases, ""),
+        },
+        "skull": {
+            "ok": skull.ok,
+            "parse_ms": ms(skull.times.parse),
+            "semantic_ms": ms(skull.times.semantic),
+            "workspace_setup_ms": ms(skull.times.workspace_setup),
+            "emit_ms": ms(skull.times.emit),
+            "setup_phases": phases(&skull.emit_phases, "setup: "),
+            "join_phases": phases(&skull.emit_phases, "join: "),
+            // Per-unit elapsed sums; they overlap under parallel emit, so they
+            // exceed `emit_ms` and are comparable only with each other.
+            "emit_phases": phases(&skull.emit_phases, ""),
+            "failure": skull.failure.as_ref().map(|e| e.to_string()),
+        },
+    })
 }
 
 fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skull: &SkullStats) {

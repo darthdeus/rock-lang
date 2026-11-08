@@ -4759,7 +4759,7 @@ mod backend_stats_workspace_tests {
             ),
             "fixture must exercise dependency-first entry selection without main.rock"
         );
-        let result = crate::backend_stats::do_backend_stats(project.to_str().unwrap(), 1, 0);
+        let result = crate::backend_stats::do_backend_stats(project.to_str().unwrap(), 1, 0, false);
         assert!(
             result.is_ok(),
             "profiling must use the invoked project's build vars: {result:?}"

@@ -67,14 +67,14 @@ mod tests {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum EditKind {
+pub(crate) enum EditKind {
     Body,
     Signature,
     Broken,
 }
 
 impl EditKind {
-    fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
             EditKind::Body => "body",
             EditKind::Signature => "signature",
@@ -91,21 +91,21 @@ impl EditKind {
 }
 
 #[derive(Clone)]
-struct FnStat {
-    file: String,
-    name: String,
-    line: u32,
-    name_off: usize,
-    span_start: usize,
-    span_end: usize,
-    body_bytes: usize,
-    params: usize,
-    has_ret: bool,
-    call_fan_in: usize,
-    mod_fan_in: usize,
+pub(crate) struct FnStat {
+    pub(crate) file: String,
+    pub(crate) name: String,
+    pub(crate) line: u32,
+    pub(crate) name_off: usize,
+    pub(crate) span_start: usize,
+    pub(crate) span_end: usize,
+    pub(crate) body_bytes: usize,
+    pub(crate) params: usize,
+    pub(crate) has_ret: bool,
+    pub(crate) call_fan_in: usize,
+    pub(crate) mod_fan_in: usize,
 }
 
-struct ModStat {
+pub(crate) struct ModStat {
     file: String,
     fns: usize,
     items: usize,
@@ -135,7 +135,7 @@ fn line_of(text: &str, off: usize) -> u32 {
     offset_to_position(text, off.min(text.len())).line + 1
 }
 
-fn read_survey_source(path: &str) -> Result<String> {
+pub(crate) fn read_survey_source(path: &str) -> Result<String> {
     std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("lsp-survey failed to read source `{path}`: {e}"))
 }
@@ -176,7 +176,7 @@ fn short(file: &str) -> String {
 
 /// Collect per-module + per-function stats for the PROJECT files (deps/stdlib
 /// excluded) from a warm Session's workspace.
-fn collect_stats(
+pub(crate) fn collect_stats(
     session: &bone_incremental::session::Session,
     proj_marker: &str,
 ) -> Result<(Vec<ModStat>, Vec<FnStat>)> {
@@ -313,7 +313,7 @@ fn make_broken_edit(orig: &str, f: &FnStat) -> Option<String> {
     Some(out)
 }
 
-fn make_edit(orig: &str, f: &FnStat, kind: EditKind) -> Option<String> {
+pub(crate) fn make_edit(orig: &str, f: &FnStat, kind: EditKind) -> Option<String> {
     match kind {
         EditKind::Body => make_body_edit(orig, f),
         EditKind::Signature => make_sig_edit(orig, f),

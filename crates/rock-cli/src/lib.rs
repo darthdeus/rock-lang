@@ -46,6 +46,7 @@ pub mod file_watcher;
 mod formatting;
 pub mod glsl_test;
 pub mod image_snapshot;
+pub mod incremental_stats;
 pub mod invocation_log;
 #[cfg(feature = "backend-js")]
 mod js_runner;
