@@ -191,7 +191,8 @@ fn ret_slot_decls(n: usize) -> String {
     format!("var {};\n", names.join(", "))
 }
 
-/// The widest result wire in `bodies`, as recorded by the owning ABI plans.
+/// The widest result wire in `bodies`, as recorded by the owning ABI plans and,
+/// for flat `ref` calls, by the lowering (`MirFunc::flat_call_lanes`).
 /// Call destinations are operational storage; their length is not a second
 /// ABI oracle.
 ///
@@ -210,7 +211,11 @@ fn max_multi_wire(bodies: &[&MirFunc]) -> Result<usize, CompilerError> {
         for (iid, inst) in mf.insts.iter() {
             match inst {
                 Inst::CallMulti { .. } | Inst::CallValueMulti { .. } => {
-                    if let Some(plan) = mf.call_abi_plans.get(&iid) {
+                    // A flat `ref` wire first: a flat-result call also keeps
+                    // its callee's declaration plan, which describes one lane.
+                    if let Some(&lanes) = mf.flat_call_lanes.get(&iid) {
+                        n = n.max(lanes);
+                    } else if let Some(plan) = mf.call_abi_plans.get(&iid) {
                         n = n.max(plan.result_lanes());
                     } else if let Some(plan) = mf.call_rep_plans.get(&iid) {
                         n = n.max(plan.return_lanes());

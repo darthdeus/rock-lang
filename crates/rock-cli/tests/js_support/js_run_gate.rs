@@ -184,6 +184,40 @@ fn js_run_project_dir_matches_luajit() {
     );
 }
 
+// A `value` row's borrow is stored flat and crosses calls as `vec, slot`, a
+// two-lane wire no declaration ABI plan describes; the program's return bank
+// must still be sized for it.
+#[test]
+fn js_run_value_row_borrow_runs_on_both_backends() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    let dir = std::env::temp_dir().join("rock_js_run_gate_value_row_borrow");
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("value_row_borrow.rock");
+    std::fs::write(
+        &path,
+        "value Cell { n: int }\n\
+         fn main() {\n\
+         \x20   let a: Arena<Cell> = arena_new()\n\
+         \x20   let h = a.insert(Cell { n: 10 })\n\
+         \x20   let cell: ref Cell = a.borrow(h).unwrap()\n\
+         \x20   cell.n = 11\n\
+         \x20   print(cell.n)\n\
+         \x20   print(h.get().unwrap().n)\n\
+         }\n",
+    )
+    .unwrap();
+
+    let (lua_out, lua_ok) = run(None, &path);
+    assert!(lua_ok, "luajit value-row borrow run failed:\n{lua_out}");
+    assert_eq!(lua_out, "11\n11\n");
+    let (js_out, js_ok) = run(Some("js"), &path);
+    assert!(js_ok, "js value-row borrow run failed:\n{js_out}");
+    assert_eq!(js_out, "11\n11\n");
+}
+
 // A modules-v1 package names its functions by qualified DefKey
 // (`<package>::main`), so the entry must be found by its declared name.
 #[test]

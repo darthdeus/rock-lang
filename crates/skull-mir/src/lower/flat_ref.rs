@@ -876,6 +876,7 @@ impl<'a> Builder<'a> {
                 args,
             });
             self.record_call(call, func, dc)?;
+            self.f.flat_call_lanes.insert(call, dests.len());
             let vec = self.emit_cur(Inst::Load(dests[0]));
             let slot = self.emit_cur(Inst::Load(dests[1]));
             return Ok(FlatCallOut::Flat(FlatRefVal { vec, slot, key }));
@@ -891,11 +892,12 @@ impl<'a> Builder<'a> {
         argv.extend(args);
         if let Some(key) = plan.ret {
             let dests = vec![self.f.new_cell(None), self.f.new_cell(None)];
-            self.emit_cur(Inst::CallValueMulti {
+            let call = self.emit_cur(Inst::CallValueMulti {
                 dests: dests.clone(),
                 callee,
                 args: argv,
             });
+            self.f.flat_call_lanes.insert(call, dests.len());
             let vec = self.emit_cur(Inst::Load(dests[0]));
             let slot = self.emit_cur(Inst::Load(dests[1]));
             return Ok(FlatCallOut::Flat(FlatRefVal { vec, slot, key }));
@@ -909,11 +911,12 @@ impl<'a> Builder<'a> {
             let dests: Vec<Idx<Cell>> = (0..shape.leaf_count())
                 .map(|_| self.f.new_cell(None))
                 .collect();
-            self.emit_cur(Inst::CallValueMulti {
+            let call = self.emit_cur(Inst::CallValueMulti {
                 dests: dests.clone(),
                 callee,
                 args: argv,
             });
+            self.f.flat_call_lanes.insert(call, dests.len());
             let leaves: Vec<Idx<Inst>> = dests
                 .iter()
                 .map(|c| self.emit_cur(Inst::Load(*c)))
@@ -928,11 +931,12 @@ impl<'a> Builder<'a> {
                 .into_iter()
                 .map(|ty| self.f.new_cell_typed(None, ty))
                 .collect();
-            self.emit_cur(Inst::CallValueMulti {
+            let call = self.emit_cur(Inst::CallValueMulti {
                 dests: dests.clone(),
                 callee,
                 args: argv,
             });
+            self.f.flat_call_lanes.insert(call, dests.len());
             let loads: Vec<Idx<Inst>> = dests
                 .iter()
                 .map(|c| self.emit_cur(Inst::Load(*c)))

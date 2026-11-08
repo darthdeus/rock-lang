@@ -623,6 +623,7 @@ pub fn convert_closures_framed(
             callee_instances: mf.callee_instances.clone(),
             call_abi_plans: mf.call_abi_plans.clone(),
             call_rep_plans: mf.call_rep_plans.clone(),
+            flat_call_lanes: mf.flat_call_lanes.clone(),
             closure_env_plans: mf.closure_env_plans.clone(),
             fn_value_symbols: mf.fn_value_symbols.clone(),
             hoisted_fn_globals: mf.hoisted_fn_globals.clone(),

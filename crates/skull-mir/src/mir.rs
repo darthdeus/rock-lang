@@ -1274,6 +1274,10 @@ pub struct MirFunc {
     /// function value has no declaration `Instance`, so its physical signature
     /// is carried directly beside the `CallValue`/`CallValueMulti` instruction.
     pub call_rep_plans: bone_semantic::prelude::FxHashMap<Idx<Inst>, crate::lower::FunctionRepPlan>,
+    /// The result width of each multi-value call whose wire is a flat element
+    /// `ref` (`vec, slot`) or a call to a hoisted flat variant. Neither has a
+    /// declaration plan that states it, so the lowering records it here.
+    pub flat_call_lanes: bone_semantic::prelude::FxHashMap<Idx<Inst>, usize>,
     /// The owned capture transport for each closure creation instruction. The
     /// closure transform consumes this instead of re-deriving captures from the
     /// rewritten CFG.
@@ -1418,6 +1422,7 @@ impl MirFunc {
             callee_instances: Default::default(),
             call_abi_plans: Default::default(),
             call_rep_plans: Default::default(),
+            flat_call_lanes: Default::default(),
             closure_env_plans: Default::default(),
             fn_value_symbols: Default::default(),
             hoisted_fn_globals: Vec::new(),

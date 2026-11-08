@@ -1438,6 +1438,7 @@ fn compact_live_template(
     remap_inst_table!(callee_instances);
     remap_inst_table!(call_abi_plans);
     remap_inst_table!(call_rep_plans);
+    remap_inst_table!(flat_call_lanes);
     remap_inst_table!(fn_value_symbols);
     remap_inst_table!(param_default_guards);
     remap_inst_table!(inst_logical_types);
@@ -2711,6 +2712,11 @@ fn import_spec_bindings(
     for (old_id, plan) in &callee.call_rep_plans {
         if let Some(&new_id) = inst_map.get(old_id) {
             func.call_rep_plans.insert(new_id, plan.clone());
+        }
+    }
+    for (old_id, &lanes) in &callee.flat_call_lanes {
+        if let Some(&new_id) = inst_map.get(old_id) {
+            func.flat_call_lanes.insert(new_id, lanes);
         }
     }
     for (old_id, plan) in &callee.closure_env_plans {
