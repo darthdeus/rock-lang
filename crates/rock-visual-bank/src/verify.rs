@@ -87,12 +87,9 @@ pub fn check_sheet(dir: &Path, spec: &SheetSpec) -> std::result::Result<String, 
                 .expect("relight sheets hold sheet.json");
             match serde_json::from_slice::<SheetGeometry>(&bytes) {
                 Ok(parsed) => {
-                    if let Err(error) = parsed.validate_layout(
-                        spec.png_size,
-                        geometry.0,
-                        geometry.1,
-                        geometry.2,
-                    ) {
+                    if let Err(error) =
+                        parsed.validate_layout(spec.png_size, geometry.0, geometry.1, geometry.2)
+                    {
                         problems.push(format!("{}: {error:#}", dir.display()));
                     }
                 }

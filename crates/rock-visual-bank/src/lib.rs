@@ -401,14 +401,23 @@ pub fn sheet_files(line: &Line) -> Vec<String> {
             .map(|channel| format!("{channel}.png"))
             .chain([SHEET_GEOMETRY.to_string()])
             .collect(),
-        Line::Surface(surface) => RELIGHT_CHANNELS.iter()
+        Line::Surface(surface) => RELIGHT_CHANNELS
+            .iter()
             .map(|channel| format!("{channel}.png"))
             .chain([SHEET_GEOMETRY.to_string()])
             .chain(surface.studio.as_ref().into_iter().flat_map(|studio| {
-                ["painted.png", "radiance.png"].into_iter()
-                    .chain(studio.skin.then_some(["skin-albedo.png", "skin-diffuse.png", "skin-specular.png"]).into_iter().flatten())
+                ["painted.png", "radiance.png"]
+                    .into_iter()
+                    .chain(
+                        studio
+                            .skin
+                            .then_some(["skin-albedo.png", "skin-diffuse.png", "skin-specular.png"])
+                            .into_iter()
+                            .flatten(),
+                    )
                     .map(str::to_string)
-            })).collect(),
+            }))
+            .collect(),
         Line::Prop(prop) => ["albedo.png", "normal.png", "material.png"]
             .into_iter()
             .map(str::to_string)
@@ -505,11 +514,16 @@ pub fn check_line(line: &Line) -> Result<()> {
             );
             anyhow::ensure!(finite(&surface.pivot), "pivot must be finite");
             let views = surface.camera.bases.len();
-            anyhow::ensure!(views == 1 || views == DIRECTION_COUNT, "surface requires one or eight camera bases");
+            anyhow::ensure!(
+                views == 1 || views == DIRECTION_COUNT,
+                "surface requires one or eight camera bases"
+            );
             surface.camera.validate_views(views)?;
             if let Some(studio) = &surface.studio {
-                anyhow::ensure!(studio.radiance_range.is_finite() && studio.radiance_range > 0.0,
-                    "studio radiance range must be finite and positive");
+                anyhow::ensure!(
+                    studio.radiance_range.is_finite() && studio.radiance_range > 0.0,
+                    "studio radiance range must be finite and positive"
+                );
             }
         }
         Line::Animation(a) => {
@@ -1001,31 +1015,73 @@ mod tests {
         let line: Line = serde_json::from_value(raw.clone()).unwrap();
         check_line(&line).unwrap();
         let files = sheet_files(&line);
-        for name in ["painted.png", "radiance.png", "skin-albedo.png", "skin-diffuse.png", "skin-specular.png"] {
+        for name in [
+            "painted.png",
+            "radiance.png",
+            "skin-albedo.png",
+            "skin-diffuse.png",
+            "skin-specular.png",
+        ] {
             assert!(files.contains(&name.to_string()), "missing {name}");
         }
-        let root = std::env::temp_dir().join(format!("surface-bank-{}-{}", std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let root = std::env::temp_dir().join(format!(
+            "surface-bank-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir(&root).unwrap();
         struct Cleanup(std::path::PathBuf);
-        impl Drop for Cleanup { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
         let _cleanup = Cleanup(root.clone());
         for name in &files {
-            if name.ends_with(".png") { image::RgbaImage::new(2, 2).save(root.join(name)).unwrap(); }
+            if name.ends_with(".png") {
+                image::RgbaImage::new(2, 2).save(root.join(name)).unwrap();
+            }
         }
-        std::fs::write(root.join(SHEET_GEOMETRY), serde_json::to_vec(&json!({
-            "rects":[[0,0,2,2,0,0,0]], "joints":{}
-        })).unwrap()).unwrap();
+        std::fs::write(
+            root.join(SHEET_GEOMETRY),
+            serde_json::to_vec(&json!({
+                "rects":[[0,0,2,2,0,0,0]], "joints":{}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let spec = sheet_spec(&line).unwrap().unwrap();
         check_sheet(&root, &spec).unwrap();
         std::fs::remove_file(root.join("radiance.png")).unwrap();
-        assert!(check_sheet(&root, &spec).unwrap_err().iter().any(|p| p.contains("radiance.png")));
-        image::RgbaImage::new(1, 2).save(root.join("radiance.png")).unwrap();
-        assert!(check_sheet(&root, &spec).unwrap_err().iter().any(|p| p.contains("expected 2x2")));
-        image::RgbaImage::new(2, 2).save(root.join("radiance.png")).unwrap();
-        std::fs::write(root.join(SHEET_GEOMETRY), serde_json::to_vec(&json!({
-            "rects":[[0,0,2,2,0,0,0],[0,0,2,2,0,0,0]], "joints":{}
-        })).unwrap()).unwrap();
+        assert!(
+            check_sheet(&root, &spec)
+                .unwrap_err()
+                .iter()
+                .any(|p| p.contains("radiance.png"))
+        );
+        image::RgbaImage::new(1, 2)
+            .save(root.join("radiance.png"))
+            .unwrap();
+        assert!(
+            check_sheet(&root, &spec)
+                .unwrap_err()
+                .iter()
+                .any(|p| p.contains("expected 2x2"))
+        );
+        image::RgbaImage::new(2, 2)
+            .save(root.join("radiance.png"))
+            .unwrap();
+        std::fs::write(
+            root.join(SHEET_GEOMETRY),
+            serde_json::to_vec(&json!({
+                "rects":[[0,0,2,2,0,0,0],[0,0,2,2,0,0,0]], "joints":{}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         assert!(check_sheet(&root, &spec).is_err());
         let mut bad = raw.clone();
         bad["camera"]["bases"] = json!([]);
@@ -1036,9 +1092,12 @@ mod tests {
         let mut character: Line = serde_json::from_value(json!({
             "kind":"character", "id":"actor", "draw_size":1.0,"padding_px":0.0,
             "camera":{"ground_y":0.0,"bases":[[0.,0.,0.,1.,0.,0.,0.,1.,0.,0.,0.,-1.]]}
-        })).unwrap();
+        }))
+        .unwrap();
         assert!(check_line(&character).is_err());
-        if let Line::Character(c) = &mut character { c.camera.bases = vec![c.camera.bases[0]; DIRECTION_COUNT]; }
+        if let Line::Character(c) = &mut character {
+            c.camera.bases = vec![c.camera.bases[0]; DIRECTION_COUNT];
+        }
         check_line(&character).unwrap();
     }
 
