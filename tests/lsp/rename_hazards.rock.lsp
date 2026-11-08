@@ -513,3 +513,219 @@ FILE: project.toml
 [package]
 name = "test"
 ===
+
+TEST: rename_shadowing_inner_local
+TYPE: rename
+---
+fn main() {
+    let x = 1
+    if true {
+        let «cursor»x = 2
+        print(x)
+    }
+    print(x)
+}
+---
+OPERATION: rename
+NEW_NAME: y
+---
+EXPECTED:
+fn main() {
+    let x = 1
+    if true {
+        let y = 2
+        print(y)
+    }
+    print(x)
+}
+===
+
+TEST: rename_shadowed_local_in_same_block
+TYPE: rename
+---
+fn main() {
+    let «cursor»x = 1
+    let x = x + 1
+    print(x)
+}
+---
+OPERATION: rename
+NEW_NAME: y
+---
+EXPECTED:
+fn main() {
+    let y = 1
+    let x = y + 1
+    print(x)
+}
+===
+
+TEST: rename_fn_from_ufcs_call
+TYPE: rename
+---
+struct Circle {
+    radius: float,
+}
+
+fn area(c: Circle) -> float {
+    return c.radius * c.radius
+}
+
+fn main() {
+    let c = Circle { radius: 1.0 }
+    print(c.«cursor»area())
+    print(area(c))
+}
+---
+OPERATION: rename
+NEW_NAME: size
+---
+EXPECTED:
+struct Circle {
+    radius: float,
+}
+
+fn size(c: Circle) -> float {
+    return c.radius * c.radius
+}
+
+fn main() {
+    let c = Circle { radius: 1.0 }
+    print(c.size())
+    print(size(c))
+}
+===
+
+TEST: rename_receiver_form_fn
+TYPE: rename
+---
+struct Point {
+    x: int,
+}
+
+fn Point.«cursor»shift(p, dx: int) -> int {
+    return p.x + dx
+}
+
+fn main() {
+    let p = Point { x: 1 }
+    print(p.shift(1))
+    print(shift(p, 2))
+}
+---
+OPERATION: rename
+NEW_NAME: nudge
+---
+EXPECTED:
+struct Point {
+    x: int,
+}
+
+fn Point.nudge(p, dx: int) -> int {
+    return p.x + dx
+}
+
+fn main() {
+    let p = Point { x: 1 }
+    print(p.nudge(1))
+    print(nudge(p, 2))
+}
+===
+
+TEST: rename_field_leaves_same_named_field_of_other_struct
+TYPE: rename
+---
+struct A {
+    «cursor»hp: int,
+}
+
+struct B {
+    hp: int,
+}
+
+fn main() {
+    let a = A { hp: 1 }
+    let b = B { hp: 2 }
+    print(a.hp + b.hp)
+}
+---
+OPERATION: rename
+NEW_NAME: health
+---
+EXPECTED:
+struct A {
+    health: int,
+}
+
+struct B {
+    hp: int,
+}
+
+fn main() {
+    let a = A { health: 1 }
+    let b = B { hp: 2 }
+    print(a.health + b.hp)
+}
+===
+
+TEST: rename_local_inside_string_interpolation
+TYPE: rename
+---
+fn main() {
+    let «cursor»n = 5
+    print("n = {n}")
+}
+---
+OPERATION: rename
+NEW_NAME: count
+---
+EXPECTED:
+fn main() {
+    let count = 5
+    print("n = {count}")
+}
+===
+
+TEST: rename_lambda_param
+TYPE: rename
+---
+fn main() {
+    let f = («cursor»a: int) => a + 1
+    print(f(1))
+}
+---
+OPERATION: rename
+NEW_NAME: b
+---
+EXPECTED:
+fn main() {
+    let f = (b: int) => b + 1
+    print(f(1))
+}
+===
+
+TEST: rename_struct_generic_param_edits_nothing
+TYPE: rename
+---
+struct Box<«cursor»T> {
+    value: T,
+}
+
+fn main() {
+    let b = Box { value: 1 }
+    print(b.value)
+}
+---
+OPERATION: rename
+NEW_NAME: U
+---
+EXPECTED:
+struct Box<T> {
+    value: T,
+}
+
+fn main() {
+    let b = Box { value: 1 }
+    print(b.value)
+}
+===

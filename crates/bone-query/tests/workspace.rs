@@ -1176,6 +1176,28 @@ fn references_from_a_named_arg_label_find_the_resolved_overloads_param() {
 }
 
 #[test]
+fn prepare_rename_agrees_with_rename_on_refusals_and_nothing_to_rename() {
+    let src = "inline(lua) fn probe(x: int) -> int = \"return x\"\nmacro double(v: expr) -> int { v + v }\nstruct Box<T> {\n  value: T,\n}\nfn main() {\n  print(probe(double(1)))\n}\n";
+    let bone = fresh(src);
+    let refusal = |pos| {
+        let prepared = bone.prepare_rename(PATH, pos).unwrap_err();
+        let renamed = bone.rename(PATH, pos, "renamed").unwrap_err();
+        assert_eq!(prepared, renamed, "prepare and rename refuse alike");
+        prepared.0
+    };
+    let param = refusal(Position::new(0, 21));
+    assert!(param.contains("inline(lua) body of `probe`"), "{param}");
+    let mac = refusal(Position::new(6, 15));
+    assert!(mac.contains("cannot rename a macro"), "{mac}");
+    // A struct generic has no reference walk: nothing to rename, no reason.
+    assert_eq!(bone.prepare_rename(PATH, Position::new(2, 11)), Ok(None));
+    assert!(matches!(
+        bone.rename(PATH, Position::new(2, 11), "U"),
+        Ok(None)
+    ));
+}
+
+#[test]
 fn prepare_rename_on_a_function_definition_name_returns_the_name_range() {
     // F2 on the `fn load_image_asset` declaration name must offer a rename
     // ranged on the identifier -- not report "nothing to rename". (Regression:
