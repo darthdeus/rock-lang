@@ -4664,7 +4664,7 @@ fn anno_int(annos: &[bone_semantic::hir::Annotation], name: &str) -> Option<i64>
 /// too would make the emitter a second authority on what an array holds, free to
 /// disagree with the one that computed the offsets. Which kinds are ADMITTED is
 /// likewise `uniform_array_block`'s answer, not this function's -- it rejects
-/// `Vec3`/`Mat4`/`bool` with a span, so re-stating the set here would be the same
+/// `Vec3`/`Mat4`/`bool`/`uint` with a span, so re-stating the set here would be the same
 /// drift one level down.
 fn uniform_array_elem(
     ws: &Workspace,

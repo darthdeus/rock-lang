@@ -713,12 +713,13 @@ fn oversized(block_name: Ustr, member: Ustr, span: Span, size: u64) -> CompilerE
 
 /// Lay out one stage's `UniformArray<T>` params as a std140 array block.
 ///
-/// The admitted element kinds are exactly the set the GLSL emitter admits
-/// (`array_elem_kind` there): float, int, Vec2, Vec4. `Vec3` is refused because
-/// its base alignment is 16 while its size is 12, so an array of them is neither
-/// tightly packed nor stride-12; `Mat4` and `bool` are simply not offered yet.
-/// Both sides refusing the same set is what stops the layout and the declaration
-/// drifting into disagreeing about what an array may hold.
+/// The admitted element kinds are exactly the set the host array lane can push
+/// (`wire_kind_components` in Stone's `uniform_block.rock`): float, int, Vec2,
+/// Vec4. The GLSL emitter declares whatever this admits, so this is the one
+/// gate. `Vec3` is refused because its base alignment is 16 while its size is
+/// 12, so an array of them is neither tightly packed nor stride-12; `Mat4`,
+/// `bool` and `uint` have no host push, so a declared member could never be
+/// filled and every draw would fail the unfilled-block gate.
 pub fn uniform_array_block(
     block_name: Ustr,
     decls: &[ArrayMemberDecl],
@@ -734,16 +735,17 @@ pub fn uniform_array_block(
 
     for d in decls {
         let stride = match d.elem {
-            WireKind::F32 | WireKind::I32 | WireKind::U32 | WireKind::F32x2 | WireKind::F32x4 => {
+            WireKind::F32 | WireKind::I32 | WireKind::F32x2 | WireKind::F32x4 => {
                 // An array's stride is its element's base alignment rounded up
                 // to 16. Every kind here rounds to 16; computed rather than
                 // written as a literal so a new kind cannot inherit it silently.
                 round_up(d.elem.align(), 16)
             }
-            WireKind::F32x3 | WireKind::Mat4 | WireKind::Bool32 => {
+            WireKind::F32x3 | WireKind::Mat4 | WireKind::Bool32 | WireKind::U32 => {
                 let name = match d.elem {
                     WireKind::F32x3 => "Vec3",
                     WireKind::Mat4 => "Mat4",
+                    WireKind::U32 => "uint",
                     _ => "bool",
                 };
                 return Err(CompilerError::new_with_label(

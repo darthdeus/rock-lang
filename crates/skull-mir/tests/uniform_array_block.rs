@@ -213,6 +213,29 @@ fn a_mat4_array_is_rejected() {
     );
 }
 
+/// `uint` has a std140 form as a scalar block member, but the host array lane
+/// has no push for it: `__array_push` knows float, int, Vec2 and Vec4 only, so a
+/// declared `uint[N]` member could never be filled and the upload gate would
+/// refuse every draw. The layout admits exactly what the host can pack.
+#[test]
+fn a_uint_array_is_rejected() {
+    let e = uniform_array_block(Ustr::from("arrays"), &[decl("a", WireKind::U32, 4)])
+        .expect_err("uint arrays are not admitted");
+    assert!(e.message.contains("`uint`"), "{}", e.message);
+    assert!(
+        e.message.contains("allowed: float, int, Vec2, Vec4"),
+        "{}",
+        e.message
+    );
+}
+
+#[test]
+fn a_bool_array_is_rejected() {
+    let e = uniform_array_block(Ustr::from("arrays"), &[decl("a", WireKind::Bool32, 4)])
+        .expect_err("bool arrays are not admitted");
+    assert!(e.message.contains("`bool`"), "{}", e.message);
+}
+
 /// The fingerprint separates layouts a size comparison cannot. Two blocks with
 /// the same total and the same offsets differ only in element KIND or in NAME,
 /// and the driver resolves members by name.

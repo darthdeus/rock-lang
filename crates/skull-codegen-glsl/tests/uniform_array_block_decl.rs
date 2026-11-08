@@ -275,6 +275,82 @@ fn members_carry_the_std140_layout_the_host_packs_against() {
     assert_eq!(p.size, 1024);
 }
 
+/// Every element kind the array lane admits, in one block: the declaration's
+/// spelling, the std140 offsets and stride, and the wire codes the host's
+/// `wire_kind_components` table reads (float 0, Vec2 1, Vec4 3, int 4) all come
+/// from one plan and must agree member by member.
+#[test]
+fn every_admitted_element_kind_declares_and_lays_out_consistently() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {
+            return Vary { position: Vec4 { x: a.aPos.x, y: 0.0, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(
+            vary: Vary,
+            @size(3) fs: UniformArray<float>,
+            @size(5) is: UniformArray<int>,
+            @size(2) v2s: UniformArray<Vec2>,
+            @size(4) v4s: UniformArray<Vec4>,
+        ) -> Vec4 {
+            let f = at(fs, 0)
+            let i = at(is, 0)
+            let p = at(v2s, 0)
+            let c = at(v4s, 0)
+            return Vec4 { x: f + p.x + (i as float), y: c.y, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let e = emit(src, "vt", "fr");
+    let p = block_at(&e, 4);
+    assert_eq!(
+        layout(p),
+        vec![
+            ("fs", 3, 0, 16),
+            ("is", 5, 48, 16),
+            ("v2s", 2, 128, 16),
+            ("v4s", 4, 160, 16)
+        ]
+    );
+    assert_eq!(p.size, 224);
+    let codes: Vec<u32> = p.members.iter().map(|m| m.elem.code()).collect();
+    assert_eq!(codes, vec![0, 4, 1, 3]);
+    let src = &e.source;
+    for line in [
+        "    float fs[3];",
+        "    int is[5];",
+        "    vec2 v2s[2];",
+        "    vec4 v4s[4];",
+    ] {
+        assert!(src.contains(line), "missing `{line}`:\n{src}");
+    }
+}
+
+/// `uint` is a scalar block kind, but an array of it has no host push, so the
+/// emitter refuses it at the `@size` param rather than declaring a block the
+/// runtime can never fill.
+#[test]
+fn a_uint_array_is_rejected_at_emission() {
+    let src = r#"
+        value QV { aPos: Vec2 }
+        value Vary { position: Vec4 }
+        @shader(vertex)
+        fn vt(@attr a: QV) -> Vary {
+            return Vary { position: Vec4 { x: a.aPos.x, y: 0.0, z: 0.0, w: 1.0 } }
+        }
+        @shader(fragment)
+        fn fr(vary: Vary, @size(4) masks: UniformArray<uint>) -> Vec4 {
+            let m = at(masks, 0)
+            return Vec4 { x: (m as int) as float, y: 0.0, z: 0.0, w: 1.0 }
+        }
+    "#;
+    let msg = emit_err(src, "vt", "fr");
+    assert!(msg.contains("`uint`"), "got: {msg}");
+    assert!(msg.contains("masks"), "got: {msg}");
+}
+
 #[test]
 fn the_array_blocks_fingerprint_travels_with_it() {
     let e = emit(VERTEX_ARRAYS, "vt", "fr");
