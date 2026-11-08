@@ -164,18 +164,18 @@ pub(super) struct UnitOut {
     /// A rejection that fails the compile.
     pub(super) hard_error: Option<CompilerError>,
     /// `(emit_key, direct_global_reads, direct_callees)` for global-init ordering.
-    refs: Option<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
+    pub(super) refs: Option<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
     /// `(global_name, init_key, load_line)` for a global initializer.
     pub(super) pending_init: Option<(Ustr, Ustr, String)>,
     /// Callees this definition still calls -- reachability roots, since decorator
     /// bodies and global initializers are always emitted.
-    calls: Vec<FuncRef>,
+    pub(super) calls: Vec<FuncRef>,
     /// Specialized callees this definition needs emitted (see `Chunk::specs`).
     pub(super) specs: Vec<skull_mir::bound::SpecDemand>,
     /// Compiler-owned logical callable identities in this emitted body.
     pub(super) code_artifact: skull_mir::code_identity::CodeArtifact,
     /// Module-global names read/written (fn-as-value edges; see `Chunk`).
-    global_names: Vec<Ustr>,
+    pub(super) global_names: Vec<Ustr>,
     /// Comptime inputs this unit's body baked in (`build_var`/`embed_string`).
     /// Always-emitted units have no Chunk to carry these, and ALL in-tree
     /// production comptime reads are global initializers -- dropping them here
@@ -220,37 +220,4 @@ pub(super) fn emit_lowered(
     let regalloc = skull_codegen_lua::regalloc_time_elapsed().min(t_emit);
     out.times.regalloc += regalloc;
     out.times.regalloc_work |= regalloc > Duration::ZERO;
-}
-
-/// Fold parallel `UnitOut`s back into the chunk IN ORDER: append each unit's Lua,
-/// collect call-graph facts / pending inits, sum phase times.
-pub(super) fn merge_units(
-    results: Vec<UnitOut>,
-    out: &mut String,
-    direct_globals: &mut FxHashMap<Ustr, Vec<Ustr>>,
-    direct_calls: &mut FxHashMap<Ustr, Vec<Ustr>>,
-    pending_inits: &mut Vec<(Ustr, Ustr, String)>,
-    calls: &mut Vec<FuncRef>,
-    global_names: &mut Vec<Ustr>,
-    code_artifact: &mut skull_mir::code_identity::CodeArtifact,
-    allocation_bodies: &mut Vec<crate::allocation_report::AllocationBody>,
-    attribution: &mut AttributionAccumulator,
-    times: &mut PhaseTimes,
-) {
-    for u in results {
-        out.push_str(&u.lua);
-        if let Some((k, gs, cs)) = u.refs {
-            direct_globals.insert(k, gs);
-            direct_calls.insert(k, cs);
-        }
-        if let Some(pi) = u.pending_init {
-            pending_inits.push(pi);
-        }
-        calls.extend(u.calls);
-        global_names.extend(u.global_names);
-        code_artifact.merge(u.code_artifact);
-        allocation_bodies.extend(u.allocation_bodies);
-        attribution.add_unit(&u.attribution);
-        times.add(&u.times);
-    }
 }

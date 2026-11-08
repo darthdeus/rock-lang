@@ -79,24 +79,10 @@ pub(super) fn artifact_fingerprint(
     })
 }
 
-pub(super) fn assemble(
-    ws: &Workspace,
-    cache: &mut SkullEmitCache,
-    built_specs: &mut Vec<(Instance, Chunk)>,
-    lifetime: CacheLifetime,
-) -> Result<(MirEmit, FxHashSet<Instance>, UnitComptimeReads), CompilerError> {
-    let cg = &cache.cg;
-    let scx = &cache.scx;
-    let mut release_stats = CompileReleaseStats {
-        retained_dependency_edges: cache.dependents.values().map(|keys| keys.len()).sum(),
-        retained_static_keys: cache.static_key_baseline.len(),
-        ..CompileReleaseStats::default()
-    };
-    let mut compile_counts = CompileCounts {
-        concrete_plans: cache.concrete.plans.len() + cache.concrete.always_plans.len(),
-        chunks: cache.chunks.len(),
-        dependency_edges: None,
-    };
+/// What one assembly accumulates while it pulls every emitted definition into
+/// the program text, in the order `assemble` visits them.
+struct Assembly {
+    out: String,
     // Per-stage lower/cleanup/emit/regalloc times: chunk times (captured during the
     // parallel `emit_full`/`emit_incremental` chunk build) summed in as chunks are
     // pulled, plus the decorator/global units re-emitted here. Under parallel emit
@@ -104,7 +90,384 @@ pub(super) fn assemble(
     // total `backend-stats` measures). `t_scaffold` is the directly-timed
     // SEQUENTIAL remainder (prelude/value-structs/type-tables + global-init
     // ordering + deco application).
-    let mut times = PhaseTimes::default();
+    times: PhaseTimes,
+    t_scaffold: Duration,
+    attribution: AttributionAccumulator,
+    needed_specs: Vec<skull_mir::bound::SpecDemand>,
+    rejections: Rejections,
+    direct_globals: FxHashMap<Ustr, Vec<Ustr>>,
+    direct_calls: FxHashMap<Ustr, Vec<Ustr>>,
+    all_statics: Vec<skull_mir::mir::StaticCell>,
+    code_artifact: skull_mir::code_identity::CodeArtifact,
+    allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
+    always_emitted_calls: Vec<FuncRef>,
+    always_emitted_names: Vec<Ustr>,
+    unit_reads: UnitComptimeReads,
+    definitions: LuaDefinitionBuffer,
+    // Second pass of the callee binding: every factory's
+    // `<name> = __rock_mk_<name>(<callees>)` line, emitted after EVERY
+    // definition and in ascending call-graph component rank, so each captured
+    // callee is already its final closure.
+    callee_binds: Vec<skull_codegen_lua::CalleeBindingPlan>,
+    emits_main: bool,
+}
+
+impl Assembly {
+    fn new(cache: &SkullEmitCache) -> Self {
+        Self {
+            out: String::new(),
+            times: PhaseTimes::default(),
+            t_scaffold: Duration::ZERO,
+            attribution: candidate_setup_attribution(cache),
+            needed_specs: Vec::new(),
+            rejections: Rejections::default(),
+            direct_globals: FxHashMap::default(),
+            direct_calls: FxHashMap::default(),
+            all_statics: Vec::new(),
+            code_artifact: skull_mir::code_identity::CodeArtifact::default(),
+            allocation_bodies: Vec::new(),
+            always_emitted_calls: Vec::new(),
+            always_emitted_names: Vec::new(),
+            unit_reads: UnitComptimeReads::default(),
+            definitions: LuaDefinitionBuffer::new(),
+            callee_binds: Vec::new(),
+            emits_main: false,
+        }
+    }
+
+    /// Fold parallel `UnitOut`s back into the chunk IN ORDER: append each unit's Lua,
+    /// collect call-graph facts / pending inits, sum phase times.
+    fn merge_units(
+        &mut self,
+        results: Vec<UnitOut>,
+        out: &mut String,
+        pending_inits: &mut Vec<(Ustr, Ustr, String)>,
+    ) {
+        for u in results {
+            out.push_str(&u.lua);
+            if let Some((k, gs, cs)) = u.refs {
+                self.direct_globals.insert(k, gs);
+                self.direct_calls.insert(k, cs);
+            }
+            if let Some(pi) = u.pending_init {
+                pending_inits.push(pi);
+            }
+            self.always_emitted_calls.extend(u.calls);
+            self.always_emitted_names.extend(u.global_names);
+            self.code_artifact.merge(u.code_artifact);
+            self.allocation_bodies.extend(u.allocation_bodies);
+            self.attribution.add_unit(&u.attribution);
+            self.times.add(&u.times);
+        }
+    }
+
+    /// IR-agnostic load-time scaffolding.
+    fn push_scaffold_prelude(
+        &mut self,
+        ws: &Workspace,
+        scx: &skull_mir::lower::ScalarCtx,
+    ) -> Result<(), CompilerError> {
+        let ts = Instant::now();
+        let out = &mut self.out;
+        out.push_str(crate::runtime_prelude());
+        if crate::allocation_report::activation_enabled() {
+            out.push_str(skull_codegen_lua::ALLOCATION_ACTIVATION_PRELUDE);
+        }
+        out.push_str(&crate::enum_cdata_defs(ws));
+        let rep_arena = scx.rep_arena();
+        let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws, &rep_arena)?;
+        out.push_str(&vdefs);
+        out.push_str(&crate::value_struct_gc_defs(ws, &value_gc, &rep_arena)?);
+        out.push_str(&crate::value_struct_metatypes(ws, &value_emitted));
+        out.push_str(&crate::enum_cdata_metatypes(ws));
+        out.push_str(&crate::c_struct_inspect_defs(ws, &value_emitted));
+        out.push_str(&crate::type_table_defs(ws, &value_gc)?);
+        out.push_str(&crate::enum_runtime_defs(ws));
+        self.t_scaffold += ts.elapsed();
+        Ok(())
+    }
+
+    /// Decorator DEFINITIONS, workspace-wide: each `deco <name> { .. }` -> a fn
+    /// `__deco_<name>(target, <params>)`. `deco_map` is built up front (sequential,
+    /// cheap) because an application usually names a decorator declared in another
+    /// module; the definition bodies themselves lower+emit in parallel.
+    fn push_decorator_definitions(&mut self, ws: &Workspace, cache: &SkullEmitCache) -> DecoMap {
+        let (deco_map, deco_items) = build_deco_map(ws);
+        let deco_results = par_map(deco_items, |(mid, did)| {
+            emit_decorator_unit(ws, &cache.scx, &cache.cg, &cache.concrete, mid, did)
+        });
+        self.rejections.extend(unit_errors(&deco_results));
+        self.needed_specs
+            .extend(deco_results.iter().flat_map(|u| u.specs.iter().cloned()));
+        for u in &deco_results {
+            self.unit_reads
+                .decorators
+                .extend(u.comptime_reads.iter().cloned());
+        }
+        let mut decorator_lua = String::new();
+        self.merge_units(deco_results, &mut decorator_lua, &mut Vec::new());
+        let mut decorator_definitions = LuaDefinitionBuffer::new();
+        decorator_definitions.push_str(&decorator_lua);
+        decorator_definitions.append_to(&mut self.out);
+        deco_map
+    }
+
+    /// Global initializers are emitted later, in their original slot, but they are
+    /// LOWERED here: their call edges are reachability roots (a global init is
+    /// always emitted), so the walk needs them before the fn-def loop runs.
+    /// Returns the initializer definitions and their pending init lines.
+    fn lower_global_units(
+        &mut self,
+        ws: &Workspace,
+        cache: &SkullEmitCache,
+    ) -> (String, Vec<(Ustr, Ustr, String)>) {
+        let mut pending_inits: Vec<(Ustr, Ustr, String)> = Vec::new();
+        let global_items: Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> = ws
+            .modules
+            .iter()
+            .filter(|m| m.id != ModuleId::builtin())
+            .flat_map(|m| m.globals.iter().map(move |(gid, _)| (m.id, gid)))
+            .collect();
+        let global_keys = global_items.clone();
+        let global_results = par_map(global_items, |(mid, gid)| {
+            emit_global_unit(ws, &cache.scx, &cache.cg, &cache.concrete, mid, gid)
+        });
+        // par_map preserves input order, so keys and results zip positionally --
+        // the same pairing merge_units relies on for output order.
+        for (key, u) in global_keys.iter().zip(global_results.iter()) {
+            if !u.comptime_reads.is_empty() {
+                self.unit_reads
+                    .globals
+                    .insert(*key, u.comptime_reads.clone());
+            }
+        }
+        self.rejections.extend(unit_errors(&global_results));
+        self.needed_specs
+            .extend(global_results.iter().flat_map(|u| u.specs.iter().cloned()));
+        let mut globals_lua = String::new();
+        self.merge_units(global_results, &mut globals_lua, &mut pending_inits);
+        (globals_lua, pending_inits)
+    }
+
+    /// Function definitions, every module (cached chunk for ordinary/coroutine,
+    /// regenerated for extern / inline(lua)). The cached chunks were built in
+    /// parallel by `emit_full`/`emit_incremental`; here we pull their Lua and sum
+    /// their captured phase times back into the breakdown.
+    fn push_function_definitions(
+        &mut self,
+        ws: &Workspace,
+        cache: &SkullEmitCache,
+        needed_foreign: &FxHashSet<Instance>,
+    ) -> Result<(), CompilerError> {
+        for module in ws.modules.iter() {
+            if module.id == ModuleId::builtin() {
+                continue;
+            }
+            let mid = module.id;
+            for (fid, f) in module.functions.iter() {
+                let self_ref = FuncRef {
+                    module: mid,
+                    func: fid,
+                };
+                // A JS-backend decl (`inline(js)` / `extern(js)`) is inert on luajit:
+                // its lua sibling (if any) carries the binding, and a js-only call from
+                // lua-reachable code is rejected at call lowering (resolve_funcref).
+                if f.backend == bone_semantic::hir::FnBackend::Js {
+                    continue;
+                }
+                // Whole-program DCE gates both chunk construction and definition
+                // emission. Retained bodies still fail hard when their plan or chunk
+                // is missing; pruned dependency bodies have neither by design.
+                let emit_def = should_emit_via_view(ws, &cache.lua_view, self_ref);
+                if f.is_extern {
+                    // An `extern(ffi, "lib")` fn needs a thin wrapper binding it to the
+                    // loaded library handle. A non-ffi extern is a pre-existing global.
+                    //
+                    // Gated by the VIEW like every other definition. `is_emission_root`
+                    // roots every `extern`, so in practice the view retains them all
+                    // and this changes no output -- but an ungated write is a second
+                    // population input, and one is the whole point of the cut.
+                    if let Some(lib) = f.ffi_lib {
+                        let (nm, params, body) = ffi_extern_wrapper(ws, f, lib)?;
+                        // The rejection above runs for EVERY extern; only the WRITE
+                        // is gated. Pruning may change which definitions are emitted
+                        // and nothing else -- gating the whole arm suppressed
+                        // `extern_ret`'s unbound-generic rejection, whose subject is
+                        // a generic declaration the view holds no base instance for.
+                        if emit_def {
+                            let prologue = default_fill_prologue(ws, mid, fid, f);
+                            self.definitions.push_str(&format!(
+                                "function {nm}({params})\n{prologue}{body}\nend\n"
+                            ));
+                        }
+                    }
+                    continue;
+                }
+                if let Some((_, body)) = f.inline_body {
+                    // Retention alone (`emit_def`) over-emits here -- see
+                    // `needed_foreign`'s doc. Three independent reasons still force
+                    // emission regardless of splicing eligibility: a publication
+                    // obligation (`@nomangle`), a residual (non-spliced) demand, or
+                    // being a ROOT in its own right (an own-project inline(lua) fn
+                    // is unconditionally rooted by `is_emission_root` even with no
+                    // caller at all -- same reasoning as `main`/`@sim`/`@test`;
+                    // found empirically, `anvil`'s `sv_close`/`sv_is_eof` etc. have
+                    // no call site anywhere in the corpus and are rooted purely by
+                    // living in the project's own file).
+                    if !emits_foreign_definition(ws, &cache.lua_view, needed_foreign, self_ref) {
+                        continue;
+                    }
+                    self.definitions.push_str(&inline_lua_definition(
+                        ws,
+                        &cache.scx,
+                        self_ref,
+                        f,
+                        body.as_str(),
+                    ));
+                    continue;
+                }
+                // An `Iterator`-bounded fn has no standalone emission (it exists
+                // only inlined at its call sites) -- deliberately absent.
+                if fn_has_bounds(f) {
+                    continue;
+                }
+                // A generic declaration has no definition of its own. Its bodies are
+                // its instances, rendered below by `emit_specialized_callees`.
+                if is_generic(f) {
+                    continue;
+                }
+                self.pull_cached_chunk(ws, cache, self_ref, f, emit_def);
+            }
+        }
+        Ok(())
+    }
+
+    /// Ordinary / coroutine: pull the cached chunk.
+    fn pull_cached_chunk(
+        &mut self,
+        ws: &Workspace,
+        cache: &SkullEmitCache,
+        self_ref: FuncRef,
+        f: &bone_semantic::hir::Function,
+        emit_def: bool,
+    ) {
+        match cache.chunks.get(&shared(self_ref)) {
+            Some(Ok(chunk)) => {
+                let key = Ustr::from(&mangle_fn(ws, f));
+                self.direct_globals
+                    .insert(key, chunk.direct_globals.clone());
+                self.direct_calls.insert(key, chunk.direct_calls.clone());
+                self.times.add(&chunk.times);
+                self.attribution.add_unit(&chunk.attribution);
+                if emit_def {
+                    self.emits_main |= key.as_str() == "main";
+                    self.definitions.push_str(&chunk.lua);
+                    self.callee_binds.extend(chunk.binds.iter().cloned());
+                    self.allocation_bodies
+                        .extend(chunk.allocation_bodies.iter().cloned());
+                    self.code_artifact.merge_ref(&chunk.code_artifact);
+                    // A dropped definition's `static` cells do not exist, so
+                    // they must not be registered for hot-reload preservation.
+                    self.all_statics.extend(chunk.statics.iter().cloned());
+                    // Only a body that is actually emitted can call one.
+                    self.needed_specs.extend(chunk.specs.iter().cloned());
+                }
+            }
+            Some(Err(_)) if !emit_def => {}
+            Some(Err(err)) => self.rejections.push(err.clone()),
+            None if !emit_def => {}
+            None => self.rejections.push(CompilerError::new_with_label(
+                f.name_span,
+                format!("internal: `{}` has no emitted chunk", f.name),
+            )),
+        }
+    }
+
+    /// Order the init lines by their transitive global-read closure over the full
+    /// call graph (now that every fn's direct facts are recorded), then append the
+    /// static resets, the initializer calls and the remaining load-time
+    /// registrations.
+    fn push_initializers(
+        &mut self,
+        ws: &Workspace,
+        cache: &SkullEmitCache,
+        pending_inits: Vec<(Ustr, Ustr, String)>,
+        deco_map: &DecoMap,
+        has_code_slot_publication: bool,
+        has_definition_plan: bool,
+        lifecycle_declarations: bool,
+    ) -> Result<(), CompilerError> {
+        let scx = &cache.scx;
+        let ts = Instant::now();
+        let reach =
+            skull_mir::reach::transitive_global_reads(&self.direct_globals, &self.direct_calls);
+        let leaf_owner = global_leaf_owners(ws, scx)?;
+        let inits: Vec<PendingInit<String>> = pending_inits
+            .into_iter()
+            .map(|(name, init_name, line)| PendingInit {
+                name,
+                deps: reach.deps_of(init_name),
+                item: line,
+            })
+            .collect();
+        let static_resets = static_reset_lines(ws, scx, &self.all_statics)?;
+        let out = &mut self.out;
+        out.push_str(&static_resets);
+        let init_lines = sort_global_init_lines(inits, &leaf_owner)?;
+        out.push_str(&state_initializer_lua(&init_lines));
+
+        // Decorator APPLICATIONS (after global inits so a deco body can push a global).
+        out.push_str(&decorator_application_lines(ws, deco_map, scx)?);
+        // `@sim` registrations (after fn + global defs; same init slot as rock).
+        if cache.build_kind == BuildKind::Program {
+            out.push_str(&sim_registration_lines(
+                ws,
+                scx,
+                cache.selected_sim_functions.as_ref(),
+            )?);
+        }
+        // `rock_shader` pipeline registrations:
+        // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
+        // reload re-`dofile`s them with the new source (hot-reload parity).
+        out.push_str(&cache.shader_registrations.lua);
+        if has_code_slot_publication {
+            out.push_str(code_slot_publish_lua(
+                &self.code_artifact,
+                has_definition_plan,
+                lifecycle_declarations,
+            ));
+        }
+        // Closes the block the runtime prelude opens (the storage cell becomes a
+        // closed upvalue here); anything appended after this line runs outside it.
+        out.push_str("end\n");
+        self.t_scaffold += ts.elapsed();
+        Ok(())
+    }
+
+    /// `times.emit` brackets emit_function/emit_named/emit_coroutine; `times.regalloc`
+    /// is the subset spent in `color_values` inside them (per-unit reset/read, exact
+    /// even under parallel emit). stringify = the remainder.
+    fn phases(&self) -> Vec<(&'static str, Duration)> {
+        let times = &self.times;
+        let t_stringify = times.emit - times.regalloc;
+        vec![
+            ("lower hir->mir", times.lower),
+            ("inline plan+splice", times.inline),
+            ("cleanup mir", times.cleanup),
+            ("closure conversion", times.closure),
+            ("counted-loop recovery", times.counted_loop),
+            ("hoisted-body inline", times.hoisted_inline),
+            ("post-transform validation", times.validation),
+            ("emit: regalloc", times.regalloc),
+            ("emit: stringify", t_stringify),
+            ("scaffold+callgraph+order", self.t_scaffold),
+        ]
+    }
+}
+
+/// The inline-candidate table's setup counters, the starting point of this
+/// assembly's attribution.
+fn candidate_setup_attribution(cache: &SkullEmitCache) -> AttributionAccumulator {
     let mut attribution = AttributionAccumulator {
         census_enabled: cache.inline_cache.census_enabled(),
         ..AttributionAccumulator::default()
@@ -157,144 +520,30 @@ pub(super) fn assemble(
             }
         }
     }
-    let mut t_scaffold = Duration::ZERO;
-    let mut needed_specs: Vec<skull_mir::bound::SpecDemand> = Vec::new();
-    let mut rejections = Rejections::default();
-    let mut direct_globals: FxHashMap<Ustr, Vec<Ustr>> = FxHashMap::default();
-    let mut direct_calls: FxHashMap<Ustr, Vec<Ustr>> = FxHashMap::default();
-    let mut all_statics: Vec<skull_mir::mir::StaticCell> = Vec::new();
-    let mut code_artifact = skull_mir::code_identity::CodeArtifact::default();
-    let mut allocation_bodies = Vec::new();
+    attribution
+}
 
-    // IR-agnostic load-time scaffolding.
-    let ts = Instant::now();
-    let mut out = String::from(crate::runtime_prelude());
-    if crate::allocation_report::activation_enabled() {
-        out.push_str(skull_codegen_lua::ALLOCATION_ACTIVATION_PRELUDE);
-    }
-    out.push_str(&crate::enum_cdata_defs(ws));
-    let rep_arena = scx.rep_arena();
-    let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws, &rep_arena)?;
-    out.push_str(&vdefs);
-    out.push_str(&crate::value_struct_gc_defs(ws, &value_gc, &rep_arena)?);
-    out.push_str(&crate::value_struct_metatypes(ws, &value_emitted));
-    out.push_str(&crate::enum_cdata_metatypes(ws));
-    out.push_str(&crate::c_struct_inspect_defs(ws, &value_emitted));
-    out.push_str(&crate::type_table_defs(ws, &value_gc)?);
-    out.push_str(&crate::enum_runtime_defs(ws));
-    t_scaffold += ts.elapsed();
-
-    // Decorator DEFINITIONS, workspace-wide: each `deco <name> { .. }` -> a fn
-    // `__deco_<name>(target, <params>)`. `deco_map` is built up front (sequential,
-    // cheap) because an application usually names a decorator declared in another
-    // module; the definition bodies themselves lower+emit in parallel.
-    let (deco_map, deco_items) = build_deco_map(ws);
-    let deco_results = par_map(deco_items, |(mid, did)| {
-        emit_decorator_unit(ws, scx, cg, &cache.concrete, mid, did)
-    });
-    rejections.extend(unit_errors(&deco_results));
-    needed_specs.extend(deco_results.iter().flat_map(|u| u.specs.iter().cloned()));
-    let mut unit_reads = UnitComptimeReads::default();
-    for u in &deco_results {
-        unit_reads
-            .decorators
-            .extend(u.comptime_reads.iter().cloned());
-    }
-    let mut always_emitted_calls: Vec<FuncRef> = Vec::new();
-    let mut always_emitted_names: Vec<Ustr> = Vec::new();
-    let mut decorator_lua = String::new();
-    merge_units(
-        deco_results,
-        &mut decorator_lua,
-        &mut direct_globals,
-        &mut direct_calls,
-        &mut Vec::new(),
-        &mut always_emitted_calls,
-        &mut always_emitted_names,
-        &mut code_artifact,
-        &mut allocation_bodies,
-        &mut attribution,
-        &mut times,
-    );
-    let mut decorator_definitions = LuaDefinitionBuffer::new();
-    decorator_definitions.push_str(&decorator_lua);
-    decorator_definitions.append_to(&mut out);
-
-    // Global initializers are emitted below, in their original slot, but they are
-    // LOWERED here: their call edges are reachability roots (a global init is
-    // always emitted), so the walk needs them before the fn-def loop runs.
-    let mut pending_inits: Vec<(Ustr, Ustr, String)> = Vec::new();
-    let global_items: Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> = ws
-        .modules
-        .iter()
-        .filter(|m| m.id != ModuleId::builtin())
-        .flat_map(|m| m.globals.iter().map(move |(gid, _)| (m.id, gid)))
-        .collect();
-    let global_keys = global_items.clone();
-    let global_results = par_map(global_items, |(mid, gid)| {
-        emit_global_unit(ws, scx, cg, &cache.concrete, mid, gid)
-    });
-    // par_map preserves input order, so keys and results zip positionally --
-    // the same pairing merge_units relies on for output order.
-    for (key, u) in global_keys.iter().zip(global_results.iter()) {
-        if !u.comptime_reads.is_empty() {
-            unit_reads.globals.insert(*key, u.comptime_reads.clone());
-        }
-    }
-    rejections.extend(unit_errors(&global_results));
-    needed_specs.extend(global_results.iter().flat_map(|u| u.specs.iter().cloned()));
-    let mut globals_lua = String::new();
-    merge_units(
-        global_results,
-        &mut globals_lua,
-        &mut direct_globals,
-        &mut direct_calls,
-        &mut pending_inits,
-        &mut always_emitted_calls,
-        &mut always_emitted_names,
-        &mut code_artifact,
-        &mut allocation_bodies,
-        &mut attribution,
-        &mut times,
-    );
-
-    // **Whole-program population, driven by `cache.lua_view` -- Phase 2.**
-    // `should_emit_via_view` decides every ordinary/coroutine/inline
-    // definition below; `view_driven_specialized_chunks` decides every
-    // specialized one. Corpus-verified before this cutover landed (every real
-    // `stick.toml` project, both directions: zero instances the old walk
-    // emitted that the view did not retain, and the reverse direction's only
-    // difference was instances nothing ever DEMANDS standalone -- see that
-    // fn's own doc). `_ = &always_emitted_calls` /`&always_emitted_names`:
-    // still collected above (decorator/global lowering needs its own direct
-    // calls for OTHER bookkeeping -- global-read ordering, static baselines --
-    // untouched by this cutover), but no longer fed to a root-discovery walk.
-    // Generated-glue obligations (`register_sim`, shader dependencies) are part
-    // of the ROOT INPUT the graph and the view were built from -- see
-    // [`all_roots`] -- so there is no second population source here.
-    let (spec_chunks, spec_rejected) =
-        view_driven_specialized_chunks(ws, cg, scx, cache, &needed_specs);
-    if lifetime == CacheLifetime::OneShot {
-        let instances = cache.graph.instances.len();
-        cache.graph.release_records();
-        release_stats.graph_instances = instances - cache.graph.instances.len();
-    }
-
-    // **Foreign-body (`inline(lua)`/`extern`) DELIVERY, separate from
-    // RETENTION.** `lua_view` (and `should_emit_via_view`'s call-serving half)
-    // answers "is this declaration's canonical Instance part of the program",
-    // which is not the same question as "does anything call it in RESIDUAL
-    // (non-spliced) form" -- `@pure @inline` stdlib operators (`+`, `-`, ...)
-    // are retained (something calls `+`) but almost always fully spliced away
-    // at every call site, so a naive retention-only gate emitted them
-    // standalone anyway (found empirically: `__op_add_int_int` and
-    // siblings newly appeared in every project's output the moment retention
-    // alone drove the inline-body gate). Splicing eligibility is a LOWERING
-    // decision the graph does not model (same class of fact as a generic's
-    // standalone-vs-spliced `SpecDemand`, just for a NON-generic body), so
-    // this is collected from what already-lowered chunks record they still
-    // call after inlining (`Chunk::calls`), exactly as `chunk.specs` seeds
-    // `view_driven_specialized_chunks` above.
+/// **Foreign-body (`inline(lua)`/`extern`) DELIVERY, separate from
+/// RETENTION.** `lua_view` (and `should_emit_via_view`'s call-serving half)
+/// answers "is this declaration's canonical Instance part of the program",
+/// which is not the same question as "does anything call it in RESIDUAL
+/// (non-spliced) form" -- `@pure @inline` stdlib operators (`+`, `-`, ...)
+/// are retained (something calls `+`) but almost always fully spliced away
+/// at every call site, so a naive retention-only gate emitted them
+/// standalone anyway (found empirically: `__op_add_int_int` and
+/// siblings newly appeared in every project's output the moment retention
+/// alone drove the inline-body gate). Splicing eligibility is a LOWERING
+/// decision the graph does not model (same class of fact as a generic's
+/// standalone-vs-spliced `SpecDemand`, just for a NON-generic body), so
+/// this is collected from what already-lowered chunks record they still
+/// call after inlining (`Chunk::calls`), exactly as `chunk.specs` seeds
+/// `view_driven_specialized_chunks`.
+fn collect_needed_foreign(
+    ws: &Workspace,
+    cache: &SkullEmitCache,
+    always_emitted_calls: &[FuncRef],
+    spec_chunks: &FxHashMap<Instance, Chunk>,
+) -> FxHashSet<Instance> {
     let mut needed_foreign: FxHashSet<Instance> = FxHashSet::default();
     needed_foreign.extend(always_emitted_calls.iter().map(|f| shared(*f)));
     for module in ws.modules.iter() {
@@ -319,11 +568,258 @@ pub(super) fn assemble(
     for c in spec_chunks.values() {
         needed_foreign.extend(c.calls.iter().map(|f| shared(*f)));
     }
+    needed_foreign
+}
+
+/// The name, parameter list and body of the thin wrapper binding an
+/// `extern(ffi, "lib")` fn to its loaded library handle.
+fn ffi_extern_wrapper(
+    ws: &Workspace,
+    f: &bone_semantic::hir::Function,
+    lib: Ustr,
+) -> Result<(String, String, String), CompilerError> {
+    let nm = mangle_fn(ws, f);
+    let params = f
+        .param_decls
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body = match extern_ret(ws, f)? {
+        // Returns an OWNING copy, never `__out[0]`. LuaJIT does
+        // not keep the parent array alive through a reference
+        // into it, so handing one back is a use-after-free that
+        // reads fine until the memory is reused
+        // (`tests/extern_value_return_ownership.rs`).
+        ExternRet::ValueStruct(key) => {
+            let sname = skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(&key));
+            let call_args = if params.is_empty() {
+                "__out".to_string()
+            } else {
+                format!("__out, {params}")
+            };
+            format!(
+                "  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n{}",
+                skull_codegen_lua::wrapper_return(&format!("ffi.new(\"{sname}\", __out[0])"))
+            )
+        }
+        // `return <call>` is a `CALLT` into C, which a root trace
+        // cannot leave through; the bound local makes it a `RET`
+        // (`wrapper_return`). `Bool` ends in a compare, not a call.
+        ExternRet::Int | ExternRet::Uint => {
+            skull_codegen_lua::wrapper_return(&format!("tonumber({lib}.{nm}({params}))"))
+        }
+        ExternRet::Bool => format!("  return {lib}.{nm}({params}) ~= 0"),
+        ExternRet::AsIs => skull_codegen_lua::wrapper_return(&format!("{lib}.{nm}({params})")),
+        ExternRet::None => format!("  {lib}.{nm}({params})"),
+    };
+    Ok((nm, params, body))
+}
+
+/// inline(lua): emit the hand-written body verbatim, wrapping a
+/// value-returning bodyless-`return` and prepending default fills.
+/// (Js inline bodies were skipped by the backend guard.)
+fn inline_lua_definition(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    self_ref: FuncRef,
+    f: &bone_semantic::hir::Function,
+    body: &str,
+) -> String {
+    let name = mangle_fn(ws, f);
+    let params =
+        match skull_mir::lower::BackendFnAbiPlan::for_boundary_declaration(ws, scx, self_ref)
+            .lua_param_names(ws)
+        {
+            Some(names) => names.join(", "),
+            None => f
+                .param_decls
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+    let body = if f.return_ty.is_some() && !body.contains("return") {
+        format!("return {}", body.trim())
+    } else {
+        body.to_string()
+    };
+    let prologue = default_fill_prologue(ws, self_ref.module, self_ref.func, f);
+    format!("function {name}({params})\n{prologue}{body}\nend\n")
+}
+
+/// Init ordering is stated over SOURCE globals, but a `nobox` global is READ
+/// through its leaves, so a leaf dep has to resolve back to the group that
+/// owns it or the dependent initializer sorts before it. Built from the
+/// globals that actually mint leaves -- never a name-shape guess.
+fn global_leaf_owners(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+) -> Result<FxHashMap<Ustr, Ustr>, CompilerError> {
+    let mut leaf_owner: FxHashMap<Ustr, Ustr> = FxHashMap::default();
+    for module in ws.modules.iter() {
+        for (_, g) in module.globals.iter() {
+            let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty)
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
+            // Leaf names are the emitted symbols; the owner they resolve back
+            // to is the global's LOGICAL name, which is what an init line and a
+            // plain global read are keyed on.
+            if let Some(leaves) = plan.leaf_names(skull_mir::mangle::symbol_of_key(g.name)) {
+                for leaf in leaves {
+                    leaf_owner.insert(leaf, g.name);
+                }
+            }
+        }
+    }
+    Ok(leaf_owner)
+}
+
+/// `static` cells: on reload, RESET (nil the cell + clear the done-flag) when
+/// the init/type key changed since last run, so the next reach re-inits with
+/// the edited initializer; an unchanged key preserves the live cell. Dedup by
+/// cell.
+fn static_reset_lines(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    all_statics: &[skull_mir::mir::StaticCell],
+) -> Result<String, CompilerError> {
+    let mut seen_static: FxHashSet<Ustr> = FxHashSet::default();
+    let mut static_resets = String::new();
+    for sc in all_statics {
+        if !seen_static.insert(sc.cell) {
+            continue;
+        }
+        let key = static_cell_key(sc);
+        let (value_slot, done_slot) =
+            skull_mir::global_storage::static_cell_storage_keys(ws, scx.interner(), sc)
+                .map_err(CompilerError::new_no_location)?;
+        let _ = writeln!(
+            static_resets,
+            "__rock_static_prepare({value_slot:?}, {done_slot:?}, {key:?})"
+        );
+    }
+    Ok(static_resets)
+}
+
+/// Every definition this assembly actually emitted: the source-order bodies
+/// the same gates admitted, plus the specialized instances.
+fn emitted_bodies(
+    ws: &Workspace,
+    cache: &SkullEmitCache,
+    needed_foreign: &FxHashSet<Instance>,
+    specialized_instances: Vec<Instance>,
+) -> FxHashSet<Instance> {
+    let mut emitted_bodies: FxHashSet<Instance> = FxHashSet::default();
+    for module in ws.modules.iter() {
+        if module.id == ModuleId::builtin() {
+            continue;
+        }
+        for (fid, f) in module.functions.iter() {
+            if f.backend == bone_semantic::hir::FnBackend::Js {
+                continue;
+            }
+            let self_ref = FuncRef {
+                module: module.id,
+                func: fid,
+            };
+            let actually_emitted = if f.is_extern {
+                should_emit_via_view(ws, &cache.lua_view, self_ref)
+            } else if f.inline_body.is_some() {
+                emits_foreign_definition(ws, &cache.lua_view, needed_foreign, self_ref)
+            } else {
+                should_emit_via_view(ws, &cache.lua_view, self_ref)
+            };
+            if actually_emitted {
+                emitted_bodies.insert(shared(self_ref));
+            }
+        }
+    }
+    emitted_bodies.extend(specialized_instances);
+    emitted_bodies
+}
+
+/// One-shot builds drop the chunk cache once its last reader is done: capture
+/// the artifact's comptime reads and the chunk and dependency counts first.
+fn release_one_shot_chunks(
+    cache: &mut SkullEmitCache,
+    built_specs: &mut Vec<(Instance, Chunk)>,
+    unit_reads: &UnitComptimeReads,
+    compile_counts: &mut CompileCounts,
+    release_stats: &mut CompileReleaseStats,
+) -> Vec<skull_mir::mir::ComptimeRead> {
+    let reads = artifact_comptime_reads(cache, built_specs, unit_reads, true);
+    compile_counts.chunks += built_specs
+        .iter()
+        .filter(|(key, _)| !cache.chunks.contains_key(key))
+        .count();
+    compile_counts.dependency_edges = Some(
+        cache
+            .chunks
+            .values()
+            .flatten()
+            .map(|chunk| chunk.deps.len())
+            .sum::<usize>()
+            + built_specs
+                .iter()
+                .map(|(_, chunk)| chunk.deps.len())
+                .sum::<usize>(),
+    );
+    let chunks = cache.chunks.len() + built_specs.len();
+    drop(std::mem::take(&mut cache.chunks));
+    drop(std::mem::take(built_specs));
+    release_stats.chunks = chunks - cache.chunks.len() - built_specs.len();
+    reads
+}
+
+pub(super) fn assemble(
+    ws: &Workspace,
+    cache: &mut SkullEmitCache,
+    built_specs: &mut Vec<(Instance, Chunk)>,
+    lifetime: CacheLifetime,
+) -> Result<(MirEmit, FxHashSet<Instance>, UnitComptimeReads), CompilerError> {
+    let mut release_stats = CompileReleaseStats {
+        retained_dependency_edges: cache.dependents.values().map(|keys| keys.len()).sum(),
+        retained_static_keys: cache.static_key_baseline.len(),
+        ..CompileReleaseStats::default()
+    };
+    let mut compile_counts = CompileCounts {
+        concrete_plans: cache.concrete.plans.len() + cache.concrete.always_plans.len(),
+        chunks: cache.chunks.len(),
+        dependency_edges: None,
+    };
+    let mut asm = Assembly::new(cache);
+    asm.push_scaffold_prelude(ws, &cache.scx)?;
+    let deco_map = asm.push_decorator_definitions(ws, cache);
+    let (globals_lua, pending_inits) = asm.lower_global_units(ws, cache);
+
+    // **Whole-program population, driven by `cache.lua_view` -- Phase 2.**
+    // `should_emit_via_view` decides every ordinary/coroutine/inline
+    // definition below; `view_driven_specialized_chunks` decides every
+    // specialized one. Corpus-verified before this cutover landed (every real
+    // `stick.toml` project, both directions: zero instances the old walk
+    // emitted that the view did not retain, and the reverse direction's only
+    // difference was instances nothing ever DEMANDS standalone -- see that
+    // fn's own doc). `always_emitted_calls` / `always_emitted_names`:
+    // still collected above (decorator/global lowering needs its own direct
+    // calls for OTHER bookkeeping -- global-read ordering, static baselines --
+    // untouched by this cutover), but no longer fed to a root-discovery walk.
+    // Generated-glue obligations (`register_sim`, shader dependencies) are part
+    // of the ROOT INPUT the graph and the view were built from -- see
+    // [`all_roots`] -- so there is no second population source here.
+    let (spec_chunks, spec_rejected) =
+        view_driven_specialized_chunks(ws, &cache.cg, &cache.scx, cache, &asm.needed_specs);
+    if lifetime == CacheLifetime::OneShot {
+        let instances = cache.graph.instances.len();
+        cache.graph.release_records();
+        release_stats.graph_instances = instances - cache.graph.instances.len();
+    }
+    let needed_foreign = collect_needed_foreign(ws, cache, &asm.always_emitted_calls, &spec_chunks);
     // Factory lowering is the last concrete-plan reader. Keep its text in the
     // original output slot, but release one-shot plans before copying definitions.
     let early_definition_stage = if lifetime == CacheLifetime::OneShot {
         let plan = collect_definition_plan(ws)?;
-        let stage = definition_plan_stage_lua(ws, cg, scx, &cache.concrete.plans, &plan)?;
+        let stage =
+            definition_plan_stage_lua(ws, &cache.cg, &cache.scx, &cache.concrete.plans, &plan)?;
         let plans = cache.concrete.plans.len() + cache.concrete.always_plans.len();
         drop(std::mem::take(&mut cache.concrete));
         release_stats.concrete_plans =
@@ -332,247 +828,57 @@ pub(super) fn assemble(
     } else {
         None
     };
-    let mut definitions = LuaDefinitionBuffer::new();
-    // Second pass of the callee binding: every factory's
-    // `<name> = __rock_mk_<name>(<callees>)` line, emitted after EVERY
-    // definition and in ascending call-graph component rank, so each captured
-    // callee is already its final closure.
-    let mut callee_binds: Vec<skull_codegen_lua::CalleeBindingPlan> = Vec::new();
-    let mut emits_main = false;
 
-    // Function definitions, every module (cached chunk for ordinary/coroutine,
-    // regenerated for extern / inline(lua)). The cached chunks were built in
-    // parallel by `emit_full`/`emit_incremental`; here we pull their Lua and sum
-    // their captured phase times back into the breakdown.
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
-        let mid = module.id;
-        for (fid, f) in module.functions.iter() {
-            let self_ref = FuncRef {
-                module: mid,
-                func: fid,
-            };
-            // A JS-backend decl (`inline(js)` / `extern(js)`) is inert on luajit:
-            // its lua sibling (if any) carries the binding, and a js-only call from
-            // lua-reachable code is rejected at call lowering (resolve_funcref).
-            if f.backend == bone_semantic::hir::FnBackend::Js {
-                continue;
-            }
-            // Whole-program DCE gates both chunk construction and definition
-            // emission. Retained bodies still fail hard when their plan or chunk
-            // is missing; pruned dependency bodies have neither by design.
-            let emit_def = should_emit_via_view(ws, &cache.lua_view, self_ref);
-            if f.is_extern {
-                // An `extern(ffi, "lib")` fn needs a thin wrapper binding it to the
-                // loaded library handle. A non-ffi extern is a pre-existing global.
-                //
-                // Gated by the VIEW like every other definition. `is_emission_root`
-                // roots every `extern`, so in practice the view retains them all
-                // and this changes no output -- but an ungated write is a second
-                // population input, and one is the whole point of the cut.
-                if let Some(lib) = f.ffi_lib {
-                    let nm = mangle_fn(ws, f);
-                    let params = f
-                        .param_decls
-                        .iter()
-                        .map(|p| p.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    let body = match extern_ret(ws, f)? {
-                        // Returns an OWNING copy, never `__out[0]`. LuaJIT does
-                        // not keep the parent array alive through a reference
-                        // into it, so handing one back is a use-after-free that
-                        // reads fine until the memory is reused
-                        // (`tests/extern_value_return_ownership.rs`).
-                        ExternRet::ValueStruct(key) => {
-                            let sname = skull_mir::mangle::type_symbol(ws, ustr::Ustr::from(&key));
-                            let call_args = if params.is_empty() {
-                                "__out".to_string()
-                            } else {
-                                format!("__out, {params}")
-                            };
-                            format!(
-                                "  local __out = ffi.new(\"{sname}[1]\")\n  {lib}.{nm}({call_args})\n{}",
-                                skull_codegen_lua::wrapper_return(&format!(
-                                    "ffi.new(\"{sname}\", __out[0])"
-                                ))
-                            )
-                        }
-                        // `return <call>` is a `CALLT` into C, which a root trace
-                        // cannot leave through; the bound local makes it a `RET`
-                        // (`wrapper_return`). `Bool` ends in a compare, not a call.
-                        ExternRet::Int | ExternRet::Uint => skull_codegen_lua::wrapper_return(
-                            &format!("tonumber({lib}.{nm}({params}))"),
-                        ),
-                        ExternRet::Bool => format!("  return {lib}.{nm}({params}) ~= 0"),
-                        ExternRet::AsIs => {
-                            skull_codegen_lua::wrapper_return(&format!("{lib}.{nm}({params})"))
-                        }
-                        ExternRet::None => format!("  {lib}.{nm}({params})"),
-                    };
-                    // The rejection above runs for EVERY extern; only the WRITE
-                    // is gated. Pruning may change which definitions are emitted
-                    // and nothing else -- gating the whole arm suppressed
-                    // `extern_ret`'s unbound-generic rejection, whose subject is
-                    // a generic declaration the view holds no base instance for.
-                    if emit_def {
-                        let prologue = default_fill_prologue(ws, mid, fid, f);
-                        definitions
-                            .push_str(&format!("function {nm}({params})\n{prologue}{body}\nend\n"));
-                    }
-                }
-                continue;
-            }
-            if let Some((_, body)) = f.inline_body {
-                // Retention alone (`emit_def`) over-emits here -- see
-                // `needed_foreign`'s doc. Three independent reasons still force
-                // emission regardless of splicing eligibility: a publication
-                // obligation (`@nomangle`), a residual (non-spliced) demand, or
-                // being a ROOT in its own right (an own-project inline(lua) fn
-                // is unconditionally rooted by `is_emission_root` even with no
-                // caller at all -- same reasoning as `main`/`@sim`/`@test`;
-                // found empirically, `anvil`'s `sv_close`/`sv_is_eof` etc. have
-                // no call site anywhere in the corpus and are rooted purely by
-                // living in the project's own file).
-                if !emits_foreign_definition(ws, &cache.lua_view, &needed_foreign, self_ref) {
-                    continue;
-                }
-                // inline(lua): emit the hand-written body verbatim, wrapping a
-                // value-returning bodyless-`return` and prepending default fills.
-                // (Js inline bodies were skipped above via the backend guard.)
-                let name = mangle_fn(ws, f);
-                let params = match skull_mir::lower::BackendFnAbiPlan::for_boundary_declaration(
-                    ws, scx, self_ref,
-                )
-                .lua_param_names(ws)
-                {
-                    Some(names) => names.join(", "),
-                    None => f
-                        .param_decls
-                        .iter()
-                        .map(|p| p.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                };
-                let body = body.as_str();
-                let body = if f.return_ty.is_some() && !body.contains("return") {
-                    format!("return {}", body.trim())
-                } else {
-                    body.to_string()
-                };
-                let prologue = default_fill_prologue(ws, mid, fid, f);
-                definitions.push_str(&format!(
-                    "function {name}({params})\n{prologue}{body}\nend\n"
-                ));
-                continue;
-            }
-            // An `Iterator`-bounded fn has no standalone emission (it exists
-            // only inlined at its call sites) -- deliberately absent.
-            if fn_has_bounds(f) {
-                continue;
-            }
-            // A generic declaration has no definition of its own. Its bodies are
-            // its instances, rendered below by `emit_specialized_callees`.
-            if is_generic(f) {
-                continue;
-            }
-            // Ordinary / coroutine: pull the cached chunk.
-            match cache.chunks.get(&shared(self_ref)) {
-                Some(Ok(chunk)) => {
-                    let key = Ustr::from(&mangle_fn(ws, f));
-                    direct_globals.insert(key, chunk.direct_globals.clone());
-                    direct_calls.insert(key, chunk.direct_calls.clone());
-                    times.add(&chunk.times);
-                    attribution.add_unit(&chunk.attribution);
-                    if emit_def {
-                        emits_main |= key.as_str() == "main";
-                        definitions.push_str(&chunk.lua);
-                        callee_binds.extend(chunk.binds.iter().cloned());
-                        allocation_bodies.extend(chunk.allocation_bodies.iter().cloned());
-                        code_artifact.merge_ref(&chunk.code_artifact);
-                        // A dropped definition's `static` cells do not exist, so
-                        // they must not be registered for hot-reload preservation.
-                        all_statics.extend(chunk.statics.iter().cloned());
-                        // Only a body that is actually emitted can call one.
-                        needed_specs.extend(chunk.specs.iter().cloned());
-                    }
-                }
-                Some(Err(err)) if !emit_def => {}
-                Some(Err(err)) => rejections.push(err.clone()),
-                None if !emit_def => {}
-                None => rejections.push(CompilerError::new_with_label(
-                    f.name_span,
-                    format!("internal: `{}` has no emitted chunk", f.name),
-                )),
-            }
-        }
-    }
-
-    rejections.extend(emit_specialized_callees(
+    asm.push_function_definitions(ws, cache, &needed_foreign)?;
+    asm.rejections.extend(emit_specialized_callees(
         ws,
-        scx,
-        &mut needed_specs,
+        &cache.scx,
+        &mut asm.needed_specs,
         &cache.chunks,
         &spec_chunks,
         &spec_rejected,
         built_specs,
-        &mut allocation_bodies,
-        &mut all_statics,
-        &mut definitions,
-        &mut callee_binds,
-        &mut attribution,
-        &mut times,
+        &mut asm.allocation_bodies,
+        &mut asm.all_statics,
+        &mut asm.definitions,
+        &mut asm.callee_binds,
+        &mut asm.attribution,
+        &mut asm.times,
     ));
     for chunk in spec_chunks.values() {
-        code_artifact.merge_ref(&chunk.code_artifact);
+        asm.code_artifact.merge_ref(&chunk.code_artifact);
     }
     for (_, chunk) in built_specs.iter() {
-        code_artifact.merge_ref(&chunk.code_artifact);
+        asm.code_artifact.merge_ref(&chunk.code_artifact);
     }
     let specialized_instances: Vec<_> = spec_chunks.keys().cloned().collect();
-    let one_shot_reads = if lifetime == CacheLifetime::OneShot {
-        let reads = artifact_comptime_reads(cache, built_specs, &unit_reads, true);
-        compile_counts.chunks += built_specs
-            .iter()
-            .filter(|(key, _)| !cache.chunks.contains_key(key))
-            .count();
-        compile_counts.dependency_edges = Some(
-            cache
-                .chunks
-                .values()
-                .flatten()
-                .map(|chunk| chunk.deps.len())
-                .sum::<usize>()
-                + built_specs
-                    .iter()
-                    .map(|(_, chunk)| chunk.deps.len())
-                    .sum::<usize>(),
-        );
-        let chunks = cache.chunks.len() + built_specs.len();
-        drop(std::mem::take(&mut cache.chunks));
-        drop(std::mem::take(built_specs));
-        release_stats.chunks = chunks - cache.chunks.len() - built_specs.len();
-        Some(reads)
-    } else {
-        None
-    };
+    let one_shot_reads = (lifetime == CacheLifetime::OneShot).then(|| {
+        release_one_shot_chunks(
+            cache,
+            built_specs,
+            &asm.unit_reads,
+            &mut compile_counts,
+            &mut release_stats,
+        )
+    });
     drop(spec_chunks);
 
     // Every emitted definition has now been visited, so this is the earliest
     // point where the whole rejection list exists. Anything past here is
     // scaffolding (init ordering, deco application) whose own errors are
     // unrelated to a body that cannot emit.
-    rejections.into_result()?;
+    std::mem::take(&mut asm.rejections).into_result()?;
+    let cg = &cache.cg;
+    let scx = &cache.scx;
     if let Some(err) = cg.take_rejection() {
         return Err(err);
     }
-    definitions.append_to(&mut out);
-    out.push_str(&callee_binding_pass_lua(&mut callee_binds));
+    std::mem::replace(&mut asm.definitions, LuaDefinitionBuffer::new()).append_to(&mut asm.out);
+    asm.out
+        .push_str(&callee_binding_pass_lua(&mut asm.callee_binds));
     mark_generated_code_values(
         ws,
-        &mut code_artifact,
+        &mut asm.code_artifact,
         cache.build_kind == BuildKind::Program,
         cache.selected_sim_functions.as_ref(),
     );
@@ -580,7 +886,7 @@ pub(super) fn assemble(
         Some((plan, stage)) => (plan, Some(stage)),
         None => (collect_definition_plan(ws)?, None),
     };
-    let lifecycle_plan = skull_mir::lifecycle::collect_with_artifact(ws, &code_artifact)?;
+    let lifecycle_plan = skull_mir::lifecycle::collect_with_artifact(ws, &asm.code_artifact)?;
     if lifecycle_plan.census.applications != lifecycle_plan.census.admitted {
         return Err(CompilerError::new_no_location(format!(
             "incomplete LifecyclePlan census: {:?}",
@@ -588,22 +894,27 @@ pub(super) fn assemble(
         )));
     }
     let allocation_report = if crate::allocation_report::enabled() {
-        let mut report = crate::allocation_report::AllocationReport::from_bodies(allocation_bodies);
-        report.populate_lifecycle_routes(&lifecycle_plan, &code_artifact);
+        let mut report = crate::allocation_report::AllocationReport::from_bodies(std::mem::take(
+            &mut asm.allocation_bodies,
+        ));
+        report.populate_lifecycle_routes(&lifecycle_plan, &asm.code_artifact);
         report
     } else {
         crate::allocation_report::AllocationReport::default()
     };
+    let code_artifact = &asm.code_artifact;
     let has_code_slot_publication = code_artifact.entries.values().any(|entry| entry.escaping)
         || !definition_plan.catalogs.is_empty()
         || lifecycle_plan.census.declarations > 0;
     let global_layout = skull_mir::global_storage::global_layout_id(ws, scx)
         .map_err(CompilerError::new_no_location)?;
-    let static_count = all_statics
+    let static_count = asm
+        .all_statics
         .iter()
         .map(|cell| cell.cell)
         .collect::<FxHashSet<_>>()
         .len();
+    let out = &mut asm.out;
     out.push_str(&globals_open_lua(&global_layout, cg, static_count));
     out.push_str(&wrap_large_lua_section(
         "__rock_globals_directory_part",
@@ -617,14 +928,14 @@ pub(super) fn assemble(
     // the original slot, so the emitted text is unchanged.)
     let mut global_definitions = LuaDefinitionBuffer::new();
     global_definitions.push_str(&globals_lua);
-    global_definitions.append_to(&mut out);
+    global_definitions.append_to(out);
     let has_definition_plan = !definition_plan.catalogs.is_empty();
     if has_code_slot_publication {
         out.push_str(skull_codegen_lua::FN_MT_PRELUDE);
     }
     // Global initializer bodies (including their escaping lambdas) are now
     // defined, so slot staging must follow them but precede initializer calls.
-    let code_slot_stage = code_slot_registration_lua(ws, scx, &code_artifact)?;
+    let code_slot_stage = code_slot_registration_lua(ws, scx, code_artifact)?;
     out.push_str(&wrap_large_lua_section(
         "__rock_code_slot_stage_part",
         &code_slot_stage,
@@ -645,104 +956,16 @@ pub(super) fn assemble(
         "__rock_lifecycle_plan_stage_part",
         &lifecycle_plan_stage,
     ));
-
-    // Order the init lines by their transitive global-read closure over the full
-    // call graph (now that every fn's direct facts are recorded).
-    let ts = Instant::now();
-    let reach = skull_mir::reach::transitive_global_reads(&direct_globals, &direct_calls);
-    // Init ordering is stated over SOURCE globals, but a `nobox` global is READ
-    // through its leaves, so a leaf dep has to resolve back to the group that
-    // owns it or the dependent initializer sorts before it. Built from the
-    // globals that actually mint leaves -- never a name-shape guess.
-    let mut leaf_owner: FxHashMap<Ustr, Ustr> = FxHashMap::default();
-    for module in ws.modules.iter() {
-        for (_, g) in module.globals.iter() {
-            let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, &cache.scx, g.ty)
-                .map_err(|e| CompilerError::new_no_location(e.message))?;
-            // Leaf names are the emitted symbols; the owner they resolve back
-            // to is the global's LOGICAL name, which is what an init line and a
-            // plain global read are keyed on.
-            if let Some(leaves) = plan.leaf_names(skull_mir::mangle::symbol_of_key(g.name)) {
-                for leaf in leaves {
-                    leaf_owner.insert(leaf, g.name);
-                }
-            }
-        }
-    }
-    let inits: Vec<PendingInit<String>> = pending_inits
-        .into_iter()
-        .map(|(name, init_name, line)| PendingInit {
-            name,
-            deps: reach.deps_of(init_name),
-            item: line,
-        })
-        .collect();
-    // `static` cells: on reload, RESET (nil the cell + clear the done-flag) when
-    // the init/type key changed since last run, so the next reach re-inits with
-    // the edited initializer; an unchanged key preserves the live cell. Dedup by
-    // cell.
-    let mut seen_static: FxHashSet<Ustr> = FxHashSet::default();
-    let mut static_resets = String::new();
-    for sc in &all_statics {
-        if !seen_static.insert(sc.cell) {
-            continue;
-        }
-        let key = static_cell_key(sc);
-        let (value_slot, done_slot) =
-            skull_mir::global_storage::static_cell_storage_keys(ws, scx.interner(), sc)
-                .map_err(CompilerError::new_no_location)?;
-        let _ = writeln!(
-            static_resets,
-            "__rock_static_prepare({value_slot:?}, {done_slot:?}, {key:?})"
-        );
-    }
-
-    out.push_str(&static_resets);
-    let init_lines = sort_global_init_lines(inits, &leaf_owner)?;
-    out.push_str(&state_initializer_lua(&init_lines));
-
-    // Decorator APPLICATIONS (after global inits so a deco body can push a global).
-    out.push_str(&decorator_application_lines(ws, &deco_map, scx)?);
-    // `@sim` registrations (after fn + global defs; same init slot as rock).
-    if cache.build_kind == BuildKind::Program {
-        out.push_str(&sim_registration_lines(
-            ws,
-            scx,
-            cache.selected_sim_functions.as_ref(),
-        )?);
-    }
-    // `rock_shader` pipeline registrations:
-    // one top-level `__rock_shader_register(key, glsl)` per distinct pair, so a
-    // reload re-`dofile`s them with the new source (hot-reload parity).
-    out.push_str(&cache.shader_registrations.lua);
-    if has_code_slot_publication {
-        out.push_str(code_slot_publish_lua(
-            &code_artifact,
-            has_definition_plan,
-            lifecycle_plan.census.declarations > 0,
-        ));
-    }
-    // Closes the block the runtime prelude opens (the storage cell becomes a
-    // closed upvalue here); anything appended after this line runs outside it.
-    out.push_str("end\n");
-    t_scaffold += ts.elapsed();
-
-    // `times.emit` brackets emit_function/emit_named/emit_coroutine; `times.regalloc`
-    // is the subset spent in `color_values` inside them (per-unit reset/read, exact
-    // even under parallel emit). stringify = the remainder.
-    let t_stringify = times.emit - times.regalloc;
-    let phases = vec![
-        ("lower hir->mir", times.lower),
-        ("inline plan+splice", times.inline),
-        ("cleanup mir", times.cleanup),
-        ("closure conversion", times.closure),
-        ("counted-loop recovery", times.counted_loop),
-        ("hoisted-body inline", times.hoisted_inline),
-        ("post-transform validation", times.validation),
-        ("emit: regalloc", times.regalloc),
-        ("emit: stringify", t_stringify),
-        ("scaffold+callgraph+order", t_scaffold),
-    ];
+    asm.push_initializers(
+        ws,
+        cache,
+        pending_inits,
+        &deco_map,
+        has_code_slot_publication,
+        has_definition_plan,
+        lifecycle_plan.census.declarations > 0,
+    )?;
+    let phases = asm.phases();
 
     // A synthetic top-level name (`<fn>__lambda<k>`, `<co>__step`/`__on_*`/...)
     // that collides with a user fn/global was recorded during chunk emit (above,
@@ -750,32 +973,15 @@ pub(super) fn assemble(
     // rather than emit two clobbering top-level defs. Covers `emit_full` +
     // `emit_incremental` (both funnel through here); the overlay fast path drains
     // in `emit_overlay` and propagates the same error.
-    let mut emitted_bodies: FxHashSet<Instance> = FxHashSet::default();
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
-        for (fid, f) in module.functions.iter() {
-            if f.backend == bone_semantic::hir::FnBackend::Js {
-                continue;
-            }
-            let self_ref = FuncRef {
-                module: module.id,
-                func: fid,
-            };
-            let actually_emitted = if f.is_extern {
-                should_emit_via_view(ws, &cache.lua_view, self_ref)
-            } else if f.inline_body.is_some() {
-                emits_foreign_definition(ws, &cache.lua_view, &needed_foreign, self_ref)
-            } else {
-                should_emit_via_view(ws, &cache.lua_view, self_ref)
-            };
-            if actually_emitted {
-                emitted_bodies.insert(shared(self_ref));
-            }
-        }
-    }
-    emitted_bodies.extend(specialized_instances);
+    let emitted_bodies = emitted_bodies(ws, cache, &needed_foreign, specialized_instances);
+    let Assembly {
+        mut out,
+        attribution,
+        code_artifact,
+        unit_reads,
+        emits_main,
+        ..
+    } = asm;
     let artifact_reads = one_shot_reads
         .unwrap_or_else(|| artifact_comptime_reads(cache, built_specs, &unit_reads, true));
     let artifact_fingerprint = artifact_fingerprint(
