@@ -28,7 +28,7 @@ pub fn decode_png_rgba8(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
         (png::ColorType::Rgb, png::BitDepth::Eight) => {
             // Expand RGB -> RGBA with full alpha.
             let mut out = Vec::with_capacity(bytes.len() / 3 * 4);
-            for chunk in bytes.chunks_exact(3) {
+            for chunk in bytes.as_chunks::<3>().0 {
                 out.extend_from_slice(chunk);
                 out.push(255);
             }
@@ -119,16 +119,16 @@ mod tests {
         // dims, so the deadband is pinned on both block shapes at once.
         let (w, h) = (40u32, 40u32);
         let mut base = vec![0u8; (w * h * 4) as usize];
-        for px in base.chunks_exact_mut(4) {
+        for px in base.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&[128, 128, 128, 128]);
         }
         let mut shifted = base.clone();
-        for (i, px) in shifted.chunks_exact_mut(4).enumerate() {
+        for (i, px) in shifted.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let x = i as u32 % w;
             let y = i as u32 / w;
             px[0] += 1; // R always +1
             px[1] -= 1; // G always -1
-            if (x + y) % 2 == 0 {
+            if (x + y).is_multiple_of(2) {
                 px[2] += 1; // B mixed sign by checkerboard
             } else {
                 px[2] -= 1;
@@ -163,11 +163,11 @@ mod tests {
         // interaction (that rule has its own control below).
         let (w, h) = (BLOCK_PX, BLOCK_PX);
         let mut base = vec![0u8; (w * h * 4) as usize];
-        for px in base.chunks_exact_mut(4) {
+        for px in base.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&[128, 128, 128, 128]);
         }
         let mut shifted = base.clone();
-        for px in shifted.chunks_exact_mut(4) {
+        for px in shifted.as_chunks_mut::<4>().0 {
             px[0] += 2;
             px[1] -= 2;
             px[2] += 2;
@@ -202,7 +202,7 @@ mod tests {
         // partial block in both dims.
         let (w, h) = (40u32, 40u32);
         let mut base = vec![0u8; (w * h * 4) as usize];
-        for px in base.chunks_exact_mut(4) {
+        for px in base.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&[0, 0, 0, 255]);
         }
         let mut shifted = base.clone();
@@ -229,7 +229,7 @@ mod tests {
         // diffs 128/(4*255) = 32/255 over its own pixels.
         let (w2, h2) = (48u32, 32u32);
         let mut base2 = vec![0u8; (w2 * h2 * 4) as usize];
-        for px in base2.chunks_exact_mut(4) {
+        for px in base2.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&[0, 0, 0, 255]);
         }
         let mut shifted2 = base2.clone();
