@@ -134,7 +134,6 @@ pub struct Args {
     pub quiet: bool,
     pub frames: usize,
     pub seconds: Option<f64>,
-    pub warmup_seconds: f64,
     pub gc_window: usize,
     pub gc_window_start: usize,
     pub gc_window_mode: String,
@@ -377,7 +376,6 @@ impl Args {
             quiet: m.get_flag("quiet"),
             frames: Default::default(),
             seconds: Default::default(),
-            warmup_seconds: Default::default(),
             gc_window: Default::default(),
             gc_window_start: Default::default(),
             gc_window_mode: Default::default(),
@@ -491,11 +489,14 @@ pub mod overlay_test_support;
 mod asset_selection;
 pub mod compile_cache;
 mod compiler_watch;
+pub mod frame_commands;
 pub mod frame_compile_cache;
 pub mod frame_runtime;
 pub mod game_compile;
 pub mod game_runtime;
+pub mod headless_scope;
 mod host_paths;
+mod log_record;
 pub mod package;
 pub mod stone_runtime;
 pub mod stone_watch;
