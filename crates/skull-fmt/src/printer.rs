@@ -850,9 +850,19 @@ impl<'a> Printer<'a> {
         let multi_line_block = stmts.first().zip(stmts.last()).is_some_and(|(f, l)| {
             self.ast.s(f).span.line_range.0 != self.ast.s(l).span.line_range.1
         });
+        // A group is sliced up to the end of its last source line, so a
+        // multi-line statement whose last line starts another statement would
+        // copy that statement into the slice as well as printing it.
+        let ends_on_next_start = |i: usize| {
+            spans[i].line_range.0 != spans[i].line_range.1
+                && spans
+                    .get(i + 1)
+                    .is_some_and(|n| n.line_range.0 == spans[i].line_range.1)
+        };
         let mut groups: Vec<Vec<usize>> = Vec::new();
         for i in 0..stmts.len() {
             let merge = multi_line_block
+                && !ends_on_next_start(i)
                 && groups.last().is_some_and(|g| {
                     let p = *g.last().unwrap();
                     !is_comment(p)

@@ -152,6 +152,24 @@ fn single_line_containers_with_multiline_children_reach_a_fixed_point() {
     }
 }
 
+/// Statements sharing a line are sliced verbatim to the end of that line; a
+/// multi-line statement whose last line starts another statement must not
+/// copy that statement into the slice.
+#[test]
+fn shared_line_group_does_not_duplicate_the_next_statement() {
+    for source in [
+        "fn f() {\n    () let\n    y 13\n}\n",
+        "fn f() {\n    a(); b(() => {\n        c()\n    }); d()\n}\n",
+    ] {
+        let original = skull_parser::parse_module_clean(source, "<source>".into()).unwrap();
+        let once = skull_fmt::format_code(source);
+        let twice = skull_fmt::format_code(&once);
+        assert_eq!(once, twice, "source: {source}");
+        let formatted = skull_parser::parse_module_clean(&once, "<formatted>".into()).unwrap();
+        assert_eq!(original.module_sexp(), formatted.module_sexp(), "{once}");
+    }
+}
+
 /// A tight `..` must not fuse with a neighbouring `.` into `...`.
 #[test]
 fn range_operator_next_to_a_dot_keeps_its_spaces() {
