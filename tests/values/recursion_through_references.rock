@@ -1,0 +1,112 @@
+// A `value` cannot embed itself by value (errors/recursive_value_layout.rock.err),
+// but recursion through a reference or a handle is fine: a Vec, a Map, an enum
+// payload, an Arena `Entity` handle, a phantom type argument and a non-value
+// struct all hold the recursive type by reference.
+
+value VecTree { v: int, kids: [VecTree] }
+
+value MapTree { v: int, kids: Map<string, MapTree> }
+
+enum ValueList { Nil, Cons(ListCell) }
+value ListCell { head: int, tail: ValueList }
+
+value Phantom<T> { tag: int }
+value Tagged { v: int, self_tag: Phantom<Tagged> }
+
+value Linked { v: int, next: Entity<Linked>? }
+
+struct Graph { name: string, root: GraphNode? }
+value GraphNode { v: int, owner: Graph? }
+
+fn vec_sum(t: VecTree) -> int {
+    let total = t.v
+    for k in t.kids {
+        total += vec_sum(k)
+    }
+    return total
+}
+
+fn list_sum(l: ValueList) -> int {
+    return match l {
+        ValueList::Nil => 0,
+        ValueList::Cons(cell) => cell.head + list_sum(cell.tail),
+    }
+}
+
+@test
+fn recursion_through_a_vec() {
+    let t = VecTree { v: 1, kids: [VecTree { v: 2, kids: [] }, VecTree { v: 3, kids: [VecTree { v: 4, kids: [] }] }] }
+    assert_eq(vec_sum(t), 10)
+}
+
+@test
+fn recursion_through_a_map() {
+    let kids: Map<string, MapTree> = map_new()
+    kids["a"] = MapTree { v: 2, kids: map_new() }
+    let t = MapTree { v: 1, kids: kids }
+    assert_eq(t.kids["a"].v, 2)
+}
+
+@test
+fn recursion_through_an_enum_payload() {
+    let l = ValueList::Cons(ListCell { head: 1, tail: ValueList::Cons(ListCell { head: 2, tail: ValueList::Nil }) })
+    assert_eq(list_sum(l), 3)
+}
+
+@test
+fn recursion_through_a_phantom_argument() {
+    let t = Tagged { v: 5, self_tag: Phantom { tag: 1 } }
+    assert_eq(t.v + t.self_tag.tag, 6)
+}
+
+@test
+fn recursion_through_an_entity_handle() {
+    let arena: Arena<Linked> = arena_new()
+    let tail = arena.insert(Linked { v: 2, next: null })
+    let head = Linked { v: 1, next: tail }
+    assert_eq(head.v + (head.next?.get()?.v ?? 0), 3)
+}
+
+@test
+fn recursion_through_a_struct() {
+    let g = Graph { name: "g", root: null }
+    let n = GraphNode { v: 7, owner: g }
+    assert_eq(n.owner?.name ?? "", "g")
+}
+
+enum Expr { Lit(int), Add(BinOp) }
+value BinOp { l: Expr, r: Expr }
+
+enum Outer { Done, More(OuterCell) }
+value OuterCell { inner: Inner }
+enum Inner { Stop, Back(InnerCell) }
+value InnerCell { outer: Outer }
+
+fn eval(e: Expr) -> int {
+    return match e {
+        Expr::Lit(n) => n,
+        Expr::Add(op) => eval(op.l) + eval(op.r),
+    }
+}
+
+@test
+fn recursion_through_an_enum_with_two_payload_fields() {
+    let e = Expr::Add(BinOp { l: Expr::Lit(2), r: Expr::Add(BinOp { l: Expr::Lit(3), r: Expr::Lit(4) }) })
+    assert_eq(eval(e), 9)
+}
+
+@test
+fn recursion_through_two_enums() {
+    let o = Outer::More(OuterCell { inner: Inner::Back(InnerCell { outer: Outer::Done }) })
+    let depth = match o {
+        Outer::More(cell) => match cell.inner {
+            Inner::Back(ic) => match ic.outer {
+                Outer::Done => 2,
+                _ => -1,
+            },
+            _ => -1,
+        },
+        _ => -1,
+    }
+    assert_eq(depth, 2)
+}

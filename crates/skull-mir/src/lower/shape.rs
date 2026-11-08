@@ -2507,9 +2507,69 @@ fn flat_payload_shape(ws: &Workspace, ty: TyId, visiting: &mut Vec<Ustr>) -> Opt
         return None;
     };
     if map_is_value_struct(ws, n) {
+        // The value's own shape plans its enum fields from scratch, without
+        // `visiting`, so a payload that leads back to an enum being built
+        // (`enum L { Cons(Cell) }`, `value Cell { tail: L }`) stays opaque.
+        if reaches_enum_in(ws, ty, visiting, &mut HashSet::new()) {
+            return None;
+        }
         return sig_shape_of_nominal(ws, n);
     }
     build_flat_enum_shape_inner(ws, n, visiting).map(|shape| shape.value_shape())
+}
+
+/// Whether `ty` mentions any enum in `goals`, through value fields, enum
+/// payloads and type arguments.
+fn reaches_enum_in(ws: &Workspace, ty: TyId, goals: &[Ustr], seen: &mut HashSet<Ustr>) -> bool {
+    let TyId::Static(mid, _) = ty else {
+        return false;
+    };
+    let sub = |idx| TyId::Static(mid, idx);
+    match static_ty(ws, ty) {
+        Some(TypeExpr::Nullable(inner)) => reaches_enum_in(ws, sub(inner), goals, seen),
+        Some(TypeExpr::Tuple { elements }) => elements
+            .into_iter()
+            .any(|idx| reaches_enum_in(ws, sub(idx), goals, seen)),
+        Some(TypeExpr::App { ctor, params }) => {
+            if params
+                .into_iter()
+                .any(|idx| reaches_enum_in(ws, sub(idx), goals, seen))
+            {
+                return true;
+            }
+            let TypeCtor::Nominal(n) = ctor else {
+                return false;
+            };
+            if goals.contains(&n) {
+                return true;
+            }
+            if !seen.insert(n) {
+                return false;
+            }
+            if let Some(sid) = ws.struct_by_name.get(&n) {
+                let sd = &ws.modules[sid.module.index()].structs[sid.def];
+                return sd.is_value
+                    && sd
+                        .fields
+                        .iter()
+                        .any(|f| reaches_enum_in(ws, f.ty, goals, seen));
+            }
+            if let Some(eid) = ws.enums_by_name.get(&n) {
+                let ed = &ws.modules[eid.module.index()].enums[eid.def];
+                return ed.variants.iter().any(|v| match &v.payload {
+                    VariantPayload::Unit => false,
+                    VariantPayload::Tuple(tys) => {
+                        tys.iter().any(|t| reaches_enum_in(ws, *t, goals, seen))
+                    }
+                    VariantPayload::Record(fields) => fields
+                        .iter()
+                        .any(|f| reaches_enum_in(ws, f.ty, goals, seen)),
+                });
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn flat_enum_equality_is_leafwise(ws: &Workspace, name: Ustr) -> bool {
