@@ -81,19 +81,26 @@ fn staged_cdylib_path(root: &Path, dst_stem: &str) -> PathBuf {
     root.join("tmp").join(cdylib_name(dst_stem))
 }
 
+// rustc escapes spaces and continuations, but leaves path separators literal.
 fn makefile_words(text: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut word = String::new();
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '\\' {
-            match chars.next() {
-                Some('\n') => {}
-                Some('\r') if chars.peek() == Some(&'\n') => {
+            match chars.peek().copied() {
+                Some(' ') => {
+                    chars.next();
+                    word.push(' ');
+                }
+                Some('\n') => {
                     chars.next();
                 }
-                Some(next) => word.push(next),
-                None => word.push(ch),
+                Some('\r') if chars.clone().nth(1) == Some('\n') => {
+                    chars.next();
+                    chars.next();
+                }
+                _ => word.push(ch),
             }
         } else if ch.is_whitespace() {
             if !word.is_empty() {
@@ -463,6 +470,21 @@ mod tests {
         assert!(
             stdout.lines().any(|line| line == "@rpath/libstone.dylib"),
             "{stdout}"
+        );
+    }
+
+    #[test]
+    fn dep_info_preserves_windows_paths_and_escaped_spaces() {
+        assert_eq!(
+            makefile_words(
+                r"C:\work\src\lib.rs C:\my\ project\src.rs \\server\share\src.rs /my\ project/src.rs"
+            ),
+            [
+                r"C:\work\src\lib.rs",
+                r"C:\my project\src.rs",
+                r"\\server\share\src.rs",
+                "/my project/src.rs"
+            ]
         );
     }
 

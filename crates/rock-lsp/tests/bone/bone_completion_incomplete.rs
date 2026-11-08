@@ -10,7 +10,6 @@
 
 use lsp_types::*;
 use rock_lsp::{LspWorkspace, do_completion_workspace};
-use std::str::FromStr;
 
 const SRC: &str = "\
 struct IVec2 { x: int }
@@ -33,7 +32,7 @@ fn bone_completion_is_marked_incomplete() {
     let params = CompletionParams {
         text_document_position: TextDocumentPositionParams {
             text_document: TextDocumentIdentifier {
-                uri: Uri::from_str(&format!("file://{}", path.display())).unwrap(),
+                uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
             },
             // cursor after `pg` inside `sfx(...)` (line 5, char 8).
             position: Position::new(5, 8),

@@ -4,7 +4,6 @@
 
 use lsp_types::*;
 use rock_lsp::{LspWorkspace, do_completion_workspace};
-use std::str::FromStr;
 
 const SRC: &str = "\
 struct Dims { width: int, height: int }
@@ -25,7 +24,7 @@ fn labels_at(line: u32, ch: u32) -> Vec<String> {
     let params = CompletionParams {
         text_document_position: TextDocumentPositionParams {
             text_document: TextDocumentIdentifier {
-                uri: Uri::from_str(&format!("file://{}", path.display())).unwrap(),
+                uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
             },
             position: Position::new(line, ch),
         },

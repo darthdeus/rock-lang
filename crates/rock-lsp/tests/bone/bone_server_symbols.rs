@@ -8,7 +8,6 @@
 use crate::common::bone_ws;
 use lsp_types::*;
 use rock_lsp::{do_document_symbols_workspace, do_workspace_symbols_workspace};
-use std::str::FromStr;
 
 const SRC: &str = "\
 struct Player {
@@ -25,7 +24,7 @@ fn main() {
 ";
 
 fn uri_of(path: &std::path::Path) -> Uri {
-    Uri::from_str(&format!("file://{}", path.display())).unwrap()
+    Uri::from_file_path(path.to_str().unwrap()).unwrap()
 }
 
 fn workspace_names(ws: &mut rock_lsp::LspWorkspace, query: &str) -> Vec<String> {

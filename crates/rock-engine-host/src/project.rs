@@ -224,7 +224,8 @@ mod tests {
             .to_string();
         assert!(err.contains("ambiguous project `dup`"), "unexpected: {err}");
         assert!(
-            err.contains("games/dup") && err.contains("demos/dup"),
+            err.contains(&root.join("games").join("dup").display().to_string())
+                && err.contains(&root.join("demos").join("dup").display().to_string()),
             "should list both candidates: {err}"
         );
     }

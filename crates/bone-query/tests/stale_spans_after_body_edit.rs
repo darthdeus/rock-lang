@@ -6,7 +6,10 @@
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
 
+#[cfg(not(windows))]
 const PATH: &str = "/tmp/rock_lsp_bone_stale_spans.rock";
+#[cfg(windows)]
+const PATH: &str = r"C:\tmp\rock_lsp_bone_stale_spans.rock";
 
 const BEFORE: &str = "\
 fn alpha() -> int {

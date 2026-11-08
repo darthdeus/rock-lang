@@ -49,7 +49,9 @@ fn response(out: &[Message]) -> &lsp_server::Response {
 }
 
 fn uri_of(path: &std::path::Path) -> String {
-    format!("file://{}", path.display())
+    lsp_types::Uri::from_file_path(path.to_str().unwrap())
+        .unwrap()
+        .to_string()
 }
 
 const BROKEN: &str = "fn main() {\n    let n: int = \"text\"\n    print(\"{n}\")\n}\n";

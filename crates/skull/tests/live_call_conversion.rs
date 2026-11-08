@@ -71,7 +71,12 @@ fn field_derived_len_is_evaluated_once_through_conversion() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "0\n0");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .replace("\r\n", "\n"),
+        "0\n0"
+    );
     // This suffix covers both the Vec.len wrapper and its vec_len helper.
     let length_calls = body.matches("len_arr_T_spec_p_int(").count();
     let length_reads = body.matches(".len").count();

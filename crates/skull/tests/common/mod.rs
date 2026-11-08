@@ -558,7 +558,7 @@ pub fn run_luajit(prog: &str, tag: &str) -> String {
         "luajit exited non-zero.\nstdout:\n{stdout}\nstderr:\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
-    stdout.trim().to_string()
+    stdout.trim().replace("\r\n", "\n")
 }
 
 pub struct InlineOffGuard(#[allow(dead_code)] skull_transform::InlineOffGuard);

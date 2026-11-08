@@ -397,6 +397,7 @@ mod tests {
     fn lib_path_entries(value: &str) -> Vec<&str> {
         value.split(if cfg!(windows) { ';' } else { ':' }).collect()
     }
+    #[cfg(unix)]
     fn run_probe(
         path: &Path,
         code: &str,
@@ -660,7 +661,8 @@ mod tests {
                     "bytecode compile is not the final spawn"
                 );
             }
-            if cfg!(unix) {
+            #[cfg(unix)]
+            {
                 // Harness spawn observed through real children: an explicit
                 // child preload passes through exactly, and without one no
                 // gate lib appears. The sentinel travels via the child's own

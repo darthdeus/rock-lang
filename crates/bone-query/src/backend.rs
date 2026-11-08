@@ -631,9 +631,7 @@ impl BoneWorkspace {
     /// standalone file with no project. Determines whether `update` should
     /// batch-index siblings (real project) or stay single-file (scratch file).
     fn stick_root(path: &str) -> Option<PathBuf> {
-        let on_disk = editor_path(path);
-        let p = Path::new(on_disk.as_ref());
-        let canon = fs_err::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let canon = PathBuf::from(canonicalize_lenient(&editor_path(path)));
         let mut cur = canon.parent();
         while let Some(dir) = cur {
             if dir.join("stick.toml").exists() {
@@ -651,9 +649,7 @@ impl BoneWorkspace {
         if let Some(root) = Self::stick_root(path) {
             return root;
         }
-        let on_disk = editor_path(path);
-        let p = Path::new(on_disk.as_ref());
-        let canon = fs_err::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let canon = PathBuf::from(canonicalize_lenient(&editor_path(path)));
         canon.parent().map(|d| d.to_path_buf()).unwrap_or(canon)
     }
 
@@ -893,11 +889,15 @@ impl BoneWorkspace {
         }
 
         let root = Self::root_for(path);
+        // Package roots use filesystem spelling, including Windows' verbatim prefix.
+        let on_disk = editor_path(path);
+        let graph_path = fs_err::canonicalize(on_disk.as_ref())
+            .unwrap_or_else(|_| PathBuf::from(on_disk.as_ref()));
         let proj = self.project_mut(&root);
         if proj.graph.as_ref().is_some_and(|graph| {
             graph
-                .package_of_file(Path::new(path))
-                .is_some_and(|owner| !graph.includes_file(owner, Path::new(path)))
+                .package_of_file(&graph_path)
+                .is_some_and(|owner| !graph.includes_file(owner, &graph_path))
         }) {
             return vec![(editor_path(path).into_owned(), Vec::new())];
         }
@@ -931,7 +931,7 @@ impl BoneWorkspace {
             let node = proj
                 .graph
                 .as_ref()
-                .and_then(|g| rock_host::compilation_units::source_package(g, Path::new(path)));
+                .and_then(|g| rock_host::compilation_units::source_package(g, &graph_path));
             let (package, dialect, global_policy) = match node {
                 Some(node) => (Some(node.tag()), node.dialect, node.global_policy),
                 None => (

@@ -8,7 +8,10 @@
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
 
+#[cfg(not(windows))]
 const PATH: &str = "/tmp/rock_lsp_bone_test_main.rock";
+#[cfg(windows)]
+const PATH: &str = r"C:\scratch\rock_lsp_bone_test_main.rock";
 
 fn fresh(src: &str) -> BoneWorkspace {
     let mut bone = BoneWorkspace::new();
@@ -1537,8 +1540,8 @@ fn definition_of_stdlib_type_resolves_to_a_real_file() {
     );
     // And the resolved file must actually contain `struct Entity` at the
     // reported line (the offsets are valid against the on-disk stdlib).
-    let path = uri.strip_prefix("file://").unwrap();
-    let text = std::fs::read_to_string(path).expect("stdlib file must be readable");
+    let path = loc.uri.to_file_path().unwrap();
+    let text = std::fs::read_to_string(&path).expect("stdlib file must be readable");
     let line = loc.range.start.line as usize;
     let target = text.lines().nth(line).unwrap_or("");
     assert!(

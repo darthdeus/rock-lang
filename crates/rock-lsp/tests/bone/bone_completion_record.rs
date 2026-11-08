@@ -8,7 +8,6 @@
 use lsp_types::*;
 use rock_lsp::completion_record;
 use rock_lsp::{LspWorkspace, do_completion_workspace};
-use std::str::FromStr;
 
 const SRC: &str = "\
 struct IVec2 { x: int }
@@ -24,7 +23,7 @@ fn completion_items(ws: &mut LspWorkspace, path: &std::path::Path) -> Vec<Comple
     let params = CompletionParams {
         text_document_position: TextDocumentPositionParams {
             text_document: TextDocumentIdentifier {
-                uri: Uri::from_str(&format!("file://{}", path.display())).unwrap(),
+                uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
             },
             // cursor after `pg` inside `sfx(...)`.
             position: Position::new(5, 8),

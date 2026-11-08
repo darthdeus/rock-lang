@@ -8,7 +8,6 @@
 use crate::common::bone_ws;
 use lsp_types::*;
 use rock_lsp::{LspWorkspace, do_document_highlight_workspace};
-use std::str::FromStr;
 
 // `count` is declared on line 1 and used on lines 2 and 3 -> three occurrences.
 const SRC: &str = "\
@@ -28,7 +27,7 @@ fn highlight_at(
     let params = DocumentHighlightParams {
         text_document_position_params: TextDocumentPositionParams {
             text_document: TextDocumentIdentifier {
-                uri: Uri::from_str(&format!("file://{}", path.display())).unwrap(),
+                uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
             },
             position: Position::new(line, ch),
         },
