@@ -1450,3 +1450,27 @@ fn glsl_emits_no_double_underscore_for_lua_escaped_names_or_idiv() {
         "GLSL floored division helper must be emitted:\n{glsl}"
     );
 }
+
+/// The GLSL side of #37: a sampled vector reassigned on one branch stays one
+/// `vec4` local, assigned in place.
+#[test]
+fn conditionally_reassigned_sample() {
+    let src = r#"
+        @shader(fragment)
+        fn frag(scene: Sampler2D, tc: Vec2) -> Vec4 {
+            let color = texture(scene, tc)
+            if color.w < 0.5 {
+                color = Vec4 { x: color.x * 0.5, y: color.y, z: 0.0, w: 1.0 }
+            }
+            return color
+        }
+    "#;
+    let glsl = emit_entry(src, "frag").expect("emit");
+    assert!(
+        glsl.contains(
+            "  vec4 color;\n  color = texture(scene, tc);\n  if ((color.w < 0.5)) {\n    \
+             color = vec4((color.x * 0.5), color.y, 0.0, 1.0);\n  }\n  return color;\n"
+        ),
+        "got:\n{glsl}"
+    );
+}

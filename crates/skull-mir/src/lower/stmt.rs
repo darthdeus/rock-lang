@@ -414,6 +414,19 @@ impl Builder<'_> {
                                     self.repr_to_leaves_shape(&r.value().clone(), &shape)?,
                                 ))
                             }
+                            // A `nobox` binding whose first value arrives boxed
+                            // (a `@gpu_only` intrinsic's return) still threads its
+                            // leaves: a single boxed cell would force every later
+                            // assignment to pack an implicit box to match it (#37).
+                            None if matches!(r.value(), ValueRepr::Scalar(_))
+                                && !shape.nullable
+                                && self.is_nobox_struct(shape.name) =>
+                            {
+                                Some((
+                                    shape.clone(),
+                                    self.repr_to_leaves_shape(&r.value().clone(), &shape)?,
+                                ))
+                            }
                             None => None,
                         };
                         if let Some((shape, leaves)) = threaded_leaves {

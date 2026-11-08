@@ -41,3 +41,32 @@ fn mapped_intrinsic_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
 fn a_mapped_gpu_intrinsic_emits() {
     print("ok2")
 }
+
+// A conditionally reassigned sampled vector (#37). The binding's first value is
+// the intrinsic's boxed return; the literal on one branch then had to share that
+// one boxed cell, so it was packed into an implicit `Vec4` box and rejected.
+@shader(fragment)
+fn reassigned_sample_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
+    let color = texture(uTexture, tc)
+    if color.w < 0.5 {
+        color = Vec4 { x: color.x * 0.5, y: color.y, z: 0.0, w: 1.0 }
+    }
+    return color
+}
+
+// The control spelling: the sampled vector stays immutable and only a separate
+// color is updated.
+@shader(fragment)
+fn separate_color_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
+    let sampled = texture(uTexture, tc)
+    let rgb = Vec3 { x: sampled.x, y: sampled.y, z: sampled.z }
+    if sampled.w < 0.5 {
+        rgb = Vec3 { x: sampled.x * 0.5, y: sampled.y, z: 0.0 }
+    }
+    return Vec4 { x: rgb.x, y: rgb.y, z: rgb.z, w: sampled.w }
+}
+
+@test(output = "ok3")
+fn a_conditionally_reassigned_sample_emits() {
+    print("ok3")
+}
