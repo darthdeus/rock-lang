@@ -5,6 +5,63 @@ use crate::*;
 
 pub static COMMANDS: &[&CliCommand] = &[
     &CliCommand {
+        name: "native-build",
+        route: Route::Direct(|cx| {
+            anyhow::ensure!(
+                !cx.args.files.is_empty(),
+                "usage: rock native-build <project>"
+            );
+            for project in &cx.args.files {
+                for lib in rock_engine_host::engine_build::game_engine_libs(project)? {
+                    rock_engine_host::engine_build::build_optional_engine_lib(&lib)?;
+                }
+            }
+            Ok(())
+        }),
+    },
+    &CliCommand {
+        name: "engine-libs",
+        route: Route::Direct(|cx| {
+            let mut libs = Vec::new();
+            for project in &cx.args.files {
+                libs.extend(rock_engine_host::engine_build::game_engine_libs(project)?);
+            }
+            println!(
+                "{}",
+                rock_engine_host::native_libraries::registry_json(&libs)?
+            );
+            Ok(())
+        }),
+    },
+    &CliCommand {
+        name: "engine-build-receipt",
+        route: Route::Direct(|cx| {
+            let output = cx.args.output.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "usage: rock engine-build-receipt [<game>...] --output <receipt.json>"
+                )
+            })?;
+            rock_engine_host::engine_build::prepare_engine_build_receipt(
+                &cx.args.files,
+                std::path::Path::new(output),
+            )
+        }),
+    },
+    &CliCommand {
+        name: "sdk-check",
+        route: Route::Direct(|cx| {
+            if cx.args.files.len() != 1 {
+                anyhow::bail!("usage: rock sdk-check <project>");
+            }
+            crate::sdk_check::check(
+                &cx.args.files[0],
+                std::path::Path::new(&rock_host::rock_dir()),
+            )?;
+            println!("SDK manifest compatibility: OK");
+            Ok(())
+        }),
+    },
+    &CliCommand {
         name: "sim",
         route: Route::Backend(Operation::Sim),
     },

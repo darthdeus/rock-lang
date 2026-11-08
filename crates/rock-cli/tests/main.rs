@@ -50,3 +50,5 @@ mod test_backends;
 #[cfg(feature = "backend-js")]
 #[path = "js_support/test_exit_status_gate_js.rs"]
 mod test_exit_status_gate_js;
+
+mod native_commands;

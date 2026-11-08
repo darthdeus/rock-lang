@@ -508,3 +508,5 @@ mod sim_command;
 mod sim_environment;
 pub mod sim_observability;
 pub mod sim_report;
+
+mod sdk_check;
