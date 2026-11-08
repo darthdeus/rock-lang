@@ -19,9 +19,7 @@ fn test_random_seed_changes_sequence() {
 }
 
 // Determinism pin: re-seeding reproduces the exact same draw sequence. The
-// stream is backend-specific by doctrine (Lua numeric 32-bit transition, JS
-// mulberry32; bit-parity is a non-goal), so this shared suite checks the
-// seedable/deterministic semantic rather than a cross-backend vector.
+// exact cross-backend stream is pinned at the end of this file.
 @test(output = "true")
 fn test_random_int_reseed_reproduces_sequence() {
     random_seed(42)
@@ -220,4 +218,23 @@ fn native_rng_matches_gameplay_and_presentation_contract() {
     presentation_random_seed(0)
     assert_eq(presentation_random_int(-4, 9000000000), 8798616889,
         "presentation two draw integer span")
+}
+
+// A seed or state wraps to its signed 32-bit word on both backends, so seeds
+// that differ by 2^32 give the same stream.
+@test
+fn rng_seed_wraps_to_32_bits() {
+    random_seed(4294967301)
+    assert_eq(random_get_state(), 5, "seed above 2^32 wraps")
+    let a = random()
+    random_seed(5)
+    assert_eq(random(), a, "same stream as the wrapped seed")
+
+    random_seed(-1)
+    assert_eq(random_get_state(), -1, "negative seed kept")
+    random_seed(4294967295)
+    assert_eq(random_get_state(), -1, "2^32 - 1 is -1 as a signed word")
+    random_set_state(2147483648)
+    assert_eq(random_get_state(), -2147483648, "state wraps on set")
+    assert_eq(random(), 0.8164801069069654, "draw after a wrapped state")
 }

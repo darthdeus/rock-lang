@@ -141,3 +141,41 @@ fn test_non_finite_float_interpolation() {
     assert_eq("{neg}", "-inf")
     assert_eq("{nan}", "nan")
 }
+
+fn same_float(x: float) -> float { return x }
+fn same_int(x: int) -> int { return x }
+
+// `tostring` and `print` use LuaJIT's `%.14g`. The JS port has to round exact
+// ties half-to-even and spell the exponent and non-finite values the same way.
+@test
+fn test_tostring_matches_luajit_g14() {
+    assert_eq(tostring(same_float(-0.0)), "-0")
+    assert_eq(tostring(same_float(1.0) / same_float(0.0)), "inf")
+    assert_eq(tostring(same_float(-1.0) / same_float(0.0)), "-inf")
+    assert_eq(tostring(same_float(0.0) / same_float(0.0)), "nan")
+    assert_eq(tostring(same_float(1e300) * same_float(1e300)), "inf")
+    assert_eq(tostring(same_float(0.1) + same_float(0.2)), "0.3")
+    assert_eq(tostring(same_float(1.0) / same_float(3.0)), "0.33333333333333")
+    assert_eq(tostring(same_float(1e15)), "1e+15")
+    assert_eq(tostring(same_float(1e21)), "1e+21")
+    assert_eq(tostring(same_float(1e100)), "1e+100")
+    assert_eq(tostring(same_float(1.5e-7)), "1.5e-07")
+    assert_eq(tostring(same_float(1e-5)), "1e-05")
+    assert_eq(tostring(same_float(0.0001)), "0.0001")
+    assert_eq(tostring(same_float(5e-324)), "4.9406564584125e-324")
+    assert_eq(tostring(same_float(1.7976931348623157e308)), "1.7976931348623e+308")
+    assert_eq(tostring(same_float(123456789.125)), "123456789.125")
+    assert_eq(tostring(same_float(1234567890123456.0)), "1.2345678901235e+15")
+}
+
+@test
+fn test_tostring_of_large_ints() {
+    assert_eq(tostring(same_int(99999999999999)), "99999999999999")
+    assert_eq(tostring(same_int(100000000000000)), "1e+14")
+    assert_eq(tostring(same_int(123456789012345)), "1.2345678901234e+14")
+    assert_eq(tostring(same_int(9007199254740992)), "9.007199254741e+15")
+    assert_eq(tostring(same_int(-9007199254740992)), "-9.007199254741e+15")
+    assert_eq(tostring(same_int(-2147483648)), "-2147483648")
+    assert_eq(tostring(same_int(4294967296)), "4294967296")
+    assert_eq("{same_int(123456789012345)}", "1.2345678901234e+14")
+}
