@@ -2164,10 +2164,7 @@ pub(crate) fn check_expr(
             params,
         } = *gamma.get(exp_r)
         {
-            if bone_core::modules::is_intrinsic_key_in(
-                former,
-                &["FieldRef", "ReadFieldRef", "WriteFieldRef"],
-            ) {
+            if bone_core::modules::is_field_ref_former(former) {
                 let is_field_ref = bone_core::modules::is_intrinsic_key(former, "FieldRef");
                 let is_read_field_ref =
                     bone_core::modules::is_intrinsic_key(former, "ReadFieldRef");

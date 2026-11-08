@@ -31,7 +31,7 @@ use bone_incremental::session::{Session, SessionFile, UpdateTier};
 use bone_semantic::inference::{self, Gamma};
 use bone_semantic::prelude::{
     BodyInference, FxHashMap, FxHashSet, InferenceResult, ModuleId, Span, TyId, Workspace,
-    is_intrinsic_key_in,
+    is_field_ref_former, is_intrinsic_key_in,
 };
 use skull_parser::CompilerError;
 use ustr::Ustr;
@@ -4468,7 +4468,7 @@ pub(crate) fn callee_slot_is_field_of_in_scope(
                 TyId::Static(pmid, idx) => ws.module(pmid).ty_arena[idx],
                 TyId::Local(_) => continue,
             };
-            if matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if is_intrinsic_key_in(n, &["FieldRef", "ReadFieldRef", "WriteFieldRef"]))
+            if matches!(te, TypeExpr::App { ctor: TypeCtor::Nominal(n), .. } if is_field_ref_former(n))
             {
                 found = true;
             }

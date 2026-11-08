@@ -1,6 +1,6 @@
 use bone_core::modules::{
     DefKind, FragmentScope, LegacyImports, LegacyProjection, NsNode, NsPackage, NsVisibility,
-    STD_INTRINSIC_TYPES, STD_PACKAGE_ID, STD_PACKAGE_NAME, UsePathRef, is_stdlib_module_file,
+    STD_PACKAGE_ID, STD_PACKAGE_NAME, UsePathRef, is_stdlib_module_file,
 };
 use skull_parser::{Ast, Item, ItemKind};
 
@@ -1675,7 +1675,7 @@ fn register_stdlib_items(
         table.entry(name).or_insert(name);
     }
 
-    for name in STD_INTRINSIC_TYPES {
+    for name in bone_core::modules::std_exported_intrinsic_types() {
         root.owned_types
             .entry(ustr(name))
             .or_insert_with(|| ustr(name));

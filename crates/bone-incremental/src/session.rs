@@ -837,11 +837,7 @@ impl Session {
                 bone_semantic::semantic_passes::ScopeItem::Def { name, .. } => Some(*name),
                 _ => None,
             })
-            .chain(
-                bone_core::modules::STD_INTRINSIC_TYPES
-                    .iter()
-                    .map(|n| ustr(n)),
-            )
+            .chain(bone_core::modules::std_exported_intrinsic_types().map(ustr))
             .collect();
 
         // Parse each file once for its prints/macros AND keep the module to feed

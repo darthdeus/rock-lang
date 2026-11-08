@@ -19,9 +19,30 @@ pub type PackageId = u32;
 pub const STD_PACKAGE_ID: PackageId = u32::MAX;
 pub const STD_PACKAGE_NAME: &str = "std";
 
-/// Compiler-known type formers that have no source declaration of their own.
-/// Their canonical keys are the bare spellings, just like legacy definitions.
-pub const STD_INTRINSIC_TYPES: &[&str] = &["FieldRef", "ReadFieldRef", "WriteFieldRef"];
+/// How a compiler-known type former is admitted and resolved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntrinsicType {
+    /// The nominal field references. They are members of the std export view
+    /// (`std::FieldRef`, the v1 prelude), so they resolve only while the
+    /// stdlib is loaded, and a bare key admits as a nominal type.
+    FieldRef,
+    /// Builtin formers with their own lowering. They resolve bare at the std
+    /// tier without being std exports: `std::Map` names nothing.
+    Former,
+}
+
+/// The one inventory of compiler-known type formers that have no source
+/// declaration of their own. Their canonical keys are the bare spellings,
+/// just like legacy definitions, so a package type with the same tail
+/// (`geo::Map`) is never one of them.
+pub const STD_INTRINSIC_TYPES: &[(&str, IntrinsicType)] = &[
+    ("FieldRef", IntrinsicType::FieldRef),
+    ("ReadFieldRef", IntrinsicType::FieldRef),
+    ("WriteFieldRef", IntrinsicType::FieldRef),
+    ("Map", IntrinsicType::Former),
+    ("Coroutine", IntrinsicType::Former),
+    ("Iterator", IntrinsicType::Former),
+];
 
 /// Stdlib ownership is read from the loader's source-file id, never inferred
 /// from linked files or path components.
@@ -36,11 +57,26 @@ pub fn is_intrinsic_key(key: Ustr, spelling: &str) -> bool {
     key.as_str() == spelling
 }
 
-pub fn intrinsic_type_name(key: Ustr) -> Option<&'static str> {
+/// The intrinsic type former whose canonical key is `key`, if any.
+pub fn intrinsic_type(key: Ustr) -> Option<IntrinsicType> {
     STD_INTRINSIC_TYPES
         .iter()
-        .copied()
-        .find(|name| is_intrinsic_key(key, name))
+        .find(|(name, _)| is_intrinsic_key(key, name))
+        .map(|&(_, kind)| kind)
+}
+
+/// Whether `key` is one of the field-reference formers (`FieldRef`,
+/// `ReadFieldRef`, `WriteFieldRef`).
+pub fn is_field_ref_former(key: Ustr) -> bool {
+    intrinsic_type(key) == Some(IntrinsicType::FieldRef)
+}
+
+/// The intrinsic formers the std export view owns.
+pub fn std_exported_intrinsic_types() -> impl Iterator<Item = &'static str> {
+    STD_INTRINSIC_TYPES
+        .iter()
+        .filter(|(_, kind)| *kind == IntrinsicType::FieldRef)
+        .map(|&(name, _)| name)
 }
 
 /// Stdlib `value` descriptors whose Lua representation is one host slot (the

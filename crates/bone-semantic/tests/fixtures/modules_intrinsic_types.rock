@@ -1,0 +1,98 @@
+//! Intrinsic type formers (`bone_core::modules::STD_INTRINSIC_TYPES`) have no
+//! source declaration: their canonical keys are the bare spellings, reached
+//! through the std tier. Only the FieldRef family is a member of the std
+//! export view. A package type with the same tail spelling stays an ordinary
+//! nominal that resolves only through the package's own paths.
+
+//- every_intrinsic_resolves_bare_in_a_v1_package
+//-- main.rock @pkg=app,1 @v1
+struct Hero { hp: int }
+
+fn field_refs(f: FieldRef<Hero, int>, r: ReadFieldRef<Hero, int>, w: WriteFieldRef<Hero, int>) {
+    let a = f
+          //^ FieldRef<app::Hero, int>
+    let b = r
+          //^ ReadFieldRef<app::Hero, int>
+    let c = w
+          //^ WriteFieldRef<app::Hero, int>
+}
+
+fn lookup(m: Map<int, string>) {
+    let a = m
+          //^ Map<int, string>
+}
+
+co fn ticks() -> Coroutine<int> {
+    yield 1
+}
+
+fn run() {
+    let c = ticks()
+          //^ Coroutine<int, (), ()>
+}
+
+fn first<I: Iterator<int>>(it: I) -> int {
+    for x in it {
+        return x
+             //^ int
+    }
+    0
+}
+
+//- field_ref_family_resolves_through_std_paths
+//-- main.rock @pkg=app,1 @v1
+struct Hero { hp: int }
+
+fn field_ref(f: std::FieldRef<Hero, int>, r: std::ReadFieldRef<Hero, int>, w: std::WriteFieldRef<Hero, int>) {
+    let a = f
+          //^ FieldRef<app::Hero, int>
+    let b = r
+          //^ ReadFieldRef<app::Hero, int>
+    let c = w
+          //^ WriteFieldRef<app::Hero, int>
+}
+
+//- package_type_named_like_an_intrinsic_stays_nominal
+//-- geo.rock @pkg=geo,2 @v1
+pub mod world;
+
+pub struct Map { pub width: int }
+pub struct Coroutine { pub step: int }
+pub struct Iterator { pub at: int }
+pub struct FieldRef { pub slot: int }
+
+pub fn own_map(m: Map) -> int {
+    m.width
+    //^ int
+}
+
+//-- main.rock @pkg=app,1 @v1
+fn qualified(m: geo::world::Map, c: geo::world::Coroutine, i: geo::world::Iterator, f: geo::world::FieldRef) -> int {
+    let a = m
+          //^ geo::world::Map
+    let b = c
+          //^ geo::world::Coroutine
+    let d = i
+          //^ geo::world::Iterator
+    let e = f
+          //^ geo::world::FieldRef
+    m.width + c.step + i.at + f.slot
+}
+
+fn bare(m: Map<int, string>) {
+    let a = m
+          //^ Map<int, string>
+}
+
+//- package_map_is_not_reachable_bare_from_another_package @fail=Map type must have exactly 2 type arguments
+//-- geo.rock @pkg=geo,2 @v1
+pub mod world;
+
+pub struct Map { pub width: int }
+
+//-- main.rock @pkg=app,1 @v1
+fn bare(m: Map<int>) {}
+
+//- std_path_does_not_name_a_bare_former @fail=`std::Map` did not resolve to any definition
+//-- main.rock @pkg=app,1 @v1
+fn lookup(m: std::Map<int, string>) {}

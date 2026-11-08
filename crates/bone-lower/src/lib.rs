@@ -759,7 +759,7 @@ fn lower_resolved_type_name(
     te: &skull_parser::TypeExprData,
     key: &Ustr,
 ) -> Result<TyId, CompilerError> {
-    let is_intrinsic = bone_core::modules::intrinsic_type_name(*key).is_some();
+    let is_intrinsic = bone_core::modules::is_field_ref_former(*key);
     if !is_intrinsic
         && !(ctx.workspace.struct_by_name.contains_key(key)
             || ctx.workspace.enums_by_name.contains_key(key)
@@ -972,9 +972,7 @@ pub fn lower_type_expr_in(
 
         TypeExprKind::App { ctor, args } => {
             let resolved_ctor = ctx.resolve_bare_key(ctor.name, ctor.span)?;
-            let is_field_ref = ["FieldRef", "ReadFieldRef", "WriteFieldRef"]
-                .iter()
-                .any(|name| bone_core::modules::is_intrinsic_key(resolved_ctor, name));
+            let is_field_ref = bone_core::modules::is_field_ref_former(resolved_ctor);
 
             if is_field_ref {
                 if args.len() != 2 {

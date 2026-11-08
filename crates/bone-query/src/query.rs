@@ -1767,12 +1767,9 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                                     .copied()
                                     .and_then(|t| struct_app_args(ws, bi, t))
                                     .and_then(|(ctor, args)| {
-                                        is_intrinsic_key_in(
-                                            ctor,
-                                            &["FieldRef", "ReadFieldRef", "WriteFieldRef"],
-                                        )
-                                        .then(|| args.into_iter().next())
-                                        .flatten()
+                                        is_field_ref_former(ctor)
+                                            .then(|| args.into_iter().next())
+                                            .flatten()
                                     })
                                     .and_then(|t0| struct_app_args(ws, bi, t0))
                                     .is_some_and(|(sn, _)| sn == sname)
@@ -3182,7 +3179,7 @@ pub(crate) fn receiver_vec_elem<'a>(
 /// a `FieldRef` whose first arg isn't a nominal struct).
 fn field_ref_struct(ws: &Workspace, bi: &BodyInference, ty: TyId) -> Option<Ustr> {
     let (ctor, args) = struct_app_args(ws, bi, ty)?;
-    if !is_intrinsic_key_in(ctor, &["FieldRef", "ReadFieldRef", "WriteFieldRef"]) {
+    if !is_field_ref_former(ctor) {
         return None;
     }
     let (sname, _) = struct_app_args(ws, bi, *args.first()?)?;

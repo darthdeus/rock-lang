@@ -11,7 +11,7 @@ use lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat};
 use bone_core::type_equiv::TyRef;
 use bone_incremental::session::Session;
 use bone_semantic::prelude::{
-    Idx, InferenceResult, ModuleId, TyId, Workspace, is_intrinsic_key, is_intrinsic_key_in,
+    Idx, InferenceResult, ModuleId, TyId, Workspace, is_field_ref_former, is_intrinsic_key,
 };
 use ustr::Ustr;
 
@@ -138,9 +138,7 @@ fn fieldref_slot_owner(
         TypeExpr::App {
             ctor: TypeCtor::Nominal(n),
             params,
-        } if is_intrinsic_key_in(n, &["FieldRef", "ReadFieldRef", "WriteFieldRef"])
-            && params.len() == 2 =>
-        {
+        } if is_field_ref_former(n) && params.len() == 2 => {
             let mut it = params.into_iter();
             (it.next().unwrap(), it.next().unwrap())
         }

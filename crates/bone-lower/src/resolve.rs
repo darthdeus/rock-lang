@@ -663,7 +663,9 @@ fn several(ws: &Workspace, name: Ustr, hits: &[Resolved], via: Via) -> String {
 /// files share, so it is owned by the std view: only the standard library's
 /// own overloads belong to it (spec 5).
 fn std_definition(ws: &Workspace, name: Ustr) -> Option<Resolved> {
-    if bone_core::modules::is_intrinsic_key_in(name, &["Map", "Coroutine", "Iterator"]) {
+    // The std exports among the intrinsics (the FieldRef family) live in the
+    // std view below; the other formers resolve bare even with no stdlib.
+    if bone_core::modules::intrinsic_type(name) == Some(bone_core::modules::IntrinsicType::Former) {
         return Some(Resolved {
             key: name,
             kind: ResolvedKind::Type,

@@ -430,7 +430,7 @@ fn count_references(
             Target::Key { key, modules }
                 if modules.is_empty() && matches!(r.kind, RefKind::Type | RefKind::Pattern) =>
             {
-                if bone_core::modules::STD_INTRINSIC_TYPES.contains(&key.as_str()) {
+                if bone_core::modules::is_field_ref_former(*key) {
                     Owner::Std
                 } else {
                     Owner::Builtin
