@@ -101,6 +101,25 @@ fn test_inspect_enum_record_variant_compact() {
     print(inspect(color))
 }
 
+// `Color` is stored as a scalar tag box, which carries no variant name, so the
+// name has to come from the enum itself wherever the box reaches `inspect`:
+// through a parameter and out of a Vec as well as straight from a literal.
+fn inspect_color(color: Color) -> string { return inspect(color) }
+
+enum Shade { Plain, Tint(int, int) }
+
+@test(output = "Color::Blue Color::Custom {{ g = 2, r = 1 }} Color::Green")
+fn test_inspect_scalar_enum_box_away_from_its_literal() {
+    let colors: [Color] = [Color::Green]
+    print("{inspect_color(Color::Blue)} {inspect_color(Color::Custom { r: 1, g: 2 })} {inspect(colors[0])}")
+}
+
+@test(output = "Shade::Plain Shade::Tint {{ [1] = 3, [2] = 4 }}")
+fn test_inspect_scalar_enum_box_tuple_variant() {
+    let shades: [Shade] = [Shade::Plain, Shade::Tint(3, 4)]
+    print("{inspect(shades[0])} {inspect(shades[1])}")
+}
+
 @test(output = "{{ 1, 2, 3 }}")
 fn test_inspect_tuple_compact() {
     let tuple = (1, 2, 3)

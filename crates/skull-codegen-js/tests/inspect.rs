@@ -3,9 +3,9 @@
 //! keys, ` = ` sep, compact/multiline threshold), Vec, Map, arrays, scalars,
 //! fn-records. A GC-FREE VALUE STRUCT argument renders colon-format cdata-faithful
 //! (`Name { f: v }`, declaration field order) via an emit-time recursive renderer
-//! (its fields are bounded to primitives + nested value structs). An ENUM argument
-//! still REJECTS (the scalarized box cannot reproduce the named variant). Node
-//! execution is the correctness oracle; `tests/strings/js_inspect.rock` cross-checks
+//! (its fields are bounded to primitives + nested value structs). An enum stored
+//! as a scalar tag box renders through a per-enum renderer that bakes in the
+//! variant names. Node execution is the correctness oracle; `tests/strings/js_inspect.rock` cross-checks
 //! against luajit.
 
 use crate::common::ws_with;
@@ -169,17 +169,12 @@ return { __ty: "Draw", mask: { __ty: "Mask", r: true } };
     );
 }
 
-// An ENUM argument rejects. A payload-bearing enum scalarizes to the
-// value-struct-like shape (`MakeValueStruct`), so it is caught by the same box
-// gate -- either message is a correct honest reject (the numeric tag / colon
-// render cannot be reproduced without the enum/value-struct repr work).
+// A payload-bearing enum scalarizes to a tag box (`MakeValueStruct`) whose
+// numeric tag carries no variant name; the per-enum renderer supplies it, with
+// record fields sorted as luajit's cdata `__tostring` renders them.
 #[test]
-fn enum_arg_rejects() {
+fn scalar_enum_box_renders_its_variant() {
     let src = "enum Color { Red, Custom { r: int, g: int } }\n\
                fn root() -> string { inspect(Color::Custom { r: 1, g: 2 }) }";
-    let err = emit_closure(&ws_with(src), "root").unwrap_err();
-    assert!(
-        err.contains("enum") || err.contains("value struct"),
-        "reject reason: {err}"
-    );
+    assert_eq!(eval_str(src, "root"), "Color::Custom { g = 2, r = 1 }");
 }

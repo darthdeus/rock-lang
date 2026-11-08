@@ -3009,12 +3009,7 @@ impl Emitter<'_> {
         // `inspect` (lua_tostring / precision parity), nested value structs recurse.
         if supply.is_some() && matches!(cf.name.as_str(), "inspect" | "inspect_formatted") {
             if let Some(&arg0) = args.first() {
-                if let Inst::MakeValueStruct {
-                    name,
-                    representation,
-                    ..
-                } = &self.mf.insts[arg0]
-                {
+                if let Inst::MakeValueStruct { name, .. } = &self.mf.insts[arg0] {
                     if skull_mir::lower::gc_free_value_struct_field_order(self.ws, *name).is_some()
                     {
                         let (cyc, prec) = if cf.name.as_str() == "inspect_formatted" {
@@ -3032,21 +3027,6 @@ impl Emitter<'_> {
                             )
                         };
                         return self.render_value_struct_inspect(arg0, &cyc, &prec);
-                    }
-                    // A scalarized ENUM box reaches here (name is an enum value-shape,
-                    // not a struct): its numeric tag / named variant cannot be rebuilt
-                    // from the `{__tag, _n}` object -- reject honestly.
-                    let storage = self
-                        .mf
-                        .rep_arena
-                        .as_ref()
-                        .and_then(|arena| arena.try_get(*representation))
-                        .and_then(|plan| plan.value_storage());
-                    if storage == Some(skull_mir::lower::ValueStorage::CData) {
-                        return Err(err(format!(
-                            "JS subset: `inspect` of scalarized enum `{name}` \
-                             (numeric-tag box cannot reproduce the named variant)"
-                        )));
                     }
                 }
             }
@@ -3157,6 +3137,7 @@ pub fn emit_with_closure(
     out.push_str(&emit_inspect_enum_payloads(ws)?);
     out.push_str(&emit_vt_eq(ws, struct_registry.as_ref())?);
     out.push_str(&emit_inspect_ty(ws, struct_registry.as_ref())?);
+    out.push_str(&emit_inspect_cdata_enums(ws)?);
     out.push_str(&emit_col_mat(ws, struct_registry.as_ref())?);
     out.push_str(&ret_slot_decls(
         max_multi_wire(&bodies)?.max(max_published_lanes(&session.view, &st.inline_js)?),
@@ -3755,6 +3736,9 @@ fn assemble_program_core(
     let inspect_ty = emit_inspect_ty(ws, struct_registry.as_ref())?;
     out.push_str(&inspect_ty);
     stable.push_str(&inspect_ty);
+    let inspect_cdata_enums = emit_inspect_cdata_enums(ws)?;
+    out.push_str(&inspect_cdata_enums);
+    stable.push_str(&inspect_cdata_enums);
     let col_mat = emit_col_mat(ws, struct_registry.as_ref())?;
     out.push_str(&col_mat);
     stable.push_str(&col_mat);
@@ -5916,6 +5900,72 @@ fn emit_inspect_ty(
         registry.value_plans(),
         registry.names(),
     )
+}
+
+/// Per-enum `__rock_inspect_ty` renderers for every enum stored as a scalar
+/// tag box (`{__ty, __tag, _<slot>..}`). The box carries no variant name, so
+/// the name is baked per tag at compile time, matching luajit's per-enum
+/// cdata `__tostring` (`skull::enum_cdata_metatypes`): a unit variant renders
+/// `E::V`, a tuple `E::V { [1] = .. }`, a record `E::V { f = .. }` with its
+/// fields sorted. Name-sorted, emitted from declarations.
+fn emit_inspect_cdata_enums(ws: &Workspace) -> Result<String, CompilerError> {
+    use bone_semantic::hir::VariantPayload;
+
+    let mut names: Vec<ustr::Ustr> = ws.enums_by_name.keys().copied().collect();
+    names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    let mut out = String::new();
+    for name in names {
+        if skull_mir::lower::EnumPlan::for_name(ws, name)
+            .and_then(|plan| plan.cdata().cloned())
+            .is_none()
+        {
+            continue;
+        }
+        let Some(eid) = ws.enums_by_name.get(&name) else {
+            continue;
+        };
+        let ed = &ws.modules[eid.module.index()].enums[eid.def];
+        if out.is_empty() {
+            out.push_str("var __rock_inspect_ty = __rock_inspect_ty || {};\n");
+        }
+        let mut body = String::from("var g = t.__tag; ");
+        for (tag, variant) in ed.variants.iter().enumerate() {
+            let head = format!("{name}::{}", variant.name);
+            let slots: Vec<(String, String)> = match &variant.payload {
+                VariantPayload::Tuple(types) => (0..types.len())
+                    .map(|j| (format!("[{}]", j + 1), format!("_{j}")))
+                    .collect(),
+                VariantPayload::Record(fields) => {
+                    let mut names: Vec<ustr::Ustr> = fields.iter().map(|f| f.name).collect();
+                    names.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+                    names
+                        .iter()
+                        .map(|f| (f.to_string(), format!("_{f}")))
+                        .collect()
+                }
+                _ => Vec::new(),
+            };
+            let render = if slots.is_empty() {
+                js_string_lit(&head)?
+            } else {
+                let mut parts = vec![js_string_lit(&format!("{head} {{ "))?];
+                for (i, (label, slot)) in slots.iter().enumerate() {
+                    let sep = if i == 0 { "" } else { ", " };
+                    parts.push(js_string_lit(&format!("{sep}{label} = "))?);
+                    parts.push(format!("lua_tostring(t[{}])", js_string_lit(slot)?));
+                }
+                parts.push(js_string_lit(" }")?);
+                parts.join(" + ")
+            };
+            body.push_str(&format!("if (g === {tag}) return {render}; "));
+        }
+        body.push_str("return \"?\";");
+        out.push_str(&format!(
+            "__rock_inspect_ty[{}] = function(t) {{ {body} }};\n",
+            js_string_lit(name.as_str())?
+        ));
+    }
+    Ok(out)
 }
 
 /// Per-type, per-variant descriptors for flat enum tuple payloads whose
