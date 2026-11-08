@@ -1146,30 +1146,37 @@ fn parse_position(line: &str) -> Result<(usize, usize)> {
     Ok((line, character))
 }
 
-/// Environment variable that points the fixture runner at a different server
-/// build. Tests use it to drive the runner with a stub server; it is the only
-/// override, so every fixture runs one known binary.
-const LSP_TEST_BIN_ENV: &str = "ROCK_LSP_TEST_BIN";
-
 /// The binary every fixture request runs: the executable that is running this
 /// suite, so a fixture always tests the build under test. Probing a working
 /// directory for `target/debug/rock` (and falling back to `cargo run`) used to
 /// pick a different build than the one running, and `cargo run` also made the
 /// suite slow and flaky under parallel load.
 fn lsp_server_bin() -> Result<PathBuf> {
-    if let Some(requested) = std::env::var_os(LSP_TEST_BIN_ENV) {
-        let path = PathBuf::from(requested);
-        if !path.is_file() {
-            return Err(anyhow::anyhow!(
-                "{LSP_TEST_BIN_ENV} points at {}, which is not a file",
-                path.display()
-            ));
-        }
-        return Ok(path);
-    }
     std::env::current_exe().map_err(|e| {
         anyhow::anyhow!("cannot find the running executable to use as the LSP server: {e}")
     })
+}
+
+/// The server a fixture talks to: the binary to spawn and the backend its
+/// LSP routes to. Tests pass a stub binary here.
+#[derive(Clone, Copy)]
+struct LspServerCmd<'a> {
+    bin: &'a Path,
+    backend: crate::Backend,
+}
+
+impl LspServerCmd<'_> {
+    /// `<bin> lsp` with the backend's environment. The one-shot handlers and
+    /// the interactive server both live under `rock lsp`; there is no
+    /// separate `rock-lsp` binary.
+    fn command(&self) -> Command {
+        let mut cmd = Command::new(self.bin);
+        cmd.arg("lsp");
+        if let Some((k, v)) = lsp_child_backend_env(self.backend) {
+            cmd.env(k, v);
+        }
+        cmd
+    }
 }
 
 /// The shape a fixture's reply must have, one variant per decoder. The
@@ -1322,7 +1329,7 @@ fn symbol_kind_name(kind: &serde_json::Value) -> Option<&str> {
 }
 
 /// Run a single LSP test
-fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
+fn run_lsp_test(test: &LspTest, server: LspServerCmd) -> Result<bool> {
     // Create a test file in a local test directory
     let test_dir = std::path::PathBuf::from(".lsp-test-tmp");
     fs_err::create_dir_all(&test_dir)?;
@@ -1455,7 +1462,7 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
         // No one-shot subcommand answers a code action; it goes to the
         // interactive server over JSON-RPC, as an editor sends it.
         LspOperation::CodeAction { line, character } => {
-            let result = run_code_action_test(test, backend, &test_file, *line, *character);
+            let result = run_code_action_test(test, server, &test_file, *line, *character);
             if let Some(dir) = &project_dir {
                 let _ = fs_err::remove_dir_all(dir);
             }
@@ -1463,20 +1470,7 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
         }
     };
 
-    // Execute the LSP command - use the already built binary for speed. The
-    // one-shot handlers live under `rock lsp <subcommand>`; there is no longer
-    // a separate `rock-lsp` binary (folded in by 6072750d1), so prepend `lsp`.
-    // Execute the LSP command against the running executable. The one-shot
-    // handlers live under `rock lsp <subcommand>`; there is no longer a
-    // separate `rock-lsp` binary (folded in by 6072750d1), so prepend `lsp`.
-    let rock_bin = lsp_server_bin()?;
-    let mut cmd = Command::new(&rock_bin);
-    cmd.arg("lsp");
-    cmd.args(&args);
-    if let Some((k, v)) = lsp_child_backend_env(backend) {
-        cmd.env(k, v);
-    }
-    let output = cmd.output()?;
+    let output = server.command().args(&args).output()?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -2192,7 +2186,7 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
 /// compare the file with the fixture's `RESULT:`.
 fn run_code_action_test(
     test: &LspTest,
-    backend: crate::Backend,
+    server: LspServerCmd,
     test_file: &Path,
     line: usize,
     character: usize,
@@ -2202,7 +2196,7 @@ fn run_code_action_test(
         .parent()
         .ok_or_else(|| anyhow::anyhow!("{} has no parent", test_file.display()))?;
     let uri = file_uri(&test_file)?;
-    let mut server = start_lsp_server(backend, root, &test.name)?;
+    let mut server = start_lsp_server(server, root, &test.name)?;
     let reply = request_code_actions(&mut server, &uri, &test.code, line, character);
     // Shut down before looking at the reply, so a failed request still stops
     // the child.
@@ -2556,7 +2550,7 @@ impl LspServer {
 
 /// Spawn `rock lsp serve` rooted at `root_dir` and complete the
 /// `initialize` handshake, using request id 1. `name` labels the watchdog.
-fn start_lsp_server(backend: crate::Backend, root_dir: &Path, name: &str) -> Result<LspServer> {
+fn start_lsp_server(server: LspServerCmd, root_dir: &Path, name: &str) -> Result<LspServer> {
     // Start the LSP server subprocess. Route stderr to a known-location
     // log file so that when the server hangs / panics during a test, the
     // operator has a breadcrumb. `Stdio::null()` here previously hid real
@@ -2571,18 +2565,13 @@ fn start_lsp_server(backend: crate::Backend, root_dir: &Path, name: &str) -> Res
                 .open(&stderr_log_path)?,
         ))
     };
-    // `rock lsp serve` is the interactive server (no separate `rock-lsp`
-    // binary since 6072750d1; bare `rock lsp` also defaults to serve).
-    let rock_bin = lsp_server_bin()?;
-    let mut cmd = Command::new(&rock_bin);
-    cmd.args(["lsp", "serve"])
+    let mut child = server
+        .command()
+        .arg("serve")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(stderr_for()?);
-    if let Some((k, v)) = lsp_child_backend_env(backend) {
-        cmd.env(k, v);
-    }
-    let mut child = cmd.spawn()?;
+        .stderr(stderr_for()?)
+        .spawn()?;
 
     let mut stdin = child
         .stdin
@@ -2698,7 +2687,7 @@ fn start_lsp_server(backend: crate::Backend, root_dir: &Path, name: &str) -> Res
 
 fn run_edit_sequence_test(
     test: &EditSequenceTest,
-    backend: crate::Backend,
+    server: LspServerCmd,
 ) -> Result<(usize, usize, Vec<String>)> {
     let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
     let mut passed = 0;
@@ -2735,7 +2724,7 @@ fn run_edit_sequence_test(
         mut stdin,
         rx: msg_rx,
         done: test_done,
-    } = start_lsp_server(backend, &test_dir, &test.name)?;
+    } = start_lsp_server(server, &test_dir, &test.name)?;
     // `start_lsp_server` used id 1 for `initialize`.
     let mut next_id: i64 = 2;
     let mut version: i64 = 1;
@@ -3221,7 +3210,7 @@ fn check_hover_response(
 
 /// Run all tests (single-shot + edit_sequence) in a single .rock.lsp file.
 /// Returns a `FileTestResult` for the shared parallel runner.
-fn run_lsp_file(file: &Path, display_name: &str, backend: crate::Backend) -> FileTestResult {
+fn run_lsp_file(file: &Path, display_name: &str, server: LspServerCmd) -> FileTestResult {
     let start_time = bone_core::prelude::Instant::now();
 
     let tests = match parse_lsp_test_file(file) {
@@ -3260,7 +3249,7 @@ fn run_lsp_file(file: &Path, display_name: &str, backend: crate::Backend) -> Fil
 
     // Run regular single-shot tests
     for test in tests.iter() {
-        match run_lsp_test(test, backend) {
+        match run_lsp_test(test, server) {
             Ok(true) => {
                 file_passed += 1;
             }
@@ -3277,7 +3266,7 @@ fn run_lsp_file(file: &Path, display_name: &str, backend: crate::Backend) -> Fil
 
     // Run edit sequence tests (persistent LSP server per test)
     for seq_test in edit_seq_tests.iter() {
-        match run_edit_sequence_test(seq_test, backend) {
+        match run_edit_sequence_test(seq_test, server) {
             Ok((_p, f, failure_details)) => {
                 if f == 0 {
                     file_passed += 1;
@@ -3403,11 +3392,13 @@ pub fn run_lsp_tests(
     }
 
     let start_time = bone_core::prelude::Instant::now();
+    let bin = lsp_server_bin()?;
 
     let (total, passed, failed, ignored) =
         parallel_runner::run_files_parallel(lsp_files, None, move |file| {
             let display_name = display_name_for_lsp_file(file, &root_dir);
-            run_lsp_file(file, &display_name, backend)
+            let server = LspServerCmd { bin: &bin, backend };
+            run_lsp_file(file, &display_name, server)
         });
 
     // Print section summary (matches formatter/error test pattern)
@@ -3450,40 +3441,6 @@ mod stderr_log_tests {
 mod runner_tests {
     use super::*;
 
-    /// `ROCK_LSP_TEST_BIN` is process-global, so tests that set it take this
-    /// lock and never observe each other's override.
-    static BIN_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Points the runner at `path` for the guard's lifetime, then restores the
-    /// previous value.
-    struct BinOverride {
-        previous: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl Drop for BinOverride {
-        fn drop(&mut self) {
-            // SAFETY: holding BIN_ENV_LOCK keeps other override-setting tests out.
-            unsafe {
-                match self.previous.take() {
-                    Some(value) => std::env::set_var(LSP_TEST_BIN_ENV, value),
-                    None => std::env::remove_var(LSP_TEST_BIN_ENV),
-                }
-            }
-        }
-    }
-
-    fn override_server_bin(path: &Path) -> BinOverride {
-        let lock = BIN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = std::env::var_os(LSP_TEST_BIN_ENV);
-        // SAFETY: holding BIN_ENV_LOCK keeps other override-setting tests out.
-        unsafe { std::env::set_var(LSP_TEST_BIN_ENV, path) };
-        BinOverride {
-            previous,
-            _lock: lock,
-        }
-    }
-
     /// Write an executable stub server that records each spawn in
     /// `<dir>/invocations` and prints `reply`, so a fixture's verdict comes
     /// from the runner's reply handling rather than from the compiler.
@@ -3511,8 +3468,11 @@ mod runner_tests {
         let marker = dir.path().join("invocations");
         let path = dir.path().join("fixture.rock.lsp");
         std::fs::write(&path, fixture).unwrap();
-        let _override = override_server_bin(&bin);
-        let result = run_lsp_file(&path, "fixture", crate::Backend::Bone);
+        let server = LspServerCmd {
+            bin: &bin,
+            backend: crate::Backend::Bone,
+        };
+        let result = run_lsp_file(&path, "fixture", server);
         let invocations = std::fs::read_to_string(&marker)
             .map(|log| log.lines().count())
             .unwrap_or(0);
@@ -3521,48 +3481,16 @@ mod runner_tests {
 
     #[test]
     fn the_lsp_server_is_the_running_executable() {
-        let _lock = BIN_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let previous = std::env::var_os(LSP_TEST_BIN_ENV);
-        // SAFETY: holding BIN_ENV_LOCK keeps other override-setting tests out.
-        unsafe { std::env::remove_var(LSP_TEST_BIN_ENV) };
-        let bin = lsp_server_bin();
-        // SAFETY: as above; restore before asserting so a panic keeps it clean.
-        unsafe {
-            match previous {
-                Some(value) => std::env::set_var(LSP_TEST_BIN_ENV, value),
-                None => std::env::remove_var(LSP_TEST_BIN_ENV),
-            }
-        }
         assert_eq!(
-            bin.unwrap(),
+            lsp_server_bin().unwrap(),
             std::env::current_exe().unwrap(),
             "a fixture must run the executable that is running it"
         );
     }
 
-    #[test]
-    fn the_binary_override_is_used_verbatim() {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = stub_server(dir.path(), "{}");
-        let _override = override_server_bin(&bin);
-        assert_eq!(lsp_server_bin().unwrap(), bin);
-    }
-
-    #[test]
-    fn an_override_that_is_not_a_file_is_a_named_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("no-such-rock");
-        let _override = override_server_bin(&missing);
-        let message = lsp_server_bin().unwrap_err().to_string();
-        assert!(
-            message.contains(LSP_TEST_BIN_ENV) && message.contains("no-such-rock"),
-            "{message}"
-        );
-    }
-
     /// The stub records every spawn, so the fixture proves which binary ran.
     #[test]
-    fn a_fixture_runs_on_the_overridden_binary() {
+    fn a_fixture_runs_on_the_given_binary() {
         let fixture = "TEST: stub completion\n\
 TYPE: completion\n\
 ---\n\
