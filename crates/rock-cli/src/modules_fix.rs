@@ -12,12 +12,9 @@
 //! behind an undeclared dependency or a narrower visibility is reported.
 //! Nothing adds a dependency, `allow_legacy`, or visibility.
 //!
-//! Lowering reports every unresolved bare name of a body and of the
-//! signatures in one pass, so one check finds the names to import. A few
-//! positions, such as a generic type constructor, a variant's enum or a global's
-//! initializer, still stop at their first name, so the planner re-checks the
-//! edited text in memory while a round planned a new import, up to
-//! [`MAX_ROUNDS`]. Safety is
+//! Lowering reports every unresolved bare name of the signatures, bodies and
+//! global initializers in one pass, so one check finds every name to import
+//! and the planner plans them together. Safety is
 //! migrate's check (`modules_analysis::sites`): every site the baseline
 //! resolved must resolve to the same target in the candidate, and the
 //! candidate may have no error the baseline lacked. An explicit import of a
@@ -51,9 +48,6 @@ use crate::modules_migrate::Mode;
 
 const EXIT_NOT_CLEAN: i32 = 3;
 const EXIT_ANALYSIS_FAILED: i32 = 4;
-/// A round only continues when it planned a new import. Only a name in a
-/// position that still stops lowering can hide another, so a chain is short.
-const MAX_ROUNDS: usize = 4;
 
 pub fn run(target: &Path, mode: Mode, format: Format) -> Result<i32> {
     let outcome = plan(target);
@@ -228,13 +222,13 @@ fn plan(target: &Path) -> Outcome {
         Ok(r) => r,
         Err((stage, message)) => return failed(stage, message),
     };
-    let mut plan = match plan_rounds(&ctx, &files, &baseline, baseline.resolved.is_some()) {
+    let mut plan = match plan_imports(&ctx, &files, &baseline, baseline.resolved.is_some()) {
         Ok(p) => p,
         Err((stage, message)) => return failed(stage, message),
     };
     // A glob that moves a site falls back to explicit imports.
     if plan.refused.is_some() && plan.fixes.iter().any(|f| f.glob) {
-        plan = match plan_rounds(&ctx, &files, &baseline, false) {
+        plan = match plan_imports(&ctx, &files, &baseline, false) {
             Ok(p) => p,
             Err((stage, message)) => return failed(stage, message),
         };
@@ -365,7 +359,7 @@ fn line_of(text: &str, off: usize) -> usize {
     text[..off.min(text.len())].matches('\n').count() + 1
 }
 
-fn plan_rounds(
+fn plan_imports(
     ctx: &Ctx,
     files: &[FixFile],
     baseline: &Round,
@@ -384,48 +378,26 @@ fn plan_rounds(
         refused: None,
     };
     let mut handled: BTreeSet<(usize, Ustr)> = BTreeSet::new();
-    // The latest round checked with every import planned so far; the first
-    // is the baseline itself.
-    let mut owned: Option<Round> = None;
-    let mut checked_fixes = 0;
-    for _ in 0..MAX_ROUNDS {
-        let edits = edits_for(files, &plan.fixes);
-        if !plan.fixes.is_empty() {
-            owned = Some(Round::check(ctx, files, &edits)?);
-            checked_fixes = plan.fixes.len();
-        }
-        let round = owned.as_ref().unwrap_or(baseline);
-        let mut found: Vec<Site> = Vec::new();
-        for e in &round.errors {
-            let (Some(name), Some(&fi)) = (unresolved_name(e), by_id.get(&e.location.file)) else {
-                continue;
-            };
-            if !handled.insert((fi, name)) {
-                continue;
-            }
-            let off = unmap(
-                edits.get(&fi).map(Vec::as_slice).unwrap_or(&[]),
-                e.location.offset,
-            );
+    let mut found: Vec<Site> = Vec::new();
+    for e in &baseline.errors {
+        let (Some(name), Some(&fi)) = (unresolved_name(e), by_id.get(&e.location.file)) else {
+            continue;
+        };
+        if handled.insert((fi, name)) {
             found.push(Site {
                 file: fi,
-                line: line_of(&files[fi].text, off),
+                line: line_of(&files[fi].text, e.location.offset),
                 name,
             });
         }
-        if found.is_empty() {
-            break;
-        }
-        let ws = round.namespace()?;
-        let before = plan.fixes.len();
+    }
+    if !found.is_empty() {
+        let ws = baseline.namespace()?;
         for site in found {
             let Some(frag) = ws.fragment_scopes.get(&files[site.file].id) else {
                 continue;
             };
             classify(&ws, frag, site, allow_globs, &mut plan);
-        }
-        if plan.fixes.len() == before {
-            break;
         }
     }
     plan.fixes.sort_by(|a, b| {
@@ -440,10 +412,7 @@ fn plan_rounds(
         plan.verification = "nothing to verify: no import is planned".to_string();
         return Ok(plan);
     }
-    let last = match owned {
-        Some(r) if checked_fixes == plan.fixes.len() => r,
-        _ => Round::check(ctx, files, &edits)?,
-    };
+    let last = Round::check(ctx, files, &edits)?;
     verify(ctx, files, baseline, &last, &edits, &mut plan);
     Ok(plan)
 }
