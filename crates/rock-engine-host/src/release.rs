@@ -286,7 +286,7 @@ mod worktree_bank_tests {
         let ordinary = resolve_asset_with_overlays(
             &project,
             "demo",
-            &[overlay.clone()],
+            std::slice::from_ref(&overlay),
             visual_bank::BANK_PATH,
         )
         .unwrap()
