@@ -759,8 +759,8 @@ fn release_one_shot_chunks(
                 .sum::<usize>(),
     );
     let chunks = cache.chunks.len() + built_specs.len();
-    drop(std::mem::take(&mut cache.chunks));
-    drop(std::mem::take(built_specs));
+    drop_in_background(std::mem::take(&mut cache.chunks));
+    drop_in_background(std::mem::take(built_specs));
     release_stats.chunks = chunks - cache.chunks.len() - built_specs.len();
     reads
 }
@@ -804,7 +804,7 @@ pub(super) fn assemble(
         view_driven_specialized_chunks(ws, &cache.cg, &cache.scx, cache, &asm.needed_specs);
     if lifetime == CacheLifetime::OneShot {
         let instances = cache.graph.instances.len();
-        cache.graph.release_records();
+        drop_in_background(cache.graph.take_records());
         release_stats.graph_instances = instances - cache.graph.instances.len();
     }
     let needed_foreign = collect_needed_foreign(ws, cache, &asm.always_emitted_calls, &spec_chunks);
@@ -815,7 +815,7 @@ pub(super) fn assemble(
         let stage =
             definition_plan_stage_lua(ws, &cache.cg, &cache.scx, &cache.concrete.plans, &plan)?;
         let plans = cache.concrete.plans.len() + cache.concrete.always_plans.len();
-        drop(std::mem::take(&mut cache.concrete));
+        drop_in_background(std::mem::take(&mut cache.concrete));
         release_stats.concrete_plans =
             plans - cache.concrete.plans.len() - cache.concrete.always_plans.len();
         Some((plan, stage))

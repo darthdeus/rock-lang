@@ -91,3 +91,16 @@ pub(super) fn parallel_join<A: Send, B: Send>(
 pub(super) fn parallel_join<A, B>(left: impl FnOnce() -> A, right: impl FnOnce() -> B) -> (A, B) {
     (left(), right())
 }
+
+/// Drop `value` off the calling thread. One-shot builds release large caches
+/// in the middle of serial assembly; freeing them on an idle worker keeps that
+/// path short. Inline where there are no worker threads to hand it to.
+#[cfg(all(not(feature = "sequential"), not(target_arch = "wasm32")))]
+pub(super) fn drop_in_background<T: Send + 'static>(value: T) {
+    rayon::spawn(move || drop(value));
+}
+
+#[cfg(any(feature = "sequential", target_arch = "wasm32"))]
+pub(super) fn drop_in_background<T>(value: T) {
+    drop(value);
+}

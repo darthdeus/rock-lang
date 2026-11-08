@@ -1731,12 +1731,14 @@ impl InstanceGraph {
         &self.interner
     }
 
-    /// Release one-shot build records while keeping the shared type arena alive.
-    pub fn release_records(&mut self) {
+    /// Release one-shot build records while keeping the shared type arena
+    /// alive. Returns the released records so the caller chooses where they
+    /// are freed.
+    pub fn take_records(&mut self) -> Self {
         let mut empty = Self::empty_in(std::sync::Arc::clone(&self.interner));
         empty.run_stats = self.run_stats;
         empty.verify_whole_graph = self.verify_whole_graph;
-        *self = empty;
+        std::mem::replace(self, empty)
     }
 
     fn empty_in(interner: std::sync::Arc<MonoInterner>) -> Self {
