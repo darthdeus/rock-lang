@@ -374,6 +374,13 @@ pub struct Module {
     pub interface_generation: u64,
 
     pub lower_var_high_water: u32,
+    /// `ty_arena` entries below this index are the previous lowering's, kept
+    /// so that inference cached in other modules still reads valid types.
+    /// Nothing in the current lowering refers to them.
+    pub ty_arena_live_start: u32,
+    /// `lower_var_high_water` when this lowering began: lowering the same
+    /// text from here assigns the same `VarId`s.
+    pub lower_var_floor: u32,
 
     pub file: Ustr,
     /// The owning package's manifest name, stamped by the host graph. `None`
@@ -443,6 +450,8 @@ impl Default for Module {
 
             interface_generation: 0,
             lower_var_high_water: 0,
+            ty_arena_live_start: 0,
+            lower_var_floor: 0,
 
             file: Ustr::from(""),
             package: None,
@@ -486,6 +495,14 @@ impl Default for Module {
 }
 
 impl Module {
+    /// The type expressions the current lowering allocated, without the
+    /// entries kept for cached inference (see `ty_arena_live_start`).
+    pub fn live_type_exprs(&self) -> impl Iterator<Item = &TypeExpr> {
+        self.ty_arena
+            .values()
+            .skip(self.ty_arena_live_start as usize)
+    }
+
     pub fn make_lapper(&mut self, start: usize, stop: usize, val: BodyOwner) {
         self.item_intervals
             .push(rust_lapper::Interval { start, stop, val })

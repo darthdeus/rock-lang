@@ -1037,7 +1037,7 @@ pub(crate) fn build_freq_index(ws: &Workspace) -> HashMap<Ustr, u32> {
     use bone_semantic::hir::{self, TypeCtor, TypeExpr};
     let mut counts: HashMap<Ustr, u32> = HashMap::new();
     for m in ws.modules.iter() {
-        for te in m.ty_arena.values() {
+        for te in m.live_type_exprs() {
             if let TypeExpr::App {
                 ctor: TypeCtor::Nominal(n),
                 ..

@@ -2211,6 +2211,77 @@ fn make_point(x: int, y: int, z: int) -> Point {
     );
 }
 
+// A parameter added to `shifted` moves every later entry of the module's type
+// arena, and `b.rock` holds inferred types that point into it. Those callers
+// must stay cached (they read nothing the edit changed) and still read valid
+// types, through repeated edits and the whole-module path a later edit takes.
+#[test]
+fn signature_edit_reinfers_only_the_callers_of_the_edited_function() {
+    let a = |extra: &str, body: &str| {
+        format!(
+            "fn shifted(x: int{extra}) -> int {{ x }}\n\n\
+             struct Pair<T> {{ a: T }}\n\n\
+             fn stable(v: Pair<int>) -> Pair<int> {{ v }}\n\n\
+             fn other(v: Pair<int>) -> int {{ {body} }}\n"
+        )
+    };
+    let b = "fn calls_stable(p: Pair<int>) -> int { let q = stable(p)\n q.a }";
+    let c = "fn calls_shifted() -> int { shifted(1) }";
+    let d = "fn unrelated() -> int { 7 }";
+    let mut h = Harness::new(&[
+        ("a.rock", &a("", "v.a")),
+        ("b.rock", b),
+        ("c.rock", c),
+        ("d.rock", d),
+    ]);
+
+    let result = h.update("a.rock", &a(", y: int = 0", "v.a"));
+    assert_eq!(result.tier, UpdateTier::Interface);
+    let mids = Harness::reinferred_mids(&result);
+    assert!(mids.contains(&h.mid("c.rock")), "c.rock calls shifted");
+    assert!(
+        !mids.contains(&h.mid("b.rock")),
+        "b.rock reads only `stable` and `Pair`, which the edit left alone"
+    );
+    h.assert_matches_batch();
+
+    let result = h.update("a.rock", &a(", y: int = 0, z: int = 1", "v.a"));
+    assert!(!Harness::reinferred_mids(&result).contains(&h.mid("b.rock")));
+    h.assert_matches_batch();
+
+    // Two bodies at once: the whole-module path re-lowers the file while b.rock
+    // keeps its inference.
+    let two_bodies = a(", y: int = 0, z: int = 1", "v.a + 1").replace("{ x }", "{ x + 1 }");
+    let result = h.update("a.rock", &two_bodies);
+    assert_eq!(result.tier, UpdateTier::BodyOnly);
+    h.assert_matches_batch();
+
+    let result = h.update(
+        "b.rock",
+        "fn calls_stable(p: Pair<int>) -> int { let q = stable(p)\n q.a + 1 }",
+    );
+    assert_eq!(result.tier, UpdateTier::BodyOnly);
+    h.assert_matches_batch();
+    h.assert_clean();
+}
+
+// A signature edit that adds a function renumbers the later functions, and a
+// cached caller stores its callee's index: it has to re-infer.
+#[test]
+fn signature_edit_that_adds_a_function_reinfers_callers_of_the_later_ones() {
+    let without = "fn first() -> int { 1 }\nfn later() -> int { 2 }\n";
+    let with = "fn first() -> int { 1 }\nfn added() -> int { 3 }\nfn later() -> int { 2 }\n";
+    let mut h = Harness::new(&[
+        ("a.rock", without),
+        ("b.rock", "fn use_later() -> int { later() }"),
+    ]);
+
+    let result = h.update("a.rock", with);
+    assert_eq!(result.tier, UpdateTier::Interface);
+    assert!(Harness::reinferred_mids(&result).contains(&h.mid("b.rock")));
+    h.assert_matches_batch();
+}
+
 #[test]
 fn interface_edit_field_add_reinfers_struct_users_only() {
     let mut h = Harness::new(&[

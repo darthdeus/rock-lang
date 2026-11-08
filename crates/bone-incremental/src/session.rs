@@ -11,7 +11,7 @@ use bone_core::modules::ScopeProbe;
 use bone_semantic::{
     hir::{Function, Module, TypeCtor, TypeExpr},
     prelude::*,
-    semantic_passes::{FragmentContribution, contribute},
+    semantic_passes::{FragmentContribution, TypeArenaSeed, contribute, lower_modules_seeded},
 };
 
 use crate::span_shift;
@@ -272,6 +272,10 @@ fn changed_keys<V: PartialEq>(old: &FxHashMap<Ustr, V>, new: &FxHashMap<Ustr, V>
         .chain(new.keys().filter(|k| !old.contains_key(*k)).copied())
         .collect()
 }
+
+/// How many times its live size a module's type arena may grow by keeping
+/// earlier lowerings' entries.
+const MAX_KEPT_ARENA_GROWTH: usize = 16;
 
 /// Whether the warm modules can be lowered and inferred once, alone, and
 /// reused by every build. Warm ASTs are immutable for the session's lifetime
@@ -1106,6 +1110,8 @@ impl Session {
         let new_scope = scope_hash(&module, text);
         let new_contribution = contribute(&module);
         let tracked = self.files.contains_key(path);
+        let only_functions =
+            tracked && only_functions_changed(&self.files[path].item_prints, &new_prints);
 
         // An edit that changes what the namespace tree, the fragment scopes
         // or the legacy projections are built from takes the scope path:
@@ -1212,6 +1218,7 @@ impl Session {
                         &changed,
                         ScopeDelta::default(),
                         UpdateTier::Interface,
+                        only_functions,
                     )
                 },
                 restore,
@@ -1486,7 +1493,7 @@ impl Session {
         self.ws.legacy_projections = next.legacy_projections;
         self.ws.legacy_imports = next.legacy_imports;
 
-        self.rebuild_interface(module, changed, delta, UpdateTier::Scope)
+        self.rebuild_interface(module, changed, delta, UpdateTier::Scope, false)
     }
 
     /// User modules other than `except` whose lowering read a fact in `delta`.
@@ -1515,6 +1522,7 @@ impl Session {
         changed: &FxHashSet<Ustr>,
         mut delta: ScopeDelta,
         tier: UpdateTier,
+        only_functions: bool,
     ) -> Result<UpdateResult, CompilerError> {
         let file = module.file;
         let mid = self.ws.module_ids[&file];
@@ -1620,10 +1628,28 @@ impl Session {
             asts.push(a);
         }
 
+        // An edit confined to function items cannot change what any other item
+        // of this module lowers to, so a caller of an untouched definition keeps
+        // its inference. That inference holds `TyId`s into this module's arena:
+        // keep the entries in place and lower after them. The item lists are
+        // compared after lowering, since a caller also stores item indices.
+        let kept = (only_functions
+            && to_relower.is_empty()
+            && delta.is_empty()
+            && changed_types.is_empty())
+        .then(|| self.kept_type_arena(mid))
+        .flatten()
+        .map(|seed| (seed, item_names(self.ws.module(mid))));
+
         self.retain_modules(|m| m != mid && !to_relower.contains(&m));
         self.ws.phase_timings.clear();
 
-        let f_mids = lower_modules(&mut self.ws, &asts)?;
+        let (seeds, old_items) = match kept {
+            Some((seed, items)) => (FxHashMap::from_iter([(mid, seed)]), Some(items)),
+            None => (FxHashMap::default(), None),
+        };
+        let f_mids = lower_modules_seeded(&mut self.ws, &asts, seeds)?;
+        let narrow = old_items.is_some_and(|items| items == item_names(self.ws.module(mid)));
 
         // Names whose definition may have shifted: the edited module's interface
         // diff PLUS every name exported by a RE-LOWERED module (re-lowering may
@@ -1637,6 +1663,18 @@ impl Session {
         reinfer_names.extend(delta.legacy.iter().copied());
         for &m in &f_mids {
             let module = self.ws.module(m);
+            if narrow {
+                // A v1 fragment's callers record the DefKey, not the bare name.
+                let bare: FxHashSet<&str> = changed.iter().map(|n| n.as_str()).collect();
+                reinfer_names.extend(
+                    module
+                        .functions_by_name
+                        .keys()
+                        .filter(|key| bare.contains(key.rsplit("::").next().unwrap_or(key)))
+                        .copied(),
+                );
+                continue;
+            }
             reinfer_names.extend(exported_type_names(module));
             reinfer_names.extend(module.functions_by_name.keys().copied());
             reinfer_names.extend(module.global_by_name.keys().copied());
@@ -1990,12 +2028,29 @@ impl Session {
             .get_mut(mid.index())
             .and_then(|s| s.take());
 
+        // Same text, same interface: starting from the same arena prefix puts
+        // every entry back at the index cached callers hold.
+        let seeds = {
+            let module = self.ws.module(mid);
+            let kept = module.ty_arena_live_start as usize;
+            if kept == 0 {
+                FxHashMap::default()
+            } else {
+                let arena = module.ty_arena.values().take(kept).cloned().collect();
+                let seed = TypeArenaSeed {
+                    arena,
+                    var_high_water: module.lower_var_floor,
+                };
+                FxHashMap::from_iter([(mid, seed)])
+            }
+        };
+
         self.retain_modules(|m| m != mid);
         self.ws.phase_timings.clear();
 
         let mut edited = ast;
         self.cook_edited(&mut edited)?;
-        lower_modules(&mut self.ws, &[edited])?;
+        lower_modules_seeded(&mut self.ws, &[edited], seeds)?;
 
         let changed_owners: FxHashSet<BodyOwner> = {
             let prints = &self.files[path].item_prints;
@@ -2501,6 +2556,19 @@ impl Session {
     /// narrow paths that call this are taken only when no macro definition
     /// changed, so the cached registry is current and every other file's
     /// calls were checked against it already.
+    /// The module's whole type arena as a seed for its next lowering, or `None`
+    /// once earlier lowerings have piled up enough dead entries that the edit
+    /// should re-lower from empty (and re-infer every caller) to reclaim them.
+    fn kept_type_arena(&self, mid: ModuleId) -> Option<TypeArenaSeed> {
+        let module = self.ws.module(mid);
+        let total = module.ty_arena.len();
+        let live = total - module.ty_arena_live_start as usize;
+        (total < MAX_KEPT_ARENA_GROWTH * live.max(256)).then(|| TypeArenaSeed {
+            arena: module.ty_arena.clone(),
+            var_high_water: module.lower_var_high_water,
+        })
+    }
+
     fn cook_edited(&self, ast: &mut Ast) -> Result<(), CompilerError> {
         if let Some(e) = check_macro_call_labels_in(ast, &self.registry)
             .into_iter()
@@ -2647,6 +2715,30 @@ fn text_edit_delta(path: &str, old: &str, new: &str) -> TextEditDelta {
     }
 }
 
+/// Whether `old` and `new` list the same items and only function items differ
+/// in interface. A non-function item's body hash (a `const` value) counts too.
+fn only_functions_changed(old: &[ItemPrint], new: &[ItemPrint]) -> bool {
+    old.len() == new.len()
+        && old.iter().zip(new).all(|(o, n)| {
+            o.kind == n.kind
+                && o.name == n.name
+                && (o.kind == ItemKindTag::Fn
+                    || (o.iface_hash == n.iface_hash && o.body_hash == n.body_hash))
+        })
+}
+
+/// Every definition a cached caller can address by arena index, in index order.
+fn item_names(module: &Module) -> Vec<Ustr> {
+    let mut names = Vec::new();
+    names.extend(module.functions.values().map(|f| f.name));
+    names.extend(module.structs.values().map(|s| s.name));
+    names.extend(module.enums.values().map(|e| e.name));
+    names.extend(module.newtypes.values().map(|n| n.name));
+    names.extend(module.globals.values().map(|g| g.name));
+    names.extend(module.decorators.values().map(|d| d.name));
+    names
+}
+
 /// The index of the single item whose function BODY block strictly contains the
 /// edit region `[es, oe)`, or `None` if the edit touches a signature, spans
 /// items, or lands between them (body ranges are disjoint, so at most one matches
@@ -2725,9 +2817,8 @@ fn exported_type_names(module: &Module) -> impl Iterator<Item = Ustr> + '_ {
 
 fn iface_dep_names(module: &Module) -> FxHashSet<Ustr> {
     module
-        .ty_arena
-        .iter()
-        .filter_map(|(_, te)| match te {
+        .live_type_exprs()
+        .filter_map(|te| match te {
             TypeExpr::App {
                 ctor: TypeCtor::Nominal(n),
                 ..

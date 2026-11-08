@@ -139,6 +139,23 @@ pub fn lower_modules(
     ws: &mut Workspace,
     rock_modules: &[Ast],
 ) -> Result<Vec<ModuleId>, CompilerError> {
+    lower_modules_seeded(ws, rock_modules, FxHashMap::default())
+}
+
+/// Type-arena entries a module's next lowering starts from.
+#[derive(Debug)]
+pub struct TypeArenaSeed {
+    pub arena: Arena<TypeExpr>,
+    pub var_high_water: u32,
+}
+
+/// [`lower_modules`], with the listed modules allocating after the seeded
+/// entries of their type arena instead of from an empty one.
+pub fn lower_modules_seeded(
+    ws: &mut Workspace,
+    rock_modules: &[Ast],
+    mut seeds: FxHashMap<ModuleId, TypeArenaSeed>,
+) -> Result<Vec<ModuleId>, CompilerError> {
     let mut modules = rock_modules
         .iter()
         .map(|rock_mod| Module {
@@ -155,6 +172,12 @@ pub fn lower_modules(
 
     for m in modules.iter_mut() {
         m.id = ws.intern_module(m.file);
+        if let Some(seed) = seeds.remove(&m.id) {
+            m.ty_arena_live_start = seed.arena.len() as u32;
+            m.ty_arena = seed.arena;
+            m.lower_var_high_water = seed.var_high_water;
+            m.lower_var_floor = seed.var_high_water;
+        }
     }
 
     // Record nominal generic arity from the raw AST, workspace-wide, BEFORE
@@ -383,11 +406,12 @@ pub fn lower_modules(
         items
             .par_iter_mut()
             .map(|item| {
+                let first_var = item.module.lower_var_high_water;
                 let mut ctx = LowerCtx {
                     workspace: ws,
                     module: item.module,
                     generics_in_scope: Default::default(),
-                    _next_var_id: 0,
+                    _next_var_id: first_var,
                     placeholder_param: None,
                     placeholder_forbidden: false,
                     scope_probes: Default::default(),
