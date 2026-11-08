@@ -390,12 +390,15 @@ pub struct EmbeddedFile<'a> {
     pub src: &'a str,
 }
 
+/// An open embedded file: name, package, modules-v1 flag, marker line index.
+type OpenFile<'a> = (&'a str, Option<(&'a str, u32)>, bool, usize);
+
 /// Split a fixture section body into embedded files. Lines `//-- <name>
 /// [@pkg=<self_name>,<id>] [@v1]` start a file; everything until the next
 /// marker is that file's source.
 pub fn parse_embedded_files(body: &str) -> Vec<EmbeddedFile<'_>> {
     let mut files: Vec<EmbeddedFile> = Vec::new();
-    let mut current: Option<(&str, Option<(&str, u32)>, bool, usize)> = None;
+    let mut current: Option<OpenFile> = None;
     for (idx, line) in body.lines().enumerate() {
         if let Some(rest) = line.trim_start().strip_prefix("//--") {
             if let Some(prev) = current.take() {
