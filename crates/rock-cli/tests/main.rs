@@ -6,6 +6,7 @@ mod gpu_process;
 mod guide;
 mod lsp_code_action;
 mod metric_add_window;
+mod modules_display_paths;
 mod no_stdlib;
 mod package_test_program_shape;
 mod plain_process;

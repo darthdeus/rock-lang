@@ -572,6 +572,60 @@ mod tests {
         assert_eq!(aliases, expected);
     }
 
+    const GROUP_CHANNELS: &str = "\n[language]\nmodules = \"v1\"\n\n\
+        [build]\nchannels = [\"dev\", \"demo\"]\n";
+
+    fn group_package(groups: &str) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("app");
+        for dir in ["dev_tools/inner", "demo"] {
+            fs::create_dir_all(root.join(dir)).expect("create group dir");
+        }
+        for file in ["main.rock", "dev_tools/inner/probe.rock", "demo/intro.rock"] {
+            fs::write(root.join(file), "fn f() {}\n").expect("write source");
+        }
+        write_manifest(&root, "app", &format!("{GROUP_CHANNELS}{groups}"));
+        (tmp, root)
+    }
+
+    /// A source group's files keep the enclosing package as owner; the
+    /// channel decides only whether they are in the compile set.
+    #[test]
+    fn source_groups_keep_their_package_and_follow_the_channel() {
+        let (_tmp, root) = group_package(
+            "\n[source_groups]\ntools = { directory = \"dev_tools\", channels = [\"dev\"] }\n\
+             intro = { directory = \"demo\", channels = [\"demo\"] }\n",
+        );
+        let config =
+            StickConfig::new_from_str(&fs::read_to_string(root.join("stick.toml")).unwrap())
+                .expect("manifest");
+        for (channel, tools, intro) in [("dev", true, false), ("demo", false, true)] {
+            let graph = PackageGraph::build_with_channel(&root, &config, channel).expect("graph");
+            let app = graph.root();
+            let probe = fs::canonicalize(root.join("dev_tools/inner/probe.rock")).unwrap();
+            let demo = fs::canonicalize(root.join("demo/intro.rock")).unwrap();
+            let main = fs::canonicalize(root.join("main.rock")).unwrap();
+            assert_eq!(graph.package_of_file(&probe), Some(app));
+            assert_eq!(graph.package_of_file(&demo), Some(app));
+            assert!(graph.includes_file(app, &main), "{channel}");
+            assert_eq!(graph.includes_file(app, &probe), tools, "{channel}");
+            assert_eq!(graph.includes_file(app, &demo), intro, "{channel}");
+        }
+    }
+
+    #[test]
+    fn nested_source_groups_are_rejected() {
+        let (_tmp, root) = group_package(
+            "\n[source_groups]\ntools = { directory = \"dev_tools\", channels = [\"dev\"] }\n\
+             probe = { directory = \"dev_tools/inner\", channels = [\"demo\"] }\n",
+        );
+        let err = PackageGraph::build(&root).expect_err("overlapping groups must reject");
+        assert!(
+            err.to_string().contains("overlaps another source group"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn unknown_language_modules_value_is_load_error() {
         let err = StickConfig::new_from_str(
