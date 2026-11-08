@@ -72,6 +72,57 @@ pub fn global_storage_keys(
     Ok(keys)
 }
 
+/// One mutable global in the published global directory: its identity, its
+/// display name, its physical leaves and the storage slot of each leaf.
+pub struct GlobalDirectoryEntry {
+    pub identity: String,
+    pub name: String,
+    pub physical: Vec<Ustr>,
+    pub slots: Vec<String>,
+}
+
+/// Every mutable global a program publishes, sorted by identity. `slot_of`
+/// names the backend's storage slot for a physical leaf.
+pub fn global_directory(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    mut slot_of: impl FnMut(Ustr) -> Option<String>,
+) -> Result<Vec<GlobalDirectoryEntry>, String> {
+    let mut entries = Vec::new();
+    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
+        for (_, global) in module.globals.iter().filter(|(_, g)| !g.is_const) {
+            let identity = global_identity(module.file, global.name);
+            let plan = GlobalPlan::for_declared_type(ws, scx, global.ty)
+                .map_err(|_| format!("no storage plan for global `{}`", global.name))?;
+            let physical = physical_leaf_names(&plan, global.name);
+            let slots = physical
+                .iter()
+                .map(|leaf| {
+                    slot_of(*leaf).ok_or_else(|| {
+                        format!(
+                            "global `{}` has no compiler-owned storage slot for `{leaf}`",
+                            global.name
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let name = identity
+                .rsplit("::")
+                .next()
+                .unwrap_or(&identity)
+                .to_string();
+            entries.push(GlobalDirectoryEntry {
+                identity,
+                name,
+                physical,
+                slots,
+            });
+        }
+    }
+    entries.sort_by(|a, b| a.identity.cmp(&b.identity));
+    Ok(entries)
+}
+
 /// A fingerprint of the mutable-global layout: every global's identity, type,
 /// representation and leaves, and the C layout of every cdata value type a
 /// global can hold. A program whose layout differs from the one that created

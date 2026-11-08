@@ -241,43 +241,14 @@ pub(super) fn globals_directory_lua(
     cg: &CodegenCtx,
 ) -> Result<String, CompilerError> {
     use skull_codegen_lua::lua_string;
-    let mut entries = Vec::new();
-    for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
-        for (_, global) in module.globals.iter().filter(|(_, g)| !g.is_const) {
-            let identity = skull_mir::global_storage::global_identity(module.file, global.name);
-            let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, global.ty)
-                .map_err(|_| {
-                    CompilerError::new_no_location(format!(
-                        "no storage plan for global `{}`",
-                        global.name
-                    ))
-                })?;
-            let physical = skull_mir::global_storage::physical_leaf_names(&plan, global.name);
-            let slots = physical
-                .iter()
-                .map(|leaf| {
-                    cg.state_slot(*leaf)
-                        .map(|slot| slot.to_string())
-                        .ok_or_else(|| {
-                            CompilerError::new_no_location(format!(
-                                "global `{}` has no compiler-owned storage slot for `{leaf}`",
-                                global.name
-                            ))
-                        })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let name = identity
-                .rsplit("::")
-                .next()
-                .unwrap_or(&identity)
-                .to_string();
-            entries.push((identity, name, physical, slots));
-        }
-    }
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let entries = skull_mir::global_storage::global_directory(ws, scx, |leaf| {
+        cg.state_slot(leaf).map(|slot| slot.to_string())
+    })
+    .map_err(CompilerError::new_no_location)?;
     let mut out = String::from("_G.__rock_globals_publish({");
-    for (identity, name, physical, slots) in entries {
-        let physical = physical
+    for entry in entries {
+        let physical = entry
+            .physical
             .iter()
             .map(|leaf| lua_string(leaf))
             .collect::<Vec<_>>()
@@ -285,9 +256,9 @@ pub(super) fn globals_directory_lua(
         let _ = writeln!(
             out,
             "{{name={},identity={},physical={{{physical}}},slots={{{}}}}},",
-            lua_string(&name),
-            lua_string(&identity),
-            slots.join(",")
+            lua_string(&entry.name),
+            lua_string(&entry.identity),
+            entry.slots.join(",")
         );
     }
     out.push_str("})\n");

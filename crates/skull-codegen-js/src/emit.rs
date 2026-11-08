@@ -3961,50 +3961,28 @@ fn globals_directory_js(
     scx: &skull_mir::lower::ScalarCtx,
     state_slots: &HashMap<ustr::Ustr, String>,
 ) -> Result<String, CompilerError> {
-    let mut entries = Vec::new();
-    for module in ws
-        .modules
-        .iter()
-        .filter(|m| m.id != bone_semantic::prelude::ModuleId::builtin())
-    {
-        for (_, global) in module.globals.iter().filter(|(_, g)| !g.is_const) {
-            let identity = skull_mir::global_storage::global_identity(module.file, global.name);
-            let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, global.ty)
-                .map_err(|_| err(format!("JS: global `{}` has no storage plan", global.name)))?;
-            let physical = skull_mir::global_storage::physical_leaf_names(&plan, global.name);
-            let slots = physical
-                .iter()
-                .map(|leaf| {
-                    state_slots.get(leaf).ok_or_else(|| {
-                        err(format!(
-                            "JS: global `{}` has no storage slot for `{leaf}`",
-                            global.name
-                        ))
-                    })
-                })
-                .map(|slot| js_string_lit(slot?))
-                .collect::<Result<Vec<_>, _>>()?
-                .join(",");
-            let physical = physical
-                .iter()
-                .map(|leaf| js_string_lit(leaf))
-                .collect::<Result<Vec<_>, _>>()?
-                .join(",");
-            let name = identity
-                .rsplit("::")
-                .next()
-                .unwrap_or(&identity)
-                .to_string();
-            entries.push((identity, name, physical, slots));
-        }
-    }
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let entries = skull_mir::global_storage::global_directory(ws, scx, |leaf| {
+        state_slots.get(&leaf).cloned()
+    })
+    .map_err(err)?;
     let mut out = String::from("__rock_globals_publish([");
-    for (identity, name, physical, slots) in entries {
+    for entry in entries {
+        let physical = entry
+            .physical
+            .iter()
+            .map(|leaf| js_string_lit(leaf))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(",");
+        let slots = entry
+            .slots
+            .iter()
+            .map(|slot| js_string_lit(slot))
+            .collect::<Result<Vec<_>, _>>()?
+            .join(",");
         out.push_str(&format!(
             "{{name:{},identity:{},physical:[{physical}],slots:[{slots}]}},",
-            js_string_lit(&name)?,
-            js_string_lit(&identity)?,
+            js_string_lit(&entry.name)?,
+            js_string_lit(&entry.identity)?,
         ));
     }
     out.push_str("]);\n");
