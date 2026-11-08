@@ -3,11 +3,13 @@
 
 Each commit is checked out into one reused worktree, built into a shared
 release target directory (so consecutive commits rebuild incrementally), and
-measured with perf/run.py against the corpora of the current checkout, so every
-revision compiles the same source (a revision that cannot compile it records an
-error). Commits already in the history are skipped unless --force is given.
+measured with perf/run.py against that commit's own corpora (the language moves
+too fast for one fixed source to compile on every revision; pass
+`-- --corpus-root DIR` to try anyway). Commits already in the history are
+skipped unless --force is given.
 
-Usage: perf/backfill.py --since 2026-11-01 [--step 5] [--max 20] [-- run.py args]
+Usage: perf/backfill.py --from 7d1204f0 [--step 5] [--max 20] [-- run.py args]
+       perf/backfill.py --since 2026-11-01 ...
        perf/backfill.py --revs sha1 sha2 ...
 """
 import argparse
@@ -40,6 +42,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--since", help="first-parent commits on master since this date")
+    parser.add_argument("--from", dest="from_rev",
+                        help="first-parent commits on master after this revision, plus itself")
     parser.add_argument("--revs", nargs="*", help="explicit commits instead of --since")
     parser.add_argument("--step", type=int, default=1, help="measure every Nth commit")
     parser.add_argument("--max", type=int, default=0, help="at most this many commits")
@@ -57,8 +61,12 @@ def main():
     elif args.since:
         shas = git("rev-list", "--first-parent", "--reverse", f"--since={args.since}",
                    "master").splitlines()
+    elif args.from_rev:
+        start = git("rev-parse", args.from_rev)
+        shas = [start] + git("rev-list", "--first-parent", "--reverse",
+                             f"{start}..master").splitlines()
     else:
-        sys.exit("give --since DATE or --revs SHA...")
+        sys.exit("give --from REV, --since DATE or --revs SHA...")
     shas = shas[::args.step]
     if args.max:
         shas = shas[-args.max:]
@@ -83,7 +91,7 @@ def main():
                 print(f"build failed at {sha[:10]}; skipping", file=sys.stderr)
                 continue
             subprocess.run([sys.executable, "-I", str(REPO / "perf/run.py"),
-                            "--repo", str(args.worktree), "--corpus-root", str(REPO),
+                            "--repo", str(args.worktree),
                             "--bin", str(args.target_dir / "release/rock"),
                             "--history", str(args.history), *args.run_args])
     finally:
