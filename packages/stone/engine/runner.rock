@@ -1848,9 +1848,35 @@ pub @nomangle inline(lua) fn jit_trace_abort_bucket_key(
     _G.__stone_jit_abort_site_report = { rows = __stone_jit_abort_site_rows_of(st) }
 """
 
+// Capture the generated root while its initializer is on the stack. Walking
+// its prototypes is deferred until profiling, before the measured window.
+@nomangle inline(lua) fn __stone_jit_program_identity_init(source: string) -> bool = """
+    local root
+    local level = 1
+    while true do
+        local info = debug.getinfo(level, "fS")
+        if not info then break end
+        if info.what == "main" then root = info.func; break end
+        level = level + 1
+    end
+    assert(root, "loaded program root unavailable for JIT attribution")
+    local registry
+    _G.__stone_jit_program_identity = function()
+        if registry == nil then
+            registry = assert(loadstring(source, "@stone/engine/debug/prototype_identity.lua"))()(root)
+        end
+        return registry
+    end
+    return true
+"""
+
+const STONE_JIT_PROGRAM_IDENTITY_READY: bool = __stone_jit_program_identity_init(
+    embed_string("engine/debug/prototype_identity.lua"))
+
 // Open the measured window: the callback clears the era at its next event, so
 // the window's abort count and its sites share one boundary.
 @nomangle inline(lua) fn __stone_jit_abort_sites_open() = """
+    _G.__stone_jit_program_identity()
     _G.__stone_jit_abort_site_report = nil
     local st = _G.__stone_jit_abort_sites
     if st == nil then

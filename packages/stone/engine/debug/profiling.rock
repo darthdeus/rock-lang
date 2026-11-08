@@ -3528,13 +3528,21 @@ const PERF_JIT_ABORT_SITES: int = 50
     end
     local loc_of = __stone_jit_make_loc_of()
     local reason_name = __stone_jit_make_reason_name()
+    local prototypes = _G.__stone_jit_program_identity()
+    local function proto_json(func)
+        local proto = prototypes.describe(func)
+        if proto == nil then return 'null' end
+        return string.format('{"function_id":%d,"source":"%s","definition_line":%d,"bytecodes":%d}',
+            proto.function_id, __perf_json_escape_name(proto.source), proto.definition_line, proto.bytecodes)
+    end
     local resolved = {}
     for i = 1, #rows do
         local row = rows[i]
         resolved[#resolved + 1] = { n = row.n,
             reason = reason_name(row.r, row.x),
             abort_loc = loc_of(row.af, row.apc),
-            start_loc = loc_of(row.sf, row.spc) }
+            start_loc = loc_of(row.sf, row.spc),
+            abort_proto = proto_json(row.af), start_proto = proto_json(row.sf) }
     end
     table.sort(resolved, function(a, b)
         if a.n ~= b.n then return a.n > b.n end
@@ -3550,10 +3558,12 @@ const PERF_JIT_ABORT_SITES: int = 50
         out[#out + 1] = '{"reason":"' .. __perf_json_escape_name(row.reason) ..
             '","abort_loc":"' .. __perf_json_escape_name(row.abort_loc) ..
             '","start_loc":"' .. __perf_json_escape_name(row.start_loc) ..
-            '","count":' .. string.format("%d", row.n) .. '}'
+            '","start_proto":' .. row.start_proto .. ',"abort_proto":' .. row.abort_proto ..
+            ',"count":' .. string.format("%d", row.n) .. '}'
     end
     return '"abort_sites":[' .. table.concat(out, ',') ..
-        '],"abort_sites_total":' .. string.format("%d", total)
+        '],"abort_sites_total":' .. string.format("%d", total) ..
+        ',"program_prototypes":' .. string.format("%d", prototypes.count)
 """
 
 // Sites exist whenever a trace handler is attached: both of them feed the
