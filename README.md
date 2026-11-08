@@ -80,8 +80,13 @@ New to Rock? Start with [docs/guide.md](docs/guide.md): a tour of the
 language in runnable examples, from a first program through structs,
 enums, optionals, generics, modules, tests and shaders. The examples are
 in [`examples/guide/`](examples/guide/), so clone the repository to run them.
+For advanced facilities, see the [language reference](docs/language-reference.md)
+and [coroutines](docs/coroutines.md).
 
 ## Testing compiler changes
+
+The [compiler structure guide](docs/compiler.md) maps the implementation and
+its shared lowering and incremental-emission boundaries.
 
 Use `cargo run --quiet --bin rock -- test file.rock` to rebuild and test with
 this checkout. See [Testing compiler changes](docs/testing.md) for runtime cases,
