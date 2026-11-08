@@ -71,3 +71,12 @@ fn parity(n: int) -> bool {
     return is_even(n)
 }
 fn main() { let _ = parity(4) }
+
+//=== TEST CASE: nested_fn_reads_enclosing_param_in_format_spec_Generic ===
+// A read in an interpolation's dynamic precision is a read like any other.
+//! expect: nested function may not read enclosing local
+fn outer(digits: int) -> string {
+    fn show(x: float) -> string { "{x:.{digits}f}" }
+    return show(1.5)
+}
+fn main() { let _ = outer(2) }

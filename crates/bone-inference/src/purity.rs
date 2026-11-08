@@ -215,8 +215,15 @@ pub(crate) fn reject_captures_expr(
 
         Expr::InterpolatedString(parts) => {
             for p in parts {
-                if let InterpPart::Value { expr, .. } = c.body.interp_part_arena[p] {
+                if let InterpPart::Value { expr, spec } = c.body.interp_part_arena[p] {
                     go!(expr);
+                    for sub in spec
+                        .into_iter()
+                        .flat_map(|spec| [spec.width_expr, spec.precision_expr])
+                        .flatten()
+                    {
+                        go!(sub);
+                    }
                 }
             }
         }
