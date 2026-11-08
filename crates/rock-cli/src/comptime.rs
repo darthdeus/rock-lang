@@ -405,17 +405,31 @@ pub(crate) fn resolve_checked_inputs(
                     .find(|f| f.name == name)
                     .map(|f| f.contents.to_string());
             }
-            let path = Path::new(file);
-            let path = if path.is_absolute() {
-                Some(path.to_path_buf())
+            // `packages/` is an explicit toolchain-package selector. Resolve it
+            // before project-relative inputs so a same-spelled local file
+            // cannot shadow the selected package or satisfy a missing file.
+            let package_path = file.strip_prefix("packages/");
+            let path = if let Some(package_path) = package_path {
+                let (package, relative) = package_path.split_once('/')?;
+                Some(rock_stdlib::package_dir(package).ok()?.join(relative))
             } else {
-                root.as_ref().map(|root| root.join(path))
+                let path = Path::new(file);
+                if path.is_absolute() {
+                    Some(path.to_path_buf())
+                } else {
+                    root.as_ref().map(|root| root.join(path))
+                }
             };
             let path = path.and_then(|path| path.canonicalize().ok());
-            let text = source_text(file).or_else(|| {
+            let text = if package_path.is_some() {
                 let path = path.as_ref()?;
-                source_text(path.to_str()?).or_else(|| std::fs::read_to_string(path).ok())
-            })?;
+                source_text(path.to_str()?).or_else(|| std::fs::read_to_string(path).ok())?
+            } else {
+                source_text(file).or_else(|| {
+                    let path = path.as_ref()?;
+                    source_text(path.to_str()?).or_else(|| std::fs::read_to_string(path).ok())
+                })?
+            };
             if let Some(path) = path {
                 watch_files.insert(
                     ustr::Ustr::from(path.to_str()?),
@@ -971,6 +985,104 @@ mod source_fingerprint_tests {
         let revision = &recorded.vars[&Ustr::from("REV")].value;
         assert!(revision.starts_with("source-v1:"));
         assert!(std::fs::read_to_string(output).unwrap().contains(revision));
+    }
+
+    #[test]
+    fn checked_source_fingerprint_uses_package_override() {
+        const CHILD: &str = "ROCK_CLI_TEST_PACKAGE_FINGERPRINT_CHILD";
+        const PACKAGE_ROOT: &str = "ROCK_CLI_TEST_PACKAGE_FINGERPRINT_ROOT";
+        const PROJECT_ROOT: &str = "ROCK_CLI_TEST_PACKAGE_FINGERPRINT_PROJECT";
+
+        if std::env::var_os(CHILD).is_some() {
+            let package_root = std::path::PathBuf::from(std::env::var_os(PACKAGE_ROOT).unwrap());
+            let project_root = std::path::PathBuf::from(std::env::var_os(PROJECT_ROOT).unwrap());
+            let (ws, mut inputs) = fixture();
+            inputs.embed_root = Some(project_root);
+            inputs
+                .source_fingerprints
+                .get_mut(&Ustr::from("REV"))
+                .unwrap()
+                .files = vec!["packages/package-probe/decoder.rock".into()];
+            let decode = "fn decode() -> int { 7 }";
+            let read_checked_source = |file: &str| match file {
+                "root.rock" => Some("struct Root { child: Child }".into()),
+                "child.rock" => Some("value Child { count: int = 4 }".into()),
+                _ => None,
+            };
+
+            let resolved =
+                resolve_checked_inputs(&ws, inputs.clone(), read_checked_source).unwrap();
+            let package_file = package_root
+                .join("package-probe/decoder.rock")
+                .canonicalize()
+                .unwrap();
+            let package_file_key = Ustr::from(package_file.to_str().unwrap());
+            let revision = resolved.vars[&Ustr::from("REV")].value.clone();
+            assert_eq!(
+                resolved.source_fingerprint_files.get(&package_file_key),
+                Some(&skull_mir::mir::comptime_value_hash(decode)),
+                "fingerprint tracking must watch the resolved package file"
+            );
+
+            let changed_decode = "fn decode() -> int { 8 }";
+            std::fs::write(&package_file, changed_decode).unwrap();
+            let changed = resolve_checked_inputs(&ws, inputs.clone(), read_checked_source).unwrap();
+            assert_ne!(revision, changed.vars[&Ustr::from("REV")].value);
+            assert_eq!(
+                changed.source_fingerprint_files.get(&package_file_key),
+                Some(&skull_mir::mir::comptime_value_hash(changed_decode)),
+                "watch hash must follow package-source changes"
+            );
+
+            std::fs::remove_file(package_file).unwrap();
+            let missing = resolve_checked_inputs(&ws, inputs, read_checked_source)
+                .expect_err("a project-root file must not satisfy a missing package file");
+            assert!(
+                missing
+                    .to_string()
+                    .contains("packages/package-probe/decoder.rock"),
+                "{missing:#}"
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let project_root = dir.path().join("project");
+        let project_package = project_root.join("packages/package-probe");
+        std::fs::create_dir_all(&project_package).unwrap();
+        std::fs::write(
+            project_package.join("decoder.rock"),
+            "fn decode() -> int { 99 }",
+        )
+        .unwrap();
+
+        let package_root = dir.path().join("package-overrides");
+        let package = package_root.join("package-probe");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(
+            package.join("stick.toml"),
+            "[package]\nname = \"package-probe\"\n",
+        )
+        .unwrap();
+        std::fs::write(package.join("decoder.rock"), "fn decode() -> int { 7 }").unwrap();
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "comptime::source_fingerprint_tests::checked_source_fingerprint_uses_package_override",
+            ])
+            .env(CHILD, "1")
+            .env("ROCK_PACKAGES_DIR", &package_root)
+            .env(PACKAGE_ROOT, &package_root)
+            .env(PROJECT_ROOT, &project_root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "package fingerprint child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
