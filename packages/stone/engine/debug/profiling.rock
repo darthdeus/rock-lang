@@ -948,6 +948,9 @@ struct SectionWindow {
 }
 global SECTION_WINDOWS: [SectionWindow] = vec_new()
 global SECTION_HISTORY_DROPPED: int = 0
+// Runner frame of history sample 0. Stall rows carry runner frame numbers,
+// so this is what maps a perf record to its ring index at export.
+global SECTION_HISTORY_FIRST_FRAME: int = -1
 
 // Sections first reached inside the GC window. Ordinary admission allocates
 // (Arena rows, two MAX_FRAME_HISTORY buffers per metric, vector and Map
@@ -1011,6 +1014,7 @@ fn section_window_end_frame() {
         perf_frame_history_add(w.observations_per_frame, w.pending_observations as float)
     }
     if history_active {
+        if PROFILER.frame_count == 0 { SECTION_HISTORY_FIRST_FRAME = PERF_RECORDS.previous_frame }
         for id in 0..SECTION_FRAME_TIME.len() {
             perf_frame_history_add(SECTION_FRAME_TIME[id].get().unwrap(), SECTION_WINDOWS[id].pending_seconds)
             perf_frame_history_add(SECTION_FRAME_OBSERVATION[id].get().unwrap(), SECTION_WINDOWS[id].pending_observation_ms)
@@ -1038,6 +1042,7 @@ pub fn section_time_reset() {
     }
     for m in SECTION_FRAME_TIME { metric_reset(m.get().unwrap()) }
     for m in SECTION_FRAME_OBSERVATION { metric_reset(m.get().unwrap()) }
+    SECTION_HISTORY_FIRST_FRAME = -1
     if PERF_SECTION_HISTORY && PERF_FRAME_CAPTURE {
         for id in 0..SECTION_TIME.len() { nb_set(SECTION_HISTORY_CALLS, id, 0) }
     }
@@ -1856,6 +1861,7 @@ fn init_profiler() {
     SECTION_FRAME_TIME = vec_new()
     SECTION_FRAME_OBSERVATION = vec_new()
     SECTION_HISTORY_DROPPED = 0
+    SECTION_HISTORY_FIRST_FRAME = -1
     SECTION_HISTORY_CALLS = native_buffer_int(if PERF_SECTION_HISTORY && PERF_FRAME_CAPTURE { MAX_PROFILE_ENTRIES } else { 0 })
     SECTION_REQUEST_KB = vec_new()
     SECTION_FRAME_REQUEST_KB = native_buffer_float(MAX_PROFILE_ENTRIES)
@@ -3454,6 +3460,7 @@ pub fn profiler_perf_json() -> string {
     let sections_json = __perf_json_sections(stats)
     let window_json = __perf_json_section_windows()
     let section_frames = __perf_json_section_frames(mcode)
+    let stall_sections = __perf_json_stall_sections(stats)
     let observations_json = __perf_json_observations()
     let mem_json = __perf_json_memory(mem)
     let graphics = "{{\"draw_calls\":{gfx.draw_calls},\"text_draws\":{gfx.text_draw_calls},\"shader_switches\":{gfx.shader_switches},\"canvas_switches\":{gfx.canvas_switches},\"stream_upload_calls\":{gfx.stream_upload_calls},\"stream_storage_replacements\":{gfx.stream_storage_replacements},\"stream_upload_bytes\":{gfx.stream_upload_bytes},\"streamed_vertices\":{gfx.streamed_vertices},\"retained_upload_calls\":{gfx.retained_upload_calls},\"retained_upload_bytes\":{gfx.retained_upload_bytes},\"retained_uploaded_vertices\":{gfx.retained_uploaded_vertices},\"world_active_batches\":{RENDER_BATCH_ACTIVE_LAST},\"world_mesh_batches\":{RENDER_BATCH_MESH_LAST},\"world_batch_vertices\":{RENDER_BATCH_VERTS_LAST},\"ui_active_batches\":{UI_RENDER_ACTIVE_LAST},\"ui_mesh_batches\":{UI_RENDER_MESH_LAST},\"ui_batch_vertices\":{UI_RENDER_VERTS_LAST},\"overlay_active_batches\":{OVERLAY_RENDER_ACTIVE_LAST},\"overlay_mesh_batches\":{OVERLAY_RENDER_MESH_LAST},\"overlay_batch_vertices\":{OVERLAY_RENDER_VERTS_LAST},\"pool_world\":{RENDER_BATCHES.len()},\"pool_ui\":{UI_RENDER_BATCHES.len()},\"births_last\":{POOL_BIRTHS_LAST}}}"
@@ -3466,7 +3473,7 @@ pub fn profiler_perf_json() -> string {
     let scenario = perf_scenario_json()
     let transitions = perf_transitions_json()
     let jit_health = perf_jit_health_json()
-    return "{{\"measurement\":{measurement},\"timeline\":{perf_phase_json()},\"stalls\":{stalls},\"jit_health\":{jit_health},\"frame_records\":{records},\"gc_steps\":{gc_steps},\"scenario\":{scenario},\"transitions\":{transitions},\"run\":{run_json},\"frames\":{PROFILER.frame_count},\"warmup_s\":{PROFILER.warmup_seconds:.3f},\"frame_ms\":{frame_ms},\"frame_ms_trailing\":{frame_ms_trailing},\"gpu_scopes\":{gpu_scopes},\"sections\":{sections_json},\"section_window\":{window_json},\"sections_per_frame\":{section_frames},\"observations\":{observations_json},\"graphics\":{graphics},\"resources\":{resources},\"memory\":{mem_json}}}"
+    return "{{\"measurement\":{measurement},\"timeline\":{perf_phase_json()},\"stalls\":{stalls},\"jit_health\":{jit_health},\"frame_records\":{records},\"gc_steps\":{gc_steps},\"scenario\":{scenario},\"transitions\":{transitions},\"run\":{run_json},\"frames\":{PROFILER.frame_count},\"warmup_s\":{PROFILER.warmup_seconds:.3f},\"frame_ms\":{frame_ms},\"frame_ms_trailing\":{frame_ms_trailing},\"gpu_scopes\":{gpu_scopes},\"sections\":{sections_json},\"section_window\":{window_json},\"sections_per_frame\":{section_frames},\"stall_sections\":{stall_sections},\"observations\":{observations_json},\"graphics\":{graphics},\"resources\":{resources},\"memory\":{mem_json}}}"
 }
 
 fn __perf_json_section_frames(mcode: string) -> string {
@@ -3491,6 +3498,50 @@ fn __perf_json_section_frames(mcode: string) -> string {
         }
     }
     return "{{\"complete\":{complete},\"capacity\":{MAX_PERF_FRAME_HISTORY},\"dropped_events\":{SECTION_HISTORY_DROPPED},\"mcode_snapshot\":{mcode},\"observations_per_frame\":[{observations.join(\",\")}],\"rows\":[{rows.join(\",\")}]}}"
+}
+
+const PERF_STALL_SECTION_ROWS: int = 8
+
+// Inclusive per-section time of every recorded frame over the stall
+// threshold, read from the section rings at the frame's own sample.
+fn __perf_json_stall_sections(stats: [ProfileStats]) -> string {
+    if !PERF_SECTION_HISTORY || !PERF_FRAME_CAPTURE { return "null" }
+    let depths: Map<int, int> = map_new()
+    for s in stats { depths[s.section_id] = s.depth }
+    let complete = SECTION_HISTORY_DROPPED == 0 && PROFILER.frame_count <= MAX_PERF_FRAME_HISTORY
+    let rows: [string] = []
+    for i in 0..PERF_RECORDS.count {
+        let at = i * PERF_RECORD_COLUMNS
+        let frame_ms = nb_get(PERF_RECORDS.data, at + 2)
+        if frame_ms <= PERF_STALL_MS { continue }
+        let frame = nb_get(PERF_RECORDS.data, at) as int
+        let sample = frame - SECTION_HISTORY_FIRST_FRAME
+        let covered = SECTION_HISTORY_FIRST_FRAME >= 0 && sample >= 0
+        let timed: [(float, int)] = []
+        if covered {
+            for id in 0..SECTION_COUNT {
+                let m = SECTION_FRAME_TIME[id].get().unwrap()
+                if sample >= m.count { covered = false; break }
+                let ms = nb_get(m.ring, sample) * 1000.0
+                if ms > 0.0 { timed.push((ms, id)) }
+            }
+        }
+        let sections = "null"
+        if covered {
+            sort(timed, t => -t.0)
+            let parts: [string] = []
+            for t in timed {
+                if parts.len() >= PERF_STALL_SECTION_ROWS { break }
+                let depth = depths.get(t.1) ?? -1
+                parts.push("{{\"name\":\"{__perf_json_escape_name(SECTION_NAMES[t.1])}\",\"depth\":{__perf_json_nullable_int(depth)},\"ms\":{t.0:.4f}}}")
+            }
+            sections = "[{parts.join(",")}]"
+        } else { complete = false }
+        let logic_ms = nb_get(PERF_RECORDS.data, at + 3)
+        let render_ms = nb_get(PERF_RECORDS.data, at + 4)
+        rows.push("{{\"frame\":{frame},\"frame_ms\":{frame_ms:.4f},\"logic_ms\":{logic_ms:.4f},\"render_ms\":{render_ms:.4f},\"sections\":{sections}}}")
+    }
+    return "{{\"threshold_ms\":{PERF_STALL_MS:.1f},\"complete\":{complete},\"rows\":[{rows.join(",")}]}}"
 }
 
 // Sample only at export, after the timed window. Retained trace bytes exclude

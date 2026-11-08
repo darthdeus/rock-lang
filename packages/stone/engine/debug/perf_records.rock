@@ -124,6 +124,10 @@ const PERF_RECORD_TIMING_OFFSET: int = 17 + GC_STEP_FIELDS + JIT_NATIVE_COLUMNS
 const PERF_RECORD_COLUMNS: int = PERF_RECORD_TIMING_OFFSET + 2
 const PERF_RECORD_CAPACITY: int = 65536
 
+// Frames over this are stalls in every band; `stalls.counts.over_33` and the
+// stall section export share it.
+const PERF_STALL_MS: float = 33.0
+
 pub struct PerfStallSummary {
     over_17: int, over_33: int, over_34: int, over_50: int,
     excess_17: float, excess_34: float, median_ms: float, worst_ms: float,
@@ -145,7 +149,7 @@ pub fn perf_stall_summary(samples: NativeBuffer<float>, count: int,
         let ms = nb_get(samples, i * stride + offset)
         sorted.push(ms)
         if ms > 17.0 { result.over_17 += 1; result.excess_17 += ms - 17.0 }
-        if ms > 33.0 { result.over_33 += 1 }
+        if ms > PERF_STALL_MS { result.over_33 += 1 }
         if ms > 34.0 { result.over_34 += 1; result.excess_34 += ms - 34.0 }
         if ms > 50.0 { result.over_50 += 1 }
         result.worst_ms = max(result.worst_ms, ms)
