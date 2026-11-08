@@ -24,6 +24,14 @@ The workspace is Clippy-clean and CI runs this command, so any new warning
 fails the build. Fix the cause of a diagnostic rather than adding a blanket
 allowance. Crates inherit the shared lint policy through `[lints] workspace = true`.
 
+CI also lints the single-threaded build that swaps Rayon fanouts for
+sequential iteration (used for profiling), since its `cfg` branches compile
+differently:
+
+```sh
+cargo clippy --locked --workspace --all-targets --features rock-cli/sequential -- -D warnings
+```
+
 Rust formatting uses the formatter shipped with Rust 1.99.1, independently of
 which stable compiler you use to build. Install it once, then format and check:
 
