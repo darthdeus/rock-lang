@@ -6,6 +6,8 @@
 mod completion_blank_line;
 #[path = "completion_contexts.rs"]
 mod completion_contexts;
+#[path = "completion_dispatch.rs"]
+mod completion_dispatch;
 #[path = "completion_in_comment.rs"]
 mod completion_in_comment;
 #[path = "completion_in_string.rs"]
