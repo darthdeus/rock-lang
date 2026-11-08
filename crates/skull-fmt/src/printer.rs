@@ -1522,9 +1522,14 @@ impl<'a> Printer<'a> {
             }
             ExprKind::Not(x) => Doc::concat([Doc::text("!"), self.expr(*x)]),
             ExprKind::BitNot(x) => Doc::concat([Doc::text("~"), self.expr(*x)]),
-            // `- -1` must not print as the pre-decrement `--1`.
+            // `- -1` must not print as the pre-decrement `--1`, and `- 1` must
+            // not print as `-1`, which lexes as a negative literal.
             ExprKind::UnaryMinus(x) => {
-                let sign = if self.slice(self.ast.e(x).span).starts_with('-') {
+                let operand = self.slice(self.ast.e(x).span);
+                let number = operand.strip_prefix('.').unwrap_or(operand);
+                let sign = if operand.starts_with('-')
+                    || number.starts_with(|c: char| c.is_ascii_digit())
+                {
                     "- "
                 } else {
                     "-"

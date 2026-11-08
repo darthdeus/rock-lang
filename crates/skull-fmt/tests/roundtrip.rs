@@ -307,3 +307,20 @@ fn macro_call_bang_is_kept() {
         assert_format_keeps(&format!("fn f() {{\n    {line}\n}}\n"));
     }
 }
+
+/// A spaced unary minus over a number parses as `UnaryMinus(1)`; printed
+/// tight it would lex as the literal `-1`, a different AST.
+#[test]
+fn spaced_unary_minus_over_a_number_keeps_its_shape() {
+    for line in [
+        "x += - 1",
+        "x = - 1",
+        "x = - 1.5",
+        "x = - .5",
+        "f(- 2)",
+        "x -= -1",
+        "x = -y",
+    ] {
+        assert_format_keeps(&format!("fn f() {{\n    {line}\n}}\n"));
+    }
+}
