@@ -414,7 +414,7 @@ fn record_sim_compile_phase(
     phase: &str,
     project: &Path,
     output: Option<&Path>,
-    started: std::time::Instant,
+    started: rock_core::clock::Instant,
     success: bool,
 ) {
     let Some(path) = std::env::var_os("ROCK_SIM_COMPILE_TIMING")
@@ -471,13 +471,11 @@ fn append_sim_trace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         }
         let write_result = std::io::Write::write_all(&mut file, bytes);
         let unlock_result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
-        if let Err(error) = write_result {
-            return Err(error);
-        }
+        write_result?;
         if unlock_result != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(unix))]
     std::io::Write::write_all(&mut file, bytes)
@@ -490,7 +488,7 @@ fn timed_sim_compile_phase<T>(
     output: Option<&Path>,
     action: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    let started = std::time::Instant::now();
+    let started = rock_core::clock::Instant::now();
     let result = action();
     record_sim_compile_phase(operation, phase, project, output, started, result.is_ok());
     result
@@ -501,9 +499,9 @@ fn sim_spawn_barrier() {
         return;
     };
     let gate = PathBuf::from(gate);
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let deadline = rock_core::clock::Instant::now() + Duration::from_secs(120);
     while !gate.exists() {
-        if std::time::Instant::now() > deadline {
+        if rock_core::clock::Instant::now() > deadline {
             log::warn!(target: "SIM",
                 "ROCK_SIM_SPAWN_BARRIER `{}` never appeared; proceeding", gate.display());
             return;
@@ -1888,7 +1886,7 @@ fn do_run_sim_opts_recorded(
         &sim_sources,
         prepared.stone.as_mut(),
         None,
-        Some(&recorder),
+        Some(recorder),
         entry_ids.first().copied(),
     )?;
     let sim_name = display_name.as_str();
@@ -2307,7 +2305,7 @@ fn run_fresh_entries(run: FreshRun<'_>) -> Result<Vec<(String, SimSummary)>> {
         update_snapshots,
         jobs,
         full_asset_jobs,
-        mut reload_lane,
+        reload_lane,
         recorder,
         entry_ids,
     } = run;
@@ -2389,11 +2387,7 @@ fn run_fresh_entries(run: FreshRun<'_>) -> Result<Vec<(String, SimSummary)>> {
                 run_at(dispatch[k], None)
             })
         },
-        || {
-            run_reload_lane_serially(reload_lane.as_deref_mut(), &reload_idx, |i, lane| {
-                run_at(i, Some(lane))
-            })
-        },
+        || run_reload_lane_serially(reload_lane, &reload_idx, |i, lane| run_at(i, Some(lane))),
     );
     let mut results: HashMap<usize, Result<(String, SimSummary)>> = HashMap::new();
     for (k, r) in pool {
@@ -3986,7 +3980,7 @@ fn parse_nvidia_smi_free_mib(stdout: &str) -> Option<u64> {
 fn emit_bytecode_image(output: &Path) {
     let lua_file = output.join(rock_host::project::MAIN_LUA_FILENAME);
     let bytecode = output.join(rock_host::project::MAIN_BYTECODE_FILENAME);
-    let started = std::time::Instant::now();
+    let started = rock_core::clock::Instant::now();
     let command = rock_host::project::build_luajit_bytecode_command(&lua_file, &bytecode);
     let mut command = (crate::registry::RuntimeServices::registered().runtime_command)(
         command,
@@ -4089,8 +4083,7 @@ const RUNNER_BASELINE_ENV: &[(&str, &str)] = &[
 /// rendered frame, which is what this oracle decides (the asset stub).
 fn entry_renders(env: &[(String, String)]) -> bool {
     env.iter()
-        .filter(|(k, _)| k == "SIM_DRAW")
-        .next_back()
+        .rfind(|(k, _)| k == "SIM_DRAW")
         .is_some_and(|(_, v)| matches!(v.as_str(), "on_demand" | "every_frame"))
 }
 
@@ -4107,12 +4100,7 @@ fn entry_renders(env: &[(String, String)]) -> bool {
 /// full assets holds them all the same (measured 2.0 GB against 2.4-4.3 GB
 /// for its rendering siblings).
 fn entry_full_assets(env: &[(String, String)], default_stub: &str) -> bool {
-    let last = |key: &str| {
-        env.iter()
-            .filter(|(k, _)| k == key)
-            .next_back()
-            .map(|(_, v)| v.as_str())
-    };
+    let last = |key: &str| env.iter().rfind(|(k, _)| k == key).map(|(_, v)| v.as_str());
     let stub = last("STONE_ASSET_STUB").unwrap_or(default_stub);
     let cap_default = RUNNER_BASELINE_ENV
         .iter()
@@ -4494,12 +4482,12 @@ fn acquire_worker_slot(
         Err(error) => return Err(anyhow!("ROCK_SIM_WORKER_SLOTS: {error}")),
     };
     let root = sim_worker_slot_directory()?;
-    let started = std::time::Instant::now();
+    let started = rock_core::clock::Instant::now();
     let mut checks = Duration::ZERO;
     let mut waits: BTreeMap<&'static str, Duration> = BTreeMap::new();
     let mut waiting = false;
     loop {
-        let checking = std::time::Instant::now();
+        let checking = rock_core::clock::Instant::now();
         let result =
             worker_admission::try_acquire(&root, slots, forced > 0, worker_admission::gpu_memory)?;
         checks += checking.elapsed();
@@ -4525,7 +4513,7 @@ fn acquire_worker_slot(
             log::info!(target: "SIM", "waiting for host sim capacity (at most {slots} workers, {reason}): {label}");
             waiting = true;
         }
-        let blocked = std::time::Instant::now();
+        let blocked = rock_core::clock::Instant::now();
         std::thread::sleep(Duration::from_millis(100));
         *waits.entry(reason).or_default() += blocked.elapsed();
     }
@@ -4713,7 +4701,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
     let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     // What the wall-clock deadline is measured from: the spawn until the entry
     // opens, then its `entry_start`, so boot does not spend the entry's budget.
-    let deadline_anchor = Arc::new(Mutex::new(std::time::Instant::now()));
+    let deadline_anchor = Arc::new(Mutex::new(rock_core::clock::Instant::now()));
     // Mid-sim reload_edit ops flow stderr-thread -> wait-loop, which owns the
     // (single-threaded) IncrementalProject and services them between try_wait polls.
     let (reload_tx, reload_rx) = mpsc::channel::<ReloadEditReq>();
@@ -4738,7 +4726,6 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
         // of another sim's locked record. The lines are retained and handed
         // back for the caller to emit inside that lock.
         let quiet = quiet || buffered;
-        let buffered = buffered;
         std::thread::spawn(move || -> Option<String> {
             let reader = BufReader::new(stderr_handle);
             let mut parse_error = None;
@@ -4756,7 +4743,7 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
                 };
                 let boundary = deadline_guard.observe_boundary(&line);
                 if let Some(EnvelopeStep::Started) = boundary {
-                    *anchor.lock().unwrap() = std::time::Instant::now();
+                    *anchor.lock().unwrap() = rock_core::clock::Instant::now();
                 }
                 if let Some(recorder) = recorder.as_ref() {
                     match boundary {
@@ -5250,7 +5237,6 @@ fn run_child(config: ChildConfig<'_>) -> Result<SimSummary> {
     // a revert failure is itself a loud error (it would poison every later
     // sim in the suite).
     if let Err(e) = stone
-        .as_deref_mut()
         .map(|st| {
             if pristine.is_empty() {
                 return revert_reload_edits(st, output, &mut pristine);
@@ -5882,12 +5868,12 @@ mod tests {
             .arg("3600")
             .spawn()
             .expect("spawn sleep");
-        let deadline = std::time::Instant::now() + test_utils::HANG_BACKSTOP;
+        let deadline = rock_core::clock::Instant::now() + test_utils::HANG_BACKSTOP;
         let measured = loop {
             if let Some(mb) = process_memory_mb(small.id()) {
                 break Some(mb);
             }
-            if std::time::Instant::now() > deadline {
+            if rock_core::clock::Instant::now() > deadline {
                 break None;
             }
             std::thread::sleep(Duration::from_millis(1));
@@ -6328,9 +6314,9 @@ mod tests {
         // ends, the lane ends once the narrowed pool is full, and after it
         // three tasks must be live together. A missing widening leaves that
         // barrier at two until the hang backstop, which every wait shares.
-        let deadline = std::time::Instant::now() + test_utils::HANG_BACKSTOP;
+        let deadline = rock_core::clock::Instant::now() + test_utils::HANG_BACKSTOP;
         let wait_for = |done: &dyn Fn() -> bool| {
-            while !done() && std::time::Instant::now() < deadline {
+            while !done() && rock_core::clock::Instant::now() < deadline {
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
         };
@@ -7208,9 +7194,11 @@ mod tests {
 
     #[test]
     fn entry_excluded_is_not_passed_and_verdict_word_is_excluded() {
-        let mut s = SimSummary::default();
-        s.excluded = Some("opt-in fixture".to_string());
-        s.saw_stop = true;
+        let s = SimSummary {
+            excluded: Some("opt-in fixture".to_string()),
+            saw_stop: true,
+            ..Default::default()
+        };
         assert!(!entry_passed(&s));
         assert!(entry_excluded(&s));
         assert_eq!(verdict_word(&s), "EXCLUDED");
@@ -7434,8 +7422,10 @@ emit('{{"op":"stop"}}', 'test.rock:2')
 
     #[test]
     fn census_missing_or_incomplete_result_is_not_a_zero_success() {
-        let mut missing = SimSummary::default();
-        missing.saw_stop = true;
+        let missing = SimSummary {
+            saw_stop: true,
+            ..Default::default()
+        };
         let (record, rank_values) = allocation_census_record("missing", &missing);
         assert_eq!(census_status(&missing), "no-verdict");
         assert_eq!(record["status"], "no-verdict");

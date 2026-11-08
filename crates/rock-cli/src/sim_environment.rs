@@ -31,7 +31,7 @@ pub static SIM_PIXEL_PREFIXES: &[&str] = &[
 
 /// Match an engine pixel reader or a readback-family prefix.
 fn sim_name_reads_pixels(declared: &str) -> bool {
-    SIM_PIXEL_ROOTS.iter().any(|root| *root == declared)
+    SIM_PIXEL_ROOTS.contains(&declared)
         || SIM_PIXEL_PREFIXES
             .iter()
             .any(|prefix| declared.starts_with(prefix))
@@ -161,7 +161,7 @@ fn sim_callee_edges(
                 } => Some(name),
                 _ => None,
             };
-            if let Some(fns) = name.map(|n| name_map.get(n)).flatten() {
+            if let Some(fns) = name.and_then(|n| name_map.get(n)) {
                 out.extend(fns.iter().copied());
             }
         }
@@ -279,7 +279,7 @@ fn sim_reads_capacity(
                 continue;
             }
             let declared = name.as_str().rsplit("::").next().unwrap_or(name.as_str());
-            if SIM_CAPACITY_GLOBALS.iter().any(|root| *root == declared) {
+            if SIM_CAPACITY_GLOBALS.contains(&declared) {
                 reads = true;
                 break;
             }

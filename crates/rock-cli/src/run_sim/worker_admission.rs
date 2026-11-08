@@ -3,11 +3,12 @@
 //! again would penalize a later suite for workers the host already admitted.
 use super::{SIM_LANE_VRAM_MIB, SIM_VRAM_RESERVE_MIB};
 use anyhow::{Context, Result};
+use rock_core::clock::Instant;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, Write};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use wait_timeout::ChildExt;
 
 #[derive(Clone, Debug)]

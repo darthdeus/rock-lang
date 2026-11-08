@@ -72,7 +72,7 @@ pub fn list_runs(root: &Path) -> Result<Vec<(String, PathBuf)>> {
         let id = entry.file_name().to_string_lossy().into_owned();
         runs.push((id, dir));
     }
-    runs.sort_by(|left, right| run_sort_key(&left.0).cmp(&run_sort_key(&right.0)));
+    runs.sort_by_key(|left| run_sort_key(&left.0));
     Ok(runs)
 }
 

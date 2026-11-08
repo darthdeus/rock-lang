@@ -5,6 +5,7 @@
 //! observed before the process stopped. Recording failures are diagnostics and
 //! never change the sim result.
 
+use rock_core::clock::Instant;
 use serde_json::{Value, json};
 use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, File, OpenOptions};
@@ -13,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 mod timing;
 
