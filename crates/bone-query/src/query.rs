@@ -2408,6 +2408,61 @@ fn param_named_arg_sites<'t>(
     out
 }
 
+/// The declaration name of the parameter whose named-arg label (`count` in
+/// `spawn_it(count: 3)`) the cursor is on, in the overload the call resolved
+/// to. HIR keeps labels without spans, so the label token is located in the
+/// source text before the argument's value, as `param_named_arg_sites` does.
+/// None off a label or when the call has no resolved overload.
+pub fn named_arg_param_at<'t>(
+    ws: &Workspace,
+    mid: ModuleId,
+    inf: &InferenceResult,
+    offset: usize,
+    text_of: TextOf<'_, 't>,
+) -> Option<Span> {
+    let module = ws.modules.get(mid.index())?;
+    let owner = module.body_at(offset)?;
+    let body = module.bodies.get(&owner)?;
+    let bi = inf.per_fn.get(&owner)?;
+    for (call_idx, (rmid, rfid)) in bi.resolved_overload_calls.iter() {
+        let args = match &body.expr_arena[*call_idx] {
+            hir::Expr::Call { args, .. } | hir::Expr::SafeNavCall { args, .. } => *args,
+            _ => continue,
+        };
+        for a in args.into_iter() {
+            let Some(label) = body.arg_names.get(&a) else {
+                continue;
+            };
+            let Some(asp) = body.expr_spans.get(a) else {
+                continue;
+            };
+            let Some(text) = text_of(asp.file.as_str()) else {
+                continue;
+            };
+            let Some(lsp) = named_label_before(text, asp.offset_range.0, label.as_str(), asp)
+            else {
+                continue;
+            };
+            if !span_contains(&lsp, offset) {
+                continue;
+            }
+            let tmod = ws.modules.get(rmid.index())?;
+            let tbody = tmod.bodies.get(&hir::BodyOwner::Function(*rfid))?;
+            let p = tbody
+                .param_bindings
+                .into_iter()
+                .find(|p| tbody.binding_arena[*p].name == *label)?;
+            let s = tbody.binding_spans.get(p)?;
+            let start = s.offset_range.0;
+            return Some(Span {
+                offset_range: (start, start + label.as_str().len()),
+                ..*s
+            });
+        }
+    }
+    None
+}
+
 /// The binding the cursor is on in `body`: its declaration name token, a
 /// `Var` use, or a local-callee use. The innermost-node resolution
 /// `local_references` uses.

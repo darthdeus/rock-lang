@@ -1648,14 +1648,20 @@ impl BoneWorkspace {
         };
         // Text lookup for the walks whose HIR carries no token span (named-arg
         // labels, `?.method` names) -- `proj.texts` holds every tracked file.
-        gaps::references(
-            ws,
-            mid,
-            inf,
-            offset,
-            &|f| proj.texts.get(f).map(|s| s.as_str()),
-            fn_scope,
-        )
+        let text_of = |f: &str| proj.texts.get(f).map(|s| s.as_str());
+        // A caller's named-arg label stands for the parameter of the overload
+        // the call resolved to; without this the enclosing call's callee
+        // answered, renaming the function instead.
+        if let Some(param) = crate::query::named_arg_param_at(ws, mid, inf, offset, &text_of) {
+            return self.all_reference_spans(
+                proj,
+                param.file.as_str(),
+                param.offset_range.0,
+                fn_scope,
+                request,
+            );
+        }
+        gaps::references(ws, mid, inf, offset, &text_of, fn_scope)
     }
 
     /// The sites a rename at `offset` rewrites: [`Self::v1_rename_sites`]

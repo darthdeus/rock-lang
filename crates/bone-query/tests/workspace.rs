@@ -1151,6 +1151,31 @@ fn rename_newtype_edits_decl_and_ctor_in_file_only() {
 }
 
 #[test]
+fn references_from_a_named_arg_label_find_the_resolved_overloads_param() {
+    let src = "fn put(count: int) {\n  print(count)\n}\nfn put(count: string) {\n  print(count)\n}\nfn main() {\n  put(count: 1)\n  put(count: \"a\")\n}\n";
+    let bone = fresh(src);
+    let lines = |pos| {
+        let mut l: Vec<(u32, u32)> = bone
+            .references(PATH, pos)
+            .into_iter()
+            .map(|loc| (loc.range.start.line, loc.range.start.character))
+            .collect();
+        l.sort();
+        l
+    };
+    assert_eq!(lines(Position::new(7, 7)), vec![(0, 7), (1, 8), (7, 6)]);
+    assert_eq!(lines(Position::new(8, 7)), vec![(3, 7), (4, 8), (8, 6)]);
+    let range = bone
+        .prepare_rename(PATH, Position::new(7, 7))
+        .expect("no refusal")
+        .expect("a label is renameable");
+    assert_eq!(
+        (range.start, range.end),
+        (Position::new(7, 6), Position::new(7, 11))
+    );
+}
+
+#[test]
 fn prepare_rename_on_a_function_definition_name_returns_the_name_range() {
     // F2 on the `fn load_image_asset` declaration name must offer a rename
     // ranged on the identifier -- not report "nothing to rename". (Regression:
