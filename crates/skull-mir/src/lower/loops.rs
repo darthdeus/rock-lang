@@ -231,6 +231,7 @@ impl Builder<'_> {
             cell: it_cell,
             value: it_val,
         });
+        let owned_flag = self.own_loop_coroutine(iter_expr, it_cell);
 
         // next returns `(bool, E)` / `(bool, A, B, ...)`. The shape is read under
         // the concrete callee the emitted call will carry, not the caller's own:
@@ -373,7 +374,86 @@ impl Builder<'_> {
             self.f.set_term(self.cur, Term::Goto(header));
         }
         self.cur = exit;
+        if let Some(flag) = owned_flag {
+            let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
+            self.emit_cur(Inst::Store {
+                cell: flag,
+                value: off,
+            });
+        }
         Ok(())
+    }
+
+    /// A co fn `for` whose head constructs a coroutine (`for v in gen()`)
+    /// holds the only reference to it, so a kill or error of the enclosing
+    /// coroutine while it is suspended in the loop must take the generator
+    /// down too, or the generator's defers and `on_killed` never run. That is
+    /// registered as a terminal cleanup guarded by a frame flag, which is
+    /// cleared on every path out of the loop. Leaving the loop (break,
+    /// exhaustion) does not kill: a plain fn does not either. A head that
+    /// names an existing handle is not owned by the loop and is left alone.
+    fn own_loop_coroutine(
+        &mut self,
+        iter_expr: Idx<Expr>,
+        it_cell: Idx<Cell>,
+    ) -> Option<Idx<Cell>> {
+        if self.defer_mode != stmt::DeferMode::CoFlag || !self.head_constructs_coroutine(iter_expr)
+        {
+            return None;
+        }
+        let flag = self.f.new_cell(Some(Ustr::from("__defer")));
+        let on = self.emit_cur(Inst::Const(Lit::Bool(true)));
+        self.emit_cur(Inst::Store {
+            cell: flag,
+            value: on,
+        });
+        let saved_cur = self.cur;
+        let entry = self.f.new_block();
+        let b_kill = self.f.new_block();
+        let b_done = self.f.new_block();
+        self.cur = entry;
+        let fv = self.emit_cur(Inst::Load(flag));
+        self.f.set_term(
+            entry,
+            Term::Branch {
+                cond: fv,
+                then_bb: b_kill,
+                else_bb: b_done,
+            },
+        );
+        self.cur = b_kill;
+        let off = self.emit_cur(Inst::Const(Lit::Bool(false)));
+        self.emit_cur(Inst::Store {
+            cell: flag,
+            value: off,
+        });
+        let it = self.emit_cur(Inst::Load(it_cell));
+        let kill = self.emit_cur(Inst::Global(Ustr::from(crate::mir::CORO_KILL)));
+        self.emit_cur(Inst::CallValue {
+            callee: kill,
+            args: vec![it],
+        });
+        self.f.set_term(b_kill, Term::Goto(b_done));
+        self.f.set_term(b_done, Term::Return(Vec::new()));
+        self.cur = saved_cur;
+        self.f.coro_defers.push((flag, entry));
+        Some(flag)
+    }
+
+    /// Whether `e` is a direct call of a `co fn`, i.e. a fresh coroutine.
+    fn head_constructs_coroutine(&self, e: Idx<Expr>) -> bool {
+        let Expr::Call {
+            callee: Callee::Unresolved { name, .. },
+            ..
+        } = self.body.expr_arena[e]
+        else {
+            return false;
+        };
+        let Some(inf) = self.inf else {
+            return false;
+        };
+        resolve_call_fn(self.ws, inf, e, name)
+            .is_some_and(|(m, f)| self.ws.module(m).functions[f].is_coroutine)
     }
 
     /// The variant names of `e`'s enum type (empty if `e` is not an enum) — used

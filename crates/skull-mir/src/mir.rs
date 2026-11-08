@@ -1359,6 +1359,9 @@ pub struct MirFunc {
 pub const DEFER_PUSH: &str = "__rock_defer_push";
 pub const DEFER_POP: &str = "__rock_defer_pop";
 pub const DEFER_CALL: &str = "__rock_defer_call";
+/// The coroutine runtime's kill (stdlib `__rock_coroutine_kill`, and its JS
+/// port), called as a global by cleanup the lowering synthesizes.
+pub const CORO_KILL: &str = "__rock_coroutine_kill";
 
 impl MirFunc {
     /// Whether any of `blocks` registers an ordinary-fn `defer` cleanup, i.e.

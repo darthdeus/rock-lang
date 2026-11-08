@@ -823,10 +823,12 @@ fn defer_unwind_wrap(unwind: bool, body: &str) -> String {
     )
 }
 
-/// The cleanup-stack entry points the shared lowering calls as globals; the
-/// JS runtime defines them (`JS_DEFER_RUNTIME`).
-fn is_defer_runtime_global(name: &str) -> bool {
-    name == skull_mir::mir::DEFER_PUSH || name == skull_mir::mir::DEFER_POP
+/// The runtime entry points the shared lowering calls as globals; the JS
+/// runtime defines them (`JS_DEFER_RUNTIME`, the coroutine runtime).
+fn is_runtime_global(name: &str) -> bool {
+    name == skull_mir::mir::DEFER_PUSH
+        || name == skull_mir::mir::DEFER_POP
+        || name == skull_mir::mir::CORO_KILL
 }
 
 /// A unique, JS-invalid sentinel a loop emits in place of its label; resolved by
@@ -1067,8 +1069,8 @@ impl Emitter<'_> {
         None
     }
 
-    fn is_defer_runtime_value(&self, v: Idx<Inst>) -> bool {
-        matches!(&self.mf.insts[v], Inst::Global(n) if is_defer_runtime_global(n))
+    fn is_runtime_value(&self, v: Idx<Inst>) -> bool {
+        matches!(&self.mf.insts[v], Inst::Global(n) if is_runtime_global(n))
     }
 
     /// Whether inst `iid` produces a statement in [`Self::emit_block_effects`]:
@@ -2289,7 +2291,7 @@ impl Emitter<'_> {
             Inst::Global(name)
                 if self.hoisted.contains(name)
                     || name.as_str() == "error"
-                    || is_defer_runtime_global(name) =>
+                    || is_runtime_global(name) =>
             {
                 name.to_string()
             }
@@ -2340,8 +2342,8 @@ impl Emitter<'_> {
                 }
                 format!("({{{}}})", parts.join(", "))
             }
-            // The defer runtime is plain JS: no CodeRef dispatch.
-            Inst::CallValue { callee, args } if self.is_defer_runtime_value(*callee) => {
+            // The runtime is plain JS: no CodeRef dispatch.
+            Inst::CallValue { callee, args } if self.is_runtime_value(*callee) => {
                 let rendered = args
                     .iter()
                     .map(|a| self.render_val(*a))
@@ -6788,7 +6790,7 @@ fn schedule_global_reads(
         if fn_value_names.contains(&name) {
             continue;
         }
-        if name.as_str() == "error" || is_defer_runtime_global(&name) {
+        if name.as_str() == "error" || is_runtime_global(&name) {
             continue;
         } else if st.enum_defs.contains_key(&name) {
             st.gctx.enum_globals.insert(name);

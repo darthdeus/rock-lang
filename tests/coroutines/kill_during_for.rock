@@ -1,0 +1,116 @@
+// A co fn suspended inside `for v in gen()` holds the only reference to the
+// generator the loop constructed. Killing (or erroring) the outer coroutine
+// there must run the generator's cleanup too -- its defers and on_killed --
+// the same way an `await`ed inner is killed with its outer. Leaving the loop
+// does not kill the generator, and a loop over an existing handle does not
+// own it.
+
+global LOG: [string] = []
+
+co fn gen() -> Coroutine<int, (), ()> {
+    defer { LOG.push("inner-defer") }
+    on_killed { LOG.push("inner-killed") }
+    yield 1
+    yield 2
+    yield 3
+}
+
+co fn outer() -> Coroutine<int> {
+    defer { LOG.push("outer-defer") }
+    for v in gen() {
+        yield v * 10
+    }
+}
+
+@test(output = "10 inner-defer,inner-killed,outer-defer")
+fn test_kill_outer_mid_for_kills_the_generator() {
+    LOG = []
+    let c = outer()
+    let v = c.resume() ?? -1
+    kill(c)
+    print("{v} {LOG.join(",")}")
+}
+
+@test(output = "inner-defer,inner-killed,outer-defer n:3")
+fn test_kill_is_idempotent() {
+    LOG = []
+    let c = outer()
+    c.resume()
+    kill(c)
+    kill(c)
+    print("{LOG.join(",")} n:{LOG.len()}")
+}
+
+co fn outer_raises() -> Coroutine<int> {
+    for v in gen() {
+        yield v
+        error("outer-boom")
+    }
+}
+
+@test(output = "errored inner-defer,inner-killed")
+fn test_outer_error_mid_for_kills_the_generator() {
+    LOG = []
+    let c = outer_raises()
+    c.resume()
+    c.resume()
+    print("{c.status()} {LOG.join(",")}")
+}
+
+// The loop ran to the end: the generator completed on its own, its defer
+// fired once at its natural exit, and a later kill of the outer finds
+// nothing left to clean up.
+co fn outer_then_wait() -> Coroutine<int> {
+    for v in gen() {
+        yield v
+    }
+    yield 99
+}
+
+@test(output = "99 inner-defer")
+fn test_exhausted_generator_is_not_killed_again() {
+    LOG = []
+    let c = outer_then_wait()
+    let last = 0
+    for i in 0..4 {
+        last = c.resume() ?? -1
+    }
+    kill(c)
+    print("{last} {LOG.join(",")}")
+}
+
+// `break` leaves the generator suspended, as it does in a plain fn; a later
+// kill of the outer does not reach it either.
+co fn outer_breaks() -> Coroutine<int> {
+    for v in gen() {
+        break
+    }
+    yield 7
+}
+
+@test(output = "7 []")
+fn test_break_leaves_the_generator_alone() {
+    LOG = []
+    let c = outer_breaks()
+    let v = c.resume() ?? -1
+    kill(c)
+    print("{v} [{LOG.join(",")}]")
+}
+
+// A loop over a handle the body already holds does not own it: the handle
+// may be shared, so killing the outer leaves it running.
+co fn outer_named() -> Coroutine<int> {
+    let g = gen()
+    for v in g {
+        yield v
+    }
+}
+
+@test(output = "1 []")
+fn test_named_handle_is_not_owned_by_the_loop() {
+    LOG = []
+    let c = outer_named()
+    let v = c.resume() ?? -1
+    kill(c)
+    print("{v} [{LOG.join(",")}]")
+}
