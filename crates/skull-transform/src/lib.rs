@@ -146,7 +146,7 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) {
                 if let Some(cp) = cp {
                     remap_inst(&mut insts[i], &|x| resolve_subst(&cp.subst, x));
                 }
-                value_operands(&insts[i], &mut |op| use_count[raw(op) as usize] += 1);
+                insts[i].uses_each(&mut |op| use_count[raw(op) as usize] += 1);
                 match &insts[i] {
                     Inst::Load(c) => load_count[raw(*c) as usize] += 1,
                     Inst::Store { cell, .. } => store_n[raw(*cell) as usize] += 1,
@@ -158,7 +158,7 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) {
             }
             // Terminator operands are permanent uses (terms are never removed), so
             // their +1 is never decremented — a value used by a term stays live.
-            term_uses_each(&b.term, &mut |v| use_count[raw(v) as usize] += 1);
+            b.term.uses_each(&mut |v| use_count[raw(v) as usize] += 1);
         }
     }
     // Compact templates summarize these loads instead of cloning their dead blocks.
@@ -204,7 +204,7 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) {
     while let Some(i) = work.pop() {
         // Each value operand of the removed inst loses a use; a value that hits
         // zero (and is pure) is itself now dead.
-        value_operands(&func.insts[i], &mut |op| {
+        func.insts[i].uses_each(&mut |op| {
             let k = raw(op) as usize;
             use_count[k] = use_count[k].saturating_sub(1);
             if !dead[k]
@@ -242,17 +242,6 @@ fn drop_flagged(func: &mut MirFunc, dead: &[bool]) {
         let mut insts = std::mem::take(&mut func.blocks[bid].insts);
         insts.retain(|&i| !dead[raw(i) as usize]);
         func.blocks[bid].insts = insts;
-    }
-}
-
-/// Value operands a terminator reads (the live-use contribution of a `Term`).
-fn term_uses_each(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
-    match term {
-        Term::Return(vs) => vs.iter().for_each(|v| push(*v)),
-        Term::Branch { cond, .. } => push(*cond),
-        Term::Switch { discr, .. } => push(*discr),
-        Term::Yield { values, .. } => values.iter().for_each(|v| push(*v)),
-        _ => {}
     }
 }
 
@@ -472,7 +461,7 @@ pub fn fold_const_branches(func: &mut MirFunc) -> bool {
     let mut reach: rustc_hash::FxHashSet<Idx<Block>> = roots.iter().copied().collect();
     let mut stack = roots;
     while let Some(b) = stack.pop() {
-        term_targets_each(&func.blocks[b].term, &mut |t| {
+        skull_mir::cfg::successors(&func.blocks[b].term, |t| {
             if reach.insert(t) {
                 stack.push(t);
             }
@@ -502,27 +491,6 @@ pub fn fold_const_branches(func: &mut MirFunc) -> bool {
         }
     }
     true
-}
-
-/// Block targets of a terminator.
-fn term_targets_each(term: &Term, f: &mut impl FnMut(Idx<Block>)) {
-    match term {
-        Term::Goto(t) => f(*t),
-        Term::Branch {
-            then_bb, else_bb, ..
-        } => {
-            f(*then_bb);
-            f(*else_bb);
-        }
-        Term::Switch { cases, default, .. } => {
-            for (_, b) in cases {
-                f(*b);
-            }
-            f(*default);
-        }
-        Term::Yield { resume, .. } => f(*resume),
-        Term::Return(_) | Term::Unreachable => {}
-    }
 }
 
 /// Scalarize `buf[i] = <value-struct literal>` for a `NativeBuffer<value>`.
@@ -1194,9 +1162,9 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
     let mut vuse = vec![0u32; func.insts.len()];
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
-            value_operands(&func.insts[i], &mut |op| vuse[raw(op) as usize] += 1);
+            func.insts[i].uses_each(&mut |op| vuse[raw(op) as usize] += 1);
         }
-        term_uses_each(&b.term, &mut |op| vuse[raw(op) as usize] += 1);
+        b.term.uses_each(&mut |op| vuse[raw(op) as usize] += 1);
     }
     for (bid, b) in func.blocks.iter() {
         let in_main = main.contains(&bid);
@@ -1352,7 +1320,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
     let mut chained_roots: HashSet<usize> = HashSet::default();
     for (_, b) in func.blocks.iter() {
         for &i in &b.insts {
-            value_operands(&func.insts[i], &mut |op| {
+            func.insts[i].uses_each(&mut |op| {
                 if let Some(&c) = load_cell.get(&op) {
                     let known = |f: &ustr::Ustr| {
                         cand_fields[rep[raw(c) as usize]]
@@ -1425,7 +1393,7 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
                 }
             });
         }
-        term_uses_each(&b.term, &mut |op| {
+        b.term.uses_each(&mut |op| {
             if let Some(&c) = load_cell.get(&op) {
                 if func.cells[c].nonnull_value_struct {
                     escape_loads.push((op, c)); // rebuild at the terminator use
@@ -1964,9 +1932,9 @@ fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) -> Option<Cop
         let mut uses = vec![0u32; func.insts.len()];
         for (_, b) in func.blocks.iter() {
             for &i in &b.insts {
-                value_operands(&func.insts[i], &mut |op| uses[raw(op) as usize] += 1);
+                func.insts[i].uses_each(&mut |op| uses[raw(op) as usize] += 1);
             }
-            term_uses_each(&b.term, &mut |op| uses[raw(op) as usize] += 1);
+            b.term.uses_each(&mut |op| uses[raw(op) as usize] += 1);
         }
         uses
     } else {
@@ -2316,164 +2284,6 @@ pub(crate) fn top_level_blocks(f: &MirFunc) -> Vec<Idx<Block>> {
     order
 }
 
-/// Value operands an instruction READS, pushed to `push` (callback form — avoids
-/// a per-inst `Vec` allocation in the dce hot loop).
-pub fn value_operands(inst: &Inst, push: &mut impl FnMut(Idx<Inst>)) {
-    let mut p = |x: &Idx<Inst>| push(*x);
-    match inst {
-        Inst::Const(_)
-        | Inst::Global(_)
-        | Inst::Load(_)
-        | Inst::Lambda { .. }
-        | Inst::CoroHook { .. } => {}
-        Inst::FfiViewCast { ptr, .. } => p(ptr),
-        Inst::IntAdd(a, b)
-        | Inst::IntSub(a, b)
-        | Inst::IntMul(a, b)
-        | Inst::IntDiv(a, b)
-        | Inst::IntMod(a, b)
-        | Inst::FloatAdd(a, b)
-        | Inst::FloatSub(a, b)
-        | Inst::FloatMul(a, b)
-        | Inst::FloatDiv(a, b)
-        | Inst::FloatMod(a, b)
-        | Inst::StringConcat(a, b)
-        | Inst::IntLt(a, b)
-        | Inst::IntLeq(a, b)
-        | Inst::IntGt(a, b)
-        | Inst::IntGeq(a, b)
-        | Inst::UintAdd(a, b)
-        | Inst::UintSub(a, b)
-        | Inst::UintMul(a, b)
-        | Inst::UintDiv(a, b)
-        | Inst::UintMod(a, b)
-        | Inst::UintLt(a, b)
-        | Inst::UintLeq(a, b)
-        | Inst::UintGt(a, b)
-        | Inst::UintGeq(a, b)
-        | Inst::FloatLt(a, b)
-        | Inst::FloatLeq(a, b)
-        | Inst::FloatGt(a, b)
-        | Inst::FloatGeq(a, b)
-        | Inst::Eq(a, b)
-        | Inst::NotEq(a, b)
-        | Inst::BitAnd(a, b)
-        | Inst::BitOr(a, b)
-        | Inst::BitXor(a, b)
-        | Inst::Shl(a, b)
-        | Inst::Shr(a, b)
-        | Inst::UintBitAnd(a, b)
-        | Inst::UintBitOr(a, b)
-        | Inst::UintBitXor(a, b)
-        | Inst::UintShl(a, b)
-        | Inst::UintShr(a, b) => {
-            p(a);
-            p(b);
-        }
-        Inst::Neg(x)
-        | Inst::Not(x)
-        | Inst::BitNot(x)
-        | Inst::UintBitNot(x)
-        | Inst::ToString(x)
-        | Inst::FloatToInt(x)
-        | Inst::IntToFloat(x)
-        | Inst::UintToFloat(x)
-        | Inst::FloatToF32(x)
-        | Inst::IntToUint(x)
-        | Inst::UintToInt(x)
-        | Inst::FloatToUint(x)
-        | Inst::UintBitcastInt(x)
-        | Inst::IntBitcastUint(x)
-        | Inst::CoroSetInner(x)
-        | Inst::VecStrideNilToFalse(x)
-        | Inst::VecStrideFalseToNil(x) => p(x),
-        Inst::Format { value, .. } => p(value),
-        Inst::FormatDyn { value, fmt } => {
-            p(value);
-            p(fmt);
-        }
-        Inst::Call { args, .. }
-        | Inst::CallMulti { args, .. }
-        | Inst::CallBoundMulti { args, .. } => args.iter().for_each(&mut p),
-        Inst::CallValue { callee, args } => {
-            p(callee);
-            args.iter().for_each(&mut p);
-        }
-        Inst::CallValueMulti { callee, args, .. } => {
-            p(callee);
-            args.iter().for_each(&mut p);
-        }
-        Inst::MakeTuple(vs) | Inst::MakeVec(vs) => vs.iter().for_each(&mut p),
-        Inst::MakeVecColumns {
-            columns, capacity, ..
-        } => {
-            p(capacity);
-            columns.iter().flat_map(|(_, vs)| vs).for_each(&mut p)
-        }
-        Inst::MakeVecColumnHeader { capacity, .. } => p(capacity),
-        Inst::MakeVecStrided {
-            values, capacity, ..
-        } => {
-            p(capacity);
-            values.iter().for_each(&mut p);
-        }
-        Inst::MakeVecStridedHeader { capacity, .. } => p(capacity),
-        Inst::MakeStruct { fields, .. }
-        | Inst::MakeValueStruct { fields, .. }
-        | Inst::MaterializeValueStruct { fields, .. }
-        | Inst::MakeEnv { fields, .. } => fields.iter().for_each(|(_, a)| p(a)),
-        Inst::MakeNullableValue { present, value } => {
-            p(present);
-            p(value);
-        }
-        Inst::MakeEnum {
-            positional, named, ..
-        } => {
-            positional.iter().for_each(&mut p);
-            named.iter().for_each(|(_, a)| p(a));
-        }
-        Inst::MakeEnumDyn {
-            tag,
-            positional,
-            named,
-            ..
-        } => {
-            p(tag);
-            positional.iter().for_each(&mut p);
-            named.iter().for_each(|(_, a)| p(a));
-        }
-        Inst::FfiNewArray { count, .. } => p(count),
-        Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => p(base),
-        Inst::Index { base, index, .. } => {
-            p(base);
-            p(index);
-        }
-        Inst::VecCheckedIndex { vec, index } => {
-            p(vec);
-            p(index);
-        }
-        Inst::Len { base, .. } => p(base),
-        Inst::Store { value, .. } => p(value),
-        Inst::StoreField { base, value, .. } => {
-            p(base);
-            p(value);
-        }
-        Inst::StoreIndex {
-            base, index, value, ..
-        } => {
-            p(base);
-            p(index);
-            p(value);
-        }
-        Inst::StoreGlobal { value, .. } => p(value),
-        Inst::ArrayPush { arr, value, .. } => {
-            p(arr);
-            p(value);
-        }
-        Inst::MapNext { table, .. } => p(table),
-    }
-}
-
 /// Remap an instruction's value operands through `m`.
 pub(crate) fn remap_inst(inst: &mut Inst, m: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
     let mut f = |x: &mut Idx<Inst>| *x = m(*x);
@@ -2684,7 +2494,7 @@ fn spill_cross_block_values(
     for &bid in block_ids {
         let mut used: Vec<Idx<Inst>> = Vec::new();
         for &id in &step.blocks[bid].insts {
-            value_operands(&step.insts[id], &mut |v| used.push(v));
+            step.insts[id].uses_each(&mut |v| used.push(v));
         }
         used.extend(term_value(&step.blocks[bid].term));
         for v in used {
@@ -2718,7 +2528,7 @@ fn spill_cross_block_values(
         {
             let mut seen = HashSet::default();
             for &id in &step.blocks[bid].insts {
-                value_operands(&step.insts[id], &mut |v| {
+                step.insts[id].uses_each(&mut |v| {
                     if persistent_values.contains(&v)
                         && def_block.get(&v).copied() != Some(bid)
                         && seen.insert(v)
@@ -2902,7 +2712,7 @@ fn values_live_at_resume_blocks(
         let mut uses = HashSet::default();
         let mut defs = HashSet::default();
         for &id in &func.blocks[block].insts {
-            value_operands(&func.insts[id], &mut |value| {
+            func.insts[id].uses_each(&mut |value| {
                 if !defs.contains(&value) {
                     uses.insert(value);
                 }
@@ -2911,7 +2721,7 @@ fn values_live_at_resume_blocks(
                 defs.insert(id);
             }
         }
-        term_uses_each(&func.blocks[block].term, &mut |value| {
+        func.blocks[block].term.uses_each(&mut |value| {
             if !defs.contains(&value) {
                 uses.insert(value);
             }

@@ -1262,7 +1262,7 @@ impl Emitter<'_> {
             for &iid in &blk.insts {
                 for_each_operand(&self.mf.insts[iid], &mut |op| hit |= mat.contains(&op));
             }
-            for_each_term_operand(&blk.term, &mut |op| hit |= mat.contains(&op));
+            blk.term.uses_each(&mut |op| hit |= mat.contains(&op));
             if hit {
                 return true;
             }
@@ -7958,147 +7958,12 @@ fn is_native_buffer(name: &str) -> bool {
     )
 }
 
-/// Invoke `f` for each inst used as an operand by `inst`. The match is
-/// EXHAUSTIVE on purpose: a new Inst variant must decide its operands here or
-/// the compiler errors, so use-counting can never silently rot.
+/// `Inst::uses_each`, but a `CoroHook`'s lambda also counts as a use here, so
+/// the JS use counts and cross-block checks still see the hooked closure.
 fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
-    let mut mark = |ids: &[Idx<Inst>]| ids.iter().for_each(|&i| f(i));
-    match inst {
-        Inst::Const(_) | Inst::Global(_) | Inst::Load(_) | Inst::Lambda { .. } => {}
-        Inst::FfiViewCast { ptr, .. } => mark(&[*ptr]),
-        Inst::IntAdd(a, b)
-        | Inst::IntSub(a, b)
-        | Inst::IntMul(a, b)
-        | Inst::IntDiv(a, b)
-        | Inst::IntMod(a, b)
-        | Inst::UintAdd(a, b)
-        | Inst::UintSub(a, b)
-        | Inst::UintMul(a, b)
-        | Inst::UintDiv(a, b)
-        | Inst::UintMod(a, b)
-        | Inst::FloatAdd(a, b)
-        | Inst::FloatSub(a, b)
-        | Inst::FloatMul(a, b)
-        | Inst::FloatDiv(a, b)
-        | Inst::FloatMod(a, b)
-        | Inst::StringConcat(a, b)
-        | Inst::IntLt(a, b)
-        | Inst::IntLeq(a, b)
-        | Inst::IntGt(a, b)
-        | Inst::IntGeq(a, b)
-        | Inst::UintLt(a, b)
-        | Inst::UintLeq(a, b)
-        | Inst::UintGt(a, b)
-        | Inst::UintGeq(a, b)
-        | Inst::FloatLt(a, b)
-        | Inst::FloatLeq(a, b)
-        | Inst::FloatGt(a, b)
-        | Inst::FloatGeq(a, b)
-        | Inst::Eq(a, b)
-        | Inst::NotEq(a, b)
-        | Inst::BitAnd(a, b)
-        | Inst::BitOr(a, b)
-        | Inst::BitXor(a, b)
-        | Inst::Shl(a, b)
-        | Inst::Shr(a, b)
-        | Inst::UintBitAnd(a, b)
-        | Inst::UintBitOr(a, b)
-        | Inst::UintBitXor(a, b)
-        | Inst::UintShl(a, b)
-        | Inst::UintShr(a, b) => mark(&[*a, *b]),
-        Inst::ToString(x)
-        | Inst::FloatToInt(x)
-        | Inst::IntToFloat(x)
-        | Inst::UintToFloat(x)
-        | Inst::FloatToF32(x)
-        | Inst::IntToUint(x)
-        | Inst::UintToInt(x)
-        | Inst::FloatToUint(x)
-        | Inst::UintBitcastInt(x)
-        | Inst::IntBitcastUint(x)
-        | Inst::VecStrideNilToFalse(x)
-        | Inst::VecStrideFalseToNil(x)
-        | Inst::Neg(x)
-        | Inst::Not(x)
-        | Inst::BitNot(x)
-        | Inst::UintBitNot(x)
-        | Inst::CoroSetInner(x) => mark(&[*x]),
-        Inst::Format { value, .. } => mark(&[*value]),
-        Inst::FormatDyn { value, fmt } => mark(&[*value, *fmt]),
-        Inst::Call { args, .. } | Inst::CallBoundMulti { args, .. } => mark(args),
-        Inst::CallMulti { args, .. } => mark(args),
-        Inst::CallValue { callee, args } | Inst::CallValueMulti { callee, args, .. } => {
-            mark(&[*callee]);
-            mark(args);
-        }
-        Inst::MakeTuple(elems) | Inst::MakeVec(elems) => mark(elems),
-        Inst::MakeVecColumns {
-            columns, capacity, ..
-        } => {
-            mark(&[*capacity]);
-            columns.iter().for_each(|(_, vs)| mark(vs));
-        }
-        Inst::MakeVecColumnHeader { capacity, .. } => mark(&[*capacity]),
-        Inst::MakeVecStrided {
-            values, capacity, ..
-        } => {
-            mark(&[*capacity]);
-            mark(values);
-        }
-        Inst::MakeVecStridedHeader { capacity, .. } => mark(&[*capacity]),
-        Inst::MakeStruct { fields, .. }
-        | Inst::MakeValueStruct { fields, .. }
-        | Inst::MaterializeValueStruct { fields, .. }
-        | Inst::MakeEnv { fields, .. } => {
-            for (_, v) in fields {
-                f(*v);
-            }
-        }
-        Inst::MakeNullableValue { present, value } => mark(&[*present, *value]),
-        Inst::MakeEnum {
-            positional, named, ..
-        } => {
-            mark(positional);
-            for (_, v) in named {
-                f(*v);
-            }
-        }
-        Inst::MakeEnumDyn {
-            tag,
-            positional,
-            named,
-            ..
-        } => {
-            mark(&[*tag]);
-            mark(positional);
-            for (_, v) in named {
-                f(*v);
-            }
-        }
-        Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => mark(&[*base]),
-        Inst::Index { base, index, .. } => mark(&[*base, *index]),
-        Inst::VecCheckedIndex { vec, index } => mark(&[*vec, *index]),
-        Inst::Len { base, .. } => mark(&[*base]),
-        Inst::FfiNewArray { count, .. } => mark(&[*count]),
-        Inst::Store { value, .. } => mark(&[*value]),
-        Inst::StoreField { base, value, .. } => mark(&[*base, *value]),
-        Inst::StoreIndex {
-            base, index, value, ..
-        } => mark(&[*base, *index, *value]),
-        Inst::StoreGlobal { value, .. } => mark(&[*value]),
-        Inst::ArrayPush { arr, value, .. } => mark(&[*arr, *value]),
-        Inst::CoroHook { lambda, .. } => mark(&[*lambda]),
-        Inst::MapNext { table, .. } => mark(&[*table]),
-    }
-}
-
-fn for_each_term_operand(term: &Term, f: &mut impl FnMut(Idx<Inst>)) {
-    match term {
-        Term::Return(vs) => vs.iter().for_each(|&i| f(i)),
-        Term::Branch { cond, .. } => f(*cond),
-        Term::Switch { discr, .. } => f(*discr),
-        Term::Yield { values, .. } => values.iter().for_each(|&i| f(i)),
-        Term::Unreachable | Term::Goto(_) => {}
+    inst.uses_each(f);
+    if let Inst::CoroHook { lambda, .. } = inst {
+        f(*lambda);
     }
 }
 
@@ -8206,7 +8071,7 @@ fn compute_inlinable_over(mf: &MirFunc, blocks: &[Idx<Block>]) -> (Vec<u32>, Vec
                 use_block[k] = br;
             });
         }
-        for_each_term_operand(&mf.blocks[b].term, &mut |u| {
+        mf.blocks[b].term.uses_each(&mut |u| {
             let k = raw(u) as usize;
             use_count[k] += 1;
             use_block[k] = br;
@@ -8264,7 +8129,7 @@ fn cross_block_temps(
         for &iid in &mf.blocks[b].insts {
             for_each_operand(&mf.insts[iid], &mut check);
         }
-        for_each_term_operand(&mf.blocks[b].term, &mut check);
+        mf.blocks[b].term.uses_each(&mut check);
     }
     cross
 }

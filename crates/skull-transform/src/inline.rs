@@ -871,25 +871,25 @@ impl UseIndex {
     }
 
     fn add_inst(&mut self, func: &MirFunc, iid: Idx<Inst>) {
-        crate::value_operands(&func.insts[iid], &mut |value| {
+        func.insts[iid].uses_each(&mut |value| {
             self.add_use(value, UseSite::Inst(iid));
         });
     }
 
     fn remove_inst(&mut self, func: &MirFunc, iid: Idx<Inst>) {
-        crate::value_operands(&func.insts[iid], &mut |value| {
+        func.insts[iid].uses_each(&mut |value| {
             self.remove_use(value, UseSite::Inst(iid));
         });
     }
 
     fn add_term(&mut self, func: &MirFunc, bid: Idx<Block>) {
-        term_values(&func.blocks[bid].term, &mut |value| {
+        func.blocks[bid].term.uses_each(&mut |value| {
             self.add_use(value, UseSite::Term(bid));
         });
     }
 
     fn remove_term(&mut self, func: &MirFunc, bid: Idx<Block>) {
-        term_values(&func.blocks[bid].term, &mut |value| {
+        func.blocks[bid].term.uses_each(&mut |value| {
             self.remove_use(value, UseSite::Term(bid));
         });
     }
@@ -1091,51 +1091,6 @@ struct LiveClosure {
     cells: HashSet<Idx<Cell>>,
 }
 
-fn term_values(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
-    match term {
-        Term::Return(values) | Term::Yield { values, .. } => {
-            values.iter().copied().for_each(push);
-        }
-        Term::Branch { cond, .. } | Term::Switch { discr: cond, .. } => push(*cond),
-        Term::Goto(_) | Term::Unreachable => {}
-    }
-}
-
-fn term_targets(term: &Term, push: &mut impl FnMut(Idx<Block>)) {
-    match term {
-        Term::Goto(target) => push(*target),
-        Term::Branch {
-            then_bb, else_bb, ..
-        } => {
-            push(*then_bb);
-            push(*else_bb);
-        }
-        Term::Switch { cases, default, .. } => {
-            cases.iter().map(|(_, target)| *target).for_each(&mut *push);
-            push(*default);
-        }
-        Term::Yield { resume, .. } => push(*resume),
-        Term::Return(_) | Term::Unreachable => {}
-    }
-}
-
-fn cell_operands(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
-    match inst {
-        Inst::Load(cell) | Inst::Store { cell, .. } => push(*cell),
-        Inst::CallMulti { dests, .. }
-        | Inst::CallValueMulti { dests, .. }
-        | Inst::CallBoundMulti { dests, .. } => dests.iter().copied().for_each(push),
-        Inst::Lambda { params, .. } => params.iter().copied().for_each(push),
-        Inst::MapNext {
-            key_cell, val_cell, ..
-        } => {
-            push(*key_cell);
-            push(*val_cell);
-        }
-        _ => {}
-    }
-}
-
 fn forced_cells(func: &MirFunc) -> Vec<(u32, u32)> {
     let top: HashSet<Idx<Block>> = top_level_blocks(func).into_iter().collect();
     let mut cells = HashSet::default();
@@ -1151,7 +1106,7 @@ fn forced_cells(func: &MirFunc) -> Vec<(u32, u32)> {
             continue;
         }
         for &iid in &block.insts {
-            cell_operands(&func.insts[iid], &mut |cell| {
+            func.insts[iid].cells_each(&mut |cell| {
                 cells.insert((cell, bid));
             });
         }
@@ -1174,8 +1129,8 @@ fn live_closure(func: &MirFunc) -> LiveClosure {
         }
         let block = &func.blocks[bid];
         insts.extend(block.insts.iter().copied());
-        term_values(&block.term, &mut |iid| insts.push(iid));
-        term_targets(&block.term, &mut |target| blocks.push(target));
+        block.term.uses_each(&mut |iid| insts.push(iid));
+        skull_mir::cfg::successors(&block.term, |target| blocks.push(target));
     }
     for param in &func.params {
         live.cells.insert(*param);
@@ -1185,8 +1140,8 @@ fn live_closure(func: &MirFunc) -> LiveClosure {
             continue;
         }
         let inst = &func.insts[iid];
-        crate::value_operands(inst, &mut |operand| insts.push(operand));
-        cell_operands(inst, &mut |cell| {
+        inst.uses_each(&mut |operand| insts.push(operand));
+        inst.cells_each(&mut |cell| {
             live.cells.insert(cell);
         });
         if let Inst::Lambda { entry, .. } = inst {
@@ -1198,8 +1153,8 @@ fn live_closure(func: &MirFunc) -> LiveClosure {
             }
             let block = &func.blocks[bid];
             insts.extend(block.insts.iter().copied());
-            term_values(&block.term, &mut |value| insts.push(value));
-            term_targets(&block.term, &mut |target| blocks.push(target));
+            block.term.uses_each(&mut |value| insts.push(value));
+            skull_mir::cfg::successors(&block.term, |target| blocks.push(target));
         }
     }
     if let Some(cell) = func.resume_arg {

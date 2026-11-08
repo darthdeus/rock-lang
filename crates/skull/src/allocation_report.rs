@@ -672,7 +672,7 @@ fn allocation_result_uses(func: &MirFunc) -> Vec<AllocationUseFacts> {
     for block in reachable_blocks_from(func, func.entry) {
         for &iid in &func.blocks[block].insts {
             let inst = &func.insts[iid];
-            skull_transform::value_operands(inst, &mut |operand| {
+            inst.uses_each(&mut |operand| {
                 let use_facts = &mut facts[operand.into_raw().into_u32() as usize];
                 use_facts.uses += 1;
                 allocation_inst_use(inst, operand, use_facts);
