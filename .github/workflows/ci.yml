@@ -47,10 +47,12 @@ jobs:
         run: cargo clippy --locked --workspace --exclude stone-rs --exclude stone-gl --exclude stone-capture --exclude stone-imgui-abi --all-targets -- -D warnings
       - name: Native Clippy diagnostics
         run: cargo clippy --locked -p stone-rs -p stone-gl -p stone-capture -p stone-imgui-abi --all-targets -- -W clippy::approx_constant
-      - name: Test workspace
-        run: cargo nextest run --locked --workspace
-      - name: Test doc examples
-        run: cargo test --locked --workspace --doc
+      - name: Test compiler workspace
+        run: cargo test --locked --workspace --exclude stone-rs --exclude stone-gl --exclude stone-capture --exclude stone-imgui-abi
+      - name: Test native runtime
+        run: cargo nextest run --locked -p stone-rs -p stone-gl -p stone-capture -p stone-imgui-abi
+      - name: Test native doc examples
+        run: cargo test --locked -p stone-rs -p stone-gl -p stone-capture -p stone-imgui-abi --doc
       - name: Test bundle installer
         run: python3 -m unittest discover -s scripts -p test_gamelibs.py
       - name: Test Stone packages
