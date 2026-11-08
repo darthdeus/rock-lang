@@ -4998,7 +4998,8 @@ pub fn action_caller_gaps(
 /// arguments: that is the only shape the receiver path can spell, so a
 /// container, nullable, tuple, builtin, or generic param 0 is never a
 /// candidate. `extern` decls are excluded because the parser REJECTS a receiver
-/// path on one.
+/// path on one; `@shader` entry points because their param 0 is the stage input,
+/// not a receiver.
 pub fn method_syntax_in_module(
     ws: &Workspace,
     module: &Module,
@@ -5008,6 +5009,7 @@ pub fn method_syntax_in_module(
     let mut out = Vec::new();
     for (_, f) in module.functions.iter() {
         if f.is_extern
+            || f.annotations.iter().any(|a| a.is_builtin("shader"))
             || declared_name(f.name.as_str()) == "main"
             || f.name_span.file != module.file
         {

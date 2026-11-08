@@ -251,3 +251,13 @@ fn unknown_lint_names_are_reported_back() {
     let sel = LintOptions::only(["method_sytnax".to_string(), "unused_var".to_string()]);
     assert_eq!(sel.unknown(), vec!["method_sytnax"]);
 }
+
+/// A shader entry point's first parameter is its stage input, not a receiver.
+#[test]
+fn a_shader_entry_point_is_not_a_candidate() {
+    let src = "struct Input { uv: float }\n\
+               @shader(fragment)\n\
+               fn shade(input: Input, n: int) -> float {\n    input.uv\n}\n\
+               fn main() {}\n";
+    assert_eq!(methods(src), Vec::<String>::new());
+}
