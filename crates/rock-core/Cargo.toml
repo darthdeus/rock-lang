@@ -13,7 +13,6 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 ariadne = { workspace = true }
-fs-err = { workspace = true }
 atomic_refcell = { workspace = true }
 ustr = { workspace = true }
 itertools = { workspace = true }

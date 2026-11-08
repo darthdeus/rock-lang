@@ -23,15 +23,6 @@ impl CompileStats {
         Self::default()
     }
 
-    pub fn merge(&mut self, other: &Self) {
-        self.files += other.files;
-        self.total_lines += other.total_lines;
-        self.code_lines += other.code_lines;
-        self.comment_lines += other.comment_lines;
-        self.blank_lines += other.blank_lines;
-        self.bytes += other.bytes;
-    }
-
     /// Headline lines-per-second: tokei-compatible `total_lines / elapsed`.
     /// Returns 0.0 if elapsed is zero (avoids div-by-zero in tests).
     pub fn loc_per_sec(&self, elapsed: std::time::Duration) -> f64 {
@@ -62,31 +53,6 @@ impl CompileStats {
 mod tests {
     use super::*;
     use std::time::Duration;
-
-    #[test]
-    fn merge_sums_fields() {
-        let mut a = CompileStats {
-            files: 1,
-            total_lines: 10,
-            code_lines: 7,
-            comment_lines: 2,
-            blank_lines: 1,
-            bytes: 100,
-        };
-        let b = CompileStats {
-            files: 2,
-            total_lines: 20,
-            code_lines: 15,
-            comment_lines: 3,
-            blank_lines: 2,
-            bytes: 200,
-        };
-        a.merge(&b);
-        assert_eq!(a.files, 3);
-        assert_eq!(a.total_lines, 30);
-        assert_eq!(a.code_lines, 22);
-        assert_eq!(a.bytes, 300);
-    }
 
     #[test]
     fn loc_per_sec_zero_elapsed() {

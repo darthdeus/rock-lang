@@ -76,10 +76,6 @@ type Registry = HashMap<Ustr, Vec<MacroTemplate>>;
 pub struct MacroRegistry(Registry);
 
 impl MacroRegistry {
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     /// The definition name-span of the macro overload that `name(<argc args>)`
     /// expands to, selected by the SAME arity rule as expansion
     /// (`select_overload`), or None if no macro overload matches this arity --

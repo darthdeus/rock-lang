@@ -7591,11 +7591,6 @@ impl SkullEmitCache {
         &self.graph
     }
 
-    /// The shader artifact view used by the current renderer registration.
-    pub fn shader_view(&self) -> &crate::shader_artifact::ShaderArtifactView {
-        &self.shader_view
-    }
-
     /// The Lua artifact's retained realization of [`Self::graph`], from the
     /// same roots the graph was built/updated from. Body edits apply a local
     /// delta; full construction remains the independent oracle.
@@ -10699,7 +10694,7 @@ fn main() { let result = outer(1) }
             "the overlap fixture must allocate new shared identity: {lanes:?}"
         );
         assert!(!cache.lua_view().publisher_lanes.is_empty());
-        assert!(!cache.shader_view().roots.is_empty());
+        assert!(!cache.shader_view.roots.is_empty());
     }
 
     #[cfg(feature = "sequential")]
@@ -10780,9 +10775,9 @@ fn main() { let result = outer(1) }
                 cache.lua_view().census()
             );
             assert!(
-                cache.shader_view().roots.len() > 0,
+                cache.shader_view.roots.len() > 0,
                 "{name} fixture must retain a shader root: {:?}",
-                cache.shader_view().roots.len()
+                cache.shader_view.roots.len()
             );
         }
 

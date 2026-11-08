@@ -10,22 +10,17 @@ pub mod structure;
 
 use bone_semantic::hir::{BodyOwner, BuiltinTy, Expr, Function, TyId, TypeCtor, TypeExpr};
 use bone_semantic::inference::Workspace;
-use bone_semantic::prelude::{FnList, ModuleId, Span};
+use bone_semantic::prelude::Span;
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
-use skull_graph::instance_graph::SiteOutcome;
 use skull_mir::concrete::{ConcretePlans, ConcreteSignature};
-use skull_mir::gpu_layout::{SamplerKind, WireKind, texture_slots};
+use skull_mir::gpu_layout::{SamplerKind, texture_slots};
 use skull_mir::instance::Instance;
 use skull_mir::lower::{ScalarCtx, SpecSubst};
 use skull_mir::mir::{FuncRef, Inst, Lit, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
-use skull_mir::shader_ir::{
-    FragmentOutput, LogicalSampler, LogicalTextureGroup, LogicalUniformGroup, NominalType,
-    ShaderIR, ShaderInstance, ShaderInterfacePlan, ShaderStage, ShaderStageIr, UniformRole,
-};
+use skull_mir::shader_ir::{ShaderInstance, ShaderInterfacePlan, ShaderStage, ShaderStageIr};
 use skull_parser::CompilerError;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use ustr::Ustr;
 
@@ -80,53 +75,8 @@ pub struct ConcreteStageInput {
     pub concrete_plans: Arc<ConcretePlans>,
 }
 
-/// A neutral fullscreen fragment artifact. The parameter indices are logical
-/// entry metadata used by a renderer to drop resource parameters from its
-/// generated helper signature; they contain no target type or binding answer.
-#[derive(Clone)]
-pub struct ShaderArtifactPlan {
-    pub entry: ShaderInstance,
-    pub ir: ShaderIR,
-    pub interface: ShaderInterfacePlan,
-    pub dependencies: Vec<FuncRef>,
-    pub global_params: Vec<usize>,
-    pub sampler_params: Vec<usize>,
-}
-
 fn err(span: Span, message: impl Into<String>) -> CompilerError {
     CompilerError::new_with_label(span, message.into())
-}
-
-/// Resolve a root name to one function, preferring the caller's module.
-pub fn resolve_root(
-    ws: &Workspace,
-    user_mid: ModuleId,
-    name: &str,
-) -> Result<FuncRef, CompilerError> {
-    let key = Ustr::from(name);
-    let Some(list): Option<&FnList> = ws.functions_by_name.get(&key) else {
-        return Err(CompilerError::new_no_location(format!(
-            "shader root `{name}` not found"
-        )));
-    };
-    let in_user: Vec<_> = list
-        .iter()
-        .filter(|(module, _)| *module == user_mid)
-        .collect();
-    let pick = if in_user.len() == 1 {
-        *in_user[0]
-    } else if list.len() == 1 {
-        list[0]
-    } else {
-        return Err(CompilerError::new_no_location(format!(
-            "shader root `{name}` is overloaded/ambiguous ({} definitions); shader roots must be uniquely named",
-            list.len()
-        )));
-    };
-    Ok(FuncRef {
-        module: pick.0,
-        func: pick.1,
-    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -512,147 +462,6 @@ fn callee_instance(
     Ok(ShaderInstance::new(instance))
 }
 
-/// Build the standalone shader entry's concrete population from the shared
-/// graph. The old entry path lowered a declaration, profiled its MIR, and ran
-/// a second reach walk; this keeps identity and callee ownership in the graph
-/// and leaves body/profile validation to `plan_stage_from_concrete`.
-fn standalone_stage_input(
-    ws: &Workspace,
-    fref: FuncRef,
-    stage: ShaderStage,
-    policy: &dyn ShaderPlannerPolicy,
-) -> Result<(ScalarCtx, ConcreteStageInput), CompilerError> {
-    let interner = Arc::new(skull_mir::monoty::MonoInterner::new());
-    let graph = skull_graph::instance_graph::build_in(ws, vec![fref], false, Arc::clone(&interner));
-    let scx = ScalarCtx::new_values_first_class(ws).sharing(Arc::clone(&interner));
-    let canonical = skull_mir::lower::canonical_variant(ws, fref);
-    let entry = graph
-        .instances
-        .iter()
-        .find(|instance| instance.func == canonical && instance.args.is_empty())
-        .cloned()
-        .ok_or_else(|| {
-            CompilerError::new_no_location("shader root has no concrete graph instance".to_string())
-        })?;
-
-    let mut retained = BTreeSet::from([entry.clone()]);
-    let mut builtins = BTreeSet::new();
-    let mut active = BTreeSet::new();
-    let mut done = BTreeSet::new();
-    let mut order = Vec::new();
-    visit_standalone_shader_instance(
-        ws,
-        &graph,
-        &entry,
-        policy,
-        &interner,
-        &mut retained,
-        &mut builtins,
-        &mut active,
-        &mut done,
-        &mut order,
-    )?;
-    order.retain(|instance| instance != &entry);
-    let mut dependencies = Vec::new();
-    let mut seen_declarations = BTreeSet::new();
-    for instance in order.iter().chain(std::iter::once(&entry)) {
-        let key = (
-            instance.func.module.raw(),
-            instance.func.func.into_raw().into_u32(),
-        );
-        if seen_declarations.insert(key) {
-            dependencies.push(instance.func);
-        }
-    }
-    let concrete_plans = skull_graph::concrete_body::build(ws, &graph).plans;
-    let helpers: BTreeSet<Instance> = retained
-        .iter()
-        .filter(|instance| *instance != &entry)
-        .cloned()
-        .collect();
-    let input = ConcreteStageInput {
-        stage,
-        entry,
-        retained: retained.into_iter().collect(),
-        helpers: helpers.into_iter().collect(),
-        builtins: builtins.into_iter().collect(),
-        order,
-        dependencies,
-        concrete_plans,
-    };
-    Ok((scx, input))
-}
-
-fn visit_standalone_shader_instance(
-    ws: &Workspace,
-    graph: &skull_graph::instance_graph::InstanceGraph,
-    instance: &Instance,
-    policy: &dyn ShaderPlannerPolicy,
-    interner: &skull_mir::monoty::MonoInterner,
-    retained: &mut BTreeSet<Instance>,
-    builtins: &mut BTreeSet<Instance>,
-    active: &mut BTreeSet<Instance>,
-    done: &mut BTreeSet<Instance>,
-    order: &mut Vec<Instance>,
-) -> Result<(), CompilerError> {
-    if done.contains(instance) {
-        return Ok(());
-    }
-    if !active.insert(instance.clone()) {
-        let function = &ws.module(instance.func.module).functions[instance.func.func];
-        return Err(err(
-            function.name_span,
-            format!(
-                "shader profile: recursion through `{}` is not allowed on {}",
-                function.name,
-                policy.backend_name()
-            ),
-        ));
-    }
-    let Some(sites) = graph.sites_of(instance) else {
-        active.remove(instance);
-        done.insert(instance.clone());
-        order.push(instance.clone());
-        return Ok(());
-    };
-    for record in sites.values() {
-        let SiteOutcome::Resolved(callee) = &record.outcome else {
-            continue;
-        };
-        let function = &ws.module(callee.func.module).functions[callee.func.func];
-        if policy.inline_instance(ws, function, callee, interner) {
-            builtins.insert(callee.clone());
-            continue;
-        }
-        if policy.lowered_native_operator(ws, function, callee, interner) {
-            continue;
-        }
-        if function.is_extern || function.inline_body.is_some() {
-            return Err(err(
-                function.name_span,
-                format!(
-                    "shader profile: `{}` has no emittable body and no {} intrinsic mapping",
-                    function.name,
-                    policy.backend_name()
-                ),
-            ));
-        }
-        if retained.insert(callee.clone()) {
-            visit_standalone_shader_instance(
-                ws, graph, callee, policy, interner, retained, builtins, active, done, order,
-            )?;
-        } else if active.contains(callee) {
-            return visit_standalone_shader_instance(
-                ws, graph, callee, policy, interner, retained, builtins, active, done, order,
-            );
-        }
-    }
-    active.remove(instance);
-    done.insert(instance.clone());
-    order.push(instance.clone());
-    Ok(())
-}
-
 fn checked_concrete_callees(
     ws: &Workspace,
     caller: &ShaderInstance,
@@ -970,26 +779,6 @@ fn nominal_name(ws: &Workspace, ty: TyId) -> Option<Ustr> {
     }
 }
 
-fn shader_stage(function: &Function) -> Option<&'static str> {
-    let annotation = function
-        .annotations
-        .iter()
-        .find(|annotation| annotation.name.name.as_str() == "shader")?;
-    match annotation.args.first().map(|argument| &argument.value) {
-        Some(bone_semantic::hir::AnnoValue::Ident(identifier))
-            if identifier.name.as_str() == "fragment" =>
-        {
-            Some("fragment")
-        }
-        Some(bone_semantic::hir::AnnoValue::Ident(identifier))
-            if identifier.name.as_str() == "vertex" =>
-        {
-            Some("vertex")
-        }
-        _ => Some("<unknown>"),
-    }
-}
-
 fn texture_group_samplers(
     ws: &Workspace,
     ty: TyId,
@@ -1115,68 +904,6 @@ pub fn classify_entry(ws: &Workspace, function: &Function) -> Result<EntryClass,
     })
 }
 
-fn logical_members(
-    ws: &Workspace,
-    struct_name: Ustr,
-    span: Span,
-) -> Result<Vec<(Ustr, WireKind)>, CompilerError> {
-    skull_mir::gpu_layout::uniform_group_members(ws, struct_name)
-        .map_err(|error| err(span, error.message))
-}
-
-fn logical_uniform_group(
-    ws: &Workspace,
-    role: UniformRole,
-    struct_name: Ustr,
-    span: Span,
-) -> Result<LogicalUniformGroup, CompilerError> {
-    Ok(LogicalUniformGroup {
-        role,
-        struct_name: NominalType::of(ws, struct_name),
-        members: logical_members(ws, struct_name, span)?,
-    })
-}
-
-fn logical_textures(
-    ws: &Workspace,
-    group: Option<Ustr>,
-    has_bare_sampler: bool,
-    span: Span,
-) -> Result<Option<LogicalTextureGroup>, CompilerError> {
-    let Some(group) = group else { return Ok(None) };
-    if has_bare_sampler {
-        return Err(err(
-            span,
-            format!("shader entry: `{group}` is a @textures group, so every sampler must join it"),
-        ));
-    }
-    let slots = texture_slots(ws, group).map_err(|error| err(span, error.message))?;
-    Ok(Some(LogicalTextureGroup {
-        struct_name: Some(NominalType::of(ws, group)),
-        samplers: slots
-            .slots
-            .iter()
-            .map(|slot| (slot.name, slot.kind))
-            .collect(),
-        stages: vec![ShaderStage::Fragment],
-    }))
-}
-
-fn bare_sampler_list(
-    samplers: &[(usize, Ustr, SamplerKind)],
-    grouped_params: &[usize],
-) -> Vec<LogicalSampler> {
-    samplers
-        .iter()
-        .filter(|(index, _, _)| !grouped_params.contains(index))
-        .map(|(_, name, kind)| LogicalSampler {
-            name: *name,
-            kind: *kind,
-            stage: ShaderStage::Fragment,
-        })
-        .collect()
-}
-
 pub fn check_entry_collisions(
     interface: &ShaderInterfacePlan,
     span: Span,
@@ -1206,154 +933,4 @@ pub fn check_entry_collisions(
         }
     }
     Ok(())
-}
-
-/// Build the first target-neutral artifact shape: one compiler-owned fragment
-/// entry plus the fullscreen vertex supplied by a physical backend.
-pub fn plan_fullscreen_fragment_from_concrete(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    input: &ConcreteStageInput,
-    policy: &dyn ShaderPlannerPolicy,
-) -> Result<ShaderArtifactPlan, CompilerError> {
-    if input.stage != ShaderStage::Fragment {
-        return Err(CompilerError::new_no_location(
-            "shader artifact: fullscreen input must be a fragment stage".to_string(),
-        ));
-    }
-    let function = &ws.module(input.entry.func.module).functions[input.entry.func.func];
-    match shader_stage(function) {
-        Some("fragment") => {}
-        Some(stage) => {
-            return Err(err(
-                function.name_span,
-                format!(
-                    "shader entry: @shader({stage}) is not supported by the fullscreen artifact; only @shader(fragment) is admitted"
-                ),
-            ));
-        }
-        None => {
-            return Err(err(
-                function.name_span,
-                format!(
-                    "shader entry: `{}` has no @shader(fragment) annotation",
-                    function.name
-                ),
-            ));
-        }
-    }
-    let class = classify_entry(ws, function)?;
-    let stage = plan_stage_from_concrete(ws, scx, input, policy)?;
-    let interface = ShaderInterfacePlan {
-        stages: vec![ShaderStage::Fragment],
-        uniform_groups: class
-            .uniform_group
-            .map(|group| {
-                logical_uniform_group(
-                    ws,
-                    UniformRole::Stage(ShaderStage::Fragment),
-                    group,
-                    function.name_span,
-                )
-            })
-            .transpose()?
-            .into_iter()
-            .collect(),
-        textures: logical_textures(
-            ws,
-            class.texture_group,
-            class
-                .samplers
-                .iter()
-                .any(|(index, _, _)| !class.global_params.contains(index)),
-            function.name_span,
-        )?,
-        bare_samplers: bare_sampler_list(&class.samplers, &class.global_params),
-        fragment_output: FragmentOutput::Single(WireKind::F32x4),
-        ..Default::default()
-    };
-    check_entry_collisions(&interface, function.name_span)?;
-    Ok(ShaderArtifactPlan {
-        entry: stage.entry.clone(),
-        ir: ShaderIR {
-            interner: scx.interner_handle(),
-            stages: vec![stage],
-        },
-        interface,
-        dependencies: input.dependencies.clone(),
-        global_params: class.global_params,
-        sampler_params: class.sampler_params,
-    })
-}
-
-pub fn plan_fullscreen_fragment(
-    ws: &Workspace,
-    fref: FuncRef,
-    policy: &dyn ShaderPlannerPolicy,
-) -> Result<ShaderArtifactPlan, CompilerError> {
-    let function = &ws.module(fref.module).functions[fref.func];
-    match shader_stage(function) {
-        Some("fragment") => {}
-        Some(stage) => {
-            return Err(err(
-                function.name_span,
-                format!(
-                    "shader entry: @shader({stage}) is not supported by the fullscreen artifact; only @shader(fragment) is admitted"
-                ),
-            ));
-        }
-        None => {
-            return Err(err(
-                function.name_span,
-                format!(
-                    "shader entry: `{}` has no @shader(fragment) annotation",
-                    function.name
-                ),
-            ));
-        }
-    }
-    let class = classify_entry(ws, function)?;
-    let (scx, input) = standalone_stage_input(ws, fref, ShaderStage::Fragment, policy)?;
-    let stage = plan_stage_from_concrete(ws, &scx, &input, policy)?;
-    let interface = ShaderInterfacePlan {
-        stages: vec![ShaderStage::Fragment],
-        uniform_groups: class
-            .uniform_group
-            .map(|group| {
-                logical_uniform_group(
-                    ws,
-                    UniformRole::Stage(ShaderStage::Fragment),
-                    group,
-                    function.name_span,
-                )
-            })
-            .transpose()?
-            .into_iter()
-            .collect(),
-        textures: logical_textures(
-            ws,
-            class.texture_group,
-            class
-                .samplers
-                .iter()
-                .any(|(index, _, _)| !class.global_params.contains(index)),
-            function.name_span,
-        )?,
-        bare_samplers: bare_sampler_list(&class.samplers, &class.global_params),
-        fragment_output: FragmentOutput::Single(WireKind::F32x4),
-        ..Default::default()
-    };
-    check_entry_collisions(&interface, function.name_span)?;
-    let dependencies = stage.declarations();
-    Ok(ShaderArtifactPlan {
-        entry: stage.entry.clone(),
-        ir: ShaderIR {
-            interner: scx.interner_handle(),
-            stages: vec![stage],
-        },
-        interface,
-        dependencies,
-        global_params: class.global_params,
-        sampler_params: class.sampler_params,
-    })
 }

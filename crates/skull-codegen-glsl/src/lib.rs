@@ -260,41 +260,6 @@ fn glsl_name(ws: &Workspace, interner: &MonoInterner, inst: &ShaderInstance) -> 
     inst.symbol(ws, interner)
 }
 
-/// Reject a signature whose params/return aren't tier 0, as DECLARED.
-///
-/// Public because the mono SHADER ARTIFACT VIEW asks it of what a target
-/// packages: the same function the emission walk runs, so a view cannot admit
-/// a signature emission refuses. A generic declaration is answered under its
-/// instantiation instead -- see [`check_tier0_signature_spec`].
-pub fn check_tier0_signature(ws: &Workspace, f: &Function) -> Result<(), CompilerError> {
-    check_tier0_signature_spec(ws, &SpecSubst::default(), f)
-}
-
-fn check_tier0_signature_spec(
-    ws: &Workspace,
-    subst: &SpecSubst,
-    f: &Function,
-) -> Result<(), CompilerError> {
-    for pd in &f.param_decls {
-        glsl_ty(
-            ws,
-            subst,
-            pd.ty,
-            f.name_span,
-            &format!("parameter `{}`", pd.name),
-        )?;
-    }
-    if let Some(rt) = f.return_ty {
-        if glsl_ty(ws, subst, rt, f.name_span, "return")?.is_sampler() {
-            return Err(err(
-                f.name_span,
-                "shader profile: a sampler cannot be returned (GLSL forbids sampler locals/returns)",
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn check_tier0_signature_concrete(
     interner: &MonoInterner,
     signature: &ConcreteSignature,
@@ -4206,13 +4171,6 @@ impl ShaderAbiPlan {
             attribute_locations,
         })
     }
-
-    pub fn block_at(&self, binding: u32) -> Option<&UniformBlockPlan> {
-        self.uniform_blocks
-            .iter()
-            .find(|(b, _)| *b == binding)
-            .map(|(_, p)| &p.plan)
-    }
 }
 
 /// One std140 block of a GLSL program. `name` is the group type's symbol, which
@@ -6274,33 +6232,6 @@ fn render_shader_pipeline(
             stages: vec![plan.vert.ir.clone(), plan.frag.ir.clone()],
         },
     })
-}
-
-/// CLI entry point: dispatch on the root's `@shader` annotation -- an annotated
-/// root compiles as a whole-shader fragment entry (exactly one root), plain
-/// roots as a fn library.
-pub fn emit_shader(
-    ws: &Workspace,
-    mid: ModuleId,
-    roots: &[String],
-    profile: GlslProfile,
-) -> Result<String, CompilerError> {
-    let annotated = roots
-        .iter()
-        .filter(|r| {
-            resolve_root(ws, mid, r).ok().is_some_and(|fref| {
-                shader_stage(&ws.module(fref.module).functions[fref.func]).is_some()
-            })
-        })
-        .count();
-    match annotated {
-        0 => emit_shader_library(ws, mid, roots),
-        1 if roots.len() == 1 => emit_shader_entry(ws, mid, &roots[0], profile),
-        _ => Err(err(
-            Span::default(),
-            "rock shader: a @shader(fragment) entry compiles alone -- pass exactly one root fn",
-        )),
-    }
 }
 
 /// The scalar return kind of a value-test fn -- selects the readback texture

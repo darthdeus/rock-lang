@@ -100,119 +100,13 @@ fn record_source_view(files: usize, aliased: usize, detached_bytes: usize) {
     census.detached_source_bytes += detached_bytes;
 }
 
+#[cfg(test)]
 pub fn take_census() -> Option<LintPassCensus> {
     if !census_enabled() {
         return None;
     }
     let mut census = lint_census();
     Some(std::mem::take(&mut *census))
-}
-
-pub fn print_census(census: &LintPassCensus) {
-    let family = |name: &str, family: &bone_lints::LintFamilyCensus| {
-        eprintln!(
-            "    {name}: requests={} files={} modules={} bodies={} derived={} reused={} suppressed={} ms={:.3}",
-            family.requests,
-            family.files_examined,
-            family.modules_examined,
-            family.bodies_examined,
-            family.findings_derived,
-            family.findings_reused,
-            family.findings_suppressed,
-            family.elapsed_ns as f64 / 1_000_000.0,
-        );
-    };
-    eprintln!(
-        "  lint census (ROCK_LINT_CENSUS=1): full_workspace_passes={}",
-        census.lint.full_workspace_passes
-    );
-    family("flat/body-local", &census.lint.flat);
-    family("inference-dependent", &census.lint.inference);
-    family("suppression", &census.lint.suppression);
-    family("unused_fn", &census.lint.unused_fn);
-    family("backend_sibling", &census.lint.backend_sibling);
-    family("action_caller", &census.lint.action_caller);
-    let cache = &census.cache;
-    eprintln!(
-        "    cache: full_rebuilds={} body_updates={} global_passes={} flat_requests={} inference_requests={} flat_reused_bodies={} inference_reused_bodies={} flat_derived={} inference_derived={} flat_reused_findings={} inference_reused_findings={} span_shifts={} suppression_invalidations={}",
-        cache.full_rebuilds,
-        cache.body_updates,
-        cache.global_passes,
-        cache.flat_body_requests,
-        cache.inference_body_requests,
-        cache.flat_bodies_reused,
-        cache.inference_bodies_reused,
-        cache.flat_findings_derived,
-        cache.inference_findings_derived,
-        cache.flat_findings_reused,
-        cache.inference_findings_reused,
-        cache.span_shifts,
-        cache.suppression_invalidations,
-    );
-    eprintln!(
-        "    cache dependency: changed_declarations={} call_edges_retracted={} call_edges_installed={} reachability_components={} declarations_revisited={} declarations_reused={} sibling_groups_requested={} sibling_groups_revisited={}",
-        cache.changed_declarations,
-        cache.call_edges_retracted,
-        cache.call_edges_installed,
-        cache.reachability_components_visited,
-        cache.declarations_revisited,
-        cache.declarations_reused,
-        cache.sibling_groups_requested,
-        cache.sibling_groups_revisited,
-    );
-    eprintln!(
-        "    cache action/suppression: action_declarations_requested={} action_declarations_revisited={} action_callers_requested={} action_callers_revisited={} suppression_files_requested={} suppression_files_refiltered={} suppression_source_scans={} suppression_entry_parses={}",
-        cache.action_declarations_requested,
-        cache.action_declarations_revisited,
-        cache.action_callers_requested,
-        cache.action_callers_revisited,
-        cache.suppression_files_requested,
-        cache.suppression_files_refiltered,
-        cache.suppression_source_scans,
-        cache.suppression_entry_parses,
-    );
-    eprintln!(
-        "    cache validation: full_lint_workspace_passes={} full_cache_reconstructions={} fresh_cached_finding_comparisons={}",
-        cache.full_lint_workspace_passes,
-        cache.full_cache_reconstructions,
-        cache.fresh_cached_finding_comparisons,
-    );
-    eprintln!(
-        "    cache locality: reuse_totals_reads={} output_refresh_requests={} output_files_refreshed={} output_owners_visited={} output_file_rows_read={}",
-        cache.reuse_totals_reads,
-        cache.output_refresh_requests,
-        cache.output_files_refreshed,
-        cache.output_owner_entries_visited,
-        cache.output_file_rows_read,
-    );
-    let snapshots = &census.cache_snapshots;
-    eprintln!(
-        "    cache snapshots: count={} entries={} findings={} files={} flat_bodies={} inference_bodies={} other={} global={} last={} count_ms={:.3} clone_ms={:.3}",
-        snapshots.snapshots,
-        snapshots.cached_entries,
-        snapshots.cached_findings,
-        snapshots.file_entries,
-        snapshots.flat_body_entries,
-        snapshots.inference_body_entries,
-        snapshots.other_entries,
-        snapshots.global_entries,
-        snapshots.last_entries,
-        snapshots.count_ns as f64 / 1_000_000.0,
-        snapshots.clone_ns as f64 / 1_000_000.0,
-    );
-    eprintln!(
-        "    report: prepare_ms={:.3} summary_sort_ms={:.3} render_ms={:.3}",
-        census.report_prepare_ns as f64 / 1_000_000.0,
-        census.summary_sort_ns as f64 / 1_000_000.0,
-        census.render_ns as f64 / 1_000_000.0,
-    );
-    eprintln!(
-        "    source view: requests={} files={} aliased={} detached_bytes={}",
-        census.source_view_requests,
-        census.source_files_borrowed,
-        census.source_views_aliased,
-        census.detached_source_bytes,
-    );
 }
 
 /// How a build reports lint findings. Applies to `Warning`/`Advice` only --

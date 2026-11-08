@@ -21,10 +21,8 @@ rock-core = { workspace = true }
 rock-stdlib = { workspace = true }
 anyhow = { workspace = true }
 fs-err = { workspace = true }
-rustc-hash = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 basic-toml = "0.1"
-sha1 = "0.10"
 walkdir = { workspace = true }
 log = { workspace = true }
 once_cell = { workspace = true }

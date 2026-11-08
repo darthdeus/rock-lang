@@ -17,12 +17,8 @@
 //! sites demand the same one.
 
 use bone_semantic::inference::{BodyInference, Workspace};
-use bone_semantic::prelude::{BoundNext, BoundTree};
-use skull_parser::CompilerError;
 
 use crate::instance::Instance;
-use crate::lower::SpecSubst;
-use crate::mir::FuncRef;
 use crate::monoty::MonoInterner;
 
 /// How one bounded generic index of a callee resolves.
@@ -73,12 +69,6 @@ pub struct SpecDemand {
     /// identity rather than as a pair a consumer has to re-pair.
     pub inst: Instance,
     pub tree: ResolvedBoundTree,
-}
-
-impl SpecDemand {
-    pub fn func(&self) -> FuncRef {
-        self.inst.func
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -145,74 +135,5 @@ pub fn concrete_body_ctx<'a>(
         inf: ws.inference(mid).and_then(|r| r.per_fn.get(&owner)),
         incoming,
         interner,
-    }
-}
-
-/// Resolve a raw tree recorded in `inf`'s body against the `incoming` tree that
-/// body was itself instantiated with.
-///
-/// The two arms are the two things a leaf can be. A `Concrete` leaf spends the
-/// caller-arena `next_generics` HERE, where `inf` is the arena they belong to,
-/// and keeps only the [`Instance`] it names. A `CallerGeneric` leaf is the
-/// enclosing body's own bounded generic, so it is answered by `incoming` -- and
-/// when `incoming` does not answer it, it stays a `CallerGeneric`: this body is
-/// itself generic in that position and the resolution belongs to whoever
-/// instantiates it, not to a failure here.
-pub fn resolve_bound_tree(
-    ws: &Workspace,
-    interner: &MonoInterner,
-    inf: Option<&BodyInference>,
-    subst: &SpecSubst,
-    raw: &BoundTree,
-    incoming: &ResolvedBoundTree,
-) -> Result<ResolvedBoundTree, CompilerError> {
-    let mut out = ResolvedBoundTree::default();
-    for (&g, bn) in &raw.next {
-        out.next.insert(
-            g,
-            resolve_bound_next(ws, interner, inf, subst, bn, incoming)?,
-        );
-    }
-    Ok(out)
-}
-
-pub fn resolve_bound_next(
-    ws: &Workspace,
-    interner: &MonoInterner,
-    inf: Option<&BodyInference>,
-    subst: &SpecSubst,
-    bn: &BoundNext,
-    incoming: &ResolvedBoundTree,
-) -> Result<ResolvedBoundNext, CompilerError> {
-    match bn {
-        BoundNext::Concrete {
-            func: (m, f),
-            sub,
-            next_generics,
-        } => {
-            let func = FuncRef {
-                module: *m,
-                func: *f,
-            };
-            // No inference for this body means no arena to read the witness
-            // instantiation out of; the shared witness is what the splice path
-            // has always used in that case.
-            let instance = match inf {
-                Some(inf) => {
-                    crate::lower::spec_key_from_next_generics(ws, inf, func, next_generics, subst)?
-                        .map(|key| Instance::intern(interner, func, key))
-                        .unwrap_or_else(|| Instance::base(func))
-                }
-                None => Instance::base(func),
-            };
-            Ok(ResolvedBoundNext::Concrete {
-                instance,
-                sub: resolve_bound_tree(ws, interner, inf, subst, sub, incoming)?,
-            })
-        }
-        BoundNext::CallerGeneric(g) => Ok(match incoming.get(*g) {
-            Some(resolved) => resolved.clone(),
-            None => ResolvedBoundNext::CallerGeneric(*g),
-        }),
     }
 }

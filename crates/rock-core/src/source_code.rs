@@ -33,13 +33,6 @@ pub enum GlobalPolicy {
 }
 
 impl GlobalPolicy {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Any => "any",
-            Self::None => "none",
-        }
-    }
-
     /// Parse a declared policy. Unknown values are rejected by the manifest
     /// loader instead of silently restoring the permissive default.
     pub fn parse(name: &str) -> Option<Self> {
@@ -206,11 +199,6 @@ impl Span {
         }
     }
 
-    pub fn panic(&self, message: impl AsRef<str>) -> Self {
-        self.print(message.as_ref());
-        panic!("{}", message.as_ref());
-    }
-
     /// The smallest span covering both, which must belong to one file.
     pub fn merge(&self, other: &Self) -> Self {
         assert_eq!(self.file, other.file);
@@ -219,15 +207,6 @@ impl Span {
             line_range: (self.line_range.0, other.line_range.1),
             col_range: (self.col_range.0, other.col_range.1),
             offset_range: (self.offset_range.0, other.offset_range.1),
-        }
-    }
-
-    /// `self`, unless it is the unknown placeholder, in which case `other`.
-    pub fn or(self, other: &Self) -> Self {
-        if self.file == UNKNOWN_FILE_NAME {
-            *other
-        } else {
-            self
         }
     }
 
@@ -248,69 +227,6 @@ impl Span {
             col,
             offset,
         }
-    }
-
-    pub fn end(&self) -> LineCol {
-        let (line, col, offset) = (self.line_range.1, self.col_range.1, self.offset_range.1);
-        LineCol {
-            file: self.file,
-            line,
-            col,
-            offset,
-        }
-    }
-
-    /// Whether `loc` names a byte inside this span of the same file. The end
-    /// offset itself is outside, as for any half-open range.
-    pub fn contains_loc(&self, loc: &LineCol) -> bool {
-        let (first, last) = self.offset_range;
-        loc.file == self.file && first <= loc.offset && loc.offset < last
-    }
-
-    /// The file's text for the frame the debug printers draw. Empty when the
-    /// file is the nameless placeholder or cannot be read, so the frame is
-    /// simply left out: a debug printer that panicked while printing would be
-    /// worse than one that prints less.
-    fn report_source(&self) -> String {
-        if self.file == "unknown" {
-            return String::new();
-        }
-        fs_err::read_to_string(self.file.as_str()).unwrap_or_default()
-    }
-
-    /// An advice report with this span marked and `message` in both the header
-    /// and the label, which is what both debug printers emit.
-    fn debug_report(
-        &self,
-        message: &str,
-    ) -> ariadne::ReportBuilder<'static, (String, std::ops::Range<usize>)> {
-        let mut report = make_report_builder(
-            ariadne::ReportKind::Advice,
-            self.file.to_string(),
-            self.offset_range.0,
-            String::new(),
-            message.to_string(),
-        );
-        report.add_span_label(self, message.to_string());
-        report
-    }
-
-    pub fn print(&self, message: impl AsRef<str>) {
-        let message = message.as_ref();
-        let source = self.report_source();
-        self.debug_report(message)
-            .finish()
-            .eprint((self.file.to_string(), ariadne::Source::from(source)))
-            .unwrap();
-    }
-
-    pub fn write(&self, message: impl AsRef<str>, w: impl std::io::Write) {
-        let message = message.as_ref();
-        let source = self.report_source();
-        self.debug_report(message)
-            .finish()
-            .write((self.file.to_string(), ariadne::Source::from(source)), w)
-            .unwrap();
     }
 }
 
@@ -354,8 +270,6 @@ impl LineCol {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::{LineColError, line_col_to_offset};
-    use test_utils::strip_ansi_sgr;
 
     const FILE: &str = "main.rock";
 
@@ -419,10 +333,9 @@ mod tests {
     }
 
     #[test]
-    fn start_and_end_read_each_range_at_its_own_border() {
+    fn start_reads_each_range_at_its_start() {
         let covered = span((2, 4), (3, 9), (20, 41));
         assert_eq!(covered.start(), line_col(FILE, 2, 3, 20));
-        assert_eq!(covered.end(), line_col(FILE, 4, 9, 41));
     }
 
     #[test]
@@ -434,7 +347,6 @@ mod tests {
         assert_eq!(converted.col_range, (11, 11));
         assert_eq!(converted.offset_range, (96, 96));
         assert_eq!(converted.start(), point);
-        assert_eq!(converted.end(), point);
         assert!(converted.is_empty());
     }
 
@@ -458,24 +370,6 @@ mod tests {
     }
 
     #[test]
-    fn or_falls_back_only_when_self_is_unknown() {
-        let known = span((1, 1), (0, 4), (28, 32));
-        let other = span((9, 9), (9, 12), (90, 93));
-        assert_eq!(Span::unknown().or(&other), other);
-        assert_eq!(known.or(&other), known);
-    }
-
-    #[test]
-    fn contains_loc_is_half_open_on_the_byte_offsets() {
-        let covered = span((1, 1), (5, 10), (17, 22));
-        assert!(covered.contains_loc(&line_col(FILE, 1, 5, 17)));
-        assert!(covered.contains_loc(&line_col(FILE, 1, 9, 21)));
-        assert!(!covered.contains_loc(&line_col(FILE, 1, 10, 22)));
-        assert!(!covered.contains_loc(&line_col(FILE, 1, 4, 16)));
-        assert!(!covered.contains_loc(&line_col("other.rock", 1, 5, 17)));
-    }
-
-    #[test]
     fn format_site_is_one_based_on_the_line() {
         assert_eq!(span((0, 0), (0, 1), (0, 1)).format_site(), "main.rock:1");
         assert_eq!(span((6, 7), (0, 1), (0, 1)).format_site(), "main.rock:7");
@@ -489,88 +383,6 @@ mod tests {
             "Span(main.rock)"
         );
         assert_eq!(format!("{:?}", Span::unknown()), "Span(unknown)");
-    }
-
-    #[test]
-    fn write_renders_a_header_only_for_a_missing_source() {
-        let mut written = Vec::new();
-        span((1, 1), (5, 8), (17, 20)).write("span message", &mut written);
-        assert_eq!(
-            strip_ansi_sgr(&String::from_utf8(written).unwrap()),
-            "[  ] Advice: span message\n"
-        );
-    }
-
-    fn offset_of(source: &str, line: usize, col: usize) -> usize {
-        line_col_to_offset(source, line, col).expect("offset")
-    }
-
-    fn assert_line_out_of_range(source: &str, line: usize, col: usize) {
-        assert!(matches!(
-            line_col_to_offset(source, line, col),
-            Err(LineColError::LineOutOfRange)
-        ));
-    }
-
-    fn assert_column_out_of_range(source: &str, line: usize, col: usize) {
-        assert!(matches!(
-            line_col_to_offset(source, line, col),
-            Err(LineColError::ColumnOutOfRange)
-        ));
-    }
-
-    #[test]
-    fn empty_text_has_no_offsets_to_convert() {
-        assert_line_out_of_range("", 0, 0);
-    }
-
-    #[test]
-    fn a_col_at_the_start_of_a_line_converts_to_its_byte_offset() {
-        let source = "let x = 1;\nlet y = 2;\nlet z = 3;\n";
-        assert_eq!(offset_of(source, 0, 0), 0);
-        assert_eq!(offset_of(source, 1, 0), 11);
-        assert_eq!(offset_of(source, 2, 0), 22);
-    }
-
-    #[test]
-    fn the_last_line_without_a_newline_is_addressable() {
-        let source = "first\nsecond";
-        assert_eq!(source.len(), 12);
-        assert_eq!(offset_of(source, 1, 6), 12);
-        assert_column_out_of_range(source, 1, 7);
-        assert_line_out_of_range(source, 2, 0);
-    }
-
-    #[test]
-    fn the_line_after_a_trailing_newline_does_not_exist() {
-        assert_line_out_of_range("first\n", 1, 0);
-    }
-
-    #[test]
-    fn a_col_past_the_byte_length_of_the_line_is_rejected() {
-        let source = "abc\ndef\n";
-        assert_eq!(offset_of(source, 0, 3), 3);
-        assert_column_out_of_range(source, 0, 4);
-    }
-
-    #[test]
-    fn a_col_is_counted_in_characters_over_byte_offsets() {
-        let source = "h\u{e9}llo\n";
-        assert_eq!(offset_of(source, 0, 1), 1);
-        assert_eq!(offset_of(source, 0, 2), 3);
-        assert_eq!(offset_of(source, 0, 5), 6);
-        assert_eq!(offset_of(source, 0, 6), 6);
-        assert_column_out_of_range(source, 0, 7);
-        assert_line_out_of_range(source, 1, 0);
-    }
-
-    #[test]
-    fn a_crlf_break_counts_as_one_byte_when_advancing() {
-        let source = "ab\r\ncd\r\n";
-        assert_eq!(offset_of(source, 0, 2), 2);
-        assert_eq!(offset_of(source, 1, 0), 3);
-        assert_eq!(offset_of(source, 1, 2), 5);
-        assert_line_out_of_range(source, 2, 0);
     }
 
     #[test]

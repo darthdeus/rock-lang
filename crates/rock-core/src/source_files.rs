@@ -52,21 +52,6 @@ impl SourceFiles {
         }
     }
 
-    pub fn get_line(&self, line_col: &LineCol) -> Option<String> {
-        let file = self.file_for_linecol(line_col)?;
-        file.borrow()
-            .contents
-            .lines()
-            .nth(line_col.line)
-            .map(str::to_string)
-    }
-
-    pub fn file_for_linecol(&self, line_col: &LineCol) -> Option<&Arc<AtomicRefCell<SourceFile>>> {
-        self.files
-            .iter()
-            .find(|file| file.borrow().file.to_id_path() == line_col.file.as_str())
-    }
-
     /// A copy without the test-only files. Test-only means the path
     /// convention: a file with a `tests` component below the root of the
     /// package that owns it (sims live in `<pkg>/tests/sims/`, unit tests in
@@ -174,15 +159,6 @@ mod tests {
         )
     }
 
-    fn line_col(file: &str, line: usize) -> LineCol {
-        LineCol {
-            file: ustr::ustr(file),
-            line,
-            col: 0,
-            offset: 0,
-        }
-    }
-
     #[test]
     fn an_empty_set_holds_no_files_and_no_package_roots() {
         let sources = SourceFiles::empty();
@@ -213,64 +189,6 @@ mod tests {
         assert_eq!(
             sources.files[0].borrow().contents,
             "fn main() { changed(); }\n"
-        );
-    }
-
-    #[test]
-    fn get_line_reads_the_line_by_its_zero_based_index() {
-        let mut sources = SourceFiles::empty();
-        let mut file = source("main.rock");
-        file.contents = "first\nsecond\nthird".to_string();
-        sources.add_or_update_file(file);
-
-        assert_eq!(
-            sources.get_line(&line_col("main.rock", 0)).as_deref(),
-            Some("first")
-        );
-        assert_eq!(
-            sources.get_line(&line_col("main.rock", 1)).as_deref(),
-            Some("second")
-        );
-        assert_eq!(
-            sources.get_line(&line_col("main.rock", 2)).as_deref(),
-            Some("third")
-        );
-        assert_eq!(sources.get_line(&line_col("main.rock", 3)), None);
-        assert_eq!(sources.get_line(&line_col("absent.rock", 0)), None);
-    }
-
-    #[test]
-    fn get_line_drops_the_line_break_but_not_its_carriage_return_escape() {
-        let mut sources = SourceFiles::empty();
-        let mut file = source("crlf.rock");
-        file.contents = "one\r\ntwo\r\n".to_string();
-        sources.add_or_update_file(file);
-
-        assert_eq!(
-            sources.get_line(&line_col("crlf.rock", 0)).as_deref(),
-            Some("one")
-        );
-        assert_eq!(
-            sources.get_line(&line_col("crlf.rock", 1)).as_deref(),
-            Some("two")
-        );
-        assert_eq!(sources.get_line(&line_col("crlf.rock", 2)), None);
-    }
-
-    #[test]
-    fn file_for_linecol_matches_the_file_identifier() {
-        let mut sources = SourceFiles::empty();
-        sources.add_or_update_file(source("main.rock"));
-        sources.add_or_update_file(source("other.rock"));
-
-        let found = sources
-            .file_for_linecol(&line_col("other.rock", 0))
-            .unwrap();
-        assert_eq!(found.borrow().file.to_id_path(), "other.rock");
-        assert!(
-            sources
-                .file_for_linecol(&line_col("absent.rock", 0))
-                .is_none()
         );
     }
 

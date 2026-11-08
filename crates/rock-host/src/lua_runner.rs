@@ -171,10 +171,6 @@ pub fn run_lua_code_with_command(
     })
 }
 
-pub fn run_lua_code(code: &str) -> Result<LuaRun, CompilerError> {
-    run_lua_code_with_timeout(code, Some(Duration::from_millis(1800)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

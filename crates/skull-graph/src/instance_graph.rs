@@ -1100,16 +1100,6 @@ pub enum Concreteness {
     Missing,
 }
 
-impl Concreteness {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Concrete => "concrete",
-            Self::Generic => "generic",
-            Self::Missing => "missing-substitution",
-        }
-    }
-}
-
 impl InstanceGraph {
     /// **The one substitution oracle.** Both the publisher-ABI lanes and the
     /// GLSL artifact passes read this, so the two cannot classify one instance
@@ -1525,8 +1515,6 @@ pub struct SpanCensus {
     /// [`Self::unresolved`]; they differ only in having no `from` instance.
     pub always_emitted: BTreeMap<&'static str, SpanCoverage>,
 }
-
-impl SpanCensus {}
 
 /// A span the walk could not fill in. `Span::unknown` is the only way one is
 /// produced here, and its file sentinel is what distinguishes it -- a real span
@@ -6518,27 +6506,6 @@ fn record_coroutine_helpers(
     }
 }
 
-impl InstanceGraph {
-    /// Helper symbols that more than one INSTANCE claims.
-    ///
-    /// A generic `co fn` whose call site SPECIALIZES gets its own base
-    /// (`spec_fn_name`) and no longer collides; one whose specialization the
-    /// lowerer declined still shares the declaration's, so this reports the
-    /// declined population. E1 removes the category by making every instance an
-    /// emitted body.
-    pub fn colliding_coroutine_helpers(&self) -> BTreeMap<String, BTreeSet<String>> {
-        let mut by_symbol: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-        for h in &self.coroutine_helpers {
-            by_symbol
-                .entry(h.symbol_today.clone())
-                .or_default()
-                .insert(h.owner_identity.clone());
-        }
-        by_symbol.retain(|_, owners| owners.len() > 1);
-        by_symbol
-    }
-}
-
 pub(crate) enum FunctionBody<'a> {
     Ready {
         inf: &'a BodyInference,
@@ -6583,10 +6550,6 @@ pub fn manifest_digest(ws: &Workspace, g: &InstanceGraph) -> u64 {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
-}
-
-pub fn instance_count(g: &InstanceGraph) -> usize {
-    g.instances.len()
 }
 
 /// Coverage of concrete generic call identities by the instance graph.

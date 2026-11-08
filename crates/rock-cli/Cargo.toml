@@ -59,7 +59,6 @@ walkdir = { workspace = true }
 tempfile = "3.0"
 notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
-regex-lite = { workspace = true }
 rustc-hash = { workspace = true }
 ustr = { workspace = true }
 mimalloc = "0.1"

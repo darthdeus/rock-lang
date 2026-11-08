@@ -121,24 +121,6 @@ fn add_coroutine_code_values(
     (advance_key, resume_key, defer_keys, hook_keys)
 }
 
-/// Emit a `co fn` as its stackless `__step` (via the dumb printer, with a frame
-/// context) + the stdlib Coroutine constructor.
-///
-/// Every symbol comes from `plan`, which is the JS emitter's input too: a
-/// specialized instantiation is a distinct definition under a distinct base, and
-/// a base spelled here from the DECLARATION would give every instantiation of a
-/// generic `co fn` the same `__step`.
-pub fn emit_coroutine(
-    ws: &Workspace,
-    ctx: &CodegenCtx,
-    scx: &skull_mir::lower::ScalarCtx,
-    source_func: &bone_semantic::hir::Function,
-    plan: &CoroutinePlan,
-    func: &MirFunc,
-) -> Result<String, CompilerError> {
-    emit_coroutine_with_artifact(ws, ctx, scx, source_func, plan, func).map(|(lua, _, _, _, _)| lua)
-}
-
 pub fn emit_coroutine_with_artifact(
     ws: &Workspace,
     ctx: &CodegenCtx,

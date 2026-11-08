@@ -4348,56 +4348,6 @@ pub fn comptime_input_rejection(ws: &Workspace, mid: ModuleId) -> Option<Compile
     None
 }
 
-/// The ABSOLUTE path of every `embed_string` input the program reads, found
-/// by the SAME resolution emission uses (`resolve_comptime_value` -- one
-/// oracle, so this cannot drift from what actually gets baked). For watchers
-/// over emitters that keep no chunk cache (the JS web watch); the Lua side
-/// reads its `SkullEmitCache::comptime_file_hashes` instead.
-pub fn comptime_embed_files(ws: &Workspace) -> Vec<Ustr> {
-    let mut out: Vec<Ustr> = Vec::new();
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
-        let Some(ir) = ws.inference(module.id) else {
-            continue;
-        };
-        for (owner, body) in module.bodies.iter() {
-            let Some(inf) = ir.per_fn.get(owner) else {
-                continue;
-            };
-            for (e, expr) in body.expr_arena.iter() {
-                let Expr::Call {
-                    callee: Callee::Unresolved { name, .. },
-                    args,
-                    ..
-                } = expr
-                else {
-                    continue;
-                };
-                let Some((fmod, fid)) = resolve_call_fn(ws, inf, e, *name) else {
-                    continue;
-                };
-                let kind = crate::intrinsics::expand_kind(&ws.module(fmod).functions[fid]);
-                if !matches!(kind, Some(ExpandKind::EmbedString)) {
-                    continue;
-                }
-                let arg_idxs: Vec<Idx<Expr>> = args.into_iter().collect();
-                if let Ok(resolved) =
-                    resolve_comptime_value(ws, body, e, &arg_idxs, ExpandKind::EmbedString)
-                {
-                    if let Some(path) = resolved.file_abs {
-                        out.push(path);
-                    }
-                }
-            }
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
-
 /// Emit-time validation for `@vertex_expand` calls: misuse is a spanned
 /// compile error, never a call that reaches the fn's error body.
 fn vertex_expand_rejection_for_call(

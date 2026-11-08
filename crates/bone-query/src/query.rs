@@ -4044,17 +4044,9 @@ pub struct UfcsMethod {
     pub return_ty: Option<TyId>,
 }
 
-/// UFCS methods callable as `recv.method(...)` on a value of struct `name`:
-/// every function (in any module) whose FIRST parameter's type is that struct.
-/// Skips compiler-generated `__` ops. Mirrors rock, which surfaces these in
-/// `recv.` member completion.
-///
-/// `recv_elem` is the receiver's ELEMENT type for a Vec receiver
-/// (`[Vec2]` -> `Vec2`); when set, a candidate whose first param is `[E']`
-/// survives only if `E'` is generic (a polymorphic Vec op like `push`) or its
-/// element matches -- so `[Vec2]` doesn't offer `apply_status([Status])`, but a
-/// `[string]` receiver still gets `join([string])`. `None` (nominal receivers,
-/// or an unresolved Vec element) keeps name-only matching.
+/// UFCS methods callable as `recv.method(...)` on a value of struct `name`,
+/// in any scope; see `ufcs_methods_in_scope`.
+#[cfg(test)]
 pub fn ufcs_methods(ws: &Workspace, name: Ustr, recv_elem: Option<TyRef<'_>>) -> Vec<UfcsMethod> {
     ufcs_methods_in_scope(ws, name, recv_elem, None)
 }
@@ -4219,13 +4211,6 @@ pub fn struct_fields_by_name(ws: &Workspace, name: &str) -> Vec<(String, String,
     }
 }
 
-/// The rendered RETURN type of struct `name`'s field `field`, when that field's
-/// type is a function type (`fn(..) -> R` -> `R`); else None. Used to type-direct
-/// completion inside a lambda body assigned to a function-typed field.
-pub fn struct_field_fn_return_type(ws: &Workspace, name: &str, field: &str) -> Option<String> {
-    struct_field_fn_return_ty(ws, name, field).map(|t| ws.render(None, t))
-}
-
 /// The declared TyId of struct `name`'s field `field` (Static -- struct defs
 /// are lowered module items). Typed twin of `struct_fields_by_name`'s render.
 pub fn struct_field_ty(ws: &Workspace, name: &str, field: &str) -> Option<TyId> {
@@ -4236,8 +4221,7 @@ pub fn struct_field_ty(ws: &Workspace, name: &str, field: &str) -> Option<TyId> 
         .map(|f| f.ty)
 }
 
-/// TyId twin of `struct_field_fn_return_type`: the RETURN TyId of a
-/// function-typed field.
+/// The RETURN TyId of a function-typed field.
 pub fn struct_field_fn_return_ty(ws: &Workspace, name: &str, field: &str) -> Option<TyId> {
     let sdef = struct_def_by_name(ws, Ustr::from(name))?;
     let f = sdef.fields.iter().find(|f| f.name.as_str() == field)?;
@@ -5192,44 +5176,6 @@ pub(crate) fn key_entries_in_scope(
             out,
         );
     }
-}
-
-pub fn completion(
-    ws: &Workspace,
-    mid: ModuleId,
-    inf: &InferenceResult,
-    offset: usize,
-    prefix: &str,
-    expr_position: bool,
-) -> Vec<CompletionEntry> {
-    let req_file = ws
-        .modules
-        .get(mid.index())
-        .map_or_else(ustr::Ustr::default, |m| m.file);
-    let fragment_file = crate::modules_scope::fragment(ws, req_file).map(|_| req_file);
-    let mut entries =
-        completion_with_visible_bindings(ws, mid, inf, offset, prefix, expr_position, None);
-    for entry in &mut entries {
-        if entry.detail.is_some() {
-            continue;
-        }
-        match entry.kind {
-            SymCat::Function => {
-                if let (Some(fragment_file), Some(key)) = (fragment_file, entry.signature_key) {
-                    entry.detail =
-                        render_deferred_signature(ws, Some(fragment_file), key, entry.name);
-                }
-            }
-            SymCat::Global => {
-                entry.detail = entry
-                    .ty
-                    .map(|ty| ws.render(None, ty))
-                    .filter(|detail| !detail.is_empty());
-            }
-            _ => {}
-        }
-    }
-    entries
 }
 
 pub(crate) fn completion_with_visible_bindings(

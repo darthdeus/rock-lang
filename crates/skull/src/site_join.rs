@@ -125,18 +125,6 @@ pub enum BodySkip {
     NoLoweredBody,
 }
 
-impl BodySkip {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::NoSubstitution => "no-substitution",
-            Self::LowerFailed => "lower-failed",
-            Self::PrepareFailed => "prepare-failed",
-            Self::Coroutine => "coroutine",
-            Self::NoLoweredBody => "no-lowered-body",
-        }
-    }
-}
-
 #[derive(Clone, Default, Debug)]
 pub struct SiteJoinCensus {
     /// Instances whose body was lowered AND prepared -- the space the call
@@ -346,48 +334,6 @@ impl SiteJoinCensus {
 
     pub fn accounts(&self) -> bool {
         self.accounting_failures().is_empty()
-    }
-
-    pub fn merge(&mut self, other: &SiteJoinCensus) {
-        self.bodies_measured += other.bodies_measured;
-        self.obligations_examined += other.obligations_examined;
-        self.joined += other.joined;
-        self.joined_rock += other.joined_rock;
-        self.joined_boundary += other.joined_boundary;
-        self.joined_spliced += other.joined_spliced;
-        self.joined_instance_verified += other.joined_instance_verified;
-        self.joined_non_generic += other.joined_non_generic;
-        self.symbol_mints += other.symbol_mints;
-        self.joined_boundary_verified += other.joined_boundary_verified;
-        self.admitted_indirect += other.admitted_indirect;
-        for (k, v) in &other.admitted_indirect_by_op {
-            *self.admitted_indirect_by_op.entry(k).or_insert(0) += v;
-        }
-        for (k, v) in &other.indirect_forms_by_producer {
-            *self.indirect_forms_by_producer.entry(*k).or_insert(0) += v;
-        }
-        self.indirect_unrecorded_symbol += other.indirect_unrecorded_symbol;
-        for (k, v) in &other.examined_by_op {
-            *self.examined_by_op.entry(k).or_insert(0) += v;
-        }
-        for (k, v) in &other.joined_by_op {
-            *self.joined_by_op.entry(k).or_insert(0) += v;
-        }
-        for (k, v) in &other.bodies_skipped {
-            *self.bodies_skipped.entry(*k).or_insert(0) += v;
-        }
-        for (k, v) in &other.unjoined {
-            *self.unjoined.entry(*k).or_insert(0) += v;
-        }
-        for (k, v) in &other.unjoined_by_op {
-            *self.unjoined_by_op.entry(k).or_insert(0) += v;
-        }
-        for e in &other.examples {
-            if self.examples.len() < 12 {
-                self.examples.push(e.clone());
-            }
-        }
-        self.rows.extend(other.rows.iter().cloned());
     }
 }
 

@@ -244,7 +244,6 @@ fn every_js_production_route_enters_the_shared_session() {
         ("pub fn emit_with_closure(", "new_js_session("),
         ("pub fn emit_program(", "build_program_session("),
         ("pub fn emit_program_cached(", "build_program_session("),
-        ("pub fn emit_program_with_roots(", "emit_program_core("),
         ("pub fn emit_overlay(", "update_js_session("),
     ] {
         let start = source.find(route).expect("production JS route");

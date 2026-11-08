@@ -167,29 +167,6 @@ impl CommandContext {
         Ok(paths)
     }
 
-    pub fn get_output_or_default(&self, default: &str) -> Result<String> {
-        let output = self
-            .args
-            .output
-            .clone()
-            .unwrap_or_else(|| default.to_string());
-
-        if output == "/dev/stdout" {
-            anyhow::bail!(
-                "Cannot use /dev/stdout as output path.\n\
-                 The compiler automatically prints to stdout when no output is specified.\n\
-                 Usage: 'rock compile input.rock'"
-            );
-        } else if output == "/dev/stdin" || output == "/dev/stderr" {
-            anyhow::bail!(
-                "Cannot use {} as output path. Special device files are not supported.",
-                output
-            );
-        }
-
-        Ok(output)
-    }
-
     pub fn get_test_files(&self) -> Result<Vec<String>> {
         let files = if self.args.files.is_empty() {
             vec!["tests".to_string()]

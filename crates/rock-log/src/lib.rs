@@ -499,48 +499,6 @@ pub fn reset_dedup() {
     THROTTLE.lock().unwrap().clear();
 }
 
-/// Every suppression record this logger holds, copied out.
-///
-/// The sim worker's entry boundary needs boot's IMAGE rather than an empty
-/// store, for the reason the Lua half already documents: a fresh process
-/// reaches its first entry with whatever boot itself logged already deduped, so
-/// clearing would make a worker emit warnings no isolated run has.
-pub struct DedupImage {
-    once: HashSet<&'static str>,
-    subject: HashSet<(&'static str, u64)>,
-    throttle: HashMap<&'static str, Instant>,
-}
-
-impl DedupImage {
-    /// Distinct suppression records this image holds, on the same scale
-    /// `dedup_count` reports so a caller can compare the two.
-    pub fn len(&self) -> usize {
-        self.once.len() + self.subject.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
-}
-
-pub fn dedup_image() -> DedupImage {
-    DedupImage {
-        once: DEDUP.lock().unwrap().clone(),
-        subject: DEDUP_SUBJECT.lock().unwrap().clone(),
-        throttle: THROTTLE.lock().unwrap().clone(),
-    }
-}
-
-/// Put a previously copied image back, replacing whatever has accumulated
-/// since. Every store the image covers is replaced, never merged: a merge
-/// would keep a successor's warnings suppressed by its predecessor, which is
-/// the whole defect.
-pub fn restore_dedup_image(image: &DedupImage) {
-    *DEDUP.lock().unwrap() = image.once.clone();
-    *DEDUP_SUBJECT.lock().unwrap() = image.subject.clone();
-    *THROTTLE.lock().unwrap() = image.throttle.clone();
-}
-
 /// Distinct `log_once!` call sites that have fired, site-keyed and
 /// subject-keyed together.
 pub fn dedup_count() -> usize {

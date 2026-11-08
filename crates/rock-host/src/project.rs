@@ -39,28 +39,6 @@ pub fn find_workspace_root(path: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Find the source workspace root for a project path without consulting the
-/// executable's installed toolchain layout.
-pub fn find_source_root(path: &Path) -> Option<PathBuf> {
-    if let Some(root) = context_root_from_env() {
-        return Some(root);
-    }
-
-    let initial_path = fs_err::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    let mut current = if initial_path.is_file() {
-        initial_path.parent()?.to_path_buf()
-    } else {
-        initial_path
-    };
-
-    loop {
-        if current.join("Cargo.toml").exists() && current.join("crates").is_dir() {
-            return Some(current);
-        }
-        current = current.parent()?.to_path_buf();
-    }
-}
-
 pub(crate) fn context_root_from_env() -> Option<PathBuf> {
     let root = PathBuf::from(std::env::var_os("ROCK_CONTEXT_ROOT")?);
     if root.is_dir() && root.join("sdk").is_dir() && root.join(".context/context.json").is_file() {
@@ -84,29 +62,6 @@ fn release_root_from_exe() -> Option<PathBuf> {
     } else {
         None
     }
-}
-
-/// Ensure that the Rock root directory can be located and is valid.
-///
-/// Does NOT change process current directory, allowing callers to execute
-/// from project subdirectories while finding toolchain resources.
-pub fn ensure_workspace_root() -> Result<()> {
-    if release_root_from_exe().is_some() {
-        return Ok(());
-    }
-    let cwd = std::env::current_dir().unwrap_or_default();
-    if is_rock_root(&cwd) || find_workspace_root(&cwd).is_some() {
-        return Ok(());
-    }
-    let rock_dir = crate::rock_dir();
-    let root = Path::new(&rock_dir);
-    if is_rock_root(root) || root.join("Cargo.toml").exists() {
-        return Ok(());
-    }
-    Err(anyhow::anyhow!(
-        "Could not find Rock root directory.\n\
-         Run this command from within the Rock workspace, or set the ROCK_DIR environment variable."
-    ))
 }
 
 /// Find project directory by looking for stick.toml or other project markers
@@ -141,19 +96,6 @@ pub fn find_project_root(path: &Path) -> Option<PathBuf> {
 
         current_path = current_path.parent()?.to_path_buf();
     }
-}
-
-/// Generate a deterministic identifier for a project based on its canonical path
-/// This is used for creating unique socket names, cache directories, etc.
-pub fn get_project_id(project_root: &Path) -> Result<String> {
-    use std::hash::{Hash, Hasher};
-
-    let canonical = project_root.canonicalize()?;
-    let mut hasher = rustc_hash::FxHasher::default();
-    canonical.to_string_lossy().as_bytes().hash(&mut hasher);
-    // 32 bits of hash, 8 hex chars — parity with the prior SHA-256 truncation.
-    // Non-cryptographic; only needs collision resistance over local project paths.
-    Ok(format!("{:08x}", hasher.finish() as u32))
 }
 
 /// Returns true when the rock_dir looks like an extracted release zip
@@ -296,13 +238,6 @@ pub fn default_main_lua_path() -> PathBuf {
 /// path shared by every generated-Lua writer (rock + skull backends).
 pub fn write_atomic(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
     write_atomic_impl(path.as_ref(), contents.as_ref(), false)
-}
-
-pub fn write_atomic_durable(
-    path: impl AsRef<Path>,
-    contents: impl AsRef<[u8]>,
-) -> std::io::Result<()> {
-    write_atomic_impl(path.as_ref(), contents.as_ref(), true)
 }
 
 /// Stream a generated artifact into a same-directory temporary file before
@@ -511,31 +446,6 @@ mod tests {
     }
 
     #[test]
-    fn test_project_id_deterministic() {
-        let temp = TempDir::new().unwrap();
-        let project_dir = temp.path();
-
-        let id1 = get_project_id(project_dir).unwrap();
-        let id2 = get_project_id(project_dir).unwrap();
-
-        // Should generate the same ID for the same path
-        assert_eq!(id1, id2);
-        assert_eq!(id1.len(), 8);
-    }
-
-    #[test]
-    fn durable_atomic_write_replaces_the_file_without_temp_artifacts() {
-        let temp = TempDir::new().unwrap();
-        let path = temp.path().join("arrangement.json");
-        fs::write(&path, "old").unwrap();
-
-        write_atomic_durable(&path, "new").unwrap();
-
-        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
-        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
-    }
-
-    #[test]
     fn rock_luajit_env_selects_the_diagnostic_runtime() {
         const CHILD: &str = "ROCK_LUAJIT_OVERRIDE_WITNESS";
         if std::env::var_os(CHILD).is_none() {
@@ -584,45 +494,6 @@ mod tests {
     }
 
     #[test]
-    fn ensure_workspace_root_preserves_cwd() {
-        const CHILD: &str = "ROCK_WORKSPACE_CWD_WITNESS";
-        if let Ok(expected) = std::env::var(CHILD) {
-            let before = std::env::current_dir().unwrap();
-            let result = ensure_workspace_root();
-            assert_eq!(result.is_ok(), expected == "ok", "{result:?}");
-            assert_eq!(std::env::current_dir().unwrap(), before);
-            return;
-        }
-        for workspace in [false, true] {
-            let temp = TempDir::new().unwrap();
-            if workspace {
-                fs_err::write(temp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
-                fs_err::create_dir(temp.path().join("crates")).unwrap();
-            }
-            let project = temp.path().join("project");
-            fs_err::create_dir(&project).unwrap();
-            fs_err::write(project.join("stick.toml"), "[package]\nname = \"game\"\n").unwrap();
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "project::tests::ensure_workspace_root_preserves_cwd",
-                    "--nocapture",
-                ])
-                .current_dir(&project)
-                .env_remove("ROCK_DIR")
-                .env(CHILD, if workspace { "ok" } else { "error" })
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            );
-        }
-    }
-
-    #[test]
     fn context_root_env_admits_a_project_sibling_to_the_sdk() {
         let temp = TempDir::new().unwrap();
         let root = temp.path().canonicalize().unwrap();
@@ -634,7 +505,6 @@ mod tests {
         let previous = std::env::var_os("ROCK_CONTEXT_ROOT");
         unsafe { std::env::set_var("ROCK_CONTEXT_ROOT", &root) };
         let found = find_workspace_root(&root.join("game"));
-        let found_source = find_source_root(&root.join("game"));
         unsafe {
             match previous {
                 Some(value) => std::env::set_var("ROCK_CONTEXT_ROOT", value),
@@ -642,7 +512,6 @@ mod tests {
             }
         }
 
-        assert_eq!(found, Some(root.clone()));
-        assert_eq!(found_source, Some(root));
+        assert_eq!(found, Some(root));
     }
 }

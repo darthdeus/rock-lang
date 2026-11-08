@@ -51,34 +51,6 @@ pub enum IdentityStorageKind {
     AnyErasure,
 }
 
-impl IdentityStorageKind {
-    pub const ALL: [IdentityStorageKind; 9] = [
-        IdentityStorageKind::Field,
-        IdentityStorageKind::Container,
-        IdentityStorageKind::Payload,
-        IdentityStorageKind::Newtype,
-        IdentityStorageKind::LocalStorage,
-        IdentityStorageKind::Capture,
-        IdentityStorageKind::CoParam,
-        IdentityStorageKind::AcrossYield,
-        IdentityStorageKind::AnyErasure,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            IdentityStorageKind::Field => "field",
-            IdentityStorageKind::Container => "container",
-            IdentityStorageKind::Payload => "payload",
-            IdentityStorageKind::Newtype => "newtype",
-            IdentityStorageKind::LocalStorage => "local-storage",
-            IdentityStorageKind::Capture => "capture",
-            IdentityStorageKind::CoParam => "co-param",
-            IdentityStorageKind::AcrossYield => "across-yield",
-            IdentityStorageKind::AnyErasure => "any-erasure",
-        }
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct IdentityStorageSite {
     pub kind: IdentityStorageKind,

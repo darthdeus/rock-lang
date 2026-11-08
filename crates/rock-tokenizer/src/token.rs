@@ -191,10 +191,6 @@ impl TokenKind {
         )
     }
 
-    pub fn is_comment(&self) -> bool {
-        matches!(self, TokenKind::Comment(_))
-    }
-
     pub fn postfix_bp(&self) -> Option<(u8, ())> {
         use TokenKind::*;
         let val = match self {
@@ -451,23 +447,3 @@ impl TokenKind {
         })
     }
 }
-
-/// All Rock reserved keywords, as written in source. The
-/// authoritative `name -> TokenKind` mapping lives in
-/// `read_keyword_or_ident` (this crate's `tokenizer`); this list is the
-/// downstream-visible mirror used by tooling (LSP completion in
-/// particular). If you add a keyword to the tokenizer, append it
-/// here too — a keyword round-trip test fails
-/// when an entry here is NOT recognized as a keyword token, catching
-/// drift in one direction. The reverse (new tokenizer keyword
-/// missing from this list) is a doc-comment invariant.
-///
-/// Contextual keywords ("co" before `fn`, "value" before a type name,
-/// "wrap"/"init" in decorator definitions, "inline") are intentionally
-/// excluded — they're identifiers outside their specific syntactic
-/// context, recognized by parser lookahead rather than the lexer.
-pub const KEYWORDS: &[&str] = &[
-    "fn", "operator", "table", "type", "as", "yield", "await", "if", "else", "for", "in", "while",
-    "loop", "break", "continue", "let", "return", "defer", "struct", "newtype", "null", "enum",
-    "match", "extern", "global", "deco", "macro", "true", "false",
-];

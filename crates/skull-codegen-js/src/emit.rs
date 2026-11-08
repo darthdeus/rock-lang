@@ -3622,18 +3622,6 @@ pub fn emit_program_cached(
     Ok((program, cache))
 }
 
-/// [`emit_program`] with EXPLICIT extra roots and no `main` handling -- the
-/// per-test path's whole-file emission (roots = the file's runnable `@test`
-/// fns), so decorator applications populate the registries a test reads. Returns
-/// just the program string; the caller invokes each root by the JS name it gave.
-pub fn emit_program_with_roots(
-    ws: &Workspace,
-    roots: &[(FuncRef, String)],
-) -> Result<String, CompilerError> {
-    let scx = js_scx(ws);
-    emit_program_core(ws, &scx, roots)
-}
-
 /// The whole-file test emission plus its compiler-owned callable artifact. The
 /// runtime wrapper uses the artifact to decide whether CodeRef machinery is
 /// needed; the string-only API above remains for callers that only execute it.
@@ -3644,20 +3632,6 @@ pub fn emit_program_with_roots_artifact(
     let scx = js_scx(ws);
     let build = build_program_session(ws, &scx, roots)?.0;
     Ok((build.program, build.code_artifact))
-}
-
-/// The shared program assembly for [`emit_program`] / [`emit_program_with_roots`]:
-/// `extra_roots` (main, or the test fns) plus every DECORATED fn workspace-wide
-/// (its application line names the fn as `func`, so it must be emitted even if no
-/// extra root calls it), the APPLIED `deco` def bodies, ginits, and the
-/// application lines. `extra_roots` seed the `names` map FIRST so their chosen
-/// JS names win over the `callee_js_name` a discovery pass would assign.
-fn emit_program_core(
-    ws: &Workspace,
-    scx: &skull_mir::lower::ScalarCtx,
-    extra_roots: &[(FuncRef, String)],
-) -> Result<String, CompilerError> {
-    Ok(build_program_session(ws, scx, extra_roots)?.0.program)
 }
 
 fn build_program_session(
@@ -4248,10 +4222,6 @@ pub struct JsEmitCache {
 }
 
 impl JsEmitCache {
-    pub fn current_program(&self) -> &str {
-        &self.build.program
-    }
-
     /// The session arena. Handed out so a caller can prove two runs share one;
     /// `Arc::ptr_eq` on it is the identity, `len()` the population.
     pub fn interner_handle(&self) -> std::sync::Arc<skull_mir::monoty::MonoInterner> {
@@ -4268,9 +4238,6 @@ impl JsEmitCache {
 
     pub fn graph_update(&self) -> Option<JsGraphUpdate> {
         self.session.last_update.clone()
-    }
-    pub fn code_artifact(&self) -> &CodeArtifact {
-        &self.build.code_artifact
     }
 
     pub fn global_layout(&self) -> &str {
@@ -4314,23 +4281,6 @@ pub fn emit_overlay(
     )],
 ) -> Result<JsReload, CompilerError> {
     emit_overlay_with_span_edits(ws, user_mid, cache, reinferred, &[])
-}
-
-/// Build an overlay against a staged cache. The caller publishes the returned
-/// cache only after the overlay bytes are durably written.
-pub fn emit_overlay_with_span_edits_staged(
-    ws: &Workspace,
-    user_mid: bone_semantic::prelude::ModuleId,
-    cache: &JsEmitCache,
-    reinferred: &[(
-        bone_semantic::prelude::ModuleId,
-        bone_semantic::hir::BodyOwner,
-    )],
-    edits: &[skull_graph::instance_graph::SpanEdit],
-) -> Result<(JsReload, JsEmitCache), CompilerError> {
-    let mut staged = cache.clone();
-    let reload = emit_overlay_with_span_edits(ws, user_mid, &mut staged, reinferred, edits)?;
-    Ok((reload, staged))
 }
 
 pub fn emit_overlay_with_span_edits(

@@ -302,10 +302,6 @@ impl ContainerPlan {
         )
     }
 
-    pub fn target(&self) -> bone_semantic::hir::FnBackend {
-        self.target
-    }
-
     pub fn family(&self) -> ContainerFamily {
         self.family
     }

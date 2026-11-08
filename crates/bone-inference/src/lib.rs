@@ -232,10 +232,6 @@ impl<'a> Gamma<'a> {
         g
     }
 
-    pub fn module(&self) -> &Module {
-        &self.workspace.modules[self.current_module_id.index()]
-    }
-
     /// A `BodyCtx` for this Gamma's own body -- pending-constraint retries run
     /// outside the syntactic walk, where no `c` is threaded through.
     pub(crate) fn body_ctx(&self) -> BodyCtx<'a> {

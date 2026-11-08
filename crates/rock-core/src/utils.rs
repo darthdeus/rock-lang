@@ -56,36 +56,6 @@ impl ReportBuilderExt for ReportBuilder<'_> {
     }
 }
 
-#[derive(Copy, Clone, Debug)]
-pub enum LineColError {
-    ColumnOutOfRange,
-    LineOutOfRange,
-}
-
-/// Byte offset of `col` characters into line `line` of `s`.
-///
-/// Lines are the ones `str::lines` yields, so a trailing line break ends the
-/// last line rather than starting an empty one, and `col` is checked against
-/// the byte length of the line before being counted in characters. A `\r\n`
-/// break advances the offset by one byte rather than two, so a later line's
-/// base offset sits on the `\n` of a CRLF break.
-pub fn line_col_to_offset(s: &str, line: usize, col: usize) -> Result<usize, LineColError> {
-    let mut offset = 0usize;
-
-    for (index, text) in s.lines().enumerate() {
-        if index != line {
-            offset += text.len() + 1;
-            continue;
-        }
-        if col > text.len() {
-            return Err(LineColError::ColumnOutOfRange);
-        }
-        return Ok(offset + text.chars().take(col).map(char::len_utf8).sum::<usize>());
-    }
-
-    Err(LineColError::LineOutOfRange)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

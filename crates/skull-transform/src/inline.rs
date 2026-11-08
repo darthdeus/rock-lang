@@ -582,11 +582,6 @@ fn adjust_candidate_profile(
 }
 
 impl InlineCandidateTable {
-    pub fn from_warms(warms: Vec<InlineCandidateWarm>) -> Self {
-        let keys = warms.iter().map(|warm| warm.key.clone()).collect();
-        Self::from_warms_with_base(None, keys, warms)
-    }
-
     pub fn from_warms_with_base(
         base: Option<&Self>,
         mut keys: Vec<CacheKey>,
@@ -3690,10 +3685,11 @@ mod tests {
     #[test]
     fn incremental_candidate_replacement_updates_rejection_profile() {
         let key = candidate_test_key();
-        let base = Arc::new(InlineCandidateTable::from_warms(vec![candidate_warm(
-            key.clone(),
+        let base = Arc::new(InlineCandidateTable::from_warms_with_base(
             None,
-        )]));
+            vec![key.clone()],
+            vec![candidate_warm(key.clone(), None)],
+        ));
         assert_eq!(base.stats().eligible, 1);
         assert_eq!(base.stats().rejected, 0);
 

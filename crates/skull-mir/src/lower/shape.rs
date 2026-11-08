@@ -72,54 +72,6 @@ pub(crate) fn all_float_leaf_count_rec(
     Some(total)
 }
 
-/// One immediate field of an all-float value struct in its flattened float-slot
-/// layout: `offset` in float units from the struct's start, and whether it is a
-/// float leaf or a nested value struct (named, for recursive descent).
-pub struct ValueSlotField {
-    pub name: Ustr,
-    pub offset: usize,
-    /// `None` = float leaf (width 1); `Some(n)` = nested value struct `n`.
-    pub nested: Option<Ustr>,
-}
-
-/// Immediate fields of all-float value STRUCT `name` with their flattened
-/// float-slot offsets, declaration order (the C layout / Float32Array order).
-/// `None` unless `name` is a value struct proper whose every leaf is float --
-/// the exact set `FfiNewArray` lowers to a flat `Float32Array` on JS.
-pub fn value_struct_slot_fields(ws: &Workspace, name: Ustr) -> Option<Vec<ValueSlotField>> {
-    value_struct_all_float_leaf_count(ws, name)?;
-    let sid = *ws.struct_by_name.get(&name)?;
-    let sd = &ws.modules[sid.module.index()].structs[sid.def];
-    let mut out = Vec::with_capacity(sd.fields.len());
-    let mut offset = 0usize;
-    for f in &sd.fields {
-        match static_ty(ws, f.storage_ty)? {
-            TypeExpr::Builtin(BuiltinTy::Float | BuiltinTy::F32) => {
-                out.push(ValueSlotField {
-                    name: f.name,
-                    offset,
-                    nested: None,
-                });
-                offset += 1;
-            }
-            TypeExpr::App {
-                ctor: TypeCtor::Nominal(n),
-                ..
-            } => {
-                let w = value_struct_all_float_leaf_count(ws, n)?;
-                out.push(ValueSlotField {
-                    name: f.name,
-                    offset,
-                    nested: Some(n),
-                });
-                offset += w;
-            }
-            _ => return None,
-        }
-    }
-    Some(out)
-}
-
 /// Max leaf count that stores an unmarked value in columns. Above it, columns
 /// fall off a measured write cliff (9.3x on LuaJIT / 9.1x on V8 at K=16, x86;
 /// 17.1x / 11.7x on arm64), so an unmarked wider type stays boxed. An explicit
@@ -1620,48 +1572,6 @@ pub fn nobox_global_accessor_shape(
     }))
 }
 
-/// Structural depth of an instantiation type, counting a leaf as 1. Polymorphic
-/// recursion (`f<T> -> f<[T]>`) is exactly type GROWTH, so depth is its
-/// observable and a plain tree walk is the whole detector -- no
-/// instantiation-graph machinery.
-///
-/// A CONSTRUCTOR counts, so a parameterless nominal is 1 and `Vec<Vec2>` is 2 --
-/// unlike [`MonoTy::depth`], which measures nesting alone. Both cap on the depth
-/// of the TYPE rather than on a path length: a path length is a property of how
-/// the walk arrived, so capping on it makes membership depend on discovery
-/// order.
-pub fn growth_depth(t: &MonoTy) -> u32 {
-    match t {
-        MonoTy::Int
-        | MonoTy::Uint
-        | MonoTy::Float
-        | MonoTy::Bool
-        | MonoTy::String
-        | MonoTy::Any
-        | MonoTy::Unit
-        | MonoTy::Never => 1,
-        MonoTy::Nullable(inner) => 1 + growth_depth(inner),
-        MonoTy::App { params, .. } => 1 + params.iter().map(growth_depth).max().unwrap_or(0),
-        MonoTy::Tuple(parts) => 1 + parts.iter().map(growth_depth).max().unwrap_or(0),
-        MonoTy::Function { params, ret } => {
-            1 + params
-                .iter()
-                .map(growth_depth)
-                .chain([growth_depth(ret)])
-                .max()
-                .unwrap_or(0)
-        }
-    }
-}
-
-/// Depth at which the ablation calls an instantiation polymorphic growth.
-///
-/// Chosen to sit ABOVE anything the corpus produces: the deepest real
-/// instantiation measured is well under this, so a firing means genuine growth
-/// rather than an ordinarily nested container. It is a REPORTING threshold in a
-/// diagnostic mode, never a limit on what compiles.
-pub const ABLATION_GROWTH_DEPTH: u32 = 8;
-
 /// Callee generic `VarId` -> its concrete type tree, for specialized lowering.
 /// Total against the declaration's generics, exactly as [`Vec<MonoTy>`] is.
 ///
@@ -1814,55 +1724,6 @@ pub(crate) fn instance_subst_from_bindings(
         }
     }
     Ok(Some(subst))
-}
-
-/// The CONCRETE INSTANCE an iterator-protocol WITNESS resolves to, from the
-/// `VarId -> TyId` map bone recorded for it.
-///
-/// The identity sibling of [`spec_key_from_next_generics`], and the same
-/// separation [`callee_instance_subst`] makes for a direct call: that one stops
-/// at the delivery policy, this one answers which instance the witness means.
-/// One function serves both witnesses -- `IterWitness::generics` and
-/// `next_generics` are the same shape, and a second copy would be free to
-/// disagree about one of them.
-pub fn witness_instance_subst(
-    ws: &Workspace,
-    inf: &BodyInference,
-    func: FuncRef,
-    generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
-    enclosing: &SpecSubst,
-) -> Result<Option<SpecSubst>, CompilerError> {
-    let f = &ws.module(func.module).functions[func.func];
-    if f.generics.is_empty() {
-        return Ok(None);
-    }
-    let mut bindings = Vec::with_capacity(f.generics.len());
-    for generic in &f.generics {
-        let Some(TypeExpr::Generic(var, _)) = ty_node(ws, inf, *generic) else {
-            return Ok(None);
-        };
-        // A generic the resolution left unbound leaves the instantiation
-        // INCOMPLETE, which the census reports as its own cause rather than
-        // being papered over with a default.
-        let Some(bound) = generics.get(&var).copied() else {
-            return Ok(None);
-        };
-        bindings.push(bound);
-    }
-    instance_subst_from_bindings(ws, inf, func, &bindings, enclosing)
-}
-
-pub fn spec_key_from_next_generics(
-    ws: &Workspace,
-    inf: &BodyInference,
-    func: FuncRef,
-    next_generics: &rustc_hash::FxHashMap<bone_semantic::hir::VarId, TyId>,
-    enclosing: &SpecSubst,
-) -> Result<Option<Vec<MonoTy>>, CompilerError> {
-    let Some(subst) = witness_instance_subst(ws, inf, func, next_generics, enclosing)? else {
-        return Ok(None);
-    };
-    Ok(spec_key_from_subst(ws, func, &subst))
 }
 
 /// Rebuild the [`SpecSubst`] (callee generic `VarId` -> concrete type) for `fref`
@@ -2607,10 +2468,6 @@ impl EnumPlan {
             EnumLayout::Boxed
         };
         Some(Self { name, layout })
-    }
-
-    pub fn name(&self) -> Ustr {
-        self.name
     }
 
     pub fn layout(&self) -> &EnumLayout {

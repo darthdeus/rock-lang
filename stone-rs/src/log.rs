@@ -10,17 +10,6 @@
 //! `rock_log` and emit via `log::` at `warn` level (spam-guard =
 //! recoverable failure; visible at the default `info`).
 
-/// Clear dedup + throttle state (hot reload; tests). Delegates to the
-/// one logger's state.
-pub fn log_reset_dedup() {
-    rock_log::reset_dedup();
-}
-
-/// Distinct `log_once!` sites that have fired. Delegates to rock-log.
-pub fn log_dedup_count() -> usize {
-    rock_log::dedup_count()
-}
-
 /// How many distinct suppression records the RUST logger currently holds.
 ///
 /// The oracle for the boundary's `log_dedup` row. A fixture reads it around a

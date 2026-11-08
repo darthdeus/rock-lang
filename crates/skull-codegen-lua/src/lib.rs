@@ -459,9 +459,6 @@ end
 /// provides them (`stdlib/unified.rock`); stdlib-free test harnesses prepend
 /// this so emitted chunks stay self-contained.
 pub const VEC_CHECK_SHIMS: &str = "\
-function __rock_vec_oob(vec, i)\n\
-  error('Vec index out of bounds')\n\
-end\n\
 function __vec_checked_get(vec, i)\n\
   if i < 0 or i >= vec.len then error('Vec index out of bounds') end\n\
   return vec._data[i + 1]\n\

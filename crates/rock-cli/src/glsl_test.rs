@@ -69,16 +69,6 @@ pub struct GlslSuiteSummary {
     pub per_profile: Vec<GlslProfileSummary>,
 }
 
-impl GlslSuiteSummary {
-    /// The profile summary for a wire name (`"330core"`).
-    pub fn profile(&self, name: &str) -> &GlslProfileSummary {
-        self.per_profile
-            .iter()
-            .find(|p| p.profile == name)
-            .expect("profile present")
-    }
-}
-
 /// `rock test --backend glsl` entry: run, print per-profile lines + the
 /// end-of-run summary, exit non-zero on any FAIL or unit failure.
 pub fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {

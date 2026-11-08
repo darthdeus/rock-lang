@@ -98,37 +98,6 @@ pub enum CodeIdentity {
 }
 
 impl CodeIdentity {
-    pub fn enclosing(&self) -> Option<&Instance> {
-        match self {
-            Self::Named(i) => Some(i),
-            Self::Lambda {
-                enclosing: CodeOwner::Instance(i),
-                ..
-            }
-            | Self::Nested {
-                enclosing: CodeOwner::Instance(i),
-                ..
-            }
-            | Self::Generated {
-                enclosing: CodeOwner::Instance(i),
-                ..
-            } => Some(i),
-            Self::Artifact(_)
-            | Self::Lambda {
-                enclosing: CodeOwner::Artifact { .. },
-                ..
-            }
-            | Self::Nested {
-                enclosing: CodeOwner::Artifact { .. },
-                ..
-            }
-            | Self::Generated {
-                enclosing: CodeOwner::Artifact { .. },
-                ..
-            } => None,
-        }
-    }
-
     pub fn owner(&self) -> Option<CodeOwner> {
         match self {
             Self::Named(i) => Some(CodeOwner::Instance(i.clone())),
@@ -143,10 +112,6 @@ impl CodeIdentity {
                 enclosing: owner, ..
             } => Some(owner.clone()),
         }
-    }
-
-    pub fn is_lambda(&self) -> bool {
-        matches!(self, Self::Lambda { .. })
     }
 
     /// A stable runtime key. It names the compiler-owned source/mono identity

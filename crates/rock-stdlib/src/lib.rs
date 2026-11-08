@@ -36,6 +36,7 @@ pub const STDLIB_NAMES: &[&str] = &[
 ];
 
 /// The `stdlib/` of the source checkout this crate was built from.
+#[cfg(not(target_arch = "wasm32"))]
 const BUILD_CHECKOUT_STDLIB: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../stdlib");
 
 /// Where the stdlib sources come from: a directory on disk, or the copy
@@ -71,6 +72,7 @@ fn resolve_for_this_process() -> StdlibSource {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn resolve_stdlib(
     override_dir: Option<PathBuf>,
     exe: Option<&Path>,

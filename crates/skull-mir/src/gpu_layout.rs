@@ -139,14 +139,6 @@ pub struct TextureSlots {
     pub slots: Vec<TexSlot>,
 }
 
-impl TextureSlots {
-    /// Sampler names in slot order -- what a GL backend needs to point each
-    /// sampler uniform at its unit once, at link time.
-    pub fn names(&self) -> Vec<Ustr> {
-        self.slots.iter().map(|s| s.name).collect()
-    }
-}
-
 fn sampler_kind(ws: &Workspace, ty: TyId) -> Option<SamplerKind> {
     match ty_expr(ws, ty) {
         Some(TypeExpr::App {

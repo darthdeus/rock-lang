@@ -739,10 +739,3 @@ pub struct InferenceResult {
     pub per_fn: FxHashMap<BodyOwner, BodyInference>,
     pub errors: FxHashMap<BodyOwner, Vec<CompilerError>>,
 }
-
-impl InferenceResult {
-    // TODO: probably want to remove this?
-    pub fn body_at(&self, module: &Module, offset: usize) -> Option<&BodyInference> {
-        self.per_fn.get(&module.body_at(offset)?)
-    }
-}

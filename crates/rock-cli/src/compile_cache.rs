@@ -555,13 +555,8 @@ mod compile_cache_compiler_tests {
             Ok("unlinked") => {
                 let path = std::env::current_exe().unwrap();
                 let expected = crate::comptime::compiler_image_identity(&path).unwrap();
-                let expected_manifest_hash = rock_host::stick::get_compiler_sha1().unwrap();
                 std::fs::remove_file(&path).unwrap();
                 assert!(!std::env::current_exe().unwrap().exists());
-                assert_eq!(
-                    rock_host::stick::get_compiler_sha1().unwrap(),
-                    expected_manifest_hash
-                );
                 assert_eq!(crate::comptime::compiler_identity().unwrap(), expected);
                 let executable = rock_host::process_management::current_executable_image().unwrap();
                 assert_eq!(

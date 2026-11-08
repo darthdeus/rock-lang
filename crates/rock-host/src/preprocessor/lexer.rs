@@ -55,16 +55,6 @@ impl<'a> PreprocessorLexer<'a> {
         None
     }
 
-    /// Get all remaining content from current position
-    pub fn remaining(&self) -> &str {
-        &self.input[self.position..]
-    }
-
-    /// Get content between two positions
-    pub fn slice(&self, start: usize, end: usize) -> &str {
-        &self.input[start..end]
-    }
-
     /// Get current position
     pub fn position(&self) -> usize {
         self.position

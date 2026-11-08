@@ -534,46 +534,6 @@ pub fn categorize(msg: &str) -> String {
     }
 }
 
-/// Collect every `.rock` file at `path` (a single file yields itself; a
-/// directory is walked recursively). Mirrors the discovery the Lua backend's
-/// `rock test` uses so the same paths select the same files.
-pub(crate) fn collect_rock_files(path: &str) -> Result<Vec<String>> {
-    let p = Path::new(path);
-    if !p.exists() {
-        anyhow::bail!("Path does not exist: {}", path);
-    }
-    if p.is_file() {
-        return Ok(vec![path.to_string()]);
-    }
-
-    rock_host::project::find_rock_files_at_path(p)
-}
-
-/// `rock parse --backend bone` — run each file through bone's front end
-/// (`parse_rock` + `semantic_pass`, which lowers to HIR and type-checks; bone
-/// no longer exposes a lowering-only entry). "parse" here means "bone accepts
-/// this file". Exits non-zero on the first failure, matching the Lua backend's
-/// `do_parse`.
-pub fn bone_parse(path: &str) -> Result<()> {
-    let files = collect_rock_files(path)?;
-    for file in &files {
-        let src = fs_err::read_to_string(file)?;
-        let module = match skull_parser::parse_module(&src, ustr::Ustr::from("<parse_rock>")) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("{}", render_source_errs(&src, &[e]));
-                crate::ablation_report::exit_with_census(1);
-            }
-        };
-        // No stdlib here (this path checks a single module in isolation).
-        if let Err(errs) = check_modules(&mut [module]) {
-            eprintln!("{}", render_source_errs(&src, &errs));
-            crate::ablation_report::exit_with_census(1);
-        }
-    }
-    Ok(())
-}
-
 /// `rock compile`/`run --backend bone`. Bone has no codegen, so the most useful
 /// behavior is a type-check: succeed silently (exit 0) when it type-checks, print
 /// the rendered error and exit 1 otherwise.

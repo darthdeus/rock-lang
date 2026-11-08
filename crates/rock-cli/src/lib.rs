@@ -70,7 +70,6 @@ mod modules_migrate;
 pub mod plain;
 mod process;
 pub mod registry;
-mod text_utils;
 pub mod unified_compile;
 pub mod watch;
 pub use lint_cmd::do_lint;
@@ -87,7 +86,6 @@ pub use dispatcher::*;
 pub use file_watcher::*;
 pub use formatting::*;
 pub use registry::{BackendSpec, CliCommand, Operation};
-pub use text_utils::*;
 pub use unified_compile::*;
 pub use watch::*;
 

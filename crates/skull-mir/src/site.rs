@@ -148,16 +148,6 @@ pub struct Site {
     pub op: SiteOp,
 }
 
-impl Site {
-    pub fn direct_call(expr: Idx<Expr>) -> Self {
-        Self {
-            domain: SiteDomain::Own,
-            expr,
-            op: SiteOp::DirectCall,
-        }
-    }
-}
-
 /// An index into [`crate::mir::MirFunc::site_owners`].
 ///
 /// Interned rather than stored inline because a body can hold thousands of

@@ -227,7 +227,6 @@
 // prelude: __rock_strided_column_view
 // prelude: __rock_vec_column_elements
 // prelude: __rock_vec_from_lua_array
-// prelude: __rock_vec_oob
 // prelude: __rock_vec_strided_elements
 // prelude: __rock_vec_to_lua_array
 // prelude: __scene_begin_update_phase

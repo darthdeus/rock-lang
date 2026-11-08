@@ -12,7 +12,6 @@ bone-semantic = { workspace = true }
 comfy-la-arena = { workspace = true }
 rustc-hash = { workspace = true }
 skull-mir = { workspace = true }
-skull-graph = { workspace = true }
 skull-parser = { workspace = true }
 ustr = { workspace = true }
 

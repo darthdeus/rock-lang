@@ -367,9 +367,6 @@ pub enum NodeRef {
     LocalTy(Idx<TypeExpr>),
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct ModuleData {}
-
 #[derive(Clone, Debug)]
 pub struct Module {
     pub id: ModuleId,

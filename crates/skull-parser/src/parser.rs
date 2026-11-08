@@ -195,11 +195,6 @@ impl<'a> Parser<'a> {
     /// offset of its first byte. Interpolated strings are re-scanned from it, so
     /// a caller that passes the wrong text gets spanned errors, not silent
     /// drift.
-    pub fn new(tokens: Vec<Token>, source: &'a str, base: usize) -> Self {
-        Self::new_with_dialect(tokens, source, base, Dialect::Legacy)
-    }
-
-    /// [`Parser::new`] with the file's source dialect selected.
     pub fn new_with_dialect(
         tokens: Vec<Token>,
         source: &'a str,

@@ -332,7 +332,7 @@ mod tests {
     /// Parse `src`, cook it, and return the first function body's s-expr.
     fn cooked_body(src: &str) -> String {
         let mut ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
-        crate::cook_single(&mut ast);
+        super::desugar(&mut ast);
         let crate::ast::ItemKind::Function(f) = &ast.items[0].kind else {
             panic!("expected fn");
         };

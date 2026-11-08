@@ -263,16 +263,6 @@ impl ContainerKind {
             ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_)
         )
     }
-
-    /// Either Vec flavor — the `{ .., len }` growable shape, 1-indexed.
-    pub fn is_vec(self) -> bool {
-        matches!(
-            self,
-            ContainerKind::Vec
-                | ContainerKind::VecValueColumns(_)
-                | ContainerKind::VecValueStrided(_)
-        )
-    }
 }
 
 /// Which `co fn` lifecycle hook a [`Inst::CoroHook`] registers. All three

@@ -2920,21 +2920,6 @@ pub fn build_with_result_order(
     (run.bodies, run.merge_order)
 }
 
-pub fn build_with_default_trace(ws: &Workspace, g: &InstanceGraph) -> (ConcreteBodies, BuildTrace) {
-    let run = build_impl(
-        ws,
-        g,
-        BuildResultOrder::Canonical,
-        BuildSchedule::Default,
-        true,
-    );
-    (
-        run.bodies,
-        run.trace
-            .expect("default concrete run did not produce a trace"),
-    )
-}
-
 #[cfg(not(feature = "sequential"))]
 pub fn build_with_reverse_completion(
     ws: &Workspace,

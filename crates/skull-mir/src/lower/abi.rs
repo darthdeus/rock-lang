@@ -196,14 +196,6 @@ pub struct RepPlan {
 }
 
 impl RepPlan {
-    pub fn id(&self) -> RepId {
-        self.id
-    }
-
-    pub fn target(&self) -> FnBackend {
-        self.target
-    }
-
     pub fn use_context(&self) -> RepUse {
         self.use_context
     }
@@ -3174,7 +3166,7 @@ mod rep_read_cache_tests {
         let second = a.intern(FnBackend::Lua, RepUse::Parameter, RepLayout::Opaque);
         assert_ne!(first, second);
         assert_eq!(a.get(second).use_context(), RepUse::Parameter);
-        assert_eq!(a.get(second).id(), second);
+        assert_eq!(a.get(second).id, second);
     }
 
     #[test]

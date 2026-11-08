@@ -56,21 +56,6 @@ pub enum ArgsError {
     NotThisStruct(String),
 }
 
-impl ArgsError {
-    pub fn render(&self, struct_name: Ustr) -> String {
-        match self {
-            Self::Untyped => format!("generic struct `{struct_name}` literal is untyped"),
-            Self::Unconvertible(r) => {
-                format!("generic struct `{struct_name}` literal: {}", r.bucket())
-            }
-            Self::NotThisStruct(got) => format!(
-                "generic struct `{struct_name}` default injected while `{got}` is current, \
-                 so the arguments would not be its own"
-            ),
-        }
-    }
-}
-
 /// How many generics the struct declares.
 pub fn declared_generics(ws: &Workspace, sid: StructId) -> usize {
     ws.modules[sid.module.index()].structs[sid.def]

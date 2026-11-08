@@ -294,7 +294,7 @@ fn is_dead_value(inst: &Inst) -> bool {
 /// The two passes are FUSED: copy-prop's substitution is applied as DCE's count
 /// scan walks each inst, so the value-operand remap (`remap_inst` over every
 /// inst) and the use-counting share one traversal instead of two back-to-back.
-/// The standalone `copy_propagate` / `dce` keep their independent behavior.
+/// The standalone `dce` keeps its independent behavior.
 pub fn cleanup(func: &mut MirFunc) -> Result<(), CompilerError> {
     cleanup_in(None, func)
 }
@@ -1082,51 +1082,6 @@ fn value_ctor_plan(inst: &Inst) -> Option<(skull_mir::lower::RepId, ValueCtorFor
         } => Some((*representation, *form)),
         _ => None,
     }
-}
-
-/// Scalar replacement of struct cells (SROA) -- both `value` cdata and plain
-/// `struct` tables. A cell whose every `Store` is a struct ctor of one
-/// consistent type and whose every `Load` feeds ONLY `Field` reads / `StoreField`
-/// writes never needs the aggregate: split it into one cell per declared field,
-/// turning the ctor store into per-field stores, each `Field` read into a plain
-/// field-cell `Load`, and each `StoreField` write into a field-cell `Store`. The
-/// now-unreferenced ctor and whole-cell `Load`s die in the `cleanup` DCE that
-/// runs right after.
-///
-/// skull already unboxes value structs WITHIN a body (`ValueRepr::Group`), but a
-/// `@pure`/`@inline` helper that returns a struct is lowered standalone and packs
-/// its return; the MIR inliner then splices that packed ctor into the caller,
-/// where the field reads land in branch arms (other blocks). The value model is
-/// single-block, so the per-field VALUES can't cross the branch -- but per-field
-/// CELLS can, which is exactly how rock scalarizes (`pos` -> `pos__x`/`pos__y`).
-///
-/// For `value` structs this removes a cdata that LuaJIT cannot sink across a
-/// side-trace split (for example, in grid traversal loops). For plain
-/// structs it removes a Lua TABLE that LuaJIT's SINK only elides on a compiled
-/// trace -- in the interpreter (uncompiled text-rendering loops) the table
-/// allocates every iteration; rock scalarizes it to per-field locals so it pays
-/// 0 even interpreted. Plain structs are MUTABLE, so `StoreField` writes are
-/// legal (they become field-cell stores); any WHOLE-struct use (pass-by-value,
-/// `==`, return, store as another aggregate's field) escapes and keeps the table
-/// -- a struct that never escapes has no observable identity, so dropping it is
-/// sound (rock proves it). Runs to a fixpoint so nested value structs (a field
-/// cell that itself holds a ctor) peel too.
-pub fn scalarize_struct_cells(func: &mut MirFunc) -> Result<(), CompilerError> {
-    let dbg = std::env::var("SROA_DEBUG").is_ok();
-    let mut round = 0;
-    loop {
-        if dbg {
-            eprintln!("--- SROA round {round} input ---\n{func}");
-            round += 1;
-        }
-        if !has_scalarizable_store(func) || !scalarize_struct_cells_once(func)? {
-            break;
-        }
-    }
-    if dbg {
-        eprintln!("--- SROA final ---\n{func}");
-    }
-    Ok(())
 }
 
 /// One SROA round; returns whether it rewrote anything (drives the fixpoint).
@@ -1939,33 +1894,6 @@ fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, CompilerError
     Ok(true)
 }
 
-/// Intra-block copy propagation: the cell model emits a `Load(c)` for every use
-/// of a binding even when its value is already in hand, leaving
-/// `c = v; r = c; r2 = c` churn. Within ONE block a cell's value is stable until
-/// the next `Store` to it (cells are plain locals, not aliased — only `Store{cell}`
-/// changes one), and a value is single-block (born+consumed in its block, design
-/// invariant), so replacing a `Load(c)` with the value last stored to `c` EARLIER
-/// IN THE SAME BLOCK is sound with no dominance/coroutine-spill hazard. The same
-/// walk proves a `Store` back to the value its cell already holds is a no-op
-/// ([`CopyProp::self_stores`]). The now-dead `Load`s (and any store to a
-/// now-unloaded cell) are removed by [`dce`].
-/// Cross-block loads are left untouched (conservative — a later mem2reg, P7).
-pub fn copy_propagate(func: &mut MirFunc) {
-    let Some(cp) = copy_propagate_analysis(func, None) else {
-        return;
-    };
-    let m = |x: Idx<Inst>| resolve_subst(&cp.subst, x);
-    for (_, inst) in func.insts.iter_mut() {
-        remap_inst(inst, &m);
-    }
-    for (_, b) in func.blocks.iter_mut() {
-        remap_term(&mut b.term, &m);
-    }
-    if cp.self_stores.iter().any(|&noop| noop) {
-        drop_flagged(func, &cp.self_stores);
-    }
-}
-
 /// The intra-block copy-propagation analysis: the value->value substitution
 /// chain, plus the stores the same walk proves are no-ops.
 struct CopyProp {
@@ -1979,8 +1907,7 @@ struct CopyProp {
 
 /// Build the analysis without applying it. Returns `None` when the walk proves
 /// nothing (the common case for small bodies), so callers skip the remap
-/// entirely. Shared by the standalone [`copy_propagate`] (which then remaps the
-/// whole arena) and [`cleanup`] (which folds the remap into DCE's count scan).
+/// entirely. [`cleanup`] folds the remap into DCE's count scan.
 fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) -> Option<CopyProp> {
     // A cell STORED inside a closure body can be mutated indirectly by ANY call
     // (the call may invoke that closure — e.g. `with_callback(() => { count = .. })`),

@@ -280,15 +280,6 @@ pub struct UsePathRef {
     pub segments: Vec<Ustr>,
 }
 
-/// Fragment-local imports (plain `use` in one file), spec 8.2.
-#[derive(Clone, Debug, Default)]
-pub struct FragmentImports {
-    /// Plain (tier-3) bindings: local name -> DefKey.
-    pub named: FxHashMap<Ustr, Ustr>,
-    /// Glob (tier-4) bindings: the module node keys globbed.
-    pub globs: Vec<Ustr>,
-}
-
 /// Host-supplied alias tables (one entry per package), so cross-package
 /// resolution uses the graph's dependency names rather than guessing. The
 /// CLI derives this from the PackageGraph; tests construct it directly.

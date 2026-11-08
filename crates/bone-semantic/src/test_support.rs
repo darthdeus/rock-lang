@@ -250,12 +250,8 @@ pub struct PackageFixture<'a> {
 /// each file parses under its dialect, v1 files join the namespace tree, and
 /// every `//^ ty` marker in every file must resolve. Cross-package alias
 /// tables default to "every package is reachable under its own self name".
-pub fn check_types_packages(files: &[PackageFixture<'_>]) -> Result<(), String> {
-    check_types_packages_inner(files, files)
-}
-
-/// Like [`check_types_packages`], but prepends trusted legacy stdlib sources
-/// without treating their internal `//^` comments as fixture assertions.
+/// Trusted legacy stdlib sources are prepended without treating their
+/// internal `//^` comments as fixture assertions.
 pub fn check_types_packages_with_stdlib(
     files: &[PackageFixture<'_>],
     stdlib_sources: &[(&str, &str)],

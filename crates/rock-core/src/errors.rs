@@ -123,11 +123,6 @@ impl CompilerError {
         self
     }
 
-    pub fn panic(self) -> CompilerError {
-        self.labels.first().unwrap().span.panic(&self.message);
-        self
-    }
-
     pub fn new_with_label(span: Span, message: String) -> Self {
         Self::at(span.start(), message.clone()).with_label(span, message)
     }
@@ -633,11 +628,5 @@ mod tests {
         assert_eq!(as_vec.len(), 1);
         assert_eq!(as_vec[0].message, error.message);
         assert_eq!(format!("{error}"), "bad thing");
-    }
-
-    #[test]
-    fn panic_prints_the_first_label_before_aborting() {
-        let result = std::panic::catch_unwind(|| labelled().panic());
-        assert!(result.is_err());
     }
 }

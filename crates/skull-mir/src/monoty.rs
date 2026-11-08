@@ -336,29 +336,6 @@ impl MonoTy {
             other => (other, false),
         }
     }
-
-    /// Whether any nominal anywhere in the tree satisfies `pred`.
-    pub fn any_nominal(&self, pred: &impl Fn(Ustr) -> bool) -> bool {
-        match self {
-            Self::Int
-            | Self::Uint
-            | Self::Float
-            | Self::Bool
-            | Self::String
-            | Self::Any
-            | Self::Unit
-            | Self::Never => false,
-            Self::Nullable(inner) => inner.any_nominal(pred),
-            Self::Tuple(parts) => parts.iter().any(|part| part.any_nominal(pred)),
-            Self::App { ctor, params } => {
-                matches!(ctor, MonoCtor::Nominal(name) if pred(*name))
-                    || params.iter().any(|param| param.any_nominal(pred))
-            }
-            Self::Function { params, ret } => {
-                params.iter().any(|param| param.any_nominal(pred)) || ret.any_nominal(pred)
-            }
-        }
-    }
 }
 
 /// Why a type did not convert. Every variant is a distinct census bucket --
@@ -528,7 +505,7 @@ pub type MonoSubst = FxHashMap<VarId, MonoTy>;
 ///
 /// A BODY has an inference arena for `TyId::Local` and solved substitutions for
 /// `TypeExpr::Infer`. A DECLARATION has neither: a signature's types live in
-/// their own module's arena, so either shape reaching [`MonoArena::convert_in`]
+/// their own module's arena, so either shape reaching [`MonoArena::convert`]
 /// from a declaration is compiler state disagreeing with itself. Declared
 /// newtype resolution uses this converter for each instantiated step as well.
 #[derive(Clone, Copy)]
@@ -661,11 +638,6 @@ impl MonoArena {
         self.get(id).canonical()
     }
 
-    /// Structural nesting depth of an interned type.
-    pub fn depth(&self, id: MonoTyId) -> u32 {
-        self.get(id).depth()
-    }
-
     /// FNV-1a over the canonical encoding of an interned type.
     pub fn structural_hash(&self, id: MonoTyId) -> u64 {
         self.get(id).structural_hash()
@@ -723,17 +695,6 @@ impl MonoArena {
         subst: &MonoSubst,
     ) -> Result<MonoTyId, MonoTyReason> {
         Ok(self.intern(convert_decl(ws, ty, subst)?))
-    }
-
-    /// [`convert_in`], interned, for a caller that holds the environment.
-    pub fn convert_in(
-        &mut self,
-        ws: &Workspace,
-        env: TyEnv<'_>,
-        ty: TyId,
-        subst: &MonoSubst,
-    ) -> Result<MonoTyId, MonoTyReason> {
-        Ok(self.intern(convert_in(ws, env, ty, subst)?))
     }
 
     /// [`convert`], interned, reporting how many declared generics the
@@ -982,16 +943,6 @@ pub fn convert_decl<S: std::hash::BuildHasher>(
     subst: &std::collections::HashMap<VarId, MonoTy, S>,
 ) -> Result<MonoTy, MonoTyReason> {
     convert_at(ws, TyEnv::Decl, ty, subst, 0, &mut 0)
-}
-
-/// [`convert`] for a caller that already holds the environment.
-pub fn convert_in<S: std::hash::BuildHasher>(
-    ws: &Workspace,
-    env: TyEnv<'_>,
-    ty: TyId,
-    subst: &std::collections::HashMap<VarId, MonoTy, S>,
-) -> Result<MonoTy, MonoTyReason> {
-    convert_at(ws, env, ty, subst, 0, &mut 0)
 }
 
 /// [`convert`], reporting how many declared generics it resolved THROUGH

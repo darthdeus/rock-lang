@@ -104,25 +104,6 @@ pub fn parse_one_item(
     Ok(ast)
 }
 
-/// Cook a single already-parsed module in place: run the syntax desugars only.
-/// Cross-module macro expansion is a separate whole-workspace step (`cook`)
-/// since macros resolve across files.
-pub fn cook_single(ast: &mut Ast) {
-    desugar::desugar(ast);
-}
-
-/// Cook a whole workspace in place: cross-module macro expansion, then
-/// per-module syntax desugar. This is the front-end's full "cook" — its output
-/// is the AST bone consumes, byte-identical to rock post-expand+desugar.
-pub fn cook(modules: &mut [Ast]) {
-    // Macro expansion FIRST (bone's order), across the whole workspace — macro
-    // defs resolve across files — then per-module syntax desugar.
-    macro_expand::expand_macros(modules);
-    for ast in modules.iter_mut() {
-        desugar::desugar(ast);
-    }
-}
-
 /// Cook a SINGLE module against a prebuilt `registry`: macro-expand it, then
 /// syntax-desugar it. The per-module unit of `cook`, exposed so an incremental
 /// driver can re-cook just one edited file -- build the registry once with
@@ -142,6 +123,14 @@ pub use macro_expand::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Macro-expand across `modules`, then desugar each one.
+    fn cook(modules: &mut [Ast]) {
+        macro_expand::expand_macros(modules);
+        for ast in modules.iter_mut() {
+            desugar::desugar(ast);
+        }
+    }
 
     /// Parse a single-function source and return its body block's s-expr.
     /// The s-expr format is byte-compatible with rock's `Block::to_sexp`,

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use atomic_refcell::AtomicRefCell;
-use rock_core::{FileContents, ModuleId, SourceFile, SourceFiles, Span};
+use rock_core::{FileContents, ModuleId, SourceFile, SourceFiles};
 
 use crate::preprocessor::{PreprocessorContext, preprocess};
 
@@ -18,37 +18,13 @@ use crate::preprocessor::{PreprocessorContext, preprocess};
 /// they depend on the preprocessor).
 pub trait SourceFilesExt {
     fn from_dir_preprocessed<P: AsRef<Path>>(source_dir: P) -> Result<SourceFiles>;
-    fn from_single_path<P: AsRef<Path>>(path: P) -> Result<SourceFiles>;
     fn from_single_path_preprocessed<P: AsRef<Path>>(path: P) -> Result<SourceFiles>;
     fn from_multiple_paths(paths: &[PathBuf], preprocess: bool) -> Result<SourceFiles>;
-    fn test_from_code_literal(code: &str) -> SourceFiles;
-
-    /// Source text covered by `span` (byte `offset_range`), or None if
-    /// the file isn't loaded or the range is out of bounds. Canonical
-    /// reader for lint auto-fix rendering -- one body for what was three
-    /// copies (coalesce/if-let `slice_source`, ufcs `span_source`).
-    fn span_text(&self, span: &Span) -> Option<String>;
 }
 
 impl SourceFilesExt for SourceFiles {
     fn from_dir_preprocessed<P: AsRef<Path>>(source_dir: P) -> Result<SourceFiles> {
         source_files_from_dir_impl(source_dir, true)
-    }
-
-    fn span_text(&self, span: &Span) -> Option<String> {
-        let path = span.file.as_str();
-        let file = self
-            .files
-            .iter()
-            .find(|f| f.borrow().file.to_id_path() == path)?;
-        let f = file.borrow();
-        let (start, end) = span.offset_range;
-        f.contents.get(start..end).map(|s| s.to_string())
-    }
-
-    fn from_single_path<P: AsRef<Path>>(path: P) -> Result<SourceFiles> {
-        let file = source_file_load(path, false)?;
-        Ok(SourceFiles::from_single_file(file))
     }
 
     fn from_single_path_preprocessed<P: AsRef<Path>>(path: P) -> Result<SourceFiles> {
@@ -71,10 +47,6 @@ impl SourceFilesExt for SourceFiles {
             files,
             package_roots: Vec::new(),
         })
-    }
-
-    fn test_from_code_literal(code: &str) -> SourceFiles {
-        SourceFiles::from_single_file(source_file_from_code("test.rock".into(), code.to_string()))
     }
 }
 
@@ -251,40 +223,6 @@ fn source_file_from_canonical_path(path: &Path, preprocess: bool) -> Result<Sour
         is_test_util,
         used_packages,
     )
-}
-
-pub fn source_file_from_path_and_contents(
-    path: String,
-    filename: String,
-    contents: String,
-) -> SourceFile {
-    // Check for directives without applying preprocessing. Preprocessor
-    // failure (malformed `#if`, etc.) used to fall back to defaults
-    // (is_script=false, is_test=false, used_packages=[]) silently --
-    // tests in such a file would never run with no diagnostic. Surface
-    // the error so the user sees the real cause; keep the safe defaults
-    // so a downstream parse can still produce useful diagnostics
-    // (silent-errors audit, 2026-05-02).
-    let (_, is_script, is_test, is_test_util, used_packages) =
-        match preprocess_content(&contents, false) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("rock: preprocessor error for `{path}`: {e:#}");
-                (contents.clone(), false, false, false, vec![])
-            }
-        };
-
-    let file = FileContents::Filesystem { path, filename };
-
-    create_source_file(
-        file,
-        contents,
-        is_script,
-        is_test,
-        is_test_util,
-        used_packages,
-    )
-    .unwrap_or_else(|e| panic!("rock: {e:#}"))
 }
 
 pub fn source_file_from_code(id_path: String, contents: String) -> SourceFile {

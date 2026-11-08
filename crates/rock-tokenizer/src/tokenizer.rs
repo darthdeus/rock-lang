@@ -1484,28 +1484,6 @@ mod test {
         );
     }
 
-    /// Every entry in `rock_tokenizer::token::KEYWORDS` must be recognized
-    /// by the tokenizer as a non-Ident token. Catches drift when
-    /// `KEYWORDS` adds a name the tokenizer doesn't recognize. The
-    /// reverse direction (new keyword in the tokenizer match missing
-    /// from `KEYWORDS`) is a doc-comment invariant — see the const's
-    /// definition site.
-    #[test]
-    fn tokenizer_keyword_round_trip() {
-        for kw in crate::token::KEYWORDS {
-            let tokens = Tokenizer::from_code("test.rock", kw)
-                .tokenize_kinds()
-                .unwrap_or_else(|e| panic!("keyword {kw:?} failed to tokenize: {e:?}"));
-            assert_eq!(tokens.len(), 1, "keyword {kw:?} produced {tokens:?}");
-            match &tokens[0] {
-                TokenKind::Ident(_) => panic!(
-                    "{kw:?} listed in rock_tokenizer::token::KEYWORDS but tokenizer treats it as an identifier"
-                ),
-                _ => {}
-            }
-        }
-    }
-
     #[test]
     fn test_num_method() {
         let tokens = Tokenizer::from_code("test.rock", "5.double()")
