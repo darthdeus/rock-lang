@@ -207,16 +207,15 @@ mod tests {
     #[test]
     fn asset_overlay_defaults_expand_the_vault_token() {
         let project = tempfile::tempdir().unwrap();
+        let vault = tempfile::tempdir().unwrap();
         let cfg = StickConfig::new_from_str(
             "[package]\nname = \"x\"\n[assets]\noverlays = [\"$GAME_ART_VAULT/demo\"]\n",
         )
         .unwrap();
         let resolved = cfg
-            .asset_overlay_defaults_with_vault(project.path(), &|| {
-                Ok(PathBuf::from("/machine/vault"))
-            })
+            .asset_overlay_defaults_with_vault(project.path(), &|| Ok(vault.path().to_path_buf()))
             .unwrap();
-        assert_eq!(resolved, vec![PathBuf::from("/machine/vault/demo")]);
+        assert_eq!(resolved, vec![vault.path().join("demo")]);
         let err = cfg
             .asset_overlay_defaults_with_vault(project.path(), &|| {
                 anyhow::bail!("game-art vault not found")

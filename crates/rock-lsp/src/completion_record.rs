@@ -1,6 +1,7 @@
 //! Completion corpus recorder -- the replay corpus's server half.
 //!
-//! Gated on `ROCK_LSP_RECORD`: `1` -> `/tmp/rock-completion-corpus.jsonl`,
+//! Gated on `ROCK_LSP_RECORD`: `1` -> `rock-completion-corpus.jsonl` in `/tmp`
+//! (Windows: the system temp directory),
 //! any other non-empty value -> that path (the `ROCK_LSP_DEBUG` convention).
 //! Off = zero cost: no snapshots taken, no item commands attached.
 //!
@@ -22,7 +23,6 @@ use lsp_types::{Command, CompletionItem, Position};
 use serde_json::json;
 
 pub const ACCEPT_COMMAND: &str = "rock.completionAccepted";
-const DEFAULT_PATH: &str = "/tmp/rock-completion-corpus.jsonl";
 /// An accept refers to one of the last few requests (per-keystroke
 /// re-query while the popup is open); older snapshots are dead weight.
 const RING_CAP: usize = 8;
@@ -175,7 +175,9 @@ fn append_line(path: &Path, row: &serde_json::Value) -> std::io::Result<()> {
 /// completion request when off -- noise next to the request itself.
 static RECORDER: LazyLock<Mutex<Option<Recorder>>> = LazyLock::new(|| {
     Mutex::new(match std::env::var("ROCK_LSP_RECORD") {
-        Ok(v) if v == "1" => Some(Recorder::new(DEFAULT_PATH.into())),
+        Ok(v) if v == "1" => Some(Recorder::new(crate::default_debug_file(
+            "rock-completion-corpus.jsonl",
+        ))),
         Ok(v) if !v.is_empty() && v != "0" => Some(Recorder::new(v.into())),
         _ => None,
     })

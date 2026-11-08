@@ -11,7 +11,6 @@
 use lsp_types::*;
 use rock_lsp::LspWorkspace;
 use rock_lsp::semantic_tokens::{compute_semantic_tokens_workspace, get_semantic_tokens_legend};
-use std::str::FromStr;
 
 fn tokens(src: &str) -> Vec<SemanticToken> {
     let dir = tempfile::tempdir().unwrap();
@@ -21,7 +20,7 @@ fn tokens(src: &str) -> Vec<SemanticToken> {
     ws.bone.update(path.to_str().unwrap(), src.to_string());
     let params = SemanticTokensParams {
         text_document: TextDocumentIdentifier {
-            uri: Uri::from_str(&format!("file://{}", path.display())).unwrap(),
+            uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
         },
         work_done_progress_params: Default::default(),
         partial_result_params: Default::default(),

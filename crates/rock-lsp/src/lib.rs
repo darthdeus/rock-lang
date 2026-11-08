@@ -63,6 +63,24 @@ pub use workspace_adapters::*;
 
 pub mod completion_record;
 
+fn default_debug_file(name: &str) -> std::path::PathBuf {
+    #[cfg(windows)]
+    return std::env::temp_dir().join(name);
+    #[cfg(not(windows))]
+    std::path::Path::new("/tmp").join(name)
+}
+
+#[cfg(all(test, windows))]
+mod debug_path_tests {
+    #[test]
+    fn default_debug_files_use_the_system_temp_directory() {
+        for name in ["lsp_debug.log", "rock-completion-corpus.jsonl"] {
+            let path = super::default_debug_file(name);
+            assert_eq!(path.parent(), Some(std::env::temp_dir().as_path()));
+        }
+    }
+}
+
 #[macro_export]
 macro_rules! debug_log {
     ($($arg:tt)*) => {

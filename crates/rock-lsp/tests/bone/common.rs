@@ -4,7 +4,6 @@
 
 use lsp_types::*;
 use rock_lsp::{LspWorkspace, compute_code_actions_workspace};
-use std::str::FromStr;
 
 /// Write `src` to `path` and open it on a fresh bone workspace.
 pub fn bone_ws(path: &std::path::Path, src: &str) -> LspWorkspace {
@@ -18,7 +17,7 @@ pub fn bone_ws(path: &std::path::Path, src: &str) -> LspWorkspace {
 pub fn params_at(path: &std::path::Path, line: u32, ch: u32) -> CodeActionParams {
     CodeActionParams {
         text_document: TextDocumentIdentifier {
-            uri: Uri::from_str(&format!("file://{}", path.display())).unwrap(),
+            uri: Uri::from_file_path(path.to_str().unwrap()).unwrap(),
         },
         range: Range {
             start: Position::new(line, ch),

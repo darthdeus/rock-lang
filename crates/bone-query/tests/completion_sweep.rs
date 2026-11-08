@@ -10,7 +10,10 @@
 use bone_query::BoneWorkspace;
 use lsp_types::{HoverContents, Position};
 
+#[cfg(not(windows))]
 const PATH: &str = "/tmp/rock_lsp_sweep.rock";
+#[cfg(windows)]
+const PATH: &str = r"C:\tmp\rock_lsp_sweep.rock";
 
 const PREAMBLE: &str = "global MARKER: int = 0\n\
      fn marker_fn() -> int { 0 }\n\

@@ -197,13 +197,15 @@ pub fn run_cli(args: Vec<String>) -> Result<()> {
 }
 
 pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> Result<()> {
-    // ROCK_LSP_DEBUG=1 -> /tmp/lsp_debug.log at trace level (tail -f friendly)
+    // ROCK_LSP_DEBUG=1 -> lsp_debug.log in /tmp (Windows: system temp directory).
     // ROCK_LSP_DEBUG=/some/path -> that path at trace level
     // Unset -> stderr at warn (or RUST_LOG level)
     match std::env::var("ROCK_LSP_DEBUG") {
         Ok(val) => {
             let log_path = if val == "1" || val.is_empty() {
-                "/tmp/lsp_debug.log".to_string()
+                crate::default_debug_file("lsp_debug.log")
+                    .to_string_lossy()
+                    .into_owned()
             } else {
                 val
             };

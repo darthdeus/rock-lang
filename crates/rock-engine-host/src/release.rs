@@ -472,10 +472,13 @@ pub fn copy_assets(selection: &AssetSelection, output_dir: &Path) -> Result<Stag
 fn validate_relative_key(value: &str, label: &str) -> Result<()> {
     let path = Path::new(value);
     if value.is_empty()
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir))
+        || path.has_root()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
     {
         anyhow::bail!("release {label} must be a non-empty relative path: {value:?}");
     }
@@ -816,12 +819,18 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("demo");
         std::fs::create_dir_all(&project).unwrap();
-        let err = select_assets(&project, "/tmp/demo", None, None)
-            .expect_err("absolute game key must reject");
-        assert!(
-            format!("{err}").contains("relative"),
-            "error explains key restriction: {err}"
-        );
+        let mut keys = vec!["/tmp/demo", "../demo", "demo/../other"];
+        if cfg!(windows) {
+            keys.extend([r"\demo", r"C:demo", r"C:\demo", r"\\server\share\demo"]);
+        }
+        for key in keys {
+            let err = select_assets(&project, key, None, None)
+                .expect_err("non-relative game key must reject");
+            assert!(
+                format!("{err}").contains("relative"),
+                "error explains key restriction for {key}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -951,7 +960,7 @@ mod tests {
             std::fs::create_dir_all(path).unwrap();
         }
         let cfg = StickConfig::new_from_str(&format!(
-            "[package]\nname = \"game\"\n[assets]\noverlays = [\"{}\"]\n",
+            "[package]\nname = \"game\"\n[assets]\noverlays = ['{}']\n",
             configured.display()
         ))
         .unwrap();

@@ -474,7 +474,9 @@ fn record_cache_event(
     {
         std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
+    // Windows cannot lock a handle opened with append-only access.
     let mut file = std::fs::OpenOptions::new()
+        .read(true)
         .create(true)
         .append(true)
         .open(&path)

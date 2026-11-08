@@ -135,9 +135,9 @@ pub fn begin(command: &'static str, backend: &str) {
     record.insert("exe".into(), json!(std::env::current_exe().ok()));
     record.insert("host".into(), json!(hostname()));
     record.insert("pid".into(), json!(pid));
-    let ppid = unsafe { libc::getppid() };
+    let (ppid, parent_comm) = parent_process();
     record.insert("ppid".into(), json!(ppid));
-    record.insert("parent_comm".into(), json!(process_name(ppid)));
+    record.insert("parent_comm".into(), json!(parent_comm));
     record.insert("nested_in".into(), json!(parent));
     record.insert("cwd".into(), json!(cwd));
     record.insert("repo_root".into(), json!(repo_root));
@@ -493,6 +493,12 @@ fn utc(t: SystemTime) -> String {
     )
 }
 
+#[cfg(windows)]
+fn hostname() -> Option<String> {
+    sysinfo::System::host_name().map(|name| name.split('.').next().unwrap_or(&name).to_lowercase())
+}
+
+#[cfg(unix)]
 fn hostname() -> Option<String> {
     let mut buf = [0u8; 256];
     // SAFETY: the buffer is valid for its length; the result is NUL-terminated
@@ -507,7 +513,40 @@ fn hostname() -> Option<String> {
     Some(name.split('.').next().unwrap_or(&name).to_lowercase())
 }
 
+#[cfg(unix)]
+fn parent_process() -> (Option<u32>, Option<String>) {
+    let pid = unsafe { libc::getppid() };
+    (Some(pid as u32), process_name(pid))
+}
+
+#[cfg(windows)]
+fn parent_process() -> (Option<u32>, Option<String>) {
+    use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+    let mut system = System::new();
+    let pid = Pid::from_u32(std::process::id());
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    let Some(parent) = system.process(pid).and_then(|process| process.parent()) else {
+        return (None, None);
+    };
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[parent]),
+        true,
+        ProcessRefreshKind::nothing(),
+    );
+    (
+        Some(parent.as_u32()),
+        system
+            .process(parent)
+            .map(|process| process.name().to_string_lossy().into_owned()),
+    )
+}
+
 /// The parent's process name (`zsh`, `just`, `python3`, a cargo test binary).
+#[cfg(unix)]
 fn process_name(pid: libc::pid_t) -> Option<String> {
     #[cfg(target_os = "linux")]
     {

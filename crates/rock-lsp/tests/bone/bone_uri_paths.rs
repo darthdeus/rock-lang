@@ -18,12 +18,13 @@ fn spaced_project() -> (tempfile::TempDir, std::path::PathBuf, Uri, LspWorkspace
     std::fs::create_dir(dir.path().join("my dir")).unwrap();
     let path = dir.path().join("my dir").join("caf\u{e9}.rock");
     let ws = bone_ws(&path, SRC);
-    let root = dir.path().to_str().unwrap();
+    let root_uri = Uri::from_file_path(dir.path().to_str().unwrap()).unwrap();
+    let root = root_uri.as_str();
     assert!(
         root.bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
+            .all(|b| b.is_ascii_alphanumeric() || b"/:.%_-".contains(&b))
     );
-    let uri = Uri::from_str(&format!("file://{root}/my%20dir/caf%C3%A9.rock")).unwrap();
+    let uri = Uri::from_str(&format!("{root}/my%20dir/caf%C3%A9.rock")).unwrap();
     (dir, path, uri, ws)
 }
 
@@ -80,14 +81,16 @@ fn returned_locations_encode_the_path() {
     // handwritten so this still checks the URI encoder independently.
     let root = dir.path().canonicalize().unwrap();
     let uri = Uri::from_str(&format!(
-        "file://{}/my%20dir/caf%C3%A9.rock",
-        root.to_str().unwrap()
+        "{}/my%20dir/caf%C3%A9.rock",
+        Uri::from_file_path(root.to_str().unwrap())
+            .unwrap()
+            .as_str()
     ))
     .unwrap();
     assert_eq!(hits[0].location.uri, uri);
     assert_eq!(
         hits[0].location.uri.to_file_path().unwrap(),
-        path.canonicalize().unwrap().to_str().unwrap()
+        bone_query::canonicalize_lenient(path.to_str().unwrap())
     );
 }
 

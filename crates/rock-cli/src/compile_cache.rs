@@ -279,7 +279,6 @@ pub fn compile_cache_compiler_sha256(rock_exe: &std::path::Path) -> Option<Strin
     hash
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn running_image_sha256() -> Result<Option<String>> {
     crate::comptime::compiler_identity().map(Some)
 }
@@ -310,6 +309,23 @@ fn file_sha256_if_unchanged_since(
         .modified()
         .with_context(|| format!("mtime of {}", path.display()))?;
     Ok((stamp(&before) == stamp(&after) && written <= started).then_some(hash))
+}
+
+#[cfg(windows)]
+fn file_sha256_if_unchanged_since(
+    path: &std::path::Path,
+    started: std::time::SystemTime,
+) -> Result<Option<String>> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // Keep the pathname and contents fixed while the shared image reader opens it.
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(winapi::um::winnt::FILE_SHARE_READ)
+        .open(path)?;
+    if file.metadata()?.modified()? > started {
+        return Ok(None);
+    }
+    crate::comptime::compiler_image_identity(path).map(Some)
 }
 
 pub fn compile_cache_identity(

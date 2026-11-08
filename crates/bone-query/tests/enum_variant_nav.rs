@@ -9,7 +9,10 @@
 use bone_query::BoneWorkspace;
 use lsp_types::{HoverContents, Position};
 
+#[cfg(not(windows))]
 const PATH: &str = "/tmp/rock_enum_variant_nav.rock";
+#[cfg(windows)]
+const PATH: &str = r"C:\tmp\rock_enum_variant_nav.rock";
 
 const SRC: &str = "\
 enum SpellState {
@@ -198,7 +201,7 @@ fn main() {
         for i in 0.."Circle".len() {
             let p = pos_of(main, prefix, 0, prefix.len() + i);
             let location = b.definition(&path, p).expect("variant definition");
-            assert_eq!(location.uri.path().as_str(), project.path(file));
+            assert_eq!(location.uri.to_file_path().unwrap(), project.path(file));
             assert_eq!(location.range, expected);
             let h = b.hover(&path, p).expect("variant hover");
             let HoverContents::Markup(markup) = h.contents else {
@@ -220,7 +223,7 @@ fn main() {
         let into = qualifier.rfind("::").map_or(0, |i| i + 2);
         let p = pos_of(main, prefix, 0, into);
         let location = b.definition(&path, p).expect("enum definition");
-        assert_eq!(location.uri.path().as_str(), project.path(file));
+        assert_eq!(location.uri.to_file_path().unwrap(), project.path(file));
         assert_eq!(location.range.start, pos_of(src, "enum Shape", 0, 5));
         let h = b.hover(&path, p).expect("enum hover");
         let HoverContents::Markup(markup) = h.contents else {
@@ -273,7 +276,7 @@ fn f() {
             let loc = b
                 .definition(PATH, p)
                 .unwrap_or_else(|| panic!("no definition at {p:?}"));
-            assert_eq!(loc.uri.path().as_str(), PATH);
+            assert_eq!(loc.uri.to_file_path().unwrap(), PATH);
             assert_eq!(loc.range, target, "definition at {p:?}");
         }
     }

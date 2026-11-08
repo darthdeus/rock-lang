@@ -161,12 +161,7 @@ pub fn pos_of(text: &str, needle: &str, nth: usize, into: usize) -> Position {
 
 /// The text a location's range covers, read from disk.
 fn located_text(loc: &lsp_types::Location) -> (String, String) {
-    let path = loc
-        .uri
-        .as_str()
-        .strip_prefix("file://")
-        .unwrap()
-        .to_string();
+    let path = loc.uri.to_file_path().unwrap();
     let text = std::fs::read_to_string(&path).unwrap();
     let lines: Vec<&str> = text.split('\n').collect();
     let r = loc.range;
@@ -540,7 +535,10 @@ fn a_legacy_call_of_a_projected_name_lands_on_the_v1_definition() {
         .definition(&main, pos_of(text, "area", 0, 1))
         .expect("a projected call resolves");
     let (path, covered) = located_text(&loc);
-    assert!(path.ends_with("geo/lib.rock"), "landed in {path}");
+    assert!(
+        std::path::Path::new(&path).ends_with("geo/lib.rock"),
+        "landed in {path}"
+    );
     assert!(covered.contains("area"), "landed on {covered:?}");
 }
 
@@ -1066,7 +1064,7 @@ fn rename_edits(
     let edit = bone.rename(path, pos, new_name).expect("renameable");
     let mut out = Vec::new();
     for (uri, edits) in edit.changes.unwrap_or_default() {
-        let file = uri.as_str().strip_prefix("file://").unwrap().to_string();
+        let file = uri.to_file_path().unwrap();
         let text = std::fs::read_to_string(&file).unwrap();
         let lines: Vec<&str> = text.split('\n').collect();
         for e in edits {

@@ -16,7 +16,10 @@
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
 
+#[cfg(not(windows))]
 const PATH: &str = "/probe/main.rock";
+#[cfg(windows)]
+const PATH: &str = r"C:\probe\main.rock";
 
 fn pos_of(src: &str, needle: &str, extra: usize) -> Position {
     let idx = src.rfind(needle).expect("needle") + extra;

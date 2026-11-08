@@ -216,7 +216,9 @@ fn run_t(src: &str) -> String {
         "luajit failed:\nstderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .replace("\r\n", "\n")
 }
 
 #[test]

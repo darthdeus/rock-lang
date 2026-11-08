@@ -9,7 +9,10 @@
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
 
+#[cfg(not(windows))]
 const PATH: &str = "/tmp/rock_interp_hole_spans.rock";
+#[cfg(windows)]
+const PATH: &str = r"C:\tmp\rock_interp_hole_spans.rock";
 
 /// Goto-definition at the `x` of the (single) hole in `line`, which is placed in
 /// a `fn` after a `let x`. Returns the target line, or `None` for no target.

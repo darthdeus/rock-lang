@@ -27,8 +27,16 @@ fn pos(src: &str, marker: &str, into: usize) -> Position {
 #[test]
 fn def_macro_invocation_jumps_to_the_macro_decl_cross_file() {
     // The reported shape: the macro is defined in one file, invoked in another.
-    let def_path = "/probe/def.rock";
-    let use_path = "/probe/use.rock";
+    let def_path = if cfg!(windows) {
+        "C:/probe/def.rock"
+    } else {
+        "/probe/def.rock"
+    };
+    let use_path = if cfg!(windows) {
+        "C:/probe/use.rock"
+    } else {
+        "/probe/use.rock"
+    };
     let def_src = "macro twice(x: expr) {\n    let _ = x + x\n}\n";
     let use_src = "fn main() {\n    twice(41)\n}\n";
 
@@ -84,7 +92,11 @@ fn def_macro_overload_resolves_to_the_arity_matching_decl() {
     // A macro name can't collide with a fn (rule: macro names are unique), but
     // it CAN have overloads by arity. Goto-def picks the decl of the overload
     // the call's arity selects -- the same `select_overload` expansion uses.
-    let path = "/probe/overload.rock";
+    let path = if cfg!(windows) {
+        "C:/probe/overload.rock"
+    } else {
+        "/probe/overload.rock"
+    };
     let src = "macro pick(a: expr) {\n\
                \x20   let _ = a\n\
                }\n\
