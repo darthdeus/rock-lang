@@ -29,6 +29,7 @@ ustr = { workspace = true }
 rock-host = { workspace = true }
 rock-stdlib = { workspace = true }
 bone-query = { path = "../bone-query" }
+bone-lints = { workspace = true }
 
 [lints]
 workspace = true

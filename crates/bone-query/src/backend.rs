@@ -911,10 +911,7 @@ impl BoneWorkspace {
         // hole cache below.
         let mut this_file_parse_err: Option<CompilerError> = None;
         let mut changed: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut lint_changed_files = FxHashSet::default();
-        let mut lint_reinferred = Vec::new();
-        let mut lint_edits = Vec::new();
-        let mut lint_full = false;
+        let mut lint_change = bone_lints::LintCacheUpdate::body_only([], [], []);
         changed.insert(path.to_string());
         // Tier governs the type-graph-derived caches (reachability index +
         // completion signature cache): both depend only on the type graph
@@ -949,7 +946,6 @@ impl BoneWorkspace {
             Ok(upd) => {
                 if !matches!(upd.tier, UpdateTier::BodyOnly | UpdateTier::NoChange) {
                     rebuild_type_caches = true;
-                    lint_full = true;
                 }
                 let ws = proj.session.workspace();
                 let touched: Vec<String> = upd
@@ -962,17 +958,7 @@ impl BoneWorkspace {
                     proj.module_touched.insert(file.clone(), now);
                     changed.insert(file);
                 }
-                match upd.tier {
-                    UpdateTier::BodyOnly => {
-                        lint_changed_files.insert(Ustr::from(path));
-                        lint_reinferred.extend(upd.reinferred.iter().copied());
-                        lint_edits.extend(upd.body_update.edit);
-                    }
-                    UpdateTier::Interface | UpdateTier::Scope | UpdateTier::FullUser => {
-                        lint_full = true
-                    }
-                    UpdateTier::NoChange => {}
-                }
+                lint_change = lint_cache_update(ws, path, &upd);
             }
             Err(e) => this_file_parse_err = Some(e),
         }
@@ -1076,15 +1062,6 @@ impl BoneWorkspace {
         if this_file_parse_err.is_some() {
             proj.lint_cache.invalidate_file(Ustr::from(path));
         } else {
-            let lint_change = if lint_full {
-                bone_lints::LintCacheUpdate::full()
-            } else {
-                bone_lints::LintCacheUpdate::body_only(
-                    lint_changed_files,
-                    lint_reinferred,
-                    lint_edits,
-                )
-            };
             let findings = update_lint_cache(proj, &lint_change);
             for finding in findings {
                 by_file
@@ -4153,6 +4130,45 @@ fn directive_verb_items(typed: &str) -> Vec<CompletionItem> {
             ..Default::default()
         })
         .collect()
+}
+
+/// The lint-cache change one session update of `path` implies. Interface and
+/// scope edits relower modules in place, so the cache derives just those files
+/// and the re-inferred bodies again; a full user rebuild reassigns module ids
+/// and rebuilds the cache.
+pub fn lint_cache_update(
+    ws: &Workspace,
+    path: &str,
+    upd: &bone_incremental::session::UpdateResult,
+) -> bone_lints::LintCacheUpdate {
+    let relowered = || {
+        bone_lints::LintCacheUpdate::relowered(
+            std::iter::once(Ustr::from(path))
+                .chain(upd.relowered.iter().map(|(mid, _)| ws.module(*mid).file)),
+            upd.reinferred.iter().copied(),
+        )
+    };
+    match upd.tier {
+        UpdateTier::NoChange => bone_lints::LintCacheUpdate::body_only([], [], []),
+        // A body edit that changed several bodies or relowered the whole
+        // module has one delta spanning other items' declarations.
+        UpdateTier::BodyOnly
+            if upd.reinferred.len() > 1
+                || upd
+                    .relowered
+                    .iter()
+                    .any(|body| !upd.reinferred.contains(body)) =>
+        {
+            relowered()
+        }
+        UpdateTier::BodyOnly => bone_lints::LintCacheUpdate::body_only(
+            [Ustr::from(path)],
+            upd.reinferred.iter().copied(),
+            upd.body_update.edit,
+        ),
+        UpdateTier::Interface | UpdateTier::Scope => relowered(),
+        UpdateTier::FullUser => bone_lints::LintCacheUpdate::full(),
+    }
 }
 
 fn update_lint_cache(

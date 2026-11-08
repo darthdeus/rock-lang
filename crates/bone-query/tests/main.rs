@@ -48,6 +48,8 @@ mod interp_hole_spans;
 mod line_index;
 #[path = "lint_columns_after_body_edit.rs"]
 mod lint_columns_after_body_edit;
+#[path = "lint_incremental_matches_fresh.rs"]
+mod lint_incremental_matches_fresh;
 #[path = "macro_call_site_sentinel.rs"]
 mod macro_call_site_sentinel;
 #[path = "macro_goto_definition.rs"]

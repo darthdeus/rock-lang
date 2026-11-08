@@ -220,6 +220,9 @@ struct Harness {
     stride: usize,
     /// The host graph's alias tables (default/empty for legacy fixtures).
     aliases: bone_core::modules::NsAliases,
+    /// The language server's lint cache, fed the change each update implies;
+    /// it must agree with a fresh lint pass after every step.
+    lints: bone_lints::IncrementalLintCache,
 }
 
 impl Harness {
@@ -247,14 +250,16 @@ impl Harness {
         aliases: bone_core::modules::NsAliases,
     ) -> Harness {
         let session = Session::new(warm.clone(), texts.clone(), &aliases).expect("session init");
-        let h = Harness {
+        let mut h = Harness {
             session,
             warm,
             texts,
             stride,
             aliases,
+            lints: bone_lints::IncrementalLintCache::default(),
         };
         h.assert_matches_batch();
+        h.assert_lints_match(&bone_lints::LintCacheUpdate::full());
         h
     }
 
@@ -270,6 +275,8 @@ impl Harness {
                 .push(bone_incremental::session::SessionFile::legacy(path, text)),
         }
         self.assert_matches_batch();
+        let change = bone_query::lint_cache_update(self.session.workspace(), path, &result);
+        self.assert_lints_match(&change);
         result
     }
 
@@ -280,7 +287,36 @@ impl Harness {
             .unwrap_or_else(|e| panic!("remove_file({path}) failed: {}", e.message));
         self.texts.retain(|f| f.path != path);
         self.assert_matches_batch();
+        self.lints.invalidate_file(Ustr::from(path));
+        self.assert_lints_match(&bone_lints::LintCacheUpdate::body_only([], [], []));
         result
+    }
+
+    /// Apply `change` to the lint cache and compare its findings with a fresh
+    /// whole-workspace lint pass over the same session workspace.
+    fn assert_lints_match(&mut self, change: &bone_lints::LintCacheUpdate) {
+        let sources: FxHashMap<Ustr, &str> = self
+            .texts
+            .iter()
+            .map(|f| (Ustr::from(f.path.as_str()), f.text.as_str()))
+            .collect();
+        let ws = self.session.workspace();
+        let warm = &self.session.warm_mids;
+        let options = bone_lints::LintOptions::default();
+        let (cached, _) = self
+            .lints
+            .update(ws, warm, true, &sources, &options, change);
+        let fresh = bone_lints::lint_workspace(ws, warm, true, &sources, &options);
+        let render = |findings: &[bone_lints::Finding]| {
+            let mut rows: Vec<String> = findings.iter().map(|f| format!("{f:?}")).collect();
+            rows.sort();
+            rows
+        };
+        assert_eq!(
+            render(&cached),
+            render(&fresh),
+            "incremental lint findings != fresh after {change:?}"
+        );
     }
 
     fn assert_matches_batch(&self) {

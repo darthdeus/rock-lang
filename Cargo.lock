@@ -183,6 +183,7 @@ name = "bone-incremental"
 version = "0.1.0"
 dependencies = [
  "bone-core",
+ "bone-lints",
  "bone-query",
  "bone-semantic",
  "rock-core",
