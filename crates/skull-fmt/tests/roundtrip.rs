@@ -141,6 +141,9 @@ fn single_line_containers_with_multiline_children_reach_a_fixed_point() {
         "fn f() {\n    let q = F { a + b: { c = c + 1; 10 }, d: 2 }\n}\n",
         "fn f() {\n    for x in v.iter().map(x => { t.push(x); x }).filter(x => { u(); true }) {\n        print(x)\n    }\n}\n",
         "fn f() -> P {\n    return P { get: () => n, bump: () => {\n        n = n + 1\n        return n\n    } }\n}\n",
+        "fn f() {\n    x = [{ y: {} }]\n}\n",
+        "fn f() {\n    let a = [1, { let x = 5; x * 2 }]\n}\n",
+        "fn f() {\n    let t = ({ let x = 5; x * 2 }, 1)\n}\n",
     ] {
         let original = skull_parser::parse_module_clean(source, "<source>".into()).unwrap();
         let config = skull_fmt::FormatConfig::default();

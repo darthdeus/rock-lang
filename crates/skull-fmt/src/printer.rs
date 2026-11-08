@@ -2303,11 +2303,14 @@ impl<'a> Printer<'a> {
         // Preserve the author's layout (a tuple takes a trailing comma only with
         // one element, where `(x)` would be a parenthesized `x`): a single-line
         // tuple stays inline; a multi-line one expands one per line.
+        // An element that renders across lines expands the tuple, as the next
+        // pass would.
         let trailing = if items.len() == 1 { "," } else { "" };
-        if span.line_range.0 == span.line_range.1 {
+        let docs: Vec<Doc> = items.iter().map(|i| self.expr(*i)).collect();
+        if span.line_range.0 == span.line_range.1 && !docs.iter().any(Doc::has_hard_line) {
             return Doc::concat([
                 Doc::text("("),
-                Doc::join(Doc::text(", "), items.iter().map(|i| self.expr(*i))),
+                Doc::join(Doc::text(", "), docs),
                 Doc::text(format!("{trailing})")),
             ]);
         }
@@ -2315,10 +2318,7 @@ impl<'a> Printer<'a> {
             Doc::text("("),
             Doc::indent(Doc::concat([
                 hardline(),
-                Doc::join(
-                    Doc::concat([Doc::text(","), hardline()]),
-                    items.iter().map(|i| self.expr(*i)),
-                ),
+                Doc::join(Doc::concat([Doc::text(","), hardline()]), docs),
                 Doc::text(trailing),
             ])),
             hardline(),
@@ -2335,11 +2335,25 @@ impl<'a> Printer<'a> {
         // -- even past the width limit. Same rule as struct literals.
         let force = span.line_range.0 != span.line_range.1;
         if !force {
-            return Doc::concat([
-                Doc::text(open.to_string()),
-                Doc::join(Doc::text(", "), items.iter().map(|i| self.expr(*i))),
-                Doc::text(close.to_string()),
-            ]);
+            let docs: Vec<Doc> = items.iter().map(|i| self.expr(*i)).collect();
+            if !docs.iter().any(Doc::has_hard_line) {
+                return Doc::concat([
+                    Doc::text(open.to_string()),
+                    Doc::join(Doc::text(", "), docs),
+                    Doc::text(close.to_string()),
+                ]);
+            }
+            // An element that renders across lines makes the array multi-line
+            // on the next pass: expand one element per line now.
+            let entries = items
+                .iter()
+                .zip(docs)
+                .map(|(e, d)| {
+                    let s = self.ast.e(e).span;
+                    (d, s.line_range.0, s)
+                })
+                .collect();
+            return self.comma_block(entries, None, open, close);
         }
         // Comment-bearing arrays route through comma_block (it preserves the
         // comments). Otherwise preserve the author's row layout verbatim.
