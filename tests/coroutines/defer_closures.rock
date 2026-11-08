@@ -315,3 +315,24 @@ fn test_hook_nested_defer_closure() {
     print(c.resume() ?? -1)
     c.kill()
 }
+
+// ---- Generic co fn ----
+co fn generic_defer<T>(x: T) -> Coroutine<T> {
+    defer {
+        let n = 5
+        let bump = () => { n = n + 1 }
+        bump()
+        print(n)
+    }
+    yield x
+}
+
+@test(output = "a\n6\n6")
+fn test_generic_defer_closure() {
+    let c = generic_defer("a")
+    print(c.resume() ?? "?")
+    c.resume()
+    let d = generic_defer(3)
+    d.resume()
+    d.kill()
+}

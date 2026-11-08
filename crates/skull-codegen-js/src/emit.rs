@@ -5043,22 +5043,24 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             self.st.reject(&name, e);
             return Ok(());
         }
-        // A specialized `co fn` takes this same sequence, unlike luajit's, which
-        // routes coroutines around it. Measured, not assumed: forcing the two to
-        // agree changed no result on a column instantiation, one carrying a
-        // capturing lambda, or one inlining an `@inline` callee -- the
-        // trampoline's own framed conversion is idempotent over what
-        // `convert_closures` already hoisted. Left as one path rather than a
-        // branch no fixture can distinguish.
-        if let Err(e) = prepare_body(
-            self.ws,
-            self.scx,
-            fr,
-            &mut mf,
-            &name,
-            &mut self.st.cache,
-            self.st.concrete,
-        ) {
+        // A specialized `co fn` takes cleanup only, like an unspecialized one:
+        // closure conversion here would erase the lambdas of its detached
+        // defer copies (unreachable from the entry) before the coroutine
+        // preparation splits them out.
+        let prepared = if mf.is_coroutine {
+            skull_transform::cleanup_with_nobox(self.ws, &mut mf)
+        } else {
+            prepare_body(
+                self.ws,
+                self.scx,
+                fr,
+                &mut mf,
+                &name,
+                &mut self.st.cache,
+                self.st.concrete,
+            )
+        };
+        if let Err(e) = prepared {
             self.st.reject(&name, e);
             return Ok(());
         }
