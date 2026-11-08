@@ -11,7 +11,7 @@
 // === STRUCT — basic two-invocation ident substitution ===
 
 macro decl_pair(Name: ident) {
-    struct Name { x: int, y: int }
+    value Name { x: int, y: int }
 }
 
 decl_pair(PairFoo)
@@ -200,10 +200,10 @@ fn test_emitted_fn_keeps_annotation() {
     assert(pure_dbl_b(7) == 14, "b")
 }
 
-// === `value struct` emission ===
+// === `value` struct emission ===
 
 macro decl_value_pair(Name: ident) {
-    value struct Name { x: int, y: int }
+    value Name { x: int, y: int }
 }
 
 decl_value_pair(VPairA)
@@ -214,7 +214,15 @@ fn test_value_struct_emission() {
     let a = VPairA { x: 1, y: 2 }
     let b = VPairB { x: 3, y: 4 }
     assert(a.x + b.y == 5, "value struct preserved through splice")
+    // A copy is independent of the place it was read from only for a value
+    // struct; a reference struct would alias it.
+    let h = VPairHolder { p: a }
+    let copy = h.p
+    h.p.x = 9
+    assert(copy.x == 1, "emitted struct keeps value semantics")
 }
+
+struct VPairHolder { p: VPairA }
 
 // === Generic struct emission ===
 

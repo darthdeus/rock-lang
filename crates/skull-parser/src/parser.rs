@@ -1734,8 +1734,8 @@ impl<'a> Parser<'a> {
     }
 
     /// Does the current token start an item declaration valid inside a macro
-    /// body? (`@anno` / `fn` / `co` / `extern` / `struct` / `enum` / `newtype` /
-    /// `inline(lua) fn`.) Mirrors rock's `token_starts_macro_body_item`.
+    /// body? (`@anno` / `fn` / `co` / `extern` / `struct` / `value` / `enum` /
+    /// `newtype` / `inline(lua) fn`.) Mirrors rock's `token_starts_macro_body_item`.
     ///
     /// `use`/`mod` are included so they parse as ITEMS and `macro_expand`
     /// rejects them by name (a macro must not change the module
@@ -1756,6 +1756,13 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(name) if name.as_str() == "co" => {
                 matches!(self.peek_kind(), TokenKind::Fn)
+            }
+            // `value Name {` / `nobox value Name`, as at module scope.
+            TokenKind::Ident(name) if name.as_str() == "value" => {
+                matches!(self.peek_kind(), TokenKind::Ident(_))
+            }
+            TokenKind::Ident(name) if name.as_str() == "nobox" => {
+                matches!(self.peek_kind(), TokenKind::Ident(v) if v.as_str() == "value")
             }
             TokenKind::Ident(name) if name.as_str() == "inline" => {
                 self.peek_kind() == TokenKind::OpenParen
