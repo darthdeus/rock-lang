@@ -582,3 +582,40 @@ fn let_from_refined_path() {
         print("{n} {l}")
     }
 }
+
+// ==============================
+// A local narrowed twice by one condition is restored after the branch
+// ==============================
+
+// `w != null && w.box != null` narrows `w` both directly and as the prefix of
+// `w.box`. Leaving the branch must put back `w`'s declared nullable type, so
+// the later `w != null` stays a live check rather than a rejected dead one.
+fn double_narrow_branch(w: Wrapper?) -> string {
+    if w != null && w.box != null {
+        print("inner")
+    }
+    if w != null { return "set" }
+    return "null"
+}
+
+@test(output = "null")
+fn double_narrow_restored_after_branch() {
+    print(double_narrow_branch(null))
+}
+
+// Two guards narrowing the same local inside a block (`w` directly, then as the
+// prefix of `w.box`): after the block the local is nullable again.
+fn double_guard_block(w: Wrapper?, flag: bool) -> string {
+    if flag {
+        if w == null { return "early" }
+        if w.box == null { return "early" }
+        print(w.box.label)
+    }
+    if w == null { return "null" }
+    return "set"
+}
+
+@test(output = "null")
+fn double_guard_restored_after_block() {
+    print(double_guard_block(null, false))
+}

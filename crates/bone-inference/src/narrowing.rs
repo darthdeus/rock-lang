@@ -221,7 +221,9 @@ pub(crate) fn infer_branch(
 
     let result = infer_expr_used(c, gamma, branch, used);
 
-    for (b, old) in saved_bindings {
+    // Reverse order: `x != null && x.f != null` narrows `x` twice, and only the
+    // first save holds its type from before the branch.
+    for (b, old) in saved_bindings.into_iter().rev() {
         gamma.out.binding_types.insert(b, old);
     }
 

@@ -2019,7 +2019,9 @@ fn infer_block(
         }
     };
 
-    for (b, old) in g_saved {
+    // Reverse order: a local narrowed by two guards was saved twice, and only
+    // the first save holds its type from before the block.
+    for (b, old) in g_saved.into_iter().rev() {
         gamma.out.binding_types.insert(b, old);
     }
 
