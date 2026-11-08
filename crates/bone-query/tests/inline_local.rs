@@ -74,3 +74,24 @@ fn atomic_initializer_is_not_parenthesized() {
         "fn f(v: int) -> int {\n    return g(v) + g(v)\n}\nfn g(a: int) -> int { a }\n"
     );
 }
+
+/// A use that is a whole call argument is delimited by the call's `(`/`,`/`)`,
+/// so it keeps its own precedence without parens; a use inside an operator
+/// still gets them.
+#[test]
+fn a_use_that_is_a_whole_call_argument_is_not_parenthesized() {
+    let src = "fn f() -> int {\n    let x = 1 + 2\n    print(x)\n    g(x, x * 2)\n    return x\n}\nfn g(a: int, b: int) {}\n";
+    let out = inlined(src, Position::new(1, 8));
+    assert_eq!(
+        out,
+        "fn f() -> int {\n    print(1 + 2)\n    g(1 + 2, (1 + 2) * 2)\n    return (1 + 2)\n}\nfn g(a: int, b: int) {}\n"
+    );
+}
+
+/// A method receiver is not delimited: `(1 + 2).abs()` needs its parens.
+#[test]
+fn a_use_that_is_a_method_receiver_stays_parenthesized() {
+    let src = "fn f() -> int {\n    let x = 1 - 2\n    return x.abs()\n}\n";
+    let out = inlined(src, Position::new(1, 8));
+    assert_eq!(out, "fn f() -> int {\n    return (1 - 2).abs()\n}\n");
+}

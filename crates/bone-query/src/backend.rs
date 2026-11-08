@@ -506,6 +506,16 @@ pub struct GenerateFunctionEdit {
 /// (outside strings) -- e.g. a constant-folded `1 + 2`. Postfix `.`/`::`/`?.` and
 /// operators inside a call/index/literal don't count, so `g(v)` / `a.b` / `S{..}`
 /// stay unparenthesized while `a + b` / `-x` / `a as int` get wrapped.
+/// Whether `src[start..end]` fills a whole delimited slot: a call argument,
+/// tuple or array element, or index, with only `(`/`[`/`,` before it and
+/// `)`/`]`/`,` after it. An expression spliced there keeps its precedence
+/// without parens. A method receiver is followed by `.`, so it is not one.
+fn is_delimited_slot(src: &str, start: usize, end: usize) -> bool {
+    let before = src[..start].trim_end().as_bytes().last();
+    let after = src[end..].trim_start().as_bytes().first();
+    matches!(before, Some(b'(' | b'[' | b',')) && matches!(after, Some(b')' | b']' | b','))
+}
+
 fn text_has_top_level_operator(s: &str) -> bool {
     let b = s.trim().as_bytes();
     let mut depth = 0i32;
@@ -1572,21 +1582,22 @@ impl BoneWorkspace {
         // but its SOURCE still has a top-level operator, so back it with a text
         // scan; either signal means splicing needs parens to keep precedence.
         let parenthesize = sites.parenthesize || text_has_top_level_operator(init_text);
-        let replacement = if parenthesize {
-            format!("({init_text})")
-        } else {
-            init_text.to_string()
-        };
+        let parenthesized = format!("({init_text})");
 
         let mut edits = Vec::with_capacity(sites.uses.len() + 1);
         for u in &sites.uses {
             let (s, e) = u.offset_range;
+            let new_text = if parenthesize && !is_delimited_slot(src, s, e) {
+                parenthesized.clone()
+            } else {
+                init_text.to_string()
+            };
             edits.push(TextEdit {
                 range: Range {
                     start: offset_to_position(src, s),
                     end: offset_to_position(src, e),
                 },
-                new_text: replacement.clone(),
+                new_text,
             });
         }
         // Delete the whole `let` line: leading indent through the trailing newline.
