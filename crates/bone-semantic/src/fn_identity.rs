@@ -168,8 +168,15 @@ pub fn check_generic_fn_eq(ws: &mut Workspace) {
     }
     let found: Vec<(ModuleId, BodyOwner, CompilerError)> = {
         let summary = summaries(ws);
+        // Only a call with generic bindings to a comparing callee can reject.
+        if summary.is_empty() {
+            return;
+        }
         let mut found = Vec::new();
         for (mid, owner, body, bi) in inferred_bodies(ws) {
+            if bi.call_generic_bindings.is_empty() {
+                continue;
+            }
             for (id, _) in body.expr_arena.iter() {
                 let (Some(&callee), Some(bindings)) = (
                     bi.resolved_overload_calls.get(&id),
