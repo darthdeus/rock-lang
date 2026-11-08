@@ -1,0 +1,124 @@
+// Numeric edge cases where a backend can silently disagree with LuaJIT, the
+// reference: floored division and remainder with negative operands and zero
+// divisors, uint division by zero, shift counts outside 0..31, and bitwise
+// operands above 2^31. Operands pass through `id` so no stage can fold them.
+//
+// Results that LuaJIT itself does not agree on across platforms are not pinned
+// here: a zero produced by floating-point arithmetic (`0.0 * -1.0`,
+// `0 ./ -5`) prints as `-0` on x64 but `0` on arm64, whose LuaJIT keeps
+// small integers as integers.
+
+fn id(x: int) -> int { return x }
+fn idu(x: uint) -> uint { return x }
+fn idf(x: float) -> float { return x }
+
+@test
+fn int_floor_division_signs() {
+    assert_eq(id(-7) ./ id(2), -4)
+    assert_eq(id(7) ./ id(-2), -4)
+    assert_eq(id(-7) ./ id(-2), 3)
+    assert_eq(id(-2147483648) ./ id(-1), 2147483648)
+    assert_eq(id(1000000000000) ./ id(7), 142857142857)
+}
+
+@test
+fn int_remainder_takes_the_divisor_sign() {
+    assert_eq(id(-7) % id(2), 1)
+    assert_eq(id(7) % id(-2), -1)
+    assert_eq(id(-7) % id(-2), -1)
+    assert_eq(id(-1000000000000) % id(7), 6)
+}
+
+// LuaJIT computes `a - floor(a / b) * b`, so an exact multiple leaves +0 even
+// for a negative divisor. A remainder built from JS `%` keeps the dividend's
+// sign and prints -0.
+@test
+fn zero_remainder_is_positive_zero() {
+    assert_eq(tostring(id(4) % id(-2)), "0")
+    assert_eq(tostring(id(-4) % id(-2)), "0")
+    assert_eq(tostring(id(-6) % id(3)), "0")
+    assert_eq(tostring(id(-2147483648) % id(-1)), "0")
+    assert_eq(tostring(idf(5.5) % idf(-5.5)), "0")
+    assert_eq(tostring(idf(-5.5) % idf(5.5)), "0")
+}
+
+@test
+fn float_remainder_follows_the_floor_formula() {
+    assert_eq(idf(7.5) % idf(2.0), 1.5)
+    assert_eq(idf(-7.5) % idf(2.0), 0.5)
+    assert_eq(idf(5.5) % idf(-2.0), -0.5)
+    assert_eq(idf(-5.5) % idf(-2.0), -1.5)
+    // The formula rounds -1e-20 + 1 to 1, one ulp outside [0, 1).
+    assert_eq(idf(-1e-20) % idf(1.0), 1.0)
+    assert_eq(tostring(idf(1.0) % (idf(1.0) / idf(0.0))), "nan")
+}
+
+@test
+fn int_division_by_zero_is_not_an_error() {
+    assert_eq(tostring(id(7) ./ id(0)), "inf")
+    assert_eq(tostring(id(-7) ./ id(0)), "-inf")
+    assert_eq(tostring(id(0) ./ id(0)), "nan")
+    assert_eq(tostring(id(7) % id(0)), "nan")
+    assert_eq(tostring(id(-7) % id(0)), "nan")
+    assert_eq(tostring(id(7) / id(0)), "inf")
+    assert_eq(tostring(id(0) / id(0)), "nan")
+}
+
+@test
+fn uint_division_by_zero_matches_int() {
+    assert_eq(tostring(idu(7 as uint) ./ idu(0 as uint)), "inf")
+    assert_eq(tostring(idu(0 as uint) ./ idu(0 as uint)), "nan")
+    assert_eq(tostring(idu(7 as uint) % idu(0 as uint)), "nan")
+    assert_eq(idu(4294967295 as uint) ./ idu(2 as uint), 2147483647 as uint)
+    assert_eq(idu(4294967295 as uint) % idu(10 as uint), 5 as uint)
+}
+
+@test
+fn slash_is_float_division_for_ints() {
+    assert_eq(id(7) / id(2), 3.5)
+    assert_eq(id(-7) / id(2), -3.5)
+    assert_eq(tostring(id(1) / id(3)), "0.33333333333333")
+}
+
+// Shift counts mask to their low 5 bits, so a negative count shifts by 32 + n.
+@test
+fn shift_counts_mask_to_five_bits() {
+    assert_eq(id(1) << id(-1), -2147483648)
+    assert_eq(id(1) << id(32), 1)
+    assert_eq(id(1) << id(33), 2)
+    assert_eq(id(1) >> id(-1), 0)
+    assert_eq(id(-1) >> id(-1), 1)
+    assert_eq(id(256) >> id(36), 16)
+}
+
+@test
+fn shifts_of_negative_numbers() {
+    assert_eq(id(-256) >> id(4), 268435440)
+    assert_eq(id(-256) << id(4), -4096)
+    assert_eq(id(-1) << id(31), -2147483648)
+}
+
+// Operands wrap modulo 2^32 into the signed range. LuaJIT's conversion is
+// exact only below 2^51 in magnitude; beyond that the backends differ.
+@test
+fn bitwise_operands_above_two_to_the_31() {
+    assert_eq(id(4294967296) & id(1), 0)
+    assert_eq(id(4294967297) & id(1), 1)
+    assert_eq(id(3000000000) | id(0), -1294967296)
+    assert_eq(id(3000000000) & id(3000000000), -1294967296)
+    assert_eq(id(2147483648) ^ id(0), -2147483648)
+    assert_eq(~id(2147483648), 2147483647)
+    assert_eq(id(8589934591) >> id(0), -1)
+    assert_eq(id(-4294967297) | id(0), -1)
+    assert_eq(id(2251799813685247) & id(255), 255)
+}
+
+@test
+fn uint_bitwise_stays_unsigned() {
+    assert_eq(idu(4294967295 as uint) >> idu(1 as uint), 2147483647 as uint)
+    assert_eq(idu(1 as uint) << idu(31 as uint), 2147483648 as uint)
+    assert_eq(~idu(0 as uint), 4294967295 as uint)
+    assert_eq(idu(3000000000 as uint) ^ idu(1 as uint), 3000000001 as uint)
+    assert_eq(idu(0 as uint) - idu(1 as uint), 4294967295 as uint)
+    assert_eq(idu(4000000000 as uint) * idu(3 as uint), 3410065408 as uint)
+}

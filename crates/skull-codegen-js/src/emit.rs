@@ -2093,6 +2093,12 @@ impl Emitter<'_> {
         ))
     }
 
+    /// An operand that renders as a temp or a literal, so repeating its text
+    /// neither re-evaluates nor grows the expression.
+    fn is_plain_operand(&self, iid: Idx<Inst>) -> bool {
+        !self.inlinable[raw(iid) as usize] || matches!(self.mf.insts[iid], Inst::Const(_))
+    }
+
     fn render_val(&self, iid: Idx<Inst>) -> Result<String, CompilerError> {
         if self.inlinable[raw(iid) as usize] {
             self.render_inst_expr(iid)
@@ -2142,16 +2148,14 @@ impl Emitter<'_> {
                 self.render_val(*a)?,
                 self.render_val(*b)?
             ),
+            // Both operands are already in uint range, so only a zero divisor
+            // can leave it, and LuaJIT yields inf/nan there rather than wrapping.
             Inst::UintDiv(a, b) => format!(
-                "(Math.floor({} / {}) >>> 0)",
+                "Math.floor({} / {})",
                 self.render_val(*a)?,
                 self.render_val(*b)?
             ),
-            Inst::UintMod(a, b) => format!(
-                "(({} % {}) >>> 0)",
-                self.render_val(*a)?,
-                self.render_val(*b)?
-            ),
+            Inst::UintMod(a, b) => bin(a, "%", b, self)?,
             Inst::FloatDiv(a, b) => bin(a, "/", b, self)?,
             // Rock int `/` floors toward -inf (Lua); JS `/` is real division.
             Inst::IntDiv(a, b) => format!(
@@ -2256,11 +2260,16 @@ impl Emitter<'_> {
             // The scalar `{x}` interpolation stringify (int/bool/string) -- same
             // `%.14g`-parity path as a concat leaf.
             Inst::ToString(x) => format!("lua_tostring({})", self.render_val(*x)?),
-            // Rock `%` is Lua floored modulo; JS `%` is truncated remainder
-            // (differs for mixed signs). `((a % b) + b) % b` is the floored form.
+            // Rock `%` is LuaJIT's `a - floor(a / b) * b`, computed the same way
+            // so rounding and the sign of a zero agree; JS `%` truncates. Each
+            // operand appears twice, so an inlined expression binds once.
             Inst::IntMod(a, b) | Inst::FloatMod(a, b) => {
-                let (a, b) = (self.render_val(*a)?, self.render_val(*b)?);
-                format!("((({a} % {b}) + {b}) % {b})")
+                let (ra, rb) = (self.render_val(*a)?, self.render_val(*b)?);
+                if self.is_plain_operand(*a) && self.is_plain_operand(*b) {
+                    format!("({ra} - Math.floor({ra} / {rb}) * {rb})")
+                } else {
+                    format!("((a, b) => a - Math.floor(a / b) * b)({ra}, {rb})")
+                }
             }
             Inst::Call { func, args } => self.render_call(iid, *func, args)?,
             // A capture-free hoisted closure resolves its reusable logical slot.

@@ -27,6 +27,15 @@ operator definitions are rejected; equality is not user-overloadable. Prefix
 [operator table and tests](../crates/bone-semantic/tests/operator_table.rs)
 keep declarations aligned with dispatch.
 
+Numbers follow LuaJIT on every backend. `./` floors and `%` is
+`a - floor(a / b) * b`, so the remainder takes the divisor's sign. Dividing by
+zero is not an error: it yields `inf`, `-inf` or `nan`, for `uint` too.
+Bitwise operators work on signed 32-bit words: an operand wraps modulo 2^32
+and a shift count uses its low 5 bits. `>>` is a logical shift. An operand of
+magnitude 2^51 or more gives a backend-specific result. Whether
+arithmetic such as `0.0 * -1.0` yields `-0` depends on LuaJIT's platform, so
+do not rely on it. See [numeric edge tests](../tests/operators/numeric_edges.rock).
+
 `ref T` accesses a place without copying its value; field writes go through
 to that place. A function can return a reference derived from a valid input
 reference or its field, but not to a local place. The compiler rejects refs
