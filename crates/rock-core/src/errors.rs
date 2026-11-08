@@ -209,9 +209,9 @@ impl CompilerError {
 /// all of them against one cache; any multi-diagnostic render belongs here.
 ///
 /// An error in a stdlib file whose contents the caller never supplied has no
-/// source to frame and falls back to the one-line form. A caller that does
-/// supply the stdlib (the CLI does) gets the same source report as for a user
-/// file.
+/// source to frame and falls back to the one-line form, as does an error with
+/// no location at all. A caller that does supply the stdlib (the CLI does) gets
+/// the same source report as for a user file.
 #[must_use]
 pub fn render_all(errs: &[CompilerError], sources: &SourceFiles) -> String {
     if errs.is_empty() {
@@ -225,7 +225,8 @@ pub fn render_all(errs: &[CompilerError], sources: &SourceFiles) -> String {
             .any(|source| source.borrow().file.to_id_path() == error.location.file.as_str())
     };
     let frameless = |error: &CompilerError| {
-        crate::is_stdlib_module_file(error.location.file.as_str()) && !has_source(error)
+        let file = error.location.file.as_str();
+        file == UNKNOWN_FILE_NAME || (crate::is_stdlib_module_file(file) && !has_source(error))
     };
 
     let (unframed, framed): (Vec<&CompilerError>, Vec<&CompilerError>) =
@@ -512,6 +513,22 @@ mod tests {
             format!(
                 "{}\n{}",
                 strip_ansi_sgr(&stdlib.render_compact()),
+                strip_ansi_sgr(&labelled().render(&files()))
+            )
+        );
+    }
+
+    // A location-less error (`rock shader <file> <missing_root>`) has no file
+    // to frame; ariadne would print "Unable to fetch source" and an empty box.
+    #[test]
+    fn render_all_reports_a_location_less_error_on_one_line() {
+        let nowhere = CompilerError::new_no_location("shader root `nope` not found".to_string());
+        let rendered = strip_ansi_sgr(&render_all(&[labelled(), nowhere.clone()], &files()));
+        assert_eq!(
+            rendered,
+            format!(
+                "{}\n{}",
+                "[E00] Error: shader root `nope` not found",
                 strip_ansi_sgr(&labelled().render(&files()))
             )
         );
