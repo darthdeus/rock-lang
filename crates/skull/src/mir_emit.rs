@@ -20,6 +20,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use skull_codegen_lua::{CodegenCtx, emit_function, mangle_fn};
 use skull_mir::instance::Instance;
 use skull_mir::mir::{FuncRef, Inst, MirFunc, Term};
+use skull_mir::reach::PendingInit;
 use skull_parser::CompilerError;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
@@ -161,51 +162,19 @@ fn direct_refs(ws: &Workspace, mf: &MirFunc) -> (Vec<Ustr>, Vec<Ustr>) {
     (globals, calls)
 }
 
-/// One pending global-init line plus the dependency facts the topo-sort needs.
-struct GlobalInit {
-    /// The global's name (the LHS of `<NAME> = __skull_ginit_<NAME>()`).
-    name: Ustr,
-    /// The globals this init transitively reads (through its call graph),
-    /// restricted to globals that themselves have an init line.
-    deps: Vec<Ustr>,
-    line: String,
-}
-
-/// Round-based topo-sort: an init emits once every global it (transitively) reads
-/// that ALSO has an init line is already emitted (self-refs ignored). Source order
-/// is kept within a round. No progress => mutually-referential initializers —
-/// rejected, not emitted to fail at runtime as a nil latch.
-fn sort_global_init_lines(inits: Vec<GlobalInit>) -> Result<Vec<String>, CompilerError> {
-    let known: FxHashSet<Ustr> = inits.iter().map(|g| g.name).collect();
-    let mut done: FxHashSet<Ustr> = FxHashSet::default();
-    let mut lines = Vec::with_capacity(inits.len());
-    let mut remaining = inits;
-    while !remaining.is_empty() {
-        let mut next = Vec::new();
-        let mut progress = false;
-        for g in remaining {
-            let ready = g
-                .deps
-                .iter()
-                .all(|d| *d == g.name || !known.contains(d) || done.contains(d));
-            if ready {
-                done.insert(g.name);
-                lines.push(g.line);
-                progress = true;
-            } else {
-                next.push(g);
-            }
-        }
-        if !progress {
-            let names: Vec<&str> = next.iter().map(|g| g.name.as_str()).collect();
-            return Err(CompilerError::new_no_location(format!(
-                "skull: global initializers are mutually recursive: {}",
-                names.join(", ")
-            )));
-        }
-        remaining = next;
-    }
-    Ok(lines)
+/// Sort the pending init lines into load-time order (see
+/// [`skull_mir::reach::order_global_inits`]).
+fn sort_global_init_lines(
+    inits: Vec<PendingInit<String>>,
+    leaf_owner: &FxHashMap<Ustr, Ustr>,
+) -> Result<Vec<String>, CompilerError> {
+    skull_mir::reach::order_global_inits(inits, leaf_owner).map_err(|stuck| {
+        let names: Vec<&str> = stuck.iter().map(|name| name.as_str()).collect();
+        CompilerError::new_no_location(format!(
+            "skull: global initializers are mutually recursive: {}",
+            names.join(", ")
+        ))
+    })
 }
 
 const LUA_INIT_PART_BYTES: usize = 32 * 1024;
@@ -5930,16 +5899,12 @@ fn assemble(
             }
         }
     }
-    let inits: Vec<GlobalInit> = pending_inits
+    let inits: Vec<PendingInit<String>> = pending_inits
         .into_iter()
-        .map(|(name, init_name, line)| GlobalInit {
+        .map(|(name, init_name, line)| PendingInit {
             name,
-            deps: reach
-                .deps_of(init_name)
-                .into_iter()
-                .map(|d| leaf_owner.get(&d).copied().unwrap_or(d))
-                .collect(),
-            line,
+            deps: reach.deps_of(init_name),
+            item: line,
         })
         .collect();
     // `static` cells: on reload, RESET (nil the cell + clear the done-flag) when
@@ -5963,7 +5928,7 @@ fn assemble(
     }
 
     out.push_str(&static_resets);
-    let init_lines = sort_global_init_lines(inits)?;
+    let init_lines = sort_global_init_lines(inits, &leaf_owner)?;
     out.push_str(&state_initializer_lua(&init_lines));
 
     // Decorator APPLICATIONS (after global inits so a deco body can push a global).
@@ -8618,11 +8583,10 @@ fn assemble_overlay(
                 });
             }
         }
-        let affected_names: FxHashSet<Ustr> = affected.iter().map(|a| a.name).collect();
 
         // Emit each affected const's ginit fn now; build its init
         // line + dependency edges (restricted to affected consts) for the sort.
-        let mut inits: Vec<GlobalInit> = Vec::new();
+        let mut inits: Vec<PendingInit<String>> = Vec::new();
         let mut definitions = LuaDefinitionBuffer::new();
         for a in &affected {
             let line = {
@@ -8646,21 +8610,15 @@ fn assemble_overlay(
                     ))
                 })?
             };
-            let edges: Vec<Ustr> = a
-                .reach
-                .iter()
-                .copied()
-                .filter(|n| *n != a.name && affected_names.contains(n))
-                .collect();
-            inits.push(GlobalInit {
+            inits.push(PendingInit {
                 name: a.name,
-                deps: edges,
-                line,
+                deps: a.reach.iter().copied().collect(),
+                item: line,
             });
         }
         definitions.append_to(&mut out);
 
-        out.push_str(&sort_global_init_lines(inits)?.concat());
+        out.push_str(&sort_global_init_lines(inits, &FxHashMap::default())?.concat());
     }
     let d_const_inits = t_const_inits.elapsed();
 

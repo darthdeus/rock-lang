@@ -6939,8 +6939,8 @@ fn affected_const_names(
 /// it TRANSITIVELY reads through its call graph: `__G.<name> = <init_name>();`.
 /// A shallow "reads in the init body" edge misses `ACT_UI_CONFIRM = action_new(..)`
 /// where the `ACTIONS` read is inside `action_new`, not the init body -- so build
-/// the transitive global-read closure over every emitted fn (ginits + lowered),
-/// exactly the luajit backend's `transitive_global_reads`. A genuine cycle rejects.
+/// the transitive global-read closure over every emitted fn (ginits + lowered).
+/// A genuine cycle rejects.
 fn order_global_inits(
     ginits: &[GlobalInit],
     lowered: &[(FuncRef, MirFunc)],
@@ -6948,194 +6948,119 @@ fn order_global_inits(
     state_slots: &HashMap<ustr::Ustr, String>,
 ) -> Result<Vec<GlobalInitLine>, CompilerError> {
     // Per-fn direct facts, keyed by emit name (ginit = init_name, lowered = js name).
-    let mut direct_globals: HashMap<ustr::Ustr, Vec<ustr::Ustr>> = HashMap::new();
-    let mut direct_calls: HashMap<ustr::Ustr, Vec<ustr::Ustr>> = HashMap::new();
-    let mut record = |key: ustr::Ustr, mf: &MirFunc| {
+    let mut direct_globals: rustc_hash::FxHashMap<Ustr, Vec<Ustr>> = Default::default();
+    let mut direct_calls: rustc_hash::FxHashMap<Ustr, Vec<Ustr>> = Default::default();
+    let mut record = |key: Ustr, mf: &MirFunc| {
         direct_globals.insert(key, global_refs(mf));
         direct_calls.insert(key, direct_callees(mf, names));
     };
     for g in ginits {
-        record(ustr::Ustr::from(g.init_name.as_str()), &g.mf);
+        record(Ustr::from(g.init_name.as_str()), &g.mf);
     }
     // Key by the EMIT name (`names[fr]`, mangled) -- that is what `direct_callees`
     // resolves a call to, NOT the unmangled `mf.name`.
     for (fr, mf) in lowered {
         if let Some(emit_name) = names.get(&Instance::base(*fr)) {
-            record(ustr::Ustr::from(emit_name.as_str()), mf);
+            record(Ustr::from(emit_name.as_str()), mf);
         }
     }
-
-    // Transitive closure: closure[f] |= closure[callee], to a fixpoint.
-    let mut id_of: HashMap<ustr::Ustr, usize> = HashMap::new();
-    let intern = |s: ustr::Ustr, id_of: &mut HashMap<ustr::Ustr, usize>| -> usize {
-        let next = id_of.len();
-        *id_of.entry(s).or_insert(next)
-    };
-    for (f, gs) in direct_globals.iter() {
-        intern(*f, &mut id_of);
-        for g in gs {
-            intern(*g, &mut id_of);
-        }
-    }
-    for (f, cs) in direct_calls.iter() {
-        intern(*f, &mut id_of);
-        for c in cs {
-            intern(*c, &mut id_of);
-        }
-    }
-    let n = id_of.len();
-    let mut closure: Vec<HashSet<usize>> = vec![HashSet::new(); n];
-    let mut callees: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (f, gs) in direct_globals.iter() {
-        let fi = id_of[f];
-        for g in gs {
-            closure[fi].insert(id_of[g]);
-        }
-    }
-    for (f, cs) in direct_calls.iter() {
-        let fi = id_of[f];
-        callees[fi].extend(cs.iter().map(|c| id_of[c]));
-    }
-    let mut add: Vec<usize> = Vec::new();
-    loop {
-        let mut changed = false;
-        for fi in 0..n {
-            if callees[fi].is_empty() {
-                continue;
-            }
-            add.clear();
-            for &c in &callees[fi] {
-                for &g in &closure[c] {
-                    if !closure[fi].contains(&g) {
-                        add.push(g);
-                    }
-                }
-            }
-            for &g in &add {
-                if closure[fi].insert(g) {
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    // Round-based topo sort over each init's transitive global reads (restricted to
-    // globals that themselves have an init line); source order kept within a round.
-    let mut names_by_id: Vec<ustr::Ustr> = vec![ustr::Ustr::from(""); n];
-    for (&k, &v) in id_of.iter() {
-        names_by_id[v] = k;
-    }
-    let known: HashSet<ustr::Ustr> = ginits.iter().map(|g| g.name).collect();
+    let reach = skull_mir::reach::transitive_global_reads(&direct_globals, &direct_calls);
     // A `nobox` global is READ by its leaf names, which are synthesized and never
-    // appear in `global_by_name` -- so an edge to one is invisible to a filter
-    // keyed on base names, and the dependent init emits FIRST, off undefined
-    // leaves. Same blind spot as the init line itself had: the leaves are the
-    // storage, and every mechanism keyed on the base name has to be told.
-    let leaf_base: HashMap<ustr::Ustr, ustr::Ustr> = ginits
+    // appear in `global_by_name`; the leaves are the storage, so an edge to one
+    // is an edge to the global that owns them.
+    let leaf_owner: rustc_hash::FxHashMap<Ustr, Ustr> = ginits
         .iter()
         .filter_map(|g| g.leaves.as_ref().map(|ls| (g.name, ls)))
         .flat_map(|(base, ls)| ls.iter().map(move |&leaf| (leaf, base)))
         .collect();
-    let init_deps: HashMap<ustr::Ustr, HashSet<ustr::Ustr>> = ginits
+    let pending = ginits
         .iter()
-        .map(|g| {
-            let ds: HashSet<ustr::Ustr> = match id_of.get(&ustr::Ustr::from(g.init_name.as_str())) {
-                Some(&fi) => closure[fi]
-                    .iter()
-                    .map(|&gid| names_by_id[gid])
-                    .map(|d| leaf_base.get(&d).copied().unwrap_or(d))
-                    .filter(|d| *d != g.name && known.contains(d))
-                    .collect(),
-                None => HashSet::new(),
-            };
-            (g.name, ds)
+        .map(|g| skull_mir::reach::PendingInit {
+            name: g.name,
+            deps: reach.deps_of(Ustr::from(g.init_name.as_str())),
+            item: g,
         })
         .collect();
+    let ordered = skull_mir::reach::order_global_inits(pending, &leaf_owner).map_err(|stuck| {
+        let names: Vec<&str> = stuck.iter().map(|name| name.as_str()).collect();
+        err(format!(
+            "JS subset: module globals are mutually recursive: {}",
+            names.join(", ")
+        ))
+    })?;
+    ordered
+        .into_iter()
+        .map(|g| global_init_line(g, state_slots))
+        .collect()
+}
 
-    let mut emitted: HashSet<ustr::Ustr> = HashSet::new();
-    let mut lines = Vec::with_capacity(ginits.len());
-    let mut remaining: Vec<&GlobalInit> = ginits.iter().collect();
-    while !remaining.is_empty() {
-        let before = remaining.len();
-        let mut next = Vec::with_capacity(before);
-        for g in remaining.drain(..) {
-            if init_deps[&g.name].iter().all(|d| emitted.contains(d)) {
-                lines.push(GlobalInitLine {
-                    name: g.name,
-                    js: match (g.is_const, &g.leaves) {
-                        (true, Some(leaves)) => {
-                            let mut js = format!(
-                                "{} = {}();", js_member("__G", leaves[0].as_str())?, g.init_name
-                            );
-                            for (i, leaf) in leaves.iter().enumerate().skip(1) {
-                                js.push_str(&format!(
-                                    " {} = __rock_ret{i};", js_member("__G", leaf.as_str())?
-                                ));
-                            }
-                            js.push('\n');
-                            js
-                        }
-                        (true, None) => format!(
-                            "{} = {}();\n", js_member("__G", g.name.as_str())?, g.init_name
-                        ),
-                        // Leaf storage: the ginit splats, so the extra leaves come
-                        // back through the scratch bank and must be read off it
-                        // before anything else can call and clobber it.
-                        (false, Some(leaves)) => {
-                            let keys: Vec<&str> = leaves
-                                .iter()
-                                .map(|leaf| {
-                                    state_slots.get(leaf).map(String::as_str).ok_or_else(|| {
-                                        err(format!(
-                                            "JS: global `{}` has no compiler-owned storage slot for `{leaf}`",
-                                            g.name
-                                        ))
-                                    })
-                                })
-                                .collect::<Result<_, _>>()?;
-                            let mut js = format!(
-                                "if (__rock_globals_fresh) {{ __rock_globals[{:?}] = {}();",
-                                keys[0], g.init_name
-                            );
-                            for (i, _) in leaves.iter().enumerate().skip(1) {
-                                let key = keys[i];
-                                js.push_str(&format!(" __rock_globals[{key:?}] = __rock_ret{i};"));
-                            }
-                            js.push_str(" }\n");
-                            js
-                        }
-                        (false, None) => {
-                            let key = state_slots.get(&symbol_of_key(g.name)).ok_or_else(|| {
-                                err(format!(
-                                    "JS: global `{}` has no compiler-owned storage slot",
-                                    g.name
-                                ))
-                            })?;
-                            format!(
-                                "if (__rock_globals_fresh) __rock_globals[{key:?}] = {}();\n",
-                                g.init_name
-                            )
-                        }
-                    },
-                });
-                emitted.insert(g.name);
-            } else {
-                next.push(g);
+fn global_init_line(
+    g: &GlobalInit,
+    state_slots: &HashMap<ustr::Ustr, String>,
+) -> Result<GlobalInitLine, CompilerError> {
+    Ok(GlobalInitLine {
+        name: g.name,
+        js: match (g.is_const, &g.leaves) {
+            (true, Some(leaves)) => {
+                let mut js = format!(
+                    "{} = {}();",
+                    js_member("__G", leaves[0].as_str())?,
+                    g.init_name
+                );
+                for (i, leaf) in leaves.iter().enumerate().skip(1) {
+                    js.push_str(&format!(
+                        " {} = __rock_ret{i};",
+                        js_member("__G", leaf.as_str())?
+                    ));
+                }
+                js.push('\n');
+                js
             }
-        }
-        remaining = next;
-        if remaining.len() == before {
-            let names: Vec<&str> = remaining.iter().map(|g| g.name.as_str()).collect();
-            return Err(err(format!(
-                "JS subset: module globals are mutually recursive: {}",
-                names.join(", ")
-            )));
-        }
-    }
-    Ok(lines)
+            (true, None) => format!(
+                "{} = {}();\n",
+                js_member("__G", g.name.as_str())?,
+                g.init_name
+            ),
+            // Leaf storage: the ginit splats, so the extra leaves come
+            // back through the scratch bank and must be read off it
+            // before anything else can call and clobber it.
+            (false, Some(leaves)) => {
+                let keys: Vec<&str> = leaves
+                    .iter()
+                    .map(|leaf| {
+                        state_slots.get(leaf).map(String::as_str).ok_or_else(|| {
+                            err(format!(
+                                "JS: global `{}` has no compiler-owned storage slot for `{leaf}`",
+                                g.name
+                            ))
+                        })
+                    })
+                    .collect::<Result<_, _>>()?;
+                let mut js = format!(
+                    "if (__rock_globals_fresh) {{ __rock_globals[{:?}] = {}();",
+                    keys[0], g.init_name
+                );
+                for (i, _) in leaves.iter().enumerate().skip(1) {
+                    let key = keys[i];
+                    js.push_str(&format!(" __rock_globals[{key:?}] = __rock_ret{i};"));
+                }
+                js.push_str(" }\n");
+                js
+            }
+            (false, None) => {
+                let key = state_slots.get(&symbol_of_key(g.name)).ok_or_else(|| {
+                    err(format!(
+                        "JS: global `{}` has no compiler-owned storage slot",
+                        g.name
+                    ))
+                })?;
+                format!(
+                    "if (__rock_globals_fresh) __rock_globals[{key:?}] = {}();\n",
+                    g.init_name
+                )
+            }
+        },
+    })
 }
 
 /// All valid `__rock_enum_*` global names -> their JS def line. A payload-free

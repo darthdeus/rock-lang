@@ -111,6 +111,64 @@ pub fn transitive_global_reads(
     }
 }
 
+/// One global initializer waiting for its slot in load-time order.
+pub struct PendingInit<T> {
+    /// The global's logical name.
+    pub name: Ustr,
+    /// The globals the initializer reads, transitively through its call graph.
+    /// Leaf names and names without an initializer are allowed here.
+    pub deps: Vec<Ustr>,
+    /// The backend's payload for this init, returned in sorted order.
+    pub item: T,
+}
+
+/// Order global initializers so each runs after every initialized global it
+/// reads. Rounds keep source order among the inits that become ready together.
+///
+/// A `nobox` global is read through its synthesized leaf names, so `leaf_owner`
+/// maps each leaf back to the global that owns it; without it the dependent init
+/// would sort first and read undefined leaves. Self-reads and reads of globals
+/// with no initializer impose nothing. A round without progress means the
+/// initializers are mutually recursive: the stuck names come back as the error,
+/// in source order, for the backend to report.
+pub fn order_global_inits<T>(
+    inits: Vec<PendingInit<T>>,
+    leaf_owner: &FxHashMap<Ustr, Ustr>,
+) -> Result<Vec<T>, Vec<Ustr>> {
+    let known: HashSet<Ustr> = inits.iter().map(|init| init.name).collect();
+    let mut remaining: Vec<(Ustr, HashSet<Ustr>, T)> = inits
+        .into_iter()
+        .map(|init| {
+            let deps = init
+                .deps
+                .iter()
+                .map(|dep| leaf_owner.get(dep).copied().unwrap_or(*dep))
+                .filter(|dep| *dep != init.name && known.contains(dep))
+                .collect();
+            (init.name, deps, init.item)
+        })
+        .collect();
+    let mut done: HashSet<Ustr> = HashSet::default();
+    let mut ordered = Vec::with_capacity(remaining.len());
+    while !remaining.is_empty() {
+        let before = remaining.len();
+        let mut next = Vec::new();
+        for (name, deps, item) in remaining {
+            if deps.iter().all(|dep| done.contains(dep)) {
+                done.insert(name);
+                ordered.push(item);
+            } else {
+                next.push((name, deps, item));
+            }
+        }
+        if next.len() == before {
+            return Err(next.into_iter().map(|(name, _, _)| name).collect());
+        }
+        remaining = next;
+    }
+    Ok(ordered)
+}
+
 /// The per-backend parameters of the reachability search.
 ///
 /// The driver owns the traversal state (seen/in-progress marking, the stack,
@@ -414,4 +472,49 @@ pub fn spec_bound_calls(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod init_order_tests {
+    use super::{PendingInit, order_global_inits};
+    use rustc_hash::FxHashMap;
+    use ustr::Ustr;
+
+    fn init(name: &str, deps: &[&str]) -> PendingInit<&'static str> {
+        PendingInit {
+            name: Ustr::from(name),
+            deps: deps.iter().map(|d| Ustr::from(d)).collect(),
+            item: Ustr::from(name).as_str(),
+        }
+    }
+
+    #[test]
+    fn a_leaf_read_orders_after_the_leaf_owner() {
+        let leaf_owner: FxHashMap<Ustr, Ustr> = [
+            (Ustr::from("__nbg_BASE_0"), Ustr::from("BASE")),
+            (Ustr::from("__nbg_BASE_1"), Ustr::from("BASE")),
+        ]
+        .into_iter()
+        .collect();
+        let order = order_global_inits(
+            vec![
+                init("DERIVED", &["__nbg_BASE_1", "UNINITIALIZED", "DERIVED"]),
+                init("BASE", &[]),
+                init("OTHER", &[]),
+            ],
+            &leaf_owner,
+        )
+        .unwrap();
+        assert_eq!(order, ["BASE", "OTHER", "DERIVED"]);
+    }
+
+    #[test]
+    fn mutually_recursive_inits_report_the_stuck_names() {
+        let stuck = order_global_inits(
+            vec![init("A", &["B"]), init("C", &[]), init("B", &["A"])],
+            &FxHashMap::default(),
+        )
+        .unwrap_err();
+        assert_eq!(stuck, [Ustr::from("A"), Ustr::from("B")]);
+    }
 }
