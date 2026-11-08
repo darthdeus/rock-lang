@@ -260,3 +260,31 @@ Use `test_utils::strip_ansi_sgr` when an assertion checks diagnostic text or
 layout rather than styling. For Node subprocesses whose numeric stdout is test
 data, remove `FORCE_COLOR` from the child environment; `NO_COLOR` alone does not
 override it. Do not change process-wide environment variables in parallel tests.
+
+## LSP fixtures
+
+The `tests/lsp/` corpus contains `.rock.lsp` fixtures. A single-request fixture
+specifies source, an operation and position, and expected results. For example,
+[`goto_definition.rock.lsp`](../tests/lsp/goto_definition.rock.lsp) checks a
+returned file and position. Run a file with the compiler being edited:
+
+```sh
+cargo run --quiet --bin rock -- test tests/lsp/goto_definition.rock.lsp
+```
+
+A single-request fixture starts a fresh process. For an editor bug that depends
+on prior edits, use an `edit_sequence` fixture such as
+[`edit_sequence.rock.lsp`](../tests/lsp/edit_sequence.rock.lsp), which sends
+changes to one persistent server. In-process query and protocol tests also live
+in the `bone-query` and `rock-lsp` crates:
+
+```sh
+cargo test --locked -p bone-query
+cargo test --locked -p rock-lsp
+```
+
+Check the fixture's reported test count and assert the response content, not
+just that the request succeeded. The parser accepts only specific expectation
+forms for each operation and can silently skip unrecognized lines; make a valid
+expectation fail temporarily to verify that it is actually checked. The fixture parser and validators are in
+[`lsp_test.rs`](../crates/rock-cli/src/lsp_test.rs).

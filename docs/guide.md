@@ -22,6 +22,10 @@ rock run 01_hello.rock
 `rock run` and `rock test` execute programs with LuaJIT, so `luajit`
 must be on `PATH`. See the README for install instructions.
 
+Advanced facilities are covered in the [language reference](language-reference.md)
+and [coroutine reference](coroutines.md). Contributors can start with
+[compiler structure](compiler.md) and [testing](testing.md).
+
 ## Your first program
 
 A program is a file with a `main` function. `print` writes a line.
