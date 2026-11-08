@@ -1,3 +1,4 @@
 /target
 /dist
 /playground/dist
+/perf/report.html
