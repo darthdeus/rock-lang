@@ -33,10 +33,16 @@ impl SourceFilesExt for SourceFiles {
     }
 
     fn from_multiple_paths(paths: &[PathBuf], preprocess: bool) -> Result<SourceFiles> {
-        let files = paths
-            .iter()
-            .map(|path| source_file_load(path, preprocess))
-            .collect::<Result<Vec<_>>>()?;
+        // Load in parallel, then collect in path order so the reported error
+        // is still the first failing path's.
+        let loaded: Vec<Result<SourceFile>> = {
+            use rayon::prelude::*;
+            paths
+                .par_iter()
+                .map(|path| source_file_load(path, preprocess))
+                .collect()
+        };
+        let files = loaded.into_iter().collect::<Result<Vec<_>>>()?;
 
         let files = files
             .into_iter()
