@@ -296,13 +296,7 @@ fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(), Compiler
     // cursors: MapIter{__inner: VecIter{..}}). Sweeping between rounds lets
     // each level peel; depth = chain nesting, so this converges fast. The ctor
     // store prefilter avoids allocating the per-cell analysis for no-op rounds.
-    let dbg = std::env::var("SROA_DEBUG").is_ok();
-    let mut round = 0;
     loop {
-        if dbg {
-            eprintln!("--- SROA round {round} input ({}) ---\n{func}", func.name);
-            round += 1;
-        }
         let changed = if has_scalarizable_store(func) {
             scalarize_struct_cells_once(func)?
         } else {
@@ -317,9 +311,6 @@ fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(), Compiler
         if !changed && !folded {
             break;
         }
-    }
-    if dbg {
-        eprintln!("--- SROA final ({}) ---\n{func}", func.name);
     }
     if fold_const_branches(func) {
         dce(func);

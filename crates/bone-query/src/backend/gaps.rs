@@ -100,20 +100,8 @@ pub fn inlay_hints(
     start: usize,
     end: usize,
 ) -> Vec<HintEntry> {
-    let prof = crate::backend::lsp_profile_enabled();
-    let t = bone_core::prelude::Instant::now();
     let lets = crate::query::inferred_let_bindings(ws, mid, inf, start, end);
-    let let_ms = t.elapsed().as_secs_f64() * 1000.0;
-    let t = bone_core::prelude::Instant::now();
     let params = crate::query::call_param_hints(ws, mid, inf, start, end);
-    let param_ms = t.elapsed().as_secs_f64() * 1000.0;
-    if prof {
-        eprintln!(
-            "[bone inlay] let-bindings {let_ms:.2}ms ({} hints)  call-params {param_ms:.2}ms ({} hints)",
-            lets.len(),
-            params.len()
-        );
-    }
     let type_hints = lets.into_iter().map(|(span, ty)| HintEntry {
         span,
         label: format!(": {ty}"),

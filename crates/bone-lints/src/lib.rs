@@ -522,37 +522,6 @@ impl LintCacheStats {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct LintCacheSnapshotStats {
-    pub snapshots: usize,
-    pub cached_entries: usize,
-    pub cached_findings: usize,
-    pub file_entries: usize,
-    pub flat_body_entries: usize,
-    pub inference_body_entries: usize,
-    pub other_entries: usize,
-    pub global_entries: usize,
-    pub last_entries: usize,
-    pub count_ns: u128,
-    pub clone_ns: u128,
-}
-
-impl LintCacheSnapshotStats {
-    pub fn merge(&mut self, other: &Self) {
-        self.snapshots += other.snapshots;
-        self.cached_entries += other.cached_entries;
-        self.cached_findings += other.cached_findings;
-        self.file_entries += other.file_entries;
-        self.flat_body_entries += other.flat_body_entries;
-        self.inference_body_entries += other.inference_body_entries;
-        self.other_entries += other.other_entries;
-        self.global_entries += other.global_entries;
-        self.last_entries += other.last_entries;
-        self.count_ns += other.count_ns;
-        self.clone_ns += other.clone_ns;
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 struct CachedFileFindings {
     flat_raw: FxHashMap<BodyOwner, Vec<Finding>>,
@@ -1475,40 +1444,6 @@ impl IncrementalLintCache {
         fresh_keys.sort();
         cached_keys.sort();
         fresh_keys == cached_keys
-    }
-
-    pub fn snapshot_stats(&self, measure: bool) -> Option<LintCacheSnapshotStats> {
-        let mut stats = measure.then(LintCacheSnapshotStats::default);
-        let count_started = measure.then(Instant::now);
-        if let (Some(stats), Some(count_started)) = (&mut stats, count_started) {
-            stats.snapshots = 1;
-            stats.file_entries = self.files.len();
-            stats.flat_body_entries = self.files.values().map(|file| file.flat.len()).sum();
-            stats.inference_body_entries =
-                self.files.values().map(|file| file.inference.len()).sum();
-            stats.other_entries = self.files.values().map(|file| file.other.len()).sum();
-            stats.global_entries = self.global.len();
-            stats.last_entries = self.last_by_file.len();
-            stats.cached_entries = stats.file_entries
-                + stats.flat_body_entries
-                + stats.inference_body_entries
-                + stats.other_entries
-                + stats.global_entries
-                + stats.last_entries;
-            stats.cached_findings = self
-                .files
-                .values()
-                .map(|file| {
-                    file.flat.values().map(Vec::len).sum::<usize>()
-                        + file.inference.values().map(Vec::len).sum::<usize>()
-                        + file.other.len()
-                })
-                .sum::<usize>()
-                + self.global.values().map(Vec::len).sum::<usize>()
-                + self.last_by_file.values().map(Vec::len).sum::<usize>();
-            stats.count_ns = count_started.elapsed().as_nanos();
-        }
-        stats
     }
 
     pub fn begin_body_transaction(&mut self, change: &LintCacheUpdate) {

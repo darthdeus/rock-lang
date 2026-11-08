@@ -1201,14 +1201,11 @@ mod frontier_census {
             .collect()
     }
 
-    /// One-off, gated: how often does CursorAst::at return None -- the ONLY
-    /// case the byte fallbacks still run. Sweeps a stride over EVERY byte
-    /// offset (not just "interesting" ones).
+    /// How often CursorAst::at returns None -- the ONLY case the byte
+    /// fallbacks still run. Sweeps a stride over EVERY byte offset (not just
+    /// "interesting" ones).
     #[test]
     fn none_rate_over_all_offsets() {
-        if std::env::var("ROCK_CTX_FRONTIER").is_err() {
-            return;
-        }
         let mut total = 0usize;
         let mut none = 0usize;
         let mut samples: Vec<String> = Vec::new();

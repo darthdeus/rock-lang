@@ -891,12 +891,6 @@ impl BoneWorkspace {
             return vec![(editor_path(path).into_owned(), vec![diagnostic])];
         }
 
-        // `BONE_LSP_PROFILE=1` prints a per-call breakdown of update's three
-        // sub-phases (re-typecheck / diagnostics scan / hole pass), the lens for
-        // per-keystroke LSP latency. Mirrors `SKULL_EMIT_PROFILE`. Read once --
-        // `update` is on the keystroke hot path, so no per-call env alloc.
-        let prof = lsp_profile_enabled();
-
         let root = Self::root_for(path);
         let proj = self.project_mut(&root);
         if proj.graph.as_ref().is_some_and(|graph| {
@@ -916,7 +910,6 @@ impl BoneWorkspace {
         // Holes can only change in files that were re-typechecked, so collect
         // the changed set (edited file + reinferred dependents) to drive the
         // hole cache below.
-        let t_uf = bone_core::prelude::Instant::now();
         let mut this_file_parse_err: Option<CompilerError> = None;
         let mut changed: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut lint_changed_files = FxHashSet::default();
@@ -994,42 +987,17 @@ impl BoneWorkspace {
         if rebuild_type_caches {
             proj.scoped_call_through.clear();
             proj.visible_bindings.clear();
-            let t_reach = bone_core::prelude::Instant::now();
-            let idx = crate::reachability::ReachabilityIndex::build(proj.session.workspace());
-            if prof {
-                eprintln!(
-                    "[bone reach] index build {:.2}ms ({})",
-                    t_reach.elapsed().as_secs_f64() * 1000.0,
-                    idx.stats()
-                );
-            }
-            proj.reach = Some(idx);
-            let t_sigs = bone_core::prelude::Instant::now();
-            let sigs = build_fn_sigs(proj.session.workspace());
-            if prof {
-                eprintln!(
-                    "[bone completion] sig-cache build {:.2}ms ({} fns)",
-                    t_sigs.elapsed().as_secs_f64() * 1000.0,
-                    sigs.len()
-                );
-            }
-            proj.fn_sigs = Some(sigs);
-            let t_ct = bone_core::prelude::Instant::now();
-            let ct = build_call_through(proj.session.workspace(), proj.reach.as_ref().unwrap());
-            if prof {
-                eprintln!(
-                    "[bone completion] call-through index build {:.2}ms ({} fns, {} types)",
-                    t_ct.elapsed().as_secs_f64() * 1000.0,
-                    ct.fns.len(),
-                    ct.global_type_args.len()
-                );
-            }
-            proj.call_through = Some(ct);
+            proj.reach = Some(crate::reachability::ReachabilityIndex::build(
+                proj.session.workspace(),
+            ));
+            proj.fn_sigs = Some(build_fn_sigs(proj.session.workspace()));
+            proj.call_through = Some(build_call_through(
+                proj.session.workspace(),
+                proj.reach.as_ref().unwrap(),
+            ));
             proj.freq = Some(build_freq_index(proj.session.workspace()));
         }
-        let uf_ms = t_uf.elapsed().as_secs_f64() * 1000.0;
 
-        let t_diag = bone_core::prelude::Instant::now();
         let mut by_file: HashMap<String, Vec<Diagnostic>> = HashMap::new();
         // Seed every tracked file with an empty vec so clean files get a
         // clearing publish.
@@ -1056,7 +1024,6 @@ impl BoneWorkspace {
             // Override: current editor text for this file is broken; show that.
             by_file.insert(path.to_string(), vec![compiler_error_to_diagnostic(e)]);
         }
-        let diag_ms = t_diag.elapsed().as_secs_f64() * 1000.0;
 
         // Unfilled-hole diagnostics. `hole_diagnostics_for` REPARSES, so we
         // recompute as few files as possible (a full scan reparses the whole
@@ -1072,8 +1039,6 @@ impl BoneWorkspace {
         // `None` from hole_diagnostics_for means "couldn't compute" (no
         // inference / parse fail) -- never cached, so it isn't mistaken for a
         // known-hole-free file.
-        let t_holes = bone_core::prelude::Instant::now();
-        let mut reparsed = 0usize;
         for (p, diags) in by_file.iter_mut() {
             if p == path && this_file_parse_err.is_some() {
                 // Now-broken file: drop any stale cached holes; show the parse error only.
@@ -1097,7 +1062,6 @@ impl BoneWorkspace {
             };
 
             let holes = if must_recompute {
-                reparsed += 1;
                 match hole_diagnostics_for(proj, p) {
                     Some(v) => {
                         proj.hole_cache.insert(p.clone(), v.clone());
@@ -1116,7 +1080,6 @@ impl BoneWorkspace {
             };
             diags.extend(holes);
         }
-        let holes_ms = t_holes.elapsed().as_secs_f64() * 1000.0;
 
         if this_file_parse_err.is_some() {
             proj.lint_cache.invalidate_file(Ustr::from(path));
@@ -1137,13 +1100,6 @@ impl BoneWorkspace {
                     .or_default()
                     .push(finding_diagnostic(&finding));
             }
-        }
-
-        if prof {
-            eprintln!(
-                "[bone update] update_file {uf_ms:.2}ms  diag-scan {diag_ms:.2}ms  holes {holes_ms:.2}ms ({reparsed}/{} files reparsed)",
-                by_file.len()
-            );
         }
 
         by_file
@@ -1886,18 +1842,6 @@ impl BoneWorkspace {
             return Vec::new();
         }
         let prefix = prefix_raw.to_lowercase();
-        // Every early-return path below reports its total under BONE_LSP_PROFILE;
-        // the fall-through path has its own phase breakdown further down.
-        let prof = lsp_profile_enabled();
-        let t_total = bone_core::prelude::Instant::now();
-        let path_ms = |label: &str, n: usize| {
-            if prof {
-                eprintln!(
-                    "[bone completion] {label} {:.2}ms ({n} items, prefix {prefix_raw:?})",
-                    t_total.elapsed().as_secs_f64() * 1000.0
-                );
-            }
-        };
         // A `(` directly after the cursor means the call parens already exist
         // (e.g. `cw` over the callee in `world_to_screen(x)`): a `name($0)`
         // snippet would double them (`world_to_design()(x)`). `strip_call_template`
@@ -1976,7 +1920,6 @@ impl BoneWorkspace {
                 if next_is_open_paren {
                     strip_call_template(&mut items);
                 }
-                path_ms("member path", items.len());
                 return items;
             }
         }
@@ -2023,7 +1966,6 @@ impl BoneWorkspace {
                         )
                     });
                     if let Some(Some(items)) = attempt {
-                        path_ms("field-ref path", items.len());
                         return items;
                     }
                 }
@@ -2042,7 +1984,6 @@ impl BoneWorkspace {
                 &variant,
                 &prefix,
             ) {
-                path_ms("enum-record path", items.len());
                 return items;
             }
         }
@@ -2057,7 +1998,6 @@ impl BoneWorkspace {
             offset - prefix_raw.len(),
             &prefix,
         ) {
-            path_ms("v1 path", items.len());
             return items;
         }
         if let Some(enum_name) = cx.qualified.clone() {
@@ -2072,7 +2012,6 @@ impl BoneWorkspace {
             if next_is_open_paren {
                 strip_call_template(&mut items);
             }
-            path_ms("enum-qualified path", items.len());
             return items;
         }
         if let Some((struct_name, brace_open)) = cx.struct_literal.clone() {
@@ -2087,7 +2026,6 @@ impl BoneWorkspace {
                 brace_open,
                 &prefix,
             ) {
-                path_ms("struct-literal path", items.len());
                 return items;
             }
         }
@@ -2098,7 +2036,6 @@ impl BoneWorkspace {
         // the engine, so they're present even if the edited module dropped out).
         if cx.decorator {
             let items = decorator_completions(proj.session.workspace(), &prefix);
-            path_ms("decorator path", items.len());
             return items;
         }
 
@@ -2118,7 +2055,6 @@ impl BoneWorkspace {
             .and_then(|a| pattern_scrutinee_enum(&mut proj.session, path, src, offset, a));
         let live = proj.session.workspace();
         let fallback_ws: Option<Workspace> = if user_module_for_path(live, path).is_none() {
-            let t = bone_core::prelude::Instant::now();
             // A half-typed arm HEAD (`match s { co`) is what broke the parse:
             // complete it (` => {}` at the cursor) so the recovery reparse
             // keeps the match -- and its scrutinee, which the pattern rung
@@ -2132,15 +2068,7 @@ impl BoneWorkspace {
             } else {
                 src.to_string()
             };
-            let ws = reparse_with_project(proj, path, &balance_delimiters(fixed), "completion");
-            if prof {
-                eprintln!(
-                    "[bone completion] broken-buffer fallback reparse {:.2}ms (recovered: {})",
-                    t.elapsed().as_secs_f64() * 1000.0,
-                    ws.is_some()
-                );
-            }
-            ws
+            reparse_with_project(proj, path, &balance_delimiters(fixed), "completion")
         } else {
             None
         };
@@ -2810,11 +2738,6 @@ impl BoneWorkspace {
                     }
                     None => reach.paths_to(&vty, &expected_types, REACH_CAP),
                 };
-                if res.truncated && lsp_profile_enabled() {
-                    eprintln!(
-                        "[bone completion] reach paths from `{vname}: {vty}` clipped at {REACH_CAP}"
-                    );
-                }
                 for p in res.paths {
                     // A path that CALLS the enclosing fn (`k.partition_style()`
                     // inside `partition_style`) is a recursive self-reference --
@@ -2951,24 +2874,11 @@ impl BoneWorkspace {
                 ct_survivors: ct_counts.survivors,
             })
         });
-        if lsp_profile_enabled() {
-            eprintln!(
-                "[bone completion] candidates {cands_ms:.2}ms ({n_cands} cands)  rank {rank_ms:.2}  reach {reach_ms:.2}  call-through {call_through_ms:.2}  ({} items, prefix {:?})",
-                sink.len(),
-                prefix
-            );
-        }
         // ONE select over the facts. The list is served `isIncomplete: true`,
         // so cap it: the client re-queries per keystroke and the server
         // re-scores, so returning the whole workspace (2539 items at empty
         // prefix) is pure wasted serialization -- the dominant end-to-end
         // completion cost.
-        if sink.cands.len() > max_items && lsp_profile_enabled() {
-            eprintln!(
-                "[bone completion] completion truncated {} -> {max_items}",
-                sink.cands.len()
-            );
-        }
         let fragment_file =
             crate::modules_scope::fragment(ws, ws.module(mid).file).map(|_| ws.module(mid).file);
         sink.cands.sort_by(cand_cmp);
@@ -3612,8 +3522,6 @@ impl BoneWorkspace {
         let Some(src) = proj.texts.get(path) else {
             return SemanticTokens::default();
         };
-        let prof = lsp_profile_enabled();
-        let t = bone_core::prelude::Instant::now();
         let Some(toks) = proj.fallbacks.result(
             rock_tokenizer::Tokenizer::new(src, Ustr::from(path)).tokenize(),
             "semantic tokens",
@@ -3623,9 +3531,7 @@ impl BoneWorkspace {
         ) else {
             return SemanticTokens::default();
         };
-        let tok_ms = t.elapsed().as_secs_f64() * 1000.0;
         let ws = proj.session.workspace();
-        let t = bone_core::prelude::Instant::now();
         let mut names = semantic_name_map(ws);
         // Macros are expanded away before bone lowering, so the workspace HIR
         // has no record of them; the Session's parse-time capture supplies the
@@ -3633,20 +3539,10 @@ impl BoneWorkspace {
         for (_, md) in proj.session.all_macro_defs() {
             names.entry(md.name).or_insert(TT_MACRO);
         }
-        let names_ms = t.elapsed().as_secs_f64() * 1000.0;
-        let t = bone_core::prelude::Instant::now();
         let hir = user_module_for_path(ws, path)
             .map(|mid| semantic_classifications(ws, mid, range))
             // A missing HIR module still permits lexical tokens for a partial buffer.
             .unwrap_or_default();
-        let hir_ms = t.elapsed().as_secs_f64() * 1000.0;
-        if prof {
-            eprintln!(
-                "[bone semtok] tokenize {tok_ms:.2}ms ({} toks)  name_map {names_ms:.2}ms ({} names)  classifications {hir_ms:.2}ms  range={range:?}",
-                toks.len(),
-                names.len()
-            );
-        }
 
         let mut data = Vec::new();
         let (mut prev_line, mut prev_start) = (0u32, 0u32);
@@ -5012,17 +4908,7 @@ fn reparse_with_project(
         "combined-module parse",
         "use live workspace",
     )?;
-    let t = bone_core::prelude::Instant::now();
-    let out = reparse_with_project_inner(&combined, path, munged, &proj.fallbacks, request);
-    if lsp_profile_enabled() {
-        eprintln!(
-            "[bone completion] reparse_with_project {:.2}ms ({} modules, recovered: {})",
-            t.elapsed().as_secs_f64() * 1000.0,
-            combined.len(),
-            out.is_some()
-        );
-    }
-    out
+    reparse_with_project_inner(&combined, path, munged, &proj.fallbacks, request)
 }
 
 /// Analyze one completion munge: apply it as a speculative Session variant
@@ -5045,12 +4931,6 @@ pub(crate) fn analyze_variant<R>(
                 "completion: session refused the variant for `{path}` ({}); single-file fallback",
                 e.message
             );
-            if lsp_profile_enabled() {
-                eprintln!(
-                    "[bone completion] variant refused ({}) -> single-file fallback",
-                    e.message
-                );
-            }
             let fallback = skull_parser::parse_module(munged, Ustr::from(path))
                 .and_then(|m| bone_semantic::semantic_passes::semantic_pass(&mut [m]));
             match fallback {
@@ -5389,12 +5269,6 @@ fn format_hole_report(hi: &crate::query::HoleInfo) -> String {
 /// type-checks), turning every `?` -- hand-written or inserted by a code action
 /// -- into a visible, typed TODO that clears when the `?` is replaced. Empty
 /// when the file isn't loaded / hasn't been inferred.
-/// Whether `BONE_LSP_PROFILE` is set, read once (the result is process-stable).
-pub(crate) fn lsp_profile_enabled() -> bool {
-    static P: OnceLock<bool> = OnceLock::new();
-    *P.get_or_init(|| std::env::var("BONE_LSP_PROFILE").is_ok())
-}
-
 /// `Some(diags)` is an AUTHORITATIVE result (parse + inference both succeeded) --
 /// an empty vec means "this file genuinely has no holes". `None` means the holes
 /// COULD NOT be computed (file untracked / no module / no inference / parse

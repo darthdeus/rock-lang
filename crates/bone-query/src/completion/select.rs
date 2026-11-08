@@ -88,7 +88,7 @@ pub(crate) const DEFAULT_MAX_COMPLETION_ITEMS: usize = 200;
 
 /// The effective general-completion cap: `ROCK_LSP_MAX_COMPLETIONS` if it parses
 /// to a positive integer, else `DEFAULT_MAX_COMPLETION_ITEMS`. Read once (the env
-/// is process-stable), mirroring `lsp_profile_enabled`.
+/// is process-stable).
 pub(crate) fn max_completion_items() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     // An unset or non-Unicode optional tuning override selects the documented default.

@@ -13,21 +13,6 @@ use bone_semantic::inference::Workspace;
 use rock_core::{CompilerError, SourceFiles, source_file_from_path_and_contents};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Mutex, MutexGuard, OnceLock};
-
-#[derive(Clone, Debug, Default)]
-pub struct LintPassCensus {
-    pub lint: bone_lints::LintCensus,
-    pub cache: bone_lints::LintCacheStats,
-    pub cache_snapshots: bone_lints::LintCacheSnapshotStats,
-    pub report_prepare_ns: u128,
-    pub summary_sort_ns: u128,
-    pub render_ns: u128,
-    pub source_view_requests: usize,
-    pub source_files_borrowed: usize,
-    pub source_views_aliased: usize,
-    pub detached_source_bytes: usize,
-}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct LintRouteTiming {
@@ -40,73 +25,6 @@ pub(crate) struct LintRouteTiming {
     pub summary_sort_ns: u128,
     pub render_ns: u128,
     pub finding_aggregation_ns: u128,
-}
-
-static CENSUS_ENABLED: OnceLock<bool> = OnceLock::new();
-static CENSUS: OnceLock<Mutex<LintPassCensus>> = OnceLock::new();
-
-fn lint_census() -> MutexGuard<'static, LintPassCensus> {
-    CENSUS
-        .get_or_init(|| Mutex::new(LintPassCensus::default()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-pub(crate) fn census_enabled() -> bool {
-    *CENSUS_ENABLED.get_or_init(|| std::env::var_os("ROCK_LINT_CENSUS").is_some())
-}
-
-fn record_lint_census(census: bone_lints::LintCensus) {
-    if !census_enabled() {
-        return;
-    }
-    lint_census().lint.merge(&census);
-}
-
-fn record_lint_cache_stats(stats: bone_lints::LintCacheStats) {
-    if !census_enabled() {
-        return;
-    }
-    let mut census = lint_census();
-    census.cache.merge(&stats);
-}
-
-pub(crate) fn record_lint_cache_snapshot(stats: bone_lints::LintCacheSnapshotStats) {
-    if !census_enabled() {
-        return;
-    }
-    let mut census = lint_census();
-    census.cache_snapshots.merge(&stats);
-}
-
-fn record_report_census(report_prepare_ns: u128, summary_sort_ns: u128, render_ns: u128) {
-    if !census_enabled() {
-        return;
-    }
-    let mut census = lint_census();
-    census.report_prepare_ns += report_prepare_ns;
-    census.summary_sort_ns += summary_sort_ns;
-    census.render_ns += render_ns;
-}
-
-fn record_source_view(files: usize, aliased: usize, detached_bytes: usize) {
-    if !census_enabled() {
-        return;
-    }
-    let mut census = lint_census();
-    census.source_view_requests += 1;
-    census.source_files_borrowed += files;
-    census.source_views_aliased += aliased;
-    census.detached_source_bytes += detached_bytes;
-}
-
-#[cfg(test)]
-pub fn take_census() -> Option<LintPassCensus> {
-    if !census_enabled() {
-        return None;
-    }
-    let mut census = lint_census();
-    Some(std::mem::take(&mut *census))
 }
 
 /// How a build reports lint findings. Applies to `Warning`/`Advice` only --
@@ -213,14 +131,13 @@ pub(crate) fn rollback_build_lints_cached(
             .filter(|(file, _)| owned.contains(*file))
             .map(|(&file, &text)| (file, text))
             .collect();
-        let stats = cache.rollback_body_transaction(
+        cache.rollback_body_transaction(
             ws,
             &warm,
             is_bin,
             &owned_sources,
             &crate::registry::lint_options(),
         )?;
-        record_lint_cache_stats(stats);
         Ok(())
     })
 }
@@ -275,27 +192,6 @@ fn run_build_lints_cached_inner(
                 change,
             )
         };
-        if census_enabled() && stats.full_rebuilds > 0 {
-            let (ignored, census) = bone_lints::lint_workspace_with_census(
-                ws,
-                &warm,
-                is_bin,
-                &owned_sources,
-                &crate::registry::lint_options(),
-            );
-            debug_assert_eq!(
-                ignored
-                    .iter()
-                    .map(|f| (f.lint, f.error.message.as_str()))
-                    .collect::<Vec<_>>(),
-                found
-                    .iter()
-                    .map(|f| (f.lint, f.error.message.as_str()))
-                    .collect::<Vec<_>>(),
-                "census oracle must match cached full rebuild",
-            );
-            record_lint_census(census);
-        }
         (found, stats)
     });
     if let Some(timing) = timing.as_deref_mut() {
@@ -305,7 +201,6 @@ fn run_build_lints_cached_inner(
         timing.suppression_filtering_ns += stats.suppression_filtering_ns;
         timing.suppression_filter_calls += stats.suppression_filter_calls;
     }
-    record_lint_cache_stats(stats);
     report_timed(found, sources, root, policy(), timing)
 }
 
@@ -331,7 +226,6 @@ fn report_timed(
     timing: Option<&mut LintRouteTiming>,
 ) -> Vec<CompilerError> {
     if found.is_empty() {
-        record_report_census(0, 0, 0);
         return Vec::new();
     }
     let report_started = Instant::now();
@@ -344,7 +238,6 @@ fn report_timed(
 /// the pipeline itself refuses on the `Error` findings.
 pub fn report_soft(soft: &[bone_lints::Finding], sources: &SourceFiles, root: &Path) {
     if soft.is_empty() {
-        record_report_census(0, 0, 0);
         return;
     }
     present_soft(soft, sources, root, policy(), Instant::now(), None);
@@ -379,7 +272,6 @@ fn present_soft(
             }
         }
     }
-    record_report_census(report_prepare_ns, summary_sort_ns, render_ns);
     if let Some(timing) = timing {
         timing.report_prepare_ns += report_prepare_ns;
         timing.summary_sort_ns += summary_sort_ns;
@@ -454,14 +346,7 @@ pub fn findings_with(
             .filter(|(file, _)| owned.contains(*file))
             .map(|(&file, &text)| (file, text))
             .collect();
-        if census_enabled() {
-            let (findings, census) =
-                bone_lints::lint_workspace_with_census(ws, &warm, is_bin, &report, sel);
-            record_lint_census(census);
-            findings
-        } else {
-            bone_lints::lint_workspace(ws, &warm, is_bin, &report, sel)
-        }
+        bone_lints::lint_workspace(ws, &warm, is_bin, &report, sel)
     })
 }
 
@@ -566,20 +451,6 @@ fn with_source_texts<R>(
         .iter()
         .map(|file| (Ustr::from(&file.file.to_id_path()), file.contents.as_str()))
         .collect::<FxHashMap<_, _>>();
-    if census_enabled() {
-        let mut aliased = 0;
-        let mut detached_bytes = 0;
-        for file in &files {
-            let key = Ustr::from(&file.file.to_id_path());
-            let text = texts.get(&key).copied().unwrap_or("");
-            if text.len() == file.contents.len() && text.as_ptr() == file.contents.as_ptr() {
-                aliased += 1;
-            } else {
-                detached_bytes += text.len();
-            }
-        }
-        record_source_view(texts.len(), aliased, detached_bytes);
-    }
     use_texts(&texts)
 }
 

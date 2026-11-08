@@ -1536,11 +1536,6 @@ impl Session {
     ) -> Result<UpdateResult, CompilerError> {
         let file = module.file;
         let mid = self.ws.module_ids[&file];
-        // `BONE_CASCADE_STATS=1` prints a per-stage breakdown of the interface
-        // cascade (closure / re-parse / lower / re-infer / dep-index), the lens
-        // for where Interface-tier latency goes. Mirrors `BONE_REINFER_STATS`.
-        let stats = std::env::var("BONE_CASCADE_STATS").is_ok();
-        let t_closure = Instant::now();
 
         // --- Interface-dependent closure to RE-LOWER ---
         // A module needs RE-LOWERING (re-resolving its signatures) only when a
@@ -1633,10 +1628,6 @@ impl Session {
             }
         }
 
-        let closure_ms = t_closure.elapsed().as_secs_f64() * 1000.0;
-        let closure_n = to_relower.len();
-        let t_parse = Instant::now();
-
         // Re-parse each closure module from its stored text (the edited module
         // uses the provided AST); cook + lower them together with the edited
         // module so intra-closure and closure->kept references resolve.
@@ -1650,15 +1641,11 @@ impl Session {
             cook_one(&mut a, &self.registry);
             asts.push(a);
         }
-        let parse_ms = t_parse.elapsed().as_secs_f64() * 1000.0;
 
         self.retain_modules(|m| m != mid && !to_relower.contains(&m));
         self.ws.phase_timings.clear();
 
-        let t_lower = Instant::now();
         let f_mids = lower_modules(&mut self.ws, &asts)?;
-        let lower_ms = t_lower.elapsed().as_secs_f64() * 1000.0;
-        let t_reinfer = Instant::now();
 
         // Names whose definition may have shifted: the edited module's interface
         // diff PLUS every name exported by a RE-LOWERED module (re-lowering may
@@ -1713,8 +1700,6 @@ impl Session {
         // disjoint from `changed` is no more affected than one in a module that
         // wasn't selected at all (which is never re-inferred). Globals/decorators/
         // struct-defaults always re-check inside check_module_incremental.
-        let mut stat_total = 0usize;
-        let mut stat_reused = 0usize;
         let prevs: Vec<(ModuleId, InferenceResult)> = ids
             .iter()
             .map(|id| {
@@ -1727,24 +1712,13 @@ impl Session {
                 let errored: FxHashSet<BodyOwner> = cached.errors.keys().copied().collect();
                 let mut prev = InferenceResult::default();
                 for (owner, bi) in cached.per_fn {
-                    stat_total += 1;
                     if !errored.contains(&owner) && bi.deps.is_disjoint(&reinfer_names) {
-                        stat_reused += 1;
                         prev.per_fn.insert(owner, bi);
                     }
                 }
                 (*id, prev)
             })
             .collect();
-        if std::env::var("BONE_REINFER_STATS").is_ok() {
-            eprintln!(
-                "[reinfer] {} dependent fn-bodies: {} reused, {} re-inferred (deps touch a changed name)",
-                stat_total,
-                stat_reused,
-                stat_total - stat_reused
-            );
-        }
-
         // check_module_incremental reads ws immutably (declared signatures from
         // the HIR, not inference results), so dependents re-check in parallel --
         // mirroring the full pipeline's `infer_modules`.
@@ -1761,29 +1735,13 @@ impl Session {
         for (id, inf) in results {
             self.ws.set_inference(id, inf);
         }
-        let reinfer_ms = t_reinfer.elapsed().as_secs_f64() * 1000.0;
 
         // The same whole-program gate `rebuild_users` runs: a signature edit
         // alone can export a type whose closure is not public. It reads only
         // definitions and their signatures, and is a no-op with no v1 package.
         bone_semantic::semantic_passes::pass_validate_api_closure(&self.ws)?;
 
-        let t_dep = Instant::now();
         self.rebuild_dependents();
-        let dep_ms = t_dep.elapsed().as_secs_f64() * 1000.0;
-
-        if stats {
-            eprintln!(
-                "[cascade] closure {:.3}ms ({} relower) | reparse {:.3}ms | lower {:.3}ms | reinfer {:.3}ms ({} bodies) | dep-index {:.3}ms",
-                closure_ms,
-                closure_n,
-                parse_ms,
-                lower_ms,
-                reinfer_ms,
-                ids.len(),
-                dep_ms
-            );
-        }
 
         // `ids` is the full re-checked set and already contains `f_mids`, so it
         // covers `reinferred`. `relowered` is precisely the re-LOWERED modules

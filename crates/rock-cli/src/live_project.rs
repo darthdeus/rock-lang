@@ -112,12 +112,6 @@ impl LiveProject {
             }
             previous_contents.push((id, source.borrow().contents.clone()));
         }
-        if let Some(stats) = self
-            .lint_cache
-            .snapshot_stats(crate::lint_pass::census_enabled())
-        {
-            crate::lint_pass::record_lint_cache_snapshot(stats);
-        }
         let snapshot = LiveProjectSnapshot {
             comptime_inputs: self.session.ws.comptime_inputs.clone(),
             sources: self.sources.clone(),
