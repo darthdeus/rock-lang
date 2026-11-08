@@ -1,6 +1,5 @@
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -11,12 +10,14 @@ fn fixture(root: &Path, code: i32) -> std::path::PathBuf {
     )
     .unwrap();
     let runner = root.join("runner");
-    if code == 0 {
-        std::fs::write(&runner, "#!/bin/sh\ninput=$(cat)\nif [ \"$input\" != '[]' ]; then printf '__SKULL__\\tVALUE\\tgpu_probe\\t3\\n'; fi\n").unwrap();
+    let script = if code == 0 {
+        "#!/bin/sh\ninput=$(cat)\nif [ \"$input\" != '[]' ]; then printf '__SKULL__\\tVALUE\\tgpu_probe\\t3\\n'; fi\n".to_owned()
     } else {
-        std::fs::write(&runner, format!("#!/bin/sh\ncat >/dev/null\necho 'no GL context: display or GL driver unavailable' >&2\nexit {code}\n")).unwrap();
-    }
-    std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+        format!(
+            "#!/bin/sh\ncat >/dev/null\necho 'no GL context: display or GL driver unavailable' >&2\nexit {code}\n"
+        )
+    };
+    test_utils::write_executable(&runner, &script);
     runner
 }
 

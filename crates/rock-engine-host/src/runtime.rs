@@ -666,14 +666,10 @@ mod tests {
                 // gate lib appears. The sentinel travels via the child's own
                 // env, never via process-global LD_PRELOAD.
                 let probe = root.join("print_preload");
-                std::fs::write(
+                test_utils::write_executable(
                     &probe,
                     "#!/bin/sh\ncat >/dev/null\necho \"LD_PRELOAD=$LD_PRELOAD\"\n",
-                )
-                .expect("probe script");
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o755))
-                    .expect("probe executable");
+                );
                 let run = run_probe(
                     &probe,
                     "",

@@ -3399,20 +3399,15 @@ mod runner_tests {
         let marker = dir.join("invocations");
         let path = dir.join("stub-rock");
         let quoted = reply.replace('\'', r"'\''");
-        std::fs::write(
-            &path,
-            format!(
-                "#!/bin/sh\necho \"$@\" >> '{}'\nprintf '%s' '{}'\n",
-                marker.display(),
-                quoted
-            ),
-        )
-        .unwrap();
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" >> '{}'\nprintf '%s' '{}'\n",
+            marker.display(),
+            quoted
+        );
         #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        test_utils::write_executable(&path, &script);
+        #[cfg(not(unix))]
+        std::fs::write(&path, script).unwrap();
         path
     }
 

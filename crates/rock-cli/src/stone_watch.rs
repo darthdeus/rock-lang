@@ -1039,13 +1039,11 @@ mod tests {
             crate::compiler_watch::build_compiler().expect_err("prebuilt compiler is fixed");
             return;
         }
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "[workspace]\n").unwrap();
         std::fs::write(dir.path().join("stone_ffi.rock"), "").unwrap();
         let cargo = dir.path().join("cargo");
-        std::fs::write(&cargo, "#!/bin/sh\ntouch \"$ROCK_CARGO_PROBE\"\nexit 97\n").unwrap();
-        std::fs::set_permissions(&cargo, std::fs::Permissions::from_mode(0o755)).unwrap();
+        test_utils::write_executable(&cargo, "#!/bin/sh\ntouch \"$ROCK_CARGO_PROBE\"\nexit 97\n");
         let marker = dir.path().join("cargo-called");
         std::fs::create_dir(dir.path().join("tmp")).unwrap();
         std::fs::write(

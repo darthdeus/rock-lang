@@ -300,6 +300,45 @@ pub fn strip_ansi_sgr(text: &str) -> String {
     ANSI_SGR.replace_all(text, "").into_owned()
 }
 
+/// Create an executable script for a test to spawn, replacing any file at
+/// `path`.
+///
+/// On Linux, exec fails with ETXTBSY while any process holds the file open
+/// for writing. Test binaries spawn from many threads, and a child forked by
+/// another thread inherits every descriptor open at that moment and keeps it
+/// until it reaches exec; O_CLOEXEC closes it no earlier. A script written
+/// with `std::fs::write` in the test process can therefore still be open for
+/// writing in an unrelated child when the test runs it. Here the write
+/// happens in a short-lived `/bin/sh` that has exited before this returns, so
+/// the test process never holds a write descriptor that a fork could copy.
+/// The rename replaces an existing file instead of truncating it in place.
+#[cfg(unix)]
+pub fn write_executable(path: &std::path::Path, contents: &str) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("/bin/sh")
+        .args([
+            "-c",
+            r#"partial="$1.partial.$$" && cat > "$partial" && chmod 755 "$partial" && mv -f "$partial" "$1""#,
+            "sh",
+        ])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("spawn /bin/sh to write a test executable");
+    let mut stdin = child.stdin.take().expect("piped stdin");
+    stdin
+        .write_all(contents.as_bytes())
+        .expect("write test executable contents");
+    drop(stdin);
+    let status = child.wait().expect("wait for /bin/sh");
+    assert!(
+        status.success(),
+        "writing test executable {} failed: {status}",
+        path.display()
+    );
+}
+
 #[cfg(test)]
 mod ansi_tests {
     use super::strip_ansi_sgr;
@@ -314,5 +353,31 @@ mod ansi_tests {
     fn leaves_plain_text_unchanged() {
         let rendered = "[E00] Error: plain text\n 1 \u{2502} let x = 1;\n";
         assert_eq!(strip_ansi_sgr(rendered), rendered);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod executable_tests {
+    use super::write_executable;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn written_executable_runs_and_replaces_an_existing_one() {
+        let dir = std::env::temp_dir().join(format!("test-utils-exec-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("probe");
+        for code in [3, 99] {
+            let script = format!("#!/bin/sh\necho 'it''s ok'\nexit {code}\n");
+            write_executable(&path, &script);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), script);
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o755);
+            let output = std::process::Command::new(&path).output().unwrap();
+            assert_eq!(output.status.code(), Some(code));
+            assert_eq!(output.stdout, b"its ok\n");
+        }
+        let entries = std::fs::read_dir(&dir).unwrap().count();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(entries, 1, "partial files left behind");
     }
 }

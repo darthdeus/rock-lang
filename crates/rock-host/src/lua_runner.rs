@@ -203,16 +203,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn broken_pipe_without_a_child_error_is_reported() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().expect("tempdir");
         let child_path = dir.path().join("close_stdin");
-        std::fs::write(&child_path, "#!/bin/sh\nexec </dev/null\nsleep 1\n").expect("child script");
-        let mut permissions = std::fs::metadata(&child_path)
-            .expect("child metadata")
-            .permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&child_path, permissions).expect("child permissions");
+        test_utils::write_executable(&child_path, "#!/bin/sh\nexec </dev/null\nsleep 1\n");
 
         let mut code = "ignored by child\n".to_string();
         code.push_str(&"-- valid filler\n".repeat(1_000_000));
