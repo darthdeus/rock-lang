@@ -44,6 +44,33 @@ fn convert_closures(mf: &mut MirFunc, name: &str) {
     skull_transform::convert_closures(mf, name);
 }
 
+/// The pass chain every inlined body takes before discovery and emission:
+/// inline, cleanup, then [`finish_body`].
+fn prepare_body(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    self_ref: FuncRef,
+    mf: &mut MirFunc,
+    name: &str,
+    cache: &mut skull_transform::InlineCache,
+    concrete: &skull_mir::concrete::ConcretePlans,
+) -> Result<(), CompilerError> {
+    skull_transform::inline_functions_with_plans(ws, scx, self_ref, mf, cache, concrete)?;
+    skull_transform::cleanup_with_nobox(ws, mf)?;
+    finish_body(ws, mf, name);
+    Ok(())
+}
+
+/// Closure conversion, then counted-loop recovery over the body and the
+/// bodies conversion hoisted.
+fn finish_body(ws: &Workspace, mf: &mut MirFunc, name: &str) {
+    convert_closures(mf, name);
+    skull_transform::recover_counted_loops(ws, mf);
+    for nf in &mut mf.nested_fns {
+        skull_transform::recover_counted_loops(ws, nf);
+    }
+}
+
 fn collect_nested_code_identities(
     mf: &MirFunc,
     out: &mut HashSet<skull_mir::code_identity::CodeIdentity>,
@@ -3728,25 +3755,17 @@ fn assemble_program_core(
                 }
             };
             let self_ref = safe_self_ref(ws, &mf);
-            if let Err(e) = skull_transform::inline_functions_with_plans(
+            if let Err(e) = prepare_body(
                 ws,
                 scx,
                 self_ref,
                 &mut mf,
+                &deco_name,
                 &mut st.cache,
                 st.concrete,
             ) {
                 st.reject(&deco_name, e);
                 continue;
-            }
-            if let Err(e) = skull_transform::cleanup_with_nobox(ws, &mut mf) {
-                st.reject(&deco_name, e);
-                continue;
-            }
-            convert_closures(&mut mf, &deco_name);
-            skull_transform::recover_counted_loops(ws, &mut mf);
-            for nf in &mut mf.nested_fns {
-                skull_transform::recover_counted_loops(ws, nf);
             }
             // THE shared discovery step, not a restatement of the parts of it a
             // decorator was thought to need. Enumerating callees and globals by
@@ -5049,25 +5068,17 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
                 return Ok(());
             }
         } else {
-            if let Err(e) = skull_transform::inline_functions_with_plans(
+            if let Err(e) = prepare_body(
                 self.ws,
                 self.scx,
                 fr,
                 &mut mf,
+                &name,
                 &mut self.st.cache,
                 self.st.concrete,
             ) {
                 self.st.reject(&name, e);
                 return Ok(());
-            }
-            if let Err(e) = skull_transform::cleanup_with_nobox(self.ws, &mut mf) {
-                self.st.reject(&name, e);
-                return Ok(());
-            }
-            convert_closures(&mut mf, &name);
-            skull_transform::recover_counted_loops(self.ws, &mut mf);
-            for nf in &mut mf.nested_fns {
-                skull_transform::recover_counted_loops(self.ws, nf);
             }
         }
         let mut findings: Vec<CompilerError> = Vec::new();
@@ -5209,25 +5220,17 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
         // trampoline's own framed conversion is idempotent over what
         // `convert_closures` already hoisted. Left as one path rather than a
         // branch no fixture can distinguish.
-        if let Err(e) = skull_transform::inline_functions_with_plans(
+        if let Err(e) = prepare_body(
             self.ws,
             self.scx,
             fr,
             &mut mf,
+            &name,
             &mut self.st.cache,
             self.st.concrete,
         ) {
             self.st.reject(&name, e);
             return Ok(());
-        }
-        if let Err(e) = skull_transform::cleanup_with_nobox(self.ws, &mut mf) {
-            self.st.reject(&name, e);
-            return Ok(());
-        }
-        convert_closures(&mut mf, &name);
-        skull_transform::recover_counted_loops(self.ws, &mut mf);
-        for nf in &mut mf.nested_fns {
-            skull_transform::recover_counted_loops(self.ws, nf);
         }
         let mut findings: Vec<CompilerError> = Vec::new();
         collect(&mut findings, nobox_errs(self.ws, &mf));
@@ -5286,11 +5289,7 @@ impl<'a, 'b> JsDelivery<'a, 'b> {
             self.st.reject(&init_name, e);
             return Ok(());
         }
-        convert_closures(&mut mf, &init_name);
-        skull_transform::recover_counted_loops(self.ws, &mut mf);
-        for nf in &mut mf.nested_fns {
-            skull_transform::recover_counted_loops(self.ws, nf);
-        }
+        finish_body(self.ws, &mut mf, &init_name);
         let mut findings: Vec<CompilerError> = Vec::new();
         collect(&mut findings, nobox_errs(self.ws, &mf));
         for nf in &mf.nested_fns {
