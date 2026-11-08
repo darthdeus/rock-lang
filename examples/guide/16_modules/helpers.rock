@@ -1,4 +1,4 @@
-// Items are private to their file unless marked `pub`.
+// Items default to visibility in their module and its descendants.
 mod helpers;
 
 pub fn shout(s: string) -> string {

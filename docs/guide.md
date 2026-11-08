@@ -569,10 +569,9 @@ fn main() {
 
 ## Modules and use
 
-A single file is one namespace: everything in it sees everything else.
-A project is a directory with a `stick.toml`; without any module
-settings, its `.rock` files share one namespace too, so helpers need
-no import. Larger projects opt into modules per package:
+A project is a directory with a `stick.toml`. By default its `.rock`
+files use the legacy flat namespace, so helpers need no import. A package
+can opt into scoped modules:
 
 ```toml
 [package]
@@ -582,17 +581,13 @@ name = "greeter"
 modules = "v1"
 ```
 
-In a v1 package every file starts with a `mod` header naming it, items
-stay private to their file unless marked `pub`, and `use` imports
-across files. `super::` addresses the enclosing package, so one file
-reaches a sibling through `super::helpers::shout`:
+In a v1 package, a `mod` header assigns a file to a logical module;
+without a header it belongs to the package root. Multiple files can
+contribute to the same module. Items are private to their defining module
+and its descendants unless exported. Here `super::` addresses the parent
+module, so `main` reaches its sibling through `super::helpers::shout`:
 
 ```rock
-// Every file in a v1 package starts with a `mod` header naming it,
-// then imports what it needs with `use`. Run the whole directory:
-//
-//     rock run .
-//
 mod main;
 
 use super::helpers::shout;
@@ -603,7 +598,6 @@ fn main() {
 ```
 
 ```rock
-// Items are private to their file unless marked `pub`.
 mod helpers;
 
 pub fn shout(s: string) -> string {
@@ -616,7 +610,8 @@ fn whisper(s: string) -> string {
 ```
 
 The files live in `16_modules/`; `rock run 16_modules` (or `rock run .`
-inside it) prints `HELLO!`.
+inside it) prints `HELLO!`. See the [modules reference](modules.md) for
+imports, visibility, and compatibility with legacy packages.
 
 ## Tests
 

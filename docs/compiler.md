@@ -51,3 +51,44 @@ build or restart path. See [`mir_emit.rs`](../crates/skull/src/mir_emit.rs) and
 its incremental tests for the implementation and current boundaries.
 
 For tests and fixture formats, see [Testing compiler changes](testing.md).
+
+## Lua value ABI
+
+The shared [ABI planner](../crates/skull-mir/src/lower/abi.rs) selects the
+wire representation consistently for definitions and callers. For ordinary
+values on scalar Rock-to-Rock calls, payloads above 48 leaves become one boxed
+slot. A signature still above 96 lanes then boxes its widest eligible ordinary
+values until it fits. The payload cut excludes a nullable presence flag; the
+signature budget counts actual parameter and result lanes, including presence
+flags. These are backend policy limits, not language size limits.
+
+`nobox` values are never boxing candidates. An ordinary GC-table value whose
+box would implicitly materialize a nested `nobox` child also stays scalar.
+Keep this exemption until a concrete workload justifies another representation;
+do not label an implicit child allocation explicit merely to bypass verification.
+An explicit [`materialize`](language-reference.md#no-box-values) permits a box.
+Function-value and opaque foreign/inline boundaries have their own ABI plans;
+do not apply the direct-call cut independently at a call site.
+
+A scalar signature can still exceed LuaJIT's parse limits. The Lua emitter's
+[frame checks](../crates/skull-codegen-lua/src/frame_limits.rs) diagnose known
+frame/local overflows; they do not make every no-box signature executable.
+Parse limits and runtime trace pressure are different constraints. A smaller
+scalar signature is not by itself evidence of faster execution or less
+allocation. Use the [emitted-frame diagnostic](guide.md#backends) to investigate
+call pressure, then measure the actual workload before changing representation.
+
+The [wide-value ABI tests](../crates/skull/tests/wide_value_abi.rs) cover call
+kinds and boxed value semantics. Representation changes must preserve value
+copies and field layout, including uniform packing and nested no-box fields.
+
+## JavaScript multi-value returns
+
+The JS emitter returns the first leaf directly and publishes remaining leaves
+in a program-sized scratch bank. Capturing a call and all its bank reads must
+remain indivisible: another call between publication and capture would overwrite
+the result. See [`multi_assign`](../crates/skull-codegen-js/src/emit.rs) and the
+[multi-value tests](../crates/skull-codegen-js/tests/multivalue.rs).
+Reference leaves can remain reachable until overwritten, bounded by the bank's
+width. Clearing every slot on each call adds stores; retain the bounded bank
+unless a measured retention problem warrants a different policy.
