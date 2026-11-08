@@ -161,6 +161,44 @@ fn ui_batch_sampler_fixture(fail_after_draw: bool) {
     load_pending_shader_sources()
     assert(get_shader_handle(pipe.shader_name) != 0)
 
+    let fullscreen = BLIT_PIPELINE
+    load_pending_shader_sources()
+    assert(get_shader_handle(fullscreen.shader_name) != 0)
+    CURRENT_UI_POOL = render_batch_scope(pool.unwrap())
+    let rect = ui_rect(4.0, 0.0, 8.0, 8.0)
+    let shader_error = world_fixture_raised(() => { let _ = rect.shader(fullscreen) })
+    let quad_error = world_fixture_raised(() => { let _ = rect.shader_quad(fullscreen) })
+    CURRENT_UI_POOL = saved_pool
+    stone_flush_image_uploads()
+    assert(shader_error != null && quad_error != null,
+        "fullscreen shaders must reject pixel-space UI: shader={shader_error}, quad={quad_error}")
+    assert(shader_error.unwrap().contains(fullscreen.shader_name)
+        && quad_error.unwrap().contains(fullscreen.shader_name), "UI errors identify the incompatible shader")
+    assert_eq(batch_pool_active_count(pool.unwrap()), 0, "rejected UI shaders enqueue no geometry")
+    assert(run_pass(Pass { pipeline: fullscreen, output: output,
+        slot_inputs: [(white, TextureFilter::Nearest)] }), "fullscreen shader remains valid for a pass")
+    assert(ui_batch_sampler_channel(output.unwrap(), 12, 0) > 0.9,
+        "the fullscreen control reaches real pixels")
+
+    let ui_pipe = pipeline(rock_shader(sprite_batch_vert, ui_batch_sampler_primary_frag))
+    for ctx in [UI_CTX_OUTPUT, UI_CTX_COMPOSITE] {
+        CURRENT_UI_POOL = render_batch_scope(pool.unwrap())
+        let scale = UiRect { x: 0.0, y: 0.0, w: 1.0, h: 1.0, ctx }.ctx_scale()
+        let left = UiRect { x: 0.0, y: 0.0, w: 8.0 / scale, h: 8.0 / scale, ctx }
+        let right = UiRect { ..left, x: 8.0 / scale }
+        let _ = left.shader(ui_pipe)
+        let _ = right.shader_quad(ui_pipe)
+        CURRENT_UI_POOL = saved_pool
+        with_canvas(output.unwrap(), () => {
+            clear_screen(0.0, 0.0, 0.0, 0.0)
+            render_ui_batches(pool.unwrap(), projection_extent: v(16.0, 8.0))
+        })
+        for x in [4, 12] {
+            assert(ui_batch_sampler_channel(output.unwrap(), x, 0) > 0.9,
+                "both UI shader methods retain explicit-vertex pixels in context {ctx}")
+        }
+    }
+
     // Successive batches with different stored filters.
     let linear_batch = ui_batch_sampler_filter_batch(pool.unwrap(), pipe,
         white, 1, v(0.0, 0.0))
