@@ -4130,7 +4130,12 @@ fn uniform_expand_rejection_for_call(
         [_u] => {
             let returns_int = f
                 .return_ty
-                .map(|rt| ws.render(None, rt) == "int")
+                .map(|rt| {
+                    matches!(
+                        shape::static_ty(ws, rt),
+                        Some(TypeExpr::Builtin(BuiltinTy::Int))
+                    )
+                })
                 .unwrap_or(false);
             if !returns_int {
                 return reject(body.expr_spans[call], uniform_expand_arity_msg(fname));

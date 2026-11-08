@@ -931,7 +931,12 @@ impl Builder<'_> {
                 // return type rather than guessing from the call.
                 let returns_int = self.ws.module(func.module).functions[func.func]
                     .return_ty
-                    .map(|rt| self.ws.render(None, rt) == "int")
+                    .map(|rt| {
+                        matches!(
+                            shape::static_ty(self.ws, rt),
+                            Some(TypeExpr::Builtin(BuiltinTy::Int))
+                        )
+                    })
                     .unwrap_or(false);
                 if !returns_int {
                     return Err(reject(call_span, uniform_expand_arity_msg(fname)));
