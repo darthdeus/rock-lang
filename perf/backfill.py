@@ -3,8 +3,9 @@
 
 Each commit is checked out into one reused worktree, built into a shared
 release target directory (so consecutive commits rebuild incrementally), and
-measured with perf/run.py against that commit's own corpora. Commits already in
-the history are skipped unless --force is given.
+measured with perf/run.py against the corpora of the current checkout, so every
+revision compiles the same source (a revision that cannot compile it records an
+error). Commits already in the history are skipped unless --force is given.
 
 Usage: perf/backfill.py --since 2026-11-01 [--step 5] [--max 20] [-- run.py args]
        perf/backfill.py --revs sha1 sha2 ...
@@ -82,7 +83,7 @@ def main():
                 print(f"build failed at {sha[:10]}; skipping", file=sys.stderr)
                 continue
             subprocess.run([sys.executable, "-I", str(REPO / "perf/run.py"),
-                            "--repo", str(args.worktree),
+                            "--repo", str(args.worktree), "--corpus-root", str(REPO),
                             "--bin", str(args.target_dir / "release/rock"),
                             "--history", str(args.history), *args.run_args])
     finally:

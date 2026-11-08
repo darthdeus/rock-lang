@@ -280,7 +280,9 @@ def main():
                         help="use the existing target/release/rock without rebuilding")
     parser.add_argument("--history", type=Path, default=default_history())
     parser.add_argument("--corpus", action="append", metavar="NAME=DIR",
-                        help="project to measure, relative to --repo (repeatable)")
+                        help="project to measure, relative to --corpus-root (repeatable)")
+    parser.add_argument("--corpus-root", help="checkout the corpora are read from; default --repo. "
+                        "A backfill passes the current checkout so every revision compiles the same source")
     parser.add_argument("--runs", type=int, default=10, help="hyperfine runs per command")
     parser.add_argument("--warmup-runs", type=int, default=2)
     parser.add_argument("--iters", type=int, default=10,
@@ -294,10 +296,18 @@ def main():
     repo = Path(args.repo).resolve()
     if shutil.which("hyperfine") is None:
         sys.exit("hyperfine is required (brew install hyperfine)")
-    corpora = dict(c.split("=", 1) for c in args.corpus) if args.corpus else default_corpora(repo)
-    for name, rel in corpora.items():
-        if not (repo / rel).is_dir():
-            sys.exit(f"corpus {name}: {repo / rel} is not a directory")
+    corpus_root = Path(args.corpus_root).resolve() if args.corpus_root else repo
+    corpora = (dict(c.split("=", 1) for c in args.corpus) if args.corpus
+               else default_corpora(corpus_root))
+    corpora = {name: str(corpus_root / rel) for name, rel in corpora.items()}
+    # A corpus a revision does not have is skipped, so the run still records
+    # the corpora it does have.
+    for name, path in list(corpora.items()):
+        if not Path(path).is_dir():
+            print(f"corpus {name}: {path} is not a directory; skipped", file=sys.stderr)
+            del corpora[name]
+    if not corpora:
+        sys.exit("no corpus to measure")
 
     rev = revision(repo)
     if args.bin:
@@ -316,9 +326,9 @@ def main():
                             cpus=os.cpu_count(), load_before=os.getloadavg()[0]),
                settings=dict(runs=args.runs, iters=args.iters, lsp_iters=args.lsp_iters),
                corpora={})
-    for name, rel in corpora.items():
-        print(f"measuring {name} ({rel}) at {rev['short']}...", file=sys.stderr)
-        row["corpora"][name] = measure_corpus(rock, repo, rel, args, env)
+    for name, path in corpora.items():
+        print(f"measuring {name} ({path}) at {rev['short']}...", file=sys.stderr)
+        row["corpora"][name] = measure_corpus(rock, repo, path, args, env)
     row["machine"]["load_after"] = os.getloadavg()[0]
     row["elapsed_s"] = time.time() - started
     row["status"] = "ok" if all(
