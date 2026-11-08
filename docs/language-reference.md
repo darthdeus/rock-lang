@@ -19,6 +19,71 @@ optimizer may eliminate a box whose allocation is not observable. Some
 otherwise unboxed uses may still be rejected when their representation is not
 supported.
 
+## Function forms and static locals
+
+A receiver can be named at the definition: `fn Point.move(p, dx: int)`
+declares an ordinary function whose first parameter has type `Point`. The
+receiver has no type annotation at that position; both `p.move(1)` and
+`move(p, 1)` use the same function and overload rules.
+
+A named function can be declared inside a function. It is visible from its
+declaration to the end of its block and can refer to globals, in-scope static
+locals and earlier nested functions. It cannot capture enclosing parameters or
+locals; use a lambda for those. Self-recursion is supported, but forward and
+mutual recursion, generic parameters and annotations on nested functions are
+not.
+
+A `static` local persists across calls and initializes the first time control
+reaches its declaration:
+
+```rock
+fn counter() -> int {
+    static n = 0
+    n = n + 1
+    return n
+}
+```
+
+Each declaration has one cell shared across calls and loop iterations. Its
+initializer cannot read enclosing parameters, locals or another static. Static
+locals are rejected in `@pure` and coroutine functions. A shared scratch cell
+can be overwritten by recursive or interleaved calls.
+
+## Macros
+
+Macros expand at call sites and can accept syntax fragments. Arguments are
+substituted into the body, so an expression used twice can be evaluated twice:
+
+```rock
+macro double(x: expr) -> int { x + x }
+let result = double(5)
+```
+
+Macros can be overloaded by argument shape and arity, and a variadic macro can
+expand recursively using `rest: ...expr` and `...rest`. A macro body can use
+`_G.name` for an explicit global and `^name` for a binding in the caller's
+scope. Macro-introduced local bindings do not capture substituted arguments.
+Macros currently use legacy global lookup even in modules v1; see
+[Modules](modules.md).
+
+## Embedded fields
+
+An `embed` field is owned by its containing struct and is projection-only:
+
+```rock
+struct Point { x: int, y: int }
+struct Holder { embed p: Point }
+```
+
+Leaf access and assignment, whole-field constructor assignment, and a direct
+scalar-ABI round trip such as `h.p = advance(h.p)` are allowed. An embedded
+field cannot be independently bound, returned, captured, or passed through an
+`any` boundary. A nullable embedded field permits presence tests and leaf
+safe-navigation; coalescing the whole field is rejected. Field selection of an
+embedded field uses the write-only `WriteFieldRef`, not a readable field
+reference. Only nominal structs can be embedded, and embed graphs must be
+acyclic. `embed` is contextual: `embed: int` remains a field named `embed`.
+
 ## Default type parameters
 
 Structs, enums and newtypes may give trailing type parameters defaults:

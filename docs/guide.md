@@ -1,6 +1,7 @@
 # The Rock language guide
 
-Rock is a statically typed language. You write `.rock` files, and the
+Rock aims to retain Lua's dynamic feel while providing static typing, structured
+data, pattern matching and generics. You write `.rock` files, and the
 `rock` compiler checks them and runs them on LuaJIT; the same compiler
 also lowers `@shader` functions to GLSL. This guide describes
 what the compiler accepts today, feature by feature, with runnable
