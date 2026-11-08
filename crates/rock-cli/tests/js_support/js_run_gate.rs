@@ -184,6 +184,31 @@ fn js_run_project_dir_matches_luajit() {
     );
 }
 
+// A modules-v1 package names its functions by qualified DefKey
+// (`<package>::main`), so the entry must be found by its declared name.
+#[test]
+fn js_run_modules_v1_bin_package_runs_main() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    let dir = std::env::temp_dir().join("rock_js_run_gate_modules_v1_bin");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("stick.toml"),
+        "[package]\nname = \"semantics_probe\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("main.rock"), "fn main() { print(17) }\n").unwrap();
+
+    let (lua_out, lua_ok) = run(None, &dir);
+    assert!(lua_ok, "luajit v1 package run failed:\n{lua_out}");
+    assert_eq!(lua_out, "17\n", "luajit v1 package output drifted");
+    let (js_out, js_ok) = run(Some("js"), &dir);
+    assert!(js_ok, "js v1 package run failed:\n{js_out}");
+    assert_eq!(js_out, "17\n", "js must call the v1 package's main");
+}
+
 // A file with no nullary `main` runs module-load effects only (ginit + deco
 // applications), matching luajit -- and prints nothing, exiting cleanly.
 #[test]

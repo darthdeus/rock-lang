@@ -6296,11 +6296,14 @@ fn applied_decorator_names(
 }
 
 /// The entry module's nullary `main`, if it defines one -- the program entry.
+/// Matched by declared name: a modules-v1 entry's key is `<package>::main`.
 fn nullary_main(ws: &Workspace, user_mid: bone_semantic::prelude::ModuleId) -> Option<FuncRef> {
     ws.module(user_mid)
         .functions
         .iter()
-        .find(|(_, f)| f.name.as_str() == "main" && f.param_decls.is_empty())
+        .find(|(_, f)| {
+            skull_mir::mangle::declared_name(f.name.as_str()) == "main" && f.param_decls.is_empty()
+        })
         .map(|(fid, _)| FuncRef {
             module: user_mid,
             func: fid,
