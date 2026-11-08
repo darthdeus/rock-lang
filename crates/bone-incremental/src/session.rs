@@ -1716,6 +1716,7 @@ impl Session {
         // disjoint from `changed` is no more affected than one in a module that
         // wasn't selected at all (which is never re-inferred). Globals/decorators/
         // struct-defaults always re-check inside check_module_incremental.
+        let mut reused: FxHashSet<BodyId> = FxHashSet::default();
         let prevs: Vec<(ModuleId, InferenceResult)> = ids
             .iter()
             .map(|id| {
@@ -1729,6 +1730,11 @@ impl Session {
                 let mut prev = InferenceResult::default();
                 for (owner, bi) in cached.per_fn {
                     if !errored.contains(&owner) && bi.deps.is_disjoint(&reinfer_names) {
+                        // Globals, decorators and struct defaults re-check
+                        // regardless of `prev`, so only a function is reused.
+                        if matches!(owner, BodyOwner::Function(_)) {
+                            reused.insert((*id, owner));
+                        }
                         prev.per_fn.insert(owner, bi);
                     }
                 }
@@ -1759,11 +1765,12 @@ impl Session {
 
         self.rebuild_dependents();
 
-        // `ids` is the full re-checked set and already contains `f_mids`, so it
-        // covers `reinferred`. `relowered` is precisely the re-LOWERED modules
+        // `ids` already contains `f_mids`, so it covers `reinferred`, minus the
+        // bodies reused above. `relowered` is precisely the re-LOWERED modules
         // (`f_mids`) -- re-inferred-only dependents kept their arenas, so listing
         // them as relowered would be wrong.
-        let reinferred = self.collect_reinferred(&ids);
+        let mut reinferred = self.collect_reinferred(&ids);
+        reinferred.retain(|body| !reused.contains(body));
         let relowered = self.collect_reinferred(&f_mids);
 
         Ok(UpdateResult {

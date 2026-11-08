@@ -2265,6 +2265,24 @@ fn signature_edit_reinfers_only_the_callers_of_the_edited_function() {
     h.assert_clean();
 }
 
+#[test]
+fn signature_edit_reports_only_the_bodies_it_rechecked() {
+    let mut h = Harness::new(&[
+        ("a.rock", "fn edited(x: int) -> int { x }\n"),
+        (
+            "b.rock",
+            "fn calls_edited() -> int { edited(1) }\nfn leaves_it_alone() -> int { 2 }\n",
+        ),
+    ]);
+
+    let result = h.update("a.rock", "fn edited(x: int, y: int = 0) -> int { x }\n");
+
+    let b = h.mid("b.rock");
+    let in_b: Vec<_> = result.reinferred.iter().filter(|(m, _)| *m == b).collect();
+    assert_eq!(in_b.len(), 1, "only calls_edited was re-checked: {in_b:?}");
+    h.assert_matches_batch();
+}
+
 // A signature edit that adds a function renumbers the later functions, and a
 // cached caller stores its callee's index: it has to re-infer.
 #[test]
