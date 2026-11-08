@@ -950,8 +950,7 @@ impl UseIndex {
 
 impl Default for InlineCache {
     fn default() -> Self {
-        let census_enabled =
-            std::env::var_os("ROCK_INLINE_CENSUS").is_some_and(|v| v.to_str() == Some("1"));
+        let census_enabled = std::env::var("ROCK_LOG").is_ok_and(|value| value == "debug");
         let worker = if census_enabled {
             format!("{:?}", std::thread::current().id())
         } else {

@@ -456,9 +456,7 @@ pub struct ExpandTiming {
 }
 
 fn graph_timing_enabled() -> bool {
-    cfg!(debug_assertions)
-        || log::log_enabled!(log::Level::Debug)
-        || std::env::var_os("ROCK_GRAPH_CENSUS").is_some()
+    cfg!(debug_assertions) || log::log_enabled!(log::Level::Debug)
 }
 
 fn elapsed_ns(start: Option<Instant>) -> u64 {

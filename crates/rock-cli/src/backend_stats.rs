@@ -766,7 +766,7 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             if graph.census_enabled {
                 "enabled"
             } else {
-                "disabled; set ROCK_GRAPH_CENSUS=1"
+                "disabled; set ROCK_LOG=debug"
             },
             graph.frontier_count,
             graph.frontier_owner_p50,

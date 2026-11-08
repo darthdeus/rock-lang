@@ -2193,7 +2193,7 @@ fn inline_candidate_keys(concrete: &crate::concrete_body::ConcreteBodies) -> Vec
 }
 
 fn concrete_stats_requested() -> bool {
-    std::env::var_os("SKULL_CONCRETE_STATS").is_some()
+    std::env::var("ROCK_LOG").is_ok_and(|value| value == "debug")
 }
 
 fn build_inline_candidate_table(
@@ -2569,18 +2569,6 @@ fn callee_binding_pass_lua(plans: &mut [skull_codegen_lua::CalleeBindingPlan]) -
     }
     if names_in_scope > 0 {
         out.push_str("end)()\nend\n");
-    }
-    if std::env::var("SKULL_EMIT_PROFILE").is_ok() {
-        let capped = plans.iter().filter(|p| p.capped).count();
-        let captures: usize = plans.iter().map(|p| p.captures.len()).sum();
-        eprintln!(
-            "    callee binding: {} bound definitions, {} captures ({:.1} mean), {} capped at {}",
-            plans.len(),
-            captures,
-            captures as f64 / plans.len() as f64,
-            capped,
-            skull_codegen_lua::MAX_BOUND_CALLEES,
-        );
     }
     out
 }
@@ -8111,11 +8099,6 @@ impl SkullEmitCache {
             .saturating_sub(concrete_builds_before)
             as usize;
         cache.repair_stats.concrete_update_ns = t_concrete.elapsed().as_nanos() as u64;
-        let _graph_ms = Duration::from_nanos(
-            cache.repair_stats.graph_update_ns
-                + cache.repair_stats.concrete_update_ns
-                + cache.repair_stats.artifact_update_ns,
-        );
 
         // Before any borrow of the cache's own fields, because it mutates several.
         for gone in &update.removed {
@@ -8330,14 +8313,13 @@ impl SkullEmitCache {
         // newly reached body cannot reuse an inline decision made for the old body.
         cache.repair_stats.affected_selection_ns = _t_aff.elapsed().as_nanos() as u64;
         cache.repair_stats.chunk_rebuild_requests = affected.len();
-        let _aff_ms = Duration::from_nanos(cache.repair_stats.affected_selection_ns);
 
         // The persistent InlineCache keeps unchanged callee bodies across edits; the
         // affected entries are exactly those whose lowered body could have changed
         // (own body edit, own ABI flip, or a callee's ABI flip -- all within
         // `affected`), so invalidate them before re-lowering. Everything else is
         // provably unchanged and reused.
-        let _t_relow = Instant::now();
+        let t_relow = Instant::now();
         let mut chunks_rebuilt = 0;
         for body in &affected {
             cache.inline_cache.invalidate(body.func);
@@ -8385,19 +8367,7 @@ impl SkullEmitCache {
         let (added_errors, added_fingerprint_identities) =
             Self::build_graph_added_chunks(cache, ws, &update.added);
         fingerprint_identities.extend(added_fingerprint_identities);
-        cache.repair_stats.relowering_ns = _t_relow.elapsed().as_nanos() as u64;
-        if std::env::var("SKULL_EMIT_PROFILE").is_ok() {
-            eprintln!(
-                "    update_chunk_cache: graph {:.3}ms (+{} -{} instances) | affected-scan {:.3}ms (O(edit), {} chunks) | re-lower {:.3}ms ({} affected)",
-                _graph_ms.as_secs_f64() * 1000.0,
-                update.added.len(),
-                update.removed.len(),
-                _aff_ms.as_secs_f64() * 1000.0,
-                cache.chunks.len(),
-                _t_relow.elapsed().as_secs_f64() * 1000.0,
-                affected.len(),
-            );
-        }
+        cache.repair_stats.relowering_ns = t_relow.elapsed().as_nanos() as u64;
         Ok((affected, update, added_errors, fingerprint_identities))
     }
 }
@@ -9430,8 +9400,8 @@ fn main() {
     impl InlineCensusOn {
         fn on() -> Self {
             let guard = INLINE_CENSUS.lock().unwrap_or_else(|e| e.into_inner());
-            let previous = std::env::var("ROCK_INLINE_CENSUS").ok();
-            unsafe { std::env::set_var("ROCK_INLINE_CENSUS", "1") };
+            let previous = std::env::var("ROCK_LOG").ok();
+            unsafe { std::env::set_var("ROCK_LOG", "debug") };
             Self(guard, previous)
         }
     }
@@ -9439,8 +9409,8 @@ fn main() {
     impl Drop for InlineCensusOn {
         fn drop(&mut self) {
             match &self.1 {
-                Some(value) => unsafe { std::env::set_var("ROCK_INLINE_CENSUS", value) },
-                None => unsafe { std::env::remove_var("ROCK_INLINE_CENSUS") },
+                Some(value) => unsafe { std::env::set_var("ROCK_LOG", value) },
+                None => unsafe { std::env::remove_var("ROCK_LOG") },
             }
         }
     }
@@ -10084,7 +10054,7 @@ fn main() { let result = first() }
                     > 0,
             "named lowerer consumer ownership routes are misclassified: {attribution:?}"
         );
-        if std::env::var("ROCK_LOWER_CENSUS").is_ok_and(|value| value == "1") {
+        if std::env::var("ROCK_LOG").is_ok_and(|value| value == "debug") {
             assert!(
                 attribution.lower.concrete_mono_timed_requests > 0
                     && attribution.lower.concrete_mono_lookup_ns > 0
