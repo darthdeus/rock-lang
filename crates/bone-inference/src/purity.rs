@@ -1,4 +1,5 @@
 use super::*;
+use bone_core::hir_walk::HirChild;
 
 /// True if `e` reaches a `return`/`break`/`continue` (statement or expr form)
 /// through block / if / match / loop bodies. Port of the retired checker's
@@ -94,7 +95,13 @@ pub(crate) fn reject_static_init_captures(
     site: Span,
 ) -> Result<(), CompilerError> {
     let root_span = c.body.expr_spans[root];
-    reject_captures_expr(c, root, root_span, site, CaptureCtx::StaticInit)
+    reject_captures(
+        c,
+        HirChild::Expr(root),
+        root_span,
+        site,
+        CaptureCtx::StaticInit,
+    )
 }
 
 /// A nested fn's body may not capture the enclosing frame. `body` is the body
@@ -106,7 +113,13 @@ pub(crate) fn reject_nested_fn_captures(
     body: Idx<Expr>,
     decl_span: Span,
 ) -> Result<(), CompilerError> {
-    reject_captures_expr(c, body, decl_span, decl_span, CaptureCtx::NestedFnBody)
+    reject_captures(
+        c,
+        HirChild::Expr(body),
+        decl_span,
+        decl_span,
+        CaptureCtx::NestedFnBody,
+    )
 }
 
 /// Reject a binding reference (a `Var` read or a `Callee::Local` call) that
@@ -149,506 +162,160 @@ pub(crate) fn reject_captured_binding(
     Ok(())
 }
 
-pub(crate) fn reject_captures_expr(
+pub(crate) fn reject_captures(
     c: BodyCtx,
-    e: Idx<Expr>,
+    node: HirChild,
     root_span: Span,
     site: Span,
     mode: CaptureCtx,
 ) -> Result<(), CompilerError> {
-    macro_rules! go {
-        ($x:expr) => {
-            reject_captures_expr(c, $x, root_span, site, mode)?
-        };
-    }
-    match c.body.expr_arena[e] {
-        Expr::Var(b) => reject_captured_binding(c, b, root_span, site, mode)?,
-
-        Expr::Unit
-        | Expr::Null
-        | Expr::Hole(_)
-        | Expr::Int(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::String(_)
-        | Expr::Break
-        | Expr::Continue
-        | Expr::Global(_)
-        | Expr::SiblingRef(_)
-        | Expr::Return(None)
-        | Expr::Yield(None) => {}
-
-        Expr::Not(i, _)
-        | Expr::BitNot(i)
-        | Expr::UnaryMinus(i, _)
-        | Expr::Spread(i)
-        | Expr::YieldDelegate(i)
-        | Expr::Return(Some(i))
-        | Expr::Yield(Some(i))
-        | Expr::As { value: i, .. }
-        | Expr::TupleIndex { tuple: i, .. }
-        | Expr::FieldAccess { base: i, .. }
-        | Expr::SafeNav { base: i, .. }
-        | Expr::IncDec { target: i, .. } => go!(i),
-
-        Expr::Index { base: a, index: b }
-        | Expr::Range { low: a, high: b }
-        | Expr::BinOp { lhs: a, rhs: b, .. }
-        | Expr::Assign {
-            target: a,
-            value: b,
-        }
-        | Expr::CompoundAssign {
-            target: a,
-            value: b,
-            ..
-        } => {
-            go!(a);
-            go!(b);
-        }
-
-        Expr::Tuple(es) | Expr::Array(es) => {
-            for x in es {
-                go!(x);
-            }
-        }
-
-        Expr::InterpolatedString(parts) => {
-            for p in parts {
-                if let InterpPart::Value { expr, spec } = c.body.interp_part_arena[p] {
-                    go!(expr);
-                    for sub in spec
-                        .into_iter()
-                        .flat_map(|spec| [spec.width_expr, spec.precision_expr])
-                        .flatten()
-                    {
-                        go!(sub);
-                    }
-                }
-            }
-        }
-
-        Expr::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            go!(cond);
-            go!(then_branch);
-            if let Some(eb) = else_branch {
-                go!(eb);
-            }
-        }
-        Expr::IfLet {
-            value,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            go!(value);
-            go!(then_branch);
-            if let Some(eb) = else_branch {
-                go!(eb);
-            }
-        }
-
-        Expr::Call { callee, args, .. } => {
-            match callee {
-                Callee::Value(ve) => go!(ve),
-                // Calling an enclosing local (a captured lambda) is a capture;
-                // calling a sibling nested fn / in-scope static is not.
-                Callee::Local(b) => reject_captured_binding(c, b, root_span, site, mode)?,
-                Callee::Unresolved { .. } => {}
-            }
-            for a in args {
-                go!(a);
-            }
-        }
-        Expr::SafeNavCall { receiver, args, .. } => {
-            go!(receiver);
-            for a in args {
-                go!(a);
-            }
-        }
-        Expr::SafeNavLet { receiver, body, .. } => {
-            go!(receiver);
-            go!(body);
-        }
-
-        Expr::Lambda { body, .. } => go!(body),
-
-        Expr::Block { statements, tail } => {
-            for s in statements {
-                reject_captures_stmt(c, s, root_span, site, mode)?;
-            }
-            if let Some(t) = tail {
-                go!(t);
-            }
-        }
-
-        Expr::Match { scrutinee, arms } => {
-            go!(scrutinee);
-            for a in arms {
-                let arm = c.body.match_arm_arena[a];
-                if let Some(g) = arm.guard {
-                    go!(g);
-                }
-                go!(arm.body);
-            }
-        }
-
-        Expr::StructLiteral { fields, bases, .. } => {
-            for b in bases {
-                go!(b);
-            }
-            for fld in fields {
-                go!(c.body.struct_lit_field_arena[fld].value);
-            }
-        }
-
-        Expr::EnumVariant { args, .. } => match args {
-            VariantArgs::Unit => {}
-            VariantArgs::Tuple(es) => {
-                for x in es {
-                    go!(x);
-                }
-            }
-            VariantArgs::Record(fs) => {
-                for fld in fs {
-                    go!(c.body.struct_lit_field_arena[fld].value);
-                }
-            }
+    match node {
+        HirChild::Expr(e) => match c.body.expr_arena[e] {
+            // Calling an enclosing local (a captured lambda) is a capture;
+            // calling a sibling nested fn / in-scope static is not.
+            Expr::Var(b)
+            | Expr::Call {
+                callee: Callee::Local(b),
+                ..
+            } => reject_captured_binding(c, b, root_span, site, mode)?,
+            _ => {}
         },
+        // A doubly-nested fn's body sits inside `root_span`, so any
+        // enclosing-frame read it makes is caught by ITS own reject pass;
+        // walking the body here is harmless (every ref is span-inside
+        // `root_span`).
+        HirChild::Statement(_) => {}
+        // A pattern binds and compares; it reads no enclosing local.
+        HirChild::Pattern(_) => return Ok(()),
     }
-    Ok(())
+    c.body.try_for_each_child(node, |child| {
+        reject_captures(c, child, root_span, site, mode)
+    })
 }
 
-pub(crate) fn reject_captures_stmt(
+/// Push an error at every construct in `node` that is not referentially
+/// transparent. Lambda and nested fn bodies are rejected whole rather than
+/// vetted, so the walk does not enter them.
+pub(crate) fn verify_pure(
     c: BodyCtx,
-    s: Idx<Statement>,
-    root_span: Span,
-    site: Span,
-    mode: CaptureCtx,
-) -> Result<(), CompilerError> {
-    macro_rules! go {
-        ($x:expr) => {
-            reject_captures_expr(c, $x, root_span, site, mode)?
-        };
+    ws: &Workspace,
+    resolved: &FxHashMap<Idx<Expr>, (ModuleId, Idx<Function>)>,
+    node: HirChild,
+    errors: &mut Vec<CompilerError>,
+) {
+    let descend = match node {
+        HirChild::Expr(e) => verify_pure_expr(c, ws, resolved, e, errors),
+        HirChild::Statement(s) => verify_pure_stmt(c, s, errors),
+        // A pattern binds and compares; it has no effect of its own.
+        HirChild::Pattern(_) => false,
+    };
+    if descend {
+        c.body
+            .for_each_child(node, |child| verify_pure(c, ws, resolved, child, errors));
     }
-    match c.body.statement_arena[s] {
-        Statement::Let { value, .. }
-        | Statement::LetTuple { value, .. }
-        | Statement::LetNewtype { value, .. }
-        | Statement::Expr(value)
-        | Statement::Defer(value)
-        | Statement::Return(Some(value))
-        | Statement::Static { value, .. } => go!(value),
-        // A doubly-nested fn's body sits inside `root_span`, so any enclosing-frame
-        // read it makes is caught by ITS own reject pass; walking the body here is
-        // harmless (every ref is span-inside `root_span`).
-        Statement::Fn { body, .. } => go!(body),
-        Statement::For { iter, body, .. } => {
-            go!(iter);
-            go!(body);
-        }
-        Statement::While { cond, body } => {
-            go!(cond);
-            go!(body);
-        }
-        Statement::WhileLet { value, body, .. } => {
-            go!(value);
-            go!(body);
-        }
-        Statement::Return(None)
-        | Statement::Break
-        | Statement::Continue
-        | Statement::Comment(_) => {}
-    }
-    Ok(())
 }
 
-pub(crate) fn verify_pure_expr(
+/// The errors `e` itself raises; whether its children still need vetting.
+fn verify_pure_expr(
     c: BodyCtx,
     ws: &Workspace,
     resolved: &FxHashMap<Idx<Expr>, (ModuleId, Idx<Function>)>,
     e: Idx<Expr>,
     errors: &mut Vec<CompilerError>,
-) {
+) -> bool {
     let span = c.body.expr_spans[e];
-    macro_rules! go {
-        ($x:expr) => {
-            verify_pure_expr(c, ws, resolved, $x, errors)
-        };
-    }
+    let mut reject = |message: String| errors.push(CompilerError::new_with_label(span, message));
     match c.body.expr_arena[e] {
         Expr::Global(name) => {
             // const globals are read-only (assignment/incdec rejected,
             // re-initialized unconditionally on hot reload); reading one
             // is pure. Only mutable globals break purity.
             if !ws.const_globals.contains(&name) {
-                errors.push(CompilerError::new_with_label(
-                    span,
-                    format!("`@pure` function reads global `{}` (mutable state)", name),
+                reject(format!(
+                    "`@pure` function reads global `{}` (mutable state)",
+                    name
                 ))
             }
         }
-        Expr::Assign { target, value } => {
-            errors.push(CompilerError::new_with_label(
-                span,
-                "`@pure` function performs an assignment (mutation)".to_string(),
-            ));
-            go!(target);
-            go!(value);
+        Expr::Assign { .. } => {
+            reject("`@pure` function performs an assignment (mutation)".to_string())
         }
-        Expr::CompoundAssign { target, value, .. } => {
-            errors.push(CompilerError::new_with_label(
-                span,
-                "`@pure` function performs a compound assignment (mutation)".to_string(),
-            ));
-            go!(target);
-            go!(value);
-        }
-        Expr::IncDec { target, .. } => {
-            errors.push(CompilerError::new_with_label(
-                span,
-                "`@pure` function performs an increment/decrement (mutation)".to_string(),
-            ));
-            go!(target);
-        }
+        Expr::CompoundAssign { .. } => reject(
+            "`@pure` function performs a compound assignment (mutation)".to_string(),
+        ),
+        Expr::IncDec { .. } => reject(
+            "`@pure` function performs an increment/decrement (mutation)".to_string(),
+        ),
         Expr::Call { .. } | Expr::SafeNavCall { .. } => {
             if let Some(&(mid, fid)) = resolved.get(&e) {
                 let callee_fn = &ws.module(mid).functions[fid];
                 if !fn_has_anno(callee_fn, "pure") && !fn_has_anno(callee_fn, "debug_impure") {
-                    errors.push(CompilerError::new_with_label(
-                        span,
-                        format!(
-                            "`@pure` function calls `{}` which is not provably pure",
-                            callee_fn.name
-                        ),
+                    reject(format!(
+                        "`@pure` function calls `{}` which is not provably pure",
+                        callee_fn.name
                     ));
                 }
             }
-            let (head, args) = match c.body.expr_arena[e] {
-                Expr::Call { callee, args, .. } => match callee {
-                    Callee::Value(ve) => (Some(ve), args),
-                    Callee::Local(_) | Callee::Unresolved { .. } => (None, args),
-                },
-                Expr::SafeNavCall { receiver, args, .. } => (Some(receiver), args),
-                _ => unreachable!("matched a call above"),
-            };
-            if let Some(head) = head {
-                go!(head);
-            }
-            for a in args {
-                go!(a);
-            }
         }
-        Expr::SafeNavLet { receiver, body, .. } => {
-            go!(receiver);
-            go!(body);
-        }
-        Expr::InterpolatedString(parts) => {
-            for p in parts {
-                if let InterpPart::Value { expr, spec } = c.body.interp_part_arena[p] {
-                    go!(expr);
-                    for sub in spec
-                        .into_iter()
-                        .flat_map(|spec| [spec.width_expr, spec.precision_expr])
-                        .flatten()
-                    {
-                        go!(sub);
-                    }
-                }
-            }
-        }
-        Expr::Block { statements, tail } => {
-            for s in statements {
-                verify_pure_stmt(c, ws, resolved, s, errors);
-            }
-            if let Some(t) = tail {
-                go!(t);
-            }
-        }
-        Expr::If {
-            cond,
-            then_branch,
-            else_branch,
-        } => {
-            go!(cond);
-            go!(then_branch);
-            if let Some(eb) = else_branch {
-                go!(eb);
-            }
-        }
-        Expr::IfLet {
-            value,
-            then_branch,
-            else_branch,
-            ..
-        } => {
-            go!(value);
-            go!(then_branch);
-            if let Some(eb) = else_branch {
-                go!(eb);
-            }
-        }
-        Expr::Match { scrutinee, arms } => {
-            go!(scrutinee);
-            for a in arms {
-                let arm = c.body.match_arm_arena[a];
-                if let Some(g) = arm.guard {
-                    go!(g);
-                }
-                go!(arm.body);
-            }
-        }
-        Expr::BinOp { lhs, rhs, .. } => {
-            go!(lhs);
-            go!(rhs);
-        }
-        Expr::Index { base, index } => {
-            errors.push(CompilerError::new_with_label(
-                span,
-                "`@pure` function indexes a collection (reads potentially-mutable state)"
-                    .to_string(),
-            ));
-            go!(base);
-            go!(index);
-        }
-        Expr::Range { low, high } => {
-            go!(low);
-            go!(high);
-        }
-        Expr::Not(i, _)
-        | Expr::BitNot(i)
-        | Expr::UnaryMinus(i, _)
-        | Expr::Spread(i)
-        | Expr::YieldDelegate(i)
-        | Expr::Return(Some(i))
-        | Expr::Yield(Some(i))
-        | Expr::As { value: i, .. }
-        | Expr::TupleIndex { tuple: i, .. }
-        | Expr::FieldAccess { base: i, .. }
-        | Expr::SafeNav { base: i, .. } => go!(i),
-        // Tuples are value-like (no heap identity) -- pure.
-        Expr::Tuple(es) => {
-            for x in es {
-                go!(x);
-            }
-        }
+        Expr::Index { .. } => reject(
+            "`@pure` function indexes a collection (reads potentially-mutable state)"
+                .to_string(),
+        ),
         // Array literals allocate a heap table -- identity observable across
-        // re-evaluation, so not dup-safe.
-        Expr::Array(es) => {
-            errors.push(CompilerError::new_with_label(
-                span,
-                "`@pure` function builds an array literal (allocates a heap table, identity observable)"
-                    .to_string(),
-            ));
-            for x in es {
-                go!(x);
-            }
-        }
+        // re-evaluation, so not dup-safe. Tuples are value-like (no heap
+        // identity) -- pure.
+        Expr::Array(_) => reject(
+            "`@pure` function builds an array literal (allocates a heap table, identity observable)"
+                .to_string(),
+        ),
         // A `value` struct literal is byte-value (pure); a heap struct literal
         // has observable identity.
-        Expr::StructLiteral {
-            name,
-            fields,
-            bases,
-        } => {
+        Expr::StructLiteral { name, .. } => {
             let is_value = ws
                 .struct_by_name
                 .get(&name)
                 .is_some_and(|sid| ws.module(sid.module).structs[sid.def].is_value);
             if !is_value {
-                errors.push(CompilerError::new_with_label(
-                    span,
+                reject(
                     "`@pure` function constructs a heap struct literal (identity observable); only `value` structs are allowed"
                         .to_string(),
-                ));
-            }
-            for b in bases {
-                go!(b);
-            }
-            for fld in fields {
-                go!(c.body.struct_lit_field_arena[fld].value);
+                );
             }
         }
-        Expr::EnumVariant { args, .. } => match args {
-            VariantArgs::Unit => {}
-            VariantArgs::Tuple(es) => {
-                for x in es {
-                    go!(x);
-                }
-            }
-            VariantArgs::Record(fs) => {
-                for fld in fs {
-                    go!(c.body.struct_lit_field_arena[fld].value);
-                }
-            }
-        },
         // A lambda captures and has closure identity; its body isn't vetted
         // for purity here.
-        Expr::Lambda { .. } => errors.push(CompilerError::new_with_label(
-            span,
-            "`@pure` function creates a lambda (closure identity / captured state not vetted)"
-                .to_string(),
-        )),
+        Expr::Lambda { .. } => {
+            reject(
+                "`@pure` function creates a lambda (closure identity / captured state not vetted)"
+                    .to_string(),
+            );
+            return false;
+        }
         // Match (incl. with-binding) and self-recursion are accepted: they are
         // referentially transparent. rock rejects match-bind / self-recursion
         // as scope-walker limitations; bone implements the intended rule.
         _ => {}
     }
+    true
 }
 
-pub(crate) fn verify_pure_stmt(
-    c: BodyCtx,
-    ws: &Workspace,
-    resolved: &FxHashMap<Idx<Expr>, (ModuleId, Idx<Function>)>,
-    s: Idx<Statement>,
-    errors: &mut Vec<CompilerError>,
-) {
-    macro_rules! go {
-        ($x:expr) => {
-            verify_pure_expr(c, ws, resolved, $x, errors)
-        };
-    }
-    match c.body.statement_arena[s] {
-        Statement::Let { value, .. }
-        | Statement::LetTuple { value, .. }
-        | Statement::LetNewtype { value, .. }
-        | Statement::Expr(value)
-        | Statement::Defer(value)
-        | Statement::Return(Some(value)) => go!(value),
-        Statement::For { iter, body, .. } => {
-            go!(iter);
-            go!(body);
-        }
-        Statement::While { cond, body } => {
-            go!(cond);
-            go!(body);
-        }
-        Statement::WhileLet { value, body, .. } => {
-            go!(value);
-            go!(body);
-        }
+/// The errors `s` itself raises; whether its children still need vetting.
+fn verify_pure_stmt(c: BodyCtx, s: Idx<Statement>, errors: &mut Vec<CompilerError>) -> bool {
+    let message = match c.body.statement_arena[s] {
         Statement::Static { .. } => {
-            errors.push(CompilerError::new_with_label(
-                c.body.statement_spans[s],
-                "`@pure` function declares a `static` (writes module state)".to_string(),
-            ));
+            "`@pure` function declares a `static` (writes module state)".to_string()
         }
         // Conservative, like the lambda case: a nested fn's body is not vetted
         // for purity here. Put the helper at top level if it must be `@pure`.
         Statement::Fn { .. } => {
-            errors.push(CompilerError::new_with_label(
-                c.body.statement_spans[s],
-                "`@pure` function declares a nested `fn` (its body is not vetted for purity)"
-                    .to_string(),
-            ));
+            "`@pure` function declares a nested `fn` (its body is not vetted for purity)"
+                .to_string()
         }
-        Statement::Return(None)
-        | Statement::Break
-        | Statement::Continue
-        | Statement::Comment(_) => {}
-    }
+        _ => return true,
+    };
+    errors.push(CompilerError::new_with_label(
+        c.body.statement_spans[s],
+        message,
+    ));
+    false
 }

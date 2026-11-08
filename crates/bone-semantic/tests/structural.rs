@@ -3440,3 +3440,95 @@ fn legacy_struct_sharing_a_stdlib_name_reports_the_duplicate_at_the_user_file() 
         }
     }
 }
+
+/// `Body::for_each_child` reaches every expression of every body from the
+/// body's roots: the whole stdlib plus a module that spells each HIR shape
+/// with child expressions. A variant whose children the walk forgot leaves
+/// them unreached here.
+#[test]
+fn hir_child_walk_reaches_every_expression() {
+    use bone_core::hir::Expr;
+    use bone_core::hir_walk::HirChild;
+
+    let src = r#"
+struct P { x: int = 1 + 2, y: int = 3 }
+enum Shape { Dot, Circle(float), Rect { w: float, h: float } }
+global G: int = 0
+fn takes(a: int, b: int = 4 * 2) -> int { a + b }
+fn shapes(s: Shape) -> float {
+    match s {
+        Shape::Dot => 0.0,
+        Shape::Circle(r) if r > 1.0 => r,
+        Shape::Circle(r) => -r,
+        Shape::Rect { w, h } => w * h,
+    }
+}
+fn all(xs: [int], n: int?, p: P) -> string {
+    let t = (1, 2)
+    let (a, b) = t
+    let arr = [a, b, t.0]
+    let q = P { ..p, x: 5 }
+    let r = Shape::Rect { w: 1.0, h: 2.0 }
+    let c = Shape::Circle(2.0)
+    let f = (k: int) => k + a
+    fn helper(k: int) -> int { k * 2 }
+    static S: int = 7
+    defer { G = 1 }
+    if let v = n { G += v } else { G -= 1 }
+    while let v = n { G = v; break }
+    while G < 3 { G++ }
+    for i in 0..3 { if i == 1 { continue } }
+    let m = n?.let { n + 1 }
+    let o = n?.takes(1)
+    let s = xs[0] as float
+    let width = 3
+    let digits = 2
+    match n { 1 | 2 => G = 0, 3..5 => G = 1, _ => {} }
+    let _ = (m, o, s, q, r, c, f(1), helper(2), !true, ~1, -a, takes(b: 1, a: 2))
+    return "{s:{width}.{digits}f} {p.y}"
+}
+"#;
+    let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
+        .iter()
+        .map(|f| {
+            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
+            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
+        })
+        .collect();
+    modules.push(parse_rock(src).expect("parse"));
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+
+    let mut missed = Vec::new();
+    for module in &ws.modules {
+        for (owner, body) in module.bodies.iter() {
+            let mut reached = FxHashSet::default();
+            let roots = body
+                .root
+                .into_iter()
+                .chain(body.param_defaults.iter().flatten().copied())
+                .chain(body.field_defaults.values().copied());
+            for root in roots {
+                reached.insert(root);
+                body.walk_descendants(HirChild::Expr(root), &mut |child| match child {
+                    HirChild::Expr(e) => reached.insert(e),
+                    HirChild::Statement(_) | HirChild::Pattern(_) => true,
+                });
+            }
+            for (e, expr) in body.expr_arena.iter() {
+                // Lowering an `if let` chain copies its outermost node into a
+                // fresh slot and leaves the original behind, unreferenced;
+                // its children are reached through the copy.
+                let orphaned_copy =
+                    matches!(expr, Expr::IfLet { value, .. } if reached.contains(value));
+                if !reached.contains(&e) && !orphaned_copy {
+                    missed.push(format!("{} {owner:?}: {expr:?}", module.file));
+                }
+            }
+        }
+    }
+    assert!(
+        missed.is_empty(),
+        "unreached expressions:\n{}",
+        missed.join("\n")
+    );
+}

@@ -607,11 +607,11 @@ pub fn check_function(
         }
         let ws_ref = gamma.workspace;
         let mut purity_errors = Vec::new();
-        verify_pure_expr(
+        verify_pure(
             c,
             ws_ref,
             &gamma.out.resolved_overload_calls,
-            body,
+            bone_core::hir_walk::HirChild::Expr(body),
             &mut purity_errors,
         );
         gamma.body_errors.append(&mut purity_errors);

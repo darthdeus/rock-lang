@@ -12,6 +12,7 @@ pub mod annotations;
 pub mod comptime_files;
 pub mod escape;
 pub mod hir;
+pub mod hir_walk;
 pub mod identity_storage;
 pub mod modules;
 pub mod suspension;

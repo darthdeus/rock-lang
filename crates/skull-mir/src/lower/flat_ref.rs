@@ -12,7 +12,7 @@
 use super::call::DirectCall;
 use super::*;
 use crate::instance::Instance;
-use bone_core::hir::InterpPart;
+use bone_core::hir_walk::HirChild;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum FlatStorage {
@@ -131,192 +131,26 @@ fn is_phantom_call(body: &Body, e: Idx<Expr>) -> bool {
 /// bodies of lambdas and nested fns, which return for themselves.
 fn scan_returns(
     body: &Body,
-    e: Idx<Expr>,
+    node: HirChild,
     returns: &mut Vec<Idx<Expr>>,
     lets: &mut Vec<(Idx<BindingInfo>, Idx<Expr>)>,
 ) {
-    let go = |x: Idx<Expr>, returns: &mut Vec<Idx<Expr>>, lets: &mut Vec<_>| {
-        scan_returns(body, x, returns, lets)
-    };
-    match body.expr_arena[e] {
-        Expr::Unit
-        | Expr::Null
-        | Expr::Hole(_)
-        | Expr::Int(_)
-        | Expr::Float(_)
-        | Expr::Bool(_)
-        | Expr::String(_)
-        | Expr::Var(_)
-        | Expr::Global(_)
-        | Expr::SiblingRef(_)
-        | Expr::Break
-        | Expr::Continue
-        | Expr::Lambda { .. } => {}
-        Expr::Tuple(es) | Expr::Array(es) => {
-            for x in es {
-                go(x, returns, lets);
-            }
-        }
-        Expr::InterpolatedString(parts) => {
-            for p in parts {
-                if let InterpPart::Value { expr, .. } = body.interp_part_arena[p] {
-                    go(expr, returns, lets);
-                }
-            }
-        }
-        Expr::Not(i, _)
-        | Expr::BitNot(i)
-        | Expr::UnaryMinus(i, _)
-        | Expr::Spread(i)
-        | Expr::YieldDelegate(i)
-        | Expr::As { value: i, .. }
-        | Expr::TupleIndex { tuple: i, .. }
-        | Expr::FieldAccess { base: i, .. }
-        | Expr::SafeNav { base: i, .. }
-        | Expr::IncDec { target: i, .. } => go(i, returns, lets),
-        Expr::Return(o) => {
-            if let Some(i) = o {
-                returns.push(i);
-                go(i, returns, lets);
-            }
-        }
-        Expr::Yield(o) => {
-            if let Some(i) = o {
-                go(i, returns, lets);
-            }
-        }
-        Expr::Index { base: a, index: b }
-        | Expr::Range { low: a, high: b }
-        | Expr::BinOp { lhs: a, rhs: b, .. }
-        | Expr::Assign {
-            target: a,
-            value: b,
-        }
-        | Expr::CompoundAssign {
-            target: a,
-            value: b,
-            ..
-        } => {
-            go(a, returns, lets);
-            go(b, returns, lets);
-        }
-        Expr::If {
-            cond: a,
-            then_branch: b,
-            else_branch,
-        }
-        | Expr::IfLet {
-            value: a,
-            then_branch: b,
-            else_branch,
-            ..
-        } => {
-            go(a, returns, lets);
-            go(b, returns, lets);
-            if let Some(x) = else_branch {
-                go(x, returns, lets);
-            }
-        }
-        Expr::Block { statements, tail } => {
-            for s in statements {
-                scan_stmt_returns(body, s, returns, lets);
-            }
-            if let Some(t) = tail {
-                go(t, returns, lets);
-            }
-        }
-        Expr::Match { scrutinee, arms } => {
-            go(scrutinee, returns, lets);
-            for a in arms {
-                let arm = body.match_arm_arena[a];
-                if let Some(g) = arm.guard {
-                    go(g, returns, lets);
-                }
-                go(arm.body, returns, lets);
-            }
-        }
-        Expr::Call { callee, args, .. } => {
-            if let Callee::Value(v) = callee {
-                go(v, returns, lets);
-            }
-            for x in args {
-                go(x, returns, lets);
-            }
-        }
-        Expr::SafeNavCall { receiver, args, .. } => {
-            go(receiver, returns, lets);
-            for x in args {
-                go(x, returns, lets);
-            }
-        }
-        Expr::SafeNavLet {
-            receiver, body: b, ..
-        } => {
-            go(receiver, returns, lets);
-            go(b, returns, lets);
-        }
-        Expr::StructLiteral { fields, bases, .. } => {
-            for b in bases {
-                go(b, returns, lets);
-            }
-            for fld in fields {
-                go(body.struct_lit_field_arena[fld].value, returns, lets);
-            }
-        }
-        Expr::EnumVariant { args, .. } => match args {
-            VariantArgs::Unit => {}
-            VariantArgs::Tuple(es) => {
-                for x in es {
-                    go(x, returns, lets);
-                }
-            }
-            VariantArgs::Record(fs) => {
-                for fld in fs {
-                    go(body.struct_lit_field_arena[fld].value, returns, lets);
-                }
-            }
+    match node {
+        HirChild::Expr(e) => match body.expr_arena[e] {
+            Expr::Lambda { .. } => return,
+            Expr::Return(Some(value)) => returns.push(value),
+            _ => {}
         },
+        HirChild::Statement(s) => match body.statement_arena[s] {
+            Statement::Fn { .. } => return,
+            Statement::Let { name, value } => lets.push((name, value)),
+            Statement::Return(Some(value)) => returns.push(value),
+            _ => {}
+        },
+        // A pattern holds neither a return nor a let.
+        HirChild::Pattern(_) => return,
     }
-}
-
-fn scan_stmt_returns(
-    body: &Body,
-    s: Idx<Statement>,
-    returns: &mut Vec<Idx<Expr>>,
-    lets: &mut Vec<(Idx<BindingInfo>, Idx<Expr>)>,
-) {
-    match body.statement_arena[s].clone() {
-        Statement::Let { name, value } => {
-            lets.push((name, value));
-            scan_returns(body, value, returns, lets);
-        }
-        Statement::LetTuple { value, .. }
-        | Statement::LetNewtype { value, .. }
-        | Statement::Expr(value)
-        | Statement::Defer(value)
-        | Statement::Static { value, .. } => scan_returns(body, value, returns, lets),
-        Statement::Return(Some(value)) => {
-            returns.push(value);
-            scan_returns(body, value, returns, lets);
-        }
-        Statement::For { iter, body: b, .. } => {
-            scan_returns(body, iter, returns, lets);
-            scan_returns(body, b, returns, lets);
-        }
-        Statement::While { cond, body: b } => {
-            scan_returns(body, cond, returns, lets);
-            scan_returns(body, b, returns, lets);
-        }
-        Statement::WhileLet { value, body: b, .. } => {
-            scan_returns(body, value, returns, lets);
-            scan_returns(body, b, returns, lets);
-        }
-        Statement::Fn { .. }
-        | Statement::Return(None)
-        | Statement::Break
-        | Statement::Continue
-        | Statement::Comment(_) => {}
-    }
+    body.for_each_child(node, |child| scan_returns(body, child, returns, lets));
 }
 
 impl<'a> Builder<'a> {
@@ -611,7 +445,7 @@ impl<'a> Builder<'a> {
                 Expr::Block { tail: None, .. } => {}
                 _ => returns.push(root),
             }
-            scan_returns(body, root, &mut returns, &mut lets);
+            scan_returns(body, HirChild::Expr(root), &mut returns, &mut lets);
         }
         for (name, value) in lets {
             if scan
