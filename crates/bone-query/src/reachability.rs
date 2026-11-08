@@ -6,6 +6,7 @@
 use bone_core::modules::{FragmentScope, NsVisibility};
 use bone_semantic::prelude::*;
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex, OnceLock};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EdgeKind {
@@ -65,18 +66,24 @@ pub struct ReachResult {
     pub truncated: bool,
 }
 
-/// Edges out of each type, plus the transitive closure used to prune the
-/// per-keystroke path search.
+/// Edges out of each type. The pruning sets and shallow path stores derived
+/// from them are computed on first use: the index is rebuilt on every
+/// signature edit, while queries touch only a few expected and root types.
 pub struct ReachabilityIndex {
     #[cfg(test)]
     search_visits: std::sync::atomic::AtomicUsize,
     edges: HashMap<Ustr, Vec<Edge>>,
-    /// `reaches[T]` = every type reachable from `T` with its shortest distance.
-    /// Prunes searches; it does not store access paths.
-    reaches: HashMap<Ustr, HashMap<Ustr, u16>>,
+    /// Predecessors of each type (one per edge), for the backward pruning
+    /// search.
+    preds: FxHashMap<Ustr, Vec<Ustr>>,
+    /// Per expected-type set (sorted, deduplicated): every type with a path of
+    /// at least one edge to one of them. Prunes searches; it does not store
+    /// access paths.
+    reachers: Mutex<FxHashMap<Vec<Ustr>, Arc<FxHashSet<Ustr>>>>,
     /// Shallow call-through argument paths, cached independently of the
-    /// expected-type search because their depth is bounded at build time.
-    arg_paths: HashMap<Ustr, Vec<ReachPath>>,
+    /// expected-type search because their depth is bounded. One slot per
+    /// edge source, filled on first lookup.
+    arg_paths: FxHashMap<Ustr, OnceLock<Vec<ReachPath>>>,
 }
 
 /// Max depth for the precomputed `arg_paths` store. Call-through args are
@@ -86,9 +93,8 @@ pub struct ReachabilityIndex {
 const ARG_PATH_DEPTH: u16 = 2;
 
 impl ReachabilityIndex {
-    /// Build from a checked workspace. O(structs*fields + functions) to lay
-    /// edges, then a BFS per source for the closure (sub-ms at game-scale node
-    /// counts; the SCC-condensation DP is the documented asymptotic follow-up).
+    /// Build from a checked workspace: O(structs*fields + functions) to lay
+    /// edges and their predecessor lists. Derived data is filled per query.
     pub fn build(ws: &Workspace) -> ReachabilityIndex {
         let mut edges: HashMap<Ustr, Vec<Edge>> = HashMap::new();
 
@@ -145,60 +151,20 @@ impl ReachabilityIndex {
             }
         }
 
-        // Transitive closure (the pruning oracle): BFS from every node, recording
-        // the shortest distance to each reachable target. BFS naturally tolerates
-        // cycles via the visited set.
-        let mut reaches: HashMap<Ustr, HashMap<Ustr, u16>> = HashMap::new();
-        for &src in edges.keys() {
-            let mut dist: HashMap<Ustr, u16> = HashMap::new();
-            let mut q: VecDeque<(Ustr, u16)> = VecDeque::new();
-            q.push_back((src, 0));
-            while let Some((cur, d)) = q.pop_front() {
-                let Some(outs) = edges.get(&cur) else {
-                    continue;
-                };
-                for e in outs {
-                    let nd = d + 1;
-                    // Keep the first (=shortest, BFS) distance seen per target.
-                    if dist.get(&e.target).is_none_or(|&old| nd < old) {
-                        if dist.insert(e.target, nd).is_none() {
-                            q.push_back((e.target, nd));
-                        }
-                    }
-                }
-            }
-            reaches.insert(src, dist);
-        }
-
-        // Materialize the shallow (depth <= ARG_PATH_DEPTH) path store: a simple
-        // bounded enumeration per source. This is the work `paths_to` used to do
-        // per call for the call-through arg expansion -- done once here instead.
-        let mut arg_paths: HashMap<Ustr, Vec<ReachPath>> = HashMap::new();
-        for &src in edges.keys() {
-            let mut paths = Vec::new();
-            let mut on_path: HashSet<Ustr> = HashSet::new();
-            on_path.insert(src);
-            enumerate_arg_paths(
-                &edges,
-                src,
-                "",
-                0,
-                false,
-                &mut on_path,
-                &mut paths,
-                &[],
-                &[],
-            );
-            if !paths.is_empty() {
-                arg_paths.insert(src, paths);
+        let mut preds: FxHashMap<Ustr, Vec<Ustr>> = FxHashMap::default();
+        for (&src, outs) in edges.iter() {
+            for e in outs {
+                preds.entry(e.target).or_default().push(src);
             }
         }
+        let arg_paths = edges.keys().map(|&src| (src, OnceLock::new())).collect();
 
         ReachabilityIndex {
             #[cfg(test)]
             search_visits: Default::default(),
             edges,
-            reaches,
+            preds,
+            reachers: Mutex::default(),
             arg_paths,
         }
     }
@@ -209,7 +175,25 @@ impl ReachabilityIndex {
     /// nullable `?` so a `Foo?` root matches the `Foo`-keyed store.
     pub fn arg_paths_from(&self, ty: &str) -> &[ReachPath] {
         let key = Ustr::from(ty.strip_suffix('?').unwrap_or(ty));
-        self.arg_paths.get(&key).map_or(&[], |v| v.as_slice())
+        self.arg_paths.get(&key).map_or(&[], |slot| {
+            slot.get_or_init(|| {
+                let mut paths = Vec::new();
+                let mut on_path: HashSet<Ustr> = HashSet::new();
+                on_path.insert(key);
+                enumerate_arg_paths(
+                    &self.edges,
+                    key,
+                    "",
+                    0,
+                    false,
+                    &mut on_path,
+                    &mut paths,
+                    &[],
+                    &[],
+                );
+                paths
+            })
+        })
     }
 
     /// The same shallow paths, restricted to callable members admitted by a
@@ -227,20 +211,28 @@ impl ReachabilityIndex {
             .collect()
     }
 
-    /// `N nodes, E edges, R closure-pairs` -- for the build profiling line.
-    pub fn stats(&self) -> String {
-        let edges: usize = self.edges.values().map(|v| v.len()).sum();
-        let pairs: usize = self.reaches.values().map(|m| m.len()).sum();
-        format!(
-            "{} nodes, {edges} edges, {pairs} closure-pairs",
-            self.edges.len()
-        )
-    }
-
-    fn reaches_any(&self, from: Ustr, expected: &[Ustr]) -> bool {
-        self.reaches
-            .get(&from)
-            .is_some_and(|d| expected.iter().any(|e| d.contains_key(e)))
+    /// Types with a path of at least one edge to any of `want`, by a backward
+    /// search from `want`, memoized per expected-type set.
+    fn reachers_of(&self, want: &[Ustr]) -> Arc<FxHashSet<Ustr>> {
+        let mut key = want.to_vec();
+        key.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+        key.dedup();
+        let mut memo = self.reachers.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(set) = memo.get(&key) {
+            return set.clone();
+        }
+        let mut set: FxHashSet<Ustr> = FxHashSet::default();
+        let mut q: VecDeque<Ustr> = key.iter().copied().collect();
+        while let Some(cur) = q.pop_front() {
+            for &p in self.preds.get(&cur).map_or(&[][..], |v| v.as_slice()) {
+                if set.insert(p) {
+                    q.push_back(p);
+                }
+            }
+        }
+        let set = Arc::new(set);
+        memo.insert(key, set.clone());
+        set
     }
 
     /// Simple paths ranked by (distance, suffix), retaining at most `cap`.
@@ -280,14 +272,17 @@ impl ReachabilityIndex {
             paths: Vec::new(),
             truncated: false,
         };
-        if !self.reaches_any(root, &want) {
+        let reachers = self.reachers_of(&want);
+        if !reachers.contains(&root) {
             return result;
         }
         let mut pending = std::collections::BTreeMap::new();
         let mut serial = 0usize;
         let prefix = Vec::new();
         let blocked = HashSet::new();
-        if let Some(path) = self.shortest_path(root, &want, &prefix, &blocked, visibility) {
+        if let Some(path) =
+            self.shortest_path(root, &want, &reachers, &prefix, &blocked, visibility)
+        {
             pending.insert(
                 (path.len(), self.path_suffix(&path, false), serial),
                 (path, prefix, blocked),
@@ -313,6 +308,7 @@ impl ReachabilityIndex {
                 if let Some(alternative) = self.shortest_path(
                     root,
                     &want,
+                    &reachers,
                     &alternative_prefix,
                     &alternative_blocked,
                     visibility,
@@ -379,6 +375,7 @@ impl ReachabilityIndex {
         &self,
         root: Ustr,
         want: &[Ustr],
+        reachers: &FxHashSet<Ustr>,
         prefix: &[(Ustr, usize)],
         blocked: &HashSet<Option<usize>>,
         visibility: Option<(&Workspace, &FragmentScope)>,
@@ -442,7 +439,7 @@ impl ReachabilityIndex {
                     }
                 }
                 if matches!(edge.kind, EdgeKind::Method { takes_args: true })
-                    || !self.reaches_any(edge.target, want)
+                    || !reachers.contains(&edge.target)
                 {
                     continue;
                 }
