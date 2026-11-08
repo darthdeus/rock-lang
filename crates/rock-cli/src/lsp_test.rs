@@ -1052,11 +1052,11 @@ fn parse_hint_markers(lines: &[String]) -> Vec<(u64, u64, String)> {
     let mut out = Vec::new();
     for (line_idx, raw) in lines.iter().enumerate() {
         let mut rest: &str = raw;
-        let mut stripped_offset: usize = 0; // byte offset in the stripped line
+        let mut stripped_offset: usize = 0; // UTF-16 column in the stripped line
         while let Some(open_rel) = rest.find(OPEN) {
-            // Chars before the marker contribute to the stripped offset.
+            // Text before the marker contributes to the stripped column.
             let before = &rest[..open_rel];
-            stripped_offset += before.chars().count();
+            stripped_offset += before.encode_utf16().count();
             let after_open = &rest[open_rel + OPEN.len()..];
             let Some(close_rel) = after_open.find(CLOSE) else {
                 break;

@@ -228,6 +228,7 @@ fn modules_json(summary: Vec<(String, Vec<bone_query::ModuleRecency>)>) -> serde
 /// in sync with the dispatch in `handle_request`.
 pub fn server_capabilities() -> ServerCapabilities {
     ServerCapabilities {
+        position_encoding: Some(lsp_types::PositionEncodingKind::UTF16),
         definition_provider: Some(OneOf::Left(true)),
         type_definition_provider: Some(lsp_types::TypeDefinitionProviderCapability::Simple(true)),
         references_provider: Some(OneOf::Left(true)),

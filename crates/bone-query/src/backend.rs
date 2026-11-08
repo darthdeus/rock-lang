@@ -983,10 +983,11 @@ impl BoneWorkspace {
             by_file.entry(p.clone()).or_default();
         }
 
+        let text_of = |f: &str| proj.texts.get(f).map(|s| s.as_str());
         for e in proj.session.diagnostics() {
             // One squiggle per underlined label, each filed under its own label's
             // file (labels may be cross-file).
-            for (file, diag) in compiler_error_to_diagnostics(&e) {
+            for (file, diag) in compiler_error_to_diagnostics(&e, &text_of) {
                 let file = file.as_str();
                 // Errors with no/synthetic location are attributed to the edited file.
                 let key = if file.is_empty() || !proj.texts.contains_key(file) {
@@ -1000,7 +1001,10 @@ impl BoneWorkspace {
 
         if let Some(e) = &this_file_parse_err {
             // Override: current editor text for this file is broken; show that.
-            by_file.insert(path.to_string(), vec![compiler_error_to_diagnostic(e)]);
+            by_file.insert(
+                path.to_string(),
+                vec![compiler_error_to_diagnostic(e, &text_of)],
+            );
         }
 
         // Unfilled-hole diagnostics. `hole_diagnostics_for` REPARSES, so we
@@ -1063,11 +1067,12 @@ impl BoneWorkspace {
             proj.lint_cache.invalidate_file(Ustr::from(path));
         } else {
             let findings = update_lint_cache(proj, &lint_change);
+            let text_of = |f: &str| proj.texts.get(f).map(|s| s.as_str());
             for finding in findings {
                 by_file
                     .entry(finding.file().as_str().to_string())
                     .or_default()
-                    .push(finding_diagnostic(&finding));
+                    .push(finding_diagnostic(&finding, &text_of));
             }
         }
 
@@ -1208,11 +1213,12 @@ impl BoneWorkspace {
         };
         // Expand to one diagnostic per label, then keep those whose label lands
         // in this file (a multi-label error's labels may span files).
+        let text_of = |f: &str| proj.texts.get(f).map(|s| s.as_str());
         let mut diags: Vec<Diagnostic> = proj
             .session
             .diagnostics()
             .into_iter()
-            .flat_map(|e| compiler_error_to_diagnostics(&e))
+            .flat_map(|e| compiler_error_to_diagnostics(&e, &text_of))
             .filter(|(file, _)| file.as_str() == path || file.as_str().is_empty())
             .map(|(_, d)| d)
             .collect();
@@ -1232,10 +1238,11 @@ impl BoneWorkspace {
         let Some(proj) = self.project(path) else {
             return Vec::new();
         };
+        let text_of = |f: &str| proj.texts.get(f).map(|s| s.as_str());
         proj.lint_cache
             .findings_for_file(Ustr::from(path))
             .iter()
-            .map(finding_diagnostic)
+            .map(|f| finding_diagnostic(f, &text_of))
             .collect()
     }
 
@@ -2551,7 +2558,8 @@ impl BoneWorkspace {
                         .iter()
                         .filter(|h| h.offset_range.0 >= ts && h.offset_range.1 <= te)
                     {
-                        let (hs, he) = (h.col_range.0 as u32, h.col_range.1 as u32);
+                        let hs = utf16_col_at(src, h.offset_range.0);
+                        let he = utf16_col_at(src, h.offset_range.1);
                         if hs > cur {
                             pieces.push((cur, hs - cur, TT_STRING, 0));
                         }
@@ -2609,16 +2617,15 @@ struct SingleLine {
 }
 
 /// The non-empty pieces of `tok`, one per source line it covers. Columns and
-/// lengths count scalar values, as `col_range` does.
+/// lengths count UTF-16 code units, as the protocol requires.
 fn token_line_segments(src: &str, tok: &rock_tokenizer::Token) -> Vec<SingleLine> {
     let (first_line, last_line) = tok.span.line_range;
     let (lo, hi) = tok.span.offset_range;
     if first_line == last_line {
-        let (start, end) = tok.span.col_range;
         return vec![SingleLine {
             line: first_line as u32,
-            start: start as u32,
-            length: end.saturating_sub(start) as u32,
+            start: utf16_col_at(src, lo),
+            length: src.get(lo..hi).map_or(0, |t| t.encode_utf16().count()) as u32,
             lo,
             hi,
         }]
@@ -2634,14 +2641,10 @@ fn token_line_segments(src: &str, tok: &rock_tokenizer::Token) -> Vec<SingleLine
             let lo = offset;
             offset += raw.len();
             let text = raw.trim_end_matches('\n').trim_end_matches('\r');
-            let length = text.chars().count() as u32;
+            let length = text.encode_utf16().count() as u32;
             (length > 0).then_some(SingleLine {
                 line: (first_line + i) as u32,
-                start: if i == 0 {
-                    tok.span.col_range.0 as u32
-                } else {
-                    0
-                },
+                start: if i == 0 { utf16_col_at(src, lo) } else { 0 },
                 length,
                 lo,
                 hi: lo + text.len(),
@@ -3111,30 +3114,31 @@ fn semantic_name_map(ws: &Workspace) -> HashMap<Ustr, u32> {
 // ---------------------------------------------------------------------------
 
 /// 0-based LSP `(line, character)` -> 0-based **byte** offset into `src`.
-/// `character` counts Unicode scalar values; a multibyte glyph before the cursor
-/// still maps to the right byte. Out-of-range clamps to end-of-line / EOF.
+/// `character` counts UTF-16 code units, the protocol's default encoding. A
+/// column inside a surrogate pair snaps to the character's start; past the
+/// line's end it clamps there (before the line break), per the spec.
 pub fn offset_at_line_col(src: &str, line: u32, character: u32) -> usize {
-    let line = line as usize;
-    let character = character as usize;
     let mut offset = 0usize;
     for (i, line_str) in src.split_inclusive('\n').enumerate() {
-        if i == line {
-            let mut chars = line_str.char_indices();
-            for _ in 0..character {
-                if chars.next().is_none() {
-                    break;
+        if i == line as usize {
+            let text = line_str.strip_suffix('\n').unwrap_or(line_str);
+            let text = text.strip_suffix('\r').unwrap_or(text);
+            let mut units = 0u32;
+            for (byte, ch) in text.char_indices() {
+                units += ch.len_utf16() as u32;
+                if units > character {
+                    return offset + byte;
                 }
             }
-            let within = chars.next().map(|(b, _)| b).unwrap_or(line_str.len());
-            return offset + within;
+            return offset + text.len();
         }
         offset += line_str.len();
     }
     src.len()
 }
 
-/// Byte offset -> 0-based LSP [`Position`] (character counted in scalar values,
-/// matching [`offset_at_line_col`]).
+/// Byte offset -> 0-based LSP [`Position`], `character` in UTF-16 code units
+/// like [`offset_at_line_col`].
 pub fn offset_to_position(src: &str, offset: usize) -> Position {
     let mut line = 0u32;
     let mut col = 0u32;
@@ -3148,10 +3152,32 @@ pub fn offset_to_position(src: &str, offset: usize) -> Position {
             line += 1;
             col = 0;
         } else {
-            col += 1;
+            col += ch.len_utf16() as u32;
         }
     }
     Position::new(line, col)
+}
+
+/// The LSP character of byte `offset` on its own line, in UTF-16 code units.
+fn utf16_col_at(src: &str, offset: usize) -> u32 {
+    let Some(before) = src.get(..offset) else {
+        return 0;
+    };
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    before[line_start..].encode_utf16().count() as u32
+}
+
+/// A compiler `(line, col)`, where `col` counts Unicode scalars, as an LSP
+/// [`Position`] in UTF-16 code units. Without the file's text the column is
+/// passed through, which is exact for any line without astral characters.
+fn compiler_position(text: Option<&str>, line: usize, col: usize) -> Position {
+    let units = text.and_then(|t| t.split('\n').nth(line)).map(|l| {
+        let prefix = l.chars().take(col);
+        let (scalars, units) =
+            prefix.fold((0, 0u32), |(n, u), c| (n + 1, u + c.len_utf16() as u32));
+        units + (col - scalars) as u32
+    });
+    Position::new(line as u32, units.unwrap_or(col as u32))
 }
 
 /// Byte offsets of each line start in `src`, for O(log n + col) repeated
@@ -3180,14 +3206,14 @@ impl LineIndex {
     }
 
     /// 0-based byte `offset` -> 0-based LSP `(line, character)`. `character` counts
-    /// Unicode scalar values within the line, matching [`offset_to_position`].
+    /// UTF-16 code units within the line, matching [`offset_to_position`].
     pub fn position(&self, src: &str, offset: usize) -> Position {
         let offset = offset.min(src.len());
         // Last line start <= offset (partition_point gives the count of starts
         // that are <=, so -1 is that line's index; line_starts[0]=0 so >=1).
         let line = self.line_starts.partition_point(|&s| s <= offset) - 1;
         let line_start = self.line_starts[line];
-        // Column = scalar values from the line start up to (not past) offset.
+        // Column = UTF-16 units from the line start up to (not past) offset.
         let mut col = 0u32;
         let mut cur = line_start;
         for ch in src[line_start..].chars() {
@@ -3195,7 +3221,7 @@ impl LineIndex {
                 break;
             }
             cur += ch.len_utf8();
-            col += 1;
+            col += ch.len_utf16() as u32;
         }
         Position::new(line as u32, col)
     }
@@ -4043,24 +4069,39 @@ fn bone_diagnostic(
     }
 }
 
-pub fn compiler_error_to_diagnostic(e: &CompilerError) -> Diagnostic {
+pub fn compiler_error_to_diagnostic(
+    e: &CompilerError,
+    text_of: crate::query::TextOf<'_, '_>,
+) -> Diagnostic {
     // Use the label's span (whole token) when there is one; `col_range` is
     // 0-based/end-exclusive, same as LSP. Fall back to a 1-char range at the
-    // location for label-less or zero-width errors.
-    let (start, end) = match e.labels.first().map(|l| &l.span) {
-        Some(s) if !s.is_empty() => (
-            Position::new(s.line_range.0 as u32, s.col_range.0 as u32),
-            Position::new(s.line_range.1 as u32, s.col_range.1 as u32),
-        ),
-        _ => {
-            let loc = &e.location;
-            (
-                Position::new(loc.line as u32, loc.col as u32),
-                Position::new(loc.line as u32, loc.col as u32 + 1),
-            )
-        }
+    // error location.
+    let range = match e.labels.first().map(|l| &l.span) {
+        Some(s) if !s.is_empty() => span_range(s, text_of),
+        _ => location_range(&e.location, text_of),
     };
-    bone_diagnostic(Range::new(start, end), e.message.clone(), e.level)
+    bone_diagnostic(range, e.message.clone(), e.level)
+}
+
+/// A compiler span's `(line, col)` range as an LSP range.
+fn span_range(s: &Span, text_of: crate::query::TextOf<'_, '_>) -> Range {
+    let text = text_of(s.file.as_str());
+    Range::new(
+        compiler_position(text, s.line_range.0, s.col_range.0),
+        compiler_position(text, s.line_range.1, s.col_range.1),
+    )
+}
+
+/// The one-column range at a label-less error's location.
+fn location_range(
+    loc: &rock_core::source_code::LineCol,
+    text_of: crate::query::TextOf<'_, '_>,
+) -> Range {
+    let text = text_of(loc.file.as_str());
+    Range::new(
+        compiler_position(text, loc.line, loc.col),
+        compiler_position(text, loc.line, loc.col + 1),
+    )
 }
 
 /// One `(file, Diagnostic)` per label the compiler underlined, so every flagged
@@ -4068,24 +4109,21 @@ pub fn compiler_error_to_diagnostic(e: &CompilerError) -> Diagnostic {
 /// error like the `./` hint -- the `/` cause plus the use site -- surfaces at
 /// both). Labels can live in different files (returned per-label so the caller
 /// files each correctly). A label-less error falls back to the error location.
-pub fn compiler_error_to_diagnostics(e: &CompilerError) -> Vec<(Ustr, Diagnostic)> {
+pub fn compiler_error_to_diagnostics(
+    e: &CompilerError,
+    text_of: crate::query::TextOf<'_, '_>,
+) -> Vec<(Ustr, Diagnostic)> {
     let labelled: Vec<_> = e.labels.iter().filter(|l| !l.span.is_empty()).collect();
     if labelled.is_empty() {
         let loc = &e.location;
-        let range = Range::new(
-            Position::new(loc.line as u32, loc.col as u32),
-            Position::new(loc.line as u32, loc.col as u32 + 1),
-        );
+        let range = location_range(loc, text_of);
         return vec![(loc.file, bone_diagnostic(range, e.message.clone(), e.level))];
     }
     labelled
         .iter()
         .map(|l| {
             let s = &l.span;
-            let range = Range::new(
-                Position::new(s.line_range.0 as u32, s.col_range.0 as u32),
-                Position::new(s.line_range.1 as u32, s.col_range.1 as u32),
-            );
+            let range = span_range(s, text_of);
             // label[0].message == the error message (new_with_label); a stray
             // empty label message falls back to it too.
             let msg = if l.message.is_empty() {
@@ -4101,8 +4139,11 @@ pub fn compiler_error_to_diagnostics(e: &CompilerError) -> Vec<(Ustr, Diagnostic
 /// Render a lint finding as an LSP warning tagged with its lint name in the
 /// `code` field, so the "Suppress with `// rock: allow(<lint>)`" code action
 /// identifies lint squiggles robustly (by `code`, not by message-sniffing).
-fn finding_diagnostic(f: &bone_lints::Finding) -> Diagnostic {
-    let mut d = compiler_error_to_diagnostic(&f.error);
+fn finding_diagnostic(
+    f: &bone_lints::Finding,
+    text_of: crate::query::TextOf<'_, '_>,
+) -> Diagnostic {
+    let mut d = compiler_error_to_diagnostic(&f.error, text_of);
     d.code = Some(NumberOrString::String(f.lint.to_string()));
     d
 }
@@ -4752,7 +4793,7 @@ mod tests {
         let mut e = CompilerError::new_no_location("boom".to_string());
         e.location.line = 2;
         e.location.col = 26;
-        let d = compiler_error_to_diagnostic(&e);
+        let d = compiler_error_to_diagnostic(&e, &|_| None);
         assert_eq!(d.range.start.line, 2);
         assert_eq!(d.range.start.character, 26);
         assert_eq!(d.range.end.character, 27);
@@ -4766,7 +4807,7 @@ mod tests {
         span.col_range = (7, 15); // `ris_shot`, 8 chars, end-exclusive
         span.offset_range = (100, 108);
         let e = CompilerError::new_with_label(span, "Undefined global `ris_shot`".to_string());
-        let d = compiler_error_to_diagnostic(&e);
+        let d = compiler_error_to_diagnostic(&e, &|_| None);
         assert_eq!((d.range.start.line, d.range.start.character), (10, 7));
         assert_eq!((d.range.end.line, d.range.end.character), (10, 15));
     }
@@ -4791,7 +4832,7 @@ mod tests {
             use_site,
             "this `float` is used where `int` is required".to_string(),
         );
-        let diags = compiler_error_to_diagnostics(&e);
+        let diags = compiler_error_to_diagnostics(&e, &|_| None);
 
         assert_eq!(diags.len(), 2, "one diagnostic per label");
         assert_eq!(diags[0].1.range.start.line, 118);
@@ -4813,7 +4854,7 @@ mod tests {
         span.col_range = (7, 15);
         span.offset_range = (100, 108);
         let e = CompilerError::new_with_label(span, "Undefined global `ris_shot`".to_string());
-        let diags = compiler_error_to_diagnostics(&e);
+        let diags = compiler_error_to_diagnostics(&e, &|_| None);
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].1.message, "Undefined global `ris_shot`");
     }

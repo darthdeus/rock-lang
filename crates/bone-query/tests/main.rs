@@ -52,6 +52,8 @@ mod lint_columns_after_body_edit;
 mod lint_incremental_matches_fresh;
 #[path = "lsp_span_coverage.rs"]
 mod lsp_span_coverage;
+#[path = "lsp_utf16_columns.rs"]
+mod lsp_utf16_columns;
 #[path = "macro_call_site_sentinel.rs"]
 mod macro_call_site_sentinel;
 #[path = "macro_goto_definition.rs"]

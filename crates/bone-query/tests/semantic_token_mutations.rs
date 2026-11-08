@@ -1,5 +1,5 @@
 //! Bounded edits through the real workspace, checked without production position helpers.
-//! Columns deliberately count Unicode scalars, not bytes or UTF-16 code units.
+//! Columns deliberately count UTF-16 code units, not bytes or Unicode scalars.
 
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 
@@ -43,7 +43,7 @@ const CASES: &[Case] = &[
         valid: true,
     },
     Case {
-        name: "scalar-not-utf16-or-bytes",
+        name: "utf16-not-scalars-or-bytes",
         seed: 0x5eed_0003,
         source: "fn run() { let s = \"\u{e9}\u{1f980}\"; let marker = 1 }\n",
         valid: true,
@@ -175,8 +175,8 @@ fn decode(data: &[SemanticToken]) -> Result<Vec<Decoded>, String> {
     Ok(out)
 }
 
-// Split only on LF: a CR in CRLF still occupies one scalar column, matching
-// the current contract. Slicing scalar vectors cannot hide a byte/UTF-16 drift.
+// Split only on LF: a CR in CRLF still occupies one column, matching the
+// current contract. Slicing UTF-16 vectors cannot hide a byte/scalar drift.
 fn validate(
     source: &str,
     data: &[SemanticToken],
@@ -185,7 +185,10 @@ fn validate(
     if require_tokens && data.is_empty() {
         return Err("valid control returned no tokens".into());
     }
-    let lines: Vec<Vec<char>> = source.split('\n').map(|s| s.chars().collect()).collect();
+    let lines: Vec<Vec<u16>> = source
+        .split('\n')
+        .map(|s| s.encode_utf16().collect())
+        .collect();
     let types = semantic_tokens_legend().len();
     let modifiers = semantic_tokens_modifiers_legend().len();
     let allowed_modifiers = if modifiers >= u32::BITS as usize {
@@ -216,7 +219,7 @@ fn validate(
         let slice = line
             .get(t.col as usize..end as usize)
             .ok_or_else(|| fail("span out of bounds"))?;
-        if slice.is_empty() || slice.contains(&'\n') {
+        if slice.is_empty() || slice.contains(&(b'\n' as u16)) {
             return Err(fail("not a nonempty single-line span"));
         }
         if (t.line, t.col) < previous_end {
@@ -551,27 +554,27 @@ fn targeted_malformed_buffers_repair_and_failure_cleanup() {
 }
 
 #[test]
-fn non_bmp_control_pins_scalar_columns_after_multibyte_text() {
+fn non_bmp_control_pins_utf16_columns_after_multibyte_text() {
     let case = &CASES[2];
     let mut bone = BoneWorkspace::new();
     update_and_check(
         &mut bone,
         case.source,
         true,
-        &replay(case, "scalar control", &[], case.source),
+        &replay(case, "utf-16 control", &[], case.source),
     );
     // Locate an identifier independently, after both a multibyte BMP scalar
-    // and a supplementary scalar. Byte and UTF-16 columns both differ here.
+    // and a supplementary scalar. Byte and scalar columns both differ here.
     let offset = case.source.find("marker").unwrap();
     let prefix = &case.source[..offset];
     let line = prefix.bytes().filter(|b| *b == b'\n').count() as u32;
-    let col = prefix.rsplit('\n').next().unwrap().chars().count() as u32;
+    let col = prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
     let decoded = decode(&bone.semantic_tokens(PATH).data).unwrap();
     assert!(
         decoded
             .iter()
             .any(|t| t.line == line && t.col == col && t.length == "marker".chars().count() as u32),
-        "{}: missing scalar-aligned marker at {line}:{col}; {decoded:?}",
-        replay(case, "scalar control", &[], case.source)
+        "{}: missing UTF-16-aligned marker at {line}:{col}; {decoded:?}",
+        replay(case, "utf-16 control", &[], case.source)
     );
 }

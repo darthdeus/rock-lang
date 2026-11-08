@@ -126,6 +126,7 @@ fn capability_set_stays_identical() {
             "executeCommandProvider",
             "hoverProvider",
             "inlayHintProvider",
+            "positionEncoding",
             "referencesProvider",
             "renameProvider",
             "semanticTokensProvider",
