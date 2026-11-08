@@ -5,61 +5,18 @@
 //! oracle; `tests/intrinsics/js_misc_intrinsics.rock` cross-checks against luajit.
 
 use crate::common::ws_with;
-use skull_mir::mir::FuncRef;
-
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let mut r = None;
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == root {
-            r = Some(FuncRef {
-                module: mid,
-                func: fid,
-            });
-        }
-    }
-    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
-        .map_err(|e| e.message)
-}
 
 fn eval_int(defs: &str, root: &str, expect: i64) {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
-        return;
-    }
-    let program = format!(
-        "{}{}{}\n{defs}\nconsole.log({root}());",
-        skull_codegen_js::JS_NB_CHECK_SHIMS,
-        skull_codegen_js::JS_VEC_CHECK_SHIMS,
-        skull_codegen_js::JS_STRING_RUNTIME,
+    crate::common::eval_int(
+        &[
+            skull_codegen_js::JS_NB_CHECK_SHIMS,
+            skull_codegen_js::JS_VEC_CHECK_SHIMS,
+            skull_codegen_js::JS_STRING_RUNTIME,
+        ],
+        defs,
+        root,
+        expect,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let s = String::from_utf8_lossy(&out.stdout);
-    let got: i64 = s
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
-    assert_eq!(got, expect, "wrong result\n{program}");
 }
 
 // tuple_first / tuple_second project the 0-based array (Lua 1-based [1]/[2]).
@@ -67,7 +24,7 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
 fn tuple_projections() {
     let src = "fn root() -> int { let t = (10, 3); tuple_first(t) * 10 + tuple_second(t) }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("tuple emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("tuple emits");
     assert!(
         js.contains("[0]") && js.contains("[1]"),
         "0-based projection:\n{js}"
@@ -85,7 +42,7 @@ fn range_materializes_vec() {
                    s * 10 + r.len\n\
                }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("range emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("range emits");
     assert!(js.contains("__range"), "renders the range runtime:\n{js}");
     eval_int(&js, "root", 93); // 2+3+4 = 9, len 3
 }
@@ -100,7 +57,7 @@ fn tuple_spread_appends_to_array_literal() {
                    xs[0] * 1000 + xs[1] * 100 + xs[3] * 10 + xs.len\n\
                }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("spread literal emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("spread literal emits");
     eval_int(&js, "root", 1244);
 }
 
@@ -121,7 +78,7 @@ fn a_tuple_intrinsic_result_decomposes_into_all_of_its_lanes() {
                        + tuple_first(right) * 10 + tuple_second(right)\n\
                }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("nested tuple element emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("nested tuple element emits");
     eval_int(&js, "root", 1234);
 }
 
@@ -133,8 +90,8 @@ fn a_tuple_intrinsic_rejects_an_unprojectable_nullable_tuple_result() {
                    return result.1\n\
                }";
     let ws = ws_with(src);
-    let err =
-        emit_closure(&ws, "root").expect_err("nullable tuple lanes cannot use the return bank");
+    let err = crate::common::emit_closure(&ws, "root")
+        .expect_err("nullable tuple lanes cannot use the return bank");
     assert!(
         err.contains("tuple_first"),
         "the unprojectable intrinsic diagnostic must name its callee: {err}"
@@ -152,7 +109,8 @@ fn a_tuple_intrinsic_rejects_dotted_nobox_leaf_paths() {
                    return tuple_first(result) + tuple_second(result).inner.x\n\
                }";
     let ws = ws_with(src);
-    let err = emit_closure(&ws, "root").expect_err("dotted leaf lanes cannot use the return bank");
+    let err = crate::common::emit_closure(&ws, "root")
+        .expect_err("dotted leaf lanes cannot use the return bank");
     assert!(
         err.contains("tuple_first"),
         "the unprojectable intrinsic diagnostic must name its callee: {err}"

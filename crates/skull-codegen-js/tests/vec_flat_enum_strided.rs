@@ -60,13 +60,7 @@ fn emit_js() -> String {
 
 #[test]
 fn wide_flat_enum_vec_round_trips_mutation_and_sort_under_node() {
-    if !crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|out| out.status.success())
-        .unwrap_or(false)
-    {
-        eprintln!("SKIP: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let js = emit_js();

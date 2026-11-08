@@ -4,31 +4,13 @@
 //! `fixtures/number_format.rock`. Runs the SAME fn through the full skull
 //! pipeline under luajit and through the JS emitter under node, then
 //! byte-compares stdout line by line -- luajit is the oracle, no hand-pinned
-//! expectations to rot. Gated on `node` AND `luajit`; absent, skip WITH A LOG.
+//! expectations to rot. Needs `node` and `luajit`.
 
 use bone_semantic::inference::Workspace;
 use skull_mir::mir::FuncRef;
 
 const FIXTURE: &str = include_str!("fixtures/number_format.rock");
 const FIXTURE_MOD: &str = "<number_format>";
-
-fn tool_available(tool: &str, arg: &str) -> bool {
-    crate::common::tool(tool)
-        .arg(arg)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn both_backends_available(test: &str) -> bool {
-    for (tool, arg) in [("node", "--version"), ("luajit", "-v")] {
-        if !tool_available(tool, arg) {
-            eprintln!("SKIP {test}: `{tool}` not on PATH");
-            return false;
-        }
-    }
-    true
-}
 
 fn fixture_ws() -> Workspace {
     let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
@@ -93,7 +75,7 @@ fn run_lines(tool: &str, tag: &str, ext: &str, prog: &str) -> Vec<String> {
 
 #[test]
 fn number_tostring_parity_luajit_vs_node() {
-    if !both_backends_available("number_tostring_parity_luajit_vs_node") {
+    if !crate::common::require_node_and_luajit() {
         return;
     }
     let ws = fixture_ws();
@@ -129,7 +111,7 @@ fn number_tostring_parity_luajit_vs_node() {
 }
 
 fn json_float_roundtrip(backend: &str) {
-    if !both_backends_available("json_float_roundtrip") {
+    if !crate::common::require_node_and_luajit() {
         return;
     }
     let ws = crate::common::ws_with_named(

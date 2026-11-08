@@ -40,14 +40,6 @@ fn specialized() -> int {
 fn main() { let _ = specialized() }
 "#;
 
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 fn emit_js(name: &str) -> Result<String, String> {
     let ws = ws_with(SRC);
     let mid = *ws
@@ -107,8 +99,7 @@ fn a_column_element_call_reaches_its_specialized_body() {
 /// crash.
 #[test]
 fn a_specialized_column_call_round_trips_under_node() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let defs = emit_js("specialized").expect("emit");
@@ -145,8 +136,7 @@ fn a_specialized_column_call_round_trips_under_node() {
 /// emits column-shaped code and reads back as a plausible wrong number.
 #[test]
 fn a_column_sort_round_trips_on_js() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let defs = emit_js("sorted").expect("column-stored nobox sort must emit on JS");

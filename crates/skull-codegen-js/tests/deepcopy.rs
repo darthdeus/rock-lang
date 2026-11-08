@@ -4,63 +4,20 @@
 //! correctness oracle; `tests/library/js_deepcopy.rock` cross-checks against luajit.
 
 use crate::common::ws_with;
-use skull_mir::mir::FuncRef;
-
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let mut r = None;
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == root {
-            r = Some(FuncRef {
-                module: mid,
-                func: fid,
-            });
-        }
-    }
-    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
-        .map_err(|e| e.message)
-}
 
 fn eval_int(defs: &str, root: &str, expect: i64) {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
-        return;
-    }
-    let program = format!(
-        "{}{}{}{}{}\n{defs}\nconsole.log({root}());",
-        skull_codegen_js::JS_VEC_CHECK_SHIMS,
-        skull_codegen_js::JS_TABLE_PRIM,
-        skull_codegen_js::JS_CALL_HELPER,
-        skull_codegen_js::JS_STRING_RUNTIME,
-        skull_codegen_js::JS_DEEPCOPY_RUNTIME,
+    crate::common::eval_int(
+        &[
+            skull_codegen_js::JS_VEC_CHECK_SHIMS,
+            skull_codegen_js::JS_TABLE_PRIM,
+            skull_codegen_js::JS_CALL_HELPER,
+            skull_codegen_js::JS_STRING_RUNTIME,
+            skull_codegen_js::JS_DEEPCOPY_RUNTIME,
+        ],
+        defs,
+        root,
+        expect,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let s = String::from_utf8_lossy(&out.stdout);
-    let got: i64 = s
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
-    assert_eq!(got, expect, "wrong result\n{program}");
 }
 
 // A shared inner struct copies once: mutating via one field shows through the
@@ -77,7 +34,7 @@ fn shared_ref_copies_once() {
                    c.b.v * 100 + s.a.v\n\
                }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("deepcopy emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("deepcopy emits");
     assert!(js.contains("deepcopy("), "renders deepcopy:\n{js}");
     eval_int(&js, "root", 9901);
 }
@@ -96,7 +53,7 @@ fn cycle_copies_without_hanging() {
                    via * 100 + n.tag\n\
                }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("cyclic deepcopy emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("cyclic deepcopy emits");
     eval_int(&js, "root", 501);
 }
 
@@ -110,14 +67,13 @@ fn vec_copy_is_independent() {
                    c[0] * 100 + v[0]\n\
                }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("vec deepcopy emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("vec deepcopy emits");
     eval_int(&js, "root", 1001);
 }
 
 #[test]
 fn copied_code_ref_env_shares_logical_slot() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let program = format!(
@@ -167,7 +123,7 @@ fn clone_into_copies_column_vec_storage() {
                    return int(copied[0].x) * 100 + copied.len() * 10 + points.len()\n\
                }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("column clone_into emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("column clone_into emits");
     eval_int(&js, "root", 132);
 }
 
@@ -176,8 +132,7 @@ fn clone_into_copies_column_vec_storage() {
 // its element width, so a write through a view shows through `.ptr`.
 #[test]
 fn native_buffer_copy_rebuilds_leaf_views_over_its_storage() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let program = format!(

@@ -4,25 +4,7 @@
 //! co-emitted under FuncRef-deterministic names; mapped intrinsics stay
 //! templates; anything else rejects with the emitter's own message.
 
-use skull_mir::mir::FuncRef;
-
 /// FuncRef of the unique fn named `name` in the `<test>` module.
-fn test_fn_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == name {
-            return FuncRef {
-                module: mid,
-                func: fid,
-            };
-        }
-    }
-    panic!("no fn `{name}` in <test> module");
-}
-
 #[test]
 fn co_emits_plain_rock_callee_transitively() {
     let ws = crate::common::ws_with(
@@ -30,7 +12,7 @@ fn co_emits_plain_rock_callee_transitively() {
          fn helper(x: int) -> int { leaf(x) * 2 }\n\
          fn root(y: int) -> int { helper(y) + leaf(y) }\n",
     );
-    let root = test_fn_ref(&ws, "root");
+    let root = crate::common::test_fn_ref(&ws, "root");
     let js = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())])
         .expect("closure emit");
     assert!(
@@ -49,7 +31,7 @@ fn rejects_unmapped_inline_lua_callee_with_emitter_message() {
         "inline(lua) fn my_lua_thing(x: int) -> int = \"\"\" return x \"\"\"\n\
          fn root(y: int) -> int { my_lua_thing(y) }\n",
     );
-    let root = test_fn_ref(&ws, "root");
+    let root = crate::common::test_fn_ref(&ws, "root");
     let err = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())])
         .expect_err("inline(lua) callee must reject");
     assert!(
@@ -69,7 +51,7 @@ fn user_fn_shadowing_intrinsic_name_is_co_emitted_not_mapped() {
         "fn abs(b: bool) -> int { if b { 1 } else { 0 } }\n\
          fn root() -> int { abs(true) }\n",
     );
-    let root = test_fn_ref(&ws, "root");
+    let root = crate::common::test_fn_ref(&ws, "root");
     let js = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())])
         .expect("closure emit");
     assert!(
@@ -85,7 +67,7 @@ fn user_fn_shadowing_intrinsic_name_is_co_emitted_not_mapped() {
 #[test]
 fn stdlib_intrinsic_calls_stay_templates() {
     let ws = crate::common::ws_with("fn root(x: float) -> float { floor(x) + sqrt(x) }\n");
-    let root = test_fn_ref(&ws, "root");
+    let root = crate::common::test_fn_ref(&ws, "root");
     let js = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())])
         .expect("closure emit");
     assert!(js.contains("Math.floor"), "{js}");

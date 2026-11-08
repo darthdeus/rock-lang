@@ -6,61 +6,18 @@
 //! `tests/library/js_try_call.rock` cross-checks against luajit.
 
 use crate::common::ws_with;
-use skull_mir::mir::FuncRef;
-
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let mut r = None;
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == root {
-            r = Some(FuncRef {
-                module: mid,
-                func: fid,
-            });
-        }
-    }
-    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
-        .map_err(|e| e.message)
-}
 
 fn eval_int(defs: &str, root: &str, expect: i64) {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
-        return;
-    }
-    let program = format!(
-        "{}{}{}\n{defs}\nconsole.log({root}());",
-        skull_codegen_js::JS_NB_CHECK_SHIMS,
-        skull_codegen_js::JS_VEC_CHECK_SHIMS,
-        skull_codegen_js::JS_CALL_HELPER,
+    crate::common::eval_int(
+        &[
+            skull_codegen_js::JS_NB_CHECK_SHIMS,
+            skull_codegen_js::JS_VEC_CHECK_SHIMS,
+            skull_codegen_js::JS_CALL_HELPER,
+        ],
+        defs,
+        root,
+        expect,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let s = String::from_utf8_lossy(&out.stdout);
-    let got: i64 = s
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
-    assert_eq!(got, expect, "wrong result\n{program}");
 }
 
 const TRY_CALL: &str = "@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = \"\"\"\n    local ok, err = pcall(f)\n    return not ok\n\"\"\"\n";
@@ -77,7 +34,7 @@ fn catches_and_reports() {
          }}"
     );
     let ws = ws_with(&src);
-    let js = emit_closure(&ws, "root").expect("try_call emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("try_call emits");
     assert!(
         js.contains("__try_call"),
         "renders the try/catch runtime:\n{js}"
@@ -97,7 +54,7 @@ fn unused_oob_index_still_throws() {
          }}"
     );
     let ws = ws_with(&src);
-    let js = emit_closure(&ws, "root").expect("try_call emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("try_call emits");
     assert!(
         js.contains("__vec_checked_get"),
         "the unused checked read must be emitted, not dropped:\n{js}"
@@ -116,6 +73,6 @@ fn unused_inbounds_index_ok() {
          }}"
     );
     let ws = ws_with(&src);
-    let js = emit_closure(&ws, "root").expect("try_call emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("try_call emits");
     eval_int(&js, "root", 0);
 }

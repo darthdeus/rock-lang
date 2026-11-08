@@ -2,7 +2,7 @@
 //! and the `__map_next` cursor-cached keys-iterator shim (`JS_MAP_ITER_RUNTIME`).
 //!
 //! The emit-shape test needs no node; the shim behavior pins run the ACTUAL
-//! prelude const under node, node-gated with a skip-log.
+//! prelude const under node.
 
 use crate::common::{emit_user, ws_with};
 use skull_codegen_js::JS_MAP_ITER_RUNTIME;
@@ -28,14 +28,6 @@ fn f(m: Map<string, int>) -> int {
     );
 }
 
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 /// Run the map-iter prelude + `body`, return trimmed stdout.
 fn node_run(body: &str) -> String {
     let program = format!("{JS_MAP_ITER_RUNTIME}\n{body}");
@@ -58,8 +50,7 @@ const DRAIN: &str = "function drain(m){var out=[],k=null; while(true){k=__map_ne
 
 #[test]
 fn fresh_iteration_yields_insertion_order() {
-    if !node_available() {
-        eprintln!("SKIP fresh_iteration_yields_insertion_order: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let got = node_run(&format!(
@@ -70,8 +61,7 @@ fn fresh_iteration_yields_insertion_order() {
 
 #[test]
 fn empty_map_yields_nothing() {
-    if !node_available() {
-        eprintln!("SKIP empty_map_yields_nothing: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let got = node_run(&format!(
@@ -82,8 +72,7 @@ fn empty_map_yields_nothing() {
 
 #[test]
 fn exhaustion_returns_null_then_restarts_fresh() {
-    if !node_available() {
-        eprintln!("SKIP exhaustion_returns_null_then_restarts_fresh: node not found");
+    if !crate::common::require_node() {
         return;
     }
     // First drain exhausts; a second null-seeded drain restarts from the top.
@@ -95,8 +84,7 @@ fn exhaustion_returns_null_then_restarts_fresh() {
 
 #[test]
 fn break_then_restart_same_map() {
-    if !node_available() {
-        eprintln!("SKIP break_then_restart_same_map: node not found");
+    if !crate::common::require_node() {
         return;
     }
     // Advance once (break mid-loop), then a fresh null seed restarts from 'a'.
@@ -111,8 +99,7 @@ fn break_then_restart_same_map() {
 
 #[test]
 fn nested_iteration_over_same_map() {
-    if !node_available() {
-        eprintln!("SKIP nested_iteration_over_same_map: node not found");
+    if !crate::common::require_node() {
         return;
     }
     // Outer and inner loops over the SAME map interleave through one cursor
@@ -130,8 +117,7 @@ fn nested_iteration_over_same_map() {
 
 #[test]
 fn deletion_during_iteration_follows_live_iterator() {
-    if !node_available() {
-        eprintln!("SKIP deletion_during_iteration_follows_live_iterator: node not found");
+    if !crate::common::require_node() {
         return;
     }
     // Deleting a not-yet-visited key mid-walk drops it (live JS keys iterator,
@@ -146,8 +132,7 @@ fn deletion_during_iteration_follows_live_iterator() {
 
 #[test]
 fn map_mutated_between_loops() {
-    if !node_available() {
-        eprintln!("SKIP map_mutated_between_loops: node not found");
+    if !crate::common::require_node() {
         return;
     }
     // A fresh loop after an insert sees the new key (each null seed re-reads

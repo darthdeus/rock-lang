@@ -53,40 +53,13 @@ fn definition_headers(js: &str) -> Vec<(String, usize)> {
         .collect()
 }
 
-fn node_root(js: &str) -> i64 {
-    if !crate::common::node()
-        .arg("--version")
-        .output()
-        .expect("spawn node")
-        .status
-        .success()
-    {
-        eprintln!("SKIP generic_inline_instance_abi_and_runtime: node unavailable");
-        return 14;
-    }
-    let program = format!(
-        "{}{}{}{}{}\n{js}\nconsole.log(root());",
-        skull_codegen_js::JS_NB_CHECK_SHIMS,
-        skull_codegen_js::JS_VEC_CHECK_SHIMS,
-        skull_codegen_js::JS_TABLE_PRIM,
-        skull_codegen_js::JS_STRUCTURAL_EQ,
-        skull_codegen_js::JS_CALL_HELPER,
-    );
-    let output = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("run emitted JS");
-    assert!(
-        output.status.success(),
-        "Node rejected the emitted generic boundary:\n{program}\n{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse()
-        .expect("root must print an int")
-}
+const RUNTIME: &[&str] = &[
+    skull_codegen_js::JS_NB_CHECK_SHIMS,
+    skull_codegen_js::JS_VEC_CHECK_SHIMS,
+    skull_codegen_js::JS_TABLE_PRIM,
+    skull_codegen_js::JS_STRUCTURAL_EQ,
+    skull_codegen_js::JS_CALL_HELPER,
+];
 
 #[test]
 fn generic_inline_instances_keep_abi_publishers_calls_and_runtime_together() {
@@ -182,5 +155,6 @@ fn generic_inline_instances_keep_abi_publishers_calls_and_runtime_together() {
         2,
         "the probe publisher population is nonzero and exact"
     );
-    assert_eq!(node_root(&js), 14, "both instance call paths must run");
+    // Both instance call paths must run.
+    crate::common::eval_int(RUNTIME, &js, "root", 14);
 }

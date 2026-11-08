@@ -7,65 +7,21 @@
 //! false positive). The node-executed value checks are the correctness oracle.
 
 use crate::common::ws_with;
-use skull_mir::mir::FuncRef;
 
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Co-emit `root` + its transitive callee closure through the shared pipeline.
-fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let mut r = None;
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == root {
-            r = Some(FuncRef {
-                module: mid,
-                func: fid,
-            });
-        }
-    }
-    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
-        .map_err(|e| e.message)
-}
-
-/// Evaluate `<root>()` under node over the emitted defs (skips if node absent).
+/// Evaluate `<root>()` under node over the emitted defs.
 fn eval_int(defs: &str, root: &str, expect: i64) {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
-        return;
-    }
-    let program = format!(
-        "{}{}{}{}{}\n{defs}\nconsole.log({root}());",
-        skull_codegen_js::JS_NB_CHECK_SHIMS,
-        skull_codegen_js::JS_VEC_CHECK_SHIMS,
-        skull_codegen_js::JS_TABLE_PRIM,
-        skull_codegen_js::JS_STRUCTURAL_EQ,
-        skull_codegen_js::JS_CALL_HELPER,
+    crate::common::eval_int(
+        &[
+            skull_codegen_js::JS_NB_CHECK_SHIMS,
+            skull_codegen_js::JS_VEC_CHECK_SHIMS,
+            skull_codegen_js::JS_TABLE_PRIM,
+            skull_codegen_js::JS_STRUCTURAL_EQ,
+            skull_codegen_js::JS_CALL_HELPER,
+        ],
+        defs,
+        root,
+        expect,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let s = String::from_utf8_lossy(&out.stdout);
-    let got: i64 = s
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
-    assert_eq!(got, expect, "wrong result\n{program}");
 }
 
 // A call to an `@inline` fn is SPLICED into the caller: no standalone `function
@@ -73,7 +29,7 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
 #[test]
 fn inline_callee_is_spliced() {
     let ws = ws_with("@inline fn dbl(x: int) -> int { x * 2 }\nfn root() -> int { dbl(3) }");
-    let js = emit_closure(&ws, "root").expect("emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("emits");
     assert!(
         !js.contains("function dbl"),
         "@inline callee should be spliced, not co-emitted:\n{js}"
@@ -85,7 +41,7 @@ fn inline_callee_is_spliced() {
 #[test]
 fn pure_callee_is_spliced() {
     let ws = ws_with("@pure fn sq(x: int) -> int { x * x }\nfn root() -> int { sq(3) }");
-    let js = emit_closure(&ws, "root").expect("emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("emits");
     assert!(
         !js.contains("function sq"),
         "@pure callee should be spliced, not co-emitted:\n{js}"
@@ -106,8 +62,8 @@ fn combinator_terminal_chain_structures() {
              v.map(_ * 2).filter(_ > 2).reduce(0, (a, b) => a + b)\n\
          }",
     );
-    let js =
-        emit_closure(&ws, "root").expect("inlined combinator chain structures via labeled loops");
+    let js = crate::common::emit_closure(&ws, "root")
+        .expect("inlined combinator chain structures via labeled loops");
     eval_int(&js, "root", 10);
 }
 
@@ -119,7 +75,7 @@ fn omitted_default_arg_emits() {
         "fn ranged(a: int, b: int, step: int = 1) -> int { a + b + step }\n\
          fn root() -> int { ranged(2, 3) }",
     );
-    let js = emit_closure(&ws, "root").expect("omitted default should emit");
+    let js = crate::common::emit_closure(&ws, "root").expect("omitted default should emit");
     eval_int(&js, "root", 6);
 }
 const EXHAUSTIVE_MATCH: &str = r#"
@@ -133,7 +89,7 @@ fn root(choice: Choice) -> int { choose(choice, 10, 20) + 1 }
 #[test]
 fn exhaustive_match_callee_is_spliced() {
     let ws = ws_with(EXHAUSTIVE_MATCH);
-    let js = emit_closure(&ws, "root").expect("exhaustive match emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("exhaustive match emits");
     assert!(js.contains("function root("), "missing caller:\n{js}");
     assert!(
         !js.contains("choose"),
@@ -148,7 +104,7 @@ fn exhaustive_match_fallback_throws() {
         EXHAUSTIVE_MATCH.replace("@inline ", ""),
     ] {
         let ws = ws_with(&source);
-        let js = emit_closure(&ws, "root").expect("exhaustive match emits");
+        let js = crate::common::emit_closure(&ws, "root").expect("exhaustive match emits");
         let program = format!(
             r#"{js}
 if (root(0) !== 11 || root(1) !== 21) throw new Error("wrong match result");

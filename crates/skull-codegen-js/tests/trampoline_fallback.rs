@@ -5,63 +5,20 @@
 //! fallback fired (and, dually, that a structured body does NOT trampoline).
 
 use crate::common::ws_with;
-use skull_mir::mir::FuncRef;
-
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let mut r = None;
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == root {
-            r = Some(FuncRef {
-                module: mid,
-                func: fid,
-            });
-        }
-    }
-    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
-        .map_err(|e| e.message)
-}
 
 fn eval_int(defs: &str, root: &str, expect: i64) {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
-        return;
-    }
-    let program = format!(
-        "{}{}{}{}{}\n{defs}\nconsole.log({root}());",
-        skull_codegen_js::JS_NB_CHECK_SHIMS,
-        skull_codegen_js::JS_VEC_CHECK_SHIMS,
-        skull_codegen_js::JS_TABLE_PRIM,
-        skull_codegen_js::JS_STRUCTURAL_EQ,
-        skull_codegen_js::JS_CALL_HELPER,
+    crate::common::eval_int(
+        &[
+            skull_codegen_js::JS_NB_CHECK_SHIMS,
+            skull_codegen_js::JS_VEC_CHECK_SHIMS,
+            skull_codegen_js::JS_TABLE_PRIM,
+            skull_codegen_js::JS_STRUCTURAL_EQ,
+            skull_codegen_js::JS_CALL_HELPER,
+        ],
+        defs,
+        root,
+        expect,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let s = String::from_utf8_lossy(&out.stdout);
-    let got: i64 = s
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
-    assert_eq!(got, expect, "wrong result\n{program}");
 }
 
 // A nested loop inside an or-pattern success arm: dup_region rejects a loop
@@ -84,7 +41,8 @@ fn nested_loop_tail_trampolines() {
              return out + sel\n\
          }",
     );
-    let js = emit_closure(&ws, "root").expect("nested-loop tail should trampoline, not reject");
+    let js = crate::common::emit_closure(&ws, "root")
+        .expect("nested-loop tail should trampoline, not reject");
     assert!(
         js.contains("for (;;) {"),
         "expected a trampoline loop:\n{js}"
@@ -132,7 +90,7 @@ fn over_cap_tail_trampolines_and_hoists_temp() {
              return out\n\
          }",
     );
-    let js = emit_closure(&ws, "root").expect("over-cap tail should trampoline");
+    let js = crate::common::emit_closure(&ws, "root").expect("over-cap tail should trampoline");
     assert!(
         js.contains("switch (__bb"),
         "expected a __bb dispatch:\n{js}"
@@ -166,7 +124,7 @@ fn multi_value_return_through_fallback() {
              return a * 10 + b\n\
          }",
     );
-    let js = emit_closure(&ws, "root").expect("multi-value return through fallback");
+    let js = crate::common::emit_closure(&ws, "root").expect("multi-value return through fallback");
     assert!(
         js.contains("switch (__bb"),
         "expected the callee to trampoline:\n{js}"
@@ -209,7 +167,7 @@ fn multi_value_capture_inside_a_trampolined_caller() {
              return out * 1000 + p * 100 + q\n\
          }",
     );
-    let js = emit_closure(&ws, "root").expect("trampolined caller should emit");
+    let js = crate::common::emit_closure(&ws, "root").expect("trampolined caller should emit");
     assert!(
         js.contains("switch (__bb"),
         "expected the caller to trampoline:\n{js}"
@@ -237,7 +195,7 @@ fn structured_body_does_not_trampoline() {
              return acc\n\
          }",
     );
-    let js = emit_closure(&ws, "root").expect("structured body should emit");
+    let js = crate::common::emit_closure(&ws, "root").expect("structured body should emit");
     assert!(
         !js.contains("__bb"),
         "a structured body must not trampoline:\n{js}"

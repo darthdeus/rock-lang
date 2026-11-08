@@ -34,14 +34,6 @@ fn mutable_global_accesses_use_the_global_storage() {
     );
 }
 
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
-}
-
 fn run_node(program: &str) -> String {
     let output = crate::common::node()
         .arg("-e")
@@ -58,8 +50,7 @@ fn run_node(program: &str) -> String {
 
 #[test]
 fn opaque_js_global_reads_and_writes_go_through_the_bridge() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let source = r#"
@@ -94,8 +85,7 @@ fn main() {
 
 #[test]
 fn opaque_js_nobox_physical_leaves_route_through_the_bridge() {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let program = r#"

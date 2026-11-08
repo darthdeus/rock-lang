@@ -9,26 +9,6 @@
 //! struct (deferred to a future arc), a scalar-ABI arg/param count mismatch.
 
 use crate::common::{emit_user, ws_with};
-use skull_mir::mir::FuncRef;
-
-/// Co-emit `root` + its plain-Rock callees (needed for `push`), returning the JS.
-fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let mut r = None;
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == root {
-            r = Some(FuncRef {
-                module: mid,
-                func: fid,
-            });
-        }
-    }
-    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
-        .map_err(|e| e.message)
-}
 
 // A tuple return scalarizes to N leaves: one returned, the rest published to the
 // scratch bank. No array anywhere on the wire.
@@ -58,7 +38,7 @@ fn loop_capture_snapshots_per_iteration() {
              for i in 0..3 { let a = i; fns.push(() => a) }\n\
          }",
     );
-    let js = emit_closure(&ws, "f").expect("emits");
+    let js = crate::common::emit_closure(&ws, "f").expect("emits");
     assert!(
         js.contains("__slot: __rock_code_slot_ref("),
         "per-iteration capture record:\n{js}"
@@ -79,7 +59,7 @@ fn loop_counter_capture_now_emits() {
              for i in 0..3 { fns.push(() => i) }\n\
          }",
     );
-    let js = emit_closure(&ws, "f").expect("counter capture now emits");
+    let js = crate::common::emit_closure(&ws, "f").expect("counter capture now emits");
     assert!(
         js.contains("__slot: __rock_code_slot_ref("),
         "counter snapshotted into a record:\n{js}"
@@ -96,7 +76,7 @@ fn reassigned_param_stays_shared() {
              for i in 0..3 { fns.push(() => p); p = p + 10 }\n\
          }",
     );
-    let js = emit_closure(&ws, "f").expect("emits");
+    let js = crate::common::emit_closure(&ws, "f").expect("emits");
     // `p` is the fn param `c0`; it is not relocated into the loop body.
     assert!(js.starts_with("function f(c0)"), "p stays a param:\n{js}");
 }
@@ -170,6 +150,6 @@ fn bound_zero_leaf_call_result_is_a_bare_call() {
                    let s = dest(points)\n\
                    return points.len()\n\
                }";
-    let js = emit_closure(&ws_with(src), "root").expect("zero-leaf call emits");
+    let js = crate::common::emit_closure(&ws_with(src), "root").expect("zero-leaf call emits");
     assert!(js.contains("  dest_arr_int(v1);"), "{js}");
 }

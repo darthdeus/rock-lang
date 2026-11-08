@@ -5,55 +5,9 @@
 //! against luajit.
 
 use crate::common::ws_with;
-use skull_mir::mir::FuncRef;
-
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let mut r = None;
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == root {
-            r = Some(FuncRef {
-                module: mid,
-                func: fid,
-            });
-        }
-    }
-    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
-        .map_err(|e| e.message)
-}
 
 fn eval_str(defs: &str, root: &str, expect: &str) {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
-        return;
-    }
-    let program = format!(
-        "{}\n{defs}\nconsole.log({root}());",
-        skull_codegen_js::JS_STRING_RUNTIME
-    );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let s = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(s.trim_end_matches('\n'), expect, "wrong result\n{program}");
+    crate::common::eval_str(&[skull_codegen_js::JS_STRING_RUNTIME], defs, root, expect);
 }
 
 // A valid numeric string parses to its double.
@@ -61,7 +15,7 @@ fn eval_str(defs: &str, root: &str, expect: &str) {
 fn parses_valid_number() {
     let src = "fn root() -> string { let r = \"1.5\".parse_float(); if r == null { \"nil\" } else { tostring(r) } }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("parse_float emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("parse_float emits");
     assert!(
         js.contains("__parse_float"),
         "renders the strict parse:\n{js}"
@@ -74,7 +28,7 @@ fn parses_valid_number() {
 fn non_numeric_is_null() {
     let src = "fn root() -> string { let r = \"12abc\".parse_float(); if r == null { \"nil\" } else { tostring(r) } }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("parse_float emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("parse_float emits");
     eval_str(&js, "root", "nil");
 }
 
@@ -83,6 +37,6 @@ fn non_numeric_is_null() {
 fn empty_is_null_not_zero() {
     let src = "fn root() -> string { let r = \"\".parse_float(); if r == null { \"nil\" } else { tostring(r) } }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("parse_float emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("parse_float emits");
     eval_str(&js, "root", "nil");
 }

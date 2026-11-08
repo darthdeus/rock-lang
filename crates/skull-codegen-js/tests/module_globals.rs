@@ -7,68 +7,23 @@
 //! cross-checks against luajit.
 
 use crate::common::ws_with;
-use skull_mir::mir::FuncRef;
-
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    // Target JS explicitly (as the real per-test path does): a fn taken by value
-    // keeps its surface name only on the JS target, where JS resolves it through
-    // its own `discover_globals`; a non-Js target mangles the value ref.
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let mut r = None;
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == root {
-            r = Some(FuncRef {
-                module: mid,
-                func: fid,
-            });
-        }
-    }
-    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
-        .map_err(|e| e.message)
-}
 
 fn eval_int(defs: &str, root: &str, expect: i64) {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
-        return;
-    }
     // `__G` is the scoped module-globals object the emitter targets; the run
     // harness (js_test.rs) supplies it in its preamble.
-    let program = format!(
-        "{}{}{}{}{}\nvar __G = {{}};\n{defs}\nconsole.log({root}());",
-        skull_codegen_js::JS_NB_CHECK_SHIMS,
-        skull_codegen_js::JS_VEC_CHECK_SHIMS,
-        skull_codegen_js::JS_CALL_HELPER,
-        skull_codegen_js::JS_STRING_RUNTIME,
-        skull_codegen_js::JS_GLOBALS_RUNTIME,
+    crate::common::eval_int(
+        &[
+            skull_codegen_js::JS_NB_CHECK_SHIMS,
+            skull_codegen_js::JS_VEC_CHECK_SHIMS,
+            skull_codegen_js::JS_CALL_HELPER,
+            skull_codegen_js::JS_STRING_RUNTIME,
+            skull_codegen_js::JS_GLOBALS_RUNTIME,
+            "\nvar __G = {};",
+        ],
+        defs,
+        root,
+        expect,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let s = String::from_utf8_lossy(&out.stdout);
-    let got: i64 = s
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
-    assert_eq!(got, expect, "wrong result\n{program}");
 }
 
 // A const module global read renders `__G.CANS` and inits once at load.
@@ -76,7 +31,7 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
 fn const_global_read() {
     let src = "const CANS: int = 7\nfn root() -> int { CANS * 3 }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("const global emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("const global emits");
     assert!(js.contains("__G.CANS"), "scoped global read:\n{js}");
     eval_int(&js, "root", 21);
 }
@@ -88,7 +43,7 @@ fn mutable_global_state() {
                fn bump() -> int { COUNTER = COUNTER + 1; return COUNTER }\n\
                fn root() -> int { COUNTER = 0; bump(); bump(); return bump() }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("mutable global emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("mutable global emits");
     assert!(js.contains("__rock_globals["), "StoreGlobal renders:\n{js}");
     eval_int(&js, "root", 3);
 }
@@ -100,7 +55,7 @@ fn derived_global_init_order() {
                global DERIVED: int = BASE + 5\n\
                fn root() -> int { DERIVED }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("derived global emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("derived global emits");
     eval_int(&js, "root", 105);
 }
 
@@ -115,7 +70,7 @@ fn transitive_global_init_order_through_call() {
                global ACT: int = register(\"x\")\n\
                fn root() -> int { ACT }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("transitive global emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("transitive global emits");
     // REG's init line must precede ACT's.
     let reg_at = js
         .find("__rock_globals[\"global:<test>::REG::value\"] = __ginit")
@@ -136,7 +91,7 @@ fn fn_as_value() {
     let src = "fn add_one(x: int) -> int { x + 1 }\n\
                fn root() -> int { let f = add_one; f(5) }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("fn-as-value emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("fn-as-value emits");
     eval_int(&js, "root", 6);
 }
 
@@ -150,7 +105,7 @@ fn a_nobox_global_initializes_its_leaves() {
                global ORIGIN: P = P { x: 3, y: 4 }\n\
                fn root() -> int { return ORIGIN.x * 10 + ORIGIN.y }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("nobox global emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("nobox global emits");
     assert!(
         js.contains("__rock_globals[\"global:<test>::ORIGIN::leaf0\"] = ")
             && js.contains("__rock_globals[\"global:<test>::ORIGIN::leaf1\"] = "),
@@ -170,6 +125,6 @@ fn a_global_lambda_initializer_runs_after_the_code_slots_are_staged() {
                const OPS: [fn(int) -> int] = [(x: int) => x + 1]\n\
                fn root() -> int { return SQUARE(7) + OPS[0](4) }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("global lambda emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("global lambda emits");
     eval_int(&js, "root", 54);
 }

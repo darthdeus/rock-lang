@@ -4,33 +4,6 @@
 //! is the correctness oracle; `tests/library/js_put.rock` cross-checks against luajit.
 
 use crate::common::ws_with;
-use skull_mir::mir::FuncRef;
-
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let mut r = None;
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == root {
-            r = Some(FuncRef {
-                module: mid,
-                func: fid,
-            });
-        }
-    }
-    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
-        .map_err(|e| e.message)
-}
 
 // `put` appends its argument to the shared buffer raw (no newline); the joined
 // buffer is the exact output.
@@ -39,10 +12,9 @@ fn put_writes_raw_no_newline() {
     let src = "@intrinsic @inline inline(lua) fn put(s: string) = \"io.write(s)\"\n\
                fn root() { put(\"a\"); put(\"b\"); put(\"\\n\"); put(\"c\") }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("put emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("put emits");
     assert!(js.contains("put("), "put renders as a call:\n{js}");
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let program = format!(

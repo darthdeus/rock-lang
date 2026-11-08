@@ -7,63 +7,20 @@
 //! node-executed checks are the correctness oracle.
 
 use crate::common::ws_with;
-use skull_mir::mir::FuncRef;
-
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let mut r = None;
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == root {
-            r = Some(FuncRef {
-                module: mid,
-                func: fid,
-            });
-        }
-    }
-    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
-        .map_err(|e| e.message)
-}
 
 fn eval_int(defs: &str, root: &str, expect: i64) {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
-        return;
-    }
-    let program = format!(
-        "{}{}{}{}{}\n{defs}\nconsole.log({root}());",
-        skull_codegen_js::JS_NB_CHECK_SHIMS,
-        skull_codegen_js::JS_VEC_CHECK_SHIMS,
-        skull_codegen_js::JS_TABLE_PRIM,
-        skull_codegen_js::JS_STRUCTURAL_EQ,
-        skull_codegen_js::JS_STRING_RUNTIME,
+    crate::common::eval_int(
+        &[
+            skull_codegen_js::JS_NB_CHECK_SHIMS,
+            skull_codegen_js::JS_VEC_CHECK_SHIMS,
+            skull_codegen_js::JS_TABLE_PRIM,
+            skull_codegen_js::JS_STRUCTURAL_EQ,
+            skull_codegen_js::JS_STRING_RUNTIME,
+        ],
+        defs,
+        root,
+        expect,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let s = String::from_utf8_lossy(&out.stdout);
-    let got: i64 = s
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
-    assert_eq!(got, expect, "wrong result\n{program}");
 }
 
 // Two distinct constructions with equal contents compare EQUAL, unequal contents
@@ -80,7 +37,7 @@ fn all_scalar_value_struct_eq_by_contents() {
                    eq * 10 + ne\n\
                }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("all-scalar value struct emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("all-scalar value struct emits");
     assert!(
         js.contains("__ty: \"V\""),
         "value struct emits a `{{__ty, ...}}` object:\n{js}"
@@ -100,7 +57,7 @@ fn nested_value_struct_eq() {
                    if p == q { 1 } else { 0 }\n\
                }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("nested value struct emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("nested value struct emits");
     eval_int(&js, "root", 1);
 }
 
@@ -117,7 +74,8 @@ fn gc_carrying_value_struct_eq() {
                    if a == b { 1 } else { 0 }\n\
                }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("GC-carrying value struct emits (T8g)");
+    let js =
+        crate::common::emit_closure(&ws, "root").expect("GC-carrying value struct emits (T8g)");
     assert!(
         js.contains(
             "__rock_vt_eq[\"W\"] = function(a, b) { return a.s === b.s && __op_eq(a.n, b.n); };"
@@ -141,7 +99,8 @@ fn nobox_value_return_crosses_as_leaves_not_a_box() {
                    return v.x * 10 + v.y\n\
                }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("a nobox return emits under the scratch ABI");
+    let js = crate::common::emit_closure(&ws, "root")
+        .expect("a nobox return emits under the scratch ABI");
     assert!(
         !js.contains("\"V\""),
         "nobox value materialized an object:\n{js}"
@@ -180,7 +139,7 @@ fn ordinary_value_with_a_flat_enum_return_crosses_as_leaves() {
                }\n\
                fn root() -> int { consume(make(Kind::Payload(Payload::B), 4)) }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("ordinary nested-enum value emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("ordinary nested-enum value emits");
     assert!(
         !js.contains("__ty: \"Row\""),
         "the returned row materialized an object:\n{js}"
@@ -207,7 +166,8 @@ fn a_leaf_table_value_box_keys_its_inline_children_by_dotted_path() {
                    return p.x * 100 + p.y * 10 + tag.value + rows[0].id\n\
                }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("leaf-table value stored in a Vec emits");
+    let js =
+        crate::common::emit_closure(&ws, "root").expect("leaf-table value stored in a Vec emits");
     assert!(
         js.contains("\"pos.x\""),
         "the box must key the inline child by leaf path, not box it under `pos`:\n{js}"
@@ -244,7 +204,7 @@ fn root() -> int {
     );
     let ws = ws_with(&src);
     eval_int(
-        &emit_closure(&ws, "root").expect("nullable field_get emits"),
+        &crate::common::emit_closure(&ws, "root").expect("nullable field_get emits"),
         "root",
         1,
     );
@@ -269,7 +229,7 @@ fn root() -> int {
     );
     let ws = ws_with(&src);
     eval_int(
-        &emit_closure(&ws, "root").expect("nested nullable field_get emits"),
+        &crate::common::emit_closure(&ws, "root").expect("nested nullable field_get emits"),
         "root",
         1,
     );
@@ -295,7 +255,7 @@ fn root() -> int {
     );
     let ws = ws_with(&src);
     eval_int(
-        &emit_closure(&ws, "root").expect("nullable field_get emits"),
+        &crate::common::emit_closure(&ws, "root").expect("nullable field_get emits"),
         "root",
         1,
     );

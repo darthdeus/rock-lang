@@ -3,19 +3,10 @@
 //! the second EXECUTING backend (`node`), used for the full
 //! mapping-vs-fallback differential.
 //!
-//! Gated on `node` being present -- absent, the test skips WITH A LOG (never a
-//! silent pass). node is at `/run/current-system/sw/bin/node` on the dev box.
+//! Needs `node`; see `common::require_node`.
 
 use crate::common::{emit_scalar, stdlib_ws};
 use skull_codegen_js::{JS_INTRINSICS, fill_template};
-
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
 
 /// Run a JS program that prints exactly one number; parse it as f64.
 fn node_eval_number(program: &str) -> f64 {
@@ -102,8 +93,7 @@ const MAPPING_ONLY_CASES: &[(&str, usize, &[f64], f64)] =
 // reference values -- proving the S2 emitter produces runnable, correct JS.
 #[test]
 fn fallback_bodies_execute_under_node() {
-    if !node_available() {
-        eprintln!("SKIP fallback_bodies_execute_under_node: `node` not on PATH");
+    if !crate::common::require_node() {
         return;
     }
     let ws = stdlib_ws();
@@ -124,8 +114,7 @@ fn fallback_bodies_execute_under_node() {
 // no emittable fallback); their fallback side is the luajit reference.
 #[test]
 fn mapping_vs_fallback_differential() {
-    if !node_available() {
-        eprintln!("SKIP mapping_vs_fallback_differential: `node` not on PATH");
+    if !crate::common::require_node() {
         return;
     }
     let ws = stdlib_ws();

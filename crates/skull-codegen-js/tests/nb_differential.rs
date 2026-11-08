@@ -1,5 +1,5 @@
 //! The JS NativeBuffer checked-store shim (`__nb_checked_set`), run under
-//! node. Gated on `node` being present -- absent, skip WITH A LOG.
+//! node.
 
 use bone_semantic::inference::Workspace;
 use skull_codegen_js::JS_NB_CHECK_SHIMS;
@@ -88,24 +88,6 @@ const ERROR_CASES: &[&str] = &[
     "test_nb_oob_read_neg",
     "test_nb_oob_write",
 ];
-
-fn tool_available(tool: &str, arg: &str) -> bool {
-    crate::common::tool(tool)
-        .arg(arg)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn both_backends_available(test: &str) -> bool {
-    for (tool, arg) in [("node", "--version"), ("luajit", "-v")] {
-        if !tool_available(tool, arg) {
-            eprintln!("SKIP {test}: `{tool}` not on PATH");
-            return false;
-        }
-    }
-    true
-}
 
 fn fixture_ws() -> Workspace {
     let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
@@ -198,7 +180,7 @@ fn run_lines(tool: &str, tag: &str, ext: &str, prog: &str) -> Vec<String> {
 
 #[test]
 fn nb_value_differential() {
-    if !both_backends_available("nb_value_differential") {
+    if !crate::common::require_node_and_luajit() {
         return;
     }
     let ws = fixture_ws();
@@ -239,7 +221,7 @@ fn nb_value_differential() {
 
 #[test]
 fn nb_checked_oob_errors_on_both_backends() {
-    if !both_backends_available("nb_checked_oob_errors_on_both_backends") {
+    if !crate::common::require_node_and_luajit() {
         return;
     }
     let ws = fixture_ws();
@@ -276,8 +258,7 @@ fn nb_checked_oob_errors_on_both_backends() {
 // luajit the store is backend-native, so there is nothing to compare.
 #[test]
 fn nb_js_checked_set_rejects_nan_into_int_buffer() {
-    if !tool_available("node", "--version") {
-        eprintln!("SKIP nb_js_checked_set_rejects_nan_into_int_buffer: `node` not on PATH");
+    if !crate::common::require_node() {
         return;
     }
     let prog = format!(

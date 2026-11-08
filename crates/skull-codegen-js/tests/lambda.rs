@@ -6,31 +6,6 @@
 //! oracle.
 
 use crate::common::{emit_user, ws_with};
-use skull_mir::mir::FuncRef;
-
-fn test_fn_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == name {
-            return FuncRef {
-                module: mid,
-                func: fid,
-            };
-        }
-    }
-    panic!("no fn `{name}` in <test> module");
-}
-
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
 
 /// Run `<defs>; console.log(<call>)` under node and parse the printed int. The
 /// `__rock_call` dispatch helper is prepended (every indirect call routes
@@ -58,9 +33,7 @@ fn node_eval_int(defs: &str, call: &str) -> i64 {
 
 /// Co-emit `root` and its plain-Rock callees into one JS program.
 fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> String {
-    let r = test_fn_ref(ws, root);
-    skull_codegen_js::emit::emit_with_closure(ws, &[(r, root.to_string())])
-        .unwrap_or_else(|e| panic!("closure emit `{root}`: {}", e.message))
+    crate::common::emit_closure(ws, root).unwrap_or_else(|e| panic!("closure emit `{root}`: {e}"))
 }
 
 // --- structural pins (post-`convert_closures`: records + hoisted siblings) ---
@@ -148,8 +121,7 @@ fn capture_free_lambda_is_hoisted() {
 
 #[test]
 fn capturing_arrow_executes() {
-    if !node_available() {
-        eprintln!("SKIP capturing_arrow_executes: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let ws = ws_with(
@@ -166,8 +138,7 @@ fn capturing_arrow_executes() {
 
 #[test]
 fn hof_receives_and_calls_lambda() {
-    if !node_available() {
-        eprintln!("SKIP hof_receives_and_calls_lambda: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let ws = ws_with(
@@ -181,8 +152,7 @@ fn hof_receives_and_calls_lambda() {
 // invocation (no shared param state across calls).
 #[test]
 fn lambda_reentrant_across_calls() {
-    if !node_available() {
-        eprintln!("SKIP lambda_reentrant_across_calls: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let ws = ws_with(
@@ -198,8 +168,7 @@ fn lambda_reentrant_across_calls() {
 // writes accumulate into the one binding the enclosing scope also reads.
 #[test]
 fn lambda_mutates_captured_cell() {
-    if !node_available() {
-        eprintln!("SKIP lambda_mutates_captured_cell: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let ws = ws_with(

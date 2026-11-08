@@ -10,14 +10,6 @@
 
 use crate::common::{emit_user, ws_with};
 
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 fn node_eval_int(defs: &str, call: &str) -> i64 {
     let program = format!("{defs}\nconsole.log({call});");
     let out = crate::common::node()
@@ -36,10 +28,9 @@ fn node_eval_int(defs: &str, call: &str) -> i64 {
         .unwrap_or_else(|_| panic!("node did not print an int: {s:?}\n{program}"))
 }
 
-/// Emit `f` and evaluate `f(arg)` under node (skips if node is absent).
+/// Emit `f` and evaluate `f(arg)` under node.
 fn eval1(src: &str, arg: i64, expect: i64) {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let ws = ws_with(src);

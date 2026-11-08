@@ -8,27 +8,9 @@
 //! shape). Each test runs the SAME program through Lua (oracle) and JS:
 //! expectations below are the LuaJIT output via
 //! `skull::mir_emit::emit_workspace_mir` + `luajit`, asserted on both sides.
-//! Gated on `node` AND `luajit`; absent, skip WITH A LOG.
+//! Needs `node` and `luajit`.
 
 use crate::common::{tool, ws_with};
-
-fn tool_available(tool_name: &str, arg: &str) -> bool {
-    tool(tool_name)
-        .arg(arg)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn both_backends_available(test: &str) -> bool {
-    for (name, arg) in [("node", "--version"), ("luajit", "-v")] {
-        if !tool_available(name, arg) {
-            eprintln!("SKIP {test}: `{name}` not on PATH");
-            return false;
-        }
-    }
-    true
-}
 
 fn write_temp(tag: &str, ext: &str, contents: &str) -> std::path::PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -143,7 +125,7 @@ fn main() {
 
 #[test]
 fn safenav_read_each_intermediate() {
-    if !both_backends_available("safenav_read_each_intermediate") {
+    if !crate::common::require_node_and_luajit() {
         return;
     }
     check(READ_SRC, "read", "-1\n-1\n42");
@@ -151,7 +133,7 @@ fn safenav_read_each_intermediate() {
 
 #[test]
 fn safenav_assign_each_intermediate() {
-    if !both_backends_available("safenav_assign_each_intermediate") {
+    if !crate::common::require_node_and_luajit() {
         return;
     }
     check(
@@ -163,7 +145,7 @@ fn safenav_assign_each_intermediate() {
 
 #[test]
 fn safenav_compound_assign_each_intermediate() {
-    if !both_backends_available("safenav_compound_assign_each_intermediate") {
+    if !crate::common::require_node_and_luajit() {
         return;
     }
     check(

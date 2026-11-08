@@ -8,29 +8,11 @@
 //! appear after the first is built. Same defect (and same fix) as the luajit
 //! path's `rock-lang/crates/skull/tests/multi_rejection.rs`.
 
-use skull_mir::mir::FuncRef;
-
-fn test_fn_ref(ws: &bone_semantic::inference::Workspace, name: &str) -> FuncRef {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == name {
-            return FuncRef {
-                module: mid,
-                func: fid,
-            };
-        }
-    }
-    panic!("no fn `{name}` in <test> module");
-}
-
 /// Every reported rejection for the closure rooted at `root`: the primary plus
 /// its siblings (the shape the driver's skip channel and every renderer expand).
 fn reject_messages(src: &str) -> Vec<String> {
     let ws = crate::common::ws_with(src);
-    let root = test_fn_ref(&ws, "root");
+    let root = crate::common::test_fn_ref(&ws, "root");
     let err = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())])
         .expect_err("must reject");
     std::iter::once(err.message.clone())

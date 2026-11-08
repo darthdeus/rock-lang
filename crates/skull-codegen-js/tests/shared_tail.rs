@@ -5,63 +5,20 @@
 //! a labeled continue -> a wrong result, not a silent pass).
 
 use crate::common::ws_with;
-use skull_mir::mir::FuncRef;
-
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let mut r = None;
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == root {
-            r = Some(FuncRef {
-                module: mid,
-                func: fid,
-            });
-        }
-    }
-    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
-        .map_err(|e| e.message)
-}
 
 fn eval_int(defs: &str, root: &str, expect: i64) {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
-        return;
-    }
-    let program = format!(
-        "{}{}{}{}{}\n{defs}\nconsole.log({root}());",
-        skull_codegen_js::JS_NB_CHECK_SHIMS,
-        skull_codegen_js::JS_VEC_CHECK_SHIMS,
-        skull_codegen_js::JS_TABLE_PRIM,
-        skull_codegen_js::JS_STRUCTURAL_EQ,
-        skull_codegen_js::JS_CALL_HELPER,
+    crate::common::eval_int(
+        &[
+            skull_codegen_js::JS_NB_CHECK_SHIMS,
+            skull_codegen_js::JS_VEC_CHECK_SHIMS,
+            skull_codegen_js::JS_TABLE_PRIM,
+            skull_codegen_js::JS_STRUCTURAL_EQ,
+            skull_codegen_js::JS_CALL_HELPER,
+        ],
+        defs,
+        root,
+        expect,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let s = String::from_utf8_lossy(&out.stdout);
-    let got: i64 = s
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
-    assert_eq!(got, expect, "wrong result\n{program}");
 }
 
 // Class A -- a loop inside a lambda body. structure::analyze roots at lambda
@@ -81,7 +38,7 @@ fn lambda_body_loop_structures() {
              sum\n\
          }",
     );
-    let js = emit_closure(&ws, "root").expect("lambda-body loop should structure");
+    let js = crate::common::emit_closure(&ws, "root").expect("lambda-body loop should structure");
     eval_int(&js, "root", 15);
 }
 
@@ -96,7 +53,8 @@ fn combinator_terminal_chain_structures() {
              v.map(_ * 2).filter(_ > 2).reduce(0, (a, b) => a + b)\n\
          }",
     );
-    let js = emit_closure(&ws, "root").expect("combinator terminal chain should structure");
+    let js = crate::common::emit_closure(&ws, "root")
+        .expect("combinator terminal chain should structure");
     eval_int(&js, "root", 10);
 }
 
@@ -116,7 +74,8 @@ fn multiple_continue_shared_tail_structures() {
              sum\n\
          }",
     );
-    let js = emit_closure(&ws, "root").expect("multiple-continue shared tail should structure");
+    let js = crate::common::emit_closure(&ws, "root")
+        .expect("multiple-continue shared tail should structure");
     eval_int(&js, "root", 14);
 }
 
@@ -130,7 +89,8 @@ fn or_pattern_shared_arm_structures() {
              return match x { 1 | 2 | 3 => 42, _ => 0 }\n\
          }",
     );
-    let js = emit_closure(&ws, "root").expect("or-pattern shared arm should structure");
+    let js =
+        crate::common::emit_closure(&ws, "root").expect("or-pattern shared arm should structure");
     eval_int(&js, "root", 42);
     // The alternative not on the matched value still routes correctly.
     let ws0 = ws_with(
@@ -139,6 +99,7 @@ fn or_pattern_shared_arm_structures() {
              return match x { 1 | 2 | 3 => 42, _ => 0 }\n\
          }",
     );
-    let js0 = emit_closure(&ws0, "root").expect("or-pattern default should structure");
+    let js0 =
+        crate::common::emit_closure(&ws0, "root").expect("or-pattern default should structure");
     eval_int(&js0, "root", 0);
 }

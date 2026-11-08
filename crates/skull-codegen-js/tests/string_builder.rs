@@ -5,56 +5,17 @@
 //! `tests/strings/js_string_builder.rock` cross-checks against luajit.
 
 use crate::common::ws_with;
-use skull_mir::mir::FuncRef;
-
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let mut r = None;
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == root {
-            r = Some(FuncRef {
-                module: mid,
-                func: fid,
-            });
-        }
-    }
-    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
-        .map_err(|e| e.message)
-}
 
 fn eval_str(defs: &str, root: &str, expect: &str) {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
-        return;
-    }
-    let program = format!(
-        "{}{}\n{defs}\nconsole.log({root}());",
-        skull_codegen_js::JS_NB_CHECK_SHIMS,
-        skull_codegen_js::JS_VEC_CHECK_SHIMS,
+    crate::common::eval_str(
+        &[
+            skull_codegen_js::JS_NB_CHECK_SHIMS,
+            skull_codegen_js::JS_VEC_CHECK_SHIMS,
+        ],
+        defs,
+        root,
+        expect,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let s = String::from_utf8_lossy(&out.stdout);
-    assert_eq!(s.trim_end_matches('\n'), expect, "wrong result\n{program}");
 }
 
 // Direct StringBuilder: push several fragments, build the concatenation.
@@ -67,7 +28,7 @@ fn sb_direct_concat() {
                    sb_build(sb)\n\
                }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("sb emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("sb emits");
     assert!(
         js.contains(".push(") && js.contains(".join("),
         "renders array ops:\n{js}"
@@ -83,7 +44,7 @@ fn sb_empty_builds_empty() {
                    sb_build(sb)\n\
                }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("sb emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("sb emits");
     eval_str(&js, "root", "");
 }
 
@@ -95,6 +56,6 @@ fn join_co_emits_over_sb() {
                    join(parts, \", \")\n\
                }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("join emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("join emits");
     eval_str(&js, "root", "a, b, c");
 }

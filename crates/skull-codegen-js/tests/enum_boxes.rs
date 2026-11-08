@@ -10,33 +10,6 @@
 //! `__op_eq`'s key-count walk calls the equal values unequal.
 
 use crate::common::ws_with;
-use skull_mir::mir::FuncRef;
-
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let mut r = None;
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == root {
-            r = Some(FuncRef {
-                module: mid,
-                func: fid,
-            });
-        }
-    }
-    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
-        .map_err(|e| e.message)
-}
 
 fn preamble() -> String {
     format!(
@@ -50,12 +23,12 @@ fn preamble() -> String {
 }
 
 fn eval(src: &str, root: &str, tail: &str) -> String {
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::common::require_node() {
         return String::new();
     }
     let ws = ws_with(src);
-    let js = emit_closure(&ws, root).unwrap_or_else(|e| panic!("emit `{root}`: {e}"));
+    let js =
+        crate::common::emit_closure(&ws, root).unwrap_or_else(|e| panic!("emit `{root}`: {e}"));
     let program = format!(
         "{}{}\n{js}\n{tail}",
         preamble(),
@@ -75,7 +48,7 @@ fn eval(src: &str, root: &str, tail: &str) -> String {
 }
 
 fn eval_int(src: &str, root: &str, expect: i64) {
-    if !node_available() {
+    if !crate::common::require_node() {
         return;
     }
     let got = eval(src, root, &format!("console.log({root}());"));
@@ -94,7 +67,7 @@ fn mixed_enum_tuple_variant() {
                }\n\
                fn root() -> int { node_sum(Node::Pair(1, Node::Pair(2, Node::Leaf(3)))) }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("mixed enum emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("mixed enum emits");
     assert!(
         js.contains("__rock_make_enum("),
         "boxes via the nil-dropping ctor:\n{js}"
@@ -113,7 +86,7 @@ fn unit_variant_singleton() {
                }\n\
                fn root() -> int { node_sum(Node::Pair(9, Node::Nil)) }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("unit singleton emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("unit singleton emits");
     assert!(
         js.contains("var __rock_enum_Node_Nil = { __variant: \"Nil\", __ty: \"Node\" };"),
         "emits the singleton def:\n{js}"
@@ -194,7 +167,7 @@ fn inspect_flat_enum_nobox_record_payload_names() {
                struct Holder { event: Event }\n\
                fn root() -> string { inspect(Holder { event: Event::At(Pos { x: 4, y: 9 }) }.event) }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("flat enum inspection emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("flat enum inspection emits");
     assert_eq!(
         eval(src, "root", "console.log(root());"),
         "Event::At { x = 4, y = 9 }"
@@ -259,7 +232,7 @@ fn inspect_flat_enum_payload_names_require_exact_leaf_count() {
                enum Event { At(Pos), Maybe(Pos, int?), Named { x: int }, Text(string) }\n\
                fn root() -> int { 0 }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("flat enum metadata emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("flat enum metadata emits");
     let program = format!(
         "{}{}\n{js}\nconsole.log(inspect({{__ty: \"Event\", __variant: \"At\", 0: 1, 1: 2, 2: 3}}));\n\
          console.log(inspect({{__ty: \"Event\", __variant: \"Maybe\", 0: 1, 1: 2}}));\n\
@@ -267,8 +240,7 @@ fn inspect_flat_enum_payload_names_require_exact_leaf_count() {
         preamble(),
         skull_codegen_js::JS_STRING_RUNTIME,
     );
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let out = crate::common::node()
@@ -294,7 +266,7 @@ fn payload_free_names_table() {
     let src = "enum Color { Red, Green, Blue }\n\
                fn root() -> string { let g = Color::Green\n \"{g}\" }";
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("payload-free enum emits");
+    let js = crate::common::emit_closure(&ws, "root").expect("payload-free enum emits");
     assert!(
         js.contains("var __rock_enum_Color_names = new Map([[0, \"Color::Red\"], [1, \"Color::Green\"], [2, \"Color::Blue\"]]);"),
         "emits the names Map:\n{js}"

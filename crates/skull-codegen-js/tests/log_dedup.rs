@@ -5,41 +5,13 @@
 //! cross-checks against luajit.
 
 use crate::common::ws_with;
-use skull_mir::mir::FuncRef;
-
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-fn emit_closure(ws: &bone_semantic::inference::Workspace, root: &str) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let mut r = None;
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == root {
-            r = Some(FuncRef {
-                module: mid,
-                func: fid,
-            });
-        }
-    }
-    skull_codegen_js::emit::emit_with_closure(ws, &[(r.unwrap(), root.to_string())])
-        .map_err(|e| e.message)
-}
 
 // Emit `root`, run it under node with the log + string runtimes and an `__G`,
 // capturing the `[cat] msg` lines `print` collects; assert the joined buffer.
 fn eval_log(src: &str, expect: &str) {
     let ws = ws_with(src);
-    let js = emit_closure(&ws, "root").expect("log emits");
-    if !node_available() {
-        eprintln!("SKIP: node not found");
+    let js = crate::common::emit_closure(&ws, "root").expect("log emits");
+    if !crate::common::require_node() {
         return;
     }
     let program = format!(

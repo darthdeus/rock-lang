@@ -1,22 +1,13 @@
 use crate::common::{node, ws_with};
 use skull_mir::mir::FuncRef;
 
-fn node_available() -> bool {
-    node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 fn emit_root(src: &str, root: &str) -> String {
     let ws = ws_with(src);
     crate::common::emit_user(&ws, root)
 }
 
 fn eval(src: &str, expr: &str, expected: &str) {
-    if !node_available() {
-        eprintln!("SKIP uint JS execution: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let js = emit_root(src, "root");
@@ -41,8 +32,7 @@ fn eval(src: &str, expr: &str, expected: &str) {
 }
 
 fn eval_closure(src: &str, expr: &str, expected: &str) {
-    if !node_available() {
-        eprintln!("SKIP uint JS execution: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let ws = ws_with(src);

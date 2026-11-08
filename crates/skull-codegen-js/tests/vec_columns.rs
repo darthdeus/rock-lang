@@ -58,14 +58,6 @@ fn insert_at_presence() -> int {
 fn main() { let _ = unmarked() }
 "#;
 
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 /// Whole-program JS for `name`: `push` is a stdlib callee, so emitting the root
 /// body alone rejects it as an unmapped intrinsic long before the storage
 /// question is reached.
@@ -125,34 +117,18 @@ fn fn_body<'a>(js: &'a str, name: &str) -> &'a str {
 }
 
 fn eval_int(name: &str, expect: i64) {
-    if !node_available() {
-        eprintln!("SKIP {name}: node not found");
-        return;
-    }
     let defs = emit_js(name).unwrap_or_else(|e| panic!("emit `{name}`: {e}"));
-    let program = format!(
-        "{}{}{}{}\n{defs}\nconsole.log({name}());",
-        skull_codegen_js::JS_NB_CHECK_SHIMS,
-        skull_codegen_js::JS_VEC_CHECK_SHIMS,
-        skull_codegen_js::JS_TABLE_PRIM,
-        skull_codegen_js::JS_STRUCTURAL_EQ,
+    crate::common::eval_int(
+        &[
+            skull_codegen_js::JS_NB_CHECK_SHIMS,
+            skull_codegen_js::JS_VEC_CHECK_SHIMS,
+            skull_codegen_js::JS_TABLE_PRIM,
+            skull_codegen_js::JS_STRUCTURAL_EQ,
+        ],
+        &defs,
+        name,
+        expect,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed for `{name}`:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let s = String::from_utf8_lossy(&out.stdout);
-    let got: i64 = s
-        .trim()
-        .parse()
-        .unwrap_or_else(|_| panic!("not an int: {s:?}\n{program}"));
-    assert_eq!(got, expect, "wrong result for `{name}`\n{program}");
 }
 
 /// The control: the same source still columns for luajit. Without it every

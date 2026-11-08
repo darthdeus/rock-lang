@@ -1,16 +1,7 @@
 //! Pin the `JS_RNG_RUNTIME` stream to LuaJIT's 32-bit RNG contract.
-//! Runs the ACTUAL prelude const under node, node-gated with a skip-log (never
-//! a silent pass).
+//! Runs the ACTUAL prelude const under node.
 
 use skull_codegen_js::JS_RNG_RUNTIME;
-
-fn node_available() -> bool {
-    crate::common::node()
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
 
 /// Run the RNG prelude + `body`, return trimmed stdout.
 fn node_run(body: &str) -> String {
@@ -30,8 +21,7 @@ fn node_run(body: &str) -> String {
 
 #[test]
 fn xorshift32_seed42_matches_luajit_draws_and_signed_state() {
-    if !node_available() {
-        eprintln!("SKIP xorshift32_seed42_matches_luajit_draws_and_signed_state: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let got = node_run(
@@ -49,8 +39,7 @@ fn xorshift32_seed42_matches_luajit_draws_and_signed_state() {
 
 #[test]
 fn signed_seed_and_state_set_wrap_to_luajit_state() {
-    if !node_available() {
-        eprintln!("SKIP signed_seed_and_state_set_wrap_to_luajit_state: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let got = node_run(
@@ -63,10 +52,7 @@ fn signed_seed_and_state_set_wrap_to_luajit_state() {
 
 #[test]
 fn presentation_stream_is_independent_and_matches_luajit_sequence() {
-    if !node_available() {
-        eprintln!(
-            "SKIP presentation_stream_is_independent_and_matches_luajit_sequence: node not found"
-        );
+    if !crate::common::require_node() {
         return;
     }
     let got = node_run(
@@ -82,8 +68,7 @@ fn presentation_stream_is_independent_and_matches_luajit_sequence() {
 
 #[test]
 fn random_int_seed42_first5() {
-    if !node_available() {
-        eprintln!("SKIP random_int_seed42_first5: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let got = node_run(
@@ -94,8 +79,7 @@ fn random_int_seed42_first5() {
 
 #[test]
 fn random_in_unit_interval() {
-    if !node_available() {
-        eprintln!("SKIP random_in_unit_interval: node not found");
+    if !crate::common::require_node() {
         return;
     }
     let got = node_run(
@@ -106,8 +90,7 @@ fn random_in_unit_interval() {
 
 #[test]
 fn random_int_large_range_covers_beyond_2pow32() {
-    if !node_available() {
-        eprintln!("SKIP random_int_large_range_covers_beyond_2pow32: node not found");
+    if !crate::common::require_node() {
         return;
     }
     // r = 9e9 > 2^32 forces the two-draw 53-bit compose path; assert every draw
@@ -123,8 +106,7 @@ fn random_int_large_range_covers_beyond_2pow32() {
 
 #[test]
 fn state_get_set_roundtrip_reproduces_stream() {
-    if !node_available() {
-        eprintln!("SKIP state_get_set_roundtrip_reproduces_stream: node not found");
+    if !crate::common::require_node() {
         return;
     }
     // The single-word state is the replay-serialization surface: capture it,
