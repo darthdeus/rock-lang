@@ -256,7 +256,6 @@ pub(crate) fn session_files(sources: &SourceFiles) -> Vec<bone_incremental::sess
         .map(|source| {
             let source = source.borrow();
             let file = bone_incremental::session::SessionFile::from_source(&source);
-            crate::compile_measurements::source(&file.path, file.text.len());
             file
         })
         .collect()
@@ -294,8 +293,6 @@ pub(crate) fn bone_session_for_emission(
 pub fn bone_pipeline_timed(
     src: &str,
 ) -> (std::result::Result<(), Vec<CompilerError>>, BonePhaseTimes) {
-    let stats = crate::compile_measurements::Scope::begin("<parse_rock>");
-    crate::compile_measurements::source("<parse_rock>", src.len());
     let mut times = BonePhaseTimes::default();
 
     let t = Instant::now();
@@ -308,15 +305,11 @@ pub fn bone_pipeline_timed(
     };
     times.parse = t.elapsed();
 
-    crate::compile_measurements::phase("parse");
     let t = Instant::now();
     let res = check_with_stdlib([module]).map(|_| ());
     times.semantic = t.elapsed();
 
-    crate::compile_measurements::phase("stdlib+semantic");
-    if res.is_ok() {
-        stats.success();
-    }
+    if res.is_ok() {}
     (res, times)
 }
 
@@ -338,7 +331,7 @@ pub(crate) fn parse_user_modules(
     // only shared state, `Ustr` interning, is concurrent-safe). `par_iter`
     // preserves order, so the dedup/entry scan below sees files in the same order
     // the old serial loop did. Carry each module's id-path Ustr alongside its Ast.
-    let parsed: Vec<(skull_parser::Ast, ustr::Ustr, usize)> = sources
+    let parsed: Vec<(skull_parser::Ast, ustr::Ustr)> = sources
         .files
         .par_iter()
         .map(|file| {
@@ -348,7 +341,7 @@ pub(crate) fn parse_user_modules(
                 .map_err(|e| vec![e])?;
             module.package = f.package.clone();
             module.global_policy = f.global_policy;
-            Ok((module, id, f.contents.len()))
+            Ok((module, id))
         })
         .collect::<std::result::Result<Vec<_>, Vec<CompilerError>>>()?;
 
@@ -357,8 +350,7 @@ pub(crate) fn parse_user_modules(
     let mut user_file: Option<ustr::Ustr> = None;
     let mut first_file: Option<ustr::Ustr> = None;
     let mut seen: HashMap<ustr::Ustr, ustr::Ustr> = HashMap::new();
-    for (module, id, bytes) in parsed {
-        crate::compile_measurements::source(id.as_str(), bytes);
+    for (module, id) in parsed {
         // The module's file is the stable identity the workspace's interner maps
         // to a dense ModuleId after semantic_pass. Carry it here, resolve the id
         // from `ws.module_ids` once the workspace exists (see `entry_module_id`).
@@ -418,7 +410,6 @@ pub(crate) fn bone_workspace_timed(
     std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>>,
     BonePhaseTimes,
 ) {
-    let stats = crate::compile_measurements::Scope::for_sources(sources);
     let mut times = BonePhaseTimes::default();
     let (user_modules, _mid, parse) = match parse_user_modules(sources) {
         Ok(v) => v,
@@ -433,7 +424,6 @@ pub(crate) fn bone_workspace_timed(
     let t = Instant::now();
     modules.extend(user_modules);
     times.stdlib_extend = t.elapsed();
-    crate::compile_measurements::phase("parse+stdlib");
     let aliases = match aliases_for_modules(&modules) {
         Ok(aliases) => aliases,
         Err(error) => return (Err(vec![error]), times),
@@ -444,12 +434,6 @@ pub(crate) fn bone_workspace_timed(
     let res = semantic_pass_with_aliases(&mut modules, &aliases);
     times.semantic_call = t_call.elapsed();
     times.semantic = t_sem.elapsed();
-
-    crate::compile_measurements::phase("semantic");
-    if let Ok(ws) = &res {
-        crate::compile_measurements::timings("bone", &ws.phase_timings);
-        stats.success();
-    }
     // The checked Workspace carries bone's own per-phase split (`phase_timings`)
     // for backend-stats and the symbol/loc counts for the [COMPILE] stats line.
     // `Ok(ws)` here means "lowered and checked", NOT "no type errors" -- body

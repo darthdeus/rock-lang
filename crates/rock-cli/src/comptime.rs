@@ -6,7 +6,6 @@
 //! emission and so never reaches this module.
 
 use anyhow::Result;
-use bone_core::prelude::Instant;
 use bone_semantic::inference::{ComptimeInputs, ComptimeVarValue};
 use std::path::Path;
 use std::sync::OnceLock;
@@ -389,7 +388,6 @@ pub(crate) fn resolve_checked_inputs(
     if inputs.source_fingerprints.is_empty() {
         return Ok(inputs);
     }
-    let started = Instant::now();
     let root = inputs.embed_root.clone();
     let mut watch_files = rustc_hash::FxHashMap::default();
     resolve_source_fingerprints(
@@ -440,7 +438,6 @@ pub(crate) fn resolve_checked_inputs(
         &compiler_identity()?,
     )?;
     inputs.source_fingerprint_files = watch_files;
-    crate::compile_measurements::timings("comptime", &[("source-fingerprint", started.elapsed())]);
     Ok(inputs)
 }
 

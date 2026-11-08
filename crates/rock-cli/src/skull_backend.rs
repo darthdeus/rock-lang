@@ -111,18 +111,6 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
     fn report_soft_findings(&mut self, soft: Vec<bone_lints::Finding>) {
         crate::lint_pass::report_soft(&soft, self.sources, self.lint_root);
     }
-
-    fn phase(&mut self, phase: skull::pipeline::Phase<'_>) {
-        use skull::pipeline::Phase;
-        match phase {
-            Phase::Parsed => crate::compile_measurements::phase("parse+stdlib"),
-            Phase::Checked(ws) => {
-                crate::compile_measurements::phase("semantic");
-                crate::compile_measurements::timings("bone", &ws.phase_timings);
-            }
-            Phase::Prepared => crate::compile_measurements::phase("prepare"),
-        }
-    }
 }
 
 /// A package test build's [`skull::pipeline::CompileHost`]: the command-line
@@ -165,10 +153,6 @@ impl skull::pipeline::CompileHost for PackageTestHost<'_> {
         self.inner.report_soft_findings(soft);
     }
 
-    fn phase(&mut self, phase: skull::pipeline::Phase<'_>) {
-        self.inner.phase(phase);
-    }
-
     fn emit(
         &mut self,
         ws: &bone_semantic::inference::Workspace,
@@ -188,8 +172,6 @@ fn skull_emit_full(
     file: &str,
     src: &str,
 ) -> std::result::Result<(String, Vec<skull::SkullTest>, bool), EmitFullErr> {
-    let stats = crate::compile_measurements::Scope::begin(file);
-    crate::compile_measurements::source(file, src.len());
     let (sources, lint_root) = crate::lint_pass::single_file_scope(file, src);
     let mut host = CliCompileHost {
         sources: &sources,
@@ -208,7 +190,6 @@ fn skull_emit_full(
         &mut host,
     )
     .map_err(|failure| EmitFullErr::Compile(failure.errors))?;
-    crate::compile_measurements::emission(&emit);
     let emits_main = emit.emits_main;
     let (lua, skipped) = (emit.lua, emit.skipped);
     if std::env::var("SKULL_DEBUG_SKIPPED").is_ok() && !skipped.is_empty() {
@@ -218,7 +199,6 @@ fn skull_emit_full(
         }
     }
     let tests = skull::module_tests(&ws, user_mid).map_err(EmitFullErr::Discovery)?;
-    stats.success();
     Ok((lua, tests, emits_main))
 }
 
@@ -270,7 +250,6 @@ pub fn skull_workspace_timed(
     sources: &SourceFiles,
     project_path: &std::path::Path,
 ) -> (bool, SkullPhaseTimes) {
-    let stats = crate::compile_measurements::Scope::for_sources(sources);
     let mut times = SkullPhaseTimes::default();
     let (user_modules, entry_file, parse) = match crate::bone_backend::parse_user_modules(sources) {
         Ok(v) => v,
@@ -286,7 +265,6 @@ pub fn skull_workspace_timed(
     // call explicit here (the verdict is a bool, not a gate, and the timer must
     // bracket exactly this call).
     let mut modules = skull::pipeline::with_stdlib(user_modules);
-    crate::compile_measurements::phase("parse+stdlib");
     let aliases = match crate::bone_backend::aliases_for_modules(&modules) {
         Ok(aliases) => aliases,
         Err(error) => {
@@ -304,8 +282,6 @@ pub fn skull_workspace_timed(
         }
     };
     times.semantic = t.elapsed();
-    crate::compile_measurements::phase("semantic");
-    crate::compile_measurements::timings("bone", &ws.phase_timings);
     let body_errors = crate::bone_backend::body_errors(&ws);
     if let Some(error) = body_errors.into_iter().next() {
         times.failure = Some(error);
@@ -328,7 +304,6 @@ pub fn skull_workspace_timed(
     }
     times.workspace_setup = t.elapsed();
 
-    crate::compile_measurements::phase("prepare");
     let entry_mid = crate::bone_backend::entry_module_id(&ws, entry_file);
 
     let t = Instant::now();
@@ -336,7 +311,6 @@ pub fn skull_workspace_timed(
     times.emit = t.elapsed();
     let emit_ok = match emit {
         Ok(e) => {
-            crate::compile_measurements::emission(&e);
             times.emit_phases = e.phases;
             times.abi_plan_stats = e.abi_plan_stats;
             times.arena_traffic = e.arena_traffic;
@@ -353,9 +327,7 @@ pub fn skull_workspace_timed(
         }
     };
 
-    if emit_ok {
-        stats.success();
-    }
+    if emit_ok {}
     (emit_ok, times)
 }
 
@@ -657,7 +629,6 @@ fn skull_build(
     src: &str,
     filter: Option<&crate::test::TestFilter>,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
-    let _stats = crate::compile_measurements::Scope::begin(file);
     (crate::registry::RuntimeServices::registered().prepare_unit)(file).map_err(|e| {
         SkullFailure {
             reason: "sound bank preparation failed".to_string(),
@@ -814,7 +785,6 @@ fn run_emitted_tests(
         });
     }
     if selected_tests.is_empty() {
-        crate::compile_measurements::finish("ok");
         return Ok(SkullOutcome::Pass {
             tests: 0,
             skipped,
@@ -1191,8 +1161,6 @@ fn write_test_program(
     for part in parts {
         script.write_all(part.as_bytes())?;
     }
-    crate::compile_measurements::phase("write");
-    crate::compile_measurements::finish("ok");
     Ok((script, excerpt))
 }
 
@@ -1353,7 +1321,6 @@ fn skull_build_package_with_limit(
     shards: usize,
     filter: Option<&crate::test::TestFilter>,
 ) -> std::result::Result<SkullOutcome, SkullFailure> {
-    let _stats = crate::compile_measurements::Scope::begin(dir);
     // Like a game run, so tests never read a bank an earlier tree compiled.
     (crate::registry::RuntimeServices::registered().prepare_unit)(dir).map_err(|e| {
         SkullFailure {
@@ -1365,7 +1332,6 @@ fn skull_build_package_with_limit(
         reason: "no compile slot".to_string(),
         rendered: format!("{e:#}"),
     })?;
-    crate::compile_measurements::slot(slot.acquisition());
     let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
     let sources = crate::unified_compile::discover_sources(&spec).map_err(|e| SkullFailure {
         reason: "cannot load project".to_string(),
@@ -1376,12 +1342,10 @@ fn skull_build_package_with_limit(
             reason: "cannot select package test sources".to_string(),
             rendered: format!("{error:#}"),
         })?;
-    crate::compile_measurements::phase("discovery");
     let (modules, entry_file) = skull_assemble_project(&sources).map_err(|errs| SkullFailure {
         reason: categorize(&errs[0].message),
         rendered: render_project_errs(&sources, &errs),
     })?;
-    crate::compile_measurements::phase("parse+stdlib");
     let mut host = PackageTestHost {
         inner: CliCompileHost {
             sources: &sources,
@@ -1403,7 +1367,6 @@ fn skull_build_package_with_limit(
             rendered: render_project_errs(&sources, &failure.errors),
         },
     )?;
-    crate::compile_measurements::emission(&emit);
     let lua = emit.lua;
     let test_fns = collect_package_test_fns(&ws, dir).map_err(|e| SkullFailure {
         reason: categorize(&e.message),
@@ -1851,7 +1814,6 @@ pub fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {
     if std::path::Path::new(path).is_dir() {
         return skull_compile_project(path, output);
     }
-    let stats = crate::compile_measurements::Scope::begin(path);
     let src = match fs_err::read_to_string(path) {
         Ok(s) => s,
         Err(e) => {
@@ -1871,8 +1833,6 @@ pub fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {
                     print!("{}", lua);
                 }
             }
-            crate::compile_measurements::phase("write");
-            stats.success();
             Ok(())
         }
         Err(errs) => {
@@ -1909,7 +1869,6 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
     let build = |label: &str,
                  session: &mut Option<bone_incremental::session::Session>,
                  cache: &mut Option<skull::mir_emit::SkullEmitCache>| {
-        let stats = crate::compile_measurements::Scope::begin(path);
         let source_spec = crate::common::path_to_source_spec(path);
         let sources = match crate::unified_compile::discover_sources(&source_spec) {
             Ok(s) => s,
@@ -1936,7 +1895,6 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         } else {
             sources
         };
-        crate::compile_measurements::phase("discovery");
         let files = crate::bone_backend::session_files(&sources);
 
         let t = Instant::now();
@@ -1997,7 +1955,6 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
                 }
             }
         }
-        crate::compile_measurements::phase("session: parse+stdlib+semantic");
         let check_ms = t.elapsed().as_secs_f64() * 1000.0;
 
         let Some(s) = session else { return };
@@ -2067,7 +2024,6 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
                 }
             }
         };
-        crate::compile_measurements::emission(&emit);
         let emit_ms = te.elapsed().as_secs_f64() * 1000.0;
         let mode = if full || reinferred.is_empty() {
             "full"
@@ -2076,8 +2032,6 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         };
         match rock_host::project::write_atomic(&out_file, &emit.lua) {
             Ok(()) => {
-                crate::compile_measurements::phase("write");
-                stats.success();
                 log::info!(target: "WATCH",
                 "skull {label}: {} files -> {} ({mode}, {} re-inferred; check {check_ms:.1}ms, emit {emit_ms:.1}ms)",
                 sources.files.len(), out_file.display(), reinferred.len());
@@ -2187,9 +2141,7 @@ fn skull_emit_project_with_inputs(
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> Result<(GameProgram, bool)> {
     use std::path::PathBuf;
-    let stats = crate::compile_measurements::Scope::begin(dir);
-    let slot = crate::compile_slots::acquire(dir)?;
-    crate::compile_measurements::slot(slot.acquisition());
+    let _slot = crate::compile_slots::acquire(dir)?;
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
     let sources = match crate::unified_compile::discover_sources(&spec) {
         Ok(s) => s,
@@ -2204,7 +2156,6 @@ fn skull_emit_project_with_inputs(
         .production_only(std::path::Path::new(dir))
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
-    crate::compile_measurements::phase("discovery");
     // Compile core: parse(assemble) + bone check + skull codegen. Excludes
     // discovery (disk read) and the caller's output write, matching the bone
     // backend's `compile` figure so loc/sec lines up across backends.
@@ -2217,7 +2168,6 @@ fn skull_emit_project_with_inputs(
         }
     };
 
-    crate::compile_measurements::phase("parse+stdlib");
     // Project build: modules outside `dir` (the `engine` dependency, stdlib)
     // are libraries and prune to what the project reaches. The game build
     // dropped `tests/` above, hence ProductionOnly lints.
@@ -2253,7 +2203,6 @@ fn skull_emit_project_with_inputs(
             crate::invocation_log::exit(1);
         }
     };
-    crate::compile_measurements::emission(&emit);
     let allocation_report_path = allocation_report_path_from_env();
     if let Err(e) =
         write_allocation_report(allocation_report_path.as_deref(), &emit.allocation_report)
@@ -2291,7 +2240,6 @@ fn skull_emit_project_with_inputs(
     rayon::spawn(move || drop(ws));
     #[cfg(feature = "sequential")]
     drop(ws);
-    stats.success();
     Ok((lua, emits_main))
 }
 
@@ -2601,7 +2549,6 @@ pub fn skull_compile_project_with_recorded_inputs(
     output: Option<String>,
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> Result<bone_semantic::inference::ComptimeInputs> {
-    let stats = crate::compile_measurements::Scope::begin(dir);
     let (emit, emits_main) = skull_emit_project_with_inputs(dir, inputs)?;
     // A game's runnable main.lua is the same shape run/engine produce via
     // write_full_main: preamble (game source dir) + emit +
@@ -2620,17 +2567,13 @@ pub fn skull_compile_project_with_recorded_inputs(
             write_program_parts(&mut std::io::stdout().lock(), &parts)?;
         }
     }
-    crate::compile_measurements::phase("write");
-    stats.success();
     Ok(emit.comptime_inputs)
 }
 
 fn skull_run_project(dir: &str) -> Result<()> {
-    let stats = crate::compile_measurements::Scope::begin(dir);
     let runtime = RuntimeServices::registered();
     (runtime.prepare_run)(dir)?;
     let (lua, emits_main) = skull_emit_project(dir)?;
-    stats.success();
     (runtime.launch)(dir, &lua, emits_main)
 }
 
@@ -3300,9 +3243,7 @@ impl IncrementalProject {
         explicit_allocation_report: Option<&std::path::Path>,
         select_sims: impl FnOnce(&bone_semantic::inference::Workspace) -> Result<Option<Vec<String>>>,
     ) -> Result<IncrementalProject> {
-        let stats = crate::compile_measurements::Scope::begin(dir);
-        let slot = crate::compile_slots::acquire(dir)?;
-        crate::compile_measurements::slot(slot.acquisition());
+        let _slot = crate::compile_slots::acquire(dir)?;
         let renderer_target = skull::mir_emit::RendererTarget::Gl;
         let project = crate::live_project::LiveProject::init(dir, include_tests)?;
         let (lua, cache, artifact_fingerprint, emits_main) = {
@@ -3321,7 +3262,6 @@ impl IncrementalProject {
                 skull::mir_emit::emit_full_in_for_renderer(ws, mid, Some(dir), renderer_target)
             }
             .map_err(|e| anyhow::anyhow!("{}", render_project_err(project.sources(), &e)))?;
-            crate::compile_measurements::emission(&emit);
             let allocation_report_path = allocation_report_path_from_env();
             write_allocation_report(
                 explicit_allocation_report
@@ -3336,12 +3276,9 @@ impl IncrementalProject {
             (lua, c, artifact_fingerprint, emits_main)
         };
         let preamble = (RuntimeServices::registered().program_preamble)(dir, ProgramKind::Game)?;
-        crate::compile_measurements::phase("prepare");
         write_full_main(&preamble, &lua, emits_main, main_path, incremental_path)?;
-        crate::compile_measurements::phase("write");
         let shape_hashes = skull::type_shape_hashes(project.workspace())
             .map_err(|e| anyhow::anyhow!(e.message))?;
-        stats.success();
         Ok(IncrementalProject {
             project,
             cache,
@@ -3407,13 +3344,10 @@ impl IncrementalProject {
         main_path: &std::path::Path,
         incremental_path: &std::path::Path,
     ) -> Result<SkullReload> {
-        let stats = crate::compile_measurements::Scope::begin(self.project.dir());
         let started = self.route_profile_enabled.then(Instant::now);
         self.last_route_profile = None;
         let project_started = self.route_profile_enabled.then(Instant::now);
         let publication = self.project.recompile_for_publication(changed);
-        crate::compile_measurements::phase("live-project");
-        crate::compile_measurements::known_sources(self.project.sources().files.len());
         let project_call_ns = project_started.map_or(0, |started| started.elapsed().as_nanos());
         let (update, snapshot) = match publication {
             Ok(value) => value,
@@ -3440,7 +3374,6 @@ impl IncrementalProject {
             Ok(reload) => {
                 self.project.commit_body_transaction();
                 self.finish_route_profile(started, profile);
-                stats.success();
                 Ok(reload)
             }
             Err(error) => {
@@ -3484,13 +3417,10 @@ impl IncrementalProject {
         main_path: &std::path::Path,
         incremental_path: &std::path::Path,
     ) -> Result<SkullReload> {
-        let stats = crate::compile_measurements::Scope::begin(self.project.dir());
         let started = self.route_profile_enabled.then(Instant::now);
         self.last_route_profile = None;
         let project_started = self.route_profile_enabled.then(Instant::now);
         let publication = self.project.apply_edit_for_publication(path, new_text);
-        crate::compile_measurements::phase("live-project");
-        crate::compile_measurements::known_sources(self.project.sources().files.len());
         let project_call_ns = project_started.map_or(0, |started| started.elapsed().as_nanos());
         let (update, snapshot) = match publication {
             Ok(value) => value,
@@ -3517,7 +3447,6 @@ impl IncrementalProject {
             Ok(reload) => {
                 self.project.commit_body_transaction();
                 self.finish_route_profile(started, profile);
-                stats.success();
                 Ok(reload)
             }
             Err(error) => {
@@ -3659,7 +3588,6 @@ impl IncrementalProject {
                 .map_err(|e| {
                     anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e))
                 })?;
-                crate::compile_measurements::emission(&emit);
                 if self
                     .cache
                     .global_layout()
@@ -3700,7 +3628,6 @@ impl IncrementalProject {
                 main_path,
                 incremental_path,
             )?;
-            crate::compile_measurements::phase("write");
             self.cache = staged_cache;
             self.artifact_fingerprint = self
                 .cache
@@ -3740,7 +3667,6 @@ impl IncrementalProject {
                     anyhow::anyhow!("{}", render_project_err(self.project.sources(), &e))
                 })?
             };
-            crate::compile_measurements::emission(&overlay);
             if let (Some(started), Some(profile)) = (emit_started, profile.as_deref_mut()) {
                 profile.emit_overlay_ns += started.elapsed().as_nanos();
                 profile.affected_chunk_selection_ns +=
@@ -3780,7 +3706,6 @@ impl IncrementalProject {
             let emit_ms = t_emit.elapsed().as_secs_f64() * 1000.0;
             let t_write = Instant::now();
             rock_host::project::write_atomic(incremental_path, &overlay.lua)?;
-            crate::compile_measurements::phase("write");
             if let Some(profile) = profile.as_deref_mut() {
                 profile.atomic_output_write_ns += t_write.elapsed().as_nanos();
             }
@@ -3823,8 +3748,6 @@ impl IncrementalProject {
         main_path: &std::path::Path,
         incremental_path: &std::path::Path,
     ) -> Result<()> {
-        let stats = crate::compile_measurements::Scope::begin(self.project.dir());
-        crate::compile_measurements::known_sources(self.project.sources().files.len());
         // A recompile that hit a type error bails AFTER `update_file` has already
         // mutated the session into the broken state, so the restart-path fold must
         // re-gate or it would write a partial `main.lua` to the respawned process.
@@ -3839,7 +3762,6 @@ impl IncrementalProject {
                 self.renderer_target,
             )
             .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
-            crate::compile_measurements::emission(&emit);
             let artifact_fingerprint = emit.artifact_fingerprint.clone();
             let emits_main = emit.emits_main;
             let lua =
@@ -3850,7 +3772,6 @@ impl IncrementalProject {
             self.project.dir(),
             ProgramKind::Game,
         )?;
-        crate::compile_measurements::phase("prepare");
         write_full_main(
             &self.preamble,
             &lua,
@@ -3858,7 +3779,6 @@ impl IncrementalProject {
             main_path,
             incremental_path,
         )?;
-        crate::compile_measurements::phase("write");
         self.artifact_fingerprint = artifact_fingerprint;
         self.cache = cache; // resets changed_since_full -- the overlay is now folded in
         // This program is what the (re)spawned process loads -- re-baseline the
@@ -3866,7 +3786,6 @@ impl IncrementalProject {
         // bailed on a type error after mutating the session.
         self.shape_hashes = skull::type_shape_hashes(self.project.workspace())
             .map_err(|e| anyhow::anyhow!(e.message))?;
-        stats.success();
         Ok(())
     }
 }

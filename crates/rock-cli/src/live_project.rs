@@ -67,7 +67,6 @@ impl LiveProject {
                 .production_only(Path::new(dir))
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?
         };
-        crate::compile_measurements::phase("discovery");
         let entry_path = entry_path(&sources)?;
         let files = crate::bone_backend::session_files(&sources);
         // bone_session_for_emission resolves [build.vars] at construction, so
@@ -78,8 +77,6 @@ impl LiveProject {
             .map_err(|e| {
                 anyhow::anyhow!("{}", crate::skull_backend::render_project_err(&sources, &e))
             })?;
-        crate::compile_measurements::phase("session: parse+stdlib+semantic");
-        crate::compile_measurements::timings("bone", &session.workspace().phase_timings);
         let mut project = Self {
             session,
             dir: dir.to_string(),

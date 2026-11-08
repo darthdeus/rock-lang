@@ -36,7 +36,6 @@ pub mod bone_backend;
 pub mod child_lifetime;
 pub mod common;
 pub mod compile_cmd;
-mod compile_measurements;
 pub mod compile_slots;
 pub mod comptime;
 mod dispatcher;

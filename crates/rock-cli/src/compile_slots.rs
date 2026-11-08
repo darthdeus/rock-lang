@@ -106,12 +106,15 @@ struct Held {
 #[must_use = "the slot is freed when this guard drops"]
 pub struct CompileSlot {
     held: Option<Held>,
+    // Only tests observe how the slot was acquired.
+    #[cfg_attr(not(test), allow(dead_code))]
     acquisition: SlotAcquisition,
     /// Set for guards from [`acquire`], which marks the thread as holding.
     marks_thread: bool,
 }
 
 impl CompileSlot {
+    #[cfg(test)]
     pub(crate) fn acquisition(&self) -> &SlotAcquisition {
         &self.acquisition
     }
@@ -588,7 +591,7 @@ fn package_key(what: &str) -> Option<String> {
             format!(
                 "{}.{}",
                 config.package.name,
-                crate::compile_measurements::command()
+                crate::invocation_log::command()
             )
             .chars()
             .map(|c| {

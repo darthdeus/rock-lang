@@ -100,10 +100,17 @@ pub fn log_path() -> Option<PathBuf> {
     Some(state.join("rock").join("invocations.jsonl"))
 }
 
+static COMMAND: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+
+/// The running `rock` subcommand, or "other" before `main` names it.
+pub(crate) fn command() -> &'static str {
+    COMMAND.get().copied().unwrap_or("other")
+}
+
 /// Start recording this invocation if it is a loop command and the log is on.
 /// Call once from `main`, single-threaded, after its environment setup.
 pub fn begin(command: &'static str, backend: &str) {
-    crate::compile_measurements::set_command(command);
+    let _ = COMMAND.set(command);
     if !is_loop_command(command) {
         return;
     }
@@ -219,7 +226,6 @@ fn with_pending(f: impl FnOnce(&mut Pending)) {
 /// Write the record (once). `exit_code` is `None` when the process is leaving
 /// by a path that did not report one.
 pub fn finish(exit_code: Option<i32>, exit_path: &str) {
-    crate::compile_measurements::finish(if exit_code == Some(0) { "ok" } else { "error" });
     let pending = match STATE.try_lock() {
         Ok(mut state) => state.take(),
         // Another thread holds the lock while the process exits; dropping
