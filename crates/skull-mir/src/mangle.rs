@@ -396,12 +396,12 @@ fn function_collision_error(
 /// name that would silently resolve to the wrong body. Keyed by mangled name for
 /// deterministic ordering across the rayon-scheduled emit.
 pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap as HashMap;
     // mangled name -> (a representative Function, name_span) for a non-exempt fn.
     // `sig_key` (the structural distinctness check) is computed LAZILY -- only
     // when two fns hash to the same mangled name, which the corpus proves rare.
-    let mut seen: HashMap<String, (&Function, Span)> = HashMap::new();
-    let mut exempt_names: HashMap<String, Vec<&Function>> = HashMap::new();
+    let mut seen: HashMap<String, (&Function, Span)> = HashMap::default();
+    let mut exempt_names: HashMap<String, Vec<&Function>> = HashMap::default();
     let mut out: Vec<(String, CompilerError)> = Vec::new();
 
     for m in ws.modules.iter() {
@@ -430,26 +430,32 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
     // would hand their definitions the same emitted identifier. Plan 2.1: reject
     // it, never silently rename. One pass over `ws.defs` covers callables, types
     // and globals; sorted so the reported pair does not depend on map order.
-    let mut prefixes: Vec<(String, &str, Span)> = Vec::new();
+    let mut by_prefix: HashMap<&str, Vec<Span>> = HashMap::default();
     for (key, meta) in &ws.defs {
         if let Some(cut) = key.as_str().rfind("::") {
-            let prefix = &key.as_str()[..cut];
-            prefixes.push((prefix_digest(prefix), prefix, meta.span));
+            by_prefix
+                .entry(&key.as_str()[..cut])
+                .or_default()
+                .push(meta.span);
         }
     }
-    prefixes.sort_by(|a, b| a.1.cmp(b.1));
-    let mut by_digest: HashMap<&str, &str> = HashMap::new();
-    for (digest, prefix, span) in &prefixes {
+    let mut prefixes: Vec<(&str, Vec<Span>)> = by_prefix.into_iter().collect();
+    prefixes.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    let mut by_digest: HashMap<String, &str> = HashMap::default();
+    for (prefix, spans) in &prefixes {
+        let digest = prefix_digest(prefix);
         match by_digest.get(digest.as_str()) {
-            Some(prev) if prev != prefix => {
-                let msg = format!(
-                    "module path digest `{digest}` is produced by both `{prev}` and `{prefix}`;                      their definitions would share emitted identifiers -- rename one of the modules"
-                );
-                out.push((digest.clone(), CompilerError::new_with_label(*span, msg)));
+            // Prefixes are distinct here, so a seen digest is a collision.
+            Some(prev) => {
+                for &span in spans {
+                    let msg = format!(
+                        "module path digest `{digest}` is produced by both `{prev}` and `{prefix}`;                      their definitions would share emitted identifiers -- rename one of the modules"
+                    );
+                    out.push((digest.clone(), CompilerError::new_with_label(span, msg)));
+                }
             }
-            Some(_) => {}
             None => {
-                by_digest.insert(digest.as_str(), prefix);
+                by_digest.insert(digest, prefix);
             }
         }
     }
@@ -466,7 +472,7 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
     }
     type_keys.sort_by_key(|a| a.0);
     type_keys.dedup_by(|a, b| a.0 == b.0);
-    let mut type_owner: HashMap<ustr::Ustr, ustr::Ustr> = HashMap::new();
+    let mut type_owner: HashMap<ustr::Ustr, ustr::Ustr> = HashMap::default();
     for (key, span) in &type_keys {
         let symbol = type_symbol(ws, *key);
         match type_owner.get(&symbol) {
