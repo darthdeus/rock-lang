@@ -18,6 +18,7 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{Idx, ModuleId, is_stdlib_module_file};
 use rustc_hash::{FxHashMap, FxHashSet};
 use skull_codegen_lua::{CodegenCtx, emit_function, mangle_fn};
+use skull_mir::decorator::{DecoratorTable, SimValues, decorator_symbol};
 use skull_mir::instance::Instance;
 use skull_mir::mir::{FuncRef, Inst, MirFunc, Term};
 use skull_mir::reach::PendingInit;
@@ -53,9 +54,8 @@ pub use global_init::*;
 pub use overlay::*;
 pub use roots::*;
 
-pub(crate) use decorators::*;
-
 use chunk::*;
+use decorators::*;
 use full::*;
 use instances::*;
 use par::*;

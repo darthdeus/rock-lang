@@ -46,7 +46,7 @@ pub(crate) fn is_emission_root(
     file: &str,
     project_root: Option<&str>,
     f: &bone_semantic::hir::Function,
-    deco_map: &DecoMap,
+    decorators: &DecoratorTable,
 ) -> bool {
     if !is_library_module(file, project_root) {
         return true;
@@ -58,10 +58,10 @@ pub(crate) fn is_emission_root(
     if has("sim") || has("test") {
         return true;
     }
-    is_global_emission_root(f, deco_map)
+    is_global_emission_root(f, decorators)
 }
 
-fn is_global_emission_root(f: &bone_semantic::hir::Function, deco_map: &DecoMap) -> bool {
+fn is_global_emission_root(f: &bone_semantic::hir::Function, decorators: &DecoratorTable) -> bool {
     if f.annotations.iter().any(|a| a.is_builtin("nomangle")) {
         return true;
     }
@@ -69,10 +69,7 @@ fn is_global_emission_root(f: &bone_semantic::hir::Function, deco_map: &DecoMap)
     if f.is_extern {
         return true;
     }
-    f.annotations.iter().any(|a| {
-        let key = a.resolved_name.unwrap_or(a.name.name);
-        deco_map.contains_key(&key)
-    })
+    decorators.is_decorated(f)
 }
 
 /// Every `@sim`-annotated fn in the workspace, paired with its module file and
@@ -189,7 +186,7 @@ pub fn emission_roots(ws: &Workspace, project_root: Option<&str>) -> Vec<FuncRef
 /// Harness roots plus the global roots every build keeps. Package tests and
 /// selected sim receipts have no public interface to root wholesale.
 pub(super) fn explicit_and_global_roots(ws: &Workspace, explicit: &[FuncRef]) -> Vec<FuncRef> {
-    let (deco_map, _) = build_deco_map(ws);
+    let decorators = DecoratorTable::collect(ws);
     let mut roots = explicit.to_vec();
     roots.extend(
         ws.modules
@@ -197,7 +194,7 @@ pub(super) fn explicit_and_global_roots(ws: &Workspace, explicit: &[FuncRef]) ->
             .filter(|m| m.id != ModuleId::builtin())
             .flat_map(|m| {
                 m.functions.iter().filter_map(|(fid, f)| {
-                    is_global_emission_root(f, &deco_map).then_some(FuncRef {
+                    is_global_emission_root(f, &decorators).then_some(FuncRef {
                         module: m.id,
                         func: fid,
                     })
@@ -290,7 +287,7 @@ fn emission_roots_with_census(
     project_root: Option<&str>,
     mut census: Option<&mut RootEnumerationCensus>,
 ) -> Vec<FuncRef> {
-    let (deco_map, _) = build_deco_map(ws);
+    let decorators = DecoratorTable::collect(ws);
     let mut roots = Vec::new();
     for module in ws.modules.iter() {
         if module.id == ModuleId::builtin() {
@@ -301,7 +298,7 @@ fn emission_roots_with_census(
             census.functions_examined += module.functions.len();
         }
         for (fid, f) in module.functions.iter() {
-            if is_emission_root(module.file.as_str(), project_root, f, &deco_map) {
+            if is_emission_root(module.file.as_str(), project_root, f, &decorators) {
                 roots.push(FuncRef {
                     module: module.id,
                     func: fid,

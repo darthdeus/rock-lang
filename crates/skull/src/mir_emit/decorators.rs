@@ -13,7 +13,7 @@ pub(super) fn emit_decorator_unit(
 ) -> UnitOut {
     let mut out = UnitOut::default();
     let d = &ws.module(mid).decorators[did];
-    let deco_name = crate::decorator_fn_name(d.def_key.as_str());
+    let deco_name = decorator_symbol(d.def_key.as_str());
     out.attribution.owner = format!("m{}:deco{}", mid.index(), u32::from(did.into_raw()));
     let tl = Instant::now();
     let owner = skull_mir::concrete::ConcreteOwner::Decorator {
@@ -140,87 +140,31 @@ pub(super) fn emit_decorator_unit(
     out
 }
 
-/// Assemble the full Lua program: prelude + decorator defs + the function section
-/// (cached chunks for ordinary/coroutine bodies, regenerated externs/inline(lua))
-/// plus dependency-ordered global inits + decorator applications. Everything except
-/// the cached function chunks is regenerated here, so this is shared verbatim by
-/// the full and incremental paths and there is no stale prelude/ordering.
-///
-/// The decorator and global definitions are re-lowered+emitted in PARALLEL
-/// ([`par_map`]); cached function chunks are pulled and their captured phase
-/// times summed in, so `backend-stats` still sees the full per-stage breakdown.
-pub(crate) type DecoMap = FxHashMap<Ustr, (ModuleId, Idx<bone_semantic::hir::DecoratorDef>)>;
-
-/// Name -> definition map for every `deco` in the workspace, plus the def list
-/// (an application usually names a decorator declared in another module). Shared
-/// by `assemble` (which also emits the def bodies) and `assemble_overlay`.
-pub(crate) fn build_deco_map(
-    ws: &Workspace,
-) -> (
-    DecoMap,
-    Vec<(ModuleId, Idx<bone_semantic::hir::DecoratorDef>)>,
-) {
-    let mut deco_map: DecoMap = Default::default();
-    let mut deco_items: Vec<(ModuleId, Idx<bone_semantic::hir::DecoratorDef>)> = Vec::new();
-    for module in ws.modules.iter() {
-        for (did, d) in module.decorators.iter() {
-            deco_map.insert(d.def_key, (module.id, did));
-            if !skull_mir::definition::is_compiler_owned_decorator(d) {
-                deco_items.push((module.id, did));
-            }
-        }
-    }
-    (deco_map, deco_items)
-}
-
 /// Decorator APPLICATION lines (`__deco_<name>({ name, func }, ...)`) for every
-/// decorated fn workspace-wide -- registration calls only, no fn bodies. Shared
-/// by `assemble` (full) and `assemble_overlay` (the incremental rebind that
-/// re-points system registries at the current globals after a body edit).
+/// decorated fn workspace-wide -- registration calls only, no fn bodies.
 pub(super) fn decorator_application_lines(
     ws: &Workspace,
-    deco_map: &DecoMap,
+    decorators: &DecoratorTable,
     scx: &skull_mir::lower::ScalarCtx,
 ) -> Result<String, CompilerError> {
     let mut deco_lines = String::new();
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
-        for (_fid, f) in module.functions.iter() {
-            if f.backend == bone_semantic::hir::FnBackend::Js {
-                continue;
-            }
-            for ann in &f.annotations {
-                let app_key = ann.resolved_name.unwrap_or(ann.name.name);
-                let Some(&(dmid, did)) = deco_map.get(&app_key) else {
-                    continue;
-                };
-                let d = &ws.module(dmid).decorators[did];
-                if skull_mir::definition::is_compiler_owned_decorator(d) {
-                    continue;
-                }
-                let identity =
-                    skull_mir::code_identity::CodeIdentity::Named(Instance::base(FuncRef {
-                        module: module.id,
-                        func: _fid,
-                    }));
-                let key = identity.logical_key(ws, scx.interner());
-                let target = format!(
-                    "{{ name = {:?}, params = {{}}, func = __rock_code_slot_ref({:?}) }}",
-                    f.name.as_str(),
-                    key
-                );
-                let mut call_args = vec![target];
-                call_args.extend(crate::decorator_call_args(ws, dmid, did, ann)?);
-                let _ = writeln!(
-                    deco_lines,
-                    "{}({})",
-                    crate::decorator_fn_name(app_key.as_str()),
-                    call_args.join(", ")
-                );
-            }
-        }
+    for app in decorators.applications(ws, bone_semantic::hir::FnBackend::Lua) {
+        let (dmid, did) = app.decorator;
+        let identity = skull_mir::code_identity::CodeIdentity::Named(Instance::base(app.func));
+        let key = identity.logical_key(ws, scx.interner());
+        let target = format!(
+            "{{ name = {:?}, params = {{}}, func = __rock_code_slot_ref({:?}) }}",
+            app.function.name.as_str(),
+            key
+        );
+        let mut call_args = vec![target];
+        call_args.extend(crate::decorator_call_args(ws, dmid, did, app.annotation)?);
+        let _ = writeln!(
+            deco_lines,
+            "{}({})",
+            decorator_symbol(ws.module(dmid).decorators[did].def_key.as_str()),
+            call_args.join(", ")
+        );
     }
     Ok(deco_lines)
 }

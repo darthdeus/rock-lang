@@ -191,9 +191,13 @@ impl Assembly {
     /// `__deco_<name>(target, <params>)`. `deco_map` is built up front (sequential,
     /// cheap) because an application usually names a decorator declared in another
     /// module; the definition bodies themselves lower+emit in parallel.
-    fn push_decorator_definitions(&mut self, ws: &Workspace, cache: &SkullEmitCache) -> DecoMap {
-        let (deco_map, deco_items) = build_deco_map(ws);
-        let deco_results = par_map(deco_items, |(mid, did)| {
+    fn push_decorator_definitions(
+        &mut self,
+        ws: &Workspace,
+        cache: &SkullEmitCache,
+    ) -> DecoratorTable {
+        let decorators = DecoratorTable::collect(ws);
+        let deco_results = par_map(decorators.definitions().to_vec(), |(mid, did)| {
             emit_decorator_unit(ws, &cache.scx, &cache.cg, &cache.concrete, mid, did)
         });
         self.rejections.extend(unit_errors(&deco_results));
@@ -209,7 +213,7 @@ impl Assembly {
         let mut decorator_definitions = LuaDefinitionBuffer::new();
         decorator_definitions.push_str(&decorator_lua);
         decorator_definitions.append_to(&mut self.out);
-        deco_map
+        decorators
     }
 
     /// Global initializers are emitted later, in their original slot, but they are
@@ -392,7 +396,7 @@ impl Assembly {
         ws: &Workspace,
         cache: &SkullEmitCache,
         pending_inits: Vec<(Ustr, Ustr, String)>,
-        deco_map: &DecoMap,
+        decorators: &DecoratorTable,
         has_code_slot_publication: bool,
         has_definition_plan: bool,
         lifecycle_declarations: bool,
@@ -417,7 +421,7 @@ impl Assembly {
         out.push_str(&state_initializer_lua(&init_lines));
 
         // Decorator APPLICATIONS (after global inits so a deco body can push a global).
-        out.push_str(&decorator_application_lines(ws, deco_map, scx)?);
+        out.push_str(&decorator_application_lines(ws, decorators, scx)?);
         // `@sim` registrations (after fn + global defs; same init slot as rock).
         if cache.build_kind == BuildKind::Program {
             out.push_str(&sim_registration_lines(
@@ -789,7 +793,7 @@ pub(super) fn assemble(
     };
     let mut asm = Assembly::new(cache);
     asm.push_scaffold_prelude(ws, &cache.scx)?;
-    let deco_map = asm.push_decorator_definitions(ws, cache);
+    let decorators = asm.push_decorator_definitions(ws, cache);
     let (globals_lua, pending_inits) = asm.lower_global_units(ws, cache);
 
     // **Whole-program population, driven by `cache.lua_view` -- Phase 2.**
@@ -876,11 +880,16 @@ pub(super) fn assemble(
     std::mem::replace(&mut asm.definitions, LuaDefinitionBuffer::new()).append_to(&mut asm.out);
     asm.out
         .push_str(&callee_binding_pass_lua(&mut asm.callee_binds));
-    mark_generated_code_values(
+    let sims = match (cache.build_kind, cache.selected_sim_functions.as_ref()) {
+        (BuildKind::Program, Some(selected)) => SimValues::Selected(selected),
+        (BuildKind::Program, None) => SimValues::All,
+        _ => SimValues::None,
+    };
+    decorators.mark_generated_code_values(
         ws,
+        bone_semantic::hir::FnBackend::Lua,
+        sims,
         &mut asm.code_artifact,
-        cache.build_kind == BuildKind::Program,
-        cache.selected_sim_functions.as_ref(),
     );
     let (definition_plan, early_stage) = match early_definition_stage {
         Some((plan, stage)) => (plan, Some(stage)),
@@ -962,7 +971,7 @@ pub(super) fn assemble(
         ws,
         cache,
         pending_inits,
-        &deco_map,
+        &decorators,
         has_code_slot_publication,
         has_definition_plan,
         lifecycle_plan.census.declarations > 0,
@@ -1235,47 +1244,6 @@ fn definition_plan_stage_lua(
     }
     out.push_str("})\n");
     Ok(out)
-}
-
-/// Generated registration calls are escaping-value sites even though they do
-/// not have a MIR instruction. Mark their declaration identities before the
-/// artifact publishes slots, so lifecycle and sim registries receive the same
-/// CodeRef shape as an ordinary `let f = ...` value.
-fn mark_generated_code_values(
-    ws: &Workspace,
-    artifact: &mut skull_mir::code_identity::CodeArtifact,
-    register_sims: bool,
-    selected: Option<&FxHashSet<Ustr>>,
-) {
-    let decorator_names: FxHashSet<Ustr> = ws
-        .modules
-        .iter()
-        .flat_map(|m| m.decorators.iter().map(|(_, d)| d.def_key))
-        .collect();
-    for module in ws.modules.iter() {
-        if module.id == ModuleId::builtin() {
-            continue;
-        }
-        for (fid, f) in module.functions.iter() {
-            if f.backend == bone_semantic::hir::FnBackend::Js {
-                continue;
-            }
-            let generated_value = f.annotations.iter().any(|ann| {
-                (register_sims
-                    && ann.is_builtin("sim")
-                    && selected.is_none_or(|names| names.contains(&f.name)))
-                    || decorator_names.contains(&ann.resolved_name.unwrap_or(ann.name.name))
-            });
-            if generated_value {
-                artifact.mark_value(skull_mir::code_identity::CodeIdentity::Named(
-                    Instance::base(FuncRef {
-                        module: module.id,
-                        func: fid,
-                    }),
-                ));
-            }
-        }
-    }
 }
 
 pub(super) fn lifecycle_plan_stage_lua(

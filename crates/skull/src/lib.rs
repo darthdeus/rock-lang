@@ -400,14 +400,6 @@ pub fn global_init_fn_name(global: &str) -> String {
     format!("__skull_ginit_{}", global)
 }
 
-/// Lua name for a decorator fn (`@register` -> `__deco_register`).
-pub fn decorator_fn_name(deco: &str) -> String {
-    format!(
-        "__deco_{}",
-        skull_mir::mangle::symbol_of_key(ustr::Ustr::from(deco))
-    )
-}
-
 /// A `@deco`-annotation argument (or `deco` param default) as a Lua literal.
 pub fn annotation_value_lua(v: &bone_semantic::hir::AnnoValue) -> Option<String> {
     use bone_semantic::hir::AnnoValue as A;

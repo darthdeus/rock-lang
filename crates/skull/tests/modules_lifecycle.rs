@@ -87,7 +87,7 @@ pub use ::test;
     );
 
     let emitted = emit_v1_package("v1custom", &fragments);
-    let decorator = skull::decorator_fn_name("v1custom::test");
+    let decorator = skull_mir::decorator::decorator_symbol("v1custom::test");
     assert!(emitted.lua.contains(&format!("{decorator}(")));
 }
 
