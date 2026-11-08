@@ -766,11 +766,9 @@ fn pin_comments_and_directives() {
         vec![TokenKind::Comment(" block ".into())]
     );
     assert_eq!(kinds("/**/"), vec![TokenKind::Comment("".into())]);
-    assert_eq!(kinds("/*/"), vec![TokenKind::Comment("/".into())]);
-    assert_eq!(
-        kinds("/* unterminated"),
-        vec![TokenKind::Comment(" unterminated".into())]
-    );
+    assert!(kinds_err("/*/").contains("unterminated block comment"));
+    assert!(kinds_err("/* unterminated").contains("unterminated block comment"));
+    assert!(kinds_err("/* a *").contains("unterminated block comment"));
     assert_eq!(kinds("#"), vec![TokenKind::Comment("".into())]);
     assert_eq!(kinds("# foo"), vec![TokenKind::Comment(" foo".into())]);
     assert_eq!(kinds("#if"), vec![TokenKind::DirectiveIf]);

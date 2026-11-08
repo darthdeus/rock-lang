@@ -897,10 +897,12 @@ impl<'a> Tokenizer<'a> {
                     TokenKind::Comment(self.read_line_rest().into())
                 } else if self.eat('*') {
                     let mut body = String::with_capacity(16);
+                    let mut closed = false;
                     while let Some(cur) = self.current {
                         if cur == '*' {
                             self.advance();
                             if self.eat('/') {
+                                closed = true;
                                 break;
                             }
                             body.push('*');
@@ -908,6 +910,13 @@ impl<'a> Tokenizer<'a> {
                             body.push(cur);
                             self.advance();
                         }
+                    }
+                    // Otherwise the rest of the file silently becomes a comment.
+                    if !closed {
+                        return Err(CompilerError::new_with_label(
+                            self.end_span(origin),
+                            "unterminated block comment: `/*` has no closing `*/`".to_string(),
+                        ));
                     }
                     TokenKind::Comment(body.into())
                 } else {

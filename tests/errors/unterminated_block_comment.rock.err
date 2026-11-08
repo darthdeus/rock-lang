@@ -1,0 +1,16 @@
+//! Error: a `/*` without a closing `*/` is reported instead of silently
+//!        turning the rest of the file into a comment (which dropped every
+//!        item after it, tests included).
+//! Tags: comments, tokenizer
+
+//=== TEST CASE: unterminated_block_comment ===
+//! expect: unterminated block comment
+fn main() {
+    print(1)
+}
+
+/* ERROR: unterminated block comment
+@test
+fn swallowed() {
+    assert(false)
+}
