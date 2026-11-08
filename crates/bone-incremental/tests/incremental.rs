@@ -3074,3 +3074,17 @@ fn relocation_verdict_follows_an_edit_to_the_callee() {
         .expect("update");
     assert_eq!(relocations(&session), 0, "{:?}", session.diagnostics());
 }
+
+/// A diff that starts and ends inside one body can still add an item: the
+/// common suffix of `return 0\n}` and `return 2\n}` puts the whole insertion
+/// inside `lonely`'s old body. The single-item reparse stops after `lonely`,
+/// so the fast path must notice the unparsed `trailing` and take the full
+/// route instead of dropping it.
+#[test]
+fn oracle_body_edit_that_appends_an_item_is_not_body_only() {
+    let v1 = "fn added(q: int) -> int {\n    return lonely(q)\n}\n\nfn lonely(z: int) -> int {\n    let idle = z\n    return 0\n}\n";
+    let mut h = Harness::new(&[("c.rock", v1)]);
+    let v2 = "fn added(q: int) -> int {\n    return lonely(q)\n}\n\nfn lonely(z: int) -> int {\n    return z\n}\n\nfn trailing() -> int {\n    let tail = 1\n    return 2\n}\n";
+    let result = h.update("c.rock", v2);
+    assert_ne!(result.tier, UpdateTier::BodyOnly);
+}

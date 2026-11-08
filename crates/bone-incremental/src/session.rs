@@ -2184,6 +2184,11 @@ impl Session {
         if np.kind != ItemKindTag::Fn || np.name != old_name || np.iface_hash != old_iface {
             return Ok(None);
         }
+        // The item parse stops at the end of the function; text left after it
+        // in the edited range is a new item the full path must see.
+        if np.item_span.offset_range.1 != new_end {
+            return Ok(None);
+        }
 
         // Resolve the HIR body + spans (non-mutating). Bail if anything is off.
         let Some(&mid) = self.ws.module_ids.get(&ustr(path)) else {
