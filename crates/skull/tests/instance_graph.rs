@@ -1956,25 +1956,39 @@ fn main() {{ let a = keep(1) }}
     );
 }
 
+/// A graph over `src` alone, with no stdlib, so a fixture can supply the one
+/// declaration of a runtime-entry name itself.
+fn graph_of_without_stdlib(src: &str) -> instance_graph::InstanceGraph {
+    let mut modules =
+        vec![skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse")];
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let roots = skull::mir_emit::emission_roots(&ws, None);
+    instance_graph::build(&ws, roots, false)
+}
+
 /// The `stdlib-funcref` excusal is a DECLARATION property, never a name one.
 /// `ERASED_RUNTIME_ENTRIES` holds NAMES, and membership alone is a proxy for
-/// "this is the entry `stdlib_funcref` resolves to" -- a weaker question. A user
-/// `@nomangle` generic sharing a catalogue name is not that entry.
+/// "this is the entry `stdlib_funcref` resolves to" -- a weaker question. A
+/// `@nomangle` generic sharing a catalogue name is not that entry when another
+/// declaration shares the name too.
 ///
-/// A/B on exactly that, one fixture differing only by the shadowing overload.
-/// Without it the stdlib's `__rock_col_sort` is excused; with it the resolver
+/// The stdlib's own runtime entries are all non-generic, so the fixture builds
+/// without the stdlib and declares the generic entry itself. A/B on exactly
+/// that, one fixture differing only by a shadowing overload: alone, the entry
+/// is what the resolver selects and is excused; with the overload the resolver
 /// is ambiguous -- what `stdlib_funcref` itself rejects on -- so nothing is
 /// excused and the obligation stands.
 #[test]
 fn the_funcref_excusal_follows_the_declaration_not_the_name() {
-    let (_, plain) = graph_of("fn main() { }");
+    let entry = "@nomangle fn __rock_col_sort<T>(x: T) -> int { return 1 }\nfn main() { }\n";
+    let plain = graph_of_without_stdlib(entry);
     assert!(
         plain
             .excused_generic_roots
             .get("stdlib-funcref")
             .is_some_and(|s| s.contains("__rock_col_sort")),
-        "the stdlib's own `__rock_col_sort` IS the entry `stdlib_funcref` resolves \
-         to, so it must be excused: {:?}",
+        "the only `__rock_col_sort` IS the entry `stdlib_funcref` resolves to, so \
+         it must be excused: {:?}",
         plain.excused_generic_roots
     );
     assert!(
@@ -1983,12 +1997,9 @@ fn the_funcref_excusal_follows_the_declaration_not_the_name() {
         plain.uninstantiated_roots.keys()
     );
 
-    let (_, shadowed) = graph_of(
-        r#"
-@nomangle fn __rock_col_sort<T>(x: T) -> int { return 1 }
-fn main() { }
-"#,
-    );
+    let shadowed = graph_of_without_stdlib(&format!(
+        "{entry}@nomangle fn __rock_col_sort<T>(x: T, y: T) -> int {{ return 2 }}\n"
+    ));
     assert!(
         shadowed
             .uninstantiated_roots

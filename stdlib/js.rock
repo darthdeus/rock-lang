@@ -227,7 +227,7 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
   return out;
 """
 
-@nomangle inline(js) fn __rock_col_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
+@nomangle inline(js) fn __rock_col_sort(vec: any, key_fn: any) = """
   var n = vec.len || 0;
   var order = [], elements = [];
   for (var i = 0; i < n; i++) {

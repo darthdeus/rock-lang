@@ -1076,16 +1076,16 @@ fn main() { let x = 1; host_tick(x) }
 /// The ambiguity arm's PRECONDITION, measured rather than assumed.
 ///
 /// `InlineDep` must name one instance, not one declaration, so `realize` refuses
-/// a declaration with several. That arm has no population today and a mutation
-/// that picks the first candidate reddens nothing -- so this records WHY rather
-/// than leaving a dead branch: every erased runtime entry that gets an instance
-/// is non-generic, and the generic ones (`__rock_col_sort<T, K>`) get NO
-/// instance at all, because a synthesized call to a generic entry has no
-/// binding record (the `no-bindings` hole).
+/// a declaration with several. That arm has no population and a mutation that
+/// picks the first candidate reddens nothing -- so this records WHY rather than
+/// leaving a dead branch: every erased runtime entry is non-generic, so each has
+/// at most its one base instance. `__rock_col_sort` was the last generic entry
+/// and had no instance at all, because a synthesized call to a generic entry
+/// has no binding record; it now takes `any` like its siblings, and its
+/// synthesized call resolves to that one instance.
 ///
-/// When that hole closes, a generic entry gains instances and this goes red at
-/// the `<= 1` assertion -- which is the point at which the ambiguity arm starts
-/// mattering.
+/// A generic catalogue entry fails the first assertion below -- the point at
+/// which the ambiguity arm starts mattering and needs a fixture of its own.
 #[test]
 fn every_inline_dependency_target_has_at_most_one_instance() {
     let ws = check(
@@ -1112,10 +1112,19 @@ fn main() {
         !view.inline_deps.is_empty(),
         "the fixture resolved no dependency, so the count below is vacuous"
     );
-    // The generic entry the fixture deliberately names is NOT instantiated --
-    // that is the reason the ambiguity arm is unreachable, stated as a
-    // measurement.
-    let generic_entry = g
+    for name in instance_graph::ERASED_RUNTIME_ENTRIES {
+        let decls = ws.functions_by_name.get(&Ustr::from(name));
+        for &(module, func) in decls.into_iter().flatten() {
+            assert!(
+                ws.module(module).functions[func].generics.is_empty(),
+                "runtime entry `{name}` is generic, so it can have several instances \
+                 and the ambiguity arm is live -- give it a fixture"
+            );
+        }
+    }
+    // The entry the fixture names from both a synthesized call and opaque text
+    // resolves to its one base instance.
+    let entry: Vec<&Instance> = g
         .instances
         .iter()
         .filter(|i| {
@@ -1124,11 +1133,19 @@ fn main() {
                 .as_str()
                 == "__rock_col_sort"
         })
-        .count();
+        .collect();
     assert_eq!(
-        generic_entry, 0,
-        "`__rock_col_sort` now has instances, so the ambiguity arm is live -- give \
-         it a fixture"
+        entry.len(),
+        1,
+        "`__rock_col_sort` should have exactly its base instance: {entry:?}"
+    );
+    assert!(entry[0].args.is_empty());
+    assert!(
+        view.inline_deps.iter().any(|dep| match &dep.callee {
+            RealizedCallee::Boundary(b) => b.declaration == entry[0].func,
+            RealizedCallee::Rock(i) => i == entry[0],
+        }),
+        "the opaque body's `__rock_col_sort` dependency did not resolve to its instance"
     );
     for dep in &view.inline_deps {
         let decl = match &dep.callee {

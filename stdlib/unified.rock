@@ -2402,7 +2402,7 @@ inline(lua) fn on_killed(f: fn() -> ()) = """
     end
 """
 
-@nomangle inline(lua) fn __rock_col_sort<T, K>(vec: [T], key_fn: fn(T) -> K) = """
+@nomangle inline(lua) fn __rock_col_sort(vec: any, key_fn: any) = """
     local n = vec.len or 0
     local order = {}
     local elements = {}
