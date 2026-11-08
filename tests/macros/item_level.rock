@@ -1,9 +1,7 @@
 // Item-level macros: bodies that emit `fn` / `inline(lua) fn` / `extern fn` /
-// `struct` declarations spliced into the caller's module.
-//
-// Status: RED — the parser does not yet allow item declarations inside a
-// macro body, and expansion walks function/operator bodies only (not
-// module-level invocations).
+// `struct` declarations spliced into the caller's module. Invocations that
+// would discard part of an expansion are rejected in
+// `tests/errors/macro_invocation_destination.rock.err`.
 
 // === Single fn emitted into the caller's module (no substitution) ===
 

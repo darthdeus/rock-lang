@@ -1,0 +1,76 @@
+//! Error: a macro invocation must emit everything its expansion produces
+//! Tags: macros
+
+// A top-level invocation splices items into the module and an expression or
+// statement invocation splices the body into the caller. Each case used to
+// compile with part of the expansion silently discarded: an unknown or
+// arity-mismatched top-level invocation vanished, a top-level macro's
+// statements were dropped, and items declared by a macro used as an
+// expression (including `use`) were dropped. Each case names its reason.
+
+//=== TEST CASE: top_level_unknown_macro_rejects ===
+//! expect: no macro named `not_a_macro` exists
+not_a_macro()
+
+fn main() {
+    print("hi")
+}
+
+//=== TEST CASE: top_level_expression_macro_rejects ===
+//! expect: macro `say_hi` declares no items
+macro say_hi() {
+    print("hi")
+}
+
+say_hi()
+
+fn main() {
+    print("main")
+}
+
+//=== TEST CASE: top_level_arity_mismatch_rejects ===
+//! expect: macro `emit_one` declares no items for 2 arguments
+macro emit_one(T: ty) {
+    fn emitted_one(x: T) -> T { x }
+}
+
+emit_one(int, int)
+
+fn main() {
+    print("main")
+}
+
+//=== TEST CASE: top_level_statements_reject ===
+//! expect: statements in macro `emit_mixed` cannot run at the top level
+macro emit_mixed() {
+    fn emitted_mixed() -> int { 7 }
+    print("dropped")
+}
+
+emit_mixed()
+
+fn main() {
+    print(emitted_mixed())
+}
+
+//=== TEST CASE: expression_items_reject ===
+//! expect: items declared by macro `emit_fn` cannot be emitted where it is used as an expression
+macro emit_fn() -> int {
+    fn local_helper() -> int { 5 }
+    local_helper()
+}
+
+fn main() {
+    print(emit_fn())
+}
+
+//=== TEST CASE: expression_use_rejects ===
+//! expect: items declared by macro `emit_use` cannot be emitted where it is used as an expression
+macro emit_use() -> int {
+    use self::nowhere::thing;
+    1
+}
+
+fn main() {
+    print(emit_use())
+}

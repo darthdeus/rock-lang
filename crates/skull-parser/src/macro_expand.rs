@@ -337,9 +337,8 @@ fn build_registry(modules: &[Ast]) -> Registry {
 }
 
 /// Replace each top-level `name(args)` / `name!(args)` invocation with the
-/// matching item-macro's spliced + substituted items. Non-item-macro
-/// invocations are dropped (they're resolved as expr macros in bodies, not
-/// here). Mirrors bone's `expand_top_level_macros`.
+/// matching item-macro's spliced + substituted items. An invocation that names
+/// no item macro at its arity is rejected rather than dropped.
 fn expand_top_level_macros(ast: &mut Ast, reg: &Registry) {
     if !ast
         .items
@@ -361,12 +360,57 @@ fn expand_top_level_macros(ast: &mut Ast, reg: &Registry) {
             .into_iter()
             .map(|value| MacroArg { label: None, value })
             .collect();
-        match expand_item_macro(ast, name, &args, reg) {
+        // Dropping an unexpandable invocation would compile the module with
+        // that part of the source silently missing.
+        let span = item.span;
+        let errors_before = ast.recovery_errors.len();
+        match expand_item_macro(ast, name.clone(), &args, reg) {
             Some(items) => out.extend(items),
-            None => {} // not an item-macro at this arity — drop the invocation
+            None if ast.recovery_errors.len() > errors_before => {}
+            None => {
+                let message = match reg.get(&name.name) {
+                    None => format!(
+                        "`{}(...)` at the top level invokes a macro, but no macro named `{}` exists",
+                        name.name, name.name
+                    ),
+                    Some(cands) if cands.iter().all(|d| d.items.is_empty()) => format!(
+                        "macro `{}` declares no items, so it cannot be invoked at the top level",
+                        name.name
+                    ),
+                    Some(cands) if !cands.iter().any(|d| item_arity_matches(d, args.len())) => {
+                        format!(
+                            "macro `{}` declares no items for {} argument{}",
+                            name.name,
+                            args.len(),
+                            if args.len() == 1 { "" } else { "s" }
+                        )
+                    }
+                    Some(_) => format!(
+                        "an argument of item macro `{}` is not a valid fragment for its parameter",
+                        name.name
+                    ),
+                };
+                ast.recovery_errors
+                    .push(CompilerError::new_with_label(span, message));
+            }
         }
     }
     ast.items = out;
+}
+
+/// Is `d` an item macro that accepts `argc` positional arguments?
+fn item_arity_matches(d: &MacroTemplate, argc: usize) -> bool {
+    let total = d.params.len();
+    let required = d.params.iter().filter(|p| p.default.is_none()).count();
+    !d.items.is_empty() && required <= argc && argc <= total
+}
+
+/// Does a macro body hold a statement a top-level invocation would discard?
+fn has_body_statements(tmpl: &MacroTemplate) -> bool {
+    tmpl.tmpl.blocks[tmpl.body]
+        .statements
+        .iter()
+        .any(|s| !matches!(tmpl.tmpl.stmts[*s].kind, StatementKind::Comment(_)))
 }
 
 /// Select the item-macro overload for `name(args)`, build the fragment/expr
@@ -380,11 +424,17 @@ fn expand_item_macro(
     let argc = args.len();
     // Index of the matching overload (one with item bodies, satisfiable arity).
     let cands = reg.get(&name.name)?;
-    let idx = cands.iter().position(|d| {
-        let total = d.params.len();
-        let required = d.params.iter().filter(|p| p.default.is_none()).count();
-        !d.items.is_empty() && required <= argc && argc <= total
-    })?;
+    let idx = cands.iter().position(|d| item_arity_matches(d, argc))?;
+    if has_body_statements(&cands[idx]) {
+        ast.recovery_errors.push(CompilerError::new_with_label(
+            name.span,
+            format!(
+                "statements in macro `{}` cannot run at the top level; only its items are emitted there",
+                name.name
+            ),
+        ));
+        return None;
+    }
 
     // Build substitution maps from the param fragment kinds. ty/ident args
     // recover a type via `expr_to_type_expr`; ident also substitutes into expr
@@ -837,6 +887,18 @@ fn try_expand(
     let Some(tmpl) = select_overload(&reg[&name], arg_values.len()) else {
         return;
     };
+    // Item declarations only reach a module through a top-level invocation;
+    // expanding just the body here would drop them (a `use` included).
+    if !tmpl.items.is_empty() {
+        let span = ast.exprs[e].span;
+        ast.recovery_errors.push(CompilerError::new_with_label(
+            span,
+            format!(
+                "items declared by macro `{name}` cannot be emitted where it is used as an expression; invoke it at the top level"
+            ),
+        ));
+        return;
+    }
 
     // Graft the template body into the caller arena.
     let body = graft_block(&tmpl.tmpl, ast, tmpl.body);
