@@ -2333,7 +2333,6 @@ dependencies = [
  "comfy-la-arena",
  "rock-stdlib",
  "rustc-hash",
- "skull-codegen-lua",
  "skull-codegen-shader",
  "skull-graph",
  "skull-mir",

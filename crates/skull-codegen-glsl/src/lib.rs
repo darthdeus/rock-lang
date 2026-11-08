@@ -26,7 +26,6 @@ use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::{FnList, ModuleId, Span};
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
-use skull_codegen_lua::mangle_fn;
 use skull_codegen_shader::{const_lit, structure::LoopRegion};
 use skull_graph::instance_graph::{InstanceGraph, SiteOutcome};
 pub use skull_graph::shader::ShaderLibraryView;
@@ -40,7 +39,7 @@ use skull_mir::gpu_layout::{
 use skull_mir::instance::Instance;
 use skull_mir::intrinsics::{Emission, IntrinsicEntry, IntrinsicTable};
 use skull_mir::lower::{ScalarCtx, SpecSubst};
-use skull_mir::mangle::{declared_name, symbol_of_key};
+use skull_mir::mangle::{declared_name, mangle_fn, symbol_of_key};
 use skull_mir::mir::*;
 use skull_mir::monoty::MonoInterner;
 use skull_mir::monoty::{MonoCtor, MonoTy};

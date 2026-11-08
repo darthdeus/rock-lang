@@ -419,15 +419,13 @@ fn loop_binding_cells(func: &MirFunc) -> HashSet<Idx<Cell>> {
 /// never seen for well-formed lowering) falls back to a box. Returns the extra
 /// cells to box.
 ///
-/// The dominator machinery (`dominators`/`dominates`) lives in `skull-codegen-lua`
-/// (shared with its relooper); this analysis reuses it so there is one dominator
-/// implementation. The JS path passes `frame = None`.
+/// `frame_fields` are a coroutine step's frame cells; the JS path passes `None`.
 pub fn non_dominating_by_value_captures(
     func: &MirFunc,
     tree: &ScopeTree,
     own: &Ownership,
     boxed: &HashSet<Idx<Cell>>,
-    frame: Option<&skull_codegen_lua::FrameCtx>,
+    frame_fields: Option<&HashSet<Idx<Cell>>>,
 ) -> HashSet<Idx<Cell>> {
     let mut extra: HashSet<Idx<Cell>> = HashSet::default();
     // block -> the `Inst::Lambda` creating a scope (its creation block).
@@ -469,7 +467,7 @@ pub fn non_dominating_by_value_captures(
             }
             // Frame cells are table-mediated (via `s` or a loop-binding
             // snapshot of a frame field) -- never box candidates.
-            if frame.is_some_and(|f| f.fields.contains(&c)) {
+            if frame_fields.is_some_and(|f| f.contains(&c)) {
                 continue;
             }
             if func.cells[c].default_param {

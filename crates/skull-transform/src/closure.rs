@@ -166,13 +166,6 @@ pub fn convert_closures_framed(
             (&owned_tree, &owned_own)
         }
     };
-    // The dominance rail wants a `FrameCtx` (it reads only `.fields`); build one
-    // from the `FrameInfo` when converting a step.
-    let fctx = frame.map(|f| skull_codegen_lua::FrameCtx {
-        s_cell: f.s_cell,
-        fields: f.fields.clone(),
-        slots: f.slots.clone(),
-    });
     let mut boxed: HashSet<Idx<Cell>> = tree.boxed_cells(own);
     // Frame cells are table-mediated (via `s` or a by-value loop-binding snapshot
     // of a frame field), never boxed -- matches codegen's `b.retain(!frame)`.
@@ -184,7 +177,7 @@ pub fn convert_closures_framed(
         tree,
         own,
         &boxed,
-        fctx.as_ref(),
+        frame.map(|f| &f.fields),
     ));
 
     // lambda inst -> its scope.
