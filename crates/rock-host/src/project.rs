@@ -39,6 +39,28 @@ pub fn find_workspace_root(path: &Path) -> Option<PathBuf> {
     }
 }
 
+/// Find the source workspace root for a project path without consulting the
+/// executable's installed toolchain layout.
+pub fn find_source_root(path: &Path) -> Option<PathBuf> {
+    if let Some(root) = context_root_from_env() {
+        return Some(root);
+    }
+
+    let initial_path = fs_err::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut current = if initial_path.is_file() {
+        initial_path.parent()?.to_path_buf()
+    } else {
+        initial_path
+    };
+
+    loop {
+        if current.join("Cargo.toml").exists() && current.join("crates").is_dir() {
+            return Some(current);
+        }
+        current = current.parent()?.to_path_buf();
+    }
+}
+
 pub(crate) fn context_root_from_env() -> Option<PathBuf> {
     let root = PathBuf::from(std::env::var_os("ROCK_CONTEXT_ROOT")?);
     if root.is_dir() && root.join("sdk").is_dir() && root.join(".context/context.json").is_file() {
@@ -62,6 +84,29 @@ fn release_root_from_exe() -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+/// Ensure that the Rock root directory can be located and is valid.
+///
+/// Does NOT change process current directory, allowing callers to execute
+/// from project subdirectories while finding toolchain resources.
+pub fn ensure_workspace_root() -> Result<()> {
+    if release_root_from_exe().is_some() {
+        return Ok(());
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    if is_rock_root(&cwd) || find_workspace_root(&cwd).is_some() {
+        return Ok(());
+    }
+    let rock_dir = crate::rock_dir();
+    let root = Path::new(&rock_dir);
+    if is_rock_root(root) || root.join("Cargo.toml").exists() {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "Could not find Rock root directory.\n\
+         Run this command from within the Rock workspace, or set the ROCK_DIR environment variable."
+    ))
 }
 
 /// Find project directory by looking for stick.toml or other project markers
@@ -505,6 +550,7 @@ mod tests {
         let previous = std::env::var_os("ROCK_CONTEXT_ROOT");
         unsafe { std::env::set_var("ROCK_CONTEXT_ROOT", &root) };
         let found = find_workspace_root(&root.join("game"));
+        let found_source = find_source_root(&root.join("game"));
         unsafe {
             match previous {
                 Some(value) => std::env::set_var("ROCK_CONTEXT_ROOT", value),
@@ -512,6 +558,7 @@ mod tests {
             }
         }
 
-        assert_eq!(found, Some(root));
+        assert_eq!(found, Some(root.clone()));
+        assert_eq!(found_source, Some(root));
     }
 }
