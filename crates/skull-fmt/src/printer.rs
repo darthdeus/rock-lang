@@ -926,7 +926,20 @@ impl<'a> Printer<'a> {
                     parts.push(hardline());
                 }
             }
-            let d = docs[gi].clone();
+            let mut d = docs[gi].clone();
+            // A line starting with an infix operator (`-b`, `.x = 1`, `*p = 2`)
+            // continues the previous expression, so `a; -b` printed on two
+            // lines would reparse as `a - b`: keep the separator.
+            let next_continues = groups.get(gi + 1).is_some_and(|ng| {
+                self.slice(spans[ng[0]])
+                    .starts_with(['-', '+', '*', '&', '.'])
+            });
+            if next_continues
+                && !is_comment(g[0])
+                && !matches!(&d, Doc::Text(t) if t.contains("//") || t.ends_with(';'))
+            {
+                d = Doc::concat([d, Doc::text(";")]);
+            }
             // A verbatim group already carries its own comment; a `Comment`
             // statement IS one. Otherwise attach the statement's trailing comment.
             if verbatim[gi] || is_comment(g[0]) {
@@ -1259,9 +1272,18 @@ impl<'a> Printer<'a> {
     /// `//`-column alignment within a hand-aligned run.
     fn verbatim_full_line(&self, span: Span) -> Doc {
         let b = self.src.as_bytes();
-        let mut end = span.offset_range.1.min(b.len());
+        let stop = span.offset_range.1.min(b.len());
+        let mut end = stop;
         while end < b.len() && b[end] != b'\n' {
             end += 1;
+        }
+        // Only a separator and trailing comment may ride along: other code on
+        // the line (a closing `})` of a one-line enclosing block, a following
+        // item) is printed by its own construct.
+        let rest = self.slice_range(stop, end);
+        let rest = rest.trim_start_matches(|c: char| c == ';' || c.is_whitespace());
+        if !(rest.is_empty() || rest.starts_with("//")) {
+            end = stop;
         }
         Doc::text(
             self.slice_range(span.offset_range.0, end)

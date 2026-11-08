@@ -170,6 +170,28 @@ fn shared_line_group_does_not_duplicate_the_next_statement() {
     }
 }
 
+/// A statement split onto its own line keeps code that follows it on the
+/// source line out of its slice, and keeps the `;` when the next statement
+/// starts with an operator that would otherwise continue it (`a; -b`).
+#[test]
+fn split_statements_keep_their_boundaries() {
+    for source in [
+        "fn f(){({y 7;&  y})}fn g(){}",
+        "fn f() {\n    a(); -b\n}\n",
+        "fn f() {\n    x = 7; .y = 1\n}\n",
+        "fn f() {\n    x = 7; -q // note\n}\n",
+    ] {
+        let original = skull_parser::parse_module_clean(source, "<source>".into()).unwrap();
+        let once = skull_fmt::format_code(source);
+        let twice = skull_fmt::format_code(&once);
+        assert_eq!(once, twice, "source: {source}");
+        let formatted = skull_parser::parse_module_clean(&once, "<formatted>".into())
+            .unwrap_or_else(|e| panic!("formatted output must parse: {e:?}\n{once}"));
+        assert!(formatted.recovery_errors.is_empty(), "{once}");
+        assert_eq!(original.module_sexp(), formatted.module_sexp(), "{once}");
+    }
+}
+
 /// A tight `..` must not fuse with a neighbouring `.` into `...`.
 #[test]
 fn range_operator_next_to_a_dot_keeps_its_spaces() {
