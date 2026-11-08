@@ -84,6 +84,24 @@ embedded field uses the write-only `WriteFieldRef`, not a readable field
 reference. Only nominal structs can be embedded, and embed graphs must be
 acyclic. `embed` is contextual: `embed: int` remains a field named `embed`.
 
+## Narrow floating-point storage
+
+`float` and `f64` are the same 64-bit type. `f32` is narrow storage for struct
+and value fields only; reads and writes use `float`, and each write rounds to
+single precision. It is not a general local, parameter or generic argument type.
+
+## String literals and trailing blocks
+
+Ordinary quoted strings process escapes such as `\n`, `\t`, `\r`, `\\` and
+`\u{...}`; unknown escapes are errors. Raw strings such as `r"{name}\n"`
+preserve their contents without escape processing or interpolation. Raw strings
+can also be triple quoted for multiline text.
+
+`f(args) @ expression` appends a zero-parameter lambda as the last argument:
+`f(args, () => expression)`. The right side can be a block, and chained `@`
+expressions nest from the right. The callee decides when to invoke the lambda;
+this syntax does not immediately evaluate its body.
+
 ## Default type parameters
 
 Structs, enums and newtypes may give trailing type parameters defaults:
