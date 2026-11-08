@@ -7112,10 +7112,11 @@ fn emit_coroutine_js(
     // This coroutine's hoisted lambda names are referenced only from its own
     // bodies, so extend the program set locally.
     let mut hoisted = hoisted.clone();
-    hoisted.extend(lowered.step.nested_fns.iter().map(|nf| nf.name));
-    for aux in defers.iter().chain(hooks.iter().map(|(_, aux)| aux)) {
-        hoisted.extend(aux.nested_fns.iter().map(|nf| nf.name));
-    }
+    let regions: Vec<&MirFunc> = std::iter::once(&lowered.step)
+        .chain(defers.iter())
+        .chain(hooks.iter().map(|(_, aux)| aux))
+        .collect();
+    hoisted.extend(collect_hoisted(&regions));
     // Materialize only the root region; detached regions were materialized when
     // they were copied into ordinary MirFuncs.
     let step_entry = lowered.step.entry;
@@ -7149,14 +7150,11 @@ fn emit_coroutine_js(
         skull_transform::cleanup_with_nobox(ws, nf)?;
         skull_transform::recover_counted_loops(ws, nf);
     }
-    let bodies = nested.iter().chain(
-        defers
-            .iter()
-            .chain(hooks.iter().map(|(_, aux)| aux))
-            .flat_map(|aux| std::iter::once(aux).chain(aux.nested_fns.iter())),
-    );
+    let bodies = nested
+        .iter()
+        .chain(defers.iter().chain(hooks.iter().map(|(_, aux)| aux)));
     for body in bodies {
-        out.push_str(&emit_fn_with_callees(
+        out.push_str(&emit_body_with_nested(
             ws,
             body,
             body.name.as_str(),

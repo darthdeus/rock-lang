@@ -97,3 +97,21 @@ fn test_closure_across_many_yields() {
     print(c.resume() ?? -99)
     print(c.resume() ?? -99)
 }
+
+fn apply_to(f: fn(int) -> int, x: int) -> int { return f(x) }
+
+// A named nested fn inside a co fn keeps its own hoisted lambda.
+co fn nested_fn_lambda(k: int) -> Coroutine<int> {
+    fn scaled(x: int) -> int {
+        return apply_to((v) => v * 10, x)
+    }
+    yield scaled(k)
+    yield scaled(k + 1)
+}
+
+@test(output = "30\n40")
+fn test_nested_fn_lambda_in_co_fn() {
+    let c = nested_fn_lambda(3)
+    print(c.resume() ?? -99)
+    print(c.resume() ?? -99)
+}
