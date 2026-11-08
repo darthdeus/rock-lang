@@ -24,6 +24,15 @@ inline(lua) fn json_conf_read_file(path: string) -> string? = """
     return data
 """
 
+// latin1 maps each byte to one string unit, so a case reaches the parser as
+// the same bytes the luajit body reads, invalid UTF-8 included.
+inline(js) fn json_conf_read_file(path: string) -> string? = """
+  var fs = require("fs");
+  var bytes;
+  try { bytes = fs.readFileSync(path); } catch (e) { return null; }
+  return bytes.toString("latin1");
+"""
+
 struct JsonConfCase {
     expect: string,
     name: string,
