@@ -138,3 +138,22 @@ pub fn release_bound_child(pid: u32) {
     }
     rock_host::process_management::unregister_child_process(pid);
 }
+
+#[cfg(unix)]
+pub(crate) fn pid_alive(pid: u32) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    // `kill(pid, 0)` performs no signal; EPERM still means the process
+    // exists (another user's), so only a clean error means dead.
+    unsafe {
+        libc::kill(pid, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn pid_alive(_pid: u32) -> bool {
+    // Without a liveness probe, keep PID-keyed artifacts.
+    true
+}

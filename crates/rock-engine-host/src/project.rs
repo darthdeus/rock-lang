@@ -230,3 +230,19 @@ mod tests {
         );
     }
 }
+
+// Source-owned tools and sim labels follow the game tree, not an installed SDK.
+pub fn source_workspace_root(project: &std::path::Path) -> Option<std::path::PathBuf> {
+    if let Some(root) = std::env::var_os("ROCK_CONTEXT_ROOT").map(std::path::PathBuf::from) {
+        if root.is_dir()
+            && root.join("sdk").is_dir()
+            && root.join(".context/context.json").is_file()
+        {
+            return Some(root);
+        }
+    }
+    project
+        .ancestors()
+        .find(|root| root.join("Cargo.toml").exists() && root.join("crates").is_dir())
+        .map(std::path::Path::to_path_buf)
+}

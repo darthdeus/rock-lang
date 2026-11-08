@@ -527,23 +527,12 @@ fn plain_parser_rejects_private_runtime_options() {
     assert!(help.status.success());
     let help = text(&help);
     for (option, value) in [
-        ("--full-asset-jobs", Some("2")),
         ("--warmup-seconds", Some("0")),
-        ("--top", Some("10")),
-        ("--sim-entry", Some("entry")),
-        ("--allocation-census", Some("alloc.json")),
-        ("--sim-log-dir", Some("history")),
-        ("--allocation-sites", Some("sites")),
-        ("--jobs", Some("2")),
         ("--workers", None),
         ("--isolated", None),
-        ("--plan", None),
-        ("--jobs-force", None),
         ("--multi-order", None),
         ("--renderer", Some("gl")),
-        ("--list", None),
         ("--dump-state", None),
-        ("--update-snapshots", None),
         ("--port", Some("8000")),
         ("--single-file", None),
         ("--itch", None),

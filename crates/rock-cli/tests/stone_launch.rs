@@ -540,3 +540,106 @@ exit 97
         assert_eq!(std::fs::read_dir(&output).unwrap().count(), 1);
     }
 }
+
+#[test]
+fn sim_commands_run_and_report_an_external_stone_project() {
+    let fixture = tempfile::tempdir().unwrap();
+    let game = fixture.path().join("game");
+    std::fs::create_dir_all(game.join("tests/sims")).unwrap();
+    std::fs::write(game.join("stick.toml"),
+        "[package]\nname = \"sim-probe\"\n[dependencies]\nstone = { package = \"stone\" }\n[build.vars]\nGIT_SHA = \"probe\"\nBUILD_UNIX = \"0\"\nBUILD_DATE = \"test\"\nCHANNEL = { builtin = \"channel\" }\nPLATFORM = { builtin = \"platform\" }\n").unwrap();
+    std::fs::write(game.join("main.rock"),
+        "fn main() { stone_run_game(GameConfig { title: \"sim-probe\", width: 64, height: 64, vsync: 0 }) }\n").unwrap();
+    std::fs::write(
+        game.join("tests/sims/probe.rock"),
+        r#"
+@sim
+co fn portable_sim() -> Coroutine<Wait> {
+    sim_expect(os_getenv("SIM_PROBE_FAIL") != "1", "portable sim sentinel")
+    stop_sim()
+}
+"#,
+    )
+    .unwrap();
+    let manifest = game.join("stick.toml");
+    std::fs::write(
+        &manifest,
+        format!(
+            "{}\n[sim]\nenvironment_prefixes = [\"PROBE_\"]\n",
+            std::fs::read_to_string(&manifest).unwrap()
+        ),
+    )
+    .unwrap();
+    let invoke = |args: &[&str], fail: bool| {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_rock"))
+            .args(args)
+            .current_dir(fixture.path())
+            .env(
+                "ROCK_DIR",
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            )
+            .env(
+                "ROCK_SIM_LOG_DIR",
+                fixture.path().join(if fail { "failed" } else { "passed" }),
+            )
+            .env("SIM_PROBE_FAIL", if fail { "1" } else { "0" })
+            .env("PROBE_VARIANT", "declared-workload")
+            .env("UNRELATED_VALUE", "excluded")
+            .env("ROCK_SIM_TIMEOUT_SECS", "60")
+            .env_remove("STONE_HOT_RELOAD")
+            .output()
+            .unwrap();
+        let diagnostic = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (output, diagnostic)
+    };
+    let project = game.to_str().unwrap();
+    let (list, text) = invoke(&["sim", project, "--list"], false);
+    assert!(list.status.success(), "{text}");
+    assert!(
+        String::from_utf8_lossy(&list.stdout).contains("portable_sim"),
+        "{text}"
+    );
+    let (plan, text) = invoke(
+        &["sim", project, "portable_sim", "--plan", "--jobs", "1"],
+        false,
+    );
+    assert!(plan.status.success(), "{text}");
+    let plan: serde_json::Value = serde_json::from_slice(&plan.stdout).unwrap();
+    assert_eq!(plan["entries"].as_array().unwrap().len(), 1);
+    for fail in [false, true] {
+        let (run, text) = invoke(&["sim", project, "portable_sim", "--jobs", "1"], fail);
+        assert_eq!(run.status.success(), !fail, "{text}");
+        assert!(text.contains("portable sim sentinel"), "{text}");
+        let history = fixture.path().join(if fail { "failed" } else { "passed" });
+        let run_dir = std::fs::read_dir(history)
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        let events = std::fs::read_to_string(run_dir.join("events.jsonl")).unwrap();
+        let start: serde_json::Value =
+            serde_json::from_str(events.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            start["timing_host"]["ambient"]["PROBE_VARIANT"],
+            "declared-workload"
+        );
+        assert!(
+            start["timing_host"]["ambient"]
+                .get("UNRELATED_VALUE")
+                .is_none()
+        );
+        let (report, text) = invoke(&["sim-report", "--format", "json"], fail);
+        assert!(report.status.success(), "{text}");
+        let report: serde_json::Value = serde_json::from_slice(&report.stdout).unwrap();
+        assert_eq!(
+            report["run"]["status"],
+            if fail { "FAIL" } else { "PASS" },
+            "{report}"
+        );
+    }
+}
