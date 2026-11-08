@@ -19,6 +19,22 @@ optimizer may eliminate a box whose allocation is not observable. Some
 otherwise unboxed uses may still be rejected when their representation is not
 supported.
 
+## Operators and references
+
+Binary `+`, `-`, `*`, `/`, `%`, and `./` support user overloads. Other binary
+operator definitions are rejected; equality is not user-overloadable. Prefix
+`-` and `!` have separate callable families. The
+[operator table and tests](../crates/bone-semantic/tests/operator_table.rs)
+keep declarations aligned with dispatch.
+
+`ref T` accesses a place without copying its value; field writes go through
+to that place. A function can return a reference derived from a valid input
+reference or its field, but not to a local place. The compiler rejects refs
+in persistent storage, across opaque boundaries, or live across coroutine
+suspension. A relocatable collection element can be borrowed for an immediate
+call but cannot be retained. See [reference fixtures](../tests/values/refs.rock)
+and [admission tests](../crates/bone-semantic/tests/structural.rs).
+
 ## Function forms and static locals
 
 A receiver can be named at the definition: `fn Point.move(p, dx: int)`
