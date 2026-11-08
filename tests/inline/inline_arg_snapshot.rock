@@ -1,0 +1,49 @@
+// An @inline parameter is a snapshot of its argument. The splice may bind a
+// parameter directly to the caller local its argument reads, but only while
+// nothing can write that local between the read and the end of the body.
+
+@inline
+fn twice_plus(n: int, k: int) -> int {
+    return n + n + k
+}
+
+@inline
+fn call_then_read(n: int, f: () -> ()) -> int {
+    f()
+    return n
+}
+
+@inline
+fn read_after_branch(n: int, flag: bool) -> int {
+    if flag { return n + 1 }
+    return n
+}
+
+@test(output = "2 5")
+fn test_later_argument_writes_the_local() {
+    let x = 1
+    let r = twice_plus(x, { x = 5; 0 })
+    print("{r} {x}")
+}
+
+@test(output = "1 7")
+fn test_body_runs_a_closure_that_writes_the_local() {
+    let y = 1
+    let set = () => { y = 7 }
+    let s = call_then_read(y, set)
+    print("{s} {y}")
+}
+
+@test(output = "4 9")
+fn test_argument_with_control_flow_writes_the_local() {
+    let z = 3
+    let t = read_after_branch(z, if z > 0 { z = 9; true } else { false })
+    print("{t} {z}")
+}
+
+@test(output = "3 3")
+fn test_unwritten_local_still_reads_through() {
+    let w = 1
+    let u = twice_plus(w, 1)
+    print("{u} {w + 2}")
+}

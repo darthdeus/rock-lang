@@ -2495,22 +2495,43 @@ fn remap_term_clone(
     }
 }
 
-/// For each coalescable param whose arg is a plain `Load(c)`, map the callee
-/// param cell -> the caller cell `c` (so the clone binds the param directly to
-/// it) and flag the param so the splice skips its `Store(param, arg)` copy.
+/// For each coalescable param whose arg is a plain `Load(c)` that still holds
+/// when the body runs ([`snapshot_holds`]), map the callee param cell -> the
+/// caller cell `c` (so the clone binds the param directly to it) and flag the
+/// param so the splice skips its `Store(param, arg)` copy.
 /// Removing that whole-cell copy is what keeps a by-ref-mutated cursor struct a
 /// SINGLE cell, which SROA can then scalarize (the zero-alloc iterator path).
 fn coalesce_overrides(
     caller: &MirFunc,
     cand: &CalleeBody,
     args: &[Idx<Inst>],
+    pos: (Idx<Block>, usize),
+    pinned: &HashSet<Idx<Cell>>,
     scratch: &mut InlineScratch,
 ) -> usize {
     let callee = &cand.func;
     scratch.overrides.clear();
     scratch.coalesced.clear();
     scratch.coalesced.resize(callee.params.len(), false);
-    for (i, (param, arg)) in callee.params.iter().zip(args.iter()).enumerate() {
+    for_each_coalesced(caller, cand, args, pos, pinned, |i, c| {
+        scratch.overrides.insert(callee.params[i], c);
+        scratch.coalesced[i] = true;
+    })
+}
+
+/// Visit each parameter `i` the splice at `pos` binds directly to caller cell
+/// `c`; returns how many there are.
+fn for_each_coalesced(
+    caller: &MirFunc,
+    cand: &CalleeBody,
+    args: &[Idx<Inst>],
+    pos: (Idx<Block>, usize),
+    pinned: &HashSet<Idx<Cell>>,
+    mut visit: impl FnMut(usize, Idx<Cell>),
+) -> usize {
+    let mut preds = None;
+    let mut count = 0;
+    for (i, arg) in args.iter().enumerate().take(cand.func.params.len()) {
         if !cand.coalescable_params.get(i).copied().unwrap_or(false) {
             continue;
         }
@@ -2518,20 +2539,120 @@ fn coalesce_overrides(
         // arg coalesces to `c` exactly like a bare `Load c` (this pass runs only on
         // the Lua path; GLSL never inlines) -- otherwise the wrap would defeat
         // coalescing and perturb the emitted Lua.
-        let arg_load = match caller.insts[*arg] {
-            Inst::Load(c) => Some(c),
-            Inst::IntToFloat(inner) => match caller.insts[inner] {
-                Inst::Load(c) => Some(c),
-                _ => None,
-            },
-            _ => None,
+        let Some(load) = arg_load_inst(caller, *arg) else {
+            continue;
         };
-        if let Some(c) = arg_load {
-            scratch.overrides.insert(*param, c);
-            scratch.coalesced[i] = true;
+        let Inst::Load(c) = caller.insts[load] else {
+            unreachable!("arg_load_inst returns a Load");
+        };
+        if snapshot_holds(caller, pinned, &mut preds, c, load, pos) {
+            visit(i, c);
+            count += 1;
         }
     }
-    scratch.overrides.len()
+    count
+}
+
+/// The `Load` an argument reads, looking through int->float subsumption.
+fn arg_load_inst(caller: &MirFunc, arg: Idx<Inst>) -> Option<Idx<Inst>> {
+    match caller.insts[arg] {
+        Inst::Load(_) => Some(arg),
+        Inst::IntToFloat(inner) if matches!(caller.insts[inner], Inst::Load(_)) => Some(inner),
+        _ => None,
+    }
+}
+
+/// Whether cell `c` still holds the value `load` read when the call at
+/// `bid[idx]` runs, and keeps it for the whole spliced body. The parameter is a
+/// snapshot of its argument: coalescing it onto `c` is only sound when nothing
+/// can write `c` from the read to the end of the body. The callee itself never
+/// rebinds a coalescable parameter, so the writers left are caller code on a
+/// path from the read to the call (a later argument, or a body spliced for an
+/// earlier call) and closures the body can reach (`pinned`, see [`pin_cells`]).
+fn snapshot_holds(
+    caller: &MirFunc,
+    pinned: &HashSet<Idx<Cell>>,
+    preds: &mut Option<HashMap<Idx<Block>, Vec<Idx<Block>>>>,
+    c: Idx<Cell>,
+    load: Idx<Inst>,
+    (bid, idx): (Idx<Block>, usize),
+) -> bool {
+    if pinned.contains(&c) {
+        return false;
+    }
+    let clear = |insts: &[Idx<Inst>]| {
+        insts.iter().all(|&i| {
+            let mut touches = false;
+            if !matches!(caller.insts[i], Inst::Load(_)) {
+                caller.insts[i].cells_each(&mut |cell| touches |= cell == c);
+            }
+            !touches
+        })
+    };
+    let call_prefix = &caller.blocks[bid].insts[..idx];
+    if let Some(pos) = call_prefix.iter().rposition(|&i| i == load) {
+        return clear(&call_prefix[pos + 1..]);
+    }
+    if !clear(call_prefix) {
+        return false;
+    }
+    // The read is in another block. It dominates the call, so walking
+    // predecessors back from the call without passing the read's block visits
+    // exactly the blocks a path from the read to the call can cross; re-entering
+    // the read's block would re-run the read, so only its tail counts.
+    let preds = preds.get_or_insert_with(|| {
+        let mut map: HashMap<Idx<Block>, Vec<Idx<Block>>> = HashMap::default();
+        for (from, block) in caller.blocks.iter() {
+            skull_mir::cfg::successors(&block.term, |to| map.entry(to).or_default().push(from));
+        }
+        map
+    });
+    let mut seen: HashSet<Idx<Block>> = HashSet::default();
+    let mut stack: Vec<Idx<Block>> = preds.get(&bid).cloned().unwrap_or_default();
+    let mut found = false;
+    while let Some(b) = stack.pop() {
+        if !seen.insert(b) {
+            continue;
+        }
+        let insts = &caller.blocks[b].insts;
+        if let Some(pos) = insts.iter().position(|&i| i == load) {
+            found = true;
+            if !clear(&insts[pos + 1..]) {
+                return false;
+            }
+            continue;
+        }
+        if !clear(insts) {
+            return false;
+        }
+        stack.extend(preds.get(&b).into_iter().flatten().copied());
+    }
+    found
+}
+
+/// Add the caller cells a spliced body could observe changing behind a
+/// coalesced parameter: those written inside a closure body (any block outside
+/// `top`), since the body could call that closure. A `ref` alias writes fields
+/// of the object a cell holds, never the cell, so it does not pin. Only blocks at or past `blocks_from` are examined, so each splice
+/// pins just what it imported.
+fn pin_cells(
+    func: &MirFunc,
+    top: &HashSet<Idx<Block>>,
+    blocks_from: usize,
+    pinned: &mut HashSet<Idx<Cell>>,
+) {
+    for (bid, block) in func.blocks.iter().skip(blocks_from) {
+        if top.contains(&bid) {
+            continue;
+        }
+        for &iid in &block.insts {
+            if !matches!(func.insts[iid], Inst::Load(_)) {
+                func.insts[iid].cells_each(&mut |cell| {
+                    pinned.insert(cell);
+                });
+            }
+        }
+    }
 }
 
 fn graft_resolved_bound_tree(
@@ -2862,6 +2983,7 @@ fn splice(
     ws: &Workspace,
     scx: &ScalarCtx,
     concrete_plans: &ConcretePlans,
+    pinned: &HashSet<Idx<Cell>>,
     scratch: &mut InlineScratch,
     uses: &mut UseIndex,
     census: &mut InlineScanStats,
@@ -2876,6 +2998,7 @@ fn splice(
                 ws,
                 scx,
                 concrete_plans,
+                pinned,
                 scratch,
                 uses,
                 census,
@@ -2889,6 +3012,7 @@ fn splice(
             ws,
             scx,
             concrete_plans,
+            pinned,
             scratch,
             uses,
             census,
@@ -2907,6 +3031,7 @@ fn splice_straight(
     ws: &Workspace,
     scx: &ScalarCtx,
     concrete_plans: &ConcretePlans,
+    pinned: &HashSet<Idx<Cell>>,
     scratch: &mut InlineScratch,
     uses: &mut UseIndex,
     census: &mut InlineScanStats,
@@ -2919,7 +3044,7 @@ fn splice_straight(
     };
     let site_tree = func.bound_trees.remove(&site.call_id());
     let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id());
-    let coalesced_cells = coalesce_overrides(func, cand, &args, scratch);
+    let coalesced_cells = coalesce_overrides(func, cand, &args, (bid, idx), pinned, scratch);
     let maps = clone_cells_insts(func, callee, scratch);
     // The bound element repack allocates after the clone, outside `inst_ids`.
     let repack_mark = func.insts.len();
@@ -3026,6 +3151,7 @@ fn splice_general(
     ws: &Workspace,
     scx: &ScalarCtx,
     concrete_plans: &ConcretePlans,
+    pinned: &HashSet<Idx<Cell>>,
     scratch: &mut InlineScratch,
     uses: &mut UseIndex,
     _census: &mut InlineScanStats,
@@ -3038,7 +3164,7 @@ fn splice_general(
     };
     let site_tree = func.bound_trees.remove(&site.call_id());
     let site_resolved_tree = func.resolved_bound_trees.remove(&site.call_id());
-    let coalesced_cells = coalesce_overrides(func, cand, &args, scratch);
+    let coalesced_cells = coalesce_overrides(func, cand, &args, (bid, idx), pinned, scratch);
     let maps = clone_all(func, callee, scratch);
     // The bound element repack allocates after the clone, outside `inst_ids`.
     let repack_mark = func.insts.len();
@@ -3212,6 +3338,9 @@ fn inline_functions_inner(
         cache.census.top_level_blocks_population = top_blocks.len();
     }
     let mut top: HashSet<Idx<Block>> = top_blocks.into_iter().collect();
+    // Caller cells a closure body writes; see [`pin_cells`].
+    let mut pinned: HashSet<Idx<Cell>> = HashSet::default();
+    pin_cells(func, &top, 0, &mut pinned);
     let use_index_started = cache.census_enabled.then(Instant::now);
     let mut uses = UseIndex::build(func);
     if let Some(start) = use_index_started {
@@ -3284,6 +3413,7 @@ fn inline_functions_inner(
         });
         let result_cell =
             usize::from(cand.kind == Kind::General && matches!(&site, Site::Single { .. }));
+        let blocks_before = func.blocks.len();
         let (maps, coalesced_cells) = splice(
             func,
             site,
@@ -3291,6 +3421,7 @@ fn inline_functions_inner(
             ws,
             scx,
             concrete_plans,
+            &pinned,
             scratch,
             &mut uses,
             census,
@@ -3305,6 +3436,7 @@ fn inline_functions_inner(
             })
             .unwrap_or_default();
         top.extend(scratch.added_blocks.drain(..));
+        pin_cells(func, &top, blocks_before, &mut pinned);
         let splice_ns = splice_start
             .map(|start| start.elapsed().as_nanos() as u64)
             .unwrap_or_default();
@@ -3467,6 +3599,116 @@ mod tests {
         assert!(
             !caller.cells[scratch.cell_map[&plain]].loop_binding,
             "an ordinary cloned cell must not gain the tag"
+        );
+    }
+
+    /// A caller `x = 1; arg = Load(x); <between>; call(arg)`, returning the
+    /// function, `x`, the argument load and the call position.
+    fn snapshot_caller(
+        between: impl FnOnce(&mut MirFunc, Idx<Block>, Idx<Cell>) -> Idx<Block>,
+    ) -> (MirFunc, Idx<Cell>, Idx<Inst>, (Idx<Block>, usize)) {
+        let mut func = MirFunc::new(Ustr::from("caller"));
+        let entry = func.entry;
+        let x = func.new_cell(Some(Ustr::from("x")));
+        let one = func.emit(entry, Inst::Const(Lit::Int(1)));
+        func.emit(
+            entry,
+            Inst::Store {
+                cell: x,
+                value: one,
+            },
+        );
+        let load = func.emit(entry, Inst::Load(x));
+        let call_block = between(&mut func, entry, x);
+        let idx = func.blocks[call_block].insts.len();
+        func.emit(call_block, Inst::Const(Lit::Nil));
+        func.set_term(call_block, Term::Return(vec![]));
+        (func, x, load, (call_block, idx))
+    }
+
+    fn holds(func: &MirFunc, x: Idx<Cell>, load: Idx<Inst>, pos: (Idx<Block>, usize)) -> bool {
+        let top: HashSet<Idx<Block>> = top_level_blocks(func).into_iter().collect();
+        let mut pinned = HashSet::default();
+        pin_cells(func, &top, 0, &mut pinned);
+        snapshot_holds(func, &pinned, &mut None, x, load, pos)
+    }
+
+    #[test]
+    fn coalescing_requires_the_argument_cell_unwritten_until_the_call() {
+        let (func, x, load, pos) = snapshot_caller(|_, entry, _| entry);
+        assert!(holds(&func, x, load, pos), "nothing writes x");
+
+        let (func, x, load, pos) = snapshot_caller(|func, entry, x| {
+            let five = func.emit(entry, Inst::Const(Lit::Int(5)));
+            func.emit(
+                entry,
+                Inst::Store {
+                    cell: x,
+                    value: five,
+                },
+            );
+            entry
+        });
+        assert!(!holds(&func, x, load, pos), "a later argument writes x");
+
+        let (func, x, load, pos) = snapshot_caller(|func, entry, _| {
+            let next = func.new_block();
+            func.set_term(entry, Term::Goto(next));
+            next
+        });
+        assert!(holds(&func, x, load, pos), "a clean block path keeps x");
+
+        let (func, x, load, pos) = snapshot_caller(|func, entry, x| {
+            let (left, right, join) = (func.new_block(), func.new_block(), func.new_block());
+            let flag = func.emit(entry, Inst::Const(Lit::Bool(true)));
+            func.set_term(
+                entry,
+                Term::Branch {
+                    cond: flag,
+                    then_bb: left,
+                    else_bb: right,
+                },
+            );
+            let nine = func.emit(right, Inst::Const(Lit::Int(9)));
+            func.emit(
+                right,
+                Inst::Store {
+                    cell: x,
+                    value: nine,
+                },
+            );
+            func.set_term(left, Term::Goto(join));
+            func.set_term(right, Term::Goto(join));
+            join
+        });
+        assert!(!holds(&func, x, load, pos), "one branch writes x");
+    }
+
+    #[test]
+    fn coalescing_refuses_a_cell_a_closure_body_writes() {
+        let (func, x, load, pos) = snapshot_caller(|func, entry, x| {
+            let body = func.new_block();
+            let seven = func.emit(body, Inst::Const(Lit::Int(7)));
+            func.emit(
+                body,
+                Inst::Store {
+                    cell: x,
+                    value: seven,
+                },
+            );
+            func.set_term(body, Term::Return(vec![]));
+            func.emit(
+                entry,
+                Inst::Lambda {
+                    params: vec![],
+                    entry: body,
+                },
+            );
+            entry
+        });
+        assert!(
+            !holds(&func, x, load, pos),
+            "the spliced body could call the closure"
         );
     }
 
