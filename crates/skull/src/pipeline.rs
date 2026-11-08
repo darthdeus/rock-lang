@@ -112,9 +112,21 @@ pub fn split_findings(
 }
 
 /// What a compile needs from its host.
+/// A boundary the host may measure.
+pub enum Phase<'a> {
+    /// The entry source and the stdlib are parsed ([`compile_source`] only).
+    Parsed,
+    /// The program type-checked.
+    Checked(&'a Workspace),
+    /// Build inputs are stamped and lints passed; emission starts.
+    Prepared,
+}
+
 pub trait CompileHost {
     /// Dependency alias tables for the module set.
     fn aliases(&mut self, modules: &ModuleSet) -> Result<NsAliases, CompilerError>;
+    /// A pipeline boundary was reached; hosts that measure record it.
+    fn phase(&mut self, _phase: Phase<'_>) {}
     /// The build inputs (`build_var` values, `embed_string` files), resolved
     /// once the program has type-checked.
     fn comptime_inputs(&mut self) -> Result<ComptimeInputs, CompilerError>;
@@ -206,6 +218,7 @@ pub fn compile_source(
         .map_err(|e| CompileFailure::at(Stage::Parse, vec![e]))?;
     let entry = user.file;
     let modules = with_stdlib([user]).map_err(|e| CompileFailure::at(Stage::Parse, vec![e]))?;
+    host.phase(Phase::Parsed);
     compile_modules(modules, entry, target, host)
 }
 
@@ -223,6 +236,7 @@ pub fn compile_modules(
     if !body_errors.is_empty() {
         return Err(CompileFailure::at(Stage::Check, body_errors));
     }
+    host.phase(Phase::Checked(&ws));
     // The workspace owns everything lints and emission read; the parse trees
     // would otherwise stay live through the emission peak.
     drop(modules);
@@ -237,6 +251,7 @@ pub fn compile_modules(
     if !lint_errors.is_empty() {
         return Err(CompileFailure::at(Stage::Lint, lint_errors));
     }
+    host.phase(Phase::Prepared);
     let emission = host
         .emit(&ws, entry, target)
         .map_err(|e| CompileFailure::at(Stage::Emit, vec![e]))?;

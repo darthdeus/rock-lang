@@ -36,6 +36,7 @@ pub mod backend_stats;
 pub mod bone_backend;
 pub mod child_lifetime;
 pub mod common;
+pub mod compile_budget;
 pub mod compile_cmd;
 pub mod compile_slots;
 pub mod comptime;

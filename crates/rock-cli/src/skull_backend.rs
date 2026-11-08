@@ -72,6 +72,18 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
         crate::bone_backend::aliases_for_modules(modules.iter())
     }
 
+    fn phase(&mut self, phase: skull::pipeline::Phase<'_>) {
+        use skull::pipeline::Phase;
+        match phase {
+            Phase::Parsed => crate::compile_budget::phase("parse+stdlib"),
+            Phase::Checked(ws) => {
+                crate::compile_budget::phase("semantic");
+                crate::compile_budget::detail(&ws.phase_timings);
+            }
+            Phase::Prepared => crate::compile_budget::phase("prepare"),
+        }
+    }
+
     fn comptime_inputs(
         &mut self,
     ) -> std::result::Result<bone_semantic::inference::ComptimeInputs, CompilerError> {
@@ -192,6 +204,7 @@ fn skull_emit_full(
         &mut host,
     )
     .map_err(|failure| EmitFullErr::Compile(failure.errors))?;
+    crate::compile_budget::emission(&emit);
     let emits_main = emit.emits_main;
     let lua = emit.lua;
     let tests = skull::module_tests(&ws, user_mid).map_err(EmitFullErr::Discovery)?;
@@ -1819,6 +1832,7 @@ pub fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {
             crate::invocation_log::exit(1);
         }
     };
+    let budget = crate::compile_budget::Scope::begin(path);
     match skull_emit(path, &src) {
         Ok((lua, _emits_main)) => {
             match output {
@@ -1831,6 +1845,8 @@ pub fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {
                     print!("{}", lua);
                 }
             }
+            crate::compile_budget::phase("write");
+            budget.success();
             Ok(())
         }
         Err(errs) => {
@@ -2140,6 +2156,7 @@ fn skull_emit_project_with_inputs(
 ) -> Result<(GameProgram, bool)> {
     use std::path::PathBuf;
     let _slot = crate::compile_slots::acquire(dir)?;
+    crate::compile_budget::phase("compile slot");
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
     let sources = match crate::unified_compile::discover_sources(&spec) {
         Ok(s) => s,
@@ -2153,6 +2170,8 @@ fn skull_emit_project_with_inputs(
     let sources = sources
         .production_only(std::path::Path::new(dir))
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    crate::compile_budget::phase("discovery");
+    crate::compile_budget::sources(&sources);
 
     // Compile core: parse(assemble) + bone check + skull codegen. Excludes
     // discovery (disk read) and the caller's output write, matching the bone
@@ -2165,6 +2184,7 @@ fn skull_emit_project_with_inputs(
             crate::invocation_log::exit(1);
         }
     };
+    crate::compile_budget::phase("parse+stdlib");
 
     // Project build: modules outside `dir` (the `engine` dependency, stdlib)
     // are libraries and prune to what the project reaches. The game build
@@ -2183,7 +2203,10 @@ fn skull_emit_project_with_inputs(
     let skull::pipeline::Compiled {
         ws, emission: emit, ..
     } = match compiled {
-        Ok(compiled) => compiled,
+        Ok(compiled) => {
+            crate::compile_budget::emission(&compiled.emission);
+            compiled
+        }
         Err(failure) => {
             use skull::pipeline::Stage;
             eprintln!("{}", render_project_errs(&sources, &failure.errors));
@@ -2535,6 +2558,7 @@ pub fn skull_compile_project_with_recorded_inputs(
     output: Option<String>,
     inputs: bone_semantic::inference::ComptimeInputs,
 ) -> Result<bone_semantic::inference::ComptimeInputs> {
+    let budget = crate::compile_budget::Scope::begin(dir);
     let (emit, emits_main) = skull_emit_project_with_inputs(dir, inputs)?;
     // A game's runnable main.lua is the same shape run/engine produce via
     // write_full_main: preamble (game source dir) + emit +
@@ -2553,6 +2577,8 @@ pub fn skull_compile_project_with_recorded_inputs(
             write_program_parts(&mut std::io::stdout().lock(), &parts)?;
         }
     }
+    crate::compile_budget::phase("write");
+    budget.success();
     Ok(emit.comptime_inputs)
 }
 

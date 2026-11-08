@@ -2,6 +2,7 @@
 
 mod backend_stats_summary;
 mod broken_stdlib;
+mod compile_budget;
 mod fix_imports;
 mod gpu_process;
 mod guide;

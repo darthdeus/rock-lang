@@ -14,6 +14,7 @@ records:
 | Metric | Source |
 |---|---|
 | cold `rock compile`, cold `rock check` | hyperfine wall time, several runs |
+| time budget of one cold compile | `ROCK_COMPILE_STATS` record, fastest of three |
 | parse, bone semantic, skull emit and setup phases | `rock backend-stats --format json` |
 | body edit to overlay, signature edit to full rebuild | `rock incremental-stats --format json` |
 | LSP update, hover, completion per edit kind | `rock lsp-survey --format json` |
@@ -40,6 +41,25 @@ narrows any run to the metric groups named (`cold`, `phases`,
 percentage change from the previous row in the same file, so the loop while
 working on a change is: edit, `cargo build --release -p rock-cli --bin rock`,
 `perf/run.py --quick --no-build`, read the deltas.
+
+## The time budget
+
+`ROCK_COMPILE_STATS=<file>` makes `rock compile` append one JSON record with a
+`budget` tree: process, then discovery, parse+stdlib, semantic, prepare,
+codegen, write; codegen splits into the serial setup phases, the body
+fan-out (wall window, summed per-pass unit time and the idle time that leaves
+on the worker pool) and the serial assembly steps. Every node's `wall_ms` is
+the sum of its children, with an `other` child for the remainder, so a phase
+nobody timed shows up as growth in `other` rather than vanishing.
+
+```sh
+perf/budget.py packages/stone            # compile three times, print the fastest tree
+perf/budget.py --record stats.jsonl      # print a record written elsewhere
+```
+
+`perf/run.py` records the same tree per corpus (`--only budget`) and the
+report charts its main nodes over commits. Compare the fan-out's summed unit
+times with each other, never with the wall time.
 
 `perf/report.html` is generated and not committed. Open it in a browser; the
 corpus selector switches every chart and the table.

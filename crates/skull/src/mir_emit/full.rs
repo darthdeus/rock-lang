@@ -838,29 +838,33 @@ fn emit_full_chunks(
             None,
         )
     })?;
-    let chunks = par_map_with(
-        fn_items,
-        || {
-            skull_transform::InlineCache::with_candidate_table(std::sync::Arc::clone(
-                &inline_candidate_table,
-            ))
-        },
-        |inline_cache, (self_ref, f)| {
-            (
-                shared(self_ref),
-                emit_body_chunk_with_mutation(
-                    ws,
-                    cg,
-                    scx,
-                    concrete,
-                    self_ref,
-                    f,
-                    inline_cache,
-                    mutation,
-                ),
-            )
-        },
-    );
+    // The fan-out's wall window, beside the per-unit sums the chunks carry:
+    // the budget reads idle time as threads * window - summed unit time.
+    let chunks = setup_phases.timed("window: fan-out", || {
+        par_map_with(
+            fn_items,
+            || {
+                skull_transform::InlineCache::with_candidate_table(std::sync::Arc::clone(
+                    &inline_candidate_table,
+                ))
+            },
+            |inline_cache, (self_ref, f)| {
+                (
+                    shared(self_ref),
+                    emit_body_chunk_with_mutation(
+                        ws,
+                        cg,
+                        scx,
+                        concrete,
+                        self_ref,
+                        f,
+                        inline_cache,
+                        mutation,
+                    ),
+                )
+            },
+        )
+    });
     Ok((chunks.into_iter().collect(), inline_candidate_table))
 }
 
@@ -1060,12 +1064,15 @@ pub(super) fn emit_full_build(
     };
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let graph_census = cache.graph.run_stats;
+    let assembly_started = Instant::now();
     let (mut emit, emitted, unit_reads) =
         assemble(ws, &mut cache, &mut built_specs, build.lifetime())?;
+    let assembly_window = assembly_started.elapsed();
     emit.concrete_stats = concrete_stats;
     emit.setup_lanes = setup_lanes;
     let mut phases = setup_phases.0;
     phases.extend(emit.phases);
+    phases.push(("window: assembly", assembly_window));
     emit.phases = phases;
     emit.arena_traffic = ArenaTraffic {
         rep_setup: setup_traffic.0,

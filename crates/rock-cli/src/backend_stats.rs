@@ -600,7 +600,6 @@ fn json_report(
             .iter()
             .filter_map(|(name, dur)| {
                 name.strip_prefix(prefix)
-                    .filter(|_| !prefix.is_empty() || !name.contains(": "))
                     .map(|rest| (rest.to_string(), serde_json::json!(ms(*dur))))
             })
             .collect::<serde_json::Map<_, _>>()

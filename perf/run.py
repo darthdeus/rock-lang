@@ -5,6 +5,8 @@ For every corpus (a project directory) the runner records:
 
 - cold `rock compile` and `rock check` wall time (hyperfine, several runs);
 - `rock backend-stats --format json`: bone and skull phase means;
+- one cold `rock compile` with `ROCK_COMPILE_STATS`: the time budget tree
+  (every level sums to its parent; see `perf/budget.py`);
 - `rock incremental-stats --format json`: the hot-reload path after a body
   edit (overlay) and after a signature edit (full rebuild);
 - `rock lsp-survey --format json`: the language server's update, hover and
@@ -31,6 +33,9 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import budget as budget_tool  # noqa: E402
 
 SCHEMA = 1
 
@@ -181,7 +186,7 @@ def summarize_lsp(report):
     return out
 
 
-GROUPS = ("cold", "phases", "incremental", "lsp")
+GROUPS = ("cold", "budget", "phases", "incremental", "lsp")
 
 
 def measure_corpus(rock, repo, corpus_dir, args, env):
@@ -198,6 +203,14 @@ def measure_corpus(rock, repo, corpus_dir, args, env):
                 f"{rock} check {corpus_dir}", args.runs, args.warmup_runs, env, repo)
             if err:
                 corpus["cold_check_error"] = err
+
+    if "budget" in args.only:
+        record, err = budget_tool.compile_budget(str(rock), corpus_dir, min(args.runs, 3), env)
+        corpus["budget"] = dict(wall_ms=record["wall_ms"], threads=record["threads"],
+                                totals=record.get("totals", {}), tree=record["budget"],
+                                flat=budget_tool.flatten(record["budget"])) if record else None
+        if err:
+            corpus["budget_error"] = err
 
     if "phases" in args.only:
         report, err = run_json(rock, ["backend-stats", corpus_dir, "--iters", str(args.iters),
@@ -237,6 +250,9 @@ def headline(corpus):
         "check": get("cold_check", "mean_ms"),
         "semantic": get("backend_stats", "semantic_ms"),
         "emit": get("backend_stats", "emit_ms"),
+        "setup": get("budget", "flat", "process/codegen/setup"),
+        "fan-out": get("budget", "flat", "process/codegen/fan-out"),
+        "assembly": get("budget", "flat", "process/codegen/assembly"),
         "body edit": get("incremental", "body", "mean_ms"),
         "sig edit": get("incremental", "signature", "mean_ms"),
         "lsp body": get("lsp", "body", "update_mean_ms"),

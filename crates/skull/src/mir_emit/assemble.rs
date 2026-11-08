@@ -781,10 +781,20 @@ pub(super) fn assemble(
         chunks: cache.chunks.len(),
         dependency_edges: None,
     };
+    // Serial assembly steps, each a wall window; the compile budget lists
+    // them under the assembly window so no serial tail hides in "codegen".
+    let mut steps: Vec<(&'static str, Duration)> = Vec::new();
+    let mut step_started = Instant::now();
+    let mut step = |name: &'static str, steps: &mut Vec<(&'static str, Duration)>| {
+        let now = Instant::now();
+        steps.push((name, now - step_started));
+        step_started = now;
+    };
     let mut asm = Assembly::new(cache);
     asm.push_scaffold_prelude(ws, &cache.scx)?;
     let decorators = asm.push_decorator_definitions(ws, cache);
     let (globals_lua, pending_inits) = asm.lower_global_units(ws, cache);
+    step("assembly: prelude+globals", &mut steps);
 
     // **Whole-program population, driven by `cache.lua_view` -- Phase 2.**
     // `should_emit_via_view` decides every ordinary/coroutine/inline
@@ -807,6 +817,7 @@ pub(super) fn assemble(
         drop_in_background(cache.graph.take_records());
         release_stats.graph_instances = instances - cache.graph.instances.len();
     }
+    step("assembly: specialized chunks", &mut steps);
     let needed_foreign = collect_needed_foreign(ws, cache, &asm.always_emitted_calls, &spec_chunks);
     // Factory lowering is the last concrete-plan reader. Keep its text in the
     // original output slot, but release one-shot plans before copying definitions.
@@ -856,6 +867,7 @@ pub(super) fn assemble(
         )
     });
     drop(spec_chunks);
+    step("assembly: definitions", &mut steps);
 
     // Every emitted definition has now been visited, so this is the earliest
     // point where the whole rejection list exists. Anything past here is
@@ -957,6 +969,7 @@ pub(super) fn assemble(
         "__rock_lifecycle_plan_stage_part",
         &lifecycle_plan_stage,
     ));
+    step("assembly: staging", &mut steps);
     asm.push_initializers(
         ws,
         cache,
@@ -966,7 +979,8 @@ pub(super) fn assemble(
         has_definition_plan,
         lifecycle_plan.census.declarations > 0,
     )?;
-    let phases = asm.phases();
+    step("assembly: initializers", &mut steps);
+    let mut phases = asm.phases();
 
     // A synthetic top-level name (`<fn>__lambda<k>`, `<co>__step`/`__on_*`/...)
     // that collides with a user fn/global was recorded during chunk emit (above,
@@ -995,12 +1009,15 @@ pub(super) fn assemble(
         &artifact_reads,
         cache.renderer_target,
     )?;
+    step("assembly: fingerprint", &mut steps);
     // The file name a host writes the program to; generated code after a
     // numbered definition reports its position in that file.
     if cache.cg.line_directives() {
         out = skull_codegen_lua::resolve_line_directive_resets(&out, "main.lua");
     }
     cg.report_trace_frames(&out);
+    step("assembly: finalize", &mut steps);
+    phases.extend(steps);
     Ok((
         MirEmit {
             release_stats,
