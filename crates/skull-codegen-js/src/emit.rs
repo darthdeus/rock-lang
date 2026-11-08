@@ -18,6 +18,7 @@ use skull_mir::cfg::structure::{
 use skull_mir::code_identity::{
     CaptureSchema, CodeArtifact, CodeCompatibility, CodeIdentity, FrameSchema,
 };
+use skull_mir::decorator::{DecoratorTable, SimValues, decorator_symbol};
 use skull_mir::instance::Instance;
 use skull_mir::intrinsics::{Emission, IntrinsicTable};
 use skull_mir::mangle::{ident_of_key, symbol_of_key};
@@ -3328,7 +3329,7 @@ fn js_root_plan(
     ws: &Workspace,
     extra_roots: &[(FuncRef, String)],
 ) -> Result<JsRootPlan, CompilerError> {
-    let deco_names = decorator_names(ws);
+    let decorators = DecoratorTable::collect(ws);
     let mut named = extra_roots.to_vec();
     let mut seen: HashSet<FuncRef> = named.iter().map(|(fr, _)| *fr).collect();
     for module in ws.modules.iter() {
@@ -3336,10 +3337,7 @@ fn js_root_plan(
             continue;
         }
         for (fid, f) in module.functions.iter() {
-            if f.annotations
-                .iter()
-                .any(|a| deco_names.contains(&a.name.name))
-            {
+            if decorators.is_decorated(f) {
                 let fr = FuncRef {
                     module: module.id,
                     func: fid,
@@ -3599,7 +3597,7 @@ fn assemble_program_core(
     roots: &[(FuncRef, String)],
     session: &JsSession,
 ) -> Result<ProgramBuild, CompilerError> {
-    let deco_names = decorator_names(ws);
+    let decorators = DecoratorTable::collect(ws);
     let mut st = WorklistState::new(
         ws,
         scx,
@@ -3622,72 +3620,64 @@ fn assemble_program_core(
     // so `@inline` no-ops like `transmute` splice away -- the luajit path leaves
     // them as top-level calls it emits whole-stdlib, which JS cannot). Their
     // callees/globals feed the shared worklists BEFORE the drain.
-    let applied = applied_decorator_names(ws, &deco_names);
     let mut deco_bodies: Vec<(String, MirFunc)> = Vec::new();
-    for module in ws.modules.iter() {
-        for (did, d) in module.decorators.iter() {
-            if skull_mir::definition::is_compiler_owned_decorator(d) {
-                continue;
-            }
-            if !applied.contains(&d.name) {
-                continue;
-            }
-            let deco_name = decorator_js_name(d.name.as_str());
-            let owner = skull_mir::concrete::ConcreteOwner::Decorator {
-                module: module.id,
-                index: did.into_raw().into_u32(),
-            };
-            let concrete_plan = st.always.get(&owner);
-            let lowered = concrete_plan
-                .ok_or_else(|| err(format!("JS: no concrete plan for decorator `{}`", d.name)))
-                .and_then(|plan| {
-                    skull_mir::lower::lower_decorator_with_plans(
-                        ws,
-                        scx,
-                        plan,
-                        st.concrete,
-                        ustr::Ustr::from(deco_name.as_str()),
-                    )
-                });
-            let mut mf = match lowered {
-                Ok(mf) => mf,
-                Err(e) => {
-                    st.reject(&deco_name, e);
-                    continue;
-                }
-            };
-            let self_ref = safe_self_ref(ws, &mf);
-            if let Err(e) = prepare_body(
-                ws,
-                scx,
-                self_ref,
-                &mut mf,
-                &deco_name,
-                &mut st.cache,
-                st.concrete,
-            ) {
+    for (mid, did) in decorators.applied_definitions(ws, bone_semantic::hir::FnBackend::Js) {
+        let d = &ws.module(mid).decorators[did];
+        let deco_name = decorator_symbol(d.def_key.as_str());
+        let owner = skull_mir::concrete::ConcreteOwner::Decorator {
+            module: mid,
+            index: did.into_raw().into_u32(),
+        };
+        let concrete_plan = st.always.get(&owner);
+        let lowered = concrete_plan
+            .ok_or_else(|| err(format!("JS: no concrete plan for decorator `{}`", d.name)))
+            .and_then(|plan| {
+                skull_mir::lower::lower_decorator_with_plans(
+                    ws,
+                    scx,
+                    plan,
+                    st.concrete,
+                    ustr::Ustr::from(deco_name.as_str()),
+                )
+            });
+        let mut mf = match lowered {
+            Ok(mf) => mf,
+            Err(e) => {
                 st.reject(&deco_name, e);
                 continue;
             }
-            // THE shared discovery step, not a restatement of the parts of it a
-            // decorator was thought to need. Enumerating callees and globals by
-            // hand here left out the third thing `discover` does -- filing this
-            // body's `spec_bindings` as demands -- so a specialization a deco
-            // body was the only caller of was never queued, and the call site
-            // spelled a name nothing emitted.
-            let mut findings: Vec<CompilerError> = Vec::new();
-            findings.extend(
-                JsDelivery {
-                    ws,
-                    scx,
-                    st: &mut st,
-                }
-                .schedule_body(&mf)?,
-            );
-            match merge_findings(findings) {
-                Some(e) => st.reject(&deco_name, e),
-                None => deco_bodies.push((deco_name, mf)),
+        };
+        let self_ref = safe_self_ref(ws, &mf);
+        if let Err(e) = prepare_body(
+            ws,
+            scx,
+            self_ref,
+            &mut mf,
+            &deco_name,
+            &mut st.cache,
+            st.concrete,
+        ) {
+            st.reject(&deco_name, e);
+            continue;
+        }
+        // THE shared discovery step, not a restatement of the parts of it a
+        // decorator was thought to need. Enumerating callees and globals by
+        // hand here left out the third thing `discover` does -- filing this
+        // body's `spec_bindings` as demands -- so a specialization a deco
+        // body was the only caller of was never queued, and the call site
+        // spelled a name nothing emitted.
+        let mut findings: Vec<CompilerError> = Vec::new();
+        findings.extend(
+            JsDelivery {
+                ws,
+                scx,
+                st: &mut st,
             }
+            .schedule_body(&mf)?,
+        );
+        match merge_findings(findings) {
+            Some(e) => st.reject(&deco_name, e),
+            None => deco_bodies.push((deco_name, mf)),
         }
     }
 
@@ -3881,7 +3871,12 @@ fn assemble_program_core(
     // Rejected callback bodies have no code entry; report their named errors
     // before staging would replace them with an incomplete-census error.
     combine_rejections(rejections)?;
-    mark_generated_code_values(ws, &mut code_artifact);
+    decorators.mark_generated_code_values(
+        ws,
+        bone_semantic::hir::FnBackend::Js,
+        SimValues::All,
+        &mut code_artifact,
+    );
     let definition_plan = skull_mir::definition::collect(ws)?;
     if definition_plan.census.applications != definition_plan.census.admitted {
         return Err(err(format!(
@@ -3912,7 +3907,7 @@ fn assemble_program_core(
     )?);
     // 5. decorator applications (AFTER inits: a deco body pushes into a ginit-
     //    initialized registry).
-    let applications = decorator_application_lines_js(ws, &deco_names, scx.interner(), &st.names)?;
+    let applications = decorator_application_lines_js(ws, &decorators, scx.interner(), &st.names)?;
     out.push_str(&applications);
     stable.push_str(&applications);
     out.push_str(code_slot_publish_js(
@@ -5784,38 +5779,6 @@ fn lifecycle_plan_stage_js(
     Ok(out)
 }
 
-/// Mark function values introduced by generated registration glue. Decorator
-/// applications and `@sim` registration are outside MIR, but their targets are
-/// still escaping Rock values and must use the same mono-owned CodeRefs.
-fn mark_generated_code_values(ws: &Workspace, artifact: &mut CodeArtifact) {
-    let decorator_names: HashSet<ustr::Ustr> = ws
-        .modules
-        .iter()
-        .flat_map(|m| m.decorators.iter().map(|(_, d)| d.name))
-        .collect();
-    for module in ws.modules.iter() {
-        if module.id == bone_semantic::prelude::ModuleId::builtin() {
-            continue;
-        }
-        for (fid, f) in module.functions.iter() {
-            if f.backend == bone_semantic::hir::FnBackend::Lua {
-                continue;
-            }
-            let generated_value = f.annotations.iter().any(|ann| {
-                ann.name.name.as_str() == "sim" || decorator_names.contains(&ann.name.name)
-            });
-            if generated_value {
-                artifact.mark_value(skull_mir::code_identity::CodeIdentity::Named(
-                    Instance::base(FuncRef {
-                        module: module.id,
-                        func: fid,
-                    }),
-                ));
-            }
-        }
-    }
-}
-
 /// Boxed-enum singleton / names-table defs the emitted bodies read, in name
 /// order (deterministic; `var` redeclare is harmless on concat).
 fn emit_enum_singletons(gctx: &GlobalCtx, enum_defs: &HashMap<ustr::Ustr, String>) -> String {
@@ -6187,47 +6150,6 @@ fn nested_value_field_struct_name(
     }))
 }
 
-/// The `__deco_<name>` JS identity for a decorator (matches skull's Lua
-/// `decorator_fn_name`; the two backends share the naming scheme).
-fn decorator_js_name(deco: &str) -> String {
-    format!("__deco_{deco}")
-}
-
-/// Every `deco`-definition name in the workspace -- the annotation names that are
-/// decorator APPLICATIONS (vs plain `@test`/`@sim`/... annotations).
-fn decorator_names(ws: &Workspace) -> HashSet<ustr::Ustr> {
-    let mut set = HashSet::new();
-    for module in ws.modules.iter() {
-        for (_, d) in module.decorators.iter() {
-            set.insert(d.name);
-        }
-    }
-    set
-}
-
-/// The decorator names actually APPLIED (some fn carries an `@<deco>`
-/// annotation) -- the reachable subset of [`decorator_names`]. An unapplied
-/// `deco` def is never emitted (D1).
-fn applied_decorator_names(
-    ws: &Workspace,
-    deco_names: &HashSet<ustr::Ustr>,
-) -> HashSet<ustr::Ustr> {
-    let mut set = HashSet::new();
-    for module in ws.modules.iter() {
-        if module.id == bone_semantic::prelude::ModuleId::builtin() {
-            continue;
-        }
-        for (_, f) in module.functions.iter() {
-            for ann in &f.annotations {
-                if deco_names.contains(&ann.name.name) {
-                    set.insert(ann.name.name);
-                }
-            }
-        }
-    }
-    set
-}
-
 /// The entry module's nullary `main`, if it defines one -- the program entry.
 /// Matched by declared name: a modules-v1 entry's key is `<package>::main`.
 fn nullary_main(ws: &Workspace, user_mid: bone_semantic::prelude::ModuleId) -> Option<FuncRef> {
@@ -6317,72 +6239,34 @@ fn decorator_call_args_js(
 /// `[]` placeholder (never read by a deco body, same as luajit's `{}`).
 fn decorator_application_lines_js(
     ws: &Workspace,
-    deco_names: &HashSet<ustr::Ustr>,
+    decorators: &DecoratorTable,
     interner: &skull_mir::monoty::MonoInterner,
     names: &CalleeNames,
 ) -> Result<String, CompilerError> {
-    let deco_map: HashMap<
-        ustr::Ustr,
-        (
-            bone_semantic::prelude::ModuleId,
-            Idx<bone_semantic::hir::DecoratorDef>,
-        ),
-    > = ws
-        .modules
-        .iter()
-        .flat_map(|m| {
-            m.decorators
-                .iter()
-                .map(move |(did, d)| (d.name, (m.id, did)))
-        })
-        .collect();
     let mut out = String::new();
-    for module in ws.modules.iter() {
-        if module.id == bone_semantic::prelude::ModuleId::builtin() {
-            continue;
-        }
-        for (fid, f) in module.functions.iter() {
-            for ann in &f.annotations {
-                if !deco_names.contains(&ann.name.name) {
-                    continue;
-                }
-                if f.backend == bone_semantic::hir::FnBackend::Lua {
-                    continue;
-                }
-                let &(dmid, did) = deco_map
-                    .get(&ann.name.name)
-                    .expect("decorator name resolves");
-                let d = &ws.module(dmid).decorators[did];
-                if skull_mir::definition::is_compiler_owned_decorator(d) {
-                    continue;
-                }
-                let fr = FuncRef {
-                    module: module.id,
-                    func: fid,
-                };
-                let instance = Instance::base(fr);
-                let _js_fn = names.get(&instance).ok_or_else(|| {
-                    err(format!(
-                        "JS subset: decorated fn `{}` was not emitted (not a program root)",
-                        f.name
-                    ))
-                })?;
-                let identity = skull_mir::code_identity::CodeIdentity::Named(instance);
-                let key = identity.logical_key(ws, interner);
-                let code_ref = format!("__rock_code_slot_ref({})", js_string_lit(&key)?);
-                let descriptor = format!(
-                    "{{name: {}, params: [], func: {code_ref}}}",
-                    js_string_lit(f.name.as_str())?
-                );
-                let mut call_args = vec![descriptor];
-                call_args.extend(decorator_call_args_js(ws, dmid, did, ann)?);
-                out.push_str(&format!(
-                    "{}({});\n",
-                    decorator_js_name(ann.name.name.as_str()),
-                    call_args.join(", ")
-                ));
-            }
-        }
+    for app in decorators.applications(ws, bone_semantic::hir::FnBackend::Js) {
+        let (dmid, did) = app.decorator;
+        let instance = Instance::base(app.func);
+        let _js_fn = names.get(&instance).ok_or_else(|| {
+            err(format!(
+                "JS subset: decorated fn `{}` was not emitted (not a program root)",
+                app.function.name
+            ))
+        })?;
+        let identity = skull_mir::code_identity::CodeIdentity::Named(instance);
+        let key = identity.logical_key(ws, interner);
+        let code_ref = format!("__rock_code_slot_ref({})", js_string_lit(&key)?);
+        let descriptor = format!(
+            "{{name: {}, params: [], func: {code_ref}}}",
+            js_string_lit(app.function.name.as_str())?
+        );
+        let mut call_args = vec![descriptor];
+        call_args.extend(decorator_call_args_js(ws, dmid, did, app.annotation)?);
+        out.push_str(&format!(
+            "{}({});\n",
+            decorator_symbol(ws.module(dmid).decorators[did].def_key.as_str()),
+            call_args.join(", ")
+        ));
     }
     Ok(out)
 }

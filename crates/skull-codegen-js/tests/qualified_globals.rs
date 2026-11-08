@@ -226,3 +226,37 @@ fn qualified_const_overlay_reinitializes_dependents() {
         assert_eq!(output, lua_out);
     }
 }
+
+/// A package decorator that shares its spelling with the stdlib's `on_reload`
+/// is a different definition. Applications resolve by definition key, so only
+/// the applied one is emitted, under the same symbol the Lua backend uses.
+#[test]
+fn decorator_applications_resolve_by_definition_key() {
+    let ws = workspace(
+        "global HITS: int = 0\n\
+         deco init on_reload { HITS = HITS + 1 }\n\
+         @on_reload fn tick() {}\n\
+         @nomangle fn root() -> int { HITS }",
+    );
+    let fr = root(&ws);
+    let program = skull_codegen_js::emit::emit_program(&ws, fr.module)
+        .expect("JS program")
+        .program;
+    let symbol = format!(
+        "__deco_{}",
+        skull_mir::mangle::symbol_of_key(ustr::Ustr::from("app::on_reload"))
+    );
+    let definitions: Vec<&str> = program
+        .lines()
+        .filter(|line| line.starts_with("function __deco_"))
+        .collect();
+    assert_eq!(
+        definitions,
+        [format!("function {symbol}(c0) {{").as_str()],
+        "{program}"
+    );
+    assert!(
+        program.contains(&format!("{symbol}({{name: \"app::tick\"")),
+        "{program}"
+    );
+}
