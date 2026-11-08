@@ -6,10 +6,11 @@
 
 use rock_tokenizer::{TokenKind, Tokenizer};
 
+use bone_semantic::hir;
 use bone_semantic::prelude::{Span, Workspace};
 use skull_parser::ast::FnBackend;
 
-use crate::query::{RefSite, RenameSubject, TextOf};
+use crate::query::{RefSite, RenameSubject, TextOf, is_read_only_source};
 
 /// A rename the server declines, with the reason shown to the user.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -33,6 +34,96 @@ pub(super) fn check_new_name(new_name: &str) -> Result<(), RenameRefusal> {
             "cannot rename to `{new_name}`: not an identifier"
         ))),
     }
+}
+
+/// `Err` when a site lies in a read-only source. Renaming a function keeps to
+/// the overloads the user owns before it gets here, so a site left in the
+/// stdlib means the symbol itself belongs to it: a stdlib function, type or
+/// field, or a name rename reached from inside a stdlib file.
+pub(super) fn check_read_only<'t>(
+    sites: &[RefSite],
+    old: &str,
+    text_of: TextOf<'_, 't>,
+) -> Result<(), RenameRefusal> {
+    let Some(site) = sites
+        .iter()
+        .find(|s| is_read_only_source(s.span.file.as_str()))
+    else {
+        return Ok(());
+    };
+    let file = site.span.file.as_str();
+    let at = text_of(file).map_or_else(
+        || file.to_string(),
+        |t| site_label(file, t, site.span.offset_range.0),
+    );
+    Err(RenameRefusal(format!(
+        "cannot rename `{old}`: it would edit {at} in the standard library, which is read-only"
+    )))
+}
+
+/// `Err` when a user's reference to function `name` cannot be pinned to the
+/// user's overloads or the stdlib's that share the name. A resolved call says
+/// which overload it reaches, so it is either rewritten or left alone; a bare
+/// value (`let f = get`) or a call that did not resolve says nothing, and
+/// guessing either way can leave a wrong edit, so the rename is refused.
+pub(super) fn check_unpinned<'t>(
+    ws: &Workspace,
+    subject: RenameSubject,
+    old: &str,
+    text_of: TextOf<'_, 't>,
+) -> Result<(), RenameRefusal> {
+    let RenameSubject::Function(name) = subject else {
+        return Ok(());
+    };
+    let shared_with_stdlib = ws.functions_by_name.get(&name).is_some_and(|fns| {
+        fns.iter()
+            .any(|(m, _)| is_read_only_source(ws.module(*m).file.as_str()))
+    });
+    if !shared_with_stdlib {
+        return Ok(());
+    }
+    for (m, inf) in ws.inferences_iter() {
+        let module = ws.module(m);
+        if is_read_only_source(module.file.as_str()) {
+            continue;
+        }
+        for (owner, body) in module.bodies.iter() {
+            let bi = inf.per_fn.get(owner);
+            for (e, expr) in body.expr_arena.iter() {
+                let names_it = match expr {
+                    hir::Expr::Global(n) => *n == name,
+                    hir::Expr::Call {
+                        callee: hir::Callee::Unresolved { name: n, .. },
+                        ..
+                    } => *n == name,
+                    hir::Expr::SafeNavCall { method, .. } => *method == name,
+                    _ => false,
+                };
+                let pinned = bi.is_some_and(|bi| {
+                    bi.resolved_overload_calls.contains_key(&e)
+                        || bi.fn_field_calls.contains_key(&e)
+                        || bi.bound_calls.contains_key(&e)
+                        || bi.bound_identity_calls.contains(&e)
+                });
+                if !names_it || pinned {
+                    continue;
+                }
+                let Some(span) = body.expr_spans.get(e) else {
+                    continue;
+                };
+                let file = span.file.as_str();
+                let at = text_of(file).map_or_else(
+                    || file.to_string(),
+                    |t| site_label(file, t, span.offset_range.0),
+                );
+                return Err(RenameRefusal(format!(
+                    "cannot rename `{old}`: the reference at {at} could name the standard \
+                     library's `{old}` instead, and rename cannot tell which"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `Err` when code Rock cannot rewrite spells the old name. Rename edits only

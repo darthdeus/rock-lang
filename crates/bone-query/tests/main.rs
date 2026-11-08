@@ -68,6 +68,8 @@ mod program_inputs;
 mod query;
 #[path = "reachability.rs"]
 mod reachability;
+#[path = "rename_read_only.rs"]
+mod rename_read_only;
 #[path = "semantic_token_mutations.rs"]
 mod semantic_token_mutations;
 #[path = "semantic_tokens.rs"]

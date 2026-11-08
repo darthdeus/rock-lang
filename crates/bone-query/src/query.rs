@@ -1078,6 +1078,12 @@ impl RefSite {
 /// mis-spanned.
 pub type TextOf<'a, 't> = &'a dyn Fn(&str) -> Option<&'t str>;
 
+/// Whether `file` is a source no edit may touch: the standard library and
+/// other compiler-provided `<...>` sources.
+pub(crate) fn is_read_only_source(file: &str) -> bool {
+    rock_stdlib::is_stdlib_module_file(file) || file.starts_with('<')
+}
+
 /// How a function/method reference walk scopes overloads. rock overloads share
 /// one name (`fn foo(a: A)` / `fn foo(b: B)` and D-form `fn A.foo` are all `foo`),
 /// but find-usages wants only the overload under the cursor while RENAME must
@@ -1145,12 +1151,22 @@ pub fn references<'t>(
     if let Some((fmid, fid)) = function_target(ws, mid, inf, offset) {
         let name = ws.modules.get(fmid.index()).map(|m| m.functions[fid].name);
         if let Some(name) = name {
-            // Find-usages scopes to this overload; rename keeps the shared name.
-            let target = match fn_scope {
-                FnRefScope::ThisOverload => Some((fmid, fid)),
-                FnRefScope::AllOverloads => None,
+            // Find-usages scopes to this overload; rename keeps the shared
+            // name, but only across overloads the user owns: a stdlib overload
+            // sharing the name is a different function. A read-only target
+            // keeps its whole family, and rename then refuses on those sites.
+            let (target, owned_only) = match fn_scope {
+                FnRefScope::ThisOverload => (Some((fmid, fid)), false),
+                FnRefScope::AllOverloads => (
+                    None,
+                    ws.modules
+                        .get(fmid.index())
+                        .is_some_and(|m| !is_read_only_source(m.file.as_str())),
+                ),
             };
-            return plain(function_references_by_name(ws, name, target, text_of));
+            return plain(function_references_by_name(
+                ws, name, target, owned_only, text_of,
+            ));
         }
     }
 
@@ -2739,9 +2755,11 @@ fn function_references_by_name<'t>(
     ws: &Workspace,
     name: Ustr,
     target: Option<(ModuleId, Idx<hir::Function>)>,
+    owned_only: bool,
     text_of: TextOf<'_, 't>,
 ) -> Vec<Span> {
     let mut out = Vec::new();
+    let excluded = |m: &hir::Module| owned_only && is_read_only_source(m.file.as_str());
 
     // Each matching overload's declaration name (only the target, if scoped).
     for m in ws.modules.iter() {
@@ -2750,7 +2768,7 @@ fn function_references_by_name<'t>(
                 if target.is_some_and(|t| t != (*fmid, *fid)) {
                     continue;
                 }
-                if let Some(fm) = ws.modules.get(fmid.index()) {
+                if let Some(fm) = ws.modules.get(fmid.index()).filter(|fm| !excluded(fm)) {
                     out.push(fm.functions[*fid].name_span);
                 }
             }
@@ -2774,7 +2792,7 @@ fn function_references_by_name<'t>(
                     None => ws
                         .modules
                         .get(cmid.index())
-                        .is_some_and(|cm| cm.functions[*cfid].name == name),
+                        .is_some_and(|cm| cm.functions[*cfid].name == name && !excluded(cm)),
                 };
                 if matches {
                     match &body.expr_arena[*call_idx] {
@@ -2818,6 +2836,11 @@ fn function_references_by_name<'t>(
             // call, a bare value reference carries no argument list to
             // disambiguate an overload, so it's matched by name for both
             // scopes -- there's no finer-grained target to restrict to.
+            // Rename refuses first when the name also reaches a stdlib
+            // overload (`rename_guard::check_unpinned`).
+            if excluded(module) {
+                continue;
+            }
             for (e, expr) in body.expr_arena.iter() {
                 if let hir::Expr::Global(gname) = expr {
                     if *gname == name {

@@ -1905,6 +1905,8 @@ impl BoneWorkspace {
                     None => crate::query::rename_subject(ws, mid, inf, offset),
                 }
             });
+        rename_guard::check_unpinned(ws, subject, old, &text_of)?;
+        rename_guard::check_read_only(&sites, old, &text_of)?;
         rename_guard::check_opaque(ws, subject, &sites, old, &text_of)?;
         Ok(sites)
     }

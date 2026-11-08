@@ -1444,3 +1444,40 @@ fn an_operator_use_item_segment_lands_on_the_operator() {
         ("shapes.rock".into(), 0)
     );
 }
+
+#[test]
+fn renaming_a_function_stops_at_its_own_definition_and_the_stdlib() {
+    const GET_MAIN: &str = "\
+fn main() {
+    let a = shapes::get(1)
+    let b = other::get(2)
+    print(\"{a} {b}\")
+}
+";
+    const GET_SHAPES: &str = "pub mod shapes;\n\npub fn get(w: int) -> int {\n    w\n}\n";
+    const GET_OTHER: &str = "pub mod other;\n\npub fn get(w: int) -> int {\n    w + 1\n}\n";
+    let project = V1Project::new();
+    let dir = project.dir.path();
+    std::fs::write(dir.join("main.rock"), GET_MAIN).unwrap();
+    std::fs::write(dir.join("shapes.rock"), GET_SHAPES).unwrap();
+    std::fs::write(dir.join("other.rock"), GET_OTHER).unwrap();
+    std::fs::remove_file(dir.join("shapes_inner.rock")).unwrap();
+    std::fs::remove_file(dir.join("facade.rock")).unwrap();
+
+    let mut bone = BoneWorkspace::new();
+    let diags = bone.update(&project.path("main.rock"), GET_MAIN.to_string());
+    assert!(
+        diags
+            .iter()
+            .flat_map(|(_, d)| d)
+            .all(|d| d.severity != Some(lsp_types::DiagnosticSeverity::ERROR)),
+        "{diags:#?}"
+    );
+    let shapes = project.path("shapes.rock");
+    let edits = rename_edits(&bone, &shapes, pos_of(GET_SHAPES, "get", 0, 1), "fetch");
+    let want: Vec<(String, u32, String, String)> = vec![
+        ("main.rock".into(), 1, "get".into(), "fetch".into()),
+        ("shapes.rock".into(), 2, "get".into(), "fetch".into()),
+    ];
+    assert_eq!(edits, want);
+}
