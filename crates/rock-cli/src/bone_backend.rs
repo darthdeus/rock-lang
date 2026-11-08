@@ -253,11 +253,7 @@ pub(crate) fn session_files(sources: &SourceFiles) -> Vec<bone_incremental::sess
     sources
         .files
         .iter()
-        .map(|source| {
-            let source = source.borrow();
-            let file = bone_incremental::session::SessionFile::from_source(&source);
-            file
-        })
+        .map(|source| bone_incremental::session::SessionFile::from_source(&source.borrow()))
         .collect()
 }
 
@@ -308,8 +304,6 @@ pub fn bone_pipeline_timed(
     let t = Instant::now();
     let res = check_with_stdlib([module]).map(|_| ());
     times.semantic = t.elapsed();
-
-    if res.is_ok() {}
     (res, times)
 }
 

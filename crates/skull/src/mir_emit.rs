@@ -4540,19 +4540,14 @@ fn decorator_application_lines(
                     f.name.as_str(),
                     key
                 );
-                match crate::decorator_call_args(ws, dmid, did, ann) {
-                    Ok(args) => {
-                        let mut call_args = vec![target];
-                        call_args.extend(args);
-                        let _ = writeln!(
-                            deco_lines,
-                            "{}({})",
-                            crate::decorator_fn_name(app_key.as_str()),
-                            call_args.join(", ")
-                        );
-                    }
-                    Err(e) => return Err(e),
-                }
+                let mut call_args = vec![target];
+                call_args.extend(crate::decorator_call_args(ws, dmid, did, ann)?);
+                let _ = writeln!(
+                    deco_lines,
+                    "{}({})",
+                    crate::decorator_fn_name(app_key.as_str()),
+                    call_args.join(", ")
+                );
             }
         }
     }
@@ -8665,10 +8660,7 @@ fn assemble_overlay(
         }
         definitions.append_to(&mut out);
 
-        match sort_global_init_lines(inits) {
-            Ok(lines) => out.push_str(&lines.concat()),
-            Err(e) => return Err(e),
-        }
+        out.push_str(&sort_global_init_lines(inits)?.concat());
     }
     let d_const_inits = t_const_inits.elapsed();
 

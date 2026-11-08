@@ -320,8 +320,6 @@ pub fn skull_workspace_timed(
             false
         }
     };
-
-    if emit_ok {}
     (emit_ok, times)
 }
 
