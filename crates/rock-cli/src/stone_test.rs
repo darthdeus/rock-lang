@@ -21,13 +21,13 @@
 
 use crate::skull_backend::{IncrementalProject, SkullReload};
 use anyhow::Result;
+use rock_core::clock::Instant;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::channel;
-use std::time::Instant;
 
 /// One reload event sent to the controlling process.
 #[derive(Clone)]
