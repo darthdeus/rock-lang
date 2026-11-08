@@ -27,8 +27,13 @@ use ustr::Ustr;
 
 pub struct GlobalReach {
     id_of: FxHashMap<Ustr, u32>,
-    names: Vec<Ustr>,
-    closure: Vec<HashSet<u32>>,
+    /// The global names, indexed by the bit each one owns in a closure set.
+    globals: Vec<Ustr>,
+    /// Each name's strongly connected component in the call graph.
+    component_of: Vec<u32>,
+    /// One bitset over `globals` per component: the globals its bodies read,
+    /// transitively through their calls.
+    closure: Vec<Vec<u64>>,
 }
 
 impl GlobalReach {
@@ -36,79 +41,172 @@ impl GlobalReach {
         let Some(&id) = self.id_of.get(&body) else {
             return Vec::new();
         };
-        self.closure[id as usize]
-            .iter()
-            .map(|&global| self.names[global as usize])
-            .collect()
+        let bits = &self.closure[self.component_of[id as usize] as usize];
+        let mut out = Vec::new();
+        for (word_index, &word) in bits.iter().enumerate() {
+            let mut word = word;
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                out.push(self.globals[word_index * 64 + bit]);
+                word &= word - 1;
+            }
+        }
+        out
     }
 }
 
+/// The globals each body reads, transitively through the bodies it calls.
+///
+/// Bodies in one call-graph cycle read the same globals, so the closure is
+/// computed once per strongly connected component, in the reverse
+/// topological order Tarjan's search yields: by the time a component is
+/// finished every component it calls into already has its set, and the
+/// union is one pass over bitsets. The old per-body fixpoint loop re-scanned
+/// every edge until nothing changed, which on a large program was several
+/// milliseconds of the serial assembly.
 pub fn transitive_global_reads(
     direct_globals: &FxHashMap<Ustr, Vec<Ustr>>,
     direct_calls: &FxHashMap<Ustr, Vec<Ustr>>,
 ) -> GlobalReach {
-    let mut id_of = FxHashMap::default();
-    let mut names = Vec::new();
-    let intern = |name: Ustr, id_of: &mut FxHashMap<Ustr, u32>, names: &mut Vec<Ustr>| match id_of
-        .get(&name)
-    {
-        Some(&index) => index,
-        None => {
-            let index = names.len() as u32;
-            names.push(name);
-            id_of.insert(name, index);
-            index
-        }
+    let mut id_of: FxHashMap<Ustr, u32> = FxHashMap::default();
+    let mut intern = |name: Ustr| -> u32 {
+        let next = id_of.len() as u32;
+        *id_of.entry(name).or_insert(next)
     };
-    for (body, globals) in direct_globals {
-        intern(*body, &mut id_of, &mut names);
-        for global in globals {
-            intern(*global, &mut id_of, &mut names);
+    let mut global_bit: FxHashMap<Ustr, u32> = FxHashMap::default();
+    let mut globals = Vec::new();
+    let mut own_globals: Vec<(u32, u32)> = Vec::new();
+    for (body, read) in direct_globals {
+        let body = intern(*body);
+        for global in read {
+            let next = globals.len() as u32;
+            let bit = *global_bit.entry(*global).or_insert_with(|| {
+                globals.push(*global);
+                next
+            });
+            own_globals.push((body, bit));
         }
     }
+    let mut edges: Vec<(u32, u32)> = Vec::new();
     for (body, callees) in direct_calls {
-        intern(*body, &mut id_of, &mut names);
+        let body = intern(*body);
         for callee in callees {
-            intern(*callee, &mut id_of, &mut names);
+            edges.push((body, intern(*callee)));
         }
     }
-    let mut closure = vec![HashSet::default(); names.len()];
-    let mut callees = vec![Vec::new(); names.len()];
-    for (body, globals) in direct_globals {
-        let body = id_of[body] as usize;
-        for global in globals {
-            closure[body].insert(id_of[global]);
+    // A global's own name may never appear as a body; give every name a node
+    // so `component_of` is total over `id_of`.
+    for global in &globals {
+        intern(*global);
+    }
+    let node_count = id_of.len();
+    let mut callees = vec![Vec::new(); node_count];
+    for (from, to) in edges {
+        callees[from as usize].push(to);
+    }
+
+    let components = tarjan_components(&callees);
+    let mut component_of = vec![u32::MAX; node_count];
+    for (index, members) in components.iter().enumerate() {
+        for &member in members {
+            component_of[member as usize] = index as u32;
         }
     }
-    for (body, direct) in direct_calls {
-        let body = id_of[body] as usize;
-        callees[body].extend(direct.iter().map(|callee| id_of[callee]));
+    let words = globals.len().div_ceil(64);
+    let mut closure = vec![vec![0u64; words]; components.len()];
+    for (body, bit) in own_globals {
+        let set = &mut closure[component_of[body as usize] as usize];
+        set[bit as usize / 64] |= 1 << (bit % 64);
     }
-    let mut additions = Vec::new();
-    loop {
-        let mut changed = false;
-        for body in 0..closure.len() {
-            additions.clear();
-            for &callee in &callees[body] {
-                for &global in &closure[callee as usize] {
-                    if !closure[body].contains(&global) {
-                        additions.push(global);
-                    }
+    // Components come out callee-first, so a callee's set is final here.
+    for (index, members) in components.iter().enumerate() {
+        for &member in members {
+            for &callee in &callees[member as usize] {
+                let callee_component = component_of[callee as usize] as usize;
+                if callee_component == index {
+                    continue;
+                }
+                let (earlier, later) = closure.split_at_mut(index);
+                let (from, into) = if callee_component < index {
+                    (&earlier[callee_component], &mut later[0])
+                } else {
+                    unreachable!("Tarjan emits a callee's component before its caller's");
+                };
+                for (word, source) in into.iter_mut().zip(from) {
+                    *word |= source;
                 }
             }
-            for &global in &additions {
-                changed |= closure[body].insert(global);
-            }
-        }
-        if !changed {
-            break;
         }
     }
     GlobalReach {
         id_of,
-        names,
+        globals,
+        component_of,
         closure,
     }
+}
+
+/// Tarjan's strongly connected components over `callees`, iteratively, in
+/// the order the search finishes them: every component appears after each
+/// component it has an edge into.
+fn tarjan_components(callees: &[Vec<u32>]) -> Vec<Vec<u32>> {
+    const UNVISITED: u32 = u32::MAX;
+    let n = callees.len();
+    let mut index_of = vec![UNVISITED; n];
+    let mut low = vec![0u32; n];
+    let mut on_stack = vec![false; n];
+    let mut stack: Vec<u32> = Vec::new();
+    let mut components = Vec::new();
+    let mut next_index = 0u32;
+    // (node, position of the next callee to visit)
+    let mut work: Vec<(u32, usize)> = Vec::new();
+    for root in 0..n {
+        if index_of[root] != UNVISITED {
+            continue;
+        }
+        work.push((root as u32, 0));
+        index_of[root] = next_index;
+        low[root] = next_index;
+        next_index += 1;
+        stack.push(root as u32);
+        on_stack[root] = true;
+        while let Some(&mut (node, ref mut position)) = work.last_mut() {
+            let node_usize = node as usize;
+            if *position < callees[node_usize].len() {
+                let callee = callees[node_usize][*position] as usize;
+                *position += 1;
+                if index_of[callee] == UNVISITED {
+                    index_of[callee] = next_index;
+                    low[callee] = next_index;
+                    next_index += 1;
+                    stack.push(callee as u32);
+                    on_stack[callee] = true;
+                    work.push((callee as u32, 0));
+                } else if on_stack[callee] {
+                    low[node_usize] = low[node_usize].min(index_of[callee]);
+                }
+                continue;
+            }
+            work.pop();
+            if let Some(&(parent, _)) = work.last() {
+                let parent = parent as usize;
+                low[parent] = low[parent].min(low[node_usize]);
+            }
+            if low[node_usize] == index_of[node_usize] {
+                let mut members = Vec::new();
+                loop {
+                    let member = stack.pop().expect("component member on the Tarjan stack");
+                    on_stack[member as usize] = false;
+                    members.push(member);
+                    if member == node {
+                        break;
+                    }
+                }
+                components.push(members);
+            }
+        }
+    }
+    components
 }
 
 /// Forward symbol references from the current inference: each function and
@@ -519,6 +617,60 @@ pub fn spec_bound_calls(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod global_reach_tests {
+    use super::transitive_global_reads;
+    use rustc_hash::FxHashMap;
+    use ustr::Ustr;
+
+    fn table(rows: &[(&str, &[&str])]) -> FxHashMap<Ustr, Vec<Ustr>> {
+        rows.iter()
+            .map(|(name, items)| {
+                (
+                    Ustr::from(name),
+                    items.iter().map(|item| Ustr::from(item)).collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn sorted(mut names: Vec<Ustr>) -> Vec<&'static str> {
+        names.sort();
+        names.into_iter().map(|name| name.as_str()).collect()
+    }
+
+    #[test]
+    fn reads_follow_calls_through_chains_and_cycles() {
+        // entry -> a -> b <-> c, c reads G1, a reads G0, b reads nothing.
+        let reach = transitive_global_reads(
+            &table(&[("a", &["G0"]), ("c", &["G1"]), ("d", &["G2"])]),
+            &table(&[
+                ("entry", &["a"]),
+                ("a", &["b"]),
+                ("b", &["c"]),
+                ("c", &["b"]),
+            ]),
+        );
+        assert_eq!(sorted(reach.deps_of(Ustr::from("entry"))), ["G0", "G1"]);
+        assert_eq!(sorted(reach.deps_of(Ustr::from("a"))), ["G0", "G1"]);
+        assert_eq!(sorted(reach.deps_of(Ustr::from("b"))), ["G1"]);
+        assert_eq!(sorted(reach.deps_of(Ustr::from("c"))), ["G1"]);
+        assert_eq!(sorted(reach.deps_of(Ustr::from("d"))), ["G2"]);
+        assert!(reach.deps_of(Ustr::from("G0")).is_empty());
+        assert!(reach.deps_of(Ustr::from("unknown")).is_empty());
+    }
+
+    #[test]
+    fn a_body_that_only_calls_inherits_its_callees_reads() {
+        let reach = transitive_global_reads(
+            &table(&[("leaf", &["G"])]),
+            &table(&[("caller", &["leaf", "leaf"]), ("lonely", &[])]),
+        );
+        assert_eq!(sorted(reach.deps_of(Ustr::from("caller"))), ["G"]);
+        assert!(reach.deps_of(Ustr::from("lonely")).is_empty());
+    }
 }
 
 #[cfg(test)]
