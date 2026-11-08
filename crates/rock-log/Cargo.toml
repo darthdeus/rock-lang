@@ -11,7 +11,7 @@ repository.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
-bone-core = { workspace = true }
+rock-core = { workspace = true }
 log = { workspace = true }
 once_cell = { workspace = true }
 env_filter = { workspace = true }

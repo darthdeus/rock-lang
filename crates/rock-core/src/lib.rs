@@ -3,6 +3,7 @@
 //! Deliberately holds nothing AST-shaped — the parser (`skull-parser`)
 //! and `rock-tokenizer` both build on top of this.
 
+pub mod clock;
 pub mod compile_stats;
 pub mod errors;
 pub mod module_id;

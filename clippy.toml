@@ -1,1 +1,1 @@
-disallowed-types = [{ path = "std::time::Instant", reason = "Use bone_core::prelude::Instant for the shared native/wasm clock" }]
+disallowed-types = [{ path = "std::time::Instant", reason = "Use rock_core::clock::Instant (bone_core::prelude::Instant) for the shared native/wasm clock" }]

@@ -1907,10 +1907,10 @@ dependencies = [
 name = "rock-log"
 version = "0.1.0"
 dependencies = [
- "bone-core",
  "env_filter",
  "log",
  "once_cell",
+ "rock-core",
 ]
 
 [[package]]

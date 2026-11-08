@@ -6,8 +6,8 @@
 //! `log_once!` / `log_throttled!` filters; this is the only thing that
 //! actually writes. `eprintln!` here is the *one* sanctioned raw write.
 
-use bone_core::prelude::Instant;
 use once_cell::sync::Lazy;
+use rock_core::clock::Instant;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::atomic::{AtomicU8, Ordering};
