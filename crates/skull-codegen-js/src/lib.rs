@@ -1155,7 +1155,9 @@ function inspect_formatted(obj, precision) { return inspect(obj, true, precision
 /// `deepcopy`: the recursive `__rock_deepcopy_value` clone (stdlib/unified.rock).
 /// A `seen` Map (object identity) preserves the graph -- a shared reference copies
 /// ONCE, a cycle terminates. Primitives and bare functions pass through by identity;
-/// a TypedArray (NativeBuffer `.ptr`) is `.slice()`d; a `Map` and an array (a Vec's
+/// a TypedArray (NativeBuffer `.ptr` or a leaf view) is rebuilt over a copy of its
+/// `ArrayBuffer`, copied once per buffer, so a value-struct buffer's leaf views
+/// alias the copy's `.ptr` as they alias the original's; a `Map` and an array (a Vec's
 /// `_data`) copy element-wise; every other object (a struct `{__ty,...}`, a CodeRef
 /// env record `{__slot,...}`, a box) copies own keys. A copied env record keeps its
 /// logical slot and copies its captures, so calls remain fresh while mutable boxes
@@ -1168,7 +1170,14 @@ function __rock_deepcopy_value(obj, seen) {
   if (t === "function") return obj;
   if (typeof __rock_code_ref_kind === "function" && __rock_code_ref_kind(obj) === "slot") return obj;
   if (seen.has(obj)) return seen.get(obj);
-  if (ArrayBuffer.isView(obj)) { var tc = obj.slice(); seen.set(obj, tc); return tc; }
+  if (ArrayBuffer.isView(obj)) {
+    var bc = seen.get(obj.buffer);
+    if (bc === undefined) { bc = obj.buffer.slice(0); seen.set(obj.buffer, bc); }
+    var tc = new obj.constructor(bc, obj.byteOffset, obj.byteLength / (obj.BYTES_PER_ELEMENT || 1));
+    if (obj.__rock_elem_size !== undefined) tc.__rock_elem_size = obj.__rock_elem_size;
+    seen.set(obj, tc);
+    return tc;
+  }
   if (obj instanceof Map) {
     var mc = new Map();
     seen.set(obj, mc);

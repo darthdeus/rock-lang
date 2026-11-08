@@ -179,24 +179,28 @@ impl Builder<'_> {
     fn param_slot_hazard_mono(
         &self,
         mono: &crate::monoty::MonoTy,
+        leaf_views_rebuilt: bool,
     ) -> Result<Option<(String, &'static str)>, CompilerError> {
         match mono {
-            crate::monoty::MonoTy::Nullable(inner) => self.param_slot_hazard_mono(inner),
+            crate::monoty::MonoTy::Nullable(inner) => {
+                self.param_slot_hazard_mono(inner, leaf_views_rebuilt)
+            }
             crate::monoty::MonoTy::Tuple(elems) => {
                 for elem in elems {
-                    if let Some(hazard) = self.param_slot_hazard_mono(elem)? {
+                    if let Some(hazard) = self.param_slot_hazard_mono(elem, leaf_views_rebuilt)? {
                         return Ok(Some(hazard));
                     }
                 }
                 Ok(None)
             }
-            _ => self.slot_hazard_mono(mono),
+            _ => self.slot_hazard_mono(mono, leaf_views_rebuilt),
         }
     }
 
     fn slot_hazard_mono(
         &self,
         mono: &crate::monoty::MonoTy,
+        leaf_views_rebuilt: bool,
     ) -> Result<Option<(String, &'static str)>, CompilerError> {
         let family = match mono {
             crate::monoty::MonoTy::App {
@@ -248,7 +252,7 @@ impl Builder<'_> {
                 Ok(Some((rendered, physical)))
             }
             ContainerStorage::LeafAddressed { .. }
-                if self.scx.target == bone_semantic::hir::FnBackend::Js =>
+                if self.scx.target == bone_semantic::hir::FnBackend::Js && !leaf_views_rebuilt =>
             {
                 let elem = plan
                     .ffi_element_name(&arena)
@@ -280,12 +284,19 @@ impl Builder<'_> {
         if callee.param_decls.len() != signature.params.len() {
             return Err(self.gap_here("concrete callee signature has the wrong parameter count"));
         }
+        // The JS `deepcopy` runtime rebuilds every TypedArray over one copy of
+        // its buffer, so a leaf-addressed native container comes back with its
+        // views over its own storage, in and out.
+        let leaf_views_rebuilt =
+            callee.name == "deepcopy" && crate::intrinsics::is_intrinsic(callee);
         for (i, id) in signature.params.iter().enumerate() {
             if self.param_is_repr_opaque(func, i) {
                 continue;
             }
             let mono = self.concrete_mono_view(*id, ConcreteMonoConsumer::NoboxBoundary);
-            if let Some((rendered, physical)) = self.param_slot_hazard_mono(&mono)? {
+            if let Some((rendered, physical)) =
+                self.param_slot_hazard_mono(&mono, leaf_views_rebuilt)?
+            {
                 return Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],
                     format!(
@@ -302,7 +313,7 @@ impl Builder<'_> {
             return Ok(());
         };
         let mono = self.concrete_mono_view(id, ConcreteMonoConsumer::NoboxBoundary);
-        let Some((rendered, physical)) = self.slot_hazard_mono(&mono)? else {
+        let Some((rendered, physical)) = self.slot_hazard_mono(&mono, leaf_views_rebuilt)? else {
             return Ok(());
         };
         Err(CompilerError::new_with_label(

@@ -170,3 +170,42 @@ fn clone_into_copies_column_vec_storage() {
     let js = emit_closure(&ws, "root").expect("column clone_into emits");
     eval_int(&js, "root", 132);
 }
+
+// A value-struct NativeBuffer is one flat array plus typed leaf views over its
+// bytes. The copy's views must alias the copy's own array, and the array keeps
+// its element width, so a write through a view shows through `.ptr`.
+#[test]
+fn native_buffer_copy_rebuilds_leaf_views_over_its_storage() {
+    if !node_available() {
+        eprintln!("SKIP: node not found");
+        return;
+    }
+    let program = format!(
+        "{}{}\n\
+         var ptr = Object.assign(new Float32Array(4), {{__rock_elem_size: 8}});\n\
+         var nb = {{ ptr: ptr, len: 2, __view_int: new Int32Array(ptr.buffer, ptr.byteOffset) }};\n\
+         nb.__view_int[0] = 3;\n\
+         var copy = deepcopy({{ buf: nb, len: 1 }});\n\
+         copy.buf.__view_int[0] = 9;\n\
+         var shared = new Int32Array(copy.buf.ptr.buffer)[0];\n\
+         console.log([nb.__view_int[0], shared, copy.buf.ptr.__rock_elem_size,\n\
+             copy.buf.ptr.buffer !== ptr.buffer].join(\",\"));",
+        skull_codegen_js::JS_CALL_HELPER,
+        skull_codegen_js::JS_DEEPCOPY_RUNTIME,
+    );
+    let out = crate::common::node()
+        .arg("-e")
+        .arg(&program)
+        .output()
+        .expect("spawn node");
+    assert!(
+        out.status.success(),
+        "node failed:\n{program}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "3,9,8,true",
+        "{program}"
+    );
+}
