@@ -239,7 +239,7 @@ fn main() { print(hot()) }\n";
 
 #[test]
 fn every_js_production_route_enters_the_shared_session() {
-    let source = include_str!("../src/emit.rs");
+    let source = crate::common::EMIT_SOURCE;
     for (route, seam) in [
         ("pub fn emit_with_closure(", "new_js_session("),
         ("pub fn emit_program(", "build_program_session("),
@@ -275,7 +275,7 @@ fn every_js_production_route_enters_the_shared_session() {
     );
     let overlay_start = source.find("pub fn emit_overlay(").unwrap();
     let overlay_end = source[overlay_start..]
-        .find("\nfn collect_statics(")
+        .find("\npub(super) fn collect_statics(")
         .map(|offset| overlay_start + offset)
         .expect("emit_overlay has a following private helper");
     let overlay = &source[overlay_start..overlay_end];

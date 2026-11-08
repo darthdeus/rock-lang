@@ -9,6 +9,27 @@ use skull_mir::lower::{ScalarCtx, lower_instance_with_plans};
 use skull_mir::mir::{FuncRef, MirFunc};
 use skull_mir::monoty::MonoInterner;
 
+/// The JS emitter's source, one string, for tests that pin its structure.
+/// `session` comes last so each route reads its session seam after it.
+pub const EMIT_SOURCE: &str = concat!(
+    include_str!("../../src/emit/mod.rs"),
+    include_str!("../../src/emit/lanes.rs"),
+    include_str!("../../src/emit/function.rs"),
+    include_str!("../../src/emit/structured.rs"),
+    include_str!("../../src/emit/effects.rs"),
+    include_str!("../../src/emit/inst.rs"),
+    include_str!("../../src/emit/assemble.rs"),
+    include_str!("../../src/emit/overlay.rs"),
+    include_str!("../../src/emit/worklist.rs"),
+    include_str!("../../src/emit/delivery.rs"),
+    include_str!("../../src/emit/plan_stages.rs"),
+    include_str!("../../src/emit/tables.rs"),
+    include_str!("../../src/emit/globals.rs"),
+    include_str!("../../src/emit/coroutine.rs"),
+    include_str!("../../src/emit/analysis.rs"),
+    include_str!("../../src/emit/session.rs")
+);
+
 pub struct InlineOffGuard(#[allow(dead_code)] skull_transform::InlineOffGuard);
 
 impl InlineOffGuard {

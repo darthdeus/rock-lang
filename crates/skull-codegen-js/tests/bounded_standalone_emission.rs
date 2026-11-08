@@ -97,7 +97,7 @@ fn an_unbounded_body_emits_to_js_with_inlining_disabled() {
 
 #[test]
 fn js_specializations_consume_concrete_plan_bound_trees() {
-    let source = include_str!("../src/emit.rs");
+    let source = crate::common::EMIT_SOURCE;
     assert!(
         !source.contains("graph_trees"),
         "JS must not retain a second graph-tree delivery map"
