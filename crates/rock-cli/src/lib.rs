@@ -501,6 +501,7 @@ mod host_paths;
 mod log_record;
 pub mod package;
 pub mod stone_runtime;
+mod stone_test;
 pub mod stone_watch;
 
 pub mod run_sim;

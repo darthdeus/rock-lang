@@ -96,6 +96,13 @@ pub static COMMANDS: &[&CliCommand] = &[
         route: Route::Backend(Operation::Stone),
     },
     &CliCommand {
+        name: "stone-test",
+        route: Route::Direct(|cx| {
+            let path = cx.get_path_or_current()?;
+            crate::stone_test::run_stone_test(std::path::Path::new(&path))
+        }),
+    },
+    &CliCommand {
         name: "check",
         route: Route::Direct(bone_compile),
     },
@@ -505,6 +512,7 @@ pub fn command_metadata(command: &CliCommand) -> registry::CommandMetadata {
                 | "fmt"
                 | "frame"
                 | "sim"
+                | "stone-test"
         ),
         compiler_process: if command.cli_name() == "check"
             || matches!(
