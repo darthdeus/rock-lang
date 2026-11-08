@@ -827,7 +827,7 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
     let concrete = &skull.concrete_stats;
     if concrete.plan_attempts > 0 || concrete.always_plan_attempts > 0 {
         println!(
-            "  concrete plan facts (one timed run): ordinary plans {}/{} success/fail over {}; always {}/{} over {}; source slots expr/binding {}/{}; callee scans {} over {} borrowed rows; plan maps callees/signatures {}/{}; cloned type tables expr/binding/untyped {}/{}/{}/{}",
+            "  concrete plan facts (one timed run): ordinary plans {}/{} success/fail over {}; always {}/{} over {}; source slots expr/binding {}/{}; callee scans {} over {} borrowed rows; plan maps callees/signatures {}/{}",
             concrete.plan_successes,
             concrete.plan_failures,
             concrete.plan_attempts,
@@ -840,10 +840,6 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             concrete.callee_rows_visited,
             concrete.plan_callee_map_inserts,
             concrete.plan_callee_signature_inserts,
-            concrete.plan_type_expr_clones,
-            concrete.plan_type_binding_clones,
-            concrete.plan_untyped_expr_clones,
-            concrete.plan_untyped_binding_clones,
         );
         println!(
             "    concrete tables (one timed run): type nodes {} examined, {} conversions, {} memo hits, unresolved {}; struct literals {} with {} field conversions; foreign domains {}/{} requests/unique; elapsed ns type/struct/foreign/signature {}/{}/{}/{}",

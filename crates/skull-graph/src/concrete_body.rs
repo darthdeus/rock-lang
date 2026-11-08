@@ -375,10 +375,6 @@ pub struct ConcreteBuildStats {
     pub callee_rows_visited: usize,
     pub plan_callee_map_inserts: usize,
     pub plan_callee_signature_inserts: usize,
-    pub plan_type_expr_clones: usize,
-    pub plan_type_binding_clones: usize,
-    pub plan_untyped_expr_clones: usize,
-    pub plan_untyped_binding_clones: usize,
     pub type_nodes_examined: usize,
     pub type_node_memo_hits: usize,
     pub type_node_conversion_attempts: usize,
@@ -417,10 +413,6 @@ impl ConcreteBuildStats {
         self.callee_rows_visited += other.callee_rows_visited;
         self.plan_callee_map_inserts += other.plan_callee_map_inserts;
         self.plan_callee_signature_inserts += other.plan_callee_signature_inserts;
-        self.plan_type_expr_clones += other.plan_type_expr_clones;
-        self.plan_type_binding_clones += other.plan_type_binding_clones;
-        self.plan_untyped_expr_clones += other.plan_untyped_expr_clones;
-        self.plan_untyped_binding_clones += other.plan_untyped_binding_clones;
         self.type_nodes_examined += other.type_nodes_examined;
         self.type_node_memo_hits += other.type_node_memo_hits;
         self.type_node_conversion_attempts += other.type_node_conversion_attempts;
