@@ -5,9 +5,12 @@
 //!        fall-off would stamp the completed terminal with `__return` nil --
 //!        and `result()`/`take_result` would hand out a nil typed as R. The
 //!        rejection is EMIT-time (skull-mir `lower_root`), on the bone-accepted
-//!        program. Unit R (the default), nullable R (nil is a legal value), and
-//!        generic R (unknown at the shared lowering) all stay admitted; a body
-//!        whose end is unreachable (every path returns / `while true`) is fine.
+//!        program. Unit R (the default) and nullable R (nil is a legal value)
+//!        stay admitted; a body whose end is unreachable (every path returns /
+//!        `while true`) is fine. A generic R is checked per concrete
+//!        instantiation: falling off at a non-unit, non-nullable R rejects,
+//!        including when the instantiation is reached through a generic caller
+//!        (tests/coroutines/generic_result_falloff.rock pins the admitted ones).
 //! Tags: skull, coroutine, emit-time, fall-off
 
 //=== TEST CASE: falloff_int_result ===
@@ -30,5 +33,27 @@ co fn maybe(flag: bool) -> Coroutine<int, int> {
 }
 fn main() {
     let c = maybe(true)
+    resume(c)
+}
+
+//=== TEST CASE: falloff_generic_result_at_int ===
+co fn gen<R>(x: R) -> Coroutine<int, R> {
+    yield 1
+}
+fn main() {
+    let c = gen(5)
+    resume(c)
+}
+
+//=== TEST CASE: falloff_generic_result_through_generic_caller ===
+co fn gen<R>(x: R) -> Coroutine<int, R> {
+    yield 1
+}
+co fn wrap<R>(x: R) -> Coroutine<int, R> {
+    let r = await gen(x)
+    return r
+}
+fn main() {
+    let c = wrap("s")
     resume(c)
 }

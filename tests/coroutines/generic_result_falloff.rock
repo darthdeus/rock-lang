@@ -1,0 +1,56 @@
+// A generic-result co fn that can fall off its end is judged per concrete
+// instantiation. At a nullable or unit R the fall-off is a legal completion
+// carrying nil; at a non-unit, non-nullable R it is rejected at emit time
+// (tests/errors/coroutine_falloff_nonunit.rock.err). A generic R whose every
+// path returns is fine at any R.
+
+co fn gfall<R>(x: R) -> Coroutine<int, R> {
+    yield 1
+}
+
+co fn gret<R>(x: R) -> Coroutine<int, R> {
+    yield 1
+    return x
+}
+
+@test(output = "completed:true nil:true")
+fn test_generic_falloff_at_nullable_completes_with_nil() {
+    let n: int? = 4
+    let c = gfall(n)
+    resume(c)
+    resume(c)
+    print("completed:{completed(c)} nil:{result(c) == null}")
+}
+
+@test(output = "completed:true")
+fn test_generic_falloff_at_unit_completes() {
+    let c = gfall(())
+    resume(c)
+    resume(c)
+    print("completed:{completed(c)}")
+}
+
+co fn outer_awaits_nullable() -> Coroutine<int, string> {
+    let s: string? = "x"
+    let r = await gfall(s)
+    return if r == null { "nil" } else { "value" }
+}
+
+@test(output = "nil")
+fn test_await_of_generic_falloff_at_nullable_yields_nil() {
+    let c = outer_awaits_nullable()
+    resume(c)
+    resume(c)
+    print(result(c) ?? "missing")
+}
+
+@test(output = "7 hi")
+fn test_generic_return_at_concrete_results() {
+    let a = gret(7)
+    resume(a)
+    resume(a)
+    let b = gret("hi")
+    resume(b)
+    resume(b)
+    print("{result(a) ?? -1} {result(b) ?? "missing"}")
+}

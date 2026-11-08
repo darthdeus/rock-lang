@@ -3235,10 +3235,10 @@ impl Builder<'_> {
     /// `return <expr>` statements to R (a coroutine's body tail is discarded,
     /// never coerced), so a fall-off would stamp the completed terminal with
     /// `__return` nil and `result()`/`take_result` would hand out a nil typed
-    /// as R. Unit R (the default), nullable R (nil is a legal value), and
-    /// generic R (unknown at the shared lowering; explicit `return` sites in
-    /// instantiations are still checked by bone) all stay admitted. Called only
-    /// when the body's end is reachable, so `while true` bodies never trip it.
+    /// as R. Unit R (the default) and nullable R (nil is a legal value) stay
+    /// admitted. R is read from the concrete plan, so a generic R is judged
+    /// at each instantiation. Called only when the body's end is reachable,
+    /// so `while true` bodies never trip it.
     fn reject_nonunit_coroutine_falloff(&self) -> Result<(), CompilerError> {
         let plan = self.concrete_plan;
         let Some(result_id) = plan.signature.result else {
