@@ -9,6 +9,9 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct Chunk {
     pub(super) lua: String,
+    /// Top-level definitions in `lua`, counted where the chunk is built so
+    /// serial assembly does not rescan every emitted line.
+    pub(super) definition_count: usize,
     /// Includes hoisted closures and spliced bodies, unlike init-ordering refs.
     pub(super) literal_globals: Vec<Ustr>,
     pub(super) allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
@@ -111,6 +114,10 @@ fn definition_global(line: &str) -> Option<&str> {
     Some(&line[..skull_codegen_lua::CALLEE_FACTORY_PREFIX.len() + body.len()])
 }
 
+pub(super) fn lua_definition_count(lua: &str) -> usize {
+    lua.lines().filter_map(definition_global).count()
+}
+
 impl LuaDefinitionBuffer {
     pub(super) fn new() -> Self {
         Self {
@@ -121,8 +128,15 @@ impl LuaDefinitionBuffer {
     }
 
     pub(super) fn push_str(&mut self, lua: &str) {
+        self.push_counted(lua, lua_definition_count(lua));
+    }
+
+    pub(super) fn push_chunk(&mut self, chunk: &Chunk) {
+        self.push_counted(&chunk.lua, chunk.definition_count);
+    }
+
+    fn push_counted(&mut self, lua: &str, count: usize) {
         let start = self.lua.len();
-        let count = lua.lines().filter_map(definition_global).count();
         self.lua.push_str(lua);
         self.units.push((start, self.lua.len(), count));
         self.definition_count += count;

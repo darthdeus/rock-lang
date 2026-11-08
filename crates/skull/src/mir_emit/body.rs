@@ -197,6 +197,7 @@ fn emit_coroutine_chunk(
     deps.extend(abi_deps.iter().copied());
     Ok(Chunk {
         abi_deps,
+        definition_count: lua_definition_count(&lua),
         lua,
         literal_globals: skull_mir::reach::global_ref_names(mf),
         allocation_bodies,
@@ -462,6 +463,7 @@ pub(super) fn emit_body_chunk_with_mutation(
     deps.extend(abi_deps.iter().copied());
     Ok(Chunk {
         abi_deps,
+        definition_count: lua_definition_count(&lua),
         lua,
         literal_globals: skull_mir::reach::global_ref_names(&mf),
         allocation_bodies,
@@ -900,6 +902,7 @@ pub(super) fn emit_spec_chunk(
     deps.extend(abi_deps.iter().copied());
     Ok(Chunk {
         abi_deps,
+        definition_count: lua_definition_count(&lua),
         lua,
         allocation_bodies,
         embedded_deps: deps.clone(),
@@ -970,7 +973,7 @@ pub(super) fn emit_specialized_callees(
             }
             continue;
         };
-        out.push_str(&chunk.lua);
+        out.push_chunk(chunk);
         binds.extend(chunk.binds.iter().cloned());
         allocation_bodies.extend(chunk.allocation_bodies.iter().cloned());
         attribution.add_unit(&chunk.attribution);

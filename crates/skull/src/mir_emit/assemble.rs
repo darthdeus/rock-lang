@@ -361,7 +361,7 @@ impl Assembly {
                 self.attribution.add_unit(&chunk.attribution);
                 if emit_def {
                     self.emits_main |= key.as_str() == "main";
-                    self.definitions.push_str(&chunk.lua);
+                    self.definitions.push_chunk(chunk);
                     self.callee_binds.extend(chunk.binds.iter().cloned());
                     self.allocation_bodies
                         .extend(chunk.allocation_bodies.iter().cloned());
