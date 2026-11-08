@@ -1,9 +1,7 @@
 //! Context-AWARE completion invariants (completion pipeline contract M4):
 //! fixtures that know their slot assert the typed-slot properties the
 //! position-blind checker (`bone_query::invariants`, hooked into every
-//! corpus helper and `rock completion-sweep --check`) cannot see.
-//!
-//! Not here: response-under-budget (`just compl-perf-gate` is that gate).
+//! corpus helper) cannot see.
 
 use bone_query::BoneWorkspace;
 use lsp_types::Position;

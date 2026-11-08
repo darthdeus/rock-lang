@@ -4927,7 +4927,7 @@ pub(crate) fn nominal_base(ws: &Workspace, body: Option<&BodyInference>, ty: TyI
 /// callers pass it raw -- no per-candidate `to_lowercase()` allocation. `query`
 /// must already be lowercased (the typed prefix is).
 /// Per-call phase timings for `completion()`, captured into a thread-local so a
-/// profiler (`rock iter-completion`) can attribute per-keystroke latency to the
+/// recorder can attribute per-keystroke latency to the
 /// general-candidate, reachability, and call-through pipelines without parsing
 /// log lines. Only the plain identifier-prefix path records these (the member /
 /// enum / struct-literal early-returns leave the previous value untouched).
@@ -4964,8 +4964,7 @@ thread_local! {
 }
 
 /// Read the phase timings recorded by the most recent `completion()` call ON
-/// THIS THREAD. For the in-process profiler (`rock iter-completion`) and the
-/// corpus recorder.
+/// THIS THREAD. For the corpus recorder.
 pub fn last_completion_phase_timings() -> CompletionPhaseTimings {
     LAST_COMPLETION_PHASES.with(|c| c.get())
 }

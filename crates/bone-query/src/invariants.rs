@@ -1,8 +1,8 @@
 //! Position-blind completion-response invariants (completion-v2 M4): the
 //! properties that hold for EVERY completion response regardless of cursor
-//! context, checked over the ranking corpus (test helpers) AND real-project
-//! positions (`rock completion-sweep --check`). One invariant catches a bug
-//! class across all contexts where a per-case guard pins a single decision.
+//! context, checked over the ranking corpus (test helpers). One invariant
+//! catches a bug class across all contexts where a per-case guard pins a
+//! single decision.
 //!
 //! Context-DEPENDENT invariants (typed-slot ordering, universe gating) live
 //! in `tests/completion_invariants.rs` with fixtures that know their slot.

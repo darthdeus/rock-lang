@@ -75,34 +75,6 @@ fn source_fingerprint_support_files_follow_successful_live_compiles() {
     assert_eq!(revision(&project), "fixed");
 }
 
-#[test]
-fn iter_incremental_uses_the_same_production_sources_as_live_builds() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::write(
-        dir.path().join("stick.toml"),
-        "[package]\nname = \"iter-production-sources\"\n",
-    )
-    .expect("manifest");
-    std::fs::write(
-        dir.path().join("main.rock"),
-        "fn main() { let value = 1 }\n",
-    )
-    .expect("main source");
-    std::fs::create_dir(dir.path().join("tests")).expect("tests dir");
-    std::fs::write(dir.path().join("tests/broken.rock"), "fn broken( {\n")
-        .expect("broken test source");
-
-    let sources = super::iter_incremental_sources(dir.path().to_str().unwrap())
-        .expect("discover profiler sources");
-    assert_eq!(sources.files.len(), 1);
-    assert!(
-        sources
-            .files
-            .iter()
-            .all(|source| !source.borrow().file.to_id_path().contains("/tests/"))
-    );
-}
-
 /// Every directory field the nobox accessor builder emits, as one text.
 fn nobox_accessors(
     workspace: &bone_semantic::inference::Workspace,

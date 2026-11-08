@@ -976,8 +976,8 @@ fn shape_change_relowers_only_the_edited_module() {
     // Adding a field keeps the struct's NAME, so dependents' signatures still
     // resolve it -- they need only re-inference, not re-lowering. The cascade must
     // re-lower ONLY the edited module; regressing to the conservative closure
-    // would re-lower every interface dependent (the perf cliff iter-cascade
-    // measured: a shared type touched 22 modules vs 1). Deterministic guard via `relowered`.
+    // would re-lower every interface dependent (a shared type touched 22
+    // modules vs 1). Deterministic guard via `relowered`.
     let a = "struct P { x: int }";
     let b = "fn read(p: P) -> int { p.x }"; // P in signature (interface dep) AND body
     let mut h = Harness::new(&[("a.rock", a), ("b.rock", b)]);

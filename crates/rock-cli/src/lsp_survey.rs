@@ -1,8 +1,7 @@
 //! `rock lsp-survey <project>` -- systematically hunt for the slowest LSP edit.
 //!
-//! `iter-lsp` profiles ONE target with a body touch (the cheapest `BodyOnly`
-//! tier). This driver instead uses compiler stats to find where the expensive
-//! paths hide and profiles a spread of edit kinds:
+//! The driver uses compiler stats to find where the expensive paths hide and
+//! profiles a spread of edit kinds:
 //!
 //! 1. Compile the project once and collect per-module + per-function stats from
 //!    the bone `Workspace`: body size, call fan-in (call sites resolving to a
@@ -606,10 +605,6 @@ pub fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Re
             worst.edit_mean,
             worst.edit_max,
             worst.tier,
-        );
-        eprintln!(
-            "  drill in: ITER_LSP_FN={} rock iter-lsp {}",
-            worst.name, path
         );
     }
     Ok(())

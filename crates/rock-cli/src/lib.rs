@@ -31,7 +31,6 @@ pub use std::time::Duration;
 pub use ustr::Ustr;
 
 pub mod ablation_report;
-pub mod allocation_join;
 pub mod allocator;
 pub mod backend_stats;
 pub mod bone_backend;
@@ -40,8 +39,6 @@ pub mod common;
 pub mod compile_cmd;
 mod compile_measurements;
 pub mod compile_slots;
-mod completion_episodes;
-mod completion_sweep;
 pub mod comptime;
 mod dispatcher;
 pub mod docs_index;
@@ -50,9 +47,6 @@ pub mod file_watcher;
 mod formatting;
 pub mod glsl_test;
 pub mod invocation_log;
-mod iter_completion;
-mod iter_lsp;
-mod iter_parse;
 #[cfg(feature = "backend-js")]
 mod js_runner;
 #[cfg(feature = "backend-js")]
@@ -63,7 +57,6 @@ pub mod lint_union;
 pub mod live_project;
 mod lsp_survey;
 mod lsp_test;
-mod monoty_census;
 mod package_test_sources;
 mod parallel_runner;
 pub mod skull_backend;
@@ -80,13 +73,6 @@ pub mod registry;
 mod text_utils;
 pub mod unified_compile;
 pub mod watch;
-pub use allocation_join::run as allocation_join_run;
-pub use completion_episodes::completion_episodes;
-pub use completion_sweep::completion_sweep;
-pub use iter_completion::iter_completion;
-pub use iter_lsp::iter_lsp;
-pub use iter_parse::iter_parse_skull;
-pub use iter_parse::iter_tokenize;
 pub use lint_cmd::do_lint;
 pub use lsp_survey::lsp_survey;
 pub use modules_audit::Format as ModulesFormat;
@@ -94,7 +80,6 @@ pub use modules_audit::run as modules_audit_run;
 pub use modules_fix::run as modules_fix_run;
 pub use modules_migrate::Mode as ModulesMode;
 pub use modules_migrate::run as modules_migrate_run;
-pub use monoty_census::do_monoty_census;
 pub use process::{compiler_process, main_with};
 
 pub use common::*;
@@ -182,15 +167,6 @@ pub struct Args {
     pub isolated: bool,
     pub workers: bool,
     pub multi_order: bool,
-
-    /// For `rock completion-sweep`: keep every Nth derived probe position
-    /// (1 = exhaustive). Controls corpus size vs coverage.
-    pub stride: usize,
-
-    /// For `rock iter-completion`: fail (exit nonzero) when the worst
-    /// per-keystroke median exceeds this many ms -- the completion perf gate
-    /// (the compiler contract M0). None = report only.
-    pub budget_ms: Option<f64>,
 
     pub list: bool,
     pub sim_plan: bool,
@@ -296,7 +272,7 @@ impl Args {
             .arg(Arg::new("stdout").long("stdout").action(ArgAction::SetTrue)
                 .help("Print formatted output to stdout instead of updating files - for fmt command"))
             .arg(Arg::new("check").long("check").action(ArgAction::SetTrue)
-                .help("For `rock fmt`: check if files are already formatted (exit 1 if not). For `rock completion-sweep`: enforce the completion response invariants at every position (exit 1 on violation)."))
+                .help("For `rock fmt`: check if files are already formatted (exit 1 if not)."))
             .arg(Arg::new("iters").long("iters").default_value("1")
                 .value_parser(clap::value_parser!(usize))
                 .help("Number of iterations for compilation (used for profiling)"))
@@ -334,12 +310,6 @@ impl Args {
                 .help("Timeout for run command in seconds (default: 60)"))
             .arg(Arg::new("no-timeout").long("no-timeout").action(ArgAction::SetTrue)
                 .help("Disable timeout for run command (allow infinite execution)"))
-            .arg(Arg::new("stride").long("stride").default_value("10")
-                .value_parser(clap::value_parser!(usize))
-                .help("For `rock completion-sweep`: keep every Nth probe position (1 = exhaustive)."))
-            .arg(Arg::new("budget-ms").long("budget-ms")
-                .value_parser(clap::value_parser!(f64))
-                .help("For `rock iter-completion`: fail when the worst per-keystroke median exceeds this many ms (the completion perf gate)."))
             .arg(Arg::new("watch").long("watch").action(ArgAction::SetTrue)
                 .help("For `rock test`: re-run tests on source changes."))
             .arg(Arg::new("package").long("package").action(ArgAction::SetTrue)
@@ -441,8 +411,6 @@ impl Args {
             isolated: Default::default(),
             workers: Default::default(),
             multi_order: Default::default(),
-            stride: *m.get_one::<usize>("stride").unwrap(),
-            budget_ms: m.get_one::<f64>("budget-ms").copied(),
             list: Default::default(),
             sim_plan: Default::default(),
             app_args: many_str("app_args"),
