@@ -706,10 +706,7 @@ impl Builder<'_> {
                     cell: f,
                     value: off,
                 });
-                let was = std::mem::replace(&mut self.in_defer_body, true);
-                let res = self.lower_stmt_expr(body);
-                self.in_defer_body = was;
-                res?;
+                self.lower_defer_body(body)?;
                 self.f.set_term(self.cur, Term::Goto(b_done));
                 self.cur = b_done;
             }
@@ -721,13 +718,27 @@ impl Builder<'_> {
                         args: Vec::new(),
                     });
                 }
-                let was = std::mem::replace(&mut self.in_defer_body, true);
-                let res = self.lower_stmt_expr(body);
-                self.in_defer_body = was;
-                res?;
+                self.lower_defer_body(body)?;
             }
         }
         Ok(())
+    }
+
+    /// Lower one copy of a `defer` body. A co fn's defer body cannot yield,
+    /// so it runs to completion once started and a `defer` (or owned loop
+    /// coroutine) nested in it only needs its own scope-exit splice. As a
+    /// frame-flag cleanup it would be registered once per copy of the outer
+    /// body, each a detached function for the same source site.
+    fn lower_defer_body(&mut self, body: Idx<Expr>) -> Result<(), CompilerError> {
+        let was = std::mem::replace(&mut self.in_defer_body, true);
+        let mode = self.defer_mode;
+        if mode == DeferMode::CoFlag {
+            self.defer_mode = DeferMode::Inline;
+        }
+        let res = self.lower_stmt_expr(body);
+        self.in_defer_body = was;
+        self.defer_mode = mode;
+        res
     }
 
     /// Register an ordinary fn's `defer` for unwinding: its detached copy
@@ -808,10 +819,7 @@ impl Builder<'_> {
                 value: off,
             });
         }
-        let was = std::mem::replace(&mut self.in_defer_body, true);
-        let res = self.lower_stmt_expr(body);
-        self.in_defer_body = was;
-        res?;
+        self.lower_defer_body(body)?;
         self.f.set_term(self.cur, Term::Goto(b_done));
         self.f.set_term(b_done, Term::Return(Vec::new()));
 

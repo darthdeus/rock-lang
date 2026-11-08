@@ -262,3 +262,56 @@ fn test_killed_lambda_defer_in_defer() {
     print(c.resume() ?? -1)
     c.kill()
 }
+
+// ---- Nested defers inside a defer ----
+co fn nested_defer() -> Coroutine<int> {
+    defer {
+        let n = 1
+        defer {
+            let m = 10
+            let bump = () => { m = m + n }
+            bump()
+            print(m)
+        }
+        let inc = () => { n = n + 1 }
+        inc()
+        print(n)
+    }
+    yield 1
+}
+
+@test(output = "1\n2\n12")
+fn test_nested_defer_closures() {
+    let c = nested_defer()
+    print(c.resume() ?? -1)
+    c.resume()
+}
+
+@test(output = "1\n2\n12")
+fn test_killed_nested_defer_closures() {
+    let c = nested_defer()
+    print(c.resume() ?? -1)
+    c.kill()
+}
+
+
+// ---- A defer nested in an on_killed hook ----
+co fn hook_with_defer() -> Coroutine<int> {
+    on_killed {
+        let n = 1
+        defer {
+            let bump = () => { n = n + 10 }
+            bump()
+            print(n)
+        }
+        n = n + 1
+    }
+    yield 1
+}
+
+@test(output = "1\n12")
+fn test_hook_nested_defer_closure() {
+    let c = hook_with_defer()
+    print(c.resume() ?? -1)
+    c.kill()
+}
