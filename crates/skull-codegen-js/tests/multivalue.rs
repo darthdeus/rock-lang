@@ -156,3 +156,20 @@ fn return_wire_arity(js: &str) -> usize {
         .unwrap_or_else(|| panic!("no scratch-slot publish in:\n{js}"));
     top + 1
 }
+
+// A bound zero-leaf result (`Storage`) lowers to a multi-value call with no
+// destinations; it is still called, for its effects.
+#[test]
+fn bound_zero_leaf_call_result_is_a_bare_call() {
+    let src = "fn dest(points: [int]) -> Storage {\n\
+                   points.push(5)\n\
+                   return points.storage\n\
+               }\n\
+               fn root() -> int {\n\
+                   let points = [1]\n\
+                   let s = dest(points)\n\
+                   return points.len()\n\
+               }";
+    let js = emit_closure(&ws_with(src), "root").expect("zero-leaf call emits");
+    assert!(js.contains("  dest_arr_int(v1);"), "{js}");
+}

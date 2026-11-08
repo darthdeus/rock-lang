@@ -1746,6 +1746,8 @@ impl Emitter<'_> {
     /// `CallMulti`/`CallValueMulti` have dests and always emit as statements).
     fn multi_assign(&self, dests: &[Idx<Cell>], call: &str) -> String {
         match dests {
+            // A zero-leaf result (`Storage`) is still called for its effects.
+            [] => format!("{call};"),
             [d] => format!("{} = {call};", cell_name(self.mf, *d)),
             _ => {
                 let mut s = format!("{} = {call};", cell_name(self.mf, dests[0]));
