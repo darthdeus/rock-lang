@@ -143,6 +143,12 @@ pub struct LowerCtx<'a> {
     /// lowering such a node again yields a read of its temporary, so the place
     /// can be both read and written without evaluating it twice.
     pub place_temps: Vec<(usize, Idx<BindingInfo>)>,
+    /// While a function body lowers, the names it could not resolve. A name
+    /// recorded here lowers to a placeholder and lowering continues, so one
+    /// pass reports every such name; the body is then dropped as failed, so
+    /// the placeholders never reach inference. `None` outside a body: a name
+    /// error there is returned as before.
+    pub name_errors: std::cell::RefCell<Option<Vec<CompilerError>>>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -166,6 +172,18 @@ impl<'a> LowerCtx<'a> {
         let result = self.probed(lookup);
         cache.borrow_mut().insert(name, result.clone());
         result
+    }
+
+    /// Keep lowering past a name that did not resolve when a body is
+    /// collecting them ([`LowerCtx::name_errors`]); otherwise return the error.
+    fn recover_name(&self, e: CompilerError) -> Result<(), CompilerError> {
+        match self.name_errors.borrow_mut().as_mut() {
+            Some(errors) => {
+                errors.push(e);
+                Ok(())
+            }
+            None => Err(e),
+        }
     }
 
     /// A legacy file's bare-name lookup reads `legacy_name(file, name)`.
@@ -941,9 +959,24 @@ pub fn lower_type_expr_in(
             } else if let Some(g) = ctx.generics_in_scope.get(&name.name) {
                 *g
             } else {
-                let bare_key = ctx.resolve_bare_key(name.name, name.span)?;
-                resolved_key = Some(bare_key);
-                lower_resolved_type_name(ctx, body, pos, te, &bare_key)?
+                match ctx.resolve_bare_key(name.name, name.span) {
+                    Ok(bare_key) => {
+                        resolved_key = Some(bare_key);
+                        lower_resolved_type_name(ctx, body, pos, te, &bare_key)?
+                    }
+                    // Like an unknown type name: a signature records it and
+                    // types as `Error`, a body collects it with its other names.
+                    Err(e) => match pos {
+                        TyPos::Iface => {
+                            ctx.module.interface_errors.push(e);
+                            ctx.workspace.builtins.error()
+                        }
+                        TyPos::Body => {
+                            ctx.recover_name(e)?;
+                            alloc_ty(ctx, body, pos, TypeExpr::Builtin(hir::BuiltinTy::Error))
+                        }
+                    },
+                }
             }
         }
 
@@ -1169,8 +1202,13 @@ pub fn lookup_in_scope(
     }
     // Tier 1 misses: a v1 fragment resolves through the namespace tiers to a
     // canonical key; legacy files keep the bare name.
-    let key = ctx.resolve_bare_key(name.name, name.span)?;
-    Ok(Expr::Global(key))
+    match ctx.resolve_bare_key(name.name, name.span) {
+        Ok(key) => Ok(Expr::Global(key)),
+        Err(e) => {
+            ctx.recover_name(e)?;
+            Ok(Expr::Hole(None))
+        }
+    }
 }
 
 /// The lexical binding `name` names from `start_scope`, if any (tier 1).
@@ -1587,7 +1625,13 @@ pub fn lower_expr_value(
                     // its family for a name, so a local resolves nothing further.
                     let local = lookup_local(body, scope, name.name);
                     let (callee_key, family) = if local.is_none() && name.name.as_str() != "_" {
-                        ctx.resolve_callee_family(name.name, name.span)?
+                        match ctx.resolve_callee_family(name.name, name.span) {
+                            Ok(resolved) => resolved,
+                            Err(e) => {
+                                ctx.recover_name(e)?;
+                                return Ok(Expr::Hole(None));
+                            }
+                        }
                     } else if ctx.v1_scope().is_some() {
                         (name.name, hir::CallFamily::resolved(name.name, None))
                     } else {
@@ -1975,10 +2019,16 @@ pub fn lower_expr_value(
 
             let fields = alloc_contiguous(&mut body.struct_lit_field_arena, entries);
 
-            Expr::StructLiteral {
-                name: ctx.resolve_bare_key(name.name, name.span)?,
-                fields,
-                bases: base_range,
+            match ctx.resolve_bare_key(name.name, name.span) {
+                Ok(key) => Expr::StructLiteral {
+                    name: key,
+                    fields,
+                    bases: base_range,
+                },
+                Err(e) => {
+                    ctx.recover_name(e)?;
+                    Expr::Hole(None)
+                }
             }
         }
 
@@ -2412,10 +2462,13 @@ pub fn lower_expr_value(
         ExprKind::BreakExpr => Expr::Break,
         ExprKind::ContinueExpr => Expr::Continue,
 
-        ExprKind::FunctionRef(ident) => {
-            let key = ctx.resolve_bare_key(ident.name, ident.span)?;
-            Expr::Global(key)
-        }
+        ExprKind::FunctionRef(ident) => match ctx.resolve_bare_key(ident.name, ident.span) {
+            Ok(key) => Expr::Global(key),
+            Err(e) => {
+                ctx.recover_name(e)?;
+                Expr::Hole(None)
+            }
+        },
 
         ExprKind::AnaphoricIdent(name) => lookup_in_scope(ctx, body, scope, name)?,
 
@@ -2886,8 +2939,13 @@ fn lower_fn_body_into(
         skull_parser::FunctionBody::Rock(block) => {
             let b = a.b(block);
 
-            match lower_block(ctx, a, body, root_scope, block) {
-                Ok(lowered) => (
+            let outer = ctx.name_errors.replace(Some(Vec::new()));
+            let lowered = lower_block(ctx, a, body, root_scope, block);
+            let names = ctx.name_errors.replace(outer).unwrap_or_default();
+            let failed = !names.is_empty() || lowered.is_err();
+            errors.extend(names);
+            match lowered {
+                Ok(lowered) if !failed => (
                     Some(ctx.alloc_block_expr(body, lowered, b)),
                     None,
                     false,
@@ -2895,8 +2953,8 @@ fn lower_fn_body_into(
                     hir::FnBackend::Any,
                 ),
 
-                Err(e) => {
-                    errors.push(e);
+                lowered => {
+                    errors.extend(lowered.err());
                     body_failed = true;
 
                     (None, None, false, None, hir::FnBackend::Any)
@@ -3009,6 +3067,7 @@ pub fn relower_function_in_place(
             scope_probes: Default::default(),
             resolutions: Default::default(),
             place_temps: Vec::new(),
+            name_errors: Default::default(),
         };
 
         let (func, body, errors) = build_function(&mut ctx, a, f, annotations)?;
@@ -3061,6 +3120,7 @@ pub fn relower_function_in_place(
         scope_probes: Default::default(),
         resolutions: Default::default(),
         place_temps: Vec::new(),
+        name_errors: Default::default(),
     };
 
     let mut body = Body::default();

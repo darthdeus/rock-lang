@@ -19,6 +19,7 @@ fn repeated_probes_do_not_inflate_the_module_probe_set() {
         scope_probes: Default::default(),
         resolutions: Default::default(),
         place_temps: Vec::new(),
+        name_errors: Default::default(),
     };
     for _ in 0..10_000 {
         ctx.probe_legacy(ustr("a"));

@@ -1,5 +1,6 @@
 // One harness avoids linking the compiler into a separate binary per test file.
 
+mod fix_imports;
 mod gpu_process;
 mod guide;
 mod lsp_code_action;

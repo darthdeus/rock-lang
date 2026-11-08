@@ -268,6 +268,7 @@ pub fn lower_modules(
             scope_probes: Default::default(),
             resolutions: Default::default(),
             place_temps: Vec::new(),
+            name_errors: Default::default(),
         };
         for ast_item in lower_item.rock_module.items.iter() {
             if ast_item.annotations.is_empty() {
@@ -391,6 +392,7 @@ pub fn lower_modules(
                     scope_probes: Default::default(),
                     resolutions: Default::default(),
                     place_temps: Vec::new(),
+                    name_errors: Default::default(),
                 };
 
                 pass_lower_fields(item.rock_module, &mut ctx)?;
