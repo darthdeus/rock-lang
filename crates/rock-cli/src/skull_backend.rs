@@ -1287,8 +1287,8 @@ fn is_rock_test_source(path: &std::path::Path) -> bool {
 /// Building a package's sources as loose files drops the manifest that supplies
 /// their dialect and their dependencies, so a v1 source is parsed in the legacy
 /// dialect and fails with `unsupported item start` -- an emit failure that says
-/// nothing about the package it came from. Spec 6.3 makes this the ownership
-/// rule: a nested manifest starts a different package and is not absorbed as
+/// nothing about the package it came from. The ownership rule: a nested
+/// manifest starts a different package and is not absorbed as
 /// source of the tree above it.
 ///
 /// Single-file and directory inputs use the same source filter. `.lsp` and
@@ -1902,8 +1902,7 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
     // per-body re-inference) + skull's per-body emit cache: a body edit re-emits
     // only the re-inferred chunks (+ their inline-dependent callers), reusing the
     // rest. An interface/structural change (signature, add/remove file) shifts
-    // `Idx<Function>`, so the cache is rebuilt with a full emit. See
-    // the compiler contract.
+    // `Idx<Function>`, so the cache is rebuilt with a full emit.
     let mut session: Option<bone_incremental::session::Session> = None;
     let mut cache: Option<skull::mir_emit::SkullEmitCache> = None;
 
@@ -1921,7 +1920,7 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
         };
         // Game build: drop test-only files (tests/ dirs) so a broken sim/test
         // can't break the watched game output -- parity with the rock backend's
-        // is_game gate. See the compiler contract.
+        // is_game gate.
         let path_ref = std::path::Path::new(path);
         let sources = if path_ref.is_dir()
             && (crate::registry::RuntimeServices::registered().is_game_project)(path_ref)
@@ -2200,8 +2199,7 @@ fn skull_emit_project_with_inputs(
         }
     };
     // Game build: drop test-only files (tests/ dirs) so a compile error in a
-    // sim/test can't break the running game. See
-    // the compiler contract.
+    // sim/test can't break the running game.
     let sources = sources
         .production_only(std::path::Path::new(dir))
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
@@ -2946,7 +2944,7 @@ pub fn skull_test(
         err_failed += f;
     }
 
-    // The Stage-0e census, before the exit below: this path leaves the process
+    // The totality-ablation census, before the exit below: this path leaves the process
     // with `process::exit`, which runs no destructor and never returns to
     // `main`, so a report installed only there would silently never print.
     crate::invocation_log::note_phase("error_suite", err_start.elapsed().as_millis() as u64);
@@ -3118,7 +3116,7 @@ pub enum SkullReload {
     /// A full artifact is required before the current process can observe this
     /// update; no output was written on this path.
     FullRequired { reasons: Vec<String> },
-    /// A type's runtime SHAPE changed (the compiler contract):
+    /// A type's runtime SHAPE changed:
     /// live state cannot be migrated in place. Nothing was written -- the
     /// supervisor must use the restart fallback. `types` names the drifted
     /// types for the
@@ -3228,7 +3226,7 @@ fn emit_phase_ns(phases: &[(&'static str, Duration)], label: &str) -> u128 {
 }
 
 /// Persistent incremental compile state: a warm bone `Session` + skull emit cache
-/// driving the two-file split (the compiler contract). A body
+/// driving the two-file split. A body
 /// edit re-cooks just the edited file and writes a small `incremental.lua` the
 /// running game light-reloads; an interface/structural edit rewrites `main.lua`
 /// (full) and wipes the overlay.
@@ -3239,8 +3237,7 @@ pub struct IncrementalProject {
     renderer_target: skull::mir_emit::RendererTarget,
     /// Per-type layout hashes of the last program the game process could have
     /// loaded. A full recompile whose hashes drifted returns
-    /// `SkullReload::ShapeChanged` (full-reconstruction request) instead of writing
-    /// (the compiler contract).
+    /// `SkullReload::ShapeChanged` (full-reconstruction request) instead of writing.
     shape_hashes: skull::ShapeHashes,
     route_profile_enabled: bool,
     last_route_profile: Option<SkullRouteProfile>,
@@ -3251,7 +3248,7 @@ impl IncrementalProject {
     /// Initial build: warm the Session, `emit_full` -> game-shaped `main.lua`,
     /// wipe `incremental.lua`. Errors render against the project sources.
     /// Game build: excludes test-only files (tests/ dirs) so a broken sim/test
-    /// can't break the running game. See the compiler contract.
+    /// can't break the running game.
     pub fn init(
         dir: &str,
         main_path: &std::path::Path,
@@ -3487,8 +3484,8 @@ impl IncrementalProject {
     }
 
     /// In-memory edit: replace one source's contents WITHOUT touching disk and
-    /// route/emit exactly like a watcher edit. The sim reload-injection path
-    /// (the compiler contract): the runner edits a source in memory
+    /// route/emit exactly like a watcher edit. The sim reload-injection path:
+    /// the runner edits a source in memory
     /// and writes only the overlay; the project tree is never mutated. Rejects
     /// a path the build didn't discover -- an edit to an unknown file would
     /// otherwise silently do nothing.
@@ -3577,8 +3574,8 @@ impl IncrementalProject {
     /// Absolute paths and compiled-byte hashes of embedded inputs and resolved
     /// source-fingerprint dependencies in the current program. The engine
     /// watcher treats these files as sources: an edit to one routes as a
-    /// changed non-source path, which forces the full rebuild that re-reads it
-    /// (the compiler contract). The hash lets a watcher seeding the input
+    /// changed non-source path, which forces the full rebuild that re-reads it.
+    /// The hash lets a watcher seeding the input
     /// compare against what was compiled rather than against the startup
     /// instant.
     pub fn comptime_watch_files_with_hashes(&self) -> Vec<(std::path::PathBuf, u64)> {
@@ -3649,7 +3646,7 @@ impl IncrementalProject {
             });
         }
         if full {
-            // Schema-drift gate (the compiler contract): live
+            // Schema-drift gate: live
             // data outlives every reload tier, so if any type's runtime layout
             // moved, hot-reloading the recompiled program would drive old-shape
             // state with new-shape readers. Request a complete reconstruction
@@ -3832,7 +3829,7 @@ impl IncrementalProject {
     /// watcher does. Folding the overlay back into `main.lua` before the restart
     /// means the new process gets the complete current program. The overlay
     /// stays a within-process, single-consumer artifact that never has to cross
-    /// a process boundary (the compiler contract).
+    /// a process boundary.
     pub fn force_full(
         &mut self,
         main_path: &std::path::Path,

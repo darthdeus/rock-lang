@@ -1,4 +1,4 @@
-//! What a modules-v1 fragment can name, for completion (spec 15.3). Every
+//! What a modules-v1 fragment can name, for completion. Every
 //! answer comes from the resolver (`bone_lower::resolve`): the tiers decide
 //! what a bare name binds, the path walks decide what a qualified prefix
 //! names, and a member is offered only if the resolver would let this
@@ -32,7 +32,7 @@ pub fn callable_member_admitted(
     )
 }
 
-/// Every name some tier of `frag` offers (spec 8.3), bound cleanly or not:
+/// Every name some tier of `frag` offers, bound cleanly or not:
 /// the module's own members, the fragment's named imports (by their local
 /// names), its glob imports' members, and the std prelude. Sorted.
 fn tier_names(ws: &Workspace, frag: &FragmentScope) -> Vec<Ustr> {
@@ -344,12 +344,12 @@ pub struct ImportCandidate {
     pub path: String,
 }
 
-/// Definitions `frag` could name through a new `use` (spec 15.3:
-/// "completion may suggest out-of-scope public symbols with an import
-/// edit"; `rock fix --imports`), for names `admit` accepts. Only a name no
+/// Definitions `frag` could name through a new `use` (completion may
+/// suggest out-of-scope public symbols with an import edit; `rock fix
+/// --imports`), for names `admit` accepts. Only a name no
 /// tier binds qualifies -- an explicit import of a bound name would rebind
 /// every use of it -- and only a definition of this package, of a declared
-/// dependency, or in the view of an `allow_legacy` dependency (spec 3.2),
+/// dependency, or in the view of an `allow_legacy` dependency,
 /// through a path the resolver resolves from `frag` to that very
 /// definition, which is also the access check. Sorted by name, then path.
 pub fn import_candidates(
@@ -454,8 +454,8 @@ fn dependency_aliases(ws: &Workspace, frag: &FragmentScope) -> Vec<(u32, Ustr)> 
     by_target.into_iter().collect()
 }
 
-/// The text and offset of a new `use <path>;` in a v1 fragment (spec 15.3:
-/// "keep import ordering stable and avoid repeated churn"): at the start of
+/// The text and offset of a new `use <path>;` in a v1 fragment, placed to
+/// keep import ordering stable and avoid repeated churn: at the start of
 /// the line of the first top-level `use` item whose text sorts after it,
 /// else on the line after the last `use` item, else after the `mod` header,
 /// else at the top. Deterministic for a given file, so a second run inserts

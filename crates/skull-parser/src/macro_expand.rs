@@ -432,7 +432,7 @@ fn expand_item_macro(
         subst_in_item(ast, it, &ty_subs, &expr_subs);
     }
     // Macro-generated module headers, `mod` declarations, and `use`
-    // declarations are rejected (spec 12.2): file/module/import selection is
+    // declarations are rejected: file/module/import selection is
     // fixed before expansion, so generated ones would mis-scope output.
     for it in &items {
         if let ItemKind::Use(_) | ItemKind::Module(_) = &it.kind {
@@ -853,7 +853,7 @@ fn try_expand(
         rename_block(ast, body, callsite, &mut counter, &mut stack);
     }
 
-    // Span retag (M2): stamp the macro invocation's span on every expanded body
+    // Span retag: stamp the macro invocation's span on every expanded body
     // node BEFORE substitution, so `__SITE__` resolves to the caller's source
     // position (not the macro body's) and body-originated type errors report at
     // the call site. Args, substituted in below, keep their own caller spans.

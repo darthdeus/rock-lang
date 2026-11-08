@@ -132,7 +132,7 @@ pub struct LowerCtx<'a> {
     pub placeholder_param: Option<Idx<BindingInfo>>,
     pub placeholder_forbidden: bool,
 
-    /// The namespace facts this lowering's lookups read (plan 2.6), moved
+    /// The namespace facts this lowering's lookups read, moved
     /// into `Module.scope_probes` when the lowering finishes
     /// ([`LowerCtx::flush_scope_probes`]). A cell because lookups run from
     /// `&self` helpers.
@@ -344,7 +344,7 @@ impl<'a> LowerCtx<'a> {
     /// The enum the base of a qualified variant (`E::V`, `E::V(..)`,
     /// `E::V { .. }`, and their patterns) names, by the key the workspace
     /// maps use: the base resolves like any bare name, so a legacy file
-    /// reaches a projected v1 enum by its DefKey (spec 3.2). `None` when the
+    /// reaches a projected v1 enum by its DefKey. `None` when the
     /// base names no enum.
     fn variant_enum_key(&self, base: Ustr, span: Span) -> Result<Option<Ustr>, CompilerError> {
         let key = self.resolve_bare_key(base, span)?;
@@ -423,8 +423,8 @@ impl<'a> LowerCtx<'a> {
     }
 
     /// A bare name in callee position: the spelling the callee carries and
-    /// its overload family. v1 goes through the tiers (spec 8.3); a legacy
-    /// name goes through the one legacy lookup (spec 3.2). A family spanning
+    /// its overload family. v1 goes through the tiers; a legacy
+    /// name goes through the one legacy lookup. A family spanning
     /// several definitions keeps the bare name as its spelling -- which is
     /// also what lets scalar operands of a merged operator lower natively --
     /// and records its member keys on the module for inference.
@@ -461,7 +461,7 @@ impl<'a> LowerCtx<'a> {
 
     /// The family of `recv.name(..)`. In v1 a name no tier binds is a family
     /// with no members rather than an error: a fn-typed field `name` on the
-    /// receiver is called first (spec 8.4 keeps that precedence), and
+    /// receiver is called first, and
     /// inference reports the call when there is neither.
     fn resolve_method_family(
         &mut self,
@@ -857,7 +857,7 @@ pub fn lower_type_expr_in(
         TypeExprKind::Any => ctx.workspace.builtins.any(),
 
         // Modules-v1 qualified type paths resolve through the namespace tree
-        // (plan M2) to a canonical DefKey; everything downstream keys on it.
+        // to a canonical DefKey; everything downstream keys on it.
         TypeExprKind::Path(path) => {
             let Some(frag) = ctx.v1_scope() else {
                 return Err(CompilerError::new_with_label(
@@ -1565,7 +1565,7 @@ pub fn lower_expr_value(
 
                     // A local fn-typed binding is called through its value, everything else
                     // resolves at a top-level by name. A v1 fragment resolves the
-                    // name through the namespace tiers (spec 8.3).
+                    // name through the namespace tiers.
                     // A local is called through its value, and inference never asks
                     // its family for a name, so a local resolves nothing further.
                     let local = lookup_local(body, scope, name.name);
@@ -1626,7 +1626,7 @@ pub fn lower_expr_value(
 
                     // UFCS and the bare call share one visible family: in a v1
                     // fragment the method name goes through the same tier
-                    // resolution as `method(recv, ..)` would (spec 8.4).
+                    // resolution as `method(recv, ..)` would.
                     let (callee_key, family) =
                         ctx.resolve_method_family(method.name, method.span)?;
                     Expr::Call {
@@ -1643,7 +1643,7 @@ pub fn lower_expr_value(
                 // `a::b::f(..)` in a v1 fragment. Without this the path lowers as a
                 // VALUE (`Expr::Global`) and the call becomes `Callee::Value`, which
                 // MIR cannot give a callee identity -- a direct call must carry the
-                // family's DefKey exactly as the bare-name form does (plan 2.3).
+                // family's DefKey exactly as the bare-name form does.
                 ExprKind::Path {
                     path,
                     generic_args: path_generics,
@@ -1859,7 +1859,7 @@ pub fn lower_expr_value(
 
             let target = lower_expr(ctx, a, body, scope, a.e(left))?;
             // The same callee resolution as the binary operator call, so
-            // `a += b` sees what `a + b` sees (spec 3.2, 8.5).
+            // `a += b` sees what `a + b` sees.
             let (callee_key, family) = ctx.resolve_callee_family(ustr(op_fn), e.span)?;
 
             if lvalue_has_safe_nav(a, left) {

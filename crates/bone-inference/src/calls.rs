@@ -86,7 +86,7 @@ fn owned_by_view(ws: &Workspace, owner: Option<PackageId>, mid: ModuleId) -> boo
 }
 
 /// The nearest lookup tier among the members of a merged v1 family that
-/// contribute the overload `(mid, fid)` (spec 8.3); `None` outside a merged
+/// contribute the overload `(mid, fid)`; `None` outside a merged
 /// family, where no tier orders the candidates.
 fn candidate_tier(
     gamma: &Gamma,
@@ -115,7 +115,7 @@ fn candidate_tier(
         .min()
 }
 
-/// Spec 8.3: an exact best-fit tie between members of different lookup
+/// An exact best-fit tie between members of different lookup
 /// tiers goes to the nearest tier, so a module can override a std or
 /// imported function of the same signature. Candidates of one tier stay
 /// tied.
@@ -1478,9 +1478,9 @@ pub(crate) fn resolve_named_call_inner(
             return Err(unary_operator_error(gamma, name, operand, span));
         }
 
-        // A v1 DefKey renders as its declared name (plan 2.1); legacy keys
+        // A v1 DefKey renders as its declared name; legacy keys
         // ARE the name. A v1 name whose nearest binding is a value shadows
-        // every callable of that name in a lower tier (spec 8.3), so say
+        // every callable of that name in a lower tier, so say
         // what it binds to.
         let meta = gamma.workspace.defs.get(&name);
         let shown = meta.map(|m| m.name).unwrap_or(name);

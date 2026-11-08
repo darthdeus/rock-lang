@@ -176,7 +176,7 @@ pub(crate) struct Checked {
 
 /// Parse and check `sources` the way `rock compile` does, but keep the
 /// workspace when bodies have errors (they come back beside it) and leave the
-/// spec 11 closure to the caller (`api_closure_requirements`).
+/// public-API type closure to the caller (`api_closure_requirements`).
 pub(crate) fn check(sources: &SourceFiles) -> Result<Checked, CheckFailure> {
     let (mut modules, _entry) =
         crate::skull_backend::skull_assemble_project(sources).map_err(|errors| CheckFailure {
@@ -782,7 +782,7 @@ impl Edit {
     }
 }
 
-/// Apply non-overlapping edits. Overlap is refused (spec 15.2).
+/// Apply non-overlapping edits. Overlap is refused.
 pub fn apply_edits(text: &str, edits: &[Edit]) -> std::result::Result<String, String> {
     let mut sorted: Vec<&Edit> = edits.iter().collect();
     sorted.sort_by_key(|e| e.range);

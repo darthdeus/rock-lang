@@ -1,6 +1,5 @@
-//! `rock fix --imports <package|file> [--check|--apply]` (spec 15.3; modules
-//! plan section 7.4): add the `use` items a modules-v1 fragment's unresolved
-//! bare names need.
+//! `rock fix --imports <package|file> [--check|--apply]`: add the `use` items a
+//! modules-v1 fragment's unresolved bare names need.
 //!
 //! The input is what lowering reports as ``` `x` did not resolve to any
 //! definition ``` in a v1 fragment of the package. Candidates are what
@@ -512,7 +511,7 @@ fn origin(ws: &Workspace, c: &ImportCandidate) -> String {
 }
 
 /// Whether `frag` already globs a sibling of the module holding `c`: the
-/// same package, the same parent, not the package root (plan 7.4).
+/// same package, the same parent, not the package root.
 fn globs_a_sibling(ws: &Workspace, frag: &FragmentScope, c: &ImportCandidate) -> bool {
     let Some(meta) = ws.defs.get(&c.key) else {
         return false;
@@ -584,7 +583,7 @@ fn unavailable(ws: &Workspace, frag: &FragmentScope, name: Ustr) -> Vec<String> 
     out
 }
 
-/// Compare the candidate with the baseline (plan 7.4): every baseline site
+/// Compare the candidate with the baseline: every baseline site
 /// resolves as before, and no error is new.
 fn verify(
     ctx: &Ctx,

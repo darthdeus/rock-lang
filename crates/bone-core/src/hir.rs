@@ -198,7 +198,7 @@ pub struct Body {
     pub method_call_recvs: FxHashSet<Idx<Expr>>,
     /// The method name as written at `recv.name(..)` / `recv?.name(..)`,
     /// keyed by the receiver expr. A fn-typed FIELD of that name wins over the
-    /// callee family (spec 8.4), and in v1 the family's key is a DefKey or an
+    /// callee family, and in v1 the family's key is a DefKey or an
     /// alias target, not the written name.
     pub method_names: FxHashMap<Idx<Expr>, Ustr>,
     /// Call args written as a struct spread `..op` (keyed by the operand's expr
@@ -240,7 +240,7 @@ pub struct Body {
 }
 
 /// One segment of a modules-v1 path as the resolver resolved it at lowering
-/// (plan 2.3: resolver outputs are recorded on the HIR; consumers do not
+/// (resolver outputs are recorded on the HIR; consumers do not
 /// re-resolve). The node the path lowered to carries its final target; this
 /// record adds where each segment is spelled and what the segments before
 /// the last walked through, so an editor can navigate and rename by segment.
@@ -417,7 +417,7 @@ pub struct Module {
     /// a fresh module, so it is naturally correct either way.
     pub lowering_errors: FxHashMap<BodyOwner, Vec<CompilerError>>,
     pub interface_errors: Vec<CompilerError>,
-    /// Every namespace fact this module's lowering read (plan 2.6). A full
+    /// Every namespace fact this module's lowering read. A full
     /// lowering replaces the set; the one-body fast path only adds to it, so
     /// a superset is kept and an extra re-lower is the worst it costs.
     pub scope_probes: FxHashSet<crate::modules::ScopeProbe>,
@@ -753,8 +753,8 @@ pub enum Expr {
         receiver: Idx<Expr>,
         method: Ustr,
         args: IdxRange<Expr>,
-        /// Resolver family for `method`, same shape as `Expr::Call` (spec 8.4:
-        /// UFCS and the bare call select the same family); `family.key()` is
+        /// Resolver family for `method`, same shape as `Expr::Call` (UFCS
+        /// and the bare call select the same family); `family.key()` is
         /// `method`.
         family: CallFamily,
     },
@@ -793,11 +793,10 @@ pub enum Expr {
         /// Explicit type arguments from `f<A, B>(...)`; empty when generic
         /// inference supplies the callee's instance.
         generic_args: IdxRange<TypeExpr>,
-        /// Resolver family (plan 2.3). Legacy calls use `CallFamily::Legacy`;
+        /// Resolver family. Legacy calls use `CallFamily::Legacy`;
         /// v1 calls carry the DefKey plus the shadowed losing-tier origin.
         /// `family.key()` is the same key as `Callee::Unresolved.name`, which
-        /// the MIR backend still reads; M4 moves backend identity onto the
-        /// family and drops the second copy.
+        /// the MIR backend still reads.
         family: CallFamily,
     },
 
@@ -868,7 +867,7 @@ pub enum Callee {
 /// that defines the name and by the standard library, so a member a v1
 /// fragment reached through the std view or a legacy provider's view names
 /// that view's package in `owner`, and only the overloads its own files
-/// define belong to the member (spec 3.2, 5). `None` for a v1 DefKey, which
+/// define belong to the member. `None` for a v1 DefKey, which
 /// only its definition carries.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct FamilyMember {
@@ -877,7 +876,7 @@ pub struct FamilyMember {
     pub tier: FamilyTier,
 }
 
-/// The lookup tier that contributed a family member (spec 8.3 tiers 2-5).
+/// The lookup tier that contributed a family member (tiers 2-5).
 /// A v1 callee family spans every tier from the first one that binds the
 /// name; fit ranks the whole family and the tier breaks only an exact
 /// best-fit tie, nearer tier first. A legacy family is one flat tier.
@@ -890,7 +889,7 @@ pub enum FamilyTier {
     Std,
 }
 
-/// Overload family selected by the resolver (plan 2.3 / M2 step 5).
+/// Overload family selected by the resolver.
 /// `resolve_callee` consumes this rather than a spelled last segment.
 #[derive(Copy, Clone, Debug)]
 pub enum CallFamily {
@@ -902,14 +901,13 @@ pub enum CallFamily {
         key: Ustr,
         owner: Option<crate::modules::PackageId>,
     },
-    /// A bare name whose overload family spans several definitions, in
-    /// either dialect: legacy callables merged with projected or imported v1
-    /// ones (spec 3.2), or a v1 family spanning the lookup tiers (spec 8.3,
-    /// 8.5). Lowering decides the member keys and records them under `name`
-    /// in `Module::call_families` of the module lowered from `file`; `Expr`
-    /// is `Copy`, so the family carries only that address. A v1 unary
-    /// operator no tier binds is a family with no members: a scalar operand
-    /// never reads it, any other has no overload.
+    /// A bare name whose overload family spans several definitions, in either
+    /// dialect: legacy callables merged with projected or imported v1 ones, or a
+    /// v1 family spanning the lookup tiers. Lowering decides the member keys and
+    /// records them under `name` in `Module::call_families` of the module lowered
+    /// from `file`; `Expr` is `Copy`, so the family carries only that address. A
+    /// v1 unary operator no tier binds is a family with no members: a scalar
+    /// operand never reads it, any other has no overload.
     Merged { name: Ustr, file: Ustr },
 }
 
@@ -1134,9 +1132,9 @@ pub struct StructFieldDef {
     /// independently storable aggregate: PROJECTION-ONLY at every use site.
     /// Enum record variants cannot carry it -- always false there.
     pub is_embed: bool,
-    /// Getter visibility (spec 9/10). Default is public.
+    /// Getter visibility. Default is public.
     pub read_vis: NsVisibility,
-    /// Setter visibility (spec 10). `private(set)` restricts this to owner subtree.
+    /// Setter visibility. `private(set)` restricts this to owner subtree.
     pub write_vis: NsVisibility,
 }
 

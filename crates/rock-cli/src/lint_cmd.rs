@@ -104,7 +104,7 @@ pub fn do_lint(
     // `row_escape` is a CENSUS, so it reports the population it examined
     // alongside the findings. A bare zero cannot be read: a project with no
     // `Arena` at all scores the same as one whose every row stays put, and the
-    // build-or-delete decision this feeds (the compiler contract P6)
+    // build-or-delete decision this feeds
     // turns on telling those apart.
     if sel.enabled(bone_lints::ROW_ESCAPE) {
         let warm = lint_pass::warm_modules(&ws, &sources);

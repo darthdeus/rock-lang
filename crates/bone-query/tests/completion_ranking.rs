@@ -26,8 +26,8 @@ fn labels_at(src: &str) -> Vec<String> {
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, s);
     let items = bone.completion(PATH, pos);
-    // Every corpus fixture doubles as an invariant-suite position
-    // (completion pipeline contract M4): the position-blind response
+    // Every corpus fixture doubles as an invariant-suite position:
+    // the position-blind response
     // invariants must hold wherever a ranking decision is pinned.
     let prefix = typed_prefix(src);
     let violations = bone_query::invariants::completion_response_violations(&items, &prefix);
@@ -984,7 +984,7 @@ fn typed_slot_kind_breaks_same_band_ties() {
 fn member_completion_prefix_field_beats_boundary_richer_field() {
     // MEMBER path banding: `s.co$0` -- the case-exact-prefix field `cost` must
     // outrank `charge_over_time`, whose extra word boundaries give it a higher
-    // fine score (`c` + `_o`). Pre-M1 the member encoders were score-first
+    // fine score (`c` + `_o`). The member encoders were once score-first
     // (no exact/band tiers), so the boundary-richer name won on raw points.
     let labels = member_labels_by_sort(
         "struct S { cost: int, charge_over_time: int }\n\
@@ -1008,9 +1008,8 @@ fn member_completion_prefix_field_beats_boundary_richer_field() {
 fn direct_global_beats_global_rooted_reach_chain() {
     // Typed slot: a direct right-type GLOBAL must outrank a reach chain rooted
     // at some OTHER global -- both produce the type, but the chain rides the
-    // same (global) locality rung and loses on distance. Pinned from the M1
-    // sweep review: reach paths briefly took kind 0 and deep global chains
-    // outranked direct globals.
+    // same (global) locality rung and loses on distance. Reach paths once
+    // took kind 0 and deep global chains outranked direct globals.
     let labels = labels_at(
         "struct Holder { grid_size: int }\n\
          global grip_count: int = 3\n\
@@ -1141,7 +1140,7 @@ fn member_arg_slot_field_beats_boundary_richer_method() {
     // `feed(s.targrid$0)` with both members producing int (type-match tie),
     // both in the boundary band: the FIELD `target_grid` must beat the method
     // `target_ref_grid()` whose extra `_ref_` boundary out-scores it on fine
-    // points. Pre-M1 `member_arg_sort_text` was score-first past the
+    // points. `member_arg_sort_text` was once score-first past the
     // type-match digit, so the method won.
     let labels = member_labels_by_sort(
         "struct S { target_grid: int }\n\

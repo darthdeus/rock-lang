@@ -1,5 +1,5 @@
 // A legacy consumer sees the v1 library's public ROOT exports by their bare
-// names through the compatibility projection (spec 3.2). It writes no paths and
+// names through the compatibility projection. It writes no paths and
 // no imports.
 fn main() {
     let g = greet("legacy")

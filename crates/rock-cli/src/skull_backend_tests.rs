@@ -1904,11 +1904,11 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 
     /// A FLAT-ENUM-yielding `co fn` body edit, through the overlay, must re-emit the
     /// frame-slot yield channel and CodeRefs for the ctor's `__advance`/`__resume`
-    /// fields, then a freshly-created coroutine must run the new body,
-    /// threading the yield through the slots -- no `{__variant}` box on the concrete
-    /// consumer path. Guards the frame-slot channel (the compiler contract
-    /// Part A) against a hot-reload regression; the scalar-yield test above does not
-    /// exercise the channel (int yields keep the multi-return path).
+    /// fields, then a freshly-created coroutine must run the new body, threading the
+    /// yield through the slots -- no `{__variant}` box on the concrete consumer path.
+    /// Guards the frame-slot channel against a hot-reload regression; the scalar-yield
+    /// test above does not exercise the channel (int yields keep the multi-return
+    /// path).
     #[test]
     fn flat_enum_coroutine_body_edit_overlay_threads_and_runs_new_body() {
         // The `Act(() -> ())` closure payload makes Ev NON-cdata-eligible, so it is a
@@ -2051,7 +2051,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// -- `let z = 999` never read -- is now a ghost dropped from the frame and
     /// does NOT shift the layout (the P2-finding fix; that path has its own
     /// structural test in skull/tests/frame_slot_naming.rs).
-    /// the compiler contract "Layout drift across reloads".
     #[test]
     fn live_coroutine_cell_layout_shift_requests_safe_restart() {
         // `Act(() -> ())` forces Ev flat (frame-slot channel); `mk()` keeps the
@@ -2109,7 +2108,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// skip code) -- the stamp's per-state variant tags catch it and kill the
     /// coroutine cleanly. Cells are deliberately untouched (const payloads only)
     /// so this pins the STATE component of the stamp specifically.
-    /// the compiler contract "Layout drift across reloads".
     #[test]
     fn live_coroutine_yield_renumber_overlay_stamp_kills() {
         let prog = |extra: &str| {
@@ -2172,7 +2170,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// (outer holds the inner object) + step-by-global-name (inner's stale advance
     /// resolves `inner_0__step` at call time), and both mechanisms must compose
     /// across the delegation boundary. Guards the Part B kill/advance/delegate
-    /// refactor (the compiler contract).
+    /// refactor.
     #[test]
     fn live_yield_star_delegation_survives_inner_body_overlay() {
         let prog = |a: i32, b: i32| {
@@ -2340,7 +2338,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// A coroutine hook (`on_killed`/`on_resume`/`on_hot_reload`) argument must
     /// be a lambda literal: the hook is peeled to the constructor, which can
     /// only re-render a lambda with the frame context. Any other fn-typed
-    /// expression used to SILENTLY install no hook (the compiler contract) --
+    /// expression used to SILENTLY install no hook --
     /// it must be a compile error instead.
     #[test]
     fn non_lambda_coroutine_hook_arg_rejected() {
@@ -2402,7 +2400,6 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// Interface edit (widen a variant + use the new payload, which also inserts
     /// a local) would then drive the old frame with a step compiled for a
     /// different layout -- the stamp kills the survivor cleanly instead.
-    /// the compiler contract "Layout drift across reloads".
     #[test]
     fn live_coroutine_survives_full_reload_and_shape_edit_stamp_kills() {
         let v0 = "enum Ev { Tick(int), Pair(int, int), Done, Act(() -> ()) }\n\
@@ -2495,8 +2492,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         }
     }
 
-    /// PREMISE pin for the schema-drift restart policy
-    /// (the compiler contract): a struct SHAPE edit is an
+    /// PREMISE pin for the schema-drift restart policy:
+    /// a struct SHAPE edit is an
     /// Interface-tier full rebuild, but the full reload is a re-`dofile` that
     /// preserves any mutable global whose declared-type STRING is unchanged --
     /// and `"Mob?"` names the shape without describing it. A live instance
@@ -2586,8 +2583,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         );
     }
 
-    /// PREMISE pin for the schema-drift restart policy, value-struct class
-    /// (the compiler contract): LuaJIT `ffi.cdef` typedef
+    /// PREMISE pin for the schema-drift restart policy, value-struct class:
+    /// LuaJIT `ffi.cdef` typedef
     /// redefinition is a SILENT NO-OP -- the v1 chunk's cdef "succeeds" but
     /// `ffi.typeof` keeps the ORIGINAL layout for the life of the process.
     /// Value-struct construction is POSITIONAL in declared-field order
@@ -3204,7 +3201,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 }
 #[cfg(test)]
 mod shape_drift_tests {
-    //! The schema-drift restart trigger (the compiler contract):
+    //! The schema-drift restart trigger:
     //! a type-SHAPE edit returns `ShapeChanged` (restart request) and DEFERS the
     //! `main.lua` write -- the running process must never hot-reload a program
     //! whose live data layout it doesn't have. Body and signature-only edits

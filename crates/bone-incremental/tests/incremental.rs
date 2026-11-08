@@ -1984,7 +1984,7 @@ fn make_point(x: int, y: int) -> Point {
     );
 }
 
-// Phase 3 slice 1: per-body name-dep recording (observe-only). The reverse
+// Per-body name-dep recording (observe-only). The reverse
 // index isn't wired into eviction yet; this just pins that the recording sees
 // both a call name AND a field-access struct name (the dep that is invisible
 // in the source - b.rock's `origin_doubled` reaches a Point field purely
@@ -2066,10 +2066,10 @@ fn origin_doubled() -> int {
     );
 }
 
-// Phase 3 slice 2: name-shape diff. Drives the helpers directly over parsed
+// Name-shape diff. Drives the helpers directly over parsed
 // item_prints (no inference involved) so the changed-name set is pinned exactly.
 // The body-only case is the load-bearing one: a body edit must NOT register as
-// a name-shape change, or slice 3 would over-invalidate on every keystroke.
+// a name-shape change, or eviction would over-invalidate on every keystroke.
 const SHAPE_BASE: &str = "
 struct Point { x: int, y: int }
 fn make_point(x: int, y: int) -> Point { Point { x: x, y: y } }
@@ -2252,8 +2252,7 @@ fn interface_edit_macro_body_change_relowers_users() {
     // The macro change re-expands use.rock and the now-`(base()) + 1.0` is
     // caught as a float/int mismatch, reported at the call site `use.rock` —
     // skull's macro expansion retags expanded-node spans to the invocation site
-    // (`retag_block` in skull-parser's `macro_expand`, the M2 port of rock's
-    // `retag_block_spans_for_macro`).
+    // (`retag_block` in skull-parser's `macro_expand`).
     assert!(
         diags.iter().any(|e| e.location.file.as_str() == "use.rock"),
         "expected the now-float macro error to surface at the call site use.rock; got {diags:?}"

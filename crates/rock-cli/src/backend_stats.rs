@@ -20,7 +20,7 @@
 //! skipped (reads 0); the report prints bone's type-check verdict so a 0 emit is
 //! never silent. bone/skull are timed externally at the call boundaries only
 //! (parse, semantic_pass, emit); finer bone granularity comes from bone's own
-//! per-phase counters (`Workspace::phase_timings`) — see the compiler contract.
+//! per-phase counters (`Workspace::phase_timings`).
 
 use crate::Result;
 use crate::bone_backend::{self, BonePhaseTimes};

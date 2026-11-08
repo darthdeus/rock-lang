@@ -3346,7 +3346,7 @@ pub fn validate_no_residual_bound_calls(
                         .get(&iid)
                         .is_some_and(|i| !i.args.is_empty());
                     if fn_has_bounds(callee) && !named {
-                        // Stage-0e: this rejection IS the ablation's
+                        // Totality ablation: this rejection IS the ablation's
                         // unsupported-surface population, and it fires from
                         // production's own check rather than from
                         // `ablation_decline` -- so record it here or the

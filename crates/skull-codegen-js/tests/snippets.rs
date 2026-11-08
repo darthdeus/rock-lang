@@ -1,4 +1,4 @@
-//! Snippet-emission unit tests for the toy JS intrinsic table (slice 4). No
+//! Snippet-emission unit tests for the toy JS intrinsic table. No
 //! runtime, no program emission -- just the rendered `Math.*` strings and the
 //! fail-closed end-to-end check that every JS entry is backed by a stdlib
 //! `@intrinsic` declaration (stdlib or the real test-local host fixtures).

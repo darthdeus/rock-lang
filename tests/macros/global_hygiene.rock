@@ -1,4 +1,4 @@
-// Slice 1 of macro hygiene: idents that resolve to a Rock `global`
+// Macro hygiene: idents that resolve to a Rock `global`
 // emit as `_G.<name>` so caller-scope Lua locals can't intercept them.
 
 global GH_GLOBAL: int = 100

@@ -1,4 +1,4 @@
-//! Completion sources (completion-v2 stage B): the per-context candidate
+//! Completion sources: the per-context candidate
 //! emitters -- member/struct-literal/enum paths, call-through, decorators,
 //! and their workspace-query helpers. Functions here take a `Session` only
 //! to run speculative variants through `backend::analyze_variant`; the

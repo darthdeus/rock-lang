@@ -75,9 +75,9 @@ fn source_files_from_dir_impl<P: AsRef<Path>>(
     })
 }
 
-/// Scan a file's leading `//!` directives for `modules: v1` (spec 3.1:
-/// standalone test/script sources declare their dialect explicitly; package
-/// files take theirs from the manifest via the package graph). Only the first
+/// Scan a file's leading `//!` directives for `modules: v1`. Standalone
+/// test/script sources declare their dialect explicitly; package files take
+/// theirs from the manifest via the package graph. Only the first
 /// ten lines count, mirroring `parse_lib_directive`.
 pub fn parse_modules_directive(contents: &str) -> Result<rock_core::source_code::Dialect> {
     for line in contents.lines().take(10) {

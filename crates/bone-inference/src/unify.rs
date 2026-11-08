@@ -1065,7 +1065,7 @@ pub fn coerce_to_interface(
             other => other.into(),
         })?;
 
-        // Structural interface conformance capability check (spec 10.6):
+        // Structural interface conformance capability check:
         // An external conversion cannot use a public getter to satisfy a publicly writable interface field.
         if fwrite_vis == NsVisibility::Pub {
             if let Some(skey) = from_key {

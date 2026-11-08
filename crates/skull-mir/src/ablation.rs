@@ -1,7 +1,7 @@
-//! The Stage-0e totality ablation.
+//! The totality ablation.
 //!
 //! An EXPERIMENTAL build mode, off by default, in which the compiler is held to
-//! plan S 8's target invariant:
+//! this target invariant:
 //!
 //! > Every executable Rock body entering MIR has a concrete logical type for
 //! > every expression, binding, call, and function value. Anything that cannot
@@ -14,7 +14,7 @@
 //!    `@inline`/`@pure` opt-in, the target-storage trigger). The gates are NOT
 //!    deleted -- they are bypassed, so the default path is untouched;
 //! 2. a generic Rock body that would be lowered SHARED is recorded as a fatal,
-//!    classified into exactly one S 0e category with a span;
+//!    classified into exactly one category with a span;
 //! 3. inlining is disabled, so no splice can hide a missing standalone instance.
 //!
 //! **It COLLECTS rather than aborting.** A mode that failed at the first fatal
@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 use bone_semantic::prelude::Span;
 use ustr::Ustr;
 
-/// The five S 0e categories. **There is deliberately no `Other`/`Misc` variant**
+/// The five categories. **There is deliberately no `Other`/`Misc` variant**
 /// -- S 0g requires every fatal to land in exactly one category, and an escape
 /// hatch is how a taxonomy stops being evidence.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -65,8 +65,8 @@ impl FatalCategory {
     }
 }
 
-/// One recorded fatal. `caller` and `span` are what make it actionable: S 0e
-/// asks for the body, the caller and the span, plus a smallest repro.
+/// One recorded fatal. `caller` and `span` are what make it actionable: a
+/// report needs the body, the caller and the span, plus a smallest repro.
 #[derive(Clone, Debug)]
 pub struct Fatal {
     pub category: FatalCategory,

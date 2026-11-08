@@ -1,6 +1,6 @@
 //! `rock test <path> --backend glsl` -- execute the value-test class
 //! (`@test(returns = <literal>)`) on the GPU via the GLSL emitter
-//! (`skull-codegen-glsl`), as described by the compiler contract.
+//! (`skull-codegen-glsl`).
 //!
 //! Shares the backend-neutral half of the test driver with the luajit and node
 //! paths: unit discovery (`collect_test_units`), the `@test` metadata
@@ -614,9 +614,9 @@ fn spawn_runner(
     ))
 }
 
-// --- A3: compile-validate registered render shaders on real GL contexts ---
-// (the compiler contract). The value-test corpus above proves the
-// EMITTER on desktop GL; this proves the shaders games actually register.
+// --- Compile-validate registered render shaders on real GL contexts ---
+// The value-test corpus above proves the EMITTER on desktop GL; this proves
+// the shaders games actually register.
 
 /// One profile's tallies over a `shader-validate` run.
 pub struct ValidateProfileSummary {

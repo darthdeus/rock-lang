@@ -1,5 +1,4 @@
-//! `rock modules audit <project> [--closed] [--format pretty|json]`
-//! (modules spec 15.1, plan M5).
+//! `rock modules audit <project> [--closed] [--format pretty|json]`.
 //!
 //! Read-only. The package graph is the host's `PackageGraph`; the analyzed
 //! population and the semantic pass are the ones `rock compile` runs
@@ -64,7 +63,7 @@ impl Status {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Owner {
     Package(u32),
-    /// The compiler-owned standard library (spec 5), identified by the
+    /// The compiler-owned standard library, identified by the
     /// loader's stdlib file ids.
     Std,
     /// The workspace's builtin module (no source file).
@@ -123,7 +122,7 @@ struct RefTable {
     /// legacy package -> (declared name, kind) -> referencing packages and
     /// count: what projecting that package into a scoped root must export.
     legacy_exports: BTreeMap<u32, BTreeMap<(String, &'static str), (BTreeSet<u32>, usize)>>,
-    /// v1 package -> required type -> (reason, exporter) pairs (spec 11).
+    /// v1 package -> required type -> (reason, exporter) pairs.
     closure: BTreeMap<u32, BTreeMap<String, BTreeSet<(&'static str, String)>>>,
     /// package -> summed parse-tree census of its analyzed files.
     census: BTreeMap<u32, modules_analysis::FileCensus>,
@@ -708,7 +707,7 @@ fn closed_verdict(report: &Report) -> Verdict {
 
 // --- not computed -----------------------------------------------------------
 
-/// Spec 15.1 items this version does not derive, and what is missing.
+/// Audit items this version does not derive, and what is missing.
 const NOT_COMPUTED: &[(&str, &str)] = &[
     (
         "references through field accesses and decorator uses",

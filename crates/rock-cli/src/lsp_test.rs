@@ -8,8 +8,7 @@ use std::process::{Command, Stdio};
 /// `.rock.lsp` fixtures. The bone-backed LSP (`rock-lang/crates/rock-lsp/src/lib.rs`) is
 /// the language-server front for the skull/bone stack, so `rock test
 /// --backend {skull,bone}` runs fixtures through it; `--backend rock` uses the
-/// legacy LSP unless `ROCK_LSP_TEST_BACKEND=bone` forces the bone path (the
-/// standalone parity lens, the compiler contract).
+/// legacy LSP unless `ROCK_LSP_TEST_BACKEND=bone` forces the bone path.
 ///
 /// We deliberately set this on the CHILD only, never the parent's
 /// `ROCK_BACKEND`: a parent override would also switch `rock test` itself,

@@ -1,4 +1,4 @@
-//! Stage-0e totality ablation.
+//! The totality ablation (`ROCK_MONO_ABLATION`).
 
 use std::sync::LazyLock;
 

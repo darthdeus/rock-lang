@@ -1,4 +1,4 @@
-//! Spec 8.3 "Values shadow; callables accumulate". When the first tier that
+//! Values shadow; callables accumulate. When the first tier that
 //! binds a bare name binds callables, the overload family is the union of the
 //! visible callables of that tier and every lower tier from 2 to 5 (own
 //! module, explicit imports, globs, std). Fit ranks the whole family; the

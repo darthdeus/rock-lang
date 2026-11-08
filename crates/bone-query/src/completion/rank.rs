@@ -1,4 +1,4 @@
-//! Completion ranking primitives (completion-v2 stage C): the shared fuzzy
+//! Completion ranking primitives: the shared fuzzy
 //! DP, the coarse match bands, and the `RankKey` constructors every source
 //! ranks through. `clean_match`/`fz_boundary` stay in `crate::query` -- they
 //! are the centralized matchers (shared LSP architecture).

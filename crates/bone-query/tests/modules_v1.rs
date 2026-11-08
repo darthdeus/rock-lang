@@ -1,4 +1,4 @@
-//! The LSP over a modules-v1 package (plan M5, spec 15.3): a file entering the
+//! The LSP over a modules-v1 package: a file entering the
 //! session after the batch load keeps its manifest facts, and go-to-definition
 //! follows what the resolver recorded -- module paths, aliases, globs and
 //! re-exports -- to the defining item.
@@ -313,7 +313,7 @@ fn definition_of_a_re_exported_name_lands_on_the_defining_function() {
 
 // -- the std prelude ----------------------------------------------------------
 
-/// A v1 fragment sees the std prelude (plan 2.5) in the editor as it does in
+/// A v1 fragment sees the std prelude in the editor as it does in
 /// a compile: `print` and `*` resolve.
 #[test]
 fn the_std_prelude_resolves_in_a_v1_file() {
@@ -502,7 +502,7 @@ fn a_qualified_variant_lands_on_the_variant_and_its_enum() {
 }
 
 /// A legacy package depending on the v1 package `geo`: the legacy file calls
-/// `area` through the compatibility projection (spec 3.2).
+/// `area` through the compatibility projection.
 fn legacy_consumer() -> (tempfile::TempDir, String, &'static str) {
     let dir = tempfile::tempdir().unwrap();
     let geo = dir.path().join("geo");
@@ -1197,7 +1197,7 @@ fn no_completion_in_a_v1_file_spells_a_def_key() {
     }
 }
 
-/// A module alias is a path anchor (spec 8.1): the alias segment of a path
+/// A module alias is a path anchor: the alias segment of a path
 /// through it lands on the aliased module's header, and the member after it
 /// on the member's definition.
 #[test]
@@ -1260,7 +1260,7 @@ fn an_import_edit_goes_in_sorted_position_among_the_uses() {
     assert_eq!(edits[0].range.start, Position::new(3, 0));
 }
 
-/// A definition in the view of an `allow_legacy` dependency (spec 3.2) is an
+/// A definition in the view of an `allow_legacy` dependency is an
 /// import candidate like a v1 dependency's.
 #[test]
 fn an_allow_legacy_providers_definition_is_offered_with_an_import() {

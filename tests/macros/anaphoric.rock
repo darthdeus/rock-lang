@@ -1,6 +1,6 @@
-// Slice 3: `^name` anaphoric ident — caller-scope resolution after
-// macro expansion. Bare references in macro bodies stay hygienic
-// (Slice 1 codegen rule), so `^name` is the explicit opt-in for
+// `^name` anaphoric ident — caller-scope resolution after
+// macro expansion. Bare references in macro bodies stay hygienic,
+// so `^name` is the explicit opt-in for
 // reading the caller's binding.
 
 global ANA_GLOBAL: int = 1000

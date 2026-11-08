@@ -46,13 +46,13 @@ pub struct Parser<'a> {
     /// expr-hole ids surface in the s-expr (`?{id}`), but type holes must still
     /// advance it so the numbering stays in lockstep with rock.
     hole_counter: u32,
-    /// Source-language dialect (modules plan M1). Legacy is today's grammar;
+    /// Source-language dialect. Legacy is today's grammar;
     /// V1 enables `(expr : Type)` ascription, `::` paths, and the module-item
     /// forms, and rejects infix `expr :: Type`.
     pub dialect: Dialect,
     /// Depth of paren groups whose head is currently parsing. While > 0 the
     /// Pratt loop breaks at `:` so the paren arm owns the `(expr : Type)`
-    /// ascription form (spec 7) instead of `:` binding as a binop.
+    /// ascription form instead of `:` binding as a binop.
     paren_head: u32,
     /// Expression and block levels enclosing the current parse position.
     nesting: u32,
@@ -280,7 +280,7 @@ impl<'a> Parser<'a> {
             }
             // The `mod a::b;` file header: v1-only, first non-comment item,
             // `;`-terminated. A later one is a misplaced header, not a
-            // Rust-style load request (spec 6.1). A visibility prefix
+            // Rust-style load request. A visibility prefix
             // (`pub mod combat;`) is part of the header; on a false lead the
             // position rewinds and parse_item handles the item.
             if self.dialect == Dialect::V1 && !seen_item {
@@ -731,7 +731,7 @@ impl<'a> Parser<'a> {
     /// `use <path><suffix>;` where suffix is nothing (bind the tail),
     /// `as alias`, `*`, `operator(op)` (optionally `as alias`), or
     /// `{ sub-trees }`.
-    /// `use ... as _` rejects (spec 8.1: no activation semantics).
+    /// `use ... as _` rejects (no activation semantics).
     fn parse_use_decl(&mut self, start: Span, vis: Option<Visibility>) -> PResult<UseDecl> {
         debug_assert!(matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "use"));
         self.advance(); // `use`
@@ -832,7 +832,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    /// `as <ident>` ending a use tree. `use ... as _` rejects (spec 8.1).
+    /// `as <ident>` ending a use tree. `use ... as _` rejects.
     fn parse_use_alias(&mut self) -> PResult<Ident> {
         self.expect(TokenKind::As)?;
         if matches!(self.kind(), TokenKind::Ident(n) if n.as_str() == "_") {
@@ -1737,7 +1737,7 @@ impl<'a> Parser<'a> {
     /// `inline(lua) fn`.) Mirrors rock's `token_starts_macro_body_item`.
     ///
     /// `use`/`mod` are included so they parse as ITEMS and `macro_expand`
-    /// rejects them by name (plan M1: a macro must not change the module
+    /// rejects them by name (a macro must not change the module
     /// graph). Left out, they fell through to `parse_statement` and a
     /// `use a::b;` in a macro body compiled to nothing at all. Both are
     /// contextual words, so the lookahead is what separates the declaration
@@ -1951,7 +1951,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             // v1 visibility modifiers on fields: `pub`, `private`,
-            // `private(set)`, `pub(package) private(set)`, ... (spec 10).
+            // `private(set)`, `pub(package) private(set)`, ...
             // `vis`/`set_private` are contextual words, never reserved.
             let mods = self.parse_vis_mods()?;
             let (vis, set_private) = (mods.vis, mods.set_private);
@@ -2538,7 +2538,7 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // `use ...;` inside a block (v1; spec 8.2). Parses additively in
+        // `use ...;` inside a block (v1). Parses additively in
         // legacy, where it was previously an unsupported statement.
         if self.at_use_decl() {
             let decl = self.parse_use_decl(start, None)?;
@@ -2866,7 +2866,7 @@ impl<'a> Parser<'a> {
                 if self.dialect == Dialect::V1 {
                     // In v1 `::` is exclusively the path separator; an infix
                     // `::` after a non-path expression can only be an
-                    // ascription, so name the replacement form (spec 7).
+                    // ascription, so name the replacement form.
                     return Err(self.err(
                         "infix `expr :: Type` ascription is not available in modules-v1; write `(expr : Type)`",
                     ));
@@ -3632,7 +3632,7 @@ impl<'a> Parser<'a> {
                 }
                 // v1: `::` after an ident is ALWAYS a path — the resolver
                 // decides whether the head names a module, type, or enum
-                // (no case heuristic, spec 4.3).
+                // (no case heuristic).
                 if self.dialect == Dialect::V1 && self.kind() == TokenKind::DoubleColon {
                     let path = self.parse_path_tail(base)?;
                     // `p::Type { .. }` / `p::E::V { .. }` record literal.
@@ -3722,7 +3722,7 @@ impl<'a> Parser<'a> {
                 // paren group's head and elements parse, the Pratt loop BREAKS
                 // at `:` so this arm owns the colon: one expression, one
                 // colon, one complete type, then `)`. `(a : T, ..)` is NOT a
-                // typed-tuple form and rejects (spec 7).
+                // typed-tuple form and rejects.
                 let first =
                     self.with_paren_head(|p| p.with_allow_literals(true, |p| p.parse_expr(0)))?;
                 if self.kind() == TokenKind::Colon {

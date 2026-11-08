@@ -1,9 +1,9 @@
 //! A legacy definition's key is its bare name, and so is a standard-library
 //! one, so every legacy overload of a std-named function or operator shares
-//! the std key. A v1 fragment still reaches only what its tiers bring in
-//! (spec 8.3): tier 5 is the compiler-owned std view (spec 5), which holds
+//! the std key. A v1 fragment still reaches only what its tiers bring in:
+//! tier 5 is the compiler-owned std view, which holds
 //! the standard library's own members and no legacy file's; a legacy
-//! provider's view holds the declarations its own files define (spec 3.2),
+//! provider's view holds the declarations its own files define,
 //! not other legacy files' overloads of the same name. Legacy callers keep
 //! the whole bare family.
 //!

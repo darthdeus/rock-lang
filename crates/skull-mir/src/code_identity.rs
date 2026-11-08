@@ -20,7 +20,7 @@ use crate::mir::{
 use crate::monoty::MonoInterner;
 
 /// The file-independent name of a definition, for the identities the runtime
-/// keys state on (plan 2.1). A modules-v1 definition's name IS its DefKey
+/// keys state on. A modules-v1 definition's name IS its DefKey
 /// (`<package>::<module path>::<name>`, the only names carrying `::`), which
 /// already names the logical module, so the owning FRAGMENT is not part of its
 /// identity: moving a definition between two fragments of one module keeps its

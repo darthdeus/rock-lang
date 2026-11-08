@@ -49,7 +49,7 @@ pub struct BodyUpdate {
 /// - Scope: the namespace tree's inputs changed (a `mod` header, a `use`, a v1 definition's name,
 ///   kind or visibility, or a legacy definition a compatibility view also names). The tree is
 ///   re-assembled, and the edited file plus every file whose lowering read a changed fact re-lower,
-///   then the interface cascade runs (plan 2.6, scope epochs)
+///   then the interface cascade runs (scope epochs)
 /// - FullUser: a full recompile of every user file
 ///
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -357,10 +357,10 @@ pub struct Session {
 ///
 /// A session RE-PARSES from stored text on every edit, so it has to keep the
 /// dialect and the owning package rather than take them stamped once from the
-/// caller -- plan 2.4's "dialect and package facts reach the parser and bone
-/// through the host", for the incremental route. A standalone source with no
+/// caller: dialect and package facts reach the parser and bone through the
+/// host, on the incremental route too. A standalone source with no
 /// manifest is legacy and unowned, which is what [`SessionFile::legacy`]
-/// spells (spec 3.1: the loader supplies an explicit dialect, or a synthetic
+/// spells (the loader supplies an explicit dialect, or a synthetic
 /// package, for a standalone source).
 #[derive(Clone, Debug)]
 pub struct SessionFile {
@@ -1261,7 +1261,7 @@ impl Session {
     }
 
     /// Whether a legacy file's edit adds, removes or re-kinds a definition of
-    /// a provider some v1 package depends on: its namespace view (spec 3.2)
+    /// a provider some v1 package depends on: its namespace view
     /// holds what the provider's files define, and v1 lookups through it are
     /// decided at lowering.
     fn changes_a_legacy_view(
@@ -1464,14 +1464,14 @@ impl Session {
             .collect()
     }
 
-    /// The namespace facts `file`'s last lowering read (plan 2.6), or `None`
+    /// The namespace facts `file`'s last lowering read, or `None`
     /// for a file the session does not hold.
     pub fn scope_probes(&self, file: &str) -> Option<&FxHashSet<ScopeProbe>> {
         let mid = self.ws.module_ids.get(&ustr(file))?;
         self.ws.modules.get(mid.index()).map(|m| &m.scope_probes)
     }
 
-    /// The scope path (plan 2.6): re-assemble the namespace tree from the
+    /// The scope path: re-assemble the namespace tree from the
     /// stored contributions (the edited file's is already the new one), diff
     /// it against the current tree, commit it, and run the interface cascade
     /// with every module whose lowering read a changed fact added to the

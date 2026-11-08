@@ -573,7 +573,7 @@ impl Builder<'_> {
     /// boxed representation to avoid, so a `value` struct is already a first-class
     /// `vecN` and there is no leaf form to prefer. Answering `true` here would put
     /// a local into leaf cells named `<name>__<i>`, which is both a duplicated
-    /// initializer and a RESERVED GLSL identifier (spec 3.7).
+    /// initializer and a RESERVED GLSL identifier.
     ///
     /// The gate lives on the predicate rather than on each shape helper because
     /// every representation decision reaches nobox-ness through here -- binding

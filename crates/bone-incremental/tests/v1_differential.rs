@@ -1,5 +1,5 @@
 //! Modules-v1 incremental == fresh, compared on what resolution decided, and
-//! the deterministic gates for plan M5's scope epochs (plan section 2.6).
+//! the deterministic gates for scope epochs.
 //!
 //! A sibling of `incremental.rs` rather than an extension of it: that oracle
 //! parses every file legacy through `parse_module_clean` and compares body
@@ -10,7 +10,7 @@
 //! type, which neither diagnostics nor types can see), and a refused build as
 //! a comparable outcome. The per-offset type reading is shared (`common`).
 //!
-//! The gates pin the scope path's work (plan 2.6): an edit to a
+//! The gates pin the scope path's work: an edit to a
 //! namespace-tree input re-assembles the tree, and re-lowers the edited file
 //! plus every file whose lowering read a changed fact, at fragment level.
 //! Each gate asserts its tier, the bodies re-inferred and re-lowered, and --
@@ -557,7 +557,7 @@ fn the_full_rebuild_reinfers_no_warm_body() {
 }
 
 // ---------------------------------------------------------------------------
-// M5 gates (plan 2.6). Fragment-level: whole fragments whose recorded
+// Scope-epoch gates. Fragment-level: whole fragments whose recorded
 // lookups the delta touches re-lower and re-infer. "Per-body" names the next
 // step, which needs rung 2 (per-body re-lower) and does not exist yet.
 // ---------------------------------------------------------------------------
@@ -588,11 +588,11 @@ fn control_a_body_edit_on_a_gate_fixture_reads_narrow() {
 }
 
 /// Gate (a): an explicit `use` added to one fragment joins the glob family
-/// it used to resolve through, and wins the exact tie (spec 8.3: tier 3 is
+/// it used to resolve through, and wins the exact tie (tier 3 is
 /// nearer than tier 4).
 ///
 /// c's 2 bodies re-lower and re-infer, nothing else: the import is
-/// fragment-local (spec 8.2), so only c's own fragment scope changed.
+/// fragment-local, so only c's own fragment scope changed.
 /// Per-body: only `pick`, the one body with a bare lookup of `bump`.
 #[test]
 fn gate_a_use_added_to_one_fragment() {
@@ -620,7 +620,7 @@ fn gate_a_use_added_to_one_fragment() {
 }
 
 /// Gate (b): the same `use` removed, leaving the lower-tier glob candidate
-/// that lost the exact tie to it (spec 14.3: removing an import removes its
+/// that lost the exact tie to it (removing an import removes its
 /// callables from every family it contributed to).
 ///
 /// c's 2 bodies re-lower and re-infer, nothing else. Per-body: `pick` only.
@@ -651,7 +651,7 @@ fn gate_b_use_removed_from_one_fragment() {
 
 /// Gate (c): a `pub fn` added to a module another fragment globs. Here the
 /// new member joins the prelude family the globber was already calling and
-/// wins the exact tie (spec 8.3: tier 4 is nearer than tier 5), so the
+/// wins the exact tie (tier 4 is nearer than tier 5), so the
 /// globber's selection really moves.
 ///
 /// b (edited, 2 bodies after the edit) and c (its bare lookup of `warm_one`
@@ -685,7 +685,7 @@ fn gate_c_glob_member_added() {
     );
 }
 
-/// A lower-tier overload added and removed (spec 8.3, 14.3): c's own
+/// A lower-tier overload added and removed: c's own
 /// `bump(string)` binds the name first, and b's `bump(int)`, added to a
 /// module c globs, joins its family and is the only fit for `bump(1)`. The
 /// caller re-lowers on both edits, as a fresh build of each text agrees.
@@ -946,7 +946,7 @@ fn gate_h_legacy_definer_edit_collides_with_a_projected_name() {
 // that the case exercises the scope path rather than the full rebuild.
 // ---------------------------------------------------------------------------
 
-/// The glob `warm_one` joined with the std prelude's (spec 8.3).
+/// The glob `warm_one` joined with the std prelude's.
 fn warm_one_family() -> Option<String> {
     Some(format!(
         "{}/None/Globs,warm_one/Some({})/Std",
@@ -980,7 +980,7 @@ fn a_glob_member_that_shadowed_std_is_removed() {
 }
 
 /// A legacy file that starts defining a std-named function does not join the
-/// std family a v1 call reaches through tier 5 (spec 5): the call keeps
+/// std family a v1 call reaches through tier 5: the call keeps
 /// selecting the std definition rather than tying with the legacy one, in
 /// the incremental session as in a fresh build.
 #[test]
@@ -1664,7 +1664,7 @@ fn a_user_type_named_like_a_warm_type_builds_like_a_fresh_build() {
 }
 
 // ---------------------------------------------------------------------------
-// Module anchors (spec 8.1, 8.6): an import or a named re-export that lands
+// Module anchors: an import or a named re-export that lands
 // on a module is a path segment, and the walk through it is probed.
 // ---------------------------------------------------------------------------
 
@@ -1779,7 +1779,7 @@ fn a_module_reexport_added_and_repointed_moves_a_path_through_it() {
 }
 
 // ---------------------------------------------------------------------------
-// A v1 package over a legacy provider (spec 3.2, V1 -> Legacy): the view of
+// A v1 package over a legacy provider (V1 -> Legacy): the view of
 // what the provider's own files define.
 // ---------------------------------------------------------------------------
 

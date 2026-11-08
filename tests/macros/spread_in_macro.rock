@@ -1,5 +1,5 @@
-// A `..` struct spread inside a macro body expands at the caller's types
-// (plan M2 / macro-hygiene). The spread is resolved after expansion.
+// A `..` struct spread inside a macro body expands at the caller's types.
+// The spread is resolved after expansion.
 
 struct AB { a: int, b: int }
 

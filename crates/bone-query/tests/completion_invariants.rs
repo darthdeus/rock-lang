@@ -1,4 +1,4 @@
-//! Context-AWARE completion invariants (completion pipeline contract M4):
+//! Context-AWARE completion invariants:
 //! fixtures that know their slot assert the typed-slot properties the
 //! position-blind checker (`bone_query::invariants`, hooked into every
 //! corpus helper) cannot see.

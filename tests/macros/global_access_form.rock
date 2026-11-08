@@ -1,4 +1,4 @@
-// Slice 2: `_G.X` source form. Resolves `X` against the module-root
+// `_G.X` source form. Resolves `X` against the module-root
 // scope, bypassing local shadows.
 
 global GAF_GLOBAL: int = 200

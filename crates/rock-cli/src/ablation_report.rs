@@ -1,4 +1,4 @@
-//! Stage-0e ablation census reporting (the compiler contract S 0e).
+//! Totality-ablation census reporting.
 //!
 //! The mode COLLECTS fatals rather than aborting at the first one (see
 //! `skull_mir::ablation`), so something has to drain the registry and turn it

@@ -1,12 +1,11 @@
-//! Modules-v1 namespace data (plan M2; spec 2, 6, 8, 9).
+//! Modules-v1 namespace data.
 //!
-//! The namespace tree is built per workspace by the semantic pass from the
-//! v1 fragments' headers, inline mod blocks, and use declarations. Definition
-//! identity uses canonical DefKeys (`<package>::<module path>::<name>`,
-//! plan 2.1): the workspace `*_by_name` maps keep their types, but v1 items
-//! register under their DefKey while legacy items keep today's bare names.
-//! The tree itself is only the SCOPE map — resolution lives in
-//! `bone-lower/src/resolve.rs`.
+//! The namespace tree is built per workspace by the semantic pass from the v1
+//! fragments' headers, inline mod blocks, and use declarations. Definition
+//! identity uses canonical DefKeys (`<package>::<module path>::<name>`): the
+//! workspace `*_by_name` maps keep their types, but v1 items register under
+//! their DefKey while legacy items keep today's bare names. The tree itself is
+//! only the SCOPE map — resolution lives in `bone-lower/src/resolve.rs`.
 
 use crate::prelude::*;
 
@@ -110,8 +109,8 @@ pub fn is_intrinsic_key_in(key: Ustr, spellings: &[&str]) -> bool {
 /// Package-root-relative module path (`combat::casting`).
 pub type ModulePath = Vec<Ustr>;
 
-/// The source site performing an access check (spec 10.2; plan 2.3).
-/// None package indicates legacy callers (spec 3.3).
+/// The source site performing an access check.
+/// None package indicates legacy callers.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct AccessSite<'a> {
     pub package: Option<PackageId>,
@@ -127,7 +126,7 @@ impl<'a> AccessSite<'a> {
     }
 }
 
-/// Visibility of a namespace node or export binding (spec 9).
+/// Visibility of a namespace node or export binding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NsVisibility {
     /// Defining module + descendants (the default).
@@ -211,25 +210,25 @@ pub struct NsNode {
     /// Child modules by segment.
     pub children: FxHashMap<Ustr, Ustr>,
     /// Shared named export bindings from `pub use` / `private use` at module
-    /// scope, by bound name — spec 8.2 distinguishes them from fragment-local
-    /// imports, which live on the fragment (file) in `FragmentScope`.
+    /// scope, by bound name, as distinct from fragment-local imports, which live
+    /// on the fragment (file) in `FragmentScope`.
     pub exports: FxHashMap<Ustr, ExportBinding>,
     /// Shared glob export bindings (`pub use a::*;`). A module may hold any
-    /// number; they sit below owned names and named exports (spec 8.3, 8.6).
+    /// number; they sit below owned names and named exports.
     pub glob_exports: Vec<ExportBinding>,
 }
 
-/// A shared export binding (spec 8.2): `pub use` / `private use` at module
+/// A shared export binding: `pub use` / `private use` at module
 /// scope. The target stays UNRESOLVED — the resolver chases it lazily from
 /// the exporting module (with cycle rejection), so declaration order never
-/// matters and pure re-export cycles diagnose at use (spec 8.6).
+/// matters and pure re-export cycles diagnose at use.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExportBinding {
     pub target: UsePathRef,
     pub vis: NsVisibility,
 }
 
-/// Kind of a canonical definition (plan 2.1). Callables are families;
+/// Kind of a canonical definition. Callables are families;
 /// everything else is unique in the module's one item-name domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DefKind {
@@ -240,7 +239,7 @@ pub enum DefKind {
     Module,
 }
 
-/// Metadata for one canonical definition (plan 2.1). Diagnostics and the
+/// Metadata for one canonical definition. Diagnostics and the
 /// LSP render `name`/the shortest accessible path, never the raw key.
 #[derive(Clone, Debug)]
 pub struct DefMeta {
@@ -257,7 +256,7 @@ pub struct DefMeta {
 }
 
 /// Fragment facts for one v1 file: which package/module it contributes to
-/// and its own imports (spec 8.2 fragment-local scope).
+/// and its own fragment-local imports.
 #[derive(Clone, Debug, Default)]
 pub struct FragmentScope {
     pub package: PackageId,
@@ -266,7 +265,7 @@ pub struct FragmentScope {
     /// Plain `use` bindings local to this fragment: local name -> every
     /// (unresolved) use path bound under it, in source order. Resolution is
     /// lazy so declaration order never matters; pure cycles diagnose at use,
-    /// and several paths compose or conflict there (spec 8.3).
+    /// and several paths compose or conflict there.
     pub named: FxHashMap<Ustr, Vec<UsePathRef>>,
     /// Module scopes this fragment globs (`use a::b::*;`), unresolved.
     pub globs: Vec<UsePathRef>,
@@ -323,7 +322,7 @@ impl LegacyProjection {
     }
 }
 
-/// A legacy file's item-level `use` declarations (spec 3.2). A named import
+/// A legacy file's item-level `use` declarations. A named import
 /// binds its local name explicitly, which replaces every other candidate for
 /// that name in the file; a glob import stands where the root projection
 /// would. `renamed` records what an import binds under a name other than
@@ -349,7 +348,7 @@ impl LegacyImports {
     }
 }
 
-/// What a bare name in a legacy source file names (spec 3.2). The one
+/// What a bare name in a legacy source file names. The one
 /// decision behind every legacy lookup: lowering reads it to resolve a name
 /// and to record a merged overload family's members. Its inputs -- the
 /// per-file views and the legacy owned-name facts -- exist before any body
@@ -381,10 +380,10 @@ pub fn legacy_name(ws: &crate::workspace::Workspace, file: Ustr, name: Ustr) -> 
         return LegacyName::Bare;
     }
     let imports = ws.legacy_imports.get(&file);
-    // An explicit named import wins in its file (spec 3.2: explicit
+    // An explicit named import wins in its file (explicit
     // compatibility imports shadow the root projection, and they are how a
     // legacy file resolves a collision). Named imports of several callables
-    // compose into one family of those imports alone (spec 8.3).
+    // compose into one family of those imports alone.
     if let Some(entries) = imports.and_then(|i| i.named.by_name.get(&name)) {
         if entries.len() > 1 && entries.iter().all(|e| e.kind == DefKind::Callable) {
             return LegacyName::Family(entries.iter().map(|e| e.key).collect());
@@ -438,7 +437,7 @@ pub fn legacy_name(ws: &crate::workspace::Workspace, file: Ustr, name: Ustr) -> 
     LegacyName::Collision { owners, foreign }
 }
 
-/// One namespace fact a lowering read (plan 2.6, scope epochs). A module's
+/// One namespace fact a lowering read (scope epochs). A module's
 /// lowering records every probe its lookups made, hit or miss, so an edit to
 /// the namespace tree re-lowers exactly the modules that read a changed fact.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -555,7 +554,7 @@ pub struct NsPackage {
     pub nodes: FxHashMap<Ustr, NsNode>,
     /// Dependency aliases: alias -> target package id.
     pub aliases: FxHashMap<Ustr, PackageId>,
-    /// For the view of a legacy provider (spec 3.2): the provider's own
+    /// For the view of a legacy provider: the provider's own
     /// files, whose definitions are the only members of its view's callable
     /// families. Empty for a v1 package.
     pub legacy_files: FxHashSet<Ustr>,
@@ -621,7 +620,7 @@ impl NsTree {
     }
 
     /// Whether `vis` on a node in `owner_pkg` admits access FROM
-    /// (from_pkg, from_path) — spec 9's audiences. `from_path` is the
+    /// (from_pkg, from_path). `from_path` is the
     /// accessing module's path within its own package; cross-package access
     /// only ever sees `Pub`.
     pub fn can_access(
@@ -657,7 +656,7 @@ fn from_path_is_ancestor_or_self(ancestor: &[Ustr], from: &[Ustr]) -> bool {
     from.len() >= ancestor.len() && from[..ancestor.len()] == *ancestor
 }
 
-/// Build the canonical DefKey for a definition (plan 2.1): the package's
+/// Build the canonical DefKey for a definition: the package's
 /// self name, the `::`-joined module path, then the item name. Encoding is
 /// injective because `::` cannot occur inside an identifier.
 pub fn def_key(pkg_self_name: &str, module_path: &[Ustr], name: &str) -> Ustr {

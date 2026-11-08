@@ -58,13 +58,12 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
         std::process::exit(code);
     }
 
-    // Install the one logger before anything can log (see
-    // the compiler contract). Idempotent; reads ROCK_LOG.
+    // Install the one logger before anything can log. Idempotent; reads
+    // ROCK_LOG.
     rock_log::init();
 
-    // `ROCK_MONO_ABLATION=1`: the Stage-0e totality ablation
-    // (the compiler contract S 0e). Off by default and read once here
-    // so every later consult is an atomic load rather than an env lookup.
+    // `ROCK_MONO_ABLATION=1`: the totality ablation. Off by default and read
+    // once here so every later consult is an atomic load rather than an env lookup.
     skull_mir::ablation::init_from_env();
 
     if let Some(name) = std::env::args().nth(1) {
@@ -117,8 +116,8 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
     }
 
     // Record the invocation's --channel/--var selection before dispatch; the
-    // compile chokepoints resolve [build.vars] against it per project
-    // (the compiler contract). A malformed --var fails here, by name.
+    // compile chokepoints resolve [build.vars] against it per project.
+    // A malformed --var fails here, by name.
     let implied_channel = metadata.implied_channel.map(str::to_owned);
     if let Err(e) = rock_cli::comptime::set_invocation_selection(
         args.channel.clone(),

@@ -116,8 +116,8 @@ fn fallback_bodies_execute_under_node() {
     }
 }
 
-// The native-vs-fallback numeric differential the intrinsics arc was built for
-// and slice 5 walled as "not achievable in-arc" (one body per fn on luajit).
+// The native-vs-fallback numeric differential, which luajit alone cannot run
+// (one body per fn).
 // With node as the second executing backend, each intrinsic runs BOTH ways --
 // its JS table mapping and its Rock fallback lowered to JS -- and they agree
 // with each other AND the luajit reference. min/max are mapping-only (generic,

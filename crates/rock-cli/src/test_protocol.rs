@@ -1,7 +1,6 @@
 //! The `__SKULL__` test-result line protocol shared by the per-backend test
 //! executors (luajit in `skull_backend`, node in `js_test`). One parser, one
-//! histogram helper -- the executor seam of
-//! the compiler contract.
+//! histogram helper.
 
 /// Parsed marker lines of one test-program run.
 pub struct SkullMarkers {

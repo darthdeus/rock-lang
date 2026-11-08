@@ -131,7 +131,7 @@ pub fn emit_module(src: &str) -> String {
     emit_mir(src).lua
 }
 
-/// One fragment of a modules-v1 package fixture (plan 2.2: fragment = file,
+/// One fragment of a modules-v1 package fixture (fragment = file,
 /// logical module = its `mod` header). The FIRST fragment is the one emission
 /// starts from, so it owns `main`.
 pub struct V1Fragment<'a> {

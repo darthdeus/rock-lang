@@ -1,4 +1,4 @@
-//! The ONE completion rank key (completion pipeline contract, M1). Every
+//! The ONE completion rank key. Every
 //! completion path expresses its ranking as a `RankKey`: `Ord` drives the
 //! in-process top-N select and `encode()` produces the LSP `sort_text`
 //! string, from the same field order -- so the two orderings cannot

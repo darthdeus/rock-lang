@@ -1608,7 +1608,7 @@ mod modules_grammar_tests {
         }
     }
 
-    // --- spec 7: contextual ascription -------------------------------------
+    // --- contextual ascription ----------------------------------------------
 
     #[test]
     fn paren_ascription_parses_in_v1() {
@@ -1632,7 +1632,7 @@ mod modules_grammar_tests {
 
     #[test]
     fn v1_ident_colon_ident_parses_as_a_path_not_ascription() {
-        // No name-resolution-based guessing (spec 7): `x :: float` parses as a
+        // No name-resolution-based guessing: `x :: float` parses as a
         // two-segment path; whether it names anything is the resolver's call.
         let ast = parse_module_with_dialect(
             "fn f(x: float) { let y = x :: float }",
@@ -1694,7 +1694,7 @@ mod modules_grammar_tests {
 
     #[test]
     fn ascription_is_not_a_typed_tuple_in_v1() {
-        // `(a : int, b : int)` is not a new typed-tuple literal (spec 7).
+        // `(a : int, b : int)` is not a new typed-tuple literal.
         let err = parse_v1("fn f() { let t = (a : int, b : int) }")
             .expect_err("multi-colon paren group must reject");
         assert!(
@@ -2125,7 +2125,7 @@ mod modules_items_tests {
             "pub(package) use a::b::step;",
             "private use a::b::x;",
         ];
-        // Bare `use` parses additively in legacy too (contextual, plan M1);
+        // Bare `use` parses additively in legacy too (contextual);
         // visibility-prefixed forms are v1 grammar.
         let legacy_cases = [
             "use a::b::c;",

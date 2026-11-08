@@ -139,9 +139,9 @@ fn struct_expand_is_an_expansion_intrinsic() {
     assert!(declared.contains(&(ustr::Ustr::from("upairs"), 1)));
 }
 
-// Slice 3: the Layer-0 proving set is annotated `@intrinsic` in the stdlib, so
+// The Layer-0 proving set is annotated `@intrinsic` in the stdlib, so
 // `declared_intrinsics` sees it -- the declaration side of the contract the toy
-// JS table (slice 4) is checked against with `unbacked_entries`.
+// JS table is checked against with `unbacked_entries`.
 #[test]
 fn stdlib_layer0_proving_set_is_declared_intrinsic() {
     let ws = ws_with_stdlib("fn main() {}");

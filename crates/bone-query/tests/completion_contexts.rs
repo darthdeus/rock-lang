@@ -1,5 +1,5 @@
 //! Completion contexts on the bone facade: struct-literal fields, and member
-//! access (fields + UFCS methods). See query facade contract.
+//! access (fields + UFCS methods).
 
 use bone_query::BoneWorkspace;
 use lsp_types::{CompletionItem, Position};
@@ -28,8 +28,8 @@ fn item(src: &str, line: u32, ch: u32, label: &str) -> CompletionItem {
         .unwrap_or_else(|| panic!("no completion `{label}` at {line}:{ch}"))
 }
 
-/// Every context fixture doubles as an invariant-suite position
-/// (completion pipeline contract M4): the position-blind response invariants
+/// Every context fixture doubles as an invariant-suite position:
+/// the position-blind response invariants
 /// must hold in every completion context this file exercises.
 fn check_invariants(src: &str, line: u32, ch: u32, items: &[CompletionItem]) {
     let off: usize = src

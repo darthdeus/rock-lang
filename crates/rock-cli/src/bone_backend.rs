@@ -29,7 +29,7 @@ use std::time::Duration;
 pub struct BonePhaseTimes {
     pub parse: Duration,
     /// Fused lower + check (`bone_semantic::semantic_passes::semantic_pass`). bone does not expose
-    /// a lower/check boundary publicly; see the compiler contract.
+    /// a lower/check boundary publicly.
     pub semantic: Duration,
     /// Cloning the (LazyLock-cached, pre-parsed) stdlib modules — a per-run
     /// harness cost incurred before `semantic_pass`, counted *within* `semantic`.
@@ -174,7 +174,7 @@ pub fn check_modules(
 
 /// [`check_modules`] for the modules tools, which must read a workspace whose
 /// bodies have errors (the migrate planner compares resolution site by site
-/// and repairs what changed) and which read the spec 11 closure themselves
+/// and repairs what changed) and which read the public-API type closure themselves
 /// (`api_closure_requirements`). Every other gate is the same; the body
 /// errors come back beside the workspace instead of replacing it.
 pub fn check_modules_for_tools(

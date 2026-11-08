@@ -1,16 +1,15 @@
 //! `rock modules migrate <package> --check|--apply [--consumer <dir>]...
-//! [--format pretty|json]` (modules spec 15.2, plan M5).
+//! [--format pretty|json]`.
 //!
 //! Converts one legacy package to modules-v1 without moving its files out of
-//! the package root. The plan has the parts spec 15.2 names, planned
-//! separately: the manifest mode, module headers (none: the default keeps
-//! every file at the root), one `imports.rock` facade of package-visible glob
-//! re-exports for the dependencies the package's bodies actually reference,
-//! `pub` on the definitions the named consumers reference plus the API type
-//! closure the compiler demands on top of them, the contextual-ascription
-//! rewrite (`x :: T` to `(x : T)`), and qualified-call repairs where a newly
-//! visible overload would win over the definition a legacy call selected
-//! (spec 15.2).
+//! the package root. The plan has these parts, planned separately: the manifest
+//! mode, module headers (none: the default keeps every file at the root), one
+//! `imports.rock` facade of package-visible glob re-exports for the
+//! dependencies the package's bodies actually reference, `pub` on the
+//! definitions the named consumers reference plus the API type closure the
+//! compiler demands on top of them, the contextual-ascription rewrite (`x :: T`
+//! to `(x : T)`), and qualified-call repairs where a newly visible overload
+//! would win over the definition a legacy call selected.
 //!
 //! Every fact is compiler-derived: what a consumer uses and what a fragment
 //! needs imported come from the resolved references of checked workspaces
@@ -52,7 +51,7 @@ use crate::modules_audit::Format;
 
 const EXIT_NOT_CLEAN: i32 = 3;
 const EXIT_ANALYSIS_FAILED: i32 = 4;
-/// The facade file the default conversion adds (spec 15.2).
+/// The facade file the default conversion adds.
 const IMPORTS_FILE: &str = "imports.rock";
 /// Qualified-call repairs are found by checking a candidate; each round can
 /// only expose calls the previous round's repairs unmasked, so a few suffice.
@@ -588,7 +587,7 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
             {
                 if c.file_pkg.get(&from_file) == Some(&c.p_id) {
                     // The package's own bodies inside a consumer unit: a legacy
-                    // body may resolve against the consumer (spec 3.2).
+                    // body may resolve against the consumer.
                     for owner in owners(&b.ws, &r.target, &c.file_pkg) {
                         if owner != c.p_id
                             && !c
@@ -658,9 +657,9 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
             }
         }
     }
-    // A definition only a consumer's tests reach is exported like any other
-    // use (author decision, 2026-09-18: spec 16's relocate-the-test advice is
-    // not worth a library API split here); the report lists it as test-only.
+    // A definition only a consumer's tests reach is exported like any other use
+    // (relocating the test is not worth a library API split here); the report
+    // lists it as test-only.
     plan.test_uses
         .retain(|di, _| !plan.exports.contains_key(di));
     for (&di, uses) in &plan.test_uses {
@@ -1160,7 +1159,7 @@ fn candidate_file_pkg(c: &Ctx, plan: &Plan) -> HashMap<Ustr, u32> {
 /// A changed site the plan can repair: a named, non-method call in one of the
 /// package's files whose baseline target is a single function of std or of an
 /// imported v1 dependency. The repair qualifies the callee. Callables
-/// accumulate across the v1 lookup tiers (spec 8.3), so a call moves only
+/// accumulate across the v1 lookup tiers, so a call moves only
 /// when a newly visible overload outranks the legacy selection or wins its
 /// exact tie by tier.
 fn repair_for(

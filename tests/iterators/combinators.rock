@@ -1,4 +1,4 @@
-// Slice 6 acceptance: lazy iterator combinators over `I: Iterator<T>` bounds
+// Lazy iterator combinators over `I: Iterator<T>` bounds
 // Chains desugar through the
 // protocol, mono-by-inlining substitutes the placeholder `next` calls, and the
 // whole spine flattens at the `for` loop. Coverage: chain results, LAZINESS

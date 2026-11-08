@@ -1,4 +1,4 @@
-//! Position-blind completion-response invariants (completion-v2 M4): the
+//! Position-blind completion-response invariants: the
 //! properties that hold for EVERY completion response regardless of cursor
 //! context, checked over the ranking corpus (test helpers). One invariant
 //! catches a bug class across all contexts where a per-case guard pins a

@@ -4,7 +4,7 @@
 //! rejected. Today the `body_ty != unit` gate in `check_module` skips exactly
 //! this case, so it's a silent hole.
 //!
-//! Principled fix (park note slice 2): a `Never`/bottom type that unifies with
+//! Principled fix: a `Never`/bottom type that unifies with
 //! anything. A block whose last statement is `return` is `Never`, so the gate
 //! can be dropped and `unify(body, ret)` catches a plain unit fall-through.
 //! Bare `return` (no value) must also match the declared type via the Return

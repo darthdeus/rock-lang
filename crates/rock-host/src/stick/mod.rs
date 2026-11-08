@@ -418,8 +418,8 @@ pub struct DetailedDependency {
     /// a shipping channel excludes the package from the compile set entirely,
     /// so generated shipping code carries none of its symbols.
     pub channels: Vec<String>,
-    /// Authorizes a v1 consumer's dependency edge to a legacy provider
-    /// (modules spec 3.2). Rejected when the edge lacks it; a removable
+    /// Authorizes a v1 consumer's dependency edge to a legacy provider.
+    /// Rejected when the edge lacks it; a removable
     /// warning when the provider is already v1.
     pub allow_legacy: bool,
 }

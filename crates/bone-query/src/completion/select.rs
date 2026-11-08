@@ -1,7 +1,7 @@
-//! Completion candidate selection + materialization (completion-v2 stages
-//! B/D): the fact-shaped `Cand`/`Sink`, the ONE candidate ordering, the
-//! diversity pass, and `materialize_cand` -- the only place display strings
-//! are built. Tuning constants live here with the pipeline they cap.
+//! Completion candidate selection + materialization: the fact-shaped
+//! `Cand`/`Sink`, the ONE candidate ordering, the diversity pass, and
+//! `materialize_cand` -- the only place display strings are built. Tuning
+//! constants live here with the pipeline they cap.
 
 use std::collections::HashMap;
 
@@ -73,7 +73,7 @@ pub(crate) fn reconcile_suffix(items: &mut [CompletionItem], tail: &str) {
     }
 }
 
-// === Completion tuning (completion pipeline contract) =======================
+// === Completion tuning =======================================================
 // Every cap/threshold the ranking pipeline exposes, in one block. The fuzzy
 // score weights (FZ_*) live next to the DP above; the RankKey field order is
 // the ladder itself (rank_key.rs).
@@ -113,7 +113,7 @@ fn parse_max_completions(v: Option<&str>) -> usize {
 pub(crate) const REACH_CAP: usize = 64;
 
 /// Frequency prior buckets (`RankKey::freq`): >= HOT refs -> 0, >= WARM ->
-/// 1, else 2. Placeholder thresholds until the M6 replay corpus tunes them.
+/// 1, else 2. Placeholder thresholds until the replay corpus tunes them.
 pub(crate) const FREQ_HOT: u32 = 16;
 pub(crate) const FREQ_WARM: u32 = 3;
 
@@ -123,9 +123,9 @@ pub(crate) const FREQ_WARM: u32 = 3;
 pub(crate) const CALL_THROUGH_CAP: usize = 10;
 pub(crate) const PER_FN_METHOD_CAP: usize = 2;
 
-// === Completion candidate pipeline (completion pipeline contract, M3) ========
+// === Completion candidate pipeline ===========================================
 //
-// Stage B/D of completion-v2: every general-path source emits fact-shaped
+// Every general-path source emits fact-shaped
 // `Cand`s into a `Sink`; ONE select (RankKey order) runs on the facts;
 // `CompletionItem`s (labels, inserts, details) materialize in
 // `materialize_cand` for the post-cap survivors only. Sources never build

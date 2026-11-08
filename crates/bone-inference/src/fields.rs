@@ -554,7 +554,7 @@ impl AccessDenied {
     }
 }
 
-/// Single access predicate (plan 2.3; spec 10.2).
+/// Single access predicate.
 pub fn field_access(
     gamma: &Gamma,
     struct_key: Ustr,
@@ -593,7 +593,7 @@ pub fn field_access(
             site.module_path,
         ),
         None => {
-            // Legacy callers targeting v1 definitions get the same checks (spec 3.3).
+            // Legacy callers targeting v1 definitions get the same checks.
             matches!(vis, NsVisibility::Pub)
         }
     };
@@ -645,7 +645,7 @@ pub(crate) fn check_field_write_access(
 
     // Value-place and embed writeback: if `base_ty` is a value struct, or if `base` is an `embed`
     // field on an enclosing struct, writing to this field writes into `base`'s storage.
-    // That enclosing field must also be writable (spec 10.3)!
+    // That enclosing field must also be writable!
     if let Expr::FieldAccess {
         base: parent,
         field: parent_field,

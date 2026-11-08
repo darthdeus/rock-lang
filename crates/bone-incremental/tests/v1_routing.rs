@@ -3,7 +3,7 @@
 //!
 //! Only an edit to what the namespace tree is built from -- an item's name,
 //! kind or visibility, a `use`, a `mod` header -- takes the scope path, which
-//! re-assembles the tree (plan 2.6). A signature, field or payload edit keeps
+//! re-assembles the tree. A signature, field or payload edit keeps
 //! its DefKey and stays on the interface path.
 
 use bone_core::modules::NsAliases;
@@ -137,7 +137,7 @@ fn an_added_definition_rebuilds_the_tree() {
     );
 }
 
-/// The public-API closure (spec 11) is a whole-program check that the full
+/// The public-API closure is a whole-program check that the full
 /// rebuild runs. A signature edit is enough to break it, so the interface
 /// path has to run it too.
 #[test]
@@ -169,7 +169,7 @@ const TIED_BUMP: &str = "Ambiguous overload for `bump` with argument types (int)
      livev1::a::bump(n: int) -> int (v1 definition livev1::a::bump)";
 
 /// A legacy file defines `bump(int)` and a v1 package projects
-/// `bump(int, int)` to legacy files: one overload family (spec 3.2), so both
+/// `bump(int, int)` to legacy files: one overload family, so both
 /// arities resolve, and the verdict is the same in a fresh session and after a
 /// body-only edit of the caller. Legacy resolution once checked
 /// `ws.functions_by_name`, which is empty while a fresh build lowers bodies
@@ -273,7 +273,7 @@ fn a_v1_member_signature_edit_reinfers_a_merged_family_caller() {
     assert!(diags.is_empty(), "{diags:?}");
 }
 
-/// A glob opens only the members accessible from the importer (spec 8.1),
+/// A glob opens only the members accessible from the importer,
 /// so adding a private definition to a globbed module changes no other
 /// module's resolution: `c` still reaches `a::width` through its glob.
 #[test]
@@ -329,7 +329,7 @@ const PICK_STRING: &str = "pub fn pick(s: string) -> string {\n    s\n}\n";
 const PICK_USE: &str = "fn use_it() -> int {\n    let s = pick(\"v1\")\n    pick(1)\n}\n";
 
 /// Two v1 packages each project `pick` to a package-less legacy file that
-/// defines no `pick`: one overload family (spec 3.2), as legacy overloading
+/// defines no `pick`: one overload family, as legacy overloading
 /// merges them. Narrowing one member to the other's signature ties the call,
 /// naming both origins; widening it back clears the tie. Both edits stay on
 /// the interface path and agree with a fresh session.
@@ -414,10 +414,9 @@ fn a_legacy_member_added_to_an_ownerless_family_relowers_its_callers() {
     assert!(diags.is_empty(), "{diags:?}");
 }
 
-/// Legacy operator syntax reaches a projected v1 `operator +` (spec 3.2,
-/// 8.5), through `+` and `+=` alike, after a body edit of the caller; and a
-/// legacy definer adding a same-signature `operator +` ties both, as a fresh
-/// session does.
+/// Legacy operator syntax reaches a projected v1 `operator +`, through `+` and
+/// `+=` alike, after a body edit of the caller; and a legacy definer adding a
+/// same-signature `operator +` ties both, as a fresh session does.
 #[test]
 fn legacy_operator_syntax_merges_a_projected_operator_across_edits() {
     let geo =
@@ -495,7 +494,7 @@ const IMPORT_A: &str = "use lib_a::pick;\n\n";
 const IMPORT_BOTH: &str = "use lib_a::pick;\nuse lib_b::pick;\n\n";
 
 /// Explicit imports of two different callables under one name compose into
-/// one family (spec 8.3), in a v1 and in a legacy file alike. Adding the
+/// one family, in a v1 and in a legacy file alike. Adding the
 /// second import composes it (a `use` edit: scope path); removing it
 /// splits the family again, and `pick("v1")` no longer has a member. Each
 /// edit agrees with a fresh session.
@@ -574,7 +573,7 @@ const GLOB_A: &str = "use lib_a::*;\n\n";
 const GLOB_BOTH: &str = "use lib_a::*;\nuse lib_b::*;\n\n";
 
 /// Glob candidates of two different callables compose into one family when
-/// no higher tier binds the name (spec 8.3, author decision: merge). Adding
+/// no higher tier binds the name. Adding
 /// the second glob composes it (a `use` edit: scope path); removing it
 /// splits the family again, and `pick("v1")` no longer has a member. Each
 /// edit agrees with a fresh session.
@@ -849,7 +848,7 @@ fn a_dependency_module_alias_added_or_removed_takes_the_scope_path() {
 }
 
 /// A v1 package reaches a legacy dependency through the view of what the
-/// provider's own files define (spec 3.2), so a legacy definer edit that
+/// provider's own files define, so a legacy definer edit that
 /// adds or removes a name is a namespace edit: the scope path re-lowers the
 /// v1 users that looked the name up, as a fresh session decides.
 #[test]

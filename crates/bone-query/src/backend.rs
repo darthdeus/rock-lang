@@ -1717,7 +1717,7 @@ impl BoneWorkspace {
         })
     }
 
-    /// Rename sites that tell a definition from an import alias (spec 15.3).
+    /// Rename sites that tell a definition from an import alias.
     /// Renaming a modules-v1 definition rewrites every site that spells its
     /// name -- its declaration, bare uses, the naming segment of each path,
     /// `use` items and re-exports -- and not the local name an alias binds.
@@ -1913,9 +1913,8 @@ impl BoneWorkspace {
         // cross-file receiver type at incremental cost -- plain prefix completion
         // (the fall-through below) uses the live workspace directly.
         // The cursor classification, computed ONCE (CompletionCx: the AST
-        // classifier over the munge ladder plus every context consultation;
-        // completion pipeline contract M2b). The
-        // dispatch below tries the slots most-specific-first; a `recv.field`
+        // classifier over the munge ladder plus every context consultation).
+        // The dispatch below tries the slots most-specific-first; a `recv.field`
         // even inside a struct-literal field value is member completion.
         let cx = classify(src, offset);
         // Member access `recv.<cursor>`, one dispatch for every receiver shape.
@@ -2302,7 +2301,7 @@ impl BoneWorkspace {
             }
         }
         // Out-of-scope accessible definitions of a v1 fragment, each with the
-        // `use` that brings it in (spec 15.3). Only while a name is being
+        // `use` that brings it in. Only while a name is being
         // typed: the empty-prefix list is what the file already binds.
         let mut import_edits: HashMap<String, TextEdit> = HashMap::new();
         if !prefix.is_empty() {
@@ -2456,7 +2455,7 @@ impl BoneWorkspace {
                     // Test-scoped symbols (tests/-dir or test_-named) sink to
                     // the bottom kind bucket OUTSIDE test files; the band rung
                     // still leads, so an explicitly typed `test_` prefix
-                    // surfaces them (completion pipeline contract heuristics).
+                    // surfaces them.
                     _ if demote_tests && c.test_scoped => 4,
                     SymCat::Local | SymCat::Param => 0,
                     // After `yield`/`await`, a coroutine fn is the expected

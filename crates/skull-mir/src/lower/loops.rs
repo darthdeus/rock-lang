@@ -1163,7 +1163,7 @@ impl Builder<'_> {
                 // Fast path: destructuring a fresh `MakeTuple` (a tuple literal or a
                 // multi-return call packed as `MakeTuple(loads)`) binds directly to
                 // its operands -- no table alloc, no `TupleIndex`. This is what makes
-                // `let (ok, x) = next(it)` zero-alloc (slice 1).
+                // `let (ok, x) = next(it)` zero-alloc.
                 if let Inst::MakeTuple(vs) = &self.f.insts[value] {
                     if vs.len() == subs.len() {
                         let vs = vs.clone();

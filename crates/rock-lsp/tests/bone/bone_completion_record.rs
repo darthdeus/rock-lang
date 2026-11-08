@@ -1,4 +1,4 @@
-//! M6 replay corpus, server half: with recording active, every completion
+//! Completion replay corpus, server half: with recording active, every completion
 //! response item carries a `rock.completionAccepted` command
 //! `[record_id, index, label]`, and executing that command (what the client
 //! does after inserting the item) appends one self-contained JSONL corpus

@@ -147,8 +147,8 @@ pub struct Args {
     pub test_threads: Option<usize>,
     pub lib: Option<String>,
     pub clean: bool,
-    /// `--channel`: release channel for `[build.vars]` resolution
-    /// (the compiler contract). None = the project's default_channel.
+    /// `--channel`: release channel for `[build.vars]` resolution.
+    /// None = the project's default_channel.
     pub channel: Option<String>,
     /// `--target-os`: artifact target for the `platform` builtin. Cross-builds
     /// package on one OS for another; None = infer from channel, then host.
@@ -224,7 +224,7 @@ pub struct Args {
     /// and `--check`, only plan).
     pub apply: bool,
     /// `rock modules migrate --consumer <dir>` (repeatable): the consumer set
-    /// whose references decide the package's exports (spec 15.2).
+    /// whose references decide the package's exports.
     pub consumer: Vec<String>,
     /// `rock fix --imports`: add missing `use` items.
     pub imports: bool,

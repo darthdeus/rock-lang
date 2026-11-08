@@ -3,7 +3,7 @@
 //! These exercise the facade directly (no LSP wire protocol): feed a file in,
 //! query it, assert the LSP-shaped result. Hover + diagnostics are real; the
 //! rest are gap stubs that must return empty (never panic) until bone grows the
-//! query API. See query facade contract.
+//! query API.
 
 use bone_query::BoneWorkspace;
 use lsp_types::Position;

@@ -5,7 +5,7 @@
 //! So the same `rock-lang/crates/bone-lints` engine the LSP drives also runs as a pass over
 //! bone's already-typechecked output on every `compile`/`run`/`test`/`engine`
 //! build. `Error`-severity findings FAIL the build; `Warning`/`Advice` report
-//! only. Plan: the compiler contract.
+//! only.
 
 use bone_core::prelude::Instant;
 use bone_core::prelude::{FxHashMap, FxHashSet, ModuleId, Ustr};

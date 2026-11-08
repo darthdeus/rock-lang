@@ -1,6 +1,6 @@
 //! A v1 package reaches a legacy dependency through a namespace view of the
 //! declarations the provider's own files define, with their legacy
-//! (public) accessibility (spec 3.2, V1 -> Legacy). A legacy definition's key
+//! (public) accessibility (V1 -> Legacy). A legacy definition's key
 //! is its bare name, so a v1 path, import or glob of it resolves to exactly
 //! what a legacy caller reaches: overloads stay one family and a declared
 //! operator reaches `a + b`. Names the provider only borrows -- another

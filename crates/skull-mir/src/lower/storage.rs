@@ -940,10 +940,10 @@ impl Builder<'_> {
             .collect();
         match serving.as_slice() {
             [one] => {
-                // Stage-0e: a SYNTHESIZED call. It has no call expr, so it can
-                // never appear in `call_generic_bindings` and never passes
-                // through `call_spec` -- which is why round 1 saw none of these
-                // and wrongly read the population as absent. A generic entry
+                // Totality ablation: a SYNTHESIZED call. It has no call expr, so
+                // it can never appear in `call_generic_bindings` and never
+                // passes through `call_spec`, so an ablation that only watched
+                // those would miss it. A generic entry
                 // reached this way has no instantiation record at all.
                 if crate::ablation::enabled() {
                     let f = &self.ws.module(one.module).functions[one.func];

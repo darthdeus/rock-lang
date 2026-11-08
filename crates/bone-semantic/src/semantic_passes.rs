@@ -884,7 +884,7 @@ fn is_type_publicly_accessible(
     false
 }
 
-/// One type an exported definition's interface names (spec 11): the exporter,
+/// One type an exported definition's interface names: the exporter,
 /// the nominal it requires, why, and whether that nominal supports the
 /// exporter's public audience.
 #[derive(Clone, Debug)]
@@ -901,8 +901,8 @@ pub struct ClosureRequirement {
     pub satisfied: bool,
 }
 
-/// Every nominal named by the interface of a publicly exported definition
-/// (spec 11), in `ws.defs` order, satisfied or not. The one closure
+/// Every nominal named by the interface of a publicly exported definition,
+/// in `ws.defs` order, satisfied or not. The one closure
 /// computation: the API-closure gate rejects the first unsatisfied entry, and
 /// `rock modules audit` / `migrate` read the whole list with its reasons.
 pub fn api_closure_requirements(ws: &Workspace) -> Vec<ClosureRequirement> {
@@ -1067,7 +1067,7 @@ fn collect_type_expr_closure(
     }
 }
 
-/// Spec 11 gate: reject the first type a public interface names that does
+/// Public-API type-closure gate: reject the first type a public interface names that does
 /// not support the interface's audience.
 pub fn pass_validate_api_closure(ws: &Workspace) -> Result<(), CompilerError> {
     if ws.fragment_scopes.is_empty() {
@@ -1108,7 +1108,7 @@ pub fn semantic_pass_with_aliases(
     Ok(ws)
 }
 
-/// [`semantic_pass_with_aliases`] without the spec 11 gate, for a tool that
+/// [`semantic_pass_with_aliases`] without the public-API closure gate, for a tool that
 /// reads [`api_closure_requirements`] itself (the migrate planner grows an
 /// export set until the closure is satisfied). Every compile path takes the
 /// gated pass.
@@ -1302,7 +1302,7 @@ fn scope_items(items: &[Item]) -> Vec<ScopeItem> {
         .collect()
 }
 
-/// The modules-v1 namespace builder (plan M2). Runs before any lowering:
+/// The modules-v1 namespace builder. Runs before any lowering:
 /// it turns the v1 fragments' headers, inline mod blocks, and use
 /// declarations into the workspace's namespace tree, registers every v1
 /// definition under its canonical DefKey, and records per-fragment import
@@ -1548,7 +1548,7 @@ fn register_legacy_views(ws: &mut Workspace, contributions: &[&FragmentContribut
 }
 
 /// Every `use` target in a v1 fragment resolves where it is declared, once
-/// the whole tree exists (spec 4.3: an unresolved path is a diagnostic).
+/// the whole tree exists (an unresolved path is a diagnostic).
 /// Fragment-local imports resolve from the fragment's scope, exactly as the
 /// lazy lookup will; shared export bindings resolve from the module that
 /// records them.
@@ -1898,7 +1898,7 @@ fn collect_use_leaves(
     let path_root = *tree_root || from_root;
     let mut full = prefix.to_vec();
     full.extend(segments.iter().map(|segment| segment.name));
-    // `p::m::{self}` / `{self as n}` binds the module `p::m` itself (spec 8.1).
+    // `p::m::{self}` / `{self as n}` binds the module `p::m` itself.
     let self_leaf =
         !prefix.is_empty() && segments.len() == 1 && segments[0].name.as_str() == "self";
     if self_leaf {
@@ -1960,7 +1960,7 @@ fn collect_use_leaves(
 /// Register one file's items into the namespace tree under `path`,
 /// recursing into inline mod blocks. `scope` collects the fragment's own
 /// imports; shared (`pub`/`private`-prefixed) use declarations become node
-/// exports (spec 8.2).
+/// exports.
 fn register_items(
     ws: &mut Workspace,
     pkg_id: u32,
@@ -2178,7 +2178,7 @@ fn register_items(
 }
 
 /// Flatten one `use` declaration into fragment bindings, or into shared
-/// export bindings when it carries a visibility (spec 8.2). Every leaf of a
+/// export bindings when it carries a visibility. Every leaf of a
 /// nested `pub use a::{b, c::*}` shares the declaration's visibility.
 fn flatten_use_decl(
     ws: &mut Workspace,
@@ -2595,7 +2595,7 @@ pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerE
                 // primitive overloads) keep a bare `__op_*` key so the existing
                 // intrinsic pipeline still finds them. User-declared operators
                 // in v1 register under their DefKey and are selected through
-                // imports / `operator(+)` (spec 8.5) -- not global discovery.
+                // imports / `operator(+)` -- not global discovery.
                 let key = if fn_name.starts_with("__op_") && (f.is_synthetic || over_primitives) {
                     f.name.name
                 } else {

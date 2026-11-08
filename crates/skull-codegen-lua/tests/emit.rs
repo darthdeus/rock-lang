@@ -1433,7 +1433,7 @@ fn emits_interpolation_as_flat_concat() {
 // execute a scalarized-enum match; per-function match shape is pinned by
 // skull-mir's `match_enum_*` lowering tests.
 
-// --- Slice 1: multi-return ABI for tuple-returning fns ---
+// --- Multi-return ABI for tuple-returning fns ---
 
 #[test]
 fn tuple_return_callee_splats_multi_value() {
@@ -1604,7 +1604,7 @@ fn emit_inlined(src: &str, fn_name: &str) -> String {
     emit_function(&ws, &ctx, scx.interner(), self_ref, &func, None)
 }
 
-// --- Slice 4 acceptance gate: an @inline user iterator driven by `for`
+// --- An @inline user iterator driven by `for`
 // scalarizes its cursor struct to per-field locals; the loop allocates nothing.
 const ZERO_ALLOC_ITER_SRC: &str = "
 struct IntRange { lo: int, hi: int }
@@ -1642,9 +1642,8 @@ fn for_user_iter_inline_is_zero_alloc() {
 
 // A cursor whose field is a Vec (not just scalars) also scalarizes: the Vec ref
 // is hoisted to one cell + the index to a loop-carried scalar; the per-element
-// read is `data[i+1]`, no cursor table. This is the shape slice 5's stdlib
-// `VecIter` swap activates for real `[T]` (proven here via a wrapper type so the
-// slice-3 desugar routing fires without the author's bone arm-removal).
+// read is `data[i+1]`, no cursor table. This is the shape the stdlib `VecIter`
+// gives real `[T]` (proven here via a wrapper type).
 const ZERO_ALLOC_VEC_BACKED_SRC: &str = "
 struct MyVec { items: [int] }
 struct MyVecIter { items: [int], i: int }
@@ -1679,7 +1678,7 @@ fn for_vec_backed_iter_inline_is_zero_alloc() {
     );
 }
 
-// --- Slice 4.5 acceptance gate: the desugared+inlined counted loop is rewritten
+// --- The desugared+inlined counted loop is rewritten
 // into the codegen CountedLoop shape and prints as a native numeric `for` (FORL
 // bytecode). The goto-LOOP form of the same loop measured 1.8x slower on a
 // type-stable 2M-element sum.
@@ -1709,7 +1708,7 @@ fn for_vec_backed_iter_inline_emits_forl() {
     );
 }
 
-// --- Slice 5 acceptance gate: a REAL `[T]` for-loop routes through the stdlib
+// --- A REAL `[T]` for-loop routes through the stdlib
 // VecIter protocol (no skull template) and still compiles to the same
 // zero-alloc native `for` the deleted template emitted. Parity measured at
 // ~1.0x, 0 bytes/elem (benchmarks/iterator-zero-alloc/vec_parity.rock).
@@ -1737,7 +1736,7 @@ fn for_real_vec_loop_is_forl_zero_alloc() {
     );
 }
 
-// --- Slice 6 acceptance gate: combinator chains flatten. The bounded
+// --- Combinator chains flatten. The bounded
 // `map`/`filter` `next` bodies inline via placeholder substitution (the
 // BoundTree), the cursors scalarize, and a map-only spine (counted structure
 // preserved) recovers FORL. filter keeps the goto skip loop -- its template

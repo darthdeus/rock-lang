@@ -1,4 +1,4 @@
-// Struct functional update `Ty { ..base, field: v }` (plan M1).
+// Struct functional update `Ty { ..base, field: v }`.
 // Base must be the same nominal type; explicit fields override, unwritten
 // fields copy from base. Works for `struct` and `value` types.
 

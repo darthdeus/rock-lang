@@ -1,7 +1,7 @@
 //! A fragment's explicit import that lands on a module is a path anchor for
-//! that fragment (spec 8.1: `use p::m as m;`, `use p::m::{self, x};`), and a
-//! module's named export binding that lands on a module is a module member
-//! (spec 8.6). A path through either is checked as it is written: the
+//! that fragment (`use p::m as m;`, `use p::m::{self, x};`), and a
+//! module's named export binding that lands on a module is a module member.
+//! A path through either is checked as it is written: the
 //! import's own path from the fragment, then each later segment and the
 //! final member from the fragment, never the canonical parent path a second
 //! time. An imported module name that clashes with a child module, a

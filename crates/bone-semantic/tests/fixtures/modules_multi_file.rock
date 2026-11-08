@@ -1,4 +1,4 @@
-//! Modules-v1 namespace resolution (plan M2): multi-file logical modules,
+//! Modules-v1 namespace resolution: multi-file logical modules,
 //! visibility, scope tiers, UFCS, operators, paths.
 //!
 //! Sections hold embedded files: `//-- <file> @pkg=<self_name>,<id> [@v1]`.
@@ -1097,7 +1097,7 @@ struct Foo {
     v: int,
 }
 
-// The own `min` hides the std family for the bare name (spec 8.3); the
+// The own `min` hides the std family for the bare name; the
 // qualified path reaches the std family and selects by argument type.
 fn min(a: Foo, b: Foo) -> Foo {
     a
@@ -1150,7 +1150,7 @@ struct Api {
     stop: fn() -> int,
 }
 
-// Spec 8.4 keeps the field-call precedence: no tier binds `stop`, and the
+// The field call keeps its precedence: no tier binds `stop`, and the
 // call is the field's function, exactly as in legacy.
 fn run(a: Api) -> int {
     let n = a.stop()
@@ -1192,7 +1192,7 @@ fn stop(a: Api) -> string {
     "free"
 }
 
-// Legacy calls the field here; so must v1 (spec 8.4). The free fn returns
+// Legacy calls the field here; so must v1. The free fn returns
 // string, so the marker catches a rebinding.
 fn run(a: Api) -> int {
     let n = a.stop()

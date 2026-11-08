@@ -1,10 +1,10 @@
-//! modules-v1 runtime identity (plan M4 slice 2). A v1 definition's identity is
+//! modules-v1 runtime identity. A v1 definition's identity is
 //! its DefKey (`<package>::<module path>::<name>`), which has two consequences
 //! the backend has to honor:
 //!
 //! - The key is not a Lua identifier, so every identifier the backend mints for
 //!   a global -- the global itself, its `__skull_ginit_` initializer -- must be
-//!   the key's identifier form, exactly as M4 slice 1 did for functions.
+//!   the key's identifier form, exactly as for functions.
 //! - The key is file-independent, so state identity is keyed on the LOGICAL
 //!   module: moving a definition between two fragments of one module keeps its
 //!   state, and two same-named globals in different modules never share it.

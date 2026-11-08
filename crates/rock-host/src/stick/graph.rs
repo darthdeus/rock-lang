@@ -1,4 +1,4 @@
-//! The one package graph for a build (modules spec 3-4, plan M0).
+//! The one package graph for a build.
 //!
 //! Resolves a project's stick.toml dependency tree recursively and
 //! manifest-relative (each dependency's own manifest resolves its deps
@@ -41,7 +41,7 @@ pub struct PackageNode {
     /// Canonicalized package root (the directory containing stick.toml).
     pub root: PathBuf,
     pub manifest_name: String,
-    /// Manifest name with `-` normalized to `_`, case preserved (spec 4.1):
+    /// Manifest name with `-` normalized to `_`, case preserved:
     /// `name = "Demo"` yields `Demo`, never an invented `demo`.
     pub self_name: String,
     pub dialect: Dialect,
@@ -89,7 +89,7 @@ pub struct PackageGraph {
     load_order: Vec<PackageId>,
 }
 
-/// Reserved path roots no dependency alias may claim (spec 4.3).
+/// Reserved path roots no dependency alias may claim.
 const RESERVED_ROOTS: [&str; 3] = ["std", "self", "super"];
 
 struct Builder {
@@ -277,7 +277,7 @@ impl Builder {
     ) -> Result<()> {
         // Normalized aliases must be unique within one package's dependency
         // table: `a-b` and `a_b` would otherwise be two indistinguishable
-        // root bindings (spec 4.1). Two aliases reaching one package are
+        // root bindings. Two aliases reaching one package are
         // fine; two packages behind one normalized alias are not.
         let mut seen: HashMap<&str, &str> = HashMap::new();
         for edge in dependencies {
@@ -307,7 +307,7 @@ impl Builder {
 
         // A v1 consumer of a legacy provider needs the explicit opt-in; the
         // flag on a v1 provider is a removable warning so its upgrade does
-        // not force simultaneous manifest edits in every consumer (spec 3.2).
+        // not force simultaneous manifest edits in every consumer.
         for edge in dependencies {
             let target = self.node(edge.target);
             if dialect == Dialect::V1 && target.dialect == Dialect::Legacy && !edge.allow_legacy {
@@ -336,7 +336,7 @@ impl Builder {
         // A legacy package's discovery includes every file under its root,
         // including any nested package's sources. A nested v1 package also
         // owns those files, so the graph would compile one physical source
-        // as two owners with different rule sets (spec 6.3). Pure-legacy
+        // as two owners with different rule sets. Pure-legacy
         // nesting keeps today's silent inclusion.
         for outer in self.packages.iter().flatten() {
             if outer.dialect != Dialect::Legacy {

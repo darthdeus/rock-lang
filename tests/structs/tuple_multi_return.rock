@@ -1,6 +1,6 @@
-// Semantics the multi-return ABI (slice 1) must preserve. Every case is green
-// BEFORE the ABI change (tuples are heap tables) and must stay green after
-// (multi-return on the wire, re-packed only where a tuple is used whole).
+// Semantics the multi-return ABI must preserve: tuples travel as multiple
+// return values on the wire and are re-packed only where a tuple is used
+// whole.
 
 fn pair() -> (bool, int) {
     return (true, 42)

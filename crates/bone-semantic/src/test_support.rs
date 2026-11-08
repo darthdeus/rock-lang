@@ -236,7 +236,7 @@ fn dump_at(
     err
 }
 
-/// One embedded source file in a multi-package fixture (plan M2).
+/// One embedded source file in a multi-package fixture.
 pub struct PackageFixture<'a> {
     pub file: &'a str,
     /// `None` = legacy standalone; `Some((self_name, package_id))` stamps a

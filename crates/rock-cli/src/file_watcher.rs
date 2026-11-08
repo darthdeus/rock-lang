@@ -60,7 +60,7 @@ pub struct FileWatcherConfig {
     pub ignored_roots: Vec<PathBuf>,
     /// Exact files watched IN ADDITION to the extension filter, shared with
     /// the owner so it can be updated after watcher creation. Used for
-    /// embed_string inputs (the compiler contract): the set is only known
+    /// embed_string inputs: the set is only known
     /// after a compile, and grows/shrinks as the game's embeds change.
     pub extra_files: Option<SharedWatchSet>,
     /// Ignore macOS create history for unchanged files present when a watch starts.

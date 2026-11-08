@@ -1,7 +1,6 @@
 //! One JSON line per dev-loop `rock` invocation, appended to `ROCK_INVOCATION_LOG`
 //! or, in builds that default to it, a per-user state log, so
-//! edit-to-feedback times can be mined with a log consumer
-//! (the compiler contract, "Invocation log").
+//! edit-to-feedback times can be mined with a log consumer.
 //!
 //! The record is written once, at exit: `finish` from `main` or `exit`, and an
 //! `atexit` fallback for paths that leave through `std::process::exit` outside

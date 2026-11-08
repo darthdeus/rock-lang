@@ -83,14 +83,14 @@ pub struct Workspace {
     /// body that re-lowers into a lowering error is only visible here.
     pub relowered_body_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 
-    /// Modules-v1 namespace scope (plan M2). Empty for legacy-only
+    /// Modules-v1 namespace scope. Empty for legacy-only
     /// workspaces — every legacy path behaves exactly as before when `ns`
     /// has no packages and `fragment_scopes` is empty.
     pub ns: crate::modules::NsTree,
     /// Per-file v1 scope facts: package, logical module path, and the
     /// fragment's own imports. Keyed by file id (`Module.file`).
     pub fragment_scopes: FxHashMap<Ustr, crate::modules::FragmentScope>,
-    /// Canonical definition metadata keyed by DefKey (plan 2.1). Legacy
+    /// Canonical definition metadata keyed by DefKey. Legacy
     /// definitions keep their bare-name keys and gain no entry.
     pub defs: FxHashMap<Ustr, crate::modules::DefMeta>,
     /// Per-legacy-file compatibility views over the public root exports of
@@ -133,7 +133,7 @@ pub struct ComptimeInputs {
     /// Effective declared build channel for package metadata. Empty means a
     /// synthetic/type-only workspace did not come through CLI resolution.
     pub channel: String,
-    /// Source-language mode of the root package ("legacy" or "v1", plan M0).
+    /// Source-language mode of the root package ("legacy" or "v1").
     /// Part of the Artifact fingerprint: the same sources under different
     /// language modes are different builds.
     pub modules_mode: String,
@@ -415,7 +415,7 @@ impl Workspace {
     /// is excluded because overload resolution keys on parameters. The name
     /// matters for a merged legacy family, whose members are unrelated
     /// definitions: identical signatures there are not backend siblings
-    /// (spec 8.3) but a tie.
+    /// but a tie.
     pub fn backend_variant_key(&self, mid: ModuleId, fid: Idx<Function>) -> (Ustr, Ustr) {
         (
             self.module(mid).functions[fid].name,

@@ -1,4 +1,4 @@
-//! Cursor classification for completion (completion-v2 stage A): the
+//! Cursor classification for completion: the
 //! syntactic byte/AST classifiers and `classify()` -- every classifier
 //! consulted exactly once into a `CompletionCx`. Semantic resolution
 //! (`ExpectedArg`, Session variants) stays in `backend.rs`.
@@ -459,8 +459,8 @@ pub(crate) fn for_in_iterable_slot(src: &str, offset: usize) -> bool {
 
 /// The cursor's completion classification, computed ONCE per request by
 /// [`classify`] -- every context consultation lives there, so a new syntax
-/// case is one field + one consultation + one dispatch arm
-/// (completion pipeline contract M2b). Field order below is the dispatch
+/// case is one field + one consultation + one dispatch arm.
+/// Field order below is the dispatch
 /// precedence. Classification is SYNTACTIC; handlers may still fall through
 /// at runtime (an `X {` head that isn't a struct, a call slot that isn't
 /// FieldRef), which is why the dispatcher keeps an ordered attempt chain

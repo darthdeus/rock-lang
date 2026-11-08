@@ -1,5 +1,5 @@
 // Root module of the witness library. Everything a consumer may reach is
-// declared `pub` here; the type closure (spec 11) forces `Greeting` public
+// declared `pub` here; the type closure forces `Greeting` public
 // because `greet` returns it.
 
 pub struct Greeting {

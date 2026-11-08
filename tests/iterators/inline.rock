@@ -1,4 +1,4 @@
-// Slice 4 behavior gate: @inline user iterators driven by real `for` loops.
+// Behavior gate: @inline user iterators driven by real `for` loops.
 // The emit-shape gate (skull-codegen-lua `for_user_iter_inline_is_zero_alloc`)
 // proves the cursor struct scalarizes to per-field locals (no table); this
 // proves the inlined + scalarized loop still computes correctly, incl. the

@@ -86,7 +86,7 @@ pub fn declared_name(key: &str) -> &str {
     }
 }
 
-/// The identifier form of a DefKey (plan 2.1). A legacy key is a bare name and
+/// The identifier form of a DefKey. A legacy key is a bare name and
 /// passes through byte-identical, so legacy emission cannot move. A v1 key
 /// `<package>::<module path>::<name>` becomes `<name>_<digest>`: `::` is not in
 /// any identifier grammar, and the prefix is never flattened textually, so

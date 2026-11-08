@@ -382,8 +382,8 @@ pub enum StatementKind {
     Expression(Idx<ExprData>),
     Let(Let),
     Static(Static),
-    /// `use a::b;` inside a block (v1; spec 8.2 block scope). Scoped from its
-    /// declaration to block end when module resolution lands (plan M2).
+    /// `use a::b;` inside a block (v1 block scope). Scoped from its
+    /// declaration to block end when module resolution lands.
     Use(UseDecl),
     NestedFn(NestedFn),
     /// `return [expr]` — `keyword_span` is the `return` token (rock parity).
@@ -661,7 +661,7 @@ pub struct Field {
     pub span: Span,
     pub name: Ident,
     pub ty: Idx<TypeExprData>,
-    /// Declared visibility (v1). `None` = public read/write (spec 9/10).
+    /// Declared visibility (v1). `None` = public read/write.
     pub vis: Option<Visibility>,
     /// `private(set)` — restricted setter on a readable field.
     pub set_private: bool,
@@ -749,7 +749,7 @@ pub struct AnnoArg {
     pub value: Idx<ExprData>,
 }
 
-/// Declared visibility (modules-v1 grammar; spec 9). `None` on an item means
+/// Declared visibility (modules-v1 grammar). `None` on an item means
 /// "not written" and takes the item-kind's default.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Visibility {
@@ -767,7 +767,7 @@ pub enum Visibility {
 }
 
 /// The visibility modifiers one declaration may carry. Items use `vis`;
-/// stored fields additionally use `set_private` (`private(set)`, spec 10).
+/// stored fields additionally use `set_private` (`private(set)`).
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct VisMods {
     pub vis: Option<Visibility>,
@@ -777,7 +777,7 @@ pub struct VisMods {
 
 /// The file's module header: `mod a::b;` / `pub mod a::b;` — first
 /// non-comment item only, `;`-terminated. The header selects which logical
-/// module the REST of the file contributes to (plan M2 coalesces them).
+/// module the REST of the file contributes to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ModuleHeader {
     /// Package-root-relative module path (`mod combat::casting;` -> [combat,
@@ -787,7 +787,7 @@ pub struct ModuleHeader {
     pub span: Span,
 }
 
-/// `use` declarations (spec 8.1).
+/// `use` declarations.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UseDecl {
     pub span: Span,
@@ -817,7 +817,7 @@ pub enum UseSuffix {
     /// `use a::operator(+);` — the glyph family under a nameable selector;
     /// `op` is its internal family name (`__op_add`, or the unary family
     /// name for `!`). `-` uses its binary name as the selector anchor and the
-    /// resolver follows its unary sibling. With `as add` (spec 8.5) the
+    /// resolver follows its unary sibling. With `as add` the
     /// import binds only `add`, not the glyph.
     Operator { op: Ident, alias: Option<Ident> },
     /// `use a::b::{ .. }` — sub-trees, each relative (`c`, `d::e as f`,
@@ -845,7 +845,7 @@ pub enum ItemKind {
     CompilerDirective(CompilerDirective),
     Comment(Ustr),
     /// `pub mod x { .. }` — an inline module block (v1). Reopening a module
-    /// adds fragments; the namespace tree (plan M2) coalesces them.
+    /// adds fragments; the namespace tree coalesces them.
     Module(ModBlock),
     /// `use ...;` at item level (v1 scoping; parses in legacy too, additive).
     Use(UseDecl),

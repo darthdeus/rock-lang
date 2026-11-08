@@ -1,4 +1,4 @@
-//! modules-v1 nominal type emission (plan M4). Slice 1 gave a v1 FUNCTION its
+//! modules-v1 nominal type emission. A v1 FUNCTION already had its
 //! identifier form; a v1 TYPE still handed its DefKey to every name the backend
 //! mints for it, and a DefKey is neither a Lua identifier nor a C one:
 //!

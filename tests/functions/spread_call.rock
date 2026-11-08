@@ -1,4 +1,4 @@
-// Call-site struct spread `f(..props, name: v)` (plan M2).
+// Call-site struct spread `f(..props, name: v)`.
 // Each field of the spread struct becomes a named arg at the spread's
 // position. The callee ABI is untouched (same params, default fill).
 
@@ -90,7 +90,7 @@ fn test_spread_value_param() {
     print(use_v(..h))
 }
 
-// Call-site spread of a generic struct instantiation (plan M2). Fields are
+// Call-site spread of a generic struct instantiation. Fields are
 // known after substitution.
 
 struct Pair<T> { a: T, b: T }
@@ -110,7 +110,7 @@ fn test_spread_generic_string() {
     print(cat2(..p))
 }
 
-// Call-site spread selecting among overloads (plan M2, step 5). The spread
+// Call-site spread selecting among overloads. The spread
 // expands to typed named args BEFORE candidate matching, so the operand's
 // field types pick the overload.
 
@@ -132,7 +132,7 @@ fn test_spread_selects_str_overload() {
     print(combine2(..p))
 }
 
-// A spread of a struct literal is never materialized (plan M3): its field
+// A spread of a struct literal is never materialized: its field
 // exprs lower directly as the named args. This pins that each field expr is
 // evaluated EXACTLY ONCE, in literal/source order (side effects preserved).
 
