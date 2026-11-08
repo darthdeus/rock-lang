@@ -33,6 +33,7 @@ fn contains_str(xs: [string], s: string) -> bool {
 // error(msg, 0) -- no position prefix, so log lines asserted below are stable
 // across codegen changes.
 inline(lua) fn raise_plain(msg: string) = """error(msg, 0)"""
+inline(js) fn raise_plain(msg: string) = """throw new Error(msg);"""
 
 fn note(s: string) {
     LOG.push(s)
@@ -92,6 +93,43 @@ fn test_terminal_defers_lifo_and_failure_isolation() {
     resume(c)
     kill(c)
     print("{LOG[0]} {LOG[1]} n:{LOG.len}")
+}
+
+// Collect what the shared log sink receives while `body` runs, then restore
+// the previous sink.
+inline(lua) fn capture_log(body: fn() -> ()) -> string = """
+    local saved = rawget(_G, "__rock_log_sink")
+    local seen = {}
+    _G.__rock_log_sink = function(level, category, msg)
+        seen[#seen + 1] = level .. ":" .. category .. ":" .. msg
+    end
+    pcall(body)
+    _G.__rock_log_sink = saved
+    return table.concat(seen, "|")
+"""
+inline(js) fn capture_log(body: fn() -> ()) -> string = """
+    var saved = __G.__rock_log_sink;
+    var seen = [];
+    __G.__rock_log_sink = function(level, category, msg) {
+        seen.push(level + ":" + category + ":" + msg);
+    };
+    try { __rock_call(body); } catch (e) {}
+    __G.__rock_log_sink = saved;
+    return seen.join("|");
+"""
+
+fn kill_multi() {
+    let c = multi()
+    resume(c)
+    kill(c)
+}
+
+// The defer failure goes through the Rock logger, so an installed sink
+// receives it (error level, CO tag) and nothing is printed.
+@test(output = "0:CO:coroutine defer failed during cleanup: defer-boom")
+fn test_terminal_defer_failure_reaches_the_log_sink() {
+    LOG = []
+    print(capture_log(() => kill_multi()))
 }
 
 fn count_str(xs: [string], s: string) -> int {

@@ -1193,8 +1193,10 @@ function deepcopy(obj) { return __rock_deepcopy_value(obj, new Map()); }
 /// The logging runtime: JS ports of the `@nomangle inline(lua)` dedup/throttle
 /// impls in `stdlib/logging.rock`. Rendered by their original names
 /// (`is_host_log_fn`), so `log_once`/`log_throttled` (macros -> `_log_once_impl`
-/// / `_log_throttled_*_impl`) route here. `__rock_log_emit`'s no-sink fallback is
-/// `print("[cat] msg")`, so lines land in the same per-test buffer as `print`.
+/// / `_log_throttled_*_impl`) route here. `__rock_log_emit` hands records to
+/// `__G.__rock_log_sink` when one is installed (the JS face of Lua's
+/// `_G.__rock_log_sink` seam); its no-sink fallback is `print("[cat] msg")`,
+/// so lines land in the same per-test buffer as `print`.
 /// The one Rock global (`__rock_log_level`) lives in `__G` (unified with the
 /// module-globals path); dedup/throttle/counts/sites/now are bare vars (never
 /// Rock globals). `_log_once_impl` COUNTS rather than flagging, and the throttle
@@ -1207,6 +1209,8 @@ function __rock_log_init() {
   if (__G.__rock_log_level == null || __G.__rock_log_level < 0) __G.__rock_log_level = 2;
 }
 function __rock_log_emit(level, category, msg, wall_clock) {
+  var sink = __G.__rock_log_sink;
+  if (sink != null) { sink(level, category || "", msg, wall_clock); return; }
   if (category && category.length > 0) print("[" + category + "] " + msg);
   else print(msg);
 }
@@ -1458,8 +1462,8 @@ function __rock_globals_install_bridge() {
 /// `__rock_coroutine_run_defers` inline(lua) bodies (`stdlib/unified.rock`),
 /// plus the `error` global backing the transform's `Inst::Global("error")` +
 /// `CallValue` raise shape (layout-stamp check, `await` re-raise). Defer
-/// failures go to STDERR, never stdout -- the harness output-compare must not
-/// see them. Nil checks are truthiness (`!c.__defers`, `if (c.__inner)`) so
+/// failures go through `__rock_log` (error level, `CO` tag) exactly as the
+/// Lua body does, so an installed log sink sees them. Nil checks are truthiness (`!c.__defers`, `if (c.__inner)`) so
 /// `undefined` and `null` both count as nil, matching the subset's loose rule.
 pub const JS_CORO_RUNTIME: &str = r#"
 function error(m) { throw new Error(m); }
@@ -1468,7 +1472,7 @@ function __rock_coroutine_run_defers(c) {
   for (var i = c.__defers.length - 1; i >= 0; i--) {
     try { __rock_call(c.__defers[i], c); } catch (e) {
       var m = (e && e.message !== undefined) ? e.message : e;
-      __rock_host.write_err("coroutine defer failed during cleanup: " + m + "\n");
+      __rock_log(0, "CO", "coroutine defer failed during cleanup: " + m);
     }
   }
 }

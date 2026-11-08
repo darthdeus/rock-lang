@@ -69,18 +69,49 @@ fn field(json: &str, name: &str) -> String {
     panic!("unterminated `{name}` in {json}");
 }
 
-/// A failing coroutine defer is reported on the host's error stream, never
-/// stdout, and needs no `process`.
-#[test]
-fn coroutine_defer_failure_goes_to_the_host_error_stream() {
-    let body = format!(
-        "{}{}\n__rock_coroutine_run_defers({{ __defers: [function() {{ throw new Error('boom'); }}] }});",
+/// The coroutine and log runtimes plus a program global table, then `tail`.
+fn with_log_runtime(tail: &str) -> String {
+    format!(
+        "{}{}{}\nvar __G = {{}};\n{tail}",
         skull_codegen_js::JS_FOREIGN_CALL_HELPER,
         skull_codegen_js::JS_CORO_RUNTIME,
-    );
+        skull_codegen_js::JS_LOG_RUNTIME,
+    )
+}
+
+const FAILING_DEFER: &str =
+    "__rock_coroutine_run_defers({ __defers: [function() { throw new Error('boom'); }] });\n";
+
+/// A failing coroutine defer is reported through the Rock logger, as Lua's
+/// `__rock_log(0, "CO", ...)` is: an installed `__rock_log_sink` receives it
+/// at error level under the `CO` tag, and nothing reaches the host streams.
+#[test]
+fn coroutine_defer_failure_goes_to_the_log_sink() {
+    let body = with_log_runtime(&format!(
+        "var seen = [];\n\
+         __G.__rock_log_sink = function(level, category, msg, wall) {{\n\
+           seen.push(level + '|' + category + '|' + msg + '|' + wall);\n\
+         }};\n\
+         {FAILING_DEFER}\
+         __rock_host.write(seen.join(';'));\n"
+    ));
     let (out, err) = run_without_process(&body);
-    assert_eq!(out, "");
-    assert_eq!(err, "coroutine defer failed during cleanup: boom\n");
+    assert_eq!(
+        out,
+        "0|CO|coroutine defer failed during cleanup: boom|false"
+    );
+    assert_eq!(err, "");
+}
+
+/// With no sink installed the logger falls back to `print("[CO] ...")`.
+#[test]
+fn coroutine_defer_failure_without_a_sink_prints_the_tagged_line() {
+    let body = with_log_runtime(&format!(
+        "function print(s) {{ __rock_host.write(s + '|'); }}\n{FAILING_DEFER}"
+    ));
+    let (out, err) = run_without_process(&body);
+    assert_eq!(out, "[CO] coroutine defer failed during cleanup: boom|");
+    assert_eq!(err, "");
 }
 
 const PROGRAM: &str = r#"
