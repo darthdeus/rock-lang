@@ -125,6 +125,10 @@ pub(crate) fn struct_field_ty(
             params,
         } => (*VEC, params),
 
+        // A type that already failed, such as an unresolved name in a
+        // signature, reported its own error; a field of it is just as unknown.
+        TypeExpr::Builtin(BuiltinTy::Error) => return Ok(base_ty),
+
         TypeExpr::Infer(..) => {
             let matches = structs_with_field(gamma, field);
 

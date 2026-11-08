@@ -886,9 +886,7 @@ fn main() -> int { let _value: int = cast(always_int()) 3 }
             .map(|d| d.message.clone())
             .collect();
         assert!(
-            messages
-                .iter()
-                .any(|m| m.contains("`a::bump` did not resolve")),
+            messages.iter().any(|m| m.contains("`a` did not resolve")),
             "{messages:?}"
         );
     }

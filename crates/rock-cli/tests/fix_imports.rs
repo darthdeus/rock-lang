@@ -117,3 +117,90 @@ fn fix_imports_repairs_every_importable_name_together() {
     assert_eq!(names, ["nope_x", "nope_y"], "{output}");
     assert_eq!(total, 2, "{output}");
 }
+
+/// A v1 package whose `main.rock` misses names in the positions that used to
+/// stop lowering at their first name: a global's initializer, a generic type
+/// constructor and its argument, the enum of a variant path in values and in
+/// patterns, a struct field default and a parameter default. `util` exports
+/// the importable ones; the `Nope*`, `Hue` and `nope_*` names have no
+/// candidate.
+fn positions_package() -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("stick.toml"),
+        "[package]\nname = \"names\"\nversion = \"0.1.0\"\ntype = \"bin\"\n\n\
+         [language]\nmodules = \"v1\"\n",
+    )
+    .unwrap();
+    std::fs::create_dir(root.path().join("util")).unwrap();
+    std::fs::write(
+        root.path().join("util/util.rock"),
+        "mod util;\n\npub struct Bag<T> { pub v: T }\npub enum Kind { Big, Small }\n\
+         pub enum Color { Red, Green }\npub enum Shade { Dark, Light }\n\
+         pub fn seed() -> int { 1 }\npub fn more() -> int { 2 }\n\
+         pub fn tally() -> int { 3 }\npub fn level() -> int { 4 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join("main.rock"),
+        "global START: int = nope_g + seed() + more()\n\n\
+         fn one(b: Bag<Kind>) -> int {\n    match b.v {\n        Kind::Big => 1,\n        \
+         _ => 0,\n    }\n}\n\n\
+         fn two(b: Nope<Kind>, c: Bag<Nope2>) -> int {\n    0\n}\n\n\
+         fn three() -> int {\n    let n = NopeEnum::A\n    let s = Shade::Dark\n    \
+         match Color::Red {\n        Color::Green => 1,\n        Hue::Deep(k) => k,\n        \
+         _ => 0,\n    }\n}\n\n\
+         struct Conf { n: int = nope_s + tally() }\n\n\
+         fn four(x: int = nope_p + level()) -> int {\n    x\n}\n\n\
+         fn main() {\n    print(\"{START} {one(Bag { v: Kind::Big })} {three()}\")\n}\n",
+    )
+    .unwrap();
+    root
+}
+
+#[test]
+fn check_reports_names_in_every_position_without_cascades() {
+    let root = positions_package();
+    let out = invoke(root.path(), &["check", "."]);
+    let output = text(&out);
+    assert!(!out.status.success(), "{output}");
+    let (names, total) = unresolved(&output);
+    assert_eq!(
+        names,
+        [
+            "nope_g", "seed", "more", "Bag", "Kind", "Kind", "Nope", "Kind", "Bag", "Nope2",
+            "NopeEnum", "Shade", "Color", "Color", "Hue", "nope_s", "tally", "nope_p", "level",
+            "Bag", "Kind",
+        ],
+        "{output}"
+    );
+    assert_eq!(total, names.len(), "no follow-on diagnostics: {output}");
+}
+
+#[test]
+fn fix_imports_repairs_every_position_in_one_run() {
+    let root = positions_package();
+    let applied = invoke(root.path(), &["fix", "--imports", ".", "--apply"]);
+    let applied_text = text(&applied);
+    let main = std::fs::read_to_string(root.path().join("main.rock")).unwrap();
+    for name in [
+        "seed", "more", "Bag", "Kind", "Color", "Shade", "tally", "level",
+    ] {
+        assert!(
+            main.contains(&format!("use util::{name};")),
+            "{name}: {applied_text}\n{main}"
+        );
+    }
+
+    let out = invoke(root.path(), &["check", "."]);
+    let output = text(&out);
+    let (names, total) = unresolved(&output);
+    assert_eq!(
+        names,
+        [
+            "nope_g", "Nope", "Nope2", "NopeEnum", "Hue", "nope_s", "nope_p"
+        ],
+        "{output}"
+    );
+    assert_eq!(total, names.len(), "{output}");
+}

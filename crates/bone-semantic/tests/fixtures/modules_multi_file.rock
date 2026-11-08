@@ -256,7 +256,7 @@ fn f() -> Point {
     p :: Point
 }
 
-//- an_unresolved_qualified_path_keeps_its_message @fail=`a::missing` did not resolve to any definition @not=ascription
+//- an_unresolved_qualified_path_names_its_unbound_first_segment @fail=`a` did not resolve to any definition @not=ascription
 //-- app.rock @pkg=app,1 @v1
 fn f() -> int {
     a::missing

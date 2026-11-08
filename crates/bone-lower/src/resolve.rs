@@ -1393,6 +1393,9 @@ pub fn resolve_member_path(
 ) -> Result<MemberTarget, String> {
     let segments = &path.segments;
     let mut bare_error = None;
+    // `E::V` whose `E` binds nothing: the error names `E`, the one name the
+    // author has to bring into scope.
+    let mut first_unbound = false;
     if !path.from_root && segments.len() == 2 {
         let first = segments[0];
         match bare_binding(ws, Some(frag), first) {
@@ -1409,7 +1412,7 @@ pub fn resolve_member_path(
                     }
                 }
             }
-            Ok(None) => {}
+            Ok(None) => first_unbound = true,
             // Module anchors need the path walk; if that also finds no
             // binding, retain the bare lookup's ambiguity or other error.
             Err(error) => bare_error = Some(error),
@@ -1454,9 +1457,10 @@ pub fn resolve_member_path(
         }
         let members = module_members(ws, &[Viewer::Fragment(frag)], pkg_id, &cur, seg)?;
         let not_found = || {
-            bare_error
-                .clone()
-                .unwrap_or_else(|| unresolved_value_path(ws, frag, segments))
+            bare_error.clone().unwrap_or_else(|| {
+                let unbound = (first_unbound && i == 0).then_some(segments[0]);
+                unresolved_value_path(ws, frag, segments, unbound)
+            })
         };
         let Resolved { key, kind, owner } =
             collapse(ws, members, seg, not_found, "glob re-exports")?;
@@ -1495,8 +1499,14 @@ pub fn resolve_member_path(
 
 /// The diagnostic for a value path nothing binds. A v1 `x::T` whose last
 /// segment names a type is most likely a legacy infix ascription, which v1
-/// spells `(x : T)`; name the replacement then, and only then.
-fn unresolved_value_path(ws: &Workspace, frag: &FragmentScope, segments: &[Ustr]) -> String {
+/// spells `(x : T)`; name the replacement then, and only then. Otherwise an
+/// `unbound` first segment is the name reported.
+fn unresolved_value_path(
+    ws: &Workspace,
+    frag: &FragmentScope,
+    segments: &[Ustr],
+    unbound: Option<Ustr>,
+) -> String {
     let message = format!("`{}` did not resolve to any definition", joined(segments));
     let Some((ty, prefix)) = segments.split_last() else {
         return message;
@@ -1504,7 +1514,10 @@ fn unresolved_value_path(ws: &Workspace, frag: &FragmentScope, segments: &[Ustr]
     let names_a_type = BUILTIN_TYPE_NAMES.contains(&ty.as_str())
         || resolve_bare(ws, Some(frag), *ty).is_ok_and(|r| r.kind == ResolvedKind::Type);
     if prefix.is_empty() || !names_a_type {
-        return message;
+        return match unbound {
+            Some(name) => format!("`{name}` did not resolve to any definition"),
+            None => message,
+        };
     }
     format!(
         "{message}; `::` is a path separator in modules-v1, so a type ascription is written `({} : {ty})`",

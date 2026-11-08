@@ -861,6 +861,26 @@ fn lower_resolved_type_name(
     ))
 }
 
+/// A type name that did not resolve, like an unknown type name: a signature
+/// records it and types as `Error`, a body collects it with its other names.
+fn unresolved_type_name(
+    ctx: &mut LowerCtx,
+    body: &mut Body,
+    pos: TyPos,
+    e: CompilerError,
+) -> Result<TyId, CompilerError> {
+    Ok(match pos {
+        TyPos::Iface => {
+            ctx.module.interface_errors.push(e);
+            ctx.workspace.builtins.error()
+        }
+        TyPos::Body => {
+            ctx.recover_name(e)?;
+            alloc_ty(ctx, body, pos, TypeExpr::Builtin(hir::BuiltinTy::Error))
+        }
+    })
+}
+
 pub fn lower_type_expr_in(
     ctx: &mut LowerCtx,
     a: &Ast,
@@ -964,18 +984,7 @@ pub fn lower_type_expr_in(
                         resolved_key = Some(bare_key);
                         lower_resolved_type_name(ctx, body, pos, te, &bare_key)?
                     }
-                    // Like an unknown type name: a signature records it and
-                    // types as `Error`, a body collects it with its other names.
-                    Err(e) => match pos {
-                        TyPos::Iface => {
-                            ctx.module.interface_errors.push(e);
-                            ctx.workspace.builtins.error()
-                        }
-                        TyPos::Body => {
-                            ctx.recover_name(e)?;
-                            alloc_ty(ctx, body, pos, TypeExpr::Builtin(hir::BuiltinTy::Error))
-                        }
-                    },
+                    Err(e) => unresolved_type_name(ctx, body, pos, e)?,
                 }
             }
         }
@@ -1016,8 +1025,19 @@ pub fn lower_type_expr_in(
             )
         }
 
-        TypeExprKind::App { ctor, args } => {
-            let resolved_ctor = ctx.resolve_bare_key(ctor.name, ctor.span)?;
+        TypeExprKind::App { ctor, args } => 'app: {
+            let resolved_ctor = match ctx.resolve_bare_key(ctor.name, ctor.span) {
+                Ok(key) => key,
+                // The arguments still lower, so a name among them is
+                // reported in the same pass.
+                Err(e) => {
+                    let error = unresolved_type_name(ctx, body, pos, e)?;
+                    for x in args.iter() {
+                        lower_type_expr_helper(ctx, a, body, pos, a.te(x))?;
+                    }
+                    break 'app error;
+                }
+            };
             let is_field_ref = bone_core::modules::is_field_ref_former(resolved_ctor);
 
             if is_field_ref {
@@ -2086,7 +2106,10 @@ pub fn lower_expr_value(
                     args: hir::VariantArgs::Unit,
                 },
                 Ok(resolve::MemberTarget::Type(key)) => Expr::Global(key),
-                Err(msg) => return Err(CompilerError::new_with_label(e.span, msg)),
+                Err(msg) => {
+                    ctx.recover_name(CompilerError::new_with_label(e.span, msg))?;
+                    Expr::Hole(None)
+                }
             }
         }
 
@@ -2110,7 +2133,14 @@ pub fn lower_expr_value(
             let target =
                 match ctx.probed(|| resolve::resolve_member_path(ctx.workspace, frag, &use_path)) {
                     Ok(t) => t,
-                    Err(msg) => return Err(CompilerError::new_with_label(e.span, msg)),
+                    Err(msg) => {
+                        ctx.recover_name(CompilerError::new_with_label(e.span, msg))?;
+                        // The field values may name more unresolved names.
+                        for (_, value) in fields.iter() {
+                            lower_expr(ctx, a, body, scope, a.e(value))?;
+                        }
+                        return Ok(Expr::Hole(None));
+                    }
                 };
             ctx.record_path(body, TyPos::Body, path, member_segment_target(&target));
             if !bases.is_empty() {
@@ -2158,7 +2188,14 @@ pub fn lower_expr_value(
         ExprKind::SiblingFieldRef(ident) => Expr::SiblingRef(ident.name),
 
         ExprKind::QualifiedIdent { base, member } => {
-            if let Some(enum_key) = ctx.variant_enum_key(base.name, base.span)? {
+            let enum_key = match ctx.variant_enum_key(base.name, base.span) {
+                Ok(key) => key,
+                Err(e) => {
+                    ctx.recover_name(e)?;
+                    return Ok(Expr::Hole(None));
+                }
+            };
+            if let Some(enum_key) = enum_key {
                 Expr::EnumVariant {
                     enum_name: enum_key,
                     enum_name_span: base.span,
@@ -2194,10 +2231,15 @@ pub fn lower_expr_value(
                 }
             }
 
+            let enum_key = match ctx.variant_enum_key(enum_name.name, enum_name.span) {
+                Ok(key) => key.unwrap_or(enum_name.name),
+                Err(e) => {
+                    ctx.recover_name(e)?;
+                    return Ok(Expr::Hole(None));
+                }
+            };
             Expr::EnumVariant {
-                enum_name: ctx
-                    .variant_enum_key(enum_name.name, enum_name.span)?
-                    .unwrap_or(enum_name.name),
+                enum_name: enum_key,
                 enum_name_span: enum_name.span,
                 variant: variant_name.name,
                 variant_span: variant_name.span,
@@ -2914,14 +2956,21 @@ fn lower_fn_body_into(
 
     // Defaults are lowered after every param binding exists: a lambda default
     // allocates its own param bindings, which would otherwise land inside the
-    // `first..=last` param range below.
-    for p in &f.params {
+    // `first..=last` param range below. Like the body, they report every
+    // name they cannot resolve, and such a name fails the body.
+    let outer = ctx.name_errors.replace(Some(Vec::new()));
+    let lowered = f.params.iter().try_for_each(|p| {
         let param_default = match &p.default {
             Some(expr) => Some(lower_expr(ctx, a, body, default_scope, a.e(expr))?),
             None => None,
         };
         param_defaults.push(param_default);
-    }
+        Ok(())
+    });
+    let default_names = ctx.name_errors.replace(outer).unwrap_or_default();
+    lowered?;
+    let defaults_failed = !default_names.is_empty();
+    errors.extend(default_names);
 
     let range = match (params.first(), params.last()) {
         (Some(first), Some(last)) => IdxRange::new_inclusive(*first..=*last),
@@ -2929,7 +2978,7 @@ fn lower_fn_body_into(
     };
 
     let root_scope = body.alloc_root_scope_with_bindings(bindings);
-    let mut body_failed = false;
+    let mut body_failed = defaults_failed;
 
     // `(inline_body, is_extern, ffi_lib, backend)`. `backend` is the codegen
     // discriminator: a Rock body is `Any` (portable); `extern`/`extern(lua)`/ffi
@@ -3212,21 +3261,57 @@ pub fn lower_struct_def(
 
     let mut fields = Vec::new();
     let def_scope = body.alloc_root_scope();
+    // Like a function body, the defaults report every name they cannot
+    // resolve; they then keep no value, so inference never sees a placeholder.
+    let outer = ctx.name_errors.replace(Some(Vec::new()));
+    let lowered = lower_struct_fields(ctx, a, s, &mut body, def_scope, &mut fields);
+    let names = ctx.name_errors.replace(outer).unwrap_or_default();
+    lowered?;
 
+    let idx = ctx.module.struct_by_name[&reg_key];
+    ctx.module.structs[idx].fields = fields;
+    ctx.module.structs[idx].generics = generic_var_ids;
+
+    if !names.is_empty() {
+        body.field_defaults.clear();
+        ctx.module
+            .lowering_errors
+            .insert(BodyOwner::StructDefaults(idx), names);
+    }
+    ctx.module.insert_body(BodyOwner::StructDefaults(idx), body);
+
+    ctx.module.make_lapper(
+        s.span.offset_range.0,
+        s.span.offset_range.1,
+        BodyOwner::StructDefaults(idx),
+    );
+
+    Ok(())
+}
+
+/// The fields of `s`, with their defaults lowered into `body`.
+fn lower_struct_fields(
+    ctx: &mut LowerCtx,
+    a: &Ast,
+    s: &skull_parser::StructDef,
+    body: &mut Body,
+    def_scope: Idx<Scope>,
+    fields: &mut Vec<hir::StructFieldDef>,
+) -> Result<(), CompilerError> {
     for field in s.fields.iter() {
         let (ty, storage_ty) = match a.te(&field.ty).kind {
             skull_parser::TypeExprKind::F32 => {
                 (ctx.workspace.builtins.float(), ctx.workspace.builtins.f32())
             }
             _ => {
-                let ty = lower_type_expr(ctx, a, &mut body, a.te(&field.ty))?;
+                let ty = lower_type_expr(ctx, a, body, a.te(&field.ty))?;
                 (ty, ty)
             }
         };
         let default = field
             .default
             .as_ref()
-            .map(|e| lower_expr(ctx, a, &mut body, def_scope, a.e(e)))
+            .map(|e| lower_expr(ctx, a, body, def_scope, a.e(e)))
             .transpose()?;
 
         if fields
@@ -3299,19 +3384,6 @@ pub fn lower_struct_def(
             body.field_defaults.insert(field.name.name, default);
         }
     }
-
-    let idx = ctx.module.struct_by_name[&reg_key];
-    ctx.module.structs[idx].fields = fields;
-    ctx.module.structs[idx].generics = generic_var_ids;
-
-    ctx.module.insert_body(BodyOwner::StructDefaults(idx), body);
-
-    ctx.module.make_lapper(
-        s.span.offset_range.0,
-        s.span.offset_range.1,
-        BodyOwner::StructDefaults(idx),
-    );
-
     Ok(())
 }
 
@@ -3585,15 +3657,32 @@ pub fn lower_global(
         ),
     };
 
+    // Like a function body, the initializer reports every name it cannot
+    // resolve; it then keeps no value, so inference never sees a placeholder.
+    let mut names = Vec::new();
     let value = match &g.value {
         Some(e) => {
             let scope = body.alloc_root_scope();
-            Some(lower_expr(ctx, a, &mut body, scope, a.e(e))?)
+            let outer = ctx.name_errors.replace(Some(Vec::new()));
+            let lowered = lower_expr(ctx, a, &mut body, scope, a.e(e));
+            names = ctx.name_errors.replace(outer).unwrap_or_default();
+            match lowered {
+                Ok(lowered) if names.is_empty() => Some(lowered),
+                Ok(_) => None,
+                Err(e) if names.is_empty() => return Err(e),
+                Err(e) => {
+                    names.push(e);
+                    None
+                }
+            }
         }
 
         None => None,
     };
 
+    if !names.is_empty() {
+        body = Body::default();
+    }
     body.root = value;
 
     let idx = ctx.module.globals.alloc(GlobalDef {
@@ -3608,6 +3697,11 @@ pub fn lower_global(
         comp_error!(g.span, "Duplicate global variable definition: `{}`", name);
     }
 
+    if !names.is_empty() {
+        ctx.module
+            .lowering_errors
+            .insert(BodyOwner::Global(idx), names);
+    }
     ctx.module.insert_body(BodyOwner::Global(idx), body);
 
     ctx.module.make_lapper(
@@ -3690,9 +3784,17 @@ fn lower_pattern_value(
             from_root: path.from_root,
             segments: path.segments.iter().map(|i| i.name).collect(),
         };
-        let (enum_key, variant) = ctx
-            .probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path))
-            .map_err(|msg| CompilerError::new_with_label(path.span(), msg))?;
+        let (enum_key, variant) =
+            match ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path)) {
+                Ok(target) => target,
+                Err(msg) => {
+                    ctx.recover_name(CompilerError::new_with_label(path.span(), msg))?;
+                    for p in args.iter().flatten() {
+                        lower_pattern_value(ctx, a, body, scope, p)?;
+                    }
+                    return Ok(Pattern::Wildcard);
+                }
+            };
         ctx.record_path(
             body,
             TyPos::Body,
@@ -3728,9 +3830,17 @@ fn lower_pattern_value(
             from_root: path.from_root,
             segments: path.segments.iter().map(|i| i.name).collect(),
         };
-        let (enum_key, variant) = ctx
-            .probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path))
-            .map_err(|msg| CompilerError::new_with_label(path.span(), msg))?;
+        let (enum_key, variant) =
+            match ctx.probed(|| resolve::resolve_variant_pattern(ctx.workspace, frag, &use_path)) {
+                Ok(target) => target,
+                Err(msg) => {
+                    ctx.recover_name(CompilerError::new_with_label(path.span(), msg))?;
+                    for (_, subpat) in fields.iter() {
+                        lower_pattern_value(ctx, a, body, scope, subpat)?;
+                    }
+                    return Ok(Pattern::Wildcard);
+                }
+            };
         ctx.record_path(
             body,
             TyPos::Body,
@@ -3788,7 +3898,13 @@ fn lower_pattern_value(
             args,
         } => {
             let ename = match enum_name {
-                Some(e) => Some(ctx.variant_enum_key(e.name, e.span)?.unwrap_or(e.name)),
+                Some(e) => match ctx.variant_enum_key(e.name, e.span) {
+                    Ok(key) => Some(key.unwrap_or(e.name)),
+                    Err(err) => {
+                        ctx.recover_name(err)?;
+                        Some(e.name)
+                    }
+                },
                 None => None,
             };
 
@@ -4109,15 +4225,24 @@ pub fn lower_decorator_def(
 
     let root_scope = body.alloc_root_scope_with_bindings(bindings);
 
+    // Like a function body, the defaults and body report every name they
+    // cannot resolve; the body is then dropped, so inference never sees a
+    // placeholder.
     let mut param_defaults = Vec::new();
-    for p in d.params.iter() {
-        param_defaults.push(match &p.default {
-            Some(expr) => Some(lower_expr(ctx, a, &mut body, root_scope, a.e(expr))?),
-            None => None,
-        });
-    }
-
-    let lowered_body = lower_block(ctx, a, &mut body, root_scope, &d.body)?;
+    let outer = ctx.name_errors.replace(Some(Vec::new()));
+    let lowered = d
+        .params
+        .iter()
+        .try_for_each(|p| {
+            param_defaults.push(match &p.default {
+                Some(expr) => Some(lower_expr(ctx, a, &mut body, root_scope, a.e(expr))?),
+                None => None,
+            });
+            Ok(())
+        })
+        .and_then(|()| lower_block(ctx, a, &mut body, root_scope, &d.body));
+    let names = ctx.name_errors.replace(outer).unwrap_or_default();
+    let lowered_body = lowered?;
     let body_e = ctx.alloc_block_expr(&mut body, lowered_body, a.b(&d.body));
 
     let num_required = d
@@ -4141,6 +4266,12 @@ pub fn lower_decorator_def(
         annotations: lower_annotations_with_ctx(ctx, a, annotations)?,
     });
 
+    if !names.is_empty() {
+        ctx.module
+            .lowering_errors
+            .insert(BodyOwner::Decorator(idx), names);
+        return Ok(idx);
+    }
     ctx.module.insert_body(BodyOwner::Decorator(idx), body);
 
     ctx.module.make_lapper(

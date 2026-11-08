@@ -428,7 +428,7 @@ fn globbed(d: Dir) -> int {
     n
 }
 
-//- a_bare_variant_pattern_on_an_unbound_name_is_diagnosed @fail=`Nope::A` did not resolve to any definition
+//- a_bare_variant_pattern_on_an_unbound_name_is_diagnosed @fail=`Nope` did not resolve to any definition
 //-- app.rock @pkg=app,1 @v1
 fn f(n: int) -> int {
     match n {

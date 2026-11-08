@@ -2318,6 +2318,10 @@ pub fn check_module_incremental(
     }
 
     for (d_id, d) in module.decorators.iter() {
+        // Didn't lower
+        if !module.bodies.contains_key(&BodyOwner::Decorator(d_id)) {
+            continue;
+        }
         fold_inference(
             &mut result,
             BodyOwner::Decorator(d_id),

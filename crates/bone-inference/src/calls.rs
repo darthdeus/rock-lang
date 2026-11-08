@@ -1248,6 +1248,22 @@ pub(crate) fn resolve_named_call_with_generics(
     );
 
     let Err(e) = res else { return res };
+    // An argument or receiver whose type already failed, such as one read from
+    // an unresolved signature type, reported its own error; no overload can be
+    // chosen for it, so the call is just as unknown.
+    let operands = recv_override
+        .into_iter()
+        .chain(
+            args.into_iter()
+                .filter_map(|arg| gamma.out.expr_types.get(arg).copied()),
+        )
+        .collect::<SmallVec<[TyId; 4]>>();
+    for ty in operands {
+        let ty = resolve(gamma, ty, span);
+        if matches!(gamma.get(ty), TypeExpr::Builtin(BuiltinTy::Error)) {
+            return Ok(ty);
+        }
+    }
     if gamma.quiet {
         return Err(e);
     }
