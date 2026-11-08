@@ -614,6 +614,10 @@ pub(crate) fn log_compile_stats(
     total: Duration,
     output: Option<&str>,
 ) {
+    // Counting every source line is only worth it when the line is printed.
+    if !log::log_enabled!(target: "COMPILE", log::Level::Debug) {
+        return;
+    }
     let stats = bone_loc_stats(sources);
     let symbols: usize = ws
         .modules
