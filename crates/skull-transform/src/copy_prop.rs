@@ -116,8 +116,39 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
         }
         touched.clear();
         let mut checked_native_buffers = HashSet::default();
+        let mut checked_vecs: HashSet<Operand> = HashSet::default();
+        // Live `VecCheckedIndex` results by (vec, index) operand.
+        let mut vec_checks: Vec<((Operand, Operand), Idx<Inst>)> = Vec::new();
         for &id in &b.insts {
+            // Clearing the cell-keyed facts too covers multi-result calls,
+            // which write their dest cells without a `Store`.
+            if !keeps_vec_lengths(&func.insts[id]) {
+                vec_checks.clear();
+                checked_vecs.clear();
+            }
+            if let Inst::Store { cell, .. } = &func.insts[id] {
+                let rebound = Operand::Cell(*cell);
+                vec_checks.retain(|((v, i), _)| *v != rebound && *i != rebound);
+                checked_vecs.remove(&rebound);
+            }
             match &func.insts[id] {
+                // A repeat of a check that still holds: the operands are the same
+                // values, and nothing since could have changed the Vec's length.
+                // The first check raised already if the index was out of bounds.
+                Inst::VecCheckedIndex { vec, index } => {
+                    let key = (
+                        operand_key(func, &subst, &escaping, *vec),
+                        operand_key(func, &subst, &escaping, *index),
+                    );
+                    if let Some(&(_, earlier)) = vec_checks.iter().find(|(k, _)| *k == key) {
+                        subst[raw(id) as usize] = Some(earlier);
+                        nonthrowing[raw(id) as usize] = true;
+                        any_subst = true;
+                    } else {
+                        vec_checks.push((key, id));
+                    }
+                    checked_vecs.insert(key.0);
+                }
                 Inst::Call { func: target, args }
                     if args.len() == 2
                         && ws.is_some_and(|ws| {
@@ -178,6 +209,11 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                     {
                         // The retained bounds check already accessed this exact
                         // buffer. Its generated view keys are plain table fields.
+                        nonthrowing[raw(id) as usize] = true;
+                    }
+                    if checked_vecs.contains(&operand_key(func, &subst, &escaping, base)) {
+                        // A completed bounds check read this Vec's `len`, so it is
+                        // a plain table: its column and `_data` reads cannot raise.
                         nonthrowing[raw(id) as usize] = true;
                     }
                     if let Inst::MakeValueStruct { fields, form, .. } = &func.insts[rb] {
@@ -252,6 +288,53 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
             self_stores,
             nonthrowing,
         })
+}
+
+/// What a checked operand is keyed by: a value, or the current contents of a
+/// local cell, so two loads of one cell with no store between them match.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Operand {
+    Value(Idx<Inst>),
+    Cell(Idx<Cell>),
+}
+
+fn operand_key(
+    func: &MirFunc,
+    subst: &[Option<Idx<Inst>>],
+    escaping: &[bool],
+    v: Idx<Inst>,
+) -> Operand {
+    let v = resolve_subst(subst, v);
+    match func.insts[v] {
+        Inst::Load(cell) if !escaping[raw(cell) as usize] => Operand::Cell(cell),
+        _ => Operand::Value(v),
+    }
+}
+
+/// Whether `inst` certainly leaves every Vec's length alone, so a bounds check
+/// before it still holds after it. An allow-list: any call (direct, indirect or
+/// through a global) may push or pop, as may a `len` store, an append, a
+/// whole-element write or a coroutine operation.
+fn keeps_vec_lengths(inst: &Inst) -> bool {
+    match inst {
+        // A cell write rebinds a local; facts keyed on that cell are dropped
+        // separately.
+        Inst::Store { .. } => true,
+        // Raw slot writes inside a checked element.
+        Inst::StoreIndex { kind, .. } => matches!(
+            kind,
+            ContainerKind::VecColumn
+                | ContainerKind::VecStrideSlot
+                | ContainerKind::NativeBufferLeaf
+        ),
+        // Reads that may raise but change nothing.
+        Inst::Index { .. }
+        | Inst::VecCheckedIndex { .. }
+        | Inst::Field { .. }
+        | Inst::TupleIndex { .. }
+        | Inst::Len { .. } => true,
+        _ => inst.produces_value() && !skull_mir::sinking::may_throw(inst),
+    }
 }
 
 /// The value ctor and dotted child path `x` reads when it is an unfolded

@@ -1,0 +1,119 @@
+// Two leaf reads of one flat-stored element in a block share one bounds check
+// (`xs[i].a + xs[i].b`). The check is reused only while nothing between the
+// reads can change the Vec's length or the index: these pin that the error
+// still fires, and that a pop, a call through a global or a moved index makes
+// the second read check again. Shape coverage lives in
+// crates/skull/tests/vec_value_columns.rs.
+
+@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = """
+    local ok, err = pcall(f)
+    return not ok
+"""
+
+value P { a: float, b: float }
+nobox value W { a: float, b: float, c: float, d: float, e: float, f: float }
+
+global IDX: int = 1
+global CLEAR_P: fn([P]) = (xs: [P]) => xs.clear()
+global CLEAR_W: fn([W]) = (xs: [W]) => xs.clear()
+
+fn ps() -> [P] {
+    return [P { a: 1.0, b: 2.0 }, P { a: 3.0, b: 4.0 }]
+}
+
+fn ws() -> [W] {
+    return [
+        W { a: 1.0, b: 2.0, c: 0.0, d: 0.0, e: 0.0, f: 0.0 },
+        W { a: 3.0, b: 4.0, c: 0.0, d: 0.0, e: 0.0, f: 0.0 },
+    ]
+}
+
+fn sum_p(xs: [P], i: int) -> float {
+    return xs[i].a + xs[i].b
+}
+
+fn sum_w(xs: [W], i: int) -> float {
+    return xs[i].a + xs[i].b
+}
+
+fn pop_p(xs: [P]) -> float {
+    let _ = xs.pop()
+    return 0.0
+}
+
+fn pop_w(xs: [W]) -> float {
+    let _ = xs.pop()
+    return 0.0
+}
+
+fn clear_p(xs: [P]) -> float {
+    CLEAR_P(xs)
+    return 0.0
+}
+
+fn clear_w(xs: [W]) -> float {
+    CLEAR_W(xs)
+    return 0.0
+}
+
+fn move_idx() -> float {
+    IDX = 5
+    return 0.0
+}
+
+@test
+fn same_element_leaves_read_their_values() {
+    assert(sum_p(ps(), 0) == 3.0)
+    assert(sum_p(ps(), 1) == 7.0)
+    assert(sum_w(ws(), 0) == 3.0)
+    assert(sum_w(ws(), 1) == 7.0)
+}
+
+@test
+fn a_leaf_write_between_reads_is_seen() {
+    let xs = ps()
+    let i = 1
+    xs[i].a = 10.0
+    let s = xs[i].a + xs[i].b
+    xs[i].b = xs[i].a + xs[i].b
+    assert(s == 14.0)
+    assert(xs[1].b == 14.0)
+    let w = ws()
+    w[i].a = 10.0
+    w[i].b = w[i].a + w[i].b
+    assert(w[1].b == 14.0)
+}
+
+@test
+fn out_of_bounds_still_errors() {
+    assert(try_call(() => { let _ = sum_p(ps(), 2) }))
+    assert(try_call(() => { let _ = sum_p(ps(), -1) }))
+    assert(try_call(() => { let _ = sum_w(ws(), 2) }))
+    assert(try_call(() => { let _ = sum_w(ws(), -1) }))
+}
+
+@test
+fn a_pop_between_reads_checks_again() {
+    let xs = ps()
+    assert(try_call(() => { let _ = xs[1].a + pop_p(xs) + xs[1].b }))
+    let w = ws()
+    assert(try_call(() => { let _ = w[1].a + pop_w(w) + w[1].b }))
+}
+
+@test
+fn a_call_through_a_global_checks_again() {
+    let xs = ps()
+    assert(try_call(() => { let _ = xs[0].a + clear_p(xs) + xs[0].b }))
+    let w = ws()
+    assert(try_call(() => { let _ = w[0].a + clear_w(w) + w[0].b }))
+}
+
+@test
+fn a_moved_index_checks_again() {
+    let xs = ps()
+    IDX = 1
+    assert(try_call(() => { let _ = xs[IDX].a + move_idx() + xs[IDX].b }))
+    let w = ws()
+    IDX = 1
+    assert(try_call(() => { let _ = w[IDX].a + move_idx() + w[IDX].b }))
+}

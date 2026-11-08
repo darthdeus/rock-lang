@@ -574,3 +574,44 @@ fn main() { print(fill_reference_rows([3])) }
     assert!(body.contains(r#"["position"] = {}"#), "{body}");
     assert!(!body.contains("ReferenceRow_ct("), "{body}");
 }
+
+/// Two leaves of one element in one expression share the element's bounds
+/// check, on both flat layouts, and load each column they use only once.
+#[test]
+fn two_leaves_of_one_element_check_once() {
+    for (decl, layout, init) in [
+        (
+            "value P { a: float, b: float }",
+            "columns",
+            "P { a: 1.0, b: 2.0 }",
+        ),
+        (
+            "nobox value P { a: float, b: float, c: float, d: float, e: float, f: float }",
+            "strided",
+            "P { a: 1.0, b: 2.0, c: 0.0, d: 0.0, e: 0.0, f: 0.0 }",
+        ),
+    ] {
+        let src = format!(
+            "{decl}\n\
+             fn sum(xs: [P], i: int) -> float {{\n    return xs[i].a + xs[i].b\n}}\n\
+             fn main() {{\n    let xs: [P] = [{init}]\n    print(sum(xs, 0))\n}}\n"
+        );
+        let lua = emit_module(&src);
+        assert!(lua.contains(&format!("repr = \"{layout}\"")), "{lua}");
+        let body = function_body(&lua, "sum");
+        assert_eq!(
+            body.matches("__vec_checked_index(").count(),
+            1,
+            "{layout}: `xs[i].a + xs[i].b` checked the element twice:\n{body}"
+        );
+        if layout == "columns" {
+            for col in [".a", ".b"] {
+                let loads = body.lines().filter(|l| l.ends_with(col)).count();
+                assert_eq!(
+                    loads, 1,
+                    "{layout}: column `{col}` loaded {loads}x:\n{body}"
+                );
+            }
+        }
+    }
+}
