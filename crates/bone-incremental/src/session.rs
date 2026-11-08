@@ -1813,7 +1813,10 @@ impl Session {
     pub fn tracked_paths(&self) -> Vec<&str> {
         self.paths.iter().map(|s| s.as_str()).collect()
     }
+    /// Evict every module `keep` rejects, except permanent ones: the builtin
+    /// module owns the builtin type nodes and outlives every eviction.
     pub fn retain_modules(&mut self, keep: impl Fn(ModuleId) -> bool) {
+        let keep = |mid: ModuleId| Workspace::is_permanent_module(mid) || keep(mid);
         self.module_iface_dep_names.retain(|mid, _| keep(*mid));
         for (i, slot) in self.ws.inferences.iter_mut().enumerate() {
             if !keep(ModuleId::new(i as u32)) {

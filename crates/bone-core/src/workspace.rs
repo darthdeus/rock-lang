@@ -431,6 +431,45 @@ impl Workspace {
         self.module(ModuleId::builtin())
     }
 
+    // Module lifetime and iteration contract. `modules` holds the synthetic
+    // builtin module (index 0, owner of every `Builtins` type node) beside the
+    // modules compiled from source. The builtin module is permanent: evicting
+    // it would dangle every builtin `TyId`, so eviction keeps it
+    // (`is_permanent_module`) and source-module counts and per-module
+    // iteration leave it out. Readers iterate through these methods instead of
+    // filtering `modules` themselves.
+
+    /// Whether eviction must keep `mid`: only the builtin module.
+    pub fn is_permanent_module(mid: ModuleId) -> bool {
+        mid.is_builtin()
+    }
+
+    /// Every module compiled from source (user, stdlib and warm modules
+    /// alike), in id order: all modules but the builtin one.
+    pub fn source_modules(&self) -> impl Iterator<Item = &Module> {
+        self.modules.iter().filter(|m| !m.id.is_builtin())
+    }
+
+    /// The number of modules compiled from source.
+    pub fn source_module_count(&self) -> usize {
+        self.source_modules().count()
+    }
+
+    /// The source modules outside `warm` (a session's warm stdlib set; an
+    /// empty set selects every source module). The user code an editor
+    /// session owns, re-lowers and lints.
+    pub fn user_modules<'a>(
+        &'a self,
+        warm: &'a FxHashSet<ModuleId>,
+    ) -> impl Iterator<Item = &'a Module> {
+        self.source_modules().filter(move |m| !warm.contains(&m.id))
+    }
+
+    /// Whether `mid` is a user module given the session's `warm` set.
+    pub fn is_user_module(mid: ModuleId, warm: &FxHashSet<ModuleId>) -> bool {
+        !mid.is_builtin() && !warm.contains(&mid)
+    }
+
     pub fn render(&self, body: Option<&BodyInference>, ty: TyId) -> String {
         let te = match ty {
             TyId::Static(mid, idx) => self.module(mid).ty_arena[idx],

@@ -189,8 +189,15 @@ impl ModuleId {
         self.0.get() as usize
     }
 
+    /// The synthetic `$builtin` module `Workspace::new` creates to own the
+    /// builtin type nodes. It is permanent: see `Workspace::source_modules`.
     pub fn builtin() -> Self {
         ModuleId::new(0)
+    }
+
+    #[inline]
+    pub fn is_builtin(self) -> bool {
+        self == Self::builtin()
     }
 }
 
