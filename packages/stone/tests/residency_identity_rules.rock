@@ -53,21 +53,38 @@ fn residency_two_files_of_one_object_keep_two_handles() {
 
 @test
 fn residency_one_digest_one_filter_shares_one_handle() {
-    residency_identity_fixture("a", ["soil", "trail"], paths => {
+    residency_identity_fixture("a", ["soil", "trail", "road"], paths => {
     let soil = acquire_image_asset(paths[0], watch: false)
     let trail = acquire_image_asset(paths[1], watch: false)
     assert(soil.0 != 0)
     assert_eq(trail, soil, "two logical paths of one Eat object and one filter share one handle")
     assert_eq(image_asset_cached(paths[1]).unwrap(), soil)
 
+    assert_eq(acquire_image_asset(paths[2], watch: false), soil)
+    residency_flush_required()
+    let held = residency_census()
+    assert_eq((held.handles, held.bytes, held.referenced_bytes, held.cached_bytes), (1, 32, 32, 0))
+    assert_eq((held.shared_paths, held.shared_bytes, held.loading_bytes), (2, 64, 0),
+        "three paths share one 32-byte upload, saving two uploads")
+
     // The handle lives while either logical path still holds it.
     assert(release_image_asset(paths[0]))
     assert_eq(stone_native_handle_state("image", soil.0), 1)
     assert(release_image_asset(paths[1]))
+    let remaining = residency_census()
+    assert_eq((remaining.referenced_bytes, remaining.cached_bytes), (32, 0),
+        "one remaining alias still owns the entire allocation")
+    assert(release_image_asset(paths[2]))
+    let cached = residency_census()
+    assert_eq((cached.handles, cached.bytes, cached.referenced_bytes, cached.cached_bytes), (1, 32, 0, 32))
+    assert_eq((cached.shared_paths, cached.shared_bytes), (2, 64), "released aliases still share cached storage")
     residency_set_budget(0)
     residency_trim()
     assert_eq(stone_native_handle_state("image", soil.0), 0)
     assert(image_asset_cached(paths[0]) == null)
+    let absent = residency_census()
+    assert_eq((absent.handles, absent.bytes, absent.shared_paths, absent.shared_bytes), (0, 0, 0, 0),
+        "retired identities contribute neither storage nor sharing savings")
     })
 }
 

@@ -160,6 +160,9 @@ fn residency_owner_evictor_budget_is_independent() {
         residency_trim()
         assert_eq(calls, 1)
         assert_eq(requested, 60, "evictor releases exactly its independent overage")
+        let census = residency_census()
+        assert_eq((census.handles, census.bytes, census.cached_bytes), (1, 32, 32),
+            "external evictor usage is not image-cache storage")
         residency_trim()
         assert_eq(calls, 1, "at-budget evictor is not called")
         limit = 40

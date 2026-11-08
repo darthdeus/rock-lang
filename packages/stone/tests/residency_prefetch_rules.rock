@@ -49,6 +49,11 @@ fn residency_prefetch_submits_while_under_budget() {
         assert_eq(small_image.0, 0, "a prefetch past the inflight budget waits")
         assert_eq(residency_state(small), ResidencyState::Absent, "a waiting prefetch submits nothing")
         assert(!residency_prefetch_idle(), "a waiting prefetch is not idle")
+        let pending = residency_census()
+        assert_eq((pending.handles, pending.bytes, pending.loading_bytes), (1, 16384, 16384),
+            "submitted storage is counted; a queued absent image is not")
+        assert_eq((pending.referenced_bytes, pending.cached_bytes), (0, 16384),
+            "unowned loading storage belongs to the cache partition")
         residency_prefetch_advance()
         assert_eq(residency_state(small), ResidencyState::Absent,
             "advance submits nothing while the budget is full")
@@ -62,6 +67,10 @@ fn residency_prefetch_submits_while_under_budget() {
         assert_eq(residency_state(big), ResidencyState::Resident, "the pump publishes")
         assert_eq(residency_state(small), ResidencyState::Resident, "the drained waiter publishes")
         assert(residency_prefetch_idle(), "a published set is idle")
+        let published = residency_census()
+        assert_eq((published.handles, published.bytes, published.loading_bytes), (2, 16416, 0))
+        assert_eq((published.referenced_bytes, published.cached_bytes), (0, 16416),
+            "publication clears loading bytes without acquiring ownership")
     })
 }
 
