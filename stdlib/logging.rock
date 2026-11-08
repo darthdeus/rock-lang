@@ -120,6 +120,10 @@ fn log_get_level() -> int { __rock_log_init(); return __rock_log_level }
 //   __rock_log_site_levels — site -> level, for the summary
 //   __rock_log_wall     — site -> true for a declared wall-clock site
 
+// @nomangle is ABI: raw Lua calls this by its bare name. The Stone engine's
+// inline(lua) bodies do (stone_file_read and stone_list_directory in
+// packages/stone/engine/lib.rock, the frame-error handler in runner.rock), and a
+// mangled name would turn those into calls to nil.
 @intrinsic @nomangle inline(lua) fn _log_once_impl(level: int, category: string, msg: string, site: string) = """
     __rock_log_init()
     -- Level 0 is never gated (the minimum level is 0), which is what keeps
@@ -196,6 +200,7 @@ macro log_warn_once(category: expr, msg: expr, site: expr) {
 }
 
 // Mockable-now seam used by log_throttled and exposed for deterministic tests.
+// @nomangle is ABI: _log_throttled_impl's Lua body calls it by its bare name.
 @intrinsic @nomangle inline(lua) fn _log_throttled_with_now_impl(now_sec: float, level: int, category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
     __rock_log_init()
     -- Same gate as _log_once_impl: level 0 always fires.
@@ -244,8 +249,9 @@ macro log_warn_throttled_with_now(now_sec: expr, category: expr, msg: expr, inte
     return os.clock()
 """
 
-// Wall-clock variant; thin wrapper around the mockable seam.
-@intrinsic @nomangle inline(lua) fn _log_throttled_impl(level: int, category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
+// Wall-clock variant; thin wrapper around the mockable seam. Mangled: only the
+// macros below call it, and the JS backend binds it by its declared name.
+@intrinsic inline(lua) fn _log_throttled_impl(level: int, category: string, msg: string, interval_sec: float, site: string, wall_clock: bool) = """
     _log_throttled_with_now_impl(__rock_log_now(), level, category, msg, interval_sec, site, wall_clock)
 """
 

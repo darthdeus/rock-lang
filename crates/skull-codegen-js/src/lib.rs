@@ -1189,7 +1189,7 @@ function __rock_deepcopy_value(obj, seen) {
 function deepcopy(obj) { return __rock_deepcopy_value(obj, new Map()); }
 "#;
 
-/// The logging runtime: JS ports of the `@nomangle inline(lua)` dedup/throttle
+/// The logging runtime: JS ports of the `inline(lua)` dedup/throttle
 /// impls in `stdlib/logging.rock`. Rendered by their original names
 /// (`is_host_log_fn`), so `log_once`/`log_throttled` (macros -> `_log_once_impl`
 /// / `_log_throttled_*_impl`) route here. `__rock_log_emit` hands records to
