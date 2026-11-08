@@ -2555,15 +2555,10 @@ fn for_each_coalesced(
         if !cand.coalescable_params.get(i).copied().unwrap_or(false) {
             continue;
         }
-        // int->float subsumption is identity on luajit, so an `IntToFloat(Load c)`
-        // arg coalesces to `c` exactly like a bare `Load c` (this pass runs only on
-        // the Lua path; GLSL never inlines) -- otherwise the wrap would defeat
-        // coalescing and perturb the emitted Lua.
-        let Some(load) = arg_load_inst(caller, *arg) else {
-            continue;
-        };
+        // Coalescing a converted load would erase its numeric conversion.
+        let load = *arg;
         let Inst::Load(c) = caller.insts[load] else {
-            unreachable!("arg_load_inst returns a Load");
+            continue;
         };
         if snapshot_holds(caller, pinned, &mut preds, c, load, pos) {
             visit(i, c);
@@ -2571,15 +2566,6 @@ fn for_each_coalesced(
         }
     }
     count
-}
-
-/// The `Load` an argument reads, looking through int->float subsumption.
-fn arg_load_inst(caller: &MirFunc, arg: Idx<Inst>) -> Option<Idx<Inst>> {
-    match caller.insts[arg] {
-        Inst::Load(_) => Some(arg),
-        Inst::IntToFloat(inner) if matches!(caller.insts[inner], Inst::Load(_)) => Some(inner),
-        _ => None,
-    }
 }
 
 /// Whether cell `c` still holds the value `load` read when the call at
