@@ -1826,7 +1826,6 @@ dependencies = [
  "skull-codegen-glsl",
  "skull-codegen-js",
  "skull-codegen-lua",
- "skull-codegen-shader",
  "skull-fmt",
  "skull-mir",
  "skull-parser",

@@ -75,7 +75,6 @@ sysinfo = { workspace = true }
 libc = "0.2"
 
 [dev-dependencies]
-skull-codegen-shader = { workspace = true }
 test-utils = { workspace = true }
 
 [lints]
