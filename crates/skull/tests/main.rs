@@ -56,6 +56,8 @@ mod const_hot_reload;
 mod coroutine_frame_writes;
 #[path = "coroutine_hook_hoist.rs"]
 mod coroutine_hook_hoist;
+#[path = "coroutine_trace_witness.rs"]
+mod coroutine_trace_witness;
 #[path = "dead_lambda_scope.rs"]
 mod dead_lambda_scope;
 #[path = "default_lambda_fields.rs"]

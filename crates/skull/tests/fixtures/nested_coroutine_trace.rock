@@ -1,0 +1,69 @@
+// Nested coroutines for the LuaJIT trace witness (issue #44): a parent
+// resumes two children before yielding, a grandparent drives the parent and
+// loops inside its step without yielding, and the leaf yields from three
+// points per iteration around a helper call.
+
+fn bump(x: int) -> int {
+    return x * 3 + 1
+}
+
+co fn leaf(n: int) -> Coroutine<int> {
+    let i = 0
+    while i < n {
+        yield i
+        yield bump(i)
+        if i % 3 == 0 {
+            yield i + 7
+        }
+        i = i + 1
+    }
+}
+
+co fn mid(n: int) -> Coroutine<int> {
+    let a = leaf(n)
+    let b = leaf(n)
+    let k = 0
+    while k < n {
+        let x = a.resume() ?? 0
+        let y = (b.resume() ?? 0) * 2 + k % 5
+        if x > y {
+            yield x - y
+        } else {
+            yield y - x
+        }
+        k = k + 1
+    }
+}
+
+co fn top(n: int) -> Coroutine<int> {
+    let m = mid(n)
+    let s = 0
+    let v: int? = m.resume()
+    while v != null {
+        s = s + v.unwrap()
+        if s % 2 == 0 {
+            yield s
+        }
+        v = m.resume()
+    }
+    yield s
+}
+
+fn bench(rounds: int) -> int {
+    let total = 0
+    let r = 0
+    while r < rounds {
+        let p = top(2000)
+        let v: int? = p.resume()
+        while v != null {
+            total = (total + v.unwrap()) % 1000003
+            v = p.resume()
+        }
+        r = r + 1
+    }
+    return total
+}
+
+fn main() {
+    print(bench(3000))
+}
