@@ -191,13 +191,7 @@ fn skull_emit_full(
     )
     .map_err(|failure| EmitFullErr::Compile(failure.errors))?;
     let emits_main = emit.emits_main;
-    let (lua, skipped) = (emit.lua, emit.skipped);
-    if std::env::var("SKULL_DEBUG_SKIPPED").is_ok() && !skipped.is_empty() {
-        eprintln!("skull: {} stdlib fns skipped", skipped.len());
-        for (name, reason) in &skipped {
-            eprintln!("  {name}: {reason}");
-        }
-    }
+    let lua = emit.lua;
     let tests = skull::module_tests(&ws, user_mid).map_err(EmitFullErr::Discovery)?;
     Ok((lua, tests, emits_main))
 }
@@ -2211,15 +2205,9 @@ fn skull_emit_project_with_inputs(
         crate::invocation_log::exit(1);
     }
     let emits_main = emit.emits_main;
-    let (lua, skipped) = (emit.lua, emit.skipped);
+    let lua = emit.lua;
     let compile = t.elapsed();
     crate::bone_backend::log_compile_stats(&sources, &ws, compile, compile, None);
-    if std::env::var("SKULL_DEBUG_SKIPPED").is_ok() && !skipped.is_empty() {
-        eprintln!("skull: {} fns skipped", skipped.len());
-        for (name, reason) in &skipped {
-            eprintln!("  {name}: {reason}");
-        }
-    }
 
     let lua = match install_global_accessors(lua, &ws) {
         Ok(lua) => lua,

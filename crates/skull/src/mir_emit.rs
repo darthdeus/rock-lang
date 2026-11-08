@@ -3,9 +3,8 @@
 //! together with the IR-agnostic load-time helpers (runtime prelude,
 //! value-struct cdefs, enum singletons, type tables).
 //!
-//! Some definitions that fail to lower are recorded in [`MirEmit::skipped`]
-//! instead of failing the compile; global initializers and post-lowering
-//! invariant failures are hard errors. inline(lua) bodies emit verbatim,
+//! A definition that fails to lower rejects the compile, stdlib or not.
+//! inline(lua) bodies emit verbatim,
 //! externs are pre-existing Lua globals (no def), coroutines lower via the
 //! `skull-transform` stackless pass, decorators via `lower_decorator`.
 //!
@@ -511,8 +510,6 @@ pub struct MirEmit {
     /// The semantic identity of this exact emitted Artifact. It is computed
     /// before the backend payload leaves the compiler.
     pub artifact_fingerprint: String,
-    /// `(lua_name, reason)` for every definition that failed to lower and was left out.
-    pub skipped: Vec<(String, String)>,
     /// Coarse per-stage time for the emit, in run order. `setup:` entries are
     /// direct wall-clock measurements; the remaining entries cover HIR->MIR
     /// lowering, MIR cleanup, Lua emission, and sequential assembly. The latter
@@ -1443,15 +1440,9 @@ impl AttributionAccumulator {
 /// work fans out; results are folded back in source order so output is stable.
 #[derive(Default)]
 struct UnitOut {
-    /// Lua to append to the chunk (empty for a skipped or no-op definition).
+    /// Lua to append to the chunk (empty for a no-op definition).
     lua: String,
-    /// `(lua_name, reason)` if this definition could not be lowered.
-    skipped: Option<(String, String)>,
-    /// A REJECTION, as opposed to the lenient `skipped` channel above (which is
-    /// only ever printed under `SKULL_DEBUG_SKIPPED`). A decorator body or global
-    /// initializer that lowered but then failed a post-lowering invariant must
-    /// fail the compile: routing it to `skipped` would emit the broken Lua and say
-    /// nothing, which is the miscompile this check exists to prevent.
+    /// A rejection that fails the compile.
     hard_error: Option<CompilerError>,
     /// `(emit_key, direct_global_reads, direct_callees)` for global-init ordering.
     refs: Option<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
@@ -1645,7 +1636,7 @@ fn emit_decorator_unit(
             );
             out.attribution.times = out.times;
         }
-        Err(e) => out.skipped = Some((deco_name, e.message)),
+        Err(e) => out.hard_error = Some(e),
     }
     out
 }
@@ -2005,23 +1996,16 @@ fn emit_global_unit(
             out.pending_init = Some((g.name, key, line));
         }
         Ok(None) => {}
-        // A global initializer that fails to LOWER is a hard error, not a
-        // lenient skip. `skipped` drops the init and says nothing (it prints only
-        // under `SKULL_DEBUG_SKIPPED`), so the global silently becomes nil at
-        // runtime -- and when the failure is a GUARANTEE rejection, downgrading
-        // it is precisely what this struct's own contract forbids. A `nobox`
-        // fn-value ABI rejection landed here and vanished.
         Err(e) => out.hard_error = Some(e),
     }
     out
 }
 
 /// Fold parallel `UnitOut`s back into the chunk IN ORDER: append each unit's Lua,
-/// collect skips / call-graph facts / pending inits, sum phase times.
+/// collect call-graph facts / pending inits, sum phase times.
 fn merge_units(
     results: Vec<UnitOut>,
     out: &mut String,
-    skipped: &mut Vec<(String, String)>,
     direct_globals: &mut FxHashMap<Ustr, Vec<Ustr>>,
     direct_calls: &mut FxHashMap<Ustr, Vec<Ustr>>,
     pending_inits: &mut Vec<(Ustr, Ustr, String)>,
@@ -2034,9 +2018,6 @@ fn merge_units(
 ) {
     for u in results {
         out.push_str(&u.lua);
-        if let Some(s) = u.skipped {
-            skipped.push(s);
-        }
         if let Some((k, gs, cs)) = u.refs {
             direct_globals.insert(k, gs);
             direct_calls.insert(k, cs);
@@ -4363,10 +4344,7 @@ struct BodyRejection {
 }
 
 /// One rejection site. `guarantee` separates a LANGUAGE GUARANTEE (today:
-/// `nobox`) from a codegen parity gap: the stdlib emit path downgrades a gap to
-/// a silent `skipped` -- its known-gap list -- and must never downgrade a
-/// guarantee, since dropping the body turns the promise into a nil global at
-/// runtime. `site` is the offending instruction's own span when the check could
+/// `nobox`) from a codegen parity gap. `site` is the offending instruction's own span when the check could
 /// name one; it outranks the enclosing fn's span at [`BodyRejection::into_error`]
 /// -- a whole-fn anchor cannot distinguish two violations in one body, which is
 /// how one `nobox` sink hid another inside `draw_fractures`.
@@ -4542,8 +4520,7 @@ fn decorator_application_lines(
     ws: &Workspace,
     deco_map: &DecoMap,
     scx: &skull_mir::lower::ScalarCtx,
-    skipped: &mut Vec<(String, String)>,
-) -> String {
+) -> Result<String, CompilerError> {
     let mut deco_lines = String::new();
     for module in ws.modules.iter() {
         if module.id == ModuleId::builtin() {
@@ -4584,12 +4561,12 @@ fn decorator_application_lines(
                             call_args.join(", ")
                         );
                     }
-                    Err(e) => skipped.push((f.name.as_str().to_string(), e.message)),
+                    Err(e) => return Err(e),
                 }
             }
         }
     }
-    deco_lines
+    Ok(deco_lines)
 }
 
 /// Every `@sim`-annotated fn in the workspace, paired with its module file and
@@ -5459,7 +5436,6 @@ fn assemble(
     let mut t_scaffold = Duration::ZERO;
     let mut needed_specs: Vec<skull_mir::bound::SpecDemand> = Vec::new();
     let mut rejections = Rejections::default();
-    let mut skipped: Vec<(String, String)> = Vec::new();
     let mut direct_globals: FxHashMap<Ustr, Vec<Ustr>> = FxHashMap::default();
     let mut direct_calls: FxHashMap<Ustr, Vec<Ustr>> = FxHashMap::default();
     let mut all_statics: Vec<skull_mir::mir::StaticCell> = Vec::new();
@@ -5506,7 +5482,6 @@ fn assemble(
     merge_units(
         deco_results,
         &mut decorator_lua,
-        &mut skipped,
         &mut direct_globals,
         &mut direct_calls,
         &mut Vec::new(),
@@ -5545,13 +5520,9 @@ fn assemble(
     rejections.extend(unit_errors(&global_results));
     needed_specs.extend(global_results.iter().flat_map(|u| u.specs.iter().cloned()));
     let mut globals_lua = String::new();
-    // Held back and appended after the fn-def skips so the reported order is
-    // unchanged by the hoist.
-    let mut global_skipped: Vec<(String, String)> = Vec::new();
     merge_units(
         global_results,
         &mut globals_lua,
-        &mut global_skipped,
         &mut direct_globals,
         &mut direct_calls,
         &mut pending_inits,
@@ -5805,31 +5776,12 @@ fn assemble(
                     }
                 }
                 Some(Err(err)) if !emit_def => {}
-                Some(Err(err)) => {
-                    // A GUARANTEE violation is never a known stdlib gap: silently
-                    // dropping the body would leave callers calling a nil global.
-                    if is_stdlib_module_file(module.file.as_str())
-                        && err.kind != skull_parser::CompilerErrorKind::NoboxGuaranteeViolated
-                    {
-                        skipped.push((mangle_fn(ws, f), err.message.clone()));
-                    } else {
-                        rejections.push(err.clone());
-                    }
-                }
+                Some(Err(err)) => rejections.push(err.clone()),
                 None if !emit_def => {}
-                None => {
-                    if is_stdlib_module_file(module.file.as_str()) {
-                        skipped.push((
-                            mangle_fn(ws, f),
-                            "not emitted (no cached chunk)".to_string(),
-                        ));
-                    } else {
-                        rejections.push(CompilerError::new_with_label(
-                            f.name_span,
-                            format!("internal: `{}` has no emitted chunk", f.name),
-                        ));
-                    }
-                }
+                None => rejections.push(CompilerError::new_with_label(
+                    f.name_span,
+                    format!("internal: `{}` has no emitted chunk", f.name),
+                )),
             }
         }
     }
@@ -5942,7 +5894,6 @@ fn assemble(
     let mut global_definitions = LuaDefinitionBuffer::new();
     global_definitions.push_str(&globals_lua);
     global_definitions.append_to(&mut out);
-    skipped.extend(global_skipped);
     let has_definition_plan = !definition_plan.catalogs.is_empty();
     if has_code_slot_publication {
         out.push_str(skull_codegen_lua::FN_MT_PRELUDE);
@@ -6031,12 +5982,7 @@ fn assemble(
     out.push_str(&state_initializer_lua(&init_lines));
 
     // Decorator APPLICATIONS (after global inits so a deco body can push a global).
-    out.push_str(&decorator_application_lines(
-        ws,
-        &deco_map,
-        scx,
-        &mut skipped,
-    ));
+    out.push_str(&decorator_application_lines(ws, &deco_map, scx)?);
     // `@sim` registrations (after fn + global defs; same init slot as rock).
     if cache.build_kind == BuildKind::Program {
         out.push_str(&sim_registration_lines(
@@ -6139,7 +6085,6 @@ fn assemble(
             global_layout,
             definition_plan,
             artifact_fingerprint,
-            skipped,
             phases,
             abi_plan_stats: scx.abi_plan_stats(),
             attribution: attribution.finish(),
@@ -8500,7 +8445,6 @@ fn assemble_overlay(
     if initialize_code_slots {
         out.push_str(skull_codegen_lua::FN_MT_PRELUDE);
     }
-    let mut skipped: Vec<(String, String)> = Vec::new();
     let mut candidate_code_artifact = cache.code_artifact.clone();
     let d_clone_artifact = t_clone_artifact.elapsed();
     out.push_str("do\nlocal __rock_state_cell = __rock_globals\n");
@@ -8515,11 +8459,7 @@ fn assemble_overlay(
     for body in &order {
         match cache.chunks.get(body) {
             Some(Ok(chunk)) => definitions.push_str(&chunk.lua),
-            Some(Err(err)) => {
-                let fref = body.func;
-                let f = &ws.module(fref.module).functions[fref.func];
-                skipped.push((mangle_fn(ws, f), err.message.clone()));
-            }
+            Some(Err(err)) => return Err(err.clone()),
             // extern / inline(lua) edits are interface-tier -> full rebuild path.
             None => {}
         }
@@ -8714,9 +8654,6 @@ fn assemble_overlay(
                     .globals
                     .insert((a.mid, a.gid), unit.comptime_reads.clone());
                 definitions.push_str(&unit.lua);
-                if let Some(s) = unit.skipped {
-                    skipped.push(s);
-                }
                 unit.pending_init.map(|(_, _, line)| line).ok_or_else(|| {
                     CompilerError::new_no_location(format!(
                         "changed global `{}` produced no initializer plan",
@@ -8740,7 +8677,7 @@ fn assemble_overlay(
 
         match sort_global_init_lines(inits) {
             Ok(lines) => out.push_str(&lines.concat()),
-            Err(e) => skipped.push(("const init ordering".to_string(), e.message)),
+            Err(e) => return Err(e),
         }
     }
     let d_const_inits = t_const_inits.elapsed();
@@ -8845,7 +8782,6 @@ fn assemble_overlay(
             global_layout,
             definition_plan,
             artifact_fingerprint,
-            skipped,
             phases: vec![
                 ("  overlay artifact clone", d_clone_artifact),
                 ("  overlay definitions", d_definitions),
@@ -9898,7 +9834,6 @@ fn main() { let result = first() }
         .expect("reverse emission");
         assert!(!canonical.lua.is_empty(), "fixture emitted no Lua artifact");
         assert_eq!(canonical.lua, reverse.lua);
-        assert_eq!(canonical.skipped, reverse.skipped);
     }
 
     #[test]

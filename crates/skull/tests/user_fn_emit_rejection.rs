@@ -79,19 +79,12 @@ fn same_instance_recursion_still_emits() {
     }
 }
 
-// The stdlib's known parity gaps (`flat_vec_new`/`grow`, generic bodies that
-// cannot name a concrete ffi ctype) must stay lenient skips -- a plain program
-// still emits.
+// Every reachable stdlib body lowers: a stdlib lowering failure rejects the
+// compile like any other, so a plain program must still emit.
 #[test]
-fn stdlib_parity_gaps_stay_lenient() {
+fn stdlib_lowers_for_a_plain_program() {
     let emit = emit_mir("fn main() { print(1) }");
-    assert!(
-        emit.skipped
-            .iter()
-            .all(|(name, _)| name.starts_with("flat_vec_new") || name.starts_with("grow")),
-        "only the known stdlib gaps may skip: {:?}",
-        emit.skipped
-    );
+    assert!(emit.lua.contains("main"));
 }
 
 /// A call that reaches a GENERIC DECLARATION's body rejects, rather than

@@ -3923,8 +3923,8 @@ pub fn gc_value_c_boundary(ws: &Workspace, mid: ModuleId) -> Option<(String, Spa
 
 // -- compile-time expansion admission ---------------------------------------
 // The lowering expander replaces a valid call; this pass is the FATAL gate that
-// rejects source-independent misuse, since a per-fn lowering error would only be
-// recorded as a lenient skip. Layout-dependent checks stay in the concrete
+// rejects source-independent misuse, including in bodies that never lower (an
+// uninstantiated generic). Layout-dependent checks stay in the concrete
 // expanders, where the retained instance substitution is available.
 
 /// Resolve a direct call through inference first, falling back to a
@@ -4310,8 +4310,8 @@ pub struct ResolvedComptime {
 }
 
 /// FATAL gate for `build_var` / `embed_string` misuse (non-literal argument,
-/// undeclared var, unreadable or escaping path): a per-fn lowering error is
-/// only a lenient skip, so validation lives here. Shares
+/// undeclared var, unreadable or escaping path), checked here so a body that
+/// never lowers is still validated. Shares
 /// [`resolve_comptime_value`] with the expander.
 pub fn comptime_input_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerError> {
     let module = ws.module(mid);

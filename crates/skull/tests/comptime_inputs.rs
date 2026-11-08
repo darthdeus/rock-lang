@@ -69,9 +69,7 @@ fn broken(name: string) -> string {
 #[test]
 fn build_var_misuse_in_uninstantiated_generic_rejects() {
     // A generic fn with no call sites never lowers, so the expander's own
-    // error cannot fire -- only the fatal gate sees this body. This is the
-    // gate's distinct population (its siblings' doctrine: a per-fn lowering
-    // error is only a lenient skip).
+    // error cannot fire -- only the fatal gate sees this body.
     let src = r#"
 fn dead_generic<T>(x: T) -> string {
     return build_var("NOPE")

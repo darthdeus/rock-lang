@@ -34,15 +34,6 @@ fn main() {
 #[test]
 fn bounded_fn_with_lambda_literal_inlines_and_runs() {
     let emit = emit_mir(FWD_TERMINALS);
-    let bad: Vec<&(String, String)> = emit
-        .skipped
-        .iter()
-        .filter(|(name, _)| name == "main" || name.starts_with("fwd_"))
-        .collect();
-    assert!(
-        bad.is_empty(),
-        "caller/forwarder dropped from the emit: {bad:?}"
-    );
     let out = run_luajit(&format!("{}\nmain()\n", emit.lua), "bounded_lambda");
     assert_eq!(out, "6\ntrue\n2\n5");
 }
