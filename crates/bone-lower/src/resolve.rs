@@ -20,7 +20,7 @@
 //! resolution ranks by fit with the tier as the tie-breaker. Lower-tier
 //! non-callables neither join nor block.
 
-use bone_core::hir::{FamilyMember, FamilyTier};
+use bone_core::hir::{FamilyMember, FamilyTier, unary_operator_entry};
 use bone_core::modules::{
     DefKind, FragmentScope, LegacyName, NsPackage, NsVisibility, PackageId, STD_PACKAGE_ID,
     ScopeProbe, UsePathRef, legacy_name,
@@ -563,10 +563,10 @@ fn import_tier(
                 let Some(unary) = operator_family_paths(target).nth(1) else {
                     continue;
                 };
-                match walk_optional_definition(ws, frag, &[], &unary, &mut Vec::new()) {
-                    Ok(Some(resolved)) => hits.push(resolved),
-                    Ok(None) => {}
-                    Err(message) => return Err(operator_family_error(&unary, message)),
+                if let Some(resolved) =
+                    walk_optional_definition(ws, frag, &[], &unary, &mut Vec::new())?
+                {
+                    hits.push(resolved);
                 }
             }
             hits.sort_by_key(Resolved::sort_key);
@@ -606,10 +606,10 @@ fn resolve_import_target(
     let mut hits = Vec::new();
     if path.segments.last().copied() == Some(Ustr::from("__op_sub")) {
         for candidate in &candidates {
-            match walk_optional_definition(ws, frag, &[], candidate, &mut Vec::new()) {
-                Ok(Some(resolved)) => hits.push(resolved),
-                Ok(None) => {}
-                Err(message) => return Err(operator_family_error(candidate, message)),
+            if let Some(resolved) =
+                walk_optional_definition(ws, frag, &[], candidate, &mut Vec::new())?
+            {
+                hits.push(resolved);
             }
         }
     } else {
@@ -622,28 +622,6 @@ fn resolve_import_target(
         Err(format!("`{name}` did not resolve to any definition"))
     } else {
         Ok(Some(hits))
-    }
-}
-
-fn operator_family_error(path: &UsePathRef, message: String) -> String {
-    let Some(symbol) = path.segments.last().and_then(|name| match name.as_str() {
-        "__unm" => Some("-"),
-        "__not" => Some("!"),
-        _ => None,
-    }) else {
-        return message;
-    };
-    let internal = path
-        .segments
-        .last()
-        .expect("path has a last segment")
-        .as_str();
-    let quoted = format!("`{internal}`");
-    let operator = format!("operator `{symbol}`");
-    if message.contains(&quoted) {
-        message.replace(&quoted, &operator)
-    } else {
-        message.replace(internal, symbol)
     }
 }
 
@@ -1791,14 +1769,25 @@ fn walk_optional_definition(
 ) -> Result<Option<Resolved>, String> {
     let members = walk_members(ws, frag, outer, path, visiting)?;
     let name = last_of(&path.segments);
+    let diagnostic_name = || match unary_operator_entry(name.as_str()) {
+        Some(symbol) => format!("operator `{symbol}`"),
+        None => format!("`{name}`"),
+    };
     match members.found.as_slice() {
         [single] => Ok(Some(*single)),
         [] if members.cycle => Err("circular `use` binding with no defining target".to_string()),
-        [] if members.denied => Err(format!("`{name}` is not accessible from this module")),
-        [] if members.module => Err(format!("`{name}` names a module, not a definition")),
+        [] if members.denied => Err(format!(
+            "{} is not accessible from this module",
+            diagnostic_name()
+        )),
+        [] if members.module => Err(format!(
+            "{} names a module, not a definition",
+            diagnostic_name()
+        )),
         [] => Ok(None),
         many => Err(format!(
-            "`{name}` is ambiguous between glob re-exports {}",
+            "{} is ambiguous between glob re-exports {}",
+            diagnostic_name(),
             many.iter()
                 .map(|hit| hit_display(ws, hit))
                 .collect::<Vec<_>>()

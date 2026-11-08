@@ -1,5 +1,5 @@
 use super::*;
-use crate::hir::FamilyTier;
+use crate::hir::{FamilyTier, unary_operator_entry};
 use bone_core::modules::DefKind;
 use std::borrow::Cow;
 
@@ -1398,21 +1398,13 @@ fn written_method_name(
     c.body.method_names.get(&receiver).copied()
 }
 
-fn unary_operator_symbol(name: Ustr) -> Option<&'static str> {
-    match name.as_str() {
-        "__not" => Some("!"),
-        "__unm" => Some("-"),
-        _ => None,
-    }
-}
-
 fn unary_operator_error(
     gamma: &mut Gamma,
     name: Ustr,
     operand: Option<TyId>,
     span: Span,
 ) -> CompilerError {
-    let symbol = unary_operator_symbol(name).expect("unary operator name");
+    let symbol = unary_operator_entry(name.as_str()).expect("unary operator name");
     let operand = operand
         .map(|t| {
             let t = resolve(gamma, t, span);
@@ -1560,7 +1552,7 @@ pub(crate) fn resolve_named_call_inner(
         // Unary-operator desugars (`!x` -> `__not`, `-x` -> `__unm`) with no
         // applicable overload read as operator errors naming the operand type,
         // not as a missing internal function.
-        if unary_operator_symbol(name).is_some() {
+        if unary_operator_entry(name.as_str()).is_some() {
             let operand = args
                 .into_iter()
                 .next()
@@ -1610,7 +1602,7 @@ pub(crate) fn resolve_named_call_inner(
         .is_some_and(|hidden| !hidden.is_empty());
     let single = candidates.len() == 1
         && !has_inaccessible_overloads
-        && unary_operator_symbol(name).is_none();
+        && unary_operator_entry(name.as_str()).is_none();
     let (callee_mid, callee_fn) = if single {
         candidates[0]
     } else {
@@ -1660,7 +1652,9 @@ pub(crate) fn resolve_named_call_inner(
             Ok(pick) => pick,
 
             Err(e) => {
-                if matches!(&e, SelectError::NoFit(_)) && unary_operator_symbol(name).is_some() {
+                if matches!(&e, SelectError::NoFit(_))
+                    && unary_operator_entry(name.as_str()).is_some()
+                {
                     return Err(unary_operator_error(
                         gamma,
                         name,
