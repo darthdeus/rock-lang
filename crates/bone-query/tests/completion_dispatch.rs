@@ -64,6 +64,9 @@ fn member_access_resolved_by_inference() {
 
 #[test]
 fn member_access_name_walk_fallback() {
+    // `r(thing: Thing)` takes a `Thing` first, so `thing.r()` is a valid UFCS
+    // (self-recursive) call; the inference path offers the enclosing function
+    // the same way (`member_access_offers_the_enclosing_fn_on_both_paths`).
     check(
         "struct Thing { hp: int, mp: int }\n\
          fn r(thing: Thing) {\n  newHelper(thing.<|>)\n}\n",
@@ -73,6 +76,18 @@ fn member_access_name_walk_fallback() {
          r | 100001009999000000r | r()\n\
          total 3\n",
     );
+}
+
+#[test]
+fn member_access_offers_the_enclosing_fn_on_both_paths() {
+    let inferred = "struct V { x: float }\nfn r(v: V) {\n  v.<|>\n}\n";
+    let walked = "struct V { x: float }\nfn r(v: V) {\n  newHelper(v.<|>)\n}\n";
+    let want = "\
+         r | 100001009999000000r | r()\n\
+         x: float | 100001009999000000x | x\n\
+         total 2\n";
+    check(inferred, want);
+    check(walked, want);
 }
 
 #[test]
