@@ -7,7 +7,7 @@ use std::path::Path;
 pub struct SheetSpec {
     files: Vec<String>,
     png_size: [u32; 2],
-    geometry: Option<([u32; 2], usize)>,
+    geometry: Option<([u32; 2], usize, usize)>,
 }
 
 pub fn sheet_spec(line: &Line) -> Result<Option<SheetSpec>> {
@@ -26,8 +26,8 @@ pub fn sheet_spec(line: &Line) -> Result<Option<SheetSpec>> {
         Line::Architecture(a) => a.size,
     };
     let geometry = match line {
-        Line::Animation(a) => Some((a.cell, a.frames as usize)),
-        Line::Surface(s) => Some((s.cell, 1)),
+        Line::Animation(a) => Some((a.cell, a.frames as usize, DIRECTION_COUNT)),
+        Line::Surface(s) => Some((s.cell, 1, s.camera.bases.len())),
         _ => None,
     };
     Ok(Some(SheetSpec {
@@ -91,7 +91,7 @@ pub fn check_sheet(dir: &Path, spec: &SheetSpec) -> std::result::Result<String, 
                         spec.png_size,
                         geometry.0,
                         geometry.1,
-                        DIRECTION_COUNT,
+                        geometry.2,
                     ) {
                         problems.push(format!("{}: {error:#}", dir.display()));
                     }
