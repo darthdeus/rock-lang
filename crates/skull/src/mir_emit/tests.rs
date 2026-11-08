@@ -1112,6 +1112,98 @@ fn main() { let result = first() }
         side_bounds!(iterator_headers);
     }
 
+    const LOAD_STORE_SRC: &str = r#"
+nobox value Pair { left: int, right: int }
+
+fn split(n: int) -> (int, int) { return (n + 1, n * 2) }
+
+fn make(n: int) -> Pair { return Pair { left: n, right: n + 1 } }
+
+fn tagged(n: int) -> (Pair, int) { return (make(n), n) }
+
+@inline
+fn bump(n: int) -> int {
+    let doubled = n + n
+    return doubled
+}
+
+fn run(seed: int) -> int {
+    let (a, b) = split(seed)
+    let p = make(a + b)
+    let t = tagged(seed + 1)
+    let w = bump(seed * 3)
+    return p.left + p.right + t.1 + w
+}
+
+fn main() { let result = run(4) }
+"#;
+
+    #[test]
+    fn cleanup_load_store_census_attributes_unlinked_operations_to_producers() {
+        use skull_mir::mir::CellProducer;
+        let _inline = InlineOn::on();
+        let _census = InlineCensusOn::on();
+        let mut modules = STDLIB.clone();
+        modules.push(
+            skull_parser::parse_module_clean(LOAD_STORE_SRC, Ustr::from("<load-store-census>"))
+                .expect("parse"),
+        );
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid = *ws
+            .module_ids
+            .get(&Ustr::from("<load-store-census>"))
+            .expect("census test module");
+        let (emit, _) = emit_full(&ws, mid).expect("intact emission");
+        let census = &emit.attribution.inline.census.load_store;
+        let row = |producer: CellProducer| census.rows[producer as usize];
+        for producer in CellProducer::ALL {
+            let r = row(producer);
+            assert!(
+                r.loads_unlinked <= r.loads_before
+                    && r.stores_unlinked <= r.stores_before
+                    && r.spliced_loads_unlinked <= r.loads_unlinked
+                    && r.spliced_stores_unlinked <= r.stores_unlinked,
+                "{} row cannot unlink more than it saw: {r:?}",
+                producer.label()
+            );
+        }
+        let unlinked = |producer: CellProducer| {
+            let r = row(producer);
+            r.loads_unlinked + r.stores_unlinked
+        };
+        assert!(
+            unlinked(CellProducer::Destructure) > 0,
+            "`let (a, b)` leaf cells must be attributed to destructuring: {census:?}"
+        );
+        assert!(
+            unlinked(CellProducer::AggregateLeaf) > 0,
+            "a value local's leaf cells must be attributed to aggregate leaves: {census:?}"
+        );
+        assert!(
+            row(CellProducer::TupleSlot).stores_before > 0,
+            "a splatting tuple local must be attributed to tuple slots: {census:?}"
+        );
+        let forwarded = row(CellProducer::InlineParam);
+        assert!(
+            forwarded.stores_unlinked > 0
+                && forwarded.spliced_stores_unlinked == forwarded.stores_unlinked
+                && forwarded.spliced_loads_unlinked == forwarded.loads_unlinked,
+            "only spliced code touches a non-coalesced inline parameter: {census:?}"
+        );
+        for producer in [
+            CellProducer::AggregateLeaf,
+            CellProducer::TupleSlot,
+            CellProducer::Destructure,
+        ] {
+            let r = row(producer);
+            assert!(
+                r.spliced_loads_unlinked + r.spliced_stores_unlinked == 0,
+                "caller-lowered {} cells are not inline forwarding: {r:?}",
+                producer.label()
+            );
+        }
+    }
+
     #[test]
     fn inline_population_census_proves_each_lowering_route_and_conserves_keys() {
         let _inline = InlineOn::on();

@@ -1077,6 +1077,7 @@ impl<'a> Builder<'a> {
                     None,
                     Ustr::from("slot"),
                 );
+                child.f.cells[cell].producer = crate::mir::CellProducer::Param;
                 child.f.params.push(cell);
                 slot_cells.push(cell);
             }
@@ -1092,6 +1093,7 @@ impl<'a> Builder<'a> {
                         None,
                         Ustr::from("vec"),
                     );
+                    child.f.cells[vec].producer = crate::mir::CellProducer::Param;
                     child.f.params.push(vec);
                     let slot = slot_cells.next().expect("one slot cell per flat parameter");
                     child.flat_ref_binds.insert(raw(pb), key);

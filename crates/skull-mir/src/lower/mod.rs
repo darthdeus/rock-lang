@@ -1740,6 +1740,7 @@ pub fn lower_definition_factory(
     let mut f = MirFunc::new(Ustr::from("__rock_definition_materialize"));
     f.rep_arena = Some(scx.rep_arena());
     let parameter = f.new_cell(Some(Ustr::from("factory")));
+    f.cells[parameter].producer = crate::mir::CellProducer::Param;
     f.params.push(parameter);
     let mut b = Builder::generated(ws, scx, scx, concrete_plan, concrete_plans, body, None, f);
     let callee = b.emit_cur(Inst::Load(parameter));
@@ -2150,6 +2151,7 @@ fn lower_decorator_inner(
         b.binding_ty(target),
         Ustr::from(""),
     );
+    b.f.cells[tcell].producer = crate::mir::CellProducer::Param;
     b.f.params.push(tcell);
     b.binds.insert(raw(target), tcell);
     b.lower_params()?;
@@ -2422,6 +2424,11 @@ impl Builder<'_> {
         projection: Ustr,
     ) -> Idx<Cell> {
         let cell = self.f.new_cell_typed(Some(name), ty);
+        self.f.cells[cell].producer = if projection.is_empty() {
+            crate::mir::CellProducer::Binding
+        } else {
+            crate::mir::CellProducer::AggregateLeaf
+        };
         self.f.cells[cell].capture_identity =
             crate::code_identity::LambdaSiteId::from_span(self.body.binding_arena[binding].span)
                 .map(|site| crate::code_identity::CaptureIdentity::Binding { site, projection });
@@ -2762,6 +2769,7 @@ impl Builder<'_> {
         if !slot.splats() {
             let cty = self.binding_ty(pb);
             let cell = self.new_binding_cell(pb, name, cty, Ustr::from(""));
+            self.f.cells[cell].producer = crate::mir::CellProducer::Param;
             self.f.params.push(cell);
             self.binds.insert(raw(pb), cell);
             return Ok(());
@@ -2800,6 +2808,9 @@ impl Builder<'_> {
                 cells.len(),
                 slot.slot_count()
             )));
+        }
+        for &cell in &cells {
+            self.f.cells[cell].producer = crate::mir::CellProducer::Param;
         }
         self.f.params.extend(cells.iter().copied());
         match slot {

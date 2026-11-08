@@ -1250,6 +1250,7 @@ impl Builder<'_> {
                         for (sub, v) in subs.iter().zip(vs) {
                             self.bind_for_pattern(sub, v);
                         }
+                        self.mark_destructured(vars);
                         return;
                     }
                 }
@@ -1259,6 +1260,32 @@ impl Builder<'_> {
                         index: i,
                     });
                     self.bind_for_pattern(sub, elem);
+                }
+                self.mark_destructured(vars);
+            }
+        }
+    }
+
+    /// Charge every cell a destructuring pattern bound to the destructure, for
+    /// the cleanup Load/Store census ([`crate::mir::CellProducer`]).
+    fn mark_destructured(&mut self, vars: &BindingPattern) {
+        match vars {
+            BindingPattern::Leaf(b) => {
+                let key = raw(*b);
+                let single = self.binds.get(&key).copied();
+                let group = self.group_binds.get(&key).map(|(cells, _)| cells.clone());
+                let tuple = self.tuple_binds.get(&key).map(|(cells, _)| cells.clone());
+                for cell in single
+                    .into_iter()
+                    .chain(group.into_iter().flatten())
+                    .chain(tuple.into_iter().flatten())
+                {
+                    self.f.cells[cell].producer = crate::mir::CellProducer::Destructure;
+                }
+            }
+            BindingPattern::Tuple(subs) => {
+                for sub in subs {
+                    self.mark_destructured(sub);
                 }
             }
         }
@@ -1411,6 +1438,7 @@ impl Builder<'_> {
                     None,
                     Ustr::from(si.to_string().as_str()),
                 );
+                self.f.cells[c].producer = crate::mir::CellProducer::TupleSlot;
                 self.emit_cur(Inst::Store { cell: c, value });
                 c
             })
@@ -1433,6 +1461,7 @@ impl Builder<'_> {
                 for (sub, slot) in subs.iter().zip(shape.slots.clone()) {
                     self.bind_pattern_slot(sub, &slot, &values, &mut idx)?;
                 }
+                self.mark_destructured(vars);
             }
             _ => {
                 let r = self.tuple_from_slots(shape, &values, &mut idx);

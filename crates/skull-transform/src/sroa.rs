@@ -810,6 +810,7 @@ impl FieldCells {
                 .map(|identity| identity.projected(f));
             let cell = func.new_cell(name);
             func.cells[cell].capture_identity = capture_identity;
+            func.cells[cell].producer = CellProducer::Sroa;
             cell
         })
     }

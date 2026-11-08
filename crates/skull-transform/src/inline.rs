@@ -247,6 +247,9 @@ pub struct InlineScanStats {
     pub targeted_binding_terminators: usize,
     pub targeted_binding_replacements: usize,
     pub targeted_binding_ns: u64,
+    /// Cleanup Load/Store attribution by cell producer, filled by the emit
+    /// driver around each post-inline cleanup when the census is enabled.
+    pub load_store: crate::LoadStoreCensus,
 }
 
 impl InlineCloneStats {
@@ -365,6 +368,7 @@ impl InlineScanStats {
         self.targeted_binding_terminators += other.targeted_binding_terminators;
         self.targeted_binding_replacements += other.targeted_binding_replacements;
         self.targeted_binding_ns += other.targeted_binding_ns;
+        self.load_store.add(&other.load_store);
     }
 }
 
@@ -2203,6 +2207,16 @@ fn find_site(
     Ok(None)
 }
 
+/// Charge each callee parameter the splice copied (rather than coalesced onto
+/// the argument's cell) to template forwarding, for the cleanup census.
+fn mark_forwarded_params(caller: &mut MirFunc, callee: &MirFunc, scratch: &InlineScratch) {
+    for param in &callee.params {
+        if !scratch.overrides.contains_key(param) {
+            caller.cells[scratch.cell_map[param]].producer = CellProducer::InlineParam;
+        }
+    }
+}
+
 /// Clone the callee's cells + insts into `caller` (NOT blocks — only the straight
 /// path uses this; straight candidates are lambda-free so no inst references a
 /// block). Returns `(inst_map, cell_map)`.
@@ -2237,6 +2251,7 @@ fn clone_cells_insts(
         };
         scratch.cell_map.insert(cid, mapped);
     }
+    mark_forwarded_params(caller, callee, scratch);
     scratch.inst_map.clear();
     let inst_capacity = scratch.inst_map.capacity();
     scratch.inst_map.reserve(callee.insts.len());
@@ -2310,6 +2325,7 @@ fn clone_all(caller: &mut MirFunc, callee: &MirFunc, scratch: &mut InlineScratch
         };
         scratch.cell_map.insert(cid, mapped);
     }
+    mark_forwarded_params(caller, callee, scratch);
     import_cleanup_load_cells(caller, callee, &scratch.cell_map);
     if track_emit_ids {
         let forced = map_forced_cells(caller, callee, &scratch.overrides, cell_base, block_base);
@@ -3070,6 +3086,7 @@ fn splice_general(
     let result_cell = match &site {
         Site::Single { call_id, .. } => {
             let rc = func.new_cell(None);
+            func.cells[rc].producer = CellProducer::InlineResult;
             func.insts[*call_id] = Inst::Load(rc);
             func.blocks[cont].insts.insert(0, *call_id);
             Some(rc)

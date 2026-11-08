@@ -974,6 +974,68 @@ pub struct Cell {
     /// physical slot may carry several logical members, so a single
     /// `MonoTyId` is not enough to describe its native representation.
     pub native_flat_slot: Option<NativeFlatSlot>,
+    /// Which lowering or transform minted the cell. Provenance for the cleanup
+    /// Load/Store census only: no pass may read it to decide anything.
+    pub producer: CellProducer,
+}
+
+/// The code that created a cell, so the Load/Store traffic that cleanup unlinks
+/// can be charged to it (see `rock backend-stats` with `ROCK_LOG=debug`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CellProducer {
+    /// A compiler-minted temporary: control-flow results, call destinations,
+    /// desugaring state.
+    #[default]
+    Temp,
+    /// A whole source local (`let x = e`, a pattern leaf, a newtype unwrap).
+    Binding,
+    /// A source parameter, or one ABI slot of a splatting parameter.
+    Param,
+    /// A `for` desugaring's loop variable or counter.
+    LoopBinding,
+    /// One leaf of an unboxed value local.
+    AggregateLeaf,
+    /// One slot of a splatting tuple local.
+    TupleSlot,
+    /// A leaf bound by a tuple destructuring pattern.
+    Destructure,
+    /// An inlined callee's parameter that the splice did not coalesce onto the
+    /// argument's cell: the template forwards the argument through it.
+    InlineParam,
+    /// The result cell of a General inline splice.
+    InlineResult,
+    /// A field cell SROA split out of a struct cell.
+    Sroa,
+}
+
+impl CellProducer {
+    pub const ALL: [Self; 10] = [
+        Self::Temp,
+        Self::Binding,
+        Self::Param,
+        Self::LoopBinding,
+        Self::AggregateLeaf,
+        Self::TupleSlot,
+        Self::Destructure,
+        Self::InlineParam,
+        Self::InlineResult,
+        Self::Sroa,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Temp => "temp",
+            Self::Binding => "binding",
+            Self::Param => "param",
+            Self::LoopBinding => "loop-binding",
+            Self::AggregateLeaf => "aggregate-leaf",
+            Self::TupleSlot => "tuple-slot",
+            Self::Destructure => "destructure",
+            Self::InlineParam => "inline-param",
+            Self::InlineResult => "inline-result",
+            Self::Sroa => "sroa-field",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1454,6 +1516,7 @@ impl MirFunc {
             borrowed: false,
             native_ty: None,
             native_flat_slot: None,
+            producer: CellProducer::Temp,
         });
         self.record_new_cell();
         if self.cells.capacity() != capacity {
@@ -1479,6 +1542,7 @@ impl MirFunc {
             borrowed: false,
             native_ty: None,
             native_flat_slot: None,
+            producer: CellProducer::Temp,
         });
         self.record_new_cell();
         if self.cells.capacity() != capacity {
@@ -1506,7 +1570,11 @@ impl MirFunc {
     /// Tag a cell as a `for`-desugaring loop binding (DESUGAR PROVENANCE; see
     /// [`Cell::loop_binding`]).
     pub fn mark_loop_binding(&mut self, cell: Idx<Cell>) {
-        self.cells[cell].loop_binding = true;
+        let cell = &mut self.cells[cell];
+        cell.loop_binding = true;
+        if matches!(cell.producer, CellProducer::Temp | CellProducer::Binding) {
+            cell.producer = CellProducer::LoopBinding;
+        }
     }
 
     /// Mark a parameter cell whose default expression is filled in the callee

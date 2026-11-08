@@ -492,6 +492,27 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
             census.targeted_binding_replacements,
             ms(census.targeted_binding_ns),
         );
+        println!(
+            "      cleanup load/store by cell producer: loads before/unlinked/spliced-unlinked/added; stores before/unlinked/spliced-unlinked/added"
+        );
+        for producer in skull_mir::mir::CellProducer::ALL {
+            let row = census.load_store.rows[producer as usize];
+            if row.is_empty() {
+                continue;
+            }
+            println!(
+                "        {:14} loads {}/{}/{}/{}; stores {}/{}/{}/{}",
+                producer.label(),
+                row.loads_before,
+                row.loads_unlinked,
+                row.spliced_loads_unlinked,
+                row.loads_added,
+                row.stores_before,
+                row.stores_unlinked,
+                row.spliced_stores_unlinked,
+                row.stores_added,
+            );
+        }
         macro_rules! side {
             ($name:literal, $field:ident) => {
                 println!(

@@ -381,7 +381,15 @@ pub(super) fn emit_body_chunk_with_mutation(
     let mut deps: FxHashSet<FuncRef> = spliced.into_iter().collect();
     let cleanup_before = mir_live_instructions(&mf);
     let tc = Instant::now();
-    skull_transform::cleanup_with_nobox(ws, &mut mf)?; // drop dead values + dead-cell stores
+    // drop dead values + dead-cell stores
+    skull_transform::cleanup_with_nobox_census(
+        ws,
+        &mut mf,
+        before_inline.0,
+        inline_cache
+            .census_enabled()
+            .then_some(&mut attribution.inline.census.load_store),
+    )?;
     times.cleanup = tc.elapsed();
     let cleanup_after = mir_live_instructions(&mf);
     attribution.inline.cleanup_live_before += cleanup_before;
@@ -1059,7 +1067,14 @@ fn prepare_instance_body_with_attribution(
     work.add_allocations(before, (mf.insts.len(), mf.blocks.len(), mf.cells.len()));
     let cleanup_before = mir_live_instructions(mf);
     let tc = Instant::now();
-    skull_transform::cleanup_with_nobox(ws, mf)?;
+    skull_transform::cleanup_with_nobox_census(
+        ws,
+        mf,
+        before.0,
+        cache
+            .census_enabled()
+            .then_some(&mut work.census.load_store),
+    )?;
     times.cleanup = tc.elapsed();
     let cleanup_after = mir_live_instructions(mf);
     work.cleanup_live_before += cleanup_before;
@@ -1119,7 +1134,15 @@ fn inline_hoisted_bodies(
         deps.extend(spliced);
         let cleanup_before = mir_live_instructions(nf);
         let tc = Instant::now();
-        skull_transform::cleanup_with_nobox(ws, nf).map_err(|e| e.message)?;
+        skull_transform::cleanup_with_nobox_census(
+            ws,
+            nf,
+            before.0,
+            inline_cache
+                .census_enabled()
+                .then_some(&mut work.census.load_store),
+        )
+        .map_err(|e| e.message)?;
         times.cleanup += tc.elapsed();
         let cleanup_after = mir_live_instructions(nf);
         work.cleanup_live_before += cleanup_before;
