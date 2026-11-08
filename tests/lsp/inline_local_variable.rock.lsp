@@ -9,7 +9,7 @@ fn main() {
 OPERATION: code_action
 ---
 EXPECTED:
-ACTION_TITLE: Inline local variable
+ACTION_TITLE: Inline local `x`
 RESULT:
 fn main() {
     print(42)
@@ -29,7 +29,7 @@ fn main() {
 OPERATION: code_action
 ---
 EXPECTED:
-ACTION_TITLE: Inline local variable
+ACTION_TITLE: Inline local `value`
 RESULT:
 fn main() {
     print(10 + 20)
@@ -49,7 +49,7 @@ fn calculate(x: int) -> int {
 OPERATION: code_action
 ---
 EXPECTED:
-ACTION_TITLE: Inline local variable
+ACTION_TITLE: Inline local `temp`
 RESULT:
 fn calculate(x: int) -> int {
     return (x * 2 + 1) * (x * 2 + 1)
@@ -72,7 +72,7 @@ fn main() {
 OPERATION: code_action
 ---
 EXPECTED:
-ACTION_TITLE: Inline local variable
+ACTION_TITLE: Inline local `num`
 RESULT:
 fn process(value: int) -> int {
     return value * 2
@@ -101,7 +101,7 @@ fn main() {
 OPERATION: code_action
 ---
 EXPECTED:
-ACTION_TITLE: Inline local variable
+ACTION_TITLE: Inline local `x`
 RESULT:
 fn get_value() -> int {
     print("Getting value")
@@ -127,7 +127,7 @@ fn main() {
 OPERATION: code_action
 ---
 EXPECTED:
-ACTION_TITLE: Inline local variable
+ACTION_TITLE: Inline local `condition`
 RESULT:
 fn main() {
     if true {
@@ -147,7 +147,7 @@ fn main() {
 OPERATION: code_action
 ---
 EXPECTED:
-ACTION_TITLE: Inline local variable
+ACTION_TITLE: Inline local `message`
 RESULT:
 fn main() {
     print("Hello, World!")
@@ -168,7 +168,7 @@ fn main() {
 OPERATION: code_action
 ---
 EXPECTED:
-ACTION_TITLE: Inline local variable
+ACTION_TITLE: Inline local `outer`
 RESULT:
 fn main() {
     {

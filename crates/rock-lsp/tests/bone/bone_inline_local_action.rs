@@ -3,7 +3,8 @@
 //! On a `let x = <init>` binding or any of its uses, the bone backend offers a
 //! REFACTOR_INLINE action whose multi-edit replaces every use with the
 //! initializer (parenthesized when the initializer isn't atomic) and deletes the
-//! `let`. No `.rock.lsp` fixture type for code actions, so this is end-to-end.
+//! `let`. `tests/lsp/inline_local_variable.rock.lsp` drives the same action
+//! through the JSON-RPC server.
 
 use crate::common::*;
 use lsp_types::*;

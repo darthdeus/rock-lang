@@ -44,6 +44,9 @@ struct LspTest {
     expected_code: Option<String>,
     /// For multi-file rename: expected per-file content after edits are applied.
     expected_files: Vec<(String, String)>,
+    /// For code actions: the title of the action to apply. Its result is
+    /// compared against `expected_code`.
+    action_title: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -82,6 +85,10 @@ enum LspOperation {
     DocumentSymbols,
     WorkspaceSymbols {
         query: String,
+    },
+    CodeAction {
+        line: usize,
+        character: usize,
     },
 }
 
@@ -437,10 +444,9 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
         // A TYPE the harness cannot decode is refused here, naming itself: a
         // dropped fixture is a vacuous pass, and comparing its raw reply
         // would accept output the server never shaped. `edit_sequence`
-        // fixtures are read by `parse_edit_sequence_tests`, and `code_action`
-        // is skipped by name because no subcommand answers it.
+        // fixtures are read by `parse_edit_sequence_tests`.
         let type_kind = fixture_reply_kind(&test_type);
-        if type_kind.is_none() && test_type != "edit_sequence" && test_type != "code_action" {
+        if type_kind.is_none() && test_type != "edit_sequence" {
             return Err(anyhow::anyhow!(
                 "{}: test '{}' has TYPE '{}', which has no reply decoder",
                 path.display(),
@@ -448,7 +454,7 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                 test_type
             ));
         }
-        if test_type == "edit_sequence" || test_type == "code_action" {
+        if test_type == "edit_sequence" {
             skip_to_block_end(&mut lines, path, &name)?;
             continue;
         }
@@ -572,6 +578,10 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                 let (line, character) = at(&mut lines)?;
                 LspOperation::SignatureHelp { line, character }
             }
+            "code_action" => {
+                let (line, character) = at(&mut lines)?;
+                LspOperation::CodeAction { line, character }
+            }
             "rename" => {
                 let (line, character) = at(&mut lines)?;
                 let new_name = match lines.next_if(|l| l.starts_with("NEW_NAME:")) {
@@ -629,6 +639,8 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
         let mut expected_code: Option<String> = None;
         let mut rename_lines: Vec<String> = Vec::new();
         let mut expected_files: Vec<(String, String)> = Vec::new();
+        let mut action_title: Option<String> = None;
+        let mut result_lines: Option<Vec<String>> = None;
 
         // Multi-file EXPECTED uses `FILE: name / --- / content / ---` blocks
         // up to `===`.
@@ -658,6 +670,29 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
                     // Raw capture; snippet-vs-full-code is decided after the
                     // loop from the first non-empty line.
                     rename_lines.push(line.to_string());
+                } else if test_type == "code_action" {
+                    // `ACTION_TITLE: <title>`, then `RESULT:` and the whole
+                    // file after the action's edit is applied.
+                    if let Some(result) = &mut result_lines {
+                        result.push(line.to_string());
+                    } else if let Some(title) = line.strip_prefix("ACTION_TITLE:") {
+                        if action_title.is_some() {
+                            return Err(fixture_error(
+                                path,
+                                &name,
+                                "more than one `ACTION_TITLE:`",
+                            ));
+                        }
+                        action_title = Some(title.trim().to_string());
+                    } else if line.trim() == "RESULT:" {
+                        result_lines = Some(Vec::new());
+                    } else if !line.trim().is_empty() {
+                        return Err(fixture_error(
+                            path,
+                            &name,
+                            format!("expected `ACTION_TITLE:` or `RESULT:`, found {line:?}"),
+                        ));
+                    }
                 } else if test_type == "hover" || test_type == "inlay_hints" {
                     // Hover: every line is expected content. Inlay hints: the
                     // block re-renders the source with `«hint::LABEL»`
@@ -720,6 +755,20 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
             }
         }
 
+        if test_type == "code_action" {
+            if action_title.as_deref().is_none_or(str::is_empty) {
+                return Err(fixture_error(
+                    path,
+                    &name,
+                    "code action has no `ACTION_TITLE:`",
+                ));
+            }
+            let Some(result) = result_lines else {
+                return Err(fixture_error(path, &name, "code action has no `RESULT:`"));
+            };
+            expected_code = Some(result.join("\n"));
+        }
+
         // An EXPECTED block with nothing in it asserts nothing, so the
         // fixture would pass whatever the server answered.
         if expected.iter().all(|e| e.trim().is_empty())
@@ -739,6 +788,7 @@ fn parse_lsp_test_file(path: &Path) -> Result<Vec<LspTest>> {
             expected,
             expected_code,
             expected_files,
+            action_title,
         });
     }
 
@@ -1086,6 +1136,7 @@ enum ReplyKind {
     Hover,
     Symbols,
     Rename,
+    CodeAction,
 }
 
 impl LspOperation {
@@ -1106,14 +1157,13 @@ impl LspOperation {
             LspOperation::DocumentSymbols | LspOperation::WorkspaceSymbols { .. } => {
                 ReplyKind::Symbols
             }
+            LspOperation::CodeAction { .. } => ReplyKind::CodeAction,
         }
     }
 }
 
 /// The decoder a fixture's `TYPE:` names, or `None` when the harness has none.
-/// `edit_sequence` fixtures are read by `parse_edit_sequence_tests` instead, and
-/// `code_action` has no `rock lsp` subcommand to answer it, so both are skipped
-/// by name rather than compared.
+/// `edit_sequence` fixtures are read by `parse_edit_sequence_tests` instead.
 fn fixture_reply_kind(test_type: &str) -> Option<ReplyKind> {
     Some(match test_type {
         "completion" => ReplyKind::Completion,
@@ -1127,6 +1177,7 @@ fn fixture_reply_kind(test_type: &str) -> Option<ReplyKind> {
         "hover" => ReplyKind::Hover,
         "document_symbols" | "workspace_symbols" => ReplyKind::Symbols,
         "rename" => ReplyKind::Rename,
+        "code_action" => ReplyKind::CodeAction,
         _ => return None,
     })
 }
@@ -1322,6 +1373,15 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                 test_file.display().to_string(),
                 query.clone(),
             ]
+        }
+        // No one-shot subcommand answers a code action; it goes to the
+        // interactive server over JSON-RPC, as an editor sends it.
+        LspOperation::CodeAction { line, character } => {
+            let result = run_code_action_test(test, backend, &test_file, *line, *character);
+            if let Some(dir) = &project_dir {
+                let _ = fs_err::remove_dir_all(dir);
+            }
+            return result;
         }
     };
 
@@ -1847,6 +1907,13 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
                 }
             }
         }
+        // Answered over JSON-RPC by `run_code_action_test` before any
+        // one-shot command runs.
+        ReplyKind::CodeAction => {
+            return Err(anyhow::anyhow!(
+                "{request}: a code action is not a one-shot request"
+            ));
+        }
         ReplyKind::Rename => {
             // For rename tests, apply the text edits and check the resulting code
             let json = decode_reply(&request, &stdout)?;
@@ -2037,6 +2104,225 @@ fn run_lsp_test(test: &LspTest, backend: crate::Backend) -> Result<bool> {
     Ok(all_found)
 }
 
+// ── Code Action Test Runner (JSON-RPC over stdio) ───────────────────────────
+
+/// Open the fixture in a fresh `rock lsp serve`, request the code actions at
+/// (`line`, `character`), apply the edit of the one the fixture names, and
+/// compare the file with the fixture's `RESULT:`.
+fn run_code_action_test(
+    test: &LspTest,
+    backend: crate::Backend,
+    test_file: &Path,
+    line: usize,
+    character: usize,
+) -> Result<bool> {
+    let test_file = std::fs::canonicalize(test_file)?;
+    let root = test_file
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} has no parent", test_file.display()))?;
+    let uri = file_uri(&test_file)?;
+    let mut server = start_lsp_server(backend, root, &test.name)?;
+    let reply = request_code_actions(&mut server, &uri, &test.code, line, character);
+    // Shut down before looking at the reply, so a failed request still stops
+    // the child.
+    server.shutdown(3)?;
+    check_code_action_reply(test, &uri, &reply?)
+}
+
+/// Open `code` as `uri` and send `textDocument/codeAction` (request id 2) for
+/// an empty range at the position, returning the whole JSON-RPC response.
+fn request_code_actions(
+    server: &mut LspServer,
+    uri: &str,
+    code: &str,
+    line: usize,
+    character: usize,
+) -> Result<serde_json::Value> {
+    let did_open = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": { "uri": uri, "languageId": "rock", "version": 1, "text": code }
+        }
+    });
+    server.stdin.write_all(&encode_jsonrpc(&did_open))?;
+    let position = serde_json::json!({ "line": line, "character": character });
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "textDocument/codeAction",
+        "params": {
+            "textDocument": { "uri": uri },
+            "range": { "start": position, "end": position },
+            "context": { "diagnostics": [] }
+        }
+    });
+    server.stdin.write_all(&encode_jsonrpc(&request))?;
+    server.stdin.flush()?;
+    read_response_from_chan(&server.rx, 2)
+}
+
+/// Check a `textDocument/codeAction` response against the fixture: the action
+/// titled `ACTION_TITLE:` must be offered, and applying its edit to the
+/// fixture's code must give exactly the `RESULT:` text.
+fn check_code_action_reply(test: &LspTest, uri: &str, reply: &serde_json::Value) -> Result<bool> {
+    let request = format!("code_action test '{}'", test.name);
+    let title = test
+        .action_title
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("{request}: fixture has no ACTION_TITLE"))?;
+    let expected = test
+        .expected_code
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("{request}: fixture has no RESULT"))?;
+    if let Some(error) = reply.get("error") {
+        return Err(anyhow::anyhow!(
+            "{request}: server answered with an error: {error}"
+        ));
+    }
+    // `null` is the protocol's "no actions here".
+    let actions = match reply.get("result") {
+        Some(serde_json::Value::Array(actions)) => actions.as_slice(),
+        Some(serde_json::Value::Null) => &[],
+        _ => {
+            return Err(anyhow::anyhow!(
+                "{request}: reply has no `result` array; raw reply: {reply}"
+            ));
+        }
+    };
+    let Some(action) = actions.iter().find(|a| action_title(a) == Some(title)) else {
+        let offered: Vec<&str> = actions.iter().filter_map(action_title).collect();
+        return Err(anyhow::anyhow!(
+            "{request}: no action titled {title:?}; the server offered {offered:?}"
+        ));
+    };
+    let edits = code_action_edits(action, uri)
+        .map_err(|e| anyhow::anyhow!("{request}: {e}; action: {action}"))?;
+    let actual = apply_lsp_text_edits(&test.code, &edits)
+        .map_err(|e| anyhow::anyhow!("{request}: {e}; action: {action}"))?;
+    if actual.trim_end() != expected.trim_end() {
+        return Err(anyhow::anyhow!(
+            "{request}: result after {title:?} differs\n--- expected\n{expected}\n--- actual\n{actual}"
+        ));
+    }
+    Ok(true)
+}
+
+fn action_title(action: &serde_json::Value) -> Option<&str> {
+    action.get("title").and_then(|t| t.as_str())
+}
+
+/// The text edits a code action makes to `uri`, from its `edit`'s `changes`
+/// map or `documentChanges` list. A single-file fixture has no other file to
+/// edit, so an edit elsewhere, or an action with no edit, is an error.
+fn code_action_edits<'a>(
+    action: &'a serde_json::Value,
+    uri: &str,
+) -> Result<Vec<&'a serde_json::Value>> {
+    let edit = action
+        .get("edit")
+        .ok_or_else(|| anyhow::anyhow!("action carries no workspace edit"))?;
+    let mut edits = Vec::new();
+    let check_uri = |target: &str| {
+        if target == uri {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!(
+                "action edits {target}, not the fixture file {uri}"
+            ))
+        }
+    };
+    if let Some(changes) = edit.get("changes").and_then(|c| c.as_object()) {
+        for (target, file_edits) in changes {
+            check_uri(target)?;
+            let file_edits = file_edits
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("edits for {target} are not an array"))?;
+            edits.extend(file_edits);
+        }
+    }
+    if let Some(changes) = edit.get("documentChanges").and_then(|c| c.as_array()) {
+        for change in changes {
+            let target = change
+                .pointer("/textDocument/uri")
+                .and_then(|u| u.as_str())
+                .ok_or_else(|| anyhow::anyhow!("document change has no text document"))?;
+            check_uri(target)?;
+            let file_edits = change
+                .get("edits")
+                .and_then(|e| e.as_array())
+                .ok_or_else(|| anyhow::anyhow!("document change for {target} has no edits"))?;
+            edits.extend(file_edits);
+        }
+    }
+    if edits.is_empty() {
+        return Err(anyhow::anyhow!("action's workspace edit changes nothing"));
+    }
+    Ok(edits)
+}
+
+/// The byte offset of an LSP position: `character` counts UTF-16 code units
+/// and, per the protocol, a value past the end of the line means its end.
+fn lsp_offset(source: &str, line: u64, character: u64) -> Option<usize> {
+    let mut start = 0;
+    for _ in 0..line {
+        start += source[start..].find('\n')? + 1;
+    }
+    let text = source[start..].split('\n').next().unwrap_or("");
+    let mut units = 0;
+    for (index, ch) in text.char_indices() {
+        if units >= character {
+            return Some(start + index);
+        }
+        units += ch.len_utf16() as u64;
+    }
+    Some(start + text.len())
+}
+
+/// Apply LSP `TextEdit`s (`range` + `newText`) to `source`. The edits'
+/// ranges refer to the original text, so they are applied from the end and
+/// must not overlap.
+fn apply_lsp_text_edits(source: &str, edits: &[&serde_json::Value]) -> Result<String> {
+    let offset_at = |edit: &serde_json::Value, which: &str| -> Result<usize> {
+        let pos = edit
+            .get("range")
+            .and_then(|r| r.get(which))
+            .ok_or_else(|| anyhow::anyhow!("edit has no range {which}: {edit}"))?;
+        let field = |name: &str| pos.get(name).and_then(|v| v.as_u64());
+        let (Some(line), Some(character)) = (field("line"), field("character")) else {
+            return Err(anyhow::anyhow!(
+                "edit has a malformed range {which}: {edit}"
+            ));
+        };
+        lsp_offset(source, line, character).ok_or_else(|| {
+            anyhow::anyhow!("edit range {which} is past the end of the file: {edit}")
+        })
+    };
+    let mut spans = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let (start, end) = (offset_at(edit, "start")?, offset_at(edit, "end")?);
+        let new_text = edit
+            .get("newText")
+            .and_then(|t| t.as_str())
+            .ok_or_else(|| anyhow::anyhow!("edit has no newText: {edit}"))?;
+        if end < start {
+            return Err(anyhow::anyhow!("edit range ends before it starts: {edit}"));
+        }
+        spans.push((start, end, new_text));
+    }
+    spans.sort_by_key(|&(start, end, _)| std::cmp::Reverse((start, end)));
+    let mut result = source.to_string();
+    let mut limit = source.len();
+    for (start, end, new_text) in spans {
+        if end > limit {
+            return Err(anyhow::anyhow!("code action edits overlap"));
+        }
+        result.replace_range(start..end, new_text);
+        limit = start;
+    }
+    Ok(result)
+}
+
 // ── Edit Sequence Test Runner (JSON-RPC over stdio) ──────────────────────────
 
 /// Helper: encode a JSON-RPC message with Content-Length header
@@ -2133,40 +2419,53 @@ fn new_server_stderr_log(dir: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn run_edit_sequence_test(
-    test: &EditSequenceTest,
-    backend: crate::Backend,
-) -> Result<(usize, usize, Vec<String>)> {
-    let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
-    let mut passed = 0;
-    let mut failed = 0;
-    let mut failures = Vec::new();
+/// A running `rock lsp serve` child that has answered `initialize`, with a
+/// reader thread draining its stdout and a watchdog that kills it if the
+/// test wedges.
+struct LspServer {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    rx: std::sync::mpsc::Receiver<serde_json::Value>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
 
-    // Create temp file for the test
-    let test_dir = PathBuf::from(".lsp-test-tmp");
-    std::fs::create_dir_all(&test_dir)?;
-    let test_file = test_dir.join(format!(
-        "{}.rock",
-        test.name
-            .chars()
-            .map(|c| if c == ' ' || c == '/' { '_' } else { c })
-            .collect::<String>()
-    ));
-    let test_uri =
-        file_uri(&std::fs::canonicalize(&test_dir)?.join(test_file.file_name().unwrap()))?;
+impl LspServer {
+    /// Send `shutdown` (as request `id`) and `exit`, wait for the child, and
+    /// stop the watchdog.
+    fn shutdown(mut self, id: i64) -> Result<()> {
+        let shutdown_id = id;
+        let shutdown_request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": shutdown_id,
+            "method": "shutdown",
+            "params": null
+        });
+        self.stdin.write_all(&encode_jsonrpc(&shutdown_request))?;
+        self.stdin.flush()?;
 
-    // Write initial content so the LSP can find it
-    let initial_code = match &test.steps[0].mode {
-        StepMode::FullReplace { code } => code.clone(),
-        StepMode::TypeAt { .. } | StepMode::DeleteAt { .. } => {
-            // First step must be FullReplace to establish the initial document
-            return Err(anyhow::anyhow!(
-                "First step in edit_sequence must be a full document (STEP N:), not a typing/delete step"
-            ));
-        }
-    };
-    std::fs::write(&test_file, &initial_code)?;
+        // Try to read shutdown response, but don't fail if the server is slow
+        let _ = read_response_from_chan(&self.rx, shutdown_id);
 
+        let exit_notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "exit",
+            "params": null
+        });
+        self.stdin.write_all(&encode_jsonrpc(&exit_notification))?;
+        self.stdin.flush()?;
+
+        // Wait for process to exit
+        let _ = self.child.wait();
+
+        // Stop the watchdog (we exited cleanly).
+        self.done.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+/// Spawn `rock lsp serve` rooted at `root_dir` and complete the
+/// `initialize` handshake, using request id 1. `name` labels the watchdog.
+fn start_lsp_server(backend: crate::Backend, root_dir: &Path, name: &str) -> Result<LspServer> {
     // Start the LSP server subprocess. Route stderr to a known-location
     // log file so that when the server hangs / panics during a test, the
     // operator has a breadcrumb. `Stdio::null()` here previously hid real
@@ -2244,7 +2543,7 @@ fn run_edit_sequence_test(
     let child_pid = child.id();
     let test_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watchdog_done = test_done.clone();
-    let watchdog_name = test.name.clone();
+    let watchdog_name = name.to_string();
     std::thread::spawn(move || {
         let start = bone_core::prelude::Instant::now();
         while start.elapsed() < std::time::Duration::from_secs(timeout_secs) {
@@ -2265,12 +2564,8 @@ fn run_edit_sequence_test(
         }
     });
 
-    let mut next_id: i64 = 1;
-    let mut version: i64 = 1;
-
     // --- Initialize ---
-    let init_id = next_id;
-    next_id += 1;
+    let init_id = 1;
     let init_request = serde_json::json!({
         "jsonrpc": "2.0",
         "id": init_id,
@@ -2286,7 +2581,7 @@ fn run_edit_sequence_test(
                     }
                 }
             },
-            "rootUri": file_uri(&std::fs::canonicalize(&test_dir)?)?,
+            "rootUri": file_uri(&std::fs::canonicalize(root_dir)?)?,
             "workspaceFolders": null
         }
     });
@@ -2303,6 +2598,58 @@ fn run_edit_sequence_test(
     });
     stdin.write_all(&encode_jsonrpc(&initialized))?;
     stdin.flush()?;
+
+    Ok(LspServer {
+        child,
+        stdin,
+        rx: msg_rx,
+        done: test_done,
+    })
+}
+
+fn run_edit_sequence_test(
+    test: &EditSequenceTest,
+    backend: crate::Backend,
+) -> Result<(usize, usize, Vec<String>)> {
+    let verbose = std::env::var("ROCK_TEST_VERBOSE").is_ok();
+    let mut passed = 0;
+    let mut failed = 0;
+    let mut failures = Vec::new();
+
+    // Create temp file for the test
+    let test_dir = PathBuf::from(".lsp-test-tmp");
+    std::fs::create_dir_all(&test_dir)?;
+    let test_file = test_dir.join(format!(
+        "{}.rock",
+        test.name
+            .chars()
+            .map(|c| if c == ' ' || c == '/' { '_' } else { c })
+            .collect::<String>()
+    ));
+    let test_uri =
+        file_uri(&std::fs::canonicalize(&test_dir)?.join(test_file.file_name().unwrap()))?;
+
+    // Write initial content so the LSP can find it
+    let initial_code = match &test.steps[0].mode {
+        StepMode::FullReplace { code } => code.clone(),
+        StepMode::TypeAt { .. } | StepMode::DeleteAt { .. } => {
+            // First step must be FullReplace to establish the initial document
+            return Err(anyhow::anyhow!(
+                "First step in edit_sequence must be a full document (STEP N:), not a typing/delete step"
+            ));
+        }
+    };
+    std::fs::write(&test_file, &initial_code)?;
+
+    let LspServer {
+        child,
+        mut stdin,
+        rx: msg_rx,
+        done: test_done,
+    } = start_lsp_server(backend, &test_dir, &test.name)?;
+    // `start_lsp_server` used id 1 for `initialize`.
+    let mut next_id: i64 = 2;
+    let mut version: i64 = 1;
 
     // --- Open document ---
     let mut current_doc = initial_code.clone();
@@ -2565,33 +2912,13 @@ fn run_edit_sequence_test(
         }
     }
 
-    // --- Shutdown ---
-    let shutdown_id = next_id;
-    let shutdown_request = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": shutdown_id,
-        "method": "shutdown",
-        "params": null
-    });
-    stdin.write_all(&encode_jsonrpc(&shutdown_request))?;
-    stdin.flush()?;
-
-    // Try to read shutdown response, but don't fail if the server is slow
-    let _ = read_response_from_chan(&msg_rx, shutdown_id);
-
-    let exit_notification = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "exit",
-        "params": null
-    });
-    stdin.write_all(&encode_jsonrpc(&exit_notification))?;
-    stdin.flush()?;
-
-    // Wait for process to exit
-    let _ = child.wait();
-
-    // Stop the watchdog (we exited cleanly).
-    test_done.store(true, std::sync::atomic::Ordering::Relaxed);
+    LspServer {
+        child,
+        stdin,
+        rx: msg_rx,
+        done: test_done,
+    }
+    .shutdown(next_id)?;
 
     // Clean up test file
     let _ = std::fs::remove_file(&test_file);
@@ -3793,5 +4120,185 @@ Widget: Struct\n\
                 result.failed_test_details
             );
         }
+    }
+
+    // --- Code actions -----------------------------------------------------
+
+    // No `\` line continuations: they would strip the indentation the
+    // positions below depend on.
+    const CODE_ACTION_FIXTURE: &str = "TEST: stub inline
+TYPE: code_action
+---
+fn main() {
+    let «start»x«end» = 1 + 2
+    print(x * x)
+}
+---
+OPERATION: code_action
+---
+EXPECTED:
+ACTION_TITLE: Inline local `x`
+RESULT:
+fn main() {
+    print((1 + 2) * (1 + 2))
+}
+===
+";
+
+    fn code_action_test() -> LspTest {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.rock.lsp");
+        std::fs::write(&path, CODE_ACTION_FIXTURE).unwrap();
+        let mut tests = parse_lsp_test_file(&path).unwrap();
+        assert_eq!(tests.len(), 1, "a code_action fixture must be admitted");
+        tests.pop().unwrap()
+    }
+
+    const URI: &str = "file:///fixture.rock";
+
+    /// The inline-local reply the server gives for `CODE_ACTION_FIXTURE`, with
+    /// `uses` as the replacement text of each use.
+    fn inline_reply(uses: &str) -> serde_json::Value {
+        let edit = |l1: u32, c1: u32, l2: u32, c2: u32, text: &str| {
+            serde_json::json!({
+                "range": {
+                    "start": {"line": l1, "character": c1},
+                    "end": {"line": l2, "character": c2}
+                },
+                "newText": text
+            })
+        };
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": [
+                {"title": "Fill struct fields", "edit": {"changes": {URI: []}}},
+                {
+                    "title": "Inline local `x`",
+                    "edit": {"changes": {URI: [
+                        edit(2, 10, 2, 11, uses),
+                        edit(2, 14, 2, 15, uses),
+                        edit(1, 0, 2, 0, ""),
+                    ]}}
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn a_code_action_fixture_parses_its_title_and_result() {
+        let test = code_action_test();
+        assert!(matches!(
+            test.operation,
+            LspOperation::CodeAction {
+                line: 1,
+                character: 8
+            }
+        ));
+        assert_eq!(test.action_title.as_deref(), Some("Inline local `x`"));
+        assert_eq!(
+            test.expected_code.as_deref(),
+            Some("fn main() {\n    print((1 + 2) * (1 + 2))\n}")
+        );
+    }
+
+    #[test]
+    fn the_named_action_is_applied_and_its_result_compared() {
+        let test = code_action_test();
+        assert!(check_code_action_reply(&test, URI, &inline_reply("(1 + 2)")).unwrap());
+        let wrong = check_code_action_reply(&test, URI, &inline_reply("1 + 2"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            wrong.contains("differs") && wrong.contains("print(1 + 2 * 1 + 2)"),
+            "{wrong}"
+        );
+    }
+
+    #[test]
+    fn a_code_action_reply_without_the_action_fails_naming_what_was_offered() {
+        let test = code_action_test();
+        let none =
+            check_code_action_reply(&test, URI, &serde_json::json!({"id": 2, "result": null}))
+                .unwrap_err()
+                .to_string();
+        assert!(
+            none.contains("no action titled") && none.contains("[]"),
+            "{none}"
+        );
+        let mut reply = inline_reply("(1 + 2)");
+        reply["result"][1]["title"] = "Inline local `y`".into();
+        let other = check_code_action_reply(&test, URI, &reply)
+            .unwrap_err()
+            .to_string();
+        assert!(other.contains("Inline local `y`"), "{other}");
+    }
+
+    #[test]
+    fn a_malformed_code_action_reply_fails() {
+        let test = code_action_test();
+        let cases = [
+            (
+                serde_json::json!({"id": 2, "error": {"code": -32603}}),
+                "error",
+            ),
+            (
+                serde_json::json!({"id": 2, "result": {}}),
+                "no `result` array",
+            ),
+            (
+                serde_json::json!({"id": 2, "result": [{"title": "Inline local `x`"}]}),
+                "no workspace edit",
+            ),
+            (
+                serde_json::json!({"id": 2, "result": [{
+                    "title": "Inline local `x`",
+                    "edit": {"changes": {"file:///other.rock": []}}
+                }]}),
+                "not the fixture file",
+            ),
+        ];
+        for (reply, needle) in cases {
+            let message = check_code_action_reply(&test, URI, &reply)
+                .unwrap_err()
+                .to_string();
+            assert!(message.contains(needle), "{reply}: {message}");
+        }
+    }
+
+    #[test]
+    fn lsp_text_edits_use_utf16_columns_and_reject_overlaps() {
+        let edit = |c1: u32, c2: u32, text: &str| {
+            serde_json::json!({
+                "range": {"start": {"line": 0, "character": c1}, "end": {"line": 0, "character": c2}},
+                "newText": text
+            })
+        };
+        // `é` is one UTF-16 unit but two bytes.
+        let (a, b) = (edit(1, 2, "X"), edit(9, 99, "!"));
+        assert_eq!(apply_lsp_text_edits("éab", &[&a, &b]).unwrap(), "éXb!");
+        let (a, b) = (edit(0, 2, "X"), edit(1, 3, "Y"));
+        assert!(apply_lsp_text_edits("abc", &[&a, &b]).is_err());
+    }
+
+    #[test]
+    fn a_code_action_fixture_without_a_title_or_result_is_a_parse_error() {
+        let without_title = CODE_ACTION_FIXTURE.replace("ACTION_TITLE: Inline local `x`\n", "");
+        let message = parse_error_of(&without_title);
+        assert!(message.contains("no `ACTION_TITLE:`"), "{message}");
+        let without_result = CODE_ACTION_FIXTURE.replace("RESULT:\n", "");
+        let message = parse_error_of(&without_result);
+        assert!(
+            message.contains("expected `ACTION_TITLE:` or `RESULT:`"),
+            "{message}"
+        );
+        let title_only = CODE_ACTION_FIXTURE
+            .split("RESULT:")
+            .next()
+            .unwrap()
+            .to_string()
+            + "===\n";
+        let message = parse_error_of(&title_only);
+        assert!(message.contains("no `RESULT:`"), "{message}");
     }
 }
