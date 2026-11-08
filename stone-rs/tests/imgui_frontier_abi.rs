@@ -203,11 +203,7 @@ int main(void) {
     );
 }
 
-/// Card #878: the author's MAG boots in exclusive fullscreen, the WM (i3) then
-/// takes the window out of fullscreen and the author resizes and moves it.
-/// SDL2 on X11 keeps its fullscreen flag through that and reports the display
-/// origin as the window position, so ImGui's pointer must not be rebuilt from
-/// that position: hover has to land on the widget under the pointer.
+/// Hover must land on the widget under the pointer after Stone follows the WM exit.
 #[cfg(target_os = "linux")]
 #[test]
 fn imgui_pointer_follows_a_window_the_wm_moved_out_of_fullscreen() {
@@ -280,9 +276,8 @@ int main(void) {
         window_flags(sdl_window), keyboard_focus() == sdl_window, gx, gy,
         io->MousePos.x, io->MousePos.y, hovered);
     fflush(stdout);
-    // The scenario: SDL still believes fullscreen, the window really sits at
-    // (100,100) and owns keyboard focus.
-    assert(window_flags(sdl_window) & 0x1);
+    // The window has left fullscreen, sits at (100,100), and owns keyboard focus.
+    assert(!(window_flags(sdl_window) & 0x1));
     assert(keyboard_focus() == sdl_window);
     assert(gx == 195 && gy == 195);
     assert(io->MousePos.x == 95 && io->MousePos.y == 95);

@@ -6,7 +6,8 @@ use serial_test::serial;
 use std::ffi::CString;
 use stone_rs::{
     stone_create_window_ex, stone_get_fullscreen, stone_get_window_position, stone_get_window_size,
-    stone_init, stone_poll_event, stone_teardown, stone_toggle_fullscreen, StoneEvent,
+    stone_init, stone_poll_event, stone_set_fullscreen, stone_show_window_if_deferred,
+    stone_teardown, stone_toggle_fullscreen, StoneEvent,
 };
 
 #[test]
@@ -154,4 +155,101 @@ fn alt_enter_key_event_toggles_fullscreen_and_suppresses_repeat() {
     assert_eq!((w, h), (480, 360));
 
     assert!(stone_teardown());
+}
+
+fn run_frames(frames: u32) {
+    let mut event = StoneEvent::default();
+    for _ in 0..frames {
+        while stone_poll_event(&mut event) {}
+        stone_show_window_if_deferred();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Keep the WM's geometry when it takes a fullscreen window out of fullscreen.
+#[test]
+#[serial]
+fn wm_fullscreen_exit_leaves_stone_windowed_at_the_wm_geometry() {
+    assert!(
+        std::env::var("DISPLAY").is_ok(),
+        "run through the private-display test wrapper"
+    );
+    std::env::set_var("SDL_VIDEODRIVER", "x11");
+    std::env::remove_var("STONE_HEADLESS");
+    std::env::set_var("STONE_IMMEDIATE_SHOW", "1");
+    assert!(stone_init());
+    struct Teardown;
+    impl Drop for Teardown {
+        fn drop(&mut self) {
+            stone_teardown();
+        }
+    }
+    let _teardown = Teardown;
+
+    let title = CString::new("test-wm-fullscreen-exit").unwrap();
+    let window = stone_create_window_ex(title.as_ptr(), 200, 150, 480, 360, -1, true, 0);
+    assert!(!window.is_null());
+    run_frames(20);
+
+    for mode in [1, 2] {
+        stone_set_fullscreen(mode);
+        run_frames(20);
+        assert_eq!(stone_get_fullscreen(), mode);
+
+        let status = std::process::Command::new("i3-msg")
+            .args([
+                "-q",
+                "[title=\"test-wm-fullscreen-exit\"] fullscreen disable, floating enable, resize set 500 400, move position 100 100",
+            ])
+            .status()
+            .expect("i3-msg runs on the private display");
+        assert!(status.success());
+        run_frames(30);
+
+        let (mut w, mut h, mut x, mut y) = (0, 0, 0, 0);
+        stone_get_window_size(&mut w, &mut h);
+        stone_get_window_position(&mut x, &mut y);
+        println!(
+            "after WM exit: fullscreen={} size={}x{} pos=({}, {})",
+            stone_get_fullscreen(),
+            w,
+            h,
+            x,
+            y
+        );
+        assert_eq!(
+            stone_get_fullscreen(),
+            0,
+            "the WM took the window out of fullscreen"
+        );
+        assert_eq!(
+            (x, y),
+            (100, 100),
+            "Stone must report the WM's window position"
+        );
+        assert_eq!(
+            (w, h),
+            (500, 400),
+            "the window keeps the size the WM gave it"
+        );
+
+        // A later windowed request is already satisfied and must preserve the WM's geometry.
+        stone_set_fullscreen(0);
+        run_frames(10);
+        stone_get_window_size(&mut w, &mut h);
+        stone_get_window_position(&mut x, &mut y);
+        assert_eq!(((w, h), (x, y)), ((500, 400), (100, 100)));
+
+        assert_eq!(stone_toggle_fullscreen(), 1);
+        run_frames(10);
+        assert_eq!(stone_toggle_fullscreen(), 0);
+        run_frames(10);
+        stone_get_window_size(&mut w, &mut h);
+        stone_get_window_position(&mut x, &mut y);
+        assert_eq!(
+            ((w, h), (x, y)),
+            ((500, 400), (100, 100)),
+            "a later app-driven toggle restores the WM's windowed bounds"
+        );
+    }
 }
