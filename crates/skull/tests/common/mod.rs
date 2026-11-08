@@ -438,10 +438,8 @@ pub fn mangled_name(lua: &str, src: &str) -> String {
         .to_string()
 }
 
-/// Like [`try_emit_module`] but ALSO loads `lib` as an extra stdlib module. The
-/// emit path is deliberately lenient for stdlib bodies (a codegen parity gap
-/// there becomes a silent `skipped`), so a case probing that leniency needs a
-/// body the module-file check actually classifies as stdlib.
+/// Like [`try_emit_module`] but ALSO loads `lib` as an extra stdlib module, for
+/// a case that needs a body the module-file check classifies as stdlib.
 pub fn try_emit_with_stdlib_module(
     lib: &str,
     src: &str,

@@ -61,7 +61,7 @@ The incremental emitter can publish changed bodies as an overlay. The overlay
 must retain changes accumulated since the full build and publish compatible
 code slots transactionally, so a failed update does not expose a partial set of
 bodies. Interface or incompatible layout changes require the appropriate full
-build or restart path. See [`mir_emit.rs`](../crates/skull/src/mir_emit.rs) and
+build or restart path. See [`mir_emit/overlay.rs`](../crates/skull/src/mir_emit/overlay.rs) and
 its incremental tests for the implementation and current boundaries.
 
 For tests and fixture formats, see [Testing compiler changes](testing.md).

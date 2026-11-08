@@ -426,7 +426,7 @@ impl<'a> Gamma<'a> {
 }
 
 /// The default shapes a foreign function's Lua wrapper can render
-/// (`render_default_lit` in skull's `mir_emit.rs`).
+/// (`render_default_lit` in skull's `mir_emit/unit.rs`).
 fn is_literal_default(body: &bone_core::hir::Body, e: Idx<Expr>) -> bool {
     match body.expr_arena[e] {
         Expr::Null

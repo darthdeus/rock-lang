@@ -637,8 +637,8 @@ fn verify(
 }
 
 /// A body that names an unresolved name has no baseline sites, yet a glob
-/// can rebind another call there by winning its exact tie by tier (spec
-/// 8.3). The same fixes as explicit imports bind only the names they fix,
+/// can rebind another call there by winning its exact tie by tier (see
+/// "Imports and lookup" in docs/modules.md). The same fixes as explicit imports bind only the names they fix,
 /// each of which no tier bound, so that candidate is the reference for every
 /// site of a glob plan.
 fn glob_moves(

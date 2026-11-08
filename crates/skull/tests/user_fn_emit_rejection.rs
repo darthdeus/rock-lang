@@ -1,6 +1,5 @@
 //! A USER fn whose body fails to emit must reject with a CompilerError, not
-//! silently vanish from the chunk ("Reject, don't fall back"): the lenient
-//! `skipped` channel exists for known stdlib parity gaps only. Before this
+//! silently vanish from the chunk ("Reject, don't fall back"). Before this
 //! gate, an unemittable user fn (e.g. a caller of a recursive bounded fn)
 //! shipped as a missing global and died at runtime as a nil call.
 use crate::common::{emit_mir, try_emit_module};

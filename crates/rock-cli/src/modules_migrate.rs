@@ -544,7 +544,7 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
         match edge {
             None => {
                 owner_blockers.insert(format!(
-                    "the package references `{}`, which it does not declare as a dependency ({} reference(s)); v1 needs a declared edge (spec 4.2)",
+                    "the package references `{}`, which it does not declare as a dependency ({} reference(s)); v1 needs a declared edge (see \"Membership and paths\" in docs/modules.md)",
                     node.manifest_name,
                     fragments.values().sum::<usize>()
                 ));
@@ -552,7 +552,7 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
             Some(e) if node.dialect == Dialect::Legacy && !e.allow_legacy => {
                 legacy_referenced.insert(owner);
                 owner_blockers.insert(format!(
-                    "the package references legacy dependency `{}` ({} reference(s)); a v1 package reaches a legacy one only through an `allow_legacy = true` edge (spec 3.2), which the migrator does not add on the author's behalf",
+                    "the package references legacy dependency `{}` ({} reference(s)); a v1 package reaches a legacy one only through an `allow_legacy = true` edge (see \"Legacy dependencies\" in docs/modules.md), which the migrator does not add on the author's behalf",
                     node.manifest_name,
                     fragments.values().sum::<usize>(),
                 ));
@@ -571,7 +571,7 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
             && !legacy_referenced.contains(&e.target.0)
         {
             owner_blockers.insert(format!(
-                "dependency `{}` is legacy: a v1 package needs `allow_legacy = true` on that edge (spec 3.2); the migrator does not opt in on the author's behalf",
+                "dependency `{}` is legacy: a v1 package needs `allow_legacy = true` on that edge (see \"Legacy dependencies\" in docs/modules.md); the migrator does not opt in on the author's behalf",
                 e.declared_key
             ));
         }
@@ -1034,7 +1034,7 @@ fn imports_text(plan: &Plan) -> Option<String> {
         return None;
     }
     let mut out = String::from(
-        "// Dependency names every file of this package sees (spec 8.7). Written by\n// `rock modules migrate`; review and narrow as the package is subdivided.\n",
+        "// Dependency names every file of this package sees. Written by\n// `rock modules migrate`; review and narrow as the package is subdivided.\n",
     );
     for i in &plan.imports {
         out.push_str(&format!("pub(package) use {}::*;\n", i.alias));
@@ -1213,7 +1213,7 @@ fn repair_for(
         name: site.name.to_string(),
         qualifier: qualifier.clone(),
         reason: format!(
-            "in v1 another overload of `{}` would win over the one this call selected from `{}` (spec 8.3); qualifying keeps the target",
+            "in v1 another overload of `{}` would win over the one this call selected from `{}` (see \"Imports and lookup\" in docs/modules.md); qualifying keeps the target",
             site.name,
             if qualifier == "std" {
                 "std".to_string()
@@ -1779,7 +1779,7 @@ fn render_pretty(
     }
     let _ = writeln!(
         o,
-        "\nmodule headers\n  none: every file stays in the package root (the spec 15.2 default)"
+        "\nmodule headers\n  none: every file stays in the package root (the default)"
     );
 
     let _ = writeln!(o, "\nimports [exact]");

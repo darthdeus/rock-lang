@@ -717,7 +717,7 @@ impl MonoArena {
 /// A [`MonoTyId`] means nothing without the arena that minted it, so an
 /// [`Instance`](crate::instance::Instance) is only an identity while one arena
 /// is reachable from everything that mints or reads one. Body lowering fans out
-/// across threads ([`par_map`](../../skull/src/mir_emit.rs)) and every body may
+/// across threads ([`par_map`](../../skull/src/mir_emit/par.rs)) and every body may
 /// name a callee instantiation, so the arena has to be shareable rather than
 /// owned by one walk -- and giving each walk its own would mint the second
 /// identity this stage exists to remove.

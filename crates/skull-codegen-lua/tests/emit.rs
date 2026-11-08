@@ -625,7 +625,7 @@ print('effects-ok')
 }
 
 /// Like [`emit_std`] but runs `skull_transform::cleanup` (copy-prop + DCE) before
-/// emitting -- the artifact the REAL pipeline ships (`mir_emit.rs`). Needed to
+/// emitting -- the artifact the REAL pipeline ships (`skull::mir_emit`). Needed to
 /// assert allocation-shape claims (a dead `MakeTuple` left by the raw lowering is
 /// removed here, so `no table` assertions reflect what actually runs).
 fn emit_clean(src: &str, fn_name: &str) -> String {
@@ -1534,7 +1534,7 @@ end
     );
 }
 
-/// Full pre-emit pipeline (mirrors `mir_emit.rs`): plan-backed lower -> inline
+/// Full pre-emit pipeline (mirrors `skull::mir_emit`): plan-backed lower -> inline
 /// -> `cleanup` -> emit. The honest artifact for zero-alloc claims: an `@inline`
 /// `iter`/`next` is only spliced (and its cursor struct scalarized) once the
 /// inliner has run, which `emit_clean` does NOT do.

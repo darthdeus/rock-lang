@@ -11,7 +11,8 @@ easy to break, so keep these habits:
 - **Lead with the fixture.** `crates/bone-semantic/tests/fixtures/*.rock` and
   the structural tests in `crates/bone-semantic/tests/structural.rs` are the
   contract. Write the failing case first, watch it fail, then change `src`.
-  The `src/` trees hold no tests.
+  Keep the typechecker's tests there too: the `bone-semantic` and
+  `bone-inference` `src/` trees hold no tests.
 - **Change whole functions, not fragments.** This was originally a
   transcription rule, but the failures it prevented were real bugs, not typos:
   "drop the unused `let ids =`" deleted an entire `lower_modules` call and left

@@ -59,9 +59,8 @@ pub enum CompilerErrorKind {
     Generic,
 
     /// A `nobox` value materialized implicitly. Distinct from a plain codegen
-    /// rejection because it is a LANGUAGE GUARANTEE: the stdlib emit path may
-    /// downgrade a codegen parity gap to a silent `skipped`, and must never
-    /// downgrade this (a dropped body is a nil global at runtime).
+    /// rejection because it breaks a LANGUAGE GUARANTEE rather than marking a
+    /// backend parity gap.
     NoboxGuaranteeViolated,
 }
 

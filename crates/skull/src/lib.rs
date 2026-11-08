@@ -445,7 +445,6 @@ pub fn decorator_call_args(
     Ok(args)
 }
 
-/// Returns the Lua plus the list of skipped stdlib functions.
 /// Runtime globals the stdlib expects pre-seeded (rock's codegen emits an init
 /// that does this; skull emits this small prelude instead). Empty tables are
 /// enough — the stdlib's accessors (`__rock_create_struct`, `vec_new`)

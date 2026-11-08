@@ -962,7 +962,7 @@ fn render_pretty(report: &Report, verdict: &Verdict) -> String {
             );
             let _ = writeln!(
                 o,
-                "  std: compiler-owned standard library, the allowed boundary (spec 5); never counted"
+                "  std: compiler-owned standard library, the allowed boundary; never counted"
             );
             for r in reach(graph) {
                 let node = graph.package(PackageId(r.package));
@@ -1260,7 +1260,7 @@ fn render_derived_pretty(o: &mut String, graph: &PackageGraph, table: &RefTable)
     let _ = writeln!(o, "\n{} {exact}", DERIVED_SECTIONS[3]);
     let _ = writeln!(
         o,
-        "  every nominal an exported interface names, with its reason (spec 11)"
+        "  every nominal an exported interface names, with its reason"
     );
     if table.closure.is_empty() {
         let _ = writeln!(o, "  none");
@@ -1463,7 +1463,7 @@ fn render_json(report: &Report, verdict: &Verdict) -> Value {
                 json!({
                     "status": "exact",
                     "root": graph.package(graph.root()).manifest_name,
-                    "std_boundary": "compiler-owned standard library (spec 5); never counted as legacy",
+                    "std_boundary": "compiler-owned standard library; never counted as legacy",
                     "reachable": reachable,
                 }),
             )
