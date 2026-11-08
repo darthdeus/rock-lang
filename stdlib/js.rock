@@ -252,6 +252,11 @@ inline(js) fn ffi_string(ptr: any, len: int?) -> string = """
   return i;
 """
 
+// Whether `v` is a CodeRef record; the luajit sibling is in `unified.rock`.
+@nomangle inline(js) fn __rock_is_fn_record(v: any) -> bool = """
+  return typeof __rock_code_ref_kind === "function" && __rock_code_ref_kind(v) !== null;
+"""
+
 // Reseating `.ptr` by hand leaves every typed leaf view over the OLD storage.
 // The luajit sibling re-casts from `__ROCK_LEAF_VIEWS`; a JS view already knows
 // its own type, so re-making it through its constructor cannot drift from the
@@ -494,7 +499,8 @@ inline(js) fn weak_cache_builds(name: string) -> int = """
 
 inline(js) fn weak_cache_live(name: string) -> int = """
     var owners = globalThis.__rock_weak_cache_owners || {};
-    var n = 0;
+    var records = globalThis.__rock_record_cache_live;
+    var n = (records && records[name]) || 0;
     for (var s in owners) {
         var scenes = owners[s];
         if (scenes["n:" + name]) n++;
@@ -505,4 +511,51 @@ inline(js) fn weak_cache_live(name: string) -> int = """
         }
     }
     return n;
+"""
+
+// Twins of the unified.rock record caches. A WeakMap cannot be enumerated, so
+// live entries are counted per name as they are stored and evicted; an entry
+// the collector reclaims with its owner is not subtracted.
+inline(js) fn weak_cache_get<V>(name: string, owner: CacheOwner) -> V? = """
+    if (owner.retired) return null;
+    var owners = globalThis.__rock_record_caches;
+    var entries = owners && owners.get(owner);
+    return entries && entries.has(name) ? entries.get(name) : null;
+"""
+
+inline(js) fn weak_cache_put<V>(name: string, owner: CacheOwner, value: V) = """
+    if (owner.retired) throw new Error("weak_cache_put requires a live owner");
+    var owners = globalThis.__rock_record_caches || (globalThis.__rock_record_caches = new WeakMap());
+    var entries = owners.get(owner);
+    if (!entries) { entries = new Map(); owners.set(owner, entries); }
+    if (!entries.has(name)) {
+        var live = globalThis.__rock_record_cache_live || (globalThis.__rock_record_cache_live = {});
+        live[name] = (live[name] || 0) + 1;
+    }
+    entries.set(name, value);
+    var counts = globalThis.__rock_weak_cache_builds || (globalThis.__rock_weak_cache_builds = {});
+    counts[name] = (counts[name] || 0) + 1;
+"""
+
+inline(js) fn weak_cache_drop(name: string, owner: CacheOwner) = """
+    var owners = globalThis.__rock_record_caches;
+    var entries = owners && owners.get(owner);
+    if (entries && entries.has(name)) {
+        entries.delete(name);
+        globalThis.__rock_record_cache_live[name]--;
+        if (entries.size === 0) owners.delete(owner);
+    }
+"""
+
+inline(js) fn cache_owner_retire(owner: CacheOwner) -> bool = """
+    if (owner.retired) return false;
+    owner.retired = true;
+    var owners = globalThis.__rock_record_caches;
+    var entries = owners && owners.get(owner);
+    if (entries) {
+        var live = globalThis.__rock_record_cache_live;
+        entries.forEach(function(_, name) { live[name]--; });
+        owners.delete(owner);
+    }
+    return true;
 """

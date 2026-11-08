@@ -134,6 +134,13 @@ fn weak_cache_record_copies_start_cold_and_retire_independently() {
     assert(boolean_value != null && !boolean_value.unwrap())
     weak_cache_drop(name, boolean_owner)
     assert_eq(weak_cache_live(name), 0)
+}
+
+// Forcing a collection is a LuaJIT facility: a JS run cannot collect an
+// object that is still reachable from the current job.
+@test(backends = "lua")
+fn weak_cache_record_owner_is_collected_when_unretained() {
+    let name = "test.weak_cache.record_gc"
     weak_cache_unretained_record(name)
     weak_cache_collect()
     assert_eq(weak_cache_live(name), 0, "an unretained owner is collected")
@@ -142,6 +149,10 @@ fn weak_cache_record_copies_start_cold_and_retire_independently() {
 inline(lua) fn weak_cache_raises(f: fn()) -> bool = """
     local ok = pcall(function() __rock_call(f) end)
     return not ok
+"""
+
+inline(js) fn weak_cache_raises(f: fn()) -> bool = """
+    try { __rock_call(f); return false; } catch (e) { return true; }
 """
 
 struct CWeakCacheOwner { tag: int }
