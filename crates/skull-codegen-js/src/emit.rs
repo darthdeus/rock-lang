@@ -10,7 +10,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 
-use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::{Idx, RawIdx};
 use skull_mir::cfg::structure::{
@@ -6837,24 +6836,8 @@ fn direct_callees(mf: &MirFunc, names: &CalleeNames) -> Vec<ustr::Ustr> {
     out
 }
 
-fn forward_reach(
-    deps: &HashMap<ustr::Ustr, HashSet<ustr::Ustr>>,
-    start: ustr::Ustr,
-) -> HashSet<ustr::Ustr> {
-    let mut seen = HashSet::default();
-    let mut stack = vec![start];
-    while let Some(name) = stack.pop() {
-        if let Some(references) = deps.get(&name) {
-            for &reference in references {
-                if seen.insert(reference) {
-                    stack.push(reference);
-                }
-            }
-        }
-    }
-    seen
-}
-
+/// The consts in `const_order` an overlay re-initializes: each changed const
+/// and every const that transitively references one.
 fn affected_const_names(
     ws: &Workspace,
     changed: &HashSet<ustr::Ustr>,
@@ -6863,36 +6846,13 @@ fn affected_const_names(
     if changed.is_empty() {
         return HashSet::default();
     }
-    let mut deps: HashMap<ustr::Ustr, HashSet<ustr::Ustr>> = HashMap::default();
-    for module in ws
-        .modules
-        .iter()
-        .filter(|module| module.id != bone_semantic::prelude::ModuleId::builtin())
-    {
-        let Some(inference) = ws.inference(module.id) else {
-            continue;
-        };
-        for (fid, function) in module.functions.iter() {
-            if let Some(body) = inference.per_fn.get(&BodyOwner::Function(fid)) {
-                deps.entry(function.name)
-                    .or_default()
-                    .extend(body.deps.iter().copied());
-            }
-        }
-        for (gid, global) in module.globals.iter() {
-            if let Some(body) = inference.per_fn.get(&BodyOwner::Global(gid)) {
-                deps.entry(global.name)
-                    .or_default()
-                    .extend(body.deps.iter().copied());
-            }
-        }
-    }
+    let deps = skull_mir::reach::symbol_references(ws);
     const_order
         .iter()
         .copied()
         .filter(|name| {
             changed.contains(name)
-                || forward_reach(&deps, *name)
+                || skull_mir::reach::forward_reach(&deps, *name)
                     .iter()
                     .any(|dependency| changed.contains(dependency))
         })

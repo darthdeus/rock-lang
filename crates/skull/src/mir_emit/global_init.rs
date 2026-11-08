@@ -107,29 +107,6 @@ pub(super) fn state_initializer_lua(init_lines: &[String]) -> String {
     out
 }
 
-/// Forward transitive closure over a symbol-reference graph (`name -> names it
-/// references`): every name reachable FROM `start` by following `deps` edges
-/// (NOT including `start` itself unless a cycle leads back). Used by the const
-/// overlay to find which consts an edited const affects -- the same
-/// `BodyInference.deps` symbol-reference info goto-def / references use.
-pub(super) fn forward_reach(
-    deps: &FxHashMap<Ustr, FxHashSet<Ustr>>,
-    start: Ustr,
-) -> FxHashSet<Ustr> {
-    let mut seen: FxHashSet<Ustr> = FxHashSet::default();
-    let mut stack = vec![start];
-    while let Some(n) = stack.pop() {
-        if let Some(ds) = deps.get(&n) {
-            for &d in ds {
-                if seen.insert(d) {
-                    stack.push(d);
-                }
-            }
-        }
-    }
-    seen
-}
-
 /// The assignment target of a global's init line: its own name, or -- for a
 /// `nobox` global, whose storage IS its leaves -- the comma-separated leaf list
 /// bound from the initializer's multiple return. Leaf names are compiler-minted

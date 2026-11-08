@@ -111,6 +111,59 @@ pub fn transitive_global_reads(
     }
 }
 
+/// Forward symbol references from the current inference: each function and
+/// global name maps to the names its body references. Overloads merge under one
+/// name, which at worst over-approximates a dependency.
+///
+/// An overlay uses it to find the `const` initializers an edit affects, so it is
+/// the same reference information goto-def and the re-inference cascade use.
+pub fn symbol_references(
+    ws: &bone_semantic::inference::Workspace,
+) -> FxHashMap<Ustr, HashSet<Ustr>> {
+    use bone_semantic::hir::BodyOwner;
+    let mut deps: FxHashMap<Ustr, HashSet<Ustr>> = FxHashMap::default();
+    for module in ws
+        .modules
+        .iter()
+        .filter(|m| m.id != bone_semantic::prelude::ModuleId::builtin())
+    {
+        let Some(inf) = ws.inference(module.id) else {
+            continue;
+        };
+        for (fid, f) in module.functions.iter() {
+            if let Some(bi) = inf.per_fn.get(&BodyOwner::Function(fid)) {
+                deps.entry(f.name)
+                    .or_default()
+                    .extend(bi.deps.iter().copied());
+            }
+        }
+        for (gid, g) in module.globals.iter() {
+            if let Some(bi) = inf.per_fn.get(&BodyOwner::Global(gid)) {
+                deps.entry(g.name)
+                    .or_default()
+                    .extend(bi.deps.iter().copied());
+            }
+        }
+    }
+    deps
+}
+
+/// Every name `start` references, transitively, over [`symbol_references`].
+pub fn forward_reach(deps: &FxHashMap<Ustr, HashSet<Ustr>>, start: Ustr) -> HashSet<Ustr> {
+    let mut seen: HashSet<Ustr> = HashSet::default();
+    let mut stack = vec![start];
+    while let Some(n) = stack.pop() {
+        if let Some(ds) = deps.get(&n) {
+            for &d in ds {
+                if seen.insert(d) {
+                    stack.push(d);
+                }
+            }
+        }
+    }
+    seen
+}
+
 /// One global initializer waiting for its slot in load-time order.
 pub struct PendingInit<T> {
     /// The global's logical name.

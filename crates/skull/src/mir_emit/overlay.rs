@@ -214,26 +214,7 @@ fn assemble_overlay(
         // Forward symbol-reference graph (name -> names it references) from the
         // CURRENT inference. Overloads merge under one name (conservative: at worst
         // re-emits an extra const, never misses one).
-        let mut deps: FxHashMap<Ustr, FxHashSet<Ustr>> = FxHashMap::default();
-        for module in ws.modules.iter().filter(|m| m.id != ModuleId::builtin()) {
-            let Some(inf) = ws.inference(module.id) else {
-                continue;
-            };
-            for (fid, f) in module.functions.iter() {
-                if let Some(bi) = inf.per_fn.get(&BodyOwner::Function(fid)) {
-                    deps.entry(f.name)
-                        .or_default()
-                        .extend(bi.deps.iter().copied());
-                }
-            }
-            for (gid, g) in module.globals.iter() {
-                if let Some(bi) = inf.per_fn.get(&BodyOwner::Global(gid)) {
-                    deps.entry(g.name)
-                        .or_default()
-                        .extend(bi.deps.iter().copied());
-                }
-            }
-        }
+        let deps = skull_mir::reach::symbol_references(ws);
 
         let changed_names: FxHashSet<Ustr> = cache
             .changed_consts_since_full
@@ -265,7 +246,7 @@ fn assemble_overlay(
         let mut affected: Vec<Affected> = Vec::new();
         for (mid, gid) in const_items {
             let name = ws.module(mid).globals[gid].name;
-            let reach = forward_reach(&deps, name);
+            let reach = skull_mir::reach::forward_reach(&deps, name);
             let changed = changed_names.contains(&name);
             if changed || reach.iter().any(|n| changed_names.contains(n)) {
                 affected.push(Affected {
