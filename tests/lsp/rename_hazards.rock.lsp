@@ -704,7 +704,7 @@ fn main() {
 }
 ===
 
-TEST: rename_struct_generic_param_edits_nothing
+TEST: rename_struct_generic_param_reaches_its_uses
 TYPE: rename
 ---
 struct Box<«cursor»T> {
@@ -720,8 +720,8 @@ OPERATION: rename
 NEW_NAME: U
 ---
 EXPECTED:
-struct Box<T> {
-    value: T,
+struct Box<U> {
+    value: U,
 }
 
 fn main() {

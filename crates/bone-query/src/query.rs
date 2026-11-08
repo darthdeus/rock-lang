@@ -2245,7 +2245,7 @@ fn generic_param_at(
 ) -> Option<(ModuleId, Idx<hir::TypeExpr>)> {
     let module = ws.modules.get(mid.index())?;
 
-    for g in module.functions.values().flat_map(|f| &f.generics) {
+    for g in declared_generics(module) {
         if let TyId::Static(gm, gi) = g {
             let decl = ws.modules.get(gm.index()).and_then(|m| m.ty_spans.get(*gi));
             if decl.is_some_and(|sp| span_contains(sp, offset)) {

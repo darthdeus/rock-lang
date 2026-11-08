@@ -1176,7 +1176,7 @@ fn references_from_a_named_arg_label_find_the_resolved_overloads_param() {
 }
 
 #[test]
-fn prepare_rename_agrees_with_rename_on_refusals_and_nothing_to_rename() {
+fn prepare_rename_agrees_with_rename_on_refusals_and_struct_generics() {
     let src = "inline(lua) fn probe(x: int) -> int = \"return x\"\nmacro double(v: expr) -> int { v + v }\nstruct Box<T> {\n  value: T,\n}\nfn main() {\n  print(probe(double(1)))\n}\n";
     let bone = fresh(src);
     let refusal = |pos| {
@@ -1189,12 +1189,25 @@ fn prepare_rename_agrees_with_rename_on_refusals_and_nothing_to_rename() {
     assert!(param.contains("inline(lua) body of `probe`"), "{param}");
     let mac = refusal(Position::new(6, 15));
     assert!(mac.contains("cannot rename a macro"), "{mac}");
-    // A struct generic has no reference walk: nothing to rename, no reason.
-    assert_eq!(bone.prepare_rename(PATH, Position::new(2, 11)), Ok(None));
-    assert!(matches!(
-        bone.rename(PATH, Position::new(2, 11), "U"),
-        Ok(None)
-    ));
+    // A struct generic renames from its declaration like from any use.
+    let range = bone
+        .prepare_rename(PATH, Position::new(2, 11))
+        .expect("allowed")
+        .expect("a struct generic is renameable");
+    assert_eq!((range.start.line, range.start.character), (2, 11));
+    let edit = bone
+        .rename(PATH, Position::new(2, 11), "U")
+        .expect("allowed")
+        .expect("edits");
+    let mut lines: Vec<u32> = edit
+        .changes
+        .expect("changes")
+        .into_values()
+        .flatten()
+        .map(|e| e.range.start.line)
+        .collect();
+    lines.sort();
+    assert_eq!(lines, vec![2, 3]);
 }
 
 #[test]

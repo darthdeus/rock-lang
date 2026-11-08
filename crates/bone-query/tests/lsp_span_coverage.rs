@@ -204,12 +204,12 @@ fn renaming_a_generic_parameter_reaches_its_nullable_uses() {
 }
 
 #[test]
-fn renaming_a_struct_or_enum_generic_from_a_use_reaches_every_use() {
+fn renaming_a_struct_or_enum_generic_reaches_every_use() {
     let src =
         "struct S<T> { v: T, w: [T], x: T?, y: T? = null }\nenum E<Z> { A(Z), B { q: [Z] } }\n";
     let bone = workspace(src);
     let fields = [(0, 9), (0, 17), (0, 24), (0, 31), (0, 38)];
-    for (needle, extra) in [("v: T", 3), ("x: T", 3), ("y: T", 3)] {
+    for (needle, extra) in [("<T>", 1), ("v: T", 3), ("x: T", 3), ("y: T", 3)] {
         assert_eq!(
             renamed_sites(&bone, at(src, needle, extra)),
             fields,
@@ -217,7 +217,7 @@ fn renaming_a_struct_or_enum_generic_from_a_use_reaches_every_use() {
         );
     }
     let variants = [(1, 7), (1, 14), (1, 26)];
-    for (needle, extra) in [("A(Z", 2), ("[Z", 1)] {
+    for (needle, extra) in [("<Z>", 1), ("A(Z", 2), ("[Z", 1)] {
         assert_eq!(
             renamed_sites(&bone, at(src, needle, extra)),
             variants,
