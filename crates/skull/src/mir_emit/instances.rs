@@ -181,10 +181,10 @@ pub(super) fn build_inline_candidate_table_with_census(
 /// building it standalone hits a REAL rejection -- `transmute` cannot build a
 /// column-stored `Map` -- for an instance nothing ever calls that way).
 ///
-/// `pending` seeds from the already-lowered chunk of every ordinary/coroutine
+/// The queue seeds from the already-lowered chunk of every ordinary/coroutine
 /// declaration `should_emit_via_view` retains, plus every already-collected
 /// always-emitted (decorator/global) demand; each newly BUILT specialized
-/// chunk's own `.specs` extends the worklist, mirroring
+/// chunk's own `.specs` is queued the moment that chunk is done, mirroring
 /// `emit_specialized_callees`'s render-time fixpoint but for BUILDING. Each
 /// instance's tree is the concrete plan's resolved bound tree, which the graph
 /// installs as part of that owner plan (never `DemandMap` -- sufficient per
@@ -193,15 +193,15 @@ pub(super) fn build_inline_candidate_table_with_census(
 /// (`cache.graph.has_bound_tree_disagreement`) rejects
 /// that one instance rather than picking an arbitrary tree -- the
 /// graph-driven equivalent of `DemandMap`'s clash check.
-/// Test-only observer of the specialization waves: it sees each wave's jobs,
-/// may hold a finished job back to force a completion order, and records what
-/// is installed in which order.
+/// Test-only observer of the specialization schedule: it sees each job as it
+/// is queued, may hold a finished job back to force a completion order, and
+/// records what is installed in which order.
 #[cfg(test)]
-pub(super) trait SpecWaveHook: Send + Sync {
-    /// Called on the scheduling thread before a wave runs, with its job symbols.
-    fn wave(&self, jobs: &[String]);
+pub(super) trait SpecScheduleHook: Send + Sync {
+    /// Called as a job is admitted to the queue, with its symbol.
+    fn scheduled(&self, name: &str);
     /// Called on the worker once a job's chunk is built; blocking here holds
-    /// that job's completion back.
+    /// that job's completion (and so its follow-up demand) back.
     fn finished(&self, name: &str);
     /// Called as each demanded instance's outcome is installed.
     fn installed(&self, name: &str, ok: bool);
@@ -209,8 +209,72 @@ pub(super) trait SpecWaveHook: Send + Sync {
 
 #[cfg(test)]
 thread_local! {
-    pub(super) static SPEC_WAVE_HOOK: std::cell::RefCell<Option<std::sync::Arc<dyn SpecWaveHook>>> =
+    pub(super) static SPEC_SCHEDULE_HOOK: std::cell::RefCell<Option<std::sync::Arc<dyn SpecScheduleHook>>> =
         const { std::cell::RefCell::new(None) };
+}
+
+/// One demanded instance's outcome, keyed by its symbol so the queue's
+/// completion order never shows in what is installed.
+type SpecOutcome = (String, Instance, Result<Chunk, CompilerError>);
+
+/// The demand closure's shared state: which instances have been admitted
+/// (each is decided once, whatever thread demands it) and every outcome so far.
+struct SpecQueue<'a> {
+    ws: &'a Workspace,
+    scx: &'a skull_mir::lower::ScalarCtx,
+    cache: &'a SkullEmitCache,
+    done: std::sync::Mutex<FxHashSet<Instance>>,
+    outcomes: std::sync::Mutex<Vec<SpecOutcome>>,
+    #[cfg(test)]
+    hook: Option<std::sync::Arc<dyn SpecScheduleHook>>,
+}
+
+impl SpecQueue<'_> {
+    /// Decide `inst` if it is new: reject it, take its cached chunk (and
+    /// admit that chunk's own demand), or queue it as a build job.
+    fn admit(&self, inst: Instance, jobs: &mut Vec<Instance>) {
+        if !self
+            .done
+            .lock()
+            .expect("spec demand set")
+            .insert(inst.clone())
+        {
+            return;
+        }
+        // Polymorphic recursion (plan S 0h: REJECT). The graph's own build
+        // silently CAPS a too-deep instance (`depth_capped`, no rejection --
+        // it is a target-neutral fact-recorder, not a diagnostic surface), so
+        // emission is where the spanned rejection has to live, same as before.
+        if let Some((name, err)) = too_deep_to_instantiate(self.ws, self.scx, &inst) {
+            self.record(name, inst, Err(err));
+            return;
+        }
+        if self.cache.graph.has_bound_tree_disagreement(&inst) {
+            let (name, err) = demand_clash(self.ws, self.scx, &inst);
+            self.record(name, inst, Err(err));
+            return;
+        }
+        if let Some(Ok(c)) = self.cache.chunks.get(&inst) {
+            for d in &c.specs {
+                self.admit(d.inst.clone(), jobs);
+            }
+            let name = inst.symbol(self.ws, self.scx.interner());
+            self.record(name, inst, Ok(c.clone()));
+            return;
+        }
+        #[cfg(test)]
+        if let Some(hook) = &self.hook {
+            hook.scheduled(&inst.symbol(self.ws, self.scx.interner()));
+        }
+        jobs.push(inst);
+    }
+
+    fn record(&self, name: String, inst: Instance, result: Result<Chunk, CompilerError>) {
+        self.outcomes
+            .lock()
+            .expect("spec outcomes")
+            .push((name, inst, result));
+    }
 }
 
 pub(super) fn view_driven_specialized_chunks(
@@ -222,9 +286,19 @@ pub(super) fn view_driven_specialized_chunks(
     body_cache: Option<&BodyCache>,
 ) -> (FxHashMap<Instance, Chunk>, Vec<(String, CompilerError)>) {
     let body_cache = body_cache.filter(|cache| cache.is_active());
-    let mut built: FxHashMap<Instance, Chunk> = FxHashMap::default();
-    let mut errs: Vec<(String, CompilerError)> = Vec::new();
-    let mut pending: Vec<Instance> = initial.iter().map(|d| d.inst.clone()).collect();
+    let queue = SpecQueue {
+        ws,
+        scx,
+        cache,
+        done: std::sync::Mutex::new(FxHashSet::default()),
+        outcomes: std::sync::Mutex::new(Vec::new()),
+        #[cfg(test)]
+        hook: SPEC_SCHEDULE_HOOK.with(|hook| hook.borrow().clone()),
+    };
+    let mut jobs: Vec<Instance> = Vec::new();
+    for d in initial {
+        queue.admit(d.inst.clone(), &mut jobs);
+    }
     for module in ws.source_modules() {
         for (fid, f) in module.functions.iter() {
             let self_ref = FuncRef {
@@ -237,118 +311,79 @@ pub(super) fn view_driven_specialized_chunks(
                 continue;
             }
             if let Some(Ok(c)) = cache.chunks.get(&shared(self_ref)) {
-                pending.extend(c.specs.iter().map(|d| d.inst.clone()));
+                for d in &c.specs {
+                    queue.admit(d.inst.clone(), &mut jobs);
+                }
             }
         }
     }
-    let mut done: FxHashSet<Instance> = FxHashSet::default();
-    #[cfg(test)]
-    let hook = SPEC_WAVE_HOOK.with(|hook| hook.borrow().clone());
-    #[cfg(test)]
-    let installed = |name: &str, ok: bool| {
-        if let Some(hook) = &hook {
-            hook.installed(name, ok);
-        }
-    };
-    while !pending.is_empty() {
-        let mut jobs = Vec::new();
-        for inst in std::mem::take(&mut pending).into_iter().rev() {
-            if !done.insert(inst.clone()) {
-                continue;
-            }
-            // Polymorphic recursion (plan S 0h: REJECT). The graph's own build
-            // silently CAPS a too-deep instance (`depth_capped`, no rejection --
-            // it is a target-neutral fact-recorder, not a diagnostic surface), so
-            // emission is where the spanned rejection has to live, same as before.
-            if let Some((name, err)) = too_deep_to_instantiate(ws, scx, &inst) {
-                #[cfg(test)]
-                installed(&name, false);
-                errs.push((name, err));
-                continue;
-            }
-            if cache.graph.has_bound_tree_disagreement(&inst) {
-                let (name, err) = demand_clash(ws, scx, &inst);
-                #[cfg(test)]
-                installed(&name, false);
-                errs.push((name, err));
-                continue;
-            }
-            if let Some(Ok(c)) = cache.chunks.get(&inst) {
-                pending.extend(c.specs.iter().map(|d| d.inst.clone()));
-                #[cfg(test)]
-                installed(&inst.symbol(ws, scx.interner()), true);
-                built.insert(inst, c.clone());
-                continue;
-            }
-            jobs.push(inst);
-        }
-        if let Some(body_cache) = body_cache {
-            let looked = par_map(jobs, |inst| match body_cache.lookup(ws, cg, scx, &inst) {
-                Some(chunk) => Ok((inst, chunk)),
-                None => Err(inst),
-            });
-            jobs = Vec::new();
-            for entry in looked {
-                match entry {
-                    Ok((inst, chunk)) => {
-                        pending.extend(chunk.specs.iter().map(|d| d.inst.clone()));
-                        #[cfg(test)]
-                        installed(&inst.symbol(ws, scx.interner()), true);
-                        built.insert(inst, chunk);
-                    }
-                    Err(inst) => jobs.push(inst),
+    // Each built chunk's own demand is queued as soon as that chunk is done,
+    // so a deep demand chain never waits on an unrelated body's build, and
+    // every worker keeps its inline cache for the whole closure.
+    par_drain(
+        jobs,
+        || match cache.inline_cache.candidate_table() {
+            Some(table) => skull_transform::InlineCache::with_candidate_table(table),
+            None => skull_transform::InlineCache::default(),
+        },
+        |inline_cache, inst, follow_ups| {
+            let name = inst.symbol(ws, scx.interner());
+            // The persistent body cache answers on the worker, so a hit costs
+            // the queue nothing more than its lookup.
+            if let Some(chunk) = body_cache.and_then(|c| c.lookup(ws, cg, scx, &inst)) {
+                for d in &chunk.specs {
+                    queue.admit(d.inst.clone(), follow_ups);
                 }
+                queue.record(name, inst, Ok(chunk));
+                return;
             }
-        }
-        #[cfg(test)]
-        if let Some(hook) = &hook {
-            let names: Vec<String> = jobs
-                .iter()
-                .map(|inst| inst.symbol(ws, scx.interner()))
-                .collect();
-            hook.wave(&names);
-        }
-        let results = par_map_with(
-            jobs,
-            || match cache.inline_cache.candidate_table() {
-                Some(table) => skull_transform::InlineCache::with_candidate_table(table),
-                None => skull_transform::InlineCache::default(),
-            },
-            |inline_cache, inst| {
-                let name = inst.symbol(ws, scx.interner());
-                let mut specs = Vec::new();
-                let rejections = cg.rejection_count();
-                let result = emit_spec_chunk(
-                    ws,
-                    cg,
-                    scx,
-                    &cache.concrete,
-                    &inst,
-                    &name,
-                    inline_cache,
-                    &mut specs,
-                );
-                if let (Some(body_cache), Ok(chunk)) = (body_cache, &result) {
-                    let rejected = cg.rejection_count() != rejections;
-                    body_cache.record(ws, cg, scx, &inst, chunk, rejected);
-                }
-                #[cfg(test)]
-                if let Some(hook) = &hook {
-                    hook.finished(&name);
-                }
-                (inst, name, result)
-            },
-        );
-        for (inst, name, result) in results {
+            let mut specs = Vec::new();
+            let rejections = cg.rejection_count();
+            let result = emit_spec_chunk(
+                ws,
+                cg,
+                scx,
+                &cache.concrete,
+                &inst,
+                &name,
+                inline_cache,
+                &mut specs,
+            );
+            if let (Some(body_cache), Ok(chunk)) = (body_cache, &result) {
+                let rejected = cg.rejection_count() != rejections;
+                body_cache.record(ws, cg, scx, &inst, chunk, rejected);
+            }
             #[cfg(test)]
-            installed(&name, result.is_ok());
-            match result {
-                Ok(chunk) => {
-                    pending.extend(chunk.specs.iter().map(|d| d.inst.clone()));
-                    built.insert(inst, chunk);
-                }
-                Err(e) => errs.push((name, e)),
+            if let Some(hook) = &queue.hook {
+                hook.finished(&name);
             }
+            if let Ok(chunk) = &result {
+                for d in &chunk.specs {
+                    queue.admit(d.inst.clone(), follow_ups);
+                }
+            }
+            queue.record(name, inst, result);
+        },
+    );
+    let mut outcomes = queue.outcomes.into_inner().expect("spec outcomes");
+    // Completion order is whatever the pool made it; the symbol fixes the
+    // installation order (a tie falls back to the instance itself).
+    outcomes.sort_by(|(a, ia, _), (b, ib, _)| {
+        a.cmp(b)
+            .then_with(|| format!("{ia:?}").cmp(&format!("{ib:?}")))
+    });
+    let mut built: FxHashMap<Instance, Chunk> = FxHashMap::default();
+    let mut errs: Vec<(String, CompilerError)> = Vec::new();
+    for (name, inst, result) in outcomes {
+        #[cfg(test)]
+        if let Some(hook) = &queue.hook {
+            hook.installed(&name, result.is_ok());
+        }
+        match result {
+            Ok(chunk) => {
+                built.insert(inst, chunk);
+            }
+            Err(err) => errs.push((name, err)),
         }
     }
     (built, errs)

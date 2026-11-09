@@ -1,4 +1,5 @@
-//! Order-preserving parallel map and join, sequential under `--features sequential`.
+//! Order-preserving parallel map and join, plus a work queue, sequential under
+//! `--features sequential`.
 
 /// Map `f` over `items`, in PARALLEL by default (rayon work-stealing pool) or
 /// SEQUENTIALLY under `--features sequential` (clean single-thread sampling
@@ -77,6 +78,79 @@ pub(super) fn par_map_with<T, R, S>(
 ) -> Vec<R> {
     let mut state = init();
     items.into_iter().map(|t| f(&mut state, t)).collect()
+}
+
+/// A work queue on the pool: `f` handles one item with a per-worker state
+/// (built by `init`, reused across the items a worker handles, as in
+/// [`par_map_with`]) and may push follow-up items, which are queued the moment
+/// the item is done rather than at the end of a wave. Returns once the queue
+/// has drained. Unordered: a caller that needs a deterministic result sorts
+/// what it collected. SEQUENTIALLY under `--features sequential`, a LIFO
+/// worklist over one state.
+#[cfg(not(feature = "sequential"))]
+pub(super) fn par_drain<T: Send, S: Send>(
+    items: Vec<T>,
+    init: impl Fn() -> S + Sync,
+    f: impl Fn(&mut S, T, &mut Vec<T>) + Sync,
+) {
+    struct Drain<'f, T, S, I: Fn() -> S, F: Fn(&mut S, T, &mut Vec<T>)> {
+        init: &'f I,
+        f: &'f F,
+        mode: WorkerMode,
+        states: std::sync::Mutex<Vec<S>>,
+        _item: std::marker::PhantomData<fn(T)>,
+    }
+
+    impl<T: Send, S: Send, I: Fn() -> S + Sync, F: Fn(&mut S, T, &mut Vec<T>) + Sync>
+        Drain<'_, T, S, I, F>
+    {
+        fn spawn<'scope>(&'scope self, scope: &rayon::Scope<'scope>, item: T)
+        where
+            T: 'scope,
+        {
+            scope.spawn(move |scope| {
+                let _scope = self.mode.enter();
+                let mut state = self
+                    .states
+                    .lock()
+                    .expect("drain state pool")
+                    .pop()
+                    .unwrap_or_else(|| (self.init)());
+                let mut follow_ups = Vec::new();
+                (self.f)(&mut state, item, &mut follow_ups);
+                self.states.lock().expect("drain state pool").push(state);
+                for item in follow_ups {
+                    self.spawn(scope, item);
+                }
+            });
+        }
+    }
+
+    let drain = Drain {
+        init: &init,
+        f: &f,
+        mode: WorkerMode::capture(),
+        states: std::sync::Mutex::new(Vec::new()),
+        _item: std::marker::PhantomData,
+    };
+    rayon::scope(|scope| {
+        for item in items {
+            drain.spawn(scope, item);
+        }
+    });
+}
+
+#[cfg(feature = "sequential")]
+pub(super) fn par_drain<T, S>(
+    items: Vec<T>,
+    init: impl Fn() -> S,
+    f: impl Fn(&mut S, T, &mut Vec<T>),
+) {
+    let mut state = init();
+    let mut pending = items;
+    while let Some(item) = pending.pop() {
+        f(&mut state, item, &mut pending);
+    }
 }
 
 #[cfg(not(feature = "sequential"))]
