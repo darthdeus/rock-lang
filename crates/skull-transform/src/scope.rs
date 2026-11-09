@@ -443,7 +443,7 @@ pub fn non_dominating_by_value_captures(
     // frame / transitive / multi-write) or resolve same-block by inst position,
     // so the classic fixpoint is never needed for them -- computing it up front
     // per parent was pure waste.
-    let mut idoms: HashMap<Idx<Block>, HashMap<Idx<Block>, Idx<Block>>> = HashMap::default();
+    let mut idoms: HashMap<Idx<Block>, skull_mir::cfg::Dominators> = HashMap::default();
     for s in &tree.scopes {
         let Some(lid) = s.lambda else { continue };
         let parent = s.parent.expect("a lambda scope has a parent");

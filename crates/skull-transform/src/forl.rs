@@ -68,9 +68,13 @@ pub fn recover_counted_loops(ws: &Workspace, func: &mut MirFunc) {
     }
     let headers = func.for_iter_headers.clone();
     let mut changed = false;
+    // The dominator tree is shared by the headers until a rewrite reshapes
+    // the CFG; the next header then recomputes it.
+    let mut idom = None;
     for h in headers {
-        if let Some(m) = try_match(ws, func, h) {
+        if let Some(m) = try_match(ws, func, h, &mut idom) {
             rewrite(func, h, m);
+            idom = None;
             changed = true;
         }
     }
@@ -231,7 +235,12 @@ fn fn_name(ws: &Workspace, fr: FuncRef) -> &str {
     ws.module(fr.module).functions[fr.func].name.as_str()
 }
 
-fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch> {
+fn try_match(
+    ws: &Workspace,
+    func: &MirFunc,
+    h: Idx<Block>,
+    idom: &mut Option<skull_mir::cfg::Dominators>,
+) -> Option<LoopMatch> {
     // Head -> test block through empty gotos, allowing take_while `__done`
     // GUARD blocks on the way: `g = load cell; branch g -> done | fetch`
     // (possibly through a `not`). The continue arm must be the g == false arm
@@ -686,7 +695,7 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
     // loop read as having two preheaders and stayed a goto loop. A pred the
     // entry cannot reach has no dominator entry and counts as a preheader,
     // which bails the same way it always did.
-    let idom = skull_mir::cfg::dominators(func, func.entry());
+    let idom = idom.get_or_insert_with(|| skull_mir::cfg::dominators(func, func.entry()));
     let mut back = Vec::new();
     let mut pre = Vec::new();
     for (bid, blk) in func.blocks.iter() {
@@ -697,7 +706,7 @@ fn try_match(ws: &Workspace, func: &MirFunc, h: Idx<Block>) -> Option<LoopMatch>
             }
         });
         if hits {
-            if skull_mir::cfg::dominates(&idom, h, bid) {
+            if skull_mir::cfg::dominates(idom, h, bid) {
                 back.push(bid);
             } else {
                 pre.push(bid);

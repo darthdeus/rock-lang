@@ -1,6 +1,6 @@
 use comfy_la_arena::Idx;
-use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
-use skull_mir::cfg::{dominates, dominators, reachable_blocks_from};
+use rustc_hash::FxHashSet as HashSet;
+use skull_mir::cfg::{Dominators, dominates, dominators, reachable_blocks_from};
 use skull_mir::mir::{Block, Cell, Inst, MirFunc};
 
 #[derive(Clone, Copy, Debug)]
@@ -141,7 +141,7 @@ fn analyze(func: &MirFunc) -> Analysis {
     }
 }
 
-fn is_direct(idom: &HashMap<Idx<Block>, Idx<Block>>, analysis: &Analysis, cell: usize) -> bool {
+fn is_direct(idom: &Dominators, analysis: &Analysis, cell: usize) -> bool {
     if analysis.excluded[cell] || analysis.loads[cell].is_empty() {
         return false;
     }

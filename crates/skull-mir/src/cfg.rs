@@ -114,75 +114,111 @@ pub fn predecessors(func: &MirFunc, rpo: &[Idx<Block>]) -> (PredMap, PredMap) {
     (all, goto)
 }
 
-/// Immediate-dominator map over the blocks reachable from `entry` (classic
+/// The immediate-dominator tree over the blocks reachable from `entry`,
+/// stored densely by block id (every body computes one, so a hash map per
+/// block was a measurable share of the cleanup pass). The entry maps to
+/// itself; an unreachable block has no entry.
+#[derive(Clone, Debug)]
+pub struct Dominators {
+    idom: Vec<Option<Idx<Block>>>,
+}
+
+impl Dominators {
+    /// The immediate dominator of `b` (the entry's is itself), `None` when
+    /// `b` is unreachable from the entry.
+    pub fn idom(&self, b: Idx<Block>) -> Option<Idx<Block>> {
+        self.idom.get(dense::bx(b)).copied().flatten()
+    }
+
+    /// Does block `a` dominate block `b` (walk `b`'s idom chain to the entry)?
+    pub fn dominates(&self, a: Idx<Block>, b: Idx<Block>) -> bool {
+        let mut x = b;
+        loop {
+            if x == a {
+                return true;
+            }
+            let Some(p) = self.idom(x) else { return false };
+            if p == x {
+                return false; // reached the entry without hitting `a`
+            }
+            x = p;
+        }
+    }
+}
+
+/// Immediate dominators of the blocks reachable from `entry` (classic
 /// Cooper-Harvey-Kennedy iterative fixpoint over reverse-postorder). The entry
 /// maps to itself.
-pub fn dominators(func: &MirFunc, entry: Idx<Block>) -> HashMap<Idx<Block>, Idx<Block>> {
+pub fn dominators(func: &MirFunc, entry: Idx<Block>) -> Dominators {
+    let n = func.blocks.len();
     let rpo = reverse_postorder(func, entry);
-    let mut order: HashMap<Idx<Block>, usize> = HashMap::default();
+    let mut order = vec![u32::MAX; n];
     for (i, &b) in rpo.iter().enumerate() {
-        order.insert(b, i);
+        order[dense::bx(b)] = i as u32;
     }
-    let (all_preds, _) = predecessors(func, &rpo);
-    let mut idom: HashMap<Idx<Block>, Idx<Block>> = HashMap::default();
-    idom.insert(entry, entry);
+    // Predecessors in CSR form, counting only edges from reachable blocks.
+    let mut pred_n = vec![0u32; n + 1];
+    for &b in &rpo {
+        successors(&func.blocks[b].term, |s| pred_n[dense::bx(s) + 1] += 1);
+    }
+    for i in 0..n {
+        pred_n[i + 1] += pred_n[i];
+    }
+    let mut preds = vec![0u32; pred_n[n] as usize];
+    let mut fill = pred_n.clone();
+    for &b in &rpo {
+        successors(&func.blocks[b].term, |s| {
+            let k = dense::bx(s);
+            preds[fill[k] as usize] = dense::bx(b) as u32;
+            fill[k] += 1;
+        });
+    }
+    let mut idom: Vec<Option<u32>> = vec![None; n];
+    let entry_ix = dense::bx(entry);
+    idom[entry_ix] = Some(entry_ix as u32);
+    let intersect = |idom: &[Option<u32>], mut a: u32, mut b: u32| {
+        while a != b {
+            while order[a as usize] > order[b as usize] {
+                a = idom[a as usize].expect("a processed block has an idom");
+            }
+            while order[b as usize] > order[a as usize] {
+                b = idom[b as usize].expect("a processed block has an idom");
+            }
+        }
+        a
+    };
     let mut changed = true;
     while changed {
         changed = false;
         for &b in rpo.iter().skip(1) {
-            let mut new_idom: Option<Idx<Block>> = None;
-            for &p in all_preds.get(&b).map(|v| v.as_slice()).unwrap_or(&[]) {
-                if !idom.contains_key(&p) {
+            let bx = dense::bx(b);
+            let mut new_idom: Option<u32> = None;
+            for &p in &preds[pred_n[bx] as usize..pred_n[bx + 1] as usize] {
+                if idom[p as usize].is_none() {
                     continue; // not yet processed
                 }
                 new_idom = Some(match new_idom {
                     None => p,
-                    Some(cur) => intersect(&idom, &order, p, cur),
+                    Some(cur) => intersect(&idom, p, cur),
                 });
             }
-            if let Some(ni) = new_idom {
-                if idom.get(&b) != Some(&ni) {
-                    idom.insert(b, ni);
-                    changed = true;
-                }
+            if new_idom.is_some() && idom[bx] != new_idom {
+                idom[bx] = new_idom;
+                changed = true;
             }
         }
     }
-    idom
+    Dominators {
+        idom: idom
+            .into_iter()
+            .map(|d| d.map(|d| dense::bi(d as usize)))
+            .collect(),
+    }
 }
 
-/// The CHK "intersect" walk: climb the two dominator chains (by RPO number) until
-/// they meet.
-fn intersect(
-    idom: &HashMap<Idx<Block>, Idx<Block>>,
-    order: &HashMap<Idx<Block>, usize>,
-    mut a: Idx<Block>,
-    mut b: Idx<Block>,
-) -> Idx<Block> {
-    while a != b {
-        while order[&a] > order[&b] {
-            a = idom[&a];
-        }
-        while order[&b] > order[&a] {
-            b = idom[&b];
-        }
-    }
-    a
-}
-
-/// Does block `a` dominate block `b` (walk `b`'s idom chain to the entry)?
-pub fn dominates(idom: &HashMap<Idx<Block>, Idx<Block>>, a: Idx<Block>, b: Idx<Block>) -> bool {
-    let mut x = b;
-    loop {
-        if x == a {
-            return true;
-        }
-        let Some(&p) = idom.get(&x) else { return false };
-        if p == x {
-            return false; // reached the entry without hitting `a`
-        }
-        x = p;
-    }
+/// Does block `a` dominate block `b`? See [`Dominators::dominates`].
+pub fn dominates(idom: &Dominators, a: Idx<Block>, b: Idx<Block>) -> bool {
+    idom.dominates(a, b)
 }
 
 pub mod relooper;
