@@ -107,11 +107,19 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
     ) -> std::result::Result<bone_semantic::inference::ComptimeInputs, CompilerError> {
         let timer = Instant::now();
         let inputs = self.comptime_inputs()?;
+        // Every fingerprint owner looks its text up; one index over the
+        // sources instead of a scan per owner.
+        let texts: std::collections::HashMap<String, usize> = self
+            .sources
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, source)| (source.borrow().file.to_id_path(), index))
+            .collect();
         let resolved = crate::comptime::resolve_checked_inputs(ws, inputs, |file| {
-            self.sources.files.iter().find_map(|source| {
-                let source = source.borrow();
-                (source.file.to_id_path() == file).then(|| source.contents.clone())
-            })
+            texts
+                .get(file)
+                .map(|&index| self.sources.files[index].borrow().contents.clone())
         })
         .map_err(|error| {
             CompilerError::new_no_location(format!("build var resolution failed: {error:#}"))
