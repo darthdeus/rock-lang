@@ -564,17 +564,6 @@ fn load_pending_shader_sources() {
 }
 
 fn rock_shader_compile_now(key: string, src: string, h: ShaderRegistrationKey, texture_slots: [string], blocks: [UniformBlockDecl], fullscreen_vertex: bool, semantic: SemanticShaderInterface) {
-    // Inspection artifact: the generated GLSL on disk, next to preprocessed
-    // shaders. Not under the sim harness: every sim process would rewrite the
-    // same ~60 repo-root files at boot (measured 70-95ms of a ~1.1s boot, and
-    // eight processes writing the same paths at once), and no sim reads them -- a
-    // person inspecting a shader runs the game or `rock frame`.
-    if !sim_mode_active() {
-        let safe = key.gsub("[^%w_]", "_")
-        if !io_write_file("debug_shaders/{safe}.gl.glsl", src) {
-            log_error("SHADER", "rock_shader: failed to write debug dump for {key}")
-        }
-    }
     let (shader, err) = new_shader_safe(src)
     if shader == null {
         // Loud + keep the previous program; hash unset -> retried on next reload.

@@ -17,11 +17,8 @@ fn init_batching() {
 // Compiles the rock_shader pipelines registered at chunk top level before a GL
 // context existed. The runner drains at @init; a host that
 // brings GL up outside the runner (`stone_gpu_host_ensure`) drains through this
-// call. The debug_shaders dump directory is cleared first, except under the sim
-// harness, where it is not written (see `rock_shader_compile_now`) and where
-// concurrent workers clearing one repo-root directory raced each other.
+// call.
 pub fn gpu_programs_drain() {
-    if !sim_mode_active() { io_clear_directory_recursive("debug_shaders") }
     load_pending_shader_sources()
 }
 
