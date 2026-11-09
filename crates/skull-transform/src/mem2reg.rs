@@ -192,10 +192,10 @@ pub(crate) fn promote_direct_cells(func: &mut MirFunc) -> Mem2RegPromotion {
 
     let remap = |value: Idx<Inst>| super::resolve_subst(&subst, value);
     for (_, inst) in func.insts.iter_mut() {
-        super::remap_inst(inst, &remap);
+        inst.remap_uses(&remap);
     }
     for (_, block) in func.blocks.iter_mut() {
-        super::remap_term(&mut block.term, &remap);
+        block.term.remap_uses(&remap);
     }
     super::dce(func);
     result

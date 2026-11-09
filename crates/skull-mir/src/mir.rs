@@ -730,6 +730,161 @@ pub enum Inst {
     },
 }
 
+/// The one exhaustive list of an instruction's value operands, expanded for
+/// shared and mutable access (`$iter` is `iter` or `iter_mut`).
+macro_rules! each_value_operand {
+    ($inst:expr, $iter:ident, $visit:ident) => {
+        match $inst {
+            Inst::Const(_) | Inst::Global(_) | Inst::Load(_) => {}
+            Inst::FfiViewCast { ptr, .. } => $visit(ptr),
+            Inst::IntAdd(a, b)
+            | Inst::IntSub(a, b)
+            | Inst::IntMul(a, b)
+            | Inst::IntDiv(a, b)
+            | Inst::IntMod(a, b)
+            | Inst::UintAdd(a, b)
+            | Inst::UintSub(a, b)
+            | Inst::UintMul(a, b)
+            | Inst::UintDiv(a, b)
+            | Inst::UintMod(a, b)
+            | Inst::FloatAdd(a, b)
+            | Inst::FloatSub(a, b)
+            | Inst::FloatMul(a, b)
+            | Inst::FloatDiv(a, b)
+            | Inst::FloatMod(a, b)
+            | Inst::StringConcat(a, b)
+            | Inst::IntLt(a, b)
+            | Inst::IntLeq(a, b)
+            | Inst::IntGt(a, b)
+            | Inst::IntGeq(a, b)
+            | Inst::UintLt(a, b)
+            | Inst::UintLeq(a, b)
+            | Inst::UintGt(a, b)
+            | Inst::UintGeq(a, b)
+            | Inst::FloatLt(a, b)
+            | Inst::FloatLeq(a, b)
+            | Inst::FloatGt(a, b)
+            | Inst::FloatGeq(a, b)
+            | Inst::Eq(a, b)
+            | Inst::NotEq(a, b)
+            | Inst::BitAnd(a, b)
+            | Inst::BitOr(a, b)
+            | Inst::BitXor(a, b)
+            | Inst::Shl(a, b)
+            | Inst::Shr(a, b)
+            | Inst::UintBitAnd(a, b)
+            | Inst::UintBitOr(a, b)
+            | Inst::UintBitXor(a, b)
+            | Inst::UintShl(a, b)
+            | Inst::UintShr(a, b) => {
+                $visit(a);
+                $visit(b);
+            }
+            Inst::Format { value, .. } => $visit(value),
+            Inst::FormatDyn { value, fmt } => {
+                $visit(value);
+                $visit(fmt);
+            }
+            Inst::Neg(value)
+            | Inst::Not(value)
+            | Inst::BitNot(value)
+            | Inst::UintBitNot(value)
+            | Inst::ToString(value)
+            | Inst::FloatToInt(value)
+            | Inst::IntToFloat(value)
+            | Inst::UintToFloat(value)
+            | Inst::FloatToF32(value)
+            | Inst::IntToUint(value)
+            | Inst::UintToInt(value)
+            | Inst::FloatToUint(value)
+            | Inst::UintBitcastInt(value)
+            | Inst::IntBitcastUint(value)
+            | Inst::VecStrideNilToFalse(value)
+            | Inst::VecStrideFalseToNil(value) => $visit(value),
+            Inst::Call { args, .. }
+            | Inst::CallMulti { args, .. }
+            | Inst::CallBoundMulti { args, .. } => args.$iter().for_each(&mut $visit),
+            Inst::CallValue { callee, args } | Inst::CallValueMulti { callee, args, .. } => {
+                $visit(callee);
+                args.$iter().for_each(&mut $visit);
+            }
+            Inst::Lambda { .. } => {}
+            Inst::MakeVecColumns {
+                columns, capacity, ..
+            } => {
+                $visit(capacity);
+                columns
+                    .$iter()
+                    .flat_map(|(_, values)| values)
+                    .for_each(&mut $visit);
+            }
+            Inst::MakeVecColumnHeader { capacity, .. } => $visit(capacity),
+            Inst::MakeVecStrided {
+                values, capacity, ..
+            } => {
+                $visit(capacity);
+                values.$iter().for_each(&mut $visit);
+            }
+            Inst::MakeVecStridedHeader { capacity, .. } => $visit(capacity),
+            Inst::MakeTuple(values) | Inst::MakeVec(values) => {
+                values.$iter().for_each(&mut $visit);
+            }
+            Inst::MakeStruct { fields, .. }
+            | Inst::MakeValueStruct { fields, .. }
+            | Inst::MaterializeValueStruct { fields, .. }
+            | Inst::MakeEnv { fields, .. } => {
+                fields.$iter().for_each(|(_, value)| $visit(value));
+            }
+            Inst::MakeNullableValue { present, value } => {
+                $visit(present);
+                $visit(value);
+            }
+            Inst::MakeEnum {
+                positional, named, ..
+            } => {
+                positional.$iter().for_each(&mut $visit);
+                named.$iter().for_each(|(_, value)| $visit(value));
+            }
+            Inst::MakeEnumDyn {
+                tag,
+                positional,
+                named,
+                ..
+            } => {
+                $visit(tag);
+                positional.$iter().for_each(&mut $visit);
+                named.$iter().for_each(|(_, value)| $visit(value));
+            }
+            Inst::FfiNewArray { count, .. } => $visit(count),
+            Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => $visit(base),
+            Inst::Index { base, index, .. } | Inst::VecCheckedIndex { vec: base, index } => {
+                $visit(base);
+                $visit(index);
+            }
+            Inst::Len { base, .. } => $visit(base),
+            Inst::Store { value, .. } | Inst::StoreGlobal { value, .. } => $visit(value),
+            Inst::StoreField { base, value, .. } => {
+                $visit(base);
+                $visit(value);
+            }
+            Inst::StoreIndex {
+                base, index, value, ..
+            } => {
+                $visit(base);
+                $visit(index);
+                $visit(value);
+            }
+            Inst::ArrayPush { arr, value, .. } => {
+                $visit(arr);
+                $visit(value);
+            }
+            Inst::MapNext { table, .. } => $visit(table),
+            Inst::CoroSetInner(value) => $visit(value),
+            Inst::CoroHook { .. } => {}
+        }
+    };
+}
+
 impl Inst {
     /// Call `push` for every variable cell this instruction reads or writes.
     pub fn cells_each(&self, push: &mut impl FnMut(Idx<Cell>)) {
@@ -772,154 +927,14 @@ impl Inst {
 
     /// Call `push` for every value operand this instruction reads.
     pub fn uses_each(&self, push: &mut impl FnMut(Idx<Inst>)) {
-        match self {
-            Inst::Const(_) | Inst::Global(_) | Inst::Load(_) => {}
-            Inst::FfiViewCast { ptr, .. } => push(*ptr),
-            Inst::IntAdd(a, b)
-            | Inst::IntSub(a, b)
-            | Inst::IntMul(a, b)
-            | Inst::IntDiv(a, b)
-            | Inst::IntMod(a, b)
-            | Inst::UintAdd(a, b)
-            | Inst::UintSub(a, b)
-            | Inst::UintMul(a, b)
-            | Inst::UintDiv(a, b)
-            | Inst::UintMod(a, b)
-            | Inst::FloatAdd(a, b)
-            | Inst::FloatSub(a, b)
-            | Inst::FloatMul(a, b)
-            | Inst::FloatDiv(a, b)
-            | Inst::FloatMod(a, b)
-            | Inst::StringConcat(a, b)
-            | Inst::IntLt(a, b)
-            | Inst::IntLeq(a, b)
-            | Inst::IntGt(a, b)
-            | Inst::IntGeq(a, b)
-            | Inst::UintLt(a, b)
-            | Inst::UintLeq(a, b)
-            | Inst::UintGt(a, b)
-            | Inst::UintGeq(a, b)
-            | Inst::FloatLt(a, b)
-            | Inst::FloatLeq(a, b)
-            | Inst::FloatGt(a, b)
-            | Inst::FloatGeq(a, b)
-            | Inst::Eq(a, b)
-            | Inst::NotEq(a, b)
-            | Inst::BitAnd(a, b)
-            | Inst::BitOr(a, b)
-            | Inst::BitXor(a, b)
-            | Inst::Shl(a, b)
-            | Inst::Shr(a, b)
-            | Inst::UintBitAnd(a, b)
-            | Inst::UintBitOr(a, b)
-            | Inst::UintBitXor(a, b)
-            | Inst::UintShl(a, b)
-            | Inst::UintShr(a, b) => {
-                push(*a);
-                push(*b);
-            }
-            Inst::Format { value, .. } => push(*value),
-            Inst::FormatDyn { value, fmt } => {
-                push(*value);
-                push(*fmt);
-            }
-            Inst::Neg(value)
-            | Inst::Not(value)
-            | Inst::BitNot(value)
-            | Inst::UintBitNot(value)
-            | Inst::ToString(value)
-            | Inst::FloatToInt(value)
-            | Inst::IntToFloat(value)
-            | Inst::UintToFloat(value)
-            | Inst::FloatToF32(value)
-            | Inst::IntToUint(value)
-            | Inst::UintToInt(value)
-            | Inst::FloatToUint(value)
-            | Inst::UintBitcastInt(value)
-            | Inst::IntBitcastUint(value)
-            | Inst::VecStrideNilToFalse(value)
-            | Inst::VecStrideFalseToNil(value) => push(*value),
-            Inst::Call { args, .. }
-            | Inst::CallMulti { args, .. }
-            | Inst::CallBoundMulti { args, .. } => args.iter().for_each(|arg| push(*arg)),
-            Inst::CallValue { callee, args } | Inst::CallValueMulti { callee, args, .. } => {
-                push(*callee);
-                args.iter().for_each(|arg| push(*arg));
-            }
-            Inst::Lambda { .. } => {}
-            Inst::MakeVecColumns {
-                columns, capacity, ..
-            } => {
-                push(*capacity);
-                columns
-                    .iter()
-                    .flat_map(|(_, values)| values)
-                    .for_each(|&value| push(value));
-            }
-            Inst::MakeVecColumnHeader { capacity, .. } => push(*capacity),
-            Inst::MakeVecStrided {
-                values, capacity, ..
-            } => {
-                push(*capacity);
-                values.iter().for_each(|&value| push(value));
-            }
-            Inst::MakeVecStridedHeader { capacity, .. } => push(*capacity),
-            Inst::MakeTuple(values) | Inst::MakeVec(values) => {
-                values.iter().for_each(|value| push(*value));
-            }
-            Inst::MakeStruct { fields, .. }
-            | Inst::MakeValueStruct { fields, .. }
-            | Inst::MaterializeValueStruct { fields, .. }
-            | Inst::MakeEnv { fields, .. } => {
-                fields.iter().for_each(|(_, value)| push(*value));
-            }
-            Inst::MakeNullableValue { present, value } => {
-                push(*present);
-                push(*value);
-            }
-            Inst::MakeEnum {
-                positional, named, ..
-            } => {
-                positional.iter().for_each(|value| push(*value));
-                named.iter().for_each(|(_, value)| push(*value));
-            }
-            Inst::MakeEnumDyn {
-                tag,
-                positional,
-                named,
-                ..
-            } => {
-                push(*tag);
-                positional.iter().for_each(|value| push(*value));
-                named.iter().for_each(|(_, value)| push(*value));
-            }
-            Inst::FfiNewArray { count, .. } => push(*count),
-            Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => push(*base),
-            Inst::Index { base, index, .. } | Inst::VecCheckedIndex { vec: base, index } => {
-                push(*base);
-                push(*index);
-            }
-            Inst::Len { base, .. } => push(*base),
-            Inst::Store { value, .. } | Inst::StoreGlobal { value, .. } => push(*value),
-            Inst::StoreField { base, value, .. } => {
-                push(*base);
-                push(*value);
-            }
-            Inst::StoreIndex {
-                base, index, value, ..
-            } => {
-                push(*base);
-                push(*index);
-                push(*value);
-            }
-            Inst::ArrayPush { arr, value, .. } => {
-                push(*arr);
-                push(*value);
-            }
-            Inst::MapNext { table, .. } => push(*table),
-            Inst::CoroSetInner(value) => push(*value),
-            Inst::CoroHook { .. } => {}
-        }
+        let mut visit = |value: &Idx<Inst>| push(*value);
+        each_value_operand!(self, iter, visit)
+    }
+
+    /// Replace every value operand of this instruction with `map(operand)`.
+    pub fn remap_uses(&mut self, map: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
+        let mut visit = |value: &mut Idx<Inst>| *value = map(*value);
+        each_value_operand!(self, iter_mut, visit)
     }
 
     /// Whether this instruction binds a value (gets a `vN` in the dump and a
@@ -1108,6 +1123,19 @@ impl Term {
             }
             Term::Branch { cond, .. } => push(*cond),
             Term::Switch { discr, .. } => push(*discr),
+            Term::Unreachable | Term::Goto(_) => {}
+        }
+    }
+
+    /// Replace every value operand of this terminator with `map(operand)`.
+    pub fn remap_uses(&mut self, map: &impl Fn(Idx<Inst>) -> Idx<Inst>) {
+        match self {
+            Term::Return(values) | Term::Yield { values, .. } => {
+                values.iter_mut().for_each(|value| *value = map(*value));
+            }
+            Term::Branch { cond: value, .. } | Term::Switch { discr: value, .. } => {
+                *value = map(*value);
+            }
             Term::Unreachable | Term::Goto(_) => {}
         }
     }

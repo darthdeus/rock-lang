@@ -2,7 +2,6 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::cleanup::{cleanup_in, dce, drop_f32_rounding_into_float_views};
 use crate::mem2reg::promote_direct_cells;
-use crate::visit::{remap_inst, remap_term};
 use bone_core::prelude::CompilerError;
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
@@ -319,14 +318,14 @@ pub fn flatten_nobox_nested_ctors(
         .collect();
     let m = |o: Idx<Inst>| remap.get(&o).copied().unwrap_or(o);
     for i in func.insts.iter_mut().map(|(id, _)| id).collect::<Vec<_>>() {
-        remap_inst(&mut func.insts[i], &m);
+        func.insts[i].remap_uses(&m);
     }
     // Terminators too: a `Term` still pointing at the replaced ctor references an
     // inst that is no longer in any block, which regalloc later reads as an
     // unassigned value index and panics rather than failing anywhere useful.
     let block_ids: Vec<Idx<Block>> = func.blocks.iter().map(|(id, _)| id).collect();
     for bid in &block_ids {
-        remap_term(&mut func.blocks[*bid].term, &m);
+        func.blocks[*bid].term.remap_uses(&m);
     }
     for bid in block_ids {
         if !func.blocks[bid]

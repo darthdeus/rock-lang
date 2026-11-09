@@ -46,4 +46,4 @@ pub use load_store_census::{
     LoadStoreCensus, LoadStoreRow, cleanup_with_nobox_census, observe_cleanup,
 };
 pub use nobox::{cleanup_with_nobox, flatten_nobox_nested_ctors, nobox_materialization_violations};
-pub(crate) use visit::{remap_inst, remap_term, top_level_blocks};
+pub(crate) use visit::top_level_blocks;

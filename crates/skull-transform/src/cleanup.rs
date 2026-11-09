@@ -1,7 +1,7 @@
 use crate::copy_prop::{CopyProp, copy_propagate_analysis, resolve_subst};
 use crate::native_buffer::scalarize_native_buffer_stores;
 use crate::sroa::scalarize_struct_cells_once;
-use crate::visit::{raw, remap_inst, remap_term};
+use crate::visit::raw;
 use bone_core::prelude::CompilerError;
 use bone_core::workspace::Workspace;
 use comfy_la_arena::{Idx, RawIdx};
@@ -48,7 +48,7 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) {
         for (_, b) in blocks.iter_mut() {
             for &i in &b.insts {
                 if let Some(cp) = cp {
-                    remap_inst(&mut insts[i], &|x| resolve_subst(&cp.subst, x));
+                    insts[i].remap_uses(&|x| resolve_subst(&cp.subst, x));
                 }
                 insts[i].uses_each(&mut |op| use_count[raw(op) as usize] += 1);
                 match &insts[i] {
@@ -58,7 +58,7 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) {
                 }
             }
             if let Some(cp) = cp {
-                remap_term(&mut b.term, &|x| resolve_subst(&cp.subst, x));
+                b.term.remap_uses(&|x| resolve_subst(&cp.subst, x));
             }
             // Terminator operands are permanent uses (terms are never removed), so
             // their +1 is never decremented — a value used by a term stays live.
@@ -185,7 +185,7 @@ fn is_dead_value(inst: &Inst) -> bool {
 /// write back the value their cell already holds). Run per-function in `mir_emit`.
 ///
 /// The two passes are FUSED: copy-prop's substitution is applied as DCE's count
-/// scan walks each inst, so the value-operand remap (`remap_inst` over every
+/// scan walks each inst, so the value-operand remap (`Inst::remap_uses` over every
 /// inst) and the use-counting share one traversal instead of two back-to-back.
 /// The standalone `dce` keeps its independent behavior.
 pub fn cleanup(func: &mut MirFunc) -> Result<(), CompilerError> {

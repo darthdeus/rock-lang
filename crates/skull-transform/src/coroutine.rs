@@ -28,8 +28,9 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::closure::FrameInfo;
 use crate::detached::detached_region_blocks;
-use crate::visit::{raw, remap_inst, remap_term, term_succs, term_value, top_level_blocks};
+use crate::visit::{raw, term_value, top_level_blocks};
 use comfy_la_arena::Idx;
+use skull_mir::cfg::successors;
 use skull_mir::code_identity::LambdaSiteId;
 use skull_mir::mir::*;
 
@@ -220,7 +221,7 @@ fn spill_cross_block_values(
         }
         let m = |x: Idx<Inst>| reload.get(&x).copied().unwrap_or(x);
         for id in old {
-            remap_inst(&mut step.insts[id], &m);
+            step.insts[id].remap_uses(&m);
             new_list.push(id);
             // Spill right after a frame value's def.
             if frame_values.contains(&id) && def_block.get(&id) == Some(&bid) {
@@ -236,7 +237,7 @@ fn spill_cross_block_values(
         }
         step.blocks[bid].insts = new_list;
         let mut term = step.blocks[bid].term.clone();
-        remap_term(&mut term, &m);
+        term.remap_uses(&m);
         step.blocks[bid].term = term;
     }
     let mut values: Vec<Idx<Inst>> = frame_values.into_iter().collect();
@@ -299,7 +300,7 @@ fn cells_live_at_yield_resumes(func: &MirFunc, blocks: &[Idx<Block>]) -> HashSet
         let mut changed = false;
         for &block in blocks.iter().rev() {
             let mut out = HashSet::default();
-            term_succs(&func.blocks[block].term, |succ| {
+            successors(&func.blocks[block].term, |succ| {
                 if let Some(next) = live_in.get(&succ) {
                     out.extend(next.iter().copied());
                 }
@@ -433,7 +434,7 @@ fn values_live_at_resume_blocks(
         let mut changed = false;
         for &block in blocks.iter().rev() {
             let mut out = HashSet::default();
-            term_succs(&func.blocks[block].term, |succ| {
+            successors(&func.blocks[block].term, |succ| {
                 if let Some(next) = live_in.get(&succ) {
                     out.extend(next.iter().copied());
                 }

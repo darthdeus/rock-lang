@@ -983,7 +983,7 @@ impl UseIndex {
             match site {
                 UseSite::Inst(iid) => {
                     self.remove_inst(func, iid);
-                    crate::remap_inst(&mut func.insts[iid], &|value| {
+                    func.insts[iid].remap_uses(&|value| {
                         if value == from {
                             replacements.set(replacements.get() + 1);
                             to
@@ -996,7 +996,7 @@ impl UseIndex {
                 }
                 UseSite::Term(bid) => {
                     self.remove_term(func, bid);
-                    crate::remap_term(&mut func.blocks[bid].term, &|value| {
+                    func.blocks[bid].term.remap_uses(&|value| {
                         if value == from {
                             replacements.set(replacements.get() + 1);
                             to
@@ -2453,7 +2453,7 @@ fn import_cleanup_load_cells(
     }
 }
 
-/// Remap a freshly-cloned inst's value (via [`remap_inst`]), cell, and block
+/// Remap a freshly-cloned inst's value (via [`Inst::remap_uses`]), cell, and block
 /// operands through the clone maps.
 fn remap_clone(
     inst: &mut Inst,
@@ -2461,7 +2461,7 @@ fn remap_clone(
     cm: &HashMap<Idx<Cell>, Idx<Cell>>,
     bm: &HashMap<Idx<Block>, Idx<Block>>,
 ) {
-    crate::remap_inst(inst, &|x| im[&x]);
+    inst.remap_uses(&|x| im[&x]);
     match inst {
         Inst::Load(c) => *c = cm[c],
         Inst::Store { cell, .. } => *cell = cm[cell],

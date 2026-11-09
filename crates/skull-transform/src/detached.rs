@@ -2,8 +2,8 @@ use rustc_hash::FxHashSet as HashSet;
 
 use crate::closure::{FrameInfo, convert_closures_framed};
 use crate::frame::materialize_frame_cells;
-use crate::visit::term_succs;
 use comfy_la_arena::Idx;
+use skull_mir::cfg::successors;
 use skull_mir::mir::*;
 use ustr::Ustr;
 
@@ -22,7 +22,7 @@ pub(crate) fn detached_region_blocks(func: &MirFunc, entry: Idx<Block>) -> HashS
                 stack.push(entry);
             }
         }
-        term_succs(&func.blocks[block].term, |next| stack.push(next));
+        successors(&func.blocks[block].term, |next| stack.push(next));
     }
     seen
 }

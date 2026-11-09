@@ -1,7 +1,8 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use crate::visit::{raw, term_succs};
+use crate::visit::raw;
 use comfy_la_arena::Idx;
+use skull_mir::cfg::successors;
 use skull_mir::mir::*;
 
 /// Materialize a coroutine region's frame accesses as MIR (the JS path's
@@ -48,7 +49,7 @@ fn materialize_frame_inner(
         seen.insert(entry);
         while let Some(b) = stack.pop() {
             region.push(b);
-            term_succs(&mf.blocks[b].term, |t| {
+            successors(&mf.blocks[b].term, |t| {
                 if seen.insert(t) {
                     stack.push(t);
                 }
