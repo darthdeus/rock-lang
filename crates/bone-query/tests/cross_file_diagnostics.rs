@@ -419,3 +419,18 @@ fn standalone_buffer_without_disk_file_needs_no_project() {
     );
     assert_eq!(bone.file_text(file.to_str().unwrap()), Some(src));
 }
+
+#[test]
+fn missing_first_buffer_loads_project_and_keeps_unsaved_edits() {
+    let (dir, b) = two_file_project();
+    let missing = dir.path().join("new.rock").to_string_lossy().into_owned();
+    let mut bone = BoneWorkspace::new();
+    let per = bone.update(&missing, String::new());
+    assert!(per.iter().flat_map(|(_, d)| d).all(|d| d.severity != Some(lsp_types::DiagnosticSeverity::ERROR)), "{per:?}");
+    let text = "fn draft() -> Foo { Foo { x: 1 } }\n";
+    let per = bone.update(&missing, text.into());
+    assert!(per.iter().flat_map(|(_, d)| d).all(|d| d.severity != Some(lsp_types::DiagnosticSeverity::ERROR)), "{per:?}");
+    bone.update(&b, std::fs::read_to_string(&b).unwrap());
+    assert_eq!(bone.file_text(&missing), Some(text));
+    assert!(!std::path::Path::new(&missing).exists());
+}
