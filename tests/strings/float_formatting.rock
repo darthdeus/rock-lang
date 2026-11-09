@@ -202,3 +202,18 @@ fn test_to_string_float_appends_point_zero_only_to_plain_digits() {
     assert_eq(same_float(1e16).to_string(), "1e+16")
     assert_eq(same_float(4.0).to_string(), "4.0")
 }
+
+// `{x}` goes through `%.4f`, which keeps the sign of a negative zero.
+@test
+fn interpolated_negative_zero_keeps_its_sign() {
+    let zero = 0.0
+    assert_eq("{-zero}", "-0")
+}
+
+// 1.03125 is an exact tie at the fourth decimal; `%.4f` rounds it to even.
+@test
+fn interpolation_rounds_exact_ties_to_even() {
+    let tie = 1.03125
+    assert_eq("{tie}", "1.0312")
+    assert_eq("{-tie}", "-1.0312")
+}

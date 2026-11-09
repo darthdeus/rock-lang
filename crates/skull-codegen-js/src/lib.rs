@@ -1630,7 +1630,7 @@ function __rock_format_float(v) {
   if (av !== 0 && (av < 0.0001 || av >= 1000000)) {
     return __c_g(v, 2);
   }
-  var s = v.toFixed(4);
+  var s = __c_f(v, 4);
   s = s.replace(/0+$/, "").replace(/\.$/, "");
   return s;
 }
