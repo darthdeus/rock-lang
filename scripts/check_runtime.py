@@ -14,7 +14,7 @@ import tempfile
 
 def check(archive, output):
     output.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(archive, output / 'runtime.tar.gz')
+    shutil.copyfile(archive, output / 'runtime.tar.gz')
     with archive.open('rb') as stream:
         digest = hashlib.file_digest(stream, 'sha256').hexdigest()
     (output / 'sha256.txt').write_text(f'{digest}  runtime.tar.gz\n')
@@ -109,7 +109,8 @@ def check(archive, output):
         run('frame', ['frame', install / 'demos/testbed', '--frames', '60',
                       '--output', work / 'frames'], display=True,
             extra_env={'STONE_HEADLESS': '1', 'STONE_SCREENSHOT_PATH': str(screenshot)})
-        shutil.copy2(work / 'frames/main.lua', output / 'testbed.lua')
+        # Emitted Lua is private to its compiling user; evidence must be readable by the host uploader.
+        shutil.copyfile(work / 'frames/main.lua', output / 'testbed.lua')
         assert screenshot.read_bytes().startswith(b'\x89PNG\r\n\x1a\n'), 'missing render'
         (output / 'result.json').write_text(json.dumps(dict(passed=results,
             renderer='Mesa software rendering', network='none', source_available=False), indent=2) + '\n')
