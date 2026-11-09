@@ -951,18 +951,37 @@ pub fn api_closure_requirements(ws: &Workspace) -> Vec<ClosureRequirement> {
         return out;
     }
 
-    let mut reachability: FxHashMap<
-        bone_core::modules::PackageId,
-        (FxHashSet<Ustr>, FxHashSet<Ustr>),
-    > = FxHashMap::default();
-    for &pkg_id in ws.ns.packages.keys() {
-        reachability.insert(pkg_id, compute_export_reachability(ws, pkg_id));
-    }
+    let packages: Vec<bone_core::modules::PackageId> = ws.ns.packages.keys().copied().collect();
+    let reachability: FxHashMap<bone_core::modules::PackageId, (FxHashSet<Ustr>, FxHashSet<Ustr>)> =
+        packages
+            .par_iter()
+            .map(|&pkg_id| (pkg_id, compute_export_reachability(ws, pkg_id)))
+            .collect();
 
-    for (def_key, meta) in &ws.defs {
+    // Each definition's requirements depend on the workspace alone; the
+    // definitions are visited side by side and reported in map order.
+    let per_def: Vec<Vec<ClosureRequirement>> = ws
+        .defs
+        .par_iter()
+        .map(|(def_key, meta)| api_closure_requirements_of(ws, &reachability, def_key, meta))
+        .collect();
+    out.extend(per_def.into_iter().flatten());
+    out
+}
+
+/// The [`ClosureRequirement`]s one exported definition imposes; none for a
+/// definition that is not exported.
+fn api_closure_requirements_of(
+    ws: &Workspace,
+    reachability: &FxHashMap<bone_core::modules::PackageId, (FxHashSet<Ustr>, FxHashSet<Ustr>)>,
+    def_key: &Ustr,
+    meta: &bone_core::modules::DefMeta,
+) -> Vec<ClosureRequirement> {
+    let mut out = Vec::new();
+    {
         let pkg_id = meta.package;
         let Some((reachable_modules, reachable_defs)) = reachability.get(&pkg_id) else {
-            continue;
+            return out;
         };
 
         let module_reachable =
@@ -982,7 +1001,7 @@ pub fn api_closure_requirements(ws: &Workspace) -> Vec<ClosureRequirement> {
         };
 
         if !is_exported {
-            continue;
+            return out;
         }
 
         let mut need = |ty: TyId, span: Span, reason: &'static str| {
