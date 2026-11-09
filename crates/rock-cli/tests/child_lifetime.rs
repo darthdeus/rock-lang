@@ -15,17 +15,9 @@ mod linux {
 
     fn command_thread(args: Vec<String>) -> i32 {
         assert_eq!(std::thread::current().name(), Some("rock"));
-        rock_host::compiler_thp::enter_compiler_process().expect("THP re-exec");
-        assert_eq!(std::env::var("MIMALLOC_ALLOW_THP").as_deref(), Ok("0"));
-        assert!(std::env::var_os("MIMALLOC_ROCK_COMPILER_THP_DEFAULT").is_some());
-        let mut signal = 0;
-        assert_eq!(
-            unsafe { libc::prctl(libc::PR_GET_PDEATHSIG, &mut signal) },
-            0
-        );
         let ready = Path::new(&args[0]);
         let staging = ready.with_extension("staging");
-        std::fs::write(&staging, format!("{} {signal}", std::process::id())).unwrap();
+        std::fs::write(&staging, std::process::id().to_string()).unwrap();
         std::fs::rename(staging, ready).unwrap();
         loop {
             std::thread::park();
@@ -34,11 +26,7 @@ mod linux {
 
     fn launcher(ready: &str) {
         let mut command = Command::new(std::env::current_exe().unwrap());
-        command
-            .args(["command", ready])
-            .env_remove("MIMALLOC_ALLOW_THP")
-            .env_remove("mimalloc_allow_thp")
-            .env_remove("MIMALLOC_ROCK_COMPILER_THP_DEFAULT");
+        command.args(["command", ready]);
         let mut child = rock_cli::child_lifetime::spawn_bound_child(&mut command).unwrap();
         std::fs::write(
             Path::new(ready).with_extension("pid"),
@@ -82,7 +70,7 @@ mod linux {
         }
     }
 
-    fn bound_command_reexec_keeps_parent_death_signal() {
+    fn bound_command_dies_with_its_launcher() {
         // Adopt the orphan ourselves so cleanup never depends on the host's init.
         assert_eq!(unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) }, 0);
         let scratch = tempfile::tempdir().unwrap();
@@ -108,22 +96,8 @@ mod linux {
             processes.child.is_some() && ready.exists()
         });
         let record = std::fs::read_to_string(&ready).unwrap();
-        let values: Vec<i32> = record
-            .split_whitespace()
-            .map(|s| s.parse().unwrap())
-            .collect();
-        assert_eq!(values.len(), 2);
-        let pid = values[0];
-        assert_eq!(
-            processes.child,
-            Some(pid),
-            "re-exec must preserve the bound child's PID"
-        );
-        assert_eq!(
-            values[1],
-            libc::SIGTERM,
-            "command thread lost PDEATHSIG across THP re-exec"
-        );
+        let pid: i32 = record.trim().parse().unwrap();
+        assert_eq!(processes.child, Some(pid), "the launcher bound this PID");
         assert!(
             Path::new(&format!("/proc/{pid}")).exists(),
             "child must be alive before launcher death"
@@ -146,7 +120,7 @@ mod linux {
             "child did not die from a signal: {status}"
         );
         assert_eq!(libc::WTERMSIG(status), libc::SIGTERM);
-        println!("test bound_command_reexec_keeps_parent_death_signal ... ok");
+        println!("test bound_command_dies_with_its_launcher ... ok");
     }
 
     pub fn run() {
@@ -154,7 +128,7 @@ mod linux {
         match args.get(1).map(String::as_str) {
             Some("launcher") => launcher(&args[2]),
             Some("command") => rock_cli::main_with(&REGISTRATIONS),
-            _ => bound_command_reexec_keeps_parent_death_signal(),
+            _ => bound_command_dies_with_its_launcher(),
         }
     }
 }

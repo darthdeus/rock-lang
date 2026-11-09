@@ -14,13 +14,16 @@ mod allocator_tests {
     #[test]
     fn compiler_thp_default_does_not_reach_runtime_child() {
         let exe = std::env::current_exe().expect("test executable");
-        for (key, value, compiler, runtime) in [
-            ("MIMALLOC_ALLOW_THP", None, "0", "1"),
-            ("MIMALLOC_ALLOW_THP", Some("1"), "1", "1"),
-            ("MIMALLOC_ALLOW_THP", Some("0"), "0", "0"),
-            ("MIMALLOC_ALLOW_THP", Some("ON"), "1", "1"),
-            ("mimalloc_allow_thp", Some("1"), "1", "1"),
-            ("mimalloc_allow_thp", Some("0"), "0", "0"),
+        // (variable, value, compiler option, compiler kernel THP-disable,
+        // runtime option, runtime kernel THP-disable). The compiler default
+        // is the kernel's per-process switch, not a mimalloc option.
+        for (key, value, compiler, compiler_kernel, runtime, runtime_kernel) in [
+            ("MIMALLOC_ALLOW_THP", None, "1", "1", "1", "0"),
+            ("MIMALLOC_ALLOW_THP", Some("1"), "1", "0", "1", "0"),
+            ("MIMALLOC_ALLOW_THP", Some("0"), "0", "1", "0", "1"),
+            ("MIMALLOC_ALLOW_THP", Some("ON"), "1", "0", "1", "0"),
+            ("mimalloc_allow_thp", Some("1"), "1", "0", "1", "0"),
+            ("mimalloc_allow_thp", Some("0"), "0", "1", "0", "1"),
         ] {
             let mut child = std::process::Command::new(&exe);
             child
@@ -35,7 +38,9 @@ mod allocator_tests {
                 )
                 .env("ROCK_THP_TEST_ROLE", "compiler")
                 .env("ROCK_THP_TEST_EXPECT", compiler)
+                .env("ROCK_THP_TEST_KERNEL", compiler_kernel)
                 .env("ROCK_THP_TEST_RUNTIME_EXPECT", runtime)
+                .env("ROCK_THP_TEST_RUNTIME_KERNEL", runtime_kernel)
                 .env_remove("MIMALLOC_ROCK_COMPILER_THP_DEFAULT")
                 .env_remove("MIMALLOC_ALLOW_THP")
                 .env_remove("mimalloc_allow_thp");
@@ -71,7 +76,10 @@ mod allocator_tests {
             return;
         };
         if role == "compiler" {
-            rock_host::compiler_thp::enter_compiler_process().expect("compiler restart");
+            let before = std::env::var_os("MIMALLOC_ALLOW_THP");
+            rock_host::compiler_thp::enter_compiler_process().expect("compiler default");
+            // No restart: the environment is exactly what the caller gave.
+            assert_eq!(std::env::var_os("MIMALLOC_ALLOW_THP"), before);
         }
         let expected: i64 = std::env::var("ROCK_THP_TEST_EXPECT")
             .unwrap()
@@ -81,18 +89,17 @@ mod allocator_tests {
         assert_eq!(option as i64, expected, "{role} allocator option");
         if role == "runtime" && std::env::var("ROCK_THP_TEST_DEFAULT").as_deref() == Ok("1") {
             assert!(std::env::var_os("MIMALLOC_ALLOW_THP").is_none());
-            assert!(std::env::var_os("MIMALLOC_ROCK_COMPILER_THP_DEFAULT").is_none());
         }
         println!("{role} THP option={option}");
         #[cfg(target_os = "linux")]
         {
+            let kernel: i32 = std::env::var("ROCK_THP_TEST_KERNEL")
+                .unwrap()
+                .parse()
+                .unwrap();
             let disabled =
                 unsafe { libc::prctl(libc::PR_GET_THP_DISABLE, 0usize, 0usize, 0usize, 0usize) };
-            assert_eq!(
-                disabled,
-                i32::from(expected == 0),
-                "{role} kernel THP state"
-            );
+            assert_eq!(disabled, kernel, "{role} kernel THP state");
             println!("{role} THP disabled={disabled}");
         }
         if role == "compiler" {
@@ -105,10 +112,16 @@ mod allocator_tests {
                     "--nocapture".into(),
                 ],
             );
-            runtime.env("ROCK_THP_TEST_ROLE", "runtime").env(
-                "ROCK_THP_TEST_EXPECT",
-                std::env::var("ROCK_THP_TEST_RUNTIME_EXPECT").unwrap(),
-            );
+            runtime
+                .env("ROCK_THP_TEST_ROLE", "runtime")
+                .env(
+                    "ROCK_THP_TEST_EXPECT",
+                    std::env::var("ROCK_THP_TEST_RUNTIME_EXPECT").unwrap(),
+                )
+                .env(
+                    "ROCK_THP_TEST_KERNEL",
+                    std::env::var("ROCK_THP_TEST_RUNTIME_KERNEL").unwrap(),
+                );
             let out = runtime.output().expect("spawn runtime witness");
             assert!(
                 out.status.success(),
@@ -132,12 +145,14 @@ mod allocator_tests {
                 std::fs::set_permissions(&proxy, std::fs::Permissions::from_mode(0o755)).unwrap();
                 unsafe { std::env::set_var("ROCK_LUAJIT", &proxy) };
                 let expected = std::env::var("ROCK_THP_TEST_RUNTIME_EXPECT").unwrap();
+                let kernel = std::env::var("ROCK_THP_TEST_RUNTIME_KERNEL").unwrap();
                 let out = rock_host::lua_runner::run_lua_code_with_timeout_and_env(
                     "",
                     Some(test_utils::HANG_BACKSTOP),
                     &[
                         ("ROCK_THP_TEST_ROLE", "runtime"),
                         ("ROCK_THP_TEST_EXPECT", &expected),
+                        ("ROCK_THP_TEST_KERNEL", &kernel),
                     ],
                 )
                 .expect("stdin Lua runtime witness");

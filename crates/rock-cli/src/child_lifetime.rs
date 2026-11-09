@@ -72,7 +72,8 @@ fn bind_slot(pid: u32) -> Result<(), io::Error> {
 }
 
 /// Linux keeps this binding on the calling thread; a new thread starts unbound.
-/// Preserve it before that thread can exec and replace the original leader.
+/// The process leader stays alive for the whole run, so the bound child's own
+/// binding on it is enough.
 #[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
 pub(crate) struct ParentDeathSignal {
@@ -82,17 +83,6 @@ pub(crate) struct ParentDeathSignal {
 
 #[cfg(target_os = "linux")]
 impl ParentDeathSignal {
-    pub(crate) fn capture() -> io::Result<Self> {
-        let mut signal = 0;
-        if unsafe { libc::prctl(libc::PR_GET_PDEATHSIG, &mut signal) } != 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(Self {
-            parent: unsafe { libc::getppid() },
-            signal,
-        })
-    }
-
     pub(crate) fn arm(self) -> io::Result<()> {
         if unsafe { libc::prctl(libc::PR_SET_PDEATHSIG, self.signal) } != 0 {
             return Err(io::Error::last_os_error());

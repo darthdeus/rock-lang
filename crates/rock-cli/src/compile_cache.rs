@@ -575,9 +575,6 @@ mod compile_cache_compiler_tests {
                 std::process::exit(status.code().expect("child exit code"));
             }
             Ok("respawned") => {
-                rock_host::compiler_thp::enter_compiler_process()
-                    .expect("restart the unlinked compiler with its allocator default");
-                assert_eq!(std::env::var("MIMALLOC_ALLOW_THP").as_deref(), Ok("0"));
                 assert_eq!(
                     running_image_sha256().unwrap(),
                     Some(std::env::var(HASH).unwrap())
