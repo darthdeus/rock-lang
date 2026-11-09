@@ -1192,7 +1192,7 @@ pub fn semantic_pass_without_closure_gate(
     let timer = Instant::now();
     let owned = modules.make_owned();
     let mut ws = Workspace {
-        skip_scope_probes: true,
+        skip_session_facts: true,
         ..Workspace::default()
     };
     ws.log_time("own stdlib", timer);

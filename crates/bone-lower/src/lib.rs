@@ -36,6 +36,9 @@ pub enum TyPos {
 /// here records nothing rather than a second diagnostic. Inline `mod` blocks
 /// use a child fragment path while resolving their `use` items.
 pub fn record_use_paths(a: &Ast, ctx: &mut LowerCtx) {
+    if ctx.workspace.skip_session_facts {
+        return;
+    }
     let Some(root) = ctx.v1_scope().cloned() else {
         return;
     };
@@ -154,7 +157,7 @@ pub struct LowerCtx<'a> {
 impl<'a> LowerCtx<'a> {
     /// Run one resolver lookup and record what it read.
     fn probed<R>(&self, lookup: impl FnOnce() -> R) -> R {
-        if self.workspace.skip_scope_probes {
+        if self.workspace.skip_session_facts {
             return lookup();
         }
         let (result, probes) = resolve::with_probes(lookup);
@@ -191,12 +194,20 @@ impl<'a> LowerCtx<'a> {
 
     /// A legacy file's bare-name lookup reads `legacy_name(file, name)`.
     fn probe_legacy(&self, name: Ustr) {
-        if self.workspace.skip_scope_probes {
+        if self.workspace.skip_session_facts {
             return;
         }
         self.scope_probes
             .borrow_mut()
             .push(bone_core::modules::ScopeProbe::Legacy { name });
+    }
+
+    /// Record that `val` covers source bytes `start..stop`, for editor
+    /// queries ([`Body::node_index`]); nothing in a one-shot pass.
+    fn node_interval(&self, body: &mut Body, start: usize, stop: usize, val: hir::NodeRef) {
+        if !self.workspace.skip_session_facts {
+            body.make_lapper(start, stop, val);
+        }
     }
 
     /// Move the recorded probes into the module being lowered.
@@ -281,6 +292,9 @@ impl<'a> LowerCtx<'a> {
         path: &skull_parser::Path,
         last: hir::SegmentTarget,
     ) {
+        if self.workspace.skip_session_facts {
+            return;
+        }
         let refs = self.path_segment_refs(path.from_root, &path.segments, last);
         match pos {
             TyPos::Body => body.path_segments.extend(refs),
@@ -610,7 +624,8 @@ impl<'a> LowerCtx<'a> {
         let idx = body.binding_arena.alloc(b);
 
         body.binding_spans.insert(idx, span);
-        body.make_lapper(
+        self.node_interval(
+            body,
             span.offset_range.0,
             span.offset_range.1,
             hir::NodeRef::Binding(idx),
@@ -626,7 +641,8 @@ impl<'a> LowerCtx<'a> {
         body.expr_spans.insert(idx, span);
 
         if !is_block {
-            body.make_lapper(
+            self.node_interval(
+                body,
                 span.offset_range.0,
                 span.offset_range.1,
                 hir::NodeRef::Expr(idx),
@@ -643,13 +659,15 @@ impl<'a> LowerCtx<'a> {
         body.expr_spans.insert(idx, b.span);
 
         if let Some((open, close)) = b.braces {
-            body.make_lapper(
+            self.node_interval(
+                body,
                 open.offset_range.0,
                 open.offset_range.1,
                 hir::NodeRef::Expr(idx),
             );
 
-            body.make_lapper(
+            self.node_interval(
+                body,
                 close.offset_range.0,
                 close.offset_range.1,
                 hir::NodeRef::Expr(idx),
@@ -1212,7 +1230,8 @@ pub(crate) fn lower_type_expr_in(
                 }
             }
 
-            body.make_lapper(
+            ctx.node_interval(
+                body,
                 te.span.offset_range.0,
                 te.span.offset_range.1,
                 hir::NodeRef::StaticTy { mid, idx: tidx },
@@ -1221,7 +1240,8 @@ pub(crate) fn lower_type_expr_in(
 
         TyId::Local(tidx) => {
             body.lowered_ty_spans.insert(tidx, te.span);
-            body.make_lapper(
+            ctx.node_interval(
+                body,
                 te.span.offset_range.0,
                 te.span.offset_range.1,
                 hir::NodeRef::LocalTy(tidx),
@@ -1302,7 +1322,8 @@ pub(crate) fn lower_statement_value(
                 let e_id = lower_expr(ctx, a, body, scope, a.e(expr))?;
 
                 if let Some(kw_span) = keyword_span {
-                    body.make_lapper(
+                    ctx.node_interval(
+                        body,
                         kw_span.offset_range.0,
                         kw_span.offset_range.1,
                         // TODO: statement id?

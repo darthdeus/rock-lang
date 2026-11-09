@@ -20,8 +20,9 @@ fn reused(ws: &Workspace) -> bool {
     ws.relowered_body_count.load(Ordering::Relaxed) < 50
 }
 
-/// What lowering and inference recorded, rendered per module. Scope probes
-/// are left out: they record what a lowering asked, for the session.
+/// What lowering and inference recorded, rendered per module. Session facts
+/// (scope probes, body node intervals and path segments) are left out: a
+/// one-shot pass skips them, and the shared base records them for sessions.
 fn render(ws: &Workspace) -> Vec<String> {
     let mut out: Vec<String> = ws
         .modules
@@ -34,7 +35,12 @@ fn render(ws: &Workspace) -> Vec<String> {
                 m.structs,
                 m.enums,
                 m.globals,
-                sorted(m.bodies.iter().map(|(k, v)| format!("{k:?}={v:?}"))),
+                sorted(m.bodies.iter().map(|(k, v)| {
+                    let mut body = v.clone();
+                    body.node_intervals.clear();
+                    body.path_segments.clear();
+                    format!("{k:?}={body:?}")
+                })),
                 sorted(m.lowering_errors.iter().map(|(k, v)| format!("{k:?}={v:?}"))),
                 m.interface_errors,
                 ws.inference(m.id).map(|inf| {
@@ -174,17 +180,19 @@ fn a_fallback_pass_leaves_the_shared_stdlib_unexpanded() {
 }
 
 #[test]
-fn a_one_shot_pass_records_no_scope_probes() {
-    // Scope probes exist for the incremental session's re-lowering; a pass
-    // whose workspace no session retains must not spend time recording them.
+fn a_one_shot_pass_records_no_session_facts() {
+    // Scope probes exist for the incremental session's re-lowering and body
+    // node intervals for editor queries; a pass whose workspace no session
+    // retains must not spend time recording them.
     let program = "fn helper(x: int) -> int { x }\nfn main() -> int { helper(1) }\n";
     let user_probes = |ws: &Workspace| {
-        ws.modules
+        let module = ws
+            .modules
             .iter()
             .find(|m| m.file.as_str() == "<test>")
-            .expect("user module")
-            .scope_probes
-            .len()
+            .expect("user module");
+        let intervals: usize = module.bodies.values().map(|b| b.node_intervals.len()).sum();
+        module.scope_probes.len() + intervals
     };
     let mut combined = with_stdlib(program).into_vec();
     let retained = semantic_pass_into(Workspace::default(), &mut combined, &Default::default());

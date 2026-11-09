@@ -115,10 +115,12 @@ pub struct Workspace {
     /// harness sets it: its programs are the rule's fixtures.
     pub identity_storage_enforce_unpackaged: bool,
 
-    /// Lowering records no scope probes (`hir::Module::scope_probes`). Only
-    /// the incremental session reads them, to decide what an edit
-    /// re-lowers; a pass whose workspace no session retains sets this.
-    pub skip_scope_probes: bool,
+    /// Lowering records none of the facts only a retained session reads:
+    /// scope probes (`hir::Module::scope_probes`), which decide what an edit
+    /// re-lowers, and the body node intervals and path segments editor
+    /// queries locate nodes by. A pass whose workspace no session retains
+    /// sets this.
+    pub skip_session_facts: bool,
 }
 
 /// See [`Workspace::comptime_inputs`].
@@ -233,7 +235,7 @@ impl Workspace {
             legacy_projections: Default::default(),
             legacy_imports: Default::default(),
             identity_storage_enforce_unpackaged: false,
-            skip_scope_probes: false,
+            skip_session_facts: false,
         };
 
         ws.module_ids.insert(ustr("$builtin"), ModuleId::builtin());
