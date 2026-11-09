@@ -1130,7 +1130,7 @@ pub fn references<'t>(
         return plain(newtype_references(ws, name, text_of));
     }
 
-    if let Some(name) = struct_at(ws, mid, inf, offset) {
+    if let Some(name) = struct_at(ws, mid, offset) {
         // `struct_at` matches any Nominal annotation ctor, including enums
         // (`c: Color`) and newtypes (`id: UserId`) -- route those to their
         // own walks so declarations and ctor/qualifier sites rename too.
@@ -1222,7 +1222,7 @@ pub(crate) fn rename_subject(
     if newtype_decl_at(ws, mid, offset).is_some() {
         return RenameSubject::Other;
     }
-    if let Some(name) = struct_at(ws, mid, inf, offset) {
+    if let Some(name) = struct_at(ws, mid, offset) {
         if enum_def_by_name(ws, name).is_some() {
             return RenameSubject::Type(None);
         }
@@ -1654,7 +1654,7 @@ fn leading_name_span(span: &Span, len: usize) -> Span {
 /// The struct name the cursor is on: a struct *declaration* name, a `Nominal`
 /// type annotation's ctor (`p: Point`), or a struct-literal head (`Point { .. }`).
 /// `None` otherwise.
-fn struct_at(ws: &Workspace, mid: ModuleId, _inf: &InferenceResult, offset: usize) -> Option<Ustr> {
+fn struct_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr> {
     let module = ws.modules.get(mid.index())?;
 
     // Declaration name (item-level).

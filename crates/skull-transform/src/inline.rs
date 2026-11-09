@@ -3047,7 +3047,6 @@ fn splice(
             pinned,
             scratch,
             uses,
-            census,
         ),
     }
 }
@@ -3186,7 +3185,6 @@ fn splice_general(
     pinned: &HashSet<Idx<Cell>>,
     scratch: &mut InlineScratch,
     uses: &mut UseIndex,
-    _census: &mut InlineScanStats,
 ) -> Result<(CloneMapStats, usize), CompilerError> {
     let callee = &cand.func;
     let (bid, idx, args) = match &site {

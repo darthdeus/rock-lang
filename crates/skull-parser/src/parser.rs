@@ -3609,10 +3609,10 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(self.ast.expr(start, ExprKind::Float(f)))
             }
-            TokenKind::String(s) => {
+            TokenKind::String(_) => {
                 let span = self.span();
                 self.advance();
-                self.parse_interpolated(s, span)
+                self.parse_interpolated(span)
             }
             TokenKind::RawString(s) => {
                 // Raw strings never interpolate.
@@ -3889,7 +3889,7 @@ impl<'a> Parser<'a> {
     /// expression (the format spec is parsed-and-discarded — it does not
     /// affect s-exprs); a `{...}` whose body fails to parse falls back to
     /// literal text. A lone literal collapses to `ExprKind::String`.
-    fn parse_interpolated(&mut self, _raw: Ustr, span: Span) -> PResult<Idx<ExprData>> {
+    fn parse_interpolated(&mut self, span: Span) -> PResult<Idx<ExprData>> {
         let file = span.file;
         let lit_start = span.offset_range.0;
         let Some(fi) = self

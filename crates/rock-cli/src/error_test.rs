@@ -317,7 +317,6 @@ fn lint_rejects(
 /// diagnostics mostly carry no kind), so this asserts REJECTION only.
 pub(crate) fn run_error_suite(
     path: &Path,
-    _backend: crate::Backend,
     verbose: bool,
 ) -> Result<(usize, usize, usize, usize)> {
     if !has_error_tests(path) {

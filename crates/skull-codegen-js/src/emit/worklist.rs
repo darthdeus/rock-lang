@@ -90,7 +90,6 @@ impl<'a> WorklistState<'a> {
         view: &ArtifactView,
         concrete: &'a skull_mir::concrete::ConcretePlans,
         always: &'a skull_mir::concrete::ConcreteAlwaysPlans,
-        _interner: std::sync::Arc<skull_mir::monoty::MonoInterner>,
     ) -> Result<Self, CompilerError> {
         let mut names = CalleeNames::from_graph(graph);
         for (fr, name) in roots {

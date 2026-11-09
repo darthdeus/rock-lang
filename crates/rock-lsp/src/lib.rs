@@ -330,7 +330,6 @@ pub fn run_lsp_server() -> Result<()> {
         }
         Ok(Err(fault)) => {
             eprintln!("LSP main loop exited with error: {fault:?}");
-            notify(format!("{fault:?}"));
         }
         Err(payload) => {
             eprintln!("=== LSP MAIN LOOP PANICKED ===");
@@ -1334,16 +1333,6 @@ where
     };
     out.push(Message::Response(answer));
     Ok(())
-}
-
-fn notify(_msg: impl AsRef<str>) {
-    // TODO: neat, but we don't really like/use this much
-    // if let Err(e) = notify_rust::Notification::new()
-    //     .summary(&format!("[rock-lsp]: {}", msg.as_ref()))
-    //     .show()
-    // {
-    //     log::error!("Failed to show notification: {}", e);
-    // }
 }
 
 #[cfg(test)]

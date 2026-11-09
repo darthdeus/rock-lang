@@ -3331,17 +3331,16 @@ fn display_name_for_lsp_file(file: &Path, root: &Path) -> String {
 pub(crate) fn run_lsp_suite(
     path: &Path,
     backend: crate::Backend,
-    verbose: bool,
 ) -> Result<(usize, usize, usize, usize)> {
     if !has_lsp_tests(path) {
         return Ok((0, 0, 0, 0));
     }
     if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("lsp") {
         println!("\nRunning LSP test file {}...", path.display());
-        run_lsp_tests(path, backend, verbose)
+        run_lsp_tests(path, backend)
     } else if let Some(lsp_dir) = find_lsp_test_dir(path) {
         println!("\nRunning LSP tests in {}...", lsp_dir.display());
-        run_lsp_tests(&lsp_dir, backend, verbose)
+        run_lsp_tests(&lsp_dir, backend)
     } else {
         Ok((0, 0, 0, 0))
     }
@@ -3350,7 +3349,6 @@ pub(crate) fn run_lsp_suite(
 pub(crate) fn run_lsp_tests(
     dir: &Path,
     backend: crate::Backend,
-    _verbose: bool,
 ) -> Result<(usize, usize, usize, usize)> {
     // Find all .lsp files in the directory
     let mut lsp_files = Vec::new();

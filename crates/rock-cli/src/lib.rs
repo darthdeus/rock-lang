@@ -108,7 +108,7 @@ pub enum Backend {
 /// command. With no explicit choice, the default is `skull`. The
 /// backend-agnostic kept commands (fmt, completions) are dispatched
 /// before the backend switch, so a `skull` default never rejects them.
-pub(crate) fn resolve_backend(explicit: Option<Backend>, _command: &CliCommand) -> Backend {
+pub(crate) fn resolve_backend(explicit: Option<Backend>) -> Backend {
     explicit.unwrap_or(Backend::Skull)
 }
 
@@ -466,7 +466,7 @@ impl Args {
                         }
                     }
                 });
-                resolve_backend(explicit, command)
+                resolve_backend(explicit)
             },
         };
         (registry::registered().decode_arguments)(&m, &mut args);

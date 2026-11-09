@@ -55,7 +55,6 @@ fn a_missing_graph_root_does_not_mint_a_base_instance() {
         &view,
         &concrete,
         &always,
-        interner,
     );
     let error = match result {
         Ok(_) => panic!("a missing graph root must be rejected"),

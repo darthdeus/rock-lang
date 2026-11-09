@@ -18,7 +18,6 @@ pub(super) fn assemble_program_core(
         &session.view,
         session.concrete.plans.as_ref(),
         &session.concrete.always_plans,
-        scx.interner_handle(),
     )?;
     let lifecycle_skeleton = skull_mir::lifecycle::collect(ws)?;
     queue_lifecycle_dependency_initializers(ws, &mut st, &lifecycle_skeleton)?;

@@ -30,7 +30,7 @@ pub(crate) fn static_slots_for(
 /// including a new `Inst` variant -- disqualifies. The inverse (list the
 /// escaping consumers) would silently start sharing a mutable value the day the
 /// enum grows.
-fn const_hoist_uses_are_read_only(_ws: &Workspace, func: &MirFunc, cand: Idx<Inst>) -> bool {
+fn const_hoist_uses_are_read_only(func: &MirFunc, cand: Idx<Inst>) -> bool {
     for (_, inst) in func.insts.iter() {
         let allowed = match inst {
             // A field/tuple projection and an equality test observe the value
@@ -255,7 +255,7 @@ pub(crate) fn collect_const_hoists(
             })
             .collect();
         let Some(lits) = lits else { continue };
-        if !const_hoist_uses_are_read_only(ws, func, id) {
+        if !const_hoist_uses_are_read_only(func, id) {
             continue;
         }
         let g = match groups.iter().position(|(n, rep, ctor_form, l)| {

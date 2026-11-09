@@ -72,7 +72,7 @@ pub(crate) fn check_pattern(
     let er = resolve(gamma, expected, span);
 
     if matches!(gamma.get(er), TypeExpr::Builtin(BuiltinTy::Error)) {
-        return bind_pattern_leaves_to(c, gamma, pat, er, span);
+        return bind_pattern_leaves_to(c, gamma, pat, er);
     }
 
     match c.body.pattern_arena[pat] {
@@ -381,32 +381,31 @@ pub(crate) fn bind_pattern_leaves_to(
     gamma: &mut Gamma,
     pat: Idx<Pattern>,
     ty: TyId,
-    _span: Span,
 ) -> Result<(), CompilerError> {
     match c.body.pattern_arena[pat] {
         Pattern::Bind(b) => gamma.assign_named_type(b, ty)?,
 
         Pattern::EnumVariant { sub, .. } => {
             for p in sub {
-                bind_pattern_leaves_to(c, gamma, p, ty, _span)?;
+                bind_pattern_leaves_to(c, gamma, p, ty)?;
             }
         }
 
         Pattern::Record { fields, .. } => {
             for f in fields {
-                bind_pattern_leaves_to(c, gamma, c.body.record_pat_field_arena[f].pat, ty, _span)?;
+                bind_pattern_leaves_to(c, gamma, c.body.record_pat_field_arena[f].pat, ty)?;
             }
         }
 
         Pattern::Tuple { elements } => {
             for p in elements {
-                bind_pattern_leaves_to(c, gamma, p, ty, _span)?;
+                bind_pattern_leaves_to(c, gamma, p, ty)?;
             }
         }
 
         Pattern::Or { alternatives } => {
             for p in alternatives {
-                bind_pattern_leaves_to(c, gamma, p, ty, _span)?;
+                bind_pattern_leaves_to(c, gamma, p, ty)?;
             }
         }
 

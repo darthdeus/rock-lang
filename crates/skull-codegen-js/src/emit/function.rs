@@ -322,7 +322,6 @@ pub fn emit_with_closure(
         &session.view,
         session.concrete.plans.as_ref(),
         &session.concrete.always_plans,
-        scx.interner_handle(),
     )?;
     drain_worklists(ws, &scx, &mut st)?;
     st.canonicalize_emission_order();

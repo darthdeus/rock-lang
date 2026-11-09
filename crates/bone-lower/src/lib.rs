@@ -709,13 +709,12 @@ impl<'a> LowerCtx<'a> {
         body: &mut Body,
         pos: TyPos,
         xs: &[Idx<TypeExprData>],
-        span: Span,
     ) -> Result<IdxRange<TypeExpr>, CompilerError> {
         let nodes: Vec<TypeExpr> = xs
             .iter()
             .map(|x| {
                 let id = lower_type_expr_in(self, a, body, pos, &a.types[*x])?;
-                self.type_node(body, id, span)
+                self.type_node(body, id)
             })
             .collect::<Result<_, _>>()?;
 
@@ -726,7 +725,6 @@ impl<'a> LowerCtx<'a> {
         &self,
         body: &Body,
         ty: TyId,
-        _span: Span,
     ) -> Result<TypeExpr, CompilerError> {
         match ty {
             TyId::Static(m, i) if m == self.module.module_id() => Ok(self.module.ty_arena[i]),
@@ -982,7 +980,7 @@ pub(crate) fn lower_type_expr_in(
                     Err(msg) => return Err(CompilerError::new_with_label(te.span, msg)),
                 };
             ctx.record_path(body, pos, path, hir::SegmentTarget::Def(resolved.key));
-            let params = ctx.lower_type_exprs_to_range(a, body, pos, args, te.span)?;
+            let params = ctx.lower_type_exprs_to_range(a, body, pos, args)?;
             alloc_ty(
                 ctx,
                 body,
@@ -1012,7 +1010,7 @@ pub(crate) fn lower_type_expr_in(
         }
 
         TypeExprKind::Tuple(xs) => {
-            let elements = ctx.lower_type_exprs_to_range(a, body, pos, xs, te.span)?;
+            let elements = ctx.lower_type_exprs_to_range(a, body, pos, xs)?;
             alloc_ty(ctx, body, pos, hir::TypeExpr::Tuple { elements })
         }
 
@@ -1189,7 +1187,7 @@ pub(crate) fn lower_type_expr_in(
     };
 
     let idx = if te.is_nullable {
-        let inner_te = ctx.type_node(body, idx, te.span)?;
+        let inner_te = ctx.type_node(body, idx)?;
         let inner = alloc_ty_raw(ctx, body, pos, inner_te);
 
         alloc_ty(ctx, body, pos, TypeExpr::Nullable(inner))
@@ -1645,7 +1643,7 @@ pub(crate) fn lower_expr_value(
             syntax: _,
         } => {
             let generic_args =
-                ctx.lower_type_exprs_to_range(a, body, TyPos::Body, generic_args, e.span)?;
+                ctx.lower_type_exprs_to_range(a, body, TyPos::Body, generic_args)?;
             match &a.e(func).kind {
                 ExprKind::Ident(name) => {
                     let args_range =
@@ -3596,7 +3594,7 @@ fn lower_type_expr_helper(
     //     TyId::Local(_) => comp_error!(orig_te.span, "Created local TyId while lowering"),
     // };
 
-    ctx.type_node(body, id, orig_te.span)
+    ctx.type_node(body, id)
 }
 
 fn lower_exprs<'a>(

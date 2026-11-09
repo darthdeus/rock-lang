@@ -2940,7 +2940,6 @@ pub(crate) fn skull_test(
         let (_t, _p, f, _i) = crate::lsp_test::run_lsp_suite(
             std::path::Path::new(path),
             crate::Backend::Skull,
-            verbose,
         )?;
         lsp_failed += f;
     }
@@ -2953,7 +2952,6 @@ pub(crate) fn skull_test(
     for path in paths {
         let (_t, _p, f, _i) = crate::error_test::run_error_suite(
             std::path::Path::new(path),
-            crate::Backend::Skull,
             verbose,
         )?;
         err_failed += f;
