@@ -129,7 +129,7 @@ rock stone demos/match3
 ```
 
 Match3 is a playable board with animated swaps and cascades: select adjacent
-cells with the mouse, press R to reset or A for an automatic move. It uses
+cells with the mouse, press R to reset or A to toggle autoplay. It uses
 generated visuals and Stone's bundled font; no separate game assets are needed.
 The existing
 `demos/testbed` shows drawing primitives and coordinate spaces.

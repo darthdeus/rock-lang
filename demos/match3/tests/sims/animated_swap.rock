@@ -1,19 +1,22 @@
-// Drives a swap through the LIVE update loop (start_swap -> flash ->
-// commit_flash -> core m3_collapse geometry -> fall animation), not the
-// instant execute_move path. This is the only sim that exercises the
-// animated collapse (apply_collapse_offsets); score only advances once
-// commit_flash has run the core collapse.
-
+// The animated swap must advance score and settle the refilled board.
 @sim
 co fn animated_swap() -> Coroutine<Wait> {
     start_game "match3"
 
-    load_preset_by_name("cascade")
+    grid = [
+        3, 2, 1, 4, 3, 2, 1, 4,
+        2, 1, 4, 3, 2, 1, 4, 3,
+        0, 1, 0, 4, 3, 2, 1, 4,
+        1, 4, 1, 3, 2, 1, 4, 3,
+        1, 5, 1, 3, 2, 1, 4, 3,
+        5, 0, 0, 4, 3, 2, 1, 4,
+        5, 2, 3, 1, 2, 3, 2, 1,
+        3, 1, 2, 4, 3, 1, 2, 4,
+    ]
     await frame(2)
-    sim_expect(score == 0, "score reset by preset")
+    sim_expect(score == 0, "board starts without score")
 
-    // Signature swap from the preset hint; start_swap kicks off the
-    // slide + flash + collapse state machine in update_game.
+    // This swap starts an orange match followed by a red cascade.
     start_swap(IVec2 { x: 0, y: 4 }, IVec2 { x: 1, y: 4 })
     await frame(300)
 
