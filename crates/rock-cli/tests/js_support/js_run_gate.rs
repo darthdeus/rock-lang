@@ -83,167 +83,46 @@ fn main() {
 }
 "#;
 
-#[test]
-fn scalarized_coalesce_field_runs_on_both_backends() {
-    if !crate::command::require_node() {
-        return;
-    }
-    let dir = std::env::temp_dir().join("rock_js_run_gate_coalesce_value_field");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("coalesce_value_field.rock");
-    std::fs::write(&path, COALESCE_VALUE_FIELD).unwrap();
-
-    let (lua_out, lua_ok) = run(None, &path);
-    let (js_out, js_ok) = run(Some("js"), &path);
-    assert!(
-        lua_ok && js_ok,
-        "scalarized coalesce failed: luajit_ok={lua_ok}, js_ok={js_ok}, \
-         luajit_stdout={lua_out:?}, js_stdout={js_out:?}"
-    );
-    assert_eq!(
-        (lua_out.as_str(), js_out.as_str()),
-        ("7 8\n", "7 8\n"),
-        "both backends must preserve the selected scalarized field value"
-    );
-}
-
-#[test]
-fn js_run_matches_luajit_end_to_end() {
-    if !crate::command::require_node() {
-        return;
-    }
-    let dir = std::env::temp_dir().join("rock_js_run_gate");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("gate.rock");
-    std::fs::write(&path, GATE).unwrap();
-
-    let (lua_out, lua_ok) = run(None, &path);
-    assert!(lua_ok, "luajit run failed:\n{lua_out}");
-    assert_eq!(
-        lua_out, EXPECTED,
-        "luajit output drifted from the pinned expectation"
-    );
-
-    let (js_out, js_ok) = run(Some("js"), &path);
-    assert!(js_ok, "js run failed:\n{js_out}");
-    assert_eq!(
-        js_out, EXPECTED,
-        "js output drifted from the pinned expectation"
-    );
-
-    assert_eq!(
-        js_out, lua_out,
-        "js and luajit `rock run` output must be byte-identical"
-    );
-}
-
 // `rock run <dir> --backend js` (project mode) -- a multi-file
 // project (main + a sibling module) emits via the deterministic module walk and
 // runs `main` end to end, byte-identical to the luajit `rock run` of the dir.
-#[test]
-fn js_run_project_dir_matches_luajit() {
-    if !crate::command::require_node() {
-        return;
-    }
-    let dir = std::env::temp_dir().join("rock_js_run_gate_proj");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("stick.toml"), "[package]\nname = \"proj\"\n").unwrap();
-    std::fs::write(
-        dir.join("math.rock"),
-        "fn square(x: int) -> int { return x * x }\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("main.rock"),
+const PROJECT_FILES: &[(&str, &str)] = &[
+    ("stick.toml", "[package]\nname = \"proj\"\n"),
+    ("math.rock", "fn square(x: int) -> int { return x * x }\n"),
+    (
+        "main.rock",
         "fn main() {\n  let t = 0\n  for i in 0..5 { t = t + square(i) }\n  print(\"sum={t}\")\n}\n",
-    )
-    .unwrap();
-
-    let (lua_out, lua_ok) = run(None, &dir);
-    assert!(lua_ok, "luajit project run failed:\n{lua_out}");
-    let (js_out, js_ok) = run(Some("js"), &dir);
-    assert!(js_ok, "js project run failed:\n{js_out}");
-    assert_eq!(js_out.trim(), "sum=30", "js project output drifted");
-    assert_eq!(
-        js_out.trim(),
-        lua_out.trim(),
-        "js and luajit project run must agree"
-    );
-}
+    ),
+];
 
 // A `value` row's borrow is stored flat and crosses calls as `vec, slot`, a
 // two-lane wire no declaration ABI plan describes; the program's return bank
 // must still be sized for it.
-#[test]
-fn js_run_value_row_borrow_runs_on_both_backends() {
-    if !crate::command::require_node() {
-        return;
-    }
-    let dir = std::env::temp_dir().join("rock_js_run_gate_value_row_borrow");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("value_row_borrow.rock");
-    std::fs::write(
-        &path,
-        "value Cell { n: int }\n\
-         fn main() {\n\
-         \x20   let a: Arena<Cell> = arena_new()\n\
-         \x20   let h = a.insert(Cell { n: 10 })\n\
-         \x20   let cell: ref Cell = a.borrow(h).unwrap()\n\
-         \x20   cell.n = 11\n\
-         \x20   print(cell.n)\n\
-         \x20   print(h.get().unwrap().n)\n\
-         }\n",
-    )
-    .unwrap();
-
-    let (lua_out, lua_ok) = run(None, &path);
-    assert!(lua_ok, "luajit value-row borrow run failed:\n{lua_out}");
-    assert_eq!(lua_out, "11\n11\n");
-    let (js_out, js_ok) = run(Some("js"), &path);
-    assert!(js_ok, "js value-row borrow run failed:\n{js_out}");
-    assert_eq!(js_out, "11\n11\n");
+const VALUE_ROW_BORROW: &str = r#"
+value Cell { n: int }
+fn main() {
+    let a: Arena<Cell> = arena_new()
+    let h = a.insert(Cell { n: 10 })
+    let cell: ref Cell = a.borrow(h).unwrap()
+    cell.n = 11
+    print(cell.n)
+    print(h.get().unwrap().n)
 }
+"#;
 
 // A modules-v1 package names its functions by qualified DefKey
 // (`<package>::main`), so the entry must be found by its declared name.
-#[test]
-fn js_run_modules_v1_bin_package_runs_main() {
-    if !crate::command::require_node() {
-        return;
-    }
-    let dir = std::env::temp_dir().join("rock_js_run_gate_modules_v1_bin");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("stick.toml"),
+const MODULES_V1_FILES: &[(&str, &str)] = &[
+    (
+        "stick.toml",
         "[package]\nname = \"semantics_probe\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
-    )
-    .unwrap();
-    std::fs::write(dir.join("main.rock"), "fn main() { print(17) }\n").unwrap();
-
-    let (lua_out, lua_ok) = run(None, &dir);
-    assert!(lua_ok, "luajit v1 package run failed:\n{lua_out}");
-    assert_eq!(lua_out, "17\n", "luajit v1 package output drifted");
-    let (js_out, js_ok) = run(Some("js"), &dir);
-    assert!(js_ok, "js v1 package run failed:\n{js_out}");
-    assert_eq!(js_out, "17\n", "js must call the v1 package's main");
-}
+    ),
+    ("main.rock", "fn main() { print(17) }\n"),
+];
 
 // A file with no nullary `main` runs module-load effects only (ginit + deco
 // applications), matching luajit -- and prints nothing, exiting cleanly.
-#[test]
-fn js_run_no_main_is_load_effects_only() {
-    if !crate::command::require_node() {
-        return;
-    }
-    let dir = std::env::temp_dir().join("rock_js_run_gate_nomain");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("nomain.rock");
-    std::fs::write(&path, "global X: int = 7\nfn helper() -> int { X + 1 }\n").unwrap();
-
-    let (js_out, js_ok) = run(Some("js"), &path);
-    assert!(js_ok, "js run (no main) failed:\n{js_out}");
-    assert_eq!(js_out, "", "no main -> no stdout");
-}
+const NO_MAIN: &str = "global X: int = 7\nfn helper() -> int { X + 1 }\n";
 
 // A generic `co fn` at a COLUMN-stored element must be emitted concretely,
 // one body per instantiation, on BOTH backends. The shared erased body reads a
@@ -322,54 +201,29 @@ fn main() {
 }
 "#;
 
-#[test]
-fn a_bounded_body_runs_on_both_backends() {
-    if !crate::command::require_node() {
-        return;
-    }
-    let dir = std::env::temp_dir().join("rock_js_run_gate_bounded");
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("bounded.rock");
-    std::fs::write(&path, BOUNDED_STANDALONE).unwrap();
-
-    let (lua_out, ok) = run(None, &path);
-    assert!(ok, "luajit run failed:\n{lua_out}");
-    assert_eq!(lua_out, "6 2\n");
-    let (js_out, ok) = run(Some("js"), &path);
-    assert!(ok, "js run failed:\n{js_out}");
-    assert_eq!(js_out, "6 2\n");
-}
-
-fn both_backends(name: &str, src: &str, expected: &str) {
-    let dir = std::env::temp_dir().join(format!("rock_js_run_gate_{name}"));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{name}.rock"));
-    std::fs::write(&path, src).unwrap();
-
-    let (lua_out, lua_ok) = run(None, &path);
+fn assert_backends_agree(path: &std::path::Path, expected: &str) {
+    let (lua_out, lua_ok) = run(None, path);
     assert!(lua_ok, "luajit run failed:\n{lua_out}");
     assert_eq!(lua_out, expected, "luajit output");
 
-    let (js_out, js_ok) = run(Some("js"), &path);
+    let (js_out, js_ok) = run(Some("js"), path);
     assert!(js_ok, "js run failed:\n{js_out}");
     assert_eq!(js_out, expected, "js output");
-    assert_eq!(js_out, lua_out, "js and luajit must agree");
 }
 
-#[test]
-fn a_generic_coroutine_at_a_column_element_runs_on_both_backends() {
-    if !crate::command::require_node() {
-        return;
-    }
-    both_backends("gen_co_column", GENERIC_CO_COLUMN, "2 3\n");
+fn both_backends(source: &str, expected: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("gate.rock");
+    std::fs::write(&path, source).unwrap();
+    assert_backends_agree(&path, expected);
 }
 
-#[test]
-fn a_generic_coroutine_at_a_boxed_element_runs_on_both_backends() {
-    if !crate::command::require_node() {
-        return;
+fn both_backends_project(files: &[(&str, &str)], expected: &str) {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, contents) in files {
+        std::fs::write(dir.path().join(name), contents).unwrap();
     }
-    both_backends("gen_co_boxed", GENERIC_CO_BOXED, "2 3\n");
+    assert_backends_agree(dir.path(), expected);
 }
 
 // A specialized coroutine still goes through the frame machinery: the lambda
@@ -395,14 +249,6 @@ fn main() {
     print("{t}")
 }
 "#;
-
-#[test]
-fn a_specialized_coroutine_with_a_capturing_lambda_runs_on_both_backends() {
-    if !crate::command::require_node() {
-        return;
-    }
-    both_backends("gen_co_lambda", GENERIC_CO_LAMBDA, "12\n");
-}
 
 // A direct UFCS call through safe navigation, where the receiver is a `value`.
 // Both factors are required: a `value` receiver scalarizes through the call, and
@@ -481,30 +327,6 @@ fn main() {
     print("{probe(0) ?? -1}")
 }
 "#;
-
-#[test]
-fn safe_nav_on_a_value_receiver_runs_on_both_backends() {
-    if !crate::command::require_node() {
-        return;
-    }
-    both_backends("safe_nav_value", SAFE_NAV_VALUE_RECEIVER, "300\n-1\n");
-}
-
-#[test]
-fn safe_nav_on_a_struct_receiver_runs_on_both_backends() {
-    if !crate::command::require_node() {
-        return;
-    }
-    both_backends("safe_nav_struct", SAFE_NAV_STRUCT_RECEIVER, "300\n-1\n");
-}
-
-#[test]
-fn a_refined_value_receiver_runs_on_both_backends() {
-    if !crate::command::require_node() {
-        return;
-    }
-    both_backends("safe_nav_refined", REFINED_VALUE_RECEIVER, "300\n-1\n");
-}
 
 // A generic call from a `co fn`'s lifecycle HOOK. The hook body is peeled to
 // the constructor and left detached -- unreachable from the step entry and never
@@ -614,46 +436,6 @@ fn main() {
 }
 "#;
 
-#[test]
-fn a_generic_call_from_a_coroutine_hook_runs_on_both_backends() {
-    if !crate::command::require_node() {
-        return;
-    }
-    both_backends("co_hook_generic", CO_HOOK_GENERIC, "1 killed\n");
-}
-
-#[test]
-fn a_generic_call_from_a_coroutine_lambda_runs_on_both_backends() {
-    if !crate::command::require_node() {
-        return;
-    }
-    both_backends("co_lambda_generic", CO_LAMBDA_GENERIC, "1 lam\n");
-}
-
-#[test]
-fn a_generic_call_from_a_coroutine_body_runs_on_both_backends() {
-    if !crate::command::require_node() {
-        return;
-    }
-    both_backends("co_body_generic", CO_BODY_GENERIC, "1 body\n");
-}
-
-#[test]
-fn a_generic_call_from_a_coroutine_defer_runs_on_both_backends() {
-    if !crate::command::require_node() {
-        return;
-    }
-    both_backends("co_defer_generic", CO_DEFER_GENERIC, "1 defer\n");
-}
-
-#[test]
-fn a_non_generic_call_from_a_coroutine_hook_runs_on_both_backends() {
-    if !crate::command::require_node() {
-        return;
-    }
-    both_backends("co_hook_nongeneric", CO_HOOK_NON_GENERIC, "1\n");
-}
-
 // A NON-GENERIC `next` witness reached through a generic combinator --
 // `CharsIter.next` inside `count`. The producer must answer "no instantiation"
 // for it rather than an empty key, because an empty key filed as a delivery
@@ -670,10 +452,37 @@ fn main() {
 }
 "#;
 
-#[test]
-fn a_non_generic_iterator_witness_runs_on_both_backends() {
-    if !crate::command::require_node() {
-        return;
-    }
-    both_backends("non_generic_witness", NON_GENERIC_WITNESS, "5\n");
+macro_rules! parity_tests {
+    ($($test:ident: $check:ident($input:expr, $expected:expr);)*) => {
+        $(
+            #[test]
+            fn $test() {
+                if crate::command::require_node() {
+                    $check($input, $expected);
+                }
+            }
+        )*
+    };
+}
+
+parity_tests! {
+    js_run_matches_luajit_end_to_end: both_backends(GATE, EXPECTED);
+    scalarized_coalesce_field_runs_on_both_backends: both_backends(COALESCE_VALUE_FIELD, "7 8\n");
+    js_run_project_dir_matches_luajit: both_backends_project(PROJECT_FILES, "sum=30\n");
+    js_run_value_row_borrow_runs_on_both_backends: both_backends(VALUE_ROW_BORROW, "11\n11\n");
+    js_run_modules_v1_bin_package_runs_main: both_backends_project(MODULES_V1_FILES, "17\n");
+    js_run_no_main_is_load_effects_only: both_backends(NO_MAIN, "");
+    a_bounded_body_runs_on_both_backends: both_backends(BOUNDED_STANDALONE, "6 2\n");
+    a_generic_coroutine_at_a_column_element_runs_on_both_backends: both_backends(GENERIC_CO_COLUMN, "2 3\n");
+    a_generic_coroutine_at_a_boxed_element_runs_on_both_backends: both_backends(GENERIC_CO_BOXED, "2 3\n");
+    a_specialized_coroutine_with_a_capturing_lambda_runs_on_both_backends: both_backends(GENERIC_CO_LAMBDA, "12\n");
+    safe_nav_on_a_value_receiver_runs_on_both_backends: both_backends(SAFE_NAV_VALUE_RECEIVER, "300\n-1\n");
+    safe_nav_on_a_struct_receiver_runs_on_both_backends: both_backends(SAFE_NAV_STRUCT_RECEIVER, "300\n-1\n");
+    a_refined_value_receiver_runs_on_both_backends: both_backends(REFINED_VALUE_RECEIVER, "300\n-1\n");
+    a_generic_call_from_a_coroutine_hook_runs_on_both_backends: both_backends(CO_HOOK_GENERIC, "1 killed\n");
+    a_generic_call_from_a_coroutine_lambda_runs_on_both_backends: both_backends(CO_LAMBDA_GENERIC, "1 lam\n");
+    a_generic_call_from_a_coroutine_body_runs_on_both_backends: both_backends(CO_BODY_GENERIC, "1 body\n");
+    a_generic_call_from_a_coroutine_defer_runs_on_both_backends: both_backends(CO_DEFER_GENERIC, "1 defer\n");
+    a_non_generic_call_from_a_coroutine_hook_runs_on_both_backends: both_backends(CO_HOOK_NON_GENERIC, "1\n");
+    a_non_generic_iterator_witness_runs_on_both_backends: both_backends(NON_GENERIC_WITNESS, "5\n");
 }
