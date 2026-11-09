@@ -62,22 +62,7 @@ pub(crate) fn activation_enabled() -> bool {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AllocationKind {
-    StringConcat,
-    StringConversion,
-    StringFormat,
-    TupleConstruction,
-    VecConstruction,
-    VecColumnConstruction,
-    VecColumnHeader,
-    StructConstruction,
-    ValueConstruction,
-    ExplicitValueMaterialization,
-    EnumConstruction,
-    DynamicEnumConstruction,
-    ClosureEnvironment,
-    FfiArray,
-    FfiView,
-    ContainerGrowth,
+    Emitted(skull_codegen_lua::EmittedAllocationKind),
     OpaqueCall,
 }
 
@@ -129,22 +114,7 @@ impl AllocationResultUse {
 impl AllocationKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::StringConcat => "string-concat",
-            Self::StringConversion => "string-conversion",
-            Self::StringFormat => "string-format",
-            Self::TupleConstruction => "tuple-construction",
-            Self::VecConstruction => "vec-construction",
-            Self::VecColumnConstruction => "vec-column-construction",
-            Self::VecColumnHeader => "vec-column-header",
-            Self::StructConstruction => "struct-construction",
-            Self::ValueConstruction => "value-construction",
-            Self::ExplicitValueMaterialization => "explicit-value-materialization",
-            Self::EnumConstruction => "enum-construction",
-            Self::DynamicEnumConstruction => "dynamic-enum-construction",
-            Self::ClosureEnvironment => "closure-environment",
-            Self::FfiArray => "ffi-array",
-            Self::FfiView => "ffi-view",
-            Self::ContainerGrowth => "container-growth",
+            Self::Emitted(kind) => kind.as_str(),
             Self::OpaqueCall => "opaque-call",
         }
     }
@@ -152,25 +122,7 @@ impl AllocationKind {
 
 impl From<skull_codegen_lua::EmittedAllocationKind> for AllocationKind {
     fn from(kind: skull_codegen_lua::EmittedAllocationKind) -> Self {
-        use skull_codegen_lua::EmittedAllocationKind as Emitted;
-        match kind {
-            Emitted::StringConcat => Self::StringConcat,
-            Emitted::StringConversion => Self::StringConversion,
-            Emitted::StringFormat => Self::StringFormat,
-            Emitted::TupleConstruction => Self::TupleConstruction,
-            Emitted::VecConstruction => Self::VecConstruction,
-            Emitted::VecColumnConstruction => Self::VecColumnConstruction,
-            Emitted::VecColumnHeader => Self::VecColumnHeader,
-            Emitted::StructConstruction => Self::StructConstruction,
-            Emitted::ValueConstruction => Self::ValueConstruction,
-            Emitted::ExplicitValueMaterialization => Self::ExplicitValueMaterialization,
-            Emitted::EnumConstruction => Self::EnumConstruction,
-            Emitted::DynamicEnumConstruction => Self::DynamicEnumConstruction,
-            Emitted::ClosureEnvironment => Self::ClosureEnvironment,
-            Emitted::FfiArray => Self::FfiArray,
-            Emitted::FfiView => Self::FfiView,
-            Emitted::ContainerGrowth => Self::ContainerGrowth,
-        }
+        Self::Emitted(kind)
     }
 }
 
