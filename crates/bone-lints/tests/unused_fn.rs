@@ -37,6 +37,8 @@ fn reachable_fns_and_roots_are_not_flagged() {
         // Missing this false-flags every callback in the codebase.
         "fn take(f: fn() -> ()) {}\n\
                fn main() {\n    take(cb)\n}\nfn cb() {}",
+        // JSON field predicates are reached through compiler-generated factories.
+        "fn omit(value: int) -> bool { value == 0 }\nstruct Row { @json_omit_if(omit) value: int = 0 }",
         // main is always a root
         "fn main() {}",
         // @test fn is a root

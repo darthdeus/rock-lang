@@ -4310,6 +4310,7 @@ fn unused_fns_walk(
 /// in-project call graph. See `unused_fns` for the rationale on each arm.
 fn is_root(f: &Function) -> bool {
     f.is_extern
+        || f.json_field_for.is_some()
         || declared_name(f.name.as_str()) == "main"
         || f.annotations
             .iter()
