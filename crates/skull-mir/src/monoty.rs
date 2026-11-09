@@ -961,7 +961,7 @@ impl MonoInterner {
 
     /// The counterpart to [`Self::intern_all`], for reading an instance's
     /// arguments back out as the types they are.
-    pub(crate) fn get_all(&self, ids: &[MonoTyId]) -> Vec<MonoTy> {
+    pub fn get_all(&self, ids: &[MonoTyId]) -> Vec<MonoTy> {
         ids.iter().map(|id| self.get(*id)).collect()
     }
 
