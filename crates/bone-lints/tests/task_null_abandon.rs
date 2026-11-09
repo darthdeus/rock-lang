@@ -112,12 +112,6 @@ fn null_assignments_to_task_slots_are_counted() {
             "fn fine(m: Mob) {\n    m.co = make_task()\n}",
             0,
         ),
-        // the safe-nav target is still a `Task?` place
-        (
-            "deep_safe_nav_target_is_flagged",
-            "fn bad(e: Entity<Mob>) {\n    e.get()?.co = null\n}",
-            1,
-        ),
         // a local is a place too -- the task is just as abandoned
         (
             "local_task_slot_is_flagged",

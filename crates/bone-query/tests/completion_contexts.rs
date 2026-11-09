@@ -1418,9 +1418,9 @@ fn coroutine_name_expands_to_cofframe_and_generic_snippets() {
         "bare Coroutine must be suppressed: {labels:?}"
     );
     let snip = items.iter().find(|c| c.label == "Coroutine<>").unwrap();
-    assert_snippet(&snip, "Coroutine<$0>");
+    assert_snippet(snip, "Coroutine<$0>");
     let cf = items.iter().find(|c| c.label == "Coroutine<Wait>").unwrap();
-    assert_insert(&cf, "Coroutine<Wait>");
+    assert_insert(cf, "Coroutine<Wait>");
 }
 
 #[test]
@@ -1452,7 +1452,7 @@ fn co_fn_signature_offers_coroutine_return_type() {
         .iter()
         .find(|c| c.label == "-> Coroutine<Wait>")
         .unwrap();
-    assert_insert(&it, "-> Coroutine<Wait>");
+    assert_insert(it, "-> Coroutine<Wait>");
 }
 
 #[test]
