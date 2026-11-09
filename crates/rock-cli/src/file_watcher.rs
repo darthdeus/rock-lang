@@ -307,7 +307,7 @@ impl FileWatcher {
     }
 
     /// Supply a host's relative restart path, including inputs below skipped scratch directories.
-    pub(crate) fn with_restart_suffix(mut self, suffix: PathBuf) -> Self {
+    pub fn with_restart_suffix(mut self, suffix: PathBuf) -> Self {
         self.config.restart_suffix = Some(suffix);
         self
     }

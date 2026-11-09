@@ -134,11 +134,7 @@ pub(crate) fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
 
 /// Run the suite; optionally print per-unit lines as they complete. Public for
 /// the ratchet test (`print = false`).
-pub(crate) fn glsl_test_run(
-    paths: &[String],
-    print: bool,
-    skip_gpu: bool,
-) -> Result<GlslSuiteSummary> {
+pub fn glsl_test_run(paths: &[String], print: bool, skip_gpu: bool) -> Result<GlslSuiteSummary> {
     let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
 
     // A missing runner is a hard error (workspace artifact -- build it). Probe
@@ -686,7 +682,7 @@ pub(crate) fn shader_validate(dirs: &[String], skip_gpu: bool) -> Result<()> {
 /// (missing runner, a project that fails to build, a pair that fails to EMIT)
 /// are `Err` -- the same pairs emit inside every game build, so an emit failure
 /// here is a regression or a profile-specific emitter gap, never a skip.
-pub(crate) fn shader_validate_run(
+pub fn shader_validate_run(
     dirs: &[String],
     print: bool,
     skip_gpu: bool,

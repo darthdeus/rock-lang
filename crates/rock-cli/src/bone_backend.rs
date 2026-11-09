@@ -153,7 +153,7 @@ fn check_modules_gated(
 /// [`check_modules`] over the stdlib + `user`: the common "I just parsed user
 /// code, give me a verified workspace" path (single-file emit, project compile,
 /// iter benches).
-pub(crate) fn check_with_stdlib(
+pub fn check_with_stdlib(
     user: impl IntoIterator<Item = skull_parser::Ast>,
 ) -> std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>> {
     check_modules(&mut skull::pipeline::with_stdlib(user).map_err(|e| vec![e])?)
@@ -335,7 +335,7 @@ pub(crate) fn parse_user_modules(
 /// identified by file path (`parse_user_modules`/`skull_assemble_project`); the
 /// workspace's `module_ids` interner is the single path->id authority, so the id
 /// is only knowable after `semantic_pass` has registered every module.
-pub(crate) fn entry_module_id(
+pub fn entry_module_id(
     ws: &bone_semantic::inference::Workspace,
     file: ustr::Ustr,
 ) -> bone_semantic::prelude::ModuleId {
