@@ -1165,15 +1165,8 @@ pub inline(lua) fn os_getpid() -> int = """
     return tonumber(ffi.C.getpid())
 """
 
-// Write a process environment variable. A value has to be visible to
-// `os.getenv`, to native code reading getenv, and to processes `shell()`
-// spawns; the C runtime's environment is the one mechanism all three already
-// read, so there is no second overlay to keep in sync.
-//
-// The setter is platform-specific: `setenv(3)` does not exist in the Windows
-// CRT, where `_putenv_s` is the writer that `getenv` reads back. On Windows
-// this reaches the CRT environment; code going through the Win32 block
-// directly (`GetEnvironmentVariable`) is not covered.
+// Windows uses its Unicode process environment; Unix uses the C environment.
+// Lua and native Windows readers must observe the same UTF-8 names and values.
 //
 // A failed write is fatal rather than ignored: silently keeping the previous
 // value would point an entry at the PREVIOUS entry's `$OUT`.
@@ -1181,9 +1174,24 @@ pub @nomangle inline(lua) fn os_setenv(var: string, value: string) = """
     if _G.__rock_setenv == nil then
         local ffi = require("ffi")
         if ffi.os == "Windows" then
-            ffi.cdef[[int _putenv_s(const char *name, const char *value);]]
-            local put = ffi.C._putenv_s
-            _G.__rock_setenv = function(name, v) return put(name, v) end
+            ffi.cdef[[
+                int MultiByteToWideChar(unsigned int, unsigned long, const char *, int, uint16_t *, int);
+                int SetEnvironmentVariableW(const uint16_t *, const uint16_t *);
+                unsigned long GetLastError(void);
+            ]]
+            local function wide(text)
+                local n = ffi.C.MultiByteToWideChar(65001, 8, text, -1, nil, 0)
+                if n == 0 then error("environment text is not valid UTF-8") end
+                local result = ffi.new("uint16_t[?]", n)
+                if ffi.C.MultiByteToWideChar(65001, 8, text, -1, result, n) == 0 then
+                    error("unable to decode environment text")
+                end
+                return result
+            end
+            _G.__rock_setenv = function(name, v)
+                if ffi.C.SetEnvironmentVariableW(wide(name), wide(v)) ~= 0 then return 0 end
+                return tonumber(ffi.C.GetLastError())
+            end
         else
             ffi.cdef[[int setenv(const char *name, const char *value, int overwrite);]]
             local set = ffi.C.setenv

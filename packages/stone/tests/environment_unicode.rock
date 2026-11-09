@@ -1,0 +1,41 @@
+inline(lua) fn environment_unicode_fixture(setter: fn(string, string)) = """
+    local ffi = require("ffi")
+    local prefix = "ROCK_ENV_TEST_"
+    local value = string.char(0xe6, 0xbc, 0xa2, 0xf0, 0x9f, 0x9a, 0x80)
+    local name = prefix .. value
+    local previous = os.getenv(name)
+    local remove
+    if ffi.os == "Windows" then
+        ffi.cdef[[int SetEnvironmentVariableW(const uint16_t *, const uint16_t *);]]
+        local wide_name = ffi.new("uint16_t[?]", #prefix + 4)
+        for i = 1, #prefix do wide_name[i-1] = prefix:byte(i) end
+        wide_name[#prefix], wide_name[#prefix+1], wide_name[#prefix+2] = 0x6f22, 0xd83d, 0xde80
+        remove = function() assert(ffi.C.SetEnvironmentVariableW(wide_name, nil) ~= 0) end
+    else
+        ffi.cdef[[int unsetenv(const char *);]]
+        remove = function() assert(ffi.C.unsetenv(name) == 0) end
+    end
+    local function exercise(fail)
+        local ok, message = pcall(function()
+            setter(name, value)
+            assert(os.getenv(name) == value, "Unicode environment round trip")
+            setter(name, "")
+            assert(os.getenv(name) == "", "empty environment value")
+            if fail then error("environment cleanup sentinel") end
+        end)
+        if previous ~= nil then setter(name, previous) else remove() end
+        assert(os.getenv(name) == previous, "environment restored after success or failure")
+        if fail then
+            assert(not ok and message:find("environment cleanup sentinel", 1, true), message)
+        else
+            assert(ok, message)
+        end
+    end
+    exercise(false)
+    exercise(true)
+"""
+
+@test
+fn environment_names_and_values_round_trip_without_locale_loss() {
+    environment_unicode_fixture(os_setenv)
+}
