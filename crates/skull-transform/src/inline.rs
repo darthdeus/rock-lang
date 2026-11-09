@@ -4010,18 +4010,10 @@ fn top() -> int { return sum_all(Counter { n: 0 }) }
             if *inst == witness {
                 std::sync::Arc::make_mut(&mut plan.signature).result = Some(wrong_result);
             }
-            let sites: Vec<_> = plan
-                .callees
-                .iter()
-                .filter(|(_, callee)| **callee == witness)
-                .map(|(site, _)| site.clone())
-                .collect();
-            for site in sites {
-                let signature = plan
-                    .callee_signatures
-                    .get_mut(&site)
-                    .expect("witness site signature");
-                std::sync::Arc::make_mut(signature).result = Some(wrong_result);
+            for callee in plan.callees.values_mut() {
+                if callee.instance == witness {
+                    std::sync::Arc::make_mut(&mut callee.signature).result = Some(wrong_result);
+                }
             }
         }
 

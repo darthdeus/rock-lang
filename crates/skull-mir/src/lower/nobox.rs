@@ -161,14 +161,17 @@ impl Builder<'_> {
             expr: e,
             op: self.cur_op.clone(),
         };
-        if plan.callees.get(&site) != Some(concrete_callee) {
+        let callee = plan.callees.get(&site).ok_or_else(|| {
+            self.gap_here("concrete callee identity disagrees with its site plan")
+        })?;
+        if &callee.instance != concrete_callee {
             return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
         }
-        let signature = plan
-            .callee_signatures
-            .get(&site)
-            .ok_or_else(|| self.gap_here("concrete callee signature is missing for its site"))?;
-        self.reject_concrete_column_container_opaque_slots(e, concrete_callee.func, signature)
+        self.reject_concrete_column_container_opaque_slots(
+            e,
+            concrete_callee.func,
+            &callee.signature,
+        )
     }
 
     /// A present `[T]?` and a tuple's element are the same container by

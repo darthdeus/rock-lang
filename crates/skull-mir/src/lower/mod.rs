@@ -701,7 +701,7 @@ impl ScalarCtx {
         let mut callees: rustc_hash::FxHashSet<&crate::instance::Instance> =
             rustc_hash::FxHashSet::default();
         for body in plans.values().map(|plan| &**plan).chain(always.values()) {
-            callees.extend(body.callees.values());
+            callees.extend(body.callees.values().map(|callee| &callee.instance));
         }
         let mut keys: Vec<AbiPlanKey> = plans
             .keys()
@@ -1744,12 +1744,6 @@ fn lower_instance_with_plan_inner(
     }
     if audit {
         for site in plan.callees.keys() {
-            if !plan.callee_signatures.contains_key(site) {
-                return Err(gap(format!(
-                    "concrete plan is missing the callee signature for site {:?}",
-                    site.op
-                )));
-            }
             if !matches!(site.domain, crate::site::SiteDomain::Own)
                 && plan.domain_types(&site.domain).is_none()
             {
@@ -2121,12 +2115,6 @@ fn validate_always_plan(
         }
     }
     for site in plan.callees.keys() {
-        if !plan.callee_signatures.contains_key(site) {
-            return Err(gap(format!(
-                "concrete always-emitted plan is missing the callee signature for site {:?}",
-                site.op
-            )));
-        }
         if !matches!(site.domain, crate::site::SiteDomain::Own)
             && plan.domain_types(&site.domain).is_none()
         {
@@ -2146,7 +2134,8 @@ fn validate_concrete_callee_plans(
     plan: &ConcreteBodyPlan,
     concrete_plans: &ConcretePlans,
 ) -> Result<(), CompilerError> {
-    for (site, owner) in &plan.callees {
+    for (site, callee) in &plan.callees {
+        let owner = &callee.instance;
         let needs_plan = requires_concrete_body_plan(ws, owner)
             && crate::monoty::too_deep_to_instantiate(owner.arg_types(scx.interner()).iter())
                 .is_none();
@@ -2159,12 +2148,7 @@ fn validate_concrete_callee_plans(
                 site.op
             ))
         })?;
-        let recorded = plan.callee_signatures.get(site).ok_or_else(|| {
-            gap(format!(
-                "concrete plan is missing the callee signature for site {:?}",
-                site.op
-            ))
-        })?;
+        let recorded = &callee.signature;
         if recorded != &callee_plan.signature {
             return Err(gap(format!(
                 "concrete callee signature disagrees with its body plan at site {:?}",

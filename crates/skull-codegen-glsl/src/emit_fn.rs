@@ -31,15 +31,15 @@ impl FnEmit<'_> {
                 "shader profile: concrete call has no site identity",
             )
         })?;
-        plan.callee_signatures
+        plan.callees
             .get(&site.site)
+            .map(|callee| std::sync::Arc::as_ref(&callee.signature))
             .ok_or_else(|| {
                 err(
                     self.span(),
                     "shader profile: concrete call has no signature in the body plan",
                 )
             })
-            .map(std::sync::Arc::as_ref)
     }
 
     pub(crate) fn call_param_types(

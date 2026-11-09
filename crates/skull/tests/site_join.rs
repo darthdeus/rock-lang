@@ -463,7 +463,7 @@ fn main() { print("{sum_all([1, 2, 3].iter())}") }
         .find_map(|inst| {
             bodies
                 .plans
-                .get(inst)
+                .get(&inst.instance)
                 .filter(|plan| !plan.bound_tree.is_empty())
         })
         .expect("main does not retain a bounded callee plan");

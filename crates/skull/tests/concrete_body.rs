@@ -46,8 +46,8 @@ fn plan_named<'a>(
 fn callee_named(ws: &Workspace, plan: &ConcreteBodyPlan, name: &str) -> Instance {
     plan.callees
         .values()
-        .find(|inst| fn_name(ws, inst.func) == name)
-        .cloned()
+        .find(|callee| fn_name(ws, callee.instance.func) == name)
+        .map(|callee| callee.instance.clone())
         .unwrap_or_else(|| panic!("no concrete `{name}` call"))
 }
 
@@ -98,12 +98,8 @@ fn clear_call_param_slots(
     bodies: &ConcreteBodies,
     callee: &Instance,
 ) -> ConcretePlans {
-    let signature = std::sync::Arc::make_mut(
-        caller
-            .callee_signatures
-            .get_mut(site)
-            .expect("call signature disappeared"),
-    );
+    let recorded = caller.callees.get_mut(site).expect("call disappeared");
+    let signature = std::sync::Arc::make_mut(&mut recorded.signature);
     signature.params.clear();
     signature.param_tuple_spelled.clear();
 
@@ -456,7 +452,7 @@ fn main() {
     let site = main_plan
         .callees
         .iter()
-        .find_map(|(site, inst)| (inst == &callee).then_some(site))
+        .find_map(|(site, recorded)| (recorded.instance == callee).then_some(site))
         .expect("id call site disappeared");
     let scx = scalar_ctx(&ws, &g);
     skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &bodies.plans)
@@ -492,7 +488,7 @@ fn main() {
     let site = main_plan
         .callees
         .iter()
-        .find_map(|(site, inst)| (inst == &callee).then_some(site))
+        .find_map(|(site, recorded)| (recorded.instance == callee).then_some(site))
         .expect("id UFCS call site disappeared");
     let intact_scx = scalar_ctx(&ws, &g);
     skull_mir::lower::lower_instance_with_plans(&ws, &intact_scx, main_plan, &bodies.plans)
@@ -553,26 +549,21 @@ fn main() {
     let callee = main_plan
         .callees
         .values()
-        .find(|inst| fn_name(&ws, inst.func) == "variadic")
+        .find(|callee| fn_name(&ws, callee.instance.func) == "variadic")
         .expect("main has no variadic callee");
     let variadic_sites: Vec<_> = main_plan
         .callees
         .iter()
-        .filter(|(_, inst)| *inst == callee)
+        .filter(|(_, recorded)| recorded.instance == callee.instance)
         .collect();
     assert_eq!(
         variadic_sites.len(),
         2,
         "fixture lost its direct or UFCS call"
     );
-    for (site, _) in variadic_sites {
+    for (_, recorded) in variadic_sites {
         assert_eq!(
-            main_plan
-                .callee_signatures
-                .get(site)
-                .expect("variadic site signature")
-                .params
-                .len(),
+            recorded.signature.params.len(),
             3,
             "fixture did not leave surplus arguments to the declared tail slot"
         );
@@ -668,16 +659,11 @@ fn production_call_coercion_consumes_the_selected_callee_signature() {
     let site = main_plan
         .callees
         .iter()
-        .find_map(|(site, inst)| (inst == &callee).then_some(site))
+        .find_map(|(site, recorded)| (recorded.instance == callee).then_some(site))
         .expect("id call site disappeared");
     let mut caller = (**main_plan).clone();
-    std::sync::Arc::make_mut(
-        caller
-            .callee_signatures
-            .get_mut(site)
-            .expect("id call signature disappeared"),
-    )
-    .params[0] = float;
+    let recorded = caller.callees.get_mut(site).expect("id call disappeared");
+    std::sync::Arc::make_mut(&mut recorded.signature).params[0] = float;
     let mut plans = (*bodies.plans).clone();
     let callee_plan = std::sync::Arc::make_mut(
         plans
@@ -951,7 +937,7 @@ fn main() { print("{startup}") }
         "global lowering ignored its concrete callee plan"
     );
     let call_site = plan.callees.keys().next().expect("global call site");
-    let callee = plan.callees[call_site].clone();
+    let callee = plan.callees[call_site].instance.clone();
     let mut mismatched_plans = (*bodies.plans).clone();
     let callee_plan = std::sync::Arc::make_mut(
         mismatched_plans

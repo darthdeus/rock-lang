@@ -115,7 +115,7 @@ impl Builder<'_> {
             op,
         };
         if let Some(callee) = plan.callees.get(&site) {
-            return Ok(Some(callee.clone()));
+            return Ok(Some(callee.instance.clone()));
         }
         if let Some(reason) = plan.failed_sites.get(&site) {
             return Err(self.gap_here(format!(
@@ -152,7 +152,11 @@ impl Builder<'_> {
             expr: e,
             op: self.cur_op.clone(),
         };
-        if crate::verify::checks_enabled() && plan.callees.get(&site) != Some(inst) {
+        let callee = plan
+            .callees
+            .get(&site)
+            .ok_or_else(|| self.gap_here("concrete callee signature is missing for its site"))?;
+        if crate::verify::checks_enabled() && &callee.instance != inst {
             return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
         }
         if crate::lower::requires_concrete_body_plan(self.ws, inst)
@@ -169,10 +173,7 @@ impl Builder<'_> {
                     .signature,
             ))
         } else {
-            plan.callee_signatures
-                .get(&site)
-                .cloned()
-                .ok_or_else(|| self.gap_here("concrete callee signature is missing for its site"))
+            Ok(std::sync::Arc::clone(&callee.signature))
         }
     }
 
@@ -231,7 +232,8 @@ impl Builder<'_> {
             expr: receiver,
             op: crate::site::SiteOp::DirectCall,
         };
-        let result = if let Some(owner) = body_plan.callees.get(&site) {
+        let result = if let Some(callee) = body_plan.callees.get(&site) {
+            let owner = &callee.instance;
             let signature = if crate::lower::requires_concrete_body_plan(self.ws, owner)
                 && crate::monoty::too_deep_to_instantiate(
                     owner.arg_types(self.scx.interner()).iter(),
@@ -244,9 +246,7 @@ impl Builder<'_> {
                     .ok_or_else(|| self.gap_here("concrete coroutine callee body plan is missing"))?
                     .signature
             } else {
-                body_plan.callee_signatures.get(&site).ok_or_else(|| {
-                    self.gap_here("concrete coroutine callee signature is missing")
-                })?
+                &callee.signature
             };
             signature
                 .result

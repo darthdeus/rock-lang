@@ -176,7 +176,6 @@ fn main() {
             result: Some(v2),
         }),
         callees: Default::default(),
-        callee_signatures: Default::default(),
         failed_sites: Default::default(),
         bound_tree: Default::default(),
     };
@@ -224,7 +223,6 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
             result: Some(tuple),
         }),
         callees: Default::default(),
-        callee_signatures: Default::default(),
         failed_sites: Default::default(),
         bound_tree: Default::default(),
     };
@@ -254,7 +252,6 @@ fn main() { print("{generic_tuple_take((V2 { x: 1.0, y: 2.0 }, 3.0)).0.x}") }
             result: Some(tuple),
         }),
         callees: Default::default(),
-        callee_signatures: Default::default(),
         failed_sites: Default::default(),
         bound_tree: Default::default(),
     };

@@ -90,6 +90,13 @@ pub struct ConcreteSignature {
 
 pub type ConcreteSignatureHandle = Arc<ConcreteSignature>;
 
+/// A resolved call site's identity and independently recorded signature.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConcreteCallee {
+    pub instance: Instance,
+    pub signature: ConcreteSignatureHandle,
+}
+
 /// All concrete facts MIR lowering needs for one body.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ConcreteBodyPlan {
@@ -103,11 +110,8 @@ pub struct ConcreteBodyPlan {
     /// part of the plan because each domain has a distinct HIR arena.
     pub foreign_domains: BTreeMap<SiteDomain, ConcreteTypeTables>,
     pub signature: ConcreteSignatureHandle,
-    /// Every resolved site is owned by its concrete callee instance.
-    pub callees: BTreeMap<Site, Instance>,
-    /// Concrete signatures for the same resolved sites, including boundaries
-    /// whose body is supplied by the target rather than lowered here.
-    pub callee_signatures: BTreeMap<Site, ConcreteSignatureHandle>,
+    /// Resolved sites, including boundaries supplied by the target.
+    pub callees: BTreeMap<Site, ConcreteCallee>,
     /// Sites the graph visited but could not resolve. Keeping these distinct
     /// from absent entries lets lowering report a planned failure at the site.
     pub failed_sites: BTreeMap<Site, &'static str>,
@@ -153,8 +157,8 @@ pub fn select_concrete_plan_closure<'a>(
             continue;
         };
         for callee in plan.callees.values() {
-            if selected.insert(callee.clone()) {
-                queue.push(callee.clone());
+            if selected.insert(callee.instance.clone()) {
+                queue.push(callee.instance.clone());
             }
         }
     }

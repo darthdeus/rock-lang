@@ -305,7 +305,7 @@ pub(super) fn emit_global_unit(
             out.attribution.always_lowered = true;
             out.attribution
                 .always_callee_keys
-                .extend(plan.callees.values().cloned());
+                .extend(plan.callees.values().map(|callee| callee.instance.clone()));
             let ctx = skull_mir::bound::concrete_body_ctx(
                 ws,
                 mid,

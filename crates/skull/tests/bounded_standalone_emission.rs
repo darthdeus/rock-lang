@@ -280,15 +280,9 @@ fn main() {
     );
     std::sync::Arc::make_mut(&mut witness_plan.signature).result = Some(wrong_result);
     let mut poisoned_owner = (**plan).clone();
-    for (site, callee) in &poisoned_owner.callees {
-        if callee == &witness {
-            std::sync::Arc::make_mut(
-                poisoned_owner
-                    .callee_signatures
-                    .get_mut(site)
-                    .expect("witness signature disappeared"),
-            )
-            .result = Some(wrong_result);
+    for callee in poisoned_owner.callees.values_mut() {
+        if callee.instance == witness {
+            std::sync::Arc::make_mut(&mut callee.signature).result = Some(wrong_result);
         }
     }
     let mut poisoned =

@@ -36,8 +36,8 @@ use bone_core::workspace::{BodyInference, Workspace};
 use comfy_la_arena::{ArenaMap, Idx};
 use rustc_hash::{FxHashMap, FxHashSet};
 use skull_mir::concrete::{
-    ConcreteAlwaysPlans, ConcreteBodyPlan, ConcreteOwner, ConcretePlans, ConcreteSignature,
-    ConcreteSignatureHandle, ConcreteTypeTables,
+    ConcreteAlwaysPlans, ConcreteBodyPlan, ConcreteCallee, ConcreteOwner, ConcretePlans,
+    ConcreteSignature, ConcreteSignatureHandle, ConcreteTypeTables,
 };
 use skull_mir::mir::FuncRef;
 use skull_mir::monoty::{MonoCtor, MonoInterner, MonoSubst, MonoTy, MonoTyId, MonoTyReason, TyEnv};
@@ -381,6 +381,7 @@ pub struct ConcreteBuildStats {
     pub callee_scans: usize,
     pub callee_rows_visited: usize,
     pub plan_callee_map_inserts: usize,
+    /// Recorded signature values; these share the callee map entry.
     pub plan_callee_signature_inserts: usize,
     pub type_nodes_examined: usize,
     pub type_node_memo_hits: usize,
@@ -2327,7 +2328,6 @@ fn concrete_plan_from_publication(
     timing_enabled: bool,
 ) -> Result<(ConcreteBodyPlan, FxHashSet<Instance>), MonoTyReason> {
     let mut callees = BTreeMap::new();
-    let mut callee_signatures = BTreeMap::new();
     let mut candidate_refs = FxHashSet::default();
     let signature_started = timing_enabled.then(bone_core::prelude::Instant::now);
     let callee_rows = counted_callees(body, stats);
@@ -2338,8 +2338,13 @@ fn concrete_plan_from_publication(
             .get(&instance)
             .ok_or(MonoTyReason::NoNode)?
             .clone()?;
-        callee_signatures.insert(site.clone(), signature);
-        callees.insert(site.clone(), instance);
+        callees.insert(
+            site.clone(),
+            ConcreteCallee {
+                instance,
+                signature,
+            },
+        );
     }
     let signature = signatures.get(inst).ok_or(MonoTyReason::NoNode)?.clone()?;
     if let Some(started) = signature_started {
@@ -2370,7 +2375,7 @@ fn concrete_plan_from_publication(
         timing_enabled,
     )?;
     stats.plan_callee_map_inserts += callees.len();
-    stats.plan_callee_signature_inserts += callee_signatures.len();
+    stats.plan_callee_signature_inserts += callees.len();
     Ok((
         ConcreteBodyPlan {
             owner: ConcreteOwner::Function(inst.clone()),
@@ -2379,7 +2384,6 @@ fn concrete_plan_from_publication(
             foreign_domains,
             signature,
             callees,
-            callee_signatures,
             failed_sites,
             bound_tree: g
                 .bound_tree(inst)
@@ -2543,7 +2547,6 @@ fn produce_always(
         }
     };
     let mut callees = BTreeMap::new();
-    let mut callee_signatures = BTreeMap::new();
     let mut failed_sites = BTreeMap::new();
     let signature_started = timing_enabled.then(bone_core::prelude::Instant::now);
     for (site, record) in &contribution.always_call_sites {
@@ -2569,8 +2572,13 @@ fn produce_always(
                         };
                     }
                 };
-                callee_signatures.insert(site.clone(), signature);
-                callees.insert(site.clone(), instance.clone());
+                callees.insert(
+                    site.clone(),
+                    ConcreteCallee {
+                        instance: instance.clone(),
+                        signature,
+                    },
+                );
             }
             SiteOutcome::Failed(reason) => {
                 failed_sites.insert(site.clone(), *reason);
@@ -2683,7 +2691,6 @@ fn produce_always(
         foreign_domains,
         signature,
         callees,
-        callee_signatures,
         failed_sites,
         bound_tree: Default::default(),
     };

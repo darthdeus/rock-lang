@@ -624,7 +624,7 @@ fn production_shader_calls_use_concrete_signature_and_instance_records() {
         .get(&caller_inst)
         .expect("caller has a concrete plan");
     assert!(
-        !caller_plan.callee_signatures.is_empty(),
+        !caller_plan.callees.is_empty(),
         "call signature population is empty"
     );
 
@@ -664,12 +664,12 @@ fn production_shader_calls_use_concrete_signature_and_instance_records() {
     let caller_plan = Arc::make_mut(&mut view.concrete_plans)
         .get_mut(&caller_inst)
         .expect("caller plan");
-    let signature = Arc::make_mut(caller_plan)
-        .callee_signatures
+    let callee = Arc::make_mut(caller_plan)
+        .callees
         .values_mut()
         .next()
-        .expect("call signature");
-    Arc::make_mut(signature).result = Some(scx.interner().intern(MonoTy::String));
+        .expect("call record");
+    Arc::make_mut(&mut callee.signature).result = Some(scx.interner().intern(MonoTy::String));
     let bad_signature = emit_shader_library_with_view(&ws, scx, &view)
         .expect_err("a non-tier-0 concrete call result must reject GLSL emission");
     assert!(
