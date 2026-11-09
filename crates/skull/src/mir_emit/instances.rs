@@ -283,9 +283,7 @@ pub(super) fn view_driven_specialized_chunks(
     scx: &skull_mir::lower::ScalarCtx,
     cache: &SkullEmitCache,
     initial: &[skull_mir::bound::SpecDemand],
-    body_cache: Option<&BodyCache>,
 ) -> (FxHashMap<Instance, Chunk>, Vec<(String, CompilerError)>) {
-    let body_cache = body_cache.filter(|cache| cache.is_active());
     let queue = SpecQueue {
         ws,
         scx,
@@ -328,17 +326,7 @@ pub(super) fn view_driven_specialized_chunks(
         },
         |inline_cache, inst, follow_ups| {
             let name = inst.symbol(ws, scx.interner());
-            // The persistent body cache answers on the worker, so a hit costs
-            // the queue nothing more than its lookup.
-            if let Some(chunk) = body_cache.and_then(|c| c.lookup(ws, cg, scx, &inst)) {
-                for d in &chunk.specs {
-                    queue.admit(d.inst.clone(), follow_ups);
-                }
-                queue.record(name, inst, Ok(chunk));
-                return;
-            }
             let mut specs = Vec::new();
-            let rejections = cg.rejection_count();
             let result = emit_spec_chunk(
                 ws,
                 cg,
@@ -349,10 +337,6 @@ pub(super) fn view_driven_specialized_chunks(
                 inline_cache,
                 &mut specs,
             );
-            if let (Some(body_cache), Ok(chunk)) = (body_cache, &result) {
-                let rejected = cg.rejection_count() != rejections;
-                body_cache.record(ws, cg, scx, &inst, chunk, rejected);
-            }
             #[cfg(test)]
             if let Some(hook) = &queue.hook {
                 hook.finished(&name);

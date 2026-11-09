@@ -89,7 +89,6 @@ fn compile(request: &Value) -> Result<Value, String> {
     let target = EmitTarget {
         project_root: None,
         renderer,
-        body_cache: None,
     };
     let result = skull::pipeline::compile_source(file, source, target, &mut host);
     let mut diagnostics: Vec<Value> = host

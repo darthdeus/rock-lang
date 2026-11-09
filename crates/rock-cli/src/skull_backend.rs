@@ -1392,7 +1392,6 @@ fn skull_build_package_with_limit(
     let target = skull::pipeline::EmitTarget {
         project_root: None,
         renderer: skull::mir_emit::RendererTarget::Gl,
-        body_cache: None,
     };
     let skull::pipeline::Compiled {
         ws, emission: emit, ..
@@ -2220,11 +2219,9 @@ fn skull_emit_project_with_inputs(
         comptime: CliComptime::Resolved(Some(inputs)),
         prepare_timings: Vec::new(),
     };
-    let body_cache = open_body_cache(dir, &sources);
     let target = skull::pipeline::EmitTarget {
         project_root: Some(dir),
         renderer: skull::mir_emit::RendererTarget::Gl,
-        body_cache: body_cache.as_ref(),
     };
     let compiled = skull::pipeline::compile_modules(modules, entry_file, target, &mut host);
     let skull::pipeline::Compiled {
@@ -2283,39 +2280,6 @@ fn skull_emit_project_with_inputs(
     #[cfg(feature = "sequential")]
     drop(ws);
     Ok((lua, emits_main))
-}
-
-/// The persistent per-body cache for a project build: keyed by the running
-/// compiler's identity, sharded under the project's directory. `None` when
-/// `ROCK_BODY_CACHE=0` or the compiler image cannot be identified.
-fn open_body_cache(dir: &str, sources: &SourceFiles) -> Option<skull::mir_emit::BodyCache> {
-    let identity = match crate::comptime::compiler_identity() {
-        Ok(identity) => identity,
-        Err(error) => {
-            log::warn!(target: "SKULL", "body cache disabled: {error:#}");
-            return None;
-        }
-    };
-    let project = std::fs::canonicalize(dir)
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| dir.to_string());
-    let texts = sources
-        .files
-        .iter()
-        .map(|file| {
-            let file = file.borrow();
-            (
-                ustr::Ustr::from(file.file.to_id_path().as_str()),
-                std::sync::Arc::<str>::from(file.contents.as_str()),
-            )
-        })
-        .collect();
-    let config = skull::mir_emit::BodyCacheConfig::from_environment(
-        identity,
-        &skull::mir_emit::project_key(&project),
-        texts,
-    )?;
-    Some(skull::mir_emit::BodyCache::open(config))
 }
 
 fn write_allocation_report(

@@ -38,7 +38,6 @@ ustr = { workspace = true }
 memchr = { workspace = true }
 rustc-hash = { workspace = true }
 rayon = { workspace = true }
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [dev-dependencies]
 rock-host = { workspace = true }

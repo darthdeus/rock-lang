@@ -846,10 +846,6 @@ type ChunkMap = FxHashMap<Instance, Result<Chunk, CompilerError>>;
 
 /// Emit every retained ordinary/coroutine body into its chunk, in parallel
 /// with one inline cache per worker over a shared candidate table.
-///
-/// With a body cache, every body is first looked up; only the misses are
-/// lowered, and the candidate table (which lowers every inline candidate up
-/// front) is built only when a miss needs it or a retained cache will.
 fn emit_full_chunks(
     ws: &Workspace,
     cg: &CodegenCtx,
@@ -857,13 +853,11 @@ fn emit_full_chunks(
     concrete: &crate::concrete_body::ConcreteBodies,
     lua_view: &crate::artifact::ArtifactView,
     mutation: BodyMutation,
-    lifetime: CacheLifetime,
-    body_cache: Option<&BodyCache>,
     setup_phases: &mut SetupPhases,
 ) -> Result<
     (
         ChunkMap,
-        Option<std::sync::Arc<skull_transform::InlineCandidateTable>>,
+        std::sync::Arc<skull_transform::InlineCandidateTable>,
     ),
     CompilerError,
 > {
@@ -880,81 +874,47 @@ fn emit_full_chunks(
             })
         })
         .collect();
-    let body_cache = body_cache.filter(|cache| cache.is_active());
-    let (mut chunks, misses): (ChunkMap, Vec<(FuncRef, &bone_semantic::hir::Function)>) =
-        match body_cache {
-            Some(cache) => setup_phases.timed("window: cache lookup", || {
-                let mut chunks = ChunkMap::default();
-                let mut misses = Vec::new();
-                let looked = par_map(fn_items, |(self_ref, f)| {
-                    match cache.lookup(ws, cg, scx, &shared(self_ref)) {
-                        Some(chunk) => Ok((shared(self_ref), Ok(chunk))),
-                        None => Err((self_ref, f)),
-                    }
-                });
-                for entry in looked {
-                    match entry {
-                        Ok((key, chunk)) => {
-                            chunks.insert(key, chunk);
-                        }
-                        Err(miss) => misses.push(miss),
-                    }
-                }
-                (chunks, misses)
-            }),
-            None => (ChunkMap::default(), fn_items),
-        };
-    let inline_candidate_table = if misses.is_empty() && lifetime == CacheLifetime::OneShot {
-        None
-    } else {
-        Some(setup_phases.timed("setup: inline candidate table", || {
-            build_inline_candidate_table(
-                ws,
-                scx,
-                concrete,
-                inline_candidate_keys(concrete),
-                None,
-                None,
-                None,
-                None,
-                None,
-            )
-        })?)
-    };
-    if misses.is_empty() {
-        return Ok((chunks, inline_candidate_table));
-    }
-    let table = inline_candidate_table
-        .clone()
-        .expect("a miss builds the candidate table");
+    let inline_candidate_table = setup_phases.timed("setup: inline candidate table", || {
+        build_inline_candidate_table(
+            ws,
+            scx,
+            concrete,
+            inline_candidate_keys(concrete),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    })?;
     // The fan-out's wall window, beside the per-unit sums the chunks carry:
     // the budget reads idle time as threads * window - summed unit time.
-    let lowered = setup_phases.timed("window: fan-out", || {
+    let chunks = setup_phases.timed("window: fan-out", || {
         par_map_with(
-            misses,
-            || skull_transform::InlineCache::with_candidate_table(std::sync::Arc::clone(&table)),
+            fn_items,
+            || {
+                skull_transform::InlineCache::with_candidate_table(std::sync::Arc::clone(
+                    &inline_candidate_table,
+                ))
+            },
             |inline_cache, (self_ref, f)| {
-                let rejections = cg.rejection_count();
-                let result = emit_body_chunk_with_mutation(
-                    ws,
-                    cg,
-                    scx,
-                    concrete,
-                    self_ref,
-                    f,
-                    inline_cache,
-                    mutation,
-                );
-                if let (Some(cache), Ok(chunk)) = (body_cache, &result) {
-                    let rejected = cg.rejection_count() != rejections;
-                    cache.record(ws, cg, scx, &shared(self_ref), chunk, rejected);
-                }
-                (shared(self_ref), result)
+                (
+                    shared(self_ref),
+                    emit_body_chunk_with_mutation(
+                        ws,
+                        cg,
+                        scx,
+                        concrete,
+                        self_ref,
+                        f,
+                        inline_cache,
+                        mutation,
+                    ),
+                )
             },
         )
     });
-    chunks.extend(lowered);
-    Ok((chunks, inline_candidate_table))
+    Ok((chunks.into_iter().collect(), inline_candidate_table))
 }
 
 /// Seed the reverse dependency index from every chunk's codegen deps (only a
@@ -1033,7 +993,6 @@ pub(super) fn emit_full_build(
         renderer_target,
         shapes,
         mutation,
-        body_cache,
     } = options;
     let mut setup_phases = SetupPhases::default();
     let project_root = setup_phases.timed("setup: validation+context", || {
@@ -1092,16 +1051,6 @@ pub(super) fn emit_full_build(
         reject_abi_param_collisions(ws, &scx, &cg)
     });
 
-    if let Some(cache) = body_cache {
-        setup_phases.timed("setup: body cache keys", || {
-            cache.prepare(
-                ws,
-                &cg,
-                &scx,
-                &format!("{:?} {renderer_target:?}", build.kind()),
-            )
-        });
-    }
     let setup_traffic = (scx.rep_arena_stats(), scx.interner().stats());
     let (chunks, inline_candidate_table) = emit_full_chunks(
         ws,
@@ -1110,8 +1059,6 @@ pub(super) fn emit_full_build(
         &concrete,
         &lua_view,
         mutation,
-        build.lifetime(),
-        body_cache,
         &mut setup_phases,
     )?;
     let (dependents, dependency_edges) = index_dependents(&chunks, build.lifetime());
@@ -1134,10 +1081,7 @@ pub(super) fn emit_full_build(
         changed_since_full: FxHashSet::default(),
         cg,
         scx,
-        inline_cache: match inline_candidate_table {
-            Some(table) => skull_transform::InlineCache::with_candidate_table(table),
-            None => skull_transform::InlineCache::default(),
-        },
+        inline_cache: skull_transform::InlineCache::with_candidate_table(inline_candidate_table),
         dependents,
         changed_consts_since_full: FxHashSet::default(),
         static_key_baseline: FxHashMap::default(),
@@ -1168,25 +1112,14 @@ pub(super) fn emit_full_build(
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let graph_census = cache.graph.run_stats;
     let assembly_started = Instant::now();
-    let (mut emit, emitted, unit_reads) = assemble(
-        ws,
-        &mut cache,
-        &mut built_specs,
-        build.lifetime(),
-        body_cache,
-    )?;
+    let (mut emit, emitted, unit_reads) =
+        assemble(ws, &mut cache, &mut built_specs, build.lifetime())?;
     let assembly_window = assembly_started.elapsed();
     emit.concrete_stats = concrete_stats;
     emit.setup_lanes = setup_lanes;
     let mut phases = setup_phases.0;
     phases.extend(emit.phases);
     phases.push(("window: assembly", assembly_window));
-    if let Some(body_cache) = body_cache {
-        let write_started = Instant::now();
-        body_cache.flush();
-        phases.push(("cache: write", write_started.elapsed()));
-        emit.body_cache = body_cache.stats();
-    }
     emit.phases = phases;
     emit.arena_traffic = ArenaTraffic {
         rep_setup: setup_traffic.0,

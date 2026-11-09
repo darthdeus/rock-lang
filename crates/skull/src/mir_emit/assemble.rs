@@ -770,7 +770,6 @@ pub(super) fn assemble(
     cache: &mut SkullEmitCache,
     built_specs: &mut Vec<(Instance, Chunk)>,
     lifetime: CacheLifetime,
-    body_cache: Option<&BodyCache>,
 ) -> Result<(MirEmit, FxHashSet<Instance>, UnitComptimeReads), CompilerError> {
     let mut release_stats = CompileReleaseStats {
         retained_dependency_edges: cache.dependents.values().map(|keys| keys.len()).sum(),
@@ -811,14 +810,8 @@ pub(super) fn assemble(
     // Generated-glue obligations (`register_sim`, shader dependencies) are part
     // of the ROOT INPUT the graph and the view were built from -- see
     // [`all_roots`] -- so there is no second population source here.
-    let (spec_chunks, spec_rejected) = view_driven_specialized_chunks(
-        ws,
-        &cache.cg,
-        &cache.scx,
-        cache,
-        &asm.needed_specs,
-        body_cache,
-    );
+    let (spec_chunks, spec_rejected) =
+        view_driven_specialized_chunks(ws, &cache.cg, &cache.scx, cache, &asm.needed_specs);
     if lifetime == CacheLifetime::OneShot {
         let instances = cache.graph.instances.len();
         drop_in_background(cache.graph.take_records());
@@ -1045,7 +1038,6 @@ pub(super) fn assemble(
             concrete_stats: crate::concrete_body::ConcreteBuildStats::default(),
             emits_main,
             shaders: std::sync::Arc::clone(&cache.shader_registrations.sources),
-            body_cache: BodyCacheStats::default(),
         },
         emitted_bodies,
         unit_reads,

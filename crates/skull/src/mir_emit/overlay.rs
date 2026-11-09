@@ -412,7 +412,6 @@ fn assemble_overlay(
             // already installed by the `main.lua` it loads over.
             emits_main: false,
             shaders: std::sync::Arc::clone(&cache.shader_registrations.sources),
-            body_cache: BodyCacheStats::default(),
         },
         unit_reads,
         fingerprint_code_rows,

@@ -180,7 +180,6 @@ pub trait CompileHost {
         crate::mir_emit::FullEmit::one_shot()
             .project_root(target.project_root)
             .renderer(target.renderer)
-            .body_cache(target.body_cache)
             .run(ws, entry)
             .map(|(emit, _cache)| emit)
     }
@@ -193,15 +192,12 @@ pub struct EmitTarget<'a> {
     /// prune to what the project reaches. `None` for a single source.
     pub project_root: Option<&'a str>,
     pub renderer: RendererTarget,
-    /// The persistent per-body cache, when the host opened one.
-    pub body_cache: Option<&'a crate::mir_emit::BodyCache>,
 }
 
 impl EmitTarget<'_> {
     pub const SINGLE_SOURCE: EmitTarget<'static> = EmitTarget {
         project_root: None,
         renderer: RendererTarget::Gl,
-        body_cache: None,
     };
 }
 
