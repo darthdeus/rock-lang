@@ -91,7 +91,7 @@ fn the_ctor_definition_returns_through_a_local_not_a_tail_call() {
     let def = &lua[def_start..];
     let def = &def[..def.find("\nend\n").expect("ctor end") + 5];
     assert!(
-        def.contains("local __rock_ret = setmetatable(") && def.contains("\n  return __rock_ret\n"),
+        def.contains("local __rock_ret = setmetatable(") && def.contains("\n return __rock_ret\n"),
         "the ctor body must bind then return, not tail-call setmetatable:\n{def}"
     );
     assert!(!def.contains("return setmetatable("), "{def}");

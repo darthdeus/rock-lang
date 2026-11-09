@@ -5,7 +5,7 @@ use super::*;
 impl Emitter<'_> {
     pub(crate) fn write_effect(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
         if let Some(site) = self.record_effect_allocation_site(id, inst, out.len()) {
-            out.push_str("  __rock_alloc_hit_effect(\"");
+            out.push_str(" __rock_alloc_hit_effect(\"");
             write!(out, "{:016x}", site.id).unwrap();
             out.push_str("\")\n");
         }
@@ -18,7 +18,7 @@ impl Emitter<'_> {
                     });
                     return;
                 }
-                out.push_str("  ");
+                out.push(' ');
                 write_cellname(out, self.func, self.frame, self.cell_colors, *cell);
                 out.push_str(" = ");
                 self.write_opnd(out, *value);
@@ -41,7 +41,7 @@ impl Emitter<'_> {
                     && self.opnd_is_plain(*value)
                     && !matches!(&self.func.insts[*value], Inst::Const(lit) if !matches!(lit, Lit::Nil));
                 if guard {
-                    out.push_str("  if ");
+                    out.push_str(" if ");
                     self.write_opnd(out, *value);
                     out.push_str(" ~= nil or getmetatable(");
                     self.write_opnd(out, *base);
@@ -50,14 +50,14 @@ impl Emitter<'_> {
                     write_field_key(out, field.as_str());
                     out.push_str(" ~= nil then\n");
                 }
-                out.push_str("  ");
+                out.push(' ');
                 self.write_opnd(out, *base);
                 write_field_key(out, field.as_str());
                 out.push_str(" = ");
                 self.write_opnd(out, *value);
                 out.push('\n');
                 if guard {
-                    out.push_str("  end\n");
+                    out.push_str(" end\n");
                 }
             }
             Inst::StoreIndex {
@@ -69,7 +69,7 @@ impl Emitter<'_> {
                 match kind {
                     // NativeBuffer write -> debug-mode bounds-checked helper.
                     ContainerKind::NativeBuffer | ContainerKind::NativeBufferValue(_) => {
-                        out.push_str("  __nb_checked_set(");
+                        out.push_str(" __nb_checked_set(");
                         self.write_opnd(out, *base);
                         out.push_str(", ");
                         self.write_opnd(out, *index);
@@ -78,7 +78,7 @@ impl Emitter<'_> {
                         out.push_str(")\n");
                     }
                     ContainerKind::Vec => {
-                        out.push_str("  __vec_checked_set(");
+                        out.push_str(" __vec_checked_set(");
                         self.write_opnd(out, *base);
                         out.push_str(", ");
                         self.write_opnd(out, *index);
@@ -92,7 +92,7 @@ impl Emitter<'_> {
                     | ContainerKind::VecColumn
                     | ContainerKind::VecStrideSlot
                     | ContainerKind::NativeBufferLeaf => {
-                        out.push_str("  ");
+                        out.push(' ');
                         self.write_opnd(out, *base);
                         out.push('[');
                         self.write_opnd(out, *index);
@@ -112,7 +112,7 @@ impl Emitter<'_> {
             }
             Inst::StoreGlobal { name, value } => {
                 if self.has_state_slot(*name) {
-                    out.push_str("  ");
+                    out.push(' ');
                     out.push_str(self.ctx.state_table());
                     out.push('[');
                     self.write_state_slot(out, *name);
@@ -122,7 +122,7 @@ impl Emitter<'_> {
                 } else {
                     let _ = write!(
                         out,
-                        "  {} = ",
+                        " {} = ",
                         self.bound_name(skull_mir::mangle::symbol_of_key(*name))
                     );
                     self.write_opnd(out, *value);
@@ -135,8 +135,8 @@ impl Emitter<'_> {
                 match kind {
                     ContainerKind::Vec => {
                         // increment len BEFORE assign (1-indexed data table).
-                        let _ = writeln!(out, "  {a}.len = {a}.len + 1");
-                        let _ = write!(out, "  {a}._data[{a}.len] = ");
+                        let _ = writeln!(out, " {a}.len = {a}.len + 1");
+                        let _ = write!(out, " {a}._data[{a}.len] = ");
                         self.write_opnd(out, *value);
                         out.push('\n');
                     }
@@ -178,7 +178,7 @@ impl Emitter<'_> {
                 }
                 // `key_cell` is referenced twice; render it once.
                 let k = cellname(self.func, self.frame, self.cell_colors, *key_cell);
-                let _ = write!(out, "  {k}, ");
+                let _ = write!(out, " {k}, ");
                 write_cellname(out, self.func, self.frame, self.cell_colors, *val_cell);
                 let _ = write!(out, " = next(");
                 self.write_opnd(out, *table);
@@ -204,7 +204,7 @@ impl Emitter<'_> {
                     });
                     return;
                 }
-                out.push_str("  ");
+                out.push(' ');
                 for (i, c) in dests.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
@@ -244,7 +244,7 @@ impl Emitter<'_> {
                     });
                     return;
                 }
-                out.push_str("  ");
+                out.push(' ');
                 for (i, c) in dests.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");

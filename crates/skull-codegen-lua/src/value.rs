@@ -646,7 +646,7 @@ impl Emitter<'_> {
         targets: &[(String, bool)],
         rhs: impl FnOnce(&mut String),
     ) {
-        out.push_str("  do local ");
+        out.push_str(" do local ");
         for i in 0..targets.len() {
             if i > 0 {
                 out.push_str(", ");
@@ -660,13 +660,13 @@ impl Emitter<'_> {
             if *frame {
                 writeln!(
                     out,
-                    "    if v{i} ~= nil or {target} ~= nil then {target} = v{i} end"
+                    "  if v{i} ~= nil or {target} ~= nil then {target} = v{i} end"
                 )
                 .unwrap();
             } else {
-                writeln!(out, "    {target} = v{i}").unwrap();
+                writeln!(out, "  {target} = v{i}").unwrap();
             }
         }
-        out.push_str("  end\n");
+        out.push_str(" end\n");
     }
 }

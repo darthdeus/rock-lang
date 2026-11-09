@@ -274,7 +274,7 @@ impl Emitter<'_> {
         target: SelectionTarget,
         value: impl FnOnce(&mut String),
     ) {
-        out.push_str("  ");
+        out.push(' ');
         match target {
             SelectionTarget::Cell { cell, .. } => {
                 write_cellname(out, self.func, self.frame, self.cell_colors, cell);
@@ -305,17 +305,17 @@ impl Emitter<'_> {
             // luajit rule 2: `return` wrapped `do ... end` so it is never the
             // block's mid-sequence statement (and is legal as the last one too).
             Term::Return(vals) if !vals.is_empty() => {
-                out.push_str("  do return ");
+                out.push_str(" do return ");
                 self.write_csv(out, vals);
                 out.push_str(" end\n");
             }
             Term::Return(_) => {
-                out.push_str("  do return end\n");
+                out.push_str(" do return end\n");
             }
             // Bone proves these blocks dead; reaching one is a compiler bug,
             // which a bare return would turn into a silent early exit.
             Term::Unreachable => {
-                out.push_str("  error(\"rock: reached an unreachable block\")\n");
+                out.push_str(" error(\"rock: reached an unreachable block\")\n");
             }
             Term::Goto(b) => {
                 self.write_goto(out, *b);
@@ -349,7 +349,7 @@ impl Emitter<'_> {
                     });
                     return;
                 }
-                out.push_str("  if ");
+                out.push_str(" if ");
                 self.write_opnd(out, *cond);
                 out.push_str(" then goto ");
                 self.write_label_ref(out, *then_bb);
@@ -368,7 +368,7 @@ impl Emitter<'_> {
                 for (l, b) in cases {
                     let kw = if first { "if" } else { "elseif" };
                     first = false;
-                    let _ = write!(out, "  {kw} {d} == ");
+                    let _ = write!(out, " {kw} {d} == ");
                     write_lit(out, l);
                     out.push_str(" then goto ");
                     self.write_label_ref(out, *b);
@@ -377,7 +377,7 @@ impl Emitter<'_> {
                 if first {
                     self.write_goto(out, *default);
                 } else {
-                    out.push_str("  else goto ");
+                    out.push_str(" else goto ");
                     self.write_label_ref(out, *default);
                     out.push_str(" end\n");
                 }

@@ -765,7 +765,7 @@ pub const STATE_CELL: &str = "__rock_state_cell";
 
 /// The return statements of a one-expression wrapper -- an `extern(ffi)`
 /// binding, a value-struct `_vt`/`_lct` ctor -- whose whole result is `expr`.
-/// Two-space indented, no trailing newline.
+/// One-space indented, no trailing newline.
 ///
 /// `return lib.f(..)` would be a `CALLT` into C: a root trace started at the
 /// wrapper's entry cannot leave through it (`rec_ret` needs a real `RET`) and
@@ -774,7 +774,7 @@ pub const STATE_CELL: &str = "__rock_state_cell";
 /// local is a reserved `__rock` name so it can never shadow a wrapper
 /// parameter that `expr` reads.
 pub fn wrapper_return(expr: &str) -> String {
-    format!("  local __rock_ret = {expr}\n  return __rock_ret")
+    format!(" local __rock_ret = {expr}\n return __rock_ret")
 }
 
 /// The shared per-type metatable global of a GC-tier `value` struct -- the table

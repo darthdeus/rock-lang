@@ -76,14 +76,14 @@ pub(crate) fn render_spliced_inline_lua(
 ) {
     match shape {
         InlineLuaShape::Expr => {
-            let _ = writeln!(out, "    {lv} = {}", body.trim());
+            let _ = writeln!(out, "  {lv} = {}", body.trim());
         }
         InlineLuaShape::UnitStmts => {
             for line in body.lines() {
                 if line.trim().is_empty() {
                     continue;
                 }
-                let _ = writeln!(out, "    {}", line.trim_end());
+                let _ = writeln!(out, "  {}", line.trim_end());
             }
         }
         InlineLuaShape::TailReturn => {
@@ -94,10 +94,10 @@ pub(crate) fn render_spliced_inline_lua(
                 match inline_lua_return_rest(line) {
                     Some("") => {} // bare tail return: nothing to bind (unit)
                     Some(rest) => {
-                        let _ = writeln!(out, "    {lv} = {rest}");
+                        let _ = writeln!(out, "  {lv} = {rest}");
                     }
                     None => {
-                        let _ = writeln!(out, "    {}", line.trim_end());
+                        let _ = writeln!(out, "  {}", line.trim_end());
                     }
                 }
             }

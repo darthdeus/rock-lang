@@ -156,7 +156,7 @@ pub(crate) fn render_scope(
             frame.is_none(),
             "coroutine step `{lua_name}` registers an unwind defer"
         );
-        out.push_str("  if not __rock_defer_entering then return ");
+        out.push_str(" if not __rock_defer_entering then return ");
         out.push_str(skull_mir::mir::DEFER_CALL);
         out.push('(');
         out.push_str(lua_name);
@@ -169,7 +169,7 @@ pub(crate) fn render_scope(
 
     for &c in params {
         if cell_is_uint(ws, func.cells[c].ty) {
-            out.push_str("  ");
+            out.push(' ');
             write_cell_local(out, func, cell_colors, c);
             out.push_str(" = ((");
             write_cell_local(out, func, cell_colors, c);
@@ -191,7 +191,7 @@ pub(crate) fn render_scope(
     distinct.sort_unstable();
     distinct.dedup();
     let decl_start = out.len();
-    out.push_str("  local ");
+    out.push_str(" local ");
     let mut any = false;
     // Counted as the names are written, so the frame-limit model reads THIS
     // declaration rather than a second derivation of it.

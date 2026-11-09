@@ -75,7 +75,7 @@ fn main() { print("{hot(1.0, 2.0, 8)}") }
         .find(|l| l.trim_start().starts_with("local "))
         .expect("top local line")
         .to_string();
-    let loop_end = body.rfind("  end").expect("loop end");
+    let loop_end = body.rfind("\n end").expect("loop end");
     let tail = &body[loop_end..];
     for tok in tail.split(|c: char| !c.is_alphanumeric()) {
         if tok.starts_with('r') && tok[1..].chars().all(|c| c.is_ascii_digit()) && tok.len() > 1 {

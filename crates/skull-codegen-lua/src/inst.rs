@@ -29,7 +29,7 @@ impl Emitter<'_> {
         }
         let inst = &self.func.insts[id];
         if inst.produces_value() {
-            out.push_str("  ");
+            out.push(' ');
             write_vname(out, self.func, &self.colors, id);
             out.push_str(" = ");
             self.write_value(out, id, inst);
@@ -40,7 +40,7 @@ impl Emitter<'_> {
     }
 
     fn emit_call_arg_forward(&self, out: &mut String, forward: &CallArgForward) {
-        out.push_str("  ");
+        out.push(' ');
         write_vname(out, self.func, &self.colors, forward.consumer);
         out.push_str(" = ");
         self.write_call_arg_forward(out, forward);
@@ -126,14 +126,14 @@ impl Emitter<'_> {
         let mut lv = String::new();
         write_vname(&mut lv, self.func, &self.colors, result);
 
-        out.push_str("  do\n");
+        out.push_str(" do\n");
         for (p, a) in callee.param_decls.iter().zip(args.iter()) {
-            let _ = write!(out, "    local {} = ", p.name);
+            let _ = write!(out, "  local {} = ", p.name);
             self.write_opnd(out, *a);
             out.push('\n');
         }
         render_spliced_inline_lua(out, body.as_str(), shape, &lv);
-        out.push_str("  end\n");
+        out.push_str(" end\n");
         true
     }
 

@@ -21,7 +21,7 @@ impl Emitter<'_> {
 
     pub(crate) fn write_kills(&self, out: &mut String, locals: &[regalloc::KillLocal]) {
         for local in locals {
-            out.push_str("  ");
+            out.push(' ');
             match *local {
                 regalloc::KillLocal::Value(c) => {
                     out.push('r');
@@ -150,7 +150,7 @@ impl Emitter<'_> {
         if self.label_refs[raw(bb) as usize] == 0 {
             return;
         }
-        out.push_str("  ::bb");
+        out.push_str(" ::bb");
         push_uint(out, self.func.emit_block_id(bb));
         out.push_str("::\n");
     }
@@ -176,7 +176,7 @@ impl Emitter<'_> {
 
     pub(crate) fn write_goto(&self, out: &mut String, t: Idx<Block>) {
         let start = out.len();
-        out.push_str("  goto ");
+        out.push_str(" goto ");
         self.write_label_ref(out, t);
         out.push('\n');
         self.last_goto.set(Some((start, out.len(), t)));
@@ -254,7 +254,7 @@ impl Emitter<'_> {
         if let TailForwardCall::Direct { call, .. } = &tail.call {
             self.mark_line(out, *call);
         }
-        out.push_str("  do return ");
+        out.push_str(" do return ");
         self.write_forward_call(out, &tail.call);
         out.push_str(" end\n");
     }
@@ -301,7 +301,7 @@ impl Emitter<'_> {
         // Dead on entry to the header is dead for the whole loop unless
         // redefined, so the header's kills go once, above the `for`.
         self.write_kills(out, &self.kills.at_entry[raw(header) as usize]);
-        let _ = writeln!(out, "  for {slot_name} = {slot_name}, {limit} do");
+        let _ = writeln!(out, " for {slot_name} = {slot_name}, {limit} do");
         // Body-scoped temp registers: declared INSIDE the `for` block, above the
         // loop-control slots, so LuaJIT's snapshot liveness can prune them at
         // loop exits (else they pin their values into every side trace and
@@ -316,7 +316,7 @@ impl Emitter<'_> {
             .collect();
         if !own.is_empty() {
             own.sort_unstable();
-            out.push_str("  local ");
+            out.push_str(" local ");
             for (i, &c) in own.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
@@ -338,7 +338,7 @@ impl Emitter<'_> {
         self.drop_fallthrough_goto(out, latch);
         self.write_block_label(out, latch);
         self.write_kills(out, &self.kills.at_entry[raw(latch) as usize]);
-        out.push_str("  end\n");
+        out.push_str(" end\n");
         self.write_goto(out, exit);
     }
 }
