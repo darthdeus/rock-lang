@@ -2193,6 +2193,23 @@ impl InstanceGraph {
     /// Walk ONE owner's body. The only producer of a [`Contribution`], so a
     /// full build and an incremental re-walk cannot record different facts.
     fn expand(&self, ws: &Workspace, owner: &Owner, timing_enabled: bool) -> Contribution {
+        let mut out = self.expand_sites(ws, owner, timing_enabled);
+        // A body reaching one callee from several sites asserts its
+        // substitution once: the index records owners, not sites, and the
+        // walk is parallel while the install is not, so the duplicates are
+        // folded here.
+        let mut seen: FxHashSet<&Instance> = FxHashSet::default();
+        let mut keep = Vec::with_capacity(out.reached.len());
+        for (to, _) in &out.reached {
+            keep.push(seen.insert(to));
+        }
+        let mut keep = keep.into_iter();
+        out.reached
+            .retain(|_| keep.next().expect("one flag per reached row"));
+        out
+    }
+
+    fn expand_sites(&self, ws: &Workspace, owner: &Owner, timing_enabled: bool) -> Contribution {
         let mut out = Contribution::default();
         match owner {
             Owner::AlwaysEmitted(module, body_owner) => {
@@ -2478,10 +2495,11 @@ impl InstanceGraph {
         // so a body that reaches ITSELF -- any recursive function -- would
         // otherwise find itself absent at the moment it asked and re-walk
         // forever.
+        // `expand` already folded repeated callees; the demand order is the
+        // ordered one the sorted list used to give.
         let reached: Vec<Instance> = {
             let mut unique: Vec<&Instance> = c.reached.iter().map(|(to, _)| to).collect();
             unique.sort();
-            unique.dedup();
             unique.into_iter().cloned().collect()
         };
         for (name, failure) in &c.always_emitted_holes {
