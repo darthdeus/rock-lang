@@ -1194,16 +1194,14 @@ fn run_test_program(
     let mut command = rock_host::project::build_luajit_command(script, &[]);
     // Shards and concurrent runs share one worktree; each process gets its own
     // scratch root, removed when this returns.
-    let _scratch = (crate::registry::RuntimeServices::registered().prepare_test)(&mut command)?;
+    let _scratch = crate::runtime_process::prepare_test(&mut command)?;
     // An inherited selection would silently narrow an unsharded run.
     match selection {
         Some(selection) => command.env("ROCK_TEST_SHARD_TESTS", selection),
         None => command.env_remove("ROCK_TEST_SHARD_TESTS"),
     };
-    command = (crate::registry::RuntimeServices::registered().runtime_command)(
-        command,
-        crate::registry::RuntimeProcess::LuaTest,
-    );
+    command =
+        crate::runtime_process::configure(command, crate::runtime_process::RuntimeProcess::LuaTest);
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

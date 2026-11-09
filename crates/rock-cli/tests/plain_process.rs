@@ -194,7 +194,8 @@ fn plain_compiler_process_without_private_runtime() {
 
 #[test]
 fn library_resolves_game_services_without_private_registration() {
-    use rock_cli::registry::{ProgramKind, RuntimeProcess, RuntimeServices};
+    use rock_cli::registry::{ProgramKind, RuntimeServices};
+    use rock_cli::runtime_process::RuntimeProcess;
     assert!(std::ptr::eq(
         rock_cli::CliCommand::all(),
         rock_cli::plain::COMMANDS
@@ -219,7 +220,7 @@ fn library_resolves_game_services_without_private_registration() {
     assert!(preamble.contains(root.path().to_str().unwrap()));
     let mut command = Command::new("unused-runtime");
     command.arg("sentinel").env("PLAIN_WITNESS", "preserved");
-    let command = (services.runtime_command)(command, RuntimeProcess::LuaTest);
+    let command = rock_cli::runtime_process::configure(command, RuntimeProcess::LuaTest);
     assert_eq!(
         command.get_program(),
         rock_engine_host::runtime::luajit_path().as_os_str()
@@ -1018,4 +1019,45 @@ registration_functions = []
         "{}",
         text(&invalid)
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn headless_launch_uses_the_shared_scope_and_preserves_command_inputs() {
+    const CHILD: &str = "ROCK_HEADLESS_PLACEMENT_WITNESS";
+    if std::env::var_os(CHILD).is_none() {
+        let out = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "plain_process::headless_launch_uses_the_shared_scope_and_preserves_command_inputs",
+            ])
+            .env(CHILD, "1")
+            .env("STONE_HEADLESS", "1")
+            .env("ROCK_HEADLESS_SCOPE", "1")
+            .env_remove("STONE_JV")
+            .env_remove("STONE_RENDERDOC")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{}", text(&out));
+        return;
+    }
+    for headless in [false, true] {
+        let mut command = Command::new("unused-lua");
+        command
+            .arg("sentinel.lua")
+            .current_dir("/")
+            .env("SCOPE_INPUT", "kept");
+        let command = rock_cli::runtime_process::configure(
+            command,
+            rock_cli::runtime_process::RuntimeProcess::LuaRun { headless },
+        );
+        assert_eq!(command.get_program(), "systemd-run");
+        let args: Vec<_> = command.get_args().collect();
+        assert!(args.contains(&std::ffi::OsStr::new("--slice=rock-headless.slice")));
+        assert_eq!(args.last().unwrap(), &"sentinel.lua");
+        assert_eq!(command.get_current_dir(), Some(Path::new("/")));
+        assert!(command.get_envs().any(
+            |(key, value)| key == "SCOPE_INPUT" && value == Some(std::ffi::OsStr::new("kept"))
+        ));
+    }
 }

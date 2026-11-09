@@ -13,9 +13,9 @@ pub fn run_lua_code_with_timeout(
     timeout: Option<Duration>,
 ) -> std::result::Result<rock_host::lua_runner::LuaRun, rock_core::CompilerError> {
     let command = rock_host::project::build_luajit_stdin_command();
-    let command = (crate::registry::RuntimeServices::registered().runtime_command)(
+    let command = crate::runtime_process::configure(
         command,
-        crate::registry::RuntimeProcess::LuaStdin,
+        crate::runtime_process::RuntimeProcess::LuaStdin,
     );
     rock_host::lua_runner::run_lua_code_with_command(command, code, timeout)
 }
