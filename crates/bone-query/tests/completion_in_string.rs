@@ -2,6 +2,7 @@
 //! interpolation hole IS code, so completion keeps working between the braces
 //! -- the split is per-position within one literal, not per-literal.
 
+use crate::label_asserts::assert_offers;
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
 
@@ -34,134 +35,48 @@ fn src(body: &str) -> String {
 // == literal text: nothing ====================================================
 
 #[test]
-fn plain_string_text_offers_nothing() {
-    assert_eq!(
-        labels_at(&src("    print(\"some hel$0\")")),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn text_after_a_hole_offers_nothing() {
-    assert_eq!(
-        labels_at(&src("    print(\"{mob.health} hel$0\")")),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn text_between_two_holes_offers_nothing() {
-    let s = src("    print(\"{mob.health} hel$0 {mob.health}\")");
-    assert_eq!(labels_at(&s), Vec::<String>::new());
-}
-
-#[test]
-fn escaped_braces_are_text_not_a_hole() {
-    // `{{` emits a literal `{` -- what follows is text, not an expression.
-    assert_eq!(
-        labels_at(&src("    print(\"{{hel$0}}\")")),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn raw_string_offers_nothing() {
-    // Raw strings never interpolate, so every position in one is text.
-    assert_eq!(
-        labels_at(&src("    print(r\"raw hel$0\")")),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn raw_string_braces_are_text_not_a_hole() {
-    assert_eq!(
-        labels_at(&src("    print(r\"raw {hel$0}\")")),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn triple_quoted_text_offers_nothing() {
-    assert_eq!(
-        labels_at(&src("    let t = \"\"\"triple hel$0\"\"\"")),
-        Vec::<String>::new()
-    );
-}
-
-#[test]
-fn unterminated_string_text_offers_nothing() {
-    // The common keystroke state: the closing quote isn't typed yet.
-    assert_eq!(
-        labels_at(&src("    print(\"some hel$0")),
-        Vec::<String>::new()
-    );
+fn string_text_offers_nothing() {
+    let cases: &[&str] = &[
+        // plain string text offers nothing
+        "    print(\"some hel$0\")",
+        // text after a hole offers nothing
+        "    print(\"{mob.health} hel$0\")",
+        // text between two holes offers nothing
+        "    print(\"{mob.health} hel$0 {mob.health}\")",
+        // `{{` emits a literal `{` -- what follows is text, not an expression.
+        "    print(\"{{hel$0}}\")",
+        // Raw strings never interpolate, so every position in one is text.
+        "    print(r\"raw hel$0\")",
+        // raw string braces are text not a hole
+        "    print(r\"raw {hel$0}\")",
+        // triple quoted text offers nothing
+        "    let t = \"\"\"triple hel$0\"\"\"",
+        // The common keystroke state: the closing quote isn't typed yet.
+        "    print(\"some hel$0",
+        // A hole may hold its own literal (unescaped -- the lexer tracks nesting);
+        // that inner literal's text is still text.
+        "    print(\"{join(v, \"hel$0\")}\")",
+    ];
+    for body in cases {
+        assert_eq!(labels_at(&src(body)), Vec::<String>::new(), "{body}");
+    }
 }
 
 // == interpolation holes: code ================================================
 
 #[test]
-fn hole_offers_scope_symbols() {
-    let out = labels_at(&src("    print(\"x={hel$0}\")"));
-    assert!(
-        out.iter().any(|l| l == "helper_thing"),
-        "expected `helper_thing`, got {out:?}"
-    );
-}
-
-#[test]
-fn hole_offers_member_completion() {
-    let out = labels_at(&src("    print(\"hp={mob.hea$0}\")"));
-    assert!(
-        out.iter().any(|l| l == "health: int"),
-        "expected `health: int`, got {out:?}"
-    );
-}
-
-#[test]
-fn second_hole_after_literal_text_offers_scope_symbols() {
-    let out = labels_at(&src("    print(\"a {mob.health} b {hel$0}\")"));
-    assert!(
-        out.iter().any(|l| l == "helper_thing"),
-        "expected `helper_thing`, got {out:?}"
-    );
-}
-
-#[test]
-fn triple_quoted_hole_offers_scope_symbols() {
-    let out = labels_at(&src("    let t = \"\"\"t {hel$0} u\"\"\""));
-    assert!(
-        out.iter().any(|l| l == "helper_thing"),
-        "expected `helper_thing`, got {out:?}"
-    );
-}
-
-#[test]
-fn unterminated_hole_offers_scope_symbols() {
-    let out = labels_at(&src("    print(\"x={hel$0"));
-    assert!(
-        out.iter().any(|l| l == "helper_thing"),
-        "expected `helper_thing`, got {out:?}"
-    );
-}
-
-#[test]
-fn nested_string_inside_a_hole_is_text() {
-    // A hole may hold its own literal (unescaped -- the lexer tracks nesting);
-    // that inner literal's text is still text.
-    assert_eq!(
-        labels_at(&src("    print(\"{join(v, \"hel$0\")}\")")),
-        Vec::<String>::new()
-    );
+fn holes_and_code_outside_strings_still_complete() {
+    let cases: &[(&str, &str)] = &[
+        ("    print(\"x={hel$0}\")", "helper_thing"),
+        ("    print(\"hp={mob.hea$0}\")", "health: int"),
+        ("    print(\"a {mob.health} b {hel$0}\")", "helper_thing"),
+        ("    let t = \"\"\"t {hel$0} u\"\"\"", "helper_thing"),
+        ("    print(\"x={hel$0", "helper_thing"),
+        ("    let s = \"txt\"\n    hel$0", "helper_thing"),
+    ];
+    for (body, label) in cases {
+        assert_offers(&labels_at(&src(body)), &[*label]);
+    }
 }
 
 // == code around strings keeps working ========================================
-
-#[test]
-fn code_after_a_closed_string_still_completes() {
-    let out = labels_at(&src("    let s = \"txt\"\n    hel$0"));
-    assert!(
-        out.iter().any(|l| l == "helper_thing"),
-        "expected `helper_thing`, got {out:?}"
-    );
-}

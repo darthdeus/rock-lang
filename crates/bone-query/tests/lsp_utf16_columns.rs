@@ -2,6 +2,7 @@
 //! character (two units, one scalar) before the cursor shifts every column on
 //! its line. Each request is checked with an emoji ahead of the name it touches.
 
+use crate::label_asserts::assert_offers;
 use bone_query::{BoneWorkspace, LineIndex, offset_at_line_col, offset_to_position};
 use lsp_types::{DiagnosticSeverity, Location, Position, Range};
 
@@ -143,11 +144,7 @@ fn semantic_tokens_count_utf16_units() {
         );
         seen.push(covered(SRC, range));
     }
-    assert!(seen.iter().any(|t| t == "target"), "{seen:?}");
-    assert!(
-        seen.iter().any(|t| t == "\"\u{1F980}\u{1D4B3}\""),
-        "{seen:?}"
-    );
+    assert_offers(&seen, &["target", "\"\u{1F980}\u{1D4B3}\""]);
 }
 
 #[test]
@@ -170,8 +167,7 @@ fn a_multiline_token_counts_utf16_units_on_each_line() {
         );
         seen.push(covered(src, range));
     }
-    assert!(seen.iter().any(|t| t == "\"\"\"\u{1F980} one"), "{seen:?}");
-    assert!(seen.iter().any(|t| t == "\u{1F980} two\"\"\""), "{seen:?}");
+    assert_offers(&seen, &["\"\"\"\u{1F980} one", "\u{1F980} two\"\"\""]);
 }
 
 #[test]
@@ -194,8 +190,7 @@ fn interpolation_holes_count_utf16_units() {
         );
         seen.push(covered(src, range));
     }
-    assert!(seen.iter().any(|t| t == "x"), "{seen:?}");
-    assert!(seen.iter().any(|t| t == "} \u{1F980}\""), "{seen:?}");
+    assert_offers(&seen, &["x", "} \u{1F980}\""]);
 }
 
 #[test]

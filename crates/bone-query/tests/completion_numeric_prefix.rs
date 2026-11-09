@@ -3,6 +3,7 @@
 //! subsequence-match it against symbols. Regression: typing the `0` in
 //! `global DRAG_COMMIT: float = 0` offered `remap_to_01` / `remap_01_range`.
 
+use crate::label_asserts::assert_offers;
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
 
@@ -37,8 +38,6 @@ fn identifier_prefix_in_same_slot_still_completes() {
                global DRAG_COMMIT: float = remap\n";
     // Cursor right after `remap`.
     let out = labels(src, 3, 33);
-    assert!(
-        out.iter().any(|l| l == "remap_to_01"),
-        "identifier prefix `remap` should offer remap_to_01, got {out:?}"
-    );
+    // identifier prefix `remap` should offer remap_to_01, got
+    assert_offers(&out, &["remap_to_01"]);
 }

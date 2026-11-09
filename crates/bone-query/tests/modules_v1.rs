@@ -3,6 +3,7 @@
 //! follows what the resolver recorded -- module paths, aliases, globs and
 //! re-exports -- to the defining item.
 
+use crate::label_asserts::{assert_lacks, assert_offers};
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
 
@@ -266,10 +267,7 @@ fn references_of_a_qualified_call_cover_only_the_callable_segment() {
         })
         .collect();
 
-    assert!(
-        covered.iter().any(|text| text == "depth"),
-        "references: {covered:?}"
-    );
+    assert_offers(&covered, &["depth"]);
     assert!(
         covered.iter().all(|text| text != "shapes::inner::depth"),
         "a qualified reference must not cover its path: {covered:?}"
@@ -277,21 +275,21 @@ fn references_of_a_qualified_call_cover_only_the_callable_segment() {
 }
 
 #[test]
-fn definition_of_an_aliased_import_lands_on_the_original_function() {
-    let project = V1Project::new();
-    let bone = project.open();
-    let (file, covered) = definition_in_main(&bone, &project, "surface(2)", 0, 2);
-    assert_eq!(file, "shapes.rock");
-    assert!(covered.contains("area"), "landed on {covered:?}");
-}
-
-#[test]
-fn definition_of_a_glob_imported_name_lands_on_the_function() {
-    let project = V1Project::new();
-    let bone = project.open();
-    let (file, covered) = definition_in_main(&bone, &project, "perimeter(3)", 0, 2);
-    assert_eq!(file, "shapes.rock");
-    assert!(covered.contains("perimeter"), "landed on {covered:?}");
+fn definition_of_an_imported_name_lands_on_its_item() {
+    let cases: &[(&str, usize, usize, &str, &str)] = &[
+        ("surface(2)", 0, 2, "shapes.rock", "area"),
+        ("perimeter(3)", 0, 2, "shapes.rock", "perimeter"),
+        ("Box, c", 0, 1, "shapes.rock", "Box"),
+        ("Crate)", 0, 1, "shapes.rock", "Box"),
+        ("LIMIT", 0, 1, "shapes.rock", "LIMIT"),
+    ];
+    for (needle, nth, into, expected_file, item) in cases {
+        let project = V1Project::new();
+        let bone = project.open();
+        let (file, covered) = definition_in_main(&bone, &project, needle, *nth, *into);
+        assert_eq!(file, *expected_file, "{needle}");
+        assert!(covered.contains(item), "{needle} landed on {covered:?}");
+    }
 }
 
 #[test]
@@ -416,24 +414,6 @@ fn an_inline_module_use_item_records_each_path_segment() {
 }
 
 #[test]
-fn a_qualified_type_lands_on_the_type() {
-    let project = V1Project::new();
-    let bone = project.open();
-    let (file, covered) = definition_in_main(&bone, &project, "Box, c", 0, 1);
-    assert_eq!(file, "shapes.rock");
-    assert!(covered.contains("Box"), "landed on {covered:?}");
-}
-
-#[test]
-fn an_aliased_type_lands_on_the_original_type() {
-    let project = V1Project::new();
-    let bone = project.open();
-    let (file, covered) = definition_in_main(&bone, &project, "Crate)", 0, 1);
-    assert_eq!(file, "shapes.rock");
-    assert!(covered.contains("Box"), "landed on {covered:?}");
-}
-
-#[test]
 fn hover_on_v1_signature_types_records_each_nominal_spelling() {
     let project = V1Project::new();
     let text = format!(
@@ -473,15 +453,6 @@ fn hover_on_v1_signature_types_records_each_nominal_spelling() {
         "qualified hover: {qualified_text}"
     );
     assert_ne!(alias_hover.range, qualified_hover.range);
-}
-
-#[test]
-fn a_qualified_global_lands_on_the_global() {
-    let project = V1Project::new();
-    let bone = project.open();
-    let (file, covered) = definition_in_main(&bone, &project, "LIMIT", 0, 1);
-    assert_eq!(file, "shapes.rock");
-    assert!(covered.contains("LIMIT"), "landed on {covered:?}");
 }
 
 #[test]
@@ -682,9 +653,9 @@ fn bare_completion_offers_what_the_tiers_bind_by_their_bound_names() {
     // Private members of other modules are not callable API, bound through
     // a glob or offered with an import.
     let got = labels(&complete_in_main("let q = hidden"));
-    assert!(!got.iter().any(|l| l == "hidden_helper"), "{got:?}");
+    assert_lacks(&got, &["hidden_helper"]);
     let got = labels(&complete_in_main("let q = inner_sec"));
-    assert!(!got.iter().any(|l| l == "inner_secret"), "{got:?}");
+    assert_lacks(&got, &["inner_secret"]);
 }
 
 #[test]
@@ -727,10 +698,7 @@ fn bare_completion_of_a_bound_name_carries_no_import_edit() {
 fn v1_call_through_uses_bound_spelling_and_hides_private_globals() {
     let items = complete_in_main("let q = boxwidthb");
     let labels = labels(&items);
-    assert!(
-        labels.iter().any(|label| label == "box_width(BOX)"),
-        "public v1 call-through: {labels:?}"
-    );
+    assert_offers(&labels, &["box_width(BOX)"]);
     assert!(
         !labels.iter().any(|label| label.contains("SECRET_BOX")),
         "private global leaked: {labels:?}"
@@ -745,10 +713,7 @@ fn v1_call_through_uses_bound_spelling_and_hides_private_globals() {
 fn v1_reach_completion_uses_bound_spelling_and_field_visibility() {
     let items = complete_in_sizes("widthvaluebw");
     let labels = labels(&items);
-    assert!(
-        labels.iter().any(|label| label == "width_value(BOX.w)"),
-        "public field reach path: {labels:?}"
-    );
+    assert_offers(&labels, &["width_value(BOX.w)"]);
     assert!(
         !labels.iter().any(|label| label.contains("b.secret")),
         "private field leaked: {labels:?}"
@@ -763,12 +728,7 @@ fn v1_reach_completion_uses_bound_spelling_and_field_visibility() {
 fn v1_call_through_filters_private_fields_on_public_global_roots() {
     let items = complete_in_sizes("widthvalues");
     let labels = labels(&items);
-    assert!(
-        !labels
-            .iter()
-            .any(|label| label == "width_value(BOX.secret)"),
-        "private global field leaked: {labels:?}"
-    );
+    assert_lacks(&labels, &["width_value(BOX.secret)"]);
     assert!(
         !labels.iter().any(|label| label.contains("app::shapes::")),
         "DefKey leaked: {labels:?}"
@@ -779,10 +739,7 @@ fn v1_call_through_filters_private_fields_on_public_global_roots() {
 fn v1_call_through_hides_inaccessible_callable_members() {
     let items = complete_in_main("let q = hiddenwidthb");
     let labels = labels(&items);
-    assert!(
-        !labels.iter().any(|label| label == "hidden_width(BOX)"),
-        "private callable leaked: {labels:?}"
-    );
+    assert_lacks(&labels, &["hidden_width(BOX)"]);
 }
 
 #[test]
@@ -796,18 +753,14 @@ fn changing_v1_visibility_invalidates_synthesis_cache() {
     bone.update(&main, text.clone());
     let pos = pos_of(&text, "let q = boxwidthb", 0, "let q = boxwidthb".len());
     let before = labels(&bone.completion(&main, pos));
-    assert!(
-        before.iter().any(|label| label == "box_width(BOX)"),
-        "fixture did not seed cache: {before:?}"
-    );
+    // fixture did not seed cache
+    assert_offers(&before, &["box_width(BOX)"]);
 
     let changed = SHAPES.replace("pub global BOX", "global BOX");
     bone.update(&shapes, changed);
     let after = labels(&bone.completion(&main, pos));
-    assert!(
-        !after.iter().any(|label| label == "box_width(BOX)"),
-        "private global survived synthesis cache: {after:?}"
-    );
+    // private global survived synthesis cache
+    assert_lacks(&after, &["box_width(BOX)"]);
 }
 
 #[test]
@@ -821,18 +774,14 @@ fn changing_v1_visibility_invalidates_bound_completion_cache() {
     bone.update(&main, text.clone());
     let pos = pos_of(&text, "let q = perim", 0, "let q = perim".len());
     let before = labels(&bone.completion(&main, pos));
-    assert!(
-        before.iter().any(|label| label == "perimeter"),
-        "fixture did not seed cache: {before:?}"
-    );
+    // fixture did not seed cache
+    assert_offers(&before, &["perimeter"]);
 
     let changed = SHAPES.replace("pub fn perimeter", "fn perimeter");
     bone.update(&shapes, changed);
     let after = labels(&bone.completion(&main, pos));
-    assert!(
-        !after.iter().any(|label| label == "perimeter"),
-        "private glob member survived bound cache: {after:?}"
-    );
+    // private glob member survived bound cache
+    assert_lacks(&after, &["perimeter"]);
 }
 
 #[test]

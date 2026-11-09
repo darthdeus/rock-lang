@@ -2,6 +2,9 @@
 // instead of one per file. nextest still runs each test in its own
 // process, so isolation is unchanged.
 
+#[path = "support/label_asserts.rs"]
+mod label_asserts;
+
 #[path = "completion_blank_line.rs"]
 mod completion_blank_line;
 #[path = "completion_contexts.rs"]

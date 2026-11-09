@@ -3,6 +3,7 @@
 //! `// rock: allow(` the known lint names complete. Generic symbol/type
 //! completion is short-circuited -- a comment is not code.
 
+use crate::label_asserts::{assert_lacks, assert_offers};
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
 
@@ -22,10 +23,7 @@ fn rock_directive_offers_allow_verb() {
     // Cursor right after `// rock: ` -- offer the directive verb.
     let src = "fn main() {\n    // rock: \n    let unused_thing = 5\n}\n";
     let out = labels(src, 1, 13);
-    assert!(
-        out.iter().any(|l| l == "allow"),
-        "expected `allow` verb, got {out:?}"
-    );
+    assert_offers(&out, &["allow"]);
 }
 
 #[test]
@@ -33,14 +31,7 @@ fn inside_allow_offers_lint_names() {
     // Cursor right after `// rock: allow(` -- offer the known lint names.
     let src = "fn main() {\n    // rock: allow(\n    let unused_thing = 5\n}\n";
     let out = labels(src, 1, 19);
-    assert!(
-        out.iter().any(|l| l == "unused_var"),
-        "expected `unused_var`, got {out:?}"
-    );
-    assert!(
-        out.iter().any(|l| l == "unused_fn"),
-        "expected `unused_fn`, got {out:?}"
-    );
+    assert_offers(&out, &["unused_var", "unused_fn"]);
 }
 
 #[test]
@@ -48,14 +39,9 @@ fn inside_allow_filters_by_typed_prefix() {
     // `// rock: allow(unused_v` -- only names matching the typed prefix.
     let src = "fn main() {\n    // rock: allow(unused_v\n    let unused_thing = 5\n}\n";
     let out = labels(src, 1, 27);
-    assert!(
-        out.iter().any(|l| l == "unused_var"),
-        "expected `unused_var`, got {out:?}"
-    );
-    assert!(
-        !out.iter().any(|l| l == "unused_fn"),
-        "`unused_fn` should be filtered out, got {out:?}"
-    );
+    assert_offers(&out, &["unused_var"]);
+    // `unused_fn` should be filtered out, got
+    assert_lacks(&out, &["unused_fn"]);
 }
 
 #[test]
@@ -64,12 +50,7 @@ fn magic_comment_suppresses_generic_symbol_completion() {
     // menu must NOT offer it (a comment is not code).
     let src = "fn unused_helper() {}\nfn main() {\n    // rock: allow(un\n}\n";
     let out = labels(src, 2, 21);
-    assert!(
-        !out.iter().any(|l| l == "unused_helper"),
-        "code symbol leaked into magic comment: {out:?}"
-    );
-    assert!(
-        out.iter().any(|l| l == "unused_var"),
-        "expected lint name, got {out:?}"
-    );
+    // code symbol leaked into magic comment
+    assert_lacks(&out, &["unused_helper"]);
+    assert_offers(&out, &["unused_var"]);
 }

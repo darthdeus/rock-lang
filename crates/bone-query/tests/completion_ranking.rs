@@ -5,6 +5,7 @@
 //! regressions -- add a case here whenever a "wrong thing ranked first" bug is
 //! found. Cursor is marked with `$0` in the fixture.
 
+use crate::label_asserts::assert_offers;
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
 
@@ -746,10 +747,8 @@ fn relaxed_guard_offers_local_seeded_call_through_on_short_fn_prefix() {
          fn give(m: Mob) {}\n\
          fn r(mob: Mob) {\n  gmob$0\n}\n",
     );
-    assert!(
-        labels.iter().any(|l| l == "give(mob)"),
-        "relaxed guard must offer give(mob) for `gmob`: {labels:?}"
-    );
+    // relaxed guard must offer give(mob) for `gmob`
+    assert_offers(&labels, &["give(mob)"]);
 }
 
 // -- `_`-prefix soft-private: hidden from the general list unless the user is
@@ -766,7 +765,7 @@ fn underscore_prefixed_symbols_hidden_from_general_list() {
          fn visible_helper() {}\n\
          fn r() {\n  let _loc = 2\n  let visible_loc = 3\n  he$0\n}\n",
     );
-    assert!(labels.iter().any(|l| l == "visible_helper"), "{labels:?}");
+    assert_offers(&labels, &["visible_helper"]);
     assert!(
         !labels
             .iter()
@@ -782,8 +781,7 @@ fn typing_underscore_surfaces_soft_private_symbols() {
          global _PRIV: int = 1\n\
          fn r() {\n  _$0\n}\n",
     );
-    assert!(labels.iter().any(|l| l == "_helper"), "{labels:?}");
-    assert!(labels.iter().any(|l| l == "_PRIV"), "{labels:?}");
+    assert_offers(&labels, &["_helper", "_PRIV"]);
 }
 
 #[test]
@@ -829,109 +827,82 @@ fn exact_name_match_outranks_type_directed_candidate() {
 }
 
 #[test]
-fn assignment_rhs_prioritizes_expected_enum_variant() {
-    // `mob.ai_state = combat` -- the LHS type is `MobAiState`, so the variant
-    // `MobAiState::Combat` must outrank a same-prefix wrong-type fn
-    // `combat_target_grid(mob) -> int`. RED pre-fix: assignment RHS is not an
-    // expected-type context, so the case-exact-prefix fn won on raw score.
-    let labels = labels_at(
-        "enum MobAiState { Wander, Combat }\n\
+fn expected_enum_variant_outranks_same_prefix_wrong_type_fn() {
+    let cases: &[(&str, &str, &str, &str, &str)] = &[
+        // `mob.ai_state = combat` -- the LHS type is `MobAiState`, so the variant
+        // `MobAiState::Combat` must outrank a same-prefix wrong-type fn
+        // `combat_target_grid(mob) -> int`. RED pre-fix: assignment RHS is not an
+        // expected-type context, so the case-exact-prefix fn won on raw score.
+        (
+            "assignment_rhs_prioritizes_expected_enum_variant",
+            "enum MobAiState { Wander, Combat }\n\
          struct Mob { ai_state: MobAiState }\n\
          fn combat_target_grid(mob: Mob) -> int { return 0 }\n\
          fn use_it(mob: Mob) {\n  mob.ai_state = combat$0\n}\n",
-    );
-    let variant = labels
-        .iter()
-        .position(|l| l.contains("MobAiState") && l.contains("Combat"));
-    let func = rank_of(&labels, "combat_target_grid");
-    assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
-    assert!(
-        func.is_none() || variant < func,
-        "expected enum variant must outrank wrong-type fn in assignment RHS: {labels:?}"
-    );
-}
-
-#[test]
-fn return_value_prioritizes_expected_enum_variant() {
-    // `return combat` in a fn declared `-> MobAiState` -- the return slot's
-    // type is the fn's declared return type, so `MobAiState::Combat` must
-    // outrank the case-exact-prefix wrong-type fn `combat_target_grid`.
-    let labels = labels_at(
-        "enum MobAiState { Wander, Combat }\n\
+            "MobAiState",
+            "Combat",
+            "combat_target_grid",
+        ),
+        // `return combat` in a fn declared `-> MobAiState` -- the return slot's
+        // type is the fn's declared return type, so `MobAiState::Combat` must
+        // outrank the case-exact-prefix wrong-type fn `combat_target_grid`.
+        (
+            "return_value_prioritizes_expected_enum_variant",
+            "enum MobAiState { Wander, Combat }\n\
          fn combat_target_grid(x: int) -> int { return 0 }\n\
          fn pick() -> MobAiState {\n  return combat$0\n}\n",
-    );
-    let variant = labels
-        .iter()
-        .position(|l| l.contains("MobAiState") && l.contains("Combat"));
-    let func = rank_of(&labels, "combat_target_grid");
-    assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
-    assert!(
-        func.is_none() || variant < func,
-        "expected enum variant must outrank wrong-type fn in return position: {labels:?}"
-    );
-}
-
-#[test]
-fn typed_let_init_prioritizes_expected_enum_variant() {
-    // `let s: MobAiState = combat` -- the annotation types the slot, so the
-    // variant must outrank the case-exact-prefix wrong-type fn.
-    let labels = labels_at(
-        "enum MobAiState { Wander, Combat }\n\
+            "MobAiState",
+            "Combat",
+            "combat_target_grid",
+        ),
+        // `let s: MobAiState = combat` -- the annotation types the slot, so the
+        // variant must outrank the case-exact-prefix wrong-type fn.
+        (
+            "typed_let_init_prioritizes_expected_enum_variant",
+            "enum MobAiState { Wander, Combat }\n\
          fn combat_target_grid(x: int) -> int { return 0 }\n\
          fn r() {\n  let s: MobAiState = combat$0\n}\n",
-    );
-    let variant = labels
-        .iter()
-        .position(|l| l.contains("MobAiState") && l.contains("Combat"));
-    let func = rank_of(&labels, "combat_target_grid");
-    assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
-    assert!(
-        func.is_none() || variant < func,
-        "expected enum variant must outrank wrong-type fn in a typed-let init: {labels:?}"
-    );
-}
-
-#[test]
-fn comparison_rhs_prioritizes_expected_enum_variant() {
-    // `mob.ai_state == combat` -- the compared-against LHS types the slot, so
-    // the variant must outrank the case-exact-prefix wrong-type fn.
-    let labels = labels_at(
-        "enum MobAiState { Wander, Combat }\n\
+            "MobAiState",
+            "Combat",
+            "combat_target_grid",
+        ),
+        // `mob.ai_state == combat` -- the compared-against LHS types the slot, so
+        // the variant must outrank the case-exact-prefix wrong-type fn.
+        (
+            "comparison_rhs_prioritizes_expected_enum_variant",
+            "enum MobAiState { Wander, Combat }\n\
          struct Mob { ai_state: MobAiState }\n\
          fn combat_target_grid(mob: Mob) -> int { return 0 }\n\
          fn use_it(mob: Mob) {\n  if mob.ai_state == combat$0 {\n  }\n}\n",
-    );
-    let variant = labels
-        .iter()
-        .position(|l| l.contains("MobAiState") && l.contains("Combat"));
-    let func = rank_of(&labels, "combat_target_grid");
-    assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
-    assert!(
-        func.is_none() || variant < func,
-        "expected enum variant must outrank wrong-type fn in a comparison RHS: {labels:?}"
-    );
-}
-
-#[test]
-fn null_coalesce_rhs_prioritizes_expected_enum_variant() {
-    // `state ?? combat` with `state: MobAiState?` -- the coalesce RHS expects
-    // the LHS type (nullable stripped by the nominal-head check), so the
-    // variant must outrank the case-exact-prefix wrong-type fn.
-    let labels = labels_at(
-        "enum MobAiState { Wander, Combat }\n\
+            "MobAiState",
+            "Combat",
+            "combat_target_grid",
+        ),
+        // `state ?? combat` with `state: MobAiState?` -- the coalesce RHS expects
+        // the LHS type (nullable stripped by the nominal-head check), so the
+        // variant must outrank the case-exact-prefix wrong-type fn.
+        (
+            "null_coalesce_rhs_prioritizes_expected_enum_variant",
+            "enum MobAiState { Wander, Combat }\n\
          fn combat_target_grid(x: int) -> int { return 0 }\n\
          fn r(state: MobAiState?) {\n  let s = state ?? combat$0\n}\n",
-    );
-    let variant = labels
-        .iter()
-        .position(|l| l.contains("MobAiState") && l.contains("Combat"));
-    let func = rank_of(&labels, "combat_target_grid");
-    assert!(variant.is_some(), "MobAiState::Combat offered: {labels:?}");
-    assert!(
-        func.is_none() || variant < func,
-        "expected enum variant must outrank wrong-type fn in a `??` RHS: {labels:?}"
-    );
+            "MobAiState",
+            "Combat",
+            "combat_target_grid",
+        ),
+    ];
+    for (name, src, enum_name, variant_name, decoy) in cases {
+        let labels = labels_at(src);
+        let variant = labels
+            .iter()
+            .position(|l| l.contains(*enum_name) && l.contains(*variant_name));
+        let func = rank_of(&labels, decoy);
+        assert!(variant.is_some(), "{name}: variant offered: {labels:?}");
+        assert!(
+            func.is_none() || variant < func,
+            "{name}: variant must outrank fn: {labels:?}"
+        );
+    }
 }
 
 #[test]

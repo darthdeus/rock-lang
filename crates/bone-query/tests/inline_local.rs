@@ -49,30 +49,62 @@ fn inlined(src: &str, pos: Position) -> String {
 }
 
 #[test]
-fn inlines_a_binary_initializer_parenthesized_at_every_use() {
-    let src = "fn f() -> int {\n    let x = 1 + 2\n    return x * x\n}\n";
-    // cursor on the binding `x` (line 1, char 8).
-    let out = inlined(src, Position::new(1, 8));
-    assert_eq!(out, "fn f() -> int {\n    return (1 + 2) * (1 + 2)\n}\n");
-}
-
-#[test]
-fn offered_on_a_use_not_only_the_binding() {
-    let src = "fn f() -> int {\n    let x = 1 + 2\n    return x * x\n}\n";
-    // cursor on a USE of `x` (line 2, char 11).
-    let out = inlined(src, Position::new(2, 11));
-    assert_eq!(out, "fn f() -> int {\n    return (1 + 2) * (1 + 2)\n}\n");
-}
-
-#[test]
-fn atomic_initializer_is_not_parenthesized() {
-    let src =
-        "fn f(v: int) -> int {\n    let y = g(v)\n    return y + 1\n}\nfn g(a: int) -> int { a }\n";
-    let out = inlined(src, Position::new(1, 8));
-    assert_eq!(
-        out,
-        "fn f(v: int) -> int {\n    return g(v) + 1\n}\nfn g(a: int) -> int { a }\n"
-    );
+fn inlines_at_every_use() {
+    let cases: &[(&str, &str, (u32, u32), &str)] = &[
+        // cursor on the binding `x` (line 1, char 8).
+        (
+            "inlines_a_binary_initializer_parenthesized_at_every_use",
+            "fn f() -> int {\n    let x = 1 + 2\n    return x * x\n}\n",
+            (1, 8),
+            "fn f() -> int {\n    return (1 + 2) * (1 + 2)\n}\n",
+        ),
+        // cursor on a USE of `x` (line 2, char 11).
+        (
+            "offered_on_a_use_not_only_the_binding",
+            "fn f() -> int {\n    let x = 1 + 2\n    return x * x\n}\n",
+            (2, 11),
+            "fn f() -> int {\n    return (1 + 2) * (1 + 2)\n}\n",
+        ),
+        (
+            "atomic_initializer_is_not_parenthesized",
+            "fn f(v: int) -> int {\n    let y = g(v)\n    return y + 1\n}\nfn g(a: int) -> int { a }\n",
+            (1, 8),
+            "fn f(v: int) -> int {\n    return g(v) + 1\n}\nfn g(a: int) -> int { a }\n",
+        ),
+        // A loop or closure that also holds the `let` re-runs the initializer
+        // anyway, so a single use inside it may still be inlined.
+        (
+            "offered_for_an_impure_initializer_declared_inside_the_same_loop",
+            "fn f(v: int) {\n    for i in 0..3 {\n        let y = g(v)\n        print(y + i)\n    }\n}\nfn g(a: int) -> int { a }\n",
+            (2, 12),
+            "fn f(v: int) {\n    for i in 0..3 {\n        print(g(v) + i)\n    }\n}\nfn g(a: int) -> int { a }\n",
+        ),
+        (
+            "offered_for_a_pure_initializer_used_twice",
+            "struct P {\n    a: int\n}\nfn f(p: P, n: int) -> int {\n    let y = -p.a * n\n    return y + y\n}\n",
+            (4, 8),
+            "struct P {\n    a: int\n}\nfn f(p: P, n: int) -> int {\n    return (-p.a * n) + (-p.a * n)\n}\n",
+        ),
+        // A use that is a whole call argument is delimited by the call's `(`/`,`/`)`,
+        // so it keeps its own precedence without parens; a use inside an operator
+        // still gets them.
+        (
+            "a_use_that_is_a_whole_call_argument_is_not_parenthesized",
+            "fn f() -> int {\n    let x = 1 + 2\n    print(x)\n    g(x, x * 2)\n    return x\n}\nfn g(a: int, b: int) {}\n",
+            (1, 8),
+            "fn f() -> int {\n    print(1 + 2)\n    g(1 + 2, (1 + 2) * 2)\n    return (1 + 2)\n}\nfn g(a: int, b: int) {}\n",
+        ),
+        // A method receiver is not delimited: `(1 + 2).abs()` needs its parens.
+        (
+            "a_use_that_is_a_method_receiver_stays_parenthesized",
+            "fn f() -> int {\n    let x = 1 - 2\n    return x.abs()\n}\n",
+            (1, 8),
+            "fn f() -> int {\n    return (1 - 2).abs()\n}\n",
+        ),
+    ];
+    for (name, src, (line, ch), expected) in cases {
+        assert_eq!(inlined(src, Position::new(*line, *ch)), *expected, "{name}");
+    }
 }
 
 fn offered(src: &str, pos: Position) -> bool {
@@ -111,47 +143,4 @@ fn not_offered_for_an_impure_initializer_used_once_in_a_loop_or_closure() {
     assert!(!offered(whiled, Position::new(1, 8)), "while body");
     let closure = "fn f(v: int) -> int {\n    let y = g(v)\n    let h = () => y\n    return h()\n}\nfn g(a: int) -> int { a }\n";
     assert!(!offered(closure, Position::new(1, 8)), "closure");
-}
-
-/// A loop or closure that also holds the `let` re-runs the initializer
-/// anyway, so a single use inside it may still be inlined.
-#[test]
-fn offered_for_an_impure_initializer_declared_inside_the_same_loop() {
-    let src = "fn f(v: int) {\n    for i in 0..3 {\n        let y = g(v)\n        print(y + i)\n    }\n}\nfn g(a: int) -> int { a }\n";
-    let out = inlined(src, Position::new(2, 12));
-    assert_eq!(
-        out,
-        "fn f(v: int) {\n    for i in 0..3 {\n        print(g(v) + i)\n    }\n}\nfn g(a: int) -> int { a }\n"
-    );
-}
-
-#[test]
-fn offered_for_a_pure_initializer_used_twice() {
-    let src = "struct P {\n    a: int\n}\nfn f(p: P, n: int) -> int {\n    let y = -p.a * n\n    return y + y\n}\n";
-    let out = inlined(src, Position::new(4, 8));
-    assert_eq!(
-        out,
-        "struct P {\n    a: int\n}\nfn f(p: P, n: int) -> int {\n    return (-p.a * n) + (-p.a * n)\n}\n"
-    );
-}
-
-/// A use that is a whole call argument is delimited by the call's `(`/`,`/`)`,
-/// so it keeps its own precedence without parens; a use inside an operator
-/// still gets them.
-#[test]
-fn a_use_that_is_a_whole_call_argument_is_not_parenthesized() {
-    let src = "fn f() -> int {\n    let x = 1 + 2\n    print(x)\n    g(x, x * 2)\n    return x\n}\nfn g(a: int, b: int) {}\n";
-    let out = inlined(src, Position::new(1, 8));
-    assert_eq!(
-        out,
-        "fn f() -> int {\n    print(1 + 2)\n    g(1 + 2, (1 + 2) * 2)\n    return (1 + 2)\n}\nfn g(a: int, b: int) {}\n"
-    );
-}
-
-/// A method receiver is not delimited: `(1 + 2).abs()` needs its parens.
-#[test]
-fn a_use_that_is_a_method_receiver_stays_parenthesized() {
-    let src = "fn f() -> int {\n    let x = 1 - 2\n    return x.abs()\n}\n";
-    let out = inlined(src, Position::new(1, 8));
-    assert_eq!(out, "fn f() -> int {\n    return (1 - 2).abs()\n}\n");
 }

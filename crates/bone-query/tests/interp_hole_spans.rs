@@ -27,51 +27,24 @@ fn def_line_at_hole(line: &str) -> Option<u32> {
         .map(|l| l.range.start.line)
 }
 
-/// The control: no escape before the hole, so nothing can have shifted.
 #[test]
-fn plain_hole_resolves() {
-    assert_eq!(def_line_at_hole("print(\"ab{x} c\")"), Some(1));
-}
-
-#[test]
-fn hole_after_a_newline_escape_resolves() {
-    assert_eq!(def_line_at_hole("print(\"a\\nb{x} c\")"), Some(1));
-}
-
-#[test]
-fn hole_after_several_escapes_resolves() {
-    assert_eq!(def_line_at_hole("print(\"a\\n\\t\\\\b{x} c\")"), Some(1));
-}
-
-#[test]
-fn hole_after_an_escaped_quote_resolves() {
-    assert_eq!(def_line_at_hole("print(\"a\\\"b{x} c\")"), Some(1));
-}
-
-#[test]
-fn hole_after_doubled_braces_resolves() {
-    assert_eq!(def_line_at_hole("print(\"a{{b}}c{x} d\")"), Some(1));
-}
-
-#[test]
-fn hole_after_non_ascii_text_resolves() {
-    assert_eq!(def_line_at_hole("print(\"caf\u{e9} {x} c\")"), Some(1));
-}
-
-#[test]
-fn second_hole_after_an_escape_resolves() {
-    assert_eq!(def_line_at_hole("print(\"a\\nb{x} c {x} d\")"), Some(1));
-}
-
-#[test]
-fn plain_hole_in_a_triple_quoted_string_resolves() {
-    // `"""` is three delimiter bytes, not one.
-    assert_eq!(def_line_at_hole("print(\"\"\"ab{x} c\"\"\")"), Some(1));
-}
-
-#[test]
-fn hole_in_a_triple_quoted_string_resolves() {
-    assert_eq!(def_line_at_hole("print(\"\"\"a\\nb{x} c\"\"\")"), Some(1));
+fn holes_resolve_past_escapes_and_non_ascii_text() {
+    let cases: &[(&str, u32)] = &[
+        // The control: no escape before the hole, so nothing can have shifted.
+        ("print(\"ab{x} c\")", 1),
+        ("print(\"a\\nb{x} c\")", 1),
+        ("print(\"a\\n\\t\\\\b{x} c\")", 1),
+        ("print(\"a\\\"b{x} c\")", 1),
+        ("print(\"a{{b}}c{x} d\")", 1),
+        ("print(\"caf\u{e9} {x} c\")", 1),
+        ("print(\"a\\nb{x} c {x} d\")", 1),
+        // `"""` is three delimiter bytes, not one.
+        ("print(\"\"\"ab{x} c\"\"\")", 1),
+        ("print(\"\"\"a\\nb{x} c\"\"\")", 1),
+    ];
+    for (line, target) in cases {
+        assert_eq!(def_line_at_hole(line), Some(*target), "{line}");
+    }
 }
 
 /// A hole may carry the enclosing literal's escapes (`"{f(\"a\")}"`, real corpus

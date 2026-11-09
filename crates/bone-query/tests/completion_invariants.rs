@@ -3,6 +3,7 @@
 //! position-blind checker (`bone_query::invariants`, hooked into every
 //! corpus helper) cannot see.
 
+use crate::label_asserts::{assert_lacks, assert_offers};
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
 
@@ -87,18 +88,14 @@ fn param_type_slot_offers_types_only() {
          fn wield(x: float) {}\n\
          fn use_weapon(w: W$0) {}\n",
     );
-    assert!(
-        labels.iter().any(|l| l == "Weapon"),
-        "the struct must be offered: {labels:?}"
-    );
+    // the struct must be offered
+    assert_offers(&labels, &["Weapon"]);
     assert!(
         !labels.iter().any(|l| l == "wcount" || l == "w"),
         "value-universe candidates must not appear in a param TYPE slot: {labels:?}"
     );
-    assert!(
-        !labels.iter().any(|l| l == "wield"),
-        "functions must not appear in a param TYPE slot: {labels:?}"
-    );
+    // functions must not appear in a param TYPE slot
+    assert_lacks(&labels, &["wield"]);
 }
 
 #[test]
@@ -110,10 +107,7 @@ fn let_annotation_type_slot_offers_types_only() {
          fn wield(x: float) {}\n\
          fn r() {\n  let x: w$0 = 0\n}\n",
     );
-    assert!(
-        labels.iter().any(|l| l == "Weapon"),
-        "the struct must be offered: {labels:?}"
-    );
+    assert_offers(&labels, &["Weapon"]);
     assert!(
         !labels.iter().any(|l| l == "wcount" || l == "wield"),
         "values/functions must not appear in a let-annotation TYPE slot: {labels:?}"

@@ -81,83 +81,46 @@ fn def(bone: &BoneWorkspace, p: Position) -> (u32, u32) {
 // == Match-pattern references ================================================
 
 #[test]
-fn hover_pattern_variant_shows_the_variant_with_payload() {
-    let b = fresh();
-    // `SpellState::Casting(a, b, c)` pattern -- cursor on `Casting` (col 12).
-    let h = hover(&b, pos("SpellState::Casting(a", 12));
-    assert_eq!(h, VARIANT_CASTING, "pattern variant -> variant + payload");
+fn hover_on_variants_and_enum_qualifiers() {
+    let cases: &[(&str, usize, &str)] = &[
+        // `SpellState::Casting(a, b, c)` pattern -- cursor on `Casting` (col 12).
+        ("SpellState::Casting(a", 12, VARIANT_CASTING),
+        // Same pattern -- cursor on the `SpellState` qualifier (col 0).
+        ("SpellState::Casting(a", 0, ENUM_BODY),
+        // construction variant -> variant + payload
+        ("SpellState::Casting(SpellKind", 12, VARIANT_CASTING),
+        // construction qualifier -> full enum body
+        ("SpellState::Casting(SpellKind", 0, ENUM_BODY),
+        // `enum SpellState {` name on line 0, char 5.
+        ("enum SpellState {", 5, ENUM_BODY),
+        // `    Casting(SpellKind, float, float),` variant name on line 2.
+        ("Casting(SpellKind, float", 0, VARIANT_CASTING),
+    ];
+    for (marker, into, expected) in cases {
+        let b = fresh();
+        assert_eq!(hover(&b, pos(marker, *into)), *expected, "{marker}");
+    }
 }
 
 #[test]
-fn hover_pattern_enum_qualifier_shows_the_enum_body() {
-    let b = fresh();
-    // Same pattern -- cursor on the `SpellState` qualifier (col 0).
-    let h = hover(&b, pos("SpellState::Casting(a", 0));
-    assert_eq!(h, ENUM_BODY, "pattern qualifier -> full enum body");
-}
-
-#[test]
-fn def_pattern_variant_jumps_to_the_variant_decl() {
-    let b = fresh();
-    // `Casting(SpellKind, float, float)` decl is on line 2, char 4.
-    assert_eq!(def(&b, pos("SpellState::Casting(a", 12)), (2, 4));
-}
-
-#[test]
-fn def_pattern_enum_qualifier_jumps_to_the_enum_decl() {
-    let b = fresh();
-    // `enum SpellState` name is on line 0, char 5.
-    assert_eq!(def(&b, pos("SpellState::Casting(a", 0)), (0, 5));
+fn definition_on_variants_and_enum_qualifiers() {
+    let cases: &[(&str, usize, (u32, u32))] = &[
+        // `Casting(SpellKind, float, float)` decl is on line 2, char 4.
+        ("SpellState::Casting(a", 12, (2, 4)),
+        // `enum SpellState` name is on line 0, char 5.
+        ("SpellState::Casting(a", 0, (0, 5)),
+        ("SpellState::Casting(SpellKind", 12, (2, 4)),
+        ("SpellState::Casting(SpellKind", 0, (0, 5)),
+    ];
+    for (marker, into, expected) in cases {
+        let b = fresh();
+        assert_eq!(def(&b, pos(marker, *into)), *expected, "{marker}");
+    }
 }
 
 // == Construction references =================================================
 
-#[test]
-fn hover_construction_variant_shows_the_variant_with_payload() {
-    let b = fresh();
-    let h = hover(&b, pos("SpellState::Casting(SpellKind", 12));
-    assert_eq!(
-        h, VARIANT_CASTING,
-        "construction variant -> variant + payload"
-    );
-}
-
-#[test]
-fn hover_construction_enum_qualifier_shows_the_enum_body() {
-    let b = fresh();
-    let h = hover(&b, pos("SpellState::Casting(SpellKind", 0));
-    assert_eq!(h, ENUM_BODY, "construction qualifier -> full enum body");
-}
-
-#[test]
-fn def_construction_variant_jumps_to_the_variant_decl() {
-    let b = fresh();
-    assert_eq!(def(&b, pos("SpellState::Casting(SpellKind", 12)), (2, 4));
-}
-
-#[test]
-fn def_construction_enum_qualifier_jumps_to_the_enum_decl() {
-    let b = fresh();
-    assert_eq!(def(&b, pos("SpellState::Casting(SpellKind", 0)), (0, 5));
-}
-
 // == Declarations ============================================================
-
-#[test]
-fn hover_enum_declaration_shows_the_full_body() {
-    let b = fresh();
-    // `enum SpellState {` name on line 0, char 5.
-    let h = hover(&b, pos("enum SpellState {", 5));
-    assert_eq!(h, ENUM_BODY, "enum decl name -> full body with payloads");
-}
-
-#[test]
-fn hover_variant_declaration_shows_the_variant() {
-    let b = fresh();
-    // `    Casting(SpellKind, float, float),` variant name on line 2.
-    let h = hover(&b, pos("Casting(SpellKind, float", 0));
-    assert_eq!(h, VARIANT_CASTING, "variant decl name -> variant + payload");
-}
 
 #[test]
 fn qualified_record_paths_keep_canonical_identity_and_token_spans() {
@@ -317,39 +280,31 @@ fn f() {
     }
 
     #[test]
-    fn bare_record_head_hover_shows_variant_payload() {
-        let b = fresh();
-        assert_hover(
-            &b,
-            "Circle { radius: 1",
-            0,
-            "Circle",
-            "```rock\nShape::Circle { radius: float }\n```",
-        );
-    }
-
-    #[test]
-    fn qualified_record_head_hover_shows_variant_payload() {
-        let b = fresh();
-        assert_hover(
-            &b,
-            "Shape::Circle",
-            7,
-            "Circle",
-            "```rock\nShape::Circle { radius: float }\n```",
-        );
-    }
-
-    #[test]
-    fn record_variant_declaration_hover_shows_variant_payload() {
-        let b = fresh();
-        assert_hover(
-            &b,
-            "Circle { radius: float",
-            0,
-            "Circle",
-            "```rock\nShape::Circle { radius: float }\n```",
-        );
+    fn hover_on_record_variant_heads_shows_the_payload() {
+        let cases: &[(&str, usize, &str, &str)] = &[
+            (
+                "Circle { radius: 1",
+                0,
+                "Circle",
+                "```rock\nShape::Circle { radius: float }\n```",
+            ),
+            (
+                "Shape::Circle",
+                7,
+                "Circle",
+                "```rock\nShape::Circle { radius: float }\n```",
+            ),
+            (
+                "Circle { radius: float",
+                0,
+                "Circle",
+                "```rock\nShape::Circle { radius: float }\n```",
+            ),
+        ];
+        for (marker, into, name, expected) in cases {
+            let b = fresh();
+            assert_hover(&b, marker, *into, name, expected);
+        }
     }
 
     #[test]

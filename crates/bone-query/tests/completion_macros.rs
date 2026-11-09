@@ -3,6 +3,7 @@
 //! only source. ctags and semantic tokens already read it; completion must too,
 //! or every macro in the tree is invisible to the editor.
 
+use crate::label_asserts::{assert_lacks, assert_offers};
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
 
@@ -21,10 +22,8 @@ fn labels(src: &str, line: u32, ch: u32) -> Vec<String> {
 fn macro_is_offered_at_an_expression_position() {
     let src = "macro twice(x: expr) {\n    x + x\n}\n\nfn r() {\n    tw\n}\n";
     let got = labels(src, 5, 6);
-    assert!(
-        got.iter().any(|l| l == "twice"),
-        "macro `twice` missing from completion: {got:?}"
-    );
+    // macro `twice` missing from completion
+    assert_offers(&got, &["twice"]);
 }
 
 #[test]
@@ -34,11 +33,7 @@ fn macro_and_fn_are_both_offered_under_a_shared_prefix() {
                fn log_info(msg: string) {}\n\
                fn r() {\n    log_\n}\n";
     let got = labels(src, 5, 8);
-    assert!(
-        got.iter().any(|l| l == "log_once"),
-        "macro missing: {got:?}"
-    );
-    assert!(got.iter().any(|l| l == "log_info"), "fn missing: {got:?}");
+    assert_offers(&got, &["log_once", "log_info"]);
 }
 
 /// Stdlib macros live in the WARM modules, not `Session.files` -- a source that
@@ -48,10 +43,7 @@ fn macro_and_fn_are_both_offered_under_a_shared_prefix() {
 fn stdlib_macro_is_offered() {
     let src = "fn r() {\n    log_o\n}\n";
     let got = labels(src, 1, 9);
-    assert!(
-        got.iter().any(|l| l == "log_once"),
-        "stdlib macro `log_once` missing: {got:?}"
-    );
+    assert_offers(&got, &["log_once"]);
 }
 
 #[test]
@@ -61,8 +53,6 @@ fn macro_is_not_offered_in_a_type_position() {
     let src = "macro twice(x: expr) {\n    x + x\n}\n\nfn r(a: tw) {}\n";
     // Column 10 == directly after `tw`, inside the param's TYPE slot.
     let got = labels(src, 4, 10);
-    assert!(
-        !got.iter().any(|l| l == "twice"),
-        "macro leaked into a type slot: {got:?}"
-    );
+    // macro leaked into a type slot
+    assert_lacks(&got, &["twice"]);
 }

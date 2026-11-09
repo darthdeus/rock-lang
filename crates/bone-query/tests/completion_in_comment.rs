@@ -2,6 +2,7 @@
 //! offers nothing. The `// rock: ...` directive is the one exception, covered
 //! by `completion_magic_comment.rs`.
 
+use crate::label_asserts::assert_offers;
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
 
@@ -19,87 +20,78 @@ fn labels(src: &str, line: u32, ch: u32) -> Vec<String> {
 const HELPER: &str = "fn helper_thing() {}\n";
 
 #[test]
-fn line_comment_offers_nothing() {
-    let src = format!("{HELPER}fn main() {{\n    // plain hel\n}}\n");
-    assert_eq!(labels(&src, 2, 16), Vec::<String>::new());
+fn comment_text_offers_nothing() {
+    let cases: &[(String, u32, u32)] = &[
+        (
+            format!("{HELPER}fn main() {{\n    // plain hel\n}}\n"),
+            2,
+            16,
+        ),
+        (
+            format!("{HELPER}fn main() {{\n    /// docs hel\n}}\n"),
+            2,
+            16,
+        ),
+        (
+            format!("{HELPER}fn main() {{\n    let x = 1 // hel\n}}\n"),
+            2,
+            20,
+        ),
+        (format!("{HELPER}fn main() {{\n    # hash hel\n}}\n"), 2, 14),
+        (
+            format!("{HELPER}fn main() {{\n    /* block hel */\n}}\n"),
+            2,
+            16,
+        ),
+        (
+            format!("{HELPER}fn main() {{\n    /* one\n       hel\n     */\n}}\n"),
+            3,
+            10,
+        ),
+        // LSP characters are UTF-16 units, comment scanning is byte offsets.
+        (
+            format!("{HELPER}fn main() {{\n    // caf\u{e9} hel\n}}\n"),
+            2,
+            15,
+        ),
+    ];
+    for (src, line, ch) in cases {
+        assert_eq!(labels(src, *line, *ch), Vec::<String>::new(), "{src}");
+    }
 }
 
 #[test]
-fn doc_comment_offers_nothing() {
-    let src = format!("{HELPER}fn main() {{\n    /// docs hel\n}}\n");
-    assert_eq!(labels(&src, 2, 16), Vec::<String>::new());
-}
-
-#[test]
-fn trailing_comment_offers_nothing() {
-    let src = format!("{HELPER}fn main() {{\n    let x = 1 // hel\n}}\n");
-    assert_eq!(labels(&src, 2, 20), Vec::<String>::new());
-}
-
-#[test]
-fn hash_comment_offers_nothing() {
-    let src = format!("{HELPER}fn main() {{\n    # hash hel\n}}\n");
-    assert_eq!(labels(&src, 2, 14), Vec::<String>::new());
-}
-
-#[test]
-fn block_comment_offers_nothing() {
-    let src = format!("{HELPER}fn main() {{\n    /* block hel */\n}}\n");
-    assert_eq!(labels(&src, 2, 16), Vec::<String>::new());
-}
-
-#[test]
-fn multi_line_block_comment_offers_nothing() {
-    let src = format!("{HELPER}fn main() {{\n    /* one\n       hel\n     */\n}}\n");
-    assert_eq!(labels(&src, 3, 10), Vec::<String>::new());
-}
-
-#[test]
-fn code_after_a_string_holding_slashes_still_completes() {
-    // `//` inside a string literal does not open a comment -- the completion
-    // after it is real code and must still resolve.
-    let src = format!("{HELPER}fn main() {{\n    let u = \"http://x\"\n    hel\n}}\n");
-    let out = labels(&src, 3, 7);
-    assert!(
-        out.iter().any(|l| l == "helper_thing"),
-        "expected `helper_thing`, got {out:?}"
-    );
-}
-
-#[test]
-fn code_immediately_before_a_comment_still_completes() {
-    let src = format!("{HELPER}fn main() {{\n    hel// note\n}}\n");
-    let out = labels(&src, 2, 7);
-    assert!(
-        out.iter().any(|l| l == "helper_thing"),
-        "expected `helper_thing`, got {out:?}"
-    );
-}
-
-#[test]
-fn conditional_directive_is_not_a_comment() {
-    // `#if` lexes as a directive, not a `#` comment -- code after it completes.
-    let src = format!("{HELPER}fn main() {{\n    #if debug\n    hel\n    #end\n}}\n");
-    let out = labels(&src, 3, 7);
-    assert!(
-        out.iter().any(|l| l == "helper_thing"),
-        "expected `helper_thing`, got {out:?}"
-    );
-}
-
-#[test]
-fn non_ascii_earlier_in_the_comment_keeps_the_offset_aligned() {
-    // LSP characters are UTF-16 units, comment scanning is byte offsets.
-    let src = format!("{HELPER}fn main() {{\n    // caf\u{e9} hel\n}}\n");
-    assert_eq!(labels(&src, 2, 15), Vec::<String>::new());
-}
-
-#[test]
-fn code_after_a_closed_block_comment_still_completes() {
-    let src = format!("{HELPER}fn main() {{\n    /* note */ hel\n}}\n");
-    let out = labels(&src, 2, 18);
-    assert!(
-        out.iter().any(|l| l == "helper_thing"),
-        "expected `helper_thing`, got {out:?}"
-    );
+fn code_outside_comments_still_completes() {
+    let cases: &[(String, u32, u32, &str)] = &[
+        // `//` inside a string literal does not open a comment -- the completion
+        // after it is real code and must still resolve.
+        (
+            format!("{HELPER}fn main() {{\n    let u = \"http://x\"\n    hel\n}}\n"),
+            3,
+            7,
+            "helper_thing",
+        ),
+        (
+            format!("{HELPER}fn main() {{\n    hel// note\n}}\n"),
+            2,
+            7,
+            "helper_thing",
+        ),
+        // `#if` lexes as a directive, not a `#` comment -- code after it completes.
+        (
+            format!("{HELPER}fn main() {{\n    #if debug\n    hel\n    #end\n}}\n"),
+            3,
+            7,
+            "helper_thing",
+        ),
+        (
+            format!("{HELPER}fn main() {{\n    /* note */ hel\n}}\n"),
+            2,
+            18,
+            "helper_thing",
+        ),
+    ];
+    for (src, line, ch, label) in cases {
+        assert_offers(&labels(src, *line, *ch), &[*label]);
+    }
 }

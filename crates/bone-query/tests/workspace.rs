@@ -5,6 +5,7 @@
 //! rest are gap stubs that must return empty (never panic) until bone grows the
 //! query API.
 
+use crate::label_asserts::{assert_lacks, assert_offers};
 use bone_query::BoneWorkspace;
 use lsp_types::Position;
 
@@ -17,6 +18,24 @@ fn fresh(src: &str) -> BoneWorkspace {
     let mut bone = BoneWorkspace::new();
     bone.update(PATH, src.to_string());
     bone
+}
+
+fn completion_labels(bone: &mut BoneWorkspace, line: u32, ch: u32) -> Vec<String> {
+    bone.completion(PATH, Position::new(line, ch))
+        .into_iter()
+        .map(|i| i.label)
+        .collect()
+}
+
+#[track_caller]
+fn hover_text(bone: &BoneWorkspace, line: u32, ch: u32) -> String {
+    let hover = bone
+        .hover(PATH, Position::new(line, ch))
+        .unwrap_or_else(|| panic!("no hover at {line}:{ch}"));
+    match hover.contents {
+        lsp_types::HoverContents::Markup(m) => m.value,
+        other => panic!("expected markup hover, got {other:?}"),
+    }
 }
 
 #[test]
@@ -40,13 +59,7 @@ fn hover_reports_inferred_type() {
 fn hover_reports_uint_without_erasing_its_signedness() {
     let src = "fn main() {\n  let x: uint = 42\n  x\n}\n";
     let bone = fresh(src);
-    let hover = bone
-        .hover(PATH, Position::new(1, 6))
-        .expect("hover should resolve on the uint binding");
-    let text = match hover.contents {
-        lsp_types::HoverContents::Markup(m) => m.value,
-        other => panic!("expected markup hover, got {other:?}"),
-    };
+    let text = hover_text(&bone, 1, 6);
     assert!(
         text.contains("uint"),
         "uint hover must keep the unsigned spelling: {text:?}"
@@ -64,13 +77,7 @@ fn hover_on_type_hole_reports_hole_and_scope() {
     // same info `rock-lsp hole-info` prints, not a bare `Type: int`.
     let src = "fn main() {\n  let count = 5\n  let x: ? = count + 1\n}\n";
     let bone = fresh(src);
-    let hover = bone
-        .hover(PATH, Position::new(2, 9))
-        .expect("hover on the `?` type hole should resolve");
-    let text = match hover.contents {
-        lsp_types::HoverContents::Markup(m) => m.value,
-        other => panic!("expected markup hover, got {other:?}"),
-    };
+    let text = hover_text(&bone, 2, 9);
     assert!(
         text.contains("Type hole"),
         "hover on a hole should label it a hole, got: {text:?}"
@@ -87,13 +94,7 @@ fn hover_on_expression_hole_reports_hole_and_scope() {
     // expression-hole report (expected type + in-scope bindings).
     let src = "fn main() {\n  let a = 1\n  let x: int = ?\n}\n";
     let bone = fresh(src);
-    let hover = bone
-        .hover(PATH, Position::new(2, 15))
-        .expect("hover on the `?` expression hole should resolve");
-    let text = match hover.contents {
-        lsp_types::HoverContents::Markup(m) => m.value,
-        other => panic!("expected markup hover, got {other:?}"),
-    };
+    let text = hover_text(&bone, 2, 15);
     assert!(
         text.contains("Expression hole expecting: int"),
         "hover on an expr hole should report the expected type, got: {text:?}"
@@ -111,13 +112,7 @@ fn hover_on_a_global_declaration_reports_its_type() {
     // expressions, so hover_at needs an item fallback for globals.)
     let src = "global score: int\nfn main() {}\n";
     let bone = fresh(src);
-    let hover = bone
-        .hover(PATH, Position::new(0, 9))
-        .expect("hover on the global declaration name should resolve");
-    let text = match hover.contents {
-        lsp_types::HoverContents::Markup(m) => m.value,
-        other => panic!("expected markup hover, got {other:?}"),
-    };
+    let text = hover_text(&bone, 0, 9);
     assert!(
         text.contains("int"),
         "global decl hover names its type: {text:?}"
@@ -131,13 +126,7 @@ fn hover_on_a_type_annotation_shows_the_definition() {
     // node_index; the LocalTy/StaticTy arm renders them.)
     let src = "struct Mob { hp: int }\nfn main() {\n  let m: Mob = Mob { hp: 1 }\n}\n";
     let bone = fresh(src);
-    let hover = bone
-        .hover(PATH, Position::new(2, 10))
-        .expect("hover on the `Mob` type annotation should resolve");
-    let text = match hover.contents {
-        lsp_types::HoverContents::Markup(m) => m.value,
-        other => panic!("expected markup hover, got {other:?}"),
-    };
+    let text = hover_text(&bone, 2, 10);
     assert!(
         text.contains("struct Mob"),
         "shows the struct def: {text:?}"
@@ -176,13 +165,7 @@ fn hover_on_a_struct_field_declaration_shows_field_of() {
         "struct FixVec2 { x: float, y: float }\nstruct Mob {\n  pos: FixVec2,\n  dir: int,\n}\n";
     let bone = fresh(src);
     // `pos` on line 2 at col 2.
-    let hover = bone
-        .hover(PATH, Position::new(2, 3))
-        .expect("hover on a struct field decl name should resolve");
-    let text = match hover.contents {
-        lsp_types::HoverContents::Markup(m) => m.value,
-        other => panic!("expected markup hover, got {other:?}"),
-    };
+    let text = hover_text(&bone, 2, 3);
     assert!(
         text.contains("pos: FixVec2 (field of Mob)"),
         "field-of hover: {text:?}"
@@ -195,13 +178,7 @@ fn hover_on_a_newtype_declaration_names_it_not_an_op() {
     // `__op_add` (whose name_span is the newtype name). It must show the newtype.
     let src = "newtype Health(int)\nfn main() {}\n";
     let bone = fresh(src);
-    let hover = bone
-        .hover(PATH, Position::new(0, 9))
-        .expect("hover on the newtype decl name should resolve");
-    let text = match hover.contents {
-        lsp_types::HoverContents::Markup(m) => m.value,
-        other => panic!("expected markup hover, got {other:?}"),
-    };
+    let text = hover_text(&bone, 0, 9);
     assert!(
         text.contains("newtype Health(int)"),
         "newtype hover: {text:?}"
@@ -218,13 +195,7 @@ fn hover_on_a_struct_record_pattern_head_shows_the_struct() {
         "struct Mob { hp: int }\nfn f(m: Mob) {\n  match m {\n    Mob { hp: _h } => {}\n  }\n}\n";
     let bone = fresh(src);
     // `Mob` head on line 3 at col 4.
-    let hover = bone
-        .hover(PATH, Position::new(3, 5))
-        .expect("hover on a struct record-pattern head should resolve");
-    let text = match hover.contents {
-        lsp_types::HoverContents::Markup(m) => m.value,
-        other => panic!("expected markup hover, got {other:?}"),
-    };
+    let text = hover_text(&bone, 3, 5);
     assert!(
         text.contains("struct Mob"),
         "record-pat head -> struct: {text:?}"
@@ -270,13 +241,7 @@ fn hover_on_a_global_type_annotation_shows_the_definition() {
     let src = "struct Mob { hp: int }\nglobal boss: Mob\nfn main() {}\n";
     let bone = fresh(src);
     // `Mob` in `global boss: Mob` is at col 13 on line 1.
-    let hover = bone
-        .hover(PATH, Position::new(1, 14))
-        .expect("hover on the global's type annotation should resolve");
-    let text = match hover.contents {
-        lsp_types::HoverContents::Markup(m) => m.value,
-        other => panic!("expected markup hover, got {other:?}"),
-    };
+    let text = hover_text(&bone, 1, 14);
     assert!(
         text.contains("struct Mob"),
         "shows the struct def: {text:?}"
@@ -288,13 +253,7 @@ fn hover_on_a_global_type_annotation_shows_the_definition() {
 fn hover_on_an_enum_declaration_names_it() {
     let src = "enum Color { Red, Green }\nfn main() {}\n";
     let bone = fresh(src);
-    let hover = bone
-        .hover(PATH, Position::new(0, 6))
-        .expect("hover on the enum declaration name should resolve");
-    let text = match hover.contents {
-        lsp_types::HoverContents::Markup(m) => m.value,
-        other => panic!("expected markup hover, got {other:?}"),
-    };
+    let text = hover_text(&bone, 0, 6);
     assert!(
         text.contains("Color"),
         "enum decl hover names the enum: {text:?}"
@@ -1383,15 +1342,8 @@ fn completion_includes_in_scope_locals_and_params() {
     // fresh `t` on line 2 -> the local `total` is offered.
     let src = "fn f(count: int) -> int {\n  let total = 5\n  t\n}\n";
     let mut bone = fresh(src);
-    let labels: Vec<String> = bone
-        .completion(PATH, Position::new(2, 3))
-        .into_iter()
-        .map(|i| i.label)
-        .collect();
-    assert!(
-        labels.iter().any(|l| l == "total"),
-        "local `total` (prefix `t`): {labels:?}"
-    );
+    let labels = completion_labels(&mut bone, 2, 3);
+    assert_offers(&labels, &["total"]);
 
     // param `count` is in scope throughout the body -> offered on prefix `c`.
     let src2 = "fn f(count: int) -> int {\n  let total = 5\n  c\n}\n";
@@ -1402,10 +1354,7 @@ fn completion_includes_in_scope_locals_and_params() {
         .into_iter()
         .map(|i| i.label)
         .collect();
-    assert!(
-        labels2.iter().any(|l| l == "count"),
-        "param `count` (prefix `c`): {labels2:?}"
-    );
+    assert_offers(&labels2, &["count"]);
 }
 
 #[test]
@@ -1413,15 +1362,9 @@ fn completion_excludes_locals_declared_after_the_cursor() {
     // Completing on line 1 (`l`) must not offer `later`, declared on line 2.
     let src = "fn f() -> int {\n  l\n  let later = 5\n  later\n}\n";
     let mut bone = fresh(src);
-    let labels: Vec<String> = bone
-        .completion(PATH, Position::new(1, 3))
-        .into_iter()
-        .map(|i| i.label)
-        .collect();
-    assert!(
-        !labels.iter().any(|l| l == "later"),
-        "`later` is declared after the cursor: {labels:?}"
-    );
+    let labels = completion_labels(&mut bone, 1, 3);
+    // `later` is declared after the cursor
+    assert_lacks(&labels, &["later"]);
 }
 
 #[test]
@@ -1430,19 +1373,8 @@ fn completion_offers_struct_fields_on_broken_dot() {
     // must still resolve `p`'s struct fields. param receiver.
     let src = "struct Point { x: int, y: int }\nfn f(p: Point) {\n  p.\n}\n";
     let mut bone = fresh(src);
-    let labels: Vec<String> = bone
-        .completion(PATH, Position::new(2, 4))
-        .into_iter()
-        .map(|i| i.label)
-        .collect();
-    assert!(
-        labels.iter().any(|l| l == "x: int"),
-        "field `x: int`: {labels:?}"
-    );
-    assert!(
-        labels.iter().any(|l| l == "y: int"),
-        "field `y: int`: {labels:?}"
-    );
+    let labels = completion_labels(&mut bone, 2, 4);
+    assert_offers(&labels, &["x: int", "y: int"]);
 }
 
 #[test]
@@ -1450,34 +1382,18 @@ fn completion_member_on_struct_literal_let_and_chain() {
     // receiver `p` is an inferred `let` bound to a struct literal; chained field.
     let src = "struct FixVec2 { x: float, y: float }\nstruct Player { pos: FixVec2, name: string }\nfn main() {\n  let p = Player { pos: FixVec2 { x: 0.0, y: 0.0 }, name: \"h\" }\n  p.pos.\n}\n";
     let mut bone = fresh(src);
-    let labels: Vec<String> = bone
-        .completion(PATH, Position::new(4, 8))
-        .into_iter()
-        .map(|i| i.label)
-        .collect();
-    assert!(
-        labels.iter().any(|l| l == "x: float"),
-        "chained field `x: float`: {labels:?}"
-    );
+    let labels = completion_labels(&mut bone, 4, 8);
+    assert_offers(&labels, &["x: float"]);
 }
 
 #[test]
 fn completion_member_filters_by_field_prefix() {
     let src = "struct Player { position_x: float, health: float }\nfn foo(player: Player) {\n  player.pos\n}\n";
     let mut bone = fresh(src);
-    let labels: Vec<String> = bone
-        .completion(PATH, Position::new(2, 12))
-        .into_iter()
-        .map(|i| i.label)
-        .collect();
-    assert!(
-        labels.iter().any(|l| l == "position_x: float"),
-        "prefix `pos`: {labels:?}"
-    );
-    assert!(
-        !labels.iter().any(|l| l == "health: float"),
-        "`health` excluded by prefix `pos`: {labels:?}"
-    );
+    let labels = completion_labels(&mut bone, 2, 12);
+    assert_offers(&labels, &["position_x: float"]);
+    // `health` excluded by prefix `pos`
+    assert_lacks(&labels, &["health: float"]);
 }
 
 #[test]
@@ -1486,30 +1402,15 @@ fn completion_member_on_for_loop_var() {
     // iterable `[Item]`. Resolved structurally (no inference).
     let src = "struct Item { name: string, count: int }\nfn main() {\n  let items: [Item] = vec_new()\n  for item in items {\n    item.\n  }\n}\n";
     let mut bone = fresh(src);
-    let labels: Vec<String> = bone
-        .completion(PATH, Position::new(4, 9))
-        .into_iter()
-        .map(|i| i.label)
-        .collect();
-    assert!(
-        labels.iter().any(|l| l == "name: string"),
-        "loop-var field `name`: {labels:?}"
-    );
-    assert!(
-        labels.iter().any(|l| l == "count: int"),
-        "loop-var field `count`: {labels:?}"
-    );
+    let labels = completion_labels(&mut bone, 4, 9);
+    assert_offers(&labels, &["name: string", "count: int"]);
 }
 
 #[test]
 fn completion_enum_qualified_lists_variants() {
     let src = "enum Direction { Up, Down, Left, Right }\nfn main() {\n  let d = Direction::\n}\n";
     let mut bone = fresh(src);
-    let labels: Vec<String> = bone
-        .completion(PATH, Position::new(2, 21))
-        .into_iter()
-        .map(|i| i.label)
-        .collect();
+    let labels = completion_labels(&mut bone, 2, 21);
     for v in ["Up", "Down", "Left", "Right"] {
         assert!(
             labels.iter().any(|l| l == v),
@@ -1523,38 +1424,16 @@ fn completion_member_on_match_pattern_binding() {
     // `p` is bound by `Opt::Some(p)`; its struct is the variant's payload type.
     let src = "struct Point { x: int, y: int }\nenum Opt { None, Some(Point) }\nfn main() {\n  let o = Opt::Some(Point { x: 1, y: 2 })\n  match o {\n    Opt::Some(p) => p.\n    Opt::None => {}\n  }\n}\n";
     let mut bone = fresh(src);
-    let labels: Vec<String> = bone
-        .completion(PATH, Position::new(5, 22))
-        .into_iter()
-        .map(|i| i.label)
-        .collect();
-    assert!(
-        labels.iter().any(|l| l == "x: int"),
-        "pattern-bound field `x`: {labels:?}"
-    );
-    assert!(
-        labels.iter().any(|l| l == "y: int"),
-        "pattern-bound field `y`: {labels:?}"
-    );
+    let labels = completion_labels(&mut bone, 5, 22);
+    assert_offers(&labels, &["x: int", "y: int"]);
 }
 
 #[test]
 fn completion_enum_record_variant_fields() {
     let src = "enum Effect { Bandage { duration: float, heal_amount: int }, Other(int) }\nfn main() {\n  let e = Effect::Bandage { \n}\n";
     let mut bone = fresh(src);
-    let labels: Vec<String> = bone
-        .completion(PATH, Position::new(2, 27))
-        .into_iter()
-        .map(|i| i.label)
-        .collect();
-    assert!(
-        labels.iter().any(|l| l == "duration: float"),
-        "record field `duration`: {labels:?}"
-    );
-    assert!(
-        labels.iter().any(|l| l == "heal_amount: int"),
-        "record field `heal_amount`: {labels:?}"
-    );
+    let labels = completion_labels(&mut bone, 2, 27);
+    assert_offers(&labels, &["duration: float", "heal_amount: int"]);
 }
 
 #[test]
