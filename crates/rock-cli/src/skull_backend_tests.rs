@@ -202,6 +202,137 @@ fn allocation_report_writer_is_explicit_and_writes_the_compiler_report() {
 mod overlay_test_support;
 use overlay_test_support::*;
 
+/// A project whose only source is `main.rock`, compiled once at boot.
+struct ProjectFixture {
+    dir: tempfile::TempDir,
+    root: String,
+    project: super::IncrementalProject,
+    main: std::path::PathBuf,
+    incremental: std::path::PathBuf,
+    source: std::path::PathBuf,
+}
+
+impl ProjectFixture {
+    fn boot(source_text: &str) -> Self {
+        Self::try_boot(source_text).expect("initial build")
+    }
+
+    fn try_boot(source_text: &str) -> anyhow::Result<Self> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().to_str().expect("tempdir path").to_string();
+        let main = dir.path().join("main.lua");
+        let incremental = dir.path().join("incremental.lua");
+        let source = dir.path().join("main.rock");
+        std::fs::write(&source, source_text).expect("initial source");
+        let project = super::IncrementalProject::init(&root, &main, &incremental)?;
+        Ok(Self {
+            dir,
+            root,
+            project,
+            main,
+            incremental,
+            source,
+        })
+    }
+
+    /// Replace `main.rock` and recompile it through the production route.
+    fn edit(&mut self, text: &str) -> anyhow::Result<super::SkullReload> {
+        std::fs::write(&self.source, text).expect("edited source");
+        self.project.recompile(
+            std::slice::from_ref(&self.source),
+            &self.main,
+            &self.incremental,
+        )
+    }
+
+    fn force_full(&mut self) -> anyhow::Result<()> {
+        self.project.force_full(&self.main, &self.incremental)
+    }
+
+    fn main_text(&self) -> String {
+        std::fs::read_to_string(&self.main).expect("generated main.lua")
+    }
+
+    fn overlay_text(&self) -> String {
+        std::fs::read_to_string(&self.incremental).expect("generated incremental.lua")
+    }
+}
+
+fn files(src: &str) -> Vec<bone_incremental::session::SessionFile> {
+    vec![bone_incremental::session::SessionFile::legacy(
+        "main.rock",
+        src,
+    )]
+}
+
+/// Random call graphs shared by the incremental and overlay fuzzers: every fn is
+/// `-> int` and calls only lower-indexed fns, so each program type-checks and
+/// the graph is a DAG.
+mod fuzz_graph {
+    pub struct Rng(pub u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+        pub fn pick(&mut self, n: usize) -> usize {
+            (self.next() as usize) % n.max(1)
+        }
+    }
+
+    #[derive(Clone)]
+    pub enum Body {
+        Const(i64),
+        Call(usize), // calls f{j}, j < i (DAG, inlinable, no recursion)
+    }
+
+    /// A mix of consts and call edges so inlining is exercised from step 0.
+    pub fn initial_bodies(rng: &mut Rng, n_fns: usize) -> Vec<Body> {
+        (0..n_fns)
+            .map(|i| {
+                if i > 0 && rng.pick(2) == 0 {
+                    Body::Call(rng.pick(i))
+                } else {
+                    Body::Const(rng.pick(1000) as i64)
+                }
+            })
+            .collect()
+    }
+
+    /// `@inline` on every fn so the call graph actually inlines under the
+    /// annotation-gated policy; the fuzzers exist to exercise inline-dependency
+    /// re-emit (a leaf edit must re-emit its inliners).
+    pub fn render(bodies: &[Body]) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::new();
+        for (i, b) in bodies.iter().enumerate() {
+            match b {
+                Body::Const(k) => {
+                    let _ = writeln!(s, "@inline\nfn f{i}() -> int {{ {k} }}");
+                }
+                Body::Call(j) => {
+                    let _ = writeln!(s, "@inline\nfn f{i}() -> int {{ f{j}() }}");
+                }
+            }
+        }
+        s
+    }
+
+    /// Mutate one body to a new valid form; returns the index changed.
+    pub fn mutate(bodies: &mut [Body], rng: &mut Rng) -> usize {
+        let i = rng.pick(bodies.len());
+        bodies[i] = if i == 0 || rng.pick(2) == 0 {
+            Body::Const(rng.pick(1000) as i64)
+        } else {
+            Body::Call(rng.pick(i))
+        };
+        i
+    }
+}
+
 #[cfg(test)]
 mod incremental_watch_tests {
     //! Session edit oracles for `emit_incremental`: byte identity with fresh builds
@@ -209,14 +340,8 @@ mod incremental_watch_tests {
     //! can differ from a fresh build. Mirrors `skull/tests/incremental_emit.rs`
     //! through the actual Session edit path, covering whether `reinferred` is enough.
 
+    use super::files;
     use crate::bone_backend::bone_session;
-
-    fn files(src: &str) -> Vec<bone_incremental::session::SessionFile> {
-        vec![bone_incremental::session::SessionFile::legacy(
-            "main.rock",
-            src,
-        )]
-    }
 
     #[test]
     fn session_body_edit_incremental_matches_fresh() {
@@ -410,56 +535,7 @@ mod incremental_watch_tests {
     // (edited) workspace — the fresh build is the ground truth. A divergence means
     // a chunk that should have re-emitted (an inline-dependent caller) didn't.
 
-    struct Rng(u64);
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            self.0 >> 33
-        }
-        fn pick(&mut self, n: usize) -> usize {
-            (self.next() as usize) % n.max(1)
-        }
-    }
-
-    #[derive(Clone)]
-    enum Body {
-        Const(i64),
-        Call(usize), // calls f{j}, j < i (DAG, inlinable, no recursion)
-    }
-
-    fn render(bodies: &[Body]) -> String {
-        use std::fmt::Write as _;
-        let mut s = String::new();
-        // `@inline` on every fn so the call graph actually inlines under the
-        // default annotation-gated policy -- this fuzz's whole point is to
-        // exercise inline-dependency re-emit (a leaf edit must re-emit its
-        // inliners) + InlineCache invalidation across edits.
-        for (i, b) in bodies.iter().enumerate() {
-            match b {
-                Body::Const(k) => {
-                    let _ = writeln!(s, "@inline\nfn f{i}() -> int {{ {k} }}");
-                }
-                Body::Call(j) => {
-                    let _ = writeln!(s, "@inline\nfn f{i}() -> int {{ f{j}() }}");
-                }
-            }
-        }
-        s
-    }
-
-    /// Mutate one body to a new valid form; returns the index changed.
-    fn mutate(bodies: &mut [Body], rng: &mut Rng) -> usize {
-        let i = rng.pick(bodies.len());
-        bodies[i] = if i == 0 || rng.pick(2) == 0 {
-            Body::Const(rng.pick(1000) as i64)
-        } else {
-            Body::Call(rng.pick(i)) // some lower-indexed fn -> inline edge
-        };
-        i
-    }
+    use super::fuzz_graph::{Body, Rng, initial_bodies, mutate, render};
 
     fn assert_fuzz_values(lua: &str, calls: &str, expected: &str, context: &str) {
         match super::exec_lua(&format!("{lua}\n{calls}")) {
@@ -471,16 +547,7 @@ mod incremental_watch_tests {
     /// `run_values` also executes both artifacts under LuaJIT after each edit.
     fn run_fuzz(seed: u64, n_fns: usize, steps: usize, run_values: bool) {
         let mut rng = Rng(seed.max(1));
-        // Start: a mix of consts and call edges so inlining is exercised from step 0.
-        let mut bodies: Vec<Body> = (0..n_fns)
-            .map(|i| {
-                if i > 0 && rng.pick(2) == 0 {
-                    Body::Call(rng.pick(i))
-                } else {
-                    Body::Const(rng.pick(1000) as i64)
-                }
-            })
-            .collect();
+        let mut bodies = initial_bodies(&mut rng, n_fns);
 
         let mut session = bone_session(files(&render(&bodies))).expect("fuzz session init");
         let mid = skull::user_module_id(session.workspace()).unwrap();
@@ -755,6 +822,7 @@ mod overlay_runtime_tests {
     //! cache, and compose `frozen_baseline ++ overlay` against a fresh `emit_full`.
 
     use super::super::{IncrementalProject, SkullReload};
+    use super::files;
     use super::{ExecOutcome, emit_overlay_checked, exec_lua, normalize_stdout};
     use crate::bone_backend::bone_session;
     use std::path::Path;
@@ -938,13 +1006,6 @@ mod overlay_runtime_tests {
                 panic!("{ctx}: fresh full build runs but composed (baseline+overlay) errors")
             }
         }
-    }
-
-    fn files(src: &str) -> Vec<bone_incremental::session::SessionFile> {
-        vec![bone_incremental::session::SessionFile::legacy(
-            "main.rock",
-            src,
-        )]
     }
 
     /// Reads a yielded event in the fixtures below.
@@ -1460,44 +1521,14 @@ mod overlay_runtime_tests {
     // them) into the overlay; a dropped accumulation or a missed caller re-emit
     // surfaces as a wrong line of output.
 
-    struct Rng(u64);
-    impl Rng {
-        fn next(&mut self) -> u64 {
-            self.0 = self
-                .0
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            self.0 >> 33
-        }
-        fn pick(&mut self, n: usize) -> usize {
-            (self.next() as usize) % n.max(1)
-        }
-    }
-
-    #[derive(Clone)]
-    enum Body {
-        Const(i64),
-        Call(usize), // f{j}, j < i: a DAG inline edge (no recursion)
-    }
+    use super::fuzz_graph::{Rng, initial_bodies, mutate, render};
 
     /// Render the f-graph plus a stable `main` that prints every fN on its own
     /// line. `main` is never mutated; it inlines the leaf fns, so it lands in the
     /// overlay whenever any callee it reaches changes.
-    fn render(bodies: &[Body]) -> String {
+    fn render_with_main(bodies: &[super::fuzz_graph::Body]) -> String {
         use std::fmt::Write as _;
-        let mut s = String::new();
-        // `@inline` so the graph actually inlines under the default policy -- the
-        // overlay accumulation fuzz must exercise inlined-callee re-emit at runtime.
-        for (i, b) in bodies.iter().enumerate() {
-            match b {
-                Body::Const(k) => {
-                    let _ = writeln!(s, "@inline\nfn f{i}() -> int {{ {k} }}");
-                }
-                Body::Call(j) => {
-                    let _ = writeln!(s, "@inline\nfn f{i}() -> int {{ f{j}() }}");
-                }
-            }
-        }
+        let mut s = render(bodies);
         let _ = write!(s, "fn main() {{");
         for i in 0..bodies.len() {
             let _ = write!(s, " print(\"{{f{i}()}}\")");
@@ -1506,29 +1537,11 @@ mod overlay_runtime_tests {
         s
     }
 
-    fn mutate(bodies: &mut [Body], rng: &mut Rng) -> usize {
-        let i = rng.pick(bodies.len());
-        bodies[i] = if i == 0 || rng.pick(2) == 0 {
-            Body::Const(rng.pick(1000) as i64)
-        } else {
-            Body::Call(rng.pick(i))
-        };
-        i
-    }
-
     fn run_overlay_fuzz(seed: u64, n_fns: usize, steps: usize) {
         let mut rng = Rng(seed.max(1));
-        let mut bodies: Vec<Body> = (0..n_fns)
-            .map(|i| {
-                if i > 0 && rng.pick(2) == 0 {
-                    Body::Call(rng.pick(i))
-                } else {
-                    Body::Const(rng.pick(1000) as i64)
-                }
-            })
-            .collect();
+        let mut bodies = initial_bodies(&mut rng, n_fns);
 
-        let v0 = render(&bodies);
+        let v0 = render_with_main(&bodies);
         let mut session = bone_session(files(&v0))
             .unwrap_or_else(|e| panic!("seed {seed}: session init: {}", e.message));
         let mid = skull::user_module_id(session.workspace()).unwrap();
@@ -1540,7 +1553,7 @@ mod overlay_runtime_tests {
 
         for step in 0..steps {
             let changed = mutate(&mut bodies, &mut rng);
-            let text = render(&bodies);
+            let text = render_with_main(&bodies);
             let result = session
                 .update_file("main.rock", &text)
                 .unwrap_or_else(|e| panic!("seed {seed} step {step}: update_file: {}", e.message));
@@ -2792,27 +2805,8 @@ mod shape_drift_tests {
     //! `struct_field_add_full_reload_nil_poisons_live_instances` and
     //! `value_struct_reorder_full_reload_is_caught_by_the_layout_check`.
 
-    use super::super::{IncrementalProject, SkullReload};
-    use std::path::PathBuf;
-
-    fn boot(
-        v0: &str,
-    ) -> (
-        tempfile::TempDir,
-        IncrementalProject,
-        PathBuf,
-        PathBuf,
-        PathBuf,
-    ) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let dir_str = dir.path().to_str().unwrap().to_string();
-        let main_lua = dir.path().join("main.lua");
-        let inc_lua = dir.path().join("incremental.lua");
-        let rock = dir.path().join("main.rock");
-        std::fs::write(&rock, v0).unwrap();
-        let project = IncrementalProject::init(&dir_str, &main_lua, &inc_lua).expect("init");
-        (dir, project, main_lua, inc_lua, rock)
-    }
+    use super::super::SkullReload;
+    use super::ProjectFixture;
 
     #[test]
     fn struct_shape_edit_requests_restart_and_defers_the_write() {
@@ -2826,13 +2820,10 @@ mod shape_drift_tests {
                   @nomangle\n\
                   fn spawn() { M = Mob { hp: 10, armor: 5 } }\n\
                   fn main() { }\n";
-        let (_dir, mut project, main_lua, inc_lua, rock) = boot(v0);
-        let baseline = std::fs::read_to_string(&main_lua).unwrap();
+        let mut fx = ProjectFixture::boot(v0);
+        let baseline = fx.main_text();
 
-        std::fs::write(&rock, v1).unwrap();
-        let reload = project
-            .recompile(std::slice::from_ref(&rock), &main_lua, &inc_lua)
-            .expect("recompile v1");
+        let reload = fx.edit(v1).expect("recompile v1");
         match &reload {
             SkullReload::ShapeChanged { types } => assert!(
                 types.iter().any(|t| t == "Mob"),
@@ -2843,24 +2834,22 @@ mod shape_drift_tests {
             }
         }
         assert_eq!(
-            std::fs::read_to_string(&main_lua).unwrap(),
+            fx.main_text(),
             baseline,
             "the new-shape main.lua write must be DEFERRED -- the old process must never dofile it"
         );
 
         // The restart path canonicalizes: force_full writes the new program.
-        project.force_full(&main_lua, &inc_lua).expect("force_full");
+        fx.force_full().expect("force_full");
         assert_ne!(
-            std::fs::read_to_string(&main_lua).unwrap(),
+            fx.main_text(),
             baseline,
             "canonicalize after the kill must write the deferred new-shape program"
         );
 
         // Re-baselined: recompiling the same source again is a no-op, not a
         // second restart request.
-        let again = project
-            .recompile(&[rock], &main_lua, &inc_lua)
-            .expect("recompile same");
+        let again = fx.edit(v1).expect("recompile same");
         assert!(
             matches!(again, SkullReload::NoChange),
             "the shape delta must be consumed by the restart, got {again:?}"
@@ -2879,11 +2868,8 @@ mod shape_drift_tests {
                   global SPOT: NV2 = NV2 { x: 1.0, y: 2.0 }\nfn main() { }\n";
         let v1 = "nobox value NV2 { x: float, y: float }\n\
                   global SPOT: NV2 = NV2 { x: 1.0, y: 2.0 }\nfn main() { }\n";
-        let (_dir, mut project, main_lua, inc_lua, rock) = boot(v0);
-        std::fs::write(&rock, v1).unwrap();
-        let reload = project
-            .recompile(&[rock], &main_lua, &inc_lua)
-            .expect("recompile v1");
+        let mut fx = ProjectFixture::boot(v0);
+        let reload = fx.edit(v1).expect("recompile v1");
         assert!(
             matches!(&reload, SkullReload::ShapeChanged { types } if types.iter().any(|t| t == "NV2")),
             "a nobox flip relocates live global storage -- must restart, got {reload:?}"
@@ -2894,11 +2880,8 @@ mod shape_drift_tests {
     fn value_struct_layout_edit_requests_restart() {
         let v0 = "value P { x: int, y: int }\nfn probe(p: P) -> int { p.x }\nfn main() { }\n";
         let v1 = "value P { y: int, x: int }\nfn probe(p: P) -> int { p.x }\nfn main() { }\n";
-        let (_dir, mut project, main_lua, inc_lua, rock) = boot(v0);
-        std::fs::write(&rock, v1).unwrap();
-        let reload = project
-            .recompile(&[rock], &main_lua, &inc_lua)
-            .expect("recompile v1");
+        let mut fx = ProjectFixture::boot(v0);
+        let reload = fx.edit(v1).expect("recompile v1");
         assert!(
             matches!(&reload, SkullReload::ShapeChanged { types } if types.iter().any(|t| t == "P")),
             "a value-struct field reorder freezes against the process ctype -- must restart, got {reload:?}"
@@ -2909,18 +2892,16 @@ mod shape_drift_tests {
     fn mutable_global_membership_edit_requests_restart_and_keeps_old_global_layout() {
         let v0 = "global A: int = 1\nfn main() { }\n";
         let v1 = "global A: int = 1\nglobal B: int = 2\nfn main() { }\n";
-        let (_dir, mut project, main_lua, inc_lua, rock) = boot(v0);
-        let baseline = std::fs::read_to_string(&main_lua).expect("baseline");
-        let old_layout = project
+        let mut fx = ProjectFixture::boot(v0);
+        let baseline = fx.main_text();
+        let old_layout = fx
+            .project
             .cache
             .global_layout()
             .expect("baseline global layout")
             .to_string();
 
-        std::fs::write(&rock, v1).expect("edited source");
-        let reload = project
-            .recompile(std::slice::from_ref(&rock), &main_lua, &inc_lua)
-            .expect("membership edit");
+        let reload = fx.edit(v1).expect("membership edit");
         match reload {
             SkullReload::FullRequired { reasons } => assert!(
                 reasons
@@ -2931,12 +2912,12 @@ mod shape_drift_tests {
             other => panic!("adding a mutable global must require restart, got {other:?}"),
         }
         assert_eq!(
-            std::fs::read_to_string(&main_lua).expect("main after refusal"),
+            fx.main_text(),
             baseline,
             "an incompatible layout must not replace the old process artifact"
         );
         assert_eq!(
-            project
+            fx.project
                 .cache
                 .global_layout()
                 .expect("retained global layout"),
@@ -2944,10 +2925,8 @@ mod shape_drift_tests {
             "a refused publication must retain the old global layout"
         );
 
-        project
-            .force_full(&main_lua, &inc_lua)
-            .expect("restart canonicalization");
-        let current = std::fs::read_to_string(&main_lua).expect("new main");
+        fx.force_full().expect("restart canonicalization");
+        let current = fx.main_text();
         assert_ne!(
             current, baseline,
             "force_full must materialize the new layout"
@@ -2957,7 +2936,7 @@ mod shape_drift_tests {
             "the new logical global identity must be present in the published directory: {current}"
         );
         assert_ne!(
-            project.cache.global_layout().expect("new global layout"),
+            fx.project.cache.global_layout().expect("new global layout"),
             old_layout,
             "restart canonicalization must publish the changed layout"
         );
@@ -2974,21 +2953,15 @@ mod shape_drift_tests {
         let sig = "struct Mob { hp: int }\n\
                    fn heal(m: Mob, bonus: int) -> int { m.hp + bonus }\n\
                    fn main() { }\n";
-        let (_dir, mut project, main_lua, inc_lua, rock) = boot(v0);
+        let mut fx = ProjectFixture::boot(v0);
 
-        std::fs::write(&rock, body).unwrap();
-        let reload = project
-            .recompile(std::slice::from_ref(&rock), &main_lua, &inc_lua)
-            .expect("body edit");
+        let reload = fx.edit(body).expect("body edit");
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
             "a body edit must stay a hot overlay, got {reload:?}"
         );
 
-        std::fs::write(&rock, sig).unwrap();
-        let reload = project
-            .recompile(&[rock], &main_lua, &inc_lua)
-            .expect("sig edit");
+        let reload = fx.edit(sig).expect("sig edit");
         assert!(
             matches!(reload, SkullReload::Full { .. }),
             "a signature-only edit carries no data-shape drift -- full reload, NOT a restart, got {reload:?}"
@@ -3009,19 +2982,16 @@ mod shape_drift_tests {
                   }\n\
                   global KEY: string = rock_shader(frag)\n\
                   fn main() { }\n";
-        let (_dir, mut project, main_lua, inc_lua, rock) = boot(v0);
-        let baseline = std::fs::read_to_string(&main_lua).unwrap();
+        let mut fx = ProjectFixture::boot(v0);
+        let baseline = fx.main_text();
         assert!(baseline.contains("__rock_shader_register(\"frag\""));
 
-        std::fs::write(&rock, v1).unwrap();
-        let reload = project
-            .recompile(&[rock], &main_lua, &inc_lua)
-            .expect("shader recompile");
+        let reload = fx.edit(v1).expect("shader recompile");
         assert!(
             matches!(reload, SkullReload::Full { .. }),
             "a shader resource/interface change must use the full path, got {reload:?}"
         );
-        let current = std::fs::read_to_string(&main_lua).unwrap();
+        let current = fx.main_text();
         assert!(
             current.contains("texture("),
             "the full shader reassembly must carry the new resource-consuming source"
@@ -3035,9 +3005,9 @@ mod shape_drift_tests {
 
 #[cfg(test)]
 mod shader_registration_removal_tests {
-    use super::super::{IncrementalProject, SkullReload};
+    use super::super::SkullReload;
+    use super::ProjectFixture;
     use std::collections::BTreeSet;
-    use std::path::PathBuf;
     use std::sync::Arc;
 
     const V0: &str = r#"
@@ -3126,61 +3096,36 @@ fn main() { print(choose_a()); print(choose_b()) }
             .collect()
     }
 
-    fn boot(
-        source: &str,
-    ) -> (
-        tempfile::TempDir,
-        IncrementalProject,
-        PathBuf,
-        PathBuf,
-        PathBuf,
-    ) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().to_str().expect("tempdir path").to_string();
-        let main = dir.path().join("main.lua");
-        let incremental = dir.path().join("incremental.lua");
-        let rock = dir.path().join("main.rock");
-        std::fs::write(&rock, source).expect("source");
-        let project =
-            IncrementalProject::init(&root, &main, &incremental).expect("initial compile");
-        (dir, project, main, incremental, rock)
-    }
-
     #[test]
     fn native_reload_removing_one_shader_callsite_removes_one_runtime_key() {
-        let (_dir, mut project, main, incremental, rock) = boot(V0);
+        let mut fx = ProjectFixture::boot(V0);
         let wanted = BTreeSet::from(["frag_a".to_string(), "frag_b".to_string()]);
-        let baseline = std::fs::read_to_string(&main).unwrap();
+        let baseline = fx.main_text();
         assert_eq!(registration_keys(&baseline), wanted);
         assert_eq!(
-            logical_keys(project.project.workspace(), project.cache.graph()),
+            logical_keys(fx.project.project.workspace(), fx.project.cache.graph()),
             wanted
         );
 
-        std::fs::write(&rock, v1()).expect("edited source");
-        let reload = project
-            .recompile(std::slice::from_ref(&rock), &main, &incremental)
-            .expect("reload");
+        let reload = fx.edit(&v1()).expect("reload");
         assert!(
             matches!(reload, SkullReload::FullRequired { .. }),
             "a shader key removal must require a process restart: {reload:?}"
         );
         assert_eq!(
-            std::fs::read_to_string(&main).unwrap(),
+            fx.main_text(),
             baseline,
             "FullRequired must not write a program for the old live process"
         );
 
-        project
-            .force_full(&main, &incremental)
-            .expect("canonicalize shader removal");
+        fx.force_full().expect("canonicalize shader removal");
 
         let current = BTreeSet::from(["frag_a".to_string()]);
         assert_eq!(
-            logical_keys(project.project.workspace(), project.cache.graph()),
+            logical_keys(fx.project.project.workspace(), fx.project.cache.graph()),
             current
         );
-        let runtime = registration_keys(&std::fs::read_to_string(&main).unwrap());
+        let runtime = registration_keys(&fx.main_text());
         assert_eq!(
             runtime, current,
             "native runtime registration population retained a removed key"
@@ -3190,8 +3135,8 @@ fn main() { print(choose_a()); print(choose_b()) }
 
 #[cfg(test)]
 mod definition_transition_tests {
-    use super::super::{IncrementalProject, SkullReload};
-    use std::path::PathBuf;
+    use super::super::SkullReload;
+    use super::ProjectFixture;
 
     const V0: &str = r#"
 @artifact_definition(catalog="widgets", key_param="key")
@@ -3249,21 +3194,22 @@ fn main() {}
     #[test]
     fn late_full_publication_failure_keeps_the_last_good_artifact() {
         let mut harness = DefinitionTransitionHarness::boot(V0);
-        let old_main = std::fs::read_to_string(&harness.main).expect("last-good main");
-        let blocked_main = harness._dir.path().join("blocked-main");
+        let old_main = harness.fx.main_text();
+        let blocked_main = harness.fx.dir.path().join("blocked-main");
         std::fs::create_dir(&blocked_main).expect("blocked publication path");
 
         let failed = harness.replace_source_at(V1, &blocked_main);
         assert!(failed.is_err(), "a publication failure must surface");
         assert_eq!(
-            std::fs::read_to_string(&harness.main).expect("main after failed publication"),
+            harness.fx.main_text(),
             old_main,
             "failed full publication must not replace the last-good artifact"
         );
         assert_eq!(
             harness
+                .fx
                 .project
-                .source_text(&harness.source)
+                .source_text(&harness.fx.source)
                 .expect("retained source"),
             V0,
             "failed full publication must roll the compiler Session back with the artifact"
@@ -3323,7 +3269,7 @@ fn main() {}
             matches!(reload, SkullReload::Incremental { .. }),
             "callback body edit must stay on overlay path: {reload:?}"
         );
-        let overlay = std::fs::read_to_string(&harness.incremental).expect("definition overlay");
+        let overlay = harness.fx.overlay_text();
         assert!(
             !overlay.contains("__rock_definition_plan_stage"),
             "body-only overlay must not replace catalog membership"
@@ -3332,11 +3278,7 @@ fn main() {}
     }
 
     struct DefinitionTransitionHarness {
-        _dir: tempfile::TempDir,
-        project: IncrementalProject,
-        main: PathBuf,
-        incremental: PathBuf,
-        source: PathBuf,
+        fx: ProjectFixture,
         initial_artifact: String,
         last_good_artifact: String,
     }
@@ -3431,20 +3373,8 @@ fn main() {}
 
     impl DefinitionTransitionHarness {
         fn boot(source: &str) -> Self {
-            let dir = tempfile::tempdir().expect("transition tempdir");
-            let root = dir.path().to_str().expect("transition root").to_string();
-            let main = dir.path().join("main.lua");
-            let incremental = dir.path().join("incremental.lua");
-            let source_path = dir.path().join("main.rock");
-            std::fs::write(&source_path, source).expect("initial source");
-            let project =
-                IncrementalProject::init(&root, &main, &incremental).expect("initial build");
             let mut harness = Self {
-                _dir: dir,
-                project,
-                main,
-                incremental,
-                source: source_path,
+                fx: ProjectFixture::boot(source),
                 initial_artifact: String::new(),
                 last_good_artifact: String::new(),
             };
@@ -3454,7 +3384,7 @@ fn main() {}
         }
 
         fn replace_source(&mut self, source: &str) -> anyhow::Result<SkullReload> {
-            let reload = self.replace_source_at(source, &self.main.clone())?;
+            let reload = self.fx.edit(source)?;
             self.last_good_artifact = self.current_artifact();
             Ok(reload)
         }
@@ -3464,17 +3394,16 @@ fn main() {}
             source: &str,
             main: &std::path::Path,
         ) -> anyhow::Result<SkullReload> {
-            std::fs::write(&self.source, source).expect("replacement source");
-            let reload = self.project.recompile(
-                std::slice::from_ref(&self.source),
+            std::fs::write(&self.fx.source, source).expect("replacement source");
+            self.fx.project.recompile(
+                std::slice::from_ref(&self.fx.source),
                 main,
-                &self.incremental,
-            )?;
-            Ok(reload)
+                &self.fx.incremental,
+            )
         }
 
         fn current_artifact(&self) -> String {
-            let full = std::fs::read_to_string(&self.main).expect("written main artifact");
+            let full = self.fx.main_text();
             full.strip_suffix("\n__rock_main_wrapper(main)\n")
                 .unwrap_or(&full)
                 .to_string()
@@ -3662,8 +3591,8 @@ io.write("__STATE__old:" .. plan.len .. ":" .. plan._data[1].key .. ":" .. plan.
 
 #[cfg(test)]
 mod wire_transition_tests {
-    use super::super::{IncrementalProject, SkullReload};
-    use std::path::{Path, PathBuf};
+    use super::super::SkullReload;
+    use super::ProjectFixture;
 
     const V0: &str = r#"
 @lifecycle(phase="wire", owner="process")
@@ -3681,45 +3610,10 @@ fn unrelated() -> int { return UNRELATED }
 fn main() {}
 "#;
 
-    fn boot(
-        source: &str,
-    ) -> (
-        tempfile::TempDir,
-        IncrementalProject,
-        PathBuf,
-        PathBuf,
-        PathBuf,
-    ) {
-        let dir = tempfile::tempdir().expect("wire transition tempdir");
-        let root = dir
-            .path()
-            .to_str()
-            .expect("wire transition root")
-            .to_string();
-        let main = dir.path().join("main.lua");
-        let incremental = dir.path().join("incremental.lua");
-        let source_path = dir.path().join("main.rock");
-        std::fs::write(&source_path, source).expect("initial wire source");
-        let project =
-            IncrementalProject::init(&root, &main, &incremental).expect("initial wire build");
-        (dir, project, main, incremental, source_path)
-    }
-
-    fn replace_source(
-        project: &mut IncrementalProject,
-        source_path: &PathBuf,
-        source: &str,
-        main: &Path,
-        incremental: &Path,
-    ) -> anyhow::Result<SkullReload> {
-        std::fs::write(source_path, source).expect("wire replacement source");
-        project.recompile(std::slice::from_ref(source_path), main, incremental)
-    }
-
     #[test]
     fn compatible_wire_edits_overlay_and_structural_changes_take_full_path() {
-        let (_dir, mut project, main, incremental, source_path) = boot(V0);
-        let baseline = std::fs::read_to_string(&main).expect("wire baseline");
+        let mut fx = ProjectFixture::boot(V0);
+        let baseline = fx.main_text();
         assert!(
             baseline.contains("__ROCK_LIFECYCLE_PLAN"),
             "baseline must publish LifecyclePlan"
@@ -3727,63 +3621,53 @@ fn main() {}
 
         let unrelated = V0.replace("return UNRELATED", "return UNRELATED + 1");
         assert!(matches!(
-            replace_source(&mut project, &source_path, &unrelated, &main, &incremental),
+            fx.edit(&unrelated),
             Ok(SkullReload::Incremental { .. })
         ));
-        let overlay = std::fs::read_to_string(&incremental).expect("wire overlay");
+        let overlay = fx.overlay_text();
         assert!(overlay.contains("__rock_lifecycle_plan_stage("));
         assert!(overlay.contains("__rock_code_slot_publish()"));
 
         let direct = unrelated.replace("const DIRECT: int = 1", "const DIRECT: int = 2");
         assert!(matches!(
-            replace_source(&mut project, &source_path, &direct, &main, &incremental),
+            fx.edit(&direct),
             Ok(SkullReload::Incremental { .. })
         ));
 
         let structural = direct.replace("@wire(onchange=[DIRECT])", "@wire(onchange=[BASE])");
-        assert!(matches!(
-            replace_source(&mut project, &source_path, &structural, &main, &incremental),
-            Ok(SkullReload::Full { .. })
-        ));
+        assert!(matches!(fx.edit(&structural), Ok(SkullReload::Full { .. })));
         assert!(
-            !incremental.exists(),
+            !fx.incremental.exists(),
             "full LifecyclePlan transition must wipe the overlay"
         );
-        let full = std::fs::read_to_string(&main).expect("structural wire artifact");
+        let full = fx.main_text();
         assert_ne!(
             full, baseline,
             "structural wire transition must publish the candidate artifact"
         );
 
-        let (_dir_added, mut added_project, added_main, added_incremental, added_source) = boot(V0);
+        let mut added_fx = ProjectFixture::boot(V0);
         let added =
             format!("{V0}\n@wire(onchange=[UNRELATED]) fn added_wire() {{ let _ = UNRELATED }}\n");
         assert!(matches!(
-            replace_source(
-                &mut added_project,
-                &added_source,
-                &added,
-                &added_main,
-                &added_incremental,
-            ),
+            added_fx.edit(&added),
             Ok(SkullReload::Full { .. })
         ));
         assert!(
-            !added_incremental.exists(),
+            !added_fx.incremental.exists(),
             "wire addition must take the full path"
         );
     }
 
     #[test]
     fn gated_wire_removal_requires_restart_and_keeps_the_last_good_artifact() {
-        let (_dir, mut project, main, incremental, source_path) = boot(V0);
-        let baseline = std::fs::read_to_string(&main).expect("wire baseline");
+        let mut fx = ProjectFixture::boot(V0);
+        let baseline = fx.main_text();
         let removed = V0.replace(
             "@wire(onchange=[DIRECT]) fn direct_wire() { let _ = DIRECT }\n",
             "",
         );
-        let reload = replace_source(&mut project, &source_path, &removed, &main, &incremental)
-            .expect("gated removal route");
+        let reload = fx.edit(&removed).expect("gated removal route");
         match reload {
             SkullReload::FullRequired { reasons } => assert!(
                 reasons
@@ -3793,12 +3677,9 @@ fn main() {}
             ),
             other => panic!("gated removal must not publish live state: {other:?}"),
         }
+        assert_eq!(fx.main_text(), baseline);
         assert_eq!(
-            std::fs::read_to_string(&main).expect("retained artifact"),
-            baseline
-        );
-        assert_eq!(
-            project.source_text(&source_path).as_deref(),
+            fx.project.source_text(&fx.source).as_deref(),
             Some(removed.as_str()),
             "the current source may remain restart-pending while the published artifact stays old"
         );
@@ -3806,30 +3687,26 @@ fn main() {}
 
     #[test]
     fn failed_compile_and_failed_publication_retain_last_good_wire_artifacts() {
-        let (_dir, mut project, main, incremental, source_path) = boot(V0);
-        let baseline = std::fs::read_to_string(&main).expect("wire baseline");
+        let mut fx = ProjectFixture::boot(V0);
+        let baseline = fx.main_text();
         let invalid = V0.replace("@wire(onchange=[DIRECT])", "@wire(onchange=[UNKNOWN])");
         assert!(
-            replace_source(&mut project, &source_path, &invalid, &main, &incremental).is_err(),
+            fx.edit(&invalid).is_err(),
             "an unknown dependency must fail before publication"
         );
-        assert_eq!(
-            std::fs::read_to_string(&main).expect("last-good main"),
-            baseline
-        );
-        assert_eq!(project.source_text(&source_path).as_deref(), Some(V0));
+        assert_eq!(fx.main_text(), baseline);
+        assert_eq!(fx.project.source_text(&fx.source).as_deref(), Some(V0));
 
-        let blocked = source_path.parent().unwrap().join("blocked-incremental");
+        let blocked = fx.dir.path().join("blocked-incremental");
         std::fs::create_dir(&blocked).expect("blocked publication directory");
         let body_edit = V0.replace("return UNRELATED", "return UNRELATED + 1");
-        std::fs::write(&source_path, &body_edit).expect("body edit");
-        let failed = project.recompile(std::slice::from_ref(&source_path), &main, &blocked);
+        std::fs::write(&fx.source, &body_edit).expect("body edit");
+        let failed = fx
+            .project
+            .recompile(std::slice::from_ref(&fx.source), &fx.main, &blocked);
         assert!(failed.is_err(), "a failed overlay write must surface");
-        assert_eq!(
-            std::fs::read_to_string(&main).expect("main after failed publication"),
-            baseline
-        );
-        assert_eq!(project.source_text(&source_path).as_deref(), Some(V0));
+        assert_eq!(fx.main_text(), baseline);
+        assert_eq!(fx.project.source_text(&fx.source).as_deref(), Some(V0));
     }
 }
 
@@ -3843,6 +3720,7 @@ mod force_full_tests {
     //! overlay file is gone.
 
     use super::super::IncrementalProject;
+    use super::ProjectFixture;
     use crate::skull_backend::SkullReload;
 
     /// `wipe_overlay` treats a MISSING overlay as fine (the normal "no overlay"
@@ -3872,14 +3750,6 @@ mod force_full_tests {
     /// stale), and `incremental.lua` must be wiped.
     #[test]
     fn force_full_folds_overlay_matches_fresh_and_wipes() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let dir_str = dir.path().to_str().unwrap().to_string();
-        let src = |p: &str| dir.path().join(p);
-
-        let main_lua = src("main.lua");
-        let inc_lua = src("incremental.lua");
-        let rock = src("main.rock");
-
         // Needs a `main`: emission is reachability-driven, so a fixture with no
         // entry point at all emits no user code and the two builds would compare
         // equal for a reason that has nothing to do with the fold.
@@ -3887,34 +3757,30 @@ mod force_full_tests {
         let v2 = "fn helper() -> int { 5 }\nfn use_it() -> int { helper() }\nfn main() { print(\"{use_it()}\") }\n";
 
         // init at v1: writes main.lua(v1), wipes any overlay.
-        std::fs::write(&rock, v1).unwrap();
-        let mut skull = IncrementalProject::init(&dir_str, &main_lua, &inc_lua).expect("init v1");
-        let main_v1 = std::fs::read_to_string(&main_lua).expect("main.lua after init");
-        assert!(!inc_lua.exists(), "init must leave no overlay");
+        let mut fx = ProjectFixture::boot(v1);
+        let main_v1 = fx.main_text();
+        assert!(!fx.incremental.exists(), "init must leave no overlay");
 
         // Body edit to v2: a BodyOnly recompile writes the overlay; main.lua
         // stays the v1 baseline. Passing the changed file exercises the fast path
         // (re-read only `main.rock`); if it failed to pick up v2, the byte-identity
         // check against a fresh v2 build below would catch it.
-        std::fs::write(&rock, v2).unwrap();
-        let reload = skull
-            .recompile(std::slice::from_ref(&rock), &main_lua, &inc_lua)
-            .expect("recompile v2");
+        let reload = fx.edit(v2).expect("recompile v2");
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
             "a const body edit should route to the overlay (Incremental tier)"
         );
-        assert!(inc_lua.exists(), "body edit must produce an overlay");
+        assert!(fx.incremental.exists(), "body edit must produce an overlay");
         assert_eq!(
-            std::fs::read_to_string(&main_lua).unwrap(),
+            fx.main_text(),
             main_v1,
             "a body edit must NOT touch main.lua (overlay carries the change)"
         );
 
         // force_full: fold the overlay back into main.lua, wipe the overlay.
-        skull.force_full(&main_lua, &inc_lua).expect("force_full");
-        let main_forced = std::fs::read_to_string(&main_lua).expect("main.lua after force_full");
-        assert!(!inc_lua.exists(), "force_full must wipe the overlay");
+        fx.force_full().expect("force_full");
+        let main_forced = fx.main_text();
+        assert!(!fx.incremental.exists(), "force_full must wipe the overlay");
         assert_ne!(
             main_forced, main_v1,
             "force_full must fold the v2 edit into main.lua, not serve the stale v1 baseline"
@@ -3922,17 +3788,17 @@ mod force_full_tests {
 
         // Ground truth: a from-scratch full build of v2 (separate output path,
         // same on-disk source). force_full's main.lua must match it byte-for-byte.
-        let fresh_main = src("fresh_main.lua");
-        let fresh_inc = src("fresh_incremental.lua");
+        let fresh_main = fx.dir.path().join("fresh_main.lua");
+        let fresh_inc = fx.dir.path().join("fresh_incremental.lua");
         let fresh =
-            IncrementalProject::init(&dir_str, &fresh_main, &fresh_inc).expect("fresh init v2");
+            IncrementalProject::init(&fx.root, &fresh_main, &fresh_inc).expect("fresh init v2");
         let main_fresh = std::fs::read_to_string(&fresh_main).expect("fresh main.lua");
         assert_eq!(
             main_forced, main_fresh,
             "force_full main.lua must be byte-identical to a fresh full build of the edited source"
         );
         assert_eq!(
-            skull.artifact_fingerprint(),
+            fx.project.artifact_fingerprint(),
             fresh.artifact_fingerprint(),
             "force_full must publish the fingerprint of the Artifact it writes"
         );
@@ -3945,14 +3811,6 @@ mod force_full_tests {
     /// global that exists in neither file and dies on load.
     #[test]
     fn overlay_delivers_a_graph_added_fn_the_edit_makes_reachable() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let dir_str = dir.path().to_str().unwrap().to_string();
-        let src = |p: &str| dir.path().join(p);
-
-        let main_lua = src("main.lua");
-        let inc_lua = src("incremental.lua");
-        let rock = src("main.rock");
-
         // A LIBRARY fn, since the project's own modules are always roots. `split`
         // is not inlined and pulls `find`/`substring`/`len` with it, so this also
         // covers the multi-hop case rather than just the first edge.
@@ -3963,9 +3821,8 @@ mod force_full_tests {
         // covered by the driver's own tests (rock-lang/crates/skull-mir/tests/reach_driver.rs).
         let needed = ["function split_string_string("];
 
-        std::fs::write(&rock, v1).unwrap();
-        let mut skull = IncrementalProject::init(&dir_str, &main_lua, &inc_lua).expect("init v1");
-        let main_v1 = std::fs::read_to_string(&main_lua).expect("main.lua after init");
+        let mut fx = ProjectFixture::boot(v1);
+        let main_v1 = fx.main_text();
         for n in needed {
             assert!(
                 !main_v1.contains(n),
@@ -3974,16 +3831,13 @@ mod force_full_tests {
         }
 
         // Body edit: main now calls `split`, which routes to the overlay.
-        std::fs::write(&rock, v2).unwrap();
-        let reload = skull
-            .recompile(std::slice::from_ref(&rock), &main_lua, &inc_lua)
-            .expect("recompile v2");
+        let reload = fx.edit(v2).expect("recompile v2");
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
             "a body edit should route to the overlay (Incremental tier)"
         );
-        let main_after = std::fs::read_to_string(&main_lua).expect("main.lua after edit");
-        let overlay = std::fs::read_to_string(&inc_lua).expect("overlay after edit");
+        let main_after = fx.main_text();
+        let overlay = fx.overlay_text();
         for n in needed {
             assert!(
                 main_after.contains(n) || overlay.contains(n),
@@ -4003,20 +3857,22 @@ mod force_full_tests {
     /// `session.diagnostics()`; `init` must too.
     #[test]
     fn init_rejects_project_with_type_error() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let dir_str = dir.path().to_str().unwrap().to_string();
-        let src = |p: &str| dir.path().join(p);
-
-        let main_lua = src("main.lua");
-        let inc_lua = src("incremental.lua");
-        let rock = src("main.rock");
-
         // `boot` calls a function that does not exist -> bone collects a
         // diagnostic but Session::new still succeeds, so without the gate
         // emit_full produces a partial program.
-        std::fs::write(&rock, "fn boot() { does_not_exist() }\n").unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main_lua = dir.path().join("main.lua");
+        std::fs::write(
+            dir.path().join("main.rock"),
+            "fn boot() { does_not_exist() }\n",
+        )
+        .unwrap();
 
-        let res = IncrementalProject::init(&dir_str, &main_lua, &inc_lua);
+        let res = IncrementalProject::init(
+            dir.path().to_str().unwrap(),
+            &main_lua,
+            &dir.path().join("incremental.lua"),
+        );
         assert!(
             res.is_err(),
             "init must reject a project whose body references a non-existent function"
@@ -4033,36 +3889,26 @@ mod force_full_tests {
     /// broken intermediate state.
     #[test]
     fn failed_recompile_retains_session_and_last_good_artifact() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let dir_str = dir.path().to_str().unwrap().to_string();
-        let src = |p: &str| dir.path().join(p);
-
-        let main_lua = src("main.lua");
-        let inc_lua = src("incremental.lua");
-        let rock = src("main.rock");
-
         // init at a valid v1 -> main.lua(v1).
         let v1 = "fn helper() -> int { 3 }\nfn use_it() -> int { helper() }\n";
-        std::fs::write(&rock, v1).unwrap();
-        let mut skull = IncrementalProject::init(&dir_str, &main_lua, &inc_lua).expect("init v1");
-        let main_v1 = std::fs::read_to_string(&main_lua).expect("main.lua after init");
+        let mut fx = ProjectFixture::boot(v1);
+        let main_v1 = fx.main_text();
 
         // Edit to a broken v2 (calls a non-existent function). recompile bails
         // and must restore the v1 compiler Session before returning.
         let v2 = "fn helper() -> int { 3 }\nfn use_it() -> int { nope() }\n";
-        std::fs::write(&rock, v2).unwrap();
-        let reload = skull.recompile(std::slice::from_ref(&rock), &main_lua, &inc_lua);
+        let reload = fx.edit(v2);
         assert!(reload.is_err(), "recompile must bail on the broken edit");
 
         // A fold after the failed update now sees the retained v1 Session and
         // succeeds without changing the last-good artifact.
-        let res = skull.force_full(&main_lua, &inc_lua);
+        let res = fx.force_full();
         assert!(
             res.is_ok(),
             "force_full must retain the previous good Session"
         );
         assert_eq!(
-            std::fs::read_to_string(&main_lua).unwrap(),
+            fx.main_text(),
             main_v1,
             "a failed recompile must leave the last-good main.lua untouched"
         );
@@ -4072,31 +3918,27 @@ mod force_full_tests {
 #[cfg(test)]
 mod incremental_lint_snapshot_tests {
     use super::super::{IncrementalProject, SkullReload};
+    use super::ProjectFixture;
     use super::overlay_test_support::direct_overlay;
 
     #[test]
     fn incremental_overlay_matches_cache_independent_route() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().to_str().unwrap().to_string();
-        let main = dir.path().join("main.lua");
-        let incremental = dir.path().join("incremental.lua");
-        let source = dir.path().join("main.rock");
         let v1 = "fn helper() -> int { 3 }\nfn main() { let unused = helper() }\n";
         let v2 = "fn helper() -> int { 5 }\nfn main() { let unused = helper() }\n";
-        std::fs::write(&source, v1).expect("source");
-        let mut project = IncrementalProject::init(&root, &main, &incremental).expect("init");
-        let initial_fingerprint = project.artifact_fingerprint().to_string();
-        let reload = project
-            .apply_edit(&source, v2, &main, &incremental)
+        let mut fx = ProjectFixture::boot(v1);
+        let initial_fingerprint = fx.project.artifact_fingerprint().to_string();
+        let reload = fx
+            .project
+            .apply_edit(&fx.source, v2, &fx.main, &fx.incremental)
             .expect("body edit");
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
             "reload: {reload:?}"
         );
-        let incremental_fingerprint = project.artifact_fingerprint().to_string();
+        let incremental_fingerprint = fx.project.artifact_fingerprint().to_string();
         assert_ne!(incremental_fingerprint, initial_fingerprint);
-        let route_overlay = std::fs::read_to_string(&incremental).expect("route overlay");
-        let direct = direct_overlay(&root, "main.rock", v2);
+        let route_overlay = fx.overlay_text();
+        let direct = direct_overlay(&fx.root, "main.rock", v2);
         assert!(
             !route_overlay.is_empty(),
             "overlay population must be nonzero"
@@ -4105,10 +3947,10 @@ mod incremental_lint_snapshot_tests {
             route_overlay, direct,
             "lint-cache integration changed overlay bytes"
         );
-        std::fs::write(&source, v2).expect("fresh source");
+        std::fs::write(&fx.source, v2).expect("fresh source");
         let fresh_outputs = tempfile::tempdir().expect("fresh outputs");
         let fresh = IncrementalProject::init(
-            &root,
+            &fx.root,
             &fresh_outputs.path().join("main.lua"),
             &fresh_outputs.path().join("incremental.lua"),
         )
@@ -4130,25 +3972,20 @@ mod incremental_lint_snapshot_tests {
 
     #[test]
     fn incremental_apply_edit_profile_covers_the_real_route() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().to_str().unwrap().to_string();
-        let main = dir.path().join("main.lua");
-        let incremental = dir.path().join("incremental.lua");
-        let source = dir.path().join("main.rock");
         let v1 = "fn helper() -> int { 3 }\nfn main() { let unused = helper() }\n";
         let v2 = "fn helper() -> int { 5 }\nfn main() { let unused = helper() }\n";
-        std::fs::write(&source, v1).expect("source");
-        let mut project = IncrementalProject::init(&root, &main, &incremental).expect("init");
-        project.enable_route_profile();
+        let mut fx = ProjectFixture::boot(v1);
+        fx.project.enable_route_profile();
 
-        let reload = project
-            .apply_edit(&source, v2, &main, &incremental)
+        let reload = fx
+            .project
+            .apply_edit(&fx.source, v2, &fx.main, &fx.incremental)
             .expect("body edit");
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
             "reload: {reload:?}"
         );
-        let profile = project.take_last_route_profile().expect("route profile");
+        let profile = fx.project.take_last_route_profile().expect("route profile");
         assert!(profile.session_snapshot_ns > 0);
         assert!(profile.source_lookup_feed_ns > 0);
         assert!(profile.session_update_ns > 0);
@@ -4172,39 +4009,34 @@ mod incremental_lint_snapshot_tests {
 
     #[test]
     fn failed_body_publication_rolls_back_cache_before_the_next_edit() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let root = dir.path().to_str().unwrap().to_string();
-        let main = dir.path().join("main.lua");
-        let incremental = dir.path().join("incremental.lua");
-        let source = dir.path().join("main.rock");
         let v1 = "fn helper() -> int { 3 }\nfn other() -> int { 10 }\nfn main() { helper() }\n";
         let v2 = "fn helper() -> int { 5 }\nfn other() -> int { 10 }\nfn main() { helper() }\n";
         let v3 = "fn helper() -> int { 3 }\nfn other() -> int { 11 }\nfn main() { helper() }\n";
-        std::fs::write(&source, v1).expect("source");
-        let mut project = IncrementalProject::init(&root, &main, &incremental).expect("init");
-        if incremental.is_file() {
-            std::fs::remove_file(&incremental).expect("initial overlay");
+        let mut fx = ProjectFixture::boot(v1);
+        if fx.incremental.is_file() {
+            std::fs::remove_file(&fx.incremental).expect("initial overlay");
         }
-        std::fs::create_dir(&incremental).expect("blocked overlay");
+        std::fs::create_dir(&fx.incremental).expect("blocked overlay");
 
         assert!(
-            project
-                .apply_edit(&source, v2, &main, &incremental)
+            fx.project
+                .apply_edit(&fx.source, v2, &fx.main, &fx.incremental)
                 .is_err(),
             "a body publication to a directory must fail"
         );
-        assert_eq!(project.source_text(&source).as_deref(), Some(v1));
+        assert_eq!(fx.project.source_text(&fx.source).as_deref(), Some(v1));
 
-        std::fs::remove_dir(&incremental).expect("unblock overlay");
-        let reload = project
-            .apply_edit(&source, v3, &main, &incremental)
+        std::fs::remove_dir(&fx.incremental).expect("unblock overlay");
+        let reload = fx
+            .project
+            .apply_edit(&fx.source, v3, &fx.main, &fx.incremental)
             .expect("next body edit");
         assert!(
             matches!(reload, SkullReload::Incremental { .. }),
             "reload: {reload:?}"
         );
-        let route_overlay = std::fs::read_to_string(&incremental).expect("overlay");
-        let direct = direct_overlay(&root, "main.rock", v3);
+        let route_overlay = fx.overlay_text();
+        let direct = direct_overlay(&fx.root, "main.rock", v3);
         assert_eq!(
             route_overlay, direct,
             "rollback must retain the last-good cache"
