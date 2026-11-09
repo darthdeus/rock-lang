@@ -281,3 +281,21 @@ fn a_nullable_tuple_method_call_calls_the_field() {
     let t = field_call_tile()
     assert(t.pair() == null, "t.pair() must call the field, which returns null")
 }
+
+fn assigned_choice(value: string) -> int { return 1 }
+fn assigned_choice<T>(value: T) -> int { return 2 }
+struct AssignedHandler { callback: fn(int) -> int }
+
+@test fn assigned_callbacks_use_the_target_parameter_type() {
+    let callback: fn(int) -> int = value => assigned_choice(value)
+    assert_eq(callback(3), 2)
+    callback = value => assigned_choice(value)
+    assert_eq(callback(3), 2)
+    let holder = AssignedHandler { callback }
+    holder.callback = value => assigned_choice(value)
+    assert_eq(holder.callback(3), 2)
+    let callbacks = [callback]
+    callbacks[0] = value => assigned_choice(value)
+    let selected = callbacks[0]
+    assert_eq(selected(3), 2)
+}

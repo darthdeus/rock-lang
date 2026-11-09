@@ -1,0 +1,12 @@
+fn choose(value: string) -> int { return 1 }
+fn choose<T>(value: T) -> int { return 2 }
+struct Handler { callback: fn(int) -> int }
+fn check_assignment() -> int {
+    let callback: fn(int) -> int = value => choose(value)
+    callback = value => choose(value)
+    let holder = Handler { callback }
+    holder.callback = value => choose(value)
+    let result = holder.callback(3)
+      //^ int
+    return result
+}
