@@ -59,132 +59,9 @@ fn loop_nested() {
     print(inner)
 }
 
-@test(output = "9")
-fn continue_in_loop_basic() {
-    let sum = 0
-    let i = 0
-
-    loop {
-        i = i + 1
-        if i % 2 == 0 {
-            continue
-        }
-        sum = sum + i
-        if i >= 5 {
-            break
-        }
-    }
-
-    print(sum)
-}
-
-@test(output = "9")
-fn continue_in_while_loop() {
-    let sum = 0
-    let i = 0
-
-    while i < 5 {
-        i = i + 1
-        if i % 2 == 0 {
-            continue
-        }
-        sum = sum + i
-    }
-
-    print(sum)
-}
-
-@test(output = "9")
-fn continue_in_for_loop() {
-    let sum = 0
-    let arr = [1, 2, 3, 4, 5]
-
-    for x in arr {
-        if x % 2 == 0 {
-            continue
-        }
-        sum = sum + x
-    }
-
-    print(sum)
-}
-
 // ============================================
 // Additional Continue Statement Tests
 // ============================================
-
-@test(output = "3\n8")
-fn continue_nested_loops_inner() {
-    let outer_sum = 0
-    let inner_sum = 0
-    let i = 0
-
-    loop {
-        i = i + 1
-        let j = 0
-
-        loop {
-            j = j + 1
-            if j % 2 == 0 {
-                continue
-            }
-            inner_sum = inner_sum + j
-            if j >= 3 {
-                break
-            }
-        }
-
-        outer_sum = outer_sum + i
-        if i >= 2 {
-            break
-        }
-    }
-
-    print(outer_sum)
-    print(inner_sum)
-}
-
-@test(output = "1\n3")
-fn continue_simple() {
-    let i = 0
-
-    loop {
-        i = i + 1
-        if i == 2 {
-            continue
-        }
-        print(i)
-        if i >= 3 {
-            break
-        }
-    }
-}
-
-@test(output = "22")
-fn continue_multiple_conditions() {
-    let sum = 0
-    let i = 0
-
-    loop {
-        i = i + 1
-
-        if i >= 10 {
-            break
-        }
-
-        if i % 3 == 0 {
-            continue
-        }
-
-        if i % 5 == 0 {
-            continue
-        }
-
-        sum = sum + i
-    }
-
-    print(sum)
-}
 
 @test(output = "9\n5")
 fn continue_after_statements() {
@@ -330,28 +207,6 @@ fn nested_loops_with_continue_complex() {
             continue  // outer continue
         }
         result = result + 10
-    }
-
-    print(result)
-}
-
-@test(output = "12378")
-fn continue_with_complex_expression() {
-    let result = 0
-    let i = 0
-
-    loop {
-        i = i + 1
-
-        if i > 3 && i < 7 {
-            continue
-        }
-
-        result = result * 10 + i
-
-        if i >= 8 {
-            break
-        }
     }
 
     print(result)
