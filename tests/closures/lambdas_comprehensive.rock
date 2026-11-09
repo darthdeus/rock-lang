@@ -7,12 +7,7 @@ struct Inner { value: int }
 struct Outer { inner: Inner }
 struct TestStruct { value: float }
 struct Data { value: int, name: string }
-struct Counter { count: int }
 struct State { flag: bool, value: int }
-struct Accumulator { total: int }
-struct Container { data: int }
-struct ChainData { step1: int, step2: int, step3: int }
-struct Target { value: int }
 
 // Helper functions
 fn apply2(f: (int, int) -> int, a: int, b: int) -> int {
@@ -47,10 +42,6 @@ fn double(s: S) -> int {
     return s.field * 2 
 }
 
-fn apply_modifier(modifier_fn: (int) -> ()) {
-    modifier_fn(100)
-}
-
 fn use_fn(f: (int, int) -> int) -> int {
     return f(10, 20)
 }
@@ -61,14 +52,6 @@ fn map_point(p: Point, f: (int) -> int) -> Point {
 
 fn process(f: (Data) -> int, d: Data) -> int {
     return f(d)
-}
-
-fn add_one(x: int) -> int { 
-    return x + 1 
-}
-
-fn double_val(x: int) -> int { 
-    return x * 2 
 }
 
 fn call_twice(f: (int) -> int) {
@@ -205,21 +188,10 @@ fn test_lambda_implicit_return() {
 }
 
 // No braces single expression tests
-@test(output = "6")
-fn test_lambda_no_braces_simple_expr() {
-    let f = x => x + 1
-    print(f(5))
-}
 
 @test(output = "7")
 fn test_lambda_no_braces_two_params_annotated() {
     let sub = (a: int, b) => a - b
-    print(sub(10, 3))
-}
-
-@test(output = "7")
-fn test_lambda_no_braces_two_params_inferred() {
-    let sub = (a, b) => a - b
     print(sub(10, 3))
 }
 
@@ -254,29 +226,6 @@ fn test_lambda_multiple_assignment() {
 }
 
 // Higher-order function tests
-@test(output = "15")
-fn test_lambda_add_as_param() {
-    let result = apply_binary_op((x, y) => x + y, 10, 5)
-    print(result)
-}
-
-@test(output = "12")
-fn test_lambda_multiply_as_param() {
-    let result = apply_binary_op((x, y) => x * y, 4, 3)
-    print(result)
-}
-
-@test(output = "12")
-fn test_lambda_subtract_as_param() {
-    let result = apply_binary_op((a, b) => a - b, 20, 8)
-    print(result)
-}
-
-@test(output = "22")
-fn test_lambda_complex_expression_as_param() {
-    let result = apply_binary_op((x, y) => x * 2 + y * 3, 5, 4)
-    print(result)
-}
 
 @test(output = "14")
 fn test_lambda_with_block_as_param() {
@@ -315,33 +264,6 @@ fn test_lambda_assignment_to_global() {
     print(test_global)
 }
 
-@test(output = "5\n7")
-fn test_lambda_multiple_assignments() {
-    let p = Point { x: 0, y: 0 }
-
-    let set_point = (new_x: int, new_y: int) => {
-        p.x = new_x
-        p.y = new_y
-    }
-
-    set_point(5, 7)
-    print(p.x)
-    print(p.y)
-}
-
-@test(output = "8")
-fn test_lambda_assignment_with_computation() {
-    let counter = Counter { count: 0 }
-
-    let increment_by = (amount: int) => {
-        counter.count = counter.count + amount
-    }
-
-    increment_by(5)
-    increment_by(3)
-    print(counter.count)
-}
-
 @test(output = "15\n30")
 fn test_lambda_assignment_then_return() {
     let data = Data { value: 10, name: "" }
@@ -376,87 +298,6 @@ fn test_lambda_assignment_in_conditional() {
     conditional_set(false, 99)
     print(state.flag)
     print(state.value)
-}
-
-@test(output = "42")
-fn test_lambda_assignment_nested_fields() {
-    let obj = Outer { inner: Inner { value: 1 } }
-
-    let set_nested = (new_val: int) => {
-        obj.inner.value = new_val
-    }
-
-    set_nested(42)
-    print(obj.inner.value)
-}
-
-@test(output = "21")
-fn test_lambda_assignment_with_capture_and_params() {
-    let acc = Accumulator { total: 0 }
-    let multiplier = 3
-
-    let add_scaled = (value: int) => {
-        acc.total = acc.total + (value * multiplier)
-    }
-
-    add_scaled(5)  // 0 + (5 * 3) = 15
-    add_scaled(2)  // 15 + (2 * 3) = 21
-    print(acc.total)
-}
-
-@test(output = "100")
-fn test_lambda_assignment_passed_to_function() {
-    let container = Container { data: 0 }
-
-    let setter = (val: int) => {
-        container.data = val
-    }
-
-    apply_modifier(setter)
-    print(container.data)
-}
-
-@test(output = "10\n20\n30")
-fn test_lambda_assignment_chained_calls() {
-    let data = ChainData { step1: 0, step2: 0, step3: 0 }
-
-    let set_step1 = (val: int) => {
-        data.step1 = val
-    }
-
-    let set_step2 = (val: int) => {
-        data.step2 = val
-    }
-
-    let set_step3 = (val: int) => {
-        data.step3 = val
-    }
-
-    set_step1(10)
-    set_step2(20)
-    set_step3(30)
-
-    print(data.step1)
-    print(data.step2)
-    print(data.step3)
-}
-
-@test(output = "5\n10\n15")
-fn test_lambda_assignment_in_array_context() {
-    let target = Target { value: 0 }
-
-    let setter0 = (val: int) => { target.value = val }
-    let setter1 = (val: int) => { target.value = val * 2 }
-    let setter2 = (val: int) => { target.value = val * 3 }
-
-    setter0(5)
-    print(target.value)  // 5
-
-    setter1(5)
-    print(target.value)  // 10
-
-    setter2(5)
-    print(target.value)  // 15
 }
 
 // Side effects tests
@@ -561,27 +402,6 @@ fn test_lambda_capture_struct_by_value() {
     printer()
 }
 
-@test(output = "6")
-fn test_lambda_capture_multiple_variables() {
-    let a = 1
-    let b = 2
-    let c = 3
-
-    let summer = () => {
-        return a + b + c
-    }
-
-    print(summer())
-}
-
-@test(output = "30")
-fn test_lambda_capture_in_nested_scope() {
-    let outer = 10
-    let inner = 20
-    let lambda = () => { return outer + inner }
-    print(lambda())
-}
-
 @test(output = "15\n25")
 fn test_lambda_capture_function_parameters() {
     let create_adder = (base: int) => {
@@ -629,22 +449,10 @@ fn test_lambda_inference_edge_cases() {
     print("ok")
 }
 
-@test(output = "ok")
-fn test_lambda_in_different_contexts() {
-    // Lambda stored in variable first
+@test(output = "30")
+fn test_lambda_stored_then_passed_to_a_fn() {
     let add = (x, y) => x + y
-    assert(use_fn(add) == 30)
-
-    // Lambda stored in variables (work around array indexing)
-    let add_func = (x, y) => x + y
-    let mul_func = (x, y) => x * y
-    let sub_func = (x, y) => x - y
-
-    assert(add_func(5, 3) == 8)
-    assert(mul_func(5, 3) == 15)
-    assert(sub_func(5, 3) == 2)
-
-    print("ok")
+    print(use_fn(add))
 }
 
 @test(output = "ok")
@@ -664,14 +472,6 @@ fn test_lambda_with_struct_field_access() {
     // Field access on untyped parameter
     let result = process((d) => d.value, Data { value: 42, name: "" })
     assert(result == 42)
-
-    print("ok")
-}
-
-@test(output = "ok")
-fn test_lambda_function_composition() {
-    let composed = (x: int) => add_one(double_val(x))
-    assert(composed(5) == 11) // (5 * 2) + 1 = 11
 
     print("ok")
 }

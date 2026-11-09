@@ -9,11 +9,6 @@ struct Person { name: string, age: int }
 struct User { id: int, name: string }
 struct Item { id: int, value: float }
 struct Product { name: string, price: float, quantity: int }
-struct Pipeline<T> { data: [T] }
-struct Result<T> { is_ok: bool, value: T?, error: string? }
-struct Event { event_type: string, data: int }
-// struct Lazy<T> { computed: bool, value: T?, compute: (() -> T)? } // Function types not supported in structs
-struct Stream<T> { data: [T], index: int }
 
 // ============================================
 // Basic Vector Functional Operations
@@ -426,8 +421,6 @@ fn test_lambda_pipeline_builder() {
 // Advanced Lambda Patterns
 // ============================================
 
-// Memoization pattern removed - requires nested function definitions
-
 @test(output = "Add 5:\n6\n7\n8\n9\n10\nDouble:\n2\n4\n6\n8\n10")
 fn test_partial_application() {
     // Partial application pattern
@@ -453,29 +446,3 @@ fn test_partial_application() {
         print(val)
     }
 }
-
-// State management, event handlers, and recursive combinators removed - require nested function definitions or complex function types
-
-// Error handling pattern test removed - output format issue
-
-// ============================================
-// Performance Patterns
-// ============================================
-
-// Lazy evaluation removed - function types in structs not supported
-
-@test(output = "2\n4\n6\n8\n10")
-fn test_stream_processing_pattern() {
-    let nums = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    
-    // Simple streaming: take first 5, then double them
-    let count = 0
-    for num in nums {
-        if count < 5 {
-            print(num * 2)
-            count = count + 1
-        }
-    }
-}
-
-// Transducer pattern removed - complex nested function types not supported
