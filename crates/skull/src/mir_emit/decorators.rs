@@ -114,6 +114,7 @@ pub(super) fn emit_decorator_unit(
             }
             emit_lowered(
                 ws,
+                cg,
                 &mut out,
                 &mf,
                 lua,

@@ -228,7 +228,8 @@ pub(crate) fn call_arg_forwards(
     ws: &Workspace,
     func: &MirFunc,
 ) -> (Vec<Option<CallArgForward>>, Vec<bool>) {
-    let mut forwards = vec![None; func.insts.len()];
+    let mut forwards = Vec::with_capacity(func.insts.len());
+    forwards.resize_with(func.insts.len(), || None);
     let mut suppressed = vec![false; func.insts.len()];
     let cell_references = cell_reference_counts(func);
     let instruction_references = instruction_reference_counts(func);

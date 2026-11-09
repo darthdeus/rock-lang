@@ -270,7 +270,6 @@ pub(crate) fn render_scope(
 
     let mut em = Emitter {
         enum_box_groups: RefCell::new(HashMap::default()),
-        callee_symbols: RefCell::new(HashMap::default()),
         selection_preds: std::cell::OnceCell::new(),
         ws,
         ctx,

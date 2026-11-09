@@ -192,6 +192,7 @@ pub(super) struct UnitOut {
 /// Reads the per-thread regalloc accumulator that the caller reset before emit.
 pub(super) fn emit_lowered(
     ws: &Workspace,
+    cg: &CodegenCtx,
     out: &mut UnitOut,
     mf: &MirFunc,
     lua: String,
@@ -201,7 +202,7 @@ pub(super) fn emit_lowered(
 ) {
     let tv = Instant::now();
     if let Some(key) = collect_refs {
-        let (gs, cs) = direct_refs(ws, mf);
+        let (gs, cs) = direct_refs(ws, cg, mf);
         out.refs = Some((key, gs, cs));
     }
     out.calls = skull_mir::reach::call_targets(mf);

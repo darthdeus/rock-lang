@@ -64,15 +64,11 @@ impl Emitter<'_> {
     /// instance (its value args splatted to leaves) targets that instance's
     /// definition. The same instance object drives definition and call spelling,
     /// so the two cannot drift.
-    pub(crate) fn callee_name(&self, id: Idx<Inst>, func: FuncRef) -> std::rc::Rc<str> {
-        if let Some(inst) = self.func.spec_bindings.get(&id) {
-            return inst.symbol(self.ws, self.interner).into();
+    pub(crate) fn callee_name(&self, id: Idx<Inst>, func: FuncRef) -> CalleeName {
+        match self.func.spec_bindings.get(&id) {
+            Some(inst) => CalleeName::Specialized(inst.symbol(self.ws, self.interner)),
+            None => CalleeName::Declared(self.ctx.mangled_name(self.ws, func)),
         }
-        self.callee_symbols
-            .borrow_mut()
-            .entry(func)
-            .or_insert_with(|| mangle_fn(self.ws, func_of(self.ws, func)).into())
-            .clone()
     }
 
     fn try_emit_inline_lua_splice(&self, out: &mut String, id: Idx<Inst>) -> bool {

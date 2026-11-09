@@ -7,11 +7,9 @@ use super::*;
 /// sub-CFG unreachable from entry (its reads fire when the closure is later
 /// *called*, not at this function's load time), so it is intentionally not
 /// descended into — keeping init ordering from over-constraining on closures.
-pub(super) fn direct_refs(ws: &Workspace, mf: &MirFunc) -> (Vec<Ustr>, Vec<Ustr>) {
+pub(super) fn direct_refs(ws: &Workspace, cg: &CodegenCtx, mf: &MirFunc) -> (Vec<Ustr>, Vec<Ustr>) {
     let mut globals = Vec::new();
     let mut calls = Vec::new();
-    // A body calls the same few callees over and over; mangle each once.
-    let mut names: FxHashMap<FuncRef, Ustr> = FxHashMap::default();
     let mut seen = vec![false; mf.blocks.len()];
     let mut stack = vec![mf.entry];
     while let Some(b) = stack.pop() {
@@ -23,11 +21,7 @@ pub(super) fn direct_refs(ws: &Workspace, mf: &MirFunc) -> (Vec<Ustr>, Vec<Ustr>
             match &mf.insts[iid] {
                 Inst::Global(n) => globals.push(*n),
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
-                    let name = *names.entry(*func).or_insert_with(|| {
-                        let f = &ws.module(func.module).functions[func.func];
-                        Ustr::from(&mangle_fn(ws, f))
-                    });
-                    calls.push(name);
+                    calls.push(cg.mangled_name(ws, *func));
                 }
                 _ => {}
             }
@@ -381,6 +375,7 @@ pub(super) fn emit_global_unit(
             }
             emit_lowered(
                 ws,
+                cg,
                 &mut out,
                 &mf,
                 lua,

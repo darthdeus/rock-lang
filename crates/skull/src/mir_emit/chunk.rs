@@ -1,6 +1,7 @@
 //! Emitted body chunks and the scoped Lua definition buffer.
 
 use super::*;
+use skull_codegen_lua::CALLEE_FACTORY_PREFIX;
 
 /// One emitted ordinary/coroutine function definition plus the facts incremental
 /// emit needs. The cheap definitions (prelude, decorators, externs, inline(lua),
@@ -111,28 +112,26 @@ fn definition_global(line: &str) -> Option<&str> {
     if line.starts_with("function ") {
         return Some(body);
     }
-    Some(&line[..skull_codegen_lua::CALLEE_FACTORY_PREFIX.len() + body.len()])
+    Some(&line[..CALLEE_FACTORY_PREFIX.len() + body.len()])
 }
 
 /// How many top-level definitions `lua` holds. A definition starts its line
-/// with one of two fixed prefixes, so the text is searched for those at line
-/// starts rather than split into its (many, mostly short) lines.
+/// with one of two fixed prefixes, so only line starts are examined: the
+/// text is 46 MB of mostly short lines on a large project, where splitting
+/// into `str` lines cost more than the whole emit of some bodies.
 pub(super) fn lua_definition_count(lua: &str) -> usize {
-    fn line_at(lua: &str, start: usize) -> &str {
+    fn is_definition(lua: &str, start: usize) -> bool {
         let rest = &lua[start..];
-        rest.split_once('\n').map_or(rest, |(line, _)| line)
+        if !(rest.starts_with("function ") || rest.starts_with(CALLEE_FACTORY_PREFIX)) {
+            return false;
+        }
+        let line = rest.split_once('\n').map_or(rest, |(line, _)| line);
+        definition_global(line).is_some()
     }
-    let mut count = usize::from(definition_global(line_at(lua, 0)).is_some());
-    for prefix in ["\nfunction ", concat!("\n", "__rock_mk_")] {
-        debug_assert!(
-            prefix == "\nfunction " || &prefix[1..] == skull_codegen_lua::CALLEE_FACTORY_PREFIX,
-            "the factory prefix the scan looks for must be the emitted one"
-        );
-        count += lua
-            .match_indices(prefix)
-            .filter(|(at, _)| definition_global(line_at(lua, at + 1)).is_some())
-            .count();
-    }
+    let mut count = usize::from(is_definition(lua, 0));
+    count += memchr::memchr_iter(b'\n', lua.as_bytes())
+        .filter(|&at| is_definition(lua, at + 1))
+        .count();
     count
 }
 

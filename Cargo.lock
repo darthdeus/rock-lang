@@ -2313,6 +2313,7 @@ dependencies = [
  "bone-lints",
  "bone-semantic",
  "comfy-la-arena",
+ "memchr",
  "rayon",
  "rock-core",
  "rock-host",

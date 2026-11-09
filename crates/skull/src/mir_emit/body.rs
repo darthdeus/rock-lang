@@ -414,7 +414,7 @@ pub(super) fn emit_body_chunk_with_mutation(
             &ws.comptime_inputs.volatile_vars,
         );
     code_artifact.set_body_names(&mf, &mangle_fn(ws, f));
-    let (direct_globals, direct_calls) = direct_refs(ws, &mf);
+    let (direct_globals, direct_calls) = direct_refs(ws, cg, &mf);
     times.validation = tv.elapsed();
     times.validation_work = true;
     skull_codegen_lua::regalloc_time_reset();

@@ -86,14 +86,13 @@ fn single_receive_cells(
 ) -> HashSet<Idx<Cell>> {
     // cell -> (defs, the receive's block and position). Only a receive records
     // a position, so a cell qualifies iff its one def is one.
-    let mut defs: rustc_hash::FxHashMap<Idx<Cell>, (u32, Option<(Idx<Block>, usize)>)> =
-        rustc_hash::FxHashMap::default();
+    let mut defs: Vec<(u32, Option<(Idx<Block>, usize)>)> = vec![(0, None); func.cells.len()];
     for &b in scope {
         for (pos, &id) in func.blocks[b].insts.iter().enumerate() {
             match &func.insts[id] {
                 Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. } => {
                     for cell in dests {
-                        let entry = defs.entry(*cell).or_insert((0, None));
+                        let entry = &mut defs[raw(*cell) as usize];
                         entry.0 += 1;
                         entry.1 = Some((b, pos));
                     }
@@ -101,11 +100,11 @@ fn single_receive_cells(
                 // A placeholder the bound substitution replaces; never a receive.
                 Inst::CallBoundMulti { dests, .. } => {
                     for cell in dests {
-                        defs.entry(*cell).or_insert((0, None)).0 += 1;
+                        defs[raw(*cell) as usize].0 += 1;
                     }
                 }
                 other => regalloc::cell_defs(other, &mut |cell| {
-                    defs.entry(cell).or_insert((0, None)).0 += 1;
+                    defs[raw(cell) as usize].0 += 1;
                 }),
             }
         }
@@ -115,12 +114,14 @@ fn single_receive_cells(
             .values()
             .any(|plan| plan.captures_cell(cell) || plan.env_cell() == Some(cell))
     };
-    let mut out: HashSet<Idx<Cell>> = defs
+    let mut out: HashSet<Idx<Cell>> = func
+        .cells
         .iter()
-        .filter(|(cell, (count, at))| {
-            *count == 1 && at.is_some() && !pinned[raw(**cell) as usize] && !captured(**cell)
+        .map(|(cell, _)| cell)
+        .filter(|cell| {
+            let (count, at) = defs[raw(*cell) as usize];
+            count == 1 && at.is_some() && !pinned[raw(*cell) as usize] && !captured(*cell)
         })
-        .map(|(cell, _)| *cell)
         .collect();
     for &b in scope {
         for (pos, &id) in func.blocks[b].insts.iter().enumerate() {
@@ -128,7 +129,7 @@ fn single_receive_cells(
                 if !out.contains(&cell) {
                     return;
                 }
-                let Some((_, Some((def_block, def_pos)))) = defs.get(&cell) else {
+                let Some((_, Some((def_block, def_pos)))) = defs.get(raw(cell) as usize) else {
                     return;
                 };
                 if *def_block != b || *def_pos >= pos || !matches!(func.insts[id], Inst::Load(_)) {

@@ -35,6 +35,7 @@ bone-lints = { workspace = true }
 rock-core = { workspace = true }
 comfy-la-arena = { workspace = true }
 ustr = { workspace = true }
+memchr = { workspace = true }
 rustc-hash = { workspace = true }
 rayon = { workspace = true }
 

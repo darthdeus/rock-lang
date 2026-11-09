@@ -307,6 +307,10 @@ pub struct CodegenCtx {
     /// emit boundary. `Mutex` because `&CodegenCtx` is shared across rayon
     /// workers; contention is nil (a few per fn).
     rejections: Mutex<Vec<(String, CompilerError)>>,
+    /// The mangled name of every declaration some body has called or
+    /// referenced so far, derived once per build instead of once per site.
+    /// Readers share the lock; a miss takes the write side once.
+    mangled: std::sync::RwLock<HashMap<FuncRef, ustr::Ustr>>,
     /// Compiler-assigned storage slots for mutable globals.
     state_slots: HashMap<ustr::Ustr, u32>,
     scalar_constants: HashMap<ustr::Ustr, Lit>,
@@ -333,6 +337,9 @@ impl Clone for CodegenCtx {
         Self {
             reserved: self.reserved.clone(),
             rejections: Mutex::new(self.rejections.lock().expect("rejection sink").clone()),
+            mangled: std::sync::RwLock::new(
+                self.mangled.read().expect("mangled name cache").clone(),
+            ),
             state_slots: self.state_slots.clone(),
             scalar_constants: self.scalar_constants.clone(),
             call_sccs: self.call_sccs.clone(),
@@ -567,6 +574,7 @@ impl CodegenCtx {
         CodegenCtx {
             reserved,
             rejections: Mutex::new(collisions),
+            mangled: std::sync::RwLock::default(),
             state_slots,
             scalar_constants: scalar_constants(ws),
             call_sccs: HashMap::default(),
@@ -653,6 +661,19 @@ impl CodegenCtx {
     /// reject-not-panic: a collision is illegal user code, not a compiler bug, so
     /// it surfaces as a diagnostic and keeps interactive compiler hosts alive.
     /// THE single choke point for every synthetic top-level name across skull.
+    /// [`mangle_fn`] of the declaration `fref`, derived once per build.
+    pub fn mangled_name(&self, ws: &Workspace, fref: FuncRef) -> ustr::Ustr {
+        if let Some(name) = self.mangled.read().expect("mangled name cache").get(&fref) {
+            return *name;
+        }
+        let name = ustr::Ustr::from(&mangle_fn(ws, func_of(ws, fref)));
+        self.mangled
+            .write()
+            .expect("mangled name cache")
+            .insert(fref, name);
+        name
+    }
+
     pub fn mint_synthetic(&self, name: String) -> String {
         if let Some(&span) = self.reserved.get(&name) {
             let msg = format!(
@@ -834,11 +855,32 @@ impl SelectionArm {
     }
 }
 
+/// The symbol a call spells: a specialized instance's own, or the declaration's
+/// mangled name (interned once per build).
+pub(crate) enum CalleeName {
+    Specialized(String),
+    Declared(ustr::Ustr),
+}
+
+impl std::ops::Deref for CalleeName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        match self {
+            CalleeName::Specialized(name) => name,
+            CalleeName::Declared(name) => name.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for CalleeName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self)
+    }
+}
+
 struct Emitter<'a> {
     enum_box_groups: RefCell<HashMap<ustr::Ustr, std::rc::Rc<EnumBoxGroups>>>,
-    /// The mangled name of each declaration this body calls directly, derived
-    /// once per body rather than at every call site.
-    callee_symbols: RefCell<HashMap<FuncRef, std::rc::Rc<str>>>,
     selection_preds: std::cell::OnceCell<PredMap>,
     ws: &'a Workspace,
     ctx: &'a CodegenCtx,
