@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 /// instead of compiling one: the identity the running program reports, and the
 /// `embed_string` inputs baked into it.
 #[derive(Clone)]
-pub(crate) struct AdoptedArtifact {
+pub struct AdoptedArtifact {
     pub artifact_fingerprint: String,
     pub embedded_inputs: Vec<(PathBuf, u64)>,
 }
@@ -20,7 +20,7 @@ pub(crate) struct AdoptedArtifact {
 /// process, engine/compiler builds, sims) is the backend-agnostic runtime.
 /// What a successful (re)compile asks of the runtime beyond hot-reloading.
 #[derive(Default)]
-pub(crate) struct CompileOutcome {
+pub struct CompileOutcome {
     /// Reasons whose live state or runtime registry cannot take the compatible
     /// fast path. The watcher requests the existing clean process restart for
     /// these changes; body-only edits remain on the CodeRef overlay path.
