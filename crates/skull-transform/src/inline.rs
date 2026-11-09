@@ -842,7 +842,8 @@ enum UseSite {
 /// rewrite cross-block uses without rescanning the caller arena.
 #[derive(Default)]
 struct UseIndex {
-    users: HashMap<Idx<Inst>, Vec<UseSite>>,
+    /// Dense by instruction id; a splice's fresh instructions grow it.
+    users: Vec<Vec<UseSite>>,
     affected: HashSet<UseSite>,
 }
 
@@ -861,7 +862,12 @@ impl UseIndex {
             index
                 .users
                 .iter()
-                .flat_map(|(value, sites)| sites.iter().map(move |site| (*value, *site)))
+                .enumerate()
+                .flat_map(|(value, sites)| {
+                    let value =
+                        Idx::<Inst>::from_raw(comfy_la_arena::RawIdx::from_u32(value as u32));
+                    sites.iter().map(move |site| (value, *site))
+                })
                 .collect()
         };
         let describe = |(value, site): &(Idx<Inst>, UseSite)| match site {
@@ -888,19 +894,24 @@ impl UseIndex {
         index
     }
 
+    fn slot(&mut self, value: Idx<Inst>) -> &mut Vec<UseSite> {
+        let at = crate::visit::raw(value) as usize;
+        if self.users.len() <= at {
+            self.users.resize_with(at + 1, Vec::new);
+        }
+        &mut self.users[at]
+    }
+
     fn add_use(&mut self, value: Idx<Inst>, site: UseSite) {
-        let users = self.users.entry(value).or_default();
+        let users = self.slot(value);
         if !users.contains(&site) {
             users.push(site);
         }
     }
 
     fn remove_use(&mut self, value: Idx<Inst>, site: UseSite) {
-        if let Some(users) = self.users.get_mut(&value) {
+        if let Some(users) = self.users.get_mut(crate::visit::raw(value) as usize) {
             users.retain(|user| *user != site);
-            if users.is_empty() {
-                self.users.remove(&value);
-            }
         }
     }
 
@@ -947,7 +958,7 @@ impl UseIndex {
         if from == to {
             return (0, 0, 0);
         }
-        let sites = self.users.remove(&from).unwrap_or_default();
+        let sites = std::mem::take(self.slot(from));
         self.affected.clear();
         let mut instructions = 0;
         let mut terminators = 0;
@@ -2041,8 +2052,9 @@ fn call_target(
     let Some(owner) = func.callee_instances.get(&call_id) else {
         return Ok(None);
     };
-    if skull_mir::lower::canonical_variant(ws, owner.func)
-        != skull_mir::lower::canonical_variant(ws, fref)
+    if owner.func != fref
+        && skull_mir::lower::canonical_variant(ws, owner.func)
+            != skull_mir::lower::canonical_variant(ws, fref)
     {
         return Err(CompilerError::new_no_location(format!(
             "internal: call in `{}` records owner `{}` but targets another declaration",
@@ -3365,7 +3377,7 @@ fn inline_functions_inner(
     let mut uses = UseIndex::build(func);
     if let Some(start) = use_index_started {
         cache.census.use_index_build_ns = start.elapsed().as_nanos() as u64;
-        cache.census.use_index_values = uses.users.len();
+        cache.census.use_index_values = uses.users.iter().filter(|sites| !sites.is_empty()).count();
     }
     let original_calls: HashSet<Idx<Inst>> = top
         .iter()

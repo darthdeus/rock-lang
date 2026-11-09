@@ -5,7 +5,6 @@
 
 use crate::mir::{Block, MirFunc, Term};
 use comfy_la_arena::Idx;
-use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 /// Successor blocks of a terminator, in branch order (for reverse-postorder).
 /// Visit each successor block of `term` (callback form — avoids the per-call
@@ -97,22 +96,49 @@ pub fn reverse_postorder(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
 /// (all predecessors, goto-only predecessors) of each reachable block. Loop
 /// edges are unconditional gotos (preheader->header, latch->header), so the
 /// goto-pred set isolates the two loop entries.
-pub type PredMap = HashMap<Idx<Block>, Vec<Idx<Block>>>;
+/// Predecessor lists, dense by block id; a block with none has no entry.
+#[derive(Clone, Debug, Default)]
+pub struct PredMap {
+    lists: Vec<Vec<Idx<Block>>>,
+}
+
+impl PredMap {
+    fn sized(n: usize) -> Self {
+        Self {
+            lists: vec![Vec::new(); n],
+        }
+    }
+
+    fn push(&mut self, to: Idx<Block>, from: Idx<Block>) {
+        self.lists[dense::bx(to)].push(from);
+    }
+
+    /// The predecessors of `b`, `None` when it has none.
+    pub fn get(&self, b: &Idx<Block>) -> Option<&Vec<Idx<Block>>> {
+        self.lists
+            .get(dense::bx(*b))
+            .filter(|preds| !preds.is_empty())
+    }
+}
 
 pub fn predecessors(func: &MirFunc, rpo: &[Idx<Block>]) -> (PredMap, PredMap) {
-    let reach: HashSet<Idx<Block>> = rpo.iter().copied().collect();
-    let mut all: PredMap = HashMap::default();
-    let mut goto: PredMap = HashMap::default();
+    let n = func.blocks.len();
+    let mut reach = vec![false; n];
+    for &b in rpo {
+        reach[dense::bx(b)] = true;
+    }
+    let mut all = PredMap::sized(n);
+    let mut goto = PredMap::sized(n);
     for &b in rpo {
         match &func.blocks[b].term {
             Term::Goto(t) => {
-                all.entry(*t).or_default().push(b);
-                goto.entry(*t).or_default().push(b);
+                all.push(*t, b);
+                goto.push(*t, b);
             }
             t => {
                 successors(t, |s| {
-                    if reach.contains(&s) {
-                        all.entry(s).or_default().push(b);
+                    if reach[dense::bx(s)] {
+                        all.push(s, b);
                     }
                 });
             }
