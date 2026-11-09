@@ -196,6 +196,12 @@ pub fn determine_compilation_unit_for_file(file_path: impl AsRef<Path>) -> Resul
     }
 }
 
+/// Load an editor buffer's enclosing project, even before its first file is saved.
+pub fn load_sources_for_project(project_dir: &Path) -> Result<SourceFiles> {
+    let analysis = analyze_files_in_directory(project_dir)?;
+    load_project_sources(&analysis.project_files, Some(project_dir))
+}
+
 /// The package that owns the file at the canonical `path` in `graph`: its
 /// node stamps the file's facts, at load or when the file enters an
 /// incremental session after its load (the editor opening a new file).
@@ -215,72 +221,7 @@ pub fn source_package<'g>(
 pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<SourceFiles> {
     match unit {
         CompilationUnit::Project(files) => {
-            // Load stick.toml dependencies for project compilation
-            let mut all_files = Vec::new();
-            let mut graph = None;
-
-            // Try to find stick.toml in the project directory
-            if let Some(first_file) = files.first() {
-                if let Some(project_dir) = first_file.parent() {
-                    if let Some((stick_path, stick_config)) =
-                        crate::stick::StickConfig::find_from_dir(project_dir)?
-                    {
-                        // Resolve every package through the one graph, so the
-                        // LSP's file set matches a real compile on the same
-                        // channel: recursive, manifest-relative, channel-filtered.
-                        let channel = crate::stick::resolved_channel_for(&stick_config);
-                        let stick_dir = stick_path.parent().unwrap_or(&stick_path);
-                        let resolved = crate::stick::graph::PackageGraph::build_with_channel(
-                            stick_dir,
-                            &stick_config,
-                            &channel,
-                        )?;
-
-                        for id in resolved.load_order() {
-                            if *id == resolved.root() {
-                                continue;
-                            }
-                            let node = resolved.package(*id);
-                            let dep_files = resolved.selected_rock_files(*id, &node.root)?;
-
-                            // Filter out script files
-                            for path in dep_files {
-                                let source = source_file_new(&path)?;
-                                if !source.is_script {
-                                    all_files.push(path);
-                                }
-                            }
-                        }
-                        graph = Some(resolved);
-                    }
-                }
-            }
-
-            // Module-load effects from dependency initializers must be
-            // ready before a consuming project's global initializers.
-            all_files.extend(files.clone());
-
-            let mut sources = load_sources_from_paths(&all_files)?;
-
-            // Stamp package and dialect facts from the graph onto every file
-            // it owns, so downstream consumers (parser dialect selection,
-            // module scoping) never infer ownership from inclusion order.
-            if let Some(graph) = graph.as_ref() {
-                sources.set_package_roots(
-                    graph
-                        .packages()
-                        .iter()
-                        .map(|node| (node.id.0, node.root.clone())),
-                );
-                for file in &sources.files {
-                    let path = file.borrow().file.to_id_path();
-                    if let Some(node) = source_package(graph, Path::new(&path)) {
-                        node.stamp(&mut file.borrow_mut());
-                    }
-                }
-            }
-
-            Ok(sources)
+            load_project_sources(files, files.first().and_then(|file| file.parent()))
         }
         CompilationUnit::Script {
             file,
@@ -349,6 +290,73 @@ pub fn load_sources_for_compilation_unit(unit: &CompilationUnit) -> Result<Sourc
             Ok(sources)
         }
     }
+}
+
+fn load_project_sources(files: &[PathBuf], project_dir: Option<&Path>) -> Result<SourceFiles> {
+    // Load stick.toml dependencies for project compilation
+    let mut all_files = Vec::new();
+    let mut graph = None;
+
+    // Try to find stick.toml in the project directory
+    if let Some(project_dir) = project_dir {
+        if let Some((stick_path, stick_config)) =
+            crate::stick::StickConfig::find_from_dir(project_dir)?
+        {
+            // Resolve every package through the one graph, so the
+            // LSP's file set matches a real compile on the same
+            // channel: recursive, manifest-relative, channel-filtered.
+            let channel = crate::stick::resolved_channel_for(&stick_config);
+            let stick_dir = stick_path.parent().unwrap_or(&stick_path);
+            let resolved = crate::stick::graph::PackageGraph::build_with_channel(
+                stick_dir,
+                &stick_config,
+                &channel,
+            )?;
+
+            for id in resolved.load_order() {
+                if *id == resolved.root() {
+                    continue;
+                }
+                let node = resolved.package(*id);
+                let dep_files = resolved.selected_rock_files(*id, &node.root)?;
+
+                // Filter out script files
+                for path in dep_files {
+                    let source = source_file_new(&path)?;
+                    if !source.is_script {
+                        all_files.push(path);
+                    }
+                }
+            }
+            graph = Some(resolved);
+        }
+    }
+
+    // Module-load effects from dependency initializers must be
+    // ready before a consuming project's global initializers.
+    all_files.extend_from_slice(files);
+
+    let mut sources = load_sources_from_paths(&all_files)?;
+
+    // Stamp package and dialect facts from the graph onto every file
+    // it owns, so downstream consumers (parser dialect selection,
+    // module scoping) never infer ownership from inclusion order.
+    if let Some(graph) = graph.as_ref() {
+        sources.set_package_roots(
+            graph
+                .packages()
+                .iter()
+                .map(|node| (node.id.0, node.root.clone())),
+        );
+        for file in &sources.files {
+            let path = file.borrow().file.to_id_path();
+            if let Some(node) = source_package(graph, Path::new(&path)) {
+                node.stamp(&mut file.borrow_mut());
+            }
+        }
+    }
+
+    Ok(sources)
 }
 
 /// Helper function to load SourceFiles from a list of paths.

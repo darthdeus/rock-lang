@@ -889,10 +889,21 @@ impl BoneWorkspace {
     /// the canonical paths the LSP queries with (`root_for` / the CLI's
     /// `canonical`); a mismatch would leave the opened file's module unfindable.
     fn project_sources(file_path: &str) -> Result<Vec<SessionFile>, String> {
-        let unit = rock_host::compilation_units::determine_compilation_unit_for_file(file_path)
-            .map_err(|e| format!("source discovery failed: {e:#}"))?;
-        let sources = rock_host::compilation_units::load_sources_for_compilation_unit(&unit)
-            .map_err(|e| format!("source loading failed: {e:#}"))?;
+        // New buffers and stale session entries have no disk file. Discover
+        // their enclosing project, then let update apply the editor's text.
+        let sources = if !Path::new(file_path)
+            .try_exists()
+            .map_err(|e| format!("source discovery failed: {e}"))?
+            && let Some(root) = Self::stick_root(file_path)
+        {
+            rock_host::compilation_units::load_sources_for_project(&root)
+                .map_err(|e| format!("source loading failed: {e:#}"))?
+        } else {
+            let unit = rock_host::compilation_units::determine_compilation_unit_for_file(file_path)
+                .map_err(|e| format!("source discovery failed: {e:#}"))?;
+            rock_host::compilation_units::load_sources_for_compilation_unit(&unit)
+                .map_err(|e| format!("source loading failed: {e:#}"))?
+        };
         let mut out = Vec::new();
         for f in &sources.files {
             let f = f.borrow();

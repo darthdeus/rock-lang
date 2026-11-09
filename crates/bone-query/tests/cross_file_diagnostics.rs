@@ -426,11 +426,47 @@ fn missing_first_buffer_loads_project_and_keeps_unsaved_edits() {
     let missing = dir.path().join("new.rock").to_string_lossy().into_owned();
     let mut bone = BoneWorkspace::new();
     let per = bone.update(&missing, String::new());
-    assert!(per.iter().flat_map(|(_, d)| d).all(|d| d.severity != Some(lsp_types::DiagnosticSeverity::ERROR)), "{per:?}");
+    assert!(
+        per.iter()
+            .flat_map(|(_, d)| d)
+            .all(|d| d.severity != Some(lsp_types::DiagnosticSeverity::ERROR)),
+        "{per:?}"
+    );
     let text = "fn draft() -> Foo { Foo { x: 1 } }\n";
     let per = bone.update(&missing, text.into());
-    assert!(per.iter().flat_map(|(_, d)| d).all(|d| d.severity != Some(lsp_types::DiagnosticSeverity::ERROR)), "{per:?}");
+    assert!(
+        per.iter()
+            .flat_map(|(_, d)| d)
+            .all(|d| d.severity != Some(lsp_types::DiagnosticSeverity::ERROR)),
+        "{per:?}"
+    );
     bone.update(&b, std::fs::read_to_string(&b).unwrap());
     assert_eq!(bone.file_text(&missing), Some(text));
     assert!(!std::path::Path::new(&missing).exists());
+}
+
+#[test]
+fn first_unsaved_source_loads_dependencies_of_empty_project() {
+    let dir = tempfile::tempdir().unwrap();
+    let app = dir.path().join("app");
+    let dep = dir.path().join("dep");
+    std::fs::create_dir(&app).unwrap();
+    std::fs::create_dir(&dep).unwrap();
+    std::fs::write(
+        app.join("stick.toml"),
+        "[package]\nname = \"app\"\n[dependencies]\ndep = \"../dep\"\n",
+    )
+    .unwrap();
+    std::fs::write(dep.join("stick.toml"), "[package]\nname = \"dep\"\n").unwrap();
+    std::fs::write(dep.join("types.rock"), "struct Foo { x: int }\n").unwrap();
+    let path = app.join("new.rock").to_string_lossy().into_owned();
+    let mut bone = BoneWorkspace::new();
+    let per = bone.update(&path, "fn draft() -> Foo { Foo { x: 1 } }\n".into());
+    assert!(
+        per.iter()
+            .flat_map(|(_, d)| d)
+            .all(|d| d.severity != Some(lsp_types::DiagnosticSeverity::ERROR)),
+        "{per:?}"
+    );
+    assert!(bone.hover(&path, lsp_types::Position::new(0, 14)).is_some());
 }

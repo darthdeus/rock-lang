@@ -185,8 +185,7 @@ impl LspWorkspace {
     }
 
     /// Drop all per-document caches for a URI the editor has closed.
-    /// Called from the `textDocument/didClose` handler. The bone session entry
-    /// for the file is dropped separately (`workspace.bone.remove`).
+    /// Called after the `textDocument/didClose` handler reconciles disk contents.
     pub(crate) fn close_document(&mut self, uri: &str) {
         self.document_versions.versions.remove(uri);
         self.semantic_token_cache.remove(uri);
