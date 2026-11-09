@@ -10,8 +10,9 @@
 //! (default `~/.local/state`). Machine config is `stone/window.toml` under
 //! `$XDG_CONFIG_HOME` (default `~/.config`).
 //!
-//! Both follow one convention on every platform (macOS included), so there is
-//! a single path to reason about. Headless never reads or writes either file.
+//! On Windows, absent XDG overrides use the native LocalAppData (state) and
+//! RoamingAppData (config) known folders. Unix defaults remain unchanged.
+//! Headless never reads or writes either file.
 //!
 //! The machine config also carries `imgui_scale` (game section over default)
 //! for a display that misreports its density; `STONE_IMGUI_SCALE` outranks it.
@@ -367,6 +368,7 @@ pub fn game_slug(title: &str) -> String {
 // I/O layer (dirs + read/write). Kept thin; the logic above is what's tested.
 // ============================================================================
 
+#[cfg(not(target_os = "windows"))]
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
@@ -375,14 +377,28 @@ fn state_dir() -> Option<PathBuf> {
     if let Some(x) = std::env::var_os("XDG_STATE_HOME") {
         return Some(PathBuf::from(x).join("stone"));
     }
-    home_dir().map(|h| h.join(".local").join("state").join("stone"))
+    #[cfg(target_os = "windows")]
+    {
+        dirs::data_local_dir().map(|p| p.join("stone"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        home_dir().map(|h| h.join(".local").join("state").join("stone"))
+    }
 }
 
 fn config_dir() -> Option<PathBuf> {
     if let Some(x) = std::env::var_os("XDG_CONFIG_HOME") {
         return Some(PathBuf::from(x).join("stone"));
     }
-    home_dir().map(|h| h.join(".config").join("stone"))
+    #[cfg(target_os = "windows")]
+    {
+        dirs::config_dir().map(|p| p.join("stone"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        home_dir().map(|h| h.join(".config").join("stone"))
+    }
 }
 
 fn geometry_file() -> Option<PathBuf> {
@@ -551,15 +567,32 @@ pub fn save_geometry(
     h: i32,
     display: Option<i32>,
     requested: (i32, i32),
-) {
+) -> bool {
     let Some(path) = geometry_file() else {
-        ::log::error!(target: "STONE", "no HOME/XDG_STATE_HOME: cannot save window geometry");
-        return;
+        ::log::error!(target: "STONE", "cannot resolve user state directory for window geometry");
+        return false;
     };
-    let Some(dir) = path.parent() else { return };
+    save_geometry_to(&path, game_slug, topo, x, y, w, h, display, requested)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn save_geometry_to(
+    path: &std::path::Path,
+    game_slug: &str,
+    topo: &str,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    display: Option<i32>,
+    requested: (i32, i32),
+) -> bool {
+    let Some(dir) = path.parent() else {
+        return false;
+    };
     if let Err(e) = std::fs::create_dir_all(dir) {
         ::log::error!(target: "STONE", "creating {} failed: {}", dir.display(), e);
-        return;
+        return false;
     }
     // Merge into whatever is there so other games'/topologies' entries survive.
     let mut root: serde_json::Value = std::fs::read_to_string(&path)
@@ -579,23 +612,105 @@ pub fn save_geometry(
         Ok(s) => s,
         Err(e) => {
             ::log::error!(target: "STONE", "serializing window geometry failed: {}", e);
-            return;
+            return false;
         }
     };
     let tmp = path.with_extension("json.tmp");
     if let Err(e) = std::fs::write(&tmp, serialized.as_bytes()) {
         ::log::error!(target: "STONE", "writing {} failed: {}", tmp.display(), e);
-        return;
+        return false;
     }
     if let Err(e) = std::fs::rename(&tmp, &path) {
         ::log::error!(target: "STONE", "renaming {} -> {} failed: {}", tmp.display(), path.display(), e);
         let _ = std::fs::remove_file(&tmp);
+        return false;
     }
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn geometry_write_reports_failure_and_preserves_other_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("\u{6f22}\u{1f680}").join("geometry.json");
+        assert!(save_geometry_to(
+            &path,
+            "first",
+            "topology",
+            1,
+            2,
+            640,
+            480,
+            None,
+            (640, 480)
+        ));
+        assert!(save_geometry_to(
+            &path,
+            "second",
+            "topology",
+            3,
+            4,
+            800,
+            600,
+            Some(1),
+            (800, 600)
+        ));
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(json[saved_key("first", "topology")]["x"], 1);
+        assert_eq!(json[saved_key("second", "topology")]["x"], 3);
+        assert!(!save_geometry_to(
+            &path.join("blocked.json"),
+            "first",
+            "topology",
+            0,
+            0,
+            1,
+            1,
+            None,
+            (1, 1)
+        ));
+        assert!(!save_geometry_to(
+            dir.path(),
+            "first",
+            "topology",
+            0,
+            0,
+            1,
+            1,
+            None,
+            (1, 1)
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_paths_without_unix_environment() {
+        const CHILD: &str = "STONE_TEST_WINDOWS_PATHS";
+        if std::env::var_os(CHILD).is_some() {
+            let state = state_dir().expect("Windows native state directory");
+            let config = config_dir().expect("Windows native config directory");
+            assert!(state.is_absolute() && config.is_absolute());
+            assert_eq!(state, dirs::data_local_dir().unwrap().join("stone"));
+            assert_eq!(config, dirs::config_dir().unwrap().join("stone"));
+            return;
+        }
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "window_placement::tests::windows_paths_without_unix_environment",
+            ])
+            .env(CHILD, "1")
+            .env_remove("HOME")
+            .env_remove("XDG_STATE_HOME")
+            .env_remove("XDG_CONFIG_HOME")
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
 
     fn saved_at(size: (i32, i32)) -> PartialGeometry {
         PartialGeometry {
