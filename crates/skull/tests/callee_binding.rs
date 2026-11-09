@@ -3,7 +3,7 @@
 
 use skull::mir_emit::{emit_full, emit_overlay};
 
-use crate::common::ws_with_stdlib;
+use crate::common::{body_id, ws_with_stdlib};
 
 /// A program whose call graph has a chain (`top` -> `mid` -> `leaf`), a
 /// mutually recursive pair, and a leaf with no callees at all.
@@ -125,23 +125,6 @@ fn emits_main_is_reported() {
     let mid = skull::user_module_id(&no_main).unwrap();
     let emit = emit_full(&no_main, mid).expect("emit_full").0;
     assert!(!emit.emits_main, "no `main` is defined");
-}
-
-fn body_id(
-    ws: &bone_semantic::inference::Workspace,
-    name: &str,
-) -> (
-    bone_semantic::prelude::ModuleId,
-    bone_semantic::hir::BodyOwner,
-) {
-    for module in ws.modules.iter() {
-        for (fid, f) in module.functions.iter() {
-            if f.name.as_str() == name {
-                return (module.id, bone_semantic::hir::BodyOwner::Function(fid));
-            }
-        }
-    }
-    panic!("no fn named {name}");
 }
 
 fn over_budget_inline_caller_fixture(helper_value: i32) -> String {

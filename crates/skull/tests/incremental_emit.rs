@@ -5,7 +5,7 @@
 //! body, so they must re-emit too (the inline codegen-dep), even though a body edit
 //! never re-infers the callers.
 
-use crate::common::{ws_of, ws_with_stdlib};
+use crate::common::{body_id, ws_of, ws_with_stdlib};
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
@@ -17,21 +17,6 @@ fn emit_overlay(
     reinferred: &[(ModuleId, BodyOwner)],
 ) -> MirEmit {
     emit_overlay_result(ws, cache, reinferred).expect("emit_overlay")
-}
-
-/// The `(ModuleId, BodyOwner)` reinferred-id for the named function in `ws`.
-fn body_id(ws: &Workspace, name: &str) -> (ModuleId, BodyOwner) {
-    // Every module, not `user_module_id`: that returns the FIRST non-builtin
-    // module, which over a stdlib workspace is a stdlib module rather than the
-    // fixture's own.
-    for module in ws.modules.iter() {
-        for (fid, f) in module.functions.iter() {
-            if f.name.as_str() == name {
-                return (module.id, BodyOwner::Function(fid));
-            }
-        }
-    }
-    panic!("no fn named {name}");
 }
 
 /// Drive one body edit through the cache and assert incremental == fresh.

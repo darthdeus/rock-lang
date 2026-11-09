@@ -10,10 +10,9 @@
 //! that only checked the emitting arm would pass against a walk that recorded
 //! an obligation for every hole.
 
-use crate::common::{ws_of_files, ws_with_stdlib};
+use crate::common::{census_of, graph_of, prepared_body, unjoined, ws_of_files, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
-use skull::instance_graph::{self, InstanceGraph};
-use skull::site_join::{self, SiteJoinCensus, Unjoined};
+use skull::site_join::{SiteJoinCensus, Unjoined};
 use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::site::SiteOp;
@@ -21,54 +20,6 @@ use ustr::Ustr;
 
 fn check_with_dependency(src: &str, dependency: &str) -> Workspace {
     ws_of_files(&[("games/impostor.rock", dependency), ("<test>", src)])
-}
-
-fn graph_of(ws: &Workspace) -> InstanceGraph {
-    let roots = skull::mir_emit::emission_roots(ws, None);
-    instance_graph::build(ws, roots, false)
-}
-
-fn census_of(src: &str) -> SiteJoinCensus {
-    let ws = ws_with_stdlib(src);
-    let g = graph_of(&ws);
-    let bodies = skull::concrete_body::build(&ws, &g);
-    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
-    site_join::census(&ws, &scx, &g, &bodies)
-}
-
-/// Lower `<test>`'s fn `name` through emission's own transform sequence.
-fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    let (fid, f) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == name)
-        .expect("fn not found");
-    let fref = skull_mir::mir::FuncRef {
-        module: mid,
-        func: fid,
-    };
-    let graph = graph_of(ws);
-    let bodies = skull::concrete_body::build(ws, &graph);
-    let scx = ScalarCtx::new(ws).sharing(graph.interner().clone());
-    let instance = skull_mir::instance::Instance::base(fref);
-    let plan = bodies.plans.get(&instance).expect("concrete plan");
-    let mut mf =
-        skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans).expect("lower");
-    let mangled = skull_mir::mangle::mangle_fn(ws, f);
-    let mut cache = skull_transform::InlineCache::default();
-    skull::mir_emit::prepare_instance_body_with_plans(
-        ws,
-        &scx,
-        fref,
-        &mangled,
-        &mut mf,
-        &mut cache,
-        &bodies.plans,
-    )
-    .expect("prepare");
-    mf
 }
 
 fn lowered_body_in_mode(ws: &Workspace, name: &str, values_first_class: bool) -> MirFunc {
@@ -168,10 +119,6 @@ fn walk_dispatched_in(ws: &Workspace, name: &str) -> Vec<&'static str> {
     }
     out.sort_unstable();
     out
-}
-
-fn unjoined(c: &SiteJoinCensus, cause: Unjoined) -> usize {
-    c.unjoined.get(&cause).copied().unwrap_or(0)
 }
 
 /// The `dispatched` operation must have a POPULATION in the census, or every

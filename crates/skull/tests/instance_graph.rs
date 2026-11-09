@@ -1,7 +1,7 @@
 //! Stage 0d properties for the shadow instance graph
 //!.
 
-use crate::common::ws_with_stdlib;
+use crate::common::{body_id, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, EdgeKind};
 use ustr::Ustr;
@@ -2513,37 +2513,13 @@ fn all_unresolved(ws: &Workspace, g: &instance_graph::InstanceGraph) -> Vec<(Str
         .collect()
 }
 
-/// The one body to mutate, as `(module, owner)`.
-///
-/// A `BodyOwner::Function` holds a MODULE-LOCAL arena index, so applying one to
-/// every module's inference table hits whatever stdlib function happens to share
-/// that index. That is not hypothetical: it is what made
-/// `drop_generic_binding_records` report two removals for a body with one
-/// generic call, the second belonging to an unrelated stdlib `get`.
-fn body_of(
-    ws: &Workspace,
-    fn_name: &str,
-) -> (
-    bone_semantic::prelude::ModuleId,
-    bone_semantic::hir::BodyOwner,
-) {
-    for module in ws.modules.iter() {
-        for (fid, f) in module.functions.iter() {
-            if f.name.as_str() == fn_name {
-                return (module.id, bone_semantic::hir::BodyOwner::Function(fid));
-            }
-        }
-    }
-    panic!("no fn named `{fn_name}`");
-}
-
 /// Run `f` over exactly one body's inference record.
 fn with_body_inference<R>(
     ws: &mut Workspace,
     fn_name: &str,
     f: impl FnOnce(&mut bone_semantic::inference::BodyInference) -> R,
 ) -> R {
-    let (mid, owner) = body_of(ws, fn_name);
+    let (mid, owner) = body_id(ws, fn_name);
     let inference = ws.inferences[mid.raw() as usize]
         .as_mut()
         .unwrap_or_else(|| panic!("`{fn_name}`'s module has no inference result"));

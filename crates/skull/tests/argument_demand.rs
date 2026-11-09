@@ -1,4 +1,4 @@
-use crate::common::{run_luajit, ws_with_stdlib};
+use crate::common::{body_id, run_luajit, ws_with_stdlib};
 use skull::mir_emit::emit_full;
 
 #[test]
@@ -49,17 +49,6 @@ fn demand_read(v: Sample) -> int { return v.kept }
         .lua;
     let program = format!("{lua}\nprint(pcall(probe))\n");
     assert!(run_luajit(&program).starts_with("false\t"));
-}
-
-fn body_id(
-    ws: &bone_semantic::inference::Workspace,
-    name: &str,
-) -> (
-    bone_semantic::prelude::ModuleId,
-    bone_semantic::hir::BodyOwner,
-) {
-    let f = crate::common::fn_ref(ws, name);
-    (f.module, bone_semantic::hir::BodyOwner::Function(f.func))
 }
 
 #[test]

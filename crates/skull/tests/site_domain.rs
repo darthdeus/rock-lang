@@ -8,12 +8,11 @@
 //! apart; the previous answer was to withhold the stamp entirely, which was
 //! fail-closed but not a contract emission could consume.
 
-use crate::common::ws_with_stdlib;
+use crate::common::{census_of, graph_of, prepared_body, unjoined, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
 use skull::concrete_body::Callee;
-use skull::instance_graph::{self, InstanceGraph};
-use skull::site_join::{self, SiteJoinCensus, Unjoined};
-use skull_mir::lower::ScalarCtx;
+use skull::instance_graph::InstanceGraph;
+use skull::site_join::Unjoined;
 use skull_mir::mir::MirFunc;
 use skull_mir::site::SiteDomain;
 use ustr::Ustr;
@@ -25,53 +24,6 @@ fn render_args(g: &InstanceGraph, args: &[skull_mir::monoty::MonoTyId]) -> Strin
         .map(|a| g.interner().render(*a))
         .collect::<Vec<_>>()
         .join(",")
-}
-
-fn graph_of(ws: &Workspace) -> InstanceGraph {
-    let roots = skull::mir_emit::emission_roots(ws, None);
-    instance_graph::build(ws, roots, false)
-}
-
-fn census_of(src: &str) -> SiteJoinCensus {
-    let ws = ws_with_stdlib(src);
-    let g = graph_of(&ws);
-    let bodies = skull::concrete_body::build(&ws, &g);
-    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
-    site_join::census(&ws, &scx, &g, &bodies)
-}
-
-fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    let (fid, f) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == name)
-        .expect("fn not found");
-    let fref = skull_mir::mir::FuncRef {
-        module: mid,
-        func: fid,
-    };
-    let graph = graph_of(ws);
-    let bodies = skull::concrete_body::build(ws, &graph);
-    let scx = ScalarCtx::new(ws).sharing(graph.interner().clone());
-    let instance = skull_mir::instance::Instance::base(fref);
-    let plan = bodies.plans.get(&instance).expect("concrete plan");
-    let mut mf =
-        skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans).expect("lower");
-    let mangled = skull_mir::mangle::mangle_fn(ws, f);
-    let mut cache = skull_transform::InlineCache::default();
-    skull::mir_emit::prepare_instance_body_with_plans(
-        ws,
-        &scx,
-        fref,
-        &mangled,
-        &mut mf,
-        &mut cache,
-        &bodies.plans,
-    )
-    .expect("prepare");
-    mf
 }
 
 /// Every `(domain, expr)` a prepared body stamped, nested bodies included.
@@ -88,10 +40,6 @@ fn stamped_domains(ws: &Workspace, name: &str) -> Vec<(SiteDomain, u32)> {
     walk(&prepared_body(ws, name), &mut out);
     out.sort();
     out
-}
-
-fn unjoined(c: &SiteJoinCensus, cause: Unjoined) -> usize {
-    c.unjoined.get(&cause).copied().unwrap_or(0)
 }
 
 /// A default containing a direct call joins, and the enclosing function's own

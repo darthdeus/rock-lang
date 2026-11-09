@@ -16,7 +16,7 @@
 //! is `UpdateResult::reinferred` rather than a hand-written guess at what an
 //! edit touches.
 
-use crate::common::{stdlib_asts, ws_of_files};
+use crate::common::{body_id, stdlib_asts, ws_of_files};
 use std::collections::BTreeSet;
 
 use bone_incremental::session::{NsAliases, Session, SessionFile, UpdateTier};
@@ -305,7 +305,7 @@ fn a_replaced_root_can_be_restored_by_an_earlier_install_in_its_wave() {
         &ws,
         &[new_root],
         &[old_root],
-        &[body_of(&ws, "old_root")],
+        &[body_id(&ws, "old_root")],
         &[],
     );
     assert!(stats.expanded >= 2);
@@ -1110,23 +1110,6 @@ fn check_two_files(main: &str, lib: &str) -> Workspace {
     ws_of_files(&[(MAIN, main), (LIB, lib)])
 }
 
-fn body_of(
-    ws: &Workspace,
-    fn_name: &str,
-) -> (
-    bone_semantic::prelude::ModuleId,
-    bone_semantic::hir::BodyOwner,
-) {
-    for module in ws.modules.iter() {
-        for (fid, f) in module.functions.iter() {
-            if f.name.as_str() == fn_name {
-                return (module.id, bone_semantic::hir::BodyOwner::Function(fid));
-            }
-        }
-    }
-    panic!("no fn named `{fn_name}`");
-}
-
 impl Perturbed {
     /// `perturb` returns how many records it removed -- the denominator, so a
     /// helper that silently removed nothing cannot make its test vacuous.
@@ -1141,7 +1124,7 @@ impl Perturbed {
     ) -> Self {
         let v2 = check_two_files(main, lib);
         let mut v1 = v2.clone();
-        let (mid, owner) = body_of(&v1, fn_name);
+        let (mid, owner) = body_id(&v1, fn_name);
         let body = v1
             .module(mid)
             .bodies

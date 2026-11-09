@@ -4,6 +4,10 @@
 //! module once; its test modules import helpers through `crate::common`.
 
 use bone_semantic::inference::Workspace;
+use skull::instance_graph::{self, InstanceGraph};
+use skull::site_join::{self, SiteJoinCensus, Unjoined};
+use skull_mir::lower::ScalarCtx;
+use skull_mir::mir::MirFunc;
 use ustr::Ustr;
 
 /// The shared process stdlib with `src` parsed as `file` after it.
@@ -536,6 +540,92 @@ pub fn fn_ref(ws: &Workspace, name: &str) -> skull_mir::mir::FuncRef {
         found.len()
     );
     found[0]
+}
+
+/// The body id of the single workspace fn named `name`, as an edit list names it.
+pub fn body_id(
+    ws: &Workspace,
+    name: &str,
+) -> (
+    bone_semantic::prelude::ModuleId,
+    bone_semantic::hir::BodyOwner,
+) {
+    let f = fn_ref(ws, name);
+    (f.module, bone_semantic::hir::BodyOwner::Function(f.func))
+}
+
+/// The instance graph from `ws`'s default emission roots, and those roots.
+pub fn graph_for(ws: &Workspace) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {
+    let roots = skull::mir_emit::emission_roots(ws, None);
+    (instance_graph::build(ws, roots.clone(), false), roots)
+}
+
+pub fn graph_of(ws: &Workspace) -> InstanceGraph {
+    graph_for(ws).0
+}
+
+/// The site-join census of `src`'s whole program.
+pub fn census_of(src: &str) -> SiteJoinCensus {
+    let ws = ws_with_stdlib(src);
+    let g = graph_of(&ws);
+    let bodies = skull::concrete_body::build(&ws, &g);
+    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
+    site_join::census(&ws, &scx, &g, &bodies)
+}
+
+pub fn unjoined(c: &SiteJoinCensus, cause: Unjoined) -> usize {
+    c.unjoined.get(&cause).copied().unwrap_or(0)
+}
+
+/// `name`'s base instance in `<test>`, lowered and prepared as emission would.
+pub fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
+    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let (fid, f) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == name)
+        .expect("fn not found");
+    let fref = skull_mir::mir::FuncRef {
+        module: mid,
+        func: fid,
+    };
+    let graph = graph_of(ws);
+    let bodies = skull::concrete_body::build(ws, &graph);
+    let scx = ScalarCtx::new(ws).sharing(graph.interner().clone());
+    let instance = skull_mir::instance::Instance::base(fref);
+    let plan = bodies.plans.get(&instance).expect("concrete plan");
+    let mut mf =
+        skull_mir::lower::lower_instance_with_plans(ws, &scx, plan, &bodies.plans).expect("lower");
+    let mangled = skull_mir::mangle::mangle_fn(ws, f);
+    let mut cache = skull_transform::InlineCache::default();
+    skull::mir_emit::prepare_instance_body_with_plans(
+        ws,
+        &scx,
+        fref,
+        &mangled,
+        &mut mf,
+        &mut cache,
+        &bodies.plans,
+    )
+    .expect("prepare");
+    mf
+}
+
+/// [`definition_names`] as owned strings.
+pub fn definition_symbols(lua: &str) -> Vec<String> {
+    definition_names(lua)
+        .into_iter()
+        .map(str::to_string)
+        .collect()
+}
+
+/// The non-synthetic emitted definitions whose names start with `name`.
+pub fn definitions_of(lua: &str, name: &str) -> Vec<String> {
+    definition_symbols(lua)
+        .into_iter()
+        .filter(|s| s.starts_with(name) && !s.contains("__"))
+        .collect()
 }
 
 /// Single-module workspace (no stdlib) for incremental / hot-reload tests.

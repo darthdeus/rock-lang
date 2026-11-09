@@ -8,7 +8,7 @@
 //!
 //! The GLSL emit shape itself is pinned by the skull-codegen-glsl goldens; here
 //! we pin the driver wiring (collapse + dedup + top-level registration).
-use crate::common::{emit_mir, emit_module, function_body, ws_with_stdlib};
+use crate::common::{body_id, emit_mir, emit_module, function_body, ws_with_stdlib};
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
@@ -166,26 +166,6 @@ fn test_mid(ws: &Workspace) -> ModuleId {
         .expect("<test> module id")
 }
 
-fn frag_body_id(ws: &Workspace) -> (ModuleId, BodyOwner) {
-    let mid = test_mid(ws);
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == "ui_sim_solid_frag" {
-            return (mid, BodyOwner::Function(fid));
-        }
-    }
-    panic!("no ui_sim_solid_frag fn");
-}
-
-fn body_id_named(ws: &Workspace, name: &str) -> (ModuleId, BodyOwner) {
-    let mid = test_mid(ws);
-    for (fid, f) in ws.module(mid).functions.iter() {
-        if f.name.as_str() == name {
-            return (mid, BodyOwner::Function(fid));
-        }
-    }
-    panic!("no {name} fn");
-}
-
 #[test]
 fn changed_fragment_body_changes_registration() {
     let a = emit_module(&src_with_frag("1.0"));
@@ -209,7 +189,7 @@ fn incremental_shader_edit_stays_byte_identical() {
 
     let ws2 = ws_with_stdlib(&src_with_frag("0.5"));
     let mid2 = test_mid(&ws2);
-    let reinferred = vec![frag_body_id(&ws2)];
+    let reinferred = vec![body_id(&ws2, "ui_sim_solid_frag")];
     let inc = emit_incremental(&ws2, &mut cache, &reinferred).expect("emit_incremental");
     let fresh = emit_full(&ws2, mid2).expect("emit_full v2").0;
     assert_eq!(
@@ -225,7 +205,7 @@ fn overlay_carries_edited_shader_registration() {
     let (_full1, mut cache) = emit_full(&ws1, mid1).expect("emit_full v1");
 
     let ws2 = ws_with_stdlib(&src_with_frag("0.5"));
-    let reinferred = vec![frag_body_id(&ws2)];
+    let reinferred = vec![body_id(&ws2, "ui_sim_solid_frag")];
     let overlay = emit_overlay(&ws2, &mut cache, &reinferred);
     assert!(
         overlay
@@ -250,11 +230,7 @@ fn unrelated_body_overlay_omits_shader_registrations() {
     let ws = ws_with_stdlib(&src);
     let mid = test_mid(&ws);
     let (_full, mut cache) = emit_full(&ws, mid).expect("emit_full");
-    let overlay = emit_overlay(
-        &ws,
-        &mut cache,
-        &[body_id_named(&ws, "unrelated_shader_user")],
-    );
+    let overlay = emit_overlay(&ws, &mut cache, &[body_id(&ws, "unrelated_shader_user")]);
     assert!(
         !overlay.lua.contains("__rock_shader_register("),
         "an unrelated body edit must not rebuild shader registrations:\n{}",
@@ -277,11 +253,7 @@ fn shader_helper_overlay_carries_affected_registration() {
 
     let ws2 =
         ws_with_stdlib(&src_with_shader_helper("1.0").replace("return x }", "return x * 0.5 }"));
-    let overlay = emit_overlay(
-        &ws2,
-        &mut cache,
-        &[body_id_named(&ws2, "shader_color_component")],
-    );
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "shader_color_component")]);
     assert!(
         overlay
             .lua
@@ -316,7 +288,7 @@ fn new_shader_callsite_overlay_carries_registration() {
     let (_full, mut cache) = emit_full(&ws1, mid1).expect("emit_full without callsite");
 
     let ws2 = ws_with_stdlib(&src_with_optional_call(true));
-    let overlay = emit_overlay(&ws2, &mut cache, &[body_id_named(&ws2, "shader_choice")]);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "shader_choice")]);
     assert!(
         overlay
             .lua
@@ -432,7 +404,7 @@ fn single_arg_overlay_carries_registration() {
     let ws = ws_with_stdlib(MIXED_SRC);
     let mid = test_mid(&ws);
     let (_full, mut cache) = emit_full(&ws, mid).expect("emit_full");
-    let reinferred = vec![body_id_named(&ws, "fs_frag")];
+    let reinferred = vec![body_id(&ws, "fs_frag")];
     let overlay = emit_overlay(&ws, &mut cache, &reinferred);
     assert!(
         overlay.lua.contains("__rock_shader_register(\"fs_frag\""),

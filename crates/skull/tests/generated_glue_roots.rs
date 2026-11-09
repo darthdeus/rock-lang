@@ -13,8 +13,8 @@
 //! be a nil call at load.
 
 use crate::common::{
-    self, V1Fragment, emit_v1_package, fn_ref, ws_v1_package, ws_with_dependency_module,
-    ws_with_stdlib_module,
+    self, V1Fragment, definition_symbols, emit_v1_package, fn_ref, ws_v1_package,
+    ws_with_dependency_module, ws_with_stdlib_module,
 };
 use skull::mir_emit::emit_full;
 use skull_mir::instance::Instance;
@@ -43,15 +43,6 @@ fn main() {
     print("hi")
 }
 "#;
-
-fn definition_symbols(lua: &str) -> Vec<String> {
-    lua.match_indices("\nfunction ")
-        .map(|(i, m)| {
-            let rest = &lua[i + m.len()..];
-            rest[..rest.find('(').expect("fn header has `(`")].to_string()
-        })
-        .collect()
-}
 
 /// The sim glue's `register_sim` obligation is carried by the Lua
 /// `ArtifactView`, with its population stated: one `@sim` declaration, so the

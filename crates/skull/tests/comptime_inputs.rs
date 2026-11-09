@@ -6,7 +6,7 @@
 //! undeclared var, missing file, path escape -- never a silent default.
 use bone_semantic::inference::{ComptimeInputs, ComptimeVarValue};
 
-use crate::common::{function_body, try_emit_module_with};
+use crate::common::{body_id, function_body, try_emit_module_with};
 
 fn inputs_with_var(name: &str, value: &str) -> ComptimeInputs {
     let mut inputs = ComptimeInputs::default();
@@ -244,23 +244,6 @@ fn ws_with_inputs(
     ws
 }
 
-fn reinferred_of(
-    ws: &bone_semantic::inference::Workspace,
-    name: &str,
-) -> (
-    bone_semantic::prelude::ModuleId,
-    bone_semantic::hir::BodyOwner,
-) {
-    for module in ws.modules.iter() {
-        for (fid, f) in module.functions.iter() {
-            if f.name.as_str() == name {
-                return (module.id, bone_semantic::hir::BodyOwner::Function(fid));
-            }
-        }
-    }
-    panic!("no fn named {name}");
-}
-
 fn global_reinferred_of(
     ws: &bone_semantic::inference::Workspace,
     name: &str,
@@ -302,7 +285,7 @@ fn build_var_change_reaches_incremental_and_overlay() {
     // Same source; only the resolved value moved. The edit the session saw is
     // an unrelated body, so only stale-input detection can re-emit `tag`.
     let ws2 = ws_with_inputs(INCR_SRC, inputs_with_var("SHA", "second-sha-value"));
-    let edit = vec![reinferred_of(&ws2, "other")];
+    let edit = vec![body_id(&ws2, "other")];
     let incremental = emit_incremental(&ws2, &mut cache, &edit).expect("emit_incremental");
     assert!(
         incremental.lua.contains("second-sha-value")
@@ -321,8 +304,7 @@ fn build_var_change_reaches_incremental_and_overlay() {
     let ws1b = ws_with_inputs(INCR_SRC, inputs_with_var("SHA", "first-sha-value"));
     let (_, mut cache2) = emit_full(&ws1b, mid).expect("emit_full v1b");
     let ws3 = ws_with_inputs(INCR_SRC, inputs_with_var("SHA", "third-sha-value"));
-    let overlay =
-        emit_overlay(&ws3, &mut cache2, &[reinferred_of(&ws3, "other")]).expect("emit_overlay");
+    let overlay = emit_overlay(&ws3, &mut cache2, &[body_id(&ws3, "other")]).expect("emit_overlay");
     assert!(
         overlay.lua.contains("third-sha-value"),
         "the overlay must redefine the body reading the changed var:\n{}",
@@ -357,8 +339,8 @@ fn main() {
     assert_eq!(full1.lua.matches("all-first").count(), 3);
 
     let ws2 = ws_with_inputs(src, inputs_with_var("SHA", "all-second"));
-    let incremental = emit_incremental(&ws2, &mut cache, &[reinferred_of(&ws2, "other")])
-        .expect("emit_incremental");
+    let incremental =
+        emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "other")]).expect("emit_incremental");
     assert_eq!(incremental.lua.matches("all-second").count(), 3);
     assert!(!incremental.lua.contains("all-first"));
     let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
@@ -399,7 +381,7 @@ fn other() -> int {
 
     std::fs::write(dir.path().join("data.txt"), "embed-v2").unwrap();
     let ws2 = ws_with_inputs(src, inputs);
-    let edit = vec![reinferred_of(&ws2, "other")];
+    let edit = vec![body_id(&ws2, "other")];
     let incremental = emit_incremental(&ws2, &mut cache, &edit).expect("emit_incremental");
     assert!(
         incremental.lua.contains("embed-v2") && !incremental.lua.contains("embed-v1"),
@@ -438,8 +420,7 @@ fn other() -> int {
 
     std::fs::write(dir.path().join("data.txt"), "fn-embed-v2").unwrap();
     let ws2 = ws_with_inputs(src, inputs);
-    let overlay =
-        emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")]).expect("emit_overlay");
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "other")]).expect("emit_overlay");
     assert!(
         overlay.lua.contains("fn-embed-v2"),
         "the overlay must redefine the body embedding the edited file:\n{}",
@@ -516,7 +497,7 @@ fn global_const_build_var_change_reaches_incremental() {
     );
 
     let ws2 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "second-sha-value"));
-    let edit = vec![reinferred_of(&ws2, "other")];
+    let edit = vec![body_id(&ws2, "other")];
     let incremental = emit_incremental(&ws2, &mut cache, &edit).expect("emit_incremental");
     assert!(
         incremental.lua.contains("second-sha-value")
@@ -535,8 +516,7 @@ fn global_const_build_var_change_reaches_the_overlay() {
 
     // The session saw only an unrelated body edit; the var moved underneath.
     let ws2 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "second-sha-value"));
-    let overlay =
-        emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")]).expect("emit_overlay");
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "other")]).expect("emit_overlay");
     assert!(
         overlay.lua.contains("second-sha-value"),
         "the overlay must re-emit a const init whose build var moved:\n{}",
@@ -604,7 +584,7 @@ fn main() {
     std::fs::write(&second_path, "second-v2").unwrap();
     let ws3 = ws_with_inputs(&v2, inputs);
     let second =
-        emit_overlay(&ws3, &mut cache, &[reinferred_of(&ws3, "other")]).expect("new input overlay");
+        emit_overlay(&ws3, &mut cache, &[body_id(&ws3, "other")]).expect("new input overlay");
     assert!(
         second.lua.contains("second-v2"),
         "a later change to the newly recorded input must reach the global initializer: {}",
@@ -637,8 +617,7 @@ fn main() {
 
     std::fs::write(dir.path().join("data.txt"), "overlay-embed-v2").unwrap();
     let ws2 = ws_with_inputs(src, inputs);
-    let overlay =
-        emit_overlay(&ws2, &mut cache, &[reinferred_of(&ws2, "other")]).expect("emit_overlay");
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "other")]).expect("emit_overlay");
     assert!(
         overlay.lua.contains("overlay-embed-v2"),
         "the overlay must re-emit a const init whose embedded file changed:\n{}",

@@ -12,17 +12,12 @@
 //!   rejected with a span, while the CPU artifact over the same program keeps
 //!   compiling.
 
-use crate::common::ws_with_stdlib;
+use crate::common::{graph_for, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
 use skull::artifact::{self, ArtifactRequest};
-use skull::instance_graph::{self, InstanceGraph};
+use skull::instance_graph::{self};
 use skull::shader_artifact::{self, ShaderArtifactRequest, ShaderProgram, ShaderRejection};
 use skull::target_projection::{JAVASCRIPT_WEB, LUAJIT_DESKTOP};
-
-fn graph_for(ws: &Workspace) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {
-    let roots = skull::mir_emit::emission_roots(ws, None);
-    (instance_graph::build(ws, roots.clone(), false), roots)
-}
 
 /// The shader PROGRAMS production hands over: the `rock_shader` pairs, from
 /// `skull_mir`'s own collector. An input, exactly like the CPU artifact's

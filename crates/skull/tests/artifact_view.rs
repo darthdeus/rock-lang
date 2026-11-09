@@ -11,7 +11,7 @@
 //! Each is asserted against the SHARED graph first, so the view's job is a
 //! measured defect rather than a design preference.
 
-use crate::common::ws_with_stdlib;
+use crate::common::{graph_for, ws_with_stdlib};
 use bone_semantic::hir::{BodyOwner, FnBackend};
 use bone_semantic::inference::Workspace;
 use skull::artifact::RealizedCallee;
@@ -20,17 +20,6 @@ use skull::instance_graph::{self, Instance, InstanceGraph};
 use skull::target_projection::{JAVASCRIPT_WEB, LUAJIT_DESKTOP, NATIVE_C64_DESKTOP, WASM32_WASI};
 use skull_mir::intrinsics::BackendRealization;
 use ustr::Ustr;
-
-/// The graph AND the roots it was built from. An artifact's roots are an input
-/// to `realize` (plan S 11: "the target may change roots"), so a helper that
-/// dropped them would make every view root-less.
-///
-/// There is ONE graph. It takes no target, and the same value serves every
-/// artifact -- selecting the backend sibling is `realize_decl`'s job.
-fn graph_for(ws: &Workspace) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {
-    let roots = skull::mir_emit::emission_roots(ws, None);
-    (instance_graph::build(ws, roots.clone(), false), roots)
-}
 
 /// A planner that spells everything with a target prefix. It exists so
 /// "both artifacts spell this instance alike" cannot be mistaken for the

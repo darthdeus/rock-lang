@@ -19,8 +19,8 @@
 //! the emitter would have produced.
 
 use crate::common::{
-    emit_module_without_frame_limits, function_body, luajit_loads, run_main, try_emit_module,
-    ws_with_stdlib,
+    body_id, emit_module_without_frame_limits, function_body, luajit_loads, run_main,
+    try_emit_module, ws_with_stdlib,
 };
 
 #[test]
@@ -390,7 +390,7 @@ fn the_frame_limit_rejection_reaches_the_incremental_path() {
     let (_full, mut cache) = skull::mir_emit::emit_full(&ws1, mid).expect("emit_full fits");
 
     let ws2 = ws_with_stdlib(&over);
-    let run = run_body_id(&ws2);
+    let run = body_id(&ws2, "run");
     let err = skull::mir_emit::emit_incremental(&ws2, &mut cache, &[run])
         .err()
         .expect("the widened body must fail the incremental re-emit");
@@ -399,21 +399,4 @@ fn the_frame_limit_rejection_reaches_the_incremental_path() {
         "the incremental path reported something else: {}",
         err.message
     );
-}
-
-/// The `(ModuleId, BodyOwner)` reinferred id of the fixture's `run`.
-fn run_body_id(
-    ws: &bone_semantic::inference::Workspace,
-) -> (
-    bone_semantic::prelude::ModuleId,
-    bone_semantic::hir::BodyOwner,
-) {
-    for module in ws.modules.iter() {
-        for (fid, f) in module.functions.iter() {
-            if f.name.as_str() == "run" {
-                return (module.id, bone_semantic::hir::BodyOwner::Function(fid));
-            }
-        }
-    }
-    panic!("no fn named run");
 }

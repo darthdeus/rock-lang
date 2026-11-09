@@ -9,8 +9,7 @@
 //! (it routes through a stdlib op fn), so the static is observed via a bool
 //! toggle + assignment instead of a counter.
 
-use crate::common::run_luajit;
-use bone_semantic::inference::Workspace;
+use crate::common::{body_id, run_luajit};
 
 fn emit_program(src: &str) -> String {
     let ws = crate::common::ws_of(src);
@@ -147,25 +146,6 @@ global TOTAL: int = 0
 fn main() {}
 ";
 
-fn fn_body(
-    ws: &Workspace,
-    name: &str,
-) -> (
-    bone_semantic::prelude::ModuleId,
-    bone_semantic::hir::BodyOwner,
-) {
-    ws.modules
-        .iter()
-        .find_map(|module| {
-            module
-                .functions
-                .iter()
-                .find(|(_, f)| f.name.as_str() == name)
-                .map(|(fid, _)| (module.id, bone_semantic::hir::BodyOwner::Function(fid)))
-        })
-        .unwrap_or_else(|| panic!("fixture declares {name}"))
-}
-
 fn overlay_run(before: &str, after: &str, script: impl Fn(&str, &str) -> String) -> String {
     overlay_run_editing("bump", before, after, script)
 }
@@ -180,7 +160,7 @@ fn overlay_run_editing(
     let mid = skull::user_module_id(&ws1).unwrap();
     let (full, mut cache) = skull::mir_emit::emit_full(&ws1, mid).expect("full emit");
     let ws2 = crate::common::ws_with_stdlib(after);
-    let overlay = skull::mir_emit::emit_overlay(&ws2, &mut cache, &[fn_body(&ws2, edited)])
+    let overlay = skull::mir_emit::emit_overlay(&ws2, &mut cache, &[body_id(&ws2, edited)])
         .expect("a body edit that adds or removes a static must overlay");
     crate::common::run_luajit(&script(&full.lua, &overlay.lua))
 }

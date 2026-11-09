@@ -9,28 +9,10 @@
 //! `function <sym>(` and the callee-bound `__rock_mk_<sym> = function(`); call
 //! spellings are read out of the caller's body via `function_body`.
 
-use crate::common::{self, definition_names, emit_module, function_body, ws_with_stdlib};
-
-/// Every emitted top-level definition symbol, from its definition header in
-/// whichever callee shape the build emits (`function <sym>(` or the bound
-/// `__rock_mk_<sym> = function(`). The header IS the definition, so this cannot
-/// be satisfied by a mention inside some other body.
-fn definition_symbols(lua: &str) -> Vec<String> {
-    definition_names(lua)
-        .into_iter()
-        .map(str::to_string)
-        .collect()
-}
-
-/// The definition symbols derived from source fn `name` -- its own mangling and
-/// any per-instance derivation of it. Excludes synthetic children (`__lambda0`,
-/// `__step`), which are a different obligation.
-fn definitions_of(lua: &str, name: &str) -> Vec<String> {
-    definition_symbols(lua)
-        .into_iter()
-        .filter(|s| s.starts_with(name) && !s.contains("__"))
-        .collect()
-}
+use crate::common::{
+    self, definition_names, definition_symbols, definitions_of, emit_module, function_body,
+    ws_with_stdlib,
+};
 
 fn body_calls(body: &str, symbol: &str) -> bool {
     body.match_indices(symbol).any(|(at, _)| {

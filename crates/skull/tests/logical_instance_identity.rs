@@ -14,25 +14,11 @@
 //! that answered `any` for everything would satisfy "it converted" and lose the
 //! property the identity exists for.
 
-use crate::common::ws_with_stdlib;
+use crate::common::{census_of, graph_of, unjoined, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
-use skull::instance_graph::{self, InstanceGraph};
-use skull::site_join::{self, SiteJoinCensus, Unjoined};
-use skull_mir::lower::ScalarCtx;
+use skull::instance_graph::InstanceGraph;
+use skull::site_join::{SiteJoinCensus, Unjoined};
 use ustr::Ustr;
-
-fn graph_of(ws: &Workspace) -> InstanceGraph {
-    let roots = skull::mir_emit::emission_roots(ws, None);
-    instance_graph::build(ws, roots, false)
-}
-
-fn census_of(src: &str) -> SiteJoinCensus {
-    let ws = ws_with_stdlib(src);
-    let g = graph_of(&ws);
-    let bodies = skull::concrete_body::build(&ws, &g);
-    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
-    site_join::census(&ws, &scx, &g, &bodies)
-}
 
 /// The rendered instantiations of every instance of `<test>`'s fn `name`.
 fn instantiations_of(ws: &Workspace, g: &InstanceGraph, name: &str) -> Vec<String> {
@@ -53,10 +39,6 @@ fn instantiations_of(ws: &Workspace, g: &InstanceGraph, name: &str) -> Vec<Strin
         .collect();
     out.sort();
     out
-}
-
-fn unjoined(c: &SiteJoinCensus, cause: Unjoined) -> usize {
-    c.unjoined.get(&cause).copied().unwrap_or(0)
 }
 
 /// Every `callee-no-instance == 0` below is measured over the bodies that were

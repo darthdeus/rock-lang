@@ -11,16 +11,7 @@
 //! `@test`s die on `attempt to call local 'r0' (a nil value)` when the
 //! definition is missing.
 
-use crate::common::emit_module;
-
-fn definition_symbols(lua: &str) -> Vec<String> {
-    lua.match_indices("\nfunction ")
-        .map(|(i, m)| {
-            let rest = &lua[i + m.len()..];
-            rest[..rest.find('(').expect("fn header has `(`")].to_string()
-        })
-        .collect()
-}
+use crate::common::{definition_symbols, emit_module};
 
 fn defines(lua: &str, symbol: &str) -> bool {
     definition_symbols(lua).iter().any(|s| s == symbol)

@@ -11,26 +11,7 @@
 //! `instance_owned_emission` discipline) rather than a bare name, because a
 //! callee's own definition line contains its symbol.
 
-use crate::common::{emit_module, function_body};
-
-/// Every emitted top-level definition symbol, from its `function <sym>(` header.
-fn definition_symbols(lua: &str) -> Vec<String> {
-    lua.match_indices("\nfunction ")
-        .map(|(i, m)| {
-            let rest = &lua[i + m.len()..];
-            rest[..rest.find('(').expect("fn header has `(`")].to_string()
-        })
-        .collect()
-}
-
-/// The definition symbols derived from source fn `name`, excluding synthetic
-/// children (`__lambda0`, `__step`), which are a different obligation.
-fn definitions_of(lua: &str, name: &str) -> Vec<String> {
-    definition_symbols(lua)
-        .into_iter()
-        .filter(|s| s.starts_with(name) && !s.contains("__"))
-        .collect()
-}
+use crate::common::{definitions_of, emit_module, function_body};
 
 /// The definition symbols `caller`'s body actually CALLS, restricted to
 /// derivations of `callee`.
