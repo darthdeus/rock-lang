@@ -9,6 +9,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
+      - name: Check acceptance failure diagnostics
+        run: python3 -m unittest discover -s scripts -p test_check_runtime.py
       - name: Build the public runtime archive and runtime-only image
         run: docker build --build-arg CARGO_BUILD_JOBS=2 -f scripts/Dockerfile.acceptance -t rock-runtime-acceptance .
       - name: Test the extracted archive without networking or build inputs
