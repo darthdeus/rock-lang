@@ -979,8 +979,8 @@ impl LspServer {
         Ok(())
     }
 
-    /// Forget a closed document on both layers: the bone session entry and
-    /// the per-document LSP caches.
+    /// Closing an editor buffer returns authority to disk; it does not delete
+    /// an existing source from the project.
     fn on_close(&mut self, note: &lsp_server::Notification, out: &mut Vec<Message>) -> Result<()> {
         let _span = tracing::debug_span!("lsp_did_close_notification").entered();
         let at = doc_uri(note)?;
@@ -988,7 +988,16 @@ impl LspServer {
         let Some(path) = notification_path(out, &at, "didClose")? else {
             return Ok(());
         };
-        self.workspace.bone.remove(&path);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => bone_reload_and_publish(out, &path, text, &mut self.workspace)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // Remove the declarations through the normal edit path so
+                // dependents get fresh diagnostics before dropping the entry.
+                bone_reload_and_publish(out, &path, String::new(), &mut self.workspace)?;
+                self.workspace.bone.remove(&path);
+            }
+            Err(error) => log::error!("bone LSP: cannot reload closed document `{path}`: {error}"),
+        }
         self.workspace.close_document(at.as_str());
         Ok(())
     }
