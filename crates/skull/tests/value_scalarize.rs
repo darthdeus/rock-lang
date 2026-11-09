@@ -181,23 +181,7 @@ fn value_struct_with_whole_use_keeps_cdata() {
     // Runtime guard against a BAD fold (e.g. an uninitialized-cell read): the value
     // must be exactly 33.
     require_luajit();
-    let path = std::env::temp_dir().join(format!("skull_coexist_{}.lua", std::process::id()));
-    std::fs::write(&path, format!("{lua}\nmain()\n")).expect("write");
-    let out = std::process::Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("run");
-    let _ = std::fs::remove_file(&path);
-    assert!(
-        out.status.success(),
-        "luajit failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        "33",
-        "coexist must compute correctly"
-    );
+    assert_eq!(run_main(&lua), "33", "coexist must compute correctly");
 }
 
 #[test]

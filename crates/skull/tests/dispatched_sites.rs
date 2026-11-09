@@ -10,7 +10,9 @@
 //! that only checked the emitting arm would pass against a walk that recorded
 //! an obligation for every hole.
 
-use crate::common::{census_of, graph_of, prepared_body, unjoined, ws_of_files, ws_with_stdlib};
+use crate::common::{
+    census_of, graph_of, module_id, prepared_body, unjoined, ws_of_files, ws_with_stdlib,
+};
 use bone_semantic::inference::Workspace;
 use skull::site_join::{SiteJoinCensus, Unjoined};
 use skull_mir::lower::ScalarCtx;
@@ -23,7 +25,7 @@ fn check_with_dependency(src: &str, dependency: &str) -> Workspace {
 }
 
 fn lowered_body_in_mode(ws: &Workspace, name: &str, values_first_class: bool) -> MirFunc {
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     let (fid, _) = ws
         .module(mid)
         .functions
@@ -95,7 +97,7 @@ fn dispatched_instance_names_in(ws: &Workspace, name: &str) -> Vec<(String, Stri
 /// instance -- the other half of the cross-view check.
 fn walk_dispatched_in(ws: &Workspace, name: &str) -> Vec<&'static str> {
     let g = graph_of(ws);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     let (fid, _) = ws
         .module(mid)
         .functions

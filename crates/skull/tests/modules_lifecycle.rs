@@ -1,8 +1,7 @@
 //! Modules-v1 lifecycle discovery keeps private hooks discoverable and treats
 //! aliases/re-exports as one decorator identity.
 
-use crate::common::{V1Fragment, emit_v1_package, run_luajit, run_main, ws_v1_package};
-use ustr::Ustr;
+use crate::common::{V1Fragment, emit_v1_package, module_id, run_luajit, run_main, ws_v1_package};
 
 const MAIN: &str = r#"
 use facade::tick as first;
@@ -73,10 +72,7 @@ pub use ::test;
         },
     ];
     let ws = ws_v1_package("v1custom", &fragments);
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("main.rock"))
-        .expect("module id");
+    let mid = module_id(&ws, "main.rock");
     assert!(
         skull::module_tests(&ws, mid)
             .expect("test discovery")
@@ -204,10 +200,7 @@ fn main() {}
 "#,
     }];
     let ws = ws_v1_package("v1builtin", &fragments);
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("main.rock"))
-        .expect("module id");
+    let mid = module_id(&ws, "main.rock");
     let tests = skull::module_tests(&ws, mid).expect("test discovery");
     assert_eq!(
         tests.len(),

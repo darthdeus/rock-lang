@@ -94,7 +94,7 @@ pub fn emit_mir(src: &str) -> skull::mir_emit::MirEmit {
     let mut modules = with_stdlib(src, "<test>");
     let ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
 }
 
@@ -106,7 +106,7 @@ pub fn emit_mir_with_inputs(
     let mut ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws.comptime_inputs = inputs;
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
 }
 
@@ -118,7 +118,7 @@ pub fn try_emit_mir_with_inputs(
     let mut ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws.comptime_inputs = inputs;
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     skull::mir_emit::emit_workspace_mir(&ws, mid)
 }
 
@@ -187,10 +187,7 @@ pub fn ws_v1_package(package: &str, fragments: &[V1Fragment]) -> Workspace {
 /// Full MIR emit for a v1 package, rooted at its first fragment.
 pub fn emit_v1_package(package: &str, fragments: &[V1Fragment]) -> skull::mir_emit::MirEmit {
     let ws = ws_v1_package(package, fragments);
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from(fragments[0].file))
-        .expect("module id");
+    let mid = module_id(&ws, fragments[0].file);
     skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit")
 }
 
@@ -205,7 +202,7 @@ pub fn try_emit_module_with(
     let mut ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws.comptime_inputs = inputs;
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
 }
 
@@ -221,7 +218,7 @@ pub fn try_emit_module_with_file(
     let mut ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws.comptime_inputs = inputs;
-    let mid = *ws.module_ids.get(&Ustr::from(file)).expect("module id");
+    let mid = module_id(&ws, file);
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
 }
 
@@ -232,7 +229,7 @@ pub fn try_emit_module(src: &str) -> Result<String, skull_parser::CompilerError>
     let mut modules = with_stdlib(src, "<test>");
     let ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
 }
 
@@ -247,7 +244,7 @@ pub fn try_emit_module_enforcing_identity_storage(
     )
     .expect("semantic_pass");
     assert_no_bone_errors(&ws);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
 }
 
@@ -276,7 +273,7 @@ pub fn emit_module_shaped(
     let mut modules = with_stdlib(src, file);
     let ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
-    let mid = *ws.module_ids.get(&Ustr::from(file)).expect("module id");
+    let mid = module_id(&ws, file);
     skull::mir_emit::FullEmit::program()
         .shapes(shapes)
         .run(&ws, mid)
@@ -478,7 +475,7 @@ pub fn try_emit_with_stdlib_module(
     modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
     let ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     skull::mir_emit::emit_workspace_mir(&ws, mid).map(|e| e.lua)
 }
 
@@ -516,6 +513,11 @@ pub fn ws_with_dependency_module(lib: &str, src: &str) -> Workspace {
     let ws = semantic_pass(&mut modules).expect("semantic_pass");
     assert_no_bone_errors(&ws);
     ws
+}
+
+/// The id of the module parsed from `file`.
+pub fn module_id(ws: &Workspace, file: &str) -> bone_semantic::prelude::ModuleId {
+    *ws.module_ids.get(&Ustr::from(file)).expect("module id")
 }
 
 /// The `FuncRef` of the single workspace fn named `name`. Panics unless there is
@@ -579,7 +581,7 @@ pub fn unjoined(c: &SiteJoinCensus, cause: Unjoined) -> usize {
 
 /// `name`'s base instance in `<test>`, lowered and prepared as emission would.
 pub fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     let (fid, f) = ws
         .module(mid)
         .functions
@@ -685,7 +687,12 @@ pub fn run_luajit(prog: &str) -> String {
 
 /// Run the emitted chunk `lua`, then its `main`.
 pub fn run_main(lua: &str) -> String {
-    run_luajit(&format!("{lua}\nmain()\n"))
+    run_fn(lua, "main")
+}
+
+/// Run the emitted chunk `lua`, then its function `name`.
+pub fn run_fn(lua: &str, name: &str) -> String {
+    run_luajit(&format!("{lua}\n{name}()\n"))
 }
 
 /// Emit `src` and run its `main`, returning trimmed stdout.

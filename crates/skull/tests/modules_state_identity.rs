@@ -14,7 +14,7 @@
 //! These execute the emitted chunk rather than grepping it: a symbol that is
 //! wrong in either the definition or a use fails to parse or reads nil.
 
-use crate::common::{V1Fragment, emit_v1_package, run_main};
+use crate::common::{V1Fragment, emit_v1_package, module_id, run_main};
 
 const MAIN: &str = r#"
 fn main() {
@@ -205,10 +205,7 @@ fn v1_code_identity_is_its_def_key() {
         },
     ];
     let ws = crate::common::ws_v1_package("v1state", &fragments);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("main.rock"))
-        .expect("module id");
+    let mid = module_id(&ws, "main.rock");
     let emitted = skull::mir_emit::emit_workspace_mir(&ws, mid).expect("emit");
     let interner = skull_mir::monoty::MonoInterner::default();
     let bump = ws

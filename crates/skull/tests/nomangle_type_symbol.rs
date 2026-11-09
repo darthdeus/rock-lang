@@ -4,6 +4,7 @@
 //! (host engine's graphics-stats cdef, vertex buffers, snapshot's Font remap) relies
 //! on that name.
 
+use crate::common::module_id;
 /// Inline Lua names the exempt types by their declared names; the program only
 /// runs if the typedef and the runtime tag use those names too.
 #[test]
@@ -53,10 +54,7 @@ fn main() {}
 "#,
         }],
     );
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("main.rock"))
-        .expect("module id");
+    let mid = module_id(&ws, "main.rock");
     let err = match skull::mir_emit::emit_workspace_mir(&ws, mid) {
         Ok(_) => panic!("a @nomangle `Vec2` must not share the stdlib Vec2's symbol"),
         Err(e) => e.message,

@@ -21,7 +21,7 @@
 //! instances -- is asserted end-to-end by
 //! `site_domain::a_generic_structs_field_default_names_its_own_instance`.
 
-use crate::common::ws_with_stdlib;
+use crate::common::{module_id, ws_with_stdlib};
 use bone_semantic::hir::{BodyOwner, TyId, TypeExpr};
 use bone_semantic::inference::{BodyInference, Workspace};
 use ustr::Ustr;
@@ -84,7 +84,7 @@ fn unresolved_var(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<Strin
 }
 
 fn defaults_inference(ws: &Workspace) -> (bone_semantic::prelude::ModuleId, &BodyInference) {
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     let (sidx, _) = ws
         .module(mid)
         .structs
@@ -233,7 +233,7 @@ fn main() {
 }
 "#;
     let ws = ws_with_stdlib(PAIR);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     let sidx = ws
         .module(mid)
         .structs
@@ -291,7 +291,7 @@ fn main() {
 }
 "#;
     let ws = ws_with_stdlib(PLAIN);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     let sidx = ws
         .module(mid)
         .structs

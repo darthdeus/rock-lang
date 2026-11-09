@@ -7,7 +7,7 @@
 //! A `value` struct holding the enum field therefore scalarizes into a C-layout
 //! cdata with an int field (NOT a Lua table) and works across the scalar ABI
 //! (by-value pass).
-use crate::common::{emit_mir, emit_module, require_luajit};
+use crate::common::{emit_mir, emit_module, require_luajit, run_fn};
 
 #[test]
 fn widened_enum_record_match_rejects_a_field_missing_from_its_variant() {
@@ -123,67 +123,18 @@ fn value_struct_with_enum_field_has_cdef_int_not_table() {
 fn value_struct_with_enum_field_runs_correctly() {
     require_luajit();
     let emit = emit_mir(SRC);
-    let mut prog = emit.lua.clone();
-    // Capture print, run the @test fn (`@test` names are unmangled), echo output.
-    prog.push_str(
-        "\nlocal __b=\"\"\nlocal __op=print\n\
-         print=function(...) local p={} for i=1,select('#',...) do p[i]=tostring(select(i,...)) end \
-         __b=__b..table.concat(p,\"\\t\")..\"\\n\" end\n\
-         t()\n__op((__b:gsub(\"%s+$\",\"\")))\n",
-    );
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!("skull_enum_rt_{}.lua", std::process::id()));
-    std::fs::write(&path, &prog).expect("write lua");
-    let out = std::process::Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("run luajit");
-    let _ = std::fs::remove_file(&path);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success(),
-        "luajit failed:\nstderr: {}\n--- lua tail ---\n{}",
-        String::from_utf8_lossy(&out.stderr),
-        prog.lines()
-            .rev()
-            .take(8)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect::<Vec<_>>()
-            .join("\n")
-    );
+    let prog = emit.lua.clone();
+    let stdout = run_fn(&prog, "t");
     assert!(
         stdout.contains("5 Add 5"),
-        "expected '5 Add 5', got stdout={stdout:?} stderr={:?}",
-        String::from_utf8_lossy(&out.stderr)
+        "expected '5 Add 5', got stdout={stdout:?}"
     );
 }
 
-/// Compile `src`, append a print-capturing harness that calls `fn_name`, run under
-/// luajit, and return the captured stdout (panicking if luajit is unavailable).
+/// Compile `src`, run its `fn_name` under luajit, and return the stdout.
 fn run_skull_test(src: &str, fn_name: &str) -> String {
     require_luajit();
-    let mut prog = emit_mir(src).lua.clone();
-    prog.push_str(&format!(
-        "\nlocal __b=\"\"\nlocal __op=print\n\
-         print=function(...) local p={{}} for i=1,select('#',...) do p[i]=tostring(select(i,...)) end \
-         __b=__b..table.concat(p,\"\\t\")..\"\\n\" end\n\
-         {fn_name}()\n__op((__b:gsub(\"%s+$\",\"\")))\n",
-    ));
-    let path = std::env::temp_dir().join(format!("skull_enum_sentinel_{}.lua", std::process::id()));
-    std::fs::write(&path, &prog).expect("write lua");
-    let out = std::process::Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("run luajit");
-    let _ = std::fs::remove_file(&path);
-    assert!(
-        out.status.success(),
-        "luajit failed:\nstderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).to_string()
+    run_fn(&emit_mir(src).lua, fn_name)
 }
 
 /// SENTINEL: a payload-free enum that ESCAPES into `any`

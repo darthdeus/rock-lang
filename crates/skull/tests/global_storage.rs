@@ -1,9 +1,8 @@
-use crate::common::{emit_mir, mangled_name, run_luajit, ws_with_stdlib};
-use ustr::Ustr;
+use crate::common::{emit_mir, mangled_name, module_id, run_luajit, ws_with_stdlib};
 
 fn emit_program(src: &str) -> String {
     let ws = ws_with_stdlib(src);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     skull::mir_emit::emit_full(&ws, mid).expect("emit").0.lua
 }
 

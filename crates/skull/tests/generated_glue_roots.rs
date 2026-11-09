@@ -13,7 +13,7 @@
 //! be a nil call at load.
 
 use crate::common::{
-    self, V1Fragment, definition_symbols, emit_v1_package, fn_ref, ws_v1_package,
+    self, V1Fragment, definition_symbols, emit_v1_package, fn_ref, module_id, ws_v1_package,
     ws_with_dependency_module, ws_with_stdlib_module,
 };
 use skull::mir_emit::emit_full;
@@ -50,7 +50,7 @@ fn main() {
 #[test]
 fn sim_glue_retains_register_sim_through_the_view() {
     let ws = ws_with_stdlib_module(SIM_LIB, SIM_SRC);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     let sims = skull::mir_emit::collect_sim_fns(&ws);
     assert_eq!(
         sims.len(),
@@ -96,7 +96,7 @@ fn sim_glue_retains_register_sim_through_the_view() {
 #[test]
 fn an_unrelated_library_body_stays_pruned() {
     let ws = ws_with_stdlib_module(SIM_LIB, SIM_SRC);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     let (emit, cache) = emit_full(&ws, mid).expect("emit");
     let unrelated = Instance::base(fn_ref(&ws, "unrelated_library_body"));
     assert!(
@@ -117,10 +117,7 @@ fn shared_prefix_dependency_retains_only_reached_bodies() {
         "fn unused_dependency_body() -> int { return 7 }\nfn reached_dependency_body() -> int { return 9 }",
         "fn main() { print(reached_dependency_body()) }",
     );
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("/tmp/rock-mono-project/main.rock"))
-        .expect("project module");
+    let mid = module_id(&ws, "/tmp/rock-mono-project/main.rock");
     let (emit, mut cache) = skull::mir_emit::FullEmit::program()
         .project_root(Some("/tmp/rock-mono-project"))
         .run(&ws, mid)
@@ -236,7 +233,7 @@ fn main() {
 #[test]
 fn an_unreached_shader_registration_still_retains_its_dependencies() {
     let ws = ws_with_stdlib_module(SHADER_UNREACHED_LIB, SHADER_UNREACHED_SRC);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     let (emit, cache) = emit_full(&ws, mid).expect("emit");
     let view = cache.lua_view();
 
@@ -262,7 +259,7 @@ fn an_unreached_shader_registration_still_retains_its_dependencies() {
 #[test]
 fn shader_glue_dependencies_are_retained_through_the_view() {
     let ws = ws_with_stdlib_module(SHADER_LIB, SHADER_SRC);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     let (emit, cache) = emit_full(&ws, mid).expect("emit");
     let view = cache.lua_view();
 
@@ -337,10 +334,7 @@ fn v1_sim_glue_rejects_two_register_sim_definitions() {
         },
     ];
     let ws = ws_v1_package("v1sims_twice", &fragments);
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("main.rock"))
-        .expect("module id");
+    let mid = module_id(&ws, "main.rock");
     let error = match skull::mir_emit::emit_workspace_mir(&ws, mid) {
         Ok(_) => panic!("two registrars must not emit"),
         Err(error) => error,
@@ -382,7 +376,7 @@ fn nested_project_sources_keep_uncalled_public_functions() {
             src: "mod helpers;\npub fn uncalled_api() -> int { return 7 }",
         }],
     );
-    let mid = *ws.module_ids.get(&Ustr::from(file)).expect("nested module");
+    let mid = module_id(&ws, file);
     let (emit, cache) = skull::mir_emit::FullEmit::program()
         .project_root(Some("/tmp/rock-root-contract/app"))
         .run(&ws, mid)
@@ -399,10 +393,7 @@ fn nested_project_sources_keep_uncalled_public_functions() {
 #[test]
 fn single_file_compilation_keeps_uncalled_functions() {
     let ws = common::ws_with_stdlib("fn uncalled_helper() -> int { return 7 }");
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("single-file module");
+    let mid = module_id(&ws, "<test>");
     let (emit, cache) = emit_full(&ws, mid).expect("single-file emission");
     let helper = Instance::base(fn_ref(&ws, "uncalled_helper"));
     assert!(
@@ -419,10 +410,7 @@ fn shared_prefix_dependency_keeps_bare_name_api_roots() {
         "@nomangle fn external_api() -> int { return 7 }",
         "fn main() {}",
     );
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("/tmp/rock-mono-project/main.rock"))
-        .expect("project module");
+    let mid = module_id(&ws, "/tmp/rock-mono-project/main.rock");
     let (emit, cache) = skull::mir_emit::FullEmit::program()
         .project_root(Some("/tmp/rock-mono-project"))
         .run(&ws, mid)

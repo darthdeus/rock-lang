@@ -1,4 +1,4 @@
-use crate::common::{compile_and_run, emit_module, function_body, require_luajit};
+use crate::common::{compile_and_run, emit_module, function_body, require_luajit, run_luajit};
 
 const SRC: &str = r#"
 nobox value Pos { x: int, y: int }
@@ -53,20 +53,8 @@ fn flat_enum_equality_preserves_variant_and_payload_semantics() {
     require_luajit();
     let mut lua = emit_module(SRC);
     lua.push_str("\nprint(equal_tag(1, 3, 4), equal_tag(1, 3, 5), equal_tag(0, 3, 4), equal_tag(2, 3, 4), not_equal_tag(1, 3, 4), not_equal_tag(1, 3, 5), equal_targets(1, 3, 4, 1, 3, 4), equal_targets(1, 3, 4, 1, 3, 5), equal_targets(0, 0, 0, 0, 9, 9), equal_targets(0, 0, 0, 2, 0, 0), equal_maybe(-1, -1), equal_maybe(-1, 1), equal_maybe(1, 1))\n");
-    let path = std::env::temp_dir().join(format!("skull_flat_enum_eq_{}.lua", std::process::id()));
-    std::fs::write(&path, lua).expect("write Lua fixture");
-    let out = std::process::Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("run Lua fixture");
-    let _ = std::fs::remove_file(path);
-    assert!(
-        out.status.success(),
-        "LuaJIT failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
+        run_luajit(&lua),
         "true\tfalse\tfalse\tfalse\tfalse\ttrue\ttrue\tfalse\ttrue\tfalse\ttrue\tfalse\ttrue"
     );
 }

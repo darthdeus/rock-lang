@@ -8,7 +8,7 @@
 //!
 //! The GLSL emit shape itself is pinned by the skull-codegen-glsl goldens; here
 //! we pin the driver wiring (collapse + dedup + top-level registration).
-use crate::common::{body_id, emit_mir, emit_module, function_body, ws_with_stdlib};
+use crate::common::{body_id, emit_mir, emit_module, function_body, module_id, ws_with_stdlib};
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
@@ -161,9 +161,7 @@ fn use_it() -> string {{ return rock_shader(ui_vert, ui_sim_solid_frag) }}
 }
 
 fn test_mid(ws: &Workspace) -> ModuleId {
-    *ws.module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("<test> module id")
+    module_id(&ws, "<test>")
 }
 
 #[test]

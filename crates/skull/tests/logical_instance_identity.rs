@@ -14,7 +14,7 @@
 //! that answered `any` for everything would satisfy "it converted" and lose the
 //! property the identity exists for.
 
-use crate::common::{census_of, graph_of, unjoined, ws_with_stdlib};
+use crate::common::{census_of, graph_of, module_id, unjoined, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::InstanceGraph;
 use skull::site_join::{SiteJoinCensus, Unjoined};
@@ -22,7 +22,7 @@ use ustr::Ustr;
 
 /// The rendered instantiations of every instance of `<test>`'s fn `name`.
 fn instantiations_of(ws: &Workspace, g: &InstanceGraph, name: &str) -> Vec<String> {
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     let mut out: Vec<String> = g
         .instances
         .iter()
@@ -212,7 +212,7 @@ fn pass<U>(y: U) -> U { return ident(y) }
 fn main() { print("{pass(1)}") }
 "#;
     let ws = ws_with_stdlib(src);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     let (pass_fid, _) = ws
         .module(mid)
         .functions
@@ -343,7 +343,7 @@ fn main() { print("x") }
 "#,
     );
     let g = graph_of(&ws);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     let decls: Vec<skull_mir::mir::FuncRef> = ws
         .module(mid)
         .functions

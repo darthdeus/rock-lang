@@ -11,7 +11,7 @@
 //! Each is asserted against the SHARED graph first, so the view's job is a
 //! measured defect rather than a design preference.
 
-use crate::common::{graph_for, ws_with_stdlib};
+use crate::common::{graph_for, module_id, ws_with_stdlib};
 use bone_semantic::hir::{BodyOwner, FnBackend};
 use bone_semantic::inference::Workspace;
 use skull::artifact::RealizedCallee;
@@ -2357,10 +2357,7 @@ fn main() { let a = left()\n print(\"{a}\") }";
     );
 
     let ws2 = ws_with_stdlib(source_v2);
-    let module = *ws2
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
+    let module = module_id(&ws2, "<test>");
     let main = ws2
         .module(module)
         .functions
@@ -2553,10 +2550,7 @@ fn local_global_initializer_fn_value_retarget_matches_fresh_view() {
     assert_eq!(fn_value_target_names(&ws1, &local), ["inc"]);
 
     let ws2 = ws_with_stdlib(GLOBAL_FN_VALUE_V2);
-    let module = *ws2
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
+    let module = module_id(&ws2, "<test>");
     let global = ws2
         .module(module)
         .globals

@@ -6,7 +6,7 @@
 //! that must not collapse onto one key -- plus the mutation arms proving each
 //! half of the identity is load-bearing rather than decorative.
 
-use crate::common::ws_with_stdlib;
+use crate::common::{module_id, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, InstanceGraph};
 use skull::site_join::{self, SiteJoinCensus, Unjoined};
@@ -54,7 +54,7 @@ fn rock(inst: &skull::instance_graph::Instance) -> skull::concrete_body::Callee 
 /// Lower the `<test>` module's fn named `name` and run the SAME transform
 /// sequence emission runs, so a test inspects the body emission renders.
 fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     let (fid, f) = ws
         .module(mid)
         .functions
@@ -164,10 +164,7 @@ fn sum_all<I: Iterator<int>>(it: I) -> int {
 fn main() { print("{sum_all(Counter { n: 0 })}") }
 "#,
     );
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
+    let mid = module_id(&ws, "<test>");
     let (sum_fid, _) = ws
         .module(mid)
         .functions
@@ -412,10 +409,7 @@ fn main() {
 }
         "#,
     );
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
+    let mid = module_id(&ws, "<test>");
     let (sum_fid, _) = ws
         .module(mid)
         .functions
@@ -1168,10 +1162,7 @@ fn top() -> float {
 fn main() { print("{top()}") }
 "#,
     );
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
+    let mid = module_id(&ws, "<test>");
     let (fid, f) = ws
         .module(mid)
         .functions
@@ -1269,10 +1260,7 @@ fn top() -> float {
 fn main() { print("{top()}") }
 "#,
     );
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
+    let mid = module_id(&ws, "<test>");
     let (fid, f) = ws
         .module(mid)
         .functions
@@ -1828,7 +1816,7 @@ fn main() { print("{apply(add_one, 1)}") }
     );
 
     // The ALIEN declaration, taken from the workspace rather than invented.
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     let (fid, _) = ws
         .module(mid)
         .functions

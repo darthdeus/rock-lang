@@ -10,24 +10,7 @@
 //! `item = x` and drops `y`, storing a number. Reading `xs[0].x` then indexes a
 //! number (runtime crash). The fix: don't take the specialized-splat ABI in a
 //! context that won't be spliced -- box the value arg to match the shared body.
-use crate::common::emit_module;
-
-fn run_prog(lua: &str, tag: &str) -> String {
-    let path = std::env::temp_dir().join(format!("skull_{tag}_{}.lua", std::process::id()));
-    std::fs::write(&path, format!("{lua}\nmain()\n")).expect("write");
-    let out = std::process::Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("run luajit");
-    let _ = std::fs::remove_file(&path);
-    assert!(
-        out.status.success(),
-        "luajit failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
+use crate::common::{emit_module, run_main};
 
 const CLOSURE_PUSH: &str = r#"
 fn run(f: () -> ()) { f() }
@@ -72,23 +55,23 @@ fn main() {
 #[test]
 fn value_push_in_closure_stores_whole_struct() {
     let lua = emit_module(CLOSURE_PUSH);
-    assert_eq!(run_prog(&lua, "closure_push"), "7 9");
+    assert_eq!(run_main(&lua), "7 9");
 }
 
 #[test]
 fn value_push_in_nested_fn_stores_whole_struct() {
     let lua = emit_module(NESTED_FN_PUSH);
-    assert_eq!(run_prog(&lua, "nested_push"), "3 4");
+    assert_eq!(run_main(&lua), "3 4");
 }
 
 #[test]
 fn value_push_direct_stores_whole_struct() {
     let lua = emit_module(DIRECT_PUSH);
-    assert_eq!(run_prog(&lua, "direct_push"), "7 9");
+    assert_eq!(run_main(&lua), "7 9");
 }
 
 #[test]
 fn value_set_in_closure_stores_whole_struct() {
     let lua = emit_module(CLOSURE_SET);
-    assert_eq!(run_prog(&lua, "closure_set"), "33 44");
+    assert_eq!(run_main(&lua), "33 44");
 }

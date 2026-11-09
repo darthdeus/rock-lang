@@ -8,14 +8,13 @@
 //! apart; the previous answer was to withhold the stamp entirely, which was
 //! fail-closed but not a contract emission could consume.
 
-use crate::common::{census_of, graph_of, prepared_body, unjoined, ws_with_stdlib};
+use crate::common::{census_of, graph_of, module_id, prepared_body, unjoined, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
 use skull::concrete_body::Callee;
 use skull::instance_graph::InstanceGraph;
 use skull::site_join::Unjoined;
 use skull_mir::mir::MirFunc;
 use skull_mir::site::SiteDomain;
-use ustr::Ustr;
 
 /// An instance's arguments as one string, for comparison and for a failure
 /// message that names what was found rather than an opaque id.
@@ -122,7 +121,7 @@ fn main() {
     // The two are DIFFERENT keys, so the body's table holds both.
     let g = graph_of(&ws);
     let bodies = skull::concrete_body::build(&ws, &g);
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let mid = module_id(&ws, "<test>");
     let main = bodies
         .bodies
         .iter()

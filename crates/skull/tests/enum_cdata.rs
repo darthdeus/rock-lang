@@ -4,7 +4,7 @@
 //! value-struct machinery: `<Enum>_ct` ctor, value-struct SROA (a local construct+
 //! match scalarizes to two int locals + int-tag compare, 0 alloc), value `__eq`
 //! (byte equality so escaping enums compare correctly), scalar ABI through calls.
-use crate::common::{emit_module, require_luajit};
+use crate::common::{emit_module, require_luajit, run_fn};
 
 const SRC: &str = r#"
 enum Shape { Circle(int), Square(int), Point }
@@ -101,26 +101,8 @@ fn cdata_enum_as_value_struct_field() {
         lua.split("\nfunction ").next().unwrap_or(&lua)
     );
     require_luajit();
-    let mut prog = lua;
-    prog.push_str(
-        "\nlocal __b=\"\"\nlocal __op=print\n\
-         print=function(...) local p={} for i=1,select('#',...) do p[i]=tostring(select(i,...)) end \
-         __b=__b..table.concat(p,\"\\t\")..\"\\n\" end\n\
-         t()\n__op((__b:gsub(\"%s+$\",\"\")))\n",
-    );
-    let path = std::env::temp_dir().join(format!("skull_enum_field_{}.lua", std::process::id()));
-    std::fs::write(&path, &prog).expect("write lua");
-    let out = std::process::Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("run luajit");
-    let _ = std::fs::remove_file(&path);
-    assert!(
-        out.status.success(),
-        "luajit failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "15 30");
+    let prog = lua;
+    assert_eq!(run_fn(&prog, "t"), "15 30");
 }
 
 // Cut 2a: multi-field tuple payloads share positional slots `_0.._{n-1}`. A
@@ -153,26 +135,8 @@ fn cdata_enum_multi_field_tuple() {
         lua.split("\nfunction ").next().unwrap_or(&lua)
     );
     require_luajit();
-    let mut prog = lua;
-    prog.push_str(
-        "\nlocal __b=\"\"\nlocal __op=print\n\
-         print=function(...) local p={} for i=1,select('#',...) do p[i]=tostring(select(i,...)) end \
-         __b=__b..table.concat(p,\"\\t\")..\"\\n\" end\n\
-         t()\n__op((__b:gsub(\"%s+$\",\"\")))\n",
-    );
-    let path = std::env::temp_dir().join(format!("skull_enum_multi_{}.lua", std::process::id()));
-    std::fs::write(&path, &prog).expect("write lua");
-    let out = std::process::Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("run luajit");
-    let _ = std::fs::remove_file(&path);
-    assert!(
-        out.status.success(),
-        "luajit failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "15 12 0");
+    let prog = lua;
+    assert_eq!(run_fn(&prog, "t"), "15 12 0");
 }
 
 // Cut 2b: record payloads -> named slots `_<field>`; a mixed tuple+record enum
@@ -208,30 +172,9 @@ fn cdata_enum_record_payload() {
         lua.split("\nfunction ").next().unwrap_or(&lua)
     );
     require_luajit();
-    let mut prog = lua;
-    prog.push_str(
-        "\nlocal __b=\"\"\nlocal __op=print\n\
-         print=function(...) local p={} for i=1,select('#',...) do p[i]=tostring(select(i,...)) end \
-         __b=__b..table.concat(p,\"\\t\")..\"\\n\" end\n\
-         t()\n__op((__b:gsub(\"%s+$\",\"\")))\n",
-    );
-    let path = std::env::temp_dir().join(format!("skull_enum_rec_{}.lua", std::process::id()));
-    std::fs::write(&path, &prog).expect("write lua");
-    let out = std::process::Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("run luajit");
-    let _ = std::fs::remove_file(&path);
-    assert!(
-        out.status.success(),
-        "luajit failed:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let prog = lua;
     // Record fields sorted alphabetically (h before w) -- matches rock's inspect.
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        "15 12 0 | Shape::Box { h = 4, w = 3 }"
-    );
+    assert_eq!(run_fn(&prog, "t"), "15 12 0 | Shape::Box { h = 4, w = 3 }");
 }
 
 // A cdata enum passed through a scalar-ABI call and then matched must NOT be
@@ -270,25 +213,6 @@ fn matched_scalar_abi_enum_param_does_not_repack() {
 #[test]
 fn cdata_enum_runs_correctly() {
     require_luajit();
-    let mut prog = emit_module(SRC);
-    prog.push_str(
-        "\nlocal __b=\"\"\nlocal __op=print\n\
-         print=function(...) local p={} for i=1,select('#',...) do p[i]=tostring(select(i,...)) end \
-         __b=__b..table.concat(p,\"\\t\")..\"\\n\" end\n\
-         t()\n__op((__b:gsub(\"%s+$\",\"\")))\n",
-    );
-    let path = std::env::temp_dir().join(format!("skull_enum_cdata_{}.lua", std::process::id()));
-    std::fs::write(&path, &prog).expect("write lua");
-    let out = std::process::Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("run luajit");
-    let _ = std::fs::remove_file(&path);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success(),
-        "luajit failed:\nstderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(stdout.trim(), "1 4 7 4 | 10", "got {stdout:?}");
+    let prog = emit_module(SRC);
+    assert_eq!(run_fn(&prog, "t"), "1 4 7 4 | 10");
 }

@@ -6,7 +6,7 @@
 //! generic. A table built under an empty substitution would fail every generic
 //! slot instead, which is what the mutation arm at the bottom asserts.
 
-use crate::common::ws_with_stdlib;
+use crate::common::{module_id, ws_with_stdlib};
 use bone_semantic::hir::{BindingInfo, BodyOwner, Expr, TypeExpr};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::{ArenaMap, Idx, IdxRange};
@@ -199,10 +199,7 @@ fn main() {
 }
 "#,
     );
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
+    let mid = module_id(&ws, "<test>");
     let (inst, plan) = bodies
         .plans
         .iter()
@@ -242,10 +239,7 @@ fn id(value: int) -> int { return value }
 fn main() { print("{id(1)}") }
 "#,
     );
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
+    let mid = module_id(&ws, "<test>");
     let (inst, plan) = bodies
         .plans
         .iter()
@@ -1028,10 +1022,7 @@ fn read_startup() -> int { return 7 }
 fn main() { print("{startup}") }
 "#,
     );
-    let user_mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
+    let user_mid = module_id(&ws, "<test>");
     let (owner, plan) = bodies
         .always_plans
         .iter()
@@ -1133,10 +1124,7 @@ fn main() { let value = startup.value }
         default_domain_population > 0,
         "fixture did not put a struct-default domain on an always-emitted contribution"
     );
-    let user_mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
+    let user_mid = module_id(&ws, "<test>");
     let global = bodies
         .always_plans
         .iter()
@@ -1167,10 +1155,7 @@ fn system() {}
 fn main() {}
 "#,
     );
-    let user_mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
+    let user_mid = module_id(&ws, "<test>");
     let plan = bodies
         .always_plans
         .iter()
@@ -1227,10 +1212,7 @@ global G: V = V { x: 1.0, y: 2.0 }
 fn main() { print("{G.x}") }
 "#,
     );
-    let user_mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
+    let user_mid = module_id(&ws, "<test>");
     let (owner, plan) = bodies
         .always_plans
         .iter()
@@ -1298,10 +1280,7 @@ global G: int = pick()
 fn main() { let x = G }
 "#,
     );
-    let user_mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
+    let user_mid = module_id(&ws, "<test>");
     let roots = skull::mir_emit::emission_roots(&ws, Some("<project>"));
     let g = instance_graph::build(&ws, roots, false);
     let mut bodies = concrete_body::build(&ws, &g);
@@ -2254,14 +2233,8 @@ fn vanishing() -> int {
         .expect("stable instance was not expanded");
 
     let ws2 = ws_with_stdlib(source_v2);
-    let module = *ws2
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
-    let old_module = *ws1
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
+    let module = module_id(&ws2, "<test>");
+    let old_module = module_id(&ws1, "<test>");
     let old_main_span = ws1
         .module(old_module)
         .functions
@@ -2477,10 +2450,7 @@ fn main() {
     );
 
     let ws2 = ws_with_stdlib(source_v2);
-    let module = *ws2
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
+    let module = module_id(&ws2, "<test>");
     let owners = ws2
         .module(module)
         .functions

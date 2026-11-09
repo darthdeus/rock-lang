@@ -2,14 +2,12 @@
 //! `SkullTest::returns` contract, and the
 //! malformed shapes reject with a spanned CompilerError.
 
+use crate::common::module_id;
 use skull::ValueExpect;
 
 fn tests_of(src: &str) -> Result<Vec<skull::SkullTest>, skull_parser::CompilerError> {
     let ws = crate::common::ws_with_stdlib(src);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("module id");
+    let mid = module_id(&ws, "<test>");
     skull::module_tests(&ws, mid)
 }
 

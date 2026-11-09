@@ -1,6 +1,5 @@
-use crate::common::try_emit_module;
 use crate::common::ws_with_stdlib;
-use ustr::Ustr;
+use crate::common::{module_id, try_emit_module};
 
 const MIXED_INVALID: &str = r#"
 enum Pairs { F(float), I(int) }
@@ -45,10 +44,7 @@ fn main() {
 
 fn direct_admission_error(src: &str) -> skull_parser::CompilerError {
     let ws = ws_with_stdlib(src);
-    let mid = *ws
-        .module_ids
-        .get(&Ustr::from("<test>"))
-        .expect("test module");
+    let mid = module_id(&ws, "<test>");
     skull_mir::lower::expansion_rejection(&ws, mid).expect("fixture must be rejected by admission")
 }
 

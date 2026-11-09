@@ -10,7 +10,7 @@
 //! cdata-eligible (cut 1 is single-scalar-payload) and keep the table -- exactly
 //! the case this SROA targets. (A single-scalar enum is now a value cdata instead;
 //! see `enum_cdata.rs`.) Escaping table enums keep the table.
-use crate::common::{emit_module, function_body, require_luajit};
+use crate::common::{emit_module, function_body, require_luajit, run_fn};
 
 const COALESCE_SRC: &str = r#"
 enum Resource { Image(int), Named(string), Empty }
@@ -182,43 +182,10 @@ fn mixed_payload_and_unit_enum_does_not_allocate_table() {
     );
 }
 
-#[test]
-fn runtime_program_paths_are_unique_within_process() {
-    assert_ne!(run_t_path(), run_t_path());
-}
-
-fn run_t_path() -> std::path::PathBuf {
-    static NEXT_PATH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let n = NEXT_PATH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    std::env::temp_dir().join(format!("skull_enum_sroa_{}_{}.lua", std::process::id(), n))
-}
-
-/// Emit `src`, append a print-capturing harness that calls `t()`, run under
-/// luajit, and return the captured stdout (panicking if luajit is unavailable).
+/// Emit `src`, run its `t()` under luajit, and return the stdout.
 fn run_t(src: &str) -> String {
     require_luajit();
-    let mut prog = emit_module(src);
-    prog.push_str(
-        "\nlocal __b=\"\"\nlocal __op=print\n\
-         print=function(...) local p={} for i=1,select('#',...) do p[i]=tostring(select(i,...)) end \
-         __b=__b..table.concat(p,\"\\t\")..\"\\n\" end\n\
-         t()\n__op((__b:gsub(\"%s+$\",\"\")))\n",
-    );
-    let path = run_t_path();
-    std::fs::write(&path, &prog).expect("write lua");
-    let out = std::process::Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("run luajit");
-    let _ = std::fs::remove_file(&path);
-    assert!(
-        out.status.success(),
-        "luajit failed:\nstderr: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout)
-        .trim()
-        .replace("\r\n", "\n")
+    run_fn(&emit_module(src), "t")
 }
 
 #[test]

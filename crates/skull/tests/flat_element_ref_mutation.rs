@@ -5,7 +5,7 @@
 //! before it. The behavior matrix that also runs on C is
 //! `tests/values/flat_element_ref.rock`.
 
-use crate::common::{require_luajit, run_luajit, run_main, try_emit_module};
+use crate::common::{module_id, require_luajit, run_luajit, run_main, try_emit_module};
 
 const SRC: &str = r#"
 value Cell { v: int }
@@ -90,10 +90,7 @@ fn emit_past_relocatable_ref_rule(source: &str) -> String {
             .all(|m| m.contains("cannot retain a reference into relocatable")),
         "unexpected frontend errors: {errors:#?}"
     );
-    let module = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let module = module_id(&ws, "<test>");
     let (emission, _) = skull::mir_emit::emit_full(&ws, module).expect("production emit");
     emission.lua
 }
