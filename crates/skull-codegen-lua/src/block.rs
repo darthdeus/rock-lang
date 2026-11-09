@@ -127,8 +127,23 @@ impl Emitter<'_> {
             return; // already emitted (e.g. as a loop body block)
         }
         self.emitted[raw(bb) as usize] = true;
+        self.drop_fallthrough_goto(out, bb);
         self.write_block_label(out, bb);
         self.emit_block_contents(out, bb);
+    }
+
+    /// A goto to the block that follows it is a fallthrough: drop it. Not
+    /// after a label: LuaJIT nests one syntax level per label in a run of
+    /// them, so a long chain of empty blocks would overflow its limit.
+    fn drop_fallthrough_goto(&mut self, out: &mut String, bb: Idx<Block>) {
+        if let Some((start, end, target)) = self.last_goto.take()
+            && target == bb
+            && end == out.len()
+            && !out[..start].ends_with("::\n")
+        {
+            out.truncate(start);
+            self.label_refs[raw(bb) as usize] -= 1;
+        }
     }
 
     fn write_block_label(&self, out: &mut String, bb: Idx<Block>) {
@@ -160,9 +175,11 @@ impl Emitter<'_> {
     }
 
     pub(crate) fn write_goto(&self, out: &mut String, t: Idx<Block>) {
+        let start = out.len();
         out.push_str("  goto ");
         self.write_label_ref(out, t);
         out.push('\n');
+        self.last_goto.set(Some((start, out.len(), t)));
     }
 
     /// The statements of `bb` and its terminator, without its label.
@@ -318,6 +335,7 @@ impl Emitter<'_> {
         // Latch label only (the `for` does the increment); then close + the
         // loop-done edge (header's false branch).
         self.emitted[raw(latch) as usize] = true;
+        self.drop_fallthrough_goto(out, latch);
         self.write_block_label(out, latch);
         self.write_kills(out, &self.kills.at_entry[raw(latch) as usize]);
         out.push_str("  end\n");

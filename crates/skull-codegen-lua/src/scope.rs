@@ -285,6 +285,7 @@ pub(crate) fn render_scope(
         inlinable,
         emitted: vec![false; func.blocks.len()],
         label_refs: block::label_ref_counts(func, rpo, &loops),
+        last_goto: std::cell::Cell::new(None),
         hoist,
         hoist_names,
         state_slots,

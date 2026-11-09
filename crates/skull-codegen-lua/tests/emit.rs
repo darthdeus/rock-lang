@@ -1466,7 +1466,6 @@ function sign_int(c0)
   goto bb3
   ::bb2::
   c0 = (1)
-  goto bb3
   ::bb3::
   r0 = c0
   c0 = r0
