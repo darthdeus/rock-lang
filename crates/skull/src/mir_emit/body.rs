@@ -940,7 +940,7 @@ pub(super) fn emit_specialized_callees(
     built: &mut Vec<(Instance, Chunk)>,
     allocation_bodies: &mut Vec<crate::allocation_report::AllocationBody>,
     statics: &mut Vec<skull_mir::mir::StaticCell>,
-    out: &mut LuaDefinitionBuffer,
+    out: &mut LuaDefinitionWriter,
     binds: &mut Vec<skull_codegen_lua::CalleeBindingPlan>,
     attribution: &mut AttributionAccumulator,
     times: &mut PhaseTimes,

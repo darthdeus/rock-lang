@@ -98,7 +98,7 @@ fn assemble_overlay(
     let mut order: Vec<Instance> = cache.changed_since_full.iter().cloned().collect();
     order.sort_by_key(|b| overlay_order_key(&cache.scx, b));
     order.dedup();
-    let mut definitions = LuaDefinitionBuffer::new();
+    let mut definitions = LuaDefinitionWriter::new(out);
     for body in &order {
         match cache.chunks.get(body) {
             Some(Ok(chunk)) => definitions.push_str(&chunk.lua),
@@ -107,7 +107,7 @@ fn assemble_overlay(
             None => {}
         }
     }
-    definitions.append_to(&mut out);
+    out = definitions.finish();
     let (mut bindings, rebound_bodies) = overlay_callee_bindings(ws, cache, &order);
     out.push_str(&callee_binding_pass_lua(&mut bindings));
     let mut published_bodies = order.clone();
@@ -255,7 +255,7 @@ fn assemble_overlay(
         // Emit each affected const's ginit fn now; build its init
         // line + dependency edges (restricted to affected consts) for the sort.
         let mut inits: Vec<PendingInit<String>> = Vec::new();
-        let mut definitions = LuaDefinitionBuffer::new();
+        let mut definitions = LuaDefinitionWriter::new(out);
         for a in &affected {
             let line = {
                 let unit =
@@ -284,7 +284,7 @@ fn assemble_overlay(
                 item: line,
             });
         }
-        definitions.append_to(&mut out);
+        out = definitions.finish();
 
         out.push_str(&sort_global_init_lines(inits, &FxHashMap::default())?.concat());
     }

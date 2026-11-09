@@ -1,4 +1,4 @@
-//! Emitted body chunks and the scoped Lua definition buffer.
+//! Emitted body chunks and the scoped Lua definition writer.
 
 use super::*;
 use skull_codegen_lua::CALLEE_FACTORY_PREFIX;
@@ -99,10 +99,11 @@ pub(super) fn callee_binding_pass_lua(
     out
 }
 
-pub(super) struct LuaDefinitionBuffer {
+pub(super) struct LuaDefinitionWriter {
     lua: String,
-    units: Vec<(usize, usize, usize)>,
-    definition_count: usize,
+    section_start: usize,
+    definitions_in_scope: usize,
+    scoped: bool,
 }
 
 /// The global a top-level definition assigns, in either emitted shape.
@@ -135,12 +136,13 @@ pub(super) fn lua_definition_count(lua: &str) -> usize {
     count
 }
 
-impl LuaDefinitionBuffer {
-    pub(super) fn new() -> Self {
+impl LuaDefinitionWriter {
+    pub(super) fn new(lua: String) -> Self {
         Self {
-            lua: String::new(),
-            units: Vec::new(),
-            definition_count: 0,
+            section_start: lua.len(),
+            lua,
+            definitions_in_scope: 0,
+            scoped: false,
         }
     }
 
@@ -153,29 +155,26 @@ impl LuaDefinitionBuffer {
     }
 
     fn push_counted(&mut self, lua: &str, count: usize) {
-        let start = self.lua.len();
+        if self.definitions_in_scope + count > LUA_DEFINITIONS_PER_SCOPE {
+            if !self.scoped {
+                // Small sections stay unwrapped. Once the limit is crossed,
+                // move only the first scope's text to insert its opener.
+                self.lua.insert_str(self.section_start, "do\n(function()\n");
+                self.scoped = true;
+            }
+            if self.definitions_in_scope > 0 {
+                self.lua.push_str("end)()\nend\ndo\n(function()\n");
+                self.definitions_in_scope = 0;
+            }
+        }
         self.lua.push_str(lua);
-        self.units.push((start, self.lua.len(), count));
-        self.definition_count += count;
+        self.definitions_in_scope += count;
     }
 
-    pub(super) fn append_to(self, out: &mut String) {
-        if self.definition_count <= LUA_DEFINITIONS_PER_SCOPE {
-            out.push_str(&self.lua);
-            return;
+    pub(super) fn finish(mut self) -> String {
+        if self.scoped {
+            self.lua.push_str("end)()\nend\n");
         }
-
-        out.push_str("do\n(function()\n");
-        let mut definitions_in_scope = 0;
-        for (start, end, count) in self.units {
-            if definitions_in_scope > 0 && definitions_in_scope + count > LUA_DEFINITIONS_PER_SCOPE
-            {
-                out.push_str("end)()\nend\ndo\n(function()\n");
-                definitions_in_scope = 0;
-            }
-            out.push_str(&self.lua[start..end]);
-            definitions_in_scope += count;
-        }
-        out.push_str("end)()\nend\n");
+        self.lua
     }
 }

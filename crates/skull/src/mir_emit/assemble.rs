@@ -103,7 +103,6 @@ struct Assembly {
     always_emitted_calls: Vec<FuncRef>,
     always_emitted_names: Vec<Ustr>,
     unit_reads: UnitComptimeReads,
-    definitions: LuaDefinitionBuffer,
     // Second pass of the callee binding: every factory's
     // `<name> = __rock_mk_<name>(<callees>)` line, emitted after EVERY
     // definition and in ascending call-graph component rank, so each captured
@@ -129,7 +128,6 @@ impl Assembly {
             always_emitted_calls: Vec::new(),
             always_emitted_names: Vec::new(),
             unit_reads: UnitComptimeReads::default(),
-            definitions: LuaDefinitionBuffer::new(),
             callee_binds: Vec::new(),
             emits_main: false,
         }
@@ -176,9 +174,9 @@ impl Assembly {
         }
         let mut decorator_lua = String::new();
         self.merge_units(deco_results, &mut decorator_lua, &mut Vec::new());
-        let mut decorator_definitions = LuaDefinitionBuffer::new();
+        let mut decorator_definitions = LuaDefinitionWriter::new(std::mem::take(&mut self.out));
         decorator_definitions.push_str(&decorator_lua);
-        decorator_definitions.append_to(&mut self.out);
+        self.out = decorator_definitions.finish();
     }
 
     /// Global initializers are emitted later, in their original slot, but they
@@ -218,6 +216,7 @@ impl Assembly {
         ws: &Workspace,
         cache: &SkullEmitCache,
         needed_foreign: &FxHashSet<Instance>,
+        definitions: &mut LuaDefinitionWriter,
     ) -> Result<(), CompilerError> {
         for module in ws.source_modules() {
             let mid = module.id;
@@ -253,7 +252,7 @@ impl Assembly {
                         // a generic declaration the view holds no base instance for.
                         if emit_def {
                             let prologue = default_fill_prologue(ws, mid, fid, f);
-                            self.definitions.push_str(&format!(
+                            definitions.push_str(&format!(
                                 "function {nm}({params})\n{prologue}{body}\nend\n"
                             ));
                         }
@@ -274,7 +273,7 @@ impl Assembly {
                     if !emits_foreign_definition(ws, &cache.lua_view, needed_foreign, self_ref) {
                         continue;
                     }
-                    self.definitions.push_str(&inline_lua_definition(
+                    definitions.push_str(&inline_lua_definition(
                         ws,
                         &cache.scx,
                         self_ref,
@@ -293,7 +292,7 @@ impl Assembly {
                 if is_generic(f) {
                     continue;
                 }
-                self.pull_cached_chunk(ws, cache, self_ref, f, emit_def);
+                self.pull_cached_chunk(ws, cache, self_ref, f, emit_def, definitions);
             }
         }
         Ok(())
@@ -307,6 +306,7 @@ impl Assembly {
         self_ref: FuncRef,
         f: &bone_semantic::hir::Function,
         emit_def: bool,
+        definitions: &mut LuaDefinitionWriter,
     ) {
         match cache.chunks.get(&shared(self_ref)) {
             Some(Ok(chunk)) => {
@@ -318,7 +318,7 @@ impl Assembly {
                 self.attribution.add_unit(&chunk.attribution);
                 if emit_def {
                     self.emits_main |= key.as_str() == "main";
-                    self.definitions.push_chunk(chunk);
+                    definitions.push_chunk(chunk);
                     self.callee_binds.extend(chunk.binds.iter().cloned());
                     self.allocation_bodies
                         .extend(chunk.allocation_bodies.iter().cloned());
@@ -893,7 +893,8 @@ pub(super) fn assemble(
         None
     };
 
-    asm.push_function_definitions(ws, cache, &needed_foreign)?;
+    let mut definitions = LuaDefinitionWriter::new(std::mem::take(&mut asm.out));
+    asm.push_function_definitions(ws, cache, &needed_foreign, &mut definitions)?;
     asm.rejections.extend(emit_specialized_callees(
         ws,
         &cache.scx,
@@ -904,7 +905,7 @@ pub(super) fn assemble(
         built_specs,
         &mut asm.allocation_bodies,
         &mut asm.all_statics,
-        &mut asm.definitions,
+        &mut definitions,
         &mut asm.callee_binds,
         &mut asm.attribution,
         &mut asm.times,
@@ -938,7 +939,7 @@ pub(super) fn assemble(
     if let Some(err) = cg.take_rejection() {
         return Err(err);
     }
-    std::mem::replace(&mut asm.definitions, LuaDefinitionBuffer::new()).append_to(&mut asm.out);
+    asm.out = definitions.finish();
     asm.out
         .push_str(&callee_binding_pass_lua(&mut asm.callee_binds));
     let sims = match (cache.build_kind, cache.selected_sim_functions.as_ref()) {
@@ -997,9 +998,9 @@ pub(super) fn assemble(
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in
     // the original slot, so the emitted text is unchanged.)
-    let mut global_definitions = LuaDefinitionBuffer::new();
+    let mut global_definitions = LuaDefinitionWriter::new(std::mem::take(out));
     global_definitions.push_str(&globals_lua);
-    global_definitions.append_to(out);
+    *out = global_definitions.finish();
     let has_definition_plan = !definition_plan.catalogs.is_empty();
     if has_code_slot_publication {
         out.push_str(skull_codegen_lua::FN_MT_PRELUDE);

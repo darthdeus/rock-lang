@@ -10,6 +10,14 @@ mod lua_definition_scope_tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
+    fn generated_unit(first: usize, count: usize) -> String {
+        let mut unit = String::new();
+        for i in first..first + count {
+            unit.push_str(&format!("function generated_{i}() return {i} end\n"));
+        }
+        unit
+    }
+
     /// Panics when luajit cannot be spawned: a host without it must report red
     /// for a test that never ran, never green.
     fn luajit_loads(lua: &str) -> (bool, String) {
@@ -33,7 +41,7 @@ mod lua_definition_scope_tests {
     #[test]
     fn definition_scopes_cross_the_luajit_main_constant_limit() {
         let mut raw = String::new();
-        let mut definitions = LuaDefinitionBuffer::new();
+        let mut definitions = LuaDefinitionWriter::new(String::new());
         for i in 0..32_769 {
             let function = format!("function generated_{i}() return {i} end\n");
             raw.push_str(&function);
@@ -46,8 +54,7 @@ mod lua_definition_scope_tests {
             "the control failed for the wrong reason: {raw_error}"
         );
 
-        let mut scoped = String::new();
-        definitions.append_to(&mut scoped);
+        let mut scoped = definitions.finish();
         scoped.push_str("assert(generated_0() == 0 and generated_32768() == 32768)\n");
         let (scoped_loaded, scoped_error) = luajit_loads(&scoped);
         assert!(
@@ -59,11 +66,56 @@ mod lua_definition_scope_tests {
     #[test]
     fn small_definition_population_keeps_its_exact_text() {
         let source = "function one() return 1 end\nfunction two() return one() + 1 end\n";
-        let mut definitions = LuaDefinitionBuffer::new();
+        let mut definitions = LuaDefinitionWriter::new(String::new());
         definitions.push_str(source);
-        let mut out = String::new();
-        definitions.append_to(&mut out);
-        assert_eq!(out, source);
+        assert_eq!(definitions.finish(), source);
+    }
+
+    #[test]
+    fn exact_scope_limit_stays_unwrapped_and_keeps_prefix() {
+        let prefix = "-- prefix stays before the definition section\n";
+        let mut definitions = LuaDefinitionWriter::new(prefix.to_string());
+        let unit = generated_unit(0, 4_096);
+        definitions.push_str(&unit);
+
+        assert_eq!(definitions.finish(), format!("{prefix}{unit}"));
+    }
+
+    #[test]
+    fn crossing_splits_between_units_and_preserves_zero_definition_text() {
+        let prefix = "-- prefix\n";
+        let before = "-- before the first definition\n";
+        let between = "-- between units\n";
+        let after = "-- after the threshold\n";
+        let suffix = "-- suffix stays after the definition section\n";
+        let first = generated_unit(0, 4_095);
+        let second = generated_unit(4_095, 2);
+
+        let mut definitions = LuaDefinitionWriter::new(prefix.to_string());
+        definitions.push_str(before);
+        definitions.push_str(&first);
+        definitions.push_str(between);
+        definitions.push_str(&second);
+        definitions.push_str(after);
+        let mut actual = definitions.finish();
+        actual.push_str(suffix);
+
+        let expected = format!(
+            "{prefix}do\n(function()\n{before}{first}{between}end)()\nend\ndo\n(function()\n{second}{after}end)()\nend\n{suffix}"
+        );
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn oversized_single_unit_stays_together() {
+        let unit = generated_unit(0, 4_097);
+        let mut definitions = LuaDefinitionWriter::new(String::new());
+        definitions.push_str(&unit);
+
+        assert_eq!(
+            definitions.finish(),
+            format!("do\n(function()\n{unit}end)()\nend\n")
+        );
     }
 }
 
