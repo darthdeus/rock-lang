@@ -2025,6 +2025,7 @@ fn type_table_defs(
                 "c_struct"
             };
             let mut fields = Vec::with_capacity(s.fields.len());
+            let mut json_names = std::collections::HashSet::new();
             for f in &s.fields {
                 let (tystr, _) = reflect_field_type(ws, f.ty);
                 let plan = skull_mir::lower::struct_field_plan(
@@ -2060,9 +2061,25 @@ fn type_table_defs(
                     Some(d) => format!(", desc = {d}"),
                     None => String::new(),
                 };
+                let mut json_name = None;
+                for annotation in &f.annotations {
+                    if annotation.is_builtin("json_name") {
+                        if json_name.is_some() {
+                            return Err(CompilerError::new_no_location("duplicate @json_name on field".to_string()));
+                        }
+                        if let bone_semantic::hir::AnnoValue::String(name) = &annotation.args[0].value {
+                            json_name = Some(name.as_str());
+                        }
+                    }
+                }
+                let wire_name = json_name.unwrap_or(f.name.as_str());
+                if !json_names.insert(wire_name.to_string()) {
+                    return Err(CompilerError::new_no_location(format!("duplicate JSON field name {wire_name:?} in {}", s.name)));
+                }
+                let json = json_name.map(|name| format!(", json_name = {name:?}")).unwrap_or_default();
                 fields.push(format!(
-                    "{{ name = \"{}\", type = \"{}\", nullable = {}{}{}{} }}",
-                    f.name, tystr, nullable, embed, flat, desc
+                    "{{ name = \"{}\", type = \"{}\", nullable = {}{}{}{}{} }}",
+                    f.name, tystr, nullable, embed, flat, desc, json
                 ));
             }
             out.push_str(&format!(

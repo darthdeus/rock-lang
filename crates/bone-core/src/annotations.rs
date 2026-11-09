@@ -70,6 +70,15 @@ fn validate_one(
             at(anno, pos, AnnoPos::FnItem)?;
             test_args(anno)
         }
+        "json_name" => {
+            at(anno, pos, AnnoPos::StructField)?;
+            if anno.args.len() != 1 || anno.args[0].name.is_some()
+                || !matches!(&anno.args[0].value, AnnoValue::String(name) if !name.is_empty())
+            {
+                comp_error!(anno.span, "`@json_name` requires one nonempty string argument");
+            }
+            Ok(())
+        }
         "nomangle" => {
             match pos {
                 AnnoPos::FnItem | AnnoPos::StructItem => {}
