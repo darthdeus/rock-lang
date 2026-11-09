@@ -1,0 +1,53 @@
+struct JsonDiagnosticRow { count: int }
+struct JsonDiagnosticRoot { rows: [JsonDiagnosticRow] }
+
+@test
+fn json_record_reports_nested_failure() {
+    let errors: [JsonRecordError] = []
+    let codec = JsonRecordCodec { on_error: error => errors.push(error) }
+    let value = json_decode("{{\"rows\":[{{\"count\":\"wrong\"}}]}}").unwrap()
+    assert(json_record_decode(codec, value, JsonDiagnosticRoot { rows: [] }) == null)
+    assert_eq(errors.len(), 1)
+    assert_eq(errors[0].path, "/rows/0/count")
+    assert_eq(errors[0].expected, "int")
+    assert_eq(errors[0].actual, "Str")
+}
+
+struct JsonDiagnosticMap { values: Map<string, JsonDiagnosticRow> }
+
+@test
+fn json_record_reports_missing_fields_and_escaped_map_keys() {
+    let errors: [JsonRecordError] = []
+    let codec = JsonRecordCodec { on_error: error => errors.push(error) }
+    let value = json_decode("{{\"values\":{{\"a/b~c\":{{}}}}}}").unwrap()
+    assert(json_record_decode(codec, value, JsonDiagnosticMap { values: map_new() }) == null)
+    assert_eq(errors.len(), 1)
+    assert_eq(errors[0].path, "/values/a~1b~0c/count")
+    assert_eq(errors[0].actual, "missing")
+    assert_eq(errors[0].expected, "int")
+    errors.clear()
+    let valid = json_decode("{{\"values\":{{\"a\":{{\"count\":4}}}}}}").unwrap()
+    let decoded = json_record_decode(codec, valid, JsonDiagnosticMap { values: map_new() }).unwrap()
+    assert_eq(decoded.values.get("a").unwrap().count, 4)
+    assert_eq(errors.len(), 0)
+    assert_eq(json_encode(json_record_encode(codec, decoded)), json_encode(valid))
+    assert(json_record_decode(JsonRecordCodec {}, value, JsonDiagnosticMap { values: map_new() }) == null)
+}
+
+enum JsonDiagnosticChoice { Count(int), Empty }
+struct JsonDiagnosticEnum { choice: JsonDiagnosticChoice }
+
+@test
+fn json_record_reports_enum_payload_and_root_failures() {
+    let errors: [JsonRecordError] = []
+    let codec = JsonRecordCodec { on_error: error => errors.push(error) }
+    let value = json_decode("{{\"choice\":[\"Count\",false]}}").unwrap()
+    assert(json_record_decode(codec, value, JsonDiagnosticEnum { choice: JsonDiagnosticChoice::Empty }) == null)
+    assert_eq(errors[0].path, "/choice/1")
+    assert_eq(errors[0].expected, "int")
+    errors.clear()
+    assert(json_record_decode(codec, json_null(), JsonDiagnosticRoot { rows: [] }) == null)
+    assert_eq(errors.len(), 1)
+    assert_eq(errors[0].path, "")
+    assert_eq(errors[0].actual, "Null")
+}
