@@ -1,5 +1,63 @@
 use super::*;
 
+fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+/// `(request, update_snapshots, force, cap, expected lanes)`.
+type JobsCase = (Option<usize>, bool, bool, Option<&'static str>, usize);
+
+fn assert_jobs(cores: usize, budget: JobBudget, cases: &[JobsCase]) {
+    for &(request, update, force, cap, expected) in cases {
+        assert_eq!(
+            resolve_jobs_with(request, update, cores, budget, force, cap).unwrap(),
+            expected,
+            "request {request:?}, update {update}, force {force}, cap {cap:?}"
+        );
+    }
+}
+
+fn stopped() -> SimSummary {
+    SimSummary {
+        saw_stop: true,
+        ..SimSummary::default()
+    }
+}
+
+/// Run `body` under LuaJIT with stone's real `__SIM__` emitter as `emit`.
+fn run_with_production_emitter(body: &str) -> std::process::Output {
+    let production = std::fs::read_to_string(
+        rock_stdlib::package_dir("stone")
+            .unwrap()
+            .join("engine/sim.rock"),
+    )
+    .unwrap();
+    let emitter = production
+        .split_once("inline(lua) fn _sim_emit_impl(")
+        .unwrap()
+        .1
+        .split_once("\"\"\"")
+        .unwrap()
+        .1
+        .split_once("\"\"\"")
+        .unwrap()
+        .0;
+    let script = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(
+        script.path(),
+        format!("local function emit(json_line, site)\n{emitter}\nend\n{body}\n"),
+    )
+    .unwrap();
+    std::process::Command::new(rock_host::project::luajit_path())
+        .arg(script.path())
+        .env("STONE_HEADLESS", "1")
+        .output()
+        .unwrap()
+}
+
 #[cfg(target_os = "linux")]
 extern "C" fn block_in_shared_address_space(_: *mut libc::c_void) -> libc::c_int {
     // Raw syscall only: this child runs on the test's heap and TLS.
@@ -232,34 +290,39 @@ fn every_sim_child_stubs_its_assets_unless_asked_not_to() {
 /// census and the capability docs classify sims by it.
 #[test]
 fn rendering_is_the_effective_last_wins_value() {
-    let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
-    assert!(!entry_renders(&[]), "declaring nothing does not render");
-    assert!(
-        entry_renders(&[pair("SIM_DRAW", "on_demand")]),
-        "@sim_render sugar"
-    );
-    assert!(!entry_renders(&[pair("SIM_DRAW", "none")]), "explicit skip");
-    assert!(
-        !entry_renders(&[pair("SIM_DRAW", "commands")]),
-        "submit needs no GPU result"
-    );
-    assert!(
-        entry_renders(&[pair("SIM_DRAW", "every_frame")]),
-        "continuous GPU rendering"
-    );
-    // `@sim_render` then an explicit override, in lowering order.
-    assert!(
-        !entry_renders(&[pair("SIM_DRAW", "on_demand"), pair("SIM_DRAW", "none")]),
-        "a later explicit @sim_env overrides the @sim_render sugar"
-    );
-    assert!(
-        entry_renders(&[pair("SIM_DRAW", "none"), pair("SIM_DRAW", "on_demand")]),
-        "... and the other way round"
-    );
-    assert!(
-        !entry_renders(&[pair("GAME_FORCE_VFX", "1")]),
-        "an unrelated key is not it"
-    );
+    let cases: &[(&[(&str, &str)], bool, &str)] = &[
+        (&[], false, "declaring nothing does not render"),
+        (&[("SIM_DRAW", "on_demand")], true, "@sim_render sugar"),
+        (&[("SIM_DRAW", "none")], false, "explicit skip"),
+        (
+            &[("SIM_DRAW", "commands")],
+            false,
+            "submit needs no GPU result",
+        ),
+        (
+            &[("SIM_DRAW", "every_frame")],
+            true,
+            "continuous GPU rendering",
+        ),
+        (
+            &[("SIM_DRAW", "on_demand"), ("SIM_DRAW", "none")],
+            false,
+            "a later explicit @sim_env overrides the @sim_render sugar",
+        ),
+        (
+            &[("SIM_DRAW", "none"), ("SIM_DRAW", "on_demand")],
+            true,
+            "... and the other way round",
+        ),
+        (
+            &[("GAME_FORCE_VFX", "1")],
+            false,
+            "an unrelated key is not it",
+        ),
+    ];
+    for (declared, renders, why) in cases {
+        assert_eq!(entry_renders(&env(declared)), *renders, "{why}");
+    }
 }
 
 /// A MISSING image golden used to bootstrap itself from the current frame
@@ -269,16 +332,11 @@ fn rendering_is_the_effective_last_wins_value() {
 /// never evaluated. Only `--update-snapshots` may write a baseline.
 #[test]
 fn a_missing_image_golden_is_not_a_pass() {
-    let dir = std::env::temp_dir().join(format!(
-        "rock-golden-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    std::fs::create_dir_all(&dir).expect("tmp dir");
-    let produced = dir.join("produced.png");
+    let dir = tempfile::tempdir().expect("tmp dir");
+    let produced = dir.path().join("produced.png");
     // A 1x1 PNG; the bytes never get compared on the paths under test.
     std::fs::write(&produced, [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]).expect("write");
-    let baseline = dir.join("golden.png");
+    let baseline = dir.path().join("golden.png");
     let img = ImageSnapshotOp {
         name: "golden".into(),
         path: produced.to_string_lossy().into_owned(),
@@ -304,8 +362,6 @@ fn a_missing_image_golden_is_not_a_pass() {
         "update writes the baseline; got {r:?}"
     );
     assert!(baseline.exists(), "the baseline is created under update");
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 /// The lane discriminant decides whether a child may touch the one live
@@ -314,19 +370,28 @@ fn a_missing_image_golden_is_not_a_pass() {
 /// shared with every other child once the suite runs in parallel.
 #[test]
 fn reload_lane_is_opt_in_via_stone_hot_reload() {
-    let pair = |k: &str, v: &str| vec![(k.to_string(), v.to_string())];
-
-    assert!(is_reload_lane(&pair("STONE_HOT_RELOAD", "1")));
-    // Only the opt-in key routes to the lane; a busy sim env does not.
-    assert!(!is_reload_lane(&pair("SIM_DRAW", "on_demand")));
-    assert!(!is_reload_lane(&[]));
-    // An explicit disable is not an opt-in: the child's watcher does not
-    // poll, so it can never observe a reload.
-    assert!(!is_reload_lane(&pair("STONE_HOT_RELOAD", "0")));
-    // The key still routes when it is not the only pair.
-    let mut mixed = pair("ROCK_TEST_SEED", "42");
-    mixed.extend(pair("STONE_HOT_RELOAD", "1"));
-    assert!(is_reload_lane(&mixed));
+    let cases: &[(&[(&str, &str)], bool, &str)] = &[
+        (&[("STONE_HOT_RELOAD", "1")], true, "the opt-in key"),
+        (
+            &[("SIM_DRAW", "on_demand")],
+            false,
+            "a busy sim env does not route",
+        ),
+        (&[], false, "no env"),
+        (
+            &[("STONE_HOT_RELOAD", "0")],
+            false,
+            "an explicit disable: the child's watcher never polls",
+        ),
+        (
+            &[("ROCK_TEST_SEED", "42"), ("STONE_HOT_RELOAD", "1")],
+            true,
+            "the key routes when it is not the only pair",
+        ),
+    ];
+    for (declared, lane, why) in cases {
+        assert_eq!(is_reload_lane(&env(declared)), *lane, "{why}");
+    }
 }
 
 /// The reload lane's exclusion from the bytecode image is a correctness
@@ -339,26 +404,24 @@ fn reload_lane_is_opt_in_via_stone_hot_reload() {
 /// watching -- a reload sim would pass every assertion and observe nothing.
 #[test]
 fn only_a_non_reload_worker_boots_from_the_bytecode_image() {
-    let dir = std::env::temp_dir().join(format!("rock-chunk-path-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     let main = dir.join(rock_host::project::MAIN_LUA_FILENAME);
     let bytecode = dir.join(rock_host::project::MAIN_BYTECODE_FILENAME);
     std::fs::write(&main, "-- source").unwrap();
 
     // No image yet: both lanes run the source file. The fallback is what
     // makes the dump best-effort rather than a new failure mode.
-    assert_eq!(worker_chunk_path(&dir, false), main);
-    assert_eq!(worker_chunk_path(&dir, true), main);
+    assert_eq!(worker_chunk_path(dir, false), main);
+    assert_eq!(worker_chunk_path(dir, true), main);
 
     std::fs::write(&bytecode, "-- image").unwrap();
-    assert_eq!(worker_chunk_path(&dir, false), bytecode);
+    assert_eq!(worker_chunk_path(dir, false), bytecode);
     assert_eq!(
-        worker_chunk_path(&dir, true),
+        worker_chunk_path(dir, true),
         main,
         "a reload child must keep the source path it derives the overlay from"
     );
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -373,24 +436,18 @@ fn resolve_full_asset_jobs_is_bounded_by_jobs_and_defaults_to_two() {
 
 #[test]
 fn the_workload_env_applies_defaults_last_wins_and_keeps_out_literal() {
-    let pairs = |items: &[(&str, &str)]| -> Vec<(String, String)> {
-        items
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
-    };
     assert_eq!(
         workload_env(&[]),
-        workload_env(&pairs(&[("SIM_DRAW", "none")])),
+        workload_env(&env(&[("SIM_DRAW", "none")])),
         "omitting a runner default and declaring it are the same workload"
     );
     assert_ne!(
         workload_env(&[]),
-        workload_env(&pairs(&[("SIM_DRAW", "on_demand")]))
+        workload_env(&env(&[("SIM_DRAW", "on_demand")]))
     );
-    let last = workload_env(&pairs(&[("SIM_DRAW", "none"), ("SIM_DRAW", "on_demand")]));
+    let last = workload_env(&env(&[("SIM_DRAW", "none"), ("SIM_DRAW", "on_demand")]));
     assert!(last.contains(&("SIM_DRAW".into(), "on_demand".into())));
-    let out = workload_env(&pairs(&[("GAME_HISTORY_DIR", "$OUT/history")]));
+    let out = workload_env(&env(&[("GAME_HISTORY_DIR", "$OUT/history")]));
     assert!(out.contains(&("GAME_HISTORY_DIR".into(), "$OUT/history".into())));
 }
 
@@ -399,47 +456,29 @@ fn the_workload_env_applies_defaults_last_wins_and_keeps_out_literal() {
 /// does not say, last declaration wins, and the render flag is not read.
 #[test]
 fn entry_full_assets_needs_real_assets_and_no_image_cap() {
-    let pair = |k: &str, v: &str| (k.to_string(), v.to_string());
-    assert!(
-        !entry_full_assets(&[], "1"),
-        "declaring nothing is stubbed and capped"
-    );
-    assert!(
-        !entry_full_assets(&[pair("STONE_ASSET_STUB", "0")], "1"),
-        "real assets alone stay capped"
-    );
-    assert!(
-        !entry_full_assets(&[pair("STONE_IMAGE_MAX_SIDE", "0")], "1"),
-        "an uncapped stub is one texel"
-    );
-    assert!(entry_full_assets(
-        &[
-            pair("STONE_ASSET_STUB", "0"),
-            pair("STONE_IMAGE_MAX_SIDE", "0")
-        ],
-        "1"
-    ));
-    assert!(
-        entry_full_assets(
-            &[
-                pair("STONE_IMAGE_MAX_SIDE", "0"),
-                pair("SIM_DRAW", "commands")
-            ],
-            "0"
+    const STUB_OFF: (&str, &str) = ("STONE_ASSET_STUB", "0");
+    const UNCAPPED: (&str, &str) = ("STONE_IMAGE_MAX_SIDE", "0");
+    let cases: &[(&[(&str, &str)], &str, bool, &str)] = &[
+        (&[], "1", false, "declaring nothing is stubbed and capped"),
+        (&[STUB_OFF], "1", false, "real assets alone stay capped"),
+        (&[UNCAPPED], "1", false, "an uncapped stub is one texel"),
+        (&[STUB_OFF, UNCAPPED], "1", true, "the pair marks the lane"),
+        (
+            &[UNCAPPED, ("SIM_DRAW", "commands")],
+            "0",
+            true,
+            "an inherited STONE_ASSET_STUB=0 counts, and submit is not consulted",
         ),
-        "an inherited STONE_ASSET_STUB=0 counts, and submit is not consulted"
-    );
-    assert!(
-        !entry_full_assets(
-            &[
-                pair("STONE_ASSET_STUB", "0"),
-                pair("STONE_IMAGE_MAX_SIDE", "0"),
-                pair("STONE_IMAGE_MAX_SIDE", "512")
-            ],
-            "1"
+        (
+            &[STUB_OFF, UNCAPPED, ("STONE_IMAGE_MAX_SIDE", "512")],
+            "1",
+            false,
+            "last declaration wins",
         ),
-        "last declaration wins"
-    );
+    ];
+    for (declared, inherited, full, why) in cases {
+        assert_eq!(entry_full_assets(&env(declared), inherited), *full, "{why}");
+    }
 }
 
 #[test]
@@ -596,39 +635,24 @@ fn sim_environment_cap_reaches_default_lane_resolution() {
 #[test]
 fn sim_environment_caps_defaults_but_explicit_flags_win() {
     let budget = JobBudget { ram: 10, gpu: 8 };
-    assert_eq!(
-        resolve_jobs_with(None, false, 32, budget, false, Some("2")).unwrap(),
-        2
-    );
-    assert_eq!(
-        resolve_jobs_with(Some(6), false, 32, budget, false, Some("2")).unwrap(),
-        6
-    );
-    assert_eq!(
-        resolve_jobs_with(Some(12), false, 32, budget, true, Some("2")).unwrap(),
-        12
+    let lanes = budget.lanes();
+    assert_jobs(
+        32,
+        budget,
+        &[
+            (None, false, false, Some("2"), 2),
+            (Some(6), false, false, Some("2"), 6),
+            (Some(12), false, true, Some("2"), 12),
+            (Some(6), true, true, Some("2"), 1),
+            (None, false, false, Some("99"), lanes),
+            (None, false, false, None, lanes),
+            (None, false, false, Some("0"), lanes),
+            (None, false, false, Some("invalid"), lanes),
+            (None, false, false, Some("-1"), lanes),
+            (None, false, false, Some("184467440737095516160"), lanes),
+        ],
     );
     assert!(resolve_jobs_with(Some(12), false, 32, budget, false, Some("2")).is_err());
-    assert_eq!(
-        resolve_jobs_with(Some(6), true, 32, budget, true, Some("2")).unwrap(),
-        1
-    );
-    assert_eq!(
-        resolve_jobs_with(None, false, 32, budget, false, Some("99")).unwrap(),
-        budget.lanes()
-    );
-    for cap in [
-        None,
-        Some("0"),
-        Some("invalid"),
-        Some("-1"),
-        Some("184467440737095516160"),
-    ] {
-        assert_eq!(
-            resolve_jobs_with(None, false, 32, budget, false, cap).unwrap(),
-            budget.lanes()
-        );
-    }
 }
 
 /// The job count is a safety bound, not a preference: it must never exceed
@@ -638,62 +662,43 @@ fn sim_environment_caps_defaults_but_explicit_flags_win() {
 #[test]
 fn resolve_jobs_is_bounded_and_serial_for_snapshot_updates() {
     let (cores, budget) = (32, JobBudget { ram: 4, gpu: 4 });
-
-    assert_eq!(
-        resolve_jobs_with(None, false, cores, budget, false, None).unwrap(),
-        4,
-        "no request takes the memory budget"
-    );
-    assert_eq!(
-        resolve_jobs_with(Some(1), false, cores, budget, false, None).unwrap(),
-        1
+    assert_jobs(
+        cores,
+        budget,
+        &[
+            // No request takes the memory budget.
+            (None, false, false, None, 4),
+            (Some(1), false, false, None, 1),
+            (Some(4), false, false, None, 4),
+            (Some(8), true, false, None, 1),
+            // A forced request may exceed the budget, never the cores.
+            (Some(10), false, true, None, 10),
+            (Some(usize::MAX), false, true, None, cores),
+            // 0 is meaningless; clamp up rather than deadlock on an empty pool.
+            (Some(0), false, false, None, 1),
+            // --update-snapshots wins over ANY explicit request.
+            (None, true, true, None, 1),
+            (Some(8), true, true, None, 1),
+        ],
     );
     let error = resolve_jobs_with(Some(10), false, cores, budget, false, None).unwrap_err();
     assert!(error.to_string().contains("RAM budget of 4"));
     assert!(error.to_string().contains("--jobs-force"));
-    assert_eq!(
-        resolve_jobs_with(Some(4), false, cores, budget, false, None).unwrap(),
-        4
-    );
-    assert_eq!(
-        resolve_jobs_with(Some(8), true, cores, budget, false, None).unwrap(),
-        1
-    );
-    // A forced request may exceed the budget, never the cores.
-    assert_eq!(
-        resolve_jobs_with(Some(10), false, cores, budget, true, None).unwrap(),
-        10
-    );
-    assert_eq!(
-        resolve_jobs_with(Some(usize::MAX), false, cores, budget, true, None).unwrap(),
-        cores
-    );
-    // 0 is meaningless; clamp up rather than deadlock on an empty pool.
-    assert_eq!(
-        resolve_jobs_with(Some(0), false, cores, budget, false, None).unwrap(),
-        1
-    );
-    // --update-snapshots wins over ANY explicit request.
-    assert_eq!(
-        resolve_jobs_with(None, true, cores, budget, true, None).unwrap(),
-        1
-    );
-    assert_eq!(
-        resolve_jobs_with(Some(8), true, cores, budget, true, None).unwrap(),
-        1
-    );
 }
 
 #[test]
 fn a_request_above_only_the_free_gpu_budget_runs_at_that_budget() {
     let (cores, budget) = (32, JobBudget { ram: 10, gpu: 2 });
-    assert_eq!(
-        resolve_jobs_with(Some(8), false, cores, budget, false, None).unwrap(),
-        2
-    );
-    assert_eq!(
-        resolve_jobs_with(Some(10), false, cores, budget, false, None).unwrap(),
-        2
+    assert_jobs(
+        cores,
+        budget,
+        &[
+            (Some(8), false, false, None, 2),
+            (Some(10), false, false, None, 2),
+            // Force still takes the request as asked.
+            (Some(8), false, true, None, 8),
+            (None, false, false, None, 2),
+        ],
     );
     let error = resolve_jobs_with(Some(11), false, cores, budget, false, None).unwrap_err();
     assert!(
@@ -701,15 +706,6 @@ fn a_request_above_only_the_free_gpu_budget_runs_at_that_budget() {
             .to_string()
             .contains("--jobs 11 exceeds the RAM budget of 10"),
         "{error}"
-    );
-    // Force still takes the request as asked.
-    assert_eq!(
-        resolve_jobs_with(Some(8), false, cores, budget, true, None).unwrap(),
-        8
-    );
-    assert_eq!(
-        resolve_jobs_with(None, false, cores, budget, false, None).unwrap(),
-        2
     );
 }
 
@@ -769,17 +765,14 @@ fn the_default_job_count_leaves_a_fixed_gpu_memory_reserve() {
 fn default_jobs_fit_ram_and_gpu_budgets() {
     let studio = memory_budgets(14, Some(36 * 1024), None);
     assert_eq!(studio.lanes(), 10);
-    assert_eq!(
-        resolve_jobs_with(None, false, 14, studio, false, None).unwrap(),
-        10
-    );
-    assert_eq!(
-        resolve_jobs_with(Some(14), false, 14, studio, true, None).unwrap(),
-        14
-    );
-    assert_eq!(
-        resolve_jobs_with(Some(14), true, 14, studio, true, None).unwrap(),
-        1
+    assert_jobs(
+        14,
+        studio,
+        &[
+            (None, false, false, None, 10),
+            (Some(14), false, true, None, 14),
+            (Some(14), true, true, None, 1),
+        ],
     );
     assert_eq!(memory_budgets(32, Some(62 * 1024), Some(17851)).lanes(), 5);
     assert_eq!(memory_budgets(32, Some(62 * 1024), None).lanes(), 17);
@@ -812,62 +805,52 @@ fn a_hot_reload_sim_is_reload_lane() {
     assert!(!entry_is_reload_lane("unknown", &env));
 }
 
-fn env(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
-    pairs
-        .iter()
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .collect()
-}
-
 #[test]
 fn a_declared_frame_count_is_the_entrys_budget() {
-    assert_eq!(
-        frame_budget_for("s", &env(&[])).expect("default"),
-        DEFAULT_FRAME_BUDGET
-    );
-    assert_eq!(
-        frame_budget_for("s", &env(&[("FRAME_COUNT", "90")])).expect("declared"),
-        90
-    );
-    // The two watchdog sims in sample declare this; a runner that quietly
-    // capped them at the default would guard them with a bound nobody wrote.
-    assert_eq!(
-        frame_budget_for("s", &env(&[("FRAME_COUNT", "100000")])).expect("declared"),
-        100000
-    );
-    // Other keys are not budgets.
-    assert_eq!(
-        frame_budget_for("s", &env(&[("STONE_FX_OFF", "1")])).expect("default"),
-        DEFAULT_FRAME_BUDGET
+    const COUNT: &str = "FRAME_COUNT";
+    let cases: &[(&[(&str, &str)], usize)] = &[
+        (&[], DEFAULT_FRAME_BUDGET),
+        (&[(COUNT, "90")], 90),
+        // The two watchdog sims in sample declare this; a runner that quietly
+        // capped them at the default would guard them with a bound nobody wrote.
+        (&[(COUNT, "100000")], 100000),
+        // Other keys are not budgets.
+        (&[("STONE_FX_OFF", "1")], DEFAULT_FRAME_BUDGET),
+        // The last declaration is the effective one, and an overridden
+        // invalid declaration is inert.
+        (&[(COUNT, "80"), (COUNT, "90")], 90),
+        (&[(COUNT, "bad"), (COUNT, "90")], 90),
+    ];
+    for (declared, budget) in cases {
+        assert_eq!(
+            frame_budget_for("s", &env(declared)).expect("valid"),
+            *budget,
+            "{declared:?}"
+        );
+    }
+    assert!(
+        frame_budget_for("s", &env(&[(COUNT, "90"), (COUNT, "bad")])).is_err(),
+        "the effective last declaration is the one that must be validated"
     );
 }
 
 #[test]
 fn a_declared_timeout_is_the_entrys_wall_budget() {
-    assert_eq!(
-        timeout_for("s", &env(&[])).expect("default"),
-        Duration::from_secs(sim_timeout_secs())
-    );
-    assert_eq!(
-        timeout_for("s", &env(&[("ROCK_SIM_TIMEOUT_SECS", "1200")])).expect("declared"),
-        Duration::from_secs(1200)
-    );
-    // Other keys are not budgets, and the last declaration wins.
-    assert_eq!(
-        timeout_for("s", &env(&[("FRAME_COUNT", "90")])).expect("default"),
-        Duration::from_secs(sim_timeout_secs())
-    );
-    assert_eq!(
-        timeout_for(
-            "s",
-            &env(&[
-                ("ROCK_SIM_TIMEOUT_SECS", "90"),
-                ("ROCK_SIM_TIMEOUT_SECS", "1200")
-            ])
-        )
-        .expect("declared"),
-        Duration::from_secs(1200)
-    );
+    const KEY: &str = "ROCK_SIM_TIMEOUT_SECS";
+    let cases: &[(&[(&str, &str)], u64)] = &[
+        (&[], sim_timeout_secs()),
+        (&[(KEY, "1200")], 1200),
+        // Other keys are not budgets, and the last declaration wins.
+        (&[("FRAME_COUNT", "90")], sim_timeout_secs()),
+        (&[(KEY, "90"), (KEY, "1200")], 1200),
+    ];
+    for (declared, secs) in cases {
+        assert_eq!(
+            timeout_for("s", &env(declared)).expect("valid"),
+            Duration::from_secs(*secs),
+            "{declared:?}"
+        );
+    }
 }
 
 #[test]
@@ -888,24 +871,6 @@ fn an_unusable_frame_count_is_rejected_not_defaulted() {
             "`FRAME_COUNT={bad}` must reject rather than silently become the default"
         );
     }
-}
-
-#[test]
-fn a_frame_count_uses_the_last_declaration() {
-    assert_eq!(
-        frame_budget_for("s", &env(&[("FRAME_COUNT", "80"), ("FRAME_COUNT", "90")]))
-            .expect("last declaration is valid"),
-        90
-    );
-    assert_eq!(
-        frame_budget_for("s", &env(&[("FRAME_COUNT", "bad"), ("FRAME_COUNT", "90")]))
-            .expect("an overridden invalid declaration is inert"),
-        90
-    );
-    assert!(
-        frame_budget_for("s", &env(&[("FRAME_COUNT", "90"), ("FRAME_COUNT", "bad")])).is_err(),
-        "the effective last declaration is the one that must be validated"
-    );
 }
 
 #[test]
@@ -1120,60 +1085,43 @@ fn malformed_envelopes_are_rejected_not_guessed_at() {
 }
 
 #[test]
-fn extract_str_field_basic() {
-    let json =
-        serde_json::from_str::<serde_json::Value>(r#"{"op":"expect_fail","message":"1 segment"}"#)
-            .unwrap();
-    assert_eq!(extract_str_field(&json, "op"), Some("expect_fail".into()));
-    assert_eq!(
-        extract_str_field(&json, "message"),
-        Some("1 segment".into())
-    );
-    assert_eq!(extract_str_field(&json, "missing"), None);
+fn extract_str_field_unquotes_and_unescapes() {
+    let cases = [
+        (r#"{"op":"expect_fail"}"#, "op", Some("expect_fail")),
+        (r#"{"message":"1 segment"}"#, "message", Some("1 segment")),
+        (r#"{"op":"expect_fail"}"#, "missing", None),
+        (
+            r#"{"message":"hello \"world\""}"#,
+            "message",
+            Some(r#"hello "world""#),
+        ),
+    ];
+    for (json, key, expected) in cases {
+        let json = serde_json::from_str::<serde_json::Value>(json).unwrap();
+        assert_eq!(extract_str_field(&json, key).as_deref(), expected, "{json}");
+    }
 }
 
 #[test]
-fn extract_str_field_handles_escapes() {
-    let json =
-        serde_json::from_str::<serde_json::Value>(r#"{"message":"hello \"world\""}"#).unwrap();
-    assert_eq!(
-        extract_str_field(&json, "message"),
-        Some(r#"hello "world""#.into())
-    );
-}
-
-#[test]
-fn extract_raw_field_object_args() {
-    let line = serde_json::from_str::<serde_json::Value>(
-        r#"{"op":"custom","name":"x","args":{"a":1,"b":[2,3]}}"#,
-    )
-    .unwrap();
-    assert_eq!(
-        extract_raw_field(&line, "args"),
-        Some(r#"{"a":1,"b":[2,3]}"#.to_string())
-    );
-}
-
-#[test]
-fn extract_image_snapshot_tolerance_and_save_status() {
-    let line = serde_json::from_str::<serde_json::Value>(
-        r#"{"op":"image_snapshot","name":"x","tol":0.001,"ok":true,"path":"/tmp/x"}"#,
-    )
-    .unwrap();
-    assert_eq!(extract_raw_field(&line, "tol"), Some("0.001".into()));
-    assert_eq!(extract_raw_field(&line, "ok"), Some("true".into()));
-}
-
-#[test]
-fn extract_raw_field_handles_quotes_inside_strings() {
-    // The "args" field contains a string with an escaped `}`.
-    // Naive depth tracking would stop early at the string's `}`.
-    let line = serde_json::from_str::<serde_json::Value>(r#"{"args":{"msg":"abc}def"},"after":1}"#)
-        .unwrap();
-    assert_eq!(
-        extract_raw_field(&line, "args"),
-        Some(r#"{"msg":"abc}def"}"#.to_string())
-    );
+fn extract_raw_field_keeps_the_field_as_json_text() {
+    let cases = [
+        (
+            r#"{"args":{"a":1,"b":[2,3]}}"#,
+            "args",
+            r#"{"a":1,"b":[2,3]}"#,
+        ),
+        (r#"{"tol":0.001}"#, "tol", "0.001"),
+        (r#"{"ok":true}"#, "ok", "true"),
+        (
+            r#"{"args":{"msg":"abc}def"},"after":1}"#,
+            "args",
+            r#"{"msg":"abc}def"}"#,
+        ),
+    ];
+    for (json, key, expected) in cases {
+        let json = serde_json::from_str::<serde_json::Value>(json).unwrap();
+        assert_eq!(extract_raw_field(&json, key).as_deref(), Some(expected));
+    }
 }
 
 #[test]
@@ -1276,18 +1224,12 @@ fn entry_passed_requires_stop_and_no_failures() {
 fn a_stopped_sim_whose_checks_never_ran_fails() {
     // A fixture that returns before its checks (`STATE ?? return`) still
     // reaches stop_sim() and fails nothing; its coverage is gone.
-    let mut empty = SimSummary {
-        saw_stop: true,
-        ..SimSummary::default()
-    };
+    let mut empty = stopped();
     assert!(!entry_passed(&empty));
     assert_eq!(verdict_word(&empty), "FAIL");
     assert!(sim_outcome(&empty, "s").is_err());
 
-    let mut declared = SimSummary {
-        saw_stop: true,
-        ..SimSummary::default()
-    };
+    let mut declared = stopped();
     declared.no_checks = Some("a seed; its probe checks".into());
     assert!(
         entry_passed(&declared),
@@ -1323,17 +1265,11 @@ fn an_aborted_sim_prints_fail_not_pass() {
     });
     assert_eq!(verdict_word(&aborted), "PASS");
 
-    let mut timed_out = SimSummary {
-        saw_stop: true,
-        ..SimSummary::default()
-    };
+    let mut timed_out = stopped();
     timed_out.timed_out = true;
     assert_eq!(verdict_word(&timed_out), "FAIL");
 
-    let mut died = SimSummary {
-        saw_stop: true,
-        ..SimSummary::default()
-    };
+    let mut died = stopped();
     died.process_failure_code = Some(1);
     assert_eq!(verdict_word(&died), "FAIL");
 }
@@ -1342,10 +1278,7 @@ fn an_aborted_sim_prints_fail_not_pass() {
 fn a_timeout_names_the_budget_that_fired() {
     // The single-run message must state the entry's declared budget, not
     // the process-wide default it overrode.
-    let mut summary = SimSummary {
-        saw_stop: true,
-        ..SimSummary::default()
-    };
+    let mut summary = stopped();
     summary.timed_out = true;
     summary.timeout_budget = Some(Duration::from_secs(2));
     let error = sim_outcome(&summary, "declared_timeout_slow")
@@ -1446,44 +1379,15 @@ fn foreign_stderr_prefixes_preserve_envelopes_deadlines_and_verdicts() {
 
 #[test]
 fn summary_stop_survives_foreign_unterminated_stderr() {
-    let production = std::fs::read_to_string(
-        rock_stdlib::package_dir("stone")
-            .unwrap()
-            .join("engine/sim.rock"),
-    )
-    .unwrap();
-    let emitter = production
-        .split_once("inline(lua) fn _sim_emit_impl(")
-        .unwrap()
-        .1
-        .split_once("\"\"\"")
-        .unwrap()
-        .1
-        .split_once("\"\"\"")
-        .unwrap()
-        .0;
-    let script = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(
-        script.path(),
-        format!(
-            r#"
-local function emit(json_line, site)
-{emitter}
-end
-emit('{{"op":"expect_ok","message":"checked"}}', 'test.rock:1')
+    let child = run_with_production_emitter(
+        r#"
+emit('{"op":"expect_ok","message":"checked"}', 'test.rock:1')
 io.stderr:write('audio stream error: A backend-specific error has occurred: ')
 io.stderr:flush()
-emit('{{"op":"stop"}}', 'test.rock:2')
+emit('{"op":"stop"}', 'test.rock:2')
 io.stderr:write('`alsa::poll()` returned POLLERR\n')
-"#
-        ),
-    )
-    .unwrap();
-    let child = std::process::Command::new(rock_host::project::luajit_path())
-        .arg(script.path())
-        .env("STONE_HEADLESS", "1")
-        .output()
-        .unwrap();
+"#,
+    );
     assert!(
         child.status.success(),
         "{}",
@@ -1502,41 +1406,12 @@ io.stderr:write('`alsa::poll()` returned POLLERR\n')
 // overflowed LuaJIT's ctype table near 8,000 markers.
 #[test]
 fn many_sim_markers_do_not_exhaust_ffi_ctypes() {
-    let production = std::fs::read_to_string(
-        rock_stdlib::package_dir("stone")
-            .unwrap()
-            .join("engine/sim.rock"),
-    )
-    .unwrap();
-    let emitter = production
-        .split_once("inline(lua) fn _sim_emit_impl(")
-        .unwrap()
-        .1
-        .split_once("\"\"\"")
-        .unwrap()
-        .1
-        .split_once("\"\"\"")
-        .unwrap()
-        .0;
-    let script = tempfile::NamedTempFile::new().unwrap();
-    std::fs::write(
-        script.path(),
-        format!(
-            r#"
-local function emit(json_line, site)
-{emitter}
-end
-for i = 1, 20000 do emit('{{"op":"expect_ok","message":"checked"}}', 'test.rock:1') end
-emit('{{"op":"stop"}}', 'test.rock:2')
-"#
-        ),
-    )
-    .unwrap();
-    let child = std::process::Command::new(rock_host::project::luajit_path())
-        .arg(script.path())
-        .env("STONE_HEADLESS", "1")
-        .output()
-        .unwrap();
+    let child = run_with_production_emitter(
+        r#"
+for i = 1, 20000 do emit('{"op":"expect_ok","message":"checked"}', 'test.rock:1') end
+emit('{"op":"stop"}', 'test.rock:2')
+"#,
+    );
     let stderr = String::from_utf8(child.stderr).unwrap();
     assert!(
         child.status.success(),
@@ -1601,10 +1476,7 @@ fn summary_parses_allocation_census_and_preserves_frame_window() {
 
 #[test]
 fn census_missing_or_incomplete_result_is_not_a_zero_success() {
-    let missing = SimSummary {
-        saw_stop: true,
-        ..Default::default()
-    };
+    let missing = stopped();
     let (record, rank_values) = allocation_census_record("missing", &missing);
     assert_eq!(census_status(&missing), "no-verdict");
     assert_eq!(record["status"], "no-verdict");
@@ -1738,11 +1610,16 @@ fn reload_completion_is_terminal_after_publication() {
     ledger
         .complete(7, ReloadTerminal::Applied)
         .expect("watcher completion follows publication");
-    assert_eq!(ledger.summary().requests, 1);
-    assert_eq!(ledger.summary().applied, 1);
-    assert_eq!(ledger.summary().pending, 0);
-    assert_eq!(ledger.summary().rejected, 0);
-    assert_eq!(ledger.summary().failed, 0);
+    assert_eq!(
+        ledger.summary(),
+        ReloadLedgerSummary {
+            requests: 1,
+            applied: 1,
+            pending: 0,
+            rejected: 0,
+            failed: 0
+        }
+    );
 }
 
 #[test]
