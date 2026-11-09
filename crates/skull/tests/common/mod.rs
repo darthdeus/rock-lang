@@ -589,9 +589,14 @@ pub fn graph_of(ws: &Workspace) -> InstanceGraph {
 pub fn census_of(src: &str) -> SiteJoinCensus {
     let ws = ws_with_stdlib(src);
     let g = graph_of(&ws);
-    let bodies = skull::concrete_body::build(&ws, &g);
-    let scx = scalar_ctx(&ws, &g);
-    site_join::census(&ws, &scx, &g, &bodies)
+    census_of_graph(&ws, &g)
+}
+
+/// The site-join census of `g`, a graph of `ws`.
+pub fn census_of_graph(ws: &Workspace, g: &InstanceGraph) -> SiteJoinCensus {
+    let bodies = skull::concrete_body::build(ws, g);
+    let scx = scalar_ctx(ws, g);
+    site_join::census(ws, &scx, g, &bodies)
 }
 
 pub fn unjoined(c: &SiteJoinCensus, cause: Unjoined) -> usize {

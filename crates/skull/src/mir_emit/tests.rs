@@ -1,5 +1,9 @@
 use super::*;
 
+fn module_id(ws: &Workspace, file: &str) -> ModuleId {
+    *ws.module_ids.get(&Ustr::from(file)).expect("module id")
+}
+
 #[cfg(test)]
 mod lua_definition_scope_tests {
     use super::*;
@@ -473,10 +477,7 @@ fn main() {
         };
         let mut modules = vec![parse(SRC)];
         let ws1 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v1");
-        let mid = *ws1
-            .module_ids
-            .get(&Ustr::from("<artifact-handle-test>"))
-            .unwrap();
+        let mid = module_id(&ws1, "<artifact-handle-test>");
         let (_, mut cache) = emit_full(&ws1, mid).expect("full v1");
 
         let changed = SRC.replace("return x", "let y = x\n return y");
@@ -508,10 +509,7 @@ fn main() {
         let edit = SRC.replace("return wrap(7)", "return wrap(9)");
         let mut modules = vec![parse(SRC)];
         let ws1 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v1");
-        let mid = *ws1
-            .module_ids
-            .get(&Ustr::from("<overlay-binding-test>"))
-            .unwrap();
+        let mid = module_id(&ws1, "<overlay-binding-test>");
         let (_, mut cache) = emit_full(&ws1, mid).expect("full v1");
 
         let mut modules = vec![parse(&edit)];
@@ -633,10 +631,7 @@ fn main() {
     fn emission_rejects_a_poisoned_concrete_bound_plan() {
         let _inline = InlineOff::on();
         let ws = bounded_workspace();
-        let mid = *ws
-            .module_ids
-            .get(&Ustr::from("<bound-plan-test>"))
-            .expect("test module");
+        let mid = module_id(&ws, "<bound-plan-test>");
         let body = ref_for(&ws, "total");
         let err = match FullEmit::program()
             .mutation(BodyMutation::ClearBoundPlan { body })
@@ -655,10 +650,7 @@ fn main() {
     #[test]
     fn emission_consumes_a_concrete_coroutine_result_plan() {
         let ws = coroutine_workspace();
-        let mid = *ws
-            .module_ids
-            .get(&Ustr::from("<coroutine-plan-test>"))
-            .expect("test module");
+        let mid = module_id(&ws, "<coroutine-plan-test>");
         let body = ref_for(&ws, "worker");
         let (intact, intact_cache) = emit_full(&ws, mid).expect("intact emission");
         let symbol = Instance::base(body).symbol(&ws, intact_cache.scx.interner());
@@ -684,10 +676,7 @@ fn main() {
     fn emission_rejects_a_missing_concrete_iterator_witness_instance() {
         let _inline = InlineOff::on();
         let ws = bounded_workspace();
-        let mid = *ws
-            .module_ids
-            .get(&Ustr::from("<bound-plan-test>"))
-            .expect("test module");
+        let mid = module_id(&ws, "<bound-plan-test>");
         let body = ref_for(&ws, "total");
         let err = match FullEmit::program()
             .mutation(BodyMutation::ClearIteratorWitnessInstance { body })
@@ -968,10 +957,7 @@ fn main() { let result = first() }
         let _inline = InlineOn::on();
         let _census = InlineCensusOn::on();
         let ws = census_workspace();
-        let mid = *ws
-            .module_ids
-            .get(&Ustr::from("<inline-census-test>"))
-            .expect("census test module");
+        let mid = module_id(&ws, "<inline-census-test>");
         let (emit, _) = emit_full(&ws, mid).expect("intact emission");
         let census = &emit.attribution.inline.census;
         assert!(
@@ -1160,10 +1146,7 @@ fn main() { let result = run(4) }
             skull_parser::parse_module_clean(&src, Ustr::from("<budget-shape>")).expect("parse"),
         );
         let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
-        let mid = *ws
-            .module_ids
-            .get(&Ustr::from("<budget-shape>"))
-            .expect("budget test module");
+        let mid = module_id(&ws, "<budget-shape>");
         let (emit, _) = emit_full(&ws, mid).expect("intact emission");
         emit.attribution.inline.ordinary_splices
     }
@@ -1201,10 +1184,7 @@ fn main() { let result = run(4) }
                 .expect("parse"),
         );
         let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
-        let mid = *ws
-            .module_ids
-            .get(&Ustr::from("<load-store-census>"))
-            .expect("census test module");
+        let mid = module_id(&ws, "<load-store-census>");
         let (emit, _) = emit_full(&ws, mid).expect("intact emission");
         let census = &emit.attribution.inline.census.load_store;
         let row = |producer: CellProducer| census.rows[producer as usize];
@@ -1261,10 +1241,7 @@ fn main() { let result = run(4) }
         let _inline = InlineOn::on();
         let _census = InlineCensusOn::on();
         let ws = census_workspace();
-        let mid = *ws
-            .module_ids
-            .get(&Ustr::from("<inline-census-test>"))
-            .expect("census test module");
+        let mid = module_id(&ws, "<inline-census-test>");
         let (emit, _) = emit_full(&ws, mid).expect("intact emission");
         let population = &emit.attribution.inline.population;
         assert!(
@@ -1342,10 +1319,7 @@ fn main() { let result = run(4) }
         );
 
         let specialized = specialized_workspace();
-        let specialized_mid = *specialized
-            .module_ids
-            .get(&Ustr::from("<specialized-test>"))
-            .expect("specialized test module");
+        let specialized_mid = module_id(&specialized, "<specialized-test>");
         let (specialized_emit, _) =
             emit_full(&specialized, specialized_mid).expect("specialized emission");
         let specialized_population = &specialized_emit.attribution.inline.population;
@@ -1370,10 +1344,7 @@ fn main() { let result = run(4) }
         let v2 = CENSUS_SRC.replace("return flag", "return false");
         let mut modules = vec![parse(v1)];
         let ws1 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v1");
-        let mid1 = *ws1
-            .module_ids
-            .get(&Ustr::from("<inline-census-incremental-test>"))
-            .expect("module v1");
+        let mid1 = module_id(&ws1, "<inline-census-incremental-test>");
         let (full1, mut cache) = emit_full(&ws1, mid1).expect("full v1");
         assert!(
             full1
@@ -1388,10 +1359,7 @@ fn main() { let result = run(4) }
 
         let mut modules = vec![parse(&v2)];
         let ws2 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v2");
-        let mid2 = *ws2
-            .module_ids
-            .get(&Ustr::from("<inline-census-incremental-test>"))
-            .expect("module v2");
+        let mid2 = module_id(&ws2, "<inline-census-incremental-test>");
         let straight = ref_for(&ws2, "straight");
         let reinferred = vec![(straight.module, BodyOwner::Function(straight.func))];
         let incremental =
@@ -1422,10 +1390,7 @@ fn main() { let result = run(4) }
         let v3 = v2.replace("return 2", "return 3");
         let mut modules = vec![parse(&v3)];
         let ws3 = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic v3");
-        let mid3 = *ws3
-            .module_ids
-            .get(&Ustr::from("<inline-census-incremental-test>"))
-            .expect("module v3");
+        let mid3 = module_id(&ws3, "<inline-census-incremental-test>");
         let general = ref_for(&ws3, "general");
         let sequential = emit_incremental(
             &ws3,
@@ -1451,10 +1416,7 @@ fn main() { let result = run(4) }
         let mut modules = vec![parse(v1)];
         let ws_overlay_base = bone_semantic::semantic_passes::semantic_pass(&mut modules)
             .expect("semantic overlay base");
-        let mid_overlay = *ws_overlay_base
-            .module_ids
-            .get(&Ustr::from("<inline-census-incremental-test>"))
-            .expect("module overlay base");
+        let mid_overlay = module_id(&ws_overlay_base, "<inline-census-incremental-test>");
         let (_full_overlay, mut overlay_cache) =
             emit_full(&ws_overlay_base, mid_overlay).expect("full overlay base");
         let overlay =
@@ -1483,10 +1445,7 @@ fn main() { let result = run(4) }
         let _inline = InlineOn::on();
         let _census = InlineCensusOn::on();
         let ws = cross_block_workspace();
-        let mid = *ws
-            .module_ids
-            .get(&Ustr::from("<inline-cross-block-test>"))
-            .expect("cross-block test module");
+        let mid = module_id(&ws, "<inline-cross-block-test>");
         let (emit, _) = emit_full(&ws, mid).expect("cross-block emission");
         assert!(
             !emit.lua.contains("identity("),
@@ -1503,10 +1462,7 @@ fn main() { let result = run(4) }
     fn body_attribution_reports_transform_populations() {
         let _inline = InlineOn::on();
         let bounded = bounded_workspace();
-        let bounded_mid = *bounded
-            .module_ids
-            .get(&Ustr::from("<bound-plan-test>"))
-            .expect("bounded test module");
+        let bounded_mid = module_id(&bounded, "<bound-plan-test>");
         let (bounded_emit, _) = emit_full(&bounded, bounded_mid).expect("bounded emission");
         assert!(
             bounded_emit.attribution.counted_loop.bodies_with_work > 0,
@@ -1525,10 +1481,7 @@ fn main() { let result = run(4) }
         );
 
         let closure = closure_workspace();
-        let closure_mid = *closure
-            .module_ids
-            .get(&Ustr::from("<closure-test>"))
-            .expect("closure test module");
+        let closure_mid = module_id(&closure, "<closure-test>");
         let (closure_emit, _) = emit_full(&closure, closure_mid).expect("closure emission");
         assert!(
             closure_emit.attribution.closure.bodies_with_work > 0,
@@ -1542,10 +1495,7 @@ fn main() { let result = run(4) }
         );
 
         let specialized = specialized_workspace();
-        let specialized_mid = *specialized
-            .module_ids
-            .get(&Ustr::from("<specialized-test>"))
-            .expect("specialized test module");
+        let specialized_mid = module_id(&specialized, "<specialized-test>");
         let (specialized_emit, _) =
             emit_full(&specialized, specialized_mid).expect("specialized emission");
         assert!(
@@ -1584,10 +1534,7 @@ fn main() { let result = outer(1) }
     fn setup_lanes_use_deterministic_overlap_handshake() {
         let _inline = InlineOn::on();
         let ws = setup_workspace();
-        let mid = *ws
-            .module_ids
-            .get(&Ustr::from("<setup-lane-test>"))
-            .expect("setup test module");
+        let mid = module_id(&ws, "<setup-lane-test>");
         let (emit, cache) = FullEmit::program()
             .mutation(BodyMutation::SetupLaneSchedule(
                 SetupLaneSchedule::Handshake,
@@ -1624,10 +1571,7 @@ fn main() { let result = outer(1) }
     fn setup_lanes_keep_the_sequential_control() {
         let _inline = InlineOn::on();
         let ws = setup_workspace();
-        let mid = *ws
-            .module_ids
-            .get(&Ustr::from("<setup-lane-test>"))
-            .expect("setup test module");
+        let mid = module_id(&ws, "<setup-lane-test>");
         let (emit, _) = emit_full(&ws, mid).expect("setup lane emission");
         let lanes = emit.setup_lanes;
         assert!(
@@ -1650,10 +1594,7 @@ fn main() { let result = outer(1) }
     fn setup_lanes_preserve_identity_under_reversed_scheduling() {
         let _inline = InlineOn::on();
         let ws = setup_workspace();
-        let mid = *ws
-            .module_ids
-            .get(&Ustr::from("<setup-lane-test>"))
-            .expect("setup test module");
+        let mid = module_id(&ws, "<setup-lane-test>");
         let emit = |schedule| {
             FullEmit::program()
                 .mutation(BodyMutation::SetupLaneSchedule(schedule))
@@ -1885,7 +1826,7 @@ fn main() { let r = a() + c() }
     }
 
     fn emit(ws: &Workspace, hook: Option<Arc<Forced>>) -> (MirEmit, SkullEmitCache) {
-        let mid = *ws.module_ids.get(&Ustr::from(MODULE)).expect("module");
+        let mid = module_id(&ws, MODULE);
         with_hook(hook, || FullEmit::program().run(ws, mid)).expect("wave fixture emits")
     }
 

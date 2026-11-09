@@ -12,7 +12,7 @@ use bone_semantic::inference::Workspace;
 use comfy_la_arena::{ArenaMap, Idx, IdxRange};
 use skull::concrete_body::{self, Callee, ConcreteBodies, IteratorOpKind, Slot};
 use skull::instance_graph::{self, Instance, InstanceGraph, Site, SiteOp, SiteOutcome};
-use skull_mir::concrete::{ConcreteBodyPlan, ConcreteTypeTables};
+use skull_mir::concrete::{ConcreteBodyPlan, ConcretePlans, ConcreteTypeTables};
 use skull_mir::mir::{Inst, MirFunc, Term};
 use skull_mir::monoty::{MonoTy, MonoTyId, MonoTyReason};
 use ustr::Ustr;
@@ -56,6 +56,35 @@ fn expanded_with_prefix(ws: &Workspace, g: &InstanceGraph, prefix: &str) -> Inst
         .find(|i| g.identity(ws, i).starts_with(prefix))
         .cloned()
         .unwrap_or_else(|| panic!("no expanded instance of `{prefix}`"))
+}
+
+/// Drop every parameter slot from the call at `site`, in the caller's recorded
+/// signature and in the selected callee's own plan.
+fn clear_call_param_slots(
+    caller: &mut ConcreteBodyPlan,
+    site: &Site,
+    bodies: &ConcreteBodies,
+    callee: &Instance,
+) -> ConcretePlans {
+    let signature = std::sync::Arc::make_mut(
+        caller
+            .callee_signatures
+            .get_mut(site)
+            .expect("call signature disappeared"),
+    );
+    signature.params.clear();
+    signature.param_tuple_spelled.clear();
+
+    let mut plans = (*bodies.plans).clone();
+    let callee_plan = std::sync::Arc::make_mut(
+        plans
+            .get_mut(callee)
+            .expect("selected callee plan disappeared"),
+    );
+    let signature = std::sync::Arc::make_mut(&mut callee_plan.signature);
+    signature.params.clear();
+    signature.param_tuple_spelled.clear();
+    plans
 }
 
 fn assert_arena_tables(tables: &ConcreteTypeTables) {
@@ -407,24 +436,7 @@ fn main() {
         .expect("the intact scalar call must lower");
 
     let mut caller = (**main_plan).clone();
-    let signature = std::sync::Arc::make_mut(
-        caller
-            .callee_signatures
-            .get_mut(site)
-            .expect("id call signature disappeared"),
-    );
-    signature.params.clear();
-    signature.param_tuple_spelled.clear();
-
-    let mut plans = (*bodies.plans).clone();
-    let callee_plan = std::sync::Arc::make_mut(
-        plans
-            .get_mut(&callee)
-            .expect("selected callee plan disappeared"),
-    );
-    let signature = std::sync::Arc::make_mut(&mut callee_plan.signature);
-    signature.params.clear();
-    signature.param_tuple_spelled.clear();
+    let plans = clear_call_param_slots(&mut caller, site, &bodies, &callee);
 
     let poisoned_scx = scalar_ctx(&ws, &g);
     let err = skull_mir::lower::lower_instance_with_plans(&ws, &poisoned_scx, &caller, &plans)
@@ -459,24 +471,7 @@ fn main() {
     skull_mir::lower::lower_instance_with_plans(&ws, &intact_scx, main_plan, &bodies.plans)
         .expect("the intact safe-nav UFCS call must lower");
     let mut caller = (**main_plan).clone();
-    let signature = std::sync::Arc::make_mut(
-        caller
-            .callee_signatures
-            .get_mut(site)
-            .expect("id UFCS call signature disappeared"),
-    );
-    signature.params.clear();
-    signature.param_tuple_spelled.clear();
-
-    let mut plans = (*bodies.plans).clone();
-    let callee_plan = std::sync::Arc::make_mut(
-        plans
-            .get_mut(&callee)
-            .expect("selected UFCS callee plan disappeared"),
-    );
-    let signature = std::sync::Arc::make_mut(&mut callee_plan.signature);
-    signature.params.clear();
-    signature.param_tuple_spelled.clear();
+    let plans = clear_call_param_slots(&mut caller, site, &bodies, &callee);
 
     let scx = scalar_ctx(&ws, &g);
     let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &caller, &plans)

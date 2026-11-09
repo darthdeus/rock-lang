@@ -6,7 +6,7 @@
 //! that must not collapse onto one key -- plus the mutation arms proving each
 //! half of the identity is load-bearing rather than decorative.
 
-use crate::common::{fn_name, module_id, scalar_ctx, ws_with_stdlib};
+use crate::common::{census_of_graph, fn_name, module_id, scalar_ctx, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, InstanceGraph};
 use skull::site_join::{self, SiteJoinCensus, Unjoined};
@@ -1098,12 +1098,7 @@ fn main() { print("{top()}") }
         2,
         "a generic declaration must not use an empty specialization identity: {wraps:?}"
     );
-    let c = {
-        let graph = g;
-        let bodies = skull::concrete_body::build(&ws, &graph);
-        let scx = scalar_ctx(&ws, &graph);
-        site_join::census(&ws, &scx, &graph, &bodies)
-    };
+    let c = census_of_graph(&ws, &g);
     assert!(c.joined_instance_verified >= 2, "{c:?}");
     assert_eq!(c.unjoined.get(&Unjoined::OwnerNotAnInstance), None, "{c:?}");
     assert_eq!(c.unjoined.get(&Unjoined::OwnerNotInTable), None, "{c:?}");
@@ -1503,12 +1498,7 @@ fn main() { print("{use_both()}") }
         "{idents:?}"
     );
 
-    let c = {
-        let graph = g;
-        let bodies = skull::concrete_body::build(&ws, &graph);
-        let scx = scalar_ctx(&ws, &graph);
-        site_join::census(&ws, &scx, &graph, &bodies)
-    };
+    let c = census_of_graph(&ws, &g);
     assert!(
         c.obligations_examined > 0,
         "fixture examined no calls: {c:?}"
