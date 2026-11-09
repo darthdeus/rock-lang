@@ -309,3 +309,134 @@ just that the request succeeded. The parser accepts only specific expectation
 forms for each operation and can silently skip unrecognized lines; make a valid
 expectation fail temporarily to verify that it is actually checked. The fixture parser and validators are in
 [`lsp_test.rs`](../crates/rock-cli/src/lsp_test.rs).
+
+## Sims
+
+A `@sim` is a scripted run of a Stone game under the real engine loop. Every
+sim entry runs in its own fresh LuaJIT process with its own game init, SDL/GL
+context, `$OUT` directory and environment, so no state crosses between sims
+and there is no reset mechanism to keep honest. Speed comes from running
+children in parallel and from cheaper boot, never from sharing a booted
+process. Rejected: sharing a booted process between sims (it needed capture
+and restore of every global, static, native resource class and ambient
+singleton, plus a differential oracle to prove the restore, and still refused
+several classes); forking after GL init (driver and native thread state is
+outside copy-on-write memory); release-mode sims (they remove debug checks and
+are a different gate); skipping GL and game init for logic sims (`SIM_DRAW=none`
+already takes the safe per-frame win after real init). A random order that
+stays green is not isolation evidence.
+
+Timeouts and frame budgets are runaway guards, not semantics. The wall-clock
+timeout (`ROCK_SIM_TIMEOUT_SECS`) catches a child that never advances a frame,
+which a frame budget cannot; do not build load-aware timeout scaling. A
+timeout that fires only under `--jobs N` is a scheduler problem; one that
+fires alone is the sim. A sim that reaches `stop_sim()` without running a
+check fails with `(no check ran)` unless it declares `sim_no_checks("why")`.
+The three implicit `stop_sim` invariants (GL errors, shader failures,
+unfilled uniform blocks) read state the draw phase produces, so they run
+after present and before the envelope closes. `shader_clock()` is the single
+source for shader animation and obeys the time scale; freeze it with
+`TIME_SCALE = 0`, not `timeline_pause()`, since a paused frame runs no update
+systems and a paused sim hangs until its budget. An `errored` main coroutine
+closes the entry as failed with no further game updates. A sim declaring
+`@sim_env("SIM_MANUAL", "1")` is excluded from implicit suites and runs only
+when named; galleries and parameter sweeps are manual, fundamental
+regressions stay routine.
+
+### Draw on demand
+
+`SIM_DRAW` is the single per-entry draw control: `none` (default) updates
+without draw systems; `commands` runs draw systems and builds batches without
+GPU submission; `on_demand` renders when a picture reader, `drawn_frame` or a
+pending capture requires it; `every_frame` renders every frame. `@sim_render`
+selects `on_demand`; a later explicit `@sim_env("SIM_DRAW", ...)` overrides
+it. `ROCK_SIM_DRAW_EVERY_FRAME=1` is an A/B override for on-demand entries
+only. Draw mode is part of workload identity.
+
+Picture readers (canvas pixel, region, RGBA, depth and nearest-id reads,
+entity-id picks, image snapshots) call `sim_draw_on_demand()` first, which
+draws synchronously when the previous frame left no picture, at most once per
+frame and never from inside a draw. A reader inside update therefore draws
+the world part-way through this frame's update; a reader after `drawn_frame`
+reads the previous frame's ordinary picture. Raw FFI readers and direct reads
+of draw-written globals cannot ask for a draw, so those sims use
+`await drawn_frame(n)` before the read or opt out with `every_frame`. Draw
+observations (draw counters, emitted vertices, presented samples) stay in
+draw, so their sims use `drawn_frame`. The prepare stage (`@prepare`) runs
+after update and before draw on every frame the runner would draw, including
+on-demand frames that skip their draw; a demand draw inside update prepares
+first and the frame does not prepare again.
+
+### Scoped compile and the compile cache
+
+`rock sim` compiles in a child that publishes a receipt and exits, so the
+runner stays small beside its children, and keeps compile receipts across
+runs (`crates/rock-cli/src/sim_compile_cache.rs`). A named run that misses the
+cache emits only its selected sims plus main, global roots and generated
+glue; discovery and typechecking still include every file. Literal sim names
+in reached bodies add roots transitively; dynamic access to the sim registry
+outside its dispatcher is refused with an explicit whole-suite alternative.
+Package tests (`rock test <project>`) do not compile the sim files. Volatile
+build vars stay out of the cache key by their contract that they may vary
+without changing an artifact's identity; a project whose clock vars are not
+declared `volatile = true` compiles on every run and says why.
+
+### Run records
+
+Every `rock sim` invocation writes versioned JSONL lifecycle events to its
+own directory (`.sim-runs/` or `ROCK_SIM_LOG_DIR`); `rock sim-report` reads
+them. The recorder is parent-side and records boundaries only. A run without
+a terminal `run_end` is incomplete: never infer success from a partial log or
+an absent error, and report planned versus finalized denominators. A
+repeated name is a distinct occurrence identified by id, not spelling. Child
+boot latencies overlap, so neither the startup sum nor the envelope sum is
+suite wall time.
+
+Timing baselines are the median of the first N accepted observations for a
+`TimingIdentity` (the fields that change what a sim costs), so later slow
+revisions cannot raise them; warnings are informational and never fail a sim.
+Acceptance is per entry: a sim that passed contributes a sample even when
+siblings failed, vetoed only by a dirty source tree or an incomplete run.
+The accepted risk is that a disturbed machine inflates passing sims; the
+median of at least five samples plus the 2.0x and +1.0 s conjunction bound
+one inflated sample. There is deliberately no machine-load heuristic or
+outlier filter. If that proves insufficient, prefer a systematic guard
+(refuse samples from a run whose aggregate wall time departs from history)
+over a per-sample filter, because contamination is correlated across a run.
+
+### Hot-reload sims
+
+A running sim can ask the runner to edit a project source mid-run with
+`reload_edit(file, find, replace)` (`packages/stone/engine/sim.rock`). The
+runner (`service_reload_edit` in `crates/rock-cli/src/run_sim.rs`) feeds the
+edit through the real incremental pipeline and the real in-game pickup, which
+covers what raw-runtime overlay tests cannot: live task frames, real system
+registries and the engine reload loop.
+
+The lane is body-only by design. `BodyOnly` is necessary but not sufficient:
+the candidate artifact must also be CodeRef-compatible with the live one. The
+same call ABI, capture schema, coroutine frame schema and lambda topology
+publishes; a changed capture schema or coroutine frame schema is rejected
+before the overlay is written and takes the safe-restart path; a compatible
+frame whose logical layout stamp changes can publish, after which the runtime
+kills a stale live frame on resume. Capture fields are identified by source
+binding site plus flattened projection, not display names, and missing or
+duplicate identities fail closed.
+
+Writing one: opt into the watcher with `@sim_env("STONE_HOT_RELOAD", "1")`;
+sync on an `@on_reload` callback flipping a global, then
+`yield wait_for(N, () => SEEN)`; control game time with `SIM_FIXED_DT`
+(near-freeze while the overlay lands, fast-forward to burn through waits).
+The runner freezes the game-time timeline while a reload is pending, so a
+simulated-frame budget is not a completion wait. `find` must match exactly
+once in the file's current in-session text; sequential edits compose, and
+exact matching is deliberately fail-closed. Traps: `{` and `}` in find and
+replace literals are interpolation holes, so escape them as `{{` and `}}`;
+an edit targeting the sim's own file contains the find text in its argument
+literal, so concat-split it; the stamp-kill fires at resume, not at reload;
+a parent-side rejection (find miss, compile refusal, wrong tier, CodeRef
+incompatibility) kills the child immediately and reports the rejection, and
+extending the wait is never the remedy. After every child exits the runner
+reverts touched files and wipes the overlay. Interface-tier reload and
+restart injection are out of scope; they need a child respawn the runner
+does not do.

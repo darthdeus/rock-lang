@@ -82,6 +82,8 @@ enums, optionals, generics, modules, tests and shaders. The examples are
 in [`examples/guide/`](examples/guide/), so clone the repository to run them.
 For advanced facilities, see the [language reference](docs/language-reference.md)
 and [coroutines](docs/coroutines.md).
+Engine contracts for Stone games are in [docs/engine.md](docs/engine.md) and
+the LuaJIT trace rules in [docs/luajit-performance.md](docs/luajit-performance.md).
 
 ## Stone games
 
