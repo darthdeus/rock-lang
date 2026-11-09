@@ -1,0 +1,18 @@
+// Boot must produce a playable-sized board and leave it alone without input.
+@sim
+co fn boot_idle() -> Coroutine<Wait> {
+    start_game "match3"
+    sim_expect(grid.len() == 64, "boot board has 64 tiles")
+    sim_expect(score == 0 && moves == 0, "boot starts with no score or moves")
+    let initial = grid.clone()
+    await frame(30)
+    let unchanged = grid.len() == initial.len()
+    if unchanged {
+        for i in 0..grid.len() {
+            if grid[i] != initial[i] { unchanged = false }
+        }
+    }
+    sim_expect(unchanged, "without input the boot board does not change")
+    sim_expect(score == 0 && moves == 0, "idle boot does not score or count moves")
+    stop_sim()
+}

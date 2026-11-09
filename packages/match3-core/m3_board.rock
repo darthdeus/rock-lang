@@ -1,0 +1,410 @@
+// match3-core: the board model + the generic match-3 primitives (match
+// detection, gravity/settle). Pure over an explicit M3Board -- the core
+// never reads a game global and never draws, so any game (or a level
+// generator, or a test) drives it the same way. Gem *types* are opaque
+// non-negative ints; the game assigns them meaning. M3_EMPTY marks a hole.
+//
+// Every symbol is m3_-prefixed: Rock has one flat namespace across all
+// packages, so the prefix keeps the core from colliding with a consumer's
+// own board_/grid_ helpers during migration.
+
+pub global M3_EMPTY: int = -1
+
+pub value M3Board {
+    w: int,
+    h: int,
+    cells: [int],   // length w*h, row-major (index = y*w + x)
+}
+
+pub fn m3_at(b: M3Board, x: int, y: int) -> int {
+    return b.cells[y * b.w + x]
+}
+
+pub fn m3_set(b: M3Board, x: int, y: int, t: int) {
+    b.cells[y * b.w + x] = t
+}
+
+// A board of all-empty cells, ready to fill.
+pub fn m3_empty_board(w: int, h: int) -> M3Board {
+    let cells: [int] = []
+    let i = 0
+    while i < w * h {
+        cells.push(M3_EMPTY)
+        i = i + 1
+    }
+    return M3Board { w: w, h: h, cells: cells }
+}
+
+pub fn m3_copy(b: M3Board) -> M3Board {
+    let cells: [int] = []
+    for t in b.cells {
+        cells.push(t)
+    }
+    return M3Board { w: b.w, h: b.h, cells: cells }
+}
+
+pub fn m3_swap(b: M3Board, ax: int, ay: int, bx: int, by: int) {
+    let ia = ay * b.w + ax
+    let ib = by * b.w + bx
+    let t = b.cells[ia]
+    b.cells[ia] = b.cells[ib]
+    b.cells[ib] = t
+}
+
+// ─── Match detection ─────────────────────────────────────────────────────────
+// Every cell that is part of a horizontal or vertical run of length >= 3.
+// Two linear passes, O(w*h).
+pub fn m3_find_matches(b: M3Board) -> [(int, int)] {
+    let marked: [bool] = []
+    let i = 0
+    while i < b.w * b.h {
+        marked.push(false)
+        i = i + 1
+    }
+
+    let y = 0
+    while y < b.h {
+        let x = 0
+        while x < b.w {
+            let t = m3_at(b, x, y)
+            if t != M3_EMPTY {
+                let run_end = x + 1
+                while run_end < b.w && m3_at(b, run_end, y) == t {
+                    run_end = run_end + 1
+                }
+                if run_end - x >= 3 {
+                    let rx = x
+                    while rx < run_end {
+                        marked[y * b.w + rx] = true
+                        rx = rx + 1
+                    }
+                }
+                x = run_end
+            } else {
+                x = x + 1
+            }
+        }
+        y = y + 1
+    }
+
+    let col = 0
+    while col < b.w {
+        let row = 0
+        while row < b.h {
+            let t = m3_at(b, col, row)
+            if t != M3_EMPTY {
+                let run_end = row + 1
+                while run_end < b.h && m3_at(b, col, run_end) == t {
+                    run_end = run_end + 1
+                }
+                if run_end - row >= 3 {
+                    let ry = row
+                    while ry < run_end {
+                        marked[ry * b.w + col] = true
+                        ry = ry + 1
+                    }
+                }
+                row = run_end
+            } else {
+                row = row + 1
+            }
+        }
+        col = col + 1
+    }
+
+    let result: [(int, int)] = []
+    let j = 0
+    while j < b.w * b.h {
+        if marked[j] {
+            result.push((j % b.w, j ./ b.w))
+        }
+        j = j + 1
+    }
+    return result
+}
+
+pub fn m3_has_matches(b: M3Board) -> bool {
+    return m3_find_matches(b).len() > 0
+}
+
+// Group matched cells into connected blobs (4-neighbour BFS). Each blob is
+// one match group -- one scoring event for the game. `matching` is the cell
+// list from m3_find_matches; w/h are the board dimensions.
+pub fn m3_components(matching: [(int, int)], w: int, h: int) -> [[(int, int)]] {
+    let size = w * h
+    let in_match: [bool] = []
+    let visited: [bool] = []
+    let i = 0
+    while i < size {
+        in_match.push(false)
+        visited.push(false)
+        i = i + 1
+    }
+    for (mx, my) in matching {
+        in_match[my * w + mx] = true
+    }
+
+    let groups: [[(int, int)]] = []
+    let k = 0
+    while k < size {
+        let cx = k % w
+        let cy = k ./ w
+        if in_match[k] && !visited[k] {
+            let group: [(int, int)] = []
+            let queue: [(int, int)] = []
+            queue.push((cx, cy))
+            visited[k] = true
+            while queue.len() > 0 {
+                let (qx, qy) = queue[0]
+                let _ = queue.remove_at(0)
+                group.push((qx, qy))
+                let dirs: [(int, int)] = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                for (ddx, ddy) in dirs {
+                    let nx = qx + ddx
+                    let ny = qy + ddy
+                    if nx >= 0 && nx < w && ny >= 0 && ny < h {
+                        let ni = ny * w + nx
+                        if in_match[ni] && !visited[ni] {
+                            visited[ni] = true
+                            queue.push((nx, ny))
+                        }
+                    }
+                }
+            }
+            groups.push(group)
+        }
+        k = k + 1
+    }
+    return groups
+}
+
+// ─── Run length through a cell ──────────────────────────────────────────────
+
+fn m3_run_h(b: M3Board, x: int, y: int) -> int {
+    let t = m3_at(b, x, y)
+    if t == M3_EMPTY { return 0 }
+    let n = 1
+    let l = x - 1
+    while l >= 0 && m3_at(b, l, y) == t {
+        n = n + 1
+        l = l - 1
+    }
+    let r = x + 1
+    while r < b.w && m3_at(b, r, y) == t {
+        n = n + 1
+        r = r + 1
+    }
+    return n
+}
+
+fn m3_run_v(b: M3Board, x: int, y: int) -> int {
+    let t = m3_at(b, x, y)
+    if t == M3_EMPTY { return 0 }
+    let n = 1
+    let u = y - 1
+    while u >= 0 && m3_at(b, x, u) == t {
+        n = n + 1
+        u = u - 1
+    }
+    let d = y + 1
+    while d < b.h && m3_at(b, x, d) == t {
+        n = n + 1
+        d = d + 1
+    }
+    return n
+}
+
+fn m3_best_run(b: M3Board, x: int, y: int) -> int {
+    return max(m3_run_h(b, x, y), m3_run_v(b, x, y))
+}
+
+// ─── Collapse (clear + gravity + refill) ────────────────────────────────────
+// The recorded geometry of one collapse step, replayed by the game's
+// journal to animate falls and spawns.
+
+pub value M3Fall {
+    col: int,
+    from_row: int,
+    to_row: int,
+}
+
+pub value M3Spawn {
+    col: int,
+    row: int,
+    gem_type: int,
+    above_rows: int,   // visual start offset (rows above the board)
+}
+
+pub struct M3Collapse {
+    falls: [M3Fall],
+    spawns: [M3Spawn],
+}
+
+// Place a gem at (x, y) that completes no run THROUGH THAT CELL, in any
+// direction, and return the type placed.
+//
+// Not `m3_random_type_no_match`, which looks only BACK along a fill order --
+// correct when generating into an empty grid, wrong whenever there are already
+// gems below or to the right, because a run in those directions is invisible to
+// it. `m3_best_run` asks the question the resolver asks.
+//
+// Every type is tried before giving up, and giving up is safe: a caller either
+// settles the board afterwards or lets the resolver treat the leftover as the
+// cascade it is. What cannot be avoided is a run through a cell that has not
+// been filled YET -- nothing can know a gem that has not been chosen.
+pub fn m3_place_quiet(b: M3Board, x: int, y: int, types: M3Types) -> int {
+    let first = m3_random_type(types)
+    let n = m3_type_count(types)
+    for k in 0..n {
+        let t = (first + k) % n
+        m3_set(b, x, y, t)
+        if m3_best_run(b, x, y) < 3 {
+            return t
+        }
+    }
+    m3_set(b, x, y, first)
+    return first
+}
+
+// How the holes a collapse leaves are filled.
+pub enum M3Refill {
+    // A uniform draw, free to complete a run -- which is what makes a refill
+    // cascade, and is the historical behaviour every existing caller has.
+    Random,
+    // A gem completing no run through its own cell. Removes the cascades a
+    // refill MANUFACTURES while leaving the ones formed by gems that fell.
+    Quiet,
+}
+
+// Clear the matched cells, compact each column to the bottom, and refill the
+// holes. Mutates the board; returns the fall + spawn geometry (recorded once
+// here, replayed by the game). Spawns consume the seeded RNG at this point,
+// matching the game loop's order.
+pub fn m3_collapse(b: M3Board, matched: [(int, int)], types: M3Types) -> M3Collapse {
+    return m3_collapse_with(b, matched, types, M3Refill::Random)
+}
+
+// TWO passes: every column is compacted before any hole is filled.
+//
+// One pass cannot support `M3Refill::Quiet` at all -- it filled column 0 while
+// columns 1+ still held their pre-collapse contents, so the horizontal check
+// read gems that were about to fall away. Compacting everything first makes the
+// board a refill looks at the board it is actually joining.
+//
+// This is behaviour-preserving for `Random`: compaction draws no randomness, and
+// the refill still runs column 0 upward through column w-1, so the RNG is
+// consumed in exactly the old sequence and `falls`/`spawns` are pushed in
+// exactly the old order.
+pub fn m3_collapse_with(b: M3Board, matched: [(int, int)], types: M3Types, refill: M3Refill) -> M3Collapse {
+    let falls: [M3Fall] = []
+    let spawns: [M3Spawn] = []
+
+    for (mx, my) in matched {
+        m3_set(b, mx, my, M3_EMPTY)
+    }
+
+    // Pass 1: compact. How many holes each column ends up with is recorded,
+    // because the spawn's visual drop height is measured from it.
+    let holes: [int] = []
+    let col = 0
+    while col < b.w {
+        let gems: [int] = []
+        let gem_rows: [int] = []
+        let row = b.h - 1
+        while row >= 0 {
+            let t = m3_at(b, col, row)
+            if t != M3_EMPTY {
+                gems.push(t)
+                gem_rows.push(row)
+            }
+            row = row - 1
+        }
+
+        let dest_row = b.h - 1
+        let g = 0
+        while g < gems.len() {
+            let from_row = gem_rows[g]
+            m3_set(b, col, dest_row, gems[g])
+            if from_row != dest_row {
+                falls.push(M3Fall { col: col, from_row: from_row, to_row: dest_row })
+            }
+            dest_row = dest_row - 1
+            g = g + 1
+        }
+        // Everything above the compacted stack is a hole. Cleared explicitly:
+        // the cells still hold whatever they held before the compaction copied
+        // them downward, and a quiet refill that read those would be checking
+        // against gems that have already fallen.
+        let clear_row = dest_row
+        while clear_row >= 0 {
+            m3_set(b, col, clear_row, M3_EMPTY)
+            clear_row = clear_row - 1
+        }
+        holes.push(b.h - gems.len())
+        col = col + 1
+    }
+
+    // Pass 2: refill, in the same column order as before.
+    col = 0
+    while col < b.w {
+        let new_count = holes[col]
+        // Row 0 is the TOP and gravity compacts toward `b.h - 1`, so the holes
+        // are rows `new_count - 1` down to 0 -- which is where the one-pass form
+        // left `dest_row` after placing the survivors.
+        let dest_row = new_count - 1
+        let spawn_idx = 0
+        while dest_row >= 0 {
+            let new_type = match refill {
+                Random => m3_random_type(types),
+                Quiet => m3_place_quiet(b, col, dest_row, types),
+            }
+            m3_set(b, col, dest_row, new_type)
+            spawns.push(M3Spawn {
+                col: col,
+                row: dest_row,
+                gem_type: new_type,
+                above_rows: new_count - spawn_idx,
+            })
+            spawn_idx = spawn_idx + 1
+            dest_row = dest_row - 1
+        }
+        col = col + 1
+    }
+
+    return M3Collapse { falls: falls, spawns: spawns }
+}
+
+// ─── Gravity (no refill) ─────────────────────────────────────────────────────
+// Clear the current matches and compact each column downward, leaving holes
+// at the top (no new spawns). Returns cells cleared this round. This is the
+// RNG-free cascade proxy the interestingness metric uses.
+fn m3_clear_and_settle(b: M3Board) -> int {
+    let m = m3_find_matches(b)
+    if m.len() == 0 { return 0 }
+    for (mx, my) in m {
+        m3_set(b, mx, my, M3_EMPTY)
+    }
+    let col = 0
+    while col < b.w {
+        let stack: [int] = []
+        let row = b.h - 1
+        while row >= 0 {
+            let t = m3_at(b, col, row)
+            if t != M3_EMPTY { stack.push(t) }
+            row = row - 1
+        }
+        let dest = b.h - 1
+        let k = 0
+        while k < stack.len() {
+            m3_set(b, col, dest, stack[k])
+            dest = dest - 1
+            k = k + 1
+        }
+        while dest >= 0 {
+            m3_set(b, col, dest, M3_EMPTY)
+            dest = dest - 1
+        }
+        col = col + 1
+    }
+    return m.len()
+}

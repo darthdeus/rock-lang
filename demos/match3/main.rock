@@ -1,0 +1,837 @@
+// Match-3 board with animated swaps and cascades.
+
+// -- Constants --
+
+global GRID_W: int = 8
+global GRID_H: int = 8
+global TILE_SIZE: float = 64.0
+global TILE_GAP: float = 4.0
+global NUM_TILE_TYPES: int = 6
+
+// The board's spawn distribution. Uniform, which is what `NUM_TILE_TYPES` alone
+// used to mean; built once because it is read on every collapse.
+fn tile_types() -> M3Types {
+    static t: M3Types = m3_uniform(NUM_TILE_TYPES)
+    return t
+}
+
+// Board origin (top-left corner of the grid in screen space)
+global BOARD_X: float = 100.0
+global BOARD_Y: float = 100.0
+
+// -- Tile Colors --
+// Each tile type maps to a color for rendering
+
+global TILE_COLORS: [Color] = [
+    color(0.9, 0.2, 0.2),   // 0: Red    (damage)
+    color(0.2, 0.4, 0.9),   // 1: Blue   (mana)
+    color(0.2, 0.8, 0.3),   // 2: Green  (heal)
+    color(0.9, 0.8, 0.2),   // 3: Yellow (shield)
+    color(0.7, 0.3, 0.8),   // 4: Purple (special)
+    color(0.9, 0.5, 0.1),   // 5: Orange (gold)
+]
+
+global TILE_LABELS: [string] = ["R", "B", "G", "Y", "P", "O"]
+
+// -- Data Structures --
+
+// The grid is a flat array of ints, -1 means empty
+// Access with: grid[y * GRID_W + x]
+global grid: [int] = []
+
+// Selected tile for swapping (null = nothing selected)
+global selected: IVec2? = null
+
+// Game state
+global score: int = 0
+global moves: int = 0
+
+// -- Animation State --
+// Logical grid updates instantly; these track visual-only offsets.
+
+global SWAP_DURATION: float = 0.3         // seconds for swap slide
+global FALL_GRAVITY: float = 2000.0       // pixels/second^2 fall acceleration
+global FLASH_DURATION: float = 0.35       // seconds matched tiles flash before clearing (initial match)
+global FLASH_DURATION_CASCADE: float = 0.12 // shorter flash for cascade matches (after fall)
+
+// Swap animation: two tiles slide toward each other (0=start, 1=done)
+global anim_swap_a: IVec2 = IVec2 { x: 0, y: 0 }
+global anim_swap_b: IVec2 = IVec2 { x: 0, y: 0 }
+global anim_swap_t: float = 1.0
+// When true: swap had no match; tiles animate forward then back (Bejeweled reject)
+global anim_swap_invalid: bool = false
+
+// Per-cell fall offset: negative = tile is visually above its logical row
+global fall_offsets: [float] = []
+// Per-cell fall velocity (pixels/second, positive = moving downward toward destination)
+global fall_velocities: [float] = []
+// Landing bounce: fraction of landing velocity reflected upward (0=no bounce, 1=full)
+global BOUNCE_FACTOR: float = 0.25
+// Minimum landing velocity (px/s) required to trigger a bounce; below this, just stop
+global BOUNCE_MIN_VELOCITY: float = 80.0
+
+// Flash state: matched tiles blink for FLASH_DURATION before being cleared
+global flash_t: float = 0.0          // countdown timer (0 = not flashing)
+global flash_mask: [bool] = []       // true = this cell is about to be cleared
+
+// Input queue: captures a full swap (two tiles) during animation.
+// Bejeweled-style: queue sel->swap pair during cascade, execute when board settles.
+// Only tiles not currently falling or swapping can be queued.
+// Validated (match check) at execution time since the board changes during cascade.
+global queued_sel: IVec2 = IVec2 { x: -1, y: -1 }    // first tile of queued move
+global queued_swap_b: IVec2 = IVec2 { x: -1, y: -1 } // second tile (-1 = only partial)
+
+// Auto-play
+global auto_play: bool = false
+
+// Persistent-effect demo: a screen-space canvas that accumulates a
+// pulsing sparkle around the board. Exercises the v1 render API's
+// user-owned DrawList + canvas path end-to-end. Lazy-init'd in @init
+// because managed_canvas needs a live GL context; screen_size() is
+// not meaningful at global-init time.
+global SPARKLE_TRAIL: ScreenCanvas? = null
+global sparkle_time: float = 0.0
+
+struct Move {
+    a: IVec2,
+    b: IVec2,
+}
+
+// -- Debug Presets --
+// Named board states for development and demonstration.
+// Load in-game with F1..F9 keys or via load_preset_by_name.
+// Add new presets by appending to PRESETS below; keys auto-assign.
+
+value Preset {
+    name: string,
+    hint: string,
+    grid: string,
+}
+
+global PRESETS: [Preset] = [
+    Preset {
+        name: "cascade",
+        hint: "swap col0-row4 <-> col1-row4 to trigger 2-step cascade (O then R)",
+        grid: "YGBPYGBP/GBPYGBPY/RBRPYGBP/BPBYGBPY/BOBYGBPY/ORRPYGBP/OGYBGYGB/YBGPYBGP",
+    },
+    Preset {
+        name: "many_moves",
+        hint: "dense board with lots of valid swaps - good for auto-play",
+        grid: "RGBYRPGB/BGRPYBGR/GRYPBGRP/RPBGYRPB/PYRGBPYR/YRPBGYRP/BPYRGBPY/GRPYBGRP",
+    },
+]
+
+global active_preset: string = ""
+
+// -- Sidebar Buttons --
+global BTN_X: float = 656.0   // right of board (board ends at x=640)
+global BTN_W: float = 136.0
+global BTN_H: float = 32.0
+global BTN_GAP: float = 8.0
+
+// -- Grid Helpers --
+
+fn grid_get(x: int, y: int) -> int {
+    if x < 0 || x >= GRID_W || y < 0 || y >= GRID_H {
+        return -1
+    }
+    return grid[y * GRID_W + x]
+}
+
+fn grid_set(x: int, y: int, tile: int) {
+    if x >= 0 && x < GRID_W && y >= 0 && y < GRID_H {
+        grid[y * GRID_W + x] = tile
+    }
+}
+
+// A packages/match3-core board view over the live grid. cells is shared by
+// reference, so the core's algorithms read and mutate `grid` in place.
+// Never cache it: fill_board reassigns `grid`, which would orphan a stale view.
+fn grid_board() -> M3Board {
+    return M3Board { w: GRID_W, h: GRID_H, cells: grid }
+}
+
+// Convert grid coordinates to screen position (top-left of tile)
+fn grid_to_screen(gx: int, gy: int) -> Vec2 {
+    let cell = TILE_SIZE + TILE_GAP
+    return v(BOARD_X + gx * cell, BOARD_Y + gy * cell)
+}
+
+// Convert screen position to grid coordinates (-1,-1 if outside)
+fn screen_to_grid(pos: Vec2) -> IVec2 {
+    let cell = TILE_SIZE + TILE_GAP
+    let gx = floor((pos.x - BOARD_X) / cell)
+    let gy = floor((pos.y - BOARD_Y) / cell)
+    if gx < 0 || gx >= GRID_W || gy < 0 || gy >= GRID_H {
+        return IVec2 { x: -1, y: -1 }
+    }
+    // Check we're not in the gap
+    let local_x = (pos.x - BOARD_X) - gx * cell
+    let local_y = (pos.y - BOARD_Y) - gy * cell
+    if local_x > TILE_SIZE || local_y > TILE_SIZE {
+        return IVec2 { x: -1, y: -1 }
+    }
+    return IVec2 { x: int(gx), y: int(gy) }
+}
+
+@pure fn is_adjacent(a: IVec2, b: IVec2) -> bool {
+    let dx = abs(a.x - b.x)
+    let dy = abs(a.y - b.y)
+    return (dx == 1 && dy == 0) || (dx == 0 && dy == 1)
+}
+
+// -- Board Generation --
+
+fn fill_board() {
+    grid = m3_gen_random(GRID_W, GRID_H, tile_types()).cells
+}
+
+// -- Match Detection --
+// Returns a flat array of matched positions as [x1, y1, x2, y2, ...]
+// Each pair is one tile that's part of a match.
+// A tile may appear multiple times if it's in both a row and column match.
+
+// Matched cells as IVec2, for the flash path. The core returns deduped
+// (x,y) pairs -- a cell in both a row and a column run appears once.
+fn find_matches() -> [IVec2] {
+    let matches: [IVec2] = []
+    for (mx, my) in m3_find_matches(grid_board()) {
+        matches.push(IVec2 { x: mx, y: my })
+    }
+    return matches
+}
+
+fn has_matches() -> bool {
+    return m3_has_matches(grid_board())
+}
+
+// -- Swap --
+
+fn swap_tiles(a: IVec2, b: IVec2) {
+    let tmp = grid_get(a.x, a.y)
+    grid_set(a.x, a.y, grid_get(b.x, b.y))
+    grid_set(b.x, b.y, tmp)
+}
+
+fn try_swap(a: IVec2, b: IVec2) -> bool {
+    swap_tiles(a, b)
+    if has_matches() {
+        return true // valid swap, leave it
+    }
+    swap_tiles(a, b) // no match, swap back
+    return false
+}
+
+// -- Full Cascade (non-animated) --
+// Clear matches -> gravity -> refill via the core collapse, repeated until
+// stable. The recorded fall/spawn geometry is unused here; the animated
+// path (commit_flash) is the one that replays it. Returns cells cleared.
+fn resolve_board() -> int {
+    let b = grid_board()
+    let total_cleared = 0
+    let matches = m3_find_matches(b)
+    while matches.len() > 0 {
+        total_cleared = total_cleared + matches.len()
+        let _ = m3_collapse(b, matches, tile_types())
+        matches = m3_find_matches(b)
+    }
+    return total_cleared
+}
+
+// -- Easing --
+// Maps t in [0,1] to an eased value. Controls the feel of swap + fall.
+@pure fn ease(t: float) -> float {
+    // TODO: implement your preferred curve
+    // linear:    return t
+    // ease-out:  return 1.0 - (1.0 - t) * (1.0 - t)
+    // smoothstep: return t * t * (3.0 - 2.0 * t)
+    return t
+}
+
+// -- Animated Gravity + Refill --
+// Replay the core collapse geometry as per-cell visual offsets so tiles
+// slide into place. Surviving tiles fall from_row -> to_row; the new tiles
+// in a column share one start offset (n_new rows above the board) so the
+// refill column drops in as a rigid unit at a single arrival cadence.
+fn apply_collapse_offsets(cx: M3Collapse) {
+    let cell = TILE_SIZE + TILE_GAP
+    for f in cx.falls {
+        let dst = f.to_row * GRID_W + f.col
+        fall_offsets[dst] = float(f.from_row - f.to_row) * cell
+        fall_velocities[dst] = 0.0
+    }
+    let new_per_col: [int] = []
+    for _c in 0..GRID_W { new_per_col.push(0) }
+    for sp in cx.spawns { new_per_col[sp.col] = new_per_col[sp.col] + 1 }
+    for sp in cx.spawns {
+        let idx = sp.row * GRID_W + sp.col
+        fall_offsets[idx] = -float(new_per_col[sp.col]) * cell
+        fall_velocities[idx] = 0.0
+    }
+}
+
+// Lerp between two colors
+@pure fn lerp_color(a: Color, b: Color, t: float) -> Color {
+    return color(
+        a.r + (b.r - a.r) * t,
+        a.g + (b.g - a.g) * t,
+        a.b + (b.b - a.b) * t,
+        1.0,
+    )
+}
+
+// Find matches and start the flash timer. duration controls how long tiles highlight.
+// Use FLASH_DURATION for initial player match, FLASH_DURATION_CASCADE for cascade matches.
+fn find_and_flash(duration: float) {
+    let matches = find_matches()
+    if matches.len() == 0 { return }
+    for pos in matches {
+        flash_mask[pos.y * GRID_W + pos.x] = true
+    }
+    flash_t = duration
+}
+
+// Collapse the flashed tiles through the core (clear -> gravity -> refill),
+// then replay the recorded geometry as fall animations.
+fn commit_flash() {
+    let matched: [(int, int)] = []
+    for i in 0..(GRID_W * GRID_H) {
+        if flash_mask[i] {
+            flash_mask[i] = false
+            matched.push((i % GRID_W, i ./ GRID_W))
+        }
+    }
+    if matched.len() > 0 {
+        score = score + matched.len() * 10
+        let cx = m3_collapse(grid_board(), matched, tile_types())
+        apply_collapse_offsets(cx)
+    }
+}
+
+fn has_fall_anim() -> bool {
+    for i in 0..(GRID_W * GRID_H) {
+        if fall_offsets[i] != 0.0 || fall_velocities[i] != 0.0 { return true }
+    }
+    return false
+}
+
+// True if this tile is currently in motion (falling or being swapped).
+// Queued clicks on animating tiles are rejected -- their position is ambiguous.
+fn is_tile_animating(x: int, y: int) -> bool {
+    if fall_offsets[y * GRID_W + x] != 0.0 || fall_velocities[y * GRID_W + x] != 0.0 { return true }
+    if anim_swap_t < 1.0 {
+        if x == anim_swap_a.x && y == anim_swap_a.y { return true }
+        if x == anim_swap_b.x && y == anim_swap_b.y { return true }
+    }
+    return false
+}
+
+fn advance_fall_offsets() {
+    // Cap dt to 50ms to prevent physics explosion during pauses or frame drops
+    let pdt = min(dt, 0.05)
+    for i in 0..(GRID_W * GRID_H) {
+        if fall_offsets[i] == 0.0 && fall_velocities[i] == 0.0 { continue }
+        fall_velocities[i] = fall_velocities[i] + FALL_GRAVITY * pdt
+        fall_offsets[i] = fall_offsets[i] + fall_velocities[i] * pdt
+        // Landing: tile reached or passed its destination while moving downward
+        if fall_offsets[i] >= 0.0 && fall_velocities[i] > 0.0 {
+            if fall_velocities[i] > BOUNCE_MIN_VELOCITY {
+                // Reflect velocity upward with damping: tile briefly rises above row
+                fall_velocities[i] = -fall_velocities[i] * BOUNCE_FACTOR
+                fall_offsets[i] = 0.0
+            } else {
+                fall_offsets[i] = 0.0
+                fall_velocities[i] = 0.0
+            }
+        }
+    }
+}
+
+// -- Auto-Play --
+
+fn find_first_move() -> Move? {
+    if let mv = m3_first_move(grid_board()) {
+        return Move {
+            a: IVec2 { x: mv.ax, y: mv.ay },
+            b: IVec2 { x: mv.bx, y: mv.by },
+        }
+    }
+    return null
+}
+
+fn btn_y(i: int) -> float {
+    return BOARD_Y + float(i) * (BTN_H + BTN_GAP)
+}
+
+fn is_btn_hit(i: int, mp: Vec2) -> bool {
+    let by = btn_y(i)
+    return mp.x >= BTN_X && mp.x < BTN_X + BTN_W
+        && mp.y >= by && mp.y < by + BTN_H
+}
+
+fn handle_ui_buttons() {
+    if !is_mouse_pressed(1) { return }
+    let mp = mouse_screen()
+
+    // Reset button (index 0)
+    if is_btn_hit(0, mp) {
+        fill_board()
+        score = 0
+        moves = 0
+        selected = null
+        anim_swap_t = 1.0
+        auto_play = false
+        flash_t = 0.0
+        queued_sel = IVec2 { x: -1, y: -1 }
+        queued_swap_b = IVec2 { x: -1, y: -1 }
+        for i in 0..(GRID_W * GRID_H) {
+            fall_offsets[i] = 0.0
+            fall_velocities[i] = 0.0
+            flash_mask[i] = false
+        }
+        active_preset = ""
+        return
+    }
+
+    // Preset buttons (indices 1..N)
+    for i in 0..PRESETS.len() {
+        if is_btn_hit(i + 1, mp) {
+            load_preset_by_index(i)
+            return
+        }
+    }
+}
+
+fn draw_sidebar_buttons() {
+    let mp = mouse_screen()
+
+    // Reset button
+    let reset_hot = is_btn_hit(0, mp)
+    let reset_bg = if reset_hot { color(0.55, 0.3, 0.3) } else { color(0.3, 0.18, 0.18) }
+    fill_rect(v(BTN_X, btn_y(0)), v(BTN_W, BTN_H), reset_bg)
+    screen.text("Reset", v(BTN_X + 8.0, btn_y(0) + 7.0), 20.0, WHITE)
+
+    // Separator
+    screen.text("Presets", v(BTN_X + 8.0, btn_y(1) - 18.0), 14.0, color(0.5, 0.5, 0.6))
+
+    // Preset buttons
+    for i in 0..PRESETS.len() {
+        let idx = i + 1
+        let by = btn_y(idx)
+        let is_active = PRESETS[i].name == active_preset
+        let hot = is_btn_hit(idx, mp)
+        let bg = if is_active {
+            color(0.2, 0.5, 0.25)
+        } else if hot {
+            color(0.35, 0.35, 0.55)
+        } else {
+            color(0.18, 0.18, 0.3)
+        }
+        fill_rect(v(BTN_X, by), v(BTN_W, BTN_H), bg)
+        screen.text(PRESETS[i].name, v(BTN_X + 8.0, by + 7.0), 18.0, WHITE)
+    }
+}
+
+fn load_preset_by_index(i: int) {
+    if i < 0 || i >= PRESETS.len() { return }
+    let p = PRESETS[i]
+    if parse_compact_grid(p.grid) {
+        score = 0
+        moves = 0
+        selected = null
+        anim_swap_t = 1.0
+        auto_play = false
+        flash_t = 0.0
+        queued_sel = IVec2 { x: -1, y: -1 }
+        queued_swap_b = IVec2 { x: -1, y: -1 }
+        for j in 0..(GRID_W * GRID_H) {
+            fall_offsets[j] = 0.0
+            fall_velocities[j] = 0.0
+            flash_mask[j] = false
+        }
+        active_preset = p.name
+    }
+}
+
+// Start a swap animation. Always plays the animation; invalid swaps animate back.
+fn start_swap(a: IVec2, b: IVec2) -> bool {
+    let valid = try_swap(a, b)
+    anim_swap_a = a
+    anim_swap_b = b
+    anim_swap_t = 0.0
+    anim_swap_invalid = !valid
+    if valid { moves = moves + 1 }
+    return valid
+}
+
+// -- Game Loop --
+
+fn main() {
+    stone_run_game(GameConfig {
+        title: "Match 3",
+        width: 800,
+        height: 700,
+        vsync: 1,
+    })
+}
+
+// -- Test hooks (sims call these directly with typed args) --
+
+// Load a named debug preset board (resets score/moves). Returns false
+// if no preset matches. Sims use this; the in-game F1..F9 / env-var
+// paths go through load_preset_by_index directly.
+fn load_preset_by_name(name: string) -> bool {
+    for i in 0..PRESETS.len() {
+        if PRESETS[i].name == name {
+            load_preset_by_index(i)
+            return true
+        }
+    }
+    return false
+}
+
+// Swap two adjacent tiles, resolve the board, and bump score/moves.
+// Returns false if the swap is invalid (non-adjacent or makes no match).
+fn execute_move(a: IVec2, b: IVec2) -> bool {
+    if !is_adjacent(a, b) { return false }
+    if !try_swap(a, b) { return false }
+    let cleared = resolve_board()
+    score = score + cleared * 10
+    moves = moves + 1
+    return true
+}
+
+// A preset's `grid` is rows of TILE_LABELS joined by '/'; an unknown label is
+// tile 0. Writes `grid` in place, so live board views keep seeing it.
+fn parse_compact_grid(s: string) -> bool {
+    let cells: [int] = []
+    for i in 0..s.len() {
+        let label = s.substring(i, i + 1)
+        if label == "/" { continue }
+        let tile = 0
+        for t in 0..TILE_LABELS.len() {
+            if TILE_LABELS[t] == label { tile = t }
+        }
+        cells.push(tile)
+    }
+    if cells.len() != GRID_W * GRID_H { return false }
+    for i in 0..cells.len() { grid[i] = cells[i] }
+    return true
+}
+
+@init
+fn init_game() {
+    fill_board()
+    print("=== Match-3 initialized ===")
+
+    // Allocate the persistent sparkle canvas. Starts fully transparent.
+    if screen_canvas_supported() {
+        SPARKLE_TRAIL = screen_canvas_new("match3_sparkle")
+    }
+
+    // Initialize per-cell animation arrays
+    fall_offsets = []
+    fall_velocities = []
+    flash_mask = []
+    for _i in 0..(GRID_W * GRID_H) {
+        fall_offsets.push(0.0)
+        fall_velocities.push(0.0)
+        flash_mask.push(false)
+    }
+
+    // Load a preset board if MATCH3_PRESET env var is set (for reproducible testing)
+    if let preset_env = env_var("MATCH3_PRESET") {
+        for i in 0..PRESETS.len() {
+            if PRESETS[i].name == preset_env {
+                load_preset_by_index(i)
+            }
+        }
+    }
+}
+
+@update
+fn update_game() {
+    // Sidebar buttons respond even during animations
+    handle_ui_buttons()
+
+    // Capture clicks during animation into the swap queue (Bejeweled-style).
+    // Only tiles not currently in motion can be queued.
+    if is_mouse_pressed(1) && !auto_play {
+        let mpos = mouse_screen()
+        let gp = screen_to_grid(mpos)
+        let is_animating = anim_swap_t < 1.0 || flash_t > 0.0 || has_fall_anim()
+        if gp.x >= 0 && gp.y >= 0 && is_animating && !is_tile_animating(gp.x, gp.y) {
+            if queued_sel.x < 0 {
+                // No queued selection yet: start one
+                queued_sel = gp
+                queued_swap_b = IVec2 { x: -1, y: -1 }
+            } else if is_adjacent(queued_sel, gp) {
+                // Adjacent to queued selection: complete the swap pair
+                queued_swap_b = gp
+            } else {
+                // Not adjacent: replace the first selection, clear swap
+                queued_sel = gp
+                queued_swap_b = IVec2 { x: -1, y: -1 }
+            }
+        }
+    }
+
+    // Swap animation -> flash (valid) or reject bounce-back (invalid)
+    if anim_swap_t < 1.0 {
+        anim_swap_t = anim_swap_t + dt / SWAP_DURATION
+        if anim_swap_t >= 1.0 {
+            anim_swap_t = 1.0
+            if anim_swap_invalid {
+                anim_swap_invalid = false  // animation done, return to idle
+            } else {
+                find_and_flash(FLASH_DURATION)
+            }
+        }
+        return
+    }
+
+    // Flash phase: matched tiles highlighted, waiting to be cleared
+    if flash_t > 0.0 {
+        flash_t = flash_t - dt
+        if flash_t <= 0.0 {
+            flash_t = 0.0
+            commit_flash()
+        }
+        return
+    }
+
+    // Fall animation -> cascade check via flash (short duration: cascade feels snappy)
+    if has_fall_anim() {
+        advance_fall_offsets()
+        if !has_fall_anim() {
+            find_and_flash(FLASH_DURATION_CASCADE)
+        }
+        return
+    }
+
+    // Execute queued swap if we have a complete pair, else surface partial selection.
+    // Validated at execution time: board may have changed during the cascade.
+    if queued_swap_b.x >= 0 {
+        let a = queued_sel
+        let b = queued_swap_b
+        queued_sel = IVec2 { x: -1, y: -1 }
+        queued_swap_b = IVec2 { x: -1, y: -1 }
+        selected = null
+        if start_swap(a, b) { return }
+        // No match created (board changed during cascade): silently discard
+    } else if queued_sel.x >= 0 {
+        // Partial queue (first tile only): surface it as the active selection
+        selected = queued_sel
+        queued_sel = IVec2 { x: -1, y: -1 }
+    }
+
+    // Toggle auto-play with A
+    if is_key_pressed("a") {
+        auto_play = !auto_play
+        selected = null
+        queued_sel = IVec2 { x: -1, y: -1 }
+        queued_swap_b = IVec2 { x: -1, y: -1 }
+    }
+
+    // R = reset to fresh random board
+    if is_key_pressed("r") {
+        fill_board()
+        score = 0
+        moves = 0
+        selected = null
+        anim_swap_t = 1.0
+        auto_play = false
+        flash_t = 0.0
+        queued_sel = IVec2 { x: -1, y: -1 }
+        queued_swap_b = IVec2 { x: -1, y: -1 }
+        for i in 0..(GRID_W * GRID_H) {
+            fall_offsets[i] = 0.0
+            fall_velocities[i] = 0.0
+            flash_mask[i] = false
+        }
+        active_preset = ""
+    }
+
+    // Auto-play: immediately start next move when idle
+    if auto_play {
+        let m = find_first_move()
+        if m != null {
+            let mv = m
+            let _ = start_swap(mv.a, mv.b)
+        } else {
+            auto_play = false
+        }
+        return
+    }
+
+    // Manual input (idle, no queue pending)
+    if is_mouse_pressed(1) {
+        let mpos = mouse_screen()
+        let gpos = screen_to_grid(mpos)
+        if gpos.x >= 0 && gpos.y >= 0 {
+            if selected != null {
+                let sel = selected
+                if sel.x == gpos.x && sel.y == gpos.y {
+                    selected = null  // click same tile to deselect
+                } else if is_adjacent(sel, gpos) {
+                    start_swap(sel, gpos)
+                    selected = null
+                } else {
+                    selected = gpos
+                }
+            } else {
+                selected = gpos
+            }
+        }
+    }
+}
+
+// Helper: draw a filled rect from top-left position (screen space)
+fn fill_rect(pos: Vec2, size: Vec2, c: Color) {
+    stone_screen_rect(pos, size, c)
+}
+
+@late_draw
+fn draw_game() {
+    // Draw board background
+    let cell = TILE_SIZE + TILE_GAP
+    let board_w = GRID_W * cell - TILE_GAP
+    let board_h = GRID_H * cell - TILE_GAP
+    fill_rect(
+        v(BOARD_X - 8, BOARD_Y - 8),
+        v(board_w + 16, board_h + 16),
+        color(0.15, 0.15, 0.2),
+    )
+
+    // Draw tiles
+    let pa = grid_to_screen(anim_swap_a.x, anim_swap_a.y)
+    let pb = grid_to_screen(anim_swap_b.x, anim_swap_b.y)
+    let t = ease(anim_swap_t)
+    for y in 0..GRID_H {
+        for x in 0..GRID_W {
+            let tile = grid_get(x, y)
+            if tile >= 0 && tile < NUM_TILE_TYPES {
+                let pos = grid_to_screen(x, y)
+
+                // Swap animation: slide tiles toward their destinations
+                if anim_swap_t < 1.0 {
+                    if anim_swap_invalid {
+                        // Probe: tiles slide toward each other then bounce back
+                        // Triangle wave: peaks at t=0.5, returns to 0 at t=1
+                        let probe = if anim_swap_t < 0.5 { anim_swap_t * 2.0 } else { (1.0 - anim_swap_t) * 2.0 }
+                        if x == anim_swap_b.x && y == anim_swap_b.y {
+                            pos = pb + (pa - pb) * probe
+                        } else if x == anim_swap_a.x && y == anim_swap_a.y {
+                            pos = pa + (pb - pa) * probe
+                        }
+                    } else {
+                        if x == anim_swap_b.x && y == anim_swap_b.y {
+                            pos = pa + (pb - pa) * t
+                        } else if x == anim_swap_a.x && y == anim_swap_a.y {
+                            pos = pb + (pa - pb) * t
+                        }
+                    }
+                }
+
+                // Fall animation: offset tiles above their logical row
+                pos = v(pos.x, pos.y + fall_offsets[y * GRID_W + x])
+
+                let c = TILE_COLORS[tile]
+                let is_flashing = flash_mask[y * GRID_W + x]
+
+                // Highlight selected tile (white = active selection)
+                if selected != null {
+                    let sel = selected
+                    if sel.x == x && sel.y == y {
+                        fill_rect(pos - v(3, 3), v(TILE_SIZE + 6, TILE_SIZE + 6), WHITE)
+                    }
+                }
+
+                // Queued swap: amber border on first tile, brighter on second
+                if queued_sel.x == x && queued_sel.y == y {
+                    fill_rect(pos - v(3, 3), v(TILE_SIZE + 6, TILE_SIZE + 6), color(1.0, 0.65, 0.0))
+                }
+                if queued_swap_b.x == x && queued_swap_b.y == y {
+                    fill_rect(pos - v(3, 3), v(TILE_SIZE + 6, TILE_SIZE + 6), color(1.0, 0.85, 0.2))
+                }
+
+                // Flash matched tiles: bright border + pulsing bright tile color
+                if is_flashing {
+                    let phase = flash_t / FLASH_DURATION
+                    // pulse 3 times over the flash duration
+                    let blink = (phase * 6.0) - floor(phase * 6.0)
+                    let bright = if blink < 0.5 { 1.0 } else { 0.0 }
+                    fill_rect(pos - v(4, 4), v(TILE_SIZE + 8, TILE_SIZE + 8), color(1.0, 0.95, 0.1))
+                    c = lerp_color(c, WHITE, 0.3 + bright * 0.5)
+                }
+
+                let label = TILE_LABELS[tile]
+                fill_rect(pos, v(TILE_SIZE, TILE_SIZE), c)
+                screen.text(label, pos + v(20, 16), 32.0, WHITE)
+            }
+        }
+    }
+
+    // Draw title and stats
+    screen.text("Match 3", v(BOARD_X, 30), 48.0, WHITE)
+    let auto_label = if auto_play { "  [AUTO]" } else { "" }
+    screen.text("Score: {score}   Moves: {moves}{auto_label}", v(BOARD_X + 220, 42), 28.0, WHITE)
+
+    // FPS counter (top-left)
+    if dt > 0.0 {
+        let fps = int(1.0 / dt)
+        screen.text("FPS: {fps}", v(10, 18), 16.0, color(0.5, 0.5, 0.5))
+    }
+
+    // Hint below board: show active preset hint or generic controls
+    let board_bottom = BOARD_Y + float(GRID_H) * (TILE_SIZE + TILE_GAP) - TILE_GAP + 10.0
+    if active_preset != "" {
+        let hint = ""
+        for p in PRESETS {
+            if p.name == active_preset { hint = p.hint }
+        }
+        screen.text(hint, v(BOARD_X, board_bottom + 4.0), 15.0, color(0.6, 0.6, 0.7))
+    } else {
+        screen.text("[A]=auto  [R]=reset", v(BOARD_X, board_bottom + 4.0), 15.0, color(0.4, 0.4, 0.5))
+    }
+
+    // Sidebar buttons (right of board)
+    draw_sidebar_buttons()
+
+    // Sparkle trail demo - exercises the ScreenCanvas primitive. A
+    // dot orbits the board and leaves a persistent trail on the
+    // canvas. Press C to wipe the canvas.
+    if screen_canvas_supported() {
+        if SPARKLE_TRAIL != null {
+            let sc = SPARKLE_TRAIL
+
+            sparkle_time = sparkle_time + dt
+
+            let board_center_x = BOARD_X + float(GRID_W) * (TILE_SIZE + TILE_GAP) / 2.0
+            let board_center_y = BOARD_Y + float(GRID_H) * (TILE_SIZE + TILE_GAP) / 2.0
+            let orbit_r = 290.0
+
+            // Stamp the current orbit position each frame. Color shifts
+            // around the hue wheel so the accumulated arc shows color
+            // evolution over time.
+            let ang = sparkle_time * 1.2
+            let px = board_center_x + cos(ang) * orbit_r
+            let py = board_center_y + sin(ang) * orbit_r
+            let r = 0.6 + sin(sparkle_time * 0.7) * 0.4
+            let g = 0.6 + sin(sparkle_time * 0.9 + 2.0) * 0.4
+            let b = 0.6 + sin(sparkle_time * 1.1 + 4.0) * 0.4
+
+            sc.stamp_circle(v(px, py), 6.0, color(r, g, b, 0.6))
+
+            // Keybind: C clears the canvas.
+            if is_key_pressed("c") {
+                screen_canvas_clear(sc)
+            }
+
+            // Flush stamps INTO the canvas, then composite the canvas
+            // onto the frame.
+            screen_canvas_flush(sc)
+            screen_canvas_present(sc)
+        }
+    }
+}

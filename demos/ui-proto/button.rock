@@ -1,0 +1,29 @@
+// Button widget - draws a clickable rect with hover/press states.
+// Returns true on the frame it's clicked.
+
+fn button(r: UiRect, label: string, font_size: float) -> bool {
+    let mouse = mouse_screen()
+    let hovered = r.contains(mouse)
+    let held = is_mouse_down(MOUSE_BUTTON_LEFT)
+    let clicked = is_mouse_pressed(MOUSE_BUTTON_LEFT) && hovered
+
+    let bg = if hovered && held {
+        Color { r: 0.4, g: 0.4, b: 0.65, a: 1.0 }
+    } else if hovered {
+        Color { r: 0.28, g: 0.28, b: 0.48, a: 1.0 }
+    } else {
+        Color { r: 0.15, g: 0.15, b: 0.25, a: 1.0 }
+    }
+
+    let outline = if hovered {
+        Color { r: 0.8, g: 0.8, b: 1.0, a: 1.0 }
+    } else {
+        Color { r: 0.4, g: 0.4, b: 0.6, a: 1.0 }
+    }
+
+    r.fill(bg)
+    r.outline(outline)
+    r.text(label, font_size, WHITE)
+
+    return clicked
+}
