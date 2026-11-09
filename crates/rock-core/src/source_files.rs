@@ -138,18 +138,12 @@ impl SourceFiles {
         canonical_root: &Path,
         tagged: bool,
     ) -> Result<bool, CompilerError> {
-        let canonical_path = match Path::new(path).canonicalize() {
-            Ok(canonical) => canonical,
-            Err(_) if !tagged => {
-                // Untagged stdlib and loose sources may use non-filesystem ids.
-                return Ok(false);
-            }
-            Err(error) => {
-                return Err(CompilerError::new_no_location(format!(
-                    "cannot classify source `{path}` against root `{}`: cannot canonicalize source: {error}",
-                    root.display()
-                )));
-            }
+        let canonical_path = match Self::canonical_under(Path::new(path), canonical_root) {
+            Some(canonical) => canonical,
+            None => match Self::canonicalize_source(path, root, tagged)? {
+                Some(canonical) => canonical,
+                None => return Ok(false),
+            },
         };
         let relative = match canonical_path.strip_prefix(canonical_root) {
             Ok(relative) => relative,
@@ -165,6 +159,47 @@ impl SourceFiles {
             }
         };
         Ok(Self::is_test_only_relative_path(relative))
+    }
+
+    /// `path` itself when it is already canonical below `canonical_root`:
+    /// the root's own spelling, then plain names with no symlink among them.
+    /// Discovery hands over canonical paths, so this answers for nearly every
+    /// source with one `lstat` per component below the root instead of a
+    /// `realpath` walk from `/`.
+    fn canonical_under(path: &Path, canonical_root: &Path) -> Option<PathBuf> {
+        use std::path::Component;
+        let relative = path.strip_prefix(canonical_root).ok()?;
+        let mut probe = canonical_root.to_path_buf();
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                return None;
+            };
+            probe.push(name);
+            if std::fs::symlink_metadata(&probe).ok()?.is_symlink() {
+                return None;
+            }
+        }
+        Some(probe)
+    }
+
+    /// The filesystem's canonical spelling of `path`, or `None` for an
+    /// untagged source the filesystem does not know.
+    fn canonicalize_source(
+        path: &str,
+        root: &Path,
+        tagged: bool,
+    ) -> Result<Option<PathBuf>, CompilerError> {
+        match Path::new(path).canonicalize() {
+            Ok(canonical) => Ok(Some(canonical)),
+            Err(_) if !tagged => {
+                // Untagged stdlib and loose sources may use non-filesystem ids.
+                Ok(None)
+            }
+            Err(error) => Err(CompilerError::new_no_location(format!(
+                "cannot classify source `{path}` against root `{}`: cannot canonicalize source: {error}",
+                root.display()
+            ))),
+        }
     }
 
     /// The check shared by production discovery and watch-event filtering,
@@ -277,6 +312,49 @@ mod tests {
         assert_eq!(paths.as_slice(), std::slice::from_ref(&main_path));
         assert!(!SourceFiles::is_test_only_path(&main_path, &project_root).unwrap());
         assert!(SourceFiles::is_test_only_path(&broken_path, &project_root).unwrap());
+        std::fs::remove_dir_all(temp_root).unwrap();
+    }
+
+    /// A path spelled below the root is classified by where it really is: a
+    /// symlink below the root into a `tests` directory is test-only, and one
+    /// out of a `tests` directory into production is not.
+    #[cfg(unix)]
+    #[test]
+    fn production_classification_follows_symlinks_below_the_root() {
+        let temp_root = std::env::temp_dir().join(format!(
+            "rock_core_source_files_links_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp_root);
+        let project_root = temp_root.join("project");
+        std::fs::create_dir_all(project_root.join("tests")).unwrap();
+        std::fs::create_dir_all(project_root.join("src")).unwrap();
+        std::fs::write(
+            project_root.join("tests/helper.rock"),
+            "fn helper() {}
+",
+        )
+        .unwrap();
+        std::fs::write(
+            project_root.join("src/main.rock"),
+            "fn main() {}
+",
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("tests", project_root.join("linked")).unwrap();
+        std::os::unix::fs::symlink("../src", project_root.join("tests/production")).unwrap();
+        let project_root = project_root.canonicalize().unwrap();
+        let through_link = project_root.join("linked/helper.rock");
+        let out_of_tests = project_root.join("tests/production/main.rock");
+        let plain = project_root.join("src/main.rock");
+
+        assert!(
+            SourceFiles::is_test_only_path(through_link.to_str().unwrap(), &project_root).unwrap()
+        );
+        assert!(
+            !SourceFiles::is_test_only_path(out_of_tests.to_str().unwrap(), &project_root).unwrap()
+        );
+        assert!(!SourceFiles::is_test_only_path(plain.to_str().unwrap(), &project_root).unwrap());
         std::fs::remove_dir_all(temp_root).unwrap();
     }
 }
