@@ -1,43 +1,6 @@
 //! `const` globals lower to GLSL as their folded literal; mutable `global`s
 //! stay rejected (they are runtime state with no GLSL equivalent).
-
-use std::sync::LazyLock;
-use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn emit(src: &str, roots: &[&str]) -> Result<String, String> {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let errs = skull_mir::verdict::body_errors(&ws);
-    if !errs.is_empty() {
-        return Err(errs
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
-            .join("; "));
-    }
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    let roots: Vec<String> = roots.iter().map(|s| s.to_string()).collect();
-    let root_refs = roots
-        .iter()
-        .map(|root| skull_codegen_glsl::resolve_root(&ws, mid, root))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.message)?;
-    let session =
-        skull_codegen_glsl::shader_library_session(&ws, root_refs).map_err(|e| e.message)?;
-    skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &session.view)
-        .map_err(|e| e.message)
-}
+use crate::support::emit_library as emit;
 
 #[test]
 fn const_float_inlines_as_literal() {

@@ -12,33 +12,9 @@
 //! that only asserted "the check rejects" would pass against two different
 //! diagnostics.
 
+use crate::support::workspace;
 use skull_codegen_glsl::GlslProfile;
 use skull_mir::mir::FuncRef;
-use std::sync::LazyLock;
-use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn workspace(
-    src: &str,
-) -> (
-    bone_core::workspace::Workspace,
-    bone_core::prelude::ModuleId,
-) {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    (ws, mid)
-}
 
 fn fref(
     ws: &bone_core::workspace::Workspace,

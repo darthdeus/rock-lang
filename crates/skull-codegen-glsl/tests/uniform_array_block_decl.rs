@@ -12,61 +12,21 @@
 //! declaration drift into disagreeing about what an array holds, and "one layout
 //! authority" would be false the moment the second one exists.
 
+use crate::support::{pipeline_emission, workspace};
 use skull_codegen_glsl::{GlslProfile, ShaderEmission};
 use skull_mir::gpu_layout::UniformArrayBlockPlan;
-use std::sync::LazyLock;
-use ustr::Ustr;
 
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn workspace(
-    src: &str,
-) -> (
-    bone_core::workspace::Workspace,
-    bone_core::prelude::ModuleId,
-) {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    (ws, mid)
-}
-
+/// The one block at `binding`, or a panic naming what was actually there.
 fn emit(src: &str, vert: &str, frag: &str) -> ShaderEmission {
-    let (ws, mid) = workspace(src);
-    skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws,
-        mid,
-        vert,
-        frag,
-        GlslProfile::Core330,
-    )
-    .expect("emit")
+    pipeline_emission(src, vert, frag).expect("emit")
 }
 
 fn emit_err(src: &str, vert: &str, frag: &str) -> String {
-    let (ws, mid) = workspace(src);
-    skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws,
-        mid,
-        vert,
-        frag,
-        GlslProfile::Core330,
-    )
-    .map(|_| ())
-    .expect_err("expected a rejection")
-    .message
+    pipeline_emission(src, vert, frag)
+        .map(|_| ())
+        .expect_err("expected a rejection")
 }
 
-/// The one block at `binding`, or a panic naming what was actually there.
 fn block_at(e: &ShaderEmission, binding: u32) -> &UniformArrayBlockPlan {
     let found: Vec<u32> = e.abi.uniform_array_blocks.iter().map(|(b, _)| *b).collect();
     e.abi

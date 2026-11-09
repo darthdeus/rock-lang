@@ -17,34 +17,11 @@
 //! no samplers and no attributes would make "the two targets disagree" vacuous,
 //! so each arm states the population it disagreed over.
 
+use crate::support::{entry_emission, pipeline_emission, workspace};
 use skull_codegen_glsl::{GlslProfile, ShaderAbiPlan};
 use skull_mir::gpu_layout::WireKind;
 use skull_mir::shader_ir::{ShaderInterfacePlan, ShaderStage as IrStage, UniformRole};
-use std::sync::LazyLock;
 use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn workspace(
-    src: &str,
-) -> (
-    bone_core::workspace::Workspace,
-    bone_core::prelude::ModuleId,
-) {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    (ws, mid)
-}
 
 /// A pipeline with all four interface populations: per-vertex and per-instance
 /// attributes, a uniform group per stage plus an engine group, and a texture
@@ -312,15 +289,7 @@ fn a_second_target_derives_a_different_physical_layout_from_the_same_interface()
 /// arrive as `F32x2`/`F32x4`/`Float`, which is the property under test.
 #[test]
 fn the_interface_plan_names_nothing_physical() {
-    let (ws, mid) = workspace(PIPELINE);
-    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws,
-        mid,
-        "hv",
-        "hf",
-        GlslProfile::Core330,
-    )
-    .expect("the fixture must emit");
+    let em = pipeline_emission(PIPELINE, "hv", "hf").expect("the fixture must emit");
     let rendered = format!("{:?}", em.interface);
 
     // The denominator: the fixture's interface is populated, so the absences
@@ -443,14 +412,7 @@ fn bare_frag(uTexture: Sampler2D, tc: Vec2) -> Vec4 {
 }
 fn main() { let k = rock_shader(bare_frag) }
 "#;
-    let (ws, mid) = workspace(src);
-    let em = skull_codegen_glsl::emit_shader_entry_with_dependencies(
-        &ws,
-        mid,
-        "bare_frag",
-        GlslProfile::Core330,
-    )
-    .expect("a bare sampler entry must emit");
+    let em = entry_emission(src, "bare_frag").expect("a bare sampler entry must emit");
 
     // It IS in the interface, with its kind.
     assert_eq!(
@@ -494,14 +456,7 @@ fn grouped_frag(@textures t: Tex, tc: Vec2) -> Vec4 {
 }
 fn main() { let k = rock_shader(grouped_frag) }
 "#;
-    let (ws2, mid2) = workspace(grouped);
-    let em2 = skull_codegen_glsl::emit_shader_entry_with_dependencies(
-        &ws2,
-        mid2,
-        "grouped_frag",
-        GlslProfile::Core330,
-    )
-    .expect("a grouped sampler entry must emit");
+    let em2 = entry_emission(grouped, "grouped_frag").expect("a grouped sampler entry must emit");
     assert_eq!(em2.abi.texture_units, vec![Ustr::from("atlas")]);
     assert!(em2.interface.bare_samplers.is_empty());
 }
@@ -512,15 +467,7 @@ fn main() { let k = rock_shader(grouped_frag) }
 /// second walk -- otherwise the two could disagree and only the driver notices.
 #[test]
 fn a_second_target_numbers_attribute_locations_differently() {
-    let (ws, mid) = workspace(PIPELINE);
-    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws,
-        mid,
-        "hv",
-        "hf",
-        GlslProfile::Core330,
-    )
-    .expect("the fixture must emit");
+    let em = pipeline_emission(PIPELINE, "hv", "hf").expect("the fixture must emit");
 
     // DENOMINATOR: four attributes across two input structs.
     let n = em
@@ -624,15 +571,8 @@ fn tf(vary: Vary, @textures t: Tex) -> Vec4 {
 
 fn main() { let k = rock_shader(tv, tf) }
 "#;
-    let (ws, mid) = workspace(src);
-    let em = skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws,
-        mid,
-        "tv",
-        "tf",
-        GlslProfile::Core330,
-    )
-    .expect("a pipeline sampling in both stages must emit");
+    let em =
+        pipeline_emission(src, "tv", "tf").expect("a pipeline sampling in both stages must emit");
 
     // The DENOMINATOR: one group, one sampler, used by two stages.
     assert_eq!(em.abi.texture_units, vec![Ustr::from("height")]);

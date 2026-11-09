@@ -1,17 +1,11 @@
 //! Golden tests: Rock snippet -> expected GLSL text, over the real stdlib.
 
+use crate::support::{
+    emit_checked_entry as emit_entry, emit_library as emit, emit_library_with as emit_with,
+    workspace,
+};
 use std::sync::LazyLock;
 use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
 
 /// The stdlib with `Vec2` marked `nobox`. `nobox` is a whole-language guarantee,
 /// and a tier-0 `vecN` is the type anyone would mark first, so the GLSL surface
@@ -27,39 +21,6 @@ static STDLIB_NOBOX_VEC2: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
         })
         .collect()
 });
-
-/// Emit GLSL for `roots` from `src` (the `<test>` module).
-fn emit(src: &str, roots: &[&str]) -> Result<String, String> {
-    emit_with(&STDLIB, src, roots)
-}
-
-fn emit_with(stdlib: &[skull_parser::Ast], src: &str, roots: &[&str]) -> Result<String, String> {
-    let mut modules = stdlib.to_vec();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    // `semantic_pass` returns Ok with per-body errors recorded in `ws.errors`;
-    // the CLI reports those and refuses to emit. Without this check the goldens
-    // pin emission for sources the real pipeline rejects (backlog #67).
-    let errs = skull_mir::verdict::body_errors(&ws);
-    if !errs.is_empty() {
-        return Err(errs
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
-            .join("; "));
-    }
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    let roots: Vec<String> = roots.iter().map(|s| s.to_string()).collect();
-    let root_refs = roots
-        .iter()
-        .map(|root| skull_codegen_glsl::resolve_root(&ws, mid, root))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.message)?;
-    let session =
-        skull_codegen_glsl::shader_library_session(&ws, root_refs).map_err(|e| e.message)?;
-    skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &session.view)
-        .map_err(|e| e.message)
-}
 
 #[test]
 fn function_library_preserves_no_version_contract() {
@@ -80,10 +41,7 @@ fn function_library_requires_concrete_body_plans() {
         @pure fn identity<T>(value: T) -> T { return value }
         @pure fn root(value: float) -> float { return identity(value) }
     "#;
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let (ws, mid) = workspace(src);
     let root = skull_codegen_glsl::resolve_root(&ws, mid, "root").expect("root");
     let session = skull_codegen_glsl::shader_library_session(&ws, vec![root]).expect("session");
     let mut poisoned = session.view.clone();
@@ -198,8 +156,7 @@ fn call_swizzle_texture_evaluates_once() {
                 return {result}
             }}"
         );
-        let profile = skull_codegen_glsl::GlslProfile::Core330;
-        let glsl = emit_entry_profile(&src, "sampled", profile).expect("emit");
+        let glsl = emit_entry(&src, "sampled").expect("emit");
         assert_eq!(
             glsl.matches("texture(scene, tc)").count(),
             1,
@@ -219,8 +176,7 @@ fn fragment_call_swizzles_evaluate_each_call_once() {
             let warp = shade(uv).yx
             return v(base * tint, offset.x + offset.y + warp.x * warp.y)
         }";
-    let profile = skull_codegen_glsl::GlslProfile::Core330;
-    let glsl = emit_entry_profile(src, "sampled", profile).expect("emit");
+    let glsl = emit_entry(src, "sampled").expect("emit");
     for call in [
         "texture(scene, tc)",
         "texture(scene, uv)",
@@ -1106,33 +1062,6 @@ fn let_float_annotation_cell_typing() {
 
 // --- A1: fragment-entry compilation -------------------
 
-fn emit_entry(src: &str, root: &str) -> Result<String, String> {
-    emit_entry_profile(src, root, skull_codegen_glsl::GlslProfile::Core330)
-}
-
-fn emit_entry_profile(
-    src: &str,
-    root: &str,
-    profile: skull_codegen_glsl::GlslProfile,
-) -> Result<String, String> {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    // `semantic_pass` returns Ok with per-body errors recorded in `ws.errors`;
-    // the CLI reports those and refuses to emit. Without this check the goldens
-    // pin emission for sources the real pipeline rejects (backlog #67).
-    let errs = skull_mir::verdict::body_errors(&ws);
-    if !errs.is_empty() {
-        return Err(errs
-            .iter()
-            .map(|e| e.message.clone())
-            .collect::<Vec<_>>()
-            .join("; "));
-    }
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    skull_codegen_glsl::emit_shader_entry(&ws, mid, root, profile).map_err(|e| e.message)
-}
-
 /// The A1 scaffold: generated #version + PIXEL block (in/out, the `@uniform`
 /// group's std140 block + sampler declarations, helpers, entry fn with dropped
 /// uniform/sampler params, main) + the default fullscreen VERTEX block.
@@ -1353,16 +1282,9 @@ fn log2_float_on_desktop_profile() {
             return v(log2(t.r + 1.0), log2(t.g + 1.0), log2(t.b + 1.0), t.a)
         }
     "#;
-    let profile = skull_codegen_glsl::GlslProfile::Core330;
-    let glsl = emit_entry_profile(src, "logfrag", profile).expect("emit");
-    assert!(
-        glsl.contains("log2("),
-        "{profile:?} must use the log2 builtin:\n{glsl}"
-    );
-    assert!(
-        !glsl.contains("null"),
-        "{profile:?} must not mention null:\n{glsl}"
-    );
+    let glsl = emit_entry(src, "logfrag").expect("emit");
+    assert!(glsl.contains("log2("), "must use the log2 builtin:\n{glsl}");
+    assert!(!glsl.contains("null"), "must not mention null:\n{glsl}");
 }
 
 /// `log2` over vector data on the desktop profile. A direct `log2(vec)` call
@@ -1382,16 +1304,15 @@ fn log2_vector_components_on_desktop_profile() {
             return v(l, t.a)
         }
     "#;
-    let profile = skull_codegen_glsl::GlslProfile::Core330;
-    let glsl = emit_entry_profile(src, "logfrag", profile).expect("emit");
+    let glsl = emit_entry(src, "logfrag").expect("emit");
     assert!(
         glsl.contains("vec3 log2v_Vec3(vec3 c) {"),
-        "{profile:?} must emit the vector helper:\n{glsl}"
+        "must emit the vector helper:\n{glsl}"
     );
     assert_eq!(
         glsl.matches("log2(").count(),
         3,
-        "{profile:?} must map each component call:\n{glsl}"
+        "must map each component call:\n{glsl}"
     );
 }
 
@@ -1413,22 +1334,18 @@ fn helper_float_default_is_carried_on_desktop_profile() {
             return shade(texture(scene, tc), 2.0)
         }
     "#;
-    let profile = skull_codegen_glsl::GlslProfile::Core330;
-    let omitted = emit_entry_profile(src, "shadefrag", profile).expect("emit");
+    let omitted = emit_entry(src, "shadefrag").expect("emit");
     assert!(
         omitted.contains("shade_Vec4_float(texture(scene, tc), 1.0)"),
-        "{profile:?} omitted call must carry the default:\n{omitted}"
+        "omitted call must carry the default:\n{omitted}"
     );
-    let explicit = emit_entry_profile(src, "shadefrag_exp", profile).expect("emit");
+    let explicit = emit_entry(src, "shadefrag_exp").expect("emit");
     assert!(
         explicit.contains("shade_Vec4_float(texture(scene, tc), 2.0)"),
-        "{profile:?} explicit call must keep its argument:\n{explicit}"
+        "explicit call must keep its argument:\n{explicit}"
     );
     for glsl in [&omitted, &explicit] {
-        assert!(
-            !glsl.contains("null"),
-            "{profile:?} must not mention null:\n{glsl}"
-        );
+        assert!(!glsl.contains("null"), "must not mention null:\n{glsl}");
     }
 }
 

@@ -2,61 +2,12 @@
 //! compilation. RED-first scaffold -- these pin the A2a target behavior and go
 //! green as the emitter lands.
 //!
-//! Two harnesses:
-//!   - `emit_entry`  : A1 fragment entry, reused to exercise the new GPU builtins
-//!     (frag_coord/fwidth/discard) in isolation.
-//!   - `emit_pipeline`: the A2 vertex+fragment pair -> one #ifdef file.
+//! `emit_entry` is the A1 fragment entry, reused to exercise the GPU builtins
+//! (frag_coord/fwidth/discard) in isolation; `emit_pipeline` is the A2
+//! vertex+fragment pair -> one #ifdef file.
 
+use crate::support::{emit_entry, emit_pipeline, workspace};
 use skull_codegen_glsl::GlslProfile;
-use std::sync::LazyLock;
-use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn workspace(
-    src: &str,
-) -> (
-    bone_core::workspace::Workspace,
-    bone_core::prelude::ModuleId,
-) {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    (ws, mid)
-}
-
-/// A1 fragment entry -- for the GPU-builtin goldens.
-fn emit_entry(src: &str, root: &str) -> Result<String, String> {
-    let (ws, mid) = workspace(src);
-    skull_codegen_glsl::emit_shader_entry(&ws, mid, root, GlslProfile::Core330)
-        .map_err(|e| e.message)
-}
-
-/// The A2 vertex+fragment pipeline.
-fn emit_pipeline(src: &str, vert: &str, frag: &str) -> Result<String, String> {
-    let (ws, mid) = workspace(src);
-    skull_codegen_glsl::emit_shader_pipeline(&ws, mid, vert, frag, GlslProfile::Core330)
-        .map_err(|e| e.message)
-}
-
-fn emit_pipeline_profile(
-    src: &str,
-    vert: &str,
-    frag: &str,
-    p: GlslProfile,
-) -> Result<String, String> {
-    let (ws, mid) = workspace(src);
-    skull_codegen_glsl::emit_shader_pipeline(&ws, mid, vert, frag, p).map_err(|e| e.message)
-}
 
 #[test]
 fn vector_scalar_bounds_are_splatted() {
@@ -593,8 +544,7 @@ const FRAG_DEPTH_SRC: &str = r#"
 
 #[test]
 fn frag_depth_field_writes_gl_frag_depth_without_an_out_location() {
-    let p = GlslProfile::Core330;
-    let glsl = emit_pipeline_profile(FRAG_DEPTH_SRC, "vt", "fr", p).expect("emit");
+    let glsl = emit_pipeline(FRAG_DEPTH_SRC, "vt", "fr").expect("emit");
     assert!(
         glsl.contains("layout(location = 0) out vec4 FragColor;"),
         "got:\n{glsl}"

@@ -1,22 +1,8 @@
 //! Lexical keywords are distinct from uniform shadowing: even an unused
 //! keyword binding is invalid GLSL. Drive entry and helper allocation.
 
+use crate::support::checked_workspace;
 use skull_codegen_glsl::GlslProfile;
-use std::sync::LazyLock;
-use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            skull_parser::parse_module_clean(
-                f.contents,
-                Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str()),
-            )
-            .expect("stdlib parse")
-        })
-        .collect()
-});
 
 const SOURCE: &str = r#"
 fn keyword_helper(sample: float, packed: float, resource: float) -> float {
@@ -42,15 +28,9 @@ fn register() {
 "#;
 
 fn emit(root: &str, profile: GlslProfile) -> String {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(SOURCE, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic pass");
-    let errors = skull_mir::verdict::body_errors(&ws);
-    assert!(errors.is_empty(), "fixture body errors: {errors:?}");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
+    let (ws, mid) = checked_workspace(SOURCE);
     let emission = skull_codegen_glsl::emit_shader_entry_with_dependencies(&ws, mid, root, profile)
         .expect("emit");
-    println!("SHADER {root} {profile:?}\n{}\nEND SHADER", emission.source);
     emission.source
 }
 

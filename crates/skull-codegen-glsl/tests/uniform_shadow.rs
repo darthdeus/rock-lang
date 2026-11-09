@@ -3,50 +3,7 @@
 //! `density` uniform lane used to make every `u.density` read the local.
 //! The hoisted local is renamed apart; the global read survives.
 
-use skull_codegen_glsl::{GlslProfile, ShaderEmission};
-use std::sync::LazyLock;
-use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn workspace(
-    src: &str,
-) -> (
-    bone_core::workspace::Workspace,
-    bone_core::prelude::ModuleId,
-) {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    (ws, mid)
-}
-
-fn emit_entry(src: &str, root: &str) -> ShaderEmission {
-    let (ws, mid) = workspace(src);
-    skull_codegen_glsl::emit_shader_entry_with_dependencies(&ws, mid, root, GlslProfile::Core330)
-        .expect("emit")
-}
-
-fn emit_pipeline(src: &str, vert: &str, frag: &str) -> ShaderEmission {
-    let (ws, mid) = workspace(src);
-    skull_codegen_glsl::emit_shader_pipeline_with_dependencies(
-        &ws,
-        mid,
-        vert,
-        frag,
-        GlslProfile::Core330,
-    )
-    .expect("emit")
-}
+use crate::support::{entry_emission, pipeline_emission};
 
 /// No hoisted `float` local shadows `lane`: block members indent 4, hoisted
 /// locals 2, so the indented pattern distinguishes them.
@@ -68,7 +25,7 @@ fn hoisted_local_renamed_apart_from_uniform_lane() {
             return Vec4 { x: density, y: tc.y, z: 0.0, w: 1.0 }
         }
     "#;
-    let e = emit_entry(src, "shadow_frag");
+    let e = entry_emission(src, "shadow_frag").expect("emit");
     let glsl = &e.source;
     // Oracle: the lane names are the program's own interface plan, not the fixture text.
     let lanes: Vec<String> = e
@@ -116,7 +73,7 @@ fn vertex_locals_renamed_apart_from_attribute_and_varying() {
         @shader(fragment)
         fn fr(vary: Vary) -> Vec4 { return vary.shade }
     "#;
-    let e = emit_pipeline(src, "vt", "fr");
+    let e = pipeline_emission(src, "vt", "fr").expect("emit");
     let glsl = &e.source;
     let attrs: Vec<String> = e
         .interface
@@ -182,7 +139,7 @@ fn fragment_local_renamed_apart_from_group_sampler() {
             return Vec4 { x: tint, y: c.y, z: c.z, w: c.w }
         }
     "#;
-    let e = emit_pipeline(src, "vt", "fr");
+    let e = pipeline_emission(src, "vt", "fr").expect("emit");
     let glsl = &e.source;
     let samplers: Vec<String> = e
         .interface

@@ -2,35 +2,7 @@
 //! (reject, never skip-and-continue), so each of these must return an Err whose
 //! message names the offending construct.
 
-use std::sync::LazyLock;
-use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn emit(src: &str, roots: &[&str]) -> Result<String, String> {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    let roots: Vec<String> = roots.iter().map(|s| s.to_string()).collect();
-    let root_refs = roots
-        .iter()
-        .map(|root| skull_codegen_glsl::resolve_root(&ws, mid, root))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.message)?;
-    let session =
-        skull_codegen_glsl::shader_library_session(&ws, root_refs).map_err(|e| e.message)?;
-    skull_codegen_glsl::emit_shader_library_with_view(&ws, &session.scx, &session.view)
-        .map_err(|e| e.message)
-}
+use crate::support::{emit_entry, emit_library_unchecked as emit};
 
 fn reject(src: &str, roots: &[&str], needle: &str) {
     match emit(src, roots) {
@@ -297,24 +269,10 @@ fn reject_unknown_root() {
 // --- A1 entry-contract rejects ------------------------
 
 fn reject_entry(src: &str, root: &str, needle: &str) {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("module id");
-    let err = skull_codegen_glsl::emit_shader_entry(
-        &ws,
-        mid,
-        root,
-        skull_codegen_glsl::GlslProfile::Core330,
-    )
-    .expect_err("must reject");
+    let err = emit_entry(src, root).expect_err("must reject");
     assert!(
-        err.message.contains(needle),
-        "error `{}` should contain `{needle}`",
-        err.message
+        err.contains(needle),
+        "error `{err}` should contain `{needle}`"
     );
 }
 
