@@ -6,7 +6,7 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SetupLaneSchedule {
     CpuFirst,
-    AbiFirst,
+    ShaderFirst,
     Handshake,
 }
 
@@ -56,7 +56,7 @@ impl SetupLaneScheduler {
         }
         let first = match self.schedule {
             SetupLaneSchedule::CpuFirst => SetupLaneKind::CpuArtifact,
-            SetupLaneSchedule::AbiFirst => SetupLaneKind::AbiWarm,
+            SetupLaneSchedule::ShaderFirst => SetupLaneKind::Shader,
             SetupLaneSchedule::Handshake => unreachable!(),
         };
         if lane != first {
@@ -70,7 +70,7 @@ impl SetupLaneScheduler {
     fn finish(&self, lane: SetupLaneKind) {
         let first = match self.schedule {
             SetupLaneSchedule::CpuFirst => SetupLaneKind::CpuArtifact,
-            SetupLaneSchedule::AbiFirst => SetupLaneKind::AbiWarm,
+            SetupLaneSchedule::ShaderFirst => SetupLaneKind::Shader,
             SetupLaneSchedule::Handshake => return,
         };
         if lane != first {
@@ -631,32 +631,7 @@ fn shader_lane(
     )
 }
 
-/// Lane three: a scalar context with every concrete plan's ABI warmed, adopted
-/// by the CPU lane's context after the join.
-fn abi_warm_lane(
-    ws: &Workspace,
-    mut abi_scx: skull_mir::lower::ScalarCtx,
-    abi_plans: &skull_mir::concrete::ConcretePlans,
-    abi_always_plans: &skull_mir::concrete::ConcreteAlwaysPlans,
-    skip_abi_plan_publish: bool,
-) -> (skull_mir::lower::ScalarCtx, SetupLaneWindow) {
-    let started = Instant::now();
-    if !skip_abi_plan_publish {
-        abi_scx.warm_abi_plans(ws, abi_plans, abi_always_plans);
-    }
-    let population = abi_scx.abi_plan_stats().warm_keys as usize;
-    let finished = Instant::now();
-    (
-        abi_scx,
-        SetupLaneWindow {
-            started,
-            finished,
-            population,
-        },
-    )
-}
-
-/// What the three concurrent setup lanes produce.
+/// What the concurrent setup lanes produce.
 struct SetupLanes {
     lua_view: crate::artifact::ArtifactView,
     scx: skull_mir::lower::ScalarCtx,
@@ -664,13 +639,13 @@ struct SetupLanes {
     shader_view: crate::shader_artifact::ShaderArtifactView,
     shader_registrations: ShaderRegistrations,
     attribution: SetupLaneAttribution,
-    windows: [(&'static str, Duration); 4],
+    windows: [(&'static str, Duration); 3],
 }
 
 /// The graph is complete before these lanes start; shared interning remains
 /// synchronized. The CPU artifact lane runs beside the concrete plan build,
-/// which the shader and ABI lanes wait for. ABI plans carry their own
-/// representation arena, so the warmed context is adopted after join.
+/// which the shader lane waits for. ABI plans are derived where a body first
+/// asks for one.
 fn run_setup_lanes(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
@@ -681,14 +656,9 @@ fn run_setup_lanes(
     shapes: ShapeOverrides,
     mutation: BodyMutation,
 ) -> Result<(crate::concrete_body::ConcreteBodies, SetupLanes), CompilerError> {
-    #[cfg(test)]
-    let skip_abi_plan_publish = matches!(mutation, BodyMutation::SkipAbiPlanPublish);
-    #[cfg(not(test))]
-    let skip_abi_plan_publish = false;
     let gate = LaneGate::new(mutation);
     let mono_before_lanes = graph.interner().stats();
     let scx = skull_mir::lower::ScalarCtx::new(ws).sharing(std::sync::Arc::clone(graph.interner()));
-    let abi_scx = scx.fresh_abi_context();
     let plans_branch = || {
         let started = Instant::now();
         let concrete = build_plans();
@@ -698,25 +668,10 @@ fn run_setup_lanes(
             Err(err) => return (Err(err), plans_window),
         };
         let shader_plans = std::sync::Arc::clone(&concrete.plans);
-        let lanes = parallel_join(
-            || {
-                gate.run(SetupLaneKind::Shader, || {
-                    shader_lane(ws, graph, shader_programs, shader_collection, shader_plans)
-                })
-            },
-            || {
-                gate.run(SetupLaneKind::AbiWarm, || {
-                    abi_warm_lane(
-                        ws,
-                        abi_scx,
-                        &concrete.plans,
-                        &concrete.always_plans,
-                        skip_abi_plan_publish,
-                    )
-                })
-            },
-        );
-        (Ok((concrete, lanes)), plans_window)
+        let lane = gate.run(SetupLaneKind::Shader, || {
+            shader_lane(ws, graph, shader_programs, shader_collection, shader_plans)
+        });
+        (Ok((concrete, lane)), plans_window)
     };
     // The plan build stays on this thread: its build counter is a
     // thread-local witness the incremental repair statistics read back.
@@ -745,23 +700,19 @@ fn run_setup_lanes(
     };
     #[cfg(any(not(test), feature = "sequential"))]
     let (cpu_result, (plans_result, plans_window)) = run_lanes();
-    let (concrete, (shader_result, (abi_scx, abi_lane))) = plans_result?;
+    let (concrete, shader_result) = plans_result?;
     let mono_after_lanes = graph.interner().stats();
     #[cfg(test)]
     let setup_handshake = gate.handshake();
     let (cpu_result, cpu_lane) = cpu_result;
     let (shader_result, shader_lane) = shader_result;
-    let (lua_view, mut scx, cg) = cpu_result?;
+    let (lua_view, scx, cg) = cpu_result?;
     let (shader_view, shader_registrations) = shader_result?;
-    scx.adopt_warmed_abi(abi_scx);
     let attribution = SetupLaneAttribution {
         cpu_population: cpu_lane.population,
         shader_population: shader_lane.population,
-        abi_population: abi_lane.population,
         cpu_shader_overlap: setup_lanes_overlap(cpu_lane, shader_lane),
-        abi_cpu_overlap: setup_lanes_overlap(abi_lane, cpu_lane),
-        abi_shader_overlap: setup_lanes_overlap(abi_lane, shader_lane),
-        first_started_lane: Some(first_setup_lane(cpu_lane, shader_lane, abi_lane)),
+        first_started_lane: Some(first_setup_lane(cpu_lane, shader_lane)),
         mono_write_acqs_during_join: mono_after_lanes
             .write_acqs
             .saturating_sub(mono_before_lanes.write_acqs),
@@ -796,10 +747,6 @@ fn run_setup_lanes(
                 (
                     "join: shader view branch",
                     shader_lane.finished - shader_lane.started,
-                ),
-                (
-                    "join: ABI plan warm branch",
-                    abi_lane.finished - abi_lane.started,
                 ),
             ],
         },
@@ -1023,8 +970,8 @@ pub(super) fn emit_full_build(
         Ok((graph, selected_sim_functions))
     })?;
     // The CPU artifact view and the codegen context read only the graph, so
-    // they are built while the concrete plans are; the shader and ABI lanes
-    // read the plans and start once they are published.
+    // they are built while the concrete plans are; the shader lane
+    // reads the plans and starts once they are published.
     let (mut concrete, lanes) = setup_phases.timed("setup: concrete plans+lanes", || {
         run_setup_lanes(
             ws,

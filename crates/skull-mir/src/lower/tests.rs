@@ -86,39 +86,6 @@ fn first_class_context_skips_value_ref_facts_and_updates() {
 }
 
 #[test]
-fn fresh_abi_context_shares_refs_and_interner_with_independent_abi_state() {
-    let (ws, mid) = spec_ws(
-        "fn target(x: int) -> int { x }\n\
-         fn holder() { let f = target }\n",
-    );
-    let target = spec_fn(&ws, mid, "target");
-    let source = ScalarCtx::new(&ws);
-    let cloned = source.clone();
-    let fresh = source.fresh_abi_context();
-
-    assert!(std::sync::Arc::ptr_eq(
-        &source.value_references,
-        &cloned.value_references
-    ));
-    assert!(std::sync::Arc::ptr_eq(
-        &source.value_references,
-        &fresh.value_references
-    ));
-    assert!(std::sync::Arc::ptr_eq(&source.interner, &fresh.interner));
-    assert!(
-        !std::sync::Arc::ptr_eq(&source.rep_arena, &fresh.rep_arena),
-        "fresh ABI contexts need independent representation ids"
-    );
-
-    let inst = crate::instance::Instance::base(target);
-    let plan = std::sync::Arc::new(BackendFnAbiPlan::for_boundary_instance(&ws, &source, &inst));
-    let key = AbiPlanKey::Owner(inst);
-    source.abi_plan_store(key.clone(), &plan);
-    assert!(source.abi_plan_cached(&key).is_some());
-    assert!(fresh.abi_plan_cached(&key).is_none());
-}
-
-#[test]
 fn updating_one_shared_reference_context_uses_copy_on_write() {
     let (mut ws, mid) = spec_ws(
         "fn target(x: int) -> int { x }\n\
@@ -130,7 +97,7 @@ fn updating_one_shared_reference_context_uses_copy_on_write() {
     let target_name = ws.module(target.module).functions[target.func].name;
     let original = ScalarCtx::new(&ws);
     let sibling = original.clone();
-    let mut fresh = original.fresh_abi_context();
+    let mut fresh = original.clone();
     assert!(std::sync::Arc::ptr_eq(
         &original.value_references,
         &sibling.value_references

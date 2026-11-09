@@ -28,8 +28,6 @@ pub(super) enum BodyMutation {
         body: FuncRef,
     },
     #[cfg(test)]
-    SkipAbiPlanPublish,
-    #[cfg(test)]
     ConcreteResultOrder(skull_graph::concrete_body::BuildResultOrder),
     #[cfg(all(test, not(feature = "sequential")))]
     SetupLaneSchedule(SetupLaneSchedule),
@@ -327,10 +325,7 @@ pub(super) fn emit_body_chunk_with_mutation(
                 BodyMutation::None => unreachable!(),
                 BodyMutation::ClearBoundPlan { .. } => unreachable!(),
                 BodyMutation::ClearCoroutineResultPlan { .. } => unreachable!(),
-                BodyMutation::ClearIteratorWitnessInstance { .. }
-                | BodyMutation::SkipAbiPlanPublish => {
-                    unreachable!()
-                }
+                BodyMutation::ClearIteratorWitnessInstance { .. } => unreachable!(),
                 BodyMutation::ConcreteResultOrder(_) => unreachable!(),
                 #[cfg(all(test, not(feature = "sequential")))]
                 BodyMutation::SetupLaneSchedule(_) => unreachable!(),

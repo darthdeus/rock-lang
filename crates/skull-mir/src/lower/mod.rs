@@ -685,79 +685,6 @@ impl ScalarCtx {
         self.abi_plans.stats()
     }
 
-    /// Derive every ABI question the concrete plans can present to production
-    /// lowering, in deterministic key order, then publish the successful plans
-    /// as immutable handles for the parallel fanout. Errors are intentionally
-    /// not cached: the original consumer still re-derives them at its own span.
-    pub fn warm_abi_plans(
-        &mut self,
-        ws: &Workspace,
-        plans: &crate::concrete::ConcretePlans,
-        always: &crate::concrete::ConcreteAlwaysPlans,
-    ) {
-        // A callee is named once per call site; deduplicate by reference
-        // before cloning, and sort the distinct keys so the warm order is
-        // a function of the plan set.
-        let mut callees: rustc_hash::FxHashSet<&crate::instance::Instance> =
-            rustc_hash::FxHashSet::default();
-        for body in plans.values().map(|plan| &**plan).chain(always.values()) {
-            callees.extend(body.callees.values().map(|callee| &callee.instance));
-        }
-        let mut keys: Vec<AbiPlanKey> = plans
-            .keys()
-            .cloned()
-            .map(AbiPlanKey::Owner)
-            .chain(callees.into_iter().cloned().map(AbiPlanKey::Callee))
-            .collect();
-        keys.sort();
-
-        let warm_keys = keys.len() as u64;
-        // Every derivation reads the shared representation arena and nothing
-        // else that moves, so the keys derive in parallel; the memo is then
-        // filled under one lock instead of one per key.
-        let known = self.abi_plans.shared_keys();
-        let derived: Vec<(
-            AbiPlanKey,
-            Result<BackendFnAbiPlanHandle, skull_parser::CompilerError>,
-        )> = {
-            use bone_core::prelude::*;
-            let scx: &Self = self;
-            keys.into_par_iter()
-                .filter(|key| !known.contains(key))
-                .map(|key| {
-                    let plan = abi::derive_abi_plan(ws, scx, plans, &key);
-                    (key, plan)
-                })
-                .collect()
-        };
-        let warm_failures = derived.iter().filter(|(_, plan)| plan.is_err()).count() as u64;
-        self.abi_plans
-            .record_warm_misses(derived.iter().map(|(key, _)| key));
-        self.abi_plans.store_all(
-            derived
-                .into_iter()
-                .filter_map(|(key, plan)| plan.ok().map(|plan| (key, plan))),
-        );
-        self.abi_plans.publish(warm_keys, warm_failures);
-    }
-
-    /// Move a completed ABI warm into the context that will lower and emit.
-    /// The representation arena travels with the plans because their `RepId`s
-    /// are scoped to that arena; both contexts must share the graph interner.
-    pub fn adopt_warmed_abi(&mut self, warmed: Self) {
-        assert!(
-            self.values_first_class == warmed.values_first_class
-                && self.native_flat_enums == warmed.native_flat_enums
-                && self.native_flat_enums == warmed.native_flat_enums
-                && self.row_value_containers == warmed.row_value_containers
-                && self.target == warmed.target
-                && std::sync::Arc::ptr_eq(&self.interner, &warmed.interner),
-            "ABI warm context does not match the emission context"
-        );
-        self.rep_arena = warmed.rep_arena;
-        self.abi_plans = warmed.abi_plans;
-    }
-
     /// Traffic counters of this context's representation arena.
     pub fn rep_arena_stats(&self) -> abi::RepArenaStats {
         self.rep_arena.stats()
@@ -784,22 +711,6 @@ impl ScalarCtx {
     /// so its target is `Any` (filtering disabled).
     pub fn new_values_first_class(ws: &Workspace) -> Self {
         Self::new_with_value_mode(ws, true)
-    }
-
-    /// Make an ABI-planning context over this build's shared workspace facts.
-    /// Its representation arena and memo are private to this context so plans
-    /// and representation ids cannot leak between ABI-planning lanes.
-    pub fn fresh_abi_context(&self) -> Self {
-        Self {
-            value_references: std::sync::Arc::clone(&self.value_references),
-            values_first_class: self.values_first_class,
-            native_flat_enums: self.native_flat_enums,
-            row_value_containers: self.row_value_containers,
-            target: self.target,
-            interner: std::sync::Arc::clone(&self.interner),
-            rep_arena: std::sync::Arc::new(abi::RepArena::default()),
-            abi_plans: abi::AbiPlanCache::default(),
-        }
     }
 
     /// Incrementally fold one re-inferred body's value-reference contribution into

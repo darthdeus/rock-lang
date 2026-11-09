@@ -6,10 +6,7 @@ use super::*;
 pub struct SetupLaneAttribution {
     pub cpu_population: usize,
     pub shader_population: usize,
-    pub abi_population: usize,
     pub cpu_shader_overlap: bool,
-    pub abi_cpu_overlap: bool,
-    pub abi_shader_overlap: bool,
     pub first_started_lane: Option<SetupLaneKind>,
     pub mono_write_acqs_during_join: u64,
     pub mono_intern_attempts_during_join: u64,
@@ -26,7 +23,6 @@ pub struct SetupLaneAttribution {
 pub enum SetupLaneKind {
     CpuArtifact,
     Shader,
-    AbiWarm,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -40,17 +36,10 @@ pub(super) fn setup_lanes_overlap(left: SetupLaneWindow, right: SetupLaneWindow)
     left.started < right.finished && right.started < left.finished
 }
 
-pub(super) fn first_setup_lane(
-    cpu: SetupLaneWindow,
-    shader: SetupLaneWindow,
-    abi: SetupLaneWindow,
-) -> SetupLaneKind {
+pub(super) fn first_setup_lane(cpu: SetupLaneWindow, shader: SetupLaneWindow) -> SetupLaneKind {
     let mut first = (cpu.started, SetupLaneKind::CpuArtifact);
     if shader.started < first.0 {
         first = (shader.started, SetupLaneKind::Shader);
-    }
-    if abi.started < first.0 {
-        first = (abi.started, SetupLaneKind::AbiWarm);
     }
     first.1
 }

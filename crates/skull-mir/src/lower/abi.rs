@@ -469,11 +469,6 @@ pub struct AbiPlanMemoStats {
     pub local_clone_ns: u64,
     pub shared_clone_ns: u64,
     pub derivation_ns: u64,
-    pub published_hits: u64,
-    pub published_misses: u64,
-    pub warm_keys: u64,
-    pub warm_failures: u64,
-    pub published_keys: u64,
     pub plan_size_histogram: [u64; ABI_PLAN_SIZE_BUCKETS],
     pub plan_size_max: u64,
 }
@@ -501,11 +496,6 @@ impl Default for AbiPlanMemoStats {
             local_clone_ns: 0,
             shared_clone_ns: 0,
             derivation_ns: 0,
-            published_hits: 0,
-            published_misses: 0,
-            warm_keys: 0,
-            warm_failures: 0,
-            published_keys: 0,
             plan_size_histogram: [0; ABI_PLAN_SIZE_BUCKETS],
             plan_size_max: 0,
         }
@@ -554,11 +544,6 @@ impl AbiPlanMemoStats {
         self.local_clone_ns += other.local_clone_ns;
         self.shared_clone_ns += other.shared_clone_ns;
         self.derivation_ns += other.derivation_ns;
-        self.published_hits += other.published_hits;
-        self.published_misses += other.published_misses;
-        self.warm_keys += other.warm_keys;
-        self.warm_failures += other.warm_failures;
-        self.published_keys += other.published_keys;
         for (dst, src) in self
             .plan_size_histogram
             .iter_mut()
@@ -637,9 +622,6 @@ fn next_abi_epoch() -> u64 {
 #[derive(Debug)]
 pub(super) struct AbiPlanCache {
     plans: Mutex<HashMap<AbiPlanKey, BackendFnAbiPlanHandle>>,
-    // Publication happens before the context enters the parallel fanout;
-    // `clear` takes `&mut self`, so readers never race this pointer.
-    published: Option<Arc<HashMap<AbiPlanKey, BackendFnAbiPlanHandle>>>,
     epoch: std::sync::atomic::AtomicU64,
     owner_hits: std::sync::atomic::AtomicU64,
     owner_misses: std::sync::atomic::AtomicU64,
@@ -658,11 +640,6 @@ pub(super) struct AbiPlanCache {
     local_clone_ns: std::sync::atomic::AtomicU64,
     shared_clone_ns: std::sync::atomic::AtomicU64,
     derivation_ns: std::sync::atomic::AtomicU64,
-    warm_keys: std::sync::atomic::AtomicU64,
-    warm_failures: std::sync::atomic::AtomicU64,
-    published_hits: std::sync::atomic::AtomicU64,
-    published_misses: std::sync::atomic::AtomicU64,
-    published_keys: std::sync::atomic::AtomicU64,
     plan_size_histogram: [std::sync::atomic::AtomicU64; ABI_PLAN_SIZE_BUCKETS],
     plan_size_max: std::sync::atomic::AtomicU64,
 }
@@ -671,7 +648,6 @@ impl Default for AbiPlanCache {
     fn default() -> Self {
         Self {
             plans: Mutex::default(),
-            published: None,
             epoch: std::sync::atomic::AtomicU64::new(next_abi_epoch()),
             owner_hits: Default::default(),
             owner_misses: Default::default(),
@@ -690,11 +666,6 @@ impl Default for AbiPlanCache {
             local_clone_ns: Default::default(),
             shared_clone_ns: Default::default(),
             derivation_ns: Default::default(),
-            warm_keys: Default::default(),
-            warm_failures: Default::default(),
-            published_hits: Default::default(),
-            published_misses: Default::default(),
-            published_keys: Default::default(),
             plan_size_histogram: std::array::from_fn(|_| std::sync::atomic::AtomicU64::new(0)),
             plan_size_max: Default::default(),
         }
@@ -710,7 +681,6 @@ impl Clone for AbiPlanCache {
         };
         Self {
             plans: Mutex::new(self.plans.lock().expect("abi plan cache poisoned").clone()),
-            published: self.published.clone(),
             epoch: copy(&self.epoch),
             owner_hits: copy(&self.owner_hits),
             owner_misses: copy(&self.owner_misses),
@@ -729,11 +699,6 @@ impl Clone for AbiPlanCache {
             local_clone_ns: copy(&self.local_clone_ns),
             shared_clone_ns: copy(&self.shared_clone_ns),
             derivation_ns: copy(&self.derivation_ns),
-            warm_keys: copy(&self.warm_keys),
-            warm_failures: copy(&self.warm_failures),
-            published_hits: copy(&self.published_hits),
-            published_misses: copy(&self.published_misses),
-            published_keys: copy(&self.published_keys),
             plan_size_histogram: std::array::from_fn(|i| copy(&self.plan_size_histogram[i])),
             plan_size_max: copy(&self.plan_size_max),
         }
@@ -751,42 +716,29 @@ impl AbiPlanCache {
 
     pub(super) fn lookup(&self, key: &AbiPlanKey) -> Option<BackendFnAbiPlanHandle> {
         use std::sync::atomic::Ordering;
-        let published = match self.published.as_ref().and_then(|plans| plans.get(key)) {
-            Some(plan) => {
-                self.published_hits.fetch_add(1, Ordering::Relaxed);
-                Some(Arc::clone(plan))
+        let epoch = self.epoch.load(Ordering::Acquire);
+        let found = ABI_PLAN_LOCAL.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            cache.reset_for(epoch);
+            if let Some(plan) = cache.plans.get(key) {
+                self.local_hits.fetch_add(1, Ordering::Relaxed);
+                return Some(Arc::clone(plan));
             }
-            None if self.published.is_some() => {
-                self.published_misses.fetch_add(1, Ordering::Relaxed);
-                None
-            }
-            None => None,
-        };
-        let found = published.or_else(|| {
-            let epoch = self.epoch.load(Ordering::Acquire);
-            ABI_PLAN_LOCAL.with(|cache| {
-                let mut cache = cache.borrow_mut();
-                cache.reset_for(epoch);
-                if let Some(plan) = cache.plans.get(key) {
-                    self.local_hits.fetch_add(1, Ordering::Relaxed);
-                    return Some(Arc::clone(plan));
-                }
-                self.shared_lookups.fetch_add(1, Ordering::Relaxed);
-                let lock_start = abi_plan_timing_enabled().then(Instant::now);
-                let found = {
-                    let plans = self.plans.lock().expect("abi plan cache poisoned");
-                    let Some(plan) = plans.get(key) else {
-                        self.shared_misses.fetch_add(1, Ordering::Relaxed);
-                        add_elapsed(&self.shared_lock_ns, lock_start);
-                        return None;
-                    };
-                    Arc::clone(plan)
+            self.shared_lookups.fetch_add(1, Ordering::Relaxed);
+            let lock_start = abi_plan_timing_enabled().then(Instant::now);
+            let found = {
+                let plans = self.plans.lock().expect("abi plan cache poisoned");
+                let Some(plan) = plans.get(key) else {
+                    self.shared_misses.fetch_add(1, Ordering::Relaxed);
+                    add_elapsed(&self.shared_lock_ns, lock_start);
+                    return None;
                 };
-                add_elapsed(&self.shared_lock_ns, lock_start);
-                self.shared_hits.fetch_add(1, Ordering::Relaxed);
-                cache.plans.insert(key.clone(), Arc::clone(&found));
-                Some(found)
-            })
+                Arc::clone(plan)
+            };
+            add_elapsed(&self.shared_lock_ns, lock_start);
+            self.shared_hits.fetch_add(1, Ordering::Relaxed);
+            cache.plans.insert(key.clone(), Arc::clone(&found));
+            Some(found)
         });
         let (hits, misses) = match key {
             AbiPlanKey::Owner(_) => (&self.owner_hits, &self.owner_misses),
@@ -830,73 +782,12 @@ impl AbiPlanCache {
         }
     }
 
-    /// The keys the shared table already answers, for a warm that must not
-    /// derive them again.
-    pub(super) fn shared_keys(&self) -> rustc_hash::FxHashSet<AbiPlanKey> {
-        self.plans
-            .lock()
-            .expect("abi plan cache poisoned")
-            .keys()
-            .cloned()
-            .collect()
-    }
-
-    /// The warm asked the shared table about these keys through
-    /// [`Self::shared_keys`] and found none of them; the accounting is the
-    /// same as a per-key miss.
-    pub(super) fn record_warm_misses<'a>(&self, keys: impl IntoIterator<Item = &'a AbiPlanKey>) {
-        use std::sync::atomic::Ordering;
-        for key in keys {
-            let misses = match key {
-                AbiPlanKey::Owner(_) => &self.owner_misses,
-                AbiPlanKey::Callee(_) => &self.callee_misses,
-            };
-            misses.fetch_add(1, Ordering::Relaxed);
-            self.shared_lookups.fetch_add(1, Ordering::Relaxed);
-            self.shared_misses.fetch_add(1, Ordering::Relaxed);
-        }
-    }
-
-    /// Store plans derived outside the memo under one lock. The keys are
-    /// expected to be new; a replaced one is a duplicate cold store.
-    pub(super) fn store_all(
-        &self,
-        derived: impl IntoIterator<Item = (AbiPlanKey, BackendFnAbiPlanHandle)>,
-    ) {
-        use std::sync::atomic::Ordering;
-        let mut plans = self.plans.lock().expect("abi plan cache poisoned");
-        for (key, plan) in derived {
-            self.stores.fetch_add(1, Ordering::Relaxed);
-            if plans.insert(key, plan).is_some() {
-                self.duplicate_cold_stores.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-    }
-
     pub(super) fn clear(&mut self) {
         // New epoch FIRST: a worker that raced the old epoch into its mirror
         // re-reads the shared map (now cleared) rather than serving stale plans.
         self.epoch
             .store(next_abi_epoch(), std::sync::atomic::Ordering::Release);
         self.plans.lock().expect("abi plan cache poisoned").clear();
-        self.published = None;
-        self.warm_keys
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.published_keys
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.warm_failures
-            .store(0, std::sync::atomic::Ordering::Relaxed);
-    }
-
-    pub(super) fn publish(&mut self, warm_keys: u64, warm_failures: u64) {
-        let plans = std::mem::take(&mut *self.plans.lock().expect("abi plan cache poisoned"));
-        self.published_keys
-            .store(plans.len() as u64, std::sync::atomic::Ordering::Relaxed);
-        self.warm_keys
-            .store(warm_keys, std::sync::atomic::Ordering::Relaxed);
-        self.warm_failures
-            .store(warm_failures, std::sync::atomic::Ordering::Relaxed);
-        self.published = Some(Arc::new(plans));
     }
 
     /// Lifetime counters plus the table's current population. Lookups are
@@ -912,11 +803,7 @@ impl AbiPlanCache {
             worker_local_hits: self.local_hits.load(Ordering::Relaxed),
             stores: self.stores.load(Ordering::Relaxed),
             duplicate_cold_stores: self.duplicate_cold_stores.load(Ordering::Relaxed),
-            unique_keys: self
-                .published
-                .as_ref()
-                .map_or(0, |plans| plans.len() as u64)
-                + self.plans.lock().expect("abi plan cache poisoned").len() as u64,
+            unique_keys: self.plans.lock().expect("abi plan cache poisoned").len() as u64,
             cloned_param_slots: self.cloned_param_slots.load(Ordering::Relaxed),
             shared_lookups: self.shared_lookups.load(Ordering::Relaxed),
             shared_hits: self.shared_hits.load(Ordering::Relaxed),
@@ -927,11 +814,6 @@ impl AbiPlanCache {
             local_clone_ns: self.local_clone_ns.load(Ordering::Relaxed),
             shared_clone_ns: self.shared_clone_ns.load(Ordering::Relaxed),
             derivation_ns: self.derivation_ns.load(Ordering::Relaxed),
-            published_hits: self.published_hits.load(Ordering::Relaxed),
-            published_misses: self.published_misses.load(Ordering::Relaxed),
-            warm_keys: self.warm_keys.load(Ordering::Relaxed),
-            warm_failures: self.warm_failures.load(Ordering::Relaxed),
-            published_keys: self.published_keys.load(Ordering::Relaxed),
             plan_size_histogram: std::array::from_fn(|i| {
                 self.plan_size_histogram[i].load(Ordering::Relaxed)
             }),
@@ -2432,20 +2314,6 @@ fn derive_owner_abi_plan(
     Ok(derived)
 }
 
-/// One key's derivation, for the warm: the memo is neither consulted nor
-/// written here.
-pub(super) fn derive_abi_plan(
-    ws: &Workspace,
-    scx: &ScalarCtx,
-    plans: &crate::concrete::ConcretePlans,
-    key: &AbiPlanKey,
-) -> Result<BackendFnAbiPlanHandle, skull_parser::CompilerError> {
-    match key {
-        AbiPlanKey::Owner(owner) => derive_owner_abi_plan(ws, scx, plans, owner, None),
-        AbiPlanKey::Callee(callee) => derive_callee_abi_plan(ws, scx, plans, callee),
-    }
-}
-
 /// Resolve the declaration variant serving a requested call instance. JS keeps
 /// host mappings that have no Rock declaration, so it deliberately retains the
 /// requested instance for the emitter to handle later.
@@ -2466,9 +2334,8 @@ pub(super) fn selected_abi_instance(
 }
 
 /// The one memoized callee ABI question. It includes backend-variant selection,
-/// polymorphic-recursion rejection, and the sibling-signature fallback, so a
-/// warm lookup and a body-lowering lookup cannot silently ask different ABI
-/// questions.
+/// polymorphic-recursion rejection, and the sibling-signature fallback, so
+/// two consumers cannot silently ask different ABI questions.
 pub(super) fn callee_abi_plan_for_instance(
     ws: &Workspace,
     scx: &ScalarCtx,

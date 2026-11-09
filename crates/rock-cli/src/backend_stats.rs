@@ -805,16 +805,13 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
     }
     print_attribution(&skull.attribution);
     let lanes = &skull.setup_lanes;
-    if lanes.cpu_population > 0 || lanes.shader_population > 0 || lanes.abi_population > 0 {
+    if lanes.cpu_population > 0 || lanes.shader_population > 0 {
         println!(
-            "  setup lanes (one timed run): cpu {}, shader {}, ABI {}; first={:?}; overlap cpu/shader={}, ABI/cpu={}, ABI/shader={}; shared MonoInterner writes/acquires={}, attempts={}, new={}",
+            "  setup lanes (one timed run): cpu {}, shader {}; first={:?}; overlap cpu/shader={}; shared MonoInterner writes/acquires={}, attempts={}, new={}",
             lanes.cpu_population,
             lanes.shader_population,
-            lanes.abi_population,
             lanes.first_started_lane,
             lanes.cpu_shader_overlap,
-            lanes.abi_cpu_overlap,
-            lanes.abi_shader_overlap,
             lanes.mono_write_acqs_during_join,
             lanes.mono_intern_attempts_during_join,
             lanes.mono_intern_new_during_join,
@@ -963,15 +960,6 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             per_run(memo.shared_misses),
             per_run(memo.plan_clones),
             per_run(memo.plan_clone_param_slots),
-        );
-        println!(
-            "                   published table: {} hits, {} misses; {} warm keys, {} published \
-             keys ({} warm failures) per run",
-            per_run(memo.published_hits),
-            per_run(memo.published_misses),
-            per_run(memo.warm_keys),
-            per_run(memo.published_keys),
-            per_run(memo.warm_failures),
         );
         println!(
             "                   plan sizes p50/p95/max: {}/{}/{} over {} returned plans per run",

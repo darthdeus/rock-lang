@@ -805,14 +805,6 @@ fn main() { let result = first() }
             stats.shared_hits + stats.shared_misses,
             "shared lookup accounting lost a route: {stats:?}"
         );
-        assert!(
-            stats.published_hits > 0,
-            "the production consumers must reach the immutable published plan table: {stats:?}"
-        );
-        assert_eq!(
-            stats.published_misses, 0,
-            "a published-table miss would fall back to the old shared route: {stats:?}"
-        );
         assert_eq!(
             stats.plan_clones, 0,
             "cached plan consumers must share immutable handles rather than clone plans: {stats:?}"
@@ -855,34 +847,6 @@ fn main() { let result = first() }
     }
 
     #[test]
-    fn abi_plan_publication_witness_catches_a_bypassed_publish() {
-        let mut modules = vec![
-            skull_parser::parse_module_clean(
-                "fn helper(x: int) -> int { return x }\nfn main() { let result = helper(1) }",
-                Ustr::from("<abi-publish-bypass-test>"),
-            )
-            .expect("parse"),
-        ];
-        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
-        let mid = ws.source_modules().next().expect("test module").id;
-        let (_, cache) = FullEmit::program()
-            .mutation(BodyMutation::SkipAbiPlanPublish)
-            .run(&ws, mid)
-            .expect("the bypass must still take the fallback path");
-        let stats = cache.scx.abi_plan_stats();
-        let witness = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            assert!(
-                stats.published_hits > 0,
-                "the publication witness must fail when the publish step is bypassed: {stats:?}"
-            );
-        }));
-        assert!(
-            witness.is_err(),
-            "the publication witness did not see its bypass: {stats:?}"
-        );
-    }
-
-    #[test]
     fn full_emission_reports_pre_assembly_setup_work() {
         let (_, _, emit) = emit_with_mutation(BodyMutation::None).expect("intact emission");
         let setup = emit
@@ -914,8 +878,7 @@ fn main() { let result = first() }
             [
                 "join: concrete plans branch",
                 "join: cpu artifact branch",
-                "join: shader view branch",
-                "join: ABI plan warm branch"
+                "join: shader view branch"
             ]
         );
         assert!(join.iter().all(|(_, duration)| *duration > Duration::ZERO));
@@ -1614,7 +1577,7 @@ fn main() { let result = outer(1) }
             .expect("setup lane emission");
         let lanes = emit.setup_lanes;
         assert!(
-            lanes.cpu_population > 0 && lanes.shader_population > 0 && lanes.abi_population > 0,
+            lanes.cpu_population > 0 && lanes.shader_population > 0,
             "each setup lane must have a real population: {lanes:?}"
         );
         assert_eq!(
@@ -1646,7 +1609,7 @@ fn main() { let result = outer(1) }
         let (emit, _) = emit_full(&ws, mid).expect("setup lane emission");
         let lanes = emit.setup_lanes;
         assert!(
-            lanes.cpu_population > 0 && lanes.shader_population > 0 && lanes.abi_population > 0,
+            lanes.cpu_population > 0 && lanes.shader_population > 0,
             "each setup lane must have a real population: {lanes:?}"
         );
         assert_eq!(
@@ -1673,7 +1636,7 @@ fn main() { let result = outer(1) }
                 .expect("setup lane emission")
         };
         let (cpu_first, cpu_cache) = emit(SetupLaneSchedule::CpuFirst);
-        let (abi_first, abi_cache) = emit(SetupLaneSchedule::AbiFirst);
+        let (shader_first, shader_cache) = emit(SetupLaneSchedule::ShaderFirst);
 
         for (name, emit, cache, expected_first) in [
             (
@@ -1682,12 +1645,15 @@ fn main() { let result = outer(1) }
                 &cpu_cache,
                 SetupLaneKind::CpuArtifact,
             ),
-            ("ABI-first", &abi_first, &abi_cache, SetupLaneKind::AbiWarm),
+            (
+                "shader-first",
+                &shader_first,
+                &shader_cache,
+                SetupLaneKind::Shader,
+            ),
         ] {
             assert!(
-                emit.setup_lanes.cpu_population > 0
-                    && emit.setup_lanes.shader_population > 0
-                    && emit.setup_lanes.abi_population > 0,
+                emit.setup_lanes.cpu_population > 0 && emit.setup_lanes.shader_population > 0,
                 "{name} schedule must exercise every setup lane: {:?}",
                 emit.setup_lanes
             );
@@ -1717,12 +1683,12 @@ fn main() { let result = outer(1) }
         }
 
         assert_eq!(
-            cpu_first.lua, abi_first.lua,
+            cpu_first.lua, shader_first.lua,
             "reversing setup scheduling changed the Lua artifact"
         );
         assert_eq!(
             cpu_cache.lua_view().publisher_lanes,
-            abi_cache.lua_view().publisher_lanes,
+            shader_cache.lua_view().publisher_lanes,
             "reversing setup scheduling changed publisher ABI identity"
         );
     }
