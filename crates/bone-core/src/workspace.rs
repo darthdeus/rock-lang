@@ -393,6 +393,49 @@ impl Workspace {
         id
     }
 
+    /// [`Self::insert_module`] for every module of a pass at once: the
+    /// modules land first, then their parameter signatures render side by
+    /// side, since rendering reads only the workspace.
+    pub fn insert_modules(&mut self, modules: impl IntoIterator<Item = Module>) -> Vec<ModuleId> {
+        let ids: Vec<ModuleId> = modules
+            .into_iter()
+            .map(|module| {
+                let id = module.module_id();
+                let idx = id.index();
+                if idx < self.modules.len() {
+                    self.modules[idx] = module;
+                } else {
+                    debug_assert_eq!(
+                        idx,
+                        self.modules.len(),
+                        "insert_modules: non-sequential module id leaves a gap"
+                    );
+                    self.modules.push(module);
+                }
+                id
+            })
+            .collect();
+        let signatures: Vec<ArenaMap<Idx<Function>, Ustr>> = ids
+            .par_iter()
+            .map(|&id| {
+                self.module(id)
+                    .functions
+                    .iter()
+                    .map(|(fid, _)| (fid, self.render_param_signature(id, fid)))
+                    .collect()
+            })
+            .collect();
+        for (id, signatures) in ids.iter().zip(signatures) {
+            let idx = id.index();
+            if idx < self.param_signatures.len() {
+                self.param_signatures[idx] = signatures;
+            } else {
+                self.param_signatures.push(signatures);
+            }
+        }
+        ids
+    }
+
     /// Re-index one function whose signature was replaced in place.
     pub fn index_param_signature(&mut self, mid: ModuleId, fid: Idx<Function>) {
         let signature = self.render_param_signature(mid, fid);

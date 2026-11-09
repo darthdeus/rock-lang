@@ -497,9 +497,7 @@ pub fn lower_modules_seeded(
     // which records type errors per `BodyOwner::Global` instead of failing the
     // whole pass -- so there is no standalone fail-fast global-inference block.
     let gap_timer = Instant::now();
-    for module in modules.into_iter() {
-        ws.insert_module(module);
-    }
+    ws.insert_modules(modules);
     ws.log_time("insert modules", gap_timer);
 
     let gap_timer = Instant::now();
