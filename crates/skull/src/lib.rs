@@ -2065,18 +2065,27 @@ fn type_table_defs(
                 for annotation in &f.annotations {
                     if annotation.is_builtin("json_name") {
                         if json_name.is_some() {
-                            return Err(CompilerError::new_no_location("duplicate @json_name on field".to_string()));
+                            return Err(CompilerError::new_no_location(
+                                "duplicate @json_name on field".to_string(),
+                            ));
                         }
-                        if let bone_semantic::hir::AnnoValue::String(name) = &annotation.args[0].value {
+                        if let bone_semantic::hir::AnnoValue::String(name) =
+                            &annotation.args[0].value
+                        {
                             json_name = Some(name.as_str());
                         }
                     }
                 }
                 let wire_name = json_name.unwrap_or(f.name.as_str());
                 if !json_names.insert(wire_name.to_string()) {
-                    return Err(CompilerError::new_no_location(format!("duplicate JSON field name {wire_name:?} in {}", s.name)));
+                    return Err(CompilerError::new_no_location(format!(
+                        "duplicate JSON field name {wire_name:?} in {}",
+                        s.name
+                    )));
                 }
-                let json = json_name.map(|name| format!(", json_name = {name:?}")).unwrap_or_default();
+                let json = json_name
+                    .map(|name| format!(", json_name = {name:?}"))
+                    .unwrap_or_default();
                 fields.push(format!(
                     "{{ name = \"{}\", type = \"{}\", nullable = {}{}{}{}{} }}",
                     f.name, tystr, nullable, embed, flat, desc, json
