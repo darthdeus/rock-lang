@@ -1421,7 +1421,7 @@ impl Builder<'_> {
         }
         if let Some(ty) = self.concrete_expr_ty(base) {
             let name = ty.peel_nullable().0.nominal()?;
-            return bone_core::modules::vec_swizzle_components(name.as_str(), field.as_str());
+            return bone_core::modules::vec_swizzle_components_of(name, field.as_str());
         }
         None
     }

@@ -24,7 +24,10 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
     // (the call may invoke that closure — e.g. `with_callback(() => { count = .. })`),
     // so its cached value is not stable across calls. Exclude such cells entirely
     // (treat as opaque). Closure bodies are the blocks NOT reachable from entry.
-    let main: HashSet<Idx<Block>> = top_level_blocks(func).into_iter().collect();
+    let mut main = vec![false; func.blocks.len()];
+    for b in top_level_blocks(func) {
+        main[raw(b) as usize] = true;
+    }
     // Dense per-id side-tables (raw-keyed) replace the Idx HashMaps/HashSets:
     // `escaping` cell flag, `subst` value->value chain, and per-block `cur`
     // cell->value. `cur` is reset between blocks via a touched-list so the clear
@@ -32,7 +35,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
     // A `ref`-borrowed cell is written through an alias this pass cannot see.
     let mut escaping: Vec<bool> = func.cells.iter().map(|(_, cell)| cell.borrowed).collect();
     for (bid, b) in func.blocks.iter() {
-        if main.contains(&bid) {
+        if main[raw(bid) as usize] {
             continue;
         }
         for &i in &b.insts {
