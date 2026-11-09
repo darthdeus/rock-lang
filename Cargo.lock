@@ -1822,6 +1822,7 @@ dependencies = [
  "rock-visual-bank",
  "rodio",
  "rustc-hash",
+ "serde",
  "serde_json",
  "sha2",
  "skull",

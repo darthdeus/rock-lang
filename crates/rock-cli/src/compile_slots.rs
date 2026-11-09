@@ -21,9 +21,7 @@ use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const SLOT_DIR_ENV: &str = "ROCK_COMPILE_SLOT_DIR";
-pub const SLOTS_ENV: &str = "ROCK_COMPILE_SLOTS";
-pub const CLASS_ENV: &str = "ROCK_COMPILE_CLASS";
+pub const ADMISSION_ENV: &str = "ROCK_COMPILE_ADMISSION";
 pub use rock_host::process_management::{SPAWN_PHASE_FILE_ENV, report_spawn_phase};
 
 #[cfg(test)]
@@ -36,13 +34,14 @@ const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PEAK_SAMPLES: usize = 8;
 
 /// Resolved host admission policy. No configuration means immediate admission.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SlotConfig {
     pub dir: PathBuf,
     pub pool_mib: u64,
     pub full_compile_mib: u64,
     /// An optional slot outside the shared pool, tried before queueing.
-    pub preferred_slot: Option<&'static str>,
+    pub preferred_slot: Option<String>,
     pub try_preferred_slot: bool,
 }
 
@@ -62,7 +61,7 @@ impl SlotConfig {
             dir: dir.to_path_buf(),
             pool_mib: compiles * COMPILE_PEAK_MIB,
             full_compile_mib: COMPILE_PEAK_MIB,
-            preferred_slot: Some(AUTHOR_SLOT),
+            preferred_slot: Some(AUTHOR_SLOT.to_owned()),
             try_preferred_slot: matches!(class, CompileClass::Interactive),
         }
     }
@@ -185,7 +184,35 @@ fn current_config() -> Result<Option<SlotConfig>> {
 
 #[cfg(not(test))]
 fn current_config() -> Result<Option<SlotConfig>> {
-    (crate::registry::registered().compile_slot_policy)()
+    let Some(value) = std::env::var_os(ADMISSION_ENV).filter(|v| !v.is_empty()) else {
+        return Ok(None);
+    };
+    let value = value
+        .into_string()
+        .map_err(|_| anyhow!("{ADMISSION_ENV} must be UTF-8 JSON"))?;
+    let config: Option<SlotConfig> =
+        serde_json::from_str(&value).with_context(|| format!("invalid {ADMISSION_ENV}"))?;
+    if let Some(config) = &config {
+        anyhow::ensure!(
+            !config.dir.as_os_str().is_empty()
+                && config.pool_mib > 0
+                && config.full_compile_mib > 0,
+            "{ADMISSION_ENV}: dir must be nonempty and memory budgets must be positive"
+        );
+        if let Some(slot) = &config.preferred_slot {
+            anyhow::ensure!(
+                !slot.is_empty()
+                    && slot != "."
+                    && slot != ".."
+                    && !slot.contains(['/', '\\'])
+                    && !slot.starts_with('.')
+                    && !slot.starts_with(HELD_PREFIX)
+                    && ![QUEUE_DIR, PEAKS_DIR].contains(&slot.as_str()),
+                "{ADMISSION_ENV}: preferred_slot must be a non-reserved file name"
+            );
+        }
+    }
+    Ok(config)
 }
 
 #[cfg(test)]
@@ -218,7 +245,11 @@ fn acquire_reserving(
         peak_key: peak_key.clone(),
         peak_at_admission,
     };
-    if let Some(preferred_slot) = config.preferred_slot.filter(|_| config.try_preferred_slot) {
+    if let Some(preferred_slot) = config
+        .preferred_slot
+        .as_deref()
+        .filter(|_| config.try_preferred_slot)
+    {
         let path = config.dir.join(preferred_slot);
         let mut file = open_slot(&path)?;
         match file.try_lock() {
@@ -449,7 +480,7 @@ impl PoolState {
                 // Dot files include the AppleDouble `._*` files macOS writes on ExFAT.
                 if name.starts_with('.')
                     || !owned(&name)
-                    || Some(name.as_str()) == *preferred_slot
+                    || Some(name.as_str()) == preferred_slot.as_deref()
                     || !item.file_type()?.is_file()
                 {
                     continue;
@@ -791,7 +822,7 @@ mod tests {
             dir: dir.to_path_buf(),
             pool_mib,
             full_compile_mib: COMPILE_PEAK_MIB,
-            preferred_slot: Some(AUTHOR_SLOT),
+            preferred_slot: Some(AUTHOR_SLOT.to_owned()),
             try_preferred_slot: false,
         }
     }

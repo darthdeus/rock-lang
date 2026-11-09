@@ -21,10 +21,6 @@ pub struct Registrations {
     /// Host exclusions for automatic bin discovery; never applied to the root.
     pub scan_excluded: fn(&std::path::Path) -> bool,
     pub command_metadata: fn(&CliCommand) -> CommandMetadata,
-    /// Resolve optional machine-wide compiler admission policy.
-    pub compile_slot_policy: fn() -> Result<Option<crate::compile_slots::SlotConfig>>,
-    /// Environment keys for invocation context, with optional compile-record field names.
-    pub invocation_context_keys: &'static [(&'static str, Option<&'static str>)],
     pub option_rules: &'static [OptionRule],
     /// Optional recipes exposed under the public `fix` command.
     pub fixes: &'static [FixHandler],

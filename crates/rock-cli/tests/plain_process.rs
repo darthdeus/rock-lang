@@ -601,6 +601,7 @@ type = "bin"
         .env("HOME", root.path())
         .env("ROCK_DIR", root.path())
         .env("ROCK_INVOCATION_LOG", "off")
+        .env_remove("ROCK_COMPILE_ADMISSION")
         .env_remove("ROCK_COMPILE_SLOTS")
         .env_remove("ROCK_COMPILE_SLOT_DIR")
         .env_remove("ROCK_COMPILE_CLASS")
@@ -1060,4 +1061,73 @@ fn headless_launch_uses_the_shared_scope_and_preserves_command_inputs() {
             |(key, value)| key == "SCOPE_INPUT" && value == Some(std::ffi::OsStr::new("kept"))
         ));
     }
+}
+
+#[test]
+fn explicit_runner_policy_controls_admission_and_log_context() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("main.rock"), "fn main() {}\n").unwrap();
+    std::fs::write(
+        root.path().join("stick.toml"),
+        "[package]\nname = \"runner-policy\"\n",
+    )
+    .unwrap();
+    let slots = root.path().join("slots");
+    let log = root.path().join("invocations.jsonl");
+    let policy = serde_json::json!({"dir": slots, "pool_mib": 1024, "full_compile_mib": 512,
+        "preferred_slot": "priority-0", "try_preferred_slot": true});
+    let run = |policy: &str| {
+        Command::new(env!("CARGO_BIN_EXE_rock"))
+            .current_dir(root.path())
+            .args(["compile", ".", "out.lua"])
+            .env("ROCK_DIR", root.path())
+            .env("ROCK_COMPILE_ADMISSION", policy)
+            .env("ROCK_LOG", "debug")
+            .env("ROCK_LOG_COLOR", "never")
+            .env("ROCK_INVOCATION_LOG", &log)
+            .env("ROCK_INVOCATION_CONTEXT_KEYS", "TASK_TAG")
+            .env("TASK_TAG", "fixture")
+            .env("UNSELECTED_TAG", "omit")
+            .output()
+            .unwrap()
+    };
+    let output = run(&policy.to_string());
+    assert!(output.status.success(), "{}", text(&output));
+    assert!(
+        text(&output).contains("took compile slot priority-0"),
+        "{}",
+        text(&output)
+    );
+    let record: serde_json::Value = serde_json::from_str(
+        std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(record["env"]["TASK_TAG"], "fixture");
+    assert!(record["env"].get("UNSELECTED_TAG").is_none());
+    for invalid in [
+        "{bad".to_owned(),
+        {
+            let mut bad = policy.clone();
+            bad["full_compile_mib"] = 0.into();
+            bad.to_string()
+        },
+        {
+            let mut bad = policy.clone();
+            bad["preferred_slot"] = "../outside".into();
+            bad.to_string()
+        },
+    ] {
+        let output = run(&invalid);
+        assert!(!output.status.success(), "{}", text(&output));
+        assert!(
+            text(&output).contains("ROCK_COMPILE_ADMISSION"),
+            "{}",
+            text(&output)
+        );
+    }
+    assert!(run("null").status.success());
 }
