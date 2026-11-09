@@ -74,10 +74,7 @@ fn main() {
 /// Emit the `main` closure for the JS target.
 fn js(src: &str) -> Result<(), String> {
     let ws = crate::common::ws_with(src);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     let root = ws
         .module(mid)
         .functions
@@ -96,10 +93,7 @@ fn js(src: &str) -> Result<(), String> {
 /// The luajit control, through the ordinary module emit.
 fn lua(src: &str) -> Result<(), String> {
     let ws = crate::common::ws_with(src);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     skull::mir_emit::emit_workspace_mir(&ws, mid)
         .map(|_| ())
         .map_err(|e| e.message)

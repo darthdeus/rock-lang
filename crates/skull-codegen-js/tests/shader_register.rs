@@ -9,16 +9,6 @@
 //! resolve), or reject loudly if none is reachable.
 use crate::common::ws_with;
 
-fn emit_program_js(ws: &bone_core::workspace::Workspace) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    skull_codegen_js::emit::emit_program(ws, mid)
-        .map(|p| p.program)
-        .map_err(|e| e.message)
-}
-
 const SHADER_SRC: &str = r#"
 value QuadVert { aPos: Vec2, aTexCoord: Vec2 }
 value UiVertU  { uProjection: Mat4, uView: Mat4, uTransform: Mat4 }
@@ -47,8 +37,8 @@ fn rock_shader_pair_without_js_register_sibling_rejects() {
     // No `__rock_shader_register` sibling reachable -> the shader would never be
     // registered on web. Emit must reject loudly rather than silently drop it.
     let ws = ws_with(SHADER_SRC);
-    let err =
-        emit_program_js(&ws).expect_err("rock_shader without a js register sibling must reject");
+    let err = crate::common::emit_program_js(&ws)
+        .expect_err("rock_shader without a js register sibling must reject");
     assert!(
         err.contains("__rock_shader_register"),
         "reject must name the missing register sibling:\n{err}"
@@ -72,7 +62,8 @@ global WEB_SHADER_SRCS: Map<string, string> = map_new()
 "#,
     );
     let ws = ws_with(&src);
-    let prog = emit_program_js(&ws).expect("emit js program with plain-rock register");
+    let prog =
+        crate::common::emit_program_js(&ws).expect("emit js program with plain-rock register");
     assert!(
         prog.contains("function __rock_shader_register("),
         "plain-Rock register fn must emit under its bare name:\n{prog}"
@@ -92,7 +83,7 @@ fn rock_shader_pair_with_inline_js_register_sibling_emits() {
 "#,
     );
     let ws = ws_with(&src);
-    let prog = emit_program_js(&ws).expect("emit js program with register sibling");
+    let prog = crate::common::emit_program_js(&ws).expect("emit js program with register sibling");
     assert!(
         prog.contains("function __rock_shader_register(key, src)"),
         "register sibling must emit under its bare @nomangle name:\n{prog}"
@@ -161,7 +152,8 @@ fn qualified_register_is_rooted_under_the_driver_symbol() {
             !ws.functions_by_name
                 .contains_key(&ustr::Ustr::from("__rock_shader_register"))
         );
-        let program = emit_program_js(&ws).expect("qualified registration must emit");
+        let program =
+            crate::common::emit_program_js(&ws).expect("qualified registration must emit");
         assert!(
             program.contains("function __rock_shader_register("),
             "{program}"
@@ -174,7 +166,8 @@ fn qualified_lua_only_register_is_a_named_rejection() {
     let ws = qualified_register_workspace(&[
         "pub @nomangle inline(lua) fn __rock_shader_register(key: string, src: string) = \"print(key)\"",
     ]);
-    let error = emit_program_js(&ws).expect_err("Lua-only registration cannot serve JS");
+    let error =
+        crate::common::emit_program_js(&ws).expect_err("Lua-only registration cannot serve JS");
     assert!(
         error.contains("no JS-servable `__rock_shader_register`"),
         "{error}"
@@ -186,7 +179,8 @@ fn ambiguous_qualified_registers_are_a_named_rejection() {
     let registration =
         "pub @nomangle fn __rock_shader_register(key: string, src: string) { print(key) }";
     let ws = qualified_register_workspace(&[registration, registration]);
-    let error = emit_program_js(&ws).expect_err("two registration bodies cannot own one symbol");
+    let error = crate::common::emit_program_js(&ws)
+        .expect_err("two registration bodies cannot own one symbol");
     assert!(
         error.contains("ambiguous") && error.contains("__rock_shader_register"),
         "{error}"

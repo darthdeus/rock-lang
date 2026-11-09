@@ -7,16 +7,6 @@
 //! - a lua-only non-host-mapped fn reached from JS still rejects.
 use crate::common::{node, ws_with};
 
-fn emit_program_js(ws: &bone_core::workspace::Workspace) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    skull_codegen_js::emit::emit_program(ws, mid)
-        .map(|p| p.program)
-        .map_err(|e| e.message)
-}
-
 #[test]
 fn inline_js_body_emits_verbatim_not_lua() {
     let ws = ws_with(
@@ -30,7 +20,7 @@ fn main() {
 }
 "#,
     );
-    let prog = emit_program_js(&ws).expect("emit js program");
+    let prog = crate::common::emit_program_js(&ws).expect("emit js program");
     assert!(
         prog.contains("return x + x"),
         "js body must emit verbatim:\n{prog}"
@@ -57,7 +47,7 @@ fn main() {
 }
 "#,
     );
-    let prog = emit_program_js(&ws).expect("emit js program");
+    let prog = crate::common::emit_program_js(&ws).expect("emit js program");
     assert!(
         prog.contains("return x * 3"),
         "js sibling body must win over the Any rep:\n{prog}"
@@ -80,7 +70,7 @@ fn main() {
 }
 "#,
     );
-    let prog = emit_program_js(&ws).expect("emit js program");
+    let prog = crate::common::emit_program_js(&ws).expect("emit js program");
     assert!(
         prog.contains("js_now("),
         "extern(js) must emit a bare call:\n{prog}"
@@ -105,7 +95,7 @@ fn main() {
 }
 "#,
     );
-    let err = emit_program_js(&ws).expect_err("lua-only call from js must reject");
+    let err = crate::common::emit_program_js(&ws).expect_err("lua-only call from js must reject");
     assert!(
         err.contains("helper") && err.contains("not a mapped JS intrinsic"),
         "unexpected reject message: {err}"
@@ -124,7 +114,7 @@ fn main() {
 }
 "#,
     );
-    let err = emit_program_js(&ws).expect_err("an unmapped FFI call must reject");
+    let err = crate::common::emit_program_js(&ws).expect_err("an unmapped FFI call must reject");
     assert!(
         err.contains("host_save_screenshot") && err.contains("not a mapped JS intrinsic"),
         "unexpected reject message: {err}"
@@ -151,7 +141,7 @@ fn main() {
 }
 "#,
     );
-    let prog = emit_program_js(&ws).expect("emit js program");
+    let prog = crate::common::emit_program_js(&ws).expect("emit js program");
     assert!(
         !prog.contains("function error("),
         "the runtime throwing `error` global must not be shadowed:\n{prog}"
@@ -167,7 +157,7 @@ fn main() {
 }
 "#,
     );
-    let prog = emit_program_js(&ws).expect("emit js program");
+    let prog = crate::common::emit_program_js(&ws).expect("emit js program");
     assert!(
         prog.contains("return new Error().stack || \"\";"),
         "the declared JS traceback body must own the JS implementation:\n{prog}"
@@ -218,7 +208,7 @@ fn main() { print("{apply(rep)}") }"#,
     ] {
         let src = format!("extern(ffi, \"string\") fn rep(s: string, n: int) -> string\n{body}\n");
         let ws = ws_with(&src);
-        let err = emit_program_js(&ws)
+        let err = crate::common::emit_program_js(&ws)
             .expect_err(&format!("must reject a lua-only extern as a value:\n{src}"));
         assert!(
             err.contains("rep")
@@ -240,7 +230,8 @@ extern(lua) fn rawequal(a: int, b: int) -> bool
 fn main() { let g = rawequal; print("{g(7, 7)}") }
 "#,
     );
-    let err = emit_program_js(&ws).expect_err("must reject a bare extern as a value");
+    let err =
+        crate::common::emit_program_js(&ws).expect_err("must reject a bare extern as a value");
     assert!(
         err.contains("rawequal"),
         "rejection should name the fn, got: {err}"
@@ -255,7 +246,8 @@ inline(lua) fn twice(a: int) -> int = """return a * 2"""
 fn main() { let g = twice; print("{g(3)}") }
 "#,
     );
-    let err = emit_program_js(&ws).expect_err("must reject an inline(lua) body as a value");
+    let err = crate::common::emit_program_js(&ws)
+        .expect_err("must reject an inline(lua) body as a value");
     assert!(
         err.contains("twice"),
         "rejection should name the fn, got: {err}"
@@ -274,7 +266,8 @@ fn apply(f: (int) -> int) -> int { return f(21) }
 fn main() { print("{apply(dbl)}") }
 "#,
     );
-    let prog = emit_program_js(&ws).expect("a portable fn must remain usable as a value");
+    let prog =
+        crate::common::emit_program_js(&ws).expect("a portable fn must remain usable as a value");
     assert!(
         prog.contains("dbl"),
         "the portable body should be emitted:\n{prog}"
@@ -295,7 +288,8 @@ fn apply(f: (int) -> int) -> int { return f(3) }
 fn main() { print("{apply(twice)}") }
 "#,
     );
-    let prog = emit_program_js(&ws).expect("an inline(js) sibling must admit the value");
+    let prog =
+        crate::common::emit_program_js(&ws).expect("an inline(js) sibling must admit the value");
     assert!(
         prog.contains("return a + a"),
         "js sibling body must emit:\n{prog}"

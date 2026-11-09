@@ -14,10 +14,7 @@ fn the_scalar_abi_check_reads_the_shared_owner_oracle() {
          fn second() -> int { return helper(2) }\n\
          fn main() { let r = first() + second() print(\"{r}\") }\n",
     );
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     let (_, cache) = skull_codegen_js::emit::emit_program_cached(&ws, mid).unwrap();
     let stats = cache.abi_plan_stats();
     assert!(

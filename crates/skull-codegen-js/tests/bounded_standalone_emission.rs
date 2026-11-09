@@ -6,16 +6,6 @@
 //!
 use crate::common::ws_with;
 
-fn emit_js(ws: &bone_core::workspace::Workspace) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    skull_codegen_js::emit::emit_program(ws, mid)
-        .map(|p| p.program)
-        .map_err(|e| e.message)
-}
-
 const BOUNDED: &str = r#"
 fn total<I: Iterator<int>>(it: I) -> int {
     let s = 0
@@ -53,7 +43,7 @@ fn main() {
 #[test]
 fn a_bounded_body_emits_standalone_to_js_with_inlining_disabled() {
     let _g = crate::common::InlineOffGuard::on();
-    let js = emit_js(&ws_with(BOUNDED))
+    let js = crate::common::emit_program_js(&ws_with(BOUNDED))
         .expect("a bounded body must emit standalone to JS under its demand");
     let def = js
         .lines()
@@ -86,7 +76,7 @@ fn a_bounded_body_emits_standalone_to_js_with_inlining_disabled() {
 #[test]
 fn an_unbounded_body_emits_to_js_with_inlining_disabled() {
     let _g = crate::common::InlineOffGuard::on();
-    let err = emit_js(&ws_with(CONCRETE)).err();
+    let err = crate::common::emit_program_js(&ws_with(CONCRETE)).err();
     assert!(
         err.is_none(),
         "the same program without a bounded generic must still emit to JS with \
@@ -122,7 +112,8 @@ fn main() {
     CELLS.insert(1, Cell { x: 2.0, y: 3.0 })
 }
 "#;
-    let js = emit_js(&ws_with(source)).expect("column-map initialization must emit");
+    let js = crate::common::emit_program_js(&ws_with(source))
+        .expect("column-map initialization must emit");
     assert!(
         js.contains("__map_col_new_spine") && js.contains("new Map()"),
         "the graph must retain the JS map-spine entry reached by the initializer:\n{js}"
@@ -139,7 +130,8 @@ fn main() {
     print("{field_get(p, .x)}")
 }
 "#;
-    let js = emit_js(&ws_with(source)).expect("the retained field_get boundary must emit");
+    let js = crate::common::emit_program_js(&ws_with(source))
+        .expect("the retained field_get boundary must emit");
     assert!(
         js.lines()
             .any(|line| line.starts_with("function field_get_") && line.contains("_spec_")),

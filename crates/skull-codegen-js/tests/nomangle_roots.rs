@@ -9,30 +9,6 @@ use crate::common::ws_with;
 use rustc_hash::FxHashSet;
 use std::sync::Arc;
 
-fn function(ws: &bone_core::workspace::Workspace, name: &str) -> skull_mir::mir::FuncRef {
-    let module = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let (func, _) = ws
-        .module(module)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == name)
-        .expect("function");
-    skull_mir::mir::FuncRef { module, func }
-}
-
-fn emit_program_js(ws: &bone_core::workspace::Workspace) -> Result<String, String> {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    skull_codegen_js::emit::emit_program(ws, mid)
-        .map(|p| p.program)
-        .map_err(|e| e.message)
-}
-
 #[test]
 fn inline_js_body_roots_nomangle_rock_fn_under_bare_name() {
     let ws = ws_with(
@@ -49,7 +25,7 @@ fn main() {
 }
 "#,
     );
-    let prog = emit_program_js(&ws).expect("emit js program");
+    let prog = crate::common::emit_program_js(&ws).expect("emit js program");
     assert!(
         prog.contains("function web_boot_probe("),
         "@nomangle fn called from an inline(js) body must emit under its bare name:\n{prog}"
@@ -74,7 +50,7 @@ fn main() {
 }
 "#,
     );
-    let prog = emit_program_js(&ws).expect("emit js program");
+    let prog = crate::common::emit_program_js(&ws).expect("emit js program");
     assert!(
         prog.contains("function web_helper_probe(") && prog.contains("return x * 5"),
         "@nomangle inline(js) fn referenced from another inline(js) body must emit verbatim under its bare name:\n{prog}"
@@ -97,9 +73,9 @@ fn main() {
 }
 "#,
     );
-    let main = function(&ws, "main");
-    let launch = function(&ws, "launch_view");
-    let target = function(&ws, "web_view_probe");
+    let main = crate::common::test_fn_ref(&ws, "main");
+    let launch = crate::common::test_fn_ref(&ws, "launch_view");
+    let target = crate::common::test_fn_ref(&ws, "web_view_probe");
     let interner = Arc::new(skull_mir::monoty::MonoInterner::new());
     let roots = [main];
     let graph =

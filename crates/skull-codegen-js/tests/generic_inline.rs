@@ -17,21 +17,7 @@ value Pair { x: int, y: int }
 "#;
 
 fn root(ws: &bone_core::workspace::Workspace) -> FuncRef {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "root")
-        .map(|(fid, _)| fid)
-        .expect("root");
-    FuncRef {
-        module: mid,
-        func: fid,
-    }
+    crate::common::test_fn_ref(ws, "root")
 }
 
 fn definition_headers(js: &str) -> Vec<(String, usize)> {

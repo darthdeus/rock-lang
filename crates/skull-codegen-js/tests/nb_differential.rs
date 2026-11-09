@@ -89,21 +89,6 @@ const ERROR_CASES: &[&str] = &[
     "test_nb_oob_write",
 ];
 
-fn fixture_ws() -> Workspace {
-    let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect();
-    modules.push(
-        skull_parser::parse_module_clean(FIXTURE, ustr::Ustr::from(FIXTURE_MOD))
-            .expect("fixture parse"),
-    );
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
-}
-
 fn find_fn(ws: &Workspace, name: &str) -> FuncRef {
     let mut found = None;
     for &mid in ws.module_ids.values() {
@@ -145,33 +130,8 @@ fn emit_lua_program(ws: &Workspace) -> String {
         .lua
 }
 
-fn run_tool(tool: &str, path: &std::path::Path) -> std::process::Output {
-    crate::common::tool(tool)
-        .arg(path)
-        .output()
-        .unwrap_or_else(|e| panic!("spawn {tool}: {e}"))
-}
-
-fn write_temp(tag: &str, ext: &str, contents: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "skull_js_nbdiff_{}_{tag}.{ext}",
-        std::process::id()
-    ));
-    std::fs::write(&path, contents).expect("write temp program");
-    path
-}
-
-fn run_lines(tool: &str, tag: &str, ext: &str, prog: &str) -> Vec<String> {
-    let path = write_temp(tag, ext, prog);
-    let out = run_tool(tool, &path);
-    let _ = std::fs::remove_file(&path);
-    assert!(
-        out.status.success(),
-        "{tool} exited non-zero.\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout)
+fn run_lines(tool: &str, ext: &str, prog: &str) -> Vec<String> {
+    crate::common::run_program(tool, ext, prog)
         .trim()
         .lines()
         .map(|l| l.trim().to_string())
@@ -183,20 +143,20 @@ fn nb_value_differential() {
     if !crate::common::require_node_and_luajit() {
         return;
     }
-    let ws = fixture_ws();
+    let ws = crate::common::ws_with_named(FIXTURE_MOD, FIXTURE);
     let names: Vec<&str> = VALUE_CASES.iter().map(|(n, _)| *n).collect();
 
     let mut lua = emit_lua_program(&ws);
     for &name in &names {
         lua.push_str(&format!("\nprint(tostring({name}()))"));
     }
-    let lua_lines = run_lines("luajit", "values", "lua", &lua);
+    let lua_lines = run_lines("luajit", "lua", &lua);
 
     let mut js = emit_js_program(&ws, &names);
     for &name in &names {
         js.push_str(&format!("\nconsole.log({name}());"));
     }
-    let js_lines = run_lines("node", "values", "js", &js);
+    let js_lines = run_lines("node", "js", &js);
 
     assert_eq!(lua_lines.len(), VALUE_CASES.len(), "luajit line count");
     assert_eq!(js_lines.len(), VALUE_CASES.len(), "node line count");
@@ -224,13 +184,13 @@ fn nb_checked_oob_errors_on_both_backends() {
     if !crate::common::require_node_and_luajit() {
         return;
     }
-    let ws = fixture_ws();
+    let ws = crate::common::ws_with_named(FIXTURE_MOD, FIXTURE);
     let lua_base = emit_lua_program(&ws);
 
     for &name in ERROR_CASES {
         let lua = format!("{lua_base}\n{name}()");
-        let path = write_temp(&format!("err_{name}"), "lua", &lua);
-        let out = run_tool("luajit", &path);
+        let path = crate::common::write_temp("lua", &lua);
+        let out = crate::common::run_file("luajit", &path);
         let _ = std::fs::remove_file(&path);
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         assert!(!out.status.success(), "{name}: luajit did NOT abort");
@@ -240,8 +200,8 @@ fn nb_checked_oob_errors_on_both_backends() {
         );
 
         let js = format!("{}\n{name}();", emit_js_program(&ws, &[name]));
-        let path = write_temp(&format!("err_js_{name}"), "js", &js);
-        let out = run_tool("node", &path);
+        let path = crate::common::write_temp("js", &js);
+        let out = crate::common::run_file("node", &path);
         let _ = std::fs::remove_file(&path);
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         assert!(!out.status.success(), "{name}: node did NOT abort");
@@ -270,8 +230,8 @@ fn nb_js_checked_set_rejects_nan_into_int_buffer() {
          __nb_checked_set(fb, 0, NaN);\n\
          console.log(thrown && (fb.ptr[0] !== fb.ptr[0]));"
     );
-    let path = write_temp("nan_check", "js", &prog);
-    let out = run_tool("node", &path);
+    let path = crate::common::write_temp("js", &prog);
+    let out = crate::common::run_file("node", &path);
     let _ = std::fs::remove_file(&path);
     assert!(
         out.status.success(),

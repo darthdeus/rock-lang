@@ -41,24 +41,7 @@ fn same_name_user_declarations_are_not_host_supplies() {
             f.name
         );
     }
-    let root = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "root")
-        .unwrap()
-        .0;
-    let js = skull_codegen_js::emit::emit_with_closure(
-        &ws,
-        &[(
-            skull_mir::mir::FuncRef {
-                module: mid,
-                func: root,
-            },
-            "root".into(),
-        )],
-    )
-    .unwrap();
+    let js = crate::common::emit_closure(&ws, "root").unwrap();
     let out = crate::common::node().arg("-e")
         .arg(format!("{js}\nfor (const input of ['user function', '']) {{ if (root(input) !== input) throw Error('user function changed'); }}"))
         .output().expect("node");
@@ -112,25 +95,7 @@ fn map_get_key_is_checked_independently_of_native_buffer_get() {
 
 fn run_root(src: &str, runtime: &str, check: &str) {
     let ws = ws_with(src);
-    let mid = ws.module_ids[&Ustr::from("<test>")];
-    let root = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "root")
-        .unwrap()
-        .0;
-    let js = skull_codegen_js::emit::emit_with_closure(
-        &ws,
-        &[(
-            skull_mir::mir::FuncRef {
-                module: mid,
-                func: root,
-            },
-            "root".into(),
-        )],
-    )
-    .unwrap();
+    let js = crate::common::emit_closure(&ws, "root").unwrap();
     let out = crate::common::node()
         .arg("-e")
         .arg(format!("{runtime}\n{js}\n{check}"))

@@ -15,17 +15,7 @@ fn node_eval_int(defs: &str, call: &str) -> i64 {
         "{}{defs}\nconsole.log({call});",
         skull_codegen_js::JS_CALL_HELPER
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let s = String::from_utf8_lossy(&out.stdout);
+    let s = crate::common::run_node(&program);
     s.trim()
         .parse::<i64>()
         .unwrap_or_else(|_| panic!("node did not print an int: {s:?}\n{program}"))

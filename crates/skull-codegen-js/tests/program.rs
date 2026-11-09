@@ -10,10 +10,7 @@
 use crate::common::{node, ws_with, ws_with_named};
 
 fn emit_program(ws: &bone_core::workspace::Workspace) -> String {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(ws);
     skull_codegen_js::emit::emit_program(ws, mid)
         .unwrap_or_else(|e| panic!("emit_program rejected: {}", e.message))
         .program
@@ -310,10 +307,7 @@ fn lua_and_js_publish_identical_dependency_gated_lifecycle_plans() {
         fn main() {}
     "#,
     );
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     let lua_plan = skull::mir_emit::emit_full(&ws, mid)
         .expect("Lua emit")
         .0
@@ -374,10 +368,7 @@ fn lua_and_js_reject_the_same_unsupported_wire_dependencies() {
             "#
         );
         let ws = ws_with(&source);
-        let mid = *ws
-            .module_ids
-            .get(&ustr::Ustr::from("<test>"))
-            .expect("test module");
+        let mid = crate::common::test_mid(&ws);
         let lua_error = match skull::mir_emit::emit_full(&ws, mid) {
             Ok(_) => panic!("Lua accepted unsupported dependency {annotation}"),
             Err(error) => error.message,
@@ -505,10 +496,7 @@ fn main() {}
         ["beta", "alpha"]
     );
 
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     let lua = skull::mir_emit::emit_full(&ws, mid)
         .expect("Lua parity emission")
         .0
@@ -685,20 +673,7 @@ deco init widget(key: string) {}
 fn root() -> int { return widget_definition_plan().len }
 "#,
     );
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "root")
-        .expect("root");
-    let root = skull_mir::mir::FuncRef {
-        module: mid,
-        func: fid,
-    };
+    let root = crate::common::test_fn_ref(&ws, "root");
     let js = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())])
         .map_err(|e| e.message)
         .expect("accessor call emits");

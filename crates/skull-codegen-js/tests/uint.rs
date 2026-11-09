@@ -1,5 +1,4 @@
-use crate::common::{node, ws_with};
-use skull_mir::mir::FuncRef;
+use crate::common::ws_with;
 
 fn emit_root(src: &str, root: &str) -> String {
     let ws = ws_with(src);
@@ -18,17 +17,8 @@ fn eval(src: &str, expr: &str, expected: &str) {
         skull_codegen_js::JS_STRING_RUNTIME,
         js,
     );
-    let out = node().arg("-e").arg(&program).output().expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        expected,
-        "{program}"
-    );
+    let out = crate::common::run_node(&program);
+    assert_eq!(out.trim(), expected, "{program}");
 }
 
 fn eval_closure(src: &str, expr: &str, expected: &str) {
@@ -36,28 +26,8 @@ fn eval_closure(src: &str, expr: &str, expected: &str) {
         return;
     }
     let ws = ws_with(src);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "root")
-        .map(|(fid, _)| fid)
-        .expect("root");
-    let js = skull_codegen_js::emit::emit_with_closure(
-        &ws,
-        &[(
-            FuncRef {
-                module: mid,
-                func: fid,
-            },
-            "root".to_string(),
-        )],
-    )
-    .unwrap_or_else(|e| panic!("closure emit: {}", e.message));
+    let js =
+        crate::common::emit_closure(&ws, "root").unwrap_or_else(|e| panic!("closure emit: {e}"));
     let program = format!(
         "{}{}{}\n{}\nconsole.log({expr});",
         skull_codegen_js::JS_NB_CHECK_SHIMS,
@@ -65,17 +35,8 @@ fn eval_closure(src: &str, expr: &str, expected: &str) {
         skull_codegen_js::JS_STRING_RUNTIME,
         js,
     );
-    let out = node().arg("-e").arg(&program).output().expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        expected,
-        "{program}"
-    );
+    let out = crate::common::run_node(&program);
+    assert_eq!(out.trim(), expected, "{program}");
 }
 
 #[test]

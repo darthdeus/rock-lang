@@ -92,21 +92,8 @@ fn copied_code_ref_env_shares_logical_slot() {
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_DEEPCOPY_RUNTIME,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        "107",
-        "{program}"
-    );
+    let out = crate::common::run_node(&program);
+    assert_eq!(out.trim(), "107", "{program}");
 }
 
 // A column-stored Vec cannot enter the opaque `clone_into` body, which would
@@ -148,19 +135,6 @@ fn native_buffer_copy_rebuilds_leaf_views_over_its_storage() {
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_DEEPCOPY_RUNTIME,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        "3,9,8,true",
-        "{program}"
-    );
+    let out = crate::common::run_node(&program);
+    assert_eq!(out.trim(), "3,9,8,true", "{program}");
 }

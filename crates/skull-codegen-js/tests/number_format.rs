@@ -12,21 +12,6 @@ use skull_mir::mir::FuncRef;
 const FIXTURE: &str = include_str!("fixtures/number_format.rock");
 const FIXTURE_MOD: &str = "<number_format>";
 
-fn fixture_ws() -> Workspace {
-    let mut modules: Vec<skull_parser::Ast> = rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect();
-    modules.push(
-        skull_parser::parse_module_clean(FIXTURE, ustr::Ustr::from(FIXTURE_MOD))
-            .expect("fixture parse"),
-    );
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
-}
-
 fn find_fn(ws: &Workspace, name: &str) -> FuncRef {
     for &mid in ws.module_ids.values() {
         for (fid, f) in ws.module(mid).functions.iter() {
@@ -41,31 +26,10 @@ fn find_fn(ws: &Workspace, name: &str) -> FuncRef {
     panic!("no fn `{name}` in workspace");
 }
 
-fn write_temp(tag: &str, ext: &str, contents: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "skull_js_numfmt_{}_{tag}.{ext}",
-        std::process::id()
-    ));
-    std::fs::write(&path, contents).expect("write temp program");
-    path
-}
-
-fn run_lines(tool: &str, tag: &str, ext: &str, prog: &str) -> Vec<String> {
-    let path = write_temp(tag, ext, prog);
-    let out = crate::common::tool(tool)
-        .arg(&path)
-        .output()
-        .unwrap_or_else(|e| panic!("spawn {tool}: {e}"));
-    let _ = std::fs::remove_file(&path);
-    assert!(
-        out.status.success(),
-        "{tool} exited non-zero.\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
+fn run_lines(tool: &str, ext: &str, prog: &str) -> Vec<String> {
     // Faithful byte compare: keep every line verbatim (only strip the final
     // trailing newline), no per-line trim -- a stray space WOULD be a divergence.
-    let s = String::from_utf8_lossy(&out.stdout).into_owned();
+    let s = crate::common::run_program(tool, ext, prog);
     s.strip_suffix('\n')
         .unwrap_or(&s)
         .split('\n')
@@ -78,7 +42,7 @@ fn number_tostring_parity_luajit_vs_node() {
     if !crate::common::require_node_and_luajit() {
         return;
     }
-    let ws = fixture_ws();
+    let ws = crate::common::ws_with_named(FIXTURE_MOD, FIXTURE);
     let name = "test_number_battery";
 
     let mid = *ws
@@ -89,7 +53,7 @@ fn number_tostring_parity_luajit_vs_node() {
         .expect("lua emit")
         .lua;
     lua.push_str(&format!("\n{name}()\n"));
-    let lua_lines = run_lines("luajit", "battery", "lua", &lua);
+    let lua_lines = run_lines("luajit", "lua", &lua);
 
     let roots = [(find_fn(&ws, name), name.to_string())];
     let defs = skull_codegen_js::emit::emit_with_closure(&ws, &roots)
@@ -102,7 +66,7 @@ fn number_tostring_parity_luajit_vs_node() {
         skull_codegen_js::JS_NB_CHECK_SHIMS,
         skull_codegen_js::JS_STRING_RUNTIME,
     );
-    let js_lines = run_lines("node", "battery", "js", &js);
+    let js_lines = run_lines("node", "js", &js);
 
     assert_eq!(
         lua_lines, js_lines,
@@ -128,7 +92,7 @@ fn json_float_roundtrip(backend: &str) {
             .expect("lua emit")
             .lua;
         lua.push_str(&format!("\n{name}()\n"));
-        run_lines("luajit", "json_roundtrip", "lua", &lua)
+        run_lines("luajit", "lua", &lua)
     } else {
         let roots = [(find_fn(&ws, name), name.to_string())];
         let defs = skull_codegen_js::emit::emit_with_closure(&ws, &roots)
@@ -136,7 +100,7 @@ fn json_float_roundtrip(backend: &str) {
         let prelude =
             skull_codegen_js::assemble_prelude(&defs, true, skull_codegen_js::JS_NODE_HOST, &[]);
         let js = format!("{prelude}\n{defs}\n{name}();\n");
-        run_lines("node", "json_roundtrip", "js", &js)
+        run_lines("node", "js", &js)
     };
     let mut expected = vec!["true".to_string(); 14 * 4 + 6 + 4];
     expected.push(

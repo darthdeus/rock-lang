@@ -28,10 +28,7 @@ use crate::common::ws_with;
 use skull_mir::mir::FuncRef;
 
 fn emit(ws: &bone_core::workspace::Workspace, root: &str) -> String {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(ws);
     let mut r = None;
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == root {

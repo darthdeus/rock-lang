@@ -34,10 +34,7 @@ fn main() {
 
 fn program() -> skull_codegen_js::emit::JsProgram {
     let ws = ws_with(FIXTURE);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     skull_codegen_js::emit::emit_program(&ws, mid)
         .unwrap_or_else(|e| panic!("emit_program rejected: {}", e.message))
 }

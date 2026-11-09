@@ -7,8 +7,6 @@
 //! Emitted-shape assertions alone cannot tell "flat" from "boxed and unboxed
 //! again", so the round-trips below RUN under node.
 
-use skull_mir::mir::FuncRef;
-
 use crate::common::{lower_test_ref, ws_with};
 
 const SRC: &str = r#"
@@ -63,38 +61,14 @@ fn main() { let _ = unmarked() }
 /// question is reached.
 fn emit_js(name: &str) -> Result<String, String> {
     let ws = ws_with(SRC);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == name)
-        .map(|(fid, _)| fid)
-        .expect("fn in <test>");
-    skull_codegen_js::emit::emit_with_closure(
-        &ws,
-        &[(
-            FuncRef {
-                module: mid,
-                func: fid,
-            },
-            name.to_string(),
-        )],
-    )
-    .map_err(|e| e.message)
+    crate::common::emit_closure(&ws, name)
 }
 
 /// The luajit MIR for `name` -- the control that the same source DID take
 /// columns on the backend that has always had them.
 fn lua_mir(name: &str) -> String {
     let ws = ws_with(SRC);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     let fid = ws
         .module(mid)
         .functions

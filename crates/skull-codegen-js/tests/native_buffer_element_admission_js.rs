@@ -34,10 +34,7 @@ fn main() {
 
 fn emit_main(src: &str) -> Result<String, skull_parser::CompilerError> {
     let ws = ws_with(src);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     let root = ws
         .module(mid)
         .functions

@@ -7,23 +7,6 @@ use crate::common::ws_with;
 use bone_core::hir::BodyOwner;
 use skull_mir::mir::FuncRef;
 
-fn function(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == name)
-        .expect("function");
-    FuncRef {
-        module: mid,
-        func: fid,
-    }
-}
-
 fn instance_count(cache: &skull_codegen_js::emit::JsEmitCache, func: FuncRef) -> usize {
     cache
         .graph()
@@ -49,8 +32,8 @@ fn main() { print(hot() + other()) }\n";
 
     let before = ws_with(BEFORE);
     let after = ws_with(AFTER);
-    let mid = function(&before, "main").module;
-    let pick = function(&before, "pick");
+    let mid = crate::common::test_fn_ref(&before, "main").module;
+    let pick = crate::common::test_fn_ref(&before, "pick");
     let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
 
     let handle = cache.interner_handle();
@@ -65,7 +48,7 @@ fn main() { print(hot() + other()) }\n";
     );
     let type_population = handle.len();
 
-    let hot = function(&after, "hot");
+    let hot = crate::common::test_fn_ref(&after, "hot");
     skull_codegen_js::emit::emit_overlay(
         &after,
         mid,
@@ -104,8 +87,8 @@ fn main() { print(hot()) }\n";
 
     let before = ws_with(BEFORE);
     let after = ws_with(AFTER);
-    let mid = function(&before, "main").module;
-    let pick = function(&before, "pick");
+    let mid = crate::common::test_fn_ref(&before, "main").module;
+    let pick = crate::common::test_fn_ref(&before, "pick");
     let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     assert!(
         cache.interner_handle().len() > 0,
@@ -122,7 +105,7 @@ fn main() { print(hot()) }\n";
         "the full build must retain graph instances"
     );
 
-    let hot = function(&after, "hot");
+    let hot = crate::common::test_fn_ref(&after, "hot");
     let reload = skull_codegen_js::emit::emit_overlay(
         &after,
         mid,
@@ -163,7 +146,7 @@ fn pick<T>(x: T, y: T) -> T { x }\n\
 @nomangle fn hot() -> float { pick(1.0, 2.0) }\n\
 fn main() { print(hot()) }\n";
     let removed_ws = ws_with(REMOVED);
-    let removed_hot = function(&removed_ws, "hot");
+    let removed_hot = crate::common::test_fn_ref(&removed_ws, "hot");
     let removal = skull_codegen_js::emit::emit_overlay(
         &removed_ws,
         mid,
@@ -201,7 +184,7 @@ fn main() { print(hot()) }\n";
         "the removed instance must leave the graph"
     );
 
-    let reintroduced_hot = function(&after, "hot");
+    let reintroduced_hot = crate::common::test_fn_ref(&after, "hot");
     let reintroduced = skull_codegen_js::emit::emit_overlay(
         &after,
         mid,

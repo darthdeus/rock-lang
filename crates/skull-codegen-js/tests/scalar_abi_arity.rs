@@ -21,28 +21,7 @@ use crate::common::ws_with;
 
 fn emit_res(src: &str, root: &str) -> Result<String, String> {
     let ws = ws_with(src);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == root)
-        .map(|(fid, _)| fid)
-        .expect("root fn");
-    skull_codegen_js::emit::emit_with_closure(
-        &ws,
-        &[(
-            FuncRef {
-                module: mid,
-                func: fid,
-            },
-            root.to_string(),
-        )],
-    )
-    .map_err(|e| e.message)
+    crate::common::emit_closure(&ws, root)
 }
 
 /// A generic fn with a trailing defaulted scalar, called at a VALUE-STRUCT
@@ -119,10 +98,7 @@ fn main() {
 "#,
     );
     let interner = Arc::new(skull_mir::monoty::MonoInterner::new());
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     let fid = ws
         .module(mid)
         .functions

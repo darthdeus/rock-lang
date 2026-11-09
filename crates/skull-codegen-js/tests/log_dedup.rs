@@ -20,20 +20,11 @@ fn eval_log(src: &str, expect: &str) {
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_LOG_RUNTIME,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let out = crate::common::run_node(&program);
     // Compare the JSON-encoded buffer (avoids a serde dep): the expected string
     // with `\n` -> `\\n` inside JSON double-quotes.
     let want = format!("\"{}\"", expect.replace('\n', "\\n"));
-    let got = String::from_utf8_lossy(&out.stdout);
+    let got = out;
     assert_eq!(got.trim(), want, "log output\n{program}");
 }
 

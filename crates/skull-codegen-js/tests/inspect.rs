@@ -25,17 +25,7 @@ fn eval_str(src: &str, root: &str) -> String {
         skull_codegen_js::JS_STRUCTURAL_EQ,
         skull_codegen_js::JS_INSPECT_RUNTIME,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let s = String::from_utf8_lossy(&out.stdout);
+    let s = crate::common::run_node(&program);
     s.trim()
         .trim_start_matches("<<<")
         .trim_end_matches(">>>")

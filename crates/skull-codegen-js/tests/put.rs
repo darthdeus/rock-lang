@@ -22,16 +22,7 @@ fn put_writes_raw_no_newline() {
         skull_codegen_js::JS_NB_CHECK_SHIMS,
         skull_codegen_js::JS_STRING_RUNTIME,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let got = String::from_utf8_lossy(&out.stdout);
+    let out = crate::common::run_node(&program);
+    let got = out;
     assert_eq!(got.trim(), "\"ab\\nc\"", "raw buffer content\n{program}");
 }

@@ -29,7 +29,7 @@ fn workspace(source: &str) -> Workspace {
 }
 
 fn root(ws: &Workspace) -> FuncRef {
-    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let mid = crate::common::test_mid(ws);
     let (fid, _) = ws
         .module(mid)
         .functions

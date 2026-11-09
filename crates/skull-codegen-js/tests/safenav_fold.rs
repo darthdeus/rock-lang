@@ -10,44 +10,16 @@
 //! `skull::mir_emit::emit_workspace_mir` + `luajit`, asserted on both sides.
 //! Needs `node` and `luajit`.
 
-use crate::common::{tool, ws_with};
+use crate::common::{run_program, ws_with};
 
-fn write_temp(tag: &str, ext: &str, contents: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "skull_js_safenav_{}_{tag}.{ext}",
-        std::process::id()
-    ));
-    std::fs::write(&path, contents).expect("write temp program");
-    path
-}
-
-fn run_tool(tool_name: &str, tag: &str, ext: &str, prog: &str) -> String {
-    let path = write_temp(tag, ext, prog);
-    let out = tool(tool_name)
-        .arg(&path)
-        .output()
-        .unwrap_or_else(|e| panic!("spawn {tool_name}: {e}"));
-    let _ = std::fs::remove_file(&path);
-    assert!(
-        out.status.success(),
-        "{tool_name} exited non-zero.\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
-}
-
-fn run_both(src: &str, tag: &str) -> (String, String) {
+fn run_both(src: &str) -> (String, String) {
     let ws = ws_with(src);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     let mut lua = skull::mir_emit::emit_workspace_mir(&ws, mid)
         .expect("lua emit")
         .lua;
     lua.push_str("\nmain()\n");
-    let lua_out = run_tool("luajit", tag, "lua", &lua);
+    let lua_out = run_program("luajit", "lua", &lua).trim().to_string();
     let prog = skull_codegen_js::emit::emit_program(&ws, mid)
         .unwrap_or_else(|e| panic!("JS emit rejected: {}", e.message));
     let mut js = skull_codegen_js::assemble_prelude(
@@ -59,12 +31,12 @@ fn run_both(src: &str, tag: &str) -> (String, String) {
     js.push_str(&prog.program);
     let main = prog.main_js_name.as_deref().expect("program has a main");
     js.push_str(&format!("\n{main}();\n"));
-    let js_out = run_tool("node", tag, "js", &js);
+    let js_out = run_program("node", "js", &js).trim().to_string();
     (lua_out, js_out)
 }
 
 fn check(src: &str, tag: &str, expect: &str) {
-    let (lua_out, js_out) = run_both(src, tag);
+    let (lua_out, js_out) = run_both(src);
     assert_eq!(lua_out, expect, "Lua oracle drifted for {tag}");
     assert_eq!(
         js_out, expect,

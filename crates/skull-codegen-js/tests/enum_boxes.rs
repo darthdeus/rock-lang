@@ -34,17 +34,8 @@ fn eval(src: &str, root: &str, tail: &str) -> String {
         preamble(),
         skull_codegen_js::JS_STRING_RUNTIME
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    let out = crate::common::run_node(&program);
+    out.trim().to_string()
 }
 
 fn eval_int(src: &str, root: &str, expect: i64) {
@@ -243,18 +234,9 @@ fn inspect_flat_enum_payload_names_require_exact_leaf_count() {
     if !crate::common::require_node() {
         return;
     }
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let out = crate::common::run_node(&program);
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
+        out.trim(),
         "Event::At {\n  [1] = 1,\n  [2] = 2,\n  [3] = 3\n}\nEvent::Maybe { [1] = 1, [2] = 2 }\nEvent::At {\n  [1] = 1,\n  [2] = 2,\n  x = 99\n}"
     );
 }

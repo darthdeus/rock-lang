@@ -11,34 +11,11 @@
 //! Both now read one oracle, `skull_mir::monoty::too_deep_to_instantiate`, so a
 //! future change to the bound cannot reach one backend and miss the other.
 
-use skull_mir::mir::FuncRef;
-
 use crate::common::ws_with;
 
 fn emit_res(src: &str, root: &str) -> Result<String, String> {
     let ws = ws_with(src);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == root)
-        .map(|(fid, _)| fid)
-        .expect("root fn");
-    skull_codegen_js::emit::emit_with_closure(
-        &ws,
-        &[(
-            FuncRef {
-                module: mid,
-                func: fid,
-            },
-            root.to_string(),
-        )],
-    )
-    .map_err(|e| e.message)
+    crate::common::emit_closure(&ws, root)
 }
 
 /// `rec<T>` calls itself at `[T]`, so every call needs a body for a strictly

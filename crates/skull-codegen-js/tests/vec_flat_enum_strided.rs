@@ -34,10 +34,7 @@ fn exercise() -> int {
 
 fn emit_js() -> String {
     let ws = ws_with(SRC);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     let fid = ws
         .module(mid)
         .functions

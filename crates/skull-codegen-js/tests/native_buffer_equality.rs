@@ -1,5 +1,3 @@
-use skull_mir::mir::FuncRef;
-
 const SRC: &str = r#"
 value P2 { x: float, y: float }
 value Empty {}
@@ -71,24 +69,7 @@ fn flat_vec_equality_checks_live_bytes() -> bool {
 
 fn check(root: &str) {
     let ws = crate::common::ws_with(SRC);
-    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == root)
-        .expect("root");
-    let js = skull_codegen_js::emit::emit_with_closure(
-        &ws,
-        &[(
-            FuncRef {
-                module: mid,
-                func: fid,
-            },
-            root.to_string(),
-        )],
-    )
-    .expect("buffer equality emits");
+    let js = crate::common::emit_closure(&ws, root).expect("buffer equality emits");
     let program = format!(
         "{}{}{}{}\n{js}\nconsole.log({root}());",
         skull_codegen_js::JS_NB_CHECK_SHIMS,
@@ -96,21 +77,8 @@ fn check(root: &str) {
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_STRUCTURAL_EQ,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("node");
-    assert!(
-        out.status.success(),
-        "{root}: {}\n{program}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
-        "true",
-        "{root}"
-    );
+    let out = crate::common::run_node(&program);
+    assert_eq!(out.trim(), "true", "{root}");
 }
 
 #[test]

@@ -11,8 +11,6 @@
 //! the correct answer -- falling back to the boxed body died on
 //! `undefined._data`.
 
-use skull_mir::mir::FuncRef;
-
 use crate::common::ws_with;
 
 const SRC: &str = r#"
@@ -42,28 +40,7 @@ fn main() { let _ = specialized() }
 
 fn emit_js(name: &str) -> Result<String, String> {
     let ws = ws_with(SRC);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == name)
-        .map(|(fid, _)| fid)
-        .expect("fn in <test>");
-    skull_codegen_js::emit::emit_with_closure(
-        &ws,
-        &[(
-            FuncRef {
-                module: mid,
-                func: fid,
-            },
-            name.to_string(),
-        )],
-    )
-    .map_err(|e| e.message)
+    crate::common::emit_closure(&ws, name)
 }
 
 /// Control: the literal DOES take the column layout on JS, so the assertions
@@ -111,17 +88,7 @@ fn a_specialized_column_call_round_trips_under_node() {
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_STRUCTURAL_EQ,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let s = String::from_utf8_lossy(&out.stdout);
+    let s = crate::common::run_node(&program);
     assert_eq!(s.trim(), "11", "wrong result\n{program}");
 }
 
@@ -148,18 +115,9 @@ fn a_column_sort_round_trips_on_js() {
         skull_codegen_js::JS_CALL_HELPER,
         skull_codegen_js::JS_STRUCTURAL_EQ,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let out = crate::common::run_node(&program);
     assert_eq!(
-        String::from_utf8_lossy(&out.stdout).trim(),
+        out.trim(),
         "21",
         "the non-key column did not follow the sort\n{program}"
     );

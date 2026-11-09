@@ -128,10 +128,7 @@ fn main() {
 
 fn whole_program(host: &str) -> String {
     let ws = ws_with(PROGRAM);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     let prog = skull_codegen_js::emit::emit_program(&ws, mid)
         .unwrap_or_else(|e| panic!("emit_program rejected: {}", e.message));
     let mut js = skull_codegen_js::assemble_prelude(&prog.program, prog.has_code_refs(), host, &[]);

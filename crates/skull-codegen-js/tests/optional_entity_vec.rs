@@ -1,8 +1,6 @@
 //! A nullable-Entity Vec keeps the destination field's boxed representation
 //! when a non-empty literal is assigned to it.
 
-use skull_mir::mir::FuncRef;
-
 use crate::common::ws_with;
 
 const SRC: &str = r#"
@@ -60,28 +58,8 @@ fn main() -> int {
 
 fn emit_js() -> String {
     let ws = ws_with(SRC);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "main")
-        .map(|(fid, _)| fid)
-        .expect("main function");
-    skull_codegen_js::emit::emit_with_closure(
-        &ws,
-        &[(
-            FuncRef {
-                module: mid,
-                func: fid,
-            },
-            "main".to_string(),
-        )],
-    )
-    .unwrap_or_else(|e| panic!("nullable Entity Vec must emit: {}", e.message))
+    crate::common::emit_closure(&ws, "main")
+        .unwrap_or_else(|e| panic!("nullable Entity Vec must emit: {e}"))
 }
 
 #[test]
@@ -113,15 +91,6 @@ fn nullable_entity_vec_round_trips_through_node() {
         skull_codegen_js::JS_STRUCTURAL_EQ,
         skull_codegen_js::JS_STRING_RUNTIME,
     );
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- stderr ---\n{}\n--- program ---\n{program}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "41370");
+    let out = crate::common::run_node(&program);
+    assert_eq!(out.trim(), "41370");
 }

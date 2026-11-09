@@ -36,10 +36,7 @@ fn main() {
 #[test]
 fn lua_and_js_open_the_same_global_layout() {
     let ws = ws_with(FIXTURE);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     let lua = skull::mir_emit::emit_workspace_mir(&ws, mid).expect("lua emit");
     let js = skull_codegen_js::emit::emit_program(&ws, mid).expect("js emit");
     assert_eq!(lua.global_layout, js.global_layout);

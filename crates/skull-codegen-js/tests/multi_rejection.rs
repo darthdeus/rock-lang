@@ -129,7 +129,7 @@ inline(lua) fn unsupported_callback_leaf() = "print('native')"
 fn main() {}
 "#,
     );
-    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
+    let mid = crate::common::test_mid(&ws);
     let error = skull_codegen_js::emit::emit_program(&ws, mid)
         .err()
         .expect("callback must reject");

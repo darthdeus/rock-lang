@@ -1,23 +1,5 @@
 use crate::common::ws_with;
 use bone_core::hir::BodyOwner;
-use skull_mir::mir::FuncRef;
-
-fn function(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, function)| function.name.as_str() == name)
-        .expect("function");
-    FuncRef {
-        module: mid,
-        func: fid,
-    }
-}
 
 fn global(
     ws: &bone_core::workspace::Workspace,
@@ -26,10 +8,7 @@ fn global(
     bone_core::prelude::ModuleId,
     bone_core::prelude::Idx<bone_core::hir::GlobalDef>,
 ) {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(ws);
     let (gid, _) = ws
         .module(mid)
         .globals
@@ -123,10 +102,10 @@ fn main() {{ run_wire_systems() }}
     let unrelated = ws_with(&source(1, 10, 8));
     let direct = ws_with(&source(1, 11, 8));
     let transitive = ws_with(&source(4, 11, 8));
-    let mid = function(&before, "main").module;
+    let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) =
         skull_codegen_js::emit::emit_program_cached(&before, mid).expect("initial JS program");
-    let unrelated_fn = function(&unrelated, "unrelated");
+    let unrelated_fn = crate::common::test_fn_ref(&unrelated, "unrelated");
     let direct_global = global(&direct, "DIRECT");
     let base_global = global(&transitive, "BASE");
     let overlay_unrelated = skull_codegen_js::emit::emit_overlay(
@@ -255,10 +234,7 @@ console.log(ok && __rock_definition_plan_pending === null
 #[test]
 fn programs_without_definition_roles_do_not_stage_an_empty_plan() {
     let ws = ws_with("fn main() {}\n");
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     let program = skull_codegen_js::emit::emit_program(&ws, mid)
         .expect("emit program")
         .program;
@@ -289,10 +265,10 @@ fn main() {{}}
     let before = ws_with(&source("alpha", 1));
     let body = ws_with(&source("alpha", 2));
     let membership = ws_with(&source("beta", 2));
-    let mid = function(&before, "main").module;
+    let mid = crate::common::test_fn_ref(&before, "main").module;
     let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid)
         .expect("initial typed catalog program");
-    let changed = function(&body, "make_alpha");
+    let changed = crate::common::test_fn_ref(&body, "make_alpha");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &body,
         mid,
@@ -305,7 +281,7 @@ fn main() {{}}
 
     let (_, mut structural_cache) = skull_codegen_js::emit::emit_program_cached(&before, mid)
         .expect("structural typed catalog program");
-    let changed = function(&membership, "make_alpha");
+    let changed = crate::common::test_fn_ref(&membership, "make_alpha");
     assert!(matches!(
         skull_codegen_js::emit::emit_overlay(
             &membership,
@@ -332,7 +308,7 @@ fn const_value_overlay_redefines_users_without_reinitializing_state() {
          @nomangle fn hot() -> int { WISP_COUNT }\n\
          fn main() { print(hot()) }\n",
     );
-    let mid = function(&before, "main").module;
+    let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let (global_mid, global_id) = global(&after, "WISP_COUNT");
     let overlay = skull_codegen_js::emit::emit_overlay(
@@ -367,7 +343,7 @@ fn const_value_overlay_reinitializes_dependent_constants() {
          @nomangle fn hot() -> int { COUNT }\n\
          fn main() { print(hot()) }\n",
     );
-    let mid = function(&before, "main").module;
+    let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let (global_mid, global_id) = global(&after, "BASE");
     let overlay = skull_codegen_js::emit::emit_overlay(
@@ -400,9 +376,9 @@ fn overlay_redefines_a_function_without_reinitializing_global_state() {
          @nomangle fn hot() -> int { 2 }\n\
          fn main() { print(hot()) }\n",
     );
-    let mid = function(&before, "main").module;
+    let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let hot = function(&after, "hot");
+    let hot = crate::common::test_fn_ref(&after, "hot");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
         mid,
@@ -445,10 +421,10 @@ fn retained_named_and_capture_free_values_refresh_through_slots() {
     };
     let before = ws_with(&source(1, 10));
     let after = ws_with(&source(2, 20));
-    let mid = function(&before, "main").module;
+    let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let named = function(&after, "named");
-    let free = function(&after, "make_free");
+    let named = crate::common::test_fn_ref(&after, "named");
+    let free = crate::common::test_fn_ref(&after, "make_free");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
         mid,
@@ -490,9 +466,9 @@ fn retained_capturing_value_refreshes_while_keeping_mutable_capture() {
     };
     let before = ws_with(&source(0));
     let after = ws_with(&source(10));
-    let mid = function(&before, "main").module;
+    let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let make = function(&after, "make");
+    let make = crate::common::test_fn_ref(&after, "make");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
         mid,
@@ -532,10 +508,10 @@ fn wire_failure_after_publication_keeps_the_candidate_code_ref_live() {
     };
     let before = ws_with(&source(0, ""));
     let after = ws_with(&source(10, "error(\"late overlay failure\")"));
-    let mid = function(&before, "main").module;
+    let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let make = function(&after, "make");
-    let wire = function(&after, "run_wire_systems");
+    let make = crate::common::test_fn_ref(&after, "make");
+    let wire = crate::common::test_fn_ref(&after, "run_wire_systems");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
         mid,
@@ -579,9 +555,9 @@ fn successive_overlays_accumulate_changed_function_definitions() {
          @nomangle fn second() -> int { 20 }\n\
          fn main() { print(first() + second()) }\n",
     );
-    let mid = function(&v0, "main").module;
+    let mid = crate::common::test_fn_ref(&v0, "main").module;
     let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&v0, mid).unwrap();
-    let first = function(&v1, "first");
+    let first = crate::common::test_fn_ref(&v1, "first");
     skull_codegen_js::emit::emit_overlay(
         &v1,
         mid,
@@ -590,7 +566,7 @@ fn successive_overlays_accumulate_changed_function_definitions() {
     )
     .unwrap()
     .expect_overlay();
-    let second = function(&v2, "second");
+    let second = crate::common::test_fn_ref(&v2, "second");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &v2,
         mid,
@@ -626,9 +602,9 @@ fn changed_static_initializer_resets_only_its_live_cell() {
          }\n\
          fn main() { print(hot()) }\n",
     );
-    let mid = function(&before, "main").module;
+    let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let hot = function(&after, "hot");
+    let hot = crate::common::test_fn_ref(&after, "hot");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
         mid,
@@ -658,9 +634,9 @@ fn a_body_edit_that_removes_a_static_drops_its_cells() {
          fn main() { print(hot()) }\n",
     );
     let after = ws_with("@nomangle fn hot() -> int { 7 }\nfn main() { print(hot()) }\n");
-    let mid = function(&before, "main").module;
+    let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let hot = function(&after, "hot");
+    let hot = crate::common::test_fn_ref(&after, "hot");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
         mid,
@@ -697,9 +673,9 @@ fn decorated_function_overlay_refreshes_the_registered_code_ref() {
     };
     let before = ws_with(&source("one"));
     let after = ws_with(&source("two"));
-    let mid = function(&before, "main").module;
+    let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let hot = function(&after, "hot");
+    let hot = crate::common::test_fn_ref(&after, "hot");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
         mid,
@@ -741,9 +717,9 @@ fn unrelated_body_overlay_restages_unchanged_generic_callback_with_concrete_abi(
         fn main() { invoke(); edited() }\n";
     let before = ws_with(source);
     let after = ws_with(&source.replace("fn edited() -> int { 1 }", "fn edited() -> int { 2 }"));
-    let mid = function(&before, "main").module;
+    let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
-    let caller = function(&after, "edited");
+    let caller = crate::common::test_fn_ref(&after, "edited");
     let overlay = skull_codegen_js::emit::emit_overlay(
         &after,
         mid,
@@ -795,10 +771,10 @@ fn static_resets_for_several_edited_functions_emit_in_a_stable_order() {
     };
     let before = ws_with(&source(1));
     let after = ws_with(&source(100));
-    let mid = function(&before, "main").module;
+    let mid = crate::common::test_fn_ref(&before, "main").module;
     let edited: Vec<_> = (0..8)
         .map(|i| {
-            let f = function(&after, &format!("hot{i}"));
+            let f = crate::common::test_fn_ref(&after, &format!("hot{i}"));
             (f.module, BodyOwner::Function(f.func))
         })
         .collect();
@@ -849,7 +825,7 @@ fn main() {
 "#,
     );
     ws.comptime_inputs = inputs;
-    let mid = function(&ws, "main").module;
+    let mid = crate::common::test_fn_ref(&ws, "main").module;
     let program = skull_codegen_js::emit::emit_program(&ws, mid).expect("JS program");
     program
         .code_artifact

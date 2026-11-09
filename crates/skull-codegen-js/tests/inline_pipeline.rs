@@ -116,16 +116,7 @@ try {{ root(99); }} catch (err) {{
 if (!caught) throw new Error("exhaustive match fallback returned");
 "#
         );
-        let out = crate::common::node()
-            .arg("-e")
-            .arg(&program)
-            .output()
-            .expect("spawn node");
-        assert!(
-            out.status.success(),
-            "{program}\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        crate::common::run_node(&program);
     }
 }
 
@@ -197,15 +188,6 @@ for (const first of [true, false]) {{
 }}
 "#
         );
-        let out = crate::common::node()
-            .arg("-e")
-            .arg(&program)
-            .output()
-            .expect("spawn node");
-        assert!(
-            out.status.success(),
-            "{program}\n{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        crate::common::run_node(&program);
     }
 }

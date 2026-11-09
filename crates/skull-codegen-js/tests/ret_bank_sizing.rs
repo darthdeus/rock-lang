@@ -15,34 +15,11 @@
 //! reads "undefined"), which is why the shape check below looks for the
 //! declaration itself.
 
-use skull_mir::mir::FuncRef;
-
 use crate::common::ws_with;
 
 fn emit(src: &str, root: &str) -> String {
     let ws = ws_with(src);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == root)
-        .map(|(fid, _)| fid)
-        .expect("root fn");
-    skull_codegen_js::emit::emit_with_closure(
-        &ws,
-        &[(
-            FuncRef {
-                module: mid,
-                func: fid,
-            },
-            root.to_string(),
-        )],
-    )
-    .unwrap_or_else(|e| panic!("emit: {}", e.message))
+    crate::common::emit_closure(&ws, root).unwrap_or_else(|e| panic!("emit: {e}"))
 }
 
 /// The program's widest MIR wire is 1 (nothing multi-value), so MIR sizing alone
@@ -184,33 +161,9 @@ fn main() { let _ = commented() }
 fn main() { let _ = hand_published() }
 "#,
     );
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "main")
-        .map(|(fid, _)| fid)
-        .expect("root fn");
-    let e = skull_codegen_js::emit::emit_with_closure(
-        &ws,
-        &[(
-            FuncRef {
-                module: mid,
-                func: fid,
-            },
-            "main".to_string(),
-        )],
-    )
-    .expect_err("a hand-published slot must reject");
-    assert!(
-        e.message.contains("scratch bank"),
-        "unexpected rejection: {}",
-        e.message
-    );
+    let e =
+        crate::common::emit_closure(&ws, "main").expect_err("a hand-published slot must reject");
+    assert!(e.contains("scratch bank"), "unexpected rejection: {e}");
 }
 
 /// The control: no published lane and no multi-value wire means no bank at

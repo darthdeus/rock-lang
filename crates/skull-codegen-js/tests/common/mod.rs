@@ -109,6 +109,39 @@ pub fn run_node(program: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// Write `contents` to a temp file unique to this call, for a tool that runs a
+/// file rather than a `-e` argument.
+pub fn write_temp(ext: &str, contents: &str) -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("skull_js_test_{}_{n}.{ext}", std::process::id()));
+    std::fs::write(&path, contents).expect("write temp program");
+    path
+}
+
+/// Run the file at `path` under `name`, panicking only when it cannot spawn.
+pub fn run_file(name: &str, path: &std::path::Path) -> std::process::Output {
+    tool(name)
+        .arg(path)
+        .output()
+        .unwrap_or_else(|e| panic!("spawn {name}: {e}"))
+}
+
+/// Run `prog` from a temp file under `name` and return its stdout. Panics, with
+/// both streams, when the tool exits non-zero.
+pub fn run_program(name: &str, ext: &str, prog: &str) -> String {
+    let path = write_temp(ext, prog);
+    let out = run_file(name, &path);
+    let _ = std::fs::remove_file(&path);
+    assert!(
+        out.status.success(),
+        "{name} exited non-zero.\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 /// The program that prints `<root>()` after the given runtime pieces and defs.
 fn print_root_program(runtime: &[&str], defs: &str, root: &str) -> String {
     format!("{}\n{defs}\nconsole.log({root}());", runtime.concat())
@@ -142,12 +175,23 @@ pub fn eval_str(runtime: &[&str], defs: &str, root: &str, expect: &str) {
     );
 }
 
+/// The id of the `<test>` module.
+pub fn test_mid(ws: &bone_core::workspace::Workspace) -> bone_core::prelude::ModuleId {
+    *ws.module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("test module")
+}
+
+/// Emit the `<test>` module as a whole JS program.
+pub fn emit_program_js(ws: &bone_core::workspace::Workspace) -> Result<String, String> {
+    skull_codegen_js::emit::emit_program(ws, test_mid(ws))
+        .map(|p| p.program)
+        .map_err(|e| e.message)
+}
+
 /// The `<test>` module's fn named `name`.
 pub fn test_fn_ref(ws: &bone_core::workspace::Workspace, name: &str) -> FuncRef {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = test_mid(ws);
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == name {
             return FuncRef {
@@ -216,10 +260,7 @@ pub fn lower_test_ref(
 
 /// Lower the fn named `name` in the `<test>` module (must be unique there).
 pub fn lower_test_fn(ws: &bone_core::workspace::Workspace, name: &str) -> skull_mir::mir::MirFunc {
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = test_mid(ws);
     for (fid, f) in ws.module(mid).functions.iter() {
         if f.name.as_str() == name {
             return lower_test_ref(ws, mid, fid);

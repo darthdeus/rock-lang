@@ -31,17 +31,8 @@ fn f(m: Map<string, int>) -> int {
 /// Run the map-iter prelude + `body`, return trimmed stdout.
 fn node_run(body: &str) -> String {
     let program = format!("{JS_MAP_ITER_RUNTIME}\n{body}");
-    let out = crate::common::node()
-        .arg("-e")
-        .arg(&program)
-        .output()
-        .expect("spawn node");
-    assert!(
-        out.status.success(),
-        "node failed:\n--- program ---\n{program}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8_lossy(&out.stdout).trim().to_string()
+    let out = crate::common::run_node(&program);
+    out.trim().to_string()
 }
 
 /// Drive `__map_next` to exhaustion from a null seed, collecting the keys it

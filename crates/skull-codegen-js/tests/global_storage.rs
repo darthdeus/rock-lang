@@ -17,10 +17,7 @@ fn main() {
 #[test]
 fn mutable_global_accesses_use_the_global_storage() {
     let ws = ws_with(FIXTURE);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     let emitted = skull_codegen_js::emit::emit_program(&ws, mid).expect("JS emit");
     let slot = "__rock_globals[\"global:<test>::COUNTER::value\"]";
     assert!(
@@ -65,10 +62,7 @@ fn main() {
 }
 "#;
     let ws = ws_with(source);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     let emitted = skull_codegen_js::emit::emit_program(&ws, mid).expect("JS emit");
     let main = emitted.main_js_name.expect("main root");
     let mut program = format!(

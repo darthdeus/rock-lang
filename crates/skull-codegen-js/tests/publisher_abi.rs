@@ -20,28 +20,7 @@ use crate::common::ws_with;
 
 fn emit_res(src: &str, root: &str) -> Result<String, String> {
     let ws = ws_with(src);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
-    let fid = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == root)
-        .map(|(fid, _)| fid)
-        .expect("root fn");
-    skull_codegen_js::emit::emit_with_closure(
-        &ws,
-        &[(
-            FuncRef {
-                module: mid,
-                func: fid,
-            },
-            root.to_string(),
-        )],
-    )
-    .map_err(|e| e.message)
+    crate::common::emit_closure(&ws, root)
 }
 
 fn emit(src: &str, root: &str) -> String {
@@ -63,10 +42,7 @@ fn reject(src: &str, root: &str, needle: &str) {
 fn lanes(src: &str, name: &str) -> usize {
     let ws = ws_with(src);
     let scx = ScalarCtx::new(&ws).with_target(bone_core::hir::FnBackend::Js);
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("test module");
+    let mid = crate::common::test_mid(&ws);
     let fid = ws
         .module(mid)
         .functions

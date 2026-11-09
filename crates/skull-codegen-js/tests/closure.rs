@@ -4,7 +4,6 @@
 //! co-emitted under FuncRef-deterministic names; mapped intrinsics stay
 //! templates; anything else rejects with the emitter's own message.
 
-/// FuncRef of the unique fn named `name` in the `<test>` module.
 #[test]
 fn co_emits_plain_rock_callee_transitively() {
     let ws = crate::common::ws_with(

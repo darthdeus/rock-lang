@@ -292,18 +292,8 @@ fn enumerate_arena_emits_through_the_iterator() {
             n
         }",
     );
-    let mid = ws.module_ids[&ustr::Ustr::from("<test>")];
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == "root")
-        .expect("root");
-    let root = skull_mir::mir::FuncRef {
-        module: mid,
-        func: fid,
-    };
+    let root = crate::common::test_fn_ref(&ws, "root");
     if let Err(e) = skull_codegen_js::emit::emit_with_closure(&ws, &[(root, "root".to_string())]) {
-        panic!("enumerate(arena) rejects on JS: {}", e.message);
+        panic!("enumerate(arena) rejects on JS: {e}");
     }
 }
