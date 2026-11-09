@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 
 use bone_core::workspace::Workspace;
 use comfy_la_arena::{Idx, RawIdx};
-use skull_mir::cfg::relooper::{LoopCtx, LoopFrame, LoopTest, StructuredEmit};
+use skull_mir::cfg::relooper::{LoopCtx, LoopFrame, LoopTest, NestingKind, StructuredEmit};
 use skull_mir::cfg::structure::{
     self, CountedBound, CountedLoop, LoopRegion, LoopShapes, Structure,
 };
@@ -395,6 +395,11 @@ struct Emitter<'a> {
     /// Times each inst is used as an operand (by an inst or terminator), dense
     /// by raw inst id. 0 == statement-position (an effectful `Call`) or dead.
     use_count: Vec<u32>,
+    /// Parse-stack units used by the control flow enclosing the emit position,
+    /// one entry per open level, and whether the next branch is an `else if`.
+    nesting: u32,
+    nesting_costs: Vec<u32>,
+    next_branch_chained: bool,
     /// Whether each inst folds into its single use site (dense by raw id):
     /// pure, single-use, same-block. A non-inlinable USED value inst is bound to
     /// a `v<raw>` temp at its program position instead -- so a cell read (`Load`)

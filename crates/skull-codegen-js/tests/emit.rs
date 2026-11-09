@@ -25,16 +25,13 @@ function clamp_fb(c0, c1, c2) {
   if ((v0 < v1)) {
     let v3 = c1;
     return v3;
+  } else
+  if ((c0 > c2)) {
+    let v8 = c2;
+    return v8;
   } else {
-    let v5 = c0;
-    let v6 = c2;
-    if ((v5 > v6)) {
-      let v8 = c2;
-      return v8;
-    } else {
-      let v10 = c0;
-      return v10;
-    }
+    let v10 = c0;
+    return v10;
   }
 }
 "
@@ -42,7 +39,7 @@ function clamp_fb(c0, c1, c2) {
 }
 
 // sign: a tail `if` chain writes each arm straight to the return destination,
-// so the nested diamonds return from every arm and need no result cell.
+// so the chained diamonds return from every arm and need no result cell.
 #[test]
 fn sign_emits_nested_returning_arms() {
     let ws = stdlib_ws();
@@ -53,13 +50,11 @@ function sign_fb(c0) {
   let v0 = c0;
   if ((v0 > 0)) {
     return 1;
+  } else
+  if ((c0 < 0)) {
+    return -1;
   } else {
-    let v4 = c0;
-    if ((v4 < 0)) {
-      return -1;
-    } else {
-      return 0;
-    }
+    return 0;
   }
 }
 "

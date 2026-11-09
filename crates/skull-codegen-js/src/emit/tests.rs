@@ -143,3 +143,45 @@ fn main() {
         error.message
     );
 }
+
+/// The emitted text of `f` from a program that calls it, ending at the next
+/// top-level function so a shared helper's own `else {` cannot match.
+fn emitted_function(src: &str, name: &str) -> Result<String, CompilerError> {
+    let ws = workspace(src);
+    let mid = *ws
+        .module_ids
+        .get(&Ustr::from("<test>"))
+        .expect("test module");
+    let fid = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == name)
+        .map(|(fid, _)| fid)
+        .expect("root");
+    let root = FuncRef {
+        module: mid,
+        func: fid,
+    };
+    let js = emit_with_closure(&ws, &[(root, "root_fn".to_string())])?;
+    let start = js.find("function root_fn").expect("root emitted");
+    let rest = &js[start..];
+    let end = rest[1..].find("\nfunction ").map_or(rest.len(), |i| i + 1);
+    Ok(rest[..end].to_string())
+}
+
+fn else_if_chain(arms: usize) -> String {
+    let mut src = "fn f(x: int) -> int {\n    let r = 0\n    if x == 0 { r = 0 }\n".to_string();
+    for i in 1..arms {
+        src.push_str(&format!("    else if x == {i} {{ r = {i} }}\n"));
+    }
+    src.push_str("    return r\n}\n");
+    src
+}
+
+#[test]
+fn an_else_if_chain_does_not_nest_blocks() {
+    let js = emitted_function(&else_if_chain(8), "f").expect("emits");
+    assert!(!js.contains("} else {"), "chain nested blocks:\n{js}");
+    assert_eq!(js.matches("} else\n").count(), 7, "{js}");
+}

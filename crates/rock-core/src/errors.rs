@@ -62,6 +62,10 @@ pub enum CompilerErrorKind {
     /// rejection because it breaks a LANGUAGE GUARANTEE rather than marking a
     /// backend parity gap.
     NoboxGuaranteeViolated,
+
+    /// The program is valid Rock but goes past a fixed limit of the target it
+    /// compiles to. Not a backend gap: no later emitter work removes it.
+    TargetLimit,
 }
 
 #[derive(Clone, Debug)]

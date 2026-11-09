@@ -31,6 +31,9 @@ mod js_backend_externs_lua;
 #[path = "js_support/js_coroutines.rs"]
 mod js_coroutines;
 #[cfg(feature = "backend-js")]
+#[path = "js_support/js_deep_programs.rs"]
+mod js_deep_programs;
+#[cfg(feature = "backend-js")]
 #[path = "js_support/js_run_gate.rs"]
 mod js_run_gate;
 #[cfg(feature = "backend-js")]

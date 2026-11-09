@@ -39,6 +39,15 @@ pub struct LoopTest {
 
 /// A backend's side of the structured walk. The provided methods are the walk;
 /// the required ones are the backend's state and rendering.
+/// What one more level of nested control flow costs the target's parser.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NestingKind {
+    /// An `if` whose arms open blocks.
+    Branch,
+    /// A `for`/`while` loop.
+    Loop,
+}
+
 pub trait StructuredEmit {
     /// Whether entering the enclosing loop's exit block from a branch arm is
     /// itself a `break` (a `loop {}` whose `break` arm targets the exit).
@@ -106,6 +115,20 @@ pub trait StructuredEmit {
     fn loop_label(&mut self, _header: Idx<Block>) -> String {
         String::new()
     }
+    /// Whether the single `if` that `b` emits may be written directly after
+    /// `else` with no block of its own: `b` has no statement and no other
+    /// reason for the `if` to carry a preamble.
+    fn chains_after_else(&self, _b: Idx<Block>) -> bool {
+        false
+    }
+    /// The next [`Self::enter_nesting`] is a link of an `else if` chain.
+    fn mark_next_branch_chained(&mut self) {}
+    /// Account for one more emitted control-flow level, or reject the body.
+    fn enter_nesting(&mut self, _b: Idx<Block>, _kind: NestingKind) -> Result<(), CompilerError> {
+        Ok(())
+    }
+    fn exit_nesting(&mut self) {}
+
     fn enter_loop(&mut self, _frame: LoopFrame) {}
     fn exit_loop(&mut self) {}
 
@@ -226,6 +249,69 @@ pub trait StructuredEmit {
         stop: Option<Idx<Block>>,
         ctx: LoopCtx,
     ) -> Result<Option<Idx<Block>>, CompilerError> {
+        self.enter_nesting(blk, NestingKind::Branch)?;
+        let next = self.emit_branch_arms(blk, cond, then_bb, else_bb, stop, ctx);
+        self.exit_nesting();
+        next
+    }
+
+    /// Whether the else arm `b` is nothing but an `if` that can follow `else`
+    /// directly: the arm must emit no statement of its own and every path
+    /// through that `if` must end at the same place the arm would.
+    fn else_arm_chains(&self, b: Idx<Block>, arm_stop: Option<Idx<Block>>, ctx: LoopCtx) -> bool {
+        // The arm can open on empty forwarding blocks, which emit nothing.
+        let mut b = b;
+        loop {
+            if Some(b) == arm_stop || Some(b) == ctx.brk || Some(b) == ctx.cont {
+                return false;
+            }
+            match self.empty_forward(b) {
+                Some(next) if !self.is_active(next) => b = next,
+                _ => break,
+            }
+        }
+        if !self.chains_after_else(b) {
+            return false;
+        }
+        let Term::Branch {
+            then_bb, else_bb, ..
+        } = self.mir().blocks[b].term
+        else {
+            return false;
+        };
+        let merge = self
+            .structure()
+            .ipdom(b)
+            .filter(|&m| Some(m) != ctx.cont && Some(m) != ctx.brk);
+        match merge {
+            Some(m) => self.forwards_to(m, arm_stop, ctx),
+            None => self.empty_forward(then_bb).is_none() && self.empty_forward(else_bb).is_none(),
+        }
+    }
+
+    /// Whether control entering `m` reaches `target` through only empty
+    /// forwarding blocks, so nothing is emitted on the way there.
+    fn forwards_to(&self, mut m: Idx<Block>, target: Option<Idx<Block>>, ctx: LoopCtx) -> bool {
+        loop {
+            if Some(m) == target {
+                return true;
+            }
+            match self.empty_forward(m) {
+                Some(next) if Some(next) != ctx.cont && Some(next) != ctx.brk => m = next,
+                _ => return false,
+            }
+        }
+    }
+
+    fn emit_branch_arms(
+        &mut self,
+        blk: Idx<Block>,
+        cond: Idx<Inst>,
+        then_bb: Idx<Block>,
+        else_bb: Idx<Block>,
+        stop: Option<Idx<Block>>,
+        ctx: LoopCtx,
+    ) -> Result<Option<Idx<Block>>, CompilerError> {
         let cond_s = self.render_cond(cond)?;
         let (cond_s, then_bb, else_bb) = self.fold_branch(cond_s, then_bb, else_bb)?;
         // The merge is ipdom, unless an arm diverges (ipdom collapses to the
@@ -265,6 +351,15 @@ pub trait StructuredEmit {
         *self.indent() += 1;
         self.emit_seq(then_bb, arm_stop, ctx)?;
         *self.indent() -= 1;
+        // No block and no indent for an `else if`: nesting costs parse stack on
+        // both sides of the emitted text, and indenting by chain length makes
+        // the text quadratic in the number of links.
+        if self.else_arm_chains(else_bb, arm_stop, ctx) {
+            self.push("} else");
+            self.mark_next_branch_chained();
+            self.emit_seq(else_bb, arm_stop, ctx)?;
+            return Ok(merge);
+        }
         self.push("} else {");
         *self.indent() += 1;
         self.emit_seq(else_bb, arm_stop, ctx)?;
@@ -278,6 +373,7 @@ pub trait StructuredEmit {
     /// empty. `continue` targets the latch (the increment runs it); `break`
     /// targets the exit.
     fn emit_counted(&mut self, header: Idx<Block>, li: CountedLoop) -> Result<(), CompilerError> {
+        self.enter_nesting(header, NestingKind::Loop)?;
         let (slot, bound) = self.counted_slot_bound(&li)?;
         let cmp = if li.inclusive { "<=" } else { "<" };
         let label = self.loop_label(header);
@@ -300,6 +396,7 @@ pub trait StructuredEmit {
         self.exit_loop();
         *self.indent() -= 1;
         self.push("}");
+        self.exit_nesting();
         Ok(())
     }
 
@@ -317,6 +414,7 @@ pub trait StructuredEmit {
         };
         let test = self.loop_test(region)?;
 
+        self.enter_nesting(h, NestingKind::Loop)?;
         self.set_active(h, true);
         let label = self.loop_label(h);
         self.push(&format!("{label}while (true) {{"));
@@ -350,6 +448,7 @@ pub trait StructuredEmit {
         *self.indent() -= 1;
         self.push("}");
         self.set_active(h, false);
+        self.exit_nesting();
         Ok(())
     }
 

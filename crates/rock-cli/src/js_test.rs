@@ -290,7 +290,9 @@ fn js_build_file(file: &str) -> JsUnitOutcome {
             };
         }
     };
-    js_run_tests(&ws, &tests)
+    js_run_tests(&ws, &tests, &|e| {
+        crate::skull_backend::render_file_errs(file, &src, std::slice::from_ref(e))
+    })
 }
 
 /// A `stick.toml` package built as ONE workspace (tests included), mirroring
@@ -346,7 +348,9 @@ fn js_build_package(dir: &str) -> JsUnitOutcome {
             };
         }
     };
-    js_run_tests(&ws, &tests)
+    js_run_tests(&ws, &tests, &|e| {
+        crate::skull_backend::render_project_errs(&sources, std::slice::from_ref(e))
+    })
 }
 
 /// The luajit driver's compile-failure rule, shared verbatim: a bone rejection
@@ -368,12 +372,13 @@ fn js_compile_failure(file: &str, src: &str, errs: &[rock_core::CompilerError]) 
 fn js_run_tests(
     ws: &bone_semantic::inference::Workspace,
     tests: &[(FuncRef, skull::SkullTest)],
+    render: &dyn Fn(&rock_core::CompilerError) -> String,
 ) -> JsUnitOutcome {
     let (on_js, elsewhere): (Vec<_>, Vec<_>) = tests
         .iter()
         .cloned()
         .partition(|(_, t)| t.runs_on(bone_core::annotations::TestBackend::Js));
-    match js_run_applicable_tests(ws, &on_js) {
+    match js_run_applicable_tests(ws, &on_js, render) {
         JsUnitOutcome::Ran {
             passed,
             fails,
@@ -394,6 +399,7 @@ fn js_run_tests(
 fn js_run_applicable_tests(
     ws: &bone_semantic::inference::Workspace,
     tests: &[(FuncRef, skull::SkullTest)],
+    render: &dyn Fn(&rock_core::CompilerError) -> String,
 ) -> JsUnitOutcome {
     let mut fails: Vec<String> = Vec::new();
     let mut skips: Vec<(String, Vec<String>)> = Vec::new();
@@ -413,6 +419,12 @@ fn js_run_applicable_tests(
         match emitted {
             Ok(Ok(js)) => supported.push((i, js)),
             Ok(Err(e)) if is_decorator_populated_reject(&e.message) => deco_pending.push(i),
+            Ok(Err(e)) if e.kind == rock_core::errors::CompilerErrorKind::TargetLimit => {
+                return JsUnitOutcome::UnitFail {
+                    reason: e.message.clone(),
+                    rendered: render(&e),
+                };
+            }
             Ok(Err(e)) => skips.push((t.name.clone(), all_reasons(&e))),
             Err(panic) => {
                 let msg = panic
@@ -514,6 +526,12 @@ fn js_run_applicable_tests(
     // bug), surfaced with the program for diagnosis -- never silently absorbed.
     let markers = match parse_skull_markers(&run.stdout) {
         Some(m) if m.passed + m.fails.len() + m.values.len() == meta.len() => m,
+        _ if run.stderr.contains("Maximum call stack size exceeded") => {
+            return JsUnitOutcome::UnitFail {
+                reason: "emitted program too deeply nested for node's parser".to_string(),
+                rendered: run.stderr,
+            };
+        }
         _ => {
             return JsUnitOutcome::UnitFail {
                 reason: "invalid JS emitted (js backend bug)".to_string(),

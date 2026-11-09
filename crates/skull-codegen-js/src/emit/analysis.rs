@@ -166,8 +166,86 @@ pub(super) fn compute_inlinable_over(mf: &MirFunc, blocks: &[Idx<Block>]) -> (Ve
             }
         }
     }
+    inline_loads_before_branch(mf, blocks, &use_count, &use_block, &mut inl);
     skull_mir::sinking::preserve_effect_order(mf, blocks, &mut inl);
+    cap_inline_depth(mf, blocks, &mut inl);
     (use_count, inl)
+}
+
+/// Fold the cell reads of an `else if` link into its condition. A link holding
+/// only reads and pure values has no statement of its own once they fold, so it
+/// can follow `else` directly; nothing in it can write the cell it reads.
+fn inline_loads_before_branch(
+    mf: &MirFunc,
+    blocks: &[Idx<Block>],
+    use_count: &[u32],
+    use_block: &[u32],
+    inl: &mut [bool],
+) {
+    let mut else_arms = vec![false; mf.blocks.len()];
+    for &b in blocks {
+        if let Term::Branch { else_bb, .. } = mf.blocks[b].term {
+            let mut arm = else_bb;
+            // Bounded by the block count: a cycle of empty blocks must not hang.
+            for _ in 0..mf.blocks.len() {
+                else_arms[raw(arm) as usize] = true;
+                match mf.blocks[arm].term {
+                    Term::Goto(next) if mf.blocks[arm].insts.is_empty() => arm = next,
+                    _ => break,
+                }
+            }
+        }
+    }
+    for &b in blocks {
+        let insts = &mf.blocks[b].insts;
+        if !else_arms[raw(b) as usize]
+            || !matches!(mf.blocks[b].term, Term::Branch { .. })
+            || !insts
+                .iter()
+                .all(|&id| matches!(mf.insts[id], Inst::Load(_)) || always_inlinable(&mf.insts[id]))
+        {
+            continue;
+        }
+        for &id in insts {
+            let k = raw(id) as usize;
+            if matches!(mf.insts[id], Inst::Load(_)) && use_count[k] == 1 && use_block[k] == raw(b)
+            {
+                inl[k] = true;
+            }
+        }
+    }
+}
+
+/// The deepest expression a chain of inlinable values may fold into. Node's
+/// parser overflows its stack near 1800 nested parentheses; the cap sits far
+/// below that and costs one temp per 64 levels, which only long `a + b + ...`
+/// chains ever reach.
+const MAX_INLINE_DEPTH: u32 = 64;
+
+/// Materialize a value wherever folding it would nest deeper than
+/// [`MAX_INLINE_DEPTH`]; its consumers then start over at depth one.
+fn cap_inline_depth(mf: &MirFunc, blocks: &[Idx<Block>], inl: &mut [bool]) {
+    let mut depth = vec![0u32; mf.insts.len()];
+    for &b in blocks {
+        for &id in &mf.blocks[b].insts {
+            let k = raw(id) as usize;
+            if !inl[k] {
+                continue;
+            }
+            let mut d = 0;
+            for_each_operand(&mf.insts[id], &mut |u| {
+                let j = raw(u) as usize;
+                if inl[j] {
+                    d = d.max(depth[j]);
+                }
+            });
+            if d >= MAX_INLINE_DEPTH {
+                inl[k] = false;
+            } else {
+                depth[k] = d + 1;
+            }
+        }
+    }
 }
 
 /// Materialized value temps (raw inst ids) whose use crosses their defining

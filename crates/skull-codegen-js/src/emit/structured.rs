@@ -2,6 +2,16 @@
 
 use super::*;
 
+// V8's parser recurses per nesting level, and these costs are its stack use
+// relative to each other (in half-units of one `else if` link), measured on
+// node 22 at its default stack size: 3700 `else if` links, 1500 nested blocks
+// or 680 loop-and-`if` pairs exhaust it. The budget leaves a small margin below
+// that; a body that gets past the estimate still fails loudly at load.
+const NESTING_COST_ELSE_IF: u32 = 2;
+const NESTING_COST_BRANCH: u32 = 5;
+const NESTING_COST_LOOP: u32 = 6;
+const MAX_NESTING: u32 = 7200;
+
 impl StructuredEmit for Emitter<'_> {
     const BREAK_ON_EXIT_ENTRY: bool = true;
     // The empty-arm shortcut resumes the live arm at the empty arm's target,
@@ -193,6 +203,49 @@ impl StructuredEmit for Emitter<'_> {
         loop_marker(self.mf, header)
     }
 
+    fn chains_after_else(&self, b: Idx<Block>) -> bool {
+        let Term::Branch {
+            then_bb, else_bb, ..
+        } = self.mf.blocks[b].term
+        else {
+            return false;
+        };
+        if self.block_has_statement(b)
+            || self.visited.contains(&b)
+            || self.active.contains(&b)
+            || self.counted.contains_key(&b)
+            || self.general.contains_key(&b)
+        {
+            return false;
+        }
+        // A fold emits the folded block's reads ahead of the `if`.
+        !self.fold_fires(then_bb, else_bb)
+    }
+
+    fn mark_next_branch_chained(&mut self) {
+        self.next_branch_chained = true;
+    }
+
+    fn enter_nesting(&mut self, b: Idx<Block>, kind: NestingKind) -> Result<(), CompilerError> {
+        let cost = match kind {
+            NestingKind::Branch if std::mem::take(&mut self.next_branch_chained) => {
+                NESTING_COST_ELSE_IF
+            }
+            NestingKind::Branch => NESTING_COST_BRANCH,
+            NestingKind::Loop => NESTING_COST_LOOP,
+        };
+        self.nesting_costs.push(cost);
+        self.nesting += cost;
+        if self.nesting > MAX_NESTING {
+            return Err(self.nesting_error(b));
+        }
+        Ok(())
+    }
+
+    fn exit_nesting(&mut self) {
+        self.nesting -= self.nesting_costs.pop().expect("balanced enter_nesting");
+    }
+
     fn enter_loop(&mut self, frame: LoopFrame) {
         self.loop_stack.push(frame);
     }
@@ -209,6 +262,37 @@ impl Emitter<'_> {
 
     pub(super) fn is_runtime_value(&self, v: Idx<Inst>) -> bool {
         matches!(&self.mf.insts[v], Inst::Global(n) if is_runtime_global(n))
+    }
+
+    fn fold_fires(&self, then_bb: Idx<Block>, else_bb: Idx<Block>) -> bool {
+        self.foldable_branch(then_bb)
+            .is_some_and(|(_, _, e2)| e2 == else_bb)
+            || self
+                .foldable_branch(else_bb)
+                .is_some_and(|(_, t2, _)| t2 == then_bb)
+    }
+
+    /// The rejection for a body whose control flow is too deep for V8.
+    fn nesting_error(&self, b: Idx<Block>) -> CompilerError {
+        let term = &self.mf.blocks[b].term;
+        let mut cond = None;
+        term.uses_each(&mut |v| cond = cond.or(Some(v)));
+        let span = cond
+            .into_iter()
+            .chain(self.mf.blocks[b].insts.iter().copied())
+            .find_map(|i| self.mf.inst_spans.get(i).copied())
+            .unwrap_or_default();
+        let mut error = CompilerError::new_with_label(
+            span,
+            format!(
+                "`{}` nests control flow too deeply for the JS backend: node's parser runs out \
+                 of stack on the emitted function. Split it into smaller functions or flatten \
+                 the nesting",
+                self.mf.name
+            ),
+        );
+        error.kind = skull_parser::CompilerErrorKind::TargetLimit;
+        error
     }
 
     /// Whether inst `iid` produces a statement in [`Self::emit_block_effects`]:
