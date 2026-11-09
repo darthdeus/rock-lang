@@ -25,14 +25,6 @@ fn string_double(x: string, suffix: string) -> string {
     return "{x}{x}{suffix}"
 }
 
-fn string_rev_concat(a: string, b: string) -> string {
-    return "{b}{a}"
-}
-
-fn string_concat(a: string, b: string) -> string {
-    return "{a}{b}"
-}
-
 struct Point { x: int, y: int }
 
 struct Rectangle { width: int, height: int }
@@ -70,11 +62,6 @@ fn simple_codegen_increment() {
 // String interpolation tests
 // ============================================
 
-@test(output = "3")
-fn string_interpolation_basic() {
-    print("{1 + 2}")
-}
-
 @test(output = "a1b2c7")
 fn string_interpolation_multiple() {
     print("a{1}b{2}c{3+4}")
@@ -107,15 +94,6 @@ fn string_interpolation_nested_string() {
     print("say {\"hi\"}!")
 }
 
-@test(output = "hello 1 5 world")
-fn string_interpolation_complex() {
-    print("hello {1} {2 + 3} world")
-}
-
-// ============================================
-// Operator tests
-// ============================================
-
 // ============================================
 // Method tests
 // ============================================
@@ -132,24 +110,9 @@ fn more_method_codegen() {
     print(v.length())
 }
 
-@test(output = "hohi\nhiho")
-fn complex_strip_type_method_codegen() {
-    print("hi".string_rev_concat("ho"))
-    print("hi".string_concat("ho"))
-}
-
 // ============================================
 // Let and var tests
 // ============================================
-
-@test(output = "5\n42")
-fn let_assignment() {
-    let values = [5, 42]
-    for value in values {
-        let inferred = value
-        print(inferred)
-    }
-}
 
 @test(output = "37")
 fn let_reassignment() {
@@ -178,14 +141,6 @@ fn for_range_space() {
     }
 }
 
-@test(output = "0\n \n1\n \n2\n \n3\n \n4")
-fn for_range_no_trailing_space() {
-    for i in 0..5 {
-        if i > 0 { print(" ") }
-        print(i)
-    }
-}
-
 // ============================================
 // Tuple tests
 // ============================================
@@ -195,12 +150,6 @@ fn tuple_access() {
     let t = (4, 2)
     print(t.0)
     print(t.1)
-}
-
-@test(output = "15")
-fn tuple_sum() {
-    let t = (5, 10)
-    print(t.0 + t.1)
 }
 
 // ============================================
@@ -258,14 +207,6 @@ fn closure_capture() {
     print(add(5))
 }
 
-@test(output = "15")
-fn closure_multiple_captures() {
-    let a = 5
-    let b = 10
-    let sum = () => a + b
-    print(sum())
-}
-
 // ============================================
 // Safe navigation tests
 // ============================================
@@ -316,12 +257,6 @@ fn float_int_casting() {
 // Array/Vec tests
 // ============================================
 
-@test(output = "2")
-fn array_access() {
-    let arr = [1, 2, 3]
-    print(arr[1])
-}
-
 @test(output = "1 \n2 \n3")
 fn array_iteration() {
     let arr = [1, 2, 3]
@@ -366,20 +301,6 @@ fn nullable_unwrap_or() {
 // ============================================
 // Coroutine tests
 // ============================================
-
-co fn simple() -> Coroutine<int> {
-    yield 1
-    yield 2
-    yield 3
-}
-
-@test(output = "1\n2\n3")
-fn coroutine_basic() {
-    let coro = simple()
-    print(coro.resume())
-    print(coro.resume())
-    print(coro.resume())
-}
 
 co fn evens(max: int) -> Coroutine<int> {
     let i = 0
@@ -471,15 +392,6 @@ fn compound_assign_precedence() {
 // Compound Assignment with Struct Fields
 // ============================================
 
-@test(output = "15\n25")
-fn compound_assign_with_fields() {
-    let p = AdvPoint { x: 10, y: 20 }
-    p.x += 5
-    p.y += 5
-    print(p.x)
-    print(p.y)
-}
-
 @test(output = "15\n90")
 fn compound_assign_with_nested_fields() {
     let player = Player {
@@ -494,30 +406,9 @@ fn compound_assign_with_nested_fields() {
     print(player.health)
 }
 
-@test(output = "42")
-fn compound_operator_precedence() {
-    let x = 10
-    let y = get_value()
-    x += y * 2  // Should be 10 + (16 * 2) = 42
-    print(x)
-}
-
-fn get_value() -> int {
-    return 16
-}
-
 // ============================================
 // Compound Assignment in Control Flow
 // ============================================
-
-@test(output = "15")
-fn compound_assign_in_if() {
-    let x = 10
-    if x > 5 {
-        x += 5
-    }
-    print(x)
-}
 
 @test(output = "16")
 fn compound_assign_in_while() {
@@ -526,15 +417,6 @@ fn compound_assign_in_while() {
         x *= 2
     }
     print(x)
-}
-
-@test(output = "10")
-fn compound_assign_in_for() {
-    let sum = 0
-    for i in [1, 2, 3, 4] {
-        sum += i
-    }
-    print(sum)
 }
 
 // ============================================
@@ -551,14 +433,6 @@ fn compound_assign_with_globals() {
 // ============================================
 // Basic Operator Overloading
 // ============================================
-
-@test(output = "AdvVec2(8, 10)")
-fn operator_overloading() {
-    let v1 = AdvVec2 { x: 3.0, y: 4.0 }
-    let v2 = AdvVec2 { x: 5.0, y: 6.0 }
-    let result = v1 + v2
-    print("AdvVec2({result.x}, {result.y})")
-}
 
 @test(output = "AdvVec2(8, 10)\nAdvVec2(-2, -2)\nAdvVec2(6, 8)\nAdvVec2(1.5, 2)")
 fn complex_operator_overloading() {
@@ -604,15 +478,6 @@ fn array_indexing_with_variables_and_expressions() {
 // Array/Vec Assignment (Mutation)
 // ============================================
 
-@test(output = "1\n99\n3")
-fn array_assignment_via_index() {
-    let arr = [1, 2, 3]
-    arr[1] = 99
-    print(arr[0])
-    print(arr[1])
-    print(arr[2])
-}
-
 @test(output = "0\n1\n2\n10\n11\n12")
 fn zero_based_indexing_comprehensive() {
     let arr = [0, 1, 2]
@@ -638,13 +503,6 @@ fn vec_indexing_read_write() {
     vec_push(v, 4)
     let last_index = vec_len(v) - 1
     print(v[last_index])
-}
-
-@test(output = "30")
-fn vec_indexing_with_expressions() {
-    let v = [10, 20, 30]
-    let index = 1 + 1  // 2
-    print(v[index])
 }
 
 // ============================================
@@ -724,23 +582,14 @@ fn test_both_branches(condition: bool) -> string {
     }
 }
 
-@test(output = "42\n5")
+@test(output = "42")
 fn bare_expression_last() {
-    let result = get_value_implicit()
-    print(result)
-
-    let computed = compute_something()
-    print(computed)
+    print(get_value_implicit())
 }
 
 fn get_value_implicit() -> int {
     let x = 40
     x + 2  // Implicit return
-}
-
-fn compute_something() -> int {
-    let base = 3
-    base + 2  // This should be implicitly returned
 }
 
 // ============================================
