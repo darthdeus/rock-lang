@@ -217,3 +217,11 @@ fn interpolation_rounds_exact_ties_to_even() {
     assert_eq("{tie}", "1.0312")
     assert_eq("{-tie}", "-1.0312")
 }
+
+// log10 of the double nearest 1e31 rounds up to exactly 31, one above its
+// true decimal exponent.
+@test
+fn seventeen_digits_just_below_a_power_of_ten() {
+    let value = 1e15 * [1e16][0]
+    assert_eq("{value:.17g}", "9.9999999999999996e+30")
+}

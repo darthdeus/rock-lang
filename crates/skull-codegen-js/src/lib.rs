@@ -955,7 +955,9 @@ function __rock_inspect_struct(header, t, declared, indent, path, visited, preci
     }
   }
   if (extra) pairs.sort(function(a, b) { return __rock_inspect_key_lt(a[0], b[0]); });
-  if (pairs.length <= 2) {
+  if (pairs.length === 0 && header === "") {
+    result = "{}";
+  } else if (pairs.length <= 2) {
     var cparts = pairs.map(function(kv) {
       return kv[0] + " = " + __rock_inspect_value(kv[1], indent, path + "." + kv[0], visited, precision);
     });
@@ -1123,7 +1125,9 @@ function __rock_inspect_value(v, indent, path, visited, precision) {
     }
     return lua_tostring(k);
   };
-  if (pairs.length <= 2) {
+  if (pairs.length === 0 && header === "") {
+    result = "{}";
+  } else if (pairs.length <= 2) {
     var cparts = pairs.map(function(kv) {
       return keyStr(kv[0]) + " = " + __rock_inspect_value(kv[1], indent, path + "." + pathKey(kv[0]), visited, precision);
     });
@@ -1573,6 +1577,9 @@ function __bigdigits(ax, P) {
     return q;
   }
   var D = Math.floor(Math.log10(ax));
+  // log10 can round up to an integer for a value just below 10^D. Rounding at
+  // that scale may still produce P digits, so the length check below misses it.
+  if (D >= 0 ? num < den * 10n ** BigInt(D) : num * 10n ** BigInt(-D) < den) D -= 1;
   var N = roundHalfEven(D - P + 1), s = N.toString();
   // A wrong log10 estimate or a carry (999->1000) yields P+/-1 digits; re-round
   // at the corrected exponent.

@@ -334,3 +334,9 @@ enum Status {
     assert("{\"hello\"}" == "hello", "String interpolation")
     assert("{3.14159}" == "3.1416", "Float interpolation with default precision")
 }
+
+@test
+fn test_inspect_empty_map() {
+    let m: Map<string, int> = map_new()
+    assert_eq(inspect(m), "{{}}")
+}
