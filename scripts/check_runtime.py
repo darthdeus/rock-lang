@@ -7,9 +7,61 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import tarfile
 import tempfile
+
+
+def timeout_evidence(group, temporary, output):
+    output.mkdir()
+    processes = []
+    for directory in Path('/proc').glob('[0-9]*'):
+        pid = int(directory.name)
+        try:
+            if os.getpgid(pid) != group:
+                continue
+        except ProcessLookupError:
+            continue
+        row = dict(pid=pid, threads={})
+        for field in ('cmdline', 'status'):
+            try:
+                row[field] = (directory / field).read_text().replace('\0', ' ')
+            except OSError as error:
+                row[field] = str(error)
+        for thread in (directory / 'task').glob('[0-9]*'):
+            try:
+                row['threads'][thread.name] = (thread / 'wchan').read_text()
+            except OSError as error:
+                row['threads'][thread.name] = str(error)
+        processes.append(row)
+    (output / 'processes.json').write_text(json.dumps(processes, indent=2) + '\n')
+    for source in temporary.rglob('*.log'):
+        target = output / source.relative_to(temporary)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+
+
+def run_logged(command, *, cwd, env, output, name, timeout=180):
+    log = output / f'{name}.log'
+    # Keep output live: a timeout must not discard the only progress evidence.
+    with log.open('w') as stream:
+        process = subprocess.Popen(command, cwd=cwd, env=env, stdout=stream,
+                                   stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            try:
+                timeout_evidence(process.pid, Path(env['TMPDIR']), output / f'{name}-timeout')
+            finally:
+                # The shell, test VM and profiler child all belong to this invocation.
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            raise
+    return subprocess.CompletedProcess(command, code, stdout=log.read_text())
 
 
 def check(archive, output):
@@ -36,9 +88,10 @@ def check(archive, output):
         rock = install / 'bin/rock'
         # The container owns resource containment; it has no systemd user manager.
         env = dict(os.environ, PATH=f'{install}/bin:' + os.environ['PATH'],
-                   HOME=str(root / 'home'), LIBGL_ALWAYS_SOFTWARE='1',
+                   HOME=str(root / 'home'), TMPDIR=str(root / 'tmp'), LIBGL_ALWAYS_SOFTWARE='1',
                    ROCK_INVOCATION_LOG='off', ROCK_HEADLESS_SCOPE='0')
         Path(env['HOME']).mkdir()
+        Path(env['TMPDIR']).mkdir()
         work = root / 'project'
         work.mkdir()
         results = []
@@ -47,10 +100,8 @@ def check(archive, output):
             command = [str(rock), *map(str, args)]
             if display:
                 command = ['xvfb-run', '-a', '-s', '-screen 0 1280x720x24', *command]
-            result = subprocess.run(command, cwd=work, env=env | (extra_env or {}),
-                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                    text=True, timeout=180)
-            (output / f'{name}.log').write_text(result.stdout)
+            result = run_logged(command, cwd=work, env=env | (extra_env or {}),
+                                output=output, name=name)
             assert result.returncode == 0, f'{name}: exit {result.returncode}\n{result.stdout}'
             assert 'Error in frame:' not in result.stdout, result.stdout
             if expected is not None:
