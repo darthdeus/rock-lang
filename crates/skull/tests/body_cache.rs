@@ -2,6 +2,7 @@
 //! was built from is unchanged, and never changes the emitted text.
 
 use crate::common::{module_id, ws_of_files};
+use bone_semantic::inference::{ComptimeInputs, ComptimeVarValue};
 use rustc_hash::FxHashMap;
 use skull::mir_emit::{BodyCache, BodyCacheConfig, FullEmit, MirEmit};
 use std::sync::Arc;
@@ -47,7 +48,17 @@ fn emit_cached(
     identity: &str,
     files: &[(&str, &str)],
 ) -> (MirEmit, skull::mir_emit::BodyCacheStats) {
-    let ws = ws_of_files(files);
+    emit_cached_with_inputs(dir, identity, files, ComptimeInputs::default())
+}
+
+fn emit_cached_with_inputs(
+    dir: &std::path::Path,
+    identity: &str,
+    files: &[(&str, &str)],
+    inputs: ComptimeInputs,
+) -> (MirEmit, skull::mir_emit::BodyCacheStats) {
+    let mut ws = ws_of_files(files);
+    ws.comptime_inputs = inputs;
     let cache = BodyCache::open(config(dir, identity, files));
     let emit = FullEmit::one_shot()
         .body_cache(Some(&cache))
@@ -132,4 +143,47 @@ fn a_module_without_source_text_disables_the_cache() {
     let stats = cache.stats();
     assert!(!stats.enabled, "{stats:?}");
     assert_eq!(emit.lua, emit_uncached(&files).lua);
+}
+
+const STAMPED: &str = r#"
+fn stamp() -> string {
+    return build_var("BUILD_UNIX")
+}
+
+fn main() {
+    print(stamp())
+}
+"#;
+
+fn stamped_inputs(value: &str) -> ComptimeInputs {
+    let mut inputs = ComptimeInputs::default();
+    inputs.vars.insert(
+        Ustr::from("BUILD_UNIX"),
+        ComptimeVarValue {
+            value: value.to_string(),
+            secret: false,
+        },
+    );
+    inputs.volatile_vars.insert(Ustr::from("BUILD_UNIX"));
+    inputs
+}
+
+#[test]
+fn a_volatile_build_input_rebuilds_only_the_bodies_that_read_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let files = [("<main>", STAMPED)];
+    let (first, cold) =
+        emit_cached_with_inputs(dir.path(), "compiler-a", &files, stamped_inputs("1"));
+    assert!(first.lua.contains("\"1\""), "{}", first.lua);
+    let (second, warm) =
+        emit_cached_with_inputs(dir.path(), "compiler-a", &files, stamped_inputs("2"));
+    assert!(
+        second.lua.contains("\"2\"") && !second.lua.contains("\"1\""),
+        "the cache served a body with the old build input:\n{}",
+        second.lua
+    );
+    // Only the body that read the input (and a caller it was spliced into)
+    // is rebuilt; the stdlib bodies never read it and are served.
+    assert!((1..=2).contains(&warm.misses), "{warm:?}");
+    assert_eq!(warm.hits + warm.misses, cold.misses, "{warm:?}");
 }
