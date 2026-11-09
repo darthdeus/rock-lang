@@ -201,9 +201,19 @@ pub fn check_macro_call_labels<'a>(
     modules: impl IntoIterator<Item = &'a Ast> + Clone,
 ) -> Vec<CompilerError> {
     let reg = build_registry(modules.clone());
+    if reg.is_empty() {
+        return Vec::new();
+    }
+    // Every call of every module is visited; the modules are independent and
+    // the errors keep module order.
+    use rayon::prelude::*;
+    let modules: Vec<&Ast> = modules.into_iter().collect();
     modules
+        .par_iter()
+        .map(|m| call_label_errors(m, &reg))
+        .collect::<Vec<_>>()
         .into_iter()
-        .flat_map(|m| call_label_errors(m, &reg))
+        .flatten()
         .collect()
 }
 
