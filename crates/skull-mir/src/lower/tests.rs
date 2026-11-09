@@ -54,6 +54,113 @@ fn spec_fn(ws: &Workspace, mid: ModuleId, name: &str) -> FuncRef {
     FuncRef { module: mid, func }
 }
 
+#[test]
+fn first_class_context_skips_value_ref_facts_and_updates() {
+    let (ws, mid) = spec_ws(
+        "fn target(x: int) -> int { x }\n\
+         fn holder() { let f = target }\n",
+    );
+    let target = spec_fn(&ws, mid, "target");
+    let holder = spec_fn(&ws, mid, "holder");
+    let owner = BodyOwner::Function(holder.func);
+    let target_name = ws.module(target.module).functions[target.func].name;
+    let tracked = ScalarCtx::new(&ws);
+    assert!(tracked.value_references.taken_by_ref.contains(&target_name));
+    assert!(
+        tracked
+            .value_references
+            .per_body
+            .get(&(mid, owner))
+            .is_some_and(|refs| refs.contains(&target_name))
+    );
+
+    let mut scx = ScalarCtx::new_values_first_class(&ws);
+
+    assert!(scx.value_references.taken_by_ref.is_empty());
+    assert!(scx.value_references.per_body.is_empty());
+    assert!(scx.value_references.ref_counts.is_empty());
+    assert!(
+        scx.update_body(&ws, mid, owner).is_empty(),
+        "first-class updates cannot flip scalar-ABI eligibility"
+    );
+}
+
+#[test]
+fn fresh_abi_context_shares_refs_and_interner_with_independent_abi_state() {
+    let (ws, mid) = spec_ws(
+        "fn target(x: int) -> int { x }\n\
+         fn holder() { let f = target }\n",
+    );
+    let target = spec_fn(&ws, mid, "target");
+    let source = ScalarCtx::new(&ws);
+    let cloned = source.clone();
+    let fresh = source.fresh_abi_context();
+
+    assert!(std::sync::Arc::ptr_eq(
+        &source.value_references,
+        &cloned.value_references
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &source.value_references,
+        &fresh.value_references
+    ));
+    assert!(std::sync::Arc::ptr_eq(&source.interner, &fresh.interner));
+    assert!(
+        !std::sync::Arc::ptr_eq(&source.rep_arena, &fresh.rep_arena),
+        "fresh ABI contexts need independent representation ids"
+    );
+
+    let inst = crate::instance::Instance::base(target);
+    let plan = std::sync::Arc::new(BackendFnAbiPlan::for_boundary_instance(&ws, &source, &inst));
+    let key = AbiPlanKey::Owner(inst);
+    source.abi_plan_store(key.clone(), &plan);
+    assert!(source.abi_plan_cached(&key).is_some());
+    assert!(fresh.abi_plan_cached(&key).is_none());
+}
+
+#[test]
+fn updating_one_shared_reference_context_uses_copy_on_write() {
+    let (mut ws, mid) = spec_ws(
+        "fn target(x: int) -> int { x }\n\
+         fn holder() { let f = target }\n",
+    );
+    let target = spec_fn(&ws, mid, "target");
+    let holder = spec_fn(&ws, mid, "holder");
+    let owner = BodyOwner::Function(holder.func);
+    let target_name = ws.module(target.module).functions[target.func].name;
+    let original = ScalarCtx::new(&ws);
+    let sibling = original.clone();
+    let mut fresh = original.fresh_abi_context();
+    assert!(std::sync::Arc::ptr_eq(
+        &original.value_references,
+        &sibling.value_references
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &original.value_references,
+        &fresh.value_references
+    ));
+
+    ws.module_mut(mid).bodies.remove(&owner);
+    assert_eq!(fresh.update_body(&ws, mid, owner), vec![target_name]);
+    assert!(fresh.value_references.taken_by_ref.is_empty());
+    assert!(fresh.value_references.per_body.is_empty());
+    assert!(
+        original
+            .value_references
+            .taken_by_ref
+            .contains(&target_name)
+    );
+    assert!(sibling.value_references.taken_by_ref.contains(&target_name));
+    assert!(std::sync::Arc::ptr_eq(
+        &original.value_references,
+        &sibling.value_references
+    ));
+    assert!(!std::sync::Arc::ptr_eq(
+        &original.value_references,
+        &fresh.value_references
+    ));
+}
+
 fn spec_inf<'a>(ws: &'a Workspace, mid: ModuleId, name: &str) -> &'a BodyInference {
     let fref = spec_fn(ws, mid, name);
     ws.inference(mid)

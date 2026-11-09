@@ -2644,7 +2644,7 @@ fn abi_mode_spec(
         if f.inline_body.is_some() || f.name.as_str() == "main" || name_is_fixed {
             return None;
         }
-        scx.taken_by_ref.contains(&f.name)
+        scx.value_references.taken_by_ref.contains(&f.name)
     };
     Some(AbiMode {
         nobox_only,
@@ -2878,7 +2878,7 @@ impl BackendFnAbiPlan {
         let f = &ws.module(self.subject.func.module).functions[self.subject.func.func];
         !(scx.values_first_class
             || !matches!(self.target, FnBackend::Lua | FnBackend::Any)
-            || scx.taken_by_ref.contains(&f.name)
+            || scx.value_references.taken_by_ref.contains(&f.name)
             || f.is_extern
             || f.inline_body.is_some()
             || f.is_coroutine

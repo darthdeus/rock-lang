@@ -550,6 +550,7 @@ fn cpu_artifact_lane(
     graph: &crate::instance_graph::InstanceGraph,
     emission_roots: &[FuncRef],
     shapes: ShapeOverrides,
+    scx: skull_mir::lower::ScalarCtx,
 ) -> (
     Result<
         (
@@ -562,7 +563,6 @@ fn cpu_artifact_lane(
     SetupLaneWindow,
 ) {
     let started = Instant::now();
-    let scx = skull_mir::lower::ScalarCtx::new(ws).sharing(std::sync::Arc::clone(graph.interner()));
     let lua_view = crate::artifact::realize(
         ws,
         graph,
@@ -635,14 +635,12 @@ fn shader_lane(
 /// by the CPU lane's context after the join.
 fn abi_warm_lane(
     ws: &Workspace,
-    graph: &crate::instance_graph::InstanceGraph,
+    mut abi_scx: skull_mir::lower::ScalarCtx,
     abi_plans: &skull_mir::concrete::ConcretePlans,
     abi_always_plans: &skull_mir::concrete::ConcreteAlwaysPlans,
     skip_abi_plan_publish: bool,
 ) -> (skull_mir::lower::ScalarCtx, SetupLaneWindow) {
     let started = Instant::now();
-    let mut abi_scx =
-        skull_mir::lower::ScalarCtx::new(ws).sharing(std::sync::Arc::clone(graph.interner()));
     if !skip_abi_plan_publish {
         abi_scx.warm_abi_plans(ws, abi_plans, abi_always_plans);
     }
@@ -689,6 +687,8 @@ fn run_setup_lanes(
     let skip_abi_plan_publish = false;
     let gate = LaneGate::new(mutation);
     let mono_before_lanes = graph.interner().stats();
+    let scx = skull_mir::lower::ScalarCtx::new(ws).sharing(std::sync::Arc::clone(graph.interner()));
+    let abi_scx = scx.fresh_abi_context();
     let plans_branch = || {
         let started = Instant::now();
         let concrete = build_plans();
@@ -708,7 +708,7 @@ fn run_setup_lanes(
                 gate.run(SetupLaneKind::AbiWarm, || {
                     abi_warm_lane(
                         ws,
-                        graph,
+                        abi_scx,
                         &concrete.plans,
                         &concrete.always_plans,
                         skip_abi_plan_publish,
@@ -724,7 +724,7 @@ fn run_setup_lanes(
         join_in_place(
             || {
                 gate.run(SetupLaneKind::CpuArtifact, || {
-                    cpu_artifact_lane(ws, graph, emission_roots, shapes)
+                    cpu_artifact_lane(ws, graph, emission_roots, shapes, scx)
                 })
             },
             plans_branch,

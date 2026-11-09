@@ -487,10 +487,9 @@ enum Scrut {
     },
 }
 
-/// Workspace-wide scalar-ABI context. Address-taken functions use the
-/// type-derived fn-value ABI at their definitions and direct calls, so all three
-/// call forms agree without callee-identity analysis.
-pub struct ScalarCtx {
+/// Shared workspace facts about functions referenced as values.
+#[derive(Clone, Default)]
+struct ValueReferences {
     taken_by_ref: HashSet<Ustr>,
     /// Per-body contribution: each body's set of fn-names it references by value.
     /// Keyed by `(module, owner)` so a body edit can diff its OLD vs NEW set
@@ -499,9 +498,16 @@ pub struct ScalarCtx {
     per_body: HashMap<(ModuleId, BodyOwner), HashSet<Ustr>>,
     /// Number of distinct bodies referencing each name by value.
     /// `taken_by_ref == { name : count > 0 }`. Only a membership flip (0<->1)
-    /// changes scalar-ABI eligibility, so [`update_body`](Self::update_body)
-    /// reports exactly those.
+    /// changes scalar-ABI eligibility, so `ScalarCtx::update_body` reports exactly
+    /// those.
     ref_counts: HashMap<Ustr, u32>,
+}
+
+/// Workspace-wide scalar-ABI context. Address-taken functions use the
+/// type-derived fn-value ABI at their definitions and direct calls, so all three
+/// call forms agree without callee-identity analysis.
+pub struct ScalarCtx {
+    value_references: std::sync::Arc<ValueReferences>,
     /// When set, the scalarized value ABI is disabled workspace-wide: every fn
     /// keeps value structs as first-class single values (params/returns/args),
     /// never splatting them to leaf scalars. Used by the GLSL backend, where a
@@ -550,9 +556,7 @@ pub struct ScalarCtx {
 impl Clone for ScalarCtx {
     fn clone(&self) -> Self {
         Self {
-            taken_by_ref: self.taken_by_ref.clone(),
-            per_body: self.per_body.clone(),
-            ref_counts: self.ref_counts.clone(),
+            value_references: std::sync::Arc::clone(&self.value_references),
             values_first_class: self.values_first_class,
             native_flat_enums: self.native_flat_enums,
             row_value_containers: self.row_value_containers,
@@ -581,42 +585,51 @@ fn scan_body_value_refs(ws: &Workspace, body: &Body) -> HashSet<Ustr> {
 
 impl ScalarCtx {
     pub fn new(ws: &Workspace) -> Self {
-        let mut taken_by_ref = HashSet::default();
-        let mut per_body: HashMap<(ModuleId, BodyOwner), HashSet<Ustr>> = HashMap::default();
-        let mut ref_counts: HashMap<Ustr, u32> = HashMap::default();
-        for module in ws.modules.iter() {
-            for (owner, body) in module.bodies.iter() {
-                let set = scan_body_value_refs(ws, body);
-                for name in &set {
-                    *ref_counts.entry(*name).or_insert(0) += 1;
-                    taken_by_ref.insert(*name);
+        Self::new_with_value_mode(ws, false)
+    }
+
+    fn new_with_value_mode(ws: &Workspace, values_first_class: bool) -> Self {
+        let value_references = if values_first_class {
+            ValueReferences::default()
+        } else {
+            let mut value_references = ValueReferences::default();
+            for module in ws.modules.iter() {
+                for (owner, body) in module.bodies.iter() {
+                    let set = scan_body_value_refs(ws, body);
+                    for name in &set {
+                        *value_references.ref_counts.entry(*name).or_insert(0) += 1;
+                        value_references.taken_by_ref.insert(*name);
+                    }
+                    if !set.is_empty() {
+                        value_references.per_body.insert((module.id, *owner), set);
+                    }
                 }
-                if !set.is_empty() {
-                    per_body.insert((module.id, *owner), set);
+                // Generated `@sim` registration passes each sim as a fn value,
+                // which no body scan sees. Its reference is permanent (adding or
+                // removing `@sim` is an interface edit), so it holds one count that
+                // no body edit can release.
+                for (_, f) in module.functions.iter() {
+                    if f.annotations.iter().any(|a| a.is_builtin("sim")) {
+                        *value_references.ref_counts.entry(f.name).or_insert(0) += 1;
+                        value_references.taken_by_ref.insert(f.name);
+                    }
                 }
             }
-            // Generated `@sim` registration passes each sim as a fn value, which
-            // no body scan sees. Its reference is permanent (adding or removing
-            // `@sim` is an interface edit), so it holds one count that no body
-            // edit can release.
-            for (_, f) in module.functions.iter() {
-                if f.annotations.iter().any(|a| a.is_builtin("sim")) {
-                    *ref_counts.entry(f.name).or_insert(0) += 1;
-                    taken_by_ref.insert(f.name);
-                }
-            }
-        }
+            value_references
+        };
         // Default target is Lua: skull-codegen-lua is the primary consumer and its
         // full + incremental paths build a `ScalarCtx::new`. The JS driver and the
         // GLSL backend override via `with_target`.
         Self {
-            taken_by_ref,
-            per_body,
-            ref_counts,
-            values_first_class: false,
+            value_references: std::sync::Arc::new(value_references),
+            values_first_class,
             native_flat_enums: false,
             row_value_containers: false,
-            target: bone_core::hir::FnBackend::Lua,
+            target: if values_first_class {
+                bone_core::hir::FnBackend::Any
+            } else {
+                bone_core::hir::FnBackend::Lua
+            },
             interner: std::sync::Arc::new(crate::monoty::MonoInterner::new()),
             rep_arena: std::sync::Arc::new(abi::RepArena::default()),
             abi_plans: abi::AbiPlanCache::default(),
@@ -770,10 +783,23 @@ impl ScalarCtx {
     /// The GLSL backend does not participate in Lua/JS backend-variant selection,
     /// so its target is `Any` (filtering disabled).
     pub fn new_values_first_class(ws: &Workspace) -> Self {
-        let mut scx = Self::new(ws);
-        scx.values_first_class = true;
-        scx.target = bone_core::hir::FnBackend::Any;
-        scx
+        Self::new_with_value_mode(ws, true)
+    }
+
+    /// Make an ABI-planning context over this build's shared workspace facts.
+    /// Its representation arena and memo are private to this context so plans
+    /// and representation ids cannot leak between ABI-planning lanes.
+    pub fn fresh_abi_context(&self) -> Self {
+        Self {
+            value_references: std::sync::Arc::clone(&self.value_references),
+            values_first_class: self.values_first_class,
+            native_flat_enums: self.native_flat_enums,
+            row_value_containers: self.row_value_containers,
+            target: self.target,
+            interner: std::sync::Arc::clone(&self.interner),
+            rep_arena: std::sync::Arc::new(abi::RepArena::default()),
+            abi_plans: abi::AbiPlanCache::default(),
+        }
     }
 
     /// Incrementally fold one re-inferred body's value-reference contribution into
@@ -788,33 +814,38 @@ impl ScalarCtx {
         // read it -- drop them all rather than tracking which flips reach which
         // plan. Cheaper than one stale plan is worth.
         self.abi_plans.clear();
+        if self.values_first_class {
+            return Vec::new();
+        }
+
+        let refs = std::sync::Arc::make_mut(&mut self.value_references);
         let key = (mid, owner);
-        let old = self.per_body.remove(&key).unwrap_or_default();
+        let old = refs.per_body.remove(&key).unwrap_or_default();
         let new = match ws.module(mid).bodies.get(&owner) {
             Some(body) => scan_body_value_refs(ws, body),
             None => HashSet::default(),
         };
         let mut flipped = Vec::new();
         for name in old.difference(&new) {
-            if let Some(c) = self.ref_counts.get_mut(name) {
+            if let Some(c) = refs.ref_counts.get_mut(name) {
                 *c -= 1;
                 if *c == 0 {
-                    self.ref_counts.remove(name);
-                    self.taken_by_ref.remove(name);
+                    refs.ref_counts.remove(name);
+                    refs.taken_by_ref.remove(name);
                     flipped.push(*name);
                 }
             }
         }
         for name in new.difference(&old) {
-            let c = self.ref_counts.entry(*name).or_insert(0);
+            let c = refs.ref_counts.entry(*name).or_insert(0);
             *c += 1;
             if *c == 1 {
-                self.taken_by_ref.insert(*name);
+                refs.taken_by_ref.insert(*name);
                 flipped.push(*name);
             }
         }
         if !new.is_empty() {
-            self.per_body.insert(key, new);
+            refs.per_body.insert(key, new);
         }
         flipped
     }
