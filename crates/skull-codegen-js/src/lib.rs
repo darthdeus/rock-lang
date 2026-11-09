@@ -1580,30 +1580,27 @@ function __bigdigits(ax, P) {
   while (s.length < P) s = "0" + s;
   return { digits: s, E: D };
 }
-function __c_g(x, P) {
-  // C printf %.Pg on a finite, already-sign-split magnitude reconstruction.
+function __c_g(x, P, alt) {
+  if (x !== x) return "nan";
+  if (x === Infinity) return "inf";
+  if (x === -Infinity) return "-inf";
   var neg = x < 0 || (x === 0 && 1 / x === -Infinity);
   var ax = Math.abs(x);
-  if (ax === 0) return neg ? "-0" : "0";
-  var r = __bigdigits(ax, P);
+  var strip = function (t) { return alt ? t : t.replace(/0+$/, ""); };
+  var point = function (t) { return (t || alt) ? "." + t : ""; };
+  var r = ax === 0 ? { digits: "0".repeat(P), E: 0 } : __bigdigits(ax, P);
   var digits = r.digits, E = r.E;
   var out;
   if (E < -4 || E >= P) {
-    var frac = digits.slice(1).replace(/0+$/, "");
-    var mant = digits.slice(0, 1) + (frac ? "." + frac : "");
+    var mant = digits.slice(0, 1) + point(strip(digits.slice(1)));
     var esign = E < 0 ? "-" : "+";
     var eabs = Math.abs(E).toString();
     if (eabs.length < 2) eabs = "0" + eabs;
     out = mant + "e" + esign + eabs;
   } else if (E >= 0) {
-    var intp = digits.slice(0, E + 1);
-    var f2 = digits.slice(E + 1).replace(/0+$/, "");
-    out = intp + (f2 ? "." + f2 : "");
+    out = digits.slice(0, E + 1) + point(strip(digits.slice(E + 1)));
   } else {
-    var zeros = "";
-    for (var k = 0; k < -E - 1; k++) zeros += "0";
-    var f3 = (zeros + digits).replace(/0+$/, "");
-    out = "0." + f3;
+    out = "0" + point(strip("0".repeat(-E - 1) + digits));
   }
   return neg ? "-" + out : out;
 }
@@ -1750,8 +1747,7 @@ function __c_e(x, prec) {
 // emit. Scans `fmt`, copying literals (`%%` -> `%`), and applies the one
 // conversion spec (`%[flags][width][.prec]conv`) to `v`. Conversions: d i u x X o
 // f F e E g G s c. Flags: `-` (left), `0` (zero-pad), `+`/space (sign), `#`
-// (0x/0). Signed integer / hex negatives above 32-bit and Lua's 64-bit %x wrap
-// are out of subset (unused by the interpolation specs).
+// (0x/0, and the C alternate form for f/e/g).
 function __rock_sprintf(fmt, v) {
   var out = "", i = 0;
   while (i < fmt.length) {
@@ -1766,7 +1762,7 @@ function __rock_sprintf(fmt, v) {
     var prec = -1;
     if (fmt[i] === ".") { i++; var pp = ""; while (i < fmt.length && fmt[i] >= "0" && fmt[i] <= "9") { pp += fmt[i++]; } prec = pp === "" ? 0 : parseInt(pp, 10); }
     var conv = fmt[i++];
-    var body, sign = "", isNum = false, prefix = "";
+    var body, sign = "", isNum = false, prefix = "", alt = flags.indexOf("#") >= 0;
     if (conv === "d" || conv === "i" || conv === "u") {
       isNum = true;
       var n = Math.trunc(Number(v));
@@ -1777,23 +1773,25 @@ function __rock_sprintf(fmt, v) {
       isNum = true;
       var base = conv === "o" ? 8 : 16;
       var m = Math.trunc(Number(v));
-      body = Math.abs(m).toString(base);
+      // LuaJIT prints a negative through its 64-bit two's-complement pattern.
+      body = (m < 0 ? BigInt.asUintN(64, BigInt(m)) : m).toString(base);
       if (conv === "X") body = body.toUpperCase();
-      if (m < 0) sign = "-";
       if (prec >= 0) while (body.length < prec) body = "0" + body;
-      if (flags.indexOf("#") >= 0 && m !== 0) prefix = conv === "o" ? "0" : (conv === "X" ? "0X" : "0x");
+      if (alt && m !== 0) prefix = conv === "o" ? "0" : (conv === "X" ? "0X" : "0x");
     } else if (conv === "f" || conv === "F") {
       isNum = true;
       var p = prec < 0 ? 6 : prec, r = __c_f(v, p);
+      if (p === 0 && alt && v === v && Math.abs(v) !== Infinity) r += ".";
       if (r[0] === "-") { sign = "-"; body = r.slice(1); } else { body = r; if (flags.indexOf("+") >= 0) sign = "+"; else if (flags.indexOf(" ") >= 0) sign = " "; }
     } else if (conv === "e" || conv === "E") {
       isNum = true;
       var p2 = prec < 0 ? 6 : prec, r2 = __c_e(v, p2);
+      if (p2 === 0 && alt && v === v && Math.abs(v) !== Infinity) r2 = r2.replace("e", ".e");
       if (conv === "E") r2 = r2.toUpperCase();
       if (r2[0] === "-") { sign = "-"; body = r2.slice(1); } else { body = r2; if (flags.indexOf("+") >= 0) sign = "+"; else if (flags.indexOf(" ") >= 0) sign = " "; }
     } else if (conv === "g" || conv === "G") {
       isNum = true;
-      var p3 = prec < 0 ? 6 : (prec === 0 ? 1 : prec), r3 = __c_g(v, p3);
+      var p3 = prec < 0 ? 6 : (prec === 0 ? 1 : prec), r3 = __c_g(v, p3, alt);
       if (conv === "G") r3 = r3.toUpperCase();
       if (r3[0] === "-") { sign = "-"; body = r3.slice(1); } else { body = r3; if (flags.indexOf("+") >= 0) sign = "+"; else if (flags.indexOf(" ") >= 0) sign = " "; }
     } else if (conv === "c") {
@@ -1803,6 +1801,12 @@ function __rock_sprintf(fmt, v) {
       if (prec >= 0) body = body.slice(0, prec);
     } else {
       body = conv; // unknown: echo the conversion char
+    }
+    // LuaJIT spells a non-finite value the same way for f/e/g: nan takes only
+    // the space flag, and zero-padding never applies.
+    if ("feEgGF".indexOf(conv) >= 0 && !isFinite(v)) {
+      isNum = false;
+      if (v !== v) sign = flags.indexOf(" ") >= 0 ? " " : "";
     }
     var core = sign + prefix + body;
     if (width > core.length) {

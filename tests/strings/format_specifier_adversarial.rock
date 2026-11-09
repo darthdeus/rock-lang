@@ -551,3 +551,48 @@ fn test_consecutive_aligned_columns() {
     let expected = "frame_draw     4.29\nworld_draw     3.52\ndraw_game      2.20"
     assert_eq(out, expected)
 }
+
+// ---------------------------------------------------------------------
+// C `#` keeps the point and, for %g, the trailing zeros. %g of a non-finite
+// value spells it the same way %f does.
+// ---------------------------------------------------------------------
+
+@test
+fn test_alternate_form_keeps_point_and_zeros() {
+    let half = 0.5
+    assert_eq("{half:#g}", "0.500000")
+    assert_eq("{half:#.0f}", "0.")
+    assert_eq("{half:#.0e}", "5.e-01")
+    let big = 1234567.0
+    assert_eq("{big:#g}", "1.23457e+06")
+    assert_eq("{half * 0.0:#g}", "0.00000")
+}
+
+@test
+fn test_general_format_of_non_finite() {
+    let inf = 1.0 / 0.0
+    assert_eq("{inf:g}", "inf")
+    assert_eq("{-inf:.3g}", "-inf")
+    assert_eq("{inf:G}", "INF")
+    let nan = inf - inf
+    assert_eq("{nan:g}".lower().replace("-", ""), "nan")
+}
+
+@test
+fn test_non_finite_ignores_zero_pad_and_plus_on_nan() {
+    let inf = 1.0 / 0.0
+    let nan = inf - inf
+    assert_eq("[{inf:08.2f}]", "[     inf]")
+    assert_eq("[{-inf:08.2f}]", "[    -inf]")
+    assert_eq("[{nan:08.2f}]", "[     nan]")
+    assert_eq("[{nan:+.2f}]", "[nan]")
+}
+
+// Negative integers print through their 64-bit two's-complement pattern.
+@test
+fn test_hex_of_negative_int() {
+    let n = -1
+    assert_eq("{n:x}", "ffffffffffffffff")
+    assert_eq("{n:X}", "FFFFFFFFFFFFFFFF")
+    assert_eq("{n:o}", "1777777777777777777777")
+}
