@@ -6,10 +6,13 @@
 //! that must not collapse onto one key -- plus the mutation arms proving each
 //! half of the identity is load-bearing rather than decorative.
 
-use crate::common::{census_of_graph, fn_name, module_id, scalar_ctx, ws_with_stdlib};
+use crate::common::{
+    census_of, census_of_graph, fn_name, graph_of as graph_of_ws, module_id, scalar_ctx,
+    ws_with_stdlib,
+};
 use bone_semantic::inference::Workspace;
-use skull::instance_graph::{self, InstanceGraph};
-use skull::site_join::{self, SiteJoinCensus, Unjoined};
+use skull::instance_graph::InstanceGraph;
+use skull::site_join::{self, Unjoined};
 use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::site::{Site, SiteDomain, SiteOp};
@@ -23,25 +26,6 @@ fn graph_of(src: &str) -> (Workspace, InstanceGraph) {
     let ws = ws_with_stdlib(src);
     let g = crate::common::graph_of(&ws);
     (ws, g)
-}
-
-fn graph_of_ws(ws: &Workspace) -> InstanceGraph {
-    let roots = skull::mir_emit::emission_roots(ws, None);
-    instance_graph::build(ws, roots, false)
-}
-
-fn census_of(src: &str) -> SiteJoinCensus {
-    let (ws, g) = graph_of(src);
-    let bodies = skull::concrete_body::build(&ws, &g);
-    let scx = scalar_ctx(&ws, &g);
-    site_join::census(&ws, &scx, &g, &bodies)
-}
-
-fn instance_claim(
-    _g: &InstanceGraph,
-    inst: &skull::instance_graph::Instance,
-) -> skull::instance_graph::Instance {
-    inst.clone()
 }
 
 /// A `Callee::Rock` over `inst`, the arm an ordinary Rock call resolves to.
@@ -835,8 +819,8 @@ fn main() {
 
     // Each claim comes from its instance's OWN recorded substitution, never from
     // asking the oracle under test which candidate it likes.
-    let c0 = instance_claim(&g, insts[0]);
-    let c1 = instance_claim(&g, insts[1]);
+    let c0 = insts[0].clone();
+    let c1 = insts[1].clone();
     assert_eq!(c0.args.len(), 1, "fixture has one generic: {c0:?}");
     assert_eq!(c1.args.len(), 1, "fixture has one generic: {c1:?}");
     assert_ne!(
@@ -940,7 +924,7 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
     };
 
     // ADMISSION CONTROL: the instance's own recorded substitution verifies.
-    let good = instance_claim(&g, &inst);
+    let good = inst.clone();
     assert_eq!(good.args.len(), 2, "one entry per generic: {good:?}");
     assert_eq!(
         check(Some(&good)),
@@ -1046,7 +1030,7 @@ fn main() { print("{ident(1)}") }
         .find(|i| fn_name(&ws, i.func) == "ident")
         .expect("instance")
         .clone();
-    let claim = instance_claim(&g, &inst);
+    let claim = inst.clone();
     // Control: with the substitution present, the claim verifies.
     assert_eq!(
         skull::site_join::check_callee(&ws, &g, &rock(&inst), inst.func, Some(&claim), LUA),

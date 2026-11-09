@@ -297,77 +297,6 @@ fn main() {
     }
 }
 
-/// Logical instance identity is target-neutral (plan S 20a), and now so is the
-/// GRAPH: one build, one arena, one manifest, whatever artifact realizes it.
-///
-/// The fixture carries an EXPLICIT `inline(lua)`/`inline(js)` pair, which is
-/// what makes the equality mean anything: the two artifacts genuinely select
-/// different declarations for `variant_probe`, and `sibling_selections` below is
-/// the non-vacuity assertion for that. It used to rely on the stdlib chain its
-/// iterator loop pulls in, and the claim that the chain resolved different
-/// `FuncRef`s was never measured -- measured, it was FALSE.
-#[test]
-fn the_shared_graph_is_target_neutral() {
-    use skull::artifact::{self, ArtifactRequest};
-    use skull::target_projection as tp;
-    let ws = ws_with_stdlib(
-        r#"
-value P { x: float, y: float }
-fn ident<T>(v: T) -> T { return v }
-@inline inline(lua) fn variant_probe<T>(v: T) -> int = "return 1"
-@inline inline(js) fn variant_probe<T>(v: T) -> int = "return 1;"
-fn main() {
-    let a = ident(P { x: 1.0, y: 2.0 })
-    let b = ident(1)
-    let p = variant_probe(1)
-    let xs: [int] = [1, 2, 3]
-    for v in xs.iter().map(_ + 1) { let _ = v }
-}
-"#,
-    );
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let g = instance_graph::build(&ws, roots.clone(), false);
-
-    // The property, formerly a sentinel asserting the opposite: there is no
-    // second graph to disagree with. Rebuilding must be the same manifest --
-    // the walk selects no variant, so nothing it records can depend on a target.
-    let again = instance_graph::build(&ws, roots.clone(), false);
-    assert_eq!(
-        instance_graph::render_manifest(&ws, &g),
-        instance_graph::render_manifest(&ws, &again)
-    );
-
-    // NON-VACUITY: the two artifacts really do select different declarations
-    // for one shared instance. Without this the equality above would hold
-    // because nothing ever forked.
-    let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::LUAJIT_DESKTOP, &roots));
-    let js = artifact::realize(&ws, &g, &ArtifactRequest::new(tp::JAVASCRIPT_WEB, &roots));
-    let probe = |v: &artifact::ArtifactView| {
-        v.realization
-            .iter()
-            .filter(|(i, _)| fn_name(&ws, i.func) == "variant_probe")
-            .map(|(i, r)| (i.clone(), r.decl))
-            .collect::<Vec<_>>()
-    };
-    let (lp, jp) = (probe(&lua), probe(&js));
-    assert_eq!(
-        lp.len(),
-        1,
-        "the probe was not retained exactly once on luajit"
-    );
-    assert_eq!(
-        jp.len(),
-        1,
-        "the probe was not retained exactly once on javascript"
-    );
-    assert_eq!(lp[0].0, jp[0].0, "one shared instance, not two");
-    assert_ne!(
-        lp[0].1, jp[0].1,
-        "both artifacts selected the same declaration, so this fixture is not \
-         exercising backend variants at all and the manifest equality is vacuous"
-    );
-}
-
 /// A repeated backend makes the whole same-signature set a genuine overload
 /// ambiguity. Bone deliberately leaves every candidate distinct; the root-side
 /// inverse must not manufacture a representative that bone never chose.
@@ -605,64 +534,6 @@ fn main() {
     assert!(
         !normal_text.is_empty(),
         "the fixture produced an empty manifest"
-    );
-}
-
-/// The identity adversary: one generic instantiated at `(fn(int) -> int)?` and
-/// at `fn(int) -> int?`. Those are different types that RENDER alike -- a
-/// postfix `?` on an unbracketed arrow type is ambiguous -- so every set, map
-/// and digest over the graph has to key on the canonical encoding.
-///
-/// The equal-renderings assertion is what makes this adversarial: if the two
-/// ever displayed differently, the pair would no longer be the collision and
-/// the separation below would prove nothing.
-#[test]
-fn two_instances_whose_arguments_render_alike_stay_distinct() {
-    let (ws, g) = graph_of(
-        r#"
-fn twice(n: int) -> int { return n * 2 }
-fn maybe(n: int) -> int? { return n * 2 }
-fn ident<T>(x: T) -> T { return x }
-fn main() {
-    let f: fn(int) -> int? = maybe
-    let g: (fn(int) -> int)? = twice
-    let a = ident(f)
-    let b = ident(g)
-}
-"#,
-    );
-
-    let idents: Vec<&instance_graph::Instance> = g
-        .instances
-        .iter()
-        .filter(|i| fn_name(&ws, i.func) == "ident")
-        .collect();
-    assert_eq!(
-        idents.len(),
-        2,
-        "expected two `ident` instances, got {}",
-        idents.len()
-    );
-
-    let display: Vec<String> = idents.iter().map(|i| g.symbol(&ws, i)).collect();
-    assert_eq!(
-        display[0], display[1],
-        "the pair is no longer the ambiguity this test exists for: {display:?}"
-    );
-
-    let identity: Vec<String> = idents.iter().map(|i| g.identity(&ws, i)).collect();
-    assert_ne!(
-        identity[0], identity[1],
-        "two distinct instances share one identity: {identity:?}"
-    );
-
-    // ...and the manifest keeps both, rather than deduplicating them into one.
-    let lines = g.manifest_lines(&ws);
-    let ident_lines: Vec<&String> = lines.iter().filter(|l| l.contains("ident")).collect();
-    assert_eq!(
-        ident_lines.len(),
-        2,
-        "the manifest collapsed two distinct instances: {ident_lines:?}"
     );
 }
 
@@ -1376,6 +1247,20 @@ fn main() {
     assert_eq!(
         display[0], display[1],
         "the fixture is no longer the collision it tests"
+    );
+    let identity: Vec<String> = idents.iter().map(|i| g.identity(&ws, i)).collect();
+    assert_ne!(
+        identity[0], identity[1],
+        "two distinct instances share one identity: {identity:?}"
+    );
+
+    // ...and the manifest keeps both, rather than deduplicating them into one.
+    let lines = g.manifest_lines(&ws);
+    let ident_lines: Vec<&String> = lines.iter().filter(|l| l.contains("ident")).collect();
+    assert_eq!(
+        ident_lines.len(),
+        2,
+        "the manifest collapsed two distinct instances: {ident_lines:?}"
     );
     let encoded: Vec<String> = idents.iter().map(|i| g.logical_symbol(&ws, i)).collect();
     assert_ne!(

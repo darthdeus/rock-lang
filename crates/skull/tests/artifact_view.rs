@@ -7,9 +7,8 @@
 //! logical identity survives realization differing, so a view that invented an
 //! instance would be answering its own question.
 //!
-//! The four premises below are what made a count-only projection insufficient.
-//! Each is asserted against the SHARED graph first, so the view's job is a
-//! measured defect rather than a design preference.
+//! Each realization test checks its shared-graph preconditions before the
+//! artifact outcome, so dropping everything cannot satisfy the assertions.
 
 use crate::common::{fn_name, graph_for, module_id, ws_with_stdlib};
 use bone_semantic::hir::{BodyOwner, FnBackend};
@@ -83,13 +82,17 @@ impl BackendRealization for Supplies {
 // PREMISE 1 -- the shared graph retains one backend-group representative.
 // ---------------------------------------------------------------------------
 
-/// `__nb_checked_index` is declared twice: `inline(lua)` in `unified.rock` and
-/// `inline(js)` in `js.rock`. Both raw declarations are emission roots, but the
-/// target-neutral graph canonicalizes them to one logical instance.
+/// ONE shared instance, realized to the sibling each artifact serves. The
+/// luajit artifact selects the Lua declaration and the javascript artifact the
+/// JS one -- the same `Instance` key in both views, a different `Realized::decl`
+/// in each.
+///
+/// Neither is decided through `InstanceGraph::boundaries`, which is keyed by
+/// mangled symbol and therefore cannot tell the two apart at all.
 #[test]
-fn premise_the_shared_graph_keeps_one_representative_per_sibling_group() {
+fn an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it() {
     let ws = ws_with_stdlib("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
-    let (g, _) = graph_for(&ws);
+    let (g, roots) = graph_for(&ws);
     let decls: Vec<skull_mir::mir::FuncRef> = g
         .instances
         .iter()
@@ -115,19 +118,7 @@ fn premise_the_shared_graph_keeps_one_representative_per_sibling_group() {
         group.contains(&FnBackend::Lua) && group.contains(&FnBackend::Js),
         "the fixture no longer declares both siblings: {group:?}"
     );
-}
 
-/// ONE shared instance, realized to the sibling each artifact serves. The
-/// luajit artifact selects the Lua declaration and the javascript artifact the
-/// JS one -- the same `Instance` key in both views, a different `Realized::decl`
-/// in each.
-///
-/// Neither is decided through `InstanceGraph::boundaries`, which is keyed by
-/// mangled symbol and therefore cannot tell the two apart at all.
-#[test]
-fn an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it() {
-    let ws = ws_with_stdlib("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
-    let (g, roots) = graph_for(&ws);
     let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
 
@@ -230,14 +221,14 @@ fn fast_op(x: int) -> int { return x * 2 }
 fn main() { let a = fast_op(1) }
 "#;
 
-/// A `@native_required` intrinsic whose only body is a portable Rock fallback.
-/// `serves()` says the declaration is compatible with every target, and it HAS
-/// a Rock body, so both of the cheap tests answer "available" -- which is the
-/// exact failure `@native_required` exists to prevent.
+/// The artifact decides from its OWN mapping. luajit's mapping is the body slot
+/// (an `inline(lua)` body), so a Rock-only `@native_required` intrinsic is
+/// unavailable there -- and a table that maps it makes it available, which is
+/// what says the arm reads the mapping rather than rejecting everything.
 #[test]
-fn premise_a_compatible_backend_and_a_rock_fallback_both_say_available() {
+fn native_required_availability_comes_from_the_artifact_mapping() {
     let ws = ws_with_stdlib(NATIVE_REQUIRED);
-    let (g, _) = graph_for(&ws);
+    let (g, roots) = graph_for(&ws);
     let f = g
         .instances
         .iter()
@@ -256,16 +247,7 @@ fn premise_a_compatible_backend_and_a_rock_fallback_both_say_available() {
         skull_mir::intrinsics::is_native_required(f),
         "the fixture is not `@native_required`"
     );
-}
 
-/// The artifact decides from its OWN mapping. luajit's mapping is the body slot
-/// (an `inline(lua)` body), so a Rock-only `@native_required` intrinsic is
-/// unavailable there -- and a table that maps it makes it available, which is
-/// what says the arm reads the mapping rather than rejecting everything.
-#[test]
-fn native_required_availability_comes_from_the_artifact_mapping() {
-    let ws = ws_with_stdlib(NATIVE_REQUIRED);
-    let (g, roots) = graph_for(&ws);
     let named = |view: &artifact::ArtifactView| -> Option<Exclusion> {
         view.excluded
             .iter()
@@ -336,14 +318,12 @@ fn main() { let a = portable_op(1) }
 // PREMISE 3 -- opaque `inline(lua)` dependencies are name metadata.
 // ---------------------------------------------------------------------------
 
-/// The graph records that an opaque body NAMES a runtime entry. It does not
-/// resolve which declaration that is, so nothing downstream can retain the
-/// right one -- and on an artifact where the entry has a different serving
-/// declaration, the name alone is ambiguous.
+/// The artifact resolves each dependency to a declaration IT retains, and says
+/// so per dependency rather than as a total.
 #[test]
-fn premise_inline_body_dependencies_are_unresolved_names() {
+fn inline_body_dependencies_resolve_to_targets_in_the_artifact() {
     let ws = ws_with_stdlib("fn main() { let v: [Vec2] = []; let l = v.to_lua_array() }");
-    let (g, _) = graph_for(&ws);
+    let (g, roots) = graph_for(&ws);
     let deps: Vec<&str> = g
         .inline_body_deps
         .values()
@@ -359,14 +339,7 @@ fn premise_inline_body_dependencies_are_unresolved_names() {
         deps.iter().all(|d| d.starts_with("__")),
         "the dependencies are no longer bare runtime-entry names: {deps:?}"
     );
-}
 
-/// The artifact resolves each dependency to a declaration IT retains, and says
-/// so per dependency rather than as a total.
-#[test]
-fn inline_body_dependencies_resolve_to_targets_in_the_artifact() {
-    let ws = ws_with_stdlib("fn main() { let v: [Vec2] = []; let l = v.to_lua_array() }");
-    let (g, roots) = graph_for(&ws);
     let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     let c = view.census();
     assert!(
@@ -483,7 +456,7 @@ fn main() { let n = selected_dep_probe(1) }
 ///
 /// The `@nomangle` sibling pair that used to collide here is one instance in
 /// the shared graph
-/// (`premise_the_shared_graph_keeps_one_representative_per_sibling_group`), so
+/// (`an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it`), so
 /// injectivity is not being bought by retention dropping a duplicate.
 #[test]
 fn an_artifact_symbol_is_total_and_injective_over_what_it_retains() {

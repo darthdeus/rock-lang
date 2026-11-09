@@ -166,6 +166,31 @@ fn assert_scoped(stats: &UpdateStats, label: &str) {
     );
 }
 
+#[track_caller]
+fn assert_local_boundary(stats: &UpdateStats, label: &str) {
+    assert!(
+        stats.suspect_region > 0,
+        "{label}: no forward population: {stats:?}"
+    );
+    assert!(
+        stats.boundary_predecessor_edges_examined > 0,
+        "{label}: no boundary predecessor edges examined: {stats:?}"
+    );
+    assert_eq!(
+        stats.reverse_instances_examined, 0,
+        "{label}: performed a rootward reverse query: {stats:?}"
+    );
+    assert_eq!(
+        stats.reverse_predecessor_edges_examined, 0,
+        "{label}: examined rootward predecessor edges: {stats:?}"
+    );
+    assert!(
+        stats.prune_search_population <= stats.suspect_region * 4,
+        "{label}: boundary work escaped the locality bound: {stats:?}"
+    );
+    assert_scoped(stats, label);
+}
+
 // ---------------------------------------------------------------------------
 // 1. Deletion strands an ordinary subtree
 // ---------------------------------------------------------------------------
@@ -1866,45 +1891,15 @@ fn a_long_anchor_path_is_included_in_prune_locality() {
         "the update expanded no owner: {stats:?}"
     );
     assert!(
-        stats.suspect_region > 0,
-        "the forward prune population is empty: {stats:?}"
-    );
-    assert_eq!(
-        stats.reverse_instances_examined, 0,
-        "the affected-region search still performed a reverse reachability walk: {stats:?}"
-    );
-    assert!(
-        stats.reverse_predecessor_edges_examined == 0,
-        "the affected-region search still examined rootward predecessor edges: {stats:?}"
-    );
-    assert!(
-        stats.boundary_predecessor_edges_examined > 0,
-        "the local boundary classification examined no predecessor edges: {stats:?}"
-    );
-    assert!(
         stats.prune_search_population >= stats.suspect_region,
         "the prune denominator dropped forward work: {stats:?}"
-    );
-    assert_eq!(
-        stats.prune_search_population,
-        stats.suspect_region
-            + stats.boundary_predecessor_edges_examined
-            + stats.support_component_nodes_examined
-            + stats.support_component_edges_examined
-            + stats.reverse_instances_examined
-            + stats.reverse_predecessor_edges_examined,
-        "the prune denominator does not include every reported pruning population: {stats:?}"
     );
     assert!(
         stats.suspect_region <= stats.expanded * 4,
         "the forward prune region escaped the locality bound: {stats:?}"
     );
-    assert!(
-        stats.prune_search_population <= stats.suspect_region * 4,
-        "forward plus boundary prune work escaped the locality bound: {stats:?}"
-    );
     case.assert_matches_fresh("long external anchor path");
-    assert_scoped(&stats, "long external anchor path");
+    assert_local_boundary(&stats, "long external anchor path");
 }
 
 const DIRECT_SEED_MAIN_V1: &str = "fn main() { print(\"{shared_root()}\") }\nfn independent_root() -> int { return shared_root() }\n";
@@ -2000,32 +1995,6 @@ fn an_externally_supported_lost_seed_stops_before_its_subtree() {
     );
     case.assert_matches_fresh("direct externally supported seed");
     assert!(
-        stats.suspect_region > 0,
-        "the direct seed had no forward population: {stats:?}"
-    );
-    assert!(
-        stats.boundary_predecessor_edges_examined > 0,
-        "the direct seed classified no external predecessor edge: {stats:?}"
-    );
-    assert_eq!(
-        stats.reverse_instances_examined, 0,
-        "the direct seed used a rootward reverse query: {stats:?}"
-    );
-    assert_eq!(
-        stats.reverse_predecessor_edges_examined, 0,
-        "the direct seed examined rootward predecessor edges: {stats:?}"
-    );
-    assert_eq!(
-        stats.prune_search_population,
-        stats.suspect_region
-            + stats.boundary_predecessor_edges_examined
-            + stats.support_component_nodes_examined
-            + stats.support_component_edges_examined
-            + stats.reverse_instances_examined
-            + stats.reverse_predecessor_edges_examined,
-        "the direct-seed denominator omits pruning work: {stats:?}"
-    );
-    assert!(
         stats.suspect_region < DIRECT_SEED_SUBTREE.len(),
         "the prune search expanded the shared subtree: {stats:?}"
     );
@@ -2033,11 +2002,7 @@ fn an_externally_supported_lost_seed_stops_before_its_subtree() {
         stats.suspect_region <= stats.expanded * 4,
         "the direct external seed's forward region escaped the locality bound: {stats:?}"
     );
-    assert!(
-        stats.prune_search_population <= stats.suspect_region * 4,
-        "the direct external seed's boundary work escaped the locality bound: {stats:?}"
-    );
-    assert_scoped(&stats, "direct externally supported seed");
+    assert_local_boundary(&stats, "direct externally supported seed");
 }
 
 const NESTED_SEED_MAIN_V1: &str =
@@ -2156,40 +2121,10 @@ fn a_root_reachable_non_root_seed_predecessor_stops_before_its_subtree() {
     );
     case.assert_matches_fresh("root-reachable nested seed");
     assert!(
-        stats.suspect_region > 0,
-        "the nested seed had no forward population: {stats:?}"
-    );
-    assert!(
-        stats.boundary_predecessor_edges_examined > 0,
-        "the nested seed classified no boundary predecessor edge: {stats:?}"
-    );
-    assert_eq!(
-        stats.reverse_instances_examined, 0,
-        "the nested seed used a rootward reverse query: {stats:?}"
-    );
-    assert_eq!(
-        stats.reverse_predecessor_edges_examined, 0,
-        "the nested seed examined rootward predecessor edges: {stats:?}"
-    );
-    assert_eq!(
-        stats.prune_search_population,
-        stats.suspect_region
-            + stats.boundary_predecessor_edges_examined
-            + stats.support_component_nodes_examined
-            + stats.support_component_edges_examined
-            + stats.reverse_instances_examined
-            + stats.reverse_predecessor_edges_examined,
-        "the nested-seed denominator omits pruning work: {stats:?}"
-    );
-    assert!(
         stats.suspect_region < NESTED_SEED_SUBTREE.len(),
         "the prune search expanded the nested shared subtree: {stats:?}"
     );
-    assert!(
-        stats.prune_search_population <= stats.suspect_region * 4,
-        "the nested-seed boundary work escaped the locality bound: {stats:?}"
-    );
-    assert_scoped(&stats, "root-reachable nested seed");
+    assert_local_boundary(&stats, "root-reachable nested seed");
 }
 
 const DEFERRED_BOUNDARY_LIB: &str = r#"

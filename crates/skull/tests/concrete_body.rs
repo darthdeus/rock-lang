@@ -7,14 +7,14 @@
 //! slot instead, which is what the mutation arm at the bottom asserts.
 
 use crate::common::{fn_name, graph_of, module_id, scalar_ctx, ws_with_stdlib};
-use bone_semantic::hir::{BindingInfo, BodyOwner, Expr, TypeExpr};
+use bone_semantic::hir::{BodyOwner, Expr, TypeExpr};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::{ArenaMap, Idx, IdxRange};
 use skull::concrete_body::{self, Callee, ConcreteBodies, IteratorOpKind, Slot};
 use skull::instance_graph::{self, Instance, InstanceGraph, Site, SiteOp, SiteOutcome};
-use skull_mir::concrete::{ConcreteBodyPlan, ConcretePlans, ConcreteTypeTables};
+use skull_mir::concrete::{ConcreteBodyPlan, ConcretePlans};
 use skull_mir::mir::{Inst, MirFunc, Term};
-use skull_mir::monoty::{MonoTy, MonoTyId, MonoTyReason};
+use skull_mir::monoty::{MonoTy, MonoTyReason};
 use ustr::Ustr;
 
 fn bodies_of_raw(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
@@ -51,6 +51,38 @@ fn callee_named(ws: &Workspace, plan: &ConcreteBodyPlan, name: &str) -> Instance
         .unwrap_or_else(|| panic!("no concrete `{name}` call"))
 }
 
+const ID_CALL_SOURCE: &str = r#"
+fn id<T>(x: T) -> T { return x }
+fn main() {
+    let out = id(1)
+    print("{out}")
+}
+"#;
+
+#[track_caller]
+fn assert_int_and_string_default_domains(
+    g: &InstanceGraph,
+    plan: &ConcreteBodyPlan,
+    expectation: &str,
+) {
+    assert_eq!(plan.foreign_domains.len(), 2, "{expectation}");
+    let mut rendered = plan
+        .foreign_domains
+        .values()
+        .flat_map(|tables| tables.expr_types.values())
+        .map(|id| g.interner().render(*id))
+        .collect::<Vec<_>>();
+    rendered.sort();
+    assert!(
+        rendered.iter().any(|ty| ty == "int?"),
+        "missing int default table: {rendered:?}"
+    );
+    assert!(
+        rendered.iter().any(|ty| ty == "string?"),
+        "missing string default table: {rendered:?}"
+    );
+}
+
 fn expanded_with_prefix(ws: &Workspace, g: &InstanceGraph, prefix: &str) -> Instance {
     g.expanded()
         .find(|i| g.identity(ws, i).starts_with(prefix))
@@ -85,11 +117,6 @@ fn clear_call_param_slots(
     signature.params.clear();
     signature.param_tuple_spelled.clear();
     plans
-}
-
-fn assert_arena_tables(tables: &ConcreteTypeTables) {
-    let _: &ArenaMap<Idx<Expr>, MonoTyId> = &tables.expr_types;
-    let _: &ArenaMap<Idx<BindingInfo>, MonoTyId> = &tables.binding_types;
 }
 
 fn collect_nested_type_nodes(
@@ -488,15 +515,7 @@ fn main() {
 
 #[test]
 fn production_call_identity_consumes_the_plan_site_map() {
-    let (ws, g, bodies) = bodies_of(
-        r#"
-fn id<T>(x: T) -> T { return x }
-fn main() {
-    let out = id(1)
-    print("{out}")
-}
-"#,
-    );
+    let (ws, g, bodies) = bodies_of(ID_CALL_SOURCE);
     let main_plan = bodies
         .plans
         .iter()
@@ -631,15 +650,7 @@ fn count_int_to_float(mir: &MirFunc) -> usize {
 
 #[test]
 fn production_call_coercion_consumes_the_selected_callee_signature() {
-    let (ws, g, bodies) = bodies_of(
-        r#"
-fn id<T>(x: T) -> T { return x }
-fn main() {
-    let out = id(1)
-    print("{out}")
-}
-"#,
-    );
+    let (ws, g, bodies) = bodies_of(ID_CALL_SOURCE);
     let main_plan = bodies
         .plans
         .iter()
@@ -685,15 +696,7 @@ fn main() {
 
 #[test]
 fn production_call_rejects_a_callee_signature_body_disagreement() {
-    let (ws, g, bodies) = bodies_of(
-        r#"
-fn id<T>(x: T) -> T { return x }
-fn main() {
-    let out = id(1)
-    print("{out}")
-}
-"#,
-    );
+    let (ws, g, bodies) = bodies_of(ID_CALL_SOURCE);
     let main_plan = bodies
         .plans
         .iter()
@@ -721,15 +724,7 @@ fn main() {
 
 #[test]
 fn production_return_coercion_consumes_the_body_signature() {
-    let (ws, g, bodies) = bodies_of(
-        r#"
-fn id<T>(x: T) -> T { return x }
-fn main() {
-    let out = id(1)
-    print("{out}")
-}
-"#,
-    );
+    let (ws, g, bodies) = bodies_of(ID_CALL_SOURCE);
     let callee = bodies
         .plans
         .keys()
@@ -836,26 +831,7 @@ fn main() {
         .find(|(inst, _)| g.identity(&ws, inst).starts_with("main"))
         .map(|(_, plan)| plan)
         .expect("main has no concrete plan");
-    assert_eq!(
-        main.foreign_domains.len(),
-        2,
-        "expected both Box instantiation domains"
-    );
-    let mut rendered = main
-        .foreign_domains
-        .values()
-        .flat_map(|tables| tables.expr_types.values())
-        .map(|id| g.interner().render(*id))
-        .collect::<Vec<_>>();
-    rendered.sort();
-    assert!(
-        rendered.iter().any(|ty| ty == "int?"),
-        "missing int default table: {rendered:?}"
-    );
-    assert!(
-        rendered.iter().any(|ty| ty == "string?"),
-        "missing string default table: {rendered:?}"
-    );
+    assert_int_and_string_default_domains(&g, main, "expected both Box instantiation domains");
 
     let mut poisoned = (**main).clone();
     let domain = poisoned
@@ -890,25 +866,10 @@ fn main() {
         .find(|(inst, _)| g.identity(&ws, inst).starts_with("main"))
         .map(|(_, plan)| plan)
         .expect("main has no concrete plan");
-    assert_eq!(
-        main.foreign_domains.len(),
-        2,
-        "a default body without calls still needs both concrete domains"
-    );
-    let mut rendered = main
-        .foreign_domains
-        .values()
-        .flat_map(|tables| tables.expr_types.values())
-        .map(|id| g.interner().render(*id))
-        .collect::<Vec<_>>();
-    rendered.sort();
-    assert!(
-        rendered.iter().any(|ty| ty == "int?"),
-        "missing int default table: {rendered:?}"
-    );
-    assert!(
-        rendered.iter().any(|ty| ty == "string?"),
-        "missing string default table: {rendered:?}"
+    assert_int_and_string_default_domains(
+        &g,
+        main,
+        "a default body without calls still needs both concrete domains",
     );
     let domain = main
         .foreign_domains
@@ -1370,7 +1331,6 @@ fn main() { let a = plain(1) }
         .find(|(i, _)| g.identity(&ws, i).starts_with("plain"))
         .map(|(_, plan)| &plan.types)
         .expect("`plain` has no ConcreteBody");
-    assert_arena_tables(found);
     assert!(
         found.expr_types.values().next().is_some(),
         "`plain`'s table is empty"
@@ -1495,25 +1455,10 @@ fn main() { let a = ident(1) }
     );
 }
 
-/// SENTINEL -- pins the slots `ConcreteBody` cannot state a type for.
-///
-/// The tables are total over what inference RECORDED, and four expression kinds
-/// get no `expr_types` entry at all, so they are invisible to the free-type
-/// assertion rather than concrete. Corpus: 3,446 of 1,136,034 expression slots,
-/// entirely `Range` / `Var` / `IfLet` / `Call`.
-///
-/// Each has a plausible reason to be absent -- a numeric-`for` range names no
-/// Rock type, an `if let` in statement position produces no value, a `for`
-/// header's call is recorded through `for_iter_protocol`, and an assignment
-/// target is a place whose type the BINDING table already carries (0 untyped
-/// bindings corpus-wide). Plausible is not measured: the callee-table slice
-/// lowers exactly these forms and has to either consume the type from the table
-/// or say which oracle answers instead.
-///
-/// INVERTED: it passes today BECAUSE the slots are untyped, and asserts exactly
-/// that. When bone starts recording
-/// a type for one of these, this goes red -- drop that kind from `PINNED`, and
-/// check whether `ConcreteBody` should now be asserting concreteness for it.
+/// Inference omits types for these four expression kinds. The annotated and
+/// inferred assignment controls show that the fixture distinguishes typed and
+/// untyped targets; none of its untyped expressions may key a callee. If
+/// inference starts typing a kind, revisit this pinned set.
 #[test]
 fn untyped_expression_slots_are_pinned() {
     const PINNED: [&str; 4] = ["Call", "IfLet", "Range", "Var"];
@@ -1602,6 +1547,31 @@ fn main() { let a = body([1, 2]) }
     assert!(
         body_types.expr_types.values().count() > 20,
         "almost nothing in `body` was typed, so the pinned kinds are not what is special"
+    );
+    let body = &bodies.bodies[body_inst];
+    assert!(
+        !body.direct_calls.is_empty(),
+        "the fixture recorded no callee at all"
+    );
+    assert!(
+        bodies.census().untyped_as_callee_key.is_empty(),
+        "a callee entry is keyed on an expression with no inferred type: {:?}",
+        bodies.census().untyped_as_callee_key
+    );
+    let header = bodies
+        .untyped
+        .iter()
+        .find(|(i, u)| i == body_inst && u.kind == "Call")
+        .map(|(_, u)| u.expr)
+        .expect("no untyped `Call`");
+    assert!(
+        body.callees().all(|(site, _)| site.expr != header),
+        "the template-lowered `for` header has a callee entry after all"
+    );
+    assert_eq!(
+        g.storage_failures().count(),
+        0,
+        "a synthesized receiver had no concrete type"
     );
     assert_eq!(bodies.free_types.len(), 0);
 }
@@ -2721,80 +2691,6 @@ fn main() { let qs: [Q] = []; qs.sort(_.x) }
         leaves,
         vec!["__rock_col_sort_leaves"],
         "a `nobox` element did not take the leaf arm"
-    );
-}
-
-/// The requirement the type-table slice deferred, answered by MEASUREMENT
-/// rather than by reading the lowering paths: no callee or iterator entry is
-/// keyed on an expression inference recorded no type for, so no table needs one.
-///
-/// The oracles that answer instead are named by construction --
-/// `resolved_overload_calls` for a direct call, `IterWitness` /
-/// `for_iter_protocol` / `bound_call_trees` for the iterator ops, and the
-/// receiver's own type for a synthesized call (whose failures are
-/// `storage_failures`, reported against `synthesized_examined`).
-#[test]
-fn no_untyped_expression_is_a_callee_key() {
-    let (ws, g, bodies) = bodies_of(
-        r#"
-fn body(v: [int]) -> int {
-    let total = 0
-    for i in 0..3 { total = total + i }
-    for (i, x) in enumerate(v) { total = total + i + x }
-    let m: int? = 1
-    if let y = m { total = total + y }
-    let annotated: int = 0
-    if v.len() > 0 { annotated = 1 } else { annotated = 2 }
-    return total + annotated
-}
-fn main() { let a = body([1, 2]) }
-"#,
-    );
-    let inst = bodies
-        .bodies
-        .keys()
-        .find(|i| g.identity(&ws, i).starts_with("body"))
-        .expect("no `body` instance");
-    // The fixture can distinguish: it HAS untyped slots of every pinned kind,
-    // and it HAS callee entries. A body with neither would pass vacuously.
-    let untyped: Vec<&str> = bodies
-        .untyped
-        .iter()
-        .filter(|(i, _)| i == inst)
-        .map(|(_, u)| u.kind)
-        .collect();
-    for kind in ["Call", "IfLet", "Range", "Var"] {
-        assert!(
-            untyped.contains(&kind),
-            "the fixture has no untyped `{kind}`: {untyped:?}"
-        );
-    }
-    assert!(
-        !bodies.bodies[inst].direct_calls.is_empty(),
-        "the fixture recorded no callee at all"
-    );
-    assert!(
-        bodies.census().untyped_as_callee_key.is_empty(),
-        "a callee entry is keyed on an expression with no inferred type: {:?}",
-        bodies.census().untyped_as_callee_key
-    );
-    // The untyped `Call` is a `for` header in TEMPLATE position
-    // (`lower_for_enumerate` emits a numeric loop), so it is not a call at all
-    // -- no callee names it, and neither does the iterator table.
-    let header = bodies
-        .untyped
-        .iter()
-        .find(|(i, u)| i == inst && u.kind == "Call")
-        .map(|(_, u)| u.expr)
-        .expect("no untyped `Call`");
-    assert!(
-        bodies.bodies[inst].callees().all(|(s, _)| s.expr != header),
-        "the template-lowered `for` header has a callee entry after all"
-    );
-    assert_eq!(
-        g.storage_failures().count(),
-        0,
-        "a synthesized receiver had no concrete type"
     );
 }
 
