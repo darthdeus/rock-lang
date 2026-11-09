@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise an extracted Linux runtime without source, build tools or networking."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,10 @@ import tempfile
 
 def check(archive, output):
     output.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(archive, output / 'runtime.tar.gz')
+    with archive.open('rb') as stream:
+        digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+    (output / 'sha256.txt').write_text(f'{digest}  runtime.tar.gz\n')
     assert set(p.name for p in Path('/sys/class/net').iterdir()) == {'lo'}, 'run with --network none'
     for tool in ('cargo', 'rustc', 'git', 'luajit', 'rock'):
         assert shutil.which(tool) is None, f'ambient tool: {tool}'
@@ -100,9 +105,11 @@ def check(archive, output):
         run('stone-core', ['test', install / 'packages/stone-core'])
         run('stone', ['test', install / 'packages/stone'], display=True)
         screenshot = output / 'testbed.png'
-        run('frame', ['frame', install / 'demos/testbed', '--frames', '3',
+        # Keep a longer diagnostic capture to distinguish startup from persistent rendering defects.
+        run('frame', ['frame', install / 'demos/testbed', '--frames', '60',
                       '--output', work / 'frames'], display=True,
             extra_env={'STONE_HEADLESS': '1', 'STONE_SCREENSHOT_PATH': str(screenshot)})
+        shutil.copy2(work / 'frames/main.lua', output / 'testbed.lua')
         assert screenshot.read_bytes().startswith(b'\x89PNG\r\n\x1a\n'), 'missing render'
         (output / 'result.json').write_text(json.dumps(dict(passed=results,
             renderer='Mesa software rendering', network='none', source_available=False), indent=2) + '\n')
