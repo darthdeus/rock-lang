@@ -554,12 +554,25 @@ impl CodegenCtx {
     pub fn new_with_state(ws: &Workspace, state_slots: HashMap<ustr::Ustr, u32>) -> Self {
         let mut reserved: HashMap<String, Span> = HashMap::default();
         let mut collisions: Vec<(String, CompilerError)> = Vec::new();
+        // Every function's emitted name, mangled once for both the reserved
+        // table and the collision check below.
+        let names: Vec<(&Function, String)> = {
+            use bone_core::prelude::*;
+            let functions: Vec<&Function> = ws
+                .modules
+                .iter()
+                .flat_map(|m| m.functions.iter().map(|(_, f)| f))
+                .collect();
+            functions
+                .into_par_iter()
+                .map(|f| (f, mangle_fn(ws, f)))
+                .collect()
+        };
+        for (f, name) in &names {
+            reserved_namespace_collision(name, f.name_span, &mut collisions);
+            reserved.insert(name.clone(), f.name_span);
+        }
         for m in ws.modules.iter() {
-            for (_, f) in m.functions.iter() {
-                let name = mangle_fn(ws, f);
-                reserved_namespace_collision(&name, f.name_span, &mut collisions);
-                reserved.insert(name, f.name_span);
-            }
             for (_, g) in m.globals.iter() {
                 let symbol = skull_mir::mangle::symbol_of_key(g.name);
                 reserved_namespace_collision(symbol.as_str(), g.name_span, &mut collisions);
@@ -569,7 +582,10 @@ impl CodegenCtx {
         // Permanent mangle-collision check (reject, don't fall back): two distinct
         // signatures mangling alike, or a mangled name equal to an exempt bare
         // name. Drained through the same sink as the synthetic-name collisions.
-        collisions.extend(skull_mir::mangle::collision_errors(ws));
+        collisions.extend(skull_mir::mangle::collision_errors_of(
+            ws,
+            names.iter().map(|(f, name)| (*f, name.as_str())),
+        ));
         CodegenCtx {
             reserved,
             rejections: Mutex::new(collisions),

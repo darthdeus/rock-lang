@@ -431,32 +431,46 @@ fn function_collision_error(
 /// name that would silently resolve to the wrong body. Keyed by mangled name for
 /// deterministic ordering across the rayon-scheduled emit.
 pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
+    let names: Vec<(&Function, String)> = ws
+        .modules
+        .iter()
+        .flat_map(|m| m.functions.iter().map(|(_, f)| (f, mangle_fn(ws, f))))
+        .collect();
+    collision_errors_of(ws, names.iter().map(|(f, name)| (*f, name.as_str())))
+}
+
+/// [`collision_errors`] over names the caller already mangled, one per
+/// function in workspace order.
+pub fn collision_errors_of<'a>(
+    ws: &Workspace,
+    names: impl IntoIterator<Item = (&'a Function, &'a str)>,
+) -> Vec<(String, CompilerError)> {
     use rustc_hash::FxHashMap as HashMap;
     // mangled name -> (a representative Function, name_span) for a non-exempt fn.
     // `sig_key` (the structural distinctness check) is computed LAZILY -- only
     // when two fns hash to the same mangled name, which the corpus proves rare.
-    let mut seen: HashMap<String, (&Function, Span)> = HashMap::default();
-    let mut exempt_names: HashMap<String, Vec<&Function>> = HashMap::default();
+    let mut seen: HashMap<&str, (&Function, Span)> = HashMap::default();
+    let mut exempt_names: HashMap<&str, Vec<&Function>> = HashMap::default();
     let mut out: Vec<(String, CompilerError)> = Vec::new();
 
-    for m in ws.modules.iter() {
-        for (_, f) in m.functions.iter() {
-            if is_exempt(f) {
-                // The EMITTED name, which for a v1 key is its declared segment
-                // -- comparing the raw DefKey here would never match a mangled
-                // name and the exempt-collision check would go silent.
-                exempt_names.entry(mangle_fn(ws, f)).or_default().push(f);
-                continue;
+    for (f, name) in names {
+        if is_exempt(f) {
+            // The EMITTED name, which for a v1 key is its declared segment
+            // -- comparing the raw DefKey here would never match a mangled
+            // name and the exempt-collision check would go silent.
+            exempt_names.entry(name).or_default().push(f);
+            continue;
+        }
+        match seen.get(name) {
+            Some((prev, _)) if sig_key(ws, prev) != sig_key(ws, f) => {
+                out.push((
+                    name.to_string(),
+                    function_collision_error(ws, name, prev, f),
+                ));
             }
-            let name = mangle_fn(ws, f);
-            match seen.get(&name) {
-                Some((prev, _)) if sig_key(ws, prev) != sig_key(ws, f) => {
-                    out.push((name.clone(), function_collision_error(ws, &name, prev, f)));
-                }
-                Some(_) => {} // same overload (backend variant / re-decl): fine.
-                None => {
-                    seen.insert(name, (f, f.name_span));
-                }
+            Some(_) => {} // same overload (backend variant / re-decl): fine.
+            None => {
+                seen.insert(name, (f, f.name_span));
             }
         }
     }
@@ -534,7 +548,10 @@ pub fn collision_errors(ws: &Workspace) -> Vec<(String, CompilerError)> {
                 // Backend variants of one signature remain one logical function,
                 // even when the extern variant keeps a bare name.
                 if sig_key(ws, prev) != sig_key(ws, f) {
-                    out.push((name.clone(), function_collision_error(ws, name, prev, f)));
+                    out.push((
+                        name.to_string(),
+                        function_collision_error(ws, name, prev, f),
+                    ));
                 }
             }
         }
