@@ -2043,23 +2043,48 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         root_decls: root_decls.clone(),
         ..Default::default()
     };
-    for (owner, sites) in g.call_sites() {
-        FRESH_INDEX_SITE_ROWS.with(|count| count.set(count.get() + sites.len() as u64));
-        index.site_counts.insert(owner.clone(), sites.len());
-        // One owner row, filled site by site; the reverse rows ask before
-        // cloning the owner, which most callees already hold from another
-        // site of the same body.
-        let mut outgoing: FxHashMap<Site, Instance> = FxHashMap::default();
-        for (site, record) in sites {
-            let SiteOutcome::Resolved(callee) = &record.outcome else {
-                continue;
-            };
-            outgoing.insert(site.clone(), callee.clone());
-            let users = index.incoming.entry(callee.clone()).or_default();
-            if !users.contains(owner) {
-                users.insert(owner.clone());
-            }
-            if site.op == skull_mir::site::SiteOp::FnValue {
+    // Each owner's row of the site index is its own; the rows are built in
+    // parallel and the reverse rows, which join owners, are filled from them
+    // in owner order. A callee is listed once per owner with whether any site
+    // of that owner takes it as a value.
+    let owner_rows: Vec<(
+        &Instance,
+        usize,
+        FxHashMap<Site, Instance>,
+        Vec<(&Instance, bool)>,
+    )> = {
+        use bone_core::prelude::*;
+        let owners: Vec<_> = g.call_sites().collect();
+        owners
+            .into_par_iter()
+            .map(|(owner, sites)| {
+                let mut outgoing: FxHashMap<Site, Instance> = FxHashMap::default();
+                let mut callees: FxHashMap<&Instance, bool> = FxHashMap::default();
+                for (site, record) in sites {
+                    let SiteOutcome::Resolved(callee) = &record.outcome else {
+                        continue;
+                    };
+                    outgoing.insert(site.clone(), callee.clone());
+                    *callees.entry(callee).or_insert(false) |=
+                        site.op == skull_mir::site::SiteOp::FnValue;
+                }
+                (owner, sites.len(), outgoing, callees.into_iter().collect())
+            })
+            .collect()
+    };
+    for (owner, site_count, outgoing, callees) in owner_rows {
+        FRESH_INDEX_SITE_ROWS.with(|count| count.set(count.get() + site_count as u64));
+        index.site_counts.insert(owner.clone(), site_count);
+        if !outgoing.is_empty() {
+            index.outgoing.insert(owner.clone(), outgoing);
+        }
+        for (callee, fn_value) in callees {
+            index
+                .incoming
+                .entry(callee.clone())
+                .or_default()
+                .insert(owner.clone());
+            if fn_value {
                 index
                     .fn_values_by_caller
                     .entry(owner.clone())
@@ -2071,9 +2096,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
                     .or_default()
                     .insert(owner.clone());
             }
-        }
-        if !outgoing.is_empty() {
-            index.outgoing.insert(owner.clone(), outgoing);
         }
     }
     let mut roots: BTreeSet<Instance> = BTreeSet::new();
@@ -2208,7 +2230,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     }
 
     // One symbol per retained instance, from THIS artifact's planner.
-    let mut by_symbol: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
+    let mut by_symbol: FxHashMap<&str, Vec<&Instance>> = FxHashMap::default();
     let mut symbols = BTreeMap::new();
     // The planner answers each instance independently; the names are
     // derived in parallel and recorded in instance order.
@@ -2219,20 +2241,27 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             .map(|(i, r)| (i, req.symbols.symbol(ws, g, i, r)))
             .collect()
     };
-    for (i, s) in planned {
-        by_symbol.entry(s.clone()).or_default().push(i.clone());
+    for (i, s) in &planned {
+        by_symbol.entry(s.as_str()).or_default().push(i);
         index
             .symbol_users
             .entry(s.clone())
             .or_default()
-            .insert(i.clone());
-        symbols.insert(i.clone(), s);
+            .insert((*i).clone());
     }
-    let symbol_collisions: Vec<SymbolCollision> = by_symbol
+    // Reported in symbol order, which the hashed grouping does not keep.
+    let mut symbol_collisions: Vec<SymbolCollision> = by_symbol
         .into_iter()
         .filter(|(_, v)| v.len() > 1)
-        .map(|(symbol, instances)| SymbolCollision { symbol, instances })
+        .map(|(symbol, instances)| SymbolCollision {
+            symbol: symbol.to_string(),
+            instances: instances.into_iter().cloned().collect(),
+        })
         .collect();
+    symbol_collisions.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+    for (i, s) in planned {
+        symbols.insert(i.clone(), s);
+    }
 
     // THE boundary identities, minted once, per retained instance. Every
     // consumer -- an ordinary call site and an opaque dependency alike -- reads
