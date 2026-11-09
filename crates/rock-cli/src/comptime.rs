@@ -627,11 +627,7 @@ fn identity_at(image: &Path, memo_dir: &Path) -> Result<String> {
     let mut file = std::fs::File::open(image)?;
     let meta = file.metadata()?;
     let memo = identity_memo_path_in(image, memo_dir.to_path_buf());
-    Ok(remembered_image_identity_in(
-        &mut file,
-        &meta,
-        Some(memo),
-    )?)
+    Ok(remembered_image_identity_in(&mut file, &meta, Some(memo))?)
 }
 
 fn write_identity_memo(path: &Path, entry: &IdentityMemo) -> std::io::Result<()> {

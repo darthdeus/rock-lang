@@ -1,4 +1,3 @@
-pub mod defs;
 pub mod fn_identity;
 pub use bone_core::identity_storage;
 pub mod relocation;

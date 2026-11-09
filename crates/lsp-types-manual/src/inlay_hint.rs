@@ -270,5 +270,3 @@ impl_lsp_struct!(
         refresh_support: bool = "refreshSupport"
     }
 );
-
-// TODO(sno2): add tests once stabilized

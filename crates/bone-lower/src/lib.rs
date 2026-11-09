@@ -721,11 +721,7 @@ impl<'a> LowerCtx<'a> {
         Ok(alloc_tys_contiguous(self, body, pos, nodes))
     }
 
-    pub(crate) fn type_node(
-        &self,
-        body: &Body,
-        ty: TyId,
-    ) -> Result<TypeExpr, CompilerError> {
+    pub(crate) fn type_node(&self, body: &Body, ty: TyId) -> Result<TypeExpr, CompilerError> {
         match ty {
             TyId::Static(m, i) if m == self.module.module_id() => Ok(self.module.ty_arena[i]),
             TyId::Static(m, i) => Ok(self.workspace.module(m).ty_arena[i]),
@@ -1306,8 +1302,6 @@ pub(crate) fn lower_statement_value(
                         // TODO: statement id?
                         hir::NodeRef::Expr(e_id),
                     );
-                } else {
-                    // TODO: when?
                 }
 
                 Statement::Return(Some(e_id))
@@ -1642,8 +1636,7 @@ pub(crate) fn lower_expr_value(
             args,
             syntax: _,
         } => {
-            let generic_args =
-                ctx.lower_type_exprs_to_range(a, body, TyPos::Body, generic_args)?;
+            let generic_args = ctx.lower_type_exprs_to_range(a, body, TyPos::Body, generic_args)?;
             match &a.e(func).kind {
                 ExprKind::Ident(name) => {
                     let args_range =

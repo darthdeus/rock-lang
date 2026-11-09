@@ -1056,7 +1056,6 @@ fn check_initialize_params(params: serde_json::Value) -> Result<()> {
         }
     }
 
-    // TODO: are these not needed?
     let _params: InitializeParams = serde_json::from_value(params_val.clone()).map_err(|err| {
         // Log the exact payload that failed deserialization (after patching)
         eprintln!(

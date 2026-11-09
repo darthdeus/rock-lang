@@ -1466,7 +1466,6 @@ pub(crate) fn resolve_named_call_inner(
                     );
                 }
 
-                // TODO: do tests still pass without this?
                 for arg in args.into_iter() {
                     let aspan = c.body.expr_spans[arg];
                     let aty = infer_expr(c, gamma, arg)?;

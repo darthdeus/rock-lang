@@ -999,7 +999,6 @@ pub(crate) fn reify(gamma: &mut Gamma, ty: TyId, span: Span) -> Idx<TypeExpr> {
     idx
 }
 
-// TODO: keep this and A/B test against the no-alloc version
 pub(crate) fn reify_range(
     gamma: &mut Gamma,
     parent: TyId,
@@ -1016,31 +1015,6 @@ pub(crate) fn reify_range(
 
     alloc_contiguous(&mut gamma.out.ty_arena, children)
 }
-
-// fn reify_range(
-//     gamma: &mut Gamma,
-//     parent: TyId,
-//     range: IdxRange<TypeExpr>,
-//     span: Span,
-// ) -> IdxRange<TypeExpr> {
-//     let mut idx_start = None;
-//     let mut idx_end = None;
-//
-//     for c in range {
-//         let tyid = TyId::Local(reify(gamma, parent.with_idx(c), span));
-//         let texp = *gamma.get(tyid);
-//
-//         // TODO: span?
-//         idx_end = Some(gamma.out.ty_arena.alloc(texp));
-//         idx_start = idx_start.or(idx_end);
-//     }
-//
-//     if let (Some(a), Some(b)) = (idx_start, idx_end) {
-//         IdxRange::new_inclusive(a..=b)
-//     } else {
-//         IdxRange::new_empty()
-//     }
-// }
 
 pub(crate) fn tuple_of(gamma: &mut Gamma, elems: &[TyId], span: Span) -> TyId {
     let idxs: Vec<TyId> = elems

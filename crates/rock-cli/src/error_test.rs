@@ -315,10 +315,7 @@ fn lint_rejects(
 /// path). `backend` is informational -- bone is the shared front end, so both
 /// verify rejection identically. The error-KIND suffix is rock-specific (bone
 /// diagnostics mostly carry no kind), so this asserts REJECTION only.
-pub(crate) fn run_error_suite(
-    path: &Path,
-    verbose: bool,
-) -> Result<(usize, usize, usize, usize)> {
+pub(crate) fn run_error_suite(path: &Path, verbose: bool) -> Result<(usize, usize, usize, usize)> {
     if !has_error_tests(path) {
         return Ok((0, 0, 0, 0));
     }
