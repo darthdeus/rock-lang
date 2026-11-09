@@ -35,8 +35,6 @@ std::thread_local! {
     /// one sequential call on one thread: the frame opens and closes around
     /// it, so no parallel work can interleave with it.
     static PROBES: std::cell::RefCell<Option<Vec<ScopeProbe>>> = const { std::cell::RefCell::new(None) };
-
-    static ROOT_KEY: Ustr = Ustr::from("");
 }
 
 /// Run `lookup` and return the namespace facts it read: each
@@ -76,7 +74,7 @@ fn probe(fact: ScopeProbe) {
 
 pub(crate) fn namespace_key(ws: &Workspace, package: u32, path: &[Ustr]) -> Ustr {
     match path {
-        [] => ROOT_KEY.with(|key| *key),
+        [] => bone_core::modules::root_key(),
         [key] => *key,
         _ => {
             let mut key = path[0];
@@ -1030,11 +1028,14 @@ fn glob_export_members(
 /// An exporting module standing in as the site its export targets resolve
 /// from.
 fn exporter_scope(pkg: &bone_core::modules::NsPackage, path: &[Ustr]) -> FragmentScope {
+    // Spelled out: `..Default::default()` would intern an empty package
+    // name only to discard it, once per glob step of every lookup.
     FragmentScope {
         package: pkg.id,
         package_name: pkg.self_name,
         module_path: path.to_vec(),
-        ..Default::default()
+        named: Default::default(),
+        globs: Vec::new(),
     }
 }
 

@@ -310,6 +310,13 @@ pub struct UsePathRef {
     pub segments: Vec<Ustr>,
 }
 
+/// The key of a package's root module node: the empty path. Interned once,
+/// since resolver lookups ask for it constantly and interning takes a lock.
+pub fn root_key() -> Ustr {
+    static ROOT: std::sync::LazyLock<Ustr> = std::sync::LazyLock::new(|| Ustr::from(""));
+    *ROOT
+}
+
 impl UsePathRef {
     /// Order use paths exactly as the joined `"::"` string would, without
     /// allocating it: the byte stream is the segments with `::` between them,
@@ -633,7 +640,7 @@ impl NsTree {
     }
 
     pub fn std_root(&self) -> Option<&NsNode> {
-        self.package(STD_PACKAGE_ID)?.node(Ustr::from(""))
+        self.package(STD_PACKAGE_ID)?.node(root_key())
     }
 
     /// Whether a function lowered from `file` belongs to a family member
