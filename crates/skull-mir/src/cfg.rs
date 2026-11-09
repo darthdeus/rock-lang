@@ -73,9 +73,9 @@ pub fn reachable_blocks_from(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block
 /// Unreachable lowering-artifact blocks are dropped.
 pub fn reverse_postorder(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
     let mut post = Vec::new();
-    let mut visited: HashSet<Idx<Block>> = HashSet::default();
+    let mut visited = vec![false; func.blocks.len()];
     let mut stack = vec![(entry, false)];
-    visited.insert(entry);
+    visited[dense::bx(entry)] = true;
     while let Some((b, processed)) = stack.pop() {
         if processed {
             post.push(b);
@@ -83,7 +83,9 @@ pub fn reverse_postorder(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
         }
         stack.push((b, true));
         successors(&func.blocks[b].term, |s| {
-            if visited.insert(s) {
+            let seen = &mut visited[dense::bx(s)];
+            if !*seen {
+                *seen = true;
                 stack.push((s, false));
             }
         });

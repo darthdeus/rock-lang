@@ -432,16 +432,16 @@ pub fn walk<P: ReachPolicy>(policy: &mut P) -> Result<Vec<P::Node>, CompilerErro
 /// two: a live region is named by an `Inst::Lambda` in a block that is itself
 /// emitted, and a clone's leftovers are named by nothing.
 pub fn emitted_blocks(mf: &MirFunc) -> Vec<Idx<Block>> {
-    let mut seen: HashSet<Idx<Block>> = HashSet::default();
+    let mut seen = vec![false; mf.blocks.len()];
     let mut out: Vec<Idx<Block>> = Vec::new();
     let mut regions: Vec<Idx<Block>> = vec![mf.entry];
     regions.extend(mf.coro_defers.iter().map(|&(_, entry)| entry));
     while let Some(entry) = regions.pop() {
-        if !mf.blocks.iter().any(|(id, _)| id == entry) {
+        if crate::cfg::dense::bx(entry) >= mf.blocks.len() {
             continue;
         }
         for bid in crate::cfg::reachable_blocks_from(mf, entry) {
-            if !seen.insert(bid) {
+            if std::mem::replace(&mut seen[crate::cfg::dense::bx(bid)], true) {
                 continue;
             }
             out.push(bid);

@@ -881,7 +881,7 @@ fn body_fingerprint(mf: &MirFunc, volatile_vars: &FxHashSet<Ustr>) -> u64 {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let mut hasher = BodyHasher::default();
+    let mut hasher = BodyHasher::for_body(mf);
     for block in crate::cfg::reachable_blocks_from(mf, mf.entry) {
         hasher.tag(1);
         for inst_id in &mf.blocks[block].insts {
@@ -899,25 +899,75 @@ fn body_fingerprint(mf: &MirFunc, volatile_vars: &FxHashSet<Ustr>) -> u64 {
 
 struct BodyHasher {
     hash: Fnv64,
-    inst_ids: FxHashMap<u32, usize>,
-    cell_ids: FxHashMap<u32, usize>,
-    block_ids: FxHashMap<u32, usize>,
+    inst_ids: CanonicalIds,
+    cell_ids: CanonicalIds,
+    block_ids: CanonicalIds,
     rep_ids: FxHashMap<u32, usize>,
+}
+
+/// First-seen numbering of arena ids, dense over the arena when its size is
+/// known up front (every body hash renumbers every reachable id once).
+#[derive(Default)]
+struct CanonicalIds {
+    dense: Vec<u32>,
+    sparse: FxHashMap<u32, usize>,
+    next: usize,
+}
+
+impl CanonicalIds {
+    const UNSEEN: u32 = u32::MAX;
+
+    fn sized(len: usize) -> Self {
+        Self {
+            dense: vec![Self::UNSEEN; len],
+            sparse: FxHashMap::default(),
+            next: 0,
+        }
+    }
+
+    fn index(&mut self, raw: u32) -> usize {
+        match self.dense.get_mut(raw as usize) {
+            Some(slot) if *slot != Self::UNSEEN => *slot as usize,
+            Some(slot) => {
+                *slot = self.next as u32;
+                self.next += 1;
+                *slot as usize
+            }
+            None => {
+                let next = self.next;
+                let id = *self.sparse.entry(raw).or_insert(next);
+                if id == next {
+                    self.next += 1;
+                }
+                id
+            }
+        }
+    }
 }
 
 impl Default for BodyHasher {
     fn default() -> Self {
         Self {
             hash: Fnv64::new(),
-            inst_ids: FxHashMap::default(),
-            cell_ids: FxHashMap::default(),
-            block_ids: FxHashMap::default(),
+            inst_ids: CanonicalIds::default(),
+            cell_ids: CanonicalIds::default(),
+            block_ids: CanonicalIds::default(),
             rep_ids: FxHashMap::default(),
         }
     }
 }
 
 impl BodyHasher {
+    fn for_body(mf: &MirFunc) -> Self {
+        Self {
+            hash: Fnv64::new(),
+            inst_ids: CanonicalIds::sized(mf.insts.len()),
+            cell_ids: CanonicalIds::sized(mf.cells.len()),
+            block_ids: CanonicalIds::sized(mf.blocks.len()),
+            rep_ids: FxHashMap::default(),
+        }
+    }
+
     fn tag(&mut self, tag: u8) {
         self.hash.write_u8(tag);
     }
@@ -930,22 +980,19 @@ impl BodyHasher {
         self.hash.write_u8(value as u8);
     }
 
-    fn index<T>(map: &mut FxHashMap<u32, usize>, idx: Idx<T>) -> usize {
-        let raw = idx.into_raw().into_u32();
-        let next = map.len();
-        *map.entry(raw).or_insert(next)
-    }
-
     fn inst_idx(&mut self, idx: Idx<Inst>) {
-        self.hash.write_usize(Self::index(&mut self.inst_ids, idx));
+        let id = self.inst_ids.index(idx.into_raw().into_u32());
+        self.hash.write_usize(id);
     }
 
     fn cell_idx(&mut self, idx: Idx<crate::mir::Cell>) {
-        self.hash.write_usize(Self::index(&mut self.cell_ids, idx));
+        let id = self.cell_ids.index(idx.into_raw().into_u32());
+        self.hash.write_usize(id);
     }
 
     fn block_idx(&mut self, idx: Idx<crate::mir::Block>) {
-        self.hash.write_usize(Self::index(&mut self.block_ids, idx));
+        let id = self.block_ids.index(idx.into_raw().into_u32());
+        self.hash.write_usize(id);
     }
 
     fn rep_id(&mut self, id: crate::lower::RepId) {

@@ -10,10 +10,12 @@ use super::*;
 pub(super) fn direct_refs(ws: &Workspace, mf: &MirFunc) -> (Vec<Ustr>, Vec<Ustr>) {
     let mut globals = Vec::new();
     let mut calls = Vec::new();
-    let mut seen: FxHashSet<Idx<skull_mir::mir::Block>> = Default::default();
+    // A body calls the same few callees over and over; mangle each once.
+    let mut names: FxHashMap<FuncRef, Ustr> = FxHashMap::default();
+    let mut seen = vec![false; mf.blocks.len()];
     let mut stack = vec![mf.entry];
     while let Some(b) = stack.pop() {
-        if !seen.insert(b) {
+        if std::mem::replace(&mut seen[skull_mir::cfg::dense::bx(b)], true) {
             continue;
         }
         let block = &mf.blocks[b];
@@ -21,8 +23,11 @@ pub(super) fn direct_refs(ws: &Workspace, mf: &MirFunc) -> (Vec<Ustr>, Vec<Ustr>
             match &mf.insts[iid] {
                 Inst::Global(n) => globals.push(*n),
                 Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
-                    let f = &ws.module(func.module).functions[func.func];
-                    calls.push(Ustr::from(&mangle_fn(ws, f)));
+                    let name = *names.entry(*func).or_insert_with(|| {
+                        let f = &ws.module(func.module).functions[func.func];
+                        Ustr::from(&mangle_fn(ws, f))
+                    });
+                    calls.push(name);
                 }
                 _ => {}
             }
