@@ -2452,11 +2452,12 @@ mod tests {
     }
 
     /// Execution oracle: emit Lua, append a `driver`, run under luajit, return
-    /// trimmed stdout. Returns `None` (test skips) when luajit isn't on PATH.
+    /// trimmed stdout. Panics when luajit isn't on PATH: a host without it must
+    /// report red for tests that never ran, never green.
     /// CRLF is normalized to `\n`: on Windows luajit's stdout goes through
     /// text-mode translation (`\n` -> `\r\n`), so without this every
     /// multi-line `assert_eq!` expectation would spuriously mismatch.
-    fn run(src: &str, driver: &str) -> Option<String> {
+    fn run(src: &str, driver: &str) -> String {
         // Stdlib-free harness: codegen emits calls to the checked Vec helpers
         // the stdlib normally provides -- prepend the canonical shims. Alias the
         // user fns back to their bare source names so the driver can call them
@@ -2472,7 +2473,7 @@ mod tests {
             .arg("-e")
             .arg(&lua)
             .output()
-            .ok()?;
+            .expect("luajit is required for this execution test but could not be spawned");
         if !out.status.success() {
             panic!(
                 "luajit failed:\n{}\n--- lua ---\n{}",
@@ -2480,19 +2481,15 @@ mod tests {
                 lua
             );
         }
-        Some(
-            String::from_utf8_lossy(&out.stdout)
-                .replace("\r\n", "\n")
-                .trim()
-                .to_string(),
-        )
+        String::from_utf8_lossy(&out.stdout)
+            .replace("\r\n", "\n")
+            .trim()
+            .to_string()
     }
 
     /// Run `src` + `driver` under luajit and assert stdout == `expected`.
-    /// Skips (returns) when luajit is unavailable, mirroring `run`.
     fn exec_eq(src: &str, driver: &str, expected: &str) {
-        let Some(out) = run(src, driver) else { return };
-        assert_eq!(out, expected);
+        assert_eq!(run(src, driver), expected);
     }
 
     /// A global that depends on another global only THROUGH a struct
@@ -2508,7 +2505,7 @@ mod tests {
             "global B: Foo = Foo {}\nstruct Foo { x: int = A }\nglobal A: int = 42\nfn bx() -> int { B.x }",
             "print(bx())",
         );
-        assert_eq!(out.as_deref(), Some("42"));
+        assert_eq!(out, "42");
     }
 
     /// Global-init ordering across a call boundary: `A` initializes by calling
@@ -2564,7 +2561,7 @@ mod tests {
             "fn greet() -> string {\n    let n = 7\n    \"n={n}!\"\n}",
             "print(greet())",
         );
-        assert_eq!(out.as_deref(), Some("n=7!"));
+        assert_eq!(out, "n=7!");
     }
 
     /// Execution oracle for a format specifier: `{x:.2f}` -> `string.format`.
@@ -2574,7 +2571,7 @@ mod tests {
             "fn f() -> string {\n    let x = 3.14159\n    \"pi={x:.2f}\"\n}",
             "print(f())",
         );
-        assert_eq!(out.as_deref(), Some("pi=3.14"));
+        assert_eq!(out, "pi=3.14");
     }
 
     #[test]
@@ -2841,9 +2838,7 @@ mod tests {
                       print(table.concat(s, \",\")) end \
                       local function v(t) return {_data = t, len = #t} end \
                       show(tup()); show(strct({x=10, y=20})); show(vecs(v{1,2}, v{3,4}))";
-        let Some(out) = run(src, driver) else {
-            return;
-        };
+        let out = run(src, driver);
         assert_eq!(out, "0,1,2,3\n10,20,9\n1,2,3,4,99");
     }
 
@@ -3116,12 +3111,10 @@ mod tests {
                    fn omitted() -> float { off_y(V2 { x: 1.0, y: 2.0 }) }\n\
                    fn gap_default_off() -> float { gap_off(V2 { x: 1.0, y: 2.0 }, scale: 7.0) }\n\
                    fn gap_named_scale() -> float { gap_scale(V2 { x: 1.0, y: 2.0 }, scale: 7.0) }";
-        let Some(out) = run(
+        let out = run(
             src,
             "print(provided()); print(omitted()); print(gap_default_off()); print(gap_named_scale())",
-        ) else {
-            return;
-        };
+        );
         // provided off.y=4 ; omitted -> default off.y=20 ;
         // gap: off omitted (default 20) while scale named=7 -> off.y=20, scale=7
         assert_eq!(out, "4\n20\n20\n7");
@@ -3143,12 +3136,10 @@ mod tests {
                    fn omitted_x() -> float { pick(V2 { x: 1.0, y: 2.0 }) }\n\
                    fn omitted_y() -> float { pick_y(V2 { x: 1.0, y: 2.0 }) }\n\
                    fn provided_x() -> float { pick(V2 { x: 1.0, y: 2.0 }, V2 { x: 3.0, y: 4.0 }) }";
-        let Some(out) = run(
+        let out = run(
             src,
             "print(omitted_x()); print(omitted_y()); print(provided_x())",
-        ) else {
-            return;
-        };
+        );
         // omitted -> default DEF = (7, 8): x=7, y=8 ; provided -> off.x=3
         assert_eq!(out, "7\n8\n3");
     }
@@ -3191,9 +3182,7 @@ mod tests {
                    fn a() -> float { br_x(mk(1.0, 2.0, 3.0, 4.0)) }\n\
                    fn b() -> float { tl_y(mk(1.0, 2.0, 3.0, 4.0)) }\n\
                    fn c() -> float { br_x(whole(mk(1.0, 2.0, 3.0, 4.0))) }";
-        let Some(out) = run(src, "print(a()); print(b()); print(c())") else {
-            return;
-        };
+        let out = run(src, "print(a()); print(b()); print(c())");
         // br.x=3 ; tl.y=2 ; whole passes Rect through then br.x=3
         assert_eq!(out, "3\n2\n3");
     }
@@ -3383,9 +3372,7 @@ mod tests {
             lua.contains("for c"),
             "expected a numeric for-loop (FORL), got:\n{lua}"
         );
-        let Some(out) = run(src, "print(sum(5))") else {
-            return;
-        };
+        let out = run(src, "print(sum(5))");
         assert_eq!(out, "4");
     }
 
@@ -3402,9 +3389,7 @@ mod tests {
             2,
             "expected two numeric for-loops (outer + inner), got:\n{lua}"
         );
-        let Some(out) = run(src, "print(grid(5, 3))") else {
-            return;
-        };
+        let out = run(src, "print(grid(5, 3))");
         assert_eq!(out, "4");
     }
 
@@ -3444,9 +3429,7 @@ mod tests {
             !lua.contains("for c"),
             "counter-reassigning loop must NOT become a for (slot stored >2x), got:\n{lua}"
         );
-        let Some(out) = run(src, "print(f(10))") else {
-            return;
-        };
+        let out = run(src, "print(f(10))");
         assert_eq!(out, "0");
     }
 }

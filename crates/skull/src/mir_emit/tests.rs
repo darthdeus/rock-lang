@@ -10,22 +10,24 @@ mod lua_definition_scope_tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    fn luajit_loads(lua: &str) -> Option<(bool, String)> {
+    /// Panics when luajit cannot be spawned: a host without it must report red
+    /// for a test that never ran, never green.
+    fn luajit_loads(lua: &str) -> (bool, String) {
         let mut child = Command::new("luajit")
             .arg("-")
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
             .spawn()
-            .ok()?;
+            .expect("luajit is required for this execution test but could not be spawned");
         if let Err(error) = child.stdin.take().unwrap().write_all(lua.as_bytes()) {
             assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe);
         }
         let output = child.wait_with_output().unwrap();
-        Some((
+        (
             output.status.success(),
             String::from_utf8_lossy(&output.stderr).into_owned(),
-        ))
+        )
     }
 
     #[test]
@@ -37,9 +39,7 @@ mod lua_definition_scope_tests {
             raw.push_str(&function);
             definitions.push_str(&function);
         }
-        let Some((raw_loaded, raw_error)) = luajit_loads(&raw) else {
-            return;
-        };
+        let (raw_loaded, raw_error) = luajit_loads(&raw);
         assert!(!raw_loaded, "the unpartitioned control unexpectedly loaded");
         assert!(
             raw_error.contains("more than 65536 constants"),
@@ -49,7 +49,7 @@ mod lua_definition_scope_tests {
         let mut scoped = String::new();
         definitions.append_to(&mut scoped);
         scoped.push_str("assert(generated_0() == 0 and generated_32768() == 32768)\n");
-        let (scoped_loaded, scoped_error) = luajit_loads(&scoped).unwrap();
+        let (scoped_loaded, scoped_error) = luajit_loads(&scoped);
         assert!(
             scoped_loaded,
             "partitioned definitions did not load: {scoped_error}"
