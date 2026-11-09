@@ -239,7 +239,78 @@ fn fold_const_expr(
     }
 }
 
-fn inst_kind(inst: &Inst) -> &'static str {
+/// The instructions every shader backend lowers. A backend may accept more.
+pub fn is_tier0_inst(inst: &Inst) -> bool {
+    matches!(
+        inst,
+        Inst::Const(_)
+            | Inst::Load(_)
+            | Inst::IntAdd(..)
+            | Inst::IntSub(..)
+            | Inst::IntMul(..)
+            | Inst::IntDiv(..)
+            | Inst::IntMod(..)
+            | Inst::UintAdd(..)
+            | Inst::UintSub(..)
+            | Inst::UintMul(..)
+            | Inst::UintDiv(..)
+            | Inst::UintMod(..)
+            | Inst::FloatAdd(..)
+            | Inst::FloatSub(..)
+            | Inst::FloatMul(..)
+            | Inst::FloatDiv(..)
+            | Inst::FloatMod(..)
+            | Inst::IntLt(..)
+            | Inst::IntLeq(..)
+            | Inst::IntGt(..)
+            | Inst::IntGeq(..)
+            | Inst::UintLt(..)
+            | Inst::UintLeq(..)
+            | Inst::UintGt(..)
+            | Inst::UintGeq(..)
+            | Inst::FloatLt(..)
+            | Inst::FloatLeq(..)
+            | Inst::FloatGt(..)
+            | Inst::FloatGeq(..)
+            | Inst::Eq(..)
+            | Inst::NotEq(..)
+            | Inst::UintBitAnd(..)
+            | Inst::UintBitOr(..)
+            | Inst::UintBitXor(..)
+            | Inst::UintShl(..)
+            | Inst::UintShr(..)
+            | Inst::Neg(_)
+            | Inst::Not(_)
+            | Inst::UintBitNot(_)
+            | Inst::FloatToInt(_)
+            | Inst::IntToFloat(_)
+            | Inst::UintToFloat(_)
+            | Inst::FloatToF32(_)
+            | Inst::IntToUint(_)
+            | Inst::UintToInt(_)
+            | Inst::FloatToUint(_)
+            | Inst::UintBitcastInt(_)
+            | Inst::IntBitcastUint(_)
+            | Inst::MakeValueStruct { .. }
+            | Inst::MaterializeValueStruct { .. }
+            | Inst::Field { .. }
+            | Inst::Store { .. }
+    )
+}
+
+/// The rejection for a construct above tier 0.
+pub fn non_tier0_error(function: &Function, construct: &str, backend: &str) -> CompilerError {
+    err(
+        function.name_span,
+        format!(
+            "shader profile: `{}` uses a non-tier-0 construct ({construct}) that has no {backend} lowering",
+            function.name,
+        ),
+    )
+}
+
+/// A short human name for a rejected instruction kind (for the error message).
+pub fn inst_kind(inst: &Inst) -> &'static str {
     match inst {
         Inst::Global(_) => "global read",
         Inst::StringConcat(..)
@@ -251,7 +322,13 @@ fn inst_kind(inst: &Inst) -> &'static str {
         | Inst::BitXor(..)
         | Inst::Shl(..)
         | Inst::Shr(..)
-        | Inst::BitNot(_) => "bitwise op",
+        | Inst::BitNot(_)
+        | Inst::UintBitAnd(..)
+        | Inst::UintBitOr(..)
+        | Inst::UintBitXor(..)
+        | Inst::UintShl(..)
+        | Inst::UintShr(..)
+        | Inst::UintBitNot(_) => "bitwise op",
         Inst::CallMulti { .. }
         | Inst::CallValue { .. }
         | Inst::CallValueMulti { .. }
@@ -310,88 +387,27 @@ fn profile_body(
                             ),
                         ));
                     }
-                    return Err(err(
-                        function.name_span,
-                        format!(
-                            "shader profile: `{}` uses a non-tier-0 construct (global read) that has no {} lowering",
-                            function.name,
-                            policy.backend_name()
-                        ),
+                    return Err(non_tier0_error(
+                        function,
+                        "global read",
+                        policy.backend_name(),
                     ));
                 }
             }
             Inst::Const(Lit::Str(_)) => {
-                return Err(err(
-                    function.name_span,
-                    format!(
-                        "shader profile: `{}` uses a non-tier-0 construct (string literal) that has no {} lowering",
-                        function.name,
-                        policy.backend_name()
-                    ),
+                return Err(non_tier0_error(
+                    function,
+                    "string literal",
+                    policy.backend_name(),
                 ));
             }
             Inst::Const(Lit::Nil) => {}
-            Inst::Const(_)
-            | Inst::Load(_)
-            | Inst::IntAdd(..)
-            | Inst::IntSub(..)
-            | Inst::IntMul(..)
-            | Inst::IntDiv(..)
-            | Inst::IntMod(..)
-            | Inst::UintAdd(..)
-            | Inst::UintSub(..)
-            | Inst::UintMul(..)
-            | Inst::UintDiv(..)
-            | Inst::UintMod(..)
-            | Inst::FloatAdd(..)
-            | Inst::FloatSub(..)
-            | Inst::FloatMul(..)
-            | Inst::FloatDiv(..)
-            | Inst::FloatMod(..)
-            | Inst::IntLt(..)
-            | Inst::IntLeq(..)
-            | Inst::IntGt(..)
-            | Inst::IntGeq(..)
-            | Inst::UintLt(..)
-            | Inst::UintLeq(..)
-            | Inst::UintGt(..)
-            | Inst::UintGeq(..)
-            | Inst::FloatLt(..)
-            | Inst::FloatLeq(..)
-            | Inst::FloatGt(..)
-            | Inst::FloatGeq(..)
-            | Inst::Eq(..)
-            | Inst::NotEq(..)
-            | Inst::Neg(_)
-            | Inst::Not(_)
-            | Inst::FloatToInt(_)
-            | Inst::IntToFloat(_)
-            | Inst::UintToFloat(_)
-            | Inst::FloatToF32(_)
-            | Inst::IntToUint(_)
-            | Inst::UintToInt(_)
-            | Inst::FloatToUint(_)
-            | Inst::UintBitcastInt(_)
-            | Inst::IntBitcastUint(_)
-            | Inst::UintBitNot(_)
-            | Inst::UintBitAnd(..)
-            | Inst::UintBitOr(..)
-            | Inst::UintBitXor(..)
-            | Inst::UintShl(..)
-            | Inst::UintShr(..)
-            | Inst::MakeValueStruct { .. }
-            | Inst::MaterializeValueStruct { .. }
-            | Inst::Field { .. }
-            | Inst::Store { .. } => {}
+            allowed if is_tier0_inst(allowed) => {}
             other => {
-                return Err(err(
-                    function.name_span,
-                    format!(
-                        "shader profile: `{}` uses a non-tier-0 construct ({}) that has no {} lowering",
-                        function.name,
-                        inst_kind(other),
-                        policy.backend_name()
-                    ),
+                return Err(non_tier0_error(
+                    function,
+                    inst_kind(other),
+                    policy.backend_name(),
                 ));
             }
         }

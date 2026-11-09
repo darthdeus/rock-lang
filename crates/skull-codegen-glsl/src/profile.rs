@@ -62,135 +62,27 @@ pub(crate) fn profile_body(
                 }
             }
             Inst::Const(Lit::Str(_)) => {
-                return Err(err(
-                    span,
-                    format!(
-                        "shader profile: `{}` uses a non-tier-0 construct (string literal) that has no GLSL lowering",
-                        f.name
-                    ),
-                ));
+                return Err(non_tier0_error(f, "string literal", "GLSL"));
             }
             // A bare `Nil` const may be a dead placeholder (`return` in expression
             // position emits an unused nil, `lower.rs`); a genuinely-used null /
             // optional is rejected when it renders (`render_val`). Rejecting every
             // nil here would refuse `if a { return .. } else { .. }`.
             Inst::Const(Lit::Nil) => {}
-            // Allowed tier-0 instructions.
-            Inst::Const(_)
-            | Inst::Load(_)
-            | Inst::IntAdd(..)
-            | Inst::IntSub(..)
-            | Inst::IntMul(..)
-            | Inst::IntDiv(..)
-            | Inst::IntMod(..)
-            | Inst::UintAdd(..)
-            | Inst::UintSub(..)
-            | Inst::UintMul(..)
-            | Inst::UintDiv(..)
-            | Inst::UintMod(..)
-            | Inst::FloatAdd(..)
-            | Inst::FloatSub(..)
-            | Inst::FloatMul(..)
-            | Inst::FloatDiv(..)
-            | Inst::FloatMod(..)
-            | Inst::IntLt(..)
-            | Inst::IntLeq(..)
-            | Inst::IntGt(..)
-            | Inst::IntGeq(..)
-            | Inst::UintLt(..)
-            | Inst::UintLeq(..)
-            | Inst::UintGt(..)
-            | Inst::UintGeq(..)
-            | Inst::FloatLt(..)
-            | Inst::FloatLeq(..)
-            | Inst::FloatGt(..)
-            | Inst::FloatGeq(..)
-            | Inst::Eq(..)
-            | Inst::NotEq(..)
-            | Inst::BitAnd(..)
+            // Signed bit ops have a GLSL lowering beyond the shared tier-0 set.
+            Inst::BitAnd(..)
             | Inst::BitOr(..)
             | Inst::BitXor(..)
             | Inst::Shl(..)
             | Inst::Shr(..)
-            | Inst::UintBitAnd(..)
-            | Inst::UintBitOr(..)
-            | Inst::UintBitXor(..)
-            | Inst::UintShl(..)
-            | Inst::UintShr(..)
-            | Inst::Neg(_)
-            | Inst::Not(_)
-            | Inst::BitNot(_)
-            | Inst::UintBitNot(_)
-            | Inst::FloatToInt(_)
-            | Inst::IntToFloat(_)
-            | Inst::UintToFloat(_)
-            | Inst::FloatToF32(_)
-            | Inst::IntToUint(_)
-            | Inst::UintToInt(_)
-            | Inst::FloatToUint(_)
-            | Inst::UintBitcastInt(_)
-            | Inst::IntBitcastUint(_)
-            | Inst::MakeValueStruct { .. }
-            | Inst::MaterializeValueStruct { .. }
-            | Inst::Field { .. }
-            | Inst::Store { .. } => {}
+            | Inst::BitNot(_) => {}
+            allowed if is_tier0_inst(allowed) => {}
             // Everything else is above tier 0 (strings, containers, closures,
             // coroutines, enums, native buffers, bit ops, globals, ...).
-            other => {
-                return Err(err(
-                    span,
-                    format!(
-                        "shader profile: `{}` uses a non-tier-0 construct ({}) that has no GLSL lowering",
-                        f.name,
-                        inst_kind(other)
-                    ),
-                ));
-            }
+            other => return Err(non_tier0_error(f, inst_kind(other), "GLSL")),
         }
     }
     Ok(())
-}
-
-/// A short human name for a rejected instruction kind (for the error message).
-pub(crate) fn inst_kind(inst: &Inst) -> &'static str {
-    match inst {
-        Inst::Global(_) => "global read",
-        Inst::StringConcat(..)
-        | Inst::ToString(_)
-        | Inst::Format { .. }
-        | Inst::FormatDyn { .. } => "string",
-        Inst::BitAnd(..)
-        | Inst::BitOr(..)
-        | Inst::BitXor(..)
-        | Inst::Shl(..)
-        | Inst::Shr(..)
-        | Inst::BitNot(_)
-        | Inst::UintBitAnd(..)
-        | Inst::UintBitOr(..)
-        | Inst::UintBitXor(..)
-        | Inst::UintShl(..)
-        | Inst::UintShr(..)
-        | Inst::UintBitNot(_) => "bitwise op",
-        Inst::CallMulti { .. }
-        | Inst::CallValue { .. }
-        | Inst::CallValueMulti { .. }
-        | Inst::CallBoundMulti { .. } => "indirect/multi-value call",
-        Inst::Lambda { .. } => "closure",
-        Inst::MakeTuple(_) => "tuple",
-        Inst::MakeVec(_) => "Vec",
-        Inst::MakeStruct { .. } => "heap struct",
-        Inst::MakeEnum { .. } | Inst::MakeEnumDyn { .. } => "enum",
-        Inst::Index { .. }
-        | Inst::Len { .. }
-        | Inst::ArrayPush { .. }
-        | Inst::StoreIndex { .. } => "container op",
-        Inst::StoreField { .. } => "field mutation",
-        Inst::StoreGlobal { .. } => "global write",
-        Inst::CoroSetInner(_) | Inst::CoroHook { .. } | Inst::MapNext { .. } => {
-            "coroutine/iteration"
-        }
-        _ => "unsupported instruction",
-    }
 }
 
 // --- intrinsic mapping table ------------------------------------------------

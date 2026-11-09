@@ -24,7 +24,7 @@ use bone_core::prelude::{FnList, ModuleId, Span};
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
-use skull_codegen_shader::const_lit;
+use skull_codegen_shader::{const_lit, inst_kind, is_tier0_inst, non_tier0_error};
 use skull_graph::instance_graph::{InstanceGraph, SiteOutcome};
 pub use skull_graph::shader::ShaderLibraryView;
 use skull_graph::shader::{ShaderProgram, ShaderProgramView, ShaderStageView};
