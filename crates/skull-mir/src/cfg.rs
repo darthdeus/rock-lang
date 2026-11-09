@@ -39,12 +39,16 @@ pub fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
 /// recovery lands — a real `for` needs its preheader emitted just before the
 /// header, which id order doesn't guarantee.)
 pub fn reachable_blocks_from(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
-    let mut visited: HashSet<Idx<Block>> = HashSet::default();
+    let mut visited = vec![false; func.blocks.len()];
     let mut stack = vec![entry];
-    visited.insert(entry);
+    visited[dense::bx(entry)] = true;
+    let mut count = 1;
     while let Some(b) = stack.pop() {
         successors(&func.blocks[b].term, |s| {
-            if visited.insert(s) {
+            let seen = &mut visited[dense::bx(s)];
+            if !*seen {
+                *seen = true;
+                count += 1;
                 stack.push(s);
             }
         });
@@ -52,12 +56,13 @@ pub fn reachable_blocks_from(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block
     // The entry MUST be emitted first — Lua executes top-down, so it falls into
     // the first label regardless of the `entry` field (matters when the entry is
     // not the lowest-id block, e.g. a coroutine's dispatch entry).
-    let mut order = vec![entry];
+    let mut order = Vec::with_capacity(count);
+    order.push(entry);
     order.extend(
         func.blocks
             .iter()
             .map(|(id, _)| id)
-            .filter(|id| *id != entry && visited.contains(id)),
+            .filter(|id| *id != entry && visited[dense::bx(*id)]),
     );
     order
 }

@@ -292,7 +292,7 @@ pub(super) struct InlineWork {
     borrowed_block_scans: usize,
     instructions_scanned: usize,
     pub(super) census: skull_transform::InlineScanStats,
-    owners: BTreeMap<String, (usize, usize, u64, usize, usize)>,
+    owners: FxHashMap<FuncRef, (usize, usize, u64, usize, usize)>,
 }
 
 impl InlineWork {
@@ -302,8 +302,7 @@ impl InlineWork {
             self.copied_instructions += record.callee_insts;
             self.bounded_splices += usize::from(record.bounded);
             self.census.clone.add(record.clone);
-            let owner = inline_owner_key(record.callee);
-            let entry = self.owners.entry(owner).or_default();
+            let entry = self.owners.entry(record.callee).or_default();
             entry.0 += 1;
             entry.1 += record.callee_insts;
             entry.2 += record.splice_ns;
@@ -390,6 +389,8 @@ pub(super) struct AttributionAccumulator {
     pub(super) regalloc_samples: Vec<u64>,
     pub(super) stringify_samples: Vec<u64>,
     pub(super) top_bodies: Vec<BodyAttributionOwner>,
+    /// Per-callee inline totals, named only once the report is built.
+    pub(super) owner_totals: FxHashMap<FuncRef, (usize, usize, u64, usize, usize)>,
     pub(super) census_enabled: bool,
     pub(super) candidate_published_keys: FxHashSet<Instance>,
     pub(super) candidate_eligible_keys: FxHashSet<Instance>,
@@ -767,28 +768,12 @@ impl AttributionAccumulator {
         self.result.inline.instructions_scanned += unit.inline.instructions_scanned;
         self.result.inline.census.add(unit.inline.census.clone());
         for (owner, (splices, copied, splice_ns, live, dead)) in &unit.inline.owners {
-            let entry = self
-                .result
-                .inline
-                .top_owners
-                .iter_mut()
-                .find(|item| item.owner == *owner);
-            if let Some(entry) = entry {
-                entry.splices += *splices;
-                entry.copied_instructions += *copied;
-                entry.splice_ns += *splice_ns;
-                entry.live_cloned_entries += *live;
-                entry.dead_cloned_entries += *dead;
-            } else {
-                self.result.inline.top_owners.push(InlineOwnerAttribution {
-                    owner: owner.clone(),
-                    splices: *splices,
-                    copied_instructions: *copied,
-                    splice_ns: *splice_ns,
-                    live_cloned_entries: *live,
-                    dead_cloned_entries: *dead,
-                });
-            }
+            let entry = self.owner_totals.entry(*owner).or_default();
+            entry.0 += *splices;
+            entry.1 += *copied;
+            entry.2 += *splice_ns;
+            entry.3 += *live;
+            entry.4 += *dead;
         }
         self.top_bodies.push(BodyAttributionOwner {
             owner: unit.owner.clone(),
@@ -815,6 +800,20 @@ impl AttributionAccumulator {
         finish_distribution(&mut self.result.validation, &mut self.validation_samples);
         finish_distribution(&mut self.result.regalloc, &mut self.regalloc_samples);
         finish_distribution(&mut self.result.stringify, &mut self.stringify_samples);
+        self.result.inline.top_owners = self
+            .owner_totals
+            .iter()
+            .map(
+                |(owner, (splices, copied, splice_ns, live, dead))| InlineOwnerAttribution {
+                    owner: inline_owner_key(*owner),
+                    splices: *splices,
+                    copied_instructions: *copied,
+                    splice_ns: *splice_ns,
+                    live_cloned_entries: *live,
+                    dead_cloned_entries: *dead,
+                },
+            )
+            .collect();
         self.result.inline.top_owners.sort_by(|a, b| {
             b.copied_instructions
                 .cmp(&a.copied_instructions)
