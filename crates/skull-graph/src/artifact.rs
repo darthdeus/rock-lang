@@ -2046,20 +2046,19 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     for (owner, sites) in g.call_sites() {
         FRESH_INDEX_SITE_ROWS.with(|count| count.set(count.get() + sites.len() as u64));
         index.site_counts.insert(owner.clone(), sites.len());
+        // One owner row, filled site by site; the reverse rows ask before
+        // cloning the owner, which most callees already hold from another
+        // site of the same body.
+        let mut outgoing: FxHashMap<Site, Instance> = FxHashMap::default();
         for (site, record) in sites {
             let SiteOutcome::Resolved(callee) = &record.outcome else {
                 continue;
             };
-            index
-                .outgoing
-                .entry(owner.clone())
-                .or_default()
-                .insert(site.clone(), callee.clone());
-            index
-                .incoming
-                .entry(callee.clone())
-                .or_default()
-                .insert(owner.clone());
+            outgoing.insert(site.clone(), callee.clone());
+            let users = index.incoming.entry(callee.clone()).or_default();
+            if !users.contains(owner) {
+                users.insert(owner.clone());
+            }
             if site.op == skull_mir::site::SiteOp::FnValue {
                 index
                     .fn_values_by_caller
@@ -2072,6 +2071,9 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
                     .or_default()
                     .insert(owner.clone());
             }
+        }
+        if !outgoing.is_empty() {
+            index.outgoing.insert(owner.clone(), outgoing);
         }
     }
     let mut roots: BTreeSet<Instance> = BTreeSet::new();
@@ -2105,15 +2107,17 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // The boundary's IDENTITY is not minted here. It needs this artifact's
     // spelling, which is the planner's answer over the full retained set, so it
     // is built once below -- see `boundaries`.
+    // Most sites reach an instance already admitted: the hashed set answers
+    // that before the ordered record is touched or the key cloned.
+    let mut admitted: FxHashSet<Instance> = FxHashSet::default();
     let mut admit = |i: &Instance,
                      instances: &mut BTreeSet<Instance>,
                      realization: &mut BTreeMap<Instance, Realized>,
                      queue: &mut VecDeque<Instance>| {
-        // Most sites reach an instance already admitted; ask before cloning
-        // the key into the record.
-        if realization.contains_key(i) {
+        if admitted.contains(i) {
             return;
         }
+        admitted.insert(i.clone());
         let r = *index.realizable[i]
             .as_ref()
             .expect("admitted means realizable");
