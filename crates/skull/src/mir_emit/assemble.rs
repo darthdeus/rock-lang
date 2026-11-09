@@ -1047,7 +1047,12 @@ pub(super) fn assemble(
     // rather than emit two clobbering top-level defs. Covers `emit_full` +
     // `emit_incremental` (both funnel through here); the overlay fast path drains
     // in `emit_overlay` and propagates the same error.
-    let emitted_bodies = emitted_bodies(ws, cache, &needed_foreign, specialized_instances);
+    // Only a retained cache records which bodies were emitted.
+    let emitted_bodies = if lifetime == CacheLifetime::Retained {
+        emitted_bodies(ws, cache, &needed_foreign, specialized_instances)
+    } else {
+        FxHashSet::default()
+    };
     let Assembly {
         mut out,
         attribution,
