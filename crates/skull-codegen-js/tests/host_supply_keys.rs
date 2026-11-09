@@ -155,7 +155,11 @@ fn mapped_map_constructor_and_get_preserve_native_key_identity() {
             m
         }
     "#,
-        skull_codegen_js::JS_CALL_HELPER,
+        &format!(
+            "{}{}",
+            skull_codegen_js::JS_TABLE_PRIM,
+            skull_codegen_js::JS_CALL_HELPER
+        ),
         r#"const expected = new Map([[1, "numeric"], ["1", "string"]]);
        const actual = root();
        if (!(actual instanceof Map) || actual.size !== expected.size) throw Error("Map shape");

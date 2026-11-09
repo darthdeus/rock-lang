@@ -13,6 +13,7 @@ fn eval_int(defs: &str, root: &str, expect: i64) {
     // harness (js_test.rs) supplies it in its preamble.
     crate::common::eval_int(
         &[
+            skull_codegen_js::JS_TABLE_PRIM,
             skull_codegen_js::JS_NB_CHECK_SHIMS,
             skull_codegen_js::JS_VEC_CHECK_SHIMS,
             skull_codegen_js::JS_CALL_HELPER,

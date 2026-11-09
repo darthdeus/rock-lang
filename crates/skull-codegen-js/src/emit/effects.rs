@@ -57,7 +57,7 @@ impl Emitter<'_> {
                             )));
                         }
                         ContainerKind::Vec => format!("__vec_checked_set({b}, {i}, {v});"),
-                        ContainerKind::Map => format!("{b}.set({i}, {v});"),
+                        ContainerKind::Map => format!("__map_set({b}, {i}, {v});"),
                     };
                     self.push(&line);
                 }

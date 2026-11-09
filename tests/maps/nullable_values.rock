@@ -1,0 +1,25 @@
+// Storing null in a map leaves no entry, so `len`, iteration and `contains`
+// agree with `get`.
+
+@test
+fn inserting_null_adds_no_entry() {
+    let m: Map<string, int?> = map_new()
+    m.insert("a", null)
+    assert_eq(m.len(), 0)
+    assert(m.is_empty())
+    assert(!m.contains("a"))
+    assert_eq(m.keys().len(), 0)
+}
+
+@test
+fn overwriting_with_null_removes_the_entry() {
+    let m: Map<string, int?> = map_new()
+    m.insert("a", 1)
+    m.insert("b", 2)
+    m["a"] = null
+    assert_eq(m.len(), 1)
+    assert(!m.contains("a"))
+    for (k, _) in m {
+        assert_eq(k, "b")
+    }
+}

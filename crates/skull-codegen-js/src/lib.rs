@@ -490,7 +490,9 @@ pub const JS_TABLE_PRIM: &str = r#"
 // assembly includes these primitives, so the marker lives here.
 var __rock_omitted = Object.freeze({});
 function __table_get(t, k) { return (t instanceof Map) ? t.get(k) : t[k]; }
-function __table_set(t, k, v) { if (t instanceof Map) t.set(k, v); else t[k] = v; }
+// A Lua table holds no nil values, so storing null in a Map removes the key.
+function __map_set(m, k, v) { if (v === null || v === undefined) m.delete(k); else m.set(k, v); }
+function __table_set(t, k, v) { if (t instanceof Map) __map_set(t, k, v); else t[k] = v; }
 function __table_unset(t, k) { if (t instanceof Map) t.delete(k); else delete t[k]; }
 // Lua `#t`. Defined for a Map and for a hole-free array; a plain object has no
 // Lua sequence length, so throw rather than hand back a 0 that reads as empty.
