@@ -20,11 +20,13 @@ pub struct RawIdx(u32);
 
 impl RawIdx {
     /// Constructs a [`RawIdx`] from a u32.
+    #[inline]
     pub const fn from_u32(u32: u32) -> Self {
         RawIdx(u32)
     }
 
     /// Deconstructs a [`RawIdx`] into the underlying u32.
+    #[inline]
     pub const fn into_u32(self) -> u32 {
         self.0
     }
@@ -75,6 +77,7 @@ impl<T> PartialOrd for Idx<T> {
 }
 
 impl<T> Clone for Idx<T> {
+    #[inline]
     fn clone(&self) -> Self {
         *self
     }
@@ -82,6 +85,7 @@ impl<T> Clone for Idx<T> {
 impl<T> Copy for Idx<T> {}
 
 impl<T> PartialEq for Idx<T> {
+    #[inline]
     fn eq(&self, other: &Idx<T>) -> bool {
         self.raw == other.raw
     }
@@ -89,6 +93,7 @@ impl<T> PartialEq for Idx<T> {
 impl<T> Eq for Idx<T> {}
 
 impl<T> Hash for Idx<T> {
+    #[inline]
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.raw.hash(state);
     }
@@ -106,6 +111,7 @@ impl<T> fmt::Debug for Idx<T> {
 
 impl<T> Idx<T> {
     /// Creates a new index from a [`RawIdx`].
+    #[inline]
     pub const fn from_raw(raw: RawIdx) -> Self {
         Idx {
             raw,
@@ -114,6 +120,7 @@ impl<T> Idx<T> {
     }
 
     /// Converts this index into the underlying [`RawIdx`].
+    #[inline]
     pub const fn into_raw(self) -> RawIdx {
         self.raw
     }
@@ -354,6 +361,7 @@ impl<T> Arena<T> {
     /// arena.alloc("baz");
     /// assert_eq!(arena.len(), 3);
     /// ```
+    #[inline]
     pub fn len(&self) -> usize {
         self.data.len()
     }
@@ -389,6 +397,7 @@ impl<T> Arena<T> {
     ///
     /// assert_eq!(arena[idx], 50);
     /// ```
+    #[inline]
     pub fn alloc(&mut self, value: T) -> Idx<T> {
         let idx = self.next_idx();
         self.data.push(value);
@@ -517,6 +526,7 @@ impl<T> Default for Arena<T> {
 
 impl<T> Index<Idx<T>> for Arena<T> {
     type Output = T;
+    #[inline]
     fn index(&self, idx: Idx<T>) -> &T {
         let idx = idx.into_raw().0 as usize;
         &self.data[idx]
@@ -524,6 +534,7 @@ impl<T> Index<Idx<T>> for Arena<T> {
 }
 
 impl<T> IndexMut<Idx<T>> for Arena<T> {
+    #[inline]
     fn index_mut(&mut self, idx: Idx<T>) -> &mut T {
         let idx = idx.into_raw().0 as usize;
         &mut self.data[idx]

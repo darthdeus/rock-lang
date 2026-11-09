@@ -80,10 +80,21 @@ pub fn is_exempt(f: &Function) -> bool {
 /// Classifiers use this spelling; emitted identifiers use [`ident_of_key`]
 /// instead.
 pub fn declared_name(key: &str) -> &str {
-    match key.rfind("::") {
+    match last_path_separator(key) {
         Some(cut) => &key[cut + 2..],
         None => key,
     }
+}
+
+/// Byte offset of the last `::` in `key`. A plain backward byte scan: the
+/// general substring searcher this replaces set itself up anew for every
+/// call, and classifiers ask this of every callee a body names.
+fn last_path_separator(key: &str) -> Option<usize> {
+    let bytes = key.as_bytes();
+    (1..bytes.len())
+        .rev()
+        .find(|&i| bytes[i] == b':' && bytes[i - 1] == b':')
+        .map(|i| i - 1)
 }
 
 /// The identifier form of a DefKey. A legacy key is a bare name and
@@ -97,7 +108,7 @@ pub fn declared_name(key: &str) -> &str {
 /// shared mangler must also satisfy.
 /// [`collision_errors`] rejects a residual collision either way.
 pub fn ident_of_key(key: &str) -> std::borrow::Cow<'_, str> {
-    match key.rfind("::") {
+    match last_path_separator(key) {
         None => std::borrow::Cow::Borrowed(key),
         Some(cut) => std::borrow::Cow::Owned(format!(
             "{}{SEP}{}",
