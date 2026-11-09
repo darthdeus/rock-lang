@@ -16,12 +16,9 @@ fn producer_can_share_bank_schema_and_validation() {
     let _: fn([f32; 2]) -> bool = finite_point;
     let _: fn(&str) -> bool = is_sheet_dir;
     let _: fn(&str) -> String = mask_file;
-    let _: fn(
-        Option<[u32; 2]>,
-        Option<[u32; 4]>,
-        Option<[u32; 2]>,
-        (u32, u32),
-    ) -> anyhow::Result<()> = validate_floor_texture;
+    type FloorTextureValidator =
+        fn(Option<[u32; 2]>, Option<[u32; 4]>, Option<[u32; 2]>, (u32, u32)) -> anyhow::Result<()>;
+    let _: FloorTextureValidator = validate_floor_texture;
 
     let tracks: JointTrackSet = Default::default();
     let geometry = SheetGeometry {
