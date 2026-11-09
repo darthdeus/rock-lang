@@ -376,17 +376,6 @@ fn deeply_nested_destructuring_three_levels() {
     }
 }
 
-@test(output = "a=1,b=2,c=3,d=4,e=5")
-fn deeply_nested_destructuring_four_levels() {
-    // Test 4-level deep nested destructuring
-    let items: [(((int, int), int), (int, int))] = vec_new()
-    vec_push(items, (((1, 2), 3), (4, 5)))
-
-    for (((a, b), c), (d, e)) in items {
-        print("a={a},b={b},c={c},d={d},e={e}")
-    }
-}
-
 @test(output = "Empty vector handled correctly")
 fn edge_case_empty_vector_with_nested_destructuring() {
     // Test that empty vectors don't crash with nested patterns

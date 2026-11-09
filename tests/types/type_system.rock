@@ -113,8 +113,6 @@ fn initialized_global() {
     print("{dt:.4f}")  // Use fixed precision to avoid platform differences
 }
 
-// Loop test
-
 // Nullable type tests
 @test(output = "4", type_holes = [[7, "int"]])
 fn basic_if_nullable() {

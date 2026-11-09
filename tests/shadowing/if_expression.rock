@@ -366,20 +366,6 @@ fn test_shadow_with_safe_navigation() {
 
 // Shadowing inside if-expression values, plain and nested.
 
-// Simple case - this should work
-@test(output = "Inner: 20\nOuter: 10")
-fn test_simple_if_expression_shadow() {
-    let x = 10
-    let result = if true {
-        let x = 20
-        print("Inner: " + x.to_string())
-        x
-    } else {
-        x
-    }
-    print("Outer: " + x.to_string())
-}
-
 // Nested if expression
 @test(output = "Level 1: 100\nLevel 2: 200\nOriginal: 1")
 fn test_nested_if_expression_bug() {

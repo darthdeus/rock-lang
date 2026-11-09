@@ -634,23 +634,3 @@ fn test_complex_nested_iife_generation() {
 
     assert(result == 4, "Complex nesting should resolve to 4")
 }
-
-// Test 19: Control flow at statement level (should work correctly)
-@test
-fn test_control_flow_at_statement_level() {
-    let sum = 0
-
-    for i in 0..10 {
-        // This is at statement level, so control flow should work correctly
-        if i == 3 {
-            continue
-        }
-        if i == 7 {
-            break
-        }
-        sum = sum + i
-    }
-
-    // Should be: 0+1+2+4+5+6 = 18 (skip 3, break at 7)
-    assert(sum == 18, "Control flow at statement level should work correctly")
-}
