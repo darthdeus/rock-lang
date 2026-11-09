@@ -995,6 +995,21 @@ registration_functions = []
     let default = invoke(root.path(), &["lint", "game"]);
     assert!(default.status.success(), "{}", text(&default));
     assert!(!text(&default).contains("has no production caller"));
+    let nested = project.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    std::fs::write(
+        nested.join("main.rock"),
+        "global DO_NESTED: int = 1\nfn main() {}\n",
+    )
+    .unwrap();
+    let nested_output = invoke(&nested, &["lint", "main.rock", args[2]]);
+    assert!(nested_output.status.success(), "{}", text(&nested_output));
+    assert!(
+        text(&nested_output)
+            .contains("production Sample action `DO_NESTED` has no production caller"),
+        "{}",
+        text(&nested_output)
+    );
     std::fs::write(&manifest, format!("{header}{rules}unknown_rule = true\n")).unwrap();
     let invalid = invoke(root.path(), &args);
     assert!(!invalid.status.success(), "{}", text(&invalid));
