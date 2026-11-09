@@ -279,9 +279,13 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
         census.index_subst_unique > 0
             && census.index_trees_unique > 0
             && census.index_always_emitted_unique > 0
-            && census.index_preds_unique > 0
             && census.index_decls_unique > 0,
         "unique graph-index census is empty: {census:?}"
+    );
+    assert_eq!(
+        (census.index_preds_unique, census.index_preds_updates),
+        (0, 0),
+        "a fresh build maintained the update-only predecessor index: {census:?}"
     );
     assert!(
         census.index_erased_updates >= census.index_erased_unique,
@@ -316,7 +320,6 @@ fn the_operational_censuses_are_sums_of_the_primary_records() {
         census.index_subst_updates > 0
             && census.index_trees_updates > 0
             && census.index_always_emitted_updates > 0
-            && census.index_preds_updates > 0
             && census.index_decls_updates > 0,
         "the graph fixture did not expose the maintained-index populations: {census:?}"
     );

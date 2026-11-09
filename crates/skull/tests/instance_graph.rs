@@ -26,6 +26,15 @@ fn main() {
         (0, 0, 0),
         "fresh construction retained update-only owner or instance deltas"
     );
+    // The reverse indexes only an update reads (predecessors, instances per
+    // declaration, owners per file) are derived when the first update asks
+    // for them, not maintained during the build nothing reads them in.
+    assert!(
+        graph.index.preds.is_empty()
+            && graph.index.decl_instances.is_empty()
+            && graph.index.span_owners.is_empty(),
+        "fresh construction maintained update-only indexes"
+    );
 }
 
 /// One generic function called at two element types is TWO instances, even

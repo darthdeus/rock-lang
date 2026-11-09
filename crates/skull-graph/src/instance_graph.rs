@@ -747,6 +747,11 @@ pub struct InstanceGraph {
     // Capture the environment switch at build time; retained graphs must not
     // change verification behavior when a sibling mutates process state.
     verify_whole_graph: bool,
+    /// Whether the update-only reverse indexes (`preds`, `decl_instances`,
+    /// `span_owners`) are maintained. A fresh build has no reader for them;
+    /// the first update derives them from the contributions and keeps them
+    /// current from then on.
+    incremental_indexes: bool,
     /// **The build's one arena, SHARED rather than owned.**
     ///
     /// A retained graph and the emission that consumes it both mint and read
@@ -1569,6 +1574,7 @@ pub fn build_in(
     let intern_before = interner.stats();
     let mut g = InstanceGraph::empty_in(interner);
     g.verify_whole_graph = std::env::var_os("ROCK_GRAPH_VERIFY").is_some();
+    g.incremental_indexes = g.verify_whole_graph;
     let t = bone_core::prelude::Instant::now();
     g.seed_roots(ws, canonical_roots(ws, roots, perturb));
     let pending = g.always_emitted_owners(ws);
@@ -1725,12 +1731,24 @@ impl InstanceGraph {
     /// The retained declaration index is updated with each owner contribution,
     /// so a generic declaration maps to every live specialization without a
     /// workspace-sized scan on a body edit.
-    pub fn instances_of(&self, fref: FuncRef) -> impl Iterator<Item = &Instance> {
-        self.index
-            .decl_instances
-            .get(&fref)
-            .into_iter()
-            .flat_map(|instances| instances.iter())
+    pub fn instances_of(&self, fref: FuncRef) -> Box<dyn Iterator<Item = &Instance> + '_> {
+        if !self.incremental_indexes {
+            // Not derived yet: no update has run, so answer from the
+            // contributions instead of building the index for one question.
+            return Box::new(
+                self.contributions
+                    .keys()
+                    .filter_map(Owner::instance)
+                    .filter(move |i| i.func == fref),
+            );
+        }
+        Box::new(
+            self.index
+                .decl_instances
+                .get(&fref)
+                .into_iter()
+                .flat_map(|instances| instances.iter()),
+        )
     }
 
     /// **The arena this graph's `MonoTyId`s index**, as the shared handle.
@@ -1749,12 +1767,14 @@ impl InstanceGraph {
         let mut empty = Self::empty_in(std::sync::Arc::clone(&self.interner));
         empty.run_stats = self.run_stats;
         empty.verify_whole_graph = self.verify_whole_graph;
+        empty.incremental_indexes = self.incremental_indexes;
         std::mem::replace(self, empty)
     }
 
     fn empty_in(interner: std::sync::Arc<MonoInterner>) -> Self {
         InstanceGraph {
             verify_whole_graph: false,
+            incremental_indexes: false,
             interner,
             contributions: BTreeMap::new(),
             contributed: FxHashSet::default(),
@@ -2206,6 +2226,8 @@ impl InstanceGraph {
         let mut keep = keep.into_iter();
         out.reached
             .retain(|_| keep.next().expect("one flag per reached row"));
+        // Ordered by instance: the install demands the callees in this order.
+        out.reached.sort_by(|a, b| a.0.cmp(&b.0));
         out
     }
 
@@ -2452,17 +2474,19 @@ impl InstanceGraph {
         let lane_start = timing_enabled.then(Instant::now);
         if let Some(from) = owner.instance() {
             for e in &c.edges {
-                index.preds_updates += 1;
-                match self.index.preds.get_mut(&e.to) {
-                    Some(preds) => {
-                        if !preds.contains(from) {
-                            preds.insert(from.clone());
+                if self.incremental_indexes {
+                    index.preds_updates += 1;
+                    match self.index.preds.get_mut(&e.to) {
+                        Some(preds) => {
+                            if !preds.contains(from) {
+                                preds.insert(from.clone());
+                            }
                         }
-                    }
-                    None => {
-                        self.index
-                            .preds
-                            .insert(e.to.clone(), FxHashSet::from_iter([from.clone()]));
+                        None => {
+                            self.index
+                                .preds
+                                .insert(e.to.clone(), FxHashSet::from_iter([from.clone()]));
+                        }
                     }
                 }
                 self.lost.remove(&e.to);
@@ -2473,18 +2497,22 @@ impl InstanceGraph {
         if let Some(from) = owner.instance() {
             index.decls_updates += 1;
             *self.index.decls.entry(from.func).or_insert(0) += 1;
-            self.index
-                .decl_instances
-                .entry(from.func)
-                .or_default()
-                .insert(from.clone());
+            if self.incremental_indexes {
+                self.index
+                    .decl_instances
+                    .entry(from.func)
+                    .or_default()
+                    .insert(from.clone());
+            }
         }
-        for file in &c.span_files {
-            self.index
-                .span_owners
-                .entry(*file)
-                .or_default()
-                .insert(owner.clone());
+        if self.incremental_indexes {
+            for file in &c.span_files {
+                self.index
+                    .span_owners
+                    .entry(*file)
+                    .or_default()
+                    .insert(owner.clone());
+            }
         }
         index.decls_ns = elapsed_ns(lane_start);
         let lane_start = timing_enabled.then(Instant::now);
@@ -2495,13 +2523,8 @@ impl InstanceGraph {
         // so a body that reaches ITSELF -- any recursive function -- would
         // otherwise find itself absent at the moment it asked and re-walk
         // forever.
-        // `expand` already folded repeated callees; the demand order is the
-        // ordered one the sorted list used to give.
-        let reached: Vec<Instance> = {
-            let mut unique: Vec<&Instance> = c.reached.iter().map(|(to, _)| to).collect();
-            unique.sort();
-            unique.into_iter().cloned().collect()
-        };
+        // `expand` folded repeated callees and ordered the rows by instance.
+        let reached: Vec<Instance> = c.reached.iter().map(|(to, _)| to.clone()).collect();
         for (name, failure) in &c.always_emitted_holes {
             self.root_hole_dirty_names.insert(name.clone());
             self.root_hole_sites
@@ -2612,11 +2635,13 @@ impl InstanceGraph {
             self.lost.insert(to.clone());
         }
         if let Some(from) = owner.instance() {
-            for e in &old.edges {
-                if let Some(set) = self.index.preds.get_mut(&e.to) {
-                    set.remove(from);
-                    if set.is_empty() {
-                        self.index.preds.remove(&e.to);
+            if self.incremental_indexes {
+                for e in &old.edges {
+                    if let Some(set) = self.index.preds.get_mut(&e.to) {
+                        set.remove(from);
+                        if set.is_empty() {
+                            self.index.preds.remove(&e.to);
+                        }
                     }
                 }
             }
@@ -2636,11 +2661,13 @@ impl InstanceGraph {
                 }
             }
         }
-        for file in &old.span_files {
-            if let Some(owners) = self.index.span_owners.get_mut(file) {
-                owners.remove(owner);
-                if owners.is_empty() {
-                    self.index.span_owners.remove(file);
+        if self.incremental_indexes {
+            for file in &old.span_files {
+                if let Some(owners) = self.index.span_owners.get_mut(file) {
+                    owners.remove(owner);
+                    if owners.is_empty() {
+                        self.index.span_owners.remove(file);
+                    }
                 }
             }
         }
@@ -3264,8 +3291,7 @@ impl InstanceGraph {
                 }
                 count = decls
                     .iter()
-                    .filter_map(|decl| self.index.decl_instances.get(&decl.0))
-                    .map(FxHashSet::len)
+                    .filter_map(|decl| self.index.decls.get(&decl.0))
                     .sum();
             }
             hole.instances = count;
@@ -3291,8 +3317,7 @@ impl InstanceGraph {
                 }
                 count = decls
                     .iter()
-                    .filter_map(|decl| self.index.decl_instances.get(&decl.0))
-                    .map(FxHashSet::len)
+                    .filter_map(|decl| self.index.decls.get(&decl.0))
                     .sum();
             }
             if let Some(hole) = self.uninstantiated_roots.get_mut(&name) {
@@ -3343,6 +3368,7 @@ impl InstanceGraph {
         changed: &[(ModuleId, BodyOwner)],
         edits: &[TextEditDelta],
     ) -> UpdateStats {
+        self.ensure_incremental_indexes();
         self.reseed_roots_for_update(ws, roots);
         self.update_bodies_after_roots(ws, changed, edits, Vec::new())
     }
@@ -3358,6 +3384,7 @@ impl InstanceGraph {
         changed: &[(ModuleId, BodyOwner)],
         edits: &[TextEditDelta],
     ) -> UpdateStats {
+        self.ensure_incremental_indexes();
         let pending_roots = canonical_roots(ws, root_added.to_vec(), false)
             .into_iter()
             .filter(|root| {
@@ -3378,6 +3405,39 @@ impl InstanceGraph {
         update.census.root_hole_reason_buckets_examined =
             self.run_stats.root_hole_reason_buckets_examined;
         update
+    }
+
+    /// Derive the update-only reverse indexes from the contributions the
+    /// build installed without them, once, before the first update reads
+    /// them. Every install and uninstall after this keeps them current.
+    pub fn ensure_incremental_indexes(&mut self) {
+        if self.incremental_indexes {
+            return;
+        }
+        self.incremental_indexes = true;
+        for (owner, c) in &self.contributions {
+            if let Some(from) = owner.instance() {
+                for e in &c.edges {
+                    self.index
+                        .preds
+                        .entry(e.to.clone())
+                        .or_default()
+                        .insert(from.clone());
+                }
+                self.index
+                    .decl_instances
+                    .entry(from.func)
+                    .or_default()
+                    .insert(from.clone());
+            }
+            for file in &c.span_files {
+                self.index
+                    .span_owners
+                    .entry(*file)
+                    .or_default()
+                    .insert(owner.clone());
+            }
+        }
     }
 
     fn update_bodies_after_roots(

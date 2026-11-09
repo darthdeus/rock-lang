@@ -407,6 +407,7 @@ fn assert_generated_cycle(length: usize, rooted: bool) {
         .cloned()
         .expect("cycle_0 instance");
     let blocker_name = format!("cycle_{}", length - 1);
+    case.graph.ensure_incremental_indexes();
     let incoming = case.graph.index.preds.get(&seed).expect("cycle seed row");
     assert_eq!(
         incoming.len(),
@@ -573,6 +574,7 @@ fn assert_support_depth(depth: usize) {
         })
         .cloned()
         .expect("shared generic seed");
+    case.graph.ensure_incremental_indexes();
     let incoming = case
         .graph
         .index
@@ -694,6 +696,7 @@ fn intersecting_tentative_support_components_release_together() {
     let support_a = find("support_a", &case);
     let support_b = find("support_b", &case);
     let support_join = find("support_join", &case);
+    case.graph.ensure_incremental_indexes();
     let preds_a = case.graph.index.preds.get(&lost_a).expect("lost_a row");
     let preds_b = case.graph.index.preds.get(&lost_b).expect("lost_b row");
     assert_eq!(
@@ -837,6 +840,7 @@ fn assert_branching_support_fixture(dead_first: bool) {
     let target = find("target", &case);
     let root_branch = find("root_branch", &case);
     let dead_branch = find("dead_branch", &case);
+    case.graph.ensure_incremental_indexes();
     let target_preds = case.graph.index.preds.get(&target).expect("target row");
     assert_eq!(
         target_preds.len(),
@@ -1711,6 +1715,7 @@ fn an_external_anchor_stops_a_branched_strand_search() {
         .find(|instance| case.identity(instance).starts_with("shared_root"))
         .cloned()
         .expect("the shared branch instance");
+    case.graph.ensure_incremental_indexes();
     let incoming = case
         .graph
         .index
@@ -1822,6 +1827,7 @@ fn a_long_anchor_path_is_included_in_prune_locality() {
         .find(|instance| case.identity(instance).starts_with("shared_root"))
         .cloned()
         .expect("the shared branch instance");
+    case.graph.ensure_incremental_indexes();
     let incoming = case
         .graph
         .index
@@ -1959,6 +1965,7 @@ fn an_externally_supported_lost_seed_stops_before_its_subtree() {
         .find(|instance| case.identity(instance).starts_with("shared_root"))
         .cloned()
         .expect("the direct shared seed");
+    case.graph.ensure_incremental_indexes();
     let incoming = case
         .graph
         .index
@@ -2118,6 +2125,7 @@ fn a_root_reachable_non_root_seed_predecessor_stops_before_its_subtree() {
         .find(|instance| case.identity(instance).starts_with("shared"))
         .cloned()
         .expect("the shared generic seed after the edit");
+    case.graph.ensure_incremental_indexes();
     let incoming = case
         .graph
         .index
