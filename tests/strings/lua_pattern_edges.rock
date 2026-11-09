@@ -1,0 +1,48 @@
+// Lua-pattern edges every backend must agree on. Patterns outside the JS
+// translator's subset (%u, %b, %f, position captures) are not exercised.
+
+fn m(s: string, p: string) -> string {
+    return string_match(s, p) ?? "none"
+}
+
+@test
+fn anchors_are_literal_away_from_the_ends() {
+    assert_eq(m("a$b", "a$b"), "a$b")
+    assert_eq(m("a^b", "a^b"), "a^b")
+    assert_eq(m("ab", "^a"), "a")
+    assert_eq(m("ab", "b$"), "b")
+}
+
+@test
+fn quantifiers_without_an_item_are_literal() {
+    assert_eq(m("-", "-"), "-")
+    assert_eq(m("*", "*"), "*")
+    assert_eq(m("a-", "a%-$"), "a-")
+    assert_eq(m("+x", "^+x"), "+x")
+    assert_eq(m("(a)", "%(a%)"), "(a)")
+}
+
+@test
+fn whitespace_class_covers_vertical_tab_and_form_feed() {
+    assert_eq(m("\u{0B}", "%s"), "\u{0B}")
+    assert_eq(m("\u{0C}", "[%s]"), "\u{0C}")
+}
+
+@test
+fn sets_accept_a_leading_bracket_and_negated_classes() {
+    assert_eq(m("x]", "[]]"), "]")
+    assert_eq(m("x]", "[^]]"), "x")
+    assert_eq(m("A_", "[%W]+"), "_")
+    assert_eq(m("1a", "[%A]+"), "1")
+}
+
+@test
+fn gsub_replacement_only_interprets_percent() {
+    assert_eq("a".gsub("a", "$&"), "$&")
+    assert_eq("a".gsub("(a)", "$1"), "$1")
+    assert_eq("a".gsub("a", "$$"), "$$")
+    assert_eq("ab".gsub("%w+", "<%0>"), "<ab>")
+    assert_eq("ab".gsub("a", "[%1]"), "[a]b")
+    assert_eq("ab".gsub("(a)", "[%1]"), "[a]b")
+    assert_eq("ab".gsub("b", "%%"), "a%")
+}

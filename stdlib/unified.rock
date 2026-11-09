@@ -4123,16 +4123,20 @@ inline(lua) fn string.gsub(s, pattern: string, replacement: string) -> string = 
 @nomangle inline(js) fn __lua_pattern_to_regex(pattern: string) -> string = """
     var out = "";
     var i = 0;
+    // A quantifier needs a single-character item before it; elsewhere Lua
+    // reads the same character as a literal.
+    var quantifiable = false;
     while (i < pattern.length) {
         var c = pattern[i];
+        var item = true;
         if (c === "%") {
             var n = pattern[i + 1];
             if (n === "w") out += "[A-Za-z0-9]";
             else if (n === "W") out += "[^A-Za-z0-9]";
             else if (n === "d") out += "[0-9]";
             else if (n === "D") out += "[^0-9]";
-            else if (n === "s") out += "[ \\t\\n\\r]";
-            else if (n === "S") out += "[^ \\t\\n\\r]";
+            else if (n === "s") out += "[ \\t\\n\\r\\v\\f]";
+            else if (n === "S") out += "[^ \\t\\n\\r\\v\\f]";
             else if (n === "a") out += "[A-Za-z]";
             else if (n === "A") out += "[^A-Za-z]";
             else if ("^$()%.[]*+-?".indexOf(n) >= 0) out += "\\" + n;
@@ -4142,13 +4146,20 @@ inline(lua) fn string.gsub(s, pattern: string, replacement: string) -> string = 
             var j = i + 1;
             var cls = "[";
             if (pattern[j] === "^") { cls += "^"; j++; }
+            // A `]` right after the opening is a member of the set.
+            if (pattern[j] === "]") { cls += "\\]"; j++; }
             while (j < pattern.length && pattern[j] !== "]") {
                 if (pattern[j] === "%") {
                     var m = pattern[j + 1];
                     if (m === "w") cls += "A-Za-z0-9";
+                    else if (m === "W") cls += "\\x00-/:-@\\[-`{-\\uffff";
                     else if (m === "d") cls += "0-9";
-                    else if (m === "s") cls += " \\t\\n\\r";
+                    else if (m === "D") cls += "\\x00-/:-\\uffff";
+                    else if (m === "s") cls += " \\t\\n\\r\\v\\f";
+                    else if (m === "S") cls += "\\x00-\\x08\\x0e-\\x1f!-\\uffff";
                     else if (m === "a") cls += "A-Za-z";
+                    else if (m === "A") cls += "\\x00-@\\[-`{-\\uffff";
+                    else if (/[A-Za-z0-9]/.test(m)) throw new Error("lua pattern (js): unsupported escape %" + m + " in: " + pattern);
                     else cls += "\\" + m;
                     j += 2;
                 } else {
@@ -4160,8 +4171,25 @@ inline(lua) fn string.gsub(s, pattern: string, replacement: string) -> string = 
             if (pattern[j] !== "]") throw new Error("lua pattern (js): unterminated [] set in: " + pattern);
             out += cls + "]";
             i = j + 1;
-        } else if (c === "-") {
-            out += "*?";
+        } else if ("*+?-".indexOf(c) >= 0 && quantifiable) {
+            out += c === "-" ? "*?" : c;
+            item = false;
+            i++;
+        } else if ("*+?-".indexOf(c) >= 0) {
+            out += "\\" + c;
+            i++;
+        } else if ((c === "^" && i === 0) || (c === "$" && i === pattern.length - 1)) {
+            out += c;
+            item = false;
+            i++;
+        } else if (c === "^" || c === "$") {
+            out += "\\" + c;
+            i++;
+        } else if (c === "(" && pattern[i + 1] === ")") {
+            throw new Error("lua pattern (js): unsupported position capture in: " + pattern);
+        } else if (c === "(" || c === ")") {
+            out += c;
+            item = false;
             i++;
         } else if ("\\|{}".indexOf(c) >= 0) {
             out += "\\" + c;
@@ -4173,13 +4201,19 @@ inline(lua) fn string.gsub(s, pattern: string, replacement: string) -> string = 
             out += c;
             i++;
         }
+        quantifiable = item;
     }
     return out;
 """
 
 inline(js) fn string.gsub(s, pattern: string, replacement: string) -> string = """
     var rx = new RegExp(__lua_pattern_to_regex(pattern), "g");
-    var rep = replacement.replace(/%([0-9%%])/g, function (_, d) { return d === "%" ? "%" : "$" + d; });
+    // Lua's %1 names the whole match when the pattern has no captures.
+    var captures = new RegExp(rx.source + "|").exec("").length - 1;
+    var rep = replacement.replace(/\$/g, "$$$$").replace(/%([0-9%])/g, function (_, d) {
+        if (d === "%") return "%";
+        return d === "0" || (d === "1" && captures === 0) ? "$&" : "$" + d;
+    });
     return s.replace(rx, rep);
 """
 
