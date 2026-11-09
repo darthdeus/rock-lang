@@ -39,7 +39,7 @@ mod full;
 mod global_init;
 mod instances;
 mod overlay;
-mod par;
+pub(crate) mod par;
 mod roots;
 mod shaders;
 #[cfg(test)]

@@ -124,11 +124,11 @@ pub(super) fn join_in_place<A, B>(spawned: impl FnOnce() -> A, here: impl FnOnce
 /// in the middle of serial assembly; freeing them on an idle worker keeps that
 /// path short. Inline where there are no worker threads to hand it to.
 #[cfg(all(not(feature = "sequential"), not(target_arch = "wasm32")))]
-pub(super) fn drop_in_background<T: Send + 'static>(value: T) {
+pub(crate) fn drop_in_background<T: Send + 'static>(value: T) {
     rayon::spawn(move || drop(value));
 }
 
 #[cfg(any(feature = "sequential", target_arch = "wasm32"))]
-pub(super) fn drop_in_background<T>(value: T) {
+pub(crate) fn drop_in_background<T>(value: T) {
     drop(value);
 }

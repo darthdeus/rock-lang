@@ -260,8 +260,9 @@ pub fn compile_modules(
     }
     host.phase(Phase::Checked(&ws));
     // The workspace owns everything lints and emission read; the parse trees
-    // would otherwise stay live through the emission peak.
-    drop(modules);
+    // would otherwise stay live through the emission peak. Freeing them is
+    // not this thread's work.
+    crate::mir_emit::par::drop_in_background(modules);
     ws.comptime_inputs = host
         .checked_comptime_inputs(&ws)
         .map_err(|e| CompileFailure::at(Stage::Comptime, vec![e]))?;
