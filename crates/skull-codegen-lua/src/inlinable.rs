@@ -2,75 +2,7 @@
 
 use super::*;
 
-pub(crate) fn always_inlinable(inst: &Inst) -> bool {
-    matches!(
-        inst,
-        Inst::Const(_)
-            | Inst::IntAdd(..)
-            | Inst::IntSub(..)
-            | Inst::IntMul(..)
-            | Inst::IntDiv(..)
-            | Inst::IntMod(..)
-            | Inst::UintAdd(..)
-            | Inst::UintSub(..)
-            | Inst::UintMul(..)
-            | Inst::UintDiv(..)
-            | Inst::UintMod(..)
-            | Inst::FloatAdd(..)
-            | Inst::FloatSub(..)
-            | Inst::FloatMul(..)
-            | Inst::FloatDiv(..)
-            | Inst::FloatMod(..)
-            | Inst::StringConcat(..)
-            | Inst::IntLt(..)
-            | Inst::IntLeq(..)
-            | Inst::IntGt(..)
-            | Inst::IntGeq(..)
-            | Inst::UintLt(..)
-            | Inst::UintLeq(..)
-            | Inst::UintGt(..)
-            | Inst::UintGeq(..)
-            | Inst::FloatLt(..)
-            | Inst::FloatLeq(..)
-            | Inst::FloatGt(..)
-            | Inst::FloatGeq(..)
-            | Inst::Eq(..)
-            | Inst::NotEq(..)
-            | Inst::BitAnd(..)
-            | Inst::BitOr(..)
-            | Inst::BitXor(..)
-            | Inst::Shl(..)
-            | Inst::Shr(..)
-            | Inst::UintBitAnd(..)
-            | Inst::UintBitOr(..)
-            | Inst::UintBitXor(..)
-            | Inst::UintShl(..)
-            | Inst::UintShr(..)
-            | Inst::Neg(_)
-            | Inst::Not(_)
-            | Inst::BitNot(_)
-            | Inst::UintBitNot(_)
-            | Inst::ToString(_)
-            | Inst::FloatToInt(_)
-            | Inst::IntToFloat(_)
-            | Inst::UintToFloat(_)
-            | Inst::FloatToF32(_)
-            | Inst::IntToUint(_)
-            | Inst::UintToInt(_)
-            | Inst::FloatToUint(_)
-            | Inst::UintBitcastInt(_)
-            | Inst::IntBitcastUint(_)
-            | Inst::Format { .. }
-            | Inst::FormatDyn { .. }
-            | Inst::MakeTuple(_)
-            | Inst::MakeVec(_)
-            | Inst::MakeStruct { .. }
-            | Inst::MakeValueStruct { .. }
-            | Inst::MakeNullableValue { .. }
-            | Inst::MakeEnum { .. }
-            | Inst::MakeEnumDyn { .. }
-    )
-}
+pub(crate) use skull_mir::sinking::always_inlinable;
 
 /// Cells written exactly once in `scope`, as a multi-return destination, and
 /// read only after that call in the same block. A load of one is the call's
@@ -166,25 +98,9 @@ pub(crate) fn compute_inlinable(
     for &b in scope {
         let br = raw(b);
         for &id in &func.blocks[b].insts {
-            match &func.insts[id] {
-                Inst::Store { cell, .. } => {
-                    immutable_params.remove(cell);
-                }
-                Inst::CallMulti { dests, .. }
-                | Inst::CallValueMulti { dests, .. }
-                | Inst::CallBoundMulti { dests, .. } => {
-                    for cell in dests {
-                        immutable_params.remove(cell);
-                    }
-                }
-                Inst::MapNext {
-                    key_cell, val_cell, ..
-                } => {
-                    immutable_params.remove(key_cell);
-                    immutable_params.remove(val_cell);
-                }
-                _ => {}
-            }
+            func.insts[id].cell_writes_each(&mut |cell| {
+                immutable_params.remove(&cell);
+            });
             if func.insts[id].produces_value() {
                 def_block[raw(id) as usize] = br;
             }

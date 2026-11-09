@@ -31,6 +31,80 @@ pub fn may_throw(inst: &Inst) -> bool {
     )
 }
 
+/// An expression a backend may fold into its single use site: pure apart from
+/// the throws [`preserve_effect_order`] constrains. `Load`, `Call`, `Index`,
+/// `Field` and `Len` are excluded (impure or cell-order-sensitive), so those
+/// materialize at their program position.
+pub fn always_inlinable(inst: &Inst) -> bool {
+    matches!(
+        inst,
+        Inst::Const(_)
+            | Inst::IntAdd(..)
+            | Inst::IntSub(..)
+            | Inst::IntMul(..)
+            | Inst::IntDiv(..)
+            | Inst::IntMod(..)
+            | Inst::UintAdd(..)
+            | Inst::UintSub(..)
+            | Inst::UintMul(..)
+            | Inst::UintDiv(..)
+            | Inst::UintMod(..)
+            | Inst::FloatAdd(..)
+            | Inst::FloatSub(..)
+            | Inst::FloatMul(..)
+            | Inst::FloatDiv(..)
+            | Inst::FloatMod(..)
+            | Inst::StringConcat(..)
+            | Inst::IntLt(..)
+            | Inst::IntLeq(..)
+            | Inst::IntGt(..)
+            | Inst::IntGeq(..)
+            | Inst::UintLt(..)
+            | Inst::UintLeq(..)
+            | Inst::UintGt(..)
+            | Inst::UintGeq(..)
+            | Inst::FloatLt(..)
+            | Inst::FloatLeq(..)
+            | Inst::FloatGt(..)
+            | Inst::FloatGeq(..)
+            | Inst::Eq(..)
+            | Inst::NotEq(..)
+            | Inst::BitAnd(..)
+            | Inst::BitOr(..)
+            | Inst::BitXor(..)
+            | Inst::Shl(..)
+            | Inst::Shr(..)
+            | Inst::UintBitAnd(..)
+            | Inst::UintBitOr(..)
+            | Inst::UintBitXor(..)
+            | Inst::UintShl(..)
+            | Inst::UintShr(..)
+            | Inst::Neg(_)
+            | Inst::Not(_)
+            | Inst::BitNot(_)
+            | Inst::UintBitNot(_)
+            | Inst::ToString(_)
+            | Inst::FloatToInt(_)
+            | Inst::IntToFloat(_)
+            | Inst::UintToFloat(_)
+            | Inst::FloatToF32(_)
+            | Inst::IntToUint(_)
+            | Inst::UintToInt(_)
+            | Inst::FloatToUint(_)
+            | Inst::UintBitcastInt(_)
+            | Inst::IntBitcastUint(_)
+            | Inst::Format { .. }
+            | Inst::FormatDyn { .. }
+            | Inst::MakeTuple(_)
+            | Inst::MakeVec(_)
+            | Inst::MakeStruct { .. }
+            | Inst::MakeValueStruct { .. }
+            | Inst::MakeNullableValue { .. }
+            | Inst::MakeEnum { .. }
+            | Inst::MakeEnumDyn { .. }
+    )
+}
+
 fn is_barrier(inst: &Inst) -> bool {
     !inst.produces_value() || may_throw(inst)
 }

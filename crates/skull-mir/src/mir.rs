@@ -751,6 +751,25 @@ impl Inst {
         }
     }
 
+    /// Call `push` for every variable cell this instruction assigns.
+    pub fn cell_writes_each(&self, push: &mut impl FnMut(Idx<Cell>)) {
+        match self {
+            Inst::Store { cell, .. } => push(*cell),
+            Inst::CallMulti { dests, .. }
+            | Inst::CallValueMulti { dests, .. }
+            | Inst::CallBoundMulti { dests, .. } => {
+                dests.iter().for_each(|cell| push(*cell));
+            }
+            Inst::MapNext {
+                key_cell, val_cell, ..
+            } => {
+                push(*key_cell);
+                push(*val_cell);
+            }
+            _ => {}
+        }
+    }
+
     /// Call `push` for every value operand this instruction reads.
     pub fn uses_each(&self, push: &mut impl FnMut(Idx<Inst>)) {
         match self {

@@ -1847,23 +1847,9 @@ fn classify(
     // preserves (field-writeback through the shared cell).
     let mut rebound: HashSet<Idx<Cell>> = HashSet::default();
     for (_, inst) in mf.insts.iter() {
-        match inst {
-            Inst::Store { cell, .. } => {
-                rebound.insert(*cell);
-            }
-            Inst::CallMulti { dests, .. }
-            | Inst::CallValueMulti { dests, .. }
-            | Inst::CallBoundMulti { dests, .. } => {
-                rebound.extend(dests.iter().copied());
-            }
-            Inst::MapNext {
-                key_cell, val_cell, ..
-            } => {
-                rebound.insert(*key_cell);
-                rebound.insert(*val_cell);
-            }
-            _ => {}
-        }
+        inst.cell_writes_each(&mut |cell| {
+            rebound.insert(cell);
+        });
     }
     let coalescable_params: Vec<bool> = mf.params.iter().map(|p| !rebound.contains(p)).collect();
     let live = live_closure(&mf);

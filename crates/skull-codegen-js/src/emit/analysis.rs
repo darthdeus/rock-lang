@@ -2,23 +2,6 @@
 
 use super::*;
 
-/// The cells an inst writes: a `Store`'s target, or a multi-value call's dests.
-/// These are the cells that need a hoisted `let` (the multi-assign / store binds
-/// them, and a later block may read them across a branch merge).
-pub(super) fn inst_writes(inst: &Inst) -> Vec<Idx<Cell>> {
-    match inst {
-        Inst::Store { cell, .. } => vec![*cell],
-        Inst::CallMulti { dests, .. }
-        | Inst::CallValueMulti { dests, .. }
-        | Inst::CallBoundMulti { dests, .. } => dests.clone(),
-        // MapNext writes both the cursor key cell (in place) and the value cell.
-        Inst::MapNext {
-            key_cell, val_cell, ..
-        } => vec![*key_cell, *val_cell],
-        _ => Vec::new(),
-    }
-}
-
 /// The `NativeBuffer*` nominal names (T-typed + phantom-size variants); the
 /// same set skull-mir's lowering recognizes as `ContainerKind::NativeBuffer`.
 pub(super) fn is_native_buffer(name: &str) -> bool {
@@ -46,77 +29,10 @@ pub(super) fn for_each_operand(inst: &Inst, f: &mut impl FnMut(Idx<Inst>)) {
 /// An expression candidate for folding into its single use site. The shared
 /// sinking check separately constrains potentially throwing evaluations.
 /// EXCLUDES `Load`/`Call`/`Index`/`Field`/`Len` (impure or cell-order-sensitive)
-/// -- those materialize at their program position. Mirrors codegen-lua's
-/// `always_inlinable`.
+/// -- those materialize at their program position. JS also folds the
+/// environment record of a closure.
 pub(super) fn always_inlinable(inst: &Inst) -> bool {
-    matches!(
-        inst,
-        Inst::Const(_)
-            | Inst::IntAdd(..)
-            | Inst::IntSub(..)
-            | Inst::IntMul(..)
-            | Inst::IntDiv(..)
-            | Inst::IntMod(..)
-            | Inst::UintAdd(..)
-            | Inst::UintSub(..)
-            | Inst::UintMul(..)
-            | Inst::UintDiv(..)
-            | Inst::UintMod(..)
-            | Inst::FloatAdd(..)
-            | Inst::FloatSub(..)
-            | Inst::FloatMul(..)
-            | Inst::FloatDiv(..)
-            | Inst::FloatMod(..)
-            | Inst::StringConcat(..)
-            | Inst::IntLt(..)
-            | Inst::IntLeq(..)
-            | Inst::IntGt(..)
-            | Inst::IntGeq(..)
-            | Inst::UintLt(..)
-            | Inst::UintLeq(..)
-            | Inst::UintGt(..)
-            | Inst::UintGeq(..)
-            | Inst::FloatLt(..)
-            | Inst::FloatLeq(..)
-            | Inst::FloatGt(..)
-            | Inst::FloatGeq(..)
-            | Inst::Eq(..)
-            | Inst::NotEq(..)
-            | Inst::BitAnd(..)
-            | Inst::BitOr(..)
-            | Inst::BitXor(..)
-            | Inst::Shl(..)
-            | Inst::Shr(..)
-            | Inst::UintBitAnd(..)
-            | Inst::UintBitOr(..)
-            | Inst::UintBitXor(..)
-            | Inst::UintShl(..)
-            | Inst::UintShr(..)
-            | Inst::Neg(_)
-            | Inst::Not(_)
-            | Inst::BitNot(_)
-            | Inst::UintBitNot(_)
-            | Inst::ToString(_)
-            | Inst::FloatToInt(_)
-            | Inst::IntToFloat(_)
-            | Inst::UintToFloat(_)
-            | Inst::FloatToF32(_)
-            | Inst::IntToUint(_)
-            | Inst::UintToInt(_)
-            | Inst::FloatToUint(_)
-            | Inst::UintBitcastInt(_)
-            | Inst::IntBitcastUint(_)
-            | Inst::Format { .. }
-            | Inst::FormatDyn { .. }
-            | Inst::MakeTuple(_)
-            | Inst::MakeVec(_)
-            | Inst::MakeStruct { .. }
-            | Inst::MakeValueStruct { .. }
-            | Inst::MakeNullableValue { .. }
-            | Inst::MakeEnum { .. }
-            | Inst::MakeEnumDyn { .. }
-            | Inst::MakeEnv { .. }
-    )
+    matches!(inst, Inst::MakeEnv { .. }) || skull_mir::sinking::always_inlinable(inst)
 }
 
 /// Use counts (dense by raw inst id, over reachable blocks) + the inlinable
@@ -288,23 +204,6 @@ pub(super) fn cross_block_temps(
     cross
 }
 
-/// Successor blocks of `b` (`None` == the virtual exit).
-fn succ(mf: &MirFunc, b: Idx<Block>) -> Vec<Option<Idx<Block>>> {
-    match &mf.blocks[b].term {
-        Term::Return(_) | Term::Unreachable => vec![None],
-        Term::Goto(t) => vec![Some(*t)],
-        Term::Branch {
-            then_bb, else_bb, ..
-        } => vec![Some(*then_bb), Some(*else_bb)],
-        Term::Switch { cases, default, .. } => {
-            let mut v: Vec<_> = cases.iter().map(|(_, b)| Some(*b)).collect();
-            v.push(Some(*default));
-            v
-        }
-        Term::Yield { resume, .. } => vec![Some(*resume)],
-    }
-}
-
 /// Blocks reachable from the entry, in discovery order.
 pub(super) fn reachable_blocks(mf: &MirFunc) -> Vec<Idx<Block>> {
     reachable_from(mf, mf.entry)
@@ -320,9 +219,7 @@ pub(super) fn reachable_from(mf: &MirFunc, root: Idx<Block>) -> Vec<Idx<Block>> 
             continue;
         }
         reachable.push(b);
-        for s in succ(mf, b).into_iter().flatten() {
-            stack.push(s);
-        }
+        skull_mir::cfg::successors(&mf.blocks[b].term, |s| stack.push(s));
     }
     reachable
 }

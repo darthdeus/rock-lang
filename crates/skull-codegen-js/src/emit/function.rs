@@ -90,11 +90,11 @@ pub(crate) fn emit_fn_with_callees(
     // emits, so declaring its cell would leave an unused `let`.
     for &b in &reachable_blocks(mf) {
         for &iid in &mf.blocks[b].insts {
-            for cell in inst_writes(&mf.insts[iid]) {
+            mf.insts[iid].cell_writes_each(&mut |cell| {
                 if !param_set.contains(&cell) && seen.insert(cell) {
                     declared.push(mf.emit_cell_id(cell));
                 }
-            }
+            });
         }
     }
     if !declared.is_empty() {
@@ -177,11 +177,11 @@ pub fn emit_fn_trampoline(
     let mut seen = HashSet::new();
     for &b in &region {
         for &iid in &mf.blocks[b].insts {
-            for cell in inst_writes(&mf.insts[iid]) {
+            mf.insts[iid].cell_writes_each(&mut |cell| {
                 if !param_set.contains(&cell) && seen.insert(cell) {
                     declared.push(mf.emit_cell_id(cell));
                 }
-            }
+            });
         }
     }
     let mut hoisted_names: Vec<u32> = em
