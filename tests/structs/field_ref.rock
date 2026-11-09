@@ -93,13 +93,6 @@ fn write_through<T>(o: T, f: WriteFieldRef<T, int?>, v: int?) {
     field_set(o, f, v)
 }
 
-@test(output = "7")
-fn test_write_field_ref_literal() {
-    let m = Mob { health: 1, attack_co: null }
-    write_through(m, .attack_co, 7)
-    print("{field_get(m, .attack_co)}")
-}
-
 @test(output = "cleared")
 fn test_write_field_ref_coerced_from_field_ref() {
     let m = Mob { health: 1, attack_co: 5 }

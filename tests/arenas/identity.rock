@@ -85,6 +85,9 @@ fn cross_arena_contains_rejects_foreign_entity() {
 
 // --- clear cannot revive ---
 
+// The stale handle must not read the NEW occupant of its slot -- the failure
+// this pins is a silent alias onto an unrelated entity, not merely a live
+// lookup.
 @test(output = "true\nfalse")
 fn clear_retires_old_entities() {
     let a: Arena<Tag> = arena_new()
@@ -93,18 +96,6 @@ fn clear_retires_old_entities() {
     a.insert(Tag { v: 2 })
     print(is_null(a.get(old)))
     print(a.contains(old))
-}
-
-// The stale handle must not read the NEW occupant of its slot -- the failure
-// this pins is a silent alias onto an unrelated entity, not merely a live
-// lookup.
-@test(output = "true")
-fn clear_stale_entity_does_not_read_new_occupant() {
-    let a: Arena<Tag> = arena_new()
-    let old = a.insert(Tag { v: 1 })
-    a.clear()
-    a.insert(Tag { v: 2 })
-    print(is_null(a.get(old)))
 }
 
 // Arena and Entity are scalar logical handles, so they travel through ordinary

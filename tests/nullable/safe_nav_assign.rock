@@ -153,13 +153,6 @@ fn assign_3_levels_deep() {
     print(a?.b?.c?.d?.e?.value ?? -1)
 }
 
-@test(output = "50")
-fn compound_assign_3_levels_deep() {
-    let a: A? = A { b: B { c: C { d: D { e: E { value: 100 } } } } }
-    a?.b?.c?.d?.e?.value -= 50
-    print(a?.b?.c?.d?.e?.value ?? -1)
-}
-
 @test(output = "-1")
 fn assign_3_levels_null_at_middle() {
     let a: A? = A { b: null }

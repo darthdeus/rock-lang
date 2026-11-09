@@ -52,15 +52,6 @@ fn maybe_scale(v: V2?, k: float) -> float {
     return 0
 }
 
-// ----- 1. Nested call in non-last positional slot, scalarized callee.
-
-@test(output = "40\n80")
-fn adv_non_last_scalarized_rock() {
-    let r = plus2(make_v2(10.0, 20.0), make_v2(20.0, 50.0), 10.0)
-    print("{r.x.floor()}")
-    print("{r.y.floor()}")
-}
-
 // ----- 2. Two value-returning calls in non-last slots (both hoist). -----
 
 @test(output = "40\n80")

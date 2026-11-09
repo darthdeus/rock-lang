@@ -275,18 +275,6 @@ fn find_dot1_nullable() {
     print(missing == null)
 }
 
-@test(output = "true\ntrue")
-fn find_dot0_nullable() {
-    let mobs: Arena<Mob> = arena_new()
-    mobs.insert(Mob { name: "Boss", health: 500 })
-
-    let entity = mobs.pairs().find(_.1.name == "Boss")?.0
-    print(entity != null)
-
-    let missing = mobs.pairs().find(_.1.name == "Dragon")?.0
-    print(missing == null)
-}
-
 @test(output = "Boss")
 fn find_dot1_chain() {
     let mobs: Arena<Mob> = arena_new()

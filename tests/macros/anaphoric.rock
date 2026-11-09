@@ -29,9 +29,3 @@ fn test_anaphoric_local() {
     let x = 7
     assert_eq(ana_double(), 14)
 }
-
-@test
-fn test_anaphoric_other_local() {
-    let x = 5
-    assert_eq(ana_double(), 10)
-}

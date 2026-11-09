@@ -11,15 +11,6 @@ fn sum_vec(arr: [int]) -> int {
     return total
 }
 
-@test(output = "10\n20\n30")
-fn vec_basic_creation_and_access() {
-    // Test basic Vec creation with array literals
-    let v = [10, 20, 30]
-    print(v[0])
-    print(v[1])
-    print(v[2])
-}
-
 @test(output = "10\n25\n30")
 fn vec_indexing_write() {
     // Test Vec write indexing

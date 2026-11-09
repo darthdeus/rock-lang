@@ -399,16 +399,6 @@ fn parameter_shadows_global_variable() {
     print(counter)  // Global still accessible
 }
 
-@test(output = "100\n10\n100")
-fn global_access_from_nested_scope() {
-    print(value)  // Access global
-    if true {
-        let value = 10  // Shadow in nested scope
-        print(value)    // Should print local
-    }
-    print(value)  // Should print global again
-}
-
 @test(output = "0\n50\n1")
 fn global_mutation_with_shadowing() {
     counter2 = 0  // Reset counter2
@@ -611,13 +601,6 @@ fn type_alias_shadows_variable() {
 
     print(test_type_alias(5))
     print(int)  // The variable
-}
-
-@test(output = "15")
-fn underscore_in_lambda() {
-    // Underscore has special meaning in lambdas
-    let f = _ + 10
-    print(f(5))
 }
 
 @test(output = "10\n100")

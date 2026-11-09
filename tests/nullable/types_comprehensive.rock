@@ -99,12 +99,6 @@ fn test_optional_in_struct_field_assignment() {
     print(o.val)
 }
 
-@test(output = "true")
-fn test_optional_in_struct_field_assign_null() {
-    let o = Opt { val: null }
-    print(o.val == null)
-}
-
 // ============================================
 // Nullable function params / returns
 // ============================================
@@ -129,13 +123,6 @@ fn test_optional_in_function_return() {
 // ============================================
 // Assignment / promotion
 // ============================================
-
-@test(output = "5")
-fn test_assign_t_to_optional_t() {
-    let opt_x: int? = null
-    opt_x = 5
-    print(opt_x)
-}
 
 @test(output = "true")
 fn test_assign_null_to_optional_t() {

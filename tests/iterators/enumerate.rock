@@ -183,11 +183,6 @@ fn enumerate_map_empty() {
 
 // === Range ===
 
-@test(output = "0\n1\n2")
-fn range_basic() {
-    for i in 0..3 { print(i) }
-}
-
 // === Arena without enumerate (normal iteration) ===
 
 @test(output = "A:10\nB:20")

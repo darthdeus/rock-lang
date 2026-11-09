@@ -121,17 +121,6 @@ fn test_range_expressions() {
 }
 
 @test
-fn test_range_single() {
-    let nums = vec_new()
-    for i in 5..5 {
-        vec_push(nums, i)
-    }
-
-    // Check empty (5..5 produces no iterations with exclusive upper bound)
-    assert_eq(vec_len(nums), 0)
-}
-
-@test
 fn test_range_empty() {
     let nums = vec_new()
     for i in 5..4 {

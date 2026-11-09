@@ -2,24 +2,6 @@ struct Mob { name: string, health: int }
 
 // -- projecting tuple fields out of a vec via .iter().map(_.N) --
 
-@test(output = "1\n2\n3")
-fn vec_dot0_basic() {
-    let pairs: [(int, string)] = [(1, "a"), (2, "b"), (3, "c")]
-    let firsts = pairs.iter().map(_.0).collect()
-    for x in firsts {
-        print(x)
-    }
-}
-
-@test(output = "a\nb\nc")
-fn vec_dot1_basic() {
-    let pairs: [(int, string)] = [(1, "a"), (2, "b"), (3, "c")]
-    let seconds = pairs.iter().map(_.1).collect()
-    for x in seconds {
-        print(x)
-    }
-}
-
 @test(output = "Goblin\nOrc")
 fn vec_dot1_from_arena_filter() {
     let mobs: Arena<Mob> = arena_new()

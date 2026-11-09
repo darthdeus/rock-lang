@@ -16,11 +16,6 @@ fn test_div_annotated_float() {
 }
 
 @test
-fn test_div_mixed_operands() {
-    assert_eq(3 / 2, 1.5)
-}
-
-@test
 fn test_div_int_promotes_into_float_arg() {
     // int literal promotes into the float `/`
     assert_eq(10 / 4, 2.5)

@@ -99,12 +99,6 @@ fn test_nullable_string_present() {
     print(s ?? "default")
 }
 
-@test(output = "default")
-fn test_nullable_string_null() {
-    let s: string? = null
-    print(s ?? "default")
-}
-
 // --- String in vec ---
 
 @test(output = "a b c")

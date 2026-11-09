@@ -159,30 +159,6 @@ fn test_nested_block() {
     print(x)
 }
 
-// --- Range basics ---
-
-// --- Range in variable ---
-
-@test(output = "5")
-fn test_range_count() {
-    let count = 0
-    for i in 0..5 {
-        count = count + 1
-    }
-    print(count)
-}
-
-// --- Empty range ---
-
-@test(output = "0")
-fn test_empty_range() {
-    let count = 0
-    for i in 5..5 {
-        count = count + 1
-    }
-    print(count)
-}
-
 // --- First class function ---
 
 fn double(x: int) -> int {

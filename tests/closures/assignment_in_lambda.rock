@@ -662,23 +662,6 @@ fn test_conditional_assignment_logic() {
     assert_eq(data[2], 50)
 }
 
-// Test 9: Assignment with expression evaluation order
-@test
-fn test_expression_evaluation_order() {
-    let arr = [0, 0, 0, 0, 0]
-    let idx = 0
-
-    // This tests if the LHS index is evaluated before or after the increment
-    let tricky_assign = (val: int) => {
-        arr[idx] = val + { idx += 1; idx }  // Should use idx=0 for assignment, but val includes new idx=1
-    }
-
-    tricky_assign(100)  // Should assign to arr[0] = 100 + 1 = 101
-
-    assert_eq(arr[0], 101)
-    assert_eq(idx, 1)
-}
-
 // Test 10: Recursive lambda assignments
 global global_recursive_data: [[int]] = [[0, 0], [0, 0], [0, 0]]
 

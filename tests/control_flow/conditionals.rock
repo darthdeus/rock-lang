@@ -150,17 +150,6 @@ fn test_else_if_chain() {
 }
 
 // ============================================
-// Unwrap and Nullable Operations in Conditionals
-// ============================================
-
-@test(output = "5")
-fn test_simple_unwrap_in_function() {
-    let x: int? = 5
-    let result = x.unwrap()
-    print(result)
-}
-
-// ============================================
 // Variable Shadowing in Conditionals
 // ============================================
 

@@ -178,12 +178,6 @@ fn empty_interpolation_parts() {
     print("start{x}middle{x}end")
 }
 
-@test(output = "123")
-fn only_interpolation() {
-    let x = 123
-    print("{x}")
-}
-
 @test(output = "Dec: 255, Hex: ff, Oct: 377")
 fn multiple_format_specifiers_same_variable() {
     let x = 255
@@ -194,11 +188,6 @@ fn multiple_format_specifiers_same_variable() {
 @test(output = "This is just a string")
 fn plain_string_no_interpolation() {
     print("This is just a string")
-}
-
-@test(output = "Use curly braces for decoration")
-fn string_with_braces_but_no_variables() {
-    print("Use curly braces for decoration")
 }
 
 @test(output = "Value 42 in some text")

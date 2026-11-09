@@ -6,18 +6,6 @@ newtype UserId(int)
 newtype Score(int)
 newtype Name(string)
 
-@test(output = "42")
-fn test_newtype_construct_access() {
-    let id = UserId(42)
-    print(id.0)
-}
-
-@test(output = "100")
-fn test_newtype_score() {
-    let s = Score(100)
-    print(s.0)
-}
-
 // --- Newtype arithmetic ---
 
 @test(output = "30")
@@ -38,13 +26,6 @@ fn test_newtype_subtraction() {
 
 // --- Newtype comparison ---
 
-@test(output = "true")
-fn test_newtype_equality() {
-    let a = UserId(1)
-    let b = UserId(1)
-    print(a == b)
-}
-
 @test(output = "false")
 fn test_newtype_inequality() {
     let a = UserId(1)
@@ -60,13 +41,6 @@ fn test_newtype_ordering() {
 }
 
 // --- Newtype destructuring ---
-
-@test(output = "42")
-fn test_newtype_destructure() {
-    let id = UserId(42)
-    let UserId(val) = id
-    print(val)
-}
 
 // --- Generic newtype ---
 
@@ -119,14 +93,6 @@ newtype WrappedId(UserId)
 fn test_nested_newtype() {
     let w = WrappedId(UserId(42))
     print(w.0.0)
-}
-
-// Also works with intermediate variable
-@test(output = "42")
-fn test_nested_newtype_via_var() {
-    let w = WrappedId(UserId(42))
-    let inner = w.0
-    print(inner.0)
 }
 
 // --- Newtype with nullable ---

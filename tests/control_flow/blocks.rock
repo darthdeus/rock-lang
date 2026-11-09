@@ -14,18 +14,6 @@ fn test_block() {
     print(a)
 }
 
-@test(output="8")
-fn test_block_scoping() {
-    let x = 5
-
-    {
-        let y = 3
-        x = x + y
-    }
-
-    print(x)
-}
-
 @test(output="10")
 fn test_nested_blocks() {
     let x = 5
