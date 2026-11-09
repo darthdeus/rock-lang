@@ -2049,6 +2049,17 @@ fn fresh_workers_do_not_construct_global_concrete_indexes() {
 }
 
 #[test]
+fn fresh_publication_leaves_the_candidate_reverse_index_for_its_first_reader() {
+    let (_ws, _g, bodies) = bodies_of_raw(RICH);
+    assert!(
+        !bodies.candidate_index_derived(),
+        "a fresh build derived the reverse candidate index no compile reads"
+    );
+    assert!(!bodies.candidate_keys_by_func().is_empty());
+    assert!(bodies.candidate_index_derived());
+}
+
+#[test]
 fn fresh_publication_publishes_the_authoritative_candidate_index() {
     let (_ws, _g, bodies) = bodies_of_raw(RICH);
     let mut rebuilt = rustc_hash::FxHashMap::default();

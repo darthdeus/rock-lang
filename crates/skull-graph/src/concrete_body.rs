@@ -314,9 +314,17 @@ pub struct ConcreteBodies {
     plan_failure_index: BTreeMap<Instance, MonoTyReason>,
     always_plan_failure_index: FxHashMap<ConcreteOwner, MonoTyReason>,
     candidate_keys: BTreeSet<Instance>,
-    candidate_keys_by_func: FxHashMap<FuncRef, FxHashSet<Instance>>,
     owner_candidates: FxHashMap<Instance, FxHashSet<Instance>>,
-    candidate_users: FxHashMap<Instance, FxHashSet<Instance>>,
+    /// Derived from `owner_candidates` by its first reader, an owner-local
+    /// update: a whole-program compile reads only the key set.
+    candidate_index: std::sync::OnceLock<CandidateIndex>,
+}
+
+/// The reverse views of `ConcreteBodies::owner_candidates`.
+#[derive(Clone, Default)]
+struct CandidateIndex {
+    by_func: FxHashMap<FuncRef, FxHashSet<Instance>>,
+    users: FxHashMap<Instance, FxHashSet<Instance>>,
 }
 
 impl Default for ConcreteBodies {
@@ -354,9 +362,8 @@ impl Default for ConcreteBodies {
             plan_failure_index: BTreeMap::new(),
             always_plan_failure_index: FxHashMap::default(),
             candidate_keys: BTreeSet::new(),
-            candidate_keys_by_func: FxHashMap::default(),
             owner_candidates: FxHashMap::default(),
-            candidate_users: FxHashMap::default(),
+            candidate_index: std::sync::OnceLock::new(),
         }
     }
 }
@@ -486,12 +493,37 @@ impl ConcreteBodies {
         }
     }
 
+    pub fn candidate_index_derived(&self) -> bool {
+        self.candidate_index.get().is_some()
+    }
+
     pub fn candidate_keys(&self) -> &BTreeSet<Instance> {
         &self.candidate_keys
     }
 
     pub fn candidate_keys_by_func(&self) -> &FxHashMap<FuncRef, FxHashSet<Instance>> {
-        &self.candidate_keys_by_func
+        &self.derived_candidate_index().by_func
+    }
+
+    fn derived_candidate_index(&self) -> &CandidateIndex {
+        self.candidate_index.get_or_init(|| {
+            let mut index = CandidateIndex::default();
+            for (owner, candidates) in &self.owner_candidates {
+                for candidate in candidates {
+                    index
+                        .users
+                        .entry(candidate.clone())
+                        .or_default()
+                        .insert(owner.clone());
+                    index
+                        .by_func
+                        .entry(candidate.func)
+                        .or_default()
+                        .insert(candidate.clone());
+                }
+            }
+            index
+        })
     }
 
     /// Fold the authoritative owner records for an explicit census request.
@@ -690,19 +722,24 @@ impl ConcreteBodies {
 
     fn remove_instance(&mut self, instance: &Instance) -> (BTreeSet<Instance>, usize) {
         let mut removed = BTreeSet::new();
+        self.derived_candidate_index();
         if let Some(candidates) = self.owner_candidates.remove(instance) {
+            let index = self
+                .candidate_index
+                .get_mut()
+                .expect("the candidate index was derived above");
             for candidate in candidates {
-                let Some(users) = self.candidate_users.get_mut(&candidate) else {
+                let Some(users) = index.users.get_mut(&candidate) else {
                     continue;
                 };
                 users.remove(instance);
                 if users.is_empty() {
-                    self.candidate_users.remove(&candidate);
+                    index.users.remove(&candidate);
                     self.candidate_keys.remove(&candidate);
-                    if let Some(keys) = self.candidate_keys_by_func.get_mut(&candidate.func) {
+                    if let Some(keys) = index.by_func.get_mut(&candidate.func) {
                         keys.remove(&candidate);
                         if keys.is_empty() {
-                            self.candidate_keys_by_func.remove(&candidate.func);
+                            index.by_func.remove(&candidate.func);
                         }
                     }
                     removed.insert(candidate);
@@ -742,33 +779,21 @@ impl ConcreteBodies {
         refs: FxHashSet<Instance>,
     ) -> BTreeSet<Instance> {
         let mut added = BTreeSet::new();
-        self.install_candidate_refs_with(owner, refs, |candidate| {
-            added.insert(candidate.clone());
-        });
-        added
-    }
-
-    /// [`Self::install_candidate_refs_owned`] for a full build, which does
-    /// not read back which keys were new.
-    fn install_candidate_refs(&mut self, owner: &Instance, refs: FxHashSet<Instance>) {
-        self.install_candidate_refs_with(owner, refs, |_| {});
-    }
-
-    fn install_candidate_refs_with(
-        &mut self,
-        owner: &Instance,
-        refs: FxHashSet<Instance>,
-        mut on_new: impl FnMut(&Instance),
-    ) {
+        self.derived_candidate_index();
+        let index = self
+            .candidate_index
+            .get_mut()
+            .expect("the candidate index was derived above");
         for candidate in &refs {
-            match self.candidate_users.entry(candidate.clone()) {
+            match index.users.entry(candidate.clone()) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
                     self.candidate_keys.insert(candidate.clone());
-                    self.candidate_keys_by_func
+                    index
+                        .by_func
                         .entry(candidate.func)
                         .or_default()
                         .insert(candidate.clone());
-                    on_new(candidate);
+                    added.insert(candidate.clone());
                     let mut users = FxHashSet::default();
                     users.insert(owner.clone());
                     entry.insert(users);
@@ -779,6 +804,7 @@ impl ConcreteBodies {
             }
         }
         self.owner_candidates.insert(owner.clone(), refs);
+        added
     }
 
     pub fn census(&self) -> BodyCensus {
@@ -3146,7 +3172,8 @@ fn build_published_impl(
                 candidate_ref_rows += candidate_refs.len();
                 if let Ok(plan) = built.plan {
                     let started = timing_enabled.then(bone_core::prelude::Instant::now);
-                    out.install_candidate_refs(&instance, candidate_refs);
+                    out.owner_candidates
+                        .insert(instance.clone(), candidate_refs);
                     if let Some(started) = started {
                         candidate_install_time += started.elapsed();
                     }
@@ -3173,6 +3200,20 @@ fn build_published_impl(
                 }
             }
         }
+    }
+    let started = timing_enabled.then(bone_core::prelude::Instant::now);
+    let mut candidate_keys: Vec<&Instance> = out
+        .owner_candidates
+        .values()
+        .flatten()
+        .collect::<FxHashSet<_>>()
+        .into_iter()
+        .collect();
+    candidate_keys.sort();
+    let candidate_keys = candidate_keys.into_iter().cloned().collect();
+    out.candidate_keys = candidate_keys;
+    if let Some(started) = started {
+        candidate_install_time += started.elapsed();
     }
     let started = timing_enabled.then(bone_core::prelude::Instant::now);
     let plans: skull_mir::concrete::ConcretePlans = plan_rows.into_iter().collect();
