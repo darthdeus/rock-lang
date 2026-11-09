@@ -80,3 +80,9 @@ fn test_string_char_byte() {
     print(string_char(65))  // 'A'
     print("ABC".unit_at(0))  // 65
 }
+// A negative count produces an empty string, as Lua's string.rep does.
+@test
+fn repeat_negative_count_is_empty() {
+    let count = -1
+    assert_eq("ab".repeat(count), "")
+}

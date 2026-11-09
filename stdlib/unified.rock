@@ -4053,7 +4053,7 @@ double strtod_l(const char *nptr, char **endptr, __rock_locale_t loc);
 """
 
 @inline inline(lua) fn string.repeat(s, count: int) -> string = "string.rep(s, count)"
-@inline inline(js) fn string.repeat(s, count: int) -> string = "return s.repeat(count);"
+@inline inline(js) fn string.repeat(s, count: int) -> string = "return count > 0 ? s.repeat(count) : \"\";"
 
 // StringBuilder: append-and-join accumulator. Naive `+` concat in a loop is
 // O(n^2) even on luajit (immutable interned strings), so join/split/format
