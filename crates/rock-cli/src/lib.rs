@@ -32,7 +32,7 @@ pub use ustr::Ustr;
 pub(crate) mod allocation_join;
 pub mod allocator;
 pub(crate) mod backend_stats;
-pub(crate) mod bone_backend;
+pub mod bone_backend;
 pub mod child_lifetime;
 pub mod common;
 pub mod compile_budget;
@@ -44,7 +44,7 @@ pub(crate) mod docs_index;
 mod error_test;
 pub mod file_watcher;
 mod formatting;
-pub(crate) mod glsl_test;
+pub mod glsl_test;
 pub mod image_snapshot;
 pub(crate) mod incremental_stats;
 pub(crate) mod invocation_log;
@@ -476,7 +476,7 @@ impl Args {
 
 /// Language fixtures from the same source revision as this compiler.
 #[cfg(feature = "test-support")]
-pub(crate) fn test_corpus_dir() -> std::path::PathBuf {
+pub fn test_corpus_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -487,7 +487,7 @@ pub(crate) fn test_corpus_dir() -> std::path::PathBuf {
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub(crate) mod overlay_test_support;
+pub mod overlay_test_support;
 
 mod asset_selection;
 pub(crate) mod compile_cache;
@@ -496,7 +496,7 @@ pub(crate) mod frame_commands;
 pub(crate) mod frame_compile_cache;
 pub(crate) mod frame_runtime;
 pub(crate) mod game_compile;
-pub(crate) mod game_runtime;
+pub mod game_runtime;
 pub mod headless_scope;
 mod host_paths;
 mod log_record;

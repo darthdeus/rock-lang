@@ -301,7 +301,7 @@ impl FileWatcher {
     }
 
     /// Enable/disable metadata change filtering
-    pub(crate) fn with_metadata_filter(mut self, filter: bool) -> Self {
+    pub fn with_metadata_filter(mut self, filter: bool) -> Self {
         self.config.filter_metadata = filter;
         self
     }

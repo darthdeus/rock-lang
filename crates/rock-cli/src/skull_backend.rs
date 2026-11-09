@@ -3369,7 +3369,7 @@ impl IncrementalProject {
     /// wipe overlay; otherwise the accumulated body edits -> `incremental.lua`
     /// overlay. `changed` is the watcher's changed-path set; pass empty to force a
     /// full re-discover.
-    pub(crate) fn recompile(
+    pub fn recompile(
         &mut self,
         changed: &[std::path::PathBuf],
         main_path: &std::path::Path,
@@ -3772,7 +3772,7 @@ impl IncrementalProject {
     /// means the new process gets the complete current program. The overlay
     /// stays a within-process, single-consumer artifact that never has to cross
     /// a process boundary.
-    pub(crate) fn force_full(
+    pub fn force_full(
         &mut self,
         main_path: &std::path::Path,
         incremental_path: &std::path::Path,
