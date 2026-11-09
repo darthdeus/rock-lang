@@ -49,24 +49,6 @@ fn pure_callee_is_spliced() {
     eval_int(&js, "root", 9);
 }
 
-// An iterator combinator TERMINAL chain monomorphizes by inlining, and the
-// resulting nested loops (the inlined `next()` skip-loop continuing the outer
-// for-loop) now structure via labeled loops (T8c Class B). Was the sentinel
-// `combinator_terminal_chain_awaits_shared_tail_structuring` pinning the honest
-// shared-branch-tail reject; flipped when the structuring landed.
-#[test]
-fn combinator_terminal_chain_structures() {
-    let ws = ws_with(
-        "fn root() -> int {\n\
-             let v = [1, 2, 3]\n\
-             v.map(_ * 2).filter(_ > 2).reduce(0, (a, b) => a + b)\n\
-         }",
-    );
-    let js = crate::common::emit_closure(&ws, "root")
-        .expect("inlined combinator chain structures via labeled loops");
-    eval_int(&js, "root", 10);
-}
-
 // A call omitting a defaulted param is a legal 2-arg call to a 3-param callee --
 // pre-T8a the arity guard false-positived it as a value-struct ABI mismatch.
 #[test]

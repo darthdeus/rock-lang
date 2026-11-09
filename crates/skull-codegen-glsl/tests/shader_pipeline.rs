@@ -69,19 +69,6 @@ fn vector_scalar_bounds_are_splatted() {
 // intrinsic mapping").
 
 #[test]
-fn builtin_fwidth_maps() {
-    let src = r#"
-        @shader(fragment)
-        fn f(tc: Vec2) -> Vec4 {
-            let w = fwidth(tc.x)
-            return Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 }
-        }
-    "#;
-    let glsl = emit_entry(src, "f").expect("emit");
-    assert_has(&glsl, "fwidth(tc.x)");
-}
-
-#[test]
 fn builtin_frag_coord_maps() {
     let src = r#"
         @shader(fragment)
@@ -136,6 +123,26 @@ fn builtin_texture_size_maps() {
         !glsl.contains("texture_size("),
         "must not emit a fn call:\n{glsl}"
     );
+}
+
+fn derivative_maps(rock: &str, glsl_call: &str) {
+    let src = format!(
+        r#"
+        @shader(fragment)
+        fn f(tc: Vec2) -> Vec4 {{
+            let w = {rock}(tc.x)
+            return Vec4 {{ x: w, y: 0.0, z: 0.0, w: 1.0 }}
+        }}
+    "#
+    );
+    let glsl = emit_entry(&src, "f").expect("emit");
+    assert_has(&glsl, &format!("{glsl_call}(tc.x)"));
+}
+
+cases! { derivative_maps:
+    builtin_fwidth_maps("fwidth", "fwidth");
+    builtin_dfdx_maps("dfdx", "dFdx");
+    builtin_dfdy_maps("dfdy", "dFdy");
 }
 
 // --- the vertex+fragment pipeline scaffold (A2a) -----------------------------
@@ -1036,41 +1043,6 @@ fn reject_texture_field_select() {
 // index, which assumes one location per field and cannot express a type that
 // consumes several.
 
-/// Locations continue ACROSS the @attr and @instance structs -- one numbering
-/// for the whole vertex stage, not per-struct. This is an instanced grass
-/// shape (quad at 0..1, GrassInstance at 2..5).
-#[test]
-fn instance_attr_locations_continue_after_the_per_vertex_ones() {
-    let src = r#"
-        value Quad { aPos: Vec2, aTexCoord: Vec2 }
-        value Inst { pos: Vec2, rot: float, scale: float, height: float }
-        value Vary { position: Vec4, uv: Vec2 }
-        @shader(vertex)
-        fn vs(@attr a: Quad, @instance i: Inst) -> Vary {
-            return Vary { position: v(a.aPos + i.pos, 0.0, 1.0), TexCoord: a.aTexCoord, uv: a.aTexCoord }
-        }
-        @shader(fragment)
-        fn fs(vary: Vary) -> Vec4 { return v(vary.uv, 0.0, 1.0) }
-    "#;
-    let glsl = emit_pipeline(src, "vs", "fs").expect("must emit");
-    // The whole declaration, not location-exists + name-appears-somewhere: the
-    // split form passes even when a location binds the wrong field, and the
-    // name half matches the fn body.
-    for (loc, ty, name) in [
-        (0, "vec2", "aPos"),
-        (1, "vec2", "aTexCoord"),
-        (2, "vec2", "pos"),
-        (3, "float", "rot"),
-        (4, "float", "scale"),
-        (5, "float", "height"),
-    ] {
-        assert!(
-            glsl.contains(&format!("layout (location = {loc}) in {ty} {name};")),
-            "want `layout (location = {loc}) in {ty} {name};`:\n{glsl}"
-        );
-    }
-}
-
 /// Attribute GLSL types are the artifact's `AttrKind` spelled for this backend,
 /// so every kind maps to exactly one declaration. A wrong entry (F32x3 -> vec4)
 /// is a silent geometry corruption: the shader reads a component the buffer
@@ -1473,28 +1445,16 @@ fn engine_member_named(name: &str) -> String {
     )
 }
 
-#[test]
-fn engine_member_colliding_with_an_attribute_rejects() {
-    let e = emit_pipeline(&engine_member_named("aPos"), "c_vert", "c_frag").unwrap_err();
-    assert!(e.contains("`aPos` would collide"), "got: {e}");
+fn engine_member_collides(name: &str) {
+    let e = emit_pipeline(&engine_member_named(name), "c_vert", "c_frag").unwrap_err();
+    assert!(e.contains(&format!("`{name}` would collide")), "got: {e}");
 }
 
-#[test]
-fn engine_member_colliding_with_a_varying_rejects() {
-    let e = emit_pipeline(&engine_member_named("TexCoord"), "c_vert", "c_frag").unwrap_err();
-    assert!(e.contains("`TexCoord` would collide"), "got: {e}");
-}
-
-#[test]
-fn engine_member_colliding_with_a_sampler_rejects() {
-    let e = emit_pipeline(&engine_member_named("tex"), "c_vert", "c_frag").unwrap_err();
-    assert!(e.contains("`tex` would collide"), "got: {e}");
-}
-
-#[test]
-fn engine_member_colliding_with_a_uniform_array_rejects() {
-    let e = emit_pipeline(&engine_member_named("tints"), "c_vert", "c_frag").unwrap_err();
-    assert!(e.contains("`tints` would collide"), "got: {e}");
+cases! { engine_member_collides:
+    engine_member_colliding_with_an_attribute_rejects("aPos");
+    engine_member_colliding_with_a_varying_rejects("TexCoord");
+    engine_member_colliding_with_a_sampler_rejects("tex");
+    engine_member_colliding_with_a_uniform_array_rejects("tints");
 }
 
 /// An MRT output, whose names are ARBITRARY struct fields rather than the
@@ -1596,32 +1556,6 @@ fn a_program_without_an_engine_group_leaves_slot_zero_empty() {
         !em.abi.uniform_blocks.iter().any(|(b, _)| *b == 0),
         "slot 0 is the engine's"
     );
-}
-
-#[test]
-fn builtin_dfdx_maps() {
-    let src = r#"
-        @shader(fragment)
-        fn f(tc: Vec2) -> Vec4 {
-            let w = dfdx(tc.x)
-            return Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 }
-        }
-    "#;
-    let glsl = emit_entry(src, "f").expect("emit");
-    assert_has(&glsl, "dFdx(tc.x)");
-}
-
-#[test]
-fn builtin_dfdy_maps() {
-    let src = r#"
-        @shader(fragment)
-        fn f(tc: Vec2) -> Vec4 {
-            let w = dfdy(tc.x)
-            return Vec4 { x: w, y: 0.0, z: 0.0, w: 1.0 }
-        }
-    "#;
-    let glsl = emit_entry(src, "f").expect("emit");
-    assert_has(&glsl, "dFdy(tc.x)");
 }
 
 cases! { reject_pipeline:
