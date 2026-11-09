@@ -1,8 +1,8 @@
 //! Golden tests: Rock snippet -> expected GLSL text, over the real stdlib.
 
 use crate::support::{
-    emit_checked_entry as emit_entry, emit_library as emit, emit_library_with as emit_with,
-    workspace,
+    assert_has, emit_checked_entry as emit_entry, emit_library as emit,
+    emit_library_with as emit_with, workspace,
 };
 use std::sync::LazyLock;
 use ustr::Ustr;
@@ -93,9 +93,9 @@ fn callee_before_caller() {
         .find("float map01_float_float_float(")
         .expect("map01 emitted");
     assert!(ri < mi, "remap should precede map01:\n{glsl}");
-    assert!(
-        glsl.contains("return remap_float_float_float_float_float(value, min1, max1, 0.0, 1.0);"),
-        "got:\n{glsl}"
+    assert_has(
+        &glsl,
+        "return remap_float_float_float_float_float(value, min1, max1, 0.0, 1.0);",
     );
 }
 
@@ -113,11 +113,8 @@ fn vec_returning_and_intrinsics() {
         glsl.starts_with("vec2 random2_Vec2(vec2 p) {"),
         "got:\n{glsl}"
     );
-    assert!(glsl.contains("dot(p, vec2(127.32, 231.4))"), "got:\n{glsl}");
-    assert!(
-        glsl.contains("return vec2(fract(sin(da)), fract(sin(db)));"),
-        "got:\n{glsl}"
-    );
+    assert_has(&glsl, "dot(p, vec2(127.32, 231.4))");
+    assert_has(&glsl, "return vec2(fract(sin(da)), fract(sin(db)));");
 }
 
 #[test]
@@ -136,11 +133,8 @@ fn vec3_vec4_constructors() {
         "got:\n{glsl}"
     );
     // v(...) maps to native vecN construction, not a helper fn.
-    assert!(glsl.contains("vec3(sin(t), cos(t), 0.5)"), "got:\n{glsl}");
-    assert!(
-        glsl.contains("return vec4(rgb.x, rgb.y, rgb.z, 1.0);"),
-        "got:\n{glsl}"
-    );
+    assert_has(&glsl, "vec3(sin(t), cos(t), 0.5)");
+    assert_has(&glsl, "return vec4(rgb.x, rgb.y, rgb.z, 1.0);");
     assert!(
         !glsl.contains("v_float"),
         "v() should inline, not emit a helper fn:\n{glsl}"
@@ -417,13 +411,10 @@ fn nested_counted_loops() {
         }
     "#;
     let glsl = emit(src, &["worley2"]).expect("emit");
-    assert!(glsl.contains("for (; y < "), "got:\n{glsl}");
-    assert!(glsl.contains("for (; x < "), "got:\n{glsl}");
-    assert!(
-        glsl.contains("dist = min(dist, length(diff));"),
-        "got:\n{glsl}"
-    );
-    assert!(glsl.contains("return dist;"), "got:\n{glsl}");
+    assert_has(&glsl, "for (; y < ");
+    assert_has(&glsl, "for (; x < ");
+    assert_has(&glsl, "dist = min(dist, length(diff));");
+    assert_has(&glsl, "return dist;");
     // Vec operators render inline (native infix) and are NOT emitted as GLSL fn
     // definitions (they are reachability leaves, like intrinsics).
     assert!(
@@ -828,7 +819,7 @@ fn param_loop_bound_not_folded() {
         glsl.contains("t3 = n;"),
         "param bound must stay a temp:\n{glsl}"
     );
-    assert!(glsl.contains("for (; i < t3; i = i + 1) {"), "got:\n{glsl}");
+    assert_has(&glsl, "for (; i < t3; i = i + 1) {");
 }
 
 /// Milestone finding: `match` lowers to `Branch` chains (NOT `Term::Switch`),
@@ -1027,10 +1018,7 @@ fn int_arg_at_float_param() {
         @pure fn f(i: int) -> float { return takes_float(i) }
     "#;
     let glsl = emit(src, &["f"]).expect("emit");
-    assert!(
-        glsl.contains("return takes_float_float(float(i));"),
-        "got:\n{glsl}"
-    );
+    assert_has(&glsl, "return takes_float_float(float(i));");
 }
 
 /// An int (non-literal) mixed into float arithmetic gets a `float(...)` wrap.
@@ -1084,11 +1072,14 @@ fn fragment_entry_scaffold() {
     "#;
     let glsl = emit_entry(src, "glow").expect("emit");
     assert!(glsl.starts_with("#version 330 core\n"), "got:\n{glsl}");
-    assert!(glsl.contains("#ifdef PIXEL"), "got:\n{glsl}");
-    assert!(glsl.contains("in vec2 TexCoord;"), "got:\n{glsl}");
-    assert!(glsl.contains("out vec4 FragColor;"), "got:\n{glsl}");
+    assert_has(&glsl, "#ifdef PIXEL");
+    assert_has(&glsl, "in vec2 TexCoord;");
+    assert_has(&glsl, "out vec4 FragColor;");
     // Uniforms: one std140 block in field order, then the loose samplers.
-    assert!(glsl.contains("layout(std140) uniform GlowU {\n    float strength;\n    vec2 center;\n    float radius;\n};\nuniform sampler2D scene;"), "got:\n{glsl}");
+    assert_has(
+        &glsl,
+        "layout(std140) uniform GlowU {\n    float strength;\n    vec2 center;\n    float radius;\n};\nuniform sampler2D scene;",
+    );
     // Helper before entry; entry drops uniform/sampler params.
     let fi = glsl
         .find("float falloff_float_float(float d, float r)")
@@ -1096,23 +1087,17 @@ fn fragment_entry_scaffold() {
     let gi = glsl.find("vec4 glow(vec2 tc)").expect("entry emitted");
     assert!(fi < gi, "helper must precede entry:\n{glsl}");
     // Uniform-struct reads render as bare uniform names.
-    assert!(glsl.contains("distance(tc, center)"), "got:\n{glsl}");
-    assert!(glsl.contains("texture(scene, tc)"), "got:\n{glsl}");
+    assert_has(&glsl, "distance(tc, center)");
+    assert_has(&glsl, "texture(scene, tc)");
     assert!(
         !glsl.contains("u."),
         "uniform struct must not survive as a param:\n{glsl}"
     );
-    assert!(
-        glsl.contains("void main() {\n  FragColor = glow(TexCoord);\n}"),
-        "got:\n{glsl}"
-    );
+    assert_has(&glsl, "void main() {\n  FragColor = glow(TexCoord);\n}");
     // Default fullscreen vertex stage.
-    assert!(glsl.contains("#ifdef VERTEX"), "got:\n{glsl}");
-    assert!(
-        glsl.contains("gl_Position = vec4(aPos, 0.0, 1.0);"),
-        "got:\n{glsl}"
-    );
-    assert!(glsl.contains("TexCoord = aTexCoord;"), "got:\n{glsl}");
+    assert_has(&glsl, "#ifdef VERTEX");
+    assert_has(&glsl, "gl_Position = vec4(aPos, 0.0, 1.0);");
+    assert_has(&glsl, "TexCoord = aTexCoord;");
 }
 
 /// `@uniform` is ONE std140 block, not a run of loose uniforms. The block is
@@ -1142,13 +1127,13 @@ fn fragment_entry_uniforms_are_one_std140_block() {
         ),
         "got:\n{glsl}"
     );
-    assert!(glsl.contains("uniform sampler2D scene;"), "got:\n{glsl}");
+    assert_has(&glsl, "uniform sampler2D scene;");
     assert!(
         !glsl.contains("uniform float strength;"),
         "no loose member survives:\n{glsl}"
     );
     // The block is UNNAMED-instance, so reads are bare globals exactly as before.
-    assert!(glsl.contains("distance(tc, center)"), "got:\n{glsl}");
+    assert_has(&glsl, "distance(tc, center)");
     assert!(
         !glsl.contains("u."),
         "uniform struct must not survive as a param:\n{glsl}"
@@ -1165,9 +1150,9 @@ fn fragment_entry_sampler_only() {
         }
     "#;
     let glsl = emit_entry(src, "blit").expect("emit");
-    assert!(glsl.contains("uniform sampler2D scene;"), "got:\n{glsl}");
-    assert!(glsl.contains("vec4 blit(vec2 tc)"), "got:\n{glsl}");
-    assert!(glsl.contains("return texture(scene, tc);"), "got:\n{glsl}");
+    assert_has(&glsl, "uniform sampler2D scene;");
+    assert_has(&glsl, "vec4 blit(vec2 tc)");
+    assert_has(&glsl, "return texture(scene, tc);");
 }
 
 /// Mat4 * Vec4 and Mat4 * Mat4 render as native GLSL `*` (the vec/mat operator
@@ -1179,16 +1164,10 @@ fn mat4_native_multiply() {
         @pure fn compose(a: Mat4, b: Mat4) -> Mat4 { return a * b }
     "#;
     let glsl = emit(src, &["xform", "compose"]).expect("emit");
-    assert!(
-        glsl.contains("vec4 xform_Mat4_Vec4(mat4 m, vec4 p) {"),
-        "got:\n{glsl}"
-    );
-    assert!(glsl.contains("return (m * p);"), "got:\n{glsl}");
-    assert!(
-        glsl.contains("mat4 compose_Mat4_Mat4(mat4 a, mat4 b) {"),
-        "got:\n{glsl}"
-    );
-    assert!(glsl.contains("return (a * b);"), "got:\n{glsl}");
+    assert_has(&glsl, "vec4 xform_Mat4_Vec4(mat4 m, vec4 p) {");
+    assert_has(&glsl, "return (m * p);");
+    assert_has(&glsl, "mat4 compose_Mat4_Mat4(mat4 a, mat4 b) {");
+    assert_has(&glsl, "return (a * b);");
 }
 
 /// A `nobox` value crossing a call on the GLSL path must NOT be rejected as a

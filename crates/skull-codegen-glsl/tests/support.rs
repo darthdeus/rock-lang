@@ -117,3 +117,24 @@ pub fn pipeline_emission(src: &str, vert: &str, frag: &str) -> Result<ShaderEmis
     )
     .map_err(|e| e.message)
 }
+
+/// The emitted shader contains `needle`.
+#[track_caller]
+pub fn assert_has(glsl: &str, needle: &str) {
+    assert!(glsl.contains(needle), "missing `{needle}` in:\n{glsl}");
+}
+
+/// The emitted shader does not contain `needle`.
+#[track_caller]
+pub fn assert_lacks(glsl: &str, needle: &str) {
+    assert!(!glsl.contains(needle), "unexpected `{needle}` in:\n{glsl}");
+}
+
+/// One `#[test]` per case, each calling `$check` with that case's arguments, so
+/// a family of fixture-and-expectation tests reads as a table but still runs
+/// and reports by name.
+macro_rules! cases {
+    ($check:ident: $($(#[$attr:meta])* $name:ident($($arg:expr),* $(,)?);)*) => {
+        $($(#[$attr])* #[test] fn $name() { $check($($arg),*); })*
+    };
+}

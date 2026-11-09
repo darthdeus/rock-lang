@@ -6,7 +6,7 @@
 //! (frag_coord/fwidth/discard) in isolation; `emit_pipeline` is the A2
 //! vertex+fragment pair -> one #ifdef file.
 
-use crate::support::{emit_entry, emit_pipeline, workspace};
+use crate::support::{assert_has, assert_lacks, emit_entry, emit_pipeline, workspace};
 use skull_codegen_glsl::GlslProfile;
 
 #[test]
@@ -78,7 +78,7 @@ fn builtin_fwidth_maps() {
         }
     "#;
     let glsl = emit_entry(src, "f").expect("emit");
-    assert!(glsl.contains("fwidth(tc.x)"), "got:\n{glsl}");
+    assert_has(&glsl, "fwidth(tc.x)");
 }
 
 #[test]
@@ -91,7 +91,7 @@ fn builtin_frag_coord_maps() {
         }
     "#;
     let glsl = emit_entry(src, "f").expect("emit");
-    assert!(glsl.contains("gl_FragCoord"), "got:\n{glsl}");
+    assert_has(&glsl, "gl_FragCoord");
     // frag_coord() takes no args -- the template is a bare builtin, not a call.
     assert!(
         !glsl.contains("frag_coord("),
@@ -111,7 +111,7 @@ fn builtin_discard_is_a_statement() {
     let glsl = emit_entry(src, "f").expect("emit");
     // discard is a control-flow statement, not an expression: `discard;`, never
     // `discard()` or an assignment to a temp.
-    assert!(glsl.contains("discard;"), "got:\n{glsl}");
+    assert_has(&glsl, "discard;");
     assert!(
         !glsl.contains("discard()"),
         "discard must not render as a call:\n{glsl}"
@@ -131,7 +131,7 @@ fn builtin_texture_size_maps() {
         }
     "#;
     let glsl = emit_entry(src, "f").expect("emit");
-    assert!(glsl.contains("vec2(textureSize(tex, 0))"), "got:\n{glsl}");
+    assert_has(&glsl, "vec2(textureSize(tex, 0))");
     assert!(
         !glsl.contains("texture_size("),
         "must not emit a fn call:\n{glsl}"
@@ -177,75 +177,63 @@ const UI_SRC: &str = r#"
 fn pipeline_emits_one_block_per_stage() {
     let glsl = emit_pipeline(UI_SRC, "ui_vert", "ui_frag").expect("emit");
     // The FRAGMENT group is game-authored, so it is a block today.
-    assert!(
-        glsl.contains("layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};\n"),
-        "got:\n{glsl}"
+    assert_has(
+        &glsl,
+        "layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};\n",
     );
     // The VERTEX group is a block too: one per STAGE, each at its own binding.
-    assert!(
-        glsl.contains("layout(std140) uniform UiVertU {\n    mat4 uProjection;\n    mat4 uView;\n    mat4 uTransform;\n};\n"),
-        "got:\n{glsl}"
+    assert_has(
+        &glsl,
+        "layout(std140) uniform UiVertU {\n    mat4 uProjection;\n    mat4 uView;\n    mat4 uTransform;\n};\n",
     );
     // No member falls back to a loose uniform -- a block member has no location,
     // so a by-name setter aimed at one writes nothing.
-    assert!(!glsl.contains("uniform mat4 uProjection;"), "got:\n{glsl}");
+    assert_lacks(&glsl, "uniform mat4 uProjection;");
     // Unnamed instance -- members stay bare globals, so bodies are unchanged.
-    assert!(!glsl.contains("u.uSize"), "got:\n{glsl}");
+    assert_lacks(&glsl, "u.uSize");
 }
 
 #[test]
 fn pipeline_scaffold_vertex_block() {
     let glsl = emit_pipeline(UI_SRC, "ui_vert", "ui_frag").expect("emit");
     assert!(glsl.starts_with("#version 330 core\n"), "got:\n{glsl}");
-    assert!(glsl.contains("#ifdef VERTEX"), "got:\n{glsl}");
+    assert_has(&glsl, "#ifdef VERTEX");
     // Attribute struct fields -> `in` with declaration-order locations.
-    assert!(
-        glsl.contains("layout (location = 0) in vec2 aPos;"),
-        "got:\n{glsl}"
-    );
-    assert!(
-        glsl.contains("layout (location = 1) in vec2 aTexCoord;"),
-        "got:\n{glsl}"
-    );
-    assert!(
-        glsl.contains("layout (location = 2) in vec4 aColor;"),
-        "got:\n{glsl}"
-    );
+    assert_has(&glsl, "layout (location = 0) in vec2 aPos;");
+    assert_has(&glsl, "layout (location = 1) in vec2 aTexCoord;");
+    assert_has(&glsl, "layout (location = 2) in vec4 aColor;");
     // Vertex uniforms are a std140 block -- see `pipeline_emits_one_block_per_stage`.
-    assert!(
-        glsl.contains("layout(std140) uniform UiVertU {"),
-        "got:\n{glsl}"
-    );
-    assert!(glsl.contains("    mat4 uProjection;"), "got:\n{glsl}");
-    assert!(glsl.contains("    mat4 uView;"), "got:\n{glsl}");
-    assert!(glsl.contains("    mat4 uTransform;"), "got:\n{glsl}");
+    assert_has(&glsl, "layout(std140) uniform UiVertU {");
+    assert_has(&glsl, "    mat4 uProjection;");
+    assert_has(&glsl, "    mat4 uView;");
+    assert_has(&glsl, "    mat4 uTransform;");
     // Varyings out -- position is suppressed (it is gl_Position, not a varying).
-    assert!(glsl.contains("out vec2 TexCoord;"), "got:\n{glsl}");
-    assert!(glsl.contains("out vec4 Color;"), "got:\n{glsl}");
+    assert_has(&glsl, "out vec2 TexCoord;");
+    assert_has(&glsl, "out vec4 Color;");
     assert!(
         !glsl.contains("out vec4 position;"),
         "position must not be a varying:\n{glsl}"
     );
     // main writes gl_Position from the position field + the varying outs.
-    assert!(glsl.contains("gl_Position ="), "got:\n{glsl}");
-    assert!(glsl.contains("TexCoord = "), "got:\n{glsl}");
+    assert_has(&glsl, "gl_Position =");
+    assert_has(&glsl, "TexCoord = ");
 }
 
 #[test]
 fn pipeline_scaffold_pixel_block() {
     let glsl = emit_pipeline(UI_SRC, "ui_vert", "ui_frag").expect("emit");
-    assert!(glsl.contains("#ifdef PIXEL"), "got:\n{glsl}");
+    assert_has(&glsl, "#ifdef PIXEL");
     // Varyings arrive as `in`, matching the vertex `out` (position excluded).
-    assert!(glsl.contains("in vec2 TexCoord;"), "got:\n{glsl}");
-    assert!(glsl.contains("in vec4 Color;"), "got:\n{glsl}");
-    assert!(glsl.contains("out vec4 FragColor;"), "got:\n{glsl}");
+    assert_has(&glsl, "in vec2 TexCoord;");
+    assert_has(&glsl, "in vec4 Color;");
+    assert_has(&glsl, "out vec4 FragColor;");
     // The fragment stage's own block, separate from the vertex stage's.
-    assert!(
-        glsl.contains("layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};"),
-        "got:\n{glsl}"
+    assert_has(
+        &glsl,
+        "layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};",
     );
-    assert!(glsl.contains("void main()"), "got:\n{glsl}");
-    assert!(glsl.contains("FragColor = ui_frag("), "got:\n{glsl}");
+    assert_has(&glsl, "void main()");
+    assert_has(&glsl, "FragColor = ui_frag(");
 }
 
 // --- pipeline rejects (spanned emit CompilerError) ---------------------------
@@ -260,39 +248,30 @@ fn reject_pipeline(src: &str, vert: &str, frag: &str, needle: &str) {
     }
 }
 
-/// The varyings struct MUST carry a `position: Vec4` field (-> gl_Position).
-#[test]
-fn reject_varyings_missing_position() {
-    let src = r#"
+cases! { reject_pipeline:
+    /// The varyings struct MUST carry a `position: Vec4` field (-> gl_Position).
+    reject_varyings_missing_position(r#"
         value QV { aPos: Vec2 }
         value Vary { TexCoord: Vec2 }
         @shader(vertex)
         fn vt(@attr a: QV) -> Vary { return Vary { TexCoord: a.aPos } }
         @shader(fragment)
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: vary.TexCoord.x, y: 0.0, z: 0.0, w: 1.0 } }
-    "#;
-    reject_pipeline(src, "vt", "fr", "position");
-}
+    "#, "vt", "fr", "position");
 
-/// `position` is gl_Position, not a varying -- reading it in the fragment stage
-/// is a spanned reject.
-#[test]
-fn reject_fragment_reads_position() {
-    let src = r#"
+    /// `position` is gl_Position, not a varying -- reading it in the fragment stage
+    /// is a spanned reject.
+    reject_fragment_reads_position(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4, TexCoord: Vec2 }
         @shader(vertex)
         fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, TexCoord: a.aPos } }
         @shader(fragment)
         fn fr(vary: Vary) -> Vec4 { return vary.position }
-    "#;
-    reject_pipeline(src, "vt", "fr", "position");
-}
+    "#, "vt", "fr", "position");
 
-/// The fragment's first param type MUST equal the vertex's return type.
-#[test]
-fn reject_varyings_type_mismatch() {
-    let src = r#"
+    /// The fragment's first param type MUST equal the vertex's return type.
+    reject_varyings_type_mismatch(r#"
         value QV { aPos: Vec2 }
         value VaryA { position: Vec4, TexCoord: Vec2 }
         value VaryB { position: Vec4, Other: Vec2 }
@@ -300,47 +279,35 @@ fn reject_varyings_type_mismatch() {
         fn vt(@attr a: QV) -> VaryA { return VaryA { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, TexCoord: a.aPos } }
         @shader(fragment)
         fn fr(vary: VaryB) -> Vec4 { return Vec4 { x: vary.Other.x, y: 0.0, z: 0.0, w: 1.0 } }
-    "#;
-    reject_pipeline(src, "vt", "fr", "varyings");
-}
+    "#, "vt", "fr", "varyings");
 
-/// A value-struct vertex param with no `@attr`/`@uniform`/`@instance` role is
-/// ambiguous -- reject (the "never mixed" guarantee).
-#[test]
-fn reject_unmarked_vertex_struct_param() {
-    let src = r#"
+    /// A value-struct vertex param with no `@attr`/`@uniform`/`@instance` role is
+    /// ambiguous -- reject (the "never mixed" guarantee).
+    // (fragment reads position too, but the unmarked-param reject fires first.)
+    reject_unmarked_vertex_struct_param(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4 }
         @shader(vertex)
         fn vt(a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 } } }
         @shader(fragment)
         fn fr(vary: Vary) -> Vec4 { return vary.position }
-    "#;
-    // (fragment reads position too, but the unmarked-param reject fires first.)
-    reject_pipeline(src, "vt", "fr", "@attr");
-}
+    "#, "vt", "fr", "@attr");
 
-/// An int-typed varying without `@flat` is a spanned reject (GLSL mandates flat
-/// integer interpolation). This check lives in the emitter, not the registry.
-#[test]
-fn reject_int_varying_without_flat() {
-    let src = r#"
+    /// An int-typed varying without `@flat` is a spanned reject (GLSL mandates flat
+    /// integer interpolation). This check lives in the emitter, not the registry.
+    reject_int_varying_without_flat(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4, kind: int }
         @shader(vertex)
         fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, kind: 3 } }
         @shader(fragment)
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
-    "#;
-    reject_pipeline(src, "vt", "fr", "flat");
-}
+    "#, "vt", "fr", "flat");
 
-/// Decision 7: BOTH stages' names share ONE collision namespace (the linked GL
-/// program has one uniform namespace) -- a vertex uniform and a fragment
-/// uniform with the same name reject at emit, not at link.
-#[test]
-fn reject_cross_stage_name_collision() {
-    let src = r#"
+    /// Decision 7: BOTH stages' names share ONE collision namespace (the linked GL
+    /// program has one uniform namespace) -- a vertex uniform and a fragment
+    /// uniform with the same name reject at emit, not at link.
+    reject_cross_stage_name_collision(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4 }
         value VU { uShared: float }
@@ -349,17 +316,13 @@ fn reject_cross_stage_name_collision() {
         fn vt(@attr a: QV, @uniform u: VU) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: u.uShared, z: 0.0, w: 1.0 } } }
         @shader(fragment)
         fn fr(vary: Vary, @uniform u: FU) -> Vec4 { return Vec4 { x: u.uShared, y: 0.0, z: 0.0, w: 1.0 } }
-    "#;
-    reject_pipeline(src, "vt", "fr", "collide");
-}
+    "#, "vt", "fr", "collide");
 
-/// A global-base struct param (attrs/uniforms/varyings) reads field-by-field --
-/// its fields are GLSL globals; the struct itself has no GLSL identity. Copying
-/// it into a local must reject, not emit a dangling reference to the dropped
-/// param name.
-#[test]
-fn reject_global_struct_param_alias() {
-    let src = r#"
+    /// A global-base struct param (attrs/uniforms/varyings) reads field-by-field --
+    /// its fields are GLSL globals; the struct itself has no GLSL identity. Copying
+    /// it into a local must reject, not emit a dangling reference to the dropped
+    /// param name.
+    reject_global_struct_param_alias(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4, TexCoord: Vec2 }
         @shader(vertex)
@@ -369,36 +332,27 @@ fn reject_global_struct_param_alias() {
             let v = vary
             return Vec4 { x: v.TexCoord.x, y: 0.0, z: 0.0, w: 1.0 }
         }
-    "#;
-    reject_pipeline(src, "vt", "fr", "field-by-field");
-}
+    "#, "vt", "fr", "field-by-field");
 
-/// `in bool` / `out bool` are illegal GLSL: bool attributes and bool varyings
-/// reject at classification (uniform bool stays legal).
-#[test]
-fn reject_bool_varying() {
-    let src = r#"
+    /// `in bool` / `out bool` are illegal GLSL: bool attributes and bool varyings
+    /// reject at classification (uniform bool stays legal).
+    reject_bool_varying(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4, ok: bool }
         @shader(vertex)
         fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 }, ok: true } }
         @shader(fragment)
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
-    "#;
-    reject_pipeline(src, "vt", "fr", "bool");
-}
+    "#, "vt", "fr", "bool");
 
-#[test]
-fn reject_bool_attribute() {
-    let src = r#"
+    reject_bool_attribute(r#"
         value QV { aPos: Vec2, flag: bool }
         value Vary { position: Vec4 }
         @shader(vertex)
         fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 } } }
         @shader(fragment)
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
-    "#;
-    reject_pipeline(src, "vt", "fr", "bool");
+    "#, "vt", "fr", "bool");
 }
 
 /// A block `bool` IS legal -- the bool restriction is attrs/varyings only.
@@ -421,10 +375,7 @@ fn bool_uniform_is_allowed() {
         }
     "#;
     let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
-    assert!(
-        glsl.contains("layout(std140) uniform FU {\n    bool uEnabled;\n};"),
-        "got:\n{glsl}"
-    );
+    assert_has(&glsl, "layout(std140) uniform FU {\n    bool uEnabled;\n};");
 }
 
 // --- A2b: MRT fragment output (value-struct-of-Vec4 return) ------------------
@@ -451,19 +402,13 @@ const MRT_SRC: &str = r#"
 fn mrt_fragment_outputs_by_field_order() {
     let glsl = emit_pipeline(MRT_SRC, "vt", "fr").expect("emit");
     // Field order == layout location, mirroring the @attr location contract.
-    assert!(
-        glsl.contains("layout(location = 0) out vec4 FragColor;"),
-        "got:\n{glsl}"
-    );
-    assert!(
-        glsl.contains("layout(location = 1) out vec4 FragId;"),
-        "got:\n{glsl}"
-    );
+    assert_has(&glsl, "layout(location = 0) out vec4 FragColor;");
+    assert_has(&glsl, "layout(location = 1) out vec4 FragId;");
     // MRT frag is `void main()` with destructured assignments -- no `vec4 fr()`
     // returning + a `FragColor = fr();` wrapper.
-    assert!(glsl.contains("void main()"), "got:\n{glsl}");
-    assert!(glsl.contains("FragColor = "), "got:\n{glsl}");
-    assert!(glsl.contains("FragId = "), "got:\n{glsl}");
+    assert_has(&glsl, "void main()");
+    assert_has(&glsl, "FragColor = ");
+    assert_has(&glsl, "FragId = ");
     assert!(
         !glsl.contains("FragColor = fr("),
         "MRT must not emit a single-output wrapper:\n{glsl}"
@@ -479,19 +424,18 @@ fn mrt_fragment_outputs_by_field_order() {
 #[test]
 fn single_output_fragment_still_wraps() {
     let glsl = emit_pipeline(UI_SRC, "ui_vert", "ui_frag").expect("emit");
-    assert!(glsl.contains("out vec4 FragColor;"), "got:\n{glsl}");
-    assert!(glsl.contains("FragColor = ui_frag("), "got:\n{glsl}");
+    assert_has(&glsl, "out vec4 FragColor;");
+    assert_has(&glsl, "FragColor = ui_frag(");
     assert!(
         !glsl.contains("layout(location = 0) out vec4"),
         "single output has no layout:\n{glsl}"
     );
 }
 
-/// Every MRT output field must be Vec4 (each is a `out vec4`); a non-Vec4 field
-/// rejects.
-#[test]
-fn reject_mrt_non_vec4_field() {
-    let src = r#"
+cases! { reject_pipeline:
+    /// Every MRT output field must be Vec4 (each is a `out vec4`); a non-Vec4 field
+    /// rejects.
+    reject_mrt_non_vec4_field(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4 }
         value BadOut { FragColor: Vec4, depth: float }
@@ -499,15 +443,11 @@ fn reject_mrt_non_vec4_field() {
         fn vt(@attr a: QV) -> Vary { return Vary { position: Vec4 { x: a.aPos.x, y: a.aPos.y, z: 0.0, w: 1.0 } } }
         @shader(fragment)
         fn fr(vary: Vary) -> BadOut { return BadOut { FragColor: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }, depth: 0.5 } }
-    "#;
-    reject_pipeline(src, "vt", "fr", "Vec4");
-}
+    "#, "vt", "fr", "Vec4");
 
-/// MRT output names join the one cross-stage namespace -- an output name that
-/// collides with a uniform rejects.
-#[test]
-fn reject_mrt_output_name_collision() {
-    let src = r#"
+    /// MRT output names join the one cross-stage namespace -- an output name that
+    /// collides with a uniform rejects.
+    reject_mrt_output_name_collision(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4 }
         value FU { FragId: float }
@@ -518,8 +458,7 @@ fn reject_mrt_output_name_collision() {
         fn fr(vary: Vary, @uniform u: FU) -> Out2 {
             return Out2 { FragColor: Vec4 { x: u.FragId, y: 0.0, z: 0.0, w: 1.0 }, FragId: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
         }
-    "#;
-    reject_pipeline(src, "vt", "fr", "collide");
+    "#, "vt", "fr", "collide");
 }
 
 // --- fragment depth output: a `FragDepth: float` field is gl_FragDepth -------
@@ -545,14 +484,8 @@ const FRAG_DEPTH_SRC: &str = r#"
 #[test]
 fn frag_depth_field_writes_gl_frag_depth_without_an_out_location() {
     let glsl = emit_pipeline(FRAG_DEPTH_SRC, "vt", "fr").expect("emit");
-    assert!(
-        glsl.contains("layout(location = 0) out vec4 FragColor;"),
-        "got:\n{glsl}"
-    );
-    assert!(
-        glsl.contains("layout(location = 1) out vec4 FragId;"),
-        "got:\n{glsl}"
-    );
+    assert_has(&glsl, "layout(location = 0) out vec4 FragColor;");
+    assert_has(&glsl, "layout(location = 1) out vec4 FragId;");
     assert!(
         !glsl.contains("layout(location = 2)"),
         "FragDepth must not take a location:\n{glsl}"
@@ -561,10 +494,7 @@ fn frag_depth_field_writes_gl_frag_depth_without_an_out_location() {
         !glsl.contains("out float FragDepth"),
         "FragDepth is not an out:\n{glsl}"
     );
-    assert!(
-        glsl.contains("gl_FragDepth = (Depth * 0.5);"),
-        "got:\n{glsl}"
-    );
+    assert_has(&glsl, "gl_FragDepth = (Depth * 0.5);");
     assert_eq!(
         glsl.matches("FragDepth = ").count(),
         1,
@@ -631,33 +561,15 @@ fn instanced_locations_continue_across_structs() {
         }
     "#;
     let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
-    assert!(
-        glsl.contains("layout (location = 0) in vec2 aPos;"),
-        "got:\n{glsl}"
-    );
-    assert!(
-        glsl.contains("layout (location = 1) in vec2 aTexCoord;"),
-        "got:\n{glsl}"
-    );
-    assert!(
-        glsl.contains("layout (location = 2) in vec2 InstancePosition;"),
-        "got:\n{glsl}"
-    );
-    assert!(
-        glsl.contains("layout (location = 3) in float InstanceRotation;"),
-        "got:\n{glsl}"
-    );
-    assert!(
-        glsl.contains("layout (location = 4) in float InstanceScale;"),
-        "got:\n{glsl}"
-    );
-    assert!(
-        glsl.contains("layout (location = 5) in float InstanceHeight;"),
-        "got:\n{glsl}"
-    );
-    assert!(glsl.contains("flat out float y_pos;"), "got:\n{glsl}");
-    assert!(glsl.contains("flat in float y_pos;"), "got:\n{glsl}");
-    assert!(glsl.contains("gl_VertexID"), "got:\n{glsl}");
+    assert_has(&glsl, "layout (location = 0) in vec2 aPos;");
+    assert_has(&glsl, "layout (location = 1) in vec2 aTexCoord;");
+    assert_has(&glsl, "layout (location = 2) in vec2 InstancePosition;");
+    assert_has(&glsl, "layout (location = 3) in float InstanceRotation;");
+    assert_has(&glsl, "layout (location = 4) in float InstanceScale;");
+    assert_has(&glsl, "layout (location = 5) in float InstanceHeight;");
+    assert_has(&glsl, "flat out float y_pos;");
+    assert_has(&glsl, "flat in float y_pos;");
+    assert_has(&glsl, "gl_VertexID");
 }
 
 // --- UniformArray<T> + at() + @size(N) (decision 3; pulled into A2c by grass) -
@@ -685,10 +597,7 @@ fn uniform_array_vertex_decl_and_at() {
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
     "#;
     let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
-    assert!(
-        glsl.contains("    vec2 entity_positions[32];"),
-        "got:\n{glsl}"
-    );
+    assert_has(&glsl, "    vec2 entity_positions[32];");
     assert!(
         glsl.contains("entity_positions["),
         "at() must render as indexing:\n{glsl}"
@@ -726,13 +635,12 @@ fn uniform_array_fragment_stage() {
         }
     "#;
     let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
-    assert!(glsl.contains("    float weights[4];"), "got:\n{glsl}");
-    assert!(glsl.contains("weights[0]"), "got:\n{glsl}");
+    assert_has(&glsl, "    float weights[4];");
+    assert_has(&glsl, "weights[0]");
 }
 
-#[test]
-fn reject_uniform_array_without_size() {
-    let src = r#"
+cases! { reject_pipeline:
+    reject_uniform_array_without_size(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4 }
         @shader(vertex)
@@ -741,14 +649,10 @@ fn reject_uniform_array_without_size() {
         }
         @shader(fragment)
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
-    "#;
-    reject_pipeline(src, "vt", "fr", "@size");
-}
+    "#, "vt", "fr", "@size");
 
-/// Element types are the corpus set {float, int, Vec2, Vec4} -- Mat4 rejects.
-#[test]
-fn reject_uniform_array_bad_elem() {
-    let src = r#"
+    /// Element types are the corpus set {float, int, Vec2, Vec4} -- Mat4 rejects.
+    reject_uniform_array_bad_elem(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4 }
         @shader(vertex)
@@ -757,8 +661,7 @@ fn reject_uniform_array_bad_elem() {
         }
         @shader(fragment)
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
-    "#;
-    reject_pipeline(src, "vt", "fr", "element");
+    "#, "vt", "fr", "element");
 }
 
 // --- vertex_id: vertex-only builtin (A2c) ------------------------------------
@@ -781,7 +684,7 @@ fn builtin_vertex_id_maps() {
         fn fr(vary: Vary) -> Vec4 { return Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 } }
     "#;
     let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
-    assert!(glsl.contains("gl_VertexID"), "got:\n{glsl}");
+    assert_has(&glsl, "gl_VertexID");
     assert!(
         !glsl.contains("vertex_id("),
         "must not emit a fn call:\n{glsl}"
@@ -828,11 +731,8 @@ fn a1_vertex_stage_is_compiler_owned_and_order_blind() {
         va, vb,
         "two A1 entries must share one compiler-owned vertex stage"
     );
-    assert!(
-        va.contains("gl_Position = vec4(aPos, 0.0, 1.0)"),
-        "got:\n{va}"
-    );
-    assert!(va.contains("TexCoord = aTexCoord"), "got:\n{va}");
+    assert_has(&va, "gl_Position = vec4(aPos, 0.0, 1.0)");
+    assert_has(&va, "TexCoord = aTexCoord");
     assert!(
         !va.contains("gl_VertexID"),
         "the generated stage must not read vertex order:\n{va}"
@@ -943,10 +843,9 @@ fn bvec_nonfinite_entry_golden() {
     );
 }
 
-/// GLSL forbids bool-vector interpolants -- a Bvec3 varying field rejects at emit.
-#[test]
-fn reject_bvec_varying() {
-    let src = r#"
+cases! { reject_pipeline:
+    /// GLSL forbids bool-vector interpolants -- a Bvec3 varying field rejects at emit.
+    reject_bvec_varying(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4, flags: Bvec3 }
         @shader(vertex)
@@ -958,14 +857,10 @@ fn reject_bvec_varying() {
         }
         @shader(fragment)
         fn fr(vary: Vary) -> Vec4 { return vary.position }
-    "#;
-    reject_pipeline(src, "vt", "fr", "bvec3");
-}
+    "#, "vt", "fr", "bvec3");
 
-/// A Bvec3 attribute field rejects (GLSL has no bool vertex inputs).
-#[test]
-fn reject_bvec_attribute() {
-    let src = r#"
+    /// A Bvec3 attribute field rejects (GLSL has no bool vertex inputs).
+    reject_bvec_attribute(r#"
         value QV { aPos: Vec2, flags: Bvec3 }
         value Vary { position: Vec4 }
         @shader(vertex)
@@ -974,8 +869,7 @@ fn reject_bvec_attribute() {
         }
         @shader(fragment)
         fn fr(vary: Vary) -> Vec4 { return vary.position }
-    "#;
-    reject_pipeline(src, "vt", "fr", "bvec3");
+    "#, "vt", "fr", "bvec3");
 }
 
 // --- R32I entity-id tier: int fragment outputs + ISampler2D ------------------
@@ -1002,15 +896,9 @@ const INT_MRT_SRC: &str = r#"
 #[test]
 fn mrt_int_output_field() {
     let glsl = emit_pipeline(INT_MRT_SRC, "vt", "fr").expect("emit");
-    assert!(
-        glsl.contains("layout(location = 0) out vec4 FragColor;"),
-        "got:\n{glsl}"
-    );
-    assert!(
-        glsl.contains("layout(location = 1) out int FragId;"),
-        "got:\n{glsl}"
-    );
-    assert!(glsl.contains("FragId = "), "got:\n{glsl}");
+    assert_has(&glsl, "layout(location = 0) out vec4 FragColor;");
+    assert_has(&glsl, "layout(location = 1) out int FragId;");
+    assert_has(&glsl, "FragId = ");
 }
 
 /// A single bare `int` fragment return is a lone `out int` (the silhouette
@@ -1031,8 +919,8 @@ fn single_int_fragment_output() {
         }
     "#;
     let glsl = emit_pipeline(src, "vt", "fr").expect("emit");
-    assert!(glsl.contains("out int FragColor;"), "got:\n{glsl}");
-    assert!(glsl.contains("FragColor = fr("), "got:\n{glsl}");
+    assert_has(&glsl, "out int FragColor;");
+    assert_has(&glsl, "FragColor = fr(");
 }
 
 const ISAMPLER_SRC: &str = r#"
@@ -1056,12 +944,9 @@ const ISAMPLER_SRC: &str = r#"
 #[test]
 fn isampler_texture_id() {
     let glsl = emit_pipeline(ISAMPLER_SRC, "vt", "fr").expect("emit");
-    assert!(
-        glsl.contains("uniform highp isampler2D ids;"),
-        "got:\n{glsl}"
-    );
-    assert!(glsl.contains("texture(ids, TexCoord).r"), "got:\n{glsl}");
-    assert!(glsl.contains("vec2(textureSize(ids, 0))"), "got:\n{glsl}");
+    assert_has(&glsl, "uniform highp isampler2D ids;");
+    assert_has(&glsl, "texture(ids, TexCoord).r");
+    assert_has(&glsl, "vec2(textureSize(ids, 0))");
 }
 
 /// ISampler2D is opaque like Sampler2D: illegal as a return type.
@@ -1298,15 +1183,14 @@ fn textures_group_keeps_int_sampler_kind() {
         }
     "#;
     let glsl = emit_pipeline(src, "vs", "fs").expect("must emit");
-    assert!(glsl.contains("uniform sampler2D color;"), "got:\n{glsl}");
-    assert!(glsl.contains("isampler2D ids;"), "got:\n{glsl}");
+    assert_has(&glsl, "uniform sampler2D color;");
+    assert_has(&glsl, "isampler2D ids;");
 }
 
-/// `@textures` is exclusive with the other roles: a group is its own binding
-/// set, not attribute or uniform-block data.
-#[test]
-fn textures_conflicting_role_rejects() {
-    let src = r#"
+cases! { reject_pipeline:
+    /// `@textures` is exclusive with the other roles: a group is its own binding
+    /// set, not attribute or uniform-block data.
+    textures_conflicting_role_rejects(r#"
         struct T { tex: Sampler2D }
         value Quad { aPos: Vec2, aUv: Vec2 }
         value Vary { position: Vec4, uv: Vec2 }
@@ -1316,15 +1200,11 @@ fn textures_conflicting_role_rejects() {
         }
         @shader(fragment)
         fn fs(vary: Vary, @uniform @textures t: T) -> Vec4 { return texture(t.tex, vary.uv) }
-    "#;
-    reject_pipeline(src, "vs", "fs", "conflicting role markers");
-}
+    "#, "vs", "fs", "conflicting role markers");
 
-/// A non-sampler field in the group shifts every slot after it, so it rejects
-/// at the artifact rather than emitting a silently misnumbered binding set.
-#[test]
-fn textures_group_with_a_non_sampler_field_rejects() {
-    let src = r#"
+    /// A non-sampler field in the group shifts every slot after it, so it rejects
+    /// at the artifact rather than emitting a silently misnumbered binding set.
+    textures_group_with_a_non_sampler_field_rejects(r#"
         struct T { tex: Sampler2D, scale: float }
         value Quad { aPos: Vec2, aUv: Vec2 }
         value Vary { position: Vec4, uv: Vec2 }
@@ -1334,15 +1214,11 @@ fn textures_group_with_a_non_sampler_field_rejects() {
         }
         @shader(fragment)
         fn fs(vary: Vary, @textures t: T) -> Vec4 { return texture(t.tex, vary.uv) }
-    "#;
-    reject_pipeline(src, "vs", "fs", "scale");
-}
+    "#, "vs", "fs", "scale");
 
-/// A group and a bare sampler cannot coexist: the bare one keeps a CPU-assigned
-/// unit, which can land on a compiler-assigned slot and bind over it.
-#[test]
-fn textures_group_plus_bare_sampler_rejects() {
-    let src = r#"
+    /// A group and a bare sampler cannot coexist: the bare one keeps a CPU-assigned
+    /// unit, which can land on a compiler-assigned slot and bind over it.
+    textures_group_plus_bare_sampler_rejects(r#"
         struct T { tex: Sampler2D }
         value Quad { aPos: Vec2, aUv: Vec2 }
         value Vary { position: Vec4, uv: Vec2 }
@@ -1354,15 +1230,11 @@ fn textures_group_plus_bare_sampler_rejects() {
             let b = texture(loose, vary.uv)
             return Vec4 { x: a.x, y: b.y, z: 0.0, w: 1.0 }
         }
-    "#;
-    reject_pipeline(src, "vs", "fs", "every sampler must join it");
-}
+    "#, "vs", "fs", "every sampler must join it");
 
-/// Texture units are program-scoped, so two stages cannot declare different
-/// groups -- slot 0 would name two different textures.
-#[test]
-fn textures_groups_differing_across_stages_reject() {
-    let src = r#"
+    /// Texture units are program-scoped, so two stages cannot declare different
+    /// groups -- slot 0 would name two different textures.
+    textures_groups_differing_across_stages_reject(r#"
         struct VT { vtex: Sampler2D }
         struct FT { ftex: Sampler2D }
         value Quad { aPos: Vec2, aUv: Vec2 }
@@ -1374,8 +1246,7 @@ fn textures_groups_differing_across_stages_reject() {
         }
         @shader(fragment)
         fn fs(vary: Vary, @textures t: FT) -> Vec4 { return texture(t.ftex, vary.uv) }
-    "#;
-    reject_pipeline(src, "vs", "fs", "one program has one group");
+    "#, "vs", "fs", "one program has one group");
 }
 
 /// The emission hands the engine the slot order -- the whole compiler-to-engine
@@ -1468,8 +1339,8 @@ fn engine_block_is_declared_in_both_stages() {
     let decl = "layout(std140) uniform EngineU {\n    mat4 uProjection;\n    mat4 uView;\n    vec2 uYBounds;\n    float uTime;\n};\n";
     assert_eq!(glsl.matches(decl).count(), 2, "one per stage:\n{glsl}");
     // Unnamed instance, so members stay bare globals in both bodies.
-    assert!(glsl.contains("uProjection * uView"), "got:\n{glsl}");
-    assert!(!glsl.contains("e.uProjection"), "got:\n{glsl}");
+    assert_has(&glsl, "uProjection * uView");
+    assert_lacks(&glsl, "e.uProjection");
 }
 
 /// The shader's OWN group survives beside the engine block -- the case that
@@ -1481,21 +1352,18 @@ fn engine_block_is_declared_in_both_stages() {
 #[test]
 fn engine_block_coexists_with_a_shader_owned_block() {
     let glsl = emit_pipeline(ENGINE_SRC, "e_vert", "e_frag").expect("emit");
-    assert!(
-        glsl.contains("layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};\n"),
-        "got:\n{glsl}"
+    assert_has(
+        &glsl,
+        "layout(std140) uniform UiFragU {\n    vec2 uSize;\n    float uRatio;\n};\n",
     );
-    assert!(
-        glsl.contains("layout(std140) uniform EngineU {"),
-        "got:\n{glsl}"
-    );
+    assert_has(&glsl, "layout(std140) uniform EngineU {");
     // The vertex stage's own group is a block at its own binding.
-    assert!(
-        glsl.contains("layout(std140) uniform GrassVertU {\n    int entity_count;\n};\n"),
-        "got:\n{glsl}"
+    assert_has(
+        &glsl,
+        "layout(std140) uniform GrassVertU {\n    int entity_count;\n};\n",
     );
     // ...but the engine block's members never fall back to loose uniforms.
-    assert!(!glsl.contains("uniform mat4 uProjection;"), "got:\n{glsl}");
+    assert_lacks(&glsl, "uniform mat4 uProjection;");
 }
 
 /// The binding index comes from the param ROLE, not from position: `@engine` is
@@ -1668,11 +1536,8 @@ fn engine_member_colliding_with_an_mrt_output_rejects() {
 fn engine_member_with_a_free_name_emits() {
     let glsl =
         emit_pipeline(&engine_member_named("uEngineTime"), "c_vert", "c_frag").expect("emit");
-    assert!(
-        glsl.contains("layout(std140) uniform EngineU {"),
-        "got:\n{glsl}"
-    );
-    assert!(glsl.contains("float uEngineTime;"), "got:\n{glsl}");
+    assert_has(&glsl, "layout(std140) uniform EngineU {");
+    assert_has(&glsl, "float uEngineTime;");
 }
 
 /// A per-draw uniform collision: `BoltFragU.uTime` against
@@ -1743,7 +1608,7 @@ fn builtin_dfdx_maps() {
         }
     "#;
     let glsl = emit_entry(src, "f").expect("emit");
-    assert!(glsl.contains("dFdx(tc.x)"), "got:\n{glsl}");
+    assert_has(&glsl, "dFdx(tc.x)");
 }
 
 #[test]
@@ -1756,12 +1621,11 @@ fn builtin_dfdy_maps() {
         }
     "#;
     let glsl = emit_entry(src, "f").expect("emit");
-    assert!(glsl.contains("dFdy(tc.x)"), "got:\n{glsl}");
+    assert_has(&glsl, "dFdy(tc.x)");
 }
 
-#[test]
-fn reject_dfdx_in_vertex() {
-    let src = r#"
+cases! { reject_pipeline:
+    reject_dfdx_in_vertex(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4 }
         @shader(vertex)
@@ -1771,13 +1635,9 @@ fn reject_dfdx_in_vertex() {
         }
         @shader(fragment)
         fn fr(vary: Vary) -> Vec4 { return vary.position }
-    "#;
-    reject_pipeline(src, "vt", "fr", "fragment");
-}
+    "#, "vt", "fr", "fragment");
 
-#[test]
-fn reject_dfdy_in_vertex() {
-    let src = r#"
+    reject_dfdy_in_vertex(r#"
         value QV { aPos: Vec2 }
         value Vary { position: Vec4 }
         @shader(vertex)
@@ -1787,8 +1647,7 @@ fn reject_dfdy_in_vertex() {
         }
         @shader(fragment)
         fn fr(vary: Vary) -> Vec4 { return vary.position }
-    "#;
-    reject_pipeline(src, "vt", "fr", "fragment");
+    "#, "vt", "fr", "fragment");
 }
 
 #[test]

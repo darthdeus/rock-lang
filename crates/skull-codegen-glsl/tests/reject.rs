@@ -14,51 +14,33 @@ fn reject(src: &str, roots: &[&str], needle: &str) {
     }
 }
 
-#[test]
-fn reject_recursion() {
-    let src = r#"
+cases! { reject:
+    reject_recursion(r#"
         @pure fn fact(n: float) -> float {
             return fact(n - 1.0)
         }
-    "#;
-    reject(src, &["fact"], "recursion");
-}
+    "#, &["fact"], "recursion");
 
-#[test]
-fn reject_string_param() {
-    let src = r#"
+    reject_string_param(r#"
         @pure fn takes_string(s: string) -> float { return 1.0 }
-    "#;
-    reject(src, &["takes_string"], "not tier 0");
-}
+    "#, &["takes_string"], "not tier 0");
 
-#[test]
-fn reject_vec_return() {
-    let src = r#"
+    reject_vec_return(r#"
         fn makes_vec(n: int) -> [int] { return [n] }
-    "#;
-    reject(src, &["makes_vec"], "not tier 0");
-}
+    "#, &["makes_vec"], "not tier 0");
 
-#[test]
-fn reject_string_body() {
     // A tier-0 signature but a string literal in the body.
-    let src = r#"
+    reject_string_body(r#"
         fn has_string(x: float) -> float {
             let s = "hello"
             return x
         }
-    "#;
-    reject(src, &["has_string"], "string literal");
-}
+    "#, &["has_string"], "string literal");
 
-#[test]
-fn reject_unmapped_inline_lua_call() {
-    let src = r#"
+    reject_unmapped_inline_lua_call(r#"
         @pure @inline inline(lua) fn myprim(x: float) -> float = "math.log(x)"
         @pure fn uses_prim(x: float) -> float { return myprim(x) }
-    "#;
-    reject(src, &["uses_prim"], "no GLSL intrinsic mapping");
+    "#, &["uses_prim"], "no GLSL intrinsic mapping");
 }
 
 #[test]
@@ -218,9 +200,8 @@ fn reject_omitted_nonconstant_vector_default_argument() {
     }
 }
 
-#[test]
-fn reject_omitted_effectful_vector_constructor_default() {
-    let src = r#"
+cases! { reject:
+    reject_omitted_effectful_vector_constructor_default(r#"
         global calls: int = 0
         fn make_tint(x: float, y: float, z: float) -> Vec3 {
             calls = calls + 1
@@ -228,42 +209,31 @@ fn reject_omitted_effectful_vector_constructor_default() {
         }
         fn vector_default(x: float, tint: Vec3 = make_tint(0.125, 0.375, 0.625)) -> Vec3 { return tint * x }
         fn shader_vector_default(x: float) -> Vec3 { return vector_default(x) }
-    "#;
-    reject(src, &["shader_vector_default"], "global read");
-}
+    "#, &["shader_vector_default"], "global read");
 
-#[test]
-fn reject_omitted_expression_default_argument() {
-    let src = r#"
+    reject_omitted_expression_default_argument(r#"
         @pure fn calculated_default(x: float, offset: float = 0.25 + 0.5) -> float {
             return x + offset
         }
         @pure fn shader_expression_default(x: float) -> float {
             return calculated_default(x)
         }
-    "#;
-    reject(src, &["shader_expression_default"], "null literal");
+    "#, &["shader_expression_default"], "null literal");
 }
 
 // `match` lowers to `Term::Branch` chains (NOT `Term::Switch`, which lowering
 // never produces), so a tier-0 int `match` is accepted and structured -- see
 // `golden::match_int_ladder`. A match on a non-tier-0 scrutinee still rejects at
 // the tier-0 gate; the structurizer never silently swallows it.
-#[test]
-fn reject_match_non_tier0() {
-    let src = r#"
+cases! { reject:
+    reject_match_non_tier0(r#"
         enum Dir { North, South }
         @pure fn f(d: Dir) -> int { match d { Dir::North => { return 1 } Dir::South => { return 2 } } }
-    "#;
-    reject(src, &["f"], "not tier 0");
-}
+    "#, &["f"], "not tier 0");
 
-#[test]
-fn reject_unknown_root() {
-    let src = r#"
+    reject_unknown_root(r#"
         @pure fn present(x: float) -> float { return x }
-    "#;
-    reject(src, &["absent"], "not found");
+    "#, &["absent"], "not found");
 }
 
 // --- A1 entry-contract rejects ------------------------
@@ -276,82 +246,52 @@ fn reject_entry(src: &str, root: &str, needle: &str) {
     );
 }
 
-#[test]
-fn reject_entry_two_uniform_structs() {
-    let src = r#"
+cases! { reject_entry:
+    reject_entry_two_uniform_structs(r#"
         value Ua { a: float }
         value Ub { b: float }
         @shader(fragment)
         fn f(@uniform u1: Ua, @uniform u2: Ub, tc: Vec2) -> Vec4 { return Vec4 { x: u1.a, y: u2.b, z: 0.0, w: 1.0 } }
-    "#;
-    reject_entry(src, "f", "one uniform struct");
-}
+    "#, "f", "one uniform struct");
 
-/// A1 requires @uniform on the fragment uniform struct (one rule everywhere with
-/// the A2 pipeline). An unmarked value-struct param rejects, naming the fix.
-#[test]
-fn reject_entry_unmarked_uniform_struct() {
-    let src = r#"
+    /// A1 requires @uniform on the fragment uniform struct (one rule everywhere with
+    /// the A2 pipeline). An unmarked value-struct param rejects, naming the fix.
+    reject_entry_unmarked_uniform_struct(r#"
         value U { strength: float }
         @shader(fragment)
         fn f(u: U, tc: Vec2) -> Vec4 { return Vec4 { x: u.strength, y: tc.y, z: 0.0, w: 1.0 } }
-    "#;
-    reject_entry(src, "f", "@uniform");
-}
+    "#, "f", "@uniform");
 
-#[test]
-fn reject_entry_missing_tc() {
-    let src = r#"
+    reject_entry_missing_tc(r#"
         @shader(fragment)
         fn f(scene: Sampler2D) -> Vec4 { return texture(scene, v(0.5, 0.5)) }
-    "#;
-    reject_entry(src, "f", "Vec2");
-}
+    "#, "f", "Vec2");
 
-#[test]
-fn reject_entry_two_tc() {
-    let src = r#"
+    reject_entry_two_tc(r#"
         @shader(fragment)
         fn f(a: Vec2, b: Vec2) -> Vec4 { return Vec4 { x: a.x, y: b.y, z: 0.0, w: 1.0 } }
-    "#;
-    reject_entry(src, "f", "exactly one");
-}
+    "#, "f", "exactly one");
 
-#[test]
-fn reject_entry_scalar_param() {
-    let src = r#"
+    reject_entry_scalar_param(r#"
         @shader(fragment)
         fn f(strength: float, tc: Vec2) -> Vec4 { return Vec4 { x: strength, y: tc.y, z: 0.0, w: 1.0 } }
-    "#;
-    reject_entry(src, "f", "uniform struct");
-}
+    "#, "f", "uniform struct");
 
-#[test]
-fn reject_entry_wrong_return() {
-    let src = r#"
+    reject_entry_wrong_return(r#"
         @shader(fragment)
         fn f(tc: Vec2) -> float { return tc.x }
-    "#;
-    reject_entry(src, "f", "Vec4");
-}
+    "#, "f", "Vec4");
 
-#[test]
-fn reject_entry_uniform_name_collision() {
-    let src = r#"
+    reject_entry_uniform_name_collision(r#"
         value U { scene: float }
         @shader(fragment)
         fn f(@uniform u: U, scene: Sampler2D, tc: Vec2) -> Vec4 { return texture(scene, tc) }
-    "#;
-    reject_entry(src, "f", "collide");
-}
+    "#, "f", "collide");
 
-#[test]
-fn reject_entry_not_fragment() {
-    let src = r#"
+    reject_entry_not_fragment(r#"
         @shader(vertex)
         fn f(tc: Vec2) -> Vec4 { return Vec4 { x: tc.x, y: tc.y, z: 0.0, w: 1.0 } }
-    "#;
-    reject_entry(src, "f", "fragment");
+    "#, "f", "fragment");
 }
 
 // `pass_uniforms` returns `[(string, <enum>)]` --
