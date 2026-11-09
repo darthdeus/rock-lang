@@ -7,7 +7,7 @@ use anyhow::Result;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-pub(crate) const ENV: &str = "GAME_ART_VAULT";
+pub const ENV: &str = "GAME_ART_VAULT";
 pub const TOKEN: &str = "$GAME_ART_VAULT";
 /// The vault root named by the environment, validated before use.
 pub fn root() -> Result<PathBuf> {

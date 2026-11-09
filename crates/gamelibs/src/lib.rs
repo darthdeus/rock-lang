@@ -35,7 +35,7 @@ pub fn local_work_root(home: &Path) -> Result<PathBuf, String> {
 
 /// The version directory. An override is also a version directory, containing
 /// `gamelibs-<platform>` children; all overrides must be absolute.
-pub(crate) fn gamelibs_root() -> PathBuf {
+pub fn gamelibs_root() -> PathBuf {
     if let Some(dir) = env::var_os("ROCK_GAMELIBS_DIR").filter(|value| !value.is_empty()) {
         let dir = PathBuf::from(dir);
         assert!(
