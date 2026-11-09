@@ -1697,13 +1697,13 @@ fn publish_signatures(
     g: &InstanceGraph,
     expanded: &[Instance],
 ) -> (PublishedSignatures, usize, std::time::Duration) {
-    let mut instances = BTreeSet::new();
+    let mut instances: FxHashSet<&Instance> = FxHashSet::default();
     for inst in expanded {
-        instances.insert(inst.clone());
+        instances.insert(inst);
         if let Some(sites) = g.sites_of(inst) {
             for record in sites.values() {
                 if let SiteOutcome::Resolved(target) = &record.outcome {
-                    instances.insert(target.clone());
+                    instances.insert(target);
                 }
             }
         }
@@ -1711,21 +1711,32 @@ fn publish_signatures(
     for contribution in g.contributions.values() {
         for record in contribution.always_call_sites.values() {
             if let SiteOutcome::Resolved(target) = &record.outcome {
-                instances.insert(target.clone());
+                instances.insert(target);
             }
         }
     }
     let started = bone_core::prelude::Instant::now();
-    let mut published = FxHashMap::default();
-    for instance in instances {
-        let result = g
-            .substitution(&instance)
-            .cloned()
-            .ok_or(MonoTyReason::NoNode)
-            .and_then(|subst| concrete_signature(ws, g, &instance, &subst))
-            .map(std::sync::Arc::new);
-        published.insert(instance, result);
-    }
+    // Each signature converts one declaration's types against the shared
+    // interner, which locks only for a type it has not seen; the table is
+    // keyed by instance, so the derivation order is not observable.
+    let instances: Vec<&Instance> = instances.into_iter().collect();
+    let published: PublishedSignatures = {
+        use bone_core::prelude::*;
+        instances
+            .into_par_iter()
+            .map(|instance| {
+                let result = g
+                    .substitution(instance)
+                    .cloned()
+                    .ok_or(MonoTyReason::NoNode)
+                    .and_then(|subst| concrete_signature(ws, g, instance, &subst))
+                    .map(std::sync::Arc::new);
+                (instance.clone(), result)
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .collect()
+    };
     let elapsed = started.elapsed();
     let derivations = published.len();
     (published, derivations, elapsed)
@@ -1871,44 +1882,66 @@ fn publish_foreign_domains(
     timing_enabled: bool,
 ) -> PublishedDomains {
     let started = timing_enabled.then(bone_core::prelude::Instant::now);
-    let mut published = BTreeMap::new();
-    for domain in domains {
-        let result = match domain.clone() {
-            SiteDomain::Own => continue,
-            SiteDomain::StructDefaults(module, def, args) => {
-                let owner = BodyOwner::StructDefaults(def);
-                let result = ws
-                    .module(module)
-                    .bodies
-                    .get(&owner)
-                    .ok_or(MonoTyReason::NoNode)
-                    .and_then(|defaults_body| {
-                        let defaults_inf = ws
-                            .inference(module)
-                            .and_then(|ir| ir.per_fn.get(&owner))
-                            .ok_or(MonoTyReason::NoNode)?;
-                        let defaults_subst =
-                            skull_mir::struct_defaults::slot_subst(Some(defaults_inf), &args);
-                        concrete_tables(
-                            ws,
-                            g,
-                            defaults_inf,
-                            defaults_body,
-                            &defaults_subst,
-                            std::iter::empty(),
-                            stats,
-                            timing_enabled,
-                        )
-                    });
-                result
-            }
-        };
-        published.insert(domain, result);
+    let domains: Vec<SiteDomain> = domains
+        .into_iter()
+        .filter(|domain| !matches!(domain, SiteDomain::Own))
+        .collect();
+    // One struct-defaults body per domain, converted against the shared
+    // interner; the published map is keyed by domain, so the order the
+    // domains convert in is not observable.
+    let published: Vec<(
+        SiteDomain,
+        Result<ConcreteTypeTables, MonoTyReason>,
+        ConcreteBuildStats,
+    )> = {
+        use bone_core::prelude::*;
+        domains
+            .into_par_iter()
+            .map(|domain| {
+                let mut domain_stats = ConcreteBuildStats::default();
+                let result = match &domain {
+                    SiteDomain::Own => unreachable!("own domains are filtered above"),
+                    SiteDomain::StructDefaults(module, def, args) => {
+                        let owner = BodyOwner::StructDefaults(*def);
+                        ws.module(*module)
+                            .bodies
+                            .get(&owner)
+                            .ok_or(MonoTyReason::NoNode)
+                            .and_then(|defaults_body| {
+                                let defaults_inf = ws
+                                    .inference(*module)
+                                    .and_then(|ir| ir.per_fn.get(&owner))
+                                    .ok_or(MonoTyReason::NoNode)?;
+                                let defaults_subst = skull_mir::struct_defaults::slot_subst(
+                                    Some(defaults_inf),
+                                    args,
+                                );
+                                concrete_tables(
+                                    ws,
+                                    g,
+                                    defaults_inf,
+                                    defaults_body,
+                                    &defaults_subst,
+                                    std::iter::empty(),
+                                    &mut domain_stats,
+                                    timing_enabled,
+                                )
+                            })
+                    }
+                };
+                (domain, result, domain_stats)
+            })
+            .collect()
+    };
+    let mut out = BTreeMap::new();
+    for (domain, result, domain_stats) in published {
+        stats.add(domain_stats);
+        out.insert(domain, result);
     }
     if let Some(started) = started {
         stats.foreign_domains_ns += started.elapsed().as_nanos() as u64;
     }
-    published
+    out
 }
 
 struct PreparedInstance {
