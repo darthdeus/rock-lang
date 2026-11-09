@@ -212,8 +212,6 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
         let mut assembly = Vec::new();
         let mut fan_out_window = Duration::ZERO;
         let mut assembly_window = Duration::ZERO;
-        let mut cache_lookup_window = None;
-        let mut cache_write = None;
         let mut scaffold = None;
         for (name, d) in &emit.phases {
             if let Some(rest) = name.strip_prefix("setup: ") {
@@ -226,10 +224,6 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
                 fan_out_window = *d;
             } else if *name == "window: assembly" {
                 assembly_window = *d;
-            } else if *name == "window: cache lookup" {
-                cache_lookup_window = Some(*d);
-            } else if *name == "cache: write" {
-                cache_write = Some(*d);
             } else if *name == "scaffold+callgraph+order" {
                 scaffold = Some(*d);
             } else if !name.starts_with("incr: ") {
@@ -255,34 +249,7 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
                 .extra
                 .insert("scaffold_ms".into(), json!(ms(scaffold)));
         }
-        let mut children = vec![setup];
-        // The body cache's lookup pass precedes the fan-out, which then
-        // lowers only the misses; its write follows assembly.
-        if let Some(lookup) = cache_lookup_window {
-            children.push(Node::leaf("body cache lookup", lookup));
-        }
-        children.push(fan_out);
-        children.push(assembly);
-        if let Some(write) = cache_write {
-            children.push(Node::leaf("body cache write", write));
-        }
-        let mut codegen = Node::parent(&codegen.name, codegen.wall, children);
-        if cache_lookup_window.is_some() {
-            let stats = emit.body_cache;
-            codegen.extra.insert(
-                "body_cache".into(),
-                json!({
-                    "enabled": stats.enabled,
-                    "hits": stats.hits,
-                    "misses": stats.misses,
-                    "uncacheable": stats.uncacheable,
-                    "stored": stats.stored,
-                    "shard_records": stats.shard_records,
-                    "shard_bytes": stats.shard_bytes,
-                    "written_bytes": stats.written_bytes,
-                }),
-            );
-        }
+        let mut codegen = Node::parent(&codegen.name, codegen.wall, vec![setup, fan_out, assembly]);
         // Per-pass unit time summed over every lowered body: the fan-out, but
         // also the decorators, globals and specializations assembly lowers
         // serially. It overlaps across workers, so it is comparable between
@@ -304,8 +271,6 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
         pending.record["totals"]["chunks"] = json!(emit.compile_counts.chunks);
         pending.record["totals"]["dependency_edges"] = json!(emit.compile_counts.dependency_edges);
         pending.record["totals"]["emitted_lua_bytes"] = json!(emit.lua.len());
-        pending.record["totals"]["body_cache_hits"] = json!(emit.body_cache.hits);
-        pending.record["totals"]["body_cache_misses"] = json!(emit.body_cache.misses);
     });
 }
 
