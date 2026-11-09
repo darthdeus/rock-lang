@@ -7,19 +7,7 @@
 
 use crate::common::ws_with;
 
-fn eval_str(defs: &str, root: &str, expect: &str) {
-    crate::common::eval_str(
-        &[
-            skull_codegen_js::JS_NB_CHECK_SHIMS,
-            skull_codegen_js::JS_VEC_CHECK_SHIMS,
-            skull_codegen_js::JS_CALL_HELPER,
-            skull_codegen_js::JS_STRING_RUNTIME,
-        ],
-        defs,
-        root,
-        expect,
-    );
-}
+crate::runtime_eval!(eval_str: JS_NB_CHECK_SHIMS, JS_VEC_CHECK_SHIMS, JS_CALL_HELPER, JS_STRING_RUNTIME);
 
 // Ascending sort by the identity key over a 0-based hole-free `_data` (a stray
 // index-0 `[null,` hole would corrupt the readback).

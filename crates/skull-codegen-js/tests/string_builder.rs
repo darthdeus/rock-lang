@@ -6,17 +6,7 @@
 
 use crate::common::ws_with;
 
-fn eval_str(defs: &str, root: &str, expect: &str) {
-    crate::common::eval_str(
-        &[
-            skull_codegen_js::JS_NB_CHECK_SHIMS,
-            skull_codegen_js::JS_VEC_CHECK_SHIMS,
-        ],
-        defs,
-        root,
-        expect,
-    );
-}
+crate::runtime_eval!(eval_str: JS_NB_CHECK_SHIMS, JS_VEC_CHECK_SHIMS);
 
 // Direct StringBuilder: push several fragments, build the concatenation.
 #[test]

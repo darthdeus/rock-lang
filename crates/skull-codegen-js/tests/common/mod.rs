@@ -142,9 +142,43 @@ pub fn run_program(name: &str, ext: &str, prog: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+/// Reload the single function `func` over `cache` and return its overlay text.
+pub fn overlay_of_fn(
+    ws: &bone_core::workspace::Workspace,
+    mid: bone_core::prelude::ModuleId,
+    cache: &mut skull_codegen_js::emit::JsEmitCache,
+    func: FuncRef,
+) -> String {
+    skull_codegen_js::emit::emit_overlay(
+        ws,
+        mid,
+        cache,
+        &[(func.module, bone_core::hir::BodyOwner::Function(func.func))],
+    )
+    .unwrap()
+    .expect_overlay()
+}
+
 /// The program that prints `<root>()` after the given runtime pieces and defs.
 fn print_root_program(runtime: &[&str], defs: &str, root: &str) -> String {
     format!("{}\n{defs}\nconsole.log({root}());", runtime.concat())
+}
+
+/// Define a local `eval_int` or `eval_str` that runs `<root>()` under the listed
+/// `skull_codegen_js` runtime pieces, in order. Each file names only the pieces
+/// it needs, so a missing dependency between them still fails.
+#[macro_export]
+macro_rules! runtime_eval {
+    (eval_int: $($piece:ident),+ $(,)?) => {
+        fn eval_int(defs: &str, root: &str, expect: i64) {
+            $crate::common::eval_int(&[$(skull_codegen_js::$piece),+], defs, root, expect);
+        }
+    };
+    (eval_str: $($piece:ident),+ $(,)?) => {
+        fn eval_str(defs: &str, root: &str, expect: &str) {
+            $crate::common::eval_str(&[$(skull_codegen_js::$piece),+], defs, root, expect);
+        }
+    };
 }
 
 /// Evaluate `<root>()` under node and check it prints the integer `expect`.

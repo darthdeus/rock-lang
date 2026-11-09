@@ -6,20 +6,7 @@
 
 use crate::common::ws_with;
 
-fn eval_int(defs: &str, root: &str, expect: i64) {
-    crate::common::eval_int(
-        &[
-            skull_codegen_js::JS_NB_CHECK_SHIMS,
-            skull_codegen_js::JS_VEC_CHECK_SHIMS,
-            skull_codegen_js::JS_TABLE_PRIM,
-            skull_codegen_js::JS_STRUCTURAL_EQ,
-            skull_codegen_js::JS_CALL_HELPER,
-        ],
-        defs,
-        root,
-        expect,
-    );
-}
+crate::runtime_eval!(eval_int: JS_NB_CHECK_SHIMS, JS_VEC_CHECK_SHIMS, JS_TABLE_PRIM, JS_STRUCTURAL_EQ, JS_CALL_HELPER);
 
 // A nested loop inside an or-pattern success arm: dup_region rejects a loop
 // header in the shared-tail region, so the structured path bails and the

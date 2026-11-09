@@ -379,14 +379,7 @@ fn overlay_redefines_a_function_without_reinitializing_global_state() {
     let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let hot = crate::common::test_fn_ref(&after, "hot");
-    let overlay = skull_codegen_js::emit::emit_overlay(
-        &after,
-        mid,
-        &mut cache,
-        &[(hot.module, BodyOwner::Function(hot.func))],
-    )
-    .unwrap()
-    .expect_overlay();
+    let overlay = crate::common::overlay_of_fn(&after, mid, &mut cache, hot);
 
     assert!(!overlay.contains("__rock_globals[\"global:<test>::STATE::value\"] = "));
     let output = node(&format!(
@@ -469,14 +462,7 @@ fn retained_capturing_value_refreshes_while_keeping_mutable_capture() {
     let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let make = crate::common::test_fn_ref(&after, "make");
-    let overlay = skull_codegen_js::emit::emit_overlay(
-        &after,
-        mid,
-        &mut cache,
-        &[(make.module, BodyOwner::Function(make.func))],
-    )
-    .unwrap()
-    .expect_overlay();
+    let overlay = crate::common::overlay_of_fn(&after, mid, &mut cache, make);
     let output = node(&format!(
         "{}\nvar __G = {{}};\n{}\nstart();\nconsole.log(invoke());\n(0, eval)({:?});\nconsole.log(invoke());",
         js_runtime(),
@@ -558,23 +544,9 @@ fn successive_overlays_accumulate_changed_function_definitions() {
     let mid = crate::common::test_fn_ref(&v0, "main").module;
     let (_, mut cache) = skull_codegen_js::emit::emit_program_cached(&v0, mid).unwrap();
     let first = crate::common::test_fn_ref(&v1, "first");
-    skull_codegen_js::emit::emit_overlay(
-        &v1,
-        mid,
-        &mut cache,
-        &[(first.module, BodyOwner::Function(first.func))],
-    )
-    .unwrap()
-    .expect_overlay();
+    crate::common::overlay_of_fn(&v1, mid, &mut cache, first);
     let second = crate::common::test_fn_ref(&v2, "second");
-    let overlay = skull_codegen_js::emit::emit_overlay(
-        &v2,
-        mid,
-        &mut cache,
-        &[(second.module, BodyOwner::Function(second.func))],
-    )
-    .unwrap()
-    .expect_overlay();
+    let overlay = crate::common::overlay_of_fn(&v2, mid, &mut cache, second);
 
     let output = node(&format!(
         "{}\n{}\nconsole.log(first() + ':' + second());",
@@ -605,14 +577,7 @@ fn changed_static_initializer_resets_only_its_live_cell() {
     let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let hot = crate::common::test_fn_ref(&after, "hot");
-    let overlay = skull_codegen_js::emit::emit_overlay(
-        &after,
-        mid,
-        &mut cache,
-        &[(hot.module, BodyOwner::Function(hot.func))],
-    )
-    .unwrap()
-    .expect_overlay();
+    let overlay = crate::common::overlay_of_fn(&after, mid, &mut cache, hot);
 
     let output = node(&format!(
         "{}\n{}\nhot(); hot();\n{}\nconsole.log(hot());",
@@ -637,14 +602,7 @@ fn a_body_edit_that_removes_a_static_drops_its_cells() {
     let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let hot = crate::common::test_fn_ref(&after, "hot");
-    let overlay = skull_codegen_js::emit::emit_overlay(
-        &after,
-        mid,
-        &mut cache,
-        &[(hot.module, BodyOwner::Function(hot.func))],
-    )
-    .unwrap()
-    .expect_overlay();
+    let overlay = crate::common::overlay_of_fn(&after, mid, &mut cache, hot);
 
     let output = node(&format!(
         "{}\n{}\nhot();\n\
@@ -676,14 +634,7 @@ fn decorated_function_overlay_refreshes_the_registered_code_ref() {
     let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let hot = crate::common::test_fn_ref(&after, "hot");
-    let overlay = skull_codegen_js::emit::emit_overlay(
-        &after,
-        mid,
-        &mut cache,
-        &[(hot.module, BodyOwner::Function(hot.func))],
-    )
-    .unwrap()
-    .expect_overlay();
+    let overlay = crate::common::overlay_of_fn(&after, mid, &mut cache, hot);
     assert!(
         !overlay.contains("__rock_rebind_system"),
         "CodeRef overlays must not emit a registry repair"
@@ -720,14 +671,7 @@ fn unrelated_body_overlay_restages_unchanged_generic_callback_with_concrete_abi(
     let mid = crate::common::test_fn_ref(&before, "main").module;
     let (program, mut cache) = skull_codegen_js::emit::emit_program_cached(&before, mid).unwrap();
     let caller = crate::common::test_fn_ref(&after, "edited");
-    let overlay = skull_codegen_js::emit::emit_overlay(
-        &after,
-        mid,
-        &mut cache,
-        &[(caller.module, BodyOwner::Function(caller.func))],
-    )
-    .unwrap()
-    .expect_overlay();
+    let overlay = crate::common::overlay_of_fn(&after, mid, &mut cache, caller);
     let staged: Vec<_> = overlay
         .lines()
         .filter(|line| line.contains("__rock_code_slot_stage_one(") && line.contains("unchanged"))

@@ -49,14 +49,7 @@ fn main() { print(hot() + other()) }\n";
     let type_population = handle.len();
 
     let hot = crate::common::test_fn_ref(&after, "hot");
-    skull_codegen_js::emit::emit_overlay(
-        &after,
-        mid,
-        &mut cache,
-        &[(hot.module, BodyOwner::Function(hot.func))],
-    )
-    .unwrap()
-    .expect_overlay();
+    crate::common::overlay_of_fn(&after, mid, &mut cache, hot);
 
     assert!(
         std::sync::Arc::ptr_eq(&handle, &cache.interner_handle()),

@@ -6,18 +6,7 @@
 
 use crate::common::ws_with;
 
-fn eval_int(defs: &str, root: &str, expect: i64) {
-    crate::common::eval_int(
-        &[
-            skull_codegen_js::JS_NB_CHECK_SHIMS,
-            skull_codegen_js::JS_VEC_CHECK_SHIMS,
-            skull_codegen_js::JS_STRING_RUNTIME,
-        ],
-        defs,
-        root,
-        expect,
-    );
-}
+crate::runtime_eval!(eval_int: JS_NB_CHECK_SHIMS, JS_VEC_CHECK_SHIMS, JS_STRING_RUNTIME);
 
 // tuple_first / tuple_second project the 0-based array (Lua 1-based [1]/[2]).
 #[test]

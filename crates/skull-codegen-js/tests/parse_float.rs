@@ -6,9 +6,7 @@
 
 use crate::common::ws_with;
 
-fn eval_str(defs: &str, root: &str, expect: &str) {
-    crate::common::eval_str(&[skull_codegen_js::JS_STRING_RUNTIME], defs, root, expect);
-}
+crate::runtime_eval!(eval_str: JS_STRING_RUNTIME);
 
 // A valid numeric string parses to its double.
 #[test]

@@ -7,18 +7,7 @@
 
 use crate::common::ws_with;
 
-fn eval_str(defs: &str, root: &str, expect: &str) {
-    crate::common::eval_str(
-        &[
-            skull_codegen_js::JS_NB_CHECK_SHIMS,
-            skull_codegen_js::JS_VEC_CHECK_SHIMS,
-            skull_codegen_js::JS_STRING_RUNTIME,
-        ],
-        defs,
-        root,
-        expect,
-    );
-}
+crate::runtime_eval!(eval_str: JS_NB_CHECK_SHIMS, JS_VEC_CHECK_SHIMS, JS_STRING_RUNTIME);
 
 // The %f conversion rounds half-to-EVEN (C printf), NOT half-up (JS toFixed):
 // 2.5 -> "2", 3.5 -> "4".

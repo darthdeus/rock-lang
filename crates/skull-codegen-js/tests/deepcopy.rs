@@ -5,20 +5,7 @@
 
 use crate::common::ws_with;
 
-fn eval_int(defs: &str, root: &str, expect: i64) {
-    crate::common::eval_int(
-        &[
-            skull_codegen_js::JS_VEC_CHECK_SHIMS,
-            skull_codegen_js::JS_TABLE_PRIM,
-            skull_codegen_js::JS_CALL_HELPER,
-            skull_codegen_js::JS_STRING_RUNTIME,
-            skull_codegen_js::JS_DEEPCOPY_RUNTIME,
-        ],
-        defs,
-        root,
-        expect,
-    );
-}
+crate::runtime_eval!(eval_int: JS_VEC_CHECK_SHIMS, JS_TABLE_PRIM, JS_CALL_HELPER, JS_STRING_RUNTIME, JS_DEEPCOPY_RUNTIME);
 
 // A shared inner struct copies once: mutating via one field shows through the
 // other, and the original is untouched (99*100 + 1 encodes copy-then-original).

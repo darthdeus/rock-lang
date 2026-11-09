@@ -7,18 +7,7 @@
 
 use crate::common::ws_with;
 
-fn eval_int(defs: &str, root: &str, expect: i64) {
-    crate::common::eval_int(
-        &[
-            skull_codegen_js::JS_NB_CHECK_SHIMS,
-            skull_codegen_js::JS_VEC_CHECK_SHIMS,
-            skull_codegen_js::JS_CALL_HELPER,
-        ],
-        defs,
-        root,
-        expect,
-    );
-}
+crate::runtime_eval!(eval_int: JS_NB_CHECK_SHIMS, JS_VEC_CHECK_SHIMS, JS_CALL_HELPER);
 
 const TRY_CALL: &str = "@intrinsic @nomangle inline(lua) fn try_call(f: fn()) -> bool = \"\"\"\n    local ok, err = pcall(f)\n    return not ok\n\"\"\"\n";
 

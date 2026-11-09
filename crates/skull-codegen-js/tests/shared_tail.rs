@@ -6,20 +6,7 @@
 
 use crate::common::ws_with;
 
-fn eval_int(defs: &str, root: &str, expect: i64) {
-    crate::common::eval_int(
-        &[
-            skull_codegen_js::JS_NB_CHECK_SHIMS,
-            skull_codegen_js::JS_VEC_CHECK_SHIMS,
-            skull_codegen_js::JS_TABLE_PRIM,
-            skull_codegen_js::JS_STRUCTURAL_EQ,
-            skull_codegen_js::JS_CALL_HELPER,
-        ],
-        defs,
-        root,
-        expect,
-    );
-}
+crate::runtime_eval!(eval_int: JS_NB_CHECK_SHIMS, JS_VEC_CHECK_SHIMS, JS_TABLE_PRIM, JS_STRUCTURAL_EQ, JS_CALL_HELPER);
 
 // Class A -- a loop inside a lambda body. structure::analyze roots at lambda
 // entries, so the closure's `while` is a registered loop (was walked flat into
