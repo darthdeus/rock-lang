@@ -90,6 +90,23 @@ fn validate_one(
             at(anno, pos, AnnoPos::FnItem)?;
             test_args(anno)
         }
+        "json_omit_if" => {
+            at(anno, pos, AnnoPos::StructField)?;
+            if anno.args.len() != 1
+                || anno.args[0].name.is_some()
+                || !matches!(&anno.args[0].value, AnnoValue::Ident(_))
+            {
+                comp_error!(
+                    anno.span,
+                    "`@json_omit_if` requires one predicate function name"
+                );
+            }
+            Ok(())
+        }
+        "json_default" | "json_skip" => {
+            at(anno, pos, AnnoPos::StructField)?;
+            no_args(anno)
+        }
         "json_name" => {
             at(anno, pos, AnnoPos::StructField)?;
             if anno.args.len() != 1

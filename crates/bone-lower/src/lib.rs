@@ -2906,6 +2906,14 @@ pub fn build_function(
         annotations,
         ffi_lib,
         is_synthetic: f.is_synthetic,
+        json_field_for: f
+            .json_field_for
+            .as_ref()
+            .map(|(owner, field, operation)| {
+                ctx.resolve_bare_key(owner.name, owner.span)
+                    .map(|key| (key, *field, *operation))
+            })
+            .transpose()?,
     };
 
     Ok((func, if body_failed { None } else { Some(body) }, errors))
@@ -3384,6 +3392,23 @@ fn lower_struct_fields(
             &field_annotations,
             &ctx.workspace.decorator_names,
         )?;
+        let json_default = field_annotations.iter().any(|a| {
+            a.is_builtin("json_default")
+                || a.is_builtin("json_skip")
+                || a.is_builtin("json_omit_if")
+        });
+        if json_default && field.default.is_none() {
+            comp_error!(
+                field.name.span,
+                "JSON default and skipped fields require a declared default"
+            );
+        }
+        if json_default && !s.generics.is_empty() {
+            comp_error!(
+                field.name.span,
+                "JSON default factories for generic records are not supported yet"
+            );
+        }
         let wire_name = json_field_name(&field_annotations).unwrap_or(field.name.name);
         if !json_names.insert(wire_name) {
             comp_error!(

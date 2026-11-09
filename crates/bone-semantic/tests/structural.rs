@@ -1099,6 +1099,7 @@ fn structurally_equal_compounds_reassign_is_ok() {
         annotations: vec![],
         ffi_lib: None,
         is_synthetic: false,
+        json_field_for: None,
     });
 
     m.id = ws.intern_module(m.file);

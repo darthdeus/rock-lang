@@ -1991,28 +1991,73 @@ fn reflect_field_type(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> (Stri
 fn type_table_defs(
     ws: &Workspace,
     gc: &rustc_hash::FxHashSet<ustr::Ustr>,
+    arena: &skull_mir::lower::RepArena,
 ) -> Result<String, CompilerError> {
+    let defaults: std::collections::HashMap<_, _> = ws
+        .modules
+        .iter()
+        .flat_map(|m| m.functions.iter())
+        .filter_map(|(_, f)| {
+            f.json_field_for
+                .map(|owner| (owner, skull_mir::mangle::mangle_fn(ws, f)))
+        })
+        .collect();
     let mut out = String::from("_G.__ROCK_ENUM_FLAT_LAYOUT = {}\n_G.__ROCK_STRIDED_ROWS = {}\n");
     for module in ws.modules.iter() {
         for (_, s) in module.structs.iter() {
-            // Row offsets of a `[S]` stored as strided rows, so reflection
-            // reads a row by leaf path (`serialization.rock`).
-            if s.is_nobox
-                && let Some(offsets) = skull_mir::lower::ContainerPlan::strided_struct_row_offsets(
+            let mut vec_columns = String::new();
+            if s.is_value {
+                use skull_mir::lower::{ContainerFamily, ContainerPlan, ContainerStorage};
+                use skull_mir::monoty::{MonoCtor, MonoTy};
+                let ty = MonoTy::App {
+                    ctor: MonoCtor::Array,
+                    params: vec![MonoTy::App {
+                        ctor: MonoCtor::Nominal(s.name),
+                        params: Vec::new(),
+                    }],
+                };
+                let plan = ContainerPlan::for_type(
                     ws,
                     bone_semantic::hir::FnBackend::Lua,
-                    s.name,
+                    arena,
+                    ContainerFamily::Vec,
+                    &ty,
                 )
-            {
-                let entries = offsets
-                    .iter()
-                    .map(|(path, offset)| format!("[\"{path}\"] = {offset}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                out.push_str(&format!(
-                    "_G.__ROCK_STRIDED_ROWS[\"{}\"] = {{ {entries} }}\n",
-                    skull_mir::mangle::type_symbol(ws, s.name)
-                ));
+                .map_err(|e| CompilerError::new_no_location(e.message))?;
+                if let Some(shape) = plan.element_shape(arena) {
+                    let paths = skull_mir::lower::value_leaf_paths(&shape);
+                    match plan.storage() {
+                        ContainerStorage::Columns { .. } => {
+                            let keys = paths
+                                .iter()
+                                .map(|p| skull_codegen_lua::lua_string(p.as_str()))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            vec_columns = format!(", vec_columns = {{ {keys} }}");
+                        }
+                        ContainerStorage::Strided { .. } => {
+                            let entries = paths
+                                .iter()
+                                .enumerate()
+                                .map(|(i, path)| {
+                                    format!(
+                                        "[{}] = {}",
+                                        skull_codegen_lua::lua_string(path.as_str()),
+                                        i + 1
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            out.push_str(&format!(
+                                "_G.__ROCK_STRIDED_ROWS[{}] = {{ {entries} }}\n",
+                                skull_codegen_lua::lua_string(
+                                    skull_mir::mangle::type_symbol(ws, s.name).as_str()
+                                )
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
             }
             // Tier-distinguishing kind so reflection/inspect/serialize stay honest:
             // FFI-clean value structs are cdata (`c_struct`), GC-carrying ones are
@@ -2068,13 +2113,33 @@ fn type_table_defs(
                         )
                     })
                     .unwrap_or_default();
+                let mut json = json;
+                if let Some(factory) =
+                    defaults.get(&(s.name, f.name, skull_parser::JsonFieldOperation::Default))
+                {
+                    json.push_str(&format!(
+                        ", json_default = {}",
+                        skull_codegen_lua::lua_string(factory)
+                    ));
+                }
+                if let Some(predicate) =
+                    defaults.get(&(s.name, f.name, skull_parser::JsonFieldOperation::Omit))
+                {
+                    json.push_str(&format!(
+                        ", json_omit = {}",
+                        skull_codegen_lua::lua_string(predicate)
+                    ));
+                }
+                if f.annotations.iter().any(|a| a.is_builtin("json_skip")) {
+                    json.push_str(", json_skip = true");
+                }
                 fields.push(format!(
                     "{{ name = \"{}\", type = \"{}\", nullable = {}{}{}{}{} }}",
                     f.name, tystr, nullable, embed, flat, desc, json
                 ));
             }
             out.push_str(&format!(
-                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"{k}\", fields = {{ {f} }} }}\n",
+                "_G.__ROCK_TYPE_TABLE[\"{n}\"] = {{ name = \"{n}\", kind = \"{k}\", fields = {{ {f} }}{vec_columns} }}\n",
                 n = skull_mir::mangle::type_symbol(ws, s.name),
                 k = kind,
                 f = fields.join(", ")

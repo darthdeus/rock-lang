@@ -1,0 +1,47 @@
+struct JsonNativeRows { points: [Vec2] }
+
+@test
+fn json_record_native_array_uses_the_compiler_container_layout() {
+    let codec = JsonRecordCodec {}
+    let source = JsonNativeRows { points: [v(1.0, 2.0), v(3.0, 4.0)] }
+    let encoded = json_record_encode(codec, source)
+    let result = json_record_decode(codec, encoded, source).unwrap()
+    assert_eq(result.points.len(), 2)
+    assert_eq(result.points[1].x, 3.0)
+    result.points.push(v(5.0, 6.0))
+    assert_eq(result.points[2].y, 6.0)
+    let empty = json_record_decode(codec, json_decode("{{\"points\":[]}}").unwrap(), source).unwrap()
+    empty.points.push(v(7.0, 8.0))
+    assert_eq(empty.points[0].x, 7.0)
+}
+
+nobox value JsonNativeBounds { min: Vec2, max: Vec2 }
+struct JsonNestedNativeRows { bounds: [JsonNativeBounds] }
+
+@test
+fn json_record_nested_native_array_keeps_all_leaf_paths() {
+    let source = JsonNestedNativeRows { bounds: [JsonNativeBounds { min: v(1.0, 2.0), max: v(3.0, 4.0) }] }
+    let codec = JsonRecordCodec {}
+    let result = json_record_decode<JsonNestedNativeRows>(codec, json_record_encode(codec, source)).unwrap()
+    assert_eq(result.bounds[0].max.y, 4.0)
+    result.bounds.push(JsonNativeBounds { min: v(5.0, 6.0), max: v(7.0, 8.0) })
+    assert_eq(result.bounds[1].min.x, 5.0)
+}
+
+@test
+fn json_record_native_array_respects_element_wire_adapters() {
+    let codec = JsonRecordCodec { adapters: [json_record_adapter(v(0.0, 0.0),
+        point => json_array([json_float(point.x), json_float(point.y)]),
+        value => {
+            let parts = json_as_array(value) ?? return null
+            if parts.len() != 2 { return null }
+            return v(json_record_finite_float(parts[0]) ?? return null,
+                json_record_finite_float(parts[1]) ?? return null)
+        })] }
+    let source = JsonNativeRows { points: [v(1.0, 2.0)] }
+    let wire = json_record_encode(codec, source)
+    let point = json_as_array(json_as_array(json_field(wire, "points").unwrap()).unwrap()[0]).unwrap()
+    assert_eq(point.len(), 2)
+    let result = json_record_decode<JsonNativeRows>(codec, wire).unwrap()
+    assert_eq(result.points[0].x, 1.0)
+}

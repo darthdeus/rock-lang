@@ -62,7 +62,7 @@ pub(crate) fn is_emission_root(
 }
 
 fn is_global_emission_root(f: &bone_semantic::hir::Function, decorators: &DecoratorTable) -> bool {
-    if f.annotations.iter().any(|a| a.is_builtin("nomangle")) {
+    if f.json_field_for.is_some() || f.annotations.iter().any(|a| a.is_builtin("nomangle")) {
         return true;
     }
     // `extern` decls bind a bare name an inline(lua) body may call directly.

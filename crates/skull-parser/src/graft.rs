@@ -84,6 +84,7 @@ fn graft_fn(src: &Ast, dst: &mut Ast, f: &FunctionDef) -> FunctionDef {
         is_macro: f.is_macro,
         is_coroutine: f.is_coroutine,
         is_synthetic: f.is_synthetic,
+        json_field_for: f.json_field_for.clone(),
         macro_items: f
             .macro_items
             .iter()

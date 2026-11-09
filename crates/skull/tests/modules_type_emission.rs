@@ -430,8 +430,6 @@ fn typed_json_rejects_cycles_and_unsupported_storage() {
     let lua = crate::common::emit_module(
         r#"
 struct Node { next: Node? = null }
-value Point { x: float }
-struct NativeRows { rows: [Point] }
 struct NumericKeys { entries: Map<int, string> }
 inline(lua) fn fails(run: fn() -> JsonValue, message: string) = """
     local ok, err = pcall(run)
@@ -442,7 +440,6 @@ fn main() {
     let node = Node {}
     node.next = node
     fails(() => json_record_encode(codec, node), "cannot encode cycles")
-    fails(() => json_record_encode(codec, NativeRows { rows: [Point { x: 1.0 }] }), "native value arrays")
     fails(() => json_record_encode(codec, NumericKeys { entries: map_new() }), "require string keys")
     print("ok")
 }

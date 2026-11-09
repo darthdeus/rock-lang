@@ -1476,7 +1476,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         return value
     end
     if not field.embed then return source[key] end
-    if field.nullable and source[key] == nil then return nil end
+    if field.nullable and not source[key] then return nil end
     if _G.__ROCK_TYPE_TABLE[field.type].kind == 'c_struct' then
         return __json_record_native_get(source, field.type, key .. '.')
     end
@@ -1494,7 +1494,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         target[field.flat[1]] = value.__variant
         for i = 2, #field.flat do target[field.flat[i]] = value[i - 1] end
     elseif field.embed then
-        if field.nullable then target[key] = value ~= nil and true or nil end
+        if field.nullable then target[key] = value ~= nil end
         if type(value) == 'cdata' then
             __json_record_native_put(target, value, field.type, key .. '.')
         elseif value ~= nil then
@@ -1556,13 +1556,14 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
 """
 
 @nomangle inline(lua) fn __json_record_row_leaf(value: any, path: string) -> any = """
-    if value[path] ~= nil then return value[path] end
+    if type(value) == 'table' and value[path] ~= nil then return value[path] end
     local dot = path:find('.', 1, true)
     if dot then
         local child = value[path:sub(1, dot - 1)]
         if type(child) == 'table' or type(child) == 'cdata' then
             return __json_record_row_leaf(child, path:sub(dot + 1))
         end
+    elseif type(value) == 'cdata' then return value[path]
     elseif type(value) == 'table' then
         for _, field in ipairs(_G.__ROCK_TYPE_TABLE[value.__ty].fields) do
             if field.name == path and field.embed and field.nullable then return false end
@@ -1621,33 +1622,46 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     end
     if kind == 'vec' then
         local element = shape.elem.k == 'nom' and _G.__ROCK_TYPE_TABLE[shape.elem.name]
-        if element and (element.kind == 'c_struct' or element.kind == 'c_enum') then
-            error('json record does not support native value arrays', 0)
+        if element and element.kind == 'c_enum' then
+            error('json record does not support native enum arrays', 0)
         end
         if reading and not __json_record_tag(value, 'Array') then return false, __json_record_failure(shape, value) end
         local items = reading and value[1] or value
-        local offsets = element and element.kind == 'value_table' and _G.__ROCK_STRIDED_ROWS[shape.elem.name]
+        local offsets = element and _G.__ROCK_STRIDED_ROWS[shape.elem.name]
+        local columns = element and element.kind == 'c_struct' and element.vec_columns
+        local column_stored = not reading and __rock_is_column_vec(items)
         local strided = __rock_is_strided_vec(items)
-        if __rock_is_column_vec(items) or (strided and not offsets) then
+        if (column_stored and not columns) or (strided and not offsets) then
             error('json record does not support this array storage', 0)
         end
         local stride = 0
         if offsets then for _, offset in pairs(offsets) do stride = math.max(stride, offset) end end
         local result = {}
+        if reading and columns then
+            for _, path in ipairs(columns) do result[path] = {} end
+        end
         for i = 1, items.len do
-            local item = items._data[i]
+            local item = column_stored and __rock_materialize_column_element(items, i) or items._data[i]
             if not reading and strided then
                 item = { __ty = shape.elem.name }
                 for path, offset in pairs(offsets) do item[path] = items._data[(i - 1) * stride + offset] end
-                item = __json_record_row_object(item, shape.elem.name)
+                item = element.kind == 'c_struct' and __json_record_native_get(item, shape.elem.name, '')
+                    or __json_record_row_object(item, shape.elem.name)
             end
             local ok, decoded = __json_record_visit(codec, shape.elem, item, reading, seen, depth + 1)
             if not ok then return false, __json_record_error_at(decoded, i - 1) end
-            if reading and offsets then
+            if reading and columns then
+                for _, path in ipairs(columns) do result[path][i] = __json_record_row_leaf(decoded, path) end
+            elseif reading and offsets then
                 for path, offset in pairs(offsets) do result[(i - 1) * stride + offset] = __json_record_row_leaf(decoded, path) end
             else result[i] = decoded end
         end
         if reading then
+            if columns then
+                result.__ty, result.len = 'Vec', items.len
+                result['@vec'] = { repr = 'columns', elem = shape.elem.name, cap = items.len }
+                return true, result
+            end
             local vec = __json_record_vec(result, items.len)
             if offsets then vec['@vec'] = { repr = 'strided', elem = shape.elem.name, stride = stride, cap = items.len } end
             return true, vec
@@ -1769,7 +1783,9 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             local names = codec.field_names[name]
             if not names then
                 names = {}
-                for _, field in ipairs(decl.fields) do names[field.json_name or field.name] = true end
+                for _, field in ipairs(decl.fields) do
+                    if not field.json_skip then names[field.json_name or field.name] = true end
+                end
                 codec.field_names[name] = names
             end
             for key in pairs(value[1]) do
@@ -1780,35 +1796,42 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             end
         end
         local data = reading and decl.kind == 'c_struct' and _G[name .. '_ct']() or {}
-        for i, field in ipairs(decl.fields) do
-            local wire_name = field.json_name or field.name
-            if decl.kind == 'c_struct' and field.nullable then
-                error('json record does not support nullable native fields', 0)
-            end
-            local child = field.desc
-            if not child then
-                child = _G.__ROCK_TYPE_TABLE[field.type] and { k = 'nom', name = field.type } or { k = field.type }
-            end
-            if field.nullable and child.k ~= 'opt' then child = { k = 'opt', inner = child } end
-            local item
-            if reading then item = value[1][wire_name]
-            elseif type(value) == 'table' then item = __json_record_field_get(value, field)
-            else item = value[field.name] end
-            local fallback
-            if reading and defaults ~= nil then fallback = __json_record_field_get(defaults, field) end
-            local ok, decoded
-            if reading and item == nil then
-                if defaults == nil then return false, __json_record_error_at(__json_record_failure(child, nil), wire_name) end
-                ok, decoded = true, __json_record_copy_default(fallback)
+        for _, field in ipairs(decl.fields) do
+            if field.json_skip then
+                if reading then __json_record_field_put(data, field, _G[field.json_default]()) end
             else
-                ok, decoded = __json_record_visit(codec, child, item, reading, seen, depth + 1, fallback)
+                local wire_name = field.json_name or field.name
+                local item
+                if reading then item = value[1][wire_name]
+                elseif type(value) == 'table' then item = __json_record_field_get(value, field)
+                else item = value[field.name] end
+                if reading or not field.json_omit or not _G[field.json_omit](item) then
+                    if decl.kind == 'c_struct' and field.nullable then
+                        error('json record does not support nullable native fields', 0)
+                    end
+                    local child = field.desc
+                    if not child then
+                        child = _G.__ROCK_TYPE_TABLE[field.type] and { k = 'nom', name = field.type } or { k = field.type }
+                    end
+                    if field.nullable and child.k ~= 'opt' then child = { k = 'opt', inner = child } end
+                    local fallback
+                    if reading and defaults ~= nil then fallback = __json_record_field_get(defaults, field) end
+                    local ok, decoded
+                    if reading and item == nil then
+                        if defaults ~= nil then ok, decoded = true, __json_record_copy_default(fallback)
+                        elseif field.json_default then ok, decoded = true, _G[field.json_default]()
+                        else return false, __json_record_error_at(__json_record_failure(child, nil), wire_name) end
+                    else
+                        ok, decoded = __json_record_visit(codec, child, item, reading, seen, depth + 1, fallback)
+                    end
+                    if not ok then
+                        if not reading then error('json record invalid field ' .. name .. '.' .. field.name, 0) end
+                        return false, __json_record_error_at(decoded, wire_name)
+                    end
+                    if reading then __json_record_field_put(data, field, decoded)
+                    else data[wire_name] = decoded end
+                end
             end
-            if not ok then
-                if not reading then error('json record invalid field ' .. name .. '.' .. field.name, 0) end
-                return false, __json_record_error_at(decoded, wire_name)
-            end
-            if reading then __json_record_field_put(data, field, decoded)
-            else data[wire_name] = decoded end
         end
         if reading then
             if decl.kind ~= 'c_struct' then data.__ty = name end
@@ -1836,7 +1859,7 @@ inline(lua) fn __json_record_encode<T>(name: string, codec: JsonRecordCodec, val
     return result
 """
 
-inline(lua) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, value: JsonValue, prototype: T) -> T? = """
+inline(lua) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, value: JsonValue) -> T? = """
     local ok, result = __json_record_visit(__json_record_context(codec), { k = 'nom', name = name }, value, true, {}, 0)
     if ok then return result end
     if codec.on_error then codec.on_error(result) end
@@ -1848,7 +1871,11 @@ fn json_record_encode<T>(codec: JsonRecordCodec, value: T) -> JsonValue {
 }
 
 fn json_record_decode<T>(codec: JsonRecordCodec, value: JsonValue, prototype: T) -> T? {
-    return __json_record_decode(__json_record_type(prototype), codec, value, prototype)
+    return __json_record_decode<T>(__json_record_type(prototype), codec, value)
+}
+
+fn json_record_decode<T>(codec: JsonRecordCodec, value: JsonValue) -> T? {
+    return __json_record_decode<T>(__json_record_type(phantom<T>()), codec, value)
 }
 
 // Omitted record fields inherit from defaults; supplied arrays and maps replace
