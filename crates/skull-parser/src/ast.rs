@@ -860,6 +860,9 @@ pub struct Item {
     pub vis: Option<Visibility>,
 }
 
+// Items live in a Vec, so a boxed function body would cost an allocation per
+// definition without saving anything.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ItemKind {
     Function(FunctionDef),

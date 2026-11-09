@@ -325,57 +325,6 @@ pub(crate) fn child_blocks(ast: &Ast, e: Idx<ExprData>) -> BlockEdges {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::parse_module;
-    use ustr::Ustr;
-
-    /// Parse `src`, cook it, and return the first function body's s-expr.
-    fn cooked_body(src: &str) -> String {
-        let mut ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
-        super::desugar(&mut ast);
-        let crate::ast::ItemKind::Function(f) = &ast.items[0].kind else {
-            panic!("expected fn");
-        };
-        ast.block_sexp(f.body.rock_block().expect("rock body"))
-    }
-
-    fn check(body: &str, expected: &str) {
-        let src = format!("fn f() {{ {} }}", body);
-        assert_eq!(cooked_body(&src), expected, "source: {src:?}");
-    }
-
-    #[test]
-    fn type_hole_and_range_and_dollar() {
-        // `?` type hole, `..=` inclusive range pattern, `$` low-prec application
-        // — additional surface syntax forms.
-        check("let x: ? = 42", "(block (let x ? 42))");
-        check(
-            "match x { 1..=10 => \"s\", _ => \"o\" }",
-            "(block (match x (arm (range 1 ..= 10) (block \"s\")) (arm _ (block \"o\"))))",
-        );
-        // `f $ a == b` -> `f(a == b)` ($ is the lowest-binding operator).
-        check("assert $ a == b", "(block (call assert (== a b)))");
-        // `recv?.let { body }` — binding is the receiver ident; body excluded
-        // from the s-expr (rock parity).
-        check("x?.let { x * 2 }", "(block (?.let x x))");
-        // `^name` anaphoric ident renders bare; `&name` function ref keeps `&`.
-        check("^x + 1", "(block (+ x 1))");
-        check("let f = &helper", "(block (let f () &helper))");
-    }
-
-    #[test]
-    fn non_placeholder_untouched() {
-        // skull parses `=> expr` lambda bodies as a `return` block (same shape
-        // the placeholder path builds), so an explicit lambda is byte-identical
-        // before and after cook — proof the driver doesn't touch it.
-        check(
-            "xs.map(y => y.health)",
-            "(block (call (. xs map) (lambda (None) None (block (return (. y health))))))",
-        );
-    }
-}
-
 /// Generate ordinary typed functions so default expressions and predicates use
 /// normal name resolution, call discovery, lowering and allocation rules.
 fn synth_json_default_factories(ast: &mut Ast) {
@@ -563,5 +512,56 @@ fn json_field_factory(
             macro_items: Vec::new(),
             receiver_surface: None,
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::parse_module;
+    use ustr::Ustr;
+
+    /// Parse `src`, cook it, and return the first function body's s-expr.
+    fn cooked_body(src: &str) -> String {
+        let mut ast = parse_module(src, Ustr::from("test.rock")).expect("parse failed");
+        super::desugar(&mut ast);
+        let crate::ast::ItemKind::Function(f) = &ast.items[0].kind else {
+            panic!("expected fn");
+        };
+        ast.block_sexp(f.body.rock_block().expect("rock body"))
+    }
+
+    fn check(body: &str, expected: &str) {
+        let src = format!("fn f() {{ {} }}", body);
+        assert_eq!(cooked_body(&src), expected, "source: {src:?}");
+    }
+
+    #[test]
+    fn type_hole_and_range_and_dollar() {
+        // `?` type hole, `..=` inclusive range pattern, `$` low-prec application
+        // — additional surface syntax forms.
+        check("let x: ? = 42", "(block (let x ? 42))");
+        check(
+            "match x { 1..=10 => \"s\", _ => \"o\" }",
+            "(block (match x (arm (range 1 ..= 10) (block \"s\")) (arm _ (block \"o\"))))",
+        );
+        // `f $ a == b` -> `f(a == b)` ($ is the lowest-binding operator).
+        check("assert $ a == b", "(block (call assert (== a b)))");
+        // `recv?.let { body }` — binding is the receiver ident; body excluded
+        // from the s-expr (rock parity).
+        check("x?.let { x * 2 }", "(block (?.let x x))");
+        // `^name` anaphoric ident renders bare; `&name` function ref keeps `&`.
+        check("^x + 1", "(block (+ x 1))");
+        check("let f = &helper", "(block (let f () &helper))");
+    }
+
+    #[test]
+    fn non_placeholder_untouched() {
+        // skull parses `=> expr` lambda bodies as a `return` block (same shape
+        // the placeholder path builds), so an explicit lambda is byte-identical
+        // before and after cook — proof the driver doesn't touch it.
+        check(
+            "xs.map(y => y.health)",
+            "(block (call (. xs map) (lambda (None) None (block (return (. y health))))))",
+        );
     }
 }
