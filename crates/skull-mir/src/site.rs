@@ -114,22 +114,33 @@ impl SiteDomain {
     /// The arguments order by their CANONICAL encoding -- the same string
     /// identity is keyed on, so two domains compare equal here exactly when
     /// they are equal.
-    fn ord_key(&self) -> (u8, usize, u32, Vec<String>) {
+    fn ord_key(&self) -> (u8, usize, u32, &[crate::monoty::MonoTy]) {
         match self {
-            Self::Own => (0, 0, 0, Vec::new()),
-            Self::StructDefaults(m, d, args) => (
-                1,
-                m.index(),
-                d.into_raw().into_u32(),
-                args.iter().map(|a| a.canonical()).collect(),
-            ),
+            Self::Own => (0, 0, 0, &[]),
+            Self::StructDefaults(m, d, args) => (1, m.index(), d.into_raw().into_u32(), args),
         }
     }
 }
 
 impl Ord for SiteDomain {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.ord_key().cmp(&other.ord_key())
+        use std::cmp::Ordering;
+        let (tag, module, def, args) = self.ord_key();
+        let (other_tag, other_module, other_def, other_args) = other.ord_key();
+        let head = (tag, module, def).cmp(&(other_tag, other_module, other_def));
+        if head != Ordering::Equal {
+            return head;
+        }
+        // Lexicographic over the canonical spellings, spelled pairwise only
+        // as far as the first difference: every site lookup compares domains,
+        // and almost all of them part on the head.
+        for (a, b) in args.iter().zip(other_args) {
+            let arg = a.canonical().cmp(&b.canonical());
+            if arg != Ordering::Equal {
+                return arg;
+            }
+        }
+        args.len().cmp(&other_args.len())
     }
 }
 
