@@ -947,6 +947,111 @@ mod overlay_runtime_tests {
         )]
     }
 
+    /// A Session warmed at v0: `baseline` is the frozen `main.lua`, and `cache`
+    /// accumulates across overlays exactly as `IncrementalProject`'s does.
+    struct Live {
+        session: bone_incremental::session::Session,
+        mid: bone_semantic::prelude::ModuleId,
+        baseline: String,
+        cache: skull::mir_emit::SkullEmitCache,
+    }
+
+    impl Live {
+        fn boot(v0: &str) -> Self {
+            let session = bone_session(files(v0)).expect("session v0");
+            let mid = skull::user_module_id(session.workspace()).unwrap();
+            let (full, cache) =
+                skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+            Self {
+                session,
+                mid,
+                baseline: full.lua,
+                cache,
+            }
+        }
+
+        /// Apply an edit whose premise is that it stays in the body-only tier.
+        fn body_edit(&mut self, src: &str) -> bone_incremental::session::UpdateResult {
+            let update = self.session.update_file("main.rock", src).expect("update");
+            assert!(
+                matches!(update.tier, bone_incremental::session::UpdateTier::BodyOnly),
+                "premise: this edit is body-only, got {:?}",
+                update.tier
+            );
+            update
+        }
+
+        fn emit(&mut self, update: &bone_incremental::session::UpdateResult) -> String {
+            emit_overlay_checked(
+                self.session.workspace(),
+                &mut self.cache,
+                &update.reinferred,
+            )
+            .lua
+        }
+
+        fn overlay(&mut self, src: &str) -> String {
+            let update = self.body_edit(src);
+            self.emit(&update)
+        }
+
+        /// A body-only edit whose overlay must be refused for a safe restart.
+        fn expect_safe_restart(&mut self, src: &str) {
+            let update = self.body_edit(src);
+            let err = match skull::mir_emit::emit_overlay(
+                self.session.workspace(),
+                &mut self.cache,
+                &update.reinferred,
+            ) {
+                Ok(_) => panic!("an incompatible edit must not overlay:\n{src}"),
+                Err(err) => err,
+            };
+            assert!(
+                err.message.contains("safe restart"),
+                "an incompatible edit must request the safe restart path, got: {}",
+                err.message
+            );
+        }
+
+        /// Apply an edit that must leave the body-only tier; the rebuilt program.
+        fn full_reload(&mut self, src: &str) -> String {
+            let update = self.session.update_file("main.rock", src).expect("update");
+            assert!(
+                matches!(
+                    update.tier,
+                    bone_incremental::session::UpdateTier::Interface
+                        | bone_incremental::session::UpdateTier::FullUser
+                ),
+                "premise: this edit forces a full rebuild, got {:?}",
+                update.tier
+            );
+            self.full()
+        }
+
+        fn full(&self) -> String {
+            skull::mir_emit::emit_full(self.session.workspace(), self.mid)
+                .expect("emit_full")
+                .0
+                .lua
+        }
+    }
+
+    fn assert_stdout(outcome: ExecOutcome, expected: &str, ctx: &str) {
+        match outcome {
+            ExecOutcome::Output(output) => {
+                assert_eq!(normalize_stdout(&output).trim(), expected, "{ctx}")
+            }
+            ExecOutcome::Errored(error) => panic!("{ctx}: run failed: {error}"),
+        }
+    }
+
+    /// Load `program` with its stub, then run `steps` and compare stdout.
+    fn assert_run(program: &str, steps: &[&str], expected: &str, ctx: &str) {
+        let mut parts = vec![program, stub_for(program)];
+        parts.extend_from_slice(steps);
+        assert_stdout(run_parts(&parts), expected, ctx);
+    }
+
     #[test]
     fn capture_identity_rejects_switching_between_shadowed_bindings() {
         let v0 = "global CALLBACK: fn() -> int = () => 0\n\
@@ -956,29 +1061,8 @@ mod overlay_runtime_tests {
                   fn install() {\n  let value = 1\n  {\n    let other = 2\n    CALLBACK = () => value\n  }\n}\n\
                   fn main() {}\n";
 
-        let mut session = bone_session(files(v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_full, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
-        let result = session.update_file("main.rock", v1).expect("update v1");
-        assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "renaming a shadow binding is a body edit, got {:?}",
-            result.tier
-        );
-        let err = match skull::mir_emit::emit_overlay(
-            session.workspace(),
-            &mut cache,
-            &result.reinferred,
-        ) {
-            Ok(_) => panic!("the same lambda site adopted another binding's capture cell"),
-            Err(err) => err,
-        };
-        assert!(
-            err.message.contains("safe restart"),
-            "a capture-binding switch must request a safe restart, got: {}",
-            err.message
-        );
+        let mut live = Live::boot(v0);
+        live.expect_safe_restart(v1);
     }
 
     /// The skull watcher's robustness contract: a BROKEN edit between two valid
@@ -1016,14 +1100,10 @@ mod overlay_runtime_tests {
             .expect("emit recovered")
             .0;
 
-        let fresh_session = bone_session(files(v2)).expect("fresh v2 session");
-        let fresh_mid = skull::user_module_id(fresh_session.workspace()).unwrap();
-        let fresh = skull::mir_emit::emit_full(fresh_session.workspace(), fresh_mid)
-            .expect("emit fresh")
-            .0;
+        let fresh = Live::boot(v2).baseline;
 
         assert_eq!(
-            recovered.lua, fresh.lua,
+            recovered.lua, fresh,
             "recovered build after a broken intermediate must equal a fresh build",
         );
     }
@@ -1043,41 +1123,31 @@ mod overlay_runtime_tests {
             "{decl}fn compute() -> int {{ ctor_sum(P {{ x: INPUT, y: INPUT + 1 }}) }}\nfn main() {{ print(\"{{compute()}}\") }}\n"
         );
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
-        let stale_main = full0.lua;
+        let mut live = Live::boot(&v0);
         assert!(
-            stale_main.contains("P_ct"),
+            live.baseline.contains("P_ct"),
             "baseline must emit every value-struct ctor, even unused ones"
         );
 
-        let result = session.update_file("main.rock", &v1).expect("update v1");
+        let overlay = live.overlay(&v1);
         assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "constructing an already-defined value struct is a body edit, got {:?}",
-            result.tier
-        );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-        assert!(
-            overlay.lua.contains("P_ct("),
+            overlay.contains("P_ct("),
             "overlay's edited body must call P_ct"
         );
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit_full v1")
-            .0;
+        let fresh = live.full();
 
         assert_runtime_eq(
-            &stale_main,
-            &overlay.lua,
-            &fresh.lua,
+            &live.baseline,
+            &overlay,
+            &fresh,
             "overlay refs baseline value ctor (P 5+6=11)",
         );
-        match run_parts(&[&stale_main, stub_for(&stale_main), &overlay.lua, "main()"]) {
-            ExecOutcome::Output(output) => assert_eq!(output.trim(), "11"),
-            ExecOutcome::Errored(error) => panic!("overlay value constructor failed: {error}"),
-        }
+        assert_run(
+            &live.baseline,
+            &[&overlay, "main()"],
+            "11",
+            "overlay value constructor",
+        );
     }
 
     /// One concrete edit, fully spelled out, so the mechanism is legible before
@@ -1094,36 +1164,20 @@ mod overlay_runtime_tests {
                   fn f1() -> int { f0() }\n\
                   fn main() { print(\"{f0()}\") print(\"{f1()}\") }\n";
 
-        let mut session = bone_session(files(v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
-        let stale_main = full0.lua;
+        let mut live = Live::boot(v0);
 
-        let result = session.update_file("main.rock", v1).expect("update v1");
-        assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "literal edit should be BodyOnly, got {:?}",
-            result.tier
-        );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit_full v1")
-            .0;
+        let overlay = live.overlay(v1);
+        let fresh = live.full();
 
         // Sanity: the stale baseline alone prints 1,1 -- so a leak is observable.
-        let baseline_only = run_parts(&[&stale_main, SYS_STUB, "main()"]);
-        if let ExecOutcome::Output(o) = baseline_only {
-            assert_eq!(
-                normalize_stdout(&o).trim(),
-                "1\n1",
-                "baseline should print the STALE values"
-            );
-        } else {
-            panic!("stale baseline failed to run");
-        }
+        assert_run(
+            &live.baseline,
+            &["main()"],
+            "1\n1",
+            "baseline should print the STALE values",
+        );
 
-        assert_runtime_eq(&stale_main, &overlay.lua, &fresh.lua, "concrete f0 1->2");
+        assert_runtime_eq(&live.baseline, &overlay, &fresh, "concrete f0 1->2");
     }
 
     /// A `const`'s value edit hot-reloads through the overlay. v0: FOO=5, main
@@ -1135,36 +1189,20 @@ mod overlay_runtime_tests {
         let v0 = "const FOO: int = 5\nfn main() { print(\"{FOO}\") }\n";
         let v1 = "const FOO: int = 10\nfn main() { print(\"{FOO}\") }\n";
 
-        let mut session = bone_session(files(v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
-        let stale_main = full0.lua;
+        let mut live = Live::boot(v0);
 
-        let result = session.update_file("main.rock", v1).expect("update v1");
-        assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "const value edit should be BodyOnly, got {:?}",
-            result.tier
-        );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit_full v1")
-            .0;
+        let overlay = live.overlay(v1);
+        let fresh = live.full();
 
         // Sanity: the stale baseline alone prints the OLD const, so a leak is observable.
-        let baseline_only = run_parts(&[&stale_main, SYS_STUB, "main()"]);
-        if let ExecOutcome::Output(o) = baseline_only {
-            assert_eq!(
-                normalize_stdout(&o).trim(),
-                "5",
-                "baseline prints the STALE const"
-            );
-        } else {
-            panic!("stale baseline failed to run");
-        }
+        assert_run(
+            &live.baseline,
+            &["main()"],
+            "5",
+            "baseline prints the STALE const",
+        );
 
-        assert_runtime_eq(&stale_main, &overlay.lua, &fresh.lua, "const FOO 5->10");
+        assert_runtime_eq(&live.baseline, &overlay, &fresh, "const FOO 5->10");
     }
 
     /// A `static` local's INITIALIZER edit hot-reloads through the overlay -- the
@@ -1184,33 +1222,20 @@ mod overlay_runtime_tests {
         let v0 = "fn probe() -> int { static x = 5\n x }\nfn main() { print(\"{probe()}\") }\n";
         let v1 = "fn probe() -> int { static x = 10\n x }\nfn main() { print(\"{probe()}\") }\n";
 
-        let mut session = bone_session(files(v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
-        let stale_main = full0.lua;
+        let mut live = Live::boot(v0);
 
-        let result = session.update_file("main.rock", v1).expect("update v1");
-        assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "static initializer edit should be BodyOnly, got {:?}",
-            result.tier
-        );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = live.overlay(v1);
 
         // Warm the static in the frozen baseline (first main() -> inits x=5, sets
         // the done-flag), THEN load the overlay + call again. The bug is observable
         // precisely because the cell is already warm: without the overlay's reset
         // the redefined `probe` skips re-init and re-reads the stale 5.
-        let composed = run_parts(&[&stale_main, SYS_STUB, "main()", &overlay.lua, "main()"]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "5\n10",
-                "warm baseline prints 5; after the overlay reload the static re-inits to 10",
-            ),
-            ExecOutcome::Errored(_) => panic!("composed baseline+overlay run errored"),
-        }
+        assert_run(
+            &live.baseline,
+            &["main()", &overlay, "main()"],
+            "5\n10",
+            "warm baseline prints 5; after the overlay reload the static re-inits to 10",
+        );
     }
 
     /// A `static` inside a NESTED `fn` must hot-reload too. Nested fns are hoisted
@@ -1223,29 +1248,16 @@ mod overlay_runtime_tests {
         let v0 = "fn probe() -> int { fn inner() -> int { static x = 5\n x }\n inner() }\nfn main() { print(\"{probe()}\") }\n";
         let v1 = "fn probe() -> int { fn inner() -> int { static x = 10\n x }\n inner() }\nfn main() { print(\"{probe()}\") }\n";
 
-        let mut session = bone_session(files(v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
-        let stale_main = full0.lua;
+        let mut live = Live::boot(v0);
 
-        let result = session.update_file("main.rock", v1).expect("update v1");
-        assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "nested static init edit should be BodyOnly, got {:?}",
-            result.tier
+        let overlay = live.overlay(v1);
+
+        assert_run(
+            &live.baseline,
+            &["main()", &overlay, "main()"],
+            "5\n10",
+            "nested-fn static must re-init on initializer edit through the overlay",
         );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-
-        let composed = run_parts(&[&stale_main, SYS_STUB, "main()", &overlay.lua, "main()"]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "5\n10",
-                "nested-fn static must re-init on initializer edit through the overlay",
-            ),
-            ExecOutcome::Errored(_) => panic!("composed baseline+overlay run errored"),
-        }
     }
 
     /// Accumulation across TWO overlays (the analog of the const "edit A then B"
@@ -1264,41 +1276,25 @@ mod overlay_runtime_tests {
         let v1 = "fn probe() -> int { static n = 100\n n = n + 1\n n }\nfn main() { print(\"{probe()}\") }\n";
         let v2 = "fn probe() -> int { static n = 100\n let unused = 0\n n = n + 1\n n }\nfn main() { print(\"{probe()}\") }\n";
 
-        let mut session = bone_session(files(v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
-        let stale_main = full0.lua;
+        let mut live = Live::boot(v0);
 
-        let r1 = session.update_file("main.rock", v1).expect("update v1");
-        let overlay1 = emit_overlay_checked(session.workspace(), &mut cache, &r1.reinferred);
-        let r2 = session.update_file("main.rock", v2).expect("update v2");
-        let overlay2 = emit_overlay_checked(session.workspace(), &mut cache, &r2.reinferred);
+        let overlay1 = live.overlay(v1);
+        let overlay2 = live.overlay(v2);
 
         // Models the live game: main.lua(v0) loaded once; each overlay dofile'd in
         // turn; probe reached (accumulating) between reloads. n: inits 0 -> 1,2 ->
         // reload1 re-inits to 100 -> 101,102 -> reload2 UNRELATED must PRESERVE ->
         // 103,104. A re-reset at reload2 would drop back to 101.
-        let composed = run_parts(&[
-            &stale_main,
-            SYS_STUB,
-            "main()",
-            "main()", // 1, 2   (init 0)
-            &overlay1.lua,
-            "main()",
-            "main()", // 101, 102  (re-init 100)
-            &overlay2.lua,
-            "main()",
-            "main()", // 103, 104  (preserve)
-        ]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "1\n2\n101\n102\n103\n104",
-                "reload1 re-inits to 100; reload2 (unrelated) must preserve, not re-reset",
-            ),
-            ExecOutcome::Errored(_) => panic!("composed baseline+overlays run errored"),
-        }
+        assert_run(
+            &live.baseline,
+            &[
+                "main()", "main()", // 1, 2   (init 0)
+                &overlay1, "main()", "main()", // 101, 102  (re-init 100)
+                &overlay2, "main()", "main()", // 103, 104  (preserve)
+            ],
+            "1\n2\n101\n102\n103\n104",
+            "reload1 re-inits to 100; reload2 (unrelated) must preserve, not re-reset",
+        );
     }
 
     /// The §A narrowing on the overlay path: an UNRELATED edit in a fn that owns a
@@ -1318,39 +1314,24 @@ mod overlay_runtime_tests {
                   fn probe() -> int { static n = 42\n let unused = 0\n if DO_SET { n = 99 }\n n }\n\
                   fn main() { print(\"{probe()}\") }\n";
 
-        let mut session = bone_session(files(v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
-        let stale_main = full0.lua;
+        let mut live = Live::boot(v0);
 
-        let result = session.update_file("main.rock", v1).expect("update v1");
-        assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "unrelated body edit should be BodyOnly, got {:?}",
-            result.tier
-        );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = live.overlay(v1);
 
         // Warm the static to 99 (DO_SET=true, one call), load the overlay, then call
         // again with DO_SET=false: an unrelated edit must PRESERVE n -> still 99.
-        let composed = run_parts(&[
-            &stale_main,
-            SYS_STUB,
-            "DO_SET = true",
-            "main()",
-            &overlay.lua,
-            "DO_SET = false",
-            "main()",
-        ]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "99\n99",
-                "unrelated edit must not reset the static: warmed 99 survives the reload",
-            ),
-            ExecOutcome::Errored(_) => panic!("composed baseline+overlay run errored"),
-        }
+        assert_run(
+            &live.baseline,
+            &[
+                "DO_SET = true",
+                "main()",
+                &overlay,
+                "DO_SET = false",
+                "main()",
+            ],
+            "99\n99",
+            "unrelated edit must not reset the static: warmed 99 survives the reload",
+        );
     }
 
     /// const-on-const: editing an UPSTREAM const must update a DOWNSTREAM const
@@ -1364,39 +1345,23 @@ mod overlay_runtime_tests {
         let v0 = "const B: int = A + 1\nconst A: int = 5\nfn main() { print(\"{B}\") }\n";
         let v1 = "const B: int = A + 1\nconst A: int = 10\nfn main() { print(\"{B}\") }\n";
 
-        let mut session = bone_session(files(v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
-        let stale_main = full0.lua;
+        let mut live = Live::boot(v0);
 
-        let result = session.update_file("main.rock", v1).expect("update v1");
-        assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "const value edit should be BodyOnly, got {:?}",
-            result.tier
-        );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit_full v1")
-            .0;
+        let overlay = live.overlay(v1);
+        let fresh = live.full();
 
         // Sanity: the stale baseline prints the OLD downstream value (B = old A + 1).
-        let baseline_only = run_parts(&[&stale_main, SYS_STUB, "main()"]);
-        if let ExecOutcome::Output(o) = baseline_only {
-            assert_eq!(
-                normalize_stdout(&o).trim(),
-                "6",
-                "baseline prints stale B = old A + 1"
-            );
-        } else {
-            panic!("stale baseline failed to run");
-        }
+        assert_run(
+            &live.baseline,
+            &["main()"],
+            "6",
+            "baseline prints stale B = old A + 1",
+        );
 
         assert_runtime_eq(
-            &stale_main,
-            &overlay.lua,
-            &fresh.lua,
+            &live.baseline,
+            &overlay,
+            &fresh,
             "const B reads A, A 5->10 => B 11",
         );
     }
@@ -1410,41 +1375,35 @@ mod overlay_runtime_tests {
         let v0 = "const A: int = 5\nconst DEP: int = A + 1\nconst UNRELATED: int = 99\nfn main() { print(\"{A} {DEP} {UNRELATED}\") }\n";
         let v1 = "const A: int = 10\nconst DEP: int = A + 1\nconst UNRELATED: int = 99\nfn main() { print(\"{A} {DEP} {UNRELATED}\") }\n";
 
-        let mut session = bone_session(files(v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let mut live = Live::boot(v0);
 
-        let result = session.update_file("main.rock", v1).expect("update v1");
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = live.overlay(v1);
 
         // A changed -> its ginit fn + line re-emitted. DEP reads A -> its line
         // re-emitted (ginit unchanged, lives in main.lua). UNRELATED is independent
         // -> it must NOT appear in the overlay at all.
         assert!(
-            overlay.lua.contains("__skull_ginit_A"),
+            overlay.contains("__skull_ginit_A"),
             "changed const A must be re-emitted:\n{}",
-            overlay.lua
+            overlay
         );
         assert!(
-            overlay.lua.contains("DEP = "),
+            overlay.contains("DEP = "),
             "dependent const DEP (reads A) must be re-emitted:\n{}",
-            overlay.lua
+            overlay
         );
         assert!(
-            !overlay.lua.contains("UNRELATED"),
+            !overlay.contains("UNRELATED"),
             "independent const UNRELATED must NOT be re-emitted:\n{}",
-            overlay.lua
+            overlay
         );
 
         // ...and the result is still runtime-correct.
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit_full v1")
-            .0;
+        let fresh = live.full();
         assert_runtime_eq(
-            &full0.lua,
-            &overlay.lua,
-            &fresh.lua,
+            &live.baseline,
+            &overlay,
+            &fresh,
             "narrowed const overlay: A 5->10, DEP follows, UNRELATED untouched",
         );
     }
@@ -1458,20 +1417,12 @@ mod overlay_runtime_tests {
         let v0 = "fn f0() -> int { 1 }\nfn main() { print(\"{f0()}\") }\n";
         let v1 = "fn f0() -> int { 9 }\nfn main() { print(\"{f0()}\") }\n";
 
-        let mut session = bone_session(files(v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let stale_main = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("full v0")
-            .0
-            .lua;
-        session.update_file("main.rock", v1).expect("update v1");
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("full v1")
-            .0
-            .lua;
+        let mut live = Live::boot(v0);
+        live.body_edit(v1);
+        let fresh = live.full();
 
         // Empty overlay (just the stub) == "the overlay dropped everything".
-        let stale = run_parts(&[&stale_main, SYS_STUB, "main()"]);
+        let stale = run_parts(&[&live.baseline, SYS_STUB, "main()"]);
         let fresh_run = run_parts(&[&fresh, SYS_STUB, "main()"]);
         match (stale, fresh_run) {
             (ExecOutcome::Output(s), ExecOutcome::Output(f)) => assert_ne!(
@@ -1675,22 +1626,17 @@ mod overlay_runtime_tests {
         let v0 = sim_fixture(1);
         let v1 = sim_fixture(2);
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let mut live = Live::boot(&v0);
 
         // Baseline: the registry runs the v0 body.
-        match run_parts(&[&full0.lua, SIM_DRIVER]) {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "1",
-                "baseline frame should run the v0 system body"
-            ),
-            ExecOutcome::Errored(_) => panic!("baseline fixture failed to run"),
-        }
+        assert_run(
+            &live.baseline,
+            &[SIM_DRIVER],
+            "1",
+            "baseline frame should run the v0 system body",
+        );
 
-        let result = session.update_file("main.rock", &v1).expect("update v1");
+        let result = live.body_edit(&v1);
         // The decorated body edit must re-infer the body (else the overlay can't
         // re-emit it). Guards the bone `lower.rs` footprint fix.
         assert_eq!(
@@ -1698,35 +1644,27 @@ mod overlay_runtime_tests {
             1,
             "a decorated-fn body edit must re-infer exactly the edited body"
         );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = live.emit(&result);
         // The overlay carries the redefined body and slot publication only.
         assert!(
-            overlay.lua.contains("function tick_0()")
-                && !overlay.lua.contains("__rock_rebind_system"),
+            overlay.contains("function tick_0()") && !overlay.contains("__rock_rebind_system"),
             "overlay must redefine the body without a name-based registry repair:\n{}",
-            overlay.lua
+            overlay
         );
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit_full v1")
-            .0;
+        let fresh = live.full();
 
-        let composed = run_parts(&[&full0.lua, &overlay.lua, SIM_DRIVER]);
-        let fresh_run = run_parts(&[&fresh.lua, SIM_DRIVER]);
-        match (composed, fresh_run) {
-            (ExecOutcome::Output(c), ExecOutcome::Output(f)) => {
-                assert_eq!(
-                    normalize_stdout(&f).trim(),
-                    "2",
-                    "fresh full build should run the v1 body"
-                );
-                assert_eq!(
-                    normalize_stdout(&c).trim(),
-                    "2",
-                    "the retained registry CodeRef must run the EDITED decorated body"
-                );
-            }
-            _ => panic!("composed or fresh run errored"),
-        }
+        assert_run(
+            &fresh,
+            &[SIM_DRIVER],
+            "2",
+            "fresh full build should run the v1 body",
+        );
+        assert_run(
+            &live.baseline,
+            &[&overlay, SIM_DRIVER],
+            "2",
+            "the retained registry CodeRef must run the EDITED decorated body",
+        );
     }
 
     /// Slot publication belongs to the OUTER successful overlay boundary. A
@@ -1742,27 +1680,22 @@ mod overlay_runtime_tests {
             "const LATE: int = explode()\nfn explode() -> int {{ error(\"late overlay failure\") return 0 }}\n{}",
             sim_fixture(2).replace("TICK_OUT = 2", "TICK_OUT = 2 + LATE")
         );
-        let mut session = bone_session(files(&v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let mut live = Live::boot(&v0);
 
-        let result = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = live.overlay(&v1);
         let late_line = overlay
-            .lua
             .lines()
             .position(|line| line.trim_start().starts_with("LATE ="))
             .expect("v1 overlay must execute the changed top-level initializer");
         assert!(
-            overlay.lua.contains("__rock_code_slot_stage")
-                && overlay.lua.contains("__rock_code_slot_publish"),
+            overlay.contains("__rock_code_slot_stage")
+                && overlay.contains("__rock_code_slot_publish"),
             "the failing overlay must stage a compatible callback body:\n{}",
-            overlay.lua
+            overlay
         );
 
         let mut failing = String::new();
-        for (index, line) in overlay.lua.lines().enumerate() {
+        for (index, line) in overlay.lines().enumerate() {
             if index == late_line {
                 failing.push_str("error('late overlay failure')\n");
             }
@@ -1771,19 +1704,14 @@ mod overlay_runtime_tests {
         }
         let script = format!(
             "{}\n{}\nlocal ok, err = xpcall(function()\n{}end, debug.traceback)\nif not ok then __rock_code_slot_abort() end\nprint(ok)\nprint(_G.__rock_code_slot_pending == nil)\nrun_frame()\nprint(TICK_OUT)",
-            full0.lua, SYS_STUB, failing
+            live.baseline, SYS_STUB, failing
         );
 
-        match exec_lua(&script) {
-            ExecOutcome::Output(output) => assert_eq!(
-                normalize_stdout(&output).trim(),
-                "false\ntrue\n1",
-                "a failed overlay must report failure and keep the retained v0 CodeRef"
-            ),
-            ExecOutcome::Errored(diagnostic) => {
-                panic!("the loader failure must be caught so the old CodeRef can run: {diagnostic}")
-            }
-        }
+        assert_stdout(
+            exec_lua(&script),
+            "false\ntrue\n1",
+            "a failed overlay must report failure and keep the retained v0 CodeRef",
+        );
     }
 
     #[test]
@@ -1800,14 +1728,8 @@ fn main() {}
             "RUNS = RUNS + 1",
             "error(\"wire hook failed after publication\")",
         );
-        let mut session = bone_session(files(v0)).expect("wire session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("wire full v0");
-        let result = session
-            .update_file("main.rock", &v1)
-            .expect("wire body edit");
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let mut live = Live::boot(v0);
+        let overlay = live.overlay(&v1);
         let driver = r#"
 local function run_wire()
   local phase = _G.__ROCK_LIFECYCLE_PLAN.wire
@@ -1830,8 +1752,8 @@ assert(_G.__ROCK_LIFECYCLE_PLAN == candidate_plan, "hook failure must not claim 
 assert(__rock_globals[runs_key] == 1, "wire failure changed the retained effect")
 print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
 "#
-        .replace("REPLACE_OVERLAY", &overlay.lua);
-        let script = format!("{}\n{}\n{}", full0.lua, SYS_STUB, driver);
+        .replace("REPLACE_OVERLAY", &overlay);
+        let script = format!("{}\n{}\n{}", live.baseline, SYS_STUB, driver);
         match exec_lua(&script) {
             ExecOutcome::Output(output) => {
                 assert!(normalize_stdout(&output).contains("WIRE_HOOK_FAILURE_POST_PUBLICATION"))
@@ -1853,18 +1775,10 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         let v1 = "co fn counter() -> Coroutine<int> {\n  yield 10\n  yield 20\n}\n\
                   fn main() {\n  let c = counter()\n  let a = c.resume() ?? -1\n  let b = c.resume() ?? -1\n  print(\"{a} {b}\")\n}\n";
 
-        let mut session = bone_session(files(v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
-        match run_parts(&[&full0.lua, stub_for(&full0.lua), "main()"]) {
-            ExecOutcome::Output(o) => {
-                assert_eq!(normalize_stdout(&o).trim(), "1 2", "baseline co fn body")
-            }
-            ExecOutcome::Errored(_) => panic!("baseline coroutine fixture failed to run"),
-        }
+        let mut live = Live::boot(v0);
+        assert_run(&live.baseline, &["main()"], "1 2", "baseline co fn body");
 
-        let result = session.update_file("main.rock", v1).expect("update v1");
+        let result = live.body_edit(v1);
         // The co fn body edit must re-infer exactly the edited body.
         assert_eq!(
             result.reinferred.len(),
@@ -1872,34 +1786,27 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             "a co fn body edit re-infers exactly one body"
         );
 
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = live.emit(&result);
         // The overlay must carry the re-emitted coroutine (its top-level step fn).
         assert!(
-            overlay.lua.contains("counter_0__step("),
+            overlay.contains("counter_0__step("),
             "overlay must re-emit the coroutine's step fn:\n{}",
-            overlay.lua
+            overlay
         );
 
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit_full v1")
-            .0;
-        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), &overlay.lua, "main()"]);
-        let fresh_run = run_parts(&[&fresh.lua, stub_for(&fresh.lua), "main()"]);
-        match (composed, fresh_run) {
-            (ExecOutcome::Output(c), ExecOutcome::Output(f)) => {
-                assert_eq!(
-                    normalize_stdout(&f).trim(),
-                    "10 20",
-                    "fresh full build runs the v1 co fn body"
-                );
-                assert_eq!(
-                    normalize_stdout(&c).trim(),
-                    "10 20",
-                    "overlay must run the EDITED coroutine body, not the stale one"
-                );
-            }
-            _ => panic!("composed or fresh coroutine run errored"),
-        }
+        let fresh = live.full();
+        assert_run(
+            &fresh,
+            &["main()"],
+            "10 20",
+            "fresh full build runs the v1 co fn body",
+        );
+        assert_run(
+            &live.baseline,
+            &[&overlay, "main()"],
+            "10 20",
+            "overlay must run the EDITED coroutine body, not the stale one",
+        );
     }
 
     /// A FLAT-ENUM-yielding `co fn` body edit, through the overlay, must re-emit the
@@ -1925,64 +1832,48 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let (v0, v1) = (prog(1, 2), prog(10, 20));
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
-        match run_parts(&[&full0.lua, stub_for(&full0.lua), "main()"]) {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "1 3",
-                "baseline flat-enum co fn (Tick(1)=1, Pair(1,2)=3)"
-            ),
-            ExecOutcome::Errored(_) => panic!("baseline flat-enum coroutine fixture failed to run"),
-        }
+        let mut live = Live::boot(&v0);
+        assert_run(
+            &live.baseline,
+            &["main()"],
+            "1 3",
+            "baseline flat-enum co fn (Tick(1)=1, Pair(1,2)=3)",
+        );
 
-        let result = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = live.overlay(&v1);
         // The overlay must re-emit the whole frame-slot channel.
         assert!(
-            overlay.lua.contains("gen_0__step("),
+            overlay.contains("gen_0__step("),
             "overlay must re-emit the step fn:\n{}",
-            overlay.lua
+            overlay
         );
         assert!(
-            overlay.lua.contains(".__y0 = "),
+            overlay.contains(".__y0 = "),
             "overlay step must write yield leaves to frame slots:\n{}",
-            overlay.lua
+            overlay
         );
         assert!(
-            overlay.lua.contains("function gen_0__advance(")
+            overlay.contains("function gen_0__advance(")
                 && overlay
-                    .lua
                     .contains("__rock_code_slot_ref(\"generated:main.rock::gen<>::advance\")")
-                && overlay
-                    .lua
-                    .contains("__rock_code_slot_ref(\"generated:main.rock::gen<>::resume\")"),
+                && overlay.contains("__rock_code_slot_ref(\"generated:main.rock::gen<>::resume\")"),
             "overlay must re-emit the per-co-fn __advance/__resume fns + CodeRefs in the ctor:\n{}",
-            overlay.lua
+            overlay
         );
 
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit_full v1")
-            .0;
-        let composed = run_parts(&[&full0.lua, stub_for(&full0.lua), &overlay.lua, "main()"]);
-        let fresh_run = run_parts(&[&fresh.lua, stub_for(&fresh.lua), "main()"]);
-        match (composed, fresh_run) {
-            (ExecOutcome::Output(c), ExecOutcome::Output(f)) => {
-                assert_eq!(
-                    normalize_stdout(&f).trim(),
-                    "10 30",
-                    "fresh v1: Tick(10)=10, Pair(10,20)=30"
-                );
-                assert_eq!(
-                    normalize_stdout(&c).trim(),
-                    "10 30",
-                    "overlay must run the EDITED flat-enum body via the re-emitted frame-slot channel"
-                );
-            }
-            _ => panic!("composed or fresh flat-enum coroutine run errored"),
-        }
+        let fresh = live.full();
+        assert_run(
+            &fresh,
+            &["main()"],
+            "10 30",
+            "fresh v1: Tick(10)=10, Pair(10,20)=30",
+        );
+        assert_run(
+            &live.baseline,
+            &[&overlay, "main()"],
+            "10 30",
+            "overlay must run the EDITED flat-enum body via the re-emitted frame-slot channel",
+        );
     }
 
     /// The load-bearing hot-reload case: a flat-enum coroutine created + first-resumed
@@ -2012,36 +1903,18 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let (v0, v1) = (prog(1, 2), prog(10, 20));
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let mut live = Live::boot(&v0);
 
-        let result = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = live.overlay(&v1);
 
         // start() + pump() under v0 (Tick(1)=1), then overlay, then pump() x3 on the
         // SAME live coroutine under v1: Pair(10,20)=30, Done=100, then done -> -1.
-        let composed = run_parts(&[
-            &full0.lua,
-            stub_for(&full0.lua),
-            "start()",
-            "pump()",
-            &overlay.lua,
-            "pump()",
-            "pump()",
-            "pump()",
-        ]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "1\n30\n100\n-1",
-                "live coroutine: v0 first yield (Tick=1), then v1 body across the reload (Pair=30, Done=100, done)"
-            ),
-            ExecOutcome::Errored(_) => {
-                panic!("live flat-enum coroutine reload fixture failed to run")
-            }
-        }
+        assert_run(
+            &live.baseline,
+            &["start()", "pump()", &overlay, "pump()", "pump()", "pump()"],
+            "1\n30\n100\n-1",
+            "live coroutine: v0 first yield (Tick=1), then v1 body across the reload (Pair=30, Done=100, done)",
+        );
     }
 
     /// Layout drift, cell shift: inserting a frame-resident local changes the
@@ -2076,30 +1949,9 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                   @nomangle\n\
                   fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
 
-        let mut session = bone_session(files(v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let mut live = Live::boot(v0);
 
-        let result = session.update_file("main.rock", v1).expect("update v1");
-        assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "inserting a let is a body edit -- must be BodyOnly (the premise), got {:?}",
-            result.tier
-        );
-        let err = match skull::mir_emit::emit_overlay(
-            session.workspace(),
-            &mut cache,
-            &result.reinferred,
-        ) {
-            Ok(_) => panic!("a changed coroutine frame schema must not overlay"),
-            Err(err) => err,
-        };
-        assert!(
-            err.message.contains("safe restart"),
-            "a cell-shifting frame edit must request the safe restart path, got: {}",
-            err.message
-        );
+        live.expect_safe_restart(v1);
     }
 
     /// Layout drift, state renumber: yields are numbered by order, so a BodyOnly
@@ -2124,18 +1976,9 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let (v0, v1) = (prog(""), prog("  yield Ev::Done\n"));
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let mut live = Live::boot(&v0);
 
-        let result = session.update_file("main.rock", &v1).expect("update v1");
-        assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "adding a yield is a body edit -- must be BodyOnly (the premise), got {:?}",
-            result.tier
-        );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = live.overlay(&v1);
 
         // v0: pump() -> Tick(1)=1, suspended at state 1 (before print("fire")).
         // Overlay renumbers: the new Ev::Done yield becomes state 1, so the live
@@ -2143,26 +1986,12 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         // replayed the already-delivered Tick(1), then ran fire/cleanup a pump
         // late). The per-state variant tags in the layout stamp catch the
         // renumbering: resume #2 stamp-kills the coroutine -> -1, no replay.
-        let composed = run_parts(&[
-            &full0.lua,
-            stub_for(&full0.lua),
-            "start()",
-            "pump()",
-            &overlay.lua,
-            "pump()",
-            "pump()",
-            "pump()",
-        ]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "1\n-1\n-1\n-1",
-                "a yield-renumbering overlay must stamp-kill the live coroutine, not teleport its resume point"
-            ),
-            ExecOutcome::Errored(_) => {
-                panic!("yield-renumber + live resume errored (expected the clean kill output)")
-            }
-        }
+        assert_run(
+            &live.baseline,
+            &["start()", "pump()", &overlay, "pump()", "pump()", "pump()"],
+            "1\n-1\n-1\n-1",
+            "a yield-renumbering overlay must stamp-kill the live coroutine, not teleport its resume point",
+        );
     }
 
     /// `await` under hot reload: a live outer+inner delegation chain must pick up
@@ -2188,40 +2017,20 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let (v0, v1) = (prog(1, 2), prog(10, 20));
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let mut live = Live::boot(&v0);
 
-        let result = session.update_file("main.rock", &v1).expect("update v1");
-        assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "a constant tweak in the inner co fn must be BodyOnly, got {:?}",
-            result.tier
-        );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = live.overlay(&v1);
 
         // pump #1 under v0: outer primes inner, re-yields inner's Tick(1). Overlay
         // (layout-stable: constants only). pump #2 resumes the live chain: the
         // inner's stale advance runs the NEW inner_0__step -> Tick(20). pump #3:
         // inner done -> outer's delegate exits, outer completes -> -1.
-        let composed = run_parts(&[
-            &full0.lua,
-            stub_for(&full0.lua),
-            "start()",
-            "pump()",
-            &overlay.lua,
-            "pump()",
-            "pump()",
-        ]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "1\n20\n-1",
-                "a live await chain must thread a BodyOnly inner edit (v0 Tick(1), then v1 Tick(20), then done)"
-            ),
-            ExecOutcome::Errored(_) => panic!("live await delegation reload fixture failed to run"),
-        }
+        assert_run(
+            &live.baseline,
+            &["start()", "pump()", &overlay, "pump()", "pump()"],
+            "1\n20\n-1",
+            "a live await chain must thread a BodyOnly inner edit (v0 Tick(1), then v1 Tick(20), then done)",
+        );
     }
 
     /// A stamp-kill (or ANY error) of an outer coroutine suspended mid-`await`
@@ -2251,37 +2060,17 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let (v0, v1) = (prog(""), prog("  let z = mk(9)\n"));
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
-        let result = session.update_file("main.rock", &v1).expect("update v1");
-        assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "outer's added local must be BodyOnly, got {:?}",
-            result.tier
-        );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let mut live = Live::boot(&v0);
+        let overlay = live.overlay(&v1);
 
         // pump #1: outer primes inner -> Tick(1). Overlay shifts OUTER's layout.
         // pump #2: outer stamp-killed -> -1, and the inner's on_killed must fire.
-        let composed = run_parts(&[
-            &full0.lua,
-            stub_for(&full0.lua),
-            "start()",
-            "pump()",
-            &overlay.lua,
-            "pump()",
-            "report()",
-        ]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "1\n-1\n1",
-                "a stamp-killed outer must chain-kill its delegated inner (inner's on_killed fires exactly once)"
-            ),
-            ExecOutcome::Errored(_) => panic!("stamp-kill inner-chain fixture failed to run"),
-        }
+        assert_run(
+            &live.baseline,
+            &["start()", "pump()", &overlay, "pump()", "report()"],
+            "1\n-1\n1",
+            "a stamp-killed outer must chain-kill its delegated inner (inner's on_killed fires exactly once)",
+        );
     }
 
     /// A layout-changing coroutine edit must be refused before publication;
@@ -2311,28 +2100,28 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let (v0, v1) = (prog("", ""), prog("  let z = mk(999)\n", "  a = a + z\n"));
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
+        let mut live = Live::boot(&v0);
+        live.expect_safe_restart(&v1);
+    }
+
+    /// `gen` must be rejected naming `needle`. Emission collects per-fn skips
+    /// rather than failing the whole unit, so either surface is accepted, but
+    /// the co fn must not emit.
+    fn assert_co_fn_rejected(src: &str, needle: &str) {
+        let session = bone_session(files(src)).expect("session");
         let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (_full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
-        let result = session.update_file("main.rock", &v1).expect("update v1");
-        assert!(matches!(
-            result.tier,
-            bone_incremental::session::UpdateTier::BodyOnly
-        ));
-        let err = match skull::mir_emit::emit_overlay(
-            session.workspace(),
-            &mut cache,
-            &result.reinferred,
-        ) {
-            Ok(_) => panic!("a changed coroutine frame schema must not overlay"),
-            Err(err) => err,
-        };
-        assert!(
-            err.message.contains("safe restart"),
-            "a frame-layout edit must request the safe restart path, got: {}",
-            err.message
-        );
+        match skull::mir_emit::emit_full(session.workspace(), mid) {
+            Err(e) => assert!(
+                format!("{e:?}").contains(needle),
+                "rejection must mention {needle}, got: {e:?}"
+            ),
+            Ok((full, _)) => assert!(
+                !full.lua.contains("function gen_0__step("),
+                "a rejected co fn must not emit:
+{}",
+                full.lua
+            ),
+        }
     }
 
     /// A coroutine hook (`on_killed`/`on_resume`/`on_hot_reload`) argument must
@@ -2346,23 +2135,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                    fn cleanup() { print(\"x\") }\n\
                    co fn gen() -> Coroutine<Ev> {\n  on_killed(cleanup)\n  yield Ev::Tick(1)\n}\n\
                    fn main() { let c = gen() }\n";
-        let session = bone_session(files(src)).expect("session");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        match skull::mir_emit::emit_full(session.workspace(), mid) {
-            Err(e) => assert!(
-                format!("{e:?}").contains("lambda"),
-                "rejection must say the hook needs a lambda, got: {e:?}"
-            ),
-            Ok((full, _)) => {
-                // Per-fn skips are also an acceptable surface -- but the co fn
-                // must NOT emit with a silently-dropped hook.
-                assert!(
-                    !full.lua.contains("function gen_0__step("),
-                    "a co fn with a non-lambda hook arg must not emit:\n{}",
-                    full.lua
-                );
-            }
-        }
+        assert_co_fn_rejected(src, "lambda");
     }
 
     /// `yield` inside a `defer` body is a compile error (a defer body cannot
@@ -2372,24 +2145,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         let src = "enum Ev { Tick(int), Act(() -> ()) }\n\
                    co fn gen() -> Coroutine<Ev> {\n  defer { yield Ev::Tick(1) }\n  yield Ev::Tick(2)\n}\n\
                    fn main() { let c = gen() }\n";
-        let session = bone_session(files(src)).expect("session");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let err = skull::mir_emit::emit_full(session.workspace(), mid);
-        match err {
-            Err(e) => assert!(
-                format!("{e:?}").contains("defer"),
-                "rejection must mention defer, got: {e:?}"
-            ),
-            Ok((full, _)) => {
-                // Emission collects per-fn skips rather than failing the whole
-                // unit -- accept either surface, but the co fn must NOT emit.
-                assert!(
-                    !full.lua.contains("function gen_0__step("),
-                    "a co fn with `yield` inside a defer body must not emit:\n{}",
-                    full.lua
-                );
-            }
-        }
+        assert_co_fn_rejected(src, "defer");
     }
 
     /// Layout drift via the Interface tier (which does NOT protect live
@@ -2426,70 +2182,43 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                   @nomangle\n\
                   fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
 
-        let mut session = bone_session(files(v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, _cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let mut live = Live::boot(v0);
 
-        let result = session.update_file("main.rock", v1).expect("update v1");
-        assert!(
-            matches!(
-                result.tier,
-                bone_incremental::session::UpdateTier::Interface
-                    | bone_incremental::session::UpdateTier::FullUser
-            ),
-            "an enum shape edit must be a full rebuild (the premise), got {:?}",
-            result.tier
-        );
-        let full1 = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit_full v1")
-            .0;
+        let full1 = live.full_reload(v1);
 
         // Premise (non-inverted, stays green): the live coroutine SURVIVES the full
         // re-dofile -- the mutable-global preservation guard keeps GEN.
-        let survival = run_parts(&[
-            &full0.lua,
-            stub_for(&full0.lua),
-            "start()",
-            "pump()",
-            "_G.HOT_RELOAD = true",
-            &full1.lua,
-            "print(_G.GEN ~= nil)",
-        ]);
-        match survival {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "7\ntrue",
-                "a live coroutine in a mutable global must survive a full re-dofile (HOT_RELOAD guard)"
-            ),
-            ExecOutcome::Errored(_) => panic!("full-reload survival fixture failed to run"),
-        }
+        assert_run(
+            &live.baseline,
+            &[
+                "start()",
+                "pump()",
+                "_G.HOT_RELOAD = true",
+                &full1,
+                "print(_G.GEN ~= nil)",
+            ],
+            "7\ntrue",
+            "a live coroutine in a mutable global must survive a full re-dofile (HOT_RELOAD guard)",
+        );
 
         // Resuming the survivor: the v1 step's layout stamp (yield channel
         // widened by the Tick payload growing past the union width) rejects the
         // v0 frame -- the coroutine dies cleanly through the pcall path and pump
         // prints -1. Pre-stamp this CRASHED the consumer on the shifted frame
         // read, through the very tier the hot-reload contract once claimed was safe.
-        let composed = run_parts(&[
-            &full0.lua,
-            stub_for(&full0.lua),
-            "start()",
-            "pump()",
-            "_G.HOT_RELOAD = true",
-            &full1.lua,
-            "print(_G.GEN ~= nil)",
-            "pump()",
-        ]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "7\ntrue\n-1",
-                "a shape-edit full reload must stamp-kill the surviving live coroutine, not corrupt it"
-            ),
-            ExecOutcome::Errored(_) => {
-                panic!("full-reload survivor resume crashed -- the layout stamp regressed")
-            }
-        }
+        assert_run(
+            &live.baseline,
+            &[
+                "start()",
+                "pump()",
+                "_G.HOT_RELOAD = true",
+                &full1,
+                "print(_G.GEN ~= nil)",
+                "pump()",
+            ],
+            "7\ntrue\n-1",
+            "a shape-edit full reload must stamp-kill the surviving live coroutine, not corrupt it",
+        );
     }
 
     /// PREMISE pin for the schema-drift restart policy:
@@ -2520,56 +2249,35 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                   fn describe() {\n  let m = M\n  if m != null { print(\"{m.hp + m.armor}\") }\n}\n\
                   fn main() { }\n";
 
-        let mut session = bone_session(files(v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let full0 = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit_full v0")
-            .0;
+        let mut live = Live::boot(v0);
 
-        let result = session.update_file("main.rock", v1).expect("update v1");
-        assert!(
-            matches!(
-                result.tier,
-                bone_incremental::session::UpdateTier::Interface
-                    | bone_incremental::session::UpdateTier::FullUser
-            ),
-            "a struct shape edit must be a full rebuild (the premise), got {:?}",
-            result.tier
-        );
-        let full1 = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit_full v1")
-            .0;
+        let full1 = live.full_reload(v1);
 
         // Survival premise: the live v0 instance rides through the full
         // re-dofile untouched -- `"Mob?"` didn't change, so the guard skips
         // the re-init and the old-shape table persists.
-        let survival = run_parts(&[
-            &full0.lua,
-            stub_for(&full0.lua),
-            "spawn()",
-            "describe()",
-            "_G.HOT_RELOAD = true",
-            &full1.lua,
-            "print(_G.M ~= nil and _G.M.armor == nil)",
-        ]);
-        match survival {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "10\ntrue",
-                "a live struct instance must survive the full re-dofile WITHOUT the added field"
-            ),
-            ExecOutcome::Errored(_) => panic!("struct-shape survival fixture failed to run"),
-        }
+        assert_run(
+            &live.baseline,
+            &[
+                "spawn()",
+                "describe()",
+                "_G.HOT_RELOAD = true",
+                &full1,
+                "print(_G.M ~= nil and _G.M.armor == nil)",
+            ],
+            "10\ntrue",
+            "a live struct instance must survive the full re-dofile WITHOUT the added field",
+        );
 
         // Corruption: the v1 reader assumes `armor: int` on an instance that
         // never had it -- `m.hp + m.armor` is arithmetic on nil.
         let composed = run_parts(&[
-            &full0.lua,
-            stub_for(&full0.lua),
+            &live.baseline,
+            stub_for(&live.baseline),
             "spawn()",
             "describe()",
             "_G.HOT_RELOAD = true",
-            &full1.lua,
+            &full1,
             "describe()",
         ]);
         // Assert the SPECIFIC failure: any-error-is-success would also pass on a
@@ -2609,32 +2317,17 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                   fn show() { print(\"{CUR.x},{CUR.y}\") }\n\
                   fn main() { }\n";
 
-        let mut session = bone_session(files(v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let full0 = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit_full v0")
-            .0;
+        let mut live = Live::boot(v0);
 
-        let result = session.update_file("main.rock", v1).expect("update v1");
-        assert!(
-            matches!(
-                result.tier,
-                bone_incremental::session::UpdateTier::Interface
-                    | bone_incremental::session::UpdateTier::FullUser
-            ),
-            "a value-struct layout edit must be a full rebuild (the premise), got {:?}",
-            result.tier
-        );
-        let full1 = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit_full v1")
-            .0;
+        let full1 = live.full_reload(v1);
 
         // v0 alone: sanity -- set/show agree on the layout.
-        let fresh = run_parts(&[&full0.lua, stub_for(&full0.lua), "store_p()", "show()"]);
-        match fresh {
-            ExecOutcome::Output(o) => assert_eq!(normalize_stdout(&o).trim(), "1,2"),
-            ExecOutcome::Errored(_) => panic!("value-struct v0 fixture failed to run"),
-        }
+        assert_run(
+            &live.baseline,
+            &["store_p()", "show()"],
+            "1,2",
+            "value-struct v0 fixture",
+        );
 
         // Composed: the v1 chunk re-cdefs P (silent no-op), so LuaJIT keeps the
         // v0 layout. Left alone this misassigns silently -- the v1 positional
@@ -2651,12 +2344,12 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         // the loud backstop for anything that ever slips past it, which is what
         // makes this class detectable rather than silent.
         let composed = run_parts(&[
-            &full0.lua,
-            stub_for(&full0.lua),
+            &live.baseline,
+            stub_for(&live.baseline),
             "store_p()",
             "show()",
             "_G.HOT_RELOAD = true",
-            &full1.lua,
+            &full1,
             "store_p()",
             "show()",
         ]);
@@ -2691,17 +2384,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                   co fn gen() -> Coroutine<Ev> { yield Ev::Tick(1, 2) }\n\
                   fn main() { let c = gen() }\n";
 
-        let mut session = bone_session(files(v0)).expect("session v0");
-        let result = session.update_file("main.rock", v1).expect("update v1");
-        assert!(
-            matches!(
-                result.tier,
-                bone_incremental::session::UpdateTier::Interface
-                    | bone_incremental::session::UpdateTier::FullUser
-            ),
-            "an enum shape change must force a full rebuild (not a BodyOnly overlay), got {:?}",
-            result.tier
-        );
+        Live::boot(v0).full_reload(v1);
     }
 
     /// `@on_reload` callbacks (e.g. the engine's `fire_live_coroutine_hot_reloads`,
@@ -2733,36 +2416,26 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let (v0, v1, v2) = (prog(1), prog(2), prog(3));
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let mut live = Live::boot(&v0);
 
-        let r1 = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay1 = emit_overlay_checked(session.workspace(), &mut cache, &r1.reinferred);
-        let r2 = session.update_file("main.rock", &v2).expect("update v2");
-        let overlay2 = emit_overlay_checked(session.workspace(), &mut cache, &r2.reinferred);
+        let overlay1 = live.overlay(&v1);
+        let overlay2 = live.overlay(&v2);
 
         // full0 registers bump_fire_count via @on_reload. Each overlay is a body
         // edit of `unrelated` (bump_fire_count is NEVER in the changed set), then a
         // real fire. Both fires must run the callback -> FIRE_COUNT == 2.
-        let composed = run_parts(&[
-            &full0.lua,
-            stub_for(&full0.lua),
-            &overlay1.lua,
-            "__rock_fire_hot_reload_callbacks()",
-            &overlay2.lua,
-            "__rock_fire_hot_reload_callbacks()",
-            "report()",
-        ]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "2",
-                "the @on_reload callback must fire on BOTH incremental reloads"
-            ),
-            ExecOutcome::Errored(_) => panic!("on_reload overlay fixture failed to run"),
-        }
+        assert_run(
+            &live.baseline,
+            &[
+                &overlay1,
+                "__rock_fire_hot_reload_callbacks()",
+                &overlay2,
+                "__rock_fire_hot_reload_callbacks()",
+                "report()",
+            ],
+            "2",
+            "the @on_reload callback must fire on BOTH incremental reloads",
+        );
     }
 
     /// Editing the BODY of an `@on_reload` fn, delivered as an overlay, must run
@@ -2780,31 +2453,18 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let (v0, v1) = (prog(1), prog(2));
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let mut live = Live::boot(&v0);
 
-        let r1 = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &r1.reinferred);
+        let overlay = live.overlay(&v1);
 
         // full0 registers the CodeRef. The overlay stages the edited body, and
         // the existing callback entry must invoke it.
-        let composed = run_parts(&[
-            &full0.lua,
-            stub_for(&full0.lua),
-            &overlay.lua,
-            "__rock_fire_hot_reload_callbacks()",
-            "report()",
-        ]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "2",
-                "fire must run the EDITED @on_reload body through its CodeRef"
-            ),
-            ExecOutcome::Errored(_) => panic!("on_reload body-edit fixture failed to run"),
-        }
+        assert_run(
+            &live.baseline,
+            &[&overlay, "__rock_fire_hot_reload_callbacks()", "report()"],
+            "2",
+            "fire must run the EDITED @on_reload body through its CodeRef",
+        );
     }
 
     /// `@on_reload` stores a function value, so ordinary name mangling does not
@@ -2864,7 +2524,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// A capturing co-fn lambda whose BODY is edited (operator `+` -> `*`): the
     /// overlay must carry the hoisted `gen_0__step__lambda0` body, and a
     /// coroutine created AFTER the reload runs the new lambda behavior. Equals a
-    /// fresh full build of v1. The `overlay.lua.contains("gen_0__step__lambda0")`
+    /// fresh full build of v1. The `overlay.contains("gen_0__step__lambda0")`
     /// assertion is what discriminates P1 from pre-P1 (which had no hoisted
     /// global -- the lambda was an inline closure inside the step).
     #[test]
@@ -2883,20 +2543,11 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let (v0, v1) = (prog('+'), prog('*'));
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let mut live = Live::boot(&v0);
 
-        let result = session.update_file("main.rock", &v1).expect("update v1");
+        let overlay = live.overlay(&v1);
         assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "editing a lambda operator is a body edit, got {:?}",
-            result.tier
-        );
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
-        assert!(
-            overlay.lua.contains("gen_0__step__lambda0"),
+            overlay.contains("gen_0__step__lambda0"),
             "the overlay must carry the hoisted lambda body (const-hoist precedent); \
              absence means pre-P1 inline-closure emission"
         );
@@ -2904,24 +2555,12 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         // "12\n-1" IS a fresh v1 full build's output, so this doubles as the
         // fresh-equivalence check (the program has no `main`, so the generic
         // `assert_runtime_eq` driver doesn't apply -- start/pump is the driver).
-        let composed = run_parts(&[
-            &full0.lua,
-            stub_for(&full0.lua),
-            &overlay.lua,
-            "start()",
-            "pump()",
-            "pump()",
-        ]);
-        match composed {
-            ExecOutcome::Output(o) => assert_eq!(
-                normalize_stdout(&o).trim(),
-                "12\n-1",
-                "a coroutine created after the reload runs the new hoisted lambda body (4*3=12)"
-            ),
-            ExecOutcome::Errored(_) => {
-                panic!("post-reload coroutine with hoisted lambda failed to run")
-            }
-        }
+        assert_run(
+            &live.baseline,
+            &[&overlay, "start()", "pump()", "pump()"],
+            "12\n-1",
+            "a coroutine created after the reload runs the new hoisted lambda body (4*3=12)",
+        );
     }
 
     /// A LIVE coroutine created BEFORE the reload survives a layout-stable body
@@ -2943,52 +2582,36 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let (v0, v1) = (prog('+'), prog('*'));
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let mut live = Live::boot(&v0);
         // Layout-stable premise: an operator edit doesn't touch the frame canon.
         assert_eq!(
-            layout_stamp(&full0.lua, "gen_0"),
-            {
-                let mut s = bone_session(files(&v1)).expect("session v1 probe");
-                let m = skull::user_module_id(s.workspace()).unwrap();
-                let f = skull::mir_emit::emit_full(s.workspace(), m)
-                    .expect("emit v1 probe")
-                    .0;
-                let _ = &mut s;
-                layout_stamp(&f.lua, "gen_0")
-            },
+            layout_stamp(&live.baseline, "gen_0"),
+            layout_stamp(&Live::boot(&v1).baseline, "gen_0"),
             "an operator-only edit must be layout-stable (no frame-cell change)"
         );
 
-        let result = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &result.reinferred);
+        let overlay = live.overlay(&v1);
         assert!(
-            overlay.lua.contains("gen_0__step__lambda1"),
+            overlay.contains("gen_0__step__lambda1"),
             "overlay must carry the hoisted g body"
         );
 
         // start() + pump() under v0: f(3)=8. Overlay (op *). The same stored
         // record now resolves lambda0's edited body, then g uses lambda1.
         let composed = run_parts(&[
-            &full0.lua,
-            stub_for(&full0.lua),
+            &live.baseline,
+            stub_for(&live.baseline),
             "start()",
             "pump()",
-            &overlay.lua,
+            &overlay,
             "pump()",
             "pump()",
             "pump()",
         ]);
-        let fresh_session = bone_session(files(&v1)).expect("fresh session v1");
-        let fresh_mid = skull::user_module_id(fresh_session.workspace()).unwrap();
-        let fresh = skull::mir_emit::emit_full(fresh_session.workspace(), fresh_mid)
-            .expect("emit fresh v1")
-            .0;
+        let fresh = Live::boot(&v1).baseline;
         let fresh_run = run_parts(&[
-            &fresh.lua,
-            stub_for(&fresh.lua),
+            &fresh,
+            stub_for(&fresh),
             "start()",
             "pump()",
             "pump()",
@@ -3047,40 +2670,29 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let v0 = program(1, 10);
         let v1 = program(2, 20);
-        let mut session = bone_session(files(&v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
-        let baseline = run_parts(&[&full0.lua, "start()", "invoke()"]);
-        match baseline {
-            ExecOutcome::Output(output) => assert_eq!(normalize_stdout(&output).trim(), "4 10"),
-            ExecOutcome::Errored(error) => {
-                panic!("baseline named/capture-free values failed: {error}")
-            }
-        }
+        let mut live = Live::boot(&v0);
+        assert_run(
+            &live.baseline,
+            &["start()", "invoke()"],
+            "4 10",
+            "baseline named/capture-free values",
+        );
 
-        let update = session.update_file("main.rock", &v1).expect("update v1");
-        let overlay = emit_overlay_checked(session.workspace(), &mut cache, &update.reinferred);
-        assert!(overlay.lua.contains("__rock_code_slot_stage"));
-        assert!(overlay.lua.contains("__rock_code_slot_publish"));
-        let composed = run_parts(&[&full0.lua, "start()", &overlay.lua, "invoke()"]);
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit_full v1")
-            .0;
-        let fresh_run = run_parts(&[&fresh.lua, "start()", "invoke()"]);
-        match (composed, fresh_run) {
-            (ExecOutcome::Output(composed), ExecOutcome::Output(fresh)) => {
-                assert_eq!(normalize_stdout(&composed).trim(), "5 20");
-                assert_eq!(normalize_stdout(&composed), normalize_stdout(&fresh));
-            }
-            (ExecOutcome::Errored(composed), ExecOutcome::Errored(fresh)) => {
-                panic!("slot values both failed: composed={composed}; fresh={fresh}")
-            }
-            (ExecOutcome::Errored(composed), _) => {
-                panic!("composed slot values failed: {composed}")
-            }
-            (_, ExecOutcome::Errored(fresh)) => panic!("fresh slot values failed: {fresh}"),
-        }
+        let overlay = live.overlay(&v1);
+        assert!(overlay.contains("__rock_code_slot_stage"));
+        assert!(overlay.contains("__rock_code_slot_publish"));
+        assert_run(
+            &live.baseline,
+            &["start()", &overlay, "invoke()"],
+            "5 20",
+            "composed slot values",
+        );
+        assert_run(
+            &live.full(),
+            &["start()", "invoke()"],
+            "5 20",
+            "fresh slot values",
+        );
     }
 
     /// A bounded fn exists only as splices, so its lambda reaches closure
@@ -3108,47 +2720,25 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         let same_abi = prog("[2].iter(), 2");
         let new_abi = prog("[Pair { a: 3, b: 4 }].iter(), Pair { a: 3, b: 4 }");
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let mut live = Live::boot(&v0);
         assert!(
-            !full0.lua.contains("missing-lambda-abi"),
+            !live.baseline.contains("missing-lambda-abi"),
             "a spliced lambda must keep its call ABI"
         );
 
-        let result = session.update_file("main.rock", &same_abi).expect("update");
-        assert!(matches!(
-            result.tier,
-            bone_incremental::session::UpdateTier::BodyOnly
-        ));
-        if let Err(err) =
-            skull::mir_emit::emit_overlay(session.workspace(), &mut cache, &result.reinferred)
-        {
+        let update = live.body_edit(&same_abi);
+        if let Err(err) = skull::mir_emit::emit_overlay(
+            live.session.workspace(),
+            &mut live.cache,
+            &update.reinferred,
+        ) {
             panic!(
                 "an edit that keeps the lambda ABI must overlay: {}",
                 err.message
             );
         }
 
-        let result = session.update_file("main.rock", &new_abi).expect("update");
-        assert!(matches!(
-            result.tier,
-            bone_incremental::session::UpdateTier::BodyOnly
-        ));
-        let err = match skull::mir_emit::emit_overlay(
-            session.workspace(),
-            &mut cache,
-            &result.reinferred,
-        ) {
-            Ok(_) => panic!("a changed lambda call ABI must not overlay"),
-            Err(err) => err,
-        };
-        assert!(
-            err.message.contains("safe restart"),
-            "an incompatible lambda must request the safe restart path, got: {}",
-            err.message
-        );
+        live.expect_safe_restart(&new_abi);
     }
 
     /// A lambda-local edit leaves the coroutine frame stamp stable, but changes
@@ -3173,40 +2763,13 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         let v0 = prog("x + base");
         let v1 = prog("{ let y = base + base; x + y }");
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let mut live = Live::boot(&v0);
 
-        let result = session.update_file("main.rock", &v1).expect("update v1");
-        assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "adding a lambda-local is a body edit, got {:?}",
-            result.tier
-        );
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit_full v1")
-            .0;
-
+        live.expect_safe_restart(&v1);
         assert_eq!(
-            layout_stamp(&full0.lua, "gen_0"),
-            layout_stamp(&fresh.lua, "gen_0"),
+            layout_stamp(&live.baseline, "gen_0"),
+            layout_stamp(&live.full(), "gen_0"),
             "the lambda-local edit must not change the coroutine frame stamp"
-        );
-        let err = match skull::mir_emit::emit_overlay(
-            session.workspace(),
-            &mut cache,
-            &result.reinferred,
-        ) {
-            Ok(_) => panic!(
-                "a changed escaping lambda body must not overlay across its compatibility record"
-            ),
-            Err(err) => err,
-        };
-        assert!(
-            err.message.contains("safe restart"),
-            "incompatible lambda body must request the safe restart path, got: {}",
-            err.message
         );
     }
 
@@ -3231,39 +2794,13 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         };
         let (v0, v1) = (prog(""), prog("  let z = mk(9)\n  yield Ev::Tick(z)\n"));
 
-        let mut session = bone_session(files(&v0)).expect("session v0");
-        let mid = skull::user_module_id(session.workspace()).unwrap();
-        let (full0, mut cache) =
-            skull::mir_emit::emit_full(session.workspace(), mid).expect("emit_full v0");
+        let mut live = Live::boot(&v0);
 
-        let result = session.update_file("main.rock", &v1).expect("update v1");
-        assert!(
-            matches!(result.tier, bone_incremental::session::UpdateTier::BodyOnly),
-            "adding a co-fn local is a body edit, got {:?}",
-            result.tier
-        );
-        let fresh = skull::mir_emit::emit_full(session.workspace(), mid)
-            .expect("emit_full v1")
-            .0;
-
+        live.expect_safe_restart(&v1);
         assert_ne!(
-            layout_stamp(&full0.lua, "gen_0"),
-            layout_stamp(&fresh.lua, "gen_0"),
+            layout_stamp(&live.baseline, "gen_0"),
+            layout_stamp(&live.full(), "gen_0"),
             "a co-fn-level local must shift the frame layout stamp"
-        );
-
-        let err = match skull::mir_emit::emit_overlay(
-            session.workspace(),
-            &mut cache,
-            &result.reinferred,
-        ) {
-            Ok(_) => panic!("a changed coroutine frame schema must not overlay"),
-            Err(err) => err,
-        };
-        assert!(
-            err.message.contains("safe restart"),
-            "incompatible coroutine frame must request the safe restart path, got: {}",
-            err.message
         );
     }
 }
