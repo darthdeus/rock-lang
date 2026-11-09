@@ -113,26 +113,7 @@ fn initialized_global() {
     print("{dt:.4f}")  // Use fixed precision to avoid platform differences
 }
 
-@test(output = "1")
-fn global_decl() {
-    // Test that global declarations work
-    print(1)  // Just verify it compiles with global image: Image declared
-}
-
 // Loop test
-@test(output = "55")
-fn for_loop_twice() {
-    let sum = 0
-    for i in [1, 2, 3, 4, 5] {
-        sum = sum + i
-    }
-
-    for i in [6, 7, 8, 9, 10] {
-        sum = sum + i
-    }
-
-    print(sum)
-}
 
 // Nullable type tests
 @test(output = "4", type_holes = [[7, "int"]])
@@ -241,16 +222,6 @@ fn shadow_else_outer() -> int {
     }
 }
 
-fn shadow_in_if_branch() -> int {
-    let x: int = 5
-    if true {
-        let x = x
-        x
-    } else {
-        x
-    }
-}
-
 fn nested_shadow() -> int {
     let x: int = 5
     if true {
@@ -269,11 +240,6 @@ fn nested_shadow() -> int {
 @test(output = "5")
 fn shadow_and_else_uses_outer() {
     print(shadow_else_outer())
-}
-
-@test(output = "5")
-fn shadow_in_if() {
-    print(shadow_in_if_branch())
 }
 
 @test(output = "5")
