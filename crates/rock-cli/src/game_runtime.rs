@@ -83,7 +83,7 @@ pub trait GameCompiler {
 
 /// Skull backend: bone `Session` + `SkullEmitCache` (the `IncrementalProject` holder),
 /// emitting a full `main.lua` baseline or an `incremental.lua` overlay per tier.
-pub(crate) struct SkullGameCompiler {
+pub struct SkullGameCompiler {
     stone: Option<crate::skull_backend::IncrementalProject>,
     dir: String,
     output_path: PathBuf,

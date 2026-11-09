@@ -1,6 +1,6 @@
 use super::compile_cmd;
 
-pub(crate) fn emit_overlay_checked(
+pub fn emit_overlay_checked(
     ws: &bone_semantic::inference::Workspace,
     cache: &mut skull::mir_emit::SkullEmitCache,
     reinferred: &[(
@@ -12,7 +12,7 @@ pub(crate) fn emit_overlay_checked(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) enum ExecOutcome {
+pub enum ExecOutcome {
     /// Clean run; holds full stdout (module load prints + test prints).
     Output(String),
     /// Runtime error, lua load failure, spawn failure, or timeout -- carrying
@@ -51,7 +51,7 @@ pub(crate) fn exec_lua(program: &str) -> ExecOutcome {
 /// Replace `0x<hex>` sequences with `0xADDR`: table/cdata identity prints
 /// differ per-process and would false-positive every diff.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn normalize_stdout(s: &str) -> String {
+pub fn normalize_stdout(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -76,7 +76,7 @@ pub(crate) fn normalize_stdout(s: &str) -> String {
 
 /// First line where `lhs` and `rhs` differ, for divergence reporting.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn first_diff_line(lhs: &str, rhs: &str) -> String {
+pub fn first_diff_line(lhs: &str, rhs: &str) -> String {
     for (i, (a, b)) in lhs.lines().zip(rhs.lines()).enumerate() {
         if a != b {
             return format!("line {}: {:?} != {:?}", i + 1, a, b);
@@ -95,7 +95,7 @@ pub(crate) fn first_diff_line(lhs: &str, rhs: &str) -> String {
 pub(crate) const SYS_STUB: &str = "function clear_all_systems() end\n";
 
 /// The stub is omitted when a fixture defines its own reset function.
-pub(crate) fn stub_for(full_lua: &str) -> &'static str {
+pub fn stub_for(full_lua: &str) -> &'static str {
     if full_lua.contains("function clear_all_systems") {
         ""
     } else {
@@ -106,7 +106,7 @@ pub(crate) fn stub_for(full_lua: &str) -> &'static str {
 /// `main` is unmangled (no-mangle exception), so a bare `main()` entry runs
 /// it on both sides without computing a mangled name. Append AFTER the
 /// overlay so the overlay's fresh `main` wins over the stale baseline's.
-pub(crate) fn run_parts(parts: &[&str]) -> ExecOutcome {
+pub fn run_parts(parts: &[&str]) -> ExecOutcome {
     exec_lua(&parts.join("\n"))
 }
 
