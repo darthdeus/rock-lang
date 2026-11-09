@@ -1180,7 +1180,8 @@ pub fn semantic_pass_with_aliases(
 /// When the shared prefix of `modules` is the process stdlib and no user
 /// module can change it, the pass starts from the stdlib checked once per
 /// process ([`crate::stdlib_base`]) and leaves the prefix shared and
-/// unexpanded. Otherwise the whole set is made owned and lowered.
+/// unexpanded. Otherwise the whole set is made owned and lowered. No session
+/// retains the result, so lowering records no scope probes.
 pub fn semantic_pass_without_closure_gate(
     modules: &mut ModuleSet,
     aliases: &bone_core::modules::NsAliases,
@@ -1190,7 +1191,10 @@ pub fn semantic_pass_without_closure_gate(
     }
     let timer = Instant::now();
     let owned = modules.make_owned();
-    let mut ws = Workspace::default();
+    let mut ws = Workspace {
+        skip_scope_probes: true,
+        ..Workspace::default()
+    };
     ws.log_time("own stdlib", timer);
     semantic_pass_into(ws, owned, aliases)
 }

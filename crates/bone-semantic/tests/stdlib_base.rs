@@ -172,3 +172,31 @@ fn a_fallback_pass_leaves_the_shared_stdlib_unexpanded() {
     let after = stdlib.iter().map(|ast| ast.items.len()).collect::<Vec<_>>();
     assert_eq!(before, after);
 }
+
+#[test]
+fn a_one_shot_pass_records_no_scope_probes() {
+    // Scope probes exist for the incremental session's re-lowering; a pass
+    // whose workspace no session retains must not spend time recording them.
+    let program = "fn helper(x: int) -> int { x }\nfn main() -> int { helper(1) }\n";
+    let user_probes = |ws: &Workspace| {
+        ws.modules
+            .iter()
+            .find(|m| m.file.as_str() == "<test>")
+            .expect("user module")
+            .scope_probes
+            .len()
+    };
+    let mut combined = with_stdlib(program).into_vec();
+    let retained = semantic_pass_into(Workspace::default(), &mut combined, &Default::default());
+    assert!(user_probes(&retained.unwrap()) > 0);
+    // Both the reusing pass and the combined fallback.
+    for owned in [false, true] {
+        let mut modules = with_stdlib(program);
+        if owned {
+            modules.make_owned();
+        }
+        let ws = semantic_pass_without_closure_gate(&mut modules, &Default::default()).unwrap();
+        assert_eq!(reused(&ws), !owned);
+        assert_eq!(user_probes(&ws), 0);
+    }
+}

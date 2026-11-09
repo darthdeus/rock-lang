@@ -245,6 +245,7 @@ pub(crate) fn semantic_pass(
     };
     let clone_timer = Instant::now();
     let mut ws = base.workspace();
+    ws.skip_scope_probes = true;
     ws.phase_timings.push(("stdlib base", base_time));
     ws.log_time("clone base", clone_timer);
     Some((|| {

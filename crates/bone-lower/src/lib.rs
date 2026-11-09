@@ -154,6 +154,9 @@ pub struct LowerCtx<'a> {
 impl<'a> LowerCtx<'a> {
     /// Run one resolver lookup and record what it read.
     fn probed<R>(&self, lookup: impl FnOnce() -> R) -> R {
+        if self.workspace.skip_scope_probes {
+            return lookup();
+        }
         let (result, probes) = resolve::with_probes(lookup);
         self.scope_probes.borrow_mut().extend(probes);
         result
@@ -188,6 +191,9 @@ impl<'a> LowerCtx<'a> {
 
     /// A legacy file's bare-name lookup reads `legacy_name(file, name)`.
     fn probe_legacy(&self, name: Ustr) {
+        if self.workspace.skip_scope_probes {
+            return;
+        }
         self.scope_probes
             .borrow_mut()
             .push(bone_core::modules::ScopeProbe::Legacy { name });
