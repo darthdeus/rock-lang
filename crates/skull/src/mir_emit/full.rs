@@ -1052,15 +1052,31 @@ pub(super) fn emit_full_build(
     });
 
     let setup_traffic = (scx.rep_arena_stats(), scx.interner().stats());
-    let (chunks, inline_candidate_table) = emit_full_chunks(
-        ws,
-        &cg,
-        &scx,
-        &concrete,
-        &lua_view,
-        mutation,
-        &mut setup_phases,
-    )?;
+    // The chunk-free assembly inputs (scaffold, decorator and global units,
+    // globals directory) are prepared beside the chunk build, on the same
+    // pool, instead of serially at the start of assembly.
+    let (chunks, (early, early_window)) = parallel_join(
+        || {
+            emit_full_chunks(
+                ws,
+                &cg,
+                &scx,
+                &concrete,
+                &lua_view,
+                mutation,
+                &mut setup_phases,
+            )
+        },
+        || {
+            let started = Instant::now();
+            let early = prepare_early_assembly(ws, &scx, &cg, &concrete);
+            (early, started.elapsed())
+        },
+    );
+    let (chunks, inline_candidate_table) = chunks?;
+    setup_phases
+        .0
+        .push(("window: early assembly", early_window));
     let (dependents, dependency_edges) = index_dependents(&chunks, build.lifetime());
     let concrete_stats = if concrete_stats_requested() {
         concrete.snapshot_build_stats()
@@ -1112,8 +1128,13 @@ pub(super) fn emit_full_build(
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let graph_census = cache.graph.run_stats;
     let assembly_started = Instant::now();
-    let (mut emit, emitted, unit_reads) =
-        assemble(ws, &mut cache, &mut built_specs, build.lifetime())?;
+    let (mut emit, emitted, unit_reads) = assemble(
+        ws,
+        &mut cache,
+        &mut built_specs,
+        build.lifetime(),
+        Some(early),
+    )?;
     let assembly_window = assembly_started.elapsed();
     emit.concrete_stats = concrete_stats;
     emit.setup_lanes = setup_lanes;

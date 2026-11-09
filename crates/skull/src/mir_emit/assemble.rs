@@ -161,46 +161,11 @@ impl Assembly {
         }
     }
 
-    /// IR-agnostic load-time scaffolding.
-    fn push_scaffold_prelude(
-        &mut self,
-        ws: &Workspace,
-        scx: &skull_mir::lower::ScalarCtx,
-    ) -> Result<(), CompilerError> {
-        let ts = Instant::now();
-        let out = &mut self.out;
-        out.push_str(crate::runtime_prelude());
-        if crate::allocation_report::activation_enabled() {
-            out.push_str(skull_codegen_lua::ALLOCATION_ACTIVATION_PRELUDE);
-        }
-        out.push_str(&crate::enum_cdata_defs(ws));
-        let rep_arena = scx.rep_arena();
-        let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws, &rep_arena)?;
-        out.push_str(&vdefs);
-        out.push_str(&crate::value_struct_gc_defs(ws, &value_gc, &rep_arena)?);
-        out.push_str(&crate::value_struct_metatypes(ws, &value_emitted));
-        out.push_str(&crate::enum_cdata_metatypes(ws));
-        out.push_str(&crate::c_struct_inspect_defs(ws, &value_emitted));
-        out.push_str(&crate::type_table_defs(ws, &value_gc, &rep_arena)?);
-        out.push_str(&crate::enum_runtime_defs(ws));
-        self.t_scaffold += ts.elapsed();
-        Ok(())
-    }
-
-    /// Decorator DEFINITIONS, workspace-wide: each `deco <name> { .. }` -> a fn
+    /// Decorator DEFINITIONS, workspace-wide (lowered by
+    /// [`prepare_early_assembly`]): each `deco <name> { .. }` -> a fn
     /// `__deco_<name>(target, <params>)`. Unlike JS, Lua emits every
-    /// program-defined decorator, applied or not. The table is built up front
-    /// (sequential, cheap) because an application usually names a decorator
-    /// declared in another module; the bodies lower+emit in parallel.
-    fn push_decorator_definitions(
-        &mut self,
-        ws: &Workspace,
-        cache: &SkullEmitCache,
-    ) -> DecoratorTable {
-        let decorators = DecoratorTable::collect(ws);
-        let deco_results = par_map(decorators.definitions().to_vec(), |(mid, did)| {
-            emit_decorator_unit(ws, &cache.scx, &cache.cg, &cache.concrete, mid, did)
-        });
+    /// program-defined decorator, applied or not.
+    fn push_decorator_definitions(&mut self, deco_results: Vec<UnitOut>) {
         self.rejections.extend(unit_errors(&deco_results));
         self.needed_specs
             .extend(deco_results.iter().flat_map(|u| u.specs.iter().cloned()));
@@ -214,27 +179,19 @@ impl Assembly {
         let mut decorator_definitions = LuaDefinitionBuffer::new();
         decorator_definitions.push_str(&decorator_lua);
         decorator_definitions.append_to(&mut self.out);
-        decorators
     }
 
-    /// Global initializers are emitted later, in their original slot, but they are
-    /// LOWERED here: their call edges are reachability roots (a global init is
-    /// always emitted), so the walk needs them before the fn-def loop runs.
-    /// Returns the initializer definitions and their pending init lines.
-    fn lower_global_units(
+    /// Global initializers are emitted later, in their original slot, but they
+    /// are LOWERED early (by [`prepare_early_assembly`]): their call edges are
+    /// reachability roots (a global init is always emitted), so the walk needs
+    /// them before the fn-def loop runs. Folds the lowered units in and returns
+    /// the initializer definitions and their pending init lines.
+    fn fold_global_units(
         &mut self,
-        ws: &Workspace,
-        cache: &SkullEmitCache,
+        global_keys: &[GlobalKey],
+        global_results: Vec<UnitOut>,
     ) -> (String, Vec<(Ustr, Ustr, String)>) {
         let mut pending_inits: Vec<(Ustr, Ustr, String)> = Vec::new();
-        let global_items: Vec<(ModuleId, Idx<bone_semantic::hir::GlobalDef>)> = ws
-            .source_modules()
-            .flat_map(|m| m.globals.iter().map(move |(gid, _)| (m.id, gid)))
-            .collect();
-        let global_keys = global_items.clone();
-        let global_results = par_map(global_items, |(mid, gid)| {
-            emit_global_unit(ws, &cache.scx, &cache.cg, &cache.concrete, mid, gid)
-        });
         // par_map preserves input order, so keys and results zip positionally --
         // the same pairing merge_units relies on for output order.
         for (key, u) in global_keys.iter().zip(global_results.iter()) {
@@ -765,11 +722,102 @@ fn release_one_shot_chunks(
     reads
 }
 
+type GlobalKey = (ModuleId, Idx<bone_semantic::hir::GlobalDef>);
+
+/// The load-time scaffolding: runtime prelude, value struct and enum
+/// definitions, type tables. IR-agnostic, so it needs no chunk.
+fn scaffold_prelude_lua(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+) -> Result<String, CompilerError> {
+    let mut out = String::from(crate::runtime_prelude());
+    if crate::allocation_report::activation_enabled() {
+        out.push_str(skull_codegen_lua::ALLOCATION_ACTIVATION_PRELUDE);
+    }
+    out.push_str(&crate::enum_cdata_defs(ws));
+    let rep_arena = scx.rep_arena();
+    let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws, &rep_arena)?;
+    out.push_str(&vdefs);
+    out.push_str(&crate::value_struct_gc_defs(ws, &value_gc, &rep_arena)?);
+    out.push_str(&crate::value_struct_metatypes(ws, &value_emitted));
+    out.push_str(&crate::enum_cdata_metatypes(ws));
+    out.push_str(&crate::c_struct_inspect_defs(ws, &value_emitted));
+    out.push_str(&crate::type_table_defs(ws, &value_gc, &rep_arena)?);
+    out.push_str(&crate::enum_runtime_defs(ws));
+    Ok(out)
+}
+
+/// The assembly inputs that need no chunk: the scaffold prelude, the lowered
+/// decorator and global units, the global layout and the globals directory.
+/// A full build prepares them beside its fan-out so the pool, not the
+/// assembly tail, pays for them; an incremental build prepares them at the
+/// start of assembly.
+pub(super) struct EarlyAssembly {
+    scaffold: Result<String, CompilerError>,
+    scaffold_time: Duration,
+    decorators: DecoratorTable,
+    decorator_units: Vec<UnitOut>,
+    global_keys: Vec<GlobalKey>,
+    global_units: Vec<UnitOut>,
+    // Kept as results and reported where assembly always reported them, so a
+    // body rejection still comes first.
+    global_layout: Result<String, String>,
+    globals_directory: Result<String, CompilerError>,
+}
+
+pub(super) fn prepare_early_assembly(
+    ws: &Workspace,
+    scx: &skull_mir::lower::ScalarCtx,
+    cg: &CodegenCtx,
+    concrete: &crate::concrete_body::ConcreteBodies,
+) -> EarlyAssembly {
+    let (scaffold, units) = parallel_join(
+        || {
+            let ts = Instant::now();
+            let scaffold = scaffold_prelude_lua(ws, scx);
+            let scaffold_time = ts.elapsed();
+            let global_layout = skull_mir::global_storage::global_layout_id(ws, scx);
+            let globals_directory = globals_directory_lua(ws, scx, cg);
+            (scaffold, scaffold_time, global_layout, globals_directory)
+        },
+        || {
+            // The decorator table is built up front (sequential, cheap)
+            // because an application usually names a decorator declared in
+            // another module; the bodies lower+emit in parallel.
+            let decorators = DecoratorTable::collect(ws);
+            let decorator_units = par_map(decorators.definitions().to_vec(), |(mid, did)| {
+                emit_decorator_unit(ws, scx, cg, concrete, mid, did)
+            });
+            let global_keys: Vec<GlobalKey> = ws
+                .source_modules()
+                .flat_map(|m| m.globals.iter().map(move |(gid, _)| (m.id, gid)))
+                .collect();
+            let global_units = par_map(global_keys.clone(), |(mid, gid)| {
+                emit_global_unit(ws, scx, cg, concrete, mid, gid)
+            });
+            (decorators, decorator_units, global_keys, global_units)
+        },
+    );
+    let (scaffold, scaffold_time, global_layout, globals_directory) = scaffold;
+    let (decorators, decorator_units, global_keys, global_units) = units;
+    EarlyAssembly {
+        scaffold,
+        scaffold_time,
+        decorators,
+        decorator_units,
+        global_keys,
+        global_units,
+        global_layout,
+        globals_directory,
+    }
+}
+
 pub(super) fn assemble(
     ws: &Workspace,
     cache: &mut SkullEmitCache,
     built_specs: &mut Vec<(Instance, Chunk)>,
     lifetime: CacheLifetime,
+    early: Option<EarlyAssembly>,
 ) -> Result<(MirEmit, FxHashSet<Instance>, UnitComptimeReads), CompilerError> {
     let mut release_stats = CompileReleaseStats {
         retained_dependency_edges: cache.dependents.values().map(|keys| keys.len()).sum(),
@@ -791,9 +839,20 @@ pub(super) fn assemble(
         step_started = now;
     };
     let mut asm = Assembly::new(cache);
-    asm.push_scaffold_prelude(ws, &cache.scx)?;
-    let decorators = asm.push_decorator_definitions(ws, cache);
-    let (globals_lua, pending_inits) = asm.lower_global_units(ws, cache);
+    let EarlyAssembly {
+        scaffold,
+        scaffold_time,
+        decorators,
+        decorator_units,
+        global_keys,
+        global_units,
+        global_layout,
+        globals_directory,
+    } = early.unwrap_or_else(|| prepare_early_assembly(ws, &cache.scx, &cache.cg, &cache.concrete));
+    asm.out.push_str(&scaffold?);
+    asm.t_scaffold += scaffold_time;
+    asm.push_decorator_definitions(decorator_units);
+    let (globals_lua, pending_inits) = asm.fold_global_units(&global_keys, global_units);
     step("assembly: prelude+globals", &mut steps);
 
     // **Whole-program population, driven by `cache.lua_view` -- Phase 2.**
@@ -919,8 +978,7 @@ pub(super) fn assemble(
         lifecycle_plan.census.declarations > 0,
     );
     let has_code_slot_publication = publication.publish;
-    let global_layout = skull_mir::global_storage::global_layout_id(ws, scx)
-        .map_err(CompilerError::new_no_location)?;
+    let global_layout = global_layout.map_err(CompilerError::new_no_location)?;
     let static_count = asm
         .all_statics
         .iter()
@@ -931,7 +989,7 @@ pub(super) fn assemble(
     out.push_str(&globals_open_lua(&global_layout, cg, static_count));
     out.push_str(&wrap_large_lua_section(
         "__rock_globals_directory_part",
-        &globals_directory_lua(ws, scx, cg)?,
+        &globals_directory?,
     ));
     // A host attaches its own directory fields right after this line.
     out.push_str("__rock_globals_install_bridge()\n");

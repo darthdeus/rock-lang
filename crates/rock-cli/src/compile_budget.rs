@@ -212,6 +212,7 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
         let mut assembly = Vec::new();
         let mut fan_out_window = Duration::ZERO;
         let mut assembly_window = Duration::ZERO;
+        let mut early_assembly_window = None;
         let mut scaffold = None;
         for (name, d) in &emit.phases {
             if let Some(rest) = name.strip_prefix("setup: ") {
@@ -224,6 +225,8 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
                 fan_out_window = *d;
             } else if *name == "window: assembly" {
                 assembly_window = *d;
+            } else if *name == "window: early assembly" {
+                early_assembly_window = Some(*d);
             } else if *name == "scaffold+callgraph+order" {
                 scaffold = Some(*d);
             } else if !name.starts_with("incr: ") {
@@ -241,6 +244,14 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
 
         let mut fan_out = Node::leaf("fan-out", fan_out_window);
         fan_out.extra.insert("threads".into(), json!(threads()));
+        if let Some(early) = early_assembly_window {
+            // Runs beside the chunk build;
+            // its window overlaps them rather than summing in.
+            fan_out.extra.insert(
+                "branches".into(),
+                json!([{"name": "early assembly branch", "wall_ms": ms(early)}]),
+            );
+        }
 
         let mut assembly = Node::parent("assembly", assembly_window, assembly);
         if let Some(scaffold) = scaffold {
