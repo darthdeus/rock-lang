@@ -114,6 +114,7 @@ impl Csr {
 /// Raw arena index as a `usize` — the dense key for the `Vec` side-tables that
 /// replace `Idx`-keyed `HashMap`s in the hot liveness/interference loops (an `Idx`
 /// is dense over its arena, so a flat array beats any hash).
+#[inline]
 fn raw<T>(i: Idx<T>) -> usize {
     u32::from(i.into_raw()) as usize
 }

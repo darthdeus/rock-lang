@@ -210,6 +210,7 @@ pub fn regalloc_time_elapsed() -> std::time::Duration {
     REGALLOC_TIME.with(|c| c.get())
 }
 
+#[inline]
 fn raw<T>(idx: Idx<T>) -> u32 {
     idx.into_raw().into()
 }
