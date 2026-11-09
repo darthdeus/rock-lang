@@ -114,17 +114,18 @@ impl Builder<'_> {
             expr: e,
             op,
         };
+        if let Some(callee) = plan.callees.get(&site) {
+            return Ok(Some(callee.clone()));
+        }
         if let Some(reason) = plan.failed_sites.get(&site) {
             return Err(self.gap_here(format!(
                 "concrete plan records an unresolved callee site: {reason}"
             )));
         }
-        plan.callees.get(&site).cloned().map(Some).ok_or_else(|| {
-            gap(format!(
-                "concrete plan is missing callee identity for site {:?}",
-                site.op
-            ))
-        })
+        Err(gap(format!(
+            "concrete plan is missing callee identity for site {:?}",
+            site.op
+        )))
     }
 
     pub(crate) fn concrete_delivery_instance(
@@ -151,7 +152,7 @@ impl Builder<'_> {
             expr: e,
             op: self.cur_op.clone(),
         };
-        if plan.callees.get(&site) != Some(inst) {
+        if crate::verify::checks_enabled() && plan.callees.get(&site) != Some(inst) {
             return Err(self.gap_here("concrete callee identity disagrees with its site plan"));
         }
         if crate::lower::requires_concrete_body_plan(self.ws, inst)

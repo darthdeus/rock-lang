@@ -2598,6 +2598,9 @@ pub struct BackendFnAbiPlan {
     arena: Arc<RepArena>,
     transport: Option<ParameterTransport>,
     body_dependent_parameters: bool,
+    /// [`Self::logical_fingerprint`], spelled once: every body lowered under
+    /// this plan records it, and the plan is shared across those bodies.
+    fingerprint: std::sync::OnceLock<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2717,6 +2720,7 @@ impl BackendFnAbiPlan {
             arena,
             transport: None,
             body_dependent_parameters: false,
+            fingerprint: std::sync::OnceLock::new(),
         };
         if !params.iter().any(|ty| {
             matches!(
@@ -2781,6 +2785,7 @@ impl BackendFnAbiPlan {
             arena,
             transport: None,
             body_dependent_parameters: false,
+            fingerprint: std::sync::OnceLock::new(),
         }
     }
 
@@ -2808,6 +2813,7 @@ impl BackendFnAbiPlan {
     // A defaulted parameter keeps its declared wire, which its default fill and
     // omitted-argument nils are built against; the others still expand.
     fn expand_nullable_parameter_children(&mut self, ws: &Workspace, scx: &ScalarCtx) {
+        self.fingerprint = std::sync::OnceLock::new();
         if !self.permits_parameter_transport(ws, scx, true) {
             return;
         }
@@ -2845,6 +2851,7 @@ impl BackendFnAbiPlan {
     }
 
     fn narrow_parameter_transport(&mut self, ws: &Workspace, scx: &ScalarCtx) {
+        self.fingerprint = std::sync::OnceLock::new();
         use bone_core::hir::BodyOwner;
         // Field demand does not read default expressions, so defaults keep the
         // full transport here.
@@ -2979,11 +2986,15 @@ impl BackendFnAbiPlan {
     /// The ABI compatibility witness for a code slot. It deliberately expands
     /// the representation through the arena instead of retaining a `RepId`.
     pub fn logical_fingerprint(&self) -> String {
-        format!(
-            "target={:?};{}",
-            self.target,
-            self.representation.logical_fingerprint(&self.arena)
-        )
+        self.fingerprint
+            .get_or_init(|| {
+                format!(
+                    "target={:?};{}",
+                    self.target,
+                    self.representation.logical_fingerprint(&self.arena)
+                )
+            })
+            .clone()
     }
 
     pub fn rep_plan(&self, id: RepId) -> RepPlan {
