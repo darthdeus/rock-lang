@@ -37,6 +37,28 @@ pub struct LoopTest {
     pub break_when_true: bool,
 }
 
+impl LoopTest {
+    /// The test `block` holds when its terminator is a `Branch` with one arm
+    /// directly to `exit`.
+    pub fn with_exit_arm(func: &MirFunc, block: Idx<Block>, exit: Idx<Block>) -> Option<Self> {
+        let Term::Branch {
+            cond,
+            then_bb,
+            else_bb,
+        } = func.blocks[block].term
+        else {
+            return None;
+        };
+        let break_when_true = then_bb == exit;
+        (break_when_true || else_bb == exit).then_some(Self {
+            block,
+            cond,
+            body: if break_when_true { else_bb } else { then_bb },
+            break_when_true,
+        })
+    }
+}
+
 /// A backend's side of the structured walk. The provided methods are the walk;
 /// the required ones are the backend's state and rendering.
 /// What one more level of nested control flow costs the target's parser.

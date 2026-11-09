@@ -115,23 +115,12 @@ impl StructuredEmit for FnEmit<'_> {
     /// The loop's condition test: the `Branch` in the body with a direct
     /// successor to the exit.
     fn loop_test(&mut self, region: &LoopRegion) -> Result<Option<LoopTest>, CompilerError> {
-        for &b in &region.body {
-            if let Term::Branch {
-                cond,
-                then_bb,
-                else_bb,
-            } = self.f.blocks[b].term
-            {
-                if then_bb == region.exit || else_bb == region.exit {
-                    let break_when_true = then_bb == region.exit;
-                    return Ok(Some(LoopTest {
-                        block: b,
-                        cond,
-                        body: if break_when_true { else_bb } else { then_bb },
-                        break_when_true,
-                    }));
-                }
-            }
+        let test = region
+            .body
+            .iter()
+            .find_map(|&b| LoopTest::with_exit_arm(self.f, b, region.exit));
+        if test.is_some() {
+            return Ok(test);
         }
         Err(err(
             self.span(),

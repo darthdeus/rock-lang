@@ -168,21 +168,8 @@ impl StructuredEmit for Emitter<'_> {
         let Some(test) = region.test else {
             return Ok(None);
         };
-        if let Term::Branch {
-            cond,
-            then_bb,
-            else_bb,
-        } = self.mf.blocks[test].term
-        {
-            if then_bb == region.exit || else_bb == region.exit {
-                let break_when_true = then_bb == region.exit;
-                return Ok(Some(LoopTest {
-                    block: test,
-                    cond,
-                    body: if break_when_true { else_bb } else { then_bb },
-                    break_when_true,
-                }));
-            }
+        if let Some(test) = LoopTest::with_exit_arm(self.mf, test, region.exit) {
+            return Ok(Some(test));
         }
         Err(err(
             "JS subset: unstructured loop (condition test has no direct exit arm)",
