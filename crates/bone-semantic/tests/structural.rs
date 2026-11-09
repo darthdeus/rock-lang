@@ -290,52 +290,99 @@ fn type_mismatch_labels_the_expected_type_origin() {
     );
 }
 
-// `/` is float division; its `float` result in
-// an int-shaped hole is rejected with a hint to use `./`. Self-contained (the
-// float operators are declared inline) so it needs no stdlib.
 #[test]
-fn float_div_into_int_hole_hints_idiv() {
-    let src = r#"
+fn body_error_messages_explain_the_mistake() {
+    let cases: &[(&str, &str)] = &[
+        // `/` is float division; its `float` result in
+        // an int-shaped hole is rejected with a hint to use `./`. Self-contained (the
+        // float operators are declared inline) so it needs no stdlib.
+        (
+            r#"
 @pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
 fn foo(x: int) {}
 fn main() { foo(3 / 4) }
-"#;
-    let msgs = main_body_error_messages(src);
-    assert!(
-        msgs.iter().any(|m| m.contains("./")),
-        "expected a `./` hint, got: {msgs:?}"
-    );
-}
-
-// The `./` hint also fires when the `/` is buried in the mismatched expression,
-// reached through arithmetic operators (`__op_mul`) rather than being the
-// top-level node.
-#[test]
-fn float_div_deep_in_mul_subtree_hints_idiv() {
-    let src = r#"
+"#,
+            "./",
+        ),
+        // The `./` hint also fires when the `/` is buried in the mismatched expression,
+        // reached through arithmetic operators (`__op_mul`) rather than being the
+        // top-level node.
+        (
+            r#"
 @pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
 @pure @inline operator(lua) *(a: float, b: float) -> float = "return a * b"
 fn main() { let x: int = 2.0 * (3 / 4) }
-"#;
-    let msgs = main_body_error_messages(src);
-    assert!(
-        msgs.iter().any(|m| m.contains("./")),
-        "expected a `./` hint for a `/` nested under `*`, got: {msgs:?}"
-    );
-}
-
-// ...and through unary minus (`-(a / b)`), the other float-propagating shape.
-#[test]
-fn float_div_under_unary_minus_hints_idiv() {
-    let src = r#"
+"#,
+            "./",
+        ),
+        // ...and through unary minus (`-(a / b)`), the other float-propagating shape.
+        (
+            r#"
 @pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
 fn main() { let x: int = -(3 / 4) }
-"#;
-    let msgs = main_body_error_messages(src);
-    assert!(
-        msgs.iter().any(|m| m.contains("./")),
-        "expected a `./` hint for a `/` under unary minus, got: {msgs:?}"
-    );
+"#,
+            "./",
+        ),
+        // The walk follows a local binding back to its `let` initializer: a `float`
+        // that entered via `let h = a / b` and only mismatches an `int` later
+        // (`2 * h`) still points at the `/`. Regression for a computed frame height
+        // `let frame_h = dims.y / N ... p.dir * frame_h` into an int field.
+        (
+            r#"
+@pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
+@pure @inline operator(lua) *(a: float, b: float) -> float = "return a * b"
+fn main() {
+    let h = 8 / 3
+    let x: int = 2 * h
+}
+"#,
+            "./",
+        ),
+        // a retained Vec-element ref would dangle when growth relocates the buffer
+        (
+            r#"
+value Position { x: int }
+fn vec_push(values: [Position], value: Position) {}
+fn main() {
+    let positions = [Position { x: 1 }]
+    let position: ref Position = positions[0]
+    vec_push(positions, Position { x: 2 })
+    position.x = 3
+}
+"#,
+            "relocatable Vec or Map storage",
+        ),
+        // a ref-returning helper must preserve its Vec-element argument's ephemeral origin
+        (
+            r#"
+value Position { x: int }
+fn same(position: ref Position) -> ref Position { return position }
+fn vec_push(values: [Position], value: Position) {}
+fn main() {
+    let positions = [Position { x: 1 }]
+    let position: ref Position = same(positions[0])
+    vec_push(positions, Position { x: 2 })
+    position.x = 3
+}
+"#,
+            "relocatable Vec or Map storage",
+        ),
+        // borrowing the Vec header does not pin its relocatable element buffer
+        (
+            r#"
+value Position { x: int }
+fn main(positions: [Position]) -> ref Position { return positions[0] }
+"#,
+            "relocatable Vec or Map storage",
+        ),
+    ];
+    for (src, needle) in cases {
+        let msgs = main_body_error_messages(src);
+        assert!(
+            msgs.iter().any(|m| m.contains(*needle)),
+            "expected {needle}, got: {msgs:?}"
+        );
+    }
 }
 
 // The hint's label points at the offending `/` subexpression, not the whole
@@ -372,27 +419,6 @@ fn main() { let x: int = 2.0 * (3 / 4) }
         &src[lo..hi],
         "(3 / 4)",
         "label should cover just the division"
-    );
-}
-
-// The walk follows a local binding back to its `let` initializer: a `float`
-// that entered via `let h = a / b` and only mismatches an `int` later
-// (`2 * h`) still points at the `/`. Regression for a computed frame height
-// `let frame_h = dims.y / N ... p.dir * frame_h` into an int field.
-#[test]
-fn float_div_traced_through_let_binding_hints_idiv() {
-    let src = r#"
-@pure @inline operator(lua) /(a: float, b: float) -> float = "return a / b"
-@pure @inline operator(lua) *(a: float, b: float) -> float = "return a * b"
-fn main() {
-    let h = 8 / 3
-    let x: int = 2 * h
-}
-"#;
-    let msgs = main_body_error_messages(src);
-    assert!(
-        msgs.iter().any(|m| m.contains("./")),
-        "expected a `./` hint traced through the `let` binding, got: {msgs:?}"
     );
 }
 
@@ -1107,52 +1133,47 @@ fn structurally_equal_compounds_reassign_is_ok() {
         .expect("structurally-equal reassign must not error");
 }
 
-// Cross-module call resolution: a function call must resolve against OTHER
-// modules in the workspace (the foundation for calling into a preloaded
-// stdlib), not just the current file. Two modules, distinct ids; module B
-// calls `helper` defined in module A. Single-source fixtures can't express
-// this, so it's white-box.
 #[test]
-fn cross_module_call_resolves() {
-    // Distinct file ids so the two modules don't collide in the workspace
-    // (semantic_pass keys modules by `Ast.file`).
-    let mod_a = parse_rock_with_file("fn helper(x: int) -> int { x }", "mod_a").unwrap();
-    let mod_b = parse_rock_with_file("fn f() -> int { helper(5) }", "mod_b").unwrap();
-
-    // `f`'s call to `helper` must resolve cross-module (into mod_a) and
-    // `helper(5): int` must unify with f's declared `-> int`.
-    semantic_pass(&mut [mod_a, mod_b]).expect("cross-module call should resolve + typecheck");
-}
-
-// Bug 2: a struct defined in one module, used as a type in another, must
-// resolve cross-module. `lower_type_expr` resolves struct names against the
-// current module only, so a `Point` param in mod_b can't see mod_a's struct.
-#[test]
-fn cross_module_struct_type_resolves() {
-    let mod_a = parse_rock_with_file("struct Point { x: int, y: int }", "mod_a").unwrap();
-    let mod_b = parse_rock_with_file("fn f(p: Point) -> int { 5 }", "mod_b").unwrap();
-
-    semantic_pass(&mut [mod_a, mod_b]).expect("cross-module struct type should resolve");
-}
-
-// Bug 3: field access on a cross-module struct. Inference looks the struct up
-// in the current module only, so `p.x` (Point from mod_a) can't find the def.
-#[test]
-fn cross_module_struct_field_resolves() {
-    let mod_a = parse_rock_with_file("struct Point { x: int, y: int }", "mod_a").unwrap();
-    let mod_b = parse_rock_with_file("fn f(p: Point) -> int { p.x }", "mod_b").unwrap();
-
-    // p.x must resolve Point's field cross-module (into mod_a) -> int
-    semantic_pass(&mut [mod_a, mod_b]).expect("cross-module struct field access should resolve");
-}
-
-// Bug 3 (literal path): constructing a struct defined in another module.
-#[test]
-fn cross_module_struct_literal_resolves() {
-    let mod_a = parse_rock_with_file("struct Point { x: int, y: int }", "mod_a").unwrap();
-    let mod_b = parse_rock_with_file("fn f() -> Point { Point { x: 1, y: 2 } }", "mod_b").unwrap();
-
-    semantic_pass(&mut [mod_a, mod_b]).expect("cross-module struct literal should resolve");
+fn cross_module_items_resolve() {
+    let cases: &[(&str, &str)] = &[
+        // Cross-module call resolution: a function call must resolve against OTHER
+        // modules in the workspace (the foundation for calling into a preloaded
+        // stdlib), not just the current file. Two modules, distinct ids; module B
+        // calls `helper` defined in module A. Single-source fixtures can't express
+        // this, so it's white-box.
+        // Distinct file ids so the two modules don't collide in the workspace
+        // (semantic_pass keys modules by `Ast.file`).
+        // `f`'s call to `helper` must resolve cross-module (into mod_a) and
+        // `helper(5): int` must unify with f's declared `-> int`.
+        (
+            "fn helper(x: int) -> int { x }",
+            "fn f() -> int { helper(5) }",
+        ),
+        // Bug 2: a struct defined in one module, used as a type in another, must
+        // resolve cross-module. `lower_type_expr` resolves struct names against the
+        // current module only, so a `Point` param in mod_b can't see mod_a's struct.
+        (
+            "struct Point { x: int, y: int }",
+            "fn f(p: Point) -> int { 5 }",
+        ),
+        // Bug 3: field access on a cross-module struct. Inference looks the struct up
+        // in the current module only, so `p.x` (Point from mod_a) can't find the def.
+        // p.x must resolve Point's field cross-module (into mod_a) -> int
+        (
+            "struct Point { x: int, y: int }",
+            "fn f(p: Point) -> int { p.x }",
+        ),
+        // Bug 3 (literal path): constructing a struct defined in another module.
+        (
+            "struct Point { x: int, y: int }",
+            "fn f() -> Point { Point { x: 1, y: 2 } }",
+        ),
+    ];
+    for (a, b) in cases {
+        let mod_a = parse_rock_with_file(a, "mod_a").unwrap();
+        let mod_b = parse_rock_with_file(b, "mod_b").unwrap();
+        semantic_pass(&mut [mod_a, mod_b]).expect("cross-module use should resolve");
+    }
 }
 
 /// Sentinel: `TyId` must stay niche-packed at 8 bytes. The packing depends on
@@ -1268,21 +1289,93 @@ fn bone_rejects(src: &str) -> bool {
 }
 
 #[test]
-fn pure_reads_mutable_global_rejected() {
-    // Reads a mutable global -- not referentially transparent.
-    assert!(
-        bone_rejects("global G: int = 0\n@pure\nfn f() -> int { return G }"),
-        "@pure fn reading a mutable global must be rejected"
-    );
-}
-
-#[test]
-fn pure_writes_global_rejected() {
-    // Assigns to a mutable global -- a mutation side effect.
-    assert!(
-        bone_rejects("global G: int = 0\n@pure\nfn f() -> int { G = 5  return 0 }"),
-        "@pure fn writing a global must be rejected"
-    );
+fn rejected_programs() {
+    let cases: &[&str] = &[
+        // Reads a mutable global -- not referentially transparent.
+        "global G: int = 0\n@pure\nfn f() -> int { return G }",
+        // Assigns to a mutable global -- a mutation side effect.
+        "global G: int = 0\n@pure\nfn f() -> int { G = 5  return 0 }",
+        // Calls a fn whose body is not provably pure -> transitively impure.
+        // (operator-free: `TICK = 9` not `TICK + 1`, so the no-stdlib harness
+        // doesn't reject for an unresolved `+` instead of for purity.)
+        "\
+global TICK: int = 0
+fn bump() -> int { TICK = 9  return TICK }
+@pure
+fn f() -> int { return bump() }",
+        // Mutation through a parameter -- observable at the call site.
+        "\
+struct P { x: int, y: int }
+@pure
+fn f(p: P) -> int { p.x = 99  return p.x }",
+        // Purity must walk into loop bodies. (operator-free: `while true { C = 5 }`
+        // so the no-stdlib harness rejects for the global write, not an unresolved
+        // operator in the condition/increment.)
+        "\
+global C: int = 0
+@pure
+fn f() -> int { while true { C = 5 }  return C }",
+        // `@pure` (no side effects) and `@debug_impure` (debug-only side effect) on
+        // one fn is a contradiction -- rock rejects at annotation registration,
+        // before the purity walk. (May surface as a top-level error, not a body
+        // error -- bone_rejects covers both.)
+        "@pure\n@debug_impure\nfn f() -> int { return 1 }",
+        // redefining an enum must be rejected
+        "enum E { A }\nenum E { B }",
+        // redefining a struct must be rejected
+        "struct S { x: int }\nstruct S { y: int }",
+        // redefining a newtype must be rejected
+        "newtype N(int)\nnewtype N(string)",
+        // `continue` with no enclosing loop must be rejected
+        "fn f() { continue }",
+        // `break` with no enclosing loop must be rejected
+        "fn f() { break }",
+        // `return` inside a tuple/multi-assign RHS sub-expression.
+        "fn f() { let (x, y) = (1, if true { return } else { 2 }) }",
+        // `yield` inside a non-coroutine lambda must be rejected
+        "co fn g() -> Coroutine<int> { let f = () => yield 5  yield 0 }",
+        // destructuring a struct with a newtype pattern must be rejected
+        "\
+newtype Uid(int)
+struct U { id: int }
+fn f(u: U) -> int { let Uid(x) = u  return x }",
+        // destructuring a bare int with a newtype pattern must be rejected
+        "\
+newtype Uid(int)
+fn f() -> int { let x = 42  let Uid(y) = x  return y }",
+        // a duplicate wildcard `_` match arm must be rejected
+        "fn f() -> int { let t = 1  return match t { 0 => 10  _ => 20  _ => 30 } }",
+        // a generic type used without type args in a param position must be rejected
+        "\
+struct G<T> { v: T }
+fn f(x: G) -> int { return 0 }",
+        // Non-`value` struct literal allocates a fresh heap object (identity).
+        "\
+struct S { n: int }
+@pure
+fn f() -> S { return S { n: 0 } }",
+        // @pure building an array literal must be rejected
+        "\
+@pure
+fn f() -> [int] { return [0] }",
+        // @pure creating a lambda must be rejected
+        "\
+@pure
+fn f() -> (int) -> int { return x => x }",
+        // @pure indexing a collection must be rejected
+        "\
+@pure
+fn f(v: [int]) -> int { return v[0] }",
+        // a temporary has no stable place for a ref to address
+        "struct Player { hp: int }\nfn read(player: ref Player) -> int { player.hp }\nfn main() -> int { read(Player { hp: 1 }) }",
+        // a persistent closure environment cannot contain a ref
+        "struct Player { hp: int }\nfn bad(player: ref Player) -> () -> int { return () => player.hp }",
+        // a coroutine frame cannot retain a ref across yield
+        "struct Player { hp: int }\nco fn bad(player: ref Player) -> Coroutine<int> { yield 1  player.hp = 1 }",
+    ];
+    for src in cases {
+        assert!(bone_rejects(src), "must be rejected: {src}");
+    }
 }
 
 // (Compound-assign `G += 1` is the same purity violation as the plain
@@ -1290,62 +1383,6 @@ fn pure_writes_global_rejected() {
 // `+`, which this no-stdlib harness can't resolve, so it can't be pinned here
 // without false-greening on the operator. The purity pass handles all
 // assignment forms uniformly; writing `=` covers the class.)
-
-#[test]
-fn pure_calls_non_pure_rejected() {
-    // Calls a fn whose body is not provably pure -> transitively impure.
-    // (operator-free: `TICK = 9` not `TICK + 1`, so the no-stdlib harness
-    // doesn't reject for an unresolved `+` instead of for purity.)
-    let src = "\
-global TICK: int = 0
-fn bump() -> int { TICK = 9  return TICK }
-@pure
-fn f() -> int { return bump() }";
-    assert!(
-        bone_rejects(src),
-        "@pure fn calling a non-pure fn must be rejected"
-    );
-}
-
-#[test]
-fn pure_mutates_param_field_rejected() {
-    // Mutation through a parameter -- observable at the call site.
-    let src = "\
-struct P { x: int, y: int }
-@pure
-fn f(p: P) -> int { p.x = 99  return p.x }";
-    assert!(
-        bone_rejects(src),
-        "@pure fn mutating a param field must be rejected"
-    );
-}
-
-#[test]
-fn pure_while_loop_with_mutation_rejected() {
-    // Purity must walk into loop bodies. (operator-free: `while true { C = 5 }`
-    // so the no-stdlib harness rejects for the global write, not an unresolved
-    // operator in the condition/increment.)
-    let src = "\
-global C: int = 0
-@pure
-fn f() -> int { while true { C = 5 }  return C }";
-    assert!(
-        bone_rejects(src),
-        "@pure fn whose loop body writes a global must be rejected"
-    );
-}
-
-#[test]
-fn pure_and_debug_impure_conflict_rejected() {
-    // `@pure` (no side effects) and `@debug_impure` (debug-only side effect) on
-    // one fn is a contradiction -- rock rejects at annotation registration,
-    // before the purity walk. (May surface as a top-level error, not a body
-    // error -- bone_rejects covers both.)
-    assert!(
-        bone_rejects("@pure\n@debug_impure\nfn f() -> int { return 1 }"),
-        "@pure + @debug_impure on one fn must be rejected as contradictory"
-    );
-}
 
 // ─── Duplicate-symbol detection (RED until bone rejects redefinitions) ───────
 //
@@ -1356,30 +1393,6 @@ fn pure_and_debug_impure_conflict_rejected() {
 // RED now (verified bone accepts each); green when the author lands a
 // duplicate-definition check at symbol collection. Single-module dups surface
 // as a top-level semantic_pass error; `bone_rejects` (check() Err) covers that.
-
-#[test]
-fn duplicate_enum_rejected() {
-    assert!(
-        bone_rejects("enum E { A }\nenum E { B }"),
-        "redefining an enum must be rejected"
-    );
-}
-
-#[test]
-fn duplicate_struct_rejected() {
-    assert!(
-        bone_rejects("struct S { x: int }\nstruct S { y: int }"),
-        "redefining a struct must be rejected"
-    );
-}
-
-#[test]
-fn duplicate_newtype_rejected() {
-    assert!(
-        bone_rejects("newtype N(int)\nnewtype N(string)"),
-        "redefining a newtype must be rejected"
-    );
-}
 
 // (The cross-module case -- `struct Foo` in two files -- is NOT pinned here: a
 // real 2-module workspace needs the intern/insert dance the single-shot
@@ -1395,31 +1408,6 @@ fn duplicate_newtype_rejected() {
 // rule from the value-position-if branch-type join (which bone already checks
 // and would false-green on). Ported from tests/errors/control_flow/.
 
-#[test]
-fn continue_outside_loop_rejected() {
-    assert!(
-        bone_rejects("fn f() { continue }"),
-        "`continue` with no enclosing loop must be rejected"
-    );
-}
-
-#[test]
-fn break_outside_loop_rejected() {
-    assert!(
-        bone_rejects("fn f() { break }"),
-        "`break` with no enclosing loop must be rejected"
-    );
-}
-
-#[test]
-fn return_in_subexpression_rejected() {
-    // `return` inside a tuple/multi-assign RHS sub-expression.
-    assert!(
-        bone_rejects("fn f() { let (x, y) = (1, if true { return } else { 2 }) }"),
-        "`return` in a sub-expression position must be rejected"
-    );
-}
-
 // ─── yield outside a coroutine (RED) ─────────────────────────────────────────
 //
 // A `yield` in a plain lambda has no enclosing coroutine to suspend -- the
@@ -1427,14 +1415,6 @@ fn return_in_subexpression_rejected() {
 // `co fn`'s yield type into the lambda and accepts (LEAD). One case pins the
 // rule (bare `() => yield` is the same violation). Ported from
 // tests/errors/yield_in_plain_lambda.rock.err.
-
-#[test]
-fn yield_in_plain_lambda_rejected() {
-    assert!(
-        bone_rejects("co fn g() -> Coroutine<int> { let f = () => yield 5  yield 0 }"),
-        "`yield` inside a non-coroutine lambda must be rejected"
-    );
-}
 
 // ─── Newtype destructuring vs scrutinee type (RED) ───────────────────────────
 //
@@ -1444,43 +1424,11 @@ fn yield_in_plain_lambda_rejected() {
 // pattern's newtype matches the scrutinee type (LEAD). Ported from
 // tests/errors/newtypes/destructuring_errors.rock.err.
 
-#[test]
-fn newtype_pattern_on_struct_rejected() {
-    let src = "\
-newtype Uid(int)
-struct U { id: int }
-fn f(u: U) -> int { let Uid(x) = u  return x }";
-    assert!(
-        bone_rejects(src),
-        "destructuring a struct with a newtype pattern must be rejected"
-    );
-}
-
-#[test]
-fn newtype_pattern_on_int_rejected() {
-    let src = "\
-newtype Uid(int)
-fn f() -> int { let x = 42  let Uid(y) = x  return y }";
-    assert!(
-        bone_rejects(src),
-        "destructuring a bare int with a newtype pattern must be rejected"
-    );
-}
-
 // ─── Duplicate match patterns (RED) ──────────────────────────────────────────
 //
 // A second wildcard `_` arm is dead -- rock rejects it; bone accepts (LEAD). One
 // case pins the rule (3+ wildcards is the same violation). Ported from
 // tests/errors/patterns/duplicate_patterns.rock.err.
-
-#[test]
-fn duplicate_wildcard_arm_rejected() {
-    let src = "fn f() -> int { let t = 1  return match t { 0 => 10  _ => 20  _ => 30 } }";
-    assert!(
-        bone_rejects(src),
-        "a duplicate wildcard `_` match arm must be rejected"
-    );
-}
 
 // ─── Generic arity in parameter type position (RED) ──────────────────────────
 //
@@ -1489,17 +1437,6 @@ fn duplicate_wildcard_arm_rejected() {
 // in function PARAMETER positions (LEAD). Ported from
 // tests/errors/generics/generic_validation.rock.err
 // (function_param_missing_type_args).
-
-#[test]
-fn generic_param_missing_type_args_rejected() {
-    let src = "\
-struct G<T> { v: T }
-fn f(x: G) -> int { return 0 }";
-    assert!(
-        bone_rejects(src),
-        "a generic type used without type args in a param position must be rejected"
-    );
-}
 
 // ─── @pure identity-pure split (decided: identity-pure, not value-pure) ───────
 //
@@ -1511,91 +1448,78 @@ fn f(x: G) -> int { return 0 }";
 // self-recursion. Ported from tests/errors/pure_verification.rock.err.
 
 #[test]
-fn pure_heap_struct_literal_rejected() {
-    // Non-`value` struct literal allocates a fresh heap object (identity).
-    let src = "\
-struct S { n: int }
-@pure
-fn f() -> S { return S { n: 0 } }";
-    assert!(
-        bone_rejects(src),
-        "@pure returning a heap struct literal must be rejected"
-    );
-}
-
-#[test]
-fn pure_array_literal_rejected() {
-    let src = "\
-@pure
-fn f() -> [int] { return [0] }";
-    assert!(
-        bone_rejects(src),
-        "@pure building an array literal must be rejected"
-    );
-}
-
-#[test]
-fn pure_lambda_rejected() {
-    let src = "\
-@pure
-fn f() -> (int) -> int { return x => x }";
-    assert!(
-        bone_rejects(src),
-        "@pure creating a lambda must be rejected"
-    );
-}
-
-#[test]
-fn pure_collection_index_rejected() {
-    let src = "\
-@pure
-fn f(v: [int]) -> int { return v[0] }";
-    assert!(
-        bone_rejects(src),
-        "@pure indexing a collection must be rejected"
-    );
-}
-
-#[test]
-fn pure_match_with_binding_accepted() {
-    // DIVERGENCE from rock: a match with a binding pattern is referentially
-    // transparent. rock rejects it as a scope-walker limitation; bone accepts.
-    let src = "\
+fn accepted_programs() {
+    let cases: &[&str] = &[
+        // DIVERGENCE from rock: a match with a binding pattern is referentially
+        // transparent. rock rejects it as a scope-walker limitation; bone accepts.
+        "\
 enum E { A(int) }
 @pure
-fn f(e: E) -> int { return match e { A(x) => x } }";
-    assert!(
-        !bone_rejects(src),
-        "@pure with a match-binding is pure -- bone accepts (diverges from rock)"
-    );
-}
-
-#[test]
-fn pure_self_recursion_accepted() {
-    // DIVERGENCE from rock: a @pure fn calling itself is pure (the callee is
-    // @pure). rock rejects self-recursion without fixpoint analysis; bone accepts.
-    let src = "\
+fn f(e: E) -> int { return match e { A(x) => x } }",
+        // DIVERGENCE from rock: a @pure fn calling itself is pure (the callee is
+        // @pure). rock rejects self-recursion without fixpoint analysis; bone accepts.
+        "\
 @pure
-fn f(n: int) -> int { return f(n) }";
-    assert!(
-        !bone_rejects(src),
-        "@pure self-recursion is pure -- bone accepts (diverges from rock)"
-    );
+fn f(n: int) -> int { return f(n) }",
+        // a reference-struct place can form a temporary ref argument
+        "struct Player { hp: int }\nfn set_hp(player: ref Player) { player.hp = 2 }\nfn main() { let player = Player { hp: 1 }  set_hp(player) }",
+        // a Vec element stays live through the immediate ref-parameter call
+        r#"
+value Position { x: int }
+fn vec_push(values: [Position], value: Position) {}
+fn move(position: ref Position) { position.x = 2 }
+fn main() {
+    let positions = [Position { x: 1 }]
+    move(positions[0])
+    vec_push(positions, Position { x: 2 })
+}
+"#,
+        // frame-stable input subfields and globals remain retainable
+        r#"
+value Position { x: int }
+struct Player { position: Position }
+global ORIGIN: Position = Position { x: 0 }
+fn position(player: ref Player) -> ref Position { return player.position }
+fn same(position: ref Position) -> ref Position { return position }
+fn main(player: ref Player) {
+    let from_player: ref Position = same(player.position)
+    let from_global: ref Position = ORIGIN
+    from_player.x = from_global.x
+}
+"#,
+        // last use before yield does not put the ref in the coroutine frame
+        "struct Player { hp: int }\nco fn fine(player: ref Player) -> Coroutine<int> { player.hp = 1  yield 1 }",
+        // last use before yield does not retain the identity borrow
+        "struct Player { hp: int }\nfn make_player() -> Player { return Player { hp: 1 } }\nco fn fine() -> Coroutine<int> { let player = make_player()  player.hp = 2  yield 1 }",
+    ];
+    for src in cases {
+        assert!(!bone_rejects(src), "must be accepted: {src}");
+    }
 }
 
 #[test]
-fn value_annotation_on_struct_rejected() {
-    // `@value struct` is retired; only the `value Foo { ... }` keyword is
-    // canonical. Ported from tests/errors/types/value_annotation_rejected.rock.err.
-    assert!(
-        bone_rejects("@value\nstruct Foo { x: int }"),
-        "the retired `@value` annotation form must be rejected"
-    );
-    // The canonical keyword form is still accepted.
-    assert!(
-        !bone_rejects("value Foo { x: int }"),
-        "the `value` keyword form must still be accepted"
-    );
+fn retired_forms_are_rejected_next_to_their_canonical_form() {
+    let cases: &[(&str, &str)] = &[
+        // `@value struct` is retired; only the `value Foo { ... }` keyword is
+        // canonical. Ported from tests/errors/types/value_annotation_rejected.rock.err.
+        // The canonical keyword form is still accepted.
+        ("@value\nstruct Foo { x: int }", "value Foo { x: int }"),
+        // `??` on a non-nullable LHS is dead. Ported from
+        // tests/errors/types/null_checks.rock.err.
+        (
+            "fn f() { let x: int = 5  let y = x ?? 0 }",
+            "fn f() { let x: int? = 5  let y = x ?? 0 }",
+        ),
+        // `?.` on a non-nullable receiver is dead.
+        (
+            "struct Bar { val: int }\nfn f(b: Bar) -> int { return b?.val }",
+            "struct Bar { val: int }\nfn f(b: Bar?) -> int? { return b?.val }",
+        ),
+    ];
+    for (rejected, accepted) in cases {
+        assert!(bone_rejects(rejected), "must be rejected: {rejected}");
+        assert!(!bone_rejects(accepted), "must be accepted: {accepted}");
+    }
 }
 
 #[test]
@@ -1624,24 +1548,6 @@ fn ref_supports_direct_field_access_and_mutation() {
     assert!(
         errors.is_empty(),
         "a ref must expose the target struct's fields: {errors:?}"
-    );
-}
-
-#[test]
-fn reference_struct_place_can_be_borrowed_for_a_ref_parameter() {
-    let src = "struct Player { hp: int }\nfn set_hp(player: ref Player) { player.hp = 2 }\nfn main() { let player = Player { hp: 1 }  set_hp(player) }";
-    assert!(
-        !bone_rejects(src),
-        "a reference-struct place can form a temporary ref argument"
-    );
-}
-
-#[test]
-fn temporary_cannot_be_borrowed_for_a_ref_parameter() {
-    let src = "struct Player { hp: int }\nfn read(player: ref Player) -> int { player.hp }\nfn main() -> int { read(Player { hp: 1 }) }";
-    assert!(
-        bone_rejects(src),
-        "a temporary has no stable place for a ref to address"
     );
 }
 
@@ -1680,102 +1586,6 @@ fn returned_frame_reference_must_propagate_a_valid_origin() {
     assert!(
         bone_rejects(forged),
         "the privileged storage-origin marker is unavailable to ordinary source"
-    );
-}
-
-#[test]
-fn ref_into_vec_storage_cannot_be_retained_across_growth() {
-    let src = r#"
-value Position { x: int }
-fn vec_push(values: [Position], value: Position) {}
-fn main() {
-    let positions = [Position { x: 1 }]
-    let position: ref Position = positions[0]
-    vec_push(positions, Position { x: 2 })
-    position.x = 3
-}
-"#;
-    let errors = main_body_error_messages(src);
-    assert!(
-        errors
-            .iter()
-            .any(|message| message.contains("relocatable Vec or Map storage")),
-        "a retained Vec-element ref would dangle when growth relocates the buffer: {errors:?}"
-    );
-}
-
-#[test]
-fn ref_return_cannot_launder_a_vec_element_into_a_retained_ref() {
-    let src = r#"
-value Position { x: int }
-fn same(position: ref Position) -> ref Position { return position }
-fn vec_push(values: [Position], value: Position) {}
-fn main() {
-    let positions = [Position { x: 1 }]
-    let position: ref Position = same(positions[0])
-    vec_push(positions, Position { x: 2 })
-    position.x = 3
-}
-"#;
-    let errors = main_body_error_messages(src);
-    assert!(
-        errors
-            .iter()
-            .any(|message| message.contains("relocatable Vec or Map storage")),
-        "a ref-returning helper must preserve its Vec-element argument's ephemeral origin: {errors:?}"
-    );
-}
-
-#[test]
-fn ref_return_cannot_expose_an_element_of_a_relocatable_vec() {
-    let src = r#"
-value Position { x: int }
-fn main(positions: [Position]) -> ref Position { return positions[0] }
-"#;
-    let errors = main_body_error_messages(src);
-    assert!(
-        errors
-            .iter()
-            .any(|message| message.contains("relocatable Vec or Map storage")),
-        "borrowing the Vec header does not pin its relocatable element buffer: {errors:?}"
-    );
-}
-
-#[test]
-fn vec_element_can_be_borrowed_for_one_immediate_call() {
-    let src = r#"
-value Position { x: int }
-fn vec_push(values: [Position], value: Position) {}
-fn move(position: ref Position) { position.x = 2 }
-fn main() {
-    let positions = [Position { x: 1 }]
-    move(positions[0])
-    vec_push(positions, Position { x: 2 })
-}
-"#;
-    assert!(
-        !bone_rejects(src),
-        "a Vec element stays live through the immediate ref-parameter call"
-    );
-}
-
-#[test]
-fn ref_parameter_subfields_and_globals_remain_retainable() {
-    let src = r#"
-value Position { x: int }
-struct Player { position: Position }
-global ORIGIN: Position = Position { x: 0 }
-fn position(player: ref Player) -> ref Position { return player.position }
-fn same(position: ref Position) -> ref Position { return position }
-fn main(player: ref Player) {
-    let from_player: ref Position = same(player.position)
-    let from_global: ref Position = ORIGIN
-    from_player.x = from_global.x
-}
-"#;
-    assert!(
-        !bone_rejects(src),
-        "frame-stable input subfields and globals remain retainable"
     );
 }
 
@@ -1831,33 +1641,6 @@ fn ref_types_are_rejected_in_persistent_declarations() {
     }
 }
 
-#[test]
-fn closure_cannot_capture_a_ref() {
-    let src = "struct Player { hp: int }\nfn bad(player: ref Player) -> () -> int { return () => player.hp }";
-    assert!(
-        bone_rejects(src),
-        "a persistent closure environment cannot contain a ref"
-    );
-}
-
-#[test]
-fn ref_cannot_live_across_a_coroutine_suspension() {
-    let src = "struct Player { hp: int }\nco fn bad(player: ref Player) -> Coroutine<int> { yield 1  player.hp = 1 }";
-    assert!(
-        bone_rejects(src),
-        "a coroutine frame cannot retain a ref across yield"
-    );
-}
-
-#[test]
-fn ref_finished_before_a_coroutine_suspension_is_allowed() {
-    let src = "struct Player { hp: int }\nco fn fine(player: ref Player) -> Coroutine<int> { player.hp = 1  yield 1 }";
-    assert!(
-        !bone_rejects(src),
-        "last use before yield does not put the ref in the coroutine frame"
-    );
-}
-
 // IDENTITY BORROW ACROSS SUSPENSION: an
 // identity parameter is an implicit borrow that coroutine construction would
 // retain before the first resume, so a `co fn` cannot take one at all.
@@ -1882,15 +1665,6 @@ fn identity_local_cannot_live_across_a_coroutine_suspension() {
     assert!(
         err.contains("identity borrow `player` is used after a coroutine suspension"),
         "a coroutine frame cannot retain an identity across yield, got: {err}"
-    );
-}
-
-#[test]
-fn identity_local_finished_before_suspension_is_allowed() {
-    let src = "struct Player { hp: int }\nfn make_player() -> Player { return Player { hp: 1 } }\nco fn fine() -> Coroutine<int> { let player = make_player()  player.hp = 2  yield 1 }";
-    assert!(
-        !bone_rejects(src),
-        "last use before yield does not retain the identity borrow"
     );
 }
 
@@ -1948,20 +1722,6 @@ fn null_to_bare_any_rejected() {
 // any `a / b` here fails to resolve and false-reds. Oracle for that rule:
 // `rock backend-diff tests/errors/types/int_division_promotion.rock.err` (0
 // LEADs) + the full tests/ sweep under bone.
-
-#[test]
-fn redundant_null_coalesce_rejected() {
-    // `??` on a non-nullable LHS is dead. Ported from
-    // tests/errors/types/null_checks.rock.err.
-    assert!(
-        bone_rejects("fn f() { let x: int = 5  let y = x ?? 0 }"),
-        "`??` on a non-nullable value must be rejected"
-    );
-    assert!(
-        !bone_rejects("fn f() { let x: int? = 5  let y = x ?? 0 }"),
-        "`??` on a nullable value is meaningful and accepted"
-    );
-}
 
 // Collect every body-level error message across the user module. Used by the
 // diagnostic-quality tests below, which assert on the rendered wording rather
@@ -2036,19 +1796,6 @@ fn caller() -> float { return make().cooldown() }";
     assert!(
         joined.contains("cooldown") && joined.contains("field"),
         "should flag `cooldown` as a field: {joined}"
-    );
-}
-
-#[test]
-fn redundant_safe_nav_field_rejected() {
-    // `?.` on a non-nullable receiver is dead.
-    assert!(
-        bone_rejects("struct Bar { val: int }\nfn f(b: Bar) -> int { return b?.val }"),
-        "`?.` on a non-nullable receiver must be rejected"
-    );
-    assert!(
-        !bone_rejects("struct Bar { val: int }\nfn f(b: Bar?) -> int? { return b?.val }"),
-        "`?.` on a nullable receiver is meaningful and accepted"
     );
 }
 
