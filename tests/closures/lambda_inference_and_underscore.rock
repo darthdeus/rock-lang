@@ -184,10 +184,7 @@ fn test_underscore_practical_patterns() {
     let is_even: (int) -> bool = _ % 2 == 0
     let numbers = [1, 2, 3, 4, 5, 6]
     let evens = numbers.iter().filter(is_even).collect()
-    assert_eq(vec_len(evens), 3)
-    assert_eq(evens[0], 2)
-    assert_eq(evens[1], 4)
-    assert_eq(evens[2], 6)
+    assert_eq(evens, [2, 4, 6])
     
     // Sorting key extraction
     let people = [

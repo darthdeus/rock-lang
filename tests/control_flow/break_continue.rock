@@ -17,16 +17,7 @@ fn test_simple_continue() {
         vec_push(results, i)
     }
 
-    // Should have [1, 2, 4, 5, 6, 8, 9, 10]
-    assert(vec_len(results) == 8, "Expected 8 elements after continue")
-    assert(vec_get(results, 0) == 1, "First element should be 1")
-    assert(vec_get(results, 1) == 2, "Second element should be 2")
-    assert(vec_get(results, 2) == 4, "Third element should be 4 (skipped 3)")
-    assert(vec_get(results, 3) == 5, "Fourth element should be 5")
-    assert(vec_get(results, 4) == 6, "Fifth element should be 6")
-    assert(vec_get(results, 5) == 8, "Sixth element should be 8 (skipped 7)")
-    assert(vec_get(results, 6) == 9, "Seventh element should be 9")
-    assert(vec_get(results, 7) == 10, "Eighth element should be 10")
+    assert_eq(results, [1, 2, 4, 5, 6, 8, 9, 10])
 }
 
 @test
@@ -45,14 +36,7 @@ fn test_nested_loops_continue() {
         }
     }
 
-    // Should have [11, 13, 21, 23, 31, 33] (skipping j=2 cases)
-    assert(vec_len(results) == 6, "Expected 6 elements")
-    assert(vec_get(results, 0) == 11, "First element should be 11")
-    assert(vec_get(results, 1) == 13, "Second element should be 13 (skipped 12)")
-    assert(vec_get(results, 2) == 21, "Third element should be 21")
-    assert(vec_get(results, 3) == 23, "Fourth element should be 23 (skipped 22)")
-    assert(vec_get(results, 4) == 31, "Fifth element should be 31")
-    assert(vec_get(results, 5) == 33, "Sixth element should be 33 (skipped 32)")
+    assert_eq(results, [11, 13, 21, 23, 31, 33])
 }
 
 @test
@@ -76,20 +60,7 @@ fn test_continue_with_complex_conditions() {
         }
     }
 
-    // Expected: 1, 2, 5, 6, 7, 10, 11, 13, 14, 17, 18, 19
-    assert(vec_len(results) == 12, "Expected 12 elements")
-    assert(vec_get(results, 0) == 1, "Should include 1")
-    assert(vec_get(results, 1) == 2, "Should include 2")
-    assert(vec_get(results, 2) == 5, "Should include 5")
-    assert(vec_get(results, 3) == 6, "Should include 6")
-    assert(vec_get(results, 4) == 7, "Should include 7")
-    assert(vec_get(results, 5) == 10, "Should include 10")
-    assert(vec_get(results, 6) == 11, "Should include 11")
-    assert(vec_get(results, 7) == 13, "Should include 13")
-    assert(vec_get(results, 8) == 14, "Should include 14")
-    assert(vec_get(results, 9) == 17, "Should include 17")
-    assert(vec_get(results, 10) == 18, "Should include 18")
-    assert(vec_get(results, 11) == 19, "Should include 19")
+    assert_eq(results, [1, 2, 5, 6, 7, 10, 11, 13, 14, 17, 18, 19])
 }
 
 @test
@@ -112,14 +83,7 @@ fn test_continue_in_if_else() {
         }
     }
 
-    // Should have [1, 3, 5, 6, 8, 10] - odds <=5, evens >5
-    assert(vec_len(results) == 6, "Expected 6 elements")
-    assert(vec_get(results, 0) == 1, "Should include 1")
-    assert(vec_get(results, 1) == 3, "Should include 3")
-    assert(vec_get(results, 2) == 5, "Should include 5")
-    assert(vec_get(results, 3) == 6, "Should include 6")
-    assert(vec_get(results, 4) == 8, "Should include 8")
-    assert(vec_get(results, 5) == 10, "Should include 10")
+    assert_eq(results, [1, 3, 5, 6, 8, 10])
 }
 
 @test
@@ -164,16 +128,7 @@ fn test_continue_with_break() {
         }
     }
 
-    // Should have [1, 2, 4, 5, 7, 8, 10, 11] (first 8 non-multiples of 3)
-    assert(vec_len(results) == 8, "Expected exactly 8 elements")
-    assert(vec_get(results, 0) == 1, "Should include 1")
-    assert(vec_get(results, 1) == 2, "Should include 2")
-    assert(vec_get(results, 2) == 4, "Should include 4 (skipped 3)")
-    assert(vec_get(results, 3) == 5, "Should include 5")
-    assert(vec_get(results, 4) == 7, "Should include 7 (skipped 6)")
-    assert(vec_get(results, 5) == 8, "Should include 8")
-    assert(vec_get(results, 6) == 10, "Should include 10 (skipped 9)")
-    assert(vec_get(results, 7) == 11, "Should include 11")
+    assert_eq(results, [1, 2, 4, 5, 7, 8, 10, 11])
 }
 
 @test
@@ -273,13 +228,7 @@ fn test_for_loop_basic_continue() {
         vec_push(results, x)
     }
 
-    // Should have [1, 3, 5, 7, 9]
-    assert(vec_len(results) == 5, "Expected 5 odd numbers")
-    assert(vec_get(results, 0) == 1, "Should include 1")
-    assert(vec_get(results, 1) == 3, "Should include 3")
-    assert(vec_get(results, 2) == 5, "Should include 5")
-    assert(vec_get(results, 3) == 7, "Should include 7")
-    assert(vec_get(results, 4) == 9, "Should include 9")
+    assert_eq(results, [1, 3, 5, 7, 9])
 }
 
 @test
@@ -294,13 +243,7 @@ fn test_for_loop_basic_break() {
         vec_push(results, x)
     }
 
-    // Should have [1, 2, 3, 4, 5]
-    assert(vec_len(results) == 5, "Expected 5 elements before break")
-    assert(vec_get(results, 0) == 1, "Should include 1")
-    assert(vec_get(results, 1) == 2, "Should include 2")
-    assert(vec_get(results, 2) == 3, "Should include 3")
-    assert(vec_get(results, 3) == 4, "Should include 4")
-    assert(vec_get(results, 4) == 5, "Should include 5")
+    assert_eq(results, [1, 2, 3, 4, 5])
 }
 
 @test
@@ -318,15 +261,7 @@ fn test_for_loop_continue_and_break() {
         vec_push(results, x)
     }
 
-    // Should have [1, 2, 4, 5, 7, 8, 10] (1-10, skipping 3, 6, 9)
-    assert(vec_len(results) == 7, "Expected 7 elements")
-    assert(vec_get(results, 0) == 1, "Should include 1")
-    assert(vec_get(results, 1) == 2, "Should include 2")
-    assert(vec_get(results, 2) == 4, "Should include 4 (skipped 3)")
-    assert(vec_get(results, 3) == 5, "Should include 5")
-    assert(vec_get(results, 4) == 7, "Should include 7 (skipped 6)")
-    assert(vec_get(results, 5) == 8, "Should include 8")
-    assert(vec_get(results, 6) == 10, "Should include 10 (skipped 9)")
+    assert_eq(results, [1, 2, 4, 5, 7, 8, 10])
 }
 
 @test
@@ -349,17 +284,7 @@ fn test_for_loop_multiple_continues() {
         vec_push(results, x)
     }
 
-    // Should have [1, 2, 5, 6, 7, 10, 11, 13, 14] (skip 3, 4, 8, 9, 12, 15)
-    assert(vec_len(results) == 9, "Expected 9 elements")
-    assert(vec_get(results, 0) == 1, "Should include 1")
-    assert(vec_get(results, 1) == 2, "Should include 2")
-    assert(vec_get(results, 2) == 5, "Should include 5")
-    assert(vec_get(results, 3) == 6, "Should include 6")
-    assert(vec_get(results, 4) == 7, "Should include 7")
-    assert(vec_get(results, 5) == 10, "Should include 10")
-    assert(vec_get(results, 6) == 11, "Should include 11")
-    assert(vec_get(results, 7) == 13, "Should include 13")
-    assert(vec_get(results, 8) == 14, "Should include 14")
+    assert_eq(results, [1, 2, 5, 6, 7, 10, 11, 13, 14])
 }
 
 @test
@@ -379,16 +304,7 @@ fn test_for_loop_continue_with_break_condition() {
         }
     }
 
-    // Should have [1, 2, 3, 4, 6, 7, 8, 9] (first 8 non-multiples of 5)
-    assert(vec_len(results) == 8, "Expected exactly 8 elements")
-    assert(vec_get(results, 0) == 1, "Should include 1")
-    assert(vec_get(results, 1) == 2, "Should include 2")
-    assert(vec_get(results, 2) == 3, "Should include 3")
-    assert(vec_get(results, 3) == 4, "Should include 4")
-    assert(vec_get(results, 4) == 6, "Should include 6 (skipped 5)")
-    assert(vec_get(results, 5) == 7, "Should include 7")
-    assert(vec_get(results, 6) == 8, "Should include 8")
-    assert(vec_get(results, 7) == 9, "Should include 9")
+    assert_eq(results, [1, 2, 3, 4, 6, 7, 8, 9])
     assert(count > 8, "Should have processed more than 8 elements due to continues")
 }
 
@@ -410,16 +326,7 @@ fn test_nested_for_loops_with_continue() {
         }
     }
 
-    // Should have [110, 130, 140, 210, 240, 310, 330, 340] (skip j=20 and i=2,j=30)
-    assert(vec_len(results) == 8, "Expected 8 elements")
-    assert(vec_get(results, 0) == 110, "Should include 110")
-    assert(vec_get(results, 1) == 130, "Should include 130 (skipped 120)")
-    assert(vec_get(results, 2) == 140, "Should include 140")
-    assert(vec_get(results, 3) == 210, "Should include 210")
-    assert(vec_get(results, 4) == 240, "Should include 240 (skipped 220, 230)")
-    assert(vec_get(results, 5) == 310, "Should include 310")
-    assert(vec_get(results, 6) == 330, "Should include 330 (skipped 320)")
-    assert(vec_get(results, 7) == 340, "Should include 340")
+    assert_eq(results, [110, 130, 140, 210, 240, 310, 330, 340])
 }
 
 @test
@@ -440,17 +347,7 @@ fn test_nested_for_loops_with_break() {
         }
     }
 
-    // Should have [110, 120, 130, 210, 220, 230, 310, 320, 330] (i=1,2,3 with j=10,20,30)
-    assert(vec_len(results) == 9, "Expected 9 elements")
-    assert(vec_get(results, 0) == 110, "Should include 110")
-    assert(vec_get(results, 1) == 120, "Should include 120")
-    assert(vec_get(results, 2) == 130, "Should include 130")
-    assert(vec_get(results, 3) == 210, "Should include 210")
-    assert(vec_get(results, 4) == 220, "Should include 220")
-    assert(vec_get(results, 5) == 230, "Should include 230")
-    assert(vec_get(results, 6) == 310, "Should include 310")
-    assert(vec_get(results, 7) == 320, "Should include 320")
-    assert(vec_get(results, 8) == 330, "Should include 330")
+    assert_eq(results, [110, 120, 130, 210, 220, 230, 310, 320, 330])
 }
 
 @test
@@ -482,19 +379,7 @@ fn test_nested_for_loops_continue_and_break() {
     // i=3: j=1,3,5 → [31, 33, 35]
     // i=4: skipped (continue)
     // i=5: j=1,3,5 → [51, 53, 55] but break after 12 total
-    assert(vec_len(results) == 12, "Expected 12 elements")
-    assert(vec_get(results, 0) == 11, "Should include 11")
-    assert(vec_get(results, 1) == 13, "Should include 13")
-    assert(vec_get(results, 2) == 15, "Should include 15")
-    assert(vec_get(results, 3) == 21, "Should include 21")
-    assert(vec_get(results, 4) == 23, "Should include 23")
-    assert(vec_get(results, 5) == 25, "Should include 25")
-    assert(vec_get(results, 6) == 31, "Should include 31")
-    assert(vec_get(results, 7) == 33, "Should include 33")
-    assert(vec_get(results, 8) == 35, "Should include 35")
-    assert(vec_get(results, 9) == 51, "Should include 51")
-    assert(vec_get(results, 10) == 53, "Should include 53")
-    assert(vec_get(results, 11) == 55, "Should include 55")
+    assert_eq(results, [11, 13, 15, 21, 23, 25, 31, 33, 35, 51, 53, 55])
 }
 
 @test
@@ -528,20 +413,7 @@ fn test_for_loop_complex_continue_conditions() {
         vec_push(results, x)
     }
 
-    // Should have [1, 2, 5, 6, 7, 10, 11, 12, 13, 14, 16, 17] (12 elements)
-    assert(vec_len(results) == 12, "Expected 12 elements")
-    assert(vec_get(results, 0) == 1, "Should include 1")
-    assert(vec_get(results, 1) == 2, "Should include 2")
-    assert(vec_get(results, 2) == 5, "Should include 5")
-    assert(vec_get(results, 3) == 6, "Should include 6")
-    assert(vec_get(results, 4) == 7, "Should include 7")
-    assert(vec_get(results, 5) == 10, "Should include 10")
-    assert(vec_get(results, 6) == 11, "Should include 11")
-    assert(vec_get(results, 7) == 12, "Should include 12")
-    assert(vec_get(results, 8) == 13, "Should include 13")
-    assert(vec_get(results, 9) == 14, "Should include 14")
-    assert(vec_get(results, 10) == 16, "Should include 16")
-    assert(vec_get(results, 11) == 17, "Should include 17")
+    assert_eq(results, [1, 2, 5, 6, 7, 10, 11, 12, 13, 14, 16, 17])
 }
 
 @test
@@ -566,13 +438,7 @@ fn test_for_loop_with_early_collection_limit() {
         }
     }
 
-    // Should have [1, 2, 3, 4, 5] (first 5 non-multiples of 7)
-    assert(vec_len(results) == 5, "Expected exactly 5 elements")
-    assert(vec_get(results, 0) == 1, "Should include 1")
-    assert(vec_get(results, 1) == 2, "Should include 2")
-    assert(vec_get(results, 2) == 3, "Should include 3")
-    assert(vec_get(results, 3) == 4, "Should include 4")
-    assert(vec_get(results, 4) == 5, "Should include 5")
+    assert_eq(results, [1, 2, 3, 4, 5])
 }
 
 // === Edge cases ===
@@ -645,14 +511,7 @@ fn test_mixed_loop_types_with_continue() {
         }
     }
 
-    // Should have i=1,3 with x=1,3,5 → [11, 13, 15, 31, 33, 35]
-    assert(vec_len(results) == 6, "Expected 6 elements")
-    assert(vec_get(results, 0) == 11, "Should include 11")
-    assert(vec_get(results, 1) == 13, "Should include 13")
-    assert(vec_get(results, 2) == 15, "Should include 15")
-    assert(vec_get(results, 3) == 31, "Should include 31")
-    assert(vec_get(results, 4) == 33, "Should include 33")
-    assert(vec_get(results, 5) == 35, "Should include 35")
+    assert_eq(results, [11, 13, 15, 31, 33, 35])
 }
 
 @test
@@ -668,16 +527,7 @@ fn test_continue_with_function_calls_in_for_loop() {
     }
 
     // should_skip_value skips multiples of 4 and 7: 4, 7, 8, 12
-    // Should have [1, 2, 3, 5, 6, 9, 10, 11]
-    assert(vec_len(results) == 8, "Expected 8 elements")
-    assert(vec_get(results, 0) == 1, "Should include 1")
-    assert(vec_get(results, 1) == 2, "Should include 2")
-    assert(vec_get(results, 2) == 3, "Should include 3")
-    assert(vec_get(results, 3) == 5, "Should include 5 (skipped 4)")
-    assert(vec_get(results, 4) == 6, "Should include 6")
-    assert(vec_get(results, 5) == 9, "Should include 9 (skipped 7, 8)")
-    assert(vec_get(results, 6) == 10, "Should include 10")
-    assert(vec_get(results, 7) == 11, "Should include 11 (skipped 12)")
+    assert_eq(results, [1, 2, 3, 5, 6, 9, 10, 11])
 }
 
 @test
@@ -810,10 +660,7 @@ fn test_for_loop_continue_with_complex_data_structures() {
     // Should skip first vector (starts with 1, 1%4=1)
     // From second vector [4,5,6], skip even numbers 4,6, keep 5
     // From third vector [7,8,9], skip even number 8, keep 7,9
-    assert(vec_len(results) == 3, "Expected 3 elements")
-    assert(vec_get(results, 0) == 5, "Should include 5")
-    assert(vec_get(results, 1) == 7, "Should include 7")
-    assert(vec_get(results, 2) == 9, "Should include 9")
+    assert_eq(results, [5, 7, 9])
 }
 
 // Helper function for testing function calls with continue
@@ -891,10 +738,7 @@ fn test_maximum_nesting_continue_break() {
     // a=1 only:
     // b=1: c=1,2 d=1 → [1111, 1121]
     // b=2: c=2 d=1 → [1221] (skip b=2,c=1)
-    assert(vec_len(results) == 3, "Expected 3 elements")
-    assert(vec_get(results, 0) == 1111, "Should include 1111")
-    assert(vec_get(results, 1) == 1121, "Should include 1121")
-    assert(vec_get(results, 2) == 1221, "Should include 1221")
+    assert_eq(results, [1111, 1121, 1221])
 }
 
 // === break/continue/return at the top level of a loop body ===

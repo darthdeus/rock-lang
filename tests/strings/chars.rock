@@ -6,10 +6,7 @@
 fn test_chars_ascii() {
     let cps: [int] = []
     for cp in "Ab9".chars() { cps.push(cp) }
-    assert_eq(cps.len(), 3)
-    assert_eq(cps[0], 65)
-    assert_eq(cps[1], 98)
-    assert_eq(cps[2], 57)
+    assert_eq(cps, [65, 98, 57])
 }
 
 @test

@@ -202,10 +202,7 @@ fn vec_filter_basic() {
     // Filter even numbers using lambda with unannotated parameter
     let evens = vec.iter().filter((x) => x % 2 == 0).collect()
 
-    assert(vec_len(evens) == 3)
-    assert(evens[0] == 2)
-    assert(evens[1] == 4)
-    assert(evens[2] == 6)
+    assert_eq(evens, [2, 4, 6])
 
     print("ok")
 }
@@ -229,11 +226,7 @@ fn vec_filter_all_pass() {
     // All numbers are even
     let evens = vec.iter().filter((x) => x % 2 == 0).collect()
 
-    assert(vec_len(evens) == 4)
-    assert(evens[0] == 2)
-    assert(evens[1] == 4)
-    assert(evens[2] == 6)
-    assert(evens[3] == 8)
+    assert_eq(evens, [2, 4, 6, 8])
 
     print("ok")
 }
