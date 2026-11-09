@@ -1197,6 +1197,11 @@ fn declared_nobox(ws: &Workspace, ty: &crate::monoty::MonoTy) -> bool {
 }
 
 impl RepArena {
+    /// This arena's build generation, distinct for every arena in the process.
+    pub(crate) fn generation(&self) -> u64 {
+        self.arena_id
+    }
+
     fn lookup_key(&self, key: &RepKey) -> Option<RepId> {
         REP_READ_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();

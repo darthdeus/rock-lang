@@ -757,7 +757,90 @@ fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Op
 }
 
 pub(crate) fn planned_value(ws: &Workspace, name: Ustr) -> Option<PlannedValue> {
-    planned_value_rec(ws, name, &mut Vec::new())
+    ShapeMemo::with_active(
+        |memo| memo.planned.get(&name).cloned(),
+        |memo, plan| {
+            memo.planned.insert(name, plan.clone());
+        },
+        || planned_value_rec(ws, name, &mut Vec::new()),
+    )
+}
+
+/// Per-thread memo of the declaration plans ([`planned_value`],
+/// [`EnumPlan::for_name`]) a body's lowering keeps asking for: a large
+/// project's bodies request the same few thousand names hundreds of
+/// thousands of times, and each answer walks the declaration tree afresh.
+///
+/// The memo is valid for one build, identified by the representation
+/// arena's generation (the plans it caches are the ones that arena's own
+/// plans are derived from, so they share its lifetime: a definition edit
+/// rebuilds with a fresh arena). It serves only while a
+/// [`ShapeMemoScope`] is active, so a caller outside lowering computes
+/// directly.
+#[derive(Default)]
+struct ShapeMemo {
+    arena_gen: u64,
+    planned: rustc_hash::FxHashMap<Ustr, Option<PlannedValue>>,
+    enums: rustc_hash::FxHashMap<Ustr, Option<EnumPlan>>,
+}
+
+thread_local! {
+    static SHAPE_MEMO: std::cell::RefCell<ShapeMemo> = std::cell::RefCell::new(ShapeMemo::default());
+    /// The arena generation the active scope serves, `0` outside any scope.
+    static SHAPE_MEMO_ACTIVE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+impl ShapeMemo {
+    fn with_active<T: Clone>(
+        get: impl FnOnce(&ShapeMemo) -> Option<T>,
+        put: impl FnOnce(&mut ShapeMemo, &T),
+        compute: impl FnOnce() -> T,
+    ) -> T {
+        let generation = SHAPE_MEMO_ACTIVE.with(|active| active.get());
+        if generation == 0 {
+            return compute();
+        }
+        let hit = SHAPE_MEMO.with(|memo| {
+            let mut memo = memo.borrow_mut();
+            if memo.arena_gen != generation {
+                memo.arena_gen = generation;
+                memo.planned.clear();
+                memo.enums.clear();
+            }
+            get(&memo)
+        });
+        if let Some(value) = hit {
+            return value;
+        }
+        // Computed outside the borrow: a nested plan request re-enters here.
+        let value = compute();
+        SHAPE_MEMO.with(|memo| {
+            let mut memo = memo.borrow_mut();
+            if memo.arena_gen == generation {
+                put(&mut memo, &value);
+            }
+        });
+        value
+    }
+}
+
+/// Serves the declaration-plan memo for the representation arena generation
+/// `arena_gen` until dropped; nests, restoring the enclosing scope.
+pub(crate) struct ShapeMemoScope {
+    previous: u64,
+}
+
+impl ShapeMemoScope {
+    pub(crate) fn enter(arena_gen: u64) -> Self {
+        let previous = SHAPE_MEMO_ACTIVE.with(|active| active.replace(arena_gen));
+        Self { previous }
+    }
+}
+
+impl Drop for ShapeMemoScope {
+    fn drop(&mut self) {
+        SHAPE_MEMO_ACTIVE.with(|active| active.set(self.previous));
+    }
 }
 
 pub(crate) fn planned_value_contains_flat_enum(ws: &Workspace, name: Ustr) -> bool {
@@ -2458,6 +2541,16 @@ pub struct EnumPlan {
 impl EnumPlan {
     pub fn for_name(ws: &Workspace, name: Ustr) -> Option<Self> {
         ws.enums_by_name.get(&name)?;
+        ShapeMemo::with_active(
+            |memo| memo.enums.get(&name).cloned(),
+            |memo, plan| {
+                memo.enums.insert(name, plan.clone());
+            },
+            || Self::for_name_uncached(ws, name),
+        )
+    }
+
+    fn for_name_uncached(ws: &Workspace, name: Ustr) -> Option<Self> {
         let layout = if payload_free_enum_variants(ws, name).is_some() {
             EnumLayout::PayloadFree
         } else if let Some(shape) = build_enum_cdata_shape(ws, name) {

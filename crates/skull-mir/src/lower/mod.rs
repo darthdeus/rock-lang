@@ -1733,6 +1733,7 @@ fn lower_body(
     let inf = ws
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fid)));
+    let _shape_memo = shape::ShapeMemoScope::enter(scx.rep_arena.generation());
 
     let mut f = MirFunc::new(func.name);
     f.rep_arena = Some(scx.rep_arena());
