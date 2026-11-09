@@ -3136,6 +3136,8 @@ fn build_published_impl(
         global_build_stats: publication_stats,
         ..ConcreteBodies::default()
     };
+    out.instance_facts.reserve(results.len());
+    out.owner_candidates.reserve(results.len());
     // The results are sorted by instance, so the ordered tables are built in
     // bulk from the sorted rows rather than one insertion at a time.
     let mut plan_rows: Vec<(Instance, Arc<skull_mir::concrete::ConcreteBodyPlan>)> = Vec::new();
