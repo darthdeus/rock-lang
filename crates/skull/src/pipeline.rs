@@ -45,9 +45,12 @@ pub fn semantic_pass(
     aliases: &NsAliases,
     gate: ClosureGate,
 ) -> Result<Workspace, CompilerError> {
-    let ws = bone_semantic::semantic_passes::semantic_pass_without_closure_gate(modules, aliases)?;
+    let mut ws =
+        bone_semantic::semantic_passes::semantic_pass_without_closure_gate(modules, aliases)?;
     if gate == ClosureGate::Enforce {
+        let timer = bone_core::prelude::Instant::now();
         bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
+        ws.log_time("api closure", timer);
     }
     Ok(ws)
 }
@@ -62,6 +65,7 @@ pub fn check_modules(
     gate: ClosureGate,
     aliases: impl FnOnce(&ModuleSet) -> Result<NsAliases, CompilerError>,
 ) -> Result<(Workspace, Vec<CompilerError>), Vec<CompilerError>> {
+    let gates_timer = bone_core::prelude::Instant::now();
     let syntax = syntax_errors(modules.iter());
     if !syntax.is_empty() {
         return Err(syntax);
@@ -77,7 +81,10 @@ pub fn check_modules(
     if !macro_labels.is_empty() {
         return Err(macro_labels);
     }
+    let gates_time = gates_timer.elapsed();
+    let aliases_timer = bone_core::prelude::Instant::now();
     let aliases = aliases(modules).map_err(|error| vec![error])?;
+    let aliases_time = aliases_timer.elapsed();
     let ws = semantic_pass(modules, &aliases, gate);
     // Expansion recovers: a macro that must not expand records the reason on
     // `recovery_errors` and leaves the call in place. That reason explains
@@ -86,8 +93,12 @@ pub fn check_modules(
     if !expanded_syntax.is_empty() {
         return Err(expanded_syntax);
     }
-    let ws = ws.map_err(|e| vec![e])?;
+    let mut ws = ws.map_err(|e| vec![e])?;
+    ws.phase_timings.push(("gates", gates_time));
+    ws.phase_timings.push(("aliases", aliases_time));
+    let timer = bone_core::prelude::Instant::now();
     let errs = skull_mir::verdict::body_errors(&ws);
+    ws.log_time("body verdict", timer);
     Ok((ws, errs))
 }
 

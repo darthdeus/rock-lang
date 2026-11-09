@@ -156,6 +156,7 @@ pub fn lower_modules_seeded(
     rock_modules: &[Ast],
     mut seeds: FxHashMap<ModuleId, TypeArenaSeed>,
 ) -> Result<Vec<ModuleId>, CompilerError> {
+    let gap_timer = Instant::now();
     let mut modules = rock_modules
         .iter()
         .map(|rock_mod| Module {
@@ -250,6 +251,7 @@ pub fn lower_modules_seeded(
         for_each_def_item(rock_mod.items.as_slice(), &start, &mut walk)?;
     }
 
+    ws.log_time("nominal facts", gap_timer);
     let mut items = modules
         .iter_mut()
         .zip(rock_modules.iter())
@@ -274,6 +276,7 @@ pub fn lower_modules_seeded(
 
         ws.log_time("register decls", timer);
     }
+    let gap_timer = Instant::now();
 
     // Annotation registry validation for NON-fn item positions. Fn items, params, and fields validate
     // during lowering (build_function + the field/variant loops), which also
@@ -319,6 +322,7 @@ pub fn lower_modules_seeded(
         ctx.flush_scope_probes();
     }
 
+    ws.log_time("annotations", gap_timer);
     {
         let _span = tracing::info_span!("name_reg").entered();
         let timer = Instant::now();
@@ -492,12 +496,16 @@ pub fn lower_modules_seeded(
     // Globals are inferred per-body inside `check_module` (`check_global`),
     // which records type errors per `BodyOwner::Global` instead of failing the
     // whole pass -- so there is no standalone fail-fast global-inference block.
+    let gap_timer = Instant::now();
     for module in modules.into_iter() {
         ws.insert_module(module);
     }
+    ws.log_time("insert modules", gap_timer);
 
+    let gap_timer = Instant::now();
     check_embed_site_legality(ws, &ids);
     crate::value_recursion::check_value_recursion(ws, &ids);
+    ws.log_time("embed+value recursion", gap_timer);
     check_frame_ref_storage(ws, &ids);
     crate::identity_storage::check_identity_storage(ws, &ids);
 
@@ -822,8 +830,12 @@ pub fn lower_and_infer(
     let ids = lower_modules(ws, rock_modules)?;
 
     infer_modules(ws, &ids)?;
+    let timer = Instant::now();
     crate::relocation::check_relocation(ws);
+    ws.log_time("relocation", timer);
+    let timer = Instant::now();
     crate::fn_identity::check_generic_fn_eq(ws);
+    ws.log_time("generic fn eq", timer);
 
     Ok(ids)
 }
@@ -1156,7 +1168,11 @@ pub fn semantic_pass_without_closure_gate(
     if let Some(pass) = crate::stdlib_base::semantic_pass(modules, aliases) {
         return pass;
     }
-    semantic_pass_into(Workspace::default(), modules.make_owned(), aliases)
+    let timer = Instant::now();
+    let owned = modules.make_owned();
+    let mut ws = Workspace::default();
+    ws.log_time("own stdlib", timer);
+    semantic_pass_into(ws, owned, aliases)
 }
 
 /// [`semantic_pass`] enforcing identity storage in unpackaged files: the bone
@@ -1190,7 +1206,9 @@ pub fn semantic_pass_into(
 ) -> Result<Workspace, CompilerError> {
     let _span = tracing::info_span!("bone_semantic_pass").entered();
 
+    let timer = Instant::now();
     build_namespaces(&mut ws, &*rock_modules, aliases)?;
+    ws.log_time("namespaces", timer);
     expand_and_desugar(&mut ws, rock_modules)?;
     lower_and_infer(&mut ws, rock_modules)?;
 

@@ -206,7 +206,9 @@ pub(crate) fn semantic_pass(
     if !skull_parser::stdlib::is_process_stdlib(modules.shared()) {
         return None;
     }
+    let base_timer = Instant::now();
     let base = base()?;
+    let base_time = base_timer.elapsed();
     if !modules.rest().iter().all(|user| base.admits(user)) {
         return None;
     }
@@ -221,9 +223,14 @@ pub(crate) fn semantic_pass(
     } else {
         Cow::Borrowed(&base.registry)
     };
+    let clone_timer = Instant::now();
     let mut ws = base.workspace();
+    ws.phase_timings.push(("stdlib base", base_time));
+    ws.log_time("clone base", clone_timer);
     Some((|| {
+        let timer = Instant::now();
         crate::semantic_passes::build_namespaces(&mut ws, modules.iter(), aliases)?;
+        ws.log_time("namespaces", timer);
         let users = modules.rest_mut();
         let timer = Instant::now();
         users

@@ -53,6 +53,7 @@ struct CliCompileHost<'a> {
     lint_root: &'a std::path::Path,
     lint_scope: crate::lint_pass::Scope,
     comptime: CliComptime<'a>,
+    prepare_timings: Vec<(&'static str, std::time::Duration)>,
 }
 
 enum CliComptime<'a> {
@@ -80,7 +81,10 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
                 crate::compile_budget::phase("semantic");
                 crate::compile_budget::detail(&ws.phase_timings);
             }
-            Phase::Prepared => crate::compile_budget::phase("prepare"),
+            Phase::Prepared => {
+                crate::compile_budget::phase("prepare");
+                crate::compile_budget::detail(&self.prepare_timings);
+            }
         }
     }
 
@@ -101,8 +105,9 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
         &mut self,
         ws: &bone_semantic::inference::Workspace,
     ) -> std::result::Result<bone_semantic::inference::ComptimeInputs, CompilerError> {
+        let timer = Instant::now();
         let inputs = self.comptime_inputs()?;
-        crate::comptime::resolve_checked_inputs(ws, inputs, |file| {
+        let resolved = crate::comptime::resolve_checked_inputs(ws, inputs, |file| {
             self.sources.files.iter().find_map(|source| {
                 let source = source.borrow();
                 (source.file.to_id_path() == file).then(|| source.contents.clone())
@@ -110,14 +115,20 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
         })
         .map_err(|error| {
             CompilerError::new_no_location(format!("build var resolution failed: {error:#}"))
-        })
+        });
+        self.prepare_timings
+            .push(("comptime inputs", timer.elapsed()));
+        resolved
     }
 
     fn lint_findings(
         &mut self,
         ws: &bone_semantic::inference::Workspace,
     ) -> Vec<bone_lints::Finding> {
-        crate::lint_pass::findings(ws, self.sources, self.lint_root, self.lint_scope)
+        let timer = Instant::now();
+        let found = crate::lint_pass::findings(ws, self.sources, self.lint_root, self.lint_scope);
+        self.prepare_timings.push(("lints", timer.elapsed()));
+        found
     }
 
     fn report_soft_findings(&mut self, soft: Vec<bone_lints::Finding>) {
@@ -192,6 +203,7 @@ fn skull_emit_full(
         lint_root: &lint_root,
         lint_scope: crate::lint_pass::Scope::WholeProject,
         comptime: CliComptime::FromEntry(file),
+        prepare_timings: Vec::new(),
     };
     let skull::pipeline::Compiled {
         ws,
@@ -1365,6 +1377,7 @@ fn skull_build_package_with_limit(
             lint_root: std::path::Path::new(dir),
             lint_scope: crate::lint_pass::Scope::WholeProject,
             comptime: CliComptime::FromEntry(dir),
+            prepare_timings: Vec::new(),
         },
         test_dir: dir,
     };
@@ -2192,6 +2205,7 @@ fn skull_emit_project_with_inputs(
         lint_root: std::path::Path::new(dir),
         lint_scope: crate::lint_pass::Scope::ProductionOnly,
         comptime: CliComptime::Resolved(Some(inputs)),
+        prepare_timings: Vec::new(),
     };
     let target = skull::pipeline::EmitTarget {
         project_root: Some(dir),
