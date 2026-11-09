@@ -1,0 +1,26 @@
+struct JsonDefaultsChild { amount: int, label: string? }
+struct JsonDefaultsRoot { child: JsonDefaultsChild, values: [int], enabled: bool }
+
+@test
+fn json_record_defaults_distinguish_omission_null_and_invalid() {
+    let base = JsonDefaultsRoot { child: JsonDefaultsChild { amount: 4, label: "keep" }, values: [1, 2], enabled: true }
+    let codec = JsonRecordCodec {}
+    let input = json_decode("{{\"child\":{{\"label\":null}},\"values\":[9]}}").unwrap()
+    let result = json_record_decode_with_defaults(codec, input, base).unwrap()
+    assert_eq(result.child.amount, 4)
+    assert(result.child.label == null)
+    assert_eq(result.values.len(), 1)
+    assert_eq(result.values[0], 9)
+    assert(result.enabled)
+    assert_eq(base.child.label.unwrap(), "keep")
+    assert_eq(base.values.len(), 2)
+    let inherited = json_record_decode_with_defaults(codec, json_decode("{{}}").unwrap(), base).unwrap()
+    inherited.values.push(3)
+    inherited.child.amount = 99
+    assert_eq(base.values.len(), 2)
+    assert_eq(base.child.amount, 4)
+    for invalid in ["{{\"enabled\":null}}", "{{\"enabled\":3}}", "{{\"child\":{{\"amount\":2.5}}}}", "null"] {
+        assert(json_record_decode_with_defaults(codec, json_decode(invalid).unwrap(), base) == null)
+    }
+    assert(json_record_decode(codec, input, base) == null, "strict decode still requires every field")
+}

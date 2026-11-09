@@ -51,3 +51,14 @@ fn json_record_reports_enum_payload_and_root_failures() {
     assert_eq(errors[0].path, "")
     assert_eq(errors[0].actual, "Null")
 }
+
+@test
+fn json_record_can_reject_unknown_fields_without_a_second_schema() {
+    let errors: [JsonRecordError] = []
+    let codec = JsonRecordCodec { reject_unknown_fields: true, on_error: error => errors.push(error) }
+    let value = json_decode("{{\"rows\":[{{\"count\":4,\"cout\":5}}]}}").unwrap()
+    assert(json_record_decode(codec, value, JsonDiagnosticRoot { rows: [] }) == null)
+    assert_eq(errors[0].path, "/rows/0/cout")
+    assert_eq(errors[0].actual, "unknown field")
+    assert(json_record_decode(JsonRecordCodec {}, value, JsonDiagnosticRoot { rows: [] }) != null)
+}

@@ -1408,6 +1408,7 @@ struct JsonRecordError {
 }
 
 struct JsonRecordCodec {
+    reject_unknown_fields: bool = false,
     on_error: fn(JsonRecordError)? = null,
     adapters: [JsonRecordAdapter] = [],
     encode_float: fn(float) -> JsonValue = json_float,
@@ -1581,8 +1582,10 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     return failure
 """
 
+@nomangle fn __json_record_copy_default(value: any) -> any { return deepcopy(value) }
+
 @nomangle inline(lua) fn __json_record_visit(codec: any, shape: any,
-    value: any, reading: bool, seen: any, depth: int) -> any = """
+    value: any, reading: bool, seen: any, depth: int, defaults: any) -> any = """
     if depth > 128 then
         if reading then return false, __json_record_failure(shape, value) end
         error('json record nesting exceeds 128', 0)
@@ -1591,7 +1594,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
     if kind == 'opt' then
         if reading and __json_record_tag(value, 'Null') then return true, nil end
         if not reading and value == nil then return true, __json_record_node('Null', nil) end
-        return __json_record_visit(codec, shape.inner, value, reading, seen, depth + 1)
+        return __json_record_visit(codec, shape.inner, value, reading, seen, depth + 1, defaults)
     end
     if kind == 'int' or kind == 'uint' then
         local n = reading and ((__json_record_tag(value, 'Int') or __json_record_tag(value, 'Float')) and value[1]) or value
@@ -1762,6 +1765,20 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         end
     elseif decl.kind == 'struct' or decl.kind == 'value_table' or decl.kind == 'c_struct' then
         if reading and not __json_record_tag(value, 'Object') then return false, __json_record_failure(shape, value) end
+        if reading and codec.reject_unknown_fields then
+            local names = codec.field_names[name]
+            if not names then
+                names = {}
+                for _, field in ipairs(decl.fields) do names[field.name] = true end
+                codec.field_names[name] = names
+            end
+            for key in pairs(value[1]) do
+                if not names[key] then
+                    return false, __json_record_error_at({ __ty = 'JsonRecordError', path = '',
+                        expected = 'declared field', actual = 'unknown field' }, key)
+                end
+            end
+        end
         local data = reading and decl.kind == 'c_struct' and _G[name .. '_ct']() or {}
         for i, field in ipairs(decl.fields) do
             if decl.kind == 'c_struct' and field.nullable then
@@ -1776,8 +1793,15 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             if reading then item = value[1][field.name]
             elseif type(value) == 'table' then item = __json_record_field_get(value, field)
             else item = value[field.name] end
-            if reading and item == nil then return false, __json_record_error_at(__json_record_failure(child, nil), field.name) end
-            local ok, decoded = __json_record_visit(codec, child, item, reading, seen, depth + 1)
+            local fallback
+            if reading and defaults ~= nil then fallback = __json_record_field_get(defaults, field) end
+            local ok, decoded
+            if reading and item == nil then
+                if defaults == nil then return false, __json_record_error_at(__json_record_failure(child, nil), field.name) end
+                ok, decoded = true, __json_record_copy_default(fallback)
+            else
+                ok, decoded = __json_record_visit(codec, child, item, reading, seen, depth + 1, fallback)
+            end
             if not ok then
                 if not reading then error('json record invalid field ' .. name .. '.' .. field.name, 0) end
                 return false, __json_record_error_at(decoded, field.name)
@@ -1801,7 +1825,8 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         if adapters[adapter.name] then error('json record duplicate adapter: ' .. adapter.name, 0) end
         adapters[adapter.name] = adapter
     end
-    return { adapters = adapters, encode_float = codec.encode_float, decode_float = codec.decode_float }
+    return { adapters = adapters, encode_float = codec.encode_float, decode_float = codec.decode_float,
+        reject_unknown_fields = codec.reject_unknown_fields, field_names = codec.reject_unknown_fields and {} or nil }
 """
 
 inline(lua) fn __json_record_encode<T>(name: string, codec: JsonRecordCodec, value: T) -> JsonValue = """
@@ -1823,4 +1848,20 @@ fn json_record_encode<T>(codec: JsonRecordCodec, value: T) -> JsonValue {
 
 fn json_record_decode<T>(codec: JsonRecordCodec, value: JsonValue, prototype: T) -> T? {
     return __json_record_decode(__json_record_type(prototype), codec, value, prototype)
+}
+
+// Omitted record fields inherit from defaults; supplied arrays and maps replace
+// their baseline. Invalid supplied values never fall back. Returned defaults
+// are copied so editing the result cannot mutate the baseline.
+inline(lua) fn __json_record_decode_with_defaults<T>(name: string, codec: JsonRecordCodec,
+    value: JsonValue, defaults: T) -> T? = """
+    local ok, result = __json_record_visit(__json_record_context(codec),
+        { k = 'nom', name = name }, value, true, {}, 0, defaults)
+    if ok then return result end
+    if codec.on_error then codec.on_error(result) end
+    return nil
+"""
+
+fn json_record_decode_with_defaults<T>(codec: JsonRecordCodec, value: JsonValue, defaults: T) -> T? {
+    return __json_record_decode_with_defaults(__json_record_type(defaults), codec, value, defaults)
 }
