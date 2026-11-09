@@ -3521,32 +3521,6 @@ mod runner_tests {
         );
     }
 
-    /// The stub records every spawn, so the fixture proves which binary ran.
-    #[test]
-    fn a_fixture_runs_on_the_given_binary() {
-        let fixture = "TEST: stub completion\n\
-TYPE: completion\n\
----\n\
-fn main() {\n\
-    let stub_only_symbol_xyz = 1;\n\
-    let same = stub_only_«cursor»symbol_xyz;\n\
-}\n\
----\n\
-OPERATION: completion\n\
-EXPECTED:\n\
-- stub_only_symbol_xyz\n\
-===\n";
-        let (result, invocations) = run_against_stub(
-            fixture,
-            r#"{"completions": [{"label": "stub_only_symbol_xyz"}]}"#,
-        );
-        assert_eq!(
-            (invocations, result.passed, result.failed),
-            (1, 1, 0),
-            "details: {:?}",
-            result.failed_test_details
-        );
-    }
     // --- Reply strictness ---------------------------------------------------
     //
     // Every reply below either is malformed or lacks the array its request
@@ -3698,60 +3672,29 @@ EXPECTED:\n\
 min_tokens: 5\n\
 ===\n";
 
-    /// A fixture the parser must reject, with a type no decoder answers.
-    const UNKNOWN_TYPE_FIXTURE: &str = "\
-TEST: stub unknown type\n\
-TYPE: teleport\n\
----\n\
-fn main() {\n\
-    let count = 1;\n\
-}\n\
----\n\
-OPERATION: teleport\n\
-EXPECTED:\n\
-- count\n\
-===\n";
-
-    const MISMATCHED_OPERATION_FIXTURE: &str = "\
-TEST: stub mismatched operation\n\
-TYPE: hover\n\
----\n\
-fn main() {\n\
-    mai«cursor»n();\n\
-}\n\
----\n\
-OPERATION: completion\n\
-EXPECTED:\n\
-- count\n\
-===\n";
-
-    const UNKNOWN_OPERATION_FIXTURE: &str = "\
-TEST: stub unknown operation\n\
-TYPE: completion\n\
----\n\
-fn main() {\n\
-    mai«cursor»n();\n\
-}\n\
----\n\
-OPERATION: teleport\n\
-EXPECTED:\n\
-- count\n\
-===\n";
-
-    /// Write `fixture` to a temporary `.rock.lsp` file and return the parse
-    /// error it must produce.
+    /// The parse error `fixture` must produce.
     fn parse_error_of(fixture: &str) -> String {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fixture.rock.lsp");
-        std::fs::write(&path, fixture).unwrap();
-        parse_lsp_test_file(&path)
+        parse_fixtures(fixture)
             .expect_err("the fixture must be rejected when it is parsed")
             .to_string()
     }
 
+    fn parse_fixtures(fixture: &str) -> Result<Vec<LspTest>> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture.rock.lsp");
+        std::fs::write(&path, fixture).unwrap();
+        parse_lsp_test_file(&path)
+    }
+
+    fn parse_one(fixture: &str) -> LspTest {
+        let mut tests = parse_fixtures(fixture).unwrap();
+        assert_eq!(tests.len(), 1, "the fixture must be admitted once");
+        tests.pop().unwrap()
+    }
+
     /// The fixture must fail, and the failure must name the request and quote
     /// the raw reply.
-    fn assert_fixture_fails(fixture: &str, reply: &str, request: &str) {
+    fn assert_fixture_fails(fixture: &str, reply: &str, request: &str) -> String {
         let (result, invocations) = run_against_stub(fixture, reply);
         assert_eq!(invocations, 1, "the stub server must have run exactly once");
         assert_eq!(
@@ -3760,7 +3703,7 @@ EXPECTED:\n\
             "a reply of {reply:?} must not satisfy the fixture; details: {:?}",
             result.failed_test_details
         );
-        let detail = &result.failed_test_details[0].1;
+        let detail = result.failed_test_details[0].1.clone();
         assert!(
             detail.contains(request),
             "failure {detail:?} does not name the request {request:?}"
@@ -3769,74 +3712,32 @@ EXPECTED:\n\
             detail.contains(reply),
             "failure {detail:?} does not quote the raw reply {reply:?}"
         );
+        detail
     }
 
     #[test]
-    fn a_malformed_completion_reply_fails_the_fixture() {
-        assert_fixture_fails(
-            COMPLETION_FIXTURE,
-            r#"{"completions": [{"label": "count""#,
-            "completion",
-        );
-    }
-
-    #[test]
-    fn a_malformed_definition_reply_fails_the_fixture() {
-        assert_fixture_fails(
-            DEFINITION_FIXTURE,
-            "not json line: 2 character: 12",
-            "goto_definition",
-        );
-    }
-
-    #[test]
-    fn a_definition_reply_without_the_array_fails_the_none_expectation() {
-        assert_fixture_fails(
-            DEFINITION_NONE_FIXTURE,
-            r#"{"status": "ok"}"#,
-            "goto_definition",
-        );
-    }
-
-    #[test]
-    fn a_malformed_references_reply_fails_the_none_expectation() {
-        assert_fixture_fails(
-            REFERENCES_NONE_FIXTURE,
-            r#"{"references": [{"range": "#,
-            "references",
-        );
-    }
-
-    #[test]
-    fn a_references_reply_without_the_array_fails_the_none_expectation() {
-        assert_fixture_fails(REFERENCES_NONE_FIXTURE, r#"{"status": "ok"}"#, "references");
-    }
-
-    #[test]
-    fn a_malformed_signature_help_reply_fails_the_fixture() {
-        assert_fixture_fails(
-            SIGNATURE_HELP_FIXTURE,
-            "not json greet(name: string)",
-            "signature_help",
-        );
-    }
-
-    #[test]
-    fn a_malformed_symbols_reply_fails_the_fixture() {
-        assert_fixture_fails(
-            SYMBOLS_FIXTURE,
-            "not json Widget: struct",
-            "document_symbols",
-        );
-    }
-
-    #[test]
-    fn a_malformed_full_document_reply_fails_the_fixture() {
-        assert_fixture_fails(
-            FULL_DOCUMENT_FIXTURE,
-            "not json min_tokens: 5",
-            "full_document",
-        );
+    fn a_truncated_reply_or_one_without_its_array_fails_the_fixture() {
+        let cases = [
+            (
+                COMPLETION_FIXTURE,
+                r#"{"completions": [{"label": "count""#,
+                "completion",
+            ),
+            (
+                DEFINITION_NONE_FIXTURE,
+                r#"{"status": "ok"}"#,
+                "goto_definition",
+            ),
+            (
+                REFERENCES_NONE_FIXTURE,
+                r#"{"references": [{"range": "#,
+                "references",
+            ),
+            (REFERENCES_NONE_FIXTURE, r#"{"status": "ok"}"#, "references"),
+        ];
+        for (fixture, reply, request) in cases {
+            assert_fixture_fails(fixture, reply, request);
+        }
     }
 
     /// Every fixture type the parser accepts must reject a reply that only
@@ -3861,19 +3762,7 @@ EXPECTED:\n\
         ];
         for (fixture, expected_text, request) in cases {
             let reply = format!("not json {expected_text}");
-            let (result, invocations) = run_against_stub(fixture, &reply);
-            assert_eq!(invocations, 1, "the stub server must have run exactly once");
-            assert_eq!(
-                (result.passed, result.failed),
-                (0, 1),
-                "a reply of {reply:?} must not satisfy a {request} fixture; details: {:?}",
-                result.failed_test_details
-            );
-            let detail = &result.failed_test_details[0].1;
-            assert!(
-                detail.contains(request) && detail.contains(&reply),
-                "failure {detail:?} must name the request {request:?} and quote {reply:?}"
-            );
+            let detail = assert_fixture_fails(fixture, &reply, request);
             assert!(
                 !detail.contains("no reply decoder"),
                 "{request} must have a decoder, not fall through: {detail:?}"
@@ -3881,66 +3770,38 @@ EXPECTED:\n\
         }
     }
 
-    /// A type the harness cannot decode fails when the fixture is parsed, so it
-    /// cannot be dropped or compared as text.
     #[test]
-    fn an_unknown_fixture_type_is_rejected_at_parse_time() {
-        let message = parse_error_of(UNKNOWN_TYPE_FIXTURE);
-        assert!(
-            message.contains("TYPE 'teleport'") && message.contains("stub unknown type"),
-            "{message}"
-        );
-    }
-
-    /// The type names the decoder and the operation names the request; a
-    /// fixture whose two halves disagree would run one request through another
-    /// type's validator.
-    #[test]
-    fn a_fixture_whose_type_and_operation_disagree_is_rejected_at_parse_time() {
-        let message = parse_error_of(MISMATCHED_OPERATION_FIXTURE);
-        assert!(
-            message.contains("TYPE 'hover'")
-                && message.contains("OPERATION 'completion'")
-                && message.contains("stub mismatched operation"),
-            "{message}"
-        );
-    }
-
-    #[test]
-    fn an_unknown_operation_is_rejected_at_parse_time() {
-        let message = parse_error_of(UNKNOWN_OPERATION_FIXTURE);
-        assert!(
-            message.contains("OPERATION 'teleport'") && message.contains("stub unknown operation"),
-            "{message}"
-        );
-    }
-
-    /// The rename fixture whose code block opens with `--` instead of `---`.
-    /// It used to vanish from the run without a word.
-    const BAD_DELIMITER_FIXTURE: &str = "\
-TEST: stub bad delimiter\n\
-TYPE: rename\n\
---\n\
-fn main() {\n\
-    let «start»count«end» = 1\n\
-}\n\
----\n\
-OPERATION: rename\n\
-NEW_NAME: total\n\
----\n\
-EXPECTED:\n\
-fn main() {\n\
-    let total = 1\n\
-}\n\
-===\n";
-
-    #[test]
-    fn a_malformed_code_block_delimiter_is_a_parse_error_naming_the_fixture() {
-        let message = parse_error_of(BAD_DELIMITER_FIXTURE);
-        assert!(
-            message.contains("stub bad delimiter") && message.contains("fixture.rock.lsp"),
-            "{message}"
-        );
+    fn a_fixture_with_a_bad_type_operation_or_delimiter_is_a_parse_error() {
+        let cases = [
+            // A type no decoder answers cannot be dropped or compared as text.
+            (
+                COMPLETION_FIXTURE
+                    .replace("TYPE: completion", "TYPE: teleport")
+                    .replace("OPERATION: completion", "OPERATION: teleport"),
+                vec!["TYPE 'teleport'", "stub completion"],
+            ),
+            // The type names the decoder and the operation names the request;
+            // halves that disagree would run a request through the wrong validator.
+            (
+                HOVER_FIXTURE.replace("OPERATION: hover", "OPERATION: completion"),
+                vec!["TYPE 'hover'", "OPERATION 'completion'", "stub hover"],
+            ),
+            (
+                COMPLETION_FIXTURE.replace("OPERATION: completion", "OPERATION: teleport"),
+                vec!["OPERATION 'teleport'", "stub completion"],
+            ),
+            // A code block opened with `--` used to vanish from the run.
+            (
+                RENAME_FIXTURE.replacen("---\n", "--\n", 1),
+                vec!["stub rename", "fixture.rock.lsp"],
+            ),
+        ];
+        for (fixture, needles) in cases {
+            let message = parse_error_of(&fixture);
+            for needle in needles {
+                assert!(message.contains(needle), "{needle}: {message}");
+            }
+        }
     }
 
     /// Each reachable malformed shape, as (fixture, text the error must carry).
@@ -4032,10 +3893,7 @@ fn main() {\n\
     /// runs of the same fixture must not share a project directory.
     #[test]
     fn fixtures_with_the_same_name_get_separate_project_dirs() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fixture.rock.lsp");
-        std::fs::write(&path, HOVER_FIXTURE).unwrap();
-        let test = parse_lsp_test_file(&path).unwrap().remove(0);
+        let test = parse_one(HOVER_FIXTURE);
         let (file_a, proj_a) = write_fixture_project(&test).unwrap();
         let (file_b, proj_b) = write_fixture_project(&test).unwrap();
         let _ = std::fs::remove_dir_all(&proj_a);
@@ -4047,14 +3905,10 @@ fn main() {\n\
     /// Prose notes before and between blocks are documentation, not fixtures.
     #[test]
     fn prose_between_blocks_is_allowed() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fixture.rock.lsp");
         let fixture = format!(
             "Notes on this file.\n\n{HOVER_FIXTURE}\nPINNED BUG (sentinel): a note.\n\n{COMPLETION_FIXTURE}"
         );
-        std::fs::write(&path, fixture).unwrap();
-        let tests = parse_lsp_test_file(&path).unwrap();
-        assert_eq!(tests.len(), 2);
+        assert_eq!(parse_fixtures(&fixture).unwrap().len(), 2);
     }
 
     /// The edit-sequence parser rejects malformed steps and checks instead of
@@ -4103,42 +3957,34 @@ fn main() {\n\
     /// symbol fixtures with nothing to assert. The server sends numeric kinds.
     #[test]
     fn bare_symbol_lines_are_checked_against_numeric_kinds() {
-        let fixture = "\
-TEST: stub symbols\n\
-TYPE: document_symbols\n\
----\n\
-struct Widget {\n\
-}\n\
----\n\
-OPERATION: document_symbols\n\
-EXPECTED:\n\
-Widget: Struct\n\
-===\n";
-        let (result, _) =
-            run_against_stub(fixture, r#"{"symbols": [{"name": "Widget", "kind": 23}]}"#);
-        assert_eq!(
-            (result.passed, result.failed),
-            (1, 0),
-            "{:?}",
-            result.failed_test_details
-        );
-        let (result, _) =
-            run_against_stub(fixture, r#"{"symbols": [{"name": "Widget", "kind": 12}]}"#);
-        assert_eq!(
-            (result.passed, result.failed),
-            (0, 1),
-            "a Function is not a Struct"
-        );
-        let (result, _) = run_against_stub(fixture, r#"{"symbols": []}"#);
-        assert_eq!(
-            (result.passed, result.failed),
-            (0, 1),
-            "an empty reply lacks Widget"
-        );
+        let fixture = SYMBOLS_FIXTURE.replace("- Widget: struct", "Widget: Struct");
+        let cases = [
+            (
+                r#"{"symbols": [{"name": "Widget", "kind": 23}]}"#,
+                (1, 0),
+                "a Struct",
+            ),
+            (
+                r#"{"symbols": [{"name": "Widget", "kind": 12}]}"#,
+                (0, 1),
+                "a Function is not a Struct",
+            ),
+            (r#"{"symbols": []}"#, (0, 1), "an empty reply lacks Widget"),
+        ];
+        for (reply, verdict, why) in cases {
+            let (result, _) = run_against_stub(&fixture, reply);
+            assert_eq!(
+                (result.passed, result.failed),
+                verdict,
+                "{why}: {:?}",
+                result.failed_test_details
+            );
+        }
     }
 
     /// Stubs that answer with the documented shape still pass, so the strict
-    /// path does not reject well-formed, empty or partial replies.
+    /// path does not reject well-formed, empty or partial replies. The stub
+    /// records every spawn, so each case also proves which binary ran.
     #[test]
     fn well_formed_replies_pass_the_fixtures() {
         let cases = [
@@ -4207,12 +4053,7 @@ fn main() {
 ";
 
     fn code_action_test() -> LspTest {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fixture.rock.lsp");
-        std::fs::write(&path, CODE_ACTION_FIXTURE).unwrap();
-        let mut tests = parse_lsp_test_file(&path).unwrap();
-        assert_eq!(tests.len(), 1, "a code_action fixture must be admitted");
-        tests.pop().unwrap()
+        parse_one(CODE_ACTION_FIXTURE)
     }
 
     const URI: &str = "file:///fixture.rock";
@@ -4312,10 +4153,7 @@ NO_ACTION: Inline local `x`
 
     #[test]
     fn a_no_action_fixture_passes_only_when_the_action_is_absent() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fixture.rock.lsp");
-        std::fs::write(&path, NO_ACTION_FIXTURE).unwrap();
-        let test = parse_lsp_test_file(&path).unwrap().pop().unwrap();
+        let test = parse_one(NO_ACTION_FIXTURE);
         assert!(test.action_absent);
         assert_eq!(test.action_title.as_deref(), Some("Inline local `x`"));
         assert!(
@@ -4328,19 +4166,15 @@ NO_ACTION: Inline local `x`
         assert!(offered.contains("must not be offered"), "{offered}");
 
         let with_result = NO_ACTION_FIXTURE.replace("===", "RESULT:\nfn main() {}\n===");
-        std::fs::write(&path, with_result).unwrap();
-        let err = parse_lsp_test_file(&path).unwrap_err().to_string();
+        let err = parse_error_of(&with_result);
         assert!(err.contains("drop `RESULT:`"), "{err}");
     }
 
     #[test]
     fn a_refused_rename_fixture_needs_the_error_and_no_edits() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fixture.rock.lsp");
         let (head, _) = RENAME_FIXTURE.split_once("EXPECTED:\n").unwrap();
         let refused = format!("{head}EXPECTED:\nREFUSED: opaque body\n===\n");
-        std::fs::write(&path, &refused).unwrap();
-        let test = parse_lsp_test_file(&path).unwrap().pop().unwrap();
+        let test = parse_one(&refused);
         assert_eq!(test.rename_refused.as_deref(), Some("opaque body"));
         let edit = serde_json::json!([{"range": {}, "new_text": "total"}]);
         let check = |reply: serde_json::Value| check_rename_refusal(&test, "rename", &reply);
@@ -4361,16 +4195,14 @@ NO_ACTION: Inline local `x`
             assert!(err.contains(want), "{err}");
         }
 
-        std::fs::write(&path, RENAME_FIXTURE).unwrap();
-        let plain = parse_lsp_test_file(&path).unwrap().pop().unwrap();
+        let plain = parse_one(RENAME_FIXTURE);
         let err = check_rename_refusal(&plain, "rename", &serde_json::json!({"error": "no"}))
             .unwrap_err()
             .to_string();
         assert!(err.contains("rename refused: no"), "{err}");
 
         let trailing = refused.replace("REFUSED: opaque body\n", "REFUSED: opaque body\nfn x\n");
-        std::fs::write(&path, trailing).unwrap();
-        let err = parse_lsp_test_file(&path).unwrap_err().to_string();
+        let err = parse_error_of(&trailing);
         assert!(err.contains("whole EXPECTED block"), "{err}");
     }
 
