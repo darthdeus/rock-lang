@@ -179,6 +179,7 @@ impl Builder<'_> {
                 .and_then(|value| self.value_bundle_for_expr(e, value)),
             Err(err) => Err(err),
         };
+        let out = out.map_err(|e| self.located(e));
         self.cur_span = outer;
         self.cur_expr = outer_expr;
         out
@@ -193,6 +194,7 @@ impl Builder<'_> {
             }
             other => other,
         };
+        let out = out.map_err(|e| self.located(e));
         self.cur_span = outer;
         self.cur_expr = outer_expr;
         out

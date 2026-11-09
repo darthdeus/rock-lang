@@ -780,7 +780,7 @@ pub(super) fn emit_spec_chunk(
     let mut mf = match canonical_body {
         Some(body) => (*body).clone(),
         None => skull_mir::lower::lower_instance_with_plans(ws, scx, plan, &concrete.plans)
-            .map_err(|e| CompilerError::new_with_label(f.name_span, e.message))?,
+            .map_err(|e| e.or_at(f.name_span))?,
     };
     let mut times = PhaseTimes {
         lower: tl.elapsed(),

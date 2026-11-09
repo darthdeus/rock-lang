@@ -126,6 +126,23 @@ impl CompilerError {
         Self::at(span.start(), message.clone()).with_label(span, message)
     }
 
+    /// Whether this error has no source position to point at.
+    pub fn has_no_location(&self) -> bool {
+        self.location.file == UNKNOWN_FILE_NAME
+    }
+
+    /// Anchor an error that has no position yet at `span`, leaving a located
+    /// one untouched: the first caller that knows where the failure was wins.
+    pub fn or_at(mut self, span: Span) -> Self {
+        if self.has_no_location() {
+            self.location = span.start();
+            let message = self.message.clone();
+            self.labels.clear();
+            self = self.with_label(span, message);
+        }
+        self
+    }
+
     pub fn with_level(mut self, level: CompilerErrorLevel) -> Self {
         self.level = level;
         self

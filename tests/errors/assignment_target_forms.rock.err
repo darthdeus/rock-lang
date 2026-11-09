@@ -1,0 +1,120 @@
+//! Error: writes whose target is not a place, and `++`/`--` of a target that
+//!        is not a number, are rejected at type-check with the source location
+//!        instead of surfacing as an unlocated lowering failure.
+//! Tags: assignment, incdec, diagnostics
+
+//=== TEST CASE: incdec_string_NotNumeric ===
+//! expect: `++` needs a numeric target
+fn main() {
+    let s = "a"
+    s++
+}
+
+//=== TEST CASE: incdec_any_NotNumeric ===
+//! expect: `--` needs a numeric target
+fn main() {
+    let v: any = 1
+    v--
+}
+
+//=== TEST CASE: incdec_bool_NotNumeric ===
+//! expect: `++` needs a numeric target
+fn main() {
+    let b = true
+    b++
+}
+
+//=== TEST CASE: incdec_struct_NotNumeric ===
+//! expect: `++` needs a numeric target
+struct V { x: int }
+
+fn main() {
+    let v = V { x: 1 }
+    v++
+}
+
+//=== TEST CASE: incdec_string_newtype_NotNumeric ===
+//! expect: `++` needs a numeric target
+newtype Name(string)
+
+fn main() {
+    let n = Name("a")
+    n++
+}
+
+//=== TEST CASE: incdec_safe_nav_NotAPlace ===
+//! expect: `++` cannot be applied through `?.`
+struct V { x: int }
+
+fn main() {
+    let vs: [V?] = [V { x: 1 }]
+    vs[0]?.x++
+}
+
+//=== TEST CASE: predec_safe_nav_NotAPlace ===
+//! expect: `--` cannot be applied through `?.`
+struct V { x: int }
+
+fn main() {
+    let vs: [V?] = [V { x: 1 }]
+    --vs[0]?.x
+}
+
+//=== TEST CASE: incdec_call_result_NotAPlace ===
+//! expect: `++` needs a variable, field, or element
+fn f() -> int { return 1 }
+
+fn main() {
+    f()++
+}
+
+//=== TEST CASE: incdec_literal_NotAPlace ===
+//! expect: `++` needs a variable, field, or element
+fn main() {
+    1++
+}
+
+//=== TEST CASE: incdec_tuple_field_NotAPlace ===
+//! expect: `++` needs a variable, field, or element
+fn main() {
+    let u = (1, 2)
+    u.0++
+}
+
+//=== TEST CASE: assign_tuple_targets_NotAPlace ===
+//! expect: cannot assign to this expression
+fn main() {
+    let vs = [1, 2]
+    (vs[0], vs[1]) = (vs[1], vs[0])
+}
+
+//=== TEST CASE: assign_call_result_NotAPlace ===
+//! expect: cannot assign to this expression
+fn f() -> int { return 1 }
+
+fn main() {
+    f() = 1
+}
+
+//=== TEST CASE: compound_assign_call_result_NotAPlace ===
+//! expect: cannot assign to this expression
+fn f() -> int { return 1 }
+
+fn main() {
+    f() += 1
+}
+
+//=== TEST CASE: assign_tuple_field_NotAPlace ===
+//! expect: cannot assign to this expression
+fn main() {
+    let u = (1, 2)
+    u.0 = 3
+}
+
+//=== TEST CASE: assign_if_NotAPlace ===
+//! expect: cannot assign to this expression
+fn main() {
+    let a = 1
+    let b = 2
+    if a == 1 { a } else { b } = 3
+}

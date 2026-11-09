@@ -108,6 +108,7 @@ impl Builder<'_> {
                 }
             }
         })();
+        let result = result.map_err(|e| self.located(e));
         self.cur_span = outer;
         self.cur_expr = outer_expr;
         result
@@ -157,6 +158,7 @@ impl Builder<'_> {
             Ok(v) if self.f32_round_exprs.contains(&e) => Ok(self.emit_cur(Inst::FloatToF32(v))),
             other => other,
         };
+        let v = v.map_err(|e| self.located(e));
         self.cur_span = outer;
         self.cur_expr = outer_expr;
         let v = v?;

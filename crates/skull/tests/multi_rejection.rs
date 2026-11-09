@@ -178,3 +178,22 @@ fn main() { sink_one() }
         err.siblings.len()
     );
 }
+
+#[test]
+fn a_lowering_rejection_points_at_the_expression() {
+    // Generic, so type-check accepts it and only the `string` instance fails.
+    let src = r#"
+fn bump<T>(x: T) -> T {
+    x++
+    return x
+}
+fn main() { print(bump("a")) }
+"#;
+    let err = try_emit_module(src).expect_err("a string has no `++`");
+    assert!(err.message.contains("inc/dec"), "{}", err.message);
+    assert_eq!(
+        err.location.offset,
+        src.find("x++").expect("fixture line"),
+        "rejection did not anchor on the operand's expression: {err:?}"
+    );
+}

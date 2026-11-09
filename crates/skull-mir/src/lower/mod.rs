@@ -1707,9 +1707,11 @@ fn lower_instance_with_plan_inner(
                 )));
             }
         }
-        validate_concrete_callee_plans(ws, scx, plan, concrete_plans)?;
+        validate_concrete_callee_plans(ws, scx, plan, concrete_plans)
+            .map_err(|e| e.or_at(func.name_span))?;
     }
     lower_body(ws, scx, inst.func, inst.clone(), plan, concrete_plans)
+        .map_err(|e| e.or_at(func.name_span))
 }
 
 fn lower_body(
@@ -1837,7 +1839,7 @@ fn lower_body(
     b.fill_param_defaults()?;
     let params: Vec<Idx<BindingInfo>> = b.body.param_bindings.into_iter().collect();
     b.copy_ref_borrowed_params(&params)?;
-    b.lower_root()?;
+    b.lower_root().map_err(|e| b.located(e))?;
     let variants = b.flat_variants.borrow_mut().take_funcs();
     b.f.nested_fns.extend(variants);
     let stats = b.lower_attribution.into_inner();
@@ -1912,6 +1914,7 @@ pub fn lower_global_with_call_context(
         concrete_plans,
     )?;
     lower_global_inner(ws, scx, call_scx, *module, gid, name, plan, concrete_plans)
+        .map_err(|e| e.or_at(module_ref.globals[gid].name_span))
 }
 
 fn lower_global_inner(
@@ -1976,7 +1979,7 @@ fn lower_global_inner(
             .expect("global plan")
             .representation()
     });
-    b.lower_root()?;
+    b.lower_root().map_err(|e| b.located(e))?;
     let stats = b.lower_attribution.into_inner();
     Ok(Some(finish_lower_attribution(b.f, stats)))
 }
@@ -2008,6 +2011,7 @@ pub fn lower_decorator_with_plans(
         concrete_plans,
     )?;
     lower_decorator_inner(ws, scx, *module, did, name, plan, concrete_plans)
+        .map_err(|e| e.or_at(module_ref.decorators[did].span))
 }
 
 fn validate_always_plan(
@@ -2284,7 +2288,7 @@ fn lower_decorator_inner(
     b.fill_param_defaults()?;
     let params: Vec<Idx<BindingInfo>> = b.body.param_bindings.into_iter().collect();
     b.copy_ref_borrowed_params(&params)?;
-    b.lower_root()?;
+    b.lower_root().map_err(|e| b.located(e))?;
     let stats = b.lower_attribution.into_inner();
     Ok(finish_lower_attribution(b.f, stats))
 }
@@ -2606,6 +2610,15 @@ impl Builder<'_> {
                 CompilerError::new_with_label(span, format!("skull-mir: lowering gap: {msg}"))
             }
             None => gap(msg),
+        }
+    }
+
+    /// Give a location-less error leaving a lowering scope the cursor's span,
+    /// before that scope restores the cursor. Innermost wins.
+    fn located(&self, error: CompilerError) -> CompilerError {
+        match self.cur_span {
+            Some(span) => error.or_at(span),
+            None => error,
         }
     }
 

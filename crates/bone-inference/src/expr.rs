@@ -507,7 +507,21 @@ pub fn infer_expr_used(
             }
         }
 
-        Expr::IncDec { target, .. } => {
+        Expr::IncDec {
+            target, decrement, ..
+        } => {
+            let op = if *decrement { "--" } else { "++" };
+            match c.body.expr_arena[*target] {
+                Expr::Var(_) | Expr::Global(_) | Expr::FieldAccess { .. } | Expr::Index { .. } => {}
+                Expr::SafeNav { .. } => comp_error!(
+                    expr_span,
+                    "`{}` cannot be applied through `?.`; write the update as `{} 1` on the \
+                     same path",
+                    op,
+                    if *decrement { "-=" } else { "+=" },
+                ),
+                _ => comp_error!(expr_span, "`{}` needs a variable, field, or element", op),
+            }
             if let Expr::FieldAccess { base, field } = c.body.expr_arena[*target] {
                 reject_swizzle_write(c, gamma, base, field, expr_span)?;
                 reject_value_struct_field_write(c, gamma, base, expr_span)?;
@@ -525,7 +539,16 @@ pub fn infer_expr_used(
                 }
             }
             let inner_ty = infer_expr(c, gamma, *target)?;
-            resolve(gamma, inner_ty, c.body.expr_spans[*target])
+            let inner_ty = resolve(gamma, inner_ty, c.body.expr_spans[*target]);
+            if !may_be_numeric(gamma, inner_ty, expr_span) {
+                comp_error!(
+                    expr_span,
+                    "`{}` needs a numeric target, but this has type `{}`",
+                    op,
+                    gamma.workspace.render(Some(&gamma.out), inner_ty),
+                );
+            }
+            inner_ty
         }
 
         Expr::As {
@@ -1402,6 +1425,19 @@ pub fn infer_expr_used(
 
         Expr::Assign { target, value } => {
             let (target, value) = (*target, *value);
+            if !matches!(
+                c.body.expr_arena[target],
+                Expr::Var(_)
+                    | Expr::Global(_)
+                    | Expr::FieldAccess { .. }
+                    | Expr::Index { .. }
+                    | Expr::SafeNav { .. }
+            ) {
+                comp_error!(
+                    c.body.expr_spans[target],
+                    "cannot assign to this expression: it is not a variable, field, or element",
+                );
+            }
             // A `const` global is read-only: reject a whole-global rebind. Field/
             // index writes through it (`Expr::Field`/`Expr::Index` target) are out
             // of scope and fall through.
@@ -1893,6 +1929,38 @@ pub(crate) fn validate_frame_ref_return(
 /// Infer the common scalar type of a half-open range's bounds. Integer
 /// literals are context-sensitive here, just as they are in an assignment or
 /// call argument; non-literal `int`/`uint` mixtures remain rejected.
+/// Whether `ty` can be a number once it is concrete. A generic or unsolved
+/// operand is decided per instantiation at lowering; everything else is known
+/// now. Newtypes follow the same wrapped-representation rule as arithmetic.
+fn may_be_numeric(gamma: &mut Gamma, ty: TyId, span: Span) -> bool {
+    let mut ty = peel_nullable(gamma, ty, span);
+    // A newtype cycle is rejected at its own declaration; bound the walk.
+    for _ in 0..64 {
+        match *gamma.get(ty) {
+            TypeExpr::Builtin(
+                BuiltinTy::Int
+                | BuiltinTy::Uint
+                | BuiltinTy::Float
+                | BuiltinTy::F32
+                | BuiltinTy::Never
+                | BuiltinTy::Error,
+            )
+            | TypeExpr::Generic(..)
+            | TypeExpr::Infer(..) => return true,
+            TypeExpr::App {
+                ctor: TypeCtor::Nominal(name),
+                ..
+            } if gamma.workspace.newtypes_by_name.contains_key(&name) => {
+                let NewtypeId { module, def } = resolve_newtype(gamma, name).unwrap();
+                let wrapped = gamma.workspace.module(module).newtypes[def].wrapped;
+                ty = peel_nullable(gamma, wrapped, span);
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+
 pub(crate) fn infer_range_bounds(
     c: BodyCtx,
     gamma: &mut Gamma,
