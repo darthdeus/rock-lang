@@ -24,23 +24,38 @@ pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
                 )?;
                 let mut dependency_files = Vec::new();
 
-                // Load each dependency package's files in graph load order
+                // Every package's walk and read is independent of the others,
+                // and each waits on the disk more than on a core; the packages
+                // run side by side and the first failing package in load
+                // order reports, as a serial loop would.
+                let loaded: Vec<Result<SourceFiles>> = {
+                    use rayon::prelude::*;
+                    graph
+                        .load_order()
+                        .par_iter()
+                        .map(|id| {
+                            // The root package loads from the INVOKED directory,
+                            // which can be a subdirectory of its manifest root;
+                            // dependencies always load their whole root.
+                            let load_dir = if *id == graph.root() {
+                                project_dir.clone()
+                            } else {
+                                graph.package(*id).root.clone()
+                            };
+                            let selected = graph.selected_rock_files(*id, &load_dir)?;
+                            SourceFiles::from_multiple_paths(&selected, true)
+                        })
+                        .collect()
+                };
+
+                // Keep each dependency package's files in graph load order
                 // (providers before consumers), then the root package's files
                 // last. Global initializers are module-load effects, so a
                 // library must be ready before a consuming game's global
                 // initializer on both emitters.
-                for id in graph.load_order() {
+                for (id, package_sources) in graph.load_order().iter().zip(loaded) {
                     let node = graph.package(*id);
-                    // The root package loads from the INVOKED directory, which
-                    // can be a subdirectory of its manifest root; dependencies
-                    // always load their whole root.
-                    let load_dir = if *id == graph.root() {
-                        project_dir.clone()
-                    } else {
-                        node.root.clone()
-                    };
-                    let selected = graph.selected_rock_files(*id, &load_dir)?;
-                    let package_sources = SourceFiles::from_multiple_paths(&selected, true)?;
+                    let package_sources = package_sources?;
                     for file in package_sources.files {
                         // Skip files with #script directive (test/example files in library dependencies)
                         if !file.borrow().is_script || *id == graph.root() {
