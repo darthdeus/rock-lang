@@ -7215,7 +7215,7 @@ mod tests {
     #[test]
     fn summary_counts_expects() {
         let stderr = r#"
-__SIM__ {"op":"start_game","name":"match3","site":"foo.rock:1"}
+__SIM__ {"op":"start_game","name":"fixture","site":"foo.rock:1"}
 __SIM__ {"op":"expect_ok","message":"a","site":"foo.rock:2"}
 __SIM__ {"op":"expect_ok","message":"b","site":"foo.rock:3"}
 __SIM__ {"op":"expect_fail","message":"c","site":"foo.rock:4"}
