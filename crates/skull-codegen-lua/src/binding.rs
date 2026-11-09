@@ -160,13 +160,16 @@ pub fn callee_binding_plan(
     let limit = MAX_BOUND_CALLEES - reserved;
     let capped = captures.len() > limit;
     captures.truncate(limit);
+    // Lua derives traceback names from call-site upvalues. Preserve them at
+    // unwind boundaries so the captured raise-site trace names the callee.
+    let preserve_names = has_inline_body || func.registers_defer_cleanup(&blocks);
     let mut next_alias = 0;
     let parameters = captures
         .iter()
         .map(|capture| {
             // Raw Lua may refer to any lexical name. Runtime helper calls are
             // printed directly, so their captures retain the original spelling.
-            if has_inline_body
+            if preserve_names
                 || matches!(
                     capture.as_str(),
                     "__rock_checked_u32" | "__rock_u32_shift_count"
