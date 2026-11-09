@@ -18,14 +18,19 @@ macro_rules! bank_file_name {
 }
 /// The bank's path inside a game project.
 pub const BANK_PATH: &str = concat!("assets/", bank_file_name!());
+/// The bank file name inside a project asset root.
+pub const BANK_FILE_NAME: &str = bank_file_name!();
 /// A sheet file is `<asset root>/.eat/<dir>/<name>`.
 pub const SHEET_ROOT: &str = ".eat";
-pub(crate) const SHEET_GEOMETRY: &str = "sheet.json";
+pub const SHEET_GEOMETRY: &str = "sheet.json";
 /// The relight channels of an animation sheet, in the order the bake writes them.
-pub(crate) const RELIGHT_CHANNELS: [&str; 4] = ["albedo", "normal", "depth", "material"];
+pub const RELIGHT_CHANNELS: [&str; 4] = ["albedo", "normal", "depth", "material"];
 /// The number of bake directions (Eat's `bake::DIRECTIONS`); a character
 /// line's camera holds one basis per direction.
-pub(crate) const DIRECTION_COUNT: usize = 8;
+pub const DIRECTION_COUNT: usize = 8;
+
+/// Joint positions stored in sheet geometry, indexed by joint, direction, frame and xyz.
+pub type JointTrackSet = BTreeMap<String, Vec<Vec<[f64; 3]>>>;
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -277,10 +282,10 @@ pub struct ArchitecturalPiece {
 /// eight directions, and optional joint tracks `[direction][frame] = [x, y, z]`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SheetGeometry {
+pub struct SheetGeometry {
     pub rects: Vec<[u32; 7]>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub joints: BTreeMap<String, Vec<Vec<[f64; 3]>>>,
+    pub joints: JointTrackSet,
 }
 
 impl SheetGeometry {
@@ -356,6 +361,19 @@ impl Line {
         }
     }
 
+    /// Return the mutable sheet directory, when this line owns one.
+    pub fn dir_mut(&mut self) -> Option<&mut String> {
+        match self {
+            Line::Character(_) => None,
+            Line::Animation(line) => Some(&mut line.dir),
+            Line::Architecture(line) => Some(&mut line.dir),
+            Line::Icon(line) => Some(&mut line.dir),
+            Line::Prop(line) => Some(&mut line.dir),
+            Line::Surface(line) => Some(&mut line.dir),
+            Line::Texture(line) => Some(&mut line.dir),
+        }
+    }
+
     pub fn describe(&self) -> String {
         match self.key() {
             (kind, id, "") => format!("{kind} {id:?}"),
@@ -364,7 +382,7 @@ impl Line {
     }
 }
 
-pub(crate) fn mask_file(mask: &str) -> String {
+pub fn mask_file(mask: &str) -> String {
     format!("mask-{mask}.png")
 }
 
@@ -429,7 +447,7 @@ fn positive(size: [u32; 2]) -> bool {
     size[0] > 0 && size[1] > 0
 }
 
-pub(crate) fn is_sheet_dir(dir: &str) -> bool {
+pub fn is_sheet_dir(dir: &str) -> bool {
     dir.len() == 64
         && dir
             .bytes()
@@ -455,7 +473,7 @@ fn check_masks(masks: &[String]) -> Result<()> {
 
 /// The checks one line carries on its own; `resolve` checks lines against
 /// each other.
-pub(crate) fn check_line(line: &Line) -> Result<()> {
+pub fn check_line(line: &Line) -> Result<()> {
     let (_, id, label) = line.key();
     anyhow::ensure!(
         !id.is_empty() && (!matches!(line, Line::Animation(_)) || !label.is_empty()),
@@ -770,7 +788,7 @@ pub fn resolve(lines: &[Line]) -> (BankIndex<'_>, Vec<String>) {
     (index, problems)
 }
 
-pub(crate) fn validate_floor_texture(
+pub fn validate_floor_texture(
     repeat: Option<[u32; 2]>,
     region: Option<[u32; 4]>,
     wang: Option<[u32; 2]>,
@@ -889,11 +907,11 @@ impl Placement {
     }
 }
 
-pub(crate) fn finite_point(point: [f32; 2]) -> bool {
+pub fn finite_point(point: [f32; 2]) -> bool {
     point.iter().all(|v| v.is_finite() && v.abs() <= 65536.)
 }
 
-pub(crate) fn check_polygon(points: &[[f32; 2]]) -> Result<()> {
+pub fn check_polygon(points: &[[f32; 2]]) -> Result<()> {
     anyhow::ensure!(
         (3..=128).contains(&points.len()) && points.iter().all(|p| finite_point(*p)),
         "invalid placement polygon"
