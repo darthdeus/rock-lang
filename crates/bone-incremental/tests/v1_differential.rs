@@ -424,6 +424,21 @@ impl V1Harness {
             .collect()
     }
 
+    #[track_caller]
+    fn assert_no_diagnostics(&self) {
+        let diags = self.diagnostics();
+        assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+    }
+
+    #[track_caller]
+    fn assert_diagnostic(&self, needle: &str) {
+        let diags = self.diagnostics();
+        assert!(
+            diags.iter().any(|d| d.contains(needle)),
+            "no diagnostic contains {needle:?}: {diags:?}"
+        );
+    }
+
     fn diagnostics(&self) -> Vec<String> {
         self.session
             .diagnostics()
@@ -700,15 +715,11 @@ fn a_lower_tier_overload_added_joins_the_callers_family() {
         v1("c.rock", c),
         v1("d.rock", UNRELATED),
     ]);
-    assert!(
-        h.diagnostics().iter().any(|d| d.contains("type mismatch")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("type mismatch");
 
     let r = h.edit("b.rock", b1).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
     let both = family(&[(&key("b::bump"), "Globs"), (&key("c::bump"), "Own")]);
     assert_eq!(h.call_keys("c.rock"), vec![("bump".to_string(), both)]);
     assert_eq!(h.selected("c.rock"), vec![key("b::bump")]);
@@ -723,11 +734,7 @@ fn a_lower_tier_overload_added_joins_the_callers_family() {
     let r = h.edit("b.rock", b0).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
     assert_eq!(h.call_keys("c.rock"), vec![(key("c::bump"), None)]);
-    assert!(
-        h.diagnostics().iter().any(|d| d.contains("type mismatch")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("type mismatch");
 }
 
 /// Gate (d): a private helper added in a module nothing else names. A glob
@@ -776,13 +783,7 @@ fn gate_e_module_header_changed() {
     assert_eq!(h.call_keys("c.rock"), vec![(key("b::depth"), None)]);
 
     let r = h.edit("b.rock", b1).expect("accepted");
-    assert!(
-        h.diagnostics()
-            .iter()
-            .any(|d| d.contains("did not resolve")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("did not resolve");
     assert_eq!(r.tier, UpdateTier::Scope);
     assert_eq!(h.reinferred_body_count(), 1);
     assert_eq!(h.relowered_body_count(), 2);
@@ -814,7 +815,7 @@ fn gate_f_reexport_edit_reaches_a_globber_through_a_glob_chain() {
         v1("user.rock", user),
         v1("d.rock", UNRELATED),
     ]);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
     assert_eq!(h.call_keys("user.rock"), vec![(key("a::bump"), None)]);
 
     let r = h.edit("facade.rock", facade1).expect("accepted");
@@ -850,7 +851,7 @@ fn a_glob_reexport_of_a_named_reexport_resolves() {
     };
     for user in [direct, by_path, by_glob] {
         let h = build(user);
-        assert!(h.diagnostics().is_empty(), "{user}: {:?}", h.diagnostics());
+        h.assert_no_diagnostics();
         assert_eq!(
             h.call_keys("user.rock"),
             vec![(key("a::bump"), None)],
@@ -875,16 +876,10 @@ fn gate_g_visibility_narrowed_on_a_path_used_item() {
         v1("c.rock", c),
         v1("d.rock", UNRELATED),
     ]);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
 
     let r = h.edit("a.rock", a1).expect("accepted");
-    assert!(
-        h.diagnostics()
-            .iter()
-            .any(|d| d.contains("`bump` is not accessible from this module")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("`bump` is not accessible from this module");
     assert_eq!(r.tier, UpdateTier::Scope);
     assert_eq!(h.reinferred_body_count(), 1);
     assert_eq!(h.relowered_body_count(), 2);
@@ -923,13 +918,7 @@ fn gate_h_legacy_definer_edit_collides_with_a_projected_name() {
     assert_eq!(h.call_keys("legacy_use.rock"), vec![(key("a::bump"), None)]);
 
     let r = h.edit("legacy_def.rock", with).expect("accepted");
-    assert!(
-        h.diagnostics()
-            .iter()
-            .any(|d| d.contains("Ambiguous overload for `bump` with argument types (int)")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("Ambiguous overload for `bump` with argument types (int)");
     assert_eq!(r.tier, UpdateTier::Scope);
     assert_eq!(h.reinferred_body_count(), 3);
     assert_eq!(h.relowered_body_count(), 3);
@@ -992,7 +981,7 @@ fn a_legacy_definition_of_a_std_name_added_leaves_the_v1_call_on_std() {
     assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
 
     h.edit("legacy_def.rock", with).expect("accepted");
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
     assert_eq!(h.call_keys("c.rock"), vec![("warm_one".to_string(), None)]);
     let selected: Vec<String> = snapshot(h.session.workspace(), &h.files)
         .references
@@ -1038,15 +1027,11 @@ fn visibility_widened_on_a_path_used_item() {
         v1("c.rock", c),
         v1("d.rock", UNRELATED),
     ]);
-    assert!(
-        h.diagnostics().iter().any(|d| d.contains("not accessible")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("not accessible");
 
     let r = h.edit("a.rock", A_BUMP).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
     assert_eq!(h.call_keys("c.rock"), vec![(key("a::bump"), None)]);
     assert_eq!(h.relowered_body_count(), 2, "a's bump and c's pick");
 }
@@ -1070,11 +1055,7 @@ fn overload_member_visibility_edit_rechecks_external_callers() {
 
     let r = h.edit("a.rock", a1).expect("visibility edit is accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(
-        h.diagnostics().iter().any(|d| d.contains("not accessible")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("not accessible");
     assert_eq!(
         h.relowered_body_count(),
         3,
@@ -1107,11 +1088,11 @@ fn a_signature_edit_regroups_backend_variants() {
     let apart = "extern(js) fn now(n: float) -> int\n";
     let paired = "extern(js) fn now(n: int) -> int\n";
     let mut h = V1Harness::new(vec![legacy("a.rock", a), legacy("b.rock", apart)]);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
 
     for text in [paired, apart] {
         h.edit("b.rock", text).expect("accepted");
-        assert!(h.diagnostics().is_empty(), "{text}: {:?}", h.diagnostics());
+        h.assert_no_diagnostics();
         assert_eq!(
             selected_files(&h, "a.rock"),
             vec!["a.rock".to_string()],
@@ -1131,7 +1112,7 @@ fn an_added_backend_sibling_joins_the_group() {
 
     for text in [with, without] {
         h.edit("b.rock", text).expect("accepted");
-        assert!(h.diagnostics().is_empty(), "{text}: {:?}", h.diagnostics());
+        h.assert_no_diagnostics();
         assert_eq!(
             selected_files(&h, "a.rock"),
             vec!["a.rock".to_string()],
@@ -1153,28 +1134,16 @@ fn a_reexport_added_makes_a_failed_path_resolve() {
         v1("c.rock", c),
         v1("d.rock", UNRELATED),
     ]);
-    assert!(
-        h.diagnostics()
-            .iter()
-            .any(|d| d.contains("did not resolve")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("did not resolve");
 
     let r = h.edit("b.rock", b1).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
     assert_eq!(h.call_keys("c.rock"), vec![(key("a::bump"), None)]);
 
     let r = h.edit("b.rock", b0).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(
-        h.diagnostics()
-            .iter()
-            .any(|d| d.contains("did not resolve")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("did not resolve");
 }
 
 /// A `use` added to the fragment that failed to resolve a bare name.
@@ -1187,17 +1156,11 @@ fn a_use_added_makes_an_unresolved_name_resolve() {
         v1("c.rock", c0),
         v1("d.rock", UNRELATED),
     ]);
-    assert!(
-        h.diagnostics()
-            .iter()
-            .any(|d| d.contains("did not resolve")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("did not resolve");
 
     let r = h.edit("c.rock", c1).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
     assert_eq!(h.relowered_body_count(), 1, "c's pick alone");
 }
 
@@ -1215,7 +1178,7 @@ fn a_module_header_renamed_back_restores_the_path() {
     h.edit("b.rock", b1).expect("accepted");
     let r = h.edit("b.rock", b0).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
     assert_eq!(h.call_keys("c.rock"), vec![(key("b::depth"), None)]);
 }
 
@@ -1235,13 +1198,7 @@ fn a_definition_renamed_in_one_fragment_moves_its_sibling_fragment() {
 
     let r = h.edit("b1.rock", b1_renamed).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(
-        h.diagnostics()
-            .iter()
-            .any(|d| d.contains("`helper` did not resolve")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("`helper` did not resolve");
     assert_eq!(h.relowered_body_count(), 2, "b1's helper2 and b2's user");
 }
 
@@ -1255,7 +1212,7 @@ fn an_inline_module_added_makes_a_path_into_it_resolve() {
 
     let r = h.edit("d.rock", d1).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
     assert_eq!(h.call_keys("c.rock"), vec![(key("d::inner::f"), None)]);
 }
 
@@ -1273,17 +1230,11 @@ fn a_module_visibility_widened_opens_a_path_through_it() {
         v1("c.rock", c),
         v1("d.rock", UNRELATED),
     ]);
-    assert!(
-        h.diagnostics()
-            .iter()
-            .any(|d| d.contains("module `hidden` is not accessible")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("module `hidden` is not accessible");
 
     let r = h.edit("hidden.rock", hidden1).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
     assert_eq!(h.call_keys("c.rock"), vec![(key("outer::hidden::f"), None)]);
 }
 
@@ -1300,17 +1251,11 @@ fn a_glob_reexport_added_ties_a_globbers_call() {
         v1("hub.rock", hub0),
         v1("user.rock", user),
     ]);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
 
     let r = h.edit("hub.rock", hub1).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(
-        h.diagnostics()
-            .iter()
-            .any(|d| d.contains("Ambiguous overload for `bump`")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("Ambiguous overload for `bump`");
 }
 
 /// The definition at the end of a re-export chain renamed: the chain's own
@@ -1351,7 +1296,7 @@ fn a_type_flavor_change_relowers_a_variant_path_user() {
 
     let r = h.edit("b.rock", b1).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Interface);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
 }
 
 /// A legacy file's projection gains a name: the root re-exports another v1
@@ -1371,7 +1316,7 @@ fn a_projected_name_added_resolves_a_legacy_caller() {
 
     let r = h.edit("root.rock", root1).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
     assert_eq!(
         h.call_keys("legacy_use.rock"),
         vec![(key("a::twice"), None)]
@@ -1406,7 +1351,7 @@ fn a_merged_legacy_family_gains_a_member() {
 
     let r = h.edit("root.rock", root1).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
 }
 
 /// A legacy definer drops the collision again: the legacy caller leaves the
@@ -1428,7 +1373,7 @@ fn a_legacy_definer_removes_a_colliding_name() {
 
     let r = h.edit("legacy_def.rock", without).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
     assert_eq!(h.call_keys("legacy_use.rock"), vec![(key("a::bump"), None)]);
 }
 
@@ -1445,20 +1390,14 @@ fn a_type_removed_and_restored_relowers_its_users() {
         v1("c.rock", c),
         v1("d.rock", UNRELATED),
     ]);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
 
     let r = h.edit("b.rock", b1).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(
-        h.diagnostics()
-            .iter()
-            .any(|d| d.contains("did not resolve")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("did not resolve");
     let r = h.edit("b.rock", b0).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
 
     let sig = "mod c;\n\nfn sig(t: super::b::T) -> int {\n    t.x\n}\n";
     let mut h = V1Harness::new(vec![
@@ -1680,16 +1619,10 @@ fn a_module_alias_added_and_removed_moves_its_fragment() {
         v1("c.rock", c0),
         v1("d.rock", UNRELATED),
     ]);
-    assert!(
-        h.diagnostics()
-            .iter()
-            .any(|d| d.contains("did not resolve")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("did not resolve");
 
     let r = h.edit("c.rock", c1).expect("accepted");
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
     assert_eq!(h.call_keys("c.rock"), vec![(key("a::bump"), None)]);
     assert_eq!(r.tier, UpdateTier::Scope);
     assert_eq!(
@@ -1698,13 +1631,7 @@ fn a_module_alias_added_and_removed_moves_its_fragment() {
     );
 
     h.edit("c.rock", c0).expect("accepted");
-    assert!(
-        h.diagnostics()
-            .iter()
-            .any(|d| d.contains("did not resolve")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("did not resolve");
 }
 
 /// The module an alias names is edited in ANOTHER file: the aliasing
@@ -1722,13 +1649,7 @@ fn a_member_removed_from_an_aliased_module_relowers_the_alias_user() {
     assert_eq!(h.call_keys("c.rock"), vec![(key("a::bump"), None)]);
 
     let r = h.edit("a.rock", a1).expect("accepted");
-    assert!(
-        h.diagnostics()
-            .iter()
-            .any(|d| d.contains("did not resolve")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("did not resolve");
     assert_eq!(r.tier, UpdateTier::Scope);
     assert_eq!(h.relowered_body_count(), 2, "a's `other` and c's `pick`");
 
@@ -1752,16 +1673,10 @@ fn a_module_reexport_added_and_repointed_moves_a_path_through_it() {
         v1("user.rock", user),
         v1("d.rock", UNRELATED),
     ]);
-    assert!(
-        h.diagnostics()
-            .iter()
-            .any(|d| d.contains("did not resolve")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("did not resolve");
 
     let r = h.edit("facade.rock", facade1).expect("accepted");
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
     assert_eq!(h.call_keys("user.rock"), vec![(key("a::bump"), None)]);
     assert_eq!(r.tier, UpdateTier::Scope);
     assert_eq!(
@@ -1831,35 +1746,19 @@ fn a_legacy_providers_family_grows_and_shrinks_under_a_v1_glob_user() {
         ],
         app_over_x_lib(),
     );
-    assert!(
-        h.diagnostics()
-            .iter()
-            .any(|d| d.contains("did not resolve")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("did not resolve");
 
     let r = h.edit("xlib.rock", int_only).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
     assert_eq!(h.call_keys("use.rock"), vec![("mix".to_string(), None)]);
-    assert!(
-        h.diagnostics().iter().any(|d| d.contains("type mismatch")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("type mismatch");
 
     h.edit("xlib.rock", both).expect("accepted");
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
 
     let r = h.edit("xlib.rock", none).expect("accepted");
     assert_eq!(r.tier, UpdateTier::Scope);
-    assert!(
-        h.diagnostics()
-            .iter()
-            .any(|d| d.contains("did not resolve")),
-        "{:?}",
-        h.diagnostics()
-    );
+    h.assert_diagnostic("did not resolve");
 }
 
 #[test]
@@ -1877,12 +1776,12 @@ fn imported_iterator_protocol_tracks_visibility_and_body_edits() {
         v1("sequence.rock", provider),
         v1("caller.rock", visible),
     ]);
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
     h.edit("caller.rock", &hidden).expect("scope edit");
     assert!(!h.diagnostics().is_empty(), "unimported next is rejected");
     h.edit("caller.rock", visible).expect("restore import");
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
     h.edit("caller.rock", &visible.replace("return item", "return 1"))
         .expect("body edit");
-    assert!(h.diagnostics().is_empty(), "{:?}", h.diagnostics());
+    h.assert_no_diagnostics();
 }

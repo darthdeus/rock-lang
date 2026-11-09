@@ -425,27 +425,6 @@ fn oracle_coroutine_body_edit_stays_a_coroutine() {
     );
 }
 
-#[test]
-fn oracle_body_edit() {
-    let mut h = Harness::new(&[("a.rock", CROSS_FILE_A), ("b.rock", CROSS_FILE_B)]);
-    let result = h.update(
-        "a.rock",
-        "
-struct Point {
-    x: int,
-    y: int,
-}
-
-fn make_point(x: int, y: int) -> Point {
-    Point { x: x + 1, y: y + 1 }
-}
-",
-    );
-    // Body-only edit (same items + signatures) takes the single-module rebuild.
-    assert_eq!(result.tier, UpdateTier::BodyOnly);
-    assert!(!result.reinferred.is_empty());
-}
-
 /// PRECISION (premise-TDD for per-body `reinferred`): a body edit should report
 /// ONLY the edited body in `reinferred`, not every body in the module.
 ///
@@ -2004,6 +1983,7 @@ fn make_point(x: int, y: int) -> Point {
     let mids = Harness::reinferred_mids(&result);
 
     assert_eq!(result.tier, UpdateTier::BodyOnly);
+    assert!(!result.reinferred.is_empty());
     assert!(
         !mids.contains(&h.mid("b.rock")),
         "body edit in a.rock must not re-infer b.rock"
@@ -3100,41 +3080,35 @@ fn const_value_edit_is_body_only() {
     );
 }
 
-// A mutable global's value edit stays Interface (full rebuild): its live value is
-// preserved across reload, so the value edit has no live effect -- no overlay.
 #[test]
-fn mutable_global_value_edit_is_interface() {
-    let mut h = Harness::new(&[("m.rock", "global BAR: int = 5\nfn f() -> int { BAR }")]);
-    let result = h.update("m.rock", "global BAR: int = 7\nfn f() -> int { BAR }");
-    assert_eq!(
-        result.tier,
-        UpdateTier::Interface,
-        "editing a mutable global's value is an interface edit"
-    );
-}
-
-// Control: changing a global's TYPE is still an Interface edit (the type is in
-// the iface_hash). A const->global keyword flip is likewise interface.
-#[test]
-fn const_type_edit_is_interface() {
-    let mut h = Harness::new(&[("m.rock", "const FOO: int = 5\nfn f() {}")]);
-    let result = h.update("m.rock", "const FOO: float = 5.0\nfn f() {}");
-    assert_eq!(
-        result.tier,
-        UpdateTier::Interface,
-        "changing a const's type is an interface edit"
-    );
-}
-
-#[test]
-fn const_to_global_keyword_flip_is_interface() {
-    let mut h = Harness::new(&[("m.rock", "const FOO: int = 5\nfn f() {}")]);
-    let result = h.update("m.rock", "global FOO: int = 5\nfn f() {}");
-    assert_eq!(
-        result.tier,
-        UpdateTier::Interface,
-        "const->global flip changes write/reload semantics"
-    );
+fn value_and_keyword_edits_on_globals_are_interface() {
+    let cases: &[(&str, &str, &str)] = &[
+        // A mutable global's value edit stays Interface (full rebuild): its live value is
+        // preserved across reload, so the value edit has no live effect -- no overlay.
+        (
+            "m.rock",
+            "global BAR: int = 5\nfn f() -> int { BAR }",
+            "global BAR: int = 7\nfn f() -> int { BAR }",
+        ),
+        // Control: changing a global's TYPE is still an Interface edit (the type is in
+        // the iface_hash). A const->global keyword flip is likewise interface.
+        (
+            "m.rock",
+            "const FOO: int = 5\nfn f() {}",
+            "const FOO: float = 5.0\nfn f() {}",
+        ),
+        // const->global flip changes write/reload semantics
+        (
+            "m.rock",
+            "const FOO: int = 5\nfn f() {}",
+            "global FOO: int = 5\nfn f() {}",
+        ),
+    ];
+    for (path, before, after) in cases {
+        let mut h = Harness::new(&[(path, before)]);
+        let result = h.update(path, after);
+        assert_eq!(result.tier, UpdateTier::Interface, "{before}");
+    }
 }
 
 /// A `co fn` body edit must REPORT the edited body in `reinferred` -- not just

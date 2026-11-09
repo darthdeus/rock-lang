@@ -92,58 +92,38 @@ fn signature_lowering_error_recovers() {
     );
 }
 
-// A struct FIELD type error recovers the same way: the field lowers to `Error`,
-// the pass returns Ok, the diagnostic surfaces, the sibling fn is fine.
 #[test]
-fn field_lowering_error_recovers() {
-    let src = "struct Bad { v: Nonexistent }\nfn f() -> int { 1 }";
-    let ws = semantic_pass(&mut [parse(src)])
-        .expect("a struct-field type error must recover, not abort the pass");
-    let mid = ws
-        .modules
-        .iter()
-        .map(|m| m.id)
-        .find(|m| !m.is_builtin())
-        .expect("user module");
-    assert!(
-        ws.modules[mid.index()]
-            .functions_by_name
-            .contains_key(&Ustr::from("f")),
-        "the sibling fn survives a field type error"
-    );
-    assert!(
-        diags_of(&ws).iter().any(|d| d.contains("Nonexistent")),
-        "the unresolved field type surfaces as a diagnostic: {:?}",
-        diags_of(&ws)
-    );
-}
-
-// A GLOBAL's type annotation referencing an unknown type recovers: lowers to
-// `Error`, surfaces a diagnostic, siblings fine. Globals are interface (their
-// type, not their value), so this is the exact cross-module case the cascade
-// must handle.
-#[test]
-fn global_unknown_type_recovers() {
-    let src = "global g: Nonexistent = 0\nfn f() -> int { 1 }";
-    let ws = semantic_pass(&mut [parse(src)])
-        .expect("a global's unknown type must recover, not abort the pass");
-    let mid = ws
-        .modules
-        .iter()
-        .map(|m| m.id)
-        .find(|m| !m.is_builtin())
-        .expect("user module");
-    assert!(
-        ws.modules[mid.index()]
-            .functions_by_name
-            .contains_key(&Ustr::from("f")),
-        "the sibling fn survives a global type error"
-    );
-    assert!(
-        diags_of(&ws).iter().any(|d| d.contains("Nonexistent")),
-        "the unresolved global type surfaces as a diagnostic: {:?}",
-        diags_of(&ws)
-    );
+fn item_type_errors_recover_and_keep_siblings() {
+    let cases: &[&str] = &[
+        // A struct FIELD type error recovers the same way: the field lowers to `Error`,
+        // the pass returns Ok, the diagnostic surfaces, the sibling fn is fine.
+        "struct Bad { v: Nonexistent }\nfn f() -> int { 1 }",
+        // A GLOBAL's type annotation referencing an unknown type recovers: lowers to
+        // `Error`, surfaces a diagnostic, siblings fine. Globals are interface (their
+        // type, not their value), so this is the exact cross-module case the cascade
+        // must handle.
+        "global g: Nonexistent = 0\nfn f() -> int { 1 }",
+    ];
+    for src in cases {
+        let ws = semantic_pass(&mut [parse(src)]).expect("a type error must recover, not abort");
+        let mid = ws
+            .modules
+            .iter()
+            .map(|m| m.id)
+            .find(|m| !m.is_builtin())
+            .expect("user module");
+        assert!(
+            ws.modules[mid.index()]
+                .functions_by_name
+                .contains_key(&Ustr::from("f")),
+            "the sibling fn survives: {src}"
+        );
+        assert!(
+            diags_of(&ws).iter().any(|d| d.contains("Nonexistent")),
+            "the unresolved type surfaces as a diagnostic: {:?}",
+            diags_of(&ws)
+        );
+    }
 }
 
 // Convergence (the cardinal invariant): break a SIGNATURE type, then fix it; no
