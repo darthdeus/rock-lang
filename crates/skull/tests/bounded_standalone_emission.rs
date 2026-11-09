@@ -12,30 +12,11 @@
 //! demand path carries it -- and that is the plan's standing gate for E1, which
 //! runs with inlining off by construction.
 
-use std::sync::LazyLock;
-
-use bone_semantic::inference::Workspace;
 use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
 
-use crate::common::{InlineOffGuard, definitions_matching, function_body};
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn check(src: &str) -> Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
-}
+use crate::common::{InlineOffGuard, definitions_matching, function_body, ws_with_stdlib};
 
 /// A user fn taking an `Iterator`-bounded generic, called at one concrete
 /// chain. `total`'s body holds the placeholder; `main` is the concrete root.
@@ -91,7 +72,7 @@ fn main() {
 "#;
 
 fn emit(src: &str) -> Result<String, String> {
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let mid = skull::user_module_id(&ws).expect("user module");
     skull::mir_emit::emit_workspace_mir(&ws, mid)
         .map(|e| e.lua)
@@ -209,7 +190,7 @@ fn first_call_multi_arity(mf: &MirFunc) -> usize {
 
 #[test]
 fn standalone_bound_rewrite_consumes_the_selected_result_plan() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 nobox value Pair { x: int, y: int }
 

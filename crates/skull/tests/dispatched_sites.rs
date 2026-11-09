@@ -10,8 +10,7 @@
 //! that only checked the emitting arm would pass against a walk that recorded
 //! an obligation for every hole.
 
-use std::sync::LazyLock;
-
+use crate::common::{ws_of_files, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, InstanceGraph};
 use skull::site_join::{self, SiteJoinCensus, Unjoined};
@@ -20,30 +19,8 @@ use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::site::SiteOp;
 use ustr::Ustr;
 
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn check(src: &str) -> Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
-}
-
 fn check_with_dependency(src: &str, dependency: &str) -> Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(
-        skull_parser::parse_module_clean(dependency, Ustr::from("games/impostor.rock"))
-            .expect("dependency parse"),
-    );
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
+    ws_of_files(&[("games/impostor.rock", dependency), ("<test>", src)])
 }
 
 fn graph_of(ws: &Workspace) -> InstanceGraph {
@@ -52,7 +29,7 @@ fn graph_of(ws: &Workspace) -> InstanceGraph {
 }
 
 fn census_of(src: &str) -> SiteJoinCensus {
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let g = graph_of(&ws);
     let bodies = skull::concrete_body::build(&ws, &g);
     let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
@@ -230,7 +207,7 @@ fn assert_dispatched_population(c: &SiteJoinCensus, at_least: usize) {
 /// with the walk, which is what `dispatched_in` vs `walk_dispatched_in` reads.
 #[test]
 fn a_float_hole_joins_its_formatter_and_an_int_hole_has_no_obligation() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 fn f_float(x: float) -> string { return "v={x}" }
 fn f_int(x: int) -> string { return "v={x}" }
@@ -264,7 +241,7 @@ fn main() { print(f_float(1.5)) print(f_int(2)) }
 /// `site-not-in-body`. The hole's own expression is the key.
 #[test]
 fn two_float_holes_in_one_literal_are_two_obligations() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 fn two(a: float, b: float) -> string { return "{a} and {b}" }
 fn main() { print(two(1.0, 2.0)) }
@@ -304,7 +281,7 @@ nobox value V { a: float, b: float, c: int, s: string }
 fn show(v: V) -> string { return "{v}" }
 fn main() { print(show(V { a: 1.0, b: 2.0, c: 3, s: "x" })) }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     assert_eq!(
         dispatched_in(&ws, "show"),
         vec![
@@ -340,7 +317,7 @@ fn show_p(p: P) -> string { return "{p}" }
 fn show_id(i: Id) -> string { return "{i}" }
 fn main() { print(show_p(P { x: 1, y: 2 })) print(show_id(Id(3))) }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     assert_eq!(dispatched_in(&ws, "show_p"), vec!["inspect"]);
     assert_eq!(walk_dispatched_in(&ws, "show_p"), vec!["inspect"]);
 
@@ -366,7 +343,7 @@ fn show_p(p: P) -> string { return "{p:.3}" }
 fn show_f(x: float) -> string { return "{x:.2f}" }
 fn main() { print(show_p(P { x: 1, y: 2 })) print(show_f(1.5)) }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     assert_eq!(
         dispatched_in(&ws, "show_p"),
         vec!["__rock_fmt_pad", "inspect_formatted"]
@@ -419,7 +396,7 @@ fn main() { print("{P { x: 1 }:.2}") }
 
 #[test]
 fn a_dispatched_render_does_not_borrow_the_holes_bound_tree() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 value V2 { x: float, y: float }
 
@@ -469,7 +446,7 @@ fn main() {
     print(grouped(1000)) print(grouped_plain(1000))
 }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let empty: Vec<&'static str> = Vec::new();
 
     assert_eq!(dispatched_in(&ws, "pct"), vec!["__rock_fmt_percent"]);
@@ -513,7 +490,7 @@ fn main() {
 /// below, deleting `|| special_conv` leaves every formatter test green.
 #[test]
 fn a_special_conversion_with_a_width_also_pads_and_without_one_does_not() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 fn pct_wide(x: float) -> string { return "{x:10%}" }
 fn pct_bare(x: float) -> string { return "{x:%}" }
@@ -561,7 +538,7 @@ fn main() {
 /// is never called".
 #[test]
 fn grouping_with_a_width_also_pads_and_grouping_alone_does_not() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 fn wide(x: int) -> string { return "{x:10,}" }
 fn narrow(x: int) -> string { return "{x:,}" }
@@ -610,7 +587,7 @@ fn main() {
     print("{eq_nobox(V { a: 1.0, b: 2.0 }, V { a: 1.0, b: 2.0 })}")
 }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     assert_eq!(dispatched_in(&ws, "eq_struct"), vec!["__op_eq"]);
     assert_eq!(walk_dispatched_in(&ws, "eq_struct"), vec!["__op_eq"]);
     assert_eq!(dispatched_in(&ws, "ne_struct"), vec!["__op_ne"]);
@@ -627,7 +604,7 @@ fn main() {
 
 #[test]
 fn values_first_class_nobox_equality_stays_a_typed_operation() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 nobox value Point { x: int, y: int }
 fn same(a: Point, b: Point) -> bool { return a == b }
@@ -660,7 +637,7 @@ fn main() { print("{same(Point { x: 1, y: 2 }, Point { x: 1, y: 2 })}") }
 /// property that makes a declaration reachable by a bare synthesized name.
 #[test]
 fn the_structural_helper_is_the_declaration_that_emits_its_bare_name() {
-    let ws = check("fn main() { print(\"x\") }");
+    let ws = ws_with_stdlib("fn main() { print(\"x\") }");
     let all = ws
         .functions_by_name
         .get(&Ustr::from("__op_eq"))

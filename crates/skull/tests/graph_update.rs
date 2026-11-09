@@ -16,24 +16,13 @@
 //! is `UpdateResult::reinferred` rather than a hand-written guess at what an
 //! edit touches.
 
+use crate::common::{stdlib_asts, ws_of_files};
 use std::collections::BTreeSet;
-use std::sync::LazyLock;
 
 use bone_incremental::session::{NsAliases, Session, SessionFile, UpdateTier};
 use bone_semantic::inference::Workspace;
 use skull::graph_snapshot::{canonical, instance_key};
 use skull::instance_graph::{self, Instance, InstanceGraph, RejectionKind, UpdateStats};
-use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
 
 /// The compilation target's own directory. Everything outside it is a LIBRARY,
 /// which is what makes anything prunable at all: `mir_emit::is_emission_root`
@@ -62,7 +51,7 @@ struct Case {
 impl Case {
     fn new(main: &str, lib: &str) -> Self {
         let session = Session::new(
-            STDLIB.clone(),
+            stdlib_asts(),
             vec![
                 SessionFile::legacy(MAIN, main),
                 SessionFile::legacy(LIB, lib),
@@ -1118,10 +1107,7 @@ struct Perturbed {
 }
 
 fn check_two_files(main: &str, lib: &str) -> Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(main, Ustr::from(MAIN)).expect("parse main"));
-    modules.push(skull_parser::parse_module_clean(lib, Ustr::from(LIB)).expect("parse lib"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
+    ws_of_files(&[(MAIN, main), (LIB, lib)])
 }
 
 fn body_of(
@@ -1417,7 +1403,7 @@ fn a_struct_enum_newtype_or_decorator_edit_is_interface_tier() {
     ];
     for (what, edited) in edits {
         let mut s = Session::new(
-            STDLIB.clone(),
+            stdlib_asts(),
             vec![
                 SessionFile::legacy(MAIN, main),
                 SessionFile::legacy(LIB, base),
@@ -1441,7 +1427,7 @@ fn a_struct_enum_newtype_or_decorator_edit_is_interface_tier() {
 fn editing_a_mutable_global_initializer_is_interface_tier() {
     let main = "global g: int = pick_a()\nfn main() { print(\"{g}\") }\n";
     let mut s = Session::new(
-        STDLIB.clone(),
+        stdlib_asts(),
         vec![
             SessionFile::legacy(MAIN, main),
             SessionFile::legacy(LIB, PICK_LIB),

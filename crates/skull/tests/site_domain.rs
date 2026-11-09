@@ -8,8 +8,7 @@
 //! apart; the previous answer was to withhold the stamp entirely, which was
 //! fail-closed but not a contract emission could consume.
 
-use std::sync::LazyLock;
-
+use crate::common::ws_with_stdlib;
 use bone_semantic::inference::Workspace;
 use skull::concrete_body::Callee;
 use skull::instance_graph::{self, InstanceGraph};
@@ -18,22 +17,6 @@ use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::MirFunc;
 use skull_mir::site::SiteDomain;
 use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn check(src: &str) -> Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
-}
 
 /// An instance's arguments as one string, for comparison and for a failure
 /// message that names what was found rather than an opaque id.
@@ -50,7 +33,7 @@ fn graph_of(ws: &Workspace) -> InstanceGraph {
 }
 
 fn census_of(src: &str) -> SiteJoinCensus {
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let g = graph_of(&ws);
     let bodies = skull::concrete_body::build(&ws, &g);
     let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
@@ -138,7 +121,7 @@ fn main() {
     assert_eq!(unjoined(&c, Unjoined::SiteNotInBody), 0, "{c:?}");
     assert_eq!(unjoined(&c, Unjoined::NoSite), 0, "{c:?}");
 
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let stamped = stamped_domains(&ws, "main");
     assert!(
         stamped
@@ -176,7 +159,7 @@ fn main() {
     print("{c.n + c.m}")
 }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let stamped = stamped_domains(&ws, "main");
     let collisions: Vec<u32> = stamped
         .iter()
@@ -247,7 +230,7 @@ fn main() {
     // one defaults arena carries an obligation -- `Inner`'s, two bodies down
     // from `main`. Reaching it at all is what the worklist buys: a single pass
     // over `main` sees `Outer {}` and stops.
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let defaults: std::collections::BTreeSet<SiteDomain> = stamped_domains(&ws, "main")
         .into_iter()
         .map(|(d, _)| d)
@@ -288,7 +271,7 @@ fn main() {
     // non-library declaration an emission root, so both helpers are reachable
     // whatever this walk does. The discriminator is which OBLIGATIONS the
     // defaults domain records.
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let g = graph_of(&ws);
     let targets: std::collections::BTreeSet<String> = g
         .call_sites()
@@ -317,7 +300,7 @@ fn main() {
 /// not have. The residue is the only place it shows.
 #[test]
 fn every_defaults_body_expression_belongs_to_some_field_subtree() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 fn seed() -> int { return 7 }
 struct Cfg {
@@ -390,7 +373,7 @@ fn main() {
     print("{a.value} {b.value}")
 }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
 
     // The population: BOTH literals really do inject a call, so the counts
     // below are over two obligations rather than over an empty space.
@@ -464,7 +447,7 @@ fn main() {
 
     // THE WALK's side, which is a second derivation and can fail alone: two
     // distinct concrete `seed` instances exist at all.
-    let g2 = graph_of(&check(src));
+    let g2 = graph_of(&ws_with_stdlib(src));
     let seeds: Vec<&Vec<skull_mir::monoty::MonoTyId>> = g2
         .instances
         .iter()
@@ -559,7 +542,7 @@ fn main() {{
 "
     );
 
-    let ws = check(&omitted);
+    let ws = ws_with_stdlib(&omitted);
     // THE POPULATION, lowering side: three literals inject `tick()`.
     let stamped = stamped_domains(&ws, "main");
     let defaults: Vec<&(SiteDomain, u32)> = stamped

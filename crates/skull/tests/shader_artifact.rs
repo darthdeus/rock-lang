@@ -12,30 +12,12 @@
 //!   rejected with a span, while the CPU artifact over the same program keeps
 //!   compiling.
 
-use std::sync::LazyLock;
-
+use crate::common::ws_with_stdlib;
 use bone_semantic::inference::Workspace;
 use skull::artifact::{self, ArtifactRequest};
 use skull::instance_graph::{self, InstanceGraph};
 use skull::shader_artifact::{self, ShaderArtifactRequest, ShaderProgram, ShaderRejection};
 use skull::target_projection::{JAVASCRIPT_WEB, LUAJIT_DESKTOP};
-use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn check(src: &str) -> Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
-}
 
 fn graph_for(ws: &Workspace) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {
     let roots = skull::mir_emit::emission_roots(ws, None);
@@ -91,7 +73,7 @@ fn main() {
 /// packages no shader artifact at all.
 #[test]
 fn the_shader_view_carries_the_typed_profile_from_the_axis() {
-    let ws = check(REACHED);
+    let ws = ws_with_stdlib(REACHED);
     let (g, _) = graph_for(&ws);
     let roots = shader_roots(&ws);
 
@@ -126,7 +108,7 @@ fn the_shader_view_carries_the_typed_profile_from_the_axis() {
 /// CPU code calls is not.
 #[test]
 fn the_shader_view_retains_the_helpers_its_entries_reach() {
-    let ws = check(REACHED);
+    let ws = ws_with_stdlib(REACHED);
     let (g, roots) = graph_for(&ws);
     let view = shader_artifact::realize_shader(
         &ws,
@@ -187,7 +169,7 @@ fn the_shader_view_retains_the_helpers_its_entries_reach() {
 /// SPANNED rejection -- and the same program's CPU artifact is untouched by it.
 #[test]
 fn shader_recursion_is_a_spanned_rejection_the_cpu_artifact_does_not_share() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 @pure fn rec_helper(x: float) -> float {
     if x <= 0.0 { return 0.0 }
@@ -269,7 +251,7 @@ fn main() { let key = rock_shader(rec_frag) }
 
     // CONTROL: the non-recursive fixture reports no recursion at all, so the
     // detector is not answering yes to every shader program.
-    let ws2 = check(REACHED);
+    let ws2 = ws_with_stdlib(REACHED);
     let (g2, _) = graph_for(&ws2);
     let ok = shader_artifact::realize_shader(
         &ws2,
@@ -292,7 +274,7 @@ fn main() { let key = rock_shader(rec_frag) }
 /// re-implementation that could disagree with the emitter.
 #[test]
 fn a_retained_helper_outside_tier_zero_is_a_spanned_profile_rejection() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 @pure fn stringy_helper(s: string) -> float { return 1.0 }
 
@@ -336,7 +318,7 @@ fn main() { let key = rock_shader(tier_frag) }
     // signature is classified by STAGE, where an `@uniform` struct param is
     // legal. Asking the library's tier-0 leaf check there rejected every real
     // shader in this repo.
-    let ws3 = check(
+    let ws3 = ws_with_stdlib(
         r#"
 value ProbeU { scale: float }
 
@@ -370,7 +352,7 @@ fn main() { let key = rock_shader(uniform_frag) }
     );
 
     // CONTROL: the tier-0 fixture reports no profile rejection.
-    let ws2 = check(REACHED);
+    let ws2 = ws_with_stdlib(REACHED);
     let (g2, _) = graph_for(&ws2);
     let ok = shader_artifact::realize_shader(
         &ws2,
@@ -387,7 +369,7 @@ fn main() { let key = rock_shader(uniform_frag) }
 /// CPU target selection preserves the shared shader program.
 #[test]
 fn cpu_target_does_not_change_the_shader_artifact() {
-    let ws = check(REACHED);
+    let ws = ws_with_stdlib(REACHED);
     let (g, _) = graph_for(&ws);
     let roots = shader_roots(&ws);
     let of = |spec| {
@@ -451,7 +433,7 @@ fn main() { let key = rock_shader(foreign_frag) }
         ),
     ];
     for (src, needle) in cases {
-        let ws = check(src);
+        let ws = ws_with_stdlib(src);
         let (g, _) = graph_for(&ws);
         let view = shader_artifact::realize_shader(
             &ws,
@@ -486,7 +468,7 @@ fn main() { let key = rock_shader(foreign_frag) }
 /// green here cannot be a zero denominator.
 #[test]
 fn a_program_reaching_a_generic_helper_is_validated_at_its_instantiations() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 @pure fn passthrough<T>(x: T) -> T { return x }
 @pure fn concrete_helper(x: float) -> float { return x * 2.0 }
@@ -593,7 +575,7 @@ fn main() {
 /// population and into an explicit finding -- never into `entries_checked`.
 #[test]
 fn a_missing_substitution_record_is_a_finding_not_a_concrete_shape() {
-    let ws = check(REACHED);
+    let ws = ws_with_stdlib(REACHED);
     let (mut g, _) = graph_for(&ws);
     let programs = shader_roots(&ws);
 
@@ -663,7 +645,7 @@ fn a_missing_substitution_record_is_a_finding_not_a_concrete_shape() {
 /// rejections, measured, before the request carried programs).
 #[test]
 fn an_a2_pipeline_is_checked_as_a_pair_not_as_two_entries() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 value QuadVert { aPos: Vec2, aTexCoord: Vec2 }
 value PipeU    { uProjection: Mat4 }

@@ -4,28 +4,7 @@
 //! skipped list, and the program ran doing nothing -- a swallowed
 //! not-implemented marker (violates "NEVER swallow errors").
 
-use std::sync::LazyLock;
-use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn emit_module(src: &str) -> String {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
-    skull::mir_emit::emit_workspace_mir(&ws, mid)
-        .expect("emit")
-        .lua
-}
+use crate::common::emit_module;
 
 #[test]
 fn struct_field_hole_emits_a_runtime_error_and_keeps_the_function() {

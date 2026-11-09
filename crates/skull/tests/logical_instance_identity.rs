@@ -14,29 +14,12 @@
 //! that answered `any` for everything would satisfy "it converted" and lose the
 //! property the identity exists for.
 
-use std::sync::LazyLock;
-
+use crate::common::ws_with_stdlib;
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, InstanceGraph};
 use skull::site_join::{self, SiteJoinCensus, Unjoined};
 use skull_mir::lower::ScalarCtx;
 use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn check(src: &str) -> Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
-}
 
 fn graph_of(ws: &Workspace) -> InstanceGraph {
     let roots = skull::mir_emit::emission_roots(ws, None);
@@ -44,7 +27,7 @@ fn graph_of(ws: &Workspace) -> InstanceGraph {
 }
 
 fn census_of(src: &str) -> SiteJoinCensus {
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let g = graph_of(&ws);
     let bodies = skull::concrete_body::build(&ws, &g);
     let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
@@ -119,7 +102,7 @@ fn main() {
     print("{t} {a} {o} {m} {f(1)}")
 }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let g = graph_of(&ws);
     let insts = instantiations_of(&ws, &g, "ident");
     assert_eq!(
@@ -174,7 +157,7 @@ fn main() {
     let _ = a
 }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let g = graph_of(&ws);
     let insts = instantiations_of(&ws, &g, "ident");
     assert_eq!(
@@ -212,7 +195,7 @@ fn main() {
     print("{a} {b}")
 }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let g = graph_of(&ws);
     let insts = instantiations_of(&ws, &g, "ident");
     assert_eq!(
@@ -246,7 +229,7 @@ fn ident<T>(x: T) -> T { return x }
 fn pass<U>(y: U) -> U { return ident(y) }
 fn main() { print("{pass(1)}") }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     let (pass_fid, _) = ws
         .module(mid)
@@ -365,7 +348,7 @@ fn main() { print("{portable("x")}") }
 /// reach it -- the instances are built directly and fed to the comparison.
 #[test]
 fn a_declaration_the_language_does_not_group_is_refused_by_the_join() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 inline(lua) fn twice(a: string) -> bool = """
     return a == ""
@@ -444,7 +427,7 @@ fn main() { print("x") }
 /// the synthetic pair.
 #[test]
 fn a_repeated_backend_pair_is_not_one_declaration() {
-    let ws = check("fn main() { print(\"x\") }");
+    let ws = ws_with_stdlib("fn main() { print(\"x\") }");
     let all = ws
         .functions_by_name
         .get(&Ustr::from("__op_eq"))

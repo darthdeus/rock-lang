@@ -11,8 +11,7 @@
 //! Each is asserted against the SHARED graph first, so the view's job is a
 //! measured defect rather than a design preference.
 
-use std::sync::LazyLock;
-
+use crate::common::ws_with_stdlib;
 use bone_semantic::hir::{BodyOwner, FnBackend};
 use bone_semantic::inference::Workspace;
 use skull::artifact::RealizedCallee;
@@ -21,22 +20,6 @@ use skull::instance_graph::{self, Instance, InstanceGraph};
 use skull::target_projection::{JAVASCRIPT_WEB, LUAJIT_DESKTOP, NATIVE_C64_DESKTOP, WASM32_WASI};
 use skull_mir::intrinsics::BackendRealization;
 use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn check(src: &str) -> Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
-}
 
 /// The graph AND the roots it was built from. An artifact's roots are an input
 /// to `realize` (plan S 11: "the target may change roots"), so a helper that
@@ -118,7 +101,7 @@ impl BackendRealization for Supplies {
 /// target-neutral graph canonicalizes them to one logical instance.
 #[test]
 fn premise_the_shared_graph_keeps_one_representative_per_sibling_group() {
-    let ws = check("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
+    let ws = ws_with_stdlib("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
     let (g, _) = graph_for(&ws);
     let decls: Vec<skull_mir::mir::FuncRef> = g
         .instances
@@ -161,7 +144,7 @@ fn premise_the_shared_graph_keeps_one_representative_per_sibling_group() {
 /// mangled symbol and therefore cannot tell the two apart at all.
 #[test]
 fn an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it() {
-    let ws = check("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
+    let ws = ws_with_stdlib("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
     let (g, roots) = graph_for(&ws);
     let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
@@ -231,7 +214,7 @@ fn an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it() {
 
 #[test]
 fn an_artifact_symbol_follows_the_declaration_it_selected() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 @nomangle inline(lua) fn sibling_probe(x: int) -> int = "return x"
 inline(js) fn sibling_probe(x: int) -> int = "return x"
@@ -282,7 +265,7 @@ fn main() { let a = fast_op(1) }
 /// exact failure `@native_required` exists to prevent.
 #[test]
 fn premise_a_compatible_backend_and_a_rock_fallback_both_say_available() {
-    let ws = check(NATIVE_REQUIRED);
+    let ws = ws_with_stdlib(NATIVE_REQUIRED);
     let (g, _) = graph_for(&ws);
     let f = g
         .instances
@@ -310,7 +293,7 @@ fn premise_a_compatible_backend_and_a_rock_fallback_both_say_available() {
 /// what says the arm reads the mapping rather than rejecting everything.
 #[test]
 fn native_required_availability_comes_from_the_artifact_mapping() {
-    let ws = check(NATIVE_REQUIRED);
+    let ws = ws_with_stdlib(NATIVE_REQUIRED);
     let (g, roots) = graph_for(&ws);
     let named = |view: &artifact::ArtifactView| -> Option<Exclusion> {
         view.excluded
@@ -352,7 +335,7 @@ fn native_required_availability_comes_from_the_artifact_mapping() {
 /// test above could pass because every intrinsic is excluded.
 #[test]
 fn an_ordinary_intrinsic_falls_back_to_its_rock_body() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 @intrinsic
 fn portable_op(x: int) -> int { return x * 2 }
@@ -392,7 +375,7 @@ fn main() { let a = portable_op(1) }
 /// declaration, the name alone is ambiguous.
 #[test]
 fn premise_inline_body_dependencies_are_unresolved_names() {
-    let ws = check("fn main() { let v: [Vec2] = []; let l = v.to_lua_array() }");
+    let ws = ws_with_stdlib("fn main() { let v: [Vec2] = []; let l = v.to_lua_array() }");
     let (g, _) = graph_for(&ws);
     let deps: Vec<&str> = g
         .inline_body_deps
@@ -415,7 +398,7 @@ fn premise_inline_body_dependencies_are_unresolved_names() {
 /// so per dependency rather than as a total.
 #[test]
 fn inline_body_dependencies_resolve_to_targets_in_the_artifact() {
-    let ws = check("fn main() { let v: [Vec2] = []; let l = v.to_lua_array() }");
+    let ws = ws_with_stdlib("fn main() { let v: [Vec2] = []; let l = v.to_lua_array() }");
     let (g, roots) = graph_for(&ws);
     let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     let c = view.census();
@@ -472,7 +455,7 @@ fn inline_body_dependencies_resolve_to_targets_in_the_artifact() {
 /// entry, so scanning only that declaration silently loses the JS dependency.
 #[test]
 fn inline_body_dependencies_follow_the_selected_sibling() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 @nomangle inline(lua) fn selected_dep_probe(x: int) -> int = "return x"
 @nomangle inline(js) fn selected_dep_probe(x: int) -> int = "return __nb_checked_index({ len: 1 }, x);"
@@ -537,7 +520,7 @@ fn main() { let n = selected_dep_probe(1) }
 /// injectivity is not being bought by retention dropping a duplicate.
 #[test]
 fn an_artifact_symbol_is_total_and_injective_over_what_it_retains() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 fn ident<T>(x: T) -> T { return x }
 fn main() {
@@ -609,7 +592,7 @@ fn main() {
 /// equal size can still disagree.
 #[test]
 fn realization_never_invents_an_instance() {
-    let ws = check(REACH);
+    let ws = ws_with_stdlib(REACH);
     for spec in [LUAJIT_DESKTOP, JAVASCRIPT_WEB, NATIVE_C64_DESKTOP] {
         let (g, roots) = graph_for(&ws);
         let view = artifact::realize(&ws, &g, &ArtifactRequest::new(spec, &roots));
@@ -656,7 +639,7 @@ fn main() {
 /// artifact's program.
 #[test]
 fn retention_is_reachability_not_a_declaration_filter() {
-    let ws = check(REACH);
+    let ws = ws_with_stdlib(REACH);
     let (g, all_roots) = graph_for(&ws);
     let main_only: Vec<skull_mir::mir::FuncRef> = all_roots
         .iter()
@@ -753,7 +736,7 @@ fn retention_is_reachability_not_a_declaration_filter() {
 /// produce, because it never looks at an edge.
 #[test]
 fn a_retained_caller_naming_an_unrealizable_callee_is_severed() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 @intrinsic @native_required
 fn fast_op(x: int) -> int { return x * 2 }
@@ -818,7 +801,7 @@ fn main() { let a = caller(1) }
 /// realization rather than in the population.
 #[test]
 fn one_shared_instance_realizes_to_a_different_declaration_per_artifact() {
-    let ws = check(REACH);
+    let ws = ws_with_stdlib(REACH);
     let (g, roots) = graph_for(&ws);
 
     let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
@@ -885,7 +868,7 @@ fn one_shared_instance_realizes_to_a_different_declaration_per_artifact() {
 /// would forbid exactly what the plan permits.
 #[test]
 fn cross_artifact_identity_is_the_instance_and_not_the_spelling() {
-    let ws = check(REACH);
+    let ws = ws_with_stdlib(REACH);
     let (g, roots) = graph_for(&ws);
     let lua_p = Prefixed("lua");
     let js_p = Prefixed("js");
@@ -964,7 +947,7 @@ fn cross_artifact_identity_is_the_instance_and_not_the_spelling() {
 /// they realize, or every arm above could be dead.
 #[test]
 fn two_artifacts_differ_in_realization() {
-    let ws = check(REACH);
+    let ws = ws_with_stdlib(REACH);
     let (g, roots) = graph_for(&ws);
     let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     let js = artifact::realize(&ws, &g, &ArtifactRequest::new(JAVASCRIPT_WEB, &roots));
@@ -989,7 +972,7 @@ fn two_artifacts_differ_in_realization() {
 /// would keep every foreign body.
 #[test]
 fn a_target_with_no_backend_keeps_only_portable_bodies() {
-    let ws = check("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
+    let ws = ws_with_stdlib("fn main() { let b: NativeBuffer<int> = nb_new(4); let x = b[0] }");
     let (g, roots) = graph_for(&ws);
     let view = artifact::realize(&ws, &g, &ArtifactRequest::new(NATIVE_C64_DESKTOP, &roots));
     let c = view.census();
@@ -1013,7 +996,7 @@ fn a_target_with_no_backend_keeps_only_portable_bodies() {
 
 #[test]
 fn synthetic_targets_share_instances_and_diverge_in_physical_obligations() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 extern(ffi, "host") fn host_tick(n: int) -> int
 fn main() { let x = 1; host_tick(x) }
@@ -1088,7 +1071,7 @@ fn main() { let x = 1; host_tick(x) }
 /// which the ambiguity arm starts mattering and needs a fixture of its own.
 #[test]
 fn every_inline_dependency_target_has_at_most_one_instance() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 value P { x: float, y: float }
 value Q { a: float, b: float }
@@ -1162,7 +1145,7 @@ fn main() {
 /// on the target is exactly the fallback plan S 10 forbids.
 #[test]
 fn a_boundary_the_artifact_cannot_serve_severs_the_call() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 inline(lua) fn only_lua(x: int) -> int = "return x + 1"
 fn main() { let a = only_lua(1) }
@@ -1237,7 +1220,7 @@ fn main() { let a = only_lua(1) }
 fn platform_capabilities_participate_in_boundary_admission() {
     use skull::target_projection as tp;
 
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 extern(ffi, "host") fn host_tick(n: int) -> int
 fn main() { let n = host_tick(1) }
@@ -1278,7 +1261,7 @@ fn main() { let n = host_tick(1) }
 fn platform_is_part_of_boundary_contract_identity() {
     use skull::target_projection as tp;
 
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 extern(ffi, "host") fn host_tick(n: int) -> int
 fn main() { let n = host_tick(1) }
@@ -1376,7 +1359,7 @@ fn main() {
 #[test]
 fn shader_packaging_does_not_decide_cpu_realization() {
     use skull::target_projection as tp;
-    let ws = check(AXES);
+    let ws = ws_with_stdlib(AXES);
     let (g, roots) = graph_for(&ws);
     let view =
         |spec: tp::TargetSpec| artifact::realize(&ws, &g, &ArtifactRequest::new(spec, &roots));
@@ -1440,7 +1423,7 @@ fn shader_packaging_does_not_decide_cpu_realization() {
 #[test]
 fn an_artifact_name_decides_nothing() {
     use skull::target_projection as tp;
-    let ws = check(AXES);
+    let ws = ws_with_stdlib(AXES);
     let (g, roots) = graph_for(&ws);
     let view =
         |spec: tp::TargetSpec| artifact::realize(&ws, &g, &ArtifactRequest::new(spec, &roots));
@@ -1496,7 +1479,7 @@ fn target_fixtures_are_combinations_of_shared_axes() {
 /// costs. Both denominators, because either alone reads as the other.
 #[test]
 fn severed_calls_group_by_callee_and_cause() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 inline(lua) fn only_lua(x: int) -> int = "return x + 1"
 @intrinsic @native_required
@@ -1568,7 +1551,7 @@ fn main() { let n = a(1) + b(2) }
 /// `skull_mir::intrinsics`' order is mapping > portable fallback > reject.
 #[test]
 fn a_natively_mapped_intrinsic_needs_no_backend_sibling() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 @intrinsic inline(lua) fn mapped_probe(x: int) -> int = "return x * 2"
 fn main() { let n = mapped_probe(1) }
@@ -1640,7 +1623,7 @@ fn main() { let n = mapped_probe(1) }
 /// answering `foreign-to-artifact` severs a call every target actually expands.
 #[test]
 fn a_compile_time_expansion_needs_no_backend_sibling() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 @struct_expand inline(lua) fn expand_probe(x: int) -> int = "return 0"
 fn main() { let n = expand_probe(1) }
@@ -1695,7 +1678,7 @@ fn main() { let n = expand_probe(1) }
 /// `inline(js)` sibling exists, that body is what the artifact emits.
 #[test]
 fn a_declaration_the_artifact_binds_itself_is_not_severed() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 inline(lua) fn bound_probe(x: int) -> int = "return x + 1"
 extern(ffi, "host") fn host_probe(n: int) -> int
@@ -1806,7 +1789,7 @@ fn main() { let n = bound_probe(1) + host_probe(2) }
 /// body would walk into callees this artifact never emits.
 #[test]
 fn a_host_bound_rock_body_is_a_boundary_and_is_not_traversed() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 fn rock_bound(x: int) -> int { return rock_bound_callee(x) }
 fn rock_bound_callee(x: int) -> int { return x + 1 }
@@ -1873,7 +1856,7 @@ fn main() { let n = rock_bound(1) }
 /// `shader_artifact` is its other consumer.
 #[test]
 fn a_missing_substitution_record_states_no_publisher_width() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 inline(js) fn wired_pair(v: float) -> (bool, float) = "return __rock_publish(false, v);"
 fn main() {
@@ -1947,7 +1930,7 @@ fn main() {
 /// while a body nothing reaches is `Unreachable` and states nothing.
 #[test]
 fn the_js_view_retains_reachable_inline_js_bodies_with_their_lanes() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 inline(js) fn reached_pair(v: float) -> (bool, float) = "return __rock_publish(false, v);"
 inline(js) fn reached_scalar(v: float) -> float = "return v;"
@@ -2043,7 +2026,7 @@ fn main() {
 /// tuple, or "the generic was answered" and "generics are skipped" look alike.
 #[test]
 fn a_generic_foreign_body_takes_its_publisher_width_from_its_instance() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 inline(js) fn wired<T>(v: T) -> T = "return v;"
 fn main() {
@@ -2134,7 +2117,7 @@ fn main() { print("{caller()} {other_caller()}") }
 /// SAME shape with no `@nomangle`) that must not acquire a publication.
 #[test]
 fn a_nomangle_root_publishes_its_own_body_beside_the_calls_sibling_serves() {
-    let ws = check(PUBLICATION_FIXTURE);
+    let ws = ws_with_stdlib(PUBLICATION_FIXTURE);
     let (g, roots) = graph_for(&ws);
     let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
 
@@ -2261,7 +2244,7 @@ fn main() { print("{dup(1)} {dup(\"s\")}") }
 
 #[test]
 fn two_nomangle_roots_sharing_a_bare_name_collide_rather_than_overwrite() {
-    let ws = check(PUBLICATION_COLLISION_FIXTURE);
+    let ws = ws_with_stdlib(PUBLICATION_COLLISION_FIXTURE);
     let (g, roots) = graph_for(&ws);
     let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
 
@@ -2290,7 +2273,7 @@ fn two_nomangle_roots_sharing_a_bare_name_collide_rather_than_overwrite() {
 
 #[test]
 fn local_publication_and_collision_retraction_matches_fresh_view() {
-    let ws = check(PUBLICATION_COLLISION_FIXTURE);
+    let ws = ws_with_stdlib(PUBLICATION_COLLISION_FIXTURE);
     let (g, roots) = graph_for(&ws);
     let mut local = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     assert_eq!(
@@ -2373,7 +2356,7 @@ fn local_symbol_collision_retraction_matches_fresh_view() {
 fn main() { let a = left()\n let b = right()\n print(\"{a}{b}\") }";
     let source_v2 = "fn left() -> int { return 1 }\nfn right() -> int { return 2 }\n\
 fn main() { let a = left()\n print(\"{a}\") }";
-    let ws1 = check(source_v1);
+    let ws1 = ws_with_stdlib(source_v1);
     let roots = skull::mir_emit::emission_roots(&ws1, Some("/project"));
     let mut graph = instance_graph::build(&ws1, roots.clone(), false);
     let request = ArtifactRequest::new(LUAJIT_DESKTOP, &roots).with_symbols(&MAIN_RIGHT_COLLISION);
@@ -2384,7 +2367,7 @@ fn main() { let a = left()\n print(\"{a}\") }";
         "fixture did not populate a symbol collision"
     );
 
-    let ws2 = check(source_v2);
+    let ws2 = ws_with_stdlib(source_v2);
     let module = *ws2
         .module_ids
         .get(&Ustr::from("<test>"))
@@ -2442,7 +2425,7 @@ inline(lua) fn foreign_dep(x: int) -> int = """
 fn caller() -> string { return "unchanged" }
 fn main() { let x = caller() }
 "#;
-    let ws1 = check(source_v1);
+    let ws1 = ws_with_stdlib(source_v1);
     let all_roots1 = skull::mir_emit::emission_roots(&ws1, None);
     let mut graph = instance_graph::build(&ws1, all_roots1, false);
     let main = ws1
@@ -2472,7 +2455,7 @@ fn main() { let x = caller() }
         local.inline_deps
     );
 
-    let ws2 = check(source_v2);
+    let ws2 = ws_with_stdlib(source_v2);
     let caller = ws2
         .modules
         .iter()
@@ -2516,7 +2499,7 @@ fn main() { let x = caller() }
 
 #[test]
 fn fresh_artifact_indexes_each_graph_site_once() {
-    let ws = check("fn leaf(x: int) -> int { x + 1 }\nfn main() { let x = leaf(1) }");
+    let ws = ws_with_stdlib("fn leaf(x: int) -> int { x + 1 }\nfn main() { let x = leaf(1) }");
     let (g, roots) = graph_for(&ws);
     let expected: usize = g.call_sites().map(|(_, sites)| sites.len()).sum();
     assert!(
@@ -2563,7 +2546,7 @@ fn main() { print(\"{F(1)} {dec(1)}\") }";
 // the per-caller fn-value walk reaches. The program still stores the function.
 #[test]
 fn a_function_named_by_a_global_initializer_is_a_fn_value_target() {
-    let ws = check(GLOBAL_FN_VALUE_V1);
+    let ws = ws_with_stdlib(GLOBAL_FN_VALUE_V1);
     let (g, roots) = graph_for(&ws);
     let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     assert_eq!(fn_value_target_names(&ws, &view), ["inc"]);
@@ -2573,14 +2556,14 @@ fn a_function_named_by_a_global_initializer_is_a_fn_value_target() {
 // changes no instance's own body, so only the always-emitted owner is affected.
 #[test]
 fn local_global_initializer_fn_value_retarget_matches_fresh_view() {
-    let ws1 = check(GLOBAL_FN_VALUE_V1);
+    let ws1 = ws_with_stdlib(GLOBAL_FN_VALUE_V1);
     let roots = skull::mir_emit::emission_roots(&ws1, Some("/project"));
     let mut graph = instance_graph::build(&ws1, roots.clone(), false);
     let request = ArtifactRequest::new(LUAJIT_DESKTOP, &roots);
     let mut local = artifact::realize(&ws1, &graph, &request);
     assert_eq!(fn_value_target_names(&ws1, &local), ["inc"]);
 
-    let ws2 = check(GLOBAL_FN_VALUE_V2);
+    let ws2 = ws_with_stdlib(GLOBAL_FN_VALUE_V2);
     let module = *ws2
         .module_ids
         .get(&Ustr::from("<test>"))

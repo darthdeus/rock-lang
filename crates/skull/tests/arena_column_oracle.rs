@@ -1,27 +1,11 @@
 //! `Arena<E>` and `[E]` project the same target-specific container plan.
 
+use crate::common::ws_with_stdlib;
 use bone_semantic::inference::Workspace;
 use skull_mir::lower::{ContainerFamily, ContainerPlan, RepArena};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_parser::ast::FnBackend;
-use std::sync::LazyLock;
-use ustr::{Ustr, ustr};
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn check(src: &str) -> Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, ustr("<test>")).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
-}
+use ustr::ustr;
 
 const SRC: &str = r#"
 value ColPoint { x: int, y: int }
@@ -68,7 +52,7 @@ fn column_elem(
 /// class is rejected for its own reason.
 #[test]
 fn the_container_plan_admits_and_rejects_on_the_vec_rule() {
-    let ws = check(SRC);
+    let ws = ws_with_stdlib(SRC);
     let t = FnBackend::Lua;
     let admitted = column_elem(
         &ws,
@@ -129,7 +113,7 @@ fn the_container_plan_admits_and_rejects_on_the_vec_rule() {
 /// a non-zero rejected count, so agreement cannot be agreement about nothing.
 #[test]
 fn the_arena_and_vec_plans_cannot_disagree() {
-    let ws = check(SRC);
+    let ws = ws_with_stdlib(SRC);
     let mut admitted = 0;
     let mut rejected = 0;
 

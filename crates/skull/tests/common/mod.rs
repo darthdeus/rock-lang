@@ -125,6 +125,23 @@ pub fn ws_with_stdlib(src: &str) -> Workspace {
     semantic_pass(&mut modules).expect("semantic_pass")
 }
 
+/// The stdlib modules as an owned list, for a `Session` to start from.
+pub fn stdlib_asts() -> Vec<skull_parser::Ast> {
+    skull_parser::stdlib::ModuleSet::with_stdlib([])
+        .expect("stdlib parses")
+        .into_vec()
+}
+
+/// A workspace of `files` (`(file id, source)` pairs, in order) over the real
+/// stdlib.
+pub fn ws_of_files(files: &[(&str, &str)]) -> Workspace {
+    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
+    for (file, src) in files {
+        modules.push(skull_parser::parse_module_clean(src, Ustr::from(file)).expect("parse"));
+    }
+    semantic_pass(&mut modules).expect("semantic_pass")
+}
+
 /// Emitted Lua for `src` (the common case; `emit_mir(src).lua`).
 pub fn emit_module(src: &str) -> String {
     emit_mir(src).lua

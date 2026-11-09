@@ -1,30 +1,13 @@
 //! Stage 0d properties for the shadow instance graph
 //!.
 
-use std::sync::LazyLock;
-
+use crate::common::ws_with_stdlib;
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, EdgeKind};
 use ustr::Ustr;
 
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn check(src: &str) -> Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
-}
-
 fn graph_of(src: &str) -> (Workspace, instance_graph::InstanceGraph) {
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
     (ws, g)
@@ -126,7 +109,7 @@ fn hop5() -> int { return hop4() }
 fn far() -> int { return hop5() }
 fn main() { near(); far() }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     // `Some("<test>")` makes the STDLIB a library, so its generic bodies are
     // reached only transitively and at path lengths that depend on which root
     // got there first. With every module a root (the `None` form) path depth
@@ -315,7 +298,7 @@ fn main() {
 fn the_shared_graph_is_target_neutral() {
     use skull::artifact::{self, ArtifactRequest};
     use skull::target_projection as tp;
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 value P { x: float, y: float }
 fn ident<T>(v: T) -> T { return v }
@@ -383,7 +366,7 @@ fn main() {
 /// inverse must not manufacture a representative that bone never chose.
 #[test]
 fn canonical_variant_preserves_a_repeated_backend_group() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 inline(lua) fn __canonical_duplicate_probe(x: int) -> int = "return x"
 inline(js) fn __canonical_duplicate_probe(x: int) -> int = "return x;"
@@ -434,7 +417,7 @@ extern(ffi, "host") fn host_tick(n: int) -> int
 extern(js) fn web_tick(n: int) -> int
 fn main() { host_tick(3) }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     assert!(
         instance_graph::build(&ws, roots.clone(), false)
@@ -581,7 +564,7 @@ fn main() {
     for v in xs.iter().map(_ + 1) { let _ = v }
 }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let roots = skull::mir_emit::emission_roots(&ws, None);
 
     let (normal, normal_text) = {
@@ -764,7 +747,7 @@ fn main() { depth(1, 3) }
 
 #[test]
 fn recursive_diagnostics_do_not_depend_on_type_interning_order() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 fn grow<T>(x: T, n: int) -> int {
     if n <= 0 { return 0 }
@@ -1257,7 +1240,7 @@ fn main() {
     for v in b { total = total + v }
 }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots.clone(), false);
     assert!(
@@ -2032,7 +2015,7 @@ fn the_funcref_excusal_follows_the_declaration_not_the_name() {
 /// the fixture cannot show that this one fires on its own.
 #[test]
 fn an_always_emitted_call_hole_keeps_its_reason_and_span() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 fn pick<T>() -> int {
     let unused: T = 1
@@ -2221,7 +2204,7 @@ fn main() { opaque_caller(1) }
 /// against.
 #[test]
 fn a_generic_fn_value_in_an_always_emitted_body_keeps_its_rejection_kind() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 fn ident<T>(x: T) -> T { return x }
 global F: fn(int) -> int = ident
@@ -2264,7 +2247,7 @@ fn main() { let y = F(1) }
 /// mutation in `record_call` visible.
 #[test]
 fn a_call_with_no_binding_record_is_unresolved_with_a_span() {
-    let mut ws = check(
+    let mut ws = ws_with_stdlib(
         r#"
 fn ident<T>(x: T) -> T { return x }
 fn main() { let a = ident(1) }
@@ -2314,7 +2297,7 @@ fn main() { let a = ident(1) }
 /// `for`-protocol witness generics that `instantiate_witness` reads.
 #[test]
 fn a_witness_with_no_generic_record_is_unresolved_with_a_span() {
-    let mut ws = check(
+    let mut ws = ws_with_stdlib(
         r#"
 fn main() {
     let xs: [int] = [1, 2, 3]
@@ -2460,7 +2443,7 @@ fn main_ref(ws: &Workspace) -> skull_mir::mir::FuncRef {
 /// about the `next` half.
 #[test]
 fn a_bound_next_with_no_generic_record_is_unresolved_with_a_span() {
-    let mut ws = check(
+    let mut ws = ws_with_stdlib(
         r#"
 fn main() {
     let xs: [int] = [1, 2, 3]
@@ -2655,7 +2638,7 @@ fn main() {{
 "#
         )
     };
-    let ws = check(&program(
+    let ws = ws_with_stdlib(&program(
         r#"inline(lua) fn __map_col_len(n: int) -> int = "return n""#,
     ));
     let roots = skull::mir_emit::emission_roots(&ws, None);
@@ -2693,7 +2676,7 @@ fn main() {{
     // CONTROL: the same program WITHOUT the ambiguating declaration resolves
     // every entry, so the population is a property of the ambiguity and not of
     // the fixture being malformed.
-    let clean_ws = check(&program(""));
+    let clean_ws = ws_with_stdlib(&program(""));
     let clean_roots = skull::mir_emit::emission_roots(&clean_ws, None);
     let clean = instance_graph::build(&clean_ws, clean_roots, false);
     assert!(

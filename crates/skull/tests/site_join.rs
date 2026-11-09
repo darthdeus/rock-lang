@@ -6,8 +6,7 @@
 //! that must not collapse onto one key -- plus the mutation arms proving each
 //! half of the identity is load-bearing rather than decorative.
 
-use std::sync::LazyLock;
-
+use crate::common::ws_with_stdlib;
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, InstanceGraph};
 use skull::site_join::{self, SiteJoinCensus, Unjoined};
@@ -21,24 +20,8 @@ use ustr::Ustr;
 /// declaration selection, so the comparison needs to know which target.
 const LUA: bone_semantic::hir::FnBackend = bone_semantic::hir::FnBackend::Lua;
 
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn check(src: &str) -> Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
-}
-
 fn graph_of(src: &str) -> (Workspace, InstanceGraph) {
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
     (ws, g)
@@ -162,7 +145,7 @@ fn call_count(mf: &MirFunc) -> usize {
 /// admits it under `bound-placeholder`.
 #[test]
 fn a_bounded_loops_witness_reaches_mir_recorded() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 struct Counter { n: int }
 
@@ -245,7 +228,7 @@ fn main() { print("{sum_all(Counter { n: 0 })}") }
 /// produce a nested tree and a control that might not fire proves nothing.
 #[test]
 fn one_expression_under_different_operations_stays_distinct() {
-    let ws = check("fn main() { print(\"x\") }");
+    let ws = ws_with_stdlib("fn main() { print(\"x\") }");
     let mf = prepared_body(&ws, "main");
     let e = mf
         .call_sites
@@ -340,7 +323,7 @@ fn one_expression_under_different_operations_stays_distinct() {
 /// re-interned into the caller's table, since index 0 there is the CALLER.
 #[test]
 fn sites_survive_inlining_and_carry_the_callee_owner() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 @inline
 fn leaf(x: int) -> int { return double(x) }
@@ -381,7 +364,7 @@ fn main() { print("{top(3)}") }
 
 #[test]
 fn cloned_iterator_headers_are_reinterned_for_forl_recovery() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 @inline
 fn sum_inner(xs: [int]) -> int {
@@ -413,7 +396,7 @@ fn count_bound_splits(mf: &MirFunc) -> usize {
 
 #[test]
 fn cloned_bounded_value_calls_consume_split_placeholders() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 nobox value Pair { x: int, y: int }
 
@@ -613,7 +596,7 @@ fn main() {
 
 #[test]
 fn named_nested_functions_in_a_spliced_body_are_preserved() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 @inline
 fn outer(x: int) -> int {
@@ -1173,7 +1156,7 @@ fn main() { print("{top()}") }
 /// callee declaration rather than the caller's slot.
 #[test]
 fn concrete_inline_uses_owner_when_delivery_is_absent() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 @inline
 fn wrap<T>(x: T) -> T { return id2(x) }
@@ -1274,7 +1257,7 @@ fn main() { print("{top()}") }
 /// hides a semantically different concrete body.
 #[test]
 fn concrete_inline_declines_same_width_incompatible_abi() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 value Pair { x: int, y: int }
 @inline
@@ -1367,7 +1350,7 @@ fn main() { print("{top()}") }
 /// false.
 #[test]
 fn every_call_in_a_simple_prepared_body_carries_a_site() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 fn a(x: int) -> int { return x + 1 }
 fn b(x: int) -> int { return a(x) + a(x + 1) }

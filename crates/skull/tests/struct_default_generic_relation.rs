@@ -21,21 +21,10 @@
 //! instances -- is asserted end-to-end by
 //! `site_domain::a_generic_structs_field_default_names_its_own_instance`.
 
-use std::sync::LazyLock;
-
+use crate::common::ws_with_stdlib;
 use bone_semantic::hir::{BodyOwner, TyId, TypeExpr};
 use bone_semantic::inference::{BodyInference, Workspace};
 use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
 
 /// `echo`'s default is a SIBLING REFERENCE to `value`: the only way to reach the
 /// substituted DECLARED field type. `seed()`'s own return type cannot serve --
@@ -54,12 +43,6 @@ fn main() {
     print("{a.value} {a.echo} {b.value}")
 }
 "#;
-
-fn check(src: &str) -> Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, Ustr::from("<test>")).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
-}
 
 /// Chase `Infer` substitutions to the final `TyId`, without peeling anything.
 fn resolve(ws: &Workspace, inf: &BodyInference, ty: TyId) -> TyId {
@@ -128,7 +111,7 @@ fn defaults_inference(ws: &Workspace) -> (bone_semantic::prelude::ModuleId, &Bod
 /// `check_struct_defaults` turns this red.
 #[test]
 fn a_generic_field_default_and_its_declared_type_share_one_inference_class() {
-    let ws = check(SRC);
+    let ws = ws_with_stdlib(SRC);
     let (mid, inf) = defaults_inference(&ws);
     let sidx = ws
         .module(mid)
@@ -192,7 +175,7 @@ fn a_generic_field_default_and_its_declared_type_share_one_inference_class() {
 /// on -- if the recording published some other var, the two disagree.
 #[test]
 fn the_defaults_body_publishes_its_declared_generic_slots() {
-    let ws = check(SRC);
+    let ws = ws_with_stdlib(SRC);
     let (mid, inf) = defaults_inference(&ws);
     let sidx = ws
         .module(mid)
@@ -249,7 +232,7 @@ fn main() {
     print("{p.a} {p.b}")
 }
 "#;
-    let ws = check(PAIR);
+    let ws = ws_with_stdlib(PAIR);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     let sidx = ws
         .module(mid)
@@ -307,7 +290,7 @@ fn main() {
     print("{p.n}")
 }
 "#;
-    let ws = check(PLAIN);
+    let ws = ws_with_stdlib(PLAIN);
     let mid = *ws.module_ids.get(&Ustr::from("<test>")).expect("module id");
     let sidx = ws
         .module(mid)

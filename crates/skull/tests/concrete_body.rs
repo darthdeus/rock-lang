@@ -6,8 +6,7 @@
 //! generic. A table built under an empty substitution would fail every generic
 //! slot instead, which is what the mutation arm at the bottom asserts.
 
-use std::sync::LazyLock;
-
+use crate::common::ws_with_stdlib;
 use bone_semantic::hir::{BindingInfo, BodyOwner, Expr, TypeExpr};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::{ArenaMap, Idx, IdxRange};
@@ -18,24 +17,8 @@ use skull_mir::mir::{Inst, MirFunc, Term};
 use skull_mir::monoty::{MonoTy, MonoTyId, MonoTyReason};
 use ustr::Ustr;
 
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
-
-fn check(src: &str) -> Workspace {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module(src, Ustr::from("<test>")).expect("parse"));
-    bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass")
-}
-
 fn bodies_of_raw(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
     let bodies = concrete_body::build(&ws, &g);
@@ -1305,7 +1288,7 @@ fn main() { print("{G.x}") }
 
 #[test]
 fn always_emitted_plan_retains_a_failed_callee_site() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 fn pick<T>() -> int {
     let unused: T = 1
@@ -1506,7 +1489,7 @@ fn main() { let a = plain(1) }
 
 #[test]
 fn stale_inference_cannot_build_a_concrete_body() {
-    let mut ws = check(
+    let mut ws = ws_with_stdlib(
         r#"
 fn plain(x: int) -> int { return x + 1 }
 fn main() { let a = plain(1) }
@@ -1561,7 +1544,7 @@ fn an_empty_substitution_leaves_the_generic_slots_unbound() {
 fn ident<T>(x: T) -> T { return x }
 fn main() { let a = ident(1) }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
     let inst = g
@@ -1777,7 +1760,7 @@ fn main() {
 
 #[test]
 fn concrete_result_order_gate_exercises_the_reversed_merge_population() {
-    let ws = check(RICH);
+    let ws = ws_with_stdlib(RICH);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let canonical_graph = instance_graph::build(&ws, roots.clone(), false);
     let (_, canonical_order) = concrete_body::build_with_result_order(
@@ -1807,7 +1790,7 @@ fn concrete_result_order_gate_exercises_the_reversed_merge_population() {
 #[test]
 #[cfg(not(feature = "sequential"))]
 fn concrete_reverse_completion_gate_exercises_parallel_publication() {
-    let ws = check(RICH);
+    let ws = ws_with_stdlib(RICH);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let graph = instance_graph::build(&ws, roots, false);
     let (mut scheduled, merge_order, trace) =
@@ -1896,7 +1879,7 @@ fn concrete_reverse_completion_gate_exercises_parallel_publication() {
 #[cfg(feature = "sequential")]
 #[test]
 fn concrete_sequential_route_uses_one_worker_without_parallel_handshake() {
-    let ws = check(RICH);
+    let ws = ws_with_stdlib(RICH);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let graph = instance_graph::build(&ws, roots, false);
     let (mut scheduled, trace) = concrete_body::build_with_default_trace(&ws, &graph);
@@ -1946,7 +1929,7 @@ fn main() {
     print("{a}{b}")
 }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let canonical_graph = instance_graph::build(&ws, roots.clone(), false);
     let (mut canonical, canonical_order) = concrete_body::build_with_result_order(
@@ -2247,7 +2230,7 @@ fn vanishing() -> int {
     return 3
 }
 "#;
-    let ws1 = check(source_v1);
+    let ws1 = ws_with_stdlib(source_v1);
     let roots = skull::mir_emit::emission_roots(&ws1, Some("/project"));
     let mut graph = instance_graph::build(&ws1, roots.clone(), false);
     let mut local = concrete_body::build(&ws1, &graph);
@@ -2270,7 +2253,7 @@ fn vanishing() -> int {
         .map(|instance| graph.identity(&ws1, instance))
         .expect("stable instance was not expanded");
 
-    let ws2 = check(source_v2);
+    let ws2 = ws_with_stdlib(source_v2);
     let module = *ws2
         .module_ids
         .get(&Ustr::from("<test>"))
@@ -2359,7 +2342,7 @@ fn vanishing() -> int {
 
 #[test]
 fn owner_records_expose_plan_and_always_failure_populations() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 fn bad() -> int {
     return 1
@@ -2467,7 +2450,7 @@ fn main() {
     print("{b}{failed_call}")
 }
 "#;
-    let ws1 = check(source_v1);
+    let ws1 = ws_with_stdlib(source_v1);
     let roots = skull::mir_emit::emission_roots(&ws1, Some("<project>"));
     let mut graph = instance_graph::build(&ws1, roots, false);
     let bad = graph
@@ -2493,7 +2476,7 @@ fn main() {
             .any(|row| row.starts_with("always-plan-failure:"))
     );
 
-    let ws2 = check(source_v2);
+    let ws2 = ws_with_stdlib(source_v2);
     let module = *ws2
         .module_ids
         .get(&Ustr::from("<test>"))
@@ -2658,7 +2641,7 @@ fn main() {
 
 #[test]
 fn disagreeing_bound_trees_cannot_choose_a_body_by_discovery_order() {
-    let ws = check(
+    let ws = ws_with_stdlib(
         r#"
 fn sum_it<I: Iterator<int>>(it: I) -> int {
     let total = 0
@@ -2960,7 +2943,7 @@ fn probe_frag(@textures t: SrcTex, tc: Vec2) -> Vec4 {
 
 fn main() { let key = rock_shader(probe_frag) print("{key}") }
 "#;
-    let ws = check(src);
+    let ws = ws_with_stdlib(src);
     let mid = skull::user_module_id(&ws).unwrap();
     let before = concrete_body::build_invocations();
     let (emit, _cache) = skull::mir_emit::emit_full(&ws, mid).expect("emit_full");

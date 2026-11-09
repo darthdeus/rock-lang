@@ -9,22 +9,11 @@
 //! instances the walk said it reached" are genuinely two views, and their
 //! agreement is a property rather than a restatement.
 
+use crate::common::ws_of_files;
 use std::collections::BTreeSet;
-use std::sync::LazyLock;
 
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, Instance, InstanceGraph, Owner};
-use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
 
 const SRC: &str = r#"
 struct Holder<T> { v: T }
@@ -102,9 +91,7 @@ fn enable_census() {
 
 fn build() -> (Workspace, InstanceGraph) {
     enable_census();
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(SRC, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let ws = ws_of_files(&[("<test>", SRC)]);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, false);
     (ws, g)
@@ -112,12 +99,7 @@ fn build() -> (Workspace, InstanceGraph) {
 
 fn build_population() -> InstanceGraph {
     enable_census();
-    let mut modules = STDLIB.clone();
-    modules.push(
-        skull_parser::parse_module_clean(POPULATION_SRC, Ustr::from("<population-test>"))
-            .expect("parse"),
-    );
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let ws = ws_of_files(&[("<population-test>", POPULATION_SRC)]);
     instance_graph::build(&ws, skull::mir_emit::emission_roots(&ws, None), false)
 }
 

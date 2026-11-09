@@ -12,8 +12,8 @@
 //! nested payload (an edge's span, a bound tree's sub-witnesses, a
 //! disagreement's two substitutions) is red here rather than silently equal.
 
+use crate::common::ws_of_files;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::LazyLock;
 
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::Span;
@@ -25,16 +25,6 @@ use skull::instance_graph::{
 };
 use skull_mir::monoty::{MonoSubst, MonoTy, MonoTyReason};
 use ustr::Ustr;
-
-static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-    rock_stdlib::stdlib_files()
-        .iter()
-        .map(|f| {
-            let id = Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-        })
-        .collect()
-});
 
 /// One fixture, chosen so that every section the graph can populate from a
 /// VALID program is non-empty: generic calls, a coroutine, a bounded-generic
@@ -84,9 +74,7 @@ fn main() {
 "#;
 
 fn build(perturb: bool) -> (Workspace, InstanceGraph) {
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(SRC, Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let ws = ws_of_files(&[("<test>", SRC)]);
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let g = instance_graph::build(&ws, roots, perturb);
     (ws, g)
