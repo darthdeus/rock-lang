@@ -37,6 +37,7 @@ HEADER = re.compile(r"^(?:function ([A-Za-z_][A-Za-z0-9_]*)\(|__rock_mk_([A-Za-z
 BIND = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*) = __rock_mk_\1\(")
 LABEL = re.compile(r"^\s*::bb\d+::\s*$")
 GOTO = re.compile(r"^\s*goto bb\d+\s*$")
+GOTO_TARGET = re.compile(r"goto (bb\d+)")
 LOCAL_DECL = re.compile(r"^\s*local [rc]\d+(?:, [rc]\d+)*\s*$")
 RETURN_UNIT = re.compile(r"^\s*do return end\s*$")
 NIL_KILL = re.compile(r"^\s*[rc]\d+ = nil\s*$")
@@ -182,9 +183,8 @@ def boilerplate(lines, start, end):
     body = lines[start:end]
     targets = Counter()
     for l in body:
-        m = GOTO.match(l)
-        if m:
-            targets[l.strip()[5:]] += 1
+        for label in GOTO_TARGET.findall(l):
+            targets[label] += 1
     prev_goto = None
     for l in body:
         m = LABEL.match(l)
