@@ -716,6 +716,7 @@ fn parse_thread_count_request(
 /// [`thread_count_request`] for pool construction. `main_with` rejects an
 /// invalid value at startup, so reaching the panic means a pool was built
 /// outside the CLI process lifecycle with a bad environment.
+#[cfg(not(feature = "sequential"))]
 pub(crate) fn requested_thread_count() -> Option<usize> {
     thread_count_request().unwrap_or_else(|error| panic!("{error}"))
 }
