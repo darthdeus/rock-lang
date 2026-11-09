@@ -1092,9 +1092,6 @@ pub(super) fn emit_full_build(
         reject_abi_param_collisions(ws, &scx, &cg)
     });
 
-    // A mutated emit is a diagnostic of the planner; its chunks are neither
-    // served from nor stored in the cache.
-    let body_cache = body_cache.filter(|_| matches!(mutation, BodyMutation::None));
     if let Some(cache) = body_cache {
         setup_phases.timed("setup: body cache keys", || {
             cache.prepare(

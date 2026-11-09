@@ -546,19 +546,13 @@ fn hash_span(hash: &mut Xxh3, span: &bone_semantic::prelude::Span) {
     }
 }
 
-/// The build inputs in a canonical rendering. A volatile var (a build
-/// stamp) and a var whose value is a fingerprint of files change without
-/// the environment changing; a body that reads one records the value it
-/// baked in, and the lookup checks that record instead.
+/// The build inputs in a canonical rendering.
 fn comptime_environment(inputs: &bone_semantic::inference::ComptimeInputs) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();
     let mut vars: Vec<_> = inputs
         .vars
         .iter()
-        .filter(|(name, _)| {
-            !inputs.volatile_vars.contains(*name) && !inputs.source_fingerprints.contains_key(*name)
-        })
         .map(|(name, var)| (name.as_str(), var.value.as_str(), var.secret))
         .collect();
     vars.sort_unstable();
