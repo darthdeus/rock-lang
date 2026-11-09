@@ -875,11 +875,7 @@ fn main() { let result = first() }
             .collect::<Vec<_>>();
         assert_eq!(
             join.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
-            [
-                "join: concrete plans branch",
-                "join: cpu artifact branch",
-                "join: shader view branch"
-            ]
+            ["join: concrete plans branch", "join: cpu artifact branch"]
         );
         assert!(join.iter().all(|(_, duration)| *duration > Duration::ZERO));
     }
@@ -1577,12 +1573,12 @@ fn main() { let result = outer(1) }
             .expect("setup lane emission");
         let lanes = emit.setup_lanes;
         assert!(
-            lanes.cpu_population > 0 && lanes.shader_population > 0,
+            lanes.cpu_population > 0 && lanes.plans_population > 0 && lanes.shader_population > 0,
             "each setup lane must have a real population: {lanes:?}"
         );
         assert_eq!(
             lanes.setup_handshake_entered, 2,
-            "CPU and shader lanes must both reach the handshake: {lanes:?}"
+            "CPU and plan lanes must both reach the handshake: {lanes:?}"
         );
         assert_eq!(
             lanes.setup_handshake_released, 2,
@@ -1609,7 +1605,7 @@ fn main() { let result = outer(1) }
         let (emit, _) = emit_full(&ws, mid).expect("setup lane emission");
         let lanes = emit.setup_lanes;
         assert!(
-            lanes.cpu_population > 0 && lanes.shader_population > 0,
+            lanes.cpu_population > 0 && lanes.plans_population > 0 && lanes.shader_population > 0,
             "each setup lane must have a real population: {lanes:?}"
         );
         assert_eq!(
@@ -1636,7 +1632,7 @@ fn main() { let result = outer(1) }
                 .expect("setup lane emission")
         };
         let (cpu_first, cpu_cache) = emit(SetupLaneSchedule::CpuFirst);
-        let (shader_first, shader_cache) = emit(SetupLaneSchedule::ShaderFirst);
+        let (plans_first, plans_cache) = emit(SetupLaneSchedule::PlansFirst);
 
         for (name, emit, cache, expected_first) in [
             (
@@ -1646,14 +1642,16 @@ fn main() { let result = outer(1) }
                 SetupLaneKind::CpuArtifact,
             ),
             (
-                "shader-first",
-                &shader_first,
-                &shader_cache,
-                SetupLaneKind::Shader,
+                "plans-first",
+                &plans_first,
+                &plans_cache,
+                SetupLaneKind::ConcretePlans,
             ),
         ] {
             assert!(
-                emit.setup_lanes.cpu_population > 0 && emit.setup_lanes.shader_population > 0,
+                emit.setup_lanes.cpu_population > 0
+                    && emit.setup_lanes.plans_population > 0
+                    && emit.setup_lanes.shader_population > 0,
                 "{name} schedule must exercise every setup lane: {:?}",
                 emit.setup_lanes
             );
@@ -1683,12 +1681,12 @@ fn main() { let result = outer(1) }
         }
 
         assert_eq!(
-            cpu_first.lua, shader_first.lua,
+            cpu_first.lua, plans_first.lua,
             "reversing setup scheduling changed the Lua artifact"
         );
         assert_eq!(
             cpu_cache.lua_view().publisher_lanes,
-            shader_cache.lua_view().publisher_lanes,
+            plans_cache.lua_view().publisher_lanes,
             "reversing setup scheduling changed publisher ABI identity"
         );
     }

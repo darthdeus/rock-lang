@@ -805,13 +805,14 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
     }
     print_attribution(&skull.attribution);
     let lanes = &skull.setup_lanes;
-    if lanes.cpu_population > 0 || lanes.shader_population > 0 {
+    if lanes.cpu_population > 0 || lanes.plans_population > 0 {
         println!(
-            "  setup lanes (one timed run): cpu {}, shader {}; first={:?}; overlap cpu/shader={}; shared MonoInterner writes/acquires={}, attempts={}, new={}",
+            "  setup lanes (one timed run): cpu {}, plans {}, shader (beside the fan-out) {}; first={:?}; overlap cpu/plans={}; shared MonoInterner writes/acquires={}, attempts={}, new={}",
             lanes.cpu_population,
+            lanes.plans_population,
             lanes.shader_population,
             lanes.first_started_lane,
-            lanes.cpu_shader_overlap,
+            lanes.cpu_plans_overlap,
             lanes.mono_write_acqs_during_join,
             lanes.mono_intern_attempts_during_join,
             lanes.mono_intern_new_during_join,

@@ -213,6 +213,7 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
         let mut fan_out_window = Duration::ZERO;
         let mut assembly_window = Duration::ZERO;
         let mut early_assembly_window = None;
+        let mut shader_view_window = None;
         let mut scaffold = None;
         for (name, d) in &emit.phases {
             if let Some(rest) = name.strip_prefix("setup: ") {
@@ -227,6 +228,8 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
                 assembly_window = *d;
             } else if *name == "window: early assembly" {
                 early_assembly_window = Some(*d);
+            } else if *name == "window: shader view" {
+                shader_view_window = Some(*d);
             } else if *name == "scaffold+callgraph+order" {
                 scaffold = Some(*d);
             } else if !name.starts_with("incr: ") {
@@ -244,13 +247,19 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
 
         let mut fan_out = Node::leaf("fan-out", fan_out_window);
         fan_out.extra.insert("threads".into(), json!(threads()));
-        if let Some(early) = early_assembly_window {
-            // Runs beside the chunk build;
-            // its window overlaps them rather than summing in.
-            fan_out.extra.insert(
-                "branches".into(),
-                json!([{"name": "early assembly branch", "wall_ms": ms(early)}]),
-            );
+        // These run beside the chunk build; their windows overlap it rather
+        // than summing in.
+        let fan_out_branches: Vec<Value> = [
+            ("early assembly branch", early_assembly_window),
+            ("shader view branch", shader_view_window),
+        ]
+        .into_iter()
+        .filter_map(|(name, window)| Some(json!({"name": name, "wall_ms": ms(window?)})))
+        .collect();
+        if !fan_out_branches.is_empty() {
+            fan_out
+                .extra
+                .insert("branches".into(), Value::Array(fan_out_branches));
         }
 
         let mut assembly = Node::parent("assembly", assembly_window, assembly);

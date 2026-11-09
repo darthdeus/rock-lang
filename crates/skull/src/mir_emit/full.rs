@@ -6,7 +6,7 @@ use super::*;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum SetupLaneSchedule {
     CpuFirst,
-    ShaderFirst,
+    PlansFirst,
     Handshake,
 }
 
@@ -39,9 +39,6 @@ impl SetupLaneScheduler {
 
     fn wait(&self, lane: SetupLaneKind) {
         if self.schedule == SetupLaneSchedule::Handshake {
-            if !matches!(lane, SetupLaneKind::CpuArtifact | SetupLaneKind::Shader) {
-                return;
-            }
             let mut handshake = self.handshake.lock().expect("setup handshake lock");
             handshake.entered += 1;
             if handshake.entered == 2 {
@@ -56,7 +53,7 @@ impl SetupLaneScheduler {
         }
         let first = match self.schedule {
             SetupLaneSchedule::CpuFirst => SetupLaneKind::CpuArtifact,
-            SetupLaneSchedule::ShaderFirst => SetupLaneKind::Shader,
+            SetupLaneSchedule::PlansFirst => SetupLaneKind::ConcretePlans,
             SetupLaneSchedule::Handshake => unreachable!(),
         };
         if lane != first {
@@ -70,7 +67,7 @@ impl SetupLaneScheduler {
     fn finish(&self, lane: SetupLaneKind) {
         let first = match self.schedule {
             SetupLaneSchedule::CpuFirst => SetupLaneKind::CpuArtifact,
-            SetupLaneSchedule::ShaderFirst => SetupLaneKind::Shader,
+            SetupLaneSchedule::PlansFirst => SetupLaneKind::ConcretePlans,
             SetupLaneSchedule::Handshake => return,
         };
         if lane != first {
@@ -585,7 +582,9 @@ fn cpu_artifact_lane(
     )
 }
 
-/// Lane two: the shader view and its registration lines.
+/// The shader view and its registration lines. They read the concrete plans
+/// and nothing a CPU body lowers from, so the build runs them beside the
+/// fan-out.
 fn shader_lane(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
@@ -636,22 +635,17 @@ struct SetupLanes {
     lua_view: crate::artifact::ArtifactView,
     scx: skull_mir::lower::ScalarCtx,
     cg: CodegenCtx,
-    shader_view: crate::shader_artifact::ShaderArtifactView,
-    shader_registrations: ShaderRegistrations,
     attribution: SetupLaneAttribution,
-    windows: [(&'static str, Duration); 3],
+    windows: [(&'static str, Duration); 2],
 }
 
 /// The graph is complete before these lanes start; shared interning remains
-/// synchronized. The CPU artifact lane runs beside the concrete plan build,
-/// which the shader lane waits for. ABI plans are derived where a body first
-/// asks for one.
+/// synchronized. The CPU artifact lane runs beside the concrete plan build.
+/// ABI plans are derived where a body first asks for one.
 fn run_setup_lanes(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
     build_plans: impl FnOnce() -> Result<crate::concrete_body::ConcreteBodies, CompilerError> + Send,
-    shader_programs: &[crate::shader_artifact::ShaderProgram],
-    shader_collection: &skull_mir::lower::ShaderCollection,
     emission_roots: &[FuncRef],
     shapes: ShapeOverrides,
     mutation: BodyMutation,
@@ -660,18 +654,23 @@ fn run_setup_lanes(
     let mono_before_lanes = graph.interner().stats();
     let scx = skull_mir::lower::ScalarCtx::new(ws).sharing(std::sync::Arc::clone(graph.interner()));
     let plans_branch = || {
-        let started = Instant::now();
-        let concrete = build_plans();
-        let plans_window = started.elapsed();
-        let concrete = match concrete {
-            Ok(concrete) => concrete,
-            Err(err) => return (Err(err), plans_window),
-        };
-        let shader_plans = std::sync::Arc::clone(&concrete.plans);
-        let lane = gate.run(SetupLaneKind::Shader, || {
-            shader_lane(ws, graph, shader_programs, shader_collection, shader_plans)
-        });
-        (Ok((concrete, lane)), plans_window)
+        gate.run(SetupLaneKind::ConcretePlans, || {
+            let started = Instant::now();
+            let concrete = build_plans();
+            let finished = Instant::now();
+            let population = concrete
+                .as_ref()
+                .map(|concrete| concrete.plans.len() + concrete.always_plans.len())
+                .unwrap_or(0);
+            (
+                concrete,
+                SetupLaneWindow {
+                    started,
+                    finished,
+                    population,
+                },
+            )
+        })
     };
     // The plan build stays on this thread: its build counter is a
     // thread-local witness the incremental repair statistics read back.
@@ -686,7 +685,7 @@ fn run_setup_lanes(
         )
     };
     #[cfg(all(test, not(feature = "sequential")))]
-    let (cpu_result, (plans_result, plans_window)) = if matches!(
+    let (cpu_result, (plans_result, plans_lane)) = if matches!(
         mutation,
         BodyMutation::SetupLaneSchedule(SetupLaneSchedule::Handshake)
     ) {
@@ -699,20 +698,19 @@ fn run_setup_lanes(
         run_lanes()
     };
     #[cfg(any(not(test), feature = "sequential"))]
-    let (cpu_result, (plans_result, plans_window)) = run_lanes();
-    let (concrete, shader_result) = plans_result?;
+    let (cpu_result, (plans_result, plans_lane)) = run_lanes();
+    let concrete = plans_result?;
     let mono_after_lanes = graph.interner().stats();
     #[cfg(test)]
     let setup_handshake = gate.handshake();
     let (cpu_result, cpu_lane) = cpu_result;
-    let (shader_result, shader_lane) = shader_result;
     let (lua_view, scx, cg) = cpu_result?;
-    let (shader_view, shader_registrations) = shader_result?;
     let attribution = SetupLaneAttribution {
         cpu_population: cpu_lane.population,
-        shader_population: shader_lane.population,
-        cpu_shader_overlap: setup_lanes_overlap(cpu_lane, shader_lane),
-        first_started_lane: Some(first_setup_lane(cpu_lane, shader_lane)),
+        plans_population: plans_lane.population,
+        shader_population: 0,
+        cpu_plans_overlap: setup_lanes_overlap(cpu_lane, plans_lane),
+        first_started_lane: Some(first_setup_lane(cpu_lane, plans_lane)),
         mono_write_acqs_during_join: mono_after_lanes
             .write_acqs
             .saturating_sub(mono_before_lanes.write_acqs),
@@ -735,18 +733,15 @@ fn run_setup_lanes(
             lua_view,
             scx,
             cg,
-            shader_view,
-            shader_registrations,
             attribution,
             windows: [
-                ("join: concrete plans branch", plans_window),
+                (
+                    "join: concrete plans branch",
+                    plans_lane.finished - plans_lane.started,
+                ),
                 (
                     "join: cpu artifact branch",
                     cpu_lane.finished - cpu_lane.started,
-                ),
-                (
-                    "join: shader view branch",
-                    shader_lane.finished - shader_lane.started,
                 ),
             ],
         },
@@ -970,15 +965,12 @@ pub(super) fn emit_full_build(
         Ok((graph, selected_sim_functions))
     })?;
     // The CPU artifact view and the codegen context read only the graph, so
-    // they are built while the concrete plans are; the shader lane
-    // reads the plans and starts once they are published.
+    // they are built while the concrete plans are.
     let (mut concrete, lanes) = setup_phases.timed("setup: concrete plans+lanes", || {
         run_setup_lanes(
             ws,
             &graph,
             || build_concrete_plans(ws, &graph, mutation),
-            &shader_programs,
-            &shader_collection,
             &roots.emission_roots,
             shapes,
             mutation,
@@ -988,9 +980,7 @@ pub(super) fn emit_full_build(
         lua_view,
         scx,
         cg,
-        shader_view,
-        shader_registrations,
-        attribution: setup_lanes,
+        attribution: mut setup_lanes,
         windows,
     } = lanes;
     setup_phases.0.extend(windows);
@@ -1001,8 +991,9 @@ pub(super) fn emit_full_build(
     let setup_traffic = (scx.rep_arena_stats(), scx.interner().stats());
     // The chunk-free assembly inputs (scaffold, decorator and global units,
     // globals directory) are prepared beside the chunk build, on the same
-    // pool, instead of serially at the start of assembly.
-    let (chunks, (early, early_window)) = parallel_join(
+    // pool, instead of serially at the start of assembly. So is the shader
+    // view, which no CPU body reads.
+    let (chunks, ((early, early_window), (shader_result, shader_lane))) = parallel_join(
         || {
             emit_full_chunks(
                 ws,
@@ -1015,15 +1006,34 @@ pub(super) fn emit_full_build(
             )
         },
         || {
-            let started = Instant::now();
-            let early = prepare_early_assembly(ws, &scx, &cg, &concrete);
-            (early, started.elapsed())
+            parallel_join(
+                || {
+                    let started = Instant::now();
+                    let early = prepare_early_assembly(ws, &scx, &cg, &concrete);
+                    (early, started.elapsed())
+                },
+                || {
+                    shader_lane(
+                        ws,
+                        &graph,
+                        &shader_programs,
+                        &shader_collection,
+                        std::sync::Arc::clone(&concrete.plans),
+                    )
+                },
+            )
         },
     );
+    let (shader_view, shader_registrations) = shader_result?;
     let (chunks, inline_candidate_table) = chunks?;
+    setup_lanes.shader_population = shader_lane.population;
     setup_phases
         .0
         .push(("window: early assembly", early_window));
+    setup_phases.0.push((
+        "window: shader view",
+        shader_lane.finished - shader_lane.started,
+    ));
     let (dependents, dependency_edges) = index_dependents(&chunks, build.lifetime());
     let concrete_stats = if concrete_stats_requested() {
         concrete.snapshot_build_stats()

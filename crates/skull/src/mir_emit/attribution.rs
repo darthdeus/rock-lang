@@ -5,8 +5,10 @@ use super::*;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SetupLaneAttribution {
     pub cpu_population: usize,
+    pub plans_population: usize,
+    /// The shader view, built beside the fan-out rather than in a setup lane.
     pub shader_population: usize,
-    pub cpu_shader_overlap: bool,
+    pub cpu_plans_overlap: bool,
     pub first_started_lane: Option<SetupLaneKind>,
     pub mono_write_acqs_during_join: u64,
     pub mono_intern_attempts_during_join: u64,
@@ -22,7 +24,7 @@ pub struct SetupLaneAttribution {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SetupLaneKind {
     CpuArtifact,
-    Shader,
+    ConcretePlans,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -36,10 +38,10 @@ pub(super) fn setup_lanes_overlap(left: SetupLaneWindow, right: SetupLaneWindow)
     left.started < right.finished && right.started < left.finished
 }
 
-pub(super) fn first_setup_lane(cpu: SetupLaneWindow, shader: SetupLaneWindow) -> SetupLaneKind {
+pub(super) fn first_setup_lane(cpu: SetupLaneWindow, plans: SetupLaneWindow) -> SetupLaneKind {
     let mut first = (cpu.started, SetupLaneKind::CpuArtifact);
-    if shader.started < first.0 {
-        first = (shader.started, SetupLaneKind::Shader);
+    if plans.started < first.0 {
+        first = (plans.started, SetupLaneKind::ConcretePlans);
     }
     first.1
 }
