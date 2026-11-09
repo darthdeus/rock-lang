@@ -31,6 +31,32 @@ pub struct ResolvedBuildVars {
     pub source_fingerprints: HashMap<String, SourceFingerprint>,
 }
 
+/// A var whose value comes from running a command.
+struct PendingCommand<'a> {
+    name: &'a String,
+    var: &'a super::BuildVar,
+    /// Whether `optional_channels` may replace a failure with the default.
+    fall_back: bool,
+    run: Box<dyn FnOnce() -> Result<String> + Send + 'a>,
+}
+
+fn run_concurrently<T: Send>(jobs: Vec<Box<dyn FnOnce() -> T + Send + '_>>) -> Vec<T> {
+    if jobs.len() <= 1 {
+        return jobs.into_iter().map(|job| job()).collect();
+    }
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = jobs.into_iter().map(|job| scope.spawn(job)).collect();
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .unwrap_or_else(|p| std::panic::resume_unwind(p))
+            })
+            .collect()
+    })
+}
+
 /// `build_command` is the `ROCK_BUILD_COMMAND` a `cmd` var sees; `None`
 /// leaves the one this process inherited.
 pub fn resolve_build_vars(
@@ -91,6 +117,7 @@ pub fn resolve_build_vars(
 
     let mut vars = HashMap::new();
     let mut source_fingerprints = HashMap::new();
+    let mut commands = Vec::new();
     for (name, var) in &build.vars {
         if let Some(over) = overrides.get(name) {
             vars.insert(
@@ -130,28 +157,63 @@ pub fn resolve_build_vars(
         let value = if let Some(value) = var.value.as_ref() {
             value.clone()
         } else if let Some(builtin) = var.builtin.as_deref() {
+            if builtin == "source_revision" {
+                let channel = channel.as_str();
+                commands.push(PendingCommand {
+                    name,
+                    var,
+                    fall_back: false,
+                    run: Box::new(move || resolve_source_revision(project_dir, channel)),
+                });
+                continue;
+            }
             resolve_builtin(builtin, &channel, target_os, project_dir)?
         } else if let Some(cmd) = var.cmd.as_ref() {
-            match run_var_cmd(name, cmd, var.secret, project_dir, &channel, build_command) {
-                Ok(value) => value,
-                Err(_error)
-                    if var
-                        .optional_channels
-                        .as_deref()
-                        .is_some_and(|channels| channels.iter().any(|entry| entry == &channel)) =>
-                {
-                    log::warn!(
-                        "[build.vars] {name}: source unavailable for channel {channel:?}; continuing with its declared default"
-                    );
-                    var.default
-                        .clone()
-                        .expect("validate_build requires an optional default")
-                }
-                Err(error) => return Err(error),
-            }
+            let channel = channel.as_str();
+            commands.push(PendingCommand {
+                name,
+                var,
+                fall_back: true,
+                run: Box::new(move || {
+                    run_var_cmd(name, cmd, var.secret, project_dir, channel, build_command)
+                }),
+            });
+            continue;
         } else {
             // validate_build above rejected sourceless vars.
             unreachable!("[build.vars] {name} has no source past validate_build")
+        };
+        vars.insert(
+            name.clone(),
+            ResolvedVar {
+                value,
+                secret: var.secret,
+            },
+        );
+    }
+    // Commands are independent processes; their waits overlap.
+    let (pending, jobs): (Vec<_>, Vec<_>) = commands
+        .into_iter()
+        .map(|command| ((command.name, command.var, command.fall_back), command.run))
+        .unzip();
+    for ((name, var, fall_back), outcome) in pending.into_iter().zip(run_concurrently(jobs)) {
+        let value = match outcome {
+            Ok(value) => value,
+            Err(_error)
+                if fall_back
+                    && var
+                        .optional_channels
+                        .as_deref()
+                        .is_some_and(|channels| channels.iter().any(|entry| entry == &channel)) =>
+            {
+                log::warn!(
+                    "[build.vars] {name}: source unavailable for channel {channel:?}; continuing with its declared default"
+                );
+                var.default
+                    .clone()
+                    .expect("validate_build requires an optional default")
+            }
+            Err(error) => return Err(error),
         };
         vars.insert(
             name.clone(),
@@ -478,6 +540,28 @@ mod tests {
             resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides(), None).unwrap();
         assert_eq!(resolved.vars["MARKER"].value, "from-project-dir");
         assert_eq!(resolved.vars["CHAN"].value, "dev");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cmd_vars_run_concurrently() {
+        // Each command waits for the other's marker, so resolving them one
+        // after another cannot finish before the wait gives up.
+        let wait = |own: &str, other: &str| {
+            format!(
+                "touch {own}; i=0; while [ ! -e {other} ]; do i=$((i+1)); [ $i -gt 100 ] && exit 1; sleep 0.05; done; echo {own}"
+            )
+        };
+        let cfg = fixture(&format!(
+            "[package]\nname = \"x\"\n[build.vars]\nA = {{ cmd = \"{}\" }}\nB = {{ cmd = \"{}\" }}\n",
+            wait("a.marker", "b.marker"),
+            wait("b.marker", "a.marker"),
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let resolved =
+            resolve_build_vars(&cfg, dir.path(), None, None, &no_overrides(), None).unwrap();
+        assert_eq!(resolved.vars["A"].value, "a.marker");
+        assert_eq!(resolved.vars["B"].value, "b.marker");
     }
 
     #[test]
