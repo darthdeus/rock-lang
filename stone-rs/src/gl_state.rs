@@ -69,6 +69,13 @@ fn samplers(gl: &DebugGl) -> Option<[[glow::Sampler; 2]; 3]> {
         if let Some(s) = *cell.borrow() {
             return Some(s);
         }
+        let anisotropy = gl.max_texture_anisotropy().map(|limit| limit.min(4.0));
+        if anisotropy.is_none() {
+            log_once!(
+                "RENDER",
+                "Anisotropic filtering unavailable; using trilinear mip sampling"
+            );
+        }
         let make = |min_filter: u32, mag_filter: u32, wrap: u32| -> Option<glow::Sampler> {
             let s = match unsafe { gl.create_sampler() } {
                 Ok(s) => s,
@@ -82,6 +89,11 @@ fn samplers(gl: &DebugGl) -> Option<[[glow::Sampler; 2]; 3]> {
                 gl.sampler_parameter_i32(s, glow::TEXTURE_MAG_FILTER, mag_filter as i32);
                 gl.sampler_parameter_i32(s, glow::TEXTURE_WRAP_S, wrap as i32);
                 gl.sampler_parameter_i32(s, glow::TEXTURE_WRAP_T, wrap as i32);
+                if min_filter == glow::LINEAR_MIPMAP_LINEAR {
+                    if let Some(level) = anisotropy {
+                        gl.sampler_parameter_f32(s, glow::TEXTURE_MAX_ANISOTROPY, level);
+                    }
+                }
             }
             Some(s)
         };
