@@ -102,31 +102,40 @@ fn facts(ws: &Workspace, function: &Function, body: &Body, bi: &BodyInference) -
     Facts { compared, forwards }
 }
 
-fn inferred_bodies(
-    ws: &Workspace,
-) -> impl Iterator<Item = (ModuleId, BodyOwner, &Body, &BodyInference)> {
-    ws.modules.iter().flat_map(move |module| {
-        let inference = ws.inference(module.id);
-        module.bodies.iter().filter_map(move |(&owner, body)| {
-            let bi = inference?.per_fn.get(&owner)?;
-            Some((module.id, owner, body, bi))
-        })
+/// The inferred bodies of one module.
+fn module_bodies<'a>(
+    ws: &'a Workspace,
+    module: &'a crate::hir::Module,
+) -> impl Iterator<Item = (ModuleId, BodyOwner, &'a Body, &'a BodyInference)> {
+    let inference = ws.inference(module.id);
+    module.bodies.iter().filter_map(move |(&owner, body)| {
+        let bi = inference?.per_fn.get(&owner)?;
+        Some((module.id, owner, body, bi))
     })
 }
 
 /// Compared generic indices per generic function, at the fixpoint.
 fn summaries(ws: &Workspace) -> FxHashMap<FnKey, FxHashSet<usize>> {
-    let mut all: FxHashMap<FnKey, Facts> = FxHashMap::default();
-    for (mid, owner, body, bi) in inferred_bodies(ws) {
-        let BodyOwner::Function(fid) = owner else {
-            continue;
-        };
-        let function = &ws.module(mid).functions[fid];
-        if function.generics.is_empty() {
-            continue;
-        }
-        all.insert((mid, fid), facts(ws, function, body, bi));
-    }
+    // Every body's expressions are read once; the modules are independent.
+    let per_module: Vec<Vec<(FnKey, Facts)>> = ws
+        .modules
+        .par_iter()
+        .map(|module| {
+            module_bodies(ws, module)
+                .filter_map(|(mid, owner, body, bi)| {
+                    let BodyOwner::Function(fid) = owner else {
+                        return None;
+                    };
+                    let function = &ws.module(mid).functions[fid];
+                    if function.generics.is_empty() {
+                        return None;
+                    }
+                    Some(((mid, fid), facts(ws, function, body, bi)))
+                })
+                .collect()
+        })
+        .collect();
+    let all: FxHashMap<FnKey, Facts> = per_module.into_iter().flatten().collect();
     let mut summary: FxHashMap<FnKey, FxHashSet<usize>> = all
         .iter()
         .map(|(&key, facts)| (key, facts.compared.clone()))
@@ -172,37 +181,45 @@ pub fn check_generic_fn_eq(ws: &mut Workspace) {
         if summary.is_empty() {
             return;
         }
-        let mut found = Vec::new();
-        for (mid, owner, body, bi) in inferred_bodies(ws) {
-            // Sorted so a body's rejections come in expression order.
-            let mut calls: Vec<_> = bi.call_generic_bindings.iter().collect();
-            calls.sort_unstable_by_key(|(id, _)| id.into_raw().into_u32());
-            for (&id, bindings) in calls {
-                let Some(&callee) = bi.resolved_overload_calls.get(&id) else {
-                    continue;
-                };
-                let Some(compared) = summary.get(&callee) else {
-                    continue;
-                };
-                if compared
-                    .iter()
-                    .any(|&j| bindings.get(j).is_some_and(|&ty| is_fn_type(ws, bi, ty)))
-                {
-                    let name = ws.module(callee.0).functions[callee.1].name;
-                    found.push((
-                        mid,
-                        owner,
-                        CompilerError::new_with_label(
-                            body.expr_spans[id],
-                            format!(
-                                "{REJECTION_PREFIX}{name}` compares a generic parameter with `==`/`!=`, but it is instantiated with a fn type here -- fn identity is not meaningful (a capture-free lambda is one shared fn; a capturing lambda is a fresh record per creation). Restructure around explicit keys"
-                            ),
-                        ),
-                    ));
+        // Module order, then expression order within a body, as a serial
+        // walk reports.
+        let per_module: Vec<Vec<(ModuleId, BodyOwner, CompilerError)>> = ws
+            .modules
+            .par_iter()
+            .map(|module| {
+                let mut found = Vec::new();
+                for (mid, owner, body, bi) in module_bodies(ws, module) {
+                    let mut calls: Vec<_> = bi.call_generic_bindings.iter().collect();
+                    calls.sort_unstable_by_key(|(id, _)| id.into_raw().into_u32());
+                    for (&id, bindings) in calls {
+                        let Some(&callee) = bi.resolved_overload_calls.get(&id) else {
+                            continue;
+                        };
+                        let Some(compared) = summary.get(&callee) else {
+                            continue;
+                        };
+                        if compared
+                            .iter()
+                            .any(|&j| bindings.get(j).is_some_and(|&ty| is_fn_type(ws, bi, ty)))
+                        {
+                            let name = ws.module(callee.0).functions[callee.1].name;
+                            found.push((
+                                mid,
+                                owner,
+                                CompilerError::new_with_label(
+                                    body.expr_spans[id],
+                                    format!(
+                                        "{REJECTION_PREFIX}{name}` compares a generic parameter with `==`/`!=`, but it is instantiated with a fn type here -- fn identity is not meaningful (a capture-free lambda is one shared fn; a capturing lambda is a fresh record per creation). Restructure around explicit keys"
+                                    ),
+                                ),
+                            ));
+                        }
+                    }
                 }
-            }
-        }
-        found
+                found
+            })
+            .collect();
+        per_module.into_iter().flatten().collect()
     };
     for (mid, owner, error) in found {
         if let Some(Some(inference)) = ws.inferences.get_mut(mid.index()) {
