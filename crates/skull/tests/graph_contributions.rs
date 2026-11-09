@@ -9,7 +9,7 @@
 //! instances the walk said it reached" are genuinely two views, and their
 //! agreement is a property rather than a restatement.
 
-use crate::common::ws_of_files;
+use crate::common::{graph_of, ws_of_files};
 use std::collections::BTreeSet;
 
 use bone_semantic::inference::Workspace;
@@ -92,8 +92,7 @@ fn enable_census() {
 fn build() -> (Workspace, InstanceGraph) {
     enable_census();
     let ws = ws_of_files(&[("<test>", SRC)]);
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let g = instance_graph::build(&ws, roots, false);
+    let g = graph_of(&ws);
     (ws, g)
 }
 

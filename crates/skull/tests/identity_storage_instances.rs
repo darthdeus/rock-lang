@@ -4,7 +4,7 @@
 //! instantiated it, and exempt packages keep compiling.
 
 use crate::common::{
-    try_emit_module, try_emit_module_enforcing_identity_storage, ws_with_stdlib,
+    graph_of, try_emit_module, try_emit_module_enforcing_identity_storage, ws_with_stdlib,
     ws_with_stdlib_module,
 };
 use bone_semantic::inference::Workspace;
@@ -17,8 +17,7 @@ fn identity_rejections(src: &str) -> Vec<String> {
 }
 
 fn rejections_in(ws: &Workspace) -> Vec<String> {
-    let roots = skull::mir_emit::emission_roots(ws, None);
-    let g = instance_graph::build(ws, roots, false);
+    let g = graph_of(&ws);
     g.rejections()
         .filter(|r| r.kind.name() == IDENTITY_STORAGE)
         .map(|r| {

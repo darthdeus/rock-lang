@@ -3,7 +3,7 @@
 
 use skull::mir_emit::{emit_full, emit_overlay};
 
-use crate::common::{body_id, ws_with_stdlib};
+use crate::common::{body_id, emit_full_of, ws_with_stdlib};
 
 /// A program whose call graph has a chain (`top` -> `mid` -> `leaf`), a
 /// mutually recursive pair, and a leaf with no callees at all.
@@ -152,8 +152,7 @@ fn over_budget_inline_caller_fixture(helper_value: i32) -> String {
 fn bound_overlay_rebinds_transitive_callers_and_escaped_code_refs() {
     let v1 = format!("{SRC}\n@nomangle fn saved() -> fn(int) -> int {{ top }}\n");
     let ws1 = ws_with_stdlib(&v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) = emit_full(&ws1, mid).expect("full");
+    let (full, mut cache) = emit_full_of(&ws1, "full");
     let v2 = v1.replace("a * 3 + 1", "a * 3 + 2");
     let ws2 = ws_with_stdlib(&v2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "leaf")]).expect("overlay");
@@ -168,8 +167,7 @@ fn bound_overlay_rebinds_transitive_callers_and_escaped_code_refs() {
 fn bound_overlay_rebinds_a_residual_inline_caller_without_rebuilding_its_chunk() {
     let v1 = over_budget_inline_caller_fixture(3);
     let ws1 = ws_with_stdlib(&v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) = emit_full(&ws1, mid).expect("full");
+    let (full, mut cache) = emit_full_of(&ws1, "full");
 
     let v2 = over_budget_inline_caller_fixture(5);
     let ws2 = ws_with_stdlib(&v2);
@@ -191,8 +189,7 @@ fn bound_overlay_rebinds_a_residual_inline_caller_without_rebuilding_its_chunk()
 fn bound_overlay_cells_read_the_live_global_storage() {
     let v1 = "global COUNT: int = 0\nfn delta(n: int) -> int { n + 1 }\n@nomangle fn bump() { COUNT = delta(COUNT) }\n";
     let ws1 = ws_with_stdlib(v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) = emit_full(&ws1, mid).expect("full");
+    let (full, mut cache) = emit_full_of(&ws1, "full");
     let ws2 = ws_with_stdlib(&v1.replace("delta(COUNT)", "delta(COUNT) + 1"));
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "bump")]).expect("overlay");
     let script = format!(
@@ -206,8 +203,7 @@ fn bound_overlay_cells_read_the_live_global_storage() {
 fn bound_overlay_new_backedge_keeps_capture_binding_acyclic() {
     let v1 = "fn leaf(n: int) -> int { n }\nfn top(n: int) -> int { leaf(n) }\n@nomangle fn answer() -> int { top(3) }\n";
     let ws1 = ws_with_stdlib(v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) = emit_full(&ws1, mid).expect("full");
+    let (full, mut cache) = emit_full_of(&ws1, "full");
     let ws2 = ws_with_stdlib(&v1.replace("{ n }", "{ if n == 0 { return 10 }\n top(n - 1) }"));
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "leaf")]).expect("overlay");
     let script = format!(
@@ -221,8 +217,7 @@ fn bound_overlay_new_backedge_keeps_capture_binding_acyclic() {
 fn repeated_stripped_overlays_share_one_storage_table_and_old_closures_live() {
     let v1 = "global COUNT: int = 0\n@nomangle fn bump() { COUNT = COUNT + 1 }\n";
     let ws1 = ws_with_stdlib(v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) = emit_full(&ws1, mid).expect("full");
+    let (full, mut cache) = emit_full_of(&ws1, "full");
     let ws2 = ws_with_stdlib(&v1.replace("COUNT + 1", "COUNT + 2"));
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "bump")]).expect("overlay");
     let script = format!(

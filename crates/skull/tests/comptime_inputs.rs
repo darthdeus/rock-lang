@@ -6,7 +6,7 @@
 //! undeclared var, missing file, path escape -- never a silent default.
 use bone_semantic::inference::{ComptimeInputs, ComptimeVarValue};
 
-use crate::common::{body_id, function_body, try_emit_module_with};
+use crate::common::{body_id, emit_full_of, function_body, try_emit_module_with};
 
 fn inputs_with_var(name: &str, value: &str) -> ComptimeInputs {
     let mut inputs = ComptimeInputs::default();
@@ -334,8 +334,7 @@ fn main() {
 }
 "#;
     let ws1 = ws_with_inputs(src, inputs_with_var("SHA", "all-first"));
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full1, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
     assert_eq!(full1.lua.matches("all-first").count(), 3);
 
     let ws2 = ws_with_inputs(src, inputs_with_var("SHA", "all-second"));
@@ -372,8 +371,7 @@ fn other() -> int {
     };
 
     let ws1 = ws_with_inputs(src, inputs.clone());
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full1, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
     assert!(
         full1.lua.contains("embed-v1"),
         "control: full build embeds v1"
@@ -398,7 +396,7 @@ fn other() -> int {
 
 #[test]
 fn embed_file_change_reaches_the_overlay() {
-    use skull::mir_emit::{emit_full, emit_overlay};
+    use skull::mir_emit::emit_overlay;
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("data.txt"), "fn-embed-v1").unwrap();
@@ -415,8 +413,7 @@ fn other() -> int {
         ..ComptimeInputs::default()
     };
     let ws1 = ws_with_inputs(src, inputs.clone());
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (_, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (_, mut cache) = emit_full_of(&ws1, "emit_full v1");
 
     std::fs::write(dir.path().join("data.txt"), "fn-embed-v2").unwrap();
     let ws2 = ws_with_inputs(src, inputs);
@@ -486,11 +483,10 @@ fn main() {
 
 #[test]
 fn global_const_build_var_change_reaches_incremental() {
-    use skull::mir_emit::{emit_full, emit_incremental};
+    use skull::mir_emit::emit_incremental;
 
     let ws1 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "first-sha-value"));
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full1, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
     assert!(
         full1.lua.contains("first-sha-value"),
         "control: full build inlines v1"
@@ -508,11 +504,10 @@ fn global_const_build_var_change_reaches_incremental() {
 
 #[test]
 fn global_const_build_var_change_reaches_the_overlay() {
-    use skull::mir_emit::{emit_full, emit_overlay};
+    use skull::mir_emit::emit_overlay;
 
     let ws1 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "first-sha-value"));
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (_, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (_, mut cache) = emit_full_of(&ws1, "emit_full v1");
 
     // The session saw only an unrelated body edit; the var moved underneath.
     let ws2 = ws_with_inputs(GLOBAL_VAR_SRC, inputs_with_var("SHA", "second-sha-value"));
@@ -531,7 +526,7 @@ fn global_const_build_var_change_reaches_the_overlay() {
 
 #[test]
 fn global_body_edit_replaces_the_recorded_comptime_read_set() {
-    use skull::mir_emit::{emit_full, emit_overlay};
+    use skull::mir_emit::emit_overlay;
 
     let dir = tempfile::tempdir().unwrap();
     let first_path = dir.path().join("first.txt");
@@ -553,8 +548,7 @@ fn main() {
         ..bone_semantic::inference::ComptimeInputs::default()
     };
     let ws1 = ws_with_inputs(v1, inputs.clone());
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (_, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (_, mut cache) = emit_full_of(&ws1, "emit_full v1");
 
     let ws2 = ws_with_inputs(&v2, inputs.clone());
     let first = emit_overlay(&ws2, &mut cache, &[global_reinferred_of(&ws2, "TAG")])
@@ -594,7 +588,7 @@ fn main() {
 
 #[test]
 fn global_const_embed_change_reaches_the_overlay() {
-    use skull::mir_emit::{emit_full, emit_overlay};
+    use skull::mir_emit::emit_overlay;
 
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("data.txt"), "overlay-embed-v1").unwrap();
@@ -612,8 +606,7 @@ fn main() {
         ..ComptimeInputs::default()
     };
     let ws1 = ws_with_inputs(src, inputs.clone());
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (_, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (_, mut cache) = emit_full_of(&ws1, "emit_full v1");
 
     std::fs::write(dir.path().join("data.txt"), "overlay-embed-v2").unwrap();
     let ws2 = ws_with_inputs(src, inputs);

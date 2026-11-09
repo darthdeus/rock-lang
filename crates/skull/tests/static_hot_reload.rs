@@ -9,7 +9,7 @@
 //! (it routes through a stdlib op fn), so the static is observed via a bool
 //! toggle + assignment instead of a counter.
 
-use crate::common::{body_id, run_luajit};
+use crate::common::{body_id, emit_full_of, run_luajit};
 
 fn emit_program(src: &str) -> String {
     let ws = crate::common::ws_of(src);
@@ -157,8 +157,7 @@ fn overlay_run_editing(
     script: impl Fn(&str, &str) -> String,
 ) -> String {
     let ws1 = crate::common::ws_with_stdlib(before);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) = skull::mir_emit::emit_full(&ws1, mid).expect("full emit");
+    let (full, mut cache) = emit_full_of(&ws1, "full emit");
     let ws2 = crate::common::ws_with_stdlib(after);
     let overlay = skull::mir_emit::emit_overlay(&ws2, &mut cache, &[body_id(&ws2, edited)])
         .expect("a body edit that adds or removes a static must overlay");

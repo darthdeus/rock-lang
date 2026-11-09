@@ -6,21 +6,20 @@
 //! generic. A table built under an empty substitution would fail every generic
 //! slot instead, which is what the mutation arm at the bottom asserts.
 
-use crate::common::{module_id, ws_with_stdlib};
+use crate::common::{fn_name, graph_of, module_id, scalar_ctx, ws_with_stdlib};
 use bone_semantic::hir::{BindingInfo, BodyOwner, Expr, TypeExpr};
 use bone_semantic::inference::Workspace;
 use comfy_la_arena::{ArenaMap, Idx, IdxRange};
 use skull::concrete_body::{self, Callee, ConcreteBodies, IteratorOpKind, Slot};
-use skull::instance_graph::{self, InstanceGraph, Site, SiteOp, SiteOutcome};
-use skull_mir::concrete::ConcreteTypeTables;
+use skull::instance_graph::{self, Instance, InstanceGraph, Site, SiteOp, SiteOutcome};
+use skull_mir::concrete::{ConcreteBodyPlan, ConcreteTypeTables};
 use skull_mir::mir::{Inst, MirFunc, Term};
 use skull_mir::monoty::{MonoTy, MonoTyId, MonoTyReason};
 use ustr::Ustr;
 
 fn bodies_of_raw(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
     let ws = ws_with_stdlib(src);
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let g = instance_graph::build(&ws, roots, false);
+    let g = graph_of(&ws);
     let bodies = concrete_body::build(&ws, &g);
     (ws, g, bodies)
 }
@@ -29,6 +28,34 @@ fn bodies_of(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
     let (ws, g, mut bodies) = bodies_of_raw(src);
     bodies.refresh_flat_views();
     (ws, g, bodies)
+}
+
+fn plan_named<'a>(
+    ws: &Workspace,
+    bodies: &'a ConcreteBodies,
+    name: &str,
+) -> &'a std::sync::Arc<ConcreteBodyPlan> {
+    bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| fn_name(ws, inst.func) == name)
+        .map(|(_, plan)| plan)
+        .unwrap_or_else(|| panic!("{name} has no concrete plan"))
+}
+
+fn callee_named(ws: &Workspace, plan: &ConcreteBodyPlan, name: &str) -> Instance {
+    plan.callees
+        .values()
+        .find(|inst| fn_name(ws, inst.func) == name)
+        .cloned()
+        .unwrap_or_else(|| panic!("no concrete `{name}` call"))
+}
+
+fn expanded_with_prefix(ws: &Workspace, g: &InstanceGraph, prefix: &str) -> Instance {
+    g.expanded()
+        .find(|i| g.identity(ws, i).starts_with(prefix))
+        .cloned()
+        .unwrap_or_else(|| panic!("no expanded instance of `{prefix}`"))
 }
 
 fn assert_arena_tables(tables: &ConcreteTypeTables) {
@@ -137,7 +164,7 @@ fn main() {
         .expect("concrete plan has no type nodes");
     let mut poisoned = (**plan).clone();
     poisoned.types.ty_types.remove(&missing);
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     assert!(
         skull_mir::lower::lower_instance_with_plans(&ws, &scx, &poisoned, &bodies.plans).is_err(),
         "lowering ignored a missing concrete type-node entry"
@@ -177,7 +204,7 @@ fn main() {
         "the concrete plan lost the nested application tree"
     );
 
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
         .expect("plan-driven lowering failed");
 
@@ -222,7 +249,7 @@ fn main() {
     body.binding_arena[binding].declared_ty =
         Some(bone_semantic::prelude::TyId::Static(mid, extra));
 
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &plan, &bodies.plans)
         .expect_err("lowering accepted a declaration type absent from its concrete plan");
     assert!(
@@ -252,7 +279,7 @@ fn main() { print("{id(1)}") }
     ws.modules[mid.index()].functions[inst.func.func].param_decls[0].ty =
         bone_semantic::prelude::TyId::Static(mid, extra);
 
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &plan, &bodies.plans)
         .expect_err("lowering accepted a signature type absent from its concrete plan");
     assert!(
@@ -292,7 +319,7 @@ fn main() {
         "unresolved null slot was not recorded"
     );
 
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     let mut poisoned = (**plan).clone();
     poisoned.types.untyped_exprs.clear();
     let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &poisoned, &bodies.plans)
@@ -315,16 +342,11 @@ fn main() { let v = make(); print("{v.x}") }
     let make = bodies
         .plans
         .keys()
-        .find(|inst| {
-            ws.module(inst.func.module).functions[inst.func.func]
-                .name
-                .as_str()
-                == "make"
-        })
+        .find(|inst| fn_name(&ws, inst.func) == "make")
         .cloned()
         .expect("make has no concrete plan");
     let plan = bodies.plans.get(&make).expect("make plan disappeared");
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     let mir = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
         .expect("plan-driven struct literal lowering failed");
     assert!(
@@ -345,29 +367,9 @@ fn main() {
 }
 "#,
     );
-    let main_plan = bodies
-        .plans
-        .iter()
-        .find(|(inst, _)| {
-            ws.module(inst.func.module).functions[inst.func.func]
-                .name
-                .as_str()
-                == "main"
-        })
-        .map(|(_, plan)| plan)
-        .expect("main has no concrete plan");
-    let callee = main_plan
-        .callees
-        .values()
-        .find(|inst| {
-            ws.module(inst.func.module).functions[inst.func.func]
-                .name
-                .as_str()
-                == "id"
-        })
-        .cloned()
-        .expect("main has no concrete id call");
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let main_plan = plan_named(&ws, &bodies, "main");
+    let callee = callee_named(&ws, main_plan, "id");
+    let scx = scalar_ctx(&ws, &g);
     skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &bodies.plans)
         .expect("call lowering rejected the intact selected callee plan");
     let mut plans = (*bodies.plans).clone();
@@ -393,34 +395,14 @@ fn main() {
 }
 "#,
     );
-    let main_plan = bodies
-        .plans
-        .iter()
-        .find(|(inst, _)| {
-            ws.module(inst.func.module).functions[inst.func.func]
-                .name
-                .as_str()
-                == "main"
-        })
-        .map(|(_, plan)| plan)
-        .expect("main has no concrete plan");
-    let callee = main_plan
-        .callees
-        .values()
-        .find(|inst| {
-            ws.module(inst.func.module).functions[inst.func.func]
-                .name
-                .as_str()
-                == "id"
-        })
-        .cloned()
-        .expect("main has no concrete id call");
+    let main_plan = plan_named(&ws, &bodies, "main");
+    let callee = callee_named(&ws, main_plan, "id");
     let site = main_plan
         .callees
         .iter()
         .find_map(|(site, inst)| (inst == &callee).then_some(site))
         .expect("id call site disappeared");
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &bodies.plans)
         .expect("the intact scalar call must lower");
 
@@ -444,7 +426,7 @@ fn main() {
     signature.params.clear();
     signature.param_tuple_spelled.clear();
 
-    let poisoned_scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let poisoned_scx = scalar_ctx(&ws, &g);
     let err = skull_mir::lower::lower_instance_with_plans(&ws, &poisoned_scx, &caller, &plans)
         .expect_err("a missing scalar ABI slot must reject instead of boxing");
     assert!(
@@ -466,34 +448,14 @@ fn main() {
 }
 "#,
     );
-    let main_plan = bodies
-        .plans
-        .iter()
-        .find(|(inst, _)| {
-            ws.module(inst.func.module).functions[inst.func.func]
-                .name
-                .as_str()
-                == "main"
-        })
-        .map(|(_, plan)| plan)
-        .expect("main has no concrete plan");
-    let callee = main_plan
-        .callees
-        .values()
-        .find(|inst| {
-            ws.module(inst.func.module).functions[inst.func.func]
-                .name
-                .as_str()
-                == "id"
-        })
-        .cloned()
-        .expect("main has no concrete id call");
+    let main_plan = plan_named(&ws, &bodies, "main");
+    let callee = callee_named(&ws, main_plan, "id");
     let site = main_plan
         .callees
         .iter()
         .find_map(|(site, inst)| (inst == &callee).then_some(site))
         .expect("id UFCS call site disappeared");
-    let intact_scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let intact_scx = scalar_ctx(&ws, &g);
     skull_mir::lower::lower_instance_with_plans(&ws, &intact_scx, main_plan, &bodies.plans)
         .expect("the intact safe-nav UFCS call must lower");
     let mut caller = (**main_plan).clone();
@@ -516,7 +478,7 @@ fn main() {
     signature.params.clear();
     signature.param_tuple_spelled.clear();
 
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &caller, &plans)
         .expect_err("a missing UFCS receiver slot must reject instead of becoming opaque");
     assert!(
@@ -552,7 +514,7 @@ fn main() {
     );
     let mut poisoned = (**main_plan).clone();
     poisoned.callees.clear();
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     assert!(
         skull_mir::lower::lower_instance_with_plans(&ws, &scx, &poisoned, &bodies.plans).is_err(),
         "lowering reconstructed a callee identity after its plan site was removed"
@@ -573,26 +535,11 @@ fn main() {
 }
 "#,
     );
-    let main_plan = bodies
-        .plans
-        .iter()
-        .find(|(inst, _)| {
-            ws.module(inst.func.module).functions[inst.func.func]
-                .name
-                .as_str()
-                == "main"
-        })
-        .map(|(_, plan)| plan)
-        .expect("main has no concrete plan");
+    let main_plan = plan_named(&ws, &bodies, "main");
     let callee = main_plan
         .callees
         .values()
-        .find(|inst| {
-            ws.module(inst.func.module).functions[inst.func.func]
-                .name
-                .as_str()
-                == "variadic"
-        })
+        .find(|inst| fn_name(&ws, inst.func) == "variadic")
         .expect("main has no variadic callee");
     let variadic_sites: Vec<_> = main_plan
         .callees
@@ -616,7 +563,7 @@ fn main() {
             "fixture did not leave surplus arguments to the declared tail slot"
         );
     }
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &bodies.plans)
         .expect("direct and UFCS variadic calls did not lower");
 }
@@ -634,12 +581,7 @@ fn main() {
     let (main, plan) = bodies
         .plans
         .iter()
-        .find(|(inst, _)| {
-            ws.module(inst.func.module).functions[inst.func.func]
-                .name
-                .as_str()
-                == "main"
-        })
+        .find(|(inst, _)| fn_name(&ws, inst.func) == "main")
         .map(|(inst, plan)| (inst.clone(), plan.clone()))
         .expect("main has no concrete plan");
     let mid = main.func.module;
@@ -671,7 +613,7 @@ fn main() {
         body: lambda_body,
     };
 
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &plan, &bodies.plans)
         .expect_err("lambda lowering accepted a missing ABI parameter slot");
     assert!(
@@ -709,17 +651,7 @@ fn main() {
         .find(|(inst, _)| g.identity(&ws, inst).starts_with("main"))
         .map(|(_, plan)| plan)
         .expect("main has no concrete plan");
-    let callee = main_plan
-        .callees
-        .values()
-        .find(|inst| {
-            ws.module(inst.func.module).functions[inst.func.func]
-                .name
-                .as_str()
-                == "id"
-        })
-        .cloned()
-        .expect("main has no concrete id call");
+    let callee = callee_named(&ws, main_plan, "id");
     let callee_plan = bodies.plans.get(&callee).expect("id has no concrete plan");
     assert_eq!(
         callee_plan.signature.params.len(),
@@ -747,7 +679,7 @@ fn main() {
             .expect("selected callee plan disappeared"),
     );
     std::sync::Arc::make_mut(&mut callee_plan.signature).params[0] = float;
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     let mir = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &caller, &plans)
         .expect("plan-driven call lowering failed");
     assert!(
@@ -773,17 +705,7 @@ fn main() {
         .find(|(inst, _)| g.identity(&ws, inst).starts_with("main"))
         .map(|(_, plan)| plan)
         .expect("main has no concrete plan");
-    let callee = main_plan
-        .callees
-        .values()
-        .find(|inst| {
-            ws.module(inst.func.module).functions[inst.func.func]
-                .name
-                .as_str()
-                == "id"
-        })
-        .cloned()
-        .expect("main has no concrete id call");
+    let callee = callee_named(&ws, main_plan, "id");
     let mut plans = (*bodies.plans).clone();
     let callee_plan = std::sync::Arc::make_mut(
         plans
@@ -792,7 +714,7 @@ fn main() {
     );
     std::sync::Arc::make_mut(&mut callee_plan.signature).params[0] =
         g.interner().intern(MonoTy::Float);
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, main_plan, &plans)
         .expect_err("lowering accepted a mismatched callee body plan");
     assert!(
@@ -816,12 +738,7 @@ fn main() {
     let callee = bodies
         .plans
         .keys()
-        .find(|inst| {
-            ws.module(inst.func.module).functions[inst.func.func]
-                .name
-                .as_str()
-                == "id"
-        })
+        .find(|inst| fn_name(&ws, inst.func) == "id")
         .cloned()
         .expect("id has no concrete plan");
     let mut plan = (**bodies.plans.get(&callee).expect("id plan disappeared")).clone();
@@ -830,7 +747,7 @@ fn main() {
         "body signature has no result population"
     );
     std::sync::Arc::make_mut(&mut plan.signature).result = Some(g.interner().intern(MonoTy::Float));
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     let mir = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &plan, &bodies.plans)
         .expect("plan-driven return lowering failed");
     assert!(
@@ -953,7 +870,7 @@ fn main() {
         .cloned()
         .expect("domain");
     poisoned.foreign_domains.remove(&domain);
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     assert!(
         skull_mir::lower::lower_instance_with_plans(&ws, &scx, &poisoned, &bodies.plans).is_err(),
         "lowering accepted a plan after its struct-default domain was removed"
@@ -1006,7 +923,7 @@ fn main() {
         .expect("default domain");
     let mut poisoned = (**main).clone();
     poisoned.foreign_domains.remove(&domain);
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     assert!(
         skull_mir::lower::lower_instance_with_plans(&ws, &scx, &poisoned, &bodies.plans).is_err(),
         "lowering accepted a struct default after its concrete domain was removed"
@@ -1042,7 +959,7 @@ fn main() { print("{startup}") }
         1,
         "always-emitted plan lost its direct call population"
     );
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     skull_mir::lower::lower_global_with_plans(
         &ws,
         &scx,
@@ -1171,7 +1088,7 @@ fn main() {}
         plan.signature.params.len() >= 2,
         "fixture did not publish target and decorator parameter slots"
     );
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     let mir = skull_mir::lower::lower_decorator_with_plans(
         &ws,
         &scx,
@@ -1223,7 +1140,7 @@ fn main() { print("{G.x}") }
             )
         })
         .expect("global has no concrete plan");
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     let intact = skull_mir::lower::lower_global_with_plans(
         &ws,
         &scx,
@@ -1309,7 +1226,7 @@ fn main() { let x = G }
         plan.failed_sites.values().next(),
         Some(&"unconstrained-type-var")
     );
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     let err = skull_mir::lower::lower_global_with_plans(
         &ws,
         &scx,
@@ -1474,13 +1391,8 @@ fn plain(x: int) -> int { return x + 1 }
 fn main() { let a = plain(1) }
 "#,
     );
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let g = instance_graph::build(&ws, roots, false);
-    let inst = g
-        .expanded()
-        .find(|i| g.identity(&ws, i).starts_with("plain"))
-        .cloned()
-        .expect("no plain instance was expanded");
+    let g = graph_of(&ws);
+    let inst = expanded_with_prefix(&ws, &g, "plain");
     let owner = bone_semantic::hir::BodyOwner::Function(inst.func.func);
     ws.module_mut(inst.func.module)
         .bodies
@@ -1524,13 +1436,8 @@ fn ident<T>(x: T) -> T { return x }
 fn main() { let a = ident(1) }
 "#;
     let ws = ws_with_stdlib(src);
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let g = instance_graph::build(&ws, roots, false);
-    let inst = g
-        .expanded()
-        .find(|i| g.identity(&ws, i).starts_with("ident"))
-        .cloned()
-        .expect("no ident instance was expanded");
+    let g = graph_of(&ws);
+    let inst = expanded_with_prefix(&ws, &g, "ident");
 
     let module = ws.module(inst.func.module);
     let inf = ws
@@ -1770,8 +1677,7 @@ fn concrete_result_order_gate_exercises_the_reversed_merge_population() {
 #[cfg(not(feature = "sequential"))]
 fn concrete_reverse_completion_gate_exercises_parallel_publication() {
     let ws = ws_with_stdlib(RICH);
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let graph = instance_graph::build(&ws, roots, false);
+    let graph = graph_of(&ws);
     let (mut scheduled, merge_order, trace) =
         concrete_body::build_with_reverse_completion(&ws, &graph);
     scheduled.refresh_flat_views();
@@ -1859,8 +1765,7 @@ fn concrete_reverse_completion_gate_exercises_parallel_publication() {
 #[test]
 fn concrete_sequential_route_uses_one_worker_without_parallel_handshake() {
     let ws = ws_with_stdlib(RICH);
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let graph = instance_graph::build(&ws, roots, false);
+    let graph = graph_of(&ws);
     let (mut scheduled, trace) = concrete_body::build_with_default_trace(&ws, &graph);
     scheduled.refresh_flat_views();
 
@@ -2344,12 +2249,7 @@ fn main() {
     let mut graph = instance_graph::build(&ws, roots, false);
     let bad = graph
         .expanded()
-        .find(|instance| {
-            ws.module(instance.func.module).functions[instance.func.func]
-                .name
-                .as_str()
-                == "bad"
-        })
+        .find(|instance| fn_name(&ws, instance.func) == "bad")
         .cloned()
         .expect("bad instance");
     assert!(
@@ -2623,11 +2523,7 @@ fn main() { let n = sum_it([1, 2].iter()) }
     );
     let roots = skull::mir_emit::emission_roots(&ws, None);
     let mut g = instance_graph::build(&ws, roots, false);
-    let inst = g
-        .expanded()
-        .find(|i| g.identity(&ws, i).starts_with("sum_it"))
-        .cloned()
-        .expect("no concrete `sum_it` instance");
+    let inst = expanded_with_prefix(&ws, &g, "sum_it");
     let recorded = g.bound_tree(&inst).cloned().expect("no witness tree");
     assert!(
         !recorded.next.is_empty(),
@@ -2972,8 +2868,7 @@ fn the_tyid_memo_deduplicates_conversions_and_replays_the_census() {
         .expect("parse"),
     ];
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let g = instance_graph::build(&ws, roots, false);
+    let g = graph_of(&ws);
     let mut bodies = concrete_body::build(&ws, &g);
     bodies.refresh_flat_views();
     let slots = bodies.expr_examined + bodies.binding_examined;

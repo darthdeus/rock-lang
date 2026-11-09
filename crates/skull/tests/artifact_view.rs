@@ -11,7 +11,7 @@
 //! Each is asserted against the SHARED graph first, so the view's job is a
 //! measured defect rather than a design preference.
 
-use crate::common::{graph_for, module_id, ws_with_stdlib};
+use crate::common::{fn_name, graph_for, module_id, ws_with_stdlib};
 use bone_semantic::hir::{BodyOwner, FnBackend};
 use bone_semantic::inference::Workspace;
 use skull::artifact::RealizedCallee;
@@ -50,9 +50,7 @@ impl artifact::SymbolPlanner for MainRightCollision {
         i: &Instance,
         _realized: artifact::Realized,
     ) -> String {
-        let name = ws.module(i.func.module).functions[i.func.func]
-            .name
-            .as_str();
+        let name = fn_name(&ws, i.func);
         if matches!(name, "main" | "right") {
             "shared".to_string()
         } else {
@@ -95,12 +93,7 @@ fn premise_the_shared_graph_keeps_one_representative_per_sibling_group() {
     let decls: Vec<skull_mir::mir::FuncRef> = g
         .instances
         .iter()
-        .filter(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "__nb_checked_index"
-        })
+        .filter(|i| fn_name(&ws, i.func) == "__nb_checked_index")
         .map(|i| i.func)
         .collect();
     assert_eq!(
@@ -141,12 +134,7 @@ fn an_artifact_realizes_the_shared_instance_to_the_sibling_that_serves_it() {
     let selected = |view: &artifact::ArtifactView| -> Vec<(Instance, FnBackend)> {
         view.realization
             .iter()
-            .filter(|(i, _)| {
-                ws.module(i.func.module).functions[i.func.func]
-                    .name
-                    .as_str()
-                    == "__nb_checked_index"
-            })
+            .filter(|(i, _)| fn_name(&ws, i.func) == "__nb_checked_index")
             .map(|(i, r)| {
                 (
                     i.clone(),
@@ -219,13 +207,7 @@ fn main() { let x = sibling_probe(1) }
     let (instance, realized) = js
         .realization
         .iter()
-        .find(|(i, r)| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "sibling_probe"
-                && r.decl != i.func
-        })
+        .find(|(i, r)| fn_name(&ws, i.func) == "sibling_probe" && r.decl != i.func)
         .expect("the fixture did not select a JS sibling");
     let selected = Instance {
         func: realized.decl,
@@ -334,12 +316,8 @@ fn main() { let a = portable_op(1) }
     let (g, roots) = graph_for(&ws);
     let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     assert!(
-        view.retained().any(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "portable_op"
-        }),
+        view.retained()
+            .any(|i| { fn_name(&ws, i.func) == "portable_op" }),
         "a portable intrinsic was dropped: {:?}",
         view.census().excluded_by_cause
     );
@@ -549,12 +527,7 @@ fn main() {
     let idents: Vec<&String> = view
         .symbols
         .iter()
-        .filter(|(i, _)| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "ident"
-        })
+        .filter(|(i, _)| fn_name(&ws, i.func) == "ident")
         .map(|(_, s)| s)
         .collect();
     assert_eq!(
@@ -687,12 +660,8 @@ fn retention_is_reachability_not_a_declaration_filter() {
     // exclusion above is a property of reachability and not of the declaration.
     let wide = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &all_roots));
     assert!(
-        wide.retained().any(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "never_called_from_main"
-        }),
+        wide.retained()
+            .any(|i| { fn_name(&ws, i.func) == "never_called_from_main" }),
         "the uncalled declaration is unreachable even as a root, so the fixture \
          cannot distinguish"
     );
@@ -702,12 +671,7 @@ fn retention_is_reachability_not_a_declaration_filter() {
         "the walk retained nothing beyond its roots: {c:?}"
     );
     assert!(
-        view.retained().any(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "ident"
-        }),
+        view.retained().any(|i| { fn_name(&ws, i.func) == "ident" }),
         "the walk did not reach a called generic"
     );
     // Only ROCK bodies are traversed. A boundary is retained and never queued,
@@ -758,12 +722,9 @@ fn main() { let a = caller(1) }
     // The CALLER survives -- which is precisely why the severed call matters:
     // emission would emit a call to a body that is not in the artifact.
     assert!(
-        view.instances.iter().any(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "caller"
-        }),
+        view.instances
+            .iter()
+            .any(|i| { fn_name(&ws, i.func) == "caller" }),
         "the caller was dropped, so nothing would have emitted the call anyway"
     );
     // CONTROL: mapping the intrinsic removes the severed call without touching
@@ -1099,12 +1060,7 @@ fn main() {
     let entry: Vec<&Instance> = g
         .instances
         .iter()
-        .filter(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "__rock_col_sort"
-        })
+        .filter(|i| fn_name(&ws, i.func) == "__rock_col_sort")
         .collect();
     assert_eq!(
         entry.len(),
@@ -1148,12 +1104,7 @@ fn main() { let a = only_lua(1) }
     fn mine<'a>(ws: &Workspace, view: &'a artifact::ArtifactView) -> Vec<&'a Instance> {
         view.boundaries
             .keys()
-            .filter(|i| {
-                ws.module(i.func.module).functions[i.func.func]
-                    .name
-                    .as_str()
-                    == "only_lua"
-            })
+            .filter(|i| fn_name(&ws, i.func) == "only_lua")
             .collect()
     }
     assert_eq!(
@@ -1269,12 +1220,7 @@ fn main() { let n = host_tick(1) }
     let host_tick = |view: &artifact::ArtifactView| {
         view.boundaries
             .iter()
-            .find(|(i, _)| {
-                ws.module(i.func.module).functions[i.func.func]
-                    .name
-                    .as_str()
-                    == "host_tick"
-            })
+            .find(|(i, _)| fn_name(&ws, i.func) == "host_tick")
             .map(|(_, id)| id.clone())
             .expect("host_tick boundary")
     };
@@ -1550,12 +1496,7 @@ fn main() { let n = mapped_probe(1) }
     let named = |view: &artifact::ArtifactView| {
         view.realization
             .iter()
-            .find(|(i, _)| {
-                ws.module(i.func.module).functions[i.func.func]
-                    .name
-                    .as_str()
-                    == "mapped_probe"
-            })
+            .find(|(i, _)| fn_name(&ws, i.func) == "mapped_probe")
             .map(|(_, r)| r.kind)
     };
     let severed_here = |view: &artifact::ArtifactView| {
@@ -1622,12 +1563,7 @@ fn main() { let n = expand_probe(1) }
     let kind = |view: &artifact::ArtifactView| {
         view.realization
             .iter()
-            .find(|(i, _)| {
-                ws.module(i.func.module).functions[i.func.func]
-                    .name
-                    .as_str()
-                    == "expand_probe"
-            })
+            .find(|(i, _)| fn_name(&ws, i.func) == "expand_probe")
             .map(|(_, r)| r.kind)
     };
 
@@ -1678,12 +1614,7 @@ fn main() { let n = bound_probe(1) + host_probe(2) }
     let kind = |view: &artifact::ArtifactView, name: &str| {
         view.realization
             .iter()
-            .find(|(i, _)| {
-                ws.module(i.func.module).functions[i.func.func]
-                    .name
-                    .as_str()
-                    == name
-            })
+            .find(|(i, _)| fn_name(&ws, i.func) == name)
             .map(|(_, r)| r.kind)
     };
     let severed = |view: &artifact::ArtifactView, name: &str| {
@@ -1734,12 +1665,7 @@ fn main() { let n = bound_probe(1) + host_probe(2) }
     let inst = bound
         .realization
         .keys()
-        .find(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "bound_probe"
-        })
+        .find(|i| fn_name(&ws, i.func) == "bound_probe")
         .expect("bound_probe retained")
         .clone();
     assert!(bound.boundaries.contains_key(&inst));
@@ -1794,12 +1720,7 @@ fn main() { let n = rock_bound(1) }
     let named = |view: &artifact::ArtifactView, name: &str| {
         view.realization
             .iter()
-            .find(|(i, _)| {
-                ws.module(i.func.module).functions[i.func.func]
-                    .name
-                    .as_str()
-                    == name
-            })
+            .find(|(i, _)| fn_name(&ws, i.func) == name)
             .map(|(_, r)| r.kind)
     };
 
@@ -1862,12 +1783,7 @@ fn main() {
     let named = |v: &artifact::ArtifactView, name: &str| {
         v.publisher_lanes
             .iter()
-            .find(|(i, _)| {
-                ws.module(i.func.module).functions[i.func.func]
-                    .name
-                    .as_str()
-                    == name
-            })
+            .find(|(i, _)| fn_name(&ws, i.func) == name)
             .map(|(_, n)| *n)
     };
 
@@ -1881,12 +1797,7 @@ fn main() {
     let inst = before
         .publisher_lanes
         .keys()
-        .find(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "wired_pair"
-        })
+        .find(|i| fn_name(&ws, i.func) == "wired_pair")
         .expect("the publisher instance")
         .clone();
     let removed = g.index.subst.remove(&inst).is_some() | g.root_instances.remove(&inst);
@@ -1944,12 +1855,7 @@ fn main() {
     let lanes = |name: &str| {
         js.publisher_lanes
             .iter()
-            .find(|(i, _)| {
-                ws.module(i.func.module).functions[i.func.func]
-                    .name
-                    .as_str()
-                    == name
-            })
+            .find(|(i, _)| fn_name(&ws, i.func) == name)
             .map(|(_, n)| *n)
     };
 
@@ -1991,12 +1897,9 @@ fn main() {
     // not to the shared instance.
     let lua = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     assert!(
-        !lua.publisher_lanes.keys().any(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "reached_pair"
-        }),
+        !lua.publisher_lanes
+            .keys()
+            .any(|i| { fn_name(&ws, i.func) == "reached_pair" }),
         "the luajit artifact claimed a JS-only body's result wire"
     );
 }
@@ -2037,12 +1940,7 @@ fn main() {
     let widths: std::collections::BTreeMap<String, usize> = js
         .publisher_lanes
         .iter()
-        .filter(|(i, _)| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "wired"
-        })
+        .filter(|(i, _)| fn_name(&ws, i.func) == "wired")
         .map(|(i, n)| (g.interner().render(i.args[0]), *n))
         .collect();
 
@@ -2051,12 +1949,7 @@ fn main() {
     let generic_instances = js
         .realization
         .keys()
-        .filter(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "wired"
-        })
+        .filter(|i| fn_name(&ws, i.func) == "wired")
         .count();
     assert_eq!(
         generic_instances, 2,
@@ -2155,12 +2048,7 @@ fn a_nomangle_root_publishes_its_own_body_beside_the_calls_sibling_serves() {
     let portable_canonical = lua
         .realization
         .keys()
-        .find(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "portable"
-        })
+        .find(|i| fn_name(&ws, i.func) == "portable")
         .cloned()
         .expect("the canonical `portable` instance is retained");
     let served_backend = ws
@@ -2202,12 +2090,7 @@ fn a_nomangle_root_publishes_its_own_body_beside_the_calls_sibling_serves() {
     let plain_canonical = lua
         .realization
         .keys()
-        .find(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "plain"
-        })
+        .find(|i| fn_name(&ws, i.func) == "plain")
         .cloned()
         .expect("the canonical `plain` instance is retained");
     assert!(

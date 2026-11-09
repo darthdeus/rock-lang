@@ -16,7 +16,9 @@ use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
 
-use crate::common::{InlineOffGuard, definitions_matching, function_body, ws_with_stdlib};
+use crate::common::{
+    InlineOffGuard, definitions_matching, fn_name, function_body, scalar_ctx, ws_with_stdlib,
+};
 
 /// A user fn taking an `Iterator`-bounded generic, called at one concrete
 /// chain. `total`'s body holds the placeholder; `main` is the concrete root.
@@ -212,13 +214,7 @@ fn main() {
     let (_inst, plan) = bodies
         .plans
         .iter()
-        .find(|(inst, plan)| {
-            ws.module(inst.func.module).functions[inst.func.func]
-                .name
-                .as_str()
-                == "sum_all"
-                && !plan.bound_tree.is_empty()
-        })
+        .find(|(inst, plan)| fn_name(&ws, inst.func) == "sum_all" && !plan.bound_tree.is_empty())
         .expect("no standalone bounded instance with a resolved tree");
     let witness = plan
         .bound_tree
@@ -232,7 +228,7 @@ fn main() {
         })
         .expect("bounded plan has no concrete witness");
 
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(graph.interner().clone());
+    let scx = scalar_ctx(&ws, &graph);
     let mut intact = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
         .expect("intact bounded body did not lower");
     skull_transform::bound::resolve_standalone_bound_calls(

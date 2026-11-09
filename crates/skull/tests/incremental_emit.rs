@@ -5,7 +5,7 @@
 //! body, so they must re-emit too (the inline codegen-dep), even though a body edit
 //! never re-infers the callers.
 
-use crate::common::{body_id, ws_of, ws_with_stdlib};
+use crate::common::{body_id, emit_full_of, ws_of, ws_with_stdlib};
 use bone_semantic::hir::BodyOwner;
 use bone_semantic::inference::Workspace;
 use bone_semantic::prelude::ModuleId;
@@ -114,8 +114,7 @@ fn numeric_selection_updates_in_full_incremental_and_overlay_emission() {
 /// `ws_of` keeps the cheap fixtures cheap.
 fn check_edit_with(build: fn(&str) -> Workspace, v1: &str, v2: &str, edited: &[&str]) {
     let ws1 = build(v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (_full1, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (_full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
 
     let ws2 = build(v2);
     let mid2 = skull::user_module_id(&ws2).unwrap();
@@ -307,8 +306,7 @@ fn exact_body_edit_has_no_full_concrete_or_artifact_rebuild() {
         workspace_functions > 2,
         "root locality fixture has no unrelated function population"
     );
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (_full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (_full, mut cache) = emit_full_of(&ws1, "emit_full v1");
     let ws2 = ws_with_stdlib(v2);
 
     let _overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "helper")]);
@@ -439,8 +437,7 @@ fn main() { let _ = helper() }
 "#;
     let v2 = v1.replace("return 1", "return 2");
     let ws1 = ws_of(v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
     let escaping = full
         .code_artifact
         .entries
@@ -480,8 +477,7 @@ fn main() {}
 "#;
     let v2 = v1.replace("@tick fn first() {}", "@tick fn first() { let x = 1 }");
     let ws1 = ws_of(v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
     let escaping = full
         .code_artifact
         .entries
@@ -533,8 +529,7 @@ fn caller() -> int { return apply(1, unchanged) }
 "#;
     let v2 = v1.replace("apply(1, unchanged)", "apply(2, unchanged)");
     let ws1 = ws_of(v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
     let callback = full
         .code_artifact
         .entries
@@ -576,8 +571,7 @@ fn removing_the_last_edge_retracts_concrete_and_artifact_entries_locally() {
     let v1 = "fn leaf<T>(x: T) -> T { x }\nfn main() { let x = leaf(3) }";
     let v2 = "fn leaf<T>(x: T) -> T { x }\nfn main() { let x = 0 }";
     let ws1 = ws_of(v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
     assert!(
         full.lua.contains("leaf"),
         "the removal fixture must emit the callee"
@@ -817,8 +811,7 @@ fn an_overlay_redefines_a_changed_specialization() {
               global G: float = first([V2 { x: 1.0, y: 2.0 }]).x\n\
               fn use_g() -> float { return G }";
     let ws1 = crate::common::ws_of(v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
     let spec = "function first_arr_T_spec_a_n2_V2_0_z(";
     assert!(
         full.lua.contains(spec),
@@ -859,8 +852,7 @@ fn an_overlay_carries_a_graph_added_specialization() {
            fn use_it() -> float { return tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a }";
 
     let ws1 = crate::common::ws_of(&v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
     let spec_of = |lua: &str, ty: &str| {
         lua.lines()
             .any(|l| l.starts_with("function tally_of_") && l.contains(ty))
@@ -921,8 +913,7 @@ fn a_later_edit_to_a_generic_reaches_an_instantiation_an_earlier_edit_added() {
            fn use_it() -> float { return tally_of([Q { a: 1.0, b: 2.0, c: 3.0 }]).a }";
 
     let ws1 = crate::common::ws_with_stdlib(&v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (_full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (_full, mut cache) = emit_full_of(&ws1, "emit_full v1");
 
     let ws2 = crate::common::ws_with_stdlib(&v2);
     let o1 = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "use_it")]);
@@ -990,8 +981,7 @@ fn an_instantiation_that_returns_after_being_pruned_is_rebuilt_not_reused() {
     let v4 = types.to_string() + &generic("MARK2") + keep_alive + calls_q; // Q returns
 
     let ws1 = crate::common::ws_with_stdlib(&v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
     let q_bodies = |lua: &str| -> Vec<String> {
         lua.lines()
             .filter(|l| l.starts_with("function tally_of_") && l.contains("Q"))
@@ -1074,8 +1064,7 @@ fn an_overlay_reemits_a_definition_after_a_scalar_abi_width_flip() {
                 f(V2 { x: 1.0, y: 2.0 })\
               }";
     let ws1 = crate::common::ws_with_stdlib(v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full1, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
     assert!(full1.lua.contains("function foo_"), "v1 must emit foo");
 
     let ws2 = crate::common::ws_with_stdlib(v2);
@@ -1112,8 +1101,7 @@ fn an_overlay_carries_a_graph_added_library_body() {
               fn main() { print(\"{use_it(9)}\") }";
 
     let ws1 = crate::common::ws_with_stdlib(v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
     let defines = |lua: &str| {
         lua.lines()
             .any(|l| l.starts_with("function is_ascii_ws_int("))
@@ -1157,8 +1145,7 @@ fn an_overlay_rejects_a_failed_graph_added_body() {
            }";
 
     let ws1 = crate::common::ws_with_stdlib(&v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (full, mut cache) = emit_full_of(&ws1, "emit_full v1");
     assert!(
         !full.lua.contains("function bad_"),
         "v1 must not emit the specialization"
@@ -1521,8 +1508,7 @@ fn changed_call_graph_reuses_the_maintained_scalar_context() {
     let v1 = "fn helper() -> int { 3 }\ninline(lua) fn extra() -> int = \"return 7\"\nfn main() { let x = helper() }";
     let v2 = v1.replace("{ 3 }", "{ extra() }");
     let ws1 = ws_with_stdlib(v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (_, mut cache) = emit_full(&ws1, mid).expect("initial emit");
+    let (_, mut cache) = emit_full_of(&ws1, "initial emit");
     let ws2 = ws_with_stdlib(&v2);
     let incremental =
         emit_incremental(&ws2, &mut cache, &[body_id(&ws2, "helper")]).expect("incremental emit");
@@ -1621,8 +1607,7 @@ fn main() {
         "fn probe() -> int { return 2 }",
     );
     let ws1 = ws_with_stdlib(v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (_full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (_full, mut cache) = emit_full_of(&ws1, "emit_full v1");
     let ws2 = ws_with_stdlib(&v2);
     emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "probe")]);
 }
@@ -1660,8 +1645,7 @@ fn main() {
         "        note(apply((v) => v + seed, 3))\n        note(apply((v) => v - seed, 2))",
     );
     let ws1 = ws_with_stdlib(v1);
-    let mid = skull::user_module_id(&ws1).unwrap();
-    let (_full, mut cache) = emit_full(&ws1, mid).expect("emit_full v1");
+    let (_full, mut cache) = emit_full_of(&ws1, "emit_full v1");
     let ws_compatible = ws_with_stdlib(&compatible);
     emit_overlay_result(
         &ws_compatible,

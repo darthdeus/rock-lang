@@ -6,11 +6,10 @@
 //! that must not collapse onto one key -- plus the mutation arms proving each
 //! half of the identity is load-bearing rather than decorative.
 
-use crate::common::{module_id, ws_with_stdlib};
+use crate::common::{fn_name, module_id, scalar_ctx, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, InstanceGraph};
 use skull::site_join::{self, SiteJoinCensus, Unjoined};
-use skull_mir::lower::ScalarCtx;
 use skull_mir::mir::{Inst, MirFunc};
 use skull_mir::monoty::{MonoCtor, MonoTy};
 use skull_mir::site::{Site, SiteDomain, SiteOp};
@@ -22,8 +21,7 @@ const LUA: bone_semantic::hir::FnBackend = bone_semantic::hir::FnBackend::Lua;
 
 fn graph_of(src: &str) -> (Workspace, InstanceGraph) {
     let ws = ws_with_stdlib(src);
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let g = instance_graph::build(&ws, roots, false);
+    let g = crate::common::graph_of(&ws);
     (ws, g)
 }
 
@@ -35,7 +33,7 @@ fn graph_of_ws(ws: &Workspace) -> InstanceGraph {
 fn census_of(src: &str) -> SiteJoinCensus {
     let (ws, g) = graph_of(src);
     let bodies = skull::concrete_body::build(&ws, &g);
-    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     site_join::census(&ws, &scx, &g, &bodies)
 }
 
@@ -67,7 +65,7 @@ fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
     };
     let graph = graph_of_ws(ws);
     let bodies = skull::concrete_body::build(ws, &graph);
-    let scx = ScalarCtx::new(ws).sharing(graph.interner().clone());
+    let scx = scalar_ctx(&ws, &graph);
     let instance = skull_mir::instance::Instance::base(fref);
     let plan = bodies.plans.get(&instance).expect("concrete plan");
     let mut mf =
@@ -173,7 +171,7 @@ fn main() { print("{sum_all(Counter { n: 0 })}") }
         .expect("sum_all");
     let graph = graph_of_ws(&ws);
     let bodies = skull::concrete_body::build(&ws, &graph);
-    let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
+    let scx = scalar_ctx(&ws, &graph);
     let sum_ref = skull_mir::mir::FuncRef {
         module: mid,
         func: sum_fid,
@@ -338,9 +336,7 @@ fn main() { print("{top(3)}") }
         .values()
         .map(|cs| {
             let o = &mf.site_owners[cs.owner.0 as usize];
-            ws.module(o.func.module).functions[o.func.func]
-                .name
-                .as_str()
+            fn_name(&ws, o.func)
         })
         .collect();
     assert!(
@@ -418,7 +414,7 @@ fn main() {
         .expect("sum_all");
     let graph = graph_of_ws(&ws);
     let bodies = skull::concrete_body::build(&ws, &graph);
-    let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
+    let scx = scalar_ctx(&ws, &graph);
     let sum_ref = skull_mir::mir::FuncRef {
         module: mid,
         func: sum_fid,
@@ -474,13 +470,7 @@ fn main() { print("{sum_all([1, 2, 3].iter())}") }
     let main = bodies
         .plans
         .iter()
-        .find(|(inst, _)| {
-            inst.args.is_empty()
-                && ws.module(inst.func.module).functions[inst.func.func]
-                    .name
-                    .as_str()
-                    == "main"
-        })
+        .find(|(inst, _)| inst.args.is_empty() && fn_name(&ws, inst.func) == "main")
         .expect("main has no concrete plan");
     let callee_plan = main
         .1
@@ -494,7 +484,7 @@ fn main() { print("{sum_all([1, 2, 3].iter())}") }
         })
         .expect("main does not retain a bounded callee plan");
     let bodies = skull::concrete_body::build(&ws, &g);
-    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     let mf = skull_mir::lower::lower_instance_with_plans(&ws, &scx, main.1, &bodies.plans)
         .expect("lower main with concrete plans");
     assert!(
@@ -522,7 +512,7 @@ fn main() {
 "#;
     let (ws, g) = graph_of(src);
     let bodies = skull::concrete_body::build(&ws, &g);
-    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     let mut picked = None;
     for (candidate, candidate_tree) in g.bound_trees() {
         if candidate_tree.next.is_empty()
@@ -830,12 +820,7 @@ fn main() {
     let insts: Vec<&skull::instance_graph::Instance> = g
         .substitutions()
         .map(|(i, _)| i)
-        .filter(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "ident"
-        })
+        .filter(|i| fn_name(&ws, i.func) == "ident")
         .collect();
     assert_eq!(
         insts.len(),
@@ -898,12 +883,7 @@ fn main() { print("{one(1)} {two(2)}") }
     let find = |name: &str| -> skull::instance_graph::Instance {
         g.substitutions()
             .map(|(i, _)| i)
-            .find(|i| {
-                ws.module(i.func.module).functions[i.func.func]
-                    .name
-                    .as_str()
-                    == name
-            })
+            .find(|i| fn_name(&ws, i.func) == name)
             .expect("instance")
             .clone()
     };
@@ -940,12 +920,7 @@ fn main() { print("{pair(1, 2.0)} {other(1, 2.0)}") }
     let find = |n: &str| {
         g.substitutions()
             .map(|(i, _)| i)
-            .find(|i| {
-                ws.module(i.func.module).functions[i.func.func]
-                    .name
-                    .as_str()
-                    == n
-            })
+            .find(|i| fn_name(&ws, i.func) == n)
             .unwrap_or_else(|| panic!("no `{n}` instance"))
             .clone()
     };
@@ -1068,12 +1043,7 @@ fn main() { print("{ident(1)}") }
     let inst = g
         .substitutions()
         .map(|(i, _)| i)
-        .find(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "ident"
-        })
+        .find(|i| fn_name(&ws, i.func) == "ident")
         .expect("instance")
         .clone();
     let claim = instance_claim(&g, &inst);
@@ -1116,12 +1086,7 @@ fn main() { print("{top()}") }
     let (ws, g) = graph_of(src);
     let wraps: Vec<_> = g
         .substitutions()
-        .filter(|(i, _)| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "wrap"
-        })
+        .filter(|(i, _)| fn_name(&ws, i.func) == "wrap")
         .collect();
     assert_eq!(
         wraps.len(),
@@ -1136,7 +1101,7 @@ fn main() { print("{top()}") }
     let c = {
         let graph = g;
         let bodies = skull::concrete_body::build(&ws, &graph);
-        let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
+        let scx = scalar_ctx(&ws, &graph);
         site_join::census(&ws, &scx, &graph, &bodies)
     };
     assert!(c.joined_instance_verified >= 2, "{c:?}");
@@ -1175,7 +1140,7 @@ fn main() { print("{top()}") }
     };
     let graph = graph_of_ws(&ws);
     let bodies = skull::concrete_body::build(&ws, &graph);
-    let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
+    let scx = scalar_ctx(&ws, &graph);
     let top = skull_mir::instance::Instance::base(fref);
     let top_plan = bodies.plans.get(&top).expect("top concrete plan");
     let mut mf = skull_mir::lower::lower_instance_with_plans(&ws, &scx, top_plan, &bodies.plans)
@@ -1233,10 +1198,7 @@ fn main() { print("{top()}") }
     assert!(
         mf.call_sites.values().any(|cs| {
             let owner = &mf.site_owners[cs.owner.0 as usize];
-            ws.module(owner.func.module).functions[owner.func.func]
-                .name
-                .as_str()
-                == "wrap"
+            fn_name(&ws, owner.func) == "wrap"
         }),
         "the spliced body lost its concrete callee owner"
     );
@@ -1273,7 +1235,7 @@ fn main() { print("{top()}") }
     };
     let graph = graph_of_ws(&ws);
     let bodies = skull::concrete_body::build(&ws, &graph);
-    let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
+    let scx = scalar_ctx(&ws, &graph);
     let top = skull_mir::instance::Instance::base(fref);
     let top_plan = bodies.plans.get(&top).expect("top concrete plan");
     let mut mf = skull_mir::lower::lower_instance_with_plans(&ws, &scx, top_plan, &bodies.plans)
@@ -1432,7 +1394,7 @@ fn main() { print("{top()}") }
 "#;
     let (ws, mut g) = graph_of(src);
     let bodies = skull::concrete_body::build(&ws, &g);
-    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     // CONTROL: with every substitution present, nothing is refused for want of
     // an owner. Without this the refusal below could be any other failure.
     // CONTROL: the calls `main` owns all join before the mutation. The fixture's
@@ -1465,11 +1427,7 @@ fn main() { print("{top()}") }
         .substitutions()
         .map(|(i, _)| i)
         .find(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "wrap"
-                && g.substitution(i).is_some_and(|s| !s.is_empty())
+            fn_name(&ws, i.func) == "wrap" && g.substitution(i).is_some_and(|s| !s.is_empty())
         })
         .expect("`wrap` instance with a concrete substitution")
         .clone();
@@ -1533,12 +1491,7 @@ fn main() { print("{use_both()}") }
     let (ws, g) = graph_of(src);
     let idents: Vec<_> = g
         .substitutions()
-        .filter(|(i, _)| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "ident"
-        })
+        .filter(|(i, _)| fn_name(&ws, i.func) == "ident")
         .collect();
     assert_eq!(
         idents.len(),
@@ -1553,7 +1506,7 @@ fn main() { print("{use_both()}") }
     let c = {
         let graph = g;
         let bodies = skull::concrete_body::build(&ws, &graph);
-        let scx = ScalarCtx::new(&ws).sharing(graph.interner().clone());
+        let scx = scalar_ctx(&ws, &graph);
         site_join::census(&ws, &scx, &graph, &bodies)
     };
     assert!(
@@ -1769,12 +1722,7 @@ fn main() { print("{apply(add_one, 1)}") }
     let bodies = skull::concrete_body::build(&ws, &g);
     let main_inst = g
         .expanded()
-        .find(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "main"
-        })
+        .find(|i| fn_name(&ws, i.func) == "main")
         .expect("`main` instance")
         .clone();
 
@@ -1794,7 +1742,7 @@ fn main() { print("{apply(add_one, 1)}") }
     );
 
     // CONTROL: unmodified, the mint is in the denominator and it JOINS.
-    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     let before = skull::site_join::measure_prepared_body(&ws, &scx, &g, &bodies, &main_inst, &mf);
     assert_eq!(
         before.symbol_mints, 1,

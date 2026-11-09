@@ -1,4 +1,4 @@
-use crate::common::{compile_and_run, emit_module, run_luajit, run_main};
+use crate::common::{compile_and_run, emit_module, fn_name, run_luajit, run_main, scalar_ctx};
 
 #[test]
 fn immediate_projections_preserve_nullable_snapshots_and_evaluation_order() {
@@ -277,15 +277,10 @@ fn main() { print(selected([Row { a: 1, b: 2, c: 3, d: 4, e: 5, f: 6 }], 0)) }
     let plan = bodies
         .plans
         .iter()
-        .find(|(inst, _)| {
-            ws.module(inst.func.module).functions[inst.func.func]
-                .name
-                .as_str()
-                == "selected"
-        })
+        .find(|(inst, _)| fn_name(&ws, inst.func) == "selected")
         .expect("selected has no plan")
         .1;
-    let scx = skull_mir::lower::ScalarCtx::new(&ws).sharing(graph.interner().clone());
+    let scx = scalar_ctx(&ws, &graph);
     let mir = skull_mir::lower::lower_instance_with_plans(&ws, &scx, plan, &bodies.plans)
         .expect("lower selected");
     let reads = mir

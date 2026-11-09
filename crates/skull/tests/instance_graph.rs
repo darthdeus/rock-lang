@@ -1,15 +1,14 @@
 //! Stage 0d properties for the shadow instance graph
 //!.
 
-use crate::common::{body_id, ws_with_stdlib};
+use crate::common::{body_id, fn_name, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
 use skull::instance_graph::{self, EdgeKind};
 use ustr::Ustr;
 
 fn graph_of(src: &str) -> (Workspace, instance_graph::InstanceGraph) {
     let ws = ws_with_stdlib(src);
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let g = instance_graph::build(&ws, roots, false);
+    let g = crate::common::graph_of(&ws);
     (ws, g)
 }
 
@@ -333,12 +332,7 @@ fn main() {
     let probe = |v: &artifact::ArtifactView| {
         v.realization
             .iter()
-            .filter(|(i, _)| {
-                ws.module(i.func.module).functions[i.func.func]
-                    .name
-                    .as_str()
-                    == "variant_probe"
-            })
+            .filter(|(i, _)| fn_name(&ws, i.func) == "variant_probe")
             .map(|(i, r)| (i.clone(), r.decl))
             .collect::<Vec<_>>()
     };
@@ -628,12 +622,7 @@ fn main() {
     let idents: Vec<&instance_graph::Instance> = g
         .instances
         .iter()
-        .filter(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "ident"
-        })
+        .filter(|i| fn_name(&ws, i.func) == "ident")
         .collect();
     assert_eq!(
         idents.len(),
@@ -861,10 +850,7 @@ fn main() {
     assert_eq!(
         g.instances
             .iter()
-            .filter(|i| ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "hold")
+            .filter(|i| fn_name(&ws, i.func) == "hold")
             .count(),
         2,
         "the fixture lost the two-instantiation arm of the control"
@@ -976,12 +962,7 @@ fn main() {
     let makes: Vec<String> = g
         .instances
         .iter()
-        .filter(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "make"
-        })
+        .filter(|i| fn_name(&ws, i.func) == "make")
         .map(|i| g.symbol(&ws, i))
         .collect();
     assert_eq!(
@@ -1375,12 +1356,7 @@ fn main() {
     let idents: Vec<&instance_graph::Instance> = g
         .instances
         .iter()
-        .filter(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "ident"
-        })
+        .filter(|i| fn_name(&ws, i.func) == "ident")
         .collect();
     assert_eq!(idents.len(), 2);
     let display: Vec<String> = idents.iter().map(|i| g.symbol(&ws, i)).collect();
@@ -1417,12 +1393,7 @@ fn main() { bump(1) }
     let bump = g
         .instances
         .iter()
-        .find(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "bump"
-        })
+        .find(|i| fn_name(&ws, i.func) == "bump")
         .expect("no `bump` instance");
     assert_eq!(g.logical_symbol(&ws, bump), "bump_int");
 }
@@ -1460,12 +1431,7 @@ fn main() {
     let pushes: Vec<String> = g
         .instances
         .iter()
-        .filter(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "push"
-        })
+        .filter(|i| fn_name(&ws, i.func) == "push")
         .map(|i| g.symbol(&ws, i))
         .collect();
     assert!(
@@ -1475,10 +1441,7 @@ fn main() {
     assert!(
         g.instances
             .iter()
-            .filter(|i| ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "hold")
+            .filter(|i| fn_name(&ws, i.func) == "hold")
             .all(|i| !i.args.is_empty()),
         "a `hold` instance carries no arguments"
     );
@@ -1615,12 +1578,7 @@ fn main() {
     let dups: Vec<String> = g
         .instances
         .iter()
-        .filter(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "dup"
-        })
+        .filter(|i| fn_name(&ws, i.func) == "dup")
         .map(|i| g.symbol(&ws, i))
         .collect();
     assert_eq!(dups.len(), 2, "expected `dup<P>` and `dup<int>`: {dups:?}");
@@ -1657,21 +1615,11 @@ fn main() {
 // ---------------------------------------------------------------------------
 
 fn is_expanded(ws: &Workspace, g: &instance_graph::InstanceGraph, name: &str) -> bool {
-    g.expanded().any(|i| {
-        ws.module(i.func.module).functions[i.func.func]
-            .name
-            .as_str()
-            == name
-    })
+    g.expanded().any(|i| fn_name(&ws, i.func) == name)
 }
 
 fn reached(ws: &Workspace, g: &instance_graph::InstanceGraph, name: &str) -> bool {
-    g.instances.iter().any(|i| {
-        ws.module(i.func.module).functions[i.func.func]
-            .name
-            .as_str()
-            == name
-    })
+    g.instances.iter().any(|i| fn_name(&ws, i.func) == name)
 }
 
 /// HOSTILE: an `@intrinsic` whose body is a portable ROCK fallback. Emit
@@ -2262,8 +2210,7 @@ fn main() { let a = ident(1) }
         removed, 1,
         "expected exactly `ident`'s binding record to be dropped"
     );
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let g = instance_graph::build(&ws, roots, false);
+    let g = crate::common::graph_of(&ws);
     let sites: Vec<&instance_graph::Unresolved> = g
         .unresolved()
         .filter(|u| u.reason == "no-bindings")
@@ -2311,8 +2258,7 @@ fn main() {
         removed, 1,
         "expected the one `for`-protocol ITER record to be dropped"
     );
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let g = instance_graph::build(&ws, roots, false);
+    let g = crate::common::graph_of(&ws);
     // Discriminated by CALLEE, not by reason: both halves fail through
     // `instantiate_witness` and report `witness-generic-unbound`, so a
     // reason-only filter would accept the other recorder's site.
@@ -2457,8 +2403,7 @@ fn main() {
         removed, 1,
         "expected the one `for`-protocol `next` record to be dropped"
     );
-    let roots = skull::mir_emit::emission_roots(&ws, None);
-    let g = instance_graph::build(&ws, roots, false);
+    let g = crate::common::graph_of(&ws);
     // Same discriminant as the iter fixture, pointed at the other callee.
     let sites = unresolved_witnesses_of(&ws, &g, "next");
     assert_eq!(

@@ -556,6 +556,25 @@ pub fn body_id(
     (f.module, bone_semantic::hir::BodyOwner::Function(f.func))
 }
 
+/// The source name of the workspace fn `f`.
+pub fn fn_name(ws: &Workspace, f: skull_mir::mir::FuncRef) -> &str {
+    ws.module(f.module).functions[f.func].name.as_str()
+}
+
+/// A scalar context sharing `g`'s type interner.
+pub fn scalar_ctx(ws: &Workspace, g: &InstanceGraph) -> ScalarCtx {
+    ScalarCtx::new(ws).sharing(g.interner().clone())
+}
+
+/// The full emission of `ws`'s user module, with its cache.
+pub fn emit_full_of(
+    ws: &Workspace,
+    what: &str,
+) -> (skull::mir_emit::MirEmit, skull::mir_emit::SkullEmitCache) {
+    let mid = skull::user_module_id(ws).unwrap();
+    skull::mir_emit::emit_full(ws, mid).unwrap_or_else(|e| panic!("{what}: {e:?}"))
+}
+
 /// The instance graph from `ws`'s default emission roots, and those roots.
 pub fn graph_for(ws: &Workspace) -> (InstanceGraph, Vec<skull_mir::mir::FuncRef>) {
     let roots = skull::mir_emit::emission_roots(ws, None);
@@ -571,7 +590,7 @@ pub fn census_of(src: &str) -> SiteJoinCensus {
     let ws = ws_with_stdlib(src);
     let g = graph_of(&ws);
     let bodies = skull::concrete_body::build(&ws, &g);
-    let scx = ScalarCtx::new(&ws).sharing(g.interner().clone());
+    let scx = scalar_ctx(&ws, &g);
     site_join::census(&ws, &scx, &g, &bodies)
 }
 
@@ -594,7 +613,7 @@ pub fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
     };
     let graph = graph_of(ws);
     let bodies = skull::concrete_body::build(ws, &graph);
-    let scx = ScalarCtx::new(ws).sharing(graph.interner().clone());
+    let scx = scalar_ctx(ws, &graph);
     let instance = skull_mir::instance::Instance::base(fref);
     let plan = bodies.plans.get(&instance).expect("concrete plan");
     let mut mf =

@@ -8,7 +8,9 @@
 //! apart; the previous answer was to withhold the stamp entirely, which was
 //! fail-closed but not a contract emission could consume.
 
-use crate::common::{census_of, graph_of, module_id, prepared_body, unjoined, ws_with_stdlib};
+use crate::common::{
+    census_of, fn_name, graph_of, module_id, prepared_body, unjoined, ws_with_stdlib,
+};
 use bone_semantic::inference::Workspace;
 use skull::concrete_body::Callee;
 use skull::instance_graph::InstanceGraph;
@@ -398,12 +400,7 @@ fn main() {
     let seeds: Vec<&Vec<skull_mir::monoty::MonoTyId>> = g2
         .instances
         .iter()
-        .filter(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "seed"
-        })
+        .filter(|i| fn_name(&ws, i.func) == "seed")
         .map(|i| &i.args)
         .collect();
     assert_eq!(

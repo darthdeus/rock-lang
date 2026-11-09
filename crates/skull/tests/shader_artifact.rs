@@ -12,7 +12,7 @@
 //!   rejected with a span, while the CPU artifact over the same program keeps
 //!   compiling.
 
-use crate::common::{graph_for, ws_with_stdlib};
+use crate::common::{fn_name, graph_for, ws_with_stdlib};
 use bone_semantic::inference::Workspace;
 use skull::artifact::{self, ArtifactRequest};
 use skull::instance_graph::{self};
@@ -230,12 +230,9 @@ fn main() { let key = rock_shader(rec_frag) }
     // restriction, and a shader decision may not reach CPU admission.
     let cpu = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     assert!(
-        cpu.realization.keys().any(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "rec_helper"
-        }),
+        cpu.realization
+            .keys()
+            .any(|i| { fn_name(&ws, i.func) == "rec_helper" }),
         "the CPU artifact dropped a recursive fn because GLSL cannot take one"
     );
     assert_eq!(
@@ -510,12 +507,7 @@ fn main() {
     // over a real generic population and not over an empty one.
     let generic_insts: Vec<&skull::instance_graph::Instance> = view
         .packaged()
-        .filter(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "passthrough"
-        })
+        .filter(|i| fn_name(&ws, i.func) == "passthrough")
         .collect();
     assert_eq!(
         generic_insts.len(),
@@ -594,12 +586,7 @@ fn a_missing_substitution_record_is_a_finding_not_a_concrete_shape() {
     let entry = before
         .roots
         .iter()
-        .find(|i| {
-            ws.module(i.func.module).functions[i.func.func]
-                .name
-                .as_str()
-                == "probe_frag"
-        })
+        .find(|i| fn_name(&ws, i.func) == "probe_frag")
         .expect("the entry instance")
         .clone();
     let removed = g.index.subst.remove(&entry).is_some() | g.root_instances.remove(&entry);
