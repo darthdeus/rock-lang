@@ -35,6 +35,10 @@ fn main() {
             && graph.index.span_owners.is_empty(),
         "fresh construction maintained update-only indexes"
     );
+    assert!(
+        graph.index.subst.values().all(|a| a.owners.is_empty()),
+        "fresh construction kept the per-substitution owner sets only updates read"
+    );
 }
 
 /// One generic function called at two element types is TWO instances, even

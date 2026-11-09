@@ -700,6 +700,23 @@ impl<T: Clone + PartialEq> Agreed<T> {
         }
     }
 
+    /// A row for a fresh build, which records no owners; see
+    /// [`InstanceGraph::ensure_incremental_indexes`].
+    fn unowned(value: T) -> Self {
+        Agreed {
+            owners: BTreeSet::new(),
+            value,
+            dissent: BTreeMap::new(),
+            total: 1,
+        }
+    }
+
+    /// Count one assertion without its owner. False means it disagreed.
+    fn assert_unowned(&mut self, value: &T) -> bool {
+        self.total += 1;
+        *value == self.value
+    }
+
     fn assert_by(&mut self, owner: &Owner, value: &T) {
         self.total += 1;
         if *value == self.value {
@@ -738,6 +755,20 @@ impl<T: Clone + PartialEq> Agreed<T> {
         match (agreed, self.dissent.iter().next()) {
             (Some(a), Some((d, v))) if d < a => v,
             _ => &self.value,
+        }
+    }
+}
+
+fn assert_subst(
+    index: &mut FxHashMap<Instance, Agreed<MonoSubst>>,
+    owner: &Owner,
+    to: &Instance,
+    subst: &MonoSubst,
+) {
+    match index.get_mut(to) {
+        Some(a) => a.assert_by(owner, subst),
+        None => {
+            index.insert(to.clone(), Agreed::new(owner.clone(), subst.clone()));
         }
     }
 }
@@ -2426,15 +2457,17 @@ impl InstanceGraph {
         // `always_emitted_targets` marks which of them are ROOTS, it is not a
         // second population.
         let lane_start = timing_enabled.then(Instant::now);
+        let mut disagreed = false;
         for (to, subst) in &c.reached {
             index.subst_updates += 1;
-            match self.index.subst.get_mut(to) {
-                Some(a) => a.assert_by(&owner, subst),
-                None => {
-                    self.index
-                        .subst
-                        .insert(to.clone(), Agreed::new(owner.clone(), subst.clone()));
-                }
+            if self.incremental_indexes {
+                assert_subst(&mut self.index.subst, &owner, to, subst);
+            } else if let Some(a) = self.index.subst.get_mut(to) {
+                disagreed |= !a.assert_unowned(subst);
+            } else {
+                self.index
+                    .subst
+                    .insert(to.clone(), Agreed::unowned(subst.clone()));
             }
         }
         index.subst_ns = elapsed_ns(lane_start);
@@ -2537,6 +2570,11 @@ impl InstanceGraph {
         self.add_contribution_counters(&c);
         self.contributed.insert(owner.clone());
         self.contributions.insert(owner.clone(), c);
+        if disagreed {
+            // Rare, and only an invalid program: deciding between the sides
+            // needs the owners, so stop deferring them.
+            self.ensure_incremental_indexes();
+        }
         if track_incremental_state {
             if let Some(instance) = owner.instance() {
                 if self.instances.insert(instance.clone()) {
@@ -2568,9 +2606,15 @@ impl InstanceGraph {
     /// reaches zero: the owner SET is the record, so a stale fact cannot
     /// survive as a positive number nobody can check.
     fn uninstall(&mut self, owner: &Owner) {
-        let Some(old) = self.contributions.remove(owner) else {
+        if !self.contributions.contains_key(owner) {
             return;
-        };
+        }
+        // Retraction reads the owners a fresh build deferred.
+        self.ensure_incremental_indexes();
+        let old = self
+            .contributions
+            .remove(owner)
+            .expect("presence was checked above");
         self.contributed.remove(owner);
         self.subtract_contribution_counters(&old);
         for (name, _) in &old.always_emitted_holes {
@@ -3415,7 +3459,11 @@ impl InstanceGraph {
             return;
         }
         self.incremental_indexes = true;
+        self.index.subst.clear();
         for (owner, c) in &self.contributions {
+            for (to, subst) in &c.reached {
+                assert_subst(&mut self.index.subst, owner, to, subst);
+            }
             if let Some(from) = owner.instance() {
                 for e in &c.edges {
                     self.index
