@@ -219,7 +219,9 @@ pub(super) fn view_driven_specialized_chunks(
     scx: &skull_mir::lower::ScalarCtx,
     cache: &SkullEmitCache,
     initial: &[skull_mir::bound::SpecDemand],
+    body_cache: Option<&BodyCache>,
 ) -> (FxHashMap<Instance, Chunk>, Vec<(String, CompilerError)>) {
+    let body_cache = body_cache.filter(|cache| cache.is_active());
     let mut built: FxHashMap<Instance, Chunk> = FxHashMap::default();
     let mut errs: Vec<(String, CompilerError)> = Vec::new();
     let mut pending: Vec<Instance> = initial.iter().map(|d| d.inst.clone()).collect();
@@ -280,6 +282,24 @@ pub(super) fn view_driven_specialized_chunks(
             }
             jobs.push(inst);
         }
+        if let Some(body_cache) = body_cache {
+            let looked = par_map(jobs, |inst| match body_cache.lookup(ws, cg, scx, &inst) {
+                Some(chunk) => Ok((inst, chunk)),
+                None => Err(inst),
+            });
+            jobs = Vec::new();
+            for entry in looked {
+                match entry {
+                    Ok((inst, chunk)) => {
+                        pending.extend(chunk.specs.iter().map(|d| d.inst.clone()));
+                        #[cfg(test)]
+                        installed(&inst.symbol(ws, scx.interner()), true);
+                        built.insert(inst, chunk);
+                    }
+                    Err(inst) => jobs.push(inst),
+                }
+            }
+        }
         #[cfg(test)]
         if let Some(hook) = &hook {
             let names: Vec<String> = jobs
@@ -297,6 +317,7 @@ pub(super) fn view_driven_specialized_chunks(
             |inline_cache, inst| {
                 let name = inst.symbol(ws, scx.interner());
                 let mut specs = Vec::new();
+                let rejections = cg.rejection_count();
                 let result = emit_spec_chunk(
                     ws,
                     cg,
@@ -307,6 +328,10 @@ pub(super) fn view_driven_specialized_chunks(
                     inline_cache,
                     &mut specs,
                 );
+                if let (Some(body_cache), Ok(chunk)) = (body_cache, &result) {
+                    let rejected = cg.rejection_count() != rejections;
+                    body_cache.record(ws, cg, scx, &inst, chunk, rejected);
+                }
                 #[cfg(test)]
                 if let Some(hook) = &hook {
                     hook.finished(&name);

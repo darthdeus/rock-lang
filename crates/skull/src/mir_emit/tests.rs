@@ -1948,7 +1948,7 @@ fn main() { let r = a() + c() }
         let run = |order: Order| {
             let hook = Forced::new(order);
             let (built, errs) = with_hook(Some(Arc::clone(&hook)), || {
-                view_driven_specialized_chunks(&ws, &cache.cg, &cache.scx, &cache, &[])
+                view_driven_specialized_chunks(&ws, &cache.cg, &cache.scx, &cache, &[], None)
             });
             let mut chunks: Vec<(String, String)> = built
                 .iter()

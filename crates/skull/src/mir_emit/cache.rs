@@ -1300,7 +1300,7 @@ pub fn emit_incremental(
     let t_asm = Instant::now();
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
     let (mut emit, emitted, unit_reads) =
-        assemble(ws, cache, &mut built_specs, CacheLifetime::Retained)?;
+        assemble(ws, cache, &mut built_specs, CacheLifetime::Retained, None)?;
     if concrete_stats_requested() {
         emit.concrete_stats = cache.concrete.snapshot_build_stats();
     }

@@ -23,6 +23,20 @@ pub fn cached() -> &'static Result<Arc<[Ast]>, CompilerError> {
     &STDLIB
 }
 
+/// The source text of every process stdlib file under its session id, in
+/// load order, for a cache that keys emitted bodies on their inputs.
+pub fn source_texts() -> Vec<(Ustr, &'static str)> {
+    rock_stdlib::stdlib_files()
+        .iter()
+        .map(|f| {
+            (
+                Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str()),
+                f.contents,
+            )
+        })
+        .collect()
+}
+
 /// Whether `stdlib` is the process stdlib itself ([`cached`]), not a copy or
 /// another parse.
 pub fn is_process_stdlib(stdlib: &Arc<[Ast]>) -> bool {

@@ -21,6 +21,7 @@ mod nested_box_boundary;
 mod arena_column_oracle;
 mod artifact_fingerprint;
 mod backend_variant_mangling;
+mod body_cache;
 mod bounded_lambda_inline;
 mod bounded_standalone_emission;
 mod callee_binding;

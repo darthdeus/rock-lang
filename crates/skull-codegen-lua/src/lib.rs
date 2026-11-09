@@ -674,6 +674,52 @@ impl CodegenCtx {
         name
     }
 
+    /// How many rejections the sink holds. A body whose emit added one
+    /// cannot be served from a cache, because the rejection would be lost.
+    pub fn rejection_count(&self) -> usize {
+        self.rejections.lock().expect("rejection sink").len()
+    }
+
+    /// Whether the trace-frame diagnostic collects rows during emit.
+    pub fn trace_frames_enabled(&self) -> bool {
+        self.trace_frames.is_some()
+    }
+
+    /// Append every fact of this context that an emitted body's text can
+    /// depend on, in a canonical order: the switches, the storage slot of
+    /// every mutable global and the folded value of every scalar constant.
+    pub fn write_cache_environment(&self, out: &mut String) {
+        let _ = writeln!(
+            out,
+            "frame_limits={} line_directives={}",
+            self.frame_limits, self.line_directives
+        );
+        let mut slots: Vec<(&str, u32)> = self
+            .state_slots
+            .iter()
+            .map(|(name, slot)| (name.as_str(), *slot))
+            .collect();
+        slots.sort_unstable();
+        for (name, slot) in slots {
+            let _ = writeln!(out, "slot {name}={slot}");
+        }
+        let mut constants: Vec<(&str, String)> = self
+            .scalar_constants
+            .iter()
+            .map(|(name, lit)| {
+                let value = match lit {
+                    Lit::Float(x) => format!("f{:016x}", x.to_bits()),
+                    other => format!("{other:?}"),
+                };
+                (name.as_str(), value)
+            })
+            .collect();
+        constants.sort_unstable();
+        for (name, value) in constants {
+            let _ = writeln!(out, "const {name}={value}");
+        }
+    }
+
     pub fn mint_synthetic(&self, name: String) -> String {
         if let Some(&span) = self.reserved.get(&name) {
             let msg = format!(

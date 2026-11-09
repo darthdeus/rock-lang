@@ -32,6 +32,7 @@ use ustr::Ustr;
 mod assemble;
 mod attribution;
 mod body;
+mod body_cache;
 mod cache;
 mod chunk;
 mod decorators;
@@ -50,6 +51,7 @@ mod validate;
 pub use assemble::*;
 pub use attribution::*;
 pub use body::*;
+pub use body_cache::*;
 pub use cache::*;
 pub use global_init::*;
 pub use overlay::*;
@@ -143,6 +145,8 @@ pub struct MirEmit {
     /// carries, in registration order. Shared with the emit cache, which
     /// keeps them across incremental builds.
     pub shaders: std::sync::Arc<[ShaderSource]>,
+    /// What the persistent per-body cache did for this emission.
+    pub body_cache: BodyCacheStats,
 }
 
 /// One registered shader's emitted source.
@@ -191,6 +195,7 @@ pub struct FullEmit<'a> {
     renderer_target: RendererTarget,
     shapes: ShapeOverrides,
     mutation: BodyMutation,
+    body_cache: Option<&'a BodyCache>,
 }
 
 impl<'a> FullEmit<'a> {
@@ -201,7 +206,14 @@ impl<'a> FullEmit<'a> {
             renderer_target: RendererTarget::Gl,
             shapes: ShapeOverrides::default(),
             mutation: BodyMutation::None,
+            body_cache: None,
         }
+    }
+
+    /// Serve unchanged bodies from the persistent cache and record the rest.
+    pub fn body_cache(mut self, body_cache: Option<&'a BodyCache>) -> Self {
+        self.body_cache = body_cache;
+        self
     }
 
     /// A program that may be reloaded in place. The returned cache serves

@@ -2329,6 +2329,7 @@ dependencies = [
  "tempfile",
  "test-utils",
  "ustr",
+ "xxhash-rust",
 ]
 
 [[package]]

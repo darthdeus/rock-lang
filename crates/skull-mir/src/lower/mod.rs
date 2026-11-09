@@ -628,6 +628,15 @@ impl ScalarCtx {
     /// minted and read.
     ///
     /// [`Instance`]: crate::instance::Instance
+    /// The fn names some body takes by value, sorted. The scalar ABI of a
+    /// declaration depends on its membership, so a persistent body cache keys
+    /// on the whole set.
+    pub fn taken_by_ref_names(&self) -> Vec<Ustr> {
+        let mut names: Vec<Ustr> = self.taken_by_ref.iter().copied().collect();
+        names.sort_unstable();
+        names
+    }
+
     pub fn interner(&self) -> &crate::monoty::MonoInterner {
         &self.interner
     }
