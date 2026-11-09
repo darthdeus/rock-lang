@@ -2562,8 +2562,14 @@ pub fn collect_sim_descriptors(ws: &bone_semantic::inference::Workspace) -> Vec<
 /// analogue of the single-file [`skull_compile_single`] path; shares
 /// [`skull_emit_project`] with `run`.
 fn skull_compile_project(dir: &str, output: Option<String>) -> Result<()> {
+    // The record opens before the build vars so their commands show as a node
+    // instead of time before the budget.
+    let budget = crate::compile_budget::Scope::begin(dir);
     let inputs = crate::comptime::inputs_for_project_dir(std::path::Path::new(dir))?;
-    skull_compile_project_with_inputs(dir, output, inputs)
+    crate::compile_budget::phase("build vars");
+    skull_compile_project_with_inputs(dir, output, inputs)?;
+    budget.success();
+    Ok(())
 }
 
 pub(crate) fn skull_compile_project_with_inputs(

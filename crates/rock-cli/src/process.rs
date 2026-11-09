@@ -5,6 +5,7 @@ use crate::*;
 /// Run a CLI process with a static host table, including parsing, logging and cleanup.
 /// Call once, before spawning application threads.
 pub fn main_with(registrations: &'static crate::registry::Registrations) {
+    crate::compile_budget::mark_process_start();
     // The command runs on its own thread because the main thread's stack is
     // fixed by the OS (often 8 MiB) and compiler passes recurse over the
     // source tree; see `rock_core::nesting` for the bound.

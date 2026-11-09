@@ -45,13 +45,17 @@ working on a change is: edit, `cargo build --release -p rock-cli --bin rock`,
 ## The time budget
 
 `ROCK_COMPILE_STATS=<file>` makes `rock compile` append one JSON record with a
-`budget` tree: compile, then discovery, parse+stdlib, semantic, prepare,
-codegen, write; codegen splits into the serial setup phases, the body
+`budget` tree: compile, then process start (first Rust instant to the
+compile's own start), build vars (the `[build.vars]` commands), discovery,
+parse+stdlib, semantic, prepare, codegen, write; codegen splits into the serial setup phases, the body
 fan-out window and the serial assembly steps, and carries the per-pass unit
 time summed over every lowered body (the fan-out and the bodies assembly
 lowers serially). Every node's `wall_ms` is
 the sum of its children, with an `other` child for the remainder, so a phase
-nobody timed shows up as growth in `other` rather than vanishing.
+nobody timed shows up as growth in `other` rather than vanishing. The tree
+ends when the record is written, so teardown after it (heap release and the
+kernel unmapping the address space) is the part of the process wall it does
+not contain.
 
 ```sh
 perf/budget.py packages/stone            # compile three times, print the fastest tree

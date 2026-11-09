@@ -15,6 +15,15 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+static PROCESS_START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+
+/// Stamp the process's first Rust instant so the record's first node is the
+/// startup that precedes the compile; the loader and runtime init before
+/// `main` stay outside it.
+pub(crate) fn mark_process_start() {
+    let _ = PROCESS_START.set(Instant::now());
+}
+
 thread_local! {
     static PENDING: RefCell<Option<Pending>> = const { RefCell::new(None) };
 }
@@ -115,10 +124,11 @@ impl Scope {
             return Self(false);
         };
         let now = Instant::now();
+        let started = PROCESS_START.get().copied().unwrap_or(now);
         let pending = Pending {
             path: PathBuf::from(path),
-            started: now,
-            boundary: now,
+            started,
+            boundary: started,
             record: json!({
                 "schema": 2,
                 "timestamp_unix_ms": SystemTime::now().duration_since(UNIX_EPOCH)
@@ -132,6 +142,7 @@ impl Scope {
             phases: Vec::new(),
         };
         PENDING.with(|state| *state.borrow_mut() = Some(pending));
+        phase("process start");
         Self(true)
     }
 
