@@ -3621,13 +3621,21 @@ fn lint_workspace_inner(
     } else {
         FxHashSet::default()
     };
-    let mut out = Vec::new();
+    // Each module's own findings, then the workspace-wide findings on its
+    // file, in module order.
+    let mut per_module = Vec::new();
     for module in ws.user_modules(warm) {
         let Some(&src) = sources.get(&module.file) else {
             continue;
         };
+        per_module.push((module, src, by_file.remove(&module.file)));
+    }
+    let lint_module = |module: &Module,
+                       src: &str,
+                       workspace_findings: Option<Vec<Finding>>,
+                       mut census: Option<&mut LintCensus>| {
         let t_flat = bone_core::prelude::Instant::now();
-        let flat = flat_findings_with(
+        let mut out = flat_findings_with(
             ws,
             &variants,
             warm,
@@ -3644,9 +3652,8 @@ fn lint_workspace_inner(
             1,
             1,
             module.bodies.len(),
-            flat.len(),
+            out.len(),
         );
-        out.extend(flat);
 
         let t_inference = bone_core::prelude::Instant::now();
         let inference =
@@ -3661,19 +3668,28 @@ fn lint_workspace_inner(
             inference.len(),
         );
         out.extend(inference);
-        if let Some(findings) = by_file.remove(&module.file) {
+        if let Some(findings) = workspace_findings {
             if suppress {
-                out.extend(filter_suppressed_findings_census(
-                    findings,
-                    src,
-                    census.as_deref_mut(),
-                ));
+                out.extend(filter_suppressed_findings_census(findings, src, census));
             } else {
                 out.extend(findings);
             }
         }
-    }
-    out
+        out
+    };
+    // The modules are independent; a census (a measurement, never a build)
+    // accumulates across them and keeps the serial walk.
+    let per_module: Vec<Vec<Finding>> = match census {
+        Some(census) => per_module
+            .into_iter()
+            .map(|(module, src, findings)| lint_module(module, src, findings, Some(census)))
+            .collect(),
+        None => per_module
+            .into_par_iter()
+            .map(|(module, src, findings)| lint_module(module, src, findings, None))
+            .collect(),
+    };
+    per_module.into_iter().flatten().collect()
 }
 
 /// [`filter_suppressed`] for already-rendered [`Finding`]s, matching each one's
