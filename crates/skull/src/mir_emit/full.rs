@@ -325,7 +325,9 @@ fn expand_selected_sim_roots(
             &roots.sim_roots,
             &roots.shader_roots,
         );
-        *graph = crate::instance_graph::build(ws, roots.emission_roots.clone(), false);
+        // The scalar and codegen contexts already mint against this arena.
+        let interner = std::sync::Arc::clone(graph.interner());
+        *graph = crate::instance_graph::build_in(ws, roots.emission_roots.clone(), false, interner);
     }
     let reached = graph
         .instances
@@ -538,16 +540,33 @@ impl LaneGate {
     }
 }
 
+/// The scalar context lowering will use and the codegen context over it,
+/// short of the call graph. Both read the workspace only (the value-reference
+/// scan, the global state slots), so they are built beside the graph.
+type EarlyContexts = (
+    skull_mir::lower::ScalarCtx,
+    Result<CodegenCtx, CompilerError>,
+);
+
+fn early_contexts(
+    ws: &Workspace,
+    interner: std::sync::Arc<skull_mir::monoty::MonoInterner>,
+    shapes: ShapeOverrides,
+) -> EarlyContexts {
+    let scx = skull_mir::lower::ScalarCtx::new(ws).sharing(interner);
+    let cg = workspace_codegen_ctx(ws, &scx, shapes);
+    (scx, cg)
+}
+
 /// Lane one: the CPU artifact view, realized with the scalar context lowering
-/// will use, and the codegen context over that scalar context. The global
-/// state slots and the call graph read the graph and the declarations only,
-/// so they need no ABI plan and run here, off the plan build's path.
+/// will use, and the call graph of the closed instance graph, off the plan
+/// build's path.
 fn cpu_artifact_lane(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
     emission_roots: &[FuncRef],
-    shapes: ShapeOverrides,
     scx: skull_mir::lower::ScalarCtx,
+    cg: Result<CodegenCtx, CompilerError>,
 ) -> (
     Result<
         (
@@ -570,7 +589,10 @@ fn cpu_artifact_lane(
         .with_scalar_context(&scx),
     );
     let population = lua_view.instances.len() + lua_view.boundaries.len();
-    let cg = full_codegen_ctx(ws, &scx, graph, shapes);
+    let cg = cg.map(|mut cg| {
+        cg.set_call_sccs(call_sccs(graph));
+        cg
+    });
     let finished = Instant::now();
     (
         cg.map(|cg| (lua_view, scx, cg)),
@@ -647,12 +669,16 @@ fn run_setup_lanes(
     graph: &crate::instance_graph::InstanceGraph,
     build_plans: impl FnOnce() -> Result<crate::concrete_body::ConcreteBodies, CompilerError> + Send,
     emission_roots: &[FuncRef],
-    shapes: ShapeOverrides,
+    early: EarlyContexts,
     mutation: BodyMutation,
 ) -> Result<(crate::concrete_body::ConcreteBodies, SetupLanes), CompilerError> {
     let gate = LaneGate::new(mutation);
     let mono_before_lanes = graph.interner().stats();
-    let scx = skull_mir::lower::ScalarCtx::new(ws).sharing(std::sync::Arc::clone(graph.interner()));
+    let (scx, cg) = early;
+    assert!(
+        std::sync::Arc::ptr_eq(&scx.interner_handle(), graph.interner()),
+        "the scalar context mints against the graph's arena"
+    );
     let plans_branch = || {
         gate.run(SetupLaneKind::ConcretePlans, || {
             let started = Instant::now();
@@ -678,7 +704,7 @@ fn run_setup_lanes(
         join_in_place(
             || {
                 gate.run(SetupLaneKind::CpuArtifact, || {
-                    cpu_artifact_lane(ws, graph, emission_roots, shapes, scx)
+                    cpu_artifact_lane(ws, graph, emission_roots, scx, cg)
                 })
             },
             plans_branch,
@@ -748,16 +774,15 @@ fn run_setup_lanes(
     ))
 }
 
-/// The codegen context over the final global state slots and call graph.
-fn full_codegen_ctx(
+/// The codegen context over the final global state slots; the call graph is
+/// set once the instance graph is closed.
+fn workspace_codegen_ctx(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
-    graph: &crate::instance_graph::InstanceGraph,
     shapes: ShapeOverrides,
 ) -> Result<CodegenCtx, CompilerError> {
     let state_slots = lua_global_state_slots(ws, scx)?.into_iter().collect();
     let mut cg = CodegenCtx::new_with_state(ws, state_slots);
-    cg.set_call_sccs(call_sccs(graph));
     if let Some(on) = shapes.frame_limits {
         cg.set_frame_limits(on);
     }
@@ -952,18 +977,33 @@ pub(super) fn emit_full_build(
         .timed("setup: root collection", || {
             collect_full_roots(ws, build, project_root)
         })?;
-    let (graph, selected_sim_functions) = setup_phases.timed("setup: graph", || {
-        let mut graph = crate::instance_graph::build(ws, roots.emission_roots.clone(), false);
-        let selected_sim_functions = if matches!(build, FullBuild::SelectedSims(_)) {
-            Some(expand_selected_sim_roots(ws, &mut roots, &mut graph)?)
-        } else {
-            None
-        };
-        if let Some(err) = graph_rejection_error(ws, &graph) {
-            return Err(err);
-        }
-        Ok((graph, selected_sim_functions))
-    })?;
+    // The graph build stays on this thread: its build counter is a
+    // thread-local witness the incremental repair statistics read back.
+    let (early, graph_result) = setup_phases.timed("setup: graph", || {
+        let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
+        let early_interner = std::sync::Arc::clone(&interner);
+        join_in_place(
+            || early_contexts(ws, early_interner, shapes),
+            || {
+                let mut graph = crate::instance_graph::build_in(
+                    ws,
+                    roots.emission_roots.clone(),
+                    false,
+                    interner,
+                );
+                let selected_sim_functions = if matches!(build, FullBuild::SelectedSims(_)) {
+                    Some(expand_selected_sim_roots(ws, &mut roots, &mut graph)?)
+                } else {
+                    None
+                };
+                if let Some(err) = graph_rejection_error(ws, &graph) {
+                    return Err(err);
+                }
+                Ok::<_, CompilerError>((graph, selected_sim_functions))
+            },
+        )
+    });
+    let (graph, selected_sim_functions) = graph_result?;
     // The CPU artifact view and the codegen context read only the graph, so
     // they are built while the concrete plans are.
     let (mut concrete, lanes) = setup_phases.timed("setup: concrete plans+lanes", || {
@@ -972,7 +1012,7 @@ pub(super) fn emit_full_build(
             &graph,
             || build_concrete_plans(ws, &graph, mutation),
             &roots.emission_roots,
-            shapes,
+            early,
             mutation,
         )
     })?;
