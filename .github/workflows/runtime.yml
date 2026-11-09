@@ -1,0 +1,24 @@
+name: Installed Linux runtime
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  acceptance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the public runtime archive and runtime-only image
+        run: docker build --build-arg CARGO_BUILD_JOBS=2 -f scripts/Dockerfile.acceptance -t rock-runtime-acceptance .
+      - name: Test the extracted archive without networking or build inputs
+        run: |
+          mkdir evidence
+          chmod 777 evidence
+          docker run --rm --network none --memory 4g --volume "$PWD/evidence:/evidence" rock-runtime-acceptance --output /evidence
+      - name: Preserve acceptance logs and rendered frame
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: installed-linux-runtime
+          path: evidence/

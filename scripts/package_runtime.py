@@ -27,7 +27,8 @@ def _assemble(source: Path, built: Path, native: Path, output: Path) -> None:
     library = {'Linux': ('libstone_rs.so', 'libstone.so'),
                'Darwin': ('libstone_rs.dylib', 'libstone.dylib'),
                'Windows': ('stone_rs.dll', 'libstone.dll')}[system]
-    shutil.copy2(built / f'rock{suffix}', output / 'bin' / f'rock{suffix}')
+    for executable in ('rock', 'stone-glsl-runner'):
+        shutil.copy2(built / f'{executable}{suffix}', output / 'bin' / f'{executable}{suffix}')
     shutil.copy2(built / library[0], output / 'lib' / library[1])
     shutil.copy2(native / 'bin' / f'luajit{suffix}', output / 'bin' / f'luajit{suffix}')
     patterns = {'Linux': ('lib', '*.so*'), 'Darwin': ('lib', '*.dylib'),

@@ -1,0 +1,24 @@
+FROM rust:1.96.1-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang cmake pkg-config python3 libsdl2-dev libasound2-dev libxtst-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+ARG CARGO_BUILD_JOBS=4
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
+RUN --mount=type=cache,target=/src/target \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    bash scripts/release.sh
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 libasound2 libgl1 libgl1-mesa-dri libsdl2-2.0-0 libxtst6 \
+    xvfb xauth \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1000 runtime \
+    && mkdir /work && chown runtime /work
+COPY --from=build /src/dist/rock-x86_64-unknown-linux-gnu.tar.gz /runtime.tar.gz
+COPY scripts/check_runtime.py /check_runtime.py
+USER runtime
+WORKDIR /work
+ENTRYPOINT ["python3", "/check_runtime.py", "/runtime.tar.gz"]

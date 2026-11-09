@@ -93,9 +93,21 @@ cargo run -p rock-cli --bin rock -- stone demos/testbed
 ```
 
 `bash scripts/release.sh` builds a host archive containing Rock, Stone, LuaJIT,
-native libraries and named packages. Extract it and run `bin/rock stone demos/testbed`.
+native libraries, the GLSL test runner and named packages. Extract it and run `bin/rock stone demos/testbed`.
 Linux source builds need SDL2, ALSA and XTest development packages. Native window
 tests use `cargo nextest run -p stone-rs`; on Linux they also need Xvfb, i3 and clang.
+
+The manual **Installed Linux runtime** workflow tests the extracted archive in a
+networkless Debian container without source or build tools. To run it locally:
+
+```sh
+docker build -f scripts/Dockerfile.acceptance -t rock-runtime-check .
+docker run --rm --network none --memory 4g rock-runtime-check
+```
+
+This checks compiler commands, LSP startup, Stone package tests, GLSL execution
+and a testbed frame using Mesa software rendering. Docker supplies containment;
+the check explicitly disables the systemd user scope inside the container.
 
 ## Testing compiler changes
 
