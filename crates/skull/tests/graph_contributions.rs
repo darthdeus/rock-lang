@@ -92,7 +92,16 @@ fn main() {
 }
 "#;
 
+/// The graph census is off unless something reads it; these tests do.
+fn enable_census() {
+    static CENSUS: std::sync::Once = std::sync::Once::new();
+    // SAFETY: every graph in this binary is built after this call, so no
+    // other thread reads the environment while it is written.
+    CENSUS.call_once(|| unsafe { std::env::set_var("ROCK_GRAPH_CENSUS", "1") });
+}
+
 fn build() -> (Workspace, InstanceGraph) {
+    enable_census();
     let mut modules = STDLIB.clone();
     modules.push(skull_parser::parse_module_clean(SRC, Ustr::from("<test>")).expect("parse"));
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
@@ -102,6 +111,7 @@ fn build() -> (Workspace, InstanceGraph) {
 }
 
 fn build_population() -> InstanceGraph {
+    enable_census();
     let mut modules = STDLIB.clone();
     modules.push(
         skull_parser::parse_module_clean(POPULATION_SRC, Ustr::from("<population-test>"))

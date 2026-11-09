@@ -307,7 +307,7 @@ pub struct Unresolved {
 /// always-emitted body's callees are ROOTS with neither -- production emits
 /// that body regardless of any call (`mir_emit::reachable_fns`'s
 /// `extra_roots`), so nothing points at them.
-#[derive(Clone, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Owner {
     /// One instance's own body, plus the struct-field defaults it injects.
     Instance(Instance),
@@ -450,8 +450,11 @@ pub struct ExpandTiming {
     pub walk_struct_default_edges_ns: u64,
 }
 
+/// The per-owner census costs real time on every build, so it runs only
+/// when something reads it: a debug log level, or `ROCK_GRAPH_CENSUS` for
+/// the tests that assert over it.
 fn graph_timing_enabled() -> bool {
-    cfg!(debug_assertions) || log::log_enabled!(log::Level::Debug)
+    log::log_enabled!(log::Level::Debug) || std::env::var_os("ROCK_GRAPH_CENSUS").is_some()
 }
 
 fn elapsed_ns(start: Option<Instant>) -> u64 {
@@ -622,8 +625,9 @@ static EMPTY_SUBST: std::sync::LazyLock<MonoSubst> = std::sync::LazyLock::new(Mo
 /// discovered it in -- so a fresh build and an update cannot pick differently.
 #[derive(Default, Debug, Clone)]
 pub struct Indices {
-    /// Instance -> who reached it and what they said.
-    pub subst: BTreeMap<Instance, Agreed<MonoSubst>>,
+    /// Instance -> who reached it and what they said. Hashed: every reached
+    /// row of every install looks one up, and the ordered readers sort.
+    pub subst: FxHashMap<Instance, Agreed<MonoSubst>>,
     /// Instance -> who supplied its conformance witnesses and what they said.
     pub trees: BTreeMap<Instance, Agreed<InstanceBoundTree>>,
     /// Runtime entry name -> the owners whose walk named it. Membership is a
@@ -754,6 +758,9 @@ pub struct InstanceGraph {
     /// The primary records. Every flat field below is derived from these plus
     /// [`Self::root_instances`]; nothing writes a flat field directly.
     pub contributions: BTreeMap<Owner, Contribution>,
+    /// The keys of `contributions`, hashed: the walk asks whether a reached
+    /// instance already has one once per reached row.
+    contributed: FxHashSet<Owner>,
     /// Instances production roots regardless of any call. A reachability walk
     /// starts here and at every always-emitted target.
     pub root_instances: BTreeSet<Instance>,
@@ -1750,6 +1757,7 @@ impl InstanceGraph {
             verify_whole_graph: false,
             interner,
             contributions: BTreeMap::new(),
+            contributed: FxHashSet::default(),
             lost: BTreeSet::new(),
             root_instances: BTreeSet::new(),
             instances: BTreeSet::new(),
@@ -1882,7 +1890,7 @@ impl InstanceGraph {
         }
         let timing_enabled = graph_timing_enabled();
         stats.census_enabled = timing_enabled;
-        let mut queued = BTreeSet::new();
+        let mut queued: FxHashSet<Owner> = FxHashSet::default();
         let mut unique_pending = Vec::with_capacity(pending.len());
         for owner in pending {
             if queued.insert(owner.clone()) {
@@ -1897,22 +1905,22 @@ impl InstanceGraph {
         } else {
             Vec::new()
         };
-        let mut frontier_depths: BTreeMap<Owner, usize> = if timing_enabled {
+        let mut frontier_depths: FxHashMap<Owner, usize> = if timing_enabled {
             pending.iter().cloned().map(|owner| (owner, 0)).collect()
         } else {
-            BTreeMap::new()
+            FxHashMap::default()
         };
-        let mut same_frontier_marks = BTreeSet::new();
-        let initially_forced: BTreeSet<Owner> = pending
+        let mut same_frontier_marks: FxHashSet<Owner> = FxHashSet::default();
+        let initially_forced: FxHashSet<Owner> = pending
             .iter()
-            .filter(|owner| self.contributions.contains_key(*owner))
+            .filter(|owner| self.contributed.contains(*owner))
             .cloned()
             .collect();
-        let mut first_pass_seen = BTreeSet::new();
+        let mut first_pass_seen: FxHashSet<Owner> = FxHashSet::default();
         // A conformance tree is supplied by an owner's CALLER, so an owner
         // walked before its caller was re-walked read a stale one. Recorded
         // here and re-checked below rather than assumed away by walk order.
-        let mut walked_with: BTreeMap<Instance, InstanceBoundTree> = BTreeMap::new();
+        let mut walked_with: FxHashMap<Instance, InstanceBoundTree> = FxHashMap::default();
         let mut rounds = 0usize;
         let mut expansion_times = Vec::new();
         loop {
@@ -2107,11 +2115,10 @@ impl InstanceGraph {
             // The fixpoint: an owner whose witnesses moved while it was already
             // walked must be walked again, or its callees are the ones the old
             // witnesses selected.
-            let stale: Vec<Owner> = walked_with
+            let mut stale: Vec<Owner> = walked_with
                 .iter()
                 .filter(|(i, used)| {
-                    self.contributions
-                        .contains_key(&Owner::Instance((*i).clone()))
+                    self.contributed.contains(&Owner::Instance((*i).clone()))
                         && self.bound_tree(i).unwrap_or(&InstanceBoundTree::default()) != *used
                 })
                 .map(|(i, _)| Owner::Instance(i.clone()))
@@ -2119,6 +2126,8 @@ impl InstanceGraph {
             if stale.is_empty() {
                 break;
             }
+            // Walked in owner order, as the ordered record used to yield them.
+            stale.sort();
             rounds += 1;
             stats.settle_rounds = rounds;
             assert!(
@@ -2354,7 +2363,7 @@ impl InstanceGraph {
         track_incremental_state: bool,
     ) -> (Vec<Owner>, InstallTiming) {
         let uninstall_start = timing_enabled.then(Instant::now);
-        let replaced = self.contributions.contains_key(&owner);
+        let replaced = self.contributed.contains(&owner);
         if track_incremental_state && owner.instance().is_none() {
             if let Some(old) = self.contributions.get(&owner) {
                 self.last_run_always_targets
@@ -2485,6 +2494,7 @@ impl InstanceGraph {
                 .push(failure.clone());
         }
         self.add_contribution_counters(&c);
+        self.contributed.insert(owner.clone());
         self.contributions.insert(owner.clone(), c);
         if track_incremental_state {
             if let Some(instance) = owner.instance() {
@@ -2498,7 +2508,7 @@ impl InstanceGraph {
         let demanded: Vec<Owner> = reached
             .into_iter()
             .map(Owner::Instance)
-            .filter(|o| !self.contributions.contains_key(o))
+            .filter(|o| !self.contributed.contains(o))
             .collect();
         index.commit_ns = elapsed_ns(lane_start);
         (
@@ -2520,6 +2530,7 @@ impl InstanceGraph {
         let Some(old) = self.contributions.remove(owner) else {
             return;
         };
+        self.contributed.remove(owner);
         self.subtract_contribution_counters(&old);
         for (name, _) in &old.always_emitted_holes {
             self.root_hole_dirty_names.insert(name.clone());
@@ -3628,23 +3639,28 @@ impl InstanceGraph {
 
     /// Every instance's agreed substitution.
     pub fn substitutions(&self) -> impl Iterator<Item = (&Instance, &MonoSubst)> {
-        self.index
+        let mut agreed: Vec<(&Instance, &MonoSubst)> = self
+            .index
             .subst
             .iter()
             .map(|(i, a)| (i, a.decided()))
-            .chain(
-                self.root_instances
-                    .iter()
-                    .filter(|i| !self.index.subst.contains_key(*i))
-                    .map(|i| (i, &*EMPTY_SUBST)),
-            )
+            .collect();
+        agreed.sort_by(|left, right| left.0.cmp(right.0));
+        agreed.into_iter().chain(
+            self.root_instances
+                .iter()
+                .filter(|i| !self.index.subst.contains_key(*i))
+                .map(|i| (i, &*EMPTY_SUBST)),
+        )
     }
 
     /// Instances two owners reached with DIFFERENT substitutions. Non-empty
     /// means the substitution is not a function of the instance, so a
     /// `ConcreteBody` built from it would depend on which caller won.
     pub fn subst_disagreements(&self) -> impl Iterator<Item = SubstDisagreement> + '_ {
-        self.index.subst.iter().flat_map(|(i, a)| {
+        let mut rows: Vec<(&Instance, &Agreed<MonoSubst>)> = self.index.subst.iter().collect();
+        rows.sort_by(|left, right| left.0.cmp(right.0));
+        rows.into_iter().flat_map(|(i, a)| {
             let kept = a.decided().clone();
             let out: Vec<SubstDisagreement> = a
                 .dissent
