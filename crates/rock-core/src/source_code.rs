@@ -88,7 +88,6 @@ pub struct PackageTag {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct SourceFile {
-    pub module_id: ModuleId,
     pub contents: String,
     pub file: FileContents,
     pub is_script: bool,
@@ -113,9 +112,7 @@ pub fn source_file_from_path_and_contents(
     contents: String,
 ) -> SourceFile {
     let file = FileContents::Filesystem { path, filename };
-    let module_id = ModuleId::new(file.to_id_path().into());
     SourceFile {
-        module_id,
         file,
         contents,
         is_script: false,
@@ -392,7 +389,6 @@ mod tests {
             "main.rock".to_string(),
             "fn main() {}\n".to_string(),
         );
-        assert_eq!(file.module_id, ModuleId::new("src/main.rock".into()));
         assert_eq!(file.file.to_id_path(), "src/main.rock");
         assert_eq!(file.contents, "fn main() {}\n");
         assert!(!file.is_script);

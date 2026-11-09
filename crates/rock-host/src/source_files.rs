@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use atomic_refcell::AtomicRefCell;
-use rock_core::{FileContents, ModuleId, SourceFile, SourceFiles};
+use rock_core::{FileContents, SourceFile, SourceFiles};
 
 use crate::preprocessor::{PreprocessorContext, preprocess};
 
@@ -141,13 +141,10 @@ fn create_source_file(
     is_test_util: bool,
     used_packages: Vec<String>,
 ) -> Result<SourceFile> {
-    let module_id = ModuleId::new(file.to_id_path().into());
-
     // A `//! modules: v1` directive opts a standalone source into v1. Package
     // loaders overwrite this with the manifest/graph fact afterwards.
     let dialect = parse_modules_directive(&contents)?;
     Ok(SourceFile {
-        module_id,
         file,
         contents,
         is_script,

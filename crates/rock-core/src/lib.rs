@@ -6,7 +6,6 @@
 pub mod clock;
 pub mod compile_stats;
 pub mod errors;
-pub mod module_id;
 pub mod nesting;
 pub mod package_aliases;
 pub mod source_code;
@@ -16,7 +15,6 @@ pub mod utils;
 
 pub use compile_stats::*;
 pub use errors::*;
-pub use module_id::*;
 pub use source_code::*;
 pub use source_files::*;
 pub use source_id::*;
