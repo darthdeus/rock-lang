@@ -371,3 +371,66 @@ fn closing_buffer_restores_disk_symbols_for_other_open_files() {
         "disk symbol should remain navigable: {result}"
     );
 }
+
+#[test]
+fn closing_renamed_buffer_refreshes_definition_and_diagnostics() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("stick.toml"),
+        "[package]\nname = \"renamed_buffers\"\n",
+    )
+    .unwrap();
+    let old = dir.path().join("old.rock");
+    let new = dir.path().join("new.rock");
+    let main = dir.path().join("main.rock");
+    let declaration = "struct Foo { x: int }\n";
+    let source = "fn use_it() -> Foo { Foo { x: 1 } }\n";
+    std::fs::write(&old, declaration).unwrap();
+    std::fs::write(&main, source).unwrap();
+    let mut server = started();
+    roundtrip(&mut server, did_open(&uri_of(&old), declaration));
+    roundtrip(&mut server, did_open(&uri_of(&main), source));
+    std::fs::rename(&old, &new).unwrap();
+    roundtrip(
+        &mut server,
+        not(
+            "textDocument/didClose",
+            json!({"textDocument": {"uri": uri_of(&old)}}),
+        ),
+    );
+    roundtrip(&mut server, did_open(&uri_of(&new), declaration));
+    let out = roundtrip(
+        &mut server,
+        req(
+            902,
+            "textDocument/definition",
+            json!({
+                "textDocument": {"uri": uri_of(&main)}, "position": {"line": 0, "character": 15}
+            }),
+        ),
+    );
+    assert!(
+        response(&out)
+            .result
+            .as_ref()
+            .unwrap()
+            .to_string()
+            .contains(&uri_of(&new)),
+        "{out:?}"
+    );
+    std::fs::remove_file(&new).unwrap();
+    let out = roundtrip(
+        &mut server,
+        not(
+            "textDocument/didClose",
+            json!({"textDocument": {"uri": uri_of(&new)}}),
+        ),
+    );
+    let diags = diagnostics_for(&out, &uri_of(&main));
+    assert!(
+        diags
+            .iter()
+            .any(|d| d["severity"] == 1 && d["message"].as_str().unwrap().contains("Foo")),
+        "{out:?}"
+    );
+}
