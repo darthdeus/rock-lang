@@ -366,6 +366,20 @@ pub enum MonoTyReason {
 impl MonoTyReason {
     /// Stable bucket name for census output. Deliberately drops the payload so
     /// counts aggregate.
+    /// The reason in words, for a diagnostic.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::DepthLimit => format!(
+                "a type in it is nested too deeply (more than {MAX_DEPTH} levels); name an \
+                 inner layer with a struct or newtype"
+            ),
+            Self::UnboundGeneric(name) => format!("the generic parameter `{name}` is not bound"),
+            Self::UnresolvedInfer(name) => format!("the type of `{name}` was not inferred"),
+            Self::RecoveryError => "a type could not be recovered".to_string(),
+            other => format!("a type the compiler cannot normalize ({})", other.bucket()),
+        }
+    }
+
     pub fn bucket(&self) -> &'static str {
         match self {
             Self::RecoveryError => "recovery-error",

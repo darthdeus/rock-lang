@@ -1,0 +1,15 @@
+//! Error: a type nested past the compiler's mono-type depth limit is reported
+//!        in words at the declaration that spells it.
+//! Tags: types, limits, diagnostics
+
+//=== TEST CASE: nested_array_param_TooDeep ===
+//! expect: nested too deeply
+fn f(x: [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[int]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]) {}
+
+fn main() {}
+
+//=== TEST CASE: nested_array_global_TooDeep ===
+//! expect: nested too deeply
+global g: [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[int]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]] = []
+
+fn main() {}

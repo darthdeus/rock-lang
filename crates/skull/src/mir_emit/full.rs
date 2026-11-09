@@ -370,15 +370,36 @@ fn build_concrete_plans(
         return Err(CompilerError::new_with_label(
             f.name_span,
             format!(
-                "cannot build concrete lowering plan for `{}`: {:?}",
-                f.name, reason
+                "cannot build concrete lowering plan for `{}`: {}",
+                f.name,
+                reason.describe()
             ),
         ));
     }
     if let Some((owner, reason)) = concrete.first_always_plan_failure() {
-        return Err(CompilerError::new_no_location(format!(
-            "cannot build concrete always-emitted lowering plan for {owner:?}: {reason:?}"
-        )));
+        let (span, what) = match owner {
+            skull_mir::concrete::ConcreteOwner::Function(instance) => {
+                let f = &ws.module(instance.func.module).functions[instance.func.func];
+                (f.name_span, format!("`{}`", f.name))
+            }
+            skull_mir::concrete::ConcreteOwner::Global { module, index } => {
+                let id = Idx::from_raw(comfy_la_arena::RawIdx::from_u32(*index));
+                let g = &ws.module(*module).globals[id];
+                (g.name_span, format!("global `{}`", g.name))
+            }
+            skull_mir::concrete::ConcreteOwner::Decorator { module, index } => {
+                let id = Idx::from_raw(comfy_la_arena::RawIdx::from_u32(*index));
+                let d = &ws.module(*module).decorators[id];
+                (d.span, format!("decorator `{}`", d.name))
+            }
+        };
+        return Err(CompilerError::new_with_label(
+            span,
+            format!(
+                "cannot build concrete lowering plan for {what}: {}",
+                reason.describe()
+            ),
+        ));
     }
     Ok(concrete)
 }
