@@ -947,6 +947,20 @@ mod overlay_runtime_tests {
         )]
     }
 
+    /// Reads a yielded event in the fixtures below.
+    const SCORE4: &str = "fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n";
+    const SCORE2: &str = "fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }\n}\n";
+
+    macro_rules! pump_source {
+        () => {
+            "@nomangle\nfn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n"
+        };
+    }
+    /// Host hooks: `start()` makes the coroutine, `pump()` resumes and prints it.
+    const START_PUMP: &str = concat!("@nomangle\nfn start() { GEN = gen() }\n", pump_source!());
+    const OUTER_START_PUMP: &str =
+        concat!("@nomangle\nfn start() { GEN = outer() }\n", pump_source!());
+
     /// A Session warmed at v0: `baseline` is the frozen `main.lua`, and `cache`
     /// accumulates across overlays exactly as `IncrementalProject`'s does.
     struct Live {
@@ -1826,7 +1840,7 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
             format!(
                 "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\
                  co fn gen() -> Coroutine<Ev> {{\n  yield Ev::Tick({a})\n  yield Ev::Pair({a}, {b})\n  yield Ev::Done\n}}\n\
-                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 {SCORE4}\
                  fn main() {{\n  let c = gen()\n  let e0 = c.resume()\n  let e1 = c.resume()\n  let s0 = if e0 != null {{ score(e0) }} else {{ -1 }}\n  let s1 = if e1 != null {{ score(e1) }} else {{ -1 }}\n  print(\"{{s0}} {{s1}}\")\n}}\n"
             )
         };
@@ -1894,11 +1908,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                 "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\
                  global GEN: Coroutine<Ev>? = null\n\
                  co fn gen() -> Coroutine<Ev> {{\n  yield Ev::Tick({a})\n  yield Ev::Pair({a}, {b})\n  yield Ev::Done\n}}\n\
-                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }}\n}}\n\
-                 @nomangle\n\
-                 fn start() {{ GEN = gen() }}\n\
-                 @nomangle\n\
-                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
+                 {SCORE4}\
+                 {START_PUMP}"
             )
         };
         let (v0, v1) = (prog(1, 2), prog(10, 20));
@@ -1930,28 +1941,21 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
         // locals as real calls so copy-prop/DCE can't erase the frame cells.
         // v1 inserts `z` AND reads it after yield 1 (`a = a + z`), so `z` is a
         // real frame cell that shifts `b`'s slot -- a genuine layout change.
-        let v0 = "enum Ev { Tick(int), Pair(int, int), Done, Act(() -> ()) }\n\
-                  global GEN: Coroutine<Ev>? = null\n\
-                  fn mk(n: int) -> int { return n }\n\
-                  co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let b = mk(35)\n  yield Ev::Tick(a)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
-                  fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
-                  @nomangle\n\
-                  fn start() { GEN = gen() }\n\
-                  @nomangle\n\
-                  fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
-        let v1 = "enum Ev { Tick(int), Pair(int, int), Done, Act(() -> ()) }\n\
-                  global GEN: Coroutine<Ev>? = null\n\
-                  fn mk(n: int) -> int { return n }\n\
-                  co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let z = mk(999)\n  let b = mk(35)\n  yield Ev::Tick(a)\n  a = a + z\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
-                  fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
-                  @nomangle\n\
-                  fn start() { GEN = gen() }\n\
-                  @nomangle\n\
-                  fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
+        let prog = |extra: &str, cross: &str| {
+            format!(
+                "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\
+                 global GEN: Coroutine<Ev>? = null\n\
+                 fn mk(n: int) -> int {{ return n }}\n\
+                 co fn gen() -> Coroutine<Ev> {{\n  let a = mk(7)\n{extra}  let b = mk(35)\n  yield Ev::Tick(a)\n{cross}  yield Ev::Pair(a, b)\n  yield Ev::Done\n}}\n\
+                 {SCORE4}\
+                 {START_PUMP}"
+            )
+        };
+        let (v0, v1) = (prog("", ""), prog("  let z = mk(999)\n", "  a = a + z\n"));
 
-        let mut live = Live::boot(v0);
+        let mut live = Live::boot(&v0);
 
-        live.expect_safe_restart(v1);
+        live.expect_safe_restart(&v1);
     }
 
     /// Layout drift, state renumber: yields are numbered by order, so a BodyOnly
@@ -1967,11 +1971,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                 "enum Ev {{ Tick(int), Pair(int, int), Done, Act(() -> ()) }}\n\
                  global GEN: Coroutine<Ev>? = null\n\
                  co fn gen() -> Coroutine<Ev> {{\n{extra}  yield Ev::Tick(1)\n  print(\"fire\")\n  yield Ev::Tick(2)\n  print(\"cleanup\")\n}}\n\
-                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }}\n}}\n\
-                 @nomangle\n\
-                 fn start() {{ GEN = gen() }}\n\
-                 @nomangle\n\
-                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
+                 {SCORE4}\
+                 {START_PUMP}"
             )
         };
         let (v0, v1) = (prog(""), prog("  yield Ev::Done\n"));
@@ -2008,11 +2009,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                  global GEN: Coroutine<Ev>? = null\n\
                  co fn inner() -> Coroutine<Ev> {{\n  yield Ev::Tick({a})\n  yield Ev::Tick({b})\n}}\n\
                  co fn outer() -> Coroutine<Ev> {{\n  await inner()\n}}\n\
-                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
-                 @nomangle\n\
-                 fn start() {{ GEN = outer() }}\n\
-                 @nomangle\n\
-                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
+                 {SCORE2}\
+                 {OUTER_START_PUMP}"
             )
         };
         let (v0, v1) = (prog(1, 2), prog(10, 20));
@@ -2049,11 +2047,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                  fn note_inner_killed() {{ INNER_KILLED = INNER_KILLED + 1 }}\n\
                  co fn inner() -> Coroutine<Ev> {{\n  on_killed(() => note_inner_killed())\n  yield Ev::Tick(1)\n  yield Ev::Tick(2)\n}}\n\
                  co fn outer() -> Coroutine<Ev> {{\n{extra}  await inner()\n}}\n\
-                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
-                 @nomangle\n\
-                 fn start() {{ GEN = outer() }}\n\
-                 @nomangle\n\
-                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n\
+                 {SCORE2}\
+                 {OUTER_START_PUMP}\
                  @nomangle\n\
                  fn report() {{ print(\"{{INNER_KILLED}}\") }}\n"
             )
@@ -2089,11 +2084,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                  global BUSY: int = 0\n\
                  fn mk(n: int) -> int {{ return n }}\n\
                  co fn gen() -> Coroutine<Ev> {{\n  BUSY = 1\n  defer {{ BUSY = 0 }}\n  let a = mk(7)\n{extra}  let b = mk(35)\n  yield Ev::Tick(a)\n{cross}  yield Ev::Tick(b)\n}}\n\
-                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
-                 @nomangle\n\
-                 fn start() {{ GEN = gen() }}\n\
-                 @nomangle\n\
-                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n\
+                 {SCORE2}\
+                 {START_PUMP}\
                  @nomangle\n\
                  fn report() {{ print(\"busy:{{BUSY}}\") }}\n"
             )
@@ -2158,33 +2150,31 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
     /// different layout -- the stamp kills the survivor cleanly instead.
     #[test]
     fn live_coroutine_survives_full_reload_and_shape_edit_stamp_kills() {
-        let v0 = "enum Ev { Tick(int), Pair(int, int), Done, Act(() -> ()) }\n\
-                  global GEN: Coroutine<Ev>? = null\n\
-                  fn mk(n: int) -> int { return n }\n\
-                  co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let b = mk(35)\n  yield Ev::Tick(a)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
-                  fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x) => x\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
-                  @nomangle\n\
-                  fn start() { GEN = gen() }\n\
-                  @nomangle\n\
-                  fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
+        let prog = |enum_tick: &str, yield_tick: &str, score_tick: &str| {
+            format!(
+                "enum Ev {{ {enum_tick}, Pair(int, int), Done, Act(() -> ()) }}\n\
+                 global GEN: Coroutine<Ev>? = null\n\
+                 fn mk(n: int) -> int {{ return n }}\n\
+                 co fn gen() -> Coroutine<Ev> {{\n  let a = mk(7)\n  let b = mk(35)\n  yield {yield_tick}\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}}\n\
+                 fn score(e: Ev) -> int {{\n  return match e {{\n    {score_tick}\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }}\n}}\n\
+                 {START_PUMP}"
+            )
+        };
         // Widen Tick BEYOND the current max payload width (Pair's 2 -> Tick's 3),
         // so the frame-slot yield channel genuinely grows -- the shape edit shifts
         // the layout stamp (a within-width widen would be absorbed by the union
         // channel and, post-P2-fix, is correctly layout-stable). The enum edit is
         // Interface tier, delivered via a FULL rebuild.
-        let v1 = "enum Ev { Tick(int, int, int), Pair(int, int), Done, Act(() -> ()) }\n\
-                  global GEN: Coroutine<Ev>? = null\n\
-                  fn mk(n: int) -> int { return n }\n\
-                  co fn gen() -> Coroutine<Ev> {\n  let a = mk(7)\n  let b = mk(35)\n  yield Ev::Tick(a, b, a)\n  yield Ev::Pair(a, b)\n  yield Ev::Done\n}\n\
-                  fn score(e: Ev) -> int {\n  return match e {\n    Ev::Tick(x, y, z) => x + y + z\n    Ev::Pair(p, q) => p + q\n    Ev::Done => 100\n    Ev::Act(_) => -1\n  }\n}\n\
-                  @nomangle\n\
-                  fn start() { GEN = gen() }\n\
-                  @nomangle\n\
-                  fn pump() {\n  let c = GEN\n  if c != null {\n    let e = c.resume()\n    if e != null { print(\"{score(e)}\") } else { print(\"-1\") }\n  }\n}\n";
+        let v0 = prog("Tick(int)", "Ev::Tick(a)", "Ev::Tick(x) => x");
+        let v1 = prog(
+            "Tick(int, int, int)",
+            "Ev::Tick(a, b, a)",
+            "Ev::Tick(x, y, z) => x + y + z",
+        );
 
-        let mut live = Live::boot(v0);
+        let mut live = Live::boot(&v0);
 
-        let full1 = live.full_reload(v1);
+        let full1 = live.full_reload(&v1);
 
         // Premise (non-inverted, stays green): the live coroutine SURVIVES the full
         // re-dofile -- the mutable-global preservation guard keeps GEN.
@@ -2534,11 +2524,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                 "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
                  global GEN: Coroutine<Ev>? = null\n\
                  co fn gen() -> Coroutine<Ev> {{\n  let base = 3\n  let f = (x: int) => x {op} base\n  yield Ev::Tick(f(4))\n}}\n\
-                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
-                 @nomangle\n\
-                 fn start() {{ GEN = gen() }}\n\
-                 @nomangle\n\
-                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
+                 {SCORE2}\
+                 {START_PUMP}"
             )
         };
         let (v0, v1) = (prog('+'), prog('*'));
@@ -2573,11 +2560,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                 "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
                  global GEN: Coroutine<Ev>? = null\n\
                  co fn gen() -> Coroutine<Ev> {{\n  let base = 5\n  let f = (x: int) => x {op} base\n  yield Ev::Tick(f(3))\n  yield Ev::Tick(f(3))\n  let g = (x: int) => x {op} base\n  yield Ev::Tick(g(3))\n}}\n\
-                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
-                 @nomangle\n\
-                 fn start() {{ GEN = gen() }}\n\
-                 @nomangle\n\
-                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
+                 {SCORE2}\
+                 {START_PUMP}"
             )
         };
         let (v0, v1) = (prog('+'), prog('*'));
@@ -2753,11 +2737,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                 "enum Ev {{ Tick(int), Act(() -> ()) }}\n\
                  global GEN: Coroutine<Ev>? = null\n\
                  co fn gen() -> Coroutine<Ev> {{\n  let base = 4\n  let f = (x: int) => {body}\n  yield Ev::Tick(f(3))\n  let g = (x: int) => {body}\n  yield Ev::Tick(g(3))\n}}\n\
-                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
-                 @nomangle\n\
-                 fn start() {{ GEN = gen() }}\n\
-                 @nomangle\n\
-                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
+                 {SCORE2}\
+                 {START_PUMP}"
             )
         };
         let v0 = prog("x + base");
@@ -2785,11 +2766,8 @@ print("WIRE_HOOK_FAILURE_POST_PUBLICATION")
                  global GEN: Coroutine<Ev>? = null\n\
                  fn mk(n: int) -> int {{ return n }}\n\
                  co fn gen() -> Coroutine<Ev> {{\n  let base = mk(4)\n{extra}  let f = (x: int) => x + base\n  yield Ev::Tick(f(3))\n  yield Ev::Tick(f(3))\n}}\n\
-                 fn score(e: Ev) -> int {{\n  return match e {{\n    Ev::Tick(x) => x\n    Ev::Act(_) => -1\n  }}\n}}\n\
-                 @nomangle\n\
-                 fn start() {{ GEN = gen() }}\n\
-                 @nomangle\n\
-                 fn pump() {{\n  let c = GEN\n  if c != null {{\n    let e = c.resume()\n    if e != null {{ print(\"{{score(e)}}\") }} else {{ print(\"-1\") }}\n  }}\n}}\n"
+                 {SCORE2}\
+                 {START_PUMP}"
             )
         };
         let (v0, v1) = (prog(""), prog("  let z = mk(9)\n  yield Ev::Tick(z)\n"));
@@ -2812,7 +2790,7 @@ mod shape_drift_tests {
     //! whose live data layout it doesn't have. Body and signature-only edits
     //! stay on the hot paths. The premise repros for the corruption itself are
     //! `struct_field_add_full_reload_nil_poisons_live_instances` and
-    //! `value_struct_reorder_full_reload_misassigns_positional_ctor`.
+    //! `value_struct_reorder_full_reload_is_caught_by_the_layout_check`.
 
     use super::super::{IncrementalProject, SkullReload};
     use std::path::PathBuf;
