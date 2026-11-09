@@ -75,6 +75,15 @@ fn source_fingerprint_support_files_follow_successful_live_compiles() {
     assert_eq!(revision(&project), "fixed");
 }
 
+fn nobox_accessors_of(source: &str) -> String {
+    let module = skull_parser::parse_module(source, ustr::Ustr::from("main.rock"))
+        .expect("parse nobox reflection fixture");
+    let workspace = bone_semantic::semantic_passes::semantic_pass(&mut [module])
+        .expect("typecheck nobox reflection fixture");
+    let scalar = skull_mir::lower::ScalarCtx::new(&workspace);
+    nobox_accessors(&workspace, &scalar)
+}
+
 /// Every directory field the nobox accessor builder emits, as one text.
 fn nobox_accessors(
     workspace: &bone_semantic::inference::Workspace,
@@ -97,12 +106,7 @@ nobox value Probe { x: int, y: int }
 global SPOT: Probe = Probe { x: 3, y: 4 }
 fn main() {}
 "#;
-    let module = skull_parser::parse_module(source, ustr::Ustr::from("main.rock"))
-        .expect("parse nobox reflection fixture");
-    let workspace = bone_semantic::semantic_passes::semantic_pass(&mut [module])
-        .expect("typecheck nobox reflection fixture");
-    let scalar = skull_mir::lower::ScalarCtx::new(&workspace);
-    let bridge = nobox_accessors(&workspace, &scalar);
+    let bridge = nobox_accessors_of(source);
     assert!(
         bridge.contains("__rock_globals[1]"),
         "first leaf did not use its numeric slot:\n{bridge}"
@@ -125,12 +129,7 @@ nobox value Place { space: SpaceId, x: int, y: int }
 global HOVERED: Place? = null
 fn main() {}
 "#;
-    let module = skull_parser::parse_module(source, ustr::Ustr::from("main.rock"))
-        .expect("parse nested nobox reflection fixture");
-    let workspace = bone_semantic::semantic_passes::semantic_pass(&mut [module])
-        .expect("typecheck nested nobox reflection fixture");
-    let scalar = skull_mir::lower::ScalarCtx::new(&workspace);
-    let bridge = nobox_accessors(&workspace, &scalar);
+    let bridge = nobox_accessors_of(source);
     assert!(
         bridge.contains("Place_lct("),
         "nested CData did not use its leaf ctor:\n{bridge}"
@@ -4317,6 +4316,25 @@ fn file_limit_package(first: &str, second: Option<&str>) -> tempfile::TempDir {
     dir
 }
 
+type LimitedBuild = Result<super::SkullOutcome, super::SkullFailure>;
+
+fn build_with_limit(dir: &tempfile::TempDir, limit: Duration) -> LimitedBuild {
+    super::skull_build_package_with_limit(dir.path().to_str().unwrap(), limit, 1, None)
+}
+
+/// The failure list of a run that must have failed with exactly `passed` passes.
+#[track_caller]
+fn failures_after(result: LimitedBuild, passed: usize) -> Vec<String> {
+    match result {
+        Ok(super::SkullOutcome::TestFail {
+            passed: actual,
+            fails,
+            ..
+        }) if actual == passed => fails,
+        other => panic!("expected {passed} passes and failures: {other:?}"),
+    }
+}
+
 // Each caller asserts that the watchdog stopped its fixture and named the
 // test; a wall-time bound here would only measure how loaded the host is.
 fn assert_first_test_started(dir: &tempfile::TempDir, message: &str) {
@@ -4342,12 +4360,7 @@ fn test_limit_allows_two_files_over_total_budget() {
         std::fs::write(path, source).unwrap();
     }
     // Four one-second tests exceed the total budget, with room between markers.
-    let result = super::skull_build_package_with_limit(
-        dir.path().to_str().unwrap(),
-        Duration::from_secs(3),
-        1,
-        None,
-    );
+    let result = build_with_limit(&dir, Duration::from_secs(3));
     assert!(
         matches!(result, Ok(super::SkullOutcome::Pass { tests: 4, .. })),
         "{result:?}"
@@ -4357,50 +4370,28 @@ fn test_limit_allows_two_files_over_total_budget() {
 #[test]
 fn test_limit_kills_and_names_stuck_file() {
     let dir = file_limit_package("while true do end", None);
-    let result = super::skull_build_package_with_limit(
-        dir.path().to_str().unwrap(),
-        Duration::from_secs(1),
-        1,
-        None,
-    );
+    let result = build_with_limit(&dir, Duration::from_secs(1));
     assert_first_test_started(&dir, "stuck file was not bounded");
-    match result {
-        Ok(super::SkullOutcome::TestFail {
-            passed: 0, fails, ..
-        }) => {
-            assert!(
-                fails.iter().any(|f| f.contains("first.rock")
-                    && f.contains("timed out")
-                    && f.contains("CPU-time budget")),
-                "{fails:?}"
-            );
-        }
-        other => panic!("{other:?}"),
-    }
+    let fails = failures_after(result, 0);
+    assert!(
+        fails.iter().any(|f| f.contains("first.rock")
+            && f.contains("timed out")
+            && f.contains("CPU-time budget")),
+        "{fails:?}"
+    );
 }
 
 #[test]
 fn test_limit_keeps_completed_file_results() {
     let dir = file_limit_package("print('done')", Some("while true do end"));
-    let result = super::skull_build_package_with_limit(
-        dir.path().to_str().unwrap(),
-        Duration::from_secs(1),
-        1,
-        None,
+    let result = build_with_limit(&dir, Duration::from_secs(1));
+    let fails = failures_after(result, 1);
+    assert!(
+        fails
+            .iter()
+            .any(|f| f.contains("second.rock") && f.contains("timed out")),
+        "{fails:?}"
     );
-    match result {
-        Ok(super::SkullOutcome::TestFail {
-            passed: 1, fails, ..
-        }) => {
-            assert!(
-                fails
-                    .iter()
-                    .any(|f| f.contains("second.rock") && f.contains("timed out")),
-                "{fails:?}"
-            );
-        }
-        other => panic!("{other:?}"),
-    }
 }
 
 #[test]
@@ -4432,24 +4423,15 @@ fn test_limit_resets_for_each_test() {
     // Healthy tests whose sum exceeds the limit: the limit bounds one test's
     // inactivity, not the file's total time.
     let dir = file_limit_package("os.execute('sleep 0.3')", None);
-    let file = dir.path().join("first.rock");
-    let mut source = std::fs::read_to_string(&file).unwrap();
-    for name in [
-        "second_test_in_file",
-        "third_test_in_file",
-        "fourth_test_in_file",
-    ] {
-        source.push_str(&format!(
-            "@test inline(lua) fn {name}() = \"os.execute('sleep 0.3')\"\n"
-        ));
-    }
-    std::fs::write(file, source).unwrap();
-    let result = super::skull_build_package_with_limit(
-        dir.path().to_str().unwrap(),
-        Duration::from_secs(1),
-        1,
-        None,
+    add_tests(
+        &dir,
+        &[
+            ("second_test_in_file", "os.execute('sleep 0.3')"),
+            ("third_test_in_file", "os.execute('sleep 0.3')"),
+            ("fourth_test_in_file", "os.execute('sleep 0.3')"),
+        ],
     );
+    let result = build_with_limit(&dir, Duration::from_secs(1));
     assert!(
         matches!(result, Ok(super::SkullOutcome::Pass { tests: 4, .. })),
         "{result:?}"
@@ -4459,31 +4441,22 @@ fn test_limit_resets_for_each_test() {
 #[test]
 fn test_limit_names_hung_test_after_healthy_ones() {
     let dir = file_limit_package("os.execute('sleep 0.3')", None);
-    let file = dir.path().join("first.rock");
-    let mut source = std::fs::read_to_string(&file).unwrap();
-    source.push_str("@test inline(lua) fn slow_but_fine() = \"os.execute('sleep 0.3')\"\n");
-    source.push_str("@test inline(lua) fn hung_test() = \"while true do end\"\n");
-    std::fs::write(file, source).unwrap();
-    let result = super::skull_build_package_with_limit(
-        dir.path().to_str().unwrap(),
-        Duration::from_secs(1),
-        1,
-        None,
+    add_tests(
+        &dir,
+        &[
+            ("slow_but_fine", "os.execute('sleep 0.3')"),
+            ("hung_test", "while true do end"),
+        ],
     );
+    let result = build_with_limit(&dir, Duration::from_secs(1));
     assert_first_test_started(&dir, "hung test was not bounded");
-    match result {
-        Ok(super::SkullOutcome::TestFail {
-            passed: 2, fails, ..
-        }) => {
-            assert!(
-                fails.iter().any(|f| f.contains("first.rock")
-                    && f.contains("hung_test")
-                    && f.contains("timed out")),
-                "{fails:?}"
-            );
-        }
-        other => panic!("{other:?}"),
-    }
+    let fails = failures_after(result, 2);
+    assert!(
+        fails.iter().any(|f| f.contains("first.rock")
+            && f.contains("hung_test")
+            && f.contains("timed out")),
+        "{fails:?}"
+    );
 }
 
 fn add_tests(dir: &tempfile::TempDir, tests: &[(&str, &str)]) {
@@ -4510,37 +4483,26 @@ fn test_limit_reruns_the_tests_after_a_stopped_one() {
             ("last_test", "os.execute('sleep 0.1')"),
         ],
     );
-    let result = super::skull_build_package_with_limit(
-        dir.path().to_str().unwrap(),
-        Duration::from_secs(1),
-        1,
-        None,
+    let result = build_with_limit(&dir, Duration::from_secs(1));
+    let fails = failures_after(result, 2);
+    assert_eq!(fails.len(), 3, "{fails:?}");
+    assert!(
+        fails[0].starts_with("hung_test: ")
+            && fails[0].contains("first.rock")
+            && fails[0].contains("CPU-time budget")
+            && fails[0].contains("while it ran"),
+        "{fails:?}"
     );
-    match result {
-        Ok(super::SkullOutcome::TestFail {
-            passed: 2, fails, ..
-        }) => {
-            assert_eq!(fails.len(), 3, "{fails:?}");
-            assert!(
-                fails[0].starts_with("hung_test: ")
-                    && fails[0].contains("first.rock")
-                    && fails[0].contains("CPU-time budget")
-                    && fails[0].contains("while it ran"),
-                "{fails:?}"
-            );
-            assert!(
-                fails[1].starts_with("crashing_test: ")
-                    && fails[1].contains("child process stopped while it ran"),
-                "{fails:?}"
-            );
-            assert!(
-                fails[2].starts_with("exiting_test: ")
-                    && fails[2].contains("process exited 0 before all tests reported while it ran"),
-                "{fails:?}"
-            );
-        }
-        other => panic!("{other:?}"),
-    }
+    assert!(
+        fails[1].starts_with("crashing_test: ")
+            && fails[1].contains("child process stopped while it ran"),
+        "{fails:?}"
+    );
+    assert!(
+        fails[2].starts_with("exiting_test: ")
+            && fails[2].contains("process exited 0 before all tests reported while it ran"),
+        "{fails:?}"
+    );
 }
 
 #[test]
@@ -4558,12 +4520,7 @@ fn test_limit_bounds_the_reruns_of_a_shard() {
             .map(|name| (name.as_str(), "while true do end"))
             .collect::<Vec<_>>(),
     );
-    let result = super::skull_build_package_with_limit(
-        dir.path().to_str().unwrap(),
-        Duration::from_millis(200),
-        1,
-        None,
-    );
+    let result = build_with_limit(&dir, Duration::from_millis(200));
     match result {
         Ok(super::SkullOutcome::TestFail {
             passed: 0,
@@ -4754,70 +4711,33 @@ fn forge_marker_lua() -> String {
 }
 
 #[test]
-fn test_limit_ignores_forged_start_markers() {
-    // A hanging first test forges the next ordinal with a wrong token, plus a
-    // replayed current ordinal: neither may renew its limit or rename it.
-    let body = format!(
-        "{} for i = 1, 20 do forge('wrong', '1') forge('wrong', '0') \
-         os.execute('sleep 0.05') end while true do end",
-        forge_marker_lua()
-    );
-    let dir = file_limit_package(&body, Some("os.execute('sleep 0.1')"));
-    let result = super::skull_build_package_with_limit(
-        dir.path().to_str().unwrap(),
-        Duration::from_secs(1),
-        1,
-        None,
-    );
-    assert_first_test_started(&dir, "forged future must not extend the limit");
-    match result {
-        Ok(super::SkullOutcome::TestFail {
-            passed: 1, fails, ..
-        }) => {
-            assert!(
-                fails.iter().any(|f| f.contains("first.rock")
-                    && f.contains("first_test")
-                    && f.contains("timed out")),
-                "{fails:?}"
-            );
-            assert!(
-                !fails.iter().any(|f| f.contains("second_test")),
-                "{fails:?}"
-            );
-        }
-        other => panic!("{other:?}"),
-    }
-}
-
-#[test]
-fn test_limit_names_real_test_after_forged_marker() {
-    // Empty (absent) token for the next ordinal, then a hang: the timeout
-    // still names the runner's own first test.
-    let body = format!("{} forge('', '1') while true do end", forge_marker_lua());
-    let dir = file_limit_package(&body, Some("os.execute('sleep 0.1')"));
-    let result = super::skull_build_package_with_limit(
-        dir.path().to_str().unwrap(),
-        Duration::from_secs(1),
-        1,
-        None,
-    );
-    assert_first_test_started(&dir, "forged future must not extend the limit");
-    match result {
-        Ok(super::SkullOutcome::TestFail {
-            passed: 1, fails, ..
-        }) => {
-            assert!(
-                fails.iter().any(|f| f.contains("first.rock")
-                    && f.contains("first_test")
-                    && f.contains("timed out")),
-                "{fails:?}"
-            );
-            assert!(
-                !fails.iter().any(|f| f.contains("second_test")),
-                "{fails:?}"
-            );
-        }
-        other => panic!("{other:?}"),
+fn test_limit_names_the_real_test_despite_forged_markers() {
+    for (case, forgery) in [
+        // A forged next ordinal under a wrong token, plus a replayed current
+        // ordinal: neither may renew its limit or rename it.
+        (
+            "wrong token and replayed ordinal",
+            "for i = 1, 20 do forge('wrong', '1') forge('wrong', '0') \
+             os.execute('sleep 0.05') end",
+        ),
+        // Empty (absent) token for the next ordinal.
+        ("absent token", "forge('', '1')"),
+    ] {
+        let body = format!("{} {forgery} while true do end", forge_marker_lua());
+        let dir = file_limit_package(&body, Some("os.execute('sleep 0.1')"));
+        let result = build_with_limit(&dir, Duration::from_secs(1));
+        assert_first_test_started(&dir, "forged future must not extend the limit");
+        let fails = failures_after(result, 1);
+        assert!(
+            fails.iter().any(|f| f.contains("first.rock")
+                && f.contains("first_test")
+                && f.contains("timed out")),
+            "{case}: {fails:?}"
+        );
+        assert!(
+            !fails.iter().any(|f| f.contains("second_test")),
+            "{case}: {fails:?}"
+        );
     }
 }
 
