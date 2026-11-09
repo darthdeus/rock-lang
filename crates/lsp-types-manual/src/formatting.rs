@@ -1,7 +1,4 @@
-use crate::{
-    DocumentSelector, DynamicRegistrationClientCapabilities, Range, TextDocumentIdentifier,
-    TextDocumentPositionParams, WorkDoneProgressParams,
-};
+use crate::{DocumentSelector, DynamicRegistrationClientCapabilities};
 
 use std::collections::HashMap;
 
@@ -22,29 +19,6 @@ pub struct DocumentOnTypeFormattingOptions {
 impl_lsp_struct!(DocumentOnTypeFormattingOptions,
     required { first_trigger_character: String = "firstTriggerCharacter" },
     optional { more_trigger_character: Vec<String> = "moreTriggerCharacter" }
-);
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct DocumentFormattingParams {
-    /// The document to format.
-    pub text_document: TextDocumentIdentifier,
-
-    /// The format options.
-    pub options: FormattingOptions,
-
-    pub work_done_progress_params: WorkDoneProgressParams,
-}
-
-impl_lsp_struct!(
-    DocumentFormattingParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument",
-        options: FormattingOptions = "options",
-    },
-    optional {},
-    flatten {
-        work_done_progress_params: WorkDoneProgressParams
-    }
 );
 
 /// Value-object describing what options formatting should use.
@@ -154,57 +128,6 @@ impl_untagged_enum!(FormattingProperty {
     Number(i32),
     String(String),
 });
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct DocumentRangeFormattingParams {
-    /// The document to format.
-    pub text_document: TextDocumentIdentifier,
-
-    /// The range to format
-    pub range: Range,
-
-    /// The format options
-    pub options: FormattingOptions,
-
-    pub work_done_progress_params: WorkDoneProgressParams,
-}
-
-impl_lsp_struct!(
-    DocumentRangeFormattingParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument",
-        range: Range = "range",
-        options: FormattingOptions = "options",
-    },
-    optional {},
-    flatten {
-        work_done_progress_params: WorkDoneProgressParams
-    }
-);
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct DocumentOnTypeFormattingParams {
-    /// Text Document and Position fields.
-    pub text_document_position: TextDocumentPositionParams,
-
-    /// The character that has been typed.
-    pub ch: String,
-
-    /// The format options.
-    pub options: FormattingOptions,
-}
-
-impl_lsp_struct!(
-    DocumentOnTypeFormattingParams,
-    required {
-        ch: String = "ch",
-        options: FormattingOptions = "options",
-    },
-    optional {},
-    flatten {
-        text_document_position: TextDocumentPositionParams
-    }
-);
 
 /// Extends TextDocumentRegistrationOptions
 #[derive(Debug, Eq, PartialEq, Clone, Default)]

@@ -17,7 +17,7 @@ mod stdio;
 
 use std::{
     io,
-    net::{TcpListener, TcpStream, ToSocketAddrs},
+    net::{TcpStream, ToSocketAddrs},
 };
 
 use crossbeam_channel::{Receiver, RecvError, RecvTimeoutError, Sender};
@@ -43,13 +43,6 @@ impl Connection {
 
     pub fn connect<A: ToSocketAddrs>(addr: A) -> io::Result<(Connection, IoThreads)> {
         let stream = TcpStream::connect(addr)?;
-        let (sender, receiver, io_threads) = socket::socket_transport(stream);
-        Ok((Connection { sender, receiver }, io_threads))
-    }
-
-    pub fn listen<A: ToSocketAddrs>(addr: A) -> io::Result<(Connection, IoThreads)> {
-        let listener = TcpListener::bind(addr)?;
-        let (stream, _) = listener.accept()?;
         let (sender, receiver, io_threads) = socket::socket_transport(stream);
         Ok((Connection { sender, receiver }, io_threads))
     }
@@ -135,49 +128,6 @@ impl Connection {
         }
     }
 
-    pub fn initialize_finish_while<C>(
-        &self,
-        initialize_id: RequestId,
-        initialize_result: serde_json::Value,
-        running: C,
-    ) -> Result<(), ProtocolError>
-    where
-        C: Fn() -> bool,
-    {
-        let resp = Response::new_ok(initialize_id, initialize_result);
-        self.sender.send(resp.into()).unwrap();
-
-        while running() {
-            let msg = match self
-                .receiver
-                .recv_timeout(std::time::Duration::from_secs(1))
-            {
-                Ok(msg) => msg,
-                Err(RecvTimeoutError::Timeout) => {
-                    continue;
-                }
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err(ProtocolError::disconnected());
-                }
-            };
-
-            match msg {
-                Message::Notification(n) if n.is_initialized() => {
-                    return Ok(());
-                }
-                msg => {
-                    return Err(ProtocolError::new(format!(
-                        r#"expected initialized notification, got: {msg:?}"#
-                    )));
-                }
-            }
-        }
-
-        Err(ProtocolError::new(String::from(
-            "Initialization has been aborted during initialization",
-        )))
-    }
-
     pub fn initialize(
         &self,
         server_capabilities: serde_json::Value,
@@ -189,70 +139,4 @@ impl Connection {
         self.initialize_finish(id, initialize_data)?;
         Ok(params)
     }
-
-    pub fn initialize_while<C>(
-        &self,
-        server_capabilities: serde_json::Value,
-        running: C,
-    ) -> Result<serde_json::Value, ProtocolError>
-    where
-        C: Fn() -> bool,
-    {
-        let (id, params) = self.initialize_start_while(&running)?;
-        let initialize_data = serde_json::json!({
-            "capabilities": server_capabilities,
-        });
-        self.initialize_finish_while(id, initialize_data, running)?;
-        Ok(params)
     }
-
-    pub fn handle_shutdown(&self, req: &Request) -> Result<bool, ProtocolError> {
-        if !req.is_shutdown() {
-            return Ok(false);
-        }
-        let resp = Response::new_ok(req.id.clone(), ());
-        self.sender.send(resp.into()).map_err(|error| {
-            ProtocolError::new(format!("failed to send shutdown response: {error}"))
-        })?;
-        match &self
-            .receiver
-            .recv_timeout(std::time::Duration::from_secs(30))
-        {
-            Ok(Message::Notification(n)) if n.is_exit() => (),
-            Ok(msg) => {
-                return Err(ProtocolError::new(format!(
-                    "unexpected message during shutdown: {msg:?}"
-                )));
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                return Err(ProtocolError::new(
-                    "timed out waiting for exit notification".to_owned(),
-                ));
-            }
-            Err(RecvTimeoutError::Disconnected) => {
-                return Err(ProtocolError::new(
-                    "channel disconnected waiting for exit notification".to_owned(),
-                ));
-            }
-        }
-        Ok(true)
-    }
-}
-
-#[cfg(test)]
-mod shutdown_tests {
-    use super::*;
-    #[test]
-    fn shutdown_reports_send_failure_before_exit() {
-        let (server, client) = Connection::memory();
-        client
-            .sender
-            .send(Notification::new("exit".into(), ()).into())
-            .unwrap();
-        drop(client);
-        let error = server
-            .handle_shutdown(&Request::new(1.into(), "shutdown".into(), ()))
-            .unwrap_err();
-        assert!(error.to_string().contains("shutdown response"), "{error}");
-    }
-}

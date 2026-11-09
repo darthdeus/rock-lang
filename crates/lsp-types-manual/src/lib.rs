@@ -124,7 +124,6 @@ macro_rules! lsp_enum {
     }
 }
 
-pub mod error_codes;
 pub mod notification;
 pub mod request;
 
@@ -194,36 +193,12 @@ impl_untagged_enum!(NumberOrString {
 
 /* ----------------- Cancel support ----------------- */
 
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct CancelParams {
-    /// The request id to cancel.
-    pub id: NumberOrString,
-}
-
-impl_lsp_struct!(
-    CancelParams,
-    required {
-        id: NumberOrString = "id"
-    },
-    optional {}
-);
-
 /* ----------------- Basic JSON Structures ----------------- */
 
 /// The LSP any type
 ///
 /// @since 3.17.0
 pub type LSPAny = serde_json::Value;
-
-/// LSP object definition.
-///
-/// @since 3.17.0
-pub type LSPObject = serde_json::Map<String, serde_json::Value>;
-
-/// LSP arrays.
-///
-/// @since 3.17.0
-pub type LSPArray = Vec<serde_json::Value>;
 
 /// Position in a text document expressed as zero-based line and character offset.
 /// A position is between two characters like an 'insert' cursor in a editor.
@@ -475,21 +450,6 @@ impl Diagnostic {
             tags,
             ..Diagnostic::default()
         }
-    }
-
-    pub fn new_simple(range: Range, message: String) -> Diagnostic {
-        Self::new(range, None, None, None, message, None, None)
-    }
-
-    pub fn new_with_code_number(
-        range: Range,
-        severity: DiagnosticSeverity,
-        code_number: i32,
-        source: Option<String>,
-        message: String,
-    ) -> Diagnostic {
-        let code = Some(NumberOrString::Number(code_number));
-        Self::new(range, Some(severity), code, source, message, None, None)
     }
 }
 
@@ -931,34 +891,6 @@ impl_tagged_enum!(ResourceOp, tag = "kind" {
 
 pub type DidChangeConfigurationClientCapabilities = DynamicRegistrationClientCapabilities;
 
-#[derive(Debug, Default, Eq, PartialEq, Clone)]
-pub struct ConfigurationParams {
-    pub items: Vec<ConfigurationItem>,
-}
-
-impl_lsp_struct!(ConfigurationParams,
-    required { items: Vec<ConfigurationItem> = "items" },
-    optional {}
-);
-
-#[derive(Debug, Default, Eq, PartialEq, Clone)]
-pub struct ConfigurationItem {
-    /// The scope to get the configuration section for.
-    pub scope_uri: Option<Uri>,
-
-    ///The configuration section asked for.
-    pub section: Option<String>,
-}
-
-impl_lsp_struct!(
-    ConfigurationItem,
-    required {},
-    optional {
-        scope_uri: Uri = "scopeUri",
-        section: String = "section",
-    }
-);
-
 impl WorkspaceEdit {
     #[allow(clippy::mutable_key_type)]
     pub fn new(changes: HashMap<Uri, Vec<TextEdit>>) -> WorkspaceEdit {
@@ -990,74 +922,6 @@ impl_lsp_struct!(
 impl TextDocumentIdentifier {
     pub fn new(uri: Uri) -> TextDocumentIdentifier {
         TextDocumentIdentifier { uri }
-    }
-}
-
-/// An item to transfer a text document from the client to the server.
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct TextDocumentItem {
-    /// The text document's URI.
-    pub uri: Uri,
-
-    /// The text document's language identifier.
-    pub language_id: String,
-
-    /// The version number of this document (it will strictly increase after each
-    /// change, including undo/redo).
-    pub version: i32,
-
-    /// The content of the opened text document.
-    pub text: String,
-}
-
-impl_lsp_struct!(
-    TextDocumentItem,
-    required {
-        uri: Uri = "uri",
-        language_id: String = "languageId",
-        version: i32 = "version",
-        text: String = "text",
-    },
-    optional {}
-);
-
-impl TextDocumentItem {
-    pub fn new(uri: Uri, language_id: String, version: i32, text: String) -> TextDocumentItem {
-        TextDocumentItem {
-            uri,
-            language_id,
-            version,
-            text,
-        }
-    }
-}
-
-/// An identifier to denote a specific version of a text document. This information usually flows from the client to the server.
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct VersionedTextDocumentIdentifier {
-    // This field was "mixed-in" from TextDocumentIdentifier
-    /// The text document's URI.
-    pub uri: Uri,
-
-    /// The version number of this document.
-    ///
-    /// The version number of a document will increase after each change,
-    /// including undo/redo. The number doesn't need to be consecutive.
-    pub version: i32,
-}
-
-impl_lsp_struct!(
-    VersionedTextDocumentIdentifier,
-    required {
-        uri: Uri = "uri",
-        version: i32 = "version",
-    },
-    optional {}
-);
-
-impl VersionedTextDocumentIdentifier {
-    pub fn new(uri: Uri, version: i32) -> VersionedTextDocumentIdentifier {
-        VersionedTextDocumentIdentifier { uri, version }
     }
 }
 
@@ -1242,55 +1106,6 @@ impl_lsp_struct!(
     },
     optional {
         version: String = "version"
-    }
-);
-
-#[derive(Debug, PartialEq, Clone, Copy)]
-pub struct InitializedParams {}
-
-impl_lsp_struct!(InitializedParams, required {}, optional {});
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct GenericRegistrationOptions {
-    pub text_document_registration_options: TextDocumentRegistrationOptions,
-    pub options: GenericOptions,
-    pub static_registration_options: StaticRegistrationOptions,
-}
-
-impl_lsp_struct!(
-    GenericRegistrationOptions,
-    flatten {
-        text_document_registration_options: TextDocumentRegistrationOptions,
-        options: GenericOptions,
-        static_registration_options: StaticRegistrationOptions,
-    }
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct GenericOptions {
-    pub work_done_progress_options: WorkDoneProgressOptions,
-}
-
-impl_lsp_struct!(
-    GenericOptions,
-    flatten {
-        work_done_progress_options: WorkDoneProgressOptions
-    }
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct GenericParams {
-    pub text_document_position_params: TextDocumentPositionParams,
-    pub work_done_progress_params: WorkDoneProgressParams,
-    pub partial_result_params: PartialResultParams,
-}
-
-impl_lsp_struct!(
-    GenericParams,
-    flatten {
-        text_document_position_params: TextDocumentPositionParams,
-        work_done_progress_params: WorkDoneProgressParams,
-        partial_result_params: PartialResultParams,
     }
 );
 
@@ -2122,24 +1937,6 @@ impl_lsp_struct!(
     }
 );
 
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct InitializeError {
-    /// Indicates whether the client execute the following retry logic:
-    ///
-    /// - (1) show the message provided by the ResponseError to the user
-    /// - (2) user selects retry or cancel
-    /// - (3) if user selected retry the initialize method is sent again.
-    pub retry: bool,
-}
-
-impl_lsp_struct!(
-    InitializeError,
-    required {
-        retry: bool = "retry"
-    },
-    optional {}
-);
-
 // The server can signal the following capabilities:
 
 /// Defines how the host (editor) should sync document changes to the language server.
@@ -2636,41 +2433,6 @@ impl_lsp_struct!(
     }
 );
 
-/// General parameters to to register for a capability.
-#[derive(Debug, PartialEq, Clone)]
-pub struct Registration {
-    /// The id used to register the request. The id can be used to deregister
-    /// the request again.
-    pub id: String,
-
-    /// The method / capability to register for.
-    pub method: String,
-
-    /// Options necessary for the registration.
-    pub register_options: Option<Value>,
-}
-
-impl_lsp_struct!(
-    Registration,
-    required {
-        id: String = "id",
-        method: String = "method",
-    },
-    optional {
-        register_options: Value = "registerOptions"
-    }
-);
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct RegistrationParams {
-    pub registrations: Vec<Registration>,
-}
-
-impl_lsp_struct!(RegistrationParams,
-    required { registrations: Vec<Registration> = "registrations" },
-    optional {}
-);
-
 /// Since most of the registration options require to specify a document selector there is a base
 /// interface that can be used.
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
@@ -2874,222 +2636,6 @@ impl_lsp_struct!(
     optional { id: String = "id" }
 );
 
-/// General parameters to unregister a capability.
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct Unregistration {
-    /// The id used to unregister the request or notification. Usually an id
-    /// provided during the register request.
-    pub id: String,
-
-    /// The method / capability to unregister for.
-    pub method: String,
-}
-
-impl_lsp_struct!(
-    Unregistration,
-    required {
-        id: String = "id",
-        method: String = "method",
-    },
-    optional {}
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct UnregistrationParams {
-    pub unregisterations: Vec<Unregistration>,
-}
-
-impl_lsp_struct!(UnregistrationParams,
-    required { unregisterations: Vec<Unregistration> = "unregisterations" },
-    optional {}
-);
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct DidChangeConfigurationParams {
-    /// The actual changed settings
-    pub settings: Value,
-}
-
-impl_lsp_struct!(
-    DidChangeConfigurationParams,
-    required {
-        settings: Value = "settings"
-    },
-    optional {}
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct DidOpenTextDocumentParams {
-    /// The document that was opened.
-    pub text_document: TextDocumentItem,
-}
-
-impl_lsp_struct!(
-    DidOpenTextDocumentParams,
-    required {
-        text_document: TextDocumentItem = "textDocument"
-    },
-    optional {}
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct DidChangeTextDocumentParams {
-    /// The document that did change. The version number points
-    /// to the version after all provided content changes have
-    /// been applied.
-    pub text_document: VersionedTextDocumentIdentifier,
-    /// The actual content changes.
-    pub content_changes: Vec<TextDocumentContentChangeEvent>,
-}
-
-impl_lsp_struct!(DidChangeTextDocumentParams,
-    required {
-        text_document: VersionedTextDocumentIdentifier = "textDocument",
-        content_changes: Vec<TextDocumentContentChangeEvent> = "contentChanges",
-    },
-    optional {}
-);
-
-/// An event describing a change to a text document. If range and rangeLength are omitted
-/// the new text is considered to be the full content of the document.
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct TextDocumentContentChangeEvent {
-    /// The range of the document that changed.
-    pub range: Option<Range>,
-
-    /// The length of the range that got replaced.
-    ///
-    /// Deprecated: Use range instead
-    pub range_length: Option<u32>,
-
-    /// The new text of the document.
-    pub text: String,
-}
-
-impl_lsp_struct!(
-    TextDocumentContentChangeEvent,
-    required {
-        text: String = "text"
-    },
-    optional {
-        range: Range = "range",
-        range_length: u32 = "rangeLength",
-    }
-);
-
-/// Describe options to be used when registering for text document change events.
-///
-/// Extends TextDocumentRegistrationOptions
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct TextDocumentChangeRegistrationOptions {
-    /// A document selector to identify the scope of the registration. If set to null
-    /// the document selector provided on the client side will be used.
-    pub document_selector: Option<DocumentSelector>,
-
-    /// How documents are synced to the server. See TextDocumentSyncKind.Full
-    /// and TextDocumentSyncKind.Incremental.
-    pub sync_kind: TextDocumentSyncKind,
-}
-
-impl_lsp_struct!(
-    TextDocumentChangeRegistrationOptions,
-    required {
-        sync_kind: TextDocumentSyncKind = "syncKind"
-    },
-    nullable {
-        document_selector: DocumentSelector = "documentSelector"
-    },
-    optional {}
-);
-
-/// The parameters send in a will save text document notification.
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct WillSaveTextDocumentParams {
-    /// The document that will be saved.
-    pub text_document: TextDocumentIdentifier,
-
-    /// The 'TextDocumentSaveReason'.
-    pub reason: TextDocumentSaveReason,
-}
-
-impl_lsp_struct!(
-    WillSaveTextDocumentParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument",
-        reason: TextDocumentSaveReason = "reason",
-    },
-    optional {}
-);
-
-/// Represents reasons why a text document is saved.
-#[derive(Copy, Eq, PartialEq, Clone)]
-pub struct TextDocumentSaveReason(i32);
-lsp_enum! {
-impl TextDocumentSaveReason {
-    /// Manually triggered, e.g. by the user pressing save, by starting debugging,
-    /// or by an API call.
-    pub const MANUAL: TextDocumentSaveReason = TextDocumentSaveReason(1);
-
-    /// Automatic after a delay.
-    pub const AFTER_DELAY: TextDocumentSaveReason = TextDocumentSaveReason(2);
-
-    /// When the editor lost focus.
-    pub const FOCUS_OUT: TextDocumentSaveReason = TextDocumentSaveReason(3);
-}
-}
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct DidCloseTextDocumentParams {
-    /// The document that was closed.
-    pub text_document: TextDocumentIdentifier,
-}
-
-impl_lsp_struct!(
-    DidCloseTextDocumentParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument"
-    },
-    optional {}
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct DidSaveTextDocumentParams {
-    /// The document that was saved.
-    pub text_document: TextDocumentIdentifier,
-
-    /// Optional the content when saved. Depends on the includeText value
-    /// when the save notification was requested.
-    pub text: Option<String>,
-}
-
-impl_lsp_struct!(
-    DidSaveTextDocumentParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument"
-    },
-    optional {
-        text: String = "text"
-    }
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct TextDocumentSaveRegistrationOptions {
-    /// The client is supposed to include the content on save.
-    pub include_text: Option<bool>,
-
-    pub text_document_registration_options: TextDocumentRegistrationOptions,
-}
-
-impl_lsp_struct!(
-    TextDocumentSaveRegistrationOptions,
-    optional {
-        include_text: bool = "includeText"
-    },
-    flatten {
-        text_document_registration_options: TextDocumentRegistrationOptions
-    }
-);
-
 #[derive(Debug, Eq, PartialEq, Clone, Copy, Default)]
 pub struct DidChangeWatchedFilesClientCapabilities {
     /// Did change watched files notification supports dynamic registration.
@@ -3111,144 +2657,6 @@ impl_lsp_struct!(
         dynamic_registration: bool = "dynamicRegistration",
         relative_pattern_support: bool = "relativePatternSupport",
     }
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct DidChangeWatchedFilesParams {
-    /// The actual file events.
-    pub changes: Vec<FileEvent>,
-}
-
-impl_lsp_struct!(DidChangeWatchedFilesParams,
-    required { changes: Vec<FileEvent> = "changes" },
-    optional {}
-);
-
-/// The file event type.
-#[derive(Eq, PartialEq, Hash, Copy, Clone)]
-pub struct FileChangeType(i32);
-lsp_enum! {
-impl FileChangeType {
-    /// The file got created.
-    pub const CREATED: FileChangeType = FileChangeType(1);
-
-    /// The file got changed.
-    pub const CHANGED: FileChangeType = FileChangeType(2);
-
-    /// The file got deleted.
-    pub const DELETED: FileChangeType = FileChangeType(3);
-}
-}
-
-/// An event describing a file change.
-#[derive(Debug, Eq, Hash, PartialEq, Clone)]
-pub struct FileEvent {
-    /// The file's URI.
-    pub uri: Uri,
-
-    /// The change type.
-    pub typ: FileChangeType,
-}
-
-impl_lsp_struct!(
-    FileEvent,
-    required {
-        uri: Uri = "uri",
-        typ: FileChangeType = "type",
-    },
-    optional {}
-);
-
-impl FileEvent {
-    pub fn new(uri: Uri, typ: FileChangeType) -> FileEvent {
-        FileEvent { uri, typ }
-    }
-}
-
-/// Describe options to be used when registered for text document change events.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
-pub struct DidChangeWatchedFilesRegistrationOptions {
-    /// The watchers to register.
-    pub watchers: Vec<FileSystemWatcher>,
-}
-
-impl_lsp_struct!(DidChangeWatchedFilesRegistrationOptions,
-    required { watchers: Vec<FileSystemWatcher> = "watchers" },
-    optional {}
-);
-
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
-pub struct FileSystemWatcher {
-    /// The glob pattern to watch. See {@link GlobPattern glob pattern}
-    /// for more detail.
-    ///
-    /// @since 3.17.0 support for relative patterns.
-    pub glob_pattern: GlobPattern,
-
-    /// The kind of events of interest. If omitted it defaults to WatchKind.Create |
-    /// WatchKind.Change | WatchKind.Delete which is 7.
-    pub kind: Option<WatchKind>,
-}
-
-impl_lsp_struct!(
-    FileSystemWatcher,
-    required {
-        glob_pattern: GlobPattern = "globPattern"
-    },
-    optional {
-        kind: WatchKind = "kind"
-    }
-);
-
-/// The glob pattern. Either a string pattern or a relative pattern.
-///
-/// @since 3.17.0
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
-pub enum GlobPattern {
-    String(Pattern),
-    Relative(RelativePattern),
-}
-
-impl_untagged_enum!(GlobPattern {
-    Relative(RelativePattern),
-    String(Pattern),
-});
-
-impl From<Pattern> for GlobPattern {
-    #[inline]
-    fn from(from: Pattern) -> Self {
-        Self::String(from)
-    }
-}
-
-impl From<RelativePattern> for GlobPattern {
-    #[inline]
-    fn from(from: RelativePattern) -> Self {
-        Self::Relative(from)
-    }
-}
-
-/// A relative pattern is a helper to construct glob patterns that are matched
-/// relatively to a base URI. The common value for a `baseUri` is a workspace
-/// folder root, but it can be another absolute URI as well.
-///
-/// @since 3.17.0
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone)]
-pub struct RelativePattern {
-    /// A workspace folder or a base URI to which this pattern will be matched
-    /// against relatively.
-    pub base_uri: OneOf<WorkspaceFolder, Uri>,
-
-    /// The actual glob pattern.
-    pub pattern: Pattern,
-}
-
-impl_lsp_struct!(RelativePattern,
-    required {
-        base_uri: OneOf<WorkspaceFolder, Uri> = "baseUri",
-        pattern: Pattern = "pattern",
-    },
-    optional {}
 );
 
 /// The glob pattern to watch relative to the base path. Glob patterns can have
@@ -3380,19 +2788,6 @@ impl_lsp_struct!(
     optional {}
 );
 
-impl MarkedString {
-    pub fn from_markdown(markdown: String) -> MarkedString {
-        MarkedString::String(markdown)
-    }
-
-    pub fn from_language_code(language: String, code_block: String) -> MarkedString {
-        MarkedString::LanguageString(LanguageString {
-            language,
-            value: code_block,
-        })
-    }
-}
-
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct GotoDefinitionParams {
     pub text_document_position_params: TextDocumentPositionParams,
@@ -3458,70 +2853,6 @@ impl_lsp_struct!(ExecuteCommandParams,
     },
     optional {},
     flatten { work_done_progress_params: WorkDoneProgressParams }
-);
-
-/// Execute command registration options.
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct ExecuteCommandRegistrationOptions {
-    /// The commands to be executed on the server
-    pub commands: Vec<String>,
-
-    pub execute_command_options: ExecuteCommandOptions,
-}
-
-impl_lsp_struct!(ExecuteCommandRegistrationOptions,
-    required { commands: Vec<String> = "commands" },
-    optional {},
-    flatten { execute_command_options: ExecuteCommandOptions }
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct ApplyWorkspaceEditParams {
-    /// An optional label of the workspace edit. This label is
-    /// presented in the user interface for example on an undo
-    /// stack to undo the workspace edit.
-    pub label: Option<String>,
-
-    /// The edits to apply.
-    pub edit: WorkspaceEdit,
-}
-
-impl_lsp_struct!(
-    ApplyWorkspaceEditParams,
-    required {
-        edit: WorkspaceEdit = "edit"
-    },
-    optional {
-        label: String = "label"
-    }
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct ApplyWorkspaceEditResponse {
-    /// Indicates whether the edit was applied or not.
-    pub applied: bool,
-
-    /// An optional textual description for why the edit was not applied.
-    /// This may be used may be used by the server for diagnostic
-    /// logging or to provide a suitable error for a request that
-    /// triggered the edit
-    pub failure_reason: Option<String>,
-
-    /// Depending on the client's failure handling strategy `failedChange` might
-    /// contain the index of the change that failed. This property is only available
-    /// if the client signals a `failureHandlingStrategy` in its client capabilities.
-    pub failed_change: Option<u32>,
-}
-
-impl_lsp_struct!(
-    ApplyWorkspaceEditResponse,
-    required {
-        applied: bool = "applied"
-    },
-    optional {
-        failure_reason: String = "failureReason",
-        failed_change: u32 = "failedChange",
-    }
 );
 
 /// Describes the content type that a client supports in various
@@ -3648,10 +2979,13 @@ mod tests {
 
     #[test]
     fn marked_string() {
-        test_serialization(&MarkedString::from_markdown("xxx".into()), r#""xxx""#);
+        test_serialization(&MarkedString::String("xxx".into()), r#""xxx""#);
 
         test_serialization(
-            &MarkedString::from_language_code("lang".into(), "code".into()),
+            &MarkedString::LanguageString(LanguageString {
+                language: "lang".into(),
+                value: "code".into(),
+            }),
             r#"{"language":"lang","value":"code"}"#,
         );
     }

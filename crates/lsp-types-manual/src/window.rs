@@ -2,8 +2,6 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-use crate::{Range, Uri};
-
 #[derive(Eq, PartialEq, Clone, Copy)]
 pub struct MessageType(i32);
 lsp_enum! {
@@ -127,21 +125,6 @@ impl_untagged_enum!(MessageActionItemProperty {
 });
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-pub struct LogMessageParams {
-    pub typ: MessageType,
-    pub message: String,
-}
-
-impl_lsp_struct!(
-    LogMessageParams,
-    required {
-        typ: MessageType = "type",
-        message: String = "message",
-    },
-    optional {}
-);
-
-#[derive(Debug, Eq, PartialEq, Clone)]
 pub struct ShowMessageParams {
     pub typ: MessageType,
     pub message: String,
@@ -156,21 +139,6 @@ impl_lsp_struct!(
     optional {}
 );
 
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct ShowMessageRequestParams {
-    pub typ: MessageType,
-    pub message: String,
-    pub actions: Option<Vec<MessageActionItem>>,
-}
-
-impl_lsp_struct!(ShowMessageRequestParams,
-    required {
-        typ: MessageType = "type",
-        message: String = "message",
-    },
-    optional { actions: Vec<MessageActionItem> = "actions" }
-);
-
 /// Client capabilities for the show document request.
 #[derive(Debug, PartialEq, Clone, Default)]
 pub struct ShowDocumentClientCapabilities {
@@ -181,43 +149,6 @@ impl_lsp_struct!(
     ShowDocumentClientCapabilities,
     required {
         support: bool = "support"
-    },
-    optional {}
-);
-
-/// Params to show a document.
-///
-/// @since 3.16.0
-#[derive(Debug, PartialEq, Clone)]
-pub struct ShowDocumentParams {
-    pub uri: Uri,
-    pub external: Option<bool>,
-    pub take_focus: Option<bool>,
-    pub selection: Option<Range>,
-}
-
-impl_lsp_struct!(
-    ShowDocumentParams,
-    required { uri: Uri = "uri" },
-    optional {
-        external: bool = "external",
-        take_focus: bool = "takeFocus",
-        selection: Range = "selection",
-    }
-);
-
-/// The result of an show document request.
-///
-/// @since 3.16.0
-#[derive(Debug, PartialEq, Clone)]
-pub struct ShowDocumentResult {
-    pub success: bool,
-}
-
-impl_lsp_struct!(
-    ShowDocumentResult,
-    required {
-        success: bool = "success"
     },
     optional {}
 );

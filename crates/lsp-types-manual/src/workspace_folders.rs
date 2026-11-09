@@ -37,34 +37,3 @@ impl_lsp_struct!(
     },
     optional {}
 );
-
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct DidChangeWorkspaceFoldersParams {
-    /// The actual workspace folder change event.
-    pub event: WorkspaceFoldersChangeEvent,
-}
-
-impl_lsp_struct!(
-    DidChangeWorkspaceFoldersParams,
-    required {
-        event: WorkspaceFoldersChangeEvent = "event"
-    },
-    optional {}
-);
-
-/// The workspace folder change event.
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct WorkspaceFoldersChangeEvent {
-    /// The array of added workspace folders
-    pub added: Vec<WorkspaceFolder>,
-    /// The array of the removed workspace folders
-    pub removed: Vec<WorkspaceFolder>,
-}
-
-impl_lsp_struct!(WorkspaceFoldersChangeEvent,
-    required {
-        added: Vec<WorkspaceFolder> = "added",
-        removed: Vec<WorkspaceFolder> = "removed",
-    },
-    optional {}
-);

@@ -531,9 +531,6 @@ impl Request {
             }),
         }
     }
-    pub(crate) fn is_shutdown(&self) -> bool {
-        self.method == "shutdown"
-    }
     pub(crate) fn is_initialize(&self) -> bool {
         self.method == "initialize"
     }

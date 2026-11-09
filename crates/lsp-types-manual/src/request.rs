@@ -8,152 +8,6 @@ pub trait Request {
     const METHOD: &'static str;
 }
 
-#[macro_export]
-macro_rules! lsp_request {
-    ("initialize") => {
-        $crate::request::Initialize
-    };
-    ("shutdown") => {
-        $crate::request::Shutdown
-    };
-
-    ("window/showMessageRequest") => {
-        $crate::request::ShowMessageRequest
-    };
-
-    ("client/registerCapability") => {
-        $crate::request::RegisterCapability
-    };
-    ("client/unregisterCapability") => {
-        $crate::request::UnregisterCapability
-    };
-
-    ("workspace/symbol") => {
-        $crate::request::WorkspaceSymbolRequest
-    };
-    ("workspaceSymbol/resolve") => {
-        $crate::request::WorkspaceSymbolResolve
-    };
-    ("workspace/executeCommand") => {
-        $crate::request::ExecuteCommand
-    };
-
-    ("textDocument/willSaveWaitUntil") => {
-        $crate::request::WillSaveWaitUntil
-    };
-
-    ("textDocument/completion") => {
-        $crate::request::Completion
-    };
-    ("completionItem/resolve") => {
-        $crate::request::ResolveCompletionItem
-    };
-    ("textDocument/hover") => {
-        $crate::request::HoverRequest
-    };
-    ("textDocument/signatureHelp") => {
-        $crate::request::SignatureHelpRequest
-    };
-    ("textDocument/declaration") => {
-        $crate::request::GotoDeclaration
-    };
-    ("textDocument/definition") => {
-        $crate::request::GotoDefinition
-    };
-    ("textDocument/references") => {
-        $crate::request::References
-    };
-    ("textDocument/documentHighlight") => {
-        $crate::request::DocumentHighlightRequest
-    };
-    ("textDocument/documentSymbol") => {
-        $crate::request::DocumentSymbolRequest
-    };
-    ("textDocument/codeAction") => {
-        $crate::request::CodeActionRequest
-    };
-    ("workspace/applyEdit") => {
-        $crate::request::ApplyWorkspaceEdit
-    };
-    ("textDocument/rangeFormatting") => {
-        $crate::request::RangeFormatting
-    };
-    ("textDocument/onTypeFormatting") => {
-        $crate::request::OnTypeFormatting
-    };
-    ("textDocument/formatting") => {
-        $crate::request::Formatting
-    };
-    ("textDocument/rename") => {
-        $crate::request::Rename
-    };
-    ("textDocument/documentColor") => {
-        $crate::request::DocumentColor
-    };
-    ("textDocument/colorPresentation") => {
-        $crate::request::ColorPresentationRequest
-    };
-    ("textDocument/prepareRename") => {
-        $crate::request::PrepareRenameRequest
-    };
-    ("textDocument/implementation") => {
-        $crate::request::GotoImplementation
-    };
-    ("textDocument/typeDefinition") => {
-        $crate::request::GotoTypeDefinition
-    };
-    ("workspace/workspaceFolders") => {
-        $crate::request::WorkspaceFoldersRequest
-    };
-    ("workspace/configuration") => {
-        $crate::request::WorkspaceConfiguration
-    };
-    ("window/workDoneProgress/create") => {
-        $crate::request::WorkDoneProgressCreate
-    };
-    ("textDocument/semanticTokens/full") => {
-        $crate::request::SemanticTokensFullRequest
-    };
-    ("textDocument/semanticTokens/full/delta") => {
-        $crate::request::SemanticTokensFullDeltaRequest
-    };
-    ("textDocument/semanticTokens/range") => {
-        $crate::request::SemanticTokensRangeRequest
-    };
-    ("textDocument/inlayHint") => {
-        $crate::request::InlayHintRequest
-    };
-    ("workspace/semanticTokens/refresh") => {
-        $crate::request::SemanticTokensRefresh
-    };
-    ("workspace/inlayHint/refresh") => {
-        $crate::request::InlayHintRefreshRequest
-    };
-    ("codeAction/resolve") => {
-        $crate::request::CodeActionResolveRequest
-    };
-    ("inlayHint/resolve") => {
-        $crate::request::InlayHintResolveRequest
-    };
-    ("window/showDocument") => {
-        $crate::request::ShowDocument
-    };
-}
-
-/// The initialize request is sent as the first request from the client to the server.
-/// If the server receives request or notification before the `initialize` request it should act as follows:
-///
-/// * for a request the respond should be errored with `code: -32001`. The message can be picked by the server.
-/// * notifications should be dropped.
-#[derive(Debug)]
-pub enum Initialize {}
-
-impl Request for Initialize {
-    type Params = InitializeParams;
-    type Result = InitializeResult;
-    const METHOD: &'static str = "initialize";
-}
-
 /// The shutdown request is sent from the client to the server. It asks the server to shut down,
 /// but to not exit (otherwise the response might not be delivered correctly to the client).
 /// There is a separate exit notification that asks the server to exit.
@@ -164,41 +18,6 @@ impl Request for Shutdown {
     type Params = ();
     type Result = ();
     const METHOD: &'static str = "shutdown";
-}
-
-/// The show message request is sent from a server to a client to ask the client to display a particular message
-/// in the user interface. In addition to the show message notification the request allows to pass actions and to
-/// wait for an answer from the client.
-#[derive(Debug)]
-pub enum ShowMessageRequest {}
-
-impl Request for ShowMessageRequest {
-    type Params = ShowMessageRequestParams;
-    type Result = Option<MessageActionItem>;
-    const METHOD: &'static str = "window/showMessageRequest";
-}
-
-/// The client/registerCapability request is sent from the server to the client to register for a new capability
-/// on the client side. Not all clients need to support dynamic capability registration. A client opts in via the
-/// ClientCapabilities.GenericCapability property.
-#[derive(Debug)]
-pub enum RegisterCapability {}
-
-impl Request for RegisterCapability {
-    type Params = RegistrationParams;
-    type Result = ();
-    const METHOD: &'static str = "client/registerCapability";
-}
-
-/// The client/unregisterCapability request is sent from the server to the client to unregister a
-/// previously register capability.
-#[derive(Debug)]
-pub enum UnregisterCapability {}
-
-impl Request for UnregisterCapability {
-    type Params = UnregistrationParams;
-    type Result = ();
-    const METHOD: &'static str = "client/unregisterCapability";
 }
 
 /// The Completion request is sent from the client to the server to compute completion items at a given cursor position.
@@ -218,16 +37,6 @@ impl Request for Completion {
     type Params = CompletionParams;
     type Result = Option<CompletionResponse>;
     const METHOD: &'static str = "textDocument/completion";
-}
-
-/// The request is sent from the client to the server to resolve additional information for a given completion item.
-#[derive(Debug)]
-pub enum ResolveCompletionItem {}
-
-impl Request for ResolveCompletionItem {
-    type Params = CompletionItem;
-    type Result = CompletionItem;
-    const METHOD: &'static str = "completionItem/resolve";
 }
 
 /// The hover request is sent from the client to the server to request hover information at a given text
@@ -250,19 +59,6 @@ impl Request for SignatureHelpRequest {
     type Params = SignatureHelpParams;
     type Result = Option<SignatureHelp>;
     const METHOD: &'static str = "textDocument/signatureHelp";
-}
-
-#[derive(Debug)]
-pub enum GotoDeclaration {}
-pub type GotoDeclarationParams = GotoDefinitionParams;
-pub type GotoDeclarationResponse = GotoDefinitionResponse;
-
-/// The goto declaration request is sent from the client to the server to resolve the declaration location of
-/// a symbol at a given text document position.
-impl Request for GotoDeclaration {
-    type Params = GotoDeclarationParams;
-    type Result = Option<GotoDeclarationResponse>;
-    const METHOD: &'static str = "textDocument/declaration";
 }
 
 /// The goto definition request is sent from the client to the server to resolve the definition location of
@@ -300,21 +96,6 @@ impl Request for GotoTypeDefinition {
     type Params = GotoTypeDefinitionParams;
     type Result = Option<GotoTypeDefinitionResponse>;
     const METHOD: &'static str = "textDocument/typeDefinition";
-}
-
-/// The goto implementation request is sent from the client to the
-/// server to resolve the implementation location of a symbol at a
-/// given text document position.
-#[derive(Debug)]
-pub enum GotoImplementation {}
-
-pub type GotoImplementationParams = GotoTypeDefinitionParams;
-pub type GotoImplementationResponse = GotoDefinitionResponse;
-
-impl Request for GotoImplementation {
-    type Params = GotoImplementationParams;
-    type Result = Option<GotoImplementationResponse>;
-    const METHOD: &'static str = "textDocument/implementation";
 }
 
 /// The document highlight request is sent from the client to the server to resolve a document highlights
@@ -355,76 +136,6 @@ impl Request for WorkspaceSymbolRequest {
     const METHOD: &'static str = "workspace/symbol";
 }
 
-/// The `workspaceSymbol/resolve` request is sent from the client to the server to resolve
-/// additional information for a given workspace symbol.
-#[derive(Debug)]
-pub enum WorkspaceSymbolResolve {}
-
-impl Request for WorkspaceSymbolResolve {
-    type Params = WorkspaceSymbol;
-    type Result = WorkspaceSymbol;
-    const METHOD: &'static str = "workspaceSymbol/resolve";
-}
-
-/// The workspace/executeCommand request is sent from the client to the server to trigger command execution on the server.
-/// In most cases the server creates a WorkspaceEdit structure and applies the changes to the workspace using the request
-/// workspace/applyEdit which is sent from the server to the client.
-#[derive(Debug)]
-pub enum ExecuteCommand {}
-
-impl Request for ExecuteCommand {
-    type Params = ExecuteCommandParams;
-    type Result = Option<Value>;
-    const METHOD: &'static str = "workspace/executeCommand";
-}
-
-/// The document will save request is sent from the client to the server before the document is
-/// actually saved. The request can return an array of TextEdits which will be applied to the text
-/// document before it is saved. Please note that clients might drop results if computing the text
-/// edits took too long or if a server constantly fails on this request. This is done to keep the
-/// save fast and reliable.
-#[derive(Debug)]
-pub enum WillSaveWaitUntil {}
-
-impl Request for WillSaveWaitUntil {
-    type Params = WillSaveTextDocumentParams;
-    type Result = Option<Vec<TextEdit>>;
-    const METHOD: &'static str = "textDocument/willSaveWaitUntil";
-}
-
-/// The workspace/applyEdit request is sent from the server to the client to modify resource on the
-/// client side.
-#[derive(Debug)]
-pub enum ApplyWorkspaceEdit {}
-
-impl Request for ApplyWorkspaceEdit {
-    type Params = ApplyWorkspaceEditParams;
-    type Result = ApplyWorkspaceEditResponse;
-    const METHOD: &'static str = "workspace/applyEdit";
-}
-
-/// The workspace/configuration request is sent from the server to the client to fetch configuration settings
-/// from the client. The request can fetch several configuration settings in one roundtrip.
-/// The order of the returned configuration settings correspond to the order of the passed ConfigurationItems
-/// (e.g. the first item in the response is the result for the first configuration item in the params).
-///
-/// A ConfigurationItem consists of the configuration section to ask for and an additional scope URI.
-/// The configuration section ask for is defined by the server and doesn’t necessarily need to correspond to
-/// the configuration store used be the client. So a server might ask for a configuration cpp.formatterOptions
-/// but the client stores the configuration in a XML store layout differently.
-/// It is up to the client to do the necessary conversion. If a scope URI is provided the client should return
-/// the setting scoped to the provided resource. If the client for example uses EditorConfig to manage its
-/// settings the configuration should be returned for the passed resource URI. If the client can’t provide a
-/// configuration setting for a given scope then null need to be present in the returned array.
-#[derive(Debug)]
-pub enum WorkspaceConfiguration {}
-
-impl Request for WorkspaceConfiguration {
-    type Params = ConfigurationParams;
-    type Result = Vec<Value>;
-    const METHOD: &'static str = "workspace/configuration";
-}
-
 /// The code action request is sent from the client to the server to compute commands for a given text document
 /// and range. The request is triggered when the user moves the cursor into a problem marker in the editor or
 /// presses the lightbulb associated with a marker.
@@ -437,51 +148,6 @@ impl Request for CodeActionRequest {
     const METHOD: &'static str = "textDocument/codeAction";
 }
 
-/// The request is sent from the client to the server to resolve additional information for a given code action.
-/// This is usually used to compute the `edit` property of a code action to avoid its unnecessary computation
-/// during the `textDocument/codeAction` request.
-///
-/// @since 3.16.0
-#[derive(Debug)]
-pub enum CodeActionResolveRequest {}
-
-impl Request for CodeActionResolveRequest {
-    type Params = CodeAction;
-    type Result = CodeAction;
-    const METHOD: &'static str = "codeAction/resolve";
-}
-
-/// The document formatting request is sent from the server to the client to format a whole document.
-#[derive(Debug)]
-pub enum Formatting {}
-
-impl Request for Formatting {
-    type Params = DocumentFormattingParams;
-    type Result = Option<Vec<TextEdit>>;
-    const METHOD: &'static str = "textDocument/formatting";
-}
-
-/// The document range formatting request is sent from the client to the server to format a given range in a document.
-#[derive(Debug)]
-pub enum RangeFormatting {}
-
-impl Request for RangeFormatting {
-    type Params = DocumentRangeFormattingParams;
-    type Result = Option<Vec<TextEdit>>;
-    const METHOD: &'static str = "textDocument/rangeFormatting";
-}
-
-/// The document on type formatting request is sent from the client to the server to format parts of
-/// the document during typing.
-#[derive(Debug)]
-pub enum OnTypeFormatting {}
-
-impl Request for OnTypeFormatting {
-    type Params = DocumentOnTypeFormattingParams;
-    type Result = Option<Vec<TextEdit>>;
-    const METHOD: &'static str = "textDocument/onTypeFormatting";
-}
-
 /// The rename request is sent from the client to the server to perform a workspace-wide rename of a symbol.
 #[derive(Debug)]
 pub enum Rename {}
@@ -490,28 +156,6 @@ impl Request for Rename {
     type Params = RenameParams;
     type Result = Option<WorkspaceEdit>;
     const METHOD: &'static str = "textDocument/rename";
-}
-
-/// The document color request is sent from the client to the server to list all color references found in a given text document.
-/// Along with the range, a color value in RGB is returned.
-#[derive(Debug)]
-pub enum DocumentColor {}
-
-impl Request for DocumentColor {
-    type Params = DocumentColorParams;
-    type Result = Vec<ColorInformation>;
-    const METHOD: &'static str = "textDocument/documentColor";
-}
-
-/// The color presentation request is sent from the client to the server to obtain a list of presentations for a color value
-/// at a given location.
-#[derive(Debug)]
-pub enum ColorPresentationRequest {}
-
-impl Request for ColorPresentationRequest {
-    type Params = ColorPresentationParams;
-    type Result = Vec<ColorPresentation>;
-    const METHOD: &'static str = "textDocument/colorPresentation";
 }
 
 /// The prepare rename request is sent from the client to the server to setup and test the validity of a rename operation
@@ -523,29 +167,6 @@ impl Request for PrepareRenameRequest {
     type Params = TextDocumentPositionParams;
     type Result = Option<PrepareRenameResponse>;
     const METHOD: &'static str = "textDocument/prepareRename";
-}
-
-/// The workspace/workspaceFolders request is sent from the server to the client to fetch the current open list of
-/// workspace folders. Returns null in the response if only a single file is open in the tool.
-/// Returns an empty array if a workspace is open but no folders are configured.
-#[derive(Debug)]
-pub enum WorkspaceFoldersRequest {}
-
-impl Request for WorkspaceFoldersRequest {
-    type Params = ();
-    type Result = Option<Vec<WorkspaceFolder>>;
-    const METHOD: &'static str = "workspace/workspaceFolders";
-}
-
-/// The `window/workDoneProgress/create` request is sent from the server
-/// to the client to ask the client to create a work done progress.
-#[derive(Debug)]
-pub enum WorkDoneProgressCreate {}
-
-impl Request for WorkDoneProgressCreate {
-    type Params = WorkDoneProgressCreateParams;
-    type Result = ();
-    const METHOD: &'static str = "window/workDoneProgress/create";
 }
 
 pub enum SemanticTokensFullRequest {}
@@ -572,28 +193,6 @@ impl Request for SemanticTokensRangeRequest {
     const METHOD: &'static str = "textDocument/semanticTokens/range";
 }
 
-/// The `workspace/semanticTokens/refresh` request is sent from the server to the client.
-/// Servers can use it to ask clients to refresh the editors for which this server provides semantic tokens.
-/// As a result the client should ask the server to recompute the semantic tokens for these editors.
-/// This is useful if a server detects a project wide configuration change which requires a re-calculation of all semantic tokens.
-/// Note that the client still has the freedom to delay the re-calculation of the semantic tokens if for example an editor is currently not visible.
-pub enum SemanticTokensRefresh {}
-
-impl Request for SemanticTokensRefresh {
-    type Params = ();
-    type Result = ();
-    const METHOD: &'static str = "workspace/semanticTokens/refresh";
-}
-
-/// The show document request is sent from a server to a client to ask the client to display a particular document in the user interface.
-pub enum ShowDocument {}
-
-impl Request for ShowDocument {
-    type Params = ShowDocumentParams;
-    type Result = ShowDocumentResult;
-    const METHOD: &'static str = "window/showDocument";
-}
-
 /// The inlay hints request is sent from the client to the server to compute inlay hints for a given
 /// [text document, range] tuple that may be rendered in the editor in place with other text.
 pub enum InlayHintRequest {}
@@ -602,106 +201,4 @@ impl Request for InlayHintRequest {
     type Params = InlayHintParams;
     type Result = Option<Vec<InlayHint>>;
     const METHOD: &'static str = "textDocument/inlayHint";
-}
-
-/// The `inlayHint/resolve` request is sent from the client to the server to resolve additional
-/// information for a given inlay hint. This is usually used to compute the tooltip, location or
-/// command properties of a inlay hint’s label part to avoid its unnecessary computation during the
-/// `textDocument/inlayHint` request.
-pub enum InlayHintResolveRequest {}
-
-impl Request for InlayHintResolveRequest {
-    type Params = InlayHint;
-    type Result = InlayHint;
-    const METHOD: &'static str = "inlayHint/resolve";
-}
-
-/// The `workspace/inlayHint/refresh` request is sent from the server to the client. Servers can use
-/// it to ask clients to refresh the inlay hints currently shown in editors. As a result the client
-/// should ask the server to recompute the inlay hints for these editors. This is useful if a server
-/// detects a configuration change which requires a re-calculation of all inlay hints. Note that the
-/// client still has the freedom to delay the re-calculation of the inlay hints if for example an
-/// editor is currently not visible.
-pub enum InlayHintRefreshRequest {}
-
-impl Request for InlayHintRefreshRequest {
-    type Params = ();
-    type Result = ();
-    const METHOD: &'static str = "workspace/inlayHint/refresh";
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    fn fake_call<R>()
-    where
-        R: Request,
-        R::Params: serde::Serialize,
-        R::Result: serde::de::DeserializeOwned,
-    {
-    }
-
-    macro_rules! check_macro {
-        ($name:tt) => {
-            // check whether the macro name matches the method
-            assert_eq!(<lsp_request!($name) as Request>::METHOD, $name);
-            // test whether type checking passes for each component
-            fake_call::<lsp_request!($name)>();
-        };
-    }
-
-    #[test]
-    fn check_macro_definitions() {
-        check_macro!("initialize");
-        check_macro!("shutdown");
-
-        check_macro!("window/showDocument");
-        check_macro!("window/showMessageRequest");
-        check_macro!("window/workDoneProgress/create");
-
-        check_macro!("client/registerCapability");
-        check_macro!("client/unregisterCapability");
-
-        check_macro!("textDocument/willSaveWaitUntil");
-        check_macro!("textDocument/completion");
-        check_macro!("textDocument/hover");
-        check_macro!("textDocument/signatureHelp");
-        check_macro!("textDocument/declaration");
-        check_macro!("textDocument/definition");
-        check_macro!("textDocument/references");
-        check_macro!("textDocument/documentHighlight");
-        check_macro!("textDocument/documentSymbol");
-        check_macro!("textDocument/codeAction");
-        check_macro!("textDocument/rangeFormatting");
-        check_macro!("textDocument/onTypeFormatting");
-        check_macro!("textDocument/formatting");
-        check_macro!("textDocument/rename");
-        check_macro!("textDocument/documentColor");
-        check_macro!("textDocument/colorPresentation");
-        check_macro!("textDocument/prepareRename");
-        check_macro!("textDocument/implementation");
-        check_macro!("textDocument/typeDefinition");
-        check_macro!("textDocument/semanticTokens/full");
-        check_macro!("textDocument/semanticTokens/full/delta");
-        check_macro!("textDocument/semanticTokens/range");
-        check_macro!("textDocument/inlayHint");
-
-        check_macro!("workspace/applyEdit");
-        check_macro!("workspace/symbol");
-        check_macro!("workspace/executeCommand");
-        check_macro!("workspace/configuration");
-        check_macro!("workspace/workspaceFolders");
-        check_macro!("workspace/semanticTokens/refresh");
-        check_macro!("workspace/inlayHint/refresh");
-
-        check_macro!("codeAction/resolve");
-        check_macro!("completionItem/resolve");
-        check_macro!("inlayHint/resolve");
-        check_macro!("workspaceSymbol/resolve");
-    }
-
-    #[test]
-    #[cfg(feature = "proposed")]
-    fn check_proposed_macro_definitions() {}
 }

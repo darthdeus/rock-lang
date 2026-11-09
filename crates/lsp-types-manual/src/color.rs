@@ -1,7 +1,4 @@
-use crate::{
-    DocumentSelector, DynamicRegistrationClientCapabilities, PartialResultParams, Range,
-    TextDocumentIdentifier, TextEdit, WorkDoneProgressParams,
-};
+use crate::{DocumentSelector, DynamicRegistrationClientCapabilities};
 
 pub type DocumentColorClientCapabilities = DynamicRegistrationClientCapabilities;
 
@@ -56,42 +53,6 @@ impl From<bool> for ColorProviderCapability {
     }
 }
 
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct DocumentColorParams {
-    /// The text document
-    pub text_document: TextDocumentIdentifier,
-
-    pub work_done_progress_params: WorkDoneProgressParams,
-    pub partial_result_params: PartialResultParams,
-}
-
-impl_lsp_struct!(
-    DocumentColorParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument"
-    },
-    optional {},
-    flatten {
-        work_done_progress_params: WorkDoneProgressParams,
-        partial_result_params: PartialResultParams,
-    }
-);
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct ColorInformation {
-    pub range: Range,
-    pub color: Color,
-}
-
-impl_lsp_struct!(
-    ColorInformation,
-    required {
-        range: Range = "range",
-        color: Color = "color",
-    },
-    optional {}
-);
-
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct Color {
     pub red: f32,
@@ -109,48 +70,4 @@ impl_lsp_struct!(
         alpha: f32 = "alpha",
     },
     optional {}
-);
-
-#[derive(Debug, PartialEq, Clone)]
-pub struct ColorPresentationParams {
-    /// The text document.
-    pub text_document: TextDocumentIdentifier,
-
-    /// The color information to request presentations for.
-    pub color: Color,
-
-    /// The range where the color would be inserted. Serves as a context.
-    pub range: Range,
-
-    pub work_done_progress_params: WorkDoneProgressParams,
-    pub partial_result_params: PartialResultParams,
-}
-
-impl_lsp_struct!(
-    ColorPresentationParams,
-    required {
-        text_document: TextDocumentIdentifier = "textDocument",
-        color: Color = "color",
-        range: Range = "range",
-    },
-    optional {},
-    flatten {
-        work_done_progress_params: WorkDoneProgressParams,
-        partial_result_params: PartialResultParams,
-    }
-);
-
-#[derive(Debug, PartialEq, Eq, Default, Clone)]
-pub struct ColorPresentation {
-    pub label: String,
-    pub text_edit: Option<TextEdit>,
-    pub additional_text_edits: Option<Vec<TextEdit>>,
-}
-
-impl_lsp_struct!(ColorPresentation,
-    required { label: String = "label" },
-    optional {
-        text_edit: TextEdit = "textEdit",
-        additional_text_edits: Vec<TextEdit> = "additionalTextEdits",
-    }
 );

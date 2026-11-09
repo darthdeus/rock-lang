@@ -1,6 +1,6 @@
 use crate::{
     MarkedString, MarkupContent, MarkupKind, Range, TextDocumentPositionParams,
-    TextDocumentRegistrationOptions, WorkDoneProgressOptions, WorkDoneProgressParams,
+    WorkDoneProgressOptions, WorkDoneProgressParams,
 };
 
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
@@ -30,20 +30,6 @@ impl_lsp_struct!(
     HoverOptions,
     flatten {
         work_done_progress_options: WorkDoneProgressOptions
-    }
-);
-
-#[derive(Debug, Eq, PartialEq, Clone, Default)]
-pub struct HoverRegistrationOptions {
-    pub text_document_registration_options: TextDocumentRegistrationOptions,
-    pub hover_options: HoverOptions,
-}
-
-impl_lsp_struct!(
-    HoverRegistrationOptions,
-    flatten {
-        text_document_registration_options: TextDocumentRegistrationOptions,
-        hover_options: HoverOptions,
     }
 );
 

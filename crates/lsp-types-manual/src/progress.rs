@@ -30,39 +30,6 @@ impl_untagged_enum!(ProgressParamsValue {
     WorkDone(WorkDoneProgress),
 });
 
-/// The `window/workDoneProgress/create` request is sent from the server to the
-/// client to ask the client to create a work done progress.
-#[derive(Debug, PartialEq, Clone)]
-pub struct WorkDoneProgressCreateParams {
-    /// The token to be used to report progress.
-    pub token: ProgressToken,
-}
-
-impl_lsp_struct!(
-    WorkDoneProgressCreateParams,
-    required {
-        token: ProgressToken = "token"
-    },
-    optional {}
-);
-
-/// The `window/workDoneProgress/cancel` notification is sent from the client to
-/// the server to cancel a progress initiated on the server side using
-/// `window/workDoneProgress/create`.
-#[derive(Debug, PartialEq, Clone)]
-pub struct WorkDoneProgressCancelParams {
-    /// The token to be used to report progress.
-    pub token: ProgressToken,
-}
-
-impl_lsp_struct!(
-    WorkDoneProgressCancelParams,
-    required {
-        token: ProgressToken = "token"
-    },
-    optional {}
-);
-
 /// An optional token that a server can use to report work done progress.
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
 pub struct WorkDoneProgressParams {

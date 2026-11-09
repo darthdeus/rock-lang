@@ -1,7 +1,6 @@
 use crate::{
     Command, Documentation, MarkupKind, PartialResultParams, TagSupport,
-    TextDocumentPositionParams, TextDocumentRegistrationOptions, TextEdit, WorkDoneProgressOptions,
-    WorkDoneProgressParams,
+    TextDocumentPositionParams, TextEdit, WorkDoneProgressOptions, WorkDoneProgressParams,
 };
 
 use crate::Range;
@@ -413,20 +412,6 @@ impl_lsp_struct!(
 );
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct CompletionRegistrationOptions {
-    pub text_document_registration_options: TextDocumentRegistrationOptions,
-    pub completion_options: CompletionOptions,
-}
-
-impl_lsp_struct!(
-    CompletionRegistrationOptions,
-    flatten {
-        text_document_registration_options: TextDocumentRegistrationOptions,
-        completion_options: CompletionOptions,
-    }
-);
-
-#[derive(Debug, PartialEq, Clone)]
 pub enum CompletionResponse {
     Array(Vec<CompletionItem>),
     List(CompletionList),
@@ -627,17 +612,6 @@ impl_lsp_struct!(CompletionItem,
         tags: Vec<CompletionItemTag> = "tags",
     }
 );
-
-impl CompletionItem {
-    /// Create a CompletionItem with the minimum possible info (label and detail).
-    pub fn new_simple(label: String, detail: String) -> CompletionItem {
-        CompletionItem {
-            label,
-            detail: Some(detail),
-            ..Self::default()
-        }
-    }
-}
 
 /// Additional details for a completion item label.
 ///

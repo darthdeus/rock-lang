@@ -1,6 +1,6 @@
 use crate::{
-    Documentation, MarkupKind, TextDocumentPositionParams, TextDocumentRegistrationOptions,
-    WorkDoneProgressOptions, WorkDoneProgressParams,
+    Documentation, MarkupKind, TextDocumentPositionParams, WorkDoneProgressOptions,
+    WorkDoneProgressParams,
 };
 
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
@@ -67,19 +67,6 @@ impl_lsp_struct!(SignatureHelpOptions,
         retrigger_characters: Vec<String> = "retriggerCharacters",
     },
     flatten { work_done_progress_options: WorkDoneProgressOptions }
-);
-
-/// Signature help options.
-#[derive(Debug, Eq, PartialEq, Clone)]
-pub struct SignatureHelpRegistrationOptions {
-    pub text_document_registration_options: TextDocumentRegistrationOptions,
-}
-
-impl_lsp_struct!(
-    SignatureHelpRegistrationOptions,
-    flatten {
-        text_document_registration_options: TextDocumentRegistrationOptions
-    }
 );
 
 /// Signature help options.

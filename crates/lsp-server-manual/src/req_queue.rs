@@ -56,10 +56,6 @@ impl<I> Incoming<I> {
     pub fn complete(&mut self, id: &RequestId) -> Option<I> {
         self.pending.remove(id)
     }
-
-    pub fn is_completed(&self, id: &RequestId) -> bool {
-        !self.pending.contains_key(id)
-    }
 }
 
 impl<O> Outgoing<O> {
