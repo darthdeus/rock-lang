@@ -3,19 +3,36 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::process::{Command, Output};
 
-fn invoke(root: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_rock"))
+/// The built binary rooted at `root`, with no ambient stdlib or invocation log.
+fn rock(root: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+    command
         .current_dir(root)
-        .args(args)
         .env("ROCK_DIR", root)
         .env("ROCK_INVOCATION_LOG", "off")
+        .env_remove("ROCK_STDLIB_DIR");
+    command
+}
+
+fn invoke(root: &Path, args: &[&str]) -> Output {
+    rock(root)
+        .args(args)
         .env("ROCK_TEST_VERBOSE", "1")
-        .env_remove("ROCK_STDLIB_DIR")
         .env_remove("LUA_PATH")
         .env_remove("LUA_CPATH")
         .env_remove("ROCK_SKULL_LINE_DIRECTIVES")
         .output()
         .expect("start public plain CLI")
+}
+
+fn write(root: &Path, name: &str, contents: impl AsRef<[u8]>) {
+    std::fs::write(root.join(name), contents).unwrap();
+}
+
+#[track_caller]
+fn assert_mentions(out: &Output, needle: &str) {
+    let text = text(out);
+    assert!(text.contains(needle), "missing {needle:?} in: {text}");
 }
 
 fn text(out: &Output) -> String {
@@ -32,12 +49,8 @@ fn plain_lsp_serve_answers_initialize_over_stdio() {
     use std::process::Stdio;
     use std::time::Duration;
     let root = tempfile::tempdir().unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .current_dir(root.path())
+    let child = rock(root.path())
         .args(["lsp", "serve"])
-        .env("ROCK_DIR", root.path())
-        .env("ROCK_INVOCATION_LOG", "off")
-        .env_remove("ROCK_STDLIB_DIR")
         .env_remove("LUA_PATH")
         .env_remove("LUA_CPATH")
         .stdin(Stdio::piped())
@@ -94,25 +107,9 @@ fn plain_lsp_serve_answers_initialize_over_stdio() {
 }
 
 #[test]
-fn plain_fix_rejects_unregistered_recipe() {
-    let root = tempfile::tempdir().unwrap();
-    let out = invoke(root.path(), &["fix", "--across-yield", "missing.rock"]);
-    assert!(!out.status.success());
-    assert!(
-        text(&out).contains("unexpected argument '--across-yield'"),
-        "{}",
-        text(&out)
-    );
-    let help = invoke(root.path(), &["--help"]);
-    assert!(help.status.success());
-    assert!(!text(&help).contains("--across-yield"), "{}", text(&help));
-    assert!(!root.path().join("tmp").exists());
-}
-
-#[test]
 fn plain_named_action_layer_lints_report_no_policy() {
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("main.rock"), "fn main() {}\n").unwrap();
+    write(root.path(), "main.rock", "fn main() {}\n");
     for lint in [
         "action_layer_action_callers",
         "action_layer_raw_input",
@@ -132,7 +129,7 @@ fn plain_compiler_process_without_private_runtime() {
     let root = tempfile::tempdir().unwrap();
     let source =
         "fn main() { print(6 * 7) }\n\n@test(output = \"42\")\nfn answer() { print(6 * 7) }\n";
-    std::fs::write(root.path().join("main.rock"), source).unwrap();
+    write(root.path(), "main.rock", source);
     for command in ["check", "test", "run"] {
         let out = invoke(root.path(), &[command, "main.rock"]);
         assert!(out.status.success(), "{command}: {}", text(&out));
@@ -140,14 +137,14 @@ fn plain_compiler_process_without_private_runtime() {
             assert_eq!(String::from_utf8_lossy(&out.stdout), "42\n");
         }
         if command == "test" {
-            assert!(text(&out).contains("1/1 @tests passed"), "{}", text(&out));
+            assert_mentions(&out, "1/1 @tests passed");
         }
     }
-    std::fs::write(
-        root.path().join("stick.toml"),
+    write(
+        root.path(),
+        "stick.toml",
         "[package]\nname = \"plain-process\"\n",
-    )
-    .unwrap();
+    );
     let directory = invoke(root.path(), &["run", "."]);
     assert!(
         directory.status.success(),
@@ -155,31 +152,27 @@ fn plain_compiler_process_without_private_runtime() {
         text(&directory)
     );
     assert_eq!(String::from_utf8_lossy(&directory.stdout), "42\n");
-    std::fs::write(root.path().join("broken.rock"), "fn broken( {\n").unwrap();
+    write(root.path(), "broken.rock", "fn broken( {\n");
     let rejected = invoke(root.path(), &["check", "broken.rock"]);
     assert!(
         !rejected.status.success(),
         "check accepted an invalid program"
     );
     std::fs::remove_file(root.path().join("broken.rock")).unwrap();
-    std::fs::write(
-        root.path().join("fails.rock"),
+    write(
+        root.path(),
+        "fails.rock",
         "@test inline(lua) fn fails() = \"error('intentional test failure')\"\n",
-    )
-    .unwrap();
+    );
     let failed = invoke(root.path(), &["test", "fails.rock"]);
     assert!(!failed.status.success(), "test accepted a runtime error");
-    assert!(
-        text(&failed).contains("intentional test failure"),
-        "{}",
-        text(&failed)
-    );
+    assert_mentions(&failed, "intentional test failure");
     assert!(
         !root.path().join("tmp").exists(),
         "plain test created <cwd>/tmp after failure"
     );
     std::fs::remove_file(root.path().join("fails.rock")).unwrap();
-    std::fs::write(root.path().join("main.rock"), "fn   main(  ){print(6*7)}\n").unwrap();
+    write(root.path(), "main.rock", "fn   main(  ){print(6*7)}\n");
     let unformatted = invoke(root.path(), &["fmt", "main.rock", "--check"]);
     assert!(
         !unformatted.status.success(),
@@ -202,7 +195,7 @@ fn library_resolves_game_services_without_private_registration() {
     ));
     let services = RuntimeServices::registered();
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("stone_ffi.rock"), "// engine marker\n").unwrap();
+    write(root.path(), "stone_ffi.rock", "// engine marker\n");
     assert!((services.is_game_project)(root.path()).unwrap());
     assert!(
         (services.configured_runtime_dir)(root.path())
@@ -244,7 +237,7 @@ fn retired_backend_is_rejected_before_source_discovery() {
     for command in ["compile", "test", "run"] {
         let out = invoke(root.path(), &[command, "missing.rock", "--backend", "c"]);
         assert!(!out.status.success());
-        assert!(text(&out).contains("invalid value"), "{}", text(&out));
+        assert_mentions(&out, "invalid value");
     }
     assert!(!root.path().join("tmp").exists());
 }
@@ -271,16 +264,8 @@ fn js_backend_is_served_by_the_plain_cli() {
     }
     let out = invoke(root.path(), &["compile", "missing.rock", "--backend", "js"]);
     assert!(!out.status.success());
-    assert!(
-        text(&out).contains("the `js` backend cannot serve `compile`"),
-        "{}",
-        text(&out)
-    );
-    assert!(
-        text(&out).contains("Supported commands: test, run"),
-        "{}",
-        text(&out)
-    );
+    assert_mentions(&out, "the `js` backend cannot serve `compile`");
+    assert_mentions(&out, "Supported commands: test, run");
     let help = invoke(root.path(), &["--help"]);
     assert!(help.status.success());
     assert!(
@@ -290,32 +275,6 @@ fn js_backend_is_served_by_the_plain_cli() {
     );
 }
 
-#[test]
-fn plain_parser_rejects_options_whose_private_rules_are_absent() {
-    let root = tempfile::tempdir().unwrap();
-    let help = invoke(root.path(), &["--help"]);
-    assert!(help.status.success());
-    let help = text(&help);
-    for option in [
-        "--require-test",
-        "--show-passing",
-        "--all-rejections",
-        "--rejections-out",
-    ] {
-        let out = invoke(root.path(), &["test", "missing.rock", option, "sentinel"]);
-        assert!(!out.status.success());
-        assert!(
-            text(&out).contains("unexpected argument"),
-            "{option}: {}",
-            text(&out)
-        );
-        assert!(
-            !help.contains(option),
-            "removed option remained in public help: {option}"
-        );
-    }
-}
-
 // A package's identity-storage migration state is its own manifest's
 // declaration: the package name exempts nothing, and the declaration reaches
 // both checking backends and the LSP of the plain compiler.
@@ -323,15 +282,20 @@ fn plain_parser_rejects_options_whose_private_rules_are_absent() {
 fn plain_identity_storage_follows_the_manifest_declaration() {
     let root = tempfile::tempdir().unwrap();
     let manifest = |language: &str| {
-        std::fs::write(
-            root.path().join("stick.toml"),
+        write(
+            root.path(),
+            "stick.toml",
             format!("[package]\nname = \"stone\"\n{language}"),
-        )
-        .unwrap();
+        );
     };
     let write_source = |header: &str| {
-        std::fs::write(root.path().join("main.rock"),
-            format!("{header}struct Actor {{ hp: int }}\nstruct Holder {{ actor: Actor }}\nfn main() {{}}\n")).unwrap();
+        write(
+            root.path(),
+            "main.rock",
+            format!(
+                "{header}struct Actor {{ hp: int }}\nstruct Holder {{ actor: Actor }}\nfn main() {{}}\n"
+            ),
+        );
     };
     let commands: [&[&str]; 3] = [
         &["check", ".", "--backend", "bone"],
@@ -399,16 +363,12 @@ fn plain_watch_resolves_project_outside_workspace() {
         }
     }
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(
-        root.path().join("stick.toml"),
+    write(
+        root.path(),
+        "stick.toml",
         "[package]\nname = \"plain-watch\"\n",
-    )
-    .unwrap();
-    std::fs::write(
-        root.path().join("main.rock"),
-        "fn main() { print(6 * 7) }\n",
-    )
-    .unwrap();
+    );
+    write(root.path(), "main.rock", "fn main() { print(6 * 7) }\n");
     let output = root.path().join("watched.lua");
     let log = root.path().join("watch.log");
     for fail in [false, true] {
@@ -416,14 +376,10 @@ fn plain_watch_resolves_project_outside_workspace() {
             std::fs::remove_file(&output).unwrap();
         }
         let stream = std::fs::File::create(&log).unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_rock"))
-            .current_dir(root.path())
+        let mut child = rock(root.path())
             .args(["watch", ".", "--output"])
             .arg(&output)
-            .env("ROCK_DIR", root.path())
-            .env("ROCK_INVOCATION_LOG", "off")
             .env("ROCK_LOG", "info")
-            .env_remove("ROCK_STDLIB_DIR")
             .env_remove("ROCK_BACKEND")
             .stdout(Stdio::from(stream.try_clone().unwrap()))
             .stderr(Stdio::from(stream))
@@ -490,24 +446,16 @@ log:close()
                 ""
             }
         );
-        std::fs::write(root.path().join("scratch.rock"), source).unwrap();
-        let out = Command::new(env!("CARGO_BIN_EXE_rock"))
-            .current_dir(root.path())
+        write(root.path(), "scratch.rock", source);
+        let out = rock(root.path())
             .args(["test", "scratch.rock"])
-            .env("ROCK_DIR", root.path())
             .env("SCRATCH_LOG", &log)
-            .env("ROCK_INVOCATION_LOG", "off")
             .env("ROCK_TEST_VERBOSE", "1")
-            .env_remove("ROCK_STDLIB_DIR")
             .output()
             .unwrap();
         assert_eq!(out.status.success(), !fail, "{}", text(&out));
         if fail {
-            assert!(
-                text(&out).contains("intentional scratch failure"),
-                "{}",
-                text(&out)
-            );
+            assert_mentions(&out, "intentional scratch failure");
         }
         let scratch = std::fs::read_to_string(&log).unwrap();
         assert!(
@@ -522,85 +470,59 @@ log:close()
 }
 
 #[test]
-fn plain_parser_rejects_private_runtime_options() {
+fn plain_parser_rejects_options_of_absent_private_rules_and_runtimes() {
     let root = tempfile::tempdir().unwrap();
     let help = invoke(root.path(), &["--help"]);
     assert!(help.status.success());
     let help = text(&help);
-    for (option, value) in [
-        ("--warmup-seconds", Some("0")),
-        ("--workers", None),
-        ("--isolated", None),
-        ("--multi-order", None),
-        ("--renderer", Some("gl")),
-        ("--dump-state", None),
-        ("--port", Some("8000")),
-        ("--single-file", None),
-        ("--itch", None),
-        ("--agent-headless", None),
-        ("--agent-access", None),
-        ("--level", Some("catalog-entry")),
-        ("--daemon-sock", Some("daemon.sock")),
+    for (command, option, value) in [
+        ("fix", "--across-yield", None),
+        ("test", "--require-test", Some("sentinel")),
+        ("test", "--show-passing", Some("sentinel")),
+        ("test", "--all-rejections", Some("sentinel")),
+        ("test", "--rejections-out", Some("sentinel")),
+        ("check", "--warmup-seconds", Some("0")),
+        ("check", "--workers", None),
+        ("check", "--isolated", None),
+        ("check", "--multi-order", None),
+        ("check", "--renderer", Some("gl")),
+        ("check", "--dump-state", None),
+        ("check", "--port", Some("8000")),
+        ("check", "--single-file", None),
+        ("check", "--itch", None),
+        ("check", "--agent-headless", None),
+        ("check", "--agent-access", None),
+        ("check", "--level", Some("catalog-entry")),
+        ("check", "--daemon-sock", Some("daemon.sock")),
     ] {
-        let mut argv = vec!["check", "missing.rock", option];
+        let mut argv = vec![command, "missing.rock", option];
         argv.extend(value);
         let out = invoke(root.path(), &argv);
         assert_eq!(out.status.code(), Some(2), "{option}: {}", text(&out));
-        assert!(
-            text(&out).contains(&format!("unexpected argument '{option}'")),
-            "{}",
-            text(&out)
-        );
+        assert_mentions(&out, &format!("unexpected argument '{option}'"));
         assert!(
             !help.contains(option),
             "removed option remained in public help: {option}"
         );
     }
-    let matches = rock_cli::Args::command()
-        .try_get_matches_from([
-            "rock",
-            "test",
-            "main.rock",
-            "--watch",
-            "--iters",
-            "2",
-            "--warmup",
-            "0",
-            "--channel",
-            "release",
-            "--target-os",
-            "web",
-            "--format",
-            "json",
-        ])
-        .unwrap();
-    let args = rock_cli::Args::from_matches(matches);
-    assert!(args.watch);
-    assert_eq!(args.iters, 2);
-    assert_eq!(args.warmup, 0);
-    assert_eq!(args.target_os.as_deref(), Some("web"));
-    assert_eq!(args.perf_format, "json");
     assert!(!root.path().join("tmp").exists());
 }
 
 #[test]
 fn plain_compile_has_no_cross_process_slot_policy() {
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("main.rock"), "fn main() {}\n").unwrap();
-    std::fs::write(
-        root.path().join("stick.toml"),
+    write(root.path(), "main.rock", "fn main() {}\n");
+    write(
+        root.path(),
+        "stick.toml",
         r#"[package]
 name = "slot-probe"
 type = "bin"
 "#,
-    )
-    .unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
-        .current_dir(root.path())
+    );
+    let out = rock(root.path())
         .args(["compile", ".", "out.lua"])
         .env("HOME", root.path())
-        .env("ROCK_DIR", root.path())
-        .env("ROCK_INVOCATION_LOG", "off")
         .env_remove("ROCK_COMPILE_ADMISSION")
         .env_remove("ROCK_COMPILE_SLOTS")
         .env_remove("ROCK_COMPILE_SLOT_DIR")
@@ -697,17 +619,14 @@ fn plain_rejects_nesting_beyond_the_limit_with_a_diagnostic() {
 fn plain_writes_an_invocation_log_only_where_rock_invocation_log_names() {
     let root = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("main.rock"), "fn main() {}\n").unwrap();
+    write(root.path(), "main.rock", "fn main() {}\n");
     let run = |log: Option<&std::path::Path>| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_rock"));
+        let mut command = rock(root.path());
         command
-            .current_dir(root.path())
             .args(["fmt", "--check", "main.rock"])
-            .env("ROCK_DIR", root.path())
             .env("XDG_STATE_HOME", state.path())
             .env("HOME", state.path())
-            .env_remove("ROCK_INVOCATION_LOG")
-            .env_remove("ROCK_STDLIB_DIR");
+            .env_remove("ROCK_INVOCATION_LOG");
         if let Some(log) = log {
             command.env("ROCK_INVOCATION_LOG", log);
         }
@@ -817,11 +736,7 @@ fn plain_rock_runs_relocated_outside_any_checkout() {
         .join(if cfg!(windows) { "rock.exe" } else { "rock" });
     relocate(env!("CARGO_BIN_EXE_rock"), &exe);
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(
-        root.path().join("main.rock"),
-        "fn main() { print(6 * 7) }\n",
-    )
-    .unwrap();
+    write(root.path(), "main.rock", "fn main() { print(6 * 7) }\n");
     let run = |args: &[&str]| start_relocated(&exe, root.path(), args);
     let compiled = run(&["compile-single", "main.rock"]);
     assert!(compiled.status.success(), "{}", text(&compiled));
@@ -838,11 +753,8 @@ fn plain_rock_runs_relocated_outside_any_checkout() {
 fn plain_rejects_a_thread_count_that_is_not_a_count() {
     let root = tempfile::tempdir().unwrap();
     for var in ["ROCK_NUM_THREADS", "RAYON_NUM_THREADS"] {
-        let out = Command::new(env!("CARGO_BIN_EXE_rock"))
-            .current_dir(root.path())
+        let out = rock(root.path())
             .args(["fmt", "--check", "missing.rock"])
-            .env("ROCK_DIR", root.path())
-            .env("ROCK_INVOCATION_LOG", "off")
             .env_remove("ROCK_NUM_THREADS")
             .env_remove("RAYON_NUM_THREADS")
             .env(var, "eight")
@@ -859,16 +771,16 @@ fn plain_rejects_a_thread_count_that_is_not_a_count() {
 
 fn line_directive_project() -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(
-        root.path().join("main.rock"),
+    write(
+        root.path(),
+        "main.rock",
         "fn main() {\n    print(\"hi\")\n}\n",
-    )
-    .unwrap();
-    std::fs::write(
-        root.path().join("stick.toml"),
+    );
+    write(
+        root.path(),
+        "stick.toml",
         "[package]\nname = \"lines\"\ntype = \"bin\"\n",
-    )
-    .unwrap();
+    );
     root
 }
 
@@ -908,18 +820,15 @@ fn plain_lua_line_directives_reject_a_release_channel() {
         ],
     );
     assert!(!out.status.success(), "{}", text(&out));
-    assert!(
-        text(&out).contains("Lua line directives are a development option"),
-        "{}",
-        text(&out)
-    );
+    assert_mentions(&out, "Lua line directives are a development option");
 }
 
 #[test]
 fn run_lets_a_program_outlive_the_test_runner_timeout() {
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(
-        root.path().join("slow.rock"),
+    write(
+        root.path(),
+        "slow.rock",
         r#"inline(lua) fn busy_wait(seconds: float) = """
     local deadline = os.clock() + seconds
     while os.clock() < deadline do end
@@ -929,11 +838,10 @@ fn main() {
     print("done")
 }
 "#,
-    )
-    .unwrap();
+    );
     let out = invoke(root.path(), &["run", "slow.rock"]);
     assert!(out.status.success(), "{}", text(&out));
-    assert!(text(&out).contains("done"), "{}", text(&out));
+    assert_mentions(&out, "done");
 }
 
 #[test]
@@ -975,6 +883,27 @@ fn public_frame_and_perf_options_preserve_their_units_and_defaults() {
     assert_eq!((perf.gc_window, perf.gc_window_start), (3, 2));
     assert_eq!(perf.gc_window_mode, "running");
     assert!(perf.headless && perf.jv);
+    let test = parse(&[
+        "rock",
+        "test",
+        "main.rock",
+        "--watch",
+        "--iters",
+        "2",
+        "--warmup",
+        "0",
+        "--channel",
+        "release",
+        "--target-os",
+        "web",
+        "--format",
+        "json",
+    ]);
+    assert!(test.watch);
+    assert_eq!(test.iters, 2);
+    assert_eq!(test.warmup, 0);
+    assert_eq!(test.target_os.as_deref(), Some("web"));
+    assert_eq!(test.perf_format, "json");
 }
 
 #[test]
@@ -1006,10 +935,9 @@ registration_functions = []
     for path in ["game", "game/main.rock"] {
         let output = invoke(root.path(), &["lint", path, args[2]]);
         assert!(output.status.success(), "{}", text(&output));
-        assert!(
-            text(&output).contains("production Sample action `DO_MOVE` has no production caller"),
-            "{}",
-            text(&output)
+        assert_mentions(
+            &output,
+            "production Sample action `DO_MOVE` has no production caller",
         );
     }
     let default = invoke(root.path(), &["lint", "game"]);
@@ -1033,11 +961,7 @@ registration_functions = []
     std::fs::write(&manifest, format!("{header}{rules}unknown_rule = true\n")).unwrap();
     let invalid = invoke(root.path(), &args);
     assert!(!invalid.status.success(), "{}", text(&invalid));
-    assert!(
-        text(&invalid).contains("unknown field"),
-        "{}",
-        text(&invalid)
-    );
+    assert_mentions(&invalid, "unknown field");
 }
 
 #[cfg(target_os = "linux")]
@@ -1084,21 +1008,19 @@ fn headless_launch_uses_the_shared_scope_and_preserves_command_inputs() {
 #[test]
 fn explicit_runner_policy_controls_admission_and_log_context() {
     let root = tempfile::tempdir().unwrap();
-    std::fs::write(root.path().join("main.rock"), "fn main() {}\n").unwrap();
-    std::fs::write(
-        root.path().join("stick.toml"),
+    write(root.path(), "main.rock", "fn main() {}\n");
+    write(
+        root.path(),
+        "stick.toml",
         "[package]\nname = \"runner-policy\"\n",
-    )
-    .unwrap();
+    );
     let slots = root.path().join("slots");
     let log = root.path().join("invocations.jsonl");
     let policy = serde_json::json!({"dir": slots, "pool_mib": 1024, "full_compile_mib": 512,
         "preferred_slot": "priority-0", "try_preferred_slot": true});
     let run = |policy: &str| {
-        Command::new(env!("CARGO_BIN_EXE_rock"))
-            .current_dir(root.path())
+        rock(root.path())
             .args(["compile", ".", "out.lua"])
-            .env("ROCK_DIR", root.path())
             .env("ROCK_COMPILE_ADMISSION", policy)
             .env("ROCK_LOG", "debug")
             .env("ROCK_LOG_COLOR", "never")
@@ -1111,11 +1033,7 @@ fn explicit_runner_policy_controls_admission_and_log_context() {
     };
     let output = run(&policy.to_string());
     assert!(output.status.success(), "{}", text(&output));
-    assert!(
-        text(&output).contains("took compile slot priority-0"),
-        "{}",
-        text(&output)
-    );
+    assert_mentions(&output, "took compile slot priority-0");
     let record: serde_json::Value = serde_json::from_str(
         std::fs::read_to_string(&log)
             .unwrap()
@@ -1141,11 +1059,7 @@ fn explicit_runner_policy_controls_admission_and_log_context() {
     ] {
         let output = run(&invalid);
         assert!(!output.status.success(), "{}", text(&output));
-        assert!(
-            text(&output).contains("ROCK_COMPILE_ADMISSION"),
-            "{}",
-            text(&output)
-        );
+        assert_mentions(&output, "ROCK_COMPILE_ADMISSION");
     }
     assert!(run("null").status.success());
 }
