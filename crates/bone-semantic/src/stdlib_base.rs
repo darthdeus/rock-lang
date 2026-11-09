@@ -101,6 +101,15 @@ fn macro_names(ast: &Ast) -> impl Iterator<Item = Ustr> + '_ {
     })
 }
 
+/// What decides whether a user module admits the base: the stdlib's names,
+/// read off the parse trees alone. Much cheaper than the base itself, so a
+/// pass the stdlib rejects (a game overloading an operator the stdlib also
+/// defines) never pays for lowering and inferring the stdlib twice.
+struct StdlibNames {
+    names: WarmNames,
+    files: FxHashSet<Ustr>,
+}
+
 struct StdlibBase {
     /// The stdlib modules expanded, lowered and inferred alone, with no
     /// error anywhere.
@@ -108,11 +117,25 @@ struct StdlibBase {
     /// The stdlib's own macros, which a qualifying pass extends with its
     /// user modules' macros.
     registry: MacroRegistry,
-    names: WarmNames,
-    files: FxHashSet<Ustr>,
 }
 
+static NAMES: OnceLock<Option<StdlibNames>> = OnceLock::new();
 static BASE: OnceLock<Option<StdlibBase>> = OnceLock::new();
+
+/// The stdlib's names, built on first use; `None` when the stdlib does not
+/// parse.
+fn names() -> Option<&'static StdlibNames> {
+    NAMES
+        .get_or_init(|| {
+            let stdlib = skull_parser::stdlib::cached().as_ref().ok()?;
+            let contributions: Vec<FragmentContribution> = stdlib.iter().map(contribute).collect();
+            Some(StdlibNames {
+                names: warm_names(stdlib, &contributions),
+                files: stdlib.iter().map(|ast| ast.file).collect(),
+            })
+        })
+        .as_ref()
+}
 
 /// The shared base, built on first use; `None` when the stdlib alone does not
 /// check cleanly (then a combined pass decides what that means).
@@ -145,13 +168,7 @@ fn build() -> Option<StdlibBase> {
         return None;
     }
     ws.phase_timings.clear();
-    let contributions: Vec<FragmentContribution> = stdlib.iter().map(contribute).collect();
-    Some(StdlibBase {
-        ws,
-        registry,
-        names: warm_names(stdlib, &contributions),
-        files: stdlib.iter().map(|ast| ast.file).collect(),
-    })
+    Some(StdlibBase { ws, registry })
 }
 
 /// The process stdlib expanded, lowered and inferred alone, when `warm` is
@@ -175,13 +192,15 @@ fn has_errors(ws: &Workspace) -> bool {
         })
 }
 
-impl StdlibBase {
+impl StdlibNames {
     /// Whether `user` leaves the stdlib modules as a combined pass builds
     /// them: not a stdlib file itself, and apart from every stdlib name.
     fn admits(&self, user: &Ast) -> bool {
         !self.files.contains(&user.file) && apart_from(&self.names, user, &contribute(user))
     }
+}
 
+impl StdlibBase {
     /// A copy of the base workspace with its own reuse counters (a clone
     /// would share them with every other copy).
     fn workspace(&self) -> Workspace {
@@ -206,12 +225,13 @@ pub(crate) fn semantic_pass(
     if !skull_parser::stdlib::is_process_stdlib(modules.shared()) {
         return None;
     }
+    let names = names()?;
+    if !modules.rest().iter().all(|user| names.admits(user)) {
+        return None;
+    }
     let base_timer = Instant::now();
     let base = base()?;
     let base_time = base_timer.elapsed();
-    if !modules.rest().iter().all(|user| base.admits(user)) {
-        return None;
-    }
     // A user macro is under no name the stdlib reaches, so the stdlib
     // expands against this registry as against its own.
     let registry = if modules
