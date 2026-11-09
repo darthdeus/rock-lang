@@ -1210,7 +1210,8 @@ mod tests {
 #[cfg(test)]
 mod watch_reload_tests {
     use super::{
-        StoneWatcher, categorize_stone_changes, retain_production_changes, stone_source_watch_paths,
+        StoneChanges, StoneWatcher, categorize_stone_changes, retain_production_changes,
+        stone_source_watch_paths,
     };
     use crate::FileChangeEvent;
     use crate::game_runtime::{GameCompiler, SkullGameCompiler};
@@ -1222,6 +1223,16 @@ mod watch_reload_tests {
 
     fn run_lua(code: &str) -> anyhow::Result<rock_host::lua_runner::LuaRun> {
         rock_engine_host::runtime::run_lua_code_with_timeout(code, Some(HANG_BACKSTOP))
+    }
+
+    fn categorize(event: &FileChangeEvent) -> StoneChanges {
+        categorize_stone_changes(
+            event,
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
     }
 
     struct Fixture {
@@ -1283,12 +1294,30 @@ mod watch_reload_tests {
             }
         }
 
+        fn watch(&self, restart: Vec<PathBuf>) -> (StoneWatcher, Receiver<FileChangeEvent>) {
+            let (tx, rx) = channel();
+            let mut watcher = StoneWatcher::new(Default::default(), restart, tx);
+            watcher
+                .refresh(
+                    stone_source_watch_paths(self.root.to_str().unwrap(), &self.compiler),
+                    &Default::default(),
+                )
+                .unwrap();
+            (watcher, rx)
+        }
+
+        fn retain(&self, changes: &mut HashSet<PathBuf>, inputs: &HashSet<PathBuf>) {
+            retain_production_changes(
+                changes,
+                self.root.to_str().unwrap(),
+                self.compiler.package_roots(),
+                inputs,
+            );
+        }
+
         fn assert_reload(mut self, atomic: bool) {
             let before = std::fs::read_to_string(&self.main).unwrap();
-            let roots = stone_source_watch_paths(self.root.to_str().unwrap(), &self.compiler);
-            let (tx, rx) = channel();
-            let mut watcher = StoneWatcher::new(Default::default(), Vec::new(), tx);
-            watcher.refresh(roots, &Default::default()).unwrap();
+            let (_watcher, rx) = self.watch(Vec::new());
             let text = std::fs::read_to_string(&self.edited)
                 .unwrap()
                 .replace("a + 1", "a + 10");
@@ -1300,19 +1329,8 @@ mod watch_reload_tests {
                 std::fs::write(&self.edited, text).unwrap();
             }
             let event = receive_path(&rx, &self.edited);
-            let mut changes = categorize_stone_changes(
-                &event,
-                &Default::default(),
-                &Default::default(),
-                &Default::default(),
-                &Default::default(),
-            );
-            retain_production_changes(
-                &mut changes.changed_paths,
-                self.root.to_str().unwrap(),
-                self.compiler.package_roots(),
-                &Default::default(),
-            );
+            let mut changes = categorize(&event);
+            self.retain(&mut changes.changed_paths, &Default::default());
             assert!(
                 changes.changed_paths.contains(&self.edited),
                 "Stone dropped source edit: {:?}",
@@ -1411,24 +1429,11 @@ mod watch_reload_tests {
         let sim = sims.join("probe.rock");
         std::fs::write(&sim, "fn probe() {}\n").unwrap();
         let before = std::fs::read(&fixture.main).unwrap();
-        let (tx, rx) = channel();
-        let mut watcher = StoneWatcher::new(Default::default(), Vec::new(), tx);
-        watcher
-            .refresh(
-                stone_source_watch_paths(fixture.root.to_str().unwrap(), &fixture.compiler),
-                &Default::default(),
-            )
-            .unwrap();
+        let (_watcher, rx) = fixture.watch(Vec::new());
         let barrier = drain_setup_events(&rx, &sims);
 
         let event = write_until_reported(&rx, &sim, "fn probe( {\n");
-        let mut changes = categorize_stone_changes(
-            &event,
-            &Default::default(),
-            &Default::default(),
-            &Default::default(),
-            &Default::default(),
-        );
+        let mut changes = categorize(&event);
         // Setup writes of the fixture may be reported in the same batch; they are
         // not the edit under test.
         for setup in [
@@ -1439,12 +1444,7 @@ mod watch_reload_tests {
             changes.changed_paths.remove(setup);
         }
         assert_eq!(changes.changed_paths, HashSet::from([sim.clone()]));
-        retain_production_changes(
-            &mut changes.changed_paths,
-            fixture.root.to_str().unwrap(),
-            fixture.compiler.package_roots(),
-            &Default::default(),
-        );
+        fixture.retain(&mut changes.changed_paths, &Default::default());
         assert!(
             changes.changed_paths.is_empty(),
             "sim edit reached the game compiler"
@@ -1457,22 +1457,12 @@ mod watch_reload_tests {
 
         std::fs::remove_file(&sim).unwrap();
         let mut removed = HashSet::from([sim.clone()]);
-        retain_production_changes(
-            &mut removed,
-            fixture.root.to_str().unwrap(),
-            fixture.compiler.package_roots(),
-            &Default::default(),
-        );
+        fixture.retain(&mut removed, &Default::default());
         assert!(removed.is_empty(), "deleted sim reached the game compiler");
 
         let inputs = HashSet::from([sim.clone()]);
         let mut embedded = HashSet::from([sim.clone()]);
-        retain_production_changes(
-            &mut embedded,
-            fixture.root.to_str().unwrap(),
-            fixture.compiler.package_roots(),
-            &inputs,
-        );
+        fixture.retain(&mut embedded, &inputs);
         assert_eq!(
             embedded,
             HashSet::from([sim]),
@@ -1487,14 +1477,7 @@ mod watch_reload_tests {
         let restart_dir = fixture.root.parent().unwrap().join("tmp");
         std::fs::create_dir_all(&restart_dir).unwrap();
         let restart = restart_dir.join("restart.txt");
-        let (tx, rx) = channel();
-        let mut watcher = StoneWatcher::new(Default::default(), vec![restart.clone()], tx);
-        watcher
-            .refresh(
-                stone_source_watch_paths(fixture.root.to_str().unwrap(), &fixture.compiler),
-                &Default::default(),
-            )
-            .unwrap();
+        let (_watcher, rx) = fixture.watch(vec![restart.clone()]);
         std::fs::write(&scratch, "fn scratch() {}\n").unwrap();
         std::fs::write(restart_dir.join("unrelated.rock"), "fn unrelated() {}\n").unwrap();
         // Force create and write into separate batches: both may legitimately
@@ -1508,13 +1491,7 @@ mod watch_reload_tests {
         loop {
             assert!(event.is_restart_trigger, "unexpected event: {event:?}");
             assert_eq!(event.paths, HashSet::from([restart.clone()]));
-            let changes = categorize_stone_changes(
-                &event,
-                &Default::default(),
-                &Default::default(),
-                &Default::default(),
-                &Default::default(),
-            );
+            let changes = categorize(&event);
             assert!(changes.changed_paths.is_empty());
 
             assert!(Instant::now() < deadline, "watcher never became quiet");
@@ -1726,24 +1703,11 @@ mod watch_reload_tests {
         .unwrap();
         let source = helper.join("lib.rock");
         std::fs::write(&source, "@nomangle fn library_banner() -> int { 7 }\n").unwrap();
-        let (tx, rx) = channel();
-        let mut watcher = StoneWatcher::new(Default::default(), Vec::new(), tx);
-        watcher
-            .refresh(
-                stone_source_watch_paths(fixture.root.to_str().unwrap(), &fixture.compiler),
-                &Default::default(),
-            )
-            .unwrap();
+        let (mut watcher, rx) = fixture.watch(Vec::new());
         let manifest = fixture.root.join("stick.toml");
         std::fs::write(&manifest, "[package]\nname = \"watch-game\"\n[dependencies]\nhelper = { path = \"../new-helper\" }\n").unwrap();
         let event = receive_path(&rx, &manifest);
-        let changes = categorize_stone_changes(
-            &event,
-            &Default::default(),
-            &Default::default(),
-            &Default::default(),
-            &Default::default(),
-        );
+        let changes = categorize(&event);
         fixture
             .compiler
             .compile(&changes.changed_paths, false)
@@ -1758,13 +1722,7 @@ mod watch_reload_tests {
         let before = std::fs::read_to_string(&fixture.main).unwrap();
         std::fs::write(&source, "@nomangle fn library_banner() -> int { 8 }\n").unwrap();
         let event = receive_path(&rx, &source);
-        let changes = categorize_stone_changes(
-            &event,
-            &Default::default(),
-            &Default::default(),
-            &Default::default(),
-            &Default::default(),
-        );
+        let changes = categorize(&event);
         let outcome = fixture
             .compiler
             .compile(&changes.changed_paths, false)
