@@ -223,6 +223,24 @@ pub(crate) fn drop_in_background<T>(value: T) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn parallel_join_carries_compile_modes_into_both_branches() {
+        let _inline = skull_transform::inline_off_guard();
+        let _report = crate::allocation_report::scope(true);
+        let _activation = crate::allocation_report::activation_scope(true);
+        let modes = || {
+            (
+                skull_transform::inline_off_active(),
+                crate::allocation_report::enabled(),
+                crate::allocation_report::activation_enabled(),
+            )
+        };
+        assert_eq!(
+            parallel_join(modes, modes),
+            ((true, true, true), (true, true, true))
+        );
+    }
+
     /// A pool thread waiting inside one compile's join can steal an item of
     /// another compile, so an item's mode must not depend on what its host
     /// thread currently holds.
