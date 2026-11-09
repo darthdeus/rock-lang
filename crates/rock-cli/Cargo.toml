@@ -66,7 +66,6 @@ rustc-hash = { workspace = true }
 ustr = { workspace = true }
 mimalloc = "0.1"
 rayon = { workspace = true }
-fs_extra = { workspace = true }
 atomic_refcell = { workspace = true }
 log = { workspace = true }
 parking_lot = { workspace = true }

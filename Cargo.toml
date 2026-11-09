@@ -90,7 +90,6 @@ sound-core = { path = "crates/sound-core" }
 symphonia = { version = "0.5.5", default-features = false, features = ["aiff", "flac", "mp3", "ogg", "pcm", "vorbis", "wav"] }
 
 clap_complete = "4.5"
-fs_extra = "1.3.0"
 notify = { version = "8.0.0", default-features = false }
 notify-debouncer-full = { version = "0.5.0", default-features = false }
 regex-lite = "0.1"
