@@ -310,6 +310,33 @@ pub struct UsePathRef {
     pub segments: Vec<Ustr>,
 }
 
+impl UsePathRef {
+    /// Order use paths exactly as the joined `"::"` string would, without
+    /// allocating it: the byte stream is the segments with `::` between them,
+    /// so a segment boundary compares as the separator bytes (a segment that
+    /// is a prefix of another does not simply sort first).
+    pub fn cmp_joined(&self, other: &UsePathRef) -> std::cmp::Ordering {
+        fn joined_bytes(path: &UsePathRef) -> impl Iterator<Item = u8> + '_ {
+            path.segments.iter().enumerate().flat_map(|(i, s)| {
+                let sep: &[u8] = if i == 0 { b"" } else { b"::" };
+                sep.iter().copied().chain(s.as_bytes().iter().copied())
+            })
+        }
+        self.from_root
+            .cmp(&other.from_root)
+            .then_with(|| joined_bytes(self).cmp(joined_bytes(other)))
+    }
+
+    /// Insert `path` into `paths`, kept in [`UsePathRef::cmp_joined`] order
+    /// (after any equal path, as a stable sort of the insertion order would
+    /// place it), so lookups walk glob bindings in a fixed order without
+    /// sorting them each time.
+    pub fn insert_sorted<T>(paths: &mut Vec<T>, item: T, path: impl Fn(&T) -> &UsePathRef) {
+        let at = paths.partition_point(|p| path(p).cmp_joined(path(&item)).is_le());
+        paths.insert(at, item);
+    }
+}
+
 /// Host-supplied alias tables (one entry per package), so cross-package
 /// resolution uses the graph's dependency names rather than guessing.
 pub use rock_core::package_aliases::{NsAliases, PackageAliases};
@@ -687,4 +714,70 @@ pub fn def_key(pkg_self_name: &str, module_path: &[Ustr], name: &str) -> Ustr {
     key.push_str("::");
     key.push_str(name);
     Ustr::from(&key)
+}
+
+#[cfg(test)]
+mod path_order_tests {
+    use super::UsePathRef;
+    use std::cmp::Ordering;
+    use ustr::ustr;
+
+    fn path(from_root: bool, segments: &[&str]) -> UsePathRef {
+        UsePathRef {
+            from_root,
+            segments: segments.iter().map(|s| ustr(s)).collect(),
+        }
+    }
+
+    /// The order the allocating key produced: `(from_root, joined)`.
+    fn joined_key(p: &UsePathRef) -> (bool, String) {
+        (
+            p.from_root,
+            p.segments
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("::"),
+        )
+    }
+
+    #[test]
+    fn cmp_joined_matches_joined_string_order() {
+        let paths = [
+            path(false, &[]),
+            path(true, &[]),
+            path(false, &["a"]),
+            path(false, &["a", "b"]),
+            path(false, &["a-", "b"]),
+            path(false, &["a", "b-"]),
+            path(false, &["a:"]),
+            path(false, &["a::"]),
+            path(false, &["", "a"]),
+            path(false, &["a", ""]),
+            path(false, &["A"]),
+            path(false, &["_"]),
+            path(false, &["a_b"]),
+            path(false, &["self", "x"]),
+            path(false, &["super", "x"]),
+            path(true, &["a"]),
+            path(true, &["a", "b"]),
+            path(false, &["ab"]),
+            path(false, &["a", "bc"]),
+        ];
+        for a in &paths {
+            for b in &paths {
+                assert_eq!(
+                    a.cmp_joined(b),
+                    joined_key(a).cmp(&joined_key(b)),
+                    "order differs for {a:?} vs {b:?}"
+                );
+            }
+        }
+        // The trap, spelled out: joined order puts "a-" before "a"
+        // ('-' < ':'), naive segment order would not.
+        assert_eq!(
+            path(false, &["a-", "b"]).cmp_joined(&path(false, &["a", "b"])),
+            Ordering::Less
+        );
+    }
 }

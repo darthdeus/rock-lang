@@ -2282,7 +2282,7 @@ fn flatten_use_decl(
         match (local, decl.vis.is_some()) {
             (local, true) => share_export(ws, pkg_id, path, local, target, decl, errs),
             (Some(local), false) => scope.named.entry(local).or_default().push(target),
-            (None, false) => scope.globs.push(target),
+            (None, false) => UsePathRef::insert_sorted(&mut scope.globs, target, |p| p),
         }
     }
 }
@@ -2311,7 +2311,7 @@ fn share_export(
         ..Default::default()
     });
     let Some(local) = local else {
-        node.glob_exports.push(binding);
+        UsePathRef::insert_sorted(&mut node.glob_exports, binding, |b| &b.target);
         return;
     };
     if node.exports.insert(local, binding).is_some() {

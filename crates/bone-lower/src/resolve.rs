@@ -707,20 +707,8 @@ fn glob_candidates(
         &mut visiting,
     )?
     .found;
-    // The common fragment globs at most one module; sorting is identity
-    // there, so only pay the clone when order can differ.
-    let sorted;
-    let globs: &[UsePathRef] = if frag.globs.len() <= 1 {
-        &frag.globs
-    } else {
-        sorted = {
-            let mut g = frag.globs.clone();
-            g.sort_by(cmp_use_path);
-            g
-        };
-        &sorted
-    };
-    for glob in globs {
+    // `frag.globs` is kept in path order (`UsePathRef::insert_sorted`).
+    for glob in &frag.globs {
         // Every fragment glob was checked where it is declared
         // (`check_use_target`), so a failure here is a real diagnostic.
         if let Landing::Module(pkg_id, path) =
@@ -732,22 +720,6 @@ fn glob_candidates(
     hits.sort_by_key(Resolved::sort_key);
     hits.dedup();
     Ok(hits)
-}
-
-/// Order use paths exactly as the joined `"::"` string would, without
-/// allocating it: the byte stream is the segments with `::` between them,
-/// so a segment boundary compares as the separator bytes (a segment that
-/// is a prefix of another does not simply sort first).
-fn cmp_use_path(a: &UsePathRef, b: &UsePathRef) -> std::cmp::Ordering {
-    fn joined_bytes(path: &UsePathRef) -> impl Iterator<Item = u8> + '_ {
-        path.segments.iter().enumerate().flat_map(|(i, s)| {
-            let sep: &[u8] = if i == 0 { b"" } else { b"::" };
-            sep.iter().copied().chain(s.as_bytes().iter().copied())
-        })
-    }
-    a.from_root
-        .cmp(&b.from_root)
-        .then_with(|| joined_bytes(a).cmp(joined_bytes(b)))
 }
 
 /// Who names a module member. A lookup through an export binding is seen by
@@ -1017,9 +989,8 @@ fn glob_export_members(
     let exporter = exporter_scope(pkg, path);
     let mut chain = viewers.to_vec();
     chain.push(Viewer::Fragment(&exporter));
-    let mut bindings: Vec<_> = node.glob_exports.iter().collect();
-    bindings.sort_by(|a, b| cmp_use_path(&a.target, &b.target));
-    for binding in bindings {
+    // Kept in target path order (`UsePathRef::insert_sorted`).
+    for binding in &node.glob_exports {
         if !all_admit(ws, viewers, &binding.vis, pkg_id, path) {
             continue;
         }
@@ -1941,71 +1912,4 @@ fn first_owned(node: &bone_core::modules::NsNode, name: Ustr) -> Option<Ustr> {
         .or_else(|| node.owned_callables.get(&name))
         .or_else(|| node.owned_decorators.get(&name))
         .copied()
-}
-
-#[cfg(test)]
-mod path_order_tests {
-    use super::cmp_use_path;
-    use bone_core::modules::UsePathRef;
-    use std::cmp::Ordering;
-    use ustr::ustr;
-
-    fn path(from_root: bool, segments: &[&str]) -> UsePathRef {
-        UsePathRef {
-            from_root,
-            segments: segments.iter().map(|s| ustr(s)).collect(),
-        }
-    }
-
-    /// The order the allocating key produced: `(from_root, joined)`.
-    fn joined_key(p: &UsePathRef) -> (bool, String) {
-        (
-            p.from_root,
-            p.segments
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>()
-                .join("::"),
-        )
-    }
-
-    #[test]
-    fn cmp_use_path_matches_joined_string_order() {
-        let paths = [
-            path(false, &[]),
-            path(true, &[]),
-            path(false, &["a"]),
-            path(false, &["a", "b"]),
-            path(false, &["a-", "b"]),
-            path(false, &["a", "b-"]),
-            path(false, &["a:"]),
-            path(false, &["a::"]),
-            path(false, &["", "a"]),
-            path(false, &["a", ""]),
-            path(false, &["A"]),
-            path(false, &["_"]),
-            path(false, &["a_b"]),
-            path(false, &["self", "x"]),
-            path(false, &["super", "x"]),
-            path(true, &["a"]),
-            path(true, &["a", "b"]),
-            path(false, &["ab"]),
-            path(false, &["a", "bc"]),
-        ];
-        for a in &paths {
-            for b in &paths {
-                assert_eq!(
-                    cmp_use_path(a, b),
-                    joined_key(a).cmp(&joined_key(b)),
-                    "order differs for {a:?} vs {b:?}"
-                );
-            }
-        }
-        // The trap, spelled out: joined order puts "a-" before "a"
-        // ('-' < ':'), naive segment order would not.
-        assert_eq!(
-            cmp_use_path(&path(false, &["a-", "b"]), &path(false, &["a", "b"])),
-            Ordering::Less
-        );
-    }
 }
