@@ -5,7 +5,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 target_dir=${CARGO_TARGET_DIR:-$root/target}
 python3 "$root/scripts/gamelibs.py" sync
 native=$(python3 "$root/scripts/gamelibs.py" path)
-cargo build --manifest-path "$root/Cargo.toml" --locked --release -p rock-cli -p stone-rs --bin rock --lib
+cargo build --manifest-path "$root/Cargo.toml" --locked --release -p rock-cli -p stone-rs -p stone-glsl-runner --bin rock --bin stone-glsl-runner --lib
 triple=$(rustc -vV | sed -n 's/^host: //p')
 name="rock-$triple"
 stage="$root/dist/$name"
