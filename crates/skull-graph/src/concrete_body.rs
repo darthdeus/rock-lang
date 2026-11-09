@@ -742,6 +742,24 @@ impl ConcreteBodies {
         refs: FxHashSet<Instance>,
     ) -> BTreeSet<Instance> {
         let mut added = BTreeSet::new();
+        self.install_candidate_refs_with(owner, refs, |candidate| {
+            added.insert(candidate.clone());
+        });
+        added
+    }
+
+    /// [`Self::install_candidate_refs_owned`] for a full build, which does
+    /// not read back which keys were new.
+    fn install_candidate_refs(&mut self, owner: &Instance, refs: FxHashSet<Instance>) {
+        self.install_candidate_refs_with(owner, refs, |_| {});
+    }
+
+    fn install_candidate_refs_with(
+        &mut self,
+        owner: &Instance,
+        refs: FxHashSet<Instance>,
+        mut on_new: impl FnMut(&Instance),
+    ) {
         for candidate in &refs {
             match self.candidate_users.entry(candidate.clone()) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
@@ -750,7 +768,7 @@ impl ConcreteBodies {
                         .entry(candidate.func)
                         .or_default()
                         .insert(candidate.clone());
-                    added.insert(candidate.clone());
+                    on_new(candidate);
                     let mut users = FxHashSet::default();
                     users.insert(owner.clone());
                     entry.insert(users);
@@ -761,7 +779,6 @@ impl ConcreteBodies {
             }
         }
         self.owner_candidates.insert(owner.clone(), refs);
-        added
     }
 
     pub fn census(&self) -> BodyCensus {
@@ -1783,15 +1800,18 @@ fn publish_signatures_local(
 }
 
 fn collect_foreign_domains(g: &InstanceGraph, expanded: &[Instance]) -> BTreeSet<SiteDomain> {
-    let mut domains = BTreeSet::new();
+    // Deduplicated by reference first: most of the sites share a handful of
+    // domains, and a domain carries its argument list, so cloning one per
+    // site cost more than the publication that follows.
+    let mut domains: FxHashSet<&SiteDomain> = FxHashSet::default();
     for inst in expanded {
         if let Some(contribution) = g.contributions.get(&Owner::Instance(inst.clone())) {
-            domains.extend(contribution.struct_default_domains.iter().cloned());
+            domains.extend(contribution.struct_default_domains.iter());
         }
         if let Some(sites) = g.sites_of(inst) {
             for (site, record) in sites {
                 if matches!(&record.outcome, SiteOutcome::Resolved(_)) {
-                    domains.insert(site.domain.clone());
+                    domains.insert(&site.domain);
                 }
             }
         }
@@ -1800,15 +1820,15 @@ fn collect_foreign_domains(g: &InstanceGraph, expanded: &[Instance]) -> BTreeSet
         if !matches!(owner, Owner::AlwaysEmitted(..)) {
             continue;
         }
-        domains.extend(contribution.struct_default_domains.iter().cloned());
+        domains.extend(contribution.struct_default_domains.iter());
         domains.extend(
             contribution
                 .always_call_sites
                 .keys()
-                .map(|site| site.domain.clone()),
+                .map(|site| &site.domain),
         );
     }
-    domains
+    domains.into_iter().cloned().collect()
 }
 
 fn collect_foreign_domains_local(
@@ -3090,7 +3110,10 @@ fn build_published_impl(
         global_build_stats: publication_stats,
         ..ConcreteBodies::default()
     };
-    let mut plans = skull_mir::concrete::ConcretePlans::new();
+    // The results are sorted by instance, so the ordered tables are built in
+    // bulk from the sorted rows rather than one insertion at a time.
+    let mut plan_rows: Vec<(Instance, Arc<skull_mir::concrete::ConcreteBodyPlan>)> = Vec::new();
+    let mut body_rows: Vec<(Instance, ConcreteBody)> = Vec::new();
     let mut per_inst = Vec::new();
     let mut t_convert = std::time::Duration::ZERO;
     let mut t_callee = std::time::Duration::ZERO;
@@ -3123,18 +3146,18 @@ fn build_published_impl(
                 candidate_ref_rows += candidate_refs.len();
                 if let Ok(plan) = built.plan {
                     let started = timing_enabled.then(bone_core::prelude::Instant::now);
-                    out.install_candidate_refs_owned(&instance, candidate_refs);
+                    out.install_candidate_refs(&instance, candidate_refs);
                     if let Some(started) = started {
                         candidate_install_time += started.elapsed();
                     }
                     let started = timing_enabled.then(bone_core::prelude::Instant::now);
-                    plans.insert(instance.clone(), std::sync::Arc::new(plan));
+                    plan_rows.push((instance.clone(), Arc::new(plan)));
                     if let Some(started) = started {
                         plan_insert_time += started.elapsed();
                     }
                 }
                 let started = timing_enabled.then(bone_core::prelude::Instant::now);
-                out.bodies.insert(instance.clone(), built.concrete);
+                body_rows.push((instance.clone(), built.concrete));
                 if let Some(started) = started {
                     body_insert_time += started.elapsed();
                 }
@@ -3150,6 +3173,16 @@ fn build_published_impl(
                 }
             }
         }
+    }
+    let started = timing_enabled.then(bone_core::prelude::Instant::now);
+    let plans: skull_mir::concrete::ConcretePlans = plan_rows.into_iter().collect();
+    if let Some(started) = started {
+        plan_insert_time += started.elapsed();
+    }
+    let started = timing_enabled.then(bone_core::prelude::Instant::now);
+    out.bodies = body_rows.into_iter().collect();
+    if let Some(started) = started {
+        body_insert_time += started.elapsed();
     }
     let ordinary_merge_time = t_ordinary_merge.elapsed();
 
