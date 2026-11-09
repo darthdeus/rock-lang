@@ -776,16 +776,20 @@ mod tests {
         );
     }
 
-    fn project() -> (tempfile::TempDir, PathBuf) {
+    fn write_project(name: &str, build_vars: &str, main: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("stick.toml"),
-            "[package]\nname = \"frame-cache-fixture\"\n",
+            format!("[package]\nname = \"{name}\"\n{build_vars}"),
         )
         .unwrap();
-        std::fs::write(dir.path().join("main.rock"), "fn main() { print(1) }\n").unwrap();
+        std::fs::write(dir.path().join("main.rock"), main).unwrap();
         let root = dir.path().canonicalize().unwrap();
         (dir, root)
+    }
+
+    fn project() -> (tempfile::TempDir, PathBuf) {
+        write_project("frame-cache-fixture", "", "fn main() { print(1) }\n")
     }
 
     fn emitted_source_revision(lua: &[u8]) -> String {
@@ -801,53 +805,13 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn same_compile_input_uses_one_artifact_across_frame_counts_and_output_dirs() {
-        let (_project_dir, project) = project();
-        let cache = tempfile::tempdir().unwrap();
-        let outputs = cache.path().join("outputs");
-        let stats = cache.path().join("events.jsonl");
-        let first_output = outputs.join("one");
-        let second_output = outputs.join("many");
-        run_frame_cache_worker("frame", &project, cache.path(), &stats, 1, &first_output);
-        run_frame_cache_worker("frame", &project, cache.path(), &stats, 600, &second_output);
-
-        let events = std::fs::read_to_string(stats)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .collect::<Vec<_>>();
-        let names = events
-            .iter()
-            .map(|row| row["event"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(names, ["miss", "compile", "store", "hit"]);
+    fn main_lua_in(dir: &Path) -> Vec<u8> {
+        std::fs::read(dir.join(rock_host::project::MAIN_LUA_FILENAME)).unwrap()
     }
 
-    #[test]
-    fn perf_runs_of_an_unchanged_tree_compile_once() {
-        let (_project_dir, project) = project();
-        let cache = tempfile::tempdir().unwrap();
-        let stats = cache.path().join("events.jsonl");
-        run_frame_cache_worker(
-            "perf",
-            &project,
-            cache.path(),
-            &stats,
-            600,
-            &cache.path().join("first"),
-        );
-        run_frame_cache_worker(
-            "perf",
-            &project,
-            cache.path(),
-            &stats,
-            600,
-            &cache.path().join("second"),
-        );
-
-        let events = std::fs::read_to_string(stats).unwrap_or_default();
-        let names = events
+    fn event_names(stats: &Path) -> Vec<String> {
+        std::fs::read_to_string(stats)
+            .unwrap()
             .lines()
             .map(|line| {
                 serde_json::from_str::<Value>(line).unwrap()["event"]
@@ -855,123 +819,157 @@ mod tests {
                     .unwrap()
                     .to_string()
             })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            ["miss", "compile", "store", "hit"],
-            "the second perf process reuses the first one's compile"
-        );
+            .collect()
+    }
+
+    /// A fresh production compile, the expected answer for a cached one.
+    struct Oracle {
+        lua: Vec<u8>,
+        fingerprint: String,
+    }
+
+    impl Oracle {
+        fn of(project: &Path) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let artifact =
+                compile_game(Backend::Skull, &project.to_string_lossy(), dir.path()).unwrap();
+            Self {
+                lua: main_lua_in(dir.path()),
+                fingerprint: artifact.artifact_fingerprint.as_str().to_string(),
+            }
+        }
+
+        #[track_caller]
+        fn assert_matches(&self, compiled: &CompiledGame, why: &str) {
+            assert_eq!(
+                std::fs::read(&compiled.lua_file).unwrap(),
+                self.lua,
+                "{why}"
+            );
+            assert_eq!(
+                compiled.artifact_fingerprint.as_str(),
+                self.fingerprint,
+                "{why}"
+            );
+        }
+    }
+
+    /// Resolve `lookup` through the cache, compiling for real on a miss.
+    fn compile_cached(
+        cache: &Path,
+        lookup: &Lookup,
+        project: &Path,
+    ) -> (tempfile::TempDir, CompiledGame) {
+        let output = tempfile::tempdir().unwrap();
+        let compiled =
+            prepare_cached_artifact(cache, lookup, &output.path().join("main.lua"), 1, |dir| {
+                compile_game(Backend::Skull, &project.to_string_lossy(), dir)
+            })
+            .unwrap();
+        (output, compiled)
+    }
+
+    /// Re-run this test binary as the worker test `name`, in `project`.
+    fn worker(name: &str, project: &Path) -> std::process::Command {
+        let rock_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .unwrap();
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                &format!("frame_compile_cache::tests::{name}"),
+                "--nocapture",
+            ])
+            .current_dir(project)
+            .env("ROCK_DIR", rock_dir);
+        command
+    }
+
+    #[test]
+    fn same_compile_input_uses_one_artifact_across_frame_counts_and_output_dirs() {
+        for (command, frame_counts) in [("frame", [1, 600]), ("perf", [600, 600])] {
+            let (_project_dir, project) = project();
+            let cache = tempfile::tempdir().unwrap();
+            let stats = cache.path().join("events.jsonl");
+            for (run, frames) in frame_counts.into_iter().enumerate() {
+                let output = cache.path().join(format!("outputs/{run}"));
+                run_frame_cache_worker(command, &project, cache.path(), &stats, frames, &output);
+            }
+            assert_eq!(
+                event_names(&stats),
+                ["miss", "compile", "store", "hit"],
+                "the second {command} process reuses the first one's compile"
+            );
+        }
     }
 
     #[test]
     fn deferred_source_fingerprint_keys_fresh_process_frame_cache_lifecycle() {
-        {
-            let project_dir = tempfile::tempdir().unwrap();
-            std::fs::write(
-                project_dir.path().join("stick.toml"),
-                "[package]\nname = \"frame-cache-source-fingerprint\"\n\
-[build.vars]\nREV = { source_fingerprint = { roots = [\"Root\"], files = [\"support.txt\"] } }\n",
-            )
-            .unwrap();
-            std::fs::write(
-                project_dir.path().join("main.rock"),
-                "value Root { count: int = 1 }\nfn main() { print(build_var(\"REV\")) }\n",
-            )
-            .unwrap();
-            let support = project_dir.path().join("support.txt");
-            std::fs::write(&support, "decoder-one\n").unwrap();
-            let project = project_dir.path().canonicalize().unwrap();
-            let cache = tempfile::tempdir().unwrap();
-            let stats = cache.path().join("events.jsonl");
-            let outputs = cache.path().join("outputs");
-            let first_output = outputs.join("first");
-            let second_output = outputs.join("hit");
-            let source_changed_output = outputs.join("source-changed");
-            let support_changed_output = outputs.join("support-changed");
-
-            run_frame_cache_worker("frame", &project, cache.path(), &stats, 1, &first_output);
-            run_frame_cache_worker("frame", &project, cache.path(), &stats, 1, &second_output);
-            let first_lua =
-                std::fs::read(first_output.join(rock_host::project::MAIN_LUA_FILENAME)).unwrap();
-            let second_lua =
-                std::fs::read(second_output.join(rock_host::project::MAIN_LUA_FILENAME)).unwrap();
-            assert_eq!(
-                first_lua, second_lua,
-                "the second fresh process reuses the recorded artifact"
-            );
-            let first_revision = emitted_source_revision(&first_lua);
-
-            std::fs::write(
-                project.join("main.rock"),
-                "value Root { count: int = 2 }\nfn main() { print(build_var(\"REV\")) }\n",
-            )
-            .unwrap();
-            run_frame_cache_worker(
-                "frame",
-                &project,
-                cache.path(),
-                &stats,
-                1,
-                &source_changed_output,
-            );
-            let source_changed_lua =
-                std::fs::read(source_changed_output.join(rock_host::project::MAIN_LUA_FILENAME))
-                    .unwrap();
-            let source_changed_revision = emitted_source_revision(&source_changed_lua);
-            assert_ne!(
-                first_revision, source_changed_revision,
-                "a changed typed default updates the deferred value"
-            );
-            assert_ne!(
-                first_lua, source_changed_lua,
-                "a changed typed default updates the deferred value and artifact"
-            );
-
-            std::fs::write(&support, "decoder-two\n").unwrap();
-            run_frame_cache_worker(
-                "frame",
-                &project,
-                cache.path(),
-                &stats,
-                1,
-                &support_changed_output,
-            );
-            let support_changed_lua =
-                std::fs::read(support_changed_output.join(rock_host::project::MAIN_LUA_FILENAME))
-                    .unwrap();
-            assert_ne!(
-                source_changed_revision,
-                emitted_source_revision(&support_changed_lua),
-                "changed explicit support bytes update the deferred value",
-            );
-            assert_ne!(
-                source_changed_lua, support_changed_lua,
-                "changed explicit support bytes update the artifact"
-            );
-
-            let events = std::fs::read_to_string(&stats)
-                .unwrap()
-                .lines()
-                .map(|line| {
-                    serde_json::from_str::<Value>(line).unwrap()["event"]
-                        .as_str()
-                        .unwrap()
-                        .to_string()
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                events,
-                [
-                    "miss", "compile", "store", "hit", "miss", "compile", "store", "miss",
-                    "compile", "store"
-                ],
-                "a fresh-process hit is stable before source and explicit support changes each force a miss",
-            );
+        let (_project_dir, project) = write_project(
+            "frame-cache-source-fingerprint",
+            "[build.vars]\nREV = { source_fingerprint = { roots = [\"Root\"], files = [\"support.txt\"] } }\n",
+            "value Root { count: int = 1 }\nfn main() { print(build_var(\"REV\")) }\n",
+        );
+        let support = project.join("support.txt");
+        std::fs::write(&support, "decoder-one\n").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let stats = cache.path().join("events.jsonl");
+        let run = |name: &str| {
+            let output = cache.path().join("outputs").join(name);
+            run_frame_cache_worker("frame", &project, cache.path(), &stats, 1, &output);
+            main_lua_in(&output)
         };
+
+        let first_lua = run("first");
+        assert_eq!(
+            first_lua,
+            run("hit"),
+            "the second fresh process reuses the recorded artifact"
+        );
+        let first_revision = emitted_source_revision(&first_lua);
+
+        std::fs::write(
+            project.join("main.rock"),
+            "value Root { count: int = 2 }\nfn main() { print(build_var(\"REV\")) }\n",
+        )
+        .unwrap();
+        let source_changed_lua = run("source-changed");
+        let source_changed_revision = emitted_source_revision(&source_changed_lua);
+        assert_ne!(
+            first_revision, source_changed_revision,
+            "a changed typed default updates the deferred value"
+        );
+        assert_ne!(
+            first_lua, source_changed_lua,
+            "a changed typed default updates the deferred value and artifact"
+        );
+
+        std::fs::write(&support, "decoder-two\n").unwrap();
+        let support_changed_lua = run("support-changed");
+        assert_ne!(
+            source_changed_revision,
+            emitted_source_revision(&support_changed_lua),
+            "changed explicit support bytes update the deferred value",
+        );
+        assert_ne!(
+            source_changed_lua, support_changed_lua,
+            "changed explicit support bytes update the artifact"
+        );
+
+        assert_eq!(
+            event_names(&stats),
+            [
+                "miss", "compile", "store", "hit", "miss", "compile", "store", "miss", "compile",
+                "store"
+            ],
+            "a fresh-process hit is stable before source and explicit support changes each force a miss",
+        );
     }
 
     /// Compile `project` in a fresh test process through the production entry
-    /// point of `command`: `frame` (`compile_game_for_frame`) or `perf` (`do_perf`).
+    /// point, with `command` as the recorded build command.
     fn run_frame_cache_worker(
         command: &str,
         project: &Path,
@@ -980,18 +978,7 @@ mod tests {
         frame_count: usize,
         output: &Path,
     ) {
-        let rock_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(2)
-            .unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "frame_compile_cache::tests::frame_cache_wrapper_worker",
-                "--nocapture",
-            ])
-            .current_dir(project)
-            .env("ROCK_DIR", rock_dir)
+        let status = worker("frame_cache_wrapper_worker", project)
             .env("ROCK_BUILD_COMMAND", command)
             .env("ROCK_FRAME_COMPILE_CACHE", "1")
             .env("ROCK_FRAME_COMPILE_CACHE_DIR", cache.join("cache"))
@@ -1015,131 +1002,53 @@ mod tests {
         if std::env::var_os("FRAME_CACHE_WRAPPER_TEST").is_none() {
             return;
         }
-        {
-            let project = PathBuf::from(std::env::var_os("FRAME_CACHE_PROJECT").unwrap())
-                .canonicalize()
-                .unwrap();
-            let output = PathBuf::from(std::env::var_os("FRAME_CACHE_OUTPUT").unwrap());
-            let frame_count = std::env::var("FRAME_CACHE_FRAME_COUNT")
-                .unwrap()
-                .parse::<usize>()
-                .unwrap();
-            let oracle_dir = tempfile::tempdir().unwrap();
-            let oracle = compile_game(
-                Backend::Skull,
-                &project.to_string_lossy(),
-                oracle_dir.path(),
-            )
+        let project = PathBuf::from(std::env::var_os("FRAME_CACHE_PROJECT").unwrap())
+            .canonicalize()
             .unwrap();
-            let lua_file = match std::env::var("ROCK_BUILD_COMMAND").unwrap().as_str() {
-                "frame" => {
-                    let compiled = compile_game_for_frame(
-                        Backend::Skull,
-                        &project.to_string_lossy(),
-                        &output.to_string_lossy(),
-                        frame_count,
-                    )
-                    .unwrap();
-                    assert_eq!(
-                        compiled.artifact_fingerprint.as_str(),
-                        oracle.artifact_fingerprint.as_str()
-                    );
-                    compiled.lua_file
-                }
-                "perf" => {
-                    compile_game_for_frame(
-                        Backend::Skull,
-                        &project.to_string_lossy(),
-                        &output.to_string_lossy(),
-                        frame_count,
-                    )
-                    .unwrap()
-                    .lua_file
-                }
-                command => panic!("no frame cache worker for {command}"),
-            };
-            let expected = std::fs::read(
-                oracle_dir
-                    .path()
-                    .join(rock_host::project::MAIN_LUA_FILENAME),
-            )
+        let output = PathBuf::from(std::env::var_os("FRAME_CACHE_OUTPUT").unwrap());
+        let frame_count = std::env::var("FRAME_CACHE_FRAME_COUNT")
+            .unwrap()
+            .parse::<usize>()
             .unwrap();
-            assert_eq!(
-                std::fs::read(&lua_file).unwrap().as_slice(),
-                expected.as_slice()
-            );
-        };
+        let oracle = Oracle::of(&project);
+        let compiled = compile_game_for_frame(
+            Backend::Skull,
+            &project.to_string_lossy(),
+            &output.to_string_lossy(),
+            frame_count,
+        )
+        .unwrap();
+        oracle.assert_matches(&compiled, "the frame compile agrees with a fresh compile");
     }
 
     #[test]
     fn source_edit_misses_the_frame_compile_cache() {
-        {
-            let (_project_dir, project) = project();
-            let cache = tempfile::tempdir().unwrap();
-            let first_lookup = Lookup::current(&project, Backend::Skull).unwrap();
-            let first_output = tempfile::tempdir().unwrap();
-            let first = prepare_cached_artifact(
-                cache.path(),
-                &first_lookup,
-                &first_output.path().join("main.lua"),
-                1,
-                |dir| compile_game(Backend::Skull, &project.to_string_lossy(), dir),
-            )
-            .unwrap();
-            std::fs::write(project.join("main.rock"), "fn main() { print(2) }\n").unwrap();
-            let changed_lookup = Lookup::current(&project, Backend::Skull).unwrap();
-            let second_output = tempfile::tempdir().unwrap();
-            let second = prepare_cached_artifact(
-                cache.path(),
-                &changed_lookup,
-                &second_output.path().join("main.lua"),
-                1,
-                |dir| compile_game(Backend::Skull, &project.to_string_lossy(), dir),
-            )
-            .unwrap();
-            let oracle_dir = tempfile::tempdir().unwrap();
-            let oracle = compile_game(
-                Backend::Skull,
-                &project.to_string_lossy(),
-                oracle_dir.path(),
-            )
-            .unwrap();
-            let expected = std::fs::read(
-                oracle_dir
-                    .path()
-                    .join(rock_host::project::MAIN_LUA_FILENAME),
-            )
-            .unwrap();
-            assert_eq!(
-                std::fs::read(&second.lua_file).unwrap().as_slice(),
-                expected.as_slice(),
-                "the changed source emits the production compiler's current Lua"
-            );
-            assert_ne!(
-                std::fs::read(&first.lua_file).unwrap().as_slice(),
-                expected.as_slice(),
-                "a stale artifact from the prior source cannot pass as the changed compile"
-            );
-            assert_eq!(
-                second.artifact_fingerprint.as_str(),
-                oracle.artifact_fingerprint.as_str()
-            );
-        };
+        let (_project_dir, project) = project();
+        let cache = tempfile::tempdir().unwrap();
+        let first_lookup = Lookup::current(&project, Backend::Skull).unwrap();
+        let (_first_output, first) = compile_cached(cache.path(), &first_lookup, &project);
+        std::fs::write(project.join("main.rock"), "fn main() { print(2) }\n").unwrap();
+        let changed_lookup = Lookup::current(&project, Backend::Skull).unwrap();
+        let (_second_output, second) = compile_cached(cache.path(), &changed_lookup, &project);
+        let oracle = Oracle::of(&project);
+        oracle.assert_matches(
+            &second,
+            "the changed source emits the production compiler's current Lua",
+        );
+        assert_ne!(
+            std::fs::read(&first.lua_file).unwrap(),
+            oracle.lua,
+            "a stale artifact from the prior source cannot pass as the changed compile"
+        );
     }
 
     #[test]
     fn build_var_override_misses_the_frame_compile_cache() {
-        let project_dir = tempfile::tempdir().unwrap();
-        let project = project_dir.path().canonicalize().unwrap();
-        std::fs::write(
-            project.join("stick.toml"),
-            "[package]\nname = \"frame-cache-var-fixture\"\n[build.vars]\nMODE = { value = \"default\" }\n",
-        ).unwrap();
-        std::fs::write(
-            project.join("main.rock"),
+        let (_project_dir, project) = write_project(
+            "frame-cache-var-fixture",
+            "[build.vars]\nMODE = { value = \"default\" }\n",
             "fn main() { print(build_var(\"MODE\")) }\n",
-        )
-        .unwrap();
+        );
         let cache = tempfile::tempdir().unwrap();
         let one_output = cache.path().join("output-one/main.lua");
         let two_output = cache.path().join("output-two/main.lua");
@@ -1154,18 +1063,7 @@ mod tests {
     }
 
     fn run_build_var_cache_worker(project: &Path, cache: &Path, value: &str, output: &Path) {
-        let rock_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(2)
-            .unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "frame_compile_cache::tests::build_var_cache_worker",
-                "--nocapture",
-            ])
-            .current_dir(project)
-            .env("ROCK_DIR", rock_dir)
+        let status = worker("build_var_cache_worker", project)
             .env("FRAME_CACHE_TEST_VAR", value)
             .env("FRAME_CACHE_TEST_PROJECT", project)
             .env("FRAME_CACHE_TEST_ROOT", cache)
@@ -1183,285 +1081,146 @@ mod tests {
         let Ok(value) = std::env::var("FRAME_CACHE_TEST_VAR") else {
             return;
         };
-        {
-            let project = PathBuf::from(std::env::var_os("FRAME_CACHE_TEST_PROJECT").unwrap())
-                .canonicalize()
-                .unwrap();
-            let root = PathBuf::from(std::env::var_os("FRAME_CACHE_TEST_ROOT").unwrap());
-            let output = PathBuf::from(std::env::var_os("FRAME_CACHE_TEST_OUTPUT").unwrap());
-            crate::comptime::set_invocation_selection(None, None, None, &[format!("MODE={value}")])
-                .unwrap();
-            let lookup = Lookup::current(&project, Backend::Skull).unwrap();
-            let compiled = prepare_cached_artifact(&root, &lookup, &output, 1, |dir| {
-                compile_game(Backend::Skull, &project.to_string_lossy(), dir)
-            })
+        let project = PathBuf::from(std::env::var_os("FRAME_CACHE_TEST_PROJECT").unwrap())
+            .canonicalize()
             .unwrap();
-            let oracle_dir = tempfile::tempdir().unwrap();
-            let oracle = compile_game(
-                Backend::Skull,
-                &project.to_string_lossy(),
-                oracle_dir.path(),
-            )
+        let root = PathBuf::from(std::env::var_os("FRAME_CACHE_TEST_ROOT").unwrap());
+        let output = PathBuf::from(std::env::var_os("FRAME_CACHE_TEST_OUTPUT").unwrap());
+        crate::comptime::set_invocation_selection(None, None, None, &[format!("MODE={value}")])
             .unwrap();
-            let expected = std::fs::read(
-                oracle_dir
-                    .path()
-                    .join(rock_host::project::MAIN_LUA_FILENAME),
-            )
-            .unwrap();
-            assert_eq!(
-                std::fs::read(&compiled.lua_file).unwrap().as_slice(),
-                expected.as_slice(),
-                "cached output agrees with a fresh production compile for --var MODE={value}"
-            );
-            assert_eq!(
-                compiled.artifact_fingerprint.as_str(),
-                oracle.artifact_fingerprint.as_str()
-            );
-        };
+        let lookup = Lookup::current(&project, Backend::Skull).unwrap();
+        let compiled = prepare_cached_artifact(&root, &lookup, &output, 1, |dir| {
+            compile_game(Backend::Skull, &project.to_string_lossy(), dir)
+        })
+        .unwrap();
+        Oracle::of(&project).assert_matches(
+            &compiled,
+            &format!("cached output agrees with a fresh production compile for --var MODE={value}"),
+        );
     }
 
     #[test]
     fn backend_change_misses_the_frame_compile_cache() {
-        {
-            let (_project_dir, project) = project();
-            let cache = tempfile::tempdir().unwrap();
-            let skull = Lookup::current(&project, Backend::Skull).unwrap();
-            let output = tempfile::tempdir().unwrap();
-            let compiled = prepare_cached_artifact(
-                cache.path(),
-                &skull,
-                &output.path().join("main.lua"),
-                1,
-                |dir| compile_game(Backend::Skull, &project.to_string_lossy(), dir),
-            )
-            .unwrap();
-            let oracle_dir = tempfile::tempdir().unwrap();
-            let oracle = compile_game(
-                Backend::Skull,
-                &project.to_string_lossy(),
-                oracle_dir.path(),
-            )
-            .unwrap();
-            assert_eq!(
-                std::fs::read(&compiled.lua_file).unwrap().as_slice(),
-                std::fs::read(
-                    oracle_dir
-                        .path()
-                        .join(rock_host::project::MAIN_LUA_FILENAME)
-                )
-                .unwrap()
-                .as_slice()
-            );
-            assert_eq!(
-                compiled.artifact_fingerprint.as_str(),
-                oracle.artifact_fingerprint.as_str()
-            );
+        let (_project_dir, project) = project();
+        let cache = tempfile::tempdir().unwrap();
+        let skull = Lookup::current(&project, Backend::Skull).unwrap();
+        let (_output, compiled) = compile_cached(cache.path(), &skull, &project);
+        Oracle::of(&project).assert_matches(&compiled, "the skull compile");
 
-            let changed_backend = Lookup::current(&project, Backend::Bone).unwrap();
-            assert_ne!(
-                skull.key, changed_backend.key,
-                "the production compile identity includes its backend"
-            );
-            let changed_output = tempfile::tempdir().unwrap();
-            let result = prepare_cached_artifact(
-                cache.path(),
-                &changed_backend,
-                &changed_output.path().join("main.lua"),
-                1,
-                |_| {
-                    Err(anyhow!(
-                        "changed backend compile path reached after cache miss"
-                    ))
-                },
-            );
-            assert!(
-                result.is_err(),
-                "a backend change reaches its own compile path"
-            );
-        };
+        let changed_backend = Lookup::current(&project, Backend::Bone).unwrap();
+        assert_ne!(
+            skull.key, changed_backend.key,
+            "the production compile identity includes its backend"
+        );
+        let changed_output = tempfile::tempdir().unwrap();
+        let result = prepare_cached_artifact(
+            cache.path(),
+            &changed_backend,
+            &changed_output.path().join("main.lua"),
+            1,
+            |_| {
+                Err(anyhow!(
+                    "changed backend compile path reached after cache miss"
+                ))
+            },
+        );
+        assert!(
+            result.is_err(),
+            "a backend change reaches its own compile path"
+        );
     }
 
     #[test]
     fn tampered_manifest_hash_is_rejected_and_recompiled() {
-        {
-            let (_project_dir, project) = project();
-            let cache = tempfile::tempdir().unwrap();
-            let lookup = Lookup::current(&project, Backend::Skull).unwrap();
-            let entry = cache.path().join(&lookup.key);
-            let first_output = tempfile::tempdir().unwrap();
-            let first = prepare_cached_artifact(
-                cache.path(),
-                &lookup,
-                &first_output.path().join("main.lua"),
-                1,
-                |dir| compile_game(Backend::Skull, &project.to_string_lossy(), dir),
-            )
-            .unwrap();
-            let oracle_dir = tempfile::tempdir().unwrap();
-            let oracle = compile_game(
-                Backend::Skull,
-                &project.to_string_lossy(),
-                oracle_dir.path(),
-            )
-            .unwrap();
-            let expected = std::fs::read(
-                oracle_dir
-                    .path()
-                    .join(rock_host::project::MAIN_LUA_FILENAME),
-            )
-            .unwrap();
-            assert_eq!(
-                std::fs::read(&first.lua_file).unwrap().as_slice(),
-                expected.as_slice()
-            );
-            assert_eq!(
-                first.artifact_fingerprint.as_str(),
-                oracle.artifact_fingerprint.as_str()
-            );
-
-            let manifest_path = entry.join("manifest.json");
-            let mut manifest: Value =
-                serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-            manifest["artifact_fingerprint"] = json!("tampered-fingerprint");
-            std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-            let repaired_manifest_output = tempfile::tempdir().unwrap();
-            let repaired_manifest = prepare_cached_artifact(
-                cache.path(),
-                &lookup,
-                &repaired_manifest_output.path().join("main.lua"),
-                1,
-                |dir| compile_game(Backend::Skull, &project.to_string_lossy(), dir),
-            )
-            .unwrap();
-            assert_eq!(
-                std::fs::read(&repaired_manifest.lua_file)
-                    .unwrap()
-                    .as_slice(),
-                expected.as_slice(),
-                "a changed manifest is rejected before its fingerprint is reused"
-            );
-            assert_eq!(
-                repaired_manifest.artifact_fingerprint.as_str(),
-                oracle.artifact_fingerprint.as_str()
-            );
-
-            std::fs::write(
-                entry.join(rock_host::project::MAIN_LUA_FILENAME),
-                b"tampered main.lua\n",
-            )
-            .unwrap();
-            let repaired_hash_output = tempfile::tempdir().unwrap();
-            let repaired_hash = prepare_cached_artifact(
-                cache.path(),
-                &lookup,
-                &repaired_hash_output.path().join("main.lua"),
-                1,
-                |dir| compile_game(Backend::Skull, &project.to_string_lossy(), dir),
-            )
-            .unwrap();
-            assert_eq!(
-                std::fs::read(&repaired_hash.lua_file).unwrap().as_slice(),
-                expected.as_slice(),
-                "a cached main.lua hash mismatch cannot reach the run output"
-            );
-            assert_eq!(
-                repaired_hash.artifact_fingerprint.as_str(),
-                oracle.artifact_fingerprint.as_str()
-            );
+        let (_project_dir, project) = project();
+        let cache = tempfile::tempdir().unwrap();
+        let lookup = Lookup::current(&project, Backend::Skull).unwrap();
+        let entry = cache.path().join(&lookup.key);
+        let oracle = Oracle::of(&project);
+        let assert_recompiled = |why: &str| {
+            let (_output, compiled) = compile_cached(cache.path(), &lookup, &project);
+            oracle.assert_matches(&compiled, why);
         };
+        assert_recompiled("the first compile");
+
+        let manifest_path = entry.join("manifest.json");
+        let mut manifest: Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["artifact_fingerprint"] = json!("tampered-fingerprint");
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        assert_recompiled("a changed manifest is rejected before its fingerprint is reused");
+
+        std::fs::write(
+            entry.join(rock_host::project::MAIN_LUA_FILENAME),
+            b"tampered main.lua\n",
+        )
+        .unwrap();
+        assert_recompiled("a cached main.lua hash mismatch cannot reach the run output");
     }
 
     #[test]
     fn cache_miss_wipes_a_stale_incremental_overlay() {
-        {
-            let (_project_dir, project) = project();
-            let cache = tempfile::tempdir().unwrap();
-            let output = tempfile::tempdir().unwrap();
-            let overlay = output.path().join("incremental.lua");
-            std::fs::write(&overlay, b"-- stale overlay\n").unwrap();
-            let lookup = Lookup::current(&project, Backend::Skull).unwrap();
-            prepare_cached_artifact(
-                cache.path(),
-                &lookup,
-                &output.path().join("main.lua"),
-                1,
-                |dir| compile_game(Backend::Skull, &project.to_string_lossy(), dir),
-            )
-            .unwrap();
-            assert!(
-                !overlay.exists(),
-                "a fresh main.lua never runs beside an older overlay"
-            );
-        };
+        let (_project_dir, project) = project();
+        let cache = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        let overlay = output.path().join("incremental.lua");
+        std::fs::write(&overlay, b"-- stale overlay\n").unwrap();
+        let lookup = Lookup::current(&project, Backend::Skull).unwrap();
+        prepare_cached_artifact(
+            cache.path(),
+            &lookup,
+            &output.path().join("main.lua"),
+            1,
+            |dir| compile_game(Backend::Skull, &project.to_string_lossy(), dir),
+        )
+        .unwrap();
+        assert!(
+            !overlay.exists(),
+            "a fresh main.lua never runs beside an older overlay"
+        );
     }
 
     #[test]
     fn entry_is_keyed_on_the_build_vars_the_compile_stamped() {
-        {
-            let project_dir = tempfile::tempdir().unwrap();
-            let project = project_dir.path().canonicalize().unwrap();
-            std::fs::write(
-                project.join("stick.toml"),
-                "[package]\nname = \"frame-cache-stamp-fixture\"\n[build.vars]\nMODE = { cmd = \"cat mode.txt\" }\n",
-            ).unwrap();
-            std::fs::write(
-                project.join("main.rock"),
-                "fn main() { print(build_var(\"MODE\")) }\n",
-            )
-            .unwrap();
-            let mode = project.join("mode.txt");
-            std::fs::write(&mode, "a").unwrap();
-            let cache = tempfile::tempdir().unwrap();
-            let lookup = Lookup::current(&project, Backend::Skull).unwrap();
-            let output = tempfile::tempdir().unwrap();
-            prepare_cached_artifact(
-                cache.path(),
-                &lookup,
-                &output.path().join("main.lua"),
-                1,
-                |dir| {
-                    // A non-monotonic var: B during the compile, A before and after.
-                    std::fs::write(&mode, "b").unwrap();
-                    let artifact = compile_game(Backend::Skull, &project.to_string_lossy(), dir);
-                    std::fs::write(&mode, "a").unwrap();
-                    artifact
-                },
-            )
-            .unwrap();
-            assert!(
-                !cache.path().join(&lookup.key).exists(),
-                "Lua built with MODE=b is never stored under the MODE=a key"
-            );
-        };
+        let (_project_dir, project) = write_project(
+            "frame-cache-stamp-fixture",
+            "[build.vars]\nMODE = { cmd = \"cat mode.txt\" }\n",
+            "fn main() { print(build_var(\"MODE\")) }\n",
+        );
+        let mode = project.join("mode.txt");
+        std::fs::write(&mode, "a").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let lookup = Lookup::current(&project, Backend::Skull).unwrap();
+        let output = tempfile::tempdir().unwrap();
+        prepare_cached_artifact(
+            cache.path(),
+            &lookup,
+            &output.path().join("main.lua"),
+            1,
+            |dir| {
+                // A non-monotonic var: B during the compile, A before and after.
+                std::fs::write(&mode, "b").unwrap();
+                let artifact = compile_game(Backend::Skull, &project.to_string_lossy(), dir);
+                std::fs::write(&mode, "a").unwrap();
+                artifact
+            },
+        )
+        .unwrap();
+        assert!(
+            !cache.path().join(&lookup.key).exists(),
+            "Lua built with MODE=b is never stored under the MODE=a key"
+        );
     }
 
     #[test]
     fn lookup_failure_propagates_the_build_var_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().canonicalize().unwrap();
-        std::fs::write(
-            project.join("stick.toml"),
-            "[package]\nname = \"frame-cache-lookup-fixture\"\n[build.vars]\nBROKEN = { cmd = \"exit 3\" }\n",
-        ).unwrap();
-        std::fs::write(
-            project.join("main.rock"),
+        let (dir, project) = write_project(
+            "frame-cache-lookup-fixture",
+            "[build.vars]\nBROKEN = { cmd = \"exit 3\" }\n",
             "fn main() { print(build_var(\"BROKEN\")) }\n",
-        )
-        .unwrap();
+        );
         std::fs::create_dir(project.join("tmp")).unwrap();
-        let rock_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(2)
-            .unwrap();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "frame_compile_cache::tests::lookup_failure_worker",
-                "--nocapture",
-            ])
-            .current_dir(&project)
-            .env("ROCK_DIR", rock_dir)
+        let status = worker("lookup_failure_worker", &project)
             .env("FRAME_CACHE_LOOKUP_FAILURE_PROJECT", &project)
             .env("ROCK_FRAME_COMPILE_CACHE_DIR", dir.path().join("cache"))
             .env_remove("ROCK_FRAME_COMPILE_CACHE")
@@ -1527,91 +1286,68 @@ mod tests {
 
     #[test]
     fn one_key_serves_a_stone_session_and_a_frame_run() {
-        {
-            let (_project_dir, project) = project();
-            let cache = tempfile::tempdir().unwrap();
-            let session_output = tempfile::tempdir().unwrap();
-            let session_main = session_output.path().join("main.lua");
-            let fingerprint =
-                stone_session_compiles_and_stores(&project, cache.path(), &session_main);
+        let (_project_dir, project) = project();
+        let cache = tempfile::tempdir().unwrap();
+        let session_output = tempfile::tempdir().unwrap();
+        let session_main = session_output.path().join("main.lua");
+        let fingerprint = stone_session_compiles_and_stores(&project, cache.path(), &session_main);
 
-            // `rock frame` resolves the same lookup and must find that entry.
-            let lookup = Lookup::current(&project, Backend::Skull).unwrap();
-            let frame_output = tempfile::tempdir().unwrap();
-            let compiled = prepare_cached_artifact(
-                cache.path(),
-                &lookup,
-                &frame_output.path().join("main.lua"),
-                1,
-                |_| {
-                    Err(anyhow!(
-                        "a frame run must not compile what a stone session stored"
-                    ))
-                },
-            )
-            .expect("the frame run reads the session's entry");
-            assert_eq!(compiled.artifact_fingerprint, fingerprint);
-            assert_eq!(
-                std::fs::read(&compiled.lua_file).unwrap(),
-                std::fs::read(&session_main).unwrap(),
-                "both commands run the same emitted program",
-            );
-        };
+        // `rock frame` resolves the same lookup and must find that entry.
+        let lookup = Lookup::current(&project, Backend::Skull).unwrap();
+        let frame_output = tempfile::tempdir().unwrap();
+        let compiled = prepare_cached_artifact(
+            cache.path(),
+            &lookup,
+            &frame_output.path().join("main.lua"),
+            1,
+            |_| {
+                Err(anyhow!(
+                    "a frame run must not compile what a stone session stored"
+                ))
+            },
+        )
+        .expect("the frame run reads the session's entry");
+        assert_eq!(compiled.artifact_fingerprint, fingerprint);
+        assert_eq!(
+            std::fs::read(&compiled.lua_file).unwrap(),
+            std::fs::read(&session_main).unwrap(),
+            "both commands run the same emitted program",
+        );
     }
 
     #[test]
     fn a_session_keeps_a_volatile_build_var_and_misses_a_changed_one() {
-        {
-            let dir = tempfile::tempdir().unwrap();
-            let project = dir.path().canonicalize().unwrap();
-            std::fs::write(
-                project.join("stick.toml"),
-                "[package]\nname = \"session-cache-var-fixture\"\n[build.vars]\n\
-                 MODE = { cmd = \"cat mode.txt\" }\nCLOCK = { cmd = \"cat clock.txt\", volatile = true }\n",
-            ).unwrap();
-            std::fs::write(
-                project.join("main.rock"),
-                "fn main() { print(build_var(\"MODE\")); print(build_var(\"CLOCK\")) }\n",
-            )
-            .unwrap();
-            std::fs::write(project.join("mode.txt"), "a\n").unwrap();
-            std::fs::write(project.join("clock.txt"), "1\n").unwrap();
-            let cache = tempfile::tempdir().unwrap();
+        let (_project_dir, project) = write_project(
+            "session-cache-var-fixture",
+            "[build.vars]\nMODE = { cmd = \"cat mode.txt\" }\nCLOCK = { cmd = \"cat clock.txt\", volatile = true }\n",
+            "fn main() { print(build_var(\"MODE\")); print(build_var(\"CLOCK\")) }\n",
+        );
+        std::fs::write(project.join("mode.txt"), "a\n").unwrap();
+        std::fs::write(project.join("clock.txt"), "1\n").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let output = tempfile::tempdir().unwrap();
+        stone_session_compiles_and_stores(&project, cache.path(), &output.path().join("main.lua"));
+        let start = || {
             let output = tempfile::tempdir().unwrap();
-            let main = output.path().join("main.lua");
-            stone_session_compiles_and_stores(&project, cache.path(), &main);
-
-            std::fs::write(project.join("clock.txt"), "2\n").unwrap();
-            let hit_output = tempfile::tempdir().unwrap();
-            assert!(
-                matches!(
-                    session_start(
-                        Some(cache.path()),
-                        Backend::Skull,
-                        &project.to_string_lossy(),
-                        &hit_output.path().join("main.lua")
-                    )
-                    .unwrap(),
-                    SessionStart::Hit(_),
-                ),
-                "a volatile build var is not part of the key; a clock would make every session miss",
-            );
-
-            std::fs::write(project.join("mode.txt"), "b\n").unwrap();
-            let miss_output = tempfile::tempdir().unwrap();
-            assert!(
-                matches!(
-                    session_start(
-                        Some(cache.path()),
-                        Backend::Skull,
-                        &project.to_string_lossy(),
-                        &miss_output.path().join("main.lua")
-                    )
-                    .unwrap(),
-                    SessionStart::Miss(_),
-                ),
-                "a non-volatile build var is identity",
-            );
+            session_start(
+                Some(cache.path()),
+                Backend::Skull,
+                &project.to_string_lossy(),
+                &output.path().join("main.lua"),
+            )
+            .unwrap()
         };
+
+        std::fs::write(project.join("clock.txt"), "2\n").unwrap();
+        assert!(
+            matches!(start(), SessionStart::Hit(_)),
+            "a volatile build var is not part of the key; a clock would make every session miss",
+        );
+
+        std::fs::write(project.join("mode.txt"), "b\n").unwrap();
+        assert!(
+            matches!(start(), SessionStart::Miss(_)),
+            "a non-volatile build var is identity",
+        );
     }
 }
