@@ -368,8 +368,12 @@ mod tests {
     #[test]
     fn discovery_follows_package_dependencies_and_rejects_collisions() {
         let root = fixture();
-        let game = root.path().join("game");
+        let game = root.path().join("game-\u{6f22}-\u{1f680}");
+        fs_err::rename(root.path().join("game"), &game).unwrap();
         let libs = game_engine_libs(game.to_str().unwrap()).unwrap();
+        let preamble = native_preamble(game.to_str().unwrap()).unwrap();
+        assert!(preamble.contains("game-\u{6f22}-\u{1f680}"));
+        assert!(!preamble.contains('\u{fffd}'));
         assert_eq!(libs.len(), 1);
         assert_eq!(libs[0].need, "bindings");
         assert_eq!(
