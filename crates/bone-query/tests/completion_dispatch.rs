@@ -294,8 +294,8 @@ fn general_coroutine_type_name_snippets() {
          CacheOwner | 103200019876310010cacheowner | -\n\
          JsonRecordCodec | 103200019976310015jsonrecordcodec | -\n\
          JsonRecordAdapter | 103200019976310017jsonrecordadapter | -\n\
+         JsonRecordError | 103200019976320015jsonrecorderror | -\n\
          SemanticUniformBlock | 103200019986320020semanticuniformblock | -\n\
-         SemanticUniformArrayBlock | 103200019986320025semanticuniformarrayblock | -\n\
          more\n",
     );
 }
