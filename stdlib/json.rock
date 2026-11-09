@@ -1494,7 +1494,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         target[field.flat[1]] = value.__variant
         for i = 2, #field.flat do target[field.flat[i]] = value[i - 1] end
     elseif field.embed then
-        if field.nullable then target[key] = value ~= nil end
+        if field.nullable then target[key] = value ~= nil and true or nil end
         if type(value) == 'cdata' then
             __json_record_native_put(target, value, field.type, key .. '.')
         elseif value ~= nil then
