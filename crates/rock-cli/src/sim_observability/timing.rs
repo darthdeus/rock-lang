@@ -556,14 +556,13 @@ mod tests {
         let mut previous = recorder(root.path());
         enter(&mut previous, true, 1280);
         end(&mut previous, 7_321, true);
+        retain(
+            root.path(),
+            "01",
+            &previous,
+            &json!({"complete": true, "status": "PASS"}),
+        );
         let retained = root.path().join("01");
-        std::fs::create_dir(&retained).unwrap();
-        previous
-            .save(
-                &retained.join("timings.json"),
-                &json!({"complete": true, "status": "PASS"}),
-            )
-            .unwrap();
         let original: Value =
             serde_json::from_slice(&std::fs::read(retained.join("timings.json")).unwrap()).unwrap();
         let lookup = |host: Value| {
@@ -602,8 +601,6 @@ mod tests {
     fn the_latest_finished_duration_per_project_is_kept_for_dispatch() {
         let root = tempfile::tempdir().unwrap();
         let record = |dir: &str, project: &str, duration: u64, finished: bool| {
-            let path = root.path().join(dir);
-            std::fs::create_dir(&path).unwrap();
             let mut timing = recorder(root.path());
             enter(&mut timing, false, 1280);
             timing.observe(
@@ -621,12 +618,12 @@ mod tests {
                     duration,
                 );
             }
-            timing
-                .save(
-                    &path.join("timings.json"),
-                    &json!({ "complete": false, "status": "FAIL" }),
-                )
-                .unwrap();
+            retain(
+                root.path(),
+                dir,
+                &timing,
+                &json!({ "complete": false, "status": "FAIL" }),
+            );
         };
         record("01", "game", 5_000, true);
         record("02", "game", 3_000, true);
@@ -650,6 +647,23 @@ mod tests {
                 ..policy()
             }
         );
+    }
+
+    fn warns(name: &str, duration: u64, baseline: &[u64], kind: TimingWarningKind) -> bool {
+        evaluate_entry(name, duration, &policy(), baseline)
+            .iter()
+            .any(|warning| warning.kind == kind)
+    }
+
+    fn baseline_of(warnings: &[TimingWarning]) -> Option<f64> {
+        warnings.iter().find_map(|warning| warning.baseline_ms)
+    }
+
+    /// Save `timing` as the retained run `name` under `root`.
+    fn retain(root: &Path, name: &str, timing: &Timings, finished: &Value) {
+        let dir = root.join(name);
+        std::fs::create_dir(&dir).unwrap();
+        timing.save(&dir.join("timings.json"), finished).unwrap();
     }
 
     fn policy() -> TimingPolicy {
@@ -676,43 +690,18 @@ mod tests {
 
     #[test]
     fn absolute_warning_uses_explicit_threshold() {
-        let p = policy();
-        assert!(
-            evaluate_entry("slow", 10_000, &p, &[])
-                .iter()
-                .any(|warning| warning.kind == TimingWarningKind::Absolute)
-        );
-        assert!(
-            !evaluate_entry("fast", 9_999, &p, &[])
-                .iter()
-                .any(|warning| warning.kind == TimingWarningKind::Absolute)
-        );
+        assert!(warns("slow", 10_000, &[], TimingWarningKind::Absolute));
+        assert!(!warns("fast", 9_999, &[], TimingWarningKind::Absolute));
     }
 
     #[test]
     fn historical_warning_requires_all_regression_guards() {
-        let p = policy();
-        let baseline = [1_000, 1_000, 1_000, 1_000, 1_000];
-        assert!(
-            evaluate_entry("slow", 3_000, &p, &baseline)
-                .iter()
-                .any(|warning| warning.kind == TimingWarningKind::Historical)
-        );
-        assert!(
-            !evaluate_entry("factor_boundary", 2_000, &p, &baseline)
-                .iter()
-                .any(|warning| warning.kind == TimingWarningKind::Historical)
-        );
-        assert!(
-            !evaluate_entry("delta_boundary", 1_999, &p, &baseline)
-                .iter()
-                .any(|warning| warning.kind == TimingWarningKind::Historical)
-        );
-        assert!(
-            !evaluate_entry("too_few", 3_000, &p, &[1_000, 1_000, 1_000, 1_000])
-                .iter()
-                .any(|warning| warning.kind == TimingWarningKind::Historical)
-        );
+        let baseline = [1_000; 5];
+        let kind = TimingWarningKind::Historical;
+        assert!(warns("slow", 3_000, &baseline, kind));
+        assert!(!warns("factor_boundary", 2_000, &baseline, kind));
+        assert!(!warns("delta_boundary", 1_999, &baseline, kind));
+        assert!(!warns("too_few", 3_000, &[1_000; 4], kind));
     }
 
     #[test]
@@ -815,8 +804,6 @@ mod tests {
     fn persisted_baselines_exclude_bad_runs_and_never_follow_a_regression_upward() {
         let root = tempfile::tempdir().unwrap();
         for index in 0..8 {
-            let dir = root.path().join(format!("{index:02}"));
-            std::fs::create_dir(&dir).unwrap();
             let mut timing = recorder(root.path());
             enter(&mut timing, index != 0, 1280);
             end(
@@ -824,36 +811,26 @@ mod tests {
                 if index < 3 { 100_000 } else { 1_000 },
                 index != 1,
             );
-            timing
-                .save(
-                    &dir.join("timings.json"),
-                    &json!({ "complete": index != 2, "status": "PASS" }),
-                )
-                .unwrap();
+            retain(
+                root.path(),
+                &format!("{index:02}"),
+                &timing,
+                &json!({ "complete": index != 2, "status": "PASS" }),
+            );
         }
         let mut candidate = recorder(root.path());
         enter(&mut candidate, true, 1280);
         let warnings = end(&mut candidate, 3_000, true);
-        assert_eq!(
-            warnings.iter().find_map(|warning| warning.baseline_ms),
-            Some(1_000.0)
+        assert_eq!(baseline_of(&warnings), Some(1_000.0));
+        retain(
+            root.path(),
+            "99",
+            &candidate,
+            &json!({ "complete": true, "status": "PASS" }),
         );
-        let later = root.path().join("99");
-        std::fs::create_dir(&later).unwrap();
-        candidate
-            .save(
-                &later.join("timings.json"),
-                &json!({ "complete": true, "status": "PASS" }),
-            )
-            .unwrap();
         let mut next = recorder(root.path());
         enter(&mut next, true, 1280);
-        assert_eq!(
-            end(&mut next, 3_000, true)
-                .iter()
-                .find_map(|warning| warning.baseline_ms),
-            Some(1_000.0)
-        );
+        assert_eq!(baseline_of(&end(&mut next, 3_000, true)), Some(1_000.0));
         let mut different = recorder(root.path());
         enter(&mut different, true, 2560);
         assert!(end(&mut different, 3_000, true).is_empty());
@@ -949,15 +926,19 @@ mod tests {
     /// Five runs of one sim, differing only in the churn a repeat invocation
     /// always produces, each saved as history under the given terminal record.
     fn history_of(root: &Path, template: &Invocation, finished: &Value) {
+        history_with(root, template, |_| (1_000, finished.clone()));
+    }
+
+    /// `shape` gives each of the five runs its duration and terminal record.
+    fn history_with(root: &Path, template: &Invocation, shape: impl Fn(u64) -> (u64, Value)) {
         for index in 0..5u64 {
-            let dir = root.join(format!("{index:02}"));
-            std::fs::create_dir(&dir).unwrap();
             let run = Invocation {
                 epoch: template.epoch + index * 263_772,
                 ..template.clone()
             };
-            let (timing, _) = invoke(root, &run, 1_000);
-            timing.save(&dir.join("timings.json"), finished).unwrap();
+            let (duration, finished) = shape(index);
+            let (timing, _) = invoke(root, &run, duration);
+            retain(root, &format!("{index:02}"), &timing, &finished);
         }
     }
 
@@ -1026,7 +1007,7 @@ mod tests {
         accepted_history(root.path());
         let (_, warnings) = invoke(root.path(), &candidate(&Invocation::default()), 3_000);
         assert_eq!(
-            warnings.iter().find_map(|warning| warning.baseline_ms),
+            baseline_of(&warnings),
             Some(1_000.0),
             "five accepted runs of the same sim must form a baseline; identity churn \
              that has nothing to do with cost keeps the historical detector dead"
@@ -1048,7 +1029,7 @@ mod tests {
         );
         let (_, warnings) = invoke(root.path(), &candidate(&Invocation::default()), 3_000);
         assert_eq!(
-            warnings.iter().find_map(|warning| warning.baseline_ms),
+            baseline_of(&warnings),
             Some(1_000.0),
             "a sim that passed contributes its own cost even when a sibling \
              failed; the run verdict is a fact about the other entries"
@@ -1063,27 +1044,18 @@ mod tests {
     fn one_inflated_sample_from_a_failing_run_does_not_move_the_median() {
         let root = tempfile::tempdir().unwrap();
         let template = Invocation::default();
-        for index in 0..5u64 {
-            let dir = root.path().join(format!("{index:02}"));
-            std::fs::create_dir(&dir).unwrap();
-            let run = Invocation {
-                epoch: template.epoch + index * 263_772,
-                ..template.clone()
-            };
-            // The first run failed on a loaded machine, and the sim that passed
-            // inside it took forty times its quiet-machine cost.
-            let (timing, _) = invoke(root.path(), &run, if index == 0 { 40_000 } else { 1_000 });
-            timing
-                .save(
-                    &dir.join("timings.json"),
-                    &json!({ "complete": true,
-                "status": if index == 0 { "FAIL" } else { "PASS" } }),
-                )
-                .unwrap();
-        }
+        // The first run failed on a loaded machine, and the sim that passed
+        // inside it took forty times its quiet-machine cost.
+        history_with(root.path(), &template, |index| {
+            let first = index == 0;
+            (
+                if first { 40_000 } else { 1_000 },
+                json!({ "complete": true, "status": if first { "FAIL" } else { "PASS" } }),
+            )
+        });
         let (_, warnings) = invoke(root.path(), &candidate(&template), 3_000);
         assert_eq!(
-            warnings.iter().find_map(|warning| warning.baseline_ms),
+            baseline_of(&warnings),
             Some(1_000.0),
             "one sample inflated by a disturbed machine must not lift the \
              baseline and mute the regressions it exists to catch"
@@ -1140,7 +1112,7 @@ mod tests {
             }
             let (_, warnings) = invoke(root.path(), &candidate(&Invocation::default()), 3_000);
             assert_eq!(
-                warnings.iter().find_map(|warning| warning.baseline_ms),
+                baseline_of(&warnings),
                 expected,
                 "a record from before per-entry acceptance contributes exactly \
                  when the old gate accepted it"
