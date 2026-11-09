@@ -143,14 +143,15 @@ pub fn begin(command: &'static str, backend: &str) {
     record.insert("repo_root".into(), json!(repo_root));
     record.insert("head".into(), json!(head));
     record.insert("branch".into(), json!(branch));
+    let context_keys = std::env::var("ROCK_INVOCATION_CONTEXT_KEYS").unwrap_or_default();
     let env: Map<String, Value> = CONTEXT_ENV
         .iter()
         .copied()
         .chain(
-            crate::registry::registered()
-                .invocation_context_keys
-                .iter()
-                .map(|(key, _)| *key),
+            context_keys
+                .split(',')
+                .map(str::trim)
+                .filter(|key| !key.is_empty()),
         )
         .filter_map(|k| {
             std::env::var(k)

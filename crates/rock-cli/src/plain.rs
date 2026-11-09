@@ -560,8 +560,6 @@ pub static REGISTRATIONS: registry::Registrations = registry::Registrations {
     arguments: crate::sim_arguments::arguments,
     decode_arguments: crate::sim_arguments::decode,
     command_metadata,
-    invocation_context_keys: &[],
-    compile_slot_policy: || Ok(None),
     scan_excluded: |_| false,
     early_entries: EARLY_ENTRIES,
     fixes: &[],

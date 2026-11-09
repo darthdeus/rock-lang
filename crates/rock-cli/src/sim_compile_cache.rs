@@ -504,6 +504,8 @@ mod tests {
             "STONE_HEADLESS",
             "ROCK_JOB_ID",
             "ROCK_COMPILE_STATS",
+            "ROCK_COMPILE_ADMISSION",
+            "ROCK_INVOCATION_CONTEXT_KEYS",
             "ROCK_COMPILE_SLOTS",
             "ROCK_COMPILE_CLASS",
             "ROCK_COMPILE_SLOT_DIR",
