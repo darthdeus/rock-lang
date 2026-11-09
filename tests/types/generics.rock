@@ -185,11 +185,6 @@ fn foo<T>(x: int) -> int {
     return x + 1 
 }
 
-@test(output = "0")
-fn generic_struct_multiple_params() {
-    print(0)
-}
-
 @test(output = "5")
 fn generic_identity_infer_int() {
     print(id(5))

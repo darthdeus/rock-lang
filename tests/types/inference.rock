@@ -287,30 +287,6 @@ fn test_while_loop_inference() {
 }
 
 // ============================================
-// Semicolon and Return Value Tests
-// ============================================
-
-@test(output = "0")
-fn test_no_semicolon_value_function() {
-    print(0)
-}
-
-@test(output = "0")  
-fn test_semicolon_intermediate_statement() {
-    print(0)
-}
-
-@test(output = "0")
-fn test_empty_block_is_unit() {
-    print(0)
-}
-
-@test(output = "0")
-fn test_block_ending_in_let_is_unit() {
-    print(0)
-}
-
-// ============================================
 // Error Cases - Type Mismatch Examples
 // ============================================
 
