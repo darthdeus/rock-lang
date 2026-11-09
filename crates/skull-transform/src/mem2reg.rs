@@ -1,3 +1,5 @@
+use std::cell::OnceCell;
+
 use comfy_la_arena::Idx;
 use rustc_hash::FxHashSet as HashSet;
 use skull_mir::cfg::{Dominators, dominates, dominators, reachable_blocks_from};
@@ -141,7 +143,12 @@ fn analyze(func: &MirFunc) -> Analysis {
     }
 }
 
-fn is_direct(idom: &Dominators, analysis: &Analysis, cell: usize) -> bool {
+fn is_direct(
+    func: &MirFunc,
+    idom: &OnceCell<Dominators>,
+    analysis: &Analysis,
+    cell: usize,
+) -> bool {
     if analysis.excluded[cell] || analysis.loads[cell].is_empty() {
         return false;
     }
@@ -157,6 +164,7 @@ fn is_direct(idom: &Dominators, analysis: &Analysis, cell: usize) -> bool {
                 if def_block == load_block {
                     def_pos < load_pos
                 } else {
+                    let idom = idom.get_or_init(|| dominators(func, func.entry()));
                     dominates(idom, def_block, load_block)
                 }
             }),
@@ -165,21 +173,24 @@ fn is_direct(idom: &Dominators, analysis: &Analysis, cell: usize) -> bool {
 }
 
 pub(crate) fn promote_direct_cells(func: &mut MirFunc) -> Mem2RegPromotion {
-    if func.is_coroutine {
+    if func.is_coroutine || func.cells.is_empty() {
         return Mem2RegPromotion::default();
     }
     let analysis = analyze(func);
-    let idom = dominators(func, func.entry());
-    let mut subst = vec![None; func.insts.len()];
+    let idom = OnceCell::new();
+    let mut subst = Vec::new();
     let mut result = Mem2RegPromotion::default();
 
     for cell in 0..func.cells.len() {
-        if !is_direct(&idom, &analysis, cell) {
-            continue;
-        }
         let Definition::Store { value, .. } = analysis.defs[cell] else {
             continue;
         };
+        if !is_direct(func, &idom, &analysis, cell) {
+            continue;
+        }
+        if subst.is_empty() {
+            subst.resize(func.insts.len(), None);
+        }
         result.cells += 1;
         result.loads += analysis.loads[cell].len();
         for &(_, _, load) in &analysis.loads[cell] {
@@ -199,4 +210,69 @@ pub(crate) fn promote_direct_cells(func: &mut MirFunc) -> Mem2RegPromotion {
     }
     super::dce(func);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skull_mir::mir::{Lit, Term};
+
+    #[test]
+    fn same_block_promotion_needs_no_dominator_tree() {
+        let mut func = MirFunc::new(ustr::Ustr::from("local"));
+        let cell = func.new_cell(None);
+        let value = func.emit(func.entry, Inst::Const(Lit::Int(7)));
+        func.emit(func.entry, Inst::Store { cell, value });
+        let load = func.emit(func.entry, Inst::Load(cell));
+        func.set_term(func.entry, Term::Return(vec![load]));
+        let analysis = analyze(&func);
+        let idom = OnceCell::new();
+        assert!(is_direct(&func, &idom, &analysis, raw(cell)));
+        assert!(idom.get().is_none());
+        assert_eq!(
+            promote_direct_cells(&mut func),
+            Mem2RegPromotion { cells: 1, loads: 1 }
+        );
+        assert!(
+            matches!(&func.blocks[func.entry].term, Term::Return(values) if values == &[value])
+        );
+    }
+
+    #[test]
+    fn cross_block_promotion_requires_a_dominating_store() {
+        for bypass_store in [false, true] {
+            let mut func = MirFunc::new(ustr::Ustr::from("cross_block"));
+            let cell = func.new_cell(None);
+            let store_block = func.new_block();
+            let join = func.new_block();
+            let value = func.emit(func.entry, Inst::Const(Lit::Int(7)));
+            if bypass_store {
+                let cond = func.emit(func.entry, Inst::Const(Lit::Bool(true)));
+                func.set_term(
+                    func.entry,
+                    Term::Branch {
+                        cond,
+                        then_bb: store_block,
+                        else_bb: join,
+                    },
+                );
+            } else {
+                func.set_term(func.entry, Term::Goto(store_block));
+            }
+            func.emit(store_block, Inst::Store { cell, value });
+            func.set_term(store_block, Term::Goto(join));
+            let load = func.emit(join, Inst::Load(cell));
+            func.set_term(join, Term::Return(vec![load]));
+            let analysis = analyze(&func);
+            let idom = OnceCell::new();
+            assert_eq!(is_direct(&func, &idom, &analysis, raw(cell)), !bypass_store);
+            assert!(idom.get().is_some());
+            let result = promote_direct_cells(&mut func);
+            assert_eq!(result.cells, usize::from(!bypass_store));
+            let expected = if bypass_store { load } else { value };
+            assert!(
+                matches!(&func.blocks[join].term, Term::Return(values) if values == &[expected])
+            );
+        }
+    }
 }
