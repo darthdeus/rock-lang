@@ -743,20 +743,18 @@ fn main() -> int { let _value: int = cast(always_int()) 3 }
                 .to_string_lossy()
                 .as_ref(),
         );
-        let before = project
-            .lint_cache
-            .findings_for_file(file)
-            .into_iter()
-            .map(|finding| format!("{}:{}", finding.lint, finding.error.message))
-            .collect::<Vec<_>>();
+        let findings = |project: &LiveProject| {
+            project
+                .lint_cache
+                .findings_for_file(file)
+                .into_iter()
+                .map(|finding| format!("{}:{}", finding.lint, finding.error.message))
+                .collect::<Vec<_>>()
+        };
+        let before = findings(&project);
         assert!(project.apply_edit(&source, &bad).is_err());
         assert_eq!(project.source_text(&source).as_deref(), Some(old));
-        let after = project
-            .lint_cache
-            .findings_for_file(file)
-            .into_iter()
-            .map(|finding| format!("{}:{}", finding.lint, finding.error.message))
-            .collect::<Vec<_>>();
+        let after = findings(&project);
         assert_eq!(after, before);
         assert!(
             after
@@ -775,27 +773,21 @@ fn main() -> int { let _value: int = cast(always_int()) 3 }
     /// example` while `rock compile games/example` was clean.
     #[test]
     fn a_v1_package_keeps_its_dialect_and_package_through_a_session() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("stick.toml"),
-            "[package]\nname = \"livev1\"\ntype = \"bin\"\n\n[language]\nmodules = \"v1\"\n",
-        )
-        .unwrap();
-        let main = dir.path().join("main.rock");
-        std::fs::write(&main, "fn main() {\n    print(\"n={a::bump(1)}\")\n}\n").unwrap();
-        std::fs::write(
-            dir.path().join("a.rock"),
-            "mod a;\n\npub fn bump(n: int) -> int {\n    n + 1\n}\n",
-        )
-        .unwrap();
-        let mut project = LiveProject::init(dir.path().to_str().unwrap(), false)
-            .expect("a v1 package must build through a session");
-
+        let (_dir, main, _a, mut project) = v1_live_project();
         // And keeps them across a re-parse: an edit re-runs the parser from the
         // stored text, which is the half a one-shot stamp at init would miss.
         project
             .apply_edit(&main, "fn main() {\n    print(\"n={a::bump(2)}\")\n}\n")
             .expect("a v1 edit must re-parse in its own dialect");
+    }
+
+    fn diagnostic_messages(project: &LiveProject) -> Vec<String> {
+        project
+            .session
+            .diagnostics()
+            .iter()
+            .map(|d| d.message.clone())
+            .collect()
     }
 
     fn v1_live_project() -> (
@@ -846,12 +838,7 @@ fn main() -> int { let _value: int = cast(always_int()) 3 }
         project
             .apply_edit_inner(&a, "mod a;\n\nfn bump(n: int) -> int {\n    n + 1\n}\n")
             .expect_err("main still calls a::bump, which is now private to `a`");
-        let messages: Vec<String> = project
-            .session
-            .diagnostics()
-            .iter()
-            .map(|d| d.message.clone())
-            .collect();
+        let messages = diagnostic_messages(&project);
         assert!(
             messages
                 .iter()
@@ -869,12 +856,7 @@ fn main() -> int { let _value: int = cast(always_int()) 3 }
         project
             .apply_edit_inner(&a, "mod b;\n\npub fn bump(n: int) -> int {\n    n + 1\n}\n")
             .expect_err("main still calls a::bump, and `a` no longer exists");
-        let messages: Vec<String> = project
-            .session
-            .diagnostics()
-            .iter()
-            .map(|d| d.message.clone())
-            .collect();
+        let messages = diagnostic_messages(&project);
         assert!(
             messages.iter().any(|m| m.contains("`a` did not resolve")),
             "{messages:?}"
