@@ -112,6 +112,21 @@ impl DebugGl {
         Self { gl }
     }
 
+    /// Returns no limit when anisotropic filtering is unavailable on this context.
+    pub fn max_texture_anisotropy(&self) -> Option<f32> {
+        let version = self.gl.version();
+        let extensions = self.gl.supported_extensions();
+        let supported = (!version.is_embedded && (version.major, version.minor) >= (4, 6))
+            || extensions.contains("GL_ARB_texture_filter_anisotropic")
+            || extensions.contains("GL_EXT_texture_filter_anisotropic");
+        if !supported {
+            return None;
+        }
+        let limit = unsafe { self.gl.get_parameter_f32(glow::MAX_TEXTURE_MAX_ANISOTROPY) };
+        self.check_error("max_texture_anisotropy");
+        Some(limit)
+    }
+
     /// # Safety
     /// Requires the [OpenGL call contract](Self#safety).
     pub unsafe fn get_sampler_parameter_i32(&self, sampler: glow::Sampler, name: u32) -> i32 {

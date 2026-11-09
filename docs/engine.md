@@ -108,7 +108,9 @@ Sampling is draw state, not camera state. `TextureFilter` (`Nearest`,
 by each draw, which may override it with `sampling:` on `draw_sprite`,
 `Material`, `RenderProps`, `RectBatch` and each `Pass` input. The backend
 binds immutable samplers per (filter, wrap), so one image is sampled two ways
-without duplicate uploads. A bound sampler overrides the texture's wrap as
+without duplicate uploads. Native `MipStable` uses trilinear mipmaps with up
+to 4x anisotropy when supported, clamped to the device limit; unsupported
+contexts retain trilinear sampling. A bound sampler overrides the texture's wrap as
 well as its filter, so a clamp-only sampler would un-tile REPEAT textures.
 Linearly sampled atlases need gutters and RGB dilation under transparent
 pixels; that is an asset requirement, not a camera workaround.
