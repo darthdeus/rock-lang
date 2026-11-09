@@ -1,4 +1,4 @@
-// Type system tests - migrated from rock/tests/type_system_tests.rs
+// Type system tests.
 // Tests nullable types, generics, global variables, extern functions, and various type system features
 
 // Shared struct definitions
@@ -278,15 +278,3 @@ fn minimal_nullable_promotion_bug() {
     let result = my_vec_map(vec, (x: int) => x * 2)
     print(result.len)
 }
-
-// NOTE: The following tests from the original file are not migrated:
-// 1. Compile-ok tests (non_nullable_is_subtype_of_nullable, etc) - these test compilation success
-// 2. Query tests (query_def_at_let, query_postfix_dot) - these test LSP functionality
-// 3. Join types test - this tests internal type system functions
-// 4. No stdlib tests - these test compilation flags and code generation
-// 5. Generic function test (marked @ignore) - not fully supported
-// 6. extern_fn_user_param_type - compile-ok test for extern functions
-
-// Total migrated: 21 tests (7 unwrap/shadow tests, 3 nullable_if tests, 3 global tests, 
-// 1 math test, 2 completion tests, 1 loop test, 2 generic tests, 1 nullable promotion bug test,
-// 1 extern declaration that's used but not tested)

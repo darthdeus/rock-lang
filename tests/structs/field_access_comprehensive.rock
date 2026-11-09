@@ -1,4 +1,4 @@
-// Comprehensive struct field access tests migrated from rock/tests/type_system_tests.rs struct_field_tests module
+// Struct field access.
 // Tests struct field access patterns, assignments, nested structs, type validation, and self-referential structs
 // Covers basic field access, nested access, assignment operations, and type inference validation
 

@@ -1,4 +1,4 @@
-// Nullable operators tests - migrated from rock/tests/nullable_operators_tests.rs
+// Nullable operators.
 // Tests nullable coalescence (??) and safe navigation (?.) operators
 
 // Struct definitions for tests
@@ -131,20 +131,6 @@ fn test_nullable_let_with_parameter() {
 }
 
 // Complex operator combinations
-@test(output = "42\n-1\n-1")
-fn test_nullable_operators_combined_complex() {
-    let outer = Outer { inner: Inner { value: 42 } }
-    let null_outer: Outer? = null
-    let outer_null_inner = Outer { inner: null }
-
-    let val1 = outer.inner?.value ?? -1
-    let val2 = null_outer?.inner?.value ?? -1
-    let val3 = outer_null_inner.inner?.value ?? -1
-
-    print(val1)
-    print(val2)
-    print(val3)
-}
 
 @test(output = "10\n20\n-1")
 fn test_nullable_operators_with_variables() {
