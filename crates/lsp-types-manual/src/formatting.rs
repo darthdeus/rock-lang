@@ -2,9 +2,9 @@ use crate::{DocumentSelector, DynamicRegistrationClientCapabilities};
 
 use std::collections::HashMap;
 
-pub type DocumentFormattingClientCapabilities = DynamicRegistrationClientCapabilities;
-pub type DocumentRangeFormattingClientCapabilities = DynamicRegistrationClientCapabilities;
-pub type DocumentOnTypeFormattingClientCapabilities = DynamicRegistrationClientCapabilities;
+pub(crate) type DocumentFormattingClientCapabilities = DynamicRegistrationClientCapabilities;
+pub(crate) type DocumentRangeFormattingClientCapabilities = DynamicRegistrationClientCapabilities;
+pub(crate) type DocumentOnTypeFormattingClientCapabilities = DynamicRegistrationClientCapabilities;
 
 /// Format document on type options
 #[derive(Debug, Eq, PartialEq, Clone, Default)]

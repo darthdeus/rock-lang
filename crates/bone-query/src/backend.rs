@@ -13,7 +13,7 @@ pub mod gaps;
 mod macro_refs;
 mod rename_guard;
 
-pub use rename_guard::RenameRefusal;
+pub(crate) use rename_guard::RenameRefusal;
 use rename_guard::check_new_name;
 
 use std::borrow::Cow;
@@ -138,7 +138,7 @@ fn session_file_id(canonical_path: String) -> String {
 }
 
 /// The editor's path for a session file id (see [`session_file_id`]).
-pub fn editor_path(id: &str) -> Cow<'_, str> {
+pub(crate) fn editor_path(id: &str) -> Cow<'_, str> {
     stdlib_paths()
         .iter()
         .find(|(sid, _)| sid == id)
@@ -599,7 +599,7 @@ pub fn canonicalize_lenient(path: &str) -> String {
 impl BoneWorkspace {
     /// Set host lint policy before loading any project.
     #[cfg(test)]
-    pub fn with_lint_options(mut self, options: bone_lints::LintOptions) -> Self {
+    pub(crate) fn with_lint_options(mut self, options: bone_lints::LintOptions) -> Self {
         assert!(
             self.projects.is_empty(),
             "lint options must precede project loading"
@@ -4117,7 +4117,7 @@ fn bone_diagnostic(
     }
 }
 
-pub fn compiler_error_to_diagnostic(
+pub(crate) fn compiler_error_to_diagnostic(
     e: &CompilerError,
     text_of: crate::query::TextOf<'_, '_>,
 ) -> Diagnostic {
@@ -4157,7 +4157,7 @@ fn location_range(
 /// error like the `./` hint -- the `/` cause plus the use site -- surfaces at
 /// both). Labels can live in different files (returned per-label so the caller
 /// files each correctly). A label-less error falls back to the error location.
-pub fn compiler_error_to_diagnostics(
+pub(crate) fn compiler_error_to_diagnostics(
     e: &CompilerError,
     text_of: crate::query::TextOf<'_, '_>,
 ) -> Vec<(Ustr, Diagnostic)> {

@@ -51,7 +51,7 @@ fn check_for_special_directives(input: &str) -> (bool, bool, bool, Vec<String>) 
 }
 
 /// Preprocess source code based on the backend context
-pub fn preprocess(input: &str, context: &PreprocessorContext) -> Result<PreprocessedSource> {
+pub(crate) fn preprocess(input: &str, context: &PreprocessorContext) -> Result<PreprocessedSource> {
     // Fast path: Check if the file contains any potential preprocessor directives
     // by looking for '#' at the beginning of lines (much faster than full lexing)
     if !contains_preprocessor_directives(input) {

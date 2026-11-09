@@ -11,7 +11,7 @@
 
 /// A line break that adapts to its enclosing group's mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LineKind {
+pub(crate) enum LineKind {
     /// Space when flat, newline when broken.
     Normal,
     /// Nothing when flat, newline when broken.
@@ -21,7 +21,7 @@ pub enum LineKind {
 }
 
 #[derive(Clone, Debug)]
-pub enum Doc {
+pub(crate) enum Doc {
     Nil,
     Text(String),
     Line(LineKind),
@@ -63,7 +63,7 @@ impl Doc {
 
     /// True if this doc contains a hard line, which forces breaking regardless
     /// of width.
-    pub fn has_hard_line(&self) -> bool {
+    pub(crate) fn has_hard_line(&self) -> bool {
         match self {
             Doc::Line(LineKind::Hard) => true,
             Doc::Text(_) | Doc::Nil | Doc::Line(_) => false,
@@ -77,10 +77,10 @@ impl Doc {
 pub fn line() -> Doc {
     Doc::Line(LineKind::Normal)
 }
-pub fn softline() -> Doc {
+pub(crate) fn softline() -> Doc {
     Doc::Line(LineKind::Soft)
 }
-pub fn hardline() -> Doc {
+pub(crate) fn hardline() -> Doc {
     Doc::Line(LineKind::Hard)
 }
 pub fn nil() -> Doc {

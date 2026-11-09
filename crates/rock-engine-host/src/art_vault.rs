@@ -7,7 +7,7 @@ use anyhow::Result;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-pub const ENV: &str = "GAME_ART_VAULT";
+pub(crate) const ENV: &str = "GAME_ART_VAULT";
 pub const TOKEN: &str = "$GAME_ART_VAULT";
 /// The vault root named by the environment, validated before use.
 pub fn root() -> Result<PathBuf> {
@@ -15,7 +15,7 @@ pub fn root() -> Result<PathBuf> {
     root_from(env.as_deref())
 }
 
-pub fn root_from(env: Option<&OsStr>) -> Result<PathBuf> {
+pub(crate) fn root_from(env: Option<&OsStr>) -> Result<PathBuf> {
     let value = env
         .filter(|value| !value.is_empty())
         .ok_or_else(|| anyhow::anyhow!("cannot locate the art vault: {ENV} is unset"))?;

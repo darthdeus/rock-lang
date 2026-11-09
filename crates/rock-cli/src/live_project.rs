@@ -178,7 +178,7 @@ impl LiveProject {
     }
 
     #[cfg(test)]
-    pub fn recompile(&mut self, changed: &[PathBuf]) -> Result<LiveUpdate> {
+    pub(crate) fn recompile(&mut self, changed: &[PathBuf]) -> Result<LiveUpdate> {
         self.recompile_for_publication(changed)
             .map(|(update, _snapshot)| update)
     }
@@ -326,7 +326,7 @@ impl LiveProject {
         self.update(&[(id, new_text.to_string())], started)
     }
 
-    pub fn source_text(&self, path: &Path) -> Option<String> {
+    pub(crate) fn source_text(&self, path: &Path) -> Option<String> {
         let id = std::fs::canonicalize(path)
             .ok()?
             .to_string_lossy()

@@ -17,7 +17,7 @@ pub fn fragment(ws: &Workspace, file: Ustr) -> Option<&FragmentScope> {
 /// Whether one callable family member is visible from a v1 query fragment.
 /// Query readers use the same per-member table as lowering; the family key's
 /// `DefMeta::vis` is only a compatibility anchor for non-callable definitions.
-pub fn callable_member_admitted(
+pub(crate) fn callable_member_admitted(
     ws: &Workspace,
     frag: &FragmentScope,
     key: Ustr,
@@ -66,7 +66,7 @@ fn tier_names(ws: &Workspace, frag: &FragmentScope) -> Vec<Ustr> {
 /// this map is the request-site view that turns those keys back into names the
 /// fragment's resolver actually accepts. Callable families are resolved in
 /// callee position so composed imports contribute every member key.
-pub fn spellings_by_key(
+pub(crate) fn spellings_by_key(
     ws: &Workspace,
     frag: &FragmentScope,
     kind: DefKind,
@@ -120,7 +120,7 @@ pub fn spellings_by_key(
 /// A global root together with the spelling and type that a fragment can use.
 /// The canonical key remains available for the cached reachability index.
 #[derive(Clone, Debug)]
-pub struct GlobalBinding {
+pub(crate) struct GlobalBinding {
     pub name: Ustr,
     pub key: Ustr,
     pub ty: String,
@@ -129,7 +129,7 @@ pub struct GlobalBinding {
 /// Enumerate globals that the fragment can actually bind. This is used for
 /// reach roots as well as for the cached call-through argument source; walking
 /// Module::global_by_name directly would leak private globals and DefKeys.
-pub fn visible_globals(ws: &Workspace, frag: &FragmentScope) -> Vec<GlobalBinding> {
+pub(crate) fn visible_globals(ws: &Workspace, frag: &FragmentScope) -> Vec<GlobalBinding> {
     let names = spellings_by_key(ws, frag, DefKind::Global);
     let mut out = Vec::new();
     for (key, spellings) in names {
@@ -226,7 +226,7 @@ pub(crate) fn display_method_suffix_with_names(
 /// definition the resolver binds it to. A name whose binding is broken (an
 /// ambiguous glob, imports that do not compose) is left out; a composed
 /// callable family is offered once, by its first member. Sorted by name.
-pub fn bound_names(
+pub(crate) fn bound_names(
     ws: &Workspace,
     frag: &FragmentScope,
     admit: impl Fn(&str) -> bool,
@@ -265,7 +265,7 @@ pub enum Member {
 /// the module the resolver walks it to -- its accessible members and child
 /// modules -- or the enum it names, whose variants follow. `None` when the
 /// prefix names neither.
-pub fn path_members(
+pub(crate) fn path_members(
     ws: &Workspace,
     frag: &FragmentScope,
     from_root: bool,

@@ -13,7 +13,7 @@ pub fn total_system_memory_mib() -> Option<u64> {
 /// stick.toml walk-up: directory becomes `Directory`, single file
 /// becomes `Files`. `do_run_timeout` keeps its own variant because
 /// it walks up to find the enclosing stick package.
-pub fn path_to_source_spec(path: &str) -> crate::unified_compile::SourceSpec {
+pub(crate) fn path_to_source_spec(path: &str) -> crate::unified_compile::SourceSpec {
     let path_buf = std::path::PathBuf::from(path);
     if path_buf.is_dir() {
         crate::unified_compile::SourceSpec::Directory(path_buf)
@@ -36,7 +36,7 @@ impl ProcessManager {
     }
 
     /// Bound startup and inactivity using a caller-supplied stderr decoder.
-    pub fn wait_with_progress_watchdog<P: Send + 'static>(
+    pub(crate) fn wait_with_progress_watchdog<P: Send + 'static>(
         child: &mut Child,
         startup: Duration,
         inactivity: Duration,
@@ -58,7 +58,7 @@ impl ProcessManager {
     }
 
     /// Start a total run budget at the first decoded progress event.
-    pub fn wait_with_progress_budget<P: Send + 'static>(
+    pub(crate) fn wait_with_progress_budget<P: Send + 'static>(
         child: &mut Child,
         startup: Duration,
         budget: Duration,
@@ -77,7 +77,7 @@ impl ProcessManager {
     /// Bound program loading and test progress by the child's CPU time. Valid
     /// START and TIME markers reset the CPU budget; a generous wall backstop
     /// still catches a child blocked without consuming CPU.
-    pub fn wait_with_test_watchdog(
+    pub(crate) fn wait_with_test_watchdog(
         child: &mut Child,
         limit: Duration,
         watch: TestWatch,
@@ -496,7 +496,7 @@ enum ProcessProgress<P> {
 /// run and distinct from accidental test output, so marker-shaped output
 /// without this run's token is not an event.
 #[derive(Debug, Clone)]
-pub struct TestWatch {
+pub(crate) struct TestWatch {
     pub token: String,
     pub tests: usize,
 }
@@ -687,7 +687,7 @@ pub struct ProcessResult<P = ()> {
 /// It sizes both the compiler's global rayon pool and the C test pool.
 /// `0` asks for the default, as in rayon. A value that is not a count is an
 /// error: ignoring it would silently run with a different pool size.
-pub fn thread_count_request() -> std::result::Result<Option<usize>, String> {
+pub(crate) fn thread_count_request() -> std::result::Result<Option<usize>, String> {
     parse_thread_count_request(
         std::env::var("ROCK_NUM_THREADS").ok().as_deref(),
         std::env::var("RAYON_NUM_THREADS").ok().as_deref(),
@@ -716,7 +716,7 @@ fn parse_thread_count_request(
 /// [`thread_count_request`] for pool construction. `main_with` rejects an
 /// invalid value at startup, so reaching the panic means a pool was built
 /// outside the CLI process lifecycle with a bad environment.
-pub fn requested_thread_count() -> Option<usize> {
+pub(crate) fn requested_thread_count() -> Option<usize> {
     thread_count_request().unwrap_or_else(|error| panic!("{error}"))
 }
 

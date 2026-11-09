@@ -7,7 +7,7 @@
 /// before a worker entry runs. Four capture sims already run this size
 /// by explicit choice (`frame_stream_capture`, `low_fps_nudge`,
 /// `meme_capture_sound`), so it is a blessed sim size, not a new extreme.
-pub const SIM_SMALL_WINDOW: &str = "320x180";
+pub(crate) const SIM_SMALL_WINDOW: &str = "320x180";
 
 /// Declared-name prefixes of the engine's async pixel-readback family and its
 /// FFI, plus the imgui test-geometry and synthetic-input families: every
@@ -22,7 +22,7 @@ pub const SIM_SMALL_WINDOW: &str = "320x180";
 /// seam proof showed a palette-click sim failing at every size below 1080p
 /// while its siblings pass at 320x180, and the full proof showed a
 /// synthetic-mouse toggle sim failing 6/20 at 320x180.
-pub static SIM_PIXEL_PREFIXES: &[&str] = &[
+pub(crate) static SIM_PIXEL_PREFIXES: &[&str] = &[
     "pixel_readback",
     "stone_pixel_readback",
     "imgui_test_",
@@ -64,7 +64,7 @@ fn sim_name_reads_pixels(declared: &str) -> bool {
 /// [`SIM_CAPACITY_GLOBALS`]. A sim whose transitive callees name one of these
 /// keeps the game's window; anything else boots in [`SIM_SMALL_WINDOW`]
 /// unless it declares its own `STONE_WINDOW`.
-pub static SIM_PIXEL_ROOTS: &[&str] = &[
+pub(crate) static SIM_PIXEL_ROOTS: &[&str] = &[
     "take_screenshot",
     "window_probe_new",
     "read_canvas_pixel",
@@ -111,7 +111,7 @@ pub static SIM_PIXEL_ROOTS: &[&str] = &[
 /// keeps hundreds of sims that never query the size. Liveness and ownership
 /// queries (`canvas_is_live`, `new_canvas`, `destroy_canvas`) do not match and
 /// stay small.
-pub static SIM_CAPACITY_GLOBALS: &[&str] = &["BLOOM_LEVELS", "SCENE_CAPACITY"];
+pub(crate) static SIM_CAPACITY_GLOBALS: &[&str] = &["BLOOM_LEVELS", "SCENE_CAPACITY"];
 
 /// Callee edges of one body: resolved calls and protocol dispatch from its
 /// inference, plus function-valued references from a body scan (a named fn

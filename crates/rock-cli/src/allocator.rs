@@ -118,7 +118,7 @@ fn take_collected_workers_mask() -> u64 {
 /// Return memory freed so far to the OS now instead of on mimalloc's lazy
 /// purge, which needs later allocator traffic to run. For a host that frees a
 /// large compile and then only waits on a child process.
-pub fn release_freed_memory() {
+pub(crate) fn release_freed_memory() {
     // mimalloc pages belong to the thread that allocated them, and a collect
     // only reclaims the calling thread's heap. The compiler's parallel passes
     // allocate on the rayon workers, so each worker collects its own. A

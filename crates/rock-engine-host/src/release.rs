@@ -46,7 +46,7 @@ pub struct StagedAssets {
 /// Select the shipped-key set for native packaging.
 /// `config` is the already-parsed StickConfig; neither caller reparses TOML.
 #[cfg(test)]
-pub fn select_assets(
+pub(crate) fn select_assets(
     project_dir: &Path,
     game_key: &str,
     config: Option<&StickConfig>,
@@ -412,7 +412,7 @@ fn insert_asset(
 /// Sibling marker proving `output_dir` is a tree this module generated and
 /// may therefore clear. Kept beside the directory, not inside it, so the
 /// staged tree itself holds only shipped keys.
-pub fn staging_marker_path(output_dir: &Path) -> PathBuf {
+pub(crate) fn staging_marker_path(output_dir: &Path) -> PathBuf {
     let name = output_dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -448,7 +448,7 @@ pub fn stage_assets(selection: &AssetSelection, output_dir: &Path) -> Result<Sta
     Ok(staged)
 }
 
-pub fn copy_assets(selection: &AssetSelection, output_dir: &Path) -> Result<StagedAssets> {
+pub(crate) fn copy_assets(selection: &AssetSelection, output_dir: &Path) -> Result<StagedAssets> {
     let mut keys = Vec::with_capacity(selection.assets.len());
     for asset in &selection.assets {
         let destination = output_dir.join(&asset.key);

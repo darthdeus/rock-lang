@@ -63,7 +63,7 @@ pub fn ns_aliases_for_sources<'a>(
 
 /// The alias table for a program whose root package owns `root_file`, read
 /// from the nearest `stick.toml` at or above it.
-pub fn ns_aliases_for_root_file(root_file: &Path) -> Result<NsAliases, CompilerError> {
+pub(crate) fn ns_aliases_for_root_file(root_file: &Path) -> Result<NsAliases, CompilerError> {
     let Some(manifest_dir) = manifest_dir_above(root_file) else {
         return Err(CompilerError::new_no_location(format!(
             "cannot find stick.toml for the root package source `{}`",

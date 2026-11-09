@@ -167,7 +167,7 @@ pub fn realize_shader_with_context(
 /// `None` derives a fresh table here and is for STANDALONE tools only
 /// (shader-validate, `rock web`'s offline view, manifests); an emit path
 /// passing `None` is re-doing setup work it already paid for.
-pub fn realize_shader_with_context_and_plans(
+pub(crate) fn realize_shader_with_context_and_plans(
     ws: &Workspace,
     g: &InstanceGraph,
     req: &ShaderArtifactRequest<'_>,

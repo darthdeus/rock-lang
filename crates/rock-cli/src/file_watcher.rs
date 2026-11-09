@@ -16,10 +16,10 @@ use std::time::Duration;
 #[cfg(not(target_os = "macos"))]
 type DebouncerCacheType = notify_debouncer_full::RecommendedCache;
 #[cfg(not(target_os = "macos"))]
-pub type WatchHandle =
+pub(crate) type WatchHandle =
     notify_debouncer_full::Debouncer<notify::RecommendedWatcher, DebouncerCacheType>;
 #[cfg(target_os = "macos")]
-pub type WatchHandle = macos::MacHandle;
+pub(crate) type WatchHandle = macos::MacHandle;
 
 /// True for files inside a project's *own* `tmp/` output directory
 /// (compiler scratch: `main.lua`, etc.). Explicit restart inputs bypass this filter.
@@ -44,7 +44,7 @@ fn is_tmp_scratch_file(path: &Path, roots: &[PathBuf]) -> bool {
 }
 
 /// Configuration for the file watcher
-pub struct FileWatcherConfig {
+pub(crate) struct FileWatcherConfig {
     /// Debounce delay in milliseconds
     pub debounce_ms: u64,
     /// Whether to filter out metadata-only changes (like touch)
@@ -73,7 +73,7 @@ pub struct FileWatcherConfig {
 /// against the startup instant, so an edit within the startup tick is not
 /// seeded silently. Hashes are consulted only when present.
 #[derive(Clone, Debug, Default)]
-pub struct SharedWatchSet {
+pub(crate) struct SharedWatchSet {
     paths: std::sync::Arc<parking_lot::Mutex<HashSet<PathBuf>>>,
     compiled: std::sync::Arc<parking_lot::Mutex<HashMap<PathBuf, u64>>>,
 }
@@ -84,20 +84,20 @@ impl SharedWatchSet {
     }
     /// Record the hash of the bytes the compiler baked in for `path`
     /// (`skull_mir::mir::comptime_value_hash` of the file text).
-    pub fn set_compiled_hash(&self, path: PathBuf, hash: u64) {
+    pub(crate) fn set_compiled_hash(&self, path: PathBuf, hash: u64) {
         self.compiled.lock().insert(path, hash);
     }
     /// The compiler-baked hash for `path`, if the producer supplied one.
-    pub fn compiled_hash(&self, path: &Path) -> Option<u64> {
+    pub(crate) fn compiled_hash(&self, path: &Path) -> Option<u64> {
         self.compiled.lock().get(path).copied()
     }
     /// Insert `path` with its compiler-baked hash in one step.
-    pub fn insert_with_hash(&self, path: PathBuf, hash: u64) {
+    pub(crate) fn insert_with_hash(&self, path: PathBuf, hash: u64) {
         self.paths().insert(path.clone());
         self.set_compiled_hash(path, hash);
     }
     /// Replace the whole set with `files` and their compiler-baked hashes.
-    pub fn replace_with_hashes(&self, files: Vec<(PathBuf, u64)>) {
+    pub(crate) fn replace_with_hashes(&self, files: Vec<(PathBuf, u64)>) {
         let mut paths = self.paths();
         let mut compiled = self.compiled.lock();
         paths.clear();
@@ -287,7 +287,7 @@ impl FileWatcher {
     /// Only `debounce` differs from `FileWatcherConfig::default()`;
     /// the rest is spelled out so the canonical intent survives a
     /// future change to the struct default.
-    pub fn default_for_rock_sources() -> Self {
+    pub(crate) fn default_for_rock_sources() -> Self {
         Self::new()
             .with_debounce(100)
             .with_metadata_filter(false)
@@ -295,42 +295,42 @@ impl FileWatcher {
     }
 
     /// Set debounce delay in milliseconds
-    pub fn with_debounce(mut self, ms: u64) -> Self {
+    pub(crate) fn with_debounce(mut self, ms: u64) -> Self {
         self.config.debounce_ms = ms;
         self
     }
 
     /// Enable/disable metadata change filtering
-    pub fn with_metadata_filter(mut self, filter: bool) -> Self {
+    pub(crate) fn with_metadata_filter(mut self, filter: bool) -> Self {
         self.config.filter_metadata = filter;
         self
     }
 
     /// Supply a host's relative restart path, including inputs below skipped scratch directories.
-    pub fn with_restart_suffix(mut self, suffix: PathBuf) -> Self {
+    pub(crate) fn with_restart_suffix(mut self, suffix: PathBuf) -> Self {
         self.config.restart_suffix = Some(suffix);
         self
     }
 
-    pub fn with_restart_files(mut self, files: Vec<PathBuf>) -> Self {
+    pub(crate) fn with_restart_files(mut self, files: Vec<PathBuf>) -> Self {
         self.config.restart_files = files;
         self
     }
 
     /// Set file extensions to watch
-    pub fn with_extensions(mut self, extensions: Vec<String>) -> Self {
+    pub(crate) fn with_extensions(mut self, extensions: Vec<String>) -> Self {
         self.config.watch_extensions = extensions;
         self
     }
 
-    pub fn with_all_files(mut self) -> Self {
+    pub(crate) fn with_all_files(mut self) -> Self {
         self.config.watch_all_files = true;
         self
     }
 
     /// Watch these exact files as well as the extension set; the shared handle
     /// stays with the caller, which refreshes it after each compile.
-    pub fn with_shared_extra_files(mut self, files: SharedWatchSet) -> Self {
+    pub(crate) fn with_shared_extra_files(mut self, files: SharedWatchSet) -> Self {
         self.config.extra_files = Some(files);
         self
     }
@@ -340,7 +340,7 @@ impl FileWatcher {
         self
     }
 
-    pub fn with_initial_create_filter(mut self, enabled: bool) -> Self {
+    pub(crate) fn with_initial_create_filter(mut self, enabled: bool) -> Self {
         self.config.ignore_existing_creates = enabled;
         self
     }

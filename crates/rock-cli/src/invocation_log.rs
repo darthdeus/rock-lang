@@ -22,7 +22,7 @@ const SCHEMA: u64 = 1;
 const LOG_ENV: &str = "ROCK_INVOCATION_LOG";
 /// Set for children so a nested `rock` (the sim compile child) is marked as
 /// such instead of reading as a separate loop step.
-pub const PARENT_ENV: &str = "ROCK_INVOCATION_PARENT";
+pub(crate) const PARENT_ENV: &str = "ROCK_INVOCATION_PARENT";
 /// Context variables copied into `env` when set.
 const CONTEXT_ENV: &[&str] = &["ROCK_TEST_FILTER", "ROCK_TEST_SHARDS"];
 /// `git status` takes 30-100 ms of stat-heavy work on the Rock tree; run
@@ -62,7 +62,7 @@ struct Pending {
 static STATE: Mutex<Option<Pending>> = Mutex::new(None);
 
 /// The commands that make up the edit-compile-test loop.
-pub fn is_loop_command(name: &str) -> bool {
+pub(crate) fn is_loop_command(name: &str) -> bool {
     crate::registry::CliCommand::named(name).is_some_and(|command| {
         (crate::registry::registered().command_metadata)(command).log_invocation
     })
@@ -169,7 +169,7 @@ pub fn begin(command: &'static str, backend: &str) {
 
 /// Record counts the command already computed (selected/passed/failed...).
 /// Later values for the same key overwrite earlier ones.
-pub fn note_counts(counts: &[(&str, usize)]) {
+pub(crate) fn note_counts(counts: &[(&str, usize)]) {
     with_pending(|p| {
         for (k, v) in counts {
             p.counts.insert((*k).to_string(), json!(v));
@@ -178,7 +178,7 @@ pub fn note_counts(counts: &[(&str, usize)]) {
 }
 
 /// Record one phase duration the command already measured.
-pub fn note_phase(name: &str, ms: u64) {
+pub(crate) fn note_phase(name: &str, ms: u64) {
     with_pending(|p| {
         p.phases.insert(name.to_string(), json!(ms));
     });

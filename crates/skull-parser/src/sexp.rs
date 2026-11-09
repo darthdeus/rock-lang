@@ -20,7 +20,7 @@ impl Ast {
 
     /// Id-free structural s-expr for one top-level item. Byte-compatible with
     /// rock's `Item::to_sexp`, including a leading annotation prefix.
-    pub fn item_sexp(&self, item: &Item) -> String {
+    pub(crate) fn item_sexp(&self, item: &Item) -> String {
         let prefix = if item.annotations.is_empty() {
             String::new()
         } else {
@@ -240,7 +240,7 @@ impl Ast {
 
     /// `(block s1 s2 ...)` — matches rock's `Block::to_sexp`. Used for
     /// function bodies and `if`/`else` branch bodies.
-    pub fn block_sexp(&self, b: Idx<BlockData>) -> String {
+    pub(crate) fn block_sexp(&self, b: Idx<BlockData>) -> String {
         let stmts = self.blocks[b]
             .statements
             .iter()
@@ -298,7 +298,7 @@ impl Ast {
         }
     }
 
-    pub fn stmt_sexp(&self, s: Idx<StatementData>) -> String {
+    pub(crate) fn stmt_sexp(&self, s: Idx<StatementData>) -> String {
         match &self.stmts[s].kind {
             StatementKind::Expression(e) => self.expr_sexp(*e),
             StatementKind::Use(u) => self.use_sexp(u),
@@ -365,7 +365,7 @@ impl Ast {
         }
     }
 
-    pub fn expr_sexp(&self, e: Idx<ExprData>) -> String {
+    pub(crate) fn expr_sexp(&self, e: Idx<ExprData>) -> String {
         match &self.exprs[e].kind {
             ExprKind::Null => "null".to_string(),
             ExprKind::Unit => "unit".to_string(),
@@ -759,7 +759,7 @@ impl Ast {
     /// Clean, id-free type s-expression, byte-identical to rock's
     /// `TypeExpr::to_sexp` (representation-normalizing: `Map<K,V>` parsed as
     /// an `App` renders the same as rock's dedicated `Map` variant).
-    pub fn type_sexp(&self, t: Idx<TypeExprData>) -> String {
+    pub(crate) fn type_sexp(&self, t: Idx<TypeExprData>) -> String {
         let td = &self.types[t];
         let inner = match &td.kind {
             TypeExprKind::Any => "any".to_string(),
@@ -1053,7 +1053,7 @@ impl Ast {
 }
 
 /// Mirror of rock's `VariableBinding::to_sexp`.
-pub fn binding_sexp(b: &Binding) -> String {
+pub(crate) fn binding_sexp(b: &Binding) -> String {
     match b {
         Binding::Ident(id) => id.name.to_string(),
         Binding::Tuple(parts) => {

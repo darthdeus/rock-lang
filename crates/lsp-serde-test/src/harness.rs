@@ -2,7 +2,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use serde_json::Value;
 
-pub struct TestResult {
+pub(crate) struct TestResult {
     pub type_name: &'static str,
     pub total: usize,
     pub failures: Vec<Failure>,
@@ -60,7 +60,7 @@ fn outcomes_match(a: &Outcome, b: &Outcome) -> bool {
     }
 }
 
-pub fn print_results(results: &[TestResult], verbose: bool) {
+pub(crate) fn print_results(results: &[TestResult], verbose: bool) {
     let mut any_failed = false;
     for r in results {
         if r.failures.is_empty() {

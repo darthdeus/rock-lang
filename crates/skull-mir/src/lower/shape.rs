@@ -143,7 +143,7 @@ pub(crate) fn dense_flat_enum_vec_eligible(ws: &Workspace, name: Ustr) -> bool {
 /// per leaf -- and it names it here rather than in `leaf_paths_rec`, whose
 /// result the global/reflection accessors read positionally against that same
 /// omission.
-pub fn column_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
+pub(crate) fn column_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
     let paths = value_leaf_paths(shape);
     if !shape.nullable {
         return paths;
@@ -1527,12 +1527,12 @@ pub(crate) fn value_shape_of_nominal(ws: &Workspace, name: Ustr) -> Option<Value
 /// The Lua global holding leaf `leaf` of the `nobox` global `base`. A global is
 /// category-2 storage -- its layout is derived from the stored type -- so a
 /// `nobox` global is K scalar globals, never one boxed cdata.
-pub fn nobox_global_leaf_name(base: Ustr, leaf: usize) -> Ustr {
+pub(crate) fn nobox_global_leaf_name(base: Ustr, leaf: usize) -> Ustr {
     Ustr::from(&format!("__nbg_{base}_{leaf}"))
 }
 
 /// Whether `name` is a `nobox` value struct.
-pub fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
+pub(crate) fn is_nobox_nominal(ws: &Workspace, name: Ustr) -> bool {
     ws.struct_by_name
         .get(&name)
         .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox)
@@ -2157,7 +2157,7 @@ pub struct EnumCdataShape {
 
 impl EnumCdataShape {
     /// The variant's runtime int tag (its declaration-order index).
-    pub fn tag_of(&self, v: Ustr) -> Option<i64> {
+    pub(crate) fn tag_of(&self, v: Ustr) -> Option<i64> {
         self.variants
             .iter()
             .position(|(n, _)| *n == v)
@@ -2777,7 +2777,7 @@ impl YieldChannel {
 /// The same channel oracle for a fully concrete logical coroutine type. The
 /// declaration-shaped variant is retained for source-only analysis; emitted
 /// coroutine bodies use this concrete form.
-pub fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Option<YieldChannel> {
+pub(crate) fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Option<YieldChannel> {
     let (ty, nullable) = ty.peel_nullable();
     if nullable {
         return None;

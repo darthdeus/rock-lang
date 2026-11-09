@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 /// instead of compiling one: the identity the running program reports, and the
 /// `embed_string` inputs baked into it.
 #[derive(Clone)]
-pub struct AdoptedArtifact {
+pub(crate) struct AdoptedArtifact {
     pub artifact_fingerprint: String,
     pub embedded_inputs: Vec<(PathBuf, u64)>,
 }
@@ -20,7 +20,7 @@ pub struct AdoptedArtifact {
 /// process, engine/compiler builds, sims) is the backend-agnostic runtime.
 /// What a successful (re)compile asks of the runtime beyond hot-reloading.
 #[derive(Default)]
-pub struct CompileOutcome {
+pub(crate) struct CompileOutcome {
     /// Reasons whose live state or runtime registry cannot take the compatible
     /// fast path. The watcher requests the existing clean process restart for
     /// these changes; body-only edits remain on the CodeRef overlay path.
@@ -83,7 +83,7 @@ pub trait GameCompiler {
 
 /// Skull backend: bone `Session` + `SkullEmitCache` (the `IncrementalProject` holder),
 /// emitting a full `main.lua` baseline or an `incremental.lua` overlay per tier.
-pub struct SkullGameCompiler {
+pub(crate) struct SkullGameCompiler {
     stone: Option<crate::skull_backend::IncrementalProject>,
     dir: String,
     output_path: PathBuf,
@@ -252,7 +252,7 @@ impl GameCompiler for SkullGameCompiler {
 /// directories. The skull overlay is its `incremental.lua` sibling. Only skull
 /// serves the game commands now (bone has no codegen, rock is gone), so anything
 /// else is a dispatch bug.
-pub fn game_compiler_for(
+pub(crate) fn game_compiler_for(
     backend: crate::Backend,
     path: &str,
     output_path: &Path,

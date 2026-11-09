@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Bound;
 use ustr::Ustr;
 
-pub struct Trivia {
+pub(crate) struct Trivia {
     /// Per 0-based source line: a trailing comment that follows other code on
     /// the same line -- its text (without leading `//`), the 0-based column the
     /// `//` started at in source (used to preserve the author's alignment
@@ -45,7 +45,7 @@ struct BlockComment {
 }
 
 impl Trivia {
-    pub fn harvest(src: &str, file: Ustr) -> Result<Trivia, String> {
+    pub(crate) fn harvest(src: &str, file: Ustr) -> Result<Trivia, String> {
         let tokens = Tokenizer::new(src, file)
             .tokenize()
             .map_err(|e| format!("{e:?}"))?;
@@ -127,7 +127,7 @@ impl Trivia {
 
     /// The trailing comment on a given 0-based line: `(text without //, source
     /// column of the //, start byte offset of the //)`.
-    pub fn trailing_comment(&self, line: usize) -> Option<(&str, usize, usize)> {
+    pub(crate) fn trailing_comment(&self, line: usize) -> Option<(&str, usize, usize)> {
         self.trailing
             .get(&line)
             .map(|(t, c, o)| (t.as_str(), *c, *o))
@@ -136,7 +136,7 @@ impl Trivia {
     /// The `)` that closes an argument list whose last argument ends at
     /// `offset`: `(end offset, 0-based line)`. `None` when other code comes
     /// first, as after the argument of a `f $ x` call.
-    pub fn close_paren_after(&self, offset: usize) -> Option<(usize, usize)> {
+    pub(crate) fn close_paren_after(&self, offset: usize) -> Option<(usize, usize)> {
         let (_, close) = self
             .code
             .range((Bound::Included(offset), Bound::Unbounded))
@@ -165,7 +165,7 @@ impl Trivia {
     /// after `offset`: `(start, end)`. The caller checks the gap between
     /// `offset` and `start` is whitespace/`,` before treating it as a trailing
     /// comment on the node ending at `offset` (`3 /* end */`).
-    pub fn inline_block_starting_after(&self, offset: usize) -> Option<(usize, usize)> {
+    pub(crate) fn inline_block_starting_after(&self, offset: usize) -> Option<(usize, usize)> {
         self.block
             .range((Bound::Included(offset), Bound::Unbounded))
             .find(|(_, b)| !b.own_line)
@@ -175,7 +175,7 @@ impl Trivia {
     /// True if any block comment starts within `[lo, hi)`. The "preserve
     /// verbatim" trigger: a construct whose span carries a block comment is
     /// sliced from source rather than re-rendered (which would drop it).
-    pub fn has_block_comment_in(&self, lo: usize, hi: usize) -> bool {
+    pub(crate) fn has_block_comment_in(&self, lo: usize, hi: usize) -> bool {
         self.block
             .range((Bound::Included(lo), Bound::Excluded(hi)))
             .next()
@@ -184,14 +184,14 @@ impl Trivia {
 
     /// True if a block comment sharing its line with code or another comment
     /// starts within `[lo, hi)`.
-    pub fn has_inline_block_comment_in(&self, lo: usize, hi: usize) -> bool {
+    pub(crate) fn has_inline_block_comment_in(&self, lo: usize, hi: usize) -> bool {
         self.block
             .range((Bound::Included(lo), Bound::Excluded(hi)))
             .any(|(_, b)| !b.own_line)
     }
 
     /// True if a `//` comment starts within `[lo, hi)`.
-    pub fn has_line_comment_in(&self, lo: usize, hi: usize) -> bool {
+    pub(crate) fn has_line_comment_in(&self, lo: usize, hi: usize) -> bool {
         self.line_comments
             .range((Bound::Included(lo), Bound::Excluded(hi)))
             .next()
@@ -200,7 +200,7 @@ impl Trivia {
 
     /// True if an own-line comment of either form sits on a line strictly
     /// between `after` and `before` (0-based, exclusive).
-    pub fn has_own_line_comment_between(&self, after: usize, before: usize) -> bool {
+    pub(crate) fn has_own_line_comment_between(&self, after: usize, before: usize) -> bool {
         !self.standalone_comments_between(after, before).is_empty()
             || !self
                 .own_line_block_comments_between(after, before)
@@ -211,7 +211,7 @@ impl Trivia {
     /// nearest one whose END is at or before `offset`. The caller checks the gap
     /// between `end` and `offset` is whitespace before treating it as a leading
     /// comment on the node at `offset`.
-    pub fn block_comment_ending_before(&self, offset: usize) -> Option<(usize, usize)> {
+    pub(crate) fn block_comment_ending_before(&self, offset: usize) -> Option<(usize, usize)> {
         self.block
             .range((Bound::Unbounded, Bound::Included(offset)))
             .rev()
@@ -223,7 +223,7 @@ impl Trivia {
     /// line strictly between `after` and `before` (0-based, exclusive), in
     /// source order: `(start_offset, end_offset, start_line)`. Recovered like
     /// `//` standalone comments in bodies the parser discards.
-    pub fn own_line_block_comments_between(
+    pub(crate) fn own_line_block_comments_between(
         &self,
         after: usize,
         before: usize,
@@ -240,7 +240,7 @@ impl Trivia {
 
     /// Number of fully blank lines strictly between two 0-based line numbers,
     /// capped at 2 (the formatter never emits more than two consecutive blanks).
-    pub fn blank_count_between(&self, end_line: usize, start_line: usize) -> usize {
+    pub(crate) fn blank_count_between(&self, end_line: usize, start_line: usize) -> usize {
         if start_line <= end_line + 1 {
             return 0;
         }

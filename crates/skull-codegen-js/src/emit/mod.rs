@@ -57,7 +57,7 @@ pub use assemble::*;
 use coroutine::*;
 use delivery::*;
 pub use function::*;
-pub use globals::*;
+pub(crate) use globals::*;
 pub use inst::*;
 use lanes::*;
 pub use overlay::*;

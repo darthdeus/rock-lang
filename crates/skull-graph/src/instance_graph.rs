@@ -438,7 +438,7 @@ struct RecursionFinding {
 /// debug/census path is enabled; the counters and their denominators remain
 /// durable.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct ExpandTiming {
+pub(crate) struct ExpandTiming {
     pub admissibility_ns: u64,
     pub body_prep_ns: u64,
     pub signature_type_conversion_ns: u64,
@@ -3740,7 +3740,7 @@ impl InstanceGraph {
     /// Does an always-emitted body take this instance as a VALUE
     /// (`SiteOp::FnValue`) rather than calling it? Such a site has no caller
     /// instance, so it never reaches an artifact's per-caller fn-value index.
-    pub fn is_always_emitted_fn_value(&self, i: &Instance) -> bool {
+    pub(crate) fn is_always_emitted_fn_value(&self, i: &Instance) -> bool {
         let Some(owners) = self.index.always_emitted.get(i) else {
             return false;
         };
@@ -5943,7 +5943,7 @@ enum CondVerdict {
 /// applies the key to the LEAVES, everything else to the materialized element.
 /// A strided `nobox` struct row is those leaves; a strided enum row is not.
 /// The copy-on-write entry a descriptor field write synthesizes.
-pub const DESCRIPTOR_WITH: &str = "__descriptor_with";
+pub(crate) const DESCRIPTOR_WITH: &str = "__descriptor_with";
 
 /// Whether `base` holds a stdlib descriptor (`Ptr`, `NativeBuffer`, ...)
 /// under this instance's substitution. A type that does not convert counts

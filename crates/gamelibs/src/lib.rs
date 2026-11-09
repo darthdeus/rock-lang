@@ -7,7 +7,7 @@ pub const VERSION: &str = include_str!("../../../gamelibs.version");
 
 /// Name of the explicit work-root override. The per-host table lives with the
 /// private tooling, which exports this variable for child builds.
-pub const WORK_ROOT_ENV: &str = "ROCK_WORK_ROOT";
+pub(crate) const WORK_ROOT_ENV: &str = "ROCK_WORK_ROOT";
 
 /// Shared host storage policy: an explicit absolute `ROCK_WORK_ROOT`, else the
 /// home directory. Host identity never enters the public crates. A root that
@@ -35,7 +35,7 @@ pub fn local_work_root(home: &Path) -> Result<PathBuf, String> {
 
 /// The version directory. An override is also a version directory, containing
 /// `gamelibs-<platform>` children; all overrides must be absolute.
-pub fn gamelibs_root() -> PathBuf {
+pub(crate) fn gamelibs_root() -> PathBuf {
     if let Some(dir) = env::var_os("ROCK_GAMELIBS_DIR").filter(|value| !value.is_empty()) {
         let dir = PathBuf::from(dir);
         assert!(
@@ -55,7 +55,7 @@ pub fn gamelibs_root() -> PathBuf {
 }
 
 /// Resolve one installed platform. Readers never download or write the cache.
-pub fn platform_dir(platform: &str) -> PathBuf {
+pub(crate) fn platform_dir(platform: &str) -> PathBuf {
     assert!(
         matches!(platform, "linux-x86_64" | "macos-arm64" | "windows-x86_64"),
         "no gamelibs for {platform}"
@@ -104,7 +104,7 @@ pub fn prebuilt_dir() -> PathBuf {
     dir
 }
 
-pub fn is_source_root(path: &Path) -> bool {
+pub(crate) fn is_source_root(path: &Path) -> bool {
     path.join("Cargo.toml").is_file() && path.join("gamelibs.version").is_file()
 }
 

@@ -45,7 +45,7 @@ const GLSL_FLOAT_REL_TOL: f64 = 1e-6;
 const PROFILES: [(&str, GlslProfile); 1] = [("330core", GlslProfile::Core330)];
 
 /// One profile's tallies over the whole run.
-pub struct GlslProfileSummary {
+pub(crate) struct GlslProfileSummary {
     /// `"330core"`.
     pub profile: &'static str,
     pub passed: usize,
@@ -59,7 +59,7 @@ pub struct GlslProfileSummary {
 }
 
 /// Whole-run tallies -- the testable core consumed by the ratchet test.
-pub struct GlslSuiteSummary {
+pub(crate) struct GlslSuiteSummary {
     pub files: usize,
     /// Tier-1: `@test` fns with no `returns=` (outside the value class). One
     /// collapsed number, never a histogram.
@@ -71,7 +71,7 @@ pub struct GlslSuiteSummary {
 
 /// `rock test --backend glsl` entry: run, print per-profile lines + the
 /// end-of-run summary, exit non-zero on any FAIL or unit failure.
-pub fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
+pub(crate) fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
     let start = Instant::now();
     let summary = glsl_test_run(paths, true, skip_gpu)?;
 
@@ -620,7 +620,7 @@ fn spawn_runner(
 // the shaders games actually register.
 
 /// One profile's tallies over a `shader-validate` run.
-pub struct ValidateProfileSummary {
+pub(crate) struct ValidateProfileSummary {
     /// `"330core"`.
     pub profile: &'static str,
     pub passed: usize,
@@ -631,7 +631,7 @@ pub struct ValidateProfileSummary {
 }
 
 /// Whole-run tallies for `rock shader-validate` -- the testable core.
-pub struct ValidateSummary {
+pub(crate) struct ValidateSummary {
     /// (project dir, registered shader-pair count).
     pub projects: Vec<(String, usize)>,
     pub per_profile: Vec<ValidateProfileSummary>,
@@ -639,7 +639,7 @@ pub struct ValidateSummary {
 
 /// `rock shader-validate <project>...`: print verdicts, exit non-zero on any
 /// FAIL; missing GL profiles require the explicit GPU opt-out.
-pub fn shader_validate(dirs: &[String], skip_gpu: bool) -> Result<()> {
+pub(crate) fn shader_validate(dirs: &[String], skip_gpu: bool) -> Result<()> {
     if dirs.is_empty() {
         crate::bail!(
             "rock shader-validate: usage: rock shader-validate <project-dir> [project-dir...]"
@@ -686,7 +686,7 @@ pub fn shader_validate(dirs: &[String], skip_gpu: bool) -> Result<()> {
 /// (missing runner, a project that fails to build, a pair that fails to EMIT)
 /// are `Err` -- the same pairs emit inside every game build, so an emit failure
 /// here is a regression or a profile-specific emitter gap, never a skip.
-pub fn shader_validate_run(
+pub(crate) fn shader_validate_run(
     dirs: &[String],
     print: bool,
     skip_gpu: bool,
@@ -813,7 +813,7 @@ pub fn shader_validate_run(
 
 /// Build a project directory into ONE type-checked workspace, tests included
 /// (sims may register their own `rock_shader` pairs -- validate those too).
-pub fn validate_workspace(dir: &str) -> Result<bone_semantic::inference::Workspace> {
+pub(crate) fn validate_workspace(dir: &str) -> Result<bone_semantic::inference::Workspace> {
     let spec = crate::unified_compile::SourceSpec::Directory(std::path::PathBuf::from(dir));
     let sources = crate::unified_compile::discover_sources(&spec)
         .map_err(|e| anyhow::anyhow!("{dir}: cannot load project: {e}"))?;

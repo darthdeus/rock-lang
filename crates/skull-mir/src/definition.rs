@@ -8,7 +8,7 @@ use crate::instance::Instance;
 use crate::mir::FuncRef;
 use crate::monoty::{MonoSubst, MonoTy, convert_decl};
 
-pub fn is_artifact_definition(decorator: &bone_core::hir::DecoratorDef) -> bool {
+pub(crate) fn is_artifact_definition(decorator: &bone_core::hir::DecoratorDef) -> bool {
     decorator
         .annotations
         .iter()
@@ -25,7 +25,7 @@ pub fn is_artifact_catalog_accessor(function: &bone_core::hir::Function) -> bool
             .any(|ann| ann.is_builtin("artifact_catalog"))
 }
 
-pub fn is_compiler_owned_decorator(decorator: &bone_core::hir::DecoratorDef) -> bool {
+pub(crate) fn is_compiler_owned_decorator(decorator: &bone_core::hir::DecoratorDef) -> bool {
     is_artifact_definition(decorator)
         || decorator
             .annotations

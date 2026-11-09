@@ -26,7 +26,7 @@ use crate::monoty::MonoInterner;
 /// identity: moving a definition between two fragments of one module keeps its
 /// state and its code slot. A legacy definition is unique only within its file,
 /// so it keeps today's `<file>::<name>`.
-pub fn logical_def_key(file: Ustr, name: Ustr) -> String {
+pub(crate) fn logical_def_key(file: Ustr, name: Ustr) -> String {
     match name.as_str().contains("::") {
         true => name.to_string(),
         false => format!("{file}::{name}"),
@@ -294,7 +294,7 @@ pub struct CodeCompatibility {
 }
 
 impl CodeCompatibility {
-    pub fn compatible_with(&self, other: &Self) -> bool {
+    pub(crate) fn compatible_with(&self, other: &Self) -> bool {
         self.capture.complete && other.capture.complete && self == other
     }
 }
@@ -739,7 +739,7 @@ impl CodeArtifact {
         }
     }
 
-    pub fn record_missing(&mut self, direct_call_only: bool) {
+    pub(crate) fn record_missing(&mut self, direct_call_only: bool) {
         if direct_call_only {
             self.census.direct_call_only += 1;
         } else {

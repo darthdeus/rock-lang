@@ -16,7 +16,7 @@
 use std::fmt::Write as _;
 
 /// `LJ_MAX_XLEVEL` (`lj_def.h`), checked by `synlevel_begin` in `lj_parse.c`.
-pub const LJ_MAX_XLEVEL: u32 = 200;
+pub(crate) const LJ_MAX_XLEVEL: u32 = 200;
 
 /// The syntax levels one emitted expression may use, leaving the rest of the
 /// cap to the statements, blocks and function bodies that enclose it.

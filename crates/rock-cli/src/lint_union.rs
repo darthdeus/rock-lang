@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 /// so the keys line up for intersection.
 type UnreachedKeys = HashSet<(Ustr, usize)>;
 
-pub fn do_lint_union(lib: &str, consumers_root: Option<&str>) -> Result<()> {
+pub(crate) fn do_lint_union(lib: &str, consumers_root: Option<&str>) -> Result<()> {
     let lib_root = Path::new(lib)
         .canonicalize()
         .map_err(|e| anyhow::anyhow!("lint --union: cannot resolve `{lib}`: {e}"))?;

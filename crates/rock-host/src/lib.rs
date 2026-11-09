@@ -10,7 +10,7 @@ pub mod compilation_units;
 pub mod compiler_thp;
 #[cfg(not(target_family = "wasm"))]
 pub mod lua_runner;
-pub mod preprocessor;
+pub(crate) mod preprocessor;
 pub mod process_management;
 pub mod program_inputs;
 pub mod project;
@@ -29,7 +29,7 @@ pub fn install_source_root(root: &'static std::path::Path) {
 }
 
 /// Resolve the Rock root directory from environment, exe path, CWD, or a host fallback.
-pub fn resolve_rock_dir_with(
+pub(crate) fn resolve_rock_dir_with(
     env_override: Option<String>,
     exe_path: Option<&std::path::Path>,
     cwd: Option<&std::path::Path>,

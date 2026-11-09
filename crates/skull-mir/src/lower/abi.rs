@@ -231,7 +231,7 @@ impl RepPlan {
         }
     }
 
-    pub fn presence_flags(&self) -> Option<Vec<bool>> {
+    pub(crate) fn presence_flags(&self) -> Option<Vec<bool>> {
         match self.layout() {
             RepLayout::Leaves(shape) => Some(crate::lower::value_leaf_presence_flags(shape)),
             RepLayout::Opaque | RepLayout::Tuple { .. } | RepLayout::Foreign { .. } => None,
@@ -362,7 +362,7 @@ impl GlobalPlan {
         self.arena.get(self.representation).leaf_paths()
     }
 
-    pub fn presence_flags(&self) -> Option<Vec<bool>> {
+    pub(crate) fn presence_flags(&self) -> Option<Vec<bool>> {
         self.arena.get(self.representation).presence_flags()
     }
 
@@ -382,7 +382,7 @@ impl GlobalPlan {
     /// A build-independent description of the stored global representation.
     /// `RepId` and the arena allocation order are deliberately absent: this is
     /// the logical layout fingerprint, not a backend publication name.
-    pub fn logical_fingerprint(&self) -> String {
+    pub(crate) fn logical_fingerprint(&self) -> String {
         rep_logical_fingerprint(&self.arena, self.representation)
     }
 }
@@ -412,7 +412,7 @@ impl FunctionRepPlan {
     /// are only lookup handles into `arena`; the returned string contains the
     /// recursive layouts they name, so a later artifact can compare it without
     /// depending on arena allocation order.
-    pub fn logical_fingerprint(&self, arena: &RepArena) -> String {
+    pub(crate) fn logical_fingerprint(&self, arena: &RepArena) -> String {
         let params = self
             .params
             .iter()
@@ -1497,7 +1497,7 @@ impl RepArena {
     /// The value plans selected during this build. Late consumers receive this
     /// catalog and retain the plan ID they use; they do not reconstruct one
     /// from a nominal declaration.
-    pub fn value_plan_catalog(&self) -> Vec<(Ustr, RepId)> {
+    pub(crate) fn value_plan_catalog(&self) -> Vec<(Ustr, RepId)> {
         let inner = self.inner.read().expect("RepArena lock poisoned");
         inner
             .plans
@@ -1547,7 +1547,7 @@ impl RepArena {
         })
     }
 
-    pub fn native_buffer_element_ctype(
+    pub(crate) fn native_buffer_element_ctype(
         &self,
         ws: &Workspace,
         target: FnBackend,
@@ -1659,7 +1659,7 @@ impl RepArena {
         self.leaf_layout(ws, id)
     }
 
-    pub fn nominal_leaf_view_ctys(
+    pub(crate) fn nominal_leaf_view_ctys(
         &self,
         ws: &Workspace,
         target: FnBackend,
@@ -2003,7 +2003,7 @@ impl RepArena {
         }
     }
 
-    pub fn function_value(
+    pub(crate) fn function_value(
         &self,
         ws: &Workspace,
         target: FnBackend,
@@ -2012,7 +2012,7 @@ impl RepArena {
         self.function_value_with_mode(ws, target, ty, true)
     }
 
-    pub fn function_value_first_class(
+    pub(crate) fn function_value_first_class(
         &self,
         ws: &Workspace,
         target: FnBackend,
@@ -2021,7 +2021,7 @@ impl RepArena {
         self.function_value_with_policy(ws, target, ty, false, true)
     }
 
-    pub fn function_value_with_mode(
+    pub(crate) fn function_value_with_mode(
         &self,
         ws: &Workspace,
         target: FnBackend,
@@ -3065,7 +3065,7 @@ impl BackendFnAbiPlan {
 
     /// The ABI compatibility witness for a code slot. It deliberately expands
     /// the representation through the arena instead of retaining a `RepId`.
-    pub fn logical_fingerprint(&self) -> String {
+    pub(crate) fn logical_fingerprint(&self) -> String {
         self.fingerprint
             .get_or_init(|| {
                 format!(

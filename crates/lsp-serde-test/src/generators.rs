@@ -4,11 +4,11 @@ use serde_json::{json, Value};
 
 // ── primitives ────────────────────────────────────────────────────────────────
 
-pub fn gen_position(rng: &mut StdRng) -> Value {
+pub(crate) fn gen_position(rng: &mut StdRng) -> Value {
     json!({ "line": rng.random::<u16>(), "character": rng.random::<u16>() })
 }
 
-pub fn gen_range(rng: &mut StdRng) -> Value {
+pub(crate) fn gen_range(rng: &mut StdRng) -> Value {
     let line = rng.random::<u16>() as u64;
     let ch = rng.random::<u16>() as u64;
     json!({
@@ -17,13 +17,13 @@ pub fn gen_range(rng: &mut StdRng) -> Value {
     })
 }
 
-pub fn gen_uri(_rng: &mut StdRng) -> Value {
+pub(crate) fn gen_uri(_rng: &mut StdRng) -> Value {
     json!("file:///tmp/test.rock")
 }
 
 // ── hover client capabilities ─────────────────────────────────────────────────
 
-pub fn gen_hover_client_capabilities(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_hover_client_capabilities(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!({}),
         json!({ "dynamicRegistration": true }),
@@ -37,7 +37,7 @@ pub fn gen_hover_client_capabilities(_rng: &mut StdRng) -> Vec<Value> {
 // MarkedString: string | { language: string, value: string }
 // HoverContents: MarkedString | MarkedString[] | MarkupContent
 
-pub fn gen_hover(rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_hover(rng: &mut StdRng) -> Vec<Value> {
     let range = gen_range(rng);
     vec![
         // plain string contents (MarkedString variant)
@@ -67,7 +67,7 @@ fn gen_semantic_tokens_legend() -> Value {
     })
 }
 
-pub fn gen_semantic_tokens_full_options(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_semantic_tokens_full_options(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!(true),
         json!(false),
@@ -77,7 +77,7 @@ pub fn gen_semantic_tokens_full_options(_rng: &mut StdRng) -> Vec<Value> {
     ]
 }
 
-pub fn gen_semantic_tokens_options(rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_semantic_tokens_options(rng: &mut StdRng) -> Vec<Value> {
     let legend = gen_semantic_tokens_legend();
     let full_variants = gen_semantic_tokens_full_options(rng);
     let mut out = Vec::new();
@@ -94,7 +94,7 @@ pub fn gen_semantic_tokens_options(rng: &mut StdRng) -> Vec<Value> {
     out
 }
 
-pub fn gen_semantic_tokens_server_capabilities(rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_semantic_tokens_server_capabilities(rng: &mut StdRng) -> Vec<Value> {
     // Both SemanticTokensOptions and SemanticTokensRegistrationOptions are valid;
     // the untagged enum picks the first that deserializes successfully.
     let legend = gen_semantic_tokens_legend();
@@ -111,7 +111,7 @@ pub fn gen_semantic_tokens_server_capabilities(rng: &mut StdRng) -> Vec<Value> {
 // ── completion ────────────────────────────────────────────────────────────────
 // CompletionOptions.triggerCharacters, resolveProvider, etc.
 
-pub fn gen_completion_options(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_completion_options(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!({}),
         json!({ "triggerCharacters": [".", ":"], "resolveProvider": true }),
@@ -129,7 +129,7 @@ pub fn gen_completion_options(_rng: &mut StdRng) -> Vec<Value> {
     ]
 }
 
-pub fn gen_completion_item_capability(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_completion_item_capability(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!({}),
         json!({ "snippetSupport": null }),
@@ -149,7 +149,7 @@ pub fn gen_completion_item_capability(_rng: &mut StdRng) -> Vec<Value> {
     ]
 }
 
-pub fn gen_document_symbol_client_capabilities(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_document_symbol_client_capabilities(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!({ "extraCapability": true }),
         json!({ "dynamicRegistration": "yes" }),
@@ -162,7 +162,7 @@ pub fn gen_document_symbol_client_capabilities(_rng: &mut StdRng) -> Vec<Value> 
     ]
 }
 
-pub fn gen_workspace_symbol_client_capabilities(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_workspace_symbol_client_capabilities(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!({ "extraCapability": true }),
         json!({ "dynamicRegistration": "yes" }),
@@ -186,7 +186,7 @@ pub(crate) fn gen_document_on_type_formatting_registration_options(
     ]
 }
 
-pub fn gen_initialize_params(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_initialize_params(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!({ "capabilities": {} }),
         json!({ "capabilities": {}, "processId": null }),
@@ -197,7 +197,7 @@ pub fn gen_initialize_params(_rng: &mut StdRng) -> Vec<Value> {
     ]
 }
 
-pub fn gen_message_action_item(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_message_action_item(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!({ "title": "Continue", "extraString": "value" }),
         json!({ "title": "Continue", "extraNull": null }),
@@ -208,7 +208,7 @@ pub fn gen_message_action_item(_rng: &mut StdRng) -> Vec<Value> {
 
 // ── diagnostic ────────────────────────────────────────────────────────────────
 
-pub fn gen_diagnostic(rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_diagnostic(rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!({
             "range": gen_range(rng),
@@ -233,7 +233,7 @@ pub fn gen_diagnostic(rng: &mut StdRng) -> Vec<Value> {
 // ── code action ───────────────────────────────────────────────────────────────
 // CodeActionOrCommand: Command | CodeAction (untagged — discriminated by presence of "command" field)
 
-pub fn gen_code_action_or_command(rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_code_action_or_command(rng: &mut StdRng) -> Vec<Value> {
     vec![
         // Command: must have "command" string field
         json!({ "title": "Run", "command": "editor.action.run" }),
@@ -257,7 +257,7 @@ pub fn gen_code_action_or_command(rng: &mut StdRng) -> Vec<Value> {
 // ── inlay hint ────────────────────────────────────────────────────────────────
 // InlayHintLabel: string | InlayHintLabelPart[] (untagged)
 
-pub fn gen_inlay_hint(rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_inlay_hint(rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!({ "position": gen_position(rng), "label": "i32" }),
         json!({ "position": gen_position(rng), "label": [{ "value": "i32" }] }),
@@ -271,7 +271,7 @@ pub fn gen_inlay_hint(rng: &mut StdRng) -> Vec<Value> {
 // ── workspace symbols ────────────────────────────────────────────────────────
 // WorkspaceSymbol.location: Location | { uri: DocumentUri } (untagged)
 
-pub fn gen_workspace_symbol(rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_workspace_symbol(rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!({
             "name": "MyStruct",
@@ -293,7 +293,7 @@ pub fn gen_workspace_symbol(rng: &mut StdRng) -> Vec<Value> {
 // validation on either side — both should accept any int verbatim and reject
 // non-int. Tests pin that contract.
 
-pub fn gen_int_newtype(rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_int_newtype(rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!(0),
         json!(1),
@@ -315,7 +315,7 @@ pub fn gen_int_newtype(rng: &mut StdRng) -> Vec<Value> {
 // Optional: trimTrailingWhitespace, insertFinalNewline, trimFinalNewlines.
 // Extra keys accept bool/int/string values and reject other JSON values.
 
-pub fn gen_formatting_options(rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_formatting_options(rng: &mut StdRng) -> Vec<Value> {
     vec![
         // minimal
         json!({ "tabSize": 4, "insertSpaces": true }),
@@ -353,7 +353,7 @@ pub fn gen_formatting_options(rng: &mut StdRng) -> Vec<Value> {
     ]
 }
 
-pub fn gen_tag_support(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_tag_support(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!({ "valueSet": [1] }),
         json!({ "valueSet": [1], "extra": true }),
@@ -369,7 +369,7 @@ pub fn gen_tag_support(_rng: &mut StdRng) -> Vec<Value> {
 //  - RangeWithPlaceholder: { range, placeholder: string }
 //  - Range: any Range object
 
-pub fn gen_prepare_rename_response(rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_prepare_rename_response(rng: &mut StdRng) -> Vec<Value> {
     let r = gen_range(rng);
     vec![
         // DefaultBehavior
@@ -394,7 +394,7 @@ pub fn gen_prepare_rename_response(rng: &mut StdRng) -> Vec<Value> {
 
 // ── WatchKind (bitflag u8: 1=Create, 2=Change, 4=Delete) ──────────────────────
 
-pub fn gen_watch_kind(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_watch_kind(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!(0), // empty flags
         json!(1),
@@ -414,7 +414,7 @@ pub fn gen_watch_kind(_rng: &mut StdRng) -> Vec<Value> {
 // ── PositionEncodingKind ──────────────────────────────────────────────────────
 // String newtype — accepts any string.
 
-pub fn gen_position_encoding_kind(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_position_encoding_kind(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!("utf-8"),
         json!("utf-16"),
@@ -426,7 +426,7 @@ pub fn gen_position_encoding_kind(_rng: &mut StdRng) -> Vec<Value> {
     ]
 }
 
-pub fn gen_semantic_tokens(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_semantic_tokens(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!({ "data": [] }),
         json!({ "data": [], "resultId": null }),
@@ -441,7 +441,7 @@ pub fn gen_semantic_tokens(_rng: &mut StdRng) -> Vec<Value> {
 //  - empty / unicode strings
 //  - non-int/non-string types (both reject)
 
-pub fn gen_request_id(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_request_id(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!(0),
         json!(1),
@@ -466,7 +466,7 @@ pub fn gen_request_id(_rng: &mut StdRng) -> Vec<Value> {
     ]
 }
 
-pub fn gen_response_error(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_response_error(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!({ "code": -32700, "message": "Parse error" }),
         json!({ "code": 0, "message": "" }),
@@ -489,7 +489,7 @@ pub fn gen_response_error(_rng: &mut StdRng) -> Vec<Value> {
     ]
 }
 
-pub fn gen_lsp_request(rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_lsp_request(rng: &mut StdRng) -> Vec<Value> {
     let id = json!(rng.random::<u16>());
     vec![
         // canonical
@@ -511,7 +511,7 @@ pub fn gen_lsp_request(rng: &mut StdRng) -> Vec<Value> {
     ]
 }
 
-pub fn gen_lsp_response(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_lsp_response(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!({ "id": 1 }),
         json!({ "id": 1, "result": null }),
@@ -530,7 +530,7 @@ pub fn gen_lsp_response(_rng: &mut StdRng) -> Vec<Value> {
     ]
 }
 
-pub fn gen_lsp_notification(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_lsp_notification(_rng: &mut StdRng) -> Vec<Value> {
     vec![
         json!({ "method": "exit" }),
         json!({ "method": "exit", "params": null }),
@@ -545,7 +545,7 @@ pub fn gen_lsp_notification(_rng: &mut StdRng) -> Vec<Value> {
     ]
 }
 
-pub fn gen_lsp_message(rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_lsp_message(rng: &mut StdRng) -> Vec<Value> {
     let mut out = Vec::new();
     out.extend(gen_lsp_request(rng));
     out.extend(gen_lsp_response(rng));
@@ -590,7 +590,7 @@ pub fn gen_lsp_message(rng: &mut StdRng) -> Vec<Value> {
     out
 }
 
-pub fn gen_initialize_result(rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_initialize_result(rng: &mut StdRng) -> Vec<Value> {
     let semantic_caps = gen_semantic_tokens_server_capabilities(rng);
     let mut out = Vec::new();
     for sc in semantic_caps {

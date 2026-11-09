@@ -142,7 +142,7 @@ pub fn definition_at(
 /// type of the expression or binding node, peels a leading `?`, and reuses the
 /// same nominal/builtin landmark resolution as type-annotation goto-def. `None`
 /// for primitives, function types, and anything without a navigable declaration.
-pub fn type_definition_at(
+pub(crate) fn type_definition_at(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
@@ -667,7 +667,7 @@ fn render_call_overloads_hover(
 /// signature). Body-interior tokens (`let`, `for`, ...) are past the brace and
 /// fall through to the normal node resolution. Skips compiler-generated `__`
 /// ops (their name_span is the decl name).
-pub fn fn_signature_hover(
+pub(crate) fn fn_signature_hover(
     ws: &Workspace,
     mid: ModuleId,
     src: &str,
@@ -942,7 +942,7 @@ fn render_struct_def(ws: &Workspace, name: Ustr) -> Option<String> {
 /// The modules-v1 path segment under `offset` in module `mid`, as lowering
 /// recorded it ([`hir::PathSegmentRef`]): the enclosing body's segments,
 /// then the module's own (`use` items, signatures, fields).
-pub fn path_segment_at(
+pub(crate) fn path_segment_at(
     ws: &Workspace,
     mid: ModuleId,
     offset: usize,
@@ -960,7 +960,7 @@ pub fn path_segment_at(
 /// The declaration a path segment's definition target names. A module
 /// target has no declaration in the workspace (its headers live in the
 /// source), so it is `None` here.
-pub fn segment_target_def(ws: &Workspace, target: hir::SegmentTarget) -> Option<Span> {
+pub(crate) fn segment_target_def(ws: &Workspace, target: hir::SegmentTarget) -> Option<Span> {
     match target {
         // A callable lands on its (first overload's) name, like a call does.
         hir::SegmentTarget::Def(key) => {
@@ -994,14 +994,14 @@ pub(crate) fn segments_naming(
 
 /// The modules-v1 definition whose declaration [`segment_target_def`]
 /// reports as `decl`: the definition a navigation landed on.
-pub fn v1_def_declared_at(ws: &Workspace, decl: &Span) -> Option<Ustr> {
+pub(crate) fn v1_def_declared_at(ws: &Workspace, decl: &Span) -> Option<Ustr> {
     ws.defs.keys().copied().find(|key| {
         segment_target_def(ws, hir::SegmentTarget::Def(*key)).is_some_and(|d| d == *decl)
     })
 }
 
 /// The modules-v1 definition whose declared name covers `offset` of `file`.
-pub fn v1_def_named_at(ws: &Workspace, file: Ustr, offset: usize) -> Option<Ustr> {
+pub(crate) fn v1_def_named_at(ws: &Workspace, file: Ustr, offset: usize) -> Option<Ustr> {
     ws.defs.keys().copied().find(|key| {
         segment_target_def(ws, hir::SegmentTarget::Def(*key))
             .is_some_and(|d| d.file == file && span_contains(&d, offset))
@@ -1079,7 +1079,7 @@ impl RefSite {
 /// token (named-arg labels, `?.method` names): path -> current file text.
 /// `None` (file not tracked) fails open -- the site is skipped, never
 /// mis-spanned.
-pub type TextOf<'a, 't> = &'a dyn Fn(&str) -> Option<&'t str>;
+pub(crate) type TextOf<'a, 't> = &'a dyn Fn(&str) -> Option<&'t str>;
 
 /// Whether `file` is a source no edit may touch: the standard library and
 /// other compiler-provided `<...>` sources.
@@ -1188,7 +1188,7 @@ pub fn references<'t>(
 /// order it tries them. Rename uses it to decide which names opaque code
 /// (an `inline(lua)` body, a `@nomangle` caller) can reach by spelling.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RenameSubject {
+pub(crate) enum RenameSubject {
     /// A local, parameter or pattern binding.
     Binding,
     /// A function; the name every overload shares.
@@ -1204,7 +1204,7 @@ pub enum RenameSubject {
     Other,
 }
 
-pub fn rename_subject(
+pub(crate) fn rename_subject(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
@@ -2307,7 +2307,7 @@ fn generic_decl_span(ws: &Workspace, gmid: ModuleId, gidx: Idx<hir::TypeExpr>) -
 }
 
 /// The declaration of the generic parameter the cursor is on.
-pub fn generic_param_def(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Span> {
+pub(crate) fn generic_param_def(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Span> {
     let (gmid, gidx) = generic_param_at(ws, mid, offset)?;
     generic_decl_span(ws, gmid, gidx)
 }
@@ -2526,7 +2526,7 @@ fn param_named_arg_sites<'t>(
 /// to. HIR keeps labels without spans, so the label token is located in the
 /// source text before the argument's value, as `param_named_arg_sites` does.
 /// None off a label or when the call has no resolved overload.
-pub fn named_arg_param_at<'t>(
+pub(crate) fn named_arg_param_at<'t>(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
@@ -2863,7 +2863,7 @@ fn function_references_by_name<'t>(
 /// `[start, end)`, each paired with its rendered inferred type (bone-native
 /// text, no `lsp_types`). Drives inlay type hints. Params and already-annotated
 /// bindings are skipped -- their type is already visible in the source.
-pub fn inferred_let_bindings(
+pub(crate) fn inferred_let_bindings(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
@@ -2908,7 +2908,7 @@ pub fn inferred_let_bindings(
 /// span is the argument's; the facade renders it as a leading hint. Variadic
 /// callees are skipped (the arg<->param mapping past the fixed params is
 /// ambiguous). Range-filtered to `[start, end)`.
-pub fn call_param_hints(
+pub(crate) fn call_param_hints(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
@@ -2967,7 +2967,7 @@ pub fn call_param_hints(
 /// parser's D-form marker) -- ordinary annotated params already show their type
 /// in source and get no hint. The type is rendered off the surface AST because
 /// bone drops `receiver_surface` at lowering. Range-filtered to `[start, end)`.
-pub fn receiver_param_hints(ast: &Ast, start: usize, end: usize) -> Vec<(Span, String)> {
+pub(crate) fn receiver_param_hints(ast: &Ast, start: usize, end: usize) -> Vec<(Span, String)> {
     let mut out = Vec::new();
     for item in &ast.items {
         let skull_parser::ItemKind::Function(f) = &item.kind else {
@@ -3063,7 +3063,7 @@ fn render_type_expr(ast: &Ast, idx: skull_parser::Idx<skull_parser::TypeExprData
 /// where a single unresolved identifier drops the body from `per_fn`. Bindings
 /// still come from lowering (`binding_arena`); types render only when inference
 /// is present, else the detail is empty.
-pub fn locals_in_scope(
+pub(crate) fn locals_in_scope(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
@@ -3147,7 +3147,7 @@ pub fn locals_in_scope(
 /// struct-def field chains -- so it works without inference, which is exactly
 /// the state completion fires in (the trigger `.` breaks the body). Empty if the
 /// path doesn't resolve to a struct.
-pub fn struct_fields_for_path(
+pub(crate) fn struct_fields_for_path(
     ws: &Workspace,
     mid: ModuleId,
     offset: usize,
@@ -3727,7 +3727,7 @@ fn pattern_binding_ty(
 /// pattern here when `hover_at` declines (the match expr is no longer a catch-all
 /// for arm patterns). Returns `Type: enum E` and the name span the cursor is on,
 /// walking match-arm patterns (recursing tuple/or/variant-arg sub-patterns).
-pub fn enum_variant_pattern_hover(
+pub(crate) fn enum_variant_pattern_hover(
     ws: &Workspace,
     ast: &skull_parser::Ast,
     offset: usize,
@@ -3858,7 +3858,7 @@ fn variant_head_def(
 /// Goto-definition for an enum-variant match pattern, resolved from the raw AST
 /// (the HIR pattern node isn't in `node_index`). Mirrors
 /// [`enum_variant_pattern_hover`].
-pub fn enum_variant_pattern_def(
+pub(crate) fn enum_variant_pattern_def(
     ws: &Workspace,
     ast: &skull_parser::Ast,
     offset: usize,
@@ -4047,7 +4047,7 @@ pub(crate) fn enum_variants_with_shape(
 /// of `inner`), by the structural chain. None when it can't be resolved or isn't
 /// a struct. Drives UFCS method completion (generic type args are irrelevant to
 /// method lookup, so the inference-substitution path isn't needed here).
-pub fn struct_name_for_path(
+pub(crate) fn struct_name_for_path(
     ws: &Workspace,
     mid: ModuleId,
     offset: usize,
@@ -4210,7 +4210,7 @@ fn inferred_struct_name(ws: &Workspace, mid: ModuleId, offset: usize, head: &str
 /// A UFCS method offered on a receiver: name, rendered signature, and whether
 /// any parameter remains AFTER the receiver fills the first one (drives the
 /// completion snippet -- `name($0)` when args remain, `name()` when none do).
-pub struct UfcsMethod {
+pub(crate) struct UfcsMethod {
     pub name: String,
     pub signature: String,
     pub takes_args: bool,
@@ -4236,7 +4236,7 @@ pub(crate) fn ufcs_methods(
 /// Scope-aware UFCS method enumeration. The unscoped wrapper remains for
 /// legacy callers; v1 completion passes its fragment so private overload
 /// members cannot leak into method candidates.
-pub fn ufcs_methods_in_scope(
+pub(crate) fn ufcs_methods_in_scope(
     ws: &Workspace,
     name: Ustr,
     recv_elem: Option<TyRef<'_>>,
@@ -4358,7 +4358,7 @@ fn vec_param_elem_matches(ws: &Workspace, p0_ty: TyId, want: TyRef<'_>) -> bool 
 /// Field names of the nominal struct typed at `offset` (a call-site spread
 /// operand `..op`), or empty when it isn't a known struct. Used to skip
 /// spread-covered params in named-arg completion.
-pub fn struct_field_names_at(
+pub(crate) fn struct_field_names_at(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
@@ -4382,7 +4382,7 @@ pub fn struct_field_names_at(
 /// Fields `(name, rendered_type, has_default)` of struct `name`, or empty if
 /// it isn't a struct. Drives struct-literal field completion
 /// (`Name { <field> }`); `has_default` ranks required fields first there.
-pub fn struct_fields_by_name(ws: &Workspace, name: &str) -> Vec<(String, String, bool)> {
+pub(crate) fn struct_fields_by_name(ws: &Workspace, name: &str) -> Vec<(String, String, bool)> {
     match struct_def_by_name(ws, Ustr::from(name)) {
         Some(sdef) => sdef
             .fields
@@ -4404,7 +4404,7 @@ pub fn struct_field_ty(ws: &Workspace, name: &str, field: &str) -> Option<TyId> 
 }
 
 /// The RETURN TyId of a function-typed field.
-pub fn struct_field_fn_return_ty(ws: &Workspace, name: &str, field: &str) -> Option<TyId> {
+pub(crate) fn struct_field_fn_return_ty(ws: &Workspace, name: &str, field: &str) -> Option<TyId> {
     let sdef = struct_def_by_name(ws, Ustr::from(name))?;
     let f = sdef.fields.iter().find(|f| f.name.as_str() == field)?;
     let te = match f.ty {
@@ -4417,7 +4417,7 @@ pub fn struct_field_fn_return_ty(ws: &Workspace, name: &str, field: &str) -> Opt
     }
 }
 
-pub fn variant_record_fields(
+pub(crate) fn variant_record_fields(
     ws: &Workspace,
     enum_name: &str,
     variant: &str,
@@ -4449,7 +4449,7 @@ pub fn variant_record_fields(
 /// with payload patterns `(_, _)` (tuple) / `{ .. }` (record). The facade turns
 /// these into the edit. None when the cursor isn't in such a match, every
 /// variant is already covered, or a `_`/binding arm already makes it exhaustive.
-pub fn match_arms_fill(
+pub(crate) fn match_arms_fill(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
@@ -4541,7 +4541,7 @@ fn match_missing_variants<'a>(
 /// such a literal, the struct is unknown, or every required field is already
 /// present. Fields WITH a default are not reported -- omitting them is legal, so
 /// the literal isn't incomplete without them.
-pub fn struct_fields_fill(
+pub(crate) fn struct_fields_fill(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,
@@ -5045,7 +5045,7 @@ pub enum SymCat {
     Keyword,
 }
 
-pub struct CompletionEntry {
+pub(crate) struct CompletionEntry {
     /// Interned candidate name (`Copy`, no heap clone during ranking). The
     /// caller materializes the `String` label only for the post-cap survivors.
     pub name: ustr::Ustr,
@@ -5806,7 +5806,7 @@ pub(crate) fn render_deferred_signature(
 /// File-path-keyed source map (the LSP's per-project `texts`), threaded into the
 /// signature renderers so a param's default *value* can be sliced from its
 /// defining module.
-pub type SourceMap = std::collections::HashMap<String, String>;
+pub(crate) type SourceMap = std::collections::HashMap<String, String>;
 
 /// Like [`render_fn_signature`] but shows optional params as `name: T = <default>`.
 /// The default's exact source text is sliced from the defining module via
@@ -6158,7 +6158,7 @@ pub fn hole_info(
 /// diagnostics: expression holes warn ("fill me in"), resolved type holes hint
 /// ("inferred as T"). Same detection as `hole_kind_at`, swept over the whole
 /// module instead of one cursor offset.
-pub fn all_holes(
+pub(crate) fn all_holes(
     ws: &Workspace,
     mid: ModuleId,
     inf: &InferenceResult,

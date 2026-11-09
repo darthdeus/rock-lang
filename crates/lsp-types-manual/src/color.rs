@@ -1,6 +1,6 @@
 use crate::{DocumentSelector, DynamicRegistrationClientCapabilities};
 
-pub type DocumentColorClientCapabilities = DynamicRegistrationClientCapabilities;
+pub(crate) type DocumentColorClientCapabilities = DynamicRegistrationClientCapabilities;
 
 #[derive(Debug, Eq, PartialEq, Clone, Default)]
 pub struct ColorProviderOptions {}

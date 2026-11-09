@@ -18,7 +18,7 @@ use skull_mir::mir::*;
 /// returns a reference for aggregate fields, so the writes go through). The dead
 /// `MakeValueStruct`s fall to DCE. Only fires when the stored value is a literal
 /// `MakeValueStruct` -- an opaque cdata (a variable) is copied whole as before.
-pub fn scalarize_native_buffer_stores(func: &mut MirFunc) {
+pub(crate) fn scalarize_native_buffer_stores(func: &mut MirFunc) {
     // (store inst, base, index, value-MakeValueStruct, kind) for each rewritable
     // store. Both NativeBuffer flavors: a value-element buffer arrives as
     // `NativeBufferValue` (carried through to the slot so the JS emitter keeps

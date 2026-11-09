@@ -29,31 +29,31 @@ pub use std::sync::mpsc::channel;
 pub use std::time::Duration;
 pub use ustr::Ustr;
 
-pub mod allocation_join;
+pub(crate) mod allocation_join;
 pub mod allocator;
-pub mod backend_stats;
-pub mod bone_backend;
+pub(crate) mod backend_stats;
+pub(crate) mod bone_backend;
 pub mod child_lifetime;
 pub mod common;
 pub mod compile_budget;
-pub mod compile_cmd;
-pub mod compile_slots;
+pub(crate) mod compile_cmd;
+pub(crate) mod compile_slots;
 pub mod comptime;
 mod dispatcher;
-pub mod docs_index;
+pub(crate) mod docs_index;
 mod error_test;
 pub mod file_watcher;
 mod formatting;
-pub mod glsl_test;
+pub(crate) mod glsl_test;
 pub mod image_snapshot;
-pub mod incremental_stats;
-pub mod invocation_log;
+pub(crate) mod incremental_stats;
+pub(crate) mod invocation_log;
 #[cfg(feature = "backend-js")]
 mod js_runner;
 #[cfg(feature = "backend-js")]
 pub mod js_test;
 mod lint_cmd;
-pub mod lint_pass;
+pub(crate) mod lint_pass;
 pub mod lint_union;
 pub mod live_project;
 mod lsp_survey;
@@ -62,9 +62,9 @@ mod package_test_sources;
 mod parallel_runner;
 pub mod skull_backend;
 mod test;
-pub mod test_protocol;
+pub(crate) mod test_protocol;
 pub(crate) use test::TestFilter;
-pub mod modules_analysis;
+pub(crate) mod modules_analysis;
 mod modules_audit;
 mod modules_fix;
 mod modules_migrate;
@@ -74,21 +74,21 @@ pub mod registry;
 pub mod runtime_process;
 pub mod unified_compile;
 pub mod watch;
-pub use lint_cmd::do_lint;
-pub use lsp_survey::lsp_survey;
-pub use modules_audit::Format as ModulesFormat;
-pub use modules_audit::run as modules_audit_run;
-pub use modules_fix::run as modules_fix_run;
-pub use modules_migrate::Mode as ModulesMode;
-pub use modules_migrate::run as modules_migrate_run;
+pub(crate) use lint_cmd::do_lint;
+pub(crate) use lsp_survey::lsp_survey;
+pub(crate) use modules_audit::Format as ModulesFormat;
+pub(crate) use modules_audit::run as modules_audit_run;
+pub(crate) use modules_fix::run as modules_fix_run;
+pub(crate) use modules_migrate::Mode as ModulesMode;
+pub(crate) use modules_migrate::run as modules_migrate_run;
 pub use process::{compiler_process, main_with};
 
 pub use common::*;
 pub use dispatcher::*;
 pub use file_watcher::*;
-pub use formatting::*;
+pub(crate) use formatting::*;
 pub use registry::{BackendSpec, CliCommand, Operation};
-pub use watch::*;
+pub(crate) use watch::*;
 
 /// Compiler backend selected via `--backend` / `ROCK_BACKEND`. Each variant's
 /// name, served operations and policy are registered in
@@ -108,7 +108,7 @@ pub enum Backend {
 /// command. With no explicit choice, the default is `skull`. The
 /// backend-agnostic kept commands (fmt, completions) are dispatched
 /// before the backend switch, so a `skull` default never rejects them.
-pub fn resolve_backend(explicit: Option<Backend>, _command: &CliCommand) -> Backend {
+pub(crate) fn resolve_backend(explicit: Option<Backend>, _command: &CliCommand) -> Backend {
     explicit.unwrap_or(Backend::Skull)
 }
 
@@ -476,7 +476,7 @@ impl Args {
 
 /// Language fixtures from the same source revision as this compiler.
 #[cfg(feature = "test-support")]
-pub fn test_corpus_dir() -> std::path::PathBuf {
+pub(crate) fn test_corpus_dir() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -487,30 +487,30 @@ pub fn test_corpus_dir() -> std::path::PathBuf {
 
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
-pub mod overlay_test_support;
+pub(crate) mod overlay_test_support;
 
 mod asset_selection;
-pub mod compile_cache;
+pub(crate) mod compile_cache;
 mod compiler_watch;
-pub mod frame_commands;
-pub mod frame_compile_cache;
-pub mod frame_runtime;
-pub mod game_compile;
-pub mod game_runtime;
+pub(crate) mod frame_commands;
+pub(crate) mod frame_compile_cache;
+pub(crate) mod frame_runtime;
+pub(crate) mod game_compile;
+pub(crate) mod game_runtime;
 pub mod headless_scope;
 mod host_paths;
 mod log_record;
 pub mod package;
-pub mod stone_runtime;
+pub(crate) mod stone_runtime;
 mod stone_test;
-pub mod stone_watch;
+pub(crate) mod stone_watch;
 
 pub mod run_sim;
 mod sim_arguments;
 mod sim_command;
 mod sim_environment;
-pub mod sim_observability;
-pub mod sim_report;
+pub(crate) mod sim_observability;
+pub(crate) mod sim_report;
 
 mod sdk_check;
 

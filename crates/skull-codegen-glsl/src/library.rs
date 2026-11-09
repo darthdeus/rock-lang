@@ -137,7 +137,7 @@ fn visit_shader_library(
 /// Realize an explicit-root function-library population from the shared graph.
 /// This is deliberately separate from registered shader programs: the roots
 /// have no stage or interface contract, only concrete definitions and helpers.
-pub fn realize_shader_library_view(
+pub(crate) fn realize_shader_library_view(
     ws: &Workspace,
     graph: &InstanceGraph,
     roots: &[FuncRef],
@@ -210,7 +210,7 @@ pub fn shader_library_session(
 
 /// The lowering context and registered-program population kept together
 /// for routes that do not already own a `skull::shader_artifact` view.
-pub struct ShaderProgramSession {
+pub(crate) struct ShaderProgramSession {
     pub scx: ScalarCtx,
     pub view: ShaderProgramView,
 }
@@ -413,7 +413,7 @@ fn realize_shader_program_view(
 /// Build a registered-program view from the shared graph. The returned session
 /// is the compatibility seam for callers that have roots but no retained
 /// `ShaderArtifactView`; emission itself still consumes the supplied view.
-pub fn shader_program_session(
+pub(crate) fn shader_program_session(
     ws: &Workspace,
     program: ShaderProgram,
 ) -> Result<ShaderProgramSession, CompilerError> {
@@ -584,7 +584,7 @@ pub fn emit_shader_library_with_view(
 /// Compatibility wrapper for callers that have not yet retained a graph. The
 /// route itself is still graph-backed; production and tests that own a session
 /// should call [`emit_shader_library_with_view`] directly.
-pub fn emit_shader_library(
+pub(crate) fn emit_shader_library(
     ws: &Workspace,
     mid: ModuleId,
     roots: &[String],

@@ -315,7 +315,7 @@ fn lint_rejects(
 /// path). `backend` is informational -- bone is the shared front end, so both
 /// verify rejection identically. The error-KIND suffix is rock-specific (bone
 /// diagnostics mostly carry no kind), so this asserts REJECTION only.
-pub fn run_error_suite(
+pub(crate) fn run_error_suite(
     path: &Path,
     _backend: crate::Backend,
     verbose: bool,
@@ -443,7 +443,7 @@ pub fn run_error_suite(
 }
 
 /// Check if a path contains error tests
-pub fn has_error_tests(path: &Path) -> bool {
+pub(crate) fn has_error_tests(path: &Path) -> bool {
     if !path.exists() {
         return false;
     }
@@ -475,7 +475,7 @@ pub fn has_error_tests(path: &Path) -> bool {
 }
 
 /// Find the error test directory from a given path
-pub fn find_error_test_dir(path: &Path) -> Option<PathBuf> {
+pub(crate) fn find_error_test_dir(path: &Path) -> Option<PathBuf> {
     if path.ends_with("errors") && path.is_dir() {
         return Some(path.to_path_buf());
     }

@@ -442,7 +442,7 @@ fn render_joined_report(
     render_joined_report_with_jit(manifest, activation, route, lua, None)
 }
 
-pub fn render_joined_report_with_jit(
+pub(crate) fn render_joined_report_with_jit(
     manifest: &str,
     activation: &str,
     route: Option<&str>,

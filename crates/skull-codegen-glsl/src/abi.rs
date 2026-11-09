@@ -852,7 +852,7 @@ fn attr_location_span(_k: AttrKind) -> u32 {
 /// (Apple's only desktop context) guarantees 16. Desktop Linux
 /// drivers allow more, so a program over it linked there and failed to link
 /// on a Mac; checking at compile time makes every host refuse it.
-pub const GLSL_STAGE_SAMPLER_BUDGET: usize = 16;
+pub(crate) const GLSL_STAGE_SAMPLER_BUDGET: usize = 16;
 
 /// Refuse a stage that declares more samplers than every GLSL target has
 /// units for. Counts DECLARED samplers (group plus bare) rather than the ones
@@ -881,8 +881,8 @@ pub(crate) fn check_stage_sampler_budget(
     ))
 }
 
-pub const UNIFORM_BLOCK_BINDING_ENGINE: u32 = 0;
-pub const UNIFORM_BLOCK_BINDING_VERTEX: u32 = 1;
-pub const UNIFORM_BLOCK_BINDING_FRAGMENT: u32 = 2;
+pub(crate) const UNIFORM_BLOCK_BINDING_ENGINE: u32 = 0;
+pub(crate) const UNIFORM_BLOCK_BINDING_VERTEX: u32 = 1;
+pub(crate) const UNIFORM_BLOCK_BINDING_FRAGMENT: u32 = 2;
 pub const UNIFORM_BLOCK_BINDING_VERTEX_ARRAYS: u32 = 3;
 pub const UNIFORM_BLOCK_BINDING_FRAGMENT_ARRAYS: u32 = 4;

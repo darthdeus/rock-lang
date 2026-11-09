@@ -20,12 +20,12 @@ macro_rules! bank_file_name {
 pub const BANK_PATH: &str = concat!("assets/", bank_file_name!());
 /// A sheet file is `<asset root>/.eat/<dir>/<name>`.
 pub const SHEET_ROOT: &str = ".eat";
-pub const SHEET_GEOMETRY: &str = "sheet.json";
+pub(crate) const SHEET_GEOMETRY: &str = "sheet.json";
 /// The relight channels of an animation sheet, in the order the bake writes them.
-pub const RELIGHT_CHANNELS: [&str; 4] = ["albedo", "normal", "depth", "material"];
+pub(crate) const RELIGHT_CHANNELS: [&str; 4] = ["albedo", "normal", "depth", "material"];
 /// The number of bake directions (Eat's `bake::DIRECTIONS`); a character
 /// line's camera holds one basis per direction.
-pub const DIRECTION_COUNT: usize = 8;
+pub(crate) const DIRECTION_COUNT: usize = 8;
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -277,7 +277,7 @@ pub struct ArchitecturalPiece {
 /// eight directions, and optional joint tracks `[direction][frame] = [x, y, z]`.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SheetGeometry {
+pub(crate) struct SheetGeometry {
     pub rects: Vec<[u32; 7]>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub joints: BTreeMap<String, Vec<Vec<[f64; 3]>>>,
@@ -364,7 +364,7 @@ impl Line {
     }
 }
 
-pub fn mask_file(mask: &str) -> String {
+pub(crate) fn mask_file(mask: &str) -> String {
     format!("mask-{mask}.png")
 }
 
@@ -429,7 +429,7 @@ fn positive(size: [u32; 2]) -> bool {
     size[0] > 0 && size[1] > 0
 }
 
-pub fn is_sheet_dir(dir: &str) -> bool {
+pub(crate) fn is_sheet_dir(dir: &str) -> bool {
     dir.len() == 64
         && dir
             .bytes()
@@ -455,7 +455,7 @@ fn check_masks(masks: &[String]) -> Result<()> {
 
 /// The checks one line carries on its own; `resolve` checks lines against
 /// each other.
-pub fn check_line(line: &Line) -> Result<()> {
+pub(crate) fn check_line(line: &Line) -> Result<()> {
     let (_, id, label) = line.key();
     anyhow::ensure!(
         !id.is_empty() && (!matches!(line, Line::Animation(_)) || !label.is_empty()),
@@ -661,7 +661,7 @@ pub fn check_line(line: &Line) -> Result<()> {
     Ok(())
 }
 
-pub fn parse_line(raw: &str) -> Result<Line> {
+pub(crate) fn parse_line(raw: &str) -> Result<Line> {
     let line: Line = serde_json::from_str(raw)?;
     check_line(&line)?;
     Ok(line)
@@ -770,7 +770,7 @@ pub fn resolve(lines: &[Line]) -> (BankIndex<'_>, Vec<String>) {
     (index, problems)
 }
 
-pub fn validate_floor_texture(
+pub(crate) fn validate_floor_texture(
     repeat: Option<[u32; 2]>,
     region: Option<[u32; 4]>,
     wang: Option<[u32; 2]>,
@@ -889,11 +889,11 @@ impl Placement {
     }
 }
 
-pub fn finite_point(point: [f32; 2]) -> bool {
+pub(crate) fn finite_point(point: [f32; 2]) -> bool {
     point.iter().all(|v| v.is_finite() && v.abs() <= 65536.)
 }
 
-pub fn check_polygon(points: &[[f32; 2]]) -> Result<()> {
+pub(crate) fn check_polygon(points: &[[f32; 2]]) -> Result<()> {
     anyhow::ensure!(
         (3..=128).contains(&points.len()) && points.iter().all(|p| finite_point(*p)),
         "invalid placement polygon"

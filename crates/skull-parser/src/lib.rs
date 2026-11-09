@@ -6,14 +6,14 @@
 pub mod ast;
 pub mod clone;
 pub mod desugar;
-pub mod graft;
+pub(crate) mod graft;
 pub mod macro_expand;
 pub mod parser;
-pub mod sexp;
+pub(crate) mod sexp;
 pub mod stdlib;
 
 pub use ast::*;
-pub use parser::Parser;
+pub(crate) use parser::Parser;
 
 pub use ordered_float::OrderedFloat;
 pub use rock_core::errors::CompilerErrorKind;

@@ -677,7 +677,7 @@ pub(super) fn emit_pass_nested_fns(
 /// NEITHER: it is emitted STANDALONE per instantiation, resolving its
 /// placeholder bound-calls from the tree that specialization demand carries, so
 /// there is no declaration-keyed chunk to cache.
-pub fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
+pub(crate) fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
     !f.is_extern && f.inline_body.is_none() && !fn_has_bounds(f) && !is_generic(f)
 }
 
@@ -695,7 +695,7 @@ pub fn is_cached_body(f: &bone_semantic::hir::Function) -> bool {
 /// generic's specialized chunk on every edit: `is_cached_body` said false, the
 /// caller took its "regenerated, drop the chunk" branch, and the overlay then
 /// found nothing to redefine.
-pub fn is_cached_emitted_body(f: &bone_semantic::hir::Function, body: &Instance) -> bool {
+pub(crate) fn is_cached_emitted_body(f: &bone_semantic::hir::Function, body: &Instance) -> bool {
     if body.args.is_empty() {
         return is_cached_body(f);
     }

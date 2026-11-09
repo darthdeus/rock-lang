@@ -352,7 +352,7 @@ pub struct SoundConfig {
     pub project: String,
 }
 
-pub const KNOWN_BUILD_BUILTINS: [&str; 3] = ["channel", "platform", "source_revision"];
+pub(crate) const KNOWN_BUILD_BUILTINS: [&str; 3] = ["channel", "platform", "source_revision"];
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -419,7 +419,7 @@ pub fn resolved_channel_for(cfg: &StickConfig) -> String {
 
 /// True when `dep` compiles into a build on `channel`. A dependency with no
 /// declared channels is unscoped and matches everywhere.
-pub fn dependency_matches_channel(dep: &Dependency, channel: &str) -> bool {
+pub(crate) fn dependency_matches_channel(dep: &Dependency, channel: &str) -> bool {
     match dep {
         Dependency::Path(_) => true,
         Dependency::Detailed(detailed) => {
@@ -449,7 +449,7 @@ impl Package {
     pub fn version(&self) -> &str {
         self.version.as_deref().unwrap_or("0.0.0")
     }
-    pub fn package_type(&self) -> PackageType {
+    pub(crate) fn package_type(&self) -> PackageType {
         self.package_type.unwrap_or(PackageType::Bin)
     }
 }

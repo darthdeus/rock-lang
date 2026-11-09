@@ -289,7 +289,7 @@ fn call_label_errors(m: &Ast, reg: &Registry) -> Vec<CompilerError> {
 /// is prebuilt and expansion only mutates `ast`), so `expand_one` over each
 /// module yields exactly the batch `expand_macros` result. Idempotent on an
 /// already-expanded module: defs are gone and no registered call remains.
-pub fn expand_one(ast: &mut Ast, registry: &MacroRegistry) {
+pub(crate) fn expand_one(ast: &mut Ast, registry: &MacroRegistry) {
     let reg = &registry.0;
     if !reg.is_empty() {
         // Item-macro invocations splice their items in first, so the spliced
@@ -1975,7 +1975,7 @@ fn stmt_blocks(ast: &Ast, s: Idx<StatementData>) -> BlockEdges {
 // Keep them in sync.
 
 /// Per parameter, its declaration span + every use span in the macro template.
-pub fn index_macro_param_refs(
+pub(crate) fn index_macro_param_refs(
     ast: &Ast,
     params: &[Param],
     body: Option<Idx<BlockData>>,

@@ -50,7 +50,7 @@ fn scope_args(mut cmd: Command) -> Command {
 /// `inner` re-issued through `systemd-run` when headless children are scoped,
 /// otherwise `inner` itself. Call before configuring stdio, which a `Command`
 /// cannot report back for copying.
-pub fn headless_command(inner: Command) -> Command {
+pub(crate) fn headless_command(inner: Command) -> Command {
     match placement() {
         Placement::Scoped => wrap(inner),
         Placement::Unscoped => inner,

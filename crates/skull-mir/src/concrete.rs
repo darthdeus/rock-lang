@@ -51,11 +51,11 @@ pub struct ConcreteTypeTables {
 }
 
 impl ConcreteTypeTables {
-    pub fn expr_type(&self, expr: Idx<Expr>) -> Option<MonoTyId> {
+    pub(crate) fn expr_type(&self, expr: Idx<Expr>) -> Option<MonoTyId> {
         self.expr_types.get(expr).copied()
     }
 
-    pub fn binding_type(&self, binding: Idx<BindingInfo>) -> Option<MonoTyId> {
+    pub(crate) fn binding_type(&self, binding: Idx<BindingInfo>) -> Option<MonoTyId> {
         self.binding_types.get(binding).copied()
     }
 
@@ -67,11 +67,11 @@ impl ConcreteTypeTables {
         self.untyped_exprs.contains(&expr)
     }
 
-    pub fn is_untyped_binding(&self, binding: Idx<BindingInfo>) -> bool {
+    pub(crate) fn is_untyped_binding(&self, binding: Idx<BindingInfo>) -> bool {
         self.untyped_bindings.contains(&binding)
     }
 
-    pub fn struct_field_type(&self, literal: Idx<Expr>, field: Ustr) -> Option<MonoTyId> {
+    pub(crate) fn struct_field_type(&self, literal: Idx<Expr>, field: Ustr) -> Option<MonoTyId> {
         self.struct_field_types.get(literal)?.get(&field).copied()
     }
 }
@@ -122,7 +122,7 @@ pub type ConcreteAlwaysPlans = FxHashMap<ConcreteOwner, ConcreteBodyPlan>;
 /// Copy a view's outer table while preserving the stable handle for every
 /// selected body. The owner-local publisher can then replace its authoritative
 /// map entry without mutating a consumer's selection.
-pub fn select_concrete_plans<'a>(
+pub(crate) fn select_concrete_plans<'a>(
     plans: &ConcretePlans,
     instances: impl IntoIterator<Item = &'a Instance>,
 ) -> ConcretePlans {
@@ -169,7 +169,7 @@ impl ConcreteBodyPlan {
         }
     }
 
-    pub fn domain_types(&self, domain: &SiteDomain) -> Option<&ConcreteTypeTables> {
+    pub(crate) fn domain_types(&self, domain: &SiteDomain) -> Option<&ConcreteTypeTables> {
         if matches!(domain, SiteDomain::Own) {
             Some(&self.types)
         } else {

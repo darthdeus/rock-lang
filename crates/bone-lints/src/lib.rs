@@ -106,7 +106,7 @@ fn candidate_bindings(body: &Body, variants: &FxHashSet<Ustr>) -> Vec<Idx<Bindin
 /// Every enum-variant name across user modules. A bare variant in pattern
 /// position (`None =>`) lowers to a `Let` binding of that name; the lint must
 /// not report those as unused variables.
-pub fn enum_variant_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> FxHashSet<Ustr> {
+pub(crate) fn enum_variant_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> FxHashSet<Ustr> {
     ws.user_modules(warm)
         .flat_map(|m| m.enums.iter())
         .flat_map(|(_, e)| e.variants.iter().map(|v| v.name))
@@ -249,7 +249,7 @@ impl LintOptions {
     }
 
     /// Whether `method_syntax` may report over receiver type `name`.
-    pub fn covers_type(&self, name: Ustr) -> bool {
+    pub(crate) fn covers_type(&self, name: Ustr) -> bool {
         self.only_types
             .as_ref()
             .is_none_or(|only| only.contains(&name))
@@ -4064,7 +4064,7 @@ pub fn backend_sibling_mismatches(ws: &Workspace) -> Vec<BackendSiblingMismatch>
 /// Same as [`backend_sibling_mismatches`], grouped by the source file of the
 /// decl each finding sits on. The LSP publishes per file; a file with no
 /// findings is absent.
-pub fn backend_sibling_mismatches_by_file(
+pub(crate) fn backend_sibling_mismatches_by_file(
     ws: &Workspace,
 ) -> FxHashMap<Ustr, Vec<BackendSiblingMismatch>> {
     let mut out: FxHashMap<Ustr, Vec<BackendSiblingMismatch>> = FxHashMap::default();
@@ -4208,7 +4208,7 @@ pub fn unused_fns(ws: &Workspace) -> Vec<UnusedFn> {
 /// Same as [`unused_fns`], but grouped by the source file each dead function
 /// lives in (`Module.file`). The LSP publishes per file, so it distributes the
 /// whole-project result this way; a file with no dead functions is absent.
-pub fn unused_fns_by_file(
+pub(crate) fn unused_fns_by_file(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
 ) -> FxHashMap<Ustr, Vec<UnusedFn>> {
@@ -4436,7 +4436,7 @@ pub struct UnusedPureExpr {
 }
 
 /// Canonical lint name for suppression: `// rock: allow(unused_pure_expr)`.
-pub const UNUSED_PURE_EXPR: &str = "unused_pure_expr";
+pub(crate) const UNUSED_PURE_EXPR: &str = "unused_pure_expr";
 
 impl LintFinding for UnusedPureExpr {
     const LINT: &'static str = UNUSED_PURE_EXPR;
@@ -4460,7 +4460,7 @@ impl LintFinding for UnusedPureExpr {
 /// never a statement, so tails and expression-position blocks are never
 /// touched. `is_pure` gates on the whole subtree, so a comparison with a call
 /// operand (`g() == x`) is not flagged.
-pub fn unused_pure_exprs_in_body(body: &Body) -> Vec<UnusedPureExpr> {
+pub(crate) fn unused_pure_exprs_in_body(body: &Body) -> Vec<UnusedPureExpr> {
     let mut out = Vec::new();
     for (_, stmt) in body.statement_arena.iter() {
         let Statement::Expr(e) = stmt else { continue };
@@ -4612,7 +4612,7 @@ impl LintFinding for TransmuteOfNullable {
 /// it nothing is judgeable. Matched by callee NAME -- user overloads named
 /// `cast`/`transmute` that strip a `?` are the same bug shape, so flagging them
 /// too is intended.
-pub fn transmute_of_nullable_in_body(
+pub(crate) fn transmute_of_nullable_in_body(
     ws: &Workspace,
     bi: Option<&BodyInference>,
     body: &Body,
@@ -4707,7 +4707,7 @@ pub fn transmute_of_nullable(ws: &Workspace) -> Vec<TransmuteOfNullable> {
 /// type, declared in prefix form (`fn damage(m: Mob, n: int)`) where the
 /// receiver form (`fn Mob.damage(m, n: int)`) says the same thing.
 #[derive(Clone, Debug)]
-pub struct MethodSyntax {
+pub(crate) struct MethodSyntax {
     pub name: Ustr,
     /// The nominal type of param 0 -- the receiver path of the rewrite.
     pub receiver: Ustr,
@@ -4717,7 +4717,7 @@ pub struct MethodSyntax {
 }
 
 /// Canonical lint name for suppression: `// rock: allow(method_syntax)`.
-pub const METHOD_SYNTAX: &str = "method_syntax";
+pub(crate) const METHOD_SYNTAX: &str = "method_syntax";
 
 impl LintFinding for MethodSyntax {
     const LINT: &'static str = METHOD_SYNTAX;
@@ -4741,7 +4741,7 @@ impl LintFinding for MethodSyntax {
 /// and rejected malformed calls, while the source span identifies the caller
 /// that still needs an action/editor/tool/text classification.
 #[derive(Clone, Debug)]
-pub struct RawInputSite {
+pub(crate) struct RawInputSite {
     pub name: Ustr,
     pub span: Span,
 }
@@ -4820,14 +4820,14 @@ fn raw_input_class_marker<'a>(
 }
 
 #[derive(Clone, Debug)]
-pub struct RawInputClassificationGap<'a> {
+pub(crate) struct RawInputClassificationGap<'a> {
     pub name: Ustr,
     pub span: Span,
     pub line_population: usize,
     pub classes: &'a [String],
 }
 
-pub fn unclassified_raw_input_sites_in_module<'a>(
+pub(crate) fn unclassified_raw_input_sites_in_module<'a>(
     module: &Module,
     source: &str,
     policy: &'a ActionLayerPolicy,
@@ -4884,7 +4884,7 @@ impl LintFinding for RawInputClassificationGap<'_> {
 /// A production project action declaration with no production caller. The source
 /// span is the declaration itself so a missing consumer is named exactly.
 #[derive(Clone, Debug)]
-pub struct ActionCallerGap<'a> {
+pub(crate) struct ActionCallerGap<'a> {
     pub action: Ustr,
     pub file: Ustr,
     pub span: Span,
@@ -4944,7 +4944,7 @@ impl LintFinding for ActionCallerGap<'_> {
 
 /// HIR-backed caller census for production project actions. Global declaration
 /// initializers and `@wire` refresh bodies are registration, not callers.
-pub fn action_caller_gaps<'a>(
+pub(crate) fn action_caller_gaps<'a>(
     ws: &Workspace,
     warm: &FxHashSet<ModuleId>,
     policy: &'a ActionLayerPolicy,
@@ -5023,7 +5023,7 @@ pub fn action_caller_gaps<'a>(
 /// candidate. `extern` decls are excluded because the parser REJECTS a receiver
 /// path on one; `@shader` entry points because their param 0 is the stage input,
 /// not a receiver.
-pub fn method_syntax_in_module(
+pub(crate) fn method_syntax_in_module(
     ws: &Workspace,
     module: &Module,
     types: &FxHashSet<Ustr>,
@@ -5289,7 +5289,7 @@ pub fn row_escapes(ws: &Workspace) -> Vec<RowEscape> {
     out
 }
 
-pub fn nominal_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> FxHashSet<Ustr> {
+pub(crate) fn nominal_type_names(ws: &Workspace, warm: &FxHashSet<ModuleId>) -> FxHashSet<Ustr> {
     let mut out = FxHashSet::default();
     for m in ws.user_modules(warm) {
         out.extend(m.struct_by_name.keys().copied());
@@ -5309,7 +5309,7 @@ pub struct TaskNullAbandon {
 }
 
 /// Canonical lint name for suppression: `// rock: allow(task_null_abandon)`.
-pub const TASK_NULL_ABANDON: &str = "task_null_abandon";
+pub(crate) const TASK_NULL_ABANDON: &str = "task_null_abandon";
 
 impl LintFinding for TaskNullAbandon {
     const LINT: &'static str = TASK_NULL_ABANDON;
@@ -5348,7 +5348,7 @@ impl LintFinding for TaskNullAbandon {
 /// null-assign shapes -- nulling a task just observed terminal, and completion
 /// cleanup inside the task's own terminal defer -- are equally invisible here,
 /// which is why the lint reports at `Warning` with the allow comment legal.
-pub fn task_null_abandon_in_body(
+pub(crate) fn task_null_abandon_in_body(
     ws: &Workspace,
     bi: Option<&BodyInference>,
     body: &Body,

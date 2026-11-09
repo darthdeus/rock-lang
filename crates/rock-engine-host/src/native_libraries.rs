@@ -14,7 +14,7 @@ pub struct NativeLibrary {
     pub stage_dir: PathBuf,
 }
 
-pub fn project_native_dir(project: &Path) -> Result<PathBuf> {
+pub(crate) fn project_native_dir(project: &Path) -> Result<PathBuf> {
     Ok(fs_err::canonicalize(project)?.join("tmp/native"))
 }
 

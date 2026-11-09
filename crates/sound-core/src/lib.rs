@@ -19,7 +19,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-pub const AUTHORING_SCHEMA_VERSION: u32 = 2;
+pub(crate) const AUTHORING_SCHEMA_VERSION: u32 = 2;
 pub const RUNTIME_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -377,7 +377,7 @@ pub fn serialize_runtime_bank(bank: &RuntimeBank) -> Result<Vec<u8>, SoundCoreEr
     serde_json::to_vec(bank).map_err(|error| SoundCoreError::Serialize(error.to_string()))
 }
 
-pub fn validate_project<R: AssetResolver + ?Sized>(
+pub(crate) fn validate_project<R: AssetResolver + ?Sized>(
     project: &SoundProject,
     resolver: &R,
     require_assets: bool,

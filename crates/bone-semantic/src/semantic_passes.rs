@@ -138,7 +138,7 @@ pub(crate) fn expand_and_desugar(
     Ok(())
 }
 
-pub fn lower_modules(
+pub(crate) fn lower_modules(
     ws: &mut Workspace,
     rock_modules: &[Ast],
 ) -> Result<Vec<ModuleId>, CompilerError> {
@@ -800,7 +800,7 @@ fn reaches(
     false
 }
 
-pub fn infer_modules(ws: &mut Workspace, ids: &[ModuleId]) -> Result<(), CompilerError> {
+pub(crate) fn infer_modules(ws: &mut Workspace, ids: &[ModuleId]) -> Result<(), CompilerError> {
     // Pass 4: inference
     {
         let _span = tracing::info_span!("infer_functions").entered();
@@ -2489,7 +2489,7 @@ fn reuse_body(
     }
 }
 
-pub fn pass_register_forward_decls(
+pub(crate) fn pass_register_forward_decls(
     rock_module: &Ast,
     module: &mut Module,
     v1_scope: Option<&FragmentScope>,
@@ -2573,7 +2573,7 @@ pub fn pass_register_forward_decls(
     Ok(())
 }
 
-pub fn pass_lower_fields(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerError> {
+pub(crate) fn pass_lower_fields(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerError> {
     // pass 2: lower fields. v1 fragments register under their DefKeys, so
     // the walk carries each item's logical module path.
     let scope = ctx.v1_scope().cloned();
@@ -2600,7 +2600,7 @@ pub fn pass_lower_fields(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerErro
     Ok(())
 }
 
-pub fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerError> {
+pub(crate) fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), CompilerError> {
     // pass 3: lower function defs
     let scope = ctx.v1_scope().cloned();
     let reg_key = |name: &ustr::Ustr, path: &[ustr::Ustr]| -> ustr::Ustr {

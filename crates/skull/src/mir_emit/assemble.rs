@@ -7,7 +7,7 @@ use super::*;
 /// plus decorator definitions (files only -- decorators re-apply on full
 /// rebuild, so the watch set is all they need).
 #[derive(Clone, Default)]
-pub struct UnitComptimeReads {
+pub(crate) struct UnitComptimeReads {
     pub(super) globals: FxHashMap<
         (ModuleId, Idx<bone_semantic::hir::GlobalDef>),
         Vec<skull_mir::mir::ComptimeRead>,

@@ -840,7 +840,7 @@ impl ConcreteBodies {
     }
 
     /// Untyped slots as `<instance> <expr kind> at <file>:<line>`.
-    pub fn render_untyped(&self, ws: &Workspace, g: &InstanceGraph) -> Vec<String> {
+    pub(crate) fn render_untyped(&self, ws: &Workspace, g: &InstanceGraph) -> Vec<String> {
         let rows: Vec<String> = self
             .aggregate_facts()
             .untyped
@@ -1314,7 +1314,7 @@ fn declared_tuple_param(ws: &Workspace, ty: TyId) -> Result<bool, MonoTyReason> 
 /// Resolve the concrete signature a graph instance owns before a consumer
 /// needs a full body plan. This is used by graph-side helper accounting, whose
 /// pass runs before `ConcreteBodies::build` installs per-body tables.
-pub fn concrete_signature_for_instance(
+pub(crate) fn concrete_signature_for_instance(
     ws: &Workspace,
     g: &InstanceGraph,
     inst: &Instance,

@@ -10,7 +10,7 @@ use skull_parser::{Ast, MacroRegistry, Span};
 
 /// All occurrences (decl + template uses) of the macro parameter the cursor is
 /// on, or empty if `offset` isn't on a macro parameter.
-pub fn macro_param_references(ast: &Ast, offset: usize) -> Vec<Span> {
+pub(crate) fn macro_param_references(ast: &Ast, offset: usize) -> Vec<Span> {
     for group in &ast.macro_param_refs {
         if group.spans.iter().any(|s| {
             let (start, end) = s.offset_range;
@@ -53,7 +53,7 @@ pub(crate) fn macro_invocation_def(
 /// Whether `offset` is on a macro's name in `ast`: a macro definition's name
 /// or an invocation that expands to a macro. Expansion erases both before
 /// bone sees the module, so no reference walk can find every use of one.
-pub fn on_macro_name(ast: &Ast, registry: &MacroRegistry, offset: usize) -> bool {
+pub(crate) fn on_macro_name(ast: &Ast, registry: &MacroRegistry, offset: usize) -> bool {
     let on_def = ast.items.iter().any(|item| {
         let ItemKind::Function(f) = &item.kind else {
             return false;

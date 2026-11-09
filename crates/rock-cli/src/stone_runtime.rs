@@ -6,7 +6,7 @@ use anyhow::Result;
 use rock_engine_host::project::configured_stone_dir;
 use std::path::{Path, PathBuf};
 
-pub fn prepare_unit(path: &str) -> anyhow::Result<()> {
+pub(crate) fn prepare_unit(path: &str) -> anyhow::Result<()> {
     if let Some(project) = rock_host::project::find_project_root(std::path::Path::new(path)) {
         let project = project
             .to_str()
@@ -16,7 +16,7 @@ pub fn prepare_unit(path: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn program_host(unit: TestUnit<'_>) -> std::result::Result<ProgramHost, RuntimeFailure> {
+pub(crate) fn program_host(unit: TestUnit<'_>) -> std::result::Result<ProgramHost, RuntimeFailure> {
     let path = match &unit {
         TestUnit::File(file) => file
             .parent()
@@ -162,7 +162,7 @@ pub fn program_preamble(dir: &str, kind: ProgramKind) -> Result<String> {
 }
 
 /// Sound assets must be ready before the compiler evaluates build-time inputs.
-pub fn prepare_run(dir: &str) -> Result<()> {
+pub(crate) fn prepare_run(dir: &str) -> Result<()> {
     if rock_engine_host::project::is_game_project(Path::new(dir)).unwrap_or(false) {
         crate::package::prepare_sound_bank(dir)?;
     } else {

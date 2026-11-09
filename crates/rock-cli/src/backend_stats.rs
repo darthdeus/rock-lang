@@ -88,7 +88,7 @@ struct SkullStats {
     concrete_stats: skull::concrete_body::ConcreteBuildStats,
 }
 
-pub fn do_backend_stats(input: &str, iters: usize, warmup: usize, json: bool) -> Result<()> {
+pub(crate) fn do_backend_stats(input: &str, iters: usize, warmup: usize, json: bool) -> Result<()> {
     let iters = iters.max(1);
 
     // One source load, consumed by both backends so the input is identical. Both

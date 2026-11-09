@@ -20,7 +20,7 @@ static LEVEL: AtomicU8 = AtomicU8::new(2);
 
 /// Parse `error|warn|info|debug|trace` or `0..4`. Unknown / unset =>
 /// `None` (caller keeps the default). `info` is the default elsewhere.
-pub fn parse_level(s: &str) -> Option<u8> {
+pub(crate) fn parse_level(s: &str) -> Option<u8> {
     match s.trim().to_lowercase().as_str() {
         "error" | "0" => Some(0),
         "warn" | "1" => Some(1),
@@ -363,10 +363,10 @@ pub struct LogRecord {
 
 /// Distinct records kept per level; past it the least recently seen is evicted
 /// and counted, so the table stays bounded without losing the fact of a record.
-pub const RECORD_CAP: usize = 64;
+pub(crate) const RECORD_CAP: usize = 64;
 
 #[derive(Default)]
-pub struct RecordTable {
+pub(crate) struct RecordTable {
     rows: Vec<LogRecord>,
     total: u64,
     evicted: u64,

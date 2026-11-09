@@ -748,7 +748,7 @@ pub fn census(
 /// Detail is a parameter rather than always-on because the rows are per CALL
 /// and the corpus has hundreds of thousands; the manifest writes them only when
 /// asked for a dump directory.
-pub fn census_detailed(
+pub(crate) fn census_detailed(
     ws: &Workspace,
     scx: &ScalarCtx,
     g: &InstanceGraph,

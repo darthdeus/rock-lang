@@ -131,7 +131,7 @@ thread_local! {
 /// pure function of the name, and every call site of a function mangles its
 /// callee's name again, so the digest and formatting run once per name per
 /// worker instead of once per reference.
-pub fn ident_of_name(name: ustr::Ustr) -> ustr::Ustr {
+pub(crate) fn ident_of_name(name: ustr::Ustr) -> ustr::Ustr {
     IDENT_CACHE.with(|cache| {
         if let Some(ident) = cache.borrow().get(&name) {
             return *ident;

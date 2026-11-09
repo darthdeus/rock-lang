@@ -9,7 +9,7 @@ use std::process::{Command, Stdio};
 ///
 /// `CARGO_TARGET_DIR` is deliberately NOT here: it is a real user setting
 /// that Cargo honors.
-pub const CARGO_HARNESS_ENV_VARS: &[&str] = &[
+pub(crate) const CARGO_HARNESS_ENV_VARS: &[&str] = &[
     "CARGO_MANIFEST_DIR",
     "CARGO_MANIFEST_PATH",
     "CARGO_MANIFEST_LINKS",
@@ -19,7 +19,7 @@ pub const CARGO_HARNESS_ENV_VARS: &[&str] = &[
 ];
 /// Prefix of the per-package harness variables (`CARGO_PKG_NAME`,
 /// `CARGO_PKG_VERSION_*`, ...), which share the fate above.
-pub const CARGO_HARNESS_ENV_PREFIX: &str = "CARGO_PKG_";
+pub(crate) const CARGO_HARNESS_ENV_PREFIX: &str = "CARGO_PKG_";
 
 /// Remove the harness variables from a nested cargo invocation so it
 /// fingerprints like a plain-shell build.

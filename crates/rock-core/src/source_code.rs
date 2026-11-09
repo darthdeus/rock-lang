@@ -4,7 +4,7 @@ use std::sync::LazyLock;
 use crate::prelude::*;
 
 /// File name that stands in for a source position which does not exist.
-pub const UNKNOWN_FILE_NAME: &str = "<unknown>";
+pub(crate) const UNKNOWN_FILE_NAME: &str = "<unknown>";
 
 /// `Span::unknown()` runs on every trial-unify path that ends up succeeding, so
 /// the sentinel name is interned here once instead of being hashed into the

@@ -6,7 +6,7 @@ use std::path::Path;
 /// Decode a PNG into an RGBA8 byte buffer (4 bytes per pixel,
 /// row-major). Stone screenshots are PNG; baselines are produced by
 /// Stone too. Anything outside the formats Stone writes is an error.
-pub fn decode_png_rgba8(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
+pub(crate) fn decode_png_rgba8(path: &Path) -> Result<(u32, u32, Vec<u8>)> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let decoder = png::Decoder::new(std::io::BufReader::new(file));
     let mut reader = decoder

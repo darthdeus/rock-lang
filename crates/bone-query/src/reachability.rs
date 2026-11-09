@@ -173,7 +173,7 @@ impl ReachabilityIndex {
     /// any type -- a lookup (no DFS). The call-through arg expansion filters
     /// these by the wanted param type. Empty for a scalar / leaf type. Peels a
     /// nullable `?` so a `Foo?` root matches the `Foo`-keyed store.
-    pub fn arg_paths_from(&self, ty: &str) -> &[ReachPath] {
+    pub(crate) fn arg_paths_from(&self, ty: &str) -> &[ReachPath] {
         let key = Ustr::from(ty.strip_suffix('?').unwrap_or(ty));
         self.arg_paths.get(&key).map_or(&[], |slot| {
             slot.get_or_init(|| {
@@ -199,7 +199,7 @@ impl ReachabilityIndex {
     /// The same shallow paths, restricted to callable members admitted by a
     /// modules-v1 fragment. The cached graph is workspace-wide; visibility is
     /// a property of the request site, so it is applied at read time.
-    pub fn arg_paths_in_scope(
+    pub(crate) fn arg_paths_in_scope(
         &self,
         ws: &Workspace,
         frag: &FragmentScope,
@@ -241,7 +241,7 @@ impl ReachabilityIndex {
     }
 
     /// `paths_to` with per-member visibility applied for a modules-v1 query.
-    pub fn paths_to_in_scope(
+    pub(crate) fn paths_to_in_scope(
         &self,
         ws: &Workspace,
         frag: &FragmentScope,

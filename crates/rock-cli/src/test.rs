@@ -9,7 +9,7 @@
 use crate::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TestFilter {
+pub(crate) struct TestFilter {
     patterns: Vec<String>,
     display: String,
 }
@@ -50,7 +50,7 @@ impl TestFilter {
 /// compile-failure flags support reporting; output and value expectations
 /// are verified on the typechecked path (`skull::SkullTest`).
 #[derive(Debug, Clone)]
-pub struct TestMetadata {
+pub(crate) struct TestMetadata {
     pub name: String,
     pub ignored: bool,
     pub expect_failure: bool,
@@ -60,7 +60,7 @@ pub struct TestMetadata {
 /// `@test` fns with their `expect_failure` / `@ignore` flags. Files that don't
 /// parse cleanly are skipped — they can't contribute a discoverable test, and
 /// the caller only reaches here after a compile failure anyway.
-pub fn find_test_functions_from_sources(sources: &SourceFiles) -> Vec<TestMetadata> {
+pub(crate) fn find_test_functions_from_sources(sources: &SourceFiles) -> Vec<TestMetadata> {
     let mut test_functions = Vec::new();
 
     for file in sources.files.iter() {

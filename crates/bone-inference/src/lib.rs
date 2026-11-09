@@ -39,7 +39,7 @@ mod unify;
 
 pub(crate) use calls::*;
 pub(crate) use defer::*;
-pub use expr::*;
+pub(crate) use expr::*;
 pub(crate) use fields::*;
 pub(crate) use iter::*;
 pub(crate) use lambda::*;
@@ -207,7 +207,7 @@ impl<'a> Gamma<'a> {
         }
     }
 
-    pub fn access_site(&self) -> AccessSite<'_> {
+    pub(crate) fn access_site(&self) -> AccessSite<'_> {
         let file = self.workspace.module(self.current_module_id).file;
         if let Some(frag) = self.workspace.fragment_scopes.get(&file) {
             AccessSite {
@@ -257,7 +257,7 @@ impl<'a> Gamma<'a> {
         self.workspace.render(Some(&self.out), ty)
     }
 
-    pub fn fresh_callsite_var(&mut self, hint: Ustr, span: Span) -> TyId {
+    pub(crate) fn fresh_callsite_var(&mut self, hint: Ustr, span: Span) -> TyId {
         let var_id = VarId(self.next_var_id);
         self.next_var_id += 1;
 
@@ -271,7 +271,7 @@ impl<'a> Gamma<'a> {
 
     /// The enclosing fn's `Iterator` bound on the generic with this VarId, if
     /// any: `(index into Function.generics, declared element type)`.
-    pub fn fn_bound_for(&self, v: VarId) -> Option<(usize, TyId)> {
+    pub(crate) fn fn_bound_for(&self, v: VarId) -> Option<(usize, TyId)> {
         self.fn_bounds
             .iter()
             .find(|(var, _, _)| *var == v)
@@ -293,14 +293,14 @@ impl<'a> Gamma<'a> {
         }
     }
 
-    pub fn span_of(&self, ty: TyId) -> Option<Span> {
+    pub(crate) fn span_of(&self, ty: TyId) -> Option<Span> {
         match ty {
             TyId::Static(mid, idx) => self.workspace.module(mid).ty_spans.get(idx).copied(),
             TyId::Local(idx) => self.out.ty_spans.get(idx).copied(),
         }
     }
 
-    pub fn instantiate_generics(
+    pub(crate) fn instantiate_generics(
         &mut self,
         generics: &[TyId],
         span: Span,
@@ -332,7 +332,7 @@ impl<'a> Gamma<'a> {
         self.app_with_ctor(TypeCtor::for_name(name), args, span)
     }
 
-    pub fn app_with_ctor(&mut self, ctor: TypeCtor, args: &[TyId], span: Span) -> TyId {
+    pub(crate) fn app_with_ctor(&mut self, ctor: TypeCtor, args: &[TyId], span: Span) -> TyId {
         let mut texps = Vec::with_capacity(args.len());
 
         for &t in args {
@@ -384,7 +384,7 @@ impl<'a> Gamma<'a> {
         Ok(())
     }
 
-    pub fn assign_named_type(
+    pub(crate) fn assign_named_type(
         &mut self,
         name: Idx<BindingInfo>,
         ty: TyId,

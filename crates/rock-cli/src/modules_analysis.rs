@@ -780,7 +780,7 @@ impl Edit {
 }
 
 /// Apply non-overlapping edits. Overlap is refused.
-pub fn apply_edits(text: &str, edits: &[Edit]) -> std::result::Result<String, String> {
+pub(crate) fn apply_edits(text: &str, edits: &[Edit]) -> std::result::Result<String, String> {
     let mut sorted: Vec<&Edit> = edits.iter().collect();
     sorted.sort_by_key(|e| e.range);
     let mut out = String::with_capacity(text.len() + 64);

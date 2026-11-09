@@ -80,14 +80,14 @@ fn member_segment_target(target: &resolve::MemberTarget) -> hir::SegmentTarget {
     }
 }
 
-pub fn alloc_ty(ctx: &mut LowerCtx, body: &mut Body, pos: TyPos, node: TypeExpr) -> TyId {
+pub(crate) fn alloc_ty(ctx: &mut LowerCtx, body: &mut Body, pos: TyPos, node: TypeExpr) -> TyId {
     match pos {
         TyPos::Iface => TyId::Static(ctx.module.module_id(), alloc_ty_raw(ctx, body, pos, node)),
         TyPos::Body => TyId::Local(alloc_ty_raw(ctx, body, pos, node)),
     }
 }
 
-pub fn alloc_ty_raw(
+pub(crate) fn alloc_ty_raw(
     ctx: &mut LowerCtx,
     body: &mut Body,
     pos: TyPos,
@@ -99,7 +99,7 @@ pub fn alloc_ty_raw(
     }
 }
 
-pub fn alloc_tys_contiguous(
+pub(crate) fn alloc_tys_contiguous(
     ctx: &mut LowerCtx,
     body: &mut Body,
     pos: TyPos,
@@ -595,7 +595,7 @@ impl<'a> LowerCtx<'a> {
         VarId(self._next_var_id)
     }
 
-    pub fn alloc_binding(
+    pub(crate) fn alloc_binding(
         &mut self,
         body: &mut Body,
         b: BindingInfo,
@@ -653,7 +653,7 @@ impl<'a> LowerCtx<'a> {
         idx
     }
 
-    pub fn bind_let(
+    pub(crate) fn bind_let(
         &mut self,
         body: &mut Body,
         name: Ustr,
@@ -675,7 +675,7 @@ impl<'a> LowerCtx<'a> {
         var
     }
 
-    pub fn lower_pattern_bindings(
+    pub(crate) fn lower_pattern_bindings(
         &mut self,
         body: &mut Body,
         binding: &Binding,
@@ -703,7 +703,7 @@ impl<'a> LowerCtx<'a> {
         }
     }
 
-    pub fn lower_type_exprs_to_range(
+    pub(crate) fn lower_type_exprs_to_range(
         &mut self,
         a: &Ast,
         body: &mut Body,
@@ -735,7 +735,7 @@ impl<'a> LowerCtx<'a> {
         }
     }
 
-    pub fn declare_generics(&mut self, generics: &[skull_parser::Generic]) -> Vec<TyId> {
+    pub(crate) fn declare_generics(&mut self, generics: &[skull_parser::Generic]) -> Vec<TyId> {
         self.generics_in_scope.clear();
 
         generics
@@ -767,7 +767,7 @@ pub fn lower_type_expr(
     lower_type_expr_in(ctx, a, body, TyPos::Iface, te)
 }
 
-pub fn lower_type_expr_local(
+pub(crate) fn lower_type_expr_local(
     ctx: &mut LowerCtx,
     a: &Ast,
     body: &mut Body,
@@ -903,7 +903,7 @@ fn unresolved_type_name(
     })
 }
 
-pub fn lower_type_expr_in(
+pub(crate) fn lower_type_expr_in(
     ctx: &mut LowerCtx,
     a: &Ast,
     body: &mut Body,
@@ -1233,7 +1233,7 @@ pub fn lower_type_expr_in(
 }
 
 // TODO: maybe just return &Expr?
-pub fn lookup_in_scope(
+pub(crate) fn lookup_in_scope(
     ctx: &LowerCtx,
     body: &mut Body,
     start_scope: Idx<Scope>,
@@ -1264,7 +1264,7 @@ fn lookup_local(body: &Body, start_scope: Idx<Scope>, name: Ustr) -> Option<Idx<
     }
 }
 
-pub fn lower_block(
+pub(crate) fn lower_block(
     ctx: &mut LowerCtx,
     a: &Ast,
     body: &mut Body,
@@ -1278,7 +1278,7 @@ pub fn lower_block(
     Ok(Expr::Block { statements, tail })
 }
 
-pub fn lower_statement_value(
+pub(crate) fn lower_statement_value(
     ctx: &mut LowerCtx,
     a: &Ast,
     body: &mut Body,
@@ -1567,7 +1567,7 @@ pub fn lower_statement_value(
     Ok(hir_s)
 }
 
-pub fn lower_expr_value(
+pub(crate) fn lower_expr_value(
     ctx: &mut LowerCtx,
     a: &Ast,
     body: &mut Body,
@@ -2816,7 +2816,7 @@ fn validate_generic_defaults(
     Ok(())
 }
 
-pub fn build_function(
+pub(crate) fn build_function(
     ctx: &mut LowerCtx,
     a: &Ast,
     f: &FunctionDef,

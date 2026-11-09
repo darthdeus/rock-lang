@@ -59,7 +59,7 @@ fn run_sort_key(id: &str) -> (u8, u128, u64, u64, String) {
 
 /// Every retained run under `root`, oldest first. A directory without an
 /// `events.jsonl` is not a run record and is skipped.
-pub fn list_runs(root: &Path) -> Result<Vec<(String, PathBuf)>> {
+pub(crate) fn list_runs(root: &Path) -> Result<Vec<(String, PathBuf)>> {
     let entries = std::fs::read_dir(root)
         .with_context(|| format!("reading the sim history root `{}`", root.display()))?;
     let mut runs = Vec::new();
@@ -116,7 +116,7 @@ fn resolve_run(root: &Path, run_id: Option<&str>) -> Result<(String, PathBuf)> {
 /// One parsed run record. `skipped_records` counts lines this reader declined
 /// to interpret (unparsable, or a `schema_version` it does not know); they are
 /// surfaced rather than silently dropped.
-pub struct RunRecord {
+pub(crate) struct RunRecord {
     pub run_id: String,
     pub dir: PathBuf,
     events: Vec<Value>,
@@ -564,7 +564,7 @@ fn occupancy(workers: &[Worker], base_ms: i64, jobs: i64) -> Occupancy {
 
 /// Everything one run's records say, already reduced. Built once and rendered
 /// either as a table or as JSON.
-pub struct SimRunAnalysis {
+pub(crate) struct SimRunAnalysis {
     run_id: String,
     dir: PathBuf,
     skipped_records: usize,
@@ -979,7 +979,7 @@ impl SimRunAnalysis {
         (jobs > 0).then(|| self.inside_envelopes_ms / jobs)
     }
 
-    pub fn render_json(&self) -> Result<String> {
+    pub(crate) fn render_json(&self) -> Result<String> {
         let mut run = Map::new();
         run.insert("run_id".into(), json!(self.run_id));
         run.insert("directory".into(), json!(self.dir.to_string_lossy()));

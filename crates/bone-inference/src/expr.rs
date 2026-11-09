@@ -351,7 +351,7 @@ pub(crate) fn infer_statement(
     Ok(())
 }
 
-pub fn infer_expr_used(
+pub(crate) fn infer_expr_used(
     c: BodyCtx,
     gamma: &mut Gamma,
     e: Idx<Expr>,

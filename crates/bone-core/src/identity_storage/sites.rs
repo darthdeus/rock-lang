@@ -57,7 +57,7 @@ pub fn identity_storage_exempt(ws: &Workspace, module: &Module) -> bool {
 }
 
 /// Every declaration position in `module` that stores an identity struct.
-pub fn identity_storage_sites(ws: &Workspace, module: &Module) -> Vec<IdentityStorageSite> {
+pub(crate) fn identity_storage_sites(ws: &Workspace, module: &Module) -> Vec<IdentityStorageSite> {
     let mut sites = Vec::new();
     let mut push = |violation: Option<IdentityStorageViolation>,
                     direct: IdentityStorageKind,
@@ -440,7 +440,7 @@ fn is_stdlib_file_named(module: &Module, stem: &str) -> bool {
 
 /// The stdlib arena file: the one module that implements the privileged row
 /// store, with the trust boundary of `@frame_ref_source`.
-pub fn is_identity_store_module(module: &Module) -> bool {
+pub(crate) fn is_identity_store_module(module: &Module) -> bool {
     is_stdlib_file_named(module, "arena")
 }
 

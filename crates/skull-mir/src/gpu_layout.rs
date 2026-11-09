@@ -278,7 +278,7 @@ impl WireKind {
     /// value walker, which is what turns the claim into a checked one.
     /// Logical scalar leaves in declaration order. This is independent of the
     /// target's offsets; the physical block uses the same order when it packs.
-    pub fn leaf_suffixes(self) -> Vec<String> {
+    pub(crate) fn leaf_suffixes(self) -> Vec<String> {
         match self {
             WireKind::F32 | WireKind::I32 | WireKind::U32 | WireKind::Bool32 => vec![String::new()],
             WireKind::F32x2 => ["x", "y"].iter().map(|k| format!(".{k}")).collect(),
@@ -817,7 +817,7 @@ pub fn uniform_array_block(
 
 /// OpenGL 3.3's guaranteed MAX_UNIFORM_BLOCK_SIZE minimum. Keep shaders portable
 /// across drivers rather than accepting a larger limit on the build host.
-pub const GL_MAX_UNIFORM_BLOCK_SIZE: u32 = 16384;
+pub(crate) const GL_MAX_UNIFORM_BLOCK_SIZE: u32 = 16384;
 
 fn ty_expr(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
     match ty {

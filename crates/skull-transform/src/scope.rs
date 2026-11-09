@@ -20,7 +20,7 @@ use skull_mir::mir::*;
 use skull_mir::cfg::reachable_blocks_from;
 
 /// Index into [`ScopeTree::scopes`]. The enclosing fn is always [`ROOT`].
-pub type ScopeId = usize;
+pub(crate) type ScopeId = usize;
 /// The enclosing-function scope.
 pub const ROOT: ScopeId = 0;
 
@@ -84,7 +84,7 @@ impl Ownership {
     /// The block and within-block position of `c`'s single WRITE, or `None` if it
     /// is written other than exactly once (a multi-write cell is not a by-value
     /// candidate). A lookup into the site map recorded by [`ScopeTree::accesses`].
-    pub fn single_write_site(&self, c: Idx<Cell>) -> Option<(Idx<Block>, usize)> {
+    pub(crate) fn single_write_site(&self, c: Idx<Cell>) -> Option<(Idx<Block>, usize)> {
         match self.write_sites.get(&c) {
             Some(WriteSite::Once(b, pos)) => Some((*b, *pos)),
             Some(WriteSite::Many) | None => None,
@@ -187,7 +187,7 @@ impl ScopeTree {
     }
 
     /// The scope owning block `b` (the scope whose region contains it).
-    pub fn scope_of_block(&self, b: Idx<Block>) -> Option<ScopeId> {
+    pub(crate) fn scope_of_block(&self, b: Idx<Block>) -> Option<ScopeId> {
         self.block_scope.get(&b).copied()
     }
 
@@ -420,7 +420,7 @@ fn loop_binding_cells(func: &MirFunc) -> HashSet<Idx<Cell>> {
 /// cells to box.
 ///
 /// `frame_fields` are a coroutine step's frame cells; the JS path passes `None`.
-pub fn non_dominating_by_value_captures(
+pub(crate) fn non_dominating_by_value_captures(
     func: &MirFunc,
     tree: &ScopeTree,
     own: &Ownership,

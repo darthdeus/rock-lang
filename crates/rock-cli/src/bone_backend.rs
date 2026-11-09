@@ -26,7 +26,7 @@ use std::time::Duration;
 /// early failure the stage that never ran stays zero (a parse error leaves
 /// `semantic` at 0), so a sum across files attributes real work to each stage.
 #[derive(Clone, Copy, Default)]
-pub struct BonePhaseTimes {
+pub(crate) struct BonePhaseTimes {
     pub parse: Duration,
     /// Fused lower + check (`bone_semantic::semantic_passes::semantic_pass`). bone does not expose
     /// a lower/check boundary publicly.
@@ -131,7 +131,7 @@ pub fn check_modules(
 /// and repairs what changed) and which read the public-API type closure themselves
 /// (`api_closure_requirements`). Every other gate is the same; the body
 /// errors come back beside the workspace instead of replacing it.
-pub fn check_modules_for_tools(
+pub(crate) fn check_modules_for_tools(
     modules: &mut skull_parser::stdlib::ModuleSet,
 ) -> std::result::Result<
     (bone_semantic::inference::Workspace, Vec<CompilerError>),
@@ -153,7 +153,7 @@ fn check_modules_gated(
 /// [`check_modules`] over the stdlib + `user`: the common "I just parsed user
 /// code, give me a verified workspace" path (single-file emit, project compile,
 /// iter benches).
-pub fn check_with_stdlib(
+pub(crate) fn check_with_stdlib(
     user: impl IntoIterator<Item = skull_parser::Ast>,
 ) -> std::result::Result<bone_semantic::inference::Workspace, Vec<CompilerError>> {
     check_modules(&mut skull::pipeline::with_stdlib(user).map_err(|e| vec![e])?)
@@ -236,7 +236,7 @@ pub(crate) fn bone_session_for_emission(
 /// `backend-stats`) layers on top so the timing split is consistent. Timed with
 /// plain `Instant`s at the call boundaries — no coupling to bone, which stays
 /// uninstrumented.
-pub fn bone_pipeline_timed(
+pub(crate) fn bone_pipeline_timed(
     src: &str,
 ) -> (std::result::Result<(), Vec<CompilerError>>, BonePhaseTimes) {
     let mut times = BonePhaseTimes::default();
@@ -335,7 +335,7 @@ pub(crate) fn parse_user_modules(
 /// identified by file path (`parse_user_modules`/`skull_assemble_project`); the
 /// workspace's `module_ids` interner is the single path->id authority, so the id
 /// is only knowable after `semantic_pass` has registered every module.
-pub fn entry_module_id(
+pub(crate) fn entry_module_id(
     ws: &bone_semantic::inference::Workspace,
     file: ustr::Ustr,
 ) -> bone_semantic::prelude::ModuleId {
@@ -407,7 +407,7 @@ fn render_source_errs(src: &str, errs: &[CompilerError]) -> String {
 /// "Unsupported top level item Item { .. }" is the full AST node); this keeps the
 /// histogram and per-file lines readable while preserving the discriminating
 /// detail (which item kind / which type ctor / which missing function).
-pub fn categorize(msg: &str) -> String {
+pub(crate) fn categorize(msg: &str) -> String {
     // First identifier-ish token before a `{`, `(`, or whitespace.
     let head = |s: &str| -> String {
         s.trim()
@@ -476,7 +476,7 @@ pub fn categorize(msg: &str) -> String {
 /// `iters` reuses the same profiling loop the Lua `compile --iters N` uses:
 /// run the pipeline N times and report the mean per-stage (parse/lower/check)
 /// timing on the `PROFILE` log target. `iters <= 1` reports a single timing.
-pub fn bone_check_single(path: &str, command: &str, iters: usize) -> Result<()> {
+pub(crate) fn bone_check_single(path: &str, command: &str, iters: usize) -> Result<()> {
     if Path::new(path).is_dir() {
         return bone_check_project(path, command, iters);
     }
@@ -643,7 +643,7 @@ pub(crate) fn log_compile_stats(
 /// rendered and the loop keeps running, unlike the one-shot commands which
 /// exit 1; a failed update (parse/macro/lowering error) keeps serving the
 /// previous good workspace.
-pub fn bone_watch(path: &str) -> Result<()> {
+pub(crate) fn bone_watch(path: &str) -> Result<()> {
     // None until a Session::new succeeds: an unparseable file at startup is
     // rendered and retried on the next change, matching the old batch loop's
     // keep-running behavior.
@@ -748,7 +748,7 @@ fn report_phase_timing(label: &str, agg: &BonePhaseTimes, iters: usize) {
 
 /// Trim a long absolute path to something readable in the per-file test line,
 /// keeping the last two components (`dir/file.rock`).
-pub fn short_path(path: &str) -> String {
+pub(crate) fn short_path(path: &str) -> String {
     let p = Path::new(path);
     let file = p.file_name().and_then(|s| s.to_str()).unwrap_or(path);
     match p

@@ -70,7 +70,7 @@ enum Ctl {
     Shutdown,
 }
 
-pub fn run_stone_test(root: &Path) -> Result<()> {
+pub(crate) fn run_stone_test(root: &Path) -> Result<()> {
     let root = root.canonicalize()?;
     if !root.is_dir() {
         anyhow::bail!("stone-test root must be a directory: {}", root.display());

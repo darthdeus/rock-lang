@@ -159,7 +159,7 @@ fn create_source_file(
 
 /// Load a source file without applying preprocessor output (used by the
 /// formatter and LSP, which want the original text with #if blocks intact).
-pub fn source_file_new(path: impl AsRef<Path>) -> Result<SourceFile> {
+pub(crate) fn source_file_new(path: impl AsRef<Path>) -> Result<SourceFile> {
     source_file_load(path, false)
 }
 

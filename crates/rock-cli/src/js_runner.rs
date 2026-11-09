@@ -12,12 +12,12 @@ use wait_timeout::ChildExt;
 /// executor's protocol lives on stdout and its error reports quote stderr
 /// verbatim. There is no exit status: the harness catches every test, so the
 /// stdout markers alone decide the outcome.
-pub struct NodeRun {
+pub(crate) struct NodeRun {
     pub stdout: String,
     pub stderr: String,
 }
 
-pub fn run_node_code_with_timeout(
+pub(crate) fn run_node_code_with_timeout(
     code: &str,
     timeout: Option<Duration>,
 ) -> Result<NodeRun, CompilerError> {
@@ -91,7 +91,7 @@ pub fn run_node_code_with_timeout(
 /// timeout, returning node's exit code. The captured-output timeout variant
 /// (`run_node_code_with_timeout`) stays test-only; a real program can run
 /// arbitrarily long and must not be truncated at 15s.
-pub fn run_node_code_streaming(code: &str) -> Result<i32, CompilerError> {
+pub(crate) fn run_node_code_streaming(code: &str) -> Result<i32, CompilerError> {
     let mut cmd = std::process::Command::new("node");
     rock_host::compiler_thp::configure_runtime_command(&mut cmd);
     let mut child = cmd

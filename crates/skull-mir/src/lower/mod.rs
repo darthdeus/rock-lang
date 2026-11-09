@@ -1919,7 +1919,7 @@ pub fn lower_global_with_plans(
 /// Lower a global with a storage context and a possibly different call ABI
 /// context. Native C globals keep their scalarized storage while calls into
 /// ordinary C bodies use those bodies' first-class value ABI.
-pub fn lower_global_with_call_context(
+pub(crate) fn lower_global_with_call_context(
     ws: &Workspace,
     scx: &ScalarCtx,
     call_scx: &ScalarCtx,
@@ -4246,7 +4246,7 @@ fn resolve_shader_arg(
 /// expander ([`Builder::expand_shader_pipeline`]), the fatal gate
 /// ([`shader_expand_rejection`]), and the driver collector
 /// ([`collect_shader_pairs`]) -- one resolver, never forked.
-pub fn resolve_shader_pair(
+pub(crate) fn resolve_shader_pair(
     ws: &Workspace,
     body: &Body,
     call_expr: Idx<Expr>,
@@ -4377,7 +4377,7 @@ fn uniform_values_rejection_for_call(
 /// accept. The argument must be a plain string literal -- interpolation or any
 /// computed expression rejects, because the input has to be knowable without
 /// running the body.
-pub fn resolve_comptime_value(
+pub(crate) fn resolve_comptime_value(
     ws: &Workspace,
     body: &Body,
     call_expr: Idx<Expr>,
@@ -4484,7 +4484,7 @@ pub fn resolve_comptime_value(
 
 /// A resolved comptime input: the value, plus (for embeds) the absolute path
 /// the read landed on -- what invalidation re-reads and the watcher watches.
-pub struct ResolvedComptime {
+pub(crate) struct ResolvedComptime {
     pub value: String,
     pub file_abs: Option<Ustr>,
 }

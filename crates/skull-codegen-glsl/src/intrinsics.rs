@@ -123,7 +123,7 @@ impl IntrinsicTable for GlslIntrinsics {
 /// Whether a callee that survived MIR lowering is rendered inline at call sites
 /// rather than emitted as a GLSL fn definition. Scalar operators do not reach
 /// this predicate: lowering turns them into native MIR instructions.
-pub fn renders_inline(f: &Function) -> bool {
+pub(crate) fn renders_inline(f: &Function) -> bool {
     GlslIntrinsics.lookup(f).is_some()
         || (vec_op_symbol(declared_name(f.name.as_str())).is_some() && f.param_decls.len() == 2)
 }
@@ -249,7 +249,7 @@ pub fn is_lowered_native_operator(
     })
 }
 
-pub struct GlslShaderPolicy;
+pub(crate) struct GlslShaderPolicy;
 
 impl skull_codegen_shader::ShaderPlannerPolicy for GlslShaderPolicy {
     fn inline_call(&self, function: &Function) -> bool {

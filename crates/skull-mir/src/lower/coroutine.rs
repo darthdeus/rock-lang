@@ -58,7 +58,7 @@ impl CoroutinePlan {
         })
     }
 
-    pub fn channel_for_concrete_type(ws: &Workspace, ty: &MonoTy) -> Option<YieldChannel> {
+    pub(crate) fn channel_for_concrete_type(ws: &Workspace, ty: &MonoTy) -> Option<YieldChannel> {
         coroutine_yield_channel_mono(ws, ty)
     }
 

@@ -99,7 +99,7 @@ impl FmtNode {
 
 /// Whether `name` is a type the structural formatter owns at the top level of
 /// a hole: an enum, a value record or a handle. Identity structs keep `inspect`.
-pub fn formats_structurally(ws: &Workspace, name: Ustr) -> bool {
+pub(crate) fn formats_structurally(ws: &Workspace, name: Ustr) -> bool {
     if handle_fields(name).is_some() || ws.enums_by_name.contains_key(&name) {
         return true;
     }
@@ -183,7 +183,7 @@ fn nominal_subst(ws: &Workspace, generics: &[TyId], params: &[MonoTy]) -> Option
 
 /// The format tree for a value of type `ty`, or why the formatter cannot print
 /// it. Unsupported kinds are a formatter limit (spec), reported at compile time.
-pub fn format_tree(ws: &Workspace, ty: &MonoTy) -> Result<FmtNode, String> {
+pub(crate) fn format_tree(ws: &Workspace, ty: &MonoTy) -> Result<FmtNode, String> {
     format_tree_in(ws, ty, &mut Vec::new())
 }
 

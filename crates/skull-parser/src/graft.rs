@@ -13,7 +13,7 @@ use crate::ast::*;
 /// Deep-copy an item (and all its arena children) from `src` into `dst`. Used
 /// to inline a macro's `macro_items` template at an invocation site. Covers the
 /// item kinds a macro body can emit (fn / struct / enum / newtype).
-pub fn graft_item(src: &Ast, dst: &mut Ast, item: &Item) -> Item {
+pub(crate) fn graft_item(src: &Ast, dst: &mut Ast, item: &Item) -> Item {
     let kind = match &item.kind {
         ItemKind::Function(f) => ItemKind::Function(graft_fn(src, dst, f)),
         ItemKind::Struct(s) => ItemKind::Struct(StructDef {
@@ -144,7 +144,7 @@ fn graft_variant(src: &Ast, dst: &mut Ast, v: &EnumVariant) -> EnumVariant {
     }
 }
 
-pub fn graft_block(src: &Ast, dst: &mut Ast, b: Idx<BlockData>) -> Idx<BlockData> {
+pub(crate) fn graft_block(src: &Ast, dst: &mut Ast, b: Idx<BlockData>) -> Idx<BlockData> {
     let data = &src.blocks[b];
     let span = data.span;
     let braces = data.braces;
@@ -157,7 +157,7 @@ pub fn graft_block(src: &Ast, dst: &mut Ast, b: Idx<BlockData>) -> Idx<BlockData
     })
 }
 
-pub fn graft_expr(src: &Ast, dst: &mut Ast, e: Idx<ExprData>) -> Idx<ExprData> {
+pub(crate) fn graft_expr(src: &Ast, dst: &mut Ast, e: Idx<ExprData>) -> Idx<ExprData> {
     let span = src.exprs[e].span;
     let kind = graft_expr_kind(src, dst, &src.exprs[e].kind);
     dst.exprs.alloc(ExprData { span, kind })

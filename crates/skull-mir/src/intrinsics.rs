@@ -128,14 +128,14 @@ pub fn is_native_required(f: &Function) -> bool {
 /// True iff `f` is `@gpu_only`: it maps only on GPU backends, so a direct call
 /// from CPU (Lua) code is rejected at emit ([`crate::lower::gpu_only_call_rejection`]).
 /// The one in-tree consumer is `texture()` (stdlib/shader.rock).
-pub fn is_gpu_only(f: &Function) -> bool {
+pub(crate) fn is_gpu_only(f: &Function) -> bool {
     has_anno(f, "gpu_only")
 }
 
 /// True iff `f` is GPU-side code that may reach a `@gpu_only` intrinsic: a
 /// `@shader(...)` entry or another `@gpu_only` fn. Shader bodies pass through the
 /// Lua backend too, so the marker exempts them.
-pub fn is_gpu_context(f: &Function) -> bool {
+pub(crate) fn is_gpu_context(f: &Function) -> bool {
     is_gpu_only(f) || has_anno(f, "shader")
 }
 

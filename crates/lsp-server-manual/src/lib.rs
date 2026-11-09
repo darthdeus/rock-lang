@@ -62,11 +62,11 @@ impl Connection {
         )
     }
 
-    pub fn initialize_start(&self) -> Result<(RequestId, serde_json::Value), ProtocolError> {
+    pub(crate) fn initialize_start(&self) -> Result<(RequestId, serde_json::Value), ProtocolError> {
         self.initialize_start_while(|| true)
     }
 
-    pub fn initialize_start_while<C>(
+    pub(crate) fn initialize_start_while<C>(
         &self,
         running: C,
     ) -> Result<(RequestId, serde_json::Value), ProtocolError>
@@ -112,7 +112,7 @@ impl Connection {
         )))
     }
 
-    pub fn initialize_finish(
+    pub(crate) fn initialize_finish(
         &self,
         initialize_id: RequestId,
         initialize_result: serde_json::Value,
@@ -139,4 +139,4 @@ impl Connection {
         self.initialize_finish(id, initialize_data)?;
         Ok(params)
     }
-    }
+}

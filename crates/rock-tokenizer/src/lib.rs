@@ -5,7 +5,7 @@
 //! can be built on top of it.
 
 pub mod interp;
-pub mod lexical_regions;
+pub(crate) mod lexical_regions;
 pub mod token;
 pub mod tokenizer;
 

@@ -17,7 +17,7 @@ enum Definition {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Mem2RegPromotion {
+pub(crate) struct Mem2RegPromotion {
     pub cells: usize,
     pub loads: usize,
 }
@@ -164,7 +164,7 @@ fn is_direct(idom: &Dominators, analysis: &Analysis, cell: usize) -> bool {
     }
 }
 
-pub fn promote_direct_cells(func: &mut MirFunc) -> Mem2RegPromotion {
+pub(crate) fn promote_direct_cells(func: &mut MirFunc) -> Mem2RegPromotion {
     if func.is_coroutine {
         return Mem2RegPromotion::default();
     }

@@ -54,7 +54,7 @@ impl std::ops::Deref for EmbedFiles {
 /// at or above an existing calling file that holds a `stick.toml`, and a read
 /// must canonicalize inside the canonical root.
 #[derive(Debug)]
-pub struct FsComptimeFiles;
+pub(crate) struct FsComptimeFiles;
 
 impl ComptimeFiles for FsComptimeFiles {
     fn package_root(&self, calling_file: &str) -> Option<PathBuf> {

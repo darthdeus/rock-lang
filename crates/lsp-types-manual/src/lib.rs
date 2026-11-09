@@ -198,7 +198,7 @@ impl_untagged_enum!(NumberOrString {
 /// The LSP any type
 ///
 /// @since 3.17.0
-pub type LSPAny = serde_json::Value;
+pub(crate) type LSPAny = serde_json::Value;
 
 /// Position in a text document expressed as zero-based line and character offset.
 /// A position is between two characters like an 'insert' cursor in a editor.
@@ -576,7 +576,7 @@ impl TextEdit {
 /// edit.
 ///
 /// @since 3.16.0
-pub type ChangeAnnotationIdentifier = String;
+pub(crate) type ChangeAnnotationIdentifier = String;
 
 /// A special text edit with an additional change annotation.
 ///
@@ -889,7 +889,7 @@ impl_tagged_enum!(ResourceOp, tag = "kind" {
     Delete(DeleteFile) = "delete",
 });
 
-pub type DidChangeConfigurationClientCapabilities = DynamicRegistrationClientCapabilities;
+pub(crate) type DidChangeConfigurationClientCapabilities = DynamicRegistrationClientCapabilities;
 
 impl WorkspaceEdit {
     #[allow(clippy::mutable_key_type)]
@@ -1026,7 +1026,7 @@ impl_lsp_struct!(
 );
 
 /// A document selector is the combination of one or many document filters.
-pub type DocumentSelector = Vec<DocumentFilter>;
+pub(crate) type DocumentSelector = Vec<DocumentFilter>;
 
 // ========================= Actual Protocol =========================
 
@@ -1956,7 +1956,7 @@ impl TextDocumentSyncKind {
 }
 }
 
-pub type ExecuteCommandClientCapabilities = DynamicRegistrationClientCapabilities;
+pub(crate) type ExecuteCommandClientCapabilities = DynamicRegistrationClientCapabilities;
 
 /// Execute command options.
 #[derive(Debug, Eq, PartialEq, Clone, Default)]

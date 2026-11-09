@@ -23,7 +23,7 @@ fn kw(name: Ustr) -> String {
     Tokenizer::unescape_lua_keyword(name.as_str()).to_string()
 }
 
-pub struct Printer<'a> {
+pub(crate) struct Printer<'a> {
     ast: &'a Ast,
     src: &'a str,
     cfg: &'a FormatConfig,

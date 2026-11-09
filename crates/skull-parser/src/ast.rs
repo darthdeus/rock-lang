@@ -795,7 +795,7 @@ pub enum Visibility {
 /// The visibility modifiers one declaration may carry. Items use `vis`;
 /// stored fields additionally use `set_private` (`private(set)`).
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
-pub struct VisMods {
+pub(crate) struct VisMods {
     pub vis: Option<Visibility>,
     /// `private(set)` — public read (per `vis`), owner-subtree write.
     pub set_private: bool,

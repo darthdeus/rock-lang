@@ -3,7 +3,7 @@
 //! histogram helper.
 
 /// Parsed marker lines of one test-program run.
-pub struct SkullMarkers {
+pub(crate) struct SkullMarkers {
     /// Number of `PASS` lines.
     pub passed: usize,
     /// The `<detail>` of every `FAIL` line.
@@ -20,7 +20,7 @@ pub struct SkullMarkers {
 /// the harness-side result; a `value` result is judged by the host. The Skull
 /// harness appends its run token and ordinal for watchdog progress tracking.
 #[derive(Debug, Clone, PartialEq)]
-pub struct TestTime {
+pub(crate) struct TestTime {
     pub name: String,
     pub ms: f64,
     pub result: String,
@@ -34,7 +34,7 @@ pub struct TestTime {
 /// of an unknown kind or shape, which is logged. Every caller treats `None` as
 /// a harness failure that shows the whole stdout; counting an unrecognized line
 /// as a pass would let a broken harness report green.
-pub fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
+pub(crate) fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
     let mut markers = SkullMarkers {
         passed: 0,
         fails: Vec::new(),
@@ -95,7 +95,7 @@ pub fn parse_skull_markers(stdout: &str) -> Option<SkullMarkers> {
 /// Default relative tolerance for `@test(returns = <float>)` comparison. An
 /// explicit parameter on [`compare_value`] so a future executor with laxer
 /// arithmetic (GLSL) can widen it; int/bool stay exact regardless.
-pub const FLOAT_REL_TOL: f64 = 1e-12;
+pub(crate) const FLOAT_REL_TOL: f64 = 1e-12;
 
 /// Compare a `VALUE` marker's serialized return value against the pinned
 /// `@test(returns = ...)` literal. Backend-neutral: the host parses the
@@ -103,7 +103,7 @@ pub const FLOAT_REL_TOL: f64 = 1e-12;
 /// executors' serializations need not be byte-identical. Int expectations are
 /// exact f64 equality (42 == 42.0); floats pass within `float_rel_tol`
 /// relative tolerance; bools are exact. `Err` carries the FAIL detail.
-pub fn compare_value(
+pub(crate) fn compare_value(
     expect: &skull::ValueExpect,
     got: &str,
     float_rel_tol: f64,

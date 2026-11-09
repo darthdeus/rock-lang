@@ -8,7 +8,7 @@ fn get_file_path_from_params(params: &TextDocumentPositionParams) -> Result<Stri
 }
 
 /// Workspace-aware go to definition
-pub fn go_to_definition_workspace(
+pub(crate) fn go_to_definition_workspace(
     workspace: &mut LspWorkspace,
     params: &GotoDefinitionParams,
 ) -> Result<Option<GotoDefinitionResponse>> {
@@ -23,7 +23,7 @@ pub fn go_to_definition_workspace(
 
 /// Workspace-aware go to type definition (LSP `textDocument/typeDefinition`):
 /// jump to the declaration of the *type* of the value under the cursor.
-pub fn go_to_type_definition_workspace(
+pub(crate) fn go_to_type_definition_workspace(
     workspace: &mut LspWorkspace,
     params: &GotoTypeDefinitionParams,
 ) -> Result<Option<GotoDefinitionResponse>> {
@@ -37,7 +37,7 @@ pub fn go_to_type_definition_workspace(
 }
 
 /// Workspace-aware find references
-pub fn find_references_workspace(
+pub(crate) fn find_references_workspace(
     workspace: &mut LspWorkspace,
     params: &ReferenceParams,
 ) -> Result<Option<Vec<Location>>> {
@@ -67,7 +67,7 @@ pub fn do_document_highlight_workspace(
 }
 
 /// Workspace-aware hover
-pub fn do_hover_workspace(
+pub(crate) fn do_hover_workspace(
     workspace: &mut LspWorkspace,
     params: &HoverParams,
 ) -> Result<Option<Hover>> {
@@ -78,7 +78,7 @@ pub fn do_hover_workspace(
 }
 
 /// Workspace-aware signature help
-pub fn do_signature_help_workspace(
+pub(crate) fn do_signature_help_workspace(
     workspace: &mut LspWorkspace,
     params: &SignatureHelpParams,
 ) -> Result<Option<SignatureHelp>> {
@@ -111,7 +111,7 @@ pub fn do_workspace_symbols_workspace(
 }
 
 /// Workspace-aware inlay hints
-pub fn do_inlay_hints_workspace(
+pub(crate) fn do_inlay_hints_workspace(
     workspace: &mut LspWorkspace,
     params: &InlayHintParams,
 ) -> Result<Option<Vec<InlayHint>>> {
@@ -159,7 +159,7 @@ pub fn do_completion_workspace(
 }
 
 /// Workspace-aware prepare rename
-pub fn prepare_rename_workspace(
+pub(crate) fn prepare_rename_workspace(
     workspace: &mut LspWorkspace,
     params: &TextDocumentPositionParams,
 ) -> Result<Option<PrepareRenameResponse>> {
@@ -172,7 +172,7 @@ pub fn prepare_rename_workspace(
 }
 
 /// Workspace-aware rename
-pub fn do_rename_workspace(
+pub(crate) fn do_rename_workspace(
     workspace: &mut LspWorkspace,
     params: &RenameParams,
 ) -> Result<Option<WorkspaceEdit>> {

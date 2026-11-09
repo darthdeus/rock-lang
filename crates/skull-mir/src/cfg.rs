@@ -274,7 +274,7 @@ pub mod dense {
         Idx::from_raw(RawIdx::from_u32(n as u32))
     }
 
-    pub fn succ_list(f: &MirFunc) -> Vec<Vec<usize>> {
+    pub(crate) fn succ_list(f: &MirFunc) -> Vec<Vec<usize>> {
         let mut s = vec![Vec::new(); f.blocks.len()];
         for (b, blk) in f.blocks.iter() {
             let i = bx(b);
@@ -386,7 +386,7 @@ pub mod dense {
 
     /// The natural-loop body for the back edge `latch -> header`: every node that
     /// reaches `latch` without passing through `header`.
-    pub fn collect_loop_body(
+    pub(crate) fn collect_loop_body(
         header: usize,
         latch: usize,
         preds: &[Vec<usize>],

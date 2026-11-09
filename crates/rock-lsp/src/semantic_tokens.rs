@@ -110,7 +110,7 @@ pub fn get_semantic_tokens_legend() -> SemanticTokensLegend {
 }
 
 /// Get semantic tokens server capabilities
-pub fn get_semantic_tokens_capabilities() -> SemanticTokensServerCapabilities {
+pub(crate) fn get_semantic_tokens_capabilities() -> SemanticTokensServerCapabilities {
     SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
         work_done_progress_options: Default::default(),
         legend: get_semantic_tokens_legend(),
@@ -157,7 +157,7 @@ pub fn semantic_tokens_delta_edits(
 
 /// Range semantic tokens: bone's viewport classifier, remapped to the
 /// advertised legend.
-pub fn compute_semantic_tokens_range_workspace(
+pub(crate) fn compute_semantic_tokens_range_workspace(
     workspace: &mut crate::LspWorkspace,
     params: SemanticTokensRangeParams,
 ) -> anyhow::Result<Option<SemanticTokensRangeResult>> {

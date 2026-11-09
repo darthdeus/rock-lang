@@ -68,7 +68,7 @@ impl RankKey {
     }
 
     /// Shorter-first tiebreak, gated on a real match (score > 0).
-    pub fn len_key(score: i32, name_len: usize) -> u16 {
+    pub(crate) fn len_key(score: i32, name_len: usize) -> u16 {
         if score > 0 {
             name_len.min(999) as u16
         } else {

@@ -133,7 +133,7 @@ pub fn is_fragment_shader_root(ws: &Workspace, mid: ModuleId, root: &str) -> boo
 }
 
 /// The `@shader(<stage>)` annotation's stage argument, if the fn carries one.
-pub fn shader_stage(f: &Function) -> Option<&'static str> {
+pub(crate) fn shader_stage(f: &Function) -> Option<&'static str> {
     let ann = f
         .annotations
         .iter()

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 /// Specification of sources to compile
 #[derive(Clone)]
-pub enum SourceSpec {
+pub(crate) enum SourceSpec {
     /// Compile a directory (with optional stick.toml)
     Directory(PathBuf),
     /// Compile specific files
@@ -11,7 +11,7 @@ pub enum SourceSpec {
 }
 
 /// Discover sources based on source specification
-pub fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
+pub(crate) fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> {
     match source_spec {
         SourceSpec::Directory(project_dir) => {
             // Check for stick.toml to pick up project settings

@@ -29,7 +29,7 @@ use crate::prelude::*;
 
 /// The compiler-reserved stdlib marker of a primitive that changes the
 /// structure of the Vec or Map passed as its first parameter.
-pub const RELOCATES_ANNOTATION: &str = "relocates";
+pub(crate) const RELOCATES_ANNOTATION: &str = "relocates";
 
 /// Every rejection starts with this, so a session can replace the previous
 /// run's rejections wholesale.

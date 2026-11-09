@@ -219,7 +219,7 @@ pub struct CliCommand {
 impl CliCommand {
     /// User-facing kebab-case name (what the user types and what error
     /// messages echo).
-    pub fn cli_name(&self) -> &'static str {
+    pub(crate) fn cli_name(&self) -> &'static str {
         self.name
     }
 
@@ -344,7 +344,7 @@ impl Backend {
 
     /// The commands a backend serves through the backend switch, in the order
     /// the reject message lists them.
-    pub fn supported_commands(self) -> Vec<&'static CliCommand> {
+    pub(crate) fn supported_commands(self) -> Vec<&'static CliCommand> {
         self.spec()
             .operations
             .iter()
@@ -374,7 +374,7 @@ impl Backend {
 
     /// `Some(message)` if this backend cannot serve `cmd`; `None` if it can.
     /// The capability gate (`require_backend_support`) is the only caller.
-    pub fn reject_reason(self, cmd: &CliCommand) -> Option<String> {
+    pub(crate) fn reject_reason(self, cmd: &CliCommand) -> Option<String> {
         if let Some(message) = self.omitted_reason() {
             return Some(message);
         }
@@ -430,7 +430,7 @@ pub struct EarlyEntry {
 
 /// Run the early entry named by the first argument, if one is registered,
 /// calling `prepare` first. `args` excludes argv[0].
-pub fn run_early_entry(
+pub(crate) fn run_early_entry(
     mut args: impl Iterator<Item = String>,
     prepare: impl FnOnce(),
 ) -> Option<i32> {

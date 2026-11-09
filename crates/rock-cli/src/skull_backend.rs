@@ -237,7 +237,7 @@ fn skull_emit_full(
 /// the codegen skull adds on top (`skull::emit_workspace`). Consumed by
 /// `backend-stats` for the bone-vs-skull comparison.
 #[derive(Default, Clone)]
-pub struct SkullPhaseTimes {
+pub(crate) struct SkullPhaseTimes {
     pub parse: Duration,
     pub semantic: Duration,
     /// Comptime/build-variable preparation after semantic checking and before
@@ -275,7 +275,7 @@ pub struct SkullPhaseTimes {
 /// mirror `bone_workspace_timed`; `emit` is skull's codegen on top. Used by
 /// `backend-stats` — a per-file loop would never reach emit because bone rejects
 /// any file that references a sibling (so emit would always read ~0).
-pub fn skull_workspace_timed(
+pub(crate) fn skull_workspace_timed(
     sources: &SourceFiles,
     project_path: &std::path::Path,
 ) -> (bool, SkullPhaseTimes) {
@@ -373,7 +373,7 @@ pub fn skull_workspace_timed(
 ///
 /// Unlike the single-file path, the embedded compiler stdlib is NOT pulled from
 /// `discover_sources` — bone supplies its own, shared ([`skull::pipeline::with_stdlib`]).
-pub fn skull_assemble_project(
+pub(crate) fn skull_assemble_project(
     sources: &SourceFiles,
 ) -> std::result::Result<(skull_parser::stdlib::ModuleSet, ustr::Ustr), Vec<CompilerError>> {
     let (user_modules, entry_file, _parse) = crate::bone_backend::parse_user_modules(sources)?;
@@ -519,7 +519,7 @@ end
 /// real `file` path as the span file id, so the source must be registered under
 /// that same id -- registering under a placeholder makes every span lookup fail
 /// ("Unable to fetch source") and silently drops the snippet + labels.
-pub fn render_file_errs(file: &str, src: &str, errs: &[CompilerError]) -> String {
+pub(crate) fn render_file_errs(file: &str, src: &str, errs: &[CompilerError]) -> String {
     let mut sf = SourceFiles::empty();
     sf.add_or_update_file(source_file_from_path_and_contents(
         file.to_string(),
@@ -729,7 +729,7 @@ fn skull_build(
 /// `expect_failure`/`@ignore` -- a compile rejection is then the expected
 /// (passing) outcome and each counts as a passing test. Shared by the luajit
 /// and JS executors (both bone-type-check first, so the rule is identical).
-pub fn all_tests_expect_compile_failure(file: &str, src: &str) -> Option<usize> {
+pub(crate) fn all_tests_expect_compile_failure(file: &str, src: &str) -> Option<usize> {
     let mut sf = SourceFiles::empty();
     sf.add_or_update_file(source_file_from_path_and_contents(
         file.to_string(),
@@ -1517,7 +1517,7 @@ fn test_program_facts(
 /// other canonical paths). Module file paths are canonicalized absolute, so a
 /// prefix match against the canonicalized `dir` selects exactly this package.
 /// Carry each test's `FuncRef` so executors retain its source file.
-pub fn collect_package_test_fns(
+pub(crate) fn collect_package_test_fns(
     ws: &bone_semantic::inference::Workspace,
     dir: &str,
 ) -> std::result::Result<Vec<(skull_mir::mir::FuncRef, skull::SkullTest)>, CompilerError> {
@@ -1628,7 +1628,7 @@ fn emit_shader_program_with_view(
 ///     `@shader(vertex)`): both take `[--profile 330core]`.
 ///
 /// A profile violation renders spanned against the source and exits non-zero.
-pub fn skull_shader(
+pub(crate) fn skull_shader(
     files: &[String],
     output: Option<String>,
     profile: Option<String>,
@@ -1841,7 +1841,7 @@ fn invalidate_shader_output(input: &str, output: &str) -> Result<()> {
     }
 }
 
-pub fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {
+pub(crate) fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {
     if std::path::Path::new(path).is_dir() {
         return skull_compile_project(path, output);
     }
@@ -1882,7 +1882,7 @@ pub fn skull_compile_single(path: &str, output: Option<String>) -> Result<()> {
 /// renders and serves the previous good output; the loop keeps running. (The old
 /// IncrementalEmitter was retired with the old IR; a batch re-emit is fast —
 /// a game project assembles in a few ms.)
-pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
+pub(crate) fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
     let out_file = output
         .map(std::path::PathBuf::from)
         .unwrap_or_else(rock_host::project::default_main_lua_path);
@@ -2085,7 +2085,7 @@ pub fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
 
 /// `rock run <file> --backend skull` — emit Lua, append a `main()` call if the
 /// file defines one, and execute it.
-pub fn skull_run(path: &str) -> Result<()> {
+pub(crate) fn skull_run(path: &str) -> Result<()> {
     if std::path::Path::new(path).is_dir() {
         return skull_run_project(path);
     }
@@ -2132,13 +2132,13 @@ pub fn skull_run(path: &str) -> Result<()> {
 /// Render a bone `CompilerError` against a whole project's source set, so spans
 /// resolve to the right file. Every discovered source is registered under its
 /// id-path (the same id used when parsing into a module).
-pub fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> String {
+pub(crate) fn render_project_err(sources: &SourceFiles, e: &CompilerError) -> String {
     render_project_errs(sources, std::slice::from_ref(e))
 }
 
 /// [`render_project_err`] over every collected diagnostic, joined into one
 /// report — the CLI prints ALL of them, matching the LSP.
-pub fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
+pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError]) -> String {
     let mut sf = SourceFiles::empty();
     for file in &sources.files {
         let f = file.borrow();
@@ -2602,7 +2602,7 @@ fn skull_compile_project(dir: &str, output: Option<String>) -> Result<()> {
     skull_compile_project_with_inputs(dir, output, inputs)
 }
 
-pub fn skull_compile_project_with_inputs(
+pub(crate) fn skull_compile_project_with_inputs(
     dir: &str,
     output: Option<String>,
     inputs: bone_semantic::inference::ComptimeInputs,
@@ -2613,7 +2613,7 @@ pub fn skull_compile_project_with_inputs(
 /// Compile with pre-resolved host inputs and return the final recorded map,
 /// including compiler-derived declarations resolved after semantic checking.
 /// Packaging uses this map so metadata and executable reads agree.
-pub fn skull_compile_project_with_recorded_inputs(
+pub(crate) fn skull_compile_project_with_recorded_inputs(
     dir: &str,
     output: Option<String>,
     inputs: bone_semantic::inference::ComptimeInputs,
@@ -2682,7 +2682,7 @@ fn print_slowest_tests(timings: &[(String, TestTiming)]) {
 /// packages built as ONE workspace each. A cross-file lib can only be tested
 /// the second way -- per-file, any file referencing a sibling's symbol fails to
 /// compile. Shared by every test executor (luajit + JS).
-pub fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<String>)> {
+pub(crate) fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<String>)> {
     let mut files = Vec::new();
     let mut package_dirs = Vec::new();
     for path in paths {
@@ -2711,7 +2711,7 @@ pub fn collect_test_units(paths: &[String]) -> Result<(Vec<String>, Vec<String>)
 
 /// `test_threads` caps how many file units compile and run at once (default:
 /// one per CPU); packages run after them, one at a time.
-pub fn skull_test(
+pub(crate) fn skull_test(
     paths: &[String],
     filter: Option<&crate::test::TestFilter>,
     test_threads: Option<usize>,
@@ -2993,7 +2993,7 @@ pub(crate) fn ms(t: Instant) -> f64 {
 /// of `fn <name>` (d -> d-1, '0'->'1'), a genuine 1-char constant change that
 /// re-applying the original text reverts. Returns None if the fn or a body
 /// digit isn't found.
-pub fn body_digit_flip(text: &str, name: &str) -> Option<String> {
+pub(crate) fn body_digit_flip(text: &str, name: &str) -> Option<String> {
     let fn_pos = text.find(&format!("fn {name}"))?;
     let brace = text[fn_pos..].find('{')? + fn_pos;
 
@@ -3062,7 +3062,7 @@ fn write_program_parts(writer: &mut impl std::io::Write, parts: &[&str]) -> std:
 /// case and is fine; ANY other error is surfaced -- a stale `incremental.lua`
 /// left beside a fresh `main.lua` would reintroduce the overlay/main desync the
 /// two-file split exists to avoid.
-pub fn wipe_overlay(incremental_path: &std::path::Path) -> Result<()> {
+pub(crate) fn wipe_overlay(incremental_path: &std::path::Path) -> Result<()> {
     match std::fs::remove_file(incremental_path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -3372,7 +3372,7 @@ impl IncrementalProject {
     }
 
     #[cfg(test)]
-    pub fn enable_route_profile(&mut self) {
+    pub(crate) fn enable_route_profile(&mut self) {
         self.route_profile_enabled = true;
         self.project.enable_route_profile();
     }
@@ -3411,7 +3411,7 @@ impl IncrementalProject {
     /// wipe overlay; otherwise the accumulated body edits -> `incremental.lua`
     /// overlay. `changed` is the watcher's changed-path set; pass empty to force a
     /// full re-discover.
-    pub fn recompile(
+    pub(crate) fn recompile(
         &mut self,
         changed: &[std::path::PathBuf],
         main_path: &std::path::Path,
@@ -3552,7 +3552,7 @@ impl IncrementalProject {
 
     /// The current in-session text of a source (reflects prior `apply_edit`s,
     /// which never touch disk). None if the path isn't a discovered source.
-    pub fn source_text(&self, path: &std::path::Path) -> Option<String> {
+    pub(crate) fn source_text(&self, path: &std::path::Path) -> Option<String> {
         self.project.source_text(path)
     }
 
@@ -3568,7 +3568,7 @@ impl IncrementalProject {
     /// The hash lets a watcher seeding the input
     /// compare against what was compiled rather than against the startup
     /// instant.
-    pub fn comptime_watch_files_with_hashes(&self) -> Vec<(std::path::PathBuf, u64)> {
+    pub(crate) fn comptime_watch_files_with_hashes(&self) -> Vec<(std::path::PathBuf, u64)> {
         // File ids are already the absolute canonical path the resolver read.
         let mut files = self
             .cache
@@ -3814,7 +3814,7 @@ impl IncrementalProject {
     /// means the new process gets the complete current program. The overlay
     /// stays a within-process, single-consumer artifact that never has to cross
     /// a process boundary.
-    pub fn force_full(
+    pub(crate) fn force_full(
         &mut self,
         main_path: &std::path::Path,
         incremental_path: &std::path::Path,

@@ -45,7 +45,7 @@ pub const VEC_STRIDED_REPR: &str = "strided";
 /// leading the leaf columns exactly as the presence leaf leads a nullable
 /// shape's leaves. `@` cannot appear in a Rock identifier, so the key can never
 /// collide with a leaf path, and it shares that property with `@vec`.
-pub const VEC_COLUMN_PRESENCE_FIELD: &str = "@p";
+pub(crate) const VEC_COLUMN_PRESENCE_FIELD: &str = "@p";
 
 /// Every element type `mf` builds a column-stored `Vec` of, nested fns included,
 /// together with the planner's no-box guarantee. The fact is carried by both
@@ -67,7 +67,7 @@ pub fn column_elem_plans(mf: &MirFunc, out: &mut std::collections::BTreeMap<Ustr
 
 /// The same census with the build-owned representation identity retained for
 /// consumers that emit or inspect the physical columns.
-pub fn column_elem_rep_plans(
+pub(crate) fn column_elem_rep_plans(
     mf: &MirFunc,
     out: &mut std::collections::BTreeMap<Ustr, (bool, crate::lower::RepId)>,
 ) {
@@ -1528,7 +1528,7 @@ impl MirFunc {
     }
 
     /// Allocate a fresh variable cell carrying bone's type for the binding.
-    pub fn new_cell_typed(&mut self, name: Option<Ustr>, ty: Option<TyId>) -> Idx<Cell> {
+    pub(crate) fn new_cell_typed(&mut self, name: Option<Ustr>, ty: Option<TyId>) -> Idx<Cell> {
         let capacity = self.cells.capacity();
         let start = self.lower_timing_enabled.then(Instant::now);
         let id = self.cells.alloc(Cell {
@@ -1555,7 +1555,7 @@ impl MirFunc {
 
     /// Allocate a cell whose physical native type is known but whose source
     /// type arena has no concrete leaf node to reference.
-    pub fn new_cell_native_typed(
+    pub(crate) fn new_cell_native_typed(
         &mut self,
         name: Option<Ustr>,
         ty: Option<TyId>,
@@ -1579,7 +1579,7 @@ impl MirFunc {
     /// Mark a parameter cell whose default expression is filled in the callee
     /// prologue, so closure capture does not mistake that initialization for a
     /// later mutation.
-    pub fn mark_default_param(&mut self, cell: Idx<Cell>) {
+    pub(crate) fn mark_default_param(&mut self, cell: Idx<Cell>) {
         self.cells[cell].default_param = true;
     }
 
@@ -1590,7 +1590,7 @@ impl MirFunc {
     }
 
     /// Tag the root cell of a `ref`-borrowed place (see [`Cell::borrowed`]).
-    pub fn mark_borrowed(&mut self, cell: Idx<Cell>) {
+    pub(crate) fn mark_borrowed(&mut self, cell: Idx<Cell>) {
         self.cells[cell].borrowed = true;
     }
 

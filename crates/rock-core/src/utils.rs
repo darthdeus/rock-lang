@@ -11,7 +11,7 @@ type ReportBuilder<'a> = ariadne::ReportBuilder<'a, (String, std::ops::Range<usi
 /// as well, because styling the source frame is a large share of ariadne's
 /// per-diagnostic cost and a piped stderr renders none of it. `ROCK_FORCE_COLOR`
 /// and `ROCK_NO_COLOR` / `NO_COLOR` override the terminal probe.
-pub fn make_report_builder(
+pub(crate) fn make_report_builder(
     kind: ariadne::ReportKind<'_>,
     file: String,
     offset: usize,
@@ -30,7 +30,7 @@ pub fn make_report_builder(
 /// Whether diagnostic colour is on, probed from stderr once per process.
 /// `ROCK_FORCE_COLOR` turns it on, while `ROCK_NO_COLOR` and `NO_COLOR` (the
 /// no-color.org convention) turn it off without consulting the terminal.
-pub fn stderr_is_tty() -> bool {
+pub(crate) fn stderr_is_tty() -> bool {
     use std::io::IsTerminal;
     use std::sync::OnceLock;
     static PROBED: OnceLock<bool> = OnceLock::new();

@@ -1,13 +1,13 @@
 use crate::{Path, PathBuf, Result};
 
-pub fn is_compiler_crate_dir(name: &str) -> bool {
+pub(crate) fn is_compiler_crate_dir(name: &str) -> bool {
     matches!(name, "rock" | "skull" | "bone")
         || name.starts_with("rock-")
         || name.starts_with("skull-")
         || name.starts_with("bone-")
 }
 
-pub fn compiler_watch_paths() -> Vec<PathBuf> {
+pub(crate) fn compiler_watch_paths() -> Vec<PathBuf> {
     let root = PathBuf::from(rock_host::rock_dir());
     let mut paths = vec![root.join("Cargo.toml"), root.join("Cargo.lock")];
     if let Ok(entries) = std::fs::read_dir(root.join("crates")) {
@@ -32,12 +32,12 @@ pub fn compiler_watch_paths() -> Vec<PathBuf> {
     paths
 }
 
-pub fn build_compiler() -> Result<()> {
+pub(crate) fn build_compiler() -> Result<()> {
     rock_engine_host::engine_build::require_source_build()?;
     rock_host::cargo::run_cargo(&["build", "--bin", "rock"], "Failed to build compiler")
 }
 
-pub fn is_compiler_source(path: impl AsRef<Path>) -> bool {
+pub(crate) fn is_compiler_source(path: impl AsRef<Path>) -> bool {
     let path = path.as_ref().to_string_lossy().replace('\\', "/");
     if path.ends_with("Cargo.toml") || path.ends_with("Cargo.lock") {
         return true;

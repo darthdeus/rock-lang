@@ -72,7 +72,7 @@ impl Flavor {
 
     /// Whether `{...}` opens an interpolation hole. Raw and single-quoted
     /// literals are inert text.
-    pub fn interpolates(self) -> bool {
+    pub(crate) fn interpolates(self) -> bool {
         matches!(self, Flavor::Quoted | Flavor::Triple)
     }
 

@@ -17,10 +17,10 @@ use skull_parser::IdentityStorage;
 mod sites;
 pub use sites::*;
 
-pub const IDENTITY_STORAGE_ANNOTATION: &str = "identity_storage";
+pub(crate) const IDENTITY_STORAGE_ANNOTATION: &str = "identity_storage";
 /// The Arena and Scene registries' erasure capability: a stdlib function whose
 /// body may erase an identity to `any`.
-pub const IDENTITY_ERASURE_ANNOTATION: &str = "identity_erasure";
+pub(crate) const IDENTITY_ERASURE_ANNOTATION: &str = "identity_erasure";
 
 /// How an identity reached the storage position that rejects it.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -38,13 +38,13 @@ pub struct IdentityStorageViolation {
 }
 
 /// Whether `name` is a nominal identity type: a `struct`, not a `value`.
-pub fn is_identity_struct(ws: &Workspace, name: Ustr) -> bool {
+pub(crate) fn is_identity_struct(ws: &Workspace, name: Ustr) -> bool {
     ws.struct_by_name
         .get(&name)
         .is_some_and(|sid| !ws.module(sid.module).structs[sid.def].is_value)
 }
 
-pub fn is_identity_storage_field(field: &StructFieldDef) -> bool {
+pub(crate) fn is_identity_storage_field(field: &StructFieldDef) -> bool {
     field
         .annotations
         .iter()
@@ -63,7 +63,7 @@ pub(crate) fn identity_storage_violation(
 /// [`identity_storage_violation`] for a type that may be local to a body
 /// (`bi` owns its `TyId::Local` arena and substitutions): a closure capture or
 /// a `co fn` parameter, which the closure or coroutine frame stores.
-pub fn identity_body_storage_violation(
+pub(crate) fn identity_body_storage_violation(
     ws: &Workspace,
     bi: Option<&BodyInference>,
     ty: TyId,
@@ -81,7 +81,7 @@ pub fn identity_body_storage_violation(
 /// [`identity_storage_violation`] for a root position (a global's type): the
 /// top itself may be an identity, or a nullable identity (an optional one-row
 /// process root), but what it stores through its type arguments may not.
-pub fn identity_root_storage_violation(
+pub(crate) fn identity_root_storage_violation(
     ws: &Workspace,
     ty: TyId,
 ) -> Option<IdentityStorageViolation> {
@@ -98,7 +98,7 @@ pub fn identity_root_storage_violation(
 /// [`identity_storage_violation`] for a body's local, parameter or temporary:
 /// an identity at the top, under a nullable, or as a tuple element is a
 /// borrow; one stored by a Vec, Map or constructor type argument is storage.
-pub fn identity_local_storage_violation(
+pub(crate) fn identity_local_storage_violation(
     ws: &Workspace,
     bi: &BodyInference,
     ty: TyId,
@@ -115,7 +115,7 @@ pub fn identity_local_storage_violation(
 
 /// [`identity_storage_violation`] for an `@identity_storage` field: the Vec's
 /// direct elements are rows, and everything below them is ordinary storage.
-pub fn identity_storage_field_violation(
+pub(crate) fn identity_storage_field_violation(
     ws: &Workspace,
     ty: TyId,
 ) -> Option<IdentityStorageViolation> {
@@ -236,7 +236,7 @@ pub fn identity_violation_in<V: IdentityTypes>(
 }
 
 /// [`identity_violation_in`] over one body's inferred types.
-pub fn identity_body_violation(
+pub(crate) fn identity_body_violation(
     ws: &Workspace,
     bi: &BodyInference,
     ty: TyId,
@@ -247,7 +247,7 @@ pub fn identity_body_violation(
 
 /// Whether `field` of a value of `owner` (a body type) is an
 /// `@identity_storage` edge.
-pub fn is_identity_storage_edge(
+pub(crate) fn is_identity_storage_edge(
     ws: &Workspace,
     bi: &BodyInference,
     owner: TyId,
@@ -267,7 +267,7 @@ pub fn is_identity_storage_edge(
 }
 
 /// Whether `field` of the struct `name` is an `@identity_storage` edge.
-pub fn is_identity_storage_struct_field(ws: &Workspace, name: Ustr, field: Ustr) -> bool {
+pub(crate) fn is_identity_storage_struct_field(ws: &Workspace, name: Ustr, field: Ustr) -> bool {
     ws.struct_by_name.get(&name).is_some_and(|sid| {
         ws.module(sid.module).structs[sid.def]
             .fields
@@ -305,7 +305,7 @@ impl Types<'_> {
     }
 }
 
-pub struct TyIdChildren {
+pub(crate) struct TyIdChildren {
     base: TyId,
     range: IdxRange<TypeExpr>,
 }
@@ -588,14 +588,14 @@ fn join(items: impl Iterator<Item = (ParamClass, bool)>) -> (ParamClass, bool) {
 
 /// The census label for files outside any package: `tests/` programs and
 /// programs embedded in Rust tests.
-pub const UNPACKAGED_PROGRAMS: &str = "unpackaged programs";
+pub(crate) const UNPACKAGED_PROGRAMS: &str = "unpackaged programs";
 /// The census label for stdlib files.
-pub const STDLIB_PACKAGE: &str = "std";
+pub(crate) const STDLIB_PACKAGE: &str = "std";
 
 /// Programs embedded in Rust tests that declare a package of their own. They
 /// belong to [`UNPACKAGED_PROGRAMS`] until S8 rewrites them; the census does
 /// not count them.
-pub const RUST_EMBEDDED_PACKAGES: &[&str] = &[
+pub(crate) const RUST_EMBEDDED_PACKAGES: &[&str] = &[
     "enum_json_v1",
     "legacyapp",
     "memclass_handle",
@@ -658,7 +658,7 @@ fn module_path_under(path: &[Ustr], prefix: &str) -> bool {
 }
 
 /// The census label of the package that owns `module`.
-pub fn identity_storage_package(module: &Module) -> &str {
+pub(crate) fn identity_storage_package(module: &Module) -> &str {
     if crate::modules::is_stdlib_module_file(module.file.as_str()) {
         STDLIB_PACKAGE
     } else {

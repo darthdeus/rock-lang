@@ -3,7 +3,7 @@ use crate::{
     WorkDoneProgressParams,
 };
 
-pub type ReferenceClientCapabilities = DynamicRegistrationClientCapabilities;
+pub(crate) type ReferenceClientCapabilities = DynamicRegistrationClientCapabilities;
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
 pub struct ReferenceContext {

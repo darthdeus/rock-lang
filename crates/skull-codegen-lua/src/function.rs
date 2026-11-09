@@ -44,7 +44,7 @@ pub fn emit_named(
     emit_named_with_statics(ws, ctx, interner, name, func, &[], bound)
 }
 
-pub fn emit_named_with_allocation_sites(
+pub(crate) fn emit_named_with_allocation_sites(
     ws: &Workspace,
     ctx: &CodegenCtx,
     interner: &MonoInterner,

@@ -581,7 +581,7 @@ fn js_run_applicable_tests(
 /// nullary `main`, and STREAM it through node with no timeout (a real program
 /// can run arbitrarily long), propagating node's exit code. A bone rejection or
 /// emit reject prints the diagnostic and exits non-zero -- never a silent fallback.
-pub fn js_run(path: &str) -> Result<()> {
+pub(crate) fn js_run(path: &str) -> Result<()> {
     let emitted = if std::path::Path::new(path).is_dir() {
         emit_js_program_project(path).0
     } else {

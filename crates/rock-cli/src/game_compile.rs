@@ -2,7 +2,7 @@ use crate::{Backend, Result};
 use std::path::{Path, PathBuf};
 
 /// What a from-scratch compile published beside its `main.lua`.
-pub struct GameArtifact {
+pub(crate) struct GameArtifact {
     pub artifact_fingerprint: String,
     /// Comptime file inputs (`embed_string`) baked into the program.
     pub embedded_files: Vec<PathBuf>,

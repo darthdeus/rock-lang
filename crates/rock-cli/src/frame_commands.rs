@@ -12,7 +12,7 @@ fn apply_perf_env(cmd: &mut Command) {
         .env("PERF_NO_SECTIONS", perf_no_sections);
 }
 
-pub fn do_perf(
+pub(crate) fn do_perf(
     backend: crate::Backend,
     path: &str,
     output: String,
@@ -307,7 +307,7 @@ fn frame_watchdog() -> FrameWatchdogConfig {
 ///
 /// This is useful for debugging and testing - compiles the game and runs it
 /// for N frames, taking a screenshot at the end.
-pub fn do_one_frame(
+pub(crate) fn do_one_frame(
     backend: crate::Backend,
     path: &str,
     output: String,
@@ -465,7 +465,7 @@ fn perf_stderr_lines(stderr: &str, child_failed: bool) -> Vec<&str> {
         .collect()
 }
 /// `rock frame` on the skull backend (do_one_frame is backend-parameterized).
-pub fn handle_frame(cx: &CommandContext) -> Result<()> {
+pub(crate) fn handle_frame(cx: &CommandContext) -> Result<()> {
     let file = get_game_file(cx)?;
     let output = cx.args.output.clone().unwrap_or_else(|| "tmp".into());
     do_one_frame(
@@ -479,7 +479,7 @@ pub fn handle_frame(cx: &CommandContext) -> Result<()> {
 }
 
 /// `rock perf` on the skull backend.
-pub fn handle_perf(cx: &CommandContext) -> Result<()> {
+pub(crate) fn handle_perf(cx: &CommandContext) -> Result<()> {
     let file = get_game_file(cx)?;
     let output = cx.args.output.clone().unwrap_or_else(|| "tmp".into());
     do_perf(
@@ -642,7 +642,7 @@ pub fn decode(m: &clap::ArgMatches, args: &mut Args) {
     args.jv = m.get_flag("jv");
 }
 
-pub fn initialize_process(args: &Args) {
+pub(crate) fn initialize_process(args: &Args) {
     // The dispatcher calls this before starting worker threads.
     if args.jv {
         unsafe { std::env::set_var("STONE_JV", "1") };

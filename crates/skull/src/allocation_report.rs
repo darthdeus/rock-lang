@@ -15,7 +15,7 @@ thread_local! {
 
 pub struct Scope(bool);
 pub struct ActivationScope(bool);
-pub struct EnvironmentScope {
+pub(crate) struct EnvironmentScope {
     _report: Scope,
     _activation: ActivationScope,
 }
@@ -42,7 +42,7 @@ pub fn activation_scope(enabled: bool) -> ActivationScope {
     ActivationScope(previous)
 }
 
-pub fn environment_scope() -> EnvironmentScope {
+pub(crate) fn environment_scope() -> EnvironmentScope {
     let activation = ACTIVATION.get() || std::env::var_os("SKULL_ALLOCATION_ACTIVATION").is_some();
     let report =
         ENABLED.get() || activation || std::env::var_os("SKULL_ALLOCATION_REPORT").is_some();
@@ -56,7 +56,7 @@ pub fn enabled() -> bool {
     ENABLED.get()
 }
 
-pub fn activation_enabled() -> bool {
+pub(crate) fn activation_enabled() -> bool {
     ACTIVATION.get()
 }
 

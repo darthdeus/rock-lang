@@ -958,7 +958,7 @@ impl CoroLowered {
     /// Frame cells owned by the coroutine's root and therefore shared with a
     /// detached hook/defer body. Cells introduced only by that detached body
     /// remain ordinary locals in its own `MirFunc`.
-    pub fn root_frame_info(&self) -> FrameInfo {
+    pub(crate) fn root_frame_info(&self) -> FrameInfo {
         let fields: HashSet<Idx<Cell>> = self
             .frame_plan
             .fields()

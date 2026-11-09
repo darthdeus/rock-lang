@@ -77,12 +77,12 @@ const COMPILE_CACHE_UNKEYED_ENV: &[&str] = &[
 ];
 const COMPILE_CACHE_UNKEYED_ENV_PREFIXES: &[&str] = &["ROCK_JOBS_", "ROCK_SIM_WARN_"];
 
-pub fn cache_sha256_bytes(bytes: &[u8]) -> String {
+pub(crate) fn cache_sha256_bytes(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
     format!("{:x}", Sha256::digest(bytes))
 }
 
-pub fn cache_sha256_file(path: &std::path::Path) -> Result<String> {
+pub(crate) fn cache_sha256_file(path: &std::path::Path) -> Result<String> {
     use anyhow::Context;
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -94,7 +94,7 @@ pub fn cache_sha256_file(path: &std::path::Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-pub fn compile_cache_environment_is_keyed(name: &str) -> bool {
+pub(crate) fn compile_cache_environment_is_keyed(name: &str) -> bool {
     (COMPILE_CACHE_KEYED_ENV_PREFIXES
         .iter()
         .any(|prefix| name.starts_with(prefix))
@@ -247,7 +247,7 @@ fn compile_cache_stdlib_digest() -> serde_json::Value {
 /// harness keying the `rock` it spawns) is hashed from its path, refused when
 /// it changes during the read. Memoized
 /// per path.
-pub fn compile_cache_compiler_sha256(rock_exe: &std::path::Path) -> Option<String> {
+pub(crate) fn compile_cache_compiler_sha256(rock_exe: &std::path::Path) -> Option<String> {
     static HASHES: std::sync::OnceLock<
         std::sync::Mutex<HashMap<std::path::PathBuf, Option<String>>>,
     > = std::sync::OnceLock::new();
@@ -329,7 +329,7 @@ fn file_sha256_if_unchanged_since(
     crate::comptime::compiler_image_identity(path).map(Some)
 }
 
-pub fn compile_cache_identity(
+pub(crate) fn compile_cache_identity(
     project: &std::path::Path,
     backend: crate::Backend,
     comptime: &bone_semantic::inference::ComptimeInputs,
@@ -355,7 +355,7 @@ pub fn compile_cache_identity(
     }))
 }
 
-pub fn compile_cache_lock_key(
+pub(crate) fn compile_cache_lock_key(
     root: &std::path::Path,
     key: &str,
     log_target: &'static str,
@@ -392,7 +392,7 @@ pub fn compile_cache_lock_key(
     Ok(file)
 }
 
-pub fn compile_cache_publish_dir(
+pub(crate) fn compile_cache_publish_dir(
     staged: &std::path::Path,
     entry: &std::path::Path,
     manifest: &str,
@@ -405,7 +405,7 @@ pub fn compile_cache_publish_dir(
     }
 }
 
-pub fn compile_cache_mark_used(entry: &std::path::Path, manifest: &str) -> Result<()> {
+pub(crate) fn compile_cache_mark_used(entry: &std::path::Path, manifest: &str) -> Result<()> {
     std::fs::File::options()
         .write(true)
         .open(entry.join(manifest))
@@ -414,7 +414,7 @@ pub fn compile_cache_mark_used(entry: &std::path::Path, manifest: &str) -> Resul
         .context("touch compile cache manifest")
 }
 
-pub fn compile_cache_evict(
+pub(crate) fn compile_cache_evict(
     root: &std::path::Path,
     entry: &std::path::Path,
     evicting_prefix: &str,
@@ -445,7 +445,7 @@ fn remove_compile_cache_eviction(doomed: &std::path::Path) -> Result<()> {
     }
 }
 
-pub fn compile_cache_evict_to_budget(
+pub(crate) fn compile_cache_evict_to_budget(
     root: &std::path::Path,
     budget: u64,
     keep: &std::path::Path,

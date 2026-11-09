@@ -65,7 +65,7 @@ fn parse_log_record(line: &str) -> Option<(&'static str, &str)> {
     Some((level, body))
 }
 
-pub fn is_error_or_warning_log_record(line: &str) -> bool {
+pub(crate) fn is_error_or_warning_log_record(line: &str) -> bool {
     parse_log_record(line).is_some_and(|(level, _)| matches!(level, "ERROR" | "WARN "))
 }
 

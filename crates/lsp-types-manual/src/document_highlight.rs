@@ -3,7 +3,7 @@ use crate::{
     WorkDoneProgressParams,
 };
 
-pub type DocumentHighlightClientCapabilities = DynamicRegistrationClientCapabilities;
+pub(crate) type DocumentHighlightClientCapabilities = DynamicRegistrationClientCapabilities;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct DocumentHighlightParams {

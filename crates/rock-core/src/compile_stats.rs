@@ -18,7 +18,7 @@ impl CompileStats {
 
     /// Headline lines-per-second: tokei-compatible `total_lines / elapsed`.
     /// Returns 0.0 if elapsed is zero (avoids div-by-zero in tests).
-    pub fn loc_per_sec(&self, elapsed: std::time::Duration) -> f64 {
+    pub(crate) fn loc_per_sec(&self, elapsed: std::time::Duration) -> f64 {
         let secs = elapsed.as_secs_f64();
         if secs <= 0.0 {
             0.0

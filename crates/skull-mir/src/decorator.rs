@@ -74,7 +74,7 @@ pub fn select_decorator_args<'a>(
 }
 
 /// A `deco` definition: its module and index there.
-pub type DecoratorRef = (ModuleId, Idx<DecoratorDef>);
+pub(crate) type DecoratorRef = (ModuleId, Idx<DecoratorDef>);
 
 /// The emitted symbol of a `deco` definition, from its definition key.
 pub fn decorator_symbol(def_key: &str) -> String {

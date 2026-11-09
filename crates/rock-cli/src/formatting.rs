@@ -6,7 +6,7 @@ use crate::*;
 ///
 /// `rock fmt` used to take a single path, so a file list silently formatted
 /// (or `--check`ed) only its first entry and reported success for the rest.
-pub fn collect_rock_files(paths: &[String]) -> Result<Vec<String>> {
+pub(crate) fn collect_rock_files(paths: &[String]) -> Result<Vec<String>> {
     use fs_err as fs;
 
     let mut collected = Vec::new();
@@ -45,7 +45,7 @@ pub fn collect_rock_files(paths: &[String]) -> Result<Vec<String>> {
     Ok(collected)
 }
 
-pub fn do_fmt(paths: &[String], in_place: bool, check: bool) -> Result<()> {
+pub(crate) fn do_fmt(paths: &[String], in_place: bool, check: bool) -> Result<()> {
     use fs_err as fs;
 
     let files_to_format = collect_rock_files(paths)?;

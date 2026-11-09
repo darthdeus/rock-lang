@@ -88,7 +88,7 @@ impl BodySlotTypes for SubstitutedSlotTypes<'_> {
 
 /// The identity-storage sites of one instance's body that its substitution
 /// adds to what bone reports for the declared body.
-pub fn substitution_only_sites(
+pub(crate) fn substitution_only_sites(
     ws: &Workspace,
     function: &Function,
     body: &Body,

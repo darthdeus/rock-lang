@@ -48,7 +48,7 @@ mod tests;
 mod unit;
 mod validate;
 
-pub use assemble::*;
+pub(crate) use assemble::*;
 pub use attribution::*;
 pub use body::*;
 pub use body_cache::*;
@@ -283,7 +283,7 @@ pub enum RendererTarget {
 
 /// What an emitted program is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BuildKind {
+pub(crate) enum BuildKind {
     /// A game, tool or single-file program; it may be reloaded in place.
     Program,
     /// A package's `rock test` program. Each test child loads it once and never

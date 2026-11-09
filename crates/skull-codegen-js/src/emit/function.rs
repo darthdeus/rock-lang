@@ -20,7 +20,7 @@ pub fn emit_fn(ws: &Workspace, mf: &MirFunc, js_name: &str) -> Result<String, Co
 /// `FuncRef` is in `callees` renders as `<js name>(args)` (the caller promises
 /// to emit that fn under that name in the same program). Anything neither a
 /// mapped intrinsic nor a known callee still rejects.
-pub fn emit_fn_with_callees(
+pub(crate) fn emit_fn_with_callees(
     ws: &Workspace,
     mf: &MirFunc,
     js_name: &str,
@@ -280,7 +280,7 @@ pub(super) fn finalize_labels(
 /// discipline is "called by original name from inline bodies / compiler
 /// codegen", and on JS an inline(js) body or a driver-injected line is verbatim
 /// text that can only use the bare name (same rule as the lua backend).
-pub fn callee_js_name(ws: &Workspace, fr: FuncRef) -> String {
+pub(crate) fn callee_js_name(ws: &Workspace, fr: FuncRef) -> String {
     let f = &ws.module(fr.module).functions[fr.func];
     skull_mir::mangle::mangle_fn(ws, f)
 }

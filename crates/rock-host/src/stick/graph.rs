@@ -373,7 +373,7 @@ impl Builder {
 /// preserved. Rejects empty keys, non-identifier spellings, and reserved
 /// roots, so a manifest typo fails here instead of inventing an unusable
 /// namespace name.
-pub fn normalize_dep_key(key: &str) -> Result<String> {
+pub(crate) fn normalize_dep_key(key: &str) -> Result<String> {
     let alias = key.replace('-', "_");
     let mut chars = alias.chars();
     let valid = match chars.next() {

@@ -145,7 +145,7 @@ pub trait SymbolPlanner: Sync {
 /// target-neutral. Injective over the instances it is given, which is exactly
 /// what it CANNOT answer for an artifact holding two declarations that encode
 /// alike -- hence the per-artifact collision check.
-pub struct LogicalSymbols;
+pub(crate) struct LogicalSymbols;
 
 impl SymbolPlanner for LogicalSymbols {
     fn symbol(

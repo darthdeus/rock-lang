@@ -7,7 +7,7 @@
 //! read the same MIR.
 
 pub mod allocation_report;
-pub mod coroutine_emit;
+pub(crate) mod coroutine_emit;
 pub mod graph_snapshot;
 pub mod mir_emit;
 pub mod shader_artifact;
@@ -390,17 +390,17 @@ pub fn module_tests_with_ids(
 /// The interned singleton global for a unit enum variant (`Color::Red` ->
 /// `__rock_enum_Color_Red`), so the value is reference-equal across uses and
 /// usable as a Lua map key.
-pub fn enum_singleton_name(enum_name: &str, variant: &str) -> String {
+pub(crate) fn enum_singleton_name(enum_name: &str, variant: &str) -> String {
     format!("__rock_enum_{enum_name}_{variant}")
 }
 
 /// Lua name for a global's init fn (`<global> = __skull_ginit_<global>()`).
-pub fn global_init_fn_name(global: &str) -> String {
+pub(crate) fn global_init_fn_name(global: &str) -> String {
     format!("__skull_ginit_{}", global)
 }
 
 /// A `@deco`-annotation argument (or `deco` param default) as a Lua literal.
-pub fn annotation_value_lua(v: &bone_semantic::hir::AnnoValue) -> Option<String> {
+pub(crate) fn annotation_value_lua(v: &bone_semantic::hir::AnnoValue) -> Option<String> {
     use bone_semantic::hir::AnnoValue as A;
     Some(match v {
         A::Int(i) => i.to_string(),
@@ -421,7 +421,7 @@ pub fn annotation_value_lua(v: &bone_semantic::hir::AnnoValue) -> Option<String>
 /// the backend-agnostic `skull_mir::decorator::select_decorator_args`, shared
 /// with the JS backend's `decorator_call_args_js`; only the literal rendering
 /// (`annotation_value_lua`) and the default tokens are Lua-specific.
-pub fn decorator_call_args(
+pub(crate) fn decorator_call_args(
     ws: &Workspace,
     module: ModuleId,
     decorator: bone_semantic::prelude::Idx<bone_semantic::hir::DecoratorDef>,
@@ -1769,7 +1769,7 @@ fn c_struct_inspect_defs(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::U
 
 /// Declared shape for runtime record walkers. Unsupported types remain `any`;
 /// consumers that reconstruct typed values must reject those descriptors.
-pub fn type_desc_lua(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
+pub(crate) fn type_desc_lua(ws: &Workspace, ty: bone_semantic::prelude::TyId) -> Option<String> {
     let mut out = String::new();
     desc_into(ws, ty, &mut out, 0).then_some(out)
 }

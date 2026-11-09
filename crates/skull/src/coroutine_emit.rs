@@ -20,7 +20,7 @@ fn raw<T>(i: Idx<T>) -> u32 {
     i.into_raw().into()
 }
 
-pub fn emit_coroutine_with_artifact(
+pub(crate) fn emit_coroutine_with_artifact(
     ws: &Workspace,
     ctx: &CodegenCtx,
     scx: &skull_mir::lower::ScalarCtx,

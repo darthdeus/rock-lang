@@ -2,7 +2,7 @@ use super::*;
 
 /// A block of code with its condition
 #[derive(Debug)]
-pub struct ConditionalBlock {
+pub(crate) struct ConditionalBlock {
     pub condition: Option<String>,
     pub start_pos: usize,
     pub end_pos: usize,
@@ -10,13 +10,13 @@ pub struct ConditionalBlock {
 
 /// A complete conditional construct (#if...#end)
 #[derive(Debug)]
-pub struct ConditionalConstruct {
+pub(crate) struct ConditionalConstruct {
     pub blocks: Vec<ConditionalBlock>,
     pub else_block: Option<ConditionalBlock>,
 }
 
 /// Parser for preprocessor directives
-pub struct PreprocessorParser {
+pub(crate) struct PreprocessorParser {
     directives: Vec<(Directive, usize)>, // (directive, position in source)
 }
 
@@ -28,7 +28,7 @@ impl PreprocessorParser {
     }
 
     /// Parse all directives and their positions from the lexer
-    pub fn parse_directives(&mut self, input: &str) -> Result<Vec<ConditionalConstruct>> {
+    pub(crate) fn parse_directives(&mut self, input: &str) -> Result<Vec<ConditionalConstruct>> {
         let mut lexer = lexer::PreprocessorLexer::new(input);
 
         // Collect all directives with their positions

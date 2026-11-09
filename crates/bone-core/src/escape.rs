@@ -15,7 +15,7 @@ use crate::workspace::{BodyInference, Workspace};
 /// Whether `lambda`, an `Expr::Lambda` in `body`, provably cannot outlive the
 /// call it is passed to. `bi` is `body`'s inference, used for its resolved
 /// overloads.
-pub fn lambda_is_nonescaping(
+pub(crate) fn lambda_is_nonescaping(
     ws: &Workspace,
     body: &Body,
     bi: &BodyInference,

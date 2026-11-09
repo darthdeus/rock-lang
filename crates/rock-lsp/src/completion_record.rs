@@ -38,7 +38,7 @@ struct Stashed {
     timings: serde_json::Value,
 }
 
-pub struct Recorder {
+pub(crate) struct Recorder {
     out_path: PathBuf,
     ring: VecDeque<Stashed>,
     next_id: u64,
@@ -194,7 +194,7 @@ pub fn init_recorder_at(path: PathBuf) {
 
 /// Snapshot the completion request into the ring and tag every item with
 /// the accept command. No-op (and no buffer copy) when recording is off.
-pub fn stash_and_tag(
+pub(crate) fn stash_and_tag(
     bone: &bone_query::BoneWorkspace,
     file_path: &str,
     pos: Position,

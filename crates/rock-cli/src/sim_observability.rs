@@ -21,7 +21,7 @@ mod timing;
 const SCHEMA_VERSION: u64 = 1;
 
 #[derive(Clone)]
-pub struct SimRunRecorder {
+pub(crate) struct SimRunRecorder {
     inner: Arc<Mutex<State>>,
 }
 
@@ -62,7 +62,7 @@ impl SimRunRecorder {
     /// Start a recording under an explicit root. This is public so the
     /// recorder contract can be tested without writing into the repository.
     #[cfg(test)]
-    pub fn begin_at(
+    pub(crate) fn begin_at(
         root: &Path,
         project: &str,
         selection: &str,
@@ -147,7 +147,7 @@ impl SimRunRecorder {
     /// Allocate one logical occurrence ID for each requested entry. Duplicate
     /// names intentionally receive different IDs; recovery reuses the ID from
     /// the original plan rather than creating a second logical entry.
-    pub fn plan_entries(&self, specs: &[String]) -> Vec<u64> {
+    pub(crate) fn plan_entries(&self, specs: &[String]) -> Vec<u64> {
         let mut ids = Vec::with_capacity(specs.len());
         for (sequence, spec) in specs.iter().enumerate() {
             let id = match self.inner.lock() {
@@ -203,11 +203,11 @@ impl SimRunRecorder {
         self.event("run_config", config);
     }
 
-    pub fn phase_start(&self, phase: &str) {
+    pub(crate) fn phase_start(&self, phase: &str) {
         self.event("phase_start", json!({ "phase": phase }));
     }
 
-    pub fn phase_end(&self, phase: &str, success: bool) {
+    pub(crate) fn phase_end(&self, phase: &str, success: bool) {
         self.event("phase_end", json!({ "phase": phase, "success": success }));
     }
 
@@ -235,7 +235,7 @@ impl SimRunRecorder {
     /// The most recent finished duration of the entry `name` in this run's
     /// project on this host, from earlier records under the history root. `None` until
     /// `configure` names the project.
-    pub fn recorded_duration_ms(&self, name: &str) -> Option<u64> {
+    pub(crate) fn recorded_duration_ms(&self, name: &str) -> Option<u64> {
         self.inner.lock().ok()?.timings.latest_duration_ms(name)
     }
 
@@ -270,7 +270,7 @@ impl SimRunRecorder {
         worker_id
     }
 
-    pub fn worker_admission(
+    pub(crate) fn worker_admission(
         &self,
         worker_id: u64,
         name: &str,
@@ -287,14 +287,14 @@ impl SimRunRecorder {
         );
     }
 
-    pub fn worker_started(&self, worker_id: u64, pid: u32) {
+    pub(crate) fn worker_started(&self, worker_id: u64, pid: u32) {
         self.event(
             "worker_started",
             json!({ "worker_attempt": worker_id, "pid": pid }),
         );
     }
 
-    pub fn worker_first_entry(&self, worker_id: u64, occurrence_id: u64, name: &str) {
+    pub(crate) fn worker_first_entry(&self, worker_id: u64, occurrence_id: u64, name: &str) {
         self.event(
             "worker_first_entry",
             json!({
@@ -305,7 +305,7 @@ impl SimRunRecorder {
         );
     }
 
-    pub fn entry_runtime_context(&self, worker_id: u64, occurrence_id: u64, context: Value) {
+    pub(crate) fn entry_runtime_context(&self, worker_id: u64, occurrence_id: u64, context: Value) {
         self.event(
             "entry_runtime_context",
             json!({ "worker_attempt": worker_id,
@@ -313,7 +313,7 @@ impl SimRunRecorder {
         );
     }
 
-    pub fn entry_start(&self, worker_id: u64, occurrence_id: u64, name: &str) {
+    pub(crate) fn entry_start(&self, worker_id: u64, occurrence_id: u64, name: &str) {
         self.event(
             "entry_start",
             json!({
@@ -324,7 +324,7 @@ impl SimRunRecorder {
         );
     }
 
-    pub fn entry_end(
+    pub(crate) fn entry_end(
         &self,
         worker_id: u64,
         occurrence_id: u64,
@@ -368,7 +368,7 @@ impl SimRunRecorder {
         );
     }
 
-    pub fn entry_result(
+    pub(crate) fn entry_result(
         &self,
         occurrence_id: u64,
         worker_id: u64,
@@ -402,21 +402,21 @@ impl SimRunRecorder {
         );
     }
 
-    pub fn artifact_check_start(&self, occurrence_id: u64) {
+    pub(crate) fn artifact_check_start(&self, occurrence_id: u64) {
         self.event(
             "artifact_check_start",
             json!({ "occurrence_id": occurrence_id }),
         );
     }
 
-    pub fn artifact_check_end(&self, occurrence_id: u64, success: bool) {
+    pub(crate) fn artifact_check_end(&self, occurrence_id: u64, success: bool) {
         self.event(
             "artifact_check_end",
             json!({ "occurrence_id": occurrence_id, "success": success }),
         );
     }
 
-    pub fn worker_end(
+    pub(crate) fn worker_end(
         &self,
         worker_id: u64,
         status: &str,

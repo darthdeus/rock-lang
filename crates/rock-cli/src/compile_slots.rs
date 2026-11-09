@@ -21,7 +21,7 @@ use std::io::{Seek, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub const ADMISSION_ENV: &str = "ROCK_COMPILE_ADMISSION";
+pub(crate) const ADMISSION_ENV: &str = "ROCK_COMPILE_ADMISSION";
 pub use rock_host::process_management::{SPAWN_PHASE_FILE_ENV, report_spawn_phase};
 
 #[cfg(test)]
@@ -36,7 +36,7 @@ const PEAK_SAMPLES: usize = 8;
 /// Resolved host admission policy. No configuration means immediate admission.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct SlotConfig {
+pub(crate) struct SlotConfig {
     pub dir: PathBuf,
     pub pool_mib: u64,
     pub full_compile_mib: u64,
@@ -103,7 +103,7 @@ struct Held {
 
 /// One compile's slot; dropping it frees the slot.
 #[must_use = "the slot is freed when this guard drops"]
-pub struct CompileSlot {
+pub(crate) struct CompileSlot {
     held: Option<Held>,
     // Only tests observe how the slot was acquired.
     #[cfg_attr(not(test), allow(dead_code))]

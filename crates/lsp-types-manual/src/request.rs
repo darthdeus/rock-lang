@@ -90,7 +90,7 @@ impl Request for References {
 pub enum GotoTypeDefinition {}
 
 pub type GotoTypeDefinitionParams = GotoDefinitionParams;
-pub type GotoTypeDefinitionResponse = GotoDefinitionResponse;
+pub(crate) type GotoTypeDefinitionResponse = GotoDefinitionResponse;
 
 impl Request for GotoTypeDefinition {
     type Params = GotoTypeDefinitionParams;

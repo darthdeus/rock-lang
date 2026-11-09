@@ -24,16 +24,16 @@ pub fn global_identity(file: Ustr, name: Ustr) -> String {
 /// namespace: a v1 DefKey is not an identifier, so the leaves are minted from
 /// the global's emitted SYMBOL. Lowering mints its `nobox` leaves the same way,
 /// so a MIR global name and a storage leaf name are the same string.
-pub fn physical_leaf_names(plan: &GlobalPlan, name: Ustr) -> Vec<Ustr> {
+pub(crate) fn physical_leaf_names(plan: &GlobalPlan, name: Ustr) -> Vec<Ustr> {
     let symbol = symbol_of_key(name);
     plan.leaf_names(symbol).unwrap_or_else(|| vec![symbol])
 }
 
-pub fn static_identity(owner: &str, name: Ustr, ordinal: u32) -> String {
+pub(crate) fn static_identity(owner: &str, name: Ustr, ordinal: u32) -> String {
     format!("static:{owner}::{name}#{ordinal}")
 }
 
-pub fn storage_key(identity: &str, leaf: &str) -> String {
+pub(crate) fn storage_key(identity: &str, leaf: &str) -> String {
     format!("{identity}::{leaf}")
 }
 

@@ -1,6 +1,6 @@
 use crate::NumberOrString;
 
-pub type ProgressToken = NumberOrString;
+pub(crate) type ProgressToken = NumberOrString;
 
 /// The progress notification is sent from the server to the client to ask
 /// the client to indicate progress.

@@ -343,7 +343,7 @@ pub static SHADER: CliCommand = CliCommand {
     }),
 };
 
-pub static BONE: BackendSpec = BackendSpec {
+pub(crate) static BONE: BackendSpec = BackendSpec {
     backend: Backend::Bone,
     name: "bone",
     tagline: "bone is a typechecker with no codegen/runtime",
@@ -371,7 +371,7 @@ pub static BONE: BackendSpec = BackendSpec {
     filter_rejection: None,
 };
 
-pub static SKULL: BackendSpec = BackendSpec {
+pub(crate) static SKULL: BackendSpec = BackendSpec {
     backend: Backend::Skull,
     name: "skull",
     tagline: "skull is a bone-HIR codegen",

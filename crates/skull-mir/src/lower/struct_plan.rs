@@ -60,7 +60,7 @@ impl StructFieldPlan {
         self.embed().map(|(child, _)| child)
     }
 
-    pub fn flat_shape(&self) -> Option<EnumFlatShape> {
+    pub(crate) fn flat_shape(&self) -> Option<EnumFlatShape> {
         match self {
             Self::Inline {
                 flat: Some(shape), ..

@@ -1,7 +1,7 @@
 use crate::{Backend, Result};
 use std::path::PathBuf;
 
-pub struct CompiledGame {
+pub(crate) struct CompiledGame {
     pub lua_file: std::path::PathBuf,
     pub artifact_fingerprint: String,
 }
@@ -21,7 +21,7 @@ pub(crate) fn compile_game_for_run(
 
 // Keep this directory alive until the child exits. The requested output directory
 // may also be targeted by a compiler, watcher or another bounded invocation.
-pub fn compile_frame_invocation(
+pub(crate) fn compile_frame_invocation(
     backend: Backend,
     path: &str,
     output: &str,
@@ -48,7 +48,7 @@ pub fn compile_frame_invocation(
 
 /// Everything a run compile needs before the compiler: project resolution,
 /// renderer feature, sound bank and engine libs.
-pub fn prepare_game_compile(path: &str) -> Result<()> {
+pub(crate) fn prepare_game_compile(path: &str) -> Result<()> {
     let project = (crate::registry::RuntimeServices::registered().resolve_project_dir)(path)?;
     let path = project.to_string_lossy();
     let path = path.as_ref();
@@ -58,20 +58,20 @@ pub fn prepare_game_compile(path: &str) -> Result<()> {
 }
 
 /// Disable device audio for bounded headless frame execution unless explicitly selected.
-pub fn apply_headless_audio_env(cmd: &mut std::process::Command) {
+pub(crate) fn apply_headless_audio_env(cmd: &mut std::process::Command) {
     if std::env::var_os("STONE_AUDIO_STUB").is_none() {
         cmd.env("STONE_AUDIO_STUB", "1");
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FrameProgress {
+pub(crate) struct FrameProgress {
     pub renderer: String,
     pub completed: usize,
     pub requested: Option<usize>,
 }
 
-pub fn parse_frame_progress(line: &[u8]) -> Option<FrameProgress> {
+pub(crate) fn parse_frame_progress(line: &[u8]) -> Option<FrameProgress> {
     let line = std::str::from_utf8(line).ok()?;
     let fields = line
         .split_once("ROCK_FRAME_PROGRESS ")?

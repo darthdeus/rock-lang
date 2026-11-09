@@ -34,7 +34,7 @@ pub enum CompilationUnit {
 }
 
 /// Analyzes files in a directory and categorizes them by directive type
-pub fn analyze_files_in_directory(dir_path: impl AsRef<Path>) -> Result<FileAnalysis> {
+pub(crate) fn analyze_files_in_directory(dir_path: impl AsRef<Path>) -> Result<FileAnalysis> {
     let mut project_files = Vec::new();
     let mut test_util_files = Vec::new();
 
@@ -77,7 +77,7 @@ pub fn analyze_files_in_directory(dir_path: impl AsRef<Path>) -> Result<FileAnal
         } else if !is_tests_directory && has_stick_toml {
             // Files without directives belong to the project unless they sit
             // in a tests/ directory.
-                project_files.push(path);
+            project_files.push(path);
         }
     }
 
@@ -89,19 +89,19 @@ pub fn analyze_files_in_directory(dir_path: impl AsRef<Path>) -> Result<FileAnal
 
 /// Result of analyzing files in a directory
 #[derive(Debug, Clone)]
-pub struct FileAnalysis {
+pub(crate) struct FileAnalysis {
     pub project_files: Vec<PathBuf>,
     pub test_util_files: Vec<PathBuf>,
 }
 
 impl FileAnalysis {
     /// Get compilation unit for running/compiling the entire project
-    pub fn project_compilation_unit(&self) -> CompilationUnit {
+    pub(crate) fn project_compilation_unit(&self) -> CompilationUnit {
         CompilationUnit::Project(self.project_files.clone())
     }
 
     /// Get compilation unit for a specific test file
-    pub fn test_compilation_unit(&self, test_file: PathBuf) -> CompilationUnit {
+    pub(crate) fn test_compilation_unit(&self, test_file: PathBuf) -> CompilationUnit {
         CompilationUnit::Test {
             project_files: self.project_files.clone(),
             test_util_files: self.test_util_files.clone(),
@@ -113,7 +113,7 @@ impl FileAnalysis {
 /// Parse the lib directive from a file's contents
 /// This is public so the LSP can reuse it
 /// Supports both `//! lib:` and legacy `//! love-lib:` syntax
-pub fn parse_lib_directive(contents: &str) -> Option<String> {
+pub(crate) fn parse_lib_directive(contents: &str) -> Option<String> {
     // Look for //! lib: or //! love-lib: path directive at the beginning of the file
     for line in contents.lines().take(10) {
         // Only check first 10 lines
@@ -130,7 +130,7 @@ pub fn parse_lib_directive(contents: &str) -> Option<String> {
 
 /// Resolve a lib path to the actual project directory
 /// This is public so the LSP can reuse it
-pub fn resolve_lib_path(lib_path: &str, file_dir: &Path) -> PathBuf {
+pub(crate) fn resolve_lib_path(lib_path: &str, file_dir: &Path) -> PathBuf {
     let lib_project_path = file_dir.join(lib_path);
 
     // If it's a stick.toml file, get its parent directory

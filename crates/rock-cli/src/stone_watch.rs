@@ -344,7 +344,7 @@ fn initial_session_build(
     Ok(fingerprint)
 }
 
-pub fn do_stone_watch(
+pub(crate) fn do_stone_watch(
     path: &str,
     quiet: bool,
     app_args: &[String],

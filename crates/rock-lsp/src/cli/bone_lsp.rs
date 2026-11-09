@@ -284,7 +284,7 @@ pub fn completion(file_path: &str, line: u32, column: u32, explain: bool) -> Res
 /// print a side-by-side matrix (rank x policy, cells `label [bBAND]`). Lets you
 /// eyeball what each policy admits/orders before picking a default. The real
 /// project is loaded so cross-file symbols resolve like the live server.
-pub fn completion_matrix(
+pub(crate) fn completion_matrix(
     file_path: &str,
     line: u32,
     column: u32,
@@ -306,7 +306,7 @@ pub fn completion_matrix(
 /// and the rank x policy matrix reprints. On a TTY this is per-keystroke (raw
 /// mode); piped stdin falls back to a line-at-a-time loop (so scripts/tests
 /// still work). Esc / Ctrl-C / Ctrl-D quit.
-pub fn completion_repl(
+pub(crate) fn completion_repl(
     file_path: &str,
     line: u32,
     column: u32,

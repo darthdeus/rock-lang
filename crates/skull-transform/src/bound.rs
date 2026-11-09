@@ -104,7 +104,7 @@ fn resolve_standalone_bound_calls_inner(
 ///
 /// A `CallerGeneric` leaf is the genuinely unresolved case: the enclosing body
 /// is still generic in that position, so nothing here can name a callee.
-pub fn substitute_bound_call(
+pub(crate) fn substitute_bound_call(
     func: &mut MirFunc,
     call: Idx<Inst>,
     already_split: bool,

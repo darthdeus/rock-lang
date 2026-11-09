@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub const ENGINE_BUILD_RECEIPT_ENV: &str = "ROCK_ENGINE_BUILD_RECEIPT";
+pub(crate) const ENGINE_BUILD_RECEIPT_ENV: &str = "ROCK_ENGINE_BUILD_RECEIPT";
 /// Interactive launches select immutable tools; source builds are opt-in.
 pub fn prebuilt_game() -> bool {
     std::env::var("ROCK_PREBUILT_GAME").as_deref() == Ok("1")

@@ -5,7 +5,7 @@ use super::*;
 /// A JS literal for a `@deco` annotation arg value (the JS analog of skull's
 /// `annotation_value_lua`): the same value classes, rendered in JS syntax. A
 /// non-literal (`AnnoValue::Other`) yields `None` (the caller rejects).
-pub fn annotation_value_js(v: &bone_core::hir::AnnoValue) -> Option<String> {
+pub(crate) fn annotation_value_js(v: &bone_core::hir::AnnoValue) -> Option<String> {
     use bone_core::hir::AnnoValue as A;
     Some(match v {
         A::Int(i) => i.to_string(),

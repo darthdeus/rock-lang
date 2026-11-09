@@ -739,7 +739,7 @@ pub(crate) fn store_session_artifact(
     Ok(())
 }
 
-pub fn compile_game_for_frame(
+pub(crate) fn compile_game_for_frame(
     backend: Backend,
     path: &str,
     output: &str,

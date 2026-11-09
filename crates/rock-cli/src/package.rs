@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub const PACKAGE_MANIFEST_NAME: &str = "package-manifest.json";
+pub(crate) const PACKAGE_MANIFEST_NAME: &str = "package-manifest.json";
 
 struct PackageContext {
     project: PathBuf,
@@ -49,7 +49,7 @@ fn package_context(project: &str) -> Result<PackageContext> {
     })
 }
 
-pub fn sound_project_path_for(project: &str) -> Result<Option<PathBuf>> {
+pub(crate) fn sound_project_path_for(project: &str) -> Result<Option<PathBuf>> {
     let (_, config) = project_and_config(project)?;
     if config
         .as_ref()
@@ -118,7 +118,7 @@ pub(crate) fn sound_watch_inputs(project: &str) -> Result<SoundWatchInputs> {
     Ok(inputs)
 }
 
-pub fn check_project_assets(project: &Path) -> Result<()> {
+pub(crate) fn check_project_assets(project: &Path) -> Result<()> {
     let (project, config) = project_and_config(
         project
             .to_str()
@@ -132,7 +132,7 @@ pub fn check_project_assets(project: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
+pub(crate) fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
     let (_, config) = project_and_config(project)?;
     if config
         .as_ref()

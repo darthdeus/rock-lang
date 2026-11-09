@@ -31,7 +31,7 @@ pub(crate) struct LintRouteTiming {
 /// `Error` findings always render in full and always fail the build, which is
 /// what makes a correctness lint non-optional.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
-pub enum LintReport {
+pub(crate) enum LintReport {
     /// Render every finding spanned against its source, like a type error.
     #[default]
     Full,
@@ -51,7 +51,7 @@ const POLICY_OFF: u8 = 3;
 /// Install the invocation's reporting policy from the parsed flags. Called from
 /// the dispatcher; the build call sites are deep in the backend and have no
 /// `Args` to thread down.
-pub fn set_policy(report: LintReport) {
+pub(crate) fn set_policy(report: LintReport) {
     POLICY.store(
         match report {
             LintReport::Full => POLICY_FULL,
@@ -67,7 +67,7 @@ pub fn set_policy(report: LintReport) {
 /// the files are deliberate compiler-shape probes, not a project -- and the
 /// parallel runner would interleave them into unreadable output anyway. `Error`
 /// findings still gate every file; `rock lint <dir>` is the detail surface.
-pub fn set_corpus_mode() {
+pub(crate) fn set_corpus_mode() {
     set_policy(LintReport::Off);
 }
 
@@ -92,7 +92,7 @@ pub fn policy() -> LintReport {
 /// Under `--no-lints` the pass still RUNS and still returns `Error` findings;
 /// the flag silences the noisy tiers, it is not an escape hatch from a
 /// correctness lint.
-pub fn run_build_lints(
+pub(crate) fn run_build_lints(
     ws: &Workspace,
     sources: &SourceFiles,
     root: &Path,
@@ -104,7 +104,7 @@ pub fn run_build_lints(
 /// The live-build adapter for [`bone_lints::IncrementalLintCache`]. The cache
 /// owns derivation and invalidation; this edge owns the same report set,
 /// severity policy, and error return as the canonical full pass.
-pub fn run_build_lints_cached(
+pub(crate) fn run_build_lints_cached(
     cache: &mut bone_lints::IncrementalLintCache,
     ws: &Workspace,
     sources: &SourceFiles,
@@ -236,7 +236,7 @@ fn report_timed(
 
 /// Report the soft tiers of a pipeline build per the invocation's policy;
 /// the pipeline itself refuses on the `Error` findings.
-pub fn report_soft(soft: &[bone_lints::Finding], sources: &SourceFiles, root: &Path) {
+pub(crate) fn report_soft(soft: &[bone_lints::Finding], sources: &SourceFiles, root: &Path) {
     if soft.is_empty() {
         return;
     }
@@ -295,7 +295,7 @@ pub enum Scope {
 /// The `SourceFiles` and lint root of a single-file build. `file` must be the
 /// same path the module was parsed under, or every span lookup misses and the
 /// findings render without their snippet.
-pub fn single_file_scope(file: &str, src: &str) -> (SourceFiles, std::path::PathBuf) {
+pub(crate) fn single_file_scope(file: &str, src: &str) -> (SourceFiles, std::path::PathBuf) {
     let mut sources = SourceFiles::empty();
     sources.add_or_update_file(source_file_from_path_and_contents(
         file.to_string(),
@@ -406,7 +406,7 @@ fn summary_line(soft: &[bone_lints::Finding], root: &Path) -> String {
 /// the usual report set (report on the DEPENDENCY, not the project) because the
 /// question is what this consumer fails to reach in a library it depends on.
 /// One consumer's answer is never a finding on its own -- see `lint_union`.
-pub fn unused_fns_under(
+pub(crate) fn unused_fns_under(
     ws: &Workspace,
     sources: &SourceFiles,
     consumer: &Path,
@@ -440,7 +440,7 @@ pub fn unused_fns_under(
 /// The modules of `ws` this build does not own -- [`skull::pipeline::warm_module_ids`] for a
 /// caller holding only the `SourceFiles`. `rock lint` needs it to validate
 /// `--ignore-types` against the project's own type names.
-pub fn warm_modules(ws: &Workspace, sources: &SourceFiles) -> FxHashSet<ModuleId> {
+pub(crate) fn warm_modules(ws: &Workspace, sources: &SourceFiles) -> FxHashSet<ModuleId> {
     with_source_texts(sources, |texts| skull::pipeline::warm_module_ids(ws, texts))
 }
 

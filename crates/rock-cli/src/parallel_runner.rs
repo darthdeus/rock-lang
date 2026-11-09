@@ -12,7 +12,7 @@ use std::path::Path;
 
 /// Result of running all tests in a single file.
 #[derive(Debug, Clone)]
-pub struct FileTestResult {
+pub(crate) struct FileTestResult {
     /// Display name for the file (may include subdirectory for disambiguation).
     pub file_name: String,
     pub passed: usize,
@@ -29,7 +29,7 @@ pub struct FileTestResult {
 
 /// Print a single file's test result in the standard compact format:
 ///   `filename ...... ok (10/12 tests, 45ms)`
-pub fn print_file_result(r: &FileTestResult) {
+pub(crate) fn print_file_result(r: &FileTestResult) {
     let total = r.passed + r.failed + r.ignored;
     let total_ms = r.duration.as_secs_f64() * 1000.0;
     let dots = ".".repeat(60_usize.saturating_sub(r.file_name.len().min(50)));
@@ -90,7 +90,7 @@ pub fn print_file_result(r: &FileTestResult) {
 /// from a config option). Pass `None` to auto-detect from available CPUs.
 ///
 /// Returns `(total, passed, failed, ignored)`.
-pub fn run_files_parallel<F>(
+pub(crate) fn run_files_parallel<F>(
     files: Vec<std::path::PathBuf>,
     num_threads_override: Option<usize>,
     worker: F,
@@ -215,7 +215,7 @@ where
 /// blocked in one unit's join may steal another whole unit, nesting a second
 /// compile inside the first's thread-local state (compile records, caches).
 /// Workers get the compiler stack.
-pub fn map_in_order<T, R, F>(items: &[T], threads: usize, work: F) -> Vec<R>
+pub(crate) fn map_in_order<T, R, F>(items: &[T], threads: usize, work: F) -> Vec<R>
 where
     T: Sync,
     R: Send,

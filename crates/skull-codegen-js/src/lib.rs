@@ -1842,7 +1842,7 @@ var __rock_host = {
 /// `put`, `env_var` (unset is Rock null, matching `os.getenv`), and one RNG
 /// seed per program -- `ROCK_TEST_SEED` when set and finite, else `Date.now()`;
 /// a program needing determinism calls `random_seed()` itself.
-pub const JS_HOST_RUNTIME: &str = r#"
+pub(crate) const JS_HOST_RUNTIME: &str = r#"
 function print() {
   var p = [];
   for (var i = 0; i < arguments.length; i++) p.push(lua_tostring(arguments[i]));

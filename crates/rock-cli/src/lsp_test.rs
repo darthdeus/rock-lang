@@ -160,7 +160,7 @@ enum EditStepOperation {
 }
 
 /// Check if the given path contains LSP tests
-pub fn has_lsp_tests(path: &Path) -> bool {
+pub(crate) fn has_lsp_tests(path: &Path) -> bool {
     if path.is_file() {
         return path
             .extension()
@@ -217,7 +217,7 @@ pub fn has_lsp_tests(path: &Path) -> bool {
 }
 
 /// Find the LSP test directory from a given path
-pub fn find_lsp_test_dir(path: &Path) -> Option<PathBuf> {
+pub(crate) fn find_lsp_test_dir(path: &Path) -> Option<PathBuf> {
     if path.ends_with("tests/lsp") && path.is_dir() {
         return Some(path.to_path_buf());
     }
@@ -3328,7 +3328,7 @@ fn display_name_for_lsp_file(file: &Path, root: &Path) -> String {
 /// there are no fixtures. The single dispatch point shared by every backend's
 /// `test` runner (rock's `do_test_multiple`, `skull_test`, `bone_test`) so the
 /// "is there an LSP suite here + which dir + which backend" logic lives once.
-pub fn run_lsp_suite(
+pub(crate) fn run_lsp_suite(
     path: &Path,
     backend: crate::Backend,
     verbose: bool,
@@ -3347,7 +3347,7 @@ pub fn run_lsp_suite(
     }
 }
 
-pub fn run_lsp_tests(
+pub(crate) fn run_lsp_tests(
     dir: &Path,
     backend: crate::Backend,
     _verbose: bool,

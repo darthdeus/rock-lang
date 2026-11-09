@@ -15,7 +15,7 @@ use rock_core::{CompilerError, Span};
 use rock_tokenizer::{Token, TokenKind, Tokenizer, interp};
 use ustr::Ustr;
 
-pub struct Parser<'a> {
+pub(crate) struct Parser<'a> {
     tokens: Vec<Token>,
     pos: usize,
     eof_span: Span,
@@ -195,7 +195,7 @@ impl<'a> Parser<'a> {
     /// offset of its first byte. Interpolated strings are re-scanned from it, so
     /// a caller that passes the wrong text gets spanned errors, not silent
     /// drift.
-    pub fn new_with_dialect(
+    pub(crate) fn new_with_dialect(
         tokens: Vec<Token>,
         source: &'a str,
         base: usize,
@@ -357,7 +357,7 @@ impl<'a> Parser<'a> {
     /// per-body lowerer -- no whole-module reparse, no shared-arena splice.
     /// Errors (a malformed body) propagate so the caller falls back to a full
     /// reparse rather than installing a half-item.
-    pub fn parse_single_item(mut self) -> PResult<Ast> {
+    pub(crate) fn parse_single_item(mut self) -> PResult<Ast> {
         self.skip_comments_as_items();
         let item = self.parse_item()?;
         self.ast.items.push(item);

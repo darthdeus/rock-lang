@@ -1,7 +1,7 @@
 use super::*;
 
 /// Lexer for preprocessor directives
-pub struct PreprocessorLexer<'a> {
+pub(crate) struct PreprocessorLexer<'a> {
     input: &'a str,
     bytes: &'a [u8],
     position: usize,
@@ -19,7 +19,7 @@ impl<'a> PreprocessorLexer<'a> {
     }
 
     /// Scan for the next preprocessor directive
-    pub fn next_directive(&mut self) -> Option<Directive> {
+    pub(crate) fn next_directive(&mut self) -> Option<Directive> {
         while self.position < self.bytes.len() {
             let pos_before = self.position;
 

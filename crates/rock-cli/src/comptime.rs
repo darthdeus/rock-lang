@@ -34,7 +34,7 @@ static SELECTION: OnceLock<CliSelection> = OnceLock::new();
 /// Record the invocation's selection. `overrides` are raw `NAME=VALUE`
 /// strings; a malformed one rejects here so the failure names the flag rather
 /// than surfacing as an undeclared-var error later.
-pub fn set_invocation_selection(
+pub(crate) fn set_invocation_selection(
     channel: Option<String>,
     implied_channel: Option<String>,
     target_os: Option<String>,
@@ -115,7 +115,7 @@ pub(crate) fn stamp_workspace(
 /// behaves the same as the project build, on both backends), a directory at
 /// itself. A path that does not exist on disk (synthetic in-memory module)
 /// has no enclosing project and resolves empty.
-pub fn inputs_for_entry_path(anchor: &Path) -> Result<ComptimeInputs> {
+pub(crate) fn inputs_for_entry_path(anchor: &Path) -> Result<ComptimeInputs> {
     let dir = if anchor.is_dir() {
         anchor
     } else if anchor.is_file() {
@@ -135,13 +135,13 @@ pub fn inputs_for_entry_path(anchor: &Path) -> Result<ComptimeInputs> {
 /// No stick.toml means empty inputs -- unless the invocation selected a
 /// channel, which nothing declares, and that rejects rather than silently
 /// resolving nothing.
-pub fn inputs_for_project_dir(dir: &Path) -> Result<ComptimeInputs> {
+pub(crate) fn inputs_for_project_dir(dir: &Path) -> Result<ComptimeInputs> {
     inputs_for_project_dir_as(dir, None)
 }
 
 /// [`inputs_for_project_dir`] as resolved by a `build_command` invocation
 /// (`ROCK_BUILD_COMMAND`), whatever command this process is.
-pub fn inputs_for_project_dir_as(
+pub(crate) fn inputs_for_project_dir_as(
     dir: &Path,
     build_command: Option<&str>,
 ) -> Result<ComptimeInputs> {
@@ -181,7 +181,7 @@ pub fn inputs_for_project_dir_as(
 /// Resolve inputs from a config the caller has already parsed. Release
 /// preparation uses this path so `[release]` selection and `[build.vars]`
 /// resolution share one `StickConfig` parse.
-pub fn inputs_for_project_with_config(
+pub(crate) fn inputs_for_project_with_config(
     project_dir: &Path,
     cfg: &rock_host::stick::StickConfig,
     build_command: Option<&str>,
@@ -468,7 +468,7 @@ pub(crate) fn resolve_checked_inputs(
 /// parsing together on a dev build, and nothing before the checked program
 /// reads it, so the fingerprint resolution finds it ready instead of paying
 /// for it on the compile's critical path.
-pub fn prefetch_compiler_identity(inputs: &ComptimeInputs) {
+pub(crate) fn prefetch_compiler_identity(inputs: &ComptimeInputs) {
     if inputs.source_fingerprints.is_empty() {
         return;
     }
@@ -479,7 +479,7 @@ pub fn prefetch_compiler_identity(inputs: &ComptimeInputs) {
 
 /// Content identity of the running compiler image, shared by source inputs
 /// and hosts' pre-compile cache keys. Never substitutes a checkout revision.
-pub fn compiler_identity() -> Result<String> {
+pub(crate) fn compiler_identity() -> Result<String> {
     static IDENTITY: OnceLock<Result<String, String>> = OnceLock::new();
     IDENTITY
         .get_or_init(|| {
@@ -505,7 +505,7 @@ pub fn compiler_identity() -> Result<String> {
 /// definition as [`compiler_identity`]. Hosts keying a compiler binary they
 /// spawn (rather than the running one) must use this, not a plain file hash,
 /// so both routes name the same compiler identically.
-pub fn compiler_image_identity(image: &Path) -> Result<String> {
+pub(crate) fn compiler_image_identity(image: &Path) -> Result<String> {
     let mut file = std::fs::File::open(image)?;
     let before = file.metadata()?;
     let identity = remembered_image_identity(image, &mut file, &before)?;

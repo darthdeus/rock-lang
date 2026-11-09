@@ -647,7 +647,7 @@ impl CodegenCtx {
 
     /// `func`'s strongly connected component number, or `None` when the graph
     /// this context was given does not mention it.
-    pub fn scc_of(&self, func: FuncRef) -> Option<u32> {
+    pub(crate) fn scc_of(&self, func: FuncRef) -> Option<u32> {
         self.call_sccs.get(&func).copied()
     }
 

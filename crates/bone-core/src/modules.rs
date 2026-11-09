@@ -34,7 +34,7 @@ pub enum IntrinsicType {
 /// declaration of their own. Their canonical keys are the bare spellings,
 /// just like legacy definitions, so a package type with the same tail
 /// (`geo::Map`) is never one of them.
-pub const STD_INTRINSIC_TYPES: &[(&str, IntrinsicType)] = &[
+pub(crate) const STD_INTRINSIC_TYPES: &[(&str, IntrinsicType)] = &[
     ("FieldRef", IntrinsicType::FieldRef),
     ("ReadFieldRef", IntrinsicType::FieldRef),
     ("WriteFieldRef", IntrinsicType::FieldRef),
@@ -112,7 +112,7 @@ pub fn std_exported_intrinsic_types() -> impl Iterator<Item = &'static str> {
 /// Stdlib `value` descriptors whose Lua representation is one host slot (the
 /// cdata for a `Ptr`, the buffer table with its leaf views for a
 /// `NativeBuffer`): copying one shares the referent and never rebuilds it.
-pub const STD_DESCRIPTOR_TYPES: &[&str] = &[
+pub(crate) const STD_DESCRIPTOR_TYPES: &[&str] = &[
     "Ptr",
     "PtrU8",
     "PtrI8",
@@ -138,7 +138,7 @@ pub fn is_intrinsic_key_in(key: Ustr, spellings: &[&str]) -> bool {
 }
 
 /// Package-root-relative module path (`combat::casting`).
-pub type ModulePath = Vec<Ustr>;
+pub(crate) type ModulePath = Vec<Ustr>;
 
 /// The source site performing an access check.
 /// None package indicates legacy callers.
@@ -549,7 +549,7 @@ impl LegacyOwnedNames {
     }
 
     /// Whether every legacy definition of `name` is a function.
-    pub fn all_callable(&self, name: Ustr) -> bool {
+    pub(crate) fn all_callable(&self, name: Ustr) -> bool {
         self.by_name
             .get(&name)
             .is_some_and(|defs| defs.iter().all(|(_, kind)| *kind == DefKind::Callable))

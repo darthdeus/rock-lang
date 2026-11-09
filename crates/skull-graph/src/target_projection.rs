@@ -146,18 +146,18 @@ pub const WEB: PlatformSpec = PlatformSpec {
         host_symbols: false,
     },
 };
-pub const WASI: PlatformSpec = PlatformSpec {
+pub(crate) const WASI: PlatformSpec = PlatformSpec {
     kind: PlatformKind::Wasi,
     caps: PlatformCapabilities {
         host_symbols: false,
     },
 };
 
-pub const GLSL_330: ShaderTargetSpec =
+pub(crate) const GLSL_330: ShaderTargetSpec =
     ShaderTargetSpec::Glsl(skull_mir::shader_ir::GlslProfile::Core330);
 
 /// The luajit execution backend.
-pub const LUAJIT: ExecutionTargetSpec = ExecutionTargetSpec {
+pub(crate) const LUAJIT: ExecutionTargetSpec = ExecutionTargetSpec {
     kind: ExecutionBackend::LuaJit,
     backend: Some(bone_core::hir::FnBackend::Lua),
     pointer_width: 64,
@@ -172,7 +172,7 @@ pub const LUAJIT: ExecutionTargetSpec = ExecutionTargetSpec {
 };
 
 /// The browser execution backend.
-pub const JAVASCRIPT: ExecutionTargetSpec = ExecutionTargetSpec {
+pub(crate) const JAVASCRIPT: ExecutionTargetSpec = ExecutionTargetSpec {
     kind: ExecutionBackend::JavaScript,
     backend: Some(bone_core::hir::FnBackend::Js),
     pointer_width: 64,
@@ -189,7 +189,7 @@ pub const JAVASCRIPT: ExecutionTargetSpec = ExecutionTargetSpec {
 /// Deliberately hostile synthetic fixture: 16-bit pointers, no GC, no
 /// suspendable frame, 32-bit floats. It exists to be maximally UNLIKE the two
 /// real backends while sharing their logical graph.
-pub const NATIVE_C64: ExecutionTargetSpec = ExecutionTargetSpec {
+pub(crate) const NATIVE_C64: ExecutionTargetSpec = ExecutionTargetSpec {
     kind: ExecutionBackend::NativeC,
     backend: None,
     pointer_width: 16,
@@ -206,7 +206,7 @@ pub const NATIVE_C64: ExecutionTargetSpec = ExecutionTargetSpec {
 /// Synthetic Wasm32 fixture. Foreign symbols are IMPORTS declared at module
 /// instantiation, not a `dlopen` the compiler can assume, so `foreign_symbols`
 /// is false -- an `extern` needs an import entry the artifact must carry.
-pub const WASM32: ExecutionTargetSpec = ExecutionTargetSpec {
+pub(crate) const WASM32: ExecutionTargetSpec = ExecutionTargetSpec {
     kind: ExecutionBackend::WebAssembly,
     backend: None,
     pointer_width: 32,
@@ -281,7 +281,7 @@ pub fn supports(target: &CpuTargetSpec, class: BoundaryClass) -> bool {
 
 /// The obligations `spec` defers to a later stage. Deferred is not unknown:
 /// each names the plan section that owns it.
-pub fn deferred_for(spec: &ExecutionTargetSpec) -> Vec<&'static str> {
+pub(crate) fn deferred_for(spec: &ExecutionTargetSpec) -> Vec<&'static str> {
     let mut deferred = Vec::new();
     if !spec.caps.garbage_collected {
         deferred.push("ownership realization: retain/release + cycle policy (plan S 20c)");

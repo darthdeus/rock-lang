@@ -154,7 +154,7 @@ impl<'a> Tokenizer<'a> {
         self.current = decode_at(bytes, self.byte_index).map(|(c, _)| c);
     }
 
-    pub fn peek_n(&self, n: usize) -> Option<char> {
+    pub(crate) fn peek_n(&self, n: usize) -> Option<char> {
         let raw = self.input.as_bytes();
         let base = self.byte_index;
         let fast_ok = base + n < raw.len() && raw[base..base + n].iter().all(|b| b.is_ascii());
@@ -486,7 +486,7 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    pub fn lookahead_number(&self) -> bool {
+    pub(crate) fn lookahead_number(&self) -> bool {
         if self.current.is_some_and(|c| c.is_ascii_digit()) {
             return true;
         }
@@ -572,7 +572,7 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    pub fn read_number(&mut self) -> Result<TokenKind, CompilerError> {
+    pub(crate) fn read_number(&mut self) -> Result<TokenKind, CompilerError> {
         enum Radix {
             Decimal,
             Binary,
@@ -1058,7 +1058,7 @@ impl<'a> Tokenizer<'a> {
         }))
     }
 
-    pub fn start_span(&self) -> LineCol {
+    pub(crate) fn start_span(&self) -> LineCol {
         LineCol {
             file: self.source_file,
             line: self.line,
@@ -1067,7 +1067,7 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
-    pub fn end_span(&self, start: LineCol) -> Span {
+    pub(crate) fn end_span(&self, start: LineCol) -> Span {
         // `col_range` end is exclusive. Use `self.column` directly — it
         // tracks columns in characters (incremented per char by `advance`),
         // whereas `byte_offset` counts bytes (UTF-8 length per char), so

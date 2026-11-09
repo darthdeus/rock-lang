@@ -63,7 +63,7 @@ impl CommandContext {
         Ok(())
     }
 
-    pub fn get_required_file(&self, command_name: &str) -> Result<&str> {
+    pub(crate) fn get_required_file(&self, command_name: &str) -> Result<&str> {
         let Some(file) = self.args.files.first() else {
             anyhow::bail!(
                 "Missing file path for `{cmd}` command.\n\
@@ -84,7 +84,7 @@ impl CommandContext {
     }
 
     /// Get output file for compile command, handling both --output flag and positional argument
-    pub fn get_compile_output(&self) -> Result<Option<String>> {
+    pub(crate) fn get_compile_output(&self) -> Result<Option<String>> {
         let output = match (&self.args.output, self.args.files.len()) {
             // Both --output flag and second positional argument provided - error
             (Some(_), n) if n >= 2 => {
@@ -129,7 +129,7 @@ impl CommandContext {
     }
 
     /// Resolve a project directory using this build's project conventions.
-    pub fn get_project_dir_or_current(&self) -> Result<String> {
+    pub(crate) fn get_project_dir_or_current(&self) -> Result<String> {
         let arg = self.get_path_or_current()?;
         Ok(
             (crate::registry::RuntimeServices::registered().resolve_project_dir)(&arg)?
@@ -138,7 +138,7 @@ impl CommandContext {
         )
     }
 
-    pub fn get_path_or_current(&self) -> Result<String> {
+    pub(crate) fn get_path_or_current(&self) -> Result<String> {
         let path = self
             .args
             .files
@@ -153,7 +153,7 @@ impl CommandContext {
 
     /// Every path argument, for the commands that act on a list rather than on
     /// one entry point. `get_path_or_current` drops everything after the first.
-    pub fn get_paths_or_current(&self) -> Result<Vec<String>> {
+    pub(crate) fn get_paths_or_current(&self) -> Result<Vec<String>> {
         let paths = if self.args.files.is_empty() {
             vec![".".to_string()]
         } else {
@@ -190,7 +190,7 @@ impl CommandContext {
         Ok(output)
     }
 
-    pub fn get_test_files(&self) -> Result<Vec<String>> {
+    pub(crate) fn get_test_files(&self) -> Result<Vec<String>> {
         let files = if self.args.files.is_empty() {
             vec!["tests".to_string()]
         } else {
@@ -279,7 +279,7 @@ impl CommandContext {
         Ok(())
     }
 
-    pub fn test_filter(&self) -> Result<Option<crate::TestFilter>> {
+    pub(crate) fn test_filter(&self) -> Result<Option<crate::TestFilter>> {
         crate::test::TestFilter::parse(self.args.test_filter.as_deref())
     }
 

@@ -1,6 +1,6 @@
 use crate::*;
 
-pub fn loaded_source_watch_paths(project: &str, roots: &[(u32, PathBuf)]) -> Vec<PathBuf> {
+pub(crate) fn loaded_source_watch_paths(project: &str, roots: &[(u32, PathBuf)]) -> Vec<PathBuf> {
     let mut paths = vec![PathBuf::from(project)];
     match rock_stdlib::stdlib_origin() {
         rock_stdlib::StdlibSource::Dir(dir) => paths.push(dir),
@@ -21,7 +21,7 @@ pub fn loaded_source_watch_paths(project: &str, roots: &[(u32, PathBuf)]) -> Vec
     paths
 }
 
-pub fn project_engine_watch_paths(project: &str) -> Vec<PathBuf> {
+pub(crate) fn project_engine_watch_paths(project: &str) -> Vec<PathBuf> {
     // Compilation may have failed before it retained a graph. Resolve the same
     // channel-filtered graph so edits to a broken dependency can repair it.
     let graph = (|| -> Result<Option<rock_host::stick::graph::PackageGraph>> {
@@ -54,7 +54,7 @@ pub fn project_engine_watch_paths(project: &str) -> Vec<PathBuf> {
     loaded_source_watch_paths(project, &roots)
 }
 
-pub fn reexec_current_binary() -> Result<()> {
+pub(crate) fn reexec_current_binary() -> Result<()> {
     let exe = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("cannot find current executable: {e}"))?;
     let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
@@ -78,7 +78,7 @@ pub fn reexec_current_binary() -> Result<()> {
 /// the caller's responsibility (per-backend state + signatures differ); this
 /// owns only the watcher + event-pump boilerplate that the bone and skull
 /// compile-watch loops both hand-rolled identically.
-pub fn run_compile_watch_loop(
+pub(crate) fn run_compile_watch_loop(
     mut watch_paths: Vec<PathBuf>,
     watching_msg: &str,
     mut on_event: impl FnMut(&FileChangeEvent),

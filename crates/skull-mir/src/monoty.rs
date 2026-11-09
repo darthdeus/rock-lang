@@ -97,7 +97,7 @@ pub enum MonoTy {
 /// symbol and an identity can differ about a type's NAME but never about its
 /// shape.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum NominalSpelling {
+pub(crate) enum NominalSpelling {
     /// The DefKey, for a stable identity.
     Key,
     /// The DefKey's identifier form (`<Name>_<digest>`), for an emitted symbol.
@@ -584,7 +584,7 @@ pub fn generic_var_of(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<V
 /// body publishes. Deliberately does NOT chase `substitutions`: a slot that
 /// inference already solved is not a hole a caller may fill, and binding it
 /// would overwrite the solution.
-pub fn infer_var_of(inf: &BodyInference, ty: TyId) -> Option<VarId> {
+pub(crate) fn infer_var_of(inf: &BodyInference, ty: TyId) -> Option<VarId> {
     let idx = match ty {
         TyId::Local(idx) => idx,
         TyId::Static(..) => return None,
@@ -642,7 +642,7 @@ impl MonoArena {
     /// `(attempts, new entries)` across this arena's lifetime, whichever path
     /// reached [`Self::intern`] -- the graph's direct walk and the shared
     /// interner handle alike.
-    pub fn intern_stats(&self) -> (u64, u64) {
+    pub(crate) fn intern_stats(&self) -> (u64, u64) {
         (self.intern_attempts, self.intern_new)
     }
 
@@ -831,7 +831,7 @@ impl MonoInterner {
     /// Adopt an arena an [`InstanceGraph`](../../skull/src/instance_graph.rs)
     /// build already filled. The graph and emission share ONE arena; a second
     /// one would give the same type two ids and the same body two identities.
-    pub fn from_arena(arena: MonoArena) -> Self {
+    pub(crate) fn from_arena(arena: MonoArena) -> Self {
         static ARENA_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
             arena: std::sync::RwLock::new(arena),
@@ -938,13 +938,13 @@ impl MonoInterner {
     /// borrows no arena lock and is valid only within the current worker's
     /// synchronous lowering work; the interner generation resets the cache
     /// before another arena can be observed.
-    pub fn get_shared(&self, id: MonoTyId) -> Rc<MonoTy> {
+    pub(crate) fn get_shared(&self, id: MonoTyId) -> Rc<MonoTy> {
         self.get_shared_with_status(id).0
     }
 
     /// As [`Self::get_shared`], also reporting whether this worker had to
     /// materialize the type from the authoritative arena.
-    pub fn get_shared_with_status(&self, id: MonoTyId) -> (Rc<MonoTy>, bool) {
+    pub(crate) fn get_shared_with_status(&self, id: MonoTyId) -> (Rc<MonoTy>, bool) {
         MONO_READ_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
             cache.reset_for(self.arena_gen);
@@ -961,7 +961,7 @@ impl MonoInterner {
 
     /// The counterpart to [`Self::intern_all`], for reading an instance's
     /// arguments back out as the types they are.
-    pub fn get_all(&self, ids: &[MonoTyId]) -> Vec<MonoTy> {
+    pub(crate) fn get_all(&self, ids: &[MonoTyId]) -> Vec<MonoTy> {
         ids.iter().map(|id| self.get(*id)).collect()
     }
 

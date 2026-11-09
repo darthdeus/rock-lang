@@ -15,7 +15,7 @@ use crate::ast::*;
 
 /// Deep-copy the expression subtree rooted at `e`, returning the new root.
 /// Every descendant Expr/Block/Stmt/Type node is freshly allocated.
-pub fn clone_expr(ast: &mut Ast, e: Idx<ExprData>) -> Idx<ExprData> {
+pub(crate) fn clone_expr(ast: &mut Ast, e: Idx<ExprData>) -> Idx<ExprData> {
     let data = ast.exprs[e].clone();
     let kind = clone_expr_kind(ast, data.kind);
     ast.exprs.alloc(ExprData {
@@ -24,7 +24,7 @@ pub fn clone_expr(ast: &mut Ast, e: Idx<ExprData>) -> Idx<ExprData> {
     })
 }
 
-pub fn clone_block(ast: &mut Ast, b: Idx<BlockData>) -> Idx<BlockData> {
+pub(crate) fn clone_block(ast: &mut Ast, b: Idx<BlockData>) -> Idx<BlockData> {
     let data = ast.blocks[b].clone();
     let statements = data
         .statements
@@ -38,7 +38,7 @@ pub fn clone_block(ast: &mut Ast, b: Idx<BlockData>) -> Idx<BlockData> {
     })
 }
 
-pub fn clone_type(ast: &mut Ast, t: Idx<TypeExprData>) -> Idx<TypeExprData> {
+pub(crate) fn clone_type(ast: &mut Ast, t: Idx<TypeExprData>) -> Idx<TypeExprData> {
     let data = ast.types[t].clone();
     let kind = clone_type_kind(ast, data.kind);
     ast.types.alloc(TypeExprData {

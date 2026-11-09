@@ -131,7 +131,7 @@ impl CompilerError {
     }
 
     /// Whether this error has no source position to point at.
-    pub fn has_no_location(&self) -> bool {
+    pub(crate) fn has_no_location(&self) -> bool {
         self.location.file == UNKNOWN_FILE_NAME
     }
 

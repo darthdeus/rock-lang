@@ -260,7 +260,7 @@ pub fn build_luajit_bytecode_command(
 }
 
 /// Default output directory for compiled programs.
-pub const DEFAULT_OUTPUT_DIR: &str = "tmp";
+pub(crate) const DEFAULT_OUTPUT_DIR: &str = "tmp";
 
 /// The canonical default location for the compiled program:
 /// `tmp/main.lua`. Used as both the compile target and the file

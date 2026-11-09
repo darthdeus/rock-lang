@@ -1,18 +1,18 @@
 use anyhow::Result;
 use ustr::Ustr;
 
-pub mod lexer;
+pub(crate) mod lexer;
 pub mod parser;
 pub mod processor;
 
-pub use processor::preprocess;
+pub(crate) use processor::preprocess;
 
 /// Preprocessor context — carries the backend identifier for `#if backend == "..."`
 /// conditional compilation. The identifier is a string rather than an enum so the
 /// preprocessor is decoupled from the compiler's Backend type (Rock currently only
 /// targets Lua, but the preprocessor syntax allows other targets).
 #[derive(Debug, Clone)]
-pub struct PreprocessorContext {
+pub(crate) struct PreprocessorContext {
     pub backend: Ustr,
 }
 
@@ -25,14 +25,14 @@ impl PreprocessorContext {
 
     /// Check if a condition is true for the current backend.
     /// Conditions are backend names compared case-sensitively.
-    pub fn evaluate_condition(&self, condition: &str) -> bool {
+    pub(crate) fn evaluate_condition(&self, condition: &str) -> bool {
         self.backend.as_str() == condition
     }
 }
 
 /// Preprocessor directive types
 #[derive(Debug, Clone, PartialEq)]
-pub enum DirectiveType {
+pub(crate) enum DirectiveType {
     If,
     ElseIf,
     Else,
@@ -45,7 +45,7 @@ pub enum DirectiveType {
 
 /// A preprocessor directive found in the source
 #[derive(Debug, Clone)]
-pub struct Directive {
+pub(crate) struct Directive {
     pub directive_type: DirectiveType,
     pub condition: Option<String>,
     pub line: usize,
@@ -53,7 +53,7 @@ pub struct Directive {
 
 /// Result of preprocessing a file
 #[derive(Debug)]
-pub struct PreprocessedSource {
+pub(crate) struct PreprocessedSource {
     pub content: String,
     pub is_script: bool,
     pub is_test: bool,

@@ -293,7 +293,7 @@ impl<'a> DispatchCtx<'a> {
     // implementation.
 
     /// The stored type node, WITHOUT the specialization substitution.
-    pub fn raw_ty_node(&self, ty: TyId) -> Option<TypeExpr> {
+    pub(crate) fn raw_ty_node(&self, ty: TyId) -> Option<TypeExpr> {
         Some(match ty {
             TyId::Static(mid, idx) => self.ws.module(mid).ty_arena[idx],
             TyId::Local(idx) => self.inf?.ty_arena[idx],
@@ -303,12 +303,12 @@ impl<'a> DispatchCtx<'a> {
     /// The concrete logical type for a plan-owned slot. This is deliberately
     /// separate from `TypeExpr`: a `MonoTy` owns all children and does not need
     /// an HIR arena to fabricate a partial node.
-    pub fn concrete_ty(&self, ty: TyId) -> Option<Rc<crate::monoty::MonoTy>> {
+    pub(crate) fn concrete_ty(&self, ty: TyId) -> Option<Rc<crate::monoty::MonoTy>> {
         let id = self.concrete_types?.ty_type(ty)?;
         self.concrete_mono(id)
     }
 
-    pub fn concrete_expr_ty(&self, expr: Idx<Expr>) -> Option<Rc<crate::monoty::MonoTy>> {
+    pub(crate) fn concrete_expr_ty(&self, expr: Idx<Expr>) -> Option<Rc<crate::monoty::MonoTy>> {
         let id = self.concrete_types?.expr_type(expr)?;
         self.concrete_mono(id)
     }
@@ -408,12 +408,12 @@ impl<'a> DispatchCtx<'a> {
     /// The stored HIR node. Concrete plan consumers use `concrete_ty` or
     /// `concrete_expr_ty` for resolved facts; this accessor never fabricates a
     /// partial HIR node for a concrete generic argument.
-    pub fn ty_node(&self, ty: TyId) -> Option<TypeExpr> {
+    pub(crate) fn ty_node(&self, ty: TyId) -> Option<TypeExpr> {
         self.raw_ty_node(ty)
     }
 
     /// Chase `Infer` and peel `Nullable`.
-    pub fn resolve_ty(&self, ty: TyId) -> Option<TypeExpr> {
+    pub(crate) fn resolve_ty(&self, ty: TyId) -> Option<TypeExpr> {
         match self.ty_node(ty)? {
             TypeExpr::Infer(var, _) => self.resolve_ty(self.inf?.substitutions.get(var)?),
             TypeExpr::Nullable(inner) => self.resolve_ty(ty.with_idx(inner)),
@@ -422,18 +422,18 @@ impl<'a> DispatchCtx<'a> {
     }
 
     /// Chase `Infer` WITHOUT peeling `Nullable`, keeping the `TyId`.
-    pub fn resolve_tyid(&self, ty: TyId) -> Option<TyId> {
+    pub(crate) fn resolve_tyid(&self, ty: TyId) -> Option<TyId> {
         match self.ty_node(ty)? {
             TypeExpr::Infer(var, _) => self.resolve_tyid(self.inf?.substitutions.get(var)?),
             _ => Some(ty),
         }
     }
 
-    pub fn expr_ty(&self, e: Idx<Expr>) -> Option<TypeExpr> {
+    pub(crate) fn expr_ty(&self, e: Idx<Expr>) -> Option<TypeExpr> {
         self.resolve_ty(*self.inf?.expr_types.get(e)?)
     }
 
-    pub fn is_nullable_ty(&self, ty: TyId) -> bool {
+    pub(crate) fn is_nullable_ty(&self, ty: TyId) -> bool {
         if let Some(ty) = self.concrete_ty(ty) {
             return ty.peel_nullable().1;
         }
@@ -458,7 +458,7 @@ impl<'a> DispatchCtx<'a> {
         }
     }
 
-    pub fn expr_is_nullable(&self, e: Idx<Expr>) -> bool {
+    pub(crate) fn expr_is_nullable(&self, e: Idx<Expr>) -> bool {
         if let Some(ty) = self.concrete_expr_ty(e) {
             return ty.peel_nullable().1;
         }
@@ -471,11 +471,11 @@ impl<'a> DispatchCtx<'a> {
             .unwrap_or(false)
     }
 
-    pub fn is_null_lit(&self, e: Idx<Expr>) -> bool {
+    pub(crate) fn is_null_lit(&self, e: Idx<Expr>) -> bool {
         matches!(self.body.expr_arena[e], Expr::Null)
     }
 
-    pub fn is_nobox_struct(&self, name: Ustr) -> bool {
+    pub(crate) fn is_nobox_struct(&self, name: Ustr) -> bool {
         if self.values_first_class {
             return false;
         }
@@ -499,7 +499,7 @@ impl<'a> DispatchCtx<'a> {
             .unwrap_or(false)
     }
 
-    pub fn nobox_value_name(&self, e: Idx<Expr>) -> Option<Ustr> {
+    pub(crate) fn nobox_value_name(&self, e: Idx<Expr>) -> Option<Ustr> {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let mut payload = &*ty;
             while let crate::monoty::MonoTy::Nullable(inner) = payload {
@@ -548,7 +548,7 @@ impl<'a> DispatchCtx<'a> {
     /// annotation -- it is the equality-only question "does this type already
     /// carry a native-`==`-reachable `__eq`", which every `value` struct
     /// answers yes to regardless of storage tier or ABI opt-in.
-    pub fn value_struct_name(&self, e: Idx<Expr>) -> Option<Ustr> {
+    pub(crate) fn value_struct_name(&self, e: Idx<Expr>) -> Option<Ustr> {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let (payload, _) = ty.peel_nullable();
             return match payload {
@@ -576,7 +576,7 @@ impl<'a> DispatchCtx<'a> {
     /// payload). Those variants lower to interned singleton globals --
     /// reference-equal across uses -- so `==`/`!=` is native Lua `==`/`~=`, not
     /// the dynamic `__op_eq` (`type()`/`pairs()`) walk.
-    pub fn is_payloadless_enum(&self, e: Idx<Expr>) -> bool {
+    pub(crate) fn is_payloadless_enum(&self, e: Idx<Expr>) -> bool {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let (payload, _) = ty.peel_nullable();
             let crate::monoty::MonoTy::App {
@@ -614,7 +614,7 @@ impl<'a> DispatchCtx<'a> {
             .all(|v| matches!(v.payload, bone_core::hir::VariantPayload::Unit))
     }
 
-    pub fn eq_is_scalar(&self, e: Idx<Expr>) -> bool {
+    pub(crate) fn eq_is_scalar(&self, e: Idx<Expr>) -> bool {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let (payload, _) = ty.peel_nullable();
             return matches!(
@@ -641,7 +641,7 @@ impl<'a> DispatchCtx<'a> {
         ) || self.is_payloadless_enum(e)
     }
 
-    pub fn expr_is_flat_enum(&self, e: Idx<Expr>) -> bool {
+    pub(crate) fn expr_is_flat_enum(&self, e: Idx<Expr>) -> bool {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let (payload, _) = ty.peel_nullable();
             return matches!(
@@ -667,7 +667,7 @@ impl<'a> DispatchCtx<'a> {
     /// known present. The nullable guard wraps this rather than changing it --
     /// `expr_ty` peels `Nullable`, so the arm is picked from the non-null shape
     /// on both sides.
-    pub fn stringify_route(&self, expr: Idx<Expr>) -> StringifyRoute {
+    pub(crate) fn stringify_route(&self, expr: Idx<Expr>) -> StringifyRoute {
         if self.is_null_lit(expr) {
             return StringifyRoute::ToString;
         }
@@ -746,7 +746,7 @@ impl<'a> DispatchCtx<'a> {
     /// The structural rendering of `expr`'s non-null type, when that type is
     /// one the structural formatter owns (an enum with a payload, a value
     /// record, a handle). `None` leaves the hole to the by-type routes.
-    pub fn structural_route(&self, expr: Idx<Expr>) -> Option<StringifyRoute> {
+    pub(crate) fn structural_route(&self, expr: Idx<Expr>) -> Option<StringifyRoute> {
         let ty = self.hole_mono(expr)?;
         let (payload, _) = ty.peel_nullable();
         let name = payload.nominal()?;
@@ -816,7 +816,7 @@ impl<'a> DispatchCtx<'a> {
 
     /// Whether `e`'s type is a composite (tuple/array/map/struct/enum) -- what
     /// `inspect`/`inspect_formatted` render structurally.
-    pub fn is_composite_expr(&self, e: Idx<Expr>) -> bool {
+    pub(crate) fn is_composite_expr(&self, e: Idx<Expr>) -> bool {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let (payload, _) = ty.peel_nullable();
             return match payload {
@@ -865,7 +865,7 @@ impl<'a> DispatchCtx<'a> {
 
     /// THE plan for a `{x:spec}` hole. Every branch that decides a stdlib call
     /// is here; the printf conversion STRING is not, because it emits no call.
-    pub fn format_plan(&self, hole: Idx<Expr>, spec: &InterpSpec) -> FormatPlan {
+    pub(crate) fn format_plan(&self, hole: Idx<Expr>, spec: &InterpSpec) -> FormatPlan {
         let inferred = if self.concrete_plan.is_some() {
             match self.concrete_expr_ty(hole).as_deref() {
                 Some(crate::monoty::MonoTy::Int) => Some('d'),

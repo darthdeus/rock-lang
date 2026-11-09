@@ -24,7 +24,7 @@ pub enum LifecycleQualification {
 }
 
 impl LifecycleQualification {
-    pub fn is_gated(&self) -> bool {
+    pub(crate) fn is_gated(&self) -> bool {
         matches!(self, Self::OnChange { .. })
     }
 
@@ -137,7 +137,7 @@ impl LifecycleQualification {
     }
 }
 
-pub const LIFECYCLE_PHASES: [&str; 13] = [
+pub(crate) const LIFECYCLE_PHASES: [&str; 13] = [
     "early_init",
     "init",
     "late_init",

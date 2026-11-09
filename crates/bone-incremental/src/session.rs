@@ -513,7 +513,7 @@ fn reject_macro_name_collisions(modules: &ModuleSet) -> Result<(), CompilerError
 }
 
 /// See [`UserFile::scope_hash`].
-pub fn scope_hash(a: &Ast, text: &str) -> u64 {
+pub(crate) fn scope_hash(a: &Ast, text: &str) -> u64 {
     use std::hash::{Hash, Hasher};
 
     let mut h = rustc_hash::FxHasher::default();
@@ -1971,7 +1971,7 @@ impl Session {
     /// entries. O(mid's deps), not O(workspace) -- the body-edit fast path. Sound
     /// because a body edit changes ONLY the edited module's outgoing deps (its
     /// interface is unchanged, so no other module's deps move).
-    pub fn update_dependents_for(&mut self, mid: ModuleId) {
+    pub(crate) fn update_dependents_for(&mut self, mid: ModuleId) {
         if !Workspace::is_user_module(mid, &self.warm_mids) {
             return;
         }
@@ -2003,7 +2003,7 @@ impl Session {
             .collect()
     }
 
-    pub fn rebuild_module(
+    pub(crate) fn rebuild_module(
         &mut self,
         path: &str,
         ast: Ast,
@@ -2611,7 +2611,7 @@ impl Session {
         }
     }
 
-    pub fn collect_reinferred(&self, mids: &[ModuleId]) -> Vec<BodyId> {
+    pub(crate) fn collect_reinferred(&self, mids: &[ModuleId]) -> Vec<BodyId> {
         let mut reinferred = Vec::new();
 
         for mid in mids {

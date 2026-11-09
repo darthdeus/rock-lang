@@ -227,7 +227,7 @@ pub enum CalleeFamily {
     },
 }
 
-pub fn resolve_legacy_callee(
+pub(crate) fn resolve_legacy_callee(
     ws: &Workspace,
     file: Ustr,
     name: Ustr,
@@ -372,7 +372,7 @@ pub fn resolve_v1_callee(
 /// A unary operator's function (`-x` -> `__unm`, `!x` -> `__not`) in a v1
 /// fragment: its family, or `None` when no tier binds the name. That is not
 /// an error here: a scalar operand never consults the family.
-pub fn resolve_v1_unary(
+pub(crate) fn resolve_v1_unary(
     ws: &Workspace,
     frag: &FragmentScope,
     name: Ustr,
@@ -1373,7 +1373,7 @@ fn module_display(ws: &Workspace, (package, path): &(u32, Vec<Ustr>)) -> String 
 }
 
 /// What a member-wise value path (`p::E::V`, `p::f`, `p::Type`) resolved to.
-pub enum MemberTarget {
+pub(crate) enum MemberTarget {
     /// A global or constant: the DefKey.
     Global(Ustr),
     /// A callable family: the key the family is registered under and the
@@ -1390,7 +1390,7 @@ pub enum MemberTarget {
 /// Member-wise resolution: at every node a segment may be a child module OR
 /// an owned definition; `Type::Variant` consumes the type and its variant
 /// (the resolver decides, not the lexer).
-pub fn resolve_member_path(
+pub(crate) fn resolve_member_path(
     ws: &Workspace,
     frag: &FragmentScope,
     path: &UsePathRef,
@@ -1891,7 +1891,7 @@ fn walk_module_path(
 /// variant and the prefix lands on an enum type. The whole path resolves
 /// exactly like the value `prefix::Variant`, so a bare enum prefix binds
 /// through every scope tier (imports, globs, std), not only own members.
-pub fn resolve_variant_pattern(
+pub(crate) fn resolve_variant_pattern(
     ws: &Workspace,
     frag: &FragmentScope,
     path: &UsePathRef,

@@ -361,7 +361,7 @@ pub(crate) fn make_edit(orig: &str, f: &FnStat, kind: EditKind) -> Option<String
     }
 }
 
-pub fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Result<()> {
+pub(crate) fn lsp_survey(path: &str, iters: usize, warmup: usize, json_out: bool) -> Result<()> {
     let dir = Path::new(path);
     if !dir.is_dir() {
         anyhow::bail!("lsp-survey expects a project directory, got `{path}`");

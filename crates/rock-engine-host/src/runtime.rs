@@ -40,7 +40,7 @@ pub fn luajit_path() -> PathBuf {
 ///
 /// In release layout: `<rock_dir>/lib` (Windows adds `<rock_dir>\bin`)
 /// In dev layout: `tmp`, the workspace's `tmp`, and the cached native lib dir.
-pub fn lib_path_value() -> String {
+pub(crate) fn lib_path_value() -> String {
     lib_path_value_in(Path::new(&rock_host::rock_dir()))
 }
 
@@ -126,7 +126,7 @@ pub fn lib_path_with_inherited() -> String {
 }
 
 #[cfg(target_os = "linux")]
-pub fn linux_vulkan_library_paths() -> Vec<PathBuf> {
+pub(crate) fn linux_vulkan_library_paths() -> Vec<PathBuf> {
     linux_vulkan_library_paths_from(Path::new("/nix/store"), Path::new("/run/opengl-driver/lib"))
 }
 
@@ -178,13 +178,13 @@ pub fn lua_path_value() -> String {
 /// Env switch enabling a RenderDoc GPU capture: the value is the capture
 /// file path template stone hands to `SetCaptureFilePathTemplate`
 /// (RenderDoc appends `_frame<N>.rdc`).
-pub const RENDERDOC_ENV: &str = "STONE_RENDERDOC";
+pub(crate) const RENDERDOC_ENV: &str = "STONE_RENDERDOC";
 /// Optional explicit `librenderdoc.so` path for the preload gate.
 pub const RENDERDOC_LIB_ENV: &str = "STONE_RENDERDOC_LIB";
 
 /// `Some(template)` when a RenderDoc capture was requested, else `None`.
 /// Empty counts as unset, matching the `ROCK_LUAJIT` precedent.
-pub fn renderdoc_capture_requested() -> Option<String> {
+pub(crate) fn renderdoc_capture_requested() -> Option<String> {
     std::env::var(RENDERDOC_ENV).ok().filter(|v| !v.is_empty())
 }
 
@@ -265,7 +265,7 @@ pub(crate) fn join_preload(
 /// would load the lib first and scrub the var). Setting it explicitly on
 /// the final spawn's `Command` is the only shape that reaches the game.
 #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
-pub fn apply_renderdoc_gate(cmd: &mut std::process::Command) {
+pub(crate) fn apply_renderdoc_gate(cmd: &mut std::process::Command) {
     if renderdoc_capture_requested().is_none() {
         return;
     }

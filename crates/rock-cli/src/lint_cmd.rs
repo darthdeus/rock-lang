@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 /// keeps `tests/` sources: a sim is code the author maintains, and `@sim` /
 /// `@test` decorators are reachability roots, so dropping them would report
 /// their callees as dead.
-pub fn do_lint(
+pub(crate) fn do_lint(
     path: &str,
     lints: Option<&str>,
     only_types: Option<&str>,

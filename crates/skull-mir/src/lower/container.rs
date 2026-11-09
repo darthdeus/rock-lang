@@ -317,14 +317,14 @@ impl ContainerPlan {
         ))
     }
 
-    pub fn ffi_element_name(&self, arena: &RepArena) -> Option<ustr::Ustr> {
+    pub(crate) fn ffi_element_name(&self, arena: &RepArena) -> Option<ustr::Ustr> {
         let shape = self.element_shape(arena)?;
         arena
             .column_eligible(self.element_rep())
             .then_some(shape.name)
     }
 
-    pub fn leaf_addresses(&self) -> Option<&[LeafAddr]> {
+    pub(crate) fn leaf_addresses(&self) -> Option<&[LeafAddr]> {
         self.leaf_addresses.as_deref()
     }
 

@@ -117,7 +117,7 @@ impl_lsp_struct!(
 );
 
 /// response for CodeActionRequest
-pub type CodeActionResponse = Vec<CodeActionOrCommand>;
+pub(crate) type CodeActionResponse = Vec<CodeActionOrCommand>;
 
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::large_enum_variant)]

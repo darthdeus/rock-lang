@@ -56,7 +56,7 @@ pub fn configured_stone_dir(path: &std::path::Path) -> Result<Option<std::path::
 /// root), beyond the literal path. `games/` holds the match3-class games;
 /// top-level projects (sample-game, demo) are picked up by the literal-path
 /// check, so they need no entry here.
-pub const PROJECT_PARENTS: &[&str] = &["games"];
+pub(crate) const PROJECT_PARENTS: &[&str] = &["games"];
 
 /// Resolve a project argument (`rock sim`/`--list`) to a directory. Checks
 /// relative to current directory first (allowing execution from game subdirectories);
@@ -78,7 +78,7 @@ pub fn resolve_project_dir(arg: &str) -> Result<PathBuf> {
 /// Core of `resolve_project_dir`, parameterized on the search base and parent
 /// list so it can be exercised without touching the process cwd. An empty
 /// `base` yields clean cwd-relative paths (`Path::new("").join("x")` == `"x"`).
-pub fn resolve_project_dir_in(base: &Path, parents: &[&str], arg: &str) -> Result<PathBuf> {
+pub(crate) fn resolve_project_dir_in(base: &Path, parents: &[&str], arg: &str) -> Result<PathBuf> {
     let literal = base.join(arg);
     if literal.is_dir() {
         return Ok(literal);

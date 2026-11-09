@@ -151,14 +151,14 @@ pub(crate) fn term_uses(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
 /// header + body region (excluding header and latch), as recognized by the
 /// emitter's `recognize_counted_loops`. Used to partition value colors by
 /// lexical scope.
-pub struct LoopScope {
+pub(crate) struct LoopScope {
     pub header: Idx<Block>,
     pub region: Vec<Idx<Block>>,
 }
 
 /// Result of [`color_values`]: the per-inst color table plus, per color, the
 /// counted loop that lexically owns it (`None` = declared at function top).
-pub struct ValueAlloc {
+pub(crate) struct ValueAlloc {
     /// Dense `raw(inst) -> color` (`u32::MAX` = uncolored: inlined or non-value).
     pub colors: Vec<u32>,
     /// `color -> owning loop header`. A `Some(h)` color's `local r<c>` is
@@ -189,7 +189,7 @@ pub struct ValueAlloc {
 /// [`ValueAlloc::color_scope`] so the emitter declares it inside the `for`
 /// block. Palettes are disjoint, so a loop-scoped local never shares a name
 /// with (or shadows) a function-top local.
-pub fn color_values(
+pub(crate) fn color_values(
     func: &MirFunc,
     scope: &[Idx<Block>],
     inline: &[bool],
@@ -598,7 +598,7 @@ fn term_cell_uses(
 /// in detached nested CFGs are forced to a unique color and are never emitted
 /// with their enclosing body.
 #[cfg(test)]
-pub fn color_cells(func: &MirFunc) -> Vec<u32> {
+pub(crate) fn color_cells(func: &MirFunc) -> Vec<u32> {
     color_cells_with_analysis(&CellAnalysis::new(func), None, &[])
 }
 
