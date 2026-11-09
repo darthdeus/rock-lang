@@ -630,15 +630,18 @@ impl Emitter<'_> {
         })
     }
 
-    /// Flatten a `StringConcat` tree into its leaf operands (descending into
-    /// child `StringConcat`s), mirroring the Lua backend's flat-`..` collection.
+    /// Flatten a `StringConcat` tree into its leaf operands, descending only into
+    /// child `StringConcat`s folded into this expression. A materialized child
+    /// stays a leaf: its operands may be `let`s of another switch case.
     fn collect_concat(&self, parts: &mut Vec<Idx<Inst>>, id: Idx<Inst>) {
-        if let Inst::StringConcat(a, b) = &self.mf.insts[id] {
-            self.collect_concat(parts, *a);
-            self.collect_concat(parts, *b);
-        } else {
-            parts.push(id);
+        if self.inlinable[raw(id) as usize] {
+            if let Inst::StringConcat(a, b) = &self.mf.insts[id] {
+                self.collect_concat(parts, *a);
+                self.collect_concat(parts, *b);
+                return;
+            }
         }
+        parts.push(id);
     }
 
     /// Box an enum: `__rock_make_enum(<tag>, "<ty>", [0, p0, 1, p1, "name", v, ..])`.

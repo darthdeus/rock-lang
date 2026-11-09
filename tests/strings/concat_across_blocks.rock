@@ -1,0 +1,30 @@
+// An interpolation built in two steps across a `??` keeps its first half in a
+// temp. The match's arms make the JS emitter fall back to one switch case per
+// block, where only that temp, not its operands, is visible in the next case.
+
+enum Inner { X, Y(bool) }
+
+value Pair { a: int, b: int }
+
+enum Outer {
+    Rec { x: int?, y: string? },
+    Nested(Inner),
+    Opt(Pair?),
+}
+
+fn show(e: Outer) -> string {
+    return match e {
+        Outer::Rec { x, y } => "D{x ?? -1}{y ?? "n"}",
+        Outer::Nested(Inner::X) => "X",
+        Outer::Nested(Inner::Y(b)) => "Y{b}",
+        Outer::Opt(p) => "O{p?.a ?? -1}",
+    }
+}
+
+@test
+fn concat_operands_stay_in_scope_across_cases() {
+    assert_eq(show(Outer::Rec { x: null, y: null }), "D-1n")
+    assert_eq(show(Outer::Rec { x: 7, y: "s" }), "D7s")
+    assert_eq(show(Outer::Nested(Inner::Y(true))), "Ytrue")
+    assert_eq(show(Outer::Opt(Pair { a: 3, b: 4 })), "O3")
+}
