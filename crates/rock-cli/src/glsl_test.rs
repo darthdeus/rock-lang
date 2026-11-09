@@ -592,10 +592,7 @@ fn spawn_runner(
     let mut cmd = Command::new(runner);
     rock_host::compiler_thp::configure_runtime_command(&mut cmd);
     cmd.arg("--profile").arg(profile);
-    cmd = (crate::registry::RuntimeServices::registered().runtime_command)(
-        cmd,
-        crate::registry::RuntimeProcess::Native,
-    );
+    cmd = crate::runtime_process::configure(cmd, crate::runtime_process::RuntimeProcess::Native);
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

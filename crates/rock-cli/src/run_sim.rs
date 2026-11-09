@@ -3982,9 +3982,9 @@ fn emit_bytecode_image(output: &Path) {
     let bytecode = output.join(rock_host::project::MAIN_BYTECODE_FILENAME);
     let started = rock_core::clock::Instant::now();
     let command = rock_host::project::build_luajit_bytecode_command(&lua_file, &bytecode);
-    let mut command = (crate::registry::RuntimeServices::registered().runtime_command)(
+    let mut command = crate::runtime_process::configure(
         command,
-        crate::registry::RuntimeProcess::LuaBytecode,
+        crate::runtime_process::RuntimeProcess::LuaBytecode,
     );
     let result = command.output();
     let failure = match result {

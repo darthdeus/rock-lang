@@ -212,9 +212,9 @@ fn exec_luajit_file(
     app_args: &[String],
 ) -> Result<()> {
     let mut cmd = rock_host::project::build_luajit_command(lua_file, app_args);
-    cmd = (crate::registry::RuntimeServices::registered().runtime_command)(
+    cmd = crate::runtime_process::configure(
         cmd,
-        crate::registry::RuntimeProcess::LuaRun { headless: false },
+        crate::runtime_process::RuntimeProcess::LuaRun { headless: false },
     );
     cmd.stdin(std::process::Stdio::inherit())
         .stdout(std::process::Stdio::inherit())

@@ -72,6 +72,7 @@ mod modules_migrate;
 pub mod plain;
 mod process;
 pub mod registry;
+pub mod runtime_process;
 pub mod unified_compile;
 pub mod watch;
 pub use lint_cmd::do_lint;

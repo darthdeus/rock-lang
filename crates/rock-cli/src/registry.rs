@@ -133,28 +133,7 @@ pub enum ProgramKind {
     Game,
 }
 
-/// Process purpose selects host environment before the caller attaches stdio.
-/// The plain host returns the command unchanged. Runtime services may select a
-/// different LuaJIT and wrap final launches for process placement.
-#[derive(Clone, Debug)]
-pub enum RuntimeProcess {
-    LuaRun {
-        headless: bool,
-    },
-    LuaStdin,
-    LuaTest,
-    LuaBytecode,
-    Native,
-    NativeTest {
-        runtime_dir: Option<std::path::PathBuf>,
-    },
-    NativeFrame {
-        headless: bool,
-    },
-}
-
 /// Runtime preparation and execution shared by compiler and game commands.
-/// Embedders may override process placement and project-specific test policy.
 pub struct RuntimeServices {
     /// Resolve a project argument against the configured project roots.
     pub resolve_project_dir: fn(&str) -> Result<std::path::PathBuf>,
@@ -163,12 +142,6 @@ pub struct RuntimeServices {
     pub configured_runtime_dir: fn(&std::path::Path) -> Result<Option<std::path::PathBuf>>,
     /// Stage native libraries requested by game compilation.
     pub build_engine_libs: fn(&str) -> Result<()>,
-    /// Configure runtime discovery, environment and final-launch placement.
-    /// Call exactly once, before configuring stdio; the service may retarget Lua.
-    pub runtime_command: fn(std::process::Command, RuntimeProcess) -> std::process::Command,
-    /// Set test-process environment and return its scratch lifetime guard.
-    /// Keep the guard until the child and descendants exit, including failure.
-    pub prepare_test: fn(&mut std::process::Command) -> Result<tempfile::TempDir>,
     pub prepare_unit: fn(&str) -> Result<()>,
     pub prepare_sound_bank: fn(&str) -> Result<Option<std::path::PathBuf>>,
     pub sound_project_path: fn(&str) -> Result<Option<std::path::PathBuf>>,

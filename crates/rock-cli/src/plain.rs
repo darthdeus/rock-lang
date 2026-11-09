@@ -483,22 +483,6 @@ pub const RUNTIME_SERVICES: registry::RuntimeServices = registry::RuntimeService
     is_game_project: rock_engine_host::project::is_game_project,
     configured_runtime_dir: rock_engine_host::project::configured_stone_dir,
     build_engine_libs: rock_engine_host::engine_build::build_engine_libs,
-    runtime_command: |command, purpose| {
-        use registry::RuntimeProcess::*;
-        let lua = matches!(purpose, LuaRun { .. } | LuaStdin | LuaTest | LuaBytecode);
-        let trace = matches!(purpose, LuaRun { .. } | LuaTest);
-        let mut command = rock_engine_host::runtime::configure_command(
-            command,
-            lua,
-            trace,
-            matches!(purpose, LuaRun { .. }),
-        );
-        if matches!(purpose, LuaTest | LuaRun { headless: true }) {
-            command.env("STONE_HEADLESS", "1");
-        }
-        command
-    },
-    prepare_test,
     prepare_unit: crate::stone_runtime::prepare_unit,
     prepare_sound_bank: crate::package::prepare_sound_bank,
     sound_project_path: crate::package::sound_project_path_for,
@@ -508,14 +492,6 @@ pub const RUNTIME_SERVICES: registry::RuntimeServices = registry::RuntimeService
     program_host: crate::stone_runtime::program_host,
     resolve_sim_specs: crate::run_sim::resolve_sim_specs,
 };
-
-/// Portable scratch belongs to the OS/user-selected temporary directory,
-/// independently of project and installation roots.
-fn prepare_test(command: &mut std::process::Command) -> Result<tempfile::TempDir> {
-    let scratch = tempfile::Builder::new().prefix("rock-test-").tempdir()?;
-    command.env("ROCK_TEST_TMP", scratch.path());
-    Ok(scratch)
-}
 
 pub fn command_metadata(command: &CliCommand) -> registry::CommandMetadata {
     registry::CommandMetadata {
