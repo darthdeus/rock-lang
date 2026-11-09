@@ -1886,7 +1886,7 @@ inline(lua) fn __json_record_decode<T>(name: string, codec: JsonRecordCodec, val
 """
 
 fn json_record_encode<T>(codec: JsonRecordCodec, value: T) -> JsonValue {
-    return __json_record_encode(__json_record_type(value), codec, value)
+    return __json_record_encode(__json_record_type(value), codec, materialize(value))
 }
 
 fn json_record_decode<T>(codec: JsonRecordCodec, value: JsonValue, prototype: T) -> T? {

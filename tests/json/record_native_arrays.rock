@@ -19,6 +19,16 @@ nobox value JsonNativeBounds { min: Vec2, max: Vec2 }
 struct JsonNestedNativeRows { bounds: [JsonNativeBounds] }
 
 @test
+fn json_record_native_root_owns_its_wire_materialization() {
+    let source = JsonNativeBounds { min: v(1.0, 2.0), max: v(3.0, 4.0) }
+    let wire = json_record_encode(JsonRecordCodec {}, source)
+    assert_eq(json_as_float(json_field(json_field(wire, "max").unwrap(), "y").unwrap()).unwrap(), 4.0)
+    let result = json_record_decode<JsonNativeBounds>(JsonRecordCodec {}, wire).unwrap()
+    assert_eq(result.min.x, 1.0)
+    assert_eq(result.max.y, 4.0)
+}
+
+@test
 fn json_record_nested_native_array_keeps_all_leaf_paths() {
     let source = JsonNestedNativeRows { bounds: [JsonNativeBounds { min: v(1.0, 2.0), max: v(3.0, 4.0) }] }
     let codec = JsonRecordCodec {}
