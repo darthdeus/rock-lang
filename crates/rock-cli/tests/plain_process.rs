@@ -740,6 +740,24 @@ fn plain_writes_an_invocation_log_only_where_rock_invocation_log_names() {
         "explicit ROCK_INVOCATION_LOG not written: <{record}>\n{}",
         text(&out)
     );
+    let stone_log = state.path().join("stone.jsonl");
+    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .current_dir(root.path())
+        .args(["stone", "missing-project"])
+        .env("ROCK_DIR", root.path())
+        .env("ROCK_INVOCATION_LOG", &stone_log)
+        .env_remove("ROCK_INVOCATION_PARENT")
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "missing project must fail");
+    let records = std::fs::read_to_string(stone_log).unwrap_or_default();
+    let records: Vec<serde_json::Value> = records
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.len(), 1, "{}", text(&out));
+    assert_eq!(records[0]["kind"], "stone");
+    assert_ne!(records[0]["exit_code"], 0);
 }
 
 /// Publishes the built binary at `exe` without leaving its inode open for

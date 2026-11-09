@@ -508,6 +508,7 @@ pub fn command_metadata(command: &CliCommand) -> registry::CommandMetadata {
                 | "frame"
                 | "sim"
                 | "stone-test"
+                | "stone"
         ),
         compiler_process: if command.cli_name() == "check"
             || matches!(
@@ -564,9 +565,5 @@ pub static REGISTRATIONS: registry::Registrations = registry::Registrations {
     early_entries: EARLY_ENTRIES,
     fixes: &[],
     runtime_services: &RUNTIME_SERVICES,
-    // A public tool does not record working directories and branches unless asked.
-    initialize_process: |args| {
-        crate::invocation_log::require_explicit_log_path();
-        crate::frame_commands::initialize_process(args);
-    },
+    initialize_process: crate::frame_commands::initialize_process,
 };
