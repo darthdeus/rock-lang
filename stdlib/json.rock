@@ -1769,7 +1769,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             local names = codec.field_names[name]
             if not names then
                 names = {}
-                for _, field in ipairs(decl.fields) do names[field.name] = true end
+                for _, field in ipairs(decl.fields) do names[field.json_name or field.name] = true end
                 codec.field_names[name] = names
             end
             for key in pairs(value[1]) do
@@ -1781,6 +1781,7 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         end
         local data = reading and decl.kind == 'c_struct' and _G[name .. '_ct']() or {}
         for i, field in ipairs(decl.fields) do
+            local wire_name = field.json_name or field.name
             if decl.kind == 'c_struct' and field.nullable then
                 error('json record does not support nullable native fields', 0)
             end
@@ -1790,24 +1791,24 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
             end
             if field.nullable and child.k ~= 'opt' then child = { k = 'opt', inner = child } end
             local item
-            if reading then item = value[1][field.name]
+            if reading then item = value[1][wire_name]
             elseif type(value) == 'table' then item = __json_record_field_get(value, field)
             else item = value[field.name] end
             local fallback
             if reading and defaults ~= nil then fallback = __json_record_field_get(defaults, field) end
             local ok, decoded
             if reading and item == nil then
-                if defaults == nil then return false, __json_record_error_at(__json_record_failure(child, nil), field.name) end
+                if defaults == nil then return false, __json_record_error_at(__json_record_failure(child, nil), wire_name) end
                 ok, decoded = true, __json_record_copy_default(fallback)
             else
                 ok, decoded = __json_record_visit(codec, child, item, reading, seen, depth + 1, fallback)
             end
             if not ok then
                 if not reading then error('json record invalid field ' .. name .. '.' .. field.name, 0) end
-                return false, __json_record_error_at(decoded, field.name)
+                return false, __json_record_error_at(decoded, wire_name)
             end
             if reading then __json_record_field_put(data, field, decoded)
-            else data[field.name] = decoded end
+            else data[wire_name] = decoded end
         end
         if reading then
             if decl.kind ~= 'c_struct' then data.__ty = name end

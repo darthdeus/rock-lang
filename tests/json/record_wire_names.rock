@@ -1,0 +1,18 @@
+struct JsonNamedRecord {
+    @json_name("wire_name")
+    name: string,
+}
+
+@test
+fn json_record_uses_declared_wire_names_in_both_directions() {
+    let codec = JsonRecordCodec { reject_unknown_fields: true }
+    let value = JsonNamedRecord { name: "example" }
+    let wire = json_record_encode(codec, value)
+    assert_eq(json_as_str(json_field(wire, "wire_name").unwrap()).unwrap(), "example")
+    assert(json_field(wire, "name") == null)
+    assert_eq(json_record_decode(codec, wire, value).unwrap().name, "example")
+    let errors: [JsonRecordError] = []
+    codec.on_error = error => errors.push(error)
+    assert(json_record_decode(codec, json_decode("{{\"wire_name\":false}}").unwrap(), value) == null)
+    assert_eq(errors[0].path, "/wire_name")
+}
