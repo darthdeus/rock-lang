@@ -1,7 +1,5 @@
 //! Owns a temporary project and the headless watcher process.
 
-#![allow(dead_code)]
-
 use rock_core::clock::Instant;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
@@ -11,6 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+// Fields this crate never reads are still shown through Debug in failure messages.
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct ReloadEvent {
     pub n: u64,
@@ -19,6 +19,7 @@ pub struct ReloadEvent {
     pub compile_ms: f64,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct CompileErrorEvent {
     pub n: u64,
@@ -26,6 +27,7 @@ pub struct CompileErrorEvent {
     pub message: String,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub enum Event {
     Reload(ReloadEvent),
@@ -221,12 +223,6 @@ impl StoneHarness {
     /// settled count once events stop arriving is stable.
     pub fn await_settled(&self, quiescent: Duration, timeout: Duration) -> Vec<ReloadEvent> {
         self.await_settled_impl(None, quiescent, timeout)
-    }
-
-    /// Like `await_settled`, but require an event after the call begins.
-    /// Compile errors count as events even though they are not reloads.
-    pub fn await_write_settled(&self, quiescent: Duration, timeout: Duration) -> Vec<ReloadEvent> {
-        self.await_settled_after(self.event_count(), quiescent, timeout)
     }
 
     /// Wait for at least one completion event after `baseline`, then wait for

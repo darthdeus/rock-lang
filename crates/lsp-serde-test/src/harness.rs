@@ -15,10 +15,10 @@ pub struct Failure {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)] // The Err message is only read through Debug.
 pub enum Outcome {
     Ok(Value),
-    Err(String),
+    // The message is only read through Debug.
+    Err(#[allow(dead_code)] String),
 }
 
 pub trait TypeTest: Send + Sync {

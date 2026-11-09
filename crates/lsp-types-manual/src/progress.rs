@@ -63,21 +63,6 @@ impl_lsp_struct!(
     optional {}
 );
 
-/// Options to signal work done progress support in server capabilities.
-#[allow(dead_code)]
-#[derive(Debug, Eq, PartialEq, Default, Clone)]
-pub struct WorkDoneProgressOptions {
-    pub work_done_progress: Option<bool>,
-}
-
-impl_lsp_struct!(
-    WorkDoneProgressOptions,
-    required {},
-    optional {
-        work_done_progress: bool = "workDoneProgress"
-    }
-);
-
 /// An optional token that a server can use to report work done progress.
 #[derive(Debug, Eq, PartialEq, Default, Clone)]
 pub struct WorkDoneProgressParams {
