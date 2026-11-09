@@ -830,6 +830,49 @@ impl AbiPlanCache {
         }
     }
 
+    /// The keys the shared table already answers, for a warm that must not
+    /// derive them again.
+    pub(super) fn shared_keys(&self) -> rustc_hash::FxHashSet<AbiPlanKey> {
+        self.plans
+            .lock()
+            .expect("abi plan cache poisoned")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// The warm asked the shared table about these keys through
+    /// [`Self::shared_keys`] and found none of them; the accounting is the
+    /// same as a per-key miss.
+    pub(super) fn record_warm_misses<'a>(&self, keys: impl IntoIterator<Item = &'a AbiPlanKey>) {
+        use std::sync::atomic::Ordering;
+        for key in keys {
+            let misses = match key {
+                AbiPlanKey::Owner(_) => &self.owner_misses,
+                AbiPlanKey::Callee(_) => &self.callee_misses,
+            };
+            misses.fetch_add(1, Ordering::Relaxed);
+            self.shared_lookups.fetch_add(1, Ordering::Relaxed);
+            self.shared_misses.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Store plans derived outside the memo under one lock. The keys are
+    /// expected to be new; a replaced one is a duplicate cold store.
+    pub(super) fn store_all(
+        &self,
+        derived: impl IntoIterator<Item = (AbiPlanKey, BackendFnAbiPlanHandle)>,
+    ) {
+        use std::sync::atomic::Ordering;
+        let mut plans = self.plans.lock().expect("abi plan cache poisoned");
+        for (key, plan) in derived {
+            self.stores.fetch_add(1, Ordering::Relaxed);
+            if plans.insert(key, plan).is_some() {
+                self.duplicate_cold_stores.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
     pub(super) fn clear(&mut self) {
         // New epoch FIRST: a worker that raced the old epoch into its mirror
         // re-reads the shared map (now cleared) rather than serving stale plans.
@@ -2355,6 +2398,20 @@ fn owner_abi_plan_impl(
     if let Some(plan) = scx.abi_plan_cached(&key) {
         return Ok(plan);
     }
+    let derived = derive_owner_abi_plan(ws, scx, plans, owner, in_hand)?;
+    scx.abi_plan_store(key, &derived);
+    Ok(derived)
+}
+
+/// The owner ABI derivation behind [`owner_abi_plan`], without the memo:
+/// the warm derives every key in parallel and stores the results in bulk.
+fn derive_owner_abi_plan(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plans: &crate::concrete::ConcretePlans,
+    owner: &crate::instance::Instance,
+    in_hand: Option<&ConcreteBodyPlan>,
+) -> Result<BackendFnAbiPlanHandle, skull_parser::CompilerError> {
     let derivation_start = abi_plan_timing_enabled().then(Instant::now);
     let derived = if !requires_concrete_body_plan(ws, owner) {
         BackendFnAbiPlan::for_boundary_instance(ws, scx, owner)
@@ -2372,8 +2429,21 @@ fn owner_abi_plan_impl(
     };
     let derived = Arc::new(derived);
     scx.abi_plan_record_derivation(derivation_start);
-    scx.abi_plan_store(key, &derived);
     Ok(derived)
+}
+
+/// One key's derivation, for the warm: the memo is neither consulted nor
+/// written here.
+pub(super) fn derive_abi_plan(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plans: &crate::concrete::ConcretePlans,
+    key: &AbiPlanKey,
+) -> Result<BackendFnAbiPlanHandle, skull_parser::CompilerError> {
+    match key {
+        AbiPlanKey::Owner(owner) => derive_owner_abi_plan(ws, scx, plans, owner, None),
+        AbiPlanKey::Callee(callee) => derive_callee_abi_plan(ws, scx, plans, callee),
+    }
 }
 
 /// Resolve the declaration variant serving a requested call instance. JS keeps
@@ -2409,6 +2479,17 @@ pub(super) fn callee_abi_plan_for_instance(
     if let Some(plan) = scx.abi_plan_cached(&key) {
         return Ok(plan);
     }
+    let derived = derive_callee_abi_plan(ws, scx, plans, inst)?;
+    scx.abi_plan_store(key, &derived);
+    Ok(derived)
+}
+
+fn derive_callee_abi_plan(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    plans: &crate::concrete::ConcretePlans,
+    inst: &crate::instance::Instance,
+) -> Result<BackendFnAbiPlanHandle, skull_parser::CompilerError> {
     let derivation_start = abi_plan_timing_enabled().then(Instant::now);
     let selected = selected_abi_instance(ws, scx, inst)?;
     let derived = if !requires_concrete_body_plan(ws, inst) {
@@ -2446,7 +2527,6 @@ pub(super) fn callee_abi_plan_for_instance(
         }
     };
     scx.abi_plan_record_derivation(derivation_start);
-    scx.abi_plan_store(key, &derived);
     Ok(derived)
 }
 

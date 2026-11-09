@@ -683,27 +683,49 @@ impl ScalarCtx {
         plans: &crate::concrete::ConcretePlans,
         always: &crate::concrete::ConcreteAlwaysPlans,
     ) {
-        let mut keys = Vec::new();
-        keys.extend(plans.keys().cloned().map(AbiPlanKey::Owner));
+        // A callee is named once per call site; deduplicate by reference
+        // before cloning, and sort the distinct keys so the warm order is
+        // a function of the plan set.
+        let mut callees: rustc_hash::FxHashSet<&crate::instance::Instance> =
+            rustc_hash::FxHashSet::default();
         for body in plans.values().map(|plan| &**plan).chain(always.values()) {
-            keys.extend(body.callees.values().cloned().map(AbiPlanKey::Callee));
+            callees.extend(body.callees.values());
         }
+        let mut keys: Vec<AbiPlanKey> = plans
+            .keys()
+            .cloned()
+            .map(AbiPlanKey::Owner)
+            .chain(callees.into_iter().cloned().map(AbiPlanKey::Callee))
+            .collect();
         keys.sort();
-        keys.dedup();
 
         let warm_keys = keys.len() as u64;
-        let mut warm_failures = 0;
-        for key in &keys {
-            let result = match key {
-                AbiPlanKey::Owner(owner) => owner_abi_plan(ws, self, plans, owner).map(|_| ()),
-                AbiPlanKey::Callee(callee) => {
-                    abi::callee_abi_plan_for_instance(ws, self, plans, callee).map(|_| ())
-                }
-            };
-            if result.is_err() {
-                warm_failures += 1;
-            }
-        }
+        // Every derivation reads the shared representation arena and nothing
+        // else that moves, so the keys derive in parallel; the memo is then
+        // filled under one lock instead of one per key.
+        let known = self.abi_plans.shared_keys();
+        let derived: Vec<(
+            AbiPlanKey,
+            Result<BackendFnAbiPlanHandle, skull_parser::CompilerError>,
+        )> = {
+            use bone_core::prelude::*;
+            let scx: &Self = self;
+            keys.into_par_iter()
+                .filter(|key| !known.contains(key))
+                .map(|key| {
+                    let plan = abi::derive_abi_plan(ws, scx, plans, &key);
+                    (key, plan)
+                })
+                .collect()
+        };
+        let warm_failures = derived.iter().filter(|(_, plan)| plan.is_err()).count() as u64;
+        self.abi_plans
+            .record_warm_misses(derived.iter().map(|(key, _)| key));
+        self.abi_plans.store_all(
+            derived
+                .into_iter()
+                .filter_map(|(key, plan)| plan.ok().map(|plan| (key, plan))),
+        );
         self.abi_plans.publish(warm_keys, warm_failures);
     }
 
