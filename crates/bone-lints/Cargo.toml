@@ -14,6 +14,7 @@ test = false
 doctest = false
 
 [dependencies]
+rock-host = { workspace = true }
 bone-core = { workspace = true }
 rock-core = { workspace = true }
 ustr = { workspace = true }

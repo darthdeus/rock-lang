@@ -193,10 +193,6 @@ fn stderr_log_filter(rust_log: Option<&str>, timing: bool) -> Result<rock_log::F
 /// logger first (`rock-cli` intercepts `lsp` before `rock_log::init()`).
 /// It is the shared rock-log backend with a per-target filter.
 pub fn run_cli(args: Vec<String>) -> Result<()> {
-    run_cli_with_policy(args, crate::CompilerPolicy::default())
-}
-
-pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> Result<()> {
     // ROCK_LSP_DEBUG=1 -> lsp_debug.log in /tmp (Windows: system temp directory).
     // ROCK_LSP_DEBUG=/some/path -> that path at trace level
     // Unset -> stderr at warn (or RUST_LOG level)
@@ -228,11 +224,9 @@ pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> 
     let matches = build_cli().get_matches_from(args);
 
     match matches.subcommand() {
-        None | Some(("serve", _)) => crate::run_lsp_server_with_policy(policy),
-        Some(("diagnostics", m)) => {
-            cli::bone_lsp::diagnostics_with_policy(arg_str(m, "file"), policy)
-        }
-        Some(("lint", m)) => cli::bone_lsp::lint_with_policy(arg_str(m, "file"), policy),
+        None | Some(("serve", _)) => crate::run_lsp_server(),
+        Some(("diagnostics", m)) => cli::bone_lsp::diagnostics(arg_str(m, "file")),
+        Some(("lint", m)) => cli::bone_lsp::lint(arg_str(m, "file")),
         Some(("inline-lua-census", m)) => {
             let paths: Vec<String> = m
                 .get_many::<String>("file")
@@ -244,10 +238,10 @@ pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> 
                 .unwrap_or_default();
             cli::inline_lua_census::inline_lua_census(&paths, &ignores, m.get_flag("summary"))
         }
-        Some(("semantic-tokens", m)) => cli::bone_lsp::semantic_tokens(arg_str(m, "file"), policy),
+        Some(("semantic-tokens", m)) => cli::bone_lsp::semantic_tokens(arg_str(m, "file")),
         Some(("hover", m)) => {
             let (file, line, col) = bone_position(m)?;
-            cli::bone_lsp::hover(&file, line, col, policy)
+            cli::bone_lsp::hover(&file, line, col)
         }
         Some(("completion", m)) => {
             let (file, line, col) = bone_position(m)?;
@@ -257,7 +251,7 @@ pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> 
                 .unwrap_or_default();
             let repl = m.get_flag("repl");
             if prefixes.is_empty() && !repl {
-                cli::bone_lsp::completion(&file, line, col, m.get_flag("explain"), policy)
+                cli::bone_lsp::completion(&file, line, col, m.get_flag("explain"))
             } else {
                 let policies = match m.get_one::<String>("policies") {
                     Some(s) => s
@@ -276,48 +270,44 @@ pub fn run_cli_with_policy(args: Vec<String>, policy: crate::CompilerPolicy) -> 
                 };
                 let top = top_arg(m);
                 if repl {
-                    cli::bone_lsp::completion_repl(&file, line, col, &policies, top, policy)
+                    cli::bone_lsp::completion_repl(&file, line, col, &policies, top)
                 } else {
-                    cli::bone_lsp::completion_matrix(
-                        &file, line, col, &prefixes, &policies, top, policy,
-                    )
+                    cli::bone_lsp::completion_matrix(&file, line, col, &prefixes, &policies, top)
                 }
             }
         }
         Some(("definition", m)) => {
             let (file, line, col) = bone_position(m)?;
-            cli::bone_lsp::definition(&file, line, col, policy)
+            cli::bone_lsp::definition(&file, line, col)
         }
         Some(("type-definition", m)) => {
             let (file, line, col) = bone_position(m)?;
-            cli::bone_lsp::type_definition(&file, line, col, policy)
+            cli::bone_lsp::type_definition(&file, line, col)
         }
         Some(("references", m)) => {
             let (file, line, col) = bone_position(m)?;
-            cli::bone_lsp::references(&file, line, col, policy)
+            cli::bone_lsp::references(&file, line, col)
         }
         Some(("hole-info", m)) => {
             let (file, line, col) = bone_position(m)?;
-            cli::bone_lsp::hole_info(&file, line, col, policy)
+            cli::bone_lsp::hole_info(&file, line, col)
         }
-        Some(("inlay-hints", m)) => cli::bone_lsp::inlay_hints(arg_str(m, "file"), policy),
+        Some(("inlay-hints", m)) => cli::bone_lsp::inlay_hints(arg_str(m, "file")),
         Some(("prepare-rename", m)) => {
             let (file, line, col) = bone_position(m)?;
-            cli::bone_lsp::prepare_rename(&file, line, col, policy)
+            cli::bone_lsp::prepare_rename(&file, line, col)
         }
         Some(("rename", m)) => {
             let (file, line, col) = bone_position(m)?;
-            cli::bone_lsp::rename(&file, line, col, arg_str(m, "new_name"), policy)
+            cli::bone_lsp::rename(&file, line, col, arg_str(m, "new_name"))
         }
         Some(("signature-help", m)) => {
             let (file, line, col) = bone_position(m)?;
-            cli::bone_lsp::signature_help(&file, line, col, policy)
+            cli::bone_lsp::signature_help(&file, line, col)
         }
-        Some(("document-symbols", m)) => {
-            cli::bone_lsp::document_symbols(arg_str(m, "file"), policy)
-        }
+        Some(("document-symbols", m)) => cli::bone_lsp::document_symbols(arg_str(m, "file")),
         Some(("workspace-symbols", m)) => {
-            cli::bone_lsp::workspace_symbols(arg_str(m, "file"), arg_str(m, "query"), policy)
+            cli::bone_lsp::workspace_symbols(arg_str(m, "file"), arg_str(m, "query"))
         }
 
         Some((name, _)) => unreachable!("unhandled subcommand: {}", name),

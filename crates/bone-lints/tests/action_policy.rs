@@ -4,14 +4,18 @@ use bone_lints::{
 };
 use bone_semantic::prelude::*;
 
-static POLICY: ActionLayerPolicy = ActionLayerPolicy {
-    production_root: "game",
-    production_label: "Example",
-    action_prefix: "DO_",
-    raw_input_names: &["read_button"],
-    raw_input_classes: &["pointer"],
-    registration_functions: &["register_controls"],
-};
+static POLICY: std::sync::LazyLock<ActionLayerPolicy> =
+    std::sync::LazyLock::new(|| ActionLayerPolicy {
+        production_root: "game".into(),
+        production_label: "Example".into(),
+        action_prefix: "DO_".into(),
+        raw_input_names: ["read_button"].iter().map(|s| (*s).to_owned()).collect(),
+        raw_input_classes: ["pointer"].iter().map(|s| (*s).to_owned()).collect(),
+        registration_functions: ["register_controls"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+    });
 
 fn workspace(file: &str, source: &str) -> Workspace {
     let ast = skull_parser::parse_module_clean(source, Ustr::from(file)).unwrap();

@@ -26,11 +26,15 @@ const RAW_INPUT_NAMES: &[&str] = &[
     "pad_axis_value",
 ];
 
-pub static POLICY: ActionLayerPolicy = ActionLayerPolicy {
-    production_root: "app",
-    production_label: "App",
-    action_prefix: "ACT_",
-    raw_input_names: RAW_INPUT_NAMES,
-    raw_input_classes: RAW_INPUT_CLASSES,
-    registration_functions: &["refresh_action_defaults", "action_new"],
-};
+pub static POLICY: std::sync::LazyLock<ActionLayerPolicy> =
+    std::sync::LazyLock::new(|| ActionLayerPolicy {
+        production_root: "app".into(),
+        production_label: "App".into(),
+        action_prefix: "ACT_".into(),
+        raw_input_names: RAW_INPUT_NAMES.iter().map(|s| (*s).to_owned()).collect(),
+        raw_input_classes: RAW_INPUT_CLASSES.iter().map(|s| (*s).to_owned()).collect(),
+        registration_functions: ["refresh_action_defaults", "action_new"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+    });

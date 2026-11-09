@@ -165,6 +165,8 @@ fn stdlib_texts() -> Vec<(String, String)> {
 struct BoneProject {
     fallbacks: FallbackReports,
     lint_options: bone_lints::LintOptions,
+    lint_manifest_stamp: Option<(std::time::SystemTime, u64)>,
+    lint_policy_error: Option<String>,
     session: Session,
     texts: HashMap<String, String>,
     /// Workspace reference counts per name (`build_freq_index`) -- the
@@ -233,7 +235,35 @@ struct BoneProject {
     graph: Option<rock_host::stick::graph::PackageGraph>,
 }
 
+fn manifest_stamp(root: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let metadata = std::fs::metadata(root.join("stick.toml")).ok()?;
+    Some((metadata.modified().ok()?, metadata.len()))
+}
+
 impl BoneProject {
+    fn refresh_lint_policy(&mut self) -> Result<(), String> {
+        let stamp = manifest_stamp(&self.root);
+        if stamp != self.lint_manifest_stamp {
+            // Discard stale findings even when the replacement declaration is invalid.
+            self.lint_cache = Default::default();
+            match bone_lints::ActionLayerPolicy::load(&self.root) {
+                Ok(policy) => {
+                    self.lint_options = self
+                        .lint_options
+                        .clone()
+                        .with_action_policy(policy.as_ref());
+                    self.lint_policy_error = None;
+                }
+                Err(error) => self.lint_policy_error = Some(error.to_string()),
+            }
+            self.lint_manifest_stamp = stamp;
+        }
+        match &self.lint_policy_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
+    }
+
     /// Queries needing surface syntax reparse the stored file; recovery errors
     /// stay on the partial AST and are already published by Session diagnostics.
     fn reparse_user_file(&self, path: &str, request: &'static str) -> Option<skull_parser::Ast> {
@@ -651,6 +681,8 @@ impl BoneWorkspace {
         if !self.projects.contains_key(root) {
             let graph =
                 rock_host::program_inputs::package_graph(root).map_err(|error| error.message)?;
+            let policy =
+                bone_lints::ActionLayerPolicy::load(root).map_err(|error| error.to_string())?;
             let aliases = rock_host::program_inputs::ns_aliases(graph.as_ref());
             let warm = self.stdlib().clone().map_err(|error| error.message)?;
             // A warm-only session is valid even if the first file doesn't
@@ -659,7 +691,12 @@ impl BoneWorkspace {
                 .map_err(|error| format!("the stdlib does not check: {}", error.message))?;
             let project = BoneProject {
                 fallbacks: Default::default(),
-                lint_options: self.lint_options.clone(),
+                lint_options: self
+                    .lint_options
+                    .clone()
+                    .with_action_policy(policy.as_ref()),
+                lint_manifest_stamp: manifest_stamp(root),
+                lint_policy_error: None,
                 session,
                 texts: stdlib_texts().into_iter().collect(),
                 freq: None,
@@ -750,9 +787,11 @@ impl BoneWorkspace {
                 let graph = rock_host::program_inputs::package_graph(&root)
                     .map_err(|error| error.message)?;
                 let warm = self.stdlib().clone().map_err(|error| error.message)?;
-                Ok((files, graph, warm))
+                let policy = bone_lints::ActionLayerPolicy::load(&root)
+                    .map_err(|error| error.to_string())?;
+                Ok((files, graph, warm, policy))
             });
-        let (files, graph, warm) = match inputs {
+        let (files, graph, warm, policy) = match inputs {
             Ok(inputs) => inputs,
             Err(message) => {
                 log::error!("bone LSP: {message}");
@@ -779,7 +818,12 @@ impl BoneWorkspace {
                 let module_touched = texts.keys().map(|k| (k.clone(), now)).collect();
                 let mut project = BoneProject {
                     fallbacks: Default::default(),
-                    lint_options: self.lint_options.clone(),
+                    lint_options: self
+                        .lint_options
+                        .clone()
+                        .with_action_policy(policy.as_ref()),
+                    lint_manifest_stamp: manifest_stamp(&root),
+                    lint_policy_error: None,
                     session,
                     texts,
                     freq: None,
@@ -892,6 +936,9 @@ impl BoneWorkspace {
                 return vec![(on_disk.into_owned(), vec![load_error_diagnostic(message)])];
             }
         };
+        if let Err(message) = proj.refresh_lint_policy() {
+            return vec![(on_disk.into_owned(), vec![load_error_diagnostic(message)])];
+        }
         if proj.graph.as_ref().is_some_and(|graph| {
             graph
                 .package_of_file(&graph_path)
@@ -1238,6 +1285,9 @@ impl BoneWorkspace {
         let Some(proj) = self.project(path) else {
             return Vec::new();
         };
+        if let Some(error) = &proj.lint_policy_error {
+            return vec![load_error_diagnostic(error.clone())];
+        }
         let text_of = |f: &str| proj.texts.get(f).map(|s| s.as_str());
         proj.lint_cache
             .findings_for_file(Ustr::from(path))
@@ -5045,34 +5095,33 @@ mod tests {
 #[cfg(test)]
 mod action_policy_tests {
     use super::BoneWorkspace;
-    use bone_lints::{ACTION_CALLERS, ActionLayerPolicy, LintOptions};
-
-    static POLICY: ActionLayerPolicy = ActionLayerPolicy {
-        production_root: "game",
-        production_label: "Example",
-        action_prefix: "DO_",
-        raw_input_names: &[],
-        raw_input_classes: &[],
-        registration_functions: &[],
-    };
+    use bone_lints::{ACTION_CALLERS, LintOptions};
 
     #[test]
-    fn host_action_policy_reaches_loaded_and_incremental_lint_caches() {
+    fn project_action_policy_reaches_loaded_and_incremental_lint_caches() {
         let root = tempfile::tempdir().unwrap();
         let project = root.path().join("game");
         std::fs::create_dir(&project).unwrap();
         std::fs::write(
             project.join("stick.toml"),
-            "[package]\nname = \"policy-fixture\"\n",
+            r#"[package]
+name = "policy-fixture"
+[lint.action_layer]
+production_root = "game"
+production_label = "Example"
+action_prefix = "DO_"
+raw_input_names = []
+raw_input_classes = []
+registration_functions = []
+"#,
         )
         .unwrap();
         let file = project.join("main.rock");
         let source = "global DO_MOVE: int = 1\nfn main() {}\n";
         std::fs::write(&file, source).unwrap();
         let file = file.to_str().unwrap();
-        let mut workspace = BoneWorkspace::new().with_lint_options(
-            LintOptions::only([ACTION_CALLERS.to_owned()]).with_action_policy(Some(&POLICY)),
-        );
+        let mut workspace =
+            BoneWorkspace::new().with_lint_options(LintOptions::only([ACTION_CALLERS.to_owned()]));
         workspace.load_project(file);
         let diagnostics = workspace.lint_diagnostics(file);
         assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
@@ -5085,5 +5134,65 @@ mod action_policy_tests {
             source.replace("fn main() {}", "fn main() { let value = DO_MOVE }"),
         );
         assert!(workspace.lint_diagnostics(file).is_empty());
+
+        // A second root must not inherit the first project's conventions.
+        let other = root.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::write(other.join("stick.toml"), "[package]\nname = \"other\"\n").unwrap();
+        let other_file = other.join("main.rock");
+        std::fs::write(&other_file, source).unwrap();
+        workspace.load_project(other_file.to_str().unwrap());
+        assert!(
+            workspace
+                .lint_diagnostics(other_file.to_str().unwrap())
+                .iter()
+                .any(|d| d.message.contains("no action-layer policy configured"))
+        );
+
+        // Refresh policy without losing the unsaved source buffer or rebuilding the session.
+        let unsaved = source.replace("DO_MOVE", "DO_UNSAVED");
+        let manifest = project.join("stick.toml");
+        let original = std::fs::read_to_string(&manifest).unwrap();
+        std::fs::write(&manifest, original.replace("Example", "Updated example")).unwrap();
+        workspace.update(file, unsaved.clone());
+        assert!(
+            workspace.lint_diagnostics(file)[0]
+                .message
+                .contains("Updated example")
+        );
+        assert!(
+            workspace.lint_diagnostics(file)[0]
+                .message
+                .contains("DO_UNSAVED")
+        );
+        std::fs::write(&manifest, format!("{original}unknown_rule = true\n")).unwrap();
+        let invalid = workspace.update(file, unsaved.clone());
+        assert!(
+            invalid
+                .iter()
+                .flat_map(|(_, diagnostics)| diagnostics)
+                .any(|d| d.message.contains("unknown field")),
+            "{invalid:?}"
+        );
+        assert!(
+            workspace.lint_diagnostics(file)[0]
+                .message
+                .contains("unknown field")
+        );
+        std::fs::write(&manifest, &original).unwrap();
+        workspace.update(file, unsaved.clone());
+        assert!(
+            workspace.lint_diagnostics(file)[0]
+                .message
+                .contains("Example")
+        );
+        std::fs::write(&manifest, "[package]\nname = \"policy-fixture\"\n").unwrap();
+        workspace.update(file, unsaved.clone());
+        assert!(
+            workspace
+                .lint_diagnostics(file)
+                .iter()
+                .any(|d| d.message.contains("no action-layer policy configured"))
+        );
     }
 }

@@ -299,10 +299,16 @@ fn lint_rejects(
     // The build pass's rule: everything the case did not author is stdlib,
     // and stdlib is scanned but never reported on.
     let warm = skull::pipeline::warm_module_ids(ws, &sources);
-    bone_lints::lint_workspace(ws, &warm, true, &sources, &crate::registry::lint_options())
-        .iter()
-        .find(|f| f.level() == rock_core::errors::CompilerErrorLevel::Error)
-        .map(|f| error_text(std::slice::from_ref(&f.error)))
+    bone_lints::lint_workspace(
+        ws,
+        &warm,
+        true,
+        &sources,
+        &bone_lints::LintOptions::default(),
+    )
+    .iter()
+    .find(|f| f.level() == rock_core::errors::CompilerErrorLevel::Error)
+    .map(|f| error_text(std::slice::from_ref(&f.error)))
 }
 
 /// Run the error-test suite through bone's front end (the skull/bone `test`

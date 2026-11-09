@@ -7,7 +7,7 @@
 //! expectation here green without touching this file.
 
 use lsp_server::{Message, Notification, Request, RequestId};
-use rock_lsp::{CompilerPolicy, LspServer};
+use rock_lsp::LspServer;
 use serde_json::{Value, json};
 use std::str::FromStr;
 
@@ -16,7 +16,7 @@ fn init_params() -> Value {
 }
 
 fn started() -> LspServer {
-    LspServer::new(CompilerPolicy::default(), init_params()).expect("init params parse")
+    LspServer::new(init_params()).expect("init params parse")
 }
 
 fn req(id: i32, method: &str, params: Value) -> Message {
@@ -92,8 +92,7 @@ fn initialize_replies_with_the_advertised_capabilities() {
         method: "initialize".to_string(),
         params: init_params(),
     };
-    let (_server, reply) =
-        LspServer::initialize(CompilerPolicy::default(), request).expect("initialize must succeed");
+    let (_server, reply) = LspServer::initialize(request).expect("initialize must succeed");
     let Message::Response(resp) = reply else {
         panic!("initialize must answer with a response");
     };

@@ -40,12 +40,12 @@ pub fn do_lint(
             }
             sel
         }
-        None => crate::registry::lint_options(),
+        None => bone_lints::LintOptions::default(),
     };
     let only = type_names(only_types);
     let ignored = type_names(ignore_types);
     let mut sel = sel
-        .with_action_policy(crate::registry::registered().action_layer_policy)
+        .with_action_policy(rock_host::stick::ActionLayerPolicy::load(Path::new(path))?.as_ref())
         .ignoring_types(ignored.iter().copied());
     if only_types.is_some() {
         sel = sel.over_types(only.iter().copied());
@@ -65,6 +65,11 @@ pub fn do_lint(
         };
         (ws, sources, PathBuf::from(path))
     } else {
+        // Match the canonical source IDs used by directory discovery and the report set.
+        let file = fs_err::canonicalize(p)?;
+        let path = file
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("non-UTF-8 source path: {}", file.display()))?;
         let src = fs_err::read_to_string(path)?;
         let module = match skull_parser::parse_module(&src, ustr::Ustr::from(path)) {
             Ok(m) => m,
@@ -74,7 +79,7 @@ pub fn do_lint(
             Ok(ws) => ws,
             Err(errs) => return Err(reject(&single_source(path, &src), &errs)),
         };
-        let root = p.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let root = file.parent().unwrap_or(Path::new(".")).to_path_buf();
         (ws, single_source(path, &src), root)
     };
 
