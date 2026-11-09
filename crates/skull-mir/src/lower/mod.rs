@@ -1659,7 +1659,10 @@ fn lower_instance_with_plan_inner(
     let inf = ws
         .inference(mid)
         .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(fid)));
-    if let Some(inf) = inf {
+    // The plan audits below only ever fail on a compiler bug (a concrete plan
+    // the graph built incompletely), so they run with the debug checks.
+    let audit = crate::verify::checks_enabled();
+    if let Some(inf) = inf.filter(|_| audit) {
         validate_concrete_type_tables(
             ws,
             inf,
@@ -1687,23 +1690,25 @@ fn lower_instance_with_plan_inner(
             }
         }
     }
-    for site in plan.callees.keys() {
-        if !plan.callee_signatures.contains_key(site) {
-            return Err(gap(format!(
-                "concrete plan is missing the callee signature for site {:?}",
-                site.op
-            )));
+    if audit {
+        for site in plan.callees.keys() {
+            if !plan.callee_signatures.contains_key(site) {
+                return Err(gap(format!(
+                    "concrete plan is missing the callee signature for site {:?}",
+                    site.op
+                )));
+            }
+            if !matches!(site.domain, crate::site::SiteDomain::Own)
+                && plan.domain_types(&site.domain).is_none()
+            {
+                return Err(gap(format!(
+                    "concrete plan is missing type tables for site domain {:?}",
+                    site.domain
+                )));
+            }
         }
-        if !matches!(site.domain, crate::site::SiteDomain::Own)
-            && plan.domain_types(&site.domain).is_none()
-        {
-            return Err(gap(format!(
-                "concrete plan is missing type tables for site domain {:?}",
-                site.domain
-            )));
-        }
+        validate_concrete_callee_plans(ws, scx, plan, concrete_plans)?;
     }
-    validate_concrete_callee_plans(ws, scx, plan, concrete_plans)?;
     lower_body(ws, scx, inst.func, inst.clone(), plan, concrete_plans)
 }
 
@@ -2021,6 +2026,9 @@ fn validate_always_plan(
         .bodies
         .get(&owner)
         .ok_or_else(|| gap("concrete always-emitted plan has no body"))?;
+    if !crate::verify::checks_enabled() {
+        return Ok(());
+    }
     let declared_types = match owner {
         BodyOwner::Global(index) => vec![ws.module(mid).globals[index].ty],
         BodyOwner::Decorator(index) => ws.module(mid).decorators[index]

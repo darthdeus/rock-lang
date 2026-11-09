@@ -71,14 +71,13 @@ pub struct Inliner<'a> {
     pub plans: &'a ConcretePlans,
 }
 
-/// Run the MIR verifier on `mf` in debug builds, panicking on a violation.
-/// `what` names the pass that just ran. Compiles to nothing in release.
+/// Run the MIR verifier on `mf` when [`skull_mir::verify::checks_enabled`],
+/// panicking on a violation. `what` names the pass that just ran.
 #[inline(always)]
 pub fn debug_verify(mf: &MirFunc, stage: Stage, what: &dyn std::fmt::Display) {
-    #[cfg(debug_assertions)]
-    skull_mir::verify::assert_verified(mf, stage, what);
-    #[cfg(not(debug_assertions))]
-    let _ = (mf, stage, what);
+    if skull_mir::verify::checks_enabled() {
+        skull_mir::verify::assert_verified(mf, stage, what);
+    }
 }
 
 fn verify_after(mf: &MirFunc, stage: Stage, pass: BodyPass) {

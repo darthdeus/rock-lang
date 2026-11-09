@@ -61,6 +61,12 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
     // Install the one logger before anything can log. Idempotent; reads
     // ROCK_LOG.
     rock_log::init();
+    // The MIR consistency checks catch compiler bugs, not program errors; an
+    // ordinary compile skips them unless ROCK_MIR_CHECKS asks.
+    skull_mir::verify::set_checks(Some(
+        skull_mir::verify::checks_requested(std::env::var("ROCK_MIR_CHECKS").ok().as_deref())
+            .unwrap_or(false),
+    ));
 
     if let Some(name) = std::env::args().nth(1) {
         if !name.starts_with('-') && CliCommand::named(&name).is_none() {

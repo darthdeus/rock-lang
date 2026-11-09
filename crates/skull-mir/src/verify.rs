@@ -10,7 +10,49 @@
 
 use crate::mir::{Block, Cell, Inst, Lit, MirFunc, Term};
 use comfy_la_arena::{Arena, Idx};
+use std::sync::atomic::{AtomicU8, Ordering};
 use ustr::Ustr;
+
+const CHECKS_BUILD_DEFAULT: u8 = 0;
+const CHECKS_ON: u8 = 1;
+const CHECKS_OFF: u8 = 2;
+
+/// Whether the consistency checks that only ever catch compiler bugs run in
+/// this process: this verifier between passes, and lowering's audit of the
+/// concrete plans it was handed. The build default is on with debug
+/// assertions, so every test exercises them; the `rock` binary turns them
+/// off for an ordinary compile (they are a measurable share of every body's
+/// time in a dev build) unless `ROCK_MIR_CHECKS` asks for them.
+static CHECKS: AtomicU8 = AtomicU8::new(CHECKS_BUILD_DEFAULT);
+
+pub fn checks_enabled() -> bool {
+    match CHECKS.load(Ordering::Relaxed) {
+        CHECKS_ON => true,
+        CHECKS_OFF => false,
+        _ => cfg!(debug_assertions),
+    }
+}
+
+/// Force the checks on or off for the rest of the process; `None` restores
+/// the build default.
+pub fn set_checks(enabled: Option<bool>) {
+    let state = match enabled {
+        Some(true) => CHECKS_ON,
+        Some(false) => CHECKS_OFF,
+        None => CHECKS_BUILD_DEFAULT,
+    };
+    CHECKS.store(state, Ordering::Relaxed);
+}
+
+/// The setting a `ROCK_MIR_CHECKS` value asks for: unset leaves the choice
+/// to the caller, `0`, `off` or `false` disable, anything else enables.
+pub fn checks_requested(setting: Option<&str>) -> Option<bool> {
+    let value = setting?.trim();
+    Some(!matches!(
+        value.to_ascii_lowercase().as_str(),
+        "0" | "off" | "false" | "no"
+    ))
+}
 
 /// What the passes run so far promise. Each flag forbids the instructions the
 /// pass that sets it removes.
@@ -485,6 +527,15 @@ mod tests {
 
     fn messages(mf: &MirFunc, stage: Stage) -> Vec<String> {
         verify(mf, stage).into_iter().map(|v| v.message).collect()
+    }
+
+    #[test]
+    fn checks_setting_parses_off_and_on() {
+        assert_eq!(checks_requested(None), None);
+        assert_eq!(checks_requested(Some("0")), Some(false));
+        assert_eq!(checks_requested(Some("off")), Some(false));
+        assert_eq!(checks_requested(Some("1")), Some(true));
+        assert_eq!(checks_requested(Some("full")), Some(true));
     }
 
     #[test]

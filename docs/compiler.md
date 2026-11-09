@@ -53,6 +53,12 @@ compatible reload. `extern`, `@nomangle`, `@test`, `main` and `test_*`
 functions keep their declared names. Raw `inline(lua)` code that calls a Rock
 function by its declared name therefore needs that function to retain its name.
 
+A structural verifier ([`verify.rs`](../crates/skull-mir/src/verify.rs))
+checks each body between passes, and lowering audits the concrete plans it
+is handed. These checks only ever fail on a compiler bug, so a `rock` process
+skips them; tests run them in debug builds. `ROCK_MIR_CHECKS=1` turns them on
+for a compile under investigation, `ROCK_MIR_CHECKS=0` turns them off.
+
 HIR may simplify an expression while its source span still contains the original
 syntax. A source edit that classifies by HIR must account for the source text;
 for example, inlining a folded expression can still require parentheses.
