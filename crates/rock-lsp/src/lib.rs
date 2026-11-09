@@ -1,19 +1,5 @@
 #![allow(clippy::mutable_key_type)]
 
-/// Build-supplied compiler conventions shared by one-shot queries and the server.
-#[derive(Clone, Copy, Default)]
-pub struct CompilerPolicy {
-    pub action_layer: Option<&'static bone_lints::ActionLayerPolicy>,
-}
-
-impl CompilerPolicy {
-    pub fn workspace(self) -> bone_query::BoneWorkspace {
-        bone_query::BoneWorkspace::new().with_lint_options(
-            bone_lints::LintOptions::default().with_action_policy(self.action_layer),
-        )
-    }
-}
-
 /// Open a tracing info-span scoped to the rest of the enclosing block, for
 /// whatever tracing subscriber the process installs. rock-lsp is its only user.
 #[macro_export]
@@ -316,10 +302,6 @@ fn sync_options() -> TextDocumentSyncOptions {
 }
 
 pub fn run_lsp_server() -> Result<()> {
-    run_lsp_server_with_policy(CompilerPolicy::default())
-}
-
-pub fn run_lsp_server_with_policy(policy: crate::CompilerPolicy) -> Result<()> {
     log::info!("Starting Rock LSP server ...");
     debug_log!("LSP_SERVER_STARTING: Debug logging enabled");
 
@@ -339,9 +321,8 @@ pub fn run_lsp_server_with_policy(policy: crate::CompilerPolicy) -> Result<()> {
         }
     };
 
-    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        main_loop(link, handshake, policy)
-    }));
+    let outcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| main_loop(link, handshake)));
 
     match outcome {
         Ok(Ok(_)) => {
@@ -377,12 +358,8 @@ pub fn run_lsp_server_with_policy(policy: crate::CompilerPolicy) -> Result<()> {
     Ok(())
 }
 
-fn main_loop(
-    link: Connection,
-    params: serde_json::Value,
-    policy: crate::CompilerPolicy,
-) -> Result<()> {
-    let mut server = LspServer::new(policy, params)?;
+fn main_loop(link: Connection, params: serde_json::Value) -> Result<()> {
+    let mut server = LspServer::new(params)?;
     let mut pending: Vec<Message> = Vec::new();
     for incoming in &link.receiver {
         let done = server.handle(incoming, &mut pending);
@@ -409,10 +386,10 @@ pub struct LspServer {
 impl LspServer {
     /// Build the workspace from the client's `initialize` params, once the
     /// handshake (or the direct `initialize` below) has delivered them.
-    pub fn new(policy: crate::CompilerPolicy, params: serde_json::Value) -> Result<Self> {
+    pub fn new(params: serde_json::Value) -> Result<Self> {
         check_initialize_params(params)?;
         Ok(Self {
-            workspace: LspWorkspace::with_policy(policy),
+            workspace: LspWorkspace::new(),
             shutdown_mode: false,
             exited: false,
         })
@@ -420,8 +397,8 @@ impl LspServer {
 
     /// Reply to `initialize` without lsp-server's blocking handshake, for
     /// hosts that pass JSON-RPC messages through directly.
-    pub fn initialize(policy: crate::CompilerPolicy, req: Request) -> Result<(Self, Message)> {
-        let made = Self::new(policy, req.params)?;
+    pub fn initialize(req: Request) -> Result<(Self, Message)> {
+        let made = Self::new(req.params)?;
         let payload = serde_json::json!({ "capabilities": server_capabilities() });
         Ok((made, Response::new_ok(req.id, payload).into()))
     }

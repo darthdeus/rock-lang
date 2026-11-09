@@ -9,12 +9,9 @@
 
 use crate::{Args, Backend, CommandContext};
 use anyhow::Result;
-pub use bone_lints::ActionLayerPolicy;
 
 /// Static host tables; uninstalled library callers use `plain::REGISTRATIONS`.
 pub struct Registrations {
-    /// Project conventions supplied by the host; absent in the plain compiler.
-    pub action_layer_policy: Option<&'static ActionLayerPolicy>,
     pub commands: &'static [&'static CliCommand],
     pub backends: &'static [BackendSpec],
     /// Extend the public parser with host-owned definitions.
@@ -101,11 +98,6 @@ pub fn registered() -> &'static Registrations {
         .get()
         .copied()
         .unwrap_or(&crate::plain::REGISTRATIONS)
-}
-
-/// Default lint tier with the installed host's action-layer conventions.
-pub fn lint_options() -> bone_lints::LintOptions {
-    bone_lints::LintOptions::default().with_action_policy(registered().action_layer_policy)
 }
 
 /// Checked native FFI libraries, independent of package names and aliases.

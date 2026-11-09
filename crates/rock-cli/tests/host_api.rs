@@ -16,7 +16,6 @@ fn host_api_items_stay_public() {
     let _ = rock_cli::compiler_process;
     let _ = registry::install;
     let _ = registry::registered;
-    let _ = registry::lint_options;
     let _ = registry::extend_arguments;
     let _: &registry::Registrations = &rock_cli::plain::REGISTRATIONS;
     let _: &[&registry::CliCommand] = rock_cli::plain::COMMANDS;

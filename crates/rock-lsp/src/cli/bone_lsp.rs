@@ -15,11 +15,11 @@ use lsp_types::{HoverContents, Position};
 use serde_json::json;
 
 /// `rock-lsp hover <file:line:col> --backend bone`.
-pub fn hover(file_path: &str, line: u32, column: u32, policy: crate::CompilerPolicy) -> Result<()> {
+pub fn hover(file_path: &str, line: u32, column: u32) -> Result<()> {
     let file_path = canonical(file_path);
     let src = fs_err::read_to_string(&file_path)?;
 
-    let mut bone = policy.workspace();
+    let mut bone = BoneWorkspace::new();
     bone.update(&file_path, src);
 
     // CLI positions are 1-based; LSP/`Position` is 0-based.
@@ -110,28 +110,12 @@ fn print_report(report: serde_json::Value) -> Result<()> {
 /// All diagnostics JSON for a file or directory. Shared by the CLI handler and
 /// tests. See [`report_with`] for the file/dir walk.
 pub fn diagnostics_report(path: &str) -> Result<serde_json::Value> {
-    report_with(
-        path,
-        BoneWorkspace::diagnostics_for,
-        crate::CompilerPolicy::default(),
-    )
+    report_with(path, BoneWorkspace::diagnostics_for)
 }
 
 /// Lint-only diagnostics JSON for a file or directory.
 pub fn lint_report(path: &str) -> Result<serde_json::Value> {
-    report_with(
-        path,
-        BoneWorkspace::lint_diagnostics,
-        crate::CompilerPolicy::default(),
-    )
-}
-
-pub fn diagnostics_with_policy(path: &str, policy: crate::CompilerPolicy) -> Result<()> {
-    print_report(report_with(path, BoneWorkspace::diagnostics_for, policy)?)
-}
-
-pub fn lint_with_policy(path: &str, policy: crate::CompilerPolicy) -> Result<()> {
-    print_report(report_with(path, BoneWorkspace::lint_diagnostics, policy)?)
+    report_with(path, BoneWorkspace::lint_diagnostics)
 }
 
 /// Diagnostics JSON for a file or a directory, using `diag_fn` to select which
@@ -139,17 +123,13 @@ pub fn lint_with_policy(path: &str, policy: crate::CompilerPolicy) -> Result<()>
 /// one's project once (whole-compilation-unit, so cross-file symbols and the
 /// whole-project `unused_fn` lint resolve), and reports the files that have any,
 /// plus an `unreadable` list naming each file it could not read.
-fn report_with(
-    path: &str,
-    diag_fn: DiagFn,
-    policy: crate::CompilerPolicy,
-) -> Result<serde_json::Value> {
+fn report_with(path: &str, diag_fn: DiagFn) -> Result<serde_json::Value> {
     if fs_err::metadata(path)?.is_dir() {
-        return dir_report(path, diag_fn, policy);
+        return dir_report(path, diag_fn);
     }
     let file_path = canonical(path);
     let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = policy.workspace();
+    let mut bone = BoneWorkspace::new();
     bone.update(&file_path, src);
     Ok(json!({
         "file": file_path,
@@ -158,15 +138,11 @@ fn report_with(
     }))
 }
 
-fn dir_report(
-    dir: &str,
-    diag_fn: DiagFn,
-    policy: crate::CompilerPolicy,
-) -> Result<serde_json::Value> {
+fn dir_report(dir: &str, diag_fn: DiagFn) -> Result<serde_json::Value> {
     let mut files = rock_host::project::find_rock_files_at_path(dir)?;
     files.sort();
 
-    let mut bone = policy.workspace();
+    let mut bone = BoneWorkspace::new();
     let mut unreadable = Vec::new();
     for f in &files {
         // Idempotent per project root: once a file's compilation unit is loaded,
@@ -215,15 +191,10 @@ fn diags_to_json(diags: Vec<lsp_types::Diagnostic>) -> Vec<serde_json::Value> {
 }
 
 /// `rock-lsp definition <file:line:col> --backend bone`.
-pub fn definition(
-    file_path: &str,
-    line: u32,
-    column: u32,
-    policy: crate::CompilerPolicy,
-) -> Result<()> {
+pub fn definition(file_path: &str, line: u32, column: u32) -> Result<()> {
     let file_path = canonical(file_path);
     let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = policy.workspace();
+    let mut bone = BoneWorkspace::new();
     bone.update(&file_path, src);
 
     let loc = bone.definition(&file_path, Position::new(line - 1, column - 1));
@@ -231,15 +202,10 @@ pub fn definition(
 }
 
 /// `rock-lsp type-definition <file:line:col> --backend bone`.
-pub fn type_definition(
-    file_path: &str,
-    line: u32,
-    column: u32,
-    policy: crate::CompilerPolicy,
-) -> Result<()> {
+pub fn type_definition(file_path: &str, line: u32, column: u32) -> Result<()> {
     let file_path = canonical(file_path);
     let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = policy.workspace();
+    let mut bone = BoneWorkspace::new();
     bone.update(&file_path, src);
 
     let loc = bone.type_definition(&file_path, Position::new(line - 1, column - 1));
@@ -278,16 +244,10 @@ fn emit_definitions(
 }
 
 /// `rock-lsp completion <file:line:col> --backend bone`.
-pub fn completion(
-    file_path: &str,
-    line: u32,
-    column: u32,
-    explain: bool,
-    policy: crate::CompilerPolicy,
-) -> Result<()> {
+pub fn completion(file_path: &str, line: u32, column: u32, explain: bool) -> Result<()> {
     let file_path = canonical(file_path);
     let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = policy.workspace();
+    let mut bone = BoneWorkspace::new();
     bone.update(&file_path, src);
 
     let pos = Position::new(line - 1, column - 1);
@@ -331,9 +291,8 @@ pub fn completion_matrix(
     prefixes: &[String],
     policies: &[bone_query::MatchPolicy],
     top: usize,
-    policy: crate::CompilerPolicy,
 ) -> Result<()> {
-    let mut probe = MatrixProbe::load(file_path, line, column, policies.to_vec(), top, policy)?;
+    let mut probe = MatrixProbe::load(file_path, line, column, policies.to_vec(), top)?;
     println!("{}\n", probe.header());
     for prefix in prefixes {
         println!("{}", probe.render(prefix));
@@ -353,10 +312,9 @@ pub fn completion_repl(
     column: u32,
     policies: &[bone_query::MatchPolicy],
     top: usize,
-    policy: crate::CompilerPolicy,
 ) -> Result<()> {
     use std::io::IsTerminal;
-    let probe = MatrixProbe::load(file_path, line, column, policies.to_vec(), top, policy)?;
+    let probe = MatrixProbe::load(file_path, line, column, policies.to_vec(), top)?;
     if std::io::stdin().is_terminal() {
         completion_repl_raw(probe)
     } else {
@@ -511,7 +469,6 @@ impl MatrixProbe {
         column: u32,
         policies: Vec<bone_query::MatchPolicy>,
         top: usize,
-        policy: crate::CompilerPolicy,
     ) -> Result<MatrixProbe> {
         let file_path = canonical(file_path);
         let src = fs_err::read_to_string(&file_path)?;
@@ -523,7 +480,7 @@ impl MatrixProbe {
         while start > 0 && is_ident(src.as_bytes()[start - 1]) {
             start -= 1;
         }
-        let mut bone = policy.workspace();
+        let mut bone = BoneWorkspace::new();
         bone.load_project(&file_path);
         Ok(MatrixProbe {
             bone,
@@ -634,14 +591,9 @@ fn line_col_to_offset(src: &str, line: u32, column: u32) -> usize {
 }
 
 /// `rock-lsp references <file:line:col> --backend bone`.
-pub fn references(
-    file_path: &str,
-    line: u32,
-    column: u32,
-    policy: crate::CompilerPolicy,
-) -> Result<()> {
+pub fn references(file_path: &str, line: u32, column: u32) -> Result<()> {
     let file_path = canonical(file_path);
-    let mut bone = policy.workspace();
+    let mut bone = BoneWorkspace::new();
     // Load the whole project so cross-file references are found.
     bone.load_project(&file_path);
 
@@ -659,15 +611,10 @@ pub fn references(
 }
 
 /// `rock-lsp prepare-rename <file:line:col> --backend bone`.
-pub fn prepare_rename(
-    file_path: &str,
-    line: u32,
-    column: u32,
-    policy: crate::CompilerPolicy,
-) -> Result<()> {
+pub fn prepare_rename(file_path: &str, line: u32, column: u32) -> Result<()> {
     let file_path = canonical(file_path);
     let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = policy.workspace();
+    let mut bone = BoneWorkspace::new();
     bone.update(&file_path, src);
 
     let pos = Position::new(line - 1, column - 1);
@@ -693,15 +640,9 @@ pub fn prepare_rename(
 }
 
 /// `rock-lsp rename <file:line:col> <new_name> --backend bone`.
-pub fn rename(
-    file_path: &str,
-    line: u32,
-    column: u32,
-    new_name: &str,
-    policy: crate::CompilerPolicy,
-) -> Result<()> {
+pub fn rename(file_path: &str, line: u32, column: u32, new_name: &str) -> Result<()> {
     let file_path = canonical(file_path);
-    let mut bone = policy.workspace();
+    let mut bone = BoneWorkspace::new();
     // Load the whole project so rename rewrites cross-file references too.
     bone.load_project(&file_path);
 
@@ -739,15 +680,10 @@ pub fn rename(
 }
 
 /// `rock-lsp signature-help <file:line:col> --backend bone`.
-pub fn signature_help(
-    file_path: &str,
-    line: u32,
-    column: u32,
-    policy: crate::CompilerPolicy,
-) -> Result<()> {
+pub fn signature_help(file_path: &str, line: u32, column: u32) -> Result<()> {
     let file_path = canonical(file_path);
     let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = policy.workspace();
+    let mut bone = BoneWorkspace::new();
     bone.update(&file_path, src);
 
     let pos = Position::new(line - 1, column - 1);
@@ -767,10 +703,10 @@ pub fn signature_help(
 }
 
 /// `rock-lsp document-symbols <file> --backend bone`.
-pub fn document_symbols(file_path: &str, policy: crate::CompilerPolicy) -> Result<()> {
+pub fn document_symbols(file_path: &str) -> Result<()> {
     let file_path = canonical(file_path);
     let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = policy.workspace();
+    let mut bone = BoneWorkspace::new();
     bone.update(&file_path, src);
 
     let symbols = bone.document_symbols(&file_path);
@@ -786,15 +722,10 @@ pub fn document_symbols(file_path: &str, policy: crate::CompilerPolicy) -> Resul
 /// `rock-lsp hole-info <file:line:col> --backend bone`. Type holes only for now
 /// (bone rejects expression holes at lowering); prints nothing and exits 1 when
 /// the cursor isn't on a hole, matching the lua handler.
-pub fn hole_info(
-    file_path: &str,
-    line: u32,
-    column: u32,
-    policy: crate::CompilerPolicy,
-) -> Result<()> {
+pub fn hole_info(file_path: &str, line: u32, column: u32) -> Result<()> {
     let file_path = canonical(file_path);
     let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = policy.workspace();
+    let mut bone = BoneWorkspace::new();
     bone.update(&file_path, src);
 
     let pos = Position::new(line - 1, column - 1);
@@ -811,13 +742,9 @@ pub fn hole_info(
 }
 
 /// `rock-lsp workspace-symbols <file> <query> --backend bone`.
-pub fn workspace_symbols(
-    file_path: &str,
-    query: &str,
-    policy: crate::CompilerPolicy,
-) -> Result<()> {
+pub fn workspace_symbols(file_path: &str, query: &str) -> Result<()> {
     let file_path = canonical(file_path);
-    let mut bone = policy.workspace();
+    let mut bone = BoneWorkspace::new();
     // Load the whole project so symbols from every user file are searched.
     bone.load_project(&file_path);
 
@@ -833,10 +760,10 @@ pub fn workspace_symbols(
 }
 
 /// `rock-lsp semantic-tokens <file> --backend bone`.
-pub fn semantic_tokens(file_path: &str, policy: crate::CompilerPolicy) -> Result<()> {
+pub fn semantic_tokens(file_path: &str) -> Result<()> {
     let file_path = canonical(file_path);
     let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = policy.workspace();
+    let mut bone = BoneWorkspace::new();
     bone.update(&file_path, src);
 
     let tokens = bone.semantic_tokens(&file_path);
@@ -864,10 +791,10 @@ pub fn semantic_tokens(file_path: &str, policy: crate::CompilerPolicy) -> Result
 }
 
 /// `rock-lsp inlay-hints <file> --backend bone`. Hints over the whole file.
-pub fn inlay_hints(file_path: &str, policy: crate::CompilerPolicy) -> Result<()> {
+pub fn inlay_hints(file_path: &str) -> Result<()> {
     let file_path = canonical(file_path);
     let src = fs_err::read_to_string(&file_path)?;
-    let mut bone = policy.workspace();
+    let mut bone = BoneWorkspace::new();
     bone.update(&file_path, src);
 
     let full = lsp_types::Range {

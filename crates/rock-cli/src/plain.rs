@@ -560,20 +560,13 @@ pub static EARLY_ENTRIES: &[registry::EarlyEntry] = &[
     // artifact that can't go stale against the embedded stdlib). It is an early
     // entry because the LSP path installs its own env_logger (ROCK_LSP_DEBUG ->
     // file) and a global logger can only be set once. The synthetic argv[0]
-    // makes its clap usage/errors read as `rock lsp ...`. The compiler policy
-    // comes from the installed registrations, so private hosts keep their own
-    // action-layer policy through this same entry.
+    // makes its clap usage/errors read as `rock lsp ...`.
     registry::EarlyEntry {
         name: "lsp",
         run: |rest| {
             let mut forwarded = vec!["rock lsp".to_string()];
             forwarded.extend(rest);
-            match rock_lsp::server_cli::run_cli_with_policy(
-                forwarded,
-                rock_lsp::CompilerPolicy {
-                    action_layer: registry::registered().action_layer_policy,
-                },
-            ) {
+            match rock_lsp::server_cli::run_cli(forwarded) {
                 Ok(()) => 0,
                 Err(e) => {
                     eprintln!("{e}");
@@ -585,7 +578,6 @@ pub static EARLY_ENTRIES: &[registry::EarlyEntry] = &[
 ];
 
 pub static REGISTRATIONS: registry::Registrations = registry::Registrations {
-    action_layer_policy: None,
     commands: COMMANDS,
     backends: BACKENDS,
     option_rules: OPTION_RULES,

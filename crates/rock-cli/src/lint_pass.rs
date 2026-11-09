@@ -136,7 +136,7 @@ pub(crate) fn rollback_build_lints_cached(
             &warm,
             is_bin,
             &owned_sources,
-            &crate::registry::lint_options(),
+            &bone_lints::LintOptions::default(),
         )?;
         Ok(())
     })
@@ -179,7 +179,7 @@ fn run_build_lints_cached_inner(
                 &warm,
                 is_bin,
                 &owned_sources,
-                &crate::registry::lint_options(),
+                &bone_lints::LintOptions::default(),
                 change,
             )
         } else {
@@ -188,7 +188,7 @@ fn run_build_lints_cached_inner(
                 &warm,
                 is_bin,
                 &owned_sources,
-                &crate::registry::lint_options(),
+                &bone_lints::LintOptions::default(),
                 change,
             )
         };
@@ -316,7 +316,13 @@ pub fn findings(
     root: &Path,
     scope: Scope,
 ) -> Vec<bone_lints::Finding> {
-    findings_with(ws, sources, root, scope, &crate::registry::lint_options())
+    findings_with(
+        ws,
+        sources,
+        root,
+        scope,
+        &bone_lints::LintOptions::default(),
+    )
 }
 
 /// [`findings`] for an explicit lint selection. `rock lint --lints=<names>`
@@ -413,7 +419,7 @@ pub fn unused_fns_under(
             ws,
             &warm,
             is_bin,
-            &crate::registry::lint_options(),
+            &bone_lints::LintOptions::default(),
         );
         let mut out = Vec::new();
         for (file, findings) in by_file {

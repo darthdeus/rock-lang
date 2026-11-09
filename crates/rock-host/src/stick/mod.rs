@@ -180,11 +180,45 @@ pub struct StickConfig {
     pub sound: Option<SoundConfig>,
     /// Project-owned ambient inputs included in sim timing identities.
     pub sim: Option<SimConfig>,
+    pub lint: Option<LintConfig>,
     /// Source-language selection for this package. `None` = legacy.
     pub language: Option<LanguageConfig>,
     pub dependencies: HashMap<String, Dependency>,
     /// Optional implementation directories that retain this package's owner.
     pub source_groups: HashMap<String, SourceGroupConfig>,
+}
+
+/// Project-owned conventions for the opt-in action-layer lints.
+/// Production roots match complete path components; test modules are excluded.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionLayerPolicy {
+    pub production_root: String,
+    pub production_label: String,
+    pub action_prefix: String,
+    pub raw_input_names: Vec<String>,
+    pub raw_input_classes: Vec<String>,
+    /// Registration helpers whose reads do not count as action consumers.
+    pub registration_functions: Vec<String>,
+}
+
+impl ActionLayerPolicy {
+    pub fn load(path: &Path) -> Result<Option<Self>> {
+        let dir = if path.is_file() {
+            path.parent().unwrap_or(Path::new("."))
+        } else {
+            path
+        };
+        Ok(StickConfig::find_from_dir(dir)?
+            .and_then(|(_, config)| config.lint)
+            .and_then(|lint| lint.action_layer))
+    }
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LintConfig {
+    pub action_layer: Option<ActionLayerPolicy>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -880,6 +914,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                 let mut assets: Option<AssetsConfig> = None;
                 let mut sound: Option<SoundConfig> = None;
                 let mut sim: Option<SimConfig> = None;
+                let mut lint: Option<LintConfig> = None;
                 let mut language: Option<LanguageConfig> = None;
                 let mut dependencies: HashMap<String, Dependency> = HashMap::new();
                 let mut source_groups: HashMap<String, SourceGroupConfig> = HashMap::new();
@@ -896,6 +931,9 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         }
                         "assets" => {
                             assets = Some(map.next_value()?);
+                        }
+                        "lint" => {
+                            lint = Some(map.next_value()?);
                         }
                         "sim" => {
                             sim = map.next_value()?;
@@ -921,7 +959,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                         other => {
                             return Err(serde::de::Error::custom(format!(
                                 "unknown key `{other}` at top level; known keys: package, build, release, \
-                                 assets, sound, sim, engine, native, language, dependencies, source_groups"
+                                 assets, sound, sim, lint, engine, native, language, dependencies, source_groups"
                             )));
                         }
                     }
@@ -936,6 +974,7 @@ impl<'de> serde::Deserialize<'de> for StickConfig {
                     assets,
                     sound,
                     sim,
+                    lint,
                     language,
                     dependencies,
                     source_groups,

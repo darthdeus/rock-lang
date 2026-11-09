@@ -956,3 +956,51 @@ fn public_frame_and_perf_options_preserve_their_units_and_defaults() {
     assert_eq!(perf.gc_window_mode, "running");
     assert!(perf.headless && perf.jv);
 }
+
+#[test]
+fn plain_lint_reads_project_action_rules_for_directory_and_file() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("game");
+    std::fs::create_dir(&project).unwrap();
+    let manifest = project.join("stick.toml");
+    let header = "[package]\nname = \"sample\"\n";
+    std::fs::write(&manifest, header).unwrap();
+    std::fs::write(
+        project.join("main.rock"),
+        "global DO_MOVE: int = 1\nfn main() {}\n",
+    )
+    .unwrap();
+    let args = ["lint", "game", "--lints=action_layer_action_callers"];
+    let missing = invoke(root.path(), &args);
+    assert!(missing.status.success(), "{}", text(&missing));
+    assert!(text(&missing).contains("no action-layer policy configured"));
+    let rules = r#"[lint.action_layer]
+production_root = "game"
+production_label = "Sample"
+action_prefix = "DO_"
+raw_input_names = []
+raw_input_classes = []
+registration_functions = []
+"#;
+    std::fs::write(&manifest, format!("{header}{rules}")).unwrap();
+    for path in ["game", "game/main.rock"] {
+        let output = invoke(root.path(), &["lint", path, args[2]]);
+        assert!(output.status.success(), "{}", text(&output));
+        assert!(
+            text(&output).contains("production Sample action `DO_MOVE` has no production caller"),
+            "{}",
+            text(&output)
+        );
+    }
+    let default = invoke(root.path(), &["lint", "game"]);
+    assert!(default.status.success(), "{}", text(&default));
+    assert!(!text(&default).contains("has no production caller"));
+    std::fs::write(&manifest, format!("{header}{rules}unknown_rule = true\n")).unwrap();
+    let invalid = invoke(root.path(), &args);
+    assert!(!invalid.status.success(), "{}", text(&invalid));
+    assert!(
+        text(&invalid).contains("unknown field"),
+        "{}",
+        text(&invalid)
+    );
+}
