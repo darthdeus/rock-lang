@@ -259,6 +259,17 @@ fn test_generic_enum_inference() {
     }
 }
 
+// `E` is pinned by nothing here, so `result` has no fully concrete type and
+// lowering has to plan the variant and the match from the nominal enum name.
+@test(output="42")
+fn test_enum_with_unconstrained_type_param() {
+    let result = Result::Ok(42)
+    match result {
+        Result::Ok(value) => print(value),
+        Result::Err(_) => print("error"),
+    }
+}
+
 enum PayloadColor {
     Red(int),
     Blue(string),
