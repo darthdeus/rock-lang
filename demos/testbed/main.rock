@@ -100,7 +100,6 @@ fn draw_animation() {
 
 @late_draw
 fn draw_header() {
-    screen.rect(v(0, 0), v(screen_size().x, 82), color(0.04, 0.05, 0.08))
     screen.text("Stone drawing testbed", v(20, 15), 28.0, WHITE)
     screen.text("WASD / arrows: move   Wheel: zoom   R: reset   G: grid   Esc: quit",
         v(20, 51), 18.0, LABEL_COLOR)
