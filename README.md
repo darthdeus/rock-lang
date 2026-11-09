@@ -126,13 +126,12 @@ From a source checkout with the native dependencies installed:
 
 ```bash
 rock stone demos/match3
-rock stone demos/ui-proto
 ```
 
 Match3 is a playable board with animated swaps and cascades: select adjacent
-cells with the mouse, press R to reset or A for an automatic move. The UI
-prototype shows menu buttons and screen transitions. Both use generated visuals
-and Stone's bundled font; no separate game assets are needed. The existing
+cells with the mouse, press R to reset or A for an automatic move. It uses
+generated visuals and Stone's bundled font; no separate game assets are needed.
+The existing
 `demos/testbed` shows drawing primitives and coordinate spaces.
 
 ```bash
