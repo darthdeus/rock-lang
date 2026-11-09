@@ -482,11 +482,12 @@ pub fn compiler_identity() -> Result<String> {
         .get_or_init(|| {
             let image = rock_host::process_management::current_executable_image()
                 .map_err(|e| e.to_string())?;
-            let mut file = std::fs::File::open(image).map_err(|e| e.to_string())?;
+            let mut file = std::fs::File::open(&image).map_err(|e| e.to_string())?;
             let before = file.metadata().map_err(|e| e.to_string())?;
             #[cfg(target_os = "macos")]
             verify_macos_compiler_image(&before)?;
-            let identity = hash_compiler_image(&mut file).map_err(|e| e.to_string())?;
+            let identity =
+                remembered_image_identity(&image, &mut file, &before).map_err(|e| e.to_string())?;
             let after = file.metadata().map_err(|e| e.to_string())?;
             if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
                 return Err("compiler image changed while hashing".into());
@@ -504,12 +505,140 @@ pub fn compiler_identity() -> Result<String> {
 pub fn compiler_image_identity(image: &Path) -> Result<String> {
     let mut file = std::fs::File::open(image)?;
     let before = file.metadata()?;
-    let identity = hash_compiler_image(&mut file)?;
+    let identity = remembered_image_identity(image, &mut file, &before)?;
     let after = file.metadata()?;
     if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
         anyhow::bail!("compiler image changed while hashing");
     }
     Ok(identity)
+}
+
+/// The identity of `image`, read from the per-user memo when the file's
+/// stamp (device, inode, length, modification time) matches the entry
+/// written after the last hashing, otherwise hashed and remembered. A
+/// compiler image is tens of megabytes and every compile needs its
+/// identity, so steady-state compiles pay one `stat` instead of a hash.
+fn remembered_image_identity(
+    image: &Path,
+    file: &mut std::fs::File,
+    meta: &std::fs::Metadata,
+) -> std::io::Result<String> {
+    remembered_image_identity_in(image, file, meta, identity_memo_path(image))
+}
+
+fn remembered_image_identity_in(
+    _image: &Path,
+    file: &mut std::fs::File,
+    meta: &std::fs::Metadata,
+    memo: Option<PathBuf>,
+) -> std::io::Result<String> {
+    let stamp = ImageStamp::of(meta);
+    if let Some(memo) = &memo
+        && let Ok(text) = std::fs::read_to_string(memo)
+        && let Ok(entry) = serde_json::from_str::<IdentityMemo>(&text)
+        && entry.stamp == stamp
+        && entry.identity.len() == 32
+    {
+        return Ok(entry.identity);
+    }
+    let identity = hash_compiler_image(file)?;
+    if let Some(memo) = memo {
+        let entry = IdentityMemo {
+            stamp,
+            identity: identity.clone(),
+        };
+        // Best effort: a memo that cannot be written only costs the next hash.
+        let _ = write_identity_memo(&memo, &entry);
+    }
+    Ok(identity)
+}
+
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq, Clone, Copy)]
+struct ImageStamp {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime_ns: i128,
+}
+
+impl ImageStamp {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        let (dev, ino) = {
+            use std::os::unix::fs::MetadataExt;
+            (meta.dev(), meta.ino())
+        };
+        #[cfg(not(unix))]
+        let (dev, ino) = (0, 0);
+        let mtime_ns = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(-1, |d| d.as_nanos() as i128);
+        ImageStamp {
+            dev,
+            ino,
+            len: meta.len(),
+            mtime_ns,
+        }
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct IdentityMemo {
+    stamp: ImageStamp,
+    identity: String,
+}
+
+/// Where the identity of `image` is remembered: `ROCK_COMPILER_IDENTITY_MEMO`
+/// names the directory (tests), otherwise the user's cache directory; `None`
+/// (no home) disables the memo. The file is named by the image path so
+/// several installed compilers do not share an entry.
+fn identity_memo_path(image: &Path) -> Option<PathBuf> {
+    let dir = match std::env::var_os("ROCK_COMPILER_IDENTITY_MEMO") {
+        Some(dir) if dir.is_empty() => return None,
+        Some(dir) => PathBuf::from(dir),
+        None => {
+            let home = std::env::var_os("HOME").filter(|h| !h.is_empty())?;
+            let base = if cfg!(target_os = "macos") {
+                PathBuf::from(&home).join("Library/Caches")
+            } else {
+                std::env::var_os("XDG_CACHE_HOME")
+                    .filter(|d| !d.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from(&home).join(".cache"))
+            };
+            base.join("rock-lang").join("compiler-identity")
+        }
+    };
+    Some(identity_memo_path_in(image, dir))
+}
+
+fn identity_memo_path_in(image: &Path, dir: PathBuf) -> PathBuf {
+    let key = xxhash_rust::xxh3::xxh3_64(image.as_os_str().as_encoded_bytes());
+    dir.join(format!("{key:016x}.json"))
+}
+
+/// [`compiler_image_identity`] with the memo kept under `memo_dir`.
+#[cfg(test)]
+fn identity_at(image: &Path, memo_dir: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(image)?;
+    let meta = file.metadata()?;
+    let memo = identity_memo_path_in(image, memo_dir.to_path_buf());
+    Ok(remembered_image_identity_in(
+        image,
+        &mut file,
+        &meta,
+        Some(memo),
+    )?)
+}
+
+fn write_identity_memo(path: &Path, entry: &IdentityMemo) -> std::io::Result<()> {
+    let dir = path.parent().expect("memo file has a directory");
+    std::fs::create_dir_all(dir)?;
+    let tmp = dir.join(format!(".{}.{}", std::process::id(), entry.identity));
+    std::fs::write(&tmp, serde_json::to_vec(entry)?)?;
+    std::fs::rename(&tmp, path)
 }
 
 /// Hash the parts of a compiler image that can affect execution. An ELF
@@ -524,18 +653,19 @@ pub fn compiler_image_identity(image: &Path) -> Result<String> {
 /// before. Any ELF inconsistency also falls back to the whole file rather
 /// than guessing.
 fn hash_compiler_image<R: std::io::Read + std::io::Seek>(image: &mut R) -> std::io::Result<String> {
-    use sha2::{Digest, Sha256};
     use std::io::SeekFrom;
-    let mut hash = Sha256::new();
-    hash.update(b"rock-compiler-identity-v2\0");
+    // Identity, not authentication: a 128-bit non-cryptographic hash reads
+    // the image at memory speed, where SHA-256 cost ~200 ms per compile.
+    let mut hash = xxhash_rust::xxh3::Xxh3::new();
+    hash.update(b"rock-compiler-identity-v3\0");
     let mut buffer = [0u8; 65536];
     match elf_load_segments(image)? {
         Some(segments) => {
             for segment in segments {
-                hash.update(segment.flags.to_le_bytes());
-                hash.update(segment.vaddr.to_le_bytes());
-                hash.update(segment.filesz.to_le_bytes());
-                hash.update(segment.memsz.to_le_bytes());
+                hash.update(&segment.flags.to_le_bytes());
+                hash.update(&segment.vaddr.to_le_bytes());
+                hash.update(&segment.filesz.to_le_bytes());
+                hash.update(&segment.memsz.to_le_bytes());
                 image.seek(SeekFrom::Start(segment.offset))?;
                 let mut remaining = segment.filesz;
                 while remaining > 0 {
@@ -563,7 +693,7 @@ fn hash_compiler_image<R: std::io::Read + std::io::Seek>(image: &mut R) -> std::
             }
         }
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(format!("{:032x}", hash.digest128()))
 }
 
 struct ElfLoadSegment {
@@ -709,6 +839,47 @@ mod compiler_image_tests {
 
     fn identity(bytes: &[u8]) -> String {
         hash_compiler_image(&mut Cursor::new(bytes.to_vec())).unwrap()
+    }
+
+    #[test]
+    fn identity_is_a_128_bit_digest_of_the_image() {
+        let a = identity(b"compiler image");
+        assert_eq!(a.len(), 32, "{a}");
+        assert!(a.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(a, identity(b"compiler image"));
+        assert_ne!(a, identity(b"compiler imagf"));
+    }
+
+    /// The memo answers for an image whose stamp is unchanged, so a compile
+    /// does not read the image; a changed image is hashed afresh.
+    #[test]
+    fn image_identity_is_remembered_by_stamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let memo = dir.path().join("memo");
+        let image = dir.path().join("rock");
+        std::fs::write(&image, b"first compiler").unwrap();
+        let stamp = std::fs::metadata(&image).unwrap().modified().unwrap();
+        let first = super::identity_at(&image, &memo).unwrap();
+        assert_eq!(first, identity(b"first compiler"));
+        assert_eq!(std::fs::read_dir(&memo).unwrap().count(), 1);
+
+        // Same length and mtime: the memo is trusted and the bytes not read.
+        std::fs::write(&image, b"other compiler").unwrap();
+        std::fs::File::open(&image)
+            .unwrap()
+            .set_modified(stamp)
+            .unwrap();
+        assert_eq!(super::identity_at(&image, &memo).unwrap(), first);
+
+        // A newer image is hashed again and replaces the entry.
+        std::fs::File::open(&image)
+            .unwrap()
+            .set_modified(stamp + std::time::Duration::from_secs(5))
+            .unwrap();
+        let second = super::identity_at(&image, &memo).unwrap();
+        assert_eq!(second, identity(b"other compiler"));
+        assert_eq!(super::identity_at(&image, &memo).unwrap(), second);
+        assert_eq!(std::fs::read_dir(&memo).unwrap().count(), 1);
     }
 
     #[cfg(target_os = "macos")]

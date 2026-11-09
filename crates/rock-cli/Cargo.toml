@@ -72,6 +72,7 @@ log = { workspace = true }
 parking_lot = { workspace = true }
 wait-timeout = { workspace = true }
 sha2 = "0.10"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 sysinfo = { workspace = true }
 libc = "0.2"
 
