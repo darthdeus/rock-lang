@@ -1392,8 +1392,11 @@ pub fn build_namespaces<'a>(
         }
         return Ok(());
     }
-    let contributions: Vec<FragmentContribution> =
-        rock_modules.into_iter().map(contribute).collect();
+    let modules = rock_modules.into_iter().collect_vec();
+    let contributions: Vec<FragmentContribution> = modules
+        .par_iter()
+        .map(|module| contribute(module))
+        .collect();
     assemble_namespaces(ws, &contributions.iter().collect_vec(), aliases)
 }
 
