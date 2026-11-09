@@ -109,6 +109,7 @@ pub fn callee_binding_plan(
     // Cleanup unlinks instructions without freeing arena slots. Match the
     // emitted body's CFG so discarded calls and separate scopes use no slots.
     let blocks = reverse_postorder(func, func.entry());
+    let mut symbols: rustc_hash::FxHashMap<FuncRef, String> = rustc_hash::FxHashMap::default();
     for id in blocks
         .iter()
         .flat_map(|bid| func.blocks[*bid].insts.iter().copied())
@@ -146,7 +147,13 @@ pub fn callee_binding_plan(
         if !decl.generics.is_empty() && !func.spec_bindings.contains_key(&id) {
             continue;
         }
-        let symbol = call_target_symbol(ws, interner, func, id, callee);
+        let symbol = match func.spec_bindings.get(&id) {
+            Some(inst) => inst.symbol(ws, interner),
+            None => symbols
+                .entry(callee)
+                .or_insert_with(|| mangle_fn(ws, decl))
+                .clone(),
+        };
         // A body that calls its own emitted name (a specialized instance
         // recursing through the shared declaration) would capture itself.
         if symbol == name {

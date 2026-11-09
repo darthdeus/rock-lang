@@ -836,6 +836,9 @@ impl SelectionArm {
 
 struct Emitter<'a> {
     enum_box_groups: RefCell<HashMap<ustr::Ustr, std::rc::Rc<EnumBoxGroups>>>,
+    /// The mangled name of each declaration this body calls directly, derived
+    /// once per body rather than at every call site.
+    callee_symbols: RefCell<HashMap<FuncRef, std::rc::Rc<str>>>,
     selection_preds: std::cell::OnceCell<PredMap>,
     ws: &'a Workspace,
     ctx: &'a CodegenCtx,
