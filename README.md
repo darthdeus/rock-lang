@@ -120,6 +120,26 @@ Use `cargo run --quiet --bin rock -- test file.rock` to rebuild and test with
 this checkout. See [Testing compiler changes](docs/testing.md) for runtime cases,
 expected compiler errors, backend comparison, filtering, and Rust test commands.
 
+## Stone demos
+
+From a source checkout with the native dependencies installed:
+
+```bash
+rock stone demos/match3
+rock stone demos/ui-proto
+```
+
+Match3 is a playable board with animated swaps and cascades: select adjacent
+cells with the mouse, press R to reset or A for an automatic move. The UI
+prototype shows menu buttons and screen transitions. Both use generated visuals
+and Stone's bundled font; no separate game assets are needed. The existing
+`demos/testbed` shows drawing primitives and coordinate spaces.
+
+```bash
+rock test packages/match3-core
+rock sim demos/match3 boot_idle animated_swap
+```
+
 ## What else is in here
 
 - `rock fmt`, `rock lint` and `rock watch`.

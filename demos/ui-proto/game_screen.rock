@@ -1,0 +1,78 @@
+// Game screen - character portrait + stat panel layout.
+
+@late_draw(stage = 10)
+fn draw_game_screen() {
+    if CURRENT_SCREEN != SCREEN_GAME { return }
+
+    let s = screen_size()
+    let cx = s.x / 2
+    let cy = s.y / 2
+
+    ui_full_screen().fill(Color { r: 0.04, g: 0.06, b: 0.08, a: 1.0 })
+
+    // Portrait area (left)
+    let portrait_w = 340.0
+    let portrait_h = 460.0
+    let portrait = ui_from_top_left(
+        v(cx - portrait_w - 20.0, cy - portrait_h / 2),
+        v(portrait_w, portrait_h)
+    )
+    portrait.fill(Color { r: 0.12, g: 0.18, b: 0.28, a: 1.0 })
+    portrait.outline(Color { r: 0.3, g: 0.4, b: 0.6, a: 1.0 })
+
+    let label = "[character render]"
+    let label_size = measure_text(label, 16.0)
+    let pc = portrait.center()
+    draw_text_immediate(DrawSpace::Target, label, pc - label_size / 2, 16.0, Color { r: 0.3, g: 0.4, b: 0.5, a: 1.0 }, v())
+
+    // Stats + actions (right)
+    let panel_w = 300.0
+    let panel_h = 460.0
+    let panel = ui_from_top_left(
+        v(cx + 20.0, cy - panel_h / 2),
+        v(panel_w, panel_h)
+    )
+    panel.fill(Color { r: 0.08, g: 0.1, b: 0.14, a: 1.0 })
+    panel.outline(Color { r: 0.25, g: 0.3, b: 0.45, a: 1.0 })
+
+    let row_h = 36.0
+    let pad = 16.0
+    let stats = ["Charm", "Strength", "Luck", "Progress"]
+    let vals  = ["72",    "45",       "88",   "34%"]
+
+    let i = 0
+    for stat in stats {
+        let row = ui_from_top_left(
+            v(panel.x + pad, panel.y + pad + i * (row_h + 8.0)),
+            v(panel_w - pad * 2, row_h)
+        )
+
+        let name_size = measure_text(stat, 16.0)
+        draw_text_immediate(DrawSpace::Target, stat, v(row.x, row.y + row_h / 2 - name_size.y / 2), 16.0, Color { r: 0.7, g: 0.7, b: 0.9, a: 1.0 }, v())
+
+        let val = vals[i]
+        let val_size = measure_text(val, 16.0)
+        draw_text_immediate(DrawSpace::Target, val, v(row.x + row.w - val_size.x, row.y + row_h / 2 - val_size.y / 2), 16.0, WHITE, v())
+
+        let divider = ui_from_top_left(v(row.x, row.y + row_h), v(row.w, 1.0))
+        divider.fill(Color { r: 0.2, g: 0.2, b: 0.3, a: 1.0 })
+
+        i = i + 1
+    }
+
+    let abw = panel_w - pad * 2
+    let abh = 44.0
+    let ab_gap = 10.0
+    let ab_top = panel.y + panel_h - pad - abh * 2.0 - ab_gap
+
+    let action1 = ui_from_top_left(v(panel.x + pad, ab_top), v(abw, abh))
+    let action2 = ui_from_top_left(v(panel.x + pad, ab_top + abh + ab_gap), v(abw, abh))
+
+    button(action1, "Talk", 24.0)
+    button(action2, "Gift", 24.0)
+
+    let back = ui_from_top_left(v(20.0, 20.0), v(100.0, 40.0))
+    if button(back, "< Back", 16.0) {
+        switch_screen(SCREEN_MENU)
+    }
+}

@@ -1,0 +1,18 @@
+[package]
+name = "ui-proto"
+version = "0.1.0"
+type = "bin"
+
+[language]
+modules = "v1"
+
+[dependencies]
+stone = {package = "stone"}
+stone-core = {package = "stone-core"}
+
+[build]
+channels = ["dev", "direct"]
+default_channel = "dev"
+
+[build.vars]
+GIT_SHA = { value = "ui-proto" }

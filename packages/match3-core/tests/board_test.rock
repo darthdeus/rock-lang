@@ -1,0 +1,80 @@
+// Native @test coverage for the core, run via `rock test packages/match3-core`
+// (whole-package workspace build). These compile WITH the core's src files --
+// the per-file test harness cannot see M3Board/m3_* across files. Kept out of
+// any consumer build: a package compile drops tests/ (production_only).
+
+fn board(w: int, h: int, cells: [int]) -> M3Board {
+    return M3Board { w: w, h: h, cells: cells }
+}
+
+@test
+fn find_matches_horizontal_run() {
+    // Row 0 is three 0s; the other rows are match-free.
+    let b = board(3, 3, [0, 0, 0,
+                         1, 2, 1,
+                         2, 1, 2])
+    assert(m3_find_matches(b).len() == 3, "a row of three equal gems is one 3-cell match")
+    assert(m3_has_matches(b), "has_matches agrees")
+}
+
+@test
+fn find_matches_dedups_intersection() {
+    // A plus: column 1 (rows 0,1,2) AND row 1 (cols 0,1,2) are both runs of 0.
+    // The shared centre (1,1) must be counted ONCE, not once per axis.
+    let b = board(3, 3, [1, 0, 1,
+                         0, 0, 0,
+                         1, 0, 1])
+    assert(m3_find_matches(b).len() == 5, "5 distinct matched cells (centre deduped)")
+}
+
+@test
+fn no_match_board_is_clean() {
+    let b = board(3, 3, [0, 1, 2,
+                         1, 2, 0,
+                         2, 0, 1])
+    assert(!m3_has_matches(b), "diagonal-shifted board has no run of 3")
+    assert(m3_find_matches(b).len() == 0, "and no matched cells")
+}
+
+@test
+fn first_move_finds_a_swap() {
+    // Swapping (0,2)<->(1,2) makes column 0 a vertical triple of 0s.
+    let b = board(3, 3, [0, 1, 1,
+                         0, 1, 1,
+                         1, 0, 1])
+    let mv = m3_first_move(b)
+    assert(mv != null, "a one-swap-to-match board yields a move")
+    assert(m3_has_legal_move(b), "has_legal_move agrees with first_move")
+}
+
+@test
+fn dead_board_has_no_move() {
+    // Perfect stripes: no single swap of unequal neighbours makes a run of 3.
+    let b = board(6, 4, [0, 1, 2, 0, 1, 2,
+                         0, 1, 2, 0, 1, 2,
+                         0, 1, 2, 0, 1, 2,
+                         0, 1, 2, 0, 1, 2])
+    assert(!m3_has_legal_move(b), "striped board is a deadlock")
+    assert(m3_first_move(b) == null, "first_move returns null on a dead board")
+}
+
+@test
+fn collapse_fills_every_cell() {
+    let b = board(3, 3, [0, 0, 0,
+                         1, 2, 1,
+                         2, 1, 2])
+    let cx = m3_collapse(b, m3_find_matches(b), m3_uniform(3))
+    let holes = 0
+    for c in b.cells {
+        if c == M3_EMPTY { holes = holes + 1 }
+    }
+    assert(holes == 0, "collapse refills every cleared cell")
+    assert(cx.spawns.len() == 3, "three cleared cells -> three spawns")
+}
+
+// ─── Spawn distribution ──────────────────────────────────────────────────────
+
+// The compatibility guarantee, checked directly rather than assumed. A uniform
+// distribution has to consume the RNG stream exactly as the bare `random_int`
+// call it replaced, or every recorded board snapshot in every consumer changes
+// for no behavioural reason.

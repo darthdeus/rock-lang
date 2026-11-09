@@ -1,0 +1,20 @@
+[package]
+name = "match3"
+version = "0.1.0"
+type = "bin"
+
+[language]
+modules = "v1"
+identity_storage = "exempt"
+
+[dependencies]
+stone = {package = "stone"}
+stone-core = {package = "stone-core"}
+match3-core = { path = "../../packages/match3-core" }
+
+[build]
+channels = ["dev", "direct"]
+default_channel = "dev"
+
+[build.vars]
+GIT_SHA = { value = "match3" }

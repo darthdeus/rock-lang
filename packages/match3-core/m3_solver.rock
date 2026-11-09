@@ -1,0 +1,423 @@
+// match3-core: legal-move enumeration, deadlock recovery, the structural
+// interestingness metric, and the seedable board generators. All pure over
+// M3Board and riding the seeded __rock_rng stream, so every result is
+// (seed) -> deterministic -- bakeable and replay-verifiable.
+//
+// The core metric is deliberately STRUCTURAL (mobility, combo seeds,
+// cascade depth, type balance). Gem *semantics* (which types are "good")
+// belong to the game, which can add its own term on top of m3_score.
+
+// ─── Legal-move enumeration ──────────────────────────────────────────────────
+
+// Longest run created at either cell by swapping the adjacent pair
+// (ax,ay)<->(bx,by); 0 if inert or < 3. Restores the board.
+pub fn m3_swap_run(b: M3Board, ax: int, ay: int, bx: int, by: int) -> int {
+    if m3_at(b, ax, ay) == m3_at(b, bx, by) { return 0 }
+    m3_swap(b, ax, ay, bx, by)
+    let best = max(m3_best_run(b, ax, ay), m3_best_run(b, bx, by))
+    m3_swap(b, ax, ay, bx, by)
+    if best < 3 { return 0 }
+    return best
+}
+
+pub fn m3_count_legal_moves(b: M3Board) -> int {
+    let n = 0
+    let y = 0
+    while y < b.h {
+        let x = 0
+        while x < b.w {
+            if x + 1 < b.w && m3_swap_run(b, x, y, x + 1, y) >= 3 { n = n + 1 }
+            if y + 1 < b.h && m3_swap_run(b, x, y, x, y + 1) >= 3 { n = n + 1 }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return n
+}
+
+pub fn m3_count_combo_moves(b: M3Board) -> int {
+    let n = 0
+    let y = 0
+    while y < b.h {
+        let x = 0
+        while x < b.w {
+            if x + 1 < b.w && m3_swap_run(b, x, y, x + 1, y) >= 4 { n = n + 1 }
+            if y + 1 < b.h && m3_swap_run(b, x, y, x, y + 1) >= 4 { n = n + 1 }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return n
+}
+
+// One legal swap (the first in scan order), or null if the board is dead.
+// A game's auto-play / hint reads the actual move; m3_has_legal_move is the
+// existence question over the same scan.
+pub value M3Move {
+    ax: int,
+    ay: int,
+    bx: int,
+    by: int,
+}
+
+pub fn m3_first_move(b: M3Board) -> M3Move? {
+    let y = 0
+    while y < b.h {
+        let x = 0
+        while x < b.w {
+            if x + 1 < b.w && m3_swap_run(b, x, y, x + 1, y) >= 3 {
+                return M3Move { ax: x, ay: y, bx: x + 1, by: y }
+            }
+            if y + 1 < b.h && m3_swap_run(b, x, y, x, y + 1) >= 3 {
+                return M3Move { ax: x, ay: y, bx: x, by: y + 1 }
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return null
+}
+
+pub fn m3_has_legal_move(b: M3Board) -> bool {
+    return m3_first_move(b) != null
+}
+
+// Every legal move, in the same scan order `m3_first_move` stops at. A game with
+// several auto-players needs the whole set rather than the first one: handed the
+// same move, two of them travel to one gem and the loser's swap is refused when
+// it arrives.
+//
+// This is the third scan in this file with the same body -- the other two count
+// and early-exit -- so `all_three_move_scans_agree` asserts they see the same
+// board, which is what stops them drifting apart.
+pub fn m3_moves(b: M3Board) -> [M3Move] {
+    let out: [M3Move] = []
+    let y = 0
+    while y < b.h {
+        let x = 0
+        while x < b.w {
+            if x + 1 < b.w && m3_swap_run(b, x, y, x + 1, y) >= 3 {
+                out.push(M3Move { ax: x, ay: y, bx: x + 1, by: y })
+            }
+            if y + 1 < b.h && m3_swap_run(b, x, y, x, y + 1) >= 3 {
+                out.push(M3Move { ax: x, ay: y, bx: x, by: y + 1 })
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+    return out
+}
+
+pub fn m3_move_cascade_depth(b: M3Board, ax: int, ay: int, bx: int, by: int) -> int {
+    let s = m3_copy(b)
+    m3_swap(s, ax, ay, bx, by)
+    let depth = 0
+    while m3_clear_and_settle(s) > 0 {
+        depth = depth + 1
+    }
+    return depth
+}
+
+// ─── Deadlock recovery ───────────────────────────────────────────────────────
+
+fn m3_shuffle(b: M3Board) {
+    let i = b.w * b.h - 1
+    while i > 0 {
+        let j = random_int(0, i + 1)
+        let t = b.cells[i]
+        b.cells[i] = b.cells[j]
+        b.cells[j] = t
+        i = i - 1
+    }
+}
+
+// If no legal move exists, reshuffle (preserving the gem multiset) until one
+// does and no pre-existing match remains. Bounded; returns playability.
+pub fn m3_ensure_playable(b: M3Board) -> bool {
+    if m3_has_legal_move(b) { return true }
+    let guard = 0
+    while guard < 50 {
+        m3_shuffle(b)
+        if m3_has_legal_move(b) && !m3_has_matches(b) {
+            return true
+        }
+        guard = guard + 1
+    }
+    return m3_has_legal_move(b)
+}
+
+// ─── Interestingness metric ──────────────────────────────────────────────────
+
+pub struct M3Stats {
+    legal_moves: int,
+    combo_moves: int,
+    best_cascade: int,
+    type_balance: float,   // 1.0 = perfectly even type spread, 0 = one dominates
+}
+
+pub fn m3_stats(b: M3Board, types: M3Types) -> M3Stats {
+    let type_count = m3_type_count(types)
+    let counts: [int] = []
+    let c = 0
+    while c < type_count {
+        counts.push(0)
+        c = c + 1
+    }
+    let i = 0
+    while i < b.w * b.h {
+        let t = b.cells[i]
+        if t >= 0 && t < type_count { counts[t] = counts[t] + 1 }
+        i = i + 1
+    }
+    let total = b.w * b.h
+    let ideal = total as float / type_count as float
+    let dev = 0.0
+    let k = 0
+    while k < type_count {
+        dev = dev + abs(counts[k] as float - ideal)
+        k = k + 1
+    }
+    let balance = 1.0 - clamp(dev / total as float, 0.0, 1.0)
+
+    // Single move scan: swap-run feeds legal/combo, cascade depth probed
+    // only for combo moves (the expensive part).
+    let legal = 0
+    let combo = 0
+    let best_cascade = 0
+    let y = 0
+    while y < b.h {
+        let x = 0
+        while x < b.w {
+            if x + 1 < b.w {
+                let run = m3_swap_run(b, x, y, x + 1, y)
+                if run >= 3 {
+                    legal = legal + 1
+                    if run >= 4 {
+                        combo = combo + 1
+                        best_cascade = max(best_cascade, m3_move_cascade_depth(b, x, y, x + 1, y))
+                    }
+                }
+            }
+            if y + 1 < b.h {
+                let run = m3_swap_run(b, x, y, x, y + 1)
+                if run >= 3 {
+                    legal = legal + 1
+                    if run >= 4 {
+                        combo = combo + 1
+                        best_cascade = max(best_cascade, m3_move_cascade_depth(b, x, y, x, y + 1))
+                    }
+                }
+            }
+            x = x + 1
+        }
+        y = y + 1
+    }
+
+    return M3Stats { legal_moves: legal, combo_moves: combo, best_cascade: best_cascade, type_balance: balance }
+}
+
+pub fn m3_score(s: M3Stats) -> float {
+    if s.legal_moves == 0 { return -1.0 }
+    return 1.0 * s.legal_moves as float
+         + 3.0 * s.best_cascade as float
+         + 2.0 * s.combo_moves as float
+         + 4.0 * s.type_balance
+}
+
+// ─── Generation ──────────────────────────────────────────────────────────────
+
+// ─── Spawn distribution ──────────────────────────────────────────────────────
+//
+// `type_count: int` used to say two things at once: how large the type space is,
+// and -- implicitly -- that spawning is uniform over it. A game that wants a
+// rare hazard needs the second to vary while the first does not, so spawn bias
+// used to be bolted on per game beside the core rather than expressed through
+// it. `M3Types` says both things in one value, and is the only description of
+// either.
+//
+// The uniform case draws EXACTLY as it always did: one `random_int`, same
+// arguments. That is not an optimisation. Recorded board snapshots depend on the
+// RNG draw, so a uniform distribution must consume the stream identically or
+// every snapshot in every consumer moves for no behavioural reason. The flag is
+// about the DRAW, not about the numbers -- `m3_weighted` with equal weights is
+// deliberately still the weighted path.
+
+pub struct M3Types {
+    weight: [float],
+    total: float,
+    uniform: bool,
+}
+
+pub fn m3_uniform(n: int) -> M3Types {
+    if n <= 0 {
+        error("m3: a board needs at least one gem type, got {n}")
+    }
+    let w: [float] = []
+    let i = 0
+    while i < n {
+        w.push(1.0)
+        i = i + 1
+    }
+    return M3Types { weight: w, total: n as float, uniform: true }
+}
+
+pub fn m3_weighted(weights: [float]) -> M3Types {
+    if weights.len() == 0 {
+        error("m3: a spawn distribution needs at least one type")
+    }
+    let total = 0.0
+    let i = 0
+    while i < weights.len() {
+        if weights[i] < 0.0 {
+            error("m3: negative spawn weight {weights[i]} for type {i}")
+        }
+        total = total + weights[i]
+        i = i + 1
+    }
+    if total <= 0.0 {
+        error("m3: every spawn weight is zero -- nothing could ever spawn")
+    }
+    let w: [float] = []
+    for x in weights {
+        w.push(x)
+    }
+    return M3Types { weight: w, total: total, uniform: false }
+}
+
+fn m3_type_count(t: M3Types) -> int {
+    return t.weight.len()
+}
+
+// The distribution math, split from the draw so both ends of it have a
+// population: the interesting inputs are `u = 0` and `u` a hair under 1, and
+// neither is reachable often enough to test through the RNG.
+//
+// Zero-weight types are skipped rather than compared past, which is what makes
+// "a type with no weight never spawns" true by construction instead of true by
+// a strict inequality that a rounding change could flip.
+fn m3_pick_type(t: M3Types, u: float) -> int {
+    let pick = u * t.total
+    let acc = 0.0
+    let last = -1
+    let i = 0
+    while i < t.weight.len() {
+        if t.weight[i] > 0.0 {
+            acc = acc + t.weight[i]
+            if pick < acc {
+                return i
+            }
+            last = i
+        }
+        i = i + 1
+    }
+    // Summing floats can leave `pick` a hair above the final accumulation. The
+    // last type CARRYING WEIGHT is the right answer there; the last index would
+    // not be, and handing back a zero-weight type is the one thing this must
+    // never do.
+    if last < 0 {
+        error("m3: distribution has no positive weight")
+    }
+    return last
+}
+
+fn m3_random_type(t: M3Types) -> int {
+    if t.uniform {
+        return random_int(0, t.weight.len())
+    }
+    return m3_pick_type(t, random())
+}
+
+fn m3_random_type_no_match(b: M3Board, x: int, y: int, types: M3Types) -> int {
+    let attempt = 0
+    while attempt < 20 {
+        let t = m3_random_type(types)
+        let bad = false
+        if x >= 2 && m3_at(b, x - 1, y) == t && m3_at(b, x - 2, y) == t { bad = true }
+        if !bad && y >= 2 && m3_at(b, x, y - 1) == t && m3_at(b, x, y - 2) == t { bad = true }
+        if !bad { return t }
+        attempt = attempt + 1
+    }
+    return m3_random_type(types)
+}
+
+pub fn m3_gen_random(w: int, h: int, types: M3Types) -> M3Board {
+    let b = m3_empty_board(w, h)
+    let j = 0
+    while j < w * h {
+        let x = j % w
+        let y = j ./ w
+        b.cells[j] = m3_random_type_no_match(b, x, y, types)
+        j = j + 1
+    }
+    return b
+}
+
+pub fn m3_gen_lookahead(w: int, h: int, types: M3Types, tries: int) -> M3Board {
+    let best = m3_gen_random(w, h, types)
+    let best_score = m3_score(m3_stats(best, types))
+    let n = 1
+    while n < tries {
+        let cand = m3_gen_random(w, h, types)
+        let sc = m3_score(m3_stats(cand, types))
+        if sc > best_score {
+            best = cand
+            best_score = sc
+        }
+        n = n + 1
+    }
+    return best
+}
+
+// ─── Generation strategy seam ───────────────────────────────────────────────
+
+pub global M3_GEN_RANDOM: int    = 0
+pub global M3_GEN_LOOKAHEAD: int = 1
+pub global M3_GEN_SOLVER: int    = 2
+pub global M3_GEN_BAKED: int     = 3
+
+pub struct M3GenStrategy {
+    kind: int,
+    tries: int,
+    min_cascade: int,
+    min_combo: int,
+    baked: M3Board,
+}
+
+// Generate-and-test with an acceptance oracle: the first candidate admitting
+// a combo-rich line (cascade depth + combo-move thresholds), else the
+// best-scoring fallback. Reuses the structural metric -- no parallel scorer.
+fn m3_gen_solver(w: int, h: int, types: M3Types, strat: M3GenStrategy) -> M3Board {
+    let best = m3_gen_random(w, h, types)
+    let best_score = m3_score(m3_stats(best, types))
+    let n = 1
+    while n < strat.tries {
+        let cand = m3_gen_random(w, h, types)
+        let s = m3_stats(cand, types)
+        if s.legal_moves > 0 && s.best_cascade >= strat.min_cascade && s.combo_moves >= strat.min_combo {
+            return cand
+        }
+        let sc = m3_score(s)
+        if sc > best_score {
+            best = cand
+            best_score = sc
+        }
+        n = n + 1
+    }
+    return best
+}
+
+pub fn m3_strategy_lookahead(tries: int) -> M3GenStrategy {
+    return M3GenStrategy { kind: M3_GEN_LOOKAHEAD, tries: tries, min_cascade: 0, min_combo: 0, baked: m3_empty_board(0, 0) }
+}
+
+pub fn m3_strategy_solver(tries: int, min_cascade: int, min_combo: int) -> M3GenStrategy {
+    return M3GenStrategy { kind: M3_GEN_SOLVER, tries: tries, min_cascade: min_cascade, min_combo: min_combo, baked: m3_empty_board(0, 0) }
+}
+
+pub fn m3_generate(w: int, h: int, types: M3Types, strat: M3GenStrategy) -> M3Board {
+    if strat.kind == M3_GEN_RANDOM { return m3_gen_random(w, h, types) }
+    if strat.kind == M3_GEN_BAKED { return m3_copy(strat.baked) }
+    if strat.kind == M3_GEN_SOLVER { return m3_gen_solver(w, h, types, strat) }
+    return m3_gen_lookahead(w, h, types, strat.tries)
+}

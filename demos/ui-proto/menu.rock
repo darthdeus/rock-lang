@@ -1,0 +1,44 @@
+// Main menu screen.
+
+@late_draw(stage = 10)
+fn draw_menu() {
+    if CURRENT_SCREEN != SCREEN_MENU { return }
+
+    let s = screen_size()
+    let cx = s.x / 2
+    let cy = s.y / 2
+
+    // Background
+    ui_full_screen().fill(Color { r: 0.06, g: 0.06, b: 0.1, a: 1.0 })
+
+    // Title
+    let title = "UI PROTOTYPE"
+    let title_size = measure_text(title, 48.0)
+    draw_text_immediate(DrawSpace::Target, title, v(cx, cy - 160.0) - title_size / 2, 48.0, WHITE, v())
+
+    // Subtitle
+    let sub = "a stone engine demo"
+    let sub_size = measure_text(sub, 16.0)
+    draw_text_immediate(DrawSpace::Target, sub, v(cx, cy - 120.0) - sub_size / 2, 16.0, Color { r: 0.5, g: 0.5, b: 0.7, a: 1.0 }, v())
+
+    // Buttons stacked from center
+    let bw = 260.0
+    let bh = 52.0
+    let gap = 16.0
+    let total = bh * 3.0 + gap * 2.0
+    let top = cy - total / 2 + 30.0
+
+    let r1 = ui_from_top_left(v(cx - bw / 2, top), v(bw, bh))
+    let r2 = ui_from_top_left(v(cx - bw / 2, top + bh + gap), v(bw, bh))
+    let r3 = ui_from_top_left(v(cx - bw / 2, top + (bh + gap) * 2.0), v(bw, bh))
+
+    if button(r1, "New Game", 24.0) {
+        switch_screen(SCREEN_GAME)
+    }
+
+    button(r2, "Options", 24.0)
+
+    if button(r3, "Quit", 24.0) {
+        stone_quit()
+    }
+}

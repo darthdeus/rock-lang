@@ -1,0 +1,26 @@
+fn main() {
+    stone_run_game(GameConfig {
+        title: "UI Prototype",
+        width: 1280,
+        height: 720,
+        font_path: "@engine/assets/fonts/DroidSans.ttf",
+        font_size: 48,
+        clear_color: Color { r: 0.05, g: 0.05, b: 0.08, a: 1.0 },
+    })
+}
+
+@init
+fn proto_init() {
+    ENGINE.use_bloom = false
+    CURRENT_SCREEN = SCREEN_MENU
+    FADE_ALPHA = 0.0
+    TRANSITIONING = false
+}
+
+// Fade overlay drawn last, on top of everything
+@late_draw(stage = 99)
+fn draw_fade_overlay() {
+    if FADE_ALPHA > 0.001 {
+        let _ = ui_full_screen().fill(BLACK.alpha(FADE_ALPHA))
+    }
+}
