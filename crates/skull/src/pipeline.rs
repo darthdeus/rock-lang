@@ -183,7 +183,12 @@ pub trait CompileHost {
             .project_root(target.project_root)
             .renderer(target.renderer)
             .run(ws, entry)
-            .map(|(emit, _cache)| emit)
+            .map(|(emit, cache)| {
+                // The emitted program is complete; the cache is dead weight
+                // whose release need not delay it.
+                crate::mir_emit::par::drop_in_background(cache);
+                emit
+            })
     }
 }
 
