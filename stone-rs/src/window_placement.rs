@@ -595,7 +595,7 @@ fn save_geometry_to(
         return false;
     }
     // Merge into whatever is there so other games'/topologies' entries survive.
-    let mut root: serde_json::Value = std::fs::read_to_string(&path)
+    let mut root: serde_json::Value = std::fs::read_to_string(path)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .filter(|v: &serde_json::Value| v.is_object())
@@ -620,7 +620,7 @@ fn save_geometry_to(
         ::log::error!(target: "STONE", "writing {} failed: {}", tmp.display(), e);
         return false;
     }
-    if let Err(e) = std::fs::rename(&tmp, &path) {
+    if let Err(e) = std::fs::rename(&tmp, path) {
         ::log::error!(target: "STONE", "renaming {} -> {} failed: {}", tmp.display(), path.display(), e);
         let _ = std::fs::remove_file(&tmp);
         return false;
