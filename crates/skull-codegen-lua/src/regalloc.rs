@@ -224,6 +224,41 @@ pub fn color_values(
         vi[raw(v)] = i as u32;
     }
 
+    // The dense indices each emitted statement and each terminator reads,
+    // flattened once: both liveness walks read them, and seeing through
+    // inlined operands is the expensive part of either. A statement's list
+    // runs from `use_off[raw(id)]` to the next statement's start; a block's
+    // terminator list is `term_range[bi]`.
+    let mut use_list: Vec<u32> = Vec::new();
+    let mut use_range = vec![(0u32, 0u32); func.insts.len()];
+    let mut term_range = vec![(0u32, 0u32); n];
+    for (bi, &b) in blocks.iter().enumerate() {
+        let block = &func.blocks[b];
+        for &id in &block.insts {
+            if inline[raw(id)] {
+                continue;
+            }
+            let start = use_list.len() as u32;
+            effective_uses(func, inline, &func.insts[id], &mut |v| {
+                use_list.push(vi[raw(v)]);
+            });
+            use_range[raw(id)] = (start, use_list.len() as u32);
+        }
+        let start = use_list.len() as u32;
+        term_uses(&block.term, &mut |v| {
+            // term operands may be inlined too -> see through them.
+            if inline[raw(v)] {
+                effective_uses(func, inline, &func.insts[v], &mut |w| {
+                    use_list.push(vi[raw(w)]);
+                });
+            } else {
+                use_list.push(vi[raw(v)]);
+            }
+        });
+        term_range[bi] = (start, use_list.len() as u32);
+    }
+    let list = |range: (u32, u32)| &use_list[range.0 as usize..range.1 as usize];
+
     // Per-block upward-exposed uses and defs (bit sets). Inlined insts are skipped
     // (no def, no own-position use — their reads fold in at the use site).
     let mut use_set: Vec<BitSet> = vec![BitSet::new(v_count); n];
@@ -234,30 +269,22 @@ pub fn color_values(
             if inline[raw(id)] {
                 continue;
             }
-            effective_uses(func, inline, &func.insts[id], &mut |v| {
-                let k = vi[raw(v)] as usize;
+            for &k in list(use_range[raw(id)]) {
+                let k = k as usize;
                 if def_set[bi].words[k >> 6] & (1u64 << (k & 63)) == 0 {
                     use_set[bi].set(k);
                 }
-            });
+            }
             if func.insts[id].produces_value() {
                 def_set[bi].set(vi[raw(id)] as usize);
             }
         }
-        term_uses(&block.term, &mut |v| {
-            // term operands may be inlined too -> see through them.
-            let mut mark = |w: Idx<Inst>| {
-                let k = vi[raw(w)] as usize;
-                if def_set[bi].words[k >> 6] & (1u64 << (k & 63)) == 0 {
-                    use_set[bi].set(k);
-                }
-            };
-            if inline[raw(v)] {
-                effective_uses(func, inline, &func.insts[v], &mut mark);
-            } else {
-                mark(v);
+        for &k in list(term_range[bi]) {
+            let k = k as usize;
+            if def_set[bi].words[k >> 6] & (1u64 << (k & 63)) == 0 {
+                use_set[bi].set(k);
             }
-        });
+        }
     }
 
     // Backward liveness fixpoint (in = use ∪ (out \ def)).
@@ -392,7 +419,7 @@ pub fn color_values(
     // has no duplicates and the resulting coloring is identical to the dense one.
     let mut edges: Vec<(u32, u32)> = Vec::new();
     let mut live = BitSet::new(v_count);
-    for &b in blocks.iter() {
+    for (bi, &b) in blocks.iter().enumerate() {
         let block = &func.blocks[b];
         // live-out = ∪ successors' live-in (recomputed; no stored live_out array).
         live.clear();
@@ -402,16 +429,10 @@ pub fn color_values(
                 live.or_with(&live_in[si]);
             }
         });
-        term_uses(&block.term, &mut |v| {
-            // term operands are after all insts; see through inlined ones.
-            if inline[raw(v)] {
-                effective_uses(func, inline, &func.insts[v], &mut |w| {
-                    live.set(vi[raw(w)] as usize)
-                });
-            } else {
-                live.set(vi[raw(v)] as usize);
-            }
-        });
+        // term operands are after all insts.
+        for &k in list(term_range[bi]) {
+            live.set(k as usize);
+        }
         for &id in block.insts.iter().rev() {
             if inline[raw(id)] {
                 continue; // no register; its reads fold in at the use site
@@ -421,9 +442,9 @@ pub fn color_values(
                 live.remove(d as usize);
                 live.for_each(|o| edges.push((d, o as u32)));
             }
-            effective_uses(func, inline, &func.insts[id], &mut |v| {
-                live.set(vi[raw(v)] as usize)
-            });
+            for &k in list(use_range[raw(id)]) {
+                live.set(k as usize);
+            }
         }
     }
     let adj = Csr::from_edges(&edges, v_count);
@@ -676,26 +697,46 @@ pub(crate) fn color_cells_with_analysis(
     // Per-block upward-exposed uses and defs (bit sets) over top-level blocks.
     let mut use_set: Vec<BitSet> = vec![BitSet::new(c_count); n];
     let mut def_set: Vec<BitSet> = vec![BitSet::new(c_count); n];
+    // The dense cells each statement and each terminator reads, flattened
+    // once for both liveness walks; seeing through inlined operands is the
+    // expensive part of either.
+    let mut use_list: Vec<u32> = Vec::new();
+    let mut use_range = vec![(0u32, 0u32); func.insts.len()];
+    let mut term_range = vec![(0u32, 0u32); n];
+    for (bi, &b) in top.iter().enumerate() {
+        for &id in &func.blocks[b].insts {
+            let start = use_list.len() as u32;
+            emitted_cell_uses(func, inline, id, &mut |c| use_list.push(ci[raw(c)]));
+            use_range[raw(id)] = (start, use_list.len() as u32);
+        }
+        let start = use_list.len() as u32;
+        term_cell_uses(func, inline, &func.blocks[b].term, &mut |c| {
+            use_list.push(ci[raw(c)])
+        });
+        term_range[bi] = (start, use_list.len() as u32);
+    }
+    let list = |range: (u32, u32)| &use_list[range.0 as usize..range.1 as usize];
+
     for (bi, &b) in top.iter().enumerate() {
         for &id in &func.blocks[b].insts {
             // A MapNext both uses (cursor) and defs (key,val); process the use
             // first so the cursor read is upward-exposed.
-            emitted_cell_uses(func, inline, id, &mut |c| {
-                let k = ci[raw(c)] as usize;
+            for &k in list(use_range[raw(id)]) {
+                let k = k as usize;
                 if def_set[bi].words[k >> 6] & (1u64 << (k & 63)) == 0 {
                     use_set[bi].set(k);
                 }
-            });
+            }
             cell_defs(&func.insts[id], &mut |c| {
                 def_set[bi].set(ci[raw(c)] as usize)
             });
         }
-        term_cell_uses(func, inline, &func.blocks[b].term, &mut |c| {
-            let k = ci[raw(c)] as usize;
+        for &k in list(term_range[bi]) {
+            let k = k as usize;
             if def_set[bi].words[k >> 6] & (1u64 << (k & 63)) == 0 {
                 use_set[bi].set(k);
             }
-        });
+        }
     }
 
     // Backward liveness via a WORKLIST (in = use ∪ (out \ def)). Cells cross
@@ -802,7 +843,7 @@ pub(crate) fn color_cells_with_analysis(
     };
     let mut live = BitSet::new(c_count);
     let mut defs: Vec<usize> = Vec::new();
-    for &b in top.iter() {
+    for (bi, &b) in top.iter().enumerate() {
         let block = &func.blocks[b];
         // live-out = ∪ successors' live-in (recomputed; no stored live_out array).
         live.clear();
@@ -812,9 +853,9 @@ pub(crate) fn color_cells_with_analysis(
                 live.or_with(&live_in[si]);
             }
         });
-        term_cell_uses(func, inline, &block.term, &mut |c| {
-            live.set(ci[raw(c)] as usize)
-        });
+        for &k in list(term_range[bi]) {
+            live.set(k as usize);
+        }
         for &id in block.insts.iter().rev() {
             defs.clear();
             cell_defs(&func.insts[id], &mut |c| defs.push(ci[raw(c)] as usize));
@@ -824,7 +865,9 @@ pub(crate) fn color_cells_with_analysis(
             for &d in &defs {
                 live.remove(d);
             }
-            emitted_cell_uses(func, inline, id, &mut |c| live.set(ci[raw(c)] as usize));
+            for &k in list(use_range[raw(id)]) {
+                live.set(k as usize);
+            }
         }
         // Params are live from entry: interfere them with live-in to entry and
         // with one another.
@@ -1181,6 +1224,29 @@ pub(crate) fn nil_kills(
         });
     };
 
+    // The slots each emitted statement defines and then reads, flattened once:
+    // the forward liveness pass and the backward kill walk both read them, and
+    // the walk through inlined operands is the expensive part of either.
+    let mut stmt_slots: Vec<u32> = Vec::new();
+    let mut stmt_range = vec![(0u32, 0u32, 0u32); func.insts.len()];
+    for &b in scope {
+        for &id in &func.blocks[b].insts {
+            if inline[raw(id)] {
+                continue;
+            }
+            let start = stmt_slots.len() as u32;
+            defs_of(id, &mut |s| stmt_slots.push(s as u32));
+            let n_defs = stmt_slots.len() as u32 - start;
+            uses_of(id, &mut |s| stmt_slots.push(s as u32));
+            stmt_range[raw(id)] = (start, n_defs, stmt_slots.len() as u32);
+        }
+    }
+    let stmt_defs_uses = |id: Idx<Inst>| -> (&[u32], &[u32]) {
+        let (start, n_defs, end) = stmt_range[raw(id)];
+        let slots = &stmt_slots[start as usize..end as usize];
+        slots.split_at(n_defs as usize)
+    };
+
     // Per-block upward-exposed uses and defs, then the same worklist liveness
     // as `color_cells_with_analysis`, over the slot space.
     let mut use_set: Vec<BitSet> = vec![BitSet::new(s_count); n];
@@ -1190,12 +1256,15 @@ pub(crate) fn nil_kills(
             if inline[raw(id)] {
                 continue;
             }
-            uses_of(id, &mut |s| {
-                if !def_set[bi].get(s) {
-                    use_set[bi].set(s);
+            let (defs, uses) = stmt_defs_uses(id);
+            for &s in uses {
+                if !def_set[bi].get(s as usize) {
+                    use_set[bi].set(s as usize);
                 }
-            });
-            defs_of(id, &mut |s| def_set[bi].set(s));
+            }
+            for &s in defs {
+                def_set[bi].set(s as usize);
+            }
         }
         term_slots(&func.blocks[b].term, &mut |s| {
             if !def_set[bi].get(s) {
@@ -1279,7 +1348,7 @@ pub(crate) fn nil_kills(
     // straight-line continuation defines. Such a kill would only cost the
     // interpreter a `KPRI`.
     let mut live = BitSet::new(s_count);
-    let mut touched: Vec<usize> = Vec::new();
+    let mut dead: Vec<usize> = Vec::new();
     let mut next_pure_defs: Vec<usize> = Vec::new();
     for (bi, &b) in scope.iter().enumerate() {
         let block = &func.blocks[b];
@@ -1297,18 +1366,16 @@ pub(crate) fn nil_kills(
             if inline[raw(id)] {
                 continue;
             }
-            touched.clear();
-            defs_of(id, &mut |s| touched.push(s));
-            let n_defs = touched.len();
-            uses_of(id, &mut |s| touched.push(s));
-            let mut dead: Vec<usize> = Vec::new();
-            for &s in &touched {
+            let (defs, uses) = stmt_defs_uses(id);
+            dead.clear();
+            for &s in defs.iter().chain(uses) {
+                let s = s as usize;
                 if !live.get(s) && !dead.contains(&s) && !next_pure_defs.contains(&s) {
                     dead.push(s);
                 }
             }
             if statement_is_pure(func, inline, id) {
-                next_pure_defs.extend_from_slice(&touched[..n_defs]);
+                next_pure_defs.extend(defs.iter().map(|&s| s as usize));
             } else {
                 next_pure_defs.clear();
             }
@@ -1316,11 +1383,11 @@ pub(crate) fn nil_kills(
                 let local = kills.decode(s);
                 kills.after_inst[raw(id)].push(local);
             }
-            for &s in &touched[..n_defs] {
-                live.remove(s);
+            for &s in defs {
+                live.remove(s as usize);
             }
-            for &s in &touched[n_defs..] {
-                live.set(s);
+            for &s in uses {
+                live.set(s as usize);
             }
         }
         // After the walk this holds the defs of the leading pure statements.
