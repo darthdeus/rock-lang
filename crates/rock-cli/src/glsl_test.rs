@@ -45,7 +45,7 @@ const GLSL_FLOAT_REL_TOL: f64 = 1e-6;
 const PROFILES: [(&str, GlslProfile); 1] = [("330core", GlslProfile::Core330)];
 
 /// One profile's tallies over the whole run.
-pub(crate) struct GlslProfileSummary {
+pub struct GlslProfileSummary {
     /// `"330core"`.
     pub profile: &'static str,
     pub passed: usize,
@@ -59,7 +59,7 @@ pub(crate) struct GlslProfileSummary {
 }
 
 /// Whole-run tallies -- the testable core consumed by the ratchet test.
-pub(crate) struct GlslSuiteSummary {
+pub struct GlslSuiteSummary {
     pub files: usize,
     /// Tier-1: `@test` fns with no `returns=` (outside the value class). One
     /// collapsed number, never a histogram.
@@ -616,7 +616,7 @@ fn spawn_runner(
 // the shaders games actually register.
 
 /// One profile's tallies over a `shader-validate` run.
-pub(crate) struct ValidateProfileSummary {
+pub struct ValidateProfileSummary {
     /// `"330core"`.
     pub profile: &'static str,
     pub passed: usize,
@@ -627,7 +627,7 @@ pub(crate) struct ValidateProfileSummary {
 }
 
 /// Whole-run tallies for `rock shader-validate` -- the testable core.
-pub(crate) struct ValidateSummary {
+pub struct ValidateSummary {
     /// (project dir, registered shader-pair count).
     pub projects: Vec<(String, usize)>,
     pub per_profile: Vec<ValidateProfileSummary>,
