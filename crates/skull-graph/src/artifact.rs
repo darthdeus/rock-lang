@@ -135,7 +135,7 @@ impl<'a> ArtifactMappings<'a> {
 /// spelling under the artifact, so "every artifact spells this instance alike"
 /// is a property of the default planner and not of the model. A test planner
 /// that renames deliberately is what keeps the two apart.
-pub trait SymbolPlanner {
+pub trait SymbolPlanner: Sync {
     fn symbol(&self, ws: &Workspace, g: &InstanceGraph, i: &Instance, realized: Realized)
         -> String;
     fn describe(&self) -> &'static str;
@@ -2109,12 +2109,15 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
                      instances: &mut BTreeSet<Instance>,
                      realization: &mut BTreeMap<Instance, Realized>,
                      queue: &mut VecDeque<Instance>| {
+        // Most sites reach an instance already admitted; ask before cloning
+        // the key into the record.
+        if realization.contains_key(i) {
+            return;
+        }
         let r = *index.realizable[i]
             .as_ref()
             .expect("admitted means realizable");
-        if realization.insert(i.clone(), r).is_some() {
-            return;
-        }
+        realization.insert(i.clone(), r);
         index
             .realization_by_decl
             .entry(r.decl)
@@ -2203,8 +2206,16 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // One symbol per retained instance, from THIS artifact's planner.
     let mut by_symbol: BTreeMap<String, Vec<Instance>> = BTreeMap::new();
     let mut symbols = BTreeMap::new();
-    for i in realization.keys() {
-        let s = req.symbols.symbol(ws, g, i, realization[i]);
+    // The planner answers each instance independently; the names are
+    // derived in parallel and recorded in instance order.
+    let planned: Vec<(&Instance, String)> = {
+        use bone_core::prelude::*;
+        let rows: Vec<(&Instance, Realized)> = realization.iter().map(|(i, r)| (i, *r)).collect();
+        rows.into_par_iter()
+            .map(|(i, r)| (i, req.symbols.symbol(ws, g, i, r)))
+            .collect()
+    };
+    for (i, s) in planned {
         by_symbol.entry(s.clone()).or_default().push(i.clone());
         index
             .symbol_users
