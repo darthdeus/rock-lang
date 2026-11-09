@@ -79,7 +79,7 @@ fn hook_fn_shared_across_constructions_and_still_fires() {
         local log_key = __rock_global_entry(\"LOG\").slots[1]\n\
         print(__rock_globals[log_key])\n"
     );
-    let out = run_luajit(&format!("{lua}{driver}"), "shared");
+    let out = run_luajit(&format!("{lua}{driver}"));
     assert_eq!(
         out, "shared\n105",
         "every fn-typed handle field must be shared across constructions and \

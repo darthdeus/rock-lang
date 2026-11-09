@@ -1,4 +1,4 @@
-use crate::common::{definition_names, emit_mir, run_luajit};
+use crate::common::{definition_names, emit_mir, run_luajit, run_main};
 
 #[test]
 fn branch_conditions_preserve_short_circuit_order_and_value_uses() {
@@ -59,10 +59,7 @@ print('ok')
         assert_eq!(symbols.len(), 1, "one callable for {name}: {symbols:?}");
         checks = checks.replace(&format!("{name}("), &format!("{}(", symbols[0]));
     }
-    assert_eq!(
-        run_luajit(&format!("{}\n{checks}", emitted.lua), "condition_branches"),
-        "ok"
-    );
+    assert_eq!(run_luajit(&format!("{}\n{checks}", emitted.lua)), "ok");
 }
 
 #[test]
@@ -140,7 +137,7 @@ fn main() {
 "#;
     let emitted = emit_mir(src);
     assert_eq!(
-        run_luajit(&format!("{}\nmain()", emitted.lua), "condition_nullable"),
+        run_main(&emitted.lua),
         "2\n1\n2\n2\n1\n2\n2\n1\n2\n0\n1\n1\n2\n2\n1\n2\n3\n0\n0\n1"
     );
 }

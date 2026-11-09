@@ -18,6 +18,7 @@
 //! instantiation too -- there is no shared generic body to fall back to.
 
 use crate::common;
+use crate::common::compile_and_run;
 use std::collections::BTreeSet;
 
 /// One generic `co fn`, two column-stored instantiations with different element
@@ -122,12 +123,6 @@ fn main() {
 }
 "#;
 
-fn run(src: &str, tag: &str) -> String {
-    let lua =
-        common::try_emit_module(src).unwrap_or_else(|e| panic!("must emit ({tag}): {}", e.message));
-    common::run_luajit(&format!("{lua}\nmain()\n"), tag)
-}
-
 /// Every top-level `<name>__step` definition the program carries, in emission
 /// order, in whichever callee shape the build emits.
 fn step_definitions(lua: &str) -> Vec<String> {
@@ -142,7 +137,7 @@ fn step_definitions(lua: &str) -> Vec<String> {
 #[test]
 fn two_column_instantiations_of_one_generic_coroutine_each_answer_their_own_length() {
     assert_eq!(
-        run(TWO_COLUMN_INSTANCES, "two_col_co"),
+        compile_and_run(TWO_COLUMN_INSTANCES),
         "2 3",
         "each instantiation of a generic `co fn` must run against its own \
          element's representation: `[P]` has 2 elements and `[Q]` has 3, and a \
@@ -184,16 +179,13 @@ fn each_column_instantiation_owns_its_own_step_symbol() {
 /// above attributable to genericity.
 #[test]
 fn a_non_generic_coroutine_over_a_column_vec_is_correct() {
-    assert_eq!(run(CONCRETE_CO_COLUMN, "concrete_co_col"), "2");
+    assert_eq!(compile_and_run(CONCRETE_CO_COLUMN), "2");
 }
 
 #[test]
 fn a_coroutine_keeps_a_multi_return_used_after_its_first_call() {
     assert_eq!(
-        run(
-            COROUTINE_RETAINS_MULTI_RETURN_AFTER_INITIAL_CALL,
-            "co_retained_multi"
-        ),
+        compile_and_run(COROUTINE_RETAINS_MULTI_RETURN_AFTER_INITIAL_CALL),
         "3\n10"
     );
 }
@@ -239,7 +231,7 @@ fn defined_and_referenced(lua: &str, prefix: &str) -> (BTreeSet<String>, BTreeSe
 /// break it.
 #[test]
 fn a_generic_coroutine_over_boxed_elements_owns_a_family_per_instance() {
-    assert_eq!(run(GENERIC_CO_BOXED, "gen_co_boxed"), "2 3");
+    assert_eq!(compile_and_run(GENERIC_CO_BOXED), "2 3");
     let lua = common::try_emit_module(GENERIC_CO_BOXED).expect("must emit");
 
     let (defined, referenced) = defined_and_referenced(&lua, "walk_");

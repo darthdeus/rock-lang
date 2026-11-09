@@ -2,7 +2,7 @@
 //! registers an ordinary-fn `defer` enters itself through `__rock_defer_call`,
 //! which unwinds the registered cleanups when an error escapes and re-raises
 //! it. A function without `defer` carries none of that machinery.
-use crate::common::{emit_module, function_body, mangled_name, run_luajit};
+use crate::common::{emit_module, function_body, mangled_name, run_main};
 
 const FIXTURE: &str = r#"
 global LOG: string = ""
@@ -64,6 +64,6 @@ fn fn_without_defer_has_no_unwind_machinery() {
 #[test]
 fn defer_runs_on_normal_exit_and_on_error() {
     let emit = emit_module(FIXTURE);
-    let out = run_luajit(&format!("{emit}\nmain()\n"), "defer_unwind");
+    let out = run_main(&emit);
     assert_eq!(out, "3 raised g;g;");
 }

@@ -23,31 +23,7 @@
 //! unmarked does no leaf splitting at all and is only opportunistically
 //! scalarized by SROA afterwards. Only the nullability QUERY was duplicated.
 
-use std::process::Command;
-
-fn run_capturing(prog: &str, tag: &str) -> (bool, String) {
-    let path =
-        std::env::temp_dir().join(format!("skull_sentinel_{}_{tag}.lua", std::process::id()));
-    std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("spawn luajit");
-    let _ = std::fs::remove_file(&path);
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    (out.status.success(), combined)
-}
-
-fn run_ok(src: &str, tag: &str) -> String {
-    let lua = crate::common::try_emit_module(src).expect("must emit");
-    let (ok, out) = run_capturing(&format!("{lua}\nmain()\n"), tag);
-    assert!(ok, "program must run:\n{out}");
-    out.trim().to_string()
-}
+use crate::common::compile_and_run;
 
 /// The minimal form: no loop, no iterator, no columns. Just a generic bound to
 /// `BV2?` whose `let` escapes.
@@ -102,28 +78,22 @@ fn main() {
 
 #[test]
 fn a_generic_bound_to_a_nullable_value_keeps_its_absent_row() {
-    assert_eq!(run_ok(GENERIC_LET, "nullable_generic_let"), "true 1");
+    assert_eq!(compile_and_run(GENERIC_LET), "true 1");
 }
 
 #[test]
 fn iterating_an_absent_row_works() {
-    assert_eq!(run_ok(ITERATE, "nullable_generic_iter"), "3");
+    assert_eq!(compile_and_run(ITERATE), "3");
 }
 
 #[test]
 fn indexed_reads_are_correct() {
-    assert_eq!(
-        run_ok(INDEXED, "nullable_generic_indexed"),
-        "true true true 3"
-    );
+    assert_eq!(compile_and_run(INDEXED), "true true true 3");
 }
 
 #[test]
 fn the_non_generic_twin_is_correct() {
-    assert_eq!(
-        run_ok(NON_GENERIC, "nullable_generic_nongeneric"),
-        "true true"
-    );
+    assert_eq!(compile_and_run(NON_GENERIC), "true true");
 }
 
 /// THE PROPERTY THE FIX ENDANGERED. `nonnull_value_struct` exists to LICENSE
@@ -154,7 +124,7 @@ fn main() {
         "a non-nullable value through a generic `let` must stay scalarized, not \
          rebuild a cdata -- the SROA license this fix narrowed:\n{body}"
     );
-    assert_eq!(run_ok(SRC, "nullable_generic_nonnull"), "3");
+    assert_eq!(compile_and_run(SRC), "3");
 }
 
 /// THE SAME LICENSE, reached through SROA's OWN field cells rather than a
@@ -186,5 +156,5 @@ fn main() {
     print("{sink(Part::One(Outer { ..o, a: 8.0 }))}")
 }
 "#;
-    assert_eq!(run_ok(SRC, "sroa_field_cell_absent"), "-1 8");
+    assert_eq!(compile_and_run(SRC), "-1 8");
 }

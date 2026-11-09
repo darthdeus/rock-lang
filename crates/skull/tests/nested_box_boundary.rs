@@ -1,5 +1,6 @@
 use crate::common::{
-    AllocationActivationGuard, emit_mir, emit_module, run_luajit, try_emit_module,
+    AllocationActivationGuard, compile_and_run, emit_mir, emit_module, run_luajit, run_main,
+    try_emit_module,
 };
 
 fn remove_handle(method: &str) {
@@ -18,7 +19,7 @@ fn main() {{
 "#
     );
     let lua = try_emit_module(&source).expect("generic handle removal must lower");
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), method), "7\t9\t1");
+    assert_eq!(run_main(&lua), "7\t9\t1");
 }
 
 #[test]
@@ -64,9 +65,8 @@ fn attach<T>(owner: Entity<T>, field: FieldRef<T, Task?>) -> Entry {
 fn main() { let _ = update(make_entry()) }
 "#;
     let lua = emit_module(source);
-    let out = run_luajit(
-        &format!(
-            r#"{lua}
+    let out = run_luajit(&format!(
+        r#"{lua}
 jit.off(); jit.flush()
 local entry = make_entry()
 for i = 1, 4 do update(entry) end
@@ -79,9 +79,7 @@ collectgarbage('restart')
 assert(total >= 0)
 print(bytes)
 "#
-        ),
-        "coroutine_slot_updates",
-    );
+    ));
     let bytes: f64 = out.parse().expect("bytes per slot update");
     eprintln!("coroutine slot bytes/update: {bytes}");
     assert!(bytes < 1.0, "slot update allocates {bytes} bytes");
@@ -170,10 +168,7 @@ fn main() {{
 "#
     );
     let lua = emit_module(&source);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "opaque_result_snapshots"),
-        "ok"
-    );
+    assert_eq!(run_main(&lua), "ok");
 }
 
 const SOURCE: &str = r#"
@@ -193,7 +188,7 @@ value HandleRow { handle: Entity<int>?, sequence: int }
 fn main() { let _ = retain(relay(make(42.0))) }
 "#;
 
-fn allocation_probe(tag: &str, probe: &str) -> String {
+fn allocation_probe(probe: &str) -> String {
     let _activation = AllocationActivationGuard::on();
     let emit = emit_mir(SOURCE);
     let mut lua = emit.lua;
@@ -230,14 +225,13 @@ tables, cdata = 0, 0
 "#,
     );
     lua.push_str(probe);
-    run_luajit(&lua, tag)
+    run_luajit(&lua)
 }
 
 #[test]
 fn returning_a_record_keeps_its_boxed_child() {
     assert_eq!(
         allocation_probe(
-            "returning_a_record_keeps_its_boxed_child",
             r#"
 local result = relay(receipt)
 print(tables, cdata, rawequal(receipt.landing, result.landing))
@@ -251,7 +245,6 @@ print(tables, cdata, rawequal(receipt.landing, result.landing))
 fn passing_a_record_into_an_enum_keeps_its_boxed_child() {
     assert_eq!(
         allocation_probe(
-            "passing_a_record_into_an_enum_keeps_its_boxed_child",
             r#"
 local result = retain(receipt)
 print(tables, cdata, rawequal(receipt.landing, result[1]))
@@ -265,7 +258,6 @@ print(tables, cdata, rawequal(receipt.landing, result[1]))
 fn passing_a_handle_field_through_keeps_the_handle() {
     assert_eq!(
         allocation_probe(
-            "passing_a_handle_field_through_keeps_the_handle",
             r#"
 local handle = { __ty = "Entity", _scene_id = 1, _arena_id = 2, _slot = 3, _generation = 4 }
 tables, cdata = 0, 0
@@ -282,7 +274,6 @@ print(tables, cdata, rawequal(handle, result.handle), result.sequence)
 fn passing_a_handle_through_keeps_the_callers_box() {
     assert_eq!(
         allocation_probe(
-            "passing_a_handle_through_keeps_the_callers_box",
             r#"
 local handle = { __ty = "Entity", _scene_id = 1, _arena_id = 2, _slot = 3, _generation = 4 }
 tables, cdata = 0, 0
@@ -317,11 +308,7 @@ fn main() {{
 }}
 "#
     );
-    let lua = emit_module(&source);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nested_box_snapshot"),
-        "1"
-    );
+    assert_eq!(compile_and_run(&source), "1");
 }
 
 #[test]
@@ -380,20 +367,13 @@ inline(lua) fn foreign_receipt(owner: Owner) -> Receipt = """return owner.receip
 "#
     );
     let lua = emit_module(&source);
-    assert_eq!(
-        run_luajit(
-            &format!("{lua}\nprobe_semantics()\n"),
-            "nested_box_semantics"
-        ),
-        "ok"
-    );
+    assert_eq!(run_luajit(&format!("{lua}\nprobe_semantics()\n")), "ok");
 }
 
-fn assert_allocation_free_compare(source: &str, tag: &str, predicate: &str) {
+fn assert_allocation_free_compare(source: &str, predicate: &str) {
     let lua = emit_module(source);
-    let output = run_luajit(
-        &format!(
-            r#"{lua}
+    let output = run_luajit(&format!(
+        r#"{lua}
 jit.off(); jit.flush()
 local owner = make_owner()
 for i = 1, 10 do assert({predicate}) end
@@ -405,9 +385,7 @@ collectgarbage('restart')
 assert(bytes < 1024, 'nullable comparison allocated ' .. bytes .. ' bytes')
 print('ok')
 "#
-        ),
-        tag,
-    );
+    ));
     assert_eq!(output, "ok");
 }
 
@@ -429,7 +407,7 @@ fn shared(first: Membership, second: Membership) -> bool {
 }
 fn main() { let _ = compare(make_owner()) }
 "#;
-    assert_allocation_free_compare(source, "unused_membership_child", "compare(owner)");
+    assert_allocation_free_compare(source, "compare(owner)");
 }
 
 #[test]
@@ -452,7 +430,7 @@ fn read(value: Membership) -> int {
 }
 fn main() { let _ = compare(make_owner()) }
 "#;
-    assert_allocation_free_compare(source, "nullable_child_call", "compare(owner) == 1");
+    assert_allocation_free_compare(source, "compare(owner) == 1");
 }
 
 #[test]
@@ -485,11 +463,7 @@ fn main() {
     print("ok")
 }
 "#;
-    let lua = emit_module(source);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nullable_parameter_snapshots"),
-        "ok"
-    );
+    assert_eq!(compile_and_run(source), "ok");
 }
 
 #[test]
@@ -517,13 +491,6 @@ fn main() {
     print("ok")
 }
 "#;
-    assert_allocation_free_compare(source, "nullable_child_default_call", "compare(owner) == 1");
-    let lua = emit_module(source);
-    assert_eq!(
-        run_luajit(
-            &format!("{lua}\nmain()\n"),
-            "nullable_child_default_semantics"
-        ),
-        "ok"
-    );
+    assert_allocation_free_compare(source, "compare(owner) == 1");
+    assert_eq!(compile_and_run(source), "ok");
 }

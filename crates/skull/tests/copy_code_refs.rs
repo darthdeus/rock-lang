@@ -75,7 +75,7 @@ fn check_reload(use_overlay: bool) {
         full.lua, reload,
     );
     assert_eq!(
-        run_luajit(&program, &format!("copy_code_refs_{mode}")),
+        run_luajit(&program),
         "1 1 1 111 110 110\n2 2 2 211 210 210\n2 2 2 211 211 212",
         "{mode}: slots follow the edited bodies; copied getter/bumper pairs own separate captures",
     );
@@ -124,8 +124,5 @@ fn check_copy(original: Graph, copy: Graph) {
 }
 "#;
     let lua = crate::common::emit_module(source);
-    assert_eq!(
-        run_luajit(&format!("{lua}\ncheck_graph()"), "copy_code_refs_graph"),
-        "owned graph"
-    );
+    assert_eq!(run_luajit(&format!("{lua}\ncheck_graph()")), "owned graph");
 }

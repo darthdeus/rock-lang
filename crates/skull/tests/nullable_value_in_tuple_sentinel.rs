@@ -20,31 +20,7 @@
 //! Nothing here is `nobox` -- a plain unmarked `value` reproduces it, which is
 //! the wider exposure. The `struct` twin bounds the class.
 
-use std::process::Command;
-
-fn run_capturing(prog: &str, tag: &str) -> (bool, String) {
-    let path =
-        std::env::temp_dir().join(format!("skull_sentinel_{}_{tag}.lua", std::process::id()));
-    std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("spawn luajit");
-    let _ = std::fs::remove_file(&path);
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    (out.status.success(), combined)
-}
-
-fn run_module(src: &str, tag: &str) -> String {
-    let lua = crate::common::try_emit_module(src).expect("must emit");
-    let (ok, out) = run_capturing(&format!("{lua}\nmain()\n"), tag);
-    assert!(ok, "program must run:\n{out}");
-    out.trim().to_string()
-}
+use crate::common::compile_and_run;
 
 const VALUE_IN_TUPLE: &str = r#"
 value NV2 { x: float, y: float }
@@ -81,7 +57,7 @@ fn main() {
 #[test]
 fn an_absent_value_in_a_tuple_reads_as_absent() {
     assert_eq!(
-        run_module(VALUE_IN_TUPLE, "nullable_value_tuple"),
+        compile_and_run(VALUE_IN_TUPLE),
         "false true",
         "an absent nullable value in a tuple must report absence, like the struct control"
     );
@@ -90,7 +66,7 @@ fn an_absent_value_in_a_tuple_reads_as_absent() {
 #[test]
 fn a_struct_in_a_tuple_is_correct() {
     assert_eq!(
-        run_module(STRUCT_IN_TUPLE, "nullable_struct_tuple"),
+        compile_and_run(STRUCT_IN_TUPLE),
         "false true",
         "a reference struct in a tuple must report absence correctly"
     );

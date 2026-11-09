@@ -19,6 +19,7 @@
 //! -- so named arguments, defaults and spreads need no special case, because no
 //! argument list is walked at all.
 
+use crate::common::compile_and_run;
 const GENERIC_RETURN: &str = r#"
 value G { x: float, y: float }
 
@@ -138,11 +139,6 @@ fn outcome(src: &str) -> Result<String, String> {
     crate::common::try_emit_module(src).map_err(|e| e.message)
 }
 
-fn run(src: &str, tag: &str) -> String {
-    let lua = crate::common::try_emit_module(src).expect("must emit");
-    crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
-}
-
 #[test]
 fn a_generic_return_inferred_as_a_column_vec_rejects() {
     let msg = outcome(GENERIC_RETURN).expect_err("must reject");
@@ -154,12 +150,12 @@ fn a_generic_return_inferred_as_a_column_vec_rejects() {
 
 #[test]
 fn a_generic_return_at_a_boxed_element_is_admitted() {
-    assert_eq!(run(GENERIC_RETURN_BOXED, "decl_ret_boxed"), "0");
+    assert_eq!(compile_and_run(GENERIC_RETURN_BOXED), "0");
 }
 
 #[test]
 fn a_generic_return_at_a_scalar_is_admitted() {
-    assert_eq!(run(GENERIC_RETURN_SCALAR, "decl_ret_scalar"), "7");
+    assert_eq!(compile_and_run(GENERIC_RETURN_SCALAR), "7");
 }
 
 #[test]
@@ -183,7 +179,7 @@ fn the_positional_form_rejects_too() {
 
 #[test]
 fn a_named_out_of_order_boxed_argument_is_admitted() {
-    assert_eq!(run(NAMED_OUT_OF_ORDER_BOXED, "decl_named_boxed"), "1");
+    assert_eq!(compile_and_run(NAMED_OUT_OF_ORDER_BOXED), "1");
 }
 
 #[test]
@@ -195,7 +191,7 @@ fn a_defaulted_slot_is_reached() {
 #[test]
 fn repr_opaque_waives_the_declared_slot_under_named_arguments() {
     assert_eq!(
-        run(NAMED_WITH_REPR_OPAQUE, "decl_named_repr"),
+        compile_and_run(NAMED_WITH_REPR_OPAQUE),
         "5",
         "the waiver follows the declared index, not the call's argument order"
     );
@@ -246,10 +242,7 @@ fn an_irrelevant_unbound_generic_does_not_disarm_the_rule() {
 
 #[test]
 fn an_irrelevant_unbound_generic_still_admits_a_boxed_element() {
-    assert_eq!(
-        run(IRRELEVANT_UNBOUND_GENERIC_BOXED, "decl_unbound_boxed"),
-        "1"
-    );
+    assert_eq!(compile_and_run(IRRELEVANT_UNBOUND_GENERIC_BOXED), "1");
 }
 
 /// A NULLABLE slot. `[T]?` names the same boxed representation once the value
@@ -309,7 +302,7 @@ fn a_nullable_slot_is_reached() {
 
 #[test]
 fn a_nullable_slot_at_a_boxed_element_is_admitted() {
-    assert_eq!(run(NULLABLE_SLOT_BOXED, "decl_nullable_boxed"), "1");
+    assert_eq!(compile_and_run(NULLABLE_SLOT_BOXED), "1");
 }
 
 #[test]

@@ -12,7 +12,7 @@
 //! so a wide struct interpolation became one long `..` run and a sequence of
 //! `total += x` became one expression with a parenthesis per statement.
 
-use crate::common::{function_body, luajit_loads, require_luajit, run_luajit, try_emit_module};
+use crate::common::{function_body, luajit_loads, require_luajit, run_main, try_emit_module};
 
 /// A program with one value of each display tier, `n` fields wide: a cdata
 /// value struct, a GC-table value struct, a leaf-table value struct, GC values
@@ -99,10 +99,7 @@ fn narrow_display_helpers_render_unchanged() {
                     MaybeHolder { tag: t, maybe: InlineWide { f0: 0.5, f1: 1.5 } }\n\
                     Wide::Tuple { [1] = 0, [2] = 1 }";
     assert_eq!(expected, display_tiers_expected(2));
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "narrow_display_helpers"),
-        expected
-    );
+    assert_eq!(run_main(&lua), expected);
 }
 
 #[test]
@@ -110,11 +107,8 @@ fn wide_display_helpers_load_and_render() {
     require_luajit();
     let n = 100;
     let lua = try_emit_module(&display_tiers(n)).expect("emits");
-    luajit_loads(&lua, "wide_display_helpers").expect("the emitted chunk must load");
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "wide_display_helpers"),
-        display_tiers_expected(n)
-    );
+    luajit_loads(&lua).expect("the emitted chunk must load");
+    assert_eq!(run_main(&lua), display_tiers_expected(n));
 }
 
 /// Interpolating a value renders it field by field inside the calling
@@ -130,15 +124,12 @@ fn wide_value_interpolation_loads_and_renders() {
     let src =
         format!("value Row {{ {fields} }}\nfn main() {{ let r = Row {{}}; print(\"<{{r}}>\") }}\n");
     let lua = try_emit_module(&src).expect("emits");
-    luajit_loads(&lua, "wide_value_interpolation").expect("the emitted chunk must load");
+    luajit_loads(&lua).expect("the emitted chunk must load");
     let body = (0..n)
         .map(|i| format!("f{i}: {i}"))
         .collect::<Vec<_>>()
         .join(", ");
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "wide_value_interpolation"),
-        format!("<Row {{ {body} }}>")
-    );
+    assert_eq!(run_main(&lua), format!("<Row {{ {body} }}>"));
 }
 
 /// `sum(p0..p9)` adding the parameters cyclically in `statements` statements.
@@ -166,11 +157,8 @@ fn accumulation(statements: usize) -> String {
 fn long_accumulation_loads_and_runs() {
     require_luajit();
     let lua = try_emit_module(&accumulation(300)).expect("emits");
-    luajit_loads(&lua, "long_accumulation").expect("the emitted chunk must load");
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "long_accumulation"),
-        "1650"
-    );
+    luajit_loads(&lua).expect("the emitted chunk must load");
+    assert_eq!(run_main(&lua), "1650");
 }
 
 /// The bound only splits what LuaJIT could not load: an accumulation well

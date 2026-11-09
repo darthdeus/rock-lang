@@ -1,4 +1,4 @@
-use crate::common::{emit_module, run_luajit};
+use crate::common::{compile_and_run, emit_module, run_luajit, run_main};
 
 #[test]
 fn immediate_projections_preserve_nullable_snapshots_and_evaluation_order() {
@@ -37,11 +37,7 @@ fn main() {
 }
 
 "#;
-    let lua = emit_module(source);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "projection_demand"),
-        "5\n8\n5\n40\n13\n40\n1\ntrue\n-1"
-    );
+    assert_eq!(compile_and_run(source), "5\n8\n5\n40\n13\n40\n1\ntrue\n-1");
 }
 
 #[test]
@@ -98,9 +94,8 @@ fn main() {{
 }}
 "#
     );
-    let lua = emit_module(&source);
     assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "boxed_projection_demand"),
+        compile_and_run(&source),
         "1\n5\n2\n5\n5\n11\n11\n17\n17\n1\n-1\n1\n1\ntrue\n-1\n2"
     );
 }
@@ -146,9 +141,8 @@ fn main() {
     print(flat())
 }
 "#;
-    let lua = emit_module(source);
     assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "global_projection_demand"),
+        compile_and_run(source),
         "17\n5\n5\n5\n99\n5\n5\n5\n11\ntrue\ntrue\n5\n-1\n11\n-1"
     );
 }
@@ -181,12 +175,9 @@ fn main() {{ print(probe(Owner {{ config: Config {{ chosen: 7, choice: Choice::E
         "an immediate projection must not expand its siblings: {probe}"
     );
     assert_eq!(
-        run_luajit(
-            &format!(
-                "{lua}\nmain(); local a = pcall(probe, nil); local b = pcall(probe, {{config=nil}}); print(a, b)\n"
-            ),
-            "reference_owned_projection"
-        ),
+        run_luajit(&format!(
+            "{lua}\nmain(); local a = pcall(probe, nil); local b = pcall(probe, {{config=nil}}); print(a, b)\n"
+        )),
         "7\nfalse\tfalse"
     );
 }
@@ -221,12 +212,9 @@ fn main() {
         "selected enum must not read siblings: {body}"
     );
     assert_eq!(
-        run_luajit(
-            &format!(
-                "{lua}\nmain(); local a = pcall(selected, nil); local b = pcall(selected, {{config=nil}}); print(a, b)\n"
-            ),
-            "selected_enum_projection"
-        ),
+        run_luajit(&format!(
+            "{lua}\nmain(); local a = pcall(selected, nil); local b = pcall(selected, {{config=nil}}); print(a, b)\n"
+        )),
         "7\nnew\nfalse\tfalse"
     );
 }
@@ -234,8 +222,9 @@ fn main() {
 #[test]
 fn enum_projections_preserve_nullable_children_and_argument_snapshots() {
     let _inline = crate::common::InlineOffGuard::on();
-    let lua = emit_module(
-        r#"
+    assert_eq!(
+        compile_and_run(
+            r#"
 enum Choice { Empty, Number(int), Text(string) }
 value Child { choice: Choice, marker: int }
 value Config { child: Child, optional: Choice?, spare: int }
@@ -266,10 +255,8 @@ fn main() {
     print(global_child.marker)
     print(CONFIG.optional == null)
 }
-"#,
-    );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "enum_projection_snapshots"),
+"#
+        ),
         "7\n1\n13\n7\n17\ntrue\n5\ntrue"
     );
 }
@@ -374,19 +361,16 @@ fn main() {
 "#;
     let lua = emit_module(source);
     assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "indexed_projection_semantics"),
+        run_main(&lua),
         "5\n12\n3\n90\n11\n13\n19\ntrue\nfalse\nhello"
     );
-    let checks = run_luajit(
-        &format!(
-            r#"{lua}
+    let checks = run_luajit(&format!(
+        r#"{lua}
 for _, i in ipairs({{-1, 0}}) do
     local ok, err = pcall(invalid, i)
     print(ok, tostring(err):find("Vec index out of bounds", 1, true) ~= nil)
 end
 "#
-        ),
-        "indexed_projection_bounds",
-    );
+    ));
     assert_eq!(checks, "false\ttrue\nfalse\ttrue");
 }

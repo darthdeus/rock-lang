@@ -1,7 +1,7 @@
 //! A nullable-Entity Vec must keep one representation across field defaults,
 //! field assignment, mutation, and separately emitted consumers.
 
-use crate::common::{run_luajit, try_emit_module};
+use crate::common::{run_main, try_emit_module};
 
 const SRC: &str = r#"
 struct Mob { hp: int }
@@ -81,6 +81,6 @@ fn nullable_entity_field_assignment_and_consumers_round_trip() {
         "nullable Entity assignment selected columns:\n{}",
         lua
     );
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "optional_entity_vec");
+    let out = run_main(&lua);
     assert_eq!(out, "41 3 true true 23 2 2 2 14");
 }

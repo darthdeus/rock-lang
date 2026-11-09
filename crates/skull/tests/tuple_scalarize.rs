@@ -7,7 +7,7 @@
 //! `Iterator<T>` bound. `for (a, b) in it` construct-then-destructures the pair
 //! every iteration; the tuple must be split into scalars at codegen -- LuaJIT
 //! SINK only fires on compiled traces, and other backends have no SINK at all.
-use crate::common::{emit_module, function_body, run_luajit};
+use crate::common::{emit_module, function_body, run_main};
 
 // Straight-line pair iterator (the EnumIter/ZipIter shape): @inline `next`
 // builds a fresh 2-tuple per iteration, the `for` header destructures it.
@@ -240,10 +240,7 @@ fn arena_scan_returning_entity_keeps_leaves_until_a_boxed_sink() {
         1,
         "only the Found field sink may materialize a tagged Entity box:\n{main}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "arena_nullable_entity_return"),
-        "true 2 true true true"
-    );
+    assert_eq!(run_main(&lua), "true 2 true true true");
 }
 
 const ARENA_ENTITY_IN_ENUM: &str = r#"
@@ -332,8 +329,5 @@ fn nullable_value_binding_return_keeps_presence_and_leaves() {
         !pick.contains("__ty = \"Bag\""),
         "nullable return builds a raw Bag box:\n{pick}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nullable_value_binding_return"),
-        "1 1 true"
-    );
+    assert_eq!(run_main(&lua), "1 1 true");
 }

@@ -34,10 +34,7 @@ fn main() {}
 "#,
         }],
     );
-    let out = crate::common::run_luajit(
-        &format!("{}\nprint(probe())\n", emitted.lua),
-        "v1_nomangle_type",
-    );
+    let out = crate::common::run_luajit(&format!("{}\nprint(probe())\n", emitted.lua));
     assert_eq!(out, "0.5 AbiHandle 3");
 }
 

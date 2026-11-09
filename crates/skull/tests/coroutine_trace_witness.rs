@@ -59,8 +59,5 @@ print(result .. ":" .. table.concat(elsewhere, ","))
 assert(crossings > 0, "LuaJIT returned through a pcall frame below the trace start; revisit #44")
 "#
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\n{driver}"), "nested_coroutine_trace"),
-        "459180:"
-    );
+    assert_eq!(run_luajit(&format!("{lua}\n{driver}")), "459180:");
 }

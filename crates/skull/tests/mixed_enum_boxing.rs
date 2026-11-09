@@ -42,10 +42,7 @@ co fn field_read_await_loop(combat: Combat) -> Coroutine<int> {
 fn mixed_enum_field_read_loop_clears_previous_payload() {
     let lua = emit_module(FIELD_READ_LOOP);
     assert_eq!(
-        run_luajit(
-            &format!("{lua}\nprint(field_read_loop())\n"),
-            "mixed_enum_field_loop"
-        ),
+        run_luajit(&format!("{lua}\nprint(field_read_loop())\n")),
         "true"
     );
 }
@@ -54,10 +51,7 @@ fn mixed_enum_field_read_loop_clears_previous_payload() {
 fn mixed_enum_field_read_across_await_clears_previous_payload() {
     let lua = emit_module(FIELD_READ_LOOP);
     assert_eq!(
-        run_luajit(
-            &format!("{lua}\nprint(field_read_coroutine())\n"),
-            "mixed_enum_field_await"
-        ),
+        run_luajit(&format!("{lua}\nprint(field_read_coroutine())\n")),
         "true"
     );
 }
@@ -100,9 +94,8 @@ struct MaybeHolder { item: Choice? }
 #[test]
 fn dynamic_mixed_units_share_identity_across_boxing_boundaries() {
     let lua = emit_module(SRC);
-    let out = run_luajit(
-        &format!(
-            r#"{lua}
+    let out = run_luajit(&format!(
+        r#"{lua}
 local unit = constant_unit()
 for _, make in ipairs({{boxed, through_vec, through_field, through_nullable}}) do
     assert(rawequal(make(0), unit))
@@ -120,18 +113,15 @@ for _ in pairs(keys) do count = count + 1 end
 assert(count == 1)
 print("ok")
 "#
-        ),
-        "mixed_enum_identity",
-    );
+    ));
     assert_eq!(out, "ok");
 }
 
 #[test]
 fn dynamic_mixed_unit_boxing_allocates_no_per_value_tables() {
     let lua = emit_module(SRC);
-    let out = run_luajit(
-        &format!(
-            r#"{lua}
+    let out = run_luajit(&format!(
+        r#"{lua}
 jit.off(); jit.flush()
 local n = 20000
 local slots = require("table.new")(n, 0)
@@ -145,27 +135,22 @@ assert(bytes < n, tostring(bytes / n) .. " bytes per unit")
 assert(rawequal(slots[1], slots[n]))
 print("ok")
 "#
-        ),
-        "mixed_enum_unit_allocation",
-    );
+    ));
     assert_eq!(out, "ok");
 }
 
 #[test]
 fn deepcopy_canonicalizes_mixed_units_and_keeps_payloads_owned() {
     let lua = emit_module(SRC);
-    let out = run_luajit(
-        &format!(
-            r#"{lua}
+    let out = run_luajit(&format!(
+        r#"{lua}
 assert(rawequal(copied(0), constant_unit()))
 local a, b = copied(1), copied(1)
 a[1] = "changed"
 assert(b[1] == "payload")
 print("ok")
 "#
-        ),
-        "mixed_enum_copy",
-    );
+    ));
     assert_eq!(out, "ok");
 }
 
@@ -186,9 +171,8 @@ fn mixed_units_keep_identity_through_body_overlay_and_full_reload() {
         .collect();
     let overlay = skull::mir_emit::emit_overlay(&ws2, &mut cache, &reinferred).expect("overlay");
     let fresh = skull::mir_emit::emit_full(&ws2, mid).expect("fresh").0;
-    let out = run_luajit(
-        &format!(
-            r#"{}
+    let out = run_luajit(&format!(
+        r#"{}
 local before = through_field(0)
 assert(rawequal(before, constant_unit()))
 _G.HOT_RELOAD = true
@@ -200,19 +184,16 @@ assert(rawequal(before, through_vec(0)))
 assert(rawequal(before, copied(0)))
 print("ok")
 "#,
-            full.lua, overlay.lua, fresh.lua
-        ),
-        "mixed_enum_reload",
-    );
+        full.lua, overlay.lua, fresh.lua
+    ));
     assert_eq!(out, "ok");
 }
 
 #[test]
 fn strided_element_reconstruction_canonicalizes_units() {
     let lua = emit_module(SRC);
-    let out = run_luajit(
-        &format!(
-            r#"{lua}
+    let out = run_luajit(&format!(
+        r#"{lua}
 local unit = constant_unit()
 local vec = {{__ty = "Vec", _data = {{"None", false}}, len = 1,
     ["@vec"] = {{repr = "strided", elem = unit.__ty, stride = 2}}}}
@@ -224,18 +205,15 @@ a[1] = "changed"
 assert(b[1] == "payload")
 print("ok")
 "#
-        ),
-        "mixed_enum_strided_reconstruction",
-    );
+    ));
     assert_eq!(out, "ok");
 }
 
 #[test]
 fn dynamic_payload_boxes_reserve_only_the_variants_payload() {
     let lua = emit_module(SRC);
-    let out = run_luajit(
-        &format!(
-            r#"{lua}
+    let out = run_luajit(&format!(
+        r#"{lua}
 jit.off(); jit.flush()
 local n = 20000
 local slots = require("table.new")(n, 0)
@@ -257,9 +235,7 @@ print("payload bytes", control, dynamic)
 assert(dynamic <= control + 1, "dynamic payload reserves union slots")
 print("ok")
 "#
-        ),
-        "mixed_enum_payload_size",
-    );
+    ));
     assert!(out.ends_with("ok"), "{out}");
 }
 
@@ -297,9 +273,8 @@ fn make_packet(kind: int) -> Packet {
 }
 "#;
     let lua = emit_module(src);
-    let out = run_luajit(
-        &format!(
-            r#"{lua}
+    let out = run_luajit(&format!(
+        r#"{lua}
 local expected = {{0, 3, 10, 11, 5, 15}}
 for kind = 0, 5 do assert(score(kind) == expected[kind + 1]) end
 local narrow = packet(1)
@@ -312,9 +287,7 @@ local named_wide = packet(5)
 assert(named_wide.text == "wide" and named_wide.code == 11)
 print("ok")
 "#
-        ),
-        "mixed_enum_variant_layout",
-    );
+    ));
     assert_eq!(out, "ok");
 }
 
@@ -346,9 +319,8 @@ struct BoxHolder { packet: Packet? }
         1,
         "identical payload layouts need one allocation site: {body}"
     );
-    let out = run_luajit(
-        &format!(
-            r#"{lua}
+    let out = run_luajit(&format!(
+        r#"{lua}
 for kind, tag in ipairs({{"A", "B", "C", "D", "E", "F"}}) do
     local a, b = box_input(kind), box_input(kind)
     assert(a.__variant == tag and a[1] == "payload")
@@ -358,8 +330,6 @@ assert(rawequal(box_input(0), box_input(0)))
 assert(box_input(-1) == nil)
 print("ok")
 "#
-        ),
-        "mixed_enum_layout_dispatch",
-    );
+    ));
     assert_eq!(out, "ok");
 }

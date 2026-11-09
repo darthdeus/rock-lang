@@ -317,13 +317,10 @@ fn main() {}
 "#,
         }],
     );
-    let out = crate::common::run_luajit(
-        &format!(
-            "m = {{ ret_int = function() return 7 end, ret_bool = function() return 1 end }}\n{}\nprint(ret_int(), ret_bool())\n",
-            emitted.lua
-        ),
-        "v1_extern_wrapper",
-    );
+    let out = crate::common::run_luajit(&format!(
+        "m = {{ ret_int = function() return 7 end, ret_bool = function() return 1 end }}\n{}\nprint(ret_int(), ret_bool())\n",
+        emitted.lua
+    ));
     assert_eq!(out, "7\ttrue");
 }
 
@@ -347,12 +344,9 @@ fn main() {}
 "#,
         }],
     );
-    let out = crate::common::run_luajit(
-        &format!(
-            "m = {{ get_pair = function(out) out[0].a = 3; out[0].b = 4 end }}\n{}\nprint(probe())\n",
-            emitted.lua
-        ),
-        "v1_extern_value_return",
-    );
+    let out = crate::common::run_luajit(&format!(
+        "m = {{ get_pair = function(out) out[0].a = 3; out[0].b = 4 end }}\n{}\nprint(probe())\n",
+        emitted.lua
+    ));
     assert_eq!(out, "7");
 }

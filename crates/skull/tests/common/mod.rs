@@ -263,14 +263,22 @@ pub fn emit_module_shaped(
         .expect("emit under explicit shapes")
 }
 
+/// A temp path for one luajit program, unique per CALL: tests run in parallel
+/// in one binary, so a pid-only name lets one test's write race another's read
+/// and its cleanup delete the other's file.
+fn temp_lua_path() -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("skull_test_{}_{n}.lua", std::process::id()))
+}
+
 /// Whether the bundled LuaJIT can LOAD `prog` (parse only -- the chunk is never
 /// run), and the parse error when it cannot. This is the oracle the frame-limit
 /// model is measured against.
-pub fn luajit_loads(prog: &str, tag: &str) -> Result<(), String> {
-    use std::process::Command;
-    let path = std::env::temp_dir().join(format!("skull_load_{}_{tag}.lua", std::process::id()));
+pub fn luajit_loads(prog: &str) -> Result<(), String> {
+    let path = temp_lua_path();
     std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit")
+    let out = std::process::Command::new("luajit")
         .arg("-e")
         .arg(format!(
             "local f, e = loadfile({:?}); if not f then io.stderr:write(e) os.exit(1) end",
@@ -532,14 +540,29 @@ pub fn require_luajit() {
     }
 }
 
-/// Run `prog` under luajit, returning trimmed stdout (panicking with stderr on a
-/// non-zero exit). `tag` disambiguates the temp file so parallel tests never
-/// collide (nextest is process-per-test, but be safe under `cargo test` threads).
-pub fn run_luajit(prog: &str, tag: &str) -> String {
-    use std::process::Command;
-    let path = std::env::temp_dir().join(format!("skull_test_{}_{tag}.lua", std::process::id()));
+/// Run `prog` under luajit, returning its success flag and stdout + stderr.
+pub fn run_luajit_capturing(prog: &str) -> (bool, String) {
+    let path = temp_lua_path();
     std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit")
+    let out = std::process::Command::new("luajit")
+        .arg(&path)
+        .output()
+        .expect("spawn luajit");
+    let _ = std::fs::remove_file(&path);
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (out.status.success(), combined)
+}
+
+/// Run `prog` under luajit, returning trimmed stdout (panicking with stderr on a
+/// non-zero exit).
+pub fn run_luajit(prog: &str) -> String {
+    let path = temp_lua_path();
+    std::fs::write(&path, prog).expect("write program");
+    let out = std::process::Command::new("luajit")
         .arg(&path)
         .output()
         .expect("spawn luajit");
@@ -551,6 +574,16 @@ pub fn run_luajit(prog: &str, tag: &str) -> String {
         String::from_utf8_lossy(&out.stderr)
     );
     stdout.trim().replace("\r\n", "\n")
+}
+
+/// Run the emitted chunk `lua`, then its `main`.
+pub fn run_main(lua: &str) -> String {
+    run_luajit(&format!("{lua}\nmain()\n"))
+}
+
+/// Emit `src` and run its `main`, returning trimmed stdout.
+pub fn compile_and_run(src: &str) -> String {
+    run_main(&emit_module(src))
 }
 
 pub struct InlineOffGuard(#[allow(dead_code)] skull_transform::InlineOffGuard);

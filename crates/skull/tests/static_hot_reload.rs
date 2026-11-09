@@ -9,6 +9,7 @@
 //! (it routes through a stdlib op fn), so the static is observed via a bool
 //! toggle + assignment instead of a counter.
 
+use crate::common::run_luajit;
 use bone_semantic::inference::Workspace;
 
 fn emit_program(src: &str) -> String {
@@ -17,35 +18,6 @@ fn emit_program(src: &str) -> String {
     skull::mir_emit::emit_workspace_mir(&ws, mid)
         .expect("emit")
         .lua
-}
-
-static UNIQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-fn run_luajit(prog: &str) -> String {
-    use std::process::Command;
-    // Unique per CALL, not just per process: these tests run in parallel in one
-    // binary and a pid-only path is shared, so one test's write raced another's
-    // luajit read (truncated -> "'=' expected near '<eof>'") and its cleanup
-    // deleted the other's file.
-    let n = UNIQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let path = std::env::temp_dir().join(format!(
-        "skull_static_reload_{}_{}.lua",
-        std::process::id(),
-        n
-    ));
-    std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("spawn luajit");
-    let _ = std::fs::remove_file(&path);
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(
-        out.status.success(),
-        "luajit exited non-zero.\nstdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    stdout
 }
 
 /// Two in-process emits of the same string/int statics must be byte-identical.
@@ -194,17 +166,11 @@ fn fn_body(
         .unwrap_or_else(|| panic!("fixture declares {name}"))
 }
 
-fn overlay_run(
-    tag: &str,
-    before: &str,
-    after: &str,
-    script: impl Fn(&str, &str) -> String,
-) -> String {
-    overlay_run_editing(tag, "bump", before, after, script)
+fn overlay_run(before: &str, after: &str, script: impl Fn(&str, &str) -> String) -> String {
+    overlay_run_editing("bump", before, after, script)
 }
 
 fn overlay_run_editing(
-    tag: &str,
     edited: &str,
     before: &str,
     after: &str,
@@ -216,34 +182,25 @@ fn overlay_run_editing(
     let ws2 = crate::common::ws_with_stdlib(after);
     let overlay = skull::mir_emit::emit_overlay(&ws2, &mut cache, &[fn_body(&ws2, edited)])
         .expect("a body edit that adds or removes a static must overlay");
-    crate::common::run_luajit(&script(&full.lua, &overlay.lua), tag)
+    crate::common::run_luajit(&script(&full.lua, &overlay.lua))
 }
 
 #[test]
 fn a_body_edit_that_adds_a_static_overlays_over_live_globals() {
-    let out = overlay_run(
-        "static_added_overlay",
-        COUNTER,
-        COUNTER_WITH_STATIC,
-        |full, overlay| {
-            format!(
-                "{full}\nassert(bump() == 1)\nassert(bump() == 2)\n{overlay}\n\
+    let out = overlay_run(COUNTER, COUNTER_WITH_STATIC, |full, overlay| {
+        format!(
+            "{full}\nassert(bump() == 1)\nassert(bump() == 2)\n{overlay}\n\
              assert(bump() == 12)\nassert(bump() == 23)\nprint('ok')"
-            )
-        },
-    );
+        )
+    });
     assert_eq!(out, "ok");
 }
 
 #[test]
 fn a_body_edit_that_removes_a_static_overlays_over_live_globals() {
-    let out = overlay_run(
-        "static_removed_overlay",
-        COUNTER_WITH_STATIC,
-        COUNTER,
-        |full, overlay| {
-            format!(
-                "{full}\nassert(bump() == 10)\nassert(bump() == 21)\n\
+    let out = overlay_run(COUNTER_WITH_STATIC, COUNTER, |full, overlay| {
+        format!(
+            "{full}\nassert(bump() == 10)\nassert(bump() == 21)\n\
              local function static_cells()\n\
                local n = 0\n\
                for key in pairs(__rock_globals) do\n\
@@ -256,9 +213,8 @@ fn a_body_edit_that_removes_a_static_overlays_over_live_globals() {
              assert(bump() == 22)\n\
              assert(static_cells() == 0, 'the removed static still holds ' .. static_cells() .. ' cells')\n\
              print('ok')"
-            )
-        },
-    );
+        )
+    });
     assert_eq!(out, "ok");
 }
 
@@ -282,14 +238,9 @@ fn main() {}
 #[test]
 fn a_body_edit_that_removes_a_specialized_generics_static_drops_its_cells() {
     let after = SPECIALIZED.replace("    static seen = 0\n    seen = seen + 1\n", "");
-    let out = overlay_run_editing(
-        "spec_static_removed_overlay",
-        "tagged",
-        SPECIALIZED,
-        &after,
-        |full, overlay| {
-            format!(
-                "{full}\nassert(bump() == 1)\n\
+    let out = overlay_run_editing("tagged", SPECIALIZED, &after, |full, overlay| {
+        format!(
+            "{full}\nassert(bump() == 1)\n\
              local function static_cells()\n\
                local n = 0\n\
                for key in pairs(__rock_globals) do\n\
@@ -302,8 +253,7 @@ fn a_body_edit_that_removes_a_specialized_generics_static_drops_its_cells() {
              assert(bump() == 2)\n\
              assert(static_cells() == 0, 'the removed static still holds ' .. static_cells() .. ' cells')\n\
              print('ok')"
-            )
-        },
-    );
+        )
+    });
     assert_eq!(out, "ok");
 }

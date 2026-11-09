@@ -32,6 +32,7 @@
 //! The bounding controls stay: `[int]` is boxed, keeps `_data`, and still passes
 //! through the very same body; and an `any` param still admits a column vec.
 
+use crate::common::compile_and_run;
 /// Guarded: the body probes for `_data` before touching it, so the column case
 /// is a silent wrong ANSWER rather than a death.
 const GUARDED_GENERIC: &str = r#"
@@ -171,11 +172,6 @@ fn main() {
 }
 "#;
 
-fn run(src: &str, tag: &str) -> String {
-    let lua = crate::common::try_emit_module(src).expect("must emit");
-    crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
-}
-
 /// The rejection an opaque body over a column vec now produces.
 fn rejection(src: &str) -> String {
     crate::common::try_emit_module(src)
@@ -216,7 +212,7 @@ fn an_unguarded_inline_lua_body_over_a_column_vec_rejects() {
 #[test]
 fn a_boxed_element_through_the_same_body_is_correct() {
     assert_eq!(
-        run(GUARDED_INT_ELEM, "inline_lua_col_int"),
+        compile_and_run(GUARDED_INT_ELEM),
         "3",
         "a boxed `[int]` keeps `_data`, so the same body must stay correct"
     );
@@ -227,7 +223,7 @@ fn a_boxed_element_through_the_same_body_is_correct() {
 #[test]
 fn an_any_param_still_admits_a_column_vec() {
     assert_eq!(
-        run(ANY_PARAM_PROBE, "inline_lua_col_any"),
+        compile_and_run(ANY_PARAM_PROBE),
         "columns",
         "an `any` param claims no representation, so it must still be admitted"
     );
@@ -247,12 +243,12 @@ fn a_generic_param_bound_to_a_column_vec_at_the_call_rejects() {
 /// Bounds it on the element: same generic param, boxed element, still correct.
 #[test]
 fn a_generic_param_bound_to_a_boxed_vec_is_correct() {
-    assert_eq!(run(GENERIC_PARAM_BOXED_ELEM, "inline_lua_gen_boxed"), "3");
+    assert_eq!(compile_and_run(GENERIC_PARAM_BOXED_ELEM), "3");
 }
 
 /// Bounds it on the constructor: a generic bound to a scalar names no
 /// container, so the rule must not fire.
 #[test]
 fn a_generic_param_bound_to_a_scalar_is_admitted() {
-    assert_eq!(run(GENERIC_PARAM_SCALAR, "inline_lua_gen_scalar"), "-1");
+    assert_eq!(compile_and_run(GENERIC_PARAM_SCALAR), "-1");
 }

@@ -62,12 +62,9 @@ fn main() {
     let foreign_scalar = mangled_name(&lua, "foreign_scalar");
     let foreign_unit = mangled_name(&lua, "foreign_unit");
     assert_eq!(
-        run_luajit(
-            &format!(
-                "{lua}\nmain()\nprint(select('#', {discard}(1)))\nprint(select('#', {foreign_scalar}(1)))\nprint(select('#', {foreign_unit}(1)))\n"
-            ),
-            "direct_tail_calls"
-        ),
+        run_luajit(&format!(
+            "{lua}\nmain()\nprint(select('#', {discard}(1)))\nprint(select('#', {foreign_scalar}(1)))\nprint(select('#', {foreign_unit}(1)))\n"
+        )),
         "41\n42\n42\n43\n12244\n0\n1\n0"
     );
 }
@@ -108,10 +105,7 @@ for pc = 1, util.funcinfo({getter}).bytecodes - 1 do
 end
 "#
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\n{driver}"), "finite_cache_siblings"),
-        "32000:0"
-    );
+    assert_eq!(run_luajit(&format!("{lua}\n{driver}")), "32000:0");
     assert!(
         !lua.contains("function __weak_cache_read("),
         "the single-use forwarding helper must be removed"

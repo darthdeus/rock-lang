@@ -99,7 +99,7 @@ print(first ~= second and second ~= third
 "#,
         lua = emitted.lua,
     );
-    assert_eq!(run_luajit(&program, "rng_suffix"), "true");
+    assert_eq!(run_luajit(&program), "true");
 }
 
 // --- The storage cell -----------------
@@ -194,10 +194,7 @@ print({bump}())
 print(storage == __rock_globals, __rock_globals_fresh)
 "
     );
-    assert_eq!(
-        run_luajit(&program, "global_reload"),
-        "1\n2\n3\ntrue\tfalse"
-    );
+    assert_eq!(run_luajit(&program), "1\n2\n3\ntrue\tfalse");
 }
 
 /// A program whose mutable-global layout differs from the live storage's
@@ -222,7 +219,7 @@ print(ok, err)
 "
     );
     assert_eq!(
-        run_luajit(&program, "global_layout_guard"),
+        run_luajit(&program),
         "false\tRock global layout changed; restart required"
     );
 }

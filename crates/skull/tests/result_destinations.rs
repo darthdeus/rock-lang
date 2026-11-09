@@ -1,9 +1,10 @@
-use crate::common::{emit_module, run_luajit};
+use crate::common::compile_and_run;
 
 #[test]
 fn destination_returns_keep_effect_order_and_defer_snapshots() {
-    let lua = emit_module(
-        r#"
+    assert_eq!(
+        compile_and_run(
+            r#"
 struct Trace { n: int }
 nobox value Pair { x: int, y: int }
 fn tick(t: Trace, n: int) -> int { t.n = t.n * 10 + n; n }
@@ -44,10 +45,8 @@ fn main() {
         print(value.0); print(value.1.x); print(value.1.y)
     }
 }
-"#,
-    );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "result_destinations"),
+"#
+        ),
         "1\n2\n12\n3\n4\n34\n34\n349\n349\n3498\ntrue\n3\nfalse\ntrue\ntrue\n7\n8\n9"
     );
 }

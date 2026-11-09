@@ -1,4 +1,4 @@
-use crate::common::{emit_module, function_body, run_luajit};
+use crate::common::{compile_and_run, emit_module, function_body};
 
 const SOURCE: &str = r#"
 value Row { text: string, n: int }
@@ -17,11 +17,7 @@ fn main() {
 
 #[test]
 fn optional_receiver_call_is_evaluated_once() {
-    let lua = emit_module(SOURCE);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "optional_receiver_once"),
-        "7 1"
-    );
+    assert_eq!(compile_and_run(SOURCE), "7 1");
 }
 
 #[test]
@@ -64,9 +60,8 @@ fn main() {
     }
 }
 "#;
-    let lua = emit_module(src);
     assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "optional_receiver_shapes"),
+        compile_and_run(src),
         "-1 -1 -1\n-1 -1 -1\n13 19 29\n31 41 43"
     );
 }

@@ -53,10 +53,7 @@ fn reused_int_to_float_across_a_yield_aliases_and_resumes_its_value() {
     let lua = common::try_emit_module(YIELD_ACROSS).expect("emit");
     let step = function_body(&lua, "scaled_int__step");
     assert_eq!(register_moves(step), Vec::<&str>::new(), "{step}");
-    assert_eq!(
-        common::run_luajit(&format!("{lua}\nmain()\n"), "int_float_alias_yield"),
-        "42\n18\n7"
-    );
+    assert_eq!(common::run_main(&lua), "42\n18\n7");
 }
 
 // `a` is one conversion, read by the comparison, by an arm and (in
@@ -87,8 +84,5 @@ fn aliased_int_to_float_selection_operand_keeps_native_minmax() {
     let body = function_body(&lua, "min_register_int_float");
     assert!(body.contains("math.min("), "{body}");
     assert_eq!(register_moves(body), Vec::<&str>::new(), "{body}");
-    assert_eq!(
-        common::run_luajit(&format!("{lua}\nmain()\n"), "int_float_alias_selection"),
-        "2\n2.5\n8.5\n0"
-    );
+    assert_eq!(common::run_main(&lua), "2\n2.5\n8.5\n0");
 }

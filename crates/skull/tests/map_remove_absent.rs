@@ -34,9 +34,8 @@ fn main() {}
 /// one present key twice.
 fn absent_key_stores(build: &str, remove: &str, keyed: &str) -> String {
     let lua = emit_module(SOURCE);
-    run_luajit(
-        &format!(
-            r#"{lua}
+    run_luajit(&format!(
+        r#"{lua}
 local m = {build}(511)
 local stores = 0
 setmetatable({keyed}, {{ __newindex = function(t, k, v)
@@ -48,9 +47,7 @@ assert({remove}(m, "k0") and not {remove}(m, "k0"))
 assert({remove}(m, "k1"))
 print(stores)
 "#
-        ),
-        remove,
-    )
+    ))
     .trim()
     .to_string()
 }

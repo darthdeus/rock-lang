@@ -15,7 +15,7 @@
 //! rejected at the sink -- `an_implicit_box_of_a_gc_tier_value_is_still_rejected`
 //! is the control, and it fails if the fix leaked into the implicit path.
 
-use crate::common::{function_body, run_luajit, try_emit_module};
+use crate::common::{compile_and_run, emit_module, function_body, run_main, try_emit_module};
 
 /// A string field. The minimal GC-tier cell.
 const STRING_FIELD: &str = r#"
@@ -157,29 +157,14 @@ fn main() {
 }
 "#;
 
-fn emit_ok(src: &str, what: &str) -> String {
-    match try_emit_module(src) {
-        Ok(lua) => lua,
-        Err(e) => panic!("{what} must emit, got a rejection: {e:?}"),
-    }
-}
-
-fn run(src: &str, what: &str, tag: &str) -> String {
-    let lua = emit_ok(src, what);
-    run_luajit(&format!("{lua}\nmain()\n"), tag)
-}
-
 #[test]
 fn a_string_field_boxes_through_the_value_table() {
-    let lua = emit_ok(STRING_FIELD, "a GC-tier nobox materialize");
+    let lua = emit_module(STRING_FIELD);
     assert!(
         function_body(&lua, "main").contains("SRow_vt("),
         "the explicit box did not take the value-table ctor:\n{lua}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "gc_tier_string"),
-        "1a"
-    );
+    assert_eq!(run_main(&lua), "1a");
 }
 
 /// The mark is the only variable, so the emitted constructor must be the same
@@ -187,8 +172,8 @@ fn a_string_field_boxes_through_the_value_table() {
 /// would keep agreeing with itself after the rule changed.
 #[test]
 fn the_marked_and_unmarked_boxes_are_the_same_shape() {
-    let marked = emit_ok(STRING_FIELD, "a GC-tier nobox materialize");
-    let plain = emit_ok(STRING_FIELD_UNMARKED, "the unmarked twin");
+    let marked = emit_module(STRING_FIELD);
+    let plain = emit_module(STRING_FIELD_UNMARKED);
     let ctor = |lua: &str| -> String {
         let body = function_body(lua, "main");
         let at = body.find("SRow_").expect("a SRow constructor in main");
@@ -204,89 +189,52 @@ fn the_marked_and_unmarked_boxes_are_the_same_shape() {
         "the explicit box selected a different constructor than the unmarked \
          struct's:\nmarked:\n{marked}\nplain:\n{plain}"
     );
-    assert_eq!(
-        run_luajit(&format!("{plain}\nmain()\n"), "gc_tier_plain"),
-        run_luajit(&format!("{marked}\nmain()\n"), "gc_tier_marked_twin"),
-    );
+    assert_eq!(run_main(&plain), run_main(&marked),);
 }
 
 #[test]
 fn an_array_field_boxes_through_the_value_table() {
-    let lua = emit_ok(ARRAY_FIELD, "an array field at the GC tier");
+    let lua = emit_module(ARRAY_FIELD);
     assert!(
         function_body(&lua, "main").contains("ARow_vt("),
         "the explicit box did not take the value-table ctor:\n{lua}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "gc_tier_array"),
-        "1:3:20"
-    );
+    assert_eq!(run_main(&lua), "1:3:20");
 }
 
 #[test]
 fn a_closure_field_boxes_through_the_value_table() {
-    assert_eq!(
-        run(
-            CLOSURE_FIELD,
-            "a closure field at the GC tier",
-            "gc_tier_closure"
-        ),
-        "2:8"
-    );
+    assert_eq!(compile_and_run(CLOSURE_FIELD), "2:8");
 }
 
 #[test]
 fn a_flat_enum_field_boxes_both_variant_kinds() {
-    assert_eq!(
-        run(
-            FLAT_ENUM_FIELD,
-            "a flat-enum field at the GC tier",
-            "gc_tier_flat_enum"
-        ),
-        "1:Silent:nil\n2:Say:hi"
-    );
+    assert_eq!(compile_and_run(FLAT_ENUM_FIELD), "1:Silent:nil\n2:Say:hi");
 }
 
 #[test]
 fn a_nested_nobox_field_boxes_inside_a_gc_tier_outer() {
-    assert_eq!(
-        run(
-            NESTED_NOBOX_FIELD,
-            "a nested nobox field at the GC tier",
-            "gc_tier_nested"
-        ),
-        "L:1:2"
-    );
+    assert_eq!(compile_and_run(NESTED_NOBOX_FIELD), "L:1:2");
 }
 
 #[test]
 fn a_nullable_gc_tier_value_reaches_the_sink_as_nil_when_absent() {
-    assert_eq!(
-        run(
-            NULLABLE_GC_TIER,
-            "a nullable GC-tier nobox value",
-            "gc_tier_nullable"
-        ),
-        "7z\nabsent"
-    );
+    assert_eq!(compile_and_run(NULLABLE_GC_TIER), "7z\nabsent");
 }
 
 #[test]
 fn a_leaf_table_value_boxes_through_its_dotted_key_constructor() {
-    let lua = emit_ok(LEAF_TABLE_TIER, "a leaf-table nobox materialize");
+    let lua = emit_module(LEAF_TABLE_TIER);
     assert!(
         function_body(&lua, "main").contains("Opt_lct("),
         "the explicit box did not take the leaf-table ctor:\n{lua}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "leaf_table_tier"),
-        "true:1:2:3"
-    );
+    assert_eq!(run_main(&lua), "true:1:2:3");
 }
 
 #[test]
 fn a_nested_cdata_value_boxes_as_one_leaf_constructor() {
-    let lua = emit_ok(NESTED_CDATA_TIER, "a nested cdata materialize");
+    let lua = emit_module(NESTED_CDATA_TIER);
     let main = function_body(&lua, "main");
     assert!(
         main.contains("Box2_lct("),
@@ -296,10 +244,7 @@ fn a_nested_cdata_value_boxes_as_one_leaf_constructor() {
         !main.contains("NV2_ct("),
         "the explicit box built an intermediate cdata per nested field:\n{lua}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "cdata_tier_nested"),
-        "1 4"
-    );
+    assert_eq!(run_main(&lua), "1 4");
 }
 
 #[test]
@@ -318,19 +263,13 @@ fn an_implicit_box_of_a_gc_tier_value_is_still_rejected() {
 
 #[test]
 fn a_nobox_field_under_a_gc_tier_parent_stores_as_leaves() {
-    let lua = emit_ok(
-        NOBOX_FIELD_UNDER_A_GC_TIER_PARENT,
-        "a nobox field of a stored GC-tier value",
-    );
+    let lua = emit_module(NOBOX_FIELD_UNDER_A_GC_TIER_PARENT);
     let setup = function_body(&lua, "setup");
     assert!(
         !setup.contains("NV2_ct("),
         "the stored parent boxed its nobox field:\n{setup}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "gc_tier_parent_leaves"),
-        "1 L"
-    );
+    assert_eq!(run_main(&lua), "1 L");
 }
 
 #[test]
@@ -357,10 +296,7 @@ fn main() {
 }
 "#;
     let lua = try_emit_module(source).expect("a scalarized closure local must emit");
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_closure_local"),
-        "10"
-    );
+    assert_eq!(run_main(&lua), "10");
 }
 
 // The live-body tests need a box that is still real: a tuple holding a `nobox`

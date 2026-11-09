@@ -6,7 +6,7 @@
 
 use skull::mir_emit::emit_full;
 
-use crate::common::{function_body, run_luajit, ws_with_stdlib};
+use crate::common::{function_body, run_main, ws_with_stdlib};
 
 /// `Bag` carries a `[int]`, so it is GC-carrying and materializes as a table
 /// (`_vt`). `Pt` is FFI-clean, so it materializes as cdata (`_ct`) and must be
@@ -76,10 +76,7 @@ fn gc_table_and_cdata_constructions_call_their_ctors() {
             "nullable return boxes before its field sink:\n{body}"
         );
     }
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "value_ctor_boxed_sink"),
-        "3\n2\ntrue\ntrue\ntrue\ntrue"
-    );
+    assert_eq!(run_main(&lua), "3\n2\ntrue\ntrue\ntrue\ntrue");
 }
 
 /// The ctor DEFINITION binds its table to a local and returns that: a

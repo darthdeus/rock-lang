@@ -30,31 +30,7 @@
 //! generics at large. The discriminant was generic-vs-non-generic, not the UFCS
 //! spelling -- a plain call through the same generic failed identically.
 
-use std::process::Command;
-
-fn run_capturing(prog: &str, tag: &str) -> (bool, String) {
-    let path =
-        std::env::temp_dir().join(format!("skull_sentinel_{}_{tag}.lua", std::process::id()));
-    std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("spawn luajit");
-    let _ = std::fs::remove_file(&path);
-    let combined = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    (out.status.success(), combined)
-}
-
-fn run_module(src: &str, tag: &str) -> String {
-    let lua = crate::common::try_emit_module(src).expect("must emit");
-    let (ok, out) = run_capturing(&format!("{lua}\nmain()\n"), tag);
-    assert!(ok, "program must run:\n{out}");
-    out.trim().to_string()
-}
+use crate::common::compile_and_run;
 
 const MARKED: &str = r#"
 nobox value NP { x: float, y: float }
@@ -106,7 +82,7 @@ fn main() {
 #[test]
 fn a_null_tuple_option_at_a_nobox_element_reads_as_null() {
     assert_eq!(
-        run_module(MARKED, "tuple_option_marked"),
+        compile_and_run(MARKED),
         "false",
         "a `return null` from a tuple-returning generic at a marked element must \
          report null, matching the controls below"
@@ -119,7 +95,7 @@ fn a_null_tuple_option_at_a_nobox_element_reads_as_null() {
 #[test]
 fn a_present_tuple_option_at_a_nobox_element_still_reads_its_values() {
     assert_eq!(
-        run_module(MARKED_PRESENT, "tuple_option_marked_present"),
+        compile_and_run(MARKED_PRESENT),
         "true 0 7 9",
         "a present tuple option must stay present and keep its element's leaves"
     );
@@ -151,7 +127,7 @@ fn main() {
 #[test]
 fn a_null_tuple_option_at_an_unmarked_column_element_reads_as_null() {
     assert_eq!(
-        run_module(UNMARKED, "tuple_option_unmarked"),
+        compile_and_run(UNMARKED),
         "false",
         "an unmarked column element must still report null correctly"
     );
@@ -162,7 +138,7 @@ fn a_null_tuple_option_at_an_unmarked_column_element_reads_as_null() {
 #[test]
 fn a_null_tuple_option_from_a_non_generic_fn_reads_as_null() {
     assert_eq!(
-        run_module(MARKED_NON_GENERIC, "tuple_option_non_generic"),
+        compile_and_run(MARKED_NON_GENERIC),
         "false",
         "a non-generic tuple option must report null correctly even at a mark"
     );

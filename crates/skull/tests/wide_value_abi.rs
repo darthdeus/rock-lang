@@ -15,7 +15,7 @@
 use skull_mir::lower::{SIGNATURE_SCALAR_LANE_BUDGET, WIDE_VALUE_PAYLOAD_LEAF_CUT};
 
 use crate::common::{
-    definition_names, emit_module_without_frame_limits, function_body, luajit_loads, run_luajit,
+    definition_names, emit_module_without_frame_limits, function_body, luajit_loads, run_main,
     try_emit_module,
 };
 
@@ -127,14 +127,11 @@ fn main() { print("{queue_sprites(0.5, 3)}") }
 #[test]
 fn the_wide_uniform_witness_compiles_loads_and_computes() {
     let lua = try_emit_module(WIDE_UNIFORM_SRC).expect("the wide-uniform shape must emit");
-    luajit_loads(&lua, "wide_value_abi_uniform").expect("the emitted chunk must load");
+    luajit_loads(&lua).expect("the emitted chunk must load");
     // Per iteration: count 1 + sprite_position.x (the index) + sprite_receiver 1
     // + origin.x 0.5, plus 0 + 1 + 2 from the three live narrow locals.
     // (2.5 + 3.5 + 4.5) + 3 * 3 = 19.5.
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_uniform_run"),
-        "19.5"
-    );
+    assert_eq!(run_main(&lua), "19.5");
 }
 
 /// The 58-leaf ordinary value crosses as ONE slot, so the helper's emitted
@@ -181,10 +178,7 @@ fn main() {{ print(\"{{roundtrip(0.0)}}\") }}
 "
     );
     let lua = try_emit_module(&src).expect("reading nobox fields out of a boxed wide value");
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_nobox_fields"),
-        "16"
-    );
+    assert_eq!(run_main(&lua), "16");
     // The `nobox` value that IS a parameter keeps its scalar lanes.
     assert_eq!(
         emitted_params(&lua, "with_anchor").len(),
@@ -199,7 +193,7 @@ fn main() {{ print(\"{{roundtrip(0.0)}}\") }}
 #[test]
 fn the_retained_old_abi_witness_still_fails_to_load() {
     let witness = include_str!("fixtures/generated-function.lua");
-    let err = luajit_loads(witness, "wide_value_abi_old_witness")
+    let err = luajit_loads(witness)
         .expect_err("the retained witness is a diagnostic of the old ABI, not a repaired oracle");
     assert!(err.contains("too complex"), "unexpected parse error: {err}");
 }
@@ -269,13 +263,7 @@ fn a_nullable_ordinary_value_takes_the_cut_of_its_payload() {
         WIDE_VALUE_PAYLOAD_LEAF_CUT + 1,
     ] {
         assert_eq!(
-            run_luajit(
-                &format!(
-                    "{}\nmain()\n",
-                    try_emit_module(&cut_fixture(payload, true)).expect("emits")
-                ),
-                "wide_value_abi_nullable"
-            ),
+            run_main(&try_emit_module(&cut_fixture(payload, true)).expect("emits")),
             "1",
         );
     }
@@ -301,10 +289,7 @@ fn a_wide_nobox_value_keeps_its_scalar_lanes() {
         "a nobox value wider than the cut must keep its lanes:\n{}",
         function_body(&lua, "thru")
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_nobox_wide"),
-        "1"
-    );
+    assert_eq!(run_main(&lua), "1");
 }
 
 // --- gate 2: the per-signature lane budget --------------------------------
@@ -423,7 +408,7 @@ fn a_signature_over_the_lane_budget_boxes_widest_first() {
         params.len() + 1
     );
     assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_budget"),
+        run_main(&lua),
         "15",
         "boxing must not change what the call computes"
     );
@@ -532,10 +517,7 @@ fn every_call_kind_agrees_on_the_boxed_wire() {
         "a value one leaf over the cut must box:\n{}",
         function_body(&lua, "bump")
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_call_kinds"),
-        "1 1 1 1 0 1 3 1 2",
-    );
+    assert_eq!(run_main(&lua), "1 1 1 1 0 1 3 1 2",);
 }
 
 /// Value semantics survive the box: a callee that mutates its own copy of a
@@ -573,7 +555,7 @@ fn main() {{
         function_body(&lua, "keep_and_mutate")
     );
     assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_aliasing"),
+        run_main(&lua),
         "1 99 7 99",
         "a boxed parameter must not alias the caller's value"
     );
@@ -609,10 +591,7 @@ fn main() {{
         0,
         "the forwarder must reuse the argument box:\n{body}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "wide_value_abi_forward"),
-        "3 9"
-    );
+    assert_eq!(run_main(&lua), "3 9");
 }
 
 /// The boxed wire is a property of the type alone, so a body whose CALLEE's
@@ -668,5 +647,5 @@ fn a_frame_limit_rejection_still_names_the_nobox_value() {
         err.message
     );
     let lua = emit_module_without_frame_limits(&src);
-    luajit_loads(&lua, "wide_value_abi_nobox_frame").expect_err("must not load");
+    luajit_loads(&lua).expect_err("must not load");
 }

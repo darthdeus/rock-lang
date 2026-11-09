@@ -5,7 +5,7 @@
 //! non-escaping path builds no box; an escape (a field, a boxed local) boxes
 //! once, and to `nil` when absent.
 
-use crate::common::{emit_module, function_body, run_luajit};
+use crate::common::{compile_and_run, emit_module, function_body};
 
 const OPTIONAL_VALUE: &str = r#"
 value Mix { gain: float, pan: float }
@@ -107,9 +107,8 @@ fn optional_value_return_builds_no_box_on_the_presence_path() {
 
 #[test]
 fn optional_value_wire_keeps_null_present_nested_and_escape_semantics() {
-    let lua = emit_module(OPTIONAL_VALUE);
     assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "optional_value_wire"),
+        compile_and_run(OPTIONAL_VALUE),
         "5\n-1\n5\ntrue\ntrue\ntrue\ntrue\n5\n0\n4\n7\n9\ntrue\ntrue\ntrue\n4\nt\nd"
     );
 }

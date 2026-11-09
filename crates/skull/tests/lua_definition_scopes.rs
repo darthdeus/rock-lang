@@ -1,4 +1,4 @@
-use crate::common::{emit_module, run_luajit};
+use crate::common::{emit_module, run_main};
 use std::fmt::Write;
 
 #[test]
@@ -18,8 +18,5 @@ fn full_emit_partitions_a_large_project_definition_population() {
         3,
         "the full emitter did not partition the definition population"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "definition_scopes"),
-        "4096"
-    );
+    assert_eq!(run_main(&lua), "4096");
 }

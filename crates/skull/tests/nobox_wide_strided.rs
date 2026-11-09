@@ -15,7 +15,7 @@
 //! closures and nil (an inactive enum payload slot, an absent nullable), so the
 //! backing stores every leaf RAW: `false` stays `false` and nil stays nil.
 
-use crate::common::{function_body, run_luajit, try_emit_module};
+use crate::common::{function_body, run_luajit, run_main, try_emit_module};
 
 const EVENT: &str = r#"
 nobox value P2 { x: float, y: float }
@@ -139,7 +139,7 @@ fn wide_nobox_push_writes_one_backing_with_a_running_index() {
 fn wide_nobox_elements_round_trip_every_leaf_kind() {
     let lua = try_emit_module(&program(PUSH_MAIN)).expect("emits");
     assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_wide_strided_round_trip"),
+        run_main(&lua),
         "1:o1,2,7,false:bob:hit:true:0:f4:s3:9|\
          2:d5:-::false:0:nf:ns:0.5|\
          3:thi:-::false:0:nf:ns:0.5|\
@@ -235,7 +235,7 @@ assert(require('table.new') == original)
 assert(ok, err)
 "#
     );
-    assert_eq!(run_luajit(&script, "strided_reservation"), "reserved");
+    assert_eq!(run_luajit(&script), "reserved");
     let failing = script
         .replace(
             "main()\nend, debug.traceback)",
@@ -245,10 +245,7 @@ assert(ok, err)
             "assert(ok, err)",
             "assert(not ok and err:find('intentional%-cleanup'), err)",
         );
-    assert_eq!(
-        run_luajit(&failing, "strided_reservation_cleanup"),
-        "reserved"
-    );
+    assert_eq!(run_luajit(&failing), "reserved");
 }
 
 const SURFACE_MAIN: &str = r#"
@@ -288,7 +285,7 @@ fn wide_nobox_strided_vec_keeps_the_mutating_surface() {
         "fixture must exercise strided storage"
     );
     assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_wide_strided_surface"),
+        run_main(&lua),
         "5:o3,4,1,true:-::false:0:nf:ns:0.5|\
          1:d1:-:set:true:0:nf:ns:0.5|\
          6|973|3978|true,false|\
@@ -337,10 +334,7 @@ fn wide_nobox_strided_vec_releases_removed_references() {
         lua.contains(r#"repr = "strided""#),
         "fixture must exercise strided storage"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_wide_strided_release"),
-        "true,true,true"
-    );
+    assert_eq!(run_main(&lua), "true,true,true");
 }
 
 #[test]
@@ -396,12 +390,9 @@ fn main() {
 fn wide_generic_rows_keep_one_slot_per_type_argument() {
     let lua = try_emit_module(GENERIC_WIDE).expect("generic rows emit");
     assert_eq!(
-        run_luajit(
-            &format!(
-                "{lua}\nmain()\nlocal row = __ROCK_STRIDED_ROWS.Wide\nassert(row.a == 1 and row.item == 2 and row.flag == 5)\n"
-            ),
-            "wide_generic_rows"
-        ),
+        run_luajit(&format!(
+            "{lua}\nmain()\nlocal row = __ROCK_STRIDED_ROWS.Wide\nassert(row.a == 1 and row.item == 2 and row.flag == 5)\n"
+        )),
         "5 5 5 5\n7 11 12 2 -1 false",
     );
 }
@@ -422,7 +413,7 @@ fn wide_generic_rows_clone_owned_leaves_and_release_removed_references() {
 "#;
     let lua = try_emit_module(&format!("{GENERIC_WIDE}\n{extra}")).expect("generic copies emit");
     assert_eq!(
-        run_luajit(&format!("{lua}\nprint(copy_rows())\n"), "wide_generic_copy"),
+        run_luajit(&format!("{lua}\nprint(copy_rows())\n")),
         "2 2 1 1 21 99",
     );
 
@@ -439,10 +430,7 @@ fn wide_generic_rows_clone_owned_leaves_and_release_removed_references() {
     let lua =
         try_emit_module(&format!("{GENERIC_WIDE}\n{popped}")).expect("generic value pop emits");
     assert_eq!(
-        run_luajit(
-            &format!("{lua}\nprint(pop_value())\n"),
-            "wide_generic_value_pop"
-        ),
+        run_luajit(&format!("{lua}\nprint(pop_value())\n")),
         "0 11 99",
     );
 
@@ -454,10 +442,7 @@ fn wide_generic_rows_clone_owned_leaves_and_release_removed_references() {
         lua.contains(r#"repr = "strided""#),
         "fixture must exercise strided storage"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "wide_generic_release"),
-        "true,true,true",
-    );
+    assert_eq!(run_main(&lua), "true,true,true",);
 }
 
 #[test]
@@ -468,10 +453,7 @@ fn a_nobox_element_at_the_threshold_keeps_columns() {
         main.contains(r#"repr = "columns""#) && !main.contains(r#"repr = "strided""#),
         "a four-leaf nobox element stays in columns:\n{main}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_narrow_columns"),
-        "4"
-    );
+    assert_eq!(run_main(&lua), "4");
 }
 
 const NESTED_WRITE: &str = r#"
@@ -506,10 +488,7 @@ fn a_nested_leaf_of_a_flat_stored_element_is_one_slot_write() {
         lua.contains(r#"repr = "strided""#) && lua.contains(r#"repr = "columns""#),
         "fixture must exercise both flat tiers"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nested_leaf_write"),
-        "1,1,2.5,3|6,70,8,11|1,20|50"
-    );
+    assert_eq!(run_main(&lua), "1,1,2.5,3|6,70,8,11|1,20|50");
 }
 
 const EMPTY_EDGES_MAIN: &str = r#"
@@ -550,10 +529,7 @@ fn an_emptied_strided_vec_answers_like_a_boxed_one() {
         "fixture must exercise strided storage"
     );
     assert_eq!(
-        run_luajit(
-            &format!("{lua}\nmain()\n"),
-            "nobox_wide_strided_empty_edges"
-        ),
+        run_main(&lua),
         "true,1,true,true,true,1,2|true,1,true,true,true,1,2"
     );
 }

@@ -139,7 +139,7 @@ fn value_struct_equality_evaluates_each_operand_exactly_once() {
     require_luajit();
     let mut lua = emit_module(SINGLE_EVAL_CONTROL);
     lua.push_str("\nprint(eq_effectful())\n");
-    let out = run_luajit(&lua, "value_struct_eq_single_eval");
+    let out = run_luajit(&lua);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
@@ -178,7 +178,7 @@ fn value_struct_equality_preserves_semantics() {
     lua.push_str(
         "\nprint(eq_scalar(1.0, 2.0, 1.0, 2.0), eq_scalar(1.0, 2.0, 1.0, 3.0), ne_scalar(1.0, 2.0, 1.0, 3.0), ne_scalar(1.0, 2.0, 1.0, 2.0), eq_gc_same_ref(5), ne_gc_different_tag(5, 6))\n",
     );
-    let out = run_luajit(&lua, "value_struct_eq_semantics");
+    let out = run_luajit(&lua);
     assert_eq!(
         out.trim(),
         "true\tfalse\ttrue\tfalse\ttrue\ttrue",
@@ -245,7 +245,7 @@ fn scalar_value_leaf_equality_keeps_field_semantics() {
         "\nprint(handle_eq(1, 2, 1, 2), handle_eq(1, 2, 1, 3), handle_eq(1, 2, 4, 2))\
          \nprint(handle_ne(1, 2, 1, 2), handle_ne(1, 2, 1, 3))\n",
     );
-    let out = run_luajit(&lua, "value_struct_eq_leaf_semantics");
+    let out = run_luajit(&lua);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
@@ -282,7 +282,7 @@ fn stored_float_value_equality_matches_a_fresh_operand() {
     require_luajit();
     let mut lua = emit_module(STORED_FLOAT_VALUE);
     lua.push_str("\nprint(stored_float_eq(0.4, 0.1), stored_float_ne(0.4, 0.1), stored_float_eq(0.5, 0.25))\n");
-    let out = run_luajit(&lua, "value_struct_eq_stored_float");
+    let out = run_luajit(&lua);
     assert_eq!(
         out.trim(),
         "true\tfalse\ttrue",
@@ -319,7 +319,7 @@ print(a.row == b.row, a.row == c.row, absent.row == row(nil).row, a.row == absen
   ReferenceParent_vt(reference) == ReferenceParent_vt({name="same"}))
 "#,
     );
-    let out = run_luajit(&lua, "nullable_boxed_value_field_equality");
+    let out = run_luajit(&lua);
     assert_eq!(
         out.trim(),
         "true\tfalse\ttrue\tfalse\ttrue\tfalse",

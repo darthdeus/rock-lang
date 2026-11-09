@@ -4,7 +4,7 @@
 //! emits the bare name, so the global resolved to the env record (a table) and
 //! arithmetic on it crashed at runtime. The param is now the reserved name
 //! `__rock_env`, which no user identifier can legally collide with.
-use crate::common::{emit_module, run_luajit};
+use crate::common::compile_and_run;
 
 /// The repro: a global `e` read alongside a captured param inside a capturing
 /// lambda. Pre-fix this crashed ("arithmetic on a table value"); the env record
@@ -16,8 +16,7 @@ global e: int = 5
 fn make(x: int) -> fn() -> int { return () => x + e }
 fn main() { let f = make(1) print("{f()}") }
 "#;
-    let lua = emit_module(src);
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "env_shadow_direct");
+    let out = compile_and_run(src);
     assert_eq!(
         out, "6",
         "global `e` must read the user global, not the env record; got: {out}"
@@ -39,8 +38,7 @@ fn make(x: int) -> fn() -> fn() -> int {
 }
 fn main() { let f = make(2) let g = f() print("{g()}") }
 "#;
-    let lua = emit_module(src);
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "env_shadow_nested");
+    let out = compile_and_run(src);
     assert_eq!(
         out, "7",
         "global `e` in a nested capture body must not resolve to an env record; got: {out}"
@@ -59,8 +57,7 @@ fn make(x: int) -> fn() -> int {
 }
 fn main() { let f = make(3) print("{f()}") }
 "#;
-    let lua = emit_module(src);
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "env_shadow_local");
+    let out = compile_and_run(src);
     assert_eq!(
         out, "3",
         "a captured local `e` reads its own value; got: {out}"

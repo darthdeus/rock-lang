@@ -105,10 +105,7 @@ fn derived_scalar_constant_edits_refresh_transitive_readers_at_runtime() {
             "{}\nassert(choose() == {expected_before})\n{}\nassert(choose() == {expected_after})\nprint('ok')",
             full.lua, overlay.lua
         );
-        assert_eq!(
-            crate::common::run_luajit(&run, "derived_scalar_reload"),
-            "ok"
-        );
+        assert_eq!(crate::common::run_luajit(&run), "ok");
     }
 }
 
@@ -1606,10 +1603,7 @@ inline(lua) fn slots_empty(c: Coroutine<FrameYield>) -> bool = """
         "{}\nprint(sample(1))\n{}\nprint(sample(3))\n",
         full.lua, overlay.lua
     );
-    assert_eq!(
-        crate::common::run_luajit(&run, "overlay_frame_nil_stores"),
-        "true\ntrue"
-    );
+    assert_eq!(crate::common::run_luajit(&run), "true\ntrue");
 }
 
 /// A `co fn` with lambdas in both its step region and a detached defer region
@@ -1775,7 +1769,7 @@ print(before)
         full = full.lua,
         overlay = overlay.lua
     );
-    let out = crate::common::run_luajit(&run, "shared_abi_overlay");
+    let out = crate::common::run_luajit(&run);
     assert_eq!(
         out.lines().count(),
         escaping.len(),
@@ -1882,10 +1876,7 @@ return c.v }
         "{}\nseed()\nassert(tick(2))\nlocal before = snapshot()\n{}\nassert(snapshot() == before)\nassert(tick(3))\nassert(snapshot() < before)\nprint('ok')\n",
         full.lua, overlay.lua,
     );
-    assert_eq!(
-        crate::common::run_luajit(&run, "flat_ref_body_overlay"),
-        "ok"
-    );
+    assert_eq!(crate::common::run_luajit(&run), "ok");
 }
 
 #[test]

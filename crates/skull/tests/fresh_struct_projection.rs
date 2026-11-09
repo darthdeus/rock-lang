@@ -1,4 +1,4 @@
-use crate::common::{emit_module, function_body, run_luajit};
+use crate::common::{compile_and_run, emit_module, function_body, run_luajit};
 
 const SOURCE: &str = r#"
 value FreshPair { x: int, y: int }
@@ -47,11 +47,7 @@ fn fresh_struct_projection_eliminates_the_unobservable_container() {
 
 #[test]
 fn fresh_struct_projection_keeps_operand_effects_and_escaping_mutation() {
-    let lua = emit_module(SOURCE);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "fresh_struct_projection"),
-        "7 2\n7 23\n7 23\n26 2"
-    );
+    assert_eq!(compile_and_run(SOURCE), "7 2\n7 23\n7 23\n26 2");
 }
 
 #[test]
@@ -79,5 +75,5 @@ fn fresh_default_constant_updates_through_incremental_and_overlay_emission() {
         "{}\nassert(selected_default() == 7)\n{}\nassert(selected_default() == 13)\nprint('ok')",
         full.lua, overlay.lua
     );
-    assert_eq!(run_luajit(&run, "fresh_default_overlay"), "ok");
+    assert_eq!(run_luajit(&run), "ok");
 }

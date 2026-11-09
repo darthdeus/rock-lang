@@ -1,4 +1,4 @@
-use crate::common::{emit_module, run_luajit};
+use crate::common::{compile_and_run, emit_module, run_luajit};
 
 const SOURCE: &str = r#"
 nobox value Cell { x: int, y: int }
@@ -101,7 +101,7 @@ change(owner)
 print(read(owner))
 "#
     );
-    let output = run_luajit(&program, "cdata_leaf_projection");
+    let output = run_luajit(&program);
     std::fs::remove_dir_all(&dir).expect("remove ABI fixture");
     assert_eq!(output, "31");
 }
@@ -165,7 +165,7 @@ assert(growth < 4, 'value iteration allocates nested descriptors: ' .. growth ..
 print('ok')
 "#
     );
-    assert_eq!(run_luajit(&program, "cdata_iteration"), "ok");
+    assert_eq!(run_luajit(&program), "ok");
 }
 
 #[test]
@@ -214,13 +214,14 @@ assert(growth < 4, 'nullable native snapshot allocates child descriptors: ' .. g
 print('ok')
 "#
     );
-    assert_eq!(run_luajit(&program, "nullable_native_snapshot"), "ok");
+    assert_eq!(run_luajit(&program), "ok");
 }
 
 #[test]
 fn optional_inline_child_projection_keeps_constructor_folding() {
-    let lua = emit_module(
-        r#"
+    assert_eq!(
+        compile_and_run(
+            r#"
 nobox value Point { x: int, y: int }
 nobox value Inner { point: Point, tag: int }
 nobox value SnapshotEnvelope { inner: Inner, flag: int }
@@ -234,10 +235,8 @@ fn main() {
     let value = before.unwrap()
     print("{value.point.x} {value.point.y} {value.tag} {child(owner) == null}")
 }
-"#,
-    );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "optional_inline_child"),
+"#
+        ),
         "2 3 7 true"
     );
 }

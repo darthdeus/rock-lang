@@ -3,7 +3,7 @@
 //! it.reduce(0, (a, x) => a + x) }` forwards its generic receiver into a
 //! fn-value terminal with the closure constructed in its own body. The caller
 //! must fully inline the chain; a refusal leaves a residual bounded call and the caller cannot emit.
-use crate::common::{emit_mir, run_luajit};
+use crate::common::{emit_mir, run_main};
 
 const FWD_TERMINALS: &str = r#"
 fn fwd_reduce<I: Iterator<int>>(it: I) -> int {
@@ -34,6 +34,6 @@ fn main() {
 #[test]
 fn bounded_fn_with_lambda_literal_inlines_and_runs() {
     let emit = emit_mir(FWD_TERMINALS);
-    let out = run_luajit(&format!("{}\nmain()\n", emit.lua), "bounded_lambda");
+    let out = run_main(&emit.lua);
     assert_eq!(out, "6\ntrue\n2\n5");
 }

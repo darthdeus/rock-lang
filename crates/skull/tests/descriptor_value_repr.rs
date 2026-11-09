@@ -70,10 +70,7 @@ fn user_value_named_like_a_descriptor_keeps_scalarization() {
     );
     let probe = mangled_name(&emitted.lua, "probe");
     assert_eq!(
-        run_luajit(
-            &format!("{}\nprint({probe}())\n", emitted.lua),
-            "user_named_descriptor"
-        ),
+        run_luajit(&format!("{}\nprint({probe}())\n", emitted.lua)),
         "3"
     );
 }

@@ -21,10 +21,7 @@ fn no_code_ref_values_omit_code_ref_runtime() {
 fn programs_without_definition_roles_do_not_stage_an_empty_plan() {
     let lua = emit_module("fn main() {}\n");
     assert!(!lua.contains("__rock_definition_plan_stage("));
-    assert_eq!(
-        run_luajit(&format!("{lua}\nprint('PASS')"), "empty_definition_plan"),
-        "PASS"
-    );
+    assert_eq!(run_luajit(&format!("{lua}\nprint('PASS')")), "PASS");
 }
 
 #[test]
@@ -47,10 +44,7 @@ else
   print("0/4 FAIL")
 end
 "#;
-    assert_eq!(
-        run_luajit(&format!("{lua}{driver}"), "typed_definition_catalog"),
-        "4/4 PASS"
-    );
+    assert_eq!(run_luajit(&format!("{lua}{driver}")), "4/4 PASS");
 }
 
 /// An escaping Rock function value enables the shared CodeRef runtime.
@@ -80,7 +74,7 @@ fn record_is_callable_via_call_metamethod() {
         __rock_code_slot_publish()\n\
         local rec = setmetatable({ __slot = __rock_code_slot_ref(\"record\"), x = 100 }, _G.__rock_fn_mt)\n\
         print(rec(5))\n";
-    let out = run_luajit(&format!("{lua}{driver}"), "call");
+    let out = run_luajit(&format!("{lua}{driver}"));
     assert_eq!(
         out, "105",
         "f(5) must route through the CodeRef slot reading rec.x; got: {out}"
@@ -107,7 +101,7 @@ fn metatable_identity_preserved_across_reload() {
            print(\"PASS\")\n\
          else print(\"FAIL\") end\n"
     );
-    let out = run_luajit(&script, "reload");
+    let out = run_luajit(&script);
     assert_eq!(
         out, "PASS",
         "records built across a reload must share metatable identity; got: {out}"
@@ -130,7 +124,7 @@ end)
 local after = __rock_code_slot_ref("probe")
 if not ok and before == after and after() == 1 then print("PASS") else print("FAIL") end
 "#;
-    let out = run_luajit(&format!("{lua}{driver}"), "slot_transaction");
+    let out = run_luajit(&format!("{lua}{driver}"));
     assert_eq!(
         out, "PASS",
         "a failed compatibility stage must not publish or replace its slot: {out}"
@@ -157,7 +151,7 @@ if not ok and _G.__rock_lifecycle_plan_pending == nil
    and _G.__ROCK_LIFECYCLE_PLAN == old_plan and old_plan.update.len == 1
    and __rock_code_slot_ref("probe")() == 1 then print("PASS") else print("FAIL") end
 "#;
-    let out = run_luajit(&format!("{lua}{driver}"), "lifecycle_transaction");
+    let out = run_luajit(&format!("{lua}{driver}"));
     assert_eq!(
         out, "PASS",
         "failed staging must retain both old plan membership and old bodies: {out}"
@@ -185,7 +179,7 @@ if not ok and _G.__rock_definition_plan_pending == nil
    and old_plan.panels.len == 1
    and __rock_code_slot_ref("probe")() == 1 then print("PASS") else print("FAIL") end
 "#;
-    let out = run_luajit(&format!("{lua}{driver}"), "definition_transaction");
+    let out = run_luajit(&format!("{lua}{driver}"));
     assert_eq!(
         out, "PASS",
         "failed staging must retain the old definition plan and clear pending state: {out}"

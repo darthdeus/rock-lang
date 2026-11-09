@@ -155,10 +155,7 @@ fn shared_prefix_dependency_retains_only_reached_bodies() {
             .any(|s| s.starts_with("reached_dependency_body"))
     );
     common::require_luajit();
-    assert_eq!(
-        common::run_luajit(&format!("{}\nmain()", emit.lua), "shared_prefix_dependency"),
-        "9"
-    );
+    assert_eq!(common::run_main(&emit.lua), "9");
 
     let edited = ws_with_dependency_module(
         "fn unused_dependency_body() -> int { return 7 }\nfn reached_dependency_body() -> int { return 9 }",
@@ -185,13 +182,7 @@ fn shared_prefix_dependency_retains_only_reached_bodies() {
         .expect("fresh emission after removing the dependency call")
         .0;
     assert_eq!(incremental.lua, fresh.lua);
-    assert_eq!(
-        common::run_luajit(
-            &format!("{}\nmain()", incremental.lua),
-            "shared_prefix_incremental"
-        ),
-        "0"
-    );
+    assert_eq!(common::run_main(&incremental.lua), "0");
 }
 
 /// A registered `rock_shader` program's dependencies -- its stage entries and

@@ -126,7 +126,7 @@ _G.bar = 17
 check("state write past a bare reinstall", _G.bar, 17)
 "#,
     );
-    let out = run_luajit(&prog, "state_global_bridge");
+    let out = run_luajit(&prog);
     assert!(!out.contains("FAIL"), "bridge behaviour changed:\n{out}");
     assert_eq!(
         out.lines().filter(|l| l.starts_with("ok ")).count(),

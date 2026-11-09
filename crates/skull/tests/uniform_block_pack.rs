@@ -8,7 +8,7 @@
 //! the divergence is visible as a skipped index rather than as a number that
 //! happens to agree.
 
-use crate::common::{bone_rejections, emit_module, function_body, run_luajit};
+use crate::common::{bone_rejections, emit_module, function_body, run_main};
 
 const CANONICAL_VALUES: &str = r#"
 value ProbeUniform {
@@ -62,7 +62,7 @@ fn uniform_values_expands_to_canonical_leaves() {
             "canonical `{variant}` leaf was not built:\n{body}"
         );
     }
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "canonical_uniform_values");
+    let out = run_main(&lua);
     assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["true", "6"]);
 }
 
@@ -159,10 +159,7 @@ fn main() {
     print(i[0])
 }
 "#;
-    let out = run_luajit(
-        &format!("{}\nmain()\n", emit_module(src)),
-        "uint_uniform_bits",
-    );
+    let out = run_main(&emit_module(src));
     assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["-1"]);
 }
 
@@ -213,10 +210,7 @@ fn main() {
 /// nil local. The three controls below each drop one leg of that shape.
 #[test]
 fn a_nested_member_survives_a_local_inside_a_lambda() {
-    let out = run_luajit(
-        &format!("{}\nmain()\n", emit_module(PROBE)),
-        "probe_lambda_local",
-    );
+    let out = run_main(&emit_module(PROBE));
     assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["1", "5", "6"]);
 }
 
@@ -231,10 +225,7 @@ fn control_a_literal_packed_directly_inside_a_lambda() {
     // A `.replace` that matched nothing yields the PROBE verbatim, and this
     // control would then silently re-run the main case instead of its own.
     assert_ne!(src, PROBE, "the control's substitution matched nothing");
-    let out = run_luajit(
-        &format!("{}\nmain()\n", emit_module(&src)),
-        "probe_lambda_literal",
-    );
+    let out = run_main(&emit_module(&src));
     assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["1", "5", "6"]);
 }
 
@@ -244,11 +235,8 @@ fn control_a_literal_packed_directly_inside_a_lambda() {
 /// asserted rather than shown.
 #[test]
 fn control_a_flat_value_in_a_lambda_local() {
-    let out = run_luajit(
-        &format!(
-            "{}\nmain()\n",
-            emit_module(
-                r#"
+    let out = run_main(&emit_module(
+        r#"
 value FlatU {
     scalar: float,
     px: float,
@@ -267,11 +255,8 @@ fn main() {
     }
     body()
 }
-"#
-            )
-        ),
-        "probe_lambda_flat",
-    );
+"#,
+    ));
     assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["1", "5", "6"]);
 }
 
@@ -279,11 +264,8 @@ fn main() {
 /// rather than in a lambda. Isolates the lambda.
 #[test]
 fn control_a_local_packed_at_function_scope() {
-    let out = run_luajit(
-        &format!(
-            "{}\nmain()\n",
-            emit_module(
-                r#"
+    let out = run_main(&emit_module(
+        r#"
 value ProbeU {
     scalar: float,
     params: Vec2,
@@ -299,10 +281,7 @@ fn main() {
     print(f[3])
 }
 "#,
-            )
-        ),
-        "probe_fnscope_local",
-    );
+    ));
     assert_eq!(out.split_whitespace().collect::<Vec<_>>(), ["1", "5", "6"]);
 }
 
@@ -316,11 +295,8 @@ fn main() {
 /// the property is pinned at runtime and not by a substring that could drift.
 #[test]
 fn the_fingerprint_never_evaluates_its_argument() {
-    let out = run_luajit(
-        &format!(
-            "{}\nmain()\n",
-            emit_module(
-                r#"
+    let out = run_main(&emit_module(
+        r#"
 value FpProbeU { a: float, b: float }
 
 global CALLS: int = 0
@@ -344,11 +320,8 @@ fn main() {
     pack_uniform_block(f.ptr, i.ptr, make_probe())
     print(CALLS)
 }
-"#
-            )
-        ),
-        "fingerprint_no_eval",
-    );
+"#,
+    ));
     assert_eq!(
         out.split_whitespace().collect::<Vec<_>>(),
         ["true", "0", "1"],
@@ -419,7 +392,7 @@ fn a_global_block_packs_one_leaf_at_a_time() {
         registers < 32,
         "{registers} registers for a 32-leaf block: every leaf is loaded before the first store:\n{body}"
     );
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "global_block_pack");
+    let out = run_main(&lua);
     assert_eq!(
         out.split_whitespace().collect::<Vec<_>>(),
         ["1", "6", "16", "17", "20"]

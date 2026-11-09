@@ -94,7 +94,7 @@ collectgarbage("collect")
 io.write(tostring(freed_while_referenced), " ", tostring(ref ~= nil), " ", tostring(owning_copy().a))
 "#;
     assert_eq!(
-        crate::common::run_luajit(probe, "extern_value_return_refprobe"),
+        crate::common::run_luajit(probe),
         "true true 7",
         "LuaJIT no longer collects a referenced parent -- if this flipped, re-read \
          whether the owning copy is still required"

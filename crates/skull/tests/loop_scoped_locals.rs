@@ -9,7 +9,7 @@
 //! (no spill fallback), blacklisting the trace tree. Body-scoped `local`s sit
 //! ABOVE the loop control slots and get pruned, collapsing the inherited set to
 //! the genuinely-live values.
-use crate::common::{emit_module, function_body, run_luajit};
+use crate::common::{compile_and_run, emit_module, function_body};
 
 /// Multi-use loop-body temps (`t1`/`t2` below are used twice, so they are not
 /// tree-folded and need real `r<N>` registers) get their `local` declaration
@@ -111,11 +111,7 @@ fn main() {
     print("{select(Selection { count: 0 }, 8, 0)}")
 }
 "#;
-    let lua = emit_module(src);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "compound_while_loop_carried"),
-        "2\n2\n0\n0"
-    );
+    assert_eq!(compile_and_run(src), "2\n2\n0\n0");
 }
 
 #[test]
@@ -152,9 +148,5 @@ fn main() {
     print("{p.count} {p.checks}")
 }
 "#;
-    let lua = emit_module(src);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "compound_while_effects"),
-        "0 0\n2 4\n6 6"
-    );
+    assert_eq!(compile_and_run(src), "0 0\n2 4\n6 6");
 }

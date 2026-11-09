@@ -15,7 +15,7 @@
 //! The GC-tier ctor itself (one field, no Vec) is pinned by
 //! `nobox_nested_ctor.rs`.
 
-use crate::common::{function_body, run_luajit, try_emit_module};
+use crate::common::{function_body, run_main, try_emit_module};
 
 const WIDE_NOBOX_OVERWRITE: &str = r#"
 nobox value Wide { a: int, b: int, c: int, d: int, e: int }
@@ -41,10 +41,7 @@ fn wide_nobox_vec_stays_flat_past_the_implicit_threshold() {
         body.contains(r#"repr = "strided""#),
         "wide nobox Vec left flat row storage:\n{body}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "wide_nobox_vec"),
-        "6 10"
-    );
+    assert_eq!(run_main(&lua), "6 10");
 }
 
 /// `n` float fields after `pos`, so the element carries `n + 3` leaves
@@ -118,7 +115,7 @@ fn every_leaf_count_round_trips_and_the_storage_tier_flips_at_the_threshold() {
         let want_present: String = std::iter::once("1 2".to_string())
             .chain((0..extra).map(|i| format!(" {}", i + 3)))
             .collect();
-        let got = run_luajit(&format!("{lua}\nmain()\n"), "column_threshold");
+        let got = run_main(&lua);
         let got: Vec<&str> = got.trim().lines().collect();
         assert_eq!(
             got,

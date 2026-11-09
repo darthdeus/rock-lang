@@ -71,9 +71,8 @@ nobox value Column { a: int, b: int, c: int, d: int }
 #[test]
 fn empty_snapshots_allocate_only_the_returned_list() {
     let lua = emit_module(SOURCE);
-    let output = run_luajit(
-        &format!(
-            r#"{lua}
+    let output = run_luajit(&format!(
+        r#"{lua}
 jit.off()
 jit.flush()
 local boxed, column = empty_boxed_map(), empty_column_map()
@@ -103,18 +102,15 @@ for _, case in ipairs({{
 end
 print('ok')
 "#
-        ),
-        "map_empty_allocations",
-    );
+    ));
     assert_eq!(output, "ok");
 }
 
 #[test]
 fn empty_snapshots_skip_sorting_and_keys_into_clears_its_result() {
     let lua = emit_module(SOURCE);
-    let output = run_luajit(
-        &format!(
-            r#"{lua}
+    let output = run_luajit(&format!(
+        r#"{lua}
 local boxed, column = empty_boxed_map(), empty_column_map()
 table.sort = function() error('empty snapshot sorted') end
 for _, case in ipairs({{
@@ -132,18 +128,15 @@ for _, case in ipairs({{{{boxed_keys_into, boxed}}, {{column_keys_into, column}}
 end
 print('ok')
 "#
-        ),
-        "map_empty_sort",
-    );
+    ));
     assert_eq!(output, "ok");
 }
 
 #[test]
 fn empty_snapshots_return_fresh_lists() {
     let lua = emit_module(SOURCE);
-    let output = run_luajit(
-        &format!(
-            r#"{lua}
+    let output = run_luajit(&format!(
+        r#"{lua}
 local boxed, column = empty_boxed_map(), empty_column_map()
 for _, case in ipairs({{
     {{boxed_keys, boxed}}, {{column_keys, column}},
@@ -159,9 +152,7 @@ for _, case in ipairs({{
 end
 print('ok')
 "#
-        ),
-        "map_empty_fresh",
-    );
+    ));
     assert_eq!(output, "ok");
 }
 
@@ -169,10 +160,7 @@ print('ok')
 fn nonempty_snapshots_stay_sorted_and_survive_map_mutation() {
     let lua = emit_module(SOURCE);
     assert_eq!(
-        run_luajit(
-            &format!("{lua}\nsorted_snapshots()\nprint('ok')"),
-            "map_sorted_snapshots"
-        ),
+        run_luajit(&format!("{lua}\nsorted_snapshots()\nprint('ok')")),
         "ok"
     );
 }

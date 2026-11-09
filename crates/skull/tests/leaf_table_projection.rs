@@ -1,4 +1,4 @@
-use crate::common::{emit_module, function_body, run_luajit};
+use crate::common::{compile_and_run, emit_module, function_body};
 
 const SOURCE: &str = r#"
 nobox value LeafPoint { x: int, y: int }
@@ -36,9 +36,5 @@ fn leaf_table_ref_field_emits_only_the_selected_read() {
 
 #[test]
 fn leaf_table_ref_projection_captures_values_before_mutation() {
-    let lua = emit_module(SOURCE);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "leaf_table_projection"),
-        "false 7 9 11 13\ntrue 17 19 -1"
-    );
+    assert_eq!(compile_and_run(SOURCE), "false 7 9 11 13\ntrue 17 19 -1");
 }

@@ -29,22 +29,16 @@ fn demand_leaf(v: DemandRecord) -> int { return v.y }
     let incremental = skull::mir_emit::emit_incremental(&ws2, &mut cache, &edits).unwrap();
     assert_eq!(incremental.lua, emit_full(&ws2, mid).unwrap().0.lua);
     assert_eq!(
-        run_luajit(
-            &format!("{}\nprint(caller(), expose())", incremental.lua),
-            "demand_function_value"
-        ),
+        run_luajit(&format!("{}\nprint(caller(), expose())", incremental.lua)),
         "23\t47"
     );
     match skull::mir_emit::emit_overlay(&ws2, &mut overlay_cache, &edits) {
         Ok(overlay) => {
             assert_eq!(
-                run_luajit(
-                    &format!(
-                        "{}\nlocal saved = caller\n{}\nprint(saved(), expose())",
-                        full.lua, overlay.lua
-                    ),
-                    "demand_exposure_overlay"
-                ),
+                run_luajit(&format!(
+                    "{}\nlocal saved = caller\n{}\nprint(saved(), expose())",
+                    full.lua, overlay.lua
+                )),
                 "23\t47"
             );
         }

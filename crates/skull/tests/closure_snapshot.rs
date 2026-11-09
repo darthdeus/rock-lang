@@ -5,7 +5,7 @@
 //! a mutable capture is BOXED and the field holds the shared box table, so a later
 //! write is observed by reference. Neither renders an inline `function(` closure
 //! at the creation site. Record mechanics in depth: `env_record_hoist.rs`.
-use crate::common::{emit_module, function_body, run_luajit};
+use crate::common::{emit_module, function_body, run_main};
 
 /// Recognize empty and seeded box constructors on a cell or register assignment.
 /// Callers also check field access to distinguish boxes from collection literals.
@@ -103,7 +103,7 @@ fn loop_capture_snapshots_per_iteration_via_record() {
         !body.contains("return function"),
         "no by-value snapshot IIFE (deleted in P2.6):\n{body}"
     );
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "loopcap");
+    let out = run_main(&lua);
     assert_eq!(
         out, "1\n2\n3",
         "each record must snapshot its iteration's value; got:\n{out}"
@@ -190,7 +190,7 @@ fn per_iteration_value_capture_snapshots_flat_leaves() {
         !body.contains("__fn"),
         "a Rock closure stores a CodeRef, not a frozen body:\n{body}"
     );
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "perit");
+    let out = run_main(&lua);
     assert_eq!(
         out, "3\n5\n7",
         "each closure reads ITS iteration's leaves; got:\n{out}"
@@ -238,7 +238,7 @@ fn per_iteration_enum_capture_snapshots_flat_leaves() {
         body.contains("setmetatable({ __slot = __rock_code_slot_ref("),
         "the enum leaves snapshot into a per-iteration env record:\n{body}"
     );
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "perit-enum");
+    let out = run_main(&lua);
     assert_eq!(
         out, "1\n2\n3",
         "each closure reads its own enum value; got:\n{out}"

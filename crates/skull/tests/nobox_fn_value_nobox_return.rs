@@ -1,4 +1,4 @@
-use crate::common::{emit_module, run_luajit};
+use crate::common::compile_and_run;
 
 const INDIRECT_NBOX_RETURN: &str = r#"
 nobox value Facts { found: bool, row: int }
@@ -40,20 +40,12 @@ fn main() {
 
 #[test]
 fn generic_fn_value_call_receives_all_nobox_value_leaves() {
-    let lua = emit_module(INDIRECT_NBOX_RETURN);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "fnval_nobox_multi_return"),
-        "true"
-    );
+    assert_eq!(compile_and_run(INDIRECT_NBOX_RETURN), "true");
 }
 
 #[test]
 fn generic_function_field_call_receives_all_nobox_value_leaves() {
-    let lua = emit_module(FN_FIELD_NBOX_RETURN);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "fnfield_nobox_multi_return"),
-        "true"
-    );
+    assert_eq!(compile_and_run(FN_FIELD_NBOX_RETURN), "true");
 }
 
 const SAFE_NAV_FN_FIELD_NBOX_RETURN: &str = r#"
@@ -80,12 +72,8 @@ fn main() {
 
 #[test]
 fn safe_nav_function_field_call_preserves_nobox_result_lanes() {
-    let lua = emit_module(SAFE_NAV_FN_FIELD_NBOX_RETURN);
     assert_eq!(
-        run_luajit(
-            &format!("{lua}\nmain()\n"),
-            "fnfield_safe_nobox_multi_return"
-        ),
+        compile_and_run(SAFE_NAV_FN_FIELD_NBOX_RETURN),
         "true\nfalse"
     );
 }

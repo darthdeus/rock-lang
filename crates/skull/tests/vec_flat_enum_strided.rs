@@ -1,4 +1,4 @@
-use crate::common::{emit_module, function_body, run_luajit};
+use crate::common::{compile_and_run, emit_module, function_body};
 
 const SRC: &str = r#"
 enum Kind { A, B }
@@ -53,11 +53,7 @@ fn wide_numeric_flat_enum_vec_uses_dense_strided_storage_without_element_boxes()
 
 #[test]
 fn wide_numeric_flat_enum_vec_round_trips_both_variants() {
-    let lua = emit_module(SRC);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "flat_enum_strided"),
-        "92"
-    );
+    assert_eq!(compile_and_run(SRC), "92");
 }
 
 const SURFACE: &str = r#"
@@ -107,11 +103,7 @@ fn main() {
 
 #[test]
 fn strided_vec_preserves_the_complete_mutating_surface() {
-    let lua = emit_module(SURFACE);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "flat_enum_strided_surface"),
-        "5670|8931|4|9,2340|1|12|3"
-    );
+    assert_eq!(compile_and_run(SURFACE), "5670|8931|4|9,2340|1|12|3");
 }
 
 const BRIDGE: &str = r#"
@@ -134,11 +126,7 @@ fn main() {
 
 #[test]
 fn erased_array_bridge_materializes_and_reimports_strided_elements() {
-    let lua = emit_module(BRIDGE);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "flat_enum_strided_bridge"),
-        "1234,8,2"
-    );
+    assert_eq!(compile_and_run(BRIDGE), "1234,8,2");
 }
 
 const BOOL_PAYLOAD: &str = r#"
@@ -172,11 +160,7 @@ fn main() {
 
 #[test]
 fn inactive_payload_lanes_remain_physically_dense() {
-    let lua = emit_module(DENSE_SENTINEL);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "flat_enum_strided_dense"),
-        "2,2"
-    );
+    assert_eq!(compile_and_run(DENSE_SENTINEL), "2,2");
 }
 
 const EQUALITY: &str = r#"
@@ -195,9 +179,5 @@ fn main() {
 
 #[test]
 fn strided_vec_equality_compares_logical_elements_not_storage_metadata() {
-    let lua = emit_module(EQUALITY);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "flat_enum_strided_eq"),
-        "true,false,false,true"
-    );
+    assert_eq!(compile_and_run(EQUALITY), "true,false,false,true");
 }

@@ -14,7 +14,7 @@
 //! These execute the emitted chunk rather than grepping it: a symbol that is
 //! wrong in either the definition or a use fails to parse or reads nil.
 
-use crate::common::{V1Fragment, emit_v1_package, run_luajit};
+use crate::common::{V1Fragment, emit_v1_package, run_main};
 
 const MAIN: &str = r#"
 fn main() {
@@ -82,7 +82,7 @@ fn package() -> skull::mir_emit::MirEmit {
 #[test]
 fn v1_module_globals_have_independent_storage() {
     let emitted = package();
-    let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_v1_state");
+    let out = run_main(&emitted.lua);
     assert_eq!(
         out, "a=2 b=1 limit=7",
         "each module's `COUNT` must have its own storage, and a const global must be readable"
@@ -262,7 +262,7 @@ fn v1_static_identity_is_keyed_on_its_owner_def_key() {
         emitted.lua.contains("static:named:v1state::a::tick<>::n#0"),
         "a v1 static is keyed on its owner's DefKey, not on the owner's file"
     );
-    let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_v1_static");
+    let out = run_main(&emitted.lua);
     assert_eq!(
         out, "t=12",
         "the static must initialize once and keep its value"
@@ -308,6 +308,6 @@ fn v1_static_cells_and_nested_fns_emit_identifiers() {
             },
         ],
     );
-    let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_v1_locals");
+    let out = run_main(&emitted.lua);
     assert_eq!(out, "2 4");
 }

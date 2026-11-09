@@ -19,7 +19,7 @@
 //! the emitter would have produced.
 
 use crate::common::{
-    emit_module_without_frame_limits, function_body, luajit_loads, run_luajit, try_emit_module,
+    emit_module_without_frame_limits, function_body, luajit_loads, run_main, try_emit_module,
     ws_with_stdlib,
 };
 
@@ -70,14 +70,8 @@ fn main() {{ assert(gather(-20) == null); print(gather(1).unwrap().checksum) }}
     );
     let lua =
         try_emit_module(&source).expect("retained loader results must fit LuaJIT's local limit");
-    luajit_loads(&lua, "retained_optional_loader_results").expect("emitted loader must load");
-    assert_eq!(
-        run_luajit(
-            &format!("{lua}\nmain()\n"),
-            "retained_optional_loader_results"
-        ),
-        "210"
-    );
+    luajit_loads(&lua).expect("emitted loader must load");
+    assert_eq!(run_main(&lua), "210");
 }
 
 /// `held` values of a `leaves`-wide nobox struct, all live across the calls
@@ -114,10 +108,7 @@ fn fixture(leaves: usize, held: usize) -> String {
 fn three_live_fifty_leaf_values_load_and_run() {
     let lua = try_emit_module(&fixture(50, 3)).expect("emits");
     // v0: 1 + 50, v1: 2 + 50 + 1, v2: 3 + 50 + 2.
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "wide_slot_budget_3x50"),
-        "159"
-    );
+    assert_eq!(run_main(&lua), "159");
 }
 
 #[test]
@@ -178,7 +169,7 @@ fn four_live_fifty_leaf_values_are_a_spanned_compile_error() {
     // And the Lua it would have emitted really is unloadable, so the rejection
     // is not the compiler being timid.
     let lua = emit_module_without_frame_limits(&fixture(50, 4));
-    let load = luajit_loads(&lua, "wide_slot_budget_4x50").expect_err("must not load");
+    let load = luajit_loads(&lua).expect_err("must not load");
     assert!(
         load.contains("more than 200 local variables") || load.contains("too complex"),
         "unexpected LuaJIT parse error: {load}"
@@ -204,7 +195,7 @@ fn four_live_fifty_leaf_values_are_a_spanned_compile_error() {
 fn verdicts_agree(tag: &str, src: &str) -> bool {
     let compiled = try_emit_module(src);
     let lua = emit_module_without_frame_limits(src);
-    let load = luajit_loads(&lua, tag);
+    let load = luajit_loads(&lua);
     match (&compiled, &load) {
         (Ok(_), Ok(())) => true,
         (Err(_), Err(_)) => false,

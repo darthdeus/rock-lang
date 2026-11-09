@@ -220,7 +220,7 @@ fn column_vec_iterated_inside_a_lambda() {
         "lambda body must iterate COLUMN storage (one index check + per-leaf reads):\n{body}"
     );
     assert_eq!(
-        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "col_lambda"),
+        crate::common::run_main(&lua),
         "4",
         "lambda over column storage computed the wrong sum"
     );
@@ -249,7 +249,7 @@ fn column_vec_iterated_inside_a_nested_fn() {
         "nested fn must iterate COLUMN storage (one index check + per-leaf reads):\n{body}"
     );
     assert_eq!(
-        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "col_nested"),
+        crate::common::run_main(&lua),
         "4",
         "nested fn over column storage computed the wrong sum"
     );
@@ -297,7 +297,7 @@ fn column_vec_iterated_inside_a_co_fn() {
          storage (the raised error is swallowed by `__resume`'s pcall):\n{body}"
     );
     assert_eq!(
-        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "col_cofn"),
+        crate::common::run_main(&lua),
         "4",
         "co fn over column storage computed the wrong sum"
     );
@@ -328,10 +328,7 @@ fn column_vec_iterated_in_a_global_initializer() {
         "global initializer called the UNSPECIALIZED VecIter `next` over column \
          storage:\n{body}"
     );
-    assert_eq!(
-        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "col_ginit"),
-        "4"
-    );
+    assert_eq!(crate::common::run_main(&lua), "4");
 }
 
 const VEC_STDLIB_SURFACE: &str = r#"
@@ -387,7 +384,7 @@ fn stdlib_vec_surface_works_over_column_storage() {
         );
     }
     assert_eq!(
-        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "col_surface"),
+        crate::common::run_main(&lua),
         "set:9,90\nget:2,20\npop:3 len2\nswap:9 now2 len1\nclear len0\nrepush:7,70 len1"
     );
 }
@@ -422,10 +419,7 @@ fn main() {
 fn unspliceable_iteration_of_boxed_elements_still_emits() {
     let lua = crate::common::try_emit_module(VEC_BOXED_ELEMS_UNSPLICED)
         .expect("boxed element types must still emit in unspliceable contexts");
-    assert_eq!(
-        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "boxed_unspliced"),
-        "4"
-    );
+    assert_eq!(crate::common::run_main(&lua), "4");
 }
 
 const VEC_CONTROLS: &str = r#"
@@ -496,7 +490,7 @@ fn vec_new_at_a_column_element_builds_empty_columns() {
         "vec_new at [V2] must build one empty array per leaf:\n{body}"
     );
     assert_eq!(
-        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "col_vecnew"),
+        crate::common::run_main(&lua),
         "1,1,2",
         "push onto a vec_new-ed column Vec must land in the columns"
     );
@@ -519,10 +513,7 @@ fn combinator_chain_preserves_column_element_type() {
         !body.contains("__vec_checked_get(") && body.contains("__vec_checked_index("),
         "the wrapped VecIter<V2> must retain V2 and read its columns:\n{body}"
     );
-    assert_eq!(
-        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "col_combinator"),
-        "4"
-    );
+    assert_eq!(crate::common::run_main(&lua), "4");
 }
 
 const NOBOX_COLUMN_SORT: &str = r#"
@@ -550,7 +541,7 @@ fn nobox_column_sort_never_materializes_an_element() {
         "[NP].sort built an element; the key fn takes leaves:\n{body}"
     );
     assert_eq!(
-        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "col_nobox_sort"),
+        crate::common::run_main(&lua),
         "1,10,2,20,3,30",
         "every column must permute in lockstep with the key's column"
     );

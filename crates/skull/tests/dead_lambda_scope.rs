@@ -8,7 +8,7 @@
 //! Fix: scope analysis considers only lambdas whose creation site is REACHABLE
 //! (a fixpoint from the fn entry through live scopes); a transitively-dead
 //! lambda gets no scope. These compile-and-run without panicking.
-use crate::common::{emit_module, mangled_name, run_luajit};
+use crate::common::{compile_and_run, emit_module, mangled_name, run_main};
 
 /// The confirmed repro: an outer lambda inside `if false`, itself holding an
 /// inner lambda. Both are dead; the live `return 42` path must compile.
@@ -27,8 +27,7 @@ fn thing() -> int {
 }
 fn main() { print("{thing()}") }
 "#;
-    let lua = emit_module(src);
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "dead_nested");
+    let out = compile_and_run(src);
     assert_eq!(
         out, "42",
         "the live branch runs; the dead nested lambdas are dropped; got: {out}"
@@ -54,8 +53,7 @@ fn thing() -> int {
 }
 fn main() { print("{thing()}") }
 "#;
-    let lua = emit_module(src);
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "dead_three_deep");
+    let out = compile_and_run(src);
     assert_eq!(
         out, "5",
         "the live branch runs; three dead nested lambdas are dropped; got: {out}"
@@ -80,8 +78,7 @@ fn thing(x: int) -> int {
 }
 fn main() { print("{thing(4)}") }
 "#;
-    let lua = emit_module(src);
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "dead_capturing");
+    let out = compile_and_run(src);
     assert_eq!(
         out, "8",
         "the live branch runs; the dead capturing lambdas are dropped; got: {out}"
@@ -110,7 +107,7 @@ fn main() { print("{thing(4)}") }
         lua.contains(&format!("function {}__lambda", mangled_name(&lua, "thing"))),
         "reachable nested lambdas must still hoist:\n{lua}"
     );
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "reachable_nested");
+    let out = run_main(&lua);
     assert_eq!(
         out, "5",
         "the reachable nested capture reads x (4+1); got: {out}"

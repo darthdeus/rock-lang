@@ -1,4 +1,4 @@
-use crate::common::{run_luajit, try_emit_module};
+use crate::common::compile_and_run;
 
 const STRUCT_UPDATE: &str = r#"
 nobox value Spec { x: float, y: float }
@@ -68,43 +68,25 @@ fn main() {
 }
 "#;
 
-fn run(src: &str, tag: &str) -> String {
-    let lua = try_emit_module(src).expect("must emit");
-    run_luajit(&format!("{lua}\nmain()\n"), tag)
-}
-
 #[test]
 fn struct_update_carries_a_flat_enum_field_from_its_physical_slots() {
-    assert_eq!(
-        run(STRUCT_UPDATE, "flat_enum_struct_update").trim(),
-        "17 false 3 5"
-    );
+    assert_eq!(compile_and_run(STRUCT_UPDATE).trim(), "17 false 3 5");
 }
 
 #[test]
 fn call_spread_carries_a_flat_enum_field_from_its_physical_slots() {
-    assert_eq!(
-        run(CALL_SPREAD, "flat_enum_call_spread").trim(),
-        "19 true 7 11"
-    );
+    assert_eq!(compile_and_run(CALL_SPREAD).trim(), "19 true 7 11");
 }
 
 #[test]
 fn call_spread_carries_a_nobox_child_from_its_physical_slots() {
-    assert_eq!(
-        run(NOBOX_CHILD_CALL_SPREAD, "nobox_child_call_spread").trim(),
-        "31 23 29"
-    );
+    assert_eq!(compile_and_run(NOBOX_CHILD_CALL_SPREAD).trim(), "31 23 29");
 }
 
 #[test]
 fn call_spread_carries_nullable_nobox_presence_and_leaves() {
     assert_eq!(
-        run(
-            NULLABLE_NOBOX_CHILD_CALL_SPREAD,
-            "nullable_nobox_child_call_spread"
-        )
-        .trim(),
+        compile_and_run(NULLABLE_NOBOX_CHILD_CALL_SPREAD).trim(),
         "43 37 41\n47 absent"
     );
 }

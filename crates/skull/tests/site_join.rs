@@ -672,10 +672,7 @@ fn main() { print("{top(2)} {top(3)}") }
 "#,
     )
     .expect("a spliced named nested body must emit");
-    assert_eq!(
-        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "spliced_nested"),
-        "6 8"
-    );
+    assert_eq!(crate::common::run_main(&lua), "6 8");
 }
 
 /// A synthesized column-storage call joins ONLY under its own operation.

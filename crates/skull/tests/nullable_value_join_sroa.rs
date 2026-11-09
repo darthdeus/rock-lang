@@ -5,7 +5,7 @@
 //! Lua allocated one table per nested value on every read. application's live mob
 //! poll (`if let pc = mob.attack_co`) paid two tables per mob per tick.
 
-use crate::common::{emit_module, function_body, run_luajit};
+use crate::common::{emit_module, function_body, run_luajit, run_main};
 
 const PIPELINE: &str = r#"
 nobox value Pipeline {
@@ -57,10 +57,7 @@ fn main() {
             );
         }
     }
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "pipeline_nullable_transfers"),
-        "empty world true true empty ui false false"
-    );
+    assert_eq!(run_main(&lua), "empty world true true empty ui false false");
 }
 
 const JOIN: &str = r#"
@@ -124,7 +121,7 @@ fn if_let_join_of_nullable_value_field_builds_no_box() {
             "poll_in rebuilds `{ctor}` for its `if let` join:\n{body}"
         );
     }
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "nullable_value_join");
+    let out = run_main(&lua);
     assert_eq!(out, "3 true 3 true false 4 true -1 false");
 }
 
@@ -179,10 +176,7 @@ fn escaping_coalesce_binding_returns_leaves_without_copying() {
         "first_match builds a raw value box:\n{body}"
     );
     assert_eq!(
-        run_luajit(
-            &format!("{lua}\ncheck_nullable_escape()\n"),
-            "escaping_nullable_value_join"
-        ),
+        run_luajit(&format!("{lua}\ncheck_nullable_escape()\n")),
         "held 7 9 true true"
     );
 }

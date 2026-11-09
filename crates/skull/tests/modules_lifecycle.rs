@@ -1,7 +1,7 @@
 //! Modules-v1 lifecycle discovery keeps private hooks discoverable and treats
 //! aliases/re-exports as one decorator identity.
 
-use crate::common::{V1Fragment, emit_v1_package, run_luajit, ws_v1_package};
+use crate::common::{V1Fragment, emit_v1_package, run_luajit, run_main, ws_v1_package};
 use ustr::Ustr;
 
 const MAIN: &str = r#"
@@ -40,13 +40,10 @@ fn v1_lifecycle_aliases_register_one_private_hook() {
         ],
     );
     assert_eq!(emitted.lifecycle_plan.entries.len(), 1);
-    let out = run_luajit(
-        &format!(
-            "{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.update; print(p.len)\n",
-            emitted.lua
-        ),
-        "modules_v1_lifecycle",
-    );
+    let out = run_luajit(&format!(
+        "{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.update; print(p.len)\n",
+        emitted.lua
+    ));
     assert_eq!(out, "1");
 }
 
@@ -159,13 +156,7 @@ pub operator +(a: Point, b: Point) -> Point { Point { x: a.x + b.x } }
             .len(),
         2
     );
-    assert_eq!(
-        run_luajit(
-            &format!("{}\nmain()\n", emitted.lua),
-            "wire_module_operator"
-        ),
-        "3"
-    );
+    assert_eq!(run_main(&emitted.lua), "3");
 }
 
 #[test]
@@ -256,8 +247,5 @@ pub fn next<T>(cursor: Cursor<T>) -> (bool, int, T) {
             },
         ],
     );
-    assert_eq!(
-        run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_iterator"),
-        "10"
-    );
+    assert_eq!(run_main(&emitted.lua), "10");
 }

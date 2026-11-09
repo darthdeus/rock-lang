@@ -12,7 +12,7 @@
 //! So a v1 package holding a value struct or an enum compiled clean and then
 //! died in LuaJIT. These controls execute the chunk.
 
-use crate::common::{InlineOffGuard, V1Fragment, emit_v1_package, run_luajit};
+use crate::common::{InlineOffGuard, V1Fragment, emit_v1_package, run_main};
 
 const MAIN: &str = r#"
 fn main() {
@@ -76,7 +76,7 @@ fn package() -> skull::mir_emit::MirEmit {
 #[test]
 fn v1_value_struct_and_enum_emit_runnable_lua() {
     let emitted = package();
-    let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_v1_types");
+    let out = run_main(&emitted.lua);
     assert_eq!(out, "s=3 c=blue n=7");
 }
 
@@ -188,10 +188,7 @@ fn v1_mixed_enum_variants_construct_and_match() {
             },
         ],
     );
-    let out = run_luajit(
-        &format!("{}\nmain()\n", emitted.lua),
-        "modules_v1_enum_payload",
-    );
+    let out = run_main(&emitted.lua);
     assert_eq!(out, "step2 jump13 pass 4");
 }
 
@@ -258,7 +255,7 @@ fn a_generic_specialized_at_a_v1_nominal_emits_runnable_lua() {
             .contains(&format!("function vec_len_arr_T_{encoded}(")),
         "the specialized definition takes the nominal's identifier form"
     );
-    let out = run_luajit(&format!("{}\nmain()\n", emitted.lua), "modules_v1_spec");
+    let out = run_main(&emitted.lua);
     assert_eq!(out, "total=9");
 }
 
@@ -284,16 +281,14 @@ fn main() {
 }
 "#,
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "record_codec_metadata"),
-        "ok"
-    );
+    assert_eq!(run_main(&lua), "ok");
 }
 
 #[test]
 fn typed_json_records_roundtrip_and_reject_malformed_fields() {
-    let lua = crate::common::emit_module(
-        r#"
+    assert_eq!(
+        crate::common::compile_and_run(
+            r#"
 enum Event { Empty, Text(string), Pair(int, float), Names([string]) }
 value Tint { red: float, visible: bool }
 value Change { event: Event, count: int }
@@ -330,18 +325,17 @@ fn main() {
     assert(json_record_decode(codec, wire, source) == null)
     print("ok")
 }
-"#,
-    );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "typed_json_records"),
+"#
+        ),
         "ok"
     );
 }
 
 #[test]
 fn typed_json_uses_declared_scalar_enum_adapters_and_embedded_values() {
-    let lua = crate::common::emit_module(
-        r#"
+    assert_eq!(
+        crate::common::compile_and_run(
+            r#"
 enum Kind { First, Second }
 nobox value Tint { red: float, visible: bool }
 nobox value Point { x: int, y: int }
@@ -396,18 +390,17 @@ fn main() {
     assert(json_record_decode(codec, wire, source) == null)
     print("ok")
 }
-"#,
-    );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "typed_json_adapters"),
+"#
+        ),
         "ok"
     );
 }
 
 #[test]
 fn typed_json_flat_enum_fields_and_widened_payloads() {
-    let lua = crate::common::emit_module(
-        r#"
+    assert_eq!(
+        crate::common::compile_and_run(
+            r#"
 nobox value Tint { red: float, visible: bool }
 enum Event { Empty, Text(string), Colored(string, Tint), Pair(string, int) }
 enum Envelope { Wrapped(Event), Other(string) }
@@ -426,10 +419,8 @@ fn main() {
     }
     print("ok")
 }
-"#,
-    );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "typed_json_flat"),
+"#
+        ),
         "ok"
     );
 }
@@ -457,8 +448,5 @@ fn main() {
 }
 "#,
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "typed_json_rejections"),
-        "ok"
-    );
+    assert_eq!(run_main(&lua), "ok");
 }

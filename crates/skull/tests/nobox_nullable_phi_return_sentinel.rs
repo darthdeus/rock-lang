@@ -23,6 +23,7 @@
 //! `tests/nobox/concrete_nullable_ops.rock`; the positive value coverage is
 //! `tests/nobox/nullable_merge.rock`.
 
+use crate::common::compile_and_run;
 /// The reported repro, `materialize` and all.
 const PHI_WITH_MATERIALIZE: &str = r#"
 nobox value P { x: int, y: int }
@@ -99,14 +100,9 @@ fn main() {
 }
 "#;
 
-fn run(src: &str, tag: &str) -> String {
-    let lua = crate::common::try_emit_module(src).expect("must emit");
-    crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
-}
-
 #[test]
 fn an_absent_nobox_option_from_a_phi_reports_absent_through_materialize() {
-    assert_eq!(run(PHI_WITH_MATERIALIZE, "phi_materialize"), "absent=true");
+    assert_eq!(compile_and_run(PHI_WITH_MATERIALIZE), "absent=true");
 }
 
 /// The discriminant that was load-bearing while this was a sentinel: the same
@@ -115,32 +111,29 @@ fn an_absent_nobox_option_from_a_phi_reports_absent_through_materialize() {
 /// the same reason, the join carrying a real presence slot.
 #[test]
 fn an_absent_nobox_option_from_a_phi_reports_absent_without_materialize() {
-    assert_eq!(run(PHI_WITHOUT_MATERIALIZE, "phi_bare"), "absent=true");
+    assert_eq!(compile_and_run(PHI_WITHOUT_MATERIALIZE), "absent=true");
 }
 
 #[test]
 fn the_present_path_of_the_same_phi_is_correct() {
-    assert_eq!(run(PHI_PRESENT_PATH, "phi_present"), "present=5");
+    assert_eq!(compile_and_run(PHI_PRESENT_PATH), "present=5");
 }
 
 #[test]
 fn materialize_on_a_non_nullable_nobox_value_is_correct() {
-    assert_eq!(run(MATERIALIZE_NON_NULLABLE, "materialize_nonnull"), "5 6");
+    assert_eq!(compile_and_run(MATERIALIZE_NON_NULLABLE), "5 6");
 }
 
 /// Bounds the sentinel: a nullable marked local with no merge reports absent
 /// correctly, so the defect is the phi and not the option itself.
 #[test]
 fn a_nullable_nobox_local_with_no_phi_reports_absent() {
-    assert_eq!(run(NULL_LOCAL_NO_PHI, "phi_none"), "absent=true");
+    assert_eq!(compile_and_run(NULL_LOCAL_NO_PHI), "absent=true");
 }
 
 /// Bounds it the other way: the same absent answer through statement-position
 /// `return null` is correct on BOTH paths.
 #[test]
 fn a_statement_position_return_null_reports_absent() {
-    assert_eq!(
-        run(EARLY_RETURN_NULL, "phi_early_return"),
-        "absent=true\npresent=5"
-    );
+    assert_eq!(compile_and_run(EARLY_RETURN_NULL), "absent=true\npresent=5");
 }

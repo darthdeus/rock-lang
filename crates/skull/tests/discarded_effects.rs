@@ -13,7 +13,7 @@ fn unused_throwing_conversion_preserves_runtime_error() {
         .0
         .lua;
     let program = format!("{lua}\nlocal ok = pcall(probe, -1); print(ok, probe(1))\n");
-    assert_eq!(run_luajit(&program, "unused_conversion"), "false\t7");
+    assert_eq!(run_luajit(&program), "false\t7");
 }
 
 #[test]
@@ -43,8 +43,5 @@ fn normalize_tail_value(x: float, y: float) -> Vec2? { v(x, y).normalize() }
     let program = format!(
         "{lua}\nprint(normalize_optional_probe(3, 4), normalize_optional_probe(0, 0), normalize_tail_probe(3, 4), normalize_tail_probe(0, 0))\n"
     );
-    assert_eq!(
-        run_luajit(&program, "aggregate_return_placeholder"),
-        "1.4\t-1\t1.4\t0"
-    );
+    assert_eq!(run_luajit(&program), "1.4\t-1\t1.4\t0");
 }

@@ -1,11 +1,10 @@
-use crate::common::{emit_module, run_luajit};
+use crate::common::compile_and_run;
 
 const SOURCE: &str = include_str!("fixtures/default_lambda_fields.rock");
 
 fn check(root: &str, expected: &str) {
     let source = format!("{SOURCE}\nfn main() {{ print(\"{{{root}(7)}}\") }}\n");
-    let lua = emit_module(&source);
-    assert_eq!(run_luajit(&format!("{lua}\nmain()\n"), root), expected);
+    assert_eq!(compile_and_run(&source), expected);
 }
 
 #[test]

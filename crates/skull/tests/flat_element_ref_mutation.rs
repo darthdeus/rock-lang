@@ -5,7 +5,7 @@
 //! before it. The behavior matrix that also runs on C is
 //! `tests/values/flat_element_ref.rock`.
 
-use crate::common::{require_luajit, run_luajit, try_emit_module};
+use crate::common::{require_luajit, run_luajit, run_main, try_emit_module};
 
 const SRC: &str = r#"
 value Cell { v: int }
@@ -49,10 +49,7 @@ fn main() {
 fn flat_container_element_ref_mutates_only_the_selected_element_on_lua() {
     require_luajit();
     let lua = try_emit_module(SRC).expect("flat element ref should emit on Lua");
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "flat_element_ref"),
-        "true true true true true true"
-    );
+    assert_eq!(run_main(&lua), "true true true true true true");
 }
 
 /// Production emission of `source`, whose only frontend diagnostic must be the
@@ -125,10 +122,7 @@ fn main() {
 }
 "#,
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nested_field_ref_let"),
-        "true true true"
-    );
+    assert_eq!(run_main(&lua), "true true true");
 }
 
 #[test]
@@ -162,10 +156,7 @@ fn main() {
 }
 "#,
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "whole_element_ref_let"),
-        "true true true true"
-    );
+    assert_eq!(run_main(&lua), "true true true true");
 }
 
 /// A `ref` to a missing Map key has no element to write; it raises at the
@@ -186,10 +177,9 @@ fn main() {
 "#,
     )
     .expect("emits");
-    let out = run_luajit(
-        &format!("{lua}\nlocal ok, err = pcall(main)\nprint(ok, err ~= nil)\n"),
-        "missing_key_ref",
-    );
+    let out = run_luajit(&format!(
+        "{lua}\nlocal ok, err = pcall(main)\nprint(ok, err ~= nil)\n"
+    ));
     assert_eq!(
         out, "false\ttrue",
         "the borrow of a missing key must raise: {out}"

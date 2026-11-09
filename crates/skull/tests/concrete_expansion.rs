@@ -1,6 +1,6 @@
 //! Expansion validation follows retained concrete instances, not generic source bodies.
 
-use crate::common::{function_body, run_luajit, try_emit_module};
+use crate::common::{function_body, run_main, try_emit_module};
 
 const STRUCT_VALID: &str = r#"
 enum E { F(float), I(int) }
@@ -168,10 +168,7 @@ fn generic_struct_wrapper_uses_the_reached_concrete_instance() {
         lua.contains("__variant = (\"F\")"),
         "no concrete struct expansion was emitted:\n{lua}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "generic_struct_expand"),
-        "1"
-    );
+    assert_eq!(run_main(&lua), "1");
 }
 
 #[test]
@@ -209,10 +206,7 @@ fn generic_vertex_wrapper_uses_the_reached_concrete_instance() {
         lua.contains("do return (3) end"),
         "no concrete vertex stride was emitted:\n{lua}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "generic_vertex_expand"),
-        "3"
-    );
+    assert_eq!(run_main(&lua), "3");
 }
 
 #[test]
@@ -241,10 +235,7 @@ fn generic_uniform_wrapper_matches_the_direct_fingerprint() {
         !function_body(&lua, "generic_id_").contains("uniform_block_id("),
         "the concrete wrapper still calls the compiler-owned expansion:\n{lua}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "generic_uniform_expand"),
-        "true\ntrue"
-    );
+    assert_eq!(run_main(&lua), "true\ntrue");
 }
 
 #[test]
@@ -270,10 +261,7 @@ fn generic_uniform_values_wrapper_uses_the_reached_concrete_instance() {
         !crate::common::definitions_matching(&lua, "generic_values_").is_empty(),
         "no retained concrete wrapper body"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "generic_uniform_values"),
-        "true\n6"
-    );
+    assert_eq!(run_main(&lua), "true\n6");
 }
 
 #[test]

@@ -39,10 +39,10 @@ fn check_struct_source(source: &str, use_overlay: bool) {
     let f = fn_ref(&after, "inspect_rows");
     let edits = [(f.module, bone_semantic::hir::BodyOwner::Function(f.func))];
     let overlay = emit_overlay(&after, &mut cache, &edits).expect("inspection body overlay");
-    let (mode, program) = if use_overlay {
-        ("overlay", format!("{}\n{}", full.lua, overlay.lua))
+    let program = if use_overlay {
+        format!("{}\n{}", full.lua, overlay.lua)
     } else {
-        ("full", emit_full(&after, mid).unwrap().0.lua)
+        emit_full(&after, mid).unwrap().0.lua
     };
     let driver = r#"
 local ok, message = pcall(inspect_rows)
@@ -50,13 +50,7 @@ assert(not ok, "nested struct rows must reject implicit materialization: " .. to
 assert(tostring(message):find("cannot materialize strided nobox struct", 1, true), tostring(message))
 print("rejected")
 "#;
-    assert_eq!(
-        run_luajit(
-            &format!("{program}\n{driver}"),
-            &format!("nested_strided_inspect_{mode}")
-        ),
-        "rejected",
-    );
+    assert_eq!(run_luajit(&format!("{program}\n{driver}")), "rejected",);
 }
 
 #[test]
@@ -87,16 +81,10 @@ assert(result:find("a = 1", 1, true), result)
 assert(result:find("d = 4", 1, true), result)
 print("enum rows")
 "#;
-    for (mode, program) in [
-        ("full", emit_full(&after, mid).unwrap().0.lua),
-        ("overlay", format!("{}\n{}", full.lua, overlay.lua)),
+    for program in [
+        emit_full(&after, mid).unwrap().0.lua,
+        format!("{}\n{}", full.lua, overlay.lua),
     ] {
-        assert_eq!(
-            run_luajit(
-                &format!("{program}\n{driver}"),
-                &format!("nested_strided_enum_inspect_{mode}")
-            ),
-            "enum rows",
-        );
+        assert_eq!(run_luajit(&format!("{program}\n{driver}")), "enum rows",);
     }
 }

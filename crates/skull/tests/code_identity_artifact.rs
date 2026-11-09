@@ -134,13 +134,10 @@ fn main() {}
     // it resolved (an unadmitted key throws "missing Rock code slot" at plan
     // construction, before this snippet even runs); `key` on the entry
     // itself carries the same identity string the thunk closed over.
-    let out = run_luajit(
-        &format!(
-            "{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.update; p._data[1].func(0); print(p.len .. ':' .. p._data[1].key)",
-            emit.lua
-        ),
-        "lifecycle_plan_root",
-    );
+    let out = run_luajit(&format!(
+        "{}\nlocal p = _G.__ROCK_LIFECYCLE_PLAN.update; p._data[1].func(0); print(p.len .. ':' .. p._data[1].key)",
+        emit.lua
+    ));
     assert!(
         out.starts_with("3:named:<test>::first<>"),
         "plan targets must be admitted CodeRef roots: {out}"
@@ -239,13 +236,10 @@ fn main() {}
         emit.lua
             .contains("factory = __rock_code_slot_pending_ref(\"named:<test>::make_beta<>\")")
     );
-    let out = run_luajit(
-        &format!(
-            "{}\nlocal p = _G.__ROCK_DEFINITION_PLAN.widgets; print(p.len .. ':' .. p._data[1].key .. ':' .. p._data[1].factory())",
-            emit.lua
-        ),
-        "definition_plan_root",
-    );
+    let out = run_luajit(&format!(
+        "{}\nlocal p = _G.__ROCK_DEFINITION_PLAN.widgets; print(p.len .. ':' .. p._data[1].key .. ':' .. p._data[1].factory())",
+        emit.lua
+    ));
     assert_eq!(out, "2:alpha:1");
 }
 
@@ -272,13 +266,10 @@ fn main() {}
             .contains("return __rock_definition_catalog(\"widgets\")")
     );
     assert!(!emit.lua.contains("__ROCK_DEFINITION_PLAN or {}"));
-    let out = run_luajit(
-        &format!(
-            "{}\nlocal p = widget_definition_plan(); local e = empty_definition_plan(); local missing = not pcall(function() return __rock_definition_catalog('missing') end); print(p.len .. ':' .. p._data[1].key .. ':' .. p._data[1].definition.value .. ':' .. e.len .. ':' .. tostring(missing))",
-            emit.lua
-        ),
-        "typed_definition_catalog_root",
-    );
+    let out = run_luajit(&format!(
+        "{}\nlocal p = widget_definition_plan(); local e = empty_definition_plan(); local missing = not pcall(function() return __rock_definition_catalog('missing') end); print(p.len .. ':' .. p._data[1].key .. ':' .. p._data[1].definition.value .. ':' .. e.len .. ':' .. tostring(missing))",
+        emit.lua
+    ));
     assert_eq!(out, "1:alpha:1:0:true");
 }
 
@@ -311,6 +302,6 @@ print(old.len .. ":" .. new.len .. ":" .. old._data[1].name .. ":" .. new._data[
 "#,
         v0.lua, v1.lua
     );
-    let out = run_luajit(&script, "lifecycle_membership");
+    let out = run_luajit(&script);
     assert_eq!(out, "2:2:removed:retained:added");
 }

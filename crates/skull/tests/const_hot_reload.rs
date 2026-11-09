@@ -1,6 +1,6 @@
 //! `const` globals re-initialize on hot reload, while mutable globals keep their
 //! live value in the global storage.
-use crate::common::ws_of;
+use crate::common::{run_luajit, ws_of};
 
 /// Compile `src` to a full skull Lua program (no stdlib -- int/empty-main only).
 fn emit_program(src: &str) -> String {
@@ -13,26 +13,6 @@ fn emit_program(src: &str) -> String {
 
 fn global_slot(lua: &str, name: &str) -> u32 {
     crate::common::global_slots(lua, &format!("global:<t>::{name}"))[0]
-}
-
-/// Run a Lua program under luajit with a wall-clock timeout; returns stdout
-/// (panicking with stderr on a non-zero exit so a runtime error is visible).
-fn run_luajit(prog: &str) -> String {
-    use std::process::Command;
-    let path = std::env::temp_dir().join(format!("skull_const_reload_{}.lua", std::process::id()));
-    std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("spawn luajit");
-    let _ = std::fs::remove_file(&path);
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(
-        out.status.success(),
-        "luajit exited non-zero.\nstdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    stdout
 }
 
 #[test]

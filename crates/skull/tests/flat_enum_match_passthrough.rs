@@ -69,8 +69,5 @@ fn a_flat_enum_match_returning_its_scrutinee_keeps_every_variant() {
     require_luajit();
     let mut lua = emit_module(SRC);
     lua.push_str("\nprint(probe())\n");
-    assert_eq!(
-        run_luajit(&lua, "flat_enum_match_passthrough"),
-        "mob 1 2 3|qx 4|player|mob 5 6|true"
-    );
+    assert_eq!(run_luajit(&lua), "mob 1 2 3|qx 4|player|mob 5 6|true");
 }

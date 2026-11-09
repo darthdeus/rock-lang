@@ -28,7 +28,7 @@ fn nullable_flat_enum_formats_null_as_nil() {
     lua.push_str(
         "\nprint(null_text(), null_interp(), stored_null_text())\nprint(present_text())\n",
     );
-    let out = run_luajit(&lua, "flat_enum_null_format");
+    let out = run_luajit(&lua);
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,

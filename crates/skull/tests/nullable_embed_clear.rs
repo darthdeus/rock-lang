@@ -1,4 +1,4 @@
-use crate::common::{emit_module, function_body, run_luajit};
+use crate::common::{compile_and_run, emit_module, function_body, run_luajit};
 
 const SRC: &str = r#"
 nobox value Id { scene: int, arena: int, slot: int, generation: int }
@@ -82,11 +82,7 @@ fn nullable_embed_clear_skips_absent_hash_slots_without_materializing() {
 
 #[test]
 fn nullable_embed_clear_releases_payload_and_can_be_repeated() {
-    let lua = emit_module(SRC);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nullable_embed_clear"),
-        "10\n-1 true\n4\n-1 true"
-    );
+    assert_eq!(compile_and_run(SRC), "10\n-1 true\n4\n-1 true");
 }
 
 #[test]
@@ -105,16 +101,14 @@ end
 assert(writes == 0, 'absent clears inserted ' .. writes .. ' hash keys')
 io.write('ok')
 "#;
-    assert_eq!(
-        run_luajit(&format!("{lua}\n{driver}"), "absent_embed_clear"),
-        "ok"
-    );
+    assert_eq!(run_luajit(&format!("{lua}\n{driver}")), "ok");
 }
 
 #[test]
 fn nullable_embed_clear_normalizes_dynamic_absence_before_boxed_read() {
-    let lua = emit_module(
-        r#"
+    assert_eq!(
+        compile_and_run(
+            r#"
 struct Payload { n: int }
 struct State { embed payload: Payload? }
 fn absent() -> Payload? { return null }
@@ -126,10 +120,8 @@ fn main() {
     clear_payload(s)
     print("{take(s.payload)}")
 }
-"#,
-    );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "embed_dynamic_absence"),
+"#
+        ),
         "-1"
     );
 }

@@ -19,6 +19,7 @@
 //! so they never reach the check at `:645`. `a_column_map_still_works_through_
 //! the_stdlib_surface` is the control that keeps that true.
 
+use crate::common::compile_and_run;
 /// Control 2 proper: the receiver is IMPLICIT. `probe` writes no type for
 /// `map`, so only the semantic `param_decls` slot 0 carries `Map<K, V>` -- a
 /// rule reading written syntax sees nothing here. Called through method syntax.
@@ -144,11 +145,6 @@ fn main() {
 }
 "#;
 
-fn run(src: &str, tag: &str) -> String {
-    let lua = crate::common::try_emit_module(src).expect("must emit");
-    crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
-}
-
 fn rejection(src: &str) -> String {
     crate::common::try_emit_module(src)
         .expect_err("a column map at an opaque `Map<K, V>` param must reject")
@@ -170,7 +166,7 @@ fn an_implicit_method_receiver_is_classified() {
 #[test]
 fn an_implicit_method_receiver_at_a_boxed_value_is_correct() {
     assert_eq!(
-        run(IMPLICIT_RECEIVER_BOXED, "inline_map_recv_boxed"),
+        compile_and_run(IMPLICIT_RECEIVER_BOXED),
         "1",
         "the rejection is about the value's storage, not about method syntax"
     );
@@ -193,7 +189,7 @@ fn a_non_generic_inline_lua_body_over_a_column_map_rejects_identically() {
 #[test]
 fn a_boxed_value_through_the_same_body_is_correct() {
     assert_eq!(
-        run(BOXED_VALUE_ELEM, "inline_map_boxed"),
+        compile_and_run(BOXED_VALUE_ELEM),
         "1",
         "a boxed value keeps the bare table, so the same body must stay correct"
     );
@@ -203,7 +199,7 @@ fn a_boxed_value_through_the_same_body_is_correct() {
 #[test]
 fn an_any_param_still_admits_a_column_map() {
     assert_eq!(
-        run(ANY_PARAM_PROBE, "inline_map_any"),
+        compile_and_run(ANY_PARAM_PROBE),
         "spine",
         "an `any` param claims no representation, so it must still be admitted"
     );
@@ -212,7 +208,7 @@ fn an_any_param_still_admits_a_column_map() {
 #[test]
 fn a_column_map_still_works_through_the_stdlib_surface() {
     assert_eq!(
-        run(STDLIB_SURFACE, "inline_map_stdlib"),
+        compile_and_run(STDLIB_SURFACE),
         "1truetrue3",
         "the intercepted stdlib names are exempt by construction"
     );

@@ -23,6 +23,7 @@
 //! and no fn value anywhere -- this program was reaching it only through the
 //! missing slot.
 
+use crate::common::compile_and_run;
 /// The repro, both arms -- the absent one no longer crashes.
 const RETURNED_LAMBDA: &str = r#"
 nobox value P { x: int, y: int }
@@ -88,15 +89,10 @@ fn main() {
 }
 "#;
 
-fn run(src: &str, tag: &str) -> String {
-    let lua = crate::common::try_emit_module(src).expect("must emit");
-    crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
-}
-
 #[test]
 fn a_returned_lambda_at_a_nullable_nobox_return_reads_the_right_field() {
     assert_eq!(
-        run(RETURNED_LAMBDA, "fnval_returned_lambda"),
+        compile_and_run(RETURNED_LAMBDA),
         "5 -1",
         "a returned lambda must read `x` when present and report absence when not"
     );
@@ -134,7 +130,7 @@ fn main() {
 #[test]
 fn an_explicitly_returned_lambda_reads_the_right_field() {
     assert_eq!(
-        run(RETURNED_LAMBDA_EXPLICIT, "fnval_returned_lambda_explicit"),
+        compile_and_run(RETURNED_LAMBDA_EXPLICIT),
         "5",
         "`return <lambda>` must record the declared return type, like the tail form"
     );
@@ -143,7 +139,7 @@ fn an_explicitly_returned_lambda_reads_the_right_field() {
 #[test]
 fn a_lambda_returned_through_a_declared_local_is_correct() {
     assert_eq!(
-        run(RETURNED_LAMBDA_VIA_LOCAL, "fnval_returned_lambda_via_local"),
+        compile_and_run(RETURNED_LAMBDA_VIA_LOCAL),
         "5",
         "the declared-let route was always correct and must stay so"
     );
@@ -154,7 +150,7 @@ fn a_lambda_returned_through_a_declared_local_is_correct() {
 #[test]
 fn a_returned_lambda_at_a_non_nullable_nobox_return_is_correct() {
     assert_eq!(
-        run(RETURNED_LAMBDA_NON_NULL, "fnval_returned_lambda_nonnull"),
+        compile_and_run(RETURNED_LAMBDA_NON_NULL),
         "5 6",
         "a non-nullable nobox return through a fn value must stay correct"
     );
@@ -165,7 +161,7 @@ fn a_returned_lambda_at_a_non_nullable_nobox_return_is_correct() {
 #[test]
 fn a_named_fn_bound_as_that_fn_value_is_correct() {
     assert_eq!(
-        run(NAMED_FN_AS_VALUE, "fnval_named_local"),
+        compile_and_run(NAMED_FN_AS_VALUE),
         "5",
         "a named fn behind the same fn-value type must read the right field"
     );
@@ -175,7 +171,7 @@ fn a_named_fn_bound_as_that_fn_value_is_correct() {
 #[test]
 fn a_named_fn_passed_as_a_fn_value_param_is_correct() {
     assert_eq!(
-        run(NAMED_FN_AS_PARAM, "fnval_named_param"),
+        compile_and_run(NAMED_FN_AS_PARAM),
         "5",
         "a named fn crossing a fn-value param must read the right field"
     );
@@ -188,7 +184,7 @@ fn a_named_fn_passed_as_a_fn_value_param_is_correct() {
 #[test]
 fn the_same_lambda_bound_to_a_typed_local_is_correct() {
     assert_eq!(
-        run(LOCALLY_BOUND_LAMBDA, "fnval_local_lambda"),
+        compile_and_run(LOCALLY_BOUND_LAMBDA),
         "5",
         "a locally-bound lambda at a nullable nobox return must read the right field"
     );

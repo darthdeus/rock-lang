@@ -19,6 +19,7 @@
 //! tell them apart from "unknown annotation `@repr`". That is why these assert
 //! MESSAGES.
 
+use crate::common::compile_and_run;
 const ON_A_ROCK_BODY: &str = r#"
 fn plain(@repr(opaque) v: int) -> int { v }
 fn main() { print("{plain(1)}") }
@@ -155,11 +156,6 @@ fn rejection(src: &str) -> String {
         .message
 }
 
-fn run(src: &str, tag: &str) -> String {
-    let lua = crate::common::try_emit_module(src).expect("must emit");
-    crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
-}
-
 /// The outcome of emitting, as a comparable value, so two sources can be
 /// asserted IDENTICAL rather than each asserted separately.
 fn outcome(src: &str) -> Result<(), String> {
@@ -213,7 +209,7 @@ fn repr_with_extra_arguments_rejects() {
 
 #[test]
 fn an_opaque_payload_is_admitted_and_correct() {
-    assert_eq!(run(PAYLOAD_ADMITTED, "repr_opaque_payload"), "1");
+    assert_eq!(compile_and_run(PAYLOAD_ADMITTED), "1");
 }
 
 /// The waiver is PER PARAMETER. Without this, annotating any parameter could

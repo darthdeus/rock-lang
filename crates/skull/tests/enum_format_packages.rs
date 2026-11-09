@@ -2,7 +2,7 @@
 //! contract lives in `tests/strings/enum_format.rock`; this holder pins the
 //! package and module segments a packaged program names.
 
-use crate::common::{V1Fragment, emit_v1_package, run_luajit};
+use crate::common::{V1Fragment, emit_v1_package, run_main};
 
 const MAIN: &str = r#"
 enum MobKind { Skeleton, Zombie }
@@ -86,24 +86,21 @@ fn package() -> skull::mir_emit::MirEmit {
     )
 }
 
-fn lines(tag: &str) -> Vec<String> {
+fn lines() -> Vec<String> {
     let emitted = package();
-    run_luajit(&format!("{}\nmain()\n", emitted.lua), tag)
-        .lines()
-        .map(str::to_string)
-        .collect()
+    run_main(&emitted.lua).lines().map(str::to_string).collect()
 }
 
 #[test]
 fn packaged_payload_free_enum_prints_its_path() {
-    let out = lines("enum_format_packages_free");
+    let out = lines();
     assert_eq!(out[0], "pkgenum::MobKind::Skeleton");
     assert_eq!(out[1], "pkgenum::status::PoisonLevel::Rotting");
 }
 
 #[test]
 fn packaged_nested_enum_prints_each_path() {
-    let out = lines("enum_format_packages_nested");
+    let out = lines();
     assert_eq!(
         out[2],
         "pkgenum::ScenarioMoveAdmission::Movement(pkgenum::movement::MovementStepAdmission::Blocked)"
@@ -112,7 +109,7 @@ fn packaged_nested_enum_prints_each_path() {
 
 #[test]
 fn packaged_value_record_payload_prints_its_path() {
-    let out = lines("enum_format_packages_record");
+    let out = lines();
     let id =
         "pkgenum::actor_identity::MobId { scene_id: 11, arena_id: 23, slot: 4, generation: 7 }";
     assert_eq!(out[3], format!("pkgenum::DamageSource::Mob({id})"));
@@ -121,7 +118,7 @@ fn packaged_value_record_payload_prints_its_path() {
 
 #[test]
 fn packaged_generic_enum_prints_its_path() {
-    let out = lines("enum_format_packages_generic");
+    let out = lines();
     assert_eq!(
         out[5],
         "pkgenum::status::StatusEffect::Paralyzed { remaining: 1.5, duration: 2 }"
@@ -130,7 +127,7 @@ fn packaged_generic_enum_prints_its_path() {
 
 #[test]
 fn packaged_handle_names_its_target_path() {
-    let out = lines("enum_format_packages_handle");
+    let out = lines();
     let text = &out[6];
     assert!(
         text.starts_with("Entity<pkgenum::"),

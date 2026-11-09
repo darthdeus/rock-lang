@@ -249,10 +249,7 @@ fn main() {}
         crate::common::emit_module(&format!("{src}\nfn legacy_probe() {{ print(probe()) }}"));
     let legacy_probe = crate::common::mangled_name(&legacy, "legacy_probe");
     assert_eq!(
-        crate::common::run_luajit(
-            &format!("{legacy}\n{legacy_probe}()\n"),
-            "embed_reflect_legacy"
-        ),
+        crate::common::run_luajit(&format!("{legacy}\n{legacy_probe}()\n")),
         "4"
     );
 
@@ -266,10 +263,7 @@ fn main() {}
     );
     let probe = crate::common::mangled_name(&emitted.lua, "probe");
     assert_eq!(
-        crate::common::run_luajit(
-            &format!("{}\nprint({probe}())\n", emitted.lua),
-            "embed_reflect_v1"
-        ),
+        crate::common::run_luajit(&format!("{}\nprint({probe}())\n", emitted.lua)),
         "4"
     );
     // The flat-enum layout beside the type table is read by the same `__ty`

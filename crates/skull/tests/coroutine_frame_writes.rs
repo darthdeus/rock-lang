@@ -64,7 +64,7 @@ fn main() {
 fn frame_stores_evaluate_rhs_once_clear_payloads_and_preserve_user_writes() {
     let lua = common::try_emit_module(FRAME_WRITES).expect("frame writes emit");
     assert_eq!(
-        common::run_luajit(&format!("{lua}\nmain()\n"), "frame_nil_writes"),
+        common::run_main(&lua),
         "true\ntrue\ntrue\ntrue\ntrue\ntrue\n4\n2"
     );
 }
@@ -94,10 +94,7 @@ fn main() {
 #[test]
 fn int_to_float_alias_survives_a_yield() {
     let lua = common::try_emit_module(INT_FLOAT_ALIAS_ACROSS_YIELD).expect("alias co emits");
-    assert_eq!(
-        common::run_luajit(&format!("{lua}\nmain()\n"), "int_float_alias_yield"),
-        "120\n121"
-    );
+    assert_eq!(common::run_main(&lua), "120\n121");
 }
 
 /// A conversion VALUE live across a yield keeps a valid slot: the spill store
@@ -177,7 +174,7 @@ fn spilled_int_to_float_alias_reads_a_valid_slot_after_resume() {
     let driver = format!(
         "{lua}\nlocal s = {{__state = 0, __layout = {layout}, c{n_slot} = 5}}\nprint(spill_alias__step(s))\nprint(spill_alias__step(s))\n"
     );
-    assert_eq!(common::run_luajit(&driver, "spill_alias"), "10\n20");
+    assert_eq!(common::run_luajit(&driver), "10\n20");
 }
 
 /// A v1 enum has one runtime tag. The erased `resume()` rebuilds the yielded
@@ -203,10 +200,7 @@ fn main() {}
         }],
     );
     let probe = common::mangled_name(&emitted.lua, "probe");
-    let out = common::run_luajit(
-        &format!("{}\nprint({probe}())\n", emitted.lua),
-        "v1_resume_tag",
-    );
+    let out = common::run_luajit(&format!("{}\nprint({probe}())\n", emitted.lua));
     let (resumed, built) = out.split_once(' ').expect("two tags");
     assert_eq!(
         resumed, built,
@@ -259,10 +253,7 @@ fn coroutine_step_colors_sequential_locals_below_luajit_limit() {
         None,
     );
     assert_eq!(
-        common::run_luajit(
-            &format!("{lua}\nprint(wide_step({{}}))\n"),
-            "coroutine_cell_colors"
-        ),
+        common::run_luajit(&format!("{lua}\nprint(wide_step({{}}))\n")),
         "7",
         "sequential step locals must not overwrite the implicit frame-state parameter"
     );

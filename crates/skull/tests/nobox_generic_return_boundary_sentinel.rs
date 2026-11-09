@@ -54,6 +54,7 @@
 //! substitution AND the callee has no scalar-ABI spec". `field_get` is
 //! `@inline inline(lua)` with neither mark, which is why it should reject.
 
+use crate::common::compile_and_run;
 /// The repro through the stdlib primitive that actually bites.
 const FIELD_GET_NOBOX: &str = r#"
 struct Row { pos: Vec2, tag: int }
@@ -140,11 +141,6 @@ fn emit_err(src: &str) -> String {
     }
 }
 
-fn run(src: &str, tag: &str) -> String {
-    let lua = crate::common::try_emit_module(src).expect("must emit");
-    crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
-}
-
 #[test]
 fn a_field_get_of_a_nobox_field_is_rejected_at_the_return_boundary() {
     let err = emit_err(FIELD_GET_NOBOX);
@@ -166,7 +162,7 @@ fn a_generic_nobox_return_is_rejected_at_an_opaque_boundary() {
 #[test]
 fn a_boxed_struct_field_reads_correctly_through_the_same_primitive() {
     assert_eq!(
-        run(FIELD_GET_BOXED_STRUCT, "fieldref_boxed_struct"),
+        compile_and_run(FIELD_GET_BOXED_STRUCT),
         "7",
         "a boxed field keeps one key and must stay readable through `field_get`"
     );
@@ -175,7 +171,7 @@ fn a_boxed_struct_field_reads_correctly_through_the_same_primitive() {
 #[test]
 fn an_unmarked_value_field_reads_correctly_through_the_same_primitive() {
     assert_eq!(
-        run(FIELD_GET_VALUE_STRUCT, "fieldref_value_struct"),
+        compile_and_run(FIELD_GET_VALUE_STRUCT),
         "9",
         "an unmarked `value` field is not flattened, so it must stay readable"
     );

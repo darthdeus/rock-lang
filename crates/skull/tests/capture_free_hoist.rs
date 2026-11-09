@@ -2,7 +2,9 @@
 //! hoists to a top-level `function <enclosing>__lambda<k>(<params>) ... end` and
 //! is referenced through one reusable logical CodeRef at the creation site. A
 //! capturing lambda carries that CodeRef plus its environment record.
-use crate::common::{emit_module, function_body, mangled_name, run_luajit};
+use crate::common::{
+    compile_and_run, emit_module, function_body, mangled_name, run_luajit, run_main,
+};
 
 #[test]
 fn defer_retains_an_existing_cleanup_without_a_forwarding_capture() {
@@ -48,10 +50,7 @@ assert(__rock_defer_top == 0)
 print("released")
 "#
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}{driver}"), "retained_cleanup"),
-        "released"
-    );
+    assert_eq!(run_luajit(&format!("{lua}{driver}")), "released");
 }
 
 #[test]
@@ -70,10 +69,7 @@ fn main() {}
 "#,
     );
     let choose = mangled_name(&lua, "choose");
-    assert_eq!(
-        run_luajit(&format!("{lua}\npcall({choose})\n"), "late_cleanup"),
-        "second"
-    );
+    assert_eq!(run_luajit(&format!("{lua}\npcall({choose})\n")), "second");
 }
 
 // `free_loop` creates a capture-free lambda (`() => { sink(42) }` closes over
@@ -161,7 +157,7 @@ fn main() { let _ = mk() }
     let lua = emit_module(src);
     let mk = mangled_name(&lua, "mk");
     let driver = format!("\nlocal a = {mk}()\nlocal b = {mk}()\nprint(rawequal(a, b))\n");
-    let out = run_luajit(&format!("{lua}{driver}"), "shared");
+    let out = run_luajit(&format!("{lua}{driver}"));
     assert_eq!(
         out, "true",
         "two creations of a capture-free lambda must share one hoisted fn value; got: {out}"
@@ -183,8 +179,7 @@ fn main() {
     print("{f()}")
 }
 "#;
-    let lua = emit_module(src);
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "percall");
+    let out = compile_and_run(src);
     assert_eq!(
         out, "6\n6",
         "a hoisted lambda's local must be per-call (not shared); got: {out}"
@@ -238,7 +233,7 @@ fn main() { let g = transitive(7) print("{g()}") }
         "both lambdas hoist to env bodies (both capture the root param `x`):\n{lua}"
     );
     // and it still behaves (the inner reads x threaded through both envs).
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "transitive");
+    let out = run_main(&lua);
     assert_eq!(
         out, "7",
         "transitive capture must still read the enclosing param; got: {out}"
@@ -269,7 +264,7 @@ fn main() { let f = split_probe() print("{f()}") }
         for k in pairs(_G) do if type(k) == \"string\" and k:match(\"^c%d+$\") then leaked[#leaked + 1] = k end end\n\
         table.sort(leaked)\n\
         print(#leaked == 0 and \"no-leak\" or table.concat(leaked, \",\"))\n";
-    let out = run_luajit(&format!("{lua}{driver}"), "split");
+    let out = run_luajit(&format!("{lua}{driver}"));
     assert_eq!(
         out, "3\nno-leak",
         "the hoisted body must declare its own cells as locals (no c<N> leaked to _G); got:\n{out}"

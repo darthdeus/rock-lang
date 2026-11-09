@@ -14,6 +14,7 @@
 //! 2.4 diagnostic, because the receiver's declared `[T]` names a layout the
 //! column element does not have. It cannot silently reach `_data`.
 
+use crate::common::compile_and_run;
 const COLUMN_RECEIVER: &str = r#"
 value PushCell { a: int, b: int }
 
@@ -52,11 +53,6 @@ fn main() {
 
 fn emit(src: &str) -> String {
     crate::common::try_emit_module(src).expect("must emit")
-}
-
-fn run(src: &str, tag: &str) -> String {
-    let lua = emit(src);
-    crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
 }
 
 /// `main`'s emitted body. Whole-module matching is not an oracle here: the
@@ -102,13 +98,13 @@ fn a_column_payload_reaches_the_boxed_body_and_is_correct() {
         reaches_boxed_body(&lua),
         "the OUTER vec is boxed, so its push is the ordinary `_data` splice"
     );
-    assert_eq!(run(COLUMN_PAYLOAD, "vec_push_col_payload"), "1");
+    assert_eq!(compile_and_run(COLUMN_PAYLOAD), "1");
 }
 
 #[test]
 fn both_receiver_forms_answer_correctly() {
-    assert_eq!(run(COLUMN_RECEIVER, "vec_push_col_recv"), "7");
-    assert_eq!(run(BOXED_RECEIVER, "vec_push_boxed_recv"), "7");
+    assert_eq!(compile_and_run(COLUMN_RECEIVER), "7");
+    assert_eq!(compile_and_run(BOXED_RECEIVER), "7");
 }
 
 /// An opaque body has one declaration-owned boundary plan, so retyping the

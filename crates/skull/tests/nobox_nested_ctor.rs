@@ -10,7 +10,7 @@
 //! leaf-count sweep that separates this from the column threshold lives in
 //! `nobox_column_threshold.rs`. Design + work list:
 
-use crate::common::{function_body, mangled_name, run_luajit, try_emit_module};
+use crate::common::{emit_module, function_body, mangled_name, run_main};
 
 /// A global forces the outer struct to materialize with no `Vec` in the program,
 /// which is what separates this class from the `MAX_COLUMN_LEAVES` trigger.
@@ -171,40 +171,22 @@ fn main() {
 }
 "#;
 
-fn emit_ok(src: &str, what: &str) -> String {
-    match try_emit_module(src) {
-        Ok(lua) => lua,
-        Err(e) => panic!("{what} must emit, got a rejection: {e:?}"),
-    }
-}
-
 /// Every leaf gets a DISTINCT value, so an ordering drift between the shape walk
 /// and the emitted writes cannot hide behind symmetric literals.
 #[test]
 fn a_nested_nobox_field_does_not_box_when_the_outer_materializes() {
-    let lua = emit_ok(GLOBAL_OUTER, "a global outer with a nested nobox field");
+    let lua = emit_module(GLOBAL_OUTER);
     assert!(
         !function_body(&lua, "setup").contains("NV2_ct("),
         "the nested nobox field materialized a cdata:
 {lua}"
     );
-    assert_eq!(
-        run_luajit(
-            &format!(
-                "{lua}
-main()
-"
-            ),
-            "global_outer"
-        )
-        .trim(),
-        "1 2 3 4 5"
-    );
+    assert_eq!(run_main(&lua).trim(), "1 2 3 4 5");
 }
 
 #[test]
 fn a_two_level_nesting_flattens_through_the_intermediate() {
-    let lua = emit_ok(TWO_LEVEL, "a two-level nesting");
+    let lua = emit_module(TWO_LEVEL);
     assert!(
         !function_body(&lua, "setup").contains("NV2_ct("),
         "the nested nobox field materialized a cdata:
@@ -217,45 +199,23 @@ fn a_two_level_nesting_flattens_through_the_intermediate() {
         "an intermediate cdata was allocated instead of flattening at the outermost ctor:
 {lua}"
     );
-    assert_eq!(
-        run_luajit(
-            &format!(
-                "{lua}
-main()
-"
-            ),
-            "two_level"
-        )
-        .trim(),
-        "1 2 3 4 5 6"
-    );
+    assert_eq!(run_main(&lua).trim(), "1 2 3 4 5 6");
 }
 
 #[test]
 fn an_opaque_nested_operand_is_decomposed_not_rejected() {
-    let lua = emit_ok(MIXED_LITERAL_AND_OPAQUE, "a mixed literal/opaque ctor");
+    let lua = emit_module(MIXED_LITERAL_AND_OPAQUE);
     assert!(
         !function_body(&lua, "setup").contains("NV2_ct("),
         "the nested nobox field materialized a cdata:
 {lua}"
     );
-    assert_eq!(
-        run_luajit(
-            &format!(
-                "{lua}
-main()
-"
-            ),
-            "mixed"
-        )
-        .trim(),
-        "6 7 1 2 8"
-    );
+    assert_eq!(run_main(&lua).trim(), "6 7 1 2 8");
 }
 
 #[test]
 fn a_nullable_nobox_field_in_a_gc_tier_outer_carries_presence() {
-    let lua = emit_ok(NULLABLE_FIELD, "a nullable nobox field in a GC-tier outer");
+    let lua = emit_module(NULLABLE_FIELD);
     assert!(
         !function_body(&lua, "__skull_ginit_G").contains("NV2_ct("),
         "the nullable nobox field materialized a cdata:
@@ -268,81 +228,51 @@ fn a_nullable_nobox_field_in_a_gc_tier_outer_carries_presence() {
         "the GC-tier outer did not take the presence-carrying leaf ctor:
 {lua}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nullable_field").trim(),
-        "1"
-    );
+    assert_eq!(run_main(&lua).trim(), "1");
 }
 
 #[test]
 fn a_leaf_table_element_read_out_of_a_container_projects_its_leaves() {
-    let lua = emit_ok(LEAF_TABLE_OUT_OF_A_MAP, "a leaf-table Map value");
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "map_value").trim(),
-        "1 2 3"
-    );
+    let lua = emit_module(LEAF_TABLE_OUT_OF_A_MAP);
+    assert_eq!(run_main(&lua).trim(), "1 2 3");
 }
 
 #[test]
 fn both_absent_spellings_store_the_same_tag() {
-    let lua = emit_ok(
-        ABSENT_SPELLINGS_AGREE,
-        "an absent literal against a null write",
-    );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "absent_spellings").trim(),
-        "true true"
-    );
+    let lua = emit_module(ABSENT_SPELLINGS_AGREE);
+    assert_eq!(run_main(&lua).trim(), "true true");
 }
 
 #[test]
 fn an_sroa_split_local_reassembled_into_an_escape_does_not_box_its_nested_field() {
-    let lua = emit_ok(SROA_SPLIT_REASSEMBLY, "a spread of an SROA-split local");
+    let lua = emit_module(SROA_SPLIT_REASSEMBLY);
     assert!(
         !function_body(&lua, "main").contains("NV2_ct("),
         "the split local's nested nobox field materialized a cdata:
 {lua}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "sroa_reassembly").trim(),
-        "boundary\n11"
-    );
+    assert_eq!(run_main(&lua).trim(), "boundary\n11");
 }
 
 #[test]
 fn a_coroutine_frame_carries_a_value_with_a_nested_nobox_field() {
-    let lua = emit_ok(
-        NESTED_NOBOX_ACROSS_COROUTINE_FRAME,
-        "a nested nobox field carried across a coroutine frame",
-    );
+    let lua = emit_module(NESTED_NOBOX_ACROSS_COROUTINE_FRAME);
     let build = mangled_name(&lua, "build");
     assert!(
         !function_body(&lua, &format!("{build}__step")).contains("NV2_ct("),
         "the coroutine frame materialized its nested nobox field:\n{lua}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nested_nobox_coroutine").trim(),
-        "0\nboundary\n11"
-    );
+    assert_eq!(run_main(&lua).trim(), "0\nboundary\n11");
 }
 
 #[test]
 fn an_explicit_materialize_stays_legal() {
-    let lua = emit_ok(EXPLICIT_MATERIALIZE, "an explicit materialize");
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "materialize").trim(),
-        "1 2"
-    );
+    let lua = emit_module(EXPLICIT_MATERIALIZE);
+    assert_eq!(run_main(&lua).trim(), "1 2");
 }
 
 #[test]
 fn an_explicitly_materialized_nested_operand_is_left_whole() {
-    let lua = emit_ok(
-        MATERIALIZED_OPERAND,
-        "an explicitly materialized nested operand",
-    );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "materialized_operand").trim(),
-        "1 2 3"
-    );
+    let lua = emit_module(MATERIALIZED_OPERAND);
+    assert_eq!(run_main(&lua).trim(), "1 2 3");
 }

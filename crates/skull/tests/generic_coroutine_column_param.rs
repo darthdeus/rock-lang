@@ -30,6 +30,7 @@
 //! on the same terms and failed identically. Column eligibility is wider than the
 //! mark, so the blast radius is wider than nobox tests can see.
 
+use crate::common::compile_and_run;
 /// The repro: generic `co fn`, column-stored element.
 const GENERIC_CO_COLUMN: &str = r#"
 nobox value P { x: float, y: float }
@@ -123,16 +124,10 @@ fn main() {
 }
 "#;
 
-fn run(src: &str, tag: &str) -> String {
-    let lua = crate::common::try_emit_module(src)
-        .unwrap_or_else(|e| panic!("must emit ({tag}): {}", e.message));
-    crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
-}
-
 #[test]
 fn a_generic_coroutine_over_a_column_vec_iterates_its_elements() {
     assert_eq!(
-        run(GENERIC_CO_COLUMN, "gen_co_col"),
+        compile_and_run(GENERIC_CO_COLUMN),
         "2",
         "the instantiation must run against COLUMN storage: a shared erased body \
          reads a `_data` the vec does not have and answers 0 with no diagnostic"
@@ -143,7 +138,7 @@ fn a_generic_coroutine_over_a_column_vec_iterates_its_elements() {
 #[test]
 fn a_generic_coroutine_over_an_unmarked_value_column_iterates_identically() {
     assert_eq!(
-        run(GENERIC_CO_UNMARKED, "gen_co_unmarked"),
+        compile_and_run(GENERIC_CO_UNMARKED),
         "2",
         "an UNMARKED value element is column-eligible on the same terms, so it \
          must behave identically -- column eligibility is wider than the mark"
@@ -154,7 +149,7 @@ fn a_generic_coroutine_over_an_unmarked_value_column_iterates_identically() {
 #[test]
 fn a_non_generic_coroutine_over_the_same_column_vec_is_correct() {
     assert_eq!(
-        run(CONCRETE_CO_COLUMN, "gen_param_concrete_co_col"),
+        compile_and_run(CONCRETE_CO_COLUMN),
         "2",
         "a NON-generic `co fn` over the same column vec must stay correct -- \
          this is half of what pins the defect to the generic x coroutine cell"
@@ -165,7 +160,7 @@ fn a_non_generic_coroutine_over_the_same_column_vec_is_correct() {
 #[test]
 fn a_generic_non_coroutine_over_the_same_column_vec_is_correct() {
     assert_eq!(
-        run(GENERIC_PLAIN_COLUMN, "gen_plain_col"),
+        compile_and_run(GENERIC_PLAIN_COLUMN),
         "2",
         "a generic non-coroutine over the same column vec must stay correct -- \
          this is the other half, and it is the forced-specialization path"
@@ -177,7 +172,7 @@ fn a_generic_non_coroutine_over_the_same_column_vec_is_correct() {
 #[test]
 fn a_generic_coroutine_over_a_boxed_element_is_correct() {
     assert_eq!(
-        run(GENERIC_CO_INT, "gen_co_int"),
+        compile_and_run(GENERIC_CO_INT),
         "2",
         "a boxed `[int]` element through the same generic `co fn` must stay correct"
     );

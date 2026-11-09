@@ -65,7 +65,7 @@ fn lambda_body_static_reinits_on_initializer_edit() {
          if __rock_globals[result_key] == 8 then print(\"PASS\")\n\
          else print(\"FAIL RESULT=\"..tostring(__rock_globals[result_key])) end\n"
     );
-    let out = run_luajit(&script, "reinit");
+    let out = run_luajit(&script);
     assert!(
         out.starts_with("PASS"),
         "expected lambda static to reset on init-edit; got: {out}"
@@ -85,7 +85,7 @@ fn lambda_body_static_preserved_across_identical_reload() {
          if __rock_globals[result_key] == 102 then print(\"PASS\")\n\
          else print(\"FAIL RESULT=\"..tostring(__rock_globals[result_key])) end\n"
     );
-    let out = run_luajit(&script, "preserve");
+    let out = run_luajit(&script);
     assert!(
         out.starts_with("PASS"),
         "expected lambda static preserved across identical reload; got: {out}"

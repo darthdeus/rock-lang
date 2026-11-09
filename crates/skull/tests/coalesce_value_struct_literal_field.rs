@@ -15,6 +15,7 @@
 //!   * `??` on a scalar (int) field is CORRECT, which rules out the literal
 //!     field position on its own.
 
+use crate::common::compile_and_run;
 /// `??` into a `value`-struct field of a struct literal.
 const VALUE_FIELD_INLINE: &str = r#"
 struct Thing { at: Vec2 = v(0, 0) }
@@ -78,23 +79,15 @@ fn main() {
 }
 "#;
 
-fn run(src: &str, tag: &str) -> String {
-    let lua = crate::common::try_emit_module(src).expect("must emit");
-    crate::common::run_luajit(&format!("{lua}\nmain()\n"), tag)
-}
-
 #[test]
 fn coalesce_into_value_struct_literal_field_is_correct() {
-    assert_eq!(
-        run(VALUE_FIELD_INLINE, "coalesce_value_field").trim(),
-        "7 8"
-    );
+    assert_eq!(compile_and_run(VALUE_FIELD_INLINE).trim(), "7 8");
 }
 
 #[test]
 fn a_diverging_coalesce_arm_does_not_build_the_parent_from_nil_leaves() {
     assert_eq!(
-        run(VALUE_FIELD_DIVERGING_RHS, "coalesce_value_diverging_rhs").trim(),
+        compile_and_run(VALUE_FIELD_DIVERGING_RHS).trim(),
         "13 17\ntrue"
     );
 }
@@ -102,7 +95,7 @@ fn a_diverging_coalesce_arm_does_not_build_the_parent_from_nil_leaves() {
 #[test]
 fn hoisting_the_coalesce_into_a_let_is_correct() {
     assert_eq!(
-        run(VALUE_FIELD_HOISTED, "coalesce_value_hoisted").trim(),
+        compile_and_run(VALUE_FIELD_HOISTED).trim(),
         "7 8",
         "the coalesce lowering is fine once it is not a literal field initializer"
     );
@@ -111,7 +104,7 @@ fn hoisting_the_coalesce_into_a_let_is_correct() {
 #[test]
 fn a_boxed_struct_through_the_same_coalesce_is_correct() {
     assert_eq!(
-        run(BOXED_FIELD_INLINE, "coalesce_boxed_field").trim(),
+        compile_and_run(BOXED_FIELD_INLINE).trim(),
         "7 8",
         "boxed fields take the coalesce inline correctly -- scalarization is the discriminant"
     );
@@ -120,7 +113,7 @@ fn a_boxed_struct_through_the_same_coalesce_is_correct() {
 #[test]
 fn a_scalar_through_the_same_coalesce_is_correct() {
     assert_eq!(
-        run(SCALAR_FIELD_INLINE, "coalesce_scalar_field").trim(),
+        compile_and_run(SCALAR_FIELD_INLINE).trim(),
         "7",
         "a literal field initializer is not itself the trigger"
     );

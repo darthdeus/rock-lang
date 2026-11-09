@@ -1,5 +1,5 @@
 use crate::common::{
-    body_of_synthetic, emit_module, function_body, run_luajit, try_emit_module,
+    body_of_synthetic, compile_and_run, emit_module, function_body, run_main, try_emit_module,
     try_emit_with_stdlib_module,
 };
 
@@ -152,9 +152,8 @@ fn main() {
 
 #[test]
 fn nullable_nobox_equality_with_a_non_nullable_operand_compares_presence_and_leaves() {
-    let lua = emit_module(NOBOX_MIXED_NULLABLE_EQUALITY);
     assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_mixed_nullable_equality"),
+        compile_and_run(NOBOX_MIXED_NULLABLE_EQUALITY),
         "true\ntrue\ntrue"
     );
 }
@@ -199,10 +198,7 @@ fn nullable_nobox_call_threads_presence_and_leaves() {
             "nullable nobox call materialized in `{name}`:\n{body}"
         );
     }
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nullable"),
-        "true"
-    );
+    assert_eq!(run_main(&lua), "true");
 }
 
 const NOBOX_NULLABLE_LOCAL: &str = r#"
@@ -230,10 +226,7 @@ fn nullable_nobox_local_keeps_presence_in_leaf_cells() {
         !body.contains("NV2_ct("),
         "nullable nobox local materialized:\n{body}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nullable_local"),
-        "nil\nNV2 { x: 1, y: 2 }"
-    );
+    assert_eq!(run_main(&lua), "nil\nNV2 { x: 1, y: 2 }");
 }
 
 const NOBOX_FIELD_WIDEN: &str = r#"
@@ -278,10 +271,7 @@ fn a_field_load_widens_to_nullable_without_materializing() {
             "a field load widened to `T?` materialized in `{name}`:\n{body}"
         );
     }
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_field_widen"),
-        "false\n3\n1"
-    );
+    assert_eq!(run_main(&lua), "false\n3\n1");
 }
 
 const NOBOX_NULLABLE_FIELD: &str = r#"
@@ -339,10 +329,7 @@ fn a_nullable_nobox_field_is_stored_as_presence_and_leaves() {
         body.contains(r#"["pos.x"]"#) && body.contains(r#"["pos.y"]"#),
         "the nullable field did not flatten into its parent's leaves:\n{body}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nullable_field"),
-        "3\n-1\n9\n-1\n7"
-    );
+    assert_eq!(run_main(&lua), "3\n-1\n9\n-1\n7");
 }
 
 const NOBOX_TWO_SINKS_IN_ONE_BODY: &str = r#"
@@ -428,10 +415,7 @@ fn a_nested_nobox_child_widens_without_materializing() {
             "a two-level nobox nest materialized in `{name}`:\n{body}"
         );
     }
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nested_field_widen"),
-        "false"
-    );
+    assert_eq!(run_main(&lua), "false");
 }
 
 const NOBOX_NESTED_PLAIN_OWNER_FIELD_READ: &str = r#"
@@ -471,10 +455,7 @@ fn a_plain_owner_reads_every_leaf_of_a_nested_nobox_field() {
             "nested nobox field read stopped before `{field}`:\n{body}"
         );
     }
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nested_plain_owner_read"),
-        "true"
-    );
+    assert_eq!(run_main(&lua), "true");
 }
 
 const NOBOX_NESTED_PLAIN_OWNER_FIELD_WRITE: &str = r#"
@@ -510,13 +491,7 @@ fn a_plain_owner_writes_every_leaf_of_a_nested_nobox_field() {
         !body.contains("Grid_ct("),
         "nested nobox field write materialized its child:\n{body}"
     );
-    assert_eq!(
-        run_luajit(
-            &format!("{lua}\nmain()\n"),
-            "nobox_nested_plain_owner_write"
-        ),
-        "80,81"
-    );
+    assert_eq!(run_main(&lua), "80,81");
 }
 
 const NOBOX_COLUMN_WIDEN: &str = r#"
@@ -595,10 +570,7 @@ fn a_column_read_widens_to_nullable_without_materializing() {
             "the `{needle}` specialization materialized the element it returns:\n{body}"
         );
     }
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_column_widen"),
-        "1\n12\n34\n-1\n56\n12\n34\n-1\n-1\n78"
-    );
+    assert_eq!(run_main(&lua), "1\n12\n34\n-1\n56\n12\n34\n-1\n-1\n78");
 }
 
 #[test]
@@ -898,8 +870,7 @@ fn global_of_a_nobox_value_stores_leaves() {
 
 #[test]
 fn nobox_global_reads_and_writes_leaves_at_runtime() {
-    let lua = emit_module(NOBOX_GLOBAL);
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "nobox_global");
+    let out = compile_and_run(NOBOX_GLOBAL);
     assert_eq!(out, "3\n12\n300");
 }
 
@@ -961,10 +932,7 @@ fn a_nobox_global_read_orders_its_dependent_initializer() {
         base < derived,
         "DERIVED initialized before the BASE it reads:\n{lua}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_global_order"),
-        "11 12"
-    );
+    assert_eq!(run_main(&lua), "11 12");
 }
 
 const NOBOX_NULLABLE_GLOBAL: &str = r#"
@@ -998,10 +966,7 @@ fn a_refined_nullable_nobox_global_addresses_the_right_leaves() {
         3,
         "a nullable nobox global must reserve storage presence/data leaves"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_global_nullable"),
-        "7\n-1\n2"
-    );
+    assert_eq!(run_main(&lua), "7\n-1\n2");
 }
 
 const NOBOX_NESTED_FN: &str = r#"
@@ -1035,10 +1000,7 @@ fn a_nested_fn_threads_nobox_leaves_through_params_and_return() {
             "a nobox value materialized at a nested-fn boundary:\n{body}"
         );
     }
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nested_fn"),
-        "27"
-    );
+    assert_eq!(run_main(&lua), "27");
 }
 
 const WIDE_NOBOX_TAIL_FORWARD: &str = r#"
@@ -1155,10 +1117,7 @@ fn a_wide_nobox_tail_forward_returns_the_scalar_wire_directly() {
             .any(|line| line.matches(',').count() >= 7 && line.contains(" = ")),
         "a result observed before becoming call arguments was incorrectly forwarded:\n{inspected_call_arg}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "wide_nobox_tail_forward"),
-        "108\n108\n108\n208\n208\n208\n10\n108"
-    );
+    assert_eq!(run_main(&lua), "108\n108\n108\n208\n208\n208\n10\n108");
 }
 
 const NOBOX_NESTED_FN_INFERRED_RETURN: &str = r#"
@@ -1185,10 +1144,7 @@ fn a_nested_fn_with_an_inferred_nobox_return_threads_leaves() {
         !body.contains("NV2_ct("),
         "an inferred nobox return materialized:\n{body}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nested_fn_inferred"),
-        "3"
-    );
+    assert_eq!(run_main(&lua), "3");
 }
 
 const VALUE_NESTED_FN_BY_VALUE: &str = r#"
@@ -1210,11 +1166,7 @@ fn main() {
 fn a_nested_fn_taken_by_value_keeps_one_boxed_abi_at_every_call() {
     // The scalar ABI is all-or-nothing per callee: a nested fn reachable as a
     // fn VALUE cannot splat, so its direct calls must not splat either.
-    let lua = emit_module(VALUE_NESTED_FN_BY_VALUE);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "value_nested_fn_by_value"),
-        "6"
-    );
+    assert_eq!(compile_and_run(VALUE_NESTED_FN_BY_VALUE), "6");
 }
 
 const NOBOX_SCALAR_ABI_FFI: &str = r#"
@@ -1241,10 +1193,7 @@ fn a_scalar_abi_ffi_wrapper_threads_nobox_leaves_both_ways() {
         !body.contains("NV2_ct("),
         "a scalar-ABI FFI boundary materialized a nobox value:\n{body}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_scalar_abi_ffi"),
-        "8 8"
-    );
+    assert_eq!(run_main(&lua), "8 8");
 }
 
 const NOBOX_NESTED_FN_BY_VALUE: &str = r#"
@@ -1301,10 +1250,7 @@ fn direct_and_indirect_calls_of_one_fn_agree_on_arity() {
         body.contains("c0(c1, c2)"),
         "the indirect call must pass two leaves, not one box:\n{body}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_fn_type_agrees"),
-        "6\n3"
-    );
+    assert_eq!(run_main(&lua), "6\n3");
 }
 
 const NOBOX_TOPLEVEL_FN_BY_VALUE: &str = r#"
@@ -1344,10 +1290,7 @@ fn a_top_level_fn_value_uses_the_type_derived_nobox_abi() {
         !body.contains("NV2_ct("),
         "the top-level fn value materialized NV2:\n{body}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_toplevel_fn_value"),
-        "10 14"
-    );
+    assert_eq!(run_main(&lua), "10 14");
 }
 
 const NOBOX_OPAQUE_TOPLEVEL_FN_BY_VALUE: &str = r#"
@@ -1418,10 +1361,7 @@ fn a_nobox_value_crosses_a_fn_value_call_as_leaves() {
             "a fn-value boundary materialized in `{name}`:\n{body}"
         );
     }
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_fn_value"),
-        "3\n12"
-    );
+    assert_eq!(run_main(&lua), "3\n12");
 }
 
 const NOBOX_GLOBAL_PLACES: &str = r#"
@@ -1457,10 +1397,7 @@ fn nobox_global_places_reach_the_right_leaves() {
     }
     // Nested whole-value write, nested leaf write, leaf compound assign, leaf
     // inc/dec, whole-value read into a call, and the copy-on-read rule.
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_global_places"),
-        "10 99 3 6 0 9901\n10 0"
-    );
+    assert_eq!(run_main(&lua), "10 99 3 6 0 9901\n10 0");
 }
 
 const NOBOX_THROUGH_GENERIC_NULLABLE: &str = r#"
@@ -1490,10 +1427,7 @@ fn a_generic_nullable_param_threads_a_nobox_argument_as_leaves() {
         !body.contains("NV2_ct("),
         "a nobox value crossing `T?` materialized a cdata:\n{body}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_generic_nullable"),
-        "3 30"
-    );
+    assert_eq!(run_main(&lua), "3 30");
 }
 
 #[test]
@@ -1552,11 +1486,7 @@ fn if_let_binding_a_nobox_nullable_stays_on_leaves() {
 
 #[test]
 fn nobox_nullable_bindings_evaluate_correctly() {
-    let lua = emit_module(NOBOX_NULLABLE_BINDINGS);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_nullable_bindings"),
-        "3 11 7 -1"
-    );
+    assert_eq!(compile_and_run(NOBOX_NULLABLE_BINDINGS), "3 11 7 -1");
 }
 
 const NOBOX_REJECTION_SITE: &str = r#"
@@ -1624,10 +1554,7 @@ fn a_non_nobox_value_in_a_tuple_return_keeps_the_boxed_abi() {
         2,
         "an unmarked value lost its single boxed tuple slot:\n{lua}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "plain_value_tuple_return"),
-        "true 1 2"
-    );
+    assert_eq!(run_main(&lua), "true 1 2");
 }
 
 /// The `a, b = <fn>(..)` destination count at a multi-return call site -- the
@@ -1671,10 +1598,7 @@ fn a_nobox_value_in_a_tuple_return_carries_its_leaves() {
         3,
         "the flag plus two leaves must come back as three values:\n{lua}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_tuple_return"),
-        "true 1 2"
-    );
+    assert_eq!(run_main(&lua), "true 1 2");
 }
 
 const NOBOX_PHI_CONTROLS: &str = r#"
@@ -1712,10 +1636,7 @@ fn nobox_phi_controls_stay_unboxed() {
             "`{name}` materialized its result:\n{body}"
         );
     }
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_phi_controls"),
-        "3 4 7 8"
-    );
+    assert_eq!(run_main(&lua), "3 4 7 8");
 }
 
 const NOBOX_PHI_AGGREGATES: &str = r#"
@@ -1758,10 +1679,7 @@ fn nobox_phi_joins_keep_aggregate_reprs() {
             "`{name}` materialized a nobox value:\n{body}"
         );
     }
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_phi_aggregates"),
-        "3 4 7 8 9 10"
-    );
+    assert_eq!(run_main(&lua), "3 4 7 8 9 10");
 }
 
 const NOBOX_OPAQUE_TUPLE_RETURN: &str = r#"
@@ -1818,10 +1736,7 @@ fn a_scalar_abi_inline_lua_tuple_return_carries_leaves() {
         !body.contains("NV2_ct("),
         "an opted-in inline(lua) tuple return still boxed:\n{body}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_scalar_abi_tuple_return"),
-        "3"
-    );
+    assert_eq!(run_main(&lua), "3");
 }
 
 const NOBOX_LOOP_ELEMENT: &str = r#"
@@ -1850,10 +1765,7 @@ fn a_loop_element_binds_a_nobox_value_by_leaves() {
         !body.contains("NV2_ct("),
         "the iterator protocol boxed a nobox element:\n{body}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_loop_element"),
-        "3 -1"
-    );
+    assert_eq!(run_main(&lua), "3 -1");
 }
 
 // A GC-tier `value` (its array field keeps it off the cdata and leaf-table
@@ -1901,11 +1813,7 @@ fn a_gc_tier_value_threaded_as_leaves_keeps_its_nobox_fields_unboxed() {
             !body.contains("Id_ct(") && !body.contains("Grid_ct(") && !body.contains("Map_vt("),
             "the {what} site boxed:\n{body}"
         );
-        assert_eq!(
-            run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_leaves"),
-            expected,
-            "the {what} site"
-        );
+        assert_eq!(run_main(&lua), expected, "the {what} site");
     }
 }
 
@@ -1946,11 +1854,7 @@ fn a_stored_gc_tier_value_keeps_its_nobox_fields_as_leaves() {
             !body.contains("Id_ct(") && !body.contains("Grid_ct("),
             "the {what} site boxed a nobox field:\n{body}"
         );
-        assert_eq!(
-            run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_stored"),
-            expected,
-            "the {what} site"
-        );
+        assert_eq!(run_main(&lua), expected, "the {what} site");
     }
 }
 
@@ -1999,14 +1903,8 @@ fn a_stored_gc_tier_value_with_a_nobox_field_matches_its_unmarked_twin() {
                     5 true false\n\
                     26 Row { label: \"c\", pos: V2 { x: 4, y: 8 } } 3\n\
                     Row { label: \"g\", pos: V2 { x: 8, y: 9 } } 9 Row { label: \"d\", pos: V2 { x: 7, y: 2 } }";
-    assert_eq!(
-        run_luajit(&format!("{plain}\nmain()\n"), "nobox_in_gc_value_plain"),
-        expected
-    );
-    assert_eq!(
-        run_luajit(&format!("{marked}\nmain()\n"), "nobox_in_gc_value_marked"),
-        expected
-    );
+    assert_eq!(run_main(&plain), expected);
+    assert_eq!(run_main(&marked), expected);
 }
 
 // Nullable, nested and generic-parent `nobox` fields of a stored GC-tier value:
@@ -2070,10 +1968,7 @@ fn a_stored_gc_tier_value_keeps_nullable_and_nested_nobox_fields_as_leaves() {
         );
     }
     assert_eq!(
-        run_luajit(
-            &format!("{lua}\nmain()\n"),
-            "nobox_in_gc_value_nullable_nested"
-        ),
+        run_main(&lua),
         "Row { label: \"a\", pos: V2 { x: 10, y: 11 }, at: V2 { x: 5, y: 6 }, \
          r: Rect { lo: V2 { x: 1, y: 2 }, hi: V2 { x: 13, y: 4 } } }\n\
          24 5 gt 7\n\
@@ -2123,10 +2018,7 @@ fn a_leaf_read_through_a_nobox_field_of_a_gc_tier_param_does_not_box() {
         !body.contains("Snap_vt("),
         "`pick` boxed its param to read a leaf:\n{body}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_param_leaf"),
-        "13"
-    );
+    assert_eq!(run_main(&lua), "13");
 }
 
 // Functional update of a GC-tier value whose base is a local: the fields the
@@ -2152,10 +2044,7 @@ fn a_functional_update_of_a_gc_tier_value_reads_nobox_fields_by_leaf() {
         !body.contains("View_vt("),
         "the update boxed its base:\n{body}"
     );
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_update"),
-        "3.75"
-    );
+    assert_eq!(run_main(&lua), "3.75");
 }
 
 // The same read off a BOXED GC-tier local (reassigned in a loop, so it lives in
@@ -2190,10 +2079,7 @@ fn main() {
 #[test]
 fn an_enum_in_a_nobox_field_of_a_boxed_gc_tier_local_reads_by_leaf() {
     let lua = emit_module(NOBOX_IN_GC_VALUE_BOXED_LOCAL_ENUM_READ);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nobox_in_gc_value_boxed_local"),
-        "10"
-    );
+    assert_eq!(run_main(&lua), "10");
     let body = function_body(&lua, "look");
     assert!(
         !body.contains("Snap_vt("),

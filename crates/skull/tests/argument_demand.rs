@@ -25,10 +25,7 @@ fn mark() -> int { marks += 1; return 0 }
     let program = format!(
         "{lua}\nlocal ok = pcall(probe, -1); print(ok, observed(), probe(1), observed())\n"
     );
-    assert_eq!(
-        run_luajit(&program, "compact_argument_errors"),
-        "false\t0\t7\t1"
-    );
+    assert_eq!(run_luajit(&program), "false\t0\t7\t1");
 }
 
 #[test]
@@ -51,7 +48,7 @@ fn demand_read(v: Sample) -> int { return v.kept }
         .0
         .lua;
     let program = format!("{lua}\nprint(pcall(probe))\n");
-    assert!(run_luajit(&program, "compact_argument_field_errors").starts_with("false\t"));
+    assert!(run_luajit(&program).starts_with("false\t"));
 }
 
 fn body_id(
@@ -86,10 +83,7 @@ fn demand_read(v: Sample) -> int { return forward(v.y) }
     let fresh = emit_full(&ws2, mid).unwrap().0;
     assert_eq!(incremental.lua, fresh.lua);
     assert_eq!(
-        run_luajit(
-            &format!("{}\nprint(caller())", incremental.lua),
-            "changed_demand"
-        ),
+        run_luajit(&format!("{}\nprint(caller())", incremental.lua)),
         "34"
     );
     match skull::mir_emit::emit_overlay(&ws2, &mut overlay_cache, &edited) {
@@ -98,7 +92,7 @@ fn demand_read(v: Sample) -> int { return forward(v.y) }
                 "{}\nlocal saved = save_caller()\n{}\nprint(caller(), saved())",
                 full1.lua, overlay.lua
             );
-            assert_eq!(run_luajit(&program, "changed_demand_overlay"), "34\t34");
+            assert_eq!(run_luajit(&program), "34\t34");
         }
         Err(error) => {
             assert!(
@@ -107,10 +101,10 @@ fn demand_read(v: Sample) -> int { return forward(v.y) }
                 error.message
             );
             assert_eq!(
-                run_luajit(
-                    &format!("{}\nlocal saved = save_caller(); print(saved())", full1.lua),
-                    "demand_old_callable"
-                ),
+                run_luajit(&format!(
+                    "{}\nlocal saved = save_caller(); print(saved())",
+                    full1.lua
+                )),
                 "23"
             );
         }
@@ -153,10 +147,7 @@ fn demand_match_read(event: MatchEvent) -> int {
     let (full1, mut cache) = emit_full(&ws1, mid).unwrap();
     let (_, mut overlay_cache) = emit_full(&ws1, mid).unwrap();
     assert_eq!(
-        run_luajit(
-            &format!("{}\nprint(match_demand_caller())", full1.lua),
-            "match_demand_before"
-        ),
+        run_luajit(&format!("{}\nprint(match_demand_caller())", full1.lua)),
         "47"
     );
     let ws2 = ws_with_stdlib(&after);
@@ -165,10 +156,7 @@ fn demand_match_read(event: MatchEvent) -> int {
     let fresh = emit_full(&ws2, mid).unwrap().0;
     assert_eq!(incremental.lua, fresh.lua);
     assert_eq!(
-        run_luajit(
-            &format!("{}\nprint(match_demand_caller())", fresh.lua),
-            "match_demand_after"
-        ),
+        run_luajit(&format!("{}\nprint(match_demand_caller())", fresh.lua)),
         "5"
     );
     match skull::mir_emit::emit_overlay(&ws2, &mut overlay_cache, &edited) {
@@ -177,7 +165,7 @@ fn demand_match_read(event: MatchEvent) -> int {
                 "{}\nlocal saved = match_demand_save()\n{}\nprint(match_demand_caller(), saved())",
                 full1.lua, overlay.lua
             );
-            assert_eq!(run_luajit(&program, "match_demand_overlay"), "5\t5");
+            assert_eq!(run_luajit(&program), "5\t5");
         }
         Err(error) => assert!(
             error.message.contains("compatibility") && error.message.contains("restart"),
@@ -222,12 +210,9 @@ fn demand_direction_result(event: DirectionEvent) -> DirectionResult? {
         .0
         .lua;
     assert_eq!(
-        run_luajit(
-            &format!(
-                "{lua}\nprint(unit_match_probe(0), unit_match_probe(1), unit_match_probe(2), unit_match_probe(3))"
-            ),
-            "unit_match_results"
-        ),
+        run_luajit(&format!(
+            "{lua}\nprint(unit_match_probe(0), unit_match_probe(1), unit_match_probe(2), unit_match_probe(3))"
+        )),
         "-1\t11\t23\t23"
     );
 }

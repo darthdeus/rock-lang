@@ -18,7 +18,7 @@
 //! (adding an overload renamed the unique `foo` and orphaned the running global,
 //! silent-stale). The fix (always-mangle) landed; the assertions are flipped to
 //! guard the correct behavior.
-use crate::common::ws_of;
+use crate::common::{run_luajit, ws_of};
 
 /// `src` -> full skull Lua program (stdlib-free: int/string/empty-main only).
 ///
@@ -31,30 +31,6 @@ fn emit_program(src: &str) -> String {
     let ws = ws_of(src);
     let mid = skull::user_module_id(&ws).unwrap();
     skull::mir_emit::emit_full(&ws, mid).expect("emit").0.lua
-}
-
-fn run_luajit(test: &str, prog: &str) -> String {
-    use std::process::Command;
-    // Keyed per TEST, not per process: `cargo test` runs both tests
-    // concurrently in one process, so a pid-only name races.
-    let path = std::env::temp_dir().join(format!(
-        "skull_mangle_reload_{}_{}.lua",
-        test,
-        std::process::id()
-    ));
-    std::fs::write(&path, prog).expect("write program");
-    let out = Command::new("luajit")
-        .arg(&path)
-        .output()
-        .expect("spawn luajit");
-    let _ = std::fs::remove_file(&path);
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(
-        out.status.success(),
-        "luajit exited non-zero.\nstdout:\n{stdout}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    stdout.trim().to_string()
 }
 
 // v1: `foo(int)` body returns the version marker 51 (no arithmetic -- the
@@ -107,7 +83,7 @@ fn overload_add_orphans_running_global_sentinel() {
          print('canonical=' .. foo_int(5))\n\
          print('bare_foo_present=' .. tostring(_G.foo ~= nil))\n"
     );
-    let out = run_luajit("overload", &script);
+    let out = run_luajit(&script);
     let fresh = out.lines().find(|l| l.starts_with("fresh=")).unwrap();
     let canon = out.lines().find(|l| l.starts_with("canonical=")).unwrap();
     let bare = out

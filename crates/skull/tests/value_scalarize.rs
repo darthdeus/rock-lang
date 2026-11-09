@@ -10,7 +10,9 @@
 //! (a nested grid update regression). The SROA forwarding pass in
 //! `skull-transform` forwards those reads to the ctor operands so DCE drops the
 //! cdata. rock scalarizes the same value struct away; this pins skull to parity.
-use crate::common::{emit_module, function_body, require_luajit, run_luajit};
+use crate::common::{
+    compile_and_run, emit_module, function_body, require_luajit, run_luajit, run_main,
+};
 
 const NULLABLE_ASSET_READ: &str = r#"
 value Handle { id: int, tags: [int] }
@@ -39,11 +41,7 @@ fn main() {
 
 #[test]
 fn a_coalesced_nullable_asset_keeps_owned_copies() {
-    let lua = emit_module(NULLABLE_ASSET_READ);
-    assert_eq!(
-        run_luajit(&format!("{lua}\nmain()\n"), "nullable_asset_copy"),
-        "-1\n24\n2 2\n2"
-    );
+    assert_eq!(compile_and_run(NULLABLE_ASSET_READ), "-1\n24\n2 2\n2");
 }
 
 #[test]
@@ -85,7 +83,7 @@ fn coalesced_nullable_children_snapshot_before_source_writes() {
     let mut failures = Vec::new();
     for (name, source) in probes {
         let lua = emit_module(source);
-        let output = run_luajit(&format!("{lua}\nprobe()\n"), name);
+        let output = run_luajit(&format!("{lua}\nprobe()\n"));
         if output != "1" {
             failures.push(format!("{name}: expected 1, got {output}"));
         }
@@ -513,7 +511,7 @@ fn non_colliding_underscore_field_still_scalarizes() {
         "the non-colliding leaves must stay distinct:\n{f}"
     );
     assert_eq!(
-        crate::common::run_luajit(&format!("{lua}\nmain()\n"), "underscore_no_collision"),
+        crate::common::run_main(&lua),
         "217",
         "7 + 1*10 + 2*100 -- a wrong leaf order or a duplicate param would shift this"
     );
@@ -557,13 +555,7 @@ fn leaf_form_value_copy_in_a_closure_builds_one_box() {
         1,
         "restoring the saved Mat4 builds exactly one box:\n{body}"
     );
-    assert_eq!(
-        run_luajit(
-            &format!("{lua}\nmain()\n"),
-            "value_scalarize_leaf_form_saved"
-        ),
-        "true 1"
-    );
+    assert_eq!(run_main(&lua), "true 1");
 }
 
 // Enums are immutable, so a copy of a value that holds an enum box can share
@@ -610,13 +602,7 @@ fn a_value_copy_shares_its_enum_children() {
         1,
         "set_count rebuilds a QKind box:\n{body}"
     );
-    assert_eq!(
-        run_luajit(
-            &format!("{lua}\nmain()\n"),
-            "value_scalarize_enum_child_copy"
-        ),
-        "8 8 0 0 gold"
-    );
+    assert_eq!(run_main(&lua), "8 8 0 0 gold");
 }
 
 /// `W` is wide enough (50 leaves) to cross every boundary as one box.
@@ -645,14 +631,7 @@ fn main() {{
 /// before the retained value escapes.
 #[test]
 fn a_copy_keeps_its_sources_nullable_child_snapshot() {
-    let lua = emit_module(&nullable_child_snapshot_source());
-    assert_eq!(
-        run_luajit(
-            &format!("{lua}\nmain()\n"),
-            "value_scalarize_nullable_child_snapshot"
-        ),
-        "1"
-    );
+    assert_eq!(compile_and_run(&nullable_child_snapshot_source()), "1");
 }
 
 const RECURSIVE_VALUE_COPY: &str = r#"

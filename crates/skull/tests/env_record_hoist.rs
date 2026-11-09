@@ -9,7 +9,7 @@
 //!
 //! Contrast `capture_free_hoist.rs`: a lambda that captures NOTHING uses the same
 //! reusable CodeRef without allocating an environment record.
-use crate::common::{emit_module, function_body, mangled_name, run_luajit};
+use crate::common::{emit_module, function_body, mangled_name, run_luajit, run_main};
 
 /// A lambda capturing a single-assignment fn param: the record + `(__rock_env, ..)` body
 /// shape, and no inline closure at the creation site.
@@ -41,7 +41,7 @@ fn main() { let f = mk_cap(5) print("{f()}") }
         !body.contains("function("),
         "a hoisted capturing lambda leaves NO inline closure at the creation site:\n{body}"
     );
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "envrec_simple");
+    let out = run_main(&lua);
     assert_eq!(
         out, "5",
         "the record is callable via __call and reads its capture; got: {out}"
@@ -83,7 +83,7 @@ fn main() {
         lua.contains(".v"),
         "the hoisted bodies read/write the box through `.v`:\n{lua}"
     );
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "envrec_box");
+    let out = run_main(&lua);
     assert_eq!(
         out, "0\n2",
         "two records sharing one box must observe each other's writes; got:\n{out}"
@@ -127,7 +127,7 @@ fn main() {
         outer_builds_inner,
         "the outer hoisted body must build the inner record:\n{lua}"
     );
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "envrec_nested");
+    let out = run_main(&lua);
     assert_eq!(
         out, "9",
         "the nested capture must thread through both envs; got: {out}"
@@ -160,7 +160,7 @@ fn main() { print("{drive()}") }
         lua.contains("{v = "),
         "the mutated lambda param must rebind to a box seeded from the param:\n{lua}"
     );
-    let out = run_luajit(&format!("{lua}\nmain()\n"), "envrec_boxparam");
+    let out = run_main(&lua);
     assert_eq!(
         out, "15",
         "the nested capture must observe the param mutation via the shared box; got: {out}"
@@ -185,7 +185,7 @@ fn main() { let _ = mk_snap(1) }
         for k, v in pairs(a) do if k ~= \"__slot\" and type(v) == \"function\" then extra = true end end\n\
         print(extra)\n"
     );
-    let out = run_luajit(&format!("{lua}{driver}"), "envrec_snapshape");
+    let out = run_luajit(&format!("{lua}{driver}"));
     assert_eq!(
         out, "true\nfalse",
         "two records share one CodeRef and hold no other function-typed field; got:\n{out}"
@@ -213,7 +213,7 @@ fn main() {
         main()\n\
         local ok, res = pcall(function() return __H2.cb() end)\n\
         print(tostring(ok) .. \"\\t\" .. tostring(res):gsub(\":.*\", \"\"))\n";
-    let out = run_luajit(&format!("{lua}{driver}"), "deepcopy_callable");
+    let out = run_luajit(&format!("{lua}{driver}"));
     assert_eq!(
         out, "true\t42",
         "a deepcopy'd env record keeps `__rock_fn_mt` and calls fine; got:\n{out}"
@@ -249,7 +249,7 @@ fn main() {
     let driver = "\n\
         main()\n\
         print(tostring(__O.get()) .. \"\\t\" .. tostring(__P.get()))\n";
-    let out = run_luajit(&format!("{lua}{driver}"), "deepcopy_diverge");
+    let out = run_luajit(&format!("{lua}{driver}"));
     assert_eq!(
         out, "12\t10",
         "the copy's boxed capture is independent of the original's after mutation; got:\n{out}"
