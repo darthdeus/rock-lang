@@ -25,6 +25,7 @@
 // prelude: FunctionCallInfo
 // prelude: HALF_PI
 // prelude: ISampler2D
+// prelude: JsonField
 // prelude: JsonParser
 // prelude: JsonReader
 // prelude: JsonReaderArray
