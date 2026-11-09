@@ -325,3 +325,26 @@ fn malformed_request_params_do_not_answer() {
         "JSON-mismatched request emits nothing: {out:?}"
     );
 }
+
+#[test]
+fn closing_buffer_restores_disk_symbols_for_other_open_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("stick.toml"), "[package]\nname = \"close_buffers\"\n").unwrap();
+    let a = dir.path().join("a.rock");
+    let b = dir.path().join("b.rock");
+    std::fs::write(&a, "struct Foo { x: int }\n").unwrap();
+    let source = "fn use_it() -> Foo { Foo { x: 1 } }\n";
+    std::fs::write(&b, source).unwrap();
+    let mut server = started();
+    roundtrip(&mut server, did_open(&uri_of(&a), "struct Draft { x: int }\n"));
+    roundtrip(&mut server, did_open(&uri_of(&b), source));
+    roundtrip(&mut server, not("textDocument/didClose", json!({"textDocument": {"uri": uri_of(&a)}})));
+    let out = roundtrip(&mut server, did_change(&uri_of(&b), &format!("{source}\n")));
+    let diags = diagnostics_for(&out, &uri_of(&b));
+    assert!(diags.iter().all(|d| d["severity"] != 1), "{diags:?}");
+    let out = roundtrip(&mut server, req(901, "textDocument/definition", json!({
+        "textDocument": {"uri": uri_of(&b)}, "position": {"line": 0, "character": 15}
+    })));
+    let result = response(&out).result.as_ref().unwrap();
+    assert!(result.to_string().contains(&uri_of(&a)), "disk symbol should remain navigable: {result}");
+}
