@@ -81,3 +81,28 @@ corpus selector switches every chart and the table.
   average before and after; treat a point taken under load with suspicion
   and rerun it (`perf/run.py` appends; `report.py` charts the latest row per
   commit).
+
+## The output census
+
+`perf/output_census.py` reads the Lua one compile wrote and reports what the
+bytes consist of: top-level definitions by class (declared functions, generic
+specializations, hoisted lambdas, global initializers, runtime support) and
+the glue around them (runtime prelude and type tables, callee binding lines,
+registration tables, global initialization); how many bodies repeat another
+body byte for byte or after erasing the type suffixes that tell the
+specializations of one generic apart, and which generics specialize most;
+the structural boilerplate inside bodies (indentation, block labels, gotos,
+register kills, declarations) and the share of bytes spent on mangled
+symbols; and the largest bodies.
+
+```sh
+rock compile packages/stone --output /tmp/stone.lua
+perf/output_census.py /tmp/stone.lua
+perf/output_census.py game.lua --engine /tmp/stone.lua --mask   # private symbols print as hashes
+ROCK_SKULL_INLINE_OFF=1 rock compile packages/stone --output /tmp/stone-noinline.lua
+```
+
+`ROCK_SKULL_INLINE_OFF=1` turns the function inliner off for one compile, so
+the output and the time budget with and without splicing can be compared. It
+is a measurement switch only; the emitted program still runs.
+

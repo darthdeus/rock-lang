@@ -70,8 +70,21 @@ impl Drop for InlineOffGuard {
     }
 }
 
+/// `ROCK_SKULL_INLINE_OFF=1` turns the function inliner off for the whole
+/// process: a measurement switch for sizing what splicing adds to the output
+/// and the compile time (`perf/output_census.py`), never a shipped mode. The
+/// per-thread guard above stays the programmatic form the tests use.
+fn inline_disabled_by_env() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| env_disables_inline(std::env::var("ROCK_SKULL_INLINE_OFF").ok().as_deref()))
+}
+
+fn env_disables_inline(value: Option<&str>) -> bool {
+    matches!(value, Some("1") | Some("true"))
+}
+
 fn inline_disabled() -> bool {
-    inline_off_active()
+    inline_off_active() || inline_disabled_by_env()
 }
 
 /// Whether a candidate callee is a single straight-line block or a CFG.
@@ -3607,6 +3620,15 @@ mod tests {
     // transform that clones cells carries it for free -- no side-table to remap.
     // This is what will keep a spliced loop counter per-iteration once the
     // lambda-callee refusal (`classify`, `Inst::Lambda -> None`) is lifted.
+    #[test]
+    fn env_switch_turns_inlining_off_only_when_set_on() {
+        assert!(env_disables_inline(Some("1")));
+        assert!(env_disables_inline(Some("true")));
+        assert!(!env_disables_inline(Some("0")));
+        assert!(!env_disables_inline(Some("")));
+        assert!(!env_disables_inline(None));
+    }
+
     #[test]
     fn loop_binding_tag_survives_cell_clone_through_splice() {
         let mut callee = MirFunc::new(Ustr::from("callee"));
