@@ -1,0 +1,117 @@
+struct JsonDefaultCache { values: [int] = [] }
+struct JsonDeclaredDefaults {
+    required: int,
+    @json_default
+    label: string? = "fresh",
+    @json_default
+    children: [JsonDefaultCache] = [JsonDefaultCache {}],
+    @json_skip
+    cache: JsonDefaultCache = JsonDefaultCache {},
+}
+
+@test
+fn json_record_declared_defaults_are_fresh_and_do_not_weaken_supplied_values() {
+    let codec = JsonRecordCodec { reject_unknown_fields: true }
+    let sample = JsonDeclaredDefaults { required: 0 }
+    let input = json_decode("{{\"required\":7}}").unwrap()
+    let first = json_record_decode<JsonDeclaredDefaults>(codec, input).unwrap()
+    let second = json_record_decode(codec, input, sample).unwrap()
+    first.children[0].values.push(1)
+    first.cache.values.push(2)
+    assert_eq(second.children[0].values.len(), 0)
+    assert_eq(second.cache.values.len(), 0)
+    assert_eq(first.label.unwrap(), "fresh")
+    let explicit_null = json_decode("{{\"required\":7,\"label\":null}}").unwrap()
+    assert(json_record_decode(codec, explicit_null, sample).unwrap().label == null)
+    for bad in ["{{}}", "{{\"required\":7,\"children\":false}}", "{{\"required\":7,\"cache\":{{}}}}"] {
+        assert(json_record_decode(codec, json_decode(bad).unwrap(), sample) == null)
+    }
+    let encoded = json_record_encode(codec, first)
+    assert(json_field(encoded, "cache") == null)
+    assert_eq(json_record_decode(codec, encoded, sample).unwrap().cache.values.len(), 0)
+}
+
+global JSON_DEFAULT_CALLS: int = 0
+fn json_declared_default_call() -> int {
+    JSON_DEFAULT_CALLS += 1
+    return JSON_DEFAULT_CALLS
+}
+struct JsonCalledDefault {
+    @json_default
+    number: int = json_declared_default_call(),
+    @json_skip
+    callback: fn() -> int = () => 42,
+}
+
+@test
+fn json_record_only_evaluates_absent_defaults() {
+    let original = JSON_DEFAULT_CALLS
+    defer { JSON_DEFAULT_CALLS = original }
+    let sample = JsonCalledDefault { number: 0 }
+    let codec = JsonRecordCodec {}
+    let first = json_record_decode(codec, json_decode("{{}}").unwrap(), sample).unwrap()
+    assert_eq(first.number, original + 1)
+    assert_eq(first.callback(), 42)
+    let supplied = json_decode("{{\"number\":9}}").unwrap()
+    let second = json_record_decode(codec, supplied, sample).unwrap()
+    assert_eq(second.number, 9)
+    json_record_encode(codec, second)
+    assert_eq(JSON_DEFAULT_CALLS, original + 1)
+}
+
+value JsonDefaultValue { x: int, y: int }
+struct JsonNativeDefault {
+    @json_default
+    point: JsonDefaultValue = JsonDefaultValue { x: 3, y: 4 },
+}
+
+@test
+fn json_record_declared_defaults_preserve_native_value_representation() {
+    let result = json_record_decode(JsonRecordCodec {}, json_decode("{{}}").unwrap(), JsonNativeDefault {}).unwrap()
+    assert_eq(result.point.x, 3)
+    assert_eq(result.point.y, 4)
+}
+
+fn json_empty_text(text: string) -> bool { return text == "" }
+fn json_zero_number(number: int) -> bool { return number == 0 }
+struct JsonOmittedDefaults {
+    @json_omit_if(json_empty_text)
+    text: string = "",
+    @json_omit_if(json_zero_number)
+    count: int = 0,
+}
+
+@test
+fn json_record_omits_fields_using_typed_predicates() {
+    let codec = JsonRecordCodec { reject_unknown_fields: true }
+    let empty = JsonOmittedDefaults {}
+    assert_eq(json_encode(json_record_encode(codec, empty)), "{{}}")
+    let decoded = json_record_decode(codec, json_decode("{{}}").unwrap(), empty).unwrap()
+    assert_eq(decoded.text, "")
+    assert_eq(decoded.count, 0)
+    let filled = JsonOmittedDefaults { text: "keep", count: 7 }
+    let wire = json_record_encode(codec, filled)
+    assert_eq(json_as_str(json_field(wire, "text").unwrap()).unwrap(), "keep")
+    assert_eq(json_as_int(json_field(wire, "count").unwrap()).unwrap(), 7)
+}
+
+nobox value JsonOptionalTile { x: int, y: int }
+fn json_absent_value<T>(value: T?) -> bool { return value == null }
+struct JsonOptionalTileContext {
+    @json_omit_if(json_absent_value)
+    tile: JsonOptionalTile? = null,
+}
+
+fn json_optional_tile_context(tile: JsonOptionalTile?) -> JsonOptionalTileContext {
+    return JsonOptionalTileContext { tile }
+}
+
+@test
+fn json_record_omission_predicate_accepts_nullable_native_values() {
+    let codec = JsonRecordCodec {}
+    let empty = json_optional_tile_context(null)
+    assert_eq(json_encode(json_record_encode(codec, empty)), "{{}}")
+    let present = JsonOptionalTileContext { tile: JsonOptionalTile { x: 2, y: 3 } }
+    let decoded = json_record_decode<JsonOptionalTileContext>(codec, json_record_encode(codec, present)).unwrap()
+    assert_eq(decoded.tile.unwrap().x, 2)
+}

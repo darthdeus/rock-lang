@@ -1,5 +1,4 @@
-//! "Desugaring" on skull-parser's arena AST. The only remaining transform is
-//! item-level newtype-operator synthesis (`synth_newtype_operators`); there is no
+//! Item-level synthesis for newtype operators and JSON field functions. There is no
 //! per-expression walk. Every expression desugar now lives in bone's `lower.rs`,
 //! consuming the raw AST directly:
 //!   - placeholder lambda (`_.f`, `_ > 0`  ->  `p => p.f`)  [D1]
@@ -25,13 +24,13 @@ use ustr::Ustr;
 pub(crate) type ExprEdges = SmallVec<[Idx<ExprData>; 4]>;
 pub(crate) type BlockEdges = SmallVec<[Idx<BlockData>; 2]>;
 
-/// "Desugar" a parsed module in place. The only remaining transform is
-/// item-level newtype-operator synthesis: every expression desugar (placeholder
+/// Synthesize compiler-owned items. Every expression desugar (placeholder
 /// `_.f` [D1], compound-assign [D2], `^name` anaphoric, `.type_info` [D4]) is now
 /// handled directly in bone's `lower.rs` on the raw AST, so there is no
 /// per-expression walk here. Idempotent on already-cooked input.
 pub fn desugar(ast: &mut Ast) {
     synth_newtype_operators(ast);
+    synth_json_default_factories(ast);
 }
 
 /// Append `@pure @inline fn __op_*(a: NT, b: NT)` operators for every newtype
@@ -176,6 +175,7 @@ fn synth_newtype_operators(ast: &mut Ast) {
                     is_macro: false,
                     is_coroutine: false,
                     is_synthetic: true,
+                    json_field_for: None,
                     macro_items: Vec::new(),
                     receiver_surface: None,
                 }),
@@ -373,5 +373,195 @@ mod tests {
             "xs.map(y => y.health)",
             "(block (call (. xs map) (lambda (None) None (block (return (. y health))))))",
         );
+    }
+}
+
+/// Generate ordinary typed functions so default expressions and predicates use
+/// normal name resolution, call discovery, lowering and allocation rules.
+fn synth_json_default_factories(ast: &mut Ast) {
+    if !ast.items.iter().any(|item| {
+        matches!(&item.kind, ItemKind::Struct(s)
+        if s.fields.iter().any(|field| field.annotations.iter().any(|a|
+            matches!(a.name.name.as_str(), "json_default" | "json_skip" | "json_omit_if"))))
+    }) {
+        return;
+    }
+    let existing: Vec<_> = ast
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::Function(f) => f.json_field_for.clone(),
+            _ => None,
+        })
+        .collect();
+    let items = std::mem::take(&mut ast.items);
+    for item in items {
+        let mut factories = Vec::new();
+        if let ItemKind::Struct(s) = &item.kind {
+            for field in &s.fields {
+                let marked = field.annotations.iter().any(|a| {
+                    matches!(
+                        a.name.name.as_str(),
+                        "json_default" | "json_skip" | "json_omit_if"
+                    )
+                });
+                if !marked || !s.generics.is_empty() {
+                    continue;
+                }
+                let Some(default) = field.default else {
+                    continue;
+                };
+                let predicate = field
+                    .annotations
+                    .iter()
+                    .find(|a| a.name.name.as_str() == "json_omit_if")
+                    .and_then(|a| a.args.first())
+                    .map(|a| a.value);
+                for operation in [JsonFieldOperation::Default, JsonFieldOperation::Omit] {
+                    if operation == JsonFieldOperation::Omit && predicate.is_none() {
+                        continue;
+                    }
+                    if existing.iter().any(|(owner, name, op)| {
+                        owner == &s.name && *name == field.name.name && *op == operation
+                    }) {
+                        continue;
+                    }
+                    factories.push(json_field_factory(
+                        ast, s, field, default, predicate, operation,
+                    ));
+                }
+            }
+        }
+        ast.items.push(item);
+        ast.items.extend(factories);
+    }
+}
+
+fn json_field_factory(
+    ast: &mut Ast,
+    owner: &StructDef,
+    field: &Field,
+    default: Idx<ExprData>,
+    predicate: Option<Idx<ExprData>>,
+    operation: JsonFieldOperation,
+) -> Item {
+    let sp = field.name.span;
+    let local = Ident {
+        span: sp,
+        name: Ustr::from("value"),
+    };
+    let any = ast.ty(sp, TypeExprKind::Any, false);
+    let field_ty = if matches!(ast.types[field.ty].kind, TypeExprKind::F32) {
+        ast.ty(sp, TypeExprKind::Float, false)
+    } else {
+        field.ty
+    };
+    let (params, statements, return_ty, stem) = match operation {
+        JsonFieldOperation::Default => {
+            let bind = ast.stmt(
+                sp,
+                StatementKind::Let(Let {
+                    span: sp,
+                    keyword_span: None,
+                    binding: Binding::Ident(local.clone()),
+                    ty: Some(field_ty),
+                    value: Some(default),
+                }),
+            );
+            let value = ast.expr(sp, ExprKind::Ident(local));
+            let ret = ast.stmt(
+                sp,
+                StatementKind::Return {
+                    keyword_span: None,
+                    value: Some(value),
+                },
+            );
+            (Vec::new(), vec![bind, ret], any, "default")
+        }
+        JsonFieldOperation::Omit => {
+            let param = Param {
+                span: sp,
+                name: local.clone(),
+                ty: any,
+                default: None,
+                is_variadic: false,
+                annotations: Vec::new(),
+            };
+            let value = ast.expr(sp, ExprKind::Ident(local));
+            let cast = ast.expr(
+                sp,
+                ExprKind::Ident(Ident {
+                    span: sp,
+                    name: Ustr::from("cast"),
+                }),
+            );
+            let typed = ast.expr(
+                sp,
+                ExprKind::FunctionCall {
+                    func: cast,
+                    generic_args: vec![field_ty],
+                    args: vec![FunctionCallArg {
+                        name: None,
+                        value,
+                        is_splat: false,
+                        is_spread: false,
+                    }],
+                    syntax: CallSyntax::Normal,
+                },
+            );
+            let call = ast.expr(
+                sp,
+                ExprKind::FunctionCall {
+                    func: predicate.expect("omission factory requires a predicate"),
+                    generic_args: Vec::new(),
+                    args: vec![FunctionCallArg {
+                        name: None,
+                        value: typed,
+                        is_splat: false,
+                        is_spread: false,
+                    }],
+                    syntax: CallSyntax::Normal,
+                },
+            );
+            let ret = ast.stmt(
+                sp,
+                StatementKind::Return {
+                    keyword_span: None,
+                    value: Some(call),
+                },
+            );
+            let boolean = ast.ty(sp, TypeExprKind::Bool, false);
+            (vec![param], vec![ret], boolean, "omit")
+        }
+    };
+    let block = ast.block(sp, None, statements);
+    Item {
+        annotations: Vec::new(),
+        vis: None,
+        span: sp,
+        kind: ItemKind::Function(FunctionDef {
+            span: sp,
+            keyword_span: None,
+            name: Ident {
+                span: sp,
+                name: Ustr::from(&format!(
+                    "__json_{stem}_{}_{}_{}",
+                    owner.name.name.len(),
+                    owner.name.name,
+                    field.name.name
+                )),
+            },
+            generics: Vec::new(),
+            params,
+            params_span: sp,
+            return_ty: Some(return_ty),
+            body: FunctionBody::Rock(block),
+            is_macro: false,
+            is_coroutine: false,
+            is_synthetic: true,
+            json_field_for: Some((owner.name.clone(), field.name.name, operation)),
+            macro_items: Vec::new(),
+            receiver_surface: None,
+        }),
     }
 }

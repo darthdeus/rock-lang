@@ -596,6 +596,8 @@ pub struct Function {
     /// synthesized for a newtype over a primitive. Lints report on user surface
     /// only -- an unreached derived operator has no available action.
     pub is_synthetic: bool,
+    /// A generated default or omission function for one JSON field.
+    pub json_field_for: Option<(Ustr, Ustr, skull_parser::JsonFieldOperation)>,
 }
 
 #[derive(Clone, Debug)]

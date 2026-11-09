@@ -1698,6 +1698,7 @@ impl<'a> Parser<'a> {
                 is_macro,
                 is_coroutine,
                 is_synthetic: false,
+                json_field_for: None,
                 macro_items,
                 receiver_surface,
             }),

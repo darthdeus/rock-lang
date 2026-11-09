@@ -181,7 +181,7 @@ impl Assembly {
         out.push_str(&crate::value_struct_metatypes(ws, &value_emitted));
         out.push_str(&crate::enum_cdata_metatypes(ws));
         out.push_str(&crate::c_struct_inspect_defs(ws, &value_emitted));
-        out.push_str(&crate::type_table_defs(ws, &value_gc)?);
+        out.push_str(&crate::type_table_defs(ws, &value_gc, &rep_arena)?);
         out.push_str(&crate::enum_runtime_defs(ws));
         self.t_scaffold += ts.elapsed();
         Ok(())

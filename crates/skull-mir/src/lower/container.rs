@@ -270,38 +270,6 @@ impl ContainerPlan {
         })
     }
 
-    /// Leaf path -> 1-based row offset for a `[name]` whose element is a
-    /// struct stored as strided rows, or `None` for any other
-    /// storage. Reflection reads rows through this; it is the plan lowering
-    /// stores by, not a restatement of it.
-    pub fn strided_struct_row_offsets(
-        ws: &bone_core::workspace::Workspace,
-        target: bone_core::hir::FnBackend,
-        name: ustr::Ustr,
-    ) -> Option<Vec<(ustr::Ustr, usize)>> {
-        use crate::monoty::{MonoCtor, MonoTy};
-        if !ws.struct_by_name.contains_key(&name) {
-            return None;
-        }
-        let ty = MonoTy::App {
-            ctor: MonoCtor::Array,
-            params: vec![MonoTy::App {
-                ctor: MonoCtor::Nominal(name),
-                params: Vec::new(),
-            }],
-        };
-        let arena = RepArena::default();
-        let plan = Self::for_type(ws, target, &arena, ContainerFamily::Vec, &ty).ok()?;
-        let shape = arena.value_shape(plan.strided_elem(&arena)?.representation())?;
-        Some(
-            crate::lower::value_leaf_paths(&shape)
-                .into_iter()
-                .enumerate()
-                .map(|(i, path)| (path, i + 1))
-                .collect(),
-        )
-    }
-
     pub fn family(&self) -> ContainerFamily {
         self.family
     }

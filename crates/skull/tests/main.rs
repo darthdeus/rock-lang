@@ -188,3 +188,5 @@ mod leaf_table_projection;
 
 mod lua_syntax_level_budget;
 mod nullable_scalar_projection;
+
+mod json_default_factories;

@@ -634,6 +634,12 @@ impl FunctionBody {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum JsonFieldOperation {
+    Default,
+    Omit,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FunctionDef {
     pub span: Span,
@@ -651,6 +657,8 @@ pub struct FunctionDef {
     /// b: NT)` operators derived for a newtype over a primitive (rock parity).
     /// Filtered out of the cook s-expr (the oracle compares user surface only).
     pub is_synthetic: bool,
+    /// A generated default or omission function for one JSON field.
+    pub json_field_for: Option<(Ident, Ustr, JsonFieldOperation)>,
     /// Item declarations in a macro body (`macro m() { fn f() {..} }`). Empty
     /// for non-macros and expression-only macros. Spliced at module scope when
     /// the macro is invoked as a top-level statement.

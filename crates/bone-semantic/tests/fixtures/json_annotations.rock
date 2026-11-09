@@ -26,3 +26,15 @@ struct Row { @json_name("same") one: int, @json_name("same") two: int }
 
 //- collision_with_unrenamed_field @fail=duplicate JSON field name
 struct Row { @json_name("two") one: int, two: int }
+
+//- default_requires_expression @fail=require a declared default
+struct Row { @json_default value: int }
+
+//- skip_requires_expression @fail=require a declared default
+struct Row { @json_skip value: int }
+
+//- default_field_position @fail=not allowed
+@json_default fn example() {}
+
+//- skip_no_arguments @fail
+struct Row { @json_skip(1) value: int = 0 }
