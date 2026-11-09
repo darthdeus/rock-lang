@@ -334,9 +334,8 @@ pub fn global_slots(lua: &str, identity: &str) -> Vec<u32> {
 /// Handles both emitted callee shapes: the global-lookup `function <name>(..)`
 /// and the callee-bound factory `__rock_mk_<name> = function(..) return
 /// function(..)`, whose body ends at the column-0 `end end` that closes the
-/// inner function and the factory together. The body TEXT is identical in both
-/// (the factory's parameters are named like the globals they replace), so a
-/// test asserting body shape reads the same either way.
+/// inner function and the factory together. A bound body's short parameters
+/// replace captured global names at direct call sites.
 ///
 /// The NAME is resolved before the text is searched, which is what keeps the
 /// bound shape honest. A hoisted `<name>__lambda0` stays a plain global while
@@ -366,6 +365,70 @@ pub fn function_body<'a>(lua: &'a str, name: &str) -> &'a str {
         .map(|e| e + terminator.len())
         .unwrap_or(rest.len());
     &rest[..end]
+}
+
+/// The name a call to `global` uses inside `caller`, accounting for a bound
+/// callee factory parameter. The corresponding binding line supplies the
+/// globals in the same order as the factory header supplies its parameters.
+/// Unbound callees keep their global spelling.
+pub fn bound_callee_name(lua: &str, caller: &str, global: &str) -> String {
+    bound_callee_names(lua, caller)
+        .into_iter()
+        .find(|(_, target)| target == global)
+        .map(|(parameter, _)| parameter)
+        .unwrap_or_else(|| global.to_string())
+}
+
+/// Factory parameters and their binding arguments, independent of whether a
+/// corresponding global definition exists.
+pub fn bound_callee_names(lua: &str, caller: &str) -> Vec<(String, String)> {
+    let caller = resolve_definition(lua, caller);
+    let factory_head = format!(
+        "{}{caller} = function(",
+        skull_codegen_lua::CALLEE_FACTORY_PREFIX
+    );
+    let Some(header) = lua.lines().find(|line| line.starts_with(&factory_head)) else {
+        return Vec::new();
+    };
+    let params = header
+        .strip_prefix(&factory_head)
+        .and_then(|rest| rest.split_once(") return function("))
+        .map(|(params, _)| params)
+        .expect("callee factory header has its inner function");
+
+    let binding_head = format!(
+        "{caller} = {}{caller}(",
+        skull_codegen_lua::CALLEE_FACTORY_PREFIX
+    );
+    let binding = lua
+        .lines()
+        .find(|line| line.starts_with(&binding_head))
+        .unwrap_or_else(|| panic!("callee factory `{caller}` has no binding line"));
+    let globals = binding
+        .strip_prefix(&binding_head)
+        .and_then(|rest| rest.strip_suffix(')'))
+        .expect("callee binding line has a closed argument list");
+
+    let globals: Vec<&str> = if globals.is_empty() {
+        Vec::new()
+    } else {
+        globals.split(", ").collect()
+    };
+    let params: Vec<&str> = if params.is_empty() {
+        Vec::new()
+    } else {
+        params.split(", ").collect()
+    };
+    assert_eq!(
+        params.len(),
+        globals.len(),
+        "callee factory `{caller}` has mismatched parameters and bindings"
+    );
+    params
+        .into_iter()
+        .zip(globals)
+        .map(|(parameter, global)| (parameter.to_string(), global.to_string()))
+        .collect()
 }
 
 /// The emitted definition `name` names: an exact name wins, then the first

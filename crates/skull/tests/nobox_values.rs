@@ -1077,9 +1077,10 @@ fn main() {
 fn a_wide_nobox_tail_forward_returns_the_scalar_wire_directly() {
     let lua = emit_module(WIDE_NOBOX_TAIL_FORWARD);
     let body = function_body(&lua, "forward_wide");
+    let callee = crate::common::bound_callee_name(&lua, "forward_wide", "make_wide_int");
     assert!(
         body.lines()
-            .any(|line| line.contains("do return ") && line.contains("make_wide")),
+            .any(|line| line.contains(&format!("do return {callee}("))),
         "wide scalar return was captured and copied instead of tail-forwarded:\n{body}"
     );
     let indirect = function_body(&lua, "forward_wide_indirect");
@@ -1097,17 +1098,26 @@ fn a_wide_nobox_tail_forward_returns_the_scalar_wire_directly() {
         "a result observed before return was incorrectly tail-forwarded:\n{inspected}"
     );
     let call_arg = function_body(&lua, "forward_into_call");
+    let consumer =
+        crate::common::bound_callee_name(&lua, "forward_into_call", "consume_wide_int_Wide");
+    let producer = crate::common::bound_callee_name(&lua, "forward_into_call", "make_wide_int");
     assert!(
         call_arg
             .lines()
-            .any(|line| line.contains("consume_wide") && line.contains("make_wide")),
+            .any(|line| line.contains(&format!("{consumer}("))
+                && line.contains(&format!("{producer}("))),
         "an unobserved scalar wire was captured only to become trailing call arguments:\n{call_arg}"
     );
     let indirect_call_arg = function_body(&lua, "forward_indirect_into_call");
+    let consumer = crate::common::bound_callee_name(
+        &lua,
+        "forward_indirect_into_call",
+        "consume_wide_int_Wide",
+    );
     assert!(
-        indirect_call_arg
-            .lines()
-            .any(|line| { line.contains("consume_wide") && line.matches('(').count() >= 2 }),
+        indirect_call_arg.lines().any(|line| {
+            line.contains(&format!("{consumer}(")) && line.matches('(').count() >= 2
+        }),
         "an indirect scalar wire was captured only to become trailing call arguments:\n{indirect_call_arg}"
     );
     let inspected_call_arg = function_body(&lua, "inspect_then_consume");

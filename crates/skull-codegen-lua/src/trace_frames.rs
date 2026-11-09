@@ -301,6 +301,15 @@ mod tests {
     }
 
     #[test]
+    fn resolves_private_factory_parameters_through_the_binding_line() {
+        let report = analyze(
+            "function leaf(x) return x + 1 end\n__rock_mk_run = function(b0) return function(x) local y = b0(x); return y + x end end\nrun = __rock_mk_run(leaf)\n",
+        );
+        assert!(report.contains("run -> leaf"), "{report}");
+        assert!(!report.contains("-> b0"), "{report}");
+    }
+
+    #[test]
     fn does_not_resolve_global_calls_to_scoped_local_functions() {
         let report = analyze(
             "do\nlocal function leaf(x) return x + 1 end\nend\nfunction run(x) local y = leaf(x); return y + x end\n",

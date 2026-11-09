@@ -120,7 +120,11 @@ impl Emitter<'_> {
                     self.write_opnd(out, *value);
                     out.push('\n');
                 } else {
-                    let _ = write!(out, "  {} = ", skull_mir::mangle::symbol_of_key(*name));
+                    let _ = write!(
+                        out,
+                        "  {} = ",
+                        self.bound_name(skull_mir::mangle::symbol_of_key(*name))
+                    );
                     self.write_opnd(out, *value);
                     out.push('\n');
                 }

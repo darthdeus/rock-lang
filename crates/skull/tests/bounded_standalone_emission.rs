@@ -17,7 +17,8 @@ use skull_mir::monoty::{MonoCtor, MonoTy};
 use ustr::Ustr;
 
 use crate::common::{
-    InlineOffGuard, definitions_matching, fn_name, function_body, scalar_ctx, ws_with_stdlib,
+    InlineOffGuard, bound_callee_name, definitions_matching, fn_name, function_body, scalar_ctx,
+    ws_with_stdlib,
 };
 
 /// A user fn taking an `Iterator`-bounded generic, called at one concrete
@@ -109,6 +110,14 @@ fn specialization<'a>(lua: &'a str, prefix: &str, what: &str) -> &'a str {
     found[0]
 }
 
+fn body_calls(body: &str, callee: &str) -> bool {
+    body.match_indices(callee).any(|(at, _)| {
+        let before = body[..at].chars().next_back();
+        let after = body[at + callee.len()..].chars().next();
+        after == Some('(') && before.is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_')
+    })
+}
+
 /// Three separate things, because each alone is satisfied by a broken build.
 ///
 /// That emission SUCCEEDS says nothing on its own -- a build that dropped
@@ -123,19 +132,23 @@ fn a_bounded_body_emits_standalone_with_inlining_disabled() {
     let lua = emit(BOUNDED).expect("a bounded body must emit standalone under its demand");
     let symbol = specialization(&lua, "total_", "specialized definition of `total`");
     let body = body_of(&lua, symbol);
+    let resolved_next = definitions_matching(&lua, "next_")
+        .into_iter()
+        .any(|target| {
+            let callee = bound_callee_name(&lua, symbol, target);
+            body.iter().any(|line| body_calls(line, &callee))
+        });
     assert!(
-        body.iter().any(|l| l.contains("next_")),
+        resolved_next,
         "the standalone `total` calls no concrete `next`, so its placeholder bound-call \
          was not resolved: {body:?}"
     );
-    // A call site, not a header. Under the bound shape the caller names the
-    // symbol as a factory PARAMETER too, which is a binding, not a call.
-    let called = lua.lines().any(|l| {
-        !l.starts_with("function ")
-            && !l.starts_with(skull_codegen_lua::CALLEE_FACTORY_PREFIX)
-            && l.contains(&format!("{symbol}("))
-    });
-    assert!(called, "`{symbol}` is emitted but nothing calls it");
+    let main = function_body(&lua, "main");
+    let caller_name = bound_callee_name(&lua, "main", symbol);
+    assert!(
+        body_calls(main, &caller_name),
+        "`{symbol}` is emitted but the actual `main` body does not call it:\n{main}"
+    );
 }
 
 /// A resolved witness that is itself bounded resolves too, one level down.
@@ -156,8 +169,14 @@ fn a_witness_that_is_itself_bounded_resolves_from_the_leafs_sub_tree() {
     let lua = emit(NESTED).expect("a bounded witness of a bounded body must emit standalone");
     let symbol = specialization(&lua, "next_MapIter_", "`MapIter.next` specialization");
     let body = body_of(&lua, symbol);
+    let resolved_next = definitions_matching(&lua, "next_VecIter")
+        .into_iter()
+        .any(|target| {
+            let callee = bound_callee_name(&lua, symbol, target);
+            body.iter().any(|line| body_calls(line, &callee))
+        });
     assert!(
-        body.iter().any(|l| l.contains("next_VecIter")),
+        resolved_next,
         "`MapIter.next` emitted without resolving its own placeholder to the inner \
          `VecIter.next`: {body:?}"
     );

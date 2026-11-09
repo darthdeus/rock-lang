@@ -23,15 +23,33 @@ local function long_bracket_open(source, start)
   return at + 1, "]" .. equals .. "]"
 end
 
+local function identifier_list(text)
+  local names = {}
+  for name in text:gmatch("[^,%s]+") do
+    if not is_identifier(name) then return nil end
+    names[#names + 1] = name
+  end
+  return names
+end
+
 local function record_header(headers, source, first, last, line_no)
   local line = source:sub(first, last)
+  local target, factory, arguments = line:match(
+    "^[ \t]*([A-Za-z_][A-Za-z0-9_]*)%s*=%s*(__rock_mk_[A-Za-z0-9_]+)%s*%(([^)]*)%)%s*$"
+  )
+  if factory and factory == "__rock_mk_" .. target then
+    headers.bindings[factory] = identifier_list(arguments)
+  end
   local outer = line:match(
     "^[ \t]*(__rock_mk_[A-Za-z_][A-Za-z0-9_]*)[ \t]*=[ \t]*function[ \t]*%("
   )
   if outer then
     local inner = line:match("return%s+function%s*%(")
       and outer:match("^__rock_mk_(.+)$") or nil
-    headers[line_no] = { outer = outer, inner = inner }
+    headers[line_no] = {
+      outer = outer, inner = inner,
+      parameters = identifier_list(line:match("function%s*%(([^)]*)%)") or ""),
+    }
   else
     local name = line:match("^[ \t]*function[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*%(")
     local scoped = false
@@ -47,7 +65,7 @@ end
 
 local function strip_directives(source)
   local out = {}
-  local headers = {}
+  local headers = { bindings = {} }
   local at = 1
   local line_start = 1
   local line_no = 1
@@ -83,7 +101,8 @@ local function strip_directives(source)
             copy_start = at
           end
         end
-      elseif first_byte == 102 or first_byte == 108 or first_byte == 95 then
+      elseif first_byte and ((first_byte >= 65 and first_byte <= 90)
+          or (first_byte >= 97 and first_byte <= 122) or first_byte == 95) then
         local newline = source:find("\n", at, true)
         local line_end = newline and newline - 1 or #source
         record_header(headers, source, at, line_end, line_no)
@@ -338,7 +357,7 @@ local function scan_calls(entry)
           and entry.trusted_factory
           and type(util.funcuvname) == "function" then
         local value = util.funcuvname(entry.proto, ins.d)
-        if is_identifier(value) then known[ins.a] = value end
+        if is_identifier(value) then known[ins.a] = entry.aliases[value] or value end
       elseif writes_a and ins.op == "MOV" and copy then
         known[ins.a] = copy
       end
@@ -360,7 +379,17 @@ local function walk(proto, parent)
   local info, children = child_proto(proto)
   local id = #prototypes
   local name, factory_inner, trusted_factory = resolve_name(id, info, parent, headers)
+  local aliases = {}
+  if trusted_factory and parent then
+    local header = headers[tonumber(parent.info.linedefined) or 0]
+    local arguments = headers.bindings[parent.name]
+    local parameters = header and header.parameters
+    if parameters and arguments and #parameters == #arguments then
+      for i, parameter in ipairs(parameters) do aliases[parameter] = arguments[i] end
+    end
+  end
   local entry = {
+    aliases = aliases,
     id = id,
     proto = proto,
     info = info,

@@ -3,7 +3,7 @@
 
 use skull::mir_emit::{emit_full, emit_overlay};
 
-use crate::common::{body_id, emit_full_of, ws_with_stdlib};
+use crate::common::{body_id, bound_callee_name, emit_full_of, function_body, ws_with_stdlib};
 
 /// A program whose call graph has a chain (`top` -> `mid` -> `leaf`), a
 /// mutually recursive pair, and a leaf with no callees at all.
@@ -98,17 +98,21 @@ fn binding_lines_are_ordered_callees_before_callers() {
 #[test]
 fn a_mutually_recursive_pair_stays_a_global_lookup() {
     let lua = emit(SRC);
-    let header = lua
-        .lines()
-        .find(|line| line.starts_with("__rock_mk_is_odd_int = function("))
-        .expect("is_odd factory");
-    assert!(
-        header.contains("leaf_int"),
-        "expected the off-component callee bound:\n{header}"
+    let caller = "is_odd";
+    let body = function_body(&lua, caller);
+    let leaf = bound_callee_name(&lua, caller, "leaf_int");
+    assert_ne!(
+        leaf, "leaf_int",
+        "the off-component callee should be captured as a factory parameter"
     );
     assert!(
-        !header.contains("is_even"),
-        "expected the mutually recursive callee left global:\n{header}"
+        body.contains(&format!("{leaf}(")),
+        "expected the off-component callee call in the body:\n{body}"
+    );
+    let recursive = bound_callee_name(&lua, caller, "is_even_int");
+    assert!(
+        recursive == "is_even_int" && body.contains("is_even_int("),
+        "expected the mutually recursive call left as a global lookup:\n{body}"
     );
 }
 

@@ -358,20 +358,17 @@ fn emit_named_framed_with_statics_impl(
     let estimated_body_bytes = func.insts.len() * 24;
     let mut out = String::with_capacity(hoist_defs.len() + name.len() + 64 + estimated_body_bytes);
     out.push_str(&hoist_defs);
-    // With a binding plan the definition becomes a factory whose
-    // parameters are named exactly like the callees they replace, so the body
-    // text below is byte-identical to an unbound body and each call
-    // reads an immutable upvalue. `assemble` emits the matching
-    // `<name> = <factory>(<captures>)` line once every capture is final.
+    // The factory captures final callee globals under private parameter names.
+    // The same plan names its parameters and every bound use in the body.
     let header_offset = match bound {
         Some(plan) => {
             debug_assert_eq!(plan.name, name);
             let _ = write!(out, "{} = function(", plan.factory);
-            for (i, capture) in plan.captures.iter().enumerate() {
+            for (i, capture) in plan.parameters.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                out.push_str(capture);
+                out.push_str(capture.as_str());
             }
             out.push_str(") return ");
             let offset = out.len();
@@ -407,6 +404,7 @@ fn emit_named_framed_with_statics_impl(
         &call_arg_forwards,
         &suppressed,
         line_marks.as_ref(),
+        bound,
         &mut out,
     );
     if bound.is_some() {

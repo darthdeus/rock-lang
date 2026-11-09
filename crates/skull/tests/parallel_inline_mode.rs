@@ -35,13 +35,16 @@ fn concurrent_inline_off_and_normal_compiles_keep_their_modes() {
     let off = off.join().expect("inline-off compile thread panicked");
     let normal = normal.join().expect("normal compile thread panicked");
     assert_ne!(off, normal, "the two compile modes produced identical Lua");
-    let call = "r0 = twice_int((3))";
+    let has_retained_call = |lua: &str| {
+        let callee = crate::common::bound_callee_name(lua, "main", "twice_int");
+        crate::common::function_body(lua, "main").contains(&format!("r0 = {callee}((3))"))
+    };
     assert!(
-        off.contains(call),
+        has_retained_call(&off),
         "inline-off compilation lost the retained call"
     );
     assert!(
-        !normal.contains(call),
+        !has_retained_call(&normal),
         "normal compilation retained the inlineable call"
     );
 }

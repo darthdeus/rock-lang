@@ -185,7 +185,12 @@ fn arena_bare_loop_used_entity_scalarizes_into_call() {
         "used entity passed to a scalar-ABI callee must scalarize (no table):\n{hot}"
     );
     assert!(
-        hot.contains("get_Entity"),
+        crate::common::definitions_of(&lua, "get_Entity")
+            .iter()
+            .any(|global| {
+                let callee = crate::common::bound_callee_name(&lua, "hot", global);
+                hot.contains(&format!(" = {callee}("))
+            }),
         "entity should thread into the scalarized get() call:\n{hot}"
     );
 }

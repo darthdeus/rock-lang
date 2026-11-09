@@ -115,9 +115,10 @@ fn three_live_fifty_leaf_values_load_and_run() {
 fn a_wide_multi_return_lands_in_the_locals_that_hold_the_value() {
     let lua = try_emit_module(&fixture(50, 2)).expect("emits");
     let run = function_body(&lua, "run");
+    let callee = crate::common::bound_callee_name(&lua, "run", "mk_float");
     let receive = run
         .lines()
-        .position(|line| line.contains("= mk_"))
+        .position(|line| line.contains(&format!("= {callee}(")))
         .unwrap_or_else(|| panic!("no receive of mk in:\n{run}"));
     let next = run.lines().nth(receive + 1).unwrap_or("");
     assert!(

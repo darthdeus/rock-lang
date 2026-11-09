@@ -29,6 +29,7 @@ pub(crate) fn render_scope(
     call_arg_forwards: &[Option<CallArgForward>],
     suppressed: &[bool],
     line_marks: Option<&RefCell<Vec<LineMark>>>,
+    bound: Option<&CalleeBindingPlan>,
     out: &mut String,
 ) {
     // RPO drives both block layout (preheader-before-header, for the relooper)
@@ -293,6 +294,7 @@ pub(crate) fn render_scope(
         suppressed,
         kills,
         line_marks,
+        bound,
     };
     let body_start = out.len();
     for &bb in rpo {

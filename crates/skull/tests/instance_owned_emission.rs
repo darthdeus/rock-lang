@@ -10,8 +10,8 @@
 //! spellings are read out of the caller's body via `function_body`.
 
 use crate::common::{
-    self, definition_names, definition_symbols, definitions_of, emit_module, function_body,
-    ws_with_stdlib,
+    self, bound_callee_name, definition_names, definition_symbols, definitions_of, emit_module,
+    function_body, ws_with_stdlib,
 };
 
 fn body_calls(body: &str, symbol: &str) -> bool {
@@ -29,7 +29,10 @@ fn callees_named_in(lua: &str, caller: &str, callee: &str) -> Vec<String> {
     let body = function_body(lua, caller);
     let mut out: Vec<String> = definitions_of(lua, callee)
         .into_iter()
-        .filter(|s| body_calls(body, s))
+        .filter(|global| {
+            let local = bound_callee_name(lua, caller, global);
+            body_calls(body, &local)
+        })
         .collect();
     out.sort();
     out.dedup();
@@ -173,17 +176,16 @@ fn main() {
     );
 }
 
-/// The `iter` symbol the body of `caller` calls, whatever it is spelled.
-///
-/// Deliberately NOT filtered to known definitions the way `callees_named_in`
-/// is: the property here is that the spelling names something that EXISTS, so
-/// filtering by the definition set first would answer the question by
-/// construction and pass on a call to a nil global.
+/// The `iter` target actually called, without filtering against definitions:
+/// the caller may be broken precisely because that global is missing.
 fn iter_called_in(lua: &str, caller: &str) -> String {
     let body = function_body(lua, caller);
-    // A CALL, not a binding. Under the bound callee shape the definition header
-    // names every callee as a factory PARAMETER, so the first `iter_` in the
-    // text is the upvalue that receives the symbol rather than a call to it.
+    if let Some((_, global)) = common::bound_callee_names(lua, caller)
+        .into_iter()
+        .find(|(local, global)| global.starts_with("iter_") && body_calls(body, local))
+    {
+        return global;
+    }
     body.match_indices("iter_")
         .find_map(|(at, _)| {
             let rest = &body[at..];
@@ -193,6 +195,14 @@ fn iter_called_in(lua: &str, caller: &str) -> String {
                 .then(|| name.to_string())
         })
         .unwrap_or_else(|| panic!("no `iter` call in `{caller}`:\n{body}"))
+}
+
+#[test]
+fn called_iter_is_detected_even_when_its_definition_is_missing() {
+    let lua = "\n__rock_mk_main = function(b0) return function()\n  b0()\nend end\nmain = __rock_mk_main(iter_missing)\n";
+    let called = iter_called_in(lua, "main");
+    assert_eq!(called, "iter_missing");
+    assert!(!definition_symbols(lua).contains(&called));
 }
 
 /// An `iter` witness names an INSTANCE in both call forms it has.

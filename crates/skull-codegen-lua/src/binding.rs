@@ -13,9 +13,10 @@ pub struct CalleeBindingPlan {
     /// Its factory's name, minted through [`CodegenCtx::mint_synthetic`].
     pub factory: String,
     /// The callee names to capture, sorted, deduplicated, and truncated to
-    /// [`MAX_BOUND_CALLEES`]. Each is BOTH the factory parameter name and the
-    /// global read at bind time, so the body text never changes.
+    /// [`MAX_BOUND_CALLEES`]. These are the globals read at bind time.
     pub captures: Vec<String>,
+    /// Factory-local names in capture order. Global binding names stay stable.
+    pub parameters: Vec<ustr::Ustr>,
     /// Ascending emission order for the binding pass: the caller's strongly
     /// connected component number, which is strictly greater than every
     /// component it captures from (see [`call_sccs`]).
@@ -26,6 +27,13 @@ pub struct CalleeBindingPlan {
 }
 
 impl CalleeBindingPlan {
+    pub(crate) fn parameter_for(&self, name: &str) -> Option<ustr::Ustr> {
+        self.captures
+            .binary_search_by(|capture| capture.as_str().cmp(name))
+            .ok()
+            .map(|i| self.parameters[i])
+    }
+
     /// The second-pass line: `F = __rock_mk_F(a, b)`.
     pub fn bind_line(&self) -> String {
         let mut out = String::with_capacity(self.name.len() + self.factory.len() + 8);
@@ -88,6 +96,7 @@ pub fn callee_binding_plan(
     let rank = ctx.scc_of(self_ref);
     let mut captures: Vec<String> = Vec::new();
     let mut touches_state = false;
+    let mut has_inline_body = false;
     // Cleanup unlinks instructions without freeing arena slots. Match the
     // emitted body's CFG so discarded calls and separate scopes use no slots.
     let blocks = reverse_postorder(func, func.entry());
@@ -112,6 +121,7 @@ pub fn callee_binding_plan(
             Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
             _ => continue,
         };
+        has_inline_body |= func_of(ws, callee).inline_body.is_some();
         // Ranks remain fixed through body edits. New backedges must stay
         // global so the retained factory order remains acyclic.
         match (rank, ctx.scc_of(callee)) {
@@ -150,10 +160,34 @@ pub fn callee_binding_plan(
     let limit = MAX_BOUND_CALLEES - reserved;
     let capped = captures.len() > limit;
     captures.truncate(limit);
+    let mut next_alias = 0;
+    let parameters = captures
+        .iter()
+        .map(|capture| {
+            // Raw Lua may refer to any lexical name. Runtime helper calls are
+            // printed directly, so their captures retain the original spelling.
+            if has_inline_body
+                || matches!(
+                    capture.as_str(),
+                    "__rock_checked_u32" | "__rock_u32_shift_count"
+                )
+            {
+                return ustr::Ustr::from(capture);
+            }
+            loop {
+                let alias = format!("b{next_alias}");
+                next_alias += 1;
+                if !ctx.reserved.contains_key(&alias) {
+                    break ustr::Ustr::from(&alias);
+                }
+            }
+        })
+        .collect();
     Some(CalleeBindingPlan {
         factory: ctx.mint_synthetic(format!("{CALLEE_FACTORY_PREFIX}{name}")),
         name: name.to_string(),
         captures,
+        parameters,
         // Runtime validators have no body dependencies, including for a leaf
         // function absent from the call-edge inventory.
         rank: rank.unwrap_or(0),

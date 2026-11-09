@@ -1913,11 +1913,11 @@ fn a_multi_return_forward_delivers_its_values() {
 
 // --- Callee binding as immutable upvalues ------------------
 //
-// Callee binding defines a function as a factory whose parameters
-// are named exactly like the callees they replace, so the body text is
-// unchanged and every call reads an immutable upvalue (2 constant-pool slots on
-// GC64) instead of a global (5, plus a guard). The assembler emits the
-// matching `<name> = __rock_mk_<name>(<callees>)` line after every definition.
+// Callee binding defines a function as a factory whose parameters hold its
+// callees, so every bound call reads an immutable upvalue (2 constant-pool
+// slots on GC64) instead of a global (5, plus a guard). The assembler emits
+// the matching `<name> = __rock_mk_<name>(<callees>)` line after every
+// definition.
 
 /// [`emit_clean`] with its callee binding plan, the call-graph components
 /// populated from this harness's own instance graph exactly as
@@ -1977,7 +1977,7 @@ fn callee_binding_ignores_calls_removed_by_cleanup() {
         );
     });
     assert!(
-        lua.starts_with("__rock_mk_caller_int = function(live_int) return function("),
+        lua.starts_with("__rock_mk_caller_int = function(b0) return function("),
         "only the live callee should consume a binding slot:\n{lua}"
     );
     assert!(
@@ -2050,8 +2050,8 @@ global METADATA: Map<string, SlotMetadata> = map_new()
 }
 
 /// The bound shape: a factory named for the function, one parameter per
-/// distinct callee spelled exactly like the global it replaces, the body
-/// verbatim, and the binding line that calls the factory with those globals.
+/// distinct callee, body calls through those parameters, and the binding line
+/// that calls the factory with the callee globals.
 #[test]
 fn callee_binding_upvalue_wraps_the_body_in_a_factory() {
     let src =
@@ -2059,22 +2059,102 @@ fn callee_binding_upvalue_wraps_the_body_in_a_factory() {
     let unbound = emit_clean(src, "caller");
     let bound = emit_clean_bound(src, "caller");
     assert!(
-        bound.starts_with("__rock_mk_caller_int = function(leaf_int) return function("),
+        bound.starts_with("__rock_mk_caller_int = function("),
         "expected the factory header:\n{bound}"
+    );
+    let header = bound.lines().next().expect("factory header");
+    let param = header
+        .split_once("= function(")
+        .expect("factory header")
+        .1
+        .split_once(") return function(")
+        .expect("factory header")
+        .0;
+    assert!(
+        !param.is_empty() && !param.contains(", "),
+        "expected one captured callee parameter:\n{header}"
     );
     assert!(
         bound.contains("caller_int = __rock_mk_caller_int(leaf_int)\n"),
         "expected the binding line:\n{bound}"
     );
-    // The body is the ONLY copy and is byte-identical to the unbound one: the
-    // factory parameter is named like the global, so no call site is rewritten.
+    // Only direct calls are rewritten to read the factory parameter. The
+    // binding line still reads the global callee at initialization time.
     let body = unbound
         .strip_prefix("function caller_int")
         .expect("unbound definition")
         .trim_end_matches('\n');
+    let rewritten_body = body.replace("leaf_int", param);
     assert!(
-        bound.contains(&format!("return function{body} end\n")),
-        "expected the unchanged body inside the factory:\n{bound}\n--- body ---\n{body}"
+        bound.contains(&format!("return function{rewritten_body} end\n")),
+        "expected the bound body with direct calls rewritten:\n{bound}\n--- body ---\n{rewritten_body}"
+    );
+}
+
+#[test]
+fn callee_binding_uses_short_private_parameters() {
+    let src =
+        "fn leaf(a: int) -> int { a + 1 }\nfn caller(a: int) -> int { leaf(a) + leaf(a + 1) }";
+    let bound = emit_clean_bound(src, "caller");
+    assert!(
+        bound.starts_with("__rock_mk_caller_int = function(b0) return function("),
+        "expected a short private factory parameter:\n{bound}"
+    );
+    assert!(
+        bound.matches("b0(").count() == 2,
+        "expected calls to use the private parameter:\n{bound}"
+    );
+    assert!(
+        bound.contains("caller_int = __rock_mk_caller_int(leaf_int)\n"),
+        "expected the binding line to keep the global callee name:\n{bound}"
+    );
+}
+
+#[test]
+fn callee_binding_short_names_skip_public_globals() {
+    let src = "fn leaf(a: int) -> int { a + 1 }\n\
+               @nomangle fn b0(a: int) -> int { a + 2 }\n\
+               fn caller(a: int) -> int { leaf(a) + b0(a) }";
+    let bound = emit_clean_bound(src, "caller");
+    assert!(
+        bound.starts_with("__rock_mk_caller_int = function(b1) return function("),
+        "the short private parameter must skip the public b0 global:\n{bound}"
+    );
+    assert!(
+        bound.contains("b1(c0)") && bound.contains("b0(c0)"),
+        "expected the private leaf alias and public call:\n{bound}"
+    );
+    assert!(
+        bound.contains("caller_int = __rock_mk_caller_int(leaf_int)\n"),
+        "expected the binding line to read the leaf global:\n{bound}"
+    );
+    assert_eq!(run(src, "caller(3)"), "9");
+}
+
+#[test]
+fn callee_binding_keeps_full_names_with_live_inline_lua_calls() {
+    let src = "fn leaf(a: int) -> int { a + 1 }\n\
+               @inline inline(lua) fn raw(a: int) -> int = \"return b0(a)\"\n\
+               fn caller(a: int) -> int { leaf(a) + raw(a) }";
+    let bound = emit_clean_bound(src, "caller");
+    assert!(
+        bound.starts_with("__rock_mk_caller_int = function(leaf_int) return function("),
+        "an inline(lua) call must retain the full capture parameter name:\n{bound}"
+    );
+    assert!(
+        bound.contains("leaf_int(c0)") && bound.contains("r1 = b0(a)"),
+        "expected the existing capture name and live inline Lua body:\n{bound}"
+    );
+    assert!(
+        bound.contains("caller_int = __rock_mk_caller_int(leaf_int)\n"),
+        "expected the factory to read the global leaf function:\n{bound}"
+    );
+    assert_eq!(
+        run(
+            src,
+            "(function() b0 = function(a) return a + 10 end; return caller(3) end)()"
+        ),
+        "17"
     );
 }
 
@@ -2087,7 +2167,7 @@ fn callee_binding_excludes_same_component_callees() {
                fn is_odd(n: int) -> bool { if n == 0 { return leaf(n) == 1 }\n  is_even(n - 1) }";
     let bound = emit_clean_bound(src, "is_odd");
     assert!(
-        bound.starts_with("__rock_mk_is_odd_int = function(leaf_int) return "),
+        bound.starts_with("__rock_mk_is_odd_int = function(b0) return "),
         "expected only the off-component callee bound:\n{bound}"
     );
     assert!(
@@ -2104,7 +2184,7 @@ fn callee_binding_excludes_self_recursion() {
                fn down(n: int) -> int { if n == 0 { return leaf(0) }\n  down(n - 1) }";
     let bound = emit_clean_bound(src, "down");
     assert!(
-        bound.starts_with("__rock_mk_down_int = function(leaf_int) return "),
+        bound.starts_with("__rock_mk_down_int = function(b0) return "),
         "expected the self-recursive call left global:\n{bound}"
     );
 }
@@ -2141,16 +2221,11 @@ fn callee_binding_caps_at_the_lua_upvalue_limit() {
         cap,
         "expected exactly {cap} bound callees:\n{header}"
     );
-    assert!(
-        params.starts_with("leaf000_int, ") && params.ends_with(&format!("leaf{:03}_int", cap - 1)),
-        "expected the first {cap} callees in name order:\n{params}"
+    assert_eq!(
+        params.split(", ").collect::<Vec<_>>(),
+        (0..cap).map(|i| format!("b{i}")).collect::<Vec<_>>(),
+        "expected the first {cap} callees assigned short names in name order:\n{params}"
     );
-    for i in cap..count {
-        assert!(
-            !params.contains(&format!("leaf{i:03}_int")),
-            "expected `leaf{i:03}` left global:\n{params}"
-        );
-    }
     // The cap is a correctness rule, not a tuning knob: LuaJIT refuses to parse
     // a function with more than `MAX_BOUND_CALLEES` upvalues, so an uncapped
     // binding would make this program fail to load at all.

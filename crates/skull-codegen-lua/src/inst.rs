@@ -60,15 +60,25 @@ impl Emitter<'_> {
 
     /// Splice an `@inline inline(lua)` `Call` inline, if `id` is one. Returns
     /// true iff it spliced; else the caller emits the normal `callee(args)`.
-    /// The emitted symbol this call targets. A call the lowerer gave a concrete
+    /// The lexical name this call targets. A call the lowerer gave a concrete
     /// instance (its value args splatted to leaves) targets that instance's
     /// definition. The same instance object drives definition and call spelling,
-    /// so the two cannot drift.
+    /// so the two cannot drift. Bound calls use the factory parameter instead.
     pub(crate) fn callee_name(&self, id: Idx<Inst>, func: FuncRef) -> CalleeName {
-        match self.func.spec_bindings.get(&id) {
+        let name = match self.func.spec_bindings.get(&id) {
             Some(inst) => CalleeName::Specialized(inst.symbol(self.ws, self.interner)),
             None => CalleeName::Declared(self.ctx.mangled_name(self.ws, func)),
+        };
+        match self.bound.and_then(|plan| plan.parameter_for(&name)) {
+            Some(alias) => CalleeName::Declared(alias),
+            None => name,
         }
+    }
+
+    pub(crate) fn bound_name(&self, name: ustr::Ustr) -> ustr::Ustr {
+        self.bound
+            .and_then(|plan| plan.parameter_for(name.as_str()))
+            .unwrap_or(name)
     }
 
     fn try_emit_inline_lua_splice(&self, out: &mut String, id: Idx<Inst>) -> bool {

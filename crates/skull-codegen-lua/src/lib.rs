@@ -871,8 +871,7 @@ impl SelectionArm {
     }
 }
 
-/// The symbol a call spells: a specialized instance's own, or the declaration's
-/// mangled name (interned once per build).
+/// A call's Lua name: an owned specialization or an interned global/local alias.
 pub(crate) enum CalleeName {
     Specialized(String),
     Declared(ustr::Ustr),
@@ -896,6 +895,7 @@ impl std::fmt::Display for CalleeName {
 }
 
 struct Emitter<'a> {
+    bound: Option<&'a CalleeBindingPlan>,
     enum_box_groups: RefCell<HashMap<ustr::Ustr, std::rc::Rc<EnumBoxGroups>>>,
     selection_preds: std::cell::OnceCell<PredMap>,
     ws: &'a Workspace,

@@ -31,7 +31,10 @@ impl Emitter<'_> {
                     self.write_state_slot(out, *g);
                     out.push(']');
                 } else {
-                    out.push_str(skull_mir::mangle::symbol_of_key(*g).as_str());
+                    out.push_str(
+                        self.bound_name(skull_mir::mangle::symbol_of_key(*g))
+                            .as_str(),
+                    );
                 }
             }
             Inst::Load(c) => write_cellname(out, self.func, self.frame, self.cell_colors, *c),
