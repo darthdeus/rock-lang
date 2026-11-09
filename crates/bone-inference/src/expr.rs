@@ -1473,11 +1473,14 @@ pub(crate) fn infer_expr_used(
                 _ => infer_expr(c, gamma, target)?,
             };
 
+            check_expr(c, gamma, value, target_ty, c.body.expr_spans[value])?;
             let value_ty = infer_expr(c, gamma, value)?;
-            coerce(gamma, value_ty, target_ty, expr_span)?;
 
             let vr = resolve(gamma, value_ty, expr_span);
-            let value_nonnull = !matches!(gamma.get(vr), TypeExpr::Nullable(_));
+            // Contextual checking records a nullable callback's declared ABI,
+            // but a lambda literal still stores a non-null function value.
+            let value_nonnull = matches!(c.body.expr_arena[value], Expr::Lambda { .. })
+                || !matches!(gamma.get(vr), TypeExpr::Nullable(_));
 
             if let Some(p) = path {
                 match p.0 {
