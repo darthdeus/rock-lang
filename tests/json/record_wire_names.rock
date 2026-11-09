@@ -16,3 +16,20 @@ fn json_record_uses_declared_wire_names_in_both_directions() {
     assert(json_record_decode(codec, json_decode("{{\"wire_name\":false}}").unwrap(), value) == null)
     assert_eq(errors[0].path, "/wire_name")
 }
+
+struct JsonEscapedNameRecord {
+    @json_name("a/b~c\"\\\n")
+    value: int,
+}
+
+@test
+fn json_record_wire_names_escape_source_and_error_paths() {
+    let errors: [JsonRecordError] = []
+    let codec = JsonRecordCodec { reject_unknown_fields: true, on_error: error => errors.push(error) }
+    let value = JsonEscapedNameRecord { value: 7 }
+    let wire = json_record_encode(codec, value)
+    assert_eq(json_as_int(json_field(wire, "a/b~c\"\\\n").unwrap()).unwrap(), 7)
+    assert_eq(json_record_decode(codec, json_decode(json_encode(wire)).unwrap(), value).unwrap().value, 7)
+    assert(json_record_decode(codec, json_object(map_new()), value) == null)
+    assert_eq(errors[0].path, "/a~1b~0c\"\\\n")
+}

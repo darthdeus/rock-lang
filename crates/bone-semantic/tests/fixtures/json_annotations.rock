@@ -1,0 +1,28 @@
+//- renamed_field
+struct Row { @json_name("external") internal: string }
+fn value(row: Row) -> string {
+    let result = row.internal
+          //^ string
+    result
+}
+
+//- missing_name @fail=requires one nonempty string argument
+struct Row { @json_name internal: string }
+
+//- empty_name @fail=requires one nonempty string argument
+struct Row { @json_name("") internal: string }
+
+//- numeric_name @fail=requires one nonempty string argument
+struct Row { @json_name(1) internal: string }
+
+//- function_position @fail=not allowed
+@json_name("external") fn example() {}
+
+//- duplicate_annotation @fail=duplicate @json_name
+struct Row { @json_name("one") @json_name("two") value: int }
+
+//- duplicate_wire_name @fail=duplicate JSON field name
+struct Row { @json_name("same") one: int, @json_name("same") two: int }
+
+//- collision_with_unrenamed_field @fail=duplicate JSON field name
+struct Row { @json_name("two") one: int, two: int }

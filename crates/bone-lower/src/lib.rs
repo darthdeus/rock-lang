@@ -9,7 +9,7 @@ use skull_parser::{
 use ustr::ustr;
 
 use bone_core::{
-    annotations::{AnnoPos, validate_annotations},
+    annotations::{AnnoPos, json_field_name, validate_annotations},
     hir::{
         AsKind, BindingInfo, BindingKind, BindingPattern, Callee, DecoratorDef, EnumVariantDef,
         Expr, Function, GlobalDef, InterpPart, InterpSpec, MatchArm, ParamDecl, Pattern,
@@ -3313,6 +3313,7 @@ fn lower_struct_fields(
     def_scope: Idx<Scope>,
     fields: &mut Vec<hir::StructFieldDef>,
 ) -> Result<(), CompilerError> {
+    let mut json_names = FxHashSet::default();
     for field in s.fields.iter() {
         let (ty, storage_ty) = match a.te(&field.ty).kind {
             skull_parser::TypeExprKind::F32 => {
@@ -3383,6 +3384,15 @@ fn lower_struct_fields(
             &field_annotations,
             &ctx.workspace.decorator_names,
         )?;
+        let wire_name = json_field_name(&field_annotations).unwrap_or(field.name.name);
+        if !json_names.insert(wire_name) {
+            comp_error!(
+                field.name.span,
+                "duplicate JSON field name `{}` in struct `{}`",
+                wire_name,
+                s.name.name
+            );
+        }
         fields.push(hir::StructFieldDef {
             name: field.name.name,
             ty,

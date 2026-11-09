@@ -47,10 +47,30 @@ pub fn validate_annotations(
     annos: &[Annotation],
     deco_names: &FxHashSet<Ustr>,
 ) -> Result<(), CompilerError> {
+    let mut json_name_seen = false;
     for anno in annos {
         validate_one(pos, anno, deco_names)?;
+        if anno.is_builtin("json_name") {
+            if json_name_seen {
+                comp_error!(anno.span, "duplicate @json_name on field");
+            }
+            json_name_seen = true;
+        }
     }
     Ok(())
+}
+
+pub fn json_field_name(annos: &[Annotation]) -> Option<Ustr> {
+    annos.iter().find_map(|anno| {
+        if anno.is_builtin("json_name") {
+            if let Some(arg) = anno.args.first() {
+                if let AnnoValue::String(name) = &arg.value {
+                    return Some(*name);
+                }
+            }
+        }
+        None
+    })
 }
 
 fn validate_one(
