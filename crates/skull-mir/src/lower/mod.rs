@@ -3533,7 +3533,7 @@ impl Builder<'_> {
             };
             // The synthesized factory ends with this return. Nested user
             // closures in its initializer retain their own no-box guarantees.
-            statements.into_iter().last().is_some_and(|statement| {
+            statements.into_iter().next_back().is_some_and(|statement| {
                 matches!(self.body.statement_arena[statement], Statement::Return(Some(value)) if value == e)
             })
         });
