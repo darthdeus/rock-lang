@@ -21,7 +21,9 @@ fn inputs(values: &[(&str, &str)], volatile: &[&str]) -> ComptimeInputs {
 }
 
 fn fingerprint(src: &str, inputs: ComptimeInputs) -> String {
-    emit_mir_with_inputs(src, inputs).artifact_fingerprint
+    emit_mir_with_inputs(src, inputs)
+        .artifact_fingerprint
+        .expect("one-shot emit publishes a fingerprint")
 }
 
 const VOLATILE_SOURCE: &str = r#"

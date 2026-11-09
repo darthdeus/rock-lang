@@ -177,7 +177,9 @@ pub trait CompileHost {
         entry: ModuleId,
         target: EmitTarget,
     ) -> Result<MirEmit, CompilerError> {
+        // The one-shot program is written once; nothing replays or reloads it.
         crate::mir_emit::FullEmit::one_shot()
+            .without_fingerprint()
             .project_root(target.project_root)
             .renderer(target.renderer)
             .run(ws, entry)

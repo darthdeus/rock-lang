@@ -1058,16 +1058,21 @@ pub(super) fn assemble(
     } = asm;
     let artifact_reads = one_shot_reads
         .unwrap_or_else(|| artifact_comptime_reads(cache, built_specs, &unit_reads, true));
-    let artifact_fingerprint = artifact_fingerprint(
-        ws,
-        scx,
-        &code_artifact,
-        &lifecycle_plan,
-        &definition_plan,
-        &global_layout,
-        &artifact_reads,
-        cache.renderer_target,
-    )?;
+    let artifact_fingerprint = cache
+        .publish_fingerprint
+        .then(|| {
+            artifact_fingerprint(
+                ws,
+                scx,
+                &code_artifact,
+                &lifecycle_plan,
+                &definition_plan,
+                &global_layout,
+                &artifact_reads,
+                cache.renderer_target,
+            )
+        })
+        .transpose()?;
     step("assembly: fingerprint", &mut steps);
     // The file name a host writes the program to; generated code after a
     // numbered definition reports its position in that file.

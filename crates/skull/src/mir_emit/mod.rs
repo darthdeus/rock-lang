@@ -101,8 +101,10 @@ pub struct MirEmit {
     /// identity and published to the runtime.
     pub definition_plan: skull_mir::definition::DefinitionPlan,
     /// The semantic identity of this exact emitted Artifact. It is computed
-    /// before the backend payload leaves the compiler.
-    pub artifact_fingerprint: String,
+    /// before the backend payload leaves the compiler; `None` only when the
+    /// build asked [`FullEmit::without_fingerprint`], because its host never
+    /// reloads or replays the program.
+    pub artifact_fingerprint: Option<String>,
     /// Coarse per-stage time for the emit, in run order. `setup:` entries are
     /// direct wall-clock measurements; the remaining entries cover HIR->MIR
     /// lowering, MIR cleanup, Lua emission, and sequential assembly. The latter
@@ -191,6 +193,7 @@ pub struct FullEmit<'a> {
     renderer_target: RendererTarget,
     shapes: ShapeOverrides,
     mutation: BodyMutation,
+    fingerprint: bool,
 }
 
 impl<'a> FullEmit<'a> {
@@ -201,6 +204,7 @@ impl<'a> FullEmit<'a> {
             renderer_target: RendererTarget::Gl,
             shapes: ShapeOverrides::default(),
             mutation: BodyMutation::None,
+            fingerprint: true,
         }
     }
 
@@ -233,6 +237,14 @@ impl<'a> FullEmit<'a> {
     /// down to what the project reaches. See [`is_library_module`].
     pub fn project_root(mut self, project_root: Option<&'a str>) -> Self {
         self.project_root = project_root;
+        self
+    }
+
+    /// Skip the artifact fingerprint. Only a host that writes the program once
+    /// and never reloads or replays it can do without; the fingerprint is the
+    /// serial tail of assembly.
+    pub fn without_fingerprint(mut self) -> Self {
+        self.fingerprint = false;
         self
     }
 

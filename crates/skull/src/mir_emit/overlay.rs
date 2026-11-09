@@ -389,7 +389,7 @@ fn assemble_overlay(
             lifecycle_plan,
             global_layout,
             definition_plan,
-            artifact_fingerprint,
+            artifact_fingerprint: Some(artifact_fingerprint),
             phases: vec![
                 ("  overlay artifact clone", d_clone_artifact),
                 ("  overlay definitions", d_definitions),
@@ -548,7 +548,7 @@ pub fn emit_overlay_with_span_edits(
     cache.code_artifact = emit.code_artifact.clone();
     cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
     cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
-    cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
+    cache.artifact_fingerprint = emit.artifact_fingerprint.clone();
     for (key, reads) in overlay_unit_reads.globals {
         if reads.is_empty() {
             cache.unit_comptime_reads.globals.remove(&key);

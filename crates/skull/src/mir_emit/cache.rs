@@ -135,6 +135,9 @@ pub struct SkullEmitCache {
     /// every `assemble` (full and incremental reassembly re-lower all units).
     pub(super) unit_comptime_reads: UnitComptimeReads,
     pub(super) renderer_target: RendererTarget,
+    /// Whether assembly computes the artifact fingerprint; false only for a
+    /// one-shot build that asked [`FullEmit::without_fingerprint`].
+    pub(super) publish_fingerprint: bool,
     pub(super) build_kind: BuildKind,
     pub(super) selected_sim_functions: Option<FxHashSet<Ustr>>,
     pub(super) repair_stats: IncrementalRepairStats,
@@ -1309,7 +1312,7 @@ pub fn emit_incremental(
     cache.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
     cache.global_layout = Some(emit.global_layout.clone());
     cache.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
-    cache.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
+    cache.artifact_fingerprint = emit.artifact_fingerprint.clone();
     cache.fingerprint_code_rows = Some(
         crate::artifact_fingerprint::CodeRows::collect(
             ws,

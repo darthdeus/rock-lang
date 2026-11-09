@@ -3305,7 +3305,9 @@ impl IncrementalProject {
                     .or(allocation_report_path.as_deref()),
                 &emit.allocation_report,
             )?;
-            let artifact_fingerprint = emit.artifact_fingerprint.clone();
+            let artifact_fingerprint = emit.artifact_fingerprint.clone().ok_or_else(|| {
+                anyhow::anyhow!("compiler did not publish an Artifact fingerprint")
+            })?;
             let emits_main = emit.emits_main;
             let lua = install_global_accessors(emit.lua, ws)
                 .map_err(|e| anyhow::anyhow!(render_project_err(project.sources(), &e)))?;
@@ -3795,7 +3797,9 @@ impl IncrementalProject {
                 .renderer(self.renderer_target)
                 .run(ws, mid)
                 .map_err(|e| anyhow::anyhow!("skull force_full emit: {}", e.message))?;
-            let artifact_fingerprint = emit.artifact_fingerprint.clone();
+            let artifact_fingerprint = emit.artifact_fingerprint.clone().ok_or_else(|| {
+                anyhow::anyhow!("compiler did not publish an Artifact fingerprint")
+            })?;
             let emits_main = emit.emits_main;
             let lua =
                 install_global_accessors(emit.lua, ws).map_err(|e| anyhow::anyhow!(e.message))?;

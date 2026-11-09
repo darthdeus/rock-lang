@@ -923,7 +923,7 @@ impl SkullEmitCache {
         self.lifecycle_plan = Some(std::sync::Arc::new(emit.lifecycle_plan.clone()));
         self.global_layout = Some(emit.global_layout.clone());
         self.definition_plan = Some(std::sync::Arc::new(emit.definition_plan.clone()));
-        self.artifact_fingerprint = Some(emit.artifact_fingerprint.clone());
+        self.artifact_fingerprint = emit.artifact_fingerprint.clone();
         self.fingerprint_code_rows = Some(
             crate::artifact_fingerprint::CodeRows::collect(
                 ws,
@@ -960,6 +960,7 @@ pub(super) fn emit_full_build(
         renderer_target,
         shapes,
         mutation,
+        fingerprint,
     } = options;
     let mut setup_phases = SetupPhases::default();
     let project_root = setup_phases.timed("setup: validation+context", || {
@@ -1116,6 +1117,7 @@ pub(super) fn emit_full_build(
         fingerprint_code_rows: None,
         unit_comptime_reads: UnitComptimeReads::default(),
         renderer_target,
+        publish_fingerprint: fingerprint,
         build_kind: build.kind(),
         selected_sim_functions,
         repair_stats: IncrementalRepairStats::default(),

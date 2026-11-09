@@ -71,3 +71,17 @@ fn one_shot_releases_concrete_plans_and_live_build_keeps_them() {
     assert_eq!(live.release_stats.concrete_plans, 0);
     assert_eq!(one_shot.lua, live.lua);
 }
+
+#[test]
+fn one_shot_can_skip_the_artifact_fingerprint_without_changing_the_program() {
+    let ws = ws_with_stdlib(SOURCE);
+    let mid = *ws.module_ids.get(&ustr::Ustr::from("<test>")).unwrap();
+    let full = emit_workspace_mir(&ws, mid).expect("one shot");
+    assert!(full.artifact_fingerprint.is_some());
+    let (skipped, _) = skull::mir_emit::FullEmit::one_shot()
+        .without_fingerprint()
+        .run(&ws, mid)
+        .expect("one shot without fingerprint");
+    assert_eq!(skipped.artifact_fingerprint, None);
+    assert_eq!(skipped.lua, full.lua);
+}
