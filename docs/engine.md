@@ -268,6 +268,40 @@ compiler's identity-storage checker (`crates/bone-core/src/identity_storage`)
 enforces the storage side of this, subject to package-manifest exemptions
 described in the [guide](guide.md).
 
+## Input and actions
+
+Stone projects one physical or synthetic input authority before game consumers.
+Actions and rebind capture read that projection; tools may read live ImGui input
+separately. The platform owns controller handles and event translation; the input
+state owns device lanes and edges; the action registry owns verbs, bindings and
+repeat behavior. The application owns control schemes, UI and persistence paths.
+
+The most recently active open controller is the logical pad. Idle axis noise
+must not select it. Removing the active controller leaves no active pad until
+new activity selects one. Handoff clears the previous pad's held state; only the
+activity causing the switch may produce a press edge. Pointer motion and glyph
+modality are separate: a mouse move may leave UI navigation without claiming
+keyboard/mouse prompts.
+
+Bindings and defaults are configuration; repeat timers are runtime state.
+Restoring simulation state must not rewind a user's binding edits. Re-registering
+an action keeps its handle and overrides while refreshing defaults and UI
+classification. Persistence accepts an explicit absolute path; encoding remains
+separate from storage.
+
+A UI focus scope selects navigable widgets, not a parallel action-set stack.
+Ordinary navigation focus gates gameplay actions; binding capture gates UI actions
+too. A text field captures all actions, including UI actions, until submission or
+cancellation. Text composition, IME and caret/selection belong to the text-entry
+pipeline, not binding tokens; native text controls use that capture boundary
+rather than adding another raw-key blacklist. Bindable keys use scancode tokens; their
+labels may follow the active keyboard layout.
+
+An additional controller backend must feed the existing pad token/axis vocabulary
+or replace its provider, rather than adding another family of action queries.
+Touch bindings require a concrete remappable-control use; a gesture can instead
+be a pointer event, virtual action or text input.
+
 ## Audio
 
 The pipeline is: source libraries and authoring tools, the `sound-core`
