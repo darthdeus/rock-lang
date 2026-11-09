@@ -380,7 +380,10 @@ pub fn find_rock_files_at_path(source_dir: impl AsRef<Path>) -> Result<Vec<Strin
         };
         let path = entry.path();
 
-        if path.is_file() {
+        // The walk already knows each entry's type; only a symlink needs the
+        // stat that tells whether it leads to a file.
+        let file_type = entry.file_type();
+        if file_type.is_file() || (file_type.is_symlink() && path.is_file()) {
             if let Some(ext) = path.extension() {
                 if ext == "rock" && !path.to_string_lossy().ends_with("~") {
                     files.push(path.to_string_lossy().to_string());
