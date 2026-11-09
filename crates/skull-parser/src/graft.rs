@@ -1,14 +1,62 @@
-//! Cross-arena deep-copy: clone an AST subtree from one `Ast` into another.
+//! Deep-copy of AST subtrees: from one `Ast` into another, or within one.
 //!
 //! Macro expansion inlines a macro body (defined in module A's arena) at a call
-//! site in module B's arena, so the template's nodes must be re-allocated into
-//! the caller. This is the cross-`Ast` twin of `clone.rs` (which copies within a
-//! single arena for compound-assign's read copy). Both exist because the borrow
-//! checker can't alias one `Ast` as `&` source and `&mut` dest; the logic is
-//! otherwise identical. Registry build (module -> template) and expansion
-//! (template -> caller) both go through here.
+//! site in module B's arena, so the template's nodes are re-allocated into the
+//! caller. Compound-assign's read copy of an lvalue (`a += b` -> `a = a + b`)
+//! and repeated macro arguments copy within a single arena instead: `Idx` is a
+//! node's identity, so duplication re-allocates every node with remapped child
+//! indices.
 
 use crate::ast::*;
+use std::borrow::Cow;
+
+/// Where a copy reads source nodes from. A separate `Ast` is borrowed for the
+/// whole copy; a within-arena copy clones each node it reads, because `dst` is
+/// mutated as the copy proceeds.
+pub(crate) trait Source: Copy {
+    fn read<'a, T: Clone + 'a>(
+        self,
+        dst: &Ast,
+        arena: fn(&Ast) -> &Arena<T>,
+        id: Idx<T>,
+    ) -> Cow<'a, T>
+    where
+        Self: 'a;
+}
+
+impl Source for &Ast {
+    fn read<'a, T: Clone + 'a>(
+        self,
+        _dst: &Ast,
+        arena: fn(&Ast) -> &Arena<T>,
+        id: Idx<T>,
+    ) -> Cow<'a, T>
+    where
+        Self: 'a,
+    {
+        Cow::Borrowed(&arena(self)[id])
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SameArena;
+
+impl Source for SameArena {
+    fn read<'a, T: Clone + 'a>(
+        self,
+        dst: &Ast,
+        arena: fn(&Ast) -> &Arena<T>,
+        id: Idx<T>,
+    ) -> Cow<'a, T> {
+        Cow::Owned(arena(dst)[id].clone())
+    }
+}
+
+/// Deep-copy the expression subtree rooted at `e` within `ast`, returning the
+/// new root.
+pub(crate) fn clone_expr(ast: &mut Ast, e: Idx<ExprData>) -> Idx<ExprData> {
+    graft_expr(SameArena, ast, e)
+}
 
 /// Deep-copy an item (and all its arena children) from `src` into `dst`. Used
 /// to inline a macro's `macro_items` template at an invocation site. Covers the
@@ -94,7 +142,7 @@ fn graft_fn(src: &Ast, dst: &mut Ast, f: &FunctionDef) -> FunctionDef {
     }
 }
 
-fn graft_param(src: &Ast, dst: &mut Ast, p: &Param) -> Param {
+fn graft_param(src: impl Source, dst: &mut Ast, p: &Param) -> Param {
     Param {
         span: p.span,
         name: p.name.clone(),
@@ -144,40 +192,45 @@ fn graft_variant(src: &Ast, dst: &mut Ast, v: &EnumVariant) -> EnumVariant {
     }
 }
 
-pub(crate) fn graft_block(src: &Ast, dst: &mut Ast, b: Idx<BlockData>) -> Idx<BlockData> {
-    let data = &src.blocks[b];
-    let span = data.span;
-    let braces = data.braces;
-    let stmts: Vec<Idx<StatementData>> = data.statements.clone();
-    let statements = stmts.into_iter().map(|s| graft_stmt(src, dst, s)).collect();
+pub(crate) fn graft_block(src: impl Source, dst: &mut Ast, b: Idx<BlockData>) -> Idx<BlockData> {
+    let data = src.read(dst, |ast| &ast.blocks, b);
+    let statements = data
+        .statements
+        .iter()
+        .map(|&s| graft_stmt(src, dst, s))
+        .collect();
     dst.blocks.alloc(BlockData {
-        span,
-        braces,
+        span: data.span,
+        braces: data.braces,
         statements,
     })
 }
 
-pub(crate) fn graft_expr(src: &Ast, dst: &mut Ast, e: Idx<ExprData>) -> Idx<ExprData> {
-    let span = src.exprs[e].span;
-    let kind = graft_expr_kind(src, dst, &src.exprs[e].kind);
-    dst.exprs.alloc(ExprData { span, kind })
-}
-
-pub(crate) fn graft_type(src: &Ast, dst: &mut Ast, t: Idx<TypeExprData>) -> Idx<TypeExprData> {
-    let data = &src.types[t];
-    let span = data.span;
-    let is_nullable = data.is_nullable;
-    let kind = graft_type_kind(src, dst, &data.kind);
-    dst.types.alloc(TypeExprData {
-        span,
+pub(crate) fn graft_expr(src: impl Source, dst: &mut Ast, e: Idx<ExprData>) -> Idx<ExprData> {
+    let data = src.read(dst, |ast| &ast.exprs, e);
+    let kind = graft_expr_kind(src, dst, &data.kind);
+    dst.exprs.alloc(ExprData {
+        span: data.span,
         kind,
-        is_nullable,
     })
 }
 
-fn graft_stmt(src: &Ast, dst: &mut Ast, s: Idx<StatementData>) -> Idx<StatementData> {
-    let data = &src.stmts[s];
-    let span = data.span;
+pub(crate) fn graft_type(
+    src: impl Source,
+    dst: &mut Ast,
+    t: Idx<TypeExprData>,
+) -> Idx<TypeExprData> {
+    let data = src.read(dst, |ast| &ast.types, t);
+    let kind = graft_type_kind(src, dst, &data.kind);
+    dst.types.alloc(TypeExprData {
+        span: data.span,
+        kind,
+        is_nullable: data.is_nullable,
+    })
+}
+
+fn graft_stmt(src: impl Source, dst: &mut Ast, s: Idx<StatementData>) -> Idx<StatementData> {
+    let data = src.read(dst, |ast| &ast.stmts, s);
     let kind = match &data.kind {
         StatementKind::Expression(e) => StatementKind::Expression(graft_expr(src, dst, *e)),
         StatementKind::Use(u) => StatementKind::Use(u.clone()),
@@ -199,18 +252,7 @@ fn graft_stmt(src: &Ast, dst: &mut Ast, s: Idx<StatementData>) -> Idx<StatementD
             span: f.span,
             keyword_span: f.keyword_span,
             name: f.name.clone(),
-            params: f
-                .params
-                .iter()
-                .map(|p| Param {
-                    span: p.span,
-                    name: p.name.clone(),
-                    ty: graft_type(src, dst, p.ty),
-                    default: p.default.map(|d| graft_expr(src, dst, d)),
-                    is_variadic: p.is_variadic,
-                    annotations: p.annotations.clone(),
-                })
-                .collect(),
+            params: f.params.iter().map(|p| graft_param(src, dst, p)).collect(),
             params_span: f.params_span,
             return_ty: f.return_ty.map(|t| graft_type(src, dst, t)),
             body: graft_block(src, dst, f.body),
@@ -266,10 +308,13 @@ fn graft_stmt(src: &Ast, dst: &mut Ast, s: Idx<StatementData>) -> Idx<StatementD
         },
         StatementKind::Comment(c) => StatementKind::Comment(*c),
     };
-    dst.stmts.alloc(StatementData { span, kind })
+    dst.stmts.alloc(StatementData {
+        span: data.span,
+        kind,
+    })
 }
 
-fn graft_expr_kind(src: &Ast, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
+fn graft_expr_kind(src: impl Source, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
     let ge = |dst: &mut Ast, e: Idx<ExprData>| graft_expr(src, dst, e);
     let gb = |dst: &mut Ast, b: Idx<BlockData>| graft_block(src, dst, b);
     let gt = |dst: &mut Ast, t: Idx<TypeExprData>| graft_type(src, dst, t);
@@ -467,7 +512,7 @@ fn graft_expr_kind(src: &Ast, dst: &mut Ast, kind: &ExprKind) -> ExprKind {
     }
 }
 
-fn graft_pattern(src: &Ast, dst: &mut Ast, p: &Pattern) -> Pattern {
+fn graft_pattern(src: impl Source, dst: &mut Ast, p: &Pattern) -> Pattern {
     match p {
         Pattern::Wildcard => Pattern::Wildcard,
         Pattern::Ident(id) => Pattern::Ident(id.clone()),
@@ -529,7 +574,7 @@ fn graft_pattern(src: &Ast, dst: &mut Ast, p: &Pattern) -> Pattern {
 
 /// Cross-arena copy of a format spec: re-allocate the dynamic width/precision
 /// sub-expressions into `dst`, copy the scalar fields.
-fn graft_format_spec(src: &Ast, dst: &mut Ast, s: &FormatSpec) -> FormatSpec {
+fn graft_format_spec(src: impl Source, dst: &mut Ast, s: &FormatSpec) -> FormatSpec {
     FormatSpec {
         precision: s.precision,
         width: s.width,
@@ -545,7 +590,7 @@ fn graft_format_spec(src: &Ast, dst: &mut Ast, s: &FormatSpec) -> FormatSpec {
     }
 }
 
-fn graft_type_kind(src: &Ast, dst: &mut Ast, kind: &TypeExprKind) -> TypeExprKind {
+fn graft_type_kind(src: impl Source, dst: &mut Ast, kind: &TypeExprKind) -> TypeExprKind {
     match kind {
         TypeExprKind::Any
         | TypeExprKind::Unit

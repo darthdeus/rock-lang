@@ -15,9 +15,8 @@
 //! substitution, and top-level item-macro splicing.
 
 use crate::ast::*;
-use crate::clone::clone_expr;
 use crate::desugar::{BlockEdges, ExprEdges, child_blocks, child_exprs};
-use crate::graft::{graft_block, graft_expr, graft_item, graft_type};
+use crate::graft::{clone_expr, graft_block, graft_expr, graft_item, graft_type};
 use rock_core::{CompilerError, Span};
 use smallvec::smallvec;
 use std::collections::{HashMap, HashSet};
@@ -1971,8 +1970,7 @@ fn stmt_blocks(ast: &Ast, s: Idx<StatementData>) -> BlockEdges {
 // them in the *definition*, with their source spans, at parse time -- the data
 // IDE references/rename for a macro parameter needs. The two walks visit the
 // same node shapes but one is `&mut Ast` (rewrite) and one is `&Ast` (read), so
-// the borrow checker keeps them separate, exactly like `clone.rs`/`graft.rs`.
-// Keep them in sync.
+// the borrow checker keeps them separate. Keep them in sync.
 
 /// Per parameter, its declaration span + every use span in the macro template.
 pub(crate) fn index_macro_param_refs(

@@ -4,7 +4,6 @@
 //! rock's `Box`-based parser.
 
 pub mod ast;
-pub mod clone;
 pub mod desugar;
 pub(crate) mod graft;
 pub mod macro_expand;
