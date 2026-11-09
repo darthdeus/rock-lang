@@ -3522,6 +3522,26 @@ impl Builder<'_> {
         opt: Option<Idx<Expr>>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let Some(e) = opt else { return Ok(vec![]) };
+        let json_default_return = self.site_owner.as_ref().is_some_and(|owner| {
+            matches!(
+                self.ws.module(owner.func.module).functions[owner.func.func].json_field_for,
+                Some((_, _, skull_parser::JsonFieldOperation::Default))
+            )
+        }) && self.body.root.is_some_and(|root| {
+            let Expr::Block { statements, .. } = self.body.expr_arena[root] else {
+                return false;
+            };
+            // The synthesized factory ends with this return. Nested user
+            // closures in its initializer retain their own no-box guarantees.
+            statements.into_iter().last().is_some_and(|statement| {
+                matches!(self.body.statement_arena[statement], Statement::Return(Some(value)) if value == e)
+            })
+        });
+        if json_default_return {
+            // Default metadata has an opaque ABI owned by the compiler.
+            let repr = self.lower_expr_repr(e)?.into_value();
+            return Ok(vec![self.materialize_repr(repr)?]);
+        }
         if self.ret_rep.is_none() {
             let gpu_context = self.site_owner.as_ref().is_some_and(|owner| {
                 crate::intrinsics::is_gpu_context(
