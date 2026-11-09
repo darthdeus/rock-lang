@@ -172,20 +172,41 @@ pub(super) fn shader_registration_lines(
             "shader graph/view registration denominator differs from shader collection".to_string(),
         ));
     }
+    // Each program's GLSL is emitted from its own view against the shared
+    // scalar context; the programs fan out and register in collection order.
+    let programs: Vec<(
+        &skull_mir::lower::ShaderPair,
+        &crate::shader_artifact::ShaderProgramView,
+    )> = collection.pairs.iter().zip(&view.program_views).collect();
+    let emissions: Vec<Result<skull_codegen_glsl::ShaderEmission, CompilerError>> = {
+        use bone_core::prelude::*;
+        programs
+            .par_iter()
+            .map(|(pair, program_view)| {
+                // vert=None is the A3c single-arg fullscreen form -> the A1
+                // single-entry emitter (PIXEL body + fullscreen VERTEX passthrough).
+                match pair.vert {
+                    Some(_) => skull_codegen_glsl::emit_shader_pipeline_with_view(
+                        ws,
+                        scx,
+                        program_view,
+                        profile,
+                    ),
+                    None => skull_codegen_glsl::emit_shader_entry_with_view(
+                        ws,
+                        scx,
+                        program_view,
+                        profile,
+                    ),
+                }
+            })
+            .collect()
+    };
     let mut out = String::new();
     let mut sources = Vec::new();
     let mut dependencies = FxHashSet::default();
-    for (pair, program_view) in collection.pairs.iter().zip(&view.program_views) {
-        // vert=None is the A3c single-arg fullscreen form -> the A1 single-entry
-        // emitter (PIXEL body + fullscreen VERTEX passthrough).
-        let emission = match pair.vert {
-            Some(_) => {
-                skull_codegen_glsl::emit_shader_pipeline_with_view(ws, scx, program_view, profile)?
-            }
-            None => {
-                skull_codegen_glsl::emit_shader_entry_with_view(ws, scx, program_view, profile)?
-            }
-        };
+    for (pair, emission) in collection.pairs.iter().zip(emissions) {
+        let emission = emission?;
         dependencies.extend(emission.dependencies);
         sources.push(ShaderSource {
             key: pair.key.clone(),

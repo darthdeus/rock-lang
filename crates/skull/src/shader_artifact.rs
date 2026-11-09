@@ -226,31 +226,39 @@ pub fn realize_shader_with_context_and_plans(
         }
     }
 
-    let mut program_views = Vec::with_capacity(req.programs.len());
     let all_concrete_plans =
         plans.unwrap_or_else(|| skull_graph::concrete_body::build(ws, g).plans);
-    for program in req.programs {
-        let entry_of = |r: FuncRef| -> Option<&Instance> {
-            let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
-            roots.iter().find(|i| DeclKey(i.func) == key)
-        };
-        let mut stages = Vec::new();
-        if let Some(vertex) = program.vert.and_then(entry_of) {
-            stages.push(stage_view(ws, g, &edges, vertex, ShaderStage::Vertex));
-        }
-        if let Some(fragment) = entry_of(program.frag) {
-            stages.push(stage_view(ws, g, &edges, fragment, ShaderStage::Fragment));
-        }
-        let concrete_plans = Arc::new(skull_mir::concrete::select_concrete_plan_closure(
-            &all_concrete_plans,
-            stages.iter().flat_map(|stage| stage.retained.iter()),
-        ));
-        program_views.push(ShaderProgramView {
-            program: *program,
-            stages,
-            concrete_plans,
-        });
-    }
+    let entry_of = |r: FuncRef| -> Option<&Instance> {
+        let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
+        roots.iter().find(|i| DeclKey(i.func) == key)
+    };
+    // Each program's view and profile check read the shared graph, plans and
+    // scalar context; the programs are independent, so they fan out, and the
+    // results are folded in program order.
+    let program_views: Vec<ShaderProgramView> = {
+        use bone_core::prelude::*;
+        req.programs
+            .par_iter()
+            .map(|program| {
+                let mut stages = Vec::new();
+                if let Some(vertex) = program.vert.and_then(entry_of) {
+                    stages.push(stage_view(ws, g, &edges, vertex, ShaderStage::Vertex));
+                }
+                if let Some(fragment) = entry_of(program.frag) {
+                    stages.push(stage_view(ws, g, &edges, fragment, ShaderStage::Fragment));
+                }
+                let concrete_plans = Arc::new(skull_mir::concrete::select_concrete_plan_closure(
+                    &all_concrete_plans,
+                    stages.iter().flat_map(|stage| stage.retained.iter()),
+                ));
+                ShaderProgramView {
+                    program: *program,
+                    stages,
+                    concrete_plans,
+                }
+            })
+            .collect()
+    };
     // THE PROFILE PASS IS EMISSION'S OWN, run per ENTRY.
     // The view-aware checker is the whole of what the view-driven emitter does
     // before it writes GLSL: stage classification of the entry's signature (an
@@ -269,90 +277,36 @@ pub fn realize_shader_with_context_and_plans(
     // cycle the emitter accepts, or an emitter recursion rejection over an
     // acyclic retained relation, is a recorded `disagreements` entry.
     let cyclic = cyclic_instances(&roots, &edges);
+    let programs: Vec<(&ShaderProgram, &ShaderProgramView)> =
+        req.programs.iter().zip(&program_views).collect();
+    let checks: Vec<ProgramCheck> = {
+        use bone_core::prelude::*;
+        programs
+            .par_iter()
+            .map(|(program, program_view)| {
+                check_program(ws, g, scx, &roots, &edges, &cyclic, program, program_view)
+            })
+            .collect()
+    };
     let mut rejections: Vec<ShaderRejection> = Vec::new();
     let mut disagreements: Vec<String> = Vec::new();
     let mut checked = 0usize;
     let mut missing_substitutions: BTreeSet<Instance> = BTreeSet::new();
     let mut programs_unchecked = 0usize;
-    for (program_index, program) in req.programs.iter().enumerate() {
-        // The PROGRAM's own root instances -- the fragment entry, and the
-        // vertex stage when the pair has one.
-        let entry_of = |r: FuncRef| -> Option<&Instance> {
-            let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
-            roots.iter().find(|i| DeclKey(i.func) == key)
-        };
-        let Some(root) = entry_of(program.frag) else {
-            continue;
-        };
-        let mut program_roots: Vec<Instance> = vec![root.clone()];
-        if let Some(v) = program.vert {
-            match entry_of(v) {
-                Some(i) => program_roots.push(i.clone()),
-                // A registered vertex stage the graph holds no instance for is
-                // not something this pass may check around.
-                None => {
-                    programs_unchecked += 1;
-                    continue;
-                }
+    for check in checks {
+        match check {
+            ProgramCheck::Skipped => {}
+            ProgramCheck::Unchecked { missing } => {
+                programs_unchecked += 1;
+                missing_substitutions.extend(missing);
             }
-        }
-
-        // THE COMPLETE RETAINED SET FOR THIS PROGRAM, not just its entries.
-        // A GENERIC instance is answerable now: GLSL lowers each one under the
-        // instantiation the call site recorded, so `passthrough<float>` and
-        // `passthrough<int>` are two checked, emitted definitions. What is still
-        // unanswerable is a MISSING record -- the graph being incomplete is not
-        // a shape, and a program reaching one may not enter the
-        // `entries_checked` denominator.
-        let retained = reachable_from(&program_roots, &edges);
-        let mut answerable = true;
-        for i in &retained {
-            if g.concreteness(i) == Concreteness::Missing {
-                missing_substitutions.insert(i.clone());
-                answerable = false;
-            }
-        }
-        if !answerable {
-            programs_unchecked += 1;
-            continue;
-        }
-
-        checked += 1;
-        let entry_cycle = cyclic.contains(root) || reaches_cycle(root, &edges, &cyclic);
-        let program_view = &program_views[program_index];
-        let outcome = match program.vert {
-            Some(_) => skull_codegen_glsl::check_pipeline_profile_with_view(ws, scx, program_view),
-            None => skull_codegen_glsl::check_entry_profile_with_view(ws, scx, program_view),
-        };
-        match outcome {
-            Ok(()) => {
-                if entry_cycle {
-                    disagreements.push(format!(
-                        "`{}`: the retained instance relation has a cycle the GLSL pass accepted",
-                        ws.module(root.func.module).functions[root.func.func].name
-                    ));
-                }
-            }
-            Err(e) => {
-                let f = &ws.module(root.func.module).functions[root.func.func];
-                let span = e.labels.first().map(|l| l.span).unwrap_or(f.name_span);
-                let kind = if entry_cycle {
-                    ShaderRejectionKind::Recursion
-                } else {
-                    ShaderRejectionKind::Profile
-                };
-                if entry_cycle && !e.message.contains("recursion") {
-                    disagreements.push(format!(
-                        "`{}`: cyclic retained relation, but the GLSL pass rejected it as: {}",
-                        f.name, e.message
-                    ));
-                }
-                rejections.push(ShaderRejection {
-                    instance: root.clone(),
-                    kind,
-                    message: e.message.clone(),
-                    span,
-                });
+            ProgramCheck::Checked {
+                rejection,
+                disagreements: program_disagreements,
+            } => {
+                checked += 1;
+                rejections.extend(rejection);
+                disagreements.extend(program_disagreements);
             }
         }
     }
@@ -383,6 +337,116 @@ pub fn realize_shader_with_context_and_plans(
         sites_walked,
         program_views,
     })
+}
+
+/// One program's outcome in the profile pass, folded into the view in
+/// program order.
+enum ProgramCheck {
+    /// No fragment instance: nothing to check.
+    Skipped,
+    /// A root the graph holds no instance or no substitution for.
+    Unchecked { missing: Vec<Instance> },
+    Checked {
+        rejection: Option<ShaderRejection>,
+        disagreements: Vec<String>,
+    },
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_program(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    scx: &skull_mir::lower::ScalarCtx,
+    roots: &BTreeSet<Instance>,
+    edges: &BTreeMap<Instance, Vec<(Instance, Span)>>,
+    cyclic: &BTreeSet<Instance>,
+    program: &ShaderProgram,
+    program_view: &ShaderProgramView,
+) -> ProgramCheck {
+    let mut disagreements = Vec::new();
+    {
+        // The PROGRAM's own root instances -- the fragment entry, and the
+        // vertex stage when the pair has one.
+        let entry_of = |r: FuncRef| -> Option<&Instance> {
+            let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
+            roots.iter().find(|i| DeclKey(i.func) == key)
+        };
+        let Some(root) = entry_of(program.frag) else {
+            return ProgramCheck::Skipped;
+        };
+        let mut program_roots: Vec<Instance> = vec![root.clone()];
+        if let Some(v) = program.vert {
+            match entry_of(v) {
+                Some(i) => program_roots.push(i.clone()),
+                // A registered vertex stage the graph holds no instance for is
+                // not something this pass may check around.
+                None => {
+                    return ProgramCheck::Unchecked {
+                        missing: Vec::new(),
+                    };
+                }
+            }
+        }
+
+        // THE COMPLETE RETAINED SET FOR THIS PROGRAM, not just its entries.
+        // A GENERIC instance is answerable now: GLSL lowers each one under the
+        // instantiation the call site recorded, so `passthrough<float>` and
+        // `passthrough<int>` are two checked, emitted definitions. What is still
+        // unanswerable is a MISSING record -- the graph being incomplete is not
+        // a shape, and a program reaching one may not enter the
+        // `entries_checked` denominator.
+        let retained = reachable_from(&program_roots, edges);
+        let missing: Vec<Instance> = retained
+            .iter()
+            .filter(|i| g.concreteness(i) == Concreteness::Missing)
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            return ProgramCheck::Unchecked { missing };
+        }
+
+        let entry_cycle = cyclic.contains(root) || reaches_cycle(root, edges, cyclic);
+        let outcome = match program.vert {
+            Some(_) => skull_codegen_glsl::check_pipeline_profile_with_view(ws, scx, program_view),
+            None => skull_codegen_glsl::check_entry_profile_with_view(ws, scx, program_view),
+        };
+        let rejection = match outcome {
+            Ok(()) => {
+                if entry_cycle {
+                    disagreements.push(format!(
+                        "`{}`: the retained instance relation has a cycle the GLSL pass accepted",
+                        ws.module(root.func.module).functions[root.func.func].name
+                    ));
+                }
+                None
+            }
+            Err(e) => {
+                let f = &ws.module(root.func.module).functions[root.func.func];
+                let span = e.labels.first().map(|l| l.span).unwrap_or(f.name_span);
+                let kind = if entry_cycle {
+                    ShaderRejectionKind::Recursion
+                } else {
+                    ShaderRejectionKind::Profile
+                };
+                if entry_cycle && !e.message.contains("recursion") {
+                    disagreements.push(format!(
+                        "`{}`: cyclic retained relation, but the GLSL pass rejected it as: {}",
+                        f.name, e.message
+                    ));
+                }
+                Some(ShaderRejection {
+                    instance: root.clone(),
+                    kind,
+                    message: e.message.clone(),
+                    span,
+                })
+            }
+        };
+        ProgramCheck::Checked {
+            rejection,
+            disagreements,
+        }
+    }
 }
 
 fn stage_view(

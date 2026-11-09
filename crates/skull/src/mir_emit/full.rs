@@ -521,14 +521,23 @@ impl LaneGate {
 }
 
 /// Lane one: the CPU artifact view, realized with the scalar context lowering
-/// will use.
+/// will use, and the codegen context over that scalar context. The global
+/// state slots and the call graph read the graph and the declarations only,
+/// so they need no ABI plan and run here, off the plan build's path.
 fn cpu_artifact_lane(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
     emission_roots: &[FuncRef],
+    shapes: ShapeOverrides,
 ) -> (
-    crate::artifact::ArtifactView,
-    skull_mir::lower::ScalarCtx,
+    Result<
+        (
+            crate::artifact::ArtifactView,
+            skull_mir::lower::ScalarCtx,
+            CodegenCtx,
+        ),
+        CompilerError,
+    >,
     SetupLaneWindow,
 ) {
     let started = Instant::now();
@@ -543,10 +552,10 @@ fn cpu_artifact_lane(
         .with_scalar_context(&scx),
     );
     let population = lua_view.instances.len() + lua_view.boundaries.len();
+    let cg = full_codegen_ctx(ws, &scx, graph, shapes);
     let finished = Instant::now();
     (
-        lua_view,
-        scx,
+        cg.map(|cg| (lua_view, scx, cg)),
         SetupLaneWindow {
             started,
             finished,
@@ -632,6 +641,7 @@ fn abi_warm_lane(
 struct SetupLanes {
     lua_view: crate::artifact::ArtifactView,
     scx: skull_mir::lower::ScalarCtx,
+    cg: CodegenCtx,
     shader_view: crate::shader_artifact::ShaderArtifactView,
     shader_registrations: ShaderRegistrations,
     attribution: SetupLaneAttribution,
@@ -649,6 +659,7 @@ fn run_setup_lanes(
     shader_programs: &[crate::shader_artifact::ShaderProgram],
     shader_collection: &skull_mir::lower::ShaderCollection,
     emission_roots: &[FuncRef],
+    shapes: ShapeOverrides,
     mutation: BodyMutation,
 ) -> Result<(crate::concrete_body::ConcreteBodies, SetupLanes), CompilerError> {
     #[cfg(test)]
@@ -692,7 +703,7 @@ fn run_setup_lanes(
         join_in_place(
             || {
                 gate.run(SetupLaneKind::CpuArtifact, || {
-                    cpu_artifact_lane(ws, graph, emission_roots)
+                    cpu_artifact_lane(ws, graph, emission_roots, shapes)
                 })
             },
             plans_branch,
@@ -717,8 +728,9 @@ fn run_setup_lanes(
     let mono_after_lanes = graph.interner().stats();
     #[cfg(test)]
     let setup_handshake = gate.handshake();
-    let (lua_view, mut scx, cpu_lane) = cpu_result;
+    let (cpu_result, cpu_lane) = cpu_result;
     let (shader_result, shader_lane) = shader_result;
+    let (lua_view, mut scx, cg) = cpu_result?;
     let (shader_view, shader_registrations) = shader_result?;
     scx.adopt_warmed_abi(abi_scx);
     let attribution = SetupLaneAttribution {
@@ -750,6 +762,7 @@ fn run_setup_lanes(
         SetupLanes {
             lua_view,
             scx,
+            cg,
             shader_view,
             shader_registrations,
             attribution,
@@ -988,26 +1001,25 @@ pub(super) fn emit_full_build(
         }
         Ok((graph, selected_sim_functions))
     })?;
-    // The CPU artifact view reads only the graph, so it is realized while the
-    // concrete plans are built; the shader and ABI lanes read the plans and
-    // start once they are published. The codegen context is built over the
-    // lanes' scalar context, inside the same phase.
-    let (mut concrete, lanes, cg) = setup_phases.timed("setup: concrete plans+lanes", || {
-        let (concrete, lanes) = run_setup_lanes(
+    // The CPU artifact view and the codegen context read only the graph, so
+    // they are built while the concrete plans are; the shader and ABI lanes
+    // read the plans and start once they are published.
+    let (mut concrete, lanes) = setup_phases.timed("setup: concrete plans+lanes", || {
+        run_setup_lanes(
             ws,
             &graph,
             || build_concrete_plans(ws, &graph, mutation),
             &shader_programs,
             &shader_collection,
             &roots.emission_roots,
+            shapes,
             mutation,
-        )?;
-        let cg = full_codegen_ctx(ws, &lanes.scx, &graph, shapes)?;
-        Ok::<_, CompilerError>((concrete, lanes, cg))
+        )
     })?;
     let SetupLanes {
         lua_view,
         scx,
+        cg,
         shader_view,
         shader_registrations,
         attribution: setup_lanes,
