@@ -247,7 +247,8 @@ pub fn native_preamble(project: &str) -> Result<String> {
     };
     let path = lib
         .stage_dir
-        .to_string_lossy()
+        .to_str()
+        .context("native library directory is not valid Unicode")?
         .replace('\\', "\\\\")
         .replace('"', "\\\"");
     // Installed game bootstraps supply their own directory before loading bytecode.

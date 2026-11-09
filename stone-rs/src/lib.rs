@@ -3312,7 +3312,7 @@ pub extern "C" fn stone_save_window_geometry(title: *const c_char) {
             let (ww, wh) = window.window.size();
             let (wx, wy) = window.window.position();
             let display = window.window.display_index().ok();
-            window_placement::save_geometry(
+            if window_placement::save_geometry(
                 &slug,
                 &topo,
                 wx,
@@ -3321,12 +3321,13 @@ pub extern "C" fn stone_save_window_geometry(title: *const c_char) {
                 wh as i32,
                 display,
                 window.requested_size,
-            );
+            ) {
             ::log::info!(
                 target: "STONE",
                 "saved window geometry (game '{}' topo {}): pos ({},{}) size {}x{} display {:?}",
                 slug, topo, wx, wy, ww, wh, display,
             );
+            }
         }
     });
 }
@@ -3759,8 +3760,8 @@ fn resolve_window_geometry(
     ::log::info!(
         target: "STONE",
         "window geometry files: saved={} config={}",
-        window_placement::geometry_file_path().map_or_else(|| "<unresolved: no HOME/XDG_STATE_HOME>".to_string(), |p| p.display().to_string()),
-        window_placement::config_file_path().map_or_else(|| "<unresolved: no HOME/XDG_CONFIG_HOME>".to_string(), |p| p.display().to_string()),
+        window_placement::geometry_file_path().map_or_else(|| "<unresolved user state directory>".to_string(), |p| p.display().to_string()),
+        window_placement::config_file_path().map_or_else(|| "<unresolved user config directory>".to_string(), |p| p.display().to_string()),
     );
 
     // A game's explicit monitor (base.display -- e.g. a settings-screen choice)
