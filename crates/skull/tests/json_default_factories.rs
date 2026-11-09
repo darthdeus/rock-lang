@@ -27,7 +27,7 @@ fn json_default_factory_updates_with_its_called_function() {
         "{}\nassert({read} == 7)\n{}\nassert({read} == 13)\nprint('ok')",
         full.lua, overlay.lua
     );
-    assert_eq!(run_luajit(&script, "json_defaults_overlay"), "ok");
+    assert_eq!(run_luajit(&script), "ok");
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn json_default_factories_keep_module_scope() {
         "{}\nlocal values = {{}}\nfor _, decl in pairs(_G.__ROCK_TYPE_TABLE) do for _, field in ipairs(decl.fields or {{}}) do if field.json_default then values[#values + 1] = _G[field.json_default]() end end end\ntable.sort(values)\nassert(#values == 2 and values[1] == 7 and values[2] == 13)\nprint('ok')",
         emitted.lua
     );
-    assert_eq!(run_luajit(&script, "json_defaults_modules"), "ok");
+    assert_eq!(run_luajit(&script), "ok");
 }
 
 #[test]
@@ -72,5 +72,5 @@ fn json_default_expression_edit_rebuilds_the_interface_and_factory() {
         "{}\nassert(_G[_G.__ROCK_TYPE_TABLE.Row.fields[1].json_default]() == 13)\nprint('ok')",
         rebuilt.lua
     );
-    assert_eq!(run_luajit(&script, "json_default_expression_edit"), "ok");
+    assert_eq!(run_luajit(&script), "ok");
 }
