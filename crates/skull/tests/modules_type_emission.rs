@@ -447,3 +447,34 @@ fn main() {
     );
     assert_eq!(run_main(&lua), "ok");
 }
+
+#[test]
+fn user_json_field_keeps_its_nominal_descriptor() {
+    let emitted = emit_v1_package(
+        "presence",
+        &[
+            V1Fragment {
+                file: "main.rock",
+                src: "fn main() { a::verify() }",
+            },
+            V1Fragment {
+                file: "a.rock",
+                src: r#"
+mod a;
+value JsonField { value: int }
+struct Holder { field: JsonField }
+inline(lua) fn check(value: Holder) = """
+        local desc = _G.__ROCK_TYPE_TABLE[value.__ty].fields[1].desc
+        assert(desc.k == 'nom')
+        assert(_G.__ROCK_TYPE_TABLE[desc.name].fields[1].name == 'value')
+        print('ok')
+"""
+pub fn verify() {
+    check(Holder { field: JsonField { value: 7 } })
+}
+"#,
+            },
+        ],
+    );
+    assert_eq!(run_main(&emitted.lua), "ok");
+}

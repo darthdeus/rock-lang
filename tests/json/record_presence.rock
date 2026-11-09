@@ -1,0 +1,75 @@
+struct JsonPresenceEdit {
+    title: JsonField<string?>,
+    count: JsonField<int>,
+    items: JsonField<[int]>,
+}
+
+@test
+fn json_record_presence_distinguishes_omitted_null_and_value() {
+    let codec = JsonRecordCodec { reject_unknown_fields: true }
+    let absent = json_record_decode<JsonPresenceEdit>(codec, json_decode("{{}}").unwrap()).unwrap()
+    assert(!absent.title.present && !absent.count.present && !absent.items.present)
+    assert_eq(json_encode(json_record_encode(codec, absent)), "{{}}")
+    let cleared = json_record_decode<JsonPresenceEdit>(codec, json_decode("{{\"title\":null}}").unwrap()).unwrap()
+    assert(cleared.title.present && cleared.title.value == null)
+    assert_eq(json_encode(json_record_encode(codec, cleared)), "{{\"title\":null}}")
+    let changed = json_record_decode<JsonPresenceEdit>(codec,
+        json_decode("{{\"title\":\"new\",\"count\":0,\"items\":[]}}").unwrap()).unwrap()
+    assert(changed.title.present && changed.title.value.unwrap() == "new")
+    assert(changed.count.present && changed.count.value.unwrap() == 0)
+    assert(changed.items.present && changed.items.value.unwrap().len() == 0)
+    let copy = json_record_decode<JsonPresenceEdit>(codec, json_record_encode(codec, changed)).unwrap()
+    assert_eq(copy, changed)
+}
+
+@test
+fn json_record_presence_rejects_invalid_supplied_values_with_paths() {
+    let errors: [JsonRecordError] = []
+    let codec = JsonRecordCodec { reject_unknown_fields: true, on_error: error => errors.push(error) }
+    for bad in ["{{\"count\":null}}", "{{\"count\":1.5}}", "{{\"count\":false}}"] {
+        assert(json_record_decode<JsonPresenceEdit>(codec, json_decode(bad).unwrap()) == null)
+        assert_eq(errors[errors.len() - 1].path, "/count")
+    }
+    assert(json_record_decode<JsonPresenceEdit>(codec, json_decode("{{\"items\":[1,false]}}").unwrap()) == null)
+    assert_eq(errors[errors.len() - 1].path, "/items/1")
+    assert(json_record_decode<JsonPresenceEdit>(codec, json_decode("{{\"extra\":0}}").unwrap()) == null)
+    assert_eq(errors[errors.len() - 1].path, "/extra")
+}
+
+nobox value JsonPresencePoint { x: int, y: int }
+struct JsonPresenceNative { point: JsonField<JsonPresencePoint?> }
+
+@test
+fn json_record_presence_preserves_native_payloads() {
+    let codec = JsonRecordCodec {}
+    let edit = json_record_decode<JsonPresenceNative>(codec,
+        json_decode("{{\"point\":{{\"x\":2,\"y\":3}}}}").unwrap()).unwrap()
+    assert(edit.point.present)
+    assert_eq(edit.point.value.unwrap().x, 2)
+    assert_eq(edit.point.value.unwrap().y, 3)
+    let copy = json_record_decode<JsonPresenceNative>(codec, json_record_encode(codec, edit)).unwrap()
+    assert_eq(copy, edit)
+}
+
+struct JsonPresenceFlag {
+    @json_name("enabled")
+    flag: JsonField<bool>,
+}
+struct JsonPresenceNested {
+    edit: JsonField<JsonPresenceEdit>,
+    labels: JsonField<Map<string, string>>,
+}
+
+@test
+fn json_record_presence_composes_with_wire_names_nested_records_and_maps() {
+    let codec = JsonRecordCodec { reject_unknown_fields: true }
+    let flag = json_record_decode<JsonPresenceFlag>(codec, json_decode("{{\"enabled\":false}}").unwrap()).unwrap()
+    assert(flag.flag.present && !flag.flag.value.unwrap())
+    assert_eq(json_encode(json_record_encode(codec, flag)), "{{\"enabled\":false}}")
+    let wire = json_decode("{{\"edit\":{{\"title\":null}},\"labels\":{{\"keep\":\"yes\"}}}}").unwrap()
+    let edit = json_record_decode<JsonPresenceNested>(codec, wire).unwrap()
+    assert(edit.edit.present && edit.edit.value.unwrap().title.present)
+    assert(edit.edit.value.unwrap().title.value == null)
+    assert(edit.labels.present && edit.labels.value.unwrap().contains("keep"))
+    assert_eq(json_encode(json_record_encode(codec, edit)), json_encode(wire))
+}

@@ -1395,6 +1395,12 @@ fn json_reader_is_object(reader: JsonReader) -> bool {
     return reader.at >= 0 && reader.src.unwrap().unit_at(reader.at) == 123
 }
 
+// Presence belongs to an object field; T controls whether a supplied null is valid.
+struct JsonField<T> {
+    present: bool = false,
+    value: T? = null,
+}
+
 struct JsonRecordAdapter {
     name: string,
     encode: fn(any) -> JsonValue,
@@ -1592,6 +1598,16 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
         error('json record nesting exceeds 128', 0)
     end
     local kind = shape.k
+    if kind == 'field' then
+        if reading then
+            if value == nil then return true, { __ty = 'JsonField', present = false } end
+            local ok, decoded = __json_record_visit(codec, shape.inner, value, true, seen, depth + 1)
+            if not ok then return false, decoded end
+            return true, { __ty = 'JsonField', present = true, value = decoded }
+        end
+        if not value.present then error('json record absent field requires an object field', 0) end
+        return __json_record_visit(codec, shape.inner, value.value, false, seen, depth + 1)
+    end
     if kind == 'opt' then
         if reading and __json_record_tag(value, 'Null') then return true, nil end
         if not reading and value == nil then return true, __json_record_node('Null', nil) end
@@ -1805,21 +1821,24 @@ fn json_record_adapter<T>(sample: T, encode: fn(T) -> JsonValue,
                 if reading then item = value[1][wire_name]
                 elseif type(value) == 'table' then item = __json_record_field_get(value, field)
                 else item = value[field.name] end
-                if reading or not field.json_omit or not _G[field.json_omit](item) then
+                local child = field.desc
+                if not child then
+                    child = _G.__ROCK_TYPE_TABLE[field.type] and { k = 'nom', name = field.type } or { k = field.type }
+                end
+                if field.nullable and child.k ~= 'opt' then child = { k = 'opt', inner = child } end
+                local absent = not reading and child.k == 'field' and not item.present
+                if not absent and (reading or not field.json_omit or not _G[field.json_omit](item)) then
                     if decl.kind == 'c_struct' and field.nullable then
                         error('json record does not support nullable native fields', 0)
                     end
-                    local child = field.desc
-                    if not child then
-                        child = _G.__ROCK_TYPE_TABLE[field.type] and { k = 'nom', name = field.type } or { k = field.type }
-                    end
-                    if field.nullable and child.k ~= 'opt' then child = { k = 'opt', inner = child } end
                     local fallback
                     if reading and defaults ~= nil then fallback = __json_record_field_get(defaults, field) end
                     local ok, decoded
                     if reading and item == nil then
                         if defaults ~= nil then ok, decoded = true, __json_record_copy_default(fallback)
                         elseif field.json_default then ok, decoded = true, _G[field.json_default]()
+                        elseif child.k == 'field' then
+                            ok, decoded = __json_record_visit(codec, child, nil, true, seen, depth + 1)
                         else return false, __json_record_error_at(__json_record_failure(child, nil), wire_name) end
                     else
                         ok, decoded = __json_record_visit(codec, child, item, reading, seen, depth + 1, fallback)

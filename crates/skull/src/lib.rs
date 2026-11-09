@@ -1867,6 +1867,20 @@ fn desc_into(
                 unreachable!("frame references are rejected from reflected storage")
             }
             TypeCtor::Nominal(name) => {
+                if name.as_str() == "JsonField"
+                    && ws.struct_by_name.get(&name).is_some_and(|sid| {
+                        rock_core::is_stdlib_module_file(ws.module(sid.module).file.as_str())
+                    })
+                {
+                    let Some(inner) = params.into_iter().next() else {
+                        out.push_str("{k=\"any\"}");
+                        return false;
+                    };
+                    out.push_str("{k=\"field\",inner=");
+                    let found = desc_into(ws, ty.with_idx(inner), out, depth + 1);
+                    out.push('}');
+                    return found;
+                }
                 // The name is the whole answer for a nominal leaf: the consumer
                 // asks the ONE classifier whether it is a native class, and a
                 // struct's own fields are reached through the type table's
