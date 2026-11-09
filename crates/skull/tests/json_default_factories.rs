@@ -74,3 +74,42 @@ fn json_default_expression_edit_rebuilds_the_interface_and_factory() {
     );
     assert_eq!(run_luajit(&script), "ok");
 }
+
+#[test]
+fn json_default_factories_materialize_nobox_payloads_at_metadata_boundary() {
+    let source = r#"
+nobox value Point { x: float, y: float }
+struct Row {
+    @json_default point: Point = Point { x: 3.0, y: 4.0 },
+    @json_skip cache: Point = Point { x: 5.0, y: 6.0 },
+    @json_default optional: Point? = Point { x: 7.0, y: 8.0 },
+}
+"#;
+    let ws = ws_of(source);
+    let mid = skull::user_module_id(&ws).unwrap();
+    let emitted = emit_full(&ws, mid).unwrap().0;
+    let script = format!(
+        "{}\nlocal fields = _G.__ROCK_TYPE_TABLE.Row.fields\nfor i = 1, 3 do local p = _G[fields[i].json_default](); assert(p.x == i * 2 + 1 and p.y == i * 2 + 2) end\nprint('ok')",
+        emitted.lua
+    );
+    assert_eq!(run_luajit(&script), "ok");
+}
+
+#[test]
+fn json_default_factory_preserves_nested_value_return_abi() {
+    let ws = ws_of(
+        r#"
+nobox value Point { x: float, y: float }
+struct Row {
+    @json_skip callback: fn() -> Point = () => Point { x: 3.0, y: 4.0 },
+}
+"#,
+    );
+    let mid = skull::user_module_id(&ws).unwrap();
+    let emitted = emit_full(&ws, mid).unwrap().0;
+    let script = format!(
+        "{}\nlocal callback = _G[_G.__ROCK_TYPE_TABLE.Row.fields[1].json_default](); local x, y = callback(); assert(x == 3 and y == 4)\nprint('ok')",
+        emitted.lua
+    );
+    assert_eq!(run_luajit(&script), "ok");
+}
