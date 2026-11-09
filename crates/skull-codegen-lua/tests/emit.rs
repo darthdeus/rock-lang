@@ -829,7 +829,6 @@ fn int_literal_and_return() {
         emit("fn five() -> int { 5 }", "five"),
         "\
 function five_0()
-  ::bb0::
   do return (5) end
 end
 "
@@ -861,7 +860,6 @@ fn param_cell_read() {
         emit("fn id(x: int) -> int { x }", "id"),
         "\
 function id_int(c0)
-  ::bb0::
   do return c0 end
 end
 "
@@ -874,7 +872,6 @@ fn int_arithmetic() {
         emit_std("fn add(a: int, b: int) -> int { a + b }", "add"),
         "\
 function add_int_int(c0, c1)
-  ::bb0::
   do return (c0 + c1) end
 end
 "
@@ -1463,7 +1460,6 @@ fn if_as_value_branch_and_cell_join() {
         "\
 function sign_int(c0)
   local r0
-  ::bb0::
   if (c0 < (0)) then goto bb1 else goto bb2 end
   ::bb1::
   c0 = (0)

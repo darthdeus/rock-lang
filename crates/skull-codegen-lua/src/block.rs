@@ -132,6 +132,9 @@ impl Emitter<'_> {
     }
 
     fn write_block_label(&self, out: &mut String, bb: Idx<Block>) {
+        if self.label_refs[raw(bb) as usize] == 0 {
+            return;
+        }
         out.push_str("  ::bb");
         push_uint(out, self.func.emit_block_id(bb));
         out.push_str("::\n");
@@ -315,11 +318,50 @@ impl Emitter<'_> {
         // Latch label only (the `for` does the increment); then close + the
         // loop-done edge (header's false branch).
         self.emitted[raw(latch) as usize] = true;
-        out.push_str("  ::bb");
-        push_uint(out, self.func.emit_block_id(latch));
-        out.push_str("::\n");
+        self.write_block_label(out, latch);
         self.write_kills(out, &self.kills.at_entry[raw(latch) as usize]);
         out.push_str("  end\n");
         self.write_goto(out, exit);
     }
+}
+
+/// How many terminator edges name each block (dense by `raw(block)`). A block
+/// with none needs no label. Counts only ever over-state the gotos emitted, so
+/// a label is never dropped while a goto still names it.
+pub(crate) fn label_ref_counts(
+    func: &MirFunc,
+    rpo: &[Idx<Block>],
+    loops: &HashMap<Idx<Block>, CountedLoop>,
+) -> Vec<u32> {
+    let mut refs = vec![0u32; func.blocks.len()];
+    for &bb in rpo {
+        match &func.blocks[bb].term {
+            Term::Goto(t) => refs[raw(*t) as usize] += 1,
+            Term::Branch {
+                then_bb, else_bb, ..
+            } => {
+                refs[raw(*then_bb) as usize] += 1;
+                refs[raw(*else_bb) as usize] += 1;
+            }
+            Term::Switch { cases, default, .. } => {
+                for (_, t) in cases {
+                    refs[raw(*t) as usize] += 1;
+                }
+                refs[raw(*default) as usize] += 1;
+            }
+            _ => {}
+        }
+    }
+    // A counted loop's header branch is the `for` line: its edge into the body
+    // is the loop entry, which names no label.
+    for (&header, cl) in loops {
+        if let Term::Branch {
+            then_bb, else_bb, ..
+        } = func.blocks[header].term
+            && (then_bb == cl.body_entry || else_bb == cl.body_entry)
+        {
+            refs[raw(cl.body_entry) as usize] -= 1;
+        }
+    }
+    refs
 }

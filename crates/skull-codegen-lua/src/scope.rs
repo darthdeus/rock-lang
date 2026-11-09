@@ -284,6 +284,7 @@ pub(crate) fn render_scope(
         rpo,
         inlinable,
         emitted: vec![false; func.blocks.len()],
+        label_refs: block::label_ref_counts(func, rpo, &loops),
         hoist,
         hoist_names,
         state_slots,

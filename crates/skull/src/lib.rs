@@ -2533,8 +2533,8 @@ mod tests {
             "expected a conditional branch to a block, got:\n{lua}"
         );
         assert!(
-            lua.contains("::bb0::"),
-            "expected block labels, got:\n{lua}"
+            lua.contains("::bb1::") && !lua.contains("::bb0::"),
+            "expected labels on branch targets only, got:\n{lua}"
         );
     }
 

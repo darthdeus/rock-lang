@@ -927,6 +927,8 @@ struct Emitter<'a> {
     inlinable: Vec<bool>,
     /// Dense `raw(block) -> bool`: blocks already emitted (loop bodies self-skip).
     emitted: Vec<bool>,
+    /// Dense `raw(block) -> edges that goto it`; a block with none is unlabeled.
+    label_refs: Vec<u32>,
     /// All-constant `MakeValueStruct` insts hoisted to a module-scope global:
     /// `inst -> group`. A reference emits `hoist_names[group]`; the statement is
     /// skipped (the def is emitted once, before the function).

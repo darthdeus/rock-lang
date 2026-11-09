@@ -37,17 +37,12 @@ fn main() { print("{hot(1.0, 2.0, 8)}") }
         .find(" for ")
         .unwrap_or_else(|| panic!("no for loop in:\n{body}"));
     let after_for = &body[for_pos..];
-    let decl = after_for
-        .lines()
-        .skip(1)
-        .find(|l| l.trim_start().starts_with("local r"))
-        .unwrap_or_else(|| panic!("no in-loop `local r` decl after the for:\n{body}"));
-    // The in-loop decl must precede the first body label/instruction.
-    let decl_pos = after_for.find(decl.trim_start()).unwrap();
-    let label_pos = after_for.find("::bb").expect("body label");
+    // The body entry has no label (only the `for` line enters it), so the
+    // in-loop decl must be the first line inside the loop.
+    let decl = after_for.lines().nth(1).unwrap_or_default();
     assert!(
-        decl_pos < label_pos,
-        "in-loop `local r` must come before the body label:\n{body}"
+        decl.trim_start().starts_with("local r"),
+        "no in-loop `local r` decl right after the for:\n{body}"
     );
 }
 
