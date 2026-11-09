@@ -836,8 +836,7 @@ fn main() { let result = first() }
                 "setup: validation+context",
                 "setup: root collection",
                 "setup: graph",
-                "setup: concrete plans",
-                "setup: artifact+shader+ABI lanes",
+                "setup: concrete plans+lanes",
                 "setup: ABI validation",
                 "setup: inline candidate table",
             ]
@@ -853,6 +852,7 @@ fn main() { let result = first() }
         assert_eq!(
             join.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
             [
+                "join: concrete plans branch",
                 "join: cpu artifact branch",
                 "join: shader view branch",
                 "join: ABI plan warm branch"

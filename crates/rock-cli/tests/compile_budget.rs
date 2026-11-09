@@ -142,8 +142,7 @@ fn a_compile_appends_a_budget_whose_levels_sum_to_the_wall() {
     let codegen = child(budget, "codegen");
     let setup = child(codegen, "setup");
     child(setup, "graph");
-    child(setup, "concrete plans");
-    let lanes = child(setup, "artifact+shader+ABI lanes");
+    let lanes = child(setup, "concrete plans+lanes");
     // Lane branches overlap, so they are reported beside the lane, not summed.
     assert!(
         lanes["branches"]

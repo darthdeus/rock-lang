@@ -230,12 +230,9 @@ pub(crate) fn emission(emit: &skull::mir_emit::MirEmit) {
                 cpu.push((*name, *d));
             }
         }
-        // The lanes run three branches at once; their windows overlap, so they
-        // sit beside the lane rather than summing into it.
-        if let Some(lanes) = setup
-            .iter_mut()
-            .find(|n| n.name == "artifact+shader+ABI lanes")
-        {
+        // The lanes run several branches at once; their windows overlap, so
+        // they sit beside the lane rather than summing into it.
+        if let Some(lanes) = setup.iter_mut().find(|n| n.name == "concrete plans+lanes") {
             lanes
                 .extra
                 .insert("branches".into(), Value::Array(branches));

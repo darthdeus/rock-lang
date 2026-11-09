@@ -92,6 +92,34 @@ pub(super) fn parallel_join<A, B>(left: impl FnOnce() -> A, right: impl FnOnce()
     (left(), right())
 }
 
+/// Run `spawned` on a pool worker while `here` runs on the CALLING thread, and
+/// return both results. Unlike [`parallel_join`], the calling thread never
+/// migrates into the pool, so thread-local witnesses `here` increments (the
+/// graph and concrete build counters) stay on the thread that reads them.
+#[cfg(not(feature = "sequential"))]
+pub(super) fn join_in_place<A: Send, B>(
+    spawned: impl FnOnce() -> A + Send,
+    here: impl FnOnce() -> B,
+) -> (A, B) {
+    let slot = std::sync::Mutex::new(None);
+    let b = rayon::in_place_scope(|scope| {
+        scope.spawn(|_| {
+            *slot.lock().expect("spawned setup lane result slot") = Some(spawned());
+        });
+        here()
+    });
+    let a = slot
+        .into_inner()
+        .expect("spawned setup lane result slot")
+        .expect("spawned setup lane finished within its scope");
+    (a, b)
+}
+
+#[cfg(feature = "sequential")]
+pub(super) fn join_in_place<A, B>(spawned: impl FnOnce() -> A, here: impl FnOnce() -> B) -> (A, B) {
+    (spawned(), here())
+}
+
 /// Drop `value` off the calling thread. One-shot builds release large caches
 /// in the middle of serial assembly; freeing them on an idle worker keeps that
 /// path short. Inline where there are no worker threads to hand it to.
