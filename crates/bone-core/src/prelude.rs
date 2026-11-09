@@ -8,7 +8,8 @@ pub use ustr::{Ustr, ustr};
 pub use comfy_la_arena::{Arena, ArenaMap, Idx, IdxRange, RawIdx};
 pub use rust_lapper::Lapper;
 pub use skull_parser::{
-    CompilerError, OrderedFloat, SourceFiles, Span, source_file_from_path_and_contents,
+    CompilerError, CompilerErrorKind, OrderedFloat, SourceFiles, Span,
+    source_file_from_path_and_contents,
 };
 
 pub use crate::hir;

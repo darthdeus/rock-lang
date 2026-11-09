@@ -99,6 +99,38 @@ pub(crate) fn check_frame_limits(
 /// The spanned diagnostic for a [`frame_limits::FrameOverflow`]: which Rock
 /// function, which LuaJIT limit, the emitter's count, and the wide values that
 /// are live across the statement that reaches it.
+/// Reject a body too long for LuaJIT to load, now that its text is final.
+pub(crate) fn check_body_limits(
+    ctx: &CodegenCtx,
+    lua_name: &str,
+    func: &MirFunc,
+    body: &str,
+    declared: usize,
+) {
+    let Some(overflow) = frame_limits::measure_body(body, declared) else {
+        return;
+    };
+    let rock_name = func.name;
+    let detail = match overflow {
+        frame_limits::BodyOverflow::Names(count) => format!(
+            "the emitted Lua function uses {count} labels, jumps and locals, and LuaJIT refuses \
+             to load a function over {} (LJ_MAX_VSTACK)",
+            frame_limits::LJ_MAX_VSTACK
+        ),
+        frame_limits::BodyOverflow::Jump(span) => format!(
+            "a jump in the emitted Lua function spans at least {span} instructions, and LuaJIT \
+             refuses to load a jump over {} (\"control structure too long\")",
+            frame_limits::MAX_FORWARD_JUMP
+        ),
+    };
+    let mut err = CompilerError::new_with_label(
+        any_inst_span(func).unwrap_or_else(Span::unknown),
+        format!("`{rock_name}` is too large for LuaJIT: {detail}. Split this function"),
+    );
+    err.kind = bone_core::prelude::CompilerErrorKind::TargetLimit;
+    ctx.reject(lua_name.to_string(), err);
+}
+
 fn frame_limit_error(
     ws: &Workspace,
     func: &MirFunc,

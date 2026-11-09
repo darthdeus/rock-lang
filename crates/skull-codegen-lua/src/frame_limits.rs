@@ -48,12 +48,22 @@
 //! line. Nothing else this printer emits opens a scope or declares a local, so
 //! this is `nactvar` itself rather than a second estimate of it.
 //!
+//! Two further parse caps scale with the LENGTH of a body rather than its
+//! width, and are measured on the emitted text ([`measure_body`]) because every
+//! block costs a label and every edge a `goto`:
+//!
+//! | cap | constant | message |
+//! |---|---|---|
+//! | names per function | `LJ_MAX_VSTACK` 65476 | `chunk has more than 65476 local variables` |
+//! | jump distance | `BCBIAS_J` 32768 | `control structure too long` |
+//!
 //! The model is validated against the bundled LuaJIT rather than argued:
 //! `crates/skull/tests/wide_value_slot_budget.rs` walks families of real
 //! emitted shapes across each boundary and asserts the compiler's verdict
 //! equals `loadfile`'s on every member.
 
 use comfy_la_arena::Idx;
+use rustc_hash::FxHashMap as HashMap;
 use skull_mir::mir::{Block, Inst, MirFunc, Term};
 
 /// `LJ_MAX_SLOTS` (`lj_def.h`). `bcreg_bump` rejects at `sz >= LJ_MAX_SLOTS`,
@@ -75,6 +85,130 @@ pub(crate) const CALL_BASE_SLOTS: usize = 2;
 /// Active locals a numeric `for` adds inside its block: `(for index)`,
 /// `(for limit)`, `(for step)` and the visible variable (`parse_for_num`).
 pub(crate) const FOR_CONTROL_LOCALS: usize = 4;
+
+/// `LJ_MAX_VSTACK` (`lj_def.h`): the parser's stack of locals, labels and
+/// `goto`s. Entries stay until the function ends, so scopes do not reclaim them.
+pub(crate) const LJ_MAX_VSTACK: usize = 65476;
+
+/// The longest forward jump `jmp_patchins` accepts: `BCBIAS_J - 1`.
+pub(crate) const MAX_FORWARD_JUMP: usize = 32767;
+
+/// The longest backward jump: `BCBIAS_J`.
+const MAX_BACKWARD_JUMP: usize = 32768;
+
+/// A body shorter than this cannot reach either length cap: each stack entry
+/// and each counted instruction is a whole line of at least six bytes.
+const MIN_MEASURED_BODY_BYTES: usize = 64 * 1024;
+
+/// A length cap the emitted body breaks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum BodyOverflow {
+    /// Labels, `goto`s and locals on the parser's stack.
+    Names(usize),
+    /// Instructions a single jump spans, at least.
+    Jump(usize),
+}
+
+fn label_number(text: &str) -> Option<u32> {
+    let digits = text.strip_prefix("bb")?;
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+/// A line that transfers control: its targets, and the instructions it takes
+/// at least. A condition can fold away, so only the jumps themselves count;
+/// `if .. else ..` also jumps over its else arm.
+fn goto_line(line: &str) -> Option<([Option<u32>; 2], usize)> {
+    if let Some(rest) = line.strip_prefix("goto ") {
+        return Some(([Some(label_number(rest)?), None], 1));
+    }
+    if let Some(rest) = line.strip_prefix("else goto ") {
+        let target = rest.strip_suffix(" end")?;
+        return Some(([Some(label_number(target)?), None], 1));
+    }
+    if !line.starts_with("if ") && !line.starts_with("elseif ") {
+        return None;
+    }
+    if let Some(body) = line.strip_suffix(" end") {
+        let (head, otherwise) = body.rsplit_once(" else goto ")?;
+        let (_, then) = head.rsplit_once(" then goto ")?;
+        return Some((
+            [Some(label_number(then)?), Some(label_number(otherwise)?)],
+            3,
+        ));
+    }
+    let (_, then) = line.rsplit_once(" then goto ")?;
+    Some(([Some(label_number(then)?), None], 1))
+}
+
+/// Whether `line` assigns a register or cell a value that takes an instruction:
+/// a self-move emits nothing, and a `nil` kill may merge with its neighbours.
+fn assigns_a_value(line: &str) -> bool {
+    let Some((target, value)) = line.split_once(" = ") else {
+        return false;
+    };
+    let digits = target.strip_prefix(['r', 'c']).unwrap_or("");
+    !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && value != target
+        && value != "nil"
+}
+
+/// The first length cap `body` breaks, given the names already `declared` by
+/// the parameter list, the top-level `local` line and the counted loops.
+///
+/// A lower bound, like the frame model above: it counts only the emitter's own
+/// label, jump and register-assignment lines, and everything else is free.
+pub(crate) fn measure_body(body: &str, declared: usize) -> Option<BodyOverflow> {
+    if body.len() < MIN_MEASURED_BODY_BYTES {
+        return None;
+    }
+    let mut names = declared;
+    let mut position = 0;
+    let mut labels: HashMap<u32, usize> = HashMap::default();
+    let mut jumps: Vec<(u32, usize, usize)> = Vec::new();
+    for line in body.lines() {
+        let line = line.trim_start();
+        if let Some(label) = line
+            .strip_prefix("::")
+            .and_then(|l| l.strip_suffix("::"))
+            .and_then(label_number)
+        {
+            names += 1;
+            labels.insert(label, position);
+        } else if let Some((targets, instructions)) = goto_line(line) {
+            for target in targets.into_iter().flatten() {
+                names += 1;
+                jumps.push((target, position, position + instructions - 1));
+            }
+            position += instructions;
+        } else if assigns_a_value(line) {
+            position += 1;
+        }
+    }
+    if names > LJ_MAX_VSTACK {
+        return Some(BodyOverflow::Names(names));
+    }
+    let mut longest = None;
+    for (target, first, last) in jumps {
+        let Some(&label) = labels.get(&target) else {
+            continue;
+        };
+        let (span, over) = if label > last {
+            let span = label - last - 1;
+            (span, span > MAX_FORWARD_JUMP)
+        } else {
+            let span = first.saturating_sub(label) + 1;
+            (span, span > MAX_BACKWARD_JUMP)
+        };
+        if over && longest.is_none_or(|l| span > l) {
+            longest = Some(span);
+        }
+    }
+    longest.map(BodyOverflow::Jump)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum FrameLimit {
@@ -355,4 +489,87 @@ pub(crate) fn frame_overflow(
     wide.truncate(8);
     overflow.wide_calls = wide.into_iter().map(|(_, id)| id).collect();
     Some(overflow)
+}
+
+#[cfg(test)]
+mod body_measure_tests {
+    use super::*;
+
+    /// Whether LuaJIT accepts the function, asked of LuaJIT itself.
+    fn loads(body: &str, locals: &str) -> bool {
+        let chunk = format!("f = function()\n{locals}{body}end\n");
+        let dir = std::env::temp_dir().join(format!(
+            "rock_body_measure_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("chunk.lua");
+        std::fs::write(&path, chunk).expect("write chunk");
+        let executable = std::env::var_os("ROCK_LUAJIT").unwrap_or_else(|| "luajit".into());
+        let output = std::process::Command::new(executable)
+            .arg("-e")
+            .arg(format!(
+                "local f, e = loadfile({:?}); if not f then io.stderr:write(e) os.exit(1) end",
+                path.to_string_lossy()
+            ))
+            .output()
+            .expect("spawn luajit");
+        let _ = std::fs::remove_dir_all(&dir);
+        output.status.success()
+    }
+
+    fn agrees(body: &str, locals: &str) -> bool {
+        let rejected = measure_body(body, 0).is_some();
+        assert_eq!(
+            rejected,
+            !loads(body, locals),
+            "verdict differs from LuaJIT"
+        );
+        rejected
+    }
+
+    fn label_goto_pairs(pairs: usize) -> String {
+        let mut body = String::new();
+        for i in 0..pairs {
+            body.push_str(&format!("  goto bb{i}\n  ::bb{i}::\n"));
+        }
+        body
+    }
+
+    #[test]
+    fn the_name_cap_matches_luajit_at_its_boundary() {
+        let last_fit = LJ_MAX_VSTACK / 2;
+        assert!(!agrees(&label_goto_pairs(last_fit), ""));
+        assert!(agrees(&label_goto_pairs(last_fit + 1), ""));
+    }
+
+    fn jump_over(statements: usize) -> String {
+        let mut body = String::from("  goto bb1\n");
+        body.push_str(&"  r0 = 1\n".repeat(statements));
+        body.push_str("  ::bb1::\n");
+        body
+    }
+
+    #[test]
+    fn the_forward_jump_cap_matches_luajit_at_its_boundary() {
+        let locals = "  local r0\n";
+        assert!(!agrees(&jump_over(MAX_FORWARD_JUMP), locals));
+        assert!(agrees(&jump_over(MAX_FORWARD_JUMP + 1), locals));
+    }
+
+    #[test]
+    fn a_self_move_and_a_kill_cost_no_measured_instruction() {
+        let body = format!(
+            "  goto bb1\n{}  ::bb1::\n",
+            "  r0 = r0\n  r0 = nil\n".repeat(40_000)
+        );
+        assert_eq!(measure_body(&body, 0), None);
+    }
+
+    #[test]
+    fn jump_text_inside_a_string_is_not_a_jump() {
+        let body = "  print(\"goto bb1\")\n".repeat(70_000);
+        assert_eq!(measure_body(&body, 0), None);
+    }
 }

@@ -294,8 +294,13 @@ pub(crate) fn render_scope(
         kills,
         line_marks,
     };
+    let body_start = out.len();
     for &bb in rpo {
         em.emit_block(out, bb); // self-skips an already-emitted block (loop body)
+    }
+    if ctx.frame_limits() {
+        let declared = params.len() + top_locals + loops.len() * frame_limits::FOR_CONTROL_LOCALS;
+        check_body_limits(ctx, lua_name, func, &out[body_start..], declared);
     }
     out.push_str("end");
 }

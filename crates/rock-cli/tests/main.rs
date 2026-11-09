@@ -8,6 +8,7 @@ mod gpu_process;
 mod guide;
 mod host_api;
 mod lsp_code_action;
+mod lua_body_limits;
 mod metric_add_window;
 mod modules_display_paths;
 mod no_stdlib;
