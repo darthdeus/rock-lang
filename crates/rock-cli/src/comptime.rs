@@ -460,6 +460,20 @@ pub(crate) fn resolve_checked_inputs(
     Ok(inputs)
 }
 
+/// Start computing [`compiler_identity`] on its own thread when `inputs`
+/// will need it. Hashing the compiler image takes longer than discovery and
+/// parsing together on a dev build, and nothing before the checked program
+/// reads it, so the fingerprint resolution finds it ready instead of paying
+/// for it on the compile's critical path.
+pub fn prefetch_compiler_identity(inputs: &ComptimeInputs) {
+    if inputs.source_fingerprints.is_empty() {
+        return;
+    }
+    std::thread::spawn(|| {
+        let _ = compiler_identity();
+    });
+}
+
 /// Content identity of the running compiler image, shared by source inputs
 /// and hosts' pre-compile cache keys. Never substitutes a checkout revision.
 pub fn compiler_identity() -> Result<String> {

@@ -2168,6 +2168,10 @@ fn skull_emit_project_with_inputs(
     use std::path::PathBuf;
     let _slot = crate::compile_slots::acquire(dir)?;
     crate::compile_budget::phase("compile slot");
+    // Discovery reads the project serially; the stdlib parse and the
+    // compiler image hash need nothing from it and run alongside.
+    skull::pipeline::warm_stdlib();
+    crate::comptime::prefetch_compiler_identity(&inputs);
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
     let sources = match crate::unified_compile::discover_sources(&spec) {
         Ok(s) => s,

@@ -14,6 +14,17 @@ use ustr::Ustr;
 
 use crate::mir_emit::{MirEmit, RendererTarget};
 
+/// Parse the process stdlib on another thread, so a host that discovers and
+/// reads its sources serially finds it ready when [`with_stdlib`] asks. A
+/// caller that arrives first waits for the parse in progress; nothing is
+/// parsed twice.
+pub fn warm_stdlib() {
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::spawn(|| {
+        let _ = skull_parser::stdlib::cached();
+    });
+}
+
 /// The shared process stdlib with `user` modules after it: the module set
 /// every non-incremental compile checks. A stdlib that does not parse is the
 /// error ([`skull_parser::stdlib::cached`], the loader the editor shares).
