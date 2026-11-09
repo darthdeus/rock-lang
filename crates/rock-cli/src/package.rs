@@ -132,7 +132,7 @@ pub(crate) fn check_project_assets(project: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
+pub fn prepare_sound_bank(project: &str) -> Result<Option<PathBuf>> {
     let (_, config) = project_and_config(project)?;
     if config
         .as_ref()
