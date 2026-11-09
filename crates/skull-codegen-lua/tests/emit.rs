@@ -7,10 +7,68 @@
 
 mod common;
 
+use bone_core::prelude::ModuleId;
+use bone_core::workspace::Workspace;
 use skull_codegen_lua::{CodegenCtx, emit_function};
 use skull_mir::mir::FuncRef;
+use std::sync::LazyLock;
 
 /// Lower `fn_name` from `modules` (last = the user `<test>` module), emit Lua.
+static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
+    rock_stdlib::stdlib_files()
+        .iter()
+        .map(|f| {
+            let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
+            skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
+        })
+        .collect()
+});
+
+/// The stdlib plus `src` as the `<test>` module.
+fn stdlib_with(src: &str) -> Vec<skull_parser::Ast> {
+    let mut modules = STDLIB.clone();
+    modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
+    modules
+}
+
+fn stdlib_workspace(src: &str) -> (Workspace, ModuleId) {
+    let mut modules = stdlib_with(src);
+    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+    let mid = *ws
+        .module_ids
+        .get(&ustr::Ustr::from("<test>"))
+        .expect("user module id");
+    (ws, mid)
+}
+
+fn test_fn(
+    ws: &Workspace,
+    mid: ModuleId,
+    name: &str,
+) -> comfy_la_arena::Idx<bone_core::hir::Function> {
+    ws.module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == name)
+        .expect("function by name")
+        .0
+}
+
+/// `luajit -e driver`, returning stdout. Panics with stderr and `context` when
+/// it cannot run or exits non-zero.
+fn luajit_ok(driver: &str, context: &str) -> String {
+    let out = std::process::Command::new("luajit")
+        .args(["-e", driver])
+        .output()
+        .expect("spawn luajit");
+    assert!(
+        out.status.success(),
+        "{}\n{context}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
 fn emit_dump(modules: Vec<skull_parser::Ast>, fn_name: &str) -> String {
     emit_dump_with(modules, fn_name, |_| {})
 }
@@ -92,16 +150,7 @@ local observed = setmetatable({{}}, {{
 assert(hits == 2 and reads == 0)
 "#
     );
-    let run = std::process::Command::new("luajit")
-        .arg("-e")
-        .arg(driver)
-        .output()
-        .expect("run field-store semantics");
-    assert!(
-        run.status.success(),
-        "{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    luajit_ok(&driver, "");
 }
 
 #[test]
@@ -154,16 +203,7 @@ end
                 "'[' .. s .. ']'"
             }
         );
-        let run = std::process::Command::new("luajit")
-            .arg("-e")
-            .arg(&driver)
-            .output()
-            .expect("run ordering probe");
-        assert!(
-            run.status.success(),
-            "{}\n{lua}",
-            String::from_utf8_lossy(&run.stderr)
-        );
+        luajit_ok(&driver, &lua);
     }
 }
 
@@ -194,16 +234,7 @@ end
 "#,
             prelude = skull_codegen_lua::UINT_CHECK_PRELUDE
         );
-        let run = std::process::Command::new("luajit")
-            .arg("-e")
-            .arg(&driver)
-            .output()
-            .expect("run numeric ordering probe");
-        assert!(
-            run.status.success(),
-            "{}\n{lua}",
-            String::from_utf8_lossy(&run.stderr)
-        );
+        luajit_ok(&driver, &lua);
     }
 }
 
@@ -351,16 +382,7 @@ fn numeric_selection_clamp_keeps_mutable_frame_bounds() {
     let driver = format!(
         "local flushes = 0\njit.attach(function(what) if what == 'flush' then flushes = flushes + 1 end end, 'trace')\nfunction mutate(s) s.c0 = 0 end\n{lua}\nassert(choose({{}}, -0.5) == 0)\nprint('frame-ok flushes=' .. flushes)"
     );
-    let run = std::process::Command::new("luajit")
-        .args(["-e", &driver])
-        .output()
-        .expect("frame-bound semantics");
-    assert!(
-        run.status.success(),
-        "{lua}\n{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    eprint!("{}", String::from_utf8_lossy(&run.stdout));
+    luajit_ok(&driver, &lua);
 }
 
 fn check_selection_values(lua: &str, reference: &str) {
@@ -380,16 +402,8 @@ end end end
 print('selection-ok flushes=' .. flushes)
 "#
     );
-    let run = std::process::Command::new("luajit")
-        .args(["-e", &driver])
-        .output()
-        .expect("selection semantics");
-    assert!(
-        run.status.success(),
-        "{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    let stdout = String::from_utf8_lossy(&run.stdout);
+    let run = luajit_ok(&driver, "");
+    let stdout = run;
     assert!(stdout.starts_with("selection-ok flushes="), "{stdout}");
     eprint!("{stdout}");
 }
@@ -566,19 +580,8 @@ end end
 print('selection-ok')
 "#
         );
-        let result = std::process::Command::new("luajit")
-            .args(["-e", &driver])
-            .output()
-            .expect("LuaJIT semantic gate");
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&result.stdout).trim(),
-            "selection-ok"
-        );
+        let result = luajit_ok(&driver, "");
+        assert_eq!(result.trim(), "selection-ok");
     }
     let lua = emit_clean(
         "fn choose(a: float, b: float) -> float { if b > a { a = b }; return a }",
@@ -612,16 +615,8 @@ end
 print('effects-ok')
 "#
     );
-    let result = std::process::Command::new("luajit")
-        .args(["-e", &driver])
-        .output()
-        .expect("LuaJIT effect gate");
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "effects-ok");
+    let result = luajit_ok(&driver, "");
+    assert_eq!(result.trim(), "effects-ok");
 }
 
 /// Like [`emit_std`] but runs `skull_transform::cleanup` (copy-prop + DCE) before
@@ -634,29 +629,8 @@ fn emit_clean(src: &str, fn_name: &str) -> String {
 
 /// [`emit_clean`] under a context `configure` adjusts first.
 fn emit_clean_with(src: &str, fn_name: &str, configure: impl FnOnce(&mut CodegenCtx)) -> String {
-    use std::sync::LazyLock;
-    static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-        rock_stdlib::stdlib_files()
-            .iter()
-            .map(|f| {
-                let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-                skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-            })
-            .collect()
-    });
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("user module id");
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == fn_name)
-        .expect("function by name");
+    let (ws, mid) = stdlib_workspace(src);
+    let fid = test_fn(&ws, mid, fn_name);
     let (mut func, interner, _) = common::lower_test_ref_with_graph(&ws, mid, fid)
         .unwrap_or_else(|e| panic!("lower failed: {}", e.message));
     skull_transform::cleanup(&mut func).unwrap();
@@ -685,24 +659,8 @@ fn emit_clean_with(src: &str, fn_name: &str, configure: impl FnOnce(&mut Codegen
 /// definition first, then the callee binding pass in component-rank order,
 /// with the components populated from this harness's own instance graph.
 fn run(src: &str, driver: &str) -> String {
-    use std::sync::LazyLock;
-    static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-        rock_stdlib::stdlib_files()
-            .iter()
-            .map(|f| {
-                let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-                skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-            })
-            .collect()
-    });
     common::require_luajit();
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("user module id");
+    let (ws, mid) = stdlib_workspace(src);
     let mut ctx = CodegenCtx::new(&ws);
     let roots = ws
         .module(mid)
@@ -859,18 +817,7 @@ fn run(src: &str, driver: &str) -> String {
 
 /// Stdlib-loaded: needed for `__op_*` arithmetic overloads.
 fn emit_std(src: &str, fn_name: &str) -> String {
-    use std::sync::LazyLock;
-    static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-        rock_stdlib::stdlib_files()
-            .iter()
-            .map(|f| {
-                let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-                skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-            })
-            .collect()
-    });
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
+    let modules = stdlib_with(src);
     emit_dump(modules, fn_name)
 }
 
@@ -1539,29 +1486,8 @@ end
 /// `iter`/`next` is only spliced (and its cursor struct scalarized) once the
 /// inliner has run, which `emit_clean` does NOT do.
 fn emit_inlined(src: &str, fn_name: &str) -> String {
-    use std::sync::LazyLock;
-    static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-        rock_stdlib::stdlib_files()
-            .iter()
-            .map(|f| {
-                let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-                skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-            })
-            .collect()
-    });
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("user module id");
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == fn_name)
-        .expect("function by name");
+    let (ws, mid) = stdlib_workspace(src);
+    let fid = test_fn(&ws, mid, fn_name);
     let interner = std::sync::Arc::new(skull_mir::monoty::MonoInterner::new());
     let graph = skull_graph::instance_graph::build_in(
         &ws,
@@ -2005,29 +1931,8 @@ fn emit_clean_bound_checked(
     fn_name: &str,
     check: impl FnOnce(&bone_core::workspace::Workspace, &skull_mir::mir::MirFunc),
 ) -> String {
-    use std::sync::LazyLock;
-    static STDLIB: LazyLock<Vec<skull_parser::Ast>> = LazyLock::new(|| {
-        rock_stdlib::stdlib_files()
-            .iter()
-            .map(|f| {
-                let id = ustr::Ustr::from(rock_stdlib::stdlib_file_id(f.name).as_str());
-                skull_parser::parse_module_clean(f.contents, id).expect("stdlib parse")
-            })
-            .collect()
-    });
-    let mut modules = STDLIB.clone();
-    modules.push(skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse"));
-    let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
-    let mid = *ws
-        .module_ids
-        .get(&ustr::Ustr::from("<test>"))
-        .expect("user module id");
-    let (fid, _) = ws
-        .module(mid)
-        .functions
-        .iter()
-        .find(|(_, f)| f.name.as_str() == fn_name)
-        .expect("function by name");
+    let (ws, mid) = stdlib_workspace(src);
+    let fid = test_fn(&ws, mid, fn_name);
     let self_ref = FuncRef {
         module: mid,
         func: fid,
@@ -2518,16 +2423,7 @@ assert(not ok, "an unreachable block returned")
 assert(tostring(err):find("unreachable", 1, true), tostring(err))
 "#
     );
-    let run = std::process::Command::new("luajit")
-        .arg("-e")
-        .arg(driver)
-        .output()
-        .expect("run unreachable trap");
-    assert!(
-        run.status.success(),
-        "{lua}\n{}",
-        String::from_utf8_lossy(&run.stderr)
-    );
+    luajit_ok(&driver, &lua);
 }
 
 /// The (line, chunk name) LuaJIT 2.1's lexer assigns to each line of `lua`,
