@@ -17,7 +17,7 @@ fn identity_rejections(src: &str) -> Vec<String> {
 }
 
 fn rejections_in(ws: &Workspace) -> Vec<String> {
-    let g = graph_of(&ws);
+    let g = graph_of(ws);
     g.rejections()
         .filter(|r| r.kind.name() == IDENTITY_STORAGE)
         .map(|r| {

@@ -50,7 +50,7 @@ impl artifact::SymbolPlanner for MainRightCollision {
         i: &Instance,
         _realized: artifact::Realized,
     ) -> String {
-        let name = fn_name(&ws, i.func);
+        let name = fn_name(ws, i.func);
         if matches!(name, "main" | "right") {
             "shared".to_string()
         } else {
@@ -1104,7 +1104,7 @@ fn main() { let a = only_lua(1) }
     fn mine<'a>(ws: &Workspace, view: &'a artifact::ArtifactView) -> Vec<&'a Instance> {
         view.boundaries
             .keys()
-            .filter(|i| fn_name(&ws, i.func) == "only_lua")
+            .filter(|i| fn_name(ws, i.func) == "only_lua")
             .collect()
     }
     assert_eq!(

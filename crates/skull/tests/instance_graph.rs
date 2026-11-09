@@ -1615,11 +1615,11 @@ fn main() {
 // ---------------------------------------------------------------------------
 
 fn is_expanded(ws: &Workspace, g: &instance_graph::InstanceGraph, name: &str) -> bool {
-    g.expanded().any(|i| fn_name(&ws, i.func) == name)
+    g.expanded().any(|i| fn_name(ws, i.func) == name)
 }
 
 fn reached(ws: &Workspace, g: &instance_graph::InstanceGraph, name: &str) -> bool {
-    g.instances.iter().any(|i| fn_name(&ws, i.func) == name)
+    g.instances.iter().any(|i| fn_name(ws, i.func) == name)
 }
 
 /// HOSTILE: an `@intrinsic` whose body is a portable ROCK fallback. Emit

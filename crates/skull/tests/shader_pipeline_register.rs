@@ -161,7 +161,7 @@ fn use_it() -> string {{ return rock_shader(ui_vert, ui_sim_solid_frag) }}
 }
 
 fn test_mid(ws: &Workspace) -> ModuleId {
-    module_id(&ws, "<test>")
+    module_id(ws, "<test>")
 }
 
 #[test]

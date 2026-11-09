@@ -52,7 +52,7 @@ fn rock(inst: &skull::instance_graph::Instance) -> skull::concrete_body::Callee 
 /// Lower the `<test>` module's fn named `name` and run the SAME transform
 /// sequence emission runs, so a test inspects the body emission renders.
 fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
-    let mid = module_id(&ws, "<test>");
+    let mid = module_id(ws, "<test>");
     let (fid, f) = ws
         .module(mid)
         .functions
@@ -65,7 +65,7 @@ fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
     };
     let graph = graph_of_ws(ws);
     let bodies = skull::concrete_body::build(ws, &graph);
-    let scx = scalar_ctx(&ws, &graph);
+    let scx = scalar_ctx(ws, &graph);
     let instance = skull_mir::instance::Instance::base(fref);
     let plan = bodies.plans.get(&instance).expect("concrete plan");
     let mut mf =

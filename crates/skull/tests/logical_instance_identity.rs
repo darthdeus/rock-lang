@@ -22,7 +22,7 @@ use ustr::Ustr;
 
 /// The rendered instantiations of every instance of `<test>`'s fn `name`.
 fn instantiations_of(ws: &Workspace, g: &InstanceGraph, name: &str) -> Vec<String> {
-    let mid = module_id(&ws, "<test>");
+    let mid = module_id(ws, "<test>");
     let mut out: Vec<String> = g
         .instances
         .iter()

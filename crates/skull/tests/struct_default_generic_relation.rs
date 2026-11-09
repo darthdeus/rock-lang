@@ -84,7 +84,7 @@ fn unresolved_var(ws: &Workspace, inf: &BodyInference, ty: TyId) -> Option<Strin
 }
 
 fn defaults_inference(ws: &Workspace) -> (bone_semantic::prelude::ModuleId, &BodyInference) {
-    let mid = module_id(&ws, "<test>");
+    let mid = module_id(ws, "<test>");
     let (sidx, _) = ws
         .module(mid)
         .structs

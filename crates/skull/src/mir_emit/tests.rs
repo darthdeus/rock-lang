@@ -1826,7 +1826,7 @@ fn main() { let r = a() + c() }
     }
 
     fn emit(ws: &Workspace, hook: Option<Arc<Forced>>) -> (MirEmit, SkullEmitCache) {
-        let mid = module_id(&ws, MODULE);
+        let mid = module_id(ws, MODULE);
         with_hook(hook, || FullEmit::program().run(ws, mid)).expect("wave fixture emits")
     }
 

@@ -605,7 +605,7 @@ pub fn unjoined(c: &SiteJoinCensus, cause: Unjoined) -> usize {
 
 /// `name`'s base instance in `<test>`, lowered and prepared as emission would.
 pub fn prepared_body(ws: &Workspace, name: &str) -> MirFunc {
-    let mid = module_id(&ws, "<test>");
+    let mid = module_id(ws, "<test>");
     let (fid, f) = ws
         .module(mid)
         .functions

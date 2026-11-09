@@ -25,7 +25,7 @@ fn check_with_dependency(src: &str, dependency: &str) -> Workspace {
 }
 
 fn lowered_body_in_mode(ws: &Workspace, name: &str, values_first_class: bool) -> MirFunc {
-    let mid = module_id(&ws, "<test>");
+    let mid = module_id(ws, "<test>");
     let (fid, _) = ws
         .module(mid)
         .functions
@@ -97,7 +97,7 @@ fn dispatched_instance_names_in(ws: &Workspace, name: &str) -> Vec<(String, Stri
 /// instance -- the other half of the cross-view check.
 fn walk_dispatched_in(ws: &Workspace, name: &str) -> Vec<&'static str> {
     let g = graph_of(ws);
-    let mid = module_id(&ws, "<test>");
+    let mid = module_id(ws, "<test>");
     let (fid, _) = ws
         .module(mid)
         .functions
