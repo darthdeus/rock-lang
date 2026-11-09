@@ -10,20 +10,9 @@ pub trait SuspensionPolicy {
 
 pub fn uses_after_suspension(body: &Body, policy: &impl SuspensionPolicy) -> Vec<Idx<Expr>> {
     suspension_crossings(body, policy)
-        .into_iter()
-        .map(|crossing| crossing.at)
-        .collect()
 }
 
-/// A use of frame data after a suspension, with the last suspension before
-/// it on each path that reaches it (`rock fix --across-yield` rebinds after
-/// each of them).
-pub struct Crossing {
-    pub at: Idx<Expr>,
-    pub suspensions: Vec<Idx<Expr>>,
-}
-
-pub fn suspension_crossings(body: &Body, policy: &impl SuspensionPolicy) -> Vec<Crossing> {
+fn suspension_crossings(body: &Body, policy: &impl SuspensionPolicy) -> Vec<Idx<Expr>> {
     let Some(root) = body.root else {
         return Vec::new();
     };
@@ -49,16 +38,8 @@ pub fn suspension_crossings(body: &Body, policy: &impl SuspensionPolicy) -> Vec<
         unwound: Flow::default(),
     };
     walk.expr(root, &mut flow);
-    let mut found: Vec<_> = walk
-        .reported
-        .into_iter()
-        .map(|(at, suspensions)| {
-            let mut suspensions: Vec<_> = suspensions.into_iter().collect();
-            suspensions.sort_by_key(|e| body.expr_spans[*e].offset_range);
-            Crossing { at, suspensions }
-        })
-        .collect();
-    found.sort_by_key(|c| body.expr_spans[c.at].offset_range);
+    let mut found: Vec<_> = walk.reported.into_keys().collect();
+    found.sort_by_key(|at| body.expr_spans[*at].offset_range);
     found
 }
 

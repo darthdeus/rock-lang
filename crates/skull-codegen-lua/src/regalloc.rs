@@ -597,6 +597,7 @@ fn term_cell_uses(
 /// cells share a color; the caller renders a colored cell as `c<color>`. Cells
 /// in detached nested CFGs are forced to a unique color and are never emitted
 /// with their enclosing body.
+#[cfg(test)]
 pub fn color_cells(func: &MirFunc) -> Vec<u32> {
     color_cells_with_analysis(&CellAnalysis::new(func), None, &[])
 }

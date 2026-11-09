@@ -1731,7 +1731,11 @@ pub fn infer_expr_used(
     Ok(ty)
 }
 
-pub fn infer_expr(c: BodyCtx, gamma: &mut Gamma, e: Idx<Expr>) -> Result<TyId, CompilerError> {
+pub(crate) fn infer_expr(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    e: Idx<Expr>,
+) -> Result<TyId, CompilerError> {
     infer_expr_used(c, gamma, e, Use::Value)
 }
 

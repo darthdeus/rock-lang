@@ -36,7 +36,11 @@ const SEP: &str = "_";
 /// An exempt (`@nomangle`, `extern`, ...) callee still gets a suffixed name here.
 /// Its bare name belongs to the ONE body the author owns; a specialized copy is a
 /// different function and must not claim it.
-pub fn spec_fn_name(ws: &Workspace, f: &Function, key: &[crate::monoty::MonoTy]) -> Option<String> {
+pub(crate) fn spec_fn_name(
+    ws: &Workspace,
+    f: &Function,
+    key: &[crate::monoty::MonoTy],
+) -> Option<String> {
     if key.is_empty() {
         return None;
     }

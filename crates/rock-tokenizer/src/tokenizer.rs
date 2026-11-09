@@ -7,54 +7,6 @@ pub struct Token {
     pub trailing_newlines: usize,
 }
 
-/// Classify lines in `contents` into code/comment/blank using the actual
-/// token stream, then return a `CompileStats` for that file. Single
-/// source of truth on what's a comment vs. a string literal — replaces
-/// the earlier byte-walker which mis-classified `//` and `/*` inside
-/// strings (regression test: `string_with_double_slash_counts_as_code`).
-pub fn count_source_stats(contents: &str, tokens: &[Token]) -> rock_core::CompileStats {
-    let total_lines = contents.lines().count();
-    let bytes = contents.len();
-
-    // Per-line classification: 0 = blank, 1 = comment-only, 2 = code.
-    // A line is "code" if ANY non-comment / non-newline token touches it
-    // (multi-line strings count their full span as code). Comment-only
-    // lines come from `TokenKind::Comment`. Everything else is blank.
-    let mut line_kind: Vec<u8> = vec![0; total_lines];
-    for tok in tokens {
-        let val = match &tok.kind {
-            TokenKind::Newline => continue,
-            TokenKind::Comment(_) => 1u8,
-            _ => 2u8,
-        };
-        let start = tok.span.line_range.0;
-        let end = tok.span.line_range.1;
-        if total_lines == 0 {
-            continue;
-        }
-        let end = end.min(total_lines - 1);
-        let start = start.min(end);
-        for slot in &mut line_kind[start..=end] {
-            if *slot < val {
-                *slot = val;
-            }
-        }
-    }
-
-    let mut stats = rock_core::CompileStats::new();
-    stats.files = 1;
-    stats.total_lines = total_lines;
-    stats.bytes = bytes;
-    for k in line_kind {
-        match k {
-            0 => stats.blank_lines += 1,
-            1 => stats.comment_lines += 1,
-            _ => stats.code_lines += 1,
-        }
-    }
-    stats
-}
-
 pub struct Tokenizer<'a> {
     pub source_file: Ustr,
     pub input: &'a str,
@@ -1525,51 +1477,6 @@ mod test {
                 TokenKind::Int(5, "5".into()),
             ]
         );
-    }
-
-    #[test]
-    fn count_stats_classifies_string_double_slash_as_code() {
-        // Regression: byte-walker counted `//` inside a string as a
-        // comment. Token-based classifier sees the line carries a real
-        // `StringLit` token and classifies it as code.
-        let src = r#"let url = "https://example.com""#;
-        let tokens = Tokenizer::from_code("t.rock", src).tokenize().unwrap();
-        let stats = count_source_stats(src, &tokens);
-        assert_eq!(stats.code_lines, 1, "URL string line must be code");
-        assert_eq!(stats.comment_lines, 0);
-    }
-
-    #[test]
-    fn count_stats_block_comment_open_inside_string_does_not_leak() {
-        // Regression: byte-walker saw `/*` inside a string literal and
-        // stayed in block-comment mode across the rest of the file.
-        let src = "let s = \"/*\"\nlet x = 1\n";
-        let tokens = Tokenizer::from_code("t.rock", src).tokenize().unwrap();
-        let stats = count_source_stats(src, &tokens);
-        assert_eq!(stats.code_lines, 2, "both lines are code");
-        assert_eq!(stats.comment_lines, 0);
-    }
-
-    #[test]
-    fn count_stats_basic_mix() {
-        let src = "\
-fn main() {       // trailing comment
-    let x = 1
-    // pure comment
-
-    /* block */
-}
-";
-        let tokens = Tokenizer::from_code("t.rock", src).tokenize().unwrap();
-        let stats = count_source_stats(src, &tokens);
-        assert_eq!(stats.files, 1);
-        assert_eq!(stats.total_lines, 6);
-        // `fn main() { // ...`, `let x = 1`, `}` -> 3 code lines
-        // `// pure comment`, `/* block */` -> 2 comment-only lines
-        // blank line -> 1
-        assert_eq!(stats.code_lines, 3);
-        assert_eq!(stats.comment_lines, 2);
-        assert_eq!(stats.blank_lines, 1);
     }
 
     #[test]

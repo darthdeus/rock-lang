@@ -119,7 +119,10 @@ pub fn nominal_type_facts(
     out
 }
 
-pub fn expand_and_desugar(ws: &mut Workspace, cooked: &mut [Ast]) -> Result<(), CompilerError> {
+pub(crate) fn expand_and_desugar(
+    ws: &mut Workspace,
+    cooked: &mut [Ast],
+) -> Result<(), CompilerError> {
     let _span = tracing::info_span!("expand_and_desugar").entered();
 
     let timer = Instant::now();

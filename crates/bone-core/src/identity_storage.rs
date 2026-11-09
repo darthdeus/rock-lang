@@ -53,7 +53,10 @@ pub fn is_identity_storage_field(field: &StructFieldDef) -> bool {
 
 /// The first identity stored by a value of `ty` held in an ordinary storage
 /// position.
-pub fn identity_storage_violation(ws: &Workspace, ty: TyId) -> Option<IdentityStorageViolation> {
+pub(crate) fn identity_storage_violation(
+    ws: &Workspace,
+    ty: TyId,
+) -> Option<IdentityStorageViolation> {
     identity_body_storage_violation(ws, None, ty)
 }
 

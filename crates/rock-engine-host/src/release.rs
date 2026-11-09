@@ -45,6 +45,7 @@ pub struct StagedAssets {
 
 /// Select the shipped-key set for native packaging.
 /// `config` is the already-parsed StickConfig; neither caller reparses TOML.
+#[cfg(test)]
 pub fn select_assets(
     project_dir: &Path,
     game_key: &str,

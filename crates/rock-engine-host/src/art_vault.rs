@@ -34,7 +34,10 @@ pub fn root_from(env: Option<&OsStr>) -> Result<PathBuf> {
 
 /// Expand a leading `$GAME_ART_VAULT` token. `Ok(None)` when `raw` does not
 /// start with the token; `root` is only called when it does.
-pub fn expand_token(raw: &str, root: impl FnOnce() -> Result<PathBuf>) -> Result<Option<PathBuf>> {
+pub(crate) fn expand_token(
+    raw: &str,
+    root: impl FnOnce() -> Result<PathBuf>,
+) -> Result<Option<PathBuf>> {
     let Some(rest) = raw.strip_prefix(TOKEN) else {
         return Ok(None);
     };

@@ -44,24 +44,6 @@ impl CalleeBindingPlan {
     }
 }
 
-/// The emitted symbol a `Call`/`CallMulti` at `id` targets. THE derivation the
-/// body rendering uses ([`Emitter::callee_name`]), exported so the binding plan
-/// cannot drift from the call spelling: a call the lowerer gave a concrete
-/// instance targets that instance's definition, everything else its
-/// declaration's mangled name.
-pub fn call_target_symbol(
-    ws: &Workspace,
-    interner: &MonoInterner,
-    func: &MirFunc,
-    id: Idx<Inst>,
-    callee: FuncRef,
-) -> String {
-    match func.spec_bindings.get(&id) {
-        Some(inst) => inst.symbol(ws, interner),
-        None => mangle_fn(ws, func_of(ws, callee)),
-    }
-}
-
 /// The binding plan for `func`, emitted under `name` for declaration
 /// `self_ref`, or `None` when nothing is bound (every call in the body is then
 /// a global lookup).

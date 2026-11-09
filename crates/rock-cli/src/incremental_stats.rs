@@ -123,7 +123,12 @@ fn candidates(fns: &[FnStat]) -> Vec<(FnStat, EditKind)> {
     out
 }
 
-pub fn incremental_stats(path: &str, iters: usize, warmup: usize, json_out: bool) -> Result<()> {
+pub(crate) fn incremental_stats(
+    path: &str,
+    iters: usize,
+    warmup: usize,
+    json_out: bool,
+) -> Result<()> {
     let dir = Path::new(path);
     if !dir.is_dir() {
         anyhow::bail!("incremental-stats expects a project directory, got `{path}`");

@@ -153,7 +153,9 @@ pub fn compare_value(
 /// Bucket reason strings into a histogram sorted by count desc, ties by reason
 /// asc (deterministic output; the JS run's skip histogram IS the emitter work
 /// list, so ordering must be stable).
-pub fn reason_histogram<'a>(reasons: impl IntoIterator<Item = &'a str>) -> Vec<(String, usize)> {
+pub(crate) fn reason_histogram<'a>(
+    reasons: impl IntoIterator<Item = &'a str>,
+) -> Vec<(String, usize)> {
     let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     for r in reasons {
         *counts.entry(r).or_insert(0) += 1;

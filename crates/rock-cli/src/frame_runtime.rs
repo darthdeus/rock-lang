@@ -6,7 +6,11 @@ pub struct CompiledGame {
     pub artifact_fingerprint: String,
 }
 
-pub fn compile_game_for_run(backend: Backend, path: &str, output: &str) -> Result<CompiledGame> {
+pub(crate) fn compile_game_for_run(
+    backend: Backend,
+    path: &str,
+    output: &str,
+) -> Result<CompiledGame> {
     prepare_game_compile(path)?;
     let artifact = crate::game_compile::compile_game(backend, path, std::path::Path::new(output))?;
     Ok(CompiledGame {

@@ -6,7 +6,6 @@ pub struct PreprocessorLexer<'a> {
     bytes: &'a [u8],
     position: usize,
     line: usize,
-    column: usize,
 }
 
 impl<'a> PreprocessorLexer<'a> {
@@ -16,7 +15,6 @@ impl<'a> PreprocessorLexer<'a> {
             bytes: input.as_bytes(),
             position: 0,
             line: 1,
-            column: 1,
         }
     }
 
@@ -62,7 +60,6 @@ impl<'a> PreprocessorLexer<'a> {
 
     fn parse_directive(&mut self) -> Option<Directive> {
         let start_line = self.line;
-        let start_column = self.column;
         let _start_pos = self.position;
 
         // Consume the #
@@ -97,7 +94,6 @@ impl<'a> PreprocessorLexer<'a> {
             directive_type,
             condition,
             line: start_line,
-            column: start_column,
         })
     }
 
@@ -184,10 +180,8 @@ impl<'a> PreprocessorLexer<'a> {
             return;
         };
         self.position += 1;
-        (self.line, self.column) = if byte == b'\n' {
-            (self.line + 1, 1)
-        } else {
-            (self.line, self.column + 1)
-        };
+        if byte == b'\n' {
+            self.line += 1;
+        }
     }
 }

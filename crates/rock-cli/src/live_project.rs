@@ -164,6 +164,7 @@ impl LiveProject {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn enable_route_profile(&mut self) {
         self.route_profile_enabled = true;
     }
@@ -176,6 +177,7 @@ impl LiveProject {
         self.lint_cache.commit_body_transaction();
     }
 
+    #[cfg(test)]
     pub fn recompile(&mut self, changed: &[PathBuf]) -> Result<LiveUpdate> {
         self.recompile_for_publication(changed)
             .map(|(update, _snapshot)| update)

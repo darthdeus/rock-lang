@@ -1,5 +1,4 @@
 pub use colored::*;
-pub use fs_extra::{copy_items, dir::CopyOptions};
 pub use notify_debouncer_full::DebouncedEvent;
 pub use std::path::PathBuf;
 pub use walkdir::WalkDir;
@@ -64,7 +63,7 @@ mod parallel_runner;
 pub mod skull_backend;
 mod test;
 pub mod test_protocol;
-pub use test::{TestFilter, TestMetadata, find_test_functions_from_sources};
+pub(crate) use test::TestFilter;
 pub mod modules_analysis;
 mod modules_audit;
 mod modules_fix;
@@ -89,7 +88,6 @@ pub use dispatcher::*;
 pub use file_watcher::*;
 pub use formatting::*;
 pub use registry::{BackendSpec, CliCommand, Operation};
-pub use unified_compile::*;
 pub use watch::*;
 
 /// Compiler backend selected via `--backend` / `ROCK_BACKEND`. Each variant's

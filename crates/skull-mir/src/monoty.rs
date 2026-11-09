@@ -983,13 +983,6 @@ impl MonoInterner {
         f(&self.arena.read().expect("mono arena poisoned"))
     }
 
-    /// Mutable access under one lock, for a caller doing several interns.
-    pub fn with_mut<R>(&self, f: impl FnOnce(&mut MonoArena) -> R) -> R {
-        self.write_acqs
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        f(&mut self.arena.write().expect("mono arena poisoned"))
-    }
-
     pub fn stats(&self) -> MonoInternerStats {
         use std::sync::atomic::Ordering;
         let (intern_attempts, intern_new, types) = self.with(|a| {

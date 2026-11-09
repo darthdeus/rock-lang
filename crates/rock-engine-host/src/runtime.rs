@@ -179,9 +179,6 @@ pub fn lua_path_value() -> String {
 /// file path template stone hands to `SetCaptureFilePathTemplate`
 /// (RenderDoc appends `_frame<N>.rdc`).
 pub const RENDERDOC_ENV: &str = "STONE_RENDERDOC";
-/// Optional swap count after which stone auto-triggers one capture.
-/// Without it, captures are manual via `stone_renderdoc_trigger_capture`.
-pub const RENDERDOC_FRAME_ENV: &str = "STONE_RENDERDOC_FRAME";
 /// Optional explicit `librenderdoc.so` path for the preload gate.
 pub const RENDERDOC_LIB_ENV: &str = "STONE_RENDERDOC_LIB";
 
@@ -202,7 +199,7 @@ pub fn resolve_renderdoc_lib() -> std::ffi::OsString {
     )
 }
 
-pub(crate) fn resolve_renderdoc_lib_with(
+pub fn resolve_renderdoc_lib_with(
     lib_override: Option<std::ffi::OsString>,
     path_var: Option<std::ffi::OsString>,
 ) -> std::ffi::OsString {

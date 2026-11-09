@@ -190,7 +190,11 @@ enum Landing {
 /// anywhere else it names several definitions at once and is ambiguous too.
 /// Every input exists before any body lowers, so a fresh build and an
 /// incremental re-lower decide alike.
-pub fn resolve_legacy_bare(ws: &Workspace, file: Ustr, name: Ustr) -> Result<Resolved, String> {
+pub(crate) fn resolve_legacy_bare(
+    ws: &Workspace,
+    file: Ustr,
+    name: Ustr,
+) -> Result<Resolved, String> {
     match legacy_name(ws, file, name) {
         LegacyName::Bare => Ok(plain(name)),
         LegacyName::Projected(entries) => projected(name, &entries),

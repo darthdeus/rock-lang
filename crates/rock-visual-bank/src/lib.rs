@@ -16,7 +16,6 @@ macro_rules! bank_file_name {
         "visual_bank.jsonl"
     };
 }
-pub const BANK_FILE_NAME: &str = bank_file_name!();
 /// The bank's path inside a game project.
 pub const BANK_PATH: &str = concat!("assets/", bank_file_name!());
 /// A sheet file is `<asset root>/.eat/<dir>/<name>`.
@@ -27,8 +26,6 @@ pub const RELIGHT_CHANNELS: [&str; 4] = ["albedo", "normal", "depth", "material"
 /// The number of bake directions (Eat's `bake::DIRECTIONS`); a character
 /// line's camera holds one basis per direction.
 pub const DIRECTION_COUNT: usize = 8;
-
-pub type JointTrackSet = BTreeMap<String, Vec<Vec<[f32; 3]>>>;
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -287,15 +284,6 @@ pub struct SheetGeometry {
 }
 
 impl SheetGeometry {
-    pub fn validate(&self, animation: &AnimationLine) -> Result<()> {
-        self.validate_layout(
-            animation.size,
-            animation.cell,
-            animation.frames as usize,
-            DIRECTION_COUNT,
-        )
-    }
-
     pub fn validate_layout(
         &self,
         size: [u32; 2],
@@ -365,18 +353,6 @@ impl Line {
             Line::Prop(line) => Some(&line.dir),
             Line::Surface(line) => Some(&line.dir),
             Line::Texture(line) => Some(&line.dir),
-        }
-    }
-
-    pub fn dir_mut(&mut self) -> Option<&mut String> {
-        match self {
-            Line::Character(_) => None,
-            Line::Animation(line) => Some(&mut line.dir),
-            Line::Architecture(line) => Some(&mut line.dir),
-            Line::Icon(line) => Some(&mut line.dir),
-            Line::Prop(line) => Some(&mut line.dir),
-            Line::Surface(line) => Some(&mut line.dir),
-            Line::Texture(line) => Some(&mut line.dir),
         }
     }
 

@@ -208,10 +208,9 @@ pub fn shader_library_session(
     Ok(ShaderLibrarySession { graph, scx, view })
 }
 
-/// The graph, lowering context and registered-program population kept together
+/// The lowering context and registered-program population kept together
 /// for routes that do not already own a `skull::shader_artifact` view.
 pub struct ShaderProgramSession {
-    pub graph: InstanceGraph,
     pub scx: ScalarCtx,
     pub view: ShaderProgramView,
 }
@@ -427,7 +426,7 @@ pub fn shader_program_session(
     let graph = skull_graph::instance_graph::build_in(ws, roots, false, Arc::clone(&interner));
     let scx = ScalarCtx::new_values_first_class(ws).sharing(interner);
     let view = realize_shader_program_view(ws, &graph, program)?;
-    Ok(ShaderProgramSession { graph, scx, view })
+    Ok(ShaderProgramSession { scx, view })
 }
 
 fn checked_library_callees(

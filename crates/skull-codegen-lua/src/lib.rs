@@ -67,7 +67,6 @@ use skull_mir::cfg::{PredMap, predecessors, reachable_blocks_from, reverse_posto
 use skull_mir::mir::*;
 use skull_mir::monoty::MonoInterner;
 
-pub use regalloc::color_cells;
 pub use skull_mir::mangle::mangle_fn;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]

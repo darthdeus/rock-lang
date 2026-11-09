@@ -102,7 +102,10 @@ mod tests {
 /// `rock watch` and the profiling tools shipped broken (each new entry point
 /// silently forgot the obligation). Type-check-only paths never need values
 /// and the LSP never runs commands, so neither reaches this.
-pub fn stamp_workspace(ws: &mut bone_semantic::inference::Workspace, anchor: &Path) -> Result<()> {
+pub(crate) fn stamp_workspace(
+    ws: &mut bone_semantic::inference::Workspace,
+    anchor: &Path,
+) -> Result<()> {
     ws.comptime_inputs = resolve_checked_inputs(ws, inputs_for_entry_path(anchor)?, |_| None)?;
     Ok(())
 }

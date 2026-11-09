@@ -1,13 +1,6 @@
-/// Aggregate LoC stats for one compile. Filled by the tokenizer as a
-/// byproduct of parsing (see `rock_tokenizer::count_source_stats`) and
-/// surfaced alongside compile-time prints as a `loc/sec` figure
-/// comparable to https://wiki.alopex.li/LanguageCompilationSpeed.
-///
-/// Per-file `CompileStats` values are produced during the per-module
-/// parse loop and `merge`'d into the storage-level aggregate. Counting
-/// piggybacks on the existing tokenizer pass — no extra byte walk —
-/// and uses the tokenizer's notion of comment vs. string-literal, so a
-/// `//` or `/*` inside a string is correctly classified as code.
+/// Aggregate LoC stats for one compile, surfaced alongside compile-time
+/// prints as a `loc/sec` figure comparable to
+/// https://wiki.alopex.li/LanguageCompilationSpeed.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CompileStats {
     pub files: usize,

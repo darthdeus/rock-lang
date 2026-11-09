@@ -31,17 +31,12 @@ pub(crate) fn detached_region_blocks(func: &MirFunc, entry: Idx<Block>) -> HashS
 /// closure conversion over it. The detached function receives the coroutine
 /// state table as its only parameter; cells owned by the coroutine root still
 /// resolve through that table, while cells introduced by the region are locals.
-pub struct LoweredDetachedRegion {
-    pub source: MirFunc,
-    pub lowered: MirFunc,
-}
-
-pub fn lower_detached_region_with_source(
+pub(crate) fn lower_detached_region(
     source: &MirFunc,
     entry: Idx<Block>,
     name: &str,
     frame: &FrameInfo,
-) -> LoweredDetachedRegion {
+) -> MirFunc {
     let region = detached_region_blocks(source, entry);
     let mut aux = source.clone();
     aux.name = Ustr::from(name);
@@ -98,7 +93,6 @@ pub fn lower_detached_region_with_source(
         }
     }
 
-    let source = aux.clone();
     convert_closures_framed(&mut aux, name, Some(frame), None);
     let aux_entry = aux.entry;
     materialize_frame_cells(&mut aux, aux_entry, frame.s_cell, &frame.slots);
@@ -108,19 +102,7 @@ pub fn lower_detached_region_with_source(
             .any(|(_, inst)| matches!(inst, Inst::Lambda { .. })),
         "detached region `{name}` retained an Inst::Lambda after conversion"
     );
-    LoweredDetachedRegion {
-        source,
-        lowered: aux,
-    }
-}
-
-pub fn lower_detached_region(
-    source: &MirFunc,
-    entry: Idx<Block>,
-    name: &str,
-    frame: &FrameInfo,
-) -> MirFunc {
-    lower_detached_region_with_source(source, entry, name, frame).lowered
+    aux
 }
 
 fn detached_region_site(
@@ -139,7 +121,10 @@ fn detached_region_site(
 /// their ordinary `MirFunc` copies have been made. This keeps the old inline
 /// emitter path structurally unreachable and gives the residual census a single
 /// zero-valued answer.
-pub fn erase_detached_lambdas(func: &mut MirFunc, entries: impl IntoIterator<Item = Idx<Block>>) {
+pub(crate) fn erase_detached_lambdas(
+    func: &mut MirFunc,
+    entries: impl IntoIterator<Item = Idx<Block>>,
+) {
     let mut detached = HashSet::default();
     for entry in entries {
         detached.extend(detached_region_blocks(func, entry));

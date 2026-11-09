@@ -598,6 +598,7 @@ pub fn canonicalize_lenient(path: &str) -> String {
 
 impl BoneWorkspace {
     /// Set host lint policy before loading any project.
+    #[cfg(test)]
     pub fn with_lint_options(mut self, options: bone_lints::LintOptions) -> Self {
         assert!(
             self.projects.is_empty(),

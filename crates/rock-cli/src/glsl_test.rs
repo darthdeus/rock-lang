@@ -134,7 +134,11 @@ pub fn glsl_test(paths: &[String], skip_gpu: bool) -> Result<()> {
 
 /// Run the suite; optionally print per-unit lines as they complete. Public for
 /// the ratchet test (`print = false`).
-pub fn glsl_test_run(paths: &[String], print: bool, skip_gpu: bool) -> Result<GlslSuiteSummary> {
+pub(crate) fn glsl_test_run(
+    paths: &[String],
+    print: bool,
+    skip_gpu: bool,
+) -> Result<GlslSuiteSummary> {
     let (files, package_dirs) = crate::skull_backend::collect_test_units(paths)?;
 
     // A missing runner is a hard error (workspace artifact -- build it). Probe

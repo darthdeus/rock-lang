@@ -978,7 +978,10 @@ pub fn segment_target_def(ws: &Workspace, target: hir::SegmentTarget) -> Option<
 
 /// Every recorded path segment, in every module and body, that resolved to
 /// `target` ([`hir::PathSegmentRef`]).
-pub fn segments_naming(ws: &Workspace, target: hir::SegmentTarget) -> Vec<hir::PathSegmentRef> {
+pub(crate) fn segments_naming(
+    ws: &Workspace,
+    target: hir::SegmentTarget,
+) -> Vec<hir::PathSegmentRef> {
     let mut out = Vec::new();
     for m in ws.modules.iter() {
         out.extend(m.path_segments.iter().filter(|s| s.target == target));
@@ -4020,7 +4023,10 @@ impl VariantShape {
 
 /// Variant names of `enum_name` paired with their construction shape, across
 /// all modules. Drives the payload template in `EnumName::<cursor>` completion.
-pub fn enum_variants_with_shape(ws: &Workspace, enum_name: &str) -> Vec<(String, VariantShape)> {
+pub(crate) fn enum_variants_with_shape(
+    ws: &Workspace,
+    enum_name: &str,
+) -> Vec<(String, VariantShape)> {
     let name = Ustr::from(enum_name);
     for m in ws.modules.iter() {
         if let Some(idx) = m.enums_by_name.get(&name) {
@@ -4219,7 +4225,11 @@ pub struct UfcsMethod {
 /// UFCS methods callable as `recv.method(...)` on a value of struct `name`,
 /// in any scope; see `ufcs_methods_in_scope`.
 #[cfg(test)]
-pub fn ufcs_methods(ws: &Workspace, name: Ustr, recv_elem: Option<TyRef<'_>>) -> Vec<UfcsMethod> {
+pub(crate) fn ufcs_methods(
+    ws: &Workspace,
+    name: Ustr,
+    recv_elem: Option<TyRef<'_>>,
+) -> Vec<UfcsMethod> {
     ufcs_methods_in_scope(ws, name, recv_elem, None)
 }
 

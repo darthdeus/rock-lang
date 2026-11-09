@@ -186,14 +186,6 @@ impl CompilerError {
         render_all(std::slice::from_ref(self), sources)
     }
 
-    /// A one-line rendering with no source frame, for low-severity diagnostics
-    /// piped to a file: the frame excerpt costs most of the per-diagnostic
-    /// time and is worth little where nobody looks at it. Goes through
-    /// `colored`, which strips its escapes when stderr is not a terminal.
-    pub fn render_compact(&self) -> String {
-        self.one_line()
-    }
-
     /// This error's ariadne report with no source cache attached, so a batch
     /// render can share one cache across every report it emits.
     fn report(&self) -> ariadne::ReportBuilder<'static, (String, std::ops::Range<usize>)> {
@@ -445,7 +437,7 @@ mod tests {
     fn render_compact_uses_the_level_only_and_always_the_00_code() {
         let error = labelled();
         assert_eq!(
-            strip_ansi_sgr(&error.render_compact()),
+            strip_ansi_sgr(&error.one_line()),
             "[E00] Error: bad thing at main.rock:1:8"
         );
         assert_eq!(
@@ -453,7 +445,7 @@ mod tests {
                 &error
                     .clone()
                     .with_level(CompilerErrorLevel::Warning)
-                    .render_compact()
+                    .one_line()
             ),
             "[W00] Warning: bad thing at main.rock:1:8"
         );
@@ -462,7 +454,7 @@ mod tests {
                 &error
                     .clone()
                     .with_level(CompilerErrorLevel::Advice)
-                    .render_compact()
+                    .one_line()
             ),
             "[A00] Advice: bad thing at main.rock:1:8"
         );
@@ -471,12 +463,12 @@ mod tests {
                 &error
                     .clone()
                     .with_code(CompilerErrorCode::TokenizerError)
-                    .render_compact()
+                    .one_line()
             ),
             "[E00] Error: bad thing at main.rock:1:8"
         );
         assert_eq!(
-            strip_ansi_sgr(&CompilerError::new_no_location("nowhere".to_string()).render_compact()),
+            strip_ansi_sgr(&CompilerError::new_no_location("nowhere".to_string()).one_line()),
             "[E00] Error: nowhere"
         );
     }
@@ -532,7 +524,7 @@ mod tests {
             rendered,
             format!(
                 "{}\n{}",
-                strip_ansi_sgr(&stdlib.render_compact()),
+                strip_ansi_sgr(&stdlib.one_line()),
                 strip_ansi_sgr(&labelled().render(&files()))
             )
         );
@@ -628,8 +620,8 @@ mod tests {
             strip_ansi_sgr(&primary.render(&files()))
         );
         assert_eq!(
-            strip_ansi_sgr(&error.render_compact()),
-            strip_ansi_sgr(&primary.render_compact())
+            strip_ansi_sgr(&error.one_line()),
+            strip_ansi_sgr(&primary.one_line())
         );
     }
 

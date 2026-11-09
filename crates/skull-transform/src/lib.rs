@@ -33,10 +33,7 @@ pub use coroutine::{
 pub use coroutine_prepare::{
     CoroutineKeys, PreparedCoroutine, convert_named_nested_closures, prepare_coroutine,
 };
-pub use detached::{
-    LoweredDetachedRegion, erase_detached_lambdas, lower_detached_region,
-    lower_detached_region_with_source,
-};
+pub(crate) use detached::{erase_detached_lambdas, lower_detached_region};
 pub use forl::recover_counted_loops;
 pub use frame::{materialize_frame, materialize_frame_cells};
 pub use inline::{
@@ -48,7 +45,5 @@ pub use inline::{
 pub use load_store_census::{
     LoadStoreCensus, LoadStoreRow, cleanup_with_nobox_census, observe_cleanup,
 };
-pub use mem2reg::{Mem2RegPromotion, promote_direct_cells};
-pub use native_buffer::scalarize_native_buffer_stores;
 pub use nobox::{cleanup_with_nobox, flatten_nobox_nested_ctors, nobox_materialization_violations};
 pub(crate) use visit::{remap_inst, remap_term, top_level_blocks};

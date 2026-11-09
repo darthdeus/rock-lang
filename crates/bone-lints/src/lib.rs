@@ -19,16 +19,6 @@ pub struct UnusedVar {
     pub span: Span,
 }
 
-/// Unused local bindings in a single body. A binding is "used" iff some `Var`
-/// read or local callee references it; resolution is already baked into the
-/// HIR (`Expr::Var(Idx<BindingInfo>)`), so this is a flat arena walk with no
-/// inference and no scope tracking. `_`-prefixed names are silenced. `variants`
-/// is the workspace's enum-variant names (see [`enum_variant_names`]), used to
-/// drop payload-less match arms.
-pub fn unused_vars_in_body(body: &Body, variants: &FxHashSet<Ustr>) -> Vec<UnusedVar> {
-    unused_vars_in_body_with_metadata(body, variants, &FxHashSet::default())
-}
-
 fn unused_vars_in_body_with_metadata(
     body: &Body,
     variants: &FxHashSet<Ustr>,
@@ -4766,7 +4756,10 @@ pub const RAW_INPUT_CLASSIFICATION: &str = "action_layer_raw_input_classificatio
 /// Direct input observations are the census population. Action calls, input
 /// event injection, and tool-input helpers are intentionally separate APIs and
 /// therefore do not appear here.
-pub fn raw_input_sites_in_module(module: &Module, policy: &ActionLayerPolicy) -> Vec<RawInputSite> {
+pub(crate) fn raw_input_sites_in_module(
+    module: &Module,
+    policy: &ActionLayerPolicy,
+) -> Vec<RawInputSite> {
     let mut out = Vec::new();
     for body in module.bodies.values() {
         for (idx, expr) in body.expr_arena.iter() {

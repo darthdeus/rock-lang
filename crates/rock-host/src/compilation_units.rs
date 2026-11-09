@@ -36,8 +36,6 @@ pub enum CompilationUnit {
 /// Analyzes files in a directory and categorizes them by directive type
 pub fn analyze_files_in_directory(dir_path: impl AsRef<Path>) -> Result<FileAnalysis> {
     let mut project_files = Vec::new();
-    let mut script_files = Vec::new();
-    let mut test_files = Vec::new();
     let mut test_util_files = Vec::new();
 
     let dir_path_ref = dir_path.as_ref();
@@ -71,29 +69,20 @@ pub fn analyze_files_in_directory(dir_path: impl AsRef<Path>) -> Result<FileAnal
         let path = PathBuf::from(&file_path);
         let source_file = source_file_new(&path)?;
 
-        if source_file.is_script {
-            script_files.push(path);
-        } else if source_file.is_test {
-            test_files.push(path);
-        } else if source_file.is_test_util {
+        if source_file.is_script || source_file.is_test {
+            continue;
+        }
+        if source_file.is_test_util {
             test_util_files.push(path);
-        } else {
-            // Handle files without directives based on context
-            if is_tests_directory {
-                // In tests/ directory, treat files without directives as test files
-                test_files.push(path);
-            } else if has_stick_toml {
-                // In project directories, treat them as project files
+        } else if !is_tests_directory && has_stick_toml {
+            // Files without directives belong to the project unless they sit
+            // in a tests/ directory.
                 project_files.push(path);
-            }
-            // Otherwise, ignore files without directives
         }
     }
 
     Ok(FileAnalysis {
         project_files,
-        script_files,
-        test_files,
         test_util_files,
     })
 }
@@ -102,8 +91,6 @@ pub fn analyze_files_in_directory(dir_path: impl AsRef<Path>) -> Result<FileAnal
 #[derive(Debug, Clone)]
 pub struct FileAnalysis {
     pub project_files: Vec<PathBuf>,
-    pub script_files: Vec<PathBuf>,
-    pub test_files: Vec<PathBuf>,
     pub test_util_files: Vec<PathBuf>,
 }
 

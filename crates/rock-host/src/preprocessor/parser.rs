@@ -6,7 +6,6 @@ pub struct ConditionalBlock {
     pub condition: Option<String>,
     pub start_pos: usize,
     pub end_pos: usize,
-    pub start_line: usize,
 }
 
 /// A complete conditional construct (#if...#end)
@@ -91,7 +90,6 @@ impl PreprocessorParser {
 
         let mut current_block_start = *if_pos;
         let mut current_condition = if_directive.condition.clone();
-        let mut current_start_line = if_directive.line;
 
         i += 1;
 
@@ -105,13 +103,11 @@ impl PreprocessorParser {
                         condition: current_condition,
                         start_pos: current_block_start,
                         end_pos: *pos,
-                        start_line: current_start_line,
                     });
 
                     // Start new block
                     current_block_start = *pos;
                     current_condition = directive.condition.clone();
-                    current_start_line = directive.line;
                 }
                 DirectiveType::Else => {
                     // End current block
@@ -119,13 +115,11 @@ impl PreprocessorParser {
                         condition: current_condition,
                         start_pos: current_block_start,
                         end_pos: *pos,
-                        start_line: current_start_line,
                     });
 
                     // Start else block
                     current_block_start = *pos;
                     current_condition = None;
-                    current_start_line = directive.line;
                 }
                 DirectiveType::End => {
                     // End current block
@@ -135,7 +129,6 @@ impl PreprocessorParser {
                             condition: None,
                             start_pos: current_block_start,
                             end_pos: *pos,
-                            start_line: current_start_line,
                         });
                     } else {
                         // This is a regular conditional block
@@ -143,7 +136,6 @@ impl PreprocessorParser {
                             condition: current_condition,
                             start_pos: current_block_start,
                             end_pos: *pos,
-                            start_line: current_start_line,
                         });
                     }
 

@@ -61,6 +61,7 @@ impl SimRunRecorder {
 
     /// Start a recording under an explicit root. This is public so the
     /// recorder contract can be tested without writing into the repository.
+    #[cfg(test)]
     pub fn begin_at(
         root: &Path,
         project: &str,
@@ -240,7 +241,12 @@ impl SimRunRecorder {
 
     /// `env` is the child's effective sim environment, which timing
     /// baselines compare as part of the workload.
-    pub fn worker_spawn(&self, occurrence_id: u64, name: &str, env: &[(String, String)]) -> u64 {
+    pub(crate) fn worker_spawn(
+        &self,
+        occurrence_id: u64,
+        name: &str,
+        env: &[(String, String)],
+    ) -> u64 {
         let worker_id = match self.inner.lock() {
             Ok(mut state) => {
                 let id = state.next_worker_id;
@@ -344,7 +350,13 @@ impl SimRunRecorder {
     /// Provisional: runner-side post-checks (snapshot compare, artifact
     /// checks) run after the worker exits and can still fail the final
     /// result. Never marks the entry complete; only `entry_result` does.
-    pub fn entry_checkpoint(&self, worker_id: u64, occurrence_id: u64, name: &str, verdict: &str) {
+    pub(crate) fn entry_checkpoint(
+        &self,
+        worker_id: u64,
+        occurrence_id: u64,
+        name: &str,
+        verdict: &str,
+    ) {
         self.event(
             "entry_checkpoint",
             json!({

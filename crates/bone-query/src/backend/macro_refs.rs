@@ -30,7 +30,11 @@ pub fn macro_param_references(ast: &Ast, offset: usize) -> Vec<Span> {
 /// the registry, so a same-named FN call at a different arity (the 3-arg
 /// `run_into` fns beside the 2-arg macro) returns None and falls through to
 /// normal definition resolution.
-pub fn macro_invocation_def(ast: &Ast, registry: &MacroRegistry, offset: usize) -> Option<Span> {
+pub(crate) fn macro_invocation_def(
+    ast: &Ast,
+    registry: &MacroRegistry,
+    offset: usize,
+) -> Option<Span> {
     for ed in ast.exprs.values() {
         let ExprKind::FunctionCall { func, args, .. } = &ed.kind else {
             continue;

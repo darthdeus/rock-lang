@@ -722,7 +722,12 @@ impl<'a> LowerCtx<'a> {
         Ok(alloc_tys_contiguous(self, body, pos, nodes))
     }
 
-    pub fn type_node(&self, body: &Body, ty: TyId, _span: Span) -> Result<TypeExpr, CompilerError> {
+    pub(crate) fn type_node(
+        &self,
+        body: &Body,
+        ty: TyId,
+        _span: Span,
+    ) -> Result<TypeExpr, CompilerError> {
         match ty {
             TyId::Static(m, i) if m == self.module.module_id() => Ok(self.module.ty_arena[i]),
             TyId::Static(m, i) => Ok(self.workspace.module(m).ty_arena[i]),

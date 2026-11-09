@@ -3371,6 +3371,7 @@ impl IncrementalProject {
         self.cache.registered_sim_names(self.project.workspace())
     }
 
+    #[cfg(test)]
     pub fn enable_route_profile(&mut self) {
         self.route_profile_enabled = true;
         self.project.enable_route_profile();

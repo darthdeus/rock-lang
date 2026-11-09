@@ -147,7 +147,11 @@ impl Trivia {
     /// Standalone `//` comments on lines strictly between `after` and `before`
     /// (both 0-based, both exclusive), in source order: `(line, text-without-//)`.
     /// Used to recover comments inside delimited bodies the parser discards.
-    pub fn standalone_comments_between(&self, after: usize, before: usize) -> Vec<(usize, &str)> {
+    pub(crate) fn standalone_comments_between(
+        &self,
+        after: usize,
+        before: usize,
+    ) -> Vec<(usize, &str)> {
         if after + 1 >= before {
             return Vec::new();
         }

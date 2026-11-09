@@ -200,16 +200,6 @@ pub fn exclude_stdlib() -> Result<(), &'static str> {
     }
 }
 
-/// Contents of stdlib file `name` (one of [`STDLIB_NAMES`]). Panics on an
-/// unknown name: callers name a stdlib file they know exists.
-pub fn stdlib_source(name: &str) -> &'static str {
-    stdlib_files()
-        .iter()
-        .find(|f| f.name == name)
-        .unwrap_or_else(|| panic!("rock: `{name}` is not a stdlib file (see STDLIB_NAMES)"))
-        .contents
-}
-
 /// Stdlib source identity: the loaders key every stdlib file by
 /// [`stdlib_file_id`], and bone reads the compiler-owned `std` package and the
 /// std-only primitives back through [`is_stdlib_module_file`]. Defined in

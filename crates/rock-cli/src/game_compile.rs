@@ -10,7 +10,11 @@ pub struct GameArtifact {
     pub comptime_inputs: Option<bone_semantic::inference::ComptimeInputs>,
 }
 
-pub fn compile_game(backend: Backend, path: &str, output_dir: &Path) -> Result<GameArtifact> {
+pub(crate) fn compile_game(
+    backend: Backend,
+    path: &str,
+    output_dir: &Path,
+) -> Result<GameArtifact> {
     use anyhow::Context as _;
     use std::collections::HashSet;
 

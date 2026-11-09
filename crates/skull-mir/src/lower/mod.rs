@@ -370,7 +370,6 @@ use flat_ref::{
     FlatArgCapture, FlatCallOut, FlatRefKey, FlatStorage, FlatVariants, FlatVariantsHandle,
 };
 mod format;
-pub use format::{FmtNode, FmtPayload, FmtVariant, format_tree};
 mod interp;
 mod kinds;
 mod loops;

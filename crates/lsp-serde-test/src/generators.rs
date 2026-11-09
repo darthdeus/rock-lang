@@ -175,7 +175,9 @@ pub fn gen_workspace_symbol_client_capabilities(_rng: &mut StdRng) -> Vec<Value>
     ]
 }
 
-pub fn gen_document_on_type_formatting_registration_options(_rng: &mut StdRng) -> Vec<Value> {
+pub(crate) fn gen_document_on_type_formatting_registration_options(
+    _rng: &mut StdRng,
+) -> Vec<Value> {
     vec![
         json!({ "firstTriggerCharacter": "." }),
         json!({ "firstTriggerCharacter": ".", "documentSelector": null }),

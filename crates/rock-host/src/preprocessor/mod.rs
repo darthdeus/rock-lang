@@ -49,7 +49,6 @@ pub struct Directive {
     pub directive_type: DirectiveType,
     pub condition: Option<String>,
     pub line: usize,
-    pub column: usize,
 }
 
 /// Result of preprocessing a file
