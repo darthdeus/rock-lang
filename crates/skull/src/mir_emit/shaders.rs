@@ -177,12 +177,30 @@ pub(super) fn shader_registration_lines(
     let programs: Vec<(
         &skull_mir::lower::ShaderPair,
         &crate::shader_artifact::ShaderProgramView,
-    )> = collection.pairs.iter().zip(&view.program_views).collect();
+        Option<&skull_codegen_glsl::ShaderPlan>,
+    )> = collection
+        .pairs
+        .iter()
+        .zip(&view.program_views)
+        .zip(&view.program_plans)
+        .map(|((pair, program_view), plan)| (pair, program_view, plan.as_deref()))
+        .collect();
     let emissions: Vec<Result<skull_codegen_glsl::ShaderEmission, CompilerError>> = {
         use bone_core::prelude::*;
         programs
             .par_iter()
-            .map(|(pair, program_view)| {
+            .map(|(pair, program_view, plan)| {
+                // The view's profile pass already planned an accepted program;
+                // a program it did not plan is emitted from the view, which
+                // reports the same refusal at the same span.
+                if let Some(plan) = plan {
+                    return skull_codegen_glsl::render_shader_plan(
+                        ws,
+                        scx.interner(),
+                        plan,
+                        profile,
+                    );
+                }
                 // vert=None is the A3c single-arg fullscreen form -> the A1
                 // single-entry emitter (PIXEL body + fullscreen VERTEX passthrough).
                 match pair.vert {

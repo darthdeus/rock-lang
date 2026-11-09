@@ -151,6 +151,14 @@ fn the_shader_view_retains_the_helpers_its_entries_reach() {
         view.sites_walked > 0,
         "no site was walked, so the exclusions above say nothing"
     );
+    // The profile pass plans each accepted program once; emission renders
+    // that plan, so the view must hand one over per accepted program.
+    assert_eq!(view.program_plans.len(), view.program_views.len());
+    assert_eq!(
+        view.program_plans.iter().flatten().count(),
+        view.entries_checked - view.rejections.len(),
+        "an accepted program left the profile pass without its plan"
+    );
 
     // ...and the CPU artifact keeps both, so the exclusion above is the SHADER
     // view's decision rather than the program's.

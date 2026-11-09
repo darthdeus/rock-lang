@@ -79,6 +79,46 @@ pub use entry::*;
 pub use intrinsics::*;
 pub use library::*;
 pub use pipeline::*;
+
+/// A program's planned GLSL, kept from the profile check so that emission
+/// renders the same plan instead of planning the program a second time.
+pub struct ShaderPlan(ShaderPlanKind);
+
+enum ShaderPlanKind {
+    Pipeline(Box<pipeline::PipelinePlan>),
+    Entry(Box<entry::EntryPlan>),
+}
+
+/// Plan a program view: the profile check's whole work, whose result is
+/// what [`render_shader_plan`] emits.
+pub fn plan_shader_with_view(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    view: &ShaderProgramView,
+) -> Result<ShaderPlan, CompilerError> {
+    let kind = match view.program.vert {
+        Some(_) => ShaderPlanKind::Pipeline(Box::new(pipeline::plan_shader_pipeline_from_view(
+            ws, scx, view,
+        )?)),
+        None => ShaderPlanKind::Entry(Box::new(entry::plan_shader_entry_program(ws, scx, view)?)),
+    };
+    Ok(ShaderPlan(kind))
+}
+
+/// Render a kept plan against the interner it was planned with.
+pub fn render_shader_plan(
+    ws: &Workspace,
+    interner: &MonoInterner,
+    plan: &ShaderPlan,
+    profile: GlslProfile,
+) -> Result<ShaderEmission, CompilerError> {
+    match &plan.0 {
+        ShaderPlanKind::Pipeline(plan) => {
+            pipeline::render_shader_pipeline(ws, interner, plan, profile)
+        }
+        ShaderPlanKind::Entry(plan) => entry::render_shader_entry(ws, interner, plan, profile),
+    }
+}
 use profile::*;
 pub use value_test::*;
 

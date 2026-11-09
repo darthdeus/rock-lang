@@ -267,7 +267,7 @@ pub(crate) fn reject_population_cycles(
 /// is not what a summary of these checks could promise, and did not deliver: it
 /// accepted a standalone `@shader(vertex)` entry and never reached the
 /// layout/slot planning at all.
-struct EntryPlan {
+pub(crate) struct EntryPlan {
     fref: FuncRef,
     shape: EntryShape,
     stage: StagePlan,
@@ -285,6 +285,25 @@ fn plan_shader_entry_from_view(
     concrete_plans: &Arc<ConcretePlans>,
 ) -> Result<EntryPlan, CompilerError> {
     plan_shader_entry_inner(ws, scx, view.entry.func, view, concrete_plans)
+}
+
+/// The single-entry plan of a program view: the fragment stage planned, for
+/// a caller that keeps the plan and renders it later.
+pub(crate) fn plan_shader_entry_program(
+    ws: &Workspace,
+    scx: &ScalarCtx,
+    view: &ShaderProgramView,
+) -> Result<EntryPlan, CompilerError> {
+    let stage = view
+        .stages
+        .iter()
+        .find(|stage| stage.stage == ShaderStage::Fragment)
+        .ok_or_else(|| {
+            CompilerError::new_no_location(
+                "shader graph/view has no fragment stage for a single-entry shader".to_string(),
+            )
+        })?;
+    plan_shader_entry_from_view(ws, scx, stage, &view.concrete_plans)
 }
 
 fn plan_shader_entry_inner(
@@ -444,7 +463,7 @@ pub fn emit_shader_entry_with_view(
     render_shader_entry(ws, scx.interner(), &plan, profile)
 }
 
-fn render_shader_entry(
+pub(crate) fn render_shader_entry(
     ws: &Workspace,
     interner: &MonoInterner,
     plan: &EntryPlan,

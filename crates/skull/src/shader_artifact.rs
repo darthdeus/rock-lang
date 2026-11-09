@@ -110,6 +110,11 @@ pub struct ShaderArtifactView {
     /// `programs` slice. Missing graph roots remain represented by an empty
     /// stage list so a denominator cannot silently shrink.
     pub program_views: Vec<ShaderProgramView>,
+    /// The GLSL plan the profile pass built for each program it accepted,
+    /// aligned with `program_views`; emission renders these rather than
+    /// planning the program again. `None` where the program was not checked
+    /// or was rejected.
+    pub program_plans: Vec<Option<Arc<skull_codegen_glsl::ShaderPlan>>>,
 }
 
 impl ShaderArtifactView {
@@ -293,20 +298,24 @@ pub fn realize_shader_with_context_and_plans(
     let mut checked = 0usize;
     let mut missing_substitutions: BTreeSet<Instance> = BTreeSet::new();
     let mut programs_unchecked = 0usize;
+    let mut program_plans = Vec::with_capacity(program_views.len());
     for check in checks {
         match check {
-            ProgramCheck::Skipped => {}
+            ProgramCheck::Skipped => program_plans.push(None),
             ProgramCheck::Unchecked { missing } => {
                 programs_unchecked += 1;
                 missing_substitutions.extend(missing);
+                program_plans.push(None);
             }
             ProgramCheck::Checked {
                 rejection,
                 disagreements: program_disagreements,
+                plan,
             } => {
                 checked += 1;
                 rejections.extend(rejection);
                 disagreements.extend(program_disagreements);
+                program_plans.push(plan.map(Arc::new));
             }
         }
     }
@@ -336,6 +345,7 @@ pub fn realize_shader_with_context_and_plans(
         programs: req.programs.len(),
         sites_walked,
         program_views,
+        program_plans,
     })
 }
 
@@ -349,6 +359,8 @@ enum ProgramCheck {
     Checked {
         rejection: Option<ShaderRejection>,
         disagreements: Vec<String>,
+        /// The accepted program's plan, kept for emission.
+        plan: Option<skull_codegen_glsl::ShaderPlan>,
     },
 }
 
@@ -406,18 +418,19 @@ fn check_program(
         }
 
         let entry_cycle = cyclic.contains(root) || reaches_cycle(root, edges, cyclic);
-        let outcome = match program.vert {
-            Some(_) => skull_codegen_glsl::check_pipeline_profile_with_view(ws, scx, program_view),
-            None => skull_codegen_glsl::check_entry_profile_with_view(ws, scx, program_view),
-        };
+        // The profile pass IS the planning of the program; the plan it
+        // produces is kept so emission renders it instead of planning again.
+        let outcome = skull_codegen_glsl::plan_shader_with_view(ws, scx, program_view);
+        let mut plan = None;
         let rejection = match outcome {
-            Ok(()) => {
+            Ok(planned) => {
                 if entry_cycle {
                     disagreements.push(format!(
                         "`{}`: the retained instance relation has a cycle the GLSL pass accepted",
                         ws.module(root.func.module).functions[root.func.func].name
                     ));
                 }
+                plan = Some(planned);
                 None
             }
             Err(e) => {
@@ -445,6 +458,7 @@ fn check_program(
         ProgramCheck::Checked {
             rejection,
             disagreements,
+            plan,
         }
     }
 }
