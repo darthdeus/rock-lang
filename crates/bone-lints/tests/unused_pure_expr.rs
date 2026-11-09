@@ -49,34 +49,76 @@ fn flags_the_canonical_enum_comparison_bug() {
 }
 
 #[test]
-fn comparison_as_block_tail_is_not_flagged() {
-    // `x == 1` is the block tail (VALUE position) -- the fn returns it.
-    let src = "fn f() -> bool {\n    let x = 1\n    x == 1\n}";
-    assert_eq!(
-        count(src),
-        0,
-        "tail comparison is the return value, not a discard"
-    );
-}
-
-#[test]
-fn comparison_in_statement_if_branch_tail_is_not_flagged() {
-    // The critical trap: the branch block's tail is a value position, NOT a
-    // Statement::Expr -- even though the enclosing `if` is in statement position
-    // and the value is ultimately discarded. Conservative v1 does not flag it.
-    let src = "fn f() {\n    let x = 1\n    if x == 1 {\n        x == 2\n    }\n}";
-    assert_eq!(
-        count(src),
-        0,
-        "branch tails are not HIR statement positions"
-    );
-}
-
-#[test]
-fn non_final_statement_flagged_in_value_block() {
-    // The block yields `x` (value position); `x == 1` before it is a discard.
-    let src = "fn f() -> int {\n    let x = 1\n    x == 1\n    x\n}";
-    assert_eq!(count(src), 1);
+fn discarded_pure_expressions_are_counted() {
+    let cases: &[(&str, &str, usize)] = &[
+        // `x == 1` is the block tail (VALUE position) -- the fn returns it.
+        (
+            "comparison_as_block_tail_is_not_flagged",
+            "fn f() -> bool {\n    let x = 1\n    x == 1\n}",
+            0,
+        ),
+        // The critical trap: the branch block's tail is a value position, NOT a
+        // Statement::Expr -- even though the enclosing `if` is in statement position
+        // and the value is ultimately discarded. Conservative v1 does not flag it.
+        (
+            "comparison_in_statement_if_branch_tail_is_not_flagged",
+            "fn f() {\n    let x = 1\n    if x == 1 {\n        x == 2\n    }\n}",
+            0,
+        ),
+        // bare literal `5` is a discarded pure expr
+        ("flags_a_literal", "fn f() -> int {\n    5\n    3\n}", 1),
+        // field access `s.a` is pure and discarded
+        (
+            "flags_field_access_chain",
+            "struct S {\n    a: int,\n}\nfn f(s: S) -> int {\n    s.a\n    3\n}",
+            1,
+        ),
+        // bare tuple literal is pure and discarded
+        (
+            "flags_a_tuple_literal",
+            "fn f() -> int {\n    let x = 1\n    (x, x)\n    x\n}",
+            1,
+        ),
+        // calls may have effects
+        (
+            "call_is_not_flagged",
+            "fn g() {}\nfn f() -> int {\n    g()\n    3\n}",
+            0,
+        ),
+        // assignment is a write, not a pure discard
+        (
+            "assignment_is_not_flagged",
+            "fn f() -> int {\n    let x = 1\n    x = 2\n    x\n}",
+            0,
+        ),
+        (
+            "compound_assign_is_not_flagged",
+            "fn f() -> int {\n    let x = 0\n    x += 1\n    x\n}",
+            0,
+        ),
+        // index may OOB-error; conservatively skipped
+        (
+            "index_is_not_flagged",
+            "fn f() -> int {\n    let xs = [1, 2, 3]\n    xs[0]\n    3\n}",
+            0,
+        ),
+        // UFCS/method calls may have effects
+        (
+            "method_call_is_not_flagged",
+            "fn f() -> int {\n    let xs = [1, 2, 3]\n    xs.push(4)\n    3\n}",
+            0,
+        ),
+        // `g()` inside the comparison has effects, so the statement is not
+        // side-effect-free by construction -- don't flag.
+        (
+            "comparison_with_call_operand_is_not_flagged",
+            "fn g() -> int { 1 }\nfn f() -> int {\n    let x = 1\n    g() == x\n    x\n}",
+            0,
+        ),
+    ];
+    for (name, src, expected) in cases {
+        assert_eq!(count(src), *expected, "{name}");
+    }
 }
 
 #[test]
@@ -88,18 +130,6 @@ fn flags_bare_variable_read() {
 }
 
 #[test]
-fn flags_a_literal() {
-    let src = "fn f() -> int {\n    5\n    3\n}";
-    assert_eq!(count(src), 1, "bare literal `5` is a discarded pure expr");
-}
-
-#[test]
-fn flags_field_access_chain() {
-    let src = "struct S {\n    a: int,\n}\nfn f(s: S) -> int {\n    s.a\n    3\n}";
-    assert_eq!(count(src), 1, "field access `s.a` is pure and discarded");
-}
-
-#[test]
 fn flags_logical_binop() {
     let src = "fn f() -> int {\n    let x = 1\n    x > 0 && x < 5\n    x\n}";
     let fs = findings(src);
@@ -108,50 +138,6 @@ fn flags_logical_binop() {
         !fs[0].is_comparison,
         "a logical `&&` root is generic, not a comparison"
     );
-}
-
-#[test]
-fn flags_a_tuple_literal() {
-    let src = "fn f() -> int {\n    let x = 1\n    (x, x)\n    x\n}";
-    assert_eq!(count(src), 1, "bare tuple literal is pure and discarded");
-}
-
-#[test]
-fn call_is_not_flagged() {
-    let src = "fn g() {}\nfn f() -> int {\n    g()\n    3\n}";
-    assert_eq!(count(src), 0, "calls may have effects");
-}
-
-#[test]
-fn assignment_is_not_flagged() {
-    let src = "fn f() -> int {\n    let x = 1\n    x = 2\n    x\n}";
-    assert_eq!(count(src), 0, "assignment is a write, not a pure discard");
-}
-
-#[test]
-fn compound_assign_is_not_flagged() {
-    let src = "fn f() -> int {\n    let x = 0\n    x += 1\n    x\n}";
-    assert_eq!(count(src), 0, "compound assign mutates");
-}
-
-#[test]
-fn index_is_not_flagged() {
-    let src = "fn f() -> int {\n    let xs = [1, 2, 3]\n    xs[0]\n    3\n}";
-    assert_eq!(count(src), 0, "index may OOB-error; conservatively skipped");
-}
-
-#[test]
-fn method_call_is_not_flagged() {
-    let src = "fn f() -> int {\n    let xs = [1, 2, 3]\n    xs.push(4)\n    3\n}";
-    assert_eq!(count(src), 0, "UFCS/method calls may have effects");
-}
-
-#[test]
-fn comparison_with_call_operand_is_not_flagged() {
-    // `g()` inside the comparison has effects, so the statement is not
-    // side-effect-free by construction -- don't flag.
-    let src = "fn g() -> int { 1 }\nfn f() -> int {\n    let x = 1\n    g() == x\n    x\n}";
-    assert_eq!(count(src), 0, "an operand call defeats purity");
 }
 
 #[test]

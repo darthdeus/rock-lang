@@ -40,46 +40,38 @@ fn names(body: &str) -> Vec<String> {
 }
 
 #[test]
-fn transmute_of_nullable_int_is_flagged() {
-    assert_eq!(
-        names("fn main() -> int {\n    let _x: int = transmute(maybe_int())\n    3\n}"),
-        vec!["transmute".to_string()]
-    );
+fn stripping_casts_are_flagged() {
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "transmute_of_nullable_int_is_flagged",
+            "fn main() -> int {\n    let _x: int = transmute(maybe_int())\n    3\n}",
+            "transmute",
+        ),
+        (
+            "cast_strips_nullability_is_flagged",
+            "fn main() -> int {\n    let _x: int = cast(maybe_int())\n    3\n}",
+            "cast",
+        ),
+    ];
+    for (name, body, callee) in cases {
+        assert_eq!(names(body), [*callee], "{name}");
+    }
 }
 
 #[test]
-fn cast_strips_nullability_is_flagged() {
-    assert_eq!(
-        names("fn main() -> int {\n    let _x: int = cast(maybe_int())\n    3\n}"),
-        vec!["cast".to_string()]
-    );
-}
-
-#[test]
-fn cast_preserving_nullability_is_not_flagged() {
-    let ns = names("fn main() -> int {\n    let _x: int? = cast(maybe_int())\n    3\n}");
-    assert!(
-        ns.is_empty(),
-        "cast<int?> preserves nullability, must not flag: {ns:?}"
-    );
-}
-
-#[test]
-fn cast_on_non_nullable_is_not_flagged() {
-    let ns = names("fn main() -> int {\n    let _x: int = cast(always_int())\n    3\n}");
-    assert!(
-        ns.is_empty(),
-        "non-nullable input has nothing to strip: {ns:?}"
-    );
-}
-
-#[test]
-fn transmute_on_non_nullable_is_not_flagged() {
-    let ns = names("fn main() -> int {\n    let _x: int = transmute(always_int())\n    3\n}");
-    assert!(
-        ns.is_empty(),
-        "transmute of non-nullable must not flag: {ns:?}"
-    );
+fn nullability_preserving_casts_are_not_flagged() {
+    let cases: &[&str] = &[
+        // cast<int?> preserves nullability, must not flag
+        "fn main() -> int {\n    let _x: int? = cast(maybe_int())\n    3\n}",
+        // non-nullable input has nothing to strip
+        "fn main() -> int {\n    let _x: int = cast(always_int())\n    3\n}",
+        // transmute of non-nullable must not flag
+        "fn main() -> int {\n    let _x: int = transmute(always_int())\n    3\n}",
+    ];
+    for body in cases {
+        let ns = names(body);
+        assert!(ns.is_empty(), "{body}: {ns:?}");
+    }
 }
 
 #[test]

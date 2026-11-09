@@ -68,62 +68,107 @@ fn prelude_alone_is_clean() {
     assert!(fs.is_empty(), "prelude must contribute no findings: {fs:?}");
 }
 
-// --- store classes --------------------------------------------------------
-
 #[test]
-fn store_into_global_is_flagged() {
-    assert_eq!(
-        kinds("fn main() {\n    let e = some_entity()\n    CACHED = e.get()\n}"),
-        vec![EscapeKind::StoreGlobal]
-    );
-}
-
-#[test]
-fn store_into_struct_field_is_flagged() {
-    assert_eq!(
-        kinds("fn main() {\n    let e = some_entity()\n    HOLDER.mob = e.get()\n}"),
-        vec![EscapeKind::StoreField]
-    );
-}
-
-#[test]
-fn store_into_struct_literal_field_is_flagged() {
-    assert_eq!(
-        kinds(
-            "fn main() {\n    let e = some_entity()\n    let m = e.get()\n    HOLDER = Holder { mob: m }\n}"
+fn each_escaping_shape_reports_its_kind() {
+    let cases: &[(&str, &str, EscapeKind)] = &[
+        (
+            "store_into_global_is_flagged",
+            "fn main() {\n    let e = some_entity()\n    CACHED = e.get()\n}",
+            EscapeKind::StoreGlobal,
         ),
-        vec![EscapeKind::StoreField]
-    );
-}
-
-#[test]
-fn push_into_collection_is_flagged() {
-    assert_eq!(
-        kinds(
-            "fn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    BAG.push(m)\n}"
+        (
+            "store_into_struct_field_is_flagged",
+            "fn main() {\n    let e = some_entity()\n    HOLDER.mob = e.get()\n}",
+            EscapeKind::StoreField,
         ),
-        vec![EscapeKind::StoreCollection]
-    );
-}
-
-#[test]
-fn index_store_into_collection_is_flagged() {
-    assert_eq!(
-        kinds(
-            "fn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    BAG[0] = m\n}"
+        (
+            "store_into_struct_literal_field_is_flagged",
+            "fn main() {\n    let e = some_entity()\n    let m = e.get()\n    HOLDER = Holder { mob: m }\n}",
+            EscapeKind::StoreField,
         ),
-        vec![EscapeKind::StoreCollection]
-    );
-}
-
-#[test]
-fn static_local_store_is_flagged() {
-    assert_eq!(
-        kinds(
-            "fn main() {\n    let e = some_entity()\n    static keep: Mob? = e.get()\n    let _u = keep\n}"
+        (
+            "push_into_collection_is_flagged",
+            "fn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    BAG.push(m)\n}",
+            EscapeKind::StoreCollection,
         ),
-        vec![EscapeKind::StoreStatic]
-    );
+        (
+            "index_store_into_collection_is_flagged",
+            "fn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    BAG[0] = m\n}",
+            EscapeKind::StoreCollection,
+        ),
+        (
+            "static_local_store_is_flagged",
+            "fn main() {\n    let e = some_entity()\n    static keep: Mob? = e.get()\n    let _u = keep\n}",
+            EscapeKind::StoreStatic,
+        ),
+        (
+            "closure_capturing_a_row_is_flagged",
+            "fn take(f: () -> int) -> int { return f() }\nfn main() -> int {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    return take(() => m.hp)\n}",
+            EscapeKind::ClosureCapture,
+        ),
+        (
+            "erasing_a_row_into_any_is_flagged",
+            "fn sink(x: any) -> int { return 0 }\nfn main() -> int {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    return sink(m)\n}",
+            EscapeKind::AnyErasure,
+        ),
+        (
+            "passing_a_row_to_an_extern_is_flagged",
+            "extern(lua) fn host_take(m: Mob) -> int\nfn main() -> int {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    return host_take(m)\n}",
+            EscapeKind::FfiArg,
+        ),
+        (
+            "row_held_across_a_yield_is_flagged",
+            "co fn bad(e: Entity<Mob>) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    yield 1\n    m.hp -= 10\n}",
+            EscapeKind::AcrossYield,
+        ),
+        // Only the then-arm suspends, but the read after the `if` is reachable
+        // through it, so the binding is stale on one path.
+        (
+            "suspension_on_one_branch_taints_the_merge",
+            "co fn f(e: Entity<Mob>, c: bool) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    if c {\n        yield 1\n    }\n    m.hp -= 1\n}",
+            EscapeKind::AcrossYield,
+        ),
+        // Textually the read PRECEDES the yield, so a source-offset rule sees
+        // nothing. The back edge is the suspension: from iteration two on, the
+        // binding was fetched before a `yield` that already ran.
+        (
+            "read_before_the_loops_yield_is_flagged_via_the_back_edge",
+            "co fn f(e: Entity<Mob>) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    for _i in 0..3 {\n        m.hp -= 1\n        yield 1\n    }\n}",
+            EscapeKind::AcrossYield,
+        ),
+        (
+            "arena_get_is_a_row_source",
+            "fn main() {\n    let e = some_entity()\n    CACHED = MOBS.get(e)\n}",
+            EscapeKind::StoreGlobal,
+        ),
+        (
+            "arena_iteration_binding_is_a_row_source",
+            "fn main() {\n    for m in MOBS {\n        BAG.push(m)\n    }\n}",
+            EscapeKind::StoreCollection,
+        ),
+        // Current limitation: `Scene<T>.get()` hands out an ordinary `T?`
+        // that dies with the Scene, so a stored root is the same defect shape.
+        (
+            "scene_root_is_a_row_source",
+            "global ROOT: Mob? = null\nfn main() {\n    let s: Scene<Mob> = Scene { _scene_id: 1 }\n    ROOT = scene_root(s)\n}",
+            EscapeKind::StoreGlobal,
+        ),
+        (
+            "a_row_aliased_through_a_local_still_escapes",
+            "fn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    let alias = m\n    BAG.push(alias)\n}",
+            EscapeKind::StoreCollection,
+        ),
+        // The other side of the same rule: without an explicit `return`, the tail
+        // IS the returned value. Narrowing the rule above must not disarm this.
+        (
+            "a_trailing_row_in_a_returning_fn_is_still_flagged",
+            "fn leak(e: Entity<Mob>) -> Mob? {\n    e.get()\n}",
+            EscapeKind::Return,
+        ),
+    ];
+    for (name, src, kind) in cases {
+        assert_eq!(kinds(src), vec![*kind], "{name}");
+    }
 }
 
 // --- return, capture, erasure --------------------------------------------
@@ -166,249 +211,42 @@ fn escape_classes_partition_the_kinds() {
 }
 
 #[test]
-fn closure_capturing_a_row_is_flagged() {
-    assert_eq!(
-        kinds(
-            "fn take(f: () -> int) -> int { return f() }\nfn main() -> int {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    return take(() => m.hp)\n}"
-        ),
-        vec![EscapeKind::ClosureCapture]
-    );
-}
-
-#[test]
-fn erasing_a_row_into_any_is_flagged() {
-    assert_eq!(
-        kinds(
-            "fn sink(x: any) -> int { return 0 }\nfn main() -> int {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    return sink(m)\n}"
-        ),
-        vec![EscapeKind::AnyErasure]
-    );
-}
-
-#[test]
-fn passing_a_row_to_an_extern_is_flagged() {
-    assert_eq!(
-        kinds(
-            "extern(lua) fn host_take(m: Mob) -> int\nfn main() -> int {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    return host_take(m)\n}"
-        ),
-        vec![EscapeKind::FfiArg]
-    );
-}
-
-// --- suspension -----------------------------------------------------------
-
-#[test]
-fn row_held_across_a_yield_is_flagged() {
-    assert_eq!(
-        kinds(
-            "co fn bad(e: Entity<Mob>) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    yield 1\n    m.hp -= 10\n}"
-        ),
-        vec![EscapeKind::AcrossYield]
-    );
-}
-
-// --- flow precision the walk buys over source ordering --------------------
-//
-// Ported with the walk from the `lints` branch (`fa7a65204`). Each of these is
-// a case a source-offset rule answers wrong: it can see that a read follows a
-// `yield` textually, but not which PATHS reach it.
-
-#[test]
-fn suspension_on_one_branch_taints_the_merge() {
-    // Only the then-arm suspends, but the read after the `if` is reachable
-    // through it, so the binding is stale on one path.
-    assert_eq!(
-        kinds(
-            "co fn f(e: Entity<Mob>, c: bool) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    if c {\n        yield 1\n    }\n    m.hp -= 1\n}"
-        ),
-        vec![EscapeKind::AcrossYield]
-    );
-}
-
-#[test]
-fn bind_and_use_within_one_iteration_is_clean() {
-    // Re-fetched at the top of each iteration and finished with before the
-    // suspension -- the correct loop shape.
-    let ks = kinds(
+fn correct_row_handling_is_clean() {
+    // Each is the CORRECT rewrite of a flagged shape. A lint that reports
+    // these is one nobody will run twice, and a census built on it is noise.
+    let cases: &[&str] = &[
+        // Re-fetched at the top of each iteration and finished with before the
+        // suspension -- the correct loop shape.
         "co fn f(e: Entity<Mob>) -> Coroutine<int> {\n    for _i in 0..3 {\n        let m = unwrap(e.get())\n        m.hp -= 1\n        yield 1\n    }\n}",
-    );
-    assert!(
-        ks.is_empty(),
-        "bound and used before the yield, every iteration: {ks:?}"
-    );
-}
-
-#[test]
-fn read_before_the_loops_yield_is_flagged_via_the_back_edge() {
-    // Textually the read PRECEDES the yield, so a source-offset rule sees
-    // nothing. The back edge is the suspension: from iteration two on, the
-    // binding was fetched before a `yield` that already ran.
-    assert_eq!(
-        kinds(
-            "co fn f(e: Entity<Mob>) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    for _i in 0..3 {\n        m.hp -= 1\n        yield 1\n    }\n}"
-        ),
-        vec![EscapeKind::AcrossYield]
-    );
-}
-
-#[test]
-fn refetch_into_the_same_local_clears_the_taint() {
-    // The fix the sims apply: `m = e.get().unwrap()` after each suspension.
-    // A rebind must clear `crossed`, or the correct program stays flagged.
-    let ks = kinds(
+        // The fix the sims apply: `m = e.get().unwrap()` after each suspension.
+        // A rebind must clear `crossed`, or the correct program stays flagged.
         "co fn f(e: Entity<Mob>) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    yield 1\n    m = unwrap(e.get())\n    m.hp -= 1\n}",
-    );
-    assert!(
-        ks.is_empty(),
-        "re-fetching into the same local is the documented fix: {ks:?}"
-    );
-}
-
-#[test]
-fn scalar_payload_is_not_tracked() {
-    // `Entity<int>` hands back the value itself -- nothing points at the arena,
-    // so holding it across a suspension is safe.
-    let ks = kinds(
+        // `Entity<int>` hands back the value itself -- nothing points at the arena,
+        // so holding it across a suspension is safe.
         "co fn f(e: Entity<int>) -> Coroutine<int> {\n    let n = unwrap(e.get())\n    yield 1\n    let _u = n + 1\n}",
-    );
-    assert!(
-        ks.is_empty(),
-        "a scalar payload is a copy, not a row: {ks:?}"
-    );
-}
-
-#[test]
-fn entity_handle_held_across_yield_is_clean() {
-    let ks = kinds(
+        // the handle is what you are supposed to hold
         "co fn f(e: Entity<Mob>) -> Coroutine<int> {\n    let h = e\n    yield 1\n    let _m = unwrap(h.get())\n}",
-    );
-    assert!(
-        ks.is_empty(),
-        "the handle is what you are supposed to hold: {ks:?}"
-    );
-}
-
-// --- the row sources ------------------------------------------------------
-
-#[test]
-fn arena_get_is_a_row_source() {
-    assert_eq!(
-        kinds("fn main() {\n    let e = some_entity()\n    CACHED = MOBS.get(e)\n}"),
-        vec![EscapeKind::StoreGlobal]
-    );
-}
-
-#[test]
-fn arena_iteration_binding_is_a_row_source() {
-    assert_eq!(
-        kinds("fn main() {\n    for m in MOBS {\n        BAG.push(m)\n    }\n}"),
-        vec![EscapeKind::StoreCollection]
-    );
-}
-
-#[test]
-fn scene_root_is_a_row_source() {
-    // Current limitation: `Scene<T>.get()` hands out an ordinary `T?`
-    // that dies with the Scene, so a stored root is the same defect shape.
-    assert_eq!(
-        kinds(
-            "global ROOT: Mob? = null\nfn main() {\n    let s: Scene<Mob> = Scene { _scene_id: 1 }\n    ROOT = scene_root(s)\n}"
-        ),
-        vec![EscapeKind::StoreGlobal]
-    );
-}
-
-#[test]
-fn a_row_aliased_through_a_local_still_escapes() {
-    assert_eq!(
-        kinds(
-            "fn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    let alias = m\n    BAG.push(alias)\n}"
-        ),
-        vec![EscapeKind::StoreCollection]
-    );
-}
-
-// --- negative controls ----------------------------------------------------
-//
-// Each is the CORRECT rewrite of one flagged shape above. A lint that reports
-// these is one nobody will run twice, and a census built on it is noise.
-
-#[test]
-fn storing_the_entity_handle_is_clean() {
-    let ks = kinds(
+        // the handle is the thing you are SUPPOSED to store
         "global KEEP: Entity<Mob>? = null\nfn main() {\n    let e = some_entity()\n    KEEP = e\n}",
-    );
-    assert!(
-        ks.is_empty(),
-        "the handle is the thing you are SUPPOSED to store: {ks:?}"
-    );
-}
-
-#[test]
-fn copying_a_scalar_out_of_a_row_is_clean() {
-    let ks = kinds(
+        // a scalar read out of a row is a copy, not a row
         "global HP: int = 0\nfn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    HP = m.hp\n}",
-    );
-    assert!(
-        ks.is_empty(),
-        "a scalar read out of a row is a copy, not a row: {ks:?}"
-    );
-}
-
-#[test]
-fn reading_and_mutating_a_row_in_place_is_clean() {
-    let ks = kinds(
+        // read/mutate in place is the whole point of .get()
         "fn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    m.hp -= 10\n}",
-    );
-    assert!(
-        ks.is_empty(),
-        "read/mutate in place is the whole point of .get(): {ks:?}"
-    );
-}
-
-#[test]
-fn passing_a_row_to_an_ordinary_helper_is_clean() {
-    let ks = kinds(
+        // a Rock-bodied helper taking a row by value is not an escape
         "fn hurt(m: Mob, n: int) { m.hp -= n }\nfn main() {\n    let e = some_entity()\n    let m = unwrap(e.get())\n    hurt(m, 10)\n}",
-    );
-    assert!(
-        ks.is_empty(),
-        "a Rock-bodied helper taking a row by value is not an escape: {ks:?}"
-    );
-}
-
-#[test]
-fn refetching_after_the_yield_is_clean() {
-    let ks = kinds(
+        // a row bound AFTER the last suspension is the correct form
         "co fn good(e: Entity<Mob>) -> Coroutine<int> {\n    yield 1\n    let m = unwrap(e.get())\n    m.hp -= 10\n}",
-    );
-    assert!(
-        ks.is_empty(),
-        "a row bound AFTER the last suspension is the correct form: {ks:?}"
-    );
-}
-
-#[test]
-fn row_used_before_the_yield_is_clean() {
-    let ks = kinds(
+        // liveness, not scope -- finished with before the suspension
         "co fn fine(e: Entity<Mob>) -> Coroutine<int> {\n    let m = unwrap(e.get())\n    m.hp -= 10\n    yield 1\n}",
-    );
-    assert!(
-        ks.is_empty(),
-        "liveness, not scope -- finished with before the suspension: {ks:?}"
-    );
-}
-
-#[test]
-fn closure_capturing_the_entity_and_refetching_is_clean() {
-    // Capture the handle and fetch the row inside the callback each frame.
-    let ks = kinds(
+        // Capture the handle and fetch the row inside the callback each frame.
         "fn take(f: () -> int) -> int { return f() }\nfn main() -> int {\n    let e = some_entity()\n    return take(() => unwrap(e.get()).hp)\n}",
-    );
-    assert!(
-        ks.is_empty(),
-        "capturing the handle and re-getting inside is correct: {ks:?}"
-    );
+        // a bulk scan that keeps nothing is the common correct loop
+        "fn main() -> int {\n    let t = 0\n    for m in MOBS {\n        t += m.hp\n    }\n    return t\n}",
+    ];
+    for src in cases {
+        let ks = kinds(src);
+        assert!(ks.is_empty(), "{src}: {ks:?}");
+    }
 }
 
 #[test]
@@ -419,27 +257,6 @@ fn a_trailing_row_in_a_unit_fn_is_clean() {
     assert!(
         ks.is_empty(),
         "a discarded tail in a unit fn returns nothing: {ks:?}"
-    );
-}
-
-#[test]
-fn a_trailing_row_in_a_returning_fn_is_still_flagged() {
-    // The other side of the same rule: without an explicit `return`, the tail
-    // IS the returned value. Narrowing the rule above must not disarm this.
-    assert_eq!(
-        kinds("fn leak(e: Entity<Mob>) -> Mob? {\n    e.get()\n}"),
-        vec![EscapeKind::Return]
-    );
-}
-
-#[test]
-fn iterating_an_arena_without_storing_is_clean() {
-    let ks = kinds(
-        "fn main() -> int {\n    let t = 0\n    for m in MOBS {\n        t += m.hp\n    }\n    return t\n}",
-    );
-    assert!(
-        ks.is_empty(),
-        "a bulk scan that keeps nothing is the common correct loop: {ks:?}"
     );
 }
 

@@ -65,13 +65,33 @@ fn flags_a_sibling_pair_whose_param_types_drifted() {
 }
 
 #[test]
-fn matching_siblings_are_not_flagged() {
-    let src = "inline(lua) fn probe(x: int) -> int = \"return x\"\n\
-               inline(js) fn probe(x: int) -> int = \"return x;\"";
-    assert!(
-        summary(&[src]).is_empty(),
-        "identical signatures are a clean sibling pair"
-    );
+fn consistent_siblings_are_not_flagged() {
+    let cases: &[&str] = &[
+        // identical signatures are a clean sibling pair
+        "inline(lua) fn probe(x: int) -> int = \"return x\"\n\
+               inline(js) fn probe(x: int) -> int = \"return x;\"",
+        // Platform-exclusive by construction: one backend declares it, nobody
+        // claimed a sibling. Flagging these would fire on every lua-only ffi fn.
+        "inline(lua) fn only_native(x: int) -> int = \"return x\"",
+        // `probe(float)` is served on BOTH backends by the portable Rock body, so
+        // the lua-only `probe(int)` overload is the only concrete decl -- and with
+        // one concrete backend per signature there is nothing to drift. Missing
+        // this rung false-flags every wrapper-over-raw-extern pair in a host library.
+        "inline(lua) fn probe(x: int) -> int = \"return x\"\n\
+               inline(js) fn probe(x: int) -> int = \"return x;\"\n\
+               fn probe(x: float) -> int {\n    return 0\n}",
+        // every signature has both backends
+        "inline(lua) fn probe(x: int) -> int = \"return x\"\n\
+               inline(lua) fn probe(x: float) -> int = \"return x\"\n\
+               inline(js) fn probe(x: int) -> int = \"return x;\"\n\
+               inline(js) fn probe(x: float) -> int = \"return x;\"",
+        // `os_getenv` renames its param on the js side; only types are the ABI.
+        "inline(lua) fn probe(var: string) -> string = \"return var\"\n\
+               inline(js) fn probe(v: string) -> string = \"return v;\"",
+    ];
+    for src in cases {
+        assert!(summary(&[src]).is_empty(), "{src}");
+    }
 }
 
 #[test]
@@ -87,55 +107,6 @@ fn flags_an_arity_drift_across_files() {
             "make_window(string) on js missing on lua".to_string(),
             "make_window(string, bool) on lua missing on js".to_string(),
         ]
-    );
-}
-
-#[test]
-fn a_single_backend_fn_is_not_flagged() {
-    // Platform-exclusive by construction: one backend declares it, nobody
-    // claimed a sibling. Flagging these would fire on every lua-only ffi fn.
-    let src = "inline(lua) fn only_native(x: int) -> int = \"return x\"";
-    assert!(
-        summary(&[src]).is_empty(),
-        "a lone lua decl is not a drifted sibling"
-    );
-}
-
-#[test]
-fn a_portable_decl_covers_the_missing_backend() {
-    // `probe(float)` is served on BOTH backends by the portable Rock body, so
-    // the lua-only `probe(int)` overload is the only concrete decl -- and with
-    // one concrete backend per signature there is nothing to drift. Missing
-    // this rung false-flags every wrapper-over-raw-extern pair in a host library.
-    let src = "inline(lua) fn probe(x: int) -> int = \"return x\"\n\
-               inline(js) fn probe(x: int) -> int = \"return x;\"\n\
-               fn probe(x: float) -> int {\n    return 0\n}";
-    assert!(
-        summary(&[src]).is_empty(),
-        "the portable body serves both backends"
-    );
-}
-
-#[test]
-fn a_full_overload_set_on_both_backends_is_not_flagged() {
-    let src = "inline(lua) fn probe(x: int) -> int = \"return x\"\n\
-               inline(lua) fn probe(x: float) -> int = \"return x\"\n\
-               inline(js) fn probe(x: int) -> int = \"return x;\"\n\
-               inline(js) fn probe(x: float) -> int = \"return x;\"";
-    assert!(
-        summary(&[src]).is_empty(),
-        "every signature has both backends"
-    );
-}
-
-#[test]
-fn param_names_do_not_count_as_drift() {
-    // `os_getenv` renames its param on the js side; only types are the ABI.
-    let src = "inline(lua) fn probe(var: string) -> string = \"return var\"\n\
-               inline(js) fn probe(v: string) -> string = \"return v;\"";
-    assert!(
-        summary(&[src]).is_empty(),
-        "param names are not part of the signature"
     );
 }
 

@@ -52,40 +52,26 @@ fn count(body: &str) -> usize {
 }
 
 #[test]
-fn prelude_typechecks() {
+fn prelude_typechecks_and_its_field_defaults_are_clean() {
+    // `co: Task? = null` in PRELUDE's struct decl is a default, lowered as a
+    // StructDefaults body -- it must not read as an assignment either.
     assert_eq!(count("fn main() -> int { 3 }"), 0);
 }
 
 #[test]
-fn field_null_assign_is_flagged() {
-    let body = "fn bad(m: Mob) {\n    m.co = null\n}";
-    assert_eq!(
-        count(body),
-        1,
-        "`m.co = null` abandons the coroutine mid-stack"
-    );
-}
-
-#[test]
-fn diagnostic_names_the_slot() {
-    let fs = findings("fn bad(m: Mob) {\n    m.co = null\n}");
-    assert_eq!(fs.len(), 1, "expected the one finding: {fs:?}");
-    assert_eq!(
-        fs[0].place.as_deref(),
-        Some("m.co"),
-        "the message points at the slot"
-    );
-}
-
-#[test]
-fn diagnostic_names_a_safe_nav_slot() {
-    let fs = findings("fn bad(e: Entity<Mob>) {\n    e.get()?.co = null\n}");
-    assert_eq!(fs.len(), 1, "expected the one finding: {fs:?}");
-    assert_eq!(
-        fs[0].place.as_deref(),
-        Some("e.get()?.co"),
-        "the whole path is re-spelled"
-    );
+fn diagnostic_names_the_abandoned_slot() {
+    let cases: &[(&str, &str)] = &[
+        ("fn bad(m: Mob) {\n    m.co = null\n}", "m.co"),
+        (
+            "fn bad(e: Entity<Mob>) {\n    e.get()?.co = null\n}",
+            "e.get()?.co",
+        ),
+    ];
+    for (body, place) in cases {
+        let fs = findings(body);
+        assert_eq!(fs.len(), 1, "expected the one finding: {fs:?}");
+        assert_eq!(fs[0].place.as_deref(), Some(*place));
+    }
 }
 
 #[test]
@@ -96,75 +82,58 @@ fn diagnostic_names_a_global_slot() {
     assert_eq!(fs[0].place.as_deref(), Some("SLOT"));
 }
 
-// The whole point of the lint: the two verbs that DO run the defers.
 #[test]
-fn stop_call_is_clean() {
-    let body = "fn good(m: Mob) {\n    stop(m, .co)\n}";
-    assert_eq!(
-        count(body),
-        0,
-        "`stop` fires the terminal defers -- that is the fix"
-    );
-}
-
-// An initializer is not an assignment: there is no live coroutine in the slot to
-// abandon, so `co: null` in a literal and the field default are both clean.
-#[test]
-fn struct_literal_initializer_is_clean() {
-    let body = "fn good() -> Mob {\n    return Mob { co: null, name: null }\n}";
-    assert_eq!(
-        count(body),
-        0,
-        "a literal initializes the slot, it does not overwrite one"
-    );
-}
-
-#[test]
-fn field_default_is_clean() {
-    // `co: Task? = null` in PRELUDE's struct decl is a default, lowered as a
-    // StructDefaults body -- it must not read as an assignment either.
-    assert_eq!(count("fn main() -> int { 3 }"), 0);
-}
-
-#[test]
-fn non_task_nullable_field_is_clean() {
-    let body = "fn fine(m: Mob) {\n    m.name = null\n}";
-    assert_eq!(count(body), 0, "only a `Task?` slot has defers to skip");
-}
-
-#[test]
-fn non_null_assign_is_clean() {
-    // v1 covers the `= null` shape only. Overwriting a live slot with a NEW task
-    // is the same hazard, but `replace` is the fix and telling a first store from
-    // an overwrite needs liveness -- see the doc comment on the lint.
-    let body = "fn fine(m: Mob) {\n    m.co = make_task()\n}";
-    assert_eq!(count(body), 0, "not a null assignment");
-}
-
-#[test]
-fn deep_safe_nav_target_is_flagged() {
-    let body = "fn bad(e: Entity<Mob>) {\n    e.get()?.co = null\n}";
-    assert_eq!(
-        count(body),
-        1,
-        "the safe-nav target is still a `Task?` place"
-    );
-}
-
-#[test]
-fn local_task_slot_is_flagged() {
-    let body = "fn bad() {\n    let t: Task? = make_task()\n    t = null\n}";
-    assert_eq!(
-        count(body),
-        1,
-        "a local is a place too -- the task is just as abandoned"
-    );
-}
-
-#[test]
-fn each_slot_is_judged_separately() {
-    let body = "fn bad(m: Mob) {\n    m.co = null\n    m.other = null\n    m.hp = 0\n}";
-    assert_eq!(count(body), 2, "two Task? slots nulled, the int is not one");
+fn null_assignments_to_task_slots_are_counted() {
+    let cases: &[(&str, &str, usize)] = &[
+        // The whole point of the lint: the two verbs that DO run the defers.
+        (
+            "stop_call_is_clean",
+            "fn good(m: Mob) {\n    stop(m, .co)\n}",
+            0,
+        ),
+        // An initializer is not an assignment: there is no live coroutine in the slot to
+        // abandon, so `co: null` in a literal and the field default are both clean.
+        (
+            "struct_literal_initializer_is_clean",
+            "fn good() -> Mob {\n    return Mob { co: null, name: null }\n}",
+            0,
+        ),
+        // only a `Task?` slot has defers to skip
+        (
+            "non_task_nullable_field_is_clean",
+            "fn fine(m: Mob) {\n    m.name = null\n}",
+            0,
+        ),
+        // v1 covers the `= null` shape only. Overwriting a live slot with a NEW task
+        // is the same hazard, but `replace` is the fix and telling a first store from
+        // an overwrite needs liveness -- see the doc comment on the lint.
+        (
+            "non_null_assign_is_clean",
+            "fn fine(m: Mob) {\n    m.co = make_task()\n}",
+            0,
+        ),
+        // the safe-nav target is still a `Task?` place
+        (
+            "deep_safe_nav_target_is_flagged",
+            "fn bad(e: Entity<Mob>) {\n    e.get()?.co = null\n}",
+            1,
+        ),
+        // a local is a place too -- the task is just as abandoned
+        (
+            "local_task_slot_is_flagged",
+            "fn bad() {\n    let t: Task? = make_task()\n    t = null\n}",
+            1,
+        ),
+        // two Task? slots nulled, the int is not one
+        (
+            "each_slot_is_judged_separately",
+            "fn bad(m: Mob) {\n    m.co = null\n    m.other = null\n    m.hp = 0\n}",
+            2,
+        ),
+    ];
+    for (name, body, expected) in cases {
+        assert_eq!(count(body), *expected, "{name}");
+    }
 }
 
 // `Warning`, not `Error`: two legal null-assign patterns exist (nulling a task

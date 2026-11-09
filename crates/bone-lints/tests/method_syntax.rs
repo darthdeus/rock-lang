@@ -52,13 +52,22 @@ fn flags_a_prefix_fn_over_a_user_struct() {
 }
 
 #[test]
-fn a_receiver_form_decl_is_already_converted() {
-    // The discriminant this lint turns on: same HIR, different surface. If it
-    // reads only the lowered signature it flags every already-converted fn.
-    let src = format!(
-        "{MOB}fn Mob.damage(m, n: int) {{\n    m.hp -= n\n}}\nfn main() {{ Mob {{ hp: 1 }}.damage(1) }}\n"
-    );
-    assert!(methods(&src).is_empty(), "{:?}", methods(&src));
+fn already_converted_or_exempt_decls_are_not_flagged() {
+    let cases: &[String] = &[
+        // The discriminant this lint turns on: same HIR, different surface. If it
+        // reads only the lowered signature it flags every already-converted fn.
+        format!(
+            "{MOB}fn Mob.damage(m, n: int) {{\n    m.hp -= n\n}}\nfn main() {{ Mob {{ hp: 1 }}.damage(1) }}\n"
+        ),
+        // The parser REJECTS a receiver path on an extern decl, so the suggested
+        // rewrite would not compile.
+        format!("{MOB}extern(lua) fn take(m: Mob)\nfn main() {{ take(Mob {{ hp: 1 }}) }}"),
+        // suppressed by an allow comment
+        format!("{MOB}// rock: allow(method_syntax)\n{DAMAGE}{CALL_MAIN}"),
+    ];
+    for src in cases {
+        assert!(methods(src).is_empty(), "{src}: {:?}", methods(src));
+    }
 }
 
 #[test]
@@ -80,20 +89,6 @@ fn skips_a_first_param_that_cannot_be_a_receiver_path() {
             methods(&src)
         );
     }
-}
-
-#[test]
-fn an_extern_decl_is_never_flagged() {
-    // The parser REJECTS a receiver path on an extern decl, so the suggested
-    // rewrite would not compile.
-    let src = format!("{MOB}extern(lua) fn take(m: Mob)\nfn main() {{ take(Mob {{ hp: 1 }}) }}");
-    assert!(methods(&src).is_empty(), "{:?}", methods(&src));
-}
-
-#[test]
-fn suppressed_by_an_allow_comment() {
-    let src = format!("{MOB}// rock: allow(method_syntax)\n{DAMAGE}{CALL_MAIN}");
-    assert!(methods(&src).is_empty(), "{:?}", methods(&src));
 }
 
 #[test]
