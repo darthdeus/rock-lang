@@ -34,6 +34,7 @@
 // prelude: JsonReaderValidation
 // prelude: JsonRecordAdapter
 // prelude: JsonRecordCodec
+// prelude: JsonRecordError
 // prelude: JsonValue
 // prelude: MapIter
 // prelude: Mat4
@@ -113,8 +114,12 @@
 // prelude: __ffi_new_float_1
 // prelude: __ffi_new_int_1
 // prelude: __json_record_context
+// prelude: __json_record_copy_default
 // prelude: __json_record_decode
+// prelude: __json_record_decode_with_defaults
 // prelude: __json_record_encode
+// prelude: __json_record_error_at
+// prelude: __json_record_failure
 // prelude: __json_record_field_get
 // prelude: __json_record_field_put
 // prelude: __json_record_finite
@@ -484,6 +489,7 @@
 // prelude: json_record_adapter
 // prelude: json_record_adapter_result
 // prelude: json_record_decode
+// prelude: json_record_decode_with_defaults
 // prelude: json_record_encode
 // prelude: json_record_finite_float
 // prelude: json_str

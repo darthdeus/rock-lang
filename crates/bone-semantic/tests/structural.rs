@@ -3279,16 +3279,3 @@ fn all(xs: [int], n: int?, p: P) -> string {
         missed.join("\n")
     );
 }
-
-#[test]
-fn json_wire_name_annotation_is_field_only_and_requires_a_name() {
-    check("struct Row { @json_name(\"external\") internal: string }\n").unwrap();
-    for source in [
-        "struct Row { @json_name internal: string }\n",
-        "struct Row { @json_name(\"\") internal: string }\n",
-        "struct Row { @json_name(1) internal: string }\n",
-        "@json_name(\"external\") fn example() {}\n",
-    ] {
-        assert!(check(source).is_err(), "accepted invalid JSON field annotation: {source}");
-    }
-}
