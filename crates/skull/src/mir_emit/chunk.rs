@@ -114,8 +114,26 @@ fn definition_global(line: &str) -> Option<&str> {
     Some(&line[..skull_codegen_lua::CALLEE_FACTORY_PREFIX.len() + body.len()])
 }
 
+/// How many top-level definitions `lua` holds. A definition starts its line
+/// with one of two fixed prefixes, so the text is searched for those at line
+/// starts rather than split into its (many, mostly short) lines.
 pub(super) fn lua_definition_count(lua: &str) -> usize {
-    lua.lines().filter_map(definition_global).count()
+    fn line_at(lua: &str, start: usize) -> &str {
+        let rest = &lua[start..];
+        rest.split_once('\n').map_or(rest, |(line, _)| line)
+    }
+    let mut count = usize::from(definition_global(line_at(lua, 0)).is_some());
+    for prefix in ["\nfunction ", concat!("\n", "__rock_mk_")] {
+        debug_assert!(
+            prefix == "\nfunction " || &prefix[1..] == skull_codegen_lua::CALLEE_FACTORY_PREFIX,
+            "the factory prefix the scan looks for must be the emitted one"
+        );
+        count += lua
+            .match_indices(prefix)
+            .filter(|(at, _)| definition_global(line_at(lua, at + 1)).is_some())
+            .count();
+    }
+    count
 }
 
 impl LuaDefinitionBuffer {

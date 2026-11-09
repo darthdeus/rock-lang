@@ -11,9 +11,9 @@ pub(crate) fn referenced_cells_in_region(
     tail_forwards: &[Option<TailForward>],
     suppressed: &[bool],
 ) -> HashSet<Idx<Cell>> {
-    let mut seen: HashSet<Idx<Block>> = HashSet::default();
+    let mut seen = vec![false; func.blocks.len()];
     let mut stack = vec![entry];
-    seen.insert(entry);
+    seen[raw(entry) as usize] = true;
     let mut cells: HashSet<Idx<Cell>> = HashSet::default();
     while let Some(b) = stack.pop() {
         let tail = tail_forwards[raw(b) as usize].as_ref();
@@ -44,7 +44,9 @@ pub(crate) fn referenced_cells_in_region(
             }
         }
         successors(&func.blocks[b].term, |s| {
-            if seen.insert(s) {
+            let seen = &mut seen[raw(s) as usize];
+            if !*seen {
+                *seen = true;
                 stack.push(s);
             }
         });

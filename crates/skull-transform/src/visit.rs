@@ -1,5 +1,3 @@
-use rustc_hash::FxHashSet as HashSet;
-
 use comfy_la_arena::Idx;
 use skull_mir::mir::*;
 
@@ -34,15 +32,16 @@ pub(crate) fn term_succs(term: &Term, mut f: impl FnMut(Idx<Block>)) {
 /// Blocks reachable from the function entry via terminators — the co-fn's own
 /// CFG, EXCLUDING closure sub-blocks (reached only through `Inst::Lambda`).
 pub(crate) fn top_level_blocks(f: &MirFunc) -> Vec<Idx<Block>> {
-    let mut seen = HashSet::default();
-    seen.reserve(f.blocks.len());
+    let mut seen = vec![false; f.blocks.len()];
     let mut stack = vec![f.entry];
-    seen.insert(f.entry);
+    seen[raw(f.entry) as usize] = true;
     let mut order = Vec::with_capacity(f.blocks.len());
     while let Some(b) = stack.pop() {
         order.push(b);
         term_succs(&f.blocks[b].term, |s| {
-            if seen.insert(s) {
+            let seen = &mut seen[raw(s) as usize];
+            if !*seen {
+                *seen = true;
                 stack.push(s);
             }
         });

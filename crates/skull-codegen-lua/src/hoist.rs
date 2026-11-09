@@ -221,13 +221,14 @@ pub(crate) fn collect_const_hoists(
     // from blocks, it does not free), and hoisting one emits a module-scope ctor
     // call for a value the program never builds -- which for a nobox type is a
     // materialization the verifier cannot see, since it walks `block.insts`.
-    let live: HashSet<Idx<Inst>> = func
-        .blocks
-        .iter()
-        .flat_map(|(_, b)| b.insts.iter().copied())
-        .collect();
+    let mut live = vec![false; func.insts.len()];
+    for (_, b) in func.blocks.iter() {
+        for &id in &b.insts {
+            live[raw(id) as usize] = true;
+        }
+    }
     for (id, inst) in func.insts.iter() {
-        if !live.contains(&id) {
+        if !live[raw(id) as usize] {
             continue;
         }
         let Inst::MakeValueStruct {
