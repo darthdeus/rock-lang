@@ -144,7 +144,7 @@ pub(super) fn new_js_session(
             .with_mappings(mappings)
             .with_symbols(&artifact::REALIZED_SYMBOLS),
     );
-    let concrete = skull_graph::concrete_body::build(ws, &graph);
+    let concrete = skull_graph::concrete_body::build_for_lowering(ws, &graph);
     JsSession {
         roots: roots.to_vec(),
         graph,

@@ -249,6 +249,10 @@ pub struct MissingBody {
 #[derive(Clone)]
 pub struct ConcreteBodies {
     pub bodies: BTreeMap<Instance, ConcreteBody>,
+    /// Whether the diagnostic per-site maps are retained. The lowering build
+    /// keeps the owner facts and plans, but does not retain a second copy of
+    /// every callee obligation.
+    retain_callee_maps: bool,
     /// Compatibility projections below are refreshed only for a full-build
     /// snapshot. Local repair reads the owner records instead; this is the
     /// non-owner instrumentation contribution that has no body to attach to.
@@ -332,6 +336,7 @@ impl Default for ConcreteBodies {
         CONCRETE_DEFAULT_INVOCATIONS.with(|count| count.set(count.get() + 1));
         Self {
             bodies: BTreeMap::new(),
+            retain_callee_maps: true,
             plans: std::sync::Arc::new(ConcretePlans::new()),
             always_plans: ConcreteAlwaysPlans::default(),
             plan_failures: Vec::new(),
@@ -589,7 +594,8 @@ impl ConcreteBodies {
         let mut targets = revisited.clone();
         targets.extend(removed.iter().cloned());
         targets.retain(|instance| g.instances.contains(instance));
-        let (results, publication_stats) = build_instance_delta(ws, g, &targets);
+        let (results, publication_stats) =
+            build_instance_delta(ws, g, &targets, self.retain_callee_maps);
         let _local_publication_stats = publication_stats;
         let mut derived = results.len();
         for result in results {
@@ -610,7 +616,9 @@ impl ConcreteBodies {
                             .expect("local concrete update lost its unique plan store")
                             .insert(instance.clone(), Arc::new(plan));
                     }
-                    self.bodies.insert(instance.clone(), built.concrete);
+                    if self.retain_callee_maps {
+                        self.bodies.insert(instance.clone(), built.concrete);
+                    }
                     self.install_failure_index(&facts);
                     self.instance_facts.insert(instance, facts);
                 }
@@ -811,7 +819,11 @@ impl ConcreteBodies {
     pub fn census(&self) -> BodyCensus {
         let facts = self.aggregate_facts();
         let mut c = BodyCensus {
-            bodies: self.bodies.len(),
+            bodies: if self.retain_callee_maps {
+                self.bodies.len()
+            } else {
+                facts.callee_summary.bodies
+            },
             expr_examined: facts.expr_examined,
             binding_examined: facts.binding_examined,
             generics_bound: facts.generics_bound,
@@ -833,19 +845,28 @@ impl ConcreteBodies {
             foreign_domain_unique: facts.build_stats.foreign_domain_unique,
             ..Default::default()
         };
-        for b in self.bodies.values() {
-            c.direct_calls += b.direct_calls.len();
-            c.fn_values += b.fn_values.len();
-            c.synthesized_calls += b.synthesized_calls.len();
-            for op in b.iterator_ops.values() {
-                *c.iterator_ops.entry(op.kind.label()).or_insert(0) += 1;
-            }
-            for (_, callee) in b.callees() {
-                match callee {
-                    Callee::Rock(_) => c.rock_callees += 1,
-                    Callee::Boundary(..) => c.boundary_callees += 1,
+        if self.retain_callee_maps {
+            for b in self.bodies.values() {
+                c.direct_calls += b.direct_calls.len();
+                c.fn_values += b.fn_values.len();
+                c.synthesized_calls += b.synthesized_calls.len();
+                for op in b.iterator_ops.values() {
+                    *c.iterator_ops.entry(op.kind.label()).or_insert(0) += 1;
+                }
+                for (_, callee) in b.callees() {
+                    match callee {
+                        Callee::Rock(_) => c.rock_callees += 1,
+                        Callee::Boundary(..) => c.boundary_callees += 1,
+                    }
                 }
             }
+        } else {
+            c.direct_calls = facts.callee_summary.direct_calls;
+            c.fn_values = facts.callee_summary.fn_values;
+            c.synthesized_calls = facts.callee_summary.synthesized_calls;
+            c.iterator_ops = facts.callee_summary.iterator_ops.clone();
+            c.rock_callees = facts.callee_summary.rock_callees;
+            c.boundary_callees = facts.callee_summary.boundary_callees;
         }
         for h in &facts.callee_holes {
             let k = c.callee_holes.entry(h.reason).or_default();
@@ -1194,100 +1215,28 @@ pub fn convert_body(
     c
 }
 
-/// One instance's callee tables, from the sites the walk recorded for it.
-///
-/// The classification is [`boundary_class_for`] -- the graph's own, and the same
-/// one `closure` asks -- so "is this callee a boundary" cannot be answered two
-/// ways. It runs here rather than in the walk because `erased_entries` is
-/// complete only after the walk, and it is the FULL classification, of which the
-/// walk's expansion test is a subset.
-fn callee_tables(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    inst: &Instance,
-    body: &mut ConcreteBody,
-    out: &mut OwnerFacts,
-) {
-    let Some(sites) = g.sites_of(inst) else {
-        return;
-    };
-    for (site, rec) in sites {
-        out.sites_examined += 1;
-        let target = match &rec.outcome {
-            SiteOutcome::Resolved(t) => t,
-            SiteOutcome::Failed(reason) => {
-                out.callee_holes.push(CalleeHole {
-                    instance: inst.clone(),
-                    site: site.clone(),
-                    reason,
-                    span: rec.span,
-                });
-                continue;
-            }
-        };
-        let f = &ws.module(target.func.module).functions[target.func.func];
-        let callee = match boundary_class_for(f, &g.erased_entries) {
-            // Whether a target can SERVE this boundary is not asked here: the
-            // graph names no target. A call to a boundary no artifact body
-            // supplies is that artifact's `Severed` call, located at this same
-            // site (`artifact::Unrealizable::ForeignToArtifact`).
-            Some(class) => Callee::Boundary(target.clone(), class),
-            None => {
-                if !g.instances.contains(target) {
-                    out.unknown_rock_callees.push((inst.clone(), site.clone()));
-                }
-                Callee::Rock(target.clone())
-            }
-        };
-        match &site.op {
-            SiteOp::DirectCall => {
-                body.direct_calls.insert(site.clone(), callee);
-            }
-            SiteOp::FnValue => {
-                body.fn_values.insert(site.clone(), callee);
-            }
-            // Both synthesized families share one table: they are keyed by the
-            // whole `Site`, so a named runtime entry and a conditional dispatch
-            // arm at one expression stay distinct without a second map.
-            SiteOp::Synthesized(_) | SiteOp::Dispatched { .. } => {
-                body.synthesized_calls.insert(site.clone(), callee);
-            }
-            SiteOp::ForIter => {
-                body.iterator_ops.insert(
-                    site.clone(),
-                    ConcreteIteratorOp {
-                        kind: IteratorOpKind::Iter,
-                        callee,
-                    },
-                );
-            }
-            SiteOp::ForNext(_) => {
-                body.iterator_ops.insert(
-                    site.clone(),
-                    ConcreteIteratorOp {
-                        kind: IteratorOpKind::Next,
-                        callee,
-                    },
-                );
-            }
-            SiteOp::ImplicitIter => {
-                body.iterator_ops.insert(
-                    site.clone(),
-                    ConcreteIteratorOp {
-                        kind: IteratorOpKind::ImplicitIter,
-                        callee,
-                    },
-                );
-            }
-            SiteOp::BoundNext(_) => {
-                body.iterator_ops.insert(
-                    site.clone(),
-                    ConcreteIteratorOp {
-                        kind: IteratorOpKind::BoundNext,
-                        callee,
-                    },
-                );
-            }
+/// Record the graph's classification for the independent site/MIR audit.
+fn record_diagnostic_callee(body: &mut ConcreteBody, site: &Site, callee: Callee) {
+    match &site.op {
+        SiteOp::DirectCall => {
+            body.direct_calls.insert(site.clone(), callee);
+        }
+        SiteOp::FnValue => {
+            body.fn_values.insert(site.clone(), callee);
+        }
+        SiteOp::Synthesized(_) | SiteOp::Dispatched { .. } => {
+            body.synthesized_calls.insert(site.clone(), callee);
+        }
+        op => {
+            let kind = match op {
+                SiteOp::ForIter => IteratorOpKind::Iter,
+                SiteOp::ForNext(_) => IteratorOpKind::Next,
+                SiteOp::ImplicitIter => IteratorOpKind::ImplicitIter,
+                SiteOp::BoundNext(_) => IteratorOpKind::BoundNext,
+                _ => unreachable!("non-iterator sites handled above"),
+            };
+            body.iterator_ops
+                .insert(site.clone(), ConcreteIteratorOp { kind, callee });
         }
     }
 }
@@ -1565,18 +1514,6 @@ fn collect_type_nodes(ws: &Workspace, inf: &BodyInference, ty: TyId, out: &mut F
     }
 }
 
-fn counted_callees<'a>(
-    body: &'a ConcreteBody,
-    stats: &mut ConcreteBuildStats,
-) -> impl Iterator<Item = (&'a Site, &'a Callee)> + use<'a> {
-    stats.callee_scans += 1;
-    stats.callee_rows_visited += body.direct_calls.len()
-        + body.fn_values.len()
-        + body.iterator_ops.len()
-        + body.synthesized_calls.len();
-    body.callees()
-}
-
 struct BuiltInstance {
     instance: Instance,
     concrete: ConcreteBody,
@@ -1609,6 +1546,53 @@ impl InstanceResult {
     }
 }
 
+/// Compact per-owner callee census. The detailed site-to-callee maps are an
+/// audit view; these counts keep aggregate census and incremental retraction
+/// exact when that view is omitted.
+#[derive(Clone, Default)]
+struct CalleeSummary {
+    bodies: usize,
+    direct_calls: usize,
+    fn_values: usize,
+    synthesized_calls: usize,
+    iterator_ops: BTreeMap<&'static str, usize>,
+    rock_callees: usize,
+    boundary_callees: usize,
+}
+
+impl CalleeSummary {
+    fn record_classified(&mut self, site: &Site, boundary: bool) {
+        match &site.op {
+            SiteOp::DirectCall => self.direct_calls += 1,
+            SiteOp::FnValue => self.fn_values += 1,
+            SiteOp::Synthesized(_) | SiteOp::Dispatched { .. } => {
+                self.synthesized_calls += 1;
+            }
+            SiteOp::ForIter => *self.iterator_ops.entry("iter").or_insert(0) += 1,
+            SiteOp::ForNext(_) => *self.iterator_ops.entry("next").or_insert(0) += 1,
+            SiteOp::ImplicitIter => *self.iterator_ops.entry("implicit-iter").or_insert(0) += 1,
+            SiteOp::BoundNext(_) => *self.iterator_ops.entry("bound-next").or_insert(0) += 1,
+        }
+        if boundary {
+            self.boundary_callees += 1;
+        } else {
+            self.rock_callees += 1;
+        }
+    }
+
+    fn add(&mut self, other: &Self) {
+        self.bodies += other.bodies;
+        self.direct_calls += other.direct_calls;
+        self.fn_values += other.fn_values;
+        self.synthesized_calls += other.synthesized_calls;
+        for (kind, count) in &other.iterator_ops {
+            *self.iterator_ops.entry(kind).or_insert(0) += count;
+        }
+        self.rock_callees += other.rock_callees;
+        self.boundary_callees += other.boundary_callees;
+    }
+}
+
 #[derive(Clone, Default)]
 struct OwnerFacts {
     plan_failures: Vec<(Instance, MonoTyReason)>,
@@ -1631,6 +1615,7 @@ struct OwnerFacts {
     signature_derivations: usize,
     signature_slots_cloned: usize,
     slot_conversions: usize,
+    callee_summary: CalleeSummary,
     build_stats: ConcreteBuildStats,
 }
 
@@ -1710,6 +1695,7 @@ impl OwnerFacts {
         out.signature_derivations += self.signature_derivations;
         out.signature_slots_cloned += self.signature_slots_cloned;
         out.slot_conversions += self.slot_conversions;
+        out.callee_summary.add(&self.callee_summary);
         out.build_stats.add(self.build_stats);
     }
 
@@ -1891,6 +1877,7 @@ fn build_instance_delta(
     ws: &Workspace,
     g: &InstanceGraph,
     targets: &BTreeSet<Instance>,
+    retain_callee_maps: bool,
 ) -> (Vec<InstanceResult>, ConcreteBuildStats) {
     if targets.is_empty() {
         return (Vec::new(), ConcreteBuildStats::default());
@@ -1914,6 +1901,7 @@ fn build_instance_delta(
                     &signatures,
                     &published_domains,
                     timing_enabled,
+                    retain_callee_maps,
                 )),
             },
         )
@@ -2316,66 +2304,151 @@ where
     Ok(out)
 }
 
-fn concrete_plan_from_publication(
+/// Project recorded graph sites into lowering facts; audit maps are optional
+/// parallel output, never the source of the plan or derived from the plan.
+fn concrete_plan_from_sites(
+    ws: &Workspace,
     g: &InstanceGraph,
     inst: &Instance,
-    body: &ConcreteBody,
     types: ConcreteTypeTables,
     type_error: Option<MonoTyReason>,
+    untyped: &[UntypedExpr],
+    facts: &mut OwnerFacts,
     signatures: &PublishedSignatures,
     domains: &PublishedDomains,
-    stats: &mut ConcreteBuildStats,
     timing_enabled: bool,
+    mut diagnostic: Option<&mut ConcreteBody>,
 ) -> Result<(ConcreteBodyPlan, FxHashSet<Instance>), MonoTyReason> {
     let mut callees = BTreeMap::new();
     let mut candidate_refs = FxHashSet::default();
+    let mut failed_sites = Vec::new();
+    let mut site_domains = Vec::new();
+    let untyped_exprs: FxHashSet<Idx<Expr>> = untyped.iter().map(|expr| expr.expr).collect();
+    let mut untyped_callee_exprs = FxHashSet::default();
+    let mut callee_signature_error: Option<(u8, Site, MonoTyReason)> = None;
     let signature_started = timing_enabled.then(bone_core::prelude::Instant::now);
-    let callee_rows = counted_callees(body, stats);
-    for (site, callee) in callee_rows {
-        let instance = callee.instance().clone();
-        candidate_refs.insert(instance.clone());
-        let signature = signatures
-            .get(&instance)
-            .ok_or(MonoTyReason::NoNode)?
-            .clone()?;
-        callees.insert(
-            site.clone(),
-            ConcreteCallee {
-                instance,
-                signature,
-            },
-        );
+
+    facts.build_stats.callee_scans += 1;
+    if let Some(sites) = g.sites_of(inst) {
+        facts.build_stats.callee_rows_visited += sites.len();
+        for (site, record) in sites {
+            facts.sites_examined += 1;
+            match &record.outcome {
+                SiteOutcome::Failed(reason) => {
+                    facts.callee_holes.push(CalleeHole {
+                        instance: inst.clone(),
+                        site: site.clone(),
+                        reason,
+                        span: record.span,
+                    });
+                    failed_sites.push((site.clone(), *reason));
+                }
+                SiteOutcome::Resolved(target) => {
+                    let function = &ws.module(target.func.module).functions[target.func.func];
+                    let class = boundary_class_for(function, &g.erased_entries);
+                    let boundary = class.is_some();
+                    if let Some(body) = diagnostic.as_deref_mut() {
+                        let callee = match class {
+                            Some(class) => Callee::Boundary(target.clone(), class),
+                            None => Callee::Rock(target.clone()),
+                        };
+                        record_diagnostic_callee(body, site, callee);
+                    }
+                    facts.callee_summary.record_classified(site, boundary);
+                    if !boundary && !g.instances.contains(target) {
+                        facts
+                            .unknown_rock_callees
+                            .push((inst.clone(), site.clone()));
+                    }
+                    if untyped_exprs.contains(&site.expr) {
+                        untyped_callee_exprs.insert(site.expr);
+                    }
+
+                    let callee_instance = target.clone();
+                    candidate_refs.insert(target.clone());
+                    match signatures.get(target) {
+                        Some(Ok(signature)) => {
+                            callees.insert(
+                                site.clone(),
+                                ConcreteCallee {
+                                    instance: callee_instance,
+                                    signature: signature.clone(),
+                                },
+                            );
+                        }
+                        Some(Err(reason)) => {
+                            let candidate = (callee_table_rank(site), site.clone(), reason.clone());
+                            let replace = callee_signature_error.as_ref().is_none_or(
+                                |(rank, previous_site, _)| {
+                                    (candidate.0, &candidate.1) < (*rank, previous_site)
+                                },
+                            );
+                            if replace {
+                                callee_signature_error = Some(candidate);
+                            }
+                        }
+                        None => {
+                            let candidate =
+                                (callee_table_rank(site), site.clone(), MonoTyReason::NoNode);
+                            let replace = callee_signature_error.as_ref().is_none_or(
+                                |(rank, previous_site, _)| {
+                                    (candidate.0, &candidate.1) < (*rank, previous_site)
+                                },
+                            );
+                            if replace {
+                                callee_signature_error = Some(candidate);
+                            }
+                        }
+                    }
+                    site_domains.push(site.domain.clone());
+                }
+            }
+        }
     }
-    let signature = signatures.get(inst).ok_or(MonoTyReason::NoNode)?.clone()?;
+
+    for expression in untyped {
+        if untyped_callee_exprs.contains(&expression.expr) {
+            *facts
+                .untyped_as_callee_key
+                .entry(expression.kind)
+                .or_insert(0) += 1;
+        }
+    }
+    facts.signature_requests += facts.callee_summary.direct_calls
+        + facts.callee_summary.fn_values
+        + facts.callee_summary.synthesized_calls
+        + facts.callee_summary.iterator_ops.values().sum::<usize>()
+        + 1;
+
+    let owner_signature = match signatures.get(inst) {
+        Some(Ok(signature)) => Ok(signature.clone()),
+        Some(Err(reason)) => Err(reason.clone()),
+        None => Err(MonoTyReason::NoNode),
+    };
     if let Some(started) = signature_started {
-        stats.signature_ns += started.elapsed().as_nanos() as u64;
+        facts.build_stats.signature_ns += started.elapsed().as_nanos() as u64;
     }
-    let failed_sites = g
-        .sites_of(inst)
-        .into_iter()
-        .flat_map(|sites| sites.iter())
-        .filter_map(|(site, record)| match &record.outcome {
-            SiteOutcome::Failed(reason) => Some((site.clone(), *reason)),
-            SiteOutcome::Resolved(_) => None,
-        })
-        .collect();
+    if let Some((_, _, reason)) = callee_signature_error {
+        return Err(reason);
+    }
+    let signature = owner_signature?;
     if let Some(reason) = type_error {
         return Err(reason);
     }
+
     let default_domains = g
         .contributions
         .get(&Owner::Instance(inst.clone()))
         .into_iter()
         .flat_map(|contribution| contribution.struct_default_domains.iter().cloned());
-    let site_domains = counted_callees(body, stats).map(|(site, _)| site.domain.clone());
     let foreign_domains = foreign_domains_from_publication(
         default_domains.chain(site_domains),
         domains,
-        stats,
+        &mut facts.build_stats,
         timing_enabled,
     )?;
-    stats.plan_callee_map_inserts += callees.len();
-    stats.plan_callee_signature_inserts += callees.len();
+    facts.build_stats.plan_callee_map_inserts += callees.len();
+    facts.build_stats.plan_callee_signature_inserts += callees.len();
     Ok((
         ConcreteBodyPlan {
             owner: ConcreteOwner::Function(inst.clone()),
@@ -2384,13 +2457,26 @@ fn concrete_plan_from_publication(
             foreign_domains,
             signature,
             callees,
-            failed_sites,
+            failed_sites: failed_sites.into_iter().collect(),
             bound_tree: g
                 .bound_tree(inst)
                 .map_or_else(Default::default, |tree| tree.to_resolved()),
         },
         candidate_refs,
     ))
+}
+
+/// Order of the rich map chain in [`ConcreteBody::callees`]. Lowering mode
+/// visits graph sites in graph order, but when more than one signature is
+/// unavailable the reported plan failure must match the rich path's first
+/// failing callee.
+fn callee_table_rank(site: &Site) -> u8 {
+    match &site.op {
+        SiteOp::DirectCall => 0,
+        SiteOp::FnValue => 1,
+        SiteOp::ForIter | SiteOp::ForNext(_) | SiteOp::ImplicitIter | SiteOp::BoundNext(_) => 2,
+        SiteOp::Synthesized(_) | SiteOp::Dispatched { .. } => 3,
+    }
 }
 
 fn produce_instance(
@@ -2400,6 +2486,7 @@ fn produce_instance(
     signatures: &PublishedSignatures,
     domains: &PublishedDomains,
     timing_enabled: bool,
+    retain_callee_maps: bool,
 ) -> BuiltInstance {
     let started_instance = bone_core::prelude::Instant::now();
     let PreparedInstance {
@@ -2420,46 +2507,32 @@ fn produce_instance(
         iterator_ops: BTreeMap::new(),
         synthesized_calls: BTreeMap::new(),
     };
+    facts.callee_summary.bodies = 1;
+    let callee_time = std::time::Duration::ZERO;
     let started = bone_core::prelude::Instant::now();
-    callee_tables(ws, g, &inst, &mut concrete, &mut facts);
-    let callee_time = started.elapsed();
-    let keys: BTreeSet<Idx<Expr>> = counted_callees(&concrete, &mut facts.build_stats)
-        .map(|(site, _)| site.expr)
-        .collect();
-    for untyped_expr in &untyped {
-        if keys.contains(&untyped_expr.expr) {
-            *facts
-                .untyped_as_callee_key
-                .entry(untyped_expr.kind)
-                .or_insert(0) += 1;
-        }
-    }
+    facts.build_stats.plan_attempts += 1;
+    let plan_result = concrete_plan_from_sites(
+        ws,
+        g,
+        &inst,
+        types,
+        type_error,
+        &untyped,
+        &mut facts,
+        signatures,
+        domains,
+        timing_enabled,
+        retain_callee_maps.then_some(&mut concrete),
+    );
+    let (plan, candidate_refs) = match plan_result {
+        Ok((plan, candidate_refs)) => (Ok(plan), candidate_refs),
+        Err(reason) => (Err(reason), FxHashSet::default()),
+    };
     facts.untyped.extend(
         untyped
             .into_iter()
             .map(|untyped_expr| (inst.clone(), untyped_expr)),
     );
-    facts.signature_requests += concrete.direct_calls.len()
-        + concrete.fn_values.len()
-        + concrete.iterator_ops.len()
-        + concrete.synthesized_calls.len()
-        + 1;
-    let started = bone_core::prelude::Instant::now();
-    facts.build_stats.plan_attempts += 1;
-    let (plan, candidate_refs) = match concrete_plan_from_publication(
-        g,
-        &inst,
-        &concrete,
-        types,
-        type_error,
-        signatures,
-        domains,
-        &mut facts.build_stats,
-        timing_enabled,
-    ) {
-        Ok((plan, candidate_refs)) => (Ok(plan), candidate_refs),
-        Err(reason) => (Err(reason), FxHashSet::default()),
-    };
     let plan_time = started.elapsed();
     if let Err(reason) = &plan {
         facts.build_stats.plan_failures += 1;
@@ -2865,6 +2938,7 @@ fn produce_instances(
     timing_enabled: bool,
     census: &WorkerCensus,
     schedule: BuildSchedule,
+    retain_callee_maps: bool,
 ) -> (Vec<InstanceResult>, Option<BuildTrace>) {
     #[cfg(not(feature = "sequential"))]
     use rayon::prelude::*;
@@ -2879,6 +2953,7 @@ fn produce_instances(
                     signatures,
                     domains,
                     timing_enabled,
+                    retain_callee_maps,
                 ))
             });
             (
@@ -2905,8 +2980,15 @@ fn produce_instances(
                         let key = instance.instance.clone();
                         census.record();
                         scheduler.enter(&key);
-                        let result =
-                            produce_instance(ws, g, instance, signatures, domains, timing_enabled);
+                        let result = produce_instance(
+                            ws,
+                            g,
+                            instance,
+                            signatures,
+                            domains,
+                            timing_enabled,
+                            retain_callee_maps,
+                        );
                         scheduler.finish(key);
                         InstanceResult::Built(result)
                     })
@@ -2940,6 +3022,22 @@ pub fn build(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
         g,
         BuildResultOrder::Canonical,
         BuildSchedule::Default,
+        false,
+        true,
+    )
+    .bodies
+}
+
+/// Build the plans and compact callee census used by lowering without
+/// retaining the diagnostic per-site callee maps on each body. Use [`build`]
+/// for site-join audits; owner-local updates preserve this lighter mode.
+pub fn build_for_lowering(ws: &Workspace, g: &InstanceGraph) -> ConcreteBodies {
+    build_impl(
+        ws,
+        g,
+        BuildResultOrder::Canonical,
+        BuildSchedule::Default,
+        false,
         false,
     )
     .bodies
@@ -2981,7 +3079,7 @@ pub fn build_with_result_order(
     g: &InstanceGraph,
     order: BuildResultOrder,
 ) -> (ConcreteBodies, Vec<Instance>) {
-    let run = build_impl(ws, g, order, BuildSchedule::Default, true);
+    let run = build_impl(ws, g, order, BuildSchedule::Default, true, true);
     (run.bodies, run.merge_order)
 }
 
@@ -2994,6 +3092,7 @@ pub fn build_with_default_trace(ws: &Workspace, g: &InstanceGraph) -> (ConcreteB
         g,
         BuildResultOrder::Canonical,
         BuildSchedule::Default,
+        true,
         true,
     );
     (
@@ -3014,6 +3113,7 @@ pub fn build_with_reverse_completion(
         BuildResultOrder::Canonical,
         BuildSchedule::ReverseCompletion,
         true,
+        true,
     );
     (
         run.bodies,
@@ -3029,8 +3129,9 @@ fn build_impl(
     order: BuildResultOrder,
     schedule: BuildSchedule,
     traced: bool,
+    retain_callee_maps: bool,
 ) -> BuildRun {
-    build_published_impl(ws, g, order, schedule, traced)
+    build_published_impl(ws, g, order, schedule, traced, retain_callee_maps)
 }
 
 fn build_published_impl(
@@ -3039,6 +3140,7 @@ fn build_published_impl(
     order: BuildResultOrder,
     schedule: BuildSchedule,
     traced: bool,
+    retain_callee_maps: bool,
 ) -> BuildRun {
     BUILD_INVOCATIONS.with(|count| count.set(count.get() + 1));
     let t_build = bone_core::prelude::Instant::now();
@@ -3133,6 +3235,7 @@ fn build_published_impl(
         timing_enabled,
         &ordinary_census,
         schedule,
+        retain_callee_maps,
     );
     let ordinary_parallel_time = t_ordinary_parallel.elapsed();
     results.extend(gaps.into_iter().map(InstanceResult::Gap));
@@ -3141,6 +3244,7 @@ fn build_published_impl(
     let t_ordinary_merge = bone_core::prelude::Instant::now();
     let mut out = ConcreteBodies {
         global_build_stats: publication_stats,
+        retain_callee_maps,
         ..ConcreteBodies::default()
     };
     out.instance_facts.reserve(results.len());
@@ -3193,9 +3297,11 @@ fn build_published_impl(
                     }
                 }
                 let started = timing_enabled.then(bone_core::prelude::Instant::now);
-                body_rows.push((instance.clone(), built.concrete));
-                if let Some(started) = started {
-                    body_insert_time += started.elapsed();
+                if retain_callee_maps {
+                    body_rows.push((instance.clone(), built.concrete));
+                    if let Some(started) = started {
+                        body_insert_time += started.elapsed();
+                    }
                 }
                 let started = timing_enabled.then(bone_core::prelude::Instant::now);
                 out.install_failure_index(&facts);

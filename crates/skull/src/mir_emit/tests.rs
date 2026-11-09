@@ -745,6 +745,25 @@ fn main() {
     }
 
     #[test]
+    fn full_emission_omits_rich_callee_maps_but_preserves_plans_and_census() {
+        let ws = setup_workspace();
+        let mid = module_id(&ws, "<setup-lane-test>");
+        let (_, cache) = emit_full(&ws, mid).expect("full emission");
+        let rich = crate::concrete_body::build(&ws, &cache.graph);
+        assert!(!rich.bodies.is_empty(), "the audit control has no bodies");
+        assert!(
+            cache.concrete.bodies.is_empty(),
+            "normal emission retained diagnostic call maps"
+        );
+        assert_eq!(cache.concrete.plans, rich.plans);
+        assert_eq!(cache.concrete.always_plans, rich.always_plans);
+        assert_eq!(
+            format!("{:?}", cache.concrete.census()),
+            format!("{:?}", rich.census())
+        );
+    }
+
+    #[test]
     fn full_emission_deduplicates_abi_plan_derivations() {
         // Its own fixture: `helper` must be CALLED from more than one site, or
         // the callee question is asked once and a zero hit count cannot

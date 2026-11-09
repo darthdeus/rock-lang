@@ -177,7 +177,7 @@ pub(crate) fn realize_shader_library_view(
             dependencies.push(instance.func);
         }
     }
-    let concrete_plans = skull_graph::concrete_body::build(ws, graph).plans;
+    let concrete_plans = skull_graph::concrete_body::build_for_lowering(ws, graph).plans;
     Ok(ShaderLibraryView {
         roots: root_instances,
         retained,
@@ -402,7 +402,7 @@ fn realize_shader_program_view(
             ShaderStage::Fragment,
         )],
     };
-    let concrete_plans = skull_graph::concrete_body::build(ws, graph).plans;
+    let concrete_plans = skull_graph::concrete_body::build_for_lowering(ws, graph).plans;
     Ok(ShaderProgramView {
         program,
         stages,

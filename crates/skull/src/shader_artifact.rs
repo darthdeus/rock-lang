@@ -232,7 +232,7 @@ pub(crate) fn realize_shader_with_context_and_plans(
     }
 
     let all_concrete_plans =
-        plans.unwrap_or_else(|| skull_graph::concrete_body::build(ws, g).plans);
+        plans.unwrap_or_else(|| skull_graph::concrete_body::build_for_lowering(ws, g).plans);
     let entry_of = |r: FuncRef| -> Option<&Instance> {
         let key = DeclKey(skull_mir::lower::canonical_variant(ws, r));
         roots.iter().find(|i| DeclKey(i.func) == key)

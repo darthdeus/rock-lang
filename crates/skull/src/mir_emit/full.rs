@@ -356,11 +356,11 @@ fn build_concrete_plans(
         if let BodyMutation::ConcreteResultOrder(order) = mutation {
             crate::concrete_body::build_with_result_order(ws, graph, order).0
         } else {
-            crate::concrete_body::build(ws, graph)
+            crate::concrete_body::build_for_lowering(ws, graph)
         }
         #[cfg(not(test))]
         {
-            crate::concrete_body::build(ws, graph)
+            crate::concrete_body::build_for_lowering(ws, graph)
         }
     };
     #[cfg(test)]

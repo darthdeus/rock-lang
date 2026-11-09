@@ -15,6 +15,7 @@ use skull::instance_graph::{self, Instance, InstanceGraph, Site, SiteOp, SiteOut
 use skull_mir::concrete::{ConcreteBodyPlan, ConcretePlans};
 use skull_mir::mir::{Inst, MirFunc, Term};
 use skull_mir::monoty::{MonoTy, MonoTyReason};
+use std::collections::BTreeSet;
 use ustr::Ustr;
 
 fn bodies_of_raw(src: &str) -> (Workspace, InstanceGraph, ConcreteBodies) {
@@ -49,6 +50,59 @@ fn callee_named(ws: &Workspace, plan: &ConcreteBodyPlan, name: &str) -> Instance
         .find(|callee| fn_name(ws, callee.instance.func) == name)
         .map(|callee| callee.instance.clone())
         .unwrap_or_else(|| panic!("no concrete `{name}` call"))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct LogicalCalleeCensus {
+    bodies: usize,
+    sites_examined: usize,
+    direct_calls: usize,
+    fn_values: usize,
+    synthesized_calls: usize,
+    iterator_ops: std::collections::BTreeMap<&'static str, usize>,
+    rock_callees: usize,
+    boundary_callees: usize,
+    callee_holes: std::collections::BTreeMap<&'static str, (usize, usize)>,
+    unknown_rock_callees: usize,
+}
+
+fn logical_callee_census(bodies: &ConcreteBodies) -> LogicalCalleeCensus {
+    let census = bodies.census();
+    LogicalCalleeCensus {
+        bodies: census.bodies,
+        sites_examined: census.sites_examined,
+        direct_calls: census.direct_calls,
+        fn_values: census.fn_values,
+        synthesized_calls: census.synthesized_calls,
+        iterator_ops: census.iterator_ops,
+        rock_callees: census.rock_callees,
+        boundary_callees: census.boundary_callees,
+        callee_holes: census.callee_holes,
+        unknown_rock_callees: census.unknown_rock_callees,
+    }
+}
+
+fn assert_lowering_projection_matches_rich(lowering: &ConcreteBodies, rich: &ConcreteBodies) {
+    assert!(
+        lowering.bodies.is_empty(),
+        "lowering projection retained concrete bodies: {}",
+        lowering.bodies.len()
+    );
+    assert!(
+        !rich.bodies.is_empty(),
+        "rich build did not retain any concrete bodies"
+    );
+    assert_eq!(
+        lowering.plans.as_ref(),
+        rich.plans.as_ref(),
+        "lowering plans diverged from the independent rich build"
+    );
+    assert_eq!(rich.census().bodies, rich.bodies.len());
+    assert_eq!(
+        logical_callee_census(lowering),
+        logical_callee_census(rich),
+        "lowering callee census diverged from the independent rich build"
+    );
 }
 
 const ID_CALL_SOURCE: &str = r#"
@@ -1958,12 +2012,11 @@ fn concrete_plan_attribution_uses_one_authoritative_type_table() {
     );
     assert!(
         stats.callee_scans > 0 && stats.callee_rows_visited > 0,
-        "the fixture did not expose ConcreteBody::callees traversal: {stats:?}"
+        "the fixture did not expose graph-site projection: {stats:?}"
     );
     assert_eq!(
-        stats.callee_scans,
-        stats.plan_attempts * 3,
-        "the ordinary plan lost a callee traversal: {stats:?}"
+        stats.callee_scans, stats.plan_attempts,
+        "ordinary planning must project its sites once: {stats:?}"
     );
     assert!(
         stats.plan_callee_map_inserts > 0 && stats.plan_callee_signature_inserts > 0,
@@ -2351,6 +2404,75 @@ fn main() {
         ),
         "stale plan failure survived owner retraction: {:?}",
         local.diagnostic_snapshot(&ws2, &graph)
+    );
+}
+
+#[test]
+fn lowering_projection_omits_bodies_and_survives_local_callee_retraction() {
+    let source_v1 = r#"
+fn echo<T>(x: T) -> T { return x }
+fn main() {
+    let value = echo(1)
+    print("{value}")
+}
+"#;
+    let source_v2 = r#"
+fn echo<T>(x: T) -> T { return x }
+fn main() {
+    let value = echo("changed")
+    print("{value}")
+}
+"#;
+
+    let ws1 = ws_with_stdlib(source_v1);
+    let mut graph = graph_of(&ws1);
+    let mut lowering = concrete_body::build_for_lowering(&ws1, &graph);
+    let rich = concrete_body::build(&ws1, &graph);
+    assert_lowering_projection_matches_rich(&lowering, &rich);
+    let old_echoes = lowering
+        .plans
+        .keys()
+        .filter(|instance| fn_name(&ws1, instance.func) == "echo")
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(old_echoes.len(), 1, "fixture did not build echo<int>");
+
+    let ws2 = ws_with_stdlib(source_v2);
+    let module = module_id(&ws2, "<test>");
+    let main = ws2
+        .module(module)
+        .functions
+        .iter()
+        .find(|(_, function)| function.name.as_str() == "main")
+        .map(|(function, _)| (module, BodyOwner::Function(function)))
+        .expect("main body");
+    let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &[main], &[]);
+    assert!(
+        update
+            .removed
+            .iter()
+            .any(|instance| fn_name(&ws1, instance.func) == "echo"),
+        "changing the only generic call did not retract its old callee: {update:?}"
+    );
+    lowering.update_local(
+        &ws2,
+        &graph,
+        &update.revisited,
+        &update.removed,
+        &update.revisited_owners,
+    );
+    let fresh_rich = concrete_body::build(&ws2, &graph);
+    assert_lowering_projection_matches_rich(&lowering, &fresh_rich);
+    let new_echoes = lowering
+        .plans
+        .keys()
+        .filter(|instance| fn_name(&ws2, instance.func) == "echo")
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(new_echoes.len(), 1, "fixture did not build echo<string>");
+    assert_ne!(
+        old_echoes, new_echoes,
+        "the old generic callee survived after its only call changed type"
     );
 }
 
