@@ -26,7 +26,7 @@ impl WorkerMode {
 
     fn enter(&self) -> WorkerScope {
         WorkerScope {
-            _inline: self.inline_off.then(skull_transform::inline_off_guard),
+            _inline: skull_transform::inline_mode_guard(self.inline_off),
             _allocation_report: crate::allocation_report::scope(self.allocation_report),
             _allocation_activation: crate::allocation_report::activation_scope(
                 self.allocation_activation,
@@ -37,7 +37,7 @@ impl WorkerMode {
 
 #[cfg(not(feature = "sequential"))]
 struct WorkerScope {
-    _inline: Option<skull_transform::InlineOffGuard>,
+    _inline: skull_transform::InlineOffGuard,
     _allocation_report: crate::allocation_report::Scope,
     _allocation_activation: crate::allocation_report::ActivationScope,
 }
@@ -158,7 +158,19 @@ pub(super) fn parallel_join<A: Send, B: Send>(
     left: impl FnOnce() -> A + Send,
     right: impl FnOnce() -> B + Send,
 ) -> (A, B) {
-    rayon::join(left, right)
+    // Either branch can run on another pool thread, away from the caller's
+    // thread-local compile modes.
+    let mode = WorkerMode::capture();
+    rayon::join(
+        || {
+            let _scope = mode.enter();
+            left()
+        },
+        || {
+            let _scope = mode.enter();
+            right()
+        },
+    )
 }
 
 #[cfg(feature = "sequential")]
@@ -205,4 +217,24 @@ pub(crate) fn drop_in_background<T: Send + 'static>(value: T) {
 #[cfg(any(feature = "sequential", target_arch = "wasm32"))]
 pub(crate) fn drop_in_background<T>(value: T) {
     drop(value);
+}
+
+#[cfg(all(test, not(feature = "sequential")))]
+mod tests {
+    use super::*;
+
+    /// A pool thread waiting inside one compile's join can steal an item of
+    /// another compile, so an item's mode must not depend on what its host
+    /// thread currently holds.
+    #[test]
+    fn an_item_runs_under_its_own_inline_mode_on_a_thread_holding_another() {
+        let normal = WorkerMode::capture();
+        assert!(!normal.inline_off);
+        let _other_compile = skull_transform::inline_off_guard();
+        {
+            let _item = normal.enter();
+            assert!(!skull_transform::inline_off_active());
+        }
+        assert!(skull_transform::inline_off_active());
+    }
 }

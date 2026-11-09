@@ -39,7 +39,7 @@ pub use frame::{materialize_frame, materialize_frame_cells};
 pub use inline::{
     InlineCache, InlineCandidateProfile, InlineCandidateTable, InlineCandidateTableStats,
     InlineCandidateWarm, InlineOffGuard, InlineScanStats, SpliceRecord, fn_has_bounds,
-    inline_functions_with_plans, inline_off_active, inline_off_guard,
+    inline_functions_with_plans, inline_mode_guard, inline_off_active, inline_off_guard,
     validate_no_residual_bound_calls,
 };
 pub use load_store_census::{

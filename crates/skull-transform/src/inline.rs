@@ -52,11 +52,12 @@ pub struct InlineOffGuard {
 }
 
 pub fn inline_off_guard() -> InlineOffGuard {
-    let previous = INLINE_OFF.with(|off| {
-        let previous = off.get();
-        off.set(true);
-        previous
-    });
+    inline_mode_guard(true)
+}
+
+/// Set this thread's inline mode to exactly `off` until the guard drops.
+pub fn inline_mode_guard(off: bool) -> InlineOffGuard {
+    let previous = INLINE_OFF.with(|cell| cell.replace(off));
     InlineOffGuard { previous }
 }
 
