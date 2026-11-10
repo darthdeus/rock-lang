@@ -50,12 +50,10 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
     // Install the one logger before anything can log. Idempotent; reads
     // ROCK_LOG.
     rock_log::init();
-    // The MIR consistency checks catch compiler bugs, not program errors; an
-    // ordinary compile skips them unless ROCK_MIR_CHECKS asks.
-    skull_mir::verify::set_checks(Some(
-        skull_mir::verify::checks_requested(std::env::var("ROCK_MIR_CHECKS").ok().as_deref())
-            .unwrap_or(false),
-    ));
+    skull_mir::verify::set_checks(Some(mir_checks(
+        std::env::args().nth(1).as_deref(),
+        std::env::var("ROCK_MIR_CHECKS").ok().as_deref(),
+    )));
 
     if let Some(name) = std::env::args().nth(1) {
         if !name.starts_with('-') && CliCommand::named(&name).is_none() {
@@ -205,5 +203,26 @@ pub fn compiler_process(command: &CliCommand, list: bool) -> bool {
         registry::CompilerProcess::Always => true,
         registry::CompilerProcess::WhenListed => list,
         registry::CompilerProcess::Never => false,
+    }
+}
+
+/// The MIR consistency checks catch compiler bugs, not program errors: an
+/// ordinary compile skips them, and `rock test`, the gate every change runs,
+/// keeps them. `ROCK_MIR_CHECKS` overrides either way.
+fn mir_checks(command: Option<&str>, setting: Option<&str>) -> bool {
+    skull_mir::verify::checks_requested(setting).unwrap_or(command == Some("test"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mir_checks;
+
+    #[test]
+    fn rock_test_runs_mir_checks_unless_asked_not_to() {
+        assert!(mir_checks(Some("test"), None));
+        assert!(!mir_checks(Some("test"), Some("0")));
+        assert!(!mir_checks(Some("compile"), None));
+        assert!(mir_checks(Some("compile"), Some("1")));
+        assert!(!mir_checks(None, None));
     }
 }
