@@ -189,8 +189,14 @@ impl SiteDomain {
 }
 
 impl Ord for SiteDomain {
+    #[inline]
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         use std::cmp::Ordering;
+        // Almost every site is in its owner's body, and a body's site table
+        // compares those with each other.
+        if matches!((self, other), (Self::Own, Self::Own)) {
+            return Ordering::Equal;
+        }
         let (tag, module, def, args) = self.ord_key();
         let (other_tag, other_module, other_def, other_args) = other.ord_key();
         let head = (tag, module, def).cmp(&(other_tag, other_module, other_def));
@@ -201,6 +207,10 @@ impl Ord for SiteDomain {
         // as far as the first difference: every site lookup compares domains,
         // and almost all of them part on the head.
         for (a, b) in args.iter().zip(other_args) {
+            // Equal types spell alike, and sites of one domain meet often.
+            if a == b {
+                continue;
+            }
             let arg = a.canonical().cmp(&b.canonical());
             if arg != Ordering::Equal {
                 return arg;
