@@ -173,7 +173,7 @@ pub(super) struct UnitOut {
     /// Specialized callees this definition needs emitted (see `Chunk::specs`).
     pub(super) specs: Vec<skull_mir::bound::SpecDemand>,
     /// Compiler-owned logical callable identities in this emitted body.
-    pub(super) code_artifact: skull_mir::code_identity::CodeArtifact,
+    pub(super) code_artifact: skull_mir::code_identity::BodyCodeArtifact,
     /// Module-global names read/written (fn-as-value edges; see `Chunk`).
     pub(super) global_names: Vec<Ustr>,
     /// Comptime inputs this unit's body baked in (`build_var`/`embed_string`).
@@ -210,11 +210,13 @@ pub(super) fn emit_lowered(
     crate::push_value_ctor_calls(&lua, &mut out.global_names);
     out.comptime_reads = mf.comptime_reads.clone();
     out.lua = lua;
-    out.code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
-        mf,
-        &ws.comptime_inputs.volatile_vars,
-    );
-    out.code_artifact.set_body_names(mf, body_name);
+    let mut code_artifact =
+        skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
+            mf,
+            &ws.comptime_inputs.volatile_vars,
+        );
+    code_artifact.set_body_names(mf, body_name);
+    out.code_artifact = code_artifact.into();
     out.times.validation += tv.elapsed();
     out.times.validation_work = true;
     out.times.emit += t_emit;

@@ -149,7 +149,7 @@ impl Assembly {
             }
             self.always_emitted_calls.extend(u.calls);
             self.always_emitted_names.extend(u.global_names);
-            self.code_artifact.merge(u.code_artifact);
+            self.code_artifact.merge_body(&u.code_artifact);
             self.allocation_bodies.extend(u.allocation_bodies);
             self.attribution.add_body(&u.attribution, Some(&u.lua));
             self.times.add(&u.times);

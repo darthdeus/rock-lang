@@ -267,9 +267,14 @@ fn assemble_overlay(
             let line = {
                 let unit =
                     emit_global_unit(ws, &cache.scx, &cache.cg, &cache.concrete, a.mid, a.gid);
-                fingerprint_identities.extend(unit.code_artifact.entries.keys().cloned());
+                fingerprint_identities.extend(
+                    unit.code_artifact
+                        .entries()
+                        .iter()
+                        .map(|entry| entry.identity.clone()),
+                );
                 candidate_code_artifact = std::sync::Arc::new(
-                    candidate_code_artifact.with_replacements(unit.code_artifact.entries.values()),
+                    candidate_code_artifact.with_replacements(unit.code_artifact.entries()),
                 );
                 if let Some(err) = unit.hard_error {
                     return Err(err);
