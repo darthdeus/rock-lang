@@ -781,7 +781,7 @@ pub(crate) fn planned_value(ws: &Workspace, name: Ustr) -> Option<Rc<PlannedValu
 struct ShapeMemo {
     arena_gen: u64,
     planned: rustc_hash::FxHashMap<Ustr, Option<Rc<PlannedValue>>>,
-    enums: rustc_hash::FxHashMap<Ustr, Option<EnumPlan>>,
+    enums: rustc_hash::FxHashMap<Ustr, Option<Rc<EnumPlan>>>,
     gc_inline: rustc_hash::FxHashMap<(FnBackend, Ustr), Option<Rc<[GcTableField]>>>,
 }
 
@@ -2566,7 +2566,7 @@ pub struct EnumPlan {
 }
 
 impl EnumPlan {
-    pub fn for_name(ws: &Workspace, name: Ustr) -> Option<Self> {
+    pub fn for_name(ws: &Workspace, name: Ustr) -> Option<Rc<Self>> {
         ws.enums_by_name.get(&name)?;
         ShapeMemo::with_active(
             |memo| memo.enums.get(&name).cloned(),
@@ -2577,7 +2577,7 @@ impl EnumPlan {
         )
     }
 
-    fn for_name_uncached(ws: &Workspace, name: Ustr) -> Option<Self> {
+    fn for_name_uncached(ws: &Workspace, name: Ustr) -> Option<Rc<Self>> {
         let layout = if payload_free_enum_variants(ws, name).is_some() {
             EnumLayout::PayloadFree
         } else if let Some(shape) = build_enum_cdata_shape(ws, name) {
@@ -2587,7 +2587,7 @@ impl EnumPlan {
         } else {
             EnumLayout::Boxed
         };
-        Some(Self { name, layout })
+        Some(Rc::new(Self { name, layout }))
     }
 
     pub fn layout(&self) -> &EnumLayout {
