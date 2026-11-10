@@ -217,14 +217,14 @@ fn an_opaque_nested_operand_is_decomposed_not_rejected() {
 fn a_nullable_nobox_field_in_a_gc_tier_outer_carries_presence() {
     let lua = emit_module(NULLABLE_FIELD);
     assert!(
-        !function_body(&lua, "__skull_ginit_G").contains("NV2_ct("),
+        !function_body(&lua, "__rock_state_initialize").contains("NV2_ct("),
         "the nullable nobox field materialized a cdata:
 {lua}"
     );
     // The presence tag leads the leaves, so an absent payload is representable
     // without a box to be nil.
     assert!(
-        function_body(&lua, "__skull_ginit_G").contains("Opt_lct((true), (1.0), (2.0))"),
+        function_body(&lua, "__rock_state_initialize").contains("Opt_lct((true), (1.0), (2.0))"),
         "the GC-tier outer did not take the presence-carrying leaf ctor:
 {lua}"
     );

@@ -60,7 +60,7 @@ use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::sync::Mutex;
 
-use bone_core::hir::Function;
+use bone_core::hir::{FnBackend, Function};
 use bone_core::prelude::{CompilerError, Span};
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
@@ -315,6 +315,8 @@ pub struct CodegenCtx {
     /// Compiler-assigned storage slots for mutable globals.
     state_slots: HashMap<ustr::Ustr, u32>,
     scalar_constants: HashMap<ustr::Ustr, Lit>,
+    /// The scalar constants whose global nothing can read ([`unread_constants`]).
+    unread_constants: HashSet<ustr::Ustr>,
     /// Every function's strongly connected component number over the
     /// whole-program call graph, from [`call_sccs`]. Read ONLY by
     /// [`callee_binding_plan`]; empty on any path that never populated it,
@@ -343,6 +345,7 @@ impl Clone for CodegenCtx {
             ),
             state_slots: self.state_slots.clone(),
             scalar_constants: self.scalar_constants.clone(),
+            unread_constants: self.unread_constants.clone(),
             call_sccs: self.call_sccs.clone(),
             frame_limits: self.frame_limits,
             line_directives: self.line_directives,
@@ -528,6 +531,30 @@ fn scalar_constants(ws: &Workspace) -> HashMap<ustr::Ustr, Lit> {
     }
 }
 
+/// The scalar constants no emitted code reads by name. Every compiled read of
+/// one is replaced by its literal, so only an `inline(lua)` body spelling the
+/// emitted name can still reach the global; a constant one spells is kept.
+fn unread_constants(ws: &Workspace, constants: &HashMap<ustr::Ustr, Lit>) -> HashSet<ustr::Ustr> {
+    let mut by_symbol: HashMap<&'static str, ustr::Ustr> = constants
+        .keys()
+        .map(|name| (skull_mir::mangle::symbol_of_key(*name).as_str(), *name))
+        .collect();
+    for module in &ws.modules {
+        for (_, f) in module.functions.iter() {
+            let Some((FnBackend::Lua, body)) = f.inline_body else {
+                continue;
+            };
+            for word in body
+                .as_str()
+                .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            {
+                by_symbol.remove(word);
+            }
+        }
+    }
+    by_symbol.into_values().collect()
+}
+
 impl CodegenCtx {
     /// Refresh baked scalar values after a constant initializer edit. Readers of
     /// every returned name need new emitted text, including readers of aliases.
@@ -547,6 +574,27 @@ impl CodegenCtx {
             .collect();
         self.scalar_constants = next;
         changed
+    }
+
+    /// Whether the global of constant `name` is never read, so it needs neither
+    /// an initializer nor storage.
+    pub fn is_unread_constant(&self, name: ustr::Ustr) -> bool {
+        self.unread_constants.contains(&name)
+    }
+
+    /// Recompute [`is_unread_constant`] after an edit, returning the constants
+    /// that something reads now but did not before: their global must be
+    /// initialized again.
+    pub fn refresh_unread_constants(&mut self, ws: &Workspace) -> Vec<ustr::Ustr> {
+        let next = unread_constants(ws, &self.scalar_constants);
+        let now_read = self
+            .unread_constants
+            .iter()
+            .filter(|name| !next.contains(*name))
+            .copied()
+            .collect();
+        self.unread_constants = next;
+        now_read
     }
 
     pub fn new(ws: &Workspace) -> Self {
@@ -588,12 +636,15 @@ impl CodegenCtx {
             ws,
             names.iter().map(|(f, name)| (*f, name.as_str())),
         ));
+        let scalar_constants = scalar_constants(ws);
+        let unread_constants = unread_constants(ws, &scalar_constants);
         CodegenCtx {
             reserved,
             rejections: Mutex::new(collisions),
             mangled: std::sync::RwLock::default(),
             state_slots,
-            scalar_constants: scalar_constants(ws),
+            scalar_constants,
+            unread_constants,
             call_sccs: HashMap::default(),
             frame_limits: true,
             line_directives: line_directives_mode(),

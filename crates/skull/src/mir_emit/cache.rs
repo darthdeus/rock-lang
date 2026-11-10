@@ -862,6 +862,24 @@ impl SkullEmitCache {
         } else {
             FxHashSet::default()
         };
+        // A constant emitted without a global because nothing read it needs
+        // one again once an edited inline Lua body spells it.
+        if reinferred.iter().any(|&(mid, owner)| match owner {
+            BodyOwner::Global(_) => true,
+            BodyOwner::Function(func) => ws.module(mid).functions[func].inline_body.is_some(),
+            _ => false,
+        }) {
+            for name in cache.cg.refresh_unread_constants(ws) {
+                cache
+                    .changed_consts_since_full
+                    .extend(ws.source_modules().flat_map(|m| {
+                        m.globals
+                            .iter()
+                            .filter(move |(_, g)| g.name == name)
+                            .map(move |(gid, _)| (m.id, gid))
+                    }));
+            }
+        }
         let mut fingerprint_identities = FxHashSet::default();
         let shader_delta_requests = cache.repair_stats.shader_delta_requests;
         let shader_roots_examined = cache.repair_stats.shader_roots_examined;

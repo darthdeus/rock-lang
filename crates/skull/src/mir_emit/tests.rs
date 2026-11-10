@@ -2067,3 +2067,52 @@ fn main() { let r = a() + c() }
         }
     }
 }
+
+#[cfg(test)]
+mod unread_constant_tests {
+    use super::*;
+    use skull_mir::mir::FuncRef;
+
+    const SRC: &str = "const FOO: int = 5\n\
+        inline(lua) fn peek() -> int = \"return 0\"\n\
+        fn top() -> int { peek() }\n\
+        fn foo() -> int { FOO }\n\
+        fn main() { top() }\n";
+
+    fn ws_of(source: &str) -> Workspace {
+        let mut modules =
+            vec![skull_parser::parse_module_clean(source, Ustr::from("<unread-const>")).unwrap()];
+        bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic")
+    }
+
+    fn function(ws: &Workspace, name: &str) -> FuncRef {
+        ws.source_modules()
+            .find_map(|m| {
+                m.functions
+                    .iter()
+                    .find(|(_, f)| f.name.as_str() == name)
+                    .map(|(func, _)| FuncRef { module: m.id, func })
+            })
+            .expect("function")
+    }
+
+    /// The full build drops the unread `FOO`; an overlay whose edited inline
+    /// Lua body now spells it must initialize the global.
+    #[test]
+    fn an_overlay_initializes_a_constant_an_edited_inline_body_spells() {
+        let ws1 = ws_of(SRC);
+        let mid = module_id(&ws1, "<unread-const>");
+        let (full, mut cache) = emit_full(&ws1, mid).expect("full");
+        assert!(!full.lua.contains("FOO ="), "{}", full.lua);
+
+        let ws2 = ws_of(&SRC.replace("\"return 0\"", "\"return FOO\""));
+        let peek = function(&ws2, "peek");
+        let overlay = emit_overlay(
+            &ws2,
+            &mut cache,
+            &[(peek.module, BodyOwner::Function(peek.func))],
+        )
+        .expect("overlay");
+        assert!(overlay.lua.contains("FOO = "), "{}", overlay.lua);
+    }
+}

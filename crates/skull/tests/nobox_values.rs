@@ -839,9 +839,9 @@ fn main() {
 #[test]
 fn global_of_a_nobox_value_stores_leaves() {
     let lua = emit_module(NOBOX_GLOBAL);
-    let init = function_body(&lua, "__skull_ginit_SPOT");
+    let init = function_body(&lua, "__rock_state_initialize");
     assert!(
-        init.contains("do return (1.0), (2.0) end"),
+        init.contains("local __rock_init_values = { (1.0), (2.0) }"),
         "the initializer did not return leaves:\n{init}"
     );
     let slots = global_slots(&lua, "SPOT");

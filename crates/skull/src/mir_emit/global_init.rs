@@ -139,7 +139,7 @@ fn global_init_line(
     scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
     g: &bone_semantic::hir::GlobalDef,
-    init_name: &str,
+    init: &str,
 ) -> Result<String, CompilerError> {
     let plan = skull_mir::lower::GlobalPlan::for_declared_type(ws, scx, g.ty).map_err(|_| {
         CompilerError::new_no_location(format!("no storage plan for global `{}`", g.name))
@@ -156,9 +156,7 @@ fn global_init_line(
     match plan.leaf_names(skull_mir::mangle::symbol_of_key(g.name)) {
         Some(leaves) => {
             let mut line = String::from("if __rock_globals_fresh then\n");
-            line.push_str(&format!(
-                "  local __rock_init_values = {{ {init_name}() }}\n"
-            ));
+            line.push_str(&format!("  local __rock_init_values = {{ {init} }}\n"));
             for (index, leaf) in leaves.iter().enumerate() {
                 line.push_str(&format!(
                     "  {cell}[{}] = __rock_init_values[{}]\n",
@@ -170,7 +168,7 @@ fn global_init_line(
             Ok(line)
         }
         None => Ok(format!(
-            "if __rock_globals_fresh then {cell}[{}] = {init_name}() end\n",
+            "if __rock_globals_fresh then {cell}[{}] = {init} end\n",
             slot(g.name)?
         )),
     }
@@ -373,6 +371,23 @@ pub(super) fn emit_global_unit(
                 out.hard_error = Some(e);
                 return out;
             }
+            // An initializer that only returns one expression is evaluated in
+            // its init line instead of through a function made for one call.
+            let returned = lua
+                .strip_prefix(&format!("function {init_name}()\n do return "))
+                .and_then(|rest| rest.strip_suffix(" end\nend\n"))
+                .filter(|expr| !expr.contains('\n'))
+                .map(str::to_string);
+            let init = match &returned {
+                Some(expr) => expr.clone(),
+                None => format!("{init_name}()"),
+            };
+            // An unread constant is still lowered: its body fingerprint is what
+            // a `@wire(onchange=...)` dependency on it compares.
+            let unread = g.is_const && cg.is_unread_constant(g.name);
+            if returned.is_some() || unread {
+                lua.clear();
+            }
             emit_lowered(
                 ws,
                 cg,
@@ -384,6 +399,9 @@ pub(super) fn emit_global_unit(
                 Duration::ZERO,
             );
             out.attribution.times = out.times;
+            if unread {
+                return out;
+            }
             // Hot-reload init line. A `const` is a compile-time constant: tweaking
             // the source literal should show the new value next reload, so its init
             // runs UNCONDITIONALLY (no preserve guard).
@@ -408,9 +426,9 @@ pub(super) fn emit_global_unit(
                 }
             };
             let line = if g.is_const {
-                format!("{target} = {init_name}()\n")
+                format!("{target} = {init}\n")
             } else {
-                match global_init_line(ws, scx, cg, g, &init_name) {
+                match global_init_line(ws, scx, cg, g, &init) {
                     Ok(line) => line,
                     Err(error) => {
                         out.hard_error = Some(error);

@@ -1446,18 +1446,26 @@ mod overlay_runtime_tests {
     /// `UNRELATED` must NOT appear in the overlay at all.
     #[test]
     fn const_overlay_reemits_only_affected() {
-        let v0 = "const A: int = 5\nconst DEP: int = A + 1\nconst UNRELATED: int = 99\nfn main() { print(\"{A} {DEP} {UNRELATED}\") }\n";
-        let v1 = "const A: int = 10\nconst DEP: int = A + 1\nconst UNRELATED: int = 99\nfn main() { print(\"{A} {DEP} {UNRELATED}\") }\n";
+        // Computed initializers: a literal constant is emitted at its reads,
+        // with no global to re-initialize.
+        let program = |a: i32| {
+            format!(
+                "fn five() -> int {{ 5 }}\nconst A: int = five() + {a}\nconst DEP: int = A + 1\n\
+                 const UNRELATED: int = five() + 94\nfn main() {{ print(\"{{A}} {{DEP}} {{UNRELATED}}\") }}\n"
+            )
+        };
+        let (v0, v1) = (program(0), program(5));
+        let (v0, v1) = (v0.as_str(), v1.as_str());
 
         let mut live = Live::boot(v0);
 
         let overlay = live.overlay(v1);
 
-        // A changed -> its ginit fn + line re-emitted. DEP reads A -> its line
-        // re-emitted (ginit unchanged, lives in main.lua). UNRELATED is independent
-        // -> it must NOT appear in the overlay at all.
+        // A changed -> its init line re-emitted. DEP reads A -> its line
+        // re-emitted. UNRELATED is independent -> it must NOT appear in the
+        // overlay at all.
         assert!(
-            overlay.contains("__skull_ginit_A"),
+            overlay.contains("\nA = "),
             "changed const A must be re-emitted:\n{}",
             overlay
         );

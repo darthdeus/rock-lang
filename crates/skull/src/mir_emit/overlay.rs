@@ -256,7 +256,10 @@ fn assemble_overlay(
         // line + dependency edges (restricted to affected consts) for the sort.
         let mut inits: Vec<PendingInit<String>> = Vec::new();
         let mut definitions = LuaDefinitionWriter::new(out);
-        for a in &affected {
+        for a in affected
+            .iter()
+            .filter(|a| !cache.cg.is_unread_constant(a.name))
+        {
             let line = {
                 let unit =
                     emit_global_unit(ws, &cache.scx, &cache.cg, &cache.concrete, a.mid, a.gid);
