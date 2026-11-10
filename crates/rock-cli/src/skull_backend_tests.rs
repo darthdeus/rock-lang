@@ -717,9 +717,10 @@ mod incremental_watch_tests {
             skull_mir::mangle::mangle_fn(session.workspace(), function)
         };
         let (a, b, x, y) = (symbol("a"), symbol("b"), symbol("x"), symbol("y"));
-        let factory = |caller: &str, callee: &str| {
-            format!("__rock_mk_{caller} = function({callee}) return function(")
-        };
+        // Factory parameters carry short local names; the binding line passes
+        // the real callee.
+        let factory =
+            |caller: &str, callee: &str| format!("\n{caller} = __rock_mk_{caller}({callee})\n");
         let (before, mut cache) = skull::mir_emit::emit_full(session.workspace(), mid)
             .expect("initial rank fixture emit");
         assert!(
