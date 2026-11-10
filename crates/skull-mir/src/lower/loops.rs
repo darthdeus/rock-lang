@@ -3,7 +3,7 @@
 //! each element -- including the per-iteration tuple that gets scalarized.
 use super::*;
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
     /// The innermost `(continue_target, break_target, defer depth)`.
     pub(crate) fn loop_target(
         &self,
@@ -1152,7 +1152,7 @@ impl Builder<'_> {
     /// its own copy.
     fn loop_element_snapshot(
         &mut self,
-        ty: Option<Rc<MonoTy>>,
+        ty: Option<std::borrow::Cow<'a, MonoTy>>,
         repr: ValueRepr,
     ) -> Result<ValueRepr, CompilerError> {
         match (repr, ty) {
@@ -1168,7 +1168,7 @@ impl Builder<'_> {
         &self,
         vars: &BindingPattern,
         component: Option<usize>,
-    ) -> Option<Rc<MonoTy>> {
+    ) -> Option<std::borrow::Cow<'a, MonoTy>> {
         let BindingPattern::Leaf(b) = vars else {
             return None;
         };
@@ -1177,9 +1177,9 @@ impl Builder<'_> {
         }
         let ty = self.binding_ty(*b).and_then(|ty| self.concrete_ty_id(ty))?;
         match component {
-            None => Some(ty),
-            Some(i) => match ty.as_ref() {
-                MonoTy::Tuple(parts) => parts.get(i).cloned().map(Rc::new),
+            None => Some(std::borrow::Cow::Borrowed(ty)),
+            Some(i) => match ty {
+                MonoTy::Tuple(parts) => parts.get(i).map(std::borrow::Cow::Borrowed),
                 _ => None,
             },
         }
@@ -1210,7 +1210,7 @@ impl Builder<'_> {
                     .binding_ty(*b)
                     .and_then(|ty| self.concrete_ty_id(ty))
                     .ok_or_else(|| self.gap_here("loop binding has no concrete representation"))?;
-                let representation = self.concrete_rep_id(&mono, RepUse::Value, false, true)?;
+                let representation = self.concrete_rep_id(mono, RepUse::Value, false, true)?;
                 let bundle = ValueBundle::new(representation, repr);
                 let leaves = self.repr_to_leaves_bundle_for_shape(&bundle, &shape)?;
                 self.bind_leaves(*b, &leaves, shape)?;
@@ -1350,7 +1350,7 @@ impl Builder<'_> {
     ) -> Result<(), CompilerError> {
         let bname = self.body.binding_arena[b].name;
         let owner = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty));
-        if let Some(cells) = self.new_flat_enum_cells(b, bname, &shape, owner.as_deref())? {
+        if let Some(cells) = self.new_flat_enum_cells(b, bname, &shape, owner)? {
             if cells.len() != leaves.len() {
                 return Err(self.gap_here(format!(
                     "flat enum {} has {} binding cells for {} leaves",
@@ -1403,14 +1403,11 @@ impl Builder<'_> {
                 return None;
             }
             match field_shape {
-                FieldShape::Prim => out.push(
-                    self.concrete_ty_id(field_ty)
-                        .map(|ty| ty.as_ref().clone())
-                        .or_else(|| {
-                            crate::monoty::convert_decl(self.ws, field_ty, &SpecSubst::default())
-                                .ok()
-                        })?,
-                ),
+                FieldShape::Prim => {
+                    out.push(self.concrete_ty_id(field_ty).cloned().or_else(|| {
+                        crate::monoty::convert_decl(self.ws, field_ty, &SpecSubst::default()).ok()
+                    })?)
+                }
                 FieldShape::Nested(child) => out.extend(self.value_shape_leaf_monos(child)?),
             }
         }

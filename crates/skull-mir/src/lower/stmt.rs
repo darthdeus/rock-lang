@@ -44,7 +44,7 @@ impl DeferMode {
     }
 }
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
     /// Lower a statement sequence into the current block. Returns `true` if a
     /// `return` terminated the block (the rest is dead).
     /// `static name = init` -> a private global cell + done-flag, guarded so the
@@ -109,7 +109,7 @@ impl Builder<'_> {
         );
         self.cur = init_bb;
         let expected = self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
-        let v = self.lower_expr_with_expected(value, expected.as_deref())?;
+        let v = self.lower_expr_with_expected(value, expected)?;
         self.emit_cur(Inst::StoreGlobal {
             name: cell,
             value: v,
@@ -162,7 +162,7 @@ impl Builder<'_> {
         let representation = BackendFnAbiPlan::for_function_value_with_mode(
             self.ws,
             self.call_scx,
-            &fn_ty,
+            fn_ty,
             taken_by_value,
         )
         .map_err(|error| match error.span.or(self.cur_span) {
@@ -232,7 +232,6 @@ impl Builder<'_> {
             call_scx: self.call_scx,
             concrete_plan: self.concrete_plan,
             concrete_plans: self.concrete_plans,
-            concrete_type_cache: std::cell::RefCell::new(rustc_hash::FxHashMap::default()),
             lower_attribution: std::cell::RefCell::new(LowerAttribution {
                 abi_param_copy_volume: param_reps.len(),
                 ..LowerAttribution::default()
@@ -434,7 +433,7 @@ impl Builder<'_> {
                             let owner =
                                 self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
                             let cells = self
-                                .new_flat_enum_cells(name, bname, &shape, owner.as_deref())?
+                                .new_flat_enum_cells(name, bname, &shape, owner)?
                                 .unwrap_or_else(|| {
                                     (0..leaves.len())
                                         .map(|li| {
@@ -509,7 +508,7 @@ impl Builder<'_> {
                                     })?
                                 }
                                 None => self.with_value_lending(false, |s| {
-                                    s.lower_expr_with_expected(value, expected.as_deref())
+                                    s.lower_expr_with_expected(value, expected)
                                 })?,
                             };
                             let v = self.coerced_to_binding(v, value, name);

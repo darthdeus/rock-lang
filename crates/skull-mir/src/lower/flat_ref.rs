@@ -271,7 +271,7 @@ impl<'a> Builder<'a> {
         let has_ref_arg = !ref_args.is_empty();
         let returns_ref = self
             .concrete_ty(e)?
-            .is_some_and(|ty| self.is_value_ref_type(&ty));
+            .is_some_and(|ty| self.is_value_ref_type(ty));
         if !has_ref_arg && !returns_ref {
             return Ok(None);
         }
@@ -349,7 +349,7 @@ impl<'a> Builder<'a> {
             }
             Expr::Call { .. } => self
                 .concrete_ty(a)?
-                .is_some_and(|ty| self.is_value_ref_type(&ty)),
+                .is_some_and(|ty| self.is_value_ref_type(ty)),
             _ => false,
         })
     }
@@ -399,11 +399,10 @@ impl<'a> Builder<'a> {
         plan: &'a ConcreteBodyPlan,
         sig: &[Option<FlatRefKey>],
     ) -> Result<Option<FlatRefKey>, CompilerError> {
-        let returns_value_ref = plan.signature.result.is_some_and(|result| {
-            self.is_value_ref_type(
-                &self.concrete_mono_view(result, ConcreteMonoConsumer::ReturnLowering),
-            )
-        });
+        let returns_value_ref = plan
+            .signature
+            .result
+            .is_some_and(|result| self.is_value_ref_type(self.concrete_mono(result)));
         if !returns_value_ref {
             return Ok(None);
         }

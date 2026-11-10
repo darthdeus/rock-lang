@@ -224,24 +224,7 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
     phase("regalloc", &attribution.regalloc);
     phase("stringify", &attribution.stringify);
     println!(
-        "    lower facts: concrete_mono {} requests, {} cache hits, {} derivations, {} unique ids, {} shared handles; clones total/miss/insertion/hit/owned {}/{}/{}/{}/{}; explicit owned escapes {}; shared-read/cache/owned-clone self {:.3}/{:.3}/{:.3} ms (timed requests {}); ABI param copied slots {}, shared views {}; MIR inst/cell/block alloc {}/{}/{} realloc {}/{}/{} capacity {}/{}/{}",
-        attribution.lower.concrete_mono_requests,
-        attribution.lower.concrete_mono_cache_hits,
-        attribution.lower.concrete_mono_derivations,
-        attribution.lower.concrete_mono_unique_ids,
-        attribution.lower.concrete_mono_shared_handle_requests,
-        attribution.lower.concrete_mono_cloned_nodes,
-        attribution.lower.concrete_mono_interner_miss_cloned_nodes,
-        attribution.lower.concrete_mono_cache_insertion_cloned_nodes,
-        attribution.lower.concrete_mono_cache_hit_cloned_nodes,
-        attribution
-            .lower
-            .concrete_mono_explicit_owned_escape_cloned_nodes,
-        attribution.lower.concrete_mono_explicit_owned_escapes,
-        attribution.lower.concrete_mono_lookup_ns as f64 / 1_000_000.0,
-        attribution.lower.concrete_mono_cache_lookup_ns as f64 / 1_000_000.0,
-        attribution.lower.concrete_mono_clone_self_ns as f64 / 1_000_000.0,
-        attribution.lower.concrete_mono_timed_requests,
+        "    lower facts: ABI param copied slots {}, shared views {}; MIR inst/cell/block alloc {}/{}/{} realloc {}/{}/{} capacity {}/{}/{}",
         attribution.lower.abi_param_copy_volume,
         attribution.lower.abi_param_shared_views,
         attribution.lower.mir_instruction_allocations,
@@ -260,30 +243,6 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
         attribution.lower.mir_cell_reallocation_ns as f64 / 1_000_000.0,
         attribution.lower.mir_block_reallocation_ns as f64 / 1_000_000.0,
     );
-    let accounted_ownership_ns = attribution
-        .lower
-        .concrete_mono_lookup_ns
-        .saturating_add(attribution.lower.concrete_mono_clone_self_ns);
-    let lower_ns = attribution.lower.elapsed.as_nanos() as u64;
-    println!(
-        "    lower ownership remainder: {:.3} ms (lower wall {:.3} ms minus timed interner/clone self; overlapping counters are not summed)",
-        lower_ns.saturating_sub(accounted_ownership_ns) as f64 / 1_000_000.0,
-        lower_ns as f64 / 1_000_000.0,
-    );
-    println!("    concrete_mono consumers:");
-    for consumer in skull_mir::lower::ConcreteMonoConsumer::ALL {
-        let stats = attribution.lower.concrete_mono_by_consumer[consumer as usize];
-        if stats.requests == 0 {
-            continue;
-        }
-        println!(
-            "      {:20} requests {}, cloned nodes {}, owned escapes {}",
-            consumer.label(),
-            stats.requests,
-            stats.cloned_nodes,
-            stats.explicit_owned_escapes
-        );
-    }
     println!(
         "    inline results: {} accepted splices, {} copied instructions, {} arena allocations; cleanup live before/after {}/{}; {} borrowed block scans over {} instructions",
         attribution.inline.accepted_splices,
@@ -573,12 +532,8 @@ fn print_attribution(attribution: &skull::mir_emit::EmitAttribution) {
         println!("    top lower bodies:");
         for body in &attribution.top_bodies {
             println!(
-                "      {:28} {:>7} us, {} MIR instructions, concrete_mono {}/{} requests/cloned nodes",
-                body.owner,
-                body.lower_us,
-                body.mir_instructions,
-                body.concrete_mono_requests,
-                body.concrete_mono_cloned_nodes,
+                "      {:28} {:>7} us, {} MIR instructions",
+                body.owner, body.lower_us, body.mir_instructions,
             );
         }
     }
@@ -852,14 +807,13 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
             graph.frontier_same_frontier_dependency_owners,
         );
         println!(
-            "  graph expansion: owner total/p50/p95/max {} / {} / {} / {} us; mono attempts/new/read/write/timed-mutations {}/{}/{}/{}/{}; interner self-time {:.3} ms",
+            "  graph expansion: owner total/p50/p95/max {} / {} / {} / {} us; mono attempts/new/write/timed-mutations {}/{}/{}/{}; interner self-time {:.3} ms",
             graph.expansion_ns_total / 1_000,
             graph.expansion_ns_p50 / 1_000,
             graph.expansion_ns_p95 / 1_000,
             graph.expansion_ns_max / 1_000,
             graph.mono_intern_attempts,
             graph.mono_new_types,
-            graph.mono_read_acqs,
             graph.mono_write_acqs,
             graph.mono_timed_mutation_calls,
             graph.mono_interner_self_ns as f64 / 1_000_000.0,
@@ -997,11 +951,8 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
         );
         let (ms, mf) = (&traffic.mono_setup, &traffic.mono_final);
         println!(
-            "  mono interner  : {} read lock acqs ({} post-setup, {} worker-local reads), \
-             {} write acqs ({} post-setup), {} new types ({} post-setup) of {}, one run",
-            mf.read_acqs,
-            mf.read_acqs - ms.read_acqs,
-            mf.local_read_hits,
+            "  mono interner  : {} write acqs ({} post-setup), {} new types ({} post-setup) of {}, \
+             one run",
             mf.write_acqs,
             mf.write_acqs - ms.write_acqs,
             mf.intern_new,

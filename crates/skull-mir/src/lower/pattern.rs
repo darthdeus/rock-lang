@@ -3,7 +3,7 @@
 //! `while let` / `for` range forms built on the same machinery.
 use super::*;
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
     /// `match scrut { pat => body, ... }` as a value. Each arm is a test block
     /// (branch to its body on match, else to the next arm) and a body block that
     /// binds, checks the guard, then stores its value into a result **cell** and
@@ -150,7 +150,7 @@ impl Builder<'_> {
                     && self.binding_ref_borrowed(b)
                     && let Some(ty) = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty))
                 {
-                    val = self.copied_value_box(&ty, val)?;
+                    val = self.copied_value_box(ty, val)?;
                 }
                 let cell = self.new_binding_cell(b, name, self.binding_ty(b), Ustr::from(""));
                 self.emit_cur(Inst::Store { cell, value: val });
@@ -321,7 +321,7 @@ impl Builder<'_> {
                                 && !self.binding_ref_borrowed(b) =>
                         {
                             match self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty)) {
-                                Some(ty) => self.copied_value_box(&ty, fv)?,
+                                Some(ty) => self.copied_value_box(ty, fv)?,
                                 None => fv,
                             }
                         }

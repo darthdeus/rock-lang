@@ -6,7 +6,7 @@
 //! builds and reads the layout that module describes.
 use super::*;
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
     pub(crate) fn clone_column_data(
         &mut self,
         vec: Idx<Inst>,

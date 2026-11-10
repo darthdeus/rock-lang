@@ -3,9 +3,8 @@
 //! numeric coercions (`int`->`float`, binding and param types).
 use super::*;
 use crate::monoty::MonoTy;
-use std::rc::Rc;
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
     pub(crate) fn container_plan_for_type(
         &self,
         ty: &MonoTy,
@@ -33,10 +32,10 @@ impl Builder<'_> {
         let Some(ty) = self.concrete_ty(e)? else {
             return Ok(None);
         };
-        if !ContainerPlan::matches_type(family, &ty) {
+        if !ContainerPlan::matches_type(family, ty) {
             return Ok(None);
         }
-        self.container_plan_for_type(&ty, family).map(Some)
+        self.container_plan_for_type(ty, family).map(Some)
     }
 
     pub(crate) fn expr_is_flat_vec(&self, e: Idx<Expr>) -> bool {
@@ -77,7 +76,7 @@ impl Builder<'_> {
             _ => return Ok(None),
         };
         let arena = self.scx.rep_arena();
-        let plan = self.container_plan_for_type(&concrete, family)?;
+        let plan = self.container_plan_for_type(concrete, family)?;
         if !plan.is_leaf_addressed() {
             return Ok(None);
         }
@@ -136,7 +135,7 @@ impl Builder<'_> {
     /// table (column or strided storage).
     pub(crate) fn flat_stored_container(&self, e: Idx<Expr>) -> Result<bool, CompilerError> {
         match self.concrete_ty(e)? {
-            Some(ty) => self.flat_stored_container_type(&ty),
+            Some(ty) => self.flat_stored_container_type(ty),
             None => Ok(false),
         }
     }
@@ -295,7 +294,7 @@ impl Builder<'_> {
     ///   nothing, and a depth limit means a cyclic substitution chain. None of
     ///   the three occurs over the corpus or the Rock suite, so this arm has
     ///   teeth without a population.
-    pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Result<Option<Rc<MonoTy>>, CompilerError> {
+    pub(crate) fn concrete_ty(&self, e: Idx<Expr>) -> Result<Option<&'a MonoTy>, CompilerError> {
         if self.concrete_expr_is_untyped(e) {
             return Ok(None);
         }
@@ -381,7 +380,7 @@ impl Builder<'_> {
 
     pub(crate) fn arith_ty(&self, e: Idx<Expr>) -> Option<ArithTy> {
         if let Some(ty) = self.concrete_expr_ty(e) {
-            return self.arith_ty_of_mono(&ty);
+            return self.arith_ty_of_mono(ty);
         }
         self.arith_ty_of(self.expr_ty(e)?)
     }
@@ -458,7 +457,7 @@ impl Builder<'_> {
             .and_then(|ty| self.concrete_ty_id(ty))
             .is_some_and(|ty| {
                 matches!(
-                    ty.as_ref(),
+                    ty,
                     MonoTy::App {
                         ctor: MonoCtor::Ref,
                         ..

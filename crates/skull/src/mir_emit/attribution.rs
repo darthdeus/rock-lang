@@ -73,23 +73,6 @@ pub struct AttributionPhase {
     pub p50_us: u64,
     pub p95_us: u64,
     pub max_us: u64,
-    pub concrete_mono_requests: usize,
-    pub concrete_mono_cache_hits: usize,
-    pub concrete_mono_derivations: usize,
-    pub concrete_mono_unique_ids: usize,
-    pub concrete_mono_cloned_nodes: usize,
-    pub concrete_mono_interner_miss_cloned_nodes: usize,
-    pub concrete_mono_cache_insertion_cloned_nodes: usize,
-    pub concrete_mono_cache_hit_cloned_nodes: usize,
-    pub concrete_mono_explicit_owned_escape_cloned_nodes: usize,
-    pub concrete_mono_explicit_owned_escapes: usize,
-    pub concrete_mono_lookup_ns: u64,
-    pub concrete_mono_cache_lookup_ns: u64,
-    pub concrete_mono_shared_handle_requests: usize,
-    pub concrete_mono_clone_self_ns: u64,
-    pub concrete_mono_timed_requests: usize,
-    pub concrete_mono_by_consumer: [skull_mir::lower::ConcreteMonoConsumerStats;
-        skull_mir::lower::ConcreteMonoConsumer::COUNT],
     pub abi_param_copy_volume: usize,
     pub abi_param_shared_views: usize,
     pub mir_instruction_allocations: usize,
@@ -201,8 +184,6 @@ pub struct BodyAttributionOwner {
     pub owner: String,
     pub lower_us: u64,
     pub mir_instructions: usize,
-    pub concrete_mono_requests: usize,
-    pub concrete_mono_cloned_nodes: usize,
 }
 
 /// Counter totals of the build's shared `RepArena` and `MonoInterner`, taken
@@ -628,44 +609,6 @@ impl AttributionAccumulator {
             unit.hir_nodes,
             unit.mir_instructions,
         );
-        self.result.lower.concrete_mono_requests += unit.lower_facts.concrete_mono_requests;
-        self.result.lower.concrete_mono_cache_hits += unit.lower_facts.concrete_mono_cache_hits;
-        self.result.lower.concrete_mono_derivations += unit.lower_facts.concrete_mono_derivations;
-        self.result.lower.concrete_mono_unique_ids += unit.lower_facts.concrete_mono_unique_ids;
-        self.result.lower.concrete_mono_cloned_nodes += unit.lower_facts.concrete_mono_cloned_nodes;
-        self.result.lower.concrete_mono_interner_miss_cloned_nodes +=
-            unit.lower_facts.concrete_mono_interner_miss_cloned_nodes;
-        self.result.lower.concrete_mono_cache_insertion_cloned_nodes +=
-            unit.lower_facts.concrete_mono_cache_insertion_cloned_nodes;
-        self.result.lower.concrete_mono_cache_hit_cloned_nodes +=
-            unit.lower_facts.concrete_mono_cache_hit_cloned_nodes;
-        self.result
-            .lower
-            .concrete_mono_explicit_owned_escape_cloned_nodes += unit
-            .lower_facts
-            .concrete_mono_explicit_owned_escape_cloned_nodes;
-        self.result.lower.concrete_mono_explicit_owned_escapes +=
-            unit.lower_facts.concrete_mono_explicit_owned_escapes;
-        self.result.lower.concrete_mono_lookup_ns += unit.lower_facts.concrete_mono_lookup_ns;
-        self.result.lower.concrete_mono_cache_lookup_ns +=
-            unit.lower_facts.concrete_mono_cache_lookup_ns;
-        self.result.lower.concrete_mono_shared_handle_requests +=
-            unit.lower_facts.concrete_mono_shared_handle_requests;
-        self.result.lower.concrete_mono_clone_self_ns +=
-            unit.lower_facts.concrete_mono_clone_self_ns;
-        self.result.lower.concrete_mono_timed_requests +=
-            unit.lower_facts.concrete_mono_timed_requests;
-        for (total, child) in self
-            .result
-            .lower
-            .concrete_mono_by_consumer
-            .iter_mut()
-            .zip(unit.lower_facts.concrete_mono_by_consumer.iter())
-        {
-            total.requests += child.requests;
-            total.cloned_nodes += child.cloned_nodes;
-            total.explicit_owned_escapes += child.explicit_owned_escapes;
-        }
         self.result.lower.abi_param_copy_volume += unit.lower_facts.abi_param_copy_volume;
         self.result.lower.abi_param_shared_views += unit.lower_facts.abi_param_shared_views;
         self.result.lower.mir_instruction_allocations +=
@@ -772,8 +715,6 @@ impl AttributionAccumulator {
             owner: unit.owner.clone(),
             lower_us: duration_us(times.lower),
             mir_instructions: unit.mir_instructions,
-            concrete_mono_requests: unit.lower_facts.concrete_mono_requests,
-            concrete_mono_cloned_nodes: unit.lower_facts.concrete_mono_cloned_nodes,
         });
     }
 

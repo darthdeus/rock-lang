@@ -326,7 +326,7 @@ fn nominal_tree(
     Err(format!("`{name}` has no structural rendering"))
 }
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
     /// Render `repr`, a value whose format tree is `node`.
     pub(crate) fn render_fmt(
         &mut self,

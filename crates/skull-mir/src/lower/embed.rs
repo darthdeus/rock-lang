@@ -3,7 +3,7 @@
 //! plumbing that materializes one.
 use super::*;
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
     pub(crate) fn struct_field_plan(
         &self,
         sname: Ustr,

@@ -6,7 +6,7 @@
 //! described in `shape`.
 use super::*;
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
     /// The caller reaches this only when the body keeps the boxed ABI
     /// (`BackendFnAbiPlan::scalar` is `None`).
     /// Under `values_first_class`, a `value` struct is already a first-class
@@ -296,9 +296,9 @@ impl Builder<'_> {
             if self.param_is_repr_opaque(func, i) {
                 continue;
             }
-            let mono = self.concrete_mono_view(*id, ConcreteMonoConsumer::NoboxBoundary);
+            let mono = self.concrete_mono(*id);
             if let Some((rendered, physical)) =
-                self.param_slot_hazard_mono(&mono, leaf_views_rebuilt)?
+                self.param_slot_hazard_mono(mono, leaf_views_rebuilt)?
             {
                 return Err(CompilerError::new_with_label(
                     self.body.expr_spans[e],
@@ -315,8 +315,8 @@ impl Builder<'_> {
         let Some(id) = signature.result else {
             return Ok(());
         };
-        let mono = self.concrete_mono_view(id, ConcreteMonoConsumer::NoboxBoundary);
-        let Some((rendered, physical)) = self.slot_hazard_mono(&mono, leaf_views_rebuilt)? else {
+        let mono = self.concrete_mono(id);
+        let Some((rendered, physical)) = self.slot_hazard_mono(mono, leaf_views_rebuilt)? else {
             return Ok(());
         };
         Err(CompilerError::new_with_label(
@@ -535,14 +535,14 @@ impl Builder<'_> {
                         "concrete struct field plan is missing `{struct_name}.{field}`"
                     ))
                 })?;
-            Some(self.concrete_mono_view(id, ConcreteMonoConsumer::NoboxBoundary))
+            Some(self.concrete_mono(id))
         } else {
             None
         };
         match r {
             ValueRepr::Scalar(s) => {
                 let s = match expected {
-                    Some(ref ty) => self.coerced_mono(s, value_expr, ty),
+                    Some(ty) => self.coerced_mono(s, value_expr, ty),
                     None => match self.struct_field_ty(struct_name, field) {
                         Some(fty) => self.coerced(s, value_expr, fty),
                         None => s,
@@ -645,7 +645,7 @@ impl Builder<'_> {
         ty: TyId,
     ) -> Result<Option<FunctionRepPlan>, CompilerError> {
         if let Some(concrete) = self.concrete_ty_id(ty) {
-            return self.fn_value_rep_plan_for_mono(&concrete);
+            return self.fn_value_rep_plan_for_mono(concrete);
         }
         Ok(None)
     }

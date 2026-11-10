@@ -3,9 +3,8 @@
 //! specialization substitutes through.
 use super::*;
 use crate::monoty::MonoTy;
-use std::rc::Rc;
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
     pub(crate) fn is_null_lit(&self, e: Idx<Expr>) -> bool {
         self.dispatch().is_null_lit(e)
     }
@@ -15,26 +14,42 @@ impl Builder<'_> {
     pub(crate) fn expr_is_nullable(&self, e: Idx<Expr>) -> bool {
         self.dispatch().expr_is_nullable(e)
     }
+}
 
-    pub(crate) fn concrete_expr_ty(&self, e: Idx<Expr>) -> Option<Rc<MonoTy>> {
-        self.dispatch().concrete_expr_ty(e)
+/// Concrete type reads. The types live in the build's interner, so the
+/// borrows outlive any borrow of the builder itself.
+impl<'a> Builder<'a> {
+    pub(crate) fn concrete_mono(&self, id: crate::monoty::MonoTyId) -> &'a MonoTy {
+        let scx: &'a ScalarCtx = self.scx;
+        scx.interner().get_ref(id)
+    }
+
+    pub(crate) fn concrete_expr_ty(&self, e: Idx<Expr>) -> Option<&'a MonoTy> {
+        let plan: &'a ConcreteBodyPlan = self.concrete_plan;
+        let id = plan.domain_types(&self.cur_domain)?.expr_type(e)?;
+        Some(self.concrete_mono(id))
     }
 
     pub(crate) fn concrete_struct_field_ty(
         &self,
         literal: Idx<Expr>,
         field: Ustr,
-    ) -> Option<Rc<MonoTy>> {
-        self.dispatch()
-            .concrete_types
-            .and_then(|tables| tables.struct_field_type(literal, field))
-            .map(|id| self.concrete_mono_view(id, ConcreteMonoConsumer::Dispatch))
+    ) -> Option<&'a MonoTy> {
+        let plan: &'a ConcreteBodyPlan = self.concrete_plan;
+        let id = plan
+            .domain_types(&self.cur_domain)?
+            .struct_field_type(literal, field)?;
+        Some(self.concrete_mono(id))
     }
 
-    pub(crate) fn concrete_ty_id(&self, ty: TyId) -> Option<Rc<MonoTy>> {
-        self.dispatch().concrete_ty(ty)
+    pub(crate) fn concrete_ty_id(&self, ty: TyId) -> Option<&'a MonoTy> {
+        let plan: &'a ConcreteBodyPlan = self.concrete_plan;
+        let id = plan.domain_types(&self.cur_domain)?.ty_type(ty)?;
+        Some(self.concrete_mono(id))
     }
+}
 
+impl<'a> Builder<'a> {
     pub(crate) fn concrete_rep_id(
         &self,
         ty: &MonoTy,
@@ -115,7 +130,7 @@ impl Builder<'_> {
         value: ValueRepr,
     ) -> Result<ValueBundle, CompilerError> {
         let ty = match self.concrete_expr_ty(e) {
-            Some(ty) => ty,
+            Some(ty) => std::borrow::Cow::Borrowed(ty),
             None => {
                 let enum_name = match self.body.expr_arena[e] {
                     Expr::EnumVariant { enum_name, .. } => Some(enum_name),
@@ -128,7 +143,7 @@ impl Builder<'_> {
                     },
                 };
                 if let Some(enum_name) = enum_name {
-                    Rc::new(crate::monoty::MonoTy::App {
+                    std::borrow::Cow::Owned(crate::monoty::MonoTy::App {
                         ctor: crate::monoty::MonoCtor::Nominal(enum_name),
                         params: Vec::new(),
                     })
@@ -141,7 +156,7 @@ impl Builder<'_> {
                     let ty_id = inf.expr_types.get(e).copied().ok_or_else(|| {
                         self.gap_here("expression has no type for representation planning")
                     })?;
-                    Rc::new(crate::monoty::convert(
+                    std::borrow::Cow::Owned(crate::monoty::convert(
                         self.ws,
                         inf,
                         ty_id,
@@ -260,7 +275,7 @@ impl Builder<'_> {
         if let Some(ty) = self.concrete_expr_ty(e) {
             let tuple_spelled = matches!(ty.peel_nullable().0, MonoTy::Tuple(_));
             return self
-                .concrete_rep_id(&ty, use_context, tuple_spelled, nobox)
+                .concrete_rep_id(ty, use_context, tuple_spelled, nobox)
                 .map(Some);
         }
         Ok(None)
@@ -329,7 +344,7 @@ impl Builder<'_> {
         let Some(mono) = self.concrete_ty_id(ty) else {
             return Ok(None);
         };
-        let id = self.concrete_rep_id(&mono, use_context, false, nobox)?;
+        let id = self.concrete_rep_id(mono, use_context, false, nobox)?;
         Ok(self.scx.rep_arena().value_shape(id))
     }
 
@@ -470,7 +485,7 @@ impl Builder<'_> {
         sname: Ustr,
         field: Ustr,
         origin: Option<Idx<Expr>>,
-    ) -> Result<Rc<MonoTy>, CompilerError> {
+    ) -> Result<std::borrow::Cow<'a, MonoTy>, CompilerError> {
         let sid = *self
             .ws
             .struct_by_name
@@ -485,18 +500,18 @@ impl Builder<'_> {
             self.dispatch()
                 .concrete_types
                 .and_then(|tables| tables.struct_field_type(literal, field))
-                .map(|id| self.concrete_mono_view(id, ConcreteMonoConsumer::Dispatch))
+                .map(|id| self.concrete_mono(id))
         });
         let ty = match ty {
-            Some(ty) => Some(ty),
+            Some(ty) => Some(std::borrow::Cow::Borrowed(ty)),
             None => match origin.and_then(|subject| self.concrete_expr_ty(subject)) {
-                Some(owner) => Some(self.struct_field_ty_in(sname, field, &owner)?),
-                None => self.concrete_ty_id(fdef.ty),
+                Some(owner) => Some(self.struct_field_ty_in(sname, field, owner)?),
+                None => self.concrete_ty_id(fdef.ty).map(std::borrow::Cow::Borrowed),
             },
         };
         Ok(match ty {
             Some(ty) => ty,
-            None => Rc::new(
+            None => std::borrow::Cow::Owned(
                 crate::monoty::convert_decl(self.ws, fdef.ty, &crate::monoty::MonoSubst::default())
                     .map_err(|reason| {
                         self.gap_here(format!(
@@ -515,7 +530,7 @@ impl Builder<'_> {
         sname: Ustr,
         field: Ustr,
         owner: &MonoTy,
-    ) -> Result<Rc<MonoTy>, CompilerError> {
+    ) -> Result<std::borrow::Cow<'a, MonoTy>, CompilerError> {
         let sid = *self
             .ws
             .struct_by_name
@@ -558,7 +573,7 @@ impl Builder<'_> {
             subst.insert(var, param.clone());
         }
         crate::monoty::convert_decl(self.ws, fdef.ty, &subst)
-            .map(Rc::new)
+            .map(std::borrow::Cow::Owned)
             .map_err(|reason| {
                 gap(format!(
                     "field `{sname}.{field}` has no concrete type plan: {reason:?}"
@@ -753,8 +768,8 @@ impl Builder<'_> {
             return self.bound_next_tuple_shape(gidx).map(Some);
         }
         if let Some(ty) = self.concrete_expr_ty(e) {
-            if matches!(&*ty, MonoTy::Tuple(_)) {
-                return self.concrete_rep_tuple(&ty, RepUse::Return, true, false);
+            if matches!(ty, MonoTy::Tuple(_)) {
+                return self.concrete_rep_tuple(ty, RepUse::Return, true, false);
             }
         }
         Ok(None)
@@ -943,7 +958,7 @@ impl Builder<'_> {
         };
         let (payload, _) = concrete.peel_nullable();
         match payload {
-            MonoTy::Tuple(_) => self.concrete_rep_tuple(&concrete, RepUse::Return, true, false),
+            MonoTy::Tuple(_) => self.concrete_rep_tuple(concrete, RepUse::Return, true, false),
             _ => Ok(None),
         }
     }

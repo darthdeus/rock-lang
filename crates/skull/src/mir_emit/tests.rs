@@ -933,67 +933,12 @@ fn main() { let result = first() }
             "lowering duration distribution is empty or unordered: {attribution:?}"
         );
         assert!(
-            attribution.lower.concrete_mono_requests > 0
-                && attribution.lower.concrete_mono_derivations > 0
-                && attribution.lower.concrete_mono_requests
-                    == attribution.lower.concrete_mono_cache_hits
-                        + attribution.lower.concrete_mono_derivations
-                && attribution.lower.concrete_mono_unique_ids
-                    == attribution.lower.concrete_mono_derivations
-                && attribution.lower.concrete_mono_cache_hits > 0
-                && attribution.lower.concrete_mono_cache_insertion_cloned_nodes == 0
-                && attribution.lower.concrete_mono_cache_hit_cloned_nodes == 0
-                && attribution.lower.concrete_mono_cloned_nodes
-                    == attribution.lower.concrete_mono_interner_miss_cloned_nodes
-                        + attribution.lower.concrete_mono_cache_insertion_cloned_nodes
-                        + attribution.lower.concrete_mono_cache_hit_cloned_nodes
-                        + attribution
-                            .lower
-                            .concrete_mono_explicit_owned_escape_cloned_nodes
-                && attribution.lower.concrete_mono_explicit_owned_escapes > 0
-                && attribution.lower.concrete_mono_cache_hit_cloned_nodes == 0
-                && attribution.lower.concrete_mono_cache_insertion_cloned_nodes == 0
-                && attribution.lower.concrete_mono_shared_handle_requests
-                    == attribution.lower.concrete_mono_requests
-                && attribution
-                    .lower
-                    .concrete_mono_by_consumer
-                    .iter()
-                    .map(|stats| stats.requests)
-                    .sum::<usize>()
-                    == attribution.lower.concrete_mono_requests
-                && attribution
-                    .lower
-                    .concrete_mono_by_consumer
-                    .iter()
-                    .map(|stats| stats.cloned_nodes)
-                    .sum::<usize>()
-                    == attribution.lower.concrete_mono_cloned_nodes
-                && attribution.lower.mir_instruction_allocations > 0
+            attribution.lower.mir_instruction_allocations > 0
                 && attribution.lower.mir_instruction_capacity
                     >= attribution.lower.instructions_visited,
             "lowerer ownership census has no production population: {attribution:?}"
         );
-        let consumers = &attribution.lower.concrete_mono_by_consumer;
-        assert!(
-            consumers[skull_mir::lower::ConcreteMonoConsumer::CallParameter as usize].requests > 0
-                && consumers[skull_mir::lower::ConcreteMonoConsumer::CallParameter as usize]
-                    .explicit_owned_escapes
-                    == 0
-                && consumers[skull_mir::lower::ConcreteMonoConsumer::GlobalPlan as usize]
-                    .explicit_owned_escapes
-                    > 0
-                && consumers[skull_mir::lower::ConcreteMonoConsumer::Dispatch as usize].requests
-                    > 0,
-            "named lowerer consumer ownership routes are misclassified: {attribution:?}"
-        );
         if std::env::var("ROCK_LOG").is_ok_and(|value| value == "debug") {
-            assert!(
-                attribution.lower.concrete_mono_timed_requests > 0
-                    && attribution.lower.concrete_mono_lookup_ns > 0
-                    && attribution.lower.concrete_mono_clone_self_ns > 0,
-                "opt-in lowerer timing has no measured population: {attribution:?}"
-            );
             let reallocations = attribution.lower.mir_instruction_reallocations
                 + attribution.lower.mir_cell_reallocations
                 + attribution.lower.mir_block_reallocations;

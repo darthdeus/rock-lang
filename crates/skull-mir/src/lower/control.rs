@@ -3,7 +3,7 @@
 //! the short-circuiting `&&` / `||` / `??`.
 use super::*;
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
     pub(crate) fn lower_native_arith(
         &mut self,
         op: &str,

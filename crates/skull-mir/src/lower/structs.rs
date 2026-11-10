@@ -4,7 +4,7 @@
 use super::*;
 use crate::monoty::MonoTy;
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
     pub(crate) fn lower_exprs(
         &mut self,
         range: comfy_la_arena::IdxRange<Expr>,
@@ -85,12 +85,12 @@ impl Builder<'_> {
                 let v = match by_value.get(&key) {
                     // A later field of a group: one evaluation, but each value
                     // field owns its own box.
-                    Some(&v) => match expected.as_deref() {
+                    Some(&v) => match expected {
                         Some(ty) => self.copied_value_box(ty, v)?,
                         None => v,
                     },
                     None => {
-                        let v = self.lower_expr_with_expected(lf.value, expected.as_deref())?;
+                        let v = self.lower_expr_with_expected(lf.value, expected)?;
                         by_value.insert(key, v);
                         v
                     }
@@ -161,7 +161,7 @@ impl Builder<'_> {
                                     field: fname,
                                 });
                                 match self.concrete_struct_field_ty(e, fname) {
-                                    Some(ty) => self.copied_value_box(&ty, v)?,
+                                    Some(ty) => self.copied_value_box(ty, v)?,
                                     None => v,
                                 }
                             }
@@ -527,7 +527,7 @@ impl Builder<'_> {
             .cur_expr
             .and_then(|literal| self.concrete_struct_field_ty(literal, field));
         self.with_struct_default(struct_name, field, |s, def| {
-            s.lower_expr_with_expected(def, expected.as_deref())
+            s.lower_expr_with_expected(def, expected)
         })
     }
 

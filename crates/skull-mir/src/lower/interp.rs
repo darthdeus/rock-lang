@@ -2,7 +2,7 @@
 //! non-null render paths, width/precision padding, and the piece emitter.
 use super::*;
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
     /// Lower an interpolated string to a left-folded `..` chain. A `Literal` part
     /// is a string const; a `{x}` hole stringifies by its static type (D8: the
     /// dispatch is decided HERE, not at the backend) — scalar -> [`Inst::ToString`]

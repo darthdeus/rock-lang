@@ -23,7 +23,6 @@
 use bone_core::hir::{BinOp, Body, BuiltinTy, Expr, InterpSpec, TyId, TypeCtor, TypeExpr};
 use bone_core::prelude::Idx;
 use bone_core::workspace::{BodyInference, Workspace};
-use std::rc::Rc;
 use ustr::Ustr;
 
 use super::{
@@ -46,9 +45,6 @@ pub struct DispatchCtx<'a> {
     pub body: &'a Body,
     pub concrete_plan: Option<&'a ConcreteBodyPlan>,
     pub concrete_types: Option<&'a ConcreteTypeTables>,
-    pub concrete_type_cache: Option<&'a super::ConcreteTypeCache>,
-    pub lower_attribution: Option<&'a std::cell::RefCell<super::LowerAttribution>>,
-    pub lower_timing_enabled: bool,
     pub interner: Option<&'a crate::monoty::MonoInterner>,
     pub rep_arena: &'a RepArena,
     pub target: bone_core::hir::FnBackend,
@@ -303,12 +299,12 @@ impl<'a> DispatchCtx<'a> {
     /// The concrete logical type for a plan-owned slot. This is deliberately
     /// separate from `TypeExpr`: a `MonoTy` owns all children and does not need
     /// an HIR arena to fabricate a partial node.
-    pub(crate) fn concrete_ty(&self, ty: TyId) -> Option<Rc<crate::monoty::MonoTy>> {
+    pub(crate) fn concrete_ty(&self, ty: TyId) -> Option<&'a crate::monoty::MonoTy> {
         let id = self.concrete_types?.ty_type(ty)?;
         self.concrete_mono(id)
     }
 
-    pub(crate) fn concrete_expr_ty(&self, expr: Idx<Expr>) -> Option<Rc<crate::monoty::MonoTy>> {
+    pub(crate) fn concrete_expr_ty(&self, expr: Idx<Expr>) -> Option<&'a crate::monoty::MonoTy> {
         let id = self.concrete_types?.expr_type(expr)?;
         self.concrete_mono(id)
     }
@@ -316,93 +312,8 @@ impl<'a> DispatchCtx<'a> {
     pub(crate) fn concrete_mono(
         &self,
         id: crate::monoty::MonoTyId,
-    ) -> Option<Rc<crate::monoty::MonoTy>> {
-        let timing = self.lower_attribution.is_some() && self.lower_timing_enabled;
-        if let Some(stats) = self.lower_attribution {
-            stats
-                .borrow_mut()
-                .record_concrete_mono_request(super::ConcreteMonoConsumer::Dispatch);
-        }
-        let interner = self.interner?;
-        if let Some(cache) = self.concrete_type_cache {
-            let cache_lookup_start = timing.then(bone_core::prelude::Instant::now);
-            let hit = cache.borrow().get(&id).map(Rc::clone);
-            let cache_lookup_ns = cache_lookup_start
-                .map(|start| start.elapsed().as_nanos() as u64)
-                .unwrap_or_default();
-            if let Some(ty) = hit {
-                if let Some(stats) = self.lower_attribution {
-                    let mut stats = stats.borrow_mut();
-                    stats.concrete_mono_shared_handle_requests += 1;
-                    if timing {
-                        stats.concrete_mono_timed_requests += 1;
-                    }
-                    stats.record_concrete_mono_cache_hit(
-                        super::ConcreteMonoConsumer::Dispatch,
-                        0,
-                        0,
-                        cache_lookup_ns,
-                        0,
-                    );
-                }
-                return Some(ty);
-            }
-            let lookup_start = timing.then(bone_core::prelude::Instant::now);
-            let (ty, interner_cold) = interner.get_shared_with_status(id);
-            let lookup_ns = lookup_start
-                .map(|start| start.elapsed().as_nanos() as u64)
-                .unwrap_or_default();
-            let nodes = if interner_cold {
-                super::mono_ty_node_count(&ty)
-            } else {
-                Default::default()
-            };
-            cache.borrow_mut().insert(id, Rc::clone(&ty));
-            if let Some(stats) = self.lower_attribution {
-                let mut stats = stats.borrow_mut();
-                stats.concrete_mono_shared_handle_requests += 1;
-                if timing {
-                    stats.concrete_mono_timed_requests += 1;
-                }
-                stats.record_concrete_mono_derivation(
-                    super::ConcreteMonoConsumer::Dispatch,
-                    nodes,
-                    0,
-                    lookup_ns,
-                    cache_lookup_ns,
-                    0,
-                );
-            }
-            return Some(ty);
-        }
-        if timing {
-            if let Some(stats) = self.lower_attribution {
-                stats.borrow_mut().concrete_mono_timed_requests += 1;
-            }
-        }
-        let lookup_start = timing.then(bone_core::prelude::Instant::now);
-        let (ty, interner_cold) = interner.get_shared_with_status(id);
-        let lookup_ns = lookup_start
-            .map(|start| start.elapsed().as_nanos() as u64)
-            .unwrap_or_default();
-        if let Some(stats) = self.lower_attribution {
-            let mut stats = stats.borrow_mut();
-            stats.concrete_mono_shared_handle_requests += 1;
-            let nodes = if interner_cold {
-                super::mono_ty_node_count(&ty)
-            } else {
-                Default::default()
-            };
-            stats.record_concrete_mono_derivation(
-                super::ConcreteMonoConsumer::Dispatch,
-                nodes,
-                0,
-                lookup_ns,
-                0,
-                0,
-            );
-        }
-        Some(ty)
+    ) -> Option<&'a crate::monoty::MonoTy> {
+        Some(self.interner?.get_ref(id))
     }
 
     /// The stored HIR node. Concrete plan consumers use `concrete_ty` or
@@ -501,7 +412,7 @@ impl<'a> DispatchCtx<'a> {
 
     pub(crate) fn nobox_value_name(&self, e: Idx<Expr>) -> Option<Ustr> {
         if let Some(ty) = self.concrete_expr_ty(e) {
-            let mut payload = &*ty;
+            let mut payload = ty;
             while let crate::monoty::MonoTy::Nullable(inner) = payload {
                 payload = inner.as_ref();
             }
@@ -867,7 +778,7 @@ impl<'a> DispatchCtx<'a> {
     /// is here; the printf conversion STRING is not, because it emits no call.
     pub(crate) fn format_plan(&self, hole: Idx<Expr>, spec: &InterpSpec) -> FormatPlan {
         let inferred = if self.concrete_plan.is_some() {
-            match self.concrete_expr_ty(hole).as_deref() {
+            match self.concrete_expr_ty(hole) {
                 Some(crate::monoty::MonoTy::Int) => Some('d'),
                 Some(crate::monoty::MonoTy::Uint) => Some('d'),
                 Some(crate::monoty::MonoTy::Float) => Some('f'),
@@ -914,7 +825,7 @@ impl<'a> DispatchCtx<'a> {
         let special_conv = matches!(spec.format_type, Some('b') | Some('%'));
         let val_is_float = if self.concrete_plan.is_some() {
             matches!(
-                self.concrete_expr_ty(hole).as_deref(),
+                self.concrete_expr_ty(hole),
                 Some(crate::monoty::MonoTy::Float)
             )
         } else {

@@ -24,7 +24,7 @@ pub(crate) struct DirectCall {
     pub(crate) plan: BackendFnAbiPlanHandle,
 }
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
     fn lower_nullable_field_get(
         &mut self,
         e: Idx<Expr>,
@@ -182,7 +182,7 @@ impl Builder<'_> {
         e: Idx<Expr>,
         inst: &crate::instance::Instance,
         pidx: usize,
-    ) -> Result<Option<std::rc::Rc<crate::monoty::MonoTy>>, CompilerError> {
+    ) -> Result<Option<std::borrow::Cow<'a, crate::monoty::MonoTy>>, CompilerError> {
         let signature = self.concrete_callee_signature(e, inst)?;
         self.concrete_param_ty_of(&signature, inst, pidx)
     }
@@ -194,7 +194,7 @@ impl Builder<'_> {
         signature: &crate::concrete::ConcreteSignature,
         inst: &crate::instance::Instance,
         pidx: usize,
-    ) -> Result<Option<std::rc::Rc<crate::monoty::MonoTy>>, CompilerError> {
+    ) -> Result<Option<std::borrow::Cow<'a, crate::monoty::MonoTy>>, CompilerError> {
         let callee = &self.ws.module(inst.func.module).functions[inst.func.func];
         let slot = signature.params.get(pidx).or_else(|| {
             callee
@@ -205,10 +205,7 @@ impl Builder<'_> {
         let id = slot.ok_or_else(|| {
             self.gap_here("concrete callee signature has no parameter for this argument")
         })?;
-        Ok(Some(self.concrete_mono_view(
-            *id,
-            ConcreteMonoConsumer::CallParameter,
-        )))
+        Ok(Some(std::borrow::Cow::Borrowed(self.concrete_mono(*id))))
     }
 
     pub(crate) fn concrete_callee_return_ty(
@@ -217,9 +214,7 @@ impl Builder<'_> {
         inst: &crate::instance::Instance,
     ) -> Result<Option<crate::monoty::MonoTy>, CompilerError> {
         let signature = self.concrete_callee_signature(e, inst)?;
-        Ok(signature
-            .result
-            .map(|id| self.concrete_mono_owned(id, ConcreteMonoConsumer::ReturnLowering)))
+        Ok(signature.result.map(|id| self.concrete_mono(id).clone()))
     }
 
     pub(crate) fn concrete_coroutine_channel(
@@ -248,9 +243,7 @@ impl Builder<'_> {
             } else {
                 &callee.signature
             };
-            signature
-                .result
-                .map(|id| self.concrete_mono_view(id, ConcreteMonoConsumer::CoroutineChannel))
+            signature.result.map(|id| self.concrete_mono(id))
         } else {
             Some(
                 self.concrete_expr_ty(receiver)
@@ -341,7 +334,7 @@ impl Builder<'_> {
         &self,
         e: Idx<Expr>,
         value: &ValueRepr,
-    ) -> Result<Option<Rc<MonoTy>>, CompilerError> {
+    ) -> Result<Option<std::borrow::Cow<'a, MonoTy>>, CompilerError> {
         if matches!(value, ValueRepr::Group { .. }) {
             if let Expr::Call {
                 callee: Callee::Unresolved { name, .. },
@@ -369,14 +362,14 @@ impl Builder<'_> {
                 return params
                     .first()
                     .cloned()
-                    .map(Rc::new)
+                    .map(std::borrow::Cow::Owned)
                     .map(Some)
                     .ok_or_else(|| {
                         self.gap_here("intercepted Vec read has no concrete element type")
                     });
             }
         }
-        Ok(self.concrete_expr_ty(e))
+        Ok(self.concrete_expr_ty(e).map(std::borrow::Cow::Borrowed))
     }
 
     fn lower_call_repr_inner(
@@ -532,7 +525,7 @@ impl Builder<'_> {
                         && self.resolves_to_inline_builtin(e, name)
                         && self
                             .concrete_expr_ty(value)
-                            .is_some_and(|ty| super::shape::lua_value_is_immutable(self.ws, &ty))
+                            .is_some_and(|ty| super::shape::lua_value_is_immutable(self.ws, ty))
                     {
                         let copy = self.lower_expr_repr(value)?;
                         self.lower_expr(storage)?;
@@ -1580,7 +1573,7 @@ impl Builder<'_> {
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
         param_shapes: &[RetSlot],
-        param_tys: &[Option<std::rc::Rc<crate::monoty::MonoTy>>],
+        param_tys: &[Option<std::borrow::Cow<'a, crate::monoty::MonoTy>>],
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if !any_named {
             let mut out = Vec::new();
@@ -1625,7 +1618,7 @@ impl Builder<'_> {
         values: Vec<Idx<Inst>>,
         arg: Idx<Expr>,
         slot: &RetSlot,
-        param_ty: Option<&Option<std::rc::Rc<crate::monoty::MonoTy>>>,
+        param_ty: Option<&Option<std::borrow::Cow<'a, crate::monoty::MonoTy>>>,
     ) -> Vec<Idx<Inst>> {
         match (values.as_slice(), param_ty) {
             (&[value], Some(Some(ty))) if !slot.splats() => {
@@ -1651,7 +1644,7 @@ impl Builder<'_> {
         param_shapes: &[RetSlot],
         arg_idxs: &[Idx<Expr>],
         defaults: &[Option<CallParamDefault>],
-        param_tys: &[Option<std::rc::Rc<crate::monoty::MonoTy>>],
+        param_tys: &[Option<std::borrow::Cow<'a, crate::monoty::MonoTy>>],
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         let mut slots: Vec<Option<Vec<Idx<Inst>>>> = vec![None; param_names.len()];
         let mut next_pos = 0usize;
@@ -2971,12 +2964,12 @@ impl Builder<'_> {
         owner: Ustr,
         owner_ty: Option<&MonoTy>,
         field: Ustr,
-    ) -> Result<Rc<MonoTy>, CompilerError> {
+    ) -> Result<std::borrow::Cow<'a, MonoTy>, CompilerError> {
         let ty = self
             .struct_field_ty(owner, field)
             .ok_or_else(|| self.gap_here(format!("field `{owner}.{field}` is not declared")))?;
         match crate::monoty::convert_decl(self.ws, ty, &crate::monoty::MonoSubst::default()) {
-            Ok(ty) => return Ok(Rc::new(ty)),
+            Ok(ty) => return Ok(std::borrow::Cow::Owned(ty)),
             Err(reason) if !self.struct_is_generic(owner) => {
                 return Err(self.gap_here(format!(
                     "field `{owner}.{field}` has no concrete type: {reason:?}"
@@ -3008,7 +3001,7 @@ impl Builder<'_> {
         owner: Ustr,
         owner_ty: Option<&MonoTy>,
         field: Ustr,
-    ) -> Result<Option<Rc<MonoTy>>, CompilerError> {
+    ) -> Result<Option<std::borrow::Cow<'a, MonoTy>>, CompilerError> {
         if !self.struct_is_generic(owner) {
             let Some(ty) = self.struct_field_ty(owner, field) else {
                 return Ok(None);
@@ -3037,7 +3030,7 @@ impl Builder<'_> {
         owner_ty: Option<&MonoTy>,
         field: Ustr,
         child: Ustr,
-    ) -> Result<Option<Rc<MonoTy>>, CompilerError> {
+    ) -> Result<Option<std::borrow::Cow<'a, MonoTy>>, CompilerError> {
         if !self.struct_is_generic(child) {
             return Ok(None);
         }
@@ -3259,7 +3252,8 @@ impl Builder<'_> {
                     self.is_value_struct(name) && !self.is_nobox_struct(name)
                 }) =>
             {
-                self.borrowed_value_children.insert(*v, Rc::new(ty.clone()));
+                self.borrowed_value_children
+                    .insert(*v, std::borrow::Cow::Owned(ty.clone()));
                 if share {
                     self.shareable_value_boxes.insert(*v);
                 }

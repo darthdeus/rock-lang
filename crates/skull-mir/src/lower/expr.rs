@@ -2,7 +2,7 @@
 //! compound assignment, `++`/`--`, safe navigation, and array/spread literals.
 use super::*;
 
-impl Builder<'_> {
+impl<'a> Builder<'a> {
     /// Forward a terminal destination through the syntax that has no value
     /// consumer. `None` leaves materialization to the ordinary value funnel.
     pub(crate) fn lower_expr_to_return(
@@ -222,7 +222,7 @@ impl Builder<'_> {
             })?;
             let tuple_spelled = matches!(ty.peel_nullable().0, crate::monoty::MonoTy::Tuple(_));
             let representation = self.concrete_rep_id(
-                &ty,
+                ty,
                 if tuple_spelled {
                     RepUse::Return
                 } else {
@@ -338,8 +338,7 @@ impl Builder<'_> {
                 if self.lending_pack && self.binding_value_is_shareable(b) {
                     return Ok(boxed);
                 }
-                let copy =
-                    self.boxed_value_copy_repr(boxed, name, self.concrete_expr_ty(e).as_deref())?;
+                let copy = self.boxed_value_copy_repr(boxed, name, self.concrete_expr_ty(e))?;
                 self.pack(copy)
             }
             Expr::Var(b) if let Some(name) = self.nullable_boxed_value_local(b, e) => {
@@ -347,7 +346,7 @@ impl Builder<'_> {
                 if self.lending_pack && self.binding_value_is_shareable(b) {
                     return Ok(boxed);
                 }
-                self.nullable_boxed_value_copy(boxed, name, self.concrete_expr_ty(e).as_deref())
+                self.nullable_boxed_value_copy(boxed, name, self.concrete_expr_ty(e))
             }
             Expr::Var(b) => {
                 let cell = *self
@@ -1174,7 +1173,7 @@ impl Builder<'_> {
                     .nominal()
                     .is_some_and(|name| self.is_value_struct(name)) =>
             {
-                let copy = self.copied_value_box(&ty, leaf)?;
+                let copy = self.copied_value_box(ty, leaf)?;
                 self.emit_cur(Inst::Store { cell, value: copy });
                 // Through a reload, so copy propagation sees the cell written
                 // in place and does not fold reads to the copy's operands.
@@ -1292,7 +1291,7 @@ impl Builder<'_> {
         let leaves = match selected {
             FieldShape::Prim => {
                 let expected = self.concrete_expr_ty(target);
-                vec![self.lower_expr_with_expected(value, expected.as_deref())?]
+                vec![self.lower_expr_with_expected(value, expected)?]
             }
             FieldShape::Nested(shape) => {
                 let r = self.lower_expr_repr(value)?;
@@ -1630,7 +1629,7 @@ impl Builder<'_> {
                     ));
                 }
                 let expected = self.binding_ty(b).and_then(|ty| self.concrete_ty_id(ty));
-                let v = self.lower_expr_with_expected(value, expected.as_deref())?;
+                let v = self.lower_expr_with_expected(value, expected)?;
                 let v = self.coerced_to_binding(v, value, b);
                 // An owned binding stays owned: a box it did not build is copied.
                 let v = match self.value_struct_of(value) {
@@ -1638,11 +1637,8 @@ impl Builder<'_> {
                         if self.owned_value_binds.contains(&raw(b))
                             && !matches!(self.f.insts[v], Inst::MakeValueStruct { .. }) =>
                     {
-                        let copy = self.boxed_value_copy_repr(
-                            v,
-                            name,
-                            self.concrete_expr_ty(value).as_deref(),
-                        )?;
+                        let copy =
+                            self.boxed_value_copy_repr(v, name, self.concrete_expr_ty(value))?;
                         self.pack(copy)?
                     }
                     _ => v,
@@ -1654,7 +1650,7 @@ impl Builder<'_> {
             {
                 let expected = self.concrete_expr_ty(target);
                 self.first_class_field_update(cell, &path, None, |s, _| {
-                    s.lower_expr_with_expected(value, expected.as_deref())
+                    s.lower_expr_with_expected(value, expected)
                 })?;
             }
             Expr::FieldAccess { .. }
@@ -1827,7 +1823,7 @@ impl Builder<'_> {
                     }
                 }
                 let expected = self.concrete_expr_ty(target);
-                let v = self.lower_expr_with_expected(value, expected.as_deref())?;
+                let v = self.lower_expr_with_expected(value, expected)?;
                 self.emit_cur(Inst::StoreField {
                     base: b,
                     field: key,
@@ -2579,18 +2575,12 @@ impl Builder<'_> {
                         _ => None,
                     };
                     match copy_name {
-                        Some(name) if self.embed_read_is_nullable(base, field)? => self
-                            .nullable_boxed_value_copy(
-                                fv,
-                                name,
-                                self.concrete_expr_ty(e).as_deref(),
-                            )?,
+                        Some(name) if self.embed_read_is_nullable(base, field)? => {
+                            self.nullable_boxed_value_copy(fv, name, self.concrete_expr_ty(e))?
+                        }
                         Some(name) => {
-                            let copy = self.boxed_value_copy_repr(
-                                fv,
-                                name,
-                                self.concrete_expr_ty(e).as_deref(),
-                            )?;
+                            let copy =
+                                self.boxed_value_copy_repr(fv, name, self.concrete_expr_ty(e))?;
                             self.pack(copy)?
                         }
                         None => fv,

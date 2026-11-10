@@ -2,7 +2,7 @@
 //! than a nested table, plus the cell group/repr conversions a coroutine frame
 //! and a flat literal both go through.
 use super::*;
-impl Builder<'_> {
+impl<'a> Builder<'a> {
     pub(crate) fn new_flat_enum_cells(
         &mut self,
         binding: Idx<BindingInfo>,

@@ -38,7 +38,6 @@ use bone_core::hir::{BuiltinTy, TypeCtor, TypeExpr, VarId};
 use bone_core::prelude::TyId;
 use bone_core::workspace::{BodyInference, Workspace};
 use rustc_hash::FxHashMap;
-use std::rc::Rc;
 use ustr::Ustr;
 
 /// Index into a [`MonoArena`]. Equality is type-equality WITHIN one arena; it
@@ -639,13 +638,6 @@ impl MonoArena {
         id
     }
 
-    /// `(attempts, new entries)` across this arena's lifetime, whichever path
-    /// reached [`Self::intern`] -- the graph's direct walk and the shared
-    /// interner handle alike.
-    pub(crate) fn intern_stats(&self) -> (u64, u64) {
-        (self.intern_attempts, self.intern_new)
-    }
-
     /// The display rendering of an interned type. Not an identity -- see
     /// [`MonoTy::render`].
     pub fn render(&self, id: MonoTyId) -> String {
@@ -749,62 +741,46 @@ impl MonoArena {
 /// instance is what keeps ids stable across incremental edits, which is the
 /// property `InstanceGraph::update_bodies` rests on.
 pub struct MonoInterner {
-    arena: std::sync::RwLock<MonoArena>,
-    /// Process-unique id keying the worker-local read caches: the arena is
-    /// monotonic, so a thread may keep private copies of ids it has already
-    /// read; the generation keeps two live interners (Lua and shader contexts)
-    /// from serving each other's types.
+    /// The types by id. Readers index it without a lock and borrow the tree
+    /// for as long as they borrow the interner.
+    types: crate::append_vec::AppendVec<MonoTy>,
+    /// The structural index answering "which id does this type have". Only
+    /// interning touches it.
+    index: std::sync::RwLock<MonoIndex>,
+    /// Process-unique id keying the worker-local intern cache, so two live
+    /// interners (Lua and shader contexts) never serve each other's ids.
     arena_gen: u64,
-    read_acqs: std::sync::atomic::AtomicU64,
-    local_read_hits: std::sync::atomic::AtomicU64,
     write_acqs: std::sync::atomic::AtomicU64,
     /// Interns answered without the write lock, from the worker-local cache
-    /// or a shared read; the arena's own attempt counter sees only the
-    /// write path.
+    /// or a shared read; the index's own attempt counter sees only the write
+    /// path.
     shared_intern_hits: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Default)]
-struct MonoReadCache {
+struct MonoIndex {
+    interned: FxHashMap<MonoTy, MonoTyId>,
+    intern_attempts: u64,
+    intern_new: u64,
+}
+
+#[derive(Default)]
+struct MonoInternCache {
     arena_gen: u64,
-    tys: Vec<Option<Rc<MonoTy>>>,
     /// Types this worker has interned before, so a repeat intern takes no
-    /// lock and touches no shared counter; the arena is monotonic, so an id
-    /// learned once stays right for the generation.
+    /// lock; the arena is monotonic, so an id learned once stays right.
     ids: FxHashMap<MonoTy, MonoTyId>,
 }
 
-impl MonoReadCache {
-    fn reset_for(&mut self, arena_gen: u64) {
-        if self.arena_gen != arena_gen {
-            self.arena_gen = arena_gen;
-            self.tys.clear();
-            self.ids.clear();
-        }
-    }
-
-    fn record(&mut self, id: MonoTyId, ty: Rc<MonoTy>) {
-        let idx = id.index();
-        if self.tys.len() <= idx {
-            self.tys.resize(idx + 1, None);
-        }
-        self.tys[idx] = Some(ty);
-    }
-}
-
 thread_local! {
-    static MONO_READ_CACHE: std::cell::RefCell<MonoReadCache> =
-        std::cell::RefCell::new(MonoReadCache::default());
+    static MONO_INTERN_CACHE: std::cell::RefCell<MonoInternCache> =
+        std::cell::RefCell::new(MonoInternCache::default());
 }
 
-/// Lifetime traffic counters for one [`MonoInterner`]: lock acquisitions by
-/// kind, plus the inner arena's intern attempt/new-entry split. Reads clone
-/// owned [`MonoTy`] values out, so `read_acqs` bounds the population a frozen
-/// indexed view would serve borrow-free.
+/// Lifetime counters for one [`MonoInterner`]: write-lock acquisitions plus
+/// the intern attempt/new-entry split.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct MonoInternerStats {
-    pub read_acqs: u64,
-    pub local_read_hits: u64,
     pub write_acqs: u64,
     pub intern_attempts: u64,
     pub intern_new: u64,
@@ -833,18 +809,31 @@ impl MonoInterner {
     /// one would give the same type two ids and the same body two identities.
     pub(crate) fn from_arena(arena: MonoArena) -> Self {
         static ARENA_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let MonoArena {
+            tys,
+            interned,
+            intern_attempts,
+            intern_new,
+        } = arena;
+        let types = crate::append_vec::AppendVec::new();
+        for ty in tys {
+            types.push(ty);
+        }
         Self {
-            arena: std::sync::RwLock::new(arena),
+            types,
+            index: std::sync::RwLock::new(MonoIndex {
+                interned,
+                intern_attempts,
+                intern_new,
+            }),
             arena_gen: ARENA_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            read_acqs: std::sync::atomic::AtomicU64::new(0),
-            local_read_hits: std::sync::atomic::AtomicU64::new(0),
             write_acqs: std::sync::atomic::AtomicU64::new(0),
             shared_intern_hits: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
     pub fn len(&self) -> usize {
-        self.with(MonoArena::len)
+        self.types.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -857,15 +846,25 @@ impl MonoInterner {
     /// meeting the same types), so a shared read first keeps those workers
     /// from serializing on the one arena.
     pub fn intern(&self, ty: MonoTy) -> MonoTyId {
-        MONO_READ_CACHE.with(|cache| {
+        MONO_INTERN_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
-            cache.reset_for(self.arena_gen);
+            if cache.arena_gen != self.arena_gen {
+                cache.arena_gen = self.arena_gen;
+                cache.ids.clear();
+            }
             if let Some(id) = cache.ids.get(&ty) {
                 self.shared_intern_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return *id;
             }
-            let id = match self.with(|a| a.lookup(&ty)) {
+            let found = self
+                .index
+                .read()
+                .expect("mono arena poisoned")
+                .interned
+                .get(&ty)
+                .copied();
+            let id = match found {
                 Some(id) => {
                     self.shared_intern_hits
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -874,10 +873,17 @@ impl MonoInterner {
                 None => {
                     self.write_acqs
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    self.arena
-                        .write()
-                        .expect("mono arena poisoned")
-                        .intern(ty.clone())
+                    let mut index = self.index.write().expect("mono arena poisoned");
+                    index.intern_attempts += 1;
+                    match index.interned.get(&ty) {
+                        Some(id) => *id,
+                        None => {
+                            index.intern_new += 1;
+                            let id = MonoTyId(self.types.push(ty.clone()) as u32);
+                            index.interned.insert(ty.clone(), id);
+                            id
+                        }
+                    }
                 }
             };
             cache.ids.insert(ty, id);
@@ -889,6 +895,16 @@ impl MonoInterner {
     /// instance's arguments arrive.
     pub fn intern_all(&self, tys: impl IntoIterator<Item = MonoTy>) -> Vec<MonoTyId> {
         tys.into_iter().map(|ty| self.intern(ty)).collect()
+    }
+
+    /// The id `ty` already has, without interning it.
+    pub fn lookup(&self, ty: &MonoTy) -> Option<MonoTyId> {
+        self.index
+            .read()
+            .expect("mono arena poisoned")
+            .interned
+            .get(ty)
+            .copied()
     }
 
     /// [`MonoArena::convert`] through [`Self::intern`]: the conversion itself
@@ -925,38 +941,14 @@ impl MonoInterner {
         Ok(self.intern(convert_counting(ws, inf, ty, subst, bound)?))
     }
 
-    /// The type an id names. Returns an OWNED [`MonoTy`] because the arena is
-    /// behind a lock; a [`MonoTy`] owns its children, so this is the same
-    /// self-contained value every other consumer already passes around.
-    /// Served from the worker-local cache when this thread has read `id`
-    /// before; a cold id reads through to the lock.
+    /// The type an id names, borrowed from the arena without a lock.
+    pub fn get_ref(&self, id: MonoTyId) -> &MonoTy {
+        &self.types[id.index()]
+    }
+
+    /// The type an id names, as an owned tree.
     pub fn get(&self, id: MonoTyId) -> MonoTy {
-        (*self.get_shared(id)).clone()
-    }
-
-    /// Read an immutable worker-local handle to an interned type. The handle
-    /// borrows no arena lock and is valid only within the current worker's
-    /// synchronous lowering work; the interner generation resets the cache
-    /// before another arena can be observed.
-    pub(crate) fn get_shared(&self, id: MonoTyId) -> Rc<MonoTy> {
-        self.get_shared_with_status(id).0
-    }
-
-    /// As [`Self::get_shared`], also reporting whether this worker had to
-    /// materialize the type from the authoritative arena.
-    pub(crate) fn get_shared_with_status(&self, id: MonoTyId) -> (Rc<MonoTy>, bool) {
-        MONO_READ_CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            cache.reset_for(self.arena_gen);
-            if let Some(Some(ty)) = cache.tys.get(id.index()) {
-                self.local_read_hits
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return (Rc::clone(ty), false);
-            }
-            let ty = Rc::new(self.with(|a| a.get(id).clone()));
-            cache.record(id, Rc::clone(&ty));
-            (ty, true)
-        })
+        self.get_ref(id).clone()
     }
 
     /// The counterpart to [`Self::intern_all`], for reading an instance's
@@ -968,36 +960,23 @@ impl MonoInterner {
     /// The display rendering of an interned type. Not an identity -- see
     /// [`MonoTy::render`].
     pub fn render(&self, id: MonoTyId) -> String {
-        self.with(|a| a.render(id))
+        self.get_ref(id).render()
     }
 
     /// The canonical identity string of an interned type.
     pub fn canonical(&self, id: MonoTyId) -> String {
-        self.with(|a| a.canonical(id))
-    }
-
-    /// Read-only access under one lock, for a caller doing several reads.
-    pub fn with<R>(&self, f: impl FnOnce(&MonoArena) -> R) -> R {
-        self.read_acqs
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        f(&self.arena.read().expect("mono arena poisoned"))
+        self.get_ref(id).canonical()
     }
 
     pub fn stats(&self) -> MonoInternerStats {
         use std::sync::atomic::Ordering;
-        let (intern_attempts, intern_new, types) = self.with(|a| {
-            let (at, new) = a.intern_stats();
-            (at, new, a.len() as u64)
-        });
-        let intern_attempts = intern_attempts + self.shared_intern_hits.load(Ordering::Relaxed);
+        let index = self.index.read().expect("mono arena poisoned");
         MonoInternerStats {
-            // Subtract the read this snapshot itself just took.
-            read_acqs: self.read_acqs.load(Ordering::Relaxed).saturating_sub(1),
-            local_read_hits: self.local_read_hits.load(Ordering::Relaxed),
             write_acqs: self.write_acqs.load(Ordering::Relaxed),
-            intern_attempts,
-            intern_new,
-            types,
+            intern_attempts: index.intern_attempts
+                + self.shared_intern_hits.load(Ordering::Relaxed),
+            intern_new: index.intern_new,
+            types: self.len() as u64,
         }
     }
 }
@@ -1237,23 +1216,5 @@ mod mono_read_cache_tests {
             a.get_all(&[first, second]),
             vec![MonoTy::Int, MonoTy::Float]
         );
-    }
-
-    #[test]
-    fn shared_reads_reuse_only_the_current_interner_handle() {
-        let a = MonoInterner::new();
-        let b = MonoInterner::new();
-        let ia = a.intern(MonoTy::Int);
-        let ib = b.intern(MonoTy::Bool);
-
-        let (a_first, a_cold) = a.get_shared_with_status(ia);
-        let (a_second, a_warm) = a.get_shared_with_status(ia);
-        let (b_first, b_cold) = b.get_shared_with_status(ib);
-
-        assert!(a_cold && !a_warm && b_cold);
-        assert!(Rc::ptr_eq(&a_first, &a_second));
-        assert!(!Rc::ptr_eq(&a_first, &b_first));
-        assert_eq!(*a_first, MonoTy::Int);
-        assert_eq!(*b_first, MonoTy::Bool);
     }
 }

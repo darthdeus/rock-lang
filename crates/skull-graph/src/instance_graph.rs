@@ -1697,7 +1697,7 @@ pub fn build_in(
         log::debug!(
             "graph wavefront census: {} frontiers, owners p50/p95/max {}/{}/{}, singleton {}; \
              ordinary {}, always {}, ready {}, same-frontier dependency {}; expansion us total/p50/p95/max \
-             {}/{}/{}/{}; mono attempts/new/read/write/timed-mutations {}/{}/{}/{}/{}, self-time {}us",
+             {}/{}/{}/{}; mono attempts/new/write/timed-mutations {}/{}/{}/{}, self-time {}us",
             stats.frontier_count,
             stats.frontier_owner_p50,
             stats.frontier_owner_p95,
@@ -1713,7 +1713,6 @@ pub fn build_in(
             stats.expansion_ns_max / 1_000,
             stats.mono_intern_attempts,
             stats.mono_new_types,
-            stats.mono_read_acqs,
             stats.mono_write_acqs,
             stats.mono_timed_mutation_calls,
             stats.mono_interner_self_ns / 1_000,
@@ -2229,7 +2228,6 @@ impl InstanceGraph {
             .intern_attempts
             .saturating_sub(mono_before.intern_attempts);
         stats.mono_new_types = mono_after.intern_new.saturating_sub(mono_before.intern_new);
-        stats.mono_read_acqs = mono_after.read_acqs.saturating_sub(mono_before.read_acqs);
         stats.mono_write_acqs = mono_after.write_acqs.saturating_sub(mono_before.write_acqs);
         if timing_enabled {
             stats.frontier_count = frontier_sizes.len();
@@ -4471,7 +4469,6 @@ pub struct RunStats {
     pub incremental_forced_ns: u64,
     pub mono_intern_attempts: u64,
     pub mono_new_types: u64,
-    pub mono_read_acqs: u64,
     pub mono_write_acqs: u64,
     pub mono_interner_self_ns: u64,
     pub mono_timed_mutation_calls: u64,
@@ -6419,9 +6416,6 @@ fn dispatched_sites(
         body,
         concrete_plan: None,
         concrete_types: None,
-        concrete_type_cache: None,
-        lower_attribution: None,
-        lower_timing_enabled: false,
         interner: None,
         rep_arena: &rep_arena,
         target: bone_core::hir::FnBackend::Any,

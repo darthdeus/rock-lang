@@ -6,6 +6,7 @@
 //! (merges go through cells). Transforms live in `skull-transform`; codegen in
 //! `skull-codegen-*`.
 
+pub mod append_vec;
 pub mod bound;
 pub mod cfg;
 pub mod code_identity;
