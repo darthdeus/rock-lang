@@ -689,6 +689,64 @@ fn body_edit_to_leaf_only_reemits_itself() {
 }
 
 #[test]
+fn body_edit_to_a_function_with_lambdas_matches_a_full_emit() {
+    let fixture = |step: i32| {
+        format!(
+            "fn apply(f: fn(int) -> int, x: int) -> int {{ return f(x) }}\n\
+             fn lambdas(n: int) -> int {{\n\
+                 let base = n * 2\n\
+                 let a = (x: int) => x + base\n\
+                 let b = (x: int) => {{\n\
+                     if x > {step} {{ return x - base }}\n\
+                     return apply(a, x)\n\
+                 }}\n\
+                 return apply(a, n) + apply(b, n + {step})\n\
+             }}\n\
+             fn other() -> int {{ return lambdas(3) }}"
+        )
+    };
+    let (v1, v2) = (fixture(1), fixture(4));
+    check_edit_with(ws_with_stdlib, &v1, &v2, &["lambdas"]);
+
+    // The overlay redefines the hoisted lambda bodies exactly as a full emit
+    // of the edited source prints them.
+    let ws1 = ws_with_stdlib(&v1);
+    let (_full1, mut cache) = emit_full_of(&ws1, "emit_full v1");
+    let ws2 = ws_with_stdlib(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "lambdas")]).lua;
+    let fresh = emit_full(&ws2, skull::user_module_id(&ws2).unwrap())
+        .expect("emit_full v2")
+        .0
+        .lua;
+    let definition = |lua: &str, name: &str| -> Option<String> {
+        let start = lua.find(&format!("function {name}("))?;
+        let rest = &lua[start..];
+        Some(rest[..rest.find("\nend\n")? + 4].to_string())
+    };
+    let lambdas: Vec<&str> = fresh
+        .match_indices("__lambda")
+        .filter_map(|(at, _)| {
+            let start = fresh[..at].rfind("function ")? + "function ".len();
+            let end = at + fresh[at..].find('(')?;
+            (!fresh[start..end].contains(char::is_whitespace)).then(|| &fresh[start..end])
+        })
+        .collect();
+    assert!(
+        lambdas.len() >= 2,
+        "the fixture hoists both lambdas:\n{fresh}"
+    );
+    for name in lambdas {
+        let expected = definition(&fresh, name);
+        assert!(expected.is_some(), "no full definition of `{name}`");
+        assert_eq!(
+            definition(&overlay, name),
+            expected,
+            "overlay and full emit disagree on `{name}`:\n{overlay}"
+        );
+    }
+}
+
+#[test]
 fn value_struct_ctor_edit_reemits_inliner() {
     // `mk` returns a `value` struct -> inlined into `use_v` as a scalarized
     // CallMulti (deps must capture CallMulti callees, not just plain Call).
