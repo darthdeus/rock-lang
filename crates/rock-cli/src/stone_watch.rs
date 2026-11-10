@@ -312,7 +312,7 @@ fn initial_session_build(
     output_path: &std::path::Path,
     compiler: &mut dyn crate::game_runtime::GameCompiler,
 ) -> Result<String> {
-    use crate::frame_compile_cache::{session_start, store_session_artifact, SessionStart};
+    use crate::frame_compile_cache::{SessionStart, session_start, store_session_artifact};
     let pending = match session_start(cache_root, backend, path, output_path)? {
         SessionStart::Hit(cached) => {
             let fingerprint = cached.artifact_fingerprint.clone();
@@ -1260,15 +1260,15 @@ mod tests {
 #[cfg(test)]
 mod watch_reload_tests {
     use super::{
-        categorize_stone_changes, retain_production_changes, stone_source_watch_paths,
-        StoneChanges, StoneWatcher,
+        StoneChanges, StoneWatcher, categorize_stone_changes, retain_production_changes,
+        stone_source_watch_paths,
     };
-    use crate::game_runtime::{GameCompiler, SkullGameCompiler};
     use crate::FileChangeEvent;
+    use crate::game_runtime::{GameCompiler, SkullGameCompiler};
     use bone_core::prelude::{Duration, Instant};
     use std::collections::HashSet;
     use std::path::PathBuf;
-    use std::sync::mpsc::{channel, Receiver};
+    use std::sync::mpsc::{Receiver, channel};
     use test_utils::HANG_BACKSTOP;
 
     fn run_lua(code: &str) -> anyhow::Result<rock_host::lua_runner::LuaRun> {
@@ -1795,8 +1795,8 @@ mod watch_reload_tests {
 #[cfg(test)]
 mod session_cache_tests {
     use super::initial_session_build;
-    use crate::game_runtime::{AdoptedArtifact, CompileOutcome, GameCompiler, SkullGameCompiler};
     use crate::Backend;
+    use crate::game_runtime::{AdoptedArtifact, CompileOutcome, GameCompiler, SkullGameCompiler};
     use std::cell::Cell;
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
@@ -2070,9 +2070,10 @@ mod reload_hold_tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(rx
-            .recv_timeout(std::time::Duration::from_millis(150))
-            .is_err());
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(150))
+                .is_err()
+        );
         std::fs::remove_file(&control).unwrap();
         rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         worker.join().unwrap();
