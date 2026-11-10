@@ -892,47 +892,18 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
         let rate = hit as f64 / asked as f64 * 100.0;
         println!("  abi-plan memo  : {asked} asked, {hit} hit per run ({rate:.1}% hit rate)");
         println!(
-            "                   owner {}/{} hit, callee {}/{} hit ({} worker-local) per run",
+            "                   owner {}/{} hit, callee {}/{} hit per run",
             per_run(memo.owner_hits),
             per_run(memo.owner_hits + memo.owner_misses),
             per_run(memo.callee_hits),
             per_run(memo.callee_hits + memo.callee_misses),
-            per_run(memo.worker_local_hits),
         );
         println!(
-            "                   {} derivations over {} unique keys per run \
-             ({} duplicate cold), {} param slots cloned by hits",
+            "                   {} derivations over {} unique keys per run ({} duplicate cold)",
             per_run(memo.stores),
             per_run(memo.unique_keys),
             per_run(memo.duplicate_cold_stores),
-            per_run(memo.cloned_param_slots),
         );
-        println!(
-            "                   {} shared lookups: {} hits, {} misses per run; {} plan clones \
-                 ({} param slots)",
-            per_run(memo.shared_lookups),
-            per_run(memo.shared_hits),
-            per_run(memo.shared_misses),
-            per_run(memo.plan_clones),
-            per_run(memo.plan_clone_param_slots),
-        );
-        println!(
-            "                   plan sizes p50/p95/max: {}/{}/{} over {} returned plans per run",
-            memo.plan_size_p50(),
-            memo.plan_size_p95(),
-            memo.plan_size_max,
-            per_run(memo.plan_size_samples()),
-        );
-        if memo.shared_lock_ns > 0 || memo.local_clone_ns > 0 || memo.shared_clone_ns > 0 {
-            println!(
-                "                   timed (ROCK_LOG=debug): shared lock {:.3} ms, local clone {:.3} ms, \
-                 shared clone {:.3} ms, derivation {:.3} ms per run",
-                memo.shared_lock_ns as f64 / per / 1_000_000.0,
-                memo.local_clone_ns as f64 / per / 1_000_000.0,
-                memo.shared_clone_ns as f64 / per / 1_000_000.0,
-                memo.derivation_ns as f64 / per / 1_000_000.0,
-            );
-        }
     }
     let traffic = &skull.arena_traffic;
     if traffic.rep_final.plans > 0 {

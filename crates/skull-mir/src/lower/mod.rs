@@ -153,7 +153,7 @@ pub use shape::*;
 /// it from two places.
 mod abi;
 pub use abi::{
-    AbiPlanKey, AbiPlanMemoStats, BackendFnAbiPlan, BackendFnAbiPlanHandle, BoundaryClass,
+    AbiPlanMemoStats, AbiQuestion, BackendFnAbiPlan, BackendFnAbiPlanHandle, BoundaryClass,
     FunctionRepPlan, GlobalPlan, RepArena, RepArenaStats, RepError, RepGuarantees, RepId,
     RepLayout, RepPlan, RepUse, RepUseFacts, SIGNATURE_SCALAR_LANE_BUDGET,
     WIDE_VALUE_PAYLOAD_LEAF_CUT, boundary_requires_boxed_representation, declared_boundary_class,
@@ -487,16 +487,21 @@ impl ScalarCtx {
         &self.rep_arena
     }
 
-    pub(crate) fn abi_plan_cached(&self, key: &AbiPlanKey) -> Option<BackendFnAbiPlanHandle> {
-        self.abi_plans.lookup(key)
+    pub(crate) fn abi_plan_cached(
+        &self,
+        question: AbiQuestion,
+        inst: &crate::instance::Instance,
+    ) -> Option<BackendFnAbiPlanHandle> {
+        self.abi_plans.lookup(question, inst)
     }
 
-    pub(crate) fn abi_plan_store(&self, key: AbiPlanKey, plan: &BackendFnAbiPlanHandle) {
-        self.abi_plans.store(key, plan);
-    }
-
-    pub(crate) fn abi_plan_record_derivation(&self, started: Option<bone_core::prelude::Instant>) {
-        self.abi_plans.record_derivation(started);
+    pub(crate) fn abi_plan_store(
+        &self,
+        question: AbiQuestion,
+        inst: &crate::instance::Instance,
+        plan: &BackendFnAbiPlanHandle,
+    ) {
+        self.abi_plans.store(question, inst, plan);
     }
 
     /// ABI-plan memo counters. A full emission over a real workspace must show
