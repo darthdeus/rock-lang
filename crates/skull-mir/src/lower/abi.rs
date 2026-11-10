@@ -2217,7 +2217,9 @@ pub struct BackendFnAbiPlan {
     representation: FunctionRepPlan,
     arena: Arc<RepArena>,
     transport: Option<ParameterTransport>,
-    body_dependent_parameters: bool,
+    /// The body's parameter demand this transport was derived from, when
+    /// body edits can change it.
+    parameter_demand: Option<u64>,
     /// [`Self::logical_fingerprint`], spelled once: every body lowered under
     /// this plan records it, and the plan is shared across those bodies.
     fingerprint: std::sync::OnceLock<String>,
@@ -2240,12 +2242,35 @@ impl PartialEq for BackendFnAbiPlan {
             && self.target == other.target
             && self.representation == other.representation
             && self.transport == other.transport
-            && self.body_dependent_parameters == other.body_dependent_parameters
+            && self.parameter_demand == other.parameter_demand
             && self.arena.equivalent(&other.arena)
     }
 }
 
 impl Eq for BackendFnAbiPlan {}
+
+/// A boxed value child is read through its declared field position, which a
+/// narrowed parameter group no longer has.
+fn keeps_opaque_value_child(
+    ws: &Workspace,
+    shape: &ValueShape,
+    kept: &std::collections::HashSet<ustr::Ustr>,
+) -> bool {
+    let Some(sid) = ws.struct_by_name.get(&shape.name) else {
+        return false;
+    };
+    let sd = &ws.modules[sid.module.index()].structs[sid.def];
+    shape.fields.iter().any(|(name, field)| {
+        matches!(field, FieldShape::Prim)
+            && kept.contains(name)
+            && sd
+                .fields
+                .iter()
+                .find(|decl| decl.name == *name)
+                .and_then(|decl| super::shape::nominal_name_from_ty(ws, decl.ty))
+                .is_some_and(|(child, _)| super::shape::planned_value(ws, child).is_some())
+    })
+}
 
 pub(super) fn expanded_nullable_parameter_shape(ws: &Workspace, shape: &ValueShape) -> ValueShape {
     let mut expanded = shape.clone();
@@ -2340,7 +2365,7 @@ impl BackendFnAbiPlan {
             representation,
             arena,
             transport: None,
-            body_dependent_parameters: false,
+            parameter_demand: None,
             fingerprint: std::sync::OnceLock::new(),
         };
         if !params.iter().any(|ty| {
@@ -2405,7 +2430,7 @@ impl BackendFnAbiPlan {
             representation,
             arena,
             transport: None,
-            body_dependent_parameters: false,
+            parameter_demand: None,
             fingerprint: std::sync::OnceLock::new(),
         }
     }
@@ -2416,8 +2441,13 @@ impl BackendFnAbiPlan {
         scx: &ScalarCtx,
         with_defaults: bool,
     ) -> bool {
+        self.uses_scalar_abi() && self.transport_candidate(ws, scx, with_defaults)
+    }
+
+    fn transport_candidate(&self, ws: &Workspace, scx: &ScalarCtx, with_defaults: bool) -> bool {
         let f = &ws.module(self.subject.func.module).functions[self.subject.func.func];
         !(scx.values_first_class
+            || crate::mangle::is_exempt(f)
             || !matches!(self.target, FnBackend::Lua | FnBackend::Any)
             || scx.value_references.taken_by_ref.contains(&f.name)
             || f.is_extern
@@ -2425,8 +2455,7 @@ impl BackendFnAbiPlan {
             || f.is_coroutine
             || f.is_variadic
             || !f.annotations.is_empty()
-            || (!with_defaults && f.num_required != f.param_decls.len())
-            || !self.uses_scalar_abi())
+            || (!with_defaults && f.num_required != f.param_decls.len()))
     }
 
     // Parameter transport can snapshot compact nullable children as scalar
@@ -2473,27 +2502,17 @@ impl BackendFnAbiPlan {
 
     fn narrow_parameter_transport(&mut self, ws: &Workspace, scx: &ScalarCtx) {
         self.fingerprint = std::sync::OnceLock::new();
-        use bone_core::hir::BodyOwner;
         // Field demand does not read default expressions, so defaults keep the
-        // full transport here.
-        if !self.permits_parameter_transport(ws, scx, false) {
+        // full transport here. A boxed signature qualifies too: dropping an
+        // unused parameter gives it a scalar wire.
+        if !self.transport_candidate(ws, scx, false) || self.representation.params.is_empty() {
             return;
         }
-        self.body_dependent_parameters = self.representation.params.iter().any(|id| {
-            matches!(self.arena.get(*id).layout(), RepLayout::Leaves(shape)
-                if !shape.nullable && ws.struct_by_name.contains_key(&shape.name))
-        });
-        if !self.body_dependent_parameters {
-            return;
-        }
-        let Some(body) = ws
-            .module(self.subject.func.module)
-            .bodies
-            .get(&BodyOwner::Function(self.subject.func.func))
-        else {
-            return;
-        };
-        let Some(demand) = super::parameter_demand::fields(body) else {
+        // Every call site of such a function is a direct call the compiler
+        // lowers against this plan, so the transport follows the body.
+        let demand = super::parameter_demand::of_function(ws, self.subject.func);
+        self.parameter_demand = Some(super::parameter_demand::key(&demand));
+        let Some(demand) = demand else {
             return;
         };
         if demand.len() != self.representation.params.len() {
@@ -2505,45 +2524,68 @@ impl BackendFnAbiPlan {
         for (i, &id) in original.iter().enumerate() {
             let rep = self.arena.get(id);
             let width = rep.lanes(&self.arena);
-            if let RepLayout::Leaves(shape) = rep.layout()
-                && !shape.nullable
-                && ws.struct_by_name.contains_key(&shape.name)
-                && let Some(fields) = &demand[i]
-                && fields
-                    .iter()
-                    .all(|field| shape.fields.iter().any(|(name, _)| name == field))
-            {
-                let mut narrowed = shape.clone();
-                narrowed.fields.clear();
-                let mut leaf = offset;
-                for (name, field) in &shape.fields {
-                    let n = match field {
-                        FieldShape::Prim => 1,
-                        FieldShape::Nested(s) => s.leaf_count(),
-                    };
-                    if fields.contains(name) {
-                        narrowed.fields.push((*name, field.clone()));
-                        lanes.extend(leaf..leaf + n);
-                    }
-                    leaf += n;
+            let struct_leaves = match rep.layout() {
+                RepLayout::Leaves(shape)
+                    if !shape.nullable && ws.struct_by_name.contains_key(&shape.name) =>
+                {
+                    Some(shape)
                 }
-                if narrowed.fields.len() != shape.fields.len() {
+                _ => None,
+            };
+            match (&demand[i], struct_leaves) {
+                // A parameter the body never names rides no lanes at all.
+                (Some(fields), None) if fields.is_empty() => {
                     self.representation.params[i] = self.arena.intern_with_facts(
                         self.target,
                         RepUse::Parameter,
-                        RepLayout::Leaves(narrowed),
-                        rep.storage,
+                        RepLayout::Tuple {
+                            slots: Vec::new(),
+                            nullable: false,
+                        },
+                        None,
                         false,
-                        rep.nobox,
+                        false,
                         false,
                     );
                 }
-            } else {
-                lanes.extend(offset..offset + width);
+                (Some(fields), Some(shape))
+                    if fields
+                        .iter()
+                        .all(|field| shape.fields.iter().any(|(name, _)| name == field))
+                        && !keeps_opaque_value_child(ws, shape, fields) =>
+                {
+                    let mut narrowed = shape.clone();
+                    narrowed.fields.clear();
+                    let mut leaf = offset;
+                    for (name, field) in &shape.fields {
+                        let n = match field {
+                            FieldShape::Prim => 1,
+                            FieldShape::Nested(s) => s.leaf_count(),
+                        };
+                        if fields.contains(name) {
+                            narrowed.fields.push((*name, field.clone()));
+                            lanes.extend(leaf..leaf + n);
+                        }
+                        leaf += n;
+                    }
+                    if narrowed.fields.len() != shape.fields.len() {
+                        self.representation.params[i] = self.arena.intern_with_facts(
+                            self.target,
+                            RepUse::Parameter,
+                            RepLayout::Leaves(narrowed),
+                            rep.storage,
+                            false,
+                            rep.nobox,
+                            false,
+                        );
+                    }
+                }
+                _ => lanes.extend(offset..offset + width),
             }
             offset += width;
         }
         if lanes.len() != offset {
+            self.representation.scalar_abi = true;
             self.transport = Some(ParameterTransport { original, lanes });
         }
     }
@@ -2586,9 +2628,33 @@ impl BackendFnAbiPlan {
         }
     }
 
+    /// Boxed parameters the callee never reads, so the call passes nothing for
+    /// them.
+    pub(super) fn dropped_opaque_parameters(&self) -> Vec<usize> {
+        let Some(transport) = &self.transport else {
+            return Vec::new();
+        };
+        transport
+            .original
+            .iter()
+            .zip(&self.representation.params)
+            .enumerate()
+            .filter(|(_, (original, current))| {
+                matches!(self.arena.get(**original).layout(), RepLayout::Opaque)
+                    && self.arena.get(**current).lanes(&self.arena) == 0
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Body edits can change this direct-call layout even when it is currently full.
     pub fn body_dependent_parameters(&self) -> bool {
-        self.body_dependent_parameters
+        self.parameter_demand.is_some()
+    }
+
+    /// See [`crate::lower::parameter_demand_key`].
+    pub fn parameter_demand_key(&self) -> Option<u64> {
+        self.parameter_demand
     }
 
     pub fn decl(&self) -> FuncRef {

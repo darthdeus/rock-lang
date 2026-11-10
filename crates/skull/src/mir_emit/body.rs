@@ -48,13 +48,11 @@ fn collect_callee_frefs(mf: &MirFunc, out: &mut FxHashSet<FuncRef>) {
     }
 }
 
-fn collect_abi_dependencies(mf: &MirFunc, out: &mut FxHashSet<FuncRef>) {
-    out.extend(
-        mf.call_abi_plans
-            .values()
-            .filter(|plan| plan.body_dependent_parameters())
-            .map(|plan| plan.subject.func),
-    );
+fn collect_abi_dependencies(mf: &MirFunc, out: &mut FxHashMap<FuncRef, u64>) {
+    out.extend(mf.call_abi_plans.values().filter_map(|plan| {
+        plan.parameter_demand_key()
+            .map(|key| (plan.subject.func, key))
+    }));
     for nested in &mf.nested_fns {
         collect_abi_dependencies(nested, out);
     }
@@ -190,9 +188,9 @@ fn emit_coroutine_chunk(
     // the GRAPH's fact, and `update_chunk_cache` reads it through
     // `instances_of`. `deps` carries only what codegen alone knows -- which
     // bodies this chunk's TEXT contains.
-    let mut abi_deps = FxHashSet::default();
+    let mut abi_deps = FxHashMap::default();
     collect_abi_dependencies(mf, &mut abi_deps);
-    deps.extend(abi_deps.iter().copied());
+    deps.extend(abi_deps.keys().copied());
     Ok(Chunk {
         abi_deps,
         definition_count: lua_definition_count(&lua),
@@ -453,9 +451,9 @@ pub(super) fn emit_body_chunk_with_mutation(
     attribution.mir_instructions = mf.insts.len();
     attribution.times = times;
     let calls = skull_mir::reach::call_targets(&mf);
-    let mut abi_deps = FxHashSet::default();
+    let mut abi_deps = FxHashMap::default();
     collect_abi_dependencies(&mf, &mut abi_deps);
-    deps.extend(abi_deps.iter().copied());
+    deps.extend(abi_deps.keys().copied());
     Ok(Chunk {
         abi_deps,
         definition_count: lua_definition_count(&lua),
@@ -875,7 +873,7 @@ pub(super) fn emit_spec_chunk(
     times.regalloc_work |= regalloc > Duration::ZERO;
     let mut statics = mf.statics.clone();
     let literal_globals = skull_mir::reach::global_ref_names(&mf);
-    let mut nested_abi_deps = FxHashSet::default();
+    let mut nested_abi_deps = FxHashMap::default();
     collect_abi_dependencies(&mf, &mut nested_abi_deps);
     let mut nested = std::mem::take(&mut mf.nested_fns);
     collect_nested_statics(&nested, &mut statics);
@@ -894,7 +892,7 @@ pub(super) fn emit_spec_chunk(
     attribution.times = times;
     let mut abi_deps = nested_abi_deps;
     collect_abi_dependencies(&mf, &mut abi_deps);
-    deps.extend(abi_deps.iter().copied());
+    deps.extend(abi_deps.keys().copied());
     Ok(Chunk {
         abi_deps,
         definition_count: lua_definition_count(&lua),

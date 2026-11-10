@@ -1220,12 +1220,14 @@ impl SkullEmitCache {
             if let Some(deps) = cache.dependents.get(c) {
                 cache.repair_stats.dependent_requests += 1;
                 cache.repair_stats.dependents_visited += deps.len();
+                let demand = skull_mir::lower::parameter_demand_key(ws, *c);
                 affected.extend(
                     deps.iter()
                         .filter(|body| {
                             !stable_residual_frefs.contains(c)
                                 || !matches!(cache.chunks.get(*body), Some(Ok(chunk))
-                        if !chunk.embedded_deps.contains(c) && !chunk.abi_deps.contains(c))
+                        if !chunk.embedded_deps.contains(c)
+                            && chunk.abi_deps.get(c).is_none_or(|key| *key == demand))
                         })
                         .cloned(),
                 );

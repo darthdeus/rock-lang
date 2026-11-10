@@ -142,6 +142,12 @@ fn serves_target(b: bone_core::hir::FnBackend, target: bone_core::hir::FnBackend
 
 mod parameter_demand;
 
+/// What a direct call's parameter transport derives from the callee's body,
+/// as a key: a body edit that keeps the key keeps every caller's call text.
+pub fn parameter_demand_key(ws: &Workspace, func: FuncRef) -> u64 {
+    parameter_demand::key(&parameter_demand::of_function(ws, func))
+}
+
 /// Value/enum REPRESENTATION analysis over a `Workspace` -- what a type looks
 /// like, as opposed to how a body lowers. Re-exported flat so the ~168 external
 /// `skull_mir::lower::*` call sites keep their paths.

@@ -22,8 +22,10 @@ pub(super) struct Chunk {
     /// These always invalidate on a body edit; residual edges can instead use
     /// the old/new inline candidate's eligibility facts.
     pub(super) embedded_deps: FxHashSet<FuncRef>,
-    /// Body-derived transport is independent of inline candidate eligibility.
-    pub(super) abi_deps: FxHashSet<FuncRef>,
+    /// Callees whose call transport follows their body, each with the
+    /// parameter demand key it was lowered against. This is independent of
+    /// inline candidate eligibility.
+    pub(super) abi_deps: FxHashMap<FuncRef, u64>,
     /// Global-init ordering facts (globals read + functions called).
     pub(super) direct_globals: Vec<Ustr>,
     pub(super) direct_calls: Vec<Ustr>,

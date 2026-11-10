@@ -1224,6 +1224,28 @@ impl<'a> Builder<'a> {
         dc: &DirectCall,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if dc.plan.uses_scalar_abi() {
+            // A boxed argument the callee does not read is still rejected, so
+            // the diagnostic does not depend on the callee's body.
+            let dropped = dc.plan.dropped_opaque_parameters();
+            if !dropped.is_empty() {
+                let names = &self.ws.module(func.module).functions[func.func].param_decls;
+                let mut position = 0;
+                let mut boxed = Vec::new();
+                for &a in arg_idxs {
+                    let index = match self.body.arg_names.get(&a) {
+                        Some(name) => names.iter().position(|p| p.name == *name),
+                        None if self.body.spread_args.contains(&a) => None,
+                        None => {
+                            position += 1;
+                            Some(position - 1)
+                        }
+                    };
+                    if index.is_some_and(|i| dropped.contains(&i)) {
+                        boxed.push(a);
+                    }
+                }
+                self.reject_nobox_boxed_call_args(func, &boxed)?;
+            }
             let param_shapes = dc.plan.argument_shapes();
             let param_count = self.ws.module(func.module).functions[func.func]
                 .param_decls

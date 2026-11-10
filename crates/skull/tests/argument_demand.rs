@@ -205,3 +205,135 @@ fn demand_direction_result(event: DirectionEvent) -> DirectionResult? {
         "-1\t11\t23\t23"
     );
 }
+
+fn lua_param_count(lua: &str, name: &str) -> usize {
+    let header = crate::common::function_body(lua, name)
+        .lines()
+        .next()
+        .unwrap();
+    let params = header
+        .rsplit('(')
+        .next()
+        .unwrap()
+        .split(')')
+        .next()
+        .unwrap();
+    params.split(',').filter(|p| !p.trim().is_empty()).count()
+}
+
+#[test]
+fn unused_parameters_are_not_passed_and_their_arguments_still_run() {
+    let _inline = crate::common::InlineOffGuard::on();
+    let ws = ws_with_stdlib(
+        r#"
+global marks: int = 0
+fn mark() -> int { marks += 1; return 0 }
+fn skip_middle(a: int, unused: int, b: string) -> string { return "{a}{b}" }
+@nomangle fn probe() -> string { return skip_middle(4, mark(), "x") }
+@nomangle fn observed() -> int { return marks }
+"#,
+    );
+    let lua = emit_full(&ws, skull::user_module_id(&ws).unwrap())
+        .unwrap()
+        .0
+        .lua;
+    assert_eq!(lua_param_count(&lua, "skip_middle"), 2);
+    let program = format!("{lua}\nprint(probe(), observed())\n");
+    assert_eq!(run_luajit(&program), "4x\t1");
+}
+
+#[test]
+fn a_function_value_keeps_its_unused_parameters() {
+    let _inline = crate::common::InlineOffGuard::on();
+    let ws = ws_with_stdlib(
+        r#"
+fn skip_middle(a: int, unused: int, b: int) -> int { return a + b }
+@nomangle fn probe() -> int {
+    let f = skip_middle
+    return f(1, 2, 3) + skip_middle(10, 20, 30)
+}
+"#,
+    );
+    let lua = emit_full(&ws, skull::user_module_id(&ws).unwrap())
+        .unwrap()
+        .0
+        .lua;
+    assert_eq!(lua_param_count(&lua, "skip_middle"), 3);
+    assert_eq!(run_luajit(&format!("{lua}\nprint(probe())\n")), "44");
+}
+
+#[test]
+fn a_lambda_capture_keeps_the_whole_parameter() {
+    let _inline = crate::common::InlineOffGuard::on();
+    let ws = ws_with_stdlib(
+        r#"
+value Pair { a: int, b: int }
+fn reader(p: Pair, unused: int) -> fn() -> int { return () => p.a }
+@nomangle fn probe() -> int { return reader(Pair { a: 5, b: 6 }, 7)() }
+"#,
+    );
+    let lua = emit_full(&ws, skull::user_module_id(&ws).unwrap())
+        .unwrap()
+        .0
+        .lua;
+    assert_eq!(lua_param_count(&lua, "reader"), 2);
+    assert_eq!(run_luajit(&format!("{lua}\nprint(probe())\n")), "5");
+}
+
+#[test]
+fn reading_an_unused_parameter_rebuilds_its_callers() {
+    let _inline = crate::common::InlineOffGuard::on();
+    let before = r#"
+fn pick(a: int, b: int) -> int { return a }
+@nomangle fn caller() -> int { return pick(3, 4) }
+@nomangle fn save_caller() -> fn() -> int { return caller }
+"#;
+    let after = before.replace("return a }", "return a + b }");
+    let ws1 = ws_with_stdlib(before);
+    let mid = skull::user_module_id(&ws1).unwrap();
+    let (full1, mut cache) = emit_full(&ws1, mid).unwrap();
+    let (_, mut overlay_cache) = emit_full(&ws1, mid).unwrap();
+    assert_eq!(lua_param_count(&full1.lua, "pick"), 1);
+    let ws2 = ws_with_stdlib(&after);
+    let edited = [body_id(&ws2, "pick")];
+    let incremental = skull::mir_emit::emit_incremental(&ws2, &mut cache, &edited).unwrap();
+    let fresh = emit_full(&ws2, mid).unwrap().0;
+    assert_eq!(incremental.lua, fresh.lua);
+    assert_eq!(
+        run_luajit(&format!("{}\nprint(caller())", incremental.lua)),
+        "7"
+    );
+    match skull::mir_emit::emit_overlay(&ws2, &mut overlay_cache, &edited) {
+        Ok(overlay) => {
+            let program = format!(
+                "{}\nlocal saved = save_caller()\n{}\nprint(caller(), saved())",
+                full1.lua, overlay.lua
+            );
+            assert_eq!(run_luajit(&program), "7\t7");
+        }
+        Err(error) => assert!(
+            error.message.contains("compatibility") && error.message.contains("restart"),
+            "{}",
+            error.message
+        ),
+    }
+}
+
+#[test]
+fn a_demanded_boxed_value_child_keeps_the_whole_parameter() {
+    let _inline = crate::common::InlineOffGuard::on();
+    let ws = ws_with_stdlib(
+        r#"
+value In { c: int, s: string }
+value MaybeIn { x: int, b: In? }
+fn child(i: In?) -> int { return i?.c ?? 0 }
+fn read_child(a: MaybeIn) -> int { return child(a.b) }
+@nomangle fn probe() -> int { return read_child(MaybeIn { x: 1, b: In { c: 4, s: "a" } }) }
+"#,
+    );
+    let lua = emit_full(&ws, skull::user_module_id(&ws).unwrap())
+        .unwrap()
+        .0
+        .lua;
+    assert_eq!(run_luajit(&format!("{lua}\nprint(probe())\n")), "4");
+}
