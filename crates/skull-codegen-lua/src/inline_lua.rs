@@ -65,21 +65,55 @@ pub(crate) fn classify_inline_lua_body(body: &str) -> Option<InlineLuaShape> {
     }
 }
 
+/// The expression a body binds to its result, if it binds one.
+pub(crate) fn result_expr(body: &str, shape: InlineLuaShape) -> Option<&str> {
+    match shape {
+        InlineLuaShape::Expr => Some(body.trim()),
+        InlineLuaShape::UnitStmts => None,
+        InlineLuaShape::TailReturn => body
+            .lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .and_then(inline_lua_return_rest)
+            .filter(|rest| !rest.is_empty()),
+    }
+}
+
+/// True if `e` is a single call of a named function, which Lua accepts as a
+/// statement on its own.
+pub(crate) fn is_call_statement(e: &str) -> bool {
+    let Some(open) = e.find('(') else {
+        return false;
+    };
+    let callee = &e[..open];
+    callee.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && callee
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'.' | b':'))
+        && one_group(&e[open..])
+}
+
 /// Emit the spliced (return-free / tail-return) body, rewriting the tail
-/// `return X` to `<lv> = X`. Param locals are emitted by the caller; this writes
-/// only the body. Each line keeps the body's own text (Lua ignores indentation).
+/// `return X` to `<lv> = X`, or to the bare call `X` when `lv` is `None`.
+/// Param locals are emitted by the caller; this writes only the body. Each
+/// line keeps the body's own text (Lua ignores indentation).
 pub(crate) fn render_spliced_inline_lua(
     out: &mut String,
     body: &str,
     shape: InlineLuaShape,
-    lv: &str,
+    lv: Option<&str>,
 ) {
-    match shape {
-        InlineLuaShape::Expr => {
-            if body.trim() != lv {
-                let _ = writeln!(out, "  {lv} = {}", body.trim());
-            }
+    let bind = |out: &mut String, rest: &str| match lv {
+        Some(lv) if rest == lv => {}
+        Some(lv) => {
+            let _ = writeln!(out, "  {lv} = {rest}");
         }
+        None => {
+            let _ = writeln!(out, "  {rest}");
+        }
+    };
+    match shape {
+        InlineLuaShape::Expr => bind(out, body.trim()),
         InlineLuaShape::UnitStmts => {
             for line in body.lines() {
                 if line.trim().is_empty() {
@@ -95,10 +129,7 @@ pub(crate) fn render_spliced_inline_lua(
                 }
                 match inline_lua_return_rest(line) {
                     Some("") => {} // bare tail return: nothing to bind (unit)
-                    Some(rest) if rest == lv => {}
-                    Some(rest) => {
-                        let _ = writeln!(out, "  {lv} = {rest}");
-                    }
+                    Some(rest) => bind(out, rest),
                     None => {
                         let _ = writeln!(out, "  {}", line.trim_end());
                     }
@@ -285,6 +316,78 @@ pub(crate) fn param_reads(body: &str, name: &str) -> Option<usize> {
         return None;
     }
     Some(variable_refs(body, &names, name).count())
+}
+
+/// True if `body` reads parameter `name` once, in its first statement, with
+/// no call returned, branch taken or assignment made before that read: an
+/// expression passed for it reads the same memory there as before the body.
+pub(crate) fn reads_first(body: &str, name: &str) -> bool {
+    let names = lua_names(body);
+    if names.iter().any(|&(s, e)| {
+        matches!(
+            &body[s..e],
+            "for" | "while" | "repeat" | "function" | "goto"
+        )
+    }) {
+        return false;
+    }
+    let mut refs = variable_refs(body, &names, name);
+    let (Some((at, _)), None) = (refs.next(), refs.next()) else {
+        return false;
+    };
+    let start = body.len() - body.trim_start().len();
+    if body[start..at].contains(['\n', ')', ';']) {
+        return false;
+    }
+    names
+        .iter()
+        .filter(|&&(s, _)| start <= s && s < at)
+        .all(|&(s, e)| {
+            matches!(&body[s..e], "return" | "local" | "if" | "not") || !is_keyword(&body[s..e])
+        })
+}
+
+/// True if a reference to `name` begins a statement, where a parenthesized
+/// stand-in would read as a call of the previous line.
+pub(crate) fn opens_statement(body: &str, name: &str) -> bool {
+    let names = lua_names(body);
+    variable_refs(body, &names, name).any(|(s, _)| {
+        let before = body[..s].trim_end_matches([' ', '\t']);
+        let word = &before[before
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .map_or(0, |at| at + 1)..];
+        before.is_empty()
+            || before.ends_with(['\n', ';'])
+            || matches!(word, "then" | "do" | "else" | "end" | "repeat")
+    })
+}
+
+fn is_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "and"
+            | "break"
+            | "do"
+            | "else"
+            | "elseif"
+            | "end"
+            | "false"
+            | "for"
+            | "function"
+            | "goto"
+            | "if"
+            | "in"
+            | "local"
+            | "nil"
+            | "not"
+            | "or"
+            | "repeat"
+            | "return"
+            | "then"
+            | "true"
+            | "until"
+            | "while"
+    )
 }
 
 /// True if `s` is one parenthesized group, so it reads as a single operand

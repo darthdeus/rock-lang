@@ -47,6 +47,28 @@ impl Emitter<'_> {
         pure
     }
 
+    /// `id` renders in place as an expression that calls nothing, so it
+    /// cannot write memory.
+    pub(crate) fn folds_no_call(&self, id: Idx<Inst>) -> bool {
+        if !self.inlinable[raw(id) as usize] {
+            return true;
+        }
+        let inst = &self.func.insts[id];
+        if matches!(
+            inst,
+            Inst::Call { .. }
+                | Inst::CallValue { .. }
+                | Inst::CallMulti { .. }
+                | Inst::CallValueMulti { .. }
+                | Inst::CallBoundMulti { .. }
+        ) {
+            return false;
+        }
+        let mut no_call = true;
+        regalloc::inst_uses(inst, &mut |u| no_call = no_call && self.folds_no_call(u));
+        no_call
+    }
+
     pub(crate) fn write_kills(&self, out: &mut String, locals: &[regalloc::KillLocal]) {
         for local in locals {
             out.push(' ');

@@ -145,7 +145,7 @@ impl Emitter<'_> {
         let names = lua_names_of(body.as_str());
         let mut locals = String::new();
         let mut stand_ins = Vec::new();
-        for (p, a) in callee.param_decls.iter().zip(args.iter()) {
+        for (i, (p, a)) in callee.param_decls.iter().zip(args.iter()).enumerate() {
             let mut operand = String::new();
             self.write_opnd(&mut operand, *a);
             let standalone = operand
@@ -154,12 +154,18 @@ impl Emitter<'_> {
                 || one_group(&operand);
             // A pure expression the body reads at most once may also move to
             // that read: nothing the body does can change its value.
+            // So may a read of memory the body's first statement makes before
+            // anything else runs, when no later argument calls anything.
             let movable = || {
                 self.opnd_is_plain(*a)
                     || self.folds_pure(*a)
                         && param_reads(body.as_str(), p.name.as_str()).is_some_and(|n| n <= 1)
+                    || self.folds_no_call(*a)
+                        && reads_first(body.as_str(), p.name.as_str())
+                        && args[i + 1..].iter().all(|&later| self.folds_no_call(later))
             };
             if standalone
+                && !(operand.starts_with('(') && opens_statement(body.as_str(), p.name.as_str()))
                 && !names.contains(&operand.as_str())
                 && movable()
                 && reads_param_only(body.as_str(), p.name.as_str())
@@ -171,12 +177,18 @@ impl Emitter<'_> {
         }
         let subs: Vec<(&str, &str)> = stand_ins.iter().map(|(p, o)| (*p, o.as_str())).collect();
         let body = substitute_params(body.as_str(), &subs);
-        let block = !locals.is_empty() || lv.starts_with("local") || declares_names(&body);
+        // A discarded call result runs as a bare call; any other discarded
+        // result still needs a local to evaluate it into.
+        let result = result_expr(&body, shape);
+        let discarded = lv.starts_with("local");
+        let bare = discarded && result.is_some_and(is_call_statement);
+        let block =
+            !locals.is_empty() || discarded && !bare && result.is_some() || declares_names(&body);
         if block {
             out.push_str(" do\n");
         }
         out.push_str(&locals);
-        render_spliced_inline_lua(out, &body, shape, &lv);
+        render_spliced_inline_lua(out, &body, shape, (!bare).then_some(lv.as_str()));
         if block {
             out.push_str(" end\n");
         }
