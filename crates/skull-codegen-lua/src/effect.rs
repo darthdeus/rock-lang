@@ -9,6 +9,11 @@ impl Emitter<'_> {
         match &self.func.insts[id] {
             Inst::Const(lit) => !matches!(lit, Lit::Nil),
             Inst::Load(cell) => cell_never_nil(self.ws, self.func.cells[*cell].ty),
+            // A callee declared to return a non-optional scalar returns one; an
+            // extern that breaks its declaration only costs the rehash guard.
+            Inst::Call { func, .. } => {
+                cell_never_nil(self.ws, crate::func_of(self.ws, *func).return_ty)
+            }
             Inst::IntAdd(..)
             | Inst::IntSub(..)
             | Inst::IntMul(..)
@@ -357,18 +362,28 @@ impl Emitter<'_> {
 /// A source binding declared with a non-nullable builtin type never holds nil
 /// where it is read.
 fn cell_never_nil(ws: &Workspace, ty: Option<bone_core::prelude::TyId>) -> bool {
-    use bone_core::hir::{BuiltinTy, TypeExpr};
+    use bone_core::hir::{BuiltinTy, TypeCtor, TypeExpr};
     let Some(bone_core::prelude::TyId::Static(module, index)) = ty else {
         return false;
     };
-    matches!(
-        ws.module(module).ty_arena[index],
-        TypeExpr::Builtin(
+    match &ws.module(module).ty_arena[index] {
+        TypeExpr::Builtin(builtin) => matches!(
+            builtin,
             BuiltinTy::Int
                 | BuiltinTy::Uint
                 | BuiltinTy::Float
                 | BuiltinTy::Bool
                 | BuiltinTy::String
-        )
-    )
+        ),
+        // Tables, closures, cdata and enum ints. A newtype is left out: it
+        // carries whatever its underlying type does.
+        TypeExpr::App { ctor, .. } => match ctor {
+            TypeCtor::Array | TypeCtor::Map | TypeCtor::Ref => true,
+            TypeCtor::Nominal(name) => {
+                ws.struct_by_name.contains_key(name) || ws.enums_by_name.contains_key(name)
+            }
+        },
+        TypeExpr::Function { .. } | TypeExpr::Tuple { .. } => true,
+        TypeExpr::Generic(..) | TypeExpr::Infer(..) | TypeExpr::Nullable(_) => false,
+    }
 }

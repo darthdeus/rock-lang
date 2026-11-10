@@ -179,6 +179,33 @@ fn computed_field_store_keeps_direct_assignment() {
 }
 
 #[test]
+fn stored_call_result_of_a_scalar_type_needs_no_nil_guard() {
+    let lua = emit_clean(
+        "struct Acc { n: int = 0, label: string = \"\" } \
+         fn weight(x: int) -> int { if x > 3 { return x * 2 } return x - 1 } \
+         fn name(x: int) -> string { if x > 3 { return \"big\" } return \"small\" } \
+         fn update(acc: Acc, x: int) { acc.n = weight(x); acc.label = name(x) }",
+        "update",
+    );
+    assert!(!lua.contains("getmetatable("), "{lua}");
+    let lua = emit_clean(
+        "struct Inner { v: int } struct Acc { inner: Inner? = null, xs: Vec<int>? = null } \
+         fn make(x: int) -> Inner { if x > 3 { return Inner { v: x } } return Inner { v: 0 } } \
+         fn list(x: int) -> Vec<int> { if x > 3 { return [x] } return [] } \
+         fn update(acc: Acc, x: int) { acc.inner = make(x); acc.xs = list(x) }",
+        "update",
+    );
+    assert!(!lua.contains("getmetatable("), "{lua}");
+    let lua = emit_clean(
+        "struct Acc { n: int? = null } \
+         fn weight(x: int) -> int? { if x > 3 { return x * 2 } return null } \
+         fn update(acc: Acc, x: int) { acc.n = weight(x) }",
+        "update",
+    );
+    assert!(lua.contains("getmetatable("), "{lua}");
+}
+
+#[test]
 fn sinking_preserves_dynamic_format_error_order() {
     common::require_luajit();
     for result in ["s", "\"[{s}]\""] {
