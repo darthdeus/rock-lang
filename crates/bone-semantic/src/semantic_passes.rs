@@ -977,18 +977,10 @@ pub struct ClosureRequirement {
 /// computation: the API-closure gate rejects the first unsatisfied entry, and
 /// `rock modules audit` / `migrate` read the whole list with its reasons.
 pub fn api_closure_requirements(ws: &Workspace) -> Vec<ClosureRequirement> {
-    let mut out = Vec::new();
     if ws.ns.packages.is_empty() {
-        return out;
+        return Vec::new();
     }
-
-    let packages: Vec<bone_core::modules::PackageId> = ws.ns.packages.keys().copied().collect();
-    let reachability: FxHashMap<bone_core::modules::PackageId, (FxHashSet<Ustr>, FxHashSet<Ustr>)> =
-        packages
-            .par_iter()
-            .map(|&pkg_id| (pkg_id, compute_export_reachability(ws, pkg_id)))
-            .collect();
-
+    let reachability = export_reachability(ws);
     // Each definition's requirements depend on the workspace alone; the
     // definitions are visited side by side and reported in map order.
     let per_def: Vec<Vec<ClosureRequirement>> = ws
@@ -996,15 +988,26 @@ pub fn api_closure_requirements(ws: &Workspace) -> Vec<ClosureRequirement> {
         .par_iter()
         .map(|(def_key, meta)| api_closure_requirements_of(ws, &reachability, def_key, meta))
         .collect();
-    out.extend(per_def.into_iter().flatten());
-    out
+    per_def.into_iter().flatten().collect()
+}
+
+type ExportReachability =
+    FxHashMap<bone_core::modules::PackageId, (FxHashSet<Ustr>, FxHashSet<Ustr>)>;
+
+/// Each package's modules and definitions reachable from its root.
+fn export_reachability(ws: &Workspace) -> ExportReachability {
+    let packages: Vec<bone_core::modules::PackageId> = ws.ns.packages.keys().copied().collect();
+    packages
+        .par_iter()
+        .map(|&pkg_id| (pkg_id, compute_export_reachability(ws, pkg_id)))
+        .collect()
 }
 
 /// The [`ClosureRequirement`]s one exported definition imposes; none for a
 /// definition that is not exported.
 fn api_closure_requirements_of(
     ws: &Workspace,
-    reachability: &FxHashMap<bone_core::modules::PackageId, (FxHashSet<Ustr>, FxHashSet<Ustr>)>,
+    reachability: &ExportReachability,
     def_key: &Ustr,
     meta: &bone_core::modules::DefMeta,
 ) -> Vec<ClosureRequirement> {
@@ -1019,11 +1022,13 @@ fn api_closure_requirements_of(
             ws.ns.package(pkg_id).is_some() && reachable_modules.contains(&meta.node);
         let is_exported = match meta.kind {
             bone_core::modules::DefKind::Callable => {
-                let has_public_member = ws.functions_by_name.get(def_key).is_some_and(|fns| {
-                    fns.iter()
-                        .any(|&(mid, fid)| ws.callable_member_is_public(*def_key, mid, fid))
-                });
-                has_public_member && (reachable_defs.contains(def_key) || module_reachable)
+                // Reachability first: it is two set lookups, and most
+                // callables are not reachable from their package's root.
+                (reachable_defs.contains(def_key) || module_reachable)
+                    && ws.functions_by_name.get(def_key).is_some_and(|fns| {
+                        fns.iter()
+                            .any(|&(mid, fid)| ws.callable_member_is_public(*def_key, mid, fid))
+                    })
             }
             _ => {
                 reachable_defs.contains(def_key)
@@ -1160,13 +1165,18 @@ fn collect_type_expr_closure(
 /// Public-API type-closure gate: reject the first type a public interface names that does
 /// not support the interface's audience.
 pub fn pass_validate_api_closure(ws: &Workspace) -> Result<(), CompilerError> {
-    if ws.fragment_scopes.is_empty() {
+    if ws.fragment_scopes.is_empty() || ws.ns.packages.is_empty() {
         return Ok(());
     }
-    if let Some(r) = api_closure_requirements(ws)
-        .into_iter()
-        .find(|r| !r.satisfied)
-    {
+    // The first unsatisfied requirement in map order, without keeping the
+    // satisfied ones.
+    let reachability = export_reachability(ws);
+    let unsatisfied = ws.defs.par_iter().find_map_first(|(def_key, meta)| {
+        api_closure_requirements_of(ws, &reachability, def_key, meta)
+            .into_iter()
+            .find(|r| !r.satisfied)
+    });
+    if let Some(r) = unsatisfied {
         let display_name = ws
             .defs
             .get(&r.required)
