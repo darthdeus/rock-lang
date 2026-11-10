@@ -92,7 +92,7 @@ fn mixed_workspace_rejects_package_less_legacy_use_at_the_use_span() {
     );
     let label = err.labels.first().expect("the rejected use is labeled");
     assert_eq!(label.span.file, Ustr::from("legacy.rock"));
-    let covered = &legacy_src[label.span.offset_range.0..label.span.offset_range.1];
+    let covered = &legacy_src[label.span.offset_range().0..label.span.offset_range().1];
     assert!(
         covered.starts_with("use provider::Provider"),
         "labeled span: {covered:?}"
@@ -134,7 +134,7 @@ fn an_unresolved_v1_variant_pattern_is_labeled_at_its_path() {
         .first()
         .expect("the unresolved pattern is labeled");
     assert_eq!(label.span.file, Ustr::from("app.rock"));
-    let covered = &src[label.span.offset_range.0..label.span.offset_range.1];
+    let covered = &src[label.span.offset_range().0..label.span.offset_range().1];
     assert_eq!(covered, "Nope::A");
 }
 
@@ -281,7 +281,7 @@ fn type_mismatch_labels_the_expected_type_origin() {
         .find(|e| e.message.contains("expected `Foo`"))
         .expect("a type-mismatch error");
     let has_origin = err.labels.iter().any(|l| {
-        let (lo, hi) = l.span.offset_range;
+        let (lo, hi) = l.span.offset_range();
         src.get(lo..hi) == Some("Foo")
     });
     assert!(
@@ -289,7 +289,7 @@ fn type_mismatch_labels_the_expected_type_origin() {
         "expected a label at the `Foo` annotation; labels: {:?}",
         err.labels
             .iter()
-            .map(|l| (l.span.offset_range, l.message.clone()))
+            .map(|l| (l.span.offset_range(), l.message.clone()))
             .collect::<Vec<_>>()
     );
 }
@@ -418,7 +418,7 @@ fn main() { let x: int = 2.0 * (3 / 4) }
         .first()
         .expect("hint carries a label span")
         .span
-        .offset_range;
+        .offset_range();
     assert_eq!(
         &src[lo..hi],
         "(3 / 4)",
@@ -657,7 +657,7 @@ fn broken_two() -> bool { return 42 }";
 
 /// The source slice a byte-offset span covers.
 fn text<'a>(src: &'a str, span: &Span) -> &'a str {
-    let (s, e) = span.offset_range;
+    let (s, e) = span.offset_range();
     &src[s..e]
 }
 
@@ -1869,7 +1869,7 @@ fn nullable_operator_diagnostic_labels_operands_without_an_overload_menu() {
         assert_eq!(error.labels.len(), operands, "{error:?}");
         for label in &error.labels {
             assert_eq!(label.message, "nullable operand");
-            let (start, end) = label.span.offset_range;
+            let (start, end) = label.span.offset_range();
             let operand = &section.content[start..end];
             assert!(matches!(operand, "x" | "y"), "{operand:?}");
             if operands == 1 {

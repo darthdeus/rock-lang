@@ -180,15 +180,15 @@ mod tests {
         let file = Ustr::from("test.rock");
         let full = parse_module(src, file).expect("full parse");
         let item = &full.items[1];
-        let (s, e) = item.span.offset_range;
+        let (s, e) = item.span.offset_range();
         let sub = &src[s..e];
 
         let mini = parse_one_item(
             sub,
             file,
             s,
-            item.span.line_range.0,
-            item.span.col_range.0,
+            item.span.line_range().0,
+            item.span.col_range().0,
             Dialect::Legacy,
         )
         .expect("parse_one_item");
@@ -196,10 +196,10 @@ mod tests {
         let m = &mini.items[0];
 
         assert_eq!(
-            m.span.offset_range, item.span.offset_range,
+            m.span.offset_range(), item.span.offset_range(),
             "item offset span"
         );
-        assert_eq!(m.span.line_range, item.span.line_range, "item line range");
+        assert_eq!(m.span.line_range(), item.span.line_range(), "item line range");
 
         let body_block = |it: &Item| match &it.kind {
             ItemKind::Function(f) => f.body.rock_block().unwrap(),
@@ -209,8 +209,8 @@ mod tests {
         let fb = body_block(item);
         // A nested node's absolute span: wrong base offset would shift it.
         assert_eq!(
-            mini.b(&mb).span.offset_range,
-            full.b(&fb).span.offset_range,
+            mini.b(&mb).span.offset_range(),
+            full.b(&fb).span.offset_range(),
             "body block span"
         );
         assert_eq!(mini.block_sexp(mb), full.block_sexp(fb), "body s-expr");
@@ -223,18 +223,18 @@ mod tests {
         let file = Ustr::from("test.rock");
         let full = parse_module(src, file).expect("full parse");
         let item = &full.items[1];
-        let (s, e) = item.span.offset_range;
+        let (s, e) = item.span.offset_range();
         let mini = parse_one_item(
             &src[s..e],
             file,
             s,
-            item.span.line_range.0,
-            item.span.col_range.0,
+            item.span.line_range().0,
+            item.span.col_range().0,
             Dialect::Legacy,
         )
         .expect("parse_one_item");
         assert_eq!(
-            mini.items[0].span.offset_range, item.span.offset_range,
+            mini.items[0].span.offset_range(), item.span.offset_range(),
             "annotated item span"
         );
         assert_eq!(mini.items[0].annotations.len(), 1, "annotation preserved");
@@ -359,11 +359,11 @@ mod tests {
         // The annotation span is a real, non-empty source range distinct from
         // the param name's.
         assert!(
-            a.span.offset_range.0 < a.span.offset_range.1,
+            a.span.offset_range().0 < a.span.offset_range().1,
             "anno span non-empty"
         );
         assert_ne!(
-            a.span.offset_range, f.params[0].name.span.offset_range,
+            a.span.offset_range(), f.params[0].name.span.offset_range(),
             "anno span != name span"
         );
     }
@@ -817,7 +817,7 @@ mod tests {
             .iter()
             .filter_map(|(_, x)| match &x.kind {
                 ExprKind::Ident(id) => {
-                    let (s, e) = x.span.offset_range;
+                    let (s, e) = x.span.offset_range();
                     Some((
                         id.name.to_string(),
                         src.get(s..e).unwrap_or("<out of range>").to_string(),
@@ -848,13 +848,13 @@ mod tests {
         // The single-item reparse starts its source mid-file, so a hole offset
         // left relative to that slice lands `offset` bytes short.
         let item = &full.items[1];
-        let (s, e) = item.span.offset_range;
+        let (s, e) = item.span.offset_range();
         let mini = parse_one_item(
             &src[s..e],
             file,
             s,
-            item.span.line_range.0,
-            item.span.col_range.0,
+            item.span.line_range().0,
+            item.span.col_range().0,
             Dialect::Legacy,
         )
         .expect("parse_one_item");
@@ -1498,9 +1498,9 @@ mod tests {
         for (_, b) in ast.blocks.iter() {
             match b.braces {
                 Some((open, close)) => {
-                    let (bs, be) = (b.span.offset_range.0, b.span.offset_range.1);
-                    assert_eq!(open.offset_range, (bs, bs + 1), "open brace at span start");
-                    assert_eq!(close.offset_range, (be - 1, be), "close brace at span end");
+                    let (bs, be) = (b.span.offset_range().0, b.span.offset_range().1);
+                    assert_eq!(open.offset_range(), (bs, bs + 1), "open brace at span start");
+                    assert_eq!(close.offset_range(), (be - 1, be), "close brace at span end");
                     assert_eq!(&src[bs..bs + 1], "{", "open brace char");
                     assert_eq!(&src[be - 1..be], "}", "close brace char");
                 }

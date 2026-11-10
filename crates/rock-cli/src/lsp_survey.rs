@@ -250,11 +250,11 @@ pub(crate) fn collect_stats(
             if func.is_extern || func.inline_body.is_some() {
                 continue;
             }
-            let (s, e) = func.span.offset_range;
+            let (s, e) = func.span.offset_range();
             let bytes = e.saturating_sub(s);
             body_bytes += bytes;
             fn_count += 1;
-            let name_off = func.name_span.offset_range.0;
+            let name_off = func.name_span.offset_range().0;
             fns.push(FnStat {
                 file: file.clone(),
                 name: func.name.as_str().to_string(),

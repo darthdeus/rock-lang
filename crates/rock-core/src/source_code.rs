@@ -142,26 +142,30 @@ pub fn source_file_from_path_and_contents(
 ///
 /// Spans are what ties analysis results back to the text the user wrote: error
 /// reporting, completion, hover and go-to-definition all start from one.
+///
+/// Positions are stored as `u32` so a span is 32 bytes: the compiler keeps
+/// millions of them alive. The accessors hand out `usize` pairs; the
+/// tokenizer refuses a source file too large for that width.
 #[derive(Copy, Clone, PartialEq, Eq)]
 pub struct Span {
     /// Which source file the region belongs to (a path or another id path).
     pub file: Ustr,
     /// First and last line, zero-based and inclusive at both ends, so a
     /// single-line span has `line_range.0 == line_range.1`.
-    pub line_range: (usize, usize),
+    line_range: (u32, u32),
     /// First and one-past-last column, zero-based and half-open `[start..end)`.
     /// `col_range.1` is therefore the column just past the last character of
     /// the span, the same convention `offset_range` and LSP `Range.end` use:
     /// a three-character token opening at column 5 has `col_range == (5, 8)`.
     /// `Tokenizer::end_span` produces it that way and `lsp_range_from_span`
     /// depends on it, so `col_range.1` is never inclusive.
-    pub col_range: (usize, usize),
+    col_range: (u32, u32),
     /// First and one-past-last byte, zero-based and half-open `[start..end)`.
     /// The precise extent: these offsets index a `&str` directly, since
     /// `Tokenizer::byte_offset` advances by `c.len_utf8()` per character.
     /// They are byte counts, not character counts, and drift from character
     /// positions as soon as a multibyte character appears earlier in the file.
-    pub offset_range: (usize, usize),
+    offset_range: (u32, u32),
 }
 
 impl Debug for Span {
@@ -176,10 +180,12 @@ impl Debug for Span {
 
 impl Hash for Span {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        // Hashed at `usize` width so hashes, and the order of anything
+        // iterated by them, match what wider spans produced.
         self.file.hash(state);
-        self.line_range.hash(state);
-        self.col_range.hash(state);
-        self.offset_range.hash(state);
+        self.line_range().hash(state);
+        self.col_range().hash(state);
+        self.offset_range().hash(state);
     }
 }
 
@@ -189,24 +195,96 @@ impl Default for Span {
     }
 }
 
+const _: () = assert!(std::mem::size_of::<Span>() == 32);
+
+fn narrow((first, last): (usize, usize)) -> (u32, u32) {
+    match (u32::try_from(first), u32::try_from(last)) {
+        (Ok(first), Ok(last)) => (first, last),
+        _ => panic!(
+            "source position {first}..{last} does not fit a span; \
+             the tokenizer refuses sources this large"
+        ),
+    }
+}
+
+fn widen((first, last): (u32, u32)) -> (usize, usize) {
+    (first as usize, last as usize)
+}
+
 impl Span {
+    pub fn new(
+        file: Ustr,
+        line_range: (usize, usize),
+        col_range: (usize, usize),
+        offset_range: (usize, usize),
+    ) -> Self {
+        Self {
+            file,
+            line_range: narrow(line_range),
+            col_range: narrow(col_range),
+            offset_range: narrow(offset_range),
+        }
+    }
+
+    #[inline]
+    pub fn line_range(&self) -> (usize, usize) {
+        widen(self.line_range)
+    }
+
+    #[inline]
+    pub fn col_range(&self) -> (usize, usize) {
+        widen(self.col_range)
+    }
+
+    #[inline]
+    pub fn offset_range(&self) -> (usize, usize) {
+        widen(self.offset_range)
+    }
+
+    pub fn set_line_range(&mut self, line_range: (usize, usize)) {
+        self.line_range = narrow(line_range);
+    }
+
+    pub fn set_col_range(&mut self, col_range: (usize, usize)) {
+        self.col_range = narrow(col_range);
+    }
+
+    pub fn set_offset_range(&mut self, offset_range: (usize, usize)) {
+        self.offset_range = narrow(offset_range);
+    }
+
+    pub fn with_line_range(mut self, line_range: (usize, usize)) -> Self {
+        self.set_line_range(line_range);
+        self
+    }
+
+    pub fn with_col_range(mut self, col_range: (usize, usize)) -> Self {
+        self.set_col_range(col_range);
+        self
+    }
+
+    pub fn with_offset_range(mut self, offset_range: (usize, usize)) -> Self {
+        self.set_offset_range(offset_range);
+        self
+    }
+
     pub fn unknown() -> Self {
         Self::from_linecol(LineCol::unknown())
     }
 
     /// `"file:line"` with a one-based line, for `__SITE__` and the like.
     pub fn format_site(&self) -> String {
-        format!("{}:{}", self.file.as_str(), self.line_range.0 + 1)
+        format!("{}:{}", self.file.as_str(), self.line_range().0 + 1)
     }
 
     /// The zero-width span of one position.
     pub fn from_linecol(linecol: LineCol) -> Self {
-        Self {
-            file: linecol.file,
-            line_range: (linecol.line, linecol.line),
-            col_range: (linecol.col, linecol.col),
-            offset_range: (linecol.offset, linecol.offset),
-        }
+        Self::new(
+            linecol.file,
+            (linecol.line, linecol.line),
+            (linecol.col, linecol.col),
+            (linecol.offset, linecol.offset),
+        )
     }
 
     /// The smallest span covering both, which must belong to one file.
@@ -225,12 +303,16 @@ impl Span {
     }
 
     pub fn len(&self) -> usize {
-        let (first, last) = self.offset_range;
+        let (first, last) = self.offset_range();
         last - first
     }
 
     pub fn start(&self) -> LineCol {
-        let (line, col, offset) = (self.line_range.0, self.col_range.0, self.offset_range.0);
+        let (line, col, offset) = (
+            self.line_range().0,
+            self.col_range().0,
+            self.offset_range().0,
+        );
         LineCol {
             file: self.file,
             line,
@@ -297,12 +379,14 @@ mod tests {
         col_range: (usize, usize),
         offset_range: (usize, usize),
     ) -> Span {
-        Span {
-            file: ustr::ustr(FILE),
-            line_range,
-            col_range,
-            offset_range,
-        }
+        Span::new(ustr::ustr(FILE), line_range, col_range, offset_range)
+    }
+
+    #[test]
+    #[should_panic(expected = "does not fit a span")]
+    fn a_span_past_u32_positions_is_refused_at_construction() {
+        let past = u32::MAX as usize + 1;
+        Span::new(ustr::ustr(FILE), (0, 0), (0, 0), (0, past));
     }
 
     #[test]
@@ -310,7 +394,7 @@ mod tests {
         let unknown = Span::unknown();
         assert_eq!(unknown.file.as_str(), "<unknown>");
         assert_eq!(
-            (unknown.line_range, unknown.col_range, unknown.offset_range),
+            (unknown.line_range(), unknown.col_range(), unknown.offset_range()),
             ((0, 0), (0, 0), (0, 0))
         );
     }
@@ -353,9 +437,9 @@ mod tests {
         let point = line_col(FILE, 7, 11, 96);
         let converted = Span::from_linecol(point.clone());
         assert_eq!(converted.file, point.file);
-        assert_eq!(converted.line_range, (7, 7));
-        assert_eq!(converted.col_range, (11, 11));
-        assert_eq!(converted.offset_range, (96, 96));
+        assert_eq!(converted.line_range(), (7, 7));
+        assert_eq!(converted.col_range(), (11, 11));
+        assert_eq!(converted.offset_range(), (96, 96));
         assert_eq!(converted.start(), point);
         assert!(converted.is_empty());
     }
@@ -365,9 +449,9 @@ mod tests {
         let first = span((1, 2), (4, 7), (13, 22));
         let last = span((3, 5), (0, 6), (30, 44));
         let merged = first.merge(&last);
-        assert_eq!(merged.line_range, (1, 5));
-        assert_eq!(merged.col_range, (4, 6));
-        assert_eq!(merged.offset_range, (13, 44));
+        assert_eq!(merged.line_range(), (1, 5));
+        assert_eq!(merged.col_range(), (4, 6));
+        assert_eq!(merged.offset_range(), (13, 44));
         assert_eq!(merged.file, first.file);
     }
 

@@ -575,12 +575,7 @@ mod tests {
             "mb.rock".to_string(),
             source.to_string(),
         ));
-        let span = Span {
-            file: ustr::ustr("mb.rock"),
-            line_range: (1, 1),
-            col_range: (13, 15),
-            offset_range: (25, 29),
-        };
+        let span = Span::new(ustr::ustr("mb.rock"), (1, 1), (13, 15), (25, 29));
         assert_eq!(&source[25..29], "\u{e9}\u{e9}");
         let error = CompilerError::new_with_label(span, "accented".to_string());
         assert_eq!(

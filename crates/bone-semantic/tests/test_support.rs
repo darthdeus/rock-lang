@@ -107,12 +107,7 @@ pub fn check_types(src: &str) -> Result<(), String> {
             stage(
                 "type_at",
                 CompilerError::new_with_label(
-                    Span {
-                        file: Ustr::from("<parse_rock>"),
-                        line_range: (0, 0),
-                        col_range: (0, 0),
-                        offset_range: (*start, *end),
-                    },
+                    Span::new(Ustr::from("<parse_rock>"), (0, 0), (0, 0), (*start, *end)),
                     format!("no type at marker (expected `{expected}`)"),
                 ),
             )
@@ -151,12 +146,7 @@ fn dump_at(
         }
     };
 
-    let mk_span = |s: usize, e: usize| Span {
-        file: module.file,
-        line_range: (0, 0),
-        col_range: (0, 0),
-        offset_range: (s, e),
-    };
+    let mk_span = |s: usize, e: usize| Span::new(module.file, (0, 0), (0, 0), (s, e));
 
     let mut labels: Vec<(usize, Span, String)> = Vec::new();
 

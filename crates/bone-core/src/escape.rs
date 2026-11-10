@@ -58,8 +58,8 @@ fn unique_target(ws: &Workspace, callee: &Callee) -> Option<(ModuleId, Idx<Funct
 
 fn contains(outer: Span, inner: Span) -> bool {
     outer.file == inner.file
-        && outer.offset_range.0 <= inner.offset_range.0
-        && inner.offset_range.1 <= outer.offset_range.1
+        && outer.offset_range().0 <= inner.offset_range().0
+        && inner.offset_range().1 <= outer.offset_range().1
 }
 
 fn param_is_nonescaping(

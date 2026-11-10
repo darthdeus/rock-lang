@@ -222,7 +222,7 @@ pub(crate) fn fold_single_use_reads(
     let same_line = |a: Idx<Inst>, b: u32| {
         let b = Idx::from_raw(b.into());
         match (func.inst_spans.get(a), func.inst_spans.get(b)) {
-            (Some(x), Some(y)) => x.file == y.file && x.line_range.0 == y.line_range.0,
+            (Some(x), Some(y)) => x.file == y.file && x.line_range().0 == y.line_range().0,
             _ => true,
         }
     };

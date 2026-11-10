@@ -272,8 +272,8 @@ fn allocation_site_id(
     write(&raw(id).to_le_bytes());
     if let Some(span) = span {
         write(span.file.as_str().as_bytes());
-        write(&span.offset_range.0.to_le_bytes());
-        write(&span.offset_range.1.to_le_bytes());
+        write(&span.offset_range().0.to_le_bytes());
+        write(&span.offset_range().1.to_le_bytes());
     }
     hash
 }

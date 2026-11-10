@@ -230,7 +230,7 @@ fn repository_revision(cwd: &Path) -> Option<String> {
 }
 
 fn declaration(ast: &Ast, item: &Item, source: &str, text: &str) -> Result<Option<Declaration>> {
-    let line = item.span.line_range.0 + 1;
+    let line = item.span.line_range().0 + 1;
     let (kind, name, signature) = match &item.kind {
         ItemKind::Function(function) if !function.is_synthetic => (
             "function",
@@ -361,7 +361,7 @@ fn params_signature(ast: &Ast, params: &[Param], text: &str) -> Result<String> {
                 ast.type_surface(param.ty)
             );
             if let Some(default) = param.default {
-                let (start, end) = ast.exprs[default].span.offset_range;
+                let (start, end) = ast.exprs[default].span.offset_range();
                 // Source spelling preserves literals and grouping without an expression printer.
                 let expression = text.get(start..end).with_context(|| {
                     format!(

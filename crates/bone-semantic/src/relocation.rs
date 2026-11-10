@@ -832,7 +832,7 @@ impl<'a> Program<'a> {
         let taken = ctx.body.expr_spans[ref_arg];
         for arg in ctx.call_args(call).unwrap_or_default() {
             let span = ctx.body.expr_spans[arg];
-            if span.offset_range.0 <= taken.offset_range.0 {
+            if span.offset_range().0 <= taken.offset_range().0 {
                 continue;
             }
             for (id, _) in ctx.body.expr_arena.iter() {
@@ -856,8 +856,8 @@ impl<'a> Program<'a> {
 
 fn contains(outer: Span, inner: Span) -> bool {
     outer.file == inner.file
-        && outer.offset_range.0 <= inner.offset_range.0
-        && inner.offset_range.1 <= outer.offset_range.1
+        && outer.offset_range().0 <= inner.offset_range().0
+        && inner.offset_range().1 <= outer.offset_range().1
 }
 
 fn callee_name(ctx: &BodyCtx, call: Idx<Expr>) -> String {

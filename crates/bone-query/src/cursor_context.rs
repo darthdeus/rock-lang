@@ -208,7 +208,7 @@ impl CursorAst {
             // only the statement-level call containing the cursor -- exactly
             // the between-args call-arg shape.
             let is_sentinel_orphan =
-                chain.len() == 1 && cx.expr(chain[0]).span.offset_range.0 >= probe;
+                chain.len() == 1 && cx.expr(chain[0]).span.offset_range().0 >= probe;
             if is_sentinel_orphan {
                 if orphan.is_none() {
                     orphan = Some(cx);
@@ -246,10 +246,10 @@ impl CursorAst {
             .exprs
             .iter()
             .filter(|(_, e)| {
-                let (s, t) = e.span.offset_range;
+                let (s, t) = e.span.offset_range();
                 s <= off && off < t
             })
-            .map(|(i, e)| (e.span.offset_range.1 - e.span.offset_range.0, i))
+            .map(|(i, e)| (e.span.offset_range().1 - e.span.offset_range().0, i))
             .collect();
         v.sort_by_key(|(len, _)| *len);
         v.into_iter().map(|(_, i)| i).collect()
@@ -277,12 +277,12 @@ impl CursorAst {
         if let Some(node) = self.expr_chain().first().copied() {
             match &self.expr(node).kind {
                 ExprKind::QualifiedIdent { base, member } => {
-                    if member.span.offset_range.0 <= self.probe {
+                    if member.span.offset_range().0 <= self.probe {
                         return Some(base.name.to_string());
                     }
                 }
                 ExprKind::TypeAscription(lhs, ty) => {
-                    let (s, e) = self.ast.types[*ty].span.offset_range;
+                    let (s, e) = self.ast.types[*ty].span.offset_range();
                     if s <= self.probe && self.probe < e {
                         if let ExprKind::Ident(base) = &self.expr(*lhs).kind {
                             return Some(base.name.to_string());
@@ -297,7 +297,7 @@ impl CursorAst {
                     variant_name,
                     ..
                 } => {
-                    let (s, e) = variant_name.span.offset_range;
+                    let (s, e) = variant_name.span.offset_range();
                     if s <= self.probe && self.probe < e {
                         return Some(enum_name.name.to_string());
                     }
@@ -377,7 +377,7 @@ impl CursorAst {
                 } => (base, vname),
                 _ => return,
             };
-            let (s, e) = vname.span.offset_range;
+            let (s, e) = vname.span.offset_range();
             if s <= off && off < e {
                 found = Some(base.name.to_string());
             }
@@ -398,7 +398,7 @@ impl CursorAst {
             else {
                 return;
             };
-            let ve = vname.span.offset_range.1;
+            let ve = vname.span.offset_range().1;
             let Some(brace) = self.text[ve..].find('{').map(|i| ve + i) else {
                 return;
             };
@@ -422,7 +422,7 @@ impl CursorAst {
             for f in &sd.fields {
                 let Some(d) = f.default else { continue };
                 let v = self.expr(d);
-                let (vs, ve) = v.span.offset_range;
+                let (vs, ve) = v.span.offset_range();
                 if vs <= self.probe && self.probe < ve {
                     return Some((
                         sd.name.name.to_string(),
@@ -439,7 +439,7 @@ impl CursorAst {
     fn lambda_body_contains(&self, v: &ExprData) -> bool {
         matches!(&v.kind, ExprKind::Lambda { body, .. }
         if {
-            let (bs, be) = self.ast.blocks[*body].span.offset_range;
+            let (bs, be) = self.ast.blocks[*body].span.offset_range();
             bs <= self.probe && self.probe < be
         })
     }
@@ -452,7 +452,7 @@ impl CursorAst {
         for &node in self.expr_chain().iter() {
             let (head, fields) = match &self.expr(node).kind {
                 ExprKind::StructLiteral { name, fields, .. } => (
-                    RecordHead::Struct(name.name.to_string(), name.span.offset_range.1),
+                    RecordHead::Struct(name.name.to_string(), name.span.offset_range().1),
                     fields,
                 ),
                 ExprKind::EnumVariantRecord {
@@ -463,7 +463,7 @@ impl CursorAst {
                     RecordHead::EnumVariant(
                         enum_name.name.to_string(),
                         variant_name.name.to_string(),
-                        variant_name.span.offset_range.1,
+                        variant_name.span.offset_range().1,
                     ),
                     fields,
                 ),
@@ -479,9 +479,9 @@ impl CursorAst {
             let mut value_field: Option<(String, bool)> = None;
             for (path, val) in fields {
                 let v = self.expr(*val);
-                let (vs, ve) = v.span.offset_range;
+                let (vs, ve) = v.span.offset_range();
                 if vs <= self.probe && self.probe < ve {
-                    let pun = path.len() == 1 && path[0].span.offset_range == v.span.offset_range;
+                    let pun = path.len() == 1 && path[0].span.offset_range() == v.span.offset_range();
                     if !pun {
                         let fname = path.last()?.name.to_string();
                         value_field = Some((fname, self.lambda_body_contains(v)));
@@ -550,9 +550,9 @@ impl CursorAst {
             let ExprKind::Assign { target, value, .. } = &e.kind else {
                 continue;
             };
-            let (vs, ve) = self.expr(*value).span.offset_range;
+            let (vs, ve) = self.expr(*value).span.offset_range();
             if vs <= self.probe && self.probe <= ve {
-                return self.expr(*target).span.offset_range.1.checked_sub(1);
+                return self.expr(*target).span.offset_range().1.checked_sub(1);
             }
         }
         None
@@ -568,7 +568,7 @@ impl CursorAst {
             let ExprKind::Assign { target, value, .. } = &e.kind else {
                 continue;
             };
-            let (vs, ve) = self.expr(*value).span.offset_range;
+            let (vs, ve) = self.expr(*value).span.offset_range();
             if vs <= self.probe && self.probe <= ve {
                 return match &self.expr(*target).kind {
                     ExprKind::Ident(id) => Some(id.name.to_string()),
@@ -595,9 +595,9 @@ impl CursorAst {
             ) {
                 continue;
             }
-            let (vs, ve) = self.expr(*right).span.offset_range;
+            let (vs, ve) = self.expr(*right).span.offset_range();
             if vs <= self.probe && self.probe <= ve {
-                return self.expr(*left).span.offset_range.1.checked_sub(1);
+                return self.expr(*left).span.offset_range().1.checked_sub(1);
             }
         }
         None
@@ -618,12 +618,12 @@ impl CursorAst {
             let Some(v) = l.value else {
                 continue;
             };
-            let (vs, ve) = self.expr(v).span.offset_range;
+            let (vs, ve) = self.expr(v).span.offset_range();
             if vs <= self.probe && self.probe <= ve {
                 let Binding::Ident(id) = &l.binding else {
                     return None;
                 };
-                return id.span.offset_range.1.checked_sub(1);
+                return id.span.offset_range().1.checked_sub(1);
             }
         }
         None
@@ -637,10 +637,10 @@ impl CursorAst {
         let in_span = |(vs, ve): (usize, usize)| vs <= self.probe && self.probe <= ve;
         let hit = self.ast.stmts.iter().any(|(_, s)| {
             matches!(&s.kind, StatementKind::Return { value: Some(v), .. }
-                if in_span(self.expr(*v).span.offset_range))
+                if in_span(self.expr(*v).span.offset_range()))
         }) || self.ast.exprs.iter().any(|(_, e)| {
             matches!(&e.kind, ExprKind::ReturnExpr(Some(v))
-                if in_span(self.expr(*v).span.offset_range))
+                if in_span(self.expr(*v).span.offset_range()))
         });
         hit && !self.ast.exprs.iter().any(|(_, e)| {
             matches!(&e.kind, ExprKind::Lambda { .. }) && self.lambda_body_contains(e)
@@ -663,7 +663,7 @@ impl CursorAst {
                 return None;
             };
             let b = f.body.rock_block()?;
-            let (s, e) = self.ast.blocks[b].span.offset_range;
+            let (s, e) = self.ast.blocks[b].span.offset_range();
             (s <= self.probe && self.probe < e).then_some(b)
         });
         body.is_some_and(|b| self.block_tail_has_cursor(b))
@@ -683,7 +683,7 @@ impl CursorAst {
     }
 
     fn expr_tail_has_cursor(&self, e: skull_parser::Idx<ExprData>) -> bool {
-        let (s, t) = self.expr(e).span.offset_range;
+        let (s, t) = self.expr(e).span.offset_range();
         if !(s <= self.probe && self.probe < t) {
             return false;
         }
@@ -724,7 +724,7 @@ impl CursorAst {
                 Some((member.name.to_string(), pos as u32, None))
             }
             ExprKind::FieldAccess(recv, method) | ExprKind::SafeNavigation(recv, method) => {
-                let recv_end = self.expr(*recv).span.offset_range.1;
+                let recv_end = self.expr(*recv).span.offset_range().1;
                 Some((method.name.to_string(), pos as u32 + 1, Some(recv_end)))
             }
             _ => None,
@@ -768,7 +768,7 @@ impl CursorAst {
                 // no arg node contains the cursor -- the slot is the count of
                 // args ending at or before the probe. Guard: the probe must
                 // sit past the arg list's `(`, not in the callee region.
-                let func_end = self.expr(*func).span.offset_range.1;
+                let func_end = self.expr(*func).span.offset_range().1;
                 let Some(paren) = self.text[func_end..].find('(').map(|i| func_end + i) else {
                     continue;
                 };
@@ -777,7 +777,7 @@ impl CursorAst {
                 }
                 let pos = args
                     .iter()
-                    .filter(|a| self.expr(a.value).span.offset_range.1 <= self.probe)
+                    .filter(|a| self.expr(a.value).span.offset_range().1 <= self.probe)
                     .count();
                 return Some((node, None, pos));
             } else {
@@ -821,12 +821,12 @@ impl CursorAst {
             // Between-args (no cursor node): only args ENDING before the probe
             // are supplied for this slot; a trailing arg after it isn't. With a
             // cursor node every OTHER arg is already present, so count them all.
-            if cursor_arg.is_none() && self.expr(a.value).span.offset_range.1 > self.probe {
+            if cursor_arg.is_none() && self.expr(a.value).span.offset_range().1 > self.probe {
                 continue;
             }
             if a.is_spread {
                 // Probe just inside the operand's end to resolve its struct type.
-                let (s, e) = self.expr(a.value).span.offset_range;
+                let (s, e) = self.expr(a.value).span.offset_range();
                 spread_probes.push(e.saturating_sub(1).max(s));
                 continue;
             }
@@ -852,7 +852,7 @@ impl CursorAst {
             .ast
             .types
             .iter()
-            .map(|(_, t)| t.span.offset_range)
+            .map(|(_, t)| t.span.offset_range())
             .filter(|(s, e)| *s <= self.probe && self.probe < *e)
             .min_by_key(|(s, e)| e - s);
         let Some((ts, te)) = ty else { return false };
@@ -873,7 +873,7 @@ impl CursorAst {
             Some(&e) => {
                 // Types nest inside exprs (ascription, casts): the smaller
                 // span is the slot the cursor is actually in.
-                let (es, ee) = self.expr(e).span.offset_range;
+                let (es, ee) = self.expr(e).span.offset_range();
                 (te - ts) <= (ee - es)
             }
         }
@@ -888,7 +888,7 @@ impl CursorAst {
                 continue;
             };
             for p in &fd.params {
-                let (ts, te) = self.ast.types[p.ty].span.offset_range;
+                let (ts, te) = self.ast.types[p.ty].span.offset_range();
                 if ts <= self.probe && self.probe < te {
                     return Some((p.name.name.to_string(), fd.name.name.to_string()));
                 }
@@ -910,7 +910,7 @@ impl CursorAst {
                 return false;
             }
             args.first().is_some_and(|&a| {
-                let (s, e) = self.ast.types[a].span.offset_range;
+                let (s, e) = self.ast.types[a].span.offset_range();
                 s <= self.probe && self.probe < e
             })
         })
@@ -954,7 +954,7 @@ impl CursorAst {
         else {
             return None;
         };
-        if self.probe < member.span.offset_range.0 {
+        if self.probe < member.span.offset_range().0 {
             return None; // cursor in the receiver, not the member slot
         }
         let mut segs: Vec<String> = Vec::new();
@@ -992,10 +992,10 @@ impl CursorAst {
         else {
             return None;
         };
-        if self.probe < member.span.offset_range.0 {
+        if self.probe < member.span.offset_range().0 {
             return None; // cursor in the receiver, not the member slot
         }
-        Some(self.expr(*recv).span.offset_range.1)
+        Some(self.expr(*recv).span.offset_range().1)
     }
 
     /// The UFCS receiver of the call whose arg slot the cursor sits in, as a
@@ -1028,9 +1028,9 @@ impl CursorAst {
                     ExprKind::FieldAccess(_, m) | ExprKind::SafeNavigation(_, m) => {
                         ReceiverAnchor::ChainCall(m.name.to_string())
                     }
-                    _ => ReceiverAnchor::End(r.span.offset_range.1),
+                    _ => ReceiverAnchor::End(r.span.offset_range().1),
                 },
-                _ => ReceiverAnchor::End(r.span.offset_range.1),
+                _ => ReceiverAnchor::End(r.span.offset_range().1),
             });
         }
         None

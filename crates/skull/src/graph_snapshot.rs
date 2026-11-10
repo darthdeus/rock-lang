@@ -123,12 +123,12 @@ fn span_key(s: &Span) -> String {
     format!(
         "{}:{}:{}-{}:{}@{}..{}",
         s.file,
-        s.line_range.0,
-        s.col_range.0,
-        s.line_range.1,
-        s.col_range.1,
-        s.offset_range.0,
-        s.offset_range.1,
+        s.line_range().0,
+        s.col_range().0,
+        s.line_range().1,
+        s.col_range().1,
+        s.offset_range().0,
+        s.offset_range().1,
     )
 }
 

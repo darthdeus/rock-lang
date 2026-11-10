@@ -2527,8 +2527,8 @@ impl<'a> Parser<'a> {
         if self.pos == 0 {
             return;
         }
-        let stmt_line = self.tokens[self.pos - 1].span.line_range.0;
-        while matches!(self.kind(), TokenKind::Comment(_)) && self.span().line_range.0 == stmt_line
+        let stmt_line = self.tokens[self.pos - 1].span.line_range().0;
+        while matches!(self.kind(), TokenKind::Comment(_)) && self.span().line_range().0 == stmt_line
         {
             self.advance();
         }
@@ -3587,7 +3587,7 @@ impl<'a> Parser<'a> {
             self.advance();
             let id = self.gen_hole_id();
             let name = if let TokenKind::Ident(n) = self.kind() {
-                if self.prev_span().offset_range.1 == self.span().offset_range.0 {
+                if self.prev_span().offset_range().1 == self.span().offset_range().0 {
                     self.advance();
                     Some(n)
                 } else {
@@ -3891,7 +3891,7 @@ impl<'a> Parser<'a> {
     /// literal text. A lone literal collapses to `ExprKind::String`.
     fn parse_interpolated(&mut self, span: Span) -> PResult<Idx<ExprData>> {
         let file = span.file;
-        let lit_start = span.offset_range.0;
+        let lit_start = span.offset_range().0;
         let Some(fi) = self
             .frames
             .iter()
@@ -3919,8 +3919,8 @@ impl<'a> Parser<'a> {
             // offsets to (line, column) without rescanning from the top.
             let mut pos = Pos {
                 at: local,
-                line: frame.origin().map_or(span.line_range.0, |o| o.0),
-                column: frame.origin().map_or(span.col_range.0, |o| o.1),
+                line: frame.origin().map_or(span.line_range().0, |o| o.0),
+                column: frame.origin().map_or(span.col_range().0, |o| o.1),
             };
             let mut pending = Vec::new();
             let mut holes = Vec::new();
@@ -4035,12 +4035,12 @@ impl<'a> Parser<'a> {
         if map.windows(2).any(|w| w[1] > w[0] + 1) {
             let base = map[0];
             for t in &mut tokens {
-                let (s, e) = t.span.offset_range;
+                let (s, e) = t.span.offset_range();
                 let remap = |o: usize| map.get(o.saturating_sub(base)).copied().unwrap_or(o);
                 let (rs, re) = (remap(s), remap(e));
-                t.span.col_range.0 += rs - s;
-                t.span.col_range.1 += re - e;
-                t.span.offset_range = (rs, re);
+                t.span.set_col_range((t.span.col_range().0 + (rs - s), t.span.col_range().1));
+                t.span.set_col_range((t.span.col_range().0, t.span.col_range().1 + (re - e)));
+                t.span.set_offset_range((rs, re));
             }
         }
         let saved_tokens = std::mem::replace(&mut self.tokens, tokens);

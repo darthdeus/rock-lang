@@ -480,12 +480,12 @@ impl SuspensionPolicy for RowSuspensionPolicy<'_> {
 /// overstates the population it exists to measure.
 fn dedup(mut found: Vec<RowEscape>) -> Vec<RowEscape> {
     let mut seen: FxHashSet<(EscapeKind, (usize, usize))> = FxHashSet::default();
-    found.retain(|f| seen.insert((f.kind, f.span.offset_range)));
+    found.retain(|f| seen.insert((f.kind, f.span.offset_range())));
     found
 }
 
 fn contains(outer: Span, inner: Span) -> bool {
-    outer.offset_range.0 <= inner.offset_range.0 && inner.offset_range.1 <= outer.offset_range.1
+    outer.offset_range().0 <= inner.offset_range().0 && inner.offset_range().1 <= outer.offset_range().1
 }
 
 fn callee_fn<'a>(ws: &'a Workspace, bi: &BodyInference, call: Idx<Expr>) -> Option<&'a Function> {

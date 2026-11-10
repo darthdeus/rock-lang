@@ -28,7 +28,7 @@ fn check(src: &str) -> bone_semantic::inference::Workspace {
 
 /// The source slice a byte-offset span covers -- the token text to assert on.
 fn text<'a>(src: &'a str, span: &Span) -> &'a str {
-    let (s, e) = span.offset_range;
+    let (s, e) = span.offset_range();
     &src[s..e]
 }
 

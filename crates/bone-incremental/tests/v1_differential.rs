@@ -138,7 +138,7 @@ fn snapshot(ws: &Workspace, files: &[SessionFile]) -> Snapshot {
                 let (s, e) = module
                     .ty_spans
                     .get(idx)
-                    .map(|sp| sp.offset_range)
+                    .map(|sp| sp.offset_range())
                     .unwrap_or((0, 0));
                 references.insert((file.clone(), s, e, "type", key.to_string(), None));
             }
@@ -148,7 +148,7 @@ fn snapshot(ws: &Workspace, files: &[SessionFile]) -> Snapshot {
                 let Some((kind, key, members)) = expr_reference(module, expr) else {
                     continue;
                 };
-                let (s, e) = body.expr_spans[idx].offset_range;
+                let (s, e) = body.expr_spans[idx].offset_range();
                 references.insert((file.clone(), s, e, kind, key.to_string(), members));
             }
             for (idx, te) in body.lowered_tys.iter() {
@@ -160,7 +160,7 @@ fn snapshot(ws: &Workspace, files: &[SessionFile]) -> Snapshot {
                     let (s, e) = body
                         .lowered_ty_spans
                         .get(idx)
-                        .map(|sp| sp.offset_range)
+                        .map(|sp| sp.offset_range())
                         .unwrap_or((0, 0));
                     references.insert((file.clone(), s, e, "type", key.to_string(), None));
                 }
@@ -176,9 +176,9 @@ fn snapshot(ws: &Workspace, files: &[SessionFile]) -> Snapshot {
                 for (call, (tmid, fid)) in bi.resolved_overload_calls.iter() {
                     let target = ws.module(*tmid);
                     let f = &target.functions[*fid];
-                    let (s, e) = body.expr_spans[*call].offset_range;
+                    let (s, e) = body.expr_spans[*call].offset_range();
                     let selected =
-                        format!("{}::{}@{}", target.file, f.name, f.name_span.offset_range.0);
+                        format!("{}::{}@{}", target.file, f.name, f.name_span.offset_range().0);
                     references.insert((file.clone(), s, e, "selects", selected, None));
                 }
             }

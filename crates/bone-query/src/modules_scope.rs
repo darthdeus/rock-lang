@@ -471,7 +471,7 @@ pub fn use_insertion(
         .items
         .iter()
         .filter_map(|item| match item {
-            ScopeItem::Use(decl) => Some(decl.span.offset_range),
+            ScopeItem::Use(decl) => Some(decl.span.offset_range()),
             _ => None,
         })
         .collect();
@@ -482,7 +482,7 @@ pub fn use_insertion(
         later,
         uses.last()
             .map(|u| u.1)
-            .or_else(|| contribution.header.as_ref().map(|h| h.span.offset_range.1)),
+            .or_else(|| contribution.header.as_ref().map(|h| h.span.offset_range().1)),
     ) {
         (Some(&(start, _)), _) => line_start(start),
         (None, Some(end)) => {

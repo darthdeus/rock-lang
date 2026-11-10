@@ -4,7 +4,7 @@ type ReportBuilder<'a> = ariadne::ReportBuilder<'a, (String, std::ops::Range<usi
 
 /// Build a report whose labels address the source by byte offset.
 ///
-/// `Span.offset_range` holds byte offsets (`Tokenizer::advance` adds
+/// `Span.offset_range()` holds byte offsets (`Tokenizer::advance` adds
 /// `c.len_utf8()` per character), while ariadne's default index type counts
 /// characters and would place a label past a multibyte character in the wrong
 /// column; the index type is therefore fixed to bytes. Colour is settled here
@@ -51,7 +51,7 @@ pub trait ReportBuilderExt {
 
 impl ReportBuilderExt for ReportBuilder<'_> {
     fn add_span_label(&mut self, span: &Span, label: String) {
-        let range = span.offset_range.0..span.offset_range.1;
+        let range = span.offset_range().0..span.offset_range().1;
         self.add_label(ariadne::Label::new((span.file.to_string(), range)).with_message(label));
     }
 }
@@ -70,12 +70,7 @@ mod tests {
     }
 
     fn span(offset_range: (usize, usize)) -> Span {
-        Span {
-            file: ustr::ustr("u.rock"),
-            line_range: (0, 0),
-            col_range: offset_range,
-            offset_range,
-        }
+        Span::new(ustr::ustr("u.rock"), (0, 0), offset_range, offset_range)
     }
 
     #[test]

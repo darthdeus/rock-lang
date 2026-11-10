@@ -39,7 +39,7 @@ fn suspension_crossings(body: &Body, policy: &impl SuspensionPolicy) -> Vec<Idx<
     };
     walk.expr(root, &mut flow);
     let mut found: Vec<_> = walk.reported.into_keys().collect();
-    found.sort_by_key(|at| body.expr_spans[*at].offset_range);
+    found.sort_by_key(|at| body.expr_spans[*at].offset_range());
     found
 }
 

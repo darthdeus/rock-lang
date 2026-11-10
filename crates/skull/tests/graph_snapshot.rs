@@ -241,7 +241,7 @@ fn real_span(g: &InstanceGraph) -> Span {
 }
 
 fn shifted(mut s: Span) -> Span {
-    s.line_range.1 += 1;
+    s.set_line_range((s.line_range().0, s.line_range().1 + 1));
     s
 }
 
@@ -1152,15 +1152,15 @@ fn span_field_probes() -> Vec<(&'static str, Box<dyn Fn(&mut Span)>)> {
         ),
         (
             "edges.span_lines",
-            Box::new(|s: &mut Span| s.line_range.0 += 1),
+            Box::new(|s: &mut Span| s.set_line_range((s.line_range().0 + 1, s.line_range().1))),
         ),
         (
             "edges.span_cols",
-            Box::new(|s: &mut Span| s.col_range.1 += 1),
+            Box::new(|s: &mut Span| s.set_col_range((s.col_range().0, s.col_range().1 + 1))),
         ),
         (
             "edges.span_offsets",
-            Box::new(|s: &mut Span| s.offset_range.1 += 1),
+            Box::new(|s: &mut Span| s.set_offset_range((s.offset_range().0, s.offset_range().1 + 1))),
         ),
     ]
 }

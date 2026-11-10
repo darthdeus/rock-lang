@@ -2870,7 +2870,7 @@ pub(crate) fn pass_lower_functions(a: &Ast, ctx: &mut LowerCtx) -> Result<(), Co
                     a,
                     f,
                     &item.annotations,
-                    item.span.offset_range.0,
+                    item.span.offset_range().0,
                     key,
                 )?;
                 let mid = ctx.module.module_id();

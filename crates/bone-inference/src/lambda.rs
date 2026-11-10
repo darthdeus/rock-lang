@@ -3,8 +3,8 @@ use super::*;
 fn reject_ref_captures(c: BodyCtx, gamma: &Gamma, lambda_span: Span) -> Result<(), CompilerError> {
     let contains = |outer: Span, inner: Span| {
         outer.file == inner.file
-            && outer.offset_range.0 <= inner.offset_range.0
-            && inner.offset_range.1 <= outer.offset_range.1
+            && outer.offset_range().0 <= inner.offset_range().0
+            && inner.offset_range().1 <= outer.offset_range().1
     };
 
     for (expr, node) in c.body.expr_arena.iter() {

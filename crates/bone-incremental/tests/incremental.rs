@@ -366,7 +366,7 @@ fn macro_def_span_shifts_on_fast_body_edit() {
     assert_eq!(before.len(), 1, "one macro recorded");
     assert_eq!(before[0].name.as_str(), "m");
     assert_eq!(
-        before[0].span.line_range.0, 4,
+        before[0].span.line_range().0, 4,
         "macro starts on line 5 (0-based 4)"
     );
 
@@ -382,7 +382,7 @@ fn macro_def_span_shifts_on_fast_body_edit() {
     let after = &h.session.files["m.rock"].macros;
     assert_eq!(after.len(), 1);
     assert_eq!(
-        after[0].span.line_range.0, 5,
+        after[0].span.line_range().0, 5,
         "macro def-line must follow the +1 line shift (was 4, now 5)"
     );
 }
@@ -1625,7 +1625,7 @@ fn use_conf(c: Conf) -> int {
     h.assert_clean();
 }
 
-/// `type_at` at `offset` in `path` as `(rendered type, span.offset_range)`.
+/// `type_at` at `offset` in `path` as `(rendered type, span.offset_range())`.
 /// Reads the stored `expr_spans` for the node under the cursor -- exactly the
 /// thing rung 2's per-body span-patching has to keep correct.
 fn type_and_span_at(h: &Harness, path: &str, offset: usize) -> Option<(String, (usize, usize))> {
@@ -1633,7 +1633,7 @@ fn type_and_span_at(h: &Harness, path: &str, offset: usize) -> Option<(String, (
     let mid = mid_for(ws, path);
     let inf = ws.inference(mid)?;
     let ta = bone_semantic::query::type_at(ws, mid, inf, offset)?;
-    Some((ws.render(ta.body, ta.ty), ta.span.offset_range))
+    Some((ws.render(ta.body, ta.ty), ta.span.offset_range()))
 }
 
 /// DETERMINISTIC span-correctness gate for rung 2 (per-body lowering;
@@ -1747,17 +1747,17 @@ fn shift_module_after_edit_moves_only_later_item_spans() {
         let mut v: Vec<_> = m.bodies[&BodyOwner::Function(f)]
             .expr_spans
             .values()
-            .map(|s| s.offset_range)
+            .map(|s| s.offset_range())
             .collect();
         v.sort();
         v
     };
 
-    let a_hdr0 = module.functions[a].span.offset_range;
+    let a_hdr0 = module.functions[a].span.offset_range();
     let a_body0 = body_offsets(&module, a);
-    let b_hdr0 = module.functions[b].span.offset_range;
+    let b_hdr0 = module.functions[b].span.offset_range();
     let b_body0 = body_offsets(&module, b);
-    let c_hdr0 = module.functions[c].span.offset_range;
+    let c_hdr0 = module.functions[c].span.offset_range();
     let c_body0 = body_offsets(&module, c);
 
     // Shift everything at/after `b`'s start by +100 bytes / +5 lines; `b` is the
@@ -1778,7 +1778,7 @@ fn shift_module_after_edit_moves_only_later_item_spans() {
 
     // (1) `a` is entirely before `at`: untouched, header and body.
     assert_eq!(
-        module.functions[a].span.offset_range, a_hdr0,
+        module.functions[a].span.offset_range(), a_hdr0,
         "earlier fn `a` header must not move"
     );
     assert_eq!(
@@ -1795,14 +1795,14 @@ fn shift_module_after_edit_moves_only_later_item_spans() {
         "edited fn `b` body spans must be left for re-lowering"
     );
     assert_eq!(
-        module.functions[b].span.offset_range,
+        module.functions[b].span.offset_range(),
         (b_hdr0.0 + d, b_hdr0.1 + d),
         "edited fn `b` header (start == at) still shifts"
     );
 
     // (3) `c` is a kept body after the edit: header AND body shift by the delta.
     assert_eq!(
-        module.functions[c].span.offset_range,
+        module.functions[c].span.offset_range(),
         (c_hdr0.0 + d, c_hdr0.1 + d),
         "later fn `c` header must shift by the delta"
     );

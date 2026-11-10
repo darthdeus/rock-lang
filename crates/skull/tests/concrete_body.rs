@@ -1889,7 +1889,7 @@ fn main() {
                         failure.slot.kind(),
                         failure.reason.bucket(),
                         failure.span.file,
-                        failure.span.line_range.0 + 1
+                        failure.span.line_range().0 + 1
                     )
                 })
         })
@@ -2209,9 +2209,9 @@ fn vanishing() -> int {
     let new_main_span = ws2.module(module).functions[main_fid].span;
     let span_edit = instance_graph::TextEditDelta {
         file: Ustr::from("<test>"),
-        at: old_main_span.offset_range.1,
-        byte_delta: new_main_span.offset_range.1 as isize - old_main_span.offset_range.1 as isize,
-        line_delta: new_main_span.line_range.1 as isize - old_main_span.line_range.1 as isize,
+        at: old_main_span.offset_range().1,
+        byte_delta: new_main_span.offset_range().1 as isize - old_main_span.offset_range().1 as isize,
+        line_delta: new_main_span.line_range().1 as isize - old_main_span.line_range().1 as isize,
     };
     let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &[main], &[span_edit]);
     assert!(

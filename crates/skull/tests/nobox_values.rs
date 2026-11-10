@@ -711,7 +711,7 @@ fn any_sink_rejects_at_the_argument() {
         "{err:?}"
     );
     let span = err.labels.first().expect("sink error has a label").span;
-    let range = span.offset_range;
+    let range = span.offset_range();
     assert_eq!(&NOBOX_ANY_SINK[range.0..range.1], "v");
 }
 

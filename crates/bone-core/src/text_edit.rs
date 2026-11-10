@@ -22,7 +22,7 @@ pub struct TextEditDelta {
 impl TextEditDelta {
     /// Whether a span in this edit's file starts at or after the edit point.
     pub fn moves(&self, span: &Span) -> bool {
-        span.file == self.file && span.offset_range.0 >= self.at
+        span.file == self.file && span.offset_range().0 >= self.at
     }
 
     /// A stored byte offset, moved iff it sits at or after the edit point.
@@ -46,14 +46,14 @@ impl TextEditDelta {
         if !self.moves(span) {
             return false;
         }
-        span.offset_range = (
-            add(span.offset_range.0, self.byte_delta),
-            add(span.offset_range.1, self.byte_delta),
-        );
-        span.line_range = (
-            add(span.line_range.0, self.line_delta),
-            add(span.line_range.1, self.line_delta),
-        );
+        span.set_offset_range((
+            add(span.offset_range().0, self.byte_delta),
+            add(span.offset_range().1, self.byte_delta),
+        ));
+        span.set_line_range((
+            add(span.line_range().0, self.line_delta),
+            add(span.line_range().1, self.line_delta),
+        ));
         true
     }
 
@@ -78,12 +78,7 @@ mod tests {
     use super::*;
 
     fn span(file: &str, line: usize, col: (usize, usize), off: (usize, usize)) -> Span {
-        Span {
-            file: Ustr::from(file),
-            line_range: (line, line),
-            col_range: col,
-            offset_range: off,
-        }
+        Span::new(Ustr::from(file), (line, line), col, off)
     }
 
     #[test]
@@ -96,9 +91,9 @@ mod tests {
         };
         let mut s = span("a.rock", 5, (8, 19), (60, 71));
         assert!(edit.shift_span(&mut s));
-        assert_eq!(s.offset_range, (66, 77));
-        assert_eq!(s.line_range, (5, 5));
-        assert_eq!(s.col_range, (8, 19));
+        assert_eq!(s.offset_range(), (66, 77));
+        assert_eq!(s.line_range(), (5, 5));
+        assert_eq!(s.col_range(), (8, 19));
     }
 
     #[test]
@@ -113,8 +108,8 @@ mod tests {
         let mut other = span("b.rock", 9, (0, 3), (90, 93));
         assert!(!edit.shift_span(&mut before));
         assert!(!edit.shift_span(&mut other));
-        assert_eq!(before.offset_range, (2, 5));
-        assert_eq!(other.offset_range, (90, 93));
+        assert_eq!(before.offset_range(), (2, 5));
+        assert_eq!(other.offset_range(), (90, 93));
     }
 
     #[test]
@@ -127,7 +122,7 @@ mod tests {
         };
         let mut s = span("a.rock", 1, (0, 1), (5, 6));
         edit.shift_span(&mut s);
-        assert_eq!(s.offset_range, (0, 0));
-        assert_eq!(s.line_range, (0, 0));
+        assert_eq!(s.offset_range(), (0, 0));
+        assert_eq!(s.line_range(), (0, 0));
     }
 }

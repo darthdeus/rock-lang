@@ -1582,7 +1582,7 @@ fn a_semantic_edit_shifts_unedited_owner_spans_without_rewalking_that_owner() {
                 .is_some_and(|i| case.identity(i).starts_with("other"))
         })
         .and_then(|(_, contribution)| contribution.call_sites.values().next())
-        .map(|site| site.span.offset_range)
+        .map(|site| site.span.offset_range())
         .expect("the unedited owner must have a call span");
 
     let stats = case.edit(
@@ -1603,7 +1603,7 @@ fn a_semantic_edit_shifts_unedited_owner_spans_without_rewalking_that_owner() {
                 .is_some_and(|i| case.identity(i).starts_with("other"))
         })
         .and_then(|(_, contribution)| contribution.call_sites.values().next())
-        .map(|site| site.span.offset_range)
+        .map(|site| site.span.offset_range())
         .expect("the unedited owner must retain its call span");
     assert!(
         span_after.0 > span_before.0,

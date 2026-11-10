@@ -13,7 +13,7 @@ use skull_parser::{Ast, MacroRegistry, Span};
 pub(crate) fn macro_param_references(ast: &Ast, offset: usize) -> Vec<Span> {
     for group in &ast.macro_param_refs {
         if group.spans.iter().any(|s| {
-            let (start, end) = s.offset_range;
+            let (start, end) = s.offset_range();
             start <= offset && offset < end
         }) {
             return group.spans.clone();
@@ -42,7 +42,7 @@ pub(crate) fn macro_invocation_def(
         let ExprKind::Ident(id) = &ast.exprs[*func].kind else {
             continue;
         };
-        let (start, end) = id.span.offset_range;
+        let (start, end) = id.span.offset_range();
         if start <= offset && offset < end {
             return registry.def_name_span(id.name, args.len());
         }
@@ -58,7 +58,7 @@ pub(crate) fn on_macro_name(ast: &Ast, registry: &MacroRegistry, offset: usize) 
         let ItemKind::Function(f) = &item.kind else {
             return false;
         };
-        let (start, end) = f.name.span.offset_range;
+        let (start, end) = f.name.span.offset_range();
         f.is_macro && start <= offset && offset < end
     });
     on_def || macro_invocation_def(ast, registry, offset).is_some()

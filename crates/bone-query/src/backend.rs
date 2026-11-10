@@ -1221,8 +1221,8 @@ impl BoneWorkspace {
                 }),
                 range: Some(range_from_offsets(
                     src,
-                    hi.span.offset_range.0,
-                    hi.span.offset_range.1,
+                    hi.span.offset_range().0,
+                    hi.span.offset_range().1,
                 )),
             });
         }
@@ -1250,8 +1250,8 @@ impl BoneWorkspace {
             }),
             range: Some(range_from_offsets(
                 src,
-                span.offset_range.0,
-                span.offset_range.1,
+                span.offset_range().0,
+                span.offset_range().1,
             )),
         })
     }
@@ -1450,7 +1450,7 @@ impl BoneWorkspace {
         let inf = ws.inference(mid)?;
         let (span, arms) = crate::query::match_arms_fill(ws, mid, inf, offset)?;
 
-        let (start, end) = span.offset_range;
+        let (start, end) = span.offset_range();
         // Closing brace of the match body = last `}` within its span.
         let close = src.get(..end)?.rfind('}')?;
         // Indent of the line the `match` sits on; arms get one level deeper.
@@ -1499,7 +1499,7 @@ impl BoneWorkspace {
         let inf = ws.inference(mid)?;
         let (span, missing) = crate::query::struct_fields_fill(ws, mid, inf, offset)?;
 
-        let (start, end) = span.offset_range;
+        let (start, end) = span.offset_range();
         let open = src.get(start..end)?.find('{')? + start;
         let close = src.get(..end)?.rfind('}')?;
         let multiline = src.get(open + 1..close)?.contains('\n');
@@ -1567,7 +1567,7 @@ impl BoneWorkspace {
         let mid = user_module_for_path(ws, path)?;
         let sites = crate::query::inline_local(ws, mid, offset)?;
 
-        let (istart, iend) = sites.init_span.offset_range;
+        let (istart, iend) = sites.init_span.offset_range();
         let init_text = src.get(istart..iend)?;
         // The HIR flag catches structural non-primaries (if/match/lambda/cast/
         // range). A constant-folded literal (`1 + 2` -> `Int(3)`) reports atomic
@@ -1578,7 +1578,7 @@ impl BoneWorkspace {
 
         let mut edits = Vec::with_capacity(sites.uses.len() + 1);
         for u in &sites.uses {
-            let (s, e) = u.offset_range;
+            let (s, e) = u.offset_range();
             let new_text = if parenthesize && !is_delimited_slot(src, s, e) {
                 parenthesized.clone()
             } else {
@@ -1593,7 +1593,7 @@ impl BoneWorkspace {
             });
         }
         // Delete the whole `let` line: leading indent through the trailing newline.
-        let (ls, le) = sites.let_span.offset_range;
+        let (ls, le) = sites.let_span.offset_range();
         let line_start = src.get(..ls)?.rfind('\n').map(|i| i + 1).unwrap_or(0);
         let line_end = src
             .get(le..)?
@@ -1688,7 +1688,7 @@ impl BoneWorkspace {
             return self.all_reference_spans(
                 proj,
                 param.file.as_str(),
-                param.offset_range.0,
+                param.offset_range().0,
                 fn_scope,
                 request,
             );
@@ -1735,7 +1735,7 @@ impl BoneWorkspace {
         let text_at = |span: &Span| {
             proj.texts
                 .get(span.file.as_str())
-                .and_then(|t| t.get(span.offset_range.0..span.offset_range.1))
+                .and_then(|t| t.get(span.offset_range().0..span.offset_range().1))
         };
         let (key, alias) = match crate::query::path_segment_at(ws, mid, offset) {
             Some(PathSegmentRef {
@@ -1772,7 +1772,7 @@ impl BoneWorkspace {
             .all_reference_spans(
                 proj,
                 decl.file.as_str(),
-                decl.offset_range.0,
+                decl.offset_range().0,
                 crate::query::FnRefScope::AllOverloads,
                 "rename",
             )
@@ -1789,8 +1789,8 @@ impl BoneWorkspace {
         sites.retain(|span| {
             text_at(span) == Some(spelling) && (alias.is_none() || span.file.as_str() == path)
         });
-        sites.sort_by_key(|span| (span.file.as_str().to_string(), span.offset_range));
-        sites.dedup_by_key(|span| (span.file, span.offset_range));
+        sites.sort_by_key(|span| (span.file.as_str().to_string(), span.offset_range()));
+        sites.dedup_by_key(|span| (span.file, span.offset_range()));
         Some(
             sites
                 .into_iter()
@@ -1866,9 +1866,9 @@ impl BoneWorkspace {
             .into_iter()
             .map(|s| s.span)
             .find(|s| {
-                s.file.as_str() == path && s.offset_range.0 <= offset && offset < s.offset_range.1
+                s.file.as_str() == path && s.offset_range().0 <= offset && offset < s.offset_range().1
             });
-        Ok(here.map(|here| range_from_offsets(src, here.offset_range.0, here.offset_range.1)))
+        Ok(here.map(|here| range_from_offsets(src, here.offset_range().0, here.offset_range().1)))
     }
 
     /// The edits renaming the symbol at `pos` to `new_name`: `Ok(None)` when
@@ -1950,12 +1950,12 @@ impl BoneWorkspace {
         let text_of = |f: &str| proj.texts.get(f).map(|s| s.as_str());
         let spelled = |span: &Span| {
             text_of(span.file.as_str())
-                .and_then(|t| t.get(span.offset_range.0..span.offset_range.1))
+                .and_then(|t| t.get(span.offset_range().0..span.offset_range().1))
         };
         let here = sites.iter().find(|s| {
             s.span.file.as_str() == path
-                && s.span.offset_range.0 <= offset
-                && offset < s.span.offset_range.1
+                && s.span.offset_range().0 <= offset
+                && offset < s.span.offset_range().1
         });
         let Some(old) = here.or(sites.first()).and_then(|s| spelled(&s.span)) else {
             return Ok(sites);
@@ -1998,7 +1998,7 @@ impl BoneWorkspace {
         crate::query::document_symbols(ws, mid)
             .into_iter()
             .map(|s| {
-                let range = line_index.range(src, s.span.offset_range.0, s.span.offset_range.1);
+                let range = line_index.range(src, s.span.offset_range().0, s.span.offset_range().1);
                 #[allow(deprecated)]
                 DocumentSymbol {
                     name: s.name,
@@ -2056,7 +2056,7 @@ impl BoneWorkspace {
                     .functions
                     .iter()
                     .filter(|(_, f)| f.annotations.iter().any(|a| a.is_builtin("test")))
-                    .map(|(_, f)| f.span.offset_range)
+                    .map(|(_, f)| f.span.offset_range())
                     .collect();
                 for s in crate::query::document_symbols(ws, mid) {
                     let name = if qualified {
@@ -2070,9 +2070,9 @@ impl BoneWorkspace {
                         continue;
                     }
                     let li = line_index.get_or_insert_with(|| LineIndex::new(src));
-                    let range = li.range(src, s.span.offset_range.0, s.span.offset_range.1);
+                    let range = li.range(src, s.span.offset_range().0, s.span.offset_range().1);
                     let target = if matches!(s.kind, SymCat::Function)
-                        && test_spans.contains(&s.span.offset_range)
+                        && test_spans.contains(&s.span.offset_range())
                     {
                         &mut tests
                     } else {
@@ -2157,7 +2157,7 @@ impl BoneWorkspace {
             let global_tys: std::collections::HashMap<usize, String> = m
                 .globals
                 .iter()
-                .map(|(_, g)| (g.span.offset_range.0, ws.render(None, g.ty)))
+                .map(|(_, g)| (g.span.offset_range().0, ws.render(None, g.ty)))
                 .collect();
             for s in crate::query::document_symbols(ws, mid) {
                 let Some(kind) = ctags_kind(s.kind) else {
@@ -2166,7 +2166,7 @@ impl BoneWorkspace {
                 let mut fields = Vec::new();
                 match s.kind {
                     SymCat::Function => {
-                        if let Some((sig, ret)) = sigs.get(&s.span.offset_range.0) {
+                        if let Some((sig, ret)) = sigs.get(&s.span.offset_range().0) {
                             fields.push(("signature".to_string(), sig.clone()));
                             if let Some(ret) = ret {
                                 fields.push(("returns".to_string(), ret.clone()));
@@ -2174,7 +2174,7 @@ impl BoneWorkspace {
                         }
                     }
                     SymCat::Global => {
-                        if let Some(ty) = global_tys.get(&s.span.offset_range.0) {
+                        if let Some(ty) = global_tys.get(&s.span.offset_range().0) {
                             fields.push(("type".to_string(), ty.clone()));
                         }
                     }
@@ -2184,7 +2184,7 @@ impl BoneWorkspace {
                     name: s.name,
                     file: file.clone(),
                     // line_range is 0-based; ctags lines are 1-based.
-                    line: s.span.line_range.0 + 1,
+                    line: s.span.line_range().0 + 1,
                     kind,
                     fields,
                 });
@@ -2198,7 +2198,7 @@ impl BoneWorkspace {
                     entries.push(crate::ctags::CtagsEntry {
                         name: f.name.to_string(),
                         file: file.clone(),
-                        line: f.span.line_range.0 + 1,
+                        line: f.span.line_range().0 + 1,
                         kind: 'm',
                         fields: vec![("struct".to_string(), st.name.to_string())],
                     });
@@ -2209,7 +2209,7 @@ impl BoneWorkspace {
                     entries.push(crate::ctags::CtagsEntry {
                         name: v.name.to_string(),
                         file: file.clone(),
-                        line: v.name_span.line_range.0 + 1,
+                        line: v.name_span.line_range().0 + 1,
                         kind: 'g',
                         fields: vec![("enum".to_string(), en.name.to_string())],
                     });
@@ -2227,7 +2227,7 @@ impl BoneWorkspace {
                 entries.push(crate::ctags::CtagsEntry {
                     name: dec.name.to_string(),
                     file: file.clone(),
-                    line: dec.span.line_range.0 + 1,
+                    line: dec.span.line_range().0 + 1,
                     kind: 'd',
                     fields: vec![("signature".to_string(), format!("({})", params.join(", ")))],
                 });
@@ -2256,7 +2256,7 @@ impl BoneWorkspace {
                     entries.push(crate::ctags::CtagsEntry {
                         name: md.name.to_string(),
                         file: file.clone(),
-                        line: md.span.line_range.0 + 1,
+                        line: md.span.line_range().0 + 1,
                         kind: 'M',
                         fields,
                     });
@@ -2282,7 +2282,7 @@ impl BoneWorkspace {
         let inf = ws.inference(mid);
         let (sigs, call_span) =
             crate::query::signature_help(ws, mid, inf, offset, Some(&proj.texts))?;
-        let call_start = call_span.offset_range.0;
+        let call_start = call_span.offset_range().0;
         let paren_start = active_call_paren_start(src, call_start, offset);
         // Active argument = top-level commas between the call's OWN `(` (not
         // necessarily the first `(` after `call_start` -- a UFCS receiver
@@ -2389,13 +2389,13 @@ impl BoneWorkspace {
                 // trailing padding; a type hint renders after with leading padding.
                 let (offset, kind, pad_left, pad_right) = if h.leading {
                     (
-                        h.span.offset_range.0,
+                        h.span.offset_range().0,
                         InlayHintKind::PARAMETER,
                         None,
                         Some(true),
                     )
                 } else {
-                    (h.span.offset_range.1, InlayHintKind::TYPE, Some(true), None)
+                    (h.span.offset_range().1, InlayHintKind::TYPE, Some(true), None)
                 };
                 InlayHint {
                     position: line_index.position(src, offset),
@@ -2462,7 +2462,7 @@ impl BoneWorkspace {
         let (uri, text) = self.span_uri_and_text(proj, span)?;
         Some(Location {
             uri,
-            range: range_from_offsets(&text, span.offset_range.0, span.offset_range.1),
+            range: range_from_offsets(&text, span.offset_range().0, span.offset_range().1),
         })
     }
 
@@ -2482,7 +2482,7 @@ impl BoneWorkspace {
             .or_insert_with(|| LineIndex::new(&text));
         Some(Location {
             uri,
-            range: li.range(&text, span.offset_range.0, span.offset_range.1),
+            range: li.range(&text, span.offset_range().0, span.offset_range().1),
         })
     }
 
@@ -2560,9 +2560,9 @@ impl BoneWorkspace {
             // operator's operand is an expression the HIR does claim, and is
             // conventionally spaced anyway.
             let is_annotation = matches!(prev_kind, Some(rock_tokenizer::TokenKind::At))
-                && prev_end == tok.span.offset_range.0;
+                && prev_end == tok.span.offset_range().0;
             prev_kind = Some(&tok.kind);
-            prev_end = tok.span.offset_range.1;
+            prev_end = tok.span.offset_range().1;
 
             // Next non-comment token — lets `classify_token` recognize the
             // contextual `co` keyword (`co` before `fn`).
@@ -2576,7 +2576,7 @@ impl BoneWorkspace {
                 next_kind,
                 &hir.by_offset,
                 &names,
-                tok.span.offset_range.0,
+                tok.span.offset_range().0,
                 is_member,
                 is_annotation,
             ) else {
@@ -2615,16 +2615,16 @@ impl BoneWorkspace {
                     for h in hir
                         .interp_holes
                         .iter()
-                        .filter(|h| h.offset_range.0 >= ts && h.offset_range.1 <= te)
+                        .filter(|h| h.offset_range().0 >= ts && h.offset_range().1 <= te)
                     {
-                        let hs = utf16_col_at(src, h.offset_range.0);
-                        let he = utf16_col_at(src, h.offset_range.1);
+                        let hs = utf16_col_at(src, h.offset_range().0);
+                        let he = utf16_col_at(src, h.offset_range().1);
                         if hs > cur {
                             pieces.push((cur, hs - cur, TT_STRING, 0));
                         }
                         let (tt, mods) = hir
                             .by_offset
-                            .get(&h.offset_range.0)
+                            .get(&h.offset_range().0)
                             .copied()
                             .unwrap_or((TT_VARIABLE, 0));
                         pieces.push((hs, he - hs, tt, mods));
@@ -2678,8 +2678,8 @@ struct SingleLine {
 /// The non-empty pieces of `tok`, one per source line it covers. Columns and
 /// lengths count UTF-16 code units, as the protocol requires.
 fn token_line_segments(src: &str, tok: &rock_tokenizer::Token) -> Vec<SingleLine> {
-    let (first_line, last_line) = tok.span.line_range;
-    let (lo, hi) = tok.span.offset_range;
+    let (first_line, last_line) = tok.span.line_range();
+    let (lo, hi) = tok.span.offset_range();
     if first_line == last_line {
         return vec![SingleLine {
             line: first_line as u32,
@@ -2913,20 +2913,20 @@ fn semantic_classifications(
     // Struct field declaration names -> property.
     for s in module.structs.values() {
         for f in &s.fields {
-            map.insert(f.span.offset_range.0, (TT_PROPERTY, 0));
+            map.insert(f.span.offset_range().0, (TT_PROPERTY, 0));
         }
     }
     // Enum variant declaration names -> enum member.
     for en in module.enums.values() {
         for v in &en.variants {
-            map.insert(v.name_span.offset_range.0, (TT_ENUM_MEMBER, 0));
+            map.insert(v.name_span.offset_range().0, (TT_ENUM_MEMBER, 0));
         }
     }
     // Function annotation names (`@test`, `@late_draw`) -> decorator. The
     // hir keeps each annotation's name Ident with its span.
     for f in module.functions.values() {
         for anno in &f.annotations {
-            map.insert(anno.name.span.offset_range.0, (TT_DECORATOR, 0));
+            map.insert(anno.name.span.offset_range().0, (TT_DECORATOR, 0));
         }
     }
     // Generic param declarations (`fn id<T>`, `struct Box<T>`): the decl's
@@ -2942,7 +2942,7 @@ fn semantic_classifications(
         if let bone_semantic::prelude::TyId::Static(gmid, idx) = g {
             if *gmid == mid {
                 if let Some(sp) = module.ty_spans.get(*idx) {
-                    map.insert(sp.offset_range.0, (TT_TYPE_PARAMETER, 0));
+                    map.insert(sp.offset_range().0, (TT_TYPE_PARAMETER, 0));
                 }
             }
         }
@@ -2966,14 +2966,14 @@ fn semantic_classifications(
             } else {
                 0
             };
-        map.insert(g.name_span.offset_range.0, (TT_VARIABLE, mods));
+        map.insert(g.name_span.offset_range().0, (TT_VARIABLE, mods));
     }
     for (owner, body) in module.bodies.iter() {
         // Range request (viewport): walk only function bodies whose footprint
         // overlaps [lo,hi) -- the expensive per-body walk is what scales with
         // file size. Globals/decorators are few, so include them unconditionally.
         if let (Some((lo, hi)), BodyOwner::Function(fid)) = (range, owner) {
-            let (s, e) = module.functions[*fid].span.offset_range;
+            let (s, e) = module.functions[*fid].span.offset_range();
             if e <= lo || s >= hi {
                 continue;
             }
@@ -2987,7 +2987,7 @@ fn semantic_classifications(
                     Some(&ty) if ty_is_nullable(ws, bi, ty) => MOD_NULLABLE,
                     _ => 0,
                 };
-                map.insert(sp.offset_range.0, (binding_tt(info.kind), mods));
+                map.insert(sp.offset_range().0, (binding_tt(info.kind), mods));
             }
         }
         for (e, expr) in body.expr_arena.iter() {
@@ -3011,7 +3011,7 @@ fn semantic_classifications(
                         } else {
                             0
                         };
-                        map.insert(sp.offset_range.0, (tt, mods));
+                        map.insert(sp.offset_range().0, (tt, mods));
                     }
                 }
                 // Variant names in expression position (`Color::Red`, bare
@@ -3019,7 +3019,7 @@ fn semantic_classifications(
                 // workspace name map.
                 Expr::EnumVariant { variant_span, .. } => {
                     map.insert(
-                        body.name_spans[*variant_span].offset_range.0,
+                        body.name_spans[*variant_span].offset_range().0,
                         (TT_ENUM_MEMBER, 0),
                     );
                 }
@@ -3041,14 +3041,14 @@ fn semantic_classifications(
                             } else {
                                 0
                             };
-                        map.insert(sp.offset_range.0, (TT_VARIABLE, mods));
+                        map.insert(sp.offset_range().0, (TT_VARIABLE, mods));
                     }
                 }
                 // Struct-literal field names -> property.
                 Expr::StructLiteral { fields, .. } => {
                     for fi in *fields {
                         let f = &body.struct_lit_field_arena[fi];
-                        map.insert(f.name_span.offset_range.0, (TT_PROPERTY, 0));
+                        map.insert(f.name_span.offset_range().0, (TT_PROPERTY, 0));
                     }
                 }
                 // Interpolation holes: each `{expr}`'s expr span (real in-file
@@ -3087,20 +3087,20 @@ fn semantic_classifications(
         for (_, pat) in body.pattern_arena.iter() {
             match pat {
                 bone_semantic::hir::Pattern::EnumVariant { variant_span, .. } => {
-                    map.insert(variant_span.offset_range.0, (TT_ENUM_MEMBER, 0));
+                    map.insert(variant_span.offset_range().0, (TT_ENUM_MEMBER, 0));
                 }
                 bone_semantic::hir::Pattern::Record {
                     enum_name: Some(_),
                     name_span: Some(sp),
                     ..
                 } => {
-                    map.insert(sp.offset_range.0, (TT_ENUM_MEMBER, 0));
+                    map.insert(sp.offset_range().0, (TT_ENUM_MEMBER, 0));
                 }
                 _ => {}
             }
         }
     }
-    holes.sort_by_key(|h| h.offset_range.0);
+    holes.sort_by_key(|h| h.offset_range().0);
     SemanticClassifications {
         by_offset: map,
         interp_holes: holes,
@@ -3473,12 +3473,7 @@ impl<'a> ExpectedArg<'a> {
         let owner = module.body_at(offset)?;
         let body = module.bodies.get(&owner)?;
         let seed = inf.per_fn.get(&owner)?;
-        let span = Span {
-            file: module.file,
-            line_range: (0, 0),
-            col_range: (0, 0),
-            offset_range: (0, 0),
-        };
+        let span = Span::new(module.file, (0, 0), (0, 0), (0, 0));
         Some((Gamma::for_query(ws, body, mid, seed), span))
     }
 
@@ -4149,8 +4144,8 @@ pub(crate) fn compiler_error_to_diagnostic(
 fn span_range(s: &Span, text_of: crate::query::TextOf<'_, '_>) -> Range {
     let text = text_of(s.file.as_str());
     Range::new(
-        compiler_position(text, s.line_range.0, s.col_range.0),
-        compiler_position(text, s.line_range.1, s.col_range.1),
+        compiler_position(text, s.line_range().0, s.col_range().0),
+        compiler_position(text, s.line_range().1, s.col_range().1),
     )
 }
 
@@ -4448,7 +4443,7 @@ fn hole_diagnostics_for(proj: &BoneProject, path: &str) -> Option<Vec<Diagnostic
                 ),
             };
             Diagnostic {
-                range: line_index.range(src, span.offset_range.0, span.offset_range.1),
+                range: line_index.range(src, span.offset_range().0, span.offset_range().1),
                 severity: Some(severity),
                 code: matches!(kind, crate::query::HoleKind::Expr)
                     .then(|| lsp_types::NumberOrString::String("unfilled_expression_hole".into())),
@@ -4548,7 +4543,7 @@ mod tests {
         let mut bone = span_test_workspace(&main);
         let mut span = Span::unknown();
         span.file = Ustr::from(target.as_str());
-        span.offset_range = (0, 6);
+        span.set_offset_range((0, 6));
         capture.take();
 
         // Both a disappearing target and unreadable source must keep the cause.
@@ -4649,7 +4644,7 @@ mod tests {
         // traverse a symlink, including the temporary directory on macOS).
         let file_id = bone.canon(&path);
         span.file = Ustr::from(file_id.as_str());
-        span.offset_range = (4, 8);
+        span.set_offset_range((4, 8));
         capture.take();
         for deleted in [false, true] {
             if deleted {
@@ -4865,9 +4860,9 @@ mod tests {
     #[test]
     fn diagnostic_spans_the_full_label() {
         let mut span = Span::unknown();
-        span.line_range = (10, 10);
-        span.col_range = (7, 15); // `ris_shot`, 8 chars, end-exclusive
-        span.offset_range = (100, 108);
+        span.set_line_range((10, 10));
+        span.set_col_range((7, 15)); // `ris_shot`, 8 chars, end-exclusive
+        span.set_offset_range((100, 108));
         let e = CompilerError::new_with_label(span, "Undefined global `ris_shot`".to_string());
         let d = compiler_error_to_diagnostic(&e, &|_| None);
         assert_eq!((d.range.start.line, d.range.start.character), (10, 7));
@@ -4881,14 +4876,14 @@ mod tests {
     fn multi_label_error_expands_to_one_diagnostic_per_label() {
         let mut cause = Span::unknown();
         cause.file = Ustr::from("a.rock");
-        cause.line_range = (118, 118);
-        cause.col_range = (18, 50);
-        cause.offset_range = (200, 232);
+        cause.set_line_range((118, 118));
+        cause.set_col_range((18, 50));
+        cause.set_offset_range((200, 232));
         let mut use_site = Span::unknown();
         use_site.file = Ustr::from("a.rock");
-        use_site.line_range = (123, 123);
-        use_site.col_range = (35, 50);
-        use_site.offset_range = (400, 415);
+        use_site.set_line_range((123, 123));
+        use_site.set_col_range((35, 50));
+        use_site.set_offset_range((400, 415));
 
         let e = CompilerError::new_with_label(cause, "use `./`".to_string()).with_label(
             use_site,
@@ -4912,9 +4907,9 @@ mod tests {
     fn single_label_error_stays_one_diagnostic() {
         let mut span = Span::unknown();
         span.file = Ustr::from("a.rock");
-        span.line_range = (10, 10);
-        span.col_range = (7, 15);
-        span.offset_range = (100, 108);
+        span.set_line_range((10, 10));
+        span.set_col_range((7, 15));
+        span.set_offset_range((100, 108));
         let e = CompilerError::new_with_label(span, "Undefined global `ris_shot`".to_string());
         let diags = compiler_error_to_diagnostics(&e, &|_| None);
         assert_eq!(diags.len(), 1);

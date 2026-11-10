@@ -647,7 +647,7 @@ fn measure_body_into(
             let span = mf
                 .inst_spans
                 .get(row.inst)
-                .map(|s| format!("{}:{}", s.file.as_str(), s.line_range.0 + 1))
+                .map(|s| format!("{}:{}", s.file.as_str(), s.line_range().0 + 1))
                 .unwrap_or_else(|| "<no span>".into());
             let owner = row
                 .site

@@ -61,18 +61,18 @@ impl Trivia {
         // sharing that line is classified as trailing.
         let mut code_on_line: Option<usize> = None;
         for tok in &tokens {
-            let line = tok.span.line_range.0;
+            let line = tok.span.line_range().0;
             if !matches!(
                 tok.kind,
                 TokenKind::Comment(_) | TokenKind::Comma | TokenKind::Newline
             ) {
                 let close = (tok.kind == TokenKind::CloseParen)
-                    .then_some((tok.span.offset_range.1, tok.span.line_range.1));
-                code.insert(tok.span.offset_range.0, close);
+                    .then_some((tok.span.offset_range().1, tok.span.line_range().1));
+                code.insert(tok.span.offset_range().0, close);
             }
             match &tok.kind {
                 TokenKind::Comment(text) => {
-                    let (lo, hi) = tok.span.offset_range;
+                    let (lo, hi) = tok.span.offset_range();
                     // A `/* */` block comment shares the `Comment` kind but must
                     // NOT enter the `//` trailing/standalone maps -- those render
                     // as `// text`, silently rewriting `/* text */` and dropping
@@ -97,7 +97,7 @@ impl Trivia {
                     } else if code_on_line == Some(line) {
                         line_comments.insert(lo);
                         trailing
-                            .insert(line, (text.as_str().to_string(), tok.span.col_range.0, lo));
+                            .insert(line, (text.as_str().to_string(), tok.span.col_range().0, lo));
                     } else if lines
                         .get(line)
                         .is_some_and(|l| l.trim_start().starts_with("//"))

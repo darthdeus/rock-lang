@@ -63,7 +63,7 @@ fn function_key(ws: &Workspace, fref: FuncRef) -> String {
         "{}@{}:{}",
         f.name,
         module.file,
-        f.name_span.line_range.0 + 1
+        f.name_span.line_range().0 + 1
     )
 }
 
@@ -154,8 +154,8 @@ pub(crate) fn record(ws: &Workspace, body: &BodyCost) -> Value {
         json!(module.package.map(|p| p.to_string())),
     );
     fields.insert("name".into(), json!(name.as_str()));
-    fields.insert("line".into(), json!(span.line_range.0 + 1));
-    fields.insert("end_line".into(), json!(span.line_range.1 + 1));
+    fields.insert("line".into(), json!(span.line_range().0 + 1));
+    fields.insert("end_line".into(), json!(span.line_range().1 + 1));
     if body.wire.iter().any(|w| w.flattened.is_some()) {
         fields.insert("wire".into(), wire(ws, &body.wire));
     }
@@ -174,7 +174,7 @@ fn wire(ws: &Workspace, wire: &[skull_mir::lower::WirePosition]) -> Value {
             let module = ws.module(id.module);
             (module, module.enums[id.def].name_span)
         };
-        Some(format!("{}:{}", module.file, span.line_range.0 + 1))
+        Some(format!("{}:{}", module.file, span.line_range().0 + 1))
     };
     wire.iter()
         .map(|w| {

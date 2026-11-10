@@ -62,6 +62,19 @@ fn single_char_token(ch: char) -> Option<TokenKind> {
     })
 }
 
+/// Spans hold positions as `u32`, so a source whose last byte offset does
+/// not fit is refused before any span is made from it. Lines and columns
+/// never exceed the byte offset, so this one check covers them too.
+pub fn source_fits_spans(file: Ustr, start_offset: usize, len: usize) -> Result<(), CompilerError> {
+    match start_offset.checked_add(len) {
+        Some(end) if end <= u32::MAX as usize => Ok(()),
+        _ => Err(CompilerError::new_no_location(format!(
+            "{file} is too large: {len} bytes; Rock sources are limited to {} bytes",
+            u32::MAX
+        ))),
+    }
+}
+
 impl<'a> Tokenizer<'a> {
     pub fn new(input: &'a str, source_file: Ustr) -> Self {
         let current = decode_at(input.as_bytes(), 0).map(|(c, _)| c);
@@ -141,7 +154,7 @@ impl<'a> Tokenizer<'a> {
             self.column += 1;
         }
 
-        // Byte offset into the source buffer — matches `Span.offset_range`
+        // Byte offset into the source buffer — matches `Span.offset_range()`
         // and what `&str` slicing wants. Increment by the UTF-8 byte
         // length of the consumed character.
         let bytes = self.input.as_bytes();
@@ -1082,12 +1095,7 @@ impl<'a> Tokenizer<'a> {
             offset_range
         );
 
-        Span {
-            file: start.file,
-            line_range: (start.line, self.line),
-            col_range: (start.col, end_col),
-            offset_range,
-        }
+        Span::new(start.file, (start.line, self.line), (start.col, end_col), offset_range)
     }
 
     pub fn empty_span(&self) -> Span {
@@ -1095,6 +1103,7 @@ impl<'a> Tokenizer<'a> {
     }
 
     pub fn tokenize(&mut self) -> Result<Vec<Token>, CompilerError> {
+        source_fits_spans(self.source_file, self.byte_offset, self.input.len())?;
         let mut out: Vec<Token> = Vec::with_capacity(self.input.len() / 5 + 8);
         loop {
             let nxt = self.next_token()?;
@@ -1123,6 +1132,15 @@ impl<'a> Tokenizer<'a> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn a_source_past_the_span_width_is_a_compile_error() {
+        let file = ustr::ustr("big.rock");
+        assert!(source_fits_spans(file, 0, u32::MAX as usize).is_ok());
+        let err = source_fits_spans(file, 0, u32::MAX as usize + 1).unwrap_err();
+        assert!(err.message.contains("big.rock is too large"), "{}", err.message);
+        assert!(source_fits_spans(file, 1, u32::MAX as usize).is_err());
+    }
 
     #[test]
     fn test_number_tokenization() {
@@ -1318,11 +1336,11 @@ mod test {
             .unwrap();
 
         assert_eq!(tokens[0].kind, TokenKind::Ident("café".into()));
-        assert_eq!(tokens[0].span.offset_range, (0, 5));
-        assert_eq!(tokens[0].span.col_range, (0, 4));
+        assert_eq!(tokens[0].span.offset_range(), (0, 5));
+        assert_eq!(tokens[0].span.col_range(), (0, 4));
         assert_eq!(tokens[1].kind, TokenKind::Ident("x".into()));
-        assert_eq!(tokens[1].span.offset_range, (6, 7));
-        assert_eq!(tokens[1].span.col_range, (5, 6));
+        assert_eq!(tokens[1].span.offset_range(), (6, 7));
+        assert_eq!(tokens[1].span.col_range(), (5, 6));
     }
 
     #[test]
@@ -1336,7 +1354,7 @@ mod test {
             .unwrap();
         assert_eq!(tokens[0].kind, TokenKind::String("a\nb".into()));
         assert_eq!(tokens[1].kind, TokenKind::Ident("c".into()));
-        assert_eq!(tokens[1].span.line_range.0, 2);
+        assert_eq!(tokens[1].span.line_range().0, 2);
     }
 
     #[test]

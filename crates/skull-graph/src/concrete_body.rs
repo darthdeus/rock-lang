@@ -908,7 +908,7 @@ impl ConcreteBodies {
                     g.identity(ws, i),
                     u.kind,
                     u.span.file,
-                    u.span.line_range.0 + 1
+                    u.span.line_range().0 + 1
                 )
             })
             .collect();
@@ -928,7 +928,7 @@ impl ConcreteBodies {
                     h.site.op.name(),
                     h.reason,
                     h.span.file,
-                    h.span.line_range.0 + 1
+                    h.span.line_range().0 + 1
                 )
             })
             .collect();
@@ -949,7 +949,7 @@ impl ConcreteBodies {
                     f.slot.kind(),
                     f.reason.bucket(),
                     f.span.file,
-                    f.span.line_range.0 + 1
+                    f.span.line_range().0 + 1
                 )
             })
             .collect();

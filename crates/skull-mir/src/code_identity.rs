@@ -47,7 +47,7 @@ impl LambdaSiteId {
     pub fn from_span(span: Span) -> Option<Self> {
         (span.file != "<unknown>").then_some(Self {
             file: span.file,
-            offset: span.offset_range.0 as u64,
+            offset: span.offset_range().0 as u64,
         })
     }
 }

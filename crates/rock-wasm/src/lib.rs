@@ -226,8 +226,8 @@ fn diagnostic(e: &CompilerError, lint: Option<&str>) -> Value {
             json!({
                 "message": l.message,
                 "file": l.span.file.as_str(),
-                "start": {"line": l.span.line_range.0, "column": l.span.col_range.0},
-                "end": {"line": l.span.line_range.1, "column": l.span.col_range.1},
+                "start": {"line": l.span.line_range().0, "column": l.span.col_range().0},
+                "end": {"line": l.span.line_range().1, "column": l.span.col_range().1},
             })
         })
         .collect();

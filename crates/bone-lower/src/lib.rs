@@ -626,8 +626,8 @@ impl<'a> LowerCtx<'a> {
         body.binding_spans.insert(idx, span);
         self.node_interval(
             body,
-            span.offset_range.0,
-            span.offset_range.1,
+            span.offset_range().0,
+            span.offset_range().1,
             hir::NodeRef::Binding(idx),
         );
 
@@ -643,8 +643,8 @@ impl<'a> LowerCtx<'a> {
         if !is_block {
             self.node_interval(
                 body,
-                span.offset_range.0,
-                span.offset_range.1,
+                span.offset_range().0,
+                span.offset_range().1,
                 hir::NodeRef::Expr(idx),
             );
         }
@@ -661,15 +661,15 @@ impl<'a> LowerCtx<'a> {
         if let Some((open, close)) = b.braces {
             self.node_interval(
                 body,
-                open.offset_range.0,
-                open.offset_range.1,
+                open.offset_range().0,
+                open.offset_range().1,
                 hir::NodeRef::Expr(idx),
             );
 
             self.node_interval(
                 body,
-                close.offset_range.0,
-                close.offset_range.1,
+                close.offset_range().0,
+                close.offset_range().1,
                 hir::NodeRef::Expr(idx),
             );
         }
@@ -1232,8 +1232,8 @@ pub(crate) fn lower_type_expr_in(
 
             ctx.node_interval(
                 body,
-                te.span.offset_range.0,
-                te.span.offset_range.1,
+                te.span.offset_range().0,
+                te.span.offset_range().1,
                 hir::NodeRef::StaticTy { mid, idx: tidx },
             );
         }
@@ -1242,8 +1242,8 @@ pub(crate) fn lower_type_expr_in(
             body.lowered_ty_spans.insert(tidx, te.span);
             ctx.node_interval(
                 body,
-                te.span.offset_range.0,
-                te.span.offset_range.1,
+                te.span.offset_range().0,
+                te.span.offset_range().1,
                 hir::NodeRef::LocalTy(tidx),
             );
         }
@@ -1324,8 +1324,8 @@ pub(crate) fn lower_statement_value(
                 if let Some(kw_span) = keyword_span {
                     ctx.node_interval(
                         body,
-                        kw_span.offset_range.0,
-                        kw_span.offset_range.1,
+                        kw_span.offset_range().0,
+                        kw_span.offset_range().1,
                         // TODO: statement id?
                         hir::NodeRef::Expr(e_id),
                     );
@@ -1630,7 +1630,7 @@ pub(crate) fn lower_expr_value(
                         true => ctx.module.logical_file,
                         false => ctx.workspace.logical_file(e.span.file),
                     };
-                Expr::String(ustr(&format!("{}:{}", file, e.span.line_range.0 + 1)))
+                Expr::String(ustr(&format!("{}:{}", file, e.span.line_range().0 + 1)))
             } else if name.name.as_str() == "_" && ctx.placeholder_param.is_some() {
                 if ctx.placeholder_forbidden {
                     comp_error!(
@@ -2650,9 +2650,9 @@ fn value_owner(
 fn function_footprint_lo(annotations: &[Annotation], f: &FunctionDef) -> usize {
     annotations
         .iter()
-        .map(|a| a.span.offset_range.0)
+        .map(|a| a.span.offset_range().0)
         .min()
-        .unwrap_or(f.span.offset_range.0)
+        .unwrap_or(f.span.offset_range().0)
 }
 
 /// Lower a fn's generic bounds: `I: Iterator<T>` becomes `Some(elem)` at I's
@@ -3122,7 +3122,7 @@ pub fn lower_function_def(
 
         ctx.module.make_lapper(
             item_lo.min(function_footprint_lo(annotations, f)),
-            f.span.offset_range.1,
+            f.span.offset_range().1,
             owner,
         );
     }
@@ -3332,8 +3332,8 @@ pub fn lower_struct_def(
     ctx.module.insert_body(BodyOwner::StructDefaults(idx), body);
 
     ctx.module.make_lapper(
-        s.span.offset_range.0,
-        s.span.offset_range.1,
+        s.span.offset_range().0,
+        s.span.offset_range().1,
         BodyOwner::StructDefaults(idx),
     );
 
@@ -3566,8 +3566,8 @@ pub fn lower_enum_def(
     ctx.module.insert_body(BodyOwner::Enum(idx), body);
 
     ctx.module.make_lapper(
-        e.span.offset_range.0,
-        e.span.offset_range.1,
+        e.span.offset_range().0,
+        e.span.offset_range().1,
         BodyOwner::Enum(idx),
     );
 
@@ -3594,8 +3594,8 @@ pub fn lower_newtype_def(
     ctx.module.insert_body(BodyOwner::Newtype(idx), body);
 
     ctx.module.make_lapper(
-        n.span.offset_range.0,
-        n.span.offset_range.1,
+        n.span.offset_range().0,
+        n.span.offset_range().1,
         BodyOwner::Newtype(idx),
     );
 
@@ -3783,8 +3783,8 @@ pub fn lower_global(
     ctx.module.insert_body(BodyOwner::Global(idx), body);
 
     ctx.module.make_lapper(
-        g.span.offset_range.0,
-        g.span.offset_range.1,
+        g.span.offset_range().0,
+        g.span.offset_range().1,
         BodyOwner::Global(idx),
     );
 
@@ -4353,8 +4353,8 @@ pub fn lower_decorator_def(
     ctx.module.insert_body(BodyOwner::Decorator(idx), body);
 
     ctx.module.make_lapper(
-        d.span.offset_range.0,
-        d.span.offset_range.1,
+        d.span.offset_range().0,
+        d.span.offset_range().1,
         BodyOwner::Decorator(idx),
     );
 

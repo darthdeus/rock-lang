@@ -45,12 +45,7 @@ pub fn type_at<'a>(
 
     let (_, _, interval) = best?;
 
-    let interval_span = Span {
-        file: module.file,
-        line_range: (0, 0),
-        col_range: (0, 0),
-        offset_range: (interval.start, interval.stop),
-    };
+    let interval_span = Span::new(module.file, (0, 0), (0, 0), (interval.start, interval.stop));
 
     match interval.val {
         hir::NodeRef::StaticTy { mid, idx } => Some(TypeAt {

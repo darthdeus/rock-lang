@@ -177,8 +177,8 @@ fn parse_defs(
                 name,
                 kind,
                 receiver_method,
-                span: item.span.offset_range,
-                line: item.span.line_range.0 + 1,
+                span: item.span.offset_range(),
+                line: item.span.line_range().0 + 1,
                 exempt_symbol,
             });
         }
@@ -195,7 +195,7 @@ fn parse_defs(
                             skull_parser::ExprKind::TypeAscription(..)
                         ) =>
                     {
-                        Some(ast.exprs[*inner].span.offset_range)
+                        Some(ast.exprs[*inner].span.offset_range())
                     }
                     _ => None,
                 })
@@ -650,7 +650,7 @@ fn plan(package: &Path, consumer_dirs: &[PathBuf]) -> Outcome {
                         u.example = Some(format!(
                             "{}:{}",
                             short_path(&span.file),
-                            span.line_range.0 + 1
+                            span.line_range().0 + 1
                         ));
                     }
                 }
@@ -905,7 +905,7 @@ fn p_def_spans(
         Target::Fn(mid, fid) => {
             if in_p(*mid) {
                 let f = &ws.module(*mid).functions[*fid];
-                out.push((ws.module(*mid).file, f.span.offset_range.0));
+                out.push((ws.module(*mid).file, f.span.offset_range().0));
             }
         }
         Target::Key { key, modules } => {
@@ -915,27 +915,27 @@ fn p_def_spans(
                 }
                 let module = ws.module(m);
                 if let Some(s) = ws.struct_by_name.get(key).filter(|s| s.module == m) {
-                    out.push((module.file, module.structs[s.def].span.offset_range.0));
+                    out.push((module.file, module.structs[s.def].span.offset_range().0));
                 }
                 if let Some(e) = ws.enums_by_name.get(key).filter(|e| e.module == m) {
-                    out.push((module.file, module.enums[e.def].span.offset_range.0));
+                    out.push((module.file, module.enums[e.def].span.offset_range().0));
                 }
                 if let Some(n) = ws.newtypes_by_name.get(key).filter(|n| n.module == m) {
-                    out.push((module.file, module.newtypes[n.def].span.offset_range.0));
+                    out.push((module.file, module.newtypes[n.def].span.offset_range().0));
                 }
                 if let Some(g) = module.global_by_name.get(key) {
-                    out.push((module.file, module.globals[*g].span.offset_range.0));
+                    out.push((module.file, module.globals[*g].span.offset_range().0));
                 }
                 if let Some(fns) = ws.functions_by_name.get(key) {
                     for (fm, fid) in fns.iter() {
                         if *fm == m {
-                            out.push((module.file, module.functions[*fid].span.offset_range.0));
+                            out.push((module.file, module.functions[*fid].span.offset_range().0));
                         }
                     }
                 }
                 for (_, d) in module.decorators.iter() {
                     if d.def_key == *key {
-                        out.push((module.file, d.span.offset_range.0));
+                        out.push((module.file, d.span.offset_range().0));
                     }
                 }
             }
@@ -1076,9 +1076,9 @@ fn verify_ascriptions(
             .iter()
             .filter_map(|(_, e)| match &e.kind {
                 skull_parser::ExprKind::ParenAscription(op, ty) => {
-                    let op = ast.exprs[*op].span.offset_range;
-                    let ty = ast.types[*ty].span.offset_range;
-                    Some((e.span.offset_range.0, &text[op.0..op.1], &text[ty.0..ty.1]))
+                    let op = ast.exprs[*op].span.offset_range();
+                    let ty = ast.types[*ty].span.offset_range();
+                    Some((e.span.offset_range().0, &text[op.0..op.1], &text[ty.0..ty.1]))
                 }
                 _ => None,
             })
@@ -1179,8 +1179,8 @@ fn repair_for(
         r.kind == RefKind::Call
             && base.ws.module(r.from).file == key.file
             && r.span.is_some_and(|s| {
-                map_offset(&file_edits, s.offset_range.0) == key.start
-                    && map_offset(&file_edits, s.offset_range.1) == key.end
+                map_offset(&file_edits, s.offset_range().0) == key.start
+                    && map_offset(&file_edits, s.offset_range().1) == key.end
             })
     })?;
     let site = r.callee?;
@@ -1203,14 +1203,14 @@ fn repair_for(
             .clone()
     };
     let text = &plan.files[fi].text;
-    let (a, b) = site.name_span.offset_range;
+    let (a, b) = site.name_span.offset_range();
     if text.get(a..b) != Some(site.name.as_str()) {
         return None;
     }
     Some(Repair {
         file: fi,
         offset: a,
-        line: site.name_span.line_range.0 + 1,
+        line: site.name_span.line_range().0 + 1,
         name: site.name.to_string(),
         qualifier: qualifier.clone(),
         reason: format!(
@@ -1274,7 +1274,7 @@ fn raw_abi_scan(
                     continue;
                 };
                 if backend == bone_core::hir::FnBackend::Js {
-                    js_sites.insert((m.file, f.span.offset_range));
+                    js_sites.insert((m.file, f.span.offset_range()));
                     continue;
                 }
                 let fref = skull_mir::mir::FuncRef {
@@ -1286,13 +1286,13 @@ fn raw_abi_scan(
                         .lua_param_names(ws)
                         .map(|names| names.into_iter().map(|s| Ustr::from(&s)).collect())
                         .unwrap_or_else(|| f.param_decls.iter().map(|p| p.name).collect());
-                if !seen.insert((m.file, f.span.offset_range, params.clone(), src)) {
+                if !seen.insert((m.file, f.span.offset_range(), params.clone(), src)) {
                     continue;
                 }
                 sites.push(format!(
                     "{}:{} `{}`",
                     short_path(&m.file),
-                    f.span.line_range.0 + 1,
+                    f.span.line_range().0 + 1,
                     f.name
                 ));
                 bodies.push(modules_analysis::LuaBody {

@@ -113,7 +113,7 @@ fn detached_region_site(
         .iter()
         .flat_map(|block| source.blocks[*block].insts.iter().copied())
         .filter_map(|inst| source.inst_spans.get(inst).copied())
-        .min_by_key(|span| span.offset_range.0)
+        .min_by_key(|span| span.offset_range().0)
         .and_then(skull_mir::code_identity::LambdaSiteId::from_span)
 }
 

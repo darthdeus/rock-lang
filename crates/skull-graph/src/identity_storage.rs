@@ -103,7 +103,7 @@ pub(crate) fn substitution_only_sites(
     if substituted.is_empty() {
         return substituted;
     }
-    let key = |site: &IdentityStorageSite| (site.kind, site.span.file, site.span.offset_range);
+    let key = |site: &IdentityStorageSite| (site.kind, site.span.file, site.span.offset_range());
     let mut skip: FxHashSet<_> = identity_body_sites(ws, function, body, bi)
         .iter()
         .map(key)
@@ -115,7 +115,7 @@ pub(crate) fn substitution_only_sites(
         (
             IdentityStorageKind::LocalStorage,
             span.file,
-            span.offset_range,
+            span.offset_range(),
         )
     }));
     substituted

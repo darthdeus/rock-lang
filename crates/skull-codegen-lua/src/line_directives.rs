@@ -49,7 +49,7 @@ pub(crate) fn write_line_directives(
     let own: Vec<(usize, u32)> = marks
         .iter()
         .filter(|(_, span)| span.file == file)
-        .map(|(offset, span)| (*offset, span.line_range.0 as u32 + 1))
+        .map(|(offset, span)| (*offset, span.line_range().0 as u32 + 1))
         .collect();
 
     let header_line = lua[..header_offset].rfind('\n').map_or(0, |at| at + 1);

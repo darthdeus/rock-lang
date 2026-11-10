@@ -44,12 +44,12 @@ fn assert_defines(src: &str, use_off: usize, decl_off: usize) {
     let inf = ws.inference(mid).expect("user module inferred");
     let def = definition_at(&ws, mid, inf, use_off)
         .unwrap_or_else(|| panic!("definition_at returned None for offset {use_off}"));
-    let (s, e) = def.offset_range;
+    let (s, e) = def.offset_range();
     assert!(
         s <= decl_off && decl_off < e,
         "definition span {:?} should contain the declaration at byte {} \
          (use site at {})",
-        def.offset_range,
+        def.offset_range(),
         decl_off,
         use_off
     );
@@ -142,7 +142,7 @@ fn assert_refs(src: &str, cursor_off: usize, expected: &[usize]) {
         "reference count: got {:?}, expected offsets {:?}",
         spans
             .iter()
-            .map(|s| s.span.offset_range)
+            .map(|s| s.span.offset_range())
             .collect::<Vec<_>>(),
         expected
     );
@@ -150,11 +150,11 @@ fn assert_refs(src: &str, cursor_off: usize, expected: &[usize]) {
         assert!(
             spans
                 .iter()
-                .any(|s| s.span.offset_range.0 <= off && off < s.span.offset_range.1),
+                .any(|s| s.span.offset_range().0 <= off && off < s.span.offset_range().1),
             "no reference span covers offset {off}; got {:?}",
             spans
                 .iter()
-                .map(|s| s.span.offset_range)
+                .map(|s| s.span.offset_range())
                 .collect::<Vec<_>>()
         );
     }
@@ -191,7 +191,7 @@ fn refs_at(src: &str, cursor_off: usize) -> Vec<(usize, usize)> {
         FnRefScope::AllOverloads,
     )
     .iter()
-    .map(|s| s.span.offset_range)
+    .map(|s| s.span.offset_range())
     .collect()
 }
 
@@ -226,10 +226,10 @@ fn definition_of_function_is_name_precise() {
     let use_off = nth_offset(src, "= helper()", 1) + "= ".len();
     let def = definition_at(&ws, mid, inf, use_off).expect("resolves");
     assert_eq!(
-        def.offset_range.1 - def.offset_range.0,
+        def.offset_range().1 - def.offset_range().0,
         "helper".len(),
         "definition span should be the bare name, got {:?}",
-        def.offset_range
+        def.offset_range()
     );
 }
 

@@ -381,7 +381,7 @@ pub fn identity_body_sites_with(
             site.kind,
             site.identity,
             site.span.file,
-            site.span.line_range.0,
+            site.span.line_range().0,
         ))
     });
     sites
@@ -417,8 +417,8 @@ impl<T: BodySlotTypes> SuspensionPolicy for IdentityBorrowPolicy<'_, T> {
 
 fn contains(outer: Span, inner: Span) -> bool {
     outer.file == inner.file
-        && outer.offset_range.0 <= inner.offset_range.0
-        && inner.offset_range.1 <= outer.offset_range.1
+        && outer.offset_range().0 <= inner.offset_range().0
+        && inner.offset_range().1 <= outer.offset_range().1
 }
 
 fn used_binding(body: &Body, at: Idx<Expr>) -> Option<Idx<BindingInfo>> {

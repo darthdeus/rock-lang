@@ -134,8 +134,8 @@ pub(crate) fn reject_captured_binding(
     mode: CaptureCtx,
 ) -> Result<(), CompilerError> {
     let bspan = c.body.binding_arena[b].span;
-    let inside = bspan.offset_range.0 >= root_span.offset_range.0
-        && bspan.offset_range.1 <= root_span.offset_range.1;
+    let inside = bspan.offset_range().0 >= root_span.offset_range().0
+        && bspan.offset_range().1 <= root_span.offset_range().1;
     if inside {
         return Ok(());
     }

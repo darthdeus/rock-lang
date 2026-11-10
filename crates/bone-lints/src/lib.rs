@@ -742,7 +742,7 @@ impl LintDependencyIndex {
             if invalidation.names.contains(&declaration.name) {
                 invalidation
                     .locations
-                    .insert((declaration.file, declaration.span.offset_range.0));
+                    .insert((declaration.file, declaration.span.offset_range().0));
             }
         }
         for module in ws.user_modules(&FxHashSet::default()) {
@@ -757,7 +757,7 @@ impl LintDependencyIndex {
                 if invalidation.names.contains(&function.name) {
                     invalidation
                         .locations
-                        .insert((module.file, function.name_span.offset_range.0));
+                        .insert((module.file, function.name_span.offset_range().0));
                 }
             }
         }
@@ -999,7 +999,7 @@ impl LintDependencyIndex {
                 .insert((function.0, BodyOwner::Function(function.1)));
             if let Some(&span) = self.declaration_spans.get(&function) {
                 let file = self.declaration_files[&function];
-                invalidation.locations.insert((file, span.offset_range.0));
+                invalidation.locations.insert((file, span.offset_range().0));
             }
             if let Some(callers) = self.reverse_callers.get(&function) {
                 invalidation.seeds.extend(callers.iter().copied());
@@ -1036,7 +1036,7 @@ impl LintDependencyIndex {
             let declaration = &module.functions[function.1];
             invalidation
                 .locations
-                .insert((module.file, declaration.name_span.offset_range.0));
+                .insert((module.file, declaration.name_span.offset_range().0));
         }
 
         for function in old_functions {
@@ -1295,7 +1295,7 @@ impl LintDependencyIndex {
         for (&action, &(file, span)) in &self.action_declarations {
             if changed_files.contains(&file) {
                 invalidation.names.insert(action);
-                invalidation.locations.insert((file, span.offset_range.0));
+                invalidation.locations.insert((file, span.offset_range().0));
             }
         }
         for module in ws.user_modules(&FxHashSet::default()) {
@@ -1312,7 +1312,7 @@ impl LintDependencyIndex {
                 invalidation.names.insert(global.name);
                 invalidation
                     .locations
-                    .insert((module.file, global.name_span.offset_range.0));
+                    .insert((module.file, global.name_span.offset_range().0));
             }
         }
         if invalidation.names.is_empty() {
@@ -1725,7 +1725,7 @@ impl IncrementalLintCache {
             else {
                 continue;
             };
-            locations.insert((module.file, function.name_span.offset_range.0));
+            locations.insert((module.file, function.name_span.offset_range().0));
             if sources.contains_key(&module.file) {
                 affected_files.insert(module.file);
             }
@@ -1880,7 +1880,7 @@ impl IncrementalLintCache {
         let mut locations: FxHashSet<(Ustr, usize)> = affected
             .iter()
             .filter_map(|action| self.dependency.action_declarations.get(action))
-            .map(|(file, span)| (*file, span.offset_range.0))
+            .map(|(file, span)| (*file, span.offset_range().0))
             .collect();
         if let Some(invalidation) = invalidation {
             locations.extend(invalidation.locations.iter().copied());
@@ -3082,7 +3082,7 @@ fn finding_offset(finding: &Finding) -> usize {
         .error
         .labels
         .first()
-        .map(|label| label.span.offset_range.0)
+        .map(|label| label.span.offset_range().0)
         .unwrap_or(finding.error.location.offset)
 }
 
@@ -3180,7 +3180,7 @@ fn shift_findings(findings: &mut [Finding], edit: &TextEditDelta) -> usize {
         }
         if moved {
             if let Some(label) = finding.error.labels.first() {
-                finding.line = label.span.line_range.0;
+                finding.line = label.span.line_range().0;
             } else {
                 finding.line = finding.error.location.line;
             }
@@ -3283,10 +3283,7 @@ fn flat_findings_with(
                 out.push(Finding {
                     lint,
                     error: CompilerError::new_with_label(
-                        Span {
-                            file: module.file,
-                            ..Span::unknown()
-                        },
+                        Span::new(module.file, (0, 0), (0, 0), (0, 0)),
                         "no action-layer policy configured".to_owned(),
                     )
                     .with_level(CompilerErrorLevel::Advice),
@@ -3812,7 +3809,7 @@ pub trait LintFinding {
 impl LintFinding for UnusedVar {
     const LINT: &'static str = UNUSED_VAR;
     fn line(&self) -> usize {
-        self.span.line_range.0
+        self.span.line_range().0
     }
     fn to_diagnostic(&self) -> CompilerError {
         CompilerError::new_with_label(
@@ -3829,7 +3826,7 @@ impl LintFinding for UnusedVar {
 impl LintFinding for UnusedFn {
     const LINT: &'static str = UNUSED_FN;
     fn line(&self) -> usize {
-        self.span.line_range.0
+        self.span.line_range().0
     }
     fn to_diagnostic(&self) -> CompilerError {
         CompilerError::new_with_label(self.span, format!("unused function `{}`", self.name))
@@ -3840,7 +3837,7 @@ impl LintFinding for UnusedFn {
 impl LintFinding for BackendSiblingMismatch {
     const LINT: &'static str = BACKEND_SIBLING_MISMATCH;
     fn line(&self) -> usize {
-        self.span.line_range.0
+        self.span.line_range().0
     }
     fn to_diagnostic(&self) -> CompilerError {
         let detail = match &self.issue {
@@ -4441,7 +4438,7 @@ pub(crate) const UNUSED_PURE_EXPR: &str = "unused_pure_expr";
 impl LintFinding for UnusedPureExpr {
     const LINT: &'static str = UNUSED_PURE_EXPR;
     fn line(&self) -> usize {
-        self.span.line_range.0
+        self.span.line_range().0
     }
     fn to_diagnostic(&self) -> CompilerError {
         let msg = if self.is_comparison {
@@ -4582,7 +4579,7 @@ pub const TRANSMUTE_OF_NULLABLE: &str = "transmute_of_nullable";
 impl LintFinding for TransmuteOfNullable {
     const LINT: &'static str = TRANSMUTE_OF_NULLABLE;
     fn line(&self) -> usize {
-        self.span.line_range.0
+        self.span.line_range().0
     }
     fn to_diagnostic(&self) -> CompilerError {
         CompilerError::new_with_label(
@@ -4722,7 +4719,7 @@ pub(crate) const METHOD_SYNTAX: &str = "method_syntax";
 impl LintFinding for MethodSyntax {
     const LINT: &'static str = METHOD_SYNTAX;
     fn line(&self) -> usize {
-        self.span.line_range.0
+        self.span.line_range().0
     }
     fn to_diagnostic(&self) -> CompilerError {
         CompilerError::new_with_label(
@@ -4788,7 +4785,7 @@ pub(crate) fn raw_input_sites_in_module(
 impl LintFinding for RawInputSite {
     const LINT: &'static str = RAW_INPUT_MIGRATION;
     fn line(&self) -> usize {
-        self.span.line_range.0
+        self.span.line_range().0
     }
     fn to_diagnostic(&self) -> CompilerError {
         CompilerError::new_with_label(
@@ -4835,14 +4832,14 @@ pub(crate) fn unclassified_raw_input_sites_in_module<'a>(
     let sites = raw_input_sites_in_module(module, policy);
     let mut sites_per_line: FxHashMap<usize, usize> = FxHashMap::default();
     for site in &sites {
-        *sites_per_line.entry(site.span.line_range.0).or_default() += 1;
+        *sites_per_line.entry(site.span.line_range().0).or_default() += 1;
     }
     sites
         .into_iter()
         .filter_map(|site| {
-            let line_population = sites_per_line[&site.span.line_range.0];
+            let line_population = sites_per_line[&site.span.line_range().0];
             (line_population != 1
-                || raw_input_class_marker(source, site.span.line_range.0, policy).is_none())
+                || raw_input_class_marker(source, site.span.line_range().0, policy).is_none())
             .then_some(RawInputClassificationGap {
                 name: site.name,
                 span: site.span,
@@ -4856,7 +4853,7 @@ pub(crate) fn unclassified_raw_input_sites_in_module<'a>(
 impl LintFinding for RawInputClassificationGap<'_> {
     const LINT: &'static str = RAW_INPUT_CLASSIFICATION;
     fn line(&self) -> usize {
-        self.span.line_range.0
+        self.span.line_range().0
     }
     fn to_diagnostic(&self) -> CompilerError {
         if self.line_population != 1 {
@@ -4924,7 +4921,7 @@ fn has_annotation(f: &Function, name: &str) -> bool {
 impl LintFinding for ActionCallerGap<'_> {
     const LINT: &'static str = ACTION_CALLERS;
     fn line(&self) -> usize {
-        self.span.line_range.0
+        self.span.line_range().0
     }
     fn to_diagnostic(&self) -> CompilerError {
         let message = if self.population_empty {
@@ -5111,7 +5108,7 @@ fn nominal_name(ws: &Workspace, ty: TyId) -> Option<Ustr> {
 /// receiver-shaped signature nobody can rewrite. Same net catches a
 /// macro-expanded decl, whose span is retagged to the call site.
 fn spelled_at(src: &str, name: Ustr, name_span: Span) -> bool {
-    let (a, b) = name_span.offset_range;
+    let (a, b) = name_span.offset_range();
     if b > src.len() || a > b || !src.is_char_boundary(a) || !src.is_char_boundary(b) {
         return false;
     }
@@ -5124,7 +5121,7 @@ fn spelled_at(src: &str, name: Ustr, name_span: Span) -> bool {
 /// `fn Mob.damage` puts a `.` immediately before the name; the prefix form
 /// cannot, since the only thing between `fn` and the name is whitespace.
 fn written_as_method(src: &str, fn_span: Span, name_span: Span) -> bool {
-    let (start, end) = (fn_span.offset_range.0, name_span.offset_range.0);
+    let (start, end) = (fn_span.offset_range().0, name_span.offset_range().0);
     if end > src.len() || start > end {
         return false;
     }
@@ -5235,7 +5232,7 @@ pub const ROW_ESCAPE: &str = "row_escape";
 impl LintFinding for RowEscape {
     const LINT: &'static str = ROW_ESCAPE;
     fn line(&self) -> usize {
-        self.span.line_range.0
+        self.span.line_range().0
     }
     fn to_diagnostic(&self) -> CompilerError {
         let (ty, kind) = (&self.row_type, self.kind.as_str());
@@ -5314,7 +5311,7 @@ pub(crate) const TASK_NULL_ABANDON: &str = "task_null_abandon";
 impl LintFinding for TaskNullAbandon {
     const LINT: &'static str = TASK_NULL_ABANDON;
     fn line(&self) -> usize {
-        self.span.line_range.0
+        self.span.line_range().0
     }
     fn to_diagnostic(&self) -> CompilerError {
         let what = match &self.place {

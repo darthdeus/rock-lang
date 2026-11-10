@@ -1216,7 +1216,7 @@ fn unsupported_interpolation_hole_error_is_located_at_the_hole() {
         err.message
     );
     let span = err.labels.first().expect("the hole is labeled").span;
-    assert_eq!(&src[span.offset_range.0..span.offset_range.1], "a");
+    assert_eq!(&src[span.offset_range().0..span.offset_range().1], "a");
 }
 
 #[test]

@@ -138,12 +138,12 @@ fn the_finding_points_at_the_unmatched_decl() {
         .find(|f| f.backend == "js")
         .expect("js-side finding");
     assert_eq!(
-        js_side.span.line_range.0, 2,
+        js_side.span.line_range().0, 2,
         "reports on the js decl's own line"
     );
     let lua_side = fs
         .iter()
         .find(|f| f.backend == "lua")
         .expect("lua-side finding");
-    assert_eq!(lua_side.span.line_range.0, 0);
+    assert_eq!(lua_side.span.line_range().0, 0);
 }

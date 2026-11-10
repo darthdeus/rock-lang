@@ -518,7 +518,7 @@ pub(crate) fn scope_hash(a: &Ast, text: &str) -> u64 {
 
     let mut h = rustc_hash::FxHasher::default();
     if let Some(header) = &a.module_header {
-        let (s, e) = header.span.offset_range;
+        let (s, e) = header.span.offset_range();
         text[s..e].hash(&mut h);
     }
     scope_items(&a.items, text, a.dialect == Dialect::V1, 0, &mut h);
@@ -543,7 +543,7 @@ fn scope_items(
     for item in items {
         let name = match &item.kind {
             ItemKind::Use(_) => {
-                let (s, e) = item.span.offset_range;
+                let (s, e) = item.span.offset_range();
                 text[s..e].hash(h);
                 continue;
             }
@@ -593,13 +593,13 @@ pub fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
     let mut prints = Vec::new();
 
     for item in a.items.iter() {
-        let (start, stop) = item.span.offset_range;
+        let (start, stop) = item.span.offset_range();
         debug_assert!(stop <= text.len(), "item span out of bounds");
 
         let mut h = rustc_hash::FxHasher::default();
 
         for ann in item.annotations.iter() {
-            let (a, b) = ann.span.offset_range;
+            let (a, b) = ann.span.offset_range();
             text[a..b].hash(&mut h);
         }
 
@@ -609,7 +609,7 @@ pub fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
                 let body_hash = if let FunctionBody::Rock(b) = f.body
                     && !f.is_macro
                 {
-                    let (bs, be) = a.b(&b).span.offset_range;
+                    let (bs, be) = a.b(&b).span.offset_range();
 
                     debug_assert!(start <= bs && be <= stop, "block escapes item span");
 
@@ -661,7 +661,7 @@ pub fn item_prints(a: &Ast, text: &str) -> Vec<ItemPrint> {
                 if g.is_const
                     && let Some(value) = g.value
                 {
-                    let (vs, ve) = a.e(&value).span.offset_range;
+                    let (vs, ve) = a.e(&value).span.offset_range();
                     debug_assert!(start <= vs && ve <= stop, "const init escapes item span");
                     text[start..vs].hash(&mut h);
                     text[ve..stop].hash(&mut h);
@@ -2191,10 +2191,10 @@ impl Session {
                 oe,
                 delta,
                 idx,
-                p.item_span.offset_range.0,
-                p.item_span.offset_range.1,
-                p.item_span.line_range.0,
-                p.item_span.col_range.0,
+                p.item_span.offset_range().0,
+                p.item_span.offset_range().1,
+                p.item_span.line_range().0,
+                p.item_span.col_range().0,
                 p.iface_hash,
                 p.name,
                 old.text.clone(),
@@ -2248,7 +2248,7 @@ impl Session {
         }
         // The item parse stops at the end of the function; text left after it
         // in the edited range is a new item the full path must see.
-        if np.item_span.offset_range.1 != new_end {
+        if np.item_span.offset_range().1 != new_end {
             return Ok(None);
         }
 
@@ -2267,9 +2267,9 @@ impl Session {
             ItemKind::Function(f) => f.span,
             _ => return Ok(None),
         };
-        let at = old_fn_span.offset_range.1;
-        let byte_delta = new_fn_span.offset_range.1 as isize - old_fn_span.offset_range.1 as isize;
-        let line_delta = new_fn_span.line_range.1 as isize - old_fn_span.line_range.1 as isize;
+        let at = old_fn_span.offset_range().1;
+        let byte_delta = new_fn_span.offset_range().1 as isize - old_fn_span.offset_range().1 as isize;
+        let line_delta = new_fn_span.line_range().1 as isize - old_fn_span.line_range().1 as isize;
 
         // --- commit: install the new prints, then relower under rebuild_or_revert
         // (on failure it restores the old file + full-rebuilds from text). ---
@@ -2449,7 +2449,7 @@ impl Session {
         let new_fn_span_opt = ast
             .items
             .iter()
-            .find(|it| it.span.offset_range.0 == new_start)
+            .find(|it| it.span.offset_range().0 == new_start)
             .and_then(|it| match &it.kind {
                 ItemKind::Function(nf) => Some(nf.span),
                 _ => None,
@@ -2477,7 +2477,7 @@ impl Session {
         let item = match edited
             .items
             .iter()
-            .find(|it| it.span.offset_range.0 == new_start)
+            .find(|it| it.span.offset_range().0 == new_start)
         {
             Some(it) => it,
             None => {
@@ -2493,9 +2493,9 @@ impl Session {
 
         let annotations = item.annotations.as_slice();
 
-        let at = old_fn_span.offset_range.1;
-        let byte_delta = new_fn_span.offset_range.1 as isize - old_fn_span.offset_range.1 as isize;
-        let line_delta = new_fn_span.line_range.1 as isize - old_fn_span.line_range.1 as isize;
+        let at = old_fn_span.offset_range().1;
+        let byte_delta = new_fn_span.offset_range().1 as isize - old_fn_span.offset_range().1 as isize;
+        let line_delta = new_fn_span.line_range().1 as isize - old_fn_span.line_range().1 as isize;
 
         let old_inf = self
             .ws

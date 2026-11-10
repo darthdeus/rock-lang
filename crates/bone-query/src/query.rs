@@ -99,7 +99,7 @@ pub fn definition_at(
                         }
                     }
                 }
-                let (vs, ve) = body.name_spans[*variant_span].offset_range;
+                let (vs, ve) = body.name_spans[*variant_span].offset_range();
                 if vs <= offset && offset < ve {
                     variant_def_span(ws, Some(*enum_name), *variant)
                 } else {
@@ -255,13 +255,13 @@ fn pattern_field_def(ws: &Workspace, body: &Body, offset: usize) -> Option<Span>
         };
         for fidx in *fields {
             let f = &body.record_pat_field_arena[fidx];
-            let (s, e) = f.name_span.offset_range;
+            let (s, e) = f.name_span.offset_range();
             if s <= offset && offset < e {
                 if let hir::Pattern::Bind(b) = &body.pattern_arena[f.pat] {
                     if body
                         .binding_spans
                         .get(*b)
-                        .is_some_and(|bs| bs.offset_range == f.name_span.offset_range)
+                        .is_some_and(|bs| bs.offset_range() == f.name_span.offset_range())
                     {
                         return None; // shorthand -> node dispatch resolves the binding
                     }
@@ -362,7 +362,7 @@ pub fn hover_at(
                                 // full struct definition.
                                 for fld_idx in *fields {
                                     let fld = &body.struct_lit_field_arena[fld_idx];
-                                    let fs = fld.name_span.offset_range.0;
+                                    let fs = fld.name_span.offset_range().0;
                                     // Cover the name through (but not including) the
                                     // value, so the `:` in `x: 3` hovers as the
                                     // field too. The value has its own expr node;
@@ -370,7 +370,7 @@ pub fn hover_at(
                                     let fe = body
                                         .expr_spans
                                         .get(fld.value)
-                                        .map_or(fld.name_span.offset_range.1, |s| s.offset_range.0);
+                                        .map_or(fld.name_span.offset_range().1, |s| s.offset_range().0);
                                     if fs <= offset && offset < fe {
                                         if let Some(s) = render_record_field(
                                             ws,
@@ -437,13 +437,13 @@ pub fn hover_at(
                                         }
                                     }
                                 }
-                                let (vs, ve) = body.name_spans[*variant_span].offset_range;
+                                let (vs, ve) = body.name_spans[*variant_span].offset_range();
                                 if vs <= offset && offset < ve {
                                     if let Some(s) = render_variant(ws, Some(*enum_name), *variant)
                                     {
                                         return Some((s, body.name_spans[*variant_span]));
                                     }
-                                } else if body.name_spans[*enum_name_span].offset_range.0 <= offset
+                                } else if body.name_spans[*enum_name_span].offset_range().0 <= offset
                                     && offset < vs
                                 {
                                     if let Some(s) = render_enum_def(ws, *enum_name) {
@@ -513,14 +513,14 @@ pub fn hover_at(
         if f.name.as_str().starts_with("__") {
             continue;
         }
-        let (s, e) = f.name_span.offset_range;
+        let (s, e) = f.name_span.offset_range();
         if s <= offset && offset < e {
             let sig = render_fn_signature_with_defaults(ws, mid, fid, sources);
             return Some((fenced(&sig), f.name_span));
         }
     }
     for s in module.structs.values() {
-        let (ss, se) = s.name_span.offset_range;
+        let (ss, se) = s.name_span.offset_range();
         if ss <= offset && offset < se {
             return render_struct_def(ws, s.name).map(|d| (d, s.name_span));
         }
@@ -534,20 +534,20 @@ pub fn hover_at(
         }
     }
     for en in module.enums.values() {
-        let (s, e) = en.name_span.offset_range;
+        let (s, e) = en.name_span.offset_range();
         if s <= offset && offset < e {
             return render_enum_def(ws, en.name).map(|d| (d, en.name_span));
         }
         // A variant declaration name (`Casting(..)` in the enum body).
         for v in &en.variants {
-            let (vs, ve) = v.name_span.offset_range;
+            let (vs, ve) = v.name_span.offset_range();
             if vs <= offset && offset < ve {
                 return render_variant(ws, Some(en.name), v.name).map(|d| (d, v.name_span));
             }
         }
     }
     for nt in module.newtypes.values() {
-        let (s, e) = nt.name_span.offset_range;
+        let (s, e) = nt.name_span.offset_range();
         if s <= offset && offset < e {
             return Some((
                 fenced(&format!(
@@ -560,7 +560,7 @@ pub fn hover_at(
         }
     }
     for g in module.globals.values() {
-        let (s, e) = g.name_span.offset_range;
+        let (s, e) = g.name_span.offset_range();
         if s <= offset && offset < e {
             return Some((
                 format!("Type: {}", render_hover_type(ws, None, g.ty)),
@@ -576,7 +576,7 @@ pub fn hover_at(
                 .get(tmid.index())
                 .and_then(|m| m.ty_spans.get(idx).copied())
             {
-                let (ts, te) = sp.offset_range;
+                let (ts, te) = sp.offset_range();
                 if ts <= offset && offset < te {
                     return Some((render_type_hover(ws, None, g.ty), sp));
                 }
@@ -681,7 +681,7 @@ pub(crate) fn fn_signature_hover(
         if f.name.as_str().starts_with("__") {
             continue;
         }
-        let (s, e) = f.span.offset_range;
+        let (s, e) = f.span.offset_range();
         if !(s <= offset && offset < e) {
             continue;
         }
@@ -856,13 +856,13 @@ fn hover_record_pat(ws: &Workspace, body: &Body, offset: usize) -> Option<(Strin
         // (name distinct from its binding) is a field-name reference.
         for fidx in *fields {
             let f = &body.record_pat_field_arena[fidx];
-            let (s, e) = f.name_span.offset_range;
+            let (s, e) = f.name_span.offset_range();
             if s <= offset && offset < e {
                 if let hir::Pattern::Bind(b) = &body.pattern_arena[f.pat] {
                     if body
                         .binding_spans
                         .get(*b)
-                        .is_some_and(|bs| bs.offset_range == f.name_span.offset_range)
+                        .is_some_and(|bs| bs.offset_range() == f.name_span.offset_range())
                     {
                         return None; // shorthand -> node dispatch renders the binding
                     }
@@ -875,7 +875,7 @@ fn hover_record_pat(ws: &Workspace, body: &Body, offset: usize) -> Option<(Strin
         // The pattern head name: an enum variant (`E::B`) -> the enum type; a
         // struct head (`Point { .. }`) -> the struct definition.
         if let (Some(nspan), Some(var)) = (name_span, name) {
-            let (s, e) = nspan.offset_range;
+            let (s, e) = nspan.offset_range();
             if s <= offset && offset < e {
                 if let Some(edef) = enum_def_for_variant(ws, *enum_name, *var) {
                     return Some((format!("Type: enum {}", edef.name), *nspan));
@@ -1277,7 +1277,7 @@ fn newtype_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>) -
     let mut push = |sp: Span| {
         if !out
             .iter()
-            .any(|s| s.offset_range == sp.offset_range && s.file == sp.file)
+            .any(|s| s.offset_range() == sp.offset_range() && s.file == sp.file)
         {
             out.push(sp);
         }
@@ -1292,7 +1292,7 @@ fn newtype_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>) -
             for_each_nominal_annotation(ws, m.file, body, name, &mut |sp| {
                 let clipped = leading_name_span(sp, len);
                 let verified = text.is_none_or(|t| {
-                    t.get(clipped.offset_range.0..clipped.offset_range.1) == Some(name.as_str())
+                    t.get(clipped.offset_range().0..clipped.offset_range().1) == Some(name.as_str())
                 });
                 if verified {
                     push(clipped);
@@ -1390,7 +1390,7 @@ fn variant_field_references(
     let mut push = |site: RefSite| {
         if !out
             .iter()
-            .any(|s| s.span.offset_range == site.span.offset_range && s.span.file == site.span.file)
+            .any(|s| s.span.offset_range() == site.span.offset_range() && s.span.file == site.span.file)
         {
             out.push(site);
         }
@@ -1425,7 +1425,7 @@ fn variant_field_references(
                             let is_shorthand = body
                                 .expr_spans
                                 .get(f.value)
-                                .is_some_and(|vs| vs.offset_range == f.name_span.offset_range);
+                                .is_some_and(|vs| vs.offset_range() == f.name_span.offset_range());
                             push(RefSite {
                                 span: f.name_span,
                                 shorthand: is_shorthand.then_some(Shorthand::KeepBinding(f.name)),
@@ -1453,7 +1453,7 @@ fn variant_field_references(
                                 hir::Pattern::Bind(b) => body
                                     .binding_spans
                                     .get(b)
-                                    .is_some_and(|bs| bs.offset_range == f.name_span.offset_range),
+                                    .is_some_and(|bs| bs.offset_range() == f.name_span.offset_range()),
                                 _ => false,
                             };
                             push(RefSite {
@@ -1488,8 +1488,8 @@ fn decorator_at<'t>(
         };
         if let Some(sp) = decl_name_span_in(
             text,
-            d.span.offset_range.0,
-            d.span.offset_range.1,
+            d.span.offset_range().0,
+            d.span.offset_range().1,
             d.name.as_str(),
             &d.span,
         ) {
@@ -1524,7 +1524,7 @@ fn decorator_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>)
     let mut push = |sp: Span| {
         if !out
             .iter()
-            .any(|s| s.offset_range == sp.offset_range && s.file == sp.file)
+            .any(|s| s.offset_range() == sp.offset_range() && s.file == sp.file)
         {
             out.push(sp);
         }
@@ -1540,8 +1540,8 @@ fn decorator_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>)
             };
             if let Some(sp) = decl_name_span_in(
                 text,
-                d.span.offset_range.0,
-                d.span.offset_range.1,
+                d.span.offset_range().0,
+                d.span.offset_range().1,
                 d.name.as_str(),
                 &d.span,
             ) {
@@ -1601,7 +1601,7 @@ fn global_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
     let mut push = |sp: Span| {
         if !out
             .iter()
-            .any(|s| s.offset_range == sp.offset_range && s.file == sp.file)
+            .any(|s| s.offset_range() == sp.offset_range() && s.file == sp.file)
         {
             out.push(sp);
         }
@@ -1615,11 +1615,8 @@ fn global_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
             for (e, expr) in body.expr_arena.iter() {
                 if matches!(expr, hir::Expr::Global(n) if *n == name) {
                     if let Some(sp) = body.expr_spans.get(e) {
-                        let end = sp.offset_range.1;
-                        push(Span {
-                            offset_range: (end - len, end),
-                            ..*sp
-                        });
+                        let end = sp.offset_range().1;
+                        push(sp.with_offset_range((end - len, end)));
                     }
                 }
             }
@@ -1640,17 +1637,14 @@ pub(crate) fn is_test_path(path: &str) -> bool {
 /// `len` bytes of a span (where the name token always sits, for type ctors and
 /// struct-literal heads).
 fn in_leading_name(offset: usize, span: &Span, len: usize) -> bool {
-    let start = span.offset_range.0;
+    let start = span.offset_range().0;
     offset >= start && offset < start + len
 }
 
 /// The leading name token of a span (clip to `len`), preserving file/line.
 fn leading_name_span(span: &Span, len: usize) -> Span {
-    let start = span.offset_range.0;
-    Span {
-        offset_range: (start, start + len),
-        ..*span
-    }
+    let start = span.offset_range().0;
+    span.with_offset_range((start, start + len))
 }
 
 /// The struct name the cursor is on: a struct *declaration* name, a `Nominal`
@@ -1725,7 +1719,7 @@ fn struct_field_at(
     // Field declaration (`struct S { field: T }`).
     for s in module.structs.values() {
         for f in &s.fields {
-            let (fs, fe) = f.span.offset_range;
+            let (fs, fe) = f.span.offset_range();
             if fs <= offset && offset < fe {
                 return Some((s.name, f.name));
             }
@@ -1747,7 +1741,7 @@ fn struct_field_at(
         hir::Expr::StructLiteral { name, fields, .. } => {
             for fidx in *fields {
                 let f = &body.struct_lit_field_arena[fidx];
-                let (fs, fe) = f.name_span.offset_range;
+                let (fs, fe) = f.name_span.offset_range();
                 if fs <= offset && offset < fe {
                     return Some((*name, f.name));
                 }
@@ -1758,7 +1752,7 @@ fn struct_field_at(
         hir::Expr::FieldAccess { base, field } => {
             let sp = body.expr_spans.get(e)?;
             let flen = field.as_str().len();
-            if offset + flen < sp.offset_range.1 {
+            if offset + flen < sp.offset_range().1 {
                 return None; // cursor is on the receiver, not the field
             }
             let bi = inf.per_fn.get(&owner)?;
@@ -1780,7 +1774,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
     let mut push = |site: RefSite| {
         if !out
             .iter()
-            .any(|s| s.span.offset_range == site.span.offset_range && s.span.file == site.span.file)
+            .any(|s| s.span.offset_range() == site.span.offset_range() && s.span.file == site.span.file)
         {
             out.push(site);
         }
@@ -1810,7 +1804,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                                 let is_shorthand = body
                                     .expr_spans
                                     .get(f.value)
-                                    .is_some_and(|vs| vs.offset_range == f.name_span.offset_range);
+                                    .is_some_and(|vs| vs.offset_range() == f.name_span.offset_range());
                                 push(RefSite {
                                     span: f.name_span,
                                     shorthand: is_shorthand
@@ -1832,11 +1826,8 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                             .is_some_and(|(n, _)| n == sname);
                         if resolves {
                             if let Some(sp) = body.expr_spans.get(e) {
-                                let end = sp.offset_range.1;
-                                push(RefSite::plain(Span {
-                                    offset_range: (end - flen, end),
-                                    ..*sp
-                                }));
+                                let end = sp.offset_range().1;
+                                push(RefSite::plain(sp.with_offset_range((end - flen, end))));
                             }
                         }
                     }
@@ -1862,11 +1853,8 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                         };
                         if of_struct {
                             if let Some(sp) = body.expr_spans.get(e) {
-                                let end = sp.offset_range.1;
-                                push(RefSite::plain(Span {
-                                    offset_range: (end - flen, end),
-                                    ..*sp
-                                }));
+                                let end = sp.offset_range().1;
+                                push(RefSite::plain(sp.with_offset_range((end - flen, end))));
                             }
                         }
                     }
@@ -1892,7 +1880,7 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                                 let is_shorthand = match body.pattern_arena[f.pat] {
                                     hir::Pattern::Bind(b) => {
                                         body.binding_spans.get(b).is_some_and(|bs| {
-                                            bs.offset_range == f.name_span.offset_range
+                                            bs.offset_range() == f.name_span.offset_range()
                                         })
                                     }
                                     _ => false,
@@ -1924,7 +1912,7 @@ fn struct_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
         let clipped = leading_name_span(sp, len);
         if !out
             .iter()
-            .any(|s| s.offset_range == clipped.offset_range && s.file == clipped.file)
+            .any(|s| s.offset_range() == clipped.offset_range() && s.file == clipped.file)
         {
             out.push(clipped);
         }
@@ -1988,19 +1976,14 @@ fn for_each_nominal_annotation(
             _ => false,
         };
         if hit {
-            f(&Span {
-                file,
-                line_range: (0, 0),
-                col_range: (0, 0),
-                offset_range: (iv.start, iv.stop),
-            });
+            f(&Span::new(file, (0, 0), (0, 0), (iv.start, iv.stop)));
         }
     }
 }
 
 /// `true` if `offset` falls inside `span` (an exact name-token span).
 fn span_contains(span: &Span, offset: usize) -> bool {
-    let (s, e) = span.offset_range;
+    let (s, e) = span.offset_range();
     s <= offset && offset < e
 }
 
@@ -2072,7 +2055,7 @@ fn enum_variant_references(ws: &Workspace, ename: Ustr, variant: Ustr) -> Vec<Sp
     let mut push = |sp: Span| {
         if !out
             .iter()
-            .any(|s| s.offset_range == sp.offset_range && s.file == sp.file)
+            .any(|s| s.offset_range() == sp.offset_range() && s.file == sp.file)
         {
             out.push(sp);
         }
@@ -2190,7 +2173,7 @@ fn enum_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
         let clipped = leading_name_span(sp, len);
         if !out
             .iter()
-            .any(|s| s.offset_range == clipped.offset_range && s.file == clipped.file)
+            .any(|s| s.offset_range() == clipped.offset_range() && s.file == clipped.file)
         {
             out.push(clipped);
         }
@@ -2333,7 +2316,7 @@ fn generic_param_references(ws: &Workspace, gmid: ModuleId, gidx: Idx<hir::TypeE
         let clipped = leading_name_span(&sp, len);
         if !out
             .iter()
-            .any(|s| s.offset_range == clipped.offset_range && s.file == clipped.file)
+            .any(|s| s.offset_range() == clipped.offset_range() && s.file == clipped.file)
         {
             out.push(clipped);
         }
@@ -2354,12 +2337,7 @@ fn generic_param_references(ws: &Workspace, gmid: ModuleId, gidx: Idx<hir::TypeE
             let hits = is_param(idx)
                 || matches!(m.ty_arena[idx], hir::TypeExpr::Nullable(ii) if is_param(ii));
             if hits {
-                push(Span {
-                    file: m.file,
-                    line_range: (0, 0),
-                    col_range: (0, 0),
-                    offset_range: (iv.start, iv.stop),
-                });
+                push(Span::new(m.file, (0, 0), (0, 0), (iv.start, iv.stop)));
             }
         }
     }
@@ -2392,11 +2370,11 @@ fn local_references(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Vec<
         let lit = body
             .struct_lit_field_arena
             .values()
-            .any(|f| f.name == name && f.name_span.offset_range == sp.offset_range);
+            .any(|f| f.name == name && f.name_span.offset_range() == sp.offset_range());
         let pat = body
             .record_pat_field_arena
             .values()
-            .any(|f| f.name == name && f.name_span.offset_range == sp.offset_range);
+            .any(|f| f.name == name && f.name_span.offset_range() == sp.offset_range());
         (lit || pat).then_some(Shorthand::KeepField(name))
     };
 
@@ -2406,11 +2384,8 @@ fn local_references(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Vec<
         // A param's binding span covers `name: type`; clip to just the name so
         // rename replaces the identifier, not the annotation. (The name always
         // leads the binding span; a plain `let x` is already name-only.)
-        let start = s.offset_range.0;
-        let span = Span {
-            offset_range: (start, start + name_len),
-            ..*s
-        };
+        let start = s.offset_range().0;
+        let span = s.with_offset_range((start, start + name_len));
         out.push(RefSite {
             span,
             shorthand: shorthand_at(&span),
@@ -2433,11 +2408,8 @@ fn local_references(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Vec<
                 ..
             } if *x == b => {
                 if let Some(s) = body.expr_spans.get(e) {
-                    let start = s.offset_range.0;
-                    out.push(RefSite::plain(Span {
-                        offset_range: (start, start + name_len),
-                        ..*s
-                    }));
+                    let start = s.offset_range().0;
+                    out.push(RefSite::plain(s.with_offset_range((start, start + name_len))));
                 }
             }
 
@@ -2512,7 +2484,7 @@ fn param_named_arg_sites<'t>(
                         continue;
                     };
                     if let Some(span) =
-                        named_label_before(text, asp.offset_range.0, pname.as_str(), asp)
+                        named_label_before(text, asp.offset_range().0, pname.as_str(), asp)
                     {
                         out.push(RefSite::plain(span));
                     }
@@ -2554,7 +2526,7 @@ pub(crate) fn named_arg_param_at<'t>(
             let Some(text) = text_of(asp.file.as_str()) else {
                 continue;
             };
-            let Some(lsp) = named_label_before(text, asp.offset_range.0, label.as_str(), asp)
+            let Some(lsp) = named_label_before(text, asp.offset_range().0, label.as_str(), asp)
             else {
                 continue;
             };
@@ -2568,11 +2540,8 @@ pub(crate) fn named_arg_param_at<'t>(
                 .into_iter()
                 .find(|p| tbody.binding_arena[*p].name == *label)?;
             let s = tbody.binding_spans.get(p)?;
-            let start = s.offset_range.0;
-            return Some(Span {
-                offset_range: (start, start + label.as_str().len()),
-                ..*s
-            });
+            let start = s.offset_range().0;
+            return Some(s.with_offset_range((start, start + label.as_str().len())));
         }
     }
     None
@@ -2623,10 +2592,7 @@ fn named_label_before(text: &str, value_start: usize, label: &str, like: &Span) 
     if start > 0 && (b[start - 1] == b'_' || b[start - 1].is_ascii_alphanumeric()) {
         return None;
     }
-    Some(Span {
-        offset_range: (start, end),
-        ..*like
-    })
+    Some(like.with_offset_range((start, end)))
 }
 
 /// The first whole-word occurrence of `ident` inside `text[start..end)`, as a
@@ -2673,10 +2639,7 @@ fn ident_span_where(
             i < hb.len() && (hb[i] == b'(' || hb[i] == b'{')
         };
         if before_ok && after_ok && open_ok {
-            return Some(Span {
-                offset_range: (start + abs, start + after),
-                ..*like
-            });
+            return Some(like.with_offset_range((start + abs, start + after)));
         }
         from = abs + 1;
     }
@@ -2738,7 +2701,7 @@ fn function_target(
         if f.name.as_str().starts_with("__") {
             continue;
         }
-        let (s, e) = f.name_span.offset_range;
+        let (s, e) = f.name_span.offset_range();
 
         if s <= offset && offset < e {
             return Some((mid, fid));
@@ -2821,8 +2784,8 @@ fn function_references_by_name<'t>(
                             };
                             if let Some(span) = ident_span_in(
                                 text,
-                                rsp.offset_range.1,
-                                sp.offset_range.1,
+                                rsp.offset_range().1,
+                                sp.offset_range().1,
                                 name.as_str(),
                                 sp,
                             ) {
@@ -2890,7 +2853,7 @@ pub(crate) fn inferred_let_bindings(
             let Some(span) = body.binding_spans.get(b_idx) else {
                 continue;
             };
-            let s = span.offset_range.0;
+            let s = span.offset_range().0;
             if s < start || s >= end {
                 continue;
             }
@@ -2952,7 +2915,7 @@ pub(crate) fn call_param_hints(
                 let Some(sp) = body.expr_spans.get(arg) else {
                     continue;
                 };
-                let s = sp.offset_range.0;
+                let s = sp.offset_range().0;
                 if s >= start && s < end {
                     out.push((*sp, format!("{}:", param.name)));
                 }
@@ -2981,7 +2944,7 @@ pub(crate) fn receiver_param_hints(ast: &Ast, start: usize, end: usize) -> Vec<(
         let Some(recv) = f.params.first() else {
             continue;
         };
-        let s = recv.span.offset_range.0;
+        let s = recv.span.offset_range().0;
         if s < start || s >= end {
             continue;
         }
@@ -3096,7 +3059,7 @@ pub(crate) fn locals_in_scope(
             hir::Statement::LetTuple { vars, value } => (vars.leaves(), *value),
             _ => continue,
         };
-        if let Some(end) = body.expr_spans.get(value).map(|s| s.offset_range.1) {
+        if let Some(end) = body.expr_spans.get(value).map(|s| s.offset_range().1) {
             for b in leaves {
                 init_end.insert(b, end);
             }
@@ -3112,7 +3075,7 @@ pub(crate) fn locals_in_scope(
                     None => body
                         .binding_spans
                         .get(b_idx)
-                        .is_some_and(|s| s.offset_range.1 <= offset),
+                        .is_some_and(|s| s.offset_range().1 <= offset),
                 }
             }
         };
@@ -3131,7 +3094,7 @@ pub(crate) fn locals_in_scope(
         let decl_end = body
             .binding_spans
             .get(b_idx)
-            .map_or(0, |s| s.offset_range.1);
+            .map_or(0, |s| s.offset_range().1);
         out.push((binding.name, binding.kind, ty, ty_id, decl_end));
     }
 
@@ -3464,7 +3427,7 @@ pub(crate) fn var_binding_ty_at(
             hir::Expr::Assign { target, .. } | hir::Expr::CompoundAssign { target, .. } => {
                 // Only the target place, not the value -- the cursor's anchor is
                 // in the LHS, but the whole Assign covers both.
-                let ts = body.expr_spans.get(*target)?.offset_range;
+                let ts = body.expr_spans.get(*target)?.offset_range();
                 if !(ts.0 <= offset && offset < ts.1) {
                     continue;
                 }
@@ -3580,12 +3543,12 @@ fn find_binding_by_name(body: &Body, head: &str, offset: usize) -> Option<Idx<hi
             hir::BindingKind::Let | hir::BindingKind::Static | hir::BindingKind::Fn => body
                 .binding_spans
                 .get(idx)
-                .is_some_and(|s| s.offset_range.1 <= offset),
+                .is_some_and(|s| s.offset_range().1 <= offset),
         };
         if !in_scope {
             continue;
         }
-        let pos = body.binding_spans.get(idx).map_or(0, |s| s.offset_range.0);
+        let pos = body.binding_spans.get(idx).map_or(0, |s| s.offset_range().0);
         if best.map_or(true, |(bp, _)| pos >= bp) {
             best = Some((pos, idx));
         }
@@ -3798,7 +3761,7 @@ fn variant_head_hover(
     offset: usize,
 ) -> Option<(String, Span)> {
     let on = |sp: Span| {
-        let (s, e) = sp.offset_range;
+        let (s, e) = sp.offset_range();
         s <= offset && offset < e
     };
     let want = enum_name.as_ref().map(|i| i.name);
@@ -3809,10 +3772,7 @@ fn variant_head_hover(
     }
     if let Some(en) = enum_name {
         // The qualifier plus the `::` up to the variant name.
-        let qual = Span {
-            offset_range: (en.span.offset_range.0, variant_name.span.offset_range.0),
-            ..en.span
-        };
+        let qual = en.span.with_offset_range((en.span.offset_range().0, variant_name.span.offset_range().0));
         if on(qual) {
             if let Some(edef) = enum_def_for_variant(ws, want, variant_name.name) {
                 if let Some(s) = render_enum_def(ws, edef.name) {
@@ -3834,7 +3794,7 @@ fn variant_head_def(
     offset: usize,
 ) -> Option<Span> {
     let on = |sp: Span| {
-        let (s, e) = sp.offset_range;
+        let (s, e) = sp.offset_range();
         s <= offset && offset < e
     };
     let want = enum_name.as_ref().map(|i| i.name);
@@ -3844,10 +3804,7 @@ fn variant_head_def(
         }
     }
     if let Some(en) = enum_name {
-        let qual = Span {
-            offset_range: (en.span.offset_range.0, variant_name.span.offset_range.0),
-            ..en.span
-        };
+        let qual = en.span.with_offset_range((en.span.offset_range().0, variant_name.span.offset_range().0));
         if on(qual) {
             if let Some(edef) = enum_def_for_variant(ws, want, variant_name.name) {
                 return Some(edef.name_span);
@@ -4471,7 +4428,7 @@ pub(crate) fn match_arms_fill(
         let Some(sp) = body.expr_spans.get(e) else {
             continue;
         };
-        let (s, en) = sp.offset_range;
+        let (s, en) = sp.offset_range();
         if s <= offset && offset < en {
             let len = en - s;
             if best.map_or(true, |(bl, _)| len < bl) {
@@ -4564,7 +4521,7 @@ pub(crate) fn struct_fields_fill(
         let Some(sp) = body.expr_spans.get(e) else {
             continue;
         };
-        let (s, en) = sp.offset_range;
+        let (s, en) = sp.offset_range();
         if s <= offset && offset < en {
             let len = en - s;
             if best.map_or(true, |(bl, _)| len < bl) {
@@ -4727,7 +4684,7 @@ fn init_is_pure(body: &hir::Body, e: Idx<hir::Expr>) -> bool {
 /// `defer`. A region that also holds the `let` re-runs the initializer too.
 fn uses_rerun_outside_let(body: &hir::Body, let_span: Span, uses: &[Span]) -> bool {
     let contains = |outer: Span, inner: Span| {
-        outer.offset_range.0 <= inner.offset_range.0 && inner.offset_range.1 <= outer.offset_range.1
+        outer.offset_range().0 <= inner.offset_range().0 && inner.offset_range().1 <= outer.offset_range().1
     };
     let mut regions: Vec<Span> = Vec::new();
     for (i, statement) in body.statement_arena.iter() {
@@ -4829,7 +4786,7 @@ pub fn generate_function(
         let Some(sp) = body.expr_spans.get(e) else {
             continue;
         };
-        let (s, en) = sp.offset_range;
+        let (s, en) = sp.offset_range();
         if s <= offset && offset < en {
             let len = en - s;
             if best.map_or(true, |(bl, _)| len < bl) {
@@ -4884,7 +4841,7 @@ pub fn generate_function(
     let hir::BodyOwner::Function(fid) = owner else {
         return None;
     };
-    let insert_at = module.functions[fid].span.offset_range.1;
+    let insert_at = module.functions[fid].span.offset_range().1;
 
     Some(GenerateFn {
         name: name.to_string(),
@@ -5861,7 +5818,7 @@ fn param_default_src(
 ) -> Option<String> {
     let body = body?;
     let dexpr = (*body.param_defaults.get(param_idx)?)?;
-    let (s, e) = body.expr_spans.get(dexpr)?.offset_range;
+    let (s, e) = body.expr_spans.get(dexpr)?.offset_range();
     let file = ws.modules[fmid.index()].file;
     let src = sources?.get(file.as_str())?;
     src.get(s..e).map(|t| t.trim().to_string())
@@ -5891,7 +5848,7 @@ pub(crate) fn fn_ctags_signatures(
             .collect();
         let returns = f.return_ty.map(|t| ws.render(None, t));
         out.insert(
-            f.span.offset_range.0,
+            f.span.offset_range().0,
             (format!("({})", params.join(", ")), returns),
         );
     }
@@ -6169,13 +6126,13 @@ pub(crate) fn all_holes(
     let mut out = Vec::new();
     for (_, t) in ast.types.iter() {
         if matches!(t.kind, skull_parser::TypeExprKind::Hole(..)) {
-            let ty = type_at_offset(ws, mid, inf, t.span.offset_range.0);
+            let ty = type_at_offset(ws, mid, inf, t.span.offset_range().0);
             out.push((t.span, HoleKind::Type, ty));
         }
     }
     for (_, e) in ast.exprs.iter() {
         if matches!(e.kind, skull_parser::ExprKind::Hole(..)) {
-            let ty = type_at_offset(ws, mid, inf, e.span.offset_range.0);
+            let ty = type_at_offset(ws, mid, inf, e.span.offset_range().0);
             out.push((e.span, HoleKind::Expr, ty));
         }
     }
@@ -6187,12 +6144,12 @@ pub(crate) fn all_holes(
 fn hole_kind_at(ast: &Ast, offset: usize) -> Option<(HoleKind, Span)> {
     let covers = |range: (usize, usize)| range.0 <= offset && offset < range.1;
     for (_, t) in ast.types.iter() {
-        if matches!(t.kind, skull_parser::TypeExprKind::Hole(..)) && covers(t.span.offset_range) {
+        if matches!(t.kind, skull_parser::TypeExprKind::Hole(..)) && covers(t.span.offset_range()) {
             return Some((HoleKind::Type, t.span));
         }
     }
     for (_, e) in ast.exprs.iter() {
-        if matches!(e.kind, skull_parser::ExprKind::Hole(..)) && covers(e.span.offset_range) {
+        if matches!(e.kind, skull_parser::ExprKind::Hole(..)) && covers(e.span.offset_range()) {
             return Some((HoleKind::Expr, e.span));
         }
     }

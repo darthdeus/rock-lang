@@ -232,7 +232,7 @@ mod tests {
                 .tokenize()
                 .unwrap_or_else(|e| panic!("corpus must lex: {src:?}: {e:?}"));
             for tok in &toks {
-                let (s, e) = tok.span.offset_range;
+                let (s, e) = tok.span.offset_range();
                 let want = match tok.kind {
                     crate::TokenKind::Comment(_) => LexRegion::Comment,
                     crate::TokenKind::RawString(_) => LexRegion::StringText,

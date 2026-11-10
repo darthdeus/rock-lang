@@ -624,9 +624,9 @@ pub(crate) fn ascriptions(ast: &skull_parser::Ast) -> Vec<Ascription> {
         .iter()
         .filter_map(|(_, e)| match &e.kind {
             skull_parser::ExprKind::TypeAscription(operand, ty) => Some(Ascription {
-                node: e.span.offset_range,
-                operand: ast.exprs[*operand].span.offset_range,
-                ty: ast.types[*ty].span.offset_range,
+                node: e.span.offset_range(),
+                operand: ast.exprs[*operand].span.offset_range(),
+                ty: ast.types[*ty].span.offset_range(),
             }),
             _ => None,
         })
@@ -939,10 +939,10 @@ pub(crate) fn sites(
         }
         let (start, end) = match edits.get(&file) {
             Some(e) => (
-                map_offset(e, span.offset_range.0),
-                map_offset(e, span.offset_range.1),
+                map_offset(e, span.offset_range().0),
+                map_offset(e, span.offset_range().1),
             ),
-            None => span.offset_range,
+            None => span.offset_range(),
         };
         out.entry(SiteKey {
             file,

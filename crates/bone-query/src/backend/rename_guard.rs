@@ -54,7 +54,7 @@ pub(super) fn check_read_only<'t>(
     let file = site.span.file.as_str();
     let at = text_of(file).map_or_else(
         || file.to_string(),
-        |t| site_label(file, t, site.span.offset_range.0),
+        |t| site_label(file, t, site.span.offset_range().0),
     );
     Err(RenameRefusal(format!(
         "cannot rename `{old}`: it would edit {at} in the standard library, which is read-only"
@@ -114,7 +114,7 @@ pub(super) fn check_unpinned<'t>(
                 let file = span.file.as_str();
                 let at = text_of(file).map_or_else(
                     || file.to_string(),
-                    |t| site_label(file, t, span.offset_range.0),
+                    |t| site_label(file, t, span.offset_range().0),
                 );
                 return Err(RenameRefusal(format!(
                     "cannot rename `{old}`: the reference at {at} could name the standard \
@@ -152,7 +152,7 @@ pub(super) fn check_opaque<'t>(
         let file = span.file.as_str();
         text_of(file).map_or_else(
             || file.to_string(),
-            |t| site_label(file, t, span.offset_range.0),
+            |t| site_label(file, t, span.offset_range().0),
         )
     };
     let user_modules = ws
@@ -198,11 +198,11 @@ pub(super) fn check_opaque<'t>(
             let Some((backend, body)) = &f.inline_body else {
                 continue;
             };
-            let (start, end) = f.span.offset_range;
+            let (start, end) = f.span.offset_range();
             let in_decl = sites.iter().any(|s| {
                 s.span.file == f.span.file
-                    && start <= s.span.offset_range.0
-                    && s.span.offset_range.0 < end
+                    && start <= s.span.offset_range().0
+                    && s.span.offset_range().0 < end
             });
             if !(in_decl || reaches_any_body) || !contains_word(body.as_str(), old) {
                 continue;
@@ -259,7 +259,7 @@ pub(super) fn check_spellings<'t>(
         let Some(text) = text_of(file) else {
             continue;
         };
-        let (start, end) = site.span.offset_range;
+        let (start, end) = site.span.offset_range();
         if text.get(start..end) != Some(old) {
             return Err(RenameRefusal(format!(
                 "cannot rename `{old}`: it is used through a macro expansion at {} \

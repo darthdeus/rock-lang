@@ -56,7 +56,7 @@ impl<'a> Printer<'a> {
     }
 
     fn slice(&self, span: Span) -> &str {
-        let (b0, b1) = span.offset_range;
+        let (b0, b1) = span.offset_range();
         self.slice_range(b0, b1)
     }
 
@@ -77,7 +77,7 @@ impl<'a> Printer<'a> {
     /// no trailing comma).
     fn source_trailing_comma(&self, last: Span) -> bool {
         let bytes = self.src.as_bytes();
-        let mut i = last.offset_range.1.min(bytes.len());
+        let mut i = last.offset_range().1.min(bytes.len());
         while i < bytes.len() {
             match bytes[i] {
                 b' ' | b'\t' | b'\r' | b'\n' => i += 1,
@@ -112,7 +112,7 @@ impl<'a> Printer<'a> {
             .iter()
             .zip(&item_spans)
             .map(|(it, sp)| {
-                sp.line_range.0 == sp.line_range.1
+                sp.line_range().0 == sp.line_range().1
                     && it.annotations.is_empty()
                     && !matches!(it.kind, ItemKind::Comment(_))
             })
@@ -128,7 +128,7 @@ impl<'a> Printer<'a> {
             .map(|(idx, it)| {
                 matches!(it.kind, ItemKind::Comment(_))
                     && idx > 0
-                    && self.ast.items[idx - 1].span.line_range.1 == it.span.line_range.0
+                    && self.ast.items[idx - 1].span.line_range().1 == it.span.line_range().0
             })
             .collect();
         let mut item_docs: Vec<Doc> = self.ast.items.iter().map(|it| self.item(it)).collect();
@@ -153,7 +153,7 @@ impl<'a> Printer<'a> {
             // At the top level the parser captures a trailing comment as its own
             // `Comment` item; trivia already re-emits it as a trailing comment on
             // the preceding item, so skip it here to avoid double output.
-            if matches!(item.kind, ItemKind::Comment(_)) && prev_end == Some(item.span.line_range.0)
+            if matches!(item.kind, ItemKind::Comment(_)) && prev_end == Some(item.span.line_range().0)
             {
                 continue;
             }
@@ -176,7 +176,7 @@ impl<'a> Printer<'a> {
                 }
             }
             parts.push(item_doc);
-            prev_end = Some(item.span.line_range.1);
+            prev_end = Some(item.span.line_range().1);
             prev_was_comment = matches!(item.kind, ItemKind::Comment(_));
             prev_multiline = cur_multiline;
         }
@@ -188,20 +188,20 @@ impl<'a> Printer<'a> {
     fn item_top_line(&self, item: &Item) -> usize {
         item.annotations
             .first()
-            .map(|a| a.span.line_range.0)
-            .unwrap_or(item.span.line_range.0)
+            .map(|a| a.span.line_range().0)
+            .unwrap_or(item.span.line_range().0)
     }
 
     /// The source line the item's own declaration (after annotations) begins on.
     fn item_decl_line(&self, item: &Item) -> usize {
         match &item.kind {
-            ItemKind::Function(f) => f.keyword_span.unwrap_or(f.span).line_range.0,
-            ItemKind::Global(g) => g.keyword_span.unwrap_or(g.span).line_range.0,
-            ItemKind::Struct(s) => s.keyword_span.unwrap_or(s.span).line_range.0,
-            ItemKind::Enum(e) => e.keyword_span.unwrap_or(e.span).line_range.0,
+            ItemKind::Function(f) => f.keyword_span.unwrap_or(f.span).line_range().0,
+            ItemKind::Global(g) => g.keyword_span.unwrap_or(g.span).line_range().0,
+            ItemKind::Struct(s) => s.keyword_span.unwrap_or(s.span).line_range().0,
+            ItemKind::Enum(e) => e.keyword_span.unwrap_or(e.span).line_range().0,
             // Newtype has no keyword span; the name shares the `newtype` line.
-            ItemKind::Newtype(n) => n.name.span.line_range.0,
-            _ => item.span.line_range.0,
+            ItemKind::Newtype(n) => n.name.span.line_range().0,
+            _ => item.span.line_range().0,
         }
     }
 
@@ -215,10 +215,10 @@ impl<'a> Printer<'a> {
             // A multi-line `{ .. }` def forces a blank; a single-line one
             // (`enum E { A, B }`) stays adjacent to its neighbours.
             ItemKind::Struct(s) => {
-                !s.fields.is_empty() && s.span.line_range.0 != s.span.line_range.1
+                !s.fields.is_empty() && s.span.line_range().0 != s.span.line_range().1
             }
             ItemKind::Enum(e) => {
-                !e.variants.is_empty() && e.span.line_range.0 != e.span.line_range.1
+                !e.variants.is_empty() && e.span.line_range().0 != e.span.line_range().1
             }
             // inline-lua / extern fns: verbatim one-liner, never forces a blank.
             ItemKind::Function(f) if !matches!(f.body, FunctionBody::Rock(_)) => false,
@@ -283,9 +283,9 @@ impl<'a> Printer<'a> {
             let decl_start = item
                 .annotations
                 .last()
-                .map(|a| a.span.offset_range.1)
-                .unwrap_or(item.span.offset_range.0);
-            let decl = self.slice_range(decl_start, item.span.offset_range.1);
+                .map(|a| a.span.offset_range().1)
+                .unwrap_or(item.span.offset_range().0);
+            let decl = self.slice_range(decl_start, item.span.offset_range().1);
             let decl = decl.trim();
             let decl = decl.strip_suffix(';').unwrap_or(decl).trim_end();
             parts.push(Doc::text(decl));
@@ -315,9 +315,9 @@ impl<'a> Printer<'a> {
             // whatever follows (next annotation or the declaration).
             let next_line = annos
                 .get(i + 1)
-                .map(|a| a.span.line_range.0)
+                .map(|a| a.span.line_range().0)
                 .unwrap_or(decl_line);
-            if anno.span.line_range.0 == next_line {
+            if anno.span.line_range().0 == next_line {
                 parts.push(Doc::text(" "));
             } else {
                 parts.push(hardline());
@@ -325,7 +325,7 @@ impl<'a> Printer<'a> {
                 // attaches none of them to the item, so recover from trivia).
                 for (_, t) in self
                     .trivia
-                    .standalone_comments_between(anno.span.line_range.1, next_line)
+                    .standalone_comments_between(anno.span.line_range().1, next_line)
                 {
                     parts.push(self.comment_line(t));
                     parts.push(hardline());
@@ -466,8 +466,8 @@ impl<'a> Printer<'a> {
     /// `head {}` for a struct or enum with no entries, keeping any comment the
     /// parser dropped from between the braces.
     fn empty_body(&self, head: Doc, span: Span) -> Doc {
-        let (open_line, close_line) = span.line_range;
-        let (lo, hi) = span.offset_range;
+        let (open_line, close_line) = span.line_range();
+        let (lo, hi) = span.offset_range();
         if self.trivia.has_inline_block_comment_in(lo, hi)
             || self
                 .trivia
@@ -505,16 +505,16 @@ impl<'a> Printer<'a> {
         }
         // Preserve the author's layout: a definition on one source line stays
         // inline (`struct Pt { x: int, y: int }`); multi-line expands.
-        if s.span.line_range.0 == s.span.line_range.1 {
+        if s.span.line_range().0 == s.span.line_range().1 {
             let inner = Doc::join(Doc::text(", "), s.fields.iter().map(|f| self.field(f)));
             return Doc::concat([head, Doc::text("{ "), inner, Doc::text(" }")]);
         }
         let fields = s
             .fields
             .iter()
-            .map(|field| (self.field(field), field.span.line_range.0, field.span))
+            .map(|field| (self.field(field), field.span.line_range().0, field.span))
             .collect();
-        let span = (s.span.line_range.0, s.span.line_range.1);
+        let span = (s.span.line_range().0, s.span.line_range().1);
         Doc::concat([head, self.comma_block(fields, Some(span), "{", "}")])
     }
 
@@ -550,16 +550,16 @@ impl<'a> Printer<'a> {
         if e.variants.is_empty() {
             return self.empty_body(head, e.span);
         }
-        if e.span.line_range.0 == e.span.line_range.1 {
+        if e.span.line_range().0 == e.span.line_range().1 {
             let inner = Doc::join(Doc::text(", "), e.variants.iter().map(|v| self.variant(v)));
             return Doc::concat([head, Doc::text("{ "), inner, Doc::text(" }")]);
         }
         let variants = e
             .variants
             .iter()
-            .map(|v| (self.variant(v), v.span.line_range.0, v.span))
+            .map(|v| (self.variant(v), v.span.line_range().0, v.span))
             .collect();
-        let span = (e.span.line_range.0, e.span.line_range.1);
+        let span = (e.span.line_range().0, e.span.line_range().1);
         Doc::concat([head, self.comma_block(variants, Some(span), "{", "}")])
     }
 
@@ -581,15 +581,15 @@ impl<'a> Printer<'a> {
                 // A record variant the author wrote on one source line stays
                 // inline (`Bandage { duration: float, heal_amount: float }`);
                 // multi-line expands. Same preserve rule as struct defs.
-                if v.span.line_range.0 == v.span.line_range.1 {
+                if v.span.line_range().0 == v.span.line_range().1 {
                     let inner = Doc::join(Doc::text(", "), fields.iter().map(|f| self.field(f)));
                     return Doc::concat([name, Doc::text(" { "), inner, Doc::text(" }")]);
                 }
                 let fs = fields
                     .iter()
-                    .map(|f| (self.field(f), f.span.line_range.0, f.span))
+                    .map(|f| (self.field(f), f.span.line_range().0, f.span))
                     .collect();
-                let span = (v.span.line_range.0, v.span.line_range.1);
+                let span = (v.span.line_range().0, v.span.line_range().1);
                 Doc::concat([
                     name,
                     Doc::text(" "),
@@ -620,10 +620,10 @@ impl<'a> Printer<'a> {
     /// Multi-line spans keep structural rendering (verbatim would un-format a
     /// nested body).
     fn maybe_verbatim_line(&self, span: Span, fallback: impl FnOnce() -> Doc) -> Doc {
-        if span.line_range.0 == span.line_range.1
+        if span.line_range().0 == span.line_range().1
             && self
                 .trivia
-                .has_block_comment_in(span.offset_range.0, span.offset_range.1)
+                .has_block_comment_in(span.offset_range().0, span.offset_range().1)
         {
             Doc::text(self.slice(span).trim_end().to_string())
         } else {
@@ -689,9 +689,9 @@ impl<'a> Printer<'a> {
     /// parentheses, or a block comment sharing a line inside them. A line
     /// comment outside them would swallow the `{`, so the brace moves down.
     fn verbatim_signature(&self, start: Span, params: Span, body: Span) -> Option<Doc> {
-        let sig_start = start.offset_range.0;
-        let body_open = body.offset_range.0;
-        let (open, close) = params.offset_range;
+        let sig_start = start.offset_range().0;
+        let body_open = body.offset_range().0;
+        let (open, close) = params.offset_range();
         let line_comment = self.trivia.has_line_comment_in(sig_start, open)
             || self.trivia.has_line_comment_in(close, body_open);
         if !line_comment
@@ -737,8 +737,8 @@ impl<'a> Printer<'a> {
         // `(` line or an own-line comment anywhere between the parentheses
         // forces the comment-preserving multi-line layout. The parser drops the
         // last two, so recover them from the source interval.
-        let (open_line, close_line) = params_span.line_range;
-        let (open_offset, close_offset) = params_span.offset_range;
+        let (open_line, close_line) = params_span.line_range();
+        let (open_offset, close_offset) = params_span.offset_range();
         let open_comment = self
             .trivia
             .trailing_comment(open_line)
@@ -762,7 +762,7 @@ impl<'a> Printer<'a> {
                 .map(|(i, p)| {
                     (
                         param_doc(p, bare_first && i == 0),
-                        p.span.line_range.0,
+                        p.span.line_range().0,
                         p.span,
                     )
                 })
@@ -808,7 +808,7 @@ impl<'a> Printer<'a> {
         if stmts.is_empty() {
             return Doc::concat([Doc::text("{"), hardline(), Doc::text("}")]);
         }
-        let source_single_line = block.span.line_range.0 == block.span.line_range.1;
+        let source_single_line = block.span.line_range().0 == block.span.line_range().1;
         let stmt_has_comment = stmts.len() == 1
             && self
                 .claimed_trailing_comment(self.ast.s(&stmts[0]).span)
@@ -845,7 +845,7 @@ impl<'a> Printer<'a> {
         let stmts = &block.statements;
         if stmts.is_empty() {
             // An empty body the author wrote inline (`_ => {}`) stays inline.
-            return if block.span.line_range.0 == block.span.line_range.1 {
+            return if block.span.line_range().0 == block.span.line_range().1 {
                 Doc::text("{}")
             } else {
                 Doc::concat([Doc::text("{"), hardline(), Doc::text("}")])
@@ -866,7 +866,7 @@ impl<'a> Printer<'a> {
     fn inline_single_line_block(&self, block_idx: Idx<BlockData>) -> Option<Doc> {
         let block = self.ast.b(&block_idx);
         let stmts = &block.statements;
-        if stmts.is_empty() || block.span.line_range.0 != block.span.line_range.1 {
+        if stmts.is_empty() || block.span.line_range().0 != block.span.line_range().1 {
             return None;
         }
         if stmts.iter().any(|s| {
@@ -878,8 +878,8 @@ impl<'a> Printer<'a> {
         // Legacy parsing can split a qualified record into a value and a
         // brace expression. Do not invent a separator the source never had.
         if stmts.windows(2).any(|pair| {
-            let end = self.ast.s(&pair[0]).span.offset_range.1;
-            let start = self.ast.s(&pair[1]).span.offset_range.0;
+            let end = self.ast.s(&pair[0]).span.offset_range().1;
+            let start = self.ast.s(&pair[1]).span.offset_range().0;
             self.slice_range(end, start).trim().is_empty()
         }) {
             return Some(self.raw(block.span));
@@ -897,16 +897,16 @@ impl<'a> Printer<'a> {
         // alone. Only when the block spans multiple lines: a whole body minified
         // onto one line (`fn f(){a;b;c}`) is still expanded one-per-line.
         let multi_line_block = stmts.first().zip(stmts.last()).is_some_and(|(f, l)| {
-            self.ast.s(f).span.line_range.0 != self.ast.s(l).span.line_range.1
+            self.ast.s(f).span.line_range().0 != self.ast.s(l).span.line_range().1
         });
         // A group is sliced up to the end of its last source line, so a
         // multi-line statement whose last line starts another statement would
         // copy that statement into the slice as well as printing it.
         let ends_on_next_start = |i: usize| {
-            spans[i].line_range.0 != spans[i].line_range.1
+            spans[i].line_range().0 != spans[i].line_range().1
                 && spans
                     .get(i + 1)
-                    .is_some_and(|n| n.line_range.0 == spans[i].line_range.1)
+                    .is_some_and(|n| n.line_range().0 == spans[i].line_range().1)
         };
         let mut groups: Vec<Vec<usize>> = Vec::new();
         for i in 0..stmts.len() {
@@ -916,7 +916,7 @@ impl<'a> Printer<'a> {
                     let p = *g.last().unwrap();
                     !is_comment(p)
                         && !is_comment(i)
-                        && spans[p].line_range.0 == spans[i].line_range.0
+                        && spans[p].line_range().0 == spans[i].line_range().0
                 });
             if merge {
                 groups.last_mut().unwrap().push(i);
@@ -929,11 +929,7 @@ impl<'a> Printer<'a> {
             .iter()
             .map(|g| {
                 let (f, l) = (spans[g[0]], spans[*g.last().unwrap()]);
-                Span {
-                    line_range: (f.line_range.0, l.line_range.1),
-                    offset_range: (f.offset_range.0, l.offset_range.1),
-                    ..f
-                }
+                f.with_line_range((f.line_range().0, l.line_range().1)).with_offset_range((f.offset_range().0, l.offset_range().1))
             })
             .collect();
         // A multi-statement line is sliced verbatim (preserving the `;`
@@ -955,7 +951,7 @@ impl<'a> Printer<'a> {
         let eligible: Vec<bool> = groups
             .iter()
             .zip(&gspans)
-            .map(|(g, gs)| g.len() == 1 && gs.line_range.0 == gs.line_range.1 && !is_comment(g[0]))
+            .map(|(g, gs)| g.len() == 1 && gs.line_range().0 == gs.line_range().1 && !is_comment(g[0]))
             .collect();
         let no_skip = vec![false; groups.len()];
         let mut verbatim = groups.iter().map(|g| g.len() > 1).collect::<Vec<_>>();
@@ -970,7 +966,7 @@ impl<'a> Printer<'a> {
                 parts.push(hardline());
                 let blanks = self
                     .trivia
-                    .blank_count_between(gspans[gi - 1].line_range.1, gspans[gi].line_range.0);
+                    .blank_count_between(gspans[gi - 1].line_range().1, gspans[gi].line_range().0);
                 for _ in 0..blanks {
                     parts.push(hardline());
                 }
@@ -1034,8 +1030,8 @@ impl<'a> Printer<'a> {
         let mut prev_end: Option<usize> = None;
         let mut last_off: Option<usize> = None;
         for (doc, start, espan) in entries.into_iter() {
-            let end = espan.line_range.1;
-            last_off = Some(espan.offset_range.1);
+            let end = espan.line_range().1;
+            last_off = Some(espan.offset_range().1);
             let gap_lo = prev_end.or(body_span.map(|(open, _)| open));
             // Standalone comments authored before this entry, in source-line
             // order: `//` own-line comments AND own-line `/* */` block comments
@@ -1078,7 +1074,7 @@ impl<'a> Printer<'a> {
                     body.push(hardline());
                 }
             }
-            body.push(self.prepend_leading_block(doc, espan.offset_range.0));
+            body.push(self.prepend_leading_block(doc, espan.offset_range().0));
             // Each entry's separator comma is source-derived: for constructs
             // where it's syntactically required (struct/array/enum) the source
             // always has it, so this matches forcing it; for match arms (where
@@ -1151,7 +1147,7 @@ impl<'a> Printer<'a> {
         let mut groups: Vec<Vec<(Span, Doc)>> = Vec::new();
         for (sp, doc) in rows {
             match groups.last_mut() {
-                Some(g) if g[0].0.line_range.0 == sp.line_range.0 => g.push((sp, doc)),
+                Some(g) if g[0].0.line_range().0 == sp.line_range().0 => g.push((sp, doc)),
                 _ => groups.push(vec![(sp, doc)]),
             }
         }
@@ -1163,18 +1159,18 @@ impl<'a> Printer<'a> {
                 body.push(hardline());
                 for _ in 0..self
                     .trivia
-                    .blank_count_between(prev, group[0].0.line_range.0)
+                    .blank_count_between(prev, group[0].0.line_range().0)
                 {
                     body.push(hardline());
                 }
             }
             // A lone element spanning >1 line recurses structurally; otherwise
             // the whole source line (one or more elements) is sliced verbatim.
-            if group.len() == 1 && group[0].0.line_range.0 != group[0].0.line_range.1 {
+            if group.len() == 1 && group[0].0.line_range().0 != group[0].0.line_range().1 {
                 body.push(group[0].1.clone());
             } else if group
                 .iter()
-                .any(|(sp, _)| sp.line_range.0 != sp.line_range.1)
+                .any(|(sp, _)| sp.line_range().0 != sp.line_range().1)
             {
                 // A verbatim slice would keep a multi-line element's old indent.
                 body.push(Doc::join(
@@ -1182,15 +1178,15 @@ impl<'a> Printer<'a> {
                     group.iter().map(|(_, d)| d.clone()),
                 ));
             } else {
-                let lo = group.first().unwrap().0.offset_range.0;
-                let hi = group.last().unwrap().0.offset_range.1;
+                let lo = group.first().unwrap().0.offset_range().0;
+                let hi = group.last().unwrap().0.offset_range().1;
                 body.push(Doc::text(self.slice_range(lo, hi).trim_end().to_string()));
             }
             let is_last = gi + 1 == g_count;
             if !is_last || last_span.is_some_and(|s| self.source_trailing_comma(s)) {
                 body.push(Doc::text(","));
             }
-            prev_end = Some(group.last().unwrap().0.line_range.1);
+            prev_end = Some(group.last().unwrap().0.line_range().1);
         }
         Doc::concat([
             Doc::text(open.to_string()),
@@ -1338,7 +1334,7 @@ impl<'a> Printer<'a> {
     /// `//`-column alignment within a hand-aligned run.
     fn verbatim_full_line(&self, span: Span) -> Doc {
         let b = self.src.as_bytes();
-        let stop = span.offset_range.1.min(b.len());
+        let stop = span.offset_range().1.min(b.len());
         let mut end = stop;
         while end < b.len() && b[end] != b'\n' {
             end += 1;
@@ -1352,7 +1348,7 @@ impl<'a> Printer<'a> {
             end = stop;
         }
         Doc::text(
-            self.slice_range(span.offset_range.0, end)
+            self.slice_range(span.offset_range().0, end)
                 .trim_end()
                 .to_string(),
         )
@@ -1398,13 +1394,10 @@ impl<'a> Printer<'a> {
         // with bodies) keep structural rendering; their headers are handled by
         // `header_verbatim`.
         let mut span = self.ast.s(&s).span;
-        if let Some((cs, ce)) = self.trivia.inline_block_starting_after(span.offset_range.1) {
-            let gap = self.slice_range(span.offset_range.1, cs);
+        if let Some((cs, ce)) = self.trivia.inline_block_starting_after(span.offset_range().1) {
+            let gap = self.slice_range(span.offset_range().1, cs);
             if gap.bytes().all(|b| b == b' ' || b == b'\t') {
-                span = Span {
-                    offset_range: (span.offset_range.0, ce),
-                    ..span
-                };
+                span = span.with_offset_range((span.offset_range().0, ce));
             }
         }
         self.maybe_verbatim_line(span, || self.stmt_structural(s))
@@ -1520,13 +1513,13 @@ impl<'a> Printer<'a> {
         fallback: impl FnOnce() -> Doc,
     ) -> Doc {
         let body_span = self.ast.b(&body).span;
-        let body_open = body_span.offset_range.0;
-        if body_span.line_range.0 == stmt_span.line_range.0
+        let body_open = body_span.offset_range().0;
+        if body_span.line_range().0 == stmt_span.line_range().0
             && self
                 .trivia
-                .has_block_comment_in(stmt_span.offset_range.0, body_open)
+                .has_block_comment_in(stmt_span.offset_range().0, body_open)
         {
-            let header = self.slice_range(stmt_span.offset_range.0, body_open);
+            let header = self.slice_range(stmt_span.offset_range().0, body_open);
             return Doc::concat([
                 Doc::text(header.trim_end().to_string()),
                 Doc::text(" "),
@@ -1630,8 +1623,8 @@ impl<'a> Printer<'a> {
                 // ascriptions. Preserve tight separators rather than changing
                 // the spelling of a path into a spaced cast.
                 let gap = self.slice_range(
-                    self.ast.e(x).span.offset_range.1,
-                    self.ast.te(ty).span.offset_range.0,
+                    self.ast.e(x).span.offset_range().1,
+                    self.ast.te(ty).span.offset_range().0,
                 );
                 let sep = if gap == "::" { "::" } else { " :: " };
                 Doc::concat([self.expr(*x), Doc::text(sep), self.type_expr(*ty)])
@@ -1666,7 +1659,7 @@ impl<'a> Printer<'a> {
             // line regardless of width and NOT restructured (a leading `-`/`+`
             // would reparse as unary). A single-line one renders structurally.
             ExprKind::BinOp { left, op, right } => {
-                if data.span.line_range.0 != data.span.line_range.1 {
+                if data.span.line_range().0 != data.span.line_range().1 {
                     self.raw(data.span)
                 } else {
                     Doc::concat([
@@ -1687,7 +1680,7 @@ impl<'a> Printer<'a> {
                 // with binary syntax -- render them infix. A multi-line binary is
                 // kept verbatim (see ExprKind::BinOp above).
                 CallSyntax::Binary(op) if args.len() == 2 => {
-                    if data.span.line_range.0 != data.span.line_range.1 {
+                    if data.span.line_range().0 != data.span.line_range().1 {
                         self.raw(data.span)
                     } else {
                         Doc::concat([
@@ -1716,12 +1709,7 @@ impl<'a> Printer<'a> {
                     // The arg list's layout follows the method's own span, not
                     // the receiver's (see `method_chain`).
                     let method = self.ast.e(func).span;
-                    let own_span = Span {
-                        line_range: (method.line_range.0, data.span.line_range.1),
-                        col_range: (method.col_range.0, data.span.col_range.1),
-                        offset_range: (method.offset_range.0, data.span.offset_range.1),
-                        ..data.span
-                    };
+                    let own_span = data.span.with_line_range((method.line_range().0, data.span.line_range().1)).with_col_range((method.col_range().0, data.span.col_range().1)).with_offset_range((method.offset_range().0, data.span.offset_range().1));
                     Doc::concat([
                         self.receiver(args[0].value),
                         Doc::text("."),
@@ -1898,7 +1886,7 @@ impl<'a> Printer<'a> {
         // Preserve the author's layout: a match written on one source line stays
         // inline (`match p { A => e, _ => null }`); multi-line expands one arm
         // per line.
-        if span.line_range.0 == span.line_range.1 {
+        if span.line_range().0 == span.line_range().1 {
             return Doc::concat([
                 Doc::text("match "),
                 self.expr(scrutinee),
@@ -1914,16 +1902,13 @@ impl<'a> Printer<'a> {
         let arm_spans: Vec<Span> = bodies
             .iter()
             .map(|b| {
-                let start = self.line_first_token_offset(b.offset_range.0);
-                Span {
-                    offset_range: (start, b.offset_range.1),
-                    ..*b
-                }
+                let start = self.line_first_token_offset(b.offset_range().0);
+                b.with_offset_range((start, b.offset_range().1))
             })
             .collect();
         let eligible: Vec<bool> = bodies
             .iter()
-            .map(|b| b.line_range.0 == b.line_range.1)
+            .map(|b| b.line_range().0 == b.line_range().1)
             .collect();
         let mut docs: Vec<Doc> = arms.iter().map(|a| self.match_arm(a)).collect();
         // Preserve a hand-aligned run of arms (`Variant   => 0` columns); the
@@ -1938,7 +1923,7 @@ impl<'a> Printer<'a> {
             if eligible[k]
                 && self
                     .trivia
-                    .has_block_comment_in(arm_spans[k].offset_range.0, arm_spans[k].offset_range.1)
+                    .has_block_comment_in(arm_spans[k].offset_range().0, arm_spans[k].offset_range().1)
             {
                 docs[k] = self.verbatim_line(arm_spans[k]);
             }
@@ -1949,7 +1934,7 @@ impl<'a> Printer<'a> {
         let entries = docs
             .into_iter()
             .zip(&arm_spans)
-            .map(|(d, s)| (d, s.line_range.0, *s))
+            .map(|(d, s)| (d, s.line_range().0, *s))
             .collect();
         Doc::concat([
             Doc::text("match "),
@@ -1957,7 +1942,7 @@ impl<'a> Printer<'a> {
             Doc::text(" "),
             self.comma_block(
                 entries,
-                Some((span.line_range.0, span.line_range.1)),
+                Some((span.line_range().0, span.line_range().1)),
                 "{",
                 "}",
             ),
@@ -1987,8 +1972,8 @@ impl<'a> Printer<'a> {
                     // returns from the enclosing fn, NOT the arm value. Keep the
                     // keyword when it actually precedes the value in source.
                     StatementKind::Return { value: Some(e), .. } => {
-                        let stmt_start = self.ast.s(&stmts[0]).span.offset_range.0;
-                        let val_start = self.ast.e(e).span.offset_range.0;
+                        let stmt_start = self.ast.s(&stmts[0]).span.offset_range().0;
+                        let val_start = self.ast.e(e).span.offset_range().0;
                         if stmt_start < val_start {
                             parts.push(Doc::text("return "));
                         }
@@ -2058,14 +2043,9 @@ impl<'a> Printer<'a> {
                 let last = self.ast.e(&last.value).span;
                 let (end, end_line) = self
                     .trivia
-                    .close_paren_after(last.offset_range.1)
-                    .unwrap_or((last.offset_range.1, last.line_range.1));
-                Span {
-                    file: f.file,
-                    line_range: (f.line_range.0, end_line),
-                    col_range: (f.col_range.0, last.col_range.1),
-                    offset_range: (f.offset_range.0, end),
-                }
+                    .close_paren_after(last.offset_range().1)
+                    .unwrap_or((last.offset_range().1, last.line_range().1));
+                Span::new(f.file, (f.line_range().0, end_line), (f.col_range().0, last.col_range().1), (f.offset_range().0, end))
             }
         };
         let head = match syntax {
@@ -2111,13 +2091,13 @@ impl<'a> Printer<'a> {
         // single-line `head @ rhs // note` mis-claims the statement's own
         // trailing comment here AND lets the statement handler emit it -> dup.
         let rhs_line = rhs_expr
-            .map(|e| self.ast.e(&e).span.line_range.0)
-            .unwrap_or_else(|| self.ast.b(&body).span.line_range.0);
+            .map(|e| self.ast.e(&e).span.line_range().0)
+            .unwrap_or_else(|| self.ast.b(&body).span.line_range().0);
         let at_comment = self
             .trivia
-            .trailing_comment(head_span.line_range.1)
-            .filter(|(_, _, off)| *off >= head_span.offset_range.1);
-        if let Some((text, _, _)) = at_comment.filter(|_| rhs_line > head_span.line_range.1) {
+            .trailing_comment(head_span.line_range().1)
+            .filter(|(_, _, off)| *off >= head_span.offset_range().1);
+        if let Some((text, _, _)) = at_comment.filter(|_| rhs_line > head_span.line_range().1) {
             return Doc::concat([
                 head,
                 Doc::text(" @ "),
@@ -2172,17 +2152,17 @@ impl<'a> Printer<'a> {
         let arg_span = |a: &FunctionCallArg| self.ast.e(&a.value).span;
         // A `f $ x` call ends at its argument, so a comment after that argument
         // trails the enclosing statement instead.
-        let call_end = span.offset_range.1;
+        let call_end = span.offset_range().1;
         let has_comments = args
             .iter()
             .any(|a| self.claimed_comment_before(arg_span(a), call_end).is_some())
             || !self
                 .trivia
-                .standalone_comments_between(span.line_range.0, span.line_range.1)
+                .standalone_comments_between(span.line_range().0, span.line_range().1)
                 .is_empty()
             || self
                 .trivia
-                .has_block_comment_in(span.offset_range.0, span.offset_range.1);
+                .has_block_comment_in(span.offset_range().0, span.offset_range().1);
         // Preserve the author's layout: a call written across multiple source
         // lines expands one arg per line; one on a single line stays inline --
         // even past the width limit, so a hand-compacted call (e.g. inside a
@@ -2193,7 +2173,7 @@ impl<'a> Printer<'a> {
         // next pass will read it, or the formatter never reaches a fixed point.
         let docs: Vec<Doc> = args.iter().map(render_arg).collect();
         let renders_multiline = docs.iter().any(Doc::has_hard_line);
-        let source_multiline = span.line_range.0 != span.line_range.1 || renders_multiline;
+        let source_multiline = span.line_range().0 != span.line_range().1 || renders_multiline;
         // Trailing-argument hug: when the author wrote the call with a sole or
         // last collection/struct-literal argument opening on the call line
         // (`push(Foo {`, `arena_insert(prefabs, Prefab {`), keep it hugging --
@@ -2227,11 +2207,11 @@ impl<'a> Printer<'a> {
                 .zip(docs)
                 .map(|(a, d)| {
                     let s = arg_span(a);
-                    (d, s.line_range.0, s)
+                    (d, s.line_range().0, s)
                 })
                 .collect();
             let body = if has_comments {
-                Some((span.line_range.0, span.line_range.1))
+                Some((span.line_range().0, span.line_range().1))
             } else {
                 None
             };
@@ -2288,12 +2268,7 @@ impl<'a> Printer<'a> {
             // two-line cumulative span and expanded the (single-line) args, an
             // oscillation. The own span tracks only the
             // author's arg-list layout, which is stable under chain reflow.
-            let own_span = Span {
-                line_range: (method.span.line_range.0, cur_span.line_range.1),
-                col_range: (method.span.col_range.0, cur_span.col_range.1),
-                offset_range: (method.span.offset_range.0, cur_span.offset_range.1),
-                ..cur_span
-            };
+            let own_span = cur_span.with_line_range((method.span.line_range().0, cur_span.line_range().1)).with_col_range((method.span.col_range().0, cur_span.col_range().1)).with_offset_range((method.span.offset_range().0, cur_span.offset_range().1));
             segs.push((method.name, cur_args, own_span));
             // Continue the spine only while the receiver is itself a method call.
             // A receiver call with explicit type arguments ends the spine: a
@@ -2319,7 +2294,7 @@ impl<'a> Printer<'a> {
         // out as a chain (`recv(..)\n    .method(..)`), preserving that break --
         // the regular call path would join them and explode the method's args.
         let broken_single =
-            segs.len() == 1 && segs[0].2.line_range.0 > self.ast.e(&base).span.line_range.1;
+            segs.len() == 1 && segs[0].2.line_range().0 > self.ast.e(&base).span.line_range().1;
         if segs.len() < 2 && !broken_single {
             return None;
         }
@@ -2344,7 +2319,7 @@ impl<'a> Printer<'a> {
         // A segment that renders across lines makes the chain multi-line on the
         // next pass, so break it the same way now.
         let segs_docs: Vec<Doc> = tail.iter().map(seg_doc).collect();
-        let source_multiline = span.line_range.0 != span.line_range.1
+        let source_multiline = span.line_range().0 != span.line_range().1
             || head.has_hard_line()
             || segs_docs.iter().any(Doc::has_hard_line);
         let tail_docs: Vec<Doc> = if source_multiline {
@@ -2394,14 +2369,14 @@ impl<'a> Printer<'a> {
         let prior = &args[..args.len() - 1];
         if prior.iter().any(|a| {
             let s = self.ast.e(&a.value).span;
-            s.line_range.0 != s.line_range.1
+            s.line_range().0 != s.line_range().1
         }) {
             return false;
         }
-        let last_line = self.ast.e(&last.value).span.line_range.0;
+        let last_line = self.ast.e(&last.value).span.line_range().0;
         let prev_line = match prior.last() {
-            Some(p) => self.ast.e(&p.value).span.line_range.1,
-            None => span.line_range.0,
+            Some(p) => self.ast.e(&p.value).span.line_range().1,
+            None => span.line_range().0,
         };
         last_line == prev_line
     }
@@ -2424,13 +2399,13 @@ impl<'a> Printer<'a> {
             }
             let v = self.ast.e(&a.value).span;
             let (start_line, start_off) = match &a.name {
-                Some(n) => (n.span.line_range.0, n.span.offset_range.0),
-                None => (v.line_range.0, v.offset_range.0),
+                Some(n) => (n.span.line_range().0, n.span.offset_range().0),
+                None => (v.line_range().0, v.offset_range().0),
             };
-            if start_line != v.line_range.1 {
+            if start_line != v.line_range().1 {
                 return None;
             }
-            Some((start_line, v.line_range.1, start_off, v.offset_range.1))
+            Some((start_line, v.line_range().1, start_off, v.offset_range().1))
         };
         let infos = args.iter().map(info).collect::<Option<Vec<_>>>()?;
         // Group consecutive args sharing a start line.
@@ -2441,8 +2416,8 @@ impl<'a> Printer<'a> {
                 _ => groups.push(vec![i]),
             }
         }
-        let hanging_open = groups[0][0].0 == span.line_range.0;
-        let hanging_close = groups.last().unwrap().last().unwrap().1 == span.line_range.1;
+        let hanging_open = groups[0][0].0 == span.line_range().0;
+        let hanging_close = groups.last().unwrap().last().unwrap().1 == span.line_range().1;
         let trailing = self.source_trailing_comma(self.ast.e(&args.last().unwrap().value).span);
         let g_count = groups.len();
         let mut head: Vec<Doc> = vec![Doc::text("(")];
@@ -2482,7 +2457,7 @@ impl<'a> Printer<'a> {
         // pass would.
         let trailing = if items.len() == 1 { "," } else { "" };
         let docs: Vec<Doc> = items.iter().map(|i| self.expr(*i)).collect();
-        if span.line_range.0 == span.line_range.1 && !docs.iter().any(Doc::has_hard_line) {
+        if span.line_range().0 == span.line_range().1 && !docs.iter().any(Doc::has_hard_line) {
             return Doc::concat([
                 Doc::text("("),
                 Doc::join(Doc::text(", "), docs),
@@ -2508,7 +2483,7 @@ impl<'a> Printer<'a> {
         // Preserve the author's layout: an array written across multiple source
         // lines expands one element per line; one on a single line stays inline
         // -- even past the width limit. Same rule as struct literals.
-        let force = span.line_range.0 != span.line_range.1;
+        let force = span.line_range().0 != span.line_range().1;
         if !force {
             let docs: Vec<Doc> = items.iter().map(|i| self.expr(*i)).collect();
             if !docs.iter().any(Doc::has_hard_line) {
@@ -2525,7 +2500,7 @@ impl<'a> Printer<'a> {
                 .zip(docs)
                 .map(|(e, d)| {
                     let s = self.ast.e(e).span;
-                    (d, s.line_range.0, s)
+                    (d, s.line_range().0, s)
                 })
                 .collect();
             return self.comma_block(entries, None, open, close);
@@ -2537,11 +2512,11 @@ impl<'a> Printer<'a> {
             .any(|e| self.claimed_trailing_comment(self.ast.e(e).span).is_some())
             || !self
                 .trivia
-                .standalone_comments_between(span.line_range.0, span.line_range.1)
+                .standalone_comments_between(span.line_range().0, span.line_range().1)
                 .is_empty()
             || self
                 .trivia
-                .has_block_comment_in(span.offset_range.0, span.offset_range.1);
+                .has_block_comment_in(span.offset_range().0, span.offset_range().1);
         if !has_comments {
             let rows = items
                 .iter()
@@ -2557,17 +2532,17 @@ impl<'a> Printer<'a> {
             .iter()
             .map(|e| {
                 let s = self.ast.e(e).span;
-                let doc = if s.line_range.0 == s.line_range.1 {
+                let doc = if s.line_range().0 == s.line_range().1 {
                     Doc::text(self.slice(s).trim_end().to_string())
                 } else {
                     self.expr(*e)
                 };
-                (doc, s.line_range.0, s)
+                (doc, s.line_range().0, s)
             })
             .collect();
         self.comma_block(
             entries,
-            Some((span.line_range.0, span.line_range.1)),
+            Some((span.line_range().0, span.line_range().1)),
             open,
             close,
         )
@@ -2590,7 +2565,7 @@ impl<'a> Printer<'a> {
             if names.len() == 1 {
                 if let ExprKind::Ident(id) = &self.ast.e(value).kind {
                     if id.name == names[0].name
-                        && self.ast.e(value).span.offset_range == names[0].span.offset_range
+                        && self.ast.e(value).span.offset_range() == names[0].span.offset_range()
                     {
                         return Doc::text(kw(id.name));
                     }
@@ -2602,7 +2577,7 @@ impl<'a> Printer<'a> {
             );
             Doc::concat([key, Doc::text(": "), self.expr(*value)])
         };
-        let field_line = |names: &[Ident]| names.first().map(|n| n.span.line_range.0).unwrap_or(0);
+        let field_line = |names: &[Ident]| names.first().map(|n| n.span.line_range().0).unwrap_or(0);
         // A field with a trailing comment, or a standalone comment in the body,
         // forces the comment-preserving multi-line layout (a `// ...` can't sit
         // inside an inline `{ a, b }`). A field claims a trailing comment only if
@@ -2611,9 +2586,9 @@ impl<'a> Printer<'a> {
         // enclosing statement (`global g = Foo { a: 1 }  // c`).
         let field_has_comment = |value: &Idx<ExprData>| {
             let v = self.ast.e(value);
-            match self.trivia.trailing_comment(v.span.line_range.1) {
+            match self.trivia.trailing_comment(v.span.line_range().1) {
                 Some((_, _, coff)) => self
-                    .slice_range(v.span.offset_range.1, coff)
+                    .slice_range(v.span.offset_range().1, coff)
                     .chars()
                     .all(|c| c.is_whitespace() || c == ',' || c == ';'),
                 None => false,
@@ -2622,16 +2597,16 @@ impl<'a> Printer<'a> {
         let has_comments = fields.iter().any(|(_, v)| field_has_comment(v))
             || !self
                 .trivia
-                .standalone_comments_between(span.line_range.0, span.line_range.1)
+                .standalone_comments_between(span.line_range().0, span.line_range().1)
                 .is_empty()
             || self
                 .trivia
-                .has_block_comment_in(span.offset_range.0, span.offset_range.1);
+                .has_block_comment_in(span.offset_range().0, span.offset_range().1);
         // Preserve the author's layout: a struct literal written across multiple
         // source lines expands one-field-per-line; one written on a single line
         // stays inline -- even past the width limit (a hand-compacted data-table
         // row is kept, not exploded). Comments force the multi-line form.
-        let source_multiline = span.line_range.0 != span.line_range.1;
+        let source_multiline = span.line_range().0 != span.line_range().1;
         // A one-line literal whose field renders across lines (a block lambda)
         // expands one field per line, the layout the next pass preserves.
         let docs: Vec<Doc> = fields
@@ -2651,12 +2626,7 @@ impl<'a> Printer<'a> {
                     .map(|((names, value), doc)| {
                         let v = self.ast.e(value).span;
                         // The field's full source span: first key name -> value end.
-                        let full = Span {
-                            line_range: (names[0].span.line_range.0, v.line_range.1),
-                            col_range: (names[0].span.col_range.0, v.col_range.1),
-                            offset_range: (names[0].span.offset_range.0, v.offset_range.1),
-                            ..v
-                        };
+                        let full = v.with_line_range((names[0].span.line_range().0, v.line_range().1)).with_col_range((names[0].span.col_range().0, v.col_range().1)).with_offset_range((names[0].span.offset_range().0, v.offset_range().1));
                         (full, doc)
                     })
                     .collect();
@@ -2674,10 +2644,7 @@ impl<'a> Printer<'a> {
                     // inline block comment (`/* y field */ y: 2`) is in the
                     // entry's leading gap; the end is unchanged, so trailing
                     // comma/comment detection is unaffected.
-                    let full = Span {
-                        offset_range: (names[0].span.offset_range.0, v.offset_range.1),
-                        ..v
-                    };
+                    let full = v.with_offset_range((names[0].span.offset_range().0, v.offset_range().1));
                     (doc, field_line(names), full)
                 })
                 .collect();
@@ -2685,7 +2652,7 @@ impl<'a> Printer<'a> {
                 Doc::text(format!("{name} ")),
                 self.comma_block(
                     entries,
-                    Some((span.line_range.0, span.line_range.1)),
+                    Some((span.line_range().0, span.line_range().1)),
                     "{",
                     "}",
                 ),
@@ -2717,12 +2684,12 @@ impl<'a> Printer<'a> {
                 // has no structural home -- slice the header verbatim, then render
                 // the body structurally.
                 let body_span = self.ast.b(body).span;
-                if if_span.line_range.0 == body_span.line_range.0
+                if if_span.line_range().0 == body_span.line_range().0
                     && self
                         .trivia
-                        .has_block_comment_in(if_span.offset_range.0, body_span.offset_range.0)
+                        .has_block_comment_in(if_span.offset_range().0, body_span.offset_range().0)
                 {
-                    let header = self.slice_range(if_span.offset_range.0, body_span.offset_range.0);
+                    let header = self.slice_range(if_span.offset_range().0, body_span.offset_range().0);
                     parts.push(Doc::text(header.trim_end().to_string()));
                     parts.push(Doc::text(" "));
                     parts.push(self.branch_body(*body));
@@ -2730,8 +2697,8 @@ impl<'a> Printer<'a> {
                 }
                 parts.push(Doc::text("if "));
             } else {
-                let prev_end = self.ast.b(&branches[i - 1].1).span.line_range.1;
-                let here = self.ast.e(cond).span.line_range.0;
+                let prev_end = self.ast.b(&branches[i - 1].1).span.line_range().1;
+                let here = self.ast.e(cond).span.line_range().0;
                 parts.push(if here > prev_end {
                     Doc::concat([hardline(), Doc::text("else if ")])
                 } else {
@@ -2744,18 +2711,15 @@ impl<'a> Printer<'a> {
         }
         if let Some(eb) = else_branch {
             let eb_span = self.ast.b(&eb).span;
-            let prev_end = self.ast.b(&branches.last().unwrap().1).span.line_range.1;
-            if eb_span.line_range.0 > prev_end {
+            let prev_end = self.ast.b(&branches.last().unwrap().1).span.line_range().1;
+            if eb_span.line_range().0 > prev_end {
                 // `else` on its own line. If its body is single-line, slice the
                 // whole `else ... }` line verbatim so the author's brace
                 // alignment (`else       { .. }`) survives; otherwise structural.
                 parts.push(hardline());
-                if eb_span.line_range.0 == eb_span.line_range.1 {
-                    let start = self.line_first_token_offset(eb_span.offset_range.0);
-                    parts.push(self.verbatim_line(Span {
-                        offset_range: (start, eb_span.offset_range.1),
-                        ..eb_span
-                    }));
+                if eb_span.line_range().0 == eb_span.line_range().1 {
+                    let start = self.line_first_token_offset(eb_span.offset_range().0);
+                    parts.push(self.verbatim_line(eb_span.with_offset_range((start, eb_span.offset_range().1))));
                 } else {
                     parts.push(Doc::text("else "));
                     parts.push(self.branch_body(eb));
@@ -2779,7 +2743,7 @@ impl<'a> Printer<'a> {
     fn branch_body(&self, block_idx: Idx<BlockData>) -> Doc {
         let block = self.ast.b(&block_idx);
         let stmts = &block.statements;
-        let source_single_line = block.span.line_range.0 == block.span.line_range.1;
+        let source_single_line = block.span.line_range().0 == block.span.line_range().1;
         if stmts.is_empty() {
             return if source_single_line {
                 Doc::text("{}")
@@ -2804,10 +2768,10 @@ impl<'a> Printer<'a> {
         let data = self.ast.te(&t);
         // A block comment inside a type (`(int, /* c */ int)`, `Foo<int /* c */>`)
         // has no structural home -- slice the type verbatim.
-        if data.span.line_range.0 == data.span.line_range.1
+        if data.span.line_range().0 == data.span.line_range().1
             && self
                 .trivia
-                .has_block_comment_in(data.span.offset_range.0, data.span.offset_range.1)
+                .has_block_comment_in(data.span.offset_range().0, data.span.offset_range().1)
         {
             return Doc::text(self.slice(data.span).trim_end().to_string());
         }
@@ -3036,12 +3000,12 @@ impl<'a> Printer<'a> {
     /// line (`if c { a; b }  // cmt`, or `Foo { x }  // cmt`), the inner ones
     /// have a `}` between them and the comment; only the outer one claims it.
     fn claimed_trailing_comment(&self, span: Span) -> Option<(&str, usize)> {
-        let (text, col, offset) = self.trivia.trailing_comment(span.line_range.1)?;
+        let (text, col, offset) = self.trivia.trailing_comment(span.line_range().1)?;
         // Some expression spans already include their trailing comment.
-        if offset < span.offset_range.1 {
+        if offset < span.offset_range().1 {
             return Some((text, col));
         }
-        let between = self.slice_range(span.offset_range.1, offset);
+        let between = self.slice_range(span.offset_range().1, offset);
         between
             .chars()
             .all(|c| c.is_whitespace() || c == ';' || c == ',')
@@ -3051,7 +3015,7 @@ impl<'a> Printer<'a> {
     /// [`Self::claimed_trailing_comment`], for a comment that starts before
     /// byte offset `limit`.
     fn claimed_comment_before(&self, span: Span, limit: usize) -> Option<(&str, usize)> {
-        let (_, _, offset) = self.trivia.trailing_comment(span.line_range.1)?;
+        let (_, _, offset) = self.trivia.trailing_comment(span.line_range().1)?;
         (offset < limit)
             .then(|| self.claimed_trailing_comment(span))
             .flatten()
