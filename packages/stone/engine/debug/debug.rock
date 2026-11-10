@@ -128,7 +128,8 @@ fn draw_debug_ui() {
 @update(stage = 0)
 fn toggle_profiler_key() {
     if !debug_keys_enabled() { return }
-    if tool_key_pressed(KEY_DEBUG_PROFILER) && tool_ctrl_held() {
+    if tool_key_pressed(KEY_DEBUG_PROFILER) && tool_ctrl_held()
+        && (tool_key_down(ToolKey::LeftShift) || tool_key_down(ToolKey::RightShift)) {
         let enabled = !profiler_requested_enabled()
         profiler_set_enabled(enabled)
         log_info("STONE", "Profiler enabled: {enabled}")
