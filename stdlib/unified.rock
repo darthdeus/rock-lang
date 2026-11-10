@@ -1689,12 +1689,15 @@ inline(lua) fn __op_null_coalesce<T>(a: T?, b: T?) -> T? = """
 // Unwrap functions for nullable types (moved early to support vec functions)
 @intrinsic @nomangle @inline inline(lua) fn is_null(value: any) -> bool = "return value == nil"
 
-// Expands debug.traceback("", 2) inline — level 2 = caller of the enclosing function.
-@intrinsic @inline inline(lua) fn __debug_traceback() -> string = 'return debug.traceback("", 2)'
+// Out of line, so a failing site is one call. Level 2 is the function that
+// unwrapped, for both the error position and the traceback.
+@intrinsic inline(lua) fn __unwrap_failed(message: string) = """
+    error(message .. "\n" .. debug.traceback("", 2), 2)
+"""
 
 @inline fn unwrap<T>(@unwraps value: T?) -> T {
     if value != null { return value }
-    error("unwrap() called on null value\n" + __debug_traceback())
+    __unwrap_failed("unwrap() called on null value")
     return phantom()
 }
 
@@ -1704,7 +1707,7 @@ fn unwrap_or<T>(@unwraps value: T?, alt: T) -> T {
 
 fn expect<T>(@unwraps value: T?, message: string) -> T {
     if value != null { return value }
-    error("expect() failed: " + message + "\n" + __debug_traceback())
+    __unwrap_failed("expect() failed: " + message)
     return phantom()
 }
 

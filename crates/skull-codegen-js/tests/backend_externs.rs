@@ -149,21 +149,23 @@ fn main() {
 }
 
 #[test]
-fn debug_traceback_uses_the_declared_js_sibling() {
+fn unwrap_failure_uses_the_declared_js_sibling() {
     let ws = ws_with(
         r#"
 fn main() {
-    print(__debug_traceback())
+    let missing: int? = null
+    print(missing.unwrap())
 }
 "#,
     );
     let prog = crate::common::emit_program_js(&ws).expect("emit js program");
     assert!(
-        prog.contains("return new Error().stack || \"\";"),
-        "the declared JS traceback body must own the JS implementation:\n{prog}"
+        prog.contains("(new Error().stack || \"\")"),
+        "the declared JS failure body must own the JS implementation:\n{prog}"
     );
     let source = format!(
-        "var __G = {{}};\nfunction print(value) {{ console.log(value); }}\n{}\n{}\nmain();",
+        "var __G = {{}};\nfunction print(value) {{ console.log(value); }}\n{}\n{}\n\
+         try {{ main(); }} catch (e) {{ console.log(e.message); }}",
         skull_codegen_js::JS_GLOBALS_RUNTIME,
         prog,
     );
@@ -173,10 +175,10 @@ fn main() {
         "node failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        String::from_utf8_lossy(&output.stdout).starts_with("Error\n"),
-        "the JS traceback was empty: {:?}",
-        String::from_utf8_lossy(&output.stdout)
+        stdout.starts_with("unwrap() called on null value\nError\n"),
+        "the JS failure lost its message or traceback: {stdout:?}"
     );
 }
 

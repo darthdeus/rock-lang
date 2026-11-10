@@ -109,7 +109,6 @@
 // prelude: __arena_store_or_empty
 // prelude: __char_decode
 // prelude: __char_units
-// prelude: __debug_traceback
 // prelude: __descriptor_with
 // prelude: __entity_arena
 // prelude: __ffi_new_float_1
@@ -254,6 +253,7 @@
 // prelude: __slot_release
 // prelude: __sort_map_keys
 // prelude: __unm
+// prelude: __unwrap_failed
 // prelude: __vec_cache_key
 // prelude: __vec_checked_get
 // prelude: __vec_checked_index
