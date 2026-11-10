@@ -3109,9 +3109,11 @@ impl Builder<'_> {
             // The boundary immediately reads this box into primitive lanes.
             // Those lanes, rather than a reconstructed box, own the snapshot.
             ValueRepr::Scalar(v)
-                if super::shape::planned_value(self.ws, shape.name)
-                    .and_then(|plan| plan.shape)
-                    .is_some_and(|plain| plain.fields == shape.fields) =>
+                if super::shape::planned_value(self.ws, shape.name).is_some_and(|plan| {
+                    plan.shape
+                        .as_ref()
+                        .is_some_and(|plain| plain.fields == shape.fields)
+                }) =>
             {
                 Ok(ValueRepr::Scalar(v))
             }

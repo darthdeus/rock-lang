@@ -756,13 +756,13 @@ fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Op
     })
 }
 
-pub(crate) fn planned_value(ws: &Workspace, name: Ustr) -> Option<PlannedValue> {
+pub(crate) fn planned_value(ws: &Workspace, name: Ustr) -> Option<Rc<PlannedValue>> {
     ShapeMemo::with_active(
         |memo| memo.planned.get(&name).cloned(),
         |memo, plan| {
             memo.planned.insert(name, plan.clone());
         },
-        || planned_value_rec(ws, name, &mut Vec::new()),
+        || planned_value_rec(ws, name, &mut Vec::new()).map(Rc::new),
     )
 }
 
@@ -780,7 +780,7 @@ pub(crate) fn planned_value(ws: &Workspace, name: Ustr) -> Option<PlannedValue> 
 #[derive(Default)]
 struct ShapeMemo {
     arena_gen: u64,
-    planned: rustc_hash::FxHashMap<Ustr, Option<PlannedValue>>,
+    planned: rustc_hash::FxHashMap<Ustr, Option<Rc<PlannedValue>>>,
     enums: rustc_hash::FxHashMap<Ustr, Option<EnumPlan>>,
 }
 
@@ -1082,7 +1082,7 @@ pub(crate) fn static_ty(ws: &Workspace, ty: TyId) -> Option<TypeExpr> {
 /// so a real cdata always exists as the escape representation). Cyclic field
 /// types disqualify.
 pub(crate) fn value_shape(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
-    planned_value(ws, name)?.shape
+    planned_value(ws, name)?.shape.clone()
 }
 
 /// The target/context-specific physical storage of a nominal value. This is
@@ -1101,6 +1101,7 @@ pub fn gc_free_value_struct_field_order(ws: &Workspace, name: Ustr) -> Option<Ve
     ws.struct_by_name.get(&name)?;
     planned_value(ws, name)?
         .shape
+        .as_ref()
         .map(|_| struct_field_names(ws, name))
 }
 
@@ -1116,7 +1117,7 @@ pub fn gc_free_value_struct_field_order(ws: &Workspace, name: Ustr) -> Option<Ve
 /// tier), never `<Name>_ct`; the leaf threading is repr-agnostic (`pack` builds
 /// an `Inst::MakeValueStruct` that codegen renders per tier).
 pub(crate) fn value_shape_gc(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
-    planned_value(ws, name)?.gc_shape
+    planned_value(ws, name)?.gc_shape.clone()
 }
 
 /// Declared field names of struct `name`, in declaration order (the positional
@@ -1506,7 +1507,8 @@ pub(crate) fn sig_shape_of_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape
 pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<ValueShape> {
     let scalar = is_nobox_nominal(ws, n) || ws.struct_by_name.contains_key(&n);
     if scalar {
-        if let Some(mut shape) = planned_value(ws, n).and_then(|plan| plan.shape.or(plan.gc_shape))
+        if let Some(mut shape) =
+            planned_value(ws, n).and_then(|plan| plan.shape.clone().or(plan.gc_shape.clone()))
         {
             shape.nullable = true;
             return Some(shape);
@@ -1518,7 +1520,7 @@ pub(crate) fn sig_shape_of_nullable_nominal(ws: &Workspace, n: Ustr) -> Option<V
 /// The value shape of a `name` nominal (value struct or flat enum), or `None`.
 pub(crate) fn value_shape_of_nominal(ws: &Workspace, name: Ustr) -> Option<ValueShape> {
     planned_value(ws, name)
-        .and_then(|plan| plan.shape.or(plan.gc_shape))
+        .and_then(|plan| plan.shape.clone().or(plan.gc_shape.clone()))
         .or_else(|| {
             EnumPlan::for_name(ws, name).and_then(|plan| plan.flat().map(|s| s.value_shape()))
         })

@@ -2598,7 +2598,8 @@ pub(super) fn expanded_nullable_parameter_shape(ws: &Workspace, shape: &ValueSha
             let Some((child, true)) = super::shape::nominal_name_from_ty(ws, decl.ty) else {
                 continue;
             };
-            let Some(mut child) = super::shape::planned_value(ws, child).and_then(|p| p.shape)
+            let Some(mut child) =
+                super::shape::planned_value(ws, child).and_then(|p| p.shape.clone())
             else {
                 continue;
             };
