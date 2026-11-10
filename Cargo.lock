@@ -2501,6 +2501,7 @@ dependencies = [
  "skull-graph",
  "skull-mir",
  "skull-parser",
+ "smallvec",
  "ustr",
 ]
 

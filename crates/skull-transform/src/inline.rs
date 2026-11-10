@@ -16,6 +16,7 @@
 
 use bone_core::prelude::Instant;
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use smallvec::SmallVec;
 use std::cell::Cell as ThreadCell;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -856,8 +857,9 @@ enum UseSite {
 /// rewrite cross-block uses without rescanning the caller arena.
 #[derive(Default)]
 struct UseIndex {
-    /// Dense by instruction id; a splice's fresh instructions grow it.
-    users: Vec<Vec<UseSite>>,
+    /// Dense by instruction id; a splice's fresh instructions grow it. Most
+    /// values have one or two users, which then need no allocation.
+    users: Vec<SmallVec<[UseSite; 2]>>,
     affected: HashSet<UseSite>,
 }
 
@@ -908,10 +910,10 @@ impl UseIndex {
         index
     }
 
-    fn slot(&mut self, value: Idx<Inst>) -> &mut Vec<UseSite> {
+    fn slot(&mut self, value: Idx<Inst>) -> &mut SmallVec<[UseSite; 2]> {
         let at = crate::visit::raw(value) as usize;
         if self.users.len() <= at {
-            self.users.resize_with(at + 1, Vec::new);
+            self.users.resize_with(at + 1, SmallVec::new);
         }
         &mut self.users[at]
     }

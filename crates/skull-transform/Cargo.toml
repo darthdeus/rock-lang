@@ -17,6 +17,7 @@ description = "Control-flow transforms, inlining and coroutine lowering"
 [dependencies]
 bone-core = { workspace = true }
 rustc-hash = { workspace = true }
+smallvec = { workspace = true }
 comfy-la-arena = { workspace = true }
 skull-mir = { workspace = true }
 ustr = { workspace = true }
