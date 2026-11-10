@@ -98,6 +98,7 @@ fn assemble_overlay(
     let mut order: Vec<Instance> = cache.changed_since_full.iter().cloned().collect();
     order.sort_by_key(|b| overlay_order_key(&cache.scx, b));
     order.dedup();
+    let leaf_ctors_at = out.len();
     let mut definitions = LuaDefinitionWriter::new(out);
     for body in &order {
         match cache.chunks.get(body) {
@@ -107,11 +108,11 @@ fn assemble_overlay(
             None => {}
         }
     }
-    let enum_names = definitions.take_enum_names();
+    let runtime_refs = definitions.take_runtime_refs();
     out = definitions.finish();
     let (mut bindings, rebound_bodies) = overlay_callee_bindings(ws, cache, &order);
     out.push_str(&callee_binding_pass_lua(&mut bindings));
-    out.push_str(&crate::enum_names_defs(ws, &enum_names));
+    out.push_str(&crate::enum_names_defs(ws, &runtime_refs));
     let mut published_bodies = order.clone();
     published_bodies.extend(rebound_bodies);
     let overlay_code_artifact = overlay_code_artifact(ws, cache, &published_bodies);
@@ -257,7 +258,7 @@ fn assemble_overlay(
         // Emit each affected const's ginit fn now; build its init
         // line + dependency edges (restricted to affected consts) for the sort.
         let mut inits: Vec<PendingInit<String>> = Vec::new();
-        let mut unit_enum_names = FxHashSet::default();
+        let mut unit_refs = FxHashSet::default();
         let mut definitions = LuaDefinitionWriter::new(out);
         for a in affected
             .iter()
@@ -277,7 +278,7 @@ fn assemble_overlay(
                     .globals
                     .insert((a.mid, a.gid), unit.comptime_reads.clone());
                 definitions.push_str(&unit.lua);
-                unit_enum_names.extend(
+                unit_refs.extend(
                     unit.global_names
                         .iter()
                         .filter(|name| crate::is_enum_names_global(name)),
@@ -296,7 +297,7 @@ fn assemble_overlay(
             });
         }
         out = definitions.finish();
-        out.push_str(&crate::enum_names_defs(ws, &unit_enum_names));
+        out.push_str(&crate::enum_names_defs(ws, &unit_refs));
 
         out.push_str(&sort_global_init_lines(inits, &FxHashMap::default())?.concat());
     }
@@ -382,6 +383,13 @@ fn assemble_overlay(
         }
     }
     let d_fingerprint = t_fingerprint.elapsed();
+    // An overlay is small, so its leaf ctor calls are read from the text.
+    let mut leaf_calls = Vec::new();
+    crate::push_leaf_ctor_calls(&out[leaf_ctors_at..], &mut leaf_calls);
+    out.insert_str(
+        leaf_ctors_at,
+        &crate::leaf_ctor_defs(&cache.leaf_ctors, &leaf_calls.into_iter().collect()),
+    );
     out.push_str("end\n");
     if cache.cg.line_directives() {
         out = skull_codegen_lua::resolve_line_directive_resets(&out, "=[overlay]");

@@ -191,11 +191,13 @@ fn emit_coroutine_chunk(
     let mut abi_deps = FxHashMap::default();
     collect_abi_dependencies(mf, &mut abi_deps);
     deps.extend(abi_deps.keys().copied());
+    let mut literal_globals = skull_mir::reach::global_ref_names(mf);
+    crate::push_leaf_ctor_calls(&lua, &mut literal_globals);
     Ok(Chunk {
         abi_deps,
         definition_count: lua_definition_count(&lua),
         lua,
-        literal_globals: skull_mir::reach::global_ref_names(mf),
+        literal_globals,
         allocation_bodies,
         embedded_deps: deps.clone(),
         deps,
@@ -455,11 +457,13 @@ pub(super) fn emit_body_chunk_with_mutation(
     let mut abi_deps = FxHashMap::default();
     collect_abi_dependencies(&mf, &mut abi_deps);
     deps.extend(abi_deps.keys().copied());
+    let mut literal_globals = skull_mir::reach::global_ref_names(&mf);
+    crate::push_leaf_ctor_calls(&lua, &mut literal_globals);
     Ok(Chunk {
         abi_deps,
         definition_count: lua_definition_count(&lua),
         lua,
-        literal_globals: skull_mir::reach::global_ref_names(&mf),
+        literal_globals,
         allocation_bodies,
         deps,
         embedded_deps,
@@ -874,7 +878,7 @@ pub(super) fn emit_spec_chunk(
     times.regalloc += regalloc;
     times.regalloc_work |= regalloc > Duration::ZERO;
     let mut statics = mf.statics.clone();
-    let literal_globals = skull_mir::reach::global_ref_names(&mf);
+    let mut literal_globals = skull_mir::reach::global_ref_names(&mf);
     let mut nested_abi_deps = FxHashMap::default();
     collect_abi_dependencies(&mf, &mut nested_abi_deps);
     let mut nested = std::mem::take(&mut mf.nested_fns);
@@ -895,6 +899,7 @@ pub(super) fn emit_spec_chunk(
     let mut abi_deps = nested_abi_deps;
     collect_abi_dependencies(&mf, &mut abi_deps);
     deps.extend(abi_deps.keys().copied());
+    crate::push_leaf_ctor_calls(&lua, &mut literal_globals);
     Ok(Chunk {
         abi_deps,
         definition_count: lua_definition_count(&lua),

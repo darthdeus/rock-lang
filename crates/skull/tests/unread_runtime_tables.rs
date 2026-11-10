@@ -19,3 +19,37 @@ fn main() {
     assert!(!lua.contains("Hidden::Gamma"), "{lua}");
     assert_eq!(run_main(&lua), "Shown::Beta\ntrue");
 }
+
+#[test]
+fn only_called_leaf_ctors_are_defined() {
+    let lua = emit_module(
+        r#"
+nobox value NV2 { x: float, y: float }
+value Used { pos: NV2? }
+value Spare { pos: NV2? }
+global G: Used = Used { pos: NV2 { x: 1.0, y: 2.0 } }
+fn main() { print("{G.pos?.x ?? -1.0}") }
+"#,
+    );
+    let defined = |sym: &str| lua.contains(&format!("\n{sym}_lct = function("));
+    let called = |sym: &str| lua.contains(&format!("{sym}_lct("));
+    assert!(called("Used") && defined("Used"), "{lua}");
+    assert!(!called("Spare") && !defined("Spare"), "{lua}");
+    assert!(!called("Mat4") && !defined("Mat4"), "{lua}");
+    assert_eq!(run_main(&lua), "1");
+}
+
+/// A host appends `nobox` global accessors after assembly, and their `get`
+/// rebuilds the value through its leaf ctor.
+#[test]
+fn nobox_global_accessors_keep_their_leaf_ctor() {
+    let lua = emit_module(
+        r#"
+nobox value SpaceId { value: int }
+nobox value Place { space: SpaceId, x: int, y: int }
+global HOVERED: Place? = null
+fn main() { print(HOVERED == null) }
+"#,
+    );
+    assert!(lua.contains("\nPlace_lct = function("), "{lua}");
+}

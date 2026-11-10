@@ -755,27 +755,52 @@ fn release_one_shot_chunks(
 
 type GlobalKey = (ModuleId, Idx<bone_semantic::hir::GlobalDef>);
 
+/// The leaf ctors a host's `nobox` global accessors call (rock-cli's
+/// `build_global_nobox_accessors` appends them after assembly). A shape the
+/// host cannot build is its error to report, so it is skipped here.
+fn host_accessor_leaf_ctors(ws: &Workspace, scx: &skull_mir::lower::ScalarCtx) -> Vec<Ustr> {
+    ws.source_modules()
+        .flat_map(|m| m.globals.iter().map(|(_, g)| g))
+        .filter(|g| !g.is_const)
+        .filter_map(|g| skull_mir::lower::nobox_global_accessor_shape(ws, scx, g.ty).ok()?)
+        .filter(|shape| shape.ctor_suffix == "_lct")
+        .map(|shape| {
+            Ustr::from(&format!(
+                "{}_lct",
+                skull_mir::mangle::type_symbol(ws, shape.ty_name)
+            ))
+        })
+        .collect()
+}
+
 /// The load-time scaffolding: runtime prelude, value struct and enum
 /// definitions, type tables. IR-agnostic, so it needs no chunk.
 fn scaffold_prelude_lua(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
-) -> Result<String, CompilerError> {
+) -> Result<(String, crate::LeafCtors), CompilerError> {
     let mut out = String::from(crate::runtime_prelude());
     if crate::allocation_report::activation_enabled() {
         out.push_str(skull_codegen_lua::ALLOCATION_ACTIVATION_PRELUDE);
     }
     out.push_str(&crate::enum_cdata_defs(ws));
     let rep_arena = scx.rep_arena();
-    let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws, rep_arena)?;
+    let mut leaf_ctors = Vec::new();
+    let (vdefs, value_emitted, value_gc) =
+        crate::value_struct_defs(ws, rep_arena, &mut leaf_ctors)?;
     out.push_str(&vdefs);
-    out.push_str(&crate::value_struct_gc_defs(ws, &value_gc, rep_arena)?);
+    out.push_str(&crate::value_struct_gc_defs(
+        ws,
+        &value_gc,
+        rep_arena,
+        &mut leaf_ctors,
+    )?);
     out.push_str(&crate::value_struct_metatypes(ws, &value_emitted));
     out.push_str(&crate::enum_cdata_metatypes(ws));
     out.push_str(&crate::c_struct_inspect_defs(ws, &value_emitted));
     out.push_str(&crate::type_table_defs(ws, &value_gc, rep_arena)?);
     out.push_str(&crate::enum_runtime_defs(ws));
-    Ok(out)
+    Ok((out, leaf_ctors))
 }
 
 /// The assembly inputs that need no chunk: the scaffold prelude, the lowered
@@ -784,7 +809,7 @@ fn scaffold_prelude_lua(
 /// assembly tail, pays for them; an incremental build prepares them at the
 /// start of assembly.
 pub(super) struct EarlyAssembly {
-    scaffold: Result<String, CompilerError>,
+    scaffold: Result<(String, crate::LeafCtors), CompilerError>,
     scaffold_time: Duration,
     decorators: DecoratorTable,
     decorator_units: Vec<UnitOut>,
@@ -892,7 +917,11 @@ pub(super) fn assemble(
         global_layout,
         globals_directory,
     } = early.unwrap_or_else(|| prepare_early_assembly(ws, &cache.scx, &cache.cg, &cache.concrete));
-    asm.out.push_str(&scaffold?);
+    let (scaffold, leaf_ctors) = scaffold?;
+    asm.out.push_str(&scaffold);
+    // Leaf ctors go here, ahead of any load-time caller, once assembly knows
+    // which ones the emitted text calls.
+    let leaf_ctors_at = asm.out.len();
     asm.t_scaffold += scaffold_time;
     asm.push_decorator_definitions(decorator_units);
     let (globals_lua, pending_inits) = asm.fold_global_units(&global_keys, global_units);
@@ -987,16 +1016,19 @@ pub(super) fn assemble(
     if let Some(err) = cg.take_rejection() {
         return Err(err);
     }
-    let mut enum_names = definitions.take_enum_names();
-    enum_names.extend(
+    let mut runtime_refs = definitions.take_runtime_refs();
+    runtime_refs.extend(
         asm.always_emitted_names
             .iter()
-            .filter(|name| crate::is_enum_names_global(name)),
+            .filter(|name| crate::is_enum_names_global(name) || crate::is_leaf_ctor_global(name)),
     );
     asm.out = definitions.finish();
     asm.out
         .push_str(&callee_binding_pass_lua(&mut asm.callee_binds));
-    asm.out.push_str(&crate::enum_names_defs(ws, &enum_names));
+    asm.out.push_str(&crate::enum_names_defs(ws, &runtime_refs));
+    // Everything from here on is generated glue rather than cached chunks, so
+    // its leaf ctor calls are read from the text.
+    let glue_start = asm.out.len();
     let sims = match (cache.build_kind, cache.selected_sim_functions.as_ref()) {
         (BuildKind::Program, Some(selected)) => SimValues::Selected(selected),
         (BuildKind::Program, None) => SimValues::All,
@@ -1093,6 +1125,15 @@ pub(super) fn assemble(
         has_definition_plan,
         lifecycle_plan.census.declarations > 0,
     )?;
+    let mut glue_calls = Vec::new();
+    crate::push_leaf_ctor_calls(&asm.out[glue_start..], &mut glue_calls);
+    runtime_refs.extend(glue_calls);
+    runtime_refs.extend(host_accessor_leaf_ctors(ws, scx));
+    asm.out.insert_str(
+        leaf_ctors_at,
+        &crate::leaf_ctor_defs(&leaf_ctors, &runtime_refs),
+    );
+    cache.leaf_ctors = leaf_ctors;
     step("assembly: initializers", &mut steps);
     let mut phases = asm.phases();
 

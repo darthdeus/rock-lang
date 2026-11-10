@@ -207,6 +207,7 @@ pub(super) fn emit_lowered(
     }
     out.calls = skull_mir::reach::call_targets(mf);
     out.global_names = skull_mir::reach::global_ref_names(mf);
+    crate::push_leaf_ctor_calls(&lua, &mut out.global_names);
     out.comptime_reads = mf.comptime_reads.clone();
     out.lua = lua;
     out.code_artifact = skull_mir::code_identity::CodeArtifact::from_mir_tree_with_volatile_vars(
