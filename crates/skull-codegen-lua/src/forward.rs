@@ -2,21 +2,18 @@
 
 use super::*;
 
-/// Cells REFERENCED (Load/Store/`MapNext` or multi-return dest) anywhere the top
-/// scope rooted at `entry` emits. Hoisted closure bodies are separate ordinary
-/// MirFuncs, so the declaration walk only follows this function's CFG.
+/// Cells REFERENCED (Load/Store/`MapNext` or multi-return dest) anywhere the
+/// blocks of `scope` emit, as a dense `raw(cell) -> bool`. Hoisted closure
+/// bodies are separate ordinary MirFuncs, so the declaration walk only covers
+/// this function's reachable blocks.
 pub(crate) fn referenced_cells_in_region(
     func: &MirFunc,
-    entry: Idx<Block>,
+    scope: &[Idx<Block>],
     tail_forwards: &[Option<TailForward>],
     suppressed: &[bool],
-) -> HashSet<Idx<Cell>> {
-    let mut seen = vec![false; func.blocks.len()];
-    let mut stack = Vec::with_capacity(func.blocks.len());
-    stack.push(entry);
-    seen[raw(entry) as usize] = true;
-    let mut cells: HashSet<Idx<Cell>> = HashSet::default();
-    while let Some(b) = stack.pop() {
+) -> Vec<bool> {
+    let mut cells = vec![false; func.cells.len()];
+    for &b in scope {
         let tail = tail_forwards[raw(b) as usize].as_ref();
         for (position, &iid) in func.blocks[b].insts.iter().enumerate() {
             if tail.is_some_and(|tail| position >= tail.first_suppressed) {
@@ -25,32 +22,22 @@ pub(crate) fn referenced_cells_in_region(
             if suppressed[raw(iid) as usize] {
                 continue;
             }
+            let mut mark = |c: Idx<Cell>| cells[raw(c) as usize] = true;
             match &func.insts[iid] {
-                Inst::Load(c) => {
-                    cells.insert(*c);
-                }
-                Inst::Store { cell, .. } => {
-                    cells.insert(*cell);
-                }
+                Inst::Load(c) => mark(*c),
+                Inst::Store { cell, .. } => mark(*cell),
                 Inst::MapNext {
                     key_cell, val_cell, ..
                 } => {
-                    cells.insert(*key_cell);
-                    cells.insert(*val_cell);
+                    mark(*key_cell);
+                    mark(*val_cell);
                 }
                 Inst::CallMulti { dests, .. }
                 | Inst::CallValueMulti { dests, .. }
-                | Inst::CallBoundMulti { dests, .. } => cells.extend(dests.iter().copied()),
+                | Inst::CallBoundMulti { dests, .. } => dests.iter().copied().for_each(mark),
                 _ => {}
             }
         }
-        successors(&func.blocks[b].term, |s| {
-            let seen = &mut seen[raw(s) as usize];
-            if !*seen {
-                *seen = true;
-                stack.push(s);
-            }
-        });
     }
     cells
 }

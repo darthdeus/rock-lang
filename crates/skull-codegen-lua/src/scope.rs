@@ -65,11 +65,14 @@ pub(crate) fn render_scope(
     // blow LuaJIT's 200-local cap on a large co-fn step). Computed once per top
     // scope; inline (non-`is_top`) renders declare nothing, so they skip it.
     let referenced = if is_top {
-        referenced_cells_in_region(func, entry, tail_forwards, suppressed)
+        referenced_cells_in_region(func, rpo, tail_forwards, suppressed)
     } else {
-        HashSet::default()
+        vec![false; func.cells.len()]
     };
-    let param_cells: HashSet<Idx<Cell>> = params.iter().copied().collect();
+    let mut param_cells = vec![false; func.cells.len()];
+    for &c in params {
+        param_cells[raw(c) as usize] = true;
+    }
     let is_frame = |c: &Idx<Cell>| frame.is_some_and(|f| f.fields.contains(c));
     // THE one answer to "does this cell render as a bare `c<..>` local here" --
     // read by the nil-kill exclusion just below and by the declaration loop that
@@ -77,7 +80,8 @@ pub(crate) fn render_scope(
     // name instead: a store the pass never intended, which under the `_G` state
     // bridge costs a `__newindex` metamethod dispatch on every execution.
     let cell_has_local = |cid: Idx<Cell>| -> bool {
-        param_cells.contains(&cid) || (is_top && !is_frame(&cid) && referenced.contains(&cid))
+        param_cells[raw(cid) as usize]
+            || (is_top && !is_frame(&cid) && referenced[raw(cid) as usize])
     };
     // Where each declared local dies, for the `<local> = nil` kills that keep
     // dead slots out of LuaJIT exit snapshots (see `regalloc::nil_kills`). A
@@ -232,7 +236,7 @@ pub(crate) fn render_scope(
             .collect();
         let mut seen_color: HashSet<u32> = HashSet::default();
         for (cid, _) in func.cells.iter() {
-            if param_cells.contains(&cid) || !cell_has_local(cid) {
+            if param_cells[raw(cid) as usize] || !cell_has_local(cid) {
                 continue;
             }
             let (decl, col) = match cell_colors[raw(cid) as usize] {

@@ -11,11 +11,7 @@ pub(crate) use skull_mir::sinking::always_inlinable;
 /// which is what pushed functions holding a few wide values past LuaJIT's
 /// 250-slot frame limit. No later write can intervene, because the one write
 /// dominates every read. Narrow receives qualify too.
-fn single_receive_cells(
-    func: &MirFunc,
-    scope: &[Idx<Block>],
-    pinned: &[bool],
-) -> HashSet<Idx<Cell>> {
+fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>], pinned: &[bool]) -> Vec<bool> {
     // cell -> (defs, the receive's block and position). Only a receive records
     // a position, so a cell qualifies iff its one def is one.
     let mut defs: Vec<(u32, Option<(Idx<Block>, usize)>)> = vec![(0, None); func.cells.len()];
@@ -46,26 +42,29 @@ fn single_receive_cells(
             .values()
             .any(|plan| plan.captures_cell(cell) || plan.env_cell() == Some(cell))
     };
-    let mut out: HashSet<Idx<Cell>> = func
-        .cells
-        .iter()
-        .map(|(cell, _)| cell)
-        .filter(|cell| {
-            let (count, at) = defs[raw(*cell) as usize];
-            count == 1 && at.is_some() && !pinned[raw(*cell) as usize] && !captured(*cell)
-        })
-        .collect();
+    let mut out = vec![false; func.cells.len()];
+    let mut any = false;
+    for (cell, _) in func.cells.iter() {
+        let (count, at) = defs[raw(cell) as usize];
+        if count == 1 && at.is_some() && !pinned[raw(cell) as usize] && !captured(cell) {
+            out[raw(cell) as usize] = true;
+            any = true;
+        }
+    }
+    if !any {
+        return out;
+    }
     for &b in scope {
         for (pos, &id) in func.blocks[b].insts.iter().enumerate() {
             regalloc::cell_uses(&func.insts[id], &mut |cell| {
-                if !out.contains(&cell) {
+                if !out[raw(cell) as usize] {
                     return;
                 }
                 let Some((_, Some((def_block, def_pos)))) = defs.get(raw(cell) as usize) else {
                     return;
                 };
                 if *def_block != b || *def_pos >= pos || !matches!(func.insts[id], Inst::Load(_)) {
-                    out.remove(&cell);
+                    out[raw(cell) as usize] = false;
                 }
             });
         }
@@ -94,12 +93,15 @@ pub(crate) fn compute_inlinable(
     let mut use_count = vec![0u32; ni];
     let mut use_block = vec![NONE; ni];
     let mut def_block = vec![NONE; ni];
-    let mut immutable_params: HashSet<Idx<Cell>> = params.iter().copied().collect();
+    let mut immutable_params = vec![false; func.cells.len()];
+    for &cell in params {
+        immutable_params[raw(cell) as usize] = true;
+    }
     for &b in scope {
         let br = raw(b);
         for &id in &func.blocks[b].insts {
             func.insts[id].cell_writes_each(&mut |cell| {
-                immutable_params.remove(&cell);
+                immutable_params[raw(cell) as usize] = false;
             });
             if func.insts[id].produces_value() {
                 def_block[raw(id) as usize] = br;
@@ -132,7 +134,8 @@ pub(crate) fn compute_inlinable(
             let k = raw(id) as usize;
             let parameter_load = matches!(
                 &func.insts[id],
-                Inst::Load(cell) if immutable_params.contains(cell) || received.contains(cell)
+                Inst::Load(cell)
+                    if immutable_params[raw(*cell) as usize] || received[raw(*cell) as usize]
             );
             repeatable[k] = parameter_load;
             if parameter_load
