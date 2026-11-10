@@ -61,8 +61,8 @@ fn lowered_values_first_class_body(ws: &Workspace, name: &str) -> MirFunc {
 fn dispatched_in(ws: &Workspace, name: &str) -> Vec<&'static str> {
     fn walk(mf: &MirFunc, out: &mut Vec<&'static str>) {
         for c in mf.call_sites.values() {
-            if let SiteOp::Dispatched { name, .. } = c.site.op {
-                out.push(name);
+            if let SiteOp::Dispatched(op) = &c.site.op {
+                out.push(op.name);
             }
         }
         for nf in &mf.nested_fns {
@@ -79,9 +79,10 @@ fn dispatched_instance_names_in(ws: &Workspace, name: &str) -> Vec<(String, Stri
     let mf = prepared_body(ws, name);
     let mut out = Vec::new();
     for (&id, site) in &mf.call_sites {
-        let SiteOp::Dispatched { name, .. } = site.site.op else {
+        let SiteOp::Dispatched(op) = &site.site.op else {
             continue;
         };
+        let name = op.name;
         let callee = mf
             .callee_instances
             .get(&id)
@@ -114,8 +115,8 @@ fn walk_dispatched_in(ws: &Workspace, name: &str) -> Vec<&'static str> {
             continue;
         }
         for site in sites.keys() {
-            if let SiteOp::Dispatched { name, .. } = site.op {
-                out.push(name);
+            if let SiteOp::Dispatched(op) = &site.op {
+                out.push(op.name);
             }
         }
     }
@@ -368,7 +369,7 @@ fn main() { print(show([V2 { x: 1.0, y: 2.0 }])) }
         "the hole's bounded user call must retain its own tree"
     );
     assert!(mf.call_sites.iter().all(|(id, site)| {
-        !matches!(site.site.op, SiteOp::Dispatched { .. }) || !mf.bound_trees.contains_key(id)
+        !matches!(site.site.op, SiteOp::Dispatched(_)) || !mf.bound_trees.contains_key(id)
     }));
 }
 
@@ -571,7 +572,7 @@ fn main() { print("{same(Point { x: 1, y: 2 }, Point { x: 1, y: 2 })}") }
     assert!(
         mf.call_sites
             .values()
-            .all(|site| !matches!(site.site.op, SiteOp::Dispatched { .. })),
+            .all(|site| !matches!(site.site.op, SiteOp::Dispatched(_))),
         "the target-neutral graph records no dispatched helper for nobox equality"
     );
 }

@@ -258,7 +258,7 @@ fn a_site() -> Site {
 }
 
 fn defaults_domain(args: Vec<MonoTy>) -> SiteDomain {
-    SiteDomain::StructDefaults(
+    SiteDomain::struct_defaults(
         bone_semantic::prelude::ModuleId::builtin(),
         bone_semantic::prelude::Idx::from_raw(0u32.into()),
         args,
@@ -692,13 +692,13 @@ fn arms() -> Vec<Arm> {
         |g| {
             let r = resolved_site(g, 0);
             let mut s = a_site();
-            s.op = SiteOp::BoundNext(vec![0]);
+            s.op = SiteOp::BoundNext(vec![0].into());
             put_site(g, s, r);
         },
         |g| {
             let r = resolved_site(g, 0);
             let mut s = a_site();
-            s.op = SiteOp::BoundNext(vec![1]);
+            s.op = SiteOp::BoundNext(vec![1].into());
             put_site(g, s, r);
         },
     ));

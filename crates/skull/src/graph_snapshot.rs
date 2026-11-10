@@ -139,11 +139,12 @@ fn span_key(s: &Span) -> String {
 fn site_key(s: &Site) -> String {
     let domain = match &s.domain {
         SiteDomain::Own => "own".to_string(),
-        SiteDomain::StructDefaults(m, d, args) => format!(
+        SiteDomain::StructDefaults(d) => format!(
             "defaults({}.{}<{}>)",
-            m.index(),
-            d.into_raw().into_u32(),
-            args.iter()
+            d.module.index(),
+            d.def.into_raw().into_u32(),
+            d.args
+                .iter()
                 .map(|a| a.canonical())
                 .collect::<Vec<_>>()
                 .join(","),
@@ -157,7 +158,7 @@ fn site_key(s: &Site) -> String {
         SiteOp::ForNext(path) => format!("for-next{}", path_key(path)),
         SiteOp::BoundNext(path) => format!("bound-next{}", path_key(path)),
         SiteOp::Synthesized(name) => format!("synthesized({name})"),
-        SiteOp::Dispatched { name, path } => format!("dispatched({name}){}", path_key(path)),
+        SiteOp::Dispatched(d) => format!("dispatched({}){}", d.name, path_key(&d.path)),
     };
     format!("{domain}/{}/{op}", s.expr.into_raw().into_u32())
 }

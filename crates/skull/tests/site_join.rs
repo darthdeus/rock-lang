@@ -235,22 +235,22 @@ fn one_expression_under_different_operations_stays_distinct() {
         Site {
             domain: SiteDomain::Own,
             expr: e,
-            op: SiteOp::ForNext(vec![]),
+            op: SiteOp::ForNext(vec![].into()),
         },
         Site {
             domain: SiteDomain::Own,
             expr: e,
-            op: SiteOp::ForNext(vec![0]),
+            op: SiteOp::ForNext(vec![0].into()),
         },
         Site {
             domain: SiteDomain::Own,
             expr: e,
-            op: SiteOp::BoundNext(vec![]),
+            op: SiteOp::BoundNext(vec![].into()),
         },
         Site {
             domain: SiteDomain::Own,
             expr: e,
-            op: SiteOp::BoundNext(vec![0]),
+            op: SiteOp::BoundNext(vec![0].into()),
         },
         Site {
             domain: SiteDomain::Own,
@@ -283,12 +283,12 @@ fn one_expression_under_different_operations_stays_distinct() {
         Site {
             domain: SiteDomain::Own,
             expr: e,
-            op: SiteOp::ForNext(vec![0])
+            op: SiteOp::ForNext(vec![0].into())
         },
         Site {
             domain: SiteDomain::Own,
             expr: e,
-            op: SiteOp::BoundNext(vec![0])
+            op: SiteOp::BoundNext(vec![0].into())
         },
     );
 }

@@ -256,7 +256,7 @@ impl<'a> Builder<'a> {
         // the witness result plan states how many values come back, so the two
         // lowering sides agree without re-deriving the shape.
         let concrete_next = if matches!(info.next, BoundNext::Concrete { .. }) {
-            self.with_site_op(crate::site::SiteOp::ForNext(Vec::new()), |b| {
+            self.with_site_op(crate::site::SiteOp::ForNext(Box::default()), |b| {
                 b.concrete_callee_for_site(iter_expr)
             })?
             .ok_or_else(|| gap("for-next has no concrete callee"))?
@@ -316,7 +316,7 @@ impl<'a> Builder<'a> {
                 // `_data` that column storage does not have.
                 // The `for` protocol's `next` witness -- the sibling of the
                 // `ForIter` above at the SAME expression.
-                let call = self.with_site_op(crate::site::SiteOp::ForNext(Vec::new()), |b| {
+                let call = self.with_site_op(crate::site::SiteOp::ForNext(Box::default()), |b| {
                     b.emit_cur(Inst::CallMulti {
                         dests: dests.clone(),
                         func,
@@ -345,7 +345,7 @@ impl<'a> Builder<'a> {
                 // above carries, at the same expression -- so it takes the same
                 // operation. Without it the witness is recorded on one arm and
                 // invisible on the other.
-                let call = self.with_site_op(crate::site::SiteOp::ForNext(Vec::new()), |b| {
+                let call = self.with_site_op(crate::site::SiteOp::ForNext(Box::default()), |b| {
                     b.emit_cur(Inst::CallBoundMulti {
                         dests: dests.clone(),
                         generic_idx: *gidx as u32,

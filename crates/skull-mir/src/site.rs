@@ -27,7 +27,10 @@ use bone_core::hir::Expr;
 use bone_core::prelude::Idx;
 
 /// WHICH operation of a body a callee was resolved for.
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+///
+/// The paths are boxed slices and the rare dispatched payload is boxed, so a
+/// [`Site`] stays small: the graph and every concrete plan key a map by it.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SiteOp {
     /// A call expression bone resolved (`resolved_overload_calls`).
     DirectCall,
@@ -37,14 +40,14 @@ pub enum SiteOp {
     ForIter,
     /// The `for` protocol's `next` witness, and the conformance path beneath it
     /// (`BoundNext::sub`). Empty path is the outermost witness.
-    ForNext(Vec<usize>),
+    ForNext(Box<[usize]>),
     /// An iterable argument coerced through `iter()` at an `Iterator`-bounded
     /// parameter.
     ImplicitIter,
     /// A witness from a bounded CALL's conformance tree, by path. Kept apart
     /// from [`Self::ForNext`] because a `for` over a bounded call has both, at
     /// the same expression and with the same paths.
-    BoundNext(Vec<usize>),
+    BoundNext(Box<[usize]>),
     /// A call lowering synthesizes, named EXACTLY -- see
     /// `skull::instance_graph::COMPILER_GENERATED_TRIGGERS`.
     Synthesized(&'static str),
@@ -57,7 +60,41 @@ pub enum SiteOp {
     /// ONE name: a nobox value renders one call per leaf FIELD, and the field
     /// index chain is what keeps them distinct. An empty path is the hole
     /// itself.
-    Dispatched { name: &'static str, path: Vec<u32> },
+    Dispatched(Box<DispatchedOp>),
+}
+
+/// The payload of [`SiteOp::Dispatched`].
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DispatchedOp {
+    pub name: &'static str,
+    pub path: Vec<u32>,
+}
+
+impl SiteOp {
+    pub fn dispatched(name: &'static str, path: Vec<u32>) -> Self {
+        Self::Dispatched(Box::new(DispatchedOp { name, path }))
+    }
+}
+
+// Spelled as the unboxed variants were, so a site's rendering does not depend
+// on how it is stored.
+impl std::fmt::Debug for SiteOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DirectCall => f.write_str("DirectCall"),
+            Self::FnValue => f.write_str("FnValue"),
+            Self::ForIter => f.write_str("ForIter"),
+            Self::ForNext(path) => f.debug_tuple("ForNext").field(&path.to_vec()).finish(),
+            Self::ImplicitIter => f.write_str("ImplicitIter"),
+            Self::BoundNext(path) => f.debug_tuple("BoundNext").field(&path.to_vec()).finish(),
+            Self::Synthesized(name) => f.debug_tuple("Synthesized").field(name).finish(),
+            Self::Dispatched(op) => f
+                .debug_struct("Dispatched")
+                .field("name", &op.name)
+                .field("path", &op.path)
+                .finish(),
+        }
+    }
 }
 
 impl SiteOp {
@@ -70,7 +107,7 @@ impl SiteOp {
             Self::ImplicitIter => "implicit-iter",
             Self::BoundNext(_) => "bound-next",
             Self::Synthesized(_) => "synthesized",
-            Self::Dispatched { .. } => "dispatched",
+            Self::Dispatched(_) => "dispatched",
         }
     }
 }
@@ -87,7 +124,7 @@ impl SiteOp {
 ///
 /// The domain is part of the KEY, not a flag beside it, so the two arenas
 /// cannot collide even when they hand out the same numeric index.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub enum SiteDomain {
     /// The owner instance's own body.
     Own,
@@ -100,11 +137,40 @@ pub enum SiteDomain {
     /// initializers and resolve `seed<int>` and `seed<string>` from them, so a
     /// declaration-keyed domain collapses two obligations onto one and the
     /// second silently reads the first's answer.
-    StructDefaults(
-        bone_core::prelude::ModuleId,
-        Idx<bone_core::hir::StructDef>,
-        Vec<crate::monoty::MonoTy>,
-    ),
+    StructDefaults(Box<StructDefaultsDomain>),
+}
+
+/// The payload of [`SiteDomain::StructDefaults`], boxed because almost every
+/// site is [`SiteDomain::Own`].
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct StructDefaultsDomain {
+    pub module: bone_core::prelude::ModuleId,
+    pub def: Idx<bone_core::hir::StructDef>,
+    pub args: Vec<crate::monoty::MonoTy>,
+}
+
+impl SiteDomain {
+    pub fn struct_defaults(
+        module: bone_core::prelude::ModuleId,
+        def: Idx<bone_core::hir::StructDef>,
+        args: Vec<crate::monoty::MonoTy>,
+    ) -> Self {
+        Self::StructDefaults(Box::new(StructDefaultsDomain { module, def, args }))
+    }
+}
+
+impl std::fmt::Debug for SiteDomain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Own => f.write_str("Own"),
+            Self::StructDefaults(d) => f
+                .debug_tuple("StructDefaults")
+                .field(&d.module)
+                .field(&d.def)
+                .field(&d.args)
+                .finish(),
+        }
+    }
 }
 
 impl SiteDomain {
@@ -117,7 +183,7 @@ impl SiteDomain {
     fn ord_key(&self) -> (u8, usize, u32, &[crate::monoty::MonoTy]) {
         match self {
             Self::Own => (0, 0, 0, &[]),
-            Self::StructDefaults(m, d, args) => (1, m.index(), d.into_raw().into_u32(), args),
+            Self::StructDefaults(d) => (1, d.module.index(), d.def.into_raw().into_u32(), &d.args),
         }
     }
 }
@@ -206,4 +272,12 @@ pub fn record_call_owner(
 pub struct CallSite {
     pub owner: OwnerRef,
     pub site: Site,
+}
+
+#[cfg(test)]
+mod size {
+    #[test]
+    fn a_site_is_five_words() {
+        assert_eq!(std::mem::size_of::<super::Site>(), 40);
+    }
 }

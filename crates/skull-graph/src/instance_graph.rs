@@ -232,8 +232,8 @@ impl BoundRoot {
             domain,
             expr,
             op: match self {
-                Self::For => SiteOp::ForNext(path),
-                Self::Call => SiteOp::BoundNext(path),
+                Self::For => SiteOp::ForNext(path.into()),
+                Self::Call => SiteOp::BoundNext(path.into()),
             },
         }
     }
@@ -5712,7 +5712,7 @@ fn walk_struct_default_edges(
         // The initializers resolve under the STRUCT's slot bindings, not the
         // enclosing instance's -- the two are keyed in different bodies.
         let inner = skull_mir::struct_defaults::slot_subst(Some(inf), &args);
-        let domain = SiteDomain::StructDefaults(module, def, args);
+        let domain = SiteDomain::struct_defaults(module, def, args);
         w.out.struct_default_domains.insert(domain.clone());
         walk_body_edges(
             w,
@@ -6585,7 +6585,7 @@ fn dispatched_sites(
                                 Site {
                                     domain: domain.clone(),
                                     expr: *hole,
-                                    op: SiteOp::Dispatched { name, path },
+                                    op: SiteOp::dispatched(name, path),
                                 },
                                 name,
                             ));
@@ -6603,7 +6603,7 @@ fn dispatched_sites(
                             Site {
                                 domain: domain.clone(),
                                 expr: arg,
-                                op: SiteOp::Dispatched { name, path },
+                                op: SiteOp::dispatched(name, path),
                             },
                             name,
                         ));
@@ -6620,10 +6620,7 @@ fn dispatched_sites(
                         Site {
                             domain: domain.clone(),
                             expr: e,
-                            op: SiteOp::Dispatched {
-                                name,
-                                path: Vec::new(),
-                            },
+                            op: SiteOp::dispatched(name, Vec::new()),
                         },
                         name,
                     ));

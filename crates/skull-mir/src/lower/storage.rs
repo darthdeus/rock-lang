@@ -1839,7 +1839,7 @@ impl<'a> Builder<'a> {
         let expr = self
             .cur_expr
             .ok_or_else(|| gap(format!("dispatch helper `{name}` has no source expression")))?;
-        self.with_site_op(crate::site::SiteOp::Dispatched { name, path }, |b| {
+        self.with_site_op(crate::site::SiteOp::dispatched(name, path), |b| {
             let direct = b.plan_direct_call(expr)?;
             let call = b.emit_cur(Inst::Call { func, args });
             b.record_call(call, func, &direct)?;

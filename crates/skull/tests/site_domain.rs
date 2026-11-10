@@ -329,7 +329,7 @@ fn main() {
     let stamped = stamped_domains(&ws, "main");
     let defaults: Vec<&(SiteDomain, u32)> = stamped
         .iter()
-        .filter(|(d, _)| matches!(d, SiteDomain::StructDefaults { .. }))
+        .filter(|(d, _)| matches!(d, SiteDomain::StructDefaults(..)))
         .collect();
     assert_eq!(
         defaults.len(),
@@ -353,7 +353,7 @@ fn main() {
     let args: Vec<&Vec<skull_mir::monoty::MonoTy>> = defaults
         .iter()
         .map(|(d, _)| match d {
-            SiteDomain::StructDefaults(_, _, a) => a,
+            SiteDomain::StructDefaults(d) => &d.args,
             SiteDomain::Own => unreachable!("filtered above"),
         })
         .collect();

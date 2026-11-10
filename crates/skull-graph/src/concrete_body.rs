@@ -1999,7 +1999,8 @@ fn publish_foreign_domains(
                 let mut domain_stats = ConcreteBuildStats::default();
                 let result = match &domain {
                     SiteDomain::Own => unreachable!("own domains are filtered above"),
-                    SiteDomain::StructDefaults(module, def, args) => {
+                    SiteDomain::StructDefaults(defaults) => {
+                        let (module, def, args) = (&defaults.module, &defaults.def, &defaults.args);
                         let owner = BodyOwner::StructDefaults(*def);
                         ws.module(*module)
                             .bodies
