@@ -190,4 +190,11 @@ mod sequential_par {
         }
     }
     impl<I: Iterator> SeqCollectVecList for I {}
+
+    pub trait SeqFindMapFirst: Iterator + Sized {
+        fn find_map_first<B>(mut self, f: impl FnMut(Self::Item) -> Option<B>) -> Option<B> {
+            self.find_map(f)
+        }
+    }
+    impl<I: Iterator> SeqFindMapFirst for I {}
 }
