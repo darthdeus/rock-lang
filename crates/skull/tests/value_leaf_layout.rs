@@ -231,3 +231,119 @@ fn layout_checks_share_one_failure_path() {
         "{out}"
     );
 }
+
+/// A nested leaf is also read through its flattened alias, so the alias must
+/// sit at the same offset as the leaf it stands for.
+#[test]
+fn a_nested_leaf_alias_at_another_offset_fails_the_load() {
+    let lua = crate::common::emit_module(LAYOUT_PROGRAM);
+    let alias = |path: &str| {
+        let hex: String = path.bytes().map(|b| format!("{b:02x}")).collect();
+        format!("__rock_leaf_{hex}")
+    };
+    let (a, b) = (alias("inner.a"), alias("inner.b"));
+    let flat = format!("double {a}; int {b};");
+    assert!(lua.contains(&flat), "no flattened alias `{flat}`:\n{lua}");
+    let swapped = lua.replace(&flat, &format!("int {b}; double {a};"));
+    let (ok, out) = crate::common::run_luajit_capturing(&swapped);
+    assert!(
+        !ok && out.contains(&format!("skull leaf alias drift: Outer.{a}")),
+        "{out}"
+    );
+}
+
+fn layout_check_line<'a>(lua: &'a str, sym: &str) -> &'a str {
+    let head = format!("__rock_layout_check(\"{sym}\"");
+    lua.lines()
+        .find(|line| line.starts_with(&head))
+        .unwrap_or_else(|| panic!("no {sym} layout check:\n{lua}"))
+}
+
+const MUTATION_PROGRAM: &str = r#"
+nobox value Inner { a: float, b: int }
+nobox value Outer { inner: Inner, c: float, e: float, d: int }
+fn main() {
+    let o = Outer { inner: Inner { a: 1.0, b: 2 }, c: 3.0, e: 5.0, d: 4 }
+    print(o.inner.b + o.d)
+}
+"#;
+
+/// Corrupt the C side of the emitted program one way at a time -- the cdef
+/// LuaJIT lays out, never the compiler's expected offsets -- and require the
+/// load to fail with the diagnostic that names what moved. These edits do not
+/// depend on how the checks are encoded.
+fn assert_load_fails(lua: &str, edits: &[(&str, &str)], message: &str) {
+    let mut edited = lua.to_string();
+    for (from, to) in edits {
+        assert_eq!(edited.matches(from).count(), 1, "`{from}` in:\n{lua}");
+        edited = edited.replace(from, to);
+    }
+    let (ok, out) = crate::common::run_luajit_capturing(&edited);
+    assert!(
+        !ok && out.contains(message),
+        "expected `{message}`, got:\n{out}"
+    );
+}
+
+#[test]
+fn a_layout_mutation_fixture_loads_unmodified() {
+    let lua = crate::common::emit_module(MUTATION_PROGRAM);
+    assert_eq!(crate::common::run_main(&lua), "6");
+}
+
+#[test]
+fn a_moved_flat_leaf_fails_the_load() {
+    let lua = crate::common::emit_module(MUTATION_PROGRAM);
+    assert_load_fails(
+        &lua,
+        &[("  double c;\n  double e;\n", "  double e;\n  double c;\n")],
+        "skull layout drift: Outer.c at 24, expected 16",
+    );
+}
+
+#[test]
+fn a_moved_nested_leaf_alias_fails_the_load() {
+    let lua = crate::common::emit_module(MUTATION_PROGRAM);
+    let (a, b) = ("__rock_leaf_696e6e65722e61", "__rock_leaf_696e6e65722e62");
+    assert_load_fails(
+        &lua,
+        &[(
+            &format!("double {a}; int {b};"),
+            &format!("int {b}; double {a};"),
+        )],
+        &format!("skull leaf alias drift: Outer.{a}"),
+    );
+}
+
+/// The embedding struct composes offsets through the nested type, so a
+/// nested type laid out differently fails the embedding struct's own check
+/// even when the nested type's check is gone.
+#[test]
+fn a_reordered_embedded_type_fails_the_load() {
+    let lua = crate::common::emit_module(MUTATION_PROGRAM);
+    let reorder = (
+        "  double a;\n  int b;\n} Inner;",
+        "  int b;\n  double a;\n} Inner;",
+    );
+    assert_load_fails(
+        &lua,
+        &[reorder],
+        "skull layout drift: Inner.a at 8, expected 0",
+    );
+    let inner_check = layout_check_line(&lua, "Inner");
+    assert_load_fails(
+        &lua,
+        &[reorder, (&format!("{inner_check}\n"), "")],
+        "skull layout drift: Outer.inner.a at 8, expected 0",
+    );
+}
+
+#[test]
+fn a_grown_struct_fails_the_load() {
+    let lua = crate::common::emit_module(MUTATION_PROGRAM);
+    assert_load_fails(
+        &lua,
+        &[("  int d;\n} Outer;", "  int d;\n  double pad;\n} Outer;")],
+        "skull layout drift: sizeof(Outer) = 48, expected 40",
+    );
+}
