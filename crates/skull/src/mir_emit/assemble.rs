@@ -1085,20 +1085,25 @@ pub(super) fn assemble(
         view_driven_specialized_chunks(ws, &cache.cg, &cache.scx, cache, &asm.needed_specs)
     });
     step("assembly: specialized chunks", &mut steps);
-    let needed_foreign = collect_needed_foreign(ws, cache, &asm.always_emitted_calls, &spec_chunks);
+    let needed_foreign =
+        || collect_needed_foreign(ws, cache, &asm.always_emitted_calls, &spec_chunks);
     // Factory lowering is the last concrete-plan reader. Keep its text in the
     // original output slot, but release one-shot plans before copying definitions.
-    let early_definition_stage = if lifetime == CacheLifetime::OneShot {
-        let plan = skull_mir::definition::collect_complete(ws)?;
-        let stage =
-            definition_plan_stage_lua(ws, &cache.cg, &cache.scx, &cache.concrete.plans, &plan)?;
+    let (needed_foreign, early_definition_stage) = if lifetime == CacheLifetime::OneShot {
+        let (needed_foreign, stage) = parallel_join(needed_foreign, || {
+            let plan = skull_mir::definition::collect_complete(ws)?;
+            let concrete = &cache.concrete.plans;
+            let stage = definition_plan_stage_lua(ws, &cache.cg, &cache.scx, concrete, &plan)?;
+            Ok::<_, CompilerError>((plan, stage))
+        });
+        let stage = stage?;
         let plans = cache.concrete.plans.len() + cache.concrete.always_plans.len();
         drop_in_background(std::mem::take(&mut cache.concrete));
         release_stats.concrete_plans =
             plans - cache.concrete.plans.len() - cache.concrete.always_plans.len();
-        Some((plan, stage))
+        (needed_foreign, Some(stage))
     } else {
-        None
+        (needed_foreign(), None)
     };
 
     let head = std::mem::take(&mut asm.out);
