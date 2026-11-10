@@ -1758,6 +1758,12 @@ fn vec_loop_is_counted_without_inlining() {
     );
     assert!(lua.contains("for "), "{lua}");
     assert!(!lua.contains("next") && !lua.contains("iter"), "{lua}");
+    let lua = emit_clean(
+        "fn sum_pairs(xs: [(int, int)]) -> int { let total = 0; for (a, b) in xs { total += a * b }; return total }",
+        "sum_pairs",
+    );
+    assert!(lua.contains("for "), "{lua}");
+    assert!(!lua.contains("next") && !lua.contains("iter"), "{lua}");
 }
 
 // --- Combinator chains flatten. The bounded

@@ -86,10 +86,10 @@ impl<'a> Builder<'a> {
         {
             // A plain `[T]` walks its storage directly: the stdlib `VecIter`
             // would only inline back into this counted loop. Shader lowering
-            // and tuple patterns keep the protocol.
+            // keeps the protocol.
             if !self.scx.values_first_class
                 && enumerated_collection.is_none()
-                && matches!(vars, BindingPattern::Leaf(b) if !self.binding_is_ref(b))
+                && vars.leaves().iter().all(|&b| !self.binding_is_ref(b))
                 && self.concrete_expr_ty(iter).is_some_and(|ty| {
                     matches!(
                         ty,
