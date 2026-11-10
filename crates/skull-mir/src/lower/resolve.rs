@@ -97,10 +97,29 @@ pub fn backend_variant_instance(
 /// `bone-inference/src/calls.rs`) and [`backend_variant_group`] owns the complete
 /// grouping rule, including bone's repeated-backend refusal.
 pub fn canonical_variant(ws: &Workspace, rep: FuncRef) -> FuncRef {
-    backend_variant_group(ws, rep)
-        .into_iter()
-        .min_by_key(|r| ws.module(r.module).functions[r.func].backend)
-        .expect("a variant group contains its requested member")
+    // `backend_variant_group` without its two allocations: every lowered call
+    // asks this, and most names have one member.
+    let key = ws.backend_variant_key(rep.module, rep.func);
+    let Some(cands) = ws.functions_by_name.get(&key.0) else {
+        return rep;
+    };
+    let mut seen = 0u8;
+    let mut best: Option<(bone_core::hir::FnBackend, FuncRef)> = None;
+    for &(module, func) in cands {
+        if ws.backend_variant_key(module, func) != key {
+            continue;
+        }
+        let backend = ws.module(module).functions[func].backend;
+        let bit = 1u8 << backend as u8;
+        if seen & bit != 0 {
+            return rep;
+        }
+        seen |= bit;
+        if best.is_none_or(|(least, _)| backend < least) {
+            best = Some((backend, FuncRef { module, func }));
+        }
+    }
+    best.map_or(rep, |(_, member)| member)
 }
 
 /// The backend-variant group containing `member`.
