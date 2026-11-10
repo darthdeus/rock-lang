@@ -548,6 +548,11 @@ impl Walk<'_, '_> {
         let then_empty = self.falls_to(then_bb, follow);
         let else_empty = self.falls_to(else_bb, follow);
         if then_empty && else_empty {
+            if self.em.folds_effect(cond) {
+                let mut lad = self.ladder();
+                self.write_cond(&mut lad, "if", cond, false);
+                self.ladder_end(lad);
+            }
             return;
         }
         let mut lad = self.ladder();

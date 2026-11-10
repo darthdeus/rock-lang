@@ -19,6 +19,18 @@ impl Emitter<'_> {
         }
     }
 
+    /// `id` renders in place and evaluates a call or a possible error, so a
+    /// construct that would drop the expression must still run it.
+    pub(crate) fn folds_effect(&self, id: Idx<Inst>) -> bool {
+        if !self.inlinable[raw(id) as usize] {
+            return false;
+        }
+        let inst = &self.func.insts[id];
+        let mut effect = skull_mir::sinking::may_throw(inst);
+        regalloc::inst_uses(inst, &mut |u| effect = effect || self.folds_effect(u));
+        effect
+    }
+
     pub(crate) fn write_kills(&self, out: &mut String, locals: &[regalloc::KillLocal]) {
         for local in locals {
             out.push(' ');

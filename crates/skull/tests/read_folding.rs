@@ -104,3 +104,26 @@ fn main() {
     assert!(body.contains("local _ = "), "{body}");
     assert_eq!(compile_and_run(src), "2");
 }
+
+#[test]
+fn folded_calls_stay_ordered_against_global_reads_and_empty_branches() {
+    let src = r#"
+global marks: int = 0
+fn bump(n: int) -> int { marks += 1; return n }
+fn maybe(n: int) -> int? { marks += 10; return n }
+fn global_after_call() -> int {
+    marks = 0
+    let r = bump(5) + 1
+    return r * 100 + marks
+}
+fn call_in_dropped_branch() -> int {
+    marks = 0
+    let unused = maybe(1) ?? -1
+    return marks
+}
+fn main() {
+    print("{global_after_call()} {call_in_dropped_branch()}")
+}
+"#;
+    assert_eq!(compile_and_run(src), "601 10");
+}
