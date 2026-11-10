@@ -186,6 +186,22 @@ pub trait CompileHost {
     /// report set and the closed-world flag; [`warm_module_ids`] and
     /// `bone_lints::lint_workspace` compute them.
     fn lint_findings(&mut self, ws: &Workspace) -> Vec<bone_lints::Finding>;
+    /// [`Self::checked_comptime_inputs`] and [`Self::lint_findings`] for one
+    /// checked workspace. Neither reads what the other produces, so a host
+    /// may run them side by side; the findings of a build whose inputs fail
+    /// are never read.
+    fn checked_inputs_and_lints(
+        &mut self,
+        ws: &Workspace,
+    ) -> (
+        Result<ComptimeInputs, CompilerError>,
+        Vec<bone_lints::Finding>,
+    ) {
+        match self.checked_comptime_inputs(ws) {
+            Ok(inputs) => (Ok(inputs), self.lint_findings(ws)),
+            Err(error) => (Err(error), Vec::new()),
+        }
+    }
     /// Present the findings that do not refuse the program.
     fn report_soft_findings(&mut self, soft: Vec<bone_lints::Finding>);
     /// Emit the checked program. The host selects the roots: a test build
@@ -304,13 +320,12 @@ pub fn compile_modules(
     // would otherwise stay live through the emission peak. Freeing them is
     // not this thread's work.
     crate::mir_emit::par::drop_in_background(modules);
-    ws.comptime_inputs = host
-        .checked_comptime_inputs(&ws)
-        .map_err(|e| CompileFailure::at(Stage::Comptime, vec![e]))?;
+    let (inputs, findings) = host.checked_inputs_and_lints(&ws);
+    ws.comptime_inputs = inputs.map_err(|e| CompileFailure::at(Stage::Comptime, vec![e]))?;
     let entry = ws.module_ids[&entry];
     // Lints are a compiler pass: an `Error` finding refuses the program
     // through the same path a type error takes.
-    let (lint_errors, soft) = split_findings(host.lint_findings(&ws));
+    let (lint_errors, soft) = split_findings(findings);
     host.report_soft_findings(soft);
     if !lint_errors.is_empty() {
         return Err(CompileFailure::at(Stage::Lint, lint_errors));

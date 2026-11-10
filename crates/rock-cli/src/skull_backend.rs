@@ -154,6 +154,26 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
         found
     }
 
+    fn checked_inputs_and_lints(
+        &mut self,
+        ws: &bone_semantic::inference::Workspace,
+    ) -> (
+        std::result::Result<bone_semantic::inference::ComptimeInputs, CompilerError>,
+        Vec<bone_lints::Finding>,
+    ) {
+        let (sources, root, scope) = (self.sources, self.lint_root, self.lint_scope);
+        let (inputs, (found, lints_time)) = bone_core::prelude::par_join(
+            || self.checked_comptime_inputs(ws),
+            || {
+                let timer = Instant::now();
+                let found = crate::lint_pass::findings(ws, sources, root, scope);
+                (found, timer.elapsed())
+            },
+        );
+        self.prepare_timings.push(("lints", lints_time));
+        (inputs, found)
+    }
+
     fn emit(
         &mut self,
         ws: &bone_semantic::inference::Workspace,
@@ -216,6 +236,16 @@ impl skull::pipeline::CompileHost for PackageTestHost<'_> {
         ws: &bone_semantic::inference::Workspace,
     ) -> Vec<bone_lints::Finding> {
         self.inner.lint_findings(ws)
+    }
+
+    fn checked_inputs_and_lints(
+        &mut self,
+        ws: &bone_semantic::inference::Workspace,
+    ) -> (
+        std::result::Result<bone_semantic::inference::ComptimeInputs, CompilerError>,
+        Vec<bone_lints::Finding>,
+    ) {
+        self.inner.checked_inputs_and_lints(ws)
     }
 
     fn report_soft_findings(&mut self, soft: Vec<bone_lints::Finding>) {
