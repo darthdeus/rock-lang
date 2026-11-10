@@ -221,16 +221,9 @@ pub(crate) fn collect_const_hoists(
     // from blocks, it does not free), and hoisting one emits a module-scope ctor
     // call for a value the program never builds -- which for a nobox type is a
     // materialization the verifier cannot see, since it walks `block.insts`.
-    let mut live = vec![false; func.insts.len()];
-    for (_, b) in func.blocks.iter() {
-        for &id in &b.insts {
-            live[raw(id) as usize] = true;
-        }
-    }
+    // Few bodies build a value at all, so the table waits for the first one.
+    let mut live: Option<Vec<bool>> = None;
     for (id, inst) in func.insts.iter() {
-        if !live[raw(id) as usize] {
-            continue;
-        }
         let Inst::MakeValueStruct {
             name,
             representation,
@@ -240,6 +233,18 @@ pub(crate) fn collect_const_hoists(
         else {
             continue;
         };
+        let live = live.get_or_insert_with(|| {
+            let mut live = vec![false; func.insts.len()];
+            for (_, b) in func.blocks.iter() {
+                for &id in &b.insts {
+                    live[raw(id) as usize] = true;
+                }
+            }
+            live
+        });
+        if !live[raw(id) as usize] {
+            continue;
+        }
         // An int->float-subsumed constant field (`IntToFloat(Const)`) is still a
         // compile-time constant: hoist as its inner literal (identity on luajit),
         // so a `Vec2 { x: 0 }` ctor stays hoistable.
