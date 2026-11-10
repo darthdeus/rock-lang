@@ -2296,8 +2296,9 @@ fn skull_emit_project_with_inputs(
         log::error!(target: "SKULL", "cannot write allocation report for {}: {:#}", dir, e);
         crate::invocation_log::exit(1);
     }
+    let mut emit = emit;
     let emits_main = emit.emits_main;
-    let lua = emit.lua;
+    let lua = std::mem::take(&mut emit.lua);
     let compile = t.elapsed();
     crate::bone_backend::log_compile_stats(&sources, &ws, compile, compile, None);
 
@@ -2314,17 +2315,17 @@ fn skull_emit_project_with_inputs(
         }
     };
     crate::compile_budget::phase("global accessors");
-    // The bone Workspace is dead once `lua` is built -- this is a terminal
-    // compile path (`compile`/`run` of a project; never looped in tests or
-    // backend-stats), so the only thing after this is the output write / a
-    // luajit exec / process exit. Hand the drop to the rayon pool so it overlaps
-    // that tail. `sources` (rock SourceFiles, RefCell-backed and ~0.01ms to
-    // drop) stays inline. `ws` is owned (bone has no Rc/RefCell), hence Send.
-    // A `sequential` build drops inline.
+    // The bone Workspace and the rest of the emission are dead once `lua` is
+    // built -- this is a terminal compile path (`compile`/`run` of a project;
+    // never looped in tests or backend-stats), so the only thing after this is
+    // the output write / a luajit exec / process exit. Hand the drop to the
+    // rayon pool so it overlaps that tail. `sources` (rock SourceFiles,
+    // RefCell-backed and ~0.01ms to drop) stays inline. A `sequential` build
+    // drops inline.
     #[cfg(not(feature = "sequential"))]
-    rayon::spawn(move || drop(ws));
+    rayon::spawn(move || drop((ws, emit)));
     #[cfg(feature = "sequential")]
-    drop(ws);
+    drop((ws, emit));
     Ok((lua, emits_main))
 }
 
