@@ -1160,7 +1160,7 @@ pub(super) fn emit_full_build(
     } = roots;
     let mut cache = SkullEmitCache {
         chunks,
-        leaf_ctors: Vec::new(),
+        value_ctors: Vec::new(),
         attribution,
         concrete,
         graph,

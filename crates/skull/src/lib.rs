@@ -1029,7 +1029,7 @@ fn cdata_alias_fields(
 fn value_struct_defs(
     ws: &Workspace,
     rep_arena: &skull_mir::lower::RepArena,
-    leaf_ctors: &mut LeafCtors,
+    value_ctors: &mut ValueCtors,
 ) -> Result<
     (
         String,
@@ -1119,7 +1119,7 @@ fn value_struct_defs(
                     )
                     .map_err(|e| CompilerError::new_no_location(e.message))?;
                 if paths.iter().any(|p| p.contains('.')) {
-                    leaf_ctors.push((
+                    value_ctors.push((
                         ustr::Ustr::from(&format!("{sym}_lct")),
                         leaf_ctor_def(ws, s.name, &paths),
                     ));
@@ -1263,7 +1263,7 @@ fn value_struct_gc_defs(
     ws: &Workspace,
     gc: &rustc_hash::FxHashSet<ustr::Ustr>,
     rep_arena: &skull_mir::lower::RepArena,
-    leaf_ctors: &mut LeafCtors,
+    value_ctors: &mut ValueCtors,
 ) -> Result<String, CompilerError> {
     let mut out = String::new();
     for s in canonical_value_structs(ws) {
@@ -1348,7 +1348,7 @@ fn value_struct_gc_defs(
                     format!("[\"{p}\"] = {v}, ")
                 })
                 .collect();
-            leaf_ctors.push((
+            value_ctors.push((
                 ustr::Ustr::from(&format!("{sym}_lct")),
                 format!(
                     "{sym}_lct = function({p})\n{r}\nend\n",
@@ -1431,12 +1431,15 @@ fn value_struct_gc_defs(
                 params.push(param);
             }
         }
-        out.push_str(&format!(
-            "{sym}_vt = function({p})\n{r}\nend\n",
-            p = params.join(", "),
-            r = skull_codegen_lua::wrapper_return(&format!(
-                "setmetatable({{ {body}__ty = \"{sym}\" }}, {mt})",
-            )),
+        value_ctors.push((
+            ustr::Ustr::from(&format!("{sym}_vt")),
+            format!(
+                "{sym}_vt = function({p})\n{r}\nend\n",
+                p = params.join(", "),
+                r = skull_codegen_lua::wrapper_return(&format!(
+                    "setmetatable({{ {body}__ty = \"{sym}\" }}, {mt})",
+                )),
+            ),
         ));
     }
     Ok(out)
@@ -1668,31 +1671,37 @@ fn value_struct_metatypes(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::
 /// []<TileType>` whose `TileType::Wall` entries would no longer `==` the
 /// freshly-created singleton -> walls silently stop rendering). A payload-free
 /// enum sidesteps this entirely: its values are ints, identity-free by nature.
-/// A value struct's leaf-taking constructor (`<Sym>_lct`) and its definition.
-/// Generated code is its only caller, so assembly defines just the ones the
-/// emitted text calls; each depends only on its struct's ctype or metatable.
-pub(crate) type LeafCtors = Vec<(ustr::Ustr, String)>;
+/// A value struct's table-building constructor (`<Sym>_lct` from leaves,
+/// `<Sym>_vt` for a GC table) and its definition. Generated code is its only
+/// caller, so assembly defines just the ones the emitted text calls; each
+/// depends only on its struct's ctype or metatable.
+pub(crate) type ValueCtors = Vec<(ustr::Ustr, String)>;
 
-pub(crate) fn is_leaf_ctor_global(name: &str) -> bool {
-    name.ends_with("_lct")
+const VALUE_CTOR_SUFFIXES: [&str; 2] = ["_lct", "_vt"];
+
+pub(crate) fn is_value_ctor_global(name: &str) -> bool {
+    VALUE_CTOR_SUFFIXES.iter().any(|s| name.ends_with(s))
 }
 
-/// Adds every `<Sym>_lct` that `lua` calls to `out`.
-pub(crate) fn push_leaf_ctor_calls(lua: &str, out: &mut Vec<ustr::Ustr>) {
-    for (at, _) in lua.match_indices("_lct(") {
-        let start = lua[..at]
-            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .map_or(0, |i| i + 1);
-        let name = ustr::Ustr::from(&lua[start..at + 4]);
-        if !out.contains(&name) {
-            out.push(name);
+/// Adds every value ctor that `lua` calls to `out`.
+pub(crate) fn push_value_ctor_calls(lua: &str, out: &mut Vec<ustr::Ustr>) {
+    for suffix in VALUE_CTOR_SUFFIXES {
+        let call = format!("{suffix}(");
+        for (at, _) in lua.match_indices(&call) {
+            let start = lua[..at]
+                .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .map_or(0, |i| i + 1);
+            let name = ustr::Ustr::from(&lua[start..at + suffix.len()]);
+            if !out.contains(&name) {
+                out.push(name);
+            }
         }
     }
 }
 
-/// The definitions of the leaf ctors in `called`, in scaffold order.
-pub(crate) fn leaf_ctor_defs(
-    defs: &LeafCtors,
+/// The definitions of the value ctors in `called`, in scaffold order.
+pub(crate) fn value_ctor_defs(
+    defs: &ValueCtors,
     called: &rustc_hash::FxHashSet<ustr::Ustr>,
 ) -> String {
     defs.iter()

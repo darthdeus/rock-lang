@@ -192,7 +192,7 @@ fn emit_coroutine_chunk(
     collect_abi_dependencies(mf, &mut abi_deps);
     deps.extend(abi_deps.keys().copied());
     let mut literal_globals = skull_mir::reach::global_ref_names(mf);
-    crate::push_leaf_ctor_calls(&lua, &mut literal_globals);
+    crate::push_value_ctor_calls(&lua, &mut literal_globals);
     Ok(Chunk {
         abi_deps,
         definition_count: lua_definition_count(&lua),
@@ -458,7 +458,7 @@ pub(super) fn emit_body_chunk_with_mutation(
     collect_abi_dependencies(&mf, &mut abi_deps);
     deps.extend(abi_deps.keys().copied());
     let mut literal_globals = skull_mir::reach::global_ref_names(&mf);
-    crate::push_leaf_ctor_calls(&lua, &mut literal_globals);
+    crate::push_value_ctor_calls(&lua, &mut literal_globals);
     Ok(Chunk {
         abi_deps,
         definition_count: lua_definition_count(&lua),
@@ -899,7 +899,7 @@ pub(super) fn emit_spec_chunk(
     let mut abi_deps = nested_abi_deps;
     collect_abi_dependencies(&mf, &mut abi_deps);
     deps.extend(abi_deps.keys().copied());
-    crate::push_leaf_ctor_calls(&lua, &mut literal_globals);
+    crate::push_value_ctor_calls(&lua, &mut literal_globals);
     Ok(Chunk {
         abi_deps,
         definition_count: lua_definition_count(&lua),

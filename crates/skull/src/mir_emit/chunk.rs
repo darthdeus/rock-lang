@@ -108,7 +108,7 @@ pub(super) struct LuaDefinitionWriter {
     section_start: usize,
     definitions_in_scope: usize,
     scoped: bool,
-    /// The enum names tables and leaf ctors the pushed chunks read.
+    /// The enum names tables and value ctors the pushed chunks read.
     runtime_refs: FxHashSet<Ustr>,
 }
 
@@ -160,7 +160,7 @@ impl LuaDefinitionWriter {
     pub(super) fn push_chunk(&mut self, chunk: &Chunk) {
         self.runtime_refs.extend(
             chunk.literal_globals.iter().filter(|name| {
-                crate::is_enum_names_global(name) || crate::is_leaf_ctor_global(name)
+                crate::is_enum_names_global(name) || crate::is_value_ctor_global(name)
             }),
         );
         self.push_counted(&chunk.lua, chunk.definition_count);

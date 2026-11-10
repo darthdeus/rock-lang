@@ -35,9 +35,9 @@ fn rebuild_chunk(
 /// [`assemble`] every time.
 pub struct SkullEmitCache {
     pub(super) chunks: FxHashMap<Instance, Result<Chunk, CompilerError>>,
-    /// Every leaf ctor definition of the last assembly, so an overlay can
+    /// Every value ctor definition of the last assembly, so an overlay can
     /// define one its new text calls.
-    pub(super) leaf_ctors: crate::LeafCtors,
+    pub(super) value_ctors: crate::ValueCtors,
     /// Whether assembly folds body attribution ([`FullEmit::with_attribution`]).
     pub(super) attribution: bool,
     pub(super) concrete: crate::concrete_body::ConcreteBodies,

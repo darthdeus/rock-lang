@@ -53,3 +53,20 @@ fn main() { print(HOVERED == null) }
     );
     assert!(lua.contains("\nPlace_lct = function("), "{lua}");
 }
+
+#[test]
+fn only_called_gc_value_ctors_are_defined() {
+    let lua = emit_module(
+        r#"
+value Named { name: string, n: int }
+value Spare { label: string, m: int }
+global G: Named = Named { name: "a", n: 1 }
+fn main() { print("{G.name}{G.n}") }
+"#,
+    );
+    let defined = |sym: &str| lua.contains(&format!("\n{sym}_vt = function("));
+    let called = |sym: &str| lua.contains(&format!("{sym}_vt("));
+    assert_eq!(called("Named"), defined("Named"), "{lua}");
+    assert!(!called("Spare") && !defined("Spare"), "{lua}");
+    assert_eq!(run_main(&lua), "a1");
+}

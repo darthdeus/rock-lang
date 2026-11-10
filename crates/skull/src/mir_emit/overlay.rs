@@ -98,7 +98,7 @@ fn assemble_overlay(
     let mut order: Vec<Instance> = cache.changed_since_full.iter().cloned().collect();
     order.sort_by_key(|b| overlay_order_key(&cache.scx, b));
     order.dedup();
-    let leaf_ctors_at = out.len();
+    let value_ctors_at = out.len();
     let mut definitions = LuaDefinitionWriter::new(out);
     for body in &order {
         match cache.chunks.get(body) {
@@ -383,12 +383,12 @@ fn assemble_overlay(
         }
     }
     let d_fingerprint = t_fingerprint.elapsed();
-    // An overlay is small, so its leaf ctor calls are read from the text.
-    let mut leaf_calls = Vec::new();
-    crate::push_leaf_ctor_calls(&out[leaf_ctors_at..], &mut leaf_calls);
+    // An overlay is small, so its value ctor calls are read from the text.
+    let mut ctor_calls = Vec::new();
+    crate::push_value_ctor_calls(&out[value_ctors_at..], &mut ctor_calls);
     out.insert_str(
-        leaf_ctors_at,
-        &crate::leaf_ctor_defs(&cache.leaf_ctors, &leaf_calls.into_iter().collect()),
+        value_ctors_at,
+        &crate::value_ctor_defs(&cache.value_ctors, &ctor_calls.into_iter().collect()),
     );
     out.push_str("end\n");
     if cache.cg.line_directives() {

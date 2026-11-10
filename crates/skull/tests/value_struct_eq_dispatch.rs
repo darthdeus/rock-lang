@@ -6,7 +6,7 @@
 // `skull/src/lib.rs`) that native `==` reaches directly. `eq_route`
 // (`skull-mir/src/lower/dispatch.rs`) now recognizes same-named `value`
 // struct operands and routes to `EqRoute::Primitive`.
-use crate::common::{emit_module, function_body, require_luajit, run_luajit};
+use crate::common::{emit_module, function_body, require_luajit, run_luajit, run_main};
 
 const HANDLE_EQUALITY_FIXTURE: &str = r#"
 struct EqTag { n: int }
@@ -293,7 +293,7 @@ fn stored_float_value_equality_matches_a_fresh_operand() {
 #[test]
 fn nullable_boxed_value_fields_compare_contents_in_enclosing_values() {
     require_luajit();
-    let mut lua = emit_module(
+    let lua = emit_module(
         r#"
 value Child { name: string, amount: int }
 value Parent { name: string, child: Child? = null }
@@ -304,25 +304,27 @@ struct Reference { name: string }
 value ReferenceParent { child: Reference? = null }
 struct ReferenceHolder { row: ReferenceParent }
 fn same_reference(a: ReferenceHolder, b: ReferenceHolder) -> bool { return a.row == b.row }
+
+fn row(amount: int) -> Holder {
+    return Holder { row: Parent { name: "parent", child: Child { name: "child", amount: amount } } }
+}
+fn absent() -> Holder { return Holder { row: Parent { name: "parent" } } }
+fn reference_row(r: Reference) -> ReferenceHolder {
+    return ReferenceHolder { row: ReferenceParent { child: r } }
+}
+fn main() {
+    let a = row(3)
+    let r = Reference { name: "same" }
+    let shared = same_reference(reference_row(r), reference_row(r))
+    let fresh = same_reference(reference_row(r), reference_row(Reference { name: "same" }))
+    print("{same(a, row(3))} {same(a, row(4))} {same(absent(), absent())} {same(a, absent())} {shared} {fresh}")
+}
 "#,
     );
-    lua.push_str(
-        r#"
-local function row(child) return { row = Parent_vt("parent", child) } end
-local a = row(Child_vt("child", 3))
-local b = row(Child_vt("child", 3))
-local c = row(Child_vt("child", 4))
-local absent = row(nil)
-local reference = { name = "same" }
-print(a.row == b.row, a.row == c.row, absent.row == row(nil).row, a.row == absent.row,
-  ReferenceParent_vt(reference) == ReferenceParent_vt(reference),
-  ReferenceParent_vt(reference) == ReferenceParent_vt({name="same"}))
-"#,
-    );
-    let out = run_luajit(&lua);
+    let out = run_main(&lua);
     assert_eq!(
         out.trim(),
-        "true\tfalse\ttrue\tfalse\ttrue\tfalse",
+        "true false true false true false",
         "nullable value fields compare contents; nullable reference fields retain identity:\n{out}"
     );
 }
