@@ -416,13 +416,13 @@ impl FunctionRepPlan {
         let params = self
             .params
             .iter()
-            .map(|id| rep_logical_fingerprint(arena, *id))
+            .map(|id| rep_logical_fingerprint_shared(arena, *id))
             .collect::<Vec<_>>()
             .join(",");
         let result = self
             .result
-            .map(|id| rep_logical_fingerprint(arena, id))
-            .unwrap_or_else(|| "none".to_string());
+            .map(|id| rep_logical_fingerprint_shared(arena, id))
+            .unwrap_or_else(|| "none".into());
         format!(
             "params=[{params}];result={result};lanes={};scalar={}",
             self.return_lanes, self.scalar_abi
@@ -905,6 +905,9 @@ struct RepReadCache {
     arena_gen: u64,
     plans: Vec<Option<RepPlan>>,
     by_key: rustc_hash::FxHashMap<RepKey, RepId>,
+    /// [`rep_logical_fingerprint`] by plan index. Every body renders its ABI
+    /// fingerprint, and the bodies share a few hundred representations.
+    fingerprints: Vec<Option<Arc<str>>>,
 }
 
 impl RepReadCache {
@@ -913,6 +916,7 @@ impl RepReadCache {
             self.arena_gen = arena_gen;
             self.plans.clear();
             self.by_key.clear();
+            self.fingerprints.clear();
         }
     }
 
@@ -3027,6 +3031,32 @@ impl BackendFnAbiPlan {
     }
 }
 pub(crate) fn rep_logical_fingerprint(arena: &RepArena, id: RepId) -> String {
+    rep_logical_fingerprint_shared(arena, id).to_string()
+}
+
+fn rep_logical_fingerprint_shared(arena: &RepArena, id: RepId) -> Arc<str> {
+    let index = id.index as usize;
+    let cached = REP_READ_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache.reset_for(arena.arena_id);
+        cache.fingerprints.get(index).cloned().flatten()
+    });
+    if let Some(fingerprint) = cached {
+        return fingerprint;
+    }
+    let fingerprint: Arc<str> = render_rep_logical_fingerprint(arena, id).into();
+    REP_READ_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache.reset_for(arena.arena_id);
+        if cache.fingerprints.len() <= index {
+            cache.fingerprints.resize(index + 1, None);
+        }
+        cache.fingerprints[index] = Some(Arc::clone(&fingerprint));
+    });
+    fingerprint
+}
+
+fn render_rep_logical_fingerprint(arena: &RepArena, id: RepId) -> String {
     let plan = arena.get(id);
     let layout = match plan.layout() {
         RepLayout::Opaque => "opaque".to_string(),
@@ -3040,7 +3070,7 @@ pub(crate) fn rep_logical_fingerprint(arena: &RepArena, id: RepId) -> String {
             "tuple(nullable={nullable};[{}])",
             slots
                 .iter()
-                .map(|slot| rep_logical_fingerprint(arena, *slot))
+                .map(|slot| rep_logical_fingerprint_shared(arena, *slot))
                 .collect::<Vec<_>>()
                 .join(",")
         ),
