@@ -71,7 +71,7 @@ fn branch_value_emits_store_then_merge() {
         emit_user(&ws, "pick"),
         "\
 function pick(c0) {
-  let c1, c2;
+  let c1;
   let v0 = c0;
   if ((v0 > 0)) {
     c1 = 1;
@@ -79,9 +79,7 @@ function pick(c0) {
     c1 = 2;
   }
   let v7 = c1;
-  c2 = v7;
-  let v9 = c2;
-  return (v9 * 3);
+  return (v7 * 3);
 }
 "
     );
@@ -129,17 +127,12 @@ function fract_fb(c0) {
         emit_scalar(&ws, "smoothstep", 3),
         "\
 function smoothstep_fb(c0, c1, c2) {
-  let c3;
   let v0 = c2;
   let v1 = c0;
   let v3 = c1;
   let v4 = c0;
   let v9 = Math.min(Math.max(((v0 - v1) / (v3 - v4)), 0), 1);
-  c3 = v9;
-  let v11 = c3;
-  let v12 = c3;
-  let v16 = c3;
-  return ((v11 * v12) * (3 - (2 * v16)));
+  return ((v9 * v9) * (3 - (2 * v9)));
 }
 "
     );

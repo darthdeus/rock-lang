@@ -1155,13 +1155,13 @@ fn main() { let result = run(4) }
     /// Splices accepted for `run`, whose last statement calls an @inline
     /// callee either through a local (`let x = e; wide(x)`) or directly
     /// (`wide(e)`), after `filler` dead locals that push the caller toward the
-    /// inliner's cell budget.
+    /// inliner's cell budget. Each filler is reassigned, so it keeps a cell.
     fn budget_shape_splices(filler: usize, through_local: bool) -> usize {
         let mut src = String::from(
             "@inline\nfn wide(n: int) -> int {\n    let a = n + 1\n    let b = a + n\n    return a + b\n}\n\nfn run(seed: int) -> int {\n",
         );
         for i in 0..filler {
-            src.push_str(&format!("    let f{i} = seed + {i}\n"));
+            src.push_str(&format!("    let f{i} = seed\n    f{i} = {i}\n"));
         }
         if through_local {
             src.push_str("    let x = seed * 2\n    return wide(x)\n}\n");

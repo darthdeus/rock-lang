@@ -1598,6 +1598,8 @@ fn lower_body(
         group_binds: HashMap::default(),
         owned_value_binds: HashSet::default(),
         ref_borrowed_binds: std::cell::OnceCell::new(),
+        body_facts: std::cell::OnceCell::new(),
+        value_binds: HashMap::default(),
         value_copy_stack: Vec::new(),
         borrowed_value_children: HashMap::default(),
         shareable_value_boxes: HashSet::default(),
@@ -2192,6 +2194,11 @@ struct Builder<'a> {
     /// Bindings some `ref` borrow in this body is rooted at
     /// ([`Self::binding_ref_borrowed`]), collected on first use.
     ref_borrowed_binds: std::cell::OnceCell<HashSet<u32>>,
+    /// Which bindings may live without a cell, computed on first use.
+    body_facts: std::cell::OnceCell<BodyFacts>,
+    /// `let` bindings held as their value instead of a cell
+    /// ([`Self::bind_let_value`]).
+    value_binds: HashMap<u32, Idx<Inst>>,
     /// Value types whose copy is being emitted, outermost first: a recursive
     /// `V?` child cannot be unrolled into its own copy ([`Self::enter_value_copy`]).
     value_copy_stack: Vec<Ustr>,
@@ -2305,6 +2312,8 @@ impl<'a> Builder<'a> {
             group_binds: HashMap::default(),
             owned_value_binds: HashSet::default(),
             ref_borrowed_binds: std::cell::OnceCell::new(),
+            body_facts: std::cell::OnceCell::new(),
+            value_binds: HashMap::default(),
             value_copy_stack: Vec::new(),
             borrowed_value_children: HashMap::default(),
             shareable_value_boxes: HashSet::default(),
@@ -2347,6 +2356,57 @@ impl<'a> Builder<'a> {
             crate::code_identity::LambdaSiteId::from_span(self.body.binding_arena[binding].span)
                 .map(|site| crate::code_identity::CaptureIdentity::Binding { site, projection });
         cell
+    }
+
+    fn body_facts(&self) -> &BodyFacts {
+        self.body_facts.get_or_init(|| BodyFacts::of(self.body))
+    }
+
+    /// Bind a `let` to its value when nothing needs the binding as a cell: it
+    /// is never written again, never captured or borrowed, and holds no
+    /// aggregate (a value struct's whole read copies from its cell).
+    pub(crate) fn bind_let_value(&mut self, name: Idx<BindingInfo>, value: Idx<Inst>) -> bool {
+        // Shader lowering keeps the cell: the GLSL emitter names a local only
+        // for a cell, and writes a value out at every use.
+        if self.scx.values_first_class
+            || self.f.is_coroutine
+            || self.body.binding_arena[name].kind != bone_core::hir::BindingKind::Let
+            || self.binding_is_ref(name)
+            || self.binding_ref_borrowed(name)
+            || self.body_facts().may_capture
+            || self.body_facts().written.contains(&raw(name))
+        {
+            return false;
+        }
+        // Scalar replacement splits an aggregate only through a cell, and an
+        // inlined call can leave a constructor behind any aggregate value.
+        let holds_aggregate = self
+            .binding_ty(name)
+            .and_then(|ty| self.concrete_ty_id(ty))
+            .is_none_or(|ty| match ty.peel_nullable().0 {
+                crate::monoty::MonoTy::Tuple(_) => true,
+                other => other
+                    .nominal()
+                    .is_some_and(|n| self.ws.struct_by_name.contains_key(&n)),
+            });
+        // A read records its own logical type on an aggregate value, which
+        // the binding's type need not match (a newtype over it, a narrowing).
+        if holds_aggregate
+            || matches!(
+                self.f.insts[value],
+                Inst::MakeValueStruct { .. }
+                    | Inst::MaterializeValueStruct { .. }
+                    | Inst::MakeTuple(..)
+                    | Inst::MakeStruct { .. }
+                    | Inst::MakeEnum { .. }
+                    | Inst::MakeEnumDyn { .. }
+            )
+        {
+            return false;
+        }
+        self.value_binds.insert(raw(name), value);
+        self.f.value_lets += 1;
+        true
     }
 
     fn rep_slot(&self, id: RepId) -> RetSlot {
@@ -4683,5 +4743,51 @@ pub(crate) mod shape_census_support {
             }
         }
         (out, rejected)
+    }
+}
+
+/// Per-body facts deciding whether a `let` may bind its value with no cell.
+#[derive(Default)]
+pub(crate) struct BodyFacts {
+    /// A lambda or `defer` may read bindings from another function body.
+    may_capture: bool,
+    /// Bindings at the root of an assignment or increment target.
+    written: HashSet<u32>,
+}
+
+impl BodyFacts {
+    fn of(body: &Body) -> Self {
+        let mut facts = BodyFacts {
+            may_capture: body
+                .statement_arena
+                .iter()
+                .any(|(_, s)| matches!(s, Statement::Defer(_))),
+            written: HashSet::default(),
+        };
+        for (_, e) in body.expr_arena.iter() {
+            let target = match e {
+                Expr::Lambda { .. } => {
+                    facts.may_capture = true;
+                    continue;
+                }
+                Expr::Assign { target, .. }
+                | Expr::CompoundAssign { target, .. }
+                | Expr::IncDec { target, .. } => *target,
+                _ => continue,
+            };
+            let mut at = target;
+            loop {
+                match &body.expr_arena[at] {
+                    Expr::Var(b) => {
+                        facts.written.insert(raw(*b));
+                        break;
+                    }
+                    Expr::FieldAccess { base, .. } | Expr::Index { base, .. } => at = *base,
+                    Expr::TupleIndex { tuple, .. } => at = *tuple,
+                    _ => break,
+                }
+            }
+        }
+        facts
     }
 }

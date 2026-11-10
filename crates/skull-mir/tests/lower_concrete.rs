@@ -333,18 +333,15 @@ return v0
 }
 
 #[test]
-fn let_bindings_store_to_cells() {
+fn let_bindings_never_written_again_bind_their_values() {
     assert_eq!(
         mir("fn f() -> int { let a = 1; let b = 2; a }", "f"),
         "\
 fn f() {
   bb0:
 v0 = const 1
-store c0, v0
 v1 = const 2
-store c1, v1
-v2 = load c0
-return v2
+return v0
 }"
     );
 }
@@ -467,9 +464,7 @@ store c1, v4
 goto bb3
   bb3:
 v5 = load c1
-store c2, v5
-v6 = load c2
-return v6
+return v5
 }"
     );
 }
@@ -1302,4 +1297,14 @@ fn branch_conditions_do_not_materialize_logical_results() {
             "only non-terminal arm values need stores: {dump}"
         );
     }
+}
+
+#[test]
+fn a_reassigned_let_keeps_its_cell() {
+    let src = "fn bump(a: int) -> int { let b = a * 2\n b = b + 1\n return b }";
+    let dump = mir_std(src, "bump");
+    assert!(
+        dump.contains("store"),
+        "a reassigned let is written through its cell: {dump}"
+    );
 }

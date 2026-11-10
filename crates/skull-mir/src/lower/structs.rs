@@ -648,6 +648,8 @@ impl<'a> Builder<'a> {
             std::mem::take(&mut self.f32_round_exprs),
             std::mem::take(&mut self.presence_only),
             std::mem::take(&mut self.flat_arg_captures),
+            std::mem::take(&mut self.value_binds),
+            std::mem::take(&mut self.body_facts),
         );
         self.body = defaults_body;
         self.inf = defaults_inf;
@@ -677,6 +679,8 @@ impl<'a> Builder<'a> {
             self.f32_round_exprs,
             self.presence_only,
             self.flat_arg_captures,
+            self.value_binds,
+            self.body_facts,
         ) = saved_locals;
         result
     }

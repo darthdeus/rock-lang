@@ -47,10 +47,7 @@ fn int_interpolation_uses_lua_tostring() {
         emit(&ws, "i"),
         "\
 function i() {
-  let c0;
-  c0 = 7;
-  let v3 = c0;
-  return (lua_tostring(\"v=\") + lua_tostring(lua_tostring(v3)));
+  return (lua_tostring(\"v=\") + lua_tostring(lua_tostring(7)));
 }
 "
     );
@@ -64,11 +61,8 @@ fn float_interpolation_uses_format_float_port() {
         emit(&ws, "f"),
         "\
 function f() {
-  let c0;
-  c0 = 1.5;
-  let v3 = c0;
-  let v4 = __rock_format_float(v3);
-  return (lua_tostring(\"v=\") + lua_tostring(v4));
+  let v2 = __rock_format_float(1.5);
+  return (lua_tostring(\"v=\") + lua_tostring(v2));
 }
 "
     );

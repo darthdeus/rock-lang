@@ -266,6 +266,8 @@ impl<'a> Builder<'a> {
             group_binds: HashMap::default(),
             owned_value_binds: HashSet::default(),
             ref_borrowed_binds: std::cell::OnceCell::new(),
+            body_facts: std::cell::OnceCell::new(),
+            value_binds: HashMap::default(),
             value_copy_stack: Vec::new(),
             borrowed_value_children: HashMap::default(),
             shareable_value_boxes: HashSet::default(),
@@ -512,6 +514,9 @@ impl<'a> Builder<'a> {
                                 })?,
                             };
                             let v = self.coerced_to_binding(v, value, name);
+                            if self.bind_let_value(name, v) {
+                                continue;
+                            }
                             let cty = self.binding_ty(name);
                             let cell = self.new_binding_cell(
                                 name,

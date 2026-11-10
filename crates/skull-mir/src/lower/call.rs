@@ -959,11 +959,16 @@ impl<'a> Builder<'a> {
                     let mut idx = 0;
                     return Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx));
                 }
-                let cell = *self
-                    .binds
-                    .get(&raw(b))
-                    .ok_or_else(|| gap("call to an unbound fn-typed local"))?;
-                let callee_v = self.emit_cur(Inst::Load(cell));
+                let callee_v = match self.value_binds.get(&raw(b)) {
+                    Some(&value) => value,
+                    None => {
+                        let cell = *self
+                            .binds
+                            .get(&raw(b))
+                            .ok_or_else(|| gap("call to an unbound fn-typed local"))?;
+                        self.emit_cur(Inst::Load(cell))
+                    }
+                };
                 if let Some(abi) = self
                     .fn_value_rep_plan(self.binding_ty(b).ok_or_else(|| {
                         gap("fn-typed local has no physical function signature")

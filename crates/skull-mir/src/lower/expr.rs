@@ -348,6 +348,7 @@ impl<'a> Builder<'a> {
                 }
                 self.nullable_boxed_value_copy(boxed, name, self.concrete_expr_ty(e))
             }
+            Expr::Var(b) if let Some(&value) = self.value_binds.get(&raw(b)) => Ok(value),
             Expr::Var(b) => {
                 let cell = *self
                     .binds

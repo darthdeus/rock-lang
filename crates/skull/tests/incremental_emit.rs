@@ -134,7 +134,7 @@ fn residual_inline_budget_fixture(helper_value: i32, caller_locals: usize) -> St
          @nomangle fn caller() -> int {{\n"
     );
     for i in 0..caller_locals {
-        src.push_str(&format!("let unused_{i} = {i}\n"));
+        src.push_str(&format!("let unused_{i} = 0\nunused_{i} = {i}\n"));
     }
     src.push_str("return helper()\n}\n@nomangle fn other() -> int { 7 }\n");
     src
@@ -154,7 +154,7 @@ fn inline_budget_eligibility_flip_fixture(large_helper: bool) -> String {
     }
     src.push_str("@nomangle fn caller() -> int {\n");
     for i in 0..380 {
-        src.push_str(&format!("let unused_{i} = {i}\n"));
+        src.push_str(&format!("let unused_{i} = 0\nunused_{i} = {i}\n"));
     }
     src.push_str("return helper(false)\n}\n@nomangle fn other() -> int { 7 }\n");
     src

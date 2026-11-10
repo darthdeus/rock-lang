@@ -146,7 +146,7 @@ fn over_budget_inline_caller_fixture(helper_value: i32) -> String {
          @nomangle fn caller() -> int {{\n"
     );
     for i in 0..401 {
-        src.push_str(&format!("let unused_{i} = {i}\n"));
+        src.push_str(&format!("let unused_{i} = 0\nunused_{i} = {i}\n"));
     }
     src.push_str("return helper(false)\n}\n");
     src

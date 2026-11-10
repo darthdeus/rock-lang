@@ -368,7 +368,7 @@ fn numeric_selection_clamp_with_ordered_bounds_uses_native_minmax() {
 fn numeric_selection_clamp_keeps_mutable_frame_bounds() {
     use skull_mir::mir::Inst;
     let ast = skull_parser::parse_module_clean(
-        "fn choose(a: float) -> float { let lo = -1.0; return if a < lo { lo } else if a > 1.0 { 1.0 } else { a } }",
+        "fn choose(a: float) -> float { let lo = 0.0; lo = -1.0; return if a < lo { lo } else if a > 1.0 { 1.0 } else { a } }",
         ustr::Ustr::from("<test>"),
     ).expect("parse");
     let ws = bone_semantic::semantic_passes::semantic_pass(&mut [ast]).expect("semantic_pass");
@@ -400,7 +400,7 @@ fn numeric_selection_clamp_keeps_mutable_frame_bounds() {
     let at = func.blocks[entry]
         .insts
         .iter()
-        .position(|id| matches!(func.insts[*id], Inst::Store { cell, .. } if cell == lo))
+        .rposition(|id| matches!(func.insts[*id], Inst::Store { cell, .. } if cell == lo))
         .expect("bound initialization")
         + 1;
     func.blocks[entry]
@@ -1839,8 +1839,8 @@ fn dead_locals_are_nil_killed_after_their_last_use() {
             .unwrap_or_else(|| panic!("missing `{needle}` in:\n{lua}"))
     };
     let product = at("r0 = c0 * c1");
-    // `t` is computed in the cell it is returned from.
-    let double = at("c0 = r0 + r0");
+    // `t`, never written again, is a value register, not a cell.
+    let double = at("r0 = r0 + r0");
     let branch = lines
         .iter()
         .position(|l| l.starts_with("if "))
@@ -1848,14 +1848,14 @@ fn dead_locals_are_nil_killed_after_their_last_use() {
     // `c1` (param `b`) dies at the product: killed before the next statement.
     let kill_b = at("c1 = nil");
     assert!(product < kill_b && kill_b < double, "{lua}");
-    // `c0` is live across the branch (`t`): no kill between its def and the `if`.
+    // `r0` is live across the branch (`t`): no kill between its def and the `if`.
     assert!(
-        !lines[double..branch].contains(&"c0 = nil"),
+        !lines[double..branch].contains(&"r0 = nil"),
         "live register killed before the branch:\n{lua}"
     );
     // A kill immediately before a plain `return` buys nothing (RET drops the
-    // frame): `t` is returned straight from its cell with no kill before it.
-    let ret = at("do return c0 end");
+    // frame): `t` is returned straight from its register with no kill before it.
+    let ret = at("do return r0 end");
     assert_eq!(ret, branch + 1, "{lua}");
 }
 

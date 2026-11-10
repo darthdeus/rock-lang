@@ -1279,6 +1279,10 @@ pub struct MirFunc {
     /// Default expression roots keyed by source parameter index. Placement
     /// callers need the callee-owned value when a wire slot is omitted.
     pub param_default_values: bone_core::prelude::FxHashMap<usize, Vec<Idx<Inst>>>,
+    /// `let` bindings lowering held as values instead of cells. The inliner
+    /// still charges a splice for its callee's, so the cell budget bounds the
+    /// same expansion; the caller's own cost nothing, like a direct argument.
+    pub value_lets: usize,
     /// Opt-in timing for arena growth attribution.
     pub lower_timing_enabled: bool,
     pub lower_attribution: crate::lower::LowerAttribution,
@@ -1503,6 +1507,7 @@ impl MirFunc {
             param_default_guards: Default::default(),
             param_default_materialized: Default::default(),
             param_default_values: Default::default(),
+            value_lets: 0,
             lower_timing_enabled: crate::lower::lower_attribution_timing_enabled(),
             lower_attribution: Default::default(),
             abi_plan: None,

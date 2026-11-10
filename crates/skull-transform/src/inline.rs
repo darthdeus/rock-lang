@@ -148,6 +148,14 @@ struct CalleeBody {
     reads_all_forwardable: Vec<bool>,
 }
 
+impl CalleeBody {
+    /// Cells a splice charges to the caller's budget: the callee's cells and
+    /// the `let`s it holds as values, which a cell would have held before.
+    fn budget_cells(&self) -> usize {
+        self.template.source_cells + self.func.value_lets
+    }
+}
+
 /// One splice the inliner performed, for the inline census
 /// (`inline_functions_with_plans` returns these alongside its dependency set). Records the
 /// callee whose body was copied in, its shape, and how much code it added.
@@ -801,7 +809,7 @@ impl InlineCandidateTable {
             && before.abi == after.abi
             && before.func.params.len() == after.func.params.len()
             && before.ret_arity == after.ret_arity
-            && before.template.source_cells == after.template.source_cells
+            && before.budget_cells() == after.budget_cells()
     }
 
     pub fn keys(&self) -> Vec<Instance> {
@@ -1505,6 +1513,7 @@ fn compact_region(
     template.nested_fn_identities = arena.nested_fn_identities.clone();
     template.rep_arena = arena.rep_arena.clone();
     template.params = header.params.iter().map(|param| cell_map[param]).collect();
+    template.value_lets = header.value_lets;
     template.lower_timing_enabled = arena.lower_timing_enabled;
     template.lower_attribution = arena.lower_attribution.clone();
     template.abi_plan = header.abi_plan.clone();
@@ -2416,8 +2425,8 @@ fn find_site(
             } else if !arity_ok(cand, &site) {
                 Some("candidate_arity_mismatch")
             } else if site.inst().args.is_empty()
-                && cell_budget + cand.template.source_cells + cand.func.params.len() > CELL_BUDGET
-                && cell_budget + cand.template.source_cells + cand.func.params.len()
+                && cell_budget + cand.budget_cells() + cand.func.params.len() > CELL_BUDGET
+                && cell_budget + cand.budget_cells() + cand.func.params.len()
                     - site_coalesced_cells(func, cand, &site, pinned)
                     > CELL_BUDGET
             {
@@ -3733,7 +3742,8 @@ fn inline_functions_inner(
             .extend(cand.func.comptime_reads.iter().cloned());
         func.struct_registry_roots
             .extend(cand.func.struct_registry_roots.iter().copied());
-        cell_budget += cand.template.source_cells.saturating_sub(coalesced_cells) + result_cell;
+        func.value_lets += cand.func.value_lets;
+        cell_budget += cand.budget_cells().saturating_sub(coalesced_cells) + result_cell;
         spliced.insert(fref);
         resume = Some(pos);
         budget -= 1;
