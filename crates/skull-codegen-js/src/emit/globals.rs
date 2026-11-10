@@ -244,7 +244,9 @@ pub(super) fn schedule_residual_calls(
     mf: &MirFunc,
     st: &mut WorklistState,
 ) -> Result<(), CompilerError> {
-    fn direct_calls(mf: &MirFunc, out: &mut Vec<(Idx<Inst>, FuncRef)>) {
+    // Each call resolves against its own body's site tables: a hoisted body
+    // has its own instruction ids.
+    fn direct_calls<'m>(mf: &'m MirFunc, out: &mut Vec<(&'m MirFunc, Idx<Inst>, FuncRef)>) {
         for (_, block) in mf.blocks.iter() {
             for &iid in &block.insts {
                 if mf.spec_bindings.contains_key(&iid) {
@@ -252,7 +254,7 @@ pub(super) fn schedule_residual_calls(
                 }
                 match &mf.insts[iid] {
                     Inst::Call { func, .. } | Inst::CallMulti { func, .. } => {
-                        out.push((iid, *func))
+                        out.push((mf, iid, *func))
                     }
                     _ => {}
                 }
@@ -266,12 +268,12 @@ pub(super) fn schedule_residual_calls(
     let mut findings = Vec::new();
     let mut calls = Vec::new();
     direct_calls(mf, &mut calls);
-    for (iid, requested) in calls {
+    for (body, iid, requested) in calls {
         let requested_f = &ws.module(requested.module).functions[requested.func];
         if js_supply(ws, requested_f).is_some() {
             continue;
         }
-        let Some(instance) = st.names.instance_for_call(ws, mf, iid, requested) else {
+        let Some(instance) = st.names.instance_for_call(ws, body, iid, requested) else {
             findings.push(err(format!(
                 "JS: call to `{}` has no shared InstanceGraph CallSite resolution",
                 requested_f.name
