@@ -119,23 +119,13 @@ pub fn nominal_type_facts(
     out
 }
 
-pub(crate) fn expand_and_desugar(
-    ws: &mut Workspace,
-    cooked: &mut [Ast],
-) -> Result<(), CompilerError> {
+/// Expand macros and desugar the parse trees in place; reads no workspace.
+fn expand_and_desugar_trees(cooked: &mut [Ast]) {
     let _span = tracing::info_span!("expand_and_desugar").entered();
-
-    let timer = Instant::now();
     skull_parser::macro_expand::expand_macros(cooked);
-    ws.log_time("macro_expand", timer);
-
-    let timer = Instant::now();
     for ast in cooked.iter_mut() {
         skull_parser::desugar::desugar(ast);
     }
-    ws.log_time("desugar", timer);
-
-    Ok(())
 }
 
 pub(crate) fn lower_modules(
@@ -1249,9 +1239,25 @@ pub fn semantic_pass_into(
     let _span = tracing::info_span!("bone_semantic_pass").entered();
 
     let timer = Instant::now();
-    build_namespaces(&mut ws, &*rock_modules, aliases)?;
-    ws.log_time("namespaces", timer);
-    expand_and_desugar(&mut ws, rock_modules)?;
+    let namespaces = NamespaceInput::read(&*rock_modules);
+    // Building the namespace tree is mostly serial and reads only what
+    // `read` took from the trees, so macro expansion and desugaring rewrite
+    // the trees beside it.
+    let (built, namespaces_time) = par_join(
+        || {
+            let built = namespaces.build(&mut ws, aliases);
+            (built, timer.elapsed())
+        },
+        || expand_and_desugar_trees(rock_modules),
+    )
+    .0;
+    built?;
+    // Expansion overlaps the namespace build; only what outlasts it adds wall.
+    ws.phase_timings.push(("namespaces", namespaces_time));
+    ws.phase_timings.push((
+        "macro_expand",
+        timer.elapsed().saturating_sub(namespaces_time),
+    ));
     lower_and_infer(&mut ws, rock_modules)?;
 
     Ok(ws)
@@ -1413,33 +1419,70 @@ pub fn build_namespaces<'a>(
     rock_modules: impl IntoIterator<Item = &'a Ast> + Clone,
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<(), CompilerError> {
-    // Legacy workspaces do not consult the modules-v1 namespace. Avoid cloning
-    // every legacy item into FragmentContribution just to skip it again.
-    if !rock_modules.clone().into_iter().any(|module| {
-        module.dialect == skull_parser::Dialect::V1 && !is_stdlib_module_file(module.file.as_str())
-    }) {
-        for module in rock_modules
-            .clone()
-            .into_iter()
-            .filter(|module| is_stdlib_module_file(module.file.as_str()))
-        {
-            let contribution = contribute(module);
-            register_stdlib_items(ws, &contribution)?;
-        }
-        for module in rock_modules.into_iter().filter(|module| {
-            module.dialect == skull_parser::Dialect::Legacy
+    NamespaceInput::read(rock_modules).build(ws, aliases)
+}
+
+/// What [`build_namespaces`] reads from the parse trees, taken before it
+/// writes the workspace so the trees are free for macro expansion meanwhile.
+enum NamespaceInput {
+    /// Legacy workspaces do not consult the modules-v1 namespace: only the
+    /// stdlib registers, and legacy files must not use v1 syntax.
+    LegacyOnly {
+        stdlib: Vec<FragmentContribution>,
+        rejected: Option<CompilerError>,
+    },
+    Fragments(Vec<FragmentContribution>),
+}
+
+impl NamespaceInput {
+    fn read<'a>(rock_modules: impl IntoIterator<Item = &'a Ast> + Clone) -> Self {
+        // Avoid cloning every legacy item into FragmentContribution just to
+        // skip it again.
+        if !rock_modules.clone().into_iter().any(|module| {
+            module.dialect == skull_parser::Dialect::V1
                 && !is_stdlib_module_file(module.file.as_str())
         }) {
-            reject_legacy_unscoped_ast_items(module)?;
+            let stdlib = rock_modules
+                .clone()
+                .into_iter()
+                .filter(|module| is_stdlib_module_file(module.file.as_str()))
+                .map(contribute)
+                .collect();
+            let rejected = rock_modules
+                .into_iter()
+                .filter(|module| {
+                    module.dialect == skull_parser::Dialect::Legacy
+                        && !is_stdlib_module_file(module.file.as_str())
+                })
+                .find_map(|module| reject_legacy_unscoped_ast_items(module).err());
+            return Self::LegacyOnly { stdlib, rejected };
         }
-        return Ok(());
+        let modules = rock_modules.into_iter().collect_vec();
+        Self::Fragments(
+            modules
+                .par_iter()
+                .map(|module| contribute(module))
+                .collect(),
+        )
     }
-    let modules = rock_modules.into_iter().collect_vec();
-    let contributions: Vec<FragmentContribution> = modules
-        .par_iter()
-        .map(|module| contribute(module))
-        .collect();
-    assemble_namespaces(ws, &contributions.iter().collect_vec(), aliases)
+
+    fn build(
+        self,
+        ws: &mut Workspace,
+        aliases: &bone_core::modules::NsAliases,
+    ) -> Result<(), CompilerError> {
+        match self {
+            Self::LegacyOnly { stdlib, rejected } => {
+                for contribution in &stdlib {
+                    register_stdlib_items(ws, contribution)?;
+                }
+                rejected.map_or(Ok(()), Err)
+            }
+            Self::Fragments(contributions) => {
+                assemble_namespaces(ws, &contributions.iter().collect_vec(), aliases)
+            }
+        }
+    }
 }
 
 /// [`build_namespaces`] from each file's [`FragmentContribution`], in module

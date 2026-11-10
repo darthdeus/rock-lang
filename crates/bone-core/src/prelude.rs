@@ -146,6 +146,9 @@ pub use rayon::iter::{
     IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
 };
 
+#[cfg(not(feature = "sequential"))]
+pub use rayon::join as par_join;
+
 #[cfg(feature = "sequential")]
 pub use sequential_par::*;
 
@@ -197,4 +200,8 @@ mod sequential_par {
         }
     }
     impl<I: Iterator> SeqFindMapFirst for I {}
+
+    pub fn par_join<RA, RB>(a: impl FnOnce() -> RA, b: impl FnOnce() -> RB) -> (RA, RB) {
+        (a(), b())
+    }
 }
