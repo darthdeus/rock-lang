@@ -631,6 +631,15 @@ impl AttributionAccumulator {
     /// when assembly drops the body.
     pub(super) fn add_body(&mut self, unit: &UnitAttribution, lua: Option<&str>) {
         if !self.enabled || !unit.examined {
+            // The lines are counted only for a body that is recorded.
+            return;
+        }
+        self.add_body_sized(unit, lua.map(|lua| (lua.len(), lua.lines().count())));
+    }
+
+    /// [`Self::add_body`] for a text known by its bytes and lines.
+    pub(super) fn add_body_sized(&mut self, unit: &UnitAttribution, text: Option<(usize, usize)>) {
+        if !self.enabled || !unit.examined {
             return;
         }
         self.add_unit(unit);
@@ -661,7 +670,7 @@ impl AttributionAccumulator {
             } else {
                 String::new()
             },
-            emitted: lua.is_some(),
+            emitted: text.is_some(),
             canonical_reused: unit.canonical_reused,
             thread_cpu: unit.thread_cpu,
             lower: times.lower,
@@ -678,8 +687,8 @@ impl AttributionAccumulator {
             mir_inlined: unit.inline.cleanup_live_before,
             mir_final: unit.inline.cleanup_live_after,
             splices,
-            lua_bytes: lua.map_or(0, str::len),
-            lua_lines: lua.map_or(0, |lua| lua.lines().count()),
+            lua_bytes: text.map_or(0, |(bytes, _)| bytes),
+            lua_lines: text.map_or(0, |(_, lines)| lines),
             wire: unit
                 .abi_plan
                 .as_ref()

@@ -100,9 +100,6 @@ struct Assembly {
     unit_facts: Vec<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
     all_statics: Vec<skull_mir::mir::StaticCell>,
     code_artifact: skull_mir::code_identity::CodeArtifact,
-    /// The lowered units' code identities, in merge order; they join the
-    /// artifact together with the placed chunks'.
-    unit_artifacts: Vec<skull_mir::code_identity::BodyCodeArtifact>,
     allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
     always_emitted_calls: Vec<FuncRef>,
     always_emitted_names: Vec<Ustr>,
@@ -111,101 +108,34 @@ struct Assembly {
 }
 
 impl Assembly {
-    fn new(cache: &SkullEmitCache) -> Self {
+    /// An assembly that starts from what the lowered units contribute.
+    fn new(cache: &SkullEmitCache, units: UnitFacts) -> Self {
+        let mut attribution = if cache.attribution {
+            candidate_setup_attribution(cache)
+        } else {
+            AttributionAccumulator::default()
+        };
+        for (unit, text) in &units.costs {
+            attribution.add_body_sized(unit, Some(*text));
+        }
+        let mut rejections = Rejections::default();
+        rejections.extend(units.rejections);
         Self {
             out: String::new(),
-            times: PhaseTimes::default(),
+            times: units.times,
             t_scaffold: Duration::ZERO,
-            attribution: if cache.attribution {
-                candidate_setup_attribution(cache)
-            } else {
-                AttributionAccumulator::default()
-            },
-            needed_specs: Vec::new(),
-            rejections: Rejections::default(),
-            unit_facts: Vec::new(),
+            attribution,
+            needed_specs: units.specs,
+            rejections,
+            unit_facts: units.facts,
             all_statics: Vec::new(),
-            code_artifact: skull_mir::code_identity::CodeArtifact::default(),
-            unit_artifacts: Vec::new(),
-            allocation_bodies: Vec::new(),
-            always_emitted_calls: Vec::new(),
-            always_emitted_names: Vec::new(),
-            unit_reads: UnitComptimeReads::default(),
+            code_artifact: units.code_artifact,
+            allocation_bodies: units.allocation_bodies,
+            always_emitted_calls: units.calls,
+            always_emitted_names: units.names,
+            unit_reads: units.reads,
             emits_main: false,
         }
-    }
-
-    /// Fold parallel `UnitOut`s back into the chunk IN ORDER: append each unit's Lua,
-    /// collect call-graph facts / pending inits, sum phase times.
-    fn merge_units(
-        &mut self,
-        results: Vec<UnitOut>,
-        out: &mut String,
-        pending_inits: &mut Vec<(Ustr, Ustr, String)>,
-    ) {
-        for u in results {
-            out.push_str(&u.lua);
-            if let Some(facts) = u.refs {
-                self.unit_facts.push(facts);
-            }
-            if let Some(pi) = u.pending_init {
-                pending_inits.push(pi);
-            }
-            self.always_emitted_calls.extend(u.calls);
-            self.always_emitted_names.extend(u.global_names);
-            self.allocation_bodies.extend(u.allocation_bodies);
-            self.attribution.add_body(&u.attribution, Some(&u.lua));
-            self.unit_artifacts.push(u.code_artifact);
-            self.times.add(&u.times);
-        }
-    }
-
-    /// Decorator DEFINITIONS, workspace-wide (lowered by
-    /// [`prepare_early_assembly`]): each `deco <name> { .. }` -> a fn
-    /// `__deco_<name>(target, <params>)`. Unlike JS, Lua emits every
-    /// program-defined decorator, applied or not.
-    fn push_decorator_definitions(&mut self, deco_results: Vec<UnitOut>) {
-        self.rejections.extend(unit_errors(&deco_results));
-        self.needed_specs
-            .extend(deco_results.iter().flat_map(|u| u.specs.iter().cloned()));
-        for u in &deco_results {
-            self.unit_reads
-                .decorators
-                .extend(u.comptime_reads.iter().cloned());
-        }
-        let mut decorator_lua = String::new();
-        self.merge_units(deco_results, &mut decorator_lua, &mut Vec::new());
-        let mut decorator_definitions = LuaDefinitionWriter::new(std::mem::take(&mut self.out));
-        decorator_definitions.push_str(&decorator_lua);
-        self.out = decorator_definitions.finish();
-    }
-
-    /// Global initializers are emitted later, in their original slot, but they
-    /// are LOWERED early (by [`prepare_early_assembly`]): their call edges are
-    /// reachability roots (a global init is always emitted), so the walk needs
-    /// them before the fn-def loop runs. Folds the lowered units in and returns
-    /// the initializer definitions and their pending init lines.
-    fn fold_global_units(
-        &mut self,
-        global_keys: &[GlobalKey],
-        global_results: Vec<UnitOut>,
-    ) -> (String, Vec<(Ustr, Ustr, String)>) {
-        let mut pending_inits: Vec<(Ustr, Ustr, String)> = Vec::new();
-        // par_map preserves input order, so keys and results zip positionally --
-        // the same pairing merge_units relies on for output order.
-        for (key, u) in global_keys.iter().zip(global_results.iter()) {
-            if !u.comptime_reads.is_empty() {
-                self.unit_reads
-                    .globals
-                    .insert(*key, u.comptime_reads.clone());
-            }
-        }
-        self.rejections.extend(unit_errors(&global_results));
-        self.needed_specs
-            .extend(global_results.iter().flat_map(|u| u.specs.iter().cloned()));
-        let mut globals_lua = String::new();
-        self.merge_units(global_results, &mut globals_lua, &mut pending_inits);
-        (globals_lua, pending_inits)
     }
 
     /// Function definitions, every module (cached chunk for ordinary/coroutine,
@@ -880,7 +810,124 @@ fn scaffold_prelude_lua(
     Ok((out, value_ctors))
 }
 
-/// The assembly inputs that need no chunk: the scaffold prelude, the lowered
+/// What the lowered decorator and global units contribute to an assembly
+/// besides their text, in unit order.
+#[derive(Default)]
+struct UnitFacts {
+    /// Global-init ordering facts: (body, globals read, functions called).
+    facts: Vec<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
+    calls: Vec<FuncRef>,
+    names: Vec<Ustr>,
+    code_artifact: skull_mir::code_identity::CodeArtifact,
+    allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
+    times: PhaseTimes,
+    reads: UnitComptimeReads,
+    rejections: Vec<CompilerError>,
+    specs: Vec<skull_mir::bound::SpecDemand>,
+    /// Each unit's cost record with its text's bytes and lines, kept only
+    /// by a build that attributes.
+    costs: Vec<(UnitAttribution, (usize, usize))>,
+}
+
+impl UnitFacts {
+    /// Fold parallel `UnitOut`s IN ORDER: append each unit's Lua to `out`,
+    /// collect call-graph facts / pending inits, sum phase times.
+    fn merge_units(
+        &mut self,
+        results: Vec<UnitOut>,
+        attribution: bool,
+        out: &mut String,
+        pending_inits: &mut Vec<(Ustr, Ustr, String)>,
+    ) {
+        self.rejections.extend(unit_errors(&results));
+        for u in results {
+            out.push_str(&u.lua);
+            if let Some(facts) = u.refs {
+                self.facts.push(facts);
+            }
+            if let Some(pi) = u.pending_init {
+                pending_inits.push(pi);
+            }
+            self.calls.extend(u.calls);
+            self.names.extend(u.global_names);
+            self.specs.extend(u.specs);
+            self.code_artifact.merge_body(&u.code_artifact);
+            self.allocation_bodies.extend(u.allocation_bodies);
+            if attribution {
+                let text = (u.lua.len(), u.lua.lines().count());
+                self.costs.push((u.attribution, text));
+            }
+            self.times.add(&u.times);
+        }
+    }
+}
+
+/// The lowered units, folded: their definitions as two scoped sections, the
+/// initializers' pending `(global, init key, load line)` rows, and the rest.
+///
+/// Decorator DEFINITIONS are workspace-wide: each `deco <name> { .. }` -> a
+/// fn `__deco_<name>(target, <params>)`. Unlike JS, Lua emits every
+/// program-defined decorator, applied or not.
+///
+/// Global initializers are emitted later, in their original slot, but they
+/// are LOWERED early: their call edges are reachability roots (a global init
+/// is always emitted), so the walk needs them before the fn-def loop runs.
+struct FoldedUnits {
+    decorator_lua: String,
+    globals_lua: String,
+    pending_inits: Vec<(Ustr, Ustr, String)>,
+    facts: UnitFacts,
+}
+
+fn fold_units(
+    decorator_units: Vec<UnitOut>,
+    global_keys: &[GlobalKey],
+    global_units: Vec<UnitOut>,
+    attribution: bool,
+) -> FoldedUnits {
+    let scoped = |lua: &str| {
+        let mut definitions = LuaDefinitionWriter::new(String::new());
+        definitions.push_str(lua);
+        definitions.finish()
+    };
+    let mut facts = UnitFacts::default();
+    for u in &decorator_units {
+        facts
+            .reads
+            .decorators
+            .extend(u.comptime_reads.iter().cloned());
+    }
+    let mut decorator_lua = String::new();
+    facts.merge_units(
+        decorator_units,
+        attribution,
+        &mut decorator_lua,
+        &mut Vec::new(),
+    );
+    // par_map preserves input order, so keys and results zip positionally --
+    // the same pairing merge_units relies on for output order.
+    for (key, u) in global_keys.iter().zip(global_units.iter()) {
+        if !u.comptime_reads.is_empty() {
+            facts.reads.globals.insert(*key, u.comptime_reads.clone());
+        }
+    }
+    let mut globals_lua = String::new();
+    let mut pending_inits = Vec::new();
+    facts.merge_units(
+        global_units,
+        attribution,
+        &mut globals_lua,
+        &mut pending_inits,
+    );
+    FoldedUnits {
+        decorator_lua: scoped(&decorator_lua),
+        globals_lua: scoped(&globals_lua),
+        pending_inits,
+        facts,
+    }
+}
+
+/// The assembly inputs that need no chunk: the scaffold prelude, the folded
 /// decorator and global units, the global layout and the globals directory.
 /// A full build prepares them beside its fan-out so the pool, not the
 /// assembly tail, pays for them; an incremental build prepares them at the
@@ -889,9 +936,7 @@ pub(super) struct EarlyAssembly {
     scaffold: Result<(String, crate::ValueCtors), CompilerError>,
     scaffold_time: Duration,
     decorators: DecoratorTable,
-    decorator_units: Vec<UnitOut>,
-    global_keys: Vec<GlobalKey>,
-    global_units: Vec<UnitOut>,
+    units: FoldedUnits,
     // Kept as results and reported where assembly always reported them, so a
     // body rejection still comes first.
     global_layout: Result<String, String>,
@@ -901,12 +946,8 @@ pub(super) struct EarlyAssembly {
 
 impl EarlyAssembly {
     /// The specializations the decorator and global units demand.
-    pub(super) fn demands(&self) -> Vec<skull_mir::bound::SpecDemand> {
-        self.decorator_units
-            .iter()
-            .chain(&self.global_units)
-            .flat_map(|u| u.specs.iter().cloned())
-            .collect()
+    pub(super) fn demands(&self) -> &[skull_mir::bound::SpecDemand] {
+        &self.units.facts.specs
     }
 }
 
@@ -915,6 +956,7 @@ pub(super) fn prepare_early_assembly(
     scx: &skull_mir::lower::ScalarCtx,
     cg: &CodegenCtx,
     concrete: &crate::concrete_body::ConcreteBodies,
+    attribution: bool,
 ) -> EarlyAssembly {
     let (scaffold, units) = parallel_join(
         || {
@@ -947,18 +989,17 @@ pub(super) fn prepare_early_assembly(
             let global_units = par_map(global_keys.clone(), |(mid, gid)| {
                 emit_global_unit(ws, scx, cg, concrete, mid, gid)
             });
-            (decorators, decorator_units, global_keys, global_units)
+            let units = fold_units(decorator_units, &global_keys, global_units, attribution);
+            (decorators, units)
         },
     );
     let (scaffold, scaffold_time, global_layout, globals_directory, leaf_owner) = scaffold;
-    let (decorators, decorator_units, global_keys, global_units) = units;
+    let (decorators, units) = units;
     EarlyAssembly {
         scaffold,
         scaffold_time,
         decorators,
-        decorator_units,
-        global_keys,
-        global_units,
+        units,
         global_layout,
         globals_directory,
         leaf_owner,
@@ -992,26 +1033,37 @@ pub(super) fn assemble(
         steps.push((name, now - step_started));
         step_started = now;
     };
-    let mut asm = Assembly::new(cache);
     let EarlyAssembly {
         scaffold,
         scaffold_time,
         decorators,
-        decorator_units,
-        global_keys,
-        global_units,
+        units,
         global_layout,
         globals_directory,
         leaf_owner,
-    } = early.unwrap_or_else(|| prepare_early_assembly(ws, &cache.scx, &cache.cg, &cache.concrete));
+    } = early.unwrap_or_else(|| {
+        prepare_early_assembly(
+            ws,
+            &cache.scx,
+            &cache.cg,
+            &cache.concrete,
+            cache.attribution,
+        )
+    });
+    let FoldedUnits {
+        decorator_lua,
+        globals_lua,
+        pending_inits,
+        facts: unit_facts,
+    } = units;
+    let mut asm = Assembly::new(cache, unit_facts);
     let (scaffold, value_ctors) = scaffold?;
-    asm.out.push_str(&scaffold);
+    asm.out = scaffold;
     // Value ctors go here, ahead of any load-time caller, once assembly knows
     // which ones the emitted text calls.
     let value_ctors_at = asm.out.len();
     asm.t_scaffold += scaffold_time;
-    asm.push_decorator_definitions(decorator_units);
-    let (globals_lua, pending_inits) = asm.fold_global_units(&global_keys, global_units);
+    asm.out.push_str(&decorator_lua);
     step("assembly: prelude+globals", &mut steps);
 
     // **Whole-program population, driven by `cache.lua_view` -- Phase 2.**
@@ -1082,7 +1134,6 @@ pub(super) fn assemble(
         let Assembly {
             unit_facts,
             code_artifact,
-            unit_artifacts,
             all_statics,
             allocation_bodies,
             always_emitted_names,
@@ -1112,12 +1163,7 @@ pub(super) fn assemble(
                             let built = built_specs.iter().map(|(_, chunk)| chunk);
                             let moved = moved.iter().map(|instance| &spec_chunks[instance]);
                             let chunks = declared.chain(unmoved).chain(built).chain(moved);
-                            code_artifact.merge_bodies(
-                                unit_artifacts
-                                    .iter()
-                                    .chain(chunks.map(|chunk| &chunk.code_artifact)),
-                            );
-                            unit_artifacts.clear();
+                            code_artifact.merge_bodies(chunks.map(|chunk| &chunk.code_artifact));
                         },
                         || {
                             parallel_join(
@@ -1262,9 +1308,7 @@ pub(super) fn assemble(
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in
     // the original slot, so the emitted text is unchanged.)
-    let mut global_definitions = LuaDefinitionWriter::new(std::mem::take(out));
-    global_definitions.push_str(&globals_lua);
-    *out = global_definitions.finish();
+    out.push_str(&globals_lua);
     let has_definition_plan = !definition_plan.catalogs.is_empty();
     if has_code_slot_publication {
         out.push_str(skull_codegen_lua::FN_MT_PRELUDE);

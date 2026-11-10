@@ -1123,7 +1123,7 @@ pub(super) fn emit_full_build(
             parallel_join(
                 || {
                     let started = Instant::now();
-                    let early = prepare_early_assembly(ws, &scx, &cg, &concrete);
+                    let early = prepare_early_assembly(ws, &scx, &cg, &concrete, attribution);
                     (early, started.elapsed())
                 },
                 || {
@@ -1147,7 +1147,7 @@ pub(super) fn emit_full_build(
     // Decorator and global units are lowered beside the fan-out; what they
     // demand is usually built already.
     let mut spec_jobs = Vec::new();
-    spec_queue.admit_all(&early.demands(), &mut spec_jobs);
+    spec_queue.admit_all(early.demands(), &mut spec_jobs);
     drain_spec_jobs(
         &spec_queue,
         &cg,
