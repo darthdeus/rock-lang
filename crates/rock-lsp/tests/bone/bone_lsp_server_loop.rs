@@ -328,14 +328,17 @@ fn malformed_request_params_do_not_answer() {
 
 #[test]
 fn closing_buffer_restores_disk_symbols_for_other_open_files() {
-    let dir = tempfile::tempdir().unwrap();
+    // Returned locations use canonical paths; on macOS the temp dir is
+    // behind a symlink, so open the files by their canonical names.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
     std::fs::write(
-        dir.path().join("stick.toml"),
+        dir.join("stick.toml"),
         "[package]\nname = \"close_buffers\"\n",
     )
     .unwrap();
-    let a = dir.path().join("a.rock");
-    let b = dir.path().join("b.rock");
+    let a = dir.join("a.rock");
+    let b = dir.join("b.rock");
     std::fs::write(&a, "struct Foo { x: int }\n").unwrap();
     let source = "fn use_it() -> Foo { Foo { x: 1 } }\n";
     std::fs::write(&b, source).unwrap();
@@ -374,15 +377,18 @@ fn closing_buffer_restores_disk_symbols_for_other_open_files() {
 
 #[test]
 fn closing_renamed_buffer_refreshes_definition_and_diagnostics() {
-    let dir = tempfile::tempdir().unwrap();
+    // Returned locations use canonical paths; on macOS the temp dir is
+    // behind a symlink, so open the files by their canonical names.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().canonicalize().unwrap();
     std::fs::write(
-        dir.path().join("stick.toml"),
+        dir.join("stick.toml"),
         "[package]\nname = \"renamed_buffers\"\n",
     )
     .unwrap();
-    let old = dir.path().join("old.rock");
-    let new = dir.path().join("new.rock");
-    let main = dir.path().join("main.rock");
+    let old = dir.join("old.rock");
+    let new = dir.join("new.rock");
+    let main = dir.join("main.rock");
     let declaration = "struct Foo { x: int }\n";
     let source = "fn use_it() -> Foo { Foo { x: 1 } }\n";
     std::fs::write(&old, declaration).unwrap();
