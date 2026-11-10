@@ -69,6 +69,57 @@ fn map_key(scope: Option<&FragmentScope>, path: &[ustr::Ustr], name: ustr::Ustr)
     }
 }
 
+/// What one module declares that lowering reads workspace-wide before any
+/// body lowers.
+struct ModuleNominalFacts {
+    /// A legacy module's owned names: a legacy lookup that could also reach
+    /// a projected v1 name is decided from them.
+    legacy_owned: Option<Vec<(ustr::Ustr, DefKind)>>,
+    /// Each nominal type's key, generic arity and trailing generic defaults,
+    /// in declaration order.
+    types: Vec<(ustr::Ustr, usize, Vec<bone_core::hir::GenericDefault>)>,
+    has_nobox: bool,
+    decorators: Vec<ustr::Ustr>,
+}
+
+fn module_nominal_facts(ws: &Workspace, rock_mod: &Ast) -> ModuleNominalFacts {
+    let legacy_owned =
+        (rock_mod.dialect == skull_parser::Dialect::Legacy).then(|| legacy_owned_names(rock_mod));
+    let scope = ws.fragment_scopes.get(&rock_mod.file);
+    let mut facts = ModuleNominalFacts {
+        legacy_owned,
+        types: Vec::new(),
+        has_nobox: false,
+        decorators: Vec::new(),
+    };
+    let mut walk = |item: &Item, path: &[ustr::Ustr]| -> Result<(), CompilerError> {
+        let key = |name: &ustr::Ustr| map_key(scope, path, *name);
+        let (name, generics) = match &item.kind {
+            ItemKind::Struct(s) => {
+                facts.has_nobox |= s.is_nobox;
+                (&s.name.name, &s.generics)
+            }
+            ItemKind::Enum(e) => (&e.name.name, &e.generics),
+            ItemKind::Newtype(n) => (&n.name.name, &n.generics),
+            ItemKind::Decorator(d) => {
+                facts.decorators.push(key(&d.name.name));
+                return Ok(());
+            }
+            _ => return Ok(()),
+        };
+        facts.types.push((
+            key(name),
+            generics.len(),
+            trailing_generic_defaults(rock_mod, generics),
+        ));
+        Ok(())
+    };
+    let start = scope.map(|s| s.module_path.clone()).unwrap_or_default();
+    for_each_def_item(rock_mod.items.as_slice(), &start, &mut walk)
+        .expect("reading nominal facts rejects nothing");
+    facts
+}
+
 /// Which kind of nominal type a definition is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NominalFlavor {
@@ -189,64 +240,28 @@ pub fn lower_modules_seeded(
     // module lowers against, or the first module's uses fail first and mask it.
     // A module refreshes its OWN entries (an arity edit must land); ownership
     // tells those apart from another module's facts for the same name.
-    for rock_mod in rock_modules.iter() {
-        // A legacy lookup that could also reach a projected v1 name is
-        // decided from this fact, so it is recorded before any body lowers.
-        if rock_mod.dialect == skull_parser::Dialect::Legacy {
-            ws.ns
-                .legacy_owned
-                .replace_file(rock_mod.file, legacy_owned_names(rock_mod));
+    // Each module's facts are read in parallel; recording them stays in
+    // module order, since the first declaration wins.
+    let facts = rock_modules
+        .par_iter()
+        .map(|rock_mod| module_nominal_facts(ws, rock_mod))
+        .collect::<Vec<_>>();
+    for (module, facts) in modules.iter().zip(facts) {
+        let mid = module.id;
+        if let Some(names) = facts.legacy_owned {
+            ws.ns.legacy_owned.replace_file(module.file, names);
         }
-        let mid = ws.intern_module(rock_mod.file);
-        let scope = ws.fragment_scopes.get(&rock_mod.file).cloned();
-        let mut walk = |item: &Item, path: &[ustr::Ustr]| -> Result<(), CompilerError> {
-            let key = |name: &ustr::Ustr| map_key(scope.as_ref(), path, *name);
+        for (k, arity, defaults) in facts.types {
             // Whether this module may write `k`'s facts: a vacant slot, or one
             // this same module owns (its own re-lower refreshing them).
-            let writable = |ws: &Workspace, k: &ustr::Ustr| {
-                ws.type_generic_owner.get(k).is_none_or(|o| *o == mid)
-            };
-            match &item.kind {
-                ItemKind::Struct(s) => {
-                    let k = key(&s.name.name);
-                    if writable(ws, &k) {
-                        ws.type_generic_arity.insert(k, s.generics.len());
-                        ws.type_generic_defaults
-                            .insert(k, trailing_generic_defaults(rock_mod, &s.generics));
-                        ws.type_generic_owner.insert(k, mid);
-                    }
-                    ws.has_nobox_types |= s.is_nobox;
-                }
-                ItemKind::Enum(e) => {
-                    let k = key(&e.name.name);
-                    if writable(ws, &k) {
-                        ws.type_generic_arity.insert(k, e.generics.len());
-                        ws.type_generic_defaults
-                            .insert(k, trailing_generic_defaults(rock_mod, &e.generics));
-                        ws.type_generic_owner.insert(k, mid);
-                    }
-                }
-                ItemKind::Newtype(n) => {
-                    let k = key(&n.name.name);
-                    if writable(ws, &k) {
-                        ws.type_generic_arity.insert(k, n.generics.len());
-                        ws.type_generic_defaults
-                            .insert(k, trailing_generic_defaults(rock_mod, &n.generics));
-                        ws.type_generic_owner.insert(k, mid);
-                    }
-                }
-                ItemKind::Decorator(d) => {
-                    ws.decorator_names.insert(key(&d.name.name));
-                }
-                _ => {}
+            if ws.type_generic_owner.get(&k).is_none_or(|o| *o == mid) {
+                ws.type_generic_arity.insert(k, arity);
+                ws.type_generic_defaults.insert(k, defaults);
+                ws.type_generic_owner.insert(k, mid);
             }
-            Ok(())
-        };
-        let start = scope
-            .as_ref()
-            .map(|s| s.module_path.clone())
-            .unwrap_or_default();
-        for_each_def_item(rock_mod.items.as_slice(), &start, &mut walk)?;
+        }
+        ws.has_nobox_types |= facts.has_nobox;
+        ws.decorator_names.extend(facts.decorators);
     }
 
     ws.log_time("nominal facts", gap_timer);
