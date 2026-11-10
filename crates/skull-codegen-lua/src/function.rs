@@ -309,7 +309,7 @@ fn emit_named_framed_with_statics_impl(
     let (call_arg_forwards, suppressed) = if frame.is_some() {
         // Coroutine lifting moves later uses into frame fields, outside the
         // ordinary cell reference count that proves a producer unobserved.
-        (vec![None; func.insts.len()], vec![false; func.insts.len()])
+        (Default::default(), vec![false; func.insts.len()])
     } else {
         call_arg_forwards(ws, func)
     };

@@ -16,7 +16,7 @@ impl Emitter<'_> {
             return;
         }
         self.mark_line(out, id);
-        if let Some(forward) = &self.call_arg_forwards[raw(id) as usize] {
+        if let Some(forward) = self.call_arg_forwards.get(id) {
             self.emit_call_arg_forward(out, forward);
             return;
         }

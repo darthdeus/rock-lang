@@ -22,7 +22,7 @@ pub(crate) fn check_frame_limits(
     color_scope: &[Option<Idx<Block>>],
     hoist: &HashMap<Idx<Inst>, u32>,
     tail_forwards: &[Option<TailForward>],
-    call_arg_forwards: &[Option<CallArgForward>],
+    call_arg_forwards: &CallArgForwards,
     inlinable: &[bool],
 ) {
     // Almost every body is far under both caps, and the exact walk below needs
@@ -79,7 +79,7 @@ pub(crate) fn check_frame_limits(
         }
     }
     let mut fixed_arity_override = vec![None; func.insts.len()];
-    for forward in call_arg_forwards.iter().flatten() {
+    for forward in call_arg_forwards.iter() {
         // `f(prefix.., g(..))`: only the prefix are fixed arguments of `f`, and
         // `g`'s own results never land in locals.
         fixed_arity_override[raw(forward.consumer) as usize] = Some(forward.prefix.len());

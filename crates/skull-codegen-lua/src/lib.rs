@@ -994,7 +994,7 @@ struct Emitter<'a> {
     static_slots: &'a HashMap<ustr::Ustr, String>,
     allocation: Option<AllocationEmission<'a>>,
     tail_forwards: &'a [Option<TailForward>],
-    call_arg_forwards: &'a [Option<CallArgForward>],
+    call_arg_forwards: &'a CallArgForwards,
     suppressed: &'a [bool],
     /// Death point of every declared local, written as `<local> = nil`.
     kills: regalloc::NilKills,

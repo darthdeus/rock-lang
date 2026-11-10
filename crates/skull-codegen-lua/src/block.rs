@@ -271,7 +271,7 @@ impl Emitter<'_> {
     pub(crate) fn write_forward_call(&self, out: &mut String, call: &TailForwardCall) {
         match call {
             TailForwardCall::Direct { call, func, args } => {
-                if let Some(forward) = &self.call_arg_forwards[raw(*call) as usize] {
+                if let Some(forward) = self.call_arg_forwards.get(*call) {
                     self.write_call_arg_forward(out, forward);
                     return;
                 }

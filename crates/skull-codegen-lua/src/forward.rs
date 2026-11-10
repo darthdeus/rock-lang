@@ -82,6 +82,26 @@ pub(crate) struct CallArgForward {
     pub(crate) func: FuncRef,
 }
 
+/// The call-argument forwards of a body, sorted by consumer. Few calls
+/// forward, so a slot per instruction was mostly empty, large slots.
+#[derive(Default)]
+pub(crate) struct CallArgForwards(Vec<CallArgForward>);
+
+impl CallArgForwards {
+    /// The forward whose consumer is `id`.
+    pub(crate) fn get(&self, id: Idx<Inst>) -> Option<&CallArgForward> {
+        let at = self
+            .0
+            .binary_search_by_key(&raw(id), |f| raw(f.consumer))
+            .ok()?;
+        Some(&self.0[at])
+    }
+
+    pub(crate) fn iter(&self) -> std::slice::Iter<'_, CallArgForward> {
+        self.0.iter()
+    }
+}
+
 fn cell_reference_counts(func: &MirFunc) -> Vec<u32> {
     let mut counts = vec![0; func.cells.len()];
     for (_, block) in func.blocks.iter() {
@@ -224,12 +244,8 @@ pub(crate) fn tail_forwards(
     forwards
 }
 
-pub(crate) fn call_arg_forwards(
-    ws: &Workspace,
-    func: &MirFunc,
-) -> (Vec<Option<CallArgForward>>, Vec<bool>) {
-    let mut forwards = Vec::with_capacity(func.insts.len());
-    forwards.resize_with(func.insts.len(), || None);
+pub(crate) fn call_arg_forwards(ws: &Workspace, func: &MirFunc) -> (CallArgForwards, Vec<bool>) {
+    let mut forwards = Vec::new();
     let mut suppressed = vec![false; func.insts.len()];
     let cell_references = cell_reference_counts(func);
     let instruction_references = instruction_reference_counts(func);
@@ -294,7 +310,7 @@ pub(crate) fn call_arg_forwards(
             for &load in loads {
                 suppressed[raw(load) as usize] = true;
             }
-            forwards[raw(consumer) as usize] = Some(CallArgForward {
+            forwards.push(CallArgForward {
                 producer,
                 prefix: consumer_args[..prefix_len].to_vec(),
                 consumer,
@@ -302,7 +318,8 @@ pub(crate) fn call_arg_forwards(
             });
         }
     }
-    (forwards, suppressed)
+    forwards.sort_unstable_by_key(|f| raw(f.consumer));
+    (CallArgForwards(forwards), suppressed)
 }
 
 /// Every closure parameter cell is owned by its nested Lua function rather

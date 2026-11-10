@@ -26,7 +26,7 @@ pub(crate) fn render_scope(
     hoist_names: &[String],
     allocation: Option<AllocationEmission<'_>>,
     tail_forwards: &[Option<TailForward>],
-    call_arg_forwards: &[Option<CallArgForward>],
+    call_arg_forwards: &CallArgForwards,
     suppressed: &[bool],
     line_marks: Option<&RefCell<Vec<LineMark>>>,
     bound: Option<&CalleeBindingPlan>,

@@ -213,7 +213,7 @@ pub(crate) fn fold_single_use_reads(
     inlinable: &mut [bool],
     pinned: &[bool],
     suppressed: &[bool],
-    call_arg_forwards: &[Option<CallArgForward>],
+    call_arg_forwards: &CallArgForwards,
     line_marked: bool,
 ) -> Vec<bool> {
     const NONE: u32 = u32::MAX;
@@ -276,7 +276,7 @@ pub(crate) fn fold_single_use_reads(
             if inlinable[k]
                 || pinned_operand[k]
                 || suppressed[k]
-                || call_arg_forwards[k].is_some()
+                || call_arg_forwards.get(id).is_some()
                 || use_count[k] != 1
                 || use_block[k] != raw(b)
             {
