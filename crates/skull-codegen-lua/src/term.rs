@@ -287,7 +287,9 @@ impl Emitter<'_> {
             SelectionTarget::Cell { join, .. } => {
                 out.push('\n');
                 // Selection skips arm entry kills; apply them at the join edge.
-                self.write_kills(out, &self.kills.on_edge(bb, join));
+                if !self.kills.reaches_return(join) {
+                    self.write_kills(out, &self.kills.on_edge(bb, join));
+                }
                 if !self.structured {
                     self.write_goto(out, join);
                 }

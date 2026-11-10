@@ -182,6 +182,7 @@ mod projection_demand;
 
 mod read_folding;
 mod result_destinations;
+mod return_kills;
 
 mod argument_demand;
 mod discarded_effects;

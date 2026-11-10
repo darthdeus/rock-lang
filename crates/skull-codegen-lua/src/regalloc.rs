@@ -1478,6 +1478,9 @@ pub(crate) struct NilKills {
     value_count: u32,
     value_scope: Vec<Option<Idx<Block>>>,
     loop_blocks: Vec<(Idx<Block>, HashSet<Idx<Block>>)>,
+    /// Dense `raw(block)`: control reaches a `return` from the block's entry
+    /// without running a statement.
+    return_tail: Vec<bool>,
 }
 
 impl NilKills {
@@ -1495,7 +1498,43 @@ impl NilKills {
             value_count: 0,
             value_scope: Vec::new(),
             loop_blocks: Vec::new(),
+            return_tail: Vec::new(),
         }
+    }
+
+    /// Mark the blocks that reach a `return` without running a statement
+    /// (`quiet` says which instructions print none) and drop their entry
+    /// kills: a return drops every slot itself, and nothing between can exit.
+    pub(crate) fn mark_return_tails(&mut self, func: &MirFunc, quiet: impl Fn(Idx<Inst>) -> bool) {
+        let mut tail = vec![false; func.blocks.len()];
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (b, block) in func.blocks.iter() {
+                if tail[raw(b)] || !block.insts.iter().all(|&id| quiet(id)) {
+                    continue;
+                }
+                let reaches = match block.term {
+                    Term::Return(_) | Term::Unreachable => true,
+                    Term::Goto(s) => tail[raw(s)],
+                    _ => false,
+                };
+                if reaches {
+                    tail[raw(b)] = true;
+                    changed = true;
+                }
+            }
+        }
+        for (b, _) in func.blocks.iter() {
+            if tail[raw(b)] {
+                self.at_entry[raw(b)].clear();
+            }
+        }
+        self.return_tail = tail;
+    }
+
+    pub(crate) fn reaches_return(&self, b: Idx<Block>) -> bool {
+        self.return_tail.get(raw(b)).copied().unwrap_or(false)
     }
 
     /// No kills in `b`, on entry or after any of its statements.
@@ -1868,6 +1907,7 @@ pub(crate) fn nil_kills(
             .iter()
             .map(|l| (l.header, l.region.iter().copied().collect()))
             .collect(),
+        return_tail: Vec::new(),
     };
 
     // Backward walk per block: a slot read or written by a statement and not

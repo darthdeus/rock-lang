@@ -137,6 +137,9 @@ pub(crate) fn render_scope(
         for b in raising_blocks(ws, func) {
             kills.drop_block(func, b);
         }
+        kills.mark_return_tails(func, |id| {
+            emits_nothing[raw(id) as usize] || suppressed[raw(id) as usize]
+        });
         kills
     };
     REGALLOC_TIME.with(|c| c.set(c.get() + t_ra.elapsed()));

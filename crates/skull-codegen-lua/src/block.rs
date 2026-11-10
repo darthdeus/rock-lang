@@ -262,10 +262,11 @@ impl Emitter<'_> {
         // last statement of a returning block are dropped: `return` (and a
         // tail call, which replaces the frame) drops every slot itself.
         let returns = tail.is_some()
-            || matches!(
-                self.func.blocks[bb].term,
-                Term::Return(_) | Term::Unreachable
-            );
+            || match self.func.blocks[bb].term {
+                Term::Return(_) | Term::Unreachable => true,
+                Term::Goto(s) => self.kills.reaches_return(s),
+                _ => false,
+            };
         // In a returning block, only a statement that may call can expose a
         // stale slot to an exit; kills past the last such statement are dropped.
         let last_impure = if returns {
