@@ -390,12 +390,12 @@ pub struct LeafSlot {
     pub path: Ustr,
     pub cty: &'static str,
     pub byte_off: usize,
-    /// The same offset expressed as a LuaJIT `ffi.offsetof` composition along
-    /// this leaf's field chain (`ffi.offsetof("Vert","pos")+ffi.offsetof("V2","x")`).
-    /// Emitted as a start-up assertion against `byte_off`: the Rust layout model
-    /// and LuaJIT's must agree, and a divergence corrupts memory silently rather
-    /// than failing, so it is checked rather than trusted.
-    pub offsetof_expr: String,
+    /// The emitted C type symbol of each nested struct along `path`, outermost
+    /// first; empty for a top-level leaf. The start-up layout check composes
+    /// `ffi.offsetof` along this chain and asserts it equals `byte_off`: the
+    /// Rust layout model and LuaJIT's must agree, and a divergence corrupts
+    /// memory silently rather than failing, so it is checked rather than trusted.
+    pub owners: Vec<Ustr>,
 }
 
 /// Size and alignment of a primitive C type as LuaJIT lays it out. The only
@@ -439,7 +439,7 @@ pub(crate) fn value_leaf_layout(
         return None;
     }
     let mut out = Vec::new();
-    let (size, align) = planned_layout_rec(ws, &plan, "", 0, "", &mut out)?;
+    let (size, align) = planned_layout_rec(ws, &plan, "", 0, &[], &mut out)?;
     Some((out, size, align))
 }
 
@@ -448,7 +448,7 @@ fn planned_layout_rec(
     plan: &PlannedValue,
     prefix: &str,
     base: usize,
-    ofs: &str,
+    owners: &[Ustr],
     out: &mut Vec<LeafSlot>,
 ) -> Option<(usize, usize)> {
     let mut off = base;
@@ -462,19 +462,21 @@ fn planned_layout_rec(
                     path: leaf_path(prefix, field.as_str()),
                     cty,
                     byte_off: off,
-                    offsetof_expr: join_offsetof(ws, ofs, plan.name, field.as_str()),
+                    owners: owners.to_vec(),
                 });
                 off += size;
                 align = align.max(field_align);
             }
             PlannedField::Nested(child) => {
                 let child_base = round_up(off, planned_alignment(child)?);
+                let mut child_owners = owners.to_vec();
+                child_owners.push(crate::mangle::type_symbol(ws, child.name));
                 let (size, child_align) = planned_layout_rec(
                     ws,
                     child,
                     &format!("{}{field}.", prefix),
                     child_base,
-                    &join_offsetof(ws, ofs, plan.name, field.as_str()),
+                    &child_owners,
                     out,
                 )?;
                 off = child_base + size;
@@ -499,18 +501,6 @@ fn planned_alignment(plan: &PlannedValue) -> Option<usize> {
         };
         Some(align.max(field_align))
     })
-}
-
-/// Extend an `ffi.offsetof` composition by one field hop. `owner` names a C
-/// TYPE, so a v1 nominal contributes its emitted symbol, never its DefKey.
-pub(crate) fn join_offsetof(ws: &Workspace, prefix: &str, owner: Ustr, field: &str) -> String {
-    let owner = crate::mangle::type_symbol(ws, owner);
-    let hop = format!("ffi.offsetof(\"{owner}\", \"{field}\")");
-    if prefix.is_empty() {
-        hop
-    } else {
-        format!("{prefix} + {hop}")
-    }
 }
 
 pub(crate) fn leaf_path(prefix: &str, name: &str) -> Ustr {

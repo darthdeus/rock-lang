@@ -204,32 +204,38 @@ fn main() {
 }
 "#;
 
-/// The load-time layout check is one shared helper call per type, and a
-/// mismatch still names the drifted size or leaf.
+/// The load-time layout check is one line of data per type for a shared
+/// helper, and a mismatch still names the drifted size or leaf.
 #[test]
 fn layout_checks_share_one_failure_path() {
     let lua = crate::common::emit_module(LAYOUT_PROGRAM);
     // The size and leaf messages, both in the shared helper.
     assert_eq!(lua.matches("skull layout drift").count(), 2, "{lua}");
     assert_eq!(crate::common::run_main(&lua), "6");
-    let check = lua
-        .lines()
-        .find(|line| line.starts_with("__rock_layout_check(\"Outer\""))
-        .unwrap_or_else(|| panic!("no Outer layout check:\n{lua}"));
-    let leaf = check.replace("\"d\", 24,", "\"d\", 25,");
-    assert_ne!(leaf, check, "{check}");
-    let (ok, out) = crate::common::run_luajit_capturing(&lua.replace(check, &leaf));
-    assert!(
-        !ok && out.contains("skull layout drift: Outer.d at 24, expected 25"),
-        "{out}"
-    );
-    let size = check.replace("\"Outer\", 32,", "\"Outer\", 40,");
-    assert_ne!(size, check, "{check}");
-    let (ok, out) = crate::common::run_luajit_capturing(&lua.replace(check, &size));
-    assert!(
-        !ok && out.contains("skull layout drift: sizeof(Outer) = 32, expected 40"),
-        "{out}"
-    );
+    let check = layout_check_line(&lua, "Outer");
+    assert!(!check.contains("ffi.offsetof"), "{check}");
+    for (from, to, message) in [
+        (
+            " d 24\"",
+            " d 25\"",
+            "skull layout drift: Outer.d at 24, expected 25",
+        ),
+        (
+            "\"Outer\", 32,",
+            "\"Outer\", 40,",
+            "skull layout drift: sizeof(Outer) = 32, expected 40",
+        ),
+        (
+            " inner.b 8 ",
+            " inner.b 9 ",
+            "skull layout drift: Outer.inner.b at 8, expected 9",
+        ),
+    ] {
+        let edited = check.replace(from, to);
+        assert_ne!(edited, check, "{from} in {check}");
+        let (ok, out) = crate::common::run_luajit_capturing(&lua.replace(check, &edited));
+        assert!(!ok && out.contains(message), "{message}: {out}");
+    }
 }
 
 /// A nested leaf is also read through its flattened alias, so the alias must

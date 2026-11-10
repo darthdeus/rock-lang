@@ -1153,19 +1153,45 @@ fn value_struct_defs(
     ))
 }
 
-/// The load-time check behind [`value_leaf_layout_checks`]: each leaf is a
-/// `path, expected, actual` triple. The count is passed because a leaf whose
-/// field is missing leaves a nil hole in the table.
-const LAYOUT_CHECK_LUA: &str = r#"function __rock_layout_check(sym, size, count, leaves)
-  if ffi.sizeof(sym) ~= size then
-    error("skull layout drift: sizeof(" .. sym .. ") = " .. ffi.sizeof(sym) .. ", expected " .. size, 0)
+/// The load-time check behind [`value_leaf_layout_checks`]. `leaves` is
+/// `path offset` pairs and `nested` maps each nested field path to its C type,
+/// so the helper composes `ffi.offsetof` along a leaf's path. A nested leaf is
+/// also checked through its flattened alias (`cdata_leaf_alias`), whose name
+/// is `prefix` plus the hex of the path.
+const LAYOUT_CHECK_LUA: &str = r#"do
+local hex = {}
+for i = 0, 255 do hex[string.char(i)] = string.format("%02x", i) end
+function __rock_layout_check(sym, size, leaves, nested, prefix)
+  local ct = ffi.typeof(sym)
+  if ffi.sizeof(ct) ~= size then
+    error("skull layout drift: sizeof(" .. sym .. ") = " .. ffi.sizeof(ct) .. ", expected " .. size, 0)
   end
-  for i = 1, count * 3, 3 do
-    if leaves[i + 2] ~= leaves[i + 1] then
-      error("skull layout drift: " .. sym .. "." .. leaves[i] .. " at " .. tostring(leaves[i + 2]) .. ", expected " .. leaves[i + 1], 0)
+  local owner = {}
+  for path, ty in string.gmatch(nested, "(%S+) (%S+)") do owner[path] = ffi.typeof(ty) end
+  for path, want in string.gmatch(leaves, "(%S+) (%d+)") do
+    want = tonumber(want)
+    local at, ty, start = 0, ct, 1
+    while true do
+      local dot = string.find(path, ".", start, true)
+      local hop = ffi.offsetof(ty, string.sub(path, start, (dot or 0) - 1))
+      if hop == nil then at = nil break end
+      at = at + hop
+      if not dot then break end
+      ty = owner[string.sub(path, 1, dot - 1)]
+      start = dot + 1
+    end
+    if at ~= want then
+      error("skull layout drift: " .. sym .. "." .. path .. " at " .. tostring(at) .. ", expected " .. want, 0)
+    end
+    if start > 1 then
+      local alias = (prefix or "__rock_leaf_") .. string.gsub(path, ".", hex)
+      if ffi.offsetof(ct, alias) ~= want then error("skull leaf alias drift: " .. sym .. "." .. alias, 0) end
     end
   end
 end
+end
+-- Runs once per type at load: tracing its loops costs 3x what it saves.
+if jit and jit.off then jit.off(__rock_layout_check) end
 "#;
 
 /// Assert, once at chunk load, that skull's C layout model agrees with LuaJIT's
@@ -1214,32 +1240,34 @@ fn value_leaf_layout_checks(
         if out.is_empty() {
             out.push_str(LAYOUT_CHECK_LUA);
         }
-        let _ = write!(
-            out,
-            "__rock_layout_check(\"{sym}\", {size}, {}, {{",
-            leaves.len()
-        );
-        for (i, l) in leaves.iter().enumerate() {
+        let _ = write!(out, "__rock_layout_check(\"{sym}\", {size}, \"");
+        let mut nested: Vec<(&str, ustr::Ustr)> = Vec::new();
+        for (i, leaf) in leaves.iter().enumerate() {
             if i > 0 {
-                out.push_str(", ");
+                out.push(' ');
             }
-            let _ = write!(
-                out,
-                "\"{path}\", {off}, ({expr})",
-                expr = l.offsetof_expr,
-                off = l.byte_off,
-                path = l.path,
-            );
+            let path = leaf.path.as_str();
+            let _ = write!(out, "{path} {}", leaf.byte_off);
+            let mut ends = path.match_indices('.').map(|(at, _)| at);
+            for (owner, end) in leaf.owners.iter().zip(&mut ends) {
+                if !nested.iter().any(|(p, _)| *p == &path[..end]) {
+                    nested.push((&path[..end], *owner));
+                }
+            }
         }
-        out.push_str("})\n");
-        for leaf in leaves.iter().filter(|leaf| leaf.path.contains('.')) {
-            let alias = skull_mir::lower::cdata_leaf_alias(ws, name, leaf.path.as_str());
-            let _ = writeln!(
-                out,
-                "if ffi.offsetof(\"{sym}\", \"{alias}\") ~= {off} then error(\"skull leaf alias drift: {sym}.{alias}\", 0) end",
-                off = leaf.byte_off
-            );
+        out.push_str("\", \"");
+        for (i, (path, owner)) in nested.iter().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            let _ = write!(out, "{path} {owner}");
         }
+        out.push('"');
+        let prefix = skull_mir::lower::cdata_leaf_alias(ws, name, "");
+        if !nested.is_empty() && prefix != "__rock_leaf_" {
+            let _ = write!(out, ", \"{prefix}\"");
+        }
+        out.push_str(")\n");
         storage.push_str(&skull_mir::lower::nb_value_storage_lua(
             ws, name, &leaves, size,
         ));
