@@ -193,10 +193,12 @@ thread_local! {
 fn color_cells_timed(
     analysis: &regalloc::CellAnalysis<'_>,
     inlinable: &[bool],
+    alias: &[Option<Idx<Cell>>],
     extra_pinned: &[Idx<Cell>],
 ) -> Vec<u32> {
     let t = bone_core::prelude::Instant::now();
-    let colors = regalloc::color_cells_with_analysis(analysis, Some(inlinable), extra_pinned);
+    let colors =
+        regalloc::color_cells_with_analysis(analysis, Some(inlinable), alias, extra_pinned);
     REGALLOC_TIME.with(|c| c.set(c.get() + t.elapsed()));
     colors
 }
@@ -977,6 +979,9 @@ struct Emitter<'a> {
     /// Dense `raw(inst) -> bool`: values tree-folded into their single use site
     /// (no register), rendered in place by [`Self::write_opnd`].
     inlinable: Vec<bool>,
+    /// Dense `raw(inst) -> cell` for values computed directly in the cell a
+    /// later store copies them into ([`regalloc::store_targets`]).
+    alias: Vec<Option<Idx<Cell>>>,
     /// Dense `raw(block) -> bool`: blocks already emitted (loop bodies self-skip).
     emitted: Vec<bool>,
     /// Dense `raw(block) -> edges that goto it`; a block with none is unlabeled.

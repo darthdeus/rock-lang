@@ -31,8 +31,10 @@ impl Emitter<'_> {
         if inst.produces_value() {
             out.push(' ');
             // Only a discarded call result reaches here without a register.
-            if self.colors[raw(id) as usize] != u32::MAX {
-                write_vname(out, self.func, &self.colors, id);
+            if self.colors[raw(id) as usize] != u32::MAX
+                || regalloc::alias_at(&self.alias, id).is_some()
+            {
+                self.write_value_name(out, id);
                 out.push_str(" = ");
             }
             self.write_value(out, id, inst);
@@ -129,10 +131,12 @@ impl Emitter<'_> {
         // A spliced call is never tree-folded, so `result` has a register
         // unless nothing reads it.
         let mut lv = String::new();
-        if self.colors[raw(result) as usize] == u32::MAX {
+        if self.colors[raw(result) as usize] == u32::MAX
+            && regalloc::alias_at(&self.alias, result).is_none()
+        {
             lv.push_str("local _");
         } else {
-            write_vname(&mut lv, self.func, &self.colors, result);
+            self.write_value_name(&mut lv, result);
         }
 
         // A parameter the body only reads takes a plain operand in place of a
@@ -232,7 +236,16 @@ impl Emitter<'_> {
             self.write_value(out, id, &self.func.insts[id]);
             out.push(')');
         } else {
-            write_vname(out, self.func, &self.colors, id);
+            self.write_value_name(out, id);
+        }
+    }
+
+    /// The local holding non-folded value `id`: its register, or the cell it
+    /// is computed in.
+    fn write_value_name(&self, out: &mut String, id: Idx<Inst>) {
+        match regalloc::alias_at(&self.alias, id) {
+            Some(cell) => write_cellname(out, self.func, self.frame, self.cell_colors, cell),
+            None => write_vname(out, self.func, &self.colors, id),
         }
     }
 

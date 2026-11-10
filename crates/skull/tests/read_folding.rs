@@ -163,3 +163,49 @@ fn main() {
     assert!(stepper.contains("r0 = c0"), "{stepper}");
     assert_eq!(compile_and_run(src), "20 12 8 66");
 }
+
+#[test]
+fn a_value_stored_into_a_dead_cell_is_computed_in_that_cell() {
+    let src = r#"
+fn pick(a: int, b: int) -> int {
+    let m = 0
+    let t = a * 3
+    if t > b {
+        m = t
+    } else {
+        m = b - t
+    }
+    return m * 2
+}
+fn clampish(a: int, lo: int) -> int {
+    let m = 0
+    let t = a * 3
+    if t < lo {
+        m = lo - 1
+    } else {
+        m = t
+    }
+    return m + t
+}
+fn swapper(a: int, b: int) -> int {
+    let x = a
+    let y = b
+    let i = 0
+    while i < 3 {
+        let t = x + 1
+        x = y
+        y = t
+        i = i + 1
+    }
+    return x * 100 + y
+}
+fn main() {
+    print("{pick(1, 5)} {pick(4, 5)} {clampish(1, 5)} {clampish(4, 5)} {swapper(1, 2)}")
+}
+"#;
+    let lua = emit_module(src);
+    let pick = function_body(&lua, "pick");
+    assert!(!pick.contains("local r"), "{pick}");
+    assert!(function_body(&lua, "clampish").contains("local r0"));
+    assert_eq!(compile_and_run(src), "4 24 7 24 303");
+}

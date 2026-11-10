@@ -16,6 +16,8 @@ pub(crate) fn render_scope(
     params: &[Idx<Cell>],
     rpo: &[Idx<Block>],
     inlinable: Vec<bool>,
+    alias: Vec<Option<Idx<Cell>>>,
+    loops: HashMap<Idx<Block>, CountedLoop>,
     is_top: bool,
     frame: Option<&FrameCtx>,
     cell_colors: &[u32],
@@ -34,7 +36,6 @@ pub(crate) fn render_scope(
 ) {
     // RPO drives both block layout (preheader-before-header, for the relooper)
     // and the reachable set the regalloc colors over.
-    let loops = recognize_counted_loops(func, rpo, frame);
     let t_ra = bone_core::prelude::Instant::now();
     // Counted-loop regions partition the coloring so loop-body temps get
     // body-scoped `local`s (see `ValueAlloc::color_scope`). Partitioning trades
@@ -48,9 +49,9 @@ pub(crate) fn render_scope(
         })
         .collect();
     loop_scopes.sort_by_key(|ls| func.emit_block_id(ls.header));
-    let mut va = regalloc::color_values(func, rpo, &inlinable, &loop_scopes);
+    let mut va = regalloc::color_values(func, rpo, &inlinable, &alias, &loop_scopes);
     if va.color_scope.len() > 150 && !loop_scopes.is_empty() {
-        va = regalloc::color_values(func, rpo, &inlinable, &[]);
+        va = regalloc::color_values(func, rpo, &inlinable, &alias, &[]);
     }
     let regalloc::ValueAlloc {
         colors,
@@ -129,6 +130,7 @@ pub(crate) fn render_scope(
             cell_colors,
             &excluded,
             params,
+            &alias,
         )
     };
     REGALLOC_TIME.with(|c| c.set(c.get() + t_ra.elapsed()));
@@ -284,6 +286,7 @@ pub(crate) fn render_scope(
         loops: &loops,
         rpo,
         inlinable,
+        alias,
         emitted: vec![false; func.blocks.len()],
         label_refs: Vec::new(),
         last_goto: std::cell::Cell::new(None),

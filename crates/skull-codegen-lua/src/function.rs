@@ -358,14 +358,47 @@ fn emit_named_framed_with_statics_impl(
             inlinable[raw(id) as usize] = true;
         }
     }
+    record_representation_violations(ctx, func);
+    let (hoist, hoist_names, hoist_defs) = collect_const_hoists(ws, ctx, func, name);
+    let loops = recognize_counted_loops(func, &rpo, frame);
+    // A value moves into the cell it is copied to when it renders through the
+    // plain `<local> = <value>` statement, outside the lines a counted `for`
+    // subsumes.
+    let alias = if frame.is_none() {
+        let mut movable = vec![true; func.insts.len()];
+        for tail in tail_forwards.iter().flatten() {
+            for &id in &tail.suppressed {
+                movable[raw(id) as usize] = false;
+            }
+        }
+        for cl in loops.values() {
+            for &id in func.blocks[cl.latch].insts.iter() {
+                movable[raw(id) as usize] = false;
+            }
+        }
+        for &h in loops.keys() {
+            for &id in func.blocks[h].insts.iter() {
+                movable[raw(id) as usize] = false;
+            }
+        }
+        regalloc::store_targets(func, &rpo, &inlinable, &cell_analysis.pinned, |v, cell| {
+            movable[raw(v) as usize]
+                && !hoist.contains_key(&v)
+                && call_arg_forwards.get(v).is_none()
+                && !suppressed[raw(v) as usize]
+                && !loops.values().any(|cl| cl.slot == cell)
+        })
+    } else {
+        Vec::new()
+    };
     // Frame fields map to their dense slots before this table is consulted.
     // Frame accesses name `s` implicitly in the printer rather than through a
     // MIR cell use; reserve its parameter's color so a later local can never
     // overwrite the state table itself.
     let cell_colors = if let Some(frame) = frame {
-        color_cells_timed(&cell_analysis, &inlinable, &[frame.s_cell])
+        color_cells_timed(&cell_analysis, &inlinable, &alias, &[frame.s_cell])
     } else {
-        color_cells_timed(&cell_analysis, &inlinable, &[])
+        color_cells_timed(&cell_analysis, &inlinable, &alias, &[])
     };
     // Module-scope const hoisting: an all-constant `value` ctor is built ONCE as a
     // function-owned top-level global and referenced everywhere, instead of rebuilt
@@ -376,8 +409,6 @@ fn emit_named_framed_with_statics_impl(
     // def is emitted in THIS function's chunk (not shared scaffolding), so an
     // incremental body-edit overlay carries it; value structs are immutable, so
     // re-running the def on reload is a harmless no-op (no preservation guard).
-    record_representation_violations(ctx, func);
-    let (hoist, hoist_names, hoist_defs) = collect_const_hoists(ws, ctx, func, name);
     let static_slots = static_slots_for(ws, interner, func, inherited_statics, name, ctx);
     // An unnamed definition is an expression its caller embeds mid-line, where
     // a directive (which must start a line) cannot go.
@@ -418,6 +449,8 @@ fn emit_named_framed_with_statics_impl(
         params,
         &rpo,
         inlinable,
+        alias,
+        loops,
         true,
         frame,
         &cell_colors,

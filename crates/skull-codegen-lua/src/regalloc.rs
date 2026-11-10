@@ -340,6 +340,206 @@ pub(crate) fn stable_loads(
         .collect()
 }
 
+/// Values to compute directly in the cell a later `Store` copies them into,
+/// as a dense `raw(inst) -> cell` table. A value qualifies when its cell is
+/// dead where the value is defined and no other statement writes the cell
+/// while the value is live, so the cell holds the value at every use; the
+/// store then assigns the cell to itself. Two values of one cell never
+/// overlap. `eligible` says which values may move; `pinned` cells never take
+/// one.
+pub(crate) fn store_targets(
+    func: &MirFunc,
+    scope: &[Idx<Block>],
+    inline: &[bool],
+    pinned: &[bool],
+    eligible: impl Fn(Idx<Inst>, Idx<Cell>) -> bool,
+) -> Vec<Option<Idx<Cell>>> {
+    let n = scope.len();
+    let mut pos = vec![usize::MAX; func.blocks.len()];
+    for (i, &b) in scope.iter().enumerate() {
+        pos[raw(b)] = i;
+    }
+    let mut defined = vec![false; func.insts.len()];
+    for &b in scope {
+        for &id in &func.blocks[b].insts {
+            defined[raw(id)] = true;
+        }
+    }
+    // Candidate k: value `vals[k]` into cell `cells[k]`.
+    let mut vi = vec![u32::MAX; func.insts.len()];
+    let mut vals: Vec<Idx<Inst>> = Vec::new();
+    let mut cells: Vec<Idx<Cell>> = Vec::new();
+    for &b in scope {
+        for &id in &func.blocks[b].insts {
+            if let Inst::Store { cell, value } = func.insts[id]
+                && !inline[raw(id)]
+                && !inline[raw(value)]
+                && defined[raw(value)]
+                && vi[raw(value)] == u32::MAX
+                && !pinned[raw(cell)]
+                && func.insts[value].produces_value()
+                && eligible(value, cell)
+            {
+                vi[raw(value)] = vals.len() as u32;
+                vals.push(value);
+                cells.push(cell);
+            }
+        }
+    }
+    let mut alias = vec![None; func.insts.len()];
+    if vals.is_empty() {
+        return alias;
+    }
+    let k_count = vals.len();
+    // Dense index over the candidate cells, for their liveness.
+    let mut ci = vec![u32::MAX; func.cells.len()];
+    let mut c_count = 0usize;
+    for &c in &cells {
+        if ci[raw(c)] == u32::MAX {
+            ci[raw(c)] = c_count as u32;
+            c_count += 1;
+        }
+    }
+    let mut by_cell = vec![Vec::new(); c_count];
+    for (k, &c) in cells.iter().enumerate() {
+        by_cell[ci[raw(c)] as usize].push(k);
+    }
+    // One liveness over both: candidate values in `0..k_count`, then their
+    // cells.
+    let width = k_count + c_count;
+    let cell_bit = |c: Idx<Cell>| (ci[raw(c)] != u32::MAX).then(|| k_count + ci[raw(c)] as usize);
+    let stmt_uses = |id: Idx<Inst>, push: &mut dyn FnMut(usize)| {
+        effective_uses(func, inline, &func.insts[id], &mut |v| {
+            if vi[raw(v)] != u32::MAX {
+                push(vi[raw(v)] as usize);
+            }
+        });
+        emitted_cell_uses(func, Some(inline), &[], id, &mut |c| {
+            if let Some(bit) = cell_bit(c) {
+                push(bit);
+            }
+        });
+    };
+    let stmt_defs = |id: Idx<Inst>, push: &mut dyn FnMut(usize)| {
+        if vi[raw(id)] != u32::MAX {
+            push(vi[raw(id)] as usize);
+        }
+        func.insts[id].cell_writes_each(&mut |c| {
+            if let Some(bit) = cell_bit(c) {
+                push(bit);
+            }
+        });
+    };
+    let term_reads = |b: Idx<Block>, push: &mut dyn FnMut(usize)| {
+        term_uses(&func.blocks[b].term, &mut |v| {
+            let mut one = |w: Idx<Inst>| {
+                if vi[raw(w)] != u32::MAX {
+                    push(vi[raw(w)] as usize);
+                }
+            };
+            if inline[raw(v)] {
+                effective_uses(func, inline, &func.insts[v], &mut one);
+            } else {
+                one(v);
+            }
+        });
+        term_cell_uses(func, Some(inline), &[], &func.blocks[b].term, &mut |c| {
+            if let Some(bit) = cell_bit(c) {
+                push(bit);
+            }
+        });
+    };
+    let mut use_set = BitRows::new(n, width);
+    let mut def_set = BitRows::new(n, width);
+    for (bi, &b) in scope.iter().enumerate() {
+        for &id in &func.blocks[b].insts {
+            if inline[raw(id)] {
+                continue;
+            }
+            stmt_uses(id, &mut |k| {
+                if !def_set.get(bi, k) {
+                    use_set.set(bi, k);
+                }
+            });
+            stmt_defs(id, &mut |k| def_set.set(bi, k));
+        }
+        term_reads(b, &mut |k| {
+            if !def_set.get(bi, k) {
+                use_set.set(bi, k);
+            }
+        });
+    }
+    let mut live_in = BitRows::new(n, width);
+    let mut out = BitSet::new(width);
+    let mut inn = BitSet::new(width);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for bi in (0..n).rev() {
+            out.clear();
+            successors(&func.blocks[scope[bi]].term, |s| {
+                if pos[raw(s)] != usize::MAX {
+                    out.or_with(live_in.row(pos[raw(s)]));
+                }
+            });
+            inn.copy_from(use_set.row(bi));
+            for (wi, (&o, &d)) in out.words.iter().zip(def_set.row(bi)).enumerate() {
+                inn.words[wi] |= o & !d;
+            }
+            changed |= live_in.or_row(bi, &inn);
+        }
+    }
+    let mut conflict = vec![false; k_count];
+    let mut live = BitSet::new(width);
+    for &b in scope {
+        live.clear();
+        successors(&func.blocks[b].term, |s| {
+            if pos[raw(s)] != usize::MAX {
+                live.or_with(live_in.row(pos[raw(s)]));
+            }
+        });
+        term_reads(b, &mut |k| live.set(k));
+        for &id in func.blocks[b].insts.iter().rev() {
+            if inline[raw(id)] {
+                continue;
+            }
+            // `live` holds what is live after this statement.
+            func.insts[id].cell_writes_each(&mut |c| {
+                if ci[raw(c)] == u32::MAX {
+                    return;
+                }
+                let copies = match func.insts[id] {
+                    Inst::Store { value, .. } => Some(value),
+                    _ => None,
+                };
+                for &k in &by_cell[ci[raw(c)] as usize] {
+                    if live.get(k) && copies != Some(vals[k]) {
+                        conflict[k] = true;
+                    }
+                }
+            });
+            if vi[raw(id)] != u32::MAX {
+                let k = vi[raw(id)] as usize;
+                let cell = ci[raw(cells[k])] as usize;
+                // The cell must be dead here, and no other value of the cell
+                // may still be live.
+                if live.get(k_count + cell) || by_cell[cell].iter().any(|&o| o != k && live.get(o))
+                {
+                    conflict[k] = true;
+                }
+            }
+            stmt_defs(id, &mut |k| live.remove(k));
+            stmt_uses(id, &mut |k| live.set(k));
+        }
+    }
+    for k in 0..k_count {
+        if !conflict[k] {
+            alias[raw(vals[k])] = Some(cells[k]);
+        }
+    }
+    alias
+}
+
 /// A call whose result nothing reads runs as a bare call statement, with no
 /// register to assign and then kill. Its callee must render as a name: a
 /// statement opening with `(` would continue the previous line's expression.
@@ -389,6 +589,7 @@ pub(crate) fn color_values(
     func: &MirFunc,
     scope: &[Idx<Block>],
     inline: &[bool],
+    alias: &[Option<Idx<Cell>>],
     loops: &[LoopScope],
 ) -> ValueAlloc {
     let blocks = scope;
@@ -415,6 +616,7 @@ pub(crate) fn color_values(
             let inst = &func.insts[id];
             if inst.produces_value()
                 && !inline[raw(id)]
+                && alias_at(alias, id).is_none()
                 && !result_discarded(inst, inline, &used, id)
             {
                 values.push(id);
@@ -446,8 +648,11 @@ pub(crate) fn color_values(
                 continue;
             }
             let start = use_list.len() as u32;
+            // A value computed in a cell has no dense index.
             effective_uses(func, inline, &func.insts[id], &mut |v| {
-                use_list.push(vi[raw(v)]);
+                if vi[raw(v)] != u32::MAX {
+                    use_list.push(vi[raw(v)]);
+                }
             });
             use_range[raw(id)] = (start, use_list.len() as u32);
         }
@@ -456,9 +661,11 @@ pub(crate) fn color_values(
             // term operands may be inlined too -> see through them.
             if inline[raw(v)] {
                 effective_uses(func, inline, &func.insts[v], &mut |w| {
-                    use_list.push(vi[raw(w)]);
+                    if vi[raw(w)] != u32::MAX {
+                        use_list.push(vi[raw(w)]);
+                    }
                 });
-            } else {
+            } else if vi[raw(v)] != u32::MAX {
                 use_list.push(vi[raw(v)]);
             }
         });
@@ -749,26 +956,51 @@ pub(crate) fn cell_uses(inst: &Inst, push: &mut impl FnMut(Idx<Cell>)) {
     }
 }
 
+/// The cell a value is computed in instead of a register of its own (see
+/// [`store_targets`]); an empty table means none is.
+pub(crate) fn alias_at(alias: &[Option<Idx<Cell>>], v: Idx<Inst>) -> Option<Idx<Cell>> {
+    alias.get(raw(v)).copied().flatten()
+}
+
 fn inlined_operand_cell_uses(
     func: &MirFunc,
     inline: &[bool],
+    alias: &[Option<Idx<Cell>>],
     inst: &Inst,
     push: &mut impl FnMut(Idx<Cell>),
 ) {
     inst_uses(inst, &mut |value| {
+        if let Some(cell) = alias_at(alias, value) {
+            push(cell);
+            return;
+        }
         if !inline[raw(value)] {
             return;
         }
         match &func.insts[value] {
             Inst::Load(cell) => push(*cell),
-            nested => inlined_operand_cell_uses(func, inline, nested, push),
+            nested => inlined_operand_cell_uses(func, inline, alias, nested, push),
         }
     });
+}
+
+/// The cells statement `id` writes, counting a value computed in a cell.
+fn emitted_cell_defs(
+    func: &MirFunc,
+    alias: &[Option<Idx<Cell>>],
+    id: Idx<Inst>,
+    push: &mut impl FnMut(Idx<Cell>),
+) {
+    cell_defs(&func.insts[id], push);
+    if let Some(cell) = alias_at(alias, id) {
+        push(cell);
+    }
 }
 
 fn emitted_cell_uses(
     func: &MirFunc,
     inline: Option<&[bool]>,
+    alias: &[Option<Idx<Cell>>],
     id: Idx<Inst>,
     push: &mut impl FnMut(Idx<Cell>),
 ) {
@@ -777,24 +1009,29 @@ fn emitted_cell_uses(
     }
     cell_uses(&func.insts[id], push);
     if let Some(inline) = inline {
-        inlined_operand_cell_uses(func, inline, &func.insts[id], push);
+        inlined_operand_cell_uses(func, inline, alias, &func.insts[id], push);
     }
 }
 
 fn term_cell_uses(
     func: &MirFunc,
     inline: Option<&[bool]>,
+    alias: &[Option<Idx<Cell>>],
     term: &Term,
     push: &mut impl FnMut(Idx<Cell>),
 ) {
     let Some(inline) = inline else { return };
     term_uses(term, &mut |value| {
+        if let Some(cell) = alias_at(alias, value) {
+            push(cell);
+            return;
+        }
         if !inline[raw(value)] {
             return;
         }
         match &func.insts[value] {
             Inst::Load(cell) => push(*cell),
-            nested => inlined_operand_cell_uses(func, inline, nested, push),
+            nested => inlined_operand_cell_uses(func, inline, alias, nested, push),
         }
     });
 }
@@ -806,7 +1043,7 @@ fn term_cell_uses(
 /// with their enclosing body.
 #[cfg(test)]
 pub(crate) fn color_cells(func: &MirFunc) -> Vec<u32> {
-    color_cells_with_analysis(&CellAnalysis::new(func), None, &[])
+    color_cells_with_analysis(&CellAnalysis::new(func), None, &[], &[])
 }
 
 /// Cells held by reference for the whole body -- a closure's params, any cell
@@ -861,6 +1098,7 @@ impl<'a> CellAnalysis<'a> {
 pub(crate) fn color_cells_with_analysis(
     analysis: &CellAnalysis<'_>,
     inline: Option<&[bool]>,
+    alias: &[Option<Idx<Cell>>],
     extra_pinned: &[Idx<Cell>],
 ) -> Vec<u32> {
     let func = analysis.func;
@@ -914,11 +1152,11 @@ pub(crate) fn color_cells_with_analysis(
     for (bi, &b) in top.iter().enumerate() {
         for &id in &func.blocks[b].insts {
             let start = use_list.len() as u32;
-            emitted_cell_uses(func, inline, id, &mut |c| use_list.push(ci[raw(c)]));
+            emitted_cell_uses(func, inline, alias, id, &mut |c| use_list.push(ci[raw(c)]));
             use_range[raw(id)] = (start, use_list.len() as u32);
         }
         let start = use_list.len() as u32;
-        term_cell_uses(func, inline, &func.blocks[b].term, &mut |c| {
+        term_cell_uses(func, inline, alias, &func.blocks[b].term, &mut |c| {
             use_list.push(ci[raw(c)])
         });
         term_range[bi] = (start, use_list.len() as u32);
@@ -935,7 +1173,7 @@ pub(crate) fn color_cells_with_analysis(
                     use_set.set(bi, k);
                 }
             }
-            cell_defs(&func.insts[id], &mut |c| {
+            emitted_cell_defs(func, alias, id, &mut |c| {
                 def_set.set(bi, ci[raw(c)] as usize)
             });
         }
@@ -1066,7 +1304,7 @@ pub(crate) fn color_cells_with_analysis(
         }
         for &id in block.insts.iter().rev() {
             defs.clear();
-            cell_defs(&func.insts[id], &mut |c| defs.push(ci[raw(c)] as usize));
+            emitted_cell_defs(func, alias, id, &mut |c| defs.push(ci[raw(c)] as usize));
             for &d in &defs {
                 push_live(d, &live, &mut edges);
             }
@@ -1378,6 +1616,7 @@ pub(crate) fn nil_kills(
     cell_colors: &[u32],
     cell_excluded: &[bool],
     params: &[Idx<Cell>],
+    alias: &[Option<Idx<Cell>>],
 ) -> NilKills {
     let n = scope.len();
     let mut pos = vec![usize::MAX; func.blocks.len()];
@@ -1414,7 +1653,7 @@ pub(crate) fn nil_kills(
                 push(s);
             }
         });
-        emitted_cell_uses(func, Some(inline), id, &mut |c| {
+        emitted_cell_uses(func, Some(inline), alias, id, &mut |c| {
             let s = cell_slot[raw(c)];
             if s != u32::MAX {
                 push(s as usize);
@@ -1427,7 +1666,7 @@ pub(crate) fn nil_kills(
                 push(s);
             }
         }
-        cell_defs(&func.insts[id], &mut |c| {
+        emitted_cell_defs(func, alias, id, &mut |c| {
             let s = cell_slot[raw(c)];
             if s != u32::MAX {
                 push(s as usize);
@@ -1446,7 +1685,7 @@ pub(crate) fn nil_kills(
                 push(s);
             }
         });
-        term_cell_uses(func, Some(inline), term, &mut |c| {
+        term_cell_uses(func, Some(inline), alias, term, &mut |c| {
             let s = cell_slot[raw(c)];
             if s != u32::MAX {
                 push(s as usize);
