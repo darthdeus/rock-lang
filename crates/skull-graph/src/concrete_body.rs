@@ -3341,7 +3341,32 @@ fn build_published_impl(
         ..ConcreteBodies::default()
     };
     out.instance_facts.reserve(results.len());
-    out.owner_candidates.reserve(results.len());
+    let mut candidate_ref_rows = 0usize;
+    let mut owner_candidates: FxHashMap<Instance, FxHashSet<Instance>> = FxHashMap::default();
+    owner_candidates.reserve(results.len());
+    for result in &mut results {
+        if let InstanceResult::Built(built) = result {
+            candidate_ref_rows += built.candidate_refs.len();
+            if built.plan.is_ok() {
+                owner_candidates.insert(
+                    built.instance.clone(),
+                    std::mem::take(&mut built.candidate_refs),
+                );
+            }
+        }
+    }
+    let collect_candidate_keys = || {
+        let started = bone_core::prelude::Instant::now();
+        let mut keys: Vec<&Instance> = owner_candidates
+            .values()
+            .flatten()
+            .collect::<FxHashSet<_>>()
+            .into_iter()
+            .collect();
+        keys.sort();
+        let keys: BTreeSet<Instance> = keys.into_iter().cloned().collect();
+        (keys, started.elapsed())
+    };
     // The results are sorted by instance, so the ordered tables are built in
     // bulk from the sorted rows rather than one insertion at a time.
     let mut plan_rows: Vec<(Instance, Arc<skull_mir::concrete::ConcreteBodyPlan>)> = Vec::new();
@@ -3350,79 +3375,62 @@ fn build_published_impl(
     let mut t_convert = std::time::Duration::ZERO;
     let mut t_callee = std::time::Duration::ZERO;
     let mut t_plan = std::time::Duration::ZERO;
-    let mut candidate_install_time = std::time::Duration::ZERO;
     let mut plan_insert_time = std::time::Duration::ZERO;
     let mut body_insert_time = std::time::Duration::ZERO;
     let mut failure_index_time = std::time::Duration::ZERO;
     let mut owner_fact_insert_time = std::time::Duration::ZERO;
-    let mut candidate_ref_rows = 0usize;
     let mut slot_tyids = 0usize;
     let mut unique_slot_tyids = 0usize;
-    for result in results {
-        match result {
-            InstanceResult::Gap(gap) => {
-                let mut facts = OwnerFacts::default();
-                facts.gaps.push(gap.clone());
-                out.instance_facts.insert(gap.instance, facts);
-            }
-            InstanceResult::Built(built) => {
-                let instance = built.instance.clone();
-                t_convert += built.convert_time;
-                t_callee += built.callee_time;
-                t_plan += built.plan_time;
-                per_inst.push((instance.clone(), built.elapsed));
-                slot_tyids += built.slot_tyids;
-                unique_slot_tyids += built.unique_slot_tyids;
-                let facts = built.facts;
-                let candidate_refs = built.candidate_refs;
-                candidate_ref_rows += candidate_refs.len();
-                if let Ok(plan) = built.plan {
-                    let started = timing_enabled.then(bone_core::prelude::Instant::now);
-                    out.owner_candidates
-                        .insert(instance.clone(), candidate_refs);
-                    if let Some(started) = started {
-                        candidate_install_time += started.elapsed();
+    // The candidate keys read only the rows taken above, so they are
+    // collected beside the rest of the merge.
+    let ((candidate_keys, candidate_install_time), ()) =
+        bone_core::prelude::join_in_place(collect_candidate_keys, || {
+            for result in results {
+                match result {
+                    InstanceResult::Gap(gap) => {
+                        let mut facts = OwnerFacts::default();
+                        facts.gaps.push(gap.clone());
+                        out.instance_facts.insert(gap.instance, facts);
                     }
-                    let started = timing_enabled.then(bone_core::prelude::Instant::now);
-                    plan_rows.push((instance.clone(), Arc::new(plan)));
-                    if let Some(started) = started {
-                        plan_insert_time += started.elapsed();
+                    InstanceResult::Built(built) => {
+                        let instance = built.instance.clone();
+                        t_convert += built.convert_time;
+                        t_callee += built.callee_time;
+                        t_plan += built.plan_time;
+                        per_inst.push((instance.clone(), built.elapsed));
+                        slot_tyids += built.slot_tyids;
+                        unique_slot_tyids += built.unique_slot_tyids;
+                        let facts = built.facts;
+                        if let Ok(plan) = built.plan {
+                            let started = timing_enabled.then(bone_core::prelude::Instant::now);
+                            plan_rows.push((instance.clone(), Arc::new(plan)));
+                            if let Some(started) = started {
+                                plan_insert_time += started.elapsed();
+                            }
+                        }
+                        let started = timing_enabled.then(bone_core::prelude::Instant::now);
+                        if retain_callee_maps {
+                            body_rows.push((instance.clone(), built.concrete));
+                            if let Some(started) = started {
+                                body_insert_time += started.elapsed();
+                            }
+                        }
+                        let started = timing_enabled.then(bone_core::prelude::Instant::now);
+                        out.install_failure_index(&facts);
+                        if let Some(started) = started {
+                            failure_index_time += started.elapsed();
+                        }
+                        let started = timing_enabled.then(bone_core::prelude::Instant::now);
+                        out.instance_facts.insert(instance, facts);
+                        if let Some(started) = started {
+                            owner_fact_insert_time += started.elapsed();
+                        }
                     }
-                }
-                let started = timing_enabled.then(bone_core::prelude::Instant::now);
-                if retain_callee_maps {
-                    body_rows.push((instance.clone(), built.concrete));
-                    if let Some(started) = started {
-                        body_insert_time += started.elapsed();
-                    }
-                }
-                let started = timing_enabled.then(bone_core::prelude::Instant::now);
-                out.install_failure_index(&facts);
-                if let Some(started) = started {
-                    failure_index_time += started.elapsed();
-                }
-                let started = timing_enabled.then(bone_core::prelude::Instant::now);
-                out.instance_facts.insert(instance, facts);
-                if let Some(started) = started {
-                    owner_fact_insert_time += started.elapsed();
                 }
             }
-        }
-    }
-    let started = timing_enabled.then(bone_core::prelude::Instant::now);
-    let mut candidate_keys: Vec<&Instance> = out
-        .owner_candidates
-        .values()
-        .flatten()
-        .collect::<FxHashSet<_>>()
-        .into_iter()
-        .collect();
-    candidate_keys.sort();
-    let candidate_keys = candidate_keys.into_iter().cloned().collect();
+        });
     out.candidate_keys = candidate_keys;
-    if let Some(started) = started {
-        candidate_install_time += started.elapsed();
-    }
+    out.owner_candidates = owner_candidates;
     let started = timing_enabled.then(bone_core::prelude::Instant::now);
     let plans: skull_mir::concrete::ConcretePlans = plan_rows.into_iter().collect();
     if let Some(started) = started {
