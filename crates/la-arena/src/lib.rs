@@ -595,7 +595,7 @@ impl<T> Extend<T> for Arena<T> {
 /// Move `v` into an allocation of exactly its length. `Vec::shrink_to_fit`
 /// asks the allocator to `realloc`, and mimalloc keeps a block in place when
 /// it shrinks by less than half: every vector grown by doubling.
-pub(crate) fn exact_fit<T>(v: &mut Vec<T>) {
+pub fn exact_fit<T>(v: &mut Vec<T>) {
     if v.capacity() > v.len() {
         let mut exact = Vec::with_capacity(v.len());
         exact.append(v);

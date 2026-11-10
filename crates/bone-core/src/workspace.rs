@@ -797,6 +797,27 @@ pub struct BodyCheckpoint {
 }
 
 impl BodyInference {
+    /// Release the spare capacity inference left in the tables a stored
+    /// result keeps until the program is emitted.
+    pub fn shrink_to_fit(&mut self) {
+        self.expr_types.shrink_to_fit();
+        self.binding_types.shrink_to_fit();
+        self.ref_call_args.shrink_to_fit();
+        self.resolved_overload_calls.shrink_to_fit();
+        self.call_generic_bindings.shrink_to_fit();
+        self.for_iter_protocol.shrink_to_fit();
+        self.bound_calls.shrink_to_fit();
+        self.bound_identity_calls.shrink_to_fit();
+        self.fn_field_calls.shrink_to_fit();
+        self.fn_field_call_types.shrink_to_fit();
+        self.bound_call_trees.shrink_to_fit();
+        self.implicit_iter_args.shrink_to_fit();
+        self.ty_arena.shrink_to_fit();
+        self.ty_spans.shrink_to_fit();
+        comfy_la_arena::exact_fit(&mut self.substitutions.0);
+        self.deps.shrink_to_fit();
+    }
+
     pub fn record_resolved_call(
         &mut self,
         call_expr: Idx<Expr>,

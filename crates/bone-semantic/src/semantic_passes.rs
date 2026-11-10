@@ -2598,6 +2598,8 @@ pub fn check_module_incremental(
         );
     }
 
+    // The table holds each body's inference inline, and lives to the end.
+    result.per_fn.shrink_to_fit();
     Ok(result)
 }
 
@@ -2615,7 +2617,8 @@ fn fold_inference(
     checked: Result<Option<(BodyOwner, BodyInference, Vec<CompilerError>)>, CompilerError>,
 ) {
     match checked {
-        Ok(Some((o, inf, errs))) => {
+        Ok(Some((o, mut inf, errs))) => {
+            inf.shrink_to_fit();
             result.per_fn.insert(o, inf);
 
             if !errs.is_empty() {
