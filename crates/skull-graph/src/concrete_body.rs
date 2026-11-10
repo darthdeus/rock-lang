@@ -534,6 +534,15 @@ impl ConcreteBodies {
 
     /// Fold the authoritative owner records for an explicit census request.
     /// The repair path does not call this method.
+    /// Release the per-owner facts, for a build that will neither repair
+    /// these plans incrementally nor ask for their census.
+    pub fn take_owner_facts(&mut self) -> impl Send + 'static {
+        (
+            std::mem::take(&mut self.instance_facts),
+            std::mem::take(&mut self.always_facts),
+        )
+    }
+
     pub fn snapshot_build_stats(&mut self) -> ConcreteBuildStats {
         let stats = self.aggregate_facts().build_stats;
         self.build_stats = stats;

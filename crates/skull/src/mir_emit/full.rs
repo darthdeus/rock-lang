@@ -1088,6 +1088,16 @@ pub(super) fn emit_full_build(
     // Nothing the fan-out lowers reads the graph's records; only the shader
     // view beside it does. A one-shot build hands them to that lane, which
     // frees them when it finishes, so the fan-out reuses their memory.
+    let concrete_stats = if concrete_stats_requested() {
+        concrete.snapshot_build_stats()
+    } else {
+        crate::concrete_body::ConcreteBuildStats::default()
+    };
+    // The owner facts serve incremental repair and the census above; a
+    // one-shot build has neither past this point.
+    if build.lifetime() == CacheLifetime::OneShot {
+        drop_in_background(concrete.take_owner_facts());
+    }
     let graph_records = (build.lifetime() == CacheLifetime::OneShot).then(|| graph.take_records());
     let released_graph_instances = graph_records.as_ref().map_or(0, |r| r.instances.len());
     let spec_queue = SpecQueue::new(ws, &scx, graph_records.as_ref().unwrap_or(&graph), None);
@@ -1155,11 +1165,6 @@ pub(super) fn emit_full_build(
         shader_lane.finished - shader_lane.started,
     ));
     let (dependents, dependency_edges) = index_dependents(&chunks, build.lifetime());
-    let concrete_stats = if concrete_stats_requested() {
-        concrete.snapshot_build_stats()
-    } else {
-        crate::concrete_body::ConcreteBuildStats::default()
-    };
     let FullRoots {
         interface_roots,
         sim_roots,
