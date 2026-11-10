@@ -12,7 +12,8 @@ pub(crate) fn referenced_cells_in_region(
     suppressed: &[bool],
 ) -> HashSet<Idx<Cell>> {
     let mut seen = vec![false; func.blocks.len()];
-    let mut stack = vec![entry];
+    let mut stack = Vec::with_capacity(func.blocks.len());
+    stack.push(entry);
     seen[raw(entry) as usize] = true;
     let mut cells: HashSet<Idx<Cell>> = HashSet::default();
     while let Some(b) = stack.pop() {

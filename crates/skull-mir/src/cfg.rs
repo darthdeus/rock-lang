@@ -39,7 +39,9 @@ pub fn successors(term: &Term, mut f: impl FnMut(Idx<Block>)) {
 /// header, which id order doesn't guarantee.)
 pub fn reachable_blocks_from(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
     let mut visited = vec![false; func.blocks.len()];
-    let mut stack = vec![entry];
+    // Each block is pushed at most once, so the stack never grows.
+    let mut stack = Vec::with_capacity(func.blocks.len());
+    stack.push(entry);
     visited[dense::bx(entry)] = true;
     let mut count = 1;
     while let Some(b) = stack.pop() {
@@ -71,9 +73,11 @@ pub fn reachable_blocks_from(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block
 /// into the header position (a `for` can't be a goto target, unlike a label).
 /// Unreachable lowering-artifact blocks are dropped.
 pub fn reverse_postorder(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
-    let mut post = Vec::new();
+    let mut post = Vec::with_capacity(func.blocks.len());
     let mut visited = vec![false; func.blocks.len()];
-    let mut stack = vec![(entry, false)];
+    // A block is pushed once unvisited and once finished.
+    let mut stack = Vec::with_capacity(2 * func.blocks.len());
+    stack.push((entry, false));
     visited[dense::bx(entry)] = true;
     while let Some((b, processed)) = stack.pop() {
         if processed {

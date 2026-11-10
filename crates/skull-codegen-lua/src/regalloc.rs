@@ -255,7 +255,7 @@ pub(crate) fn color_values(
     inline: &[bool],
     loops: &[LoopScope],
 ) -> ValueAlloc {
-    let blocks: Vec<Idx<Block>> = scope.to_vec();
+    let blocks = scope;
     let n = blocks.len();
     // Dense block -> scope-index (raw-id keyed; usize::MAX = not in this scope).
     let mut pos = vec![usize::MAX; func.blocks.len()];
@@ -274,7 +274,7 @@ pub(crate) fn color_values(
         block.term.uses_each(&mut |v| used[raw(v)] = true);
     }
     let mut values: Vec<Idx<Inst>> = Vec::with_capacity(func.insts.len());
-    for &b in &blocks {
+    for &b in blocks {
         for &id in &func.blocks[b].insts {
             let inst = &func.insts[id];
             if inst.produces_value()
