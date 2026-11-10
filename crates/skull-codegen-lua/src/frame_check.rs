@@ -32,6 +32,7 @@ pub(crate) fn check_frame_limits(
     let loop_scoped_locals = color_scope.iter().flatten().count();
     if frame_limits::fits_without_measuring(
         func,
+        rpo,
         top_locals,
         loops.len(),
         loop_scoped_locals,

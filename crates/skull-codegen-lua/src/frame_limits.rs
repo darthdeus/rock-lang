@@ -487,17 +487,18 @@ fn terminator_height(func: &MirFunc, shape: &EmittedShape<'_>, term: &Term) -> u
 }
 
 /// Whether this function is so far under both caps that the exact model cannot
-/// possibly reject it. One allocation-free pass over the instructions, against
-/// an upper bound of what [`frame_overflow`] would compute:
-/// `actives_upper` is the whole loop nest's declarations summed as if every
-/// loop enclosed every block, and the widest statement is taken without any of
-/// the narrowing the emitter applies.
+/// possibly reject it. One allocation-free pass over the statements of
+/// `blocks` (the ones [`frame_overflow`] would measure), against an upper
+/// bound of what it would compute: `actives_upper` is the whole loop nest's
+/// declarations summed as if every loop enclosed every block, and the widest
+/// statement is taken without any of the narrowing the emitter applies.
 ///
 /// This is what keeps the check off the compile-time budget: a large project emits
 /// tens of thousands of bodies and none of them comes near 200 locals, so the
 /// side tables [`frame_overflow`] needs are never allocated.
 pub(crate) fn fits_without_measuring(
     func: &MirFunc,
+    blocks: &[Idx<Block>],
     top_locals: usize,
     loop_count: usize,
     loop_scoped_locals: usize,
@@ -512,14 +513,15 @@ pub(crate) fn fits_without_measuring(
         ..EmittedShape::PLAIN
     };
     let mut widest = 0usize;
-    for (id, inst) in func.insts.iter() {
-        let mut slots = statement_slots_upper_bound(inst);
-        if !inlinable[raw(id)] {
-            slots = slots.max(operand_height(func, &shape, id));
+    for &b in blocks {
+        let block = &func.blocks[b];
+        for &id in &block.insts {
+            let mut slots = statement_slots_upper_bound(&func.insts[id]);
+            if !inlinable[raw(id)] {
+                slots = slots.max(operand_height(func, &shape, id));
+            }
+            widest = widest.max(slots);
         }
-        widest = widest.max(slots);
-    }
-    for (_, block) in func.blocks.iter() {
         widest = widest.max(terminator_height(func, &shape, &block.term));
     }
     actives_upper + widest <= FrameLimit::Slots.max_loadable()
