@@ -25,8 +25,8 @@ pub(crate) fn compile_game(
         let mut compiler = super::game_runtime::game_compiler_for(backend, path, &output_path);
         // One-shot from-scratch compile: always the init path, so the outcome
         // can never request a shape restart (there is no live process).
-        compiler.compile(&HashSet::new(), true)?;
-        Ok(GameArtifact {
+        rock_host::timed("compile", || compiler.compile(&HashSet::new(), true))?;
+        let artifact = GameArtifact {
             artifact_fingerprint: compiler.artifact_fingerprint()?,
             // The manifest re-hashes the bytes itself (sha256); only the paths travel here.
             embedded_files: compiler
@@ -35,6 +35,8 @@ pub(crate) fn compile_game(
                 .map(|(path, _)| path)
                 .collect(),
             comptime_inputs: compiler.comptime_inputs().cloned(),
-        })
+        };
+        rock_host::timed("drop compiler", || drop(compiler));
+        Ok(artifact)
     })()
 }

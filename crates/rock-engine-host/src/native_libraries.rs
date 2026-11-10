@@ -103,11 +103,13 @@ fn cargo_command(manifest: &Path) -> Command {
 }
 
 fn cargo_library(lib: &NativeLibrary) -> Result<CargoLibrary> {
-    let output = cargo_command(&lib.manifest)
-        .args(["metadata", "--format-version=1", "--manifest-path"])
-        .arg(&lib.manifest)
-        .stderr(Stdio::inherit())
-        .output()?;
+    let output = rock_host::timed(format!("{}: cargo metadata", lib.dst_stem), || {
+        cargo_command(&lib.manifest)
+            .args(["metadata", "--format-version=1", "--manifest-path"])
+            .arg(&lib.manifest)
+            .stderr(Stdio::inherit())
+            .output()
+    })?;
     anyhow::ensure!(
         output.status.success(),
         "Cargo metadata failed for {}",
@@ -260,17 +262,19 @@ pub fn native_preamble(project: &str) -> Result<String> {
 pub fn build_optional_engine_lib(lib: &NativeLibrary) -> Result<()> {
     let cargo = cargo_library(lib)?;
     log::info!("Building project native library {}", lib.dst_stem);
-    let output = cargo_command(&lib.manifest)
-        .args(["build", "--lib", "--manifest-path"])
-        .arg(&lib.manifest)
-        .args([
-            "-p",
-            &cargo.package_name,
-            "--message-format=json-render-diagnostics",
-        ])
-        .stderr(Stdio::inherit())
-        .output()
-        .with_context(|| format!("cannot build {}", lib.manifest.display()))?;
+    let output = rock_host::timed(format!("{}: cargo build", lib.dst_stem), || {
+        cargo_command(&lib.manifest)
+            .args(["build", "--lib", "--manifest-path"])
+            .arg(&lib.manifest)
+            .args([
+                "-p",
+                &cargo.package_name,
+                "--message-format=json-render-diagnostics",
+            ])
+            .stderr(Stdio::inherit())
+            .output()
+    })
+    .with_context(|| format!("cannot build {}", lib.manifest.display()))?;
     anyhow::ensure!(
         output.status.success(),
         "native build failed for {}",
@@ -310,8 +314,10 @@ pub fn build_optional_engine_lib(lib: &NativeLibrary) -> Result<()> {
     let destination = lib
         .stage_dir
         .join(crate::engine_build::cdylib_name(&lib.dst_stem));
-    crate::engine_build::stage_cdylib_from(&artifact, &destination, |path| {
-        crate::engine_build::prepare_staged_cdylib(path, &lib.dst_stem)
+    rock_host::timed(format!("{}: staging", lib.dst_stem), || {
+        crate::engine_build::stage_cdylib_from(&artifact, &destination, |path| {
+            crate::engine_build::prepare_staged_cdylib(path, &lib.dst_stem)
+        })
     })
 }
 

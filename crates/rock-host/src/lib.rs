@@ -98,6 +98,15 @@ pub fn rock_dir() -> String {
         .clone()
 }
 
+/// Runs `f` and logs its wall time at debug level, so `ROCK_LOG=debug` shows
+/// where a launch spends its time before the program starts.
+pub fn timed<T>(what: impl std::fmt::Display, f: impl FnOnce() -> T) -> T {
+    let started = rock_core::clock::Instant::now();
+    let value = f();
+    log::debug!("{what}: {:.1} ms", started.elapsed().as_secs_f64() * 1000.0);
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

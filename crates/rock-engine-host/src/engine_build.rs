@@ -628,8 +628,12 @@ fn cargo_build_and_stage_lib(
     }
     require_source_build()?;
     rock_host::process_management::report_spawn_phase("engine-build");
-    run_cargo(cargo_args, &format!("Failed to build {}", display_name))?;
-    stage_cdylib(src_stem, dst_stem)
+    rock_host::timed(format!("{display_name}: cargo build"), || {
+        run_cargo(cargo_args, &format!("Failed to build {}", display_name))
+    })?;
+    rock_host::timed(format!("{display_name}: staging"), || {
+        stage_cdylib(src_stem, dst_stem)
+    })
 }
 
 /// Stage a freshly built cdylib under its stable loader name. Accepted build

@@ -39,21 +39,24 @@ pub(crate) fn compile_frame_invocation(
     )?;
     // Profiling tools inspect this diagnostic copy after the run. Execution uses
     // only the private file, so another invocation can safely replace this copy.
-    crate::frame_compile_cache::materialize(
-        &compiled.lua_file,
-        &PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME),
-    )?;
+    rock_host::timed("diagnostic copy", || {
+        crate::frame_compile_cache::materialize(
+            &compiled.lua_file,
+            &PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME),
+        )
+    })?;
     Ok((invocation, compiled))
 }
 
 /// Everything a run compile needs before the compiler: project resolution,
 /// renderer feature, sound bank and engine libs.
 pub(crate) fn prepare_game_compile(path: &str) -> Result<()> {
-    let project = (crate::registry::RuntimeServices::registered().resolve_project_dir)(path)?;
+    let services = crate::registry::RuntimeServices::registered();
+    let project = rock_host::timed("resolve project", || (services.resolve_project_dir)(path))?;
     let path = project.to_string_lossy();
     let path = path.as_ref();
-    (crate::registry::RuntimeServices::registered().prepare_sound_bank)(path)?;
-    (crate::registry::RuntimeServices::registered().build_engine_libs)(path)?;
+    rock_host::timed("sound bank", || (services.prepare_sound_bank)(path))?;
+    rock_host::timed("engine libraries", || (services.build_engine_libs)(path))?;
     Ok(())
 }
 
