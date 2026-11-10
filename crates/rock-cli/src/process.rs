@@ -183,6 +183,20 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
 
     cleanup_all_children();
     rock_cli::invocation_log::finish(Some(0), "return");
+    exit_without_teardown();
+}
+
+/// End a successful command without process teardown. The kernel reclaims
+/// the address space in one pass at exit; letting `exit` run would first have
+/// the allocator hand every page back with one `madvise` per span (about 75 ms
+/// after a large compile) and each thread release its heap.
+fn exit_without_teardown() -> ! {
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    // SAFETY: `_exit` takes no pointers; the buffered standard streams are
+    // flushed above, and every file the command wrote is closed by now.
+    unsafe { libc::_exit(0) }
 }
 
 /// Whether the command should enter the compiler allocator policy.
