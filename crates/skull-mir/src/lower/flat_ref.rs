@@ -38,7 +38,7 @@ impl FlatRefKey {
         let prefix = if self.prefix.is_empty() {
             field
         } else {
-            Ustr::from(&format!("{}.{field}", self.prefix))
+            crate::names::ustr(&format!("{}.{field}", self.prefix))
         };
         Self { prefix, ..self }
     }
@@ -220,7 +220,7 @@ impl<'a> Builder<'a> {
                 .map(|(elem, storage)| FlatRefKey {
                     elem,
                     storage,
-                    prefix: Ustr::from(""),
+                    prefix: crate::names::ustr(""),
                 })),
             Expr::FieldAccess { base, field } => {
                 let Some(key) = self.classify_flat_ref(base)? else {
@@ -801,7 +801,7 @@ impl<'a> Builder<'a> {
             };
             let n = reg.counter;
             reg.counter += 1;
-            let name = Ustr::from(&format!(
+            let name = crate::names::ustr(&format!(
                 "__flatref_{}_{n}",
                 root.symbol(self.ws, self.scx.interner())
             ));
@@ -906,9 +906,9 @@ impl<'a> Builder<'a> {
                 let name = body.binding_arena[pb].name;
                 let cell = child.new_binding_cell(
                     pb,
-                    Ustr::from(&format!("{name}__slot")),
+                    crate::names::ustr(&format!("{name}__slot")),
                     None,
-                    Ustr::from("slot"),
+                    crate::names::ustr("slot"),
                 );
                 child.f.cells[cell].producer = crate::mir::CellProducer::Param;
                 child.f.params.push(cell);
@@ -922,9 +922,9 @@ impl<'a> Builder<'a> {
                 Some(key) => {
                     let vec = child.new_binding_cell(
                         pb,
-                        Ustr::from(&format!("{name}__vec")),
+                        crate::names::ustr(&format!("{name}__vec")),
                         None,
-                        Ustr::from("vec"),
+                        crate::names::ustr("vec"),
                     );
                     child.f.cells[vec].producer = crate::mir::CellProducer::Param;
                     child.f.params.push(vec);
@@ -1006,15 +1006,15 @@ impl<'a> Builder<'a> {
         let bname = self.body.binding_arena[name].name;
         let vec = self.new_binding_cell(
             name,
-            Ustr::from(&format!("{bname}__vec")),
+            crate::names::ustr(&format!("{bname}__vec")),
             None,
-            Ustr::from("vec"),
+            crate::names::ustr("vec"),
         );
         let slot = self.new_binding_cell(
             name,
-            Ustr::from(&format!("{bname}__slot")),
+            crate::names::ustr(&format!("{bname}__slot")),
             None,
-            Ustr::from("slot"),
+            crate::names::ustr("slot"),
         );
         self.emit_cur(Inst::Store {
             cell: vec,
@@ -1067,7 +1067,7 @@ impl<'a> Builder<'a> {
     fn flat_leaf_keys(&self, key: &FlatRefKey, shape: &ValueShape) -> Vec<Ustr> {
         leaf_names(shape, key.prefix.as_str(), ".")
             .iter()
-            .map(|k| Ustr::from(k))
+            .map(|k| crate::names::ustr(k))
             .collect()
     }
 
@@ -1166,7 +1166,7 @@ impl<'a> Builder<'a> {
             })?;
         let data = self.emit_cur(Inst::Field {
             base: vec,
-            field: Ustr::from("_data"),
+            field: crate::names::ustr("_data"),
         });
         let at = self.strided_slot_index(slot, shape.leaf_count(), offset);
         Ok((at, data))

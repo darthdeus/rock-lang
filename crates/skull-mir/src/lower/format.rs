@@ -218,7 +218,10 @@ fn format_tree_in(
                 return Ok(FmtNode::Handle {
                     name,
                     label,
-                    fields: fields.iter().map(|(l, f)| (*l, Ustr::from(f))).collect(),
+                    fields: fields
+                        .iter()
+                        .map(|(l, f)| (*l, crate::names::ustr(f)))
+                        .collect(),
                 });
             }
             if visiting.contains(&name) {
@@ -378,7 +381,7 @@ impl<'a> Builder<'a> {
                     pieces.push((format!("{field}: "), rendered));
                 }
                 if pieces.is_empty() {
-                    return Ok(self.emit_cur(Inst::Const(Lit::Str(Ustr::from(
+                    return Ok(self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(
                         format!("{name} {{}}").as_str(),
                     )))));
                 }
@@ -427,16 +430,16 @@ impl<'a> Builder<'a> {
         pieces: Vec<(String, Idx<Inst>)>,
         close: &str,
     ) -> Idx<Inst> {
-        let mut out = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(open))));
+        let mut out = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(open))));
         for (i, (label, piece)) in pieces.into_iter().enumerate() {
             let sep = if i > 0 { format!(", {label}") } else { label };
             if !sep.is_empty() {
-                let s = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(sep.as_str()))));
+                let s = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(sep.as_str()))));
                 out = self.emit_cur(Inst::StringConcat(out, s));
             }
             out = self.emit_cur(Inst::StringConcat(out, piece));
         }
-        let c = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(close))));
+        let c = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(close))));
         self.emit_cur(Inst::StringConcat(out, c))
     }
 
@@ -467,7 +470,7 @@ impl<'a> Builder<'a> {
         );
 
         self.cur = null_bb;
-        let null = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(null_text))));
+        let null = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(null_text))));
         self.store_and_join(result, null, join);
 
         self.cur = value_bb;
@@ -563,7 +566,9 @@ impl<'a> Builder<'a> {
             self.test_tag(scrut, variant.name, Some(name), fail);
             let head = format!("{name}::{}", variant.name);
             let rendered = match &variant.payload {
-                FmtPayload::Unit => self.emit_cur(Inst::Const(Lit::Str(Ustr::from(head.as_str())))),
+                FmtPayload::Unit => {
+                    self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(head.as_str()))))
+                }
                 FmtPayload::Tuple(nodes) => {
                     let mut pieces = Vec::with_capacity(nodes.len());
                     for (i, child) in nodes.iter().enumerate() {

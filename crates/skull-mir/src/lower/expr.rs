@@ -368,7 +368,7 @@ impl<'a> Builder<'a> {
                     self.fn_value_symbol(e, name)?
                 };
                 let id = self.with_site_op(crate::site::SiteOp::FnValue, |b| {
-                    b.emit_cur(Inst::Global(Ustr::from(sym.as_str())))
+                    b.emit_cur(Inst::Global(crate::names::ustr(sym.as_str())))
                 });
                 // The one place a callee DECLARATION becomes a spelled value.
                 // Recorded here rather than recovered downstream from the name:
@@ -412,11 +412,11 @@ impl<'a> Builder<'a> {
                     Some(n) => format!("reached unfilled hole ?{n}"),
                     None => "reached unfilled hole ?".to_string(),
                 };
-                let msg = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(label.as_str()))));
+                let msg = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(label.as_str()))));
                 let func = self
                     .ws
                     .functions_by_name
-                    .get(&Ustr::from("error"))
+                    .get(&crate::names::ustr("error"))
                     .and_then(|l| l.first())
                     .map(|&(module, func)| FuncRef { module, func })
                     .ok_or_else(|| gap("stdlib `error` missing for hole lowering"))?;
@@ -1732,7 +1732,9 @@ impl<'a> Builder<'a> {
                     let leaves = self.repr_to_leaves_bundle_for_shape(&repr, &shape)?;
                     let keys = super::shape::leaf_names(&shape, key.as_str(), ".");
                     for (slot, value) in Self::pair_embed_leaves(
-                        keys.into_iter().map(|key| Ustr::from(&key)).collect(),
+                        keys.into_iter()
+                            .map(|key| crate::names::ustr(&key))
+                            .collect(),
                         leaves,
                     )? {
                         self.emit_cur(Inst::StoreField {
@@ -2606,7 +2608,7 @@ impl<'a> Builder<'a> {
                 binding,
                 s.body.binding_arena[binding].name,
                 s.binding_ty(binding),
-                Ustr::from(""),
+                crate::names::ustr(""),
             );
             s.emit_cur(Inst::Store { cell, value: recv });
             s.binds.insert(raw(binding), cell);
@@ -2713,7 +2715,7 @@ impl<'a> Builder<'a> {
             binding,
             self.body.binding_arena[binding].name,
             self.binding_ty(binding),
-            Ustr::from(""),
+            crate::names::ustr(""),
         );
         self.emit_cur(Inst::Store {
             cell,

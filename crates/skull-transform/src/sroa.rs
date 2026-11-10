@@ -69,7 +69,12 @@ fn ctor_fields(
             StructId::Tuple(vs.len()),
             vs.iter()
                 .enumerate()
-                .map(|(i, v)| (ustr::Ustr::from(&format!("_{i}")), FieldSrc::Operand(*v)))
+                .map(|(i, v)| {
+                    (
+                        skull_mir::names::ustr(&format!("_{i}")),
+                        FieldSrc::Operand(*v),
+                    )
+                })
                 .collect(),
         )),
         Inst::MakeEnum {
@@ -79,14 +84,20 @@ fn ctor_fields(
             named,
         } => {
             let mut f = vec![
-                (ustr::Ustr::from("__variant"), FieldSrc::ConstStr(*tag)),
                 (
-                    ustr::Ustr::from("__ty"),
+                    skull_mir::names::ustr("__variant"),
+                    FieldSrc::ConstStr(*tag),
+                ),
+                (
+                    skull_mir::names::ustr("__ty"),
                     FieldSrc::ConstStr(skull_mir::mangle::symbol_of_key(*ty)),
                 ),
             ];
             for (i, p) in positional.iter().enumerate() {
-                f.push((ustr::Ustr::from(&format!("_{i}")), FieldSrc::Operand(*p)));
+                f.push((
+                    skull_mir::names::ustr(&format!("_{i}")),
+                    FieldSrc::Operand(*p),
+                ));
             }
             for (n, v) in named {
                 f.push((*n, FieldSrc::Operand(*v)));
@@ -100,14 +111,17 @@ fn ctor_fields(
             named,
         } => {
             let mut f = vec![
-                (ustr::Ustr::from("__variant"), FieldSrc::Operand(*tag)),
+                (skull_mir::names::ustr("__variant"), FieldSrc::Operand(*tag)),
                 (
-                    ustr::Ustr::from("__ty"),
+                    skull_mir::names::ustr("__ty"),
                     FieldSrc::ConstStr(skull_mir::mangle::symbol_of_key(*ty)),
                 ),
             ];
             for (i, p) in positional.iter().enumerate() {
-                f.push((ustr::Ustr::from(&format!("_{i}")), FieldSrc::Operand(*p)));
+                f.push((
+                    skull_mir::names::ustr(&format!("_{i}")),
+                    FieldSrc::Operand(*p),
+                ));
             }
             for (n, v) in named {
                 f.push((*n, FieldSrc::Operand(*v)));
@@ -126,10 +140,10 @@ fn ctor_fields(
                 StructId::Enum(e),
                 vec![
                     (
-                        ustr::Ustr::from("__variant"),
-                        FieldSrc::ConstStr(ustr::Ustr::from(variant)),
+                        skull_mir::names::ustr("__variant"),
+                        FieldSrc::ConstStr(skull_mir::names::ustr(variant)),
                     ),
-                    (ustr::Ustr::from("__ty"), FieldSrc::ConstStr(symbol)),
+                    (skull_mir::names::ustr("__ty"), FieldSrc::ConstStr(symbol)),
                 ],
             ))
         }
@@ -193,7 +207,7 @@ pub(crate) fn scalarize_struct_cells_once(func: &mut MirFunc) -> Result<bool, Co
 
 /// A nullable value family's presence leaf.
 fn present_field() -> ustr::Ustr {
-    ustr::Ustr::from("__present")
+    skull_mir::names::ustr("__present")
 }
 
 /// Cells some closure captures (empty when the body has no lambda).
@@ -576,7 +590,7 @@ impl Families {
                             Inst::StoreField { base, field, .. } => *base == op && known(field),
                             // An enum positional payload read: `v[index+1]`, named `_<index>`.
                             Inst::TupleIndex { base, index } => {
-                                *base == op && known(&ustr::Ustr::from(&format!("_{index}")))
+                                *base == op && known(&skull_mir::names::ustr(&format!("_{index}")))
                             }
                             Inst::Eq(a, b) | Inst::NotEq(a, b)
                                 if matches!(
@@ -803,7 +817,7 @@ impl FieldCells {
     fn get(&mut self, func: &mut MirFunc, c: Idx<Cell>, f: ustr::Ustr) -> Idx<Cell> {
         *self.0.entry((c, f)).or_insert_with(|| {
             let base = func.cells[c].name.map(|n| n.as_str().to_string());
-            let name = base.map(|b| ustr::Ustr::from(&format!("{b}__{f}")));
+            let name = base.map(|b| skull_mir::names::ustr(&format!("{b}__{f}")));
             let capture_identity = func.cells[c]
                 .capture_identity
                 .as_ref()
@@ -832,7 +846,7 @@ fn rewrite_nil_tests(
             continue;
         }
         // Every enum ctor writes a nonnil `__ty`; exhaustion nils every lane.
-        let type_cell = cells.get(func, fam.to_rep(c), ustr::Ustr::from("__ty"));
+        let type_cell = cells.get(func, fam.to_rep(c), skull_mir::names::ustr("__ty"));
         let present = func.alloc_inst(Inst::Load(type_cell));
         match &mut func.insts[test] {
             Inst::Eq(a, b) => {
@@ -929,7 +943,7 @@ fn rewrite_projections(
                 .get(base)
                 .copied()
                 .filter(|&c| fam.is_cand(c))
-                .map(|c| (i, c, ustr::Ustr::from(&format!("_{index}")))),
+                .map(|c| (i, c, skull_mir::names::ustr(&format!("_{index}")))),
             _ => None,
         })
         .collect();

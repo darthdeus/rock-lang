@@ -232,26 +232,26 @@ mod types;
 fn prefixed(field: Ustr, leaves: Vec<(Ustr, Idx<Inst>)>) -> Vec<(Ustr, Idx<Inst>)> {
     leaves
         .into_iter()
-        .map(|(k, v)| (Ustr::from(&format!("{field}.{k}")), v))
+        .map(|(k, v)| (crate::names::ustr(&format!("{field}.{k}")), v))
         .collect()
 }
 
 /// The parent-table slot holding a flattened enum field's discriminant (variant
 /// name string), e.g. field `sig` -> `sig.#`.
 fn flat_tag_slot(field: Ustr) -> Ustr {
-    Ustr::from(format!("{field}.#").as_str())
+    crate::names::ustr(format!("{field}.#").as_str())
 }
 
 /// The parent-table slot holding a flattened enum field's `i`th positional payload,
 /// e.g. field `sig` payload 0 -> `sig.0`.
 fn flat_payload_slot(field: Ustr, i: usize) -> Ustr {
-    Ustr::from(format!("{field}.{i}").as_str())
+    crate::names::ustr(format!("{field}.{i}").as_str())
 }
 
 /// The parent-table slot holding a flattened enum field's named (record) payload,
 /// e.g. field `shape` record field `r` -> `shape.r`.
 fn flat_named_slot(field: Ustr, rec_field: Ustr) -> Ustr {
-    Ustr::from(format!("{field}.{rec_field}").as_str())
+    crate::names::ustr(format!("{field}.{rec_field}").as_str())
 }
 
 /// Every relative slot a flattened enum field occupies: discriminant, positional
@@ -949,14 +949,14 @@ fn static_owner_tag(
     let name = if inst.args.is_empty() {
         func.name
     } else {
-        Ustr::from(&inst.symbol(ws, scx.interner()))
+        crate::names::ustr(&inst.symbol(ws, scx.interner()))
     };
     let mut h = std::collections::hash_map::DefaultHasher::new();
     name.as_str().hash(&mut h);
     for pd in &func.param_decls {
         ws.render(inf, pd.ty).hash(&mut h);
     }
-    Ustr::from(&format!("{}_{:06x}", name, h.finish() & 0xff_ffff))
+    crate::names::ustr(&format!("{}_{:06x}", name, h.finish() & 0xff_ffff))
 }
 
 /// Content hash of a `static` initializer -- the reload key's init half. Hashes
@@ -1540,9 +1540,9 @@ fn lower_body(
     // (the value `yield e` evaluates to). `skull-transform`'s coroutine pass then
     // rewrites it into the stackless state machine.
     let resume_arg = func.is_coroutine.then(|| {
-        let cell = f.new_cell(Some(Ustr::from("__resume_arg")));
+        let cell = f.new_cell(Some(crate::names::ustr("__resume_arg")));
         f.cells[cell].capture_identity = Some(crate::code_identity::CaptureIdentity::Generated {
-            role: Ustr::from("coroutine-resume-arg"),
+            role: crate::names::ustr("coroutine-resume-arg"),
         });
         cell
     });
@@ -1658,9 +1658,9 @@ pub fn lower_definition_factory(
         .get(&BodyOwner::Function(factory.func.func))
         .ok_or_else(|| gap("definition factory has no body"))?;
     let abi = owner_abi_plan(ws, scx, concrete_plans, factory)?;
-    let mut f = MirFunc::new(Ustr::from("__rock_definition_materialize"));
+    let mut f = MirFunc::new(crate::names::ustr("__rock_definition_materialize"));
     f.rep_arena = Some(scx.rep_arena().clone());
-    let parameter = f.new_cell(Some(Ustr::from("factory")));
+    let parameter = f.new_cell(Some(crate::names::ustr("factory")));
     f.cells[parameter].producer = crate::mir::CellProducer::Param;
     f.params.push(parameter);
     let mut b = Builder::generated(ws, scx, scx, concrete_plan, concrete_plans, body, None, f);
@@ -2065,7 +2065,7 @@ fn lower_decorator_inner(
         target,
         b.body.binding_arena[target].name,
         b.binding_ty(target),
-        Ustr::from(""),
+        crate::names::ustr(""),
     );
     b.f.cells[tcell].producer = crate::mir::CellProducer::Param;
     b.f.params.push(tcell);
@@ -2598,7 +2598,7 @@ impl<'a> Builder<'a> {
                     pb,
                     self.body.binding_arena[pb].name,
                     self.binding_ty(pb),
-                    Ustr::from(""),
+                    crate::names::ustr(""),
                 );
                 self.emit_cur(Inst::Store { cell, value });
                 self.binds.insert(raw(pb), cell);
@@ -2633,7 +2633,7 @@ impl<'a> Builder<'a> {
     ) -> Result<(), CompilerError> {
         if !slot.splats() {
             let cty = self.binding_ty(pb);
-            let cell = self.new_binding_cell(pb, name, cty, Ustr::from(""));
+            let cell = self.new_binding_cell(pb, name, cty, crate::names::ustr(""));
             self.f.cells[cell].producer = crate::mir::CellProducer::Param;
             self.f.params.push(cell);
             self.binds.insert(raw(pb), cell);
@@ -2648,9 +2648,9 @@ impl<'a> Builder<'a> {
                             .map(|li| {
                                 self.new_binding_cell(
                                     pb,
-                                    Ustr::from(format!("{name}__{li}").as_str()),
+                                    crate::names::ustr(format!("{name}__{li}").as_str()),
                                     None,
-                                    Ustr::from(li.to_string().as_str()),
+                                    crate::names::ustr(li.to_string().as_str()),
                                 )
                             })
                             .collect()
@@ -2660,9 +2660,9 @@ impl<'a> Builder<'a> {
                 .map(|li| {
                     self.new_binding_cell(
                         pb,
-                        Ustr::from(format!("{name}__{li}").as_str()),
+                        crate::names::ustr(format!("{name}__{li}").as_str()),
                         None,
-                        Ustr::from(li.to_string().as_str()),
+                        crate::names::ustr(li.to_string().as_str()),
                     )
                 })
                 .collect(),
@@ -4190,7 +4190,7 @@ pub(crate) fn resolve_comptime_value(
             })?;
             Ok(ResolvedComptime {
                 value,
-                file_abs: Some(Ustr::from(&file)),
+                file_abs: Some(crate::names::ustr(&file)),
             })
         }
         _ => unreachable!(),

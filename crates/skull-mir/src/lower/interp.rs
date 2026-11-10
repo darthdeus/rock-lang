@@ -32,7 +32,7 @@ impl<'a> Builder<'a> {
                 Some(lhs) => self.emit_cur(Inst::StringConcat(lhs, s)),
             });
         }
-        Ok(acc.unwrap_or_else(|| self.emit_cur(Inst::Const(Lit::Str(Ustr::from(""))))))
+        Ok(acc.unwrap_or_else(|| self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(""))))))
     }
 
     fn lower_interp_hole(
@@ -204,7 +204,7 @@ impl<'a> Builder<'a> {
         );
 
         self.cur = nil_bb;
-        let n = self.emit_cur(Inst::Const(Lit::Str(Ustr::from("nil"))));
+        let n = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr("nil"))));
         self.store_and_join(result, n, join);
 
         self.cur = val_bb;
@@ -246,11 +246,11 @@ impl<'a> Builder<'a> {
             // A transparent newtype renders `Name(<inner>)`; its runtime value IS
             // the raw inner, so `tostring` it directly.
             StringifyRoute::Newtype(name) => {
-                let open = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(
+                let open = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(
                     format!("{name}(").as_str(),
                 ))));
                 let inner = self.emit_cur(Inst::ToString(v));
-                let close = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(")"))));
+                let close = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(")"))));
                 let a = self.emit_cur(Inst::StringConcat(open, inner));
                 Ok(self.emit_cur(Inst::StringConcat(a, close)))
             }
@@ -263,7 +263,7 @@ impl<'a> Builder<'a> {
             // enum passed to `inspect`/stored in `any`/inside a composite) is the
             // deferred box-on-escape-into-`any` work.
             StringifyRoute::EnumNames(name) => {
-                let names = self.emit_cur(Inst::Global(Ustr::from(
+                let names = self.emit_cur(Inst::Global(crate::names::ustr(
                     format!(
                         "__rock_enum_{}_names",
                         crate::mangle::type_symbol(self.ws, *name)
@@ -368,7 +368,9 @@ impl<'a> Builder<'a> {
         };
 
         if let Some((sep, group)) = plan.grouping {
-            let sep_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(sep.to_string().as_str()))));
+            let sep_v = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(
+                sep.to_string().as_str(),
+            ))));
             let grp_v = self.emit_cur(Inst::Const(Lit::Int(group)));
             out =
                 self.dispatched_call("__rock_fmt_grouping", Vec::new(), vec![out, sep_v, grp_v])?;
@@ -397,9 +399,9 @@ impl<'a> Builder<'a> {
             .alignment
             .map(|c| c.to_string())
             .unwrap_or_else(|| ">".to_string());
-        let align_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(align.as_str()))));
+        let align_v = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(align.as_str()))));
         let fill = spec.fill.unwrap_or(' ').to_string();
-        let fill_v = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(fill.as_str()))));
+        let fill_v = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(fill.as_str()))));
         self.dispatched_call("__rock_fmt_pad", Vec::new(), vec![out, w, align_v, fill_v])
     }
 
@@ -427,13 +429,15 @@ impl<'a> Builder<'a> {
         if let [FmtPiece::Lit(s)] = &pieces[..] {
             return Ok(self.emit_cur(Inst::Format {
                 value: v,
-                fmt: Ustr::from(s.as_str()),
+                fmt: crate::names::ustr(s.as_str()),
             }));
         }
         let mut fmt: Option<Idx<Inst>> = None;
         for piece in pieces {
             let part = match piece {
-                FmtPiece::Lit(s) => self.emit_cur(Inst::Const(Lit::Str(Ustr::from(s.as_str())))),
+                FmtPiece::Lit(s) => {
+                    self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(s.as_str()))))
+                }
                 FmtPiece::DynInt(e) => {
                     let ev = self.lower_expr(e)?;
                     self.emit_cur(Inst::ToString(ev))
@@ -444,7 +448,8 @@ impl<'a> Builder<'a> {
                 Some(lhs) => self.emit_cur(Inst::StringConcat(lhs, part)),
             });
         }
-        let fmt = fmt.unwrap_or_else(|| self.emit_cur(Inst::Const(Lit::Str(Ustr::from("")))));
+        let fmt =
+            fmt.unwrap_or_else(|| self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr("")))));
         Ok(self.emit_cur(Inst::FormatDyn { value: v, fmt }))
     }
 }

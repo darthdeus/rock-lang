@@ -307,7 +307,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn map_col_data(&mut self, m: Idx<Inst>) -> Idx<Inst> {
         self.emit_cur(Inst::Field {
             base: m,
-            field: Ustr::from("data"),
+            field: crate::names::ustr("data"),
         })
     }
 
@@ -335,7 +335,7 @@ impl<'a> Builder<'a> {
             let b = self.lower_expr(base)?;
             let buf = self.emit_cur(Inst::Field {
                 base: b,
-                field: Ustr::from("buf"),
+                field: crate::names::ustr("buf"),
             });
             return Ok((buf, kind));
         }

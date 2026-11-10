@@ -117,7 +117,7 @@ impl<'a> Builder<'a> {
                         match base_inst {
                             Some(bi) => {
                                 for k in self.embed_leaf_paths(cname)? {
-                                    let key = Ustr::from(&format!("{fname}.{k}"));
+                                    let key = crate::names::ustr(&format!("{fname}.{k}"));
                                     let v = self.emit_cur(Inst::Field {
                                         base: bi,
                                         field: key,
@@ -788,9 +788,9 @@ impl<'a> Builder<'a> {
             ));
         };
         let key = ty.canonical();
-        Ok(ValueRepr::Scalar(
-            self.emit_cur(Inst::Const(Lit::Str(Ustr::from(key.as_str())))),
-        ))
+        Ok(ValueRepr::Scalar(self.emit_cur(Inst::Const(Lit::Str(
+            crate::names::ustr(key.as_str()),
+        )))))
     }
 
     /// The box `materialize(v)` asks for: the ordinary whole-value pack, with
@@ -899,7 +899,7 @@ impl<'a> Builder<'a> {
         arg_idxs: &[Idx<Expr>],
     ) -> Result<ValueRepr, CompilerError> {
         let pair = resolve_shader_pair(self.ws, self.body, call, arg_idxs)?;
-        let key = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(pair.key.as_str()))));
+        let key = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(pair.key.as_str()))));
         Ok(ValueRepr::Scalar(key))
     }
 
@@ -925,7 +925,9 @@ impl<'a> Builder<'a> {
             (_, Some(abs)) => crate::mir::ComptimeInputId::File(abs),
             (_, None) => unreachable!("embed resolution always lands on a file"),
         };
-        let inst = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(resolved.value.as_str()))));
+        let inst = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(
+            resolved.value.as_str(),
+        ))));
         self.f.comptime_reads.push(crate::mir::ComptimeRead {
             input,
             value_hash: crate::mir::comptime_value_hash(&resolved.value),
@@ -1376,7 +1378,7 @@ impl<'a> Builder<'a> {
             // INTERNED singleton table (emitted by `enum_runtime_defs`): the
             // enum still has payload variants, so its values stay tables, and the
             // singleton is reference-equal across uses + usable as a Map key.
-            let g = Ustr::from(
+            let g = crate::names::ustr(
                 format!(
                     "__rock_enum_{}_{variant}",
                     crate::mangle::type_symbol(self.ws, enum_name)
@@ -1435,7 +1437,7 @@ impl<'a> Builder<'a> {
             .map(|&i| {
                 ValueRepr::Scalar(self.emit_cur(Inst::Field {
                     base: bv,
-                    field: Ustr::from(comps[i]),
+                    field: crate::names::ustr(comps[i]),
                 }))
             })
             .collect();

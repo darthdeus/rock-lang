@@ -1216,10 +1216,10 @@ impl RepArena {
             ));
         }
         match element {
-            crate::monoty::MonoTy::Int => Ok((Ustr::from("int"), None)),
-            crate::monoty::MonoTy::Uint => Ok((Ustr::from("uint32_t"), None)),
-            crate::monoty::MonoTy::Float => Ok((Ustr::from("float"), None)),
-            crate::monoty::MonoTy::Bool => Ok((Ustr::from("bool"), None)),
+            crate::monoty::MonoTy::Int => Ok((crate::names::ustr("int"), None)),
+            crate::monoty::MonoTy::Uint => Ok((crate::names::ustr("uint32_t"), None)),
+            crate::monoty::MonoTy::Float => Ok((crate::names::ustr("float"), None)),
+            crate::monoty::MonoTy::Bool => Ok((crate::names::ustr("bool"), None)),
             crate::monoty::MonoTy::App {
                 ctor: crate::monoty::MonoCtor::Nominal(name),
                 ..

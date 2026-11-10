@@ -714,7 +714,7 @@ impl<'a> Builder<'a> {
                     }
                     if at > 0 {
                         let rest: Vec<&str> = segs[at..].iter().map(|s| s.as_str()).collect();
-                        key = Ustr::from(&rest.join("."));
+                        key = crate::names::ustr(&rest.join("."));
                     }
                     let parent = self.pack(repr)?;
                     if let Some(shape) = projected_shape {
@@ -723,7 +723,7 @@ impl<'a> Builder<'a> {
                             .map(|key| {
                                 self.emit_cur(Inst::Field {
                                     base: parent,
-                                    field: Ustr::from(&key),
+                                    field: crate::names::ustr(&key),
                                 })
                             })
                             .collect::<Vec<_>>();
@@ -1442,7 +1442,7 @@ impl<'a> Builder<'a> {
         let slot = self.f.new_cell(None);
         let resume0 = self.emit_cur(Inst::Field {
             base: sub,
-            field: Ustr::from("__resume"),
+            field: crate::names::ustr("__resume"),
         });
         let primed = self.emit_cur(Inst::CallValue {
             callee: resume0,
@@ -1487,7 +1487,7 @@ impl<'a> Builder<'a> {
         let arg = self.emit_cur(Inst::Load(rac));
         let resume1 = self.emit_cur(Inst::Field {
             base: sub,
-            field: Ustr::from("__resume"),
+            field: crate::names::ustr("__resume"),
         });
         let v2 = self.emit_cur(Inst::CallValue {
             callee: resume1,
@@ -1518,7 +1518,7 @@ impl<'a> Builder<'a> {
         self.emit_cur(Inst::CoroSetInner(clear));
         let inner_err = self.emit_cur(Inst::Field {
             base: sub,
-            field: Ustr::from("__error"),
+            field: crate::names::ustr("__error"),
         });
         let nil2 = self.emit_cur(Inst::Const(Lit::Nil));
         let has_err = self.emit_cur(Inst::NotEq(inner_err, nil2));
@@ -1535,7 +1535,7 @@ impl<'a> Builder<'a> {
         self.cur = raise;
         // `error` is the Lua builtin (a global), NOT a rock fn — read it as a
         // global and call indirectly, so re-raise works with no stdlib present.
-        let err_fn = self.emit_cur(Inst::Global(Ustr::from("error")));
+        let err_fn = self.emit_cur(Inst::Global(crate::names::ustr("error")));
         self.emit_cur(Inst::CallValue {
             callee: err_fn,
             args: vec![inner_err],
@@ -1544,7 +1544,7 @@ impl<'a> Builder<'a> {
         self.cur = cont;
         Ok(self.emit_cur(Inst::Field {
             base: sub,
-            field: Ustr::from("__return"),
+            field: crate::names::ustr("__return"),
         }))
     }
 
@@ -1564,7 +1564,7 @@ impl<'a> Builder<'a> {
         // Prime the inner (advance once).
         let adv0 = self.emit_cur(Inst::Field {
             base: sub,
-            field: Ustr::from("__advance"),
+            field: crate::names::ustr("__advance"),
         });
         self.emit_cur(Inst::CallValue {
             callee: adv0,
@@ -1580,7 +1580,7 @@ impl<'a> Builder<'a> {
         self.cur = header;
         let state = self.emit_cur(Inst::Field {
             base: frame,
-            field: Ustr::from("__state"),
+            field: crate::names::ustr("__state"),
         });
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         let done = self.emit_cur(Inst::IntLt(state, zero));
@@ -1615,7 +1615,7 @@ impl<'a> Builder<'a> {
         let arg = self.emit_cur(Inst::Load(rac));
         let adv1 = self.emit_cur(Inst::Field {
             base: sub,
-            field: Ustr::from("__advance"),
+            field: crate::names::ustr("__advance"),
         });
         self.emit_cur(Inst::CallValue {
             callee: adv1,
@@ -1634,7 +1634,7 @@ impl<'a> Builder<'a> {
         match self
             .ws
             .functions_by_name
-            .get(&Ustr::from(name))
+            .get(&crate::names::ustr(name))
             .map(|l| l.as_slice())
         {
             Some([(module, func)]) => Ok(FuncRef {

@@ -152,7 +152,8 @@ impl<'a> Builder<'a> {
                 {
                     val = self.copied_value_box(ty, val)?;
                 }
-                let cell = self.new_binding_cell(b, name, self.binding_ty(b), Ustr::from(""));
+                let cell =
+                    self.new_binding_cell(b, name, self.binding_ty(b), crate::names::ustr(""));
                 self.emit_cur(Inst::Store { cell, value: val });
                 self.binds.insert(raw(b), cell);
                 Ok(())
@@ -659,7 +660,7 @@ impl<'a> Builder<'a> {
             }),
             Scrut::Val(v) if cdata => self.emit_cur(Inst::Field {
                 base: *v,
-                field: Ustr::from(format!("_{i}").as_str()),
+                field: crate::names::ustr(format!("_{i}").as_str()),
             }),
             Scrut::Val(v) => self.emit_cur(Inst::TupleIndex { base: *v, index: i }),
             Scrut::Tuple(_) => {
@@ -749,7 +750,7 @@ impl<'a> Builder<'a> {
         {
             let tag = self.emit_cur(Inst::Field {
                 base: val,
-                field: Ustr::from("__tag"),
+                field: crate::names::ustr("__tag"),
             });
             let want = self.emit_cur(Inst::Const(Lit::Int(ord)));
             let cond = self.emit_cur(Inst::Eq(tag, want));
@@ -758,7 +759,7 @@ impl<'a> Builder<'a> {
         }
         let tag = self.emit_cur(Inst::Field {
             base: val,
-            field: Ustr::from("__variant"),
+            field: crate::names::ustr("__variant"),
         });
         let want = self.emit_cur(Inst::Const(Lit::Str(variant)));
         let cond = self.emit_cur(Inst::Eq(tag, want));
@@ -1269,7 +1270,7 @@ impl<'a> Builder<'a> {
             var_b,
             self.body.binding_arena[var_b].name,
             self.binding_ty(var_b),
-            Ustr::from(""),
+            crate::names::ustr(""),
         );
         self.binds.insert(raw(var_b), i_cell);
         self.f.mark_loop_binding(i_cell);

@@ -164,7 +164,7 @@ impl EqRoute {
 /// its own rendering through `js_supply` -- so filtering by the serving backend
 /// here rejects a program the backend can emit.
 pub fn dispatched_callee_decls(ws: &Workspace, name: &str) -> Vec<crate::mir::FuncRef> {
-    let Some(decls) = ws.functions_by_name.get(&Ustr::from(name)) else {
+    let Some(decls) = ws.functions_by_name.get(&crate::names::ustr(name)) else {
         return Vec::new();
     };
     decls

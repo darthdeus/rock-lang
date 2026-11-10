@@ -85,7 +85,9 @@ impl<'a> Builder<'a> {
             kind: ContainerKind::Map,
         })];
         for path in value_leaf_paths(shape) {
-            let suffix = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(&format!(".{path}")))));
+            let suffix = self.emit_cur(Inst::Const(Lit::Str(crate::names::ustr(&format!(
+                ".{path}"
+            )))));
             let index = self.emit_cur(Inst::StringConcat(*selector, suffix));
             leaves.push(self.emit_cur(Inst::Index {
                 base: *owner,
@@ -586,12 +588,15 @@ impl<'a> Builder<'a> {
                     count,
                     representation,
                 });
-                let mut fields = vec![(Ustr::from("ptr"), ptr), (Ustr::from("len"), count)];
+                let mut fields = vec![
+                    (crate::names::ustr("ptr"), ptr),
+                    (crate::names::ustr("len"), count),
+                ];
                 if representation.is_some() && self.is_leaf_addressed(ctype)? {
                     fields.extend(self.leaf_view_fields(ctype, ptr));
                 }
                 let nb = self.emit_cur(Inst::MakeStruct {
-                    ty: Some(Ustr::from("NativeBuffer")),
+                    ty: Some(crate::names::ustr("NativeBuffer")),
                     fields,
                 });
                 return Ok(ValueRepr::Scalar(nb));
@@ -734,7 +739,7 @@ impl<'a> Builder<'a> {
                     let recv = self.lower_expr(arg_idxs[0])?;
                     let advance = self.emit_cur(Inst::Field {
                         base: recv,
-                        field: Ustr::from("__advance"),
+                        field: crate::names::ustr("__advance"),
                     });
                     let mut cargs: Vec<Idx<Inst>> = vec![recv];
                     if let Some(&a) = arg_idxs.get(1) {

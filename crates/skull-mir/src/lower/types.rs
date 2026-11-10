@@ -900,7 +900,7 @@ impl<'a> Builder<'a> {
         ctys.into_iter()
             .map(|cty| {
                 let view = self.emit_cur(Inst::FfiViewCast {
-                    cty: Ustr::from(cty),
+                    cty: crate::names::ustr(cty),
                     ptr,
                 });
                 (leaf_view_field(cty), view)

@@ -56,15 +56,15 @@ impl<'a> Builder<'a> {
                     .enumerate()
                 {
                     let index = offset + relative;
-                    *field = Some(Ustr::from(index.to_string().as_str()));
+                    *field = Some(crate::names::ustr(index.to_string().as_str()));
                 }
             }
             offset += slot.width();
         }
         let cells = (0..flat.leaf_count())
             .map(|index| {
-                let cell_name = Ustr::from(format!("{name}__{index}").as_str());
-                let projection = Ustr::from(index.to_string().as_str());
+                let cell_name = crate::names::ustr(format!("{name}__{index}").as_str());
+                let projection = crate::names::ustr(index.to_string().as_str());
                 let cell = self.new_binding_cell(binding, cell_name, None, projection);
                 if index == 0 {
                     self.f.cells[cell].native_ty = tag_ty;
@@ -289,7 +289,7 @@ impl<'a> Builder<'a> {
         let frame = cobj;
         let state = self.emit_cur(Inst::Field {
             base: frame,
-            field: Ustr::from("__state"),
+            field: crate::names::ustr("__state"),
         });
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
         let done = self.emit_cur(Inst::IntLt(state, zero));
@@ -381,7 +381,7 @@ impl<'a> Builder<'a> {
     ) -> FlatCells {
         let tag = self.emit_cur(Inst::Field {
             base: bv,
-            field: Ustr::from("__variant"),
+            field: crate::names::ustr("__variant"),
         });
         let positional = (0..shape.tuple_width())
             .map(|i| self.emit_cur(Inst::TupleIndex { base: bv, index: i }))
@@ -508,7 +508,7 @@ impl<'a> Builder<'a> {
                 },
             );
             self.cur = unit_bb;
-            let global = Ustr::from(
+            let global = crate::names::ustr(
                 format!(
                     "__rock_enum_{}_{}",
                     crate::mangle::type_symbol(self.ws, shape.name),
@@ -546,7 +546,7 @@ impl<'a> Builder<'a> {
         variant: Ustr,
     ) -> Idx<Inst> {
         if self.variant_is_unit(shape.name, variant) {
-            let global = Ustr::from(
+            let global = crate::names::ustr(
                 format!(
                     "__rock_enum_{}_{}",
                     crate::mangle::type_symbol(self.ws, shape.name),

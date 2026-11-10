@@ -21,7 +21,7 @@ impl<'a> Builder<'a> {
         let mut fields = Vec::with_capacity(paths.len() + 2);
         let len = self.emit_cur(Inst::Field {
             base: vec,
-            field: Ustr::from("len"),
+            field: crate::names::ustr("len"),
         });
         for path in paths {
             let col = self.emit_cur(Inst::Field {
@@ -31,16 +31,16 @@ impl<'a> Builder<'a> {
             let copied = self.call_spine("__rock_col_copy", vec![col, len])?;
             fields.push((path, copied));
         }
-        fields.push((Ustr::from("len"), len));
+        fields.push((crate::names::ustr("len"), len));
         let old_header = self.column_header(vec);
         let capacity = self.emit_cur(Inst::Field {
             base: old_header,
-            field: Ustr::from("cap"),
+            field: crate::names::ustr("cap"),
         });
         let header = self.make_column_header(elem, capacity);
-        fields.push((Ustr::from(VEC_COLUMN_HEADER_FIELD), header));
+        fields.push((crate::names::ustr(VEC_COLUMN_HEADER_FIELD), header));
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
-            ty: Some(Ustr::from("Vec")),
+            ty: Some(crate::names::ustr("Vec")),
             fields,
         })))
     }
@@ -53,26 +53,26 @@ impl<'a> Builder<'a> {
         let stride = self.column_shape(elem)?.leaf_count();
         let data = self.emit_cur(Inst::Field {
             base: vec,
-            field: Ustr::from("_data"),
+            field: crate::names::ustr("_data"),
         });
         let len = self.emit_cur(Inst::Field {
             base: vec,
-            field: Ustr::from("len"),
+            field: crate::names::ustr("len"),
         });
         let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
         let copied = self.call_spine("__rock_stride_copy", vec![data, len, width])?;
         let old_header = self.column_header(vec);
         let capacity = self.emit_cur(Inst::Field {
             base: old_header,
-            field: Ustr::from("cap"),
+            field: crate::names::ustr("cap"),
         });
         let header = self.make_strided_header(elem, stride, capacity);
         Ok(ValueRepr::Scalar(self.emit_cur(Inst::MakeStruct {
-            ty: Some(Ustr::from("Vec")),
+            ty: Some(crate::names::ustr("Vec")),
             fields: vec![
-                (Ustr::from("_data"), copied),
-                (Ustr::from("len"), len),
-                (Ustr::from(VEC_COLUMN_HEADER_FIELD), header),
+                (crate::names::ustr("_data"), copied),
+                (crate::names::ustr("len"), len),
+                (crate::names::ustr(VEC_COLUMN_HEADER_FIELD), header),
             ],
         })))
     }
@@ -105,7 +105,7 @@ impl<'a> Builder<'a> {
         let slot = self.checked_column_index(vec, index);
         let data = self.emit_cur(Inst::Field {
             base: vec,
-            field: Ustr::from("_data"),
+            field: crate::names::ustr("_data"),
         });
         range
             .map(|offset| {
@@ -173,7 +173,7 @@ impl<'a> Builder<'a> {
         let raw = self.strided_stores_raw(elem);
         let data = self.emit_cur(Inst::Field {
             base: vec,
-            field: Ustr::from("_data"),
+            field: crate::names::ustr("_data"),
         });
         let mut at = self.strided_row_slot(row, stride, 0);
         let one = self.emit_cur(Inst::Const(Lit::Int(1)));
@@ -265,7 +265,7 @@ impl<'a> Builder<'a> {
         }
         let len = self.emit_cur(Inst::Field {
             base: vec,
-            field: Ustr::from("len"),
+            field: crate::names::ustr("len"),
         });
         if self.scx.target() == bone_core::hir::FnBackend::Lua {
             self.call_spine("__rock_stride_reserve", vec![vec, len])?;
@@ -276,7 +276,7 @@ impl<'a> Builder<'a> {
         let next = self.emit_cur(Inst::IntAdd(len, one));
         self.emit_cur(Inst::StoreField {
             base: vec,
-            field: Ustr::from("len"),
+            field: crate::names::ustr("len"),
             value: next,
         });
         Ok(())
@@ -376,20 +376,20 @@ impl<'a> Builder<'a> {
                 let header = self.column_header(vec);
                 let reserved = self.emit_cur(Inst::Field {
                     base: header,
-                    field: Ustr::from("cap"),
+                    field: crate::names::ustr("cap"),
                 });
                 let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
                 // A raw row may hold nil, so `#_data` is only some border.
                 let physical = if self.strided_stores_raw(elem) {
                     let len = self.emit_cur(Inst::Field {
                         base: vec,
-                        field: Ustr::from("len"),
+                        field: crate::names::ustr("len"),
                     });
                     self.emit_cur(Inst::IntMul(len, width))
                 } else {
                     let data = self.emit_cur(Inst::Field {
                         base: vec,
-                        field: Ustr::from("_data"),
+                        field: crate::names::ustr("_data"),
                     });
                     self.call_spine("table_len", vec![data])?
                 };
@@ -410,11 +410,11 @@ impl<'a> Builder<'a> {
                 let leaves = self.repr_to_storage_leaves(&bundle, &shape, "strided insert")?;
                 let data = self.emit_cur(Inst::Field {
                     base: vec,
-                    field: Ustr::from("_data"),
+                    field: crate::names::ustr("_data"),
                 });
                 let len = self.emit_cur(Inst::Field {
                     base: vec,
-                    field: Ustr::from("len"),
+                    field: crate::names::ustr("len"),
                 });
                 let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
                 self.call_spine("__rock_stride_insert", vec![data, index, len, width])?;
@@ -664,7 +664,7 @@ impl<'a> Builder<'a> {
     /// view's own element type, so one lowering serves both.
     fn native_buffer_plan(&self, elem: Ustr) -> Result<ContainerPlan, CompilerError> {
         let ty = MonoTy::App {
-            ctor: crate::monoty::MonoCtor::Nominal(Ustr::from("NativeBuffer")),
+            ctor: crate::monoty::MonoCtor::Nominal(crate::names::ustr("NativeBuffer")),
             params: vec![MonoTy::App {
                 ctor: crate::monoty::MonoCtor::Nominal(elem),
                 params: Vec::new(),
@@ -922,7 +922,7 @@ impl<'a> Builder<'a> {
     /// Multiple decls of one name are the backend-sibling scheme, so pick the one
     /// serving this target; only a residual tie is ambiguous.
     pub(crate) fn stdlib_funcref(&self, name: &str) -> Result<FuncRef, CompilerError> {
-        let Some(decls) = self.ws.functions_by_name.get(&Ustr::from(name)) else {
+        let Some(decls) = self.ws.functions_by_name.get(&crate::names::ustr(name)) else {
             return Err(gap(format!("stdlib `{name}` not found")));
         };
         let serving: Vec<FuncRef> = decls
@@ -1023,7 +1023,7 @@ impl<'a> Builder<'a> {
         }
         let len = self.emit_cur(Inst::Field {
             base: vec,
-            field: Ustr::from("len"),
+            field: crate::names::ustr("len"),
         });
         let cell = self.f.new_cell(None);
         let zero = self.emit_cur(Inst::Const(Lit::Int(0)));
@@ -1103,13 +1103,13 @@ impl<'a> Builder<'a> {
                 let header = self.column_header(vec);
                 let reserved = self.emit_cur(Inst::Field {
                     base: header,
-                    field: Ustr::from("cap"),
+                    field: crate::names::ustr("cap"),
                 });
                 // Reference leaves can be nil even when the element is present.
                 let physical = if self.column_contains_references(elem) {
                     self.emit_cur(Inst::Field {
                         base: vec,
-                        field: Ustr::from("len"),
+                        field: crate::names::ustr("len"),
                     })
                 } else {
                     match column_leaf_paths(&shape).first() {
@@ -1122,7 +1122,7 @@ impl<'a> Builder<'a> {
                         }
                         None => self.emit_cur(Inst::Field {
                             base: vec,
-                            field: Ustr::from("len"),
+                            field: crate::names::ustr("len"),
                         }),
                     }
                 };
@@ -1151,7 +1151,7 @@ impl<'a> Builder<'a> {
                 }
                 let len = self.emit_cur(Inst::Field {
                     base: vec,
-                    field: Ustr::from("len"),
+                    field: crate::names::ustr("len"),
                 });
                 for (path, leaf) in paths.into_iter().zip(leaves) {
                     let col = self.emit_cur(Inst::Field {
@@ -1251,7 +1251,7 @@ impl<'a> Builder<'a> {
     pub(crate) fn column_header(&mut self, vec: Idx<Inst>) -> Idx<Inst> {
         self.emit_cur(Inst::Field {
             base: vec,
-            field: Ustr::from(VEC_COLUMN_HEADER_FIELD),
+            field: crate::names::ustr(VEC_COLUMN_HEADER_FIELD),
         })
     }
 
@@ -1296,10 +1296,10 @@ impl<'a> Builder<'a> {
         Ok(self.emit_cur(Inst::MakeStruct {
             ty: None,
             fields: vec![
-                (Ustr::from("spine"), spine),
-                (Ustr::from("data"), data),
-                (Ustr::from("free_indices"), free),
-                (Ustr::from("occupied_count"), count),
+                (crate::names::ustr("spine"), spine),
+                (crate::names::ustr("data"), data),
+                (crate::names::ustr("free_indices"), free),
+                (crate::names::ustr("occupied_count"), count),
             ],
         }))
     }
@@ -1486,7 +1486,7 @@ impl<'a> Builder<'a> {
         // column would desync them.
         let len = self.emit_cur(Inst::Field {
             base: vec,
-            field: Ustr::from("len"),
+            field: crate::names::ustr("len"),
         });
         let one = self.emit_cur(Inst::Const(Lit::Int(1)));
         let next = self.emit_cur(Inst::IntAdd(len, one));
@@ -1498,7 +1498,7 @@ impl<'a> Builder<'a> {
         let slot = if self.column_base_is_one() { next } else { len };
         self.emit_cur(Inst::StoreField {
             base: vec,
-            field: Ustr::from("len"),
+            field: crate::names::ustr("len"),
             value: next,
         });
         for (path, leaf) in paths.into_iter().zip(leaves) {
@@ -1572,7 +1572,7 @@ impl<'a> Builder<'a> {
             return Ok(None);
         };
         segs.reverse();
-        let path = Ustr::from(
+        let path = crate::names::ustr(
             &segs
                 .iter()
                 .map(|s| s.as_str())
@@ -1670,7 +1670,7 @@ impl<'a> Builder<'a> {
         let leaves = self.repr_to_storage_leaves(&bundle, sub, "nested field store")?;
         let paths: Vec<Ustr> = leaf_names(sub, &field, ".")
             .iter()
-            .map(|p| Ustr::from(p))
+            .map(|p| crate::names::ustr(p))
             .collect();
         if leaves.len() != paths.len() {
             return Err(gap(format!(
@@ -1714,7 +1714,7 @@ impl<'a> Builder<'a> {
         let raw = self.strided_stores_raw(elem);
         let data = self.emit_cur(Inst::Field {
             base: vec,
-            field: Ustr::from("_data"),
+            field: crate::names::ustr("_data"),
         });
         for (offset, v) in offsets.into_iter().zip(leaves) {
             let v = if raw {

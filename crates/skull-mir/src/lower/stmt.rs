@@ -65,10 +65,10 @@ impl<'a> Builder<'a> {
             *c += 1;
             v
         };
-        let cell = Ustr::from(
+        let cell = crate::names::ustr(
             format!("__static_{}_{}_{}", self.static_owner_symbol(), sname, ctr).as_str(),
         );
-        let done_flag = Ustr::from(format!("{cell}__done").as_str());
+        let done_flag = crate::names::ustr(format!("{cell}__done").as_str());
         self.static_cells.insert(raw(name), cell);
 
         let ty = self
@@ -203,7 +203,7 @@ impl<'a> Builder<'a> {
             *c += 1;
             v
         };
-        let hoisted = Ustr::from(
+        let hoisted = crate::names::ustr(
             format!("__local_{}_{}_{}", self.static_owner_symbol(), sname, ctr).as_str(),
         );
         let abi = self.nested_fn_abi(name, params, hoisted)?;
@@ -437,9 +437,11 @@ impl<'a> Builder<'a> {
                                         .map(|li| {
                                             self.new_binding_cell(
                                                 name,
-                                                Ustr::from(format!("{bname}__{li}").as_str()),
+                                                crate::names::ustr(
+                                                    format!("{bname}__{li}").as_str(),
+                                                ),
                                                 None,
-                                                Ustr::from(li.to_string().as_str()),
+                                                crate::names::ustr(li.to_string().as_str()),
                                             )
                                         })
                                         .collect()
@@ -515,7 +517,7 @@ impl<'a> Builder<'a> {
                                 name,
                                 self.body.binding_arena[name].name,
                                 cty,
-                                Ustr::from(""),
+                                crate::names::ustr(""),
                             );
                             if self.binding_is_nonnull_value_struct(name) {
                                 self.f.mark_nonnull_value_struct(cell);
@@ -546,7 +548,7 @@ impl<'a> Builder<'a> {
                 Statement::Defer(body) => {
                     let pending = match self.defer_mode {
                         DeferMode::CoFlag => {
-                            let flag = self.f.new_cell(Some(Ustr::from("__defer")));
+                            let flag = self.f.new_cell(Some(crate::names::ustr("__defer")));
                             let on = self.emit_cur(Inst::Const(Lit::Bool(true)));
                             self.emit_cur(Inst::Store {
                                 cell: flag,
@@ -588,7 +590,7 @@ impl<'a> Builder<'a> {
                         var,
                         self.body.binding_arena[var].name,
                         self.binding_ty(var),
-                        Ustr::from(""),
+                        crate::names::ustr(""),
                     );
                     self.emit_cur(Inst::Store { cell, value: v });
                     self.binds.insert(raw(var), cell);
@@ -709,7 +711,8 @@ impl<'a> Builder<'a> {
             }
             PendingDefer::Unwind | PendingDefer::Inline => {
                 if pending == PendingDefer::Unwind {
-                    let pop = self.emit_cur(Inst::Global(Ustr::from(crate::mir::DEFER_POP)));
+                    let pop =
+                        self.emit_cur(Inst::Global(crate::names::ustr(crate::mir::DEFER_POP)));
                     self.emit_cur(Inst::CallValue {
                         callee: pop,
                         args: Vec::new(),
@@ -764,7 +767,7 @@ impl<'a> Builder<'a> {
             .lambda_abi_fingerprints
             .insert(lambda, plan.logical_fingerprint(self.scx.rep_arena()));
         self.f.lambda_abi_representations.insert(lambda, plan);
-        let push = self.emit_cur(Inst::Global(Ustr::from(crate::mir::DEFER_PUSH)));
+        let push = self.emit_cur(Inst::Global(crate::names::ustr(crate::mir::DEFER_PUSH)));
         self.emit_cur(Inst::CallValue {
             callee: push,
             args: vec![lambda],

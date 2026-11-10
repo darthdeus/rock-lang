@@ -226,7 +226,7 @@ impl<'a> Builder<'a> {
             }
             None => self.lower_expr(iter_expr)?,
         };
-        let it_cell = self.f.new_cell(Some(Ustr::from("__it")));
+        let it_cell = self.f.new_cell(Some(crate::names::ustr("__it")));
         self.emit_cur(Inst::Store {
             cell: it_cell,
             value: it_val,
@@ -401,7 +401,7 @@ impl<'a> Builder<'a> {
         {
             return None;
         }
-        let flag = self.f.new_cell(Some(Ustr::from("__defer")));
+        let flag = self.f.new_cell(Some(crate::names::ustr("__defer")));
         let on = self.emit_cur(Inst::Const(Lit::Bool(true)));
         self.emit_cur(Inst::Store {
             cell: flag,
@@ -428,7 +428,7 @@ impl<'a> Builder<'a> {
             value: off,
         });
         let it = self.emit_cur(Inst::Load(it_cell));
-        let kill = self.emit_cur(Inst::Global(Ustr::from(crate::mir::CORO_KILL)));
+        let kill = self.emit_cur(Inst::Global(crate::names::ustr(crate::mir::CORO_KILL)));
         self.emit_cur(Inst::CallValue {
             callee: kill,
             args: vec![it],
@@ -557,24 +557,24 @@ impl<'a> Builder<'a> {
         let arena = self.lower_iterable_collection(iter)?;
         let scene_id = self.emit_cur(Inst::Field {
             base: arena,
-            field: Ustr::from("_scene_id"),
+            field: crate::names::ustr("_scene_id"),
         });
         let arena_id = self.emit_cur(Inst::Field {
             base: arena,
-            field: Ustr::from("_arena_id"),
+            field: crate::names::ustr("_arena_id"),
         });
         let store = self.call_spine("__arena_store_or_empty", vec![scene_id, arena_id])?;
         let occupied = self.emit_cur(Inst::Field {
             base: store,
-            field: Ustr::from("occupied"),
+            field: crate::names::ustr("occupied"),
         });
         let generations = self.emit_cur(Inst::Field {
             base: store,
-            field: Ustr::from("generations"),
+            field: crate::names::ustr("generations"),
         });
         let data = self.emit_cur(Inst::Field {
             base: store,
-            field: Ustr::from("data"),
+            field: crate::names::ustr("data"),
         });
         let n = self.emit_cur(Inst::Len {
             base: occupied,
@@ -655,16 +655,17 @@ impl<'a> Builder<'a> {
             index: idx,
             kind: ContainerKind::Vec,
         });
-        let entity_representation = self.nominal_value_representation(Ustr::from("Entity"))?;
+        let entity_representation =
+            self.nominal_value_representation(crate::names::ustr("Entity"))?;
         let entity = self.emit_cur(Inst::MakeValueStruct {
-            name: Ustr::from("Entity"),
+            name: crate::names::ustr("Entity"),
             representation: entity_representation,
             form: ValueCtorForm::Declared,
             fields: vec![
-                (Ustr::from("_scene_id"), scene_id),
-                (Ustr::from("_arena_id"), arena_id),
-                (Ustr::from("_slot"), idx),
-                (Ustr::from("_generation"), e_gen),
+                (crate::names::ustr("_scene_id"), scene_id),
+                (crate::names::ustr("_arena_id"), arena_id),
+                (crate::names::ustr("_slot"), idx),
+                (crate::names::ustr("_generation"), e_gen),
             ],
         });
         // A column element is rebuilt from its leaves here. For an ordinary value
@@ -718,7 +719,7 @@ impl<'a> Builder<'a> {
                 ev,
                 self.body.binding_arena[ev].name,
                 self.binding_ty(ev),
-                Ustr::from(""),
+                crate::names::ustr(""),
             );
             self.binds.insert(raw(ev), bind_cell);
             self.emit_cur(Inst::Store {
@@ -770,7 +771,7 @@ impl<'a> Builder<'a> {
         let table = match col {
             Some(_) => self.emit_cur(Inst::Field {
                 base: m,
-                field: Ustr::from("spine"),
+                field: crate::names::ustr("spine"),
             }),
             None => m,
         };
@@ -853,7 +854,7 @@ impl<'a> Builder<'a> {
             ib,
             self.body.binding_arena[ib].name,
             self.binding_ty(ib),
-            Ustr::from(""),
+            crate::names::ustr(""),
         );
         self.binds.insert(raw(ib), i_cell);
         self.f.mark_loop_binding(i_cell);
@@ -990,7 +991,7 @@ impl<'a> Builder<'a> {
                     *ib,
                     self.body.binding_arena[*ib].name,
                     self.binding_ty(*ib),
-                    Ustr::from(""),
+                    crate::names::ustr(""),
                 );
                 self.binds.insert(raw(*ib), c);
                 c
@@ -1077,11 +1078,11 @@ impl<'a> Builder<'a> {
             let fv = self.lower_expr(iter)?;
             let buf = self.emit_cur(Inst::Field {
                 base: fv,
-                field: Ustr::from("buf"),
+                field: crate::names::ustr("buf"),
             });
             let len = self.emit_cur(Inst::Field {
                 base: fv,
-                field: Ustr::from("len"),
+                field: crate::names::ustr("len"),
             });
             (kind, buf, len)
         } else {
@@ -1231,7 +1232,7 @@ impl<'a> Builder<'a> {
                     *b,
                     self.body.binding_arena[*b].name,
                     self.binding_ty(*b),
-                    Ustr::from(""),
+                    crate::names::ustr(""),
                 );
                 if self.binding_is_nonnull_value_struct(*b) {
                     self.f.mark_nonnull_value_struct(cell);
@@ -1376,9 +1377,9 @@ impl<'a> Builder<'a> {
             .map(|(li, &value)| {
                 let c = self.new_binding_cell(
                     b,
-                    Ustr::from(format!("{bname}__{li}").as_str()),
+                    crate::names::ustr(format!("{bname}__{li}").as_str()),
                     None,
-                    Ustr::from(li.to_string().as_str()),
+                    crate::names::ustr(li.to_string().as_str()),
                 );
                 self.f.cells[c].native_ty = leaf_tys.as_ref().and_then(|tys| tys.get(li).copied());
                 self.emit_cur(Inst::Store { cell: c, value });
@@ -1431,9 +1432,9 @@ impl<'a> Builder<'a> {
             .map(|(si, &value)| {
                 let c = self.new_binding_cell(
                     b,
-                    Ustr::from(format!("{bname}__{si}").as_str()),
+                    crate::names::ustr(format!("{bname}__{si}").as_str()),
                     None,
-                    Ustr::from(si.to_string().as_str()),
+                    crate::names::ustr(si.to_string().as_str()),
                 );
                 self.f.cells[c].producer = crate::mir::CellProducer::TupleSlot;
                 self.emit_cur(Inst::Store { cell: c, value });

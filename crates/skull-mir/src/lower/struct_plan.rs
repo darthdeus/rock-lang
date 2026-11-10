@@ -101,7 +101,7 @@ pub fn cdata_leaf_alias(ws: &Workspace, owner: Ustr, path: &str) -> Ustr {
     for byte in path.bytes() {
         let _ = write!(prefix, "{byte:02x}");
     }
-    Ustr::from(&prefix)
+    crate::names::ustr(&prefix)
 }
 
 /// The build-owned struct registry input shared by late representation
@@ -355,7 +355,7 @@ impl GcTableField {
         super::shape::presence_flags_rec(sub, true, &mut presence);
         super::shape::leaf_names(sub, self.name.as_str(), ".")
             .into_iter()
-            .map(|key| Ustr::from(&key))
+            .map(|key| crate::names::ustr(&key))
             .zip(presence)
             .collect()
     }

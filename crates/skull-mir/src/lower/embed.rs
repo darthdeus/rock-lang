@@ -128,7 +128,7 @@ impl<'a> Builder<'a> {
                     }
                     physical = (
                         owner,
-                        Ustr::from(&format!("{child_field}.{relative}")),
+                        crate::names::ustr(&format!("{child_field}.{relative}")),
                         projected,
                         false,
                     );
@@ -235,7 +235,7 @@ impl<'a> Builder<'a> {
         for (k, v) in keys.into_iter().zip(leaves) {
             self.emit_cur(Inst::StoreField {
                 base: parent,
-                field: Ustr::from(&k),
+                field: crate::names::ustr(&k),
                 value: v,
             });
         }
@@ -299,7 +299,7 @@ impl<'a> Builder<'a> {
         out: &mut Vec<(Ustr, Idx<Inst>)>,
     ) -> Result<(), CompilerError> {
         for f in self.struct_field_names_required(cname)? {
-            let key = Ustr::from(&format!("{prefix}.{f}"));
+            let key = crate::names::ustr(&format!("{prefix}.{f}"));
             let relkey = format!("{rel}{f}");
             let field_plan = self.struct_field_plan(cname, f, false)?;
             if let Some((inner, nullable)) = field_plan.embed() {
@@ -308,24 +308,24 @@ impl<'a> Builder<'a> {
                         base: parent,
                         field: key,
                     });
-                    out.push((Ustr::from(relkey.as_str()), v));
+                    out.push((crate::names::ustr(relkey.as_str()), v));
                 }
                 self.collect_embed_slots(parent, key, &format!("{relkey}."), inner, out)?;
             } else if let Some(shape) = field_plan.flat_shape() {
                 for slot in flat_slot_names(f, &shape) {
-                    let src = Ustr::from(&format!("{prefix}.{slot}"));
+                    let src = crate::names::ustr(&format!("{prefix}.{slot}"));
                     let v = self.emit_cur(Inst::Field {
                         base: parent,
                         field: src,
                     });
-                    out.push((Ustr::from(&format!("{rel}{slot}")), v));
+                    out.push((crate::names::ustr(&format!("{rel}{slot}")), v));
                 }
             } else {
                 let v = self.emit_cur(Inst::Field {
                     base: parent,
                     field: key,
                 });
-                out.push((Ustr::from(relkey.as_str()), v));
+                out.push((crate::names::ustr(relkey.as_str()), v));
             }
         }
         Ok(())
@@ -358,7 +358,7 @@ impl<'a> Builder<'a> {
             .map(|key| {
                 self.emit_cur(Inst::Field {
                     base: parent,
-                    field: Ustr::from(&key),
+                    field: crate::names::ustr(&key),
                 })
             })
             .collect::<Vec<_>>();
@@ -516,7 +516,7 @@ impl<'a> Builder<'a> {
                 Some(inner) => out.extend(
                     self.embed_leaf_paths(inner)?
                         .into_iter()
-                        .map(|k| Ustr::from(&format!("{f}.{k}"))),
+                        .map(|k| crate::names::ustr(&format!("{f}.{k}"))),
                 ),
                 None => match self.struct_field_plan(cname, f, false)?.flat_shape() {
                     Some(shape) => out.extend(flat_slot_names(f, &shape)),

@@ -259,7 +259,7 @@ impl<'a> Builder<'a> {
             {
                 let elem = plan
                     .ffi_element_name(arena)
-                    .unwrap_or_else(|| Ustr::from("<element>"));
+                    .unwrap_or_else(|| crate::names::ustr("<element>"));
                 let family = match plan.family() {
                     ContainerFamily::NativeBuffer => "NativeBuffer",
                     ContainerFamily::FlatVec => "FlatVec",

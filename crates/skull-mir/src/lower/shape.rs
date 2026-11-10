@@ -149,7 +149,7 @@ pub(crate) fn column_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
         return paths;
     }
     let mut out = Vec::with_capacity(paths.len() + 1);
-    out.push(Ustr::from(VEC_COLUMN_PRESENCE_FIELD));
+    out.push(crate::names::ustr(VEC_COLUMN_PRESENCE_FIELD));
     out.extend(paths);
     out
 }
@@ -161,7 +161,7 @@ pub(crate) fn column_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
 pub fn value_leaf_paths(shape: &ValueShape) -> Vec<Ustr> {
     leaf_names(shape, "", ".")
         .into_iter()
-        .map(|s| Ustr::from(&s))
+        .map(|s| crate::names::ustr(&s))
         .collect()
 }
 
@@ -257,7 +257,7 @@ pub const LEAF_VIEWS: &[(&str, &str, &str)] = &[
 /// ([`Inst::FfiViewCast`]) and read per element access, never per leaf.
 pub fn leaf_view_field(cty: &str) -> Ustr {
     match LEAF_VIEWS.iter().find(|(t, ..)| *t == cty) {
-        Some((_, field, _)) => Ustr::from(field),
+        Some((_, field, _)) => crate::names::ustr(field),
         None => unreachable!("no leaf view for non-primitive C type `{cty}`"),
     }
 }
@@ -515,9 +515,9 @@ pub(crate) fn join_offsetof(ws: &Workspace, prefix: &str, owner: Ustr, field: &s
 
 pub(crate) fn leaf_path(prefix: &str, name: &str) -> Ustr {
     if prefix.is_empty() {
-        Ustr::from(name)
+        crate::names::ustr(name)
     } else {
-        Ustr::from(&format!("{prefix}{name}"))
+        crate::names::ustr(&format!("{prefix}{name}"))
     }
 }
 
@@ -638,7 +638,7 @@ pub(super) fn nominal_name_from_ty(ws: &Workspace, ty: TyId) -> Option<(Ustr, bo
 
 fn planned_value_rec(ws: &Workspace, name: Ustr, visiting: &mut Vec<Ustr>) -> Option<PlannedValue> {
     if let Some(enum_plan) = EnumPlan::for_name(ws, name).and_then(|plan| plan.cdata().cloned()) {
-        let mut fields = vec![(Ustr::from("__tag"), PlannedField::Primitive("int"))];
+        let mut fields = vec![(crate::names::ustr("__tag"), PlannedField::Primitive("int"))];
         fields.extend(
             enum_plan
                 .slots
@@ -1087,7 +1087,7 @@ pub(crate) fn swizzle_group(parts: Vec<ValueRepr>) -> ValueRepr {
             _ => "Vec4",
         };
         ValueRepr::Group {
-            name: Ustr::from(name),
+            name: crate::names::ustr(name),
             parts,
             present: None,
         }
@@ -1557,7 +1557,7 @@ pub(crate) fn value_shape_of_nominal(ws: &Workspace, name: Ustr) -> Option<Value
 /// category-2 storage -- its layout is derived from the stored type -- so a
 /// `nobox` global is K scalar globals, never one boxed cdata.
 pub(crate) fn nobox_global_leaf_name(base: Ustr, leaf: usize) -> Ustr {
-    Ustr::from(&format!("__nbg_{base}_{leaf}"))
+    crate::names::ustr(&format!("__nbg_{base}_{leaf}"))
 }
 
 /// Whether `name` is a `nobox` value struct.
@@ -2194,7 +2194,7 @@ impl EnumCdataShape {
     /// All field names in `<Enum>_ct` ctor order: `[__tag, <slot names>]`.
     pub fn field_names(&self) -> Vec<Ustr> {
         let mut v = Vec::with_capacity(1 + self.slots.len());
-        v.push(Ustr::from("__tag"));
+        v.push(crate::names::ustr("__tag"));
         v.extend(self.slots.iter().map(|(n, _)| *n));
         v
     }
@@ -2218,7 +2218,7 @@ impl EnumCdataShape {
 /// a record field. (Record field names are identifiers, so they never collide
 /// with the numeric tuple form.)
 pub(crate) fn slot_name(suffix: &str) -> Ustr {
-    Ustr::from(format!("_{suffix}").as_str())
+    crate::names::ustr(format!("_{suffix}").as_str())
 }
 
 pub(crate) fn scalar_c_type(ws: &Workspace, ty: TyId) -> Option<&'static str> {
@@ -2462,9 +2462,12 @@ impl EnumFlatShape {
     /// primitive leaves. `pack`/`cdata_leaves` re-detect the enum by name and use
     /// box semantics (the leaf NAMES here are nominal -- never read structurally).
     pub(crate) fn value_shape(&self) -> ValueShape {
-        let mut fields = vec![(Ustr::from("__tag"), FieldShape::Prim)];
+        let mut fields = vec![(crate::names::ustr("__tag"), FieldShape::Prim)];
         for i in 0..self.tuple_width() {
-            fields.push((Ustr::from(format!("_{i}").as_str()), FieldShape::Prim));
+            fields.push((
+                crate::names::ustr(format!("_{i}").as_str()),
+                FieldShape::Prim,
+            ));
         }
         for rf in &self.record_fields {
             fields.push((*rf, FieldShape::Prim));
@@ -2786,9 +2789,12 @@ impl YieldChannel {
     }
 
     pub(crate) fn value_shape(&self) -> ValueShape {
-        let mut fields = vec![(Ustr::from("__tag"), FieldShape::Prim)];
+        let mut fields = vec![(crate::names::ustr("__tag"), FieldShape::Prim)];
         for i in 0..self.tuple_width {
-            fields.push((Ustr::from(format!("_{i}").as_str()), FieldShape::Prim));
+            fields.push((
+                crate::names::ustr(format!("_{i}").as_str()),
+                FieldShape::Prim,
+            ));
         }
         for field in &self.record_fields {
             fields.push((*field, FieldShape::Prim));
@@ -2837,5 +2843,5 @@ pub(crate) fn coroutine_yield_channel_mono(ws: &Workspace, ty: &MonoTy) -> Optio
 /// The reused frame slot name for the `i`th yield leaf: `__y{i}` (tag at 0, then
 /// positional, then record leaves -- `value_shape` leaf order).
 pub fn yield_slot(i: usize) -> Ustr {
-    Ustr::from(format!("__y{i}").as_str())
+    crate::names::ustr(format!("__y{i}").as_str())
 }
