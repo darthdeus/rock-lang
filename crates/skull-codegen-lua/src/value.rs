@@ -387,7 +387,7 @@ impl Emitter<'_> {
                 out.push(']');
             }
 
-            Inst::Index { base, index, kind } => self.write_index(out, *base, *index, *kind),
+            Inst::Index { base, index, kind } => self.write_index(out, id, *base, *index, *kind),
             Inst::VecCheckedIndex { vec, index } => {
                 out.push_str("__vec_checked_index(");
                 self.write_opnd(out, *vec);
@@ -555,6 +555,33 @@ impl Emitter<'_> {
         out.push(')');
     }
 
+    /// Whether `id` may be written a second time on a path that is rarely
+    /// taken: it renders as a bare local or a literal, or as field reads or
+    /// one integer sum over those, which have no effect to repeat.
+    fn repeatable(&self, id: Idx<Inst>, depth: u8) -> bool {
+        if !self.inlinable[raw(id) as usize] || self.hoist.contains_key(&id) {
+            return true;
+        }
+        match self.func.insts[id] {
+            Inst::Load(_) | Inst::Const(_) => true,
+            Inst::Field { base, .. } | Inst::TupleIndex { base, .. } if depth > 0 => {
+                self.repeatable(base, depth - 1)
+            }
+            Inst::IntAdd(a, b) | Inst::IntSub(a, b) if depth > 0 => {
+                self.repeatable(a, 0) && self.repeatable(b, 0)
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether value `id` is folded into its use or assigned to a local,
+    /// rather than written as a bare statement.
+    fn has_home(&self, id: Idx<Inst>) -> bool {
+        self.inlinable[raw(id) as usize]
+            || self.colors[raw(id) as usize] != u32::MAX
+            || regalloc::alias_at(self.alias, id).is_some()
+    }
+
     /// READ index `base[index]`. NativeBuffer and Vec go through the
     /// debug-mode bounds-checked stdlib helpers (`__nb_checked_get` /
     /// `__vec_checked_get`) — skull runs debug; release stripping is future
@@ -563,11 +590,41 @@ impl Emitter<'_> {
     fn write_index(
         &self,
         out: &mut String,
+        id: Idx<Inst>,
         base: Idx<Inst>,
         index: Idx<Inst>,
         kind: ContainerKind,
     ) {
         match kind {
+            // A Vec keeps every slot outside `[0, len)` nil, so a slot that
+            // reads as a value is in bounds and is the answer: no call per
+            // element. A nil or false slot is either such an element or out of
+            // bounds, and the helper tells which. A read whose result is
+            // discarded is a bare statement, which only the call can be.
+            ContainerKind::Vec
+                if self.repeatable(base, 2) && self.repeatable(index, 2) && self.has_home(id) =>
+            {
+                self.write_opnd(out, base);
+                out.push_str("._data[");
+                match self.func.insts[index] {
+                    Inst::Const(Lit::Int(i))
+                        if (0..i64::from(i32::MAX)).contains(&i)
+                            && self.inlinable[raw(index) as usize]
+                            && !self.hoist.contains_key(&index) =>
+                    {
+                        let _ = write!(out, "{}", i + 1);
+                    }
+                    _ => {
+                        self.write_opnd(out, index);
+                        out.push_str(" + 1");
+                    }
+                }
+                out.push_str("] or __vec_checked_get(");
+                self.write_opnd(out, base);
+                out.push_str(", ");
+                self.write_opnd(out, index);
+                out.push(')');
+            }
             ContainerKind::Vec => {
                 out.push_str("__vec_checked_get(");
                 self.write_opnd(out, base);

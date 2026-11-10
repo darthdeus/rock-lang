@@ -3293,10 +3293,10 @@ fn float_range(start: float, end_val: float, step: float) -> [float] {
     return result
 }
 
-// Vec<T> — Rock's growable array type. `[T]` is syntactic sugar for
-// `Vec<T>` (they are the same type). Backed by a plain Lua table in
-// `data` (1-indexed) plus an explicit `len` so vec_* functions don't
-// rely on `#t` which is unreliable for tables with holes.
+// Vec<T> -- Rock's growable array type; `[T]` is sugar for it. Backed by a
+// plain Lua table in `_data` (1-indexed) plus an explicit `len`, since `#t`
+// is unreliable for tables with holes. Slots past `len` hold nil or false:
+// an emitted `xs[i]` read takes a truthy slot as in bounds without a check.
 struct Vec<T> {
     _data: any,
     len: int,

@@ -2482,10 +2482,79 @@ fn probe(stop: int) -> int {\n\
     assert_eq!(run(src, "probe(1)"), "-1000");
 }
 
+/// A `[T]` element read is the backing read itself. Only a slot that reads
+/// nil or false goes on to the checked helper, which raises when the index is
+/// out of bounds and otherwise returns that nil or false.
 #[test]
-fn vec_index_read_calls_the_checked_helper() {
+fn vec_index_read_is_direct_with_a_checked_fallback() {
     let lua = emit("fn f(xs: [int], i: int) -> int { return xs[i] }", "f");
-    assert!(lua.contains("__vec_checked_get("), "{lua}");
+    assert!(
+        lua.contains("._data[") && lua.contains(" + 1] or __vec_checked_get("),
+        "{lua}"
+    );
+    let lua = emit("fn first(xs: [int]) -> int { return xs[0] }", "first");
+    assert!(lua.contains("._data[1] or __vec_checked_get("), "{lua}");
+}
+
+#[test]
+fn vec_loop_reads_its_element_directly() {
+    let lua = emit_inlined(
+        "fn sum_vec(xs: [int]) -> int {
+            let total = 0
+            for x in xs { total += x }
+            return total
+        }",
+        "sum_vec",
+    );
+    assert!(lua.contains("for "), "{lua}");
+    assert!(
+        lua.contains("._data[") && lua.contains(" + 1] or __vec_checked_get("),
+        "{lua}"
+    );
+}
+
+/// An index whose operands are not plain locals would be evaluated twice by
+/// the direct form, so it keeps the one call.
+#[test]
+fn vec_index_read_of_a_computed_operand_keeps_the_call() {
+    let src = "
+fn pick(xs: [int]) -> int { return 1 }
+fn f(xs: [[int]], i: int) -> int { return xs[pick(xs[0])][i] }";
+    let lua = emit(src, "f");
+    println!("{lua}");
+    assert_eq!(lua.matches("pick").count(), 1, "{lua}");
+}
+
+const VEC_FALSY_SLOTS_SRC: &str = "
+fn count_false(xs: [bool]) -> int {
+    let n = 0
+    for x in xs { if !x { n += 1 } }
+    return n
+}
+fn count_null(xs: [int?]) -> int {
+    let n = 0
+    for x in xs { if x == null { n += 1 } }
+    return n
+}
+fn at(xs: [int], i: int) -> int { return xs[i] }
+fn probe() -> string {
+    let a = count_false([true, false, false])
+    let b = count_null([1, null, 3, null, null])
+    return \"{a} {b} {at([4, 5, 6], 2)}\"
+}
+fn past_end() -> int { return at([4, 5, 6], 3) }
+fn before_start() -> int { return at([4, 5, 6], -1) }";
+
+#[test]
+fn vec_reads_of_false_and_null_slots_and_out_of_bounds_indices() {
+    assert_eq!(run(VEC_FALSY_SLOTS_SRC, "probe()"), "2 3 6");
+    for driver in ["past_end()", "before_start()"] {
+        let out = run(
+            VEC_FALSY_SLOTS_SRC,
+            &format!("select(2, pcall(function() return {driver} end))"),
+        );
+        assert!(out.contains("Vec index out of bounds"), "{driver}: {out}");
+    }
 }
 
 #[test]
