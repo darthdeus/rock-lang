@@ -1637,7 +1637,7 @@ pub fn build_in(
     g.run_stats = stats;
     let t_run = t.elapsed();
     let t = bone_core::prelude::Instant::now();
-    g.derive(ws, false);
+    g.derive(ws);
     let t_derive = t.elapsed();
     if log::log_enabled!(log::Level::Debug) {
         let intern_after = g.interner().stats();
@@ -3372,114 +3372,39 @@ impl InstanceGraph {
         census
     }
 
-    /// **Rebuild every flat field from the contribution set**, prune what no
-    /// root reaches, and re-run the whole-graph post-passes.
+    /// What a fresh build keeps beside its contributions: the instance set
+    /// and the whole-graph post-passes.
     ///
-    /// `uninstantiated_roots` is NOT reset here: [`Self::seed_roots`] owns that
-    /// reset and runs first on both paths, so a clear in both places would be
-    /// one mechanism twice -- mutation-verified inert.
-    ///
-    /// It is the only writer of the CONCATENATION fields -- `edges`,
-    /// `call_sites`, `duplicate_sites`, `unresolved`, `rejections`,
-    /// `storage_failures`, `depth_capped`, `expanded`, `always_emitted_targets`
-    /// and the operational counters. It is NOT the only writer of the graph:
-    ///
-    /// - [`Self::seed_roots`] owns `root_instances`, `uninstantiated_roots` and
-    ///   `excused_generic_roots`;
-    /// - the four post-passes it calls each own their own field
-    ///   (`inline_body_deps`, `boundaries`, `coroutine_helpers`,
-    ///   `recursion_starts`, and the whole-graph `rejections` append);
-    /// - `substitutions`, `bound_trees` and their agreement records are written
-    ///   BOTH here and by [`Self::merge_reach`]/[`Self::merge_bound_tree`] from
-    ///   [`Self::commit`] during [`Self::run`], because `expand` reads an
-    ///   instance's substitution and witnesses before this ever runs.
-    ///
-    /// That last one is two writers for one fact and is the seam the
-    /// derivation cut removes: one indexing path, taken by install and replace
-    /// alike. Returns the instances it pruned.
-    fn derive(&mut self, ws: &Workspace, incremental: bool) -> Prune {
+    /// Nothing is pruned: `run` only ever walks owners a root or an
+    /// always-emitted seed demanded, so every owner it installed is
+    /// root-reachable. `uninstantiated_roots` is not reset here;
+    /// [`Self::seed_roots`] owns that reset and runs first.
+    fn derive(&mut self, ws: &Workspace) {
         let derive_start = Instant::now();
-        let lost: Vec<Instance> = std::mem::take(&mut self.lost).into_iter().collect();
-        // A FRESH build prunes nothing by construction: `run` only ever walks
-        // owners a root or an always-emitted seed demanded, so every owner it
-        // installed is root-reachable. An update is where the question has an
-        // answer, and the answer is searched over the affected region.
-        let Prune {
-            pruned,
-            region,
-            seeds,
-            boundary_predecessor_edges_examined,
-            support_component_nodes_examined,
-            support_component_edges_examined,
-            reverse_instances_examined,
-            reverse_predecessor_edges_examined,
-            prune_search_population,
-            broad_scans,
-        } = if incremental {
-            self.stranded(&lost)
-        } else {
-            Prune::default()
-        };
+        self.lost.clear();
         if self.verify_whole_graph {
-            // Check that the affected-region prune agrees with whole-graph
-            // reachability for graphs built with verification enabled.
-            let wholesale = self.unreachable_wholesale();
-            assert_eq!(
-                pruned, wholesale,
-                "the affected-region prune and a whole-graph reachability walk disagree"
+            let unreachable = self.unreachable_wholesale();
+            assert!(
+                unreachable.is_empty(),
+                "a fresh build installed instances no root reaches: {unreachable:?}"
             );
         }
-        let dead: Vec<Owner> = pruned.iter().cloned().map(Owner::Instance).collect();
-        // Through `uninstall`, so a pruned owner's index entries go with it --
-        // the arena is the ONLY thing not pruned, because an entry outliving
-        // its last instance is what keeps ids stable across edits.
-        for owner in &dead {
-            self.uninstall(owner);
-        }
-
-        // What ENTERED and LEFT, which is what the per-declaration passes below
-        // are refreshed over. A fresh build's `before` is empty, so they run
-        // over everything -- the same code path, not a second one.
-        let after: BTreeSet<Instance> = self
+        self.instances = self
             .contributions
             .keys()
-            .filter_map(|o| o.instance())
+            .filter_map(Owner::instance)
             .cloned()
             .collect();
-        let previous_instances = self.instances.clone();
-        let entered: Vec<Instance> = if incremental {
-            after.difference(&previous_instances).cloned().collect()
-        } else {
-            after.iter().cloned().collect()
-        };
-        let left: Vec<Instance> = if incremental {
-            previous_instances.difference(&after).cloned().collect()
-        } else {
-            Vec::new()
-        };
-        self.instances = after;
-        let decls_entered: Vec<DeclKey> = {
-            let mut v: Vec<DeclKey> = entered.iter().map(|i| DeclKey(i.func)).collect();
-            v.sort();
-            v.dedup();
-            v.retain(|d| self.index.decls.contains_key(&d.0));
-            v
-        };
-        let decls_left: Vec<DeclKey> = {
-            let mut v: Vec<DeclKey> = left.iter().map(|i| DeclKey(i.func)).collect();
-            v.sort();
-            v.dedup();
-            v.retain(|d| !self.index.decls.contains_key(&d.0));
-            v
-        };
-        for decl in &decls_left {
-            for member in skull_mir::lower::backend_variant_group(ws, decl.0) {
-                self.remove_inline_body_deps(&DeclKey(member));
-                self.inline_body_nomangle_roots.remove(&DeclKey(member));
-            }
-            let f = &ws.module(decl.0.module).functions[decl.0.func];
-            self.boundaries.remove(&mangle_fn(ws, f));
-        }
+        // Owner order is declaration order, so the declarations come out
+        // sorted and each one's instances are adjacent.
+        let mut decls: Vec<DeclKey> = self.instances.iter().map(|i| DeclKey(i.func)).collect();
+        decls.dedup();
+        let coroutines: Vec<Instance> = self
+            .instances
+            .iter()
+            .filter(|i| ws.module(i.func.module).functions[i.func.func].is_coroutine)
+            .cloned()
+            .collect();
         self.clear_graph_postpass_rejections();
         let root_holes = self.refresh_root_hole_sites();
         self.run_stats.root_hole_names_examined += root_holes.names_examined;
@@ -3491,26 +3416,33 @@ impl InstanceGraph {
 
         self.run_stats.derive_ns = derive_start.elapsed().as_nanos() as u64;
         let post_pass_start = Instant::now();
-        record_inline_body_deps(self, ws, &decls_entered);
-        record_inline_body_nomangle_roots(self, ws, decls_entered.iter().map(|decl| decl.0));
+        // The three read only the workspace and the installed records, so
+        // they run beside each other; what they found is recorded in order.
+        let (inline_deps, (nomangle_roots, (recursion_starts, recursion_findings))) = {
+            use bone_core::prelude::par_join;
+            let graph = &*self;
+            par_join(
+                || inline_body_dep_rows(ws, &decls),
+                || {
+                    par_join(
+                        || opaque_boundary_roots_for_decls(ws, decls.iter().map(|decl| decl.0)),
+                        || detect_changing_instance_recursion(graph, ws),
+                    )
+                },
+            )
+        };
+        self.record_inline_body_dep_rows(inline_deps);
+        self.inline_body_nomangle_roots.extend(nomangle_roots);
         self.run_stats.erased_catalogue_entries_examined += self.refresh_erased_entries();
-        detect_changing_instance_recursion(self, ws);
-        classify_boundaries(self, ws, &decls_entered);
-        record_coroutine_helpers(self, ws, &entered, &left);
+        self.recursion_starts = recursion_starts;
+        self.run_stats.recursion_findings_derived += recursion_findings.len();
+        for finding in recursion_findings {
+            self.install_recursion_finding(finding);
+        }
+        classify_boundaries(self, ws, &decls);
+        record_coroutine_helpers(self, ws, &coroutines, &[]);
         self.run_stats.post_pass_ns = post_pass_start.elapsed().as_nanos() as u64;
         self.run_stats.derive_ns += self.run_stats.post_pass_ns;
-        Prune {
-            pruned,
-            region,
-            seeds,
-            boundary_predecessor_edges_examined,
-            support_component_nodes_examined,
-            support_component_edges_examined,
-            reverse_instances_examined,
-            reverse_predecessor_edges_examined,
-            prune_search_population,
-            broad_scans,
-        }
     }
 
     fn derive_incremental(
@@ -4304,6 +4236,22 @@ impl InstanceGraph {
     /// inline bodies name. Bounded by `ERASED_RUNTIME_ENTRIES` (15 names), so
     /// it is rebuilt from its two indices rather than maintained -- one writer
     /// for a set this small beats two that have to agree.
+    fn record_inline_body_dep_rows(&mut self, rows: Vec<(DeclKey, &'static str)>) {
+        for (member, name) in rows {
+            let inserted = self
+                .inline_body_deps
+                .entry(member)
+                .or_default()
+                .insert(name);
+            if inserted {
+                self.inline_erased_users
+                    .entry(name.to_string())
+                    .or_default()
+                    .insert(member);
+            }
+        }
+    }
+
     fn refresh_erased_entries(&mut self) -> usize {
         self.erased_entries = self
             .index
@@ -5527,7 +5475,12 @@ fn record_call_impl(
 /// The fresh and incremental paths share the instance search below. The fresh
 /// path builds borrowed adjacency once; the incremental path looks up only the
 /// seed region affected by the edit.
-fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
+/// The whole-graph search: how many instances it started from, and what it
+/// found.
+fn detect_changing_instance_recursion(
+    g: &InstanceGraph,
+    ws: &Workspace,
+) -> (usize, Vec<RecursionFinding>) {
     // Instance-level adjacency, carrying each edge's span so a rejection can
     // name the call that changed the arguments.
     // Adjacency by REFERENCE into the contributions. Looking a successor's
@@ -5566,14 +5519,7 @@ fn detect_changing_instance_recursion(g: &mut InstanceGraph, ws: &Workspace) {
     // over every instance, because a declaration's second instance can be a
     // leaf and is exactly what makes the first one's search worth running.
     let starts = succ.keys().copied().collect();
-    let (starts, findings) = search_changing_instance_recursion(g, ws, starts, |node| {
-        succ.get(node).copied().unwrap_or(&[])
-    });
-    g.recursion_starts = starts;
-    g.run_stats.recursion_findings_derived += findings.len();
-    for finding in findings {
-        g.install_recursion_finding(finding);
-    }
+    search_changing_instance_recursion(g, ws, starts, |node| succ.get(node).copied().unwrap_or(&[]))
 }
 
 fn detect_changing_instance_recursion_local(
@@ -6966,6 +6912,12 @@ fn declared_boundary(f: &Function) -> Option<BoundaryClass> {
 /// none exists in the corpus, and a false POSITIVE keeps a symbol alive, where a
 /// false negative drops one emission requires.
 fn record_inline_body_deps(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclKey]) {
+    g.record_inline_body_dep_rows(inline_body_dep_rows(ws, decls));
+}
+
+/// Each erased runtime entry an inline body of `decls` names, with the
+/// declaration whose body names it.
+fn inline_body_dep_rows(ws: &Workspace, decls: &[DeclKey]) -> Vec<(DeclKey, &'static str)> {
     // METADATA ONLY so far: each sibling's dependency is recorded and joins
     // `erased_entries`, but it is not yet resolved to a `BoundaryId` or an
     // instance the way a call edge is. That resolution belongs to the artifact
@@ -6975,38 +6927,27 @@ fn record_inline_body_deps(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclK
     // the artifact later reads only the declaration it selected.
     // Few declarations have an inline body; finding them is the work, and
     // each declaration's group is read independently.
-    let found: Vec<(DeclKey, &'static str)> = {
-        use bone_core::prelude::*;
-        decls
-            .par_iter()
-            .map(|decl| {
-                let mut found = Vec::new();
-                for member in skull_mir::lower::backend_variant_group(ws, decl.0) {
-                    let f = &ws.module(member.module).functions[member.func];
-                    let Some(body) = &f.inline_body else { continue };
-                    let text = body.1.as_str();
-                    for name in ERASED_RUNTIME_ENTRIES {
-                        if text.contains(name) {
-                            found.push((DeclKey(member), *name));
-                        }
+    use bone_core::prelude::*;
+    decls
+        .par_iter()
+        .map(|decl| {
+            let mut found = Vec::new();
+            for member in skull_mir::lower::backend_variant_group(ws, decl.0) {
+                let f = &ws.module(member.module).functions[member.func];
+                let Some(body) = &f.inline_body else { continue };
+                let text = body.1.as_str();
+                for name in ERASED_RUNTIME_ENTRIES {
+                    if text.contains(name) {
+                        found.push((DeclKey(member), *name));
                     }
                 }
-                found
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .flatten()
-            .collect()
-    };
-    for (member, name) in found {
-        let inserted = g.inline_body_deps.entry(member).or_default().insert(name);
-        if inserted {
-            g.inline_erased_users
-                .entry(name.to_string())
-                .or_default()
-                .insert(member);
-        }
-    }
+            }
+            found
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .flatten()
+        .collect()
 }
 
 /// Resolve bare `@nomangle` names in JS opaque bodies into root declarations.
@@ -7096,17 +7037,25 @@ fn record_inline_body_nomangle_roots(
 }
 
 fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclKey]) {
-    let erased: BTreeSet<String> = g.erased_entries.clone();
-    for decl in decls {
-        let f = &ws.module(decl.0.module).functions[decl.0.func];
-        // Classified before it is named: few declarations are boundaries, and
-        // a mangled name is a formatted string.
-        let Some(class) = boundary_class_for(f, &erased) else {
-            continue;
-        };
-        let symbol = mangle_fn(ws, f);
-        g.boundaries
-            .insert(symbol.clone(), Boundary { class, symbol });
+    // Few declarations are boundaries; the pool finds them, and only those
+    // are named, since a mangled name is a formatted string.
+    let found: Vec<Boundary> = {
+        use bone_core::prelude::*;
+        let erased = &g.erased_entries;
+        decls
+            .par_iter()
+            .filter_map(|decl| {
+                let f = &ws.module(decl.0.module).functions[decl.0.func];
+                let class = boundary_class_for(f, erased)?;
+                Some(Boundary {
+                    class,
+                    symbol: mangle_fn(ws, f),
+                })
+            })
+            .collect()
+    };
+    for boundary in found {
+        g.boundaries.insert(boundary.symbol.clone(), boundary);
     }
 }
 
@@ -7363,17 +7312,17 @@ mod recursion_search_tests {
             );
         }
         let seeds = instances.iter().cloned().collect();
-        detect_changing_instance_recursion(&mut graph, &ws);
-        assert_eq!(graph.recursion_findings.len(), 1);
+        let (fresh_starts, fresh) = detect_changing_instance_recursion(&graph, &ws);
+        assert_eq!(fresh.len(), 1);
         let (starts, local) = detect_changing_instance_recursion_local(&graph, &ws, &seeds);
-        assert_eq!(starts, graph.recursion_starts);
+        assert_eq!(starts, fresh_starts);
         assert_eq!(starts, 2);
         assert_eq!(
             local.len(),
             1,
             "a non-witness must not suppress later starts"
         );
-        let fresh = graph.recursion_findings.values().next().unwrap();
+        let fresh = &fresh[0];
         assert_eq!(local[0].rejection.at, fresh.rejection.at);
         assert_eq!(local[0].rejection.message, fresh.rejection.message);
         assert_eq!(local[0].subjects, fresh.subjects);
