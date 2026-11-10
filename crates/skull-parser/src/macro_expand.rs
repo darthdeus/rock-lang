@@ -19,8 +19,7 @@ use crate::desugar::{BlockEdges, ExprEdges, child_blocks, child_exprs};
 use crate::graft::{clone_expr, graft_block, graft_expr, graft_item, graft_type};
 use rock_core::{CompilerError, Span};
 use smallvec::smallvec;
-use std::collections::{HashMap, HashSet};
-use ustr::Ustr;
+use ustr::{Ustr, UstrMap, UstrSet};
 
 const MAX_MACRO_DEPTH: usize = 64;
 
@@ -63,7 +62,7 @@ enum Frag {
     Expr,
 }
 
-type Registry = HashMap<Ustr, Vec<MacroTemplate>>;
+type Registry = UstrMap<Vec<MacroTemplate>>;
 
 /// Opaque, reusable macro registry: every macro overload collected from a whole
 /// workspace, keyed by name. Built once from the UN-expanded modules (expansion
@@ -155,7 +154,7 @@ const HYGIENE_PREFIX: &str = "__inline_local_";
 pub fn check_macro_name_uniqueness<'a>(
     modules: impl IntoIterator<Item = &'a Ast> + Clone,
 ) -> Vec<CompilerError> {
-    let mut fn_names: HashSet<Ustr> = HashSet::new();
+    let mut fn_names: UstrSet = UstrSet::default();
     for m in modules.clone() {
         for item in &m.items {
             if let ItemKind::Function(f) = &item.kind {
@@ -166,7 +165,7 @@ pub fn check_macro_name_uniqueness<'a>(
         }
     }
     let mut errs = Vec::new();
-    let mut reported: HashSet<Ustr> = HashSet::new();
+    let mut reported: UstrSet = UstrSet::default();
     for m in modules {
         for item in &m.items {
             if let ItemKind::Function(f) = &item.kind {
@@ -233,11 +232,6 @@ fn call_label_errors(m: &Ast, reg: &Registry) -> Vec<CompilerError> {
         let ExprKind::FunctionCall { func, args, .. } = &data.kind else {
             continue;
         };
-        // Labels can only appear inside the parens, so a call with none
-        // binds positionally and cannot fail this check.
-        if args.iter().all(|a| a.name.is_none()) {
-            continue;
-        }
         let (name, extra) = match &m.exprs[*func].kind {
             ExprKind::Ident(id) => (id.name, 0),
             ExprKind::FieldAccess(_, member) => (member.name, 1),
@@ -246,6 +240,11 @@ fn call_label_errors(m: &Ast, reg: &Registry) -> Vec<CompilerError> {
         let Some(cands) = reg.get(&name) else {
             continue;
         };
+        // Labels can only appear inside the parens, so a call with none
+        // binds positionally and cannot fail this check.
+        if args.iter().all(|a| a.name.is_none()) {
+            continue;
+        }
         let Some(tmpl) = select_overload(cands, args.len() + extra) else {
             continue;
         };
@@ -356,7 +355,7 @@ fn fragment_kind(ast: &Ast, ty: Idx<TypeExprData>) -> Option<Frag> {
 }
 
 fn build_registry<'a>(modules: impl IntoIterator<Item = &'a Ast>) -> Registry {
-    let mut reg: Registry = HashMap::new();
+    let mut reg = Registry::default();
     for m in modules {
         for item in &m.items {
             let ItemKind::Function(f) = &item.kind else {
@@ -502,8 +501,8 @@ fn expand_item_macro(
     // Build substitution maps from the param fragment kinds. ty/ident args
     // recover a type via `expr_to_type_expr`; ident also substitutes into expr
     // positions (ctor names / refs). expr args substitute whole subtrees.
-    let mut ty_subs: HashMap<Ustr, Idx<TypeExprData>> = HashMap::new();
-    let mut expr_subs: HashMap<Ustr, Idx<ExprData>> = HashMap::new();
+    let mut ty_subs: UstrMap<Idx<TypeExprData>> = UstrMap::default();
+    let mut expr_subs: UstrMap<Idx<ExprData>> = UstrMap::default();
     // Same by-label-then-by-position binding as the expr path; item macros take
     // no variadic, so only the slots matter.
     let bound = bind_macro_args(&cands[idx].params, args).ok()?;
@@ -600,7 +599,7 @@ fn expand_in_ast(ast: &mut Ast, reg: &Registry) {
 /// fn-typed param, a local fn value, a nested `fn`), never a macro invocation —
 /// without this, `macro key(..)` captures the stdlib's `min_by(it, key: ..)`
 /// body call `key(x)` and splices itself into the stdlib AST.
-type ShadowScope = std::collections::HashSet<Ustr>;
+type ShadowScope = UstrSet;
 
 fn is_shadowed(stack: &[ShadowScope], name: Ustr) -> bool {
     stack.iter().any(|s| s.contains(&name))
@@ -673,7 +672,7 @@ fn expand_block(
 ) {
     let stmts = ast.blocks[b].statements.clone();
     // Nested fns are hoisted: their names bind for the whole block.
-    let mut scope = ShadowScope::new();
+    let mut scope = ShadowScope::default();
     for &s in &stmts {
         if let StatementKind::NestedFn(f) = &ast.stmts[s].kind {
             scope.insert(f.name.name);
@@ -713,7 +712,7 @@ fn expand_stmt(
         StatementKind::For(f) => {
             let (iter, body, var) = (f.iter, f.body, f.var.clone());
             expand_expr(ast, iter, reg, depth, stack);
-            let mut scope = ShadowScope::new();
+            let mut scope = ShadowScope::default();
             shadow_binding(&var, &mut scope);
             stack.push(scope);
             expand_block(ast, body, reg, depth, stack);
@@ -722,7 +721,7 @@ fn expand_stmt(
         StatementKind::WhileLet(w) => {
             let (value, body, pattern) = (w.value, w.body, w.pattern.clone());
             expand_expr(ast, value, reg, depth, stack);
-            let mut scope = ShadowScope::new();
+            let mut scope = ShadowScope::default();
             shadow_pattern(&pattern, &mut scope);
             stack.push(scope);
             expand_block(ast, body, reg, depth, stack);
@@ -786,7 +785,7 @@ fn expand_expr(
                     pattern,
                     ..
                 } => {
-                    let mut scope = ShadowScope::new();
+                    let mut scope = ShadowScope::default();
                     shadow_pattern(pattern, &mut scope);
                     (*value, *then_block, *else_block, scope)
                 }
@@ -812,12 +811,12 @@ fn expand_expr(
             };
             // Bindings accumulate left-to-right: a later clause's value sees the
             // earlier clauses' bindings.
-            stack.push(ShadowScope::new());
+            stack.push(ShadowScope::default());
             for i in 0..n_clauses {
                 let (value, pat_scope) = match &ast.exprs[e].kind {
                     ExprKind::IfLetChain { clauses, .. } => match &clauses[i] {
                         IfLetClause::Binding { value, pattern } => {
-                            let mut scope = ShadowScope::new();
+                            let mut scope = ShadowScope::default();
                             shadow_pattern(pattern, &mut scope);
                             (*value, Some(scope))
                         }
@@ -847,7 +846,7 @@ fn expand_expr(
             for i in 0..n_arms {
                 let (guard, body, mut scope) = match &ast.exprs[e].kind {
                     ExprKind::Match { arms, .. } => {
-                        let mut scope = ShadowScope::new();
+                        let mut scope = ShadowScope::default();
                         shadow_pattern(&arms[i].pattern, &mut scope);
                         (arms[i].guard, arms[i].body, scope)
                     }
@@ -996,8 +995,8 @@ fn try_expand(
     let Ok(bound) = bind_macro_args(&tmpl.params, &arg_values) else {
         return;
     };
-    let mut subs: HashMap<Ustr, Idx<ExprData>> = HashMap::new();
-    let mut variadic: HashMap<Ustr, Vec<Idx<ExprData>>> = HashMap::new();
+    let mut subs: UstrMap<Idx<ExprData>> = UstrMap::default();
+    let mut variadic: UstrMap<Vec<Idx<ExprData>>> = UstrMap::default();
     for (i, p) in tmpl.params.iter().enumerate() {
         if p.is_variadic {
             let rest = bound.variadic.as_ref().filter(|(vi, _)| *vi == i);
@@ -1130,7 +1129,7 @@ fn expr_to_type_expr(ast: &mut Ast, e: Idx<ExprData>) -> Option<Idx<TypeExprData
 
 /// Rewrite a binder name if it matches an `ident`-fragment whose replacement is
 /// itself an `Ident` type (struct/fn/field/enum names).
-fn replace_ident_name(ast: &Ast, id: &mut Ident, ty_subs: &HashMap<Ustr, Idx<TypeExprData>>) {
+fn replace_ident_name(ast: &Ast, id: &mut Ident, ty_subs: &UstrMap<Idx<TypeExprData>>) {
     if let Some(&t) = ty_subs.get(&id.name) {
         if let TypeExprKind::Ident(new) = &ast.types[t].kind {
             id.name = new.name;
@@ -1140,7 +1139,7 @@ fn replace_ident_name(ast: &Ast, id: &mut Ident, ty_subs: &HashMap<Ustr, Idx<Typ
 }
 
 /// Substitute `ty`/`ident` fragments into a type subtree in place.
-fn subst_in_type(ast: &mut Ast, t: Idx<TypeExprData>, ty_subs: &HashMap<Ustr, Idx<TypeExprData>>) {
+fn subst_in_type(ast: &mut Ast, t: Idx<TypeExprData>, ty_subs: &UstrMap<Idx<TypeExprData>>) {
     if ty_subs.is_empty() {
         return;
     }
@@ -1189,8 +1188,8 @@ fn subst_in_type(ast: &mut Ast, t: Idx<TypeExprData>, ty_subs: &HashMap<Ustr, Id
 fn subst_in_item(
     ast: &mut Ast,
     item: &mut Item,
-    ty_subs: &HashMap<Ustr, Idx<TypeExprData>>,
-    expr_subs: &HashMap<Ustr, Idx<ExprData>>,
+    ty_subs: &UstrMap<Idx<TypeExprData>>,
+    expr_subs: &UstrMap<Idx<ExprData>>,
 ) {
     match &mut item.kind {
         ItemKind::Function(f) => {
@@ -1267,7 +1266,7 @@ fn subst_in_item(
 fn subst_in_type_exprs_block(
     ast: &mut Ast,
     b: Idx<BlockData>,
-    ty_subs: &HashMap<Ustr, Idx<TypeExprData>>,
+    ty_subs: &UstrMap<Idx<TypeExprData>>,
 ) {
     if ty_subs.is_empty() {
         return;
@@ -1302,11 +1301,7 @@ fn subst_in_type_exprs_block(
     }
 }
 
-fn subst_in_type_exprs(
-    ast: &mut Ast,
-    e: Idx<ExprData>,
-    ty_subs: &HashMap<Ustr, Idx<TypeExprData>>,
-) {
+fn subst_in_type_exprs(ast: &mut Ast, e: Idx<ExprData>, ty_subs: &UstrMap<Idx<TypeExprData>>) {
     match ast.exprs[e].kind.clone() {
         ExprKind::As(inner, t)
         | ExprKind::Bitcast(inner, t)
@@ -1458,11 +1453,7 @@ fn select_overload(cands: &[MacroTemplate], argc: usize) -> Option<&MacroTemplat
 
 /// Replace every `...rest` call argument (a splat of a captured variadic param)
 /// with the captured args, in place, across the body.
-fn splat_expand_block(
-    ast: &mut Ast,
-    b: Idx<BlockData>,
-    variadic: &HashMap<Ustr, Vec<Idx<ExprData>>>,
-) {
+fn splat_expand_block(ast: &mut Ast, b: Idx<BlockData>, variadic: &UstrMap<Vec<Idx<ExprData>>>) {
     for call in collect_calls(ast, b) {
         let ExprKind::FunctionCall { args, .. } = &ast.exprs[call].kind else {
             continue;
@@ -1535,7 +1526,7 @@ fn collect_calls_expr(ast: &Ast, e: Idx<ExprData>, out: &mut Vec<Idx<ExprData>>)
 // substitution under that lambda (bone parity).
 // ---------------------------------------------------------------------------
 
-fn substitute_block(ast: &mut Ast, b: Idx<BlockData>, subs: &HashMap<Ustr, Idx<ExprData>>) {
+fn substitute_block(ast: &mut Ast, b: Idx<BlockData>, subs: &UstrMap<Idx<ExprData>>) {
     let stmts = ast.blocks[b].statements.clone();
     for s in stmts {
         for e in stmt_exprs(ast, s) {
@@ -1547,7 +1538,7 @@ fn substitute_block(ast: &mut Ast, b: Idx<BlockData>, subs: &HashMap<Ustr, Idx<E
     }
 }
 
-fn substitute_expr(ast: &mut Ast, e: Idx<ExprData>, subs: &HashMap<Ustr, Idx<ExprData>>) {
+fn substitute_expr(ast: &mut Ast, e: Idx<ExprData>, subs: &UstrMap<Idx<ExprData>>) {
     // Replace this node if it is a bare param ident.
     if let ExprKind::Ident(id) = &ast.exprs[e].kind {
         if let Some(&arg) = subs.get(&id.name) {
@@ -1614,7 +1605,7 @@ fn substitute_expr(ast: &mut Ast, e: Idx<ExprData>, subs: &HashMap<Ustr, Idx<Exp
 // caller-scope reference and must keep its surface name.
 // ---------------------------------------------------------------------------
 
-type RenameScope = HashMap<Ustr, Ustr>;
+type RenameScope = UstrMap<Ustr>;
 
 fn fresh_local(orig: Ustr, callsite: u32, counter: &mut u32) -> Ustr {
     let n = *counter;
@@ -1698,7 +1689,7 @@ fn rename_block(
     stack: &mut Vec<RenameScope>,
 ) {
     // Each block is its own scope: its `let` bindings unbind at block exit.
-    stack.push(RenameScope::new());
+    stack.push(RenameScope::default());
     let stmts = ast.blocks[b].statements.clone();
     for s in stmts {
         rename_stmt(ast, s, callsite, counter, stack);
@@ -1730,7 +1721,7 @@ fn rename_stmt(
             let iter = f.iter;
             let body = f.body;
             rename_expr(ast, iter, callsite, counter, stack);
-            let mut scope = RenameScope::new();
+            let mut scope = RenameScope::default();
             if let StatementKind::For(f) = &mut ast.stmts[s].kind {
                 rename_binding(&mut f.var, callsite, counter, &mut scope);
             }
@@ -1742,7 +1733,7 @@ fn rename_stmt(
             let value = w.value;
             let body = w.body;
             rename_expr(ast, value, callsite, counter, stack);
-            let mut scope = RenameScope::new();
+            let mut scope = RenameScope::default();
             if let StatementKind::WhileLet(w) = &mut ast.stmts[s].kind {
                 rename_pattern(&mut w.pattern, callsite, counter, &mut scope);
             }
@@ -1795,7 +1786,7 @@ fn rename_expr(
                 _ => unreachable!(),
             };
             rename_expr(ast, value, callsite, counter, stack);
-            let mut scope = RenameScope::new();
+            let mut scope = RenameScope::default();
             if let ExprKind::IfLet { pattern, .. } = &mut ast.exprs[e].kind {
                 rename_pattern(pattern, callsite, counter, &mut scope);
             }
@@ -1818,7 +1809,7 @@ fn rename_expr(
             };
             // Bindings accumulate left-to-right: a later clause's value sees the
             // earlier clauses' renames.
-            stack.push(RenameScope::new());
+            stack.push(RenameScope::default());
             for i in 0..n_clauses {
                 let value = match &ast.exprs[e].kind {
                     ExprKind::IfLetChain { clauses, .. } => match &clauses[i] {
@@ -1855,7 +1846,7 @@ fn rename_expr(
                     ExprKind::Match { arms, .. } => (arms[i].guard, arms[i].body),
                     _ => unreachable!(),
                 };
-                let mut scope = RenameScope::new();
+                let mut scope = RenameScope::default();
                 if let ExprKind::Match { arms, .. } = &mut ast.exprs[e].kind {
                     rename_pattern(&mut arms[i].pattern, callsite, counter, &mut scope);
                 }
@@ -1874,7 +1865,7 @@ fn rename_expr(
                 _ => unreachable!(),
             };
             rename_expr(ast, receiver, callsite, counter, stack);
-            let mut scope = RenameScope::new();
+            let mut scope = RenameScope::default();
             if let ExprKind::SafeNavigationLet { binding, .. } = &mut ast.exprs[e].kind {
                 let fresh = fresh_local(binding.name, callsite, counter);
                 scope.insert(binding.name, fresh);
@@ -1979,7 +1970,7 @@ pub(crate) fn index_macro_param_refs(
     body: Option<Idx<BlockData>>,
     macro_items: &[Item],
 ) -> Vec<MacroParamRef> {
-    let names: HashSet<Ustr> = params.iter().map(|p| p.name.name).collect();
+    let names: UstrSet = params.iter().map(|p| p.name.name).collect();
     if names.is_empty() {
         return Vec::new();
     }
@@ -2005,13 +1996,13 @@ pub(crate) fn index_macro_param_refs(
         .collect()
 }
 
-fn note(id: &Ident, names: &HashSet<Ustr>, occ: &mut Vec<(Ustr, Span)>) {
+fn note(id: &Ident, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
     if names.contains(&id.name) {
         occ.push((id.name, id.span));
     }
 }
 
-fn refs_in_item(ast: &Ast, item: &Item, names: &HashSet<Ustr>, occ: &mut Vec<(Ustr, Span)>) {
+fn refs_in_item(ast: &Ast, item: &Item, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
     match &item.kind {
         ItemKind::Struct(s) => {
             note(&s.name, names, occ);
@@ -2067,12 +2058,7 @@ fn refs_in_item(ast: &Ast, item: &Item, names: &HashSet<Ustr>, occ: &mut Vec<(Us
     }
 }
 
-fn refs_in_type(
-    ast: &Ast,
-    t: Idx<TypeExprData>,
-    names: &HashSet<Ustr>,
-    occ: &mut Vec<(Ustr, Span)>,
-) {
+fn refs_in_type(ast: &Ast, t: Idx<TypeExprData>, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
     match &ast.types[t].kind {
         TypeExprKind::Ident(id) => note(id, names, occ),
         TypeExprKind::Ref(inner) => refs_in_type(ast, *inner, names, occ),
@@ -2098,7 +2084,7 @@ fn refs_in_type(
     }
 }
 
-fn refs_in_block(ast: &Ast, b: Idx<BlockData>, names: &HashSet<Ustr>, occ: &mut Vec<(Ustr, Span)>) {
+fn refs_in_block(ast: &Ast, b: Idx<BlockData>, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
     for &st in &ast.blocks[b].statements {
         match &ast.stmts[st].kind {
             StatementKind::Let(l) => {
@@ -2116,7 +2102,7 @@ fn refs_in_block(ast: &Ast, b: Idx<BlockData>, names: &HashSet<Ustr>, occ: &mut 
     }
 }
 
-fn refs_in_expr(ast: &Ast, e: Idx<ExprData>, names: &HashSet<Ustr>, occ: &mut Vec<(Ustr, Span)>) {
+fn refs_in_expr(ast: &Ast, e: Idx<ExprData>, names: &UstrSet, occ: &mut Vec<(Ustr, Span)>) {
     match &ast.exprs[e].kind {
         ExprKind::Ident(id) => note(id, names, occ),
         ExprKind::FieldAccess(base, _) => refs_in_expr(ast, *base, names, occ),
@@ -2279,7 +2265,7 @@ mod tests {
              fn g(v: int) -> int { v.h() + m(k, v) }\n",
             "a.rock",
         );
-        let reach: HashSet<Ustr> = super::macro_reach(&ast).collect();
+        let reach: UstrSet = super::macro_reach(&ast).collect();
         for name in ["m", "f", "h", "k", "v"] {
             assert!(reach.contains(&Ustr::from(name)), "missing {name}");
         }
