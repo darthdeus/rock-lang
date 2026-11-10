@@ -391,6 +391,9 @@ pub struct Module {
     /// The owning package's manifest name, stamped by the host graph. `None`
     /// for stdlib files and for programs outside any package.
     pub package: Option<Ustr>,
+    /// `file` relative to its package (`<package>/<path>`), the spelling
+    /// generated code embeds; `file` itself outside any package.
+    pub logical_file: Ustr,
     /// The owning package's declared identity-storage migration state,
     /// stamped with `package`. Enforced for files outside any package; the
     /// exemption predicate decides those by their census label.
@@ -460,6 +463,7 @@ impl Default for Module {
 
             file: Ustr::from(""),
             package: None,
+            logical_file: Ustr::from(""),
             identity_storage: Default::default(),
 
             functions: Default::default(),

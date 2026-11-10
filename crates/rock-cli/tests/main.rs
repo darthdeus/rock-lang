@@ -12,6 +12,7 @@ mod lua_body_limits;
 mod metric_add_window;
 mod modules_display_paths;
 mod no_stdlib;
+mod package_relative_output;
 mod package_test_program_shape;
 mod perf_stats_json;
 mod plain_process;

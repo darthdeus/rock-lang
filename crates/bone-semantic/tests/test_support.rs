@@ -294,6 +294,7 @@ fn check_types_packages_inner(
                 id,
                 self_name: name.to_string(),
                 identity_storage: Default::default(),
+                root: String::new(),
             });
         modules.push(module);
     }

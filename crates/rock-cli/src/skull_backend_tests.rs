@@ -161,6 +161,7 @@ fn main() {}
         id: 1,
         self_name: "example_space".to_string(),
         identity_storage: Default::default(),
+        root: String::new(),
     });
     let mut aliases = bone_core::modules::NsAliases::default();
     aliases.packages.push(bone_core::modules::PackageAliases {

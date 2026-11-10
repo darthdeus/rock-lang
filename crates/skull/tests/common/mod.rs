@@ -176,6 +176,7 @@ pub fn ws_v1_package(package: &str, fragments: &[V1Fragment]) -> Workspace {
             id: 0,
             self_name: package.to_string(),
             identity_storage: Default::default(),
+            root: String::new(),
         });
         modules.push(module);
     }

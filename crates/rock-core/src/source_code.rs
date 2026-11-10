@@ -84,6 +84,19 @@ pub struct PackageTag {
     pub id: u32,
     pub self_name: String,
     pub identity_storage: IdentityStorage,
+    /// The canonical package root (the directory holding stick.toml).
+    pub root: String,
+}
+
+impl PackageTag {
+    /// `file` as `<self_name>/<path under the root>`, the spelling generated
+    /// code uses so it does not depend on where the package is checked out.
+    /// `None` for a file outside the root.
+    pub fn logical_file(&self, file: &str) -> Option<String> {
+        let rest = file.strip_prefix(self.root.as_str())?;
+        let rest = rest.strip_prefix(['/', '\\'])?;
+        Some(format!("{}/{}", self.self_name, rest.replace('\\', "/")))
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

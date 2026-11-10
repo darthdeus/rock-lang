@@ -17,6 +17,7 @@ fn ws_v1(src: &str) -> Workspace {
         id: 0,
         self_name: "lintv1".to_string(),
         identity_storage: Default::default(),
+        root: String::new(),
     });
     semantic_pass(&mut [module]).expect("clean program typechecks")
 }
@@ -59,6 +60,7 @@ fn action_gaps(src: &str, dialect: skull_parser::Dialect) -> Vec<String> {
             id: 0,
             self_name: "lintv1".to_string(),
             identity_storage: Default::default(),
+            root: String::new(),
         });
     }
     let ws = semantic_pass(&mut [module]).expect("clean program typechecks");

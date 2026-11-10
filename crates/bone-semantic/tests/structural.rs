@@ -39,6 +39,7 @@ fn legacy_only_workspace_keeps_modules_v1_namespace_empty() {
         id: 1,
         self_name: "game".to_string(),
         identity_storage: Default::default(),
+        root: String::new(),
     });
     let aliases = NsAliases {
         packages: vec![PackageAliases {
@@ -68,6 +69,7 @@ fn mixed_workspace_rejects_package_less_legacy_use_at_the_use_span() {
         id: 1,
         self_name: "provider".to_string(),
         identity_storage: Default::default(),
+        root: String::new(),
     });
 
     let legacy_src = "use provider::Provider;\nfn main() {}";
@@ -110,6 +112,7 @@ fn an_unresolved_v1_variant_pattern_is_labeled_at_its_path() {
         id: 1,
         self_name: "app".to_string(),
         identity_storage: Default::default(),
+        root: String::new(),
     });
     let aliases = NsAliases {
         packages: vec![PackageAliases {
@@ -155,6 +158,7 @@ fn legacy_only_workspace_keeps_the_std_namespace() {
         id: 1,
         self_name: "game".to_string(),
         identity_storage: Default::default(),
+        root: String::new(),
     });
 
     let ws = semantic_pass(&mut [std_module, user_module]).expect("semantic pass");
@@ -2305,6 +2309,7 @@ pub struct Actor {
         id: 1,
         self_name: "game".to_string(),
         identity_storage: Default::default(),
+        root: String::new(),
     });
 
     let legacy_src = r#"
@@ -2508,6 +2513,7 @@ pub struct Actor {
         id: 1,
         self_name: "game".to_string(),
         identity_storage: Default::default(),
+        root: String::new(),
     });
 
     let consumer_src = r#"
@@ -2531,6 +2537,7 @@ pub struct ReadableSecret {
         id: 2,
         self_name: "consumer".to_string(),
         identity_storage: Default::default(),
+        root: String::new(),
     });
 
     let mut aliases = bone_core::modules::NsAliases::default();
@@ -2663,6 +2670,7 @@ fn identity_storage_errors(
         id: 1,
         self_name: name.to_string(),
         identity_storage: Default::default(),
+        root: String::new(),
     });
     let ws = semantic_pass(&mut [std_module, user_module]).expect("semantic pass");
     module_error_messages(&ws)
@@ -2787,6 +2795,7 @@ fn identity_storage_exemption_follows_the_package_declaration() {
             id: 1,
             self_name: "migrating".into(),
             identity_storage,
+            root: String::new(),
         });
         let ws = bone_semantic::semantic_passes::semantic_pass_into(
             Default::default(),
@@ -2834,6 +2843,7 @@ fn identity_storage_module_exemption_follows_the_module_path() {
             id,
             self_name: self_name.to_string(),
             identity_storage,
+            root: String::new(),
         };
         let mut modules: Vec<_> = files
             .iter()
@@ -3054,6 +3064,7 @@ fn annotation_resolution_errors(sources: &[(&str, &str)]) -> Vec<String> {
                 id: 1,
                 self_name: "sample".into(),
                 identity_storage: Default::default(),
+                root: String::new(),
             });
             ast
         })

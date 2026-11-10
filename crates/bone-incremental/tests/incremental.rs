@@ -2797,6 +2797,7 @@ fn fuzz_session_fixture_package_graph() {
                     id: node.id.0,
                     self_name: node.self_name.clone(),
                     identity_storage: Default::default(),
+                    root: String::new(),
                 }),
                 global_policy: node.global_policy,
             };

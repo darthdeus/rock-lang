@@ -1625,11 +1625,12 @@ pub(crate) fn lower_expr_value(
         ExprKind::String(val) => Expr::String(*val),
         ExprKind::Ident(name) => {
             if name.name.as_str() == "__SITE__" {
-                Expr::String(ustr(&format!(
-                    "{}:{}",
-                    e.span.file,
-                    e.span.line_range.0 + 1
-                )))
+                let file =
+                    match e.span.file == ctx.module.file && !ctx.module.logical_file.is_empty() {
+                        true => ctx.module.logical_file,
+                        false => ctx.workspace.logical_file(e.span.file),
+                    };
+                Expr::String(ustr(&format!("{}:{}", file, e.span.line_range.0 + 1)))
             } else if name.name.as_str() == "_" && ctx.placeholder_param.is_some() {
                 if ctx.placeholder_forbidden {
                     comp_error!(

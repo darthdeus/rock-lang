@@ -152,6 +152,7 @@ fn check_std_fixture(contents: &str) -> Result {
                 id,
                 self_name: name.to_owned(),
                 identity_storage: Default::default(),
+                root: String::new(),
             });
         modules.push(module);
     }

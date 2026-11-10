@@ -15,6 +15,7 @@ fn provider(dialect: Dialect, file: &str) -> Ast {
         id: 1,
         self_name: "provider".to_string(),
         identity_storage: Default::default(),
+        root: String::new(),
     });
     ast
 }
@@ -78,6 +79,7 @@ fn check_namespace(dialect: Dialect) {
             id: 2,
             self_name: "consumer".to_string(),
             identity_storage: Default::default(),
+            root: String::new(),
         });
         modules.push(consumer);
     }

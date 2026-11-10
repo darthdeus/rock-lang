@@ -19,6 +19,7 @@ fn v1(path: &str, text: &str) -> SessionFile {
             id: 1,
             self_name: "livev1".into(),
             identity_storage: Default::default(),
+            root: String::new(),
         }),
         global_policy: GlobalPolicy::Any,
     }
@@ -319,6 +320,7 @@ fn v1_in(package: u32, name: &str, path: &str, text: &str) -> SessionFile {
             id: package,
             self_name: name.into(),
             identity_storage: Default::default(),
+            root: String::new(),
         }),
         global_policy: GlobalPolicy::Any,
     }
@@ -485,6 +487,7 @@ fn in_package(dialect: Dialect, package: u32, name: &str, path: &str, text: &str
             id: package,
             self_name: name.into(),
             identity_storage: Default::default(),
+            root: String::new(),
         }),
         global_policy: GlobalPolicy::Any,
     }
@@ -699,6 +702,7 @@ fn a_file_entering_after_new_reads_with_its_declared_facts() {
                 id: 1,
                 self_name: "livev1".into(),
                 identity_storage: Default::default(),
+                root: String::new(),
             }),
             GlobalPolicy::Any,
         )
@@ -732,7 +736,8 @@ fn a_held_file_refuses_different_facts() {
                 Some(PackageTag {
                     id: 1,
                     self_name: "livev1".into(),
-                    identity_storage: Default::default()
+                    identity_storage: Default::default(),
+                    root: String::new(),
                 }),
                 GlobalPolicy::Any
             )

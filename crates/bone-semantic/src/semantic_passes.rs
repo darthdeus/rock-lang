@@ -155,6 +155,11 @@ pub fn lower_modules_seeded(
         .map(|rock_mod| Module {
             file: rock_mod.file,
             package: rock_mod.package.as_ref().map(|tag| ustr(&tag.self_name)),
+            logical_file: rock_mod
+                .package
+                .as_ref()
+                .and_then(|tag| tag.logical_file(&rock_mod.file))
+                .map_or(rock_mod.file, |file| ustr(&file)),
             identity_storage: rock_mod
                 .package
                 .as_ref()

@@ -262,6 +262,17 @@ impl Workspace {
         &mut self.modules[mid.index()]
     }
 
+    /// `file` as generated code spells it: relative to its package when the
+    /// module is known and has one, otherwise unchanged.
+    pub fn logical_file(&self, file: Ustr) -> Ustr {
+        self.module_ids
+            .get(&file)
+            .and_then(|id| self.modules.get(id.index()))
+            .map(|m| m.logical_file)
+            .filter(|logical| !logical.is_empty())
+            .unwrap_or(file)
+    }
+
     /// The per-declaration visibility records for a v1 callable family.
     /// Legacy and compiler-owned callable keys have no namespace member table
     /// and return `None`, which means their existing visibility remains public.

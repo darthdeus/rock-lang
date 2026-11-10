@@ -64,6 +64,7 @@ impl PackageNode {
             id: self.id.0,
             self_name: self.self_name.clone(),
             identity_storage: self.identity_storage.clone(),
+            root: self.root.to_string_lossy().into_owned(),
         }
     }
 

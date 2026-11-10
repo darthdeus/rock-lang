@@ -23,6 +23,7 @@ fn workspace(source: &str) -> Workspace {
         id: 0,
         self_name: "app".to_string(),
         identity_storage: Default::default(),
+        root: String::new(),
     });
     modules.push(module);
     bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic pass")

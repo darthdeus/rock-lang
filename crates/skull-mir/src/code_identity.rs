@@ -130,12 +130,19 @@ impl CodeIdentity {
                 .map(|ty| ty.canonical())
                 .collect::<Vec<_>>()
                 .join(",");
-            format!("{}<{}>", logical_def_key(module.file, function.name), args)
+            format!(
+                "{}<{}>",
+                logical_def_key(module.logical_file, function.name),
+                args
+            )
         };
         let owner_key = |owner: &CodeOwner| match owner {
             CodeOwner::Instance(instance) => instance_key(instance),
             CodeOwner::Artifact { kind, module, name } => {
-                format!("artifact:{kind:?}:{}", logical_def_key(*module, *name))
+                format!(
+                    "artifact:{kind:?}:{}",
+                    logical_def_key(ws.logical_file(*module), *name)
+                )
             }
         };
         // The owner key already names its file, so a site in that file is
@@ -147,7 +154,7 @@ impl CodeIdentity {
             };
             match site.file == owner_file {
                 true => site.offset.to_string(),
-                false => format!("{}:{}", site.file, site.offset),
+                false => format!("{}:{}", ws.logical_file(site.file), site.offset),
             }
         };
         match self {

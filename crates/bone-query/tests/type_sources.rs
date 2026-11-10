@@ -65,6 +65,7 @@ fn namespace_identity_excludes_an_unrelated_same_named_type() {
                 id: 1,
                 self_name: "app".into(),
                 identity_storage: Default::default(),
+                root: String::new(),
             });
             ast
         })

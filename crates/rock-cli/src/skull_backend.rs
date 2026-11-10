@@ -2561,11 +2561,14 @@ fn build_global_nobox_accessors(
                 ),
                 None => (format!("return {ty_symbol}{suffix}({args})"), writes),
             };
-            rows.entry(skull_mir::global_storage::global_identity(m.file, g.name))
-                .or_default()
-                .push(format!(
-                    "get=function() {get} end,set=function(v) {set} end"
-                ));
+            rows.entry(skull_mir::global_storage::global_identity(
+                m.logical_file,
+                g.name,
+            ))
+            .or_default()
+            .push(format!(
+                "get=function() {get} end,set=function(v) {set} end"
+            ));
         }
     }
     Ok(())

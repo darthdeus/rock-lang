@@ -42,6 +42,7 @@ fn v1(path: &str, text: &str) -> SessionFile {
             id: 1,
             self_name: PACKAGE.into(),
             identity_storage: Default::default(),
+            root: String::new(),
         }),
         global_policy: GlobalPolicy::Any,
     }
@@ -1707,6 +1708,7 @@ fn in_package(dialect: Dialect, id: u32, name: &str, path: &str, text: &str) -> 
             id,
             self_name: name.into(),
             identity_storage: Default::default(),
+            root: String::new(),
         }),
         global_policy: GlobalPolicy::Any,
     }

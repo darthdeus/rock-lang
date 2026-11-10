@@ -47,7 +47,7 @@ pub fn global_storage_keys(
     let mut keys = BTreeMap::new();
     for module in ws.source_modules() {
         for (_, global) in module.globals.iter().filter(|(_, g)| !g.is_const) {
-            let identity = global_identity(module.file, global.name);
+            let identity = global_identity(module.logical_file, global.name);
             let plan = GlobalPlan::for_declared_type(ws, scx, global.ty)
                 .map_err(|_| format!("global `{identity}` has no storage plan"))?;
             // Keyed on the emitted symbol, which is what a lookup from codegen
@@ -90,7 +90,7 @@ pub fn global_directory(
     let mut entries = Vec::new();
     for module in ws.source_modules() {
         for (_, global) in module.globals.iter().filter(|(_, g)| !g.is_const) {
-            let identity = global_identity(module.file, global.name);
+            let identity = global_identity(module.logical_file, global.name);
             let plan = GlobalPlan::for_declared_type(ws, scx, global.ty)
                 .map_err(|_| format!("no storage plan for global `{}`", global.name))?;
             let physical = physical_leaf_names(&plan, global.name);
@@ -131,7 +131,7 @@ pub fn global_layout_id(ws: &Workspace, scx: &ScalarCtx) -> Result<String, Strin
     let mut rows = Vec::new();
     for module in ws.source_modules() {
         for (_, global) in module.globals.iter().filter(|(_, g)| !g.is_const) {
-            let identity = global_identity(module.file, global.name);
+            let identity = global_identity(module.logical_file, global.name);
             let plan = GlobalPlan::for_declared_type(ws, scx, global.ty)
                 .map_err(|_| format!("global `{identity}` has no storage plan"))?;
             let leaves = physical_leaf_names(&plan, global.name)

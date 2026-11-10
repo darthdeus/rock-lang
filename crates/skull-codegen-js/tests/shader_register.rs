@@ -110,6 +110,7 @@ fn qualified_register_workspace(registrations: &[&str]) -> bone_core::workspace:
             id: 0,
             self_name: "shaders".into(),
             identity_storage: Default::default(),
+            root: String::new(),
         });
         users.push(module);
     }
