@@ -164,6 +164,21 @@ fn non_nil_constant_field_store_keeps_direct_assignment() {
 }
 
 #[test]
+fn computed_field_store_keeps_direct_assignment() {
+    let lua = emit_clean(
+        "struct Acc { mean: float = 0.0 } \
+         fn update(acc: Acc, x: float) -> float { let m = acc.mean * 0.5 + x; acc.mean = m; return m }",
+        "update",
+    );
+    assert!(!lua.contains("getmetatable("), "{lua}");
+    let lua = emit_clean(
+        "struct Acc { mean: float = 0.0 } fn update(acc: Acc, x: float) { acc.mean = x }",
+        "update",
+    );
+    assert!(!lua.contains("getmetatable("), "{lua}");
+}
+
+#[test]
 fn sinking_preserves_dynamic_format_error_order() {
     common::require_luajit();
     for result in ["s", "\"[{s}]\""] {

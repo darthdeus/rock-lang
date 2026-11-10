@@ -3,6 +3,68 @@
 use super::*;
 
 impl Emitter<'_> {
+    /// Whether an operand's own instruction can only produce a non-nil value,
+    /// so a store of it needs no nil-write guard.
+    pub(crate) fn never_nil(&self, id: Idx<Inst>) -> bool {
+        match &self.func.insts[id] {
+            Inst::Const(lit) => !matches!(lit, Lit::Nil),
+            Inst::Load(cell) => cell_never_nil(self.ws, self.func.cells[*cell].ty),
+            Inst::IntAdd(..)
+            | Inst::IntSub(..)
+            | Inst::IntMul(..)
+            | Inst::IntDiv(..)
+            | Inst::IntMod(..)
+            | Inst::UintAdd(..)
+            | Inst::UintSub(..)
+            | Inst::UintMul(..)
+            | Inst::UintDiv(..)
+            | Inst::UintMod(..)
+            | Inst::FloatAdd(..)
+            | Inst::FloatSub(..)
+            | Inst::FloatMul(..)
+            | Inst::FloatDiv(..)
+            | Inst::FloatMod(..)
+            | Inst::StringConcat(..)
+            | Inst::ToString(..)
+            | Inst::Format { .. }
+            | Inst::FormatDyn { .. }
+            | Inst::IntLt(..)
+            | Inst::IntLeq(..)
+            | Inst::IntGt(..)
+            | Inst::IntGeq(..)
+            | Inst::UintLt(..)
+            | Inst::UintLeq(..)
+            | Inst::UintGt(..)
+            | Inst::UintGeq(..)
+            | Inst::FloatLt(..)
+            | Inst::FloatLeq(..)
+            | Inst::FloatGt(..)
+            | Inst::FloatGeq(..)
+            | Inst::Eq(..)
+            | Inst::NotEq(..)
+            | Inst::Neg(..)
+            | Inst::Not(..)
+            | Inst::BitNot(..)
+            | Inst::UintBitNot(..)
+            | Inst::BitAnd(..)
+            | Inst::BitOr(..)
+            | Inst::BitXor(..)
+            | Inst::Shl(..)
+            | Inst::Shr(..)
+            | Inst::UintBitAnd(..)
+            | Inst::UintBitOr(..)
+            | Inst::UintBitXor(..)
+            | Inst::UintShl(..)
+            | Inst::UintShr(..)
+            | Inst::Len { .. }
+            | Inst::MakeTuple(..)
+            | Inst::MakeVec(..)
+            | Inst::MakeStruct { .. }
+            | Inst::Lambda { .. } => true,
+            _ => false,
+        }
+    }
+
     pub(crate) fn write_effect(&self, out: &mut String, id: Idx<Inst>, inst: &Inst) {
         if let Some(site) = self.record_effect_allocation_site(id, inst, out.len()) {
             out.push_str(" __rock_alloc_hit_effect(\"");
@@ -13,7 +75,8 @@ impl Emitter<'_> {
             Inst::Store { cell, value } => {
                 if self.cell_is_frame_field(*cell) {
                     let target = cellname(self.func, self.frame, self.cell_colors, *cell);
-                    self.write_frame_assignment(out, &[(target, true)], |out| {
+                    let guard = !self.never_nil(*value);
+                    self.write_frame_assignment(out, &[(target, guard)], |out| {
                         self.write_opnd(out, *value)
                     });
                     return;
@@ -41,7 +104,8 @@ impl Emitter<'_> {
                     if matches!(self.func.insts[*base], Inst::Load(cell) if cell == frame.s_cell) {
                         let mut target = cellname(self.func, None, self.cell_colors, frame.s_cell);
                         write_field_key(&mut target, field.as_str());
-                        self.write_frame_assignment(out, &[(target, true)], |out| {
+                        let guard = !self.never_nil(*value);
+                        self.write_frame_assignment(out, &[(target, guard)], |out| {
                             self.write_opnd(out, *value)
                         });
                         return;
@@ -51,7 +115,7 @@ impl Emitter<'_> {
                 // Metatable writes remain observable; plain operands evaluate once.
                 let guard = self.opnd_is_plain(*base)
                     && self.opnd_is_plain(*value)
-                    && !matches!(&self.func.insts[*value], Inst::Const(lit) if !matches!(lit, Lit::Nil));
+                    && !self.never_nil(*value);
                 if guard {
                     out.push_str(" if ");
                     self.write_opnd(out, *value);
@@ -285,4 +349,23 @@ impl Emitter<'_> {
             _ => unreachable!("not an effect"),
         }
     }
+}
+
+/// A source binding declared with a non-nullable builtin type never holds nil
+/// where it is read.
+fn cell_never_nil(ws: &Workspace, ty: Option<bone_core::prelude::TyId>) -> bool {
+    use bone_core::hir::{BuiltinTy, TypeExpr};
+    let Some(bone_core::prelude::TyId::Static(module, index)) = ty else {
+        return false;
+    };
+    matches!(
+        ws.module(module).ty_arena[index],
+        TypeExpr::Builtin(
+            BuiltinTy::Int
+                | BuiltinTy::Uint
+                | BuiltinTy::Float
+                | BuiltinTy::Bool
+                | BuiltinTy::String
+        )
+    )
 }

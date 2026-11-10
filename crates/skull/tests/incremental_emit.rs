@@ -1562,13 +1562,16 @@ inline(lua) fn slots_empty(c: Coroutine<FrameYield>) -> bool = """
     let (full, mut cache) = emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
     let ws2 = ws_with_stdlib(&v2);
     let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "stream")]);
-    assert!(
-        full.lua.contains(" ~= nil or "),
-        "full frame stores must guard absent nil writes"
-    );
-    assert!(
-        overlay.lua.contains(" ~= nil or "),
-        "overlay frame stores must use the same guard"
+    let (fresh, _) = emit_full(&ws2, skull::user_module_id(&ws2).unwrap()).unwrap();
+    let step = |lua: &str| {
+        let start = lua.find("function stream_0__step(").expect("step function");
+        let len = lua[start..].find("\nend\n").expect("step end");
+        lua[start..start + len].to_string()
+    };
+    assert_eq!(
+        step(&overlay.lua),
+        step(&fresh.lua),
+        "overlay frame stores must use the same guards as a full build"
     );
     let run = format!(
         "{}\nprint(sample(1))\n{}\nprint(sample(3))\n",
