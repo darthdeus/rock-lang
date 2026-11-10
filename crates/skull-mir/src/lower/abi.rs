@@ -2390,7 +2390,10 @@ fn derive_callee_abi_plan(
         if selected.func != inst.func {
             selected_sibling_abi_plan(ws, scx, plans, &selected, plan)
         } else {
-            Arc::new(BackendFnAbiPlan::for_concrete_plan(ws, scx, plan))
+            // The same derivation as the owner's own question, so share its
+            // memo: every called body otherwise derives its plan twice, once
+            // for its callers and once when it is lowered.
+            owner_abi_plan_impl(ws, scx, plans, inst, Some(plan))?
         }
     };
     scx.abi_plan_record_derivation(derivation_start);
