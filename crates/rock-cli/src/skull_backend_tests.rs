@@ -920,6 +920,48 @@ mod overlay_runtime_tests {
         );
     }
 
+    /// A program build defines only what its entry reaches, so an edit that
+    /// starts calling an own function nothing called before must define it
+    /// in the published artifacts.
+    #[test]
+    fn production_reload_defines_an_own_function_an_edit_starts_calling() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main_path = dir.path().join("main.lua");
+        let incremental_path = dir.path().join("incremental.lua");
+        let source_path = dir.path().join("main.rock");
+        std::fs::write(
+            &source_path,
+            "fn later(x: int) -> int { return x * 3 + 2 }\nfn main() { print(0) }\n",
+        )
+        .expect("initial source");
+        let mut project = IncrementalProject::init(
+            dir.path().to_str().expect("tempdir path"),
+            &main_path,
+            &incremental_path,
+        )
+        .expect("initial production build");
+        assert!(
+            !std::fs::read_to_string(&main_path)
+                .expect("main.lua")
+                .contains("later"),
+            "the unreached function must not be defined at boot"
+        );
+        std::fs::write(
+            &source_path,
+            "fn later(x: int) -> int { return x * 3 + 2 }\nfn main() { print(later(4)) }\n",
+        )
+        .expect("edited source");
+        project
+            .recompile(
+                std::slice::from_ref(&source_path),
+                &main_path,
+                &incremental_path,
+            )
+            .expect("recompile after the edit");
+        let out = run_project_artifacts(&main_path, &incremental_path, true);
+        assert_eq!(out.trim().lines().last(), Some("14"), "{out}");
+    }
+
     #[test]
     fn production_v1_namespace_edit_takes_full_reload_and_runs_new_definition() {
         let dir = tempfile::tempdir().expect("tempdir");
