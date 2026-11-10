@@ -113,11 +113,26 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
     let mut any_subst = false;
     let mut cur: Vec<Option<Idx<Inst>>> = vec![None; func.cells.len()];
     let mut touched: Vec<usize> = Vec::new();
+    // A block entered only by a `Goto` starts with the literals its predecessor
+    // left in its cells: an inlined callee's body starts a block, and its default
+    // prologue tests the argument the caller just stored. Literals only, so no
+    // value's live range grows across blocks.
+    let mut preds = vec![0u32; func.blocks.len()];
     for (_, b) in func.blocks.iter() {
+        skull_mir::cfg::successors(&b.term, |t| preds[raw(t) as usize] += 1);
+    }
+    let mut entry_literals: Vec<Option<Vec<(usize, Idx<Inst>)>>> = vec![None; func.blocks.len()];
+    for (bid, b) in func.blocks.iter() {
         for &t in &touched {
             cur[t] = None;
         }
         touched.clear();
+        if let Some(carried) = entry_literals[raw(bid) as usize].take() {
+            for (ck, v) in carried {
+                cur[ck] = Some(v);
+                touched.push(ck);
+            }
+        }
         let mut checked_native_buffers = HashSet::default();
         let mut checked_vecs: HashSet<Operand> = HashSet::default();
         // Live `VecCheckedIndex` results by (vec, index) operand.
@@ -128,6 +143,10 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
             if !keeps_vec_lengths(&func.insts[id]) {
                 vec_checks.clear();
                 checked_vecs.clear();
+            }
+            if !matches!(func.insts[id], Inst::Store { .. }) {
+                // Multi-result calls and `MapNext` assign their cells directly.
+                func.insts[id].cell_writes_each(&mut |c| cur[raw(c) as usize] = None);
             }
             if let Inst::Store { cell, .. } = &func.insts[id] {
                 let rebound = Operand::Cell(*cell);
@@ -283,6 +302,19 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                 }
                 _ => {}
             }
+        }
+        if let Term::Goto(next) = b.term
+            && preds[raw(next) as usize] == 1
+            && raw(next) > raw(bid)
+        {
+            let carried = touched
+                .iter()
+                .filter_map(|&ck| {
+                    let v = resolve_subst(&subst, cur[ck]?);
+                    matches!(func.insts[v], Inst::Const(_)).then_some((ck, v))
+                })
+                .collect();
+            entry_literals[raw(next) as usize] = Some(carried);
         }
     }
     (any_subst || self_stores.iter().any(|&noop| noop) || nonthrowing.iter().any(|&safe| safe))

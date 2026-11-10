@@ -38,6 +38,7 @@ mod coroutine_frame_writes;
 mod coroutine_hook_hoist;
 mod coroutine_trace_witness;
 mod dead_lambda_scope;
+mod default_guard_fold;
 mod default_lambda_fields;
 mod defer_unwind;
 mod descriptor_value_repr;

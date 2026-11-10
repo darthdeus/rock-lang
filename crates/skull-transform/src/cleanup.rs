@@ -216,7 +216,21 @@ pub(crate) fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(
             break;
         }
     }
-    if fold_const_branches(func) {
+    // Copy propagation can hand a nil test a literal operand: an inlined
+    // default prologue testing the argument its caller stored. Deciding it
+    // removes a join, so the code after it starts from that literal again.
+    let mut decided = fold_never_nil_compares(func);
+    while fold_const_branches(func) {
+        if !decided {
+            dce(func);
+            break;
+        }
+        let cp = copy_propagate_analysis(func, ws);
+        dce_core(func, cp.as_ref());
+        decided = fold_never_nil_compares(func);
+    }
+    if decided {
+        // A decided test that folded no branch still leaves its operands.
         dce(func);
     }
     Ok(())
@@ -287,6 +301,9 @@ fn has_scalarizable_store(func: &MirFunc) -> bool {
 /// [`fold_const_branches`] then turns the branch into a `Goto` and DCE removes the
 /// unreachable arm along with the boxes only it used.
 ///
+/// A literal tested against `nil` or the omitted-argument marker is decided the
+/// same way: no other literal equals either.
+///
 /// This exists because SROA manufactures the shape rather than the lowering emitting
 /// it: a presence-aware read of a nullable value field tests `Inst::Field` against
 /// nil, which is a real test, and forwarding that field read to the literal behind
@@ -304,6 +321,11 @@ fn fold_never_nil_compares(func: &mut MirFunc) -> bool {
         )
     };
     let is_nil = |func: &MirFunc, v: Idx<Inst>| matches!(&func.insts[v], Inst::Const(Lit::Nil));
+    let literal_against_sentinel =
+        |func: &MirFunc, a: Idx<Inst>, b: Idx<Inst>| match (&func.insts[a], &func.insts[b]) {
+            (Inst::Const(lit), Inst::Const(s @ (Lit::Nil | Lit::Omitted))) => Some(lit == s),
+            _ => None,
+        };
 
     let mut rewrites: Vec<(Idx<Inst>, bool)> = Vec::new();
     for (iid, inst) in func.insts.iter() {
@@ -316,6 +338,10 @@ fn fold_never_nil_compares(func: &mut MirFunc) -> bool {
             (never_nil(func, a) && is_nil(func, b)) || (never_nil(func, b) && is_nil(func, a));
         if known {
             rewrites.push((iid, !eq));
+        } else if let Some(equal) =
+            literal_against_sentinel(func, a, b).or_else(|| literal_against_sentinel(func, b, a))
+        {
+            rewrites.push((iid, equal == eq));
         }
     }
     if rewrites.is_empty() {
