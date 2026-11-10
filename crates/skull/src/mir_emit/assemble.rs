@@ -216,8 +216,8 @@ impl Assembly {
         definitions: &mut DefinitionOrder<'c>,
         facts: &mut Vec<(Ustr, &'c Chunk)>,
     ) -> Result<(), CompilerError> {
-        // Retention and a pulled chunk's mangled name are read per body and
-        // independently, so both are found in parallel before the ordered pass.
+        // Each function's placement reads only that function, so all of them
+        // are found in parallel and the ordered pass only appends.
         let fns: Vec<(FuncRef, &bone_semantic::hir::Function)> = ws
             .source_modules()
             .flat_map(|module| {
@@ -233,93 +233,20 @@ impl Assembly {
                 })
             })
             .collect();
-        let chunks: Vec<_> = {
+        let placements: Vec<Placement<'c>> = {
             use bone_core::prelude::*;
             fns.par_iter()
-                .map(|(self_ref, f)| {
-                    if f.backend == bone_semantic::hir::FnBackend::Js {
-                        return (false, None);
-                    }
-                    let emit_def = should_emit_via_view(ws, &cache.lua_view, *self_ref);
-                    let chunk = match cache.chunks.get(&shared(*self_ref)) {
-                        Some(Ok(chunk)) => Some(Ok((Ustr::from(&mangle_fn(ws, f)), chunk))),
-                        Some(Err(err)) => Some(Err(err)),
-                        None => None,
-                    };
-                    (emit_def, chunk)
-                })
+                .map(|&(self_ref, f)| place_function(ws, cache, needed_foreign, self_ref, f))
                 .collect()
         };
-        for ((self_ref, f), (emit_def, chunk)) in fns.into_iter().zip(chunks) {
-            let mid = self_ref.module;
-            let fid = self_ref.func;
-            // A JS-backend decl (`inline(js)` / `extern(js)`) is inert on luajit:
-            // its lua sibling (if any) carries the binding, and a js-only call from
-            // lua-reachable code is rejected at call lowering (resolve_funcref).
-            if f.backend == bone_semantic::hir::FnBackend::Js {
-                continue;
-            }
-            // Whole-program DCE (`emit_def`) gates both chunk construction and
-            // definition emission. Retained bodies still fail hard when their
-            // plan or chunk is missing; pruned dependency bodies have neither by
-            // design.
-            if f.is_extern {
-                // An `extern(ffi, "lib")` fn needs a thin wrapper binding it to the
-                // loaded library handle. A non-ffi extern is a pre-existing global.
-                //
-                // Gated by the VIEW like every other definition. `is_emission_root`
-                // roots every `extern`, so in practice the view retains them all
-                // and this changes no output -- but an ungated write is a second
-                // population input, and one is the whole point of the cut.
-                if let Some(lib) = f.ffi_lib {
-                    let (nm, params, body) = ffi_extern_wrapper(ws, f, lib)?;
-                    // The rejection above runs for EVERY extern; only the WRITE
-                    // is gated. Pruning may change which definitions are emitted
-                    // and nothing else -- gating the whole arm suppressed
-                    // `extern_ret`'s unbound-generic rejection, whose subject is
-                    // a generic declaration the view holds no base instance for.
-                    if emit_def {
-                        let prologue = default_fill_prologue(ws, mid, fid, f);
-                        definitions
-                            .push_text(format!("function {nm}({params})\n{prologue}{body}\nend\n"));
-                    }
+        for ((_, f), placement) in fns.into_iter().zip(placements) {
+            match placement {
+                Placement::None => {}
+                Placement::Text(text) => definitions.push_text(text?),
+                Placement::Chunk(emit_def, chunk) => {
+                    self.pull_cached_chunk(f, chunk, emit_def, definitions, facts)
                 }
-                continue;
             }
-            if let Some((_, body)) = f.inline_body {
-                // Retention alone (`emit_def`) over-emits here -- see
-                // `needed_foreign`'s doc. Three independent reasons still force
-                // emission regardless of splicing eligibility: a publication
-                // obligation (`@nomangle`), a residual (non-spliced) demand, or
-                // being a ROOT in its own right (an own-project inline(lua) fn
-                // is unconditionally rooted by `is_emission_root` even with no
-                // caller at all -- same reasoning as `main`/`@sim`/`@test`;
-                // found empirically, `anvil`'s `sv_close`/`sv_is_eof` etc. have
-                // no call site anywhere in the corpus and are rooted purely by
-                // living in the project's own file).
-                if !emits_foreign_definition(ws, &cache.lua_view, needed_foreign, self_ref) {
-                    continue;
-                }
-                definitions.push_text(inline_lua_definition(
-                    ws,
-                    &cache.scx,
-                    self_ref,
-                    f,
-                    body.as_str(),
-                ));
-                continue;
-            }
-            // An `Iterator`-bounded fn has no standalone emission (it exists
-            // only inlined at its call sites) -- deliberately absent.
-            if fn_has_bounds(f) {
-                continue;
-            }
-            // A generic declaration has no definition of its own. Its bodies are
-            // its instances, placed below by `order_specialized_callees`.
-            if is_generic(f) {
-                continue;
-            }
-            self.pull_cached_chunk(f, chunk, emit_def, definitions, facts);
         }
         Ok(())
     }
@@ -755,6 +682,99 @@ fn emitted_bodies(
     }
     emitted_bodies.extend(specialized_instances);
     emitted_bodies
+}
+
+/// Where one source function goes in the definitions, in source order.
+enum Placement<'c> {
+    None,
+    Text(Result<String, CompilerError>),
+    Chunk(bool, Option<Result<(Ustr, &'c Chunk), &'c CompilerError>>),
+}
+
+fn place_function<'c>(
+    ws: &Workspace,
+    cache: &'c SkullEmitCache,
+    needed_foreign: &FxHashSet<Instance>,
+    self_ref: FuncRef,
+    f: &bone_semantic::hir::Function,
+) -> Placement<'c> {
+    let mid = self_ref.module;
+    let fid = self_ref.func;
+    // A JS-backend decl (`inline(js)` / `extern(js)`) is inert on luajit:
+    // its lua sibling (if any) carries the binding, and a js-only call from
+    // lua-reachable code is rejected at call lowering (resolve_funcref).
+    if f.backend == bone_semantic::hir::FnBackend::Js {
+        return Placement::None;
+    }
+    // Whole-program DCE (`emit_def`) gates both chunk construction and
+    // definition emission. Retained bodies still fail hard when their
+    // plan or chunk is missing; pruned dependency bodies have neither by
+    // design.
+    let emit_def = should_emit_via_view(ws, &cache.lua_view, self_ref);
+    if f.is_extern {
+        // An `extern(ffi, "lib")` fn needs a thin wrapper binding it to the
+        // loaded library handle. A non-ffi extern is a pre-existing global.
+        //
+        // Gated by the VIEW like every other definition. `is_emission_root`
+        // roots every `extern`, so in practice the view retains them all
+        // and this changes no output -- but an ungated write is a second
+        // population input, and one is the whole point of the cut.
+        let Some(lib) = f.ffi_lib else {
+            return Placement::None;
+        };
+        let (nm, params, body) = match ffi_extern_wrapper(ws, f, lib) {
+            Ok(wrapper) => wrapper,
+            Err(err) => return Placement::Text(Err(err)),
+        };
+        // The rejection above runs for EVERY extern; only the WRITE
+        // is gated. Pruning may change which definitions are emitted
+        // and nothing else -- gating the whole arm suppressed
+        // `extern_ret`'s unbound-generic rejection, whose subject is
+        // a generic declaration the view holds no base instance for.
+        if !emit_def {
+            return Placement::None;
+        }
+        let prologue = default_fill_prologue(ws, mid, fid, f);
+        return Placement::Text(Ok(format!(
+            "function {nm}({params})\n{prologue}{body}\nend\n"
+        )));
+    }
+    if let Some((_, body)) = f.inline_body {
+        // Retention alone (`emit_def`) over-emits here -- see
+        // `needed_foreign`'s doc. Three independent reasons still force
+        // emission regardless of splicing eligibility: a publication
+        // obligation (`@nomangle`), a residual (non-spliced) demand, or
+        // being a ROOT in its own right (an own-project inline(lua) fn
+        // is unconditionally rooted by `is_emission_root` even with no
+        // caller at all -- same reasoning as `main`/`@sim`/`@test`;
+        // found empirically, `anvil`'s `sv_close`/`sv_is_eof` etc. have
+        // no call site anywhere in the corpus and are rooted purely by
+        // living in the project's own file).
+        if !emits_foreign_definition(ws, &cache.lua_view, needed_foreign, self_ref) {
+            return Placement::None;
+        }
+        return Placement::Text(Ok(inline_lua_definition(
+            ws,
+            &cache.scx,
+            self_ref,
+            f,
+            body.as_str(),
+        )));
+    }
+    // An `Iterator`-bounded fn has no standalone emission (it exists
+    // only inlined at its call sites) -- deliberately absent.
+    //
+    // A generic declaration has no definition of its own. Its bodies are
+    // its instances, placed by `order_specialized_callees`.
+    if fn_has_bounds(f) || is_generic(f) {
+        return Placement::None;
+    }
+    let chunk = match cache.chunks.get(&shared(self_ref)) {
+        Some(Ok(chunk)) => Some(Ok((Ustr::from(&mangle_fn(ws, f)), chunk))),
+        Some(Err(err)) => Some(Err(err)),
+        None => None,
+    };
+    Placement::Chunk(emit_def, chunk)
 }
 
 /// One-shot builds drop the chunk cache once its last reader is done: capture
