@@ -395,6 +395,40 @@ fn main() { print("{id(1)}") }
 }
 
 #[test]
+fn production_lowering_audits_struct_default_tables_under_checks() {
+    let (ws, g, bodies) = bodies_of(
+        r#"
+struct Config { scale: float = 2.0, count: int = 3 }
+fn main() {
+    let c = Config { count: 4 }
+    print("{c.scale}")
+}
+"#,
+    );
+    let (_, plan) = bodies
+        .plans
+        .iter()
+        .find(|(inst, _)| g.identity(&ws, inst).starts_with("main"))
+        .expect("main has no concrete plan");
+    let mut poisoned = (**plan).clone();
+    let tables = poisoned
+        .foreign_domains
+        .values_mut()
+        .next()
+        .expect("struct literal entered no default domain");
+    tables.ty_types.clear();
+
+    let scx = scalar_ctx(&ws, &g);
+    let err = skull_mir::lower::lower_instance_with_plans(&ws, &scx, &poisoned, &bodies.plans)
+        .expect_err("lowering accepted a struct-default plan missing its type nodes");
+    assert!(
+        err.message
+            .contains("concrete struct-default plan is missing concrete type node"),
+        "{err:?}"
+    );
+}
+
+#[test]
 fn production_plan_marks_unresolved_slots_as_explicitly_untyped() {
     let (ws, g, bodies) = bodies_of(
         r#"

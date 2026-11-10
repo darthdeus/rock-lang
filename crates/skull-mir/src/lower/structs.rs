@@ -610,7 +610,9 @@ impl<'a> Builder<'a> {
             .and_then(|ir| ir.per_fn.get(&owner));
         let args = self.struct_default_args(struct_name, sid)?;
         let domain = crate::site::SiteDomain::StructDefaults(sid.module, sid.def, args);
-        if let Some(defaults_inf) = defaults_inf {
+        // Like the owner's own plan audit, this only catches a plan the graph
+        // built incompletely, and it walks the whole defaults body per literal.
+        if let Some(defaults_inf) = defaults_inf.filter(|_| crate::verify::checks_enabled()) {
             let plan = self.concrete_plan;
             let tables = plan.domain_types(&domain).ok_or_else(|| {
                 gap(format!(
