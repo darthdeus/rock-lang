@@ -1693,6 +1693,73 @@ fn for_real_vec_loop_is_forl_zero_alloc() {
     );
 }
 
+/// `[T]` loops of every common shape print as counted `for`s with no
+/// protocol call and no back edge, and compute the right values: a value
+/// element, `continue` and `break`, a string element and an early return.
+const VEC_LOOP_SHAPES_SRC: &str = "
+value P { x: float, y: float }
+fn sum_p(ps: [P]) -> float {
+    let t = 0.0
+    for p in ps { t += p.x * p.y }
+    return t
+}
+fn skip_odd(xs: [int]) -> int {
+    let t = 0
+    for x in xs {
+        if x % 2 == 1 { continue }
+        if x > 100 { break }
+        t += x
+    }
+    return t
+}
+fn total_len(ss: [string]) -> int {
+    let n = 0
+    for s in ss { n += s.len() }
+    return n
+}
+fn find(xs: [int], key: int) -> int {
+    for x in xs { if x == key { return x * 10 } }
+    return -1
+}
+fn probe() -> string {
+    let b = skip_odd([1, 2, 3, 4, 200, 6])
+    let c = total_len([\"ab\", \"\", \"cde\"])
+    return \"{b} {c} {find([4, 5], 5)} {find([], 5)}\"
+}";
+
+#[test]
+fn vec_loop_shapes_are_counted_fors_that_compute_the_same() {
+    for name in ["sum_p", "skip_odd", "total_len", "find"] {
+        let lua = emit_inlined(VEC_LOOP_SHAPES_SRC, name);
+        assert!(
+            lua.contains("for "),
+            "{name} must print as a numeric `for`:\n{lua}"
+        );
+        assert!(
+            !lua.contains("next"),
+            "{name} must leave no protocol call:\n{lua}"
+        );
+        assert!(
+            backward_gotos(&lua).is_empty(),
+            "{name} must leave no back edge:\n{lua}"
+        );
+    }
+    // The bare harness has no value-column prelude, so `sum_p` is not run.
+    assert_eq!(run(VEC_LOOP_SHAPES_SRC, "probe()"), "6 5 50 -1");
+}
+
+/// A `[T]` loop is counted when lowered, not only after inlining recovers
+/// it: a body that never inlines still prints a numeric `for`.
+#[test]
+fn vec_loop_is_counted_without_inlining() {
+    let lua = emit_clean(
+        "fn sum_vec(xs: [int]) -> int { let total = 0; for x in xs { total += x }; return total }",
+        "sum_vec",
+    );
+    assert!(lua.contains("for "), "{lua}");
+    assert!(!lua.contains("next") && !lua.contains("iter"), "{lua}");
+}
+
 // --- Combinator chains flatten. The bounded
 // `map`/`filter` `next` bodies inline via placeholder substitution (the
 // BoundTree), the cursors scalarize, and a map-only spine (counted structure

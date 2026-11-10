@@ -84,6 +84,24 @@ impl<'a> Builder<'a> {
             .inf
             .and_then(|i| i.for_iter_protocol.get(&iter).cloned())
         {
+            // A plain `[T]` walks its storage directly: the stdlib `VecIter`
+            // would only inline back into this counted loop. Shader lowering
+            // and tuple patterns keep the protocol.
+            if !self.scx.values_first_class
+                && enumerated_collection.is_none()
+                && matches!(vars, BindingPattern::Leaf(b) if !self.binding_is_ref(b))
+                && self.concrete_expr_ty(iter).is_some_and(|ty| {
+                    matches!(
+                        ty,
+                        MonoTy::App {
+                            ctor: crate::monoty::MonoCtor::Array,
+                            ..
+                        }
+                    )
+                })
+            {
+                return self.lower_for_vec(&vars, iter, body, false);
+            }
             // Lua keeps its counted arena walk; native rows and JS use the
             // recorded iterator. The walk's synthesized `__arena_store_or_empty`
             // call has no instance-graph site, which only JS checks strictly.
@@ -100,7 +118,7 @@ impl<'a> Builder<'a> {
             if self.iter_is_arena(collection) {
                 return Err(gap("enumerated Arena must have an iterator protocol"));
             }
-            return self.lower_for_enumerate(&vars, collection, body);
+            return self.lower_for_vec(&vars, collection, body, true);
         }
         if self.iter_is_arena(iter) {
             // Direct `for .. in arena` arrives with `for_iter_protocol`
@@ -961,14 +979,20 @@ impl<'a> Builder<'a> {
     /// `for (i, x) in enumerate(coll)` (split bindings) or `for pair in
     /// enumerate(coll)` (one binding to the `(index, element)` tuple), over an
     /// indexable collection. The counter is a cell; `x = coll[i]`.
-    pub(crate) fn lower_for_enumerate(
+    /// `for <pat> in coll` (`enumerated` false) or `for <pat> in
+    /// enumerate(coll)` over an indexable collection, as a counted loop over
+    /// its storage. The collection and its length are read once, as the
+    /// iterator protocol's counted form reads them.
+    pub(crate) fn lower_for_vec(
         &mut self,
         vars: &BindingPattern,
         coll: Idx<Expr>,
         body: Idx<Expr>,
+        enumerated: bool,
     ) -> Result<(), CompilerError> {
         // Split `(i, xpat)` vs a single binding to the whole `(i, element)` tuple.
         let split: Option<(Idx<BindingInfo>, BindingPattern)> = match vars {
+            _ if !enumerated => None,
             BindingPattern::Tuple(subs) if subs.len() == 2 => match &subs[0] {
                 BindingPattern::Leaf(i) => Some((*i, subs[1].clone())),
                 _ => return Err(gap("enumerate binds (index, element)")),
@@ -1028,12 +1052,14 @@ impl<'a> Builder<'a> {
         let repr = self.loop_element_repr_at(arr_v, i_now, kind)?;
         let ty = match &split {
             Some((_, xpat)) => self.loop_binder_ty(xpat, None),
+            None if !enumerated => self.loop_binder_ty(vars, None),
             None => self.loop_binder_ty(vars, Some(1)),
         };
         let repr = self.loop_element_snapshot(ty, repr)?;
         match &split {
             // split: index already bound to i_cell; bind the element pattern.
             Some((_, xpat)) => self.bind_loop_element_repr(xpat, repr)?,
+            None if !enumerated => self.bind_loop_element_repr(vars, repr)?,
             // single: bind the whole `(index, element)` tuple.
             None => {
                 let elem = self.pack(repr)?;

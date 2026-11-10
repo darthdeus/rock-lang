@@ -560,7 +560,15 @@ fn both_iter_witness_forms_state_the_instance_they_target() {
         ),
         (
             "`for` head",
-            "fn main() { let a: [int] = [1, 2]\n  let s = 0\n  for v in a { s = s + v }\n  print(\"{s}\") }",
+            "struct Upto { n: int }\n\
+             struct UptoIter { i: int, n: int }\n\
+             fn iter(u: Upto) -> UptoIter { return UptoIter { i: 0, n: u.n } }\n\
+             fn next(it: UptoIter) -> (bool, int) {\n\
+                 if it.i >= it.n { return (false, 0) }\n\
+                 it.i = it.i + 1\n\
+                 return (true, it.i)\n\
+             }\n\
+             fn main() { let s = 0\n  for v in (Upto { n: 2 }) { s = s + v }\n  print(\"{s}\") }",
         ),
     ] {
         let c = census_of(src);

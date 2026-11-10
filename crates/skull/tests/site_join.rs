@@ -346,7 +346,7 @@ fn cloned_iterator_headers_are_reinterned_for_forl_recovery() {
 @inline
 fn sum_inner(xs: [int]) -> int {
     let total = 0
-    for x in xs { total = total + x }
+    for x in xs.iter() { total = total + x }
     return total
 }
 
