@@ -51,7 +51,7 @@ impl<T, V> ArenaMap<Idx<T>, V> {
             .rposition(|slot| slot.is_some())
             .map_or(0, |i| i + 1);
         self.v.truncate(min_len);
-        self.v.shrink_to_fit();
+        crate::exact_fit(&mut self.v);
     }
 
     /// Returns whether the map contains a value for the specified index.

@@ -322,6 +322,31 @@ impl Default for Body {
 }
 
 impl Body {
+    /// Release the spare capacity lowering left in every table.
+    pub fn shrink_to_fit(&mut self) {
+        self.scope_arena.shrink_to_fit();
+        self.binding_arena.shrink_to_fit();
+        self.binding_spans.shrink_to_fit();
+        self.pattern_arena.shrink_to_fit();
+        self.match_arm_arena.shrink_to_fit();
+        self.record_pat_field_arena.shrink_to_fit();
+        self.interp_part_arena.shrink_to_fit();
+        self.struct_lit_field_arena.shrink_to_fit();
+        self.statement_arena.shrink_to_fit();
+        self.statement_spans.shrink_to_fit();
+        self.expr_arena.shrink_to_fit();
+        self.expr_spans.shrink_to_fit();
+        self.name_spans.shrink_to_fit();
+        self.lowered_tys.shrink_to_fit();
+        self.lowered_ty_spans.shrink_to_fit();
+        self.arg_names.shrink_to_fit();
+        self.method_call_recvs.shrink_to_fit();
+        self.method_names.shrink_to_fit();
+        self.spread_args.shrink_to_fit();
+        self.value_owners.shrink_to_fit();
+        self.field_defaults.shrink_to_fit();
+    }
+
     pub fn make_lapper(&mut self, start: usize, stop: usize, val: NodeRef) {
         self.node_intervals.push(Interval { start, stop, val })
     }
@@ -522,7 +547,10 @@ impl Module {
             .get_or_init(|| Lapper::new(self.item_intervals.clone()))
     }
 
-    pub fn insert_body(&mut self, owner: BodyOwner, body: Body) {
+    pub fn insert_body(&mut self, owner: BodyOwner, mut body: Body) {
+        // Lowering grows every arena by doubling, and a body outlives its
+        // lowering by the whole emission.
+        body.shrink_to_fit();
         self.bodies.insert(owner, body);
     }
 
