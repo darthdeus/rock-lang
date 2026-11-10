@@ -1,0 +1,169 @@
+// Microbenchmark for loops over a vector and for `xs[i]` reads.
+//
+//     rock run benchmarks/vec_loop.rock
+//
+// Each workload flushes the JIT, attaches a trace listener and runs its loop
+// until hot, so every trace, abort and byte of mcode counted was recorded by
+// that workload. `ns_per_elem` is then measured on the warm trace cache, and
+// `interp_ns_per_elem` with the JIT off: code that never traces, or whose
+// trace aborted, runs there.
+
+@nomangle inline(lua) fn bench_clock() -> float = "return os.clock()"
+
+@nomangle inline(lua) fn bench_jit(on: bool) = """
+    local jit = require("jit")
+    if on then jit.on() else jit.off() end
+    jit.flush()
+"""
+
+@nomangle inline(lua) fn bench_reset() = """
+    local jit = require("jit")
+    jit.flush()
+    _G.__bench = { start = 0, stop = 0, abort = 0 }
+    _G.__bench_cb = function(what, tr, fn, pc, otr, oex)
+      local b = _G.__bench
+      if what == "start" then
+        b.start = b.start + 1
+      elseif what == "stop" then
+        b.stop = b.stop + 1
+      elseif what == "abort" then
+        b.abort = b.abort + 1
+      end
+    end
+    jit.attach(_G.__bench_cb, "trace")
+"""
+
+@nomangle inline(lua) fn bench_counts() -> string = """
+    local jit = require("jit")
+    jit.attach(_G.__bench_cb)
+    local util = require("jit.util")
+    local b = _G.__bench
+    local traces, mc = 0, 0
+    for tr = 1, 32000 do
+      local mcode = util.tracemc(tr)
+      if mcode then
+        traces = traces + 1
+        mc = mc + #mcode
+      end
+    end
+    collectgarbage("collect")
+    return string.format("traces=%d stops=%d aborts=%d mcode_bytes=%d",
+      traces, b.stop, b.abort, mc)
+"""
+
+struct Mote { x: float, y: float, life: int }
+struct Swarm { motes: [Mote], ids: [int] }
+
+fn ints(n: int) -> [int] {
+    let out: [int] = []
+    for i in 0..n { out.push((i * 7 + 3) % 11) }
+    return out
+}
+
+fn motes(n: int) -> [Mote] {
+    let out: [Mote] = []
+    for i in 0..n {
+        out.push(Mote { x: (i % 13) as float, y: (i % 5) as float, life: i % 9 })
+    }
+    return out
+}
+
+fn sum_ints(xs: [int]) -> int {
+    let t = 0
+    for x in xs { t += x }
+    return t
+}
+
+fn sum_indexed(xs: [int]) -> int {
+    let t = 0
+    for i in 0..xs.len() { t += xs[i] }
+    return t
+}
+
+fn sum_enumerated(xs: [int]) -> int {
+    let t = 0
+    for (i, x) in enumerate(xs) { t += x * (i % 3) }
+    return t
+}
+
+fn sum_motes(ms: [Mote]) -> float {
+    let t = 0.0
+    for m in ms {
+        if m.life > 2 { t += m.x * m.y }
+    }
+    return t
+}
+
+fn sum_field(s: Swarm) -> float {
+    let t = 0.0
+    for m in s.motes { t += m.x }
+    for id in s.ids { t += id as float }
+    return t
+}
+
+fn copy_big(xs: [int], out: [int]) -> int {
+    out.clear()
+    for x in xs {
+        if x > 4 { out.push(x) }
+    }
+    return out.len()
+}
+
+fn sum_grid(rows: [[int]]) -> int {
+    let t = 0
+    for row in rows {
+        for x in row { t += x }
+    }
+    return t
+}
+
+fn sum_pairs(xs: [int]) -> int {
+    let t = 0
+    for i in 1..xs.len() { t += xs[i] - xs[i - 1] }
+    return t
+}
+
+fn report(name: string, counts: string, elems: int, jit_s: float, interp_elems: int, interp_s: float, sink: float) {
+    let ns = jit_s * 1000000000.0 / (elems as float)
+    let interp_ns = interp_s * 1000000000.0 / (interp_elems as float)
+    print("workload={name} {counts} ns_per_elem={ns} interp_ns_per_elem={interp_ns} sink={sink}")
+}
+
+// `reps` timed passes of `pass`, each over `n` elements; one twentieth of
+// them again with the JIT off.
+fn drive(name: string, n: int, reps: int, pass: fn() -> float) {
+    bench_reset()
+    let sink = 0.0
+    for r in 0..200 { sink += pass() }
+    let counts = bench_counts()
+    let t0 = bench_clock()
+    for r in 0..reps { sink += pass() }
+    let jit_s = bench_clock() - t0
+    bench_jit(false)
+    let interp_reps = reps ./ 20 + 1
+    let t1 = bench_clock()
+    for r in 0..interp_reps { sink += pass() }
+    let interp_s = bench_clock() - t1
+    bench_jit(true)
+    report(name, counts, n * reps, jit_s, n * interp_reps, interp_s, sink)
+}
+
+fn main() {
+    let xs = ints(1000)
+    let short = ints(8)
+    let ms = motes(1000)
+    let swarm = Swarm { motes: motes(500), ids: ints(500) }
+    let out: [int] = []
+    let grid: [[int]] = []
+    for r in 0..40 { grid.push(ints(25)) }
+
+    drive("sum_ints", 1000, 20000, () => sum_ints(xs) as float)
+    drive("sum_short", 8, 2000000, () => sum_ints(short) as float)
+    drive("sum_indexed", 1000, 20000, () => sum_indexed(xs) as float)
+    drive("sum_enumerated", 1000, 20000, () => sum_enumerated(xs) as float)
+    drive("sum_pairs", 1000, 20000, () => sum_pairs(xs) as float)
+    drive("sum_motes", 1000, 20000, () => sum_motes(ms))
+    drive("sum_field", 1000, 20000, () => sum_field(swarm))
+    drive("copy_big", 1000, 10000, () => copy_big(xs, out) as float)
+    drive("sum_grid", 1000, 20000, () => sum_grid(grid) as float)
+}
