@@ -32,6 +32,8 @@
 
 use bone_core::prelude::Instant;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use bone_core::hir::{Body, BodyOwner, Function, TypeExpr, VarId};
 use bone_core::prelude::{BoundNext, IterWitness, ModuleId, Span, TyId};
@@ -1983,229 +1985,249 @@ impl InstanceGraph {
         let mut walked_with: FxHashMap<Instance, InstanceBoundTree> = FxHashMap::default();
         let mut rounds = 0usize;
         let mut expansion_times = Vec::new();
-        loop {
-            while !pending.is_empty() {
-                let wave: Vec<_> = std::mem::take(&mut pending).into_iter().rev().collect();
-                let expand_owner = |owner: Owner| {
-                    let used_tree = owner
-                        .instance()
-                        .map(|i| self.bound_tree(i).cloned().unwrap_or_default());
-                    let started = timing_enabled.then(Instant::now);
-                    let c = if owner
-                        .instance()
-                        .is_some_and(|i| self.substitution(i).is_none())
-                    {
-                        None
-                    } else {
-                        Some(self.expand(ws, &owner, timing_enabled))
-                    };
-                    (owner, used_tree, c, elapsed_ns(started))
-                };
-                let prepared: Vec<_> = {
-                    use bone_core::prelude::*;
-                    wave.into_par_iter().map(expand_owner).collect()
-                };
-                for (owner, mut used_tree, mut prepared_c, mut visit_ns) in prepared {
-                    let current_frontier = if timing_enabled {
-                        frontier_depths.get(&owner).copied().unwrap_or(0)
-                    } else {
-                        0
-                    };
-                    queued.remove(&owner);
-                    stats.owner_visits += 1;
-                    if timing_enabled {
-                        match owner {
-                            Owner::Instance(_) => stats.ordinary_owner_visits += 1,
-                            Owner::AlwaysEmitted(..) => stats.always_emitted_owner_visits += 1,
-                        }
-                    }
-                    // **An instance that lost its last namer DURING this run is not
-                    // walkable, and is not an invariant break.**
-                    //
-                    // The prune runs in `derive`, AFTER this loop, so a stranded
-                    // instance can still be sitting in `pending` -- an edit
-                    // invalidates every owner that QUOTES the edited file, which in
-                    // a single-file program is every owner, including ones the same
-                    // edit is about to strand. Its substitution was retracted by its
-                    // caller's re-walk a moment ago, so `expand` would find none and
-                    // the invariant assertion would fire on a body that is simply
-                    // gone.
-                    //
-                    // Skipping leaves it with its old contribution, which `derive`
-                    // then prunes: membership is root reachability, and nothing
-                    // points at it any more. Found by driving a real body edit
-                    // through `update_chunk_cache` -- the graph fixtures live in a
-                    // multi-file project, where the stranded owner does not quote
-                    // the edited file and never reaches this loop.
-                    if let Owner::Instance(i) = &owner {
-                        if self.substitution(i).is_none() {
-                            if timing_enabled {
-                                same_frontier_marks.remove(&owner);
-                            }
-                            stats.skipped_stranded_owners += 1;
-                            continue;
-                        }
-                        // An earlier install in this wave can restore a substitution
-                        // that was absent at preparation. Its queued demand was
-                        // suppressed, so expand it now with the current witnesses.
-                        if prepared_c.is_none() {
-                            used_tree = Some(self.bound_tree(i).cloned().unwrap_or_default());
-                            let started = timing_enabled.then(Instant::now);
-                            prepared_c = Some(self.expand(ws, &owner, timing_enabled));
-                            visit_ns = elapsed_ns(started);
-                        }
-                        walked_with.insert(i.clone(), used_tree.expect("instance snapshot"));
-                    }
-                    let visit_kind = if rounds > 0 {
-                        VisitKind::WitnessSettlement
-                    } else if !first_pass_seen.insert(owner.clone()) {
-                        VisitKind::DuplicatePending
-                    } else if initially_forced.contains(&owner) {
-                        VisitKind::IncrementalForced
-                    } else {
-                        VisitKind::FirstOwner
-                    };
-                    if track_incremental_state {
-                        self.last_run_owners.insert(owner.clone());
-                    }
-                    let c = prepared_c.expect("walkable owner");
-                    if timing_enabled {
-                        expansion_times.push(visit_ns);
-                    }
-                    stats.expanded += 1;
-                    if timing_enabled {
-                        if same_frontier_marks.remove(&owner) {
-                            stats.frontier_same_frontier_dependency_owners += 1;
-                        } else {
-                            stats.frontier_ready_owners += 1;
-                        }
-                    }
-                    match visit_kind {
-                        VisitKind::FirstOwner => {
-                            stats.first_owner_visits += 1;
-                            stats.first_owner_ns += visit_ns;
-                        }
-                        VisitKind::DuplicatePending => {
-                            stats.duplicate_pending_visits += 1;
-                            stats.duplicate_pending_ns += visit_ns;
-                        }
-                        VisitKind::WitnessSettlement => {
-                            stats.witness_settlement_rewalks += 1;
-                            stats.witness_settlement_ns += visit_ns;
-                        }
-                        VisitKind::IncrementalForced => {
-                            stats.incremental_forced_rewalks += 1;
-                            stats.incremental_forced_ns += visit_ns;
-                        }
-                    }
-                    stats.admissibility_ns += c.timing.admissibility_ns;
-                    stats.body_prep_ns += c.timing.body_prep_ns;
-                    stats.signature_type_conversion_ns += c.timing.signature_type_conversion_ns;
-                    stats.mono_interner_self_ns += c.timing.mono_interner_self_ns;
-                    stats.mono_timed_mutation_calls += c.timing.mono_timed_mutation_calls;
-                    stats.call_site_resolution_ns += c.timing.call_site_resolution_ns;
-                    stats.witness_bound_tree_ns += c.timing.witness_bound_tree_ns;
-                    stats.walk_body_edges_ns += c.timing.walk_body_edges_ns;
-                    stats.walk_struct_default_edges_ns += c.timing.walk_struct_default_edges_ns;
-                    stats.body_exprs_scanned += c.body_exprs_scanned;
-                    stats.resolved_overload_rows += c.resolved_overload_rows;
-                    stats.fn_value_rows += c.fn_value_rows;
-                    stats.generated_rows += c.generated_rows;
-                    stats.dispatched_rows += c.dispatched_rows;
-                    stats.implicit_iter_rows += c.implicit_iter_rows;
-                    stats.bound_tree_rows += c.bound_tree_rows;
-                    stats.bound_call_rows += c.bound_call_rows;
-                    stats.iterator_rows += c.iterator_rows;
-                    if timing_enabled {
-                        stats.contribution_reached += c.reached.len();
-                        stats.contribution_bound_trees += c.bound_trees.len();
-                        stats.contribution_edges += c.edges.len();
-                        stats.contribution_sites += c.call_sites.len() + c.always_call_sites.len();
-                        stats.contribution_struct_default_domains += c.struct_default_domains.len();
-                        stats.contribution_rejections += c.rejections.len();
-                        stats.contribution_synthesized_examined += c.synthesized_examined;
-                        stats.contribution_failures += c.rejections.len()
-                            + c.unresolved.len()
-                            + c.storage_failures.len()
-                            + c.always_emitted_holes.len();
-                        stats.contribution_always_emitted_targets += c.always_emitted_targets.len();
-                    }
-                    let (demanded, install_timing) =
-                        self.install(owner, c, timing_enabled, track_incremental_state);
-                    stats.uninstall_ns += install_timing.uninstall_ns;
-                    stats.root_hole_rows_examined += install_timing.root_hole_rows_retracted;
-                    stats.index_maintenance_ns += install_timing.index.total_ns();
-                    stats.index_subst_ns += install_timing.index.subst_ns;
-                    stats.index_trees_ns += install_timing.index.trees_ns;
-                    stats.index_erased_ns += install_timing.index.erased_ns;
-                    stats.index_always_emitted_ns += install_timing.index.always_emitted_ns;
-                    stats.index_preds_ns += install_timing.index.preds_ns;
-                    stats.index_decls_ns += install_timing.index.decls_ns;
-                    stats.index_commit_ns += install_timing.index.commit_ns;
-                    stats.index_subst_updates += install_timing.index.subst_updates;
-                    stats.index_trees_updates += install_timing.index.trees_updates;
-                    stats.index_erased_updates += install_timing.index.erased_updates;
-                    stats.index_always_emitted_updates +=
-                        install_timing.index.always_emitted_updates;
-                    stats.index_preds_updates += install_timing.index.preds_updates;
-                    stats.index_decls_updates += install_timing.index.decls_updates;
-                    for owner in demanded {
-                        if timing_enabled
-                            && queued.contains(&owner)
-                            && frontier_depths.get(&owner) == Some(&current_frontier)
-                        {
-                            same_frontier_marks.insert(owner.clone());
-                        }
-                        if queued.insert(owner.clone()) {
-                            if timing_enabled {
-                                let next_frontier = current_frontier.saturating_add(1);
-                                frontier_depths.insert(owner.clone(), next_frontier);
-                                if frontier_sizes.len() <= next_frontier {
-                                    frontier_sizes.resize(next_frontier + 1, 0);
+        let interner = self.interner.clone();
+        rayon::in_place_scope(|scope| {
+            loop {
+                while !pending.is_empty() {
+                    let wave: Vec<_> = std::mem::take(&mut pending).into_iter().rev().collect();
+                    // Every owner of a wave is walked with what the graph held
+                    // when the wave began, so the inputs are copied before the
+                    // first install. Walks then run on the pool while this
+                    // thread installs finished ones in wave order.
+                    let walks: Arc<Vec<OwnerWalk>> = Arc::new({
+                        use bone_core::prelude::*;
+                        wave.par_iter()
+                            .map(|owner| OwnerWalk::new(owner.clone(), self.walk_inputs(owner)))
+                            .collect()
+                    });
+                    if cfg!(not(feature = "sequential")) {
+                        for first in (0..walks.len()).step_by(WALK_TASK_OWNERS) {
+                            let walks = walks.clone();
+                            let interner = interner.clone();
+                            scope.spawn(move |_| {
+                                let end = walks.len().min(first + WALK_TASK_OWNERS);
+                                for walk in &walks[first..end] {
+                                    walk.run_unclaimed(ws, &interner, timing_enabled);
                                 }
-                                frontier_sizes[next_frontier] += 1;
-                            }
-                            pending.push(owner);
+                            });
+                        }
+                    }
+                    for (owner, walk) in wave.into_iter().zip(walks.iter()) {
+                        let (mut prepared_c, mut visit_ns) =
+                            walk.finish(ws, &interner, timing_enabled);
+                        let mut used_tree = owner
+                            .instance()
+                            .map(|_| walk.inputs.tree.clone().unwrap_or_default());
+                        let current_frontier = if timing_enabled {
+                            frontier_depths.get(&owner).copied().unwrap_or(0)
                         } else {
-                            stats.duplicate_pending_suppressed += 1;
+                            0
+                        };
+                        queued.remove(&owner);
+                        stats.owner_visits += 1;
+                        if timing_enabled {
+                            match owner {
+                                Owner::Instance(_) => stats.ordinary_owner_visits += 1,
+                                Owner::AlwaysEmitted(..) => stats.always_emitted_owner_visits += 1,
+                            }
+                        }
+                        // **An instance that lost its last namer DURING this run is not
+                        // walkable, and is not an invariant break.**
+                        //
+                        // The prune runs in `derive`, AFTER this loop, so a stranded
+                        // instance can still be sitting in `pending` -- an edit
+                        // invalidates every owner that QUOTES the edited file, which in
+                        // a single-file program is every owner, including ones the same
+                        // edit is about to strand. Its substitution was retracted by its
+                        // caller's re-walk a moment ago, so `expand` would find none and
+                        // the invariant assertion would fire on a body that is simply
+                        // gone.
+                        //
+                        // Skipping leaves it with its old contribution, which `derive`
+                        // then prunes: membership is root reachability, and nothing
+                        // points at it any more. Found by driving a real body edit
+                        // through `update_chunk_cache` -- the graph fixtures live in a
+                        // multi-file project, where the stranded owner does not quote
+                        // the edited file and never reaches this loop.
+                        if let Owner::Instance(i) = &owner {
+                            if self.substitution(i).is_none() {
+                                if timing_enabled {
+                                    same_frontier_marks.remove(&owner);
+                                }
+                                stats.skipped_stranded_owners += 1;
+                                continue;
+                            }
+                            // An earlier install in this wave can restore a substitution
+                            // that was absent at preparation. Its queued demand was
+                            // suppressed, so expand it now with the current witnesses.
+                            if prepared_c.is_none() {
+                                used_tree = Some(self.bound_tree(i).cloned().unwrap_or_default());
+                                let started = timing_enabled.then(Instant::now);
+                                prepared_c = Some(expand(
+                                    ws,
+                                    &interner,
+                                    &owner,
+                                    &self.walk_inputs(&owner),
+                                    timing_enabled,
+                                ));
+                                visit_ns = elapsed_ns(started);
+                            }
+                            walked_with.insert(i.clone(), used_tree.expect("instance snapshot"));
+                        }
+                        let visit_kind = if rounds > 0 {
+                            VisitKind::WitnessSettlement
+                        } else if !first_pass_seen.insert(owner.clone()) {
+                            VisitKind::DuplicatePending
+                        } else if initially_forced.contains(&owner) {
+                            VisitKind::IncrementalForced
+                        } else {
+                            VisitKind::FirstOwner
+                        };
+                        if track_incremental_state {
+                            self.last_run_owners.insert(owner.clone());
+                        }
+                        let c = prepared_c.expect("walkable owner");
+                        if timing_enabled {
+                            expansion_times.push(visit_ns);
+                        }
+                        stats.expanded += 1;
+                        if timing_enabled {
+                            if same_frontier_marks.remove(&owner) {
+                                stats.frontier_same_frontier_dependency_owners += 1;
+                            } else {
+                                stats.frontier_ready_owners += 1;
+                            }
+                        }
+                        match visit_kind {
+                            VisitKind::FirstOwner => {
+                                stats.first_owner_visits += 1;
+                                stats.first_owner_ns += visit_ns;
+                            }
+                            VisitKind::DuplicatePending => {
+                                stats.duplicate_pending_visits += 1;
+                                stats.duplicate_pending_ns += visit_ns;
+                            }
+                            VisitKind::WitnessSettlement => {
+                                stats.witness_settlement_rewalks += 1;
+                                stats.witness_settlement_ns += visit_ns;
+                            }
+                            VisitKind::IncrementalForced => {
+                                stats.incremental_forced_rewalks += 1;
+                                stats.incremental_forced_ns += visit_ns;
+                            }
+                        }
+                        stats.admissibility_ns += c.timing.admissibility_ns;
+                        stats.body_prep_ns += c.timing.body_prep_ns;
+                        stats.signature_type_conversion_ns += c.timing.signature_type_conversion_ns;
+                        stats.mono_interner_self_ns += c.timing.mono_interner_self_ns;
+                        stats.mono_timed_mutation_calls += c.timing.mono_timed_mutation_calls;
+                        stats.call_site_resolution_ns += c.timing.call_site_resolution_ns;
+                        stats.witness_bound_tree_ns += c.timing.witness_bound_tree_ns;
+                        stats.walk_body_edges_ns += c.timing.walk_body_edges_ns;
+                        stats.walk_struct_default_edges_ns += c.timing.walk_struct_default_edges_ns;
+                        stats.body_exprs_scanned += c.body_exprs_scanned;
+                        stats.resolved_overload_rows += c.resolved_overload_rows;
+                        stats.fn_value_rows += c.fn_value_rows;
+                        stats.generated_rows += c.generated_rows;
+                        stats.dispatched_rows += c.dispatched_rows;
+                        stats.implicit_iter_rows += c.implicit_iter_rows;
+                        stats.bound_tree_rows += c.bound_tree_rows;
+                        stats.bound_call_rows += c.bound_call_rows;
+                        stats.iterator_rows += c.iterator_rows;
+                        if timing_enabled {
+                            stats.contribution_reached += c.reached.len();
+                            stats.contribution_bound_trees += c.bound_trees.len();
+                            stats.contribution_edges += c.edges.len();
+                            stats.contribution_sites +=
+                                c.call_sites.len() + c.always_call_sites.len();
+                            stats.contribution_struct_default_domains +=
+                                c.struct_default_domains.len();
+                            stats.contribution_rejections += c.rejections.len();
+                            stats.contribution_synthesized_examined += c.synthesized_examined;
+                            stats.contribution_failures += c.rejections.len()
+                                + c.unresolved.len()
+                                + c.storage_failures.len()
+                                + c.always_emitted_holes.len();
+                            stats.contribution_always_emitted_targets +=
+                                c.always_emitted_targets.len();
+                        }
+                        let (demanded, install_timing) =
+                            self.install(owner, c, timing_enabled, track_incremental_state);
+                        stats.uninstall_ns += install_timing.uninstall_ns;
+                        stats.root_hole_rows_examined += install_timing.root_hole_rows_retracted;
+                        stats.index_maintenance_ns += install_timing.index.total_ns();
+                        stats.index_subst_ns += install_timing.index.subst_ns;
+                        stats.index_trees_ns += install_timing.index.trees_ns;
+                        stats.index_erased_ns += install_timing.index.erased_ns;
+                        stats.index_always_emitted_ns += install_timing.index.always_emitted_ns;
+                        stats.index_preds_ns += install_timing.index.preds_ns;
+                        stats.index_decls_ns += install_timing.index.decls_ns;
+                        stats.index_commit_ns += install_timing.index.commit_ns;
+                        stats.index_subst_updates += install_timing.index.subst_updates;
+                        stats.index_trees_updates += install_timing.index.trees_updates;
+                        stats.index_erased_updates += install_timing.index.erased_updates;
+                        stats.index_always_emitted_updates +=
+                            install_timing.index.always_emitted_updates;
+                        stats.index_preds_updates += install_timing.index.preds_updates;
+                        stats.index_decls_updates += install_timing.index.decls_updates;
+                        for owner in demanded {
+                            if timing_enabled
+                                && queued.contains(&owner)
+                                && frontier_depths.get(&owner) == Some(&current_frontier)
+                            {
+                                same_frontier_marks.insert(owner.clone());
+                            }
+                            if queued.insert(owner.clone()) {
+                                if timing_enabled {
+                                    let next_frontier = current_frontier.saturating_add(1);
+                                    frontier_depths.insert(owner.clone(), next_frontier);
+                                    if frontier_sizes.len() <= next_frontier {
+                                        frontier_sizes.resize(next_frontier + 1, 0);
+                                    }
+                                    frontier_sizes[next_frontier] += 1;
+                                }
+                                pending.push(owner);
+                            } else {
+                                stats.duplicate_pending_suppressed += 1;
+                            }
                         }
                     }
                 }
-            }
-            // The fixpoint: an owner whose witnesses moved while it was already
-            // walked must be walked again, or its callees are the ones the old
-            // witnesses selected.
-            let mut stale: Vec<Owner> = walked_with
-                .iter()
-                .filter(|(i, used)| {
-                    self.contributed.contains(*i)
-                        && self.bound_tree(i).unwrap_or(&InstanceBoundTree::default()) != *used
-                })
-                .map(|(i, _)| Owner::Instance(i.clone()))
-                .collect();
-            if stale.is_empty() {
-                break;
-            }
-            // Walked in owner order, as the ordered record used to yield them.
-            stale.sort();
-            rounds += 1;
-            stats.settle_rounds = rounds;
-            assert!(
-                rounds < 64,
-                "conformance witnesses did not settle after {rounds} rounds; \
-                 {} owners still disagree with what they were walked with",
-                stale.len()
-            );
-            if timing_enabled {
-                let settlement_frontier = frontier_sizes.len();
-                frontier_sizes.push(stale.len());
-                for owner in &stale {
-                    frontier_depths.insert(owner.clone(), settlement_frontier);
+                // The fixpoint: an owner whose witnesses moved while it was already
+                // walked must be walked again, or its callees are the ones the old
+                // witnesses selected.
+                let mut stale: Vec<Owner> = walked_with
+                    .iter()
+                    .filter(|(i, used)| {
+                        self.contributed.contains(*i)
+                            && self.bound_tree(i).unwrap_or(&InstanceBoundTree::default()) != *used
+                    })
+                    .map(|(i, _)| Owner::Instance(i.clone()))
+                    .collect();
+                if stale.is_empty() {
+                    break;
                 }
+                // Walked in owner order, as the ordered record used to yield them.
+                stale.sort();
+                rounds += 1;
+                stats.settle_rounds = rounds;
+                assert!(
+                    rounds < 64,
+                    "conformance witnesses did not settle after {rounds} rounds; \
+                 {} owners still disagree with what they were walked with",
+                    stale.len()
+                );
+                if timing_enabled {
+                    let settlement_frontier = frontier_sizes.len();
+                    frontier_sizes.push(stale.len());
+                    for owner in &stale {
+                        frontier_depths.insert(owner.clone(), settlement_frontier);
+                    }
+                }
+                pending = stale;
+                queued = pending.iter().cloned().collect();
             }
-            pending = stale;
-            queued = pending.iter().cloned().collect();
-        }
+        });
         assert_eq!(
             stats.owner_visits,
             stats.first_owner_visits
@@ -2251,168 +2273,103 @@ impl InstanceGraph {
 
     /// Walk ONE owner's body. The only producer of a [`Contribution`], so a
     /// full build and an incremental re-walk cannot record different facts.
-    fn expand(&self, ws: &Workspace, owner: &Owner, timing_enabled: bool) -> Contribution {
-        let mut out = self.expand_sites(ws, owner, timing_enabled);
-        // A body reaching one callee from several sites asserts its
-        // substitution once: the index records owners, not sites, and the
-        // walk is parallel while the install is not, so the duplicates are
-        // folded here.
-        let mut seen: FxHashSet<&Instance> = FxHashSet::default();
-        let mut keep = Vec::with_capacity(out.reached.len());
-        for (to, _) in &out.reached {
-            keep.push(seen.insert(to));
-        }
-        let mut keep = keep.into_iter();
-        out.reached
-            .retain(|_| keep.next().expect("one flag per reached row"));
-        // Ordered by instance: the install demands the callees in this order.
-        out.reached.sort_by(|a, b| a.0.cmp(&b.0));
-        out
-    }
-
-    fn expand_sites(&self, ws: &Workspace, owner: &Owner, timing_enabled: bool) -> Contribution {
-        let mut out = Contribution::default();
+    /// What [`expand`] reads of the graph for `owner`.
+    fn walk_inputs(&self, owner: &Owner) -> WalkInputs {
         match owner {
-            Owner::AlwaysEmitted(module, body_owner) => {
-                let prep_start = timing_enabled.then(Instant::now);
-                let Some(inf) = ws
-                    .inference(*module)
-                    .and_then(|ir| ir.per_fn.get(body_owner))
-                else {
-                    add_elapsed(&mut out.timing.body_prep_ns, prep_start);
-                    return out;
-                };
-                let body = ws.module(*module).bodies.get(body_owner);
+            Owner::Instance(i) => WalkInputs {
+                subst: self.substitution(i).cloned(),
+                tree: self.bound_tree(i).cloned(),
+            },
+            Owner::AlwaysEmitted(..) => WalkInputs::default(),
+        }
+    }
+}
+
+/// The contribution `owner` makes when walked with `inputs`. It reads nothing
+/// else of the graph, so it can run while the graph installs other owners.
+fn expand(
+    ws: &Workspace,
+    interner: &MonoInterner,
+    owner: &Owner,
+    inputs: &WalkInputs,
+    timing_enabled: bool,
+) -> Contribution {
+    let mut out = expand_sites(ws, interner, owner, inputs, timing_enabled);
+    // A body reaching one callee from several sites asserts its
+    // substitution once: the index records owners, not sites, and the
+    // walk is parallel while the install is not, so the duplicates are
+    // folded here.
+    let mut seen: FxHashSet<&Instance> = FxHashSet::default();
+    let mut keep = Vec::with_capacity(out.reached.len());
+    for (to, _) in &out.reached {
+        keep.push(seen.insert(to));
+    }
+    let mut keep = keep.into_iter();
+    out.reached
+        .retain(|_| keep.next().expect("one flag per reached row"));
+    // Ordered by instance: the install demands the callees in this order.
+    out.reached.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+fn expand_sites(
+    ws: &Workspace,
+    interner: &MonoInterner,
+    owner: &Owner,
+    inputs: &WalkInputs,
+    timing_enabled: bool,
+) -> Contribution {
+    let mut out = Contribution::default();
+    match owner {
+        Owner::AlwaysEmitted(module, body_owner) => {
+            let prep_start = timing_enabled.then(Instant::now);
+            let Some(inf) = ws
+                .inference(*module)
+                .and_then(|ir| ir.per_fn.get(body_owner))
+            else {
                 add_elapsed(&mut out.timing.body_prep_ns, prep_start);
-                let mut w = Walk {
-                    interner: &self.interner,
-                    owner_tree: None,
-                    out: &mut out,
-                    timing_enabled,
-                };
-                let walk_start = w.timer();
-                walk_body_edges(
-                    &mut w,
-                    ws,
-                    inf,
-                    body,
-                    None,
-                    &MonoSubst::default(),
-                    &SiteDomain::Own,
-                    None,
-                );
-                add_elapsed(&mut w.out.timing.walk_body_edges_ns, walk_start);
-                // An always-emitted body's struct literals omit fields too --
-                // `global POLLER: CoroutinePoller = CoroutinePoller {}` reaches
-                // `coroutines: Arena<CoState> = arena_new()` exactly as an
-                // ordinary instance's literal would. `walk_struct_default_edges`
-                // was instance-only, so a struct default reached ONLY from a
-                // global initializer or a decorator body was invisible to the
-                // graph while emission (which lowers the same literal) still
-                // built and emitted it -- found by the Phase-2 population audit,
-                // identically on every corpus project (`arena_new<CoState>` and
-                // its own `__arena_new_owned<int>` call).
-                if let Some(body) = body {
-                    let defaults_start = w.timer();
-                    walk_struct_default_edges(
-                        &mut w,
-                        ws,
-                        *module,
-                        body,
-                        *body_owner,
-                        None,
-                        &MonoSubst::default(),
-                    );
-                    add_elapsed(
-                        &mut w.out.timing.walk_struct_default_edges_ns,
-                        defaults_start,
-                    );
-                }
-            }
-            Owner::Instance(inst) => {
-                // The one admissibility oracle, shared with both emitters. The
-                // graph DECLINES to expand where they reject: a capped instance
-                // is a changing-instance-recursion candidate, not yet a verdict.
-                let admissibility_start = timing_enabled.then(Instant::now);
-                let too_deep = skull_mir::monoty::too_deep_to_instantiate(
-                    inst.args
-                        .iter()
-                        .map(|a| self.interner.get(*a))
-                        .collect::<Vec<_>>()
-                        .iter(),
-                )
-                .is_some();
-                if too_deep {
-                    add_elapsed(&mut out.timing.admissibility_ns, admissibility_start);
-                    out.depth_capped = true;
-                    return out;
-                }
-                let f = &ws.module(inst.func.module).functions[inst.func.func];
-                let is_boundary = declared_boundary(f).is_some();
-                add_elapsed(&mut out.timing.admissibility_ns, admissibility_start);
-                if is_boundary {
-                    return out;
-                }
-                let prep_start = timing_enabled.then(Instant::now);
-                let FunctionBody::Ready { inf, body } = function_body(ws, inst.func) else {
-                    add_elapsed(&mut out.timing.body_prep_ns, prep_start);
-                    return out;
-                };
-                // A boundary's Rock body is not the one emission uses -- it
-                // emits the foreign text -- so the walk STOPS here. Marking it
-                // unexpanded while continuing to enumerate its calls was the
-                // worst of both: the closure gate excused the instance as having
-                // no callees while the graph carried them, and a
-                // `@native_required` fallback body reached callees emission
-                // never routes through.
-                out.expanded = true;
-                // A body's own substitution is the one its caller reached it
-                // under, which the contribution set already answers. An
-                // instance with no record is an invariant break, not a body to
-                // walk with an empty one.
-                let subst = self
-                    .substitution(inst)
-                    .cloned()
-                    .expect("every reached instance has a recorded substitution");
-                let owner_tree = self.bound_tree(inst).cloned().unwrap_or_default();
-                add_elapsed(&mut out.timing.body_prep_ns, prep_start);
-                let mut w = Walk {
-                    interner: &self.interner,
-                    owner_tree: Some(&owner_tree),
-                    out: &mut out,
-                    timing_enabled,
-                };
-                let walk_start = w.timer();
-                walk_body_edges(
-                    &mut w,
-                    ws,
-                    inf,
-                    Some(body),
-                    Some(inst),
-                    &subst,
-                    &SiteDomain::Own,
-                    None,
-                );
-                add_elapsed(&mut w.out.timing.walk_body_edges_ns, walk_start);
-                for site in
-                    crate::identity_storage::substitution_only_sites(ws, f, body, inf, &subst)
-                {
-                    w.push_rejection(Rejection {
-                        kind: RejectionKind::IdentityInOrdinaryStorage,
-                        at: inst.clone(),
-                        span: site.span,
-                        message: format!("in this instantiation of `{}`, {}", f.name, site.message),
-                    });
-                }
+                return out;
+            };
+            let body = ws.module(*module).bodies.get(body_owner);
+            add_elapsed(&mut out.timing.body_prep_ns, prep_start);
+            let mut w = Walk {
+                interner,
+                owner_tree: None,
+                out: &mut out,
+                timing_enabled,
+            };
+            let walk_start = w.timer();
+            walk_body_edges(
+                &mut w,
+                ws,
+                inf,
+                body,
+                None,
+                &MonoSubst::default(),
+                &SiteDomain::Own,
+                None,
+            );
+            add_elapsed(&mut w.out.timing.walk_body_edges_ns, walk_start);
+            // An always-emitted body's struct literals omit fields too --
+            // `global POLLER: CoroutinePoller = CoroutinePoller {}` reaches
+            // `coroutines: Arena<CoState> = arena_new()` exactly as an
+            // ordinary instance's literal would. `walk_struct_default_edges`
+            // was instance-only, so a struct default reached ONLY from a
+            // global initializer or a decorator body was invisible to the
+            // graph while emission (which lowers the same literal) still
+            // built and emitted it -- found by the Phase-2 population audit,
+            // identically on every corpus project (`arena_new<CoState>` and
+            // its own `__arena_new_owned<int>` call).
+            if let Some(body) = body {
                 let defaults_start = w.timer();
                 walk_struct_default_edges(
                     &mut w,
                     ws,
-                    inst.func.module,
+                    *module,
                     body,
-                    BodyOwner::Function(inst.func.func),
-                    Some(inst),
-                    &subst,
+                    *body_owner,
+                    None,
+                    &MonoSubst::default(),
                 );
                 add_elapsed(
                     &mut w.out.timing.walk_struct_default_edges_ns,
@@ -2420,9 +2377,170 @@ impl InstanceGraph {
                 );
             }
         }
-        out
+        Owner::Instance(inst) => {
+            // The one admissibility oracle, shared with both emitters. The
+            // graph DECLINES to expand where they reject: a capped instance
+            // is a changing-instance-recursion candidate, not yet a verdict.
+            let admissibility_start = timing_enabled.then(Instant::now);
+            let too_deep = skull_mir::monoty::too_deep_to_instantiate(
+                inst.args
+                    .iter()
+                    .map(|a| interner.get(*a))
+                    .collect::<Vec<_>>()
+                    .iter(),
+            )
+            .is_some();
+            if too_deep {
+                add_elapsed(&mut out.timing.admissibility_ns, admissibility_start);
+                out.depth_capped = true;
+                return out;
+            }
+            let f = &ws.module(inst.func.module).functions[inst.func.func];
+            let is_boundary = declared_boundary(f).is_some();
+            add_elapsed(&mut out.timing.admissibility_ns, admissibility_start);
+            if is_boundary {
+                return out;
+            }
+            let prep_start = timing_enabled.then(Instant::now);
+            let FunctionBody::Ready { inf, body } = function_body(ws, inst.func) else {
+                add_elapsed(&mut out.timing.body_prep_ns, prep_start);
+                return out;
+            };
+            // A boundary's Rock body is not the one emission uses -- it
+            // emits the foreign text -- so the walk STOPS here. Marking it
+            // unexpanded while continuing to enumerate its calls was the
+            // worst of both: the closure gate excused the instance as having
+            // no callees while the graph carried them, and a
+            // `@native_required` fallback body reached callees emission
+            // never routes through.
+            out.expanded = true;
+            // A body's own substitution is the one its caller reached it
+            // under, which the contribution set already answers. An
+            // instance with no record is an invariant break, not a body to
+            // walk with an empty one.
+            let subst = inputs
+                .subst
+                .as_ref()
+                .expect("every reached instance has a recorded substitution");
+            let default_tree = InstanceBoundTree::default();
+            let owner_tree = inputs.tree.as_ref().unwrap_or(&default_tree);
+            add_elapsed(&mut out.timing.body_prep_ns, prep_start);
+            let mut w = Walk {
+                interner,
+                owner_tree: Some(owner_tree),
+                out: &mut out,
+                timing_enabled,
+            };
+            let walk_start = w.timer();
+            walk_body_edges(
+                &mut w,
+                ws,
+                inf,
+                Some(body),
+                Some(inst),
+                subst,
+                &SiteDomain::Own,
+                None,
+            );
+            add_elapsed(&mut w.out.timing.walk_body_edges_ns, walk_start);
+            for site in crate::identity_storage::substitution_only_sites(ws, f, body, inf, subst) {
+                w.push_rejection(Rejection {
+                    kind: RejectionKind::IdentityInOrdinaryStorage,
+                    at: inst.clone(),
+                    span: site.span,
+                    message: format!("in this instantiation of `{}`, {}", f.name, site.message),
+                });
+            }
+            let defaults_start = w.timer();
+            walk_struct_default_edges(
+                &mut w,
+                ws,
+                inst.func.module,
+                body,
+                BodyOwner::Function(inst.func.func),
+                Some(inst),
+                subst,
+            );
+            add_elapsed(
+                &mut w.out.timing.walk_struct_default_edges_ns,
+                defaults_start,
+            );
+        }
+    }
+    out
+}
+
+/// What a walk of one owner reads of the graph: an instance's substitution
+/// and bound tree. An always-emitted owner reads neither.
+#[derive(Clone, Default)]
+struct WalkInputs {
+    subst: Option<MonoSubst>,
+    tree: Option<InstanceBoundTree>,
+}
+
+type WalkResult = (Option<Contribution>, u64);
+
+/// Owners per pool task in a wave's walk.
+const WALK_TASK_OWNERS: usize = 8;
+
+/// One owner's walk, run by whichever thread claims it first: a pool thread
+/// that picked up its task, or the installing thread once the owner's turn
+/// comes.
+struct OwnerWalk {
+    owner: Owner,
+    inputs: WalkInputs,
+    claimed: AtomicBool,
+    result: Mutex<Option<std::thread::Result<WalkResult>>>,
+}
+
+impl OwnerWalk {
+    fn new(owner: Owner, inputs: WalkInputs) -> Self {
+        OwnerWalk {
+            owner,
+            inputs,
+            claimed: AtomicBool::new(false),
+            result: Mutex::new(None),
+        }
     }
 
+    fn claim(&self) -> bool {
+        !self.claimed.swap(true, Ordering::AcqRel)
+    }
+
+    fn run(&self, ws: &Workspace, interner: &MonoInterner, timing_enabled: bool) -> WalkResult {
+        // An instance whose substitution was retracted has nothing to walk;
+        // the install decides what that means.
+        if self.owner.instance().is_some() && self.inputs.subst.is_none() {
+            return (None, 0);
+        }
+        let started = timing_enabled.then(Instant::now);
+        let c = expand(ws, interner, &self.owner, &self.inputs, timing_enabled);
+        (Some(c), elapsed_ns(started))
+    }
+
+    fn run_unclaimed(&self, ws: &Workspace, interner: &MonoInterner, timing_enabled: bool) {
+        if self.claim() {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                self.run(ws, interner, timing_enabled)
+            }));
+            *self.result.lock().expect("walk result") = Some(result);
+        }
+    }
+
+    fn finish(&self, ws: &Workspace, interner: &MonoInterner, timing_enabled: bool) -> WalkResult {
+        if self.claim() {
+            return self.run(ws, interner, timing_enabled);
+        }
+        loop {
+            if let Some(result) = self.result.lock().expect("walk result").take() {
+                return result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            }
+            std::thread::yield_now();
+        }
+    }
+}
+
+impl InstanceGraph {
     /// **Install a contribution, replacing whatever the owner had.**
     ///
     /// The ONE indexing path. A full build only ever installs; an update

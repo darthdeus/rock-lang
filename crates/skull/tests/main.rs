@@ -91,6 +91,7 @@ mod foreign_fn_value_delivery;
 mod generated_glue_roots;
 
 mod graph_update;
+mod graph_walk_threads;
 
 mod graph_snapshot;
 

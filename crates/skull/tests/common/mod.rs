@@ -826,3 +826,23 @@ pub fn has_vec_header(lua: &str, repr: &str, elem: Option<&str>) -> bool {
     };
     lua.contains(&own) || lua.contains(&shared)
 }
+
+/// A workspace of `files` over the real stdlib, or `None` when the sources do
+/// not parse or bone records an error -- for tests that sweep a corpus which
+/// includes deliberately rejected programs.
+pub fn try_ws_of_files(files: &[(&str, &str)]) -> Option<Workspace> {
+    let mut modules = skull_parser::stdlib::ModuleSet::with_stdlib([]).expect("stdlib parses");
+    for (file, src) in files {
+        modules.push(skull_parser::parse_module_clean(src, Ustr::from(file)).ok()?);
+    }
+    let ws = semantic_pass(&mut modules).ok()?;
+    let clean = ws
+        .inferences
+        .iter()
+        .flatten()
+        .all(|inf| inf.errors.values().all(|e| e.is_empty()))
+        && ws.modules.iter().all(|m| {
+            m.lowering_errors.values().all(|e| e.is_empty()) && m.interface_errors.is_empty()
+        });
+    clean.then_some(ws)
+}
