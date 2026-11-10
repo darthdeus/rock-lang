@@ -434,7 +434,7 @@ pub(crate) fn references(ws: &Workspace) -> Vec<Ref> {
                         ..
                     } => Some(CalleeSite {
                         name: *name,
-                        name_span: *name_span,
+                        name_span: body.name_spans[*name_span],
                         method: !args.is_empty() && body.method_call_recvs.contains(&args.start()),
                     }),
                     _ => None,

@@ -189,6 +189,10 @@ pub struct Body {
 
     pub expr_arena: Arena<Expr>,
     pub expr_spans: ArenaMap<Idx<Expr>, Span>,
+    /// The spans of names written inside an expression (a callee, an enum
+    /// and its variant). `Expr` holds an index here instead of the span so a
+    /// node stays a third of the size.
+    pub name_spans: Arena<Span>,
 
     pub lowered_tys: Arena<TypeExpr>,
     pub lowered_ty_spans: ArenaMap<Idx<TypeExpr>, Span>,
@@ -288,6 +292,7 @@ impl Default for Body {
 
             expr_arena: Default::default(),
             expr_spans: Default::default(),
+            name_spans: Default::default(),
 
             lowered_tys: Default::default(),
             lowered_ty_spans: Default::default(),
@@ -702,6 +707,11 @@ pub enum AsKind {
     Bitcast,
 }
 
+// Bodies hold hundreds of thousands of expressions for a large program, so a
+// wide payload (a span, a second family) belongs in a side table.
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(std::mem::size_of::<Expr>() <= 56);
+
 #[derive(Copy, Clone, Debug)]
 pub enum Expr {
     Unit,
@@ -837,9 +847,9 @@ pub enum Expr {
 
     EnumVariant {
         enum_name: Ustr,
-        enum_name_span: Span,
+        enum_name_span: Idx<Span>,
         variant: Ustr,
-        variant_span: Span,
+        variant_span: Idx<Span>,
         args: VariantArgs,
     },
 
@@ -876,7 +886,11 @@ pub enum Expr {
 
 #[derive(Copy, Clone, Debug)]
 pub enum Callee {
-    Unresolved { name: Ustr, name_span: Span },
+    /// `name_span` indexes [`Body::name_spans`].
+    Unresolved {
+        name: Ustr,
+        name_span: Idx<Span>,
+    },
     Local(Idx<BindingInfo>),
     Value(Idx<Expr>),
 }

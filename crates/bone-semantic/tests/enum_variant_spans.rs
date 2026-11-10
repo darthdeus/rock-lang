@@ -75,11 +75,15 @@ fn f(c: Color, s: Shape) -> int {
         unreachable!()
     };
     assert_eq!(
-        text(src, enum_name_span),
+        text(src, &body.name_spans[*enum_name_span]),
         "Color",
         "expr enum-qualifier token"
     );
-    assert_eq!(text(src, variant_span), "Red", "expr variant token");
+    assert_eq!(
+        text(src, &body.name_spans[*variant_span]),
+        "Red",
+        "expr variant token"
+    );
 
     // --- Unit-variant pattern: `Color::Green => ..`. ---
     let green = body

@@ -7,7 +7,7 @@
 
 use bone_core::text_edit::TextEditDelta;
 use bone_semantic::{
-    hir::{AnnoValue, Callee, Expr, Module, Pattern},
+    hir::{AnnoValue, Module, Pattern},
     prelude::*,
 };
 
@@ -73,68 +73,13 @@ pub fn shift_module_after_edit(
         for (_, b) in body.binding_arena.iter_mut() {
             sh.span(&mut b.span);
         }
-        // No catch-all arm: exhaustiveness is the tripwire. A new Expr/Pattern
-        // variant, or a new field on a span-carrying one (fields are named, not
-        // `..`), fails to compile until someone decides whether it holds a span
-        // that needs shifting. The behavioral net is the reference oracle in
-        // bone-query/tests/stale_spans_after_body_edit.rs.
-        for (_, e) in body.expr_arena.iter_mut() {
-            match e {
-                Expr::EnumVariant {
-                    enum_name: _,
-                    enum_name_span,
-                    variant: _,
-                    variant_span,
-                    args: _,
-                } => {
-                    sh.span(enum_name_span);
-                    sh.span(variant_span);
-                }
-                Expr::Call { callee, .. } => match callee {
-                    Callee::Unresolved { name: _, name_span } => sh.span(name_span),
-                    Callee::Local(_) | Callee::Value(_) => {}
-                },
-                Expr::Unit
-                | Expr::Null
-                | Expr::Hole(_)
-                | Expr::Int(_)
-                | Expr::Float(_)
-                | Expr::Bool(_)
-                | Expr::String(_)
-                | Expr::Var(_)
-                | Expr::Tuple(_)
-                | Expr::InterpolatedString(_)
-                | Expr::Not(..)
-                | Expr::BitNot(_)
-                | Expr::UnaryMinus(..)
-                | Expr::IncDec { .. }
-                | Expr::Return(_)
-                | Expr::Break
-                | Expr::Continue
-                | Expr::Yield(_)
-                | Expr::YieldDelegate(_)
-                | Expr::Spread(_)
-                | Expr::As { .. }
-                | Expr::Index { .. }
-                | Expr::Lambda { .. }
-                | Expr::SafeNav { .. }
-                | Expr::SafeNavLet { .. }
-                | Expr::SafeNavCall { .. }
-                | Expr::TupleIndex { .. }
-                | Expr::BinOp { .. }
-                | Expr::Block { .. }
-                | Expr::If { .. }
-                | Expr::IfLet { .. }
-                | Expr::Array(_)
-                | Expr::StructLiteral { .. }
-                | Expr::FieldAccess { .. }
-                | Expr::Global(_)
-                | Expr::SiblingRef(_)
-                | Expr::Range { .. }
-                | Expr::Assign { .. }
-                | Expr::CompoundAssign { .. }
-                | Expr::Match { .. } => {}
-            }
+        // `Expr` holds no spans: the names written inside expressions keep
+        // theirs in `name_spans`. Patterns still hold them inline, and the
+        // match below has no catch-all arm, so a new span-carrying variant
+        // fails to compile until someone shifts it. The behavioral net is the
+        // reference oracle in bone-query/tests/stale_spans_after_body_edit.rs.
+        for s in body.name_spans.values_mut() {
+            sh.span(s);
         }
         for (_, p) in body.pattern_arena.iter_mut() {
             match p {

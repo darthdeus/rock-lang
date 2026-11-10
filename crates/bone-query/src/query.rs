@@ -99,7 +99,7 @@ pub fn definition_at(
                         }
                     }
                 }
-                let (vs, ve) = variant_span.offset_range;
+                let (vs, ve) = body.name_spans[*variant_span].offset_range;
                 if vs <= offset && offset < ve {
                     variant_def_span(ws, Some(*enum_name), *variant)
                 } else {
@@ -400,7 +400,7 @@ pub fn hover_at(
                                 if let Some(h) =
                                     render_call_overloads_hover(ws, *name, selected, frag, sources)
                                 {
-                                    return Some((h, *name_span));
+                                    return Some((h, body.name_spans[*name_span]));
                                 }
                             }
                             // Variant construction (`Enum::Variant(..)`): the
@@ -437,15 +437,17 @@ pub fn hover_at(
                                         }
                                     }
                                 }
-                                let (vs, ve) = variant_span.offset_range;
+                                let (vs, ve) = body.name_spans[*variant_span].offset_range;
                                 if vs <= offset && offset < ve {
                                     if let Some(s) = render_variant(ws, Some(*enum_name), *variant)
                                     {
-                                        return Some((s, *variant_span));
+                                        return Some((s, body.name_spans[*variant_span]));
                                     }
-                                } else if enum_name_span.offset_range.0 <= offset && offset < vs {
+                                } else if body.name_spans[*enum_name_span].offset_range.0 <= offset
+                                    && offset < vs
+                                {
                                     if let Some(s) = render_enum_def(ws, *enum_name) {
-                                        return Some((s, *enum_name_span));
+                                        return Some((s, body.name_spans[*enum_name_span]));
                                     }
                                 }
                             }
@@ -1307,7 +1309,7 @@ fn newtype_references<'t>(ws: &Workspace, name: Ustr, text_of: TextOf<'_, 't>) -
                 } = expr
                 {
                     if *cn == name {
-                        push(*name_span);
+                        push(body.name_spans[*name_span]);
                     }
                 }
             }
@@ -2029,7 +2031,7 @@ fn enum_variant_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<(Ustr
             ..
         } = expr
         {
-            if span_contains(variant_span, offset) {
+            if span_contains(&body.name_spans[*variant_span], offset) {
                 return Some((*enum_name, *variant));
             }
         }
@@ -2093,7 +2095,7 @@ fn enum_variant_references(ws: &Workspace, ename: Ustr, variant: Ustr) -> Vec<Sp
                 } = expr
                 {
                     if *enum_name == ename && *v == variant {
-                        push(*variant_span);
+                        push(body.name_spans[*variant_span]);
                     }
                 }
             }
@@ -2150,7 +2152,7 @@ fn enum_at(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Ustr> {
             ..
         } = expr
         {
-            if span_contains(enum_name_span, offset) {
+            if span_contains(&body.name_spans[*enum_name_span], offset) {
                 return Some(*enum_name);
             }
         }
@@ -2209,7 +2211,7 @@ fn enum_references(ws: &Workspace, name: Ustr) -> Vec<Span> {
                 } = expr
                 {
                     if *enum_name == name {
-                        push(enum_name_span);
+                        push(&body.name_spans[*enum_name_span]);
                     }
                 }
             }
@@ -2802,7 +2804,7 @@ fn function_references_by_name<'t>(
                         hir::Expr::Call {
                             callee: hir::Callee::Unresolved { name_span, .. },
                             ..
-                        } => out.push(*name_span),
+                        } => out.push(body.name_spans[*name_span]),
                         // `recv?.method()` -- HIR keeps no method-token span,
                         // so locate the first whole-word `name` after the
                         // receiver in source text (nothing but `?.` and ws

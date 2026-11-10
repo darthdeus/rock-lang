@@ -1561,12 +1561,13 @@ pub(crate) fn lower_statement_value(
                 );
 
                 let args = IdxRange::new_inclusive(lambda..=lambda);
+                let name_span = body.name_spans.alloc(keyword_span.unwrap_or(s.span));
                 let call = ctx.alloc_expr(
                     body,
                     Expr::Call {
                         callee: Callee::Unresolved {
                             name: ustr(name),
-                            name_span: keyword_span.unwrap_or(s.span),
+                            name_span,
                         },
                         args,
                         generic_args: IdxRange::new_empty(),
@@ -1704,13 +1705,13 @@ pub(crate) fn lower_expr_value(
                                 Expr::Var(binding) => hir::Callee::Local(binding),
                                 _ => hir::Callee::Unresolved {
                                     name: callee_key,
-                                    name_span: name.span,
+                                    name_span: body.name_spans.alloc(name.span),
                                 },
                             }
                         }
                         None => hir::Callee::Unresolved {
                             name: callee_key,
-                            name_span: name.span,
+                            name_span: body.name_spans.alloc(name.span),
                         },
                     };
 
@@ -1753,7 +1754,7 @@ pub(crate) fn lower_expr_value(
                     Expr::Call {
                         callee: Callee::Unresolved {
                             name: callee_key,
-                            name_span: method.span,
+                            name_span: body.name_spans.alloc(method.span),
                         },
                         args: args_range,
                         generic_args: IdxRange::new_empty(),
@@ -1781,7 +1782,9 @@ pub(crate) fn lower_expr_value(
                     Expr::Call {
                         callee: hir::Callee::Unresolved {
                             name: key,
-                            name_span: path.segments.last().map_or(e.span, |segment| segment.span),
+                            name_span: body
+                                .name_spans
+                                .alloc(path.segments.last().map_or(e.span, |segment| segment.span)),
                         },
                         args: args_range,
                         generic_args,
@@ -1817,9 +1820,9 @@ pub(crate) fn lower_expr_value(
                         lower_exprs(ctx, a, body, scope, args.iter().map(|x| &x.value))?;
                     Expr::EnumVariant {
                         enum_name: enum_key,
-                        enum_name_span: e.span,
+                        enum_name_span: body.name_spans.alloc(e.span),
                         variant,
-                        variant_span: e.span,
+                        variant_span: body.name_spans.alloc(e.span),
                         args: VariantArgs::Tuple(args_range),
                     }
                 }
@@ -1843,9 +1846,9 @@ pub(crate) fn lower_expr_value(
 
                     Expr::EnumVariant {
                         enum_name: enum_key,
-                        enum_name_span: base.span,
+                        enum_name_span: body.name_spans.alloc(base.span),
                         variant: member.name,
-                        variant_span: member.span,
+                        variant_span: body.name_spans.alloc(member.span),
                         args: VariantArgs::Tuple(args_range),
                     }
                 }
@@ -2003,12 +2006,13 @@ pub(crate) fn lower_expr_value(
             } else {
                 let args = lower_exprs(ctx, a, body, scope, [left, right].into_iter())?;
 
+                let name_span = body.name_spans.alloc(e.span);
                 let call = ctx.alloc_expr(
                     body,
                     Expr::Call {
                         callee: Callee::Unresolved {
                             name: callee_key,
-                            name_span: e.span,
+                            name_span,
                         },
                         args,
                         generic_args: IdxRange::new_empty(),
@@ -2140,9 +2144,9 @@ pub(crate) fn lower_expr_value(
                 ) => Expr::Global(key),
                 Ok(resolve::MemberTarget::EnumVariant { enum_key, variant }) => Expr::EnumVariant {
                     enum_name: enum_key,
-                    enum_name_span: e.span,
+                    enum_name_span: body.name_spans.alloc(e.span),
                     variant,
-                    variant_span: e.span,
+                    variant_span: body.name_spans.alloc(e.span),
                     args: hir::VariantArgs::Unit,
                 },
                 Ok(resolve::MemberTarget::Type(key)) => Expr::Global(key),
@@ -2210,9 +2214,9 @@ pub(crate) fn lower_expr_value(
                 },
                 resolve::MemberTarget::EnumVariant { enum_key, variant } => Expr::EnumVariant {
                     enum_name: enum_key,
-                    enum_name_span: e.span,
+                    enum_name_span: body.name_spans.alloc(e.span),
                     variant,
-                    variant_span: e.span,
+                    variant_span: body.name_spans.alloc(e.span),
                     args: hir::VariantArgs::Record(fields_range),
                 },
                 resolve::MemberTarget::Global(key)
@@ -2238,9 +2242,9 @@ pub(crate) fn lower_expr_value(
             if let Some(enum_key) = enum_key {
                 Expr::EnumVariant {
                     enum_name: enum_key,
-                    enum_name_span: base.span,
+                    enum_name_span: body.name_spans.alloc(base.span),
                     variant: member.name,
-                    variant_span: member.span,
+                    variant_span: body.name_spans.alloc(member.span),
                     args: hir::VariantArgs::Unit,
                 }
             } else {
@@ -2280,9 +2284,9 @@ pub(crate) fn lower_expr_value(
             };
             Expr::EnumVariant {
                 enum_name: enum_key,
-                enum_name_span: enum_name.span,
+                enum_name_span: body.name_spans.alloc(enum_name.span),
                 variant: variant_name.name,
-                variant_span: variant_name.span,
+                variant_span: body.name_spans.alloc(variant_name.span),
 
                 args: hir::VariantArgs::Record(alloc_contiguous(
                     &mut body.struct_lit_field_arena,
@@ -4633,12 +4637,13 @@ fn lower_compound_assign_with_temps(
         let target = lower_expr(ctx, a, body, scope, a.e(left))?;
         let (callee_key, family) = ctx.resolve_callee_family(ustr(op_fn), e.span)?;
         let args = lower_exprs(ctx, a, body, scope, [left, right].into_iter())?;
+        let name_span = body.name_spans.alloc(e.span);
         let call = ctx.alloc_expr(
             body,
             Expr::Call {
                 callee: Callee::Unresolved {
                     name: callee_key,
-                    name_span: e.span,
+                    name_span,
                 },
                 args,
                 generic_args: IdxRange::new_empty(),

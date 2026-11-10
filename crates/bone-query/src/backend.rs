@@ -3018,7 +3018,10 @@ fn semantic_classifications(
                 // `Red`) -> enum member; the enum qualifier colors via the
                 // workspace name map.
                 Expr::EnumVariant { variant_span, .. } => {
-                    map.insert(variant_span.offset_range.0, (TT_ENUM_MEMBER, 0));
+                    map.insert(
+                        body.name_spans[*variant_span].offset_range.0,
+                        (TT_ENUM_MEMBER, 0),
+                    );
                 }
                 // A global use -> readonly variable, with the same
                 // nullable/refined flow logic as `Var` (bone refines globals
