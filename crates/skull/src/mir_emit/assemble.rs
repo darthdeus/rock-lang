@@ -969,11 +969,6 @@ pub(super) fn assemble(
     let (mut spec_chunks, spec_rejected) = specs.unwrap_or_else(|| {
         view_driven_specialized_chunks(ws, &cache.cg, &cache.scx, cache, &asm.needed_specs)
     });
-    if lifetime == CacheLifetime::OneShot {
-        let instances = cache.graph.instances.len();
-        drop_in_background(cache.graph.take_records());
-        release_stats.graph_instances = instances - cache.graph.instances.len();
-    }
     step("assembly: specialized chunks", &mut steps);
     let needed_foreign = collect_needed_foreign(ws, cache, &asm.always_emitted_calls, &spec_chunks);
     // Factory lowering is the last concrete-plan reader. Keep its text in the

@@ -3979,6 +3979,16 @@ impl InstanceGraph {
             .is_some_and(|a| !a.dissent.is_empty())
     }
 
+    /// Every instance [`Self::has_bound_tree_disagreement`] holds for.
+    pub fn bound_tree_dissenters(&self) -> FxHashSet<Instance> {
+        self.index
+            .trees
+            .iter()
+            .filter(|(_, a)| !a.dissent.is_empty())
+            .map(|(i, _)| i.clone())
+            .collect()
+    }
+
     pub fn bound_tree_disagreements(&self) -> impl Iterator<Item = BoundTreeDisagreement> + '_ {
         self.index.trees.iter().flat_map(|(i, a)| {
             let recorded = a.decided().clone();

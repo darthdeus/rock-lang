@@ -221,7 +221,10 @@ pub(super) type SpecChunks = (FxHashMap<Instance, Chunk>, Vec<(String, CompilerE
 pub(super) struct SpecQueue<'a> {
     ws: &'a Workspace,
     scx: &'a skull_mir::lower::ScalarCtx,
-    graph: &'a crate::instance_graph::InstanceGraph,
+    /// The instances the graph reached with two different witness trees. A
+    /// set rather than the graph, so a one-shot build can free the graph's
+    /// records before the fan-out that reads this.
+    dissenters: FxHashSet<Instance>,
     /// A retained cache's chunks, whose specialized entries are reused rather
     /// than built again. A full build has none.
     cached: Option<&'a FxHashMap<Instance, Result<Chunk, CompilerError>>>,
@@ -238,13 +241,13 @@ impl<'a> SpecQueue<'a> {
     pub(super) fn new(
         ws: &'a Workspace,
         scx: &'a skull_mir::lower::ScalarCtx,
-        graph: &'a crate::instance_graph::InstanceGraph,
+        graph: &crate::instance_graph::InstanceGraph,
         cached: Option<&'a FxHashMap<Instance, Result<Chunk, CompilerError>>>,
     ) -> Self {
         Self {
             ws,
             scx,
-            graph,
+            dissenters: graph.bound_tree_dissenters(),
             cached,
             done: std::sync::Mutex::new(FxHashSet::default()),
             outcomes: std::sync::Mutex::new(Vec::new()),
@@ -289,7 +292,7 @@ impl<'a> SpecQueue<'a> {
             self.record(name, inst, Err(err));
             return;
         }
-        if self.graph.has_bound_tree_disagreement(&inst) {
+        if self.dissenters.contains(&inst) {
             let (name, err) = demand_clash(self.ws, self.scx, &inst);
             self.record(name, inst, Err(err));
             return;

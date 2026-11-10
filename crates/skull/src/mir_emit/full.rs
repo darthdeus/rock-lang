@@ -828,7 +828,7 @@ fn emit_full_chunks<'a>(
     ws: &'a Workspace,
     cg: &CodegenCtx,
     scx: &'a skull_mir::lower::ScalarCtx,
-    graph: &'a crate::instance_graph::InstanceGraph,
+    mut queue: SpecQueue<'a>,
     concrete: &crate::concrete_body::ConcreteBodies,
     lua_view: &crate::artifact::ArtifactView,
     mutation: BodyMutation,
@@ -874,7 +874,6 @@ fn emit_full_chunks<'a>(
             None,
         )
     })?;
-    let mut queue = SpecQueue::new(ws, scx, graph, None);
     queue.attribution = attribution;
     #[cfg(test)]
     if let Some(hook) = queue.hook() {
@@ -1060,7 +1059,7 @@ pub(super) fn emit_full_build(
             },
         )
     });
-    let (graph, selected_sim_functions) = graph_result?;
+    let (mut graph, selected_sim_functions) = graph_result?;
     // The CPU artifact view and the codegen context read only the graph, so
     // they are built while the concrete plans are.
     let (mut concrete, lanes) = setup_phases.timed("setup: concrete plans+lanes", || {
@@ -1086,6 +1085,12 @@ pub(super) fn emit_full_build(
     });
 
     let setup_traffic = (scx.rep_arena_stats(), scx.interner().stats());
+    // Nothing the fan-out lowers reads the graph's records; only the shader
+    // view beside it does. A one-shot build hands them to that lane, which
+    // frees them when it finishes, so the fan-out reuses their memory.
+    let graph_records = (build.lifetime() == CacheLifetime::OneShot).then(|| graph.take_records());
+    let released_graph_instances = graph_records.as_ref().map_or(0, |r| r.instances.len());
+    let spec_queue = SpecQueue::new(ws, &scx, graph_records.as_ref().unwrap_or(&graph), None);
     // The chunk-free assembly inputs (scaffold, decorator and global units,
     // globals directory) are prepared beside the chunk build, on the same
     // pool, instead of serially at the start of assembly. So is the shader
@@ -1096,7 +1101,7 @@ pub(super) fn emit_full_build(
                 ws,
                 &cg,
                 &scx,
-                &graph,
+                spec_queue,
                 &concrete,
                 &lua_view,
                 mutation,
@@ -1112,13 +1117,17 @@ pub(super) fn emit_full_build(
                     (early, started.elapsed())
                 },
                 || {
-                    shader_lane(
+                    let lane = shader_lane(
                         ws,
-                        &graph,
+                        graph_records.as_ref().unwrap_or(&graph),
                         &shader_programs,
                         &shader_collection,
                         std::sync::Arc::clone(&concrete.plans),
-                    )
+                    );
+                    if let Some(records) = graph_records {
+                        drop_in_background(records);
+                    }
+                    lane
                 },
             )
         },
@@ -1208,6 +1217,7 @@ pub(super) fn emit_full_build(
         Some(specs),
     )?;
     let assembly_window = assembly_started.elapsed();
+    emit.release_stats.graph_instances = released_graph_instances;
     emit.concrete_stats = concrete_stats;
     emit.setup_lanes = setup_lanes;
     let mut phases = setup_phases.0;
