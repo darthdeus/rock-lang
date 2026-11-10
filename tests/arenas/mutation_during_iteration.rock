@@ -78,3 +78,157 @@ fn grow_then_remove_during_pairs() {
     }
     print("{seen} {sum} {units.len()}")
 }
+
+// The same answers when the arena itself is the loop's head, with a pair
+// pattern, a single binding and under `enumerate`.
+
+@test(output = "3 9 0")
+fn clear_during_arena_loop() {
+    let units = three_units()
+    let seen = 0
+    let sum = 0
+    for (entity, unit) in units {
+        if seen == 0 { units.clear() }
+        seen += 1
+        sum += unit.hp + entity._slot
+    }
+    print("{seen} {sum} {units.len()}")
+}
+
+@test(output = "3 9 23")
+fn grow_then_remove_during_arena_loop() {
+    let units = three_units()
+    let last = units.insert(Unit { hp: 4 })
+    let seen = 0
+    let sum = 0
+    for (entity, unit) in units {
+        if seen == 0 {
+            for i in 0..20 { units.insert(Unit { hp: 100 }) }
+            units.remove(last)
+        }
+        seen += 1
+        sum += unit.hp + entity._generation
+    }
+    print("{seen} {sum} {units.len()}")
+}
+
+@test(output = "3 6 23")
+fn grow_then_remove_during_single_binding_loop() {
+    let units = three_units()
+    let last = units.insert(Unit { hp: 4 })
+    let seen = 0
+    let sum = 0
+    for item in units {
+        if seen == 0 {
+            for i in 0..20 { units.insert(Unit { hp: 100 }) }
+            units.remove(last)
+        }
+        seen += 1
+        sum += item.1.hp
+    }
+    print("{seen} {sum} {units.len()}")
+}
+
+@test(output = "3 8 23")
+fn grow_then_remove_during_enumerated_loop() {
+    let units = three_units()
+    let last = units.insert(Unit { hp: 4 })
+    let seen = 0
+    let sum = 0
+    for (i, (entity, unit)) in enumerate(units) {
+        if seen == 0 {
+            for k in 0..20 { units.insert(Unit { hp: 100 }) }
+            units.remove(last)
+        }
+        seen += 1
+        sum += unit.hp * i
+    }
+    print("{seen} {sum} {units.len()}")
+}
+
+// A slot freed during the loop and filled again before the loop reaches it is
+// visited with its new row.
+@test(output = "1,9,3, 3")
+fn a_reused_slot_ahead_of_the_loop_is_visited() {
+    let units: Arena<Unit> = arena_new()
+    units.insert(Unit { hp: 1 })
+    let second = units.insert(Unit { hp: 2 })
+    units.insert(Unit { hp: 3 })
+    let out = ""
+    for (entity, unit) in units {
+        if unit.hp == 1 {
+            units.remove(second)
+            units.insert(Unit { hp: 9 })
+        }
+        out = out + "{unit.hp},"
+    }
+    print("{out} {units.len()}")
+}
+
+@test(output = "0")
+fn a_retired_arena_runs_no_turn() {
+    let units = three_units()
+    arena_destroy(units)
+    let seen = 0
+    for (entity, unit) in units { seen += 1 }
+    print("{seen}")
+}
+
+@test(output = "2,3, stopped at 4 skipped 1")
+fn arena_loop_break_and_continue() {
+    let units = three_units()
+    units.insert(Unit { hp: 4 })
+    units.insert(Unit { hp: 5 })
+    let out = ""
+    let stopped = 0
+    let skipped = 0
+    for (entity, unit) in units {
+        if unit.hp == 1 {
+            skipped += 1
+            continue
+        }
+        if unit.hp == 4 {
+            stopped = unit.hp
+            break
+        }
+        out = out + "{unit.hp},"
+    }
+    print("{out} stopped at {stopped} skipped {skipped}")
+}
+
+@test(output = "11,12,13,21,22,23,31,32,33,")
+fn nested_loops_over_the_same_arena() {
+    let units = three_units()
+    let out = ""
+    for (ea, a) in units {
+        for (eb, b) in units {
+            out = out + "{a.hp * 10 + b.hp},"
+        }
+    }
+    print(out)
+}
+
+@test(output = "10 21 32")
+fn closures_capture_each_arena_turn() {
+    let units = three_units()
+    let fs: [fn() -> int] = []
+    for (entity, unit) in units {
+        fs.push(() => unit.hp * 10 + entity._slot)
+    }
+    print("{fs[0]()} {fs[1]()} {fs[2]()}")
+}
+
+@test(output = "6 true")
+fn the_loops_entity_resolves_its_row() {
+    let units = three_units()
+    let sum = 0
+    let all = true
+    for (entity, unit) in units {
+        if let found = units.get(entity) {
+            sum += found.hp
+        } else {
+            all = false
+        }
+    }
+    print("{sum} {all}")
+}

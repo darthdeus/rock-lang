@@ -1,4 +1,4 @@
-// Microbenchmark for loops over a vector and for `xs[i]` reads.
+// Microbenchmark for loops over a vector or an arena and for `xs[i]` reads.
 //
 //     rock run benchmarks/vec_loop.rock
 //
@@ -123,6 +123,31 @@ fn sum_pairs(xs: [int]) -> int {
     return t
 }
 
+fn units(n: int) -> Arena<Mote> {
+    let out: Arena<Mote> = arena_new()
+    let drop: [Entity<Mote>] = []
+    for i in 0..n {
+        let e = out.insert(Mote { x: (i % 13) as float, y: (i % 5) as float, life: i % 9 })
+        if i % 10 == 3 { drop.push(e) }
+    }
+    for e in drop { out.remove(e) }
+    return out
+}
+
+fn sum_arena(us: Arena<Mote>) -> int {
+    let t = 0
+    for (e, u) in us { t += u.life + e._slot % 2 }
+    return t
+}
+
+fn count_arena(us: Arena<Mote>) -> int {
+    let t = 0
+    for item in us {
+        if item.1.life > 4 { t += 1 }
+    }
+    return t
+}
+
 fn report(name: string, counts: string, elems: int, jit_s: float, interp_elems: int, interp_s: float, sink: float) {
     let ns = jit_s * 1000000000.0 / (elems as float)
     let interp_ns = interp_s * 1000000000.0 / (interp_elems as float)
@@ -166,4 +191,8 @@ fn main() {
     drive("sum_field", 1000, 20000, () => sum_field(swarm))
     drive("copy_big", 1000, 10000, () => copy_big(xs, out) as float)
     drive("sum_grid", 1000, 20000, () => sum_grid(grid) as float)
+    // One slot in ten is free.
+    let arena = units(1000)
+    drive("sum_arena", 900, 20000, () => sum_arena(arena) as float)
+    drive("count_arena", 900, 20000, () => count_arena(arena) as float)
 }

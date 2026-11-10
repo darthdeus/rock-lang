@@ -106,11 +106,26 @@ impl<'a> Builder<'a> {
             // recorded iterator. The walk's synthesized `__arena_store_or_empty`
             // call has no instance-graph site, which only JS checks strictly.
             // Adding that site would let JS take the walk too.
-            if !self.scx.row_value_containers
-                && self.scx.target() == bone_core::hir::FnBackend::Lua
-                && let Some(collection) = enumerated_collection.filter(|&c| self.iter_is_arena(c))
+            if !self.scx.row_value_containers && self.scx.target() == bone_core::hir::FnBackend::Lua
             {
-                return self.lower_for_arena(&vars, collection, body, true);
+                if let Some(collection) = enumerated_collection.filter(|&c| self.iter_is_arena(c)) {
+                    return self.lower_for_arena(&vars, collection, body, true);
+                }
+                // The arena itself as the head takes the same walk: `next` of
+                // the stdlib pair iterator skips free slots in an inner loop,
+                // which inlines to a flag-driven goto loop no pass turns back
+                // into a counted one.
+                let walkable = match &vars {
+                    BindingPattern::Leaf(_) => true,
+                    BindingPattern::Tuple(subs) => subs.len() == 2,
+                };
+                if enumerated_collection.is_none()
+                    && walkable
+                    && self.iter_is_arena(iter)
+                    && vars.leaves().iter().all(|&b| !self.binding_is_ref(b))
+                {
+                    return self.lower_for_arena(&vars, iter, body, false);
+                }
             }
             return self.lower_for_user_iter(&vars, iter, body, &info);
         }

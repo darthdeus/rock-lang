@@ -150,6 +150,20 @@ fn arena_bare_loop_unused_entity_allocates_nothing() {
     );
 }
 
+/// The arena as a loop's head walks its slots in a counted `for` that skips
+/// the free ones: no back edge and no `next` call.
+#[test]
+fn arena_bare_loop_is_a_counted_for() {
+    for src in [ARENA_BARE_LOOP_UNUSED_ENTITY, ARENA_BARE_LOOP_USED_ENTITY] {
+        let lua = emit_module(src);
+        let hot = function_body(&lua, "hot");
+        assert!(
+            hot.contains("for ") && !hot.contains("goto") && !hot.contains("next"),
+            "{hot}"
+        );
+    }
+}
+
 // `Entity<T>` is a `value` struct (GC-carrying tier). An entity passed to a
 // scalar-ABI callee (`get(e)`) scalarizes into per-field leaf args -- NO
 // Entity table materializes even though the entity is "used". This is the full
