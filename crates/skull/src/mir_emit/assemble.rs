@@ -117,7 +117,11 @@ impl Assembly {
             out: String::new(),
             times: PhaseTimes::default(),
             t_scaffold: Duration::ZERO,
-            attribution: candidate_setup_attribution(cache),
+            attribution: if cache.attribution {
+                candidate_setup_attribution(cache)
+            } else {
+                AttributionAccumulator::default()
+            },
             needed_specs: Vec::new(),
             rejections: Rejections::default(),
             direct_globals: FxHashMap::default(),
@@ -451,6 +455,7 @@ impl Assembly {
 /// assembly's attribution.
 fn candidate_setup_attribution(cache: &SkullEmitCache) -> AttributionAccumulator {
     let mut attribution = AttributionAccumulator {
+        enabled: true,
         census_enabled: cache.inline_cache.census_enabled(),
         ..AttributionAccumulator::default()
     };

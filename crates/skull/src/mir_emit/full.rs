@@ -1006,6 +1006,7 @@ pub(super) fn emit_full_build(
         shapes,
         mutation,
         fingerprint,
+        attribution,
     } = options;
     let mut setup_phases = SetupPhases::default();
     let project_root = setup_phases.timed("setup: validation+context", || {
@@ -1147,6 +1148,7 @@ pub(super) fn emit_full_build(
     } = roots;
     let mut cache = SkullEmitCache {
         chunks,
+        attribution,
         concrete,
         graph,
         lua_view,

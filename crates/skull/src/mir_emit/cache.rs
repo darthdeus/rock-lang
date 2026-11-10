@@ -35,6 +35,8 @@ fn rebuild_chunk(
 /// [`assemble`] every time.
 pub struct SkullEmitCache {
     pub(super) chunks: FxHashMap<Instance, Result<Chunk, CompilerError>>,
+    /// Whether assembly folds body attribution ([`FullEmit::with_attribution`]).
+    pub(super) attribution: bool,
     pub(super) concrete: crate::concrete_body::ConcreteBodies,
     /// **The authoritative instance graph, built EAGERLY by the full build
     /// before any chunk is lowered, and retained across body edits.**

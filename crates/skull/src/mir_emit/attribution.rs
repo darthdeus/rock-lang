@@ -382,6 +382,8 @@ pub(super) struct AttributionAccumulator {
     pub(super) top_bodies: Vec<BodyAttributionOwner>,
     /// Per-callee inline totals, named only once the report is built.
     pub(super) owner_totals: FxHashMap<FuncRef, (usize, usize, u64, usize, usize)>,
+    /// Off unless the build asked for attribution: then nothing is folded.
+    pub(super) enabled: bool,
     pub(super) census_enabled: bool,
     pub(super) candidate_published_keys: FxHashSet<Instance>,
     pub(super) candidate_eligible_keys: FxHashSet<Instance>,
@@ -565,7 +567,7 @@ fn finish_distribution(phase: &mut AttributionPhase, samples: &mut [u64]) {
 
 impl AttributionAccumulator {
     pub(super) fn add_unit(&mut self, unit: &UnitAttribution) {
-        if !unit.examined {
+        if !self.enabled || !unit.examined {
             return;
         }
         self.result.bodies_examined += 1;

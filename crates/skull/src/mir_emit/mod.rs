@@ -165,6 +165,7 @@ pub enum ShaderLanguage {
 /// build kinds and options.
 pub fn emit_workspace_mir(ws: &Workspace, user_mid: ModuleId) -> Result<MirEmit, CompilerError> {
     FullEmit::one_shot()
+        .with_attribution()
         .run(ws, user_mid)
         .map(|(emit, _cache)| emit)
 }
@@ -194,6 +195,7 @@ pub struct FullEmit<'a> {
     shapes: ShapeOverrides,
     mutation: BodyMutation,
     fingerprint: bool,
+    attribution: bool,
 }
 
 impl<'a> FullEmit<'a> {
@@ -205,6 +207,7 @@ impl<'a> FullEmit<'a> {
             shapes: ShapeOverrides::default(),
             mutation: BodyMutation::None,
             fingerprint: true,
+            attribution: false,
         }
     }
 
@@ -245,6 +248,14 @@ impl<'a> FullEmit<'a> {
     /// serial tail of assembly.
     pub fn without_fingerprint(mut self) -> Self {
         self.fingerprint = false;
+        self
+    }
+
+    /// Fold every emitted body's attribution record into
+    /// [`MirEmit::attribution`]. Only the backend statistics read it, so a
+    /// build that does not ask skips the fold.
+    pub fn with_attribution(mut self) -> Self {
+        self.attribution = true;
         self
     }
 

@@ -637,8 +637,19 @@ fn main() {
     ) -> Result<(Workspace, SkullEmitCache, MirEmit), CompilerError> {
         let ws = workspace();
         let mid = ws.source_modules().next().expect("test module").id;
-        let (emit, cache) = FullEmit::program().mutation(mutation).run(&ws, mid)?;
+        let (emit, cache) = FullEmit::program()
+            .mutation(mutation)
+            .with_attribution()
+            .run(&ws, mid)?;
         Ok((ws, cache, emit))
+    }
+
+    /// These tests read the attribution census, which a build must ask for.
+    fn emit_full(
+        ws: &Workspace,
+        mid: ModuleId,
+    ) -> Result<(MirEmit, SkullEmitCache), CompilerError> {
+        FullEmit::program().with_attribution().run(ws, mid)
     }
 
     fn assert_rejection_or_residual(
@@ -823,6 +834,20 @@ fn main() { let result = first() }
             emit.abi_plan_stats, stats,
             "the reported stats must be the context's own counters"
         );
+    }
+
+    #[test]
+    fn body_attribution_is_folded_only_when_requested() {
+        let ws = workspace();
+        let mid = ws.source_modules().next().expect("test module").id;
+        let (plain, _) = FullEmit::program().run(&ws, mid).expect("plain emission");
+        assert_eq!(plain.attribution.bodies_examined, 0);
+        let (attributed, _) = FullEmit::program()
+            .with_attribution()
+            .run(&ws, mid)
+            .expect("attributed emission");
+        assert!(attributed.attribution.bodies_examined > 0);
+        assert_eq!(plain.lua, attributed.lua);
     }
 
     #[test]
