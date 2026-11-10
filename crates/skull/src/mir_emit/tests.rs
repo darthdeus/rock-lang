@@ -1269,8 +1269,7 @@ fn main() { let result = run(4) }
         );
         let forwarded = row(CellProducer::InlineParam);
         assert!(
-            forwarded.stores_unlinked > 0
-                && forwarded.spliced_stores_unlinked == forwarded.stores_unlinked
+            forwarded.spliced_stores_unlinked == forwarded.stores_unlinked
                 && forwarded.spliced_loads_unlinked == forwarded.loads_unlinked,
             "only spliced code touches a non-coalesced inline parameter: {census:?}"
         );
@@ -1286,6 +1285,55 @@ fn main() { let result = run(4) }
                 producer.label()
             );
         }
+    }
+
+    const PARAM_FORWARD_SRC: &str = r#"
+@inline
+fn twice(n: int) -> int { return n + n }
+
+@inline
+fn wrap(n: int) -> int { return twice(n) }
+
+@inline
+fn same(n: int) -> int { return n }
+
+@inline
+fn pick(n: int, flag: bool) -> int {
+    if flag { return twice(n) }
+    return n
+}
+
+fn main() {
+    let a = 3 + 4
+    print(wrap(a * 2))
+    print(same(a + 1))
+    print(pick(a - 1, a > 2))
+}
+"#;
+
+    /// A parameter the callee never rebinds holds its argument for the whole
+    /// body, so every read -- one passed on to a call or returned included --
+    /// takes the argument directly, and no parameter cell reaches cleanup.
+    #[test]
+    fn spliced_reads_of_an_unwritten_parameter_take_the_argument() {
+        use skull_mir::mir::CellProducer;
+        let _inline = InlineOn::on();
+        let _census = InlineCensusOn::on();
+        let mut modules = STDLIB.clone();
+        modules.push(
+            skull_parser::parse_module_clean(PARAM_FORWARD_SRC, Ustr::from("<param-forward>"))
+                .expect("parse"),
+        );
+        let ws = bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic");
+        let mid = module_id(&ws, "<param-forward>");
+        let (emit, _) = emit_full(&ws, mid).expect("intact emission");
+        let census = &emit.attribution.inline.census.load_store;
+        let params = census.rows[CellProducer::InlineParam as usize];
+        assert_eq!(
+            (params.loads_before, params.stores_before),
+            (0, 0),
+            "{census:?}"
+        );
     }
 
     #[test]
