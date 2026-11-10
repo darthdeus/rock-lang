@@ -398,10 +398,7 @@ impl<'a> Builder<'a> {
         } else {
             let cells =
                 self.group_binds[&raw(binding.expect("grouped projection"))].0[range].to_vec();
-            cells
-                .into_iter()
-                .map(|cell| self.emit_cur(Inst::Load(cell)))
-                .collect()
+            cells.into_iter().map(|leaf| self.read_leaf(leaf)).collect()
         };
         let repr = match selected {
             FieldShape::Prim => ValueRepr::Scalar(leaves[0]),
@@ -574,10 +571,7 @@ impl<'a> Builder<'a> {
             // Its value children are still the caller's or the storage's.
             Expr::Var(b) if self.group_binds.contains_key(&raw(b)) => {
                 let (cells, shape) = self.group_binds.get(&raw(b)).cloned().unwrap();
-                let leaves: Vec<Idx<Inst>> = cells
-                    .iter()
-                    .map(|c| self.emit_cur(Inst::Load(*c)))
-                    .collect();
+                let leaves: Vec<Idx<Inst>> = cells.iter().map(|&c| self.read_leaf(c)).collect();
                 let mut idx = 0;
                 let repr = self.rebuild_from_leaves(&shape, &leaves, &mut idx);
                 if !self.scx.values_first_class {

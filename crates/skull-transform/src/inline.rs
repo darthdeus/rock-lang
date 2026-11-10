@@ -1514,6 +1514,7 @@ fn compact_region(
     template.rep_arena = arena.rep_arena.clone();
     template.params = header.params.iter().map(|param| cell_map[param]).collect();
     template.value_lets = header.value_lets;
+    template.value_leaves = header.value_leaves;
     template.lower_timing_enabled = arena.lower_timing_enabled;
     template.lower_attribution = arena.lower_attribution.clone();
     template.abi_plan = header.abi_plan.clone();
@@ -3631,7 +3632,7 @@ fn inline_functions_inner(
     // before it, so the next scan starts there (turns the per-splice full re-scan
     // from O(splices x size) into a single forward sweep).
     let mut resume: Option<(Idx<Block>, usize)> = None;
-    let mut cell_budget = func.cells.len();
+    let mut cell_budget = func.cells.len() + func.value_leaves;
     let mut budget = MAX_INLINES_PER_FN;
     while budget > 0 {
         let Some(site) = find_site(
@@ -3743,6 +3744,7 @@ fn inline_functions_inner(
         func.struct_registry_roots
             .extend(cand.func.struct_registry_roots.iter().copied());
         func.value_lets += cand.func.value_lets;
+        func.value_leaves += cand.func.value_leaves;
         cell_budget += cand.budget_cells().saturating_sub(coalesced_cells) + result_cell;
         spliced.insert(fref);
         resume = Some(pos);

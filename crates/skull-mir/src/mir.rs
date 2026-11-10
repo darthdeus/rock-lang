@@ -1283,6 +1283,10 @@ pub struct MirFunc {
     /// still charges a splice for its callee's, so the cell budget bounds the
     /// same expansion; the caller's own cost nothing, like a direct argument.
     pub value_lets: usize,
+    /// The leaves of scalarized bindings held as values, also counted in
+    /// `value_lets`. Unlike a whole `let`, the caller's own still count
+    /// against its budget, as their cells did.
+    pub value_leaves: usize,
     /// Opt-in timing for arena growth attribution.
     pub lower_timing_enabled: bool,
     pub lower_attribution: crate::lower::LowerAttribution,
@@ -1508,6 +1512,7 @@ impl MirFunc {
             param_default_materialized: Default::default(),
             param_default_values: Default::default(),
             value_lets: 0,
+            value_leaves: 0,
             lower_timing_enabled: crate::lower::lower_attribution_timing_enabled(),
             lower_attribution: Default::default(),
             abi_plan: None,

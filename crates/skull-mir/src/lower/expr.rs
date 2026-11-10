@@ -1094,7 +1094,7 @@ impl<'a> Builder<'a> {
     /// local or parameter field write means, and the only form a `nobox`
     /// binding has. `None` once the path leaves the cells, through a reference
     /// or an opaque value child.
-    fn group_leaf_place(&self, e: Idx<Expr>) -> Option<(Vec<Idx<Cell>>, FieldShape)> {
+    fn group_leaf_place(&self, e: Idx<Expr>) -> Option<(Vec<GroupLeaf>, FieldShape)> {
         match self.group_leaf_walk(e)? {
             (guards, cells, selected) if guards.is_empty() => Some((cells, selected)),
             _ => None,
@@ -1106,7 +1106,7 @@ impl<'a> Builder<'a> {
     fn group_leaf_walk(
         &self,
         e: Idx<Expr>,
-    ) -> Option<(Vec<Idx<Cell>>, Vec<Idx<Cell>>, FieldShape)> {
+    ) -> Option<(Vec<GroupLeaf>, Vec<GroupLeaf>, FieldShape)> {
         let mut links = Vec::new();
         let mut at = e;
         let b = loop {
@@ -1163,8 +1163,12 @@ impl<'a> Builder<'a> {
     fn group_leaf_place_base(
         &mut self,
         e: Idx<Expr>,
-        cell: Idx<Cell>,
+        leaf: GroupLeaf,
     ) -> Result<Idx<Inst>, CompilerError> {
+        let GroupLeaf::Cell(cell) = leaf else {
+            // Nothing writes through a binding held as values.
+            return Ok(self.read_leaf(leaf));
+        };
         let leaf = self.emit_cur(Inst::Load(cell));
         match self.concrete_expr_ty(e) {
             Some(ty)
@@ -1185,9 +1189,9 @@ impl<'a> Builder<'a> {
     }
 
     /// Branch to `absent` unless every presence cell in `guards` is set.
-    fn group_presence_guard(&mut self, guards: &[Idx<Cell>], absent: Idx<Block>) {
-        for &cell in guards {
-            let flag = self.emit_cur(Inst::Load(cell));
+    fn group_presence_guard(&mut self, guards: &[GroupLeaf], absent: Idx<Block>) {
+        for &leaf in guards {
+            let flag = self.read_leaf(leaf);
             let present = self.f.new_block();
             self.f.set_term(
                 self.cur,
@@ -1285,7 +1289,7 @@ impl<'a> Builder<'a> {
     fn group_leaf_store(
         &mut self,
         target: Idx<Expr>,
-        cells: &[Idx<Cell>],
+        cells: &[GroupLeaf],
         selected: &FieldShape,
         value: Idx<Expr>,
     ) -> Result<(), CompilerError> {
@@ -1299,8 +1303,11 @@ impl<'a> Builder<'a> {
                 self.repr_to_storage_leaves(&r, shape, "scalarized field assignment")?
             }
         };
-        for (cell, value) in cells.iter().zip(leaves) {
-            self.emit_cur(Inst::Store { cell: *cell, value });
+        for (leaf, value) in cells.iter().zip(leaves) {
+            self.emit_cur(Inst::Store {
+                cell: leaf.cell(),
+                value,
+            });
         }
         Ok(())
     }
@@ -1558,7 +1565,7 @@ impl<'a> Builder<'a> {
                     self.repr_to_storage_leaves(&r, &shape, "scalarized local assignment")?;
                 for (c, lv) in cells.iter().zip(leaves) {
                     self.emit_cur(Inst::Store {
-                        cell: *c,
+                        cell: c.cell(),
                         value: lv,
                     });
                 }
@@ -2028,13 +2035,11 @@ impl<'a> Builder<'a> {
             Expr::FieldAccess { .. }
                 if let Some((cells, FieldShape::Prim)) = self.group_leaf_place(target) =>
             {
-                let cur = self.emit_cur(Inst::Load(cells[0]));
+                let cell = cells[0].cell();
+                let cur = self.emit_cur(Inst::Load(cell));
                 let new_v =
                     self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
-                self.emit_cur(Inst::Store {
-                    cell: cells[0],
-                    value: new_v,
-                });
+                self.emit_cur(Inst::Store { cell, value: new_v });
             }
             Expr::FieldAccess { base, field } => {
                 if let Some((buf, checked, _, place)) = self.nb_leaf_rmw_place(target)? {
@@ -2090,13 +2095,11 @@ impl<'a> Builder<'a> {
             {
                 let join = self.f.new_block();
                 self.group_presence_guard(&guards, join);
-                let cur = self.emit_cur(Inst::Load(cells[0]));
+                let cell = cells[0].cell();
+                let cur = self.emit_cur(Inst::Load(cell));
                 let new_v =
                     self.compound_combine_f32(e, f32_target, scalar, op_fn, overload, cur, value)?;
-                self.emit_cur(Inst::Store {
-                    cell: cells[0],
-                    value: new_v,
-                });
+                self.emit_cur(Inst::Store { cell, value: new_v });
                 self.f.set_term(self.cur, Term::Goto(join));
                 self.cur = join;
             }
@@ -2255,12 +2258,10 @@ impl<'a> Builder<'a> {
             Expr::FieldAccess { .. }
                 if let Some((cells, FieldShape::Prim)) = self.group_leaf_place(target) =>
             {
-                let old = self.emit_cur(Inst::Load(cells[0]));
+                let cell = cells[0].cell();
+                let old = self.emit_cur(Inst::Load(cell));
                 let new = bump(self, old);
-                self.emit_cur(Inst::Store {
-                    cell: cells[0],
-                    value: new,
-                });
+                self.emit_cur(Inst::Store { cell, value: new });
                 Ok(if postfix { old } else { new })
             }
             Expr::FieldAccess { base, field } => {

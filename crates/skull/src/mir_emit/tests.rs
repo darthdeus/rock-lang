@@ -1144,6 +1144,7 @@ fn bump(n: int) -> int {
 fn run(seed: int) -> int {
     let (a, b) = split(seed)
     let p = make(a + b)
+    p.right = p.right + 1
     let t = tagged(seed + 1)
     let w = bump(seed * 3)
     return p.left + p.right + t.1 + w

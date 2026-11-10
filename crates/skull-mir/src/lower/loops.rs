@@ -1300,7 +1300,15 @@ impl<'a> Builder<'a> {
             BindingPattern::Leaf(b) => {
                 let key = raw(*b);
                 let single = self.binds.get(&key).copied();
-                let group = self.group_binds.get(&key).map(|(cells, _)| cells.clone());
+                let group = self.group_binds.get(&key).map(|(leaves, _)| {
+                    leaves
+                        .iter()
+                        .filter_map(|leaf| match leaf {
+                            GroupLeaf::Cell(cell) => Some(*cell),
+                            GroupLeaf::Value(_) => None,
+                        })
+                        .collect::<Vec<_>>()
+                });
                 let tuple = self.tuple_binds.get(&key).map(|(cells, _)| cells.clone());
                 for cell in single
                     .into_iter()
@@ -1389,7 +1397,15 @@ impl<'a> Builder<'a> {
             for (cell, &value) in cells.iter().zip(leaves) {
                 self.emit_cur(Inst::Store { cell: *cell, value });
             }
+            let cells = cells.into_iter().map(GroupLeaf::Cell).collect();
             self.group_binds.insert(raw(b), (cells, shape));
+            return Ok(());
+        }
+        if self.binding_stays_unwritten(b) {
+            self.f.value_lets += leaves.len();
+            self.f.value_leaves += leaves.len();
+            let values = leaves.iter().map(|&v| GroupLeaf::Value(v)).collect();
+            self.group_binds.insert(raw(b), (values, shape));
             return Ok(());
         }
         let leaf_tys = self.value_shape_leaf_monos(&shape).map(|tys| {
@@ -1397,7 +1413,7 @@ impl<'a> Builder<'a> {
                 .map(|ty| self.scx.interner().intern(ty))
                 .collect::<Vec<_>>()
         });
-        let cells: Vec<Idx<Cell>> = leaves
+        let cells: Vec<GroupLeaf> = leaves
             .iter()
             .enumerate()
             .map(|(li, &value)| {
@@ -1409,7 +1425,7 @@ impl<'a> Builder<'a> {
                 );
                 self.f.cells[c].native_ty = leaf_tys.as_ref().and_then(|tys| tys.get(li).copied());
                 self.emit_cur(Inst::Store { cell: c, value });
-                c
+                GroupLeaf::Cell(c)
             })
             .collect();
         self.group_binds.insert(raw(b), (cells, shape));

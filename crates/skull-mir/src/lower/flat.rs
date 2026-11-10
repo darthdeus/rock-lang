@@ -3,6 +3,11 @@
 //! and a flat literal both go through.
 use super::*;
 impl<'a> Builder<'a> {
+    /// A flat enum binding keeps its compiler-owned cells.
+    pub(crate) fn is_flat_enum_shape(&self, shape: &ValueShape) -> bool {
+        EnumPlan::for_name(self.ws, shape.name).is_some_and(|plan| plan.flat().is_some())
+    }
+
     pub(crate) fn new_flat_enum_cells(
         &mut self,
         binding: Idx<BindingInfo>,

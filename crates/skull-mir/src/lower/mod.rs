@@ -2181,10 +2181,10 @@ struct Builder<'a> {
     /// expression carries several distinct callee obligations and they must
     /// stay distinguishable.
     cur_op: crate::site::SiteOp,
-    /// A value PARAM binding -> (struct name, its leaf cells, shape). A read of
-    /// the param reconstructs the unboxed `Group` from these; a field read
-    /// projects a leaf directly (no cdata).
-    group_binds: HashMap<u32, (Vec<Idx<Cell>>, ValueShape)>,
+    /// A scalarized binding -> (its leaves, shape). A read of the binding
+    /// reconstructs the unboxed `Group` from these; a field read projects a
+    /// leaf directly (no cdata).
+    group_binds: HashMap<u32, (Vec<GroupLeaf>, ValueShape)>,
     /// Plain-cell `value` bindings first stored a freshly built box (a `let` of
     /// a ctor or pack). A reassignment copies a box it did not build, so every
     /// store stays a ctor and SROA can scalarize the binding. Whole-value uses
@@ -2362,20 +2362,33 @@ impl<'a> Builder<'a> {
         self.body_facts.get_or_init(|| BodyFacts::of(self.body))
     }
 
-    /// Bind a `let` to its value when nothing needs the binding as a cell: it
-    /// is never written again, never captured or borrowed, and holds no
-    /// aggregate (a value struct's whole read copies from its cell).
-    pub(crate) fn bind_let_value(&mut self, name: Idx<BindingInfo>, value: Idx<Inst>) -> bool {
+    /// A local that nothing writes, captures or borrows after its binding, so
+    /// it can be held as values with no cell.
+    pub(crate) fn binding_stays_unwritten(&self, name: Idx<BindingInfo>) -> bool {
         // Shader lowering keeps the cell: the GLSL emitter names a local only
         // for a cell, and writes a value out at every use.
-        if self.scx.values_first_class
+        !(self.scx.values_first_class
             || self.f.is_coroutine
             || self.body.binding_arena[name].kind != bone_core::hir::BindingKind::Let
             || self.binding_is_ref(name)
             || self.binding_ref_borrowed(name)
             || self.body_facts().may_capture
-            || self.body_facts().written.contains(&raw(name))
-        {
+            || self.body_facts().written.contains(&raw(name)))
+    }
+
+    /// Read one leaf of a scalarized binding.
+    pub(crate) fn read_leaf(&mut self, leaf: GroupLeaf) -> Idx<Inst> {
+        match leaf {
+            GroupLeaf::Cell(cell) => self.emit_cur(Inst::Load(cell)),
+            GroupLeaf::Value(value) => value,
+        }
+    }
+
+    /// Bind a `let` to its value when nothing needs the binding as a cell: it
+    /// is never written again, never captured or borrowed, and holds no
+    /// aggregate (a value struct's whole read copies from its cell).
+    pub(crate) fn bind_let_value(&mut self, name: Idx<BindingInfo>, value: Idx<Inst>) -> bool {
+        if !self.binding_stays_unwritten(name) {
             return false;
         }
         // Scalar replacement splits an aggregate only through a cell, and an
@@ -2656,7 +2669,7 @@ impl<'a> Builder<'a> {
             if let Some((cells, shape)) = self.group_binds.remove(&raw(pb)) {
                 let leaves = cells
                     .iter()
-                    .map(|cell| self.emit_cur(Inst::Load(*cell)))
+                    .map(|&leaf| self.read_leaf(leaf))
                     .collect::<Vec<_>>();
                 let repr = self.rebuild_from_leaves(&shape, &leaves, &mut 0);
                 self.mark_borrowed_value_children(&shape, &repr, Some(ty))?;
@@ -2747,7 +2760,13 @@ impl<'a> Builder<'a> {
         self.f.params.extend(cells.iter().copied());
         match slot {
             RetSlot::Leaves(shape) => {
-                self.group_binds.insert(raw(pb), (cells, shape.clone()));
+                self.group_binds.insert(
+                    raw(pb),
+                    (
+                        cells.iter().map(|&c| GroupLeaf::Cell(c)).collect(),
+                        shape.clone(),
+                    ),
+                );
             }
             RetSlot::Nested(inner) => {
                 self.tuple_binds.insert(raw(pb), (cells, inner.clone()));
@@ -3064,7 +3083,8 @@ impl<'a> Builder<'a> {
             }
             // A scalarized value param's omitted arg arrives as N nils — guard on
             // the FIRST leaf cell and fill all leaves from the default's leaves.
-            if let Some((cells, shape)) = self.group_binds.get(&raw(pb)).cloned() {
+            if let Some((leaves, shape)) = self.group_binds.get(&raw(pb)).cloned() {
+                let cells: Vec<Idx<Cell>> = leaves.iter().map(|l| l.cell()).collect();
                 for &cell in &cells {
                     self.f.mark_default_param(cell);
                 }
@@ -4743,6 +4763,25 @@ pub(crate) mod shape_census_support {
             }
         }
         (out, rejected)
+    }
+}
+
+/// One leaf of a scalarized binding ([`Builder::group_binds`]): its cell, or
+/// its value when the binding is never written ([`Builder::binding_stays_unwritten`]).
+#[derive(Clone, Copy)]
+pub(crate) enum GroupLeaf {
+    Cell(Idx<Cell>),
+    Value(Idx<Inst>),
+}
+
+impl GroupLeaf {
+    /// The cell a write lands in. Only a binding that is never written holds
+    /// its leaves as values, so a write always finds cells.
+    pub(crate) fn cell(self) -> Idx<Cell> {
+        match self {
+            Self::Cell(cell) => cell,
+            Self::Value(_) => unreachable!("a written binding keeps its leaf cells"),
+        }
     }
 }
 

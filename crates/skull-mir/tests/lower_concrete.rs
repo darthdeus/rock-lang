@@ -1308,3 +1308,23 @@ fn a_reassigned_let_keeps_its_cell() {
         "a reassigned let is written through its cell: {dump}"
     );
 }
+
+#[test]
+fn an_unwritten_nobox_let_holds_its_leaves_as_values() {
+    let src = "nobox value P { x: int, y: int }\n\
+               fn mk(a: int) -> P { return P { x: a, y: a + 1 } }\n\
+               fn sum(a: int) -> int { let p = mk(a)\n return p.x + p.y }";
+    let dump = mir_std(src, "sum");
+    assert!(
+        !dump.contains("store"),
+        "an unwritten nobox let needs no leaf cells: {dump}"
+    );
+    let src = "nobox value P { x: int, y: int }\n\
+               fn mk(a: int) -> P { return P { x: a, y: a + 1 } }\n\
+               fn sum(a: int) -> int { let p = mk(a)\n p.x = 5\n return p.x + p.y }";
+    let dump = mir_std(src, "sum");
+    assert!(
+        dump.contains("store"),
+        "a written nobox let keeps its leaf cells: {dump}"
+    );
+}

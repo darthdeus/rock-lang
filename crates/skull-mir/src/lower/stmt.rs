@@ -428,7 +428,18 @@ impl<'a> Builder<'a> {
                             }
                             None => None,
                         };
-                        if let Some((shape, leaves)) = threaded_leaves {
+                        if let Some((shape, leaves)) =
+                            threaded_leaves.as_ref().filter(|(shape, _)| {
+                                self.binding_stays_unwritten(name)
+                                    && !self.is_flat_enum_shape(shape)
+                            })
+                        {
+                            self.f.value_lets += leaves.len();
+                            self.f.value_leaves += leaves.len();
+                            let values = leaves.iter().map(|&v| GroupLeaf::Value(v)).collect();
+                            self.group_binds.insert(raw(name), (values, shape.clone()));
+                            threaded = true;
+                        } else if let Some((shape, leaves)) = threaded_leaves {
                             let bname = self.body.binding_arena[name].name;
                             let owner =
                                 self.binding_ty(name).and_then(|ty| self.concrete_ty_id(ty));
@@ -459,6 +470,7 @@ impl<'a> Builder<'a> {
                             for (cell, value) in cells.iter().copied().zip(leaves) {
                                 self.emit_cur(Inst::Store { cell, value });
                             }
+                            let cells = cells.into_iter().map(GroupLeaf::Cell).collect();
                             self.group_binds.insert(raw(name), (cells, shape));
                             threaded = true;
                         } else {
