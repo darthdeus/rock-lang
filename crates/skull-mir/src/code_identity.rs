@@ -138,25 +138,35 @@ impl CodeIdentity {
                 format!("artifact:{kind:?}:{}", logical_def_key(*module, *name))
             }
         };
+        // The owner key already names its file, so a site in that file is
+        // spelled by offset alone; that keeps build paths out of the key.
+        let site_key = |owner: &CodeOwner, site: &LambdaSiteId| {
+            let owner_file = match owner {
+                CodeOwner::Instance(instance) => ws.module(instance.func.module).file,
+                CodeOwner::Artifact { module, .. } => *module,
+            };
+            match site.file == owner_file {
+                true => site.offset.to_string(),
+                false => format!("{}:{}", site.file, site.offset),
+            }
+        };
         match self {
             Self::Named(instance) => format!("named:{}", instance_key(instance)),
             Self::Artifact(owner) => format!("artifact-root:{}", owner_key(owner)),
             Self::Lambda { enclosing, site } => format!(
-                "lambda:{}@{}:{}",
+                "lambda:{}@{}",
                 owner_key(enclosing),
-                site.file,
-                site.offset
+                site_key(enclosing, site)
             ),
             Self::Nested {
                 enclosing,
                 site,
                 name,
             } => format!(
-                "nested:{}::{}@{}:{}",
+                "nested:{}::{}@{}",
                 owner_key(enclosing),
                 name,
-                site.file,
-                site.offset
+                site_key(enclosing, site)
             ),
             Self::Generated { enclosing, role } => {
                 format!("generated:{}::{}", owner_key(enclosing), role)
