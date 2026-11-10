@@ -1867,6 +1867,35 @@ fn publish_signatures(
     (published, derivations, elapsed)
 }
 
+/// What a fresh build publishes for every body plan to read.
+struct Publication {
+    signatures: PublishedSignatures,
+    signature_derivations: usize,
+    domains: PublishedDomains,
+    stats: ConcreteBuildStats,
+    signature_time: std::time::Duration,
+    foreign_time: std::time::Duration,
+}
+
+fn publish(ws: &Workspace, g: &InstanceGraph, timing_enabled: bool) -> Publication {
+    let started = bone_core::prelude::Instant::now();
+    let PublicationInputs { instances, domains } = collect_publication_inputs(g);
+    let (signatures, signature_derivations, signature_cpu) = publish_signatures(ws, g, instances);
+    let signature_time = started.elapsed();
+    let mut stats = ConcreteBuildStats::default();
+    let started = bone_core::prelude::Instant::now();
+    let domains = publish_foreign_domains(ws, g, domains, &mut stats, timing_enabled);
+    stats.signature_ns += signature_cpu.as_nanos() as u64;
+    Publication {
+        signatures,
+        signature_derivations,
+        domains,
+        stats,
+        signature_time,
+        foreign_time: started.elapsed(),
+    }
+}
+
 fn publish_signatures_local(
     ws: &Workspace,
     g: &InstanceGraph,
@@ -3245,32 +3274,34 @@ fn build_published_impl(
             Owner::Instance(_) => None,
         })
         .collect::<Vec<_>>();
-    let (mut prepared, always_inputs) = {
-        use bone_core::prelude::*;
-        let prepared = expanded
-            .into_par_iter()
-            .map(|instance| prepare_instance(ws, g, instance, timing_enabled))
-            .collect::<Vec<_>>();
-        let always_inputs = always_owners
-            .into_par_iter()
-            .map(|(order, module, body_owner)| {
-                prepare_always(ws, g, order, module, body_owner, timing_enabled)
-            })
-            .collect::<Vec<_>>();
-        (prepared, always_inputs)
-    };
+    // What is published reads the graph and nothing a preparation produces,
+    // so it is derived beside the preparations.
+    let (publication, (mut prepared, always_inputs)) = bone_core::prelude::join_in_place(
+        || publish(ws, g, timing_enabled),
+        || {
+            use bone_core::prelude::*;
+            let prepared = expanded
+                .into_par_iter()
+                .map(|instance| prepare_instance(ws, g, instance, timing_enabled))
+                .collect::<Vec<_>>();
+            let always_inputs = always_owners
+                .into_par_iter()
+                .map(|(order, module, body_owner)| {
+                    prepare_always(ws, g, order, module, body_owner, timing_enabled)
+                })
+                .collect::<Vec<_>>();
+            (prepared, always_inputs)
+        },
+    );
     let preparation_time = t_preparation.elapsed();
-
-    let t_signature_publication = bone_core::prelude::Instant::now();
-    let PublicationInputs { instances, domains } = collect_publication_inputs(g);
-    let (signatures, signature_derivations, signature_time) = publish_signatures(ws, g, instances);
-    let signature_publication_time = t_signature_publication.elapsed();
-    let mut publication_stats = ConcreteBuildStats::default();
-    let t_foreign_publication = bone_core::prelude::Instant::now();
-    let published_domains =
-        publish_foreign_domains(ws, g, domains, &mut publication_stats, timing_enabled);
-    publication_stats.signature_ns += signature_time.as_nanos() as u64;
-    let foreign_publication_time = t_foreign_publication.elapsed();
+    let Publication {
+        signatures,
+        signature_derivations,
+        domains: published_domains,
+        stats: publication_stats,
+        signature_time: signature_publication_time,
+        foreign_time: foreign_publication_time,
+    } = publication;
 
     let t_partition = bone_core::prelude::Instant::now();
     if matches!(order, BuildResultOrder::Reverse) {
@@ -3451,10 +3482,9 @@ fn build_published_impl(
     if log::log_enabled!(log::Level::Debug) {
         let intern_after = g.interner().stats();
         let total_time = t_build.elapsed();
+        // The publication runs inside the preparation window.
         let accounted = expansion_time
             + preparation_time
-            + signature_publication_time
-            + foreign_publication_time
             + partition_time
             + ordinary_parallel_time
             + ordinary_merge_time

@@ -149,6 +149,34 @@ pub use rayon::iter::{
 #[cfg(not(feature = "sequential"))]
 pub use rayon::join as par_join;
 
+/// Run `spawned` on a pool worker while `here` runs on the CALLING thread, and
+/// return both results. Unlike [`par_join`], the calling thread never migrates
+/// into the pool, so thread-local witnesses `here` increments (the graph and
+/// concrete build counters) stay on the thread that reads them.
+#[cfg(not(feature = "sequential"))]
+pub fn join_in_place<A: Send, B>(
+    spawned: impl FnOnce() -> A + Send,
+    here: impl FnOnce() -> B,
+) -> (A, B) {
+    let slot = std::sync::Mutex::new(None);
+    let b = rayon::in_place_scope(|scope| {
+        scope.spawn(|_| {
+            *slot.lock().expect("spawned branch result slot") = Some(spawned());
+        });
+        here()
+    });
+    let a = slot
+        .into_inner()
+        .expect("spawned branch result slot")
+        .expect("spawned branch finished within its scope");
+    (a, b)
+}
+
+#[cfg(feature = "sequential")]
+pub fn join_in_place<A, B>(spawned: impl FnOnce() -> A, here: impl FnOnce() -> B) -> (A, B) {
+    (spawned(), here())
+}
+
 /// Free `value` on the pool instead of the calling thread.
 #[cfg(not(any(feature = "sequential", target_arch = "wasm32")))]
 pub fn drop_in_background<T: Send + 'static>(value: T) {
