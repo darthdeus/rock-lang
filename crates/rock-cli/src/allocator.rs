@@ -82,14 +82,16 @@ fn linux_current_rss() -> std::io::Result<u64> {
 // crate's `extended` constants omit it.
 const MI_OPTION_PURGE_DELAY: std::ffi::c_int = 15;
 
-/// Return freed mimalloc pages promptly; explicit environment options win.
-/// Active compilation keeps the allocator's reuse delay to avoid purging and
-/// faulting the same pages across workers. Hosts can request immediate purging
-/// explicitly; `release_freed_memory` reclaims every worker before child waits.
-pub fn purge_freed_pages_immediately() {
+/// Keep freed pages for reuse for a second before returning them, in hosts
+/// that rebuild repeatedly (watch, run, the language server); explicit
+/// environment options win. At mimalloc v2's 10 ms default a rebuild faults
+/// back in what the previous one freed: a signature edit of Stone rebuilt
+/// about 5% slower than with this delay. One-shot compiles keep the default,
+/// which holds their peak lower at the same wall time.
+pub fn keep_freed_pages_for_reuse() {
     // A set default yields to an option mimalloc read from the environment.
     // SAFETY: mi_option_set_default takes no pointers; the option is valid.
-    unsafe { mi_option_set_default(MI_OPTION_PURGE_DELAY, 0) }
+    unsafe { mi_option_set_default(MI_OPTION_PURGE_DELAY, 1000) }
 }
 
 #[cfg(all(test, not(feature = "sequential")))]
@@ -298,10 +300,10 @@ mod tests {
     // Fresh processes isolate mimalloc startup options. The default and
     // explicit overrides read before the setter also pin the option index.
     #[test]
-    fn purge_delay_defaults_to_immediate_and_env_overrides() {
+    fn purge_delay_defaults_to_reuse_and_env_overrides() {
         let exe = std::env::current_exe().expect("test binary path");
         for (env, before, after) in [
-            (None, 10, 0),
+            (None, 10, 1000),
             (Some(("MIMALLOC_PURGE_DELAY", "7")), 7, 7),
             (Some(("mimalloc_purge_delay", "9")), 9, 9),
         ] {
@@ -334,7 +336,7 @@ mod tests {
         let expect = expect.to_string_lossy().into_owned();
         // SAFETY: mi_option_get takes no pointers and accepts any valid option.
         let before = unsafe { mi_option_get(super::MI_OPTION_PURGE_DELAY) };
-        super::purge_freed_pages_immediately();
+        super::keep_freed_pages_for_reuse();
         // SAFETY: as above.
         let after = unsafe { mi_option_get(super::MI_OPTION_PURGE_DELAY) };
         assert_eq!(

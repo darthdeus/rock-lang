@@ -39,10 +39,11 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
     crate::registry::install(registrations);
     // Early entries (`rock lsp`) run before the allocator default, the logger
     // and clap: they install their own process state.
-    #[cfg(not(feature = "sequential"))]
-    let prepare = || install_compiler_pool(None);
-    #[cfg(feature = "sequential")]
-    let prepare = || {};
+    let prepare = || {
+        crate::allocator::keep_freed_pages_for_reuse();
+        #[cfg(not(feature = "sequential"))]
+        install_compiler_pool(None);
+    };
     if let Some(code) = rock_cli::registry::run_early_entry(std::env::args().skip(1), prepare) {
         std::process::exit(code);
     }
@@ -75,6 +76,8 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
             log::error!(target: "CLI", "cannot start compiler with its THP default: {error}");
             std::process::exit(1);
         }
+    } else {
+        crate::allocator::keep_freed_pages_for_reuse();
     }
 
     if args.no_stdlib {
