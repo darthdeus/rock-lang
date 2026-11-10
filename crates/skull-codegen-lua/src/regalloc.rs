@@ -93,6 +93,21 @@ impl BitRows {
     }
 }
 
+/// Record one statement in its block's rows of upward-exposed uses and of
+/// defs. A statement reads before it writes (a `MapNext` reads the cursor it
+/// then advances), so its uses are exposed past its own defs.
+fn note_statement(use_row: &mut [u64], def_row: &mut [u64], uses: &[u32], defs: &[u32]) {
+    for &k in uses {
+        let (w, bit) = (k as usize >> 6, 1u64 << (k & 63));
+        if def_row[w] & bit == 0 {
+            use_row[w] |= bit;
+        }
+    }
+    for &k in defs {
+        def_row[k as usize >> 6] |= 1u64 << (k & 63);
+    }
+}
+
 fn for_each_bit(words: &[u64], mut f: impl FnMut(usize)) {
     for (wi, &w) in words.iter().enumerate() {
         let mut bits = w;
@@ -328,16 +343,6 @@ impl Interference {
         }
     }
 
-    fn add(&mut self, a: usize, b: usize) {
-        match self {
-            Interference::Dense(rows) => {
-                rows.set(a, b);
-                rows.set(b, a);
-            }
-            Interference::Sparse(edges) => edges.push((a as u32, b as u32)),
-        }
-    }
-
     fn finish(self, n: usize) -> Neighbors {
         match self {
             Interference::Dense(rows) => Neighbors::Dense(rows),
@@ -482,6 +487,7 @@ impl<'a> TrackedLiveness<'a> {
         let mut use_set = BitRows::new(n, width);
         let mut def_set = BitRows::new(n, width);
         for (bi, &b) in scope.iter().enumerate() {
+            let (use_row, def_row) = (use_set.row_mut(bi), def_set.row_mut(bi));
             let first = t.stmts.len() as u32;
             for &id in &func.blocks[b].insts {
                 if inline[raw(id)] {
@@ -492,25 +498,19 @@ impl<'a> TrackedLiveness<'a> {
                 let d0 = t.bits.len() as u32;
                 defs(id, &mut t.bits);
                 let d1 = t.bits.len() as u32;
-                for &k in &t.bits[u0 as usize..d0 as usize] {
-                    if !def_set.get(bi, k as usize) {
-                        use_set.set(bi, k as usize);
-                    }
-                }
-                for &k in &t.bits[d0 as usize..d1 as usize] {
-                    def_set.set(bi, k as usize);
-                }
+                note_statement(
+                    use_row,
+                    def_row,
+                    &t.bits[u0 as usize..d0 as usize],
+                    &t.bits[d0 as usize..d1 as usize],
+                );
                 t.stmts.push(id);
                 t.stmt_bits.push((u0, d0, d1));
             }
             t.block_stmts.push((first, t.stmts.len() as u32));
             let u0 = t.bits.len() as u32;
             term(b, &mut t.bits);
-            for &k in &t.bits[u0 as usize..] {
-                if !def_set.get(bi, k as usize) {
-                    use_set.set(bi, k as usize);
-                }
-            }
+            note_statement(use_row, def_row, &t.bits[u0 as usize..], &[]);
             t.term_bits.push((u0, t.bits.len() as u32));
         }
         t.live_in = flow.live_in(&use_set, &def_set);
@@ -1113,45 +1113,34 @@ impl<'a> Locals<'a> {
                 bits.push(cell_base + ci[raw(c)])
             });
         };
-        for &b in scope {
+        let mut use_set = BitRows::new(n, bit_count);
+        let mut def_set = BitRows::new(n, bit_count);
+        for (bi, &b) in scope.iter().enumerate() {
+            let (use_row, def_row) = (use_set.row_mut(bi), def_set.row_mut(bi));
             first.push(marks.len() as u32);
             for &id in &func.blocks[b].insts {
-                let start = bits.len() as u32;
+                let start = bits.len();
                 let folded = inline[raw(id)];
                 if vi[raw(id)] != u32::MAX {
                     bits.push(vi[raw(id)]);
                 }
                 emitted_cell_defs(func, alias, id, &mut |c| bits.push(cell_base + ci[raw(c)]));
-                marks.push((start, bits.len() as u32));
+                let mid = bits.len();
+                marks.push((start as u32, mid as u32));
                 if !folded {
                     push_reads(&mut bits, reads.stmt(id));
                 }
+                note_statement(use_row, def_row, &bits[mid..], &bits[start..mid]);
             }
-            let start = bits.len() as u32;
-            marks.push((start, start));
+            let start = bits.len();
+            marks.push((start as u32, start as u32));
             push_reads(&mut bits, reads.term(b));
+            note_statement(use_row, def_row, &bits[start..], &[]);
         }
         first.push(marks.len() as u32);
         marks.push((bits.len() as u32, bits.len() as u32));
         let defs = |e: usize| &bits[marks[e].0 as usize..marks[e].1 as usize];
         let uses = |e: usize| &bits[marks[e].1 as usize..marks[e + 1].0 as usize];
-
-        // A statement reads before it writes (a `MapNext` reads the cursor it
-        // then advances), so its uses are upward-exposed past its own defs.
-        let mut use_set = BitRows::new(n, bit_count);
-        let mut def_set = BitRows::new(n, bit_count);
-        for bi in 0..n {
-            for e in first[bi] as usize..first[bi + 1] as usize {
-                for &k in uses(e) {
-                    if !def_set.get(bi, k as usize) {
-                        use_set.set(bi, k as usize);
-                    }
-                }
-                for &k in defs(e) {
-                    def_set.set(bi, k as usize);
-                }
-            }
-        }
         let live_in = flow.live_in(&use_set, &def_set);
 
         let mut force = vec![false; c_count];
@@ -1220,17 +1209,14 @@ impl<'a> Locals<'a> {
             // entry and with one another.
             if b == func.entry() {
                 for &p in &func.params {
+                    live.set((cell_base + ci[raw(p)]) as usize);
+                }
+                for &p in &func.params {
                     let pi = ci[raw(p)] as usize;
                     if force[pi] {
                         continue;
                     }
                     cell_graph.add_live(pi, &live.words[v_words..], Some(&allowed.words));
-                    for &q in &func.params {
-                        let qi = ci[raw(q)] as usize;
-                        if pi != qi && !force[qi] {
-                            cell_graph.add(pi, qi);
-                        }
-                    }
                 }
             }
         }
@@ -1732,21 +1718,12 @@ impl NilKills<'_> {
     /// `math.min`/`math.max` selection skips its arm blocks).
     pub(crate) fn on_edge(&self, from: Idx<Block>, to: Idx<Block>) -> Vec<KillLocal> {
         let mut out = Vec::new();
-        self.each_on_edge(from, to, |local| out.push(local));
-        out
-    }
-
-    fn each_on_edge(&self, from: Idx<Block>, to: Idx<Block>, f: impl FnMut(KillLocal)) {
         let Some(flow) = self.flow else {
-            return;
+            return out;
         };
-        if let (Some(fi), Some(ti)) = (flow.index(from), flow.index(to)) {
-            self.each_on_edge_at(fi, ti, to, f);
-        }
-    }
-
-    /// [`Self::each_on_edge`] by the blocks' indices in the flow.
-    fn each_on_edge_at(&self, fi: usize, ti: usize, to: Idx<Block>, mut f: impl FnMut(KillLocal)) {
+        let (Some(fi), Some(ti)) = (flow.index(from), flow.index(to)) else {
+            return out;
+        };
         let (start, end) = self.first_pure_range[ti];
         let first_pure = &self.first_pure_slots[start as usize..end as usize];
         for (wi, (&e, &l)) in self
@@ -1762,11 +1739,12 @@ impl NilKills<'_> {
                 let slot = wi * 64 + b;
                 let local = self.decode(slot);
                 if self.allowed_at(local, to) && !first_pure.contains(&slot) {
-                    f(local);
+                    out.push(local);
                 }
                 bits &= bits - 1;
             }
         }
+        out
     }
 }
 
@@ -1979,15 +1957,9 @@ pub(crate) fn nil_kills<'a>(
     let mut use_set = BitRows::new(n, s_count);
     let mut def_set = BitRows::new(n, s_count);
     for bi in 0..n {
+        let (use_row, def_row) = (use_set.row_mut(bi), def_set.row_mut(bi));
         for e in first[bi] as usize..first[bi + 1] as usize {
-            for &s in uses_at(e) {
-                if !def_set.get(bi, s as usize) {
-                    use_set.set(bi, s as usize);
-                }
-            }
-            for &s in defs_at(e) {
-                def_set.set(bi, s as usize);
-            }
+            note_statement(use_row, def_row, uses_at(e), defs_at(e));
         }
     }
     let live_in = flow.live_in(&use_set, &def_set);
@@ -2068,32 +2040,42 @@ pub(crate) fn nil_kills<'a>(
     }
     // Slots live at the end of a predecessor and dead on entry die on the edge;
     // the successor's label is the one place that covers every such edge.
-    let mut entry: Vec<KillLocal> = Vec::new();
+    // A slot dies once per label, at the first edge that kills it.
+    let mut entry_locals: Vec<KillLocal> = Vec::new();
+    let mut seen = vec![0u64; kills.live_in.width];
     for (ti, &to) in scope.iter().enumerate() {
-        entry.clear();
+        let start = entry_locals.len() as u32;
+        let dead_on_entry = kills.live_in.row(ti);
+        seen.copy_from_slice(dead_on_entry);
         if to == func.entry() {
             // A parameter is defined at entry; one never read dies there.
             for &p in params {
-                let s = cell_slot[raw(p)];
-                if s != u32::MAX && !kills.live_in.get(ti, s as usize) {
-                    let local = kills.decode(s as usize);
-                    if !entry.contains(&local) {
-                        entry.push(local);
-                    }
+                let s = cell_slot[raw(p)] as usize;
+                if s != u32::MAX as usize && seen[s >> 6] & (1u64 << (s & 63)) == 0 {
+                    seen[s >> 6] |= 1u64 << (s & 63);
+                    entry_locals.push(kills.decode(s));
                 }
             }
         }
+        let (first, end) = kills.first_pure_range[ti];
+        let first_pure = &kills.first_pure_slots[first as usize..end as usize];
         for &fi in flow.preds(ti) {
-            kills.each_on_edge_at(fi as usize, ti, to, |local| {
-                if !entry.contains(&local) {
-                    entry.push(local);
+            for (wi, &live) in kills.end_live.row(fi as usize).iter().enumerate() {
+                let mut bits = live & !seen[wi];
+                seen[wi] |= bits;
+                while bits != 0 {
+                    let slot = wi * 64 + bits.trailing_zeros() as usize;
+                    let local = kills.decode(slot);
+                    if kills.allowed_at(local, to) && !first_pure.contains(&slot) {
+                        entry_locals.push(local);
+                    }
+                    bits &= bits - 1;
                 }
-            });
+            }
         }
-        let start = kills.entry_locals.len() as u32;
-        kills.entry_locals.extend_from_slice(&entry);
-        kills.entry_range[raw(to)] = (start, kills.entry_locals.len() as u32);
+        kills.entry_range[raw(to)] = (start, entry_locals.len() as u32);
     }
+    kills.entry_locals = entry_locals;
     kills
 }
 
