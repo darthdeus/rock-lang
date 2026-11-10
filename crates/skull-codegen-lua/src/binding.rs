@@ -98,7 +98,7 @@ pub fn callee_binding_plan(
     func: &MirFunc,
 ) -> Option<CalleeBindingPlan> {
     let rank = ctx.scc_of(self_ref);
-    let mut captures: Vec<String> = Vec::new();
+    let mut captures: Vec<ustr::Ustr> = Vec::new();
     let mut touches_state = false;
     // Free names in spliced inline(lua) text resolve lexically, so an alias
     // spelled like one would capture it.
@@ -117,10 +117,10 @@ pub fn callee_binding_plan(
             Inst::IntToUint(x) | Inst::FloatToUint(x)
                 if checked_u32_constant(func, *x).is_none() =>
             {
-                captures.push("__rock_checked_u32".to_string());
+                captures.push(skull_mir::names::ustr(CHECKED_U32));
             }
             Inst::UintShl(..) | Inst::UintShr(..) => {
-                captures.push("__rock_u32_shift_count".to_string());
+                captures.push(skull_mir::names::ustr(U32_SHIFT_COUNT));
             }
             _ => {}
         }
@@ -151,17 +151,17 @@ pub fn callee_binding_plan(
             continue;
         }
         let symbol = match func.spec_bindings.get(&id) {
-            Some(inst) => inst.symbol(ws, interner),
-            None => ctx.mangled_name(ws, callee).to_string(),
+            Some(inst) => ctx.instance_symbol(ws, interner, inst),
+            None => ctx.mangled_name(ws, callee),
         };
         // A body that calls its own emitted name (a specialized instance
         // recursing through the shared declaration) would capture itself.
-        if symbol == name {
+        if symbol.as_str() == name {
             continue;
         }
         captures.push(symbol);
     }
-    captures.sort_unstable();
+    captures.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
     captures.dedup();
     if captures.is_empty() {
         return None;
@@ -181,19 +181,16 @@ pub fn callee_binding_plan(
         .map(|capture| {
             // Runtime helper calls are printed directly, so their captures
             // retain the original spelling.
-            if preserve_names
-                || matches!(
-                    capture.as_str(),
-                    "__rock_checked_u32" | "__rock_u32_shift_count"
-                )
-            {
-                return ustr::Ustr::from(capture);
+            if preserve_names || matches!(capture.as_str(), CHECKED_U32 | U32_SHIFT_COUNT) {
+                return *capture;
             }
             loop {
-                let alias = format!("b{next_alias}");
+                let alias = skull_mir::names::indexed("b", "", next_alias);
                 next_alias += 1;
-                if !ctx.reserved.contains_key(&alias) && !raw_names.contains(&alias.as_str()) {
-                    break ustr::Ustr::from(&alias);
+                if !ctx.reserved.contains_key(alias.as_str())
+                    && !raw_names.contains(&alias.as_str())
+                {
+                    break alias;
                 }
             }
         })
@@ -201,7 +198,7 @@ pub fn callee_binding_plan(
     Some(CalleeBindingPlan {
         factory: ctx.mint_synthetic(format!("{CALLEE_FACTORY_PREFIX}{name}")),
         name: name.to_string(),
-        captures,
+        captures: captures.iter().map(|capture| capture.to_string()).collect(),
         parameters,
         // Runtime validators have no body dependencies, including for a leaf
         // function absent from the call-edge inventory.
@@ -209,6 +206,9 @@ pub fn callee_binding_plan(
         capped,
     })
 }
+
+const CHECKED_U32: &str = "__rock_checked_u32";
+const U32_SHIFT_COUNT: &str = "__rock_u32_shift_count";
 
 /// The words of a Lua text spelled like a factory alias (`b<N>`), strings and
 /// comments included: a name to avoid needs no exact tokenizer.

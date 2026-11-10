@@ -2827,3 +2827,43 @@ fn foreign_calls_keep_trailing_nils() {
     );
     assert_eq!(lua.matches("(nil))").count(), 2, "{lua}");
 }
+
+#[test]
+fn specialized_symbols_are_spelled_per_context() {
+    // One instance key names a different function in each workspace. A worker
+    // that spelled it for one context must not answer the next from its table.
+    let interner = skull_mir::monoty::MonoInterner::new();
+    let int = interner.intern(skull_mir::monoty::MonoTy::Int);
+    let spell = |src: &str| {
+        let mut modules =
+            vec![skull_parser::parse_module_clean(src, ustr::Ustr::from("<test>")).expect("parse")];
+        let ws =
+            bone_semantic::semantic_passes::semantic_pass(&mut modules).expect("semantic_pass");
+        let mid = *ws
+            .module_ids
+            .get(&ustr::Ustr::from("<test>"))
+            .expect("user module id");
+        let (fid, _) = ws
+            .module(mid)
+            .functions
+            .iter()
+            .next()
+            .expect("the declared function");
+        let inst = skull_mir::instance::Instance {
+            func: FuncRef {
+                module: mid,
+                func: fid,
+            },
+            args: vec![int],
+        };
+        let ctx = CodegenCtx::new(&ws);
+        let symbol = ctx.instance_symbol(&ws, &interner, &inst);
+        assert_eq!(symbol.as_str(), inst.symbol(&ws, &interner));
+        assert_eq!(ctx.instance_symbol(&ws, &interner, &inst), symbol);
+        (inst, symbol)
+    };
+    let (first_inst, first) = spell("fn first<T>(x: T) -> T { return x }");
+    let (second_inst, second) = spell("fn second<T>(x: T) -> T { return x }");
+    assert_eq!(first_inst, second_inst);
+    assert_ne!(first, second);
+}

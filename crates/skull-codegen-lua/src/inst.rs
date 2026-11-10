@@ -71,15 +71,12 @@ impl Emitter<'_> {
     /// instance (its value args splatted to leaves) targets that instance's
     /// definition. The same instance object drives definition and call spelling,
     /// so the two cannot drift. Bound calls use the factory parameter instead.
-    pub(crate) fn callee_name(&self, id: Idx<Inst>, func: FuncRef) -> CalleeName {
+    pub(crate) fn callee_name(&self, id: Idx<Inst>, func: FuncRef) -> ustr::Ustr {
         let name = match self.func.spec_bindings.get(&id) {
-            Some(inst) => CalleeName::Specialized(inst.symbol(self.ws, self.interner)),
-            None => CalleeName::Declared(self.ctx.mangled_name(self.ws, func)),
+            Some(inst) => self.ctx.instance_symbol(self.ws, self.interner, inst),
+            None => self.ctx.mangled_name(self.ws, func),
         };
-        match self.bound.and_then(|plan| plan.parameter_for(&name)) {
-            Some(alias) => CalleeName::Declared(alias),
-            None => name,
-        }
+        self.bound_name(name)
     }
 
     pub(crate) fn bound_name(&self, name: ustr::Ustr) -> ustr::Ustr {

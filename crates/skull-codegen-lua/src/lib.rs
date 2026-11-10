@@ -316,6 +316,9 @@ pub struct CodegenCtx {
     /// referenced so far, derived once per build instead of once per site.
     /// Readers share the lock; a miss takes the write side once.
     mangled: std::sync::RwLock<HashMap<FuncRef, ustr::Ustr>>,
+    /// Keys the per-thread table of specialized symbols ([`Self::instance_symbol`]);
+    /// no two contexts share one, so a table never outlives its context.
+    symbols_epoch: u64,
     /// Compiler-assigned storage slots for mutable globals.
     state_slots: HashMap<ustr::Ustr, u32>,
     scalar_constants: HashMap<ustr::Ustr, Lit>,
@@ -347,6 +350,7 @@ impl Clone for CodegenCtx {
             mangled: std::sync::RwLock::new(
                 self.mangled.read().expect("mangled name cache").clone(),
             ),
+            symbols_epoch: next_symbols_epoch(),
             state_slots: self.state_slots.clone(),
             scalar_constants: self.scalar_constants.clone(),
             unread_constants: self.unread_constants.clone(),
@@ -646,6 +650,7 @@ impl CodegenCtx {
             reserved,
             rejections: Mutex::new(collisions),
             mangled: std::sync::RwLock::default(),
+            symbols_epoch: next_symbols_epoch(),
             state_slots,
             scalar_constants,
             unread_constants,
@@ -744,6 +749,33 @@ impl CodegenCtx {
             .expect("mangled name cache")
             .insert(fref, name);
         name
+    }
+
+    /// [`skull_mir::instance::Instance::symbol`], spelled once per thread
+    /// instead of once per call site. Each worker keeps its own table: a shared
+    /// one would put a lock on every specialized call the emitter prints.
+    pub fn instance_symbol(
+        &self,
+        ws: &Workspace,
+        interner: &MonoInterner,
+        inst: &skull_mir::instance::Instance,
+    ) -> ustr::Ustr {
+        if inst.args.is_empty() {
+            return self.mangled_name(ws, inst.func);
+        }
+        INSTANCE_SYMBOLS.with(|symbols| {
+            let mut symbols = symbols.borrow_mut();
+            if symbols.0 != self.symbols_epoch {
+                symbols.0 = self.symbols_epoch;
+                symbols.1.clear();
+            }
+            if let Some(name) = symbols.1.get(inst) {
+                return *name;
+            }
+            let name = ustr::Ustr::from(&inst.symbol(ws, interner));
+            symbols.1.insert(inst.clone(), name);
+            name
+        })
     }
 
     pub fn mint_synthetic(&self, name: String) -> String {
@@ -927,27 +959,16 @@ impl SelectionArm {
     }
 }
 
-/// A call's Lua name: an owned specialization or an interned global/local alias.
-pub(crate) enum CalleeName {
-    Specialized(String),
-    Declared(ustr::Ustr),
+thread_local! {
+    /// The context epoch the table belongs to, and the symbols spelled for it.
+    static INSTANCE_SYMBOLS: RefCell<(u64, HashMap<skull_mir::instance::Instance, ustr::Ustr>)> =
+        RefCell::default();
 }
 
-impl std::ops::Deref for CalleeName {
-    type Target = str;
-
-    fn deref(&self) -> &str {
-        match self {
-            CalleeName::Specialized(name) => name,
-            CalleeName::Declared(name) => name.as_str(),
-        }
-    }
-}
-
-impl std::fmt::Display for CalleeName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self)
-    }
+fn next_symbols_epoch() -> u64 {
+    // From 1: a thread's empty table starts at epoch 0.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 struct Emitter<'a> {
