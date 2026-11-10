@@ -634,8 +634,8 @@ fn seeded_box_initializers(
                 } else {
                     let idom = dominators
                         .entry(owner)
-                        .or_insert_with(|| skull_mir::cfg::dominators(mf, entry));
-                    skull_mir::cfg::dominates(idom, b, other)
+                        .or_insert_with(|| skull_mir::cfg::dominators(mf, entry).intervals());
+                    idom.dominates(b, other)
                 }
             });
             if !dominates_all {

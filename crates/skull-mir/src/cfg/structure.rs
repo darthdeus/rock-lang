@@ -744,6 +744,37 @@ mod tests {
     }
 
     #[test]
+    fn dominance_intervals_agree_with_the_idom_walk() {
+        // A loop with a diamond inside, a side exit, and an unreachable block 7.
+        let f = mk(
+            8,
+            vec![
+                Term::Goto(bi(1)),
+                branch(2, 6),
+                branch(3, 4),
+                Term::Goto(bi(5)),
+                Term::Goto(bi(5)),
+                Term::Goto(bi(1)),
+                Term::Return(vec![]),
+                Term::Goto(bi(5)),
+            ],
+        );
+        let idom = crate::cfg::dominators(&f, bi(0));
+        let fast = idom.intervals();
+        for a in 0..8 {
+            for b in 0..8 {
+                assert_eq!(
+                    fast.dominates(bi(a), bi(b)),
+                    idom.dominates(bi(a), bi(b)),
+                    "dominates({a}, {b})"
+                );
+            }
+        }
+        assert!(fast.dominates(bi(2), bi(5)));
+        assert!(!fast.dominates(bi(3), bi(5)));
+    }
+
+    #[test]
     fn diamond() {
         // 0 -> {1, 2} -> 3(return)
         let f = mk(

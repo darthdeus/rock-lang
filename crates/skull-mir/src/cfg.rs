@@ -277,6 +277,83 @@ pub fn dominators(func: &MirFunc, entry: Idx<Block>) -> Dominators {
     }
 }
 
+impl Dominators {
+    /// Preorder intervals over the dominator tree, for callers asking many
+    /// dominance queries: each then costs O(1) instead of a chain walk.
+    pub fn intervals(&self) -> DomIntervals {
+        let n = self.idom.len();
+        let mut child_n = vec![0u32; n + 1];
+        for (b, d) in self.idom.iter().enumerate() {
+            if let Some(d) = d
+                && dense::bx(*d) != b
+            {
+                child_n[dense::bx(*d) + 1] += 1;
+            }
+        }
+        for i in 0..n {
+            child_n[i + 1] += child_n[i];
+        }
+        let mut fill = child_n.clone();
+        let mut children = vec![0u32; child_n[n] as usize];
+        let mut roots = Vec::new();
+        for (b, d) in self.idom.iter().enumerate() {
+            match d {
+                Some(d) if dense::bx(*d) != b => {
+                    let p = dense::bx(*d);
+                    children[fill[p] as usize] = b as u32;
+                    fill[p] += 1;
+                }
+                Some(_) => roots.push(b as u32),
+                None => {}
+            }
+        }
+        let mut span = vec![(u32::MAX, 0u32); n];
+        let mut clock = 0u32;
+        let mut stack: Vec<(u32, u32)> = Vec::new();
+        for root in roots {
+            stack.push((root, child_n[root as usize]));
+            span[root as usize].0 = clock;
+            clock += 1;
+            while let Some(top) = stack.last_mut() {
+                let node = top.0 as usize;
+                if top.1 < child_n[node + 1] {
+                    let child = children[top.1 as usize];
+                    top.1 += 1;
+                    span[child as usize].0 = clock;
+                    clock += 1;
+                    stack.push((child, child_n[child as usize]));
+                } else {
+                    span[node].1 = clock;
+                    stack.pop();
+                }
+            }
+        }
+        DomIntervals { span }
+    }
+}
+
+/// [`Dominators`] as preorder intervals; see [`Dominators::intervals`].
+#[derive(Clone, Debug)]
+pub struct DomIntervals {
+    /// `(preorder, end)` per block; an unreachable block has `u32::MAX`.
+    span: Vec<(u32, u32)>,
+}
+
+impl DomIntervals {
+    /// Same answer as [`Dominators::dominates`].
+    pub fn dominates(&self, a: Idx<Block>, b: Idx<Block>) -> bool {
+        if a == b {
+            return true;
+        }
+        let (Some(&(a_pre, a_end)), Some(&(b_pre, _))) =
+            (self.span.get(dense::bx(a)), self.span.get(dense::bx(b)))
+        else {
+            return false;
+        };
+        a_pre != u32::MAX && b_pre != u32::MAX && a_pre <= b_pre && b_pre < a_end
+    }
+}
+
 /// Does block `a` dominate block `b`? See [`Dominators::dominates`].
 pub fn dominates(idom: &Dominators, a: Idx<Block>, b: Idx<Block>) -> bool {
     idom.dominates(a, b)
