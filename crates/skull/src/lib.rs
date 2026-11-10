@@ -2525,16 +2525,17 @@ mod tests {
     }
 
     #[test]
-    fn if_lowers_to_cfg_branch() {
+    fn if_prints_as_a_structured_if() {
         let lua = emit("fn f(c: bool) -> int { if c { 1 } else { 2 } }");
-        assert!(lua.contains("goto bb"), "expected CFG goto, got:\n{lua}");
+        let body = &lua[lua.find("function f_bool(").expect("f emitted")..];
+        let body = &body[..body.find("\nend\n").expect("f closed")];
         assert!(
-            lua.contains("then goto bb"),
-            "expected a conditional branch to a block, got:\n{lua}"
+            body.contains(" then\n") && body.contains("\n else\n"),
+            "expected an if/else, got:\n{body}"
         );
         assert!(
-            lua.contains("::bb1::") && !lua.contains("::bb0::"),
-            "expected labels on branch targets only, got:\n{lua}"
+            !body.contains("goto") && !body.contains("::"),
+            "expected no labels or jumps, got:\n{body}"
         );
     }
 

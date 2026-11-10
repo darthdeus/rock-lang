@@ -57,7 +57,7 @@ impl Emitter<'_> {
     }
 
     /// Whether `emit_inst` writes a statement for `id` (kills attach after it).
-    fn emits_statement(&self, id: Idx<Inst>) -> bool {
+    pub(crate) fn emits_statement(&self, id: Idx<Inst>) -> bool {
         !self.suppressed[raw(id) as usize]
             && !self.inlinable[raw(id) as usize]
             && !self.hoist.contains_key(&id)
@@ -184,6 +184,27 @@ impl Emitter<'_> {
 
     /// The statements of `bb` and its terminator, without its label.
     fn emit_block_contents(&mut self, out: &mut String, bb: Idx<Block>) {
+        if self.emit_block_statements(out, bb) {
+            return;
+        }
+        // A goto into an un-emitted counted-loop header becomes a structured
+        // `for` (the preheader falls through into it); everything else is a goto.
+        let term = &self.func.blocks[bb].term;
+        if let Term::Goto(t) = term {
+            let t = *t;
+            if !self.emitted[raw(t) as usize] {
+                if self.loops.contains_key(&t) {
+                    self.expand_for(out, t);
+                    return;
+                }
+            }
+        }
+        self.emit_term(out, &self.func.blocks[bb].term, bb);
+    }
+
+    /// The statements of `bb` without its terminator. True when a tail
+    /// forward already ended the block with its `return`.
+    pub(crate) fn emit_block_statements(&mut self, out: &mut String, bb: Idx<Block>) -> bool {
         let insts: &[Idx<Inst>] = &self.func.blocks[bb].insts;
         let tail = self.tail_forwards[raw(bb) as usize].as_ref();
         let emitted_len = tail.map_or(insts.len(), |tail| tail.first_suppressed);
@@ -233,21 +254,9 @@ impl Emitter<'_> {
         }
         if let Some(tail) = tail {
             self.emit_tail_forward(out, tail);
-            return;
+            return true;
         }
-        // A goto into an un-emitted counted-loop header becomes a structured
-        // `for` (the preheader falls through into it); everything else is a goto.
-        let term = &self.func.blocks[bb].term;
-        if let Term::Goto(t) = term {
-            let t = *t;
-            if !self.emitted[raw(t) as usize] {
-                if self.loops.contains_key(&t) {
-                    self.expand_for(out, t);
-                    return;
-                }
-            }
-        }
-        self.emit_term(out, &self.func.blocks[bb].term, bb);
+        false
     }
 
     fn emit_tail_forward(&self, out: &mut String, tail: &TailForward) {
@@ -279,33 +288,26 @@ impl Emitter<'_> {
         out.push(')');
     }
 
-    /// Emit a recognized counted loop as `for <slot> = <slot>, hi[-1] do .. end`.
-    /// The init reads the slot cell (the preheader's store set it to `lo`), so it
-    /// never depends on `lo`'s register being live at the loop head. The header's
-    /// compare/branch and the latch's increment are subsumed by the `for`; the
-    /// latch keeps only its label so a body `goto bb<latch>` (continue / normal
-    /// fall-through) lands at the loop tail and re-iterates.
-    pub(crate) fn expand_for(&mut self, out: &mut String, header: Idx<Block>) {
+    /// The `for <slot> = <slot>, hi[-1] do` line of a counted loop, with the
+    /// loop-scoped registers below it. The init
+    /// reads the slot cell (the preheader's store set it to `lo`), so it never
+    /// depends on `lo`'s register being live at the loop head.
+    pub(crate) fn write_for_head(&self, out: &mut String, header: Idx<Block>) {
         let cl = &self.loops[&header];
-        let (slot, inclusive, body_entry, latch, exit) =
-            (cl.slot, cl.inclusive, cl.body_entry, cl.latch, cl.exit);
-        let region: HashSet<Idx<Block>> = cl.region.iter().copied().collect();
-        let slot_name = cellname(self.func, self.frame, self.cell_colors, slot);
-        let hi = match &cl.hi {
-            HiLimit::Value(v) => self.opnd_str(*v),
-            HiLimit::Cell(c) => cellname(self.func, self.frame, self.cell_colors, *c),
-        };
-        let limit = if inclusive { hi } else { format!("{hi} - 1") };
-
-        self.emitted[raw(header) as usize] = true;
-        // Dead on entry to the header is dead for the whole loop unless
-        // redefined, so the header's kills go once, above the `for`.
-        self.write_kills(out, &self.kills.at_entry[raw(header) as usize]);
-        let _ = writeln!(out, " for {slot_name} = {slot_name}, {limit} do");
+        out.push_str(" for ");
+        write_cellname(out, self.func, self.frame, self.cell_colors, cl.slot);
+        out.push_str(" = ");
+        write_cellname(out, self.func, self.frame, self.cell_colors, cl.slot);
+        out.push_str(", ");
+        match &cl.hi {
+            HiLimit::Value(v) => self.write_opnd(out, *v),
+            HiLimit::Cell(c) => write_cellname(out, self.func, self.frame, self.cell_colors, *c),
+        }
+        out.push_str(if cl.inclusive { " do\n" } else { " - 1 do\n" });
         // Body-scoped temp registers: declared INSIDE the `for` block, above the
         // loop-control slots, so LuaJIT's snapshot liveness can prune them at
         // loop exits (else they pin their values into every side trace and
-        // `asm_head_side` aborts past ~16 inherited FP values — the
+        // `asm_head_side` aborts past ~16 inherited FP values -- the
         // "NYI: register coalescing too complex" blacklist class).
         let mut own: Vec<u32> = self
             .color_scope
@@ -326,6 +328,21 @@ impl Emitter<'_> {
             }
             out.push('\n');
         }
+    }
+
+    /// Emit a recognized counted loop as `for <slot> = <slot>, hi[-1] do .. end`.
+    /// The header's compare/branch and the latch's increment are subsumed by
+    /// the `for`; the latch keeps only its label so a body `goto bb<latch>`
+    /// (continue / normal fall-through) lands at the loop tail and re-iterates.
+    pub(crate) fn expand_for(&mut self, out: &mut String, header: Idx<Block>) {
+        let cl = &self.loops[&header];
+        let (body_entry, latch, exit) = (cl.body_entry, cl.latch, cl.exit);
+        let region: HashSet<Idx<Block>> = cl.region.iter().copied().collect();
+        self.emitted[raw(header) as usize] = true;
+        // Dead on entry to the header is dead for the whole loop unless
+        // redefined, so the header's kills go once, above the `for`.
+        self.write_kills(out, &self.kills.at_entry[raw(header) as usize]);
+        self.write_for_head(out, header);
         self.emit_block(out, body_entry);
         for &bb in self.rpo {
             if region.contains(&bb) {

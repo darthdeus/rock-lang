@@ -1460,13 +1460,11 @@ fn if_as_value_branch_and_cell_join() {
         "\
 function sign_int(c0)
  local r0
- if (c0 < (0)) then goto bb1 else goto bb2 end
- ::bb1::
+ if (c0 < (0)) then
  c0 = (0)
- goto bb3
- ::bb2::
+ else
  c0 = (1)
- ::bb3::
+ end
  r0 = c0
  c0 = r0
  r0 = c0

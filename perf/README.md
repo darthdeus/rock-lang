@@ -97,9 +97,9 @@ the glue around them (runtime prelude and type tables, callee binding lines,
 registration tables, global initialization); how many bodies repeat another
 body byte for byte or after erasing the type suffixes that tell the
 specializations of one generic apart, and which generics specialize most;
-the structural boilerplate inside bodies (indentation, block labels, gotos,
-register kills, declarations) and the share of bytes spent on mangled
-symbols; and the largest bodies.
+the structural boilerplate inside bodies (indentation, labels, gotos, control
+lines such as `if`/`else`/`end`, register kills, declarations) and the share
+of bytes spent on mangled symbols; and the largest bodies.
 
 ```sh
 rock compile packages/stone --output /tmp/stone.lua

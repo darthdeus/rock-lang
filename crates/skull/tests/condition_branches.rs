@@ -1,4 +1,4 @@
-use crate::common::{definition_names, emit_mir, run_luajit, run_main};
+use crate::common::{compile_and_run, definition_names, emit_mir, run_luajit, run_main};
 
 #[test]
 fn branch_conditions_preserve_short_circuit_order_and_value_uses() {
@@ -140,4 +140,19 @@ fn main() {
         run_main(&emitted.lua),
         "2\n1\n2\n2\n1\n2\n2\n1\n2\n0\n1\n1\n2\n2\n1\n2\n3\n0\n0\n1"
     );
+}
+
+#[test]
+fn a_for_loop_that_runs_out_skips_the_code_its_break_runs() {
+    let src = r#"
+fn scan(xs: [int], limit: int) -> bool {
+    let ok = true
+    for i in 0..xs.len() {
+        if xs[i] >= limit { ok = false; break }
+    }
+    ok
+}
+fn main() { print("{scan([1, 2, 3], 10)} {scan([1, 20, 3], 10)}") }
+"#;
+    assert_eq!(compile_and_run(src), "true false");
 }

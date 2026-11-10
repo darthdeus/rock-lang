@@ -35,9 +35,13 @@ from collections import Counter, defaultdict
 
 HEADER = re.compile(r"^(?:function ([A-Za-z_][A-Za-z0-9_]*)\(|__rock_mk_([A-Za-z_][A-Za-z0-9_]*) = function\()")
 BIND = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*) = __rock_mk_\1\(")
-LABEL = re.compile(r"^\s*::bb\d+::\s*$")
-GOTO = re.compile(r"^\s*goto bb\d+\s*$")
-GOTO_TARGET = re.compile(r"goto (bb\d+)")
+# Labels and gotos: `bb<N>` in a flat (coroutine step) body; `L<N>` (a
+# follower), `c<N>` (the end of a `for` body) and `w<N>` (a loop header) in a
+# structured one.
+LABEL = re.compile(r"^\s*::(?:bb|L|c|w)\d+::\s*$")
+GOTO = re.compile(r"^\s*goto (?:bb|L|c|w)\d+\s*$")
+GOTO_TARGET = re.compile(r"goto ((?:bb|L|c|w)\d+)")
+CONTROL = re.compile(r"^\s*(?:(?:if|elseif) .* then|else|end|for .* do|break)\s*$")
 LOCAL_DECL = re.compile(r"^\s*local [rc]\d+(?:, [rc]\d+)*\s*$")
 RETURN_UNIT = re.compile(r"^\s*do return end\s*$")
 NIL_KILL = re.compile(r"^\s*[rc]\d+ = nil\s*$")
@@ -176,9 +180,9 @@ def count_nested_functions(text):
 
 
 def boilerplate(lines, start, end):
-    """Bytes of structural text in one body, plus the control-flow waste a
-    structured emitter could drop: labels no goto targets, and a goto whose
-    target label is the very next statement."""
+    """Bytes of structural text in one body, plus the control-flow waste the
+    printer could still drop: labels no goto targets, and a goto whose target
+    label is the very next statement."""
     out = Counter()
     body = lines[start:end]
     targets = Counter()
@@ -202,6 +206,8 @@ def boilerplate(lines, start, end):
             out["block label"] += len(l) + 1
         elif GOTO.match(l):
             out["goto"] += len(l) + 1
+        elif CONTROL.match(l):
+            out["control line"] += len(l) + 1
         elif LOCAL_DECL.match(l):
             out["local decl"] += len(l) + 1
         elif RETURN_UNIT.match(l):
@@ -365,7 +371,7 @@ def main():
     rows = [["definition header line", fmt_bytes(header_bytes), f"{100 * header_bytes / total_bytes:.1f}%"],
             ["closing end line", fmt_bytes(end_bytes), f"{100 * end_bytes / total_bytes:.1f}%"],
             ["bind line (name = __rock_mk_name(..))", fmt_bytes(glue_kinds["bind"]), f"{100 * glue_kinds['bind'] / total_bytes:.1f}%"]]
-    for k in ("indent", "block label", "goto", "local decl", "do return end", "nil kill", "blank"):
+    for k in ("indent", "block label", "goto", "control line", "local decl", "do return end", "nil kill", "blank"):
         rows.append([k, fmt_bytes(boiler[k]), f"{100 * boiler[k] / total_bytes:.1f}%"])
     rows.append(["  of labels: never targeted", fmt_bytes(boiler["unused label"]), f"{100 * boiler['unused label'] / total_bytes:.1f}%"])
     rows.append(["  of gotos: to the next line's label", fmt_bytes(boiler["fallthrough goto"]), f"{100 * boiler['fallthrough goto'] / total_bytes:.1f}%"])

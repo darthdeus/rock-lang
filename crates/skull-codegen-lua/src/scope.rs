@@ -284,7 +284,7 @@ pub(crate) fn render_scope(
         rpo,
         inlinable,
         emitted: vec![false; func.blocks.len()],
-        label_refs: block::label_ref_counts(func, rpo, &loops),
+        label_refs: Vec::new(),
         last_goto: std::cell::Cell::new(None),
         hoist,
         hoist_names,
@@ -297,14 +297,58 @@ pub(crate) fn render_scope(
         kills,
         line_marks,
         bound,
+        structured: false,
     };
     let body_start = out.len();
-    for &bb in rpo {
-        em.emit_block(out, bb); // self-skips an already-emitted block (loop body)
+    // A coroutine `__step` keeps its flat labels: its yields resume mid-body
+    // through a dispatch on the saved state.
+    let control = if frame.is_some() {
+        None
+    } else if let &[only] = rpo
+        && matches!(func.blocks[only].term, Term::Return(_) | Term::Unreachable)
+    {
+        // Half of all bodies: one block that returns, with no control flow to
+        // place.
+        if !em.emit_block_statements(out, only) {
+            em.emit_term(out, &func.blocks[only].term, only);
+        }
+        Some(frame_limits::ControlLines::default())
+    } else {
+        structured::Shape::analyze(func, entry, rpo, &loops, |b| em.is_empty_forwarder(b))
+            .map(|shape| structured::emit_body(&mut em, &shape, entry, out))
+    };
+    if control.is_none() {
+        em.label_refs = block::label_ref_counts(func, rpo, &loops);
+        for &bb in rpo {
+            em.emit_block(out, bb); // self-skips an already-emitted block (loop body)
+        }
     }
     if ctx.frame_limits() {
         let declared = params.len() + top_locals + loops.len() * frame_limits::FOR_CONTROL_LOCALS;
-        check_body_limits(ctx, lua_name, func, &out[body_start..], declared);
+        let control = control.unwrap_or_default();
+        check_body_limits(
+            ctx,
+            lua_name,
+            func,
+            &out[body_start..],
+            declared,
+            &control,
+            body_start,
+        );
     }
     out.push_str("end");
+}
+
+impl Emitter<'_> {
+    /// A block that prints nothing and only jumps on: no statement, no kill
+    /// and no tail call. The caller checks that it ends in a plain `goto`.
+    fn is_empty_forwarder(&self, b: Idx<Block>) -> bool {
+        let r = raw(b) as usize;
+        self.tail_forwards[r].is_none()
+            && self.kills.at_entry[r].is_empty()
+            && self.func.blocks[b]
+                .insts
+                .iter()
+                .all(|&id| !self.suppressed[raw(id) as usize] && !self.emits_statement(id))
+    }
 }

@@ -106,8 +106,10 @@ pub(crate) fn check_body_limits(
     func: &MirFunc,
     body: &str,
     declared: usize,
+    control: &frame_limits::ControlLines,
+    base: usize,
 ) {
-    let Some(overflow) = frame_limits::measure_body(body, declared) else {
+    let Some(overflow) = frame_limits::measure_body(body, declared, control, base) else {
         return;
     };
     let rock_name = func.name;

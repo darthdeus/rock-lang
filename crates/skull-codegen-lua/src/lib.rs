@@ -36,6 +36,7 @@ mod preludes;
 mod regalloc;
 mod scc;
 mod scope;
+mod structured;
 mod term;
 mod trace_frames;
 mod value;
@@ -949,6 +950,9 @@ struct Emitter<'a> {
     /// Where each statement starts and which instruction it renders, when the
     /// definition is numbered with line directives.
     line_marks: Option<&'a RefCell<Vec<LineMark>>>,
+    /// The structured printer owns control flow: a folded selection does not
+    /// jump to its join.
+    structured: bool,
 }
 
 fn write_lit(out: &mut String, l: &Lit) {

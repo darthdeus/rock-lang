@@ -49,8 +49,10 @@
 //! this is `nactvar` itself rather than a second estimate of it.
 //!
 //! Two further parse caps scale with the LENGTH of a body rather than its
-//! width, and are measured on the emitted text ([`measure_body`]) because every
-//! block costs a label and every edge a `goto`:
+//! width, and are measured on the emitted text ([`measure_body`]): in a flat
+//! body every block costs a label and every edge a `goto`; in a structured
+//! one the printer reports its control lines and the jumps they compile to
+//! ([`ControlLines`]):
 //!
 //! | cap | constant | message |
 //! |---|---|---|
@@ -156,21 +158,67 @@ fn assigns_a_value(line: &str) -> bool {
         && value != "nil"
 }
 
+/// The control lines of a structured body, as its printer wrote them: where
+/// each starts, the jump instructions it compiles to, and which jumps go
+/// where. Only the printer knows which `end` closes which construct, so the
+/// model reads this instead of re-parsing the text.
+#[derive(Default)]
+pub(crate) struct ControlLines {
+    /// Byte offset of each control line in the printer's buffer, and the
+    /// jump instructions LuaJIT emits for it at least.
+    pub(crate) lines: Vec<(usize, u8)>,
+    /// `(from line, instruction in it, to line, instruction in it)`: a jump
+    /// from that instruction to the position that many instructions into the
+    /// target line.
+    pub(crate) jumps: Vec<(u32, u8, u32, u8)>,
+    /// Labels, `goto`s and `break`s: entries on LuaJIT's name stack.
+    pub(crate) names: usize,
+}
+
+impl ControlLines {
+    /// Record a control line starting at `offset`; returns its index.
+    pub(crate) fn line(&mut self, offset: usize, instructions: u8) -> u32 {
+        self.lines.push((offset, instructions));
+        (self.lines.len() - 1) as u32
+    }
+}
+
 /// The first length cap `body` breaks, given the names already `declared` by
 /// the parameter list, the top-level `local` line and the counted loops.
+/// `control` describes a structured body that starts at byte `base` of the
+/// printer's buffer; a flat body passes an empty one.
 ///
 /// A lower bound, like the frame model above: it counts only the emitter's own
 /// label, jump and register-assignment lines, and everything else is free.
-pub(crate) fn measure_body(body: &str, declared: usize) -> Option<BodyOverflow> {
+pub(crate) fn measure_body(
+    body: &str,
+    declared: usize,
+    control: &ControlLines,
+    base: usize,
+) -> Option<BodyOverflow> {
     if body.len() < MIN_MEASURED_BODY_BYTES {
         return None;
     }
-    let mut names = declared;
+    let mut names = declared + control.names;
     let mut position = 0;
     let mut labels: HashMap<u32, usize> = HashMap::default();
     let mut jumps: Vec<(u32, usize, usize)> = Vec::new();
-    for line in body.lines() {
-        let line = line.trim_start();
+    // Where each control line starts, in counted instructions.
+    let mut control_at: Vec<usize> = Vec::with_capacity(control.lines.len());
+    let mut next_control = control.lines.iter().peekable();
+    let mut offset = base;
+    for line in body.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        if let Some(&&(at, instructions)) = next_control.peek()
+            && at == start
+        {
+            next_control.next();
+            control_at.push(position);
+            position += instructions as usize;
+            continue;
+        }
+        let line = line.trim();
         if let Some(label) = line
             .strip_prefix("::")
             .and_then(|l| l.strip_suffix("::"))
@@ -191,11 +239,19 @@ pub(crate) fn measure_body(body: &str, declared: usize) -> Option<BodyOverflow> 
     if names > LJ_MAX_VSTACK {
         return Some(BodyOverflow::Names(names));
     }
+    let mut spans: Vec<(usize, usize, usize)> = jumps
+        .into_iter()
+        .filter_map(|(target, first, last)| Some((*labels.get(&target)?, first, last)))
+        .collect();
+    if control_at.len() == control.lines.len() {
+        for &(from, from_at, to, to_at) in &control.jumps {
+            let first = control_at[from as usize] + from_at as usize;
+            let label = control_at[to as usize] + to_at as usize;
+            spans.push((label, first, first));
+        }
+    }
     let mut longest = None;
-    for (target, first, last) in jumps {
-        let Some(&label) = labels.get(&target) else {
-            continue;
-        };
+    for (label, first, last) in spans {
         let (span, over) = if label > last {
             let span = label - last - 1;
             (span, span > MAX_FORWARD_JUMP)
@@ -520,7 +576,7 @@ mod body_measure_tests {
     }
 
     fn agrees(body: &str, locals: &str) -> bool {
-        let rejected = measure_body(body, 0).is_some();
+        let rejected = measure_body(body, 0, &ControlLines::default(), 0).is_some();
         assert_eq!(
             rejected,
             !loads(body, locals),
@@ -564,12 +620,12 @@ mod body_measure_tests {
             "  goto bb1\n{}  ::bb1::\n",
             "  r0 = r0\n  r0 = nil\n".repeat(40_000)
         );
-        assert_eq!(measure_body(&body, 0), None);
+        assert_eq!(measure_body(&body, 0, &ControlLines::default(), 0), None);
     }
 
     #[test]
     fn jump_text_inside_a_string_is_not_a_jump() {
         let body = "  print(\"goto bb1\")\n".repeat(70_000);
-        assert_eq!(measure_body(&body, 0), None);
+        assert_eq!(measure_body(&body, 0, &ControlLines::default(), 0), None);
     }
 }

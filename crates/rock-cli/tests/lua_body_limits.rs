@@ -52,15 +52,17 @@ fn a_chain_under_the_limits_runs() {
 }
 
 #[test]
-fn a_chain_past_the_jump_range_is_a_located_error() {
+fn a_chain_printed_as_one_elseif_ladder_runs() {
+    // Structured output spends about three instructions per rung, where label
+    // and goto output spent six and ran out of jump range near 5500 rungs.
     let (ok, text) = rock_test(&assign_chain(6000));
-    assert!(!ok, "{text}");
-    assert_located_limit(&text, "control structure too long");
+    assert!(ok, "{text}");
 }
 
 #[test]
-fn a_chain_past_the_label_stack_is_a_located_error() {
+fn a_chain_past_the_jump_range_is_a_located_error() {
+    // The first rung's escape jump to the ladder's `end` spans every rung.
     let (ok, text) = rock_test(&assign_chain(20000));
     assert!(!ok, "{text}");
-    assert_located_limit(&text, "LJ_MAX_VSTACK");
+    assert_located_limit(&text, "control structure too long");
 }

@@ -288,10 +288,32 @@ impl Emitter<'_> {
                 out.push('\n');
                 // Selection skips arm entry kills; apply them at the join edge.
                 self.write_kills(out, &self.kills.on_edge(bb, join));
-                self.write_goto(out, join);
+                if !self.structured {
+                    self.write_goto(out, join);
+                }
             }
             SelectionTarget::Return => out.push_str(" end\n"),
         }
+    }
+
+    /// Where a branch the printer folds into a `math.max`/`math.min`
+    /// selection continues: `Some(Some(join))`, `Some(None)` for a returning
+    /// selection, `None` when the branch is not a selection.
+    pub(crate) fn selection_next(
+        &self,
+        bb: Idx<Block>,
+        cond: Idx<Inst>,
+        then_bb: Idx<Block>,
+        else_bb: Idx<Block>,
+    ) -> Option<Option<Idx<Block>>> {
+        let target = match self.numeric_clamp(bb, cond, then_bb, else_bb) {
+            Some((target, ..)) => target,
+            None => self.numeric_selection(bb, cond, then_bb, else_bb)?.0,
+        };
+        Some(match target {
+            SelectionTarget::Cell { join, .. } => Some(join),
+            SelectionTarget::Return => None,
+        })
     }
 
     pub(crate) fn emit_term(&self, out: &mut String, term: &Term, bb: Idx<Block>) {

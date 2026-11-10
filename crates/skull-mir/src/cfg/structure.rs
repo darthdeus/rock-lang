@@ -1,10 +1,13 @@
-//! CFG structuring analysis for the relooper backends (GLSL, JS): immediate
+//! CFG structuring analysis. For the relooper backends (GLSL, JS): immediate
 //! post-dominators, natural loops, and range-`for` recognition. Both backends
 //! need structured goto-free output and see the same reducible CFGs skull-mir
 //! lowers for a tier-0 fn, so the simple iterative algorithms suffice (tens of
 //! blocks). What differs per target is passed in as [`LoopShapes`] and
 //! [`CountedBound`]; the structured walk over this analysis is
 //! [`relooper`](super::relooper).
+//!
+//! For the Lua printer, which keeps forward `goto` and so can structure every
+//! reducible CFG: [`place`], the dominator-tree placement of each block.
 
 use super::dense::{bi, bx, collect_loop_body, dominates, idoms, pred_list, rpo, succ_list};
 use crate::mir::{Block, Cell, Inst, Lit, MirFunc, Term};
@@ -314,6 +317,400 @@ fn is_incr_latch(f: &MirFunc, p: Idx<Block>, slot: Idx<Cell>) -> bool {
     false
 }
 
+/// Dense successor lists in compressed form: block `b`'s successors are
+/// `targets[offsets[b]..offsets[b + 1]]`, so a body costs two allocations
+/// rather than one per block.
+#[derive(Default)]
+pub struct Succ {
+    pub offsets: Vec<u32>,
+    pub targets: Vec<u32>,
+}
+
+impl Succ {
+    fn of(&self, b: usize) -> &[u32] {
+        &self.targets[self.offsets[b] as usize..self.offsets[b + 1] as usize]
+    }
+}
+
+/// Where each block of a reducible CFG is printed, for a printer that nests
+/// blocks along the dominator tree and keeps forward jumps (Ramsey, "Beyond
+/// Relooper"). A block reached by two or more forward edges, or one that
+/// leaves a loop, is a *follower*: it is printed after the construct of its
+/// placement parent, its immediate dominator lifted out of every loop that
+/// does not contain it. Every other block is printed inline at its one
+/// forward edge.
+///
+/// Everything but `order` is indexed by reverse-postorder position, over
+/// the blocks reachable from the entry only.
+pub struct Placement {
+    /// Block -> its reverse-postorder position, [`NO_BLOCK`] if unreachable.
+    order: Vec<u32>,
+    /// Position -> block.
+    blocks: Vec<u32>,
+    pos: Vec<Pos>,
+    /// `(header, latch)` positions of every back edge, sorted.
+    latches: Vec<(u32, u32)>,
+    /// Followers grouped by placement parent, each group in reverse
+    /// postorder; [`Pos::follow`] is where a parent's group starts.
+    follow: Vec<Idx<Block>>,
+}
+
+#[derive(Clone, Copy)]
+struct Pos {
+    /// The innermost loop header containing this position (itself, for a
+    /// header).
+    loop_of: u32,
+    /// For a header: the header of the loop enclosing its loop.
+    loop_parent: u32,
+    /// For a header: how many blocks its natural loop holds.
+    loop_size: u32,
+    follow: u32,
+    flags: u8,
+}
+
+const NO_BLOCK: u32 = u32::MAX;
+const HEADER: u8 = 1;
+const FOLLOWER: u8 = 2;
+const UNPLACED: u8 = 4;
+
+impl Placement {
+    fn at(&self, b: Idx<Block>) -> u32 {
+        self.order.get(bx(b)).copied().unwrap_or(NO_BLOCK)
+    }
+
+    fn flag(&self, b: Idx<Block>, f: u8) -> bool {
+        let p = self.at(b);
+        p != NO_BLOCK && self.pos[p as usize].flags & f != 0
+    }
+
+    /// A loop header: the target of a back edge.
+    pub fn is_header(&self, b: Idx<Block>) -> bool {
+        self.flag(b, HEADER)
+    }
+
+    /// The back-edge sources of header `h`.
+    pub fn latches(&self, h: Idx<Block>) -> impl Iterator<Item = Idx<Block>> + '_ {
+        let p = self.at(h);
+        let start = self.latches.partition_point(|&(x, _)| x < p);
+        self.latches[start..]
+            .iter()
+            .take_while(move |&&(x, _)| x == p)
+            .map(|&(_, l)| bi(self.blocks[l as usize] as usize))
+    }
+
+    /// Whether `b` lies in the natural loop headed by `h` (or a nested one).
+    pub fn in_loop(&self, h: Idx<Block>, b: Idx<Block>) -> bool {
+        let (h, b) = (self.at(h), self.at(b));
+        b != NO_BLOCK && in_loop(&self.pos, h, b)
+    }
+
+    /// How many blocks the natural loop headed by `h` holds, nested loops
+    /// included.
+    pub fn loop_size(&self, h: Idx<Block>) -> usize {
+        let p = self.at(h);
+        if p == NO_BLOCK {
+            0
+        } else {
+            self.pos[p as usize].loop_size as usize
+        }
+    }
+
+    pub fn is_follower(&self, b: Idx<Block>) -> bool {
+        self.flag(b, FOLLOWER)
+    }
+
+    /// The followers placed after `b`'s construct, in reverse postorder.
+    pub fn followers(&self, b: Idx<Block>) -> &[Idx<Block>] {
+        let p = self.at(b);
+        if p == NO_BLOCK {
+            return &[];
+        }
+        let p = p as usize;
+        let end = self
+            .pos
+            .get(p + 1)
+            .map_or(self.follow.len(), |q| q.follow as usize);
+        &self.follow[self.pos[p].follow as usize..end]
+    }
+}
+
+fn in_loop(pos: &[Pos], h: u32, b: u32) -> bool {
+    let mut l = pos[b as usize].loop_of;
+    while l != NO_BLOCK {
+        if l == h {
+            return true;
+        }
+        l = pos[l as usize].loop_parent;
+    }
+    false
+}
+
+/// Working storage for [`place`], kept per thread: one call per printed body
+/// would otherwise allocate all of it again.
+#[derive(Default)]
+struct Scratch {
+    stack: Vec<(u32, u32)>,
+    pred_start: Vec<u32>,
+    preds: Vec<u32>,
+    fill: Vec<u32>,
+    idom: Vec<u32>,
+    forward_in: Vec<u32>,
+    mark: Vec<u32>,
+    body: Vec<u32>,
+    pairs: Vec<(u32, u32)>,
+}
+
+thread_local! {
+    static SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::default();
+}
+
+fn reset<T: Copy>(v: &mut Vec<T>, len: usize, x: T) {
+    v.clear();
+    v.resize(len, x);
+}
+
+/// [`Placement`] over `succ` (successors that may differ from the function's
+/// own edges) from `entry`. `unplaced` blocks are never printed as statements
+/// (a counted loop's latch, which its `for` line subsumes), so they are never
+/// followers. `None` when the CFG is irreducible.
+pub fn place(entry: Idx<Block>, succ: &Succ, unplaced: &[Idx<Block>]) -> Option<Placement> {
+    SCRATCH.with(|s| place_in(&mut s.borrow_mut(), entry, succ, unplaced))
+}
+
+fn place_in(
+    s: &mut Scratch,
+    entry: Idx<Block>,
+    succ: &Succ,
+    unplaced: &[Idx<Block>],
+) -> Option<Placement> {
+    let n = succ.offsets.len() - 1;
+    // Reverse postorder by an iterative depth-first search.
+    let mut order = vec![NO_BLOCK; n];
+    let mut blocks: Vec<u32> = Vec::with_capacity(n);
+    s.stack.clear();
+    s.stack.push((raw_of(entry), 0));
+    order[bx(entry)] = 0;
+    while let Some(top) = s.stack.last_mut() {
+        let (b, i) = *top;
+        match succ.of(b as usize).get(i as usize) {
+            Some(&t) => {
+                top.1 += 1;
+                if order[t as usize] == NO_BLOCK {
+                    order[t as usize] = 0;
+                    s.stack.push((t, 0));
+                }
+            }
+            None => {
+                blocks.push(b);
+                s.stack.pop();
+            }
+        }
+    }
+    blocks.reverse();
+    let k = blocks.len();
+    for (p, &b) in blocks.iter().enumerate() {
+        order[b as usize] = p as u32;
+    }
+    let mut pos = vec![
+        Pos {
+            loop_of: NO_BLOCK,
+            loop_parent: NO_BLOCK,
+            loop_size: 0,
+            follow: 0,
+            flags: 0,
+        };
+        k
+    ];
+    for &u in unplaced {
+        let p = order[bx(u)];
+        if p != NO_BLOCK {
+            pos[p as usize].flags |= UNPLACED;
+        }
+    }
+    if k == 1 {
+        let self_loop = succ.of(blocks[0] as usize).contains(&blocks[0]);
+        if !self_loop {
+            return Some(Placement {
+                order,
+                blocks,
+                pos,
+                latches: Vec::new(),
+                follow: Vec::new(),
+            });
+        }
+    }
+    // Predecessors by position. Every successor of a reachable block is
+    // reachable, so the edges of `blocks` are all of them.
+    reset(&mut s.pred_start, k + 1, 0);
+    for &b in &blocks {
+        for &t in succ.of(b as usize) {
+            s.pred_start[order[t as usize] as usize + 1] += 1;
+        }
+    }
+    for p in 0..k {
+        s.pred_start[p + 1] += s.pred_start[p];
+    }
+    reset(&mut s.preds, s.pred_start[k] as usize, 0);
+    s.fill.clear();
+    s.fill.extend_from_slice(&s.pred_start);
+    for (p, &b) in blocks.iter().enumerate() {
+        for &t in succ.of(b as usize) {
+            let q = order[t as usize] as usize;
+            s.preds[s.fill[q] as usize] = p as u32;
+            s.fill[q] += 1;
+        }
+    }
+    let (pred_start, preds) = (&s.pred_start, &s.preds);
+    let preds_of = |p: usize| &preds[pred_start[p] as usize..pred_start[p + 1] as usize];
+    // Immediate dominators (Cooper, Harvey, Kennedy); in position space a
+    // dominator always has the smaller position.
+    let idom = &mut s.idom;
+    reset(idom, k, NO_BLOCK);
+    idom[0] = 0;
+    let mut retreating = false;
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for p in 1..k {
+            let mut new = NO_BLOCK;
+            for &q in preds_of(p) {
+                retreating |= q as usize >= p;
+                if idom[q as usize] == NO_BLOCK {
+                    continue;
+                }
+                new = if new == NO_BLOCK {
+                    q
+                } else {
+                    let (mut a, mut b) = (q, new);
+                    while a != b {
+                        while a > b {
+                            a = idom[a as usize];
+                        }
+                        while b > a {
+                            b = idom[b as usize];
+                        }
+                    }
+                    a
+                };
+            }
+            if idom[p] != new {
+                idom[p] = new;
+                changed = true;
+            }
+        }
+        // Without a retreating edge every predecessor was final when its
+        // successor was visited, so the first pass settled them all.
+        changed &= retreating;
+    }
+    reset(&mut s.forward_in, k, 0);
+    let mut latches: Vec<(u32, u32)> = Vec::new();
+    for (p, &b) in blocks.iter().enumerate() {
+        for &t in succ.of(b as usize) {
+            let q = order[t as usize];
+            if q as usize > p {
+                s.forward_in[q as usize] += 1;
+                continue;
+            }
+            let mut d = p as u32;
+            while d > q {
+                d = idom[d as usize];
+            }
+            if d != q {
+                return None;
+            }
+            latches.push((q, p as u32));
+            pos[q as usize].flags |= HEADER;
+        }
+    }
+    latches.sort_unstable();
+    latches.dedup();
+    // Innermost loops first: a header claims every unclaimed block of its
+    // natural loop, and a nested header already claimed is its child.
+    reset(&mut s.mark, k, NO_BLOCK);
+    let (mark, body) = (&mut s.mark, &mut s.body);
+    let mut end = latches.len();
+    while end > 0 {
+        let h = latches[end - 1].0;
+        let start = latches[..end].partition_point(|&(x, _)| x < h);
+        body.clear();
+        body.push(h);
+        mark[h as usize] = h;
+        for &(_, l) in &latches[start..end] {
+            if mark[l as usize] != h {
+                mark[l as usize] = h;
+                body.push(l);
+            }
+        }
+        // `body[0]` is the header, whose predecessors are outside the loop.
+        let mut next = 1;
+        while next < body.len() {
+            let x = body[next];
+            next += 1;
+            for &q in preds_of(x as usize) {
+                if mark[q as usize] != h {
+                    mark[q as usize] = h;
+                    body.push(q);
+                }
+            }
+        }
+        pos[h as usize].loop_size = body.len() as u32;
+        for &b in body.iter() {
+            let b = b as usize;
+            let at = &mut pos[b];
+            if at.loop_of == NO_BLOCK {
+                at.loop_of = h;
+            } else if at.loop_of as usize == b && b != h as usize && at.loop_parent == NO_BLOCK {
+                at.loop_parent = h;
+            }
+        }
+        end = start;
+    }
+    let pairs = &mut s.pairs;
+    pairs.clear();
+    for p in 1..k {
+        if pos[p].flags & UNPLACED != 0 {
+            continue;
+        }
+        let mut parent = idom[p];
+        let mut lifted = false;
+        let mut l = pos[parent as usize].loop_of;
+        while l != NO_BLOCK && !in_loop(&pos, l, p as u32) {
+            parent = l;
+            lifted = true;
+            l = pos[parent as usize].loop_parent;
+        }
+        if s.forward_in[p] >= 2 || lifted {
+            pos[p].flags |= FOLLOWER;
+            pairs.push((parent, p as u32));
+        }
+    }
+    // Pairs come in position order of the follower, so a stable sort by
+    // parent leaves each group in reverse postorder.
+    pairs.sort_by_key(|&(parent, _)| parent);
+    let mut next = 0;
+    for (p, at) in pos.iter_mut().enumerate() {
+        at.follow = next as u32;
+        while next < pairs.len() && pairs[next].0 as usize == p {
+            next += 1;
+        }
+    }
+    let follow = pairs
+        .iter()
+        .map(|&(_, f)| bi(blocks[f as usize] as usize))
+        .collect();
+    Some(Placement {
+        order,
+        blocks,
+        pos,
+        latches,
+        follow,
+    })
+}
+
+fn raw_of(b: Idx<Block>) -> u32 {
+    bx(b) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,5 +867,90 @@ mod tests {
         let l = s.loops.get(&bi(1)).expect("headerless loop");
         assert_eq!(l.exit, bi(3));
         assert_eq!(l.test, None);
+    }
+
+    fn dense_succ(f: &MirFunc) -> Succ {
+        let mut s = Succ::default();
+        s.offsets.push(0);
+        for list in super::super::dense::succ_list(f) {
+            s.targets.extend(list.iter().map(|&t| t as u32));
+            s.offsets.push(s.targets.len() as u32);
+        }
+        s
+    }
+
+    #[test]
+    fn place_rejects_an_irreducible_cfg() {
+        // 0 -> {1, 2}; 1 -> 2; 2 -> 1: the cycle has two entries.
+        let f = mk(
+            4,
+            vec![
+                branch(1, 2),
+                branch(2, 3),
+                Term::Goto(bi(1)),
+                Term::Return(vec![]),
+            ],
+        );
+        assert!(place(bi(0), &dense_succ(&f), &[]).is_none());
+    }
+
+    #[test]
+    fn place_puts_a_join_after_its_dominator() {
+        // 0 -> {1, 2} -> 3: the join follows the diamond; the arms are inline.
+        let f = mk(
+            4,
+            vec![
+                branch(1, 2),
+                Term::Goto(bi(3)),
+                Term::Goto(bi(3)),
+                Term::Return(vec![]),
+            ],
+        );
+        let p = place(bi(0), &dense_succ(&f), &[]).expect("reducible");
+        assert_eq!(p.followers(bi(0)), &[bi(3)]);
+        assert!(!p.is_follower(bi(1)) && !p.is_follower(bi(2)));
+    }
+
+    #[test]
+    fn place_lifts_a_loop_exit_out_of_the_loop() {
+        // 0 -> 1(header) -> {2, 3}; 2 -> 1; 3 returns. The exit 3 is
+        // dominated by the header but printed after the loop, as a follower of
+        // the header's own parent.
+        let f = mk(
+            4,
+            vec![
+                Term::Goto(bi(1)),
+                branch(2, 3),
+                Term::Goto(bi(1)),
+                Term::Return(vec![]),
+            ],
+        );
+        let p = place(bi(0), &dense_succ(&f), &[]).expect("reducible");
+        assert!(p.is_header(bi(1)));
+        assert_eq!(p.latches(bi(1)).collect::<Vec<_>>(), vec![bi(2)]);
+        assert!(p.in_loop(bi(1), bi(2)) && !p.in_loop(bi(1), bi(3)));
+        assert_eq!(p.followers(bi(1)), &[bi(3)]);
+    }
+
+    #[test]
+    fn place_nests_an_inner_loop_in_its_outer_loop() {
+        let f = mk(
+            7,
+            vec![
+                Term::Goto(bi(1)),
+                branch(2, 6),
+                branch(3, 5),
+                Term::Goto(bi(4)),
+                Term::Goto(bi(2)),
+                Term::Goto(bi(1)),
+                Term::Return(vec![]),
+            ],
+        );
+        let p = place(bi(0), &dense_succ(&f), &[]).expect("reducible");
+        assert!(p.in_loop(bi(1), bi(4)) && p.in_loop(bi(2), bi(4)));
+        assert!(p.in_loop(bi(1), bi(5)) && !p.in_loop(bi(2), bi(5)));
+        // The inner exit stays inside the outer loop.
+        assert_eq!(p.followers(bi(2)), &[bi(5)]);
+        assert_eq!(p.followers(bi(1)), &[bi(6)]);
     }
 }
