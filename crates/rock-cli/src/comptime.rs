@@ -337,6 +337,16 @@ fn resolve_source_fingerprints(
         hash.update(value.as_bytes());
     }
     let mut resolved = Vec::new();
+    // Declarations share files, and each file's identity and bytes are the
+    // same at every owner.
+    let mut identities = rustc_hash::FxHashMap::default();
+    let mut texts = rustc_hash::FxHashMap::default();
+    let mut source_text = |file: &str| -> Option<String> {
+        texts
+            .entry(file.to_string())
+            .or_insert_with(|| source_text(file))
+            .clone()
+    };
     for (name, declaration) in &inputs.source_fingerprints {
         let mut hash = Sha256::new();
         field(&mut hash, "rock-source-fingerprint-v1");
@@ -358,10 +368,10 @@ fn resolve_source_fingerprints(
             // Canonical declaration identity is stable across worktree roots.
             // Hash all defining bytes, including defaults and helper bodies.
             field(&mut hash, owner.name.as_str());
-            field(
-                &mut hash,
-                &source_file_identity(owner.file.as_str(), inputs.embed_root.as_deref()),
-            );
+            let identity = identities.entry(owner.file).or_insert_with(|| {
+                source_file_identity(owner.file.as_str(), inputs.embed_root.as_deref())
+            });
+            field(&mut hash, identity);
             let text = source_text(owner.file.as_str()).ok_or_else(|| {
                 anyhow::anyhow!(
                     "source fingerprint {name}: missing checked source {}",

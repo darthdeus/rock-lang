@@ -121,15 +121,17 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
         let timer = Instant::now();
         let inputs = self.comptime_inputs()?;
         // Every fingerprint owner looks its text up; one index over the
-        // sources instead of a scan per owner.
-        let texts: std::collections::HashMap<String, usize> = self
-            .sources
-            .files
-            .iter()
-            .enumerate()
-            .map(|(index, source)| (source.borrow().file.to_id_path(), index))
-            .collect();
+        // sources instead of a scan per owner, built on the first lookup.
+        let texts = std::cell::OnceCell::new();
         let resolved = crate::comptime::resolve_checked_inputs(ws, inputs, |file| {
+            let texts: &rustc_hash::FxHashMap<String, usize> = texts.get_or_init(|| {
+                self.sources
+                    .files
+                    .iter()
+                    .enumerate()
+                    .map(|(index, source)| (source.borrow().file.to_id_path(), index))
+                    .collect()
+            });
             texts
                 .get(file)
                 .map(|&index| self.sources.files[index].borrow().contents.clone())
