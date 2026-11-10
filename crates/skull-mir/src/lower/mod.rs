@@ -3846,6 +3846,20 @@ fn resolve_call_fn(
     }
 }
 
+/// Whether call `e` to `name` is a `rock_shader` expansion. Its arguments name
+/// stage entries for GLSL; the call collapses to a key, so they are no values.
+pub fn is_shader_pipeline_call(
+    ws: &Workspace,
+    inf: &BodyInference,
+    e: Idx<Expr>,
+    name: Ustr,
+) -> bool {
+    resolve_call_fn(ws, inf, e, name).is_some_and(|(m, f)| {
+        crate::intrinsics::expand_kind(&ws.module(m).functions[f])
+            == Some(crate::intrinsics::ExpandKind::ShaderPipeline)
+    })
+}
+
 fn struct_expand_rejection_for_call(
     ws: &Workspace,
     body: &Body,
@@ -3902,6 +3916,13 @@ pub struct ShaderCollection {
     pub pairs: Vec<ShaderPair>,
     pub callsites: Vec<(ModuleId, BodyOwner)>,
     pub contributions: std::collections::HashMap<(ModuleId, BodyOwner), Vec<ShaderPair>>,
+}
+
+/// Whether `f` is a `@shader` stage entry. Its program is registered as GLSL
+/// text, so it is no CPU root: a CPU artifact defines it only when ordinary code
+/// calls it.
+pub fn is_shader_entry(f: &Function) -> bool {
+    shader_stage_of(f).is_some()
 }
 
 /// The `@shader(<stage>)` stage of `f`, else `None`.

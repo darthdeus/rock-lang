@@ -714,6 +714,14 @@ fn unresolved_inline_dep_order(
     func_ref_order(&left.owner, &right.owner).then_with(|| left.entry.cmp(right.entry))
 }
 
+/// Whether `i` is one of the request's own roots. A `@shader` stage entry is
+/// registered as GLSL text, never named from Lua, so it is retained only when
+/// ordinary code reaches it.
+fn declared_root(ws: &Workspace, root_decls: &BTreeSet<DeclKey>, i: &Instance) -> bool {
+    root_decls.contains(&DeclKey(i.func))
+        && !skull_mir::lower::is_shader_entry(&ws.module(i.func.module).functions[i.func.func])
+}
+
 fn publication_candidates(ws: &Workspace, req: &ArtifactRequest<'_>) -> BTreeMap<Instance, String> {
     let target = req.spec.cpu();
     req.roots
@@ -1078,7 +1086,7 @@ impl ArtifactView {
         }
         for i in subjects.iter().filter(|i| g.instances.contains(*i)) {
             local_index_rows_examined += 1;
-            let declared = self.index.root_decls.contains(&DeclKey(i.func));
+            let declared = declared_root(ws, &self.index.root_decls, i);
             let structural = g.is_always_emitted_target(i);
             if (declared || structural) && self.index.realizable[i].is_ok() {
                 self.roots.insert(i.clone());
@@ -1196,7 +1204,7 @@ impl ArtifactView {
             if reachable_dirty.contains(i) {
                 let realized = result.expect("retained artifact instance must be realizable");
                 self.install_instance_output(ws, g, req, i, realized, &scalar_context);
-                let declared = self.index.root_decls.contains(&DeclKey(i.func));
+                let declared = declared_root(ws, &self.index.root_decls, i);
                 if declared || g.is_always_emitted_target(i) {
                     self.roots.insert(i.clone());
                     if declared {
@@ -2151,7 +2159,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     let mut roots: BTreeSet<Instance> = BTreeSet::new();
     let mut declared_roots: BTreeSet<Instance> = BTreeSet::new();
     for i in &g.instances {
-        let declared = root_decls.contains(&DeclKey(i.func));
+        let declared = declared_root(ws, &root_decls, i);
         let is_root = declared || g.is_always_emitted_target(i);
         if is_root && index.realizable[i].is_ok() {
             roots.insert(i.clone());

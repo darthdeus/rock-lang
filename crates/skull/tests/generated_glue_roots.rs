@@ -250,8 +250,13 @@ fn an_unreached_shader_registration_still_retains_its_dependencies() {
     for name in ["glue_vert", "glue_frag"] {
         let d = fn_ref(&ws, name);
         assert!(
-            view.retains(&Instance::base(d)),
-            "the Lua ArtifactView must retain shader dependency `{name}`"
+            cache.shader_view().roots.contains(&Instance::base(d)),
+            "the shader view must retain stage entry `{name}`"
+        );
+        assert!(
+            !view.retains(&Instance::base(d)),
+            "the registration carries GLSL text only, so the Lua view must not \
+             retain stage entry `{name}`"
         );
     }
 }
@@ -269,15 +274,48 @@ fn shader_glue_dependencies_are_retained_through_the_view() {
     );
 
     let deps = [fn_ref(&ws, "glue_vert"), fn_ref(&ws, "glue_frag")];
-    assert_eq!(deps.len(), 2, "stated population: two stage entries");
     for d in deps {
         let i = Instance::base(d);
+        let name = ws.module(d.module).functions[d.func].name.as_str();
         assert!(
-            view.retains(&i),
-            "the Lua ArtifactView must retain shader dependency {:?}",
-            ws.module(d.module).functions[d.func].name.as_str()
+            !view.retains(&i),
+            "no CPU code calls stage entry {name:?}, so Lua must not define it"
+        );
+        assert!(
+            !definition_symbols(&emit.lua)
+                .iter()
+                .any(|s| s.starts_with(name)),
+            "{name:?} defined in Lua"
         );
     }
+}
+
+/// A stage entry ordinary code also calls is an ordinary CPU function there.
+#[test]
+fn a_shader_entry_called_from_cpu_code_is_still_defined() {
+    let src = r#"
+fn main() {
+    print(rock_shader(glue_vert, glue_frag))
+    let c = glue_frag(UiVary { position: Vec4 { x: 0.0, y: 0.0, z: 0.0, w: 1.0 }, TexCoord: Vec2 { x: 0.0, y: 0.0 } })
+    print(c.z)
+}
+"#;
+    let ws = ws_with_stdlib_module(SHADER_LIB, src);
+    let mid = module_id(&ws, "<test>");
+    let (emit, cache) = emit_full(&ws, mid).expect("emit");
+    assert!(
+        cache
+            .lua_view()
+            .retains(&Instance::base(fn_ref(&ws, "glue_frag")))
+    );
+    assert!(
+        !cache
+            .lua_view()
+            .retains(&Instance::base(fn_ref(&ws, "glue_vert")))
+    );
+    let frag = Instance::base(fn_ref(&ws, "glue_frag"));
+    let symbol = &cache.lua_view().symbols[&frag];
+    assert!(definition_symbols(&emit.lua).iter().any(|s| s == symbol));
 }
 
 /// Under modules v1 a function's name is its DefKey (`<pkg>::<module>::<name>`),

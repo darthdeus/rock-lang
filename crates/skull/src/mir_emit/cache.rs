@@ -445,6 +445,10 @@ impl SkullEmitCache {
         &self.lua_view
     }
 
+    pub fn shader_view(&self) -> &crate::shader_artifact::ShaderArtifactView {
+        &self.shader_view
+    }
+
     pub fn global_layout(&self) -> Option<&str> {
         self.global_layout.as_deref()
     }

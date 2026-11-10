@@ -6046,13 +6046,22 @@ fn fn_value_sites(
 ) -> Vec<(Idx<bone_core::hir::Expr>, FuncRef)> {
     use bone_core::hir::{Callee, Expr as E};
     let mut called_values: BTreeSet<u32> = BTreeSet::new();
-    for (_, expr) in body.expr_arena.iter() {
-        if let E::Call {
-            callee: Callee::Value(ve),
-            ..
-        } = expr
-        {
-            called_values.insert(ve.into_raw().into());
+    for (e, expr) in body.expr_arena.iter() {
+        match expr {
+            E::Call {
+                callee: Callee::Value(ve),
+                ..
+            } => {
+                called_values.insert(ve.into_raw().into());
+            }
+            E::Call {
+                callee: Callee::Unresolved { name, .. },
+                args,
+                ..
+            } if skull_mir::lower::is_shader_pipeline_call(ws, inf, e, *name) => {
+                called_values.extend(args.into_iter().map(|a| u32::from(a.into_raw())));
+            }
+            _ => {}
         }
     }
     let mut out = Vec::new();
