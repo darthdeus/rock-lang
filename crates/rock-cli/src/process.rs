@@ -51,10 +51,12 @@ fn run_process(registrations: &'static crate::registry::Registrations) {
     // Install the one logger before anything can log. Idempotent; reads
     // ROCK_LOG.
     rock_log::init();
-    skull_mir::verify::set_checks(Some(mir_checks(
+    let (verify, scope) = mir_checks(
         std::env::args().nth(1).as_deref(),
         std::env::var("ROCK_MIR_CHECKS").ok().as_deref(),
-    )));
+    );
+    skull_mir::verify::set_checks(Some(verify));
+    skull_mir::verify::set_scope_checks(scope);
 
     if let Some(name) = std::env::args().nth(1) {
         if !name.starts_with('-') && CliCommand::named(&name).is_none() {
@@ -209,23 +211,31 @@ pub fn compiler_process(command: &CliCommand, list: bool) -> bool {
     }
 }
 
-/// The MIR consistency checks catch compiler bugs, not program errors: an
-/// ordinary compile skips them, and `rock test`, the gate every change runs,
-/// keeps them. `ROCK_MIR_CHECKS` overrides either way.
-fn mir_checks(command: Option<&str>, setting: Option<&str>) -> bool {
-    skull_mir::verify::checks_requested(setting).unwrap_or(command == Some("test"))
+/// Whether the MIR verifier and the printer's scope guard run. Both catch
+/// only compiler bugs. An ordinary compile skips both; `rock test` keeps the
+/// guard, which is nearly free, but not the verifier, which costs a large
+/// test build over a tenth of its compile. `ROCK_MIR_CHECKS` sets both.
+fn mir_checks(command: Option<&str>, setting: Option<&str>) -> (bool, bool) {
+    match skull_mir::verify::checks_requested(setting) {
+        Some(on) => (on, on),
+        None => (false, command == Some("test")),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::mir_checks;
 
+    /// `(verifier, scope guard)`: `rock test` keeps the cheap printer guard
+    /// but not the MIR verifier, which costs a large program's test build
+    /// over a tenth of its compile.
     #[test]
-    fn rock_test_runs_mir_checks_unless_asked_not_to() {
-        assert!(mir_checks(Some("test"), None));
-        assert!(!mir_checks(Some("test"), Some("0")));
-        assert!(!mir_checks(Some("compile"), None));
-        assert!(mir_checks(Some("compile"), Some("1")));
-        assert!(!mir_checks(None, None));
+    fn rock_test_keeps_only_the_scope_guard_unless_asked() {
+        assert_eq!(mir_checks(Some("test"), None), (false, true));
+        assert_eq!(mir_checks(Some("test"), Some("0")), (false, false));
+        assert_eq!(mir_checks(Some("test"), Some("1")), (true, true));
+        assert_eq!(mir_checks(Some("compile"), None), (false, false));
+        assert_eq!(mir_checks(Some("compile"), Some("1")), (true, true));
+        assert_eq!(mir_checks(None, None), (false, false));
     }
 }

@@ -10,7 +10,7 @@
 
 use crate::mir::{Block, Cell, Inst, Lit, MirFunc, Term};
 use comfy_la_arena::{Arena, Idx};
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use ustr::Ustr;
 
 const CHECKS_BUILD_DEFAULT: u8 = 0;
@@ -42,6 +42,19 @@ pub fn set_checks(enabled: Option<bool>) {
         None => CHECKS_BUILD_DEFAULT,
     };
     CHECKS.store(state, Ordering::Relaxed);
+}
+
+static SCOPE_CHECKS: AtomicBool = AtomicBool::new(false);
+
+/// Whether the Lua printer checks that every name it prints is in scope:
+/// always with the checks above, and on its own where [`set_scope_checks`]
+/// asks, since it costs far less than this verifier.
+pub fn scope_checks_enabled() -> bool {
+    checks_enabled() || SCOPE_CHECKS.load(Ordering::Relaxed)
+}
+
+pub fn set_scope_checks(enabled: bool) {
+    SCOPE_CHECKS.store(enabled, Ordering::Relaxed);
 }
 
 /// The setting a `ROCK_MIR_CHECKS` value asks for: unset leaves the choice

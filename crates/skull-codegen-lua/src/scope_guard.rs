@@ -4,7 +4,7 @@
 //! local, and a cell sharing that name is shadowed inside the loop. A
 //! loop-owned register is declared inside its `for` block, so outside it the
 //! name is a global. Either mismatch prints valid Lua that reads the wrong
-//! variable, so it is checked here, at print time, when MIR checks are on.
+//! variable, so it is checked here, at print time, when scope checks are on.
 
 use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,7 +44,7 @@ pub(crate) fn install(
     cell_colors: &[u32],
     color_scope: &[Option<Idx<Block>>],
 ) -> Installed {
-    if !skull_mir::verify::checks_enabled() {
+    if !skull_mir::verify::scope_checks_enabled() {
         return Installed(false);
     }
     ANY.store(true, Ordering::Relaxed);
