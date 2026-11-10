@@ -1567,11 +1567,18 @@ fn a_non_nobox_value_in_a_tuple_return_keeps_the_boxed_abi() {
     assert_eq!(run_main(&lua), "true 1 2");
 }
 
-/// The `a, b = <fn>(..)` destination count at a multi-return call site -- the
-/// tuple ABI's arity as the CALLER sees it.
+/// The `a, b = <fn>(..)` destination count at `main`'s multi-return call site
+/// -- the tuple ABI's arity as the CALLER sees it.
 fn multi_return_dests(lua: &str, fn_name: &str) -> usize {
-    let call = format!("= {fn_name}_");
-    let line = lua
+    let prefix = format!("{fn_name}_");
+    let call = match crate::common::bound_callee_names(lua, "main")
+        .into_iter()
+        .find(|(_, target)| target.starts_with(&prefix))
+    {
+        Some((parameter, _)) => format!("= {parameter}("),
+        None => format!("= {prefix}"),
+    };
+    let line = crate::common::function_body(lua, "main")
         .lines()
         .find(|l| l.contains(&call))
         .unwrap_or_else(|| panic!("no multi-return call of `{fn_name}` in:\n{lua}"));

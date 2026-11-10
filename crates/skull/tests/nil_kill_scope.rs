@@ -182,7 +182,8 @@ fn every_nil_kill_names_a_declared_local() {
     // as one nested call with the `v` results as trailing arguments. If the
     // inliner ever swallows `noise`, this test stops exercising the path and
     // must say so rather than pass vacuously.
-    let forwarded = lua.matches("noise_Vec3(v_float_float_float(").count();
+    // Both callees are bound, so the shape is one alias called on another.
+    let forwarded = nested_alias_calls(&lua);
     assert!(
         forwarded >= 4,
         "fixture no longer emits the forwarded `noise(v(..))` shape ({forwarded} sites); \
@@ -197,4 +198,19 @@ fn every_nil_kill_names_a_declared_local() {
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+/// Occurrences of `b<N>(b<M>(`: a bound callee whose first argument is the
+/// call of another bound callee.
+fn nested_alias_calls(lua: &str) -> usize {
+    fn alias_call(s: &str) -> Option<&str> {
+        let digits = s.strip_prefix('b')?;
+        let end = digits.find(|c: char| !c.is_ascii_digit())?;
+        (end > 0).then_some(())?;
+        digits[end..].strip_prefix('(')
+    }
+    lua.match_indices('b')
+        .filter(|(i, _)| !lua[..*i].ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|(i, _)| alias_call(&lua[*i..]).and_then(alias_call).is_some())
+        .count()
 }

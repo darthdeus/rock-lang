@@ -96,7 +96,10 @@ pub fn callee_binding_plan(
     let rank = ctx.scc_of(self_ref);
     let mut captures: Vec<String> = Vec::new();
     let mut touches_state = false;
-    let mut has_inline_body = false;
+    // Free names in spliced inline(lua) text resolve lexically, so an alias
+    // spelled like one would capture it.
+    let mut raw_names: Vec<&str> = Vec::new();
+    let mut raw_callees: Vec<FuncRef> = Vec::new();
     // Cleanup unlinks instructions without freeing arena slots. Match the
     // emitted body's CFG so discarded calls and separate scopes use no slots.
     let blocks = reverse_postorder(func, func.entry());
@@ -121,7 +124,12 @@ pub fn callee_binding_plan(
             Inst::Call { func, .. } | Inst::CallMulti { func, .. } => *func,
             _ => continue,
         };
-        has_inline_body |= func_of(ws, callee).inline_body.is_some();
+        if let Some((_, text)) = &func_of(ws, callee).inline_body
+            && !raw_callees.contains(&callee)
+        {
+            raw_callees.push(callee);
+            raw_names.extend(alias_shaped_words(text.as_str()));
+        }
         // Ranks remain fixed through body edits. New backedges must stay
         // global so the retained factory order remains acyclic.
         match (rank, ctx.scc_of(callee)) {
@@ -162,13 +170,13 @@ pub fn callee_binding_plan(
     captures.truncate(limit);
     // Lua derives traceback names from call-site upvalues. Preserve them at
     // unwind boundaries so the captured raise-site trace names the callee.
-    let preserve_names = has_inline_body || func.registers_defer_cleanup(&blocks);
+    let preserve_names = func.registers_defer_cleanup(&blocks);
     let mut next_alias = 0;
     let parameters = captures
         .iter()
         .map(|capture| {
-            // Raw Lua may refer to any lexical name. Runtime helper calls are
-            // printed directly, so their captures retain the original spelling.
+            // Runtime helper calls are printed directly, so their captures
+            // retain the original spelling.
             if preserve_names
                 || matches!(
                     capture.as_str(),
@@ -180,7 +188,7 @@ pub fn callee_binding_plan(
             loop {
                 let alias = format!("b{next_alias}");
                 next_alias += 1;
-                if !ctx.reserved.contains_key(&alias) {
+                if !ctx.reserved.contains_key(&alias) && !raw_names.contains(&alias.as_str()) {
                     break ustr::Ustr::from(&alias);
                 }
             }
@@ -196,4 +204,14 @@ pub fn callee_binding_plan(
         rank: rank.unwrap_or(0),
         capped,
     })
+}
+
+/// The words of a Lua text spelled like a factory alias (`b<N>`), strings and
+/// comments included: a name to avoid needs no exact tokenizer.
+fn alias_shaped_words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|word| {
+            word.strip_prefix('b')
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
 }

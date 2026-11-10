@@ -2230,19 +2230,21 @@ fn callee_binding_short_names_skip_public_globals() {
     assert_eq!(run(src, "caller(3)"), "9");
 }
 
+/// A factory alias never takes a name that spliced inline(lua) text reads
+/// freely: the alias would capture the text's global.
 #[test]
-fn callee_binding_keeps_full_names_with_live_inline_lua_calls() {
+fn callee_binding_aliases_skip_names_inline_lua_reads() {
     let src = "fn leaf(a: int) -> int { a + 1 }\n\
                @inline inline(lua) fn raw(a: int) -> int = \"return b0(a)\"\n\
                fn caller(a: int) -> int { leaf(a) + raw(a) }";
     let bound = emit_clean_bound(src, "caller");
     assert!(
-        bound.starts_with("__rock_mk_caller_int = function(leaf_int) return function("),
-        "an inline(lua) call must retain the full capture parameter name:\n{bound}"
+        bound.starts_with("__rock_mk_caller_int = function(b1) return function("),
+        "the alias must skip the inline text's free name:\n{bound}"
     );
     assert!(
-        bound.contains("leaf_int(c0)") && bound.contains("r1 = b0(c0)"),
-        "expected the existing capture name and live inline Lua body:\n{bound}"
+        bound.contains("b1(c0)") && bound.contains("r1 = b0(c0)"),
+        "expected the aliased capture and the live inline Lua body:\n{bound}"
     );
     assert!(
         bound.contains("caller_int = __rock_mk_caller_int(leaf_int)\n"),
@@ -2255,6 +2257,28 @@ fn callee_binding_keeps_full_names_with_live_inline_lua_calls() {
         ),
         "17"
     );
+}
+
+/// Aliased captures called around a spliced inline(lua) body inside a loop,
+/// where the splice declares a local spelled like an alias, run the same as
+/// the source says.
+#[test]
+fn aliased_captures_around_a_spliced_body_in_a_loop_run_correctly() {
+    let src = "fn leaf(a: int) -> int { a + 1 }\n\
+               fn other(a: int) -> int { a * 3 }\n\
+               @inline inline(lua) fn twice(a: int) -> int = \"local b0 = a * 2\\nreturn b0\"\n\
+               fn caller(n: int) -> int {\n\
+                 let s = 0\n\
+                 for i in 0..n { s = s + leaf(twice(i)) + other(i) }\n\
+                 return s\n\
+               }";
+    let bound = emit_clean_bound(src, "caller");
+    assert!(
+        bound.starts_with("__rock_mk_caller_int = function(b1, b2) return function("),
+        "expected aliased captures that skip the splice's local:\n{bound}"
+    );
+    // sum over i < 4 of (2i + 1) + 3i
+    assert_eq!(run(src, "caller(4)"), "34");
 }
 
 /// A callee in the caller's own strongly connected component stays a global
