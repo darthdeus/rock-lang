@@ -490,6 +490,50 @@ impl CodeArtifact {
         }
     }
 
+    /// Merge `bodies` as [`Self::merge_body`] would, one after another.
+    ///
+    /// Nearly every identity arrives once, so those entries are sorted and
+    /// built into the table in one piece instead of one search each; an
+    /// identity that repeats, or that the table already holds, takes the
+    /// ordinary path in its merge order.
+    pub fn merge_bodies<'a>(&mut self, bodies: impl IntoIterator<Item = &'a BodyCodeArtifact>) {
+        use bone_core::prelude::*;
+        let mut incoming: Vec<&CodeEntry> = Vec::new();
+        for body in bodies {
+            self.census.direct_call_only += body.census.direct_call_only;
+            self.census.missing_identity += body.census.missing_identity;
+            self.census.duplicate_identity += body.census.duplicate_identity;
+            self.census.duplicate_body += body.census.duplicate_body;
+            incoming.extend(body.entries());
+        }
+        // Stable, so the entries of one identity stay in merge order.
+        incoming.sort_by(|a, b| a.identity.cmp(&b.identity));
+        let mut once: Vec<&CodeEntry> = Vec::with_capacity(incoming.len());
+        let mut repeated: Vec<&CodeEntry> = Vec::new();
+        for group in incoming.chunk_by(|a, b| a.identity == b.identity) {
+            match group {
+                [entry] if !self.entries.contains_key(&entry.identity) => once.push(entry),
+                _ => repeated.extend(group),
+            }
+        }
+        for entry in once.iter().filter(|entry| entry.escaping) {
+            self.census.examined += 1;
+            self.census.assigned += 1;
+            Self::count_kind(&mut self.census, &entry.identity, entry.capture_free);
+            if entry.body_fingerprint == 0 {
+                self.census.unresolved_body += 1;
+            }
+        }
+        let once: Vec<(CodeIdentity, CodeEntry)> = once
+            .par_iter()
+            .map(|entry| (entry.identity.clone(), (*entry).clone()))
+            .collect();
+        self.entries.append(&mut once.into_iter().collect());
+        for entry in repeated {
+            self.insert(entry.clone());
+        }
+    }
+
     /// Attach backend payload names after emission has chosen its physical
     /// symbols. The logical keys remain unchanged.
     pub fn set_body_names(&mut self, root: &MirFunc, root_name: &str) {
@@ -1762,6 +1806,83 @@ mod tests {
         assert_eq!(body.entries().len(), 1);
         borrowed.merge_body(&body);
         assert_eq!(borrowed, owned);
+    }
+
+    #[test]
+    fn merging_bodies_at_once_matches_merging_them_in_turn() {
+        let named = |func: u32| {
+            CodeIdentity::Named(Instance::base(FuncRef {
+                module: ModuleId::new(0),
+                func: Idx::from_raw(RawIdx::from_u32(func)),
+            }))
+        };
+        let lambda = |offset| CodeIdentity::Lambda {
+            enclosing: CodeOwner::Instance(Instance::base(declaration())),
+            site: LambdaSiteId {
+                file: Ustr::from("main.rock"),
+                offset,
+            },
+        };
+        let entry = |identity: &CodeIdentity, body_fingerprint, escaping, capture_free| CodeEntry {
+            identity: identity.clone(),
+            compatibility: CodeCompatibility {
+                call_abi: "unit".to_string(),
+                capture: CaptureSchema::empty(),
+                frame: None,
+                lambda_topology: LambdaTopologyFingerprint::default(),
+            },
+            body_fingerprint,
+            body_name: Some(Ustr::from("body")),
+            escaping,
+            capture_free,
+        };
+        let body = |entries: Vec<CodeEntry>| {
+            let mut artifact = CodeArtifact::default();
+            for entry in entries {
+                artifact.insert(entry);
+            }
+            artifact.record_missing(true);
+            BodyCodeArtifact::from(artifact)
+        };
+        let (resolved_later, clash, promoted, held) = (lambda(1), named(40), named(41), named(42));
+        let bodies = [
+            body(vec![
+                entry(&named(9), 9, true, true),
+                entry(&lambda(7), 7, true, false),
+            ]),
+            body(vec![
+                entry(&resolved_later, 0, true, true),
+                entry(&clash, 1, true, true),
+            ]),
+            body(vec![
+                entry(&named(3), 3, false, true),
+                entry(&promoted, 5, false, true),
+            ]),
+            body(vec![
+                entry(&resolved_later, 6, false, false),
+                entry(&clash, 2, false, true),
+            ]),
+            body(vec![
+                entry(&promoted, 0, true, true),
+                entry(&held, 8, true, true),
+            ]),
+            body(vec![
+                entry(&named(1), 1, true, true),
+                entry(&clash, 1, true, true),
+            ]),
+        ];
+        let mut held_already = CodeArtifact::default();
+        held_already.insert(entry(&held, 0, true, true));
+        for start in [CodeArtifact::default(), held_already] {
+            let mut in_turn = start.clone();
+            for body in &bodies {
+                in_turn.merge_body(body);
+            }
+            let mut at_once = start;
+            at_once.merge_bodies(&bodies);
+            assert_eq!(at_once, in_turn);
+            assert!(in_turn.census.duplicate_identity > 0);
+        }
     }
 
     #[test]

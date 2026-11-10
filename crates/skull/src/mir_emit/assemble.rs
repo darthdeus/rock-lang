@@ -100,6 +100,9 @@ struct Assembly {
     unit_facts: Vec<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
     all_statics: Vec<skull_mir::mir::StaticCell>,
     code_artifact: skull_mir::code_identity::CodeArtifact,
+    /// The lowered units' code identities, in merge order; they join the
+    /// artifact together with the placed chunks'.
+    unit_artifacts: Vec<skull_mir::code_identity::BodyCodeArtifact>,
     allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
     always_emitted_calls: Vec<FuncRef>,
     always_emitted_names: Vec<Ustr>,
@@ -123,6 +126,7 @@ impl Assembly {
             unit_facts: Vec::new(),
             all_statics: Vec::new(),
             code_artifact: skull_mir::code_identity::CodeArtifact::default(),
+            unit_artifacts: Vec::new(),
             allocation_bodies: Vec::new(),
             always_emitted_calls: Vec::new(),
             always_emitted_names: Vec::new(),
@@ -149,9 +153,9 @@ impl Assembly {
             }
             self.always_emitted_calls.extend(u.calls);
             self.always_emitted_names.extend(u.global_names);
-            self.code_artifact.merge_body(&u.code_artifact);
             self.allocation_bodies.extend(u.allocation_bodies);
             self.attribution.add_body(&u.attribution, Some(&u.lua));
+            self.unit_artifacts.push(u.code_artifact);
             self.times.add(&u.times);
         }
     }
@@ -1063,6 +1067,7 @@ pub(super) fn assemble(
         let Assembly {
             unit_facts,
             code_artifact,
+            unit_artifacts,
             all_statics,
             allocation_bodies,
             always_emitted_names,
@@ -1084,18 +1089,20 @@ pub(super) fn assemble(
                 || {
                     parallel_join(
                         || {
-                            for chunk in &order.emitted[..declared] {
-                                code_artifact.merge_body(&chunk.code_artifact);
-                            }
-                            for (instance, chunk) in spec_chunks.iter() {
-                                if !moved_set.contains(instance) {
-                                    code_artifact.merge_body(&chunk.code_artifact);
-                                }
-                            }
+                            let declared = order.emitted[..declared].iter().copied();
+                            let unmoved = spec_chunks
+                                .iter()
+                                .filter(|(instance, _)| !moved_set.contains(instance))
+                                .map(|(_, chunk)| chunk);
                             let built = built_specs.iter().map(|(_, chunk)| chunk);
-                            for chunk in built.chain(moved.iter().map(|i| &spec_chunks[i])) {
-                                code_artifact.merge_body(&chunk.code_artifact);
-                            }
+                            let moved = moved.iter().map(|instance| &spec_chunks[instance]);
+                            let chunks = declared.chain(unmoved).chain(built).chain(moved);
+                            code_artifact.merge_bodies(
+                                unit_artifacts
+                                    .iter()
+                                    .chain(chunks.map(|chunk| &chunk.code_artifact)),
+                            );
+                            unit_artifacts.clear();
                         },
                         || {
                             parallel_join(
