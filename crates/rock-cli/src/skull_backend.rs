@@ -2268,6 +2268,7 @@ fn skull_emit_project_with_inputs(
             crate::invocation_log::exit(1);
         }
     };
+    crate::compile_budget::phase("global accessors");
     // The bone Workspace is dead once `lua` is built -- this is a terminal
     // compile path (`compile`/`run` of a project; never looped in tests or
     // backend-stats), so the only thing after this is the output write / a
@@ -2595,6 +2596,7 @@ pub(crate) fn skull_compile_project_with_recorded_inputs(
     // __rock_main_wrapper(main). Without the preamble game asset paths are
     // wrong; without the wrapper it never starts.
     let preamble = (RuntimeServices::registered().program_preamble)(dir, ProgramKind::Project)?;
+    crate::compile_budget::phase("preamble");
     let parts = skull_game_main(&preamble, &emit, emits_main);
     match output {
         Some(out) => {

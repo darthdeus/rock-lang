@@ -47,8 +47,10 @@ working on a change is: edit, `cargo build --release -p rock-cli --bin rock`,
 `ROCK_COMPILE_STATS=<file>` makes `rock compile` append one JSON record with a
 `budget` tree: compile, then process start (first Rust instant to the
 compile's own start), build vars (the `[build.vars]` commands), discovery,
-parse+stdlib, semantic, prepare, codegen, write; codegen splits into the serial setup phases, the body
-fan-out window and the serial assembly steps, and carries the per-pass unit
+parse+stdlib, semantic, prepare, codegen, global accessors (the program's
+accessor directory), preamble (the runtime preamble the output opens with),
+write; codegen splits into the serial setup phases, the body fan-out window
+and the serial assembly steps, and carries the per-pass unit
 time summed over every lowered body (the fan-out and the bodies assembly
 lowers serially). Every node's `wall_ms` is
 the sum of its children, with an `other` child for the remainder, so a phase
