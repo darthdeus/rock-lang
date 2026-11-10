@@ -61,9 +61,6 @@ impl BitSet {
         }
         changed
     }
-    fn for_each(&self, f: impl FnMut(usize)) {
-        for_each_bit(&self.words, f);
-    }
 }
 
 /// `rows` bit sets of one width in one allocation: the per-block liveness
@@ -120,12 +117,10 @@ fn for_each_bit(words: &[u64], mut f: impl FnMut(usize)) {
     }
 }
 
-/// Sparse symmetric adjacency in CSR form, built from an undirected edge list.
-/// Replaces the dense `Interference` bit-matrix for value coloring: value live
-/// ranges are short, so the interference graph is sparse and a dense `v^2`
-/// matrix wastes its zeroing and its per-row coloring scan. Each input edge
-/// `(a, b)` is stored in BOTH directions, so `neighbors(i)` yields every value
-/// interfering with `i` regardless of discovery direction.
+/// Sparse symmetric adjacency in CSR form, built from an undirected edge list:
+/// the large-body form of [`Interference`]. Each input edge `(a, b)` is stored
+/// in BOTH directions, so `neighbors(i)` yields every name interfering with `i`
+/// regardless of discovery direction.
 struct Csr {
     off: Vec<u32>,
     adj: Vec<u32>,
@@ -155,6 +150,93 @@ impl Csr {
 
     fn neighbors(&self, i: usize) -> &[u32] {
         &self.adj[self.off[i] as usize..self.off[i + 1] as usize]
+    }
+}
+
+/// Symmetric interference between `n` names. Up to [`DENSE_NAMES`] names it is
+/// a bit matrix, where a def interferes with its whole live set by OR-ing
+/// words into its row; above that, a sparse edge list in CSR form, since a
+/// matrix's zeroing and row scans grow with the square of the name count.
+enum Interference {
+    Dense(BitRows),
+    Sparse(Vec<(u32, u32)>),
+}
+
+const DENSE_NAMES: usize = 1024;
+
+impl Interference {
+    fn new(n: usize) -> Self {
+        if n <= DENSE_NAMES {
+            Interference::Dense(BitRows::new(n, n))
+        } else {
+            Interference::Sparse(Vec::new())
+        }
+    }
+
+    /// `d` interferes with every name in `live` that `allowed` admits (all
+    /// names when `None`), except itself.
+    fn add_live(&mut self, d: usize, live: &BitSet, allowed: Option<&BitSet>) {
+        match self {
+            Interference::Dense(rows) => {
+                let width = rows.width;
+                for wi in 0..width {
+                    let mut w = live.words[wi];
+                    if let Some(allowed) = allowed {
+                        w &= allowed.words[wi];
+                    }
+                    if wi == d >> 6 {
+                        w &= !(1u64 << (d & 63));
+                    }
+                    if w == 0 {
+                        continue;
+                    }
+                    rows.words[d * width + wi] |= w;
+                    while w != 0 {
+                        let o = wi * 64 + w.trailing_zeros() as usize;
+                        rows.set(o, d);
+                        w &= w - 1;
+                    }
+                }
+            }
+            Interference::Sparse(edges) => {
+                for_each_bit(&live.words, |o| {
+                    if o != d && allowed.is_none_or(|a| a.get(o)) {
+                        edges.push((d as u32, o as u32));
+                    }
+                });
+            }
+        }
+    }
+
+    fn add(&mut self, a: usize, b: usize) {
+        match self {
+            Interference::Dense(rows) => {
+                rows.set(a, b);
+                rows.set(b, a);
+            }
+            Interference::Sparse(edges) => edges.push((a as u32, b as u32)),
+        }
+    }
+
+    fn finish(self, n: usize) -> Neighbors {
+        match self {
+            Interference::Dense(rows) => Neighbors::Dense(rows),
+            Interference::Sparse(edges) => Neighbors::Sparse(Csr::from_edges(&edges, n)),
+        }
+    }
+}
+
+enum Neighbors {
+    Dense(BitRows),
+    Sparse(Csr),
+}
+
+impl Neighbors {
+    fn for_each(&self, i: usize, mut f: impl FnMut(usize)) {
+        match self {
+            Neighbors::Dense(rows) => rows.for_each(i, f),
+            Neighbors::Sparse(csr) => csr.neighbors(i).iter().for_each(|&o| f(o as usize)),
+        }
     }
 }
 
@@ -857,15 +939,9 @@ pub(crate) fn color_values(
         }
     }
 
-    // Interference edges, collected from a single backward walk. Value live
-    // ranges are short (mostly single-block), so the graph is SPARSE
-    // (~0.2x the words a dense v_count^2 bit-matrix would touch); a CSR adjacency
-    // avoids both the O(v^2) zeroing and the per-value full-row scan the dense
-    // matrix paid in coloring, with much better cache behavior on the large
-    // inlined functions that dominate. Each undirected pair is discovered exactly
-    // once (at the later-defined endpoint's removal from `live`), so the edge set
-    // has no duplicates and the resulting coloring is identical to the dense one.
-    let mut edges: Vec<(u32, u32)> = Vec::new();
+    // Interference, collected from a single backward walk: a value interferes
+    // with everything live where it is defined.
+    let mut graph = Interference::new(v_count);
     let mut live = BitSet::new(v_count);
     for (bi, &b) in blocks.iter().enumerate() {
         let block = &func.blocks[b];
@@ -888,14 +964,14 @@ pub(crate) fn color_values(
             if vi[raw(id)] != u32::MAX {
                 let d = vi[raw(id)];
                 live.remove(d as usize);
-                live.for_each(|o| edges.push((d, o as u32)));
+                graph.add_live(d as usize, &live, None);
             }
             for &k in list(use_range[raw(id)]) {
                 live.set(k as usize);
             }
         }
     }
-    let adj = Csr::from_edges(&edges, v_count);
+    let adj = graph.finish(v_count);
 
     // Greedy coloring in arena order for deterministic output. `used` is a dense
     // bool scratch (colors are small ints), reused across values so each one pays
@@ -910,8 +986,8 @@ pub(crate) fn color_values(
     let mut used: Vec<bool> = Vec::new();
     for (i, &v) in values.iter().enumerate() {
         used.clear();
-        for &nb in adj.neighbors(i) {
-            let c = color_of[nb as usize];
+        adj.for_each(i, |nb| {
+            let c = color_of[nb];
             if c != u32::MAX {
                 let c = c as usize;
                 if c >= used.len() {
@@ -919,7 +995,7 @@ pub(crate) fn color_values(
                 }
                 used[c] = true;
             }
-        }
+        });
         let my = match val_part[i] {
             u32::MAX => 0,
             p => p,
@@ -1306,19 +1382,17 @@ pub(crate) fn color_cells_with_analysis(
     }
     // Interference edges between NON-force-unique cells only: a force-unique cell
     // gets a dedicated color in `0..base` and every other cell's search starts at
-    // `base`, so edges touching a force cell never change a coloring result. CSR
-    // adjacency (sparse — short cell live ranges) replaces the dense `c_count^2`
-    // bit-matrix. Duplicate edges (a cell with several defs) are harmless: they
-    // mark the same neighbor color used. Edges between non-force cells reconstruct
-    // exactly the matrix rows the coloring below consulted, so output is identical.
-    let mut edges: Vec<(u32, u32)> = Vec::new();
-    let push_live = |d: usize, live: &BitSet, edges: &mut Vec<(u32, u32)>| {
+    // `base`, so edges touching a force cell never change a coloring result.
+    let mut allowed = BitSet::new(c_count);
+    for (i, &force) in force_idx.iter().enumerate() {
+        if !force {
+            allowed.set(i);
+        }
+    }
+    let mut graph = Interference::new(c_count);
+    let push_live = |d: usize, live: &BitSet, graph: &mut Interference| {
         if !force_idx[d] {
-            live.for_each(|o| {
-                if o != d && !force_idx[o] {
-                    edges.push((d as u32, o as u32));
-                }
-            });
+            graph.add_live(d, live, Some(&allowed));
         }
     };
     let mut live = BitSet::new(c_count);
@@ -1340,7 +1414,7 @@ pub(crate) fn color_cells_with_analysis(
             defs.clear();
             emitted_cell_defs(func, alias, id, &mut |c| defs.push(ci[raw(c)] as usize));
             for &d in &defs {
-                push_live(d, &live, &mut edges);
+                push_live(d, &live, &mut graph);
             }
             for &d in &defs {
                 live.remove(d);
@@ -1354,19 +1428,19 @@ pub(crate) fn color_cells_with_analysis(
         if b == func.entry() {
             for &p in &func.params {
                 let pi = ci[raw(p)] as usize;
-                push_live(pi, &live, &mut edges);
+                push_live(pi, &live, &mut graph);
                 if !force_idx[pi] {
                     for &q in &func.params {
                         let qi = ci[raw(q)] as usize;
                         if pi != qi && !force_idx[qi] {
-                            edges.push((pi as u32, qi as u32));
+                            graph.add(pi, qi);
                         }
                     }
                 }
             }
         }
     }
-    let adj = Csr::from_edges(&edges, c_count);
+    let adj = graph.finish(c_count);
 
     // A force-unique cell conflicts with EVERY cell (a closure captures the local
     // by identity, so it must never be reused). Rather than materialize O(F x C)
@@ -1418,8 +1492,8 @@ pub(crate) fn color_cells_with_analysis(
             continue;
         }
         used.clear();
-        for &nb in adj.neighbors(i) {
-            let col = color_of[nb as usize];
+        adj.for_each(i, |nb| {
+            let col = color_of[nb];
             if col != u32::MAX {
                 let col = col as usize;
                 if col >= used.len() {
@@ -1427,7 +1501,7 @@ pub(crate) fn color_cells_with_analysis(
                 }
                 used[col] = true;
             }
-        }
+        });
         let free = |col: usize| col >= base as usize && used.get(col) != Some(&true);
         let start = partners.partition_point(|&(a, _)| (a as usize) < i);
         let preferred = partners[start..]
