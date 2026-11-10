@@ -425,24 +425,28 @@ impl Workspace {
     /// modules land first, then their parameter signatures render side by
     /// side, since rendering reads only the workspace.
     pub fn insert_modules(&mut self, modules: impl IntoIterator<Item = Module>) -> Vec<ModuleId> {
-        let ids: Vec<ModuleId> = modules
-            .into_iter()
-            .map(|module| {
-                let id = module.module_id();
-                let idx = id.index();
-                if idx < self.modules.len() {
-                    self.modules[idx] = module;
-                } else {
-                    debug_assert_eq!(
-                        idx,
-                        self.modules.len(),
-                        "insert_modules: non-sequential module id leaves a gap"
-                    );
-                    self.modules.push(module);
+        let mut modules = modules.into_iter();
+        let mut ids: Vec<ModuleId> = Vec::with_capacity(modules.size_hint().0);
+        while let Some(module) = modules.next() {
+            let id = module.module_id();
+            let idx = id.index();
+            if idx < self.modules.len() {
+                self.modules[idx] = module;
+            } else {
+                debug_assert_eq!(
+                    idx,
+                    self.modules.len(),
+                    "insert_modules: non-sequential module id leaves a gap"
+                );
+                // Modules are large; growing one push at a time copies every
+                // module already placed at each doubling.
+                if self.modules.len() == self.modules.capacity() {
+                    self.modules.reserve(1 + modules.size_hint().0);
                 }
-                id
-            })
-            .collect();
+                self.modules.push(module);
+            }
+            ids.push(id);
+        }
         let signatures: Vec<ArenaMap<Idx<Function>, Ustr>> = ids
             .par_iter()
             .map(|&id| {
