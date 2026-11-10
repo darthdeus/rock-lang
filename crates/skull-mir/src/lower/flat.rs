@@ -261,7 +261,7 @@ impl<'a> Builder<'a> {
         let Some(id) = self.expr_rep_id(e, RepUse::Value, false)? else {
             return Ok(None);
         };
-        let Some(mut shape) = self.scx.rep_arena().value_shape(id) else {
+        let Some(mut shape) = self.scx.rep_arena().value_shape(id).cloned() else {
             return Ok(None);
         };
         if !EnumPlan::for_name(self.ws, shape.name).is_some_and(|plan| plan.flat().is_some()) {

@@ -1266,7 +1266,7 @@ impl<'a> Builder<'a> {
         };
 
         let rep_arena = self.scx.rep_arena();
-        let plan = crate::vertex_plan::vertex_plan(self.ws, &rep_arena, elem)
+        let plan = crate::vertex_plan::vertex_plan(self.ws, rep_arena, elem)
             .map_err(|e| reject(arg_span, format!("`@vertex_expand`: {}", e.message)))?;
         // `float_unit_*` carry the integer-attribute and cumulative-offset
         // rejections, so the float-unit view is never emitted for a layout it

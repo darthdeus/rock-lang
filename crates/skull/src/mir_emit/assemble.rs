@@ -766,13 +766,13 @@ fn scaffold_prelude_lua(
     }
     out.push_str(&crate::enum_cdata_defs(ws));
     let rep_arena = scx.rep_arena();
-    let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws, &rep_arena)?;
+    let (vdefs, value_emitted, value_gc) = crate::value_struct_defs(ws, rep_arena)?;
     out.push_str(&vdefs);
-    out.push_str(&crate::value_struct_gc_defs(ws, &value_gc, &rep_arena)?);
+    out.push_str(&crate::value_struct_gc_defs(ws, &value_gc, rep_arena)?);
     out.push_str(&crate::value_struct_metatypes(ws, &value_emitted));
     out.push_str(&crate::enum_cdata_metatypes(ws));
     out.push_str(&crate::c_struct_inspect_defs(ws, &value_emitted));
-    out.push_str(&crate::type_table_defs(ws, &value_gc, &rep_arena)?);
+    out.push_str(&crate::type_table_defs(ws, &value_gc, rep_arena)?);
     out.push_str(&crate::enum_runtime_defs(ws));
     Ok(out)
 }

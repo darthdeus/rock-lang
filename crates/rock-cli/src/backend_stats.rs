@@ -935,19 +935,12 @@ fn print_report(input: &str, iters: usize, warmup: usize, bone: &BoneStats, skul
         }
     }
     let traffic = &skull.arena_traffic;
-    if traffic.rep_final.get_calls > 0 {
+    if traffic.rep_final.plans > 0 {
         let (rs, rf) = (&traffic.rep_setup, &traffic.rep_final);
         println!(
-            "  rep arena      : {} gets ({} post-setup, {} worker-local), {} intern attempts \
-             ({} post-setup, {} worker-local), {} new plans ({} post-setup), one run",
-            rf.get_calls,
-            rf.get_calls - rs.get_calls,
-            rf.local_get_hits,
-            rf.intern_attempts,
-            rf.intern_attempts - rs.intern_attempts,
-            rf.local_intern_hits,
-            rf.intern_new,
-            rf.intern_new - rs.intern_new,
+            "  rep arena      : {} plans ({} post-setup), one run",
+            rf.plans,
+            rf.plans - rs.plans,
         );
         let (ms, mf) = (&traffic.mono_setup, &traffic.mono_final);
         println!(

@@ -750,7 +750,7 @@ impl<'a> Builder<'a> {
                     });
                     self.f
                         .lambda_abi_fingerprints
-                        .insert(id, lam_plan.logical_fingerprint(&self.scx.rep_arena()));
+                        .insert(id, lam_plan.logical_fingerprint(self.scx.rep_arena()));
                     self.f
                         .lambda_abi_representations
                         .insert(id, lam_plan.clone());
@@ -774,7 +774,7 @@ impl<'a> Builder<'a> {
                     });
                     self.f
                         .lambda_abi_fingerprints
-                        .insert(id, lam_plan.logical_fingerprint(&self.scx.rep_arena()));
+                        .insert(id, lam_plan.logical_fingerprint(self.scx.rep_arena()));
                     self.f
                         .lambda_abi_representations
                         .insert(id, lam_plan.clone());
@@ -813,7 +813,7 @@ impl<'a> Builder<'a> {
                 });
                 self.f
                     .lambda_abi_fingerprints
-                    .insert(id, lam_plan.logical_fingerprint(&self.scx.rep_arena()));
+                    .insert(id, lam_plan.logical_fingerprint(self.scx.rep_arena()));
                 self.f
                     .lambda_abi_representations
                     .insert(id, lam_plan.clone());

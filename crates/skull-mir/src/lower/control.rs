@@ -283,7 +283,7 @@ impl<'a> Builder<'a> {
                             false,
                             false,
                         )?;
-                        if let Some(mut shape) = self.scx.rep_arena().value_shape(id) {
+                        if let Some(mut shape) = self.scx.rep_arena().value_shape(id).cloned() {
                             shape.nullable =
                                 self.expr_is_nullable(lhs) || self.expr_is_nullable(rhs);
                             return self.lower_leafwise_value_eq(op, lhs, rhs, &shape);

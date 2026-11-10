@@ -762,7 +762,7 @@ impl<'a> Builder<'a> {
     ) -> Result<ValueRepr, CompilerError> {
         let container = self.native_buffer_plan(elem)?;
         let shape = container
-            .element_shape(&self.scx.rep_arena())
+            .element_shape(self.scx.rep_arena())
             .ok_or_else(|| gap("leaf-addressed element is not a value struct"))?;
         let plan: Vec<PlaceBundle> = container
             .leaf_addresses()
@@ -810,7 +810,7 @@ impl<'a> Builder<'a> {
             .collect::<Result<_, _>>()?;
         let bundle = self.lower_expr_repr(value)?;
         let shape = container
-            .element_shape(&self.scx.rep_arena())
+            .element_shape(self.scx.rep_arena())
             .ok_or_else(|| gap(format!("NativeBuffer<{elem}> has no value leaf plan")))?;
         let leaves = self.repr_to_storage_leaves(&bundle, &shape, "native buffer store")?;
         if leaves.len() != plan.len() {

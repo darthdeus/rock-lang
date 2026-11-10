@@ -483,8 +483,8 @@ impl ScalarCtx {
         std::sync::Arc::clone(&self.interner)
     }
 
-    pub fn rep_arena(&self) -> std::sync::Arc<abi::RepArena> {
-        std::sync::Arc::clone(&self.rep_arena)
+    pub fn rep_arena(&self) -> &std::sync::Arc<abi::RepArena> {
+        &self.rep_arena
     }
 
     pub(crate) fn abi_plan_cached(&self, key: &AbiPlanKey) -> Option<BackendFnAbiPlanHandle> {
@@ -612,7 +612,7 @@ impl NestedFn {
     pub(crate) fn result_shape(&self, arena: &RepArena) -> Option<ValueShape> {
         self.representation
             .result()
-            .and_then(|id| arena.value_shape(id))
+            .and_then(|id| arena.value_shape(id).cloned())
     }
 }
 
@@ -1516,7 +1516,7 @@ fn lower_body(
     let _shape_memo = shape::ShapeMemoScope::enter(scx.rep_arena.generation());
 
     let mut f = MirFunc::new(func.name);
-    f.rep_arena = Some(scx.rep_arena());
+    f.rep_arena = Some(scx.rep_arena().clone());
     // A `co fn` lowers to an ordinary CFG with `Term::Yield`s + a resume-arg cell
     // (the value `yield e` evaluates to). `skull-transform`'s coroutine pass then
     // rewrites it into the stackless state machine.
@@ -1640,7 +1640,7 @@ pub fn lower_definition_factory(
         .ok_or_else(|| gap("definition factory has no body"))?;
     let abi = owner_abi_plan(ws, scx, concrete_plans, factory)?;
     let mut f = MirFunc::new(Ustr::from("__rock_definition_materialize"));
-    f.rep_arena = Some(scx.rep_arena());
+    f.rep_arena = Some(scx.rep_arena().clone());
     let parameter = f.new_cell(Some(Ustr::from("factory")));
     f.cells[parameter].producer = crate::mir::CellProducer::Param;
     f.params.push(parameter);
@@ -1723,7 +1723,7 @@ fn lower_global_inner(
             name: module.globals[gid].name,
         },
     ));
-    f.rep_arena = Some(scx.rep_arena());
+    f.rep_arena = Some(scx.rep_arena().clone());
     let mut b = Builder::generated(
         ws,
         scx,
@@ -2027,7 +2027,7 @@ fn lower_decorator_inner(
             name: module.decorators[did].def_key,
         },
     ));
-    f.rep_arena = Some(scx.rep_arena());
+    f.rep_arena = Some(scx.rep_arena().clone());
     let representation = scx
         .rep_arena()
         .boxed_function(scx.target(), concrete_plan.signature.params.len());
@@ -2358,7 +2358,7 @@ impl<'a> Builder<'a> {
 
     fn result_shape(&self) -> Option<ValueShape> {
         self.ret_rep
-            .and_then(|id| self.scx.rep_arena().value_shape(id))
+            .and_then(|id| self.scx.rep_arena().value_shape(id).cloned())
     }
 
     fn result_tuple(&self) -> Option<TupleRetShape> {

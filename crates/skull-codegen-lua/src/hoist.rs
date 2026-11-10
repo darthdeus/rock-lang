@@ -176,7 +176,7 @@ pub(crate) fn record_representation_violations(ctx: &CodegenCtx, func: &MirFunc)
                 continue;
             };
             let got: Vec<ustr::Ustr> = fields.iter().map(|(n, _)| *n).collect();
-            if let Some(mut error) = leaf_form_violation(&plan, &got) {
+            if let Some(mut error) = leaf_form_violation(plan, &got) {
                 error.message = format!("`{name}` {}", error.message);
                 ctx.reject(name.to_string(), error);
             }

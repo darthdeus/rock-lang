@@ -238,7 +238,7 @@ impl<'a> Builder<'a> {
         match plan.storage() {
             ContainerStorage::Columns { .. } => {
                 let elem = plan
-                    .column_elem(&arena)
+                    .column_elem(arena)
                     .ok_or_else(|| gap("column container plan has no element shape"))?;
                 let rendered = match plan.family() {
                     ContainerFamily::Vec => format!("[{}]", elem.name),
@@ -258,7 +258,7 @@ impl<'a> Builder<'a> {
                 if self.scx.target == bone_core::hir::FnBackend::Js && !leaf_views_rebuilt =>
             {
                 let elem = plan
-                    .ffi_element_name(&arena)
+                    .ffi_element_name(arena)
                     .unwrap_or_else(|| Ustr::from("<element>"));
                 let family = match plan.family() {
                     ContainerFamily::NativeBuffer => "NativeBuffer",
@@ -610,7 +610,7 @@ impl<'a> Builder<'a> {
         let Some(id) = self.expr_rep_id(e, RepUse::Value, true)? else {
             return Ok(None);
         };
-        Ok(self.scx.rep_arena().value_shape(id))
+        Ok(self.scx.rep_arena().value_shape(id).cloned())
     }
 
     pub(crate) fn nullable_value_shape_of(
@@ -627,7 +627,8 @@ impl<'a> Builder<'a> {
             .scx
             .rep_arena()
             .value_shape(id)
-            .filter(|shape| shape.nullable))
+            .filter(|shape| shape.nullable)
+            .cloned())
     }
 
     pub(crate) fn nobox_binding_shape(
@@ -696,7 +697,7 @@ impl<'a> Builder<'a> {
                 };
                 let plan = GlobalPlan::for_declared_type(self.ws, self.scx, ty)
                     .map_err(|e| self.gap_here(e.message))?;
-                let Some(shape) = plan.value_shape() else {
+                let Some(shape) = plan.value_shape().cloned() else {
                     return Ok(None);
                 };
                 // Minted from the global's emitted SYMBOL, matching

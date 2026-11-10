@@ -851,7 +851,7 @@ impl<'a> Builder<'a> {
             .inference(inst.func.module)
             .and_then(|ir| ir.per_fn.get(&BodyOwner::Function(inst.func.func)));
         let mut mf = MirFunc::new(hoisted);
-        mf.rep_arena = Some(self.scx.rep_arena());
+        mf.rep_arena = Some(self.scx.rep_arena().clone());
         mf.flat_variant_source = Some(inst.func);
         let flat_abi = plan
             .sig
@@ -865,7 +865,7 @@ impl<'a> Builder<'a> {
                     key.elem.is_nobox(),
                     key.storage,
                     key.prefix,
-                    abi::rep_logical_fingerprint(&self.scx.rep_arena(), key.elem.representation()),
+                    abi::rep_logical_fingerprint(self.scx.rep_arena(), key.elem.representation()),
                 ),
             })
             .collect::<Vec<_>>()

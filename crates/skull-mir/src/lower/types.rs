@@ -188,7 +188,7 @@ impl<'a> Builder<'a> {
                 }
                 for family in [ContainerFamily::NativeBuffer, ContainerFamily::FlatVec] {
                     if let Some(plan) = self.container_plan_for(base, family)? {
-                        if plan.element_shape(&self.scx.rep_arena()).is_some() {
+                        if plan.element_shape(self.scx.rep_arena()).is_some() {
                             return Ok(Some(plan.element_rep()));
                         }
                     }
@@ -316,7 +316,7 @@ impl<'a> Builder<'a> {
                 Some(span) => CompilerError::new_with_label(span, error.message),
                 None => CompilerError::new_no_location(error.message),
             })?;
-        Ok(self.scx.rep_arena().value_shape(id))
+        Ok(self.scx.rep_arena().value_shape(id).cloned())
     }
 
     pub(crate) fn nominal_rep_shape_required(
@@ -332,6 +332,7 @@ impl<'a> Builder<'a> {
         self.scx
             .rep_arena()
             .value_shape(id)
+            .cloned()
             .ok_or_else(|| self.gap_here(format!("`{name}` has no planned value shape")))
     }
 
@@ -345,7 +346,7 @@ impl<'a> Builder<'a> {
             return Ok(None);
         };
         let id = self.concrete_rep_id(mono, use_context, false, nobox)?;
-        Ok(self.scx.rep_arena().value_shape(id))
+        Ok(self.scx.rep_arena().value_shape(id).cloned())
     }
 
     pub(crate) fn concrete_expr_is_untyped(&self, e: Idx<Expr>) -> bool {
@@ -813,7 +814,7 @@ impl<'a> Builder<'a> {
                 let Some(rep) = self.expr_rep_id(e, RepUse::Value, false)? else {
                     return Ok(None);
                 };
-                let Some(shape) = self.scx.rep_arena().value_shape(rep) else {
+                let Some(shape) = self.scx.rep_arena().value_shape(rep).cloned() else {
                     return Ok(None);
                 };
                 shape

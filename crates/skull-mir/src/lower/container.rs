@@ -288,7 +288,7 @@ impl ContainerPlan {
     }
 
     pub fn element_shape(&self, arena: &RepArena) -> Option<ValueShape> {
-        arena.value_shape(self.element_rep())
+        arena.value_shape(self.element_rep()).cloned()
     }
 
     pub fn column_elem(&self, arena: &RepArena) -> Option<crate::mir::ColumnElem> {

@@ -10,7 +10,7 @@ impl<'a> Builder<'a> {
         ty: &MonoTy,
         family: ContainerFamily,
     ) -> Result<ContainerPlan, CompilerError> {
-        ContainerPlan::for_type(self.ws, self.scx.target, &self.scx.rep_arena(), family, ty)
+        ContainerPlan::for_type(self.ws, self.scx.target, self.scx.rep_arena(), family, ty)
             .map(|plan| {
                 if self.scx.row_value_containers {
                     plan.into_row_storage()
@@ -80,7 +80,7 @@ impl<'a> Builder<'a> {
         if !plan.is_leaf_addressed() {
             return Ok(None);
         }
-        Ok(plan.ffi_element_name(&arena))
+        Ok(plan.ffi_element_name(arena))
     }
 
     /// The concrete `value`-struct element of `e`'s `NativeBuffer<E>` /
@@ -150,9 +150,7 @@ impl<'a> Builder<'a> {
             if ContainerPlan::matches_type(family, ty) {
                 let plan = self.container_plan_for_type(ty, family)?;
                 let arena = self.scx.rep_arena();
-                return Ok(
-                    plan.column_elem(&arena).is_some() || plan.strided_elem(&arena).is_some()
-                );
+                return Ok(plan.column_elem(arena).is_some() || plan.strided_elem(arena).is_some());
             }
         }
         Ok(false)
@@ -169,7 +167,7 @@ impl<'a> Builder<'a> {
     ) -> Result<Option<ColumnElem>, CompilerError> {
         Ok(self
             .container_plan_for(e, ContainerFamily::Arena)?
-            .and_then(|plan| plan.column_elem(&self.scx.rep_arena())))
+            .and_then(|plan| plan.column_elem(self.scx.rep_arena())))
     }
 
     /// The Vec container kind for base expr `e`: an all-scalar value-struct
@@ -199,7 +197,7 @@ impl<'a> Builder<'a> {
     ) -> Result<Option<ColumnElem>, CompilerError> {
         Ok(self
             .container_plan_for(e, ContainerFamily::Vec)?
-            .and_then(|plan| plan.column_elem(&self.scx.rep_arena())))
+            .and_then(|plan| plan.column_elem(self.scx.rep_arena())))
     }
 
     pub(crate) fn vec_column_elem_for_type(
@@ -210,7 +208,7 @@ impl<'a> Builder<'a> {
             return Ok(None);
         }
         self.container_plan_for_type(ty, ContainerFamily::Vec)
-            .map(|plan| plan.column_elem(&self.scx.rep_arena()))
+            .map(|plan| plan.column_elem(self.scx.rep_arena()))
     }
 
     pub(crate) fn vec_strided_elem_of(
@@ -219,7 +217,7 @@ impl<'a> Builder<'a> {
     ) -> Result<Option<ColumnElem>, CompilerError> {
         Ok(self
             .container_plan_for(e, ContainerFamily::Vec)?
-            .and_then(|plan| plan.strided_elem(&self.scx.rep_arena())))
+            .and_then(|plan| plan.strided_elem(self.scx.rep_arena())))
     }
 
     pub(crate) fn vec_strided_elem_for_type(
@@ -230,7 +228,7 @@ impl<'a> Builder<'a> {
             return Ok(None);
         }
         self.container_plan_for_type(ty, ContainerFamily::Vec)
-            .map(|plan| plan.strided_elem(&self.scx.rep_arena()))
+            .map(|plan| plan.strided_elem(self.scx.rep_arena()))
     }
 
     /// The column shape of `elem`: its value shape, marked nullable when the
@@ -243,6 +241,7 @@ impl<'a> Builder<'a> {
             .scx
             .rep_arena()
             .value_shape(elem.representation())
+            .cloned()
             .ok_or_else(|| gap("column element is not a value struct"))?;
         Ok(shape)
     }
@@ -263,7 +262,7 @@ impl<'a> Builder<'a> {
     ) -> Result<Option<ColumnElem>, CompilerError> {
         Ok(self
             .container_plan_for(e, ContainerFamily::Map)?
-            .and_then(|plan| plan.column_elem(&self.scx.rep_arena())))
+            .and_then(|plan| plan.column_elem(self.scx.rep_arena())))
     }
 
     /// The expression's CONCRETE type under the active specialization.

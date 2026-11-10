@@ -84,7 +84,7 @@ impl<'a> Builder<'a> {
             index: *selector,
             kind: ContainerKind::Map,
         })];
-        for path in value_leaf_paths(&shape) {
+        for path in value_leaf_paths(shape) {
             let suffix = self.emit_cur(Inst::Const(Lit::Str(Ustr::from(&format!(".{path}")))));
             let index = self.emit_cur(Inst::StringConcat(*selector, suffix));
             leaves.push(self.emit_cur(Inst::Index {
@@ -93,7 +93,7 @@ impl<'a> Builder<'a> {
                 kind: ContainerKind::Map,
             }));
         }
-        Ok(Some(self.rebuild_from_leaves(&shape, &leaves, &mut 0)))
+        Ok(Some(self.rebuild_from_leaves(shape, &leaves, &mut 0)))
     }
 
     pub(crate) fn concrete_callee_for_site(
@@ -891,7 +891,7 @@ impl<'a> Builder<'a> {
                     if let Some(identity) = self.f.nested_fn_identities.get(&abi.hoisted).cloned() {
                         self.f.code_value_identities.insert(g, identity);
                     }
-                    let param_shapes = abi.param_slots(&self.scx.rep_arena());
+                    let param_shapes = abi.param_slots(self.scx.rep_arena());
                     let arg_vals = self.slotted_call_args(
                         e,
                         &abi.param_names,
@@ -900,7 +900,7 @@ impl<'a> Builder<'a> {
                         &[],
                         &[],
                     )?;
-                    let Some(shape) = abi.result_shape(&self.scx.rep_arena()) else {
+                    let Some(shape) = abi.result_shape(self.scx.rep_arena()) else {
                         let v = self.emit_call_value(e, g, arg_vals)?;
                         self.f.call_rep_plans.insert(v, abi.representation.clone());
                         return Ok(ValueRepr::Scalar(v));
@@ -1400,7 +1400,7 @@ impl<'a> Builder<'a> {
             .map(|c| self.emit_cur(Inst::Load(*c)))
             .collect();
         let mut idx = 0;
-        Ok(self.rebuild_from_leaves(&shape, &leaves, &mut idx))
+        Ok(self.rebuild_from_leaves(shape, &leaves, &mut idx))
     }
 
     /// An indirect call `callee(args)`. If the call's result type is a tuple, the
@@ -1880,7 +1880,7 @@ impl<'a> Builder<'a> {
                         },
                     );
                     let leaves = self.repr_to_leaves_bundle(&bundle)?;
-                    let paths = value_leaf_paths(&shape);
+                    let paths = value_leaf_paths(shape);
                     if paths.len() != leaves.len() {
                         return Err(self.gap_here(format!(
                             "`{name}` leaf plan has {} paths but the value produced {} leaves",
@@ -2311,7 +2311,7 @@ impl<'a> Builder<'a> {
                     bundle.representation()
                 ))
             })?;
-        self.repr_to_leaves_shape(bundle.value(), &shape)
+        self.repr_to_leaves_shape(bundle.value(), shape)
     }
 
     pub(crate) fn repr_to_leaves_bundle_for_shape(
@@ -2341,7 +2341,7 @@ impl<'a> Builder<'a> {
         if actual.nullable && !expected.nullable {
             return self.repr_to_leaves_bundle_after_presence(bundle, expected);
         }
-        if actual == *expected {
+        if actual == expected {
             self.repr_to_leaves_bundle(bundle)
         } else {
             self.repr_to_leaves_shape(bundle.value(), expected)
@@ -3188,12 +3188,12 @@ impl<'a> Builder<'a> {
                         // Keep presence and leaves together instead of packing a
                         // snapshot only to split it again. Wide values retain
                         // the planner's boxed wire rather than widening a frame.
-                        let leaves = s.nullable_value_leaves(*v, &shape, |s, value, inner| {
+                        let leaves = s.nullable_value_leaves(*v, shape, |s, value, inner| {
                             let copy = s.boxed_copy_repr_of(value, inner, Some(payload))?;
                             let copy = s.owned_value_children(copy)?;
                             s.repr_to_leaves_shape(&copy, inner)
                         })?;
-                        return Ok(s.rebuild_from_leaves(&shape, &leaves, &mut 0));
+                        return Ok(s.rebuild_from_leaves(shape, &leaves, &mut 0));
                     }
                 }
                 s.owned_value_children(r)

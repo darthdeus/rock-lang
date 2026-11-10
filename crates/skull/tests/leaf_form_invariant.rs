@@ -36,11 +36,11 @@ fn a_non_canonical_leaf_sequence_rejects() {
     );
 
     assert!(
-        skull_codegen_lua::leaf_form_violation(&plan, &canonical).is_none(),
+        skull_codegen_lua::leaf_form_violation(plan, &canonical).is_none(),
         "the canonical sequence itself must pass"
     );
 
-    let err = skull_codegen_lua::leaf_form_violation(&plan, &canonical[..canonical.len() - 1])
+    let err = skull_codegen_lua::leaf_form_violation(plan, &canonical[..canonical.len() - 1])
         .expect("a truncated flattening must reject");
     assert!(
         err.message.contains("canonical leaf"),
@@ -51,7 +51,7 @@ fn a_non_canonical_leaf_sequence_rejects() {
     let mut swapped = canonical.clone();
     swapped.swap(0, 1);
     assert!(
-        skull_codegen_lua::leaf_form_violation(&plan, &swapped).is_some(),
+        skull_codegen_lua::leaf_form_violation(plan, &swapped).is_some(),
         "a reordered flattening must reject -- `_lct` is positional"
     );
 }

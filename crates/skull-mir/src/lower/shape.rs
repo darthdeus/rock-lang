@@ -2136,16 +2136,14 @@ pub fn bound_next_shape_from_concrete(
         ids => ids,
     };
     let arena = scx.rep_arena();
-    let elem_splats = elem_slots
-        .iter()
-        .any(|slot| arena.get(*slot).splats(&arena));
+    let elem_splats = elem_slots.iter().any(|slot| arena.get(*slot).splats(arena));
     let elem = if elem_splats {
         let rebuild = if elem_slots.len() == 1 {
-            elem_rebuild_from_rep(&arena, elem_slots[0])
+            elem_rebuild_from_rep(arena, elem_slots[0])
         } else {
             elem_slots
                 .iter()
-                .map(|slot| elem_rebuild_from_rep(&arena, *slot))
+                .map(|slot| elem_rebuild_from_rep(arena, *slot))
                 .collect::<Option<Vec<_>>>()
                 .map(ElemRebuild::Tuple)
         };

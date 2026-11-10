@@ -152,29 +152,6 @@ pub enum RepLayout {
     Foreign { reason: Ustr },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum RepPlanLayout {
-    Inline(RepLayout),
-    Shared(Arc<RepLayout>),
-}
-
-impl RepPlanLayout {
-    fn new(layout: RepLayout) -> Self {
-        match layout {
-            RepLayout::Leaves(_) | RepLayout::Tuple { .. } => Self::Shared(Arc::new(layout)),
-            // Scalar plans have no allocation to share or refcount to update.
-            RepLayout::Opaque | RepLayout::Foreign { .. } => Self::Inline(layout),
-        }
-    }
-
-    fn as_layout(&self) -> &RepLayout {
-        match self {
-            Self::Inline(layout) => layout,
-            Self::Shared(layout) => layout,
-        }
-    }
-}
-
 /// One concrete physical answer in the target/use context supplied by the
 /// planner.  Backends may inspect it, but they do not derive another answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -182,7 +159,7 @@ pub struct RepPlan {
     id: RepId,
     target: FnBackend,
     use_context: RepUse,
-    layout: RepPlanLayout,
+    layout: RepLayout,
     storage: Option<ValueStorage>,
     column_eligible: bool,
     nobox: bool,
@@ -201,7 +178,7 @@ impl RepPlan {
     }
 
     pub fn layout(&self) -> &RepLayout {
-        self.layout.as_layout()
+        &self.layout
     }
 
     pub fn value_storage(&self) -> Option<ValueStorage> {
@@ -308,7 +285,7 @@ impl GlobalPlan {
         scx: &ScalarCtx,
         ty: crate::monoty::MonoTy,
     ) -> Result<Self, RepError> {
-        let arena = scx.rep_arena();
+        let arena = scx.rep_arena().clone();
         let representation = if scx.values_first_class {
             arena.intern(scx.target, RepUse::Value, RepLayout::Opaque)
         } else {
@@ -350,7 +327,7 @@ impl GlobalPlan {
         self.arena.get(self.representation).use_context()
     }
 
-    pub(crate) fn value_shape(&self) -> Option<ValueShape> {
+    pub(crate) fn value_shape(&self) -> Option<&ValueShape> {
         self.arena.value_shape(self.representation)
     }
 
@@ -822,21 +799,6 @@ impl AbiPlanCache {
     }
 }
 
-#[derive(Debug, Default)]
-struct RepArenaInner {
-    plans: Vec<RepPlan>,
-    by_key: HashMap<RepKey, RepId>,
-}
-
-impl PartialEq for RepArenaInner {
-    fn eq(&self, other: &Self) -> bool {
-        // Input aliases are lookup history, not additional physical plans.
-        self.plans == other.plans
-    }
-}
-
-impl Eq for RepArenaInner {}
-
 /// The one build-scoped physical representation arena.  `ScalarCtx` owns the
 /// handle and every ABI plan references the same arena, so equal answers are
 /// equal identities rather than merely equal cloned shapes.
@@ -853,28 +815,28 @@ impl Eq for RepArenaInner {}
 /// `arena_gen` is a process-unique id keying that
 /// cache, so two live arenas (the Lua and shader contexts) or an arena
 /// allocated at a reused address can never serve each other's plans.
-#[derive(Debug)]
 pub struct RepArena {
-    inner: RwLock<RepArenaInner>,
+    /// Plans by index. Readers borrow them without a lock; new plans are
+    /// pushed only while `by_key` is write-locked, so an index and its key
+    /// are published together.
+    plans: crate::append_vec::AppendVec<RepPlan>,
+    by_key: RwLock<HashMap<RepKey, RepId>>,
     arena_id: u64,
-    get_calls: std::sync::atomic::AtomicU64,
-    local_get_hits: std::sync::atomic::AtomicU64,
-    intern_attempts: std::sync::atomic::AtomicU64,
-    local_intern_hits: std::sync::atomic::AtomicU64,
-    intern_new: std::sync::atomic::AtomicU64,
+}
+
+impl std::fmt::Debug for RepArena {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "RepArena({} plans)", self.plans.len())
+    }
 }
 
 impl Default for RepArena {
     fn default() -> Self {
         static ARENA_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
-            inner: RwLock::default(),
+            plans: crate::append_vec::AppendVec::new(),
+            by_key: RwLock::default(),
             arena_id: ARENA_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            get_calls: Default::default(),
-            local_get_hits: Default::default(),
-            intern_attempts: Default::default(),
-            local_intern_hits: Default::default(),
-            intern_new: Default::default(),
         }
     }
 }
@@ -903,7 +865,6 @@ enum RepKey {
 #[derive(Default)]
 struct RepReadCache {
     arena_gen: u64,
-    plans: Vec<Option<RepPlan>>,
     by_key: rustc_hash::FxHashMap<RepKey, RepId>,
     /// [`rep_logical_fingerprint`] by plan index. Every body renders its ABI
     /// fingerprint, and the bodies share a few hundred representations.
@@ -914,18 +875,9 @@ impl RepReadCache {
     fn reset_for(&mut self, arena_gen: u64) {
         if self.arena_gen != arena_gen {
             self.arena_gen = arena_gen;
-            self.plans.clear();
             self.by_key.clear();
             self.fingerprints.clear();
         }
-    }
-
-    fn record_plan(&mut self, id: RepId, plan: &RepPlan) {
-        let idx = id.index as usize;
-        if self.plans.len() <= idx {
-            self.plans.resize(idx + 1, None);
-        }
-        self.plans[idx] = Some(plan.clone());
     }
 }
 
@@ -934,16 +886,9 @@ thread_local! {
         std::cell::RefCell::new(RepReadCache::default());
 }
 
-/// Lifetime traffic counters for one [`RepArena`]. `local_*_hits` are the
-/// reads the worker-local cache served without touching the mutex; the
-/// remainder paid a lock acquisition.
+/// Population of one [`RepArena`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RepArenaStats {
-    pub get_calls: u64,
-    pub local_get_hits: u64,
-    pub intern_attempts: u64,
-    pub local_intern_hits: u64,
-    pub intern_new: u64,
     pub plans: u64,
 }
 
@@ -1139,10 +1084,9 @@ impl RepArena {
                 return Some(*id);
             }
             let id = self
-                .inner
+                .by_key
                 .read()
                 .expect("RepArena lock poisoned")
-                .by_key
                 .get(key)
                 .copied();
             if let Some(id) = id {
@@ -1153,10 +1097,9 @@ impl RepArena {
     }
 
     fn alias_key(&self, key: RepKey, id: RepId) {
-        self.inner
+        self.by_key
             .write()
             .expect("RepArena lock poisoned")
-            .by_key
             .insert(key.clone(), id);
         REP_READ_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
@@ -1169,9 +1112,8 @@ impl RepArena {
         if std::ptr::eq(self, other) {
             return true;
         }
-        let left = self.inner.read().expect("RepArena lock poisoned");
-        let right = other.inner.read().expect("RepArena lock poisoned");
-        *left == *right
+        // Key aliases are lookup history, not additional physical plans.
+        self.plans.len() == other.plans.len() && self.plans.iter().eq(other.plans.iter())
     }
 
     fn intern(&self, target: FnBackend, use_context: RepUse, layout: RepLayout) -> RepId {
@@ -1202,27 +1144,21 @@ impl RepArena {
         nobox: bool,
         boxable: bool,
     ) -> RepId {
-        self.intern_attempts
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let key = RepKey::Layout(target, use_context, layout, storage, column_eligible, nobox);
         REP_READ_CACHE.with(|cache| {
             let mut cache = cache.borrow_mut();
             cache.reset_for(self.arena_id);
             if let Some(id) = cache.by_key.get(&key) {
-                self.local_intern_hits
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return *id;
             }
             let id = {
-                let mut inner = self.inner.write().expect("RepArena lock poisoned");
-                match inner.by_key.get(&key) {
+                let mut by_key = self.by_key.write().expect("RepArena lock poisoned");
+                match by_key.get(&key) {
                     Some(id) => *id,
                     None => {
-                        self.intern_new
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         let id = RepId {
                             arena: self.arena_id,
-                            index: inner.plans.len() as u32,
+                            index: self.plans.len() as u32,
                         };
                         let RepKey::Layout(
                             target,
@@ -1235,17 +1171,17 @@ impl RepArena {
                         else {
                             unreachable!()
                         };
-                        inner.plans.push(RepPlan {
+                        self.plans.push(RepPlan {
                             id,
                             target,
                             use_context,
-                            layout: RepPlanLayout::new(layout),
+                            layout,
                             storage,
                             column_eligible,
                             nobox,
                             boxable,
                         });
-                        inner.by_key.insert(key.clone(), id);
+                        by_key.insert(key.clone(), id);
                         id
                     }
                 }
@@ -1323,70 +1259,34 @@ impl RepArena {
         )
     }
 
-    pub fn get(&self, id: RepId) -> RepPlan {
-        self.get_calls
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    pub fn get(&self, id: RepId) -> &RepPlan {
         assert_eq!(
             id.arena, self.arena_id,
             "RepId must belong to its build arena"
         );
-        REP_READ_CACHE.with(|cache| {
-            let mut cache = cache.borrow_mut();
-            cache.reset_for(self.arena_id);
-            if let Some(Some(plan)) = cache.plans.get(id.index as usize) {
-                self.local_get_hits
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                return plan.clone();
-            }
-            let plan = self
-                .inner
-                .read()
-                .expect("RepArena lock poisoned")
-                .plans
-                .get(id.index as usize)
-                .cloned()
-                .expect("RepId must belong to its build arena");
-            cache.record_plan(id, &plan);
-            plan
-        })
+        self.plans
+            .get(id.index as usize)
+            .expect("RepId must belong to its build arena")
     }
 
     pub fn stats(&self) -> RepArenaStats {
-        use std::sync::atomic::Ordering;
         RepArenaStats {
-            get_calls: self.get_calls.load(Ordering::Relaxed),
-            local_get_hits: self.local_get_hits.load(Ordering::Relaxed),
-            intern_attempts: self.intern_attempts.load(Ordering::Relaxed),
-            local_intern_hits: self.local_intern_hits.load(Ordering::Relaxed),
-            intern_new: self.intern_new.load(Ordering::Relaxed),
-            plans: self
-                .inner
-                .read()
-                .expect("RepArena lock poisoned")
-                .plans
-                .len() as u64,
+            plans: self.plans.len() as u64,
         }
     }
 
-    pub fn try_get(&self, id: RepId) -> Option<RepPlan> {
+    pub fn try_get(&self, id: RepId) -> Option<&RepPlan> {
         if id.arena != self.arena_id {
             return None;
         }
-        self.inner
-            .read()
-            .expect("RepArena lock poisoned")
-            .plans
-            .get(id.index as usize)
-            .cloned()
+        self.plans.get(id.index as usize)
     }
 
     /// The value plans selected during this build. Late consumers receive this
     /// catalog and retain the plan ID they use; they do not reconstruct one
     /// from a nominal declaration.
     pub(crate) fn value_plan_catalog(&self) -> Vec<(Ustr, RepId)> {
-        let inner = self.inner.read().expect("RepArena lock poisoned");
-        inner
-            .plans
+        self.plans
             .iter()
             .filter_map(|plan| match plan.layout() {
                 RepLayout::Leaves(shape) => Some((shape.name, plan.id)),
@@ -1572,9 +1472,9 @@ impl RepArena {
         }
     }
 
-    pub(crate) fn value_shape(&self, id: RepId) -> Option<ValueShape> {
+    pub(crate) fn value_shape(&self, id: RepId) -> Option<&ValueShape> {
         match self.get(id).layout() {
-            RepLayout::Leaves(shape) => Some(shape.clone()),
+            RepLayout::Leaves(shape) => Some(shape),
             _ => None,
         }
     }
@@ -1610,7 +1510,7 @@ impl RepArena {
                 span: None,
                 message: format!("`{}` has no C leaf layout", shape.name),
             })?;
-        let want = crate::lower::value_leaf_paths(&shape);
+        let want = crate::lower::value_leaf_paths(shape);
         let got: Vec<Ustr> = leaves.iter().map(|leaf| leaf.path).collect();
         if want != got {
             return Err(RepError {
@@ -2659,7 +2559,7 @@ impl BackendFnAbiPlan {
             .result
             .map(|id| scx.interner().get(id))
             .filter(|ty| !matches!(ty, crate::monoty::MonoTy::Unit));
-        let arena = scx.rep_arena();
+        let arena = scx.rep_arena().clone();
         let representation = arena.function_from_concrete(
             ws,
             scx.target,
@@ -2728,7 +2628,7 @@ impl BackendFnAbiPlan {
     ) -> Self {
         let decl = subject.func;
         let f = &ws.module(decl.module).functions[decl.func];
-        let arena = scx.rep_arena();
+        let arena = scx.rep_arena().clone();
         let mode = abi_mode_spec(ws, scx, decl, subst);
         let representation = arena
             .function_from_declaration(ws, scx.target, f, subst, mode)
@@ -2952,7 +2852,7 @@ impl BackendFnAbiPlan {
             .clone()
     }
 
-    pub fn rep_plan(&self, id: RepId) -> RepPlan {
+    pub fn rep_plan(&self, id: RepId) -> &RepPlan {
         self.arena.get(id)
     }
 
@@ -2976,7 +2876,7 @@ impl BackendFnAbiPlan {
     pub(super) fn ret_shape(&self) -> Option<ValueShape> {
         self.representation
             .result()
-            .and_then(|id| self.arena.value_shape(id))
+            .and_then(|id| self.arena.value_shape(id).cloned())
     }
 
     /// The declared return's tuple shape under this body's substitution.

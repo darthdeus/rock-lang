@@ -210,7 +210,7 @@ impl<'a> Builder<'a> {
         self.nested_fn_globals.insert(raw(name), abi.clone());
 
         let mut mf = MirFunc::new(hoisted);
-        mf.rep_arena = Some(self.scx.rep_arena());
+        mf.rep_arena = Some(self.scx.rep_arena().clone());
         let nested_identity = self
             .site_owner
             .clone()
@@ -294,10 +294,8 @@ impl<'a> Builder<'a> {
         child.f.abi_representation = Some(abi.representation.clone());
         child.f.abi_logical_type = Some(abi.logical_type.clone());
         child.f.code_identity = nested_identity;
-        child.f.code_abi_fingerprint = Some(
-            abi.representation
-                .logical_fingerprint(&self.scx.rep_arena()),
-        );
+        child.f.code_abi_fingerprint =
+            Some(abi.representation.logical_fingerprint(self.scx.rep_arena()));
         if child.f.code_identity.is_some() {
             child.f.code_compatibility = Some(crate::code_identity::CodeCompatibility {
                 call_abi: child
@@ -395,7 +393,7 @@ impl<'a> Builder<'a> {
                                 let shape = if shape.nullable && !actual.nullable {
                                     shape
                                 } else {
-                                    actual
+                                    actual.clone()
                                 };
                                 Some((
                                     shape.clone(),
@@ -764,7 +762,7 @@ impl<'a> Builder<'a> {
         self.cur_span = span;
         self.f
             .lambda_abi_fingerprints
-            .insert(lambda, plan.logical_fingerprint(&self.scx.rep_arena()));
+            .insert(lambda, plan.logical_fingerprint(self.scx.rep_arena()));
         self.f.lambda_abi_representations.insert(lambda, plan);
         let push = self.emit_cur(Inst::Global(Ustr::from(crate::mir::DEFER_PUSH)));
         self.emit_cur(Inst::CallValue {
