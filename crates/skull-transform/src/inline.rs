@@ -137,6 +137,15 @@ struct CalleeBody {
     /// language semantics, and a param the callee reassigns whole is excluded
     /// (aliasing it to the caller cell would clobber the caller's variable).
     coalescable_params: Vec<bool>,
+    /// Reads of a coalescable parameter that no call consumes, by parameter
+    /// index. A splice that copies the argument rewires them to it directly.
+    /// Reads feeding a call stay, because coalescing the nested call's argument
+    /// looks for that load; so do a straight body's returned reads, which a
+    /// single-result splice hands to the caller's own calls. Empty for a body
+    /// with a lambda, whose sub-CFG reads cells, not outer values.
+    forwardable_reads: Vec<(usize, Idx<Inst>)>,
+    /// Per parameter: every read is forwardable, so the copy has no reader.
+    reads_all_forwardable: Vec<bool>,
 }
 
 /// One splice the inliner performed, for the inline census
@@ -1877,6 +1886,8 @@ fn classify(
             Term::Return(vs) => vs.len(),
             _ => unreachable!(),
         };
+        let (forwardable_reads, reads_all_forwardable) =
+            forwardable_param_reads(&mf, &coalescable_params, &[mf.entry], true);
         Ok(Some(CalleeBody {
             func: mf,
             canonical,
@@ -1889,6 +1900,8 @@ fn classify(
             bounded: has_bounds,
             template,
             coalescable_params,
+            forwardable_reads,
+            reads_all_forwardable,
         }))
     } else {
         // General: uniform return arity across every reachable Return.
@@ -1906,6 +1919,7 @@ fn classify(
         if !arities.all(|a| a == ret_arity) {
             return reject_candidate(&mut timing, "nonuniform_return_arity");
         }
+        let (forwardable_reads, reads_all_forwardable) = (Vec::new(), Vec::new());
         Ok(Some(CalleeBody {
             func: mf,
             canonical,
@@ -1918,8 +1932,95 @@ fn classify(
             bounded: has_bounds,
             template,
             coalescable_params,
+            forwardable_reads,
+            reads_all_forwardable,
         }))
     }
+}
+
+/// Rewire the cloned forwardable reads of each copied parameter to its
+/// argument; returns the `(read, argument)` pairs for the caller to drop from
+/// the blocks. The loads stay allocated, outside any block, so arena and emit
+/// numbering are what they were with the copy.
+fn forward_param_reads(
+    func: &mut MirFunc,
+    cand: &CalleeBody,
+    args: &[Idx<Inst>],
+    scratch: &InlineScratch,
+) -> SmallVec<[(Idx<Inst>, Idx<Inst>); 8]> {
+    let mut forwarded: SmallVec<[(Idx<Inst>, Idx<Inst>); 8]> = SmallVec::new();
+    for &(p, read) in &cand.forwardable_reads {
+        if !scratch.coalesced[p] {
+            forwarded.push((scratch.inst_map[&read], args[p]));
+        }
+    }
+    if !forwarded.is_empty() {
+        let to = |v: Idx<Inst>| {
+            forwarded
+                .iter()
+                .find(|(read, _)| *read == v)
+                .map_or(v, |(_, arg)| *arg)
+        };
+        for &iid in &scratch.inst_ids {
+            func.insts[iid].remap_uses(&to);
+        }
+        for source_block in &cand.reachable {
+            func.blocks[scratch.block_map[source_block]]
+                .term
+                .remap_uses(&to);
+        }
+    }
+    forwarded
+}
+
+/// The reads of a body's coalescable parameters that a splice may rewire to
+/// the argument (see [`CalleeBody::forwardable_reads`]).
+fn forwardable_param_reads(
+    mf: &MirFunc,
+    coalescable: &[bool],
+    blocks: &[Idx<Block>],
+    returns_consume: bool,
+) -> (Vec<(usize, Idx<Inst>)>, Vec<bool>) {
+    let mut consumed: SmallVec<[Idx<Inst>; 8]> = SmallVec::new();
+    for &b in blocks {
+        for &i in &mf.blocks[b].insts {
+            if matches!(
+                mf.insts[i],
+                Inst::Call { .. }
+                    | Inst::CallMulti { .. }
+                    | Inst::CallValue { .. }
+                    | Inst::CallValueMulti { .. }
+                    | Inst::CallBoundMulti { .. }
+            ) {
+                mf.insts[i].uses_each(&mut |v| consumed.push(v));
+            }
+        }
+        if returns_consume {
+            mf.blocks[b].term.uses_each(&mut |v| consumed.push(v));
+        }
+    }
+    let mut reads = Vec::new();
+    let mut all = coalescable.to_vec();
+    for i in blocks
+        .iter()
+        .flat_map(|&b| mf.blocks[b].insts.iter().copied())
+    {
+        let Inst::Load(cell) = mf.insts[i] else {
+            continue;
+        };
+        let Some(p) = mf.params.iter().position(|&param| param == cell) else {
+            continue;
+        };
+        if !coalescable[p] {
+            continue;
+        }
+        if consumed.contains(&i) {
+            all[p] = false;
+        } else {
+            reads.push((p, i));
+        }
+    }
+    (reads, all)
 }
 
 /// Get (lowering+classifying on first sight) the candidate for `inst`.
@@ -3093,6 +3194,7 @@ fn splice_straight(
     )?;
     let nested_names = import_nested_fns(func, callee, &scratch.inst_map);
     import_spec_bindings(func, callee, &scratch.inst_map, &nested_names);
+    let forwarded = forward_param_reads(func, cand, &args, scratch);
     for &iid in &scratch.inst_ids {
         uses.add_inst(func, iid);
     }
@@ -3112,15 +3214,18 @@ fn splice_straight(
                 cell: pc,
                 value: *arg,
             });
-            uses.add_inst(func, store);
-            new_insts.push(store);
+            if !cand.reads_all_forwardable.get(i).copied().unwrap_or(false) {
+                uses.add_inst(func, store);
+                new_insts.push(store);
+            }
         }
     }
     new_insts.extend(
         callee.blocks[callee.entry]
             .insts
             .iter()
-            .map(|inst| scratch.inst_map[inst]),
+            .map(|inst| scratch.inst_map[inst])
+            .filter(|inst| !forwarded.iter().any(|(read, _)| read == inst)),
     );
 
     match &site {
@@ -3212,6 +3317,15 @@ fn splice_general(
     )?;
     let nested_names = import_nested_fns(func, callee, &scratch.inst_map);
     import_spec_bindings(func, callee, &scratch.inst_map, &nested_names);
+    let forwarded = forward_param_reads(func, cand, &args, scratch);
+    if !forwarded.is_empty() {
+        for source_block in &cand.reachable {
+            let nb = scratch.block_map[source_block];
+            func.blocks[nb]
+                .insts
+                .retain(|inst| !forwarded.iter().any(|(read, _)| read == inst));
+        }
+    }
     for &iid in &scratch.inst_ids {
         uses.add_inst(func, iid);
     }
@@ -3264,8 +3378,10 @@ fn splice_general(
             cell: pc,
             value: *arg,
         });
-        uses.add_inst(func, store);
-        prefix.push(store);
+        if !cand.reads_all_forwardable.get(i).copied().unwrap_or(false) {
+            uses.add_inst(func, store);
+            prefix.push(store);
+        }
     }
     func.blocks[bid].insts = prefix;
     func.blocks[bid].term = Term::Goto(entry_clone);
