@@ -1660,6 +1660,52 @@ fn value_struct_metatypes(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::
 /// []<TileType>` whose `TileType::Wall` entries would no longer `==` the
 /// freshly-created singleton -> walls silently stop rendering). A payload-free
 /// enum sidesteps this entirely: its values are ints, identity-free by nature.
+/// Whether `name` is the `__rock_enum_<E>_names` table of a payload-free enum.
+pub(crate) fn is_enum_names_global(name: &str) -> bool {
+    name.starts_with("__rock_enum_") && name.ends_with("_names")
+}
+
+/// The ordinal -> display-name tables (`__rock_enum_<E>_names[tag]`) of the
+/// payload-free enums whose table is in `read`. Interp stringify is their only
+/// reader, so a table nothing reads is not emitted. They hold no identity, so
+/// an overlay may define one again.
+pub(crate) fn enum_names_defs(ws: &Workspace, read: &rustc_hash::FxHashSet<ustr::Ustr>) -> String {
+    use bone_semantic::hir::VariantPayload;
+    let mut out = String::new();
+    if read.is_empty() {
+        return out;
+    }
+    for module in ws.modules.iter() {
+        for (_, e) in module.enums.iter() {
+            if e.variants.is_empty()
+                || !e
+                    .variants
+                    .iter()
+                    .all(|v| matches!(v.payload, VariantPayload::Unit))
+            {
+                continue;
+            }
+            // The table is a Lua GLOBAL, so its name carries the enum's
+            // symbol; the values it holds are display text.
+            let name = format!(
+                "__rock_enum_{}_names",
+                skull_mir::mangle::type_symbol(ws, e.name)
+            );
+            if !read.contains(&ustr::Ustr::from(name.as_str())) {
+                continue;
+            }
+            let items: Vec<String> = e
+                .variants
+                .iter()
+                .enumerate()
+                .map(|(ord, v)| format!("[{ord}] = \"{e}::{v}\"", e = e.name, v = v.name))
+                .collect();
+            out.push_str(&format!("{name} = {{ {} }}\n", items.join(", ")));
+        }
+    }
+    out
+}
+
 fn enum_runtime_defs(ws: &Workspace) -> String {
     use bone_semantic::hir::VariantPayload;
     let mut out = String::new();
@@ -1679,21 +1725,8 @@ fn enum_runtime_defs(ws: &Workspace) -> String {
                     .iter()
                     .all(|v| matches!(v.payload, VariantPayload::Unit));
             if all_unit {
-                // Payload-free: int repr. Emit the ordinal->display-name table for
-                // interp stringify (`__rock_enum_<E>_names[tag]`).
-                let items: Vec<String> = e
-                    .variants
-                    .iter()
-                    .enumerate()
-                    .map(|(ord, v)| format!("[{ord}] = \"{e}::{v}\"", e = e.name, v = v.name))
-                    .collect();
-                // The table is a Lua GLOBAL, so its name carries the enum's
-                // symbol; the values it holds are display text.
-                out.push_str(&format!(
-                    "__rock_enum_{}_names = {{ {} }}\n",
-                    skull_mir::mangle::type_symbol(ws, e.name),
-                    items.join(", ")
-                ));
+                // Payload-free: int repr. Its names table comes from
+                // `enum_names_defs`, and only when emitted code reads it.
             } else {
                 // Mixed: unit variants are interned singleton tables.
                 let mut units = Vec::new();

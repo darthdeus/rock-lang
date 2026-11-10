@@ -16,7 +16,7 @@ use crate::common::{InlineOffGuard, V1Fragment, emit_v1_package, run_main};
 
 const MAIN: &str = r#"
 fn main() {
-    print("s={a::sum()} c={a::color_name()} n={a::nb_sum()}")
+    print("s={a::sum()} c={a::color_name()} n={a::nb_sum()} t={a::color_text()}")
 }
 "#;
 
@@ -55,6 +55,11 @@ pub fn color_name() -> string {
         Color::Blue => { return "blue" }
     }
 }
+
+pub fn color_text() -> string {
+    let c = Color::Blue
+    return "{c}"
+}
 "#;
 
 fn package() -> skull::mir_emit::MirEmit {
@@ -77,7 +82,7 @@ fn package() -> skull::mir_emit::MirEmit {
 fn v1_value_struct_and_enum_emit_runnable_lua() {
     let emitted = package();
     let out = run_main(&emitted.lua);
-    assert_eq!(out, "s=3 c=blue n=7");
+    assert_eq!(out, "s=3 c=blue n=7 t=v1ty::a::Color::Blue");
 }
 
 /// The cdef, the `ffi.typeof` argument and the layout assertions name ONE C

@@ -96,11 +96,11 @@ fn value_struct_with_enum_field_has_cdef_int_not_table() {
         "Cmd must not be emitted as a Lua table:\n{lua}"
     );
     // A payload-free enum is an `int` globally: NO singleton tables, NO `__tag`,
-    // NO `by_tag` (the dual-rep is gone). Only the ordinal->display-name table for
-    // interp stringify is emitted; its `blend` field stores a plain int.
+    // NO `by_tag` (the dual-rep is gone). Its names table exists only for interp
+    // stringify, which this program never does; `blend` stores a plain int.
     assert!(
-        lua.contains("__rock_enum_BlendMode_names = {"),
-        "payload-free enum must emit a names table for stringify:\n{lua}"
+        !lua.contains("__rock_enum_BlendMode_names = {"),
+        "nothing stringifies the enum, so it needs no names table:\n{lua}"
     );
     assert!(
         !lua.contains("__rock_enum_BlendMode_Additive ="),

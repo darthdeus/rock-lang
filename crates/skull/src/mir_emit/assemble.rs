@@ -987,9 +987,16 @@ pub(super) fn assemble(
     if let Some(err) = cg.take_rejection() {
         return Err(err);
     }
+    let mut enum_names = definitions.take_enum_names();
+    enum_names.extend(
+        asm.always_emitted_names
+            .iter()
+            .filter(|name| crate::is_enum_names_global(name)),
+    );
     asm.out = definitions.finish();
     asm.out
         .push_str(&callee_binding_pass_lua(&mut asm.callee_binds));
+    asm.out.push_str(&crate::enum_names_defs(ws, &enum_names));
     let sims = match (cache.build_kind, cache.selected_sim_functions.as_ref()) {
         (BuildKind::Program, Some(selected)) => SimValues::Selected(selected),
         (BuildKind::Program, None) => SimValues::All,

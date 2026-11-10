@@ -1916,3 +1916,23 @@ fn sample() -> int {
         "call ABI must not contain build-scoped arena handles: {flat_abis:?}"
     );
 }
+
+/// A body edit that starts stringifying a payload-free enum needs that enum's
+/// names table, which the full build did not emit because nothing read it.
+#[test]
+fn newly_stringified_enum_gets_its_names_table_in_incremental_and_overlay() {
+    let v1 = r#"
+enum Mode { Idle, Busy }
+@nomangle fn describe(m: Mode) -> string { return "mode" }
+fn main() { print(describe(Mode::Busy)) }
+"#;
+    let v2 = v1.replace("return \"mode\"", "return \"{m}\"");
+    check_edit_with(ws_with_stdlib, v1, &v2, &["describe"]);
+    let ws1 = ws_with_stdlib(v1);
+    let (full, mut cache) = emit_full(&ws1, skull::user_module_id(&ws1).unwrap()).unwrap();
+    assert!(!full.lua.contains("Mode::Busy"), "{}", full.lua);
+    let ws2 = ws_with_stdlib(&v2);
+    let overlay = emit_overlay(&ws2, &mut cache, &[body_id(&ws2, "describe")]);
+    let run = format!("{}\n{}\nprint(describe(1))\n", full.lua, overlay.lua);
+    assert_eq!(crate::common::run_luajit(&run), "Mode::Busy");
+}

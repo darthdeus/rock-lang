@@ -101,15 +101,17 @@ fn assemble_overlay(
     let mut definitions = LuaDefinitionWriter::new(out);
     for body in &order {
         match cache.chunks.get(body) {
-            Some(Ok(chunk)) => definitions.push_str(&chunk.lua),
+            Some(Ok(chunk)) => definitions.push_chunk(chunk),
             Some(Err(err)) => return Err(err.clone()),
             // extern / inline(lua) edits are interface-tier -> full rebuild path.
             None => {}
         }
     }
+    let enum_names = definitions.take_enum_names();
     out = definitions.finish();
     let (mut bindings, rebound_bodies) = overlay_callee_bindings(ws, cache, &order);
     out.push_str(&callee_binding_pass_lua(&mut bindings));
+    out.push_str(&crate::enum_names_defs(ws, &enum_names));
     let mut published_bodies = order.clone();
     published_bodies.extend(rebound_bodies);
     let overlay_code_artifact = overlay_code_artifact(ws, cache, &published_bodies);
@@ -255,6 +257,7 @@ fn assemble_overlay(
         // Emit each affected const's ginit fn now; build its init
         // line + dependency edges (restricted to affected consts) for the sort.
         let mut inits: Vec<PendingInit<String>> = Vec::new();
+        let mut unit_enum_names = FxHashSet::default();
         let mut definitions = LuaDefinitionWriter::new(out);
         for a in affected
             .iter()
@@ -274,6 +277,11 @@ fn assemble_overlay(
                     .globals
                     .insert((a.mid, a.gid), unit.comptime_reads.clone());
                 definitions.push_str(&unit.lua);
+                unit_enum_names.extend(
+                    unit.global_names
+                        .iter()
+                        .filter(|name| crate::is_enum_names_global(name)),
+                );
                 unit.pending_init.map(|(_, _, line)| line).ok_or_else(|| {
                     CompilerError::new_no_location(format!(
                         "changed global `{}` produced no initializer plan",
@@ -288,6 +296,7 @@ fn assemble_overlay(
             });
         }
         out = definitions.finish();
+        out.push_str(&crate::enum_names_defs(ws, &unit_enum_names));
 
         out.push_str(&sort_global_init_lines(inits, &FxHashMap::default())?.concat());
     }

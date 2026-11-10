@@ -108,6 +108,8 @@ pub(super) struct LuaDefinitionWriter {
     section_start: usize,
     definitions_in_scope: usize,
     scoped: bool,
+    /// The payload-free enum names tables the pushed chunks read.
+    enum_names: FxHashSet<Ustr>,
 }
 
 /// The global a top-level definition assigns, in either emitted shape.
@@ -147,6 +149,7 @@ impl LuaDefinitionWriter {
             lua,
             definitions_in_scope: 0,
             scoped: false,
+            enum_names: FxHashSet::default(),
         }
     }
 
@@ -155,7 +158,17 @@ impl LuaDefinitionWriter {
     }
 
     pub(super) fn push_chunk(&mut self, chunk: &Chunk) {
+        self.enum_names.extend(
+            chunk
+                .literal_globals
+                .iter()
+                .filter(|name| crate::is_enum_names_global(name)),
+        );
         self.push_counted(&chunk.lua, chunk.definition_count);
+    }
+
+    pub(super) fn take_enum_names(&mut self) -> FxHashSet<Ustr> {
+        std::mem::take(&mut self.enum_names)
     }
 
     fn push_counted(&mut self, lua: &str, count: usize) {

@@ -156,6 +156,7 @@ mod tail_calls;
 mod trace_frames;
 mod tuple_scalarize;
 mod uniform_block_pack;
+mod unread_runtime_tables;
 mod unwrap_failure;
 mod user_fn_emit_rejection;
 mod valid_type_identity;
