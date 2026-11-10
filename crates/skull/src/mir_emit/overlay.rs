@@ -99,7 +99,7 @@ fn assemble_overlay(
     order.sort_by_key(|b| overlay_order_key(&cache.scx, b));
     order.dedup();
     let value_ctors_at = out.len();
-    let mut definitions = LuaDefinitionWriter::new(out);
+    let mut definitions = DefinitionOrder::default();
     for body in &order {
         match cache.chunks.get(body) {
             Some(Ok(chunk)) => definitions.push_chunk(chunk),
@@ -108,8 +108,8 @@ fn assemble_overlay(
             None => {}
         }
     }
-    let runtime_refs = definitions.take_runtime_refs();
-    out = definitions.finish();
+    let runtime_refs = definitions.runtime_refs();
+    out.push_str(&definitions.definitions_lua());
     let (mut bindings, rebound_bodies) = overlay_callee_bindings(ws, cache, &order);
     out.push_str(&callee_binding_pass_lua(&mut bindings));
     out.push_str(&crate::enum_names_defs(ws, &runtime_refs));

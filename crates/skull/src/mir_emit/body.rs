@@ -923,7 +923,7 @@ pub(super) fn emit_spec_chunk(
     })
 }
 
-/// Render every specialized body the liveness walk found, in the order the
+/// Place every specialized body the liveness walk found, in the order the
 /// assembled text has always had.
 ///
 /// This ORDERS text; it does not decide or discover. The worklist is still LIFO
@@ -932,46 +932,39 @@ pub(super) fn emit_spec_chunk(
 /// is an invariant failure rather than something to quietly build: two places
 /// that can decide a definition into the program is exactly the pair this step
 /// removes.
-pub(super) fn emit_specialized_callees(
+///
+/// It only records references. A body built for this build stays in `live`
+/// and is named in `moved`, which the caller moves into `built` once nothing
+/// borrows it.
+pub(super) fn order_specialized_callees<'c>(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
     pending: &mut Vec<skull_mir::bound::SpecDemand>,
-    cached: &FxHashMap<Instance, Result<Chunk, CompilerError>>,
-    live: &mut FxHashMap<Instance, Chunk>,
+    cached: &'c FxHashMap<Instance, Result<Chunk, CompilerError>>,
+    live: &'c FxHashMap<Instance, Chunk>,
     rejected: &[(String, CompilerError)],
-    built: &mut Vec<(Instance, Chunk)>,
-    allocation_bodies: &mut Vec<crate::allocation_report::AllocationBody>,
-    statics: &mut Vec<skull_mir::mir::StaticCell>,
-    out: &mut LuaDefinitionWriter,
-    binds: &mut Vec<skull_codegen_lua::CalleeBindingPlan>,
+    order: &mut DefinitionOrder<'c>,
     attribution: &mut AttributionAccumulator,
     times: &mut PhaseTimes,
-) -> Vec<CompilerError> {
+) -> (Vec<CompilerError>, Vec<Instance>) {
     let mut done: FxHashSet<Instance> = FxHashSet::default();
+    let mut moved = Vec::new();
     let mut errs: Vec<(String, CompilerError)> = rejected.to_vec();
     let rejected_names: FxHashSet<&str> = rejected.iter().map(|(n, _)| n.as_str()).collect();
     while let Some(demand) = pending.pop() {
         let body = demand.inst;
-        let fref = body.func;
         if !done.insert(body.clone()) {
             continue;
         }
-        let f = &ws.module(fref.module).functions[fref.func];
-        let name = body.symbol(ws, scx.interner());
-        // A body built for this build moves into `built` instead of copying.
-        let owned = if cached.contains_key(&body) {
-            None
-        } else {
-            live.remove(&body)
-        };
-        let Some(chunk) = owned
-            .as_ref()
-            .or_else(|| live.get(&body))
-            .or_else(|| cached.get(&body).and_then(|c| c.as_ref().ok()))
-        else {
+        let chunk = live
+            .get(&body)
+            .or_else(|| cached.get(&body).and_then(|c| c.as_ref().ok()));
+        let Some(chunk) = chunk else {
             // Not a fallback: the walk either built this body or recorded why it
             // could not, and a rejected one is reported through `rejected`.
+            let name = body.symbol(ws, scx.interner());
             if !rejected_names.contains(name.as_str()) {
+                let f = &ws.module(body.func.module).functions[body.func.func];
                 errs.push((
                     name.clone(),
                     CompilerError::new_with_label(
@@ -982,30 +975,24 @@ pub(super) fn emit_specialized_callees(
             }
             continue;
         };
-        out.push_chunk(chunk);
-        binds.extend(chunk.binds.iter().cloned());
-        allocation_bodies.extend(chunk.allocation_bodies.iter().cloned());
+        order.push_chunk(chunk);
         if let Some(unit) = &chunk.attribution {
             attribution.add_body(unit, Some(&chunk.lua));
         }
         times.add(&chunk.times);
-        // A specialized definition's `static` cells are cells the program uses,
-        // so they register for hot-reload preservation on the same terms as a
-        // declaration's. Folded HERE because this is where a specialized body
-        // enters the output -- the declaration loop never sees one.
-        statics.extend(chunk.statics.iter().cloned());
         pending.extend(chunk.specs.iter().cloned());
-        if let Some(chunk) = owned {
-            built.push((body, chunk));
+        // A body built for this build moves into `built` instead of copying.
+        if !cached.contains_key(&body) && live.contains_key(&body) {
+            moved.push(body);
         }
     }
     errs.sort_by(|(a, _), (b, _)| a.cmp(b));
-    errs.into_iter().map(|(_, e)| e).collect()
+    (errs.into_iter().map(|(_, e)| e).collect(), moved)
 }
 
 /// **THE transform sequence an instance body is emitted through.**
 ///
-/// Extracted so `emit_specialized_callees` and `skull::site_join`'s census
+/// Extracted so `emit_spec_chunk` and `skull::site_join`'s census
 /// consume ONE sequence rather than two that agree today. The census's whole
 /// claim is about the body EMISSION sees, so a census that re-listed these
 /// passes would be free to drift into measuring a body no emitter renders --

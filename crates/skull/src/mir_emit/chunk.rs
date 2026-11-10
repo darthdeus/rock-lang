@@ -78,16 +78,21 @@ const LUA_NAMES_PER_BIND_SCOPE: usize = 16_384;
 /// strictly lower than its caller's (they are never equal -- a same-component
 /// callee stays a global lookup), so ascending rank binds callees first. Ties
 /// break on name so the emitted text is deterministic.
-pub(super) fn callee_binding_pass_lua(
-    plans: &mut [skull_codegen_lua::CalleeBindingPlan],
+pub(super) fn callee_binding_pass_lua<
+    P: std::borrow::Borrow<skull_codegen_lua::CalleeBindingPlan>,
+>(
+    plans: &mut [P],
 ) -> String {
     if plans.is_empty() {
         return String::new();
     }
-    plans.sort_by(|a, b| a.rank.cmp(&b.rank).then_with(|| a.name.cmp(&b.name)));
+    plans.sort_by(|a, b| {
+        let (a, b) = (a.borrow(), b.borrow());
+        a.rank.cmp(&b.rank).then_with(|| a.name.cmp(&b.name))
+    });
     let mut out = String::new();
     let mut names_in_scope = 0usize;
-    for plan in plans.iter() {
+    for plan in plans.iter().map(|plan| plan.borrow()) {
         if names_in_scope == 0 {
             out.push_str("do\n(function()\n");
         }
@@ -104,13 +109,108 @@ pub(super) fn callee_binding_pass_lua(
     out
 }
 
+/// One definition's text, in output order: generated text or a chunk's Lua.
+pub(super) enum DefinitionPiece<'c> {
+    Text(String),
+    Chunk(&'c Chunk),
+}
+
+/// The definitions an assembly emits, in output order, as references into the
+/// chunk caches. The ordered pass only records these; what reads them (the
+/// text, the code artifact, the callee binds, the runtime tables) runs after
+/// it, independently.
+#[derive(Default)]
+pub(super) struct DefinitionOrder<'c> {
+    pub(super) pieces: Vec<DefinitionPiece<'c>>,
+    /// The chunks among `pieces`, in the same order.
+    pub(super) emitted: Vec<&'c Chunk>,
+}
+
+impl<'c> DefinitionOrder<'c> {
+    pub(super) fn push_text(&mut self, lua: String) {
+        self.pieces.push(DefinitionPiece::Text(lua));
+    }
+
+    pub(super) fn push_chunk(&mut self, chunk: &'c Chunk) {
+        self.pieces.push(DefinitionPiece::Chunk(chunk));
+        self.emitted.push(chunk);
+    }
+
+    /// The definitions' text, scoped as [`LuaDefinitionWriter`] scopes a
+    /// section. The scopes are decided from the counts alone, so the copying
+    /// is one parallel concatenation.
+    pub(super) fn definitions_lua(&self) -> String {
+        let mut scopes = DefinitionScopes::default();
+        let mut segments: Vec<&str> = Vec::with_capacity(self.pieces.len() + 2);
+        segments.push("");
+        for piece in &self.pieces {
+            let (lua, count) = match piece {
+                DefinitionPiece::Text(lua) => (lua.as_str(), lua_definition_count(lua)),
+                DefinitionPiece::Chunk(chunk) => (chunk.lua.as_str(), chunk.definition_count),
+            };
+            let (opens_section, separator) = scopes.before(count);
+            if opens_section {
+                segments[0] = SCOPE_OPEN;
+            }
+            segments.extend(separator);
+            segments.push(lua);
+        }
+        segments.extend(scopes.close());
+        par_concat(&segments)
+    }
+
+    /// The enum names tables and value ctors the emitted chunks read.
+    pub(super) fn runtime_refs(&self) -> FxHashSet<Ustr> {
+        self.emitted
+            .iter()
+            .flat_map(|chunk| chunk.literal_globals.iter().copied())
+            .filter(|name| crate::is_enum_names_global(name) || crate::is_value_ctor_global(name))
+            .collect()
+    }
+}
+
 pub(super) struct LuaDefinitionWriter {
     lua: String,
     section_start: usize,
+    scopes: DefinitionScopes,
+}
+
+const SCOPE_OPEN: &str = "do\n(function()\n";
+const SCOPE_CLOSE: &str = "end)()\nend\n";
+const SCOPE_NEXT: &str = "end)()\nend\ndo\n(function()\n";
+
+/// Where a definition section breaks into function scopes, so no scope holds
+/// more than [`LUA_DEFINITIONS_PER_SCOPE`] definitions.
+#[derive(Default)]
+struct DefinitionScopes {
     definitions_in_scope: usize,
     scoped: bool,
-    /// The enum names tables and value ctors the pushed chunks read.
-    runtime_refs: FxHashSet<Ustr>,
+}
+
+impl DefinitionScopes {
+    /// Before a piece of `count` definitions: whether the first scope opens
+    /// at the section start, and the text that ends the current scope.
+    fn before(&mut self, count: usize) -> (bool, Option<&'static str>) {
+        let mut opens_section = false;
+        let mut separator = None;
+        if self.definitions_in_scope + count > LUA_DEFINITIONS_PER_SCOPE {
+            // Small sections stay unwrapped.
+            if !self.scoped {
+                opens_section = true;
+                self.scoped = true;
+            }
+            if self.definitions_in_scope > 0 {
+                separator = Some(SCOPE_NEXT);
+                self.definitions_in_scope = 0;
+            }
+        }
+        self.definitions_in_scope += count;
+        (opens_section, separator)
+    }
+
+    fn close(&self) -> Option<&'static str> {
+        self.scoped.then_some(SCOPE_CLOSE)
+    }
 }
 
 /// The global a top-level definition assigns, in either emitted shape.
@@ -148,50 +248,22 @@ impl LuaDefinitionWriter {
         Self {
             section_start: lua.len(),
             lua,
-            definitions_in_scope: 0,
-            scoped: false,
-            runtime_refs: FxHashSet::default(),
+            scopes: DefinitionScopes::default(),
         }
     }
 
     pub(super) fn push_str(&mut self, lua: &str) {
-        self.push_counted(lua, lua_definition_count(lua));
-    }
-
-    pub(super) fn push_chunk(&mut self, chunk: &Chunk) {
-        self.runtime_refs.extend(
-            chunk.literal_globals.iter().filter(|name| {
-                crate::is_enum_names_global(name) || crate::is_value_ctor_global(name)
-            }),
-        );
-        self.push_counted(&chunk.lua, chunk.definition_count);
-    }
-
-    pub(super) fn take_runtime_refs(&mut self) -> FxHashSet<Ustr> {
-        std::mem::take(&mut self.runtime_refs)
-    }
-
-    fn push_counted(&mut self, lua: &str, count: usize) {
-        if self.definitions_in_scope + count > LUA_DEFINITIONS_PER_SCOPE {
-            if !self.scoped {
-                // Small sections stay unwrapped. Once the limit is crossed,
-                // move only the first scope's text to insert its opener.
-                self.lua.insert_str(self.section_start, "do\n(function()\n");
-                self.scoped = true;
-            }
-            if self.definitions_in_scope > 0 {
-                self.lua.push_str("end)()\nend\ndo\n(function()\n");
-                self.definitions_in_scope = 0;
-            }
+        let (opens_section, separator) = self.scopes.before(lua_definition_count(lua));
+        if opens_section {
+            // Moves only the first scope's text.
+            self.lua.insert_str(self.section_start, SCOPE_OPEN);
         }
+        self.lua.extend(separator);
         self.lua.push_str(lua);
-        self.definitions_in_scope += count;
     }
 
     pub(super) fn finish(mut self) -> String {
-        if self.scoped {
-            self.lua.push_str("end)()\nend\n");
-        }
+        self.lua.extend(self.scopes.close());
         self.lua
     }
 }

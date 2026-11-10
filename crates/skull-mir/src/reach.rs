@@ -64,9 +64,9 @@ impl GlobalReach {
 /// union is one pass over bitsets. The old per-body fixpoint loop re-scanned
 /// every edge until nothing changed, which on a large program was several
 /// milliseconds of the serial assembly.
-pub fn transitive_global_reads(
-    direct_globals: &FxHashMap<Ustr, Vec<Ustr>>,
-    direct_calls: &FxHashMap<Ustr, Vec<Ustr>>,
+pub fn transitive_global_reads<G: AsRef<[Ustr]>, C: AsRef<[Ustr]>>(
+    direct_globals: &FxHashMap<Ustr, G>,
+    direct_calls: &FxHashMap<Ustr, C>,
 ) -> GlobalReach {
     let mut id_of: FxHashMap<Ustr, u32> = FxHashMap::default();
     let mut intern = |name: Ustr| -> u32 {
@@ -78,7 +78,7 @@ pub fn transitive_global_reads(
     let mut own_globals: Vec<(u32, u32)> = Vec::new();
     for (body, read) in direct_globals {
         let body = intern(*body);
-        for global in read {
+        for global in read.as_ref() {
             let next = globals.len() as u32;
             let bit = *global_bit.entry(*global).or_insert_with(|| {
                 globals.push(*global);
@@ -90,7 +90,7 @@ pub fn transitive_global_reads(
     let mut edges: Vec<(u32, u32)> = Vec::new();
     for (body, callees) in direct_calls {
         let body = intern(*body);
-        for callee in callees {
+        for callee in callees.as_ref() {
             edges.push((body, intern(*callee)));
         }
     }

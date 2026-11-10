@@ -795,7 +795,7 @@ pub(crate) fn census_detailed(
                 continue;
             }
         };
-        // THE emitted body: the same sequence `emit_specialized_callees` runs.
+        // THE emitted body: the same sequence `emit_spec_chunk` runs.
         let name = skull_mir::mangle::mangle_fn(ws, f);
         if crate::mir_emit::prepare_instance_body_with_plans(
             ws,

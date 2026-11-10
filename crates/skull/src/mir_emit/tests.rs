@@ -107,6 +107,30 @@ mod lua_definition_scope_tests {
     }
 
     #[test]
+    fn ordered_definitions_scope_like_the_writer() {
+        // Over a megabyte, so the copy is split across the pool, and with
+        // scope breaks between the pieces.
+        let padding = format!("-- {}\n", "x".repeat(3 << 20));
+        let pieces = [
+            "-- before the first definition\n".to_string(),
+            generated_unit(0, 4_095),
+            padding,
+            generated_unit(4_095, 4_097),
+            "-- after\n".to_string(),
+            generated_unit(8_192, 3),
+        ];
+        let mut writer = LuaDefinitionWriter::new(String::new());
+        let mut order = DefinitionOrder::default();
+        for piece in &pieces {
+            writer.push_str(piece);
+            order.push_text(piece.clone());
+        }
+        let expected = writer.finish();
+        assert!(expected.starts_with("do\n(function()\n"));
+        assert_eq!(order.definitions_lua(), expected);
+    }
+
+    #[test]
     fn oversized_single_unit_stays_together() {
         let unit = generated_unit(0, 4_097);
         let mut definitions = LuaDefinitionWriter::new(String::new());

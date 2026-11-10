@@ -95,19 +95,15 @@ struct Assembly {
     attribution: AttributionAccumulator,
     needed_specs: Vec<skull_mir::bound::SpecDemand>,
     rejections: Rejections,
-    direct_globals: FxHashMap<Ustr, Vec<Ustr>>,
-    direct_calls: FxHashMap<Ustr, Vec<Ustr>>,
+    /// Global-init ordering facts of the lowered units, in merge order:
+    /// (body, globals read, functions called).
+    unit_facts: Vec<(Ustr, Vec<Ustr>, Vec<Ustr>)>,
     all_statics: Vec<skull_mir::mir::StaticCell>,
     code_artifact: skull_mir::code_identity::CodeArtifact,
     allocation_bodies: Vec<crate::allocation_report::AllocationBody>,
     always_emitted_calls: Vec<FuncRef>,
     always_emitted_names: Vec<Ustr>,
     unit_reads: UnitComptimeReads,
-    // Second pass of the callee binding: every factory's
-    // `<name> = __rock_mk_<name>(<callees>)` line, emitted after EVERY
-    // definition and in ascending call-graph component rank, so each captured
-    // callee is already its final closure.
-    callee_binds: Vec<skull_codegen_lua::CalleeBindingPlan>,
     emits_main: bool,
 }
 
@@ -124,15 +120,13 @@ impl Assembly {
             },
             needed_specs: Vec::new(),
             rejections: Rejections::default(),
-            direct_globals: FxHashMap::default(),
-            direct_calls: FxHashMap::default(),
+            unit_facts: Vec::new(),
             all_statics: Vec::new(),
             code_artifact: skull_mir::code_identity::CodeArtifact::default(),
             allocation_bodies: Vec::new(),
             always_emitted_calls: Vec::new(),
             always_emitted_names: Vec::new(),
             unit_reads: UnitComptimeReads::default(),
-            callee_binds: Vec::new(),
             emits_main: false,
         }
     }
@@ -147,9 +141,8 @@ impl Assembly {
     ) {
         for u in results {
             out.push_str(&u.lua);
-            if let Some((k, gs, cs)) = u.refs {
-                self.direct_globals.insert(k, gs);
-                self.direct_calls.insert(k, cs);
+            if let Some(facts) = u.refs {
+                self.unit_facts.push(facts);
             }
             if let Some(pi) = u.pending_init {
                 pending_inits.push(pi);
@@ -215,12 +208,13 @@ impl Assembly {
     /// regenerated for extern / inline(lua)). The cached chunks were built in
     /// parallel by `emit_full`/`emit_incremental`; here we pull their Lua and sum
     /// their captured phase times back into the breakdown.
-    fn push_function_definitions(
+    fn push_function_definitions<'c>(
         &mut self,
         ws: &Workspace,
-        cache: &SkullEmitCache,
+        cache: &'c SkullEmitCache,
         needed_foreign: &FxHashSet<Instance>,
-        definitions: &mut LuaDefinitionWriter,
+        definitions: &mut DefinitionOrder<'c>,
+        facts: &mut Vec<(Ustr, &'c Chunk)>,
     ) -> Result<(), CompilerError> {
         // Retention and a pulled chunk's mangled name are read per body and
         // independently, so both are found in parallel before the ordered pass.
@@ -287,7 +281,7 @@ impl Assembly {
                     if emit_def {
                         let prologue = default_fill_prologue(ws, mid, fid, f);
                         definitions
-                            .push_str(&format!("function {nm}({params})\n{prologue}{body}\nend\n"));
+                            .push_text(format!("function {nm}({params})\n{prologue}{body}\nend\n"));
                     }
                 }
                 continue;
@@ -306,7 +300,7 @@ impl Assembly {
                 if !emits_foreign_definition(ws, &cache.lua_view, needed_foreign, self_ref) {
                     continue;
                 }
-                definitions.push_str(&inline_lua_definition(
+                definitions.push_text(inline_lua_definition(
                     ws,
                     &cache.scx,
                     self_ref,
@@ -321,28 +315,29 @@ impl Assembly {
                 continue;
             }
             // A generic declaration has no definition of its own. Its bodies are
-            // its instances, rendered below by `emit_specialized_callees`.
+            // its instances, placed below by `order_specialized_callees`.
             if is_generic(f) {
                 continue;
             }
-            self.pull_cached_chunk(f, chunk, emit_def, definitions);
+            self.pull_cached_chunk(f, chunk, emit_def, definitions, facts);
         }
         Ok(())
     }
 
-    /// Ordinary / coroutine: pull the cached chunk.
-    fn pull_cached_chunk(
+    /// Ordinary / coroutine: place the cached chunk. Its global-init facts
+    /// count whether or not it is emitted; everything else it carries is read
+    /// from `definitions` once the order is complete.
+    fn pull_cached_chunk<'c>(
         &mut self,
         f: &bone_semantic::hir::Function,
-        chunk: Option<Result<(Ustr, &Chunk), &CompilerError>>,
+        chunk: Option<Result<(Ustr, &'c Chunk), &CompilerError>>,
         emit_def: bool,
-        definitions: &mut LuaDefinitionWriter,
+        definitions: &mut DefinitionOrder<'c>,
+        facts: &mut Vec<(Ustr, &'c Chunk)>,
     ) {
         match chunk {
             Some(Ok((key, chunk))) => {
-                self.direct_globals
-                    .insert(key, chunk.direct_globals.clone());
-                self.direct_calls.insert(key, chunk.direct_calls.clone());
+                facts.push((key, chunk));
                 self.times.add(&chunk.times);
                 if let Some(unit) = &chunk.attribution {
                     self.attribution
@@ -351,13 +346,6 @@ impl Assembly {
                 if emit_def {
                     self.emits_main |= key.as_str() == "main";
                     definitions.push_chunk(chunk);
-                    self.callee_binds.extend(chunk.binds.iter().cloned());
-                    self.allocation_bodies
-                        .extend(chunk.allocation_bodies.iter().cloned());
-                    self.code_artifact.merge_ref(&chunk.code_artifact);
-                    // A dropped definition's `static` cells do not exist, so
-                    // they must not be registered for hot-reload preservation.
-                    self.all_statics.extend(chunk.statics.iter().cloned());
                     // Only a body that is actually emitted can call one.
                     self.needed_specs.extend(chunk.specs.iter().cloned());
                 }
@@ -381,6 +369,7 @@ impl Assembly {
         ws: &Workspace,
         cache: &SkullEmitCache,
         pending_inits: Vec<(Ustr, Ustr, String)>,
+        ordering: InitOrdering,
         decorators: &DecoratorTable,
         has_code_slot_publication: bool,
         has_definition_plan: bool,
@@ -388,9 +377,12 @@ impl Assembly {
     ) -> Result<(), CompilerError> {
         let scx = &cache.scx;
         let ts = Instant::now();
-        let reach =
-            skull_mir::reach::transitive_global_reads(&self.direct_globals, &self.direct_calls);
-        let leaf_owner = global_leaf_owners(ws, scx)?;
+        let InitOrdering {
+            reach,
+            leaf_owner,
+            static_resets,
+        } = ordering;
+        let leaf_owner = leaf_owner?;
         let inits: Vec<PendingInit<String>> = pending_inits
             .into_iter()
             .map(|(name, init_name, line)| PendingInit {
@@ -399,7 +391,7 @@ impl Assembly {
                 item: line,
             })
             .collect();
-        let static_resets = static_reset_lines(ws, scx, &self.all_statics)?;
+        let static_resets = static_resets?;
         let out = &mut self.out;
         out.push_str(&static_resets);
         let init_lines = sort_global_init_lines(inits, &leaf_owner)?;
@@ -633,6 +625,35 @@ fn inline_lua_definition(
     };
     let prologue = default_fill_prologue(ws, self_ref.module, self_ref.func, f);
     format!("function {name}({params})\n{prologue}{body}\nend\n")
+}
+
+/// What [`Assembly::push_initializers`] orders by, found concurrently with the
+/// definition text; the errors surface where the initializers are written.
+struct InitOrdering {
+    reach: skull_mir::reach::GlobalReach,
+    leaf_owner: Result<FxHashMap<Ustr, Ustr>, CompilerError>,
+    static_resets: Result<String, CompilerError>,
+}
+
+/// The transitive global reads over the lowered units' facts and then each
+/// placed declaration's. A later key overwrites an earlier one, and the keys
+/// go into the maps in that order because the closure's global order follows
+/// the maps' iteration order.
+fn transitive_global_reads(
+    units: &[(Ustr, Vec<Ustr>, Vec<Ustr>)],
+    declarations: &[(Ustr, &Chunk)],
+) -> skull_mir::reach::GlobalReach {
+    let mut globals: FxHashMap<Ustr, &[Ustr]> = FxHashMap::default();
+    let mut calls: FxHashMap<Ustr, &[Ustr]> = FxHashMap::default();
+    for (key, read, called) in units {
+        globals.insert(*key, read);
+        calls.insert(*key, called);
+    }
+    for (key, chunk) in declarations {
+        globals.insert(*key, &chunk.direct_globals);
+        calls.insert(*key, &chunk.direct_calls);
+    }
+    skull_mir::reach::transitive_global_reads(&globals, &calls)
 }
 
 /// Init ordering is stated over SOURCE globals, but a `nobox` global is READ
@@ -970,33 +991,127 @@ pub(super) fn assemble(
         None
     };
 
-    let mut definitions = LuaDefinitionWriter::new(std::mem::take(&mut asm.out));
-    asm.push_function_definitions(ws, cache, &needed_foreign, &mut definitions)?;
+    let head = std::mem::take(&mut asm.out);
     let specialized_instances: Vec<_> = spec_chunks.keys().cloned().collect();
-    asm.rejections.extend(emit_specialized_callees(
-        ws,
-        &cache.scx,
-        &mut asm.needed_specs,
-        &cache.chunks,
-        &mut spec_chunks,
-        &spec_rejected,
-        built_specs,
-        &mut asm.allocation_bodies,
-        &mut asm.all_statics,
-        &mut definitions,
-        &mut asm.callee_binds,
-        &mut asm.attribution,
-        &mut asm.times,
-    ));
-    // A built spec moved out of `spec_chunks` was merged from both, so it
-    // still is: the merged census feeds the artifact fingerprint.
-    for chunk in spec_chunks.values() {
-        asm.code_artifact.merge_ref(&chunk.code_artifact);
-    }
-    for (_, chunk) in built_specs.iter() {
-        asm.code_artifact.merge_ref(&chunk.code_artifact);
-        asm.code_artifact.merge_ref(&chunk.code_artifact);
-    }
+    // The ordered pass only places definitions. What reads the placed chunks
+    // -- their text, code identities, callee binds, init facts, statics --
+    // is independent per reader, so the readers run concurrently after it.
+    let (definitions_lua, binds_lua, init_ordering, mut runtime_refs, enum_names_lua) = {
+        let mut order = DefinitionOrder::default();
+        let mut facts: Vec<(Ustr, &Chunk)> = Vec::new();
+        asm.push_function_definitions(ws, cache, &needed_foreign, &mut order, &mut facts)?;
+        let declared = order.emitted.len();
+        let (errors, moved) = order_specialized_callees(
+            ws,
+            &cache.scx,
+            &mut asm.needed_specs,
+            &cache.chunks,
+            &spec_chunks,
+            &spec_rejected,
+            &mut order,
+            &mut asm.attribution,
+            &mut asm.times,
+        );
+        asm.rejections.extend(errors);
+        let moved_set: FxHashSet<&Instance> = moved.iter().collect();
+        let scx = &cache.scx;
+        let Assembly {
+            unit_facts,
+            code_artifact,
+            all_statics,
+            allocation_bodies,
+            always_emitted_names,
+            ..
+        } = &mut asm;
+        let order = &order;
+        let ((definitions_lua, binds_lua), ((), (init_ordering, (runtime_refs, enum_names_lua)))) =
+            parallel_join(
+                || {
+                    parallel_join(
+                        || order.definitions_lua(),
+                        || {
+                            let mut binds: Vec<&skull_codegen_lua::CalleeBindingPlan> =
+                                order.emitted.iter().flat_map(|c| c.binds.iter()).collect();
+                            callee_binding_pass_lua(&mut binds)
+                        },
+                    )
+                },
+                || {
+                    parallel_join(
+                        || {
+                            for chunk in &order.emitted[..declared] {
+                                code_artifact.merge_ref(&chunk.code_artifact);
+                            }
+                            // A built spec is merged twice: once as built and once
+                            // as moved, which the artifact census has always seen.
+                            for (instance, chunk) in spec_chunks.iter() {
+                                if !moved_set.contains(instance) {
+                                    code_artifact.merge_ref(&chunk.code_artifact);
+                                }
+                            }
+                            let built = built_specs.iter().map(|(_, chunk)| chunk);
+                            for chunk in built.chain(moved.iter().map(|i| &spec_chunks[i])) {
+                                code_artifact.merge_ref(&chunk.code_artifact);
+                                code_artifact.merge_ref(&chunk.code_artifact);
+                            }
+                        },
+                        || {
+                            parallel_join(
+                                || {
+                                    // A dropped definition's `static` cells do not
+                                    // exist, so only emitted chunks register them.
+                                    all_statics.extend(
+                                        order
+                                            .emitted
+                                            .iter()
+                                            .flat_map(|c| c.statics.iter().cloned()),
+                                    );
+                                    if crate::allocation_report::enabled() {
+                                        allocation_bodies.extend(
+                                            order
+                                                .emitted
+                                                .iter()
+                                                .flat_map(|c| c.allocation_bodies.iter().cloned()),
+                                        );
+                                    }
+                                    let (reach, leaf_owner) = parallel_join(
+                                        || transitive_global_reads(unit_facts, &facts),
+                                        || global_leaf_owners(ws, scx),
+                                    );
+                                    InitOrdering {
+                                        reach,
+                                        leaf_owner,
+                                        static_resets: static_reset_lines(ws, scx, all_statics),
+                                    }
+                                },
+                                || {
+                                    let mut refs = order.runtime_refs();
+                                    refs.extend(always_emitted_names.iter().filter(|name| {
+                                        crate::is_enum_names_global(name)
+                                            || crate::is_value_ctor_global(name)
+                                    }));
+                                    let lua = crate::enum_names_defs(ws, &refs);
+                                    (refs, lua)
+                                },
+                            )
+                        },
+                    )
+                },
+            );
+        built_specs.extend(moved.into_iter().map(|instance| {
+            let chunk = spec_chunks
+                .remove(&instance)
+                .expect("a moved spec stays in the live set until assembly moves it");
+            (instance, chunk)
+        }));
+        (
+            definitions_lua,
+            binds_lua,
+            init_ordering,
+            runtime_refs,
+            enum_names_lua,
+        )
+    };
     let one_shot_reads = (lifetime == CacheLifetime::OneShot).then(|| {
         release_one_shot_chunks(
             cache,
@@ -1019,16 +1134,10 @@ pub(super) fn assemble(
     if let Some(err) = cg.take_rejection() {
         return Err(err);
     }
-    let mut runtime_refs = definitions.take_runtime_refs();
-    runtime_refs.extend(
-        asm.always_emitted_names
-            .iter()
-            .filter(|name| crate::is_enum_names_global(name) || crate::is_value_ctor_global(name)),
-    );
-    asm.out = definitions.finish();
-    asm.out
-        .push_str(&callee_binding_pass_lua(&mut asm.callee_binds));
-    asm.out.push_str(&crate::enum_names_defs(ws, &runtime_refs));
+    // The text after the definitions; the head and definitions are joined to
+    // it once the value ctors in front of them are known.
+    asm.out.push_str(&binds_lua);
+    asm.out.push_str(&enum_names_lua);
     // Everything from here on is generated glue rather than cached chunks, so
     // its value ctor calls are read from the text.
     let glue_start = asm.out.len();
@@ -1123,6 +1232,7 @@ pub(super) fn assemble(
         ws,
         cache,
         pending_inits,
+        init_ordering,
         &decorators,
         has_code_slot_publication,
         has_definition_plan,
@@ -1132,10 +1242,14 @@ pub(super) fn assemble(
     crate::push_value_ctor_calls(&asm.out[glue_start..], &mut glue_calls);
     runtime_refs.extend(glue_calls);
     runtime_refs.extend(host_accessor_value_ctors(ws, scx));
-    asm.out.insert_str(
-        value_ctors_at,
-        &crate::value_ctor_defs(&value_ctors, &runtime_refs),
-    );
+    let value_ctor_lua = crate::value_ctor_defs(&value_ctors, &runtime_refs);
+    asm.out = par_concat(&[
+        &head[..value_ctors_at],
+        &value_ctor_lua,
+        &head[value_ctors_at..],
+        &definitions_lua,
+        &asm.out,
+    ]);
     cache.value_ctors = value_ctors;
     step("assembly: initializers", &mut steps);
     let mut phases = asm.phases();

@@ -289,3 +289,52 @@ mod tests {
         assert!(skull_transform::inline_off_active());
     }
 }
+
+/// `parts` joined, with the copying spread over the pool: a large program's
+/// definitions are tens of megabytes, which one thread copies in milliseconds.
+#[cfg(not(feature = "sequential"))]
+pub(super) fn par_concat(parts: &[&str]) -> String {
+    use rayon::prelude::*;
+    const JOB_BYTES: usize = 1 << 20;
+    let total: usize = parts.iter().map(|part| part.len()).sum();
+    if total <= JOB_BYTES {
+        return parts.concat();
+    }
+    let mut bytes = vec![0u8; total];
+    let mut jobs: Vec<(&mut [u8], Vec<&[u8]>)> = Vec::new();
+    let mut rest: &mut [u8] = &mut bytes;
+    let mut sources: Vec<&[u8]> = Vec::new();
+    let mut job_len = 0;
+    for part in parts {
+        let mut part = part.as_bytes();
+        while !part.is_empty() {
+            let take = part.len().min(JOB_BYTES - job_len);
+            sources.push(&part[..take]);
+            part = &part[take..];
+            job_len += take;
+            if job_len == JOB_BYTES {
+                let (dest, tail) = std::mem::take(&mut rest).split_at_mut(job_len);
+                rest = tail;
+                jobs.push((dest, std::mem::take(&mut sources)));
+                job_len = 0;
+            }
+        }
+    }
+    if job_len > 0 {
+        jobs.push((rest, sources));
+    }
+    jobs.into_par_iter().for_each(|(dest, sources)| {
+        let mut at = 0;
+        for source in sources {
+            dest[at..at + source.len()].copy_from_slice(source);
+            at += source.len();
+        }
+    });
+    // SAFETY: `bytes` is a concatenation of whole `str`s, so it is UTF-8.
+    unsafe { String::from_utf8_unchecked(bytes) }
+}
+
+#[cfg(feature = "sequential")]
+pub(super) fn par_concat(parts: &[&str]) -> String {
+    parts.concat()
+}
