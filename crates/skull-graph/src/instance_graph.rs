@@ -819,12 +819,6 @@ pub struct InstanceGraph {
     /// The primary records. Every flat field below is derived from these plus
     /// [`Self::root_instances`]; nothing writes a flat field directly.
     pub contributions: BTreeMap<Owner, Box<Contribution>>,
-    /// The instance keys of `contributions`, hashed: the walk asks whether a
-    /// reached instance already has one once per reached row, and keying by
-    /// the instance lets it ask without building an owner.
-    contributed: FxHashSet<Instance>,
-    /// The always-emitted keys of `contributions`.
-    contributed_always: FxHashSet<(ModuleId, BodyOwner)>,
     /// Instances production roots regardless of any call. A reachability walk
     /// starts here and at every always-emitted target.
     pub root_instances: BTreeSet<Instance>,
@@ -1837,8 +1831,6 @@ impl InstanceGraph {
             revision: 0,
             interner,
             contributions: BTreeMap::new(),
-            contributed: FxHashSet::default(),
-            contributed_always: FxHashSet::default(),
             lost: BTreeSet::new(),
             root_instances: BTreeSet::new(),
             instances: BTreeSet::new(),
@@ -2012,7 +2004,7 @@ impl InstanceGraph {
         let mut same_frontier_marks: FxHashSet<Owner> = FxHashSet::default();
         let initially_forced: FxHashSet<Owner> = pending
             .iter()
-            .filter(|owner| self.is_contributed(owner))
+            .filter(|owner| self.contributions.contains_key(*owner))
             .cloned()
             .collect();
         let mut first_pass_seen: FxHashSet<Owner> = FxHashSet::default();
@@ -2233,8 +2225,10 @@ impl InstanceGraph {
                 let mut stale: Vec<Owner> = walked_with
                     .iter()
                     .filter(|(i, used)| {
-                        self.contributed.contains(*i)
-                            && self.bound_tree(i).unwrap_or(&InstanceBoundTree::default()) != *used
+                        self.bound_tree(i).unwrap_or(&InstanceBoundTree::default()) != *used
+                            && self
+                                .contributions
+                                .contains_key(&Owner::Instance((*i).clone()))
                     })
                     .map(|(i, _)| Owner::Instance(i.clone()))
                     .collect();
@@ -2504,7 +2498,7 @@ impl InstanceGraph {
         mut installed: Vec<(Owner, Box<Contribution>)>,
         shards: Vec<SubstShard>,
     ) -> usize {
-        let ((), subst) = bone_core::prelude::par_join(
+        let ((contributions, decls, instances), subst) = bone_core::prelude::par_join(
             || {
                 if cfg!(feature = "sequential") {
                     installed.sort_unstable_by(|a, b| a.0.cmp(&b.0));
@@ -2512,6 +2506,20 @@ impl InstanceGraph {
                     use rayon::slice::ParallelSliceMut;
                     installed.par_sort_unstable_by(|a, b| a.0.cmp(&b.0));
                 }
+                let mut decls = FxHashMap::default();
+                let mut instances = 0;
+                // Owner order groups an instance with the others of its
+                // declaration.
+                for decl in installed.chunk_by(|a, b| {
+                    a.0.instance().map(|i| i.func) == b.0.instance().map(|i| i.func)
+                }) {
+                    if let Some(i) = decl[0].0.instance() {
+                        decls.insert(i.func, decl.len());
+                        instances += decl.len();
+                    }
+                }
+                let contributions: BTreeMap<_, _> = installed.into_iter().collect();
+                (contributions, decls, instances)
             },
             || {
                 let shards: Vec<_> = shards.into_iter().map(Mutex::into_inner).collect();
@@ -2523,21 +2531,9 @@ impl InstanceGraph {
                 subst
             },
         );
+        self.contributions = contributions;
+        self.index.decls = decls;
         self.index.subst = subst;
-        let mut instances = 0;
-        // Owner order groups an instance with the others of its declaration.
-        for decl in installed
-            .chunk_by(|a, b| a.0.instance().map(|i| i.func) == b.0.instance().map(|i| i.func))
-        {
-            if let Some(i) = decl[0].0.instance() {
-                self.index.decls.insert(i.func, decl.len());
-                instances += decl.len();
-            }
-        }
-        for (owner, _) in &installed {
-            self.mark_contributed(owner);
-        }
-        self.contributions = installed.into_iter().collect();
         instances
     }
 }
@@ -2784,7 +2780,7 @@ impl InstanceGraph {
         track_incremental_state: bool,
     ) -> (Vec<Owner>, InstallTiming) {
         let uninstall_start = timing_enabled.then(Instant::now);
-        let replaced = self.is_contributed(&owner);
+        let replaced = self.contributions.contains_key(&owner);
         if track_incremental_state && owner.instance().is_none() {
             if let Some(old) = self.contributions.get(&owner) {
                 self.last_run_always_targets
@@ -2876,19 +2872,17 @@ impl InstanceGraph {
         for to in &c.always_emitted_targets {
             self.lost.remove(to);
         }
-        // The demand check runs AFTER the insert. `install` uninstalls first,
-        // so a body that reaches ITSELF -- any recursive function -- would
-        // otherwise find itself absent at the moment it asked and re-walk
-        // forever.
         self.record_root_holes(&owner, &c);
         self.add_contribution_counters(&c);
-        self.mark_contributed(&owner);
         // `expand` folded repeated callees and ordered the rows by instance.
+        // The owner itself is not demanded: `install` uninstalled it first,
+        // so a body that reaches ITSELF -- any recursive function -- would
+        // otherwise find itself absent and re-walk forever.
         let demanded: Vec<Owner> = c
             .reached
             .iter()
-            .filter(|(to, _)| !self.contributed.contains(to))
             .map(|(to, _)| Owner::Instance(to.clone()))
+            .filter(|to| *to != owner && !self.contributions.contains_key(to))
             .collect();
         self.contributions.insert(owner.clone(), c);
         if disagreed {
@@ -2978,22 +2972,6 @@ impl InstanceGraph {
     /// An index entry disappears when its last owner does, never when a count
     /// reaches zero: the owner SET is the record, so a stale fact cannot
     /// survive as a positive number nobody can check.
-    fn is_contributed(&self, owner: &Owner) -> bool {
-        match owner {
-            Owner::Instance(i) => self.contributed.contains(i),
-            Owner::AlwaysEmitted(module, body) => {
-                self.contributed_always.contains(&(*module, *body))
-            }
-        }
-    }
-
-    fn mark_contributed(&mut self, owner: &Owner) {
-        match owner {
-            Owner::Instance(i) => self.contributed.insert(i.clone()),
-            Owner::AlwaysEmitted(module, body) => self.contributed_always.insert((*module, *body)),
-        };
-    }
-
     fn uninstall(&mut self, owner: &Owner) {
         if !self.contributions.contains_key(owner) {
             return;
@@ -3004,10 +2982,6 @@ impl InstanceGraph {
             .contributions
             .remove(owner)
             .expect("presence was checked above");
-        match owner {
-            Owner::Instance(i) => self.contributed.remove(i),
-            Owner::AlwaysEmitted(module, body) => self.contributed_always.remove(&(*module, *body)),
-        };
         self.subtract_contribution_counters(&old);
         for (name, _) in &old.always_emitted_holes {
             self.root_hole_dirty_names.insert(name.clone());
