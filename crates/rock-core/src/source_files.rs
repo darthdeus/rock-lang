@@ -62,6 +62,8 @@ impl SourceFiles {
         let mut files = Vec::with_capacity(self.files.len());
         // Every file shares one of a few roots; canonicalize each root once.
         let mut canonical_roots: Vec<(&Path, Result<PathBuf, String>)> = Vec::new();
+        // Sources share their directories; each is probed once.
+        let mut plain_dirs = std::collections::HashSet::new();
         for source in &self.files {
             let file = source.borrow();
             let path = file.file.to_id_path();
@@ -78,7 +80,8 @@ impl SourceFiles {
                 }
             };
             let canonical_root = Self::canonical_root_for(&path, root, &canonical_roots[index].1)?;
-            if !Self::is_test_only_path_under(&path, root, canonical_root, tagged)? {
+            if !Self::is_test_only_path_under(&path, root, canonical_root, tagged, &mut plain_dirs)?
+            {
                 files.push(source.clone());
             }
         }
@@ -116,7 +119,7 @@ impl SourceFiles {
     ) -> Result<bool, CompilerError> {
         let canonical_root = root.canonicalize().map_err(|error| error.to_string());
         let canonical_root = Self::canonical_root_for(path, root, &canonical_root)?;
-        Self::is_test_only_path_under(path, root, canonical_root, tagged)
+        Self::is_test_only_path_under(path, root, canonical_root, tagged, &mut Default::default())
     }
 
     fn canonical_root_for<'a>(
@@ -137,14 +140,16 @@ impl SourceFiles {
         root: &Path,
         canonical_root: &Path,
         tagged: bool,
+        plain_dirs: &mut std::collections::HashSet<PathBuf>,
     ) -> Result<bool, CompilerError> {
-        let canonical_path = match Self::canonical_under(Path::new(path), canonical_root) {
-            Some(canonical) => canonical,
-            None => match Self::canonicalize_source(path, root, tagged)? {
+        let canonical_path =
+            match Self::canonical_under(Path::new(path), canonical_root, plain_dirs) {
                 Some(canonical) => canonical,
-                None => return Ok(false),
-            },
-        };
+                None => match Self::canonicalize_source(path, root, tagged)? {
+                    Some(canonical) => canonical,
+                    None => return Ok(false),
+                },
+            };
         let relative = match canonical_path.strip_prefix(canonical_root) {
             Ok(relative) => relative,
             Err(_) if !tagged => {
@@ -165,18 +170,31 @@ impl SourceFiles {
     /// the root's own spelling, then plain names with no symlink among them.
     /// Discovery hands over canonical paths, so this answers for nearly every
     /// source with one `lstat` per component below the root instead of a
-    /// `realpath` walk from `/`.
-    fn canonical_under(path: &Path, canonical_root: &Path) -> Option<PathBuf> {
+    /// `realpath` walk from `/`. `plain_dirs` holds the directories already
+    /// found to be no symlink.
+    fn canonical_under(
+        path: &Path,
+        canonical_root: &Path,
+        plain_dirs: &mut std::collections::HashSet<PathBuf>,
+    ) -> Option<PathBuf> {
         use std::path::Component;
         let relative = path.strip_prefix(canonical_root).ok()?;
         let mut probe = canonical_root.to_path_buf();
-        for component in relative.components() {
+        let mut components = relative.components().peekable();
+        while let Some(component) = components.next() {
             let Component::Normal(name) = component else {
                 return None;
             };
             probe.push(name);
+            let dir = components.peek().is_some();
+            if dir && plain_dirs.contains(&probe) {
+                continue;
+            }
             if std::fs::symlink_metadata(&probe).ok()?.is_symlink() {
                 return None;
+            }
+            if dir {
+                plain_dirs.insert(probe.clone());
             }
         }
         Some(probe)
