@@ -37,6 +37,11 @@ impl CalleeBindingPlan {
     /// The second-pass line: `F = __rock_mk_F(a, b)`.
     pub fn bind_line(&self) -> String {
         let mut out = String::with_capacity(self.name.len() + self.factory.len() + 8);
+        self.write_bind_line(&mut out);
+        out
+    }
+
+    pub fn write_bind_line(&self, out: &mut String) {
         out.push_str(&self.name);
         out.push_str(" = ");
         out.push_str(&self.factory);
@@ -48,7 +53,6 @@ impl CalleeBindingPlan {
             out.push_str(c);
         }
         out.push_str(")\n");
-        out
     }
 }
 

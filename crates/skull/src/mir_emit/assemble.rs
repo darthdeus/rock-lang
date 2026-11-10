@@ -346,8 +346,6 @@ impl Assembly {
                 if emit_def {
                     self.emits_main |= key.as_str() == "main";
                     definitions.push_chunk(chunk);
-                    // Only a body that is actually emitted can call one.
-                    self.needed_specs.extend(chunk.specs.iter().cloned());
                 }
             }
             Some(Err(_)) if !emit_def => {}
@@ -635,23 +633,39 @@ struct InitOrdering {
     static_resets: Result<String, CompilerError>,
 }
 
-/// The transitive global reads over the lowered units' facts and then each
-/// placed declaration's. A later key overwrites an earlier one, and the keys
-/// go into the maps in that order because the closure's global order follows
-/// the maps' iteration order.
+/// The transitive global reads of the initializers in `inits`, over the
+/// lowered units' facts and then each placed declaration's (a later key
+/// overwrites an earlier one).
+///
+/// Only the initializers' closures are read, and they reach a small part of
+/// the program, so the closure is taken over the bodies they reach. That
+/// changes the order of each dependency list but not its set, and the init
+/// order reads it as a set.
 fn transitive_global_reads(
+    inits: &[(Ustr, Ustr, String)],
     units: &[(Ustr, Vec<Ustr>, Vec<Ustr>)],
     declarations: &[(Ustr, &Chunk)],
 ) -> skull_mir::reach::GlobalReach {
-    let mut globals: FxHashMap<Ustr, &[Ustr]> = FxHashMap::default();
-    let mut calls: FxHashMap<Ustr, &[Ustr]> = FxHashMap::default();
+    let mut facts: FxHashMap<Ustr, (&[Ustr], &[Ustr])> = FxHashMap::default();
     for (key, read, called) in units {
-        globals.insert(*key, read);
-        calls.insert(*key, called);
+        facts.insert(*key, (read, called));
     }
     for (key, chunk) in declarations {
-        globals.insert(*key, &chunk.direct_globals);
-        calls.insert(*key, &chunk.direct_calls);
+        facts.insert(*key, (&chunk.direct_globals, &chunk.direct_calls));
+    }
+    let mut globals: FxHashMap<Ustr, &[Ustr]> = FxHashMap::default();
+    let mut calls: FxHashMap<Ustr, &[Ustr]> = FxHashMap::default();
+    let mut pending: Vec<Ustr> = inits.iter().map(|(_, init, _)| *init).collect();
+    while let Some(body) = pending.pop() {
+        if calls.contains_key(&body) {
+            continue;
+        }
+        let Some(&(read, called)) = facts.get(&body) else {
+            continue;
+        };
+        globals.insert(body, read);
+        calls.insert(body, called);
+        pending.extend(called.iter().copied());
     }
     skull_mir::reach::transitive_global_reads(&globals, &calls)
 }
@@ -843,6 +857,7 @@ pub(super) struct EarlyAssembly {
     // body rejection still comes first.
     global_layout: Result<String, String>,
     globals_directory: Result<String, CompilerError>,
+    leaf_owner: Result<FxHashMap<Ustr, Ustr>, CompilerError>,
 }
 
 impl EarlyAssembly {
@@ -869,7 +884,14 @@ pub(super) fn prepare_early_assembly(
             let scaffold_time = ts.elapsed();
             let global_layout = skull_mir::global_storage::global_layout_id(ws, scx);
             let globals_directory = globals_directory_lua(ws, scx, cg);
-            (scaffold, scaffold_time, global_layout, globals_directory)
+            let leaf_owner = global_leaf_owners(ws, scx);
+            (
+                scaffold,
+                scaffold_time,
+                global_layout,
+                globals_directory,
+                leaf_owner,
+            )
         },
         || {
             // The decorator table is built up front (sequential, cheap)
@@ -889,7 +911,7 @@ pub(super) fn prepare_early_assembly(
             (decorators, decorator_units, global_keys, global_units)
         },
     );
-    let (scaffold, scaffold_time, global_layout, globals_directory) = scaffold;
+    let (scaffold, scaffold_time, global_layout, globals_directory, leaf_owner) = scaffold;
     let (decorators, decorator_units, global_keys, global_units) = units;
     EarlyAssembly {
         scaffold,
@@ -900,6 +922,7 @@ pub(super) fn prepare_early_assembly(
         global_units,
         global_layout,
         globals_directory,
+        leaf_owner,
     }
 }
 
@@ -940,6 +963,7 @@ pub(super) fn assemble(
         global_units,
         global_layout,
         globals_directory,
+        leaf_owner,
     } = early.unwrap_or_else(|| prepare_early_assembly(ws, &cache.scx, &cache.cg, &cache.concrete));
     let (scaffold, value_ctors) = scaffold?;
     asm.out.push_str(&scaffold);
@@ -992,14 +1016,20 @@ pub(super) fn assemble(
     // -- their text, code identities, callee binds, init facts, statics --
     // is independent per reader, so the readers run concurrently after it.
     let (definitions_lua, binds_lua, init_ordering, mut runtime_refs, enum_names_lua) = {
+        let unit_demands = std::mem::take(&mut asm.needed_specs);
         let mut order = DefinitionOrder::default();
         let mut facts: Vec<(Ustr, &Chunk)> = Vec::new();
         asm.push_function_definitions(ws, cache, &needed_foreign, &mut order, &mut facts)?;
         let declared = order.emitted.len();
+        // Only a body that is actually emitted can demand a specialization.
+        let mut demands: Vec<&skull_mir::bound::SpecDemand> = unit_demands
+            .iter()
+            .chain(order.emitted.iter().flat_map(|&chunk| chunk.specs.iter()))
+            .collect();
         let (errors, moved) = order_specialized_callees(
             ws,
             &cache.scx,
-            &mut asm.needed_specs,
+            &mut demands,
             &cache.chunks,
             &spec_chunks,
             &spec_rejected,
@@ -1069,12 +1099,12 @@ pub(super) fn assemble(
                                                 .flat_map(|c| c.allocation_bodies.iter().cloned()),
                                         );
                                     }
-                                    let (reach, leaf_owner) = parallel_join(
-                                        || transitive_global_reads(unit_facts, &facts),
-                                        || global_leaf_owners(ws, scx),
-                                    );
                                     InitOrdering {
-                                        reach,
+                                        reach: transitive_global_reads(
+                                            &pending_inits,
+                                            unit_facts,
+                                            &facts,
+                                        ),
                                         leaf_owner,
                                         static_resets: static_reset_lines(ws, scx, all_statics),
                                     }

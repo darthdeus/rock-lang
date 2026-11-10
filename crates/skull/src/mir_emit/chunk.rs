@@ -98,10 +98,11 @@ const LUA_NAMES_PER_BIND_SCOPE: usize = 16_384;
 /// callee stays a global lookup), so ascending rank binds callees first. Ties
 /// break on name so the emitted text is deterministic.
 pub(super) fn callee_binding_pass_lua<
-    P: std::borrow::Borrow<skull_codegen_lua::CalleeBindingPlan>,
+    P: std::borrow::Borrow<skull_codegen_lua::CalleeBindingPlan> + Sync,
 >(
     plans: &mut [P],
 ) -> String {
+    const PLANS_PER_JOB: usize = 256;
     if plans.is_empty() {
         return String::new();
     }
@@ -109,23 +110,39 @@ pub(super) fn callee_binding_pass_lua<
         let (a, b) = (a.borrow(), b.borrow());
         a.rank.cmp(&b.rank).then_with(|| a.name.cmp(&b.name))
     });
-    let mut out = String::new();
+    // The scopes depend only on capture counts, so they are fixed first and
+    // the lines, which read every capture's name, are written in parallel.
+    let mut opens = Vec::with_capacity(plans.len());
+    let mut closes = Vec::with_capacity(plans.len());
     let mut names_in_scope = 0usize;
     for plan in plans.iter().map(|plan| plan.borrow()) {
-        if names_in_scope == 0 {
-            out.push_str("do\n(function()\n");
-        }
-        out.push_str(&plan.bind_line());
+        opens.push(names_in_scope == 0);
         names_in_scope += plan.captures.len() + 2;
-        if names_in_scope >= LUA_NAMES_PER_BIND_SCOPE {
-            out.push_str("end)()\nend\n");
+        let close = names_in_scope >= LUA_NAMES_PER_BIND_SCOPE;
+        if close {
             names_in_scope = 0;
         }
+        closes.push(close);
     }
     if names_in_scope > 0 {
-        out.push_str("end)()\nend\n");
+        *closes.last_mut().expect("plans is not empty") = true;
     }
-    out
+    let plans = &*plans;
+    let starts: Vec<usize> = (0..plans.len()).step_by(PLANS_PER_JOB).collect();
+    let parts = par_map(starts, |start| {
+        let mut out = String::new();
+        for at in start..(start + PLANS_PER_JOB).min(plans.len()) {
+            if opens[at] {
+                out.push_str("do\n(function()\n");
+            }
+            plans[at].borrow().write_bind_line(&mut out);
+            if closes[at] {
+                out.push_str("end)()\nend\n");
+            }
+        }
+        out
+    });
+    par_concat(&parts.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
 /// One definition's text, in output order: generated text or a chunk's Lua.

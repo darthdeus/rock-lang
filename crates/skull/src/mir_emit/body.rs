@@ -939,7 +939,7 @@ pub(super) fn emit_spec_chunk(
 pub(super) fn order_specialized_callees<'c>(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
-    pending: &mut Vec<skull_mir::bound::SpecDemand>,
+    pending: &mut Vec<&'c skull_mir::bound::SpecDemand>,
     cached: &'c FxHashMap<Instance, Result<Chunk, CompilerError>>,
     live: &'c FxHashMap<Instance, Chunk>,
     rejected: &[(String, CompilerError)],
@@ -947,18 +947,18 @@ pub(super) fn order_specialized_callees<'c>(
     attribution: &mut AttributionAccumulator,
     times: &mut PhaseTimes,
 ) -> (Vec<CompilerError>, Vec<Instance>) {
-    let mut done: FxHashSet<Instance> = FxHashSet::default();
+    let mut done: FxHashSet<&Instance> = FxHashSet::default();
     let mut moved = Vec::new();
     let mut errs: Vec<(String, CompilerError)> = rejected.to_vec();
     let rejected_names: FxHashSet<&str> = rejected.iter().map(|(n, _)| n.as_str()).collect();
     while let Some(demand) = pending.pop() {
-        let body = demand.inst;
-        if !done.insert(body.clone()) {
+        let body = &demand.inst;
+        if !done.insert(body) {
             continue;
         }
         let chunk = live
-            .get(&body)
-            .or_else(|| cached.get(&body).and_then(|c| c.as_ref().ok()));
+            .get(body)
+            .or_else(|| cached.get(body).and_then(|c| c.as_ref().ok()));
         let Some(chunk) = chunk else {
             // Not a fallback: the walk either built this body or recorded why it
             // could not, and a rejected one is reported through `rejected`.
@@ -980,10 +980,10 @@ pub(super) fn order_specialized_callees<'c>(
             attribution.add_body(unit, Some(&chunk.lua));
         }
         times.add(&chunk.times);
-        pending.extend(chunk.specs.iter().cloned());
+        pending.extend(chunk.specs.iter());
         // A body built for this build moves into `built` instead of copying.
-        if !cached.contains_key(&body) && live.contains_key(&body) {
-            moved.push(body);
+        if !cached.contains_key(body) && live.contains_key(body) {
+            moved.push(body.clone());
         }
     }
     errs.sort_by(|(a, _), (b, _)| a.cmp(b));

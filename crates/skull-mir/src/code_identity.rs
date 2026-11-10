@@ -691,90 +691,93 @@ impl CodeArtifact {
     }
 
     pub fn insert(&mut self, entry: CodeEntry) {
-        if self.entries.contains_key(&entry.identity) {
-            let mut newly_counted = None;
-            let mut resolved = false;
-            let mut duplicate = false;
-            let mut capture_kind_change = None;
-            {
-                let old = self
-                    .entries
-                    .get_mut(&entry.identity)
-                    .expect("identity still present");
-                if old.body_fingerprint == 0 && entry.body_fingerprint != 0 {
-                    resolved = old.escaping;
-                    let was_escaping = old.escaping;
-                    if old.escaping
-                        && matches!(old.identity, CodeIdentity::Lambda { .. })
-                        && old.capture_free != entry.capture_free
-                    {
-                        capture_kind_change = Some((old.capture_free, entry.capture_free));
+        use std::collections::btree_map::Entry;
+        // One search of the table: assembly inserts every emitted body's
+        // entries, tens of thousands on a large program.
+        let slot = match self.entries.entry(entry.identity.clone()) {
+            Entry::Vacant(slot) => {
+                if entry.escaping {
+                    self.census.examined += 1;
+                    self.census.assigned += 1;
+                    Self::count_kind(&mut self.census, &entry.identity, entry.capture_free);
+                    if entry.body_fingerprint == 0 {
+                        self.census.unresolved_body += 1;
                     }
-                    let escaping = old.escaping || entry.escaping;
-                    *old = entry;
-                    old.escaping = escaping;
-                    if escaping && !was_escaping {
-                        newly_counted = Some((old.identity.clone(), old.capture_free));
-                    }
-                } else if old.body_fingerprint != 0 && entry.body_fingerprint == 0 {
-                    if entry.escaping && !old.escaping {
-                        old.escaping = true;
-                        newly_counted = Some((old.identity.clone(), old.capture_free));
-                    }
-                } else if old.body_fingerprint != entry.body_fingerprint {
-                    duplicate = true;
                 }
+                slot.insert(entry);
+                return;
             }
-            if duplicate {
-                self.census.duplicate_identity += 1;
-                self.census.duplicate_body += 1;
-            }
-            if resolved {
-                self.census.unresolved_body = self.census.unresolved_body.saturating_sub(1);
-            }
-            if let Some((was_free, is_free)) = capture_kind_change {
-                if was_free {
-                    self.census.capture_free_lambdas =
-                        self.census.capture_free_lambdas.saturating_sub(1);
-                } else {
-                    self.census.capturing_lambdas = self.census.capturing_lambdas.saturating_sub(1);
+            Entry::Occupied(slot) => slot,
+        };
+        let mut newly_counted = None;
+        let mut resolved = false;
+        let mut duplicate = false;
+        let mut capture_kind_change = None;
+        {
+            let old = slot.into_mut();
+            if old.body_fingerprint == 0 && entry.body_fingerprint != 0 {
+                resolved = old.escaping;
+                let was_escaping = old.escaping;
+                if old.escaping
+                    && matches!(old.identity, CodeIdentity::Lambda { .. })
+                    && old.capture_free != entry.capture_free
+                {
+                    capture_kind_change = Some((old.capture_free, entry.capture_free));
                 }
-                if is_free {
-                    self.census.capture_free_lambdas += 1;
-                } else {
-                    self.census.capturing_lambdas += 1;
+                let escaping = old.escaping || entry.escaping;
+                *old = entry;
+                old.escaping = escaping;
+                if escaping && !was_escaping {
+                    newly_counted = Some((old.identity.clone(), old.capture_free));
                 }
+            } else if old.body_fingerprint != 0 && entry.body_fingerprint == 0 {
+                if entry.escaping && !old.escaping {
+                    old.escaping = true;
+                    newly_counted = Some((old.identity.clone(), old.capture_free));
+                }
+            } else if old.body_fingerprint != entry.body_fingerprint {
+                duplicate = true;
             }
-            if let Some((identity, capture_free)) = newly_counted {
-                self.census.examined += 1;
-                self.census.assigned += 1;
-                self.count_kind(&identity, capture_free);
-            }
-            return;
         }
-        if entry.escaping {
+        if duplicate {
+            self.census.duplicate_identity += 1;
+            self.census.duplicate_body += 1;
+        }
+        if resolved {
+            self.census.unresolved_body = self.census.unresolved_body.saturating_sub(1);
+        }
+        if let Some((was_free, is_free)) = capture_kind_change {
+            if was_free {
+                self.census.capture_free_lambdas =
+                    self.census.capture_free_lambdas.saturating_sub(1);
+            } else {
+                self.census.capturing_lambdas = self.census.capturing_lambdas.saturating_sub(1);
+            }
+            if is_free {
+                self.census.capture_free_lambdas += 1;
+            } else {
+                self.census.capturing_lambdas += 1;
+            }
+        }
+        if let Some((identity, capture_free)) = newly_counted {
             self.census.examined += 1;
             self.census.assigned += 1;
-            self.count_kind(&entry.identity, entry.capture_free);
-            if entry.body_fingerprint == 0 {
-                self.census.unresolved_body += 1;
-            }
+            Self::count_kind(&mut self.census, &identity, capture_free);
         }
-        self.entries.insert(entry.identity.clone(), entry);
     }
 
-    fn count_kind(&mut self, identity: &CodeIdentity, capture_free: bool) {
+    fn count_kind(census: &mut CodeIdentityCensus, identity: &CodeIdentity, capture_free: bool) {
         match identity {
             CodeIdentity::Named(_)
             | CodeIdentity::Artifact(_)
             | CodeIdentity::Nested { .. }
-            | CodeIdentity::Generated { .. } => self.census.named_values += 1,
+            | CodeIdentity::Generated { .. } => census.named_values += 1,
             CodeIdentity::Lambda { .. } => {
-                self.census.lambda_values += 1;
+                census.lambda_values += 1;
                 if capture_free {
-                    self.census.capture_free_lambdas += 1;
+                    census.capture_free_lambdas += 1;
                 } else {
-                    self.census.capturing_lambdas += 1;
+                    census.capturing_lambdas += 1;
                 }
             }
         }
