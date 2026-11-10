@@ -10,7 +10,7 @@
 
 use super::*;
 
-use bone_core::hir::{BuiltinTy, Expr, TyId, TypeCtor, TypeExpr, VariantPayload};
+use bone_core::hir::{BuiltinTy, Expr, FnBackend, TyId, TypeCtor, TypeExpr, VariantPayload};
 use bone_core::type_equiv::TyRef;
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
@@ -782,6 +782,7 @@ struct ShapeMemo {
     arena_gen: u64,
     planned: rustc_hash::FxHashMap<Ustr, Option<Rc<PlannedValue>>>,
     enums: rustc_hash::FxHashMap<Ustr, Option<EnumPlan>>,
+    gc_inline: rustc_hash::FxHashMap<(FnBackend, Ustr), Option<Rc<[GcTableField]>>>,
 }
 
 thread_local! {
@@ -806,6 +807,7 @@ impl ShapeMemo {
                 memo.arena_gen = generation;
                 memo.planned.clear();
                 memo.enums.clear();
+                memo.gc_inline.clear();
             }
             get(&memo)
         });
@@ -822,6 +824,31 @@ impl ShapeMemo {
         });
         value
     }
+}
+
+/// The fields of GC-table value `name` when some field is stored inline,
+/// memoized with the declaration plans: every boxed read and write of the
+/// value asks, and the answer is a walk over its field plans.
+pub(crate) fn gc_table_inline_fields(
+    ws: &Workspace,
+    target: FnBackend,
+    name: Ustr,
+) -> Result<Option<Rc<[GcTableField]>>, RepError> {
+    ShapeMemo::with_active(
+        |memo| memo.gc_inline.get(&(target, name)).cloned().map(Ok),
+        |memo, fields| {
+            if let Ok(fields) = fields {
+                memo.gc_inline.insert((target, name), fields.clone());
+            }
+        },
+        || {
+            let fields = crate::lower::gc_table_fields(ws, target, name)?;
+            Ok(fields
+                .iter()
+                .any(GcTableField::is_inline)
+                .then(|| fields.into()))
+        },
+    )
 }
 
 /// Serves the declaration-plan memo for the representation arena generation

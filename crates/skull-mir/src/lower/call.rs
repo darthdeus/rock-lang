@@ -2065,7 +2065,7 @@ impl Builder<'_> {
     pub(crate) fn gc_table_inline_layout(
         &self,
         name: Ustr,
-    ) -> Result<Option<Vec<GcTableField>>, CompilerError> {
+    ) -> Result<Option<Rc<[GcTableField]>>, CompilerError> {
         if self.scx.values_first_class || !self.is_value_struct(name) {
             return Ok(None);
         }
@@ -2077,9 +2077,8 @@ impl Builder<'_> {
         if storage != ValueStorage::GcTable {
             return Ok(None);
         }
-        let fields = crate::lower::gc_table_fields(self.ws, self.scx.target, name)
-            .map_err(|e| self.gap_here(e.message))?;
-        Ok(fields.iter().any(GcTableField::is_inline).then_some(fields))
+        super::shape::gc_table_inline_fields(self.ws, self.scx.target, name)
+            .map_err(|e| self.gap_here(e.message))
     }
 
     /// A GC-table Group's `<Name>_vt` operands, keyed as `layout` stores them:
