@@ -510,10 +510,23 @@ fn percentile_u64(values: &mut [u64], percentile: usize) -> u64 {
 /// the contribution being produced. Nothing else of the graph is reachable
 /// from here, which is what stops a walk from depending on what some other
 /// owner happened to record first.
+/// What a thread keeps between the bodies it walks. Both answer by type or
+/// by declaration, so one serves every body.
+#[derive(Default)]
+struct WalkScratch {
+    /// Where the walk asks how a type is represented.
+    rep_arena: RepArena,
+    identity_verdicts: std::cell::RefCell<crate::identity_storage::IdentityVerdicts>,
+}
+
 struct Walk<'a> {
     interner: &'a MonoInterner,
+    scratch: &'a WalkScratch,
     owner_tree: Option<&'a InstanceBoundTree>,
     out: &'a mut Contribution,
+    /// The file of the last span recorded: a body's spans are nearly all in
+    /// one file, and the set insert is per fact.
+    last_file: Option<ustr::Ustr>,
     timing_enabled: bool,
 }
 
@@ -605,7 +618,8 @@ impl Walk<'_> {
     /// contribution goes through here or through [`Self::record_site`], so the
     /// invalidation set cannot miss a file the walk quoted.
     fn saw(&mut self, span: Span) {
-        if !is_spanless(&span) {
+        if !is_spanless(&span) && self.last_file != Some(span.file) {
+            self.last_file = Some(span.file);
             self.out.span_files.insert(span.file);
         }
     }
@@ -2100,6 +2114,7 @@ impl InstanceGraph {
                                 prepared_c = Some(expand(
                                     ws,
                                     &interner,
+                                    &WalkScratch::default(),
                                     &owner,
                                     &self.walk_inputs(&owner),
                                     timing_enabled,
@@ -2364,6 +2379,9 @@ impl InstanceGraph {
     ) -> Vec<Owner> {
         let interner = self.interner.clone();
         let shards: Vec<SubstShard> = (0..SUBST_SHARDS).map(|_| Mutex::default()).collect();
+        // Handed from wave to wave, so what a thread learned about the
+        // program's types in one wave answers in the next.
+        let scratches: Mutex<Vec<WalkScratch>> = Mutex::default();
         let mut wave: Vec<OwnerWalk> = pending
             .into_iter()
             .map(|owner| OwnerWalk {
@@ -2385,7 +2403,7 @@ impl InstanceGraph {
             {
                 let graph = &*self;
                 let walk = || {
-                    let share = graph.walk_wave_share(ws, &interner, &units, &shards);
+                    let share = graph.walk_wave_share(ws, &interner, &units, &shards, &scratches);
                     shares.lock().push(share);
                 };
                 rayon::in_place_scope(|scope| {
@@ -2441,19 +2459,22 @@ impl InstanceGraph {
         interner: &MonoInterner,
         units: &Mutex<std::vec::IntoIter<OwnerWalk>>,
         shards: &[SubstShard],
+        scratches: &Mutex<Vec<WalkScratch>>,
     ) -> WaveShare {
         let mut share = WaveShare::default();
+        let scratch = scratches.lock().pop().unwrap_or_default();
         let mut claimed = Vec::with_capacity(WALK_TASK_OWNERS);
         loop {
             claimed.extend(units.lock().by_ref().take(WALK_TASK_OWNERS));
             if claimed.is_empty() {
+                scratches.lock().push(scratch);
                 return share;
             }
             for OwnerWalk { owner, mut inputs } in claimed.drain(..) {
                 if let Owner::Instance(i) = &owner {
                     inputs.tree = self.bound_tree(i).cloned();
                 }
-                let c = expand(ws, interner, &owner, &inputs, false);
+                let c = expand(ws, interner, &scratch, &owner, &inputs, false);
                 for (to, subst) in &c.reached {
                     let mut shard = shards[subst_shard(to)].lock();
                     if let Some(agreed) = shard.get_mut(to) {
@@ -2543,11 +2564,12 @@ impl InstanceGraph {
 fn expand(
     ws: &Workspace,
     interner: &MonoInterner,
+    scratch: &WalkScratch,
     owner: &Owner,
     inputs: &WalkInputs,
     timing_enabled: bool,
 ) -> Box<Contribution> {
-    let mut out = expand_sites(ws, interner, owner, inputs, timing_enabled);
+    let mut out = expand_sites(ws, interner, scratch, owner, inputs, timing_enabled);
     // A body reaching one callee from several sites asserts its
     // substitution once: the index records owners, not sites, and the
     // walk is parallel while the install is not, so the duplicates are
@@ -2568,6 +2590,7 @@ fn expand(
 fn expand_sites(
     ws: &Workspace,
     interner: &MonoInterner,
+    scratch: &WalkScratch,
     owner: &Owner,
     inputs: &WalkInputs,
     timing_enabled: bool,
@@ -2587,8 +2610,10 @@ fn expand_sites(
             add_elapsed(&mut out.timing.body_prep_ns, prep_start);
             let mut w = Walk {
                 interner,
+                scratch,
                 owner_tree: None,
                 out: &mut out,
+                last_file: None,
                 timing_enabled,
             };
             let walk_start = w.timer();
@@ -2680,8 +2705,10 @@ fn expand_sites(
             add_elapsed(&mut out.timing.body_prep_ns, prep_start);
             let mut w = Walk {
                 interner,
+                scratch,
                 owner_tree: Some(owner_tree),
                 out: &mut out,
+                last_file: None,
                 timing_enabled,
             };
             let walk_start = w.timer();
@@ -2696,7 +2723,14 @@ fn expand_sites(
                 None,
             );
             add_elapsed(&mut w.out.timing.walk_body_edges_ns, walk_start);
-            for site in crate::identity_storage::substitution_only_sites(ws, f, body, inf, subst) {
+            for site in crate::identity_storage::substitution_only_sites(
+                ws,
+                f,
+                body,
+                inf,
+                subst,
+                &scratch.identity_verdicts,
+            ) {
                 w.push_rejection(Rejection {
                     kind: RejectionKind::IdentityInOrdinaryStorage,
                     at: inst.clone(),
@@ -2755,7 +2789,14 @@ impl OwnerWalk {
                 return (None, 0);
             }
             let started = timing_enabled.then(Instant::now);
-            let c = expand(ws, interner, &self.owner, &self.inputs, timing_enabled);
+            let c = expand(
+                ws,
+                interner,
+                &WalkScratch::default(),
+                &self.owner,
+                &self.inputs,
+                timing_enabled,
+            );
             (Some(c), elapsed_ns(started))
         }))
     }
@@ -4993,6 +5034,14 @@ fn walk_body_edges(
         .map(|(e, r)| (*e, *r))
         .collect();
     calls.sort_by_key(|(e, _)| *e);
+    if only.is_none() {
+        // Nearly every resolved call becomes an edge and a reached row.
+        resolved_calls.reserve(calls.len());
+        w.out.reached.reserve(calls.len());
+        if from.is_some() {
+            w.out.edges.reserve(calls.len());
+        }
+    }
     for (e, (m, f)) in calls {
         if !reached(e) {
             continue;
@@ -5094,6 +5143,7 @@ fn walk_body_edges(
             inf,
             body,
             subst,
+            &w.scratch.rep_arena,
             &mut w.out.synthesized_examined,
             &mut failures,
             &mut w.out.synthesized_approximated,
@@ -5135,7 +5185,7 @@ fn walk_body_edges(
         // ORDINARY stdlib declaration whose own boundary class already answers
         // for it -- filing `inspect` as an erased runtime entry would relabel a
         // real `inline(lua)` body.
-        let dispatched_sites = dispatched_sites(ws, inf, body, subst, domain);
+        let dispatched_sites = dispatched_sites(ws, inf, body, subst, &w.scratch.rep_arena, domain);
         w.out.dispatched_rows += dispatched_sites.len();
         let dispatched = dispatched_sites
             .into_iter()
@@ -6518,12 +6568,12 @@ fn compiler_generated_sites(
     inf: &BodyInference,
     body: &bone_core::hir::Body,
     subst: &MonoSubst,
+    rep_arena: &RepArena,
     examined: &mut usize,
     failures: &mut Vec<(Idx<bone_core::hir::Expr>, MonoTyReason)>,
     approximated: &mut usize,
 ) -> Vec<GeneratedSite> {
     use bone_core::hir::{Callee, Expr as E};
-    let rep_arena = RepArena::default();
     // The receiver's CONCRETE type under this instance's substitution, which is
     // what the storage condition is asked about.
     let verdict = |recv: Idx<bone_core::hir::Expr>, cond: StorageCond| -> CondVerdict {
@@ -6548,7 +6598,7 @@ fn compiler_generated_sites(
                 ContainerPlan::for_type(
                     ws,
                     bone_core::hir::FnBackend::Any,
-                    &rep_arena,
+                    rep_arena,
                     ContainerFamily::Vec,
                     &mono,
                 )
@@ -6560,7 +6610,7 @@ fn compiler_generated_sites(
                 ContainerPlan::for_type(
                     ws,
                     bone_core::hir::FnBackend::Any,
-                    &rep_arena,
+                    rep_arena,
                     ContainerFamily::Vec,
                     &mono,
                 )
@@ -6572,7 +6622,7 @@ fn compiler_generated_sites(
                 ContainerPlan::for_type(
                     ws,
                     bone_core::hir::FnBackend::Any,
-                    &rep_arena,
+                    rep_arena,
                     ContainerFamily::Map,
                     &mono,
                 )
@@ -6580,8 +6630,8 @@ fn compiler_generated_sites(
             StorageCond::Always => return CondVerdict::Holds(None),
         };
         let elem = match plan {
-            Ok(plan) if cond == StorageCond::VecStrided => plan.strided_elem(&rep_arena),
-            Ok(plan) => plan.column_elem(&rep_arena),
+            Ok(plan) if cond == StorageCond::VecStrided => plan.strided_elem(rep_arena),
+            Ok(plan) => plan.column_elem(rep_arena),
             Err(_) => return CondVerdict::Failed(MonoTyReason::NoNode),
         };
         match elem {
@@ -6730,10 +6780,10 @@ fn dispatched_sites(
     inf: &BodyInference,
     body: &bone_core::hir::Body,
     subst: &MonoSubst,
+    rep_arena: &RepArena,
     domain: &SiteDomain,
 ) -> Vec<(Site, &'static str)> {
     use bone_core::hir::{BinOp, Expr as E, InterpPart};
-    let rep_arena = RepArena::default();
     let dcx = skull_mir::lower::DispatchCtx {
         ws,
         inf: Some(inf),
@@ -6741,7 +6791,7 @@ fn dispatched_sites(
         concrete_plan: None,
         concrete_types: None,
         interner: None,
-        rep_arena: &rep_arena,
+        rep_arena,
         target: bone_core::hir::FnBackend::Any,
         logical_subst: Some(subst),
         values_first_class: false,

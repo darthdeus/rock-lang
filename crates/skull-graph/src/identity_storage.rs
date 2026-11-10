@@ -12,8 +12,9 @@ use bone_core::identity_storage::{
 };
 use bone_core::prelude::TyId;
 use bone_core::workspace::{BodyInference, Workspace};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 use skull_mir::monoty::{MonoCtor, MonoSubst, MonoTy};
+use std::cell::RefCell;
 
 #[derive(Copy, Clone)]
 struct MonoTypes<'a>(std::marker::PhantomData<&'a MonoTy>);
@@ -54,10 +55,38 @@ pub fn stores_identity(ws: &Workspace, ty: &MonoTy) -> bool {
     .is_some()
 }
 
+/// Verdicts already reached, by position and type. A verdict depends on the
+/// type and the workspace's declarations only, and the bodies one thread
+/// walks ask about the same few types.
+#[derive(Default)]
+pub(crate) struct IdentityVerdicts([FxHashMap<MonoTy, Option<IdentityStorageViolation>>; 3]);
+
+impl IdentityVerdicts {
+    fn of(
+        &mut self,
+        ws: &Workspace,
+        ty: &MonoTy,
+        position: IdentityPosition,
+    ) -> Option<IdentityStorageViolation> {
+        let known = &mut self.0[match position {
+            IdentityPosition::Stored => 0,
+            IdentityPosition::Borrow => 1,
+            IdentityPosition::Row => 2,
+        }];
+        if let Some(verdict) = known.get(ty) {
+            return *verdict;
+        }
+        let verdict = identity_violation_in(ws, MonoTypes(std::marker::PhantomData), ty, position);
+        known.insert(ty.clone(), verdict);
+        verdict
+    }
+}
+
 struct SubstitutedSlotTypes<'a> {
     ws: &'a Workspace,
     bi: &'a BodyInference,
     subst: &'a MonoSubst,
+    verdicts: &'a RefCell<IdentityVerdicts>,
 }
 
 impl SubstitutedSlotTypes<'_> {
@@ -65,12 +94,7 @@ impl SubstitutedSlotTypes<'_> {
     // reports it as a `FreeType` or plan failure.
     fn check(&self, ty: TyId, position: IdentityPosition) -> Option<IdentityStorageViolation> {
         let mono = skull_mir::monoty::convert(self.ws, self.bi, ty, self.subst).ok()?;
-        identity_violation_in(
-            self.ws,
-            MonoTypes(std::marker::PhantomData),
-            &mono,
-            position,
-        )
+        self.verdicts.borrow_mut().of(self.ws, &mono, position)
     }
 }
 
@@ -94,32 +118,52 @@ pub(crate) fn substitution_only_sites(
     body: &Body,
     bi: &BodyInference,
     subst: &MonoSubst,
+    verdicts: &RefCell<IdentityVerdicts>,
 ) -> Vec<IdentityStorageSite> {
-    if !subst.values().any(|ty| stores_identity(ws, ty)) {
+    let stores = |ty: &MonoTy| {
+        verdicts
+            .borrow_mut()
+            .of(ws, ty, IdentityPosition::Stored)
+            .is_some()
+    };
+    if !subst.values().any(stores) {
         return Vec::new();
     }
-    let types = SubstitutedSlotTypes { ws, bi, subst };
-    let substituted = identity_body_sites_with(ws, function, body, bi, &types);
-    if substituted.is_empty() {
-        return substituted;
+    let types = SubstitutedSlotTypes {
+        ws,
+        bi,
+        subst,
+        verdicts,
+    };
+    let mut sites = identity_body_sites_with(ws, function, body, bi, &types);
+    if sites.is_empty() {
+        return sites;
     }
     let key = |site: &IdentityStorageSite| (site.kind, site.span.file, site.span.offset_range());
-    let mut skip: FxHashSet<_> = identity_body_sites(ws, function, body, bi)
+    // A parameter holds what its caller already stored, and that storage is
+    // reported where it was made. A `co fn` parameter is the frame's own.
+    let params: FxHashSet<_> = body
+        .param_bindings
+        .into_iter()
+        .map(|binding| {
+            let span = body.binding_spans[binding];
+            (
+                IdentityStorageKind::LocalStorage,
+                span.file,
+                span.offset_range(),
+            )
+        })
+        .collect();
+    sites.retain(|site| !params.contains(&key(site)));
+    // Most bodies store an identity only through a parameter, so the
+    // declared body is read for the few that have a site left.
+    if sites.is_empty() {
+        return sites;
+    }
+    let declared: FxHashSet<_> = identity_body_sites(ws, function, body, bi)
         .iter()
         .map(key)
         .collect();
-    // A parameter holds what its caller already stored, and that storage is
-    // reported where it was made. A `co fn` parameter is the frame's own.
-    skip.extend(body.param_bindings.into_iter().map(|binding| {
-        let span = body.binding_spans[binding];
-        (
-            IdentityStorageKind::LocalStorage,
-            span.file,
-            span.offset_range(),
-        )
-    }));
-    substituted
-        .into_iter()
-        .filter(|site| !skip.contains(&key(site)))
-        .collect()
+    sites.retain(|site| !declared.contains(&key(site)));
+    sites
 }
