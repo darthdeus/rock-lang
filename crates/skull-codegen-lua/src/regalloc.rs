@@ -204,6 +204,142 @@ pub(crate) struct LoopScope {
     pub region: Vec<Idx<Block>>,
 }
 
+/// The loads in `scope` that can render as their cell at every use: no
+/// statement writes the cell while the loaded value is live. Folding one
+/// removes its register, the copy into it and that copy's kill; the cell
+/// stays live to the last use instead. `pinned` cells are excluded.
+pub(crate) fn stable_loads(
+    func: &MirFunc,
+    scope: &[Idx<Block>],
+    inline: &[bool],
+    pinned: &[bool],
+) -> Vec<Idx<Inst>> {
+    let n = scope.len();
+    let mut pos = vec![usize::MAX; func.blocks.len()];
+    for (i, &b) in scope.iter().enumerate() {
+        pos[raw(b)] = i;
+    }
+    let mut loads: Vec<(Idx<Inst>, Idx<Cell>)> = Vec::new();
+    let mut li = vec![u32::MAX; func.insts.len()];
+    for &b in scope {
+        for &id in &func.blocks[b].insts {
+            if let Inst::Load(cell) = func.insts[id]
+                && !inline[raw(id)]
+                && !pinned[raw(cell)]
+            {
+                li[raw(id)] = loads.len() as u32;
+                loads.push((id, cell));
+            }
+        }
+    }
+    if loads.is_empty() {
+        return Vec::new();
+    }
+    let l_count = loads.len();
+    let mut by_cell = vec![Vec::new(); func.cells.len()];
+    for (k, &(_, cell)) in loads.iter().enumerate() {
+        by_cell[raw(cell)].push(k);
+    }
+    // A load is read where the statement or terminator that evaluates it
+    // runs, which for a folded consumer is that consumer's statement.
+    let stmt_uses = |id: Idx<Inst>, push: &mut dyn FnMut(usize)| {
+        effective_uses(func, inline, &func.insts[id], &mut |v| {
+            if li[raw(v)] != u32::MAX {
+                push(li[raw(v)] as usize);
+            }
+        });
+    };
+    let term_reads = |b: Idx<Block>, push: &mut dyn FnMut(usize)| {
+        term_uses(&func.blocks[b].term, &mut |v| {
+            let mut one = |w: Idx<Inst>| {
+                if li[raw(w)] != u32::MAX {
+                    push(li[raw(w)] as usize);
+                }
+            };
+            if inline[raw(v)] {
+                effective_uses(func, inline, &func.insts[v], &mut one);
+            } else {
+                one(v);
+            }
+        });
+    };
+    let mut use_set = BitRows::new(n, l_count);
+    let mut def_set = BitRows::new(n, l_count);
+    for (bi, &b) in scope.iter().enumerate() {
+        for &id in &func.blocks[b].insts {
+            if inline[raw(id)] {
+                continue;
+            }
+            stmt_uses(id, &mut |k| {
+                if !def_set.get(bi, k) {
+                    use_set.set(bi, k);
+                }
+            });
+            if li[raw(id)] != u32::MAX {
+                def_set.set(bi, li[raw(id)] as usize);
+            }
+        }
+        term_reads(b, &mut |k| {
+            if !def_set.get(bi, k) {
+                use_set.set(bi, k);
+            }
+        });
+    }
+    let mut live_in = BitRows::new(n, l_count);
+    let mut out = BitSet::new(l_count);
+    let mut inn = BitSet::new(l_count);
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for bi in (0..n).rev() {
+            out.clear();
+            successors(&func.blocks[scope[bi]].term, |s| {
+                if pos[raw(s)] != usize::MAX {
+                    out.or_with(live_in.row(pos[raw(s)]));
+                }
+            });
+            inn.copy_from(use_set.row(bi));
+            for (wi, (&o, &d)) in out.words.iter().zip(def_set.row(bi)).enumerate() {
+                inn.words[wi] |= o & !d;
+            }
+            changed |= live_in.or_row(bi, &inn);
+        }
+    }
+    // A statement writes its cells after it reads its operands, so a write
+    // conflicts with a load that is still live after the statement.
+    let mut conflict = vec![false; l_count];
+    let mut live = BitSet::new(l_count);
+    for &b in scope {
+        live.clear();
+        successors(&func.blocks[b].term, |s| {
+            if pos[raw(s)] != usize::MAX {
+                live.or_with(live_in.row(pos[raw(s)]));
+            }
+        });
+        term_reads(b, &mut |k| live.set(k));
+        for &id in func.blocks[b].insts.iter().rev() {
+            if inline[raw(id)] {
+                continue;
+            }
+            func.insts[id].cell_writes_each(&mut |cell| {
+                for &k in &by_cell[raw(cell)] {
+                    conflict[k] |= live.get(k);
+                }
+            });
+            if li[raw(id)] != u32::MAX {
+                live.remove(li[raw(id)] as usize);
+            }
+            stmt_uses(id, &mut |k| live.set(k));
+        }
+    }
+    loads
+        .iter()
+        .zip(conflict)
+        .filter(|&(_, c)| !c)
+        .map(|(&(id, _), _)| id)
+        .collect()
+}
+
 /// A call whose result nothing reads runs as a bare call statement, with no
 /// register to assign and then kill. Its callee must render as a name: a
 /// statement opening with `(` would continue the previous line's expression.

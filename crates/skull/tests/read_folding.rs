@@ -127,3 +127,39 @@ fn main() {
 "#;
     assert_eq!(compile_and_run(src), "601 10");
 }
+
+#[test]
+fn a_read_of_a_cell_nothing_rewrites_renders_as_the_cell() {
+    let src = r#"
+fn pick(a: int, b: int) -> int {
+    let m = a
+    if b > a {
+        m = b * 2
+    }
+    let n = m
+    if n > 10 {
+        return n - 10
+    }
+    return n * n + n
+}
+fn stepper(k: int) -> int {
+    let x = k
+    let total = 0
+    while x > 0 {
+        let y = x
+        x = x - 3
+        total = total + y * y
+    }
+    return total
+}
+fn main() {
+    print("{pick(1, 2)} {pick(3, 1)} {pick(1, 9)} {stepper(7)}")
+}
+"#;
+    let lua = emit_module(src);
+    let pick = function_body(&lua, "pick");
+    assert!(!pick.contains("local r"), "{pick}");
+    let stepper = function_body(&lua, "stepper");
+    assert!(stepper.contains("r0 = c0"), "{stepper}");
+    assert_eq!(compile_and_run(src), "20 12 8 66");
+}

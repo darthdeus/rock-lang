@@ -353,6 +353,11 @@ fn emit_named_framed_with_statics_impl(
     );
     keep_reads_ordered(func, &rpo, &mut inlinable, &folded_reads);
     bound_fold_levels(func, &rpo, &mut inlinable, &folded_reads);
+    if frame.is_none() {
+        for id in regalloc::stable_loads(func, &rpo, &inlinable, &cell_analysis.pinned) {
+            inlinable[raw(id) as usize] = true;
+        }
+    }
     // Frame fields map to their dense slots before this table is consulted.
     // Frame accesses name `s` implicitly in the printer rather than through a
     // MIR cell use; reserve its parameter's color so a later local can never
