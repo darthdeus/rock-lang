@@ -14,7 +14,7 @@ use super::*;
 /// instead of the target's -- so `x?.m()` on a `value` receiver named an
 /// instantiation it never delivered, and the callee was then reached at its
 /// declaration with no body to serve it.
-pub(crate) struct DirectCall {
+pub(crate) struct DirectCall<'a> {
     pub(crate) tree: Option<bone_core::prelude::BoundTree>,
     /// The concrete body delivered by this call, when it has one. An
     /// [`Instance`](crate::instance::Instance) is the delivery identity rather
@@ -22,6 +22,10 @@ pub(crate) struct DirectCall {
     pub(crate) delivery: Option<crate::instance::Instance>,
     pub(crate) callee_inst: crate::instance::Instance,
     pub(crate) plan: BackendFnAbiPlanHandle,
+    /// The site's resolved callee and the callee's own body plan, looked up
+    /// once for every reader of this call.
+    callee: &'a crate::concrete::ConcreteCallee,
+    callee_plan: Option<&'a crate::concrete::ConcreteBodyPlan>,
 }
 
 impl<'a> Builder<'a> {
@@ -110,14 +114,23 @@ impl<'a> Builder<'a> {
         e: Idx<Expr>,
         op: crate::site::SiteOp,
     ) -> Result<Option<crate::instance::Instance>, CompilerError> {
-        let plan = self.concrete_plan;
+        self.concrete_callee_entry(e, op)
+            .map(|callee| Some(callee.instance.clone()))
+    }
+
+    fn concrete_callee_entry(
+        &self,
+        e: Idx<Expr>,
+        op: crate::site::SiteOp,
+    ) -> Result<&'a crate::concrete::ConcreteCallee, CompilerError> {
+        let plan: &'a ConcreteBodyPlan = self.concrete_plan;
         let site = crate::site::Site {
             domain: self.cur_domain.clone(),
             expr: e,
             op,
         };
         if let Some(callee) = plan.callees.get(&site) {
-            return Ok(Some(callee.instance.clone()));
+            return Ok(callee);
         }
         if let Some(reason) = plan.failed_sites.get(&site) {
             return Err(self.gap_here(format!(
@@ -176,6 +189,24 @@ impl<'a> Builder<'a> {
             ))
         } else {
             Ok(std::sync::Arc::clone(&callee.signature))
+        }
+    }
+
+    /// [`Self::concrete_callee_signature`] for a call already planned.
+    pub(crate) fn direct_call_signature(
+        &self,
+        dc: &DirectCall<'a>,
+    ) -> Result<&'a crate::concrete::ConcreteSignature, CompilerError> {
+        let inst = &dc.callee_inst;
+        if crate::lower::requires_concrete_body_plan(self.ws, inst)
+            && crate::monoty::too_deep_to_instantiate(inst.arg_types(self.scx.interner()).iter())
+                .is_none()
+        {
+            dc.callee_plan
+                .map(|plan| &*plan.signature)
+                .ok_or_else(|| self.gap_here("concrete callee body plan is missing for its site"))
+        } else {
+            Ok(&dc.callee.signature)
         }
     }
 
@@ -992,7 +1023,10 @@ impl<'a> Builder<'a> {
     /// The delivery decision comes first because the ABI plan depends on it: a
     /// served instantiation targets the specialized definition, whose parameter
     /// list is what the caller's argument splat has to match.
-    pub(crate) fn plan_direct_call(&mut self, e: Idx<Expr>) -> Result<DirectCall, CompilerError> {
+    pub(crate) fn plan_direct_call(
+        &mut self,
+        e: Idx<Expr>,
+    ) -> Result<DirectCall<'a>, CompilerError> {
         // A dispatched helper shares the hole's expression, not its user call's bound tree.
         let tree = if matches!(self.cur_op, crate::site::SiteOp::DirectCall) {
             self.inf
@@ -1005,16 +1039,20 @@ impl<'a> Builder<'a> {
         // IDENTITY, computed beside the delivery decision and independent of it.
         // A call the policy declines to specialize still names exactly one
         // concrete instance, and this is where it says which.
-        let callee_inst = self
-            .concrete_callee_for_site(e)?
-            .ok_or_else(|| self.gap_here("direct call has no concrete callee identity"))?;
-        let delivery = self.concrete_delivery_instance(&callee_inst);
+        let callee = self.concrete_callee_entry(e, self.cur_op.clone())?;
+        let concrete_plans: &'a crate::concrete::ConcretePlans = self.concrete_plans;
+        let callee_plan = concrete_plans.get(&callee.instance).map(|plan| &**plan);
+        let callee_inst = callee.instance.clone();
+        let delivery =
+            (!callee_inst.args.is_empty() && callee_plan.is_some()).then(|| callee_inst.clone());
         let plan = self.callee_abi_plan_for_instance(&callee_inst)?;
         Ok(DirectCall {
             tree,
             delivery,
             callee_inst,
             plan,
+            callee,
+            callee_plan,
         })
     }
 
@@ -1027,7 +1065,7 @@ impl<'a> Builder<'a> {
         &mut self,
         call: Idx<Inst>,
         func: FuncRef,
-        dc: &DirectCall,
+        dc: &DirectCall<'a>,
     ) -> Result<(), CompilerError> {
         if let Some(t) = &dc.tree {
             self.f.bound_trees.insert(call, t.clone());
@@ -1040,9 +1078,9 @@ impl<'a> Builder<'a> {
             crate::lower::canonical_variant(self.ws, owner.func),
             crate::lower::canonical_variant(self.ws, func)
         );
-        self.record_callee_bound_tree(
+        self.record_planned_bound_tree(
             call,
-            owner,
+            dc.callee_plan,
             dc.tree.as_ref().is_some_and(|tree| !tree.is_empty()),
         )?;
         self.f.callee_instances.insert(call, owner.clone());
@@ -1056,7 +1094,17 @@ impl<'a> Builder<'a> {
         owner: &crate::instance::Instance,
         raw_tree_present: bool,
     ) -> Result<(), CompilerError> {
-        let Some(plan) = self.concrete_plans.get(owner) else {
+        let plan = self.concrete_plans.get(owner).map(|plan| &**plan);
+        self.record_planned_bound_tree(call, plan, raw_tree_present)
+    }
+
+    fn record_planned_bound_tree(
+        &mut self,
+        call: Idx<Inst>,
+        plan: Option<&ConcreteBodyPlan>,
+        raw_tree_present: bool,
+    ) -> Result<(), CompilerError> {
+        let Some(plan) = plan else {
             if raw_tree_present {
                 return Err(self.gap_here("concrete callee bound plan is missing for its site"));
             }
@@ -1226,7 +1274,7 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
-        dc: &DirectCall,
+        dc: &DirectCall<'a>,
     ) -> Result<Vec<Idx<Inst>>, CompilerError> {
         if dc.plan.uses_scalar_abi() {
             // A boxed argument the callee does not read is still rejected, so
@@ -1255,7 +1303,7 @@ impl<'a> Builder<'a> {
             let param_count = self.ws.module(func.module).functions[func.func]
                 .param_decls
                 .len();
-            let signature = self.concrete_callee_signature(e, &dc.callee_inst).ok();
+            let signature = self.direct_call_signature(dc).ok();
             let param_tys: Vec<_> = (0..param_count)
                 .map(|i| {
                     signature.as_ref().and_then(|signature| {
@@ -1284,13 +1332,13 @@ impl<'a> Builder<'a> {
         } else if any_named {
             self.reorder_named_args(e, arg_idxs, func, Some(&dc.callee_inst))?
         } else {
-            let signature = self.concrete_callee_signature(e, &dc.callee_inst)?;
+            let signature = self.direct_call_signature(dc)?;
             let mut args: Vec<Idx<Inst>> = arg_idxs
                 .iter()
                 .enumerate()
                 .map(|(i, &a)| {
                     let t = self
-                        .concrete_param_ty_of(&signature, &dc.callee_inst, i)?
+                        .concrete_param_ty_of(signature, &dc.callee_inst, i)?
                         .ok_or_else(|| {
                             self.gap_here("concrete call has no callee parameter type")
                         })?;
@@ -1331,7 +1379,7 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         args: Vec<Idx<Inst>>,
         shape: &TupleRetShape,
-        dc: &DirectCall,
+        dc: &DirectCall<'a>,
     ) -> Result<ValueRepr, CompilerError> {
         let slot_types = self.tuple_opaque_slot_types(e, shape);
         let dests: Vec<Idx<Cell>> = slot_types

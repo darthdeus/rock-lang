@@ -679,7 +679,7 @@ impl<'a> Builder<'a> {
         func: FuncRef,
         arg_idxs: &[Idx<Expr>],
         any_named: bool,
-        dc: &DirectCall,
+        dc: &DirectCall<'a>,
         plan: &FlatCallPlan,
         ret_tuple: Option<TupleRetShape>,
     ) -> Result<FlatCallOut, CompilerError> {
@@ -786,7 +786,7 @@ impl<'a> Builder<'a> {
     fn flat_variant(
         &mut self,
         plan: &FlatCallPlan,
-        dc: &DirectCall,
+        dc: &DirectCall<'a>,
     ) -> Result<Ustr, CompilerError> {
         let key = (plan.inst.clone(), plan.sig.clone());
         let (hoisted, identity) = {
@@ -823,7 +823,7 @@ impl<'a> Builder<'a> {
         hoisted: Ustr,
         identity: &crate::code_identity::CodeIdentity,
         plan: &FlatCallPlan,
-        dc: &DirectCall,
+        dc: &DirectCall<'a>,
     ) -> Result<MirFunc, CompilerError> {
         let inst = &plan.inst;
         let module = self.ws.module(inst.func.module);
