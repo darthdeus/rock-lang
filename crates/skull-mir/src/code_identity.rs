@@ -403,10 +403,12 @@ pub fn staged_code_slots<'a>(
     interner: &MonoInterner,
     source: impl IntoIterator<Item = &'a CodeEntry>,
 ) -> Result<Vec<StagedCodeSlot<'a>>, String> {
-    let mut entries: Vec<_> = source
-        .into_iter()
-        .filter(|entry| entry.escaping)
-        .map(|entry| (entry.identity.logical_key(ws, interner), entry))
+    use bone_core::prelude::*;
+    let escaping: Vec<&CodeEntry> = source.into_iter().filter(|entry| entry.escaping).collect();
+    // A key is several formatted parts, and a large program stages thousands.
+    let mut entries: Vec<(String, &CodeEntry)> = escaping
+        .par_iter()
+        .map(|entry| (entry.identity.logical_key(ws, interner), *entry))
         .collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     entries
