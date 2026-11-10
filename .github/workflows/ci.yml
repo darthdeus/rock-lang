@@ -25,6 +25,8 @@ jobs:
           python3 scripts/gamelibs.py sync
           native=$(python3 scripts/gamelibs.py path)
           echo "$native/bin" >> "$GITHUB_PATH"
+          # The bundled LuaJIT searches for its jit.* modules where it was built.
+          echo "LUA_PATH=$native/share/luajit-2.1/?.lua;;" >> "$GITHUB_ENV"
       - uses: taiki-e/install-action@nextest
       - name: Check public content
         shell: bash
