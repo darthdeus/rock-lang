@@ -2763,3 +2763,37 @@ fn pass_residue_reaching_emission_is_reported_not_a_panic() {
         );
     }
 }
+
+#[test]
+fn residual_rock_calls_and_returns_drop_trailing_nils() {
+    // Lua reads a missing trailing argument or return value as nil, so a call
+    // to a fixed-arity Rock function and a multi-value return need not spell
+    // them. The first returned value stays so the return keeps its arity.
+    let lua = emit_clean(
+        "value Pair { a: int, b: int } \
+         fn keep(a: int, b: int?, c: string?) -> int { if b == null { return a } return a + 1 } \
+         fn pick(x: int) -> Pair? { if x > 3 { return null } return Pair { a: x, b: x } } \
+         fn run(x: int) -> int { return keep(x, null, null) + keep(x, 1, null) }",
+        "run",
+    );
+    assert!(!lua.contains("(nil)"), "{lua}");
+    let lua = emit_clean(
+        "value Pair { a: int, b: int } \
+         fn pick(x: int) -> Pair? { if x > 3 { return null } return Pair { a: x, b: x } }",
+        "pick",
+    );
+    assert!(lua.contains("do return (false) end"), "{lua}");
+    assert!(!lua.contains("(nil)"), "{lua}");
+}
+
+#[test]
+fn foreign_calls_keep_trailing_nils() {
+    // An extern Lua function may count its arguments.
+    let lua = emit_clean(
+        "extern(lua) fn host(a: int, b: int?) -> int \
+         inline(lua) fn wrap(a: int, b: int?) -> int = \"return select('#', a, b)\" \
+         fn run(x: int) -> int { return host(x, null) + wrap(x, null) }",
+        "run",
+    );
+    assert_eq!(lua.matches("(nil))").count(), 2, "{lua}");
+}

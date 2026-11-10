@@ -1,0 +1,58 @@
+// Calls and returns may leave trailing nils unspelled in Lua; a missing
+// trailing argument or return value must still read as null.
+
+value Pair { a: int, b: int }
+
+fn count_present(a: int?, b: int?, c: string?) -> int {
+    let n = 0
+    if a != null { n += 1 }
+    if b != null { n += 1 }
+    if c != null { n += 1 }
+    return n
+}
+
+fn pick(x: int) -> Pair? {
+    if x > 3 {
+        return null
+    }
+    return Pair { a: x, b: x * 2 }
+}
+
+fn pick_pair_and_label(x: int) -> (Pair?, string?) {
+    if x > 3 {
+        return (null, null)
+    }
+    return (Pair { a: x, b: x }, "small")
+}
+
+struct Counter { hits: int = 0 }
+
+fn bump(c: Counter, by: int?, label: string?) -> int {
+    c.hits += by ?? 1
+    if label != null { c.hits += 100 }
+    return c.hits
+}
+
+@test
+fn trailing_null_arguments_read_as_null() {
+    assert_eq(count_present(1, null, null), 1)
+    assert_eq(count_present(null, null, null), 0)
+    assert_eq(count_present(1, 2, null), 2)
+    assert_eq(count_present(1, 2, "x"), 3)
+    let c = Counter {}
+    assert_eq(bump(c, null, null), 1)
+    assert_eq(bump(c, 5, null), 6)
+}
+
+@test
+fn absent_optional_value_returns_read_as_null() {
+    assert_null(pick(9))
+    let p = pick(2) ?? Pair { a: 0, b: 0 }
+    assert_eq(p.b, 4)
+    let (q, label) = pick_pair_and_label(9)
+    assert_null(q)
+    assert_null(label)
+    let (r, label2) = pick_pair_and_label(1)
+    assert_eq((r ?? Pair { a: 0, b: 0 }).a, 1)
+    assert_eq(label2 ?? "", "small")
+}

@@ -100,8 +100,8 @@ fn optional_value_return_builds_no_box_on_the_presence_path() {
         "present arm is the presence lane:\n{body}"
     );
     assert!(
-        body.contains("do return (false), "),
-        "absent arm is the presence lane:\n{body}"
+        body.contains("do return (false) end"),
+        "absent arm is the presence lane alone; Lua fills the leaves with nil:\n{body}"
     );
 }
 

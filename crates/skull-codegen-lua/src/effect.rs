@@ -284,7 +284,7 @@ impl Emitter<'_> {
                         .collect();
                     self.write_frame_assignment(out, &targets, |out| {
                         write!(out, "{}(", self.callee_name(id, *func)).unwrap();
-                        self.write_csv(out, args);
+                        self.write_csv(out, self.call_args(*func, args));
                         out.push(')');
                     });
                     return;
@@ -301,7 +301,7 @@ impl Emitter<'_> {
                     out.push_str(" = ");
                 }
                 let _ = write!(out, "{callee}(");
-                self.write_csv(out, args);
+                self.write_csv(out, self.call_args(*func, args));
                 out.push_str(")\n");
             }
             // Indirect multi-return: `d0, d1, ... = callee(args)` -- a tuple

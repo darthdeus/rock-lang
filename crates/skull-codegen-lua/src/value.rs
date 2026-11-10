@@ -184,7 +184,7 @@ impl Emitter<'_> {
                 let callee = self.callee_name(id, *func);
                 out.push_str(&callee);
                 out.push('(');
-                self.write_csv(out, args);
+                self.write_csv(out, self.call_args(*func, args));
                 out.push(')');
             }
             Inst::CallValue { callee, args } => {

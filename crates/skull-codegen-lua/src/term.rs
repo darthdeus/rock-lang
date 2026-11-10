@@ -330,7 +330,7 @@ impl Emitter<'_> {
             // block's mid-sequence statement (and is legal as the last one too).
             Term::Return(vals) if !vals.is_empty() => {
                 out.push_str(" do return ");
-                self.write_csv(out, vals);
+                self.write_csv(out, self.trim_trailing_nils(vals, 1));
                 out.push_str(" end\n");
             }
             Term::Return(_) => {
@@ -510,6 +510,27 @@ impl Emitter<'_> {
             self.write_opnd(out, *id);
         }
         out.push('}');
+    }
+
+    /// `ids` without its trailing nil constants, keeping at least `keep`.
+    /// Lua reads a missing trailing argument or return value as nil.
+    fn trim_trailing_nils<'v>(&self, ids: &'v [Idx<Inst>], keep: usize) -> &'v [Idx<Inst>] {
+        let mut n = ids.len();
+        while n > keep && matches!(self.func.insts[ids[n - 1]], Inst::Const(Lit::Nil)) {
+            n -= 1;
+        }
+        &ids[..n]
+    }
+
+    /// The arguments a direct call to `func` spells. A fixed-arity Rock
+    /// function cannot tell a trailing nil from a missing argument; a foreign
+    /// function may count its arguments.
+    pub(crate) fn call_args<'v>(&self, func: FuncRef, args: &'v [Idx<Inst>]) -> &'v [Idx<Inst>] {
+        let f = func_of(self.ws, func);
+        if f.is_extern || f.is_variadic || f.inline_body.is_some() || f.ffi_lib.is_some() {
+            return args;
+        }
+        self.trim_trailing_nils(args, 0)
     }
 
     pub(crate) fn write_csv(&self, out: &mut String, ids: &[Idx<Inst>]) {

@@ -330,7 +330,7 @@ impl Emitter<'_> {
                 }
                 out.push_str(&self.callee_name(*call, *func));
                 out.push('(');
-                self.write_csv(out, args);
+                self.write_csv(out, self.call_args(*func, args));
             }
             TailForwardCall::Value { callee, args } => {
                 self.write_opnd(out, *callee);
