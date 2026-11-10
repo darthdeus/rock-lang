@@ -65,7 +65,7 @@ notify = { workspace = true }
 notify-debouncer-full = { workspace = true }
 rustc-hash = { workspace = true }
 ustr = { workspace = true }
-mimalloc = "0.1"
+mimalloc = { version = "0.1", features = ["v2"] }
 rayon = { workspace = true }
 atomic_refcell = { workspace = true }
 log = { workspace = true }

@@ -78,7 +78,7 @@ fn linux_current_rss() -> std::io::Result<u64> {
     })
 }
 
-// `mi_option_purge_delay` in the vendored mimalloc.h `mi_option_e`; the sys
+// `mi_option_purge_delay` in the vendored mimalloc v2 `mi_option_e`; the sys
 // crate's `extended` constants omit it.
 const MI_OPTION_PURGE_DELAY: std::ffi::c_int = 15;
 
@@ -289,7 +289,7 @@ mod tests {
     fn purge_delay_defaults_to_immediate_and_env_overrides() {
         let exe = std::env::current_exe().expect("test binary path");
         for (env, before, after) in [
-            (None, 1000, 0),
+            (None, 10, 0),
             (Some(("MIMALLOC_PURGE_DELAY", "7")), 7, 7),
             (Some(("mimalloc_purge_delay", "9")), 9, 9),
         ] {

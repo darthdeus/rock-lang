@@ -11,6 +11,9 @@ mod allocator_tests {
         fn mi_option_get(option: std::ffi::c_int) -> std::ffi::c_long;
     }
 
+    // `mi_option_allow_thp` in the vendored mimalloc v2 `mi_option_e`.
+    const MI_OPTION_ALLOW_THP: std::ffi::c_int = 37;
+
     #[test]
     fn compiler_thp_default_does_not_reach_runtime_child() {
         let exe = std::env::current_exe().expect("test executable");
@@ -85,7 +88,7 @@ mod allocator_tests {
             .unwrap()
             .parse()
             .unwrap();
-        let option = unsafe { mi_option_get(43) };
+        let option = unsafe { mi_option_get(MI_OPTION_ALLOW_THP) };
         assert_eq!(option as i64, expected, "{role} allocator option");
         if role == "runtime" && std::env::var("ROCK_THP_TEST_DEFAULT").as_deref() == Ok("1") {
             assert!(std::env::var_os("MIMALLOC_ALLOW_THP").is_none());
