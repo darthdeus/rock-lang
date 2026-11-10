@@ -204,7 +204,7 @@ fn emit_coroutine_chunk(
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
         times,
-        attribution: UnitAttribution::default(),
+        attribution: Box::default(),
         statics,
         comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(mf),
@@ -346,7 +346,7 @@ pub(super) fn emit_body_chunk_with_mutation(
         let mut chunk = emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, times)?;
         attribution.mir_instructions = mf.insts.len();
         attribution.times = chunk.times;
-        chunk.attribution = attribution;
+        chunk.attribution = Box::new(attribution);
         return Ok(chunk);
     }
     // The shared chain: inline (so a hot loop traces with no per-call frame),
@@ -471,7 +471,7 @@ pub(super) fn emit_body_chunk_with_mutation(
         calls,
         specs,
         code_artifact,
-        attribution,
+        attribution: Box::new(attribution),
         comptime_reads: mf.comptime_reads.clone(),
         binds: bind.into_iter().collect(),
     })
@@ -816,7 +816,7 @@ pub(super) fn emit_spec_chunk(
         let mut chunk = emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, times)?;
         attribution.mir_instructions = mf.insts.len();
         attribution.times = chunk.times;
-        chunk.attribution = attribution;
+        chunk.attribution = Box::new(attribution);
         return Ok(chunk);
     }
     let (mut deps, prepared_times, prepared_inline) = prepare_instance_body_with_attribution(
@@ -906,7 +906,7 @@ pub(super) fn emit_spec_chunk(
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
         times,
-        attribution,
+        attribution: Box::new(attribution),
         statics,
         comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(&mf),

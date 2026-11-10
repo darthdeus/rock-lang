@@ -30,7 +30,9 @@ pub(super) struct Chunk {
     /// Per-stage emit time captured when this chunk was built, summed back into
     /// the `backend-stats` breakdown by [`assemble`] when the chunk is pulled.
     pub(super) times: PhaseTimes,
-    pub(super) attribution: UnitAttribution,
+    /// Boxed: it is most of a chunk's size, and chunks move between the
+    /// fan-out, the chunk map and assembly.
+    pub(super) attribution: Box<UnitAttribution>,
     /// `static` cells this body declares -- aggregated at chunk-pull for the
     /// hot-reload preservation preamble + `__rock_known_globals` registration.
     pub(super) statics: Vec<skull_mir::mir::StaticCell>,
