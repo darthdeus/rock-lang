@@ -361,13 +361,6 @@ pub(crate) fn do_stone_watch(
         }
     }
 
-    // Build engine cdylibs (stone-rs + optional extras per game's
-    // [engine] needs) and the rock compiler in a single cargo invocation.
-    // Two separate `cargo build` calls each pay cargo's graph-walk cost
-    // and serialize on the target lock; one combined call halves the
-    // perceived startup pause and streams progress to the user.
-    build_all_for_game(path)?;
-
     let output_path =
         rock_engine_host::project::stone_session_main_lua_path(path, std::process::id());
     if let Some(parent) = output_path.parent() {
@@ -429,34 +422,46 @@ pub(crate) fn do_stone_watch(
         log::error!(target: "STONE", "{}", error_message);
         log::info!(target: "STONE", "watching for changes; game will start when compilation succeeds");
     };
-    let initial_build =
-        match (crate::registry::RuntimeServices::registered().prepare_sound_bank)(path) {
-            Err(e) => {
-                report_initial_failure(&e);
-                None
-            }
-            Ok(_) => match initial_session_build(
-                cache_root.as_deref(),
-                backend,
-                &compiler_dir,
-                &output_path,
-                compiler.as_mut(),
-            ) {
-                Ok(build_id) => {
-                    reseed_comptime_watch(
-                        compiler.as_ref(),
-                        &sound_paths,
-                        &mut watched,
-                        &comptime_watch,
-                    );
-                    Some(build_id)
-                }
-                Err(e) => {
-                    report_initial_failure(&e);
-                    None
-                }
-            },
-        };
+    // Build engine cdylibs (stone-rs + optional extras per game's
+    // [engine] needs) and the rock compiler in a single cargo invocation,
+    // beside the initial compile, which does not read them. Two separate
+    // `cargo build` calls each pay cargo's graph-walk cost and serialize on
+    // the target lock; one combined call halves the perceived startup pause
+    // and streams progress to the user.
+    let initial_build = crate::frame_runtime::beside(
+        || build_all_for_game(path),
+        || {
+            Ok(
+                match (crate::registry::RuntimeServices::registered().prepare_sound_bank)(path) {
+                    Err(e) => {
+                        report_initial_failure(&e);
+                        None
+                    }
+                    Ok(_) => match initial_session_build(
+                        cache_root.as_deref(),
+                        backend,
+                        &compiler_dir,
+                        &output_path,
+                        compiler.as_mut(),
+                    ) {
+                        Ok(build_id) => {
+                            reseed_comptime_watch(
+                                compiler.as_ref(),
+                                &sound_paths,
+                                &mut watched,
+                                &comptime_watch,
+                            );
+                            Some(build_id)
+                        }
+                        Err(e) => {
+                            report_initial_failure(&e);
+                            None
+                        }
+                    },
+                },
+            )
+        },
+    )?;
     let initial_compilation_success = initial_build.is_some();
 
     let mut game_process = if let Some(build_id) = initial_build {
