@@ -1919,7 +1919,11 @@ fn classify(
         if !arities.all(|a| a == ret_arity) {
             return reject_candidate(&mut timing, "nonuniform_return_arity");
         }
-        let (forwardable_reads, reads_all_forwardable) = (Vec::new(), Vec::new());
+        let (forwardable_reads, reads_all_forwardable) = if has_lambda {
+            (Vec::new(), Vec::new())
+        } else {
+            forwardable_param_reads(&mf, &coalescable_params, &reachable, false)
+        };
         Ok(Some(CalleeBody {
             func: mf,
             canonical,

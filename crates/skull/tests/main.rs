@@ -77,6 +77,7 @@ mod repr_opaque_param;
 mod vec_push_column_route;
 
 mod inline_body_column_map_param;
+mod inline_constant_argument;
 
 mod graph_contributions;
 mod inline_lua_column_container_param_sentinel;
