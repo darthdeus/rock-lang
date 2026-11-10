@@ -97,7 +97,9 @@ impl ModuleSet {
     /// first call.
     pub fn make_owned(&mut self) -> &mut [Ast] {
         if !self.shared.is_empty() {
-            let mut all = self.shared.to_vec();
+            use rayon::prelude::*;
+            let mut all = Vec::with_capacity(self.len());
+            self.shared.par_iter().cloned().collect_into_vec(&mut all);
             all.append(&mut self.owned);
             self.owned = all;
             self.shared = Arc::from([]);
