@@ -281,6 +281,7 @@ pub(crate) fn render_scope(
     // shared mutable capture as an explicit `MakeEnv { fn_ref: None }` value in the
     // MIR, so codegen never sees a "boxed cell".)
 
+    let _guard = scope_guard::install(func, &loops, cell_colors, &color_scope);
     let mut em = Emitter {
         enum_box_groups: RefCell::new(HashMap::default()),
         selection_preds: std::cell::OnceCell::new(),

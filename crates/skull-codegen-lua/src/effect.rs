@@ -102,6 +102,7 @@ impl Emitter<'_> {
                     return;
                 }
                 out.push(' ');
+                scope_guard::assigning(self.func);
                 write_cellname(out, self.func, self.frame, self.cell_colors, *cell);
                 out.push_str(" = ");
                 self.write_opnd(out, *value);

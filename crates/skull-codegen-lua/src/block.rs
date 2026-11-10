@@ -74,10 +74,12 @@ impl Emitter<'_> {
             out.push(' ');
             match *local {
                 regalloc::KillLocal::Value(c) => {
+                    scope_guard::register(self.func, c);
                     out.push('r');
                     push_uint(out, c);
                 }
                 regalloc::KillLocal::Cell(c) => {
+                    scope_guard::cell_kill(self.func, c);
                     out.push('c');
                     push_uint(out, c);
                 }
@@ -345,6 +347,7 @@ impl Emitter<'_> {
     /// depends on `lo`'s register being live at the loop head.
     pub(crate) fn write_for_head(&self, out: &mut String, header: Idx<Block>) {
         let cl = &self.loops[&header];
+        scope_guard::open(self.func, header);
         out.push_str(" for ");
         write_cellname(out, self.func, self.frame, self.cell_colors, cl.slot);
         out.push_str(" = ");
@@ -407,6 +410,7 @@ impl Emitter<'_> {
         self.write_block_label(out, latch);
         self.write_kills(out, &self.kills.at_entry[raw(latch) as usize]);
         out.push_str(" end\n");
+        scope_guard::close(self.func, header);
         self.write_goto(out, exit);
     }
 }

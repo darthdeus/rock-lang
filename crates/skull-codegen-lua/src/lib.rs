@@ -36,6 +36,7 @@ mod preludes;
 mod regalloc;
 mod scc;
 mod scope;
+mod scope_guard;
 mod structured;
 mod term;
 mod trace_frames;

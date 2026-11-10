@@ -47,10 +47,12 @@ pub(crate) fn write_cellname(
 
 pub(crate) fn write_cell_local(out: &mut String, func: &MirFunc, colors: &[u32], c: Idx<Cell>) {
     out.push('c');
-    match colors[raw(c) as usize] {
-        u32::MAX => push_uint(out, func.emit_cell_id(c)),
-        col => push_uint(out, col),
-    }
+    let number = match colors[raw(c) as usize] {
+        u32::MAX => func.emit_cell_id(c),
+        col => col,
+    };
+    scope_guard::cell(func, c, number);
+    push_uint(out, number);
 }
 
 pub(crate) fn cell_is_uint(ws: &Workspace, ty: Option<bone_core::prelude::TyId>) -> bool {
@@ -109,6 +111,7 @@ pub(crate) fn write_vname(out: &mut String, func: &MirFunc, colors: &[u32], id: 
             push_uint(out, func.emit_inst_id(id));
         }
         c => {
+            scope_guard::register(func, c);
             out.push('r');
             push_uint(out, c);
         }

@@ -413,6 +413,7 @@ impl Walk<'_, '_> {
             em.write_kills(self.out, &em.kills.at_entry[bx(latch)]);
             // FORI skips past FORL; FORL loops back into the body.
             let end = self.line("end", 1);
+            scope_guard::close(self.em.func, h);
             self.jump((head, 0), (end, 1));
             self.jump((end, 0), (head, 1));
             end
