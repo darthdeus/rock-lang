@@ -354,8 +354,16 @@ fn emit_named_framed_with_statics_impl(
     keep_reads_ordered(func, &rpo, &mut inlinable, &folded_reads);
     bound_fold_levels(func, &rpo, &mut inlinable, &folded_reads);
     let loops = recognize_counted_loops(func, &rpo, frame);
+    let reads = regalloc::Reads::new(func, &rpo, &inlinable);
     if frame.is_none() {
-        for id in regalloc::stable_loads(func, &rpo, &inlinable, &cell_analysis.pinned, &loops) {
+        for id in regalloc::stable_loads(
+            func,
+            &rpo,
+            &inlinable,
+            &cell_analysis.pinned,
+            &loops,
+            &reads,
+        ) {
             inlinable[raw(id) as usize] = true;
         }
     }
@@ -381,13 +389,20 @@ fn emit_named_framed_with_statics_impl(
                 movable[raw(id) as usize] = false;
             }
         }
-        regalloc::store_targets(func, &rpo, &inlinable, &cell_analysis.pinned, |v, cell| {
-            movable[raw(v) as usize]
-                && !hoist.contains_key(&v)
-                && call_arg_forwards.get(v).is_none()
-                && !suppressed[raw(v) as usize]
-                && !loops.values().any(|cl| cl.slot == cell)
-        })
+        regalloc::store_targets(
+            func,
+            &rpo,
+            &inlinable,
+            &cell_analysis.pinned,
+            &reads,
+            |v, cell| {
+                movable[raw(v) as usize]
+                    && !hoist.contains_key(&v)
+                    && call_arg_forwards.get(v).is_none()
+                    && !suppressed[raw(v) as usize]
+                    && !loops.values().any(|cl| cl.slot == cell)
+            },
+        )
     } else {
         Vec::new()
     };
@@ -396,9 +411,9 @@ fn emit_named_framed_with_statics_impl(
     // MIR cell use; reserve its parameter's color so a later local can never
     // overwrite the state table itself.
     let cell_colors = if let Some(frame) = frame {
-        color_cells_timed(&cell_analysis, &inlinable, &alias, &[frame.s_cell])
+        color_cells_timed(&cell_analysis, &inlinable, &alias, &[frame.s_cell], &reads)
     } else {
-        color_cells_timed(&cell_analysis, &inlinable, &alias, &[])
+        color_cells_timed(&cell_analysis, &inlinable, &alias, &[], &reads)
     };
     // Module-scope const hoisting: an all-constant `value` ctor is built ONCE as a
     // function-owned top-level global and referenced everywhere, instead of rebuilt
@@ -465,6 +480,7 @@ fn emit_named_framed_with_statics_impl(
         &suppressed,
         line_marks.as_ref(),
         bound,
+        &reads,
         &mut out,
     );
     if bound.is_some() {

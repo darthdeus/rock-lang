@@ -32,6 +32,7 @@ pub(crate) fn render_scope(
     suppressed: &[bool],
     line_marks: Option<&RefCell<Vec<LineMark>>>,
     bound: Option<&CalleeBindingPlan>,
+    reads: &regalloc::Reads,
     out: &mut String,
 ) {
     // RPO drives both block layout (preheader-before-header, for the relooper)
@@ -49,9 +50,9 @@ pub(crate) fn render_scope(
         })
         .collect();
     loop_scopes.sort_by_key(|ls| func.emit_block_id(ls.header));
-    let mut va = regalloc::color_values(func, rpo, &inlinable, &alias, &loop_scopes);
+    let mut va = regalloc::color_values(func, rpo, &inlinable, &alias, &loop_scopes, reads);
     if va.color_scope.len() > 150 && !loop_scopes.is_empty() {
-        va = regalloc::color_values(func, rpo, &inlinable, &alias, &[]);
+        va = regalloc::color_values(func, rpo, &inlinable, &alias, &[], reads);
     }
     let regalloc::ValueAlloc {
         colors,
@@ -131,6 +132,7 @@ pub(crate) fn render_scope(
             &excluded,
             params,
             &alias,
+            reads,
         );
         // A path that can only end in a raise unwinds the frame; no slot it
         // leaves stale is ever observed.

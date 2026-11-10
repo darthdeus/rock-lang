@@ -196,10 +196,11 @@ fn color_cells_timed(
     inlinable: &[bool],
     alias: &[Option<Idx<Cell>>],
     extra_pinned: &[Idx<Cell>],
+    reads: &regalloc::Reads,
 ) -> Vec<u32> {
     let t = bone_core::prelude::Instant::now();
     let colors =
-        regalloc::color_cells_with_analysis(analysis, Some(inlinable), alias, extra_pinned);
+        regalloc::color_cells_with_analysis(analysis, inlinable, alias, extra_pinned, reads);
     REGALLOC_TIME.with(|c| c.set(c.get() + t.elapsed()));
     colors
 }

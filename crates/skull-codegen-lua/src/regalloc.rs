@@ -15,7 +15,7 @@
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
-use comfy_la_arena::Idx;
+use comfy_la_arena::{Idx, RawIdx};
 
 use crate::{CountedLoop, collect_lambda_params, reachable_blocks_from, successors};
 use skull_mir::mir::{Block, Cell, Inst, MirFunc, Term};
@@ -413,18 +413,111 @@ impl TrackedLiveness {
     }
 }
 
-/// The value operands statement or terminator operand `v` reads where it is
-/// evaluated: itself, or for a folded operand the values its expression reads.
-fn evaluated_reads(
-    func: &MirFunc,
-    inline: &[bool],
-    v: Idx<Inst>,
-    push: &mut impl FnMut(Idx<Inst>),
-) {
-    if inline[raw(v)] {
-        effective_uses(func, inline, &func.insts[v], push);
-    } else {
-        push(v);
+/// What each emitted statement and terminator of one body reads where it is
+/// printed, in operand order: an unfolded value, or the cell of a folded load,
+/// seeing through every other folded operand. A statement's own cell reads
+/// come first. Seeing through folded operands is the expensive part of every
+/// liveness pass after folding, so it is flattened once; the later passes
+/// fold more (never less), and [`Reads::values`] and [`Reads::cells`] expand
+/// a leaf value they fold where it is read.
+pub(crate) struct Reads {
+    /// By raw instruction, then by raw block for terminators: a range of
+    /// `leaves`.
+    stmt: Vec<(u32, u32)>,
+    term: Vec<(u32, u32)>,
+    /// A value's raw index, or a cell's with [`CELL_LEAF`] set.
+    leaves: Vec<u32>,
+}
+
+const CELL_LEAF: u32 = 1 << 31;
+
+impl Reads {
+    pub(crate) fn new(func: &MirFunc, blocks: &[Idx<Block>], inline: &[bool]) -> Self {
+        fn operand(func: &MirFunc, inline: &[bool], v: Idx<Inst>, leaves: &mut Vec<u32>) {
+            if !inline[raw(v)] {
+                leaves.push(raw(v) as u32);
+                return;
+            }
+            match &func.insts[v] {
+                Inst::Load(c) => leaves.push(raw(*c) as u32 | CELL_LEAF),
+                nested => inst_uses(nested, &mut |u| operand(func, inline, u, leaves)),
+            }
+        }
+        let mut reads = Reads {
+            stmt: vec![(0, 0); func.insts.len()],
+            term: vec![(0, 0); func.blocks.len()],
+            leaves: Vec::new(),
+        };
+        for &b in blocks {
+            let block = &func.blocks[b];
+            for &id in &block.insts {
+                if inline[raw(id)] {
+                    continue;
+                }
+                let start = reads.leaves.len() as u32;
+                let inst = &func.insts[id];
+                cell_uses(inst, &mut |c| reads.leaves.push(raw(c) as u32 | CELL_LEAF));
+                inst_uses(inst, &mut |u| operand(func, inline, u, &mut reads.leaves));
+                reads.stmt[raw(id)] = (start, reads.leaves.len() as u32);
+            }
+            let start = reads.leaves.len() as u32;
+            term_uses(&block.term, &mut |u| {
+                operand(func, inline, u, &mut reads.leaves)
+            });
+            reads.term[raw(b)] = (start, reads.leaves.len() as u32);
+        }
+        reads
+    }
+
+    fn stmt(&self, id: Idx<Inst>) -> &[u32] {
+        let (start, end) = self.stmt[raw(id)];
+        &self.leaves[start as usize..end as usize]
+    }
+
+    fn term(&self, b: Idx<Block>) -> &[u32] {
+        let (start, end) = self.term[raw(b)];
+        &self.leaves[start as usize..end as usize]
+    }
+
+    /// The registers `leaves` read under `inline`, as [`effective_uses`].
+    fn values(func: &MirFunc, inline: &[bool], leaves: &[u32], mut push: impl FnMut(Idx<Inst>)) {
+        for &leaf in leaves {
+            if leaf & CELL_LEAF != 0 {
+                continue;
+            }
+            let v = Idx::from_raw(RawIdx::from_u32(leaf));
+            if inline[raw(v)] {
+                effective_uses(func, inline, &func.insts[v], &mut push);
+            } else {
+                push(v);
+            }
+        }
+    }
+
+    /// The cells `leaves` read under `inline`, counting a value computed in a
+    /// cell, as a statement's own cell reads plus the folded loads among its operands.
+    fn cells(
+        func: &MirFunc,
+        inline: &[bool],
+        alias: &[Option<Idx<Cell>>],
+        leaves: &[u32],
+        mut push: impl FnMut(Idx<Cell>),
+    ) {
+        for &leaf in leaves {
+            if leaf & CELL_LEAF != 0 {
+                push(Idx::from_raw(RawIdx::from_u32(leaf & !CELL_LEAF)));
+                continue;
+            }
+            let v = Idx::from_raw(RawIdx::from_u32(leaf));
+            if let Some(cell) = alias_at(alias, v) {
+                push(cell);
+            } else if inline[raw(v)] {
+                match &func.insts[v] {
+                    Inst::Load(cell) => push(*cell),
+                    nested => inlined_operand_cell_uses(func, inline, alias, nested, &mut push),
+                }
+            }
+        }
     }
 }
 
@@ -438,6 +531,7 @@ pub(crate) fn stable_loads(
     inline: &[bool],
     pinned: &[bool],
     loops: &HashMap<Idx<Block>, CountedLoop>,
+    reads: &Reads,
 ) -> Vec<Idx<Inst>> {
     let mut written = vec![false; func.cells.len()];
     for &b in scope {
@@ -481,13 +575,9 @@ pub(crate) fn stable_loads(
         scope,
         inline,
         loads.len(),
-        |id, bits| effective_uses(func, inline, &func.insts[id], &mut |v| tracked(v, bits)),
+        |id, bits| Reads::values(func, inline, reads.stmt(id), |v| tracked(v, bits)),
         |id, bits| tracked(id, bits),
-        |b, bits| {
-            term_uses(&func.blocks[b].term, &mut |v| {
-                evaluated_reads(func, inline, v, &mut |w| tracked(w, bits))
-            })
-        },
+        |b, bits| Reads::values(func, inline, reads.term(b), |v| tracked(v, bits)),
     );
     // A statement writes its cells after it reads its operands, so a write
     // conflicts with a load that is still live after the statement.
@@ -534,6 +624,7 @@ pub(crate) fn store_targets(
     scope: &[Idx<Block>],
     inline: &[bool],
     pinned: &[bool],
+    reads: &Reads,
     eligible: impl Fn(Idx<Inst>, Idx<Cell>) -> bool,
 ) -> Vec<Option<Idx<Cell>>> {
     // Candidate k: value `vals[k]` into cell `cells[k]`.
@@ -593,19 +684,16 @@ pub(crate) fn store_targets(
         inline,
         k_count + c_count as usize,
         |id, bits| {
-            effective_uses(func, inline, &func.insts[id], &mut |v| value_bit(v, bits));
-            emitted_cell_uses(func, Some(inline), &[], id, &mut |c| cell_bit(c, bits));
+            Reads::values(func, inline, reads.stmt(id), |v| value_bit(v, bits));
+            Reads::cells(func, inline, &[], reads.stmt(id), |c| cell_bit(c, bits));
         },
         |id, bits| {
             value_bit(id, bits);
             func.insts[id].cell_writes_each(&mut |c| cell_bit(c, bits));
         },
         |b, bits| {
-            let term = &func.blocks[b].term;
-            term_uses(term, &mut |v| {
-                evaluated_reads(func, inline, v, &mut |w| value_bit(w, bits))
-            });
-            term_cell_uses(func, Some(inline), &[], term, &mut |c| cell_bit(c, bits));
+            Reads::values(func, inline, reads.term(b), |v| value_bit(v, bits));
+            Reads::cells(func, inline, &[], reads.term(b), |c| cell_bit(c, bits));
         },
     );
     let mut conflict = vec![false; k_count];
@@ -705,6 +793,7 @@ pub(crate) fn color_values(
     inline: &[bool],
     alias: &[Option<Idx<Cell>>],
     loops: &[LoopScope],
+    reads: &Reads,
 ) -> ValueAlloc {
     let blocks = scope;
     let n = blocks.len();
@@ -765,7 +854,7 @@ pub(crate) fn color_values(
             }
             let start = use_list.len() as u32;
             // A value computed in a cell has no dense index.
-            effective_uses(func, inline, &func.insts[id], &mut |v| {
+            Reads::values(func, inline, reads.stmt(id), |v| {
                 if vi[raw(v)] != u32::MAX {
                     use_list.push(vi[raw(v)]);
                 }
@@ -773,15 +862,8 @@ pub(crate) fn color_values(
             use_range[raw(id)] = (start, use_list.len() as u32);
         }
         let start = use_list.len() as u32;
-        term_uses(&block.term, &mut |v| {
-            // term operands may be inlined too -> see through them.
-            if inline[raw(v)] {
-                effective_uses(func, inline, &func.insts[v], &mut |w| {
-                    if vi[raw(w)] != u32::MAX {
-                        use_list.push(vi[raw(w)]);
-                    }
-                });
-            } else if vi[raw(v)] != u32::MAX {
+        Reads::values(func, inline, reads.term(b), |v| {
+            if vi[raw(v)] != u32::MAX {
                 use_list.push(vi[raw(v)]);
             }
         });
@@ -1107,45 +1189,6 @@ fn emitted_cell_defs(
     }
 }
 
-fn emitted_cell_uses(
-    func: &MirFunc,
-    inline: Option<&[bool]>,
-    alias: &[Option<Idx<Cell>>],
-    id: Idx<Inst>,
-    push: &mut impl FnMut(Idx<Cell>),
-) {
-    if inline.is_some_and(|inline| inline[raw(id)]) {
-        return;
-    }
-    cell_uses(&func.insts[id], push);
-    if let Some(inline) = inline {
-        inlined_operand_cell_uses(func, inline, alias, &func.insts[id], push);
-    }
-}
-
-fn term_cell_uses(
-    func: &MirFunc,
-    inline: Option<&[bool]>,
-    alias: &[Option<Idx<Cell>>],
-    term: &Term,
-    push: &mut impl FnMut(Idx<Cell>),
-) {
-    let Some(inline) = inline else { return };
-    term_uses(term, &mut |value| {
-        if let Some(cell) = alias_at(alias, value) {
-            push(cell);
-            return;
-        }
-        if !inline[raw(value)] {
-            return;
-        }
-        match &func.insts[value] {
-            Inst::Load(cell) => push(*cell),
-            nested => inlined_operand_cell_uses(func, inline, alias, nested, push),
-        }
-    });
-}
-
 /// Color the cells of a function that has no emitter-only cell uses. Returns a
 /// dense `raw(cell) -> color` table (`u32::MAX` = uncolored). Non-interfering
 /// cells share a color; the caller renders a colored cell as `c<color>`. Cells
@@ -1153,7 +1196,10 @@ fn term_cell_uses(
 /// with their enclosing body.
 #[cfg(test)]
 pub(crate) fn color_cells(func: &MirFunc) -> Vec<u32> {
-    color_cells_with_analysis(&CellAnalysis::new(func), None, &[], &[])
+    let analysis = CellAnalysis::new(func);
+    let inline = vec![false; func.insts.len()];
+    let reads = Reads::new(func, &analysis.top, &inline);
+    color_cells_with_analysis(&analysis, &inline, &[], &[], &reads)
 }
 
 /// Cells held by reference for the whole body -- a closure's params, any cell
@@ -1207,9 +1253,10 @@ impl<'a> CellAnalysis<'a> {
 /// references implicitly (such as a coroutine's frame parameter).
 pub(crate) fn color_cells_with_analysis(
     analysis: &CellAnalysis<'_>,
-    inline: Option<&[bool]>,
+    inline: &[bool],
     alias: &[Option<Idx<Cell>>],
     extra_pinned: &[Idx<Cell>],
+    reads: &Reads,
 ) -> Vec<u32> {
     let func = analysis.func;
     let top = &analysis.top;
@@ -1262,11 +1309,15 @@ pub(crate) fn color_cells_with_analysis(
     for (bi, &b) in top.iter().enumerate() {
         for &id in &func.blocks[b].insts {
             let start = use_list.len() as u32;
-            emitted_cell_uses(func, inline, alias, id, &mut |c| use_list.push(ci[raw(c)]));
+            if !inline[raw(id)] {
+                Reads::cells(func, inline, alias, reads.stmt(id), |c| {
+                    use_list.push(ci[raw(c)])
+                });
+            }
             use_range[raw(id)] = (start, use_list.len() as u32);
         }
         let start = use_list.len() as u32;
-        term_cell_uses(func, inline, alias, &func.blocks[b].term, &mut |c| {
+        Reads::cells(func, inline, alias, reads.term(b), |c| {
             use_list.push(ci[raw(c)])
         });
         term_range[bi] = (start, use_list.len() as u32);
@@ -1470,22 +1521,20 @@ pub(crate) fn color_cells_with_analysis(
     // A copy between two cells that share a color prints nothing, so a cell
     // takes the color of a copy partner when no neighbor holds it.
     let mut partners: Vec<(u32, u32)> = Vec::new();
-    if let Some(inline) = inline {
-        for &b in top.iter() {
-            for &id in &func.blocks[b].insts {
-                if let Inst::Store { cell, value } = func.insts[id]
-                    && inline[raw(value)]
-                    && let Inst::Load(source) = func.insts[value]
-                {
-                    let (a, b) = (ci[raw(cell)], ci[raw(source)]);
-                    partners.push((a, b));
-                    partners.push((b, a));
-                }
+    for &b in top.iter() {
+        for &id in &func.blocks[b].insts {
+            if let Inst::Store { cell, value } = func.insts[id]
+                && inline[raw(value)]
+                && let Inst::Load(source) = func.insts[value]
+            {
+                let (a, b) = (ci[raw(cell)], ci[raw(source)]);
+                partners.push((a, b));
+                partners.push((b, a));
             }
         }
-        partners.sort_unstable();
-        partners.dedup();
     }
+    partners.sort_unstable();
+    partners.dedup();
     let mut used: Vec<bool> = Vec::new();
     for (i, c) in ordered.iter().enumerate() {
         if force_idx[i] {
@@ -1803,6 +1852,7 @@ pub(crate) fn nil_kills(
     cell_excluded: &[bool],
     params: &[Idx<Cell>],
     alias: &[Option<Idx<Cell>>],
+    reads: &Reads,
 ) -> NilKills {
     let n = scope.len();
     let mut pos = vec![usize::MAX; func.blocks.len()];
@@ -1833,13 +1883,13 @@ pub(crate) fn nil_kills(
         let c = value_colors[raw(v)];
         (c != u32::MAX).then_some(c as usize)
     };
-    let uses_of = |id: Idx<Inst>, push: &mut dyn FnMut(usize)| {
-        effective_uses(func, inline, &func.insts[id], &mut |v| {
+    let leaf_slots = |leaves: &[u32], push: &mut dyn FnMut(usize)| {
+        Reads::values(func, inline, leaves, |v| {
             if let Some(s) = value_slot(v) {
                 push(s);
             }
         });
-        emitted_cell_uses(func, Some(inline), alias, id, &mut |c| {
+        Reads::cells(func, inline, alias, leaves, |c| {
             let s = cell_slot[raw(c)];
             if s != u32::MAX {
                 push(s as usize);
@@ -1853,25 +1903,6 @@ pub(crate) fn nil_kills(
             }
         }
         emitted_cell_defs(func, alias, id, &mut |c| {
-            let s = cell_slot[raw(c)];
-            if s != u32::MAX {
-                push(s as usize);
-            }
-        });
-    };
-    let term_slots = |term: &Term, push: &mut dyn FnMut(usize)| {
-        term_uses(term, &mut |v| {
-            if inline[raw(v)] {
-                effective_uses(func, inline, &func.insts[v], &mut |w| {
-                    if let Some(s) = value_slot(w) {
-                        push(s);
-                    }
-                });
-            } else if let Some(s) = value_slot(v) {
-                push(s);
-            }
-        });
-        term_cell_uses(func, Some(inline), alias, term, &mut |c| {
             let s = cell_slot[raw(c)];
             if s != u32::MAX {
                 push(s as usize);
@@ -1892,7 +1923,7 @@ pub(crate) fn nil_kills(
             let start = stmt_slots.len() as u32;
             defs_of(id, &mut |s| stmt_slots.push(s as u32));
             let n_defs = stmt_slots.len() as u32 - start;
-            uses_of(id, &mut |s| stmt_slots.push(s as u32));
+            leaf_slots(reads.stmt(id), &mut |s| stmt_slots.push(s as u32));
             stmt_range[raw(id)] = (start, n_defs, stmt_slots.len() as u32);
         }
     }
@@ -1921,7 +1952,7 @@ pub(crate) fn nil_kills(
                 def_set.set(bi, s as usize);
             }
         }
-        term_slots(&func.blocks[b].term, &mut |s| {
+        leaf_slots(reads.term(b), &mut |s| {
             if !def_set.get(bi, s) {
                 use_set.set(bi, s);
             }
@@ -2017,7 +2048,7 @@ pub(crate) fn nil_kills(
                 live.or_with(kills.live_in.row(si));
             }
         });
-        term_slots(&block.term, &mut |s| live.set(s));
+        leaf_slots(reads.term(b), &mut |s| live.set(s));
         kills.end_live.row_mut(bi).copy_from_slice(&live.words);
         next_pure_defs.clear();
         for &id in block.insts.iter().rev() {
