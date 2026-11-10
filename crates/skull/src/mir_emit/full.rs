@@ -841,7 +841,7 @@ fn emit_full_chunks<'a>(
     ),
     CompilerError,
 > {
-    let jobs: Vec<FanOutJob<'_>> = ws
+    let mut jobs: Vec<FanOutJob<'_>> = ws
         .source_modules()
         .flat_map(|m| {
             m.functions.iter().filter_map(move |(fid, f)| {
@@ -856,6 +856,10 @@ fn emit_full_chunks<'a>(
         .enumerate()
         .map(|(at, (self_ref, f))| FanOutJob::Body(at, self_ref, f))
         .collect();
+    // Libraries are listed before the modules that use them. Starting the
+    // users first starts the specialization chains they demand early, so
+    // the chains do not run alone after the other bodies are done.
+    jobs.reverse();
     let inline_candidate_table = setup_phases.timed("setup: inline candidate table", || {
         build_inline_candidate_table(
             ws,
