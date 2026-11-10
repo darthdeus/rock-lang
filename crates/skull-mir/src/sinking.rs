@@ -113,29 +113,50 @@ fn is_barrier(inst: &Inst) -> bool {
 /// Non-throwing expressions keep their eligibility. A throwing expression may
 /// reach its use only when no effect or other possible error intervenes.
 pub fn preserve_effect_order(func: &MirFunc, blocks: &[Idx<Block>], inlinable: &mut [bool]) {
-    let mut after = vec![0usize; func.insts.len()];
-    let mut evaluation = vec![0usize; func.insts.len()];
+    preserve_effect_order_with(func, blocks, inlinable, |_, _| false);
+}
+
+/// [`preserve_effect_order`], where `commutes(folded, between)` names a
+/// possible error that a folded throwing expression may cross because the
+/// target cannot tell the two apart (the same failure with the same message).
+pub fn preserve_effect_order_with(
+    func: &MirFunc,
+    blocks: &[Idx<Block>],
+    inlinable: &mut [bool],
+    commutes: impl Fn(&Inst, &Inst) -> bool,
+) {
+    let raw = |id: Idx<Inst>| id.into_raw().into_u32() as usize;
+    // Position in its block before which a value is finally evaluated.
+    let mut limit = vec![0usize; func.insts.len()];
     for &block in blocks {
-        let mut epoch = 0;
-        for &id in &func.blocks[block].insts {
-            epoch += usize::from(is_barrier(&func.insts[id]));
-            after[id.into_raw().into_u32() as usize] = epoch;
-        }
+        let insts = &func.blocks[block].insts;
         func.blocks[block].term.uses_each(&mut |value| {
-            evaluation[value.into_raw().into_u32() as usize] = epoch;
+            limit[raw(value)] = insts.len();
         });
         // Follow folded consumers to their final evaluation point. Checking
         // only the immediate use misses a throw nested in a folded tuple/concat.
-        for &id in func.blocks[block].insts.iter().rev() {
-            let k = id.into_raw().into_u32() as usize;
+        for (pos, &id) in insts.iter().enumerate().rev() {
+            let k = raw(id);
             let inst = &func.insts[id];
-            if inlinable[k] && may_throw(inst) && evaluation[k] != after[k] {
-                inlinable[k] = false;
+            if inlinable[k] && may_throw(inst) {
+                let end = limit[k].max(pos + 1);
+                if insts[pos + 1..end].iter().any(|&between| {
+                    let between = &func.insts[between];
+                    is_barrier(between) && !commutes(inst, between)
+                }) {
+                    inlinable[k] = false;
+                }
             }
-            epoch -= usize::from(is_barrier(inst));
-            let at = if inlinable[k] { evaluation[k] } else { epoch };
+            // Operands run before the instruction itself. A folded barrier
+            // was just checked to evaluate where it stands, so its operands
+            // evaluate there too, as an unfolded instruction's do.
+            let at = if inlinable[k] && !is_barrier(inst) {
+                limit[k]
+            } else {
+                pos
+            };
             inst.uses_each(&mut |value| {
-                let use_at = &mut evaluation[value.into_raw().into_u32() as usize];
+                let use_at = &mut limit[raw(value)];
                 *use_at = (*use_at).max(at);
             });
         }
@@ -251,6 +272,31 @@ mod tests {
             },
         );
         assert!(folded(&mask(&func), checked));
+    }
+
+    #[test]
+    fn a_throw_can_fold_into_a_folded_call_that_consumes_it() {
+        let mut func = MirFunc::new(Ustr::from("probe"));
+        let b = func.entry;
+        let input = func.emit(b, Inst::Const(Lit::Nil));
+        let read = func.emit(
+            b,
+            Inst::Field {
+                base: input,
+                field: Ustr::from("value"),
+            },
+        );
+        let call = func.emit(
+            b,
+            Inst::CallValue {
+                callee: input,
+                args: vec![read],
+            },
+        );
+        func.set_term(b, Term::Return(vec![call]));
+        let inlinable = mask(&func);
+        assert!(folded(&inlinable, call));
+        assert!(folded(&inlinable, read));
     }
 
     #[test]
