@@ -1149,6 +1149,21 @@ fn value_struct_defs(
     ))
 }
 
+/// The load-time check behind [`value_leaf_layout_checks`]: each leaf is a
+/// `path, expected, actual` triple. The count is passed because a leaf whose
+/// field is missing leaves a nil hole in the table.
+const LAYOUT_CHECK_LUA: &str = r#"function __rock_layout_check(sym, size, count, leaves)
+  if ffi.sizeof(sym) ~= size then
+    error("skull layout drift: sizeof(" .. sym .. ") = " .. ffi.sizeof(sym) .. ", expected " .. size, 0)
+  end
+  for i = 1, count * 3, 3 do
+    if leaves[i + 2] ~= leaves[i + 1] then
+      error("skull layout drift: " .. sym .. "." .. leaves[i] .. " at " .. tostring(leaves[i + 2]) .. ", expected " .. leaves[i + 1], 0)
+    end
+  end
+end
+"#;
+
 /// Assert, once at chunk load, that skull's C layout model agrees with LuaJIT's
 /// for every leaf of every FFI-clean value struct -- and, from that same checked
 /// layout, register each struct as `NativeBuffer` storage in
@@ -1192,21 +1207,27 @@ fn value_leaf_layout_checks(
                 ))
             })?;
         let sym = skull_mir::mangle::type_symbol(ws, name);
-        let _ = writeln!(
+        if out.is_empty() {
+            out.push_str(LAYOUT_CHECK_LUA);
+        }
+        let _ = write!(
             out,
-            "if ffi.sizeof(\"{sym}\") ~= {size} then error(\"skull layout drift: \
-             sizeof({sym}) = \" .. ffi.sizeof(\"{sym}\") .. \", expected {size}\", 0) end"
+            "__rock_layout_check(\"{sym}\", {size}, {}, {{",
+            leaves.len()
         );
-        for l in &leaves {
-            let _ = writeln!(
+        for (i, l) in leaves.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            let _ = write!(
                 out,
-                "if ({expr}) ~= {off} then error(\"skull layout drift: {sym}.{path} at \" \
-                 .. ({expr}) .. \", expected {off}\", 0) end",
+                "\"{path}\", {off}, ({expr})",
                 expr = l.offsetof_expr,
                 off = l.byte_off,
                 path = l.path,
             );
         }
+        out.push_str("})\n");
         for leaf in leaves.iter().filter(|leaf| leaf.path.contains('.')) {
             let alias = skull_mir::lower::cdata_leaf_alias(ws, name, leaf.path.as_str());
             let _ = writeln!(

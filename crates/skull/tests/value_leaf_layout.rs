@@ -194,3 +194,40 @@ fn float_width_follows_the_declared_type() {
         .expect("Spelled layout");
     assert_eq!(spelled[0].cty, "double");
 }
+
+const LAYOUT_PROGRAM: &str = r#"
+nobox value Inner { a: float, b: int }
+nobox value Outer { inner: Inner, c: float, d: int }
+fn main() {
+    let o = Outer { inner: Inner { a: 1.0, b: 2 }, c: 3.0, d: 4 }
+    print(o.inner.b + o.d)
+}
+"#;
+
+/// The load-time layout check is one shared helper call per type, and a
+/// mismatch still names the drifted size or leaf.
+#[test]
+fn layout_checks_share_one_failure_path() {
+    let lua = crate::common::emit_module(LAYOUT_PROGRAM);
+    // The size and leaf messages, both in the shared helper.
+    assert_eq!(lua.matches("skull layout drift").count(), 2, "{lua}");
+    assert_eq!(crate::common::run_main(&lua), "6");
+    let check = lua
+        .lines()
+        .find(|line| line.starts_with("__rock_layout_check(\"Outer\""))
+        .unwrap_or_else(|| panic!("no Outer layout check:\n{lua}"));
+    let leaf = check.replace("\"d\", 24,", "\"d\", 25,");
+    assert_ne!(leaf, check, "{check}");
+    let (ok, out) = crate::common::run_luajit_capturing(&lua.replace(check, &leaf));
+    assert!(
+        !ok && out.contains("skull layout drift: Outer.d at 24, expected 25"),
+        "{out}"
+    );
+    let size = check.replace("\"Outer\", 32,", "\"Outer\", 40,");
+    assert_ne!(size, check, "{check}");
+    let (ok, out) = crate::common::run_luajit_capturing(&lua.replace(check, &size));
+    assert!(
+        !ok && out.contains("skull layout drift: sizeof(Outer) = 32, expected 40"),
+        "{out}"
+    );
+}
