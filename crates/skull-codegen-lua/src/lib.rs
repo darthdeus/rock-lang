@@ -65,7 +65,7 @@ use bone_core::hir::{FnBackend, Function};
 use bone_core::prelude::{CompilerError, Span};
 use bone_core::workspace::Workspace;
 use comfy_la_arena::Idx;
-use skull_mir::cfg::{PredMap, predecessors, reachable_blocks_from, reverse_postorder, successors};
+use skull_mir::cfg::{PredMap, predecessors, reverse_postorder, successors};
 use skull_mir::mir::*;
 use skull_mir::monoty::MonoInterner;
 
@@ -186,23 +186,6 @@ thread_local! {
     /// regardless of feature.
     static REGALLOC_TIME: std::cell::Cell<std::time::Duration> =
         const { std::cell::Cell::new(std::time::Duration::ZERO) };
-}
-
-/// `regalloc::color_cells`, charged to the `REGALLOC_TIME` accumulator (so the
-/// backend-stats regalloc/stringify split counts cell coloring as regalloc, not
-/// stringify — it is the second half of register allocation).
-fn color_cells_timed(
-    analysis: &regalloc::CellAnalysis<'_>,
-    inlinable: &[bool],
-    alias: &[Option<Idx<Cell>>],
-    extra_pinned: &[Idx<Cell>],
-    reads: &regalloc::Reads,
-) -> Vec<u32> {
-    let t = bone_core::prelude::Instant::now();
-    let colors =
-        regalloc::color_cells_with_analysis(analysis, inlinable, alias, extra_pinned, reads);
-    REGALLOC_TIME.with(|c| c.set(c.get() + t.elapsed()));
-    colors
 }
 
 /// Zero the per-thread regalloc accumulator (call before an emit run).
@@ -1001,10 +984,10 @@ struct Emitter<'a> {
     /// through [`Self::opnd`], which renders their expression in place.
     /// Dense `raw(inst) -> bool`: values tree-folded into their single use site
     /// (no register), rendered in place by [`Self::write_opnd`].
-    inlinable: Vec<bool>,
+    inlinable: &'a [bool],
     /// Dense `raw(inst) -> cell` for values computed directly in the cell a
     /// later store copies them into ([`regalloc::store_targets`]).
-    alias: Vec<Option<Idx<Cell>>>,
+    alias: &'a [Option<Idx<Cell>>],
     /// Dense `raw(block) -> bool`: blocks already emitted (loop bodies self-skip).
     emitted: Vec<bool>,
     /// Dense `raw(block) -> edges that goto it`; a block with none is unlabeled.
@@ -1025,7 +1008,7 @@ struct Emitter<'a> {
     call_arg_forwards: &'a CallArgForwards,
     suppressed: &'a [bool],
     /// Death point of every declared local, written as `<local> = nil`.
-    kills: regalloc::NilKills,
+    kills: regalloc::NilKills<'a>,
     /// Where each statement starts and which instruction it renders, when the
     /// definition is numbered with line directives.
     line_marks: Option<&'a RefCell<Vec<LineMark>>>,

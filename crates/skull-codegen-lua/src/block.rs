@@ -276,7 +276,7 @@ impl Emitter<'_> {
                 .iter()
                 .rposition(|&id| {
                     self.emits_statement(id)
-                        && !regalloc::statement_is_pure(self.func, &self.inlinable, id)
+                        && !regalloc::statement_is_pure(self.func, self.inlinable, id)
                 })
                 .map(|i| insts[i])
         } else {

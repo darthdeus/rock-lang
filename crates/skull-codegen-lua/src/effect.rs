@@ -98,7 +98,7 @@ impl Emitter<'_> {
                 {
                     return;
                 }
-                if regalloc::alias_at(&self.alias, *value) == Some(*cell) {
+                if regalloc::alias_at(self.alias, *value) == Some(*cell) {
                     return;
                 }
                 out.push(' ');

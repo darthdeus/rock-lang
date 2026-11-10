@@ -314,9 +314,10 @@ fn emit_named_framed_with_statics_impl(
         call_arg_forwards(ws, func)
     };
     let t_cells = bone_core::prelude::Instant::now();
-    let cell_analysis = regalloc::CellAnalysis::new(func);
+    let flow = regalloc::Flow::new(func, &rpo);
+    let pinned = regalloc::pinned_cells(func, &flow);
     REGALLOC_TIME.with(|c| c.set(c.get() + t_cells.elapsed()));
-    let (mut inlinable, repeatable) = compute_inlinable(func, &rpo, params, &cell_analysis.pinned);
+    let (mut inlinable, repeatable) = compute_inlinable(func, &rpo, params, &pinned);
     for tail in tail_forwards.iter().flatten() {
         for &id in &tail.suppressed[1..] {
             inlinable[raw(id) as usize] = true;
@@ -336,7 +337,7 @@ fn emit_named_framed_with_statics_impl(
             func,
             &rpo,
             &mut inlinable,
-            &cell_analysis.pinned,
+            &pinned,
             &suppressed,
             &call_arg_forwards,
             ctx.line_directives() && !name.is_empty(),
@@ -356,14 +357,7 @@ fn emit_named_framed_with_statics_impl(
     let loops = recognize_counted_loops(func, &rpo, frame);
     let reads = regalloc::Reads::new(func, &rpo, &inlinable);
     if frame.is_none() {
-        for id in regalloc::stable_loads(
-            func,
-            &rpo,
-            &inlinable,
-            &cell_analysis.pinned,
-            &loops,
-            &reads,
-        ) {
+        for id in regalloc::stable_loads(func, &rpo, &flow, &inlinable, &pinned, &loops, &reads) {
             inlinable[raw(id) as usize] = true;
         }
     }
@@ -389,20 +383,13 @@ fn emit_named_framed_with_statics_impl(
                 movable[raw(id) as usize] = false;
             }
         }
-        regalloc::store_targets(
-            func,
-            &rpo,
-            &inlinable,
-            &cell_analysis.pinned,
-            &reads,
-            |v, cell| {
-                movable[raw(v) as usize]
-                    && !hoist.contains_key(&v)
-                    && call_arg_forwards.get(v).is_none()
-                    && !suppressed[raw(v) as usize]
-                    && !loops.values().any(|cl| cl.slot == cell)
-            },
-        )
+        regalloc::store_targets(func, &rpo, &flow, &inlinable, &pinned, &reads, |v, cell| {
+            movable[raw(v) as usize]
+                && !hoist.contains_key(&v)
+                && call_arg_forwards.get(v).is_none()
+                && !suppressed[raw(v) as usize]
+                && !loops.values().any(|cl| cl.slot == cell)
+        })
     } else {
         Vec::new()
     };
@@ -410,11 +397,20 @@ fn emit_named_framed_with_statics_impl(
     // Frame accesses name `s` implicitly in the printer rather than through a
     // MIR cell use; reserve its parameter's color so a later local can never
     // overwrite the state table itself.
-    let cell_colors = if let Some(frame) = frame {
-        color_cells_timed(&cell_analysis, &inlinable, &alias, &[frame.s_cell], &reads)
-    } else {
-        color_cells_timed(&cell_analysis, &inlinable, &alias, &[], &reads)
-    };
+    let t_locals = bone_core::prelude::Instant::now();
+    let frame_cell = frame.map(|frame| frame.s_cell);
+    let locals = regalloc::Locals::new(
+        func,
+        &rpo,
+        &flow,
+        &inlinable,
+        &alias,
+        &pinned,
+        frame_cell.as_slice(),
+        &reads,
+    );
+    let cell_colors = locals.color_cells();
+    REGALLOC_TIME.with(|c| c.set(c.get() + t_locals.elapsed()));
     // Module-scope const hoisting: an all-constant `value` ctor is built ONCE as a
     // function-owned top-level global and referenced everywhere, instead of rebuilt
     // at each use. On a trace the per-use ctor sinks anyway, but in the interpreter
@@ -463,13 +459,15 @@ fn emit_named_framed_with_statics_impl(
         entry,
         params,
         &rpo,
-        inlinable,
-        alias,
+        &flow,
+        &locals,
+        &inlinable,
+        &alias,
         loops,
         true,
         frame,
         &cell_colors,
-        &cell_analysis.pinned,
+        &pinned,
         &ctx.state_slots,
         &static_slots,
         &hoist,

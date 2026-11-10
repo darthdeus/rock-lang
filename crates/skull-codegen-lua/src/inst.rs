@@ -32,7 +32,7 @@ impl Emitter<'_> {
             out.push(' ');
             // Only a discarded call result reaches here without a register.
             if self.colors[raw(id) as usize] != u32::MAX
-                || regalloc::alias_at(&self.alias, id).is_some()
+                || regalloc::alias_at(self.alias, id).is_some()
             {
                 self.write_value_name(out, id);
                 out.push_str(" = ");
@@ -129,7 +129,7 @@ impl Emitter<'_> {
         // unless nothing reads it.
         let mut lv = String::new();
         if self.colors[raw(result) as usize] == u32::MAX
-            && regalloc::alias_at(&self.alias, result).is_none()
+            && regalloc::alias_at(self.alias, result).is_none()
         {
             lv.push_str("local _");
         } else {
@@ -252,7 +252,7 @@ impl Emitter<'_> {
     /// The local holding non-folded value `id`: its register, or the cell it
     /// is computed in.
     fn write_value_name(&self, out: &mut String, id: Idx<Inst>) {
-        match regalloc::alias_at(&self.alias, id) {
+        match regalloc::alias_at(self.alias, id) {
             Some(cell) => write_cellname(out, self.func, self.frame, self.cell_colors, cell),
             None => write_vname(out, self.func, &self.colors, id),
         }
@@ -263,7 +263,7 @@ impl Emitter<'_> {
     /// expression). A non-inlinable child stays a leaf -- it is a separate `..`
     /// already materialized in its own cell, so flattening past it would be wrong.
     pub(crate) fn collect_concat(&self, parts: &mut Vec<Idx<Inst>>, id: Idx<Inst>) {
-        concat_run(self.func, &self.inlinable, parts, id);
+        concat_run(self.func, self.inlinable, parts, id);
     }
 
     /// `write_opnd` into a fresh `String` — for the few cold sites that need an

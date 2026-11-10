@@ -15,8 +15,10 @@ pub(crate) fn render_scope(
     entry: Idx<Block>,
     params: &[Idx<Cell>],
     rpo: &[Idx<Block>],
-    inlinable: Vec<bool>,
-    alias: Vec<Option<Idx<Cell>>>,
+    flow: &regalloc::Flow,
+    locals: &regalloc::Locals<'_>,
+    inlinable: &[bool],
+    alias: &[Option<Idx<Cell>>],
     loops: HashMap<Idx<Block>, CountedLoop>,
     is_top: bool,
     frame: Option<&FrameCtx>,
@@ -50,9 +52,9 @@ pub(crate) fn render_scope(
         })
         .collect();
     loop_scopes.sort_by_key(|ls| func.emit_block_id(ls.header));
-    let mut va = regalloc::color_values(func, rpo, &inlinable, &alias, &loop_scopes, reads);
+    let mut va = locals.color_values(&loop_scopes);
     if va.color_scope.len() > 150 && !loop_scopes.is_empty() {
-        va = regalloc::color_values(func, rpo, &inlinable, &alias, &[], reads);
+        va = locals.color_values(&[]);
     }
     let regalloc::ValueAlloc {
         colors,
@@ -83,7 +85,7 @@ pub(crate) fn render_scope(
     let kills = if frame.is_some() {
         regalloc::NilKills::none(func)
     } else {
-        let mut emits_nothing = inlinable.clone();
+        let mut emits_nothing = inlinable.to_vec();
         for id in hoist.keys() {
             emits_nothing[raw(*id) as usize] = true;
         }
@@ -124,6 +126,7 @@ pub(crate) fn render_scope(
         let mut kills = regalloc::nil_kills(
             func,
             rpo,
+            flow,
             &emits_nothing,
             &colors,
             &color_scope,
@@ -131,7 +134,7 @@ pub(crate) fn render_scope(
             cell_colors,
             &excluded,
             params,
-            &alias,
+            alias,
             reads,
         );
         // A path that can only end in a raise unwinds the frame; no slot it
@@ -275,7 +278,7 @@ pub(crate) fn render_scope(
             hoist,
             tail_forwards,
             call_arg_forwards,
-            &inlinable,
+            inlinable,
         );
     }
 
