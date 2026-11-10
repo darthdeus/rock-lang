@@ -3588,22 +3588,11 @@ fn inline_functions_inner(
     // Caller cells a closure body writes; see [`pin_cells`].
     let mut pinned: HashSet<Idx<Cell>> = HashSet::default();
     pin_cells(func, &top, 0, &mut pinned);
-    let use_index_started = cache.census_enabled.then(Instant::now);
-    let mut uses = UseIndex::build(func);
-    if let Some(start) = use_index_started {
-        cache.census.use_index_build_ns = start.elapsed().as_nanos() as u64;
-        cache.census.use_index_values = uses.users.iter().filter(|sites| !sites.is_empty()).count();
-    }
-    let original_calls: HashSet<Idx<Inst>> = top
-        .iter()
-        .flat_map(|bid| func.blocks[*bid].insts.iter().copied())
-        .filter(|iid| {
-            matches!(
-                &func.insts[*iid],
-                Inst::Call { .. } | Inst::CallMulti { .. }
-            )
-        })
-        .collect();
+    // Only a splice reads the use index or the calls the body started with
+    // (which tell a transitive splice apart), and most bodies never have one,
+    // so both are built at the first site, while the body is still untouched.
+    let mut uses: Option<UseIndex> = None;
+    let mut original_calls: Option<HashSet<Idx<Inst>>> = None;
     // Resume cursor: the position of the last splice. No eligible call can appear
     // before it, so the next scan starts there (turns the per-splice full re-scan
     // from O(splices x size) into a single forward sweep).
@@ -3632,7 +3621,29 @@ fn inline_functions_inner(
         if cache.census_enabled {
             scan_stats.spliced_keys.push(site.inst().clone());
         }
+        let original_calls = original_calls.get_or_insert_with(|| {
+            top.iter()
+                .flat_map(|bid| func.blocks[*bid].insts.iter().copied())
+                .filter(|iid| {
+                    matches!(
+                        &func.insts[*iid],
+                        Inst::Call { .. } | Inst::CallMulti { .. }
+                    )
+                })
+                .collect()
+        });
         let transitive = !original_calls.contains(&site.call_id());
+        if uses.is_none() {
+            let started = cache.census_enabled.then(Instant::now);
+            let built = UseIndex::build(func);
+            if let Some(start) = started {
+                cache.census.use_index_build_ns = start.elapsed().as_nanos() as u64;
+                cache.census.use_index_values =
+                    built.users.iter().filter(|sites| !sites.is_empty()).count();
+            }
+            uses = Some(built);
+        }
+        let uses = uses.as_mut().expect("built above");
         let argument_elements = match &site {
             Site::Single { args, .. } | Site::Multi { args, .. } => args.len(),
         };
@@ -3671,7 +3682,7 @@ fn inline_functions_inner(
             concrete_plans,
             &pinned,
             scratch,
-            &mut uses,
+            uses,
             census,
         )?;
         let arena_reallocations = arena_capacities
@@ -3733,7 +3744,9 @@ fn inline_functions_inner(
         func.statics.retain(|sc| seen.insert(sc.cell));
     }
     #[cfg(test)]
-    uses.record_drift(func);
+    if let Some(uses) = &uses {
+        uses.record_drift(func);
+    }
     scan_stats.add(std::mem::take(&mut cache.census));
     for record in &records {
         if record.straight {
