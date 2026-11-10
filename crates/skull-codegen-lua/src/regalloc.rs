@@ -1359,6 +1359,25 @@ pub(crate) fn color_cells_with_analysis(
     // interference. Edges to force-unique cells are irrelevant — those colors are
     // all below `base`. Arena order for deterministic output. `used` is a dense
     // bool scratch reused across cells (no per-cell HashSet alloc).
+    // A copy between two cells that share a color prints nothing, so a cell
+    // takes the color of a copy partner when no neighbor holds it.
+    let mut partners: Vec<(u32, u32)> = Vec::new();
+    if let Some(inline) = inline {
+        for &b in top.iter() {
+            for &id in &func.blocks[b].insts {
+                if let Inst::Store { cell, value } = func.insts[id]
+                    && inline[raw(value)]
+                    && let Inst::Load(source) = func.insts[value]
+                {
+                    let (a, b) = (ci[raw(cell)], ci[raw(source)]);
+                    partners.push((a, b));
+                    partners.push((b, a));
+                }
+            }
+        }
+        partners.sort_unstable();
+        partners.dedup();
+    }
     let mut used: Vec<bool> = Vec::new();
     for (i, c) in ordered.iter().enumerate() {
         if force_idx[i] {
@@ -1375,9 +1394,19 @@ pub(crate) fn color_cells_with_analysis(
                 used[col] = true;
             }
         }
+        let free = |col: usize| col >= base as usize && used.get(col) != Some(&true);
+        let start = partners.partition_point(|&(a, _)| (a as usize) < i);
+        let preferred = partners[start..]
+            .iter()
+            .take_while(|&&(a, _)| a as usize == i)
+            .map(|&(_, b)| color_of[b as usize])
+            .find(|&col| col != u32::MAX && free(col as usize));
         let mut col = base as usize;
         while col < used.len() && used[col] {
             col += 1;
+        }
+        if let Some(p) = preferred {
+            col = p as usize;
         }
         if let Some(c) = c {
             colors[raw(*c)] = col as u32;

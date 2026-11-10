@@ -209,3 +209,40 @@ fn main() {
     assert!(function_body(&lua, "clampish").contains("local r0"));
     assert_eq!(compile_and_run(src), "4 24 7 24 303");
 }
+
+#[test]
+fn a_cell_copied_from_a_dying_cell_shares_its_local() {
+    let src = r#"
+fn h(n: int) -> int {
+    let u = n * 2
+    let t = 0
+    let i = 0
+    while i < n {
+        t = t + u
+        u = u - 1
+        i = i + 1
+    }
+    let s = t
+    let k = 0
+    while k < n {
+        s = s + k
+        k = k + 1
+    }
+    return s
+}
+fn main() {
+    print("{h(3)}")
+}
+"#;
+    let lua = emit_module(src);
+    let body = function_body(&lua, "h");
+    let copies = body.lines().filter(|l| {
+        let l = l.trim();
+        let mut sides = l.split(" = ");
+        matches!((sides.next(), sides.next(), sides.next()),
+            (Some(a), Some(b), None) if a.starts_with('c') && b.starts_with('c')
+                && !b.contains(' ') && !b.contains('('))
+    });
+    assert_eq!(copies.count(), 0, "{body}");
+    assert_eq!(compile_and_run(src), "18");
+}
