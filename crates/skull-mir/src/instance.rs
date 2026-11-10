@@ -149,6 +149,97 @@ fn ord_key(i: &Instance) -> (u32, u32, &[MonoTyId]) {
     )
 }
 
+/// A dense number for an [`Instance`], minted by one [`InstanceIndex`].
+///
+/// Not an identity across builds or indexes: it exists so per-instance
+/// answers can live in a table indexed by number instead of a map keyed by
+/// the instance.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct InstanceId(u32);
+
+impl InstanceId {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Numbers instances densely in the order they are first asked about. Ids are
+/// never reused or reassigned, so a table indexed by them only grows; a
+/// retained session extends it as its graph reaches new instances.
+pub struct InstanceIndex {
+    generation: u64,
+    ids: std::sync::RwLock<rustc_hash::FxHashMap<Instance, InstanceId>>,
+}
+
+struct InstanceIdCache {
+    generation: u64,
+    ids: rustc_hash::FxHashMap<Instance, InstanceId>,
+}
+
+thread_local! {
+    /// Ids this worker has seen, so a repeat question takes no shared lock.
+    static INSTANCE_ID_CACHE: std::cell::RefCell<InstanceIdCache> =
+        std::cell::RefCell::new(InstanceIdCache {
+            generation: 0,
+            ids: Default::default(),
+        });
+}
+
+impl Default for InstanceIndex {
+    fn default() -> Self {
+        static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            generation: GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            ids: Default::default(),
+        }
+    }
+}
+
+impl std::fmt::Debug for InstanceIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstanceIndex")
+            .field("len", &self.len())
+            .finish()
+    }
+}
+
+impl InstanceIndex {
+    pub fn len(&self) -> usize {
+        self.ids.read().expect("instance index poisoned").len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The id of `inst`, minting the next one on first sight.
+    pub fn id(&self, inst: &Instance) -> InstanceId {
+        INSTANCE_ID_CACHE.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.generation != self.generation {
+                cache.generation = self.generation;
+                cache.ids.clear();
+            }
+            if let Some(id) = cache.ids.get(inst) {
+                return *id;
+            }
+            let known = self
+                .ids
+                .read()
+                .expect("instance index poisoned")
+                .get(inst)
+                .copied();
+            let id = known.unwrap_or_else(|| {
+                let mut ids = self.ids.write().expect("instance index poisoned");
+                let next = InstanceId(ids.len() as u32);
+                *ids.entry(inst.clone()).or_insert(next)
+            });
+            cache.ids.insert(inst.clone(), id);
+            id
+        })
+    }
+}
+
 impl Ord for Instance {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         ord_key(self).cmp(&ord_key(other))
@@ -158,5 +249,40 @@ impl Ord for Instance {
 impl PartialOrd for Instance {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn instance(interner: &MonoInterner, func: u32, args: usize) -> Instance {
+        Instance {
+            func: FuncRef {
+                module: bone_core::prelude::ModuleId::new(0),
+                func: comfy_la_arena::Idx::from_raw(comfy_la_arena::RawIdx::from_u32(func)),
+            },
+            args: vec![interner.intern(MonoTy::Int); args],
+        }
+    }
+
+    #[test]
+    fn instance_ids_are_dense_stable_and_per_index() {
+        let interner = MonoInterner::new();
+        let index = InstanceIndex::default();
+        let a = instance(&interner, 1, 0);
+        let b = instance(&interner, 1, 1);
+        assert_eq!(index.id(&a).index(), 0);
+        assert_eq!(index.id(&b).index(), 1);
+        assert_eq!(index.id(&a).index(), 0);
+
+        let other = InstanceIndex::default();
+        assert_eq!(other.id(&b).index(), 0);
+        assert_eq!(index.id(&b).index(), 1);
+
+        let seen_elsewhere = std::thread::spawn(move || index.id(&b).index())
+            .join()
+            .expect("worker");
+        assert_eq!(seen_elsewhere, 1);
     }
 }
