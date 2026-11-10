@@ -88,6 +88,7 @@ impl SharedWatchSet {
         self.compiled.lock().insert(path, hash);
     }
     /// The compiler-baked hash for `path`, if the producer supplied one.
+    #[cfg(any(target_os = "macos", all(test, unix)))]
     pub(crate) fn compiled_hash(&self, path: &Path) -> Option<u64> {
         self.compiled.lock().get(path).copied()
     }
