@@ -875,7 +875,7 @@ fn emit_full_chunks<'a>(
         )
     })?;
     let mut queue = SpecQueue::new(ws, scx, graph, None);
-    queue.thread_cpu = attribution;
+    queue.attribution = attribution;
     #[cfg(test)]
     if let Some(hook) = queue.hook() {
         for job in &jobs {
@@ -909,9 +909,14 @@ fn emit_full_chunks<'a>(
                             inline_cache,
                             mutation,
                         );
-                        if let (Some(started), Ok(chunk)) = (started, &mut chunk) {
-                            chunk.attribution.thread_cpu =
-                                Some(thread_cpu_time().saturating_sub(started));
+                        if let Ok(chunk) = &mut chunk {
+                            match (started, &mut chunk.attribution) {
+                                (Some(started), Some(unit)) => {
+                                    unit.thread_cpu =
+                                        Some(thread_cpu_time().saturating_sub(started));
+                                }
+                                _ => chunk.attribution = None,
+                            }
                         }
                         #[cfg(test)]
                         if let Some(hook) = queue.hook() {

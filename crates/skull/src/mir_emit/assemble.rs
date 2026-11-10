@@ -344,8 +344,10 @@ impl Assembly {
                     .insert(key, chunk.direct_globals.clone());
                 self.direct_calls.insert(key, chunk.direct_calls.clone());
                 self.times.add(&chunk.times);
-                self.attribution
-                    .add_body(&chunk.attribution, emit_def.then_some(chunk.lua.as_str()));
+                if let Some(unit) = &chunk.attribution {
+                    self.attribution
+                        .add_body(unit, emit_def.then_some(chunk.lua.as_str()));
+                }
                 if emit_def {
                     self.emits_main |= key.as_str() == "main";
                     definitions.push_chunk(chunk);

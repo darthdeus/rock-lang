@@ -204,7 +204,7 @@ fn emit_coroutine_chunk(
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
         times,
-        attribution: Box::default(),
+        attribution: Some(Box::default()),
         statics,
         comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(mf),
@@ -348,7 +348,7 @@ pub(super) fn emit_body_chunk_with_mutation(
         let mut chunk = emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, times)?;
         attribution.mir_instructions = mf.insts.len();
         attribution.times = chunk.times;
-        chunk.attribution = Box::new(attribution);
+        chunk.attribution = Some(Box::new(attribution));
         return Ok(chunk);
     }
     // The shared chain: inline (so a hot loop traces with no per-call frame),
@@ -475,7 +475,7 @@ pub(super) fn emit_body_chunk_with_mutation(
         calls,
         specs,
         code_artifact,
-        attribution: Box::new(attribution),
+        attribution: Some(Box::new(attribution)),
         comptime_reads: mf.comptime_reads.clone(),
         binds: bind.into_iter().collect(),
     })
@@ -822,7 +822,7 @@ pub(super) fn emit_spec_chunk(
         let mut chunk = emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, times)?;
         attribution.mir_instructions = mf.insts.len();
         attribution.times = chunk.times;
-        chunk.attribution = Box::new(attribution);
+        chunk.attribution = Some(Box::new(attribution));
         return Ok(chunk);
     }
     let (mut deps, prepared_times, prepared_inline) = prepare_instance_body_with_attribution(
@@ -913,7 +913,7 @@ pub(super) fn emit_spec_chunk(
         direct_globals: Vec::new(),
         direct_calls: Vec::new(),
         times,
-        attribution: Box::new(attribution),
+        attribution: Some(Box::new(attribution)),
         statics,
         comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(&mf),
@@ -985,7 +985,9 @@ pub(super) fn emit_specialized_callees(
         out.push_chunk(chunk);
         binds.extend(chunk.binds.iter().cloned());
         allocation_bodies.extend(chunk.allocation_bodies.iter().cloned());
-        attribution.add_body(&chunk.attribution, Some(&chunk.lua));
+        if let Some(unit) = &chunk.attribution {
+            attribution.add_body(unit, Some(&chunk.lua));
+        }
         times.add(&chunk.times);
         // A specialized definition's `static` cells are cells the program uses,
         // so they register for hot-reload preservation on the same terms as a

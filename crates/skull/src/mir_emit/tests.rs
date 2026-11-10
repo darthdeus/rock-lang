@@ -828,6 +828,29 @@ fn main() { let result = first() }
     }
 
     #[test]
+    fn chunks_keep_body_attribution_only_when_requested() {
+        let _inline = InlineOn::on();
+        let ws = specialized_workspace();
+        let mid = module_id(&ws, "<specialized-test>");
+        let records = |cache: &SkullEmitCache| {
+            let chunks = cache.chunks.values().flatten();
+            (
+                chunks.clone().count(),
+                chunks.filter(|c| c.attribution.is_some()).count(),
+            )
+        };
+        let (_, plain) = FullEmit::program().run(&ws, mid).expect("plain emission");
+        let (chunks, kept) = records(&plain);
+        assert!(chunks > 0);
+        assert_eq!(kept, 0, "a build that does not fold attribution keeps none");
+        let (_, attributed) = FullEmit::program()
+            .with_attribution()
+            .run(&ws, mid)
+            .expect("attributed emission");
+        assert_eq!(records(&attributed), (chunks, chunks));
+    }
+
+    #[test]
     fn attribution_keeps_one_cost_record_per_emitted_body() {
         let _inline = InlineOn::on();
         let ws = specialized_workspace();

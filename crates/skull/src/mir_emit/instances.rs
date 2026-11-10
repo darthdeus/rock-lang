@@ -227,8 +227,9 @@ pub(super) struct SpecQueue<'a> {
     cached: Option<&'a FxHashMap<Instance, Result<Chunk, CompilerError>>>,
     done: std::sync::Mutex<FxHashSet<Instance>>,
     outcomes: std::sync::Mutex<Vec<SpecOutcome>>,
-    /// Record each built body's thread CPU time (attributed builds only).
-    pub(super) thread_cpu: bool,
+    /// Keep each built body's attribution record, with its thread CPU time;
+    /// only a build that folds attribution reads them.
+    pub(super) attribution: bool,
     #[cfg(test)]
     hook: Option<std::sync::Arc<dyn SpecScheduleHook>>,
 }
@@ -247,7 +248,7 @@ impl<'a> SpecQueue<'a> {
             cached,
             done: std::sync::Mutex::new(FxHashSet::default()),
             outcomes: std::sync::Mutex::new(Vec::new()),
-            thread_cpu: false,
+            attribution: false,
             #[cfg(test)]
             hook: SPEC_SCHEDULE_HOOK.with(|hook| hook.borrow().clone()),
         }
@@ -317,7 +318,7 @@ impl<'a> SpecQueue<'a> {
     ) {
         let name = inst.symbol(self.ws, self.scx.interner());
         let mut specs = Vec::new();
-        let started = self.thread_cpu.then(thread_cpu_time);
+        let started = self.attribution.then(thread_cpu_time);
         let mut result = emit_spec_chunk(
             self.ws,
             cg,
@@ -328,8 +329,13 @@ impl<'a> SpecQueue<'a> {
             inline_cache,
             &mut specs,
         );
-        if let (Some(started), Ok(chunk)) = (started, &mut result) {
-            chunk.attribution.thread_cpu = Some(thread_cpu_time().saturating_sub(started));
+        if let Ok(chunk) = &mut result {
+            match (started, &mut chunk.attribution) {
+                (Some(started), Some(unit)) => {
+                    unit.thread_cpu = Some(thread_cpu_time().saturating_sub(started));
+                }
+                _ => chunk.attribution = None,
+            }
         }
         #[cfg(test)]
         if let Some(hook) = &self.hook {
@@ -429,7 +435,8 @@ pub(super) fn view_driven_specialized_chunks(
     cache: &SkullEmitCache,
     initial: &[skull_mir::bound::SpecDemand],
 ) -> SpecChunks {
-    let queue = SpecQueue::new(ws, scx, &cache.graph, Some(&cache.chunks));
+    let mut queue = SpecQueue::new(ws, scx, &cache.graph, Some(&cache.chunks));
+    queue.attribution = cache.attribution;
     let mut jobs: Vec<Instance> = Vec::new();
     queue.admit_all(initial, &mut jobs);
     for module in ws.source_modules() {

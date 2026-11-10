@@ -33,8 +33,9 @@ pub(super) struct Chunk {
     /// the `backend-stats` breakdown by [`assemble`] when the chunk is pulled.
     pub(super) times: PhaseTimes,
     /// Boxed: it is most of a chunk's size, and chunks move between the
-    /// fan-out, the chunk map and assembly.
-    pub(super) attribution: Box<UnitAttribution>,
+    /// fan-out, the chunk map and assembly. A full build that does not fold
+    /// attribution drops it as each chunk is built.
+    pub(super) attribution: Option<Box<UnitAttribution>>,
     /// `static` cells this body declares -- aggregated at chunk-pull for the
     /// hot-reload preservation preamble + `__rock_known_globals` registration.
     pub(super) statics: Vec<skull_mir::mir::StaticCell>,
