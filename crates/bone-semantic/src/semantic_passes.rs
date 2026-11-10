@@ -475,16 +475,14 @@ pub fn lower_modules_seeded(
             .filter_map(|(module, time)| Some((module.module_id(), "lower functions", time?)))
             .collect();
 
-        let mut all_fns_by_name: FxHashMap<Ustr, FnList> = FxHashMap::default();
-
+        // Each name's list gains every module's functions in module order.
         for module in modules.iter() {
-            for (name, fns) in module.functions_by_name.clone().into_iter() {
-                all_fns_by_name.entry(name).or_default().extend(fns);
+            for (name, fns) in module.functions_by_name.iter() {
+                ws.functions_by_name
+                    .entry(*name)
+                    .or_default()
+                    .extend(fns.iter().copied());
             }
-        }
-
-        for (name, fns) in all_fns_by_name {
-            ws.functions_by_name.entry(name).or_default().extend(fns);
         }
 
         ws.phase_timings.push(("lower fields", lower_field_time));

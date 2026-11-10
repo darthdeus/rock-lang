@@ -125,9 +125,9 @@ pub struct ResolutionCache {
 }
 
 #[derive(Debug)]
-pub struct LowerCtx<'a> {
-    pub workspace: &'a Workspace,
-    pub module: &'a mut hir::Module,
+pub struct LowerCtx<'w, 'm> {
+    pub workspace: &'w Workspace,
+    pub module: &'m mut hir::Module,
     pub generics_in_scope: FxHashMap<Ustr, TyId>,
 
     pub _next_var_id: u32,
@@ -154,7 +154,7 @@ pub struct LowerCtx<'a> {
     pub name_errors: std::cell::RefCell<Option<Vec<CompilerError>>>,
 }
 
-impl<'a> LowerCtx<'a> {
+impl LowerCtx<'_, '_> {
     /// Run one resolver lookup and record what it read.
     fn probed<R>(&self, lookup: impl FnOnce() -> R) -> R {
         if self.workspace.skip_session_facts {
