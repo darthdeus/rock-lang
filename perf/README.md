@@ -137,7 +137,9 @@ file and inlined callee, and output patterns traced to source lines (wide
 signatures and calls, unread parameters, many upvalues, labels, table
 constructors in loops, failure blocks), plus the value types whose flattened
 leaves widen residual calls, ranked by the argument, parameter and result text
-they add (positions of `--wide-lanes`, default 8, or more). Every CPU number is summed over
+they add (positions of `--wide-lanes`, default 8, or more). A type is marked
+worth changing, with advice, when a signature with two or more residual calls
+carries it in more than 16 lanes (24 for `nobox`). Every CPU number is summed over
 worker threads; wall numbers are labelled as wall.
 
 ```sh

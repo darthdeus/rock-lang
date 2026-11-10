@@ -376,6 +376,27 @@ def split_args(line, start):
 RESULT_LIST = re.compile(r"^\s*(?:local )?((?:[A-Za-z_][A-Za-z0-9_]*, )+[A-Za-z_][A-Za-z0-9_]*) = $")
 
 
+# A flattened position wider than this, on a signature with WIDE_CALLS or more
+# residual calls, is worth changing in source. nobox types are kept unboxed on
+# purpose (register pressure), so they get more room.
+WIDE_ORDINARY, WIDE_NOBOX, WIDE_CALLS = 16, 24, 2
+WIDE_RULE = ("A row is worth changing when a signature with %d or more residual calls carries it in more "
+             "than %d lanes (%d for nobox)." % (WIDE_CALLS, WIDE_ORDINARY, WIDE_NOBOX))
+
+
+def wide_advice(t):
+    if t["nobox"]:
+        return "pass the fields the callee reads, or make it a struct if it need not stay unboxed"
+    return "make it a struct, or pass the fields the callee reads"
+
+
+def worth_changing(t):
+    n = t["worth_changing"]
+    if not n:
+        return ""
+    return "yes (%d signature%s): %s" % (n, "" if n == 1 else "s", t["advice"])
+
+
 def value_widening(bodies, lines, defs, binds, min_lanes=1):
     """Per value type, what flattening it costs at call boundaries that were
     not inlined: the signatures that carry its leaves, the residual calls into
@@ -408,6 +429,7 @@ def value_widening(bodies, lines, defs, binds, min_lanes=1):
         t["min_leaves"] = min(t["min_leaves"], w["lanes"])
         return t
 
+    sig_calls = Counter()
     by_name = {d["name"]: d for d in defs}
     for sym, (b, positions) in sigs.items():
         d = by_name.get(sym)
@@ -439,6 +461,7 @@ def value_widening(bodies, lines, defs, binds, min_lanes=1):
                 args = split_args(l, cm.end() - 1)
                 if args is None:
                     continue
+                sig_calls[callee] += 1
                 lhs = RESULT_LIST.match(l[:cm.start()])
                 for w, at in sig[1]:
                     if not w["type"]:
@@ -448,10 +471,17 @@ def value_widening(bodies, lines, defs, binds, min_lanes=1):
                         if lhs:
                             t["result_bytes"] += len(lhs.group(1)) + 1
                         continue
-                    t["calls"] += 1
                     t["arg_bytes"] += sum(len(a) + 2 for a in args[at:at + w["lanes"]])
+    for sym, (_, positions) in sigs.items():
+        for w, _ in positions:
+            limit = WIDE_NOBOX if w["nobox"] else WIDE_ORDINARY
+            if w["type"] and w["lanes"] > limit and sig_calls[sym] >= WIDE_CALLS:
+                types[w["type"]].setdefault("flagged", set()).add(sym)
     rows = []
     for t in types.values():
+        t["calls"] = sum(sig_calls[sym] for sym in t["signatures"] | t["results"])
+        t["worth_changing"] = len(t.pop("flagged", ()))
+        t["advice"] = wide_advice(t) if t["worth_changing"] else ""
         f, _, line = (t["declared"] or "?:0").rpartition(":")
         t["file"], t["line"], t["package"] = f, int(line) if line.isdigit() else 0, t["type"].split("::", 1)[0]
         t["signatures"], t["results"] = len(t["signatures"]), len(t["results"])
@@ -988,12 +1018,12 @@ def build(args):
                      "calls into them, and the text of its leaf arguments, parameters and result lists. Bodies also "
                      "move, store and kill every leaf, often several times this text. Boxing a type (a plain "
                      "<code>struct</code>), passing fewer fields, or inlining the callee removes it; "
-                     "<code>nobox</code> types never box.</p>" % args.wide_lanes)
+                     "<code>nobox</code> types never box. %s</p>" % (args.wide_lanes, html.escape(WIDE_RULE)))
             H.append(table(["<type", "<declared", "nobox", "lanes", "signatures", "returning", "calls",
-                            "arg KB", "param KB", "result KB", "total KB"],
+                            "arg KB", "param KB", "result KB", "total KB", "<worth changing"],
                            [[namer.symbol(t, t["type"]), namer.site(t), "yes" if t["nobox"] else "", t["lanes"], t["signatures"], t["results"], t["calls"],
                              fmt_kb(t["arg_bytes"]), fmt_kb(t["param_bytes"]), fmt_kb(t["result_bytes"]),
-                             fmt_kb(t["bytes"])] for t in widening[:args.rows]]))
+                             fmt_kb(t["bytes"]), worth_changing(t)] for t in widening[:args.rows]]))
         if synth:
             H.append("<h3>Generated and annotated definitions</h3><p class='note'>Bodies the compiler synthesized "
                      "(derives, generated accessors) and bodies grouped by their annotations.</p>")
@@ -1046,13 +1076,14 @@ def build(args):
         M.append("## Value types widening call boundaries")
         M.append("")
         M.append("Flattened value positions of %d or more lanes in residual calls; bytes are leaf arguments, "
-                 "parameters and result lists." % args.wide_lanes)
+                 "parameters and result lists. %s" % (args.wide_lanes, WIDE_RULE))
         M.append("")
-        M.append("| type | lanes | nobox | signatures | returning | calls | total KB |")
-        M.append("|---|---:|---|---:|---:|---:|---:|")
+        M.append("| type | lanes | nobox | signatures | returning | calls | total KB | worth changing |")
+        M.append("|---|---:|---|---:|---:|---:|---:|---|")
         for t in widening[:15]:
-            M.append("| %s | %s | %s | %d | %d | %d | %s |" % (namer.symbol(t, t["type"]), t["lanes"], "yes" if t["nobox"] else "",
-                                                          t["signatures"], t["results"], t["calls"], fmt_kb(t["bytes"])))
+            M.append("| %s | %s | %s | %d | %d | %d | %s | %s |" % (
+                namer.symbol(t, t["type"]), t["lanes"], "yes" if t["nobox"] else "",
+                t["signatures"], t["results"], t["calls"], fmt_kb(t["bytes"]), worth_changing(t)))
     text = "\n".join(M) + "\n"
     if args.md:
         with open(args.md, "w") as f:
