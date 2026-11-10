@@ -891,6 +891,22 @@ impl MonoInterner {
         })
     }
 
+    /// The id of `ty`, interning it when it is not already a reference into
+    /// this arena. Type facts are keyed by id, and most queries hold a type
+    /// borrowed from the arena, whose address already names its slot.
+    pub fn id_of(&self, ty: &MonoTy) -> MonoTyId {
+        if let Some(index) = self.types.index_of(ty) {
+            return MonoTyId(index as u32);
+        }
+        let cached = MONO_INTERN_CACHE.with(|cache| {
+            let cache = cache.borrow();
+            (cache.arena_gen == self.arena_gen)
+                .then(|| cache.ids.get(ty).copied())
+                .flatten()
+        });
+        cached.unwrap_or_else(|| self.intern(ty.clone()))
+    }
+
     /// [`Self::intern`] over a whole argument list, which is how an
     /// instance's arguments arrive.
     pub fn intern_all(&self, tys: impl IntoIterator<Item = MonoTy>) -> Vec<MonoTyId> {

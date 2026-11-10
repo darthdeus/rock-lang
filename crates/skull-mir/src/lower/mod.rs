@@ -444,6 +444,7 @@ impl ScalarCtx {
             }
             value_references
         };
+        let interner = std::sync::Arc::new(crate::monoty::MonoInterner::new());
         // Default target is Lua: skull-codegen-lua is the primary consumer and its
         // full + incremental paths build a `ScalarCtx::new`. The JS driver and the
         // GLSL backend override via `with_target`.
@@ -457,8 +458,8 @@ impl ScalarCtx {
             } else {
                 bone_core::hir::FnBackend::Lua
             },
-            interner: std::sync::Arc::new(crate::monoty::MonoInterner::new()),
-            rep_arena: std::sync::Arc::new(abi::RepArena::default()),
+            rep_arena: std::sync::Arc::new(abi::RepArena::new(std::sync::Arc::clone(&interner))),
+            interner,
             abi_plans: abi::AbiPlanCache::default(),
         }
     }
@@ -479,6 +480,13 @@ impl ScalarCtx {
     /// The arena is monotonic, so emission naming a type the graph never
     /// reached simply extends the shared one.
     pub fn sharing(mut self, interner: std::sync::Arc<crate::monoty::MonoInterner>) -> Self {
+        // The representation arena indexes its type facts by this arena's ids,
+        // so it follows the handle; nothing may have been planned yet.
+        assert!(
+            self.rep_arena.is_empty(),
+            "a context must share its type arena before planning any representation"
+        );
+        self.rep_arena = std::sync::Arc::new(abi::RepArena::new(std::sync::Arc::clone(&interner)));
         self.interner = interner;
         self
     }

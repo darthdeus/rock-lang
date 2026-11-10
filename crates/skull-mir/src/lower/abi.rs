@@ -20,7 +20,7 @@
 //! across targets would be answering with another target's ABI.
 
 use rustc_hash::FxHashMap as HashMap;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use bone_core::hir::{FnBackend, Function};
 use bone_core::prelude::Span;
@@ -594,6 +594,72 @@ pub struct RepArena {
     plans: crate::append_vec::AppendVec<RepPlan>,
     by_key: RwLock<HashMap<RepKey, RepId>>,
     arena_id: u64,
+    /// The build's type arena; [`Self::facts`] is indexed by its ids.
+    interner: Arc<crate::monoty::MonoInterner>,
+    /// Per-type answers, filled on first use: representation ids for each
+    /// use, and container plans. Lowering asks these per expression for a few
+    /// thousand distinct types, so the answer is one index away.
+    facts: crate::append_vec::SlotTable<TypeFacts>,
+}
+
+const TARGETS: usize = 3;
+const REP_USES: usize = 5;
+const REP_SLOTS: usize = TARGETS * REP_USES * 8;
+const CONTAINER_FAMILIES: usize = 5;
+
+fn target_index(target: FnBackend) -> usize {
+    match target {
+        FnBackend::Any => 0,
+        FnBackend::Lua => 1,
+        FnBackend::Js => 2,
+    }
+}
+
+fn rep_slot(
+    target: FnBackend,
+    use_context: RepUse,
+    tuple_spelled: bool,
+    guarantees: RepGuarantees,
+) -> usize {
+    let use_index = match use_context {
+        RepUse::Parameter => 0,
+        RepUse::Return => 1,
+        RepUse::TupleElement => 2,
+        RepUse::Value => 3,
+        RepUse::Boundary => 4,
+    };
+    let flags = usize::from(tuple_spelled)
+        | usize::from(guarantees.nobox) << 1
+        | usize::from(guarantees.allow_opaque) << 2;
+    (target_index(target) * REP_USES + use_index) * 8 + flags
+}
+
+fn container_slot(target: FnBackend, family: super::container::ContainerFamily) -> usize {
+    use super::container::ContainerFamily;
+    let family_index = match family {
+        ContainerFamily::Vec => 0,
+        ContainerFamily::Map => 1,
+        ContainerFamily::Arena => 2,
+        ContainerFamily::NativeBuffer => 3,
+        ContainerFamily::FlatVec => 4,
+    };
+    target_index(target) * CONTAINER_FAMILIES + family_index
+}
+
+struct TypeFacts {
+    /// Planned representation index plus one; zero is unplanned. Failed plans
+    /// are not recorded, so their errors are re-derived with each use's span.
+    reps: [std::sync::atomic::AtomicU32; REP_SLOTS],
+    containers: [OnceLock<super::container::ContainerPlan>; TARGETS * CONTAINER_FAMILIES],
+}
+
+impl Default for TypeFacts {
+    fn default() -> Self {
+        Self {
+            reps: std::array::from_fn(|_| std::sync::atomic::AtomicU32::new(0)),
+            containers: std::array::from_fn(|_| OnceLock::new()),
+        }
+    }
 }
 
 impl std::fmt::Debug for RepArena {
@@ -604,12 +670,7 @@ impl std::fmt::Debug for RepArena {
 
 impl Default for RepArena {
     fn default() -> Self {
-        static ARENA_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        Self {
-            plans: crate::append_vec::AppendVec::new(),
-            by_key: RwLock::default(),
-            arena_id: ARENA_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        }
+        Self::new(Arc::new(crate::monoty::MonoInterner::new()))
     }
 }
 
@@ -623,14 +684,6 @@ enum RepKey {
         bool,
         bool,
     ),
-    Concrete {
-        target: FnBackend,
-        use_context: RepUse,
-        ty: crate::monoty::MonoTy,
-        tuple_spelled: bool,
-        nobox: bool,
-        allow_opaque: bool,
-    },
     ValueShape(FnBackend, RepUse, ValueShape),
 }
 
@@ -843,6 +896,44 @@ fn declared_nobox(ws: &Workspace, ty: &crate::monoty::MonoTy) -> bool {
 }
 
 impl RepArena {
+    /// An arena whose type facts are indexed by `interner`'s ids.
+    pub fn new(interner: Arc<crate::monoty::MonoInterner>) -> Self {
+        static ARENA_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self {
+            plans: crate::append_vec::AppendVec::new(),
+            by_key: RwLock::default(),
+            arena_id: ARENA_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            interner,
+            facts: Default::default(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.plans.is_empty()
+    }
+
+    fn type_facts(&self, ty: &crate::monoty::MonoTy) -> &TypeFacts {
+        self.facts
+            .get_or_init(self.interner.id_of(ty).index(), TypeFacts::default)
+    }
+
+    /// [`ContainerPlan::for_type`](super::container::ContainerPlan::for_type),
+    /// answered once per type, family and target.
+    pub(crate) fn container_plan(
+        &self,
+        target: FnBackend,
+        family: super::container::ContainerFamily,
+        ty: &crate::monoty::MonoTy,
+        derive: impl FnOnce() -> Result<super::container::ContainerPlan, RepError>,
+    ) -> Result<super::container::ContainerPlan, RepError> {
+        let slot = &self.type_facts(ty).containers[container_slot(target, family)];
+        if let Some(plan) = slot.get() {
+            return Ok(plan.clone());
+        }
+        let plan = derive()?;
+        Ok(slot.get_or_init(|| plan).clone())
+    }
+
     /// This arena's build generation, distinct for every arena in the process.
     pub(crate) fn generation(&self) -> u64 {
         self.arena_id
@@ -1348,35 +1439,17 @@ impl RepArena {
         facts: &RepUseFacts,
         guarantees: RepGuarantees,
     ) -> Result<RepId, RepError> {
-        use crate::monoty::{MonoCtor, MonoTy};
-
-        if !matches!(
-            ty,
-            MonoTy::Nullable(_)
-                | MonoTy::Tuple(_)
-                | MonoTy::App {
-                    ctor: MonoCtor::Nominal(_),
-                    ..
-                }
-        ) {
-            return self.plan_uncached(ws, target, ty, use_context, facts, guarantees);
-        }
-        // The arena belongs to one build's declarations. Index successful
-        // requests before shape selection, retaining the same canonical RepId.
-        // Errors are re-derived so their span always belongs to this use site.
-        let key = RepKey::Concrete {
-            target,
-            use_context,
-            ty: ty.clone(),
-            tuple_spelled: facts.tuple_spelled,
-            nobox: guarantees.nobox,
-            allow_opaque: guarantees.allow_opaque,
-        };
-        if let Some(id) = self.lookup_key(&key) {
-            return Ok(id);
+        let slot = &self.type_facts(ty).reps
+            [rep_slot(target, use_context, facts.tuple_spelled, guarantees)];
+        let planned = slot.load(std::sync::atomic::Ordering::Acquire);
+        if planned != 0 {
+            return Ok(RepId {
+                arena: self.arena_id,
+                index: planned - 1,
+            });
         }
         let id = self.plan_uncached(ws, target, ty, use_context, facts, guarantees)?;
-        self.alias_key(key, id);
+        slot.store(id.index + 1, std::sync::atomic::Ordering::Release);
         Ok(id)
     }
 

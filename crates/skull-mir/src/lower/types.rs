@@ -107,9 +107,9 @@ impl<'a> Builder<'a> {
             }
         );
         let ty = if has_presence && !ty.peel_nullable().1 {
-            MonoTy::Nullable(Box::new(ty.clone()))
+            std::borrow::Cow::Owned(MonoTy::Nullable(Box::new(ty.clone())))
         } else {
-            ty.clone()
+            std::borrow::Cow::Borrowed(ty)
         };
         let tuple_spelled = matches!(ty.peel_nullable().0, MonoTy::Tuple(_));
         self.concrete_rep_id(

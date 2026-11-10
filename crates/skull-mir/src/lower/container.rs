@@ -110,6 +110,18 @@ impl ContainerPlan {
         family: ContainerFamily,
         ty: &crate::monoty::MonoTy,
     ) -> Result<Self, RepError> {
+        arena.container_plan(target, family, ty, || {
+            Self::for_type_uncached(ws, target, arena, family, ty)
+        })
+    }
+
+    fn for_type_uncached(
+        ws: &bone_core::workspace::Workspace,
+        target: bone_core::hir::FnBackend,
+        arena: &RepArena,
+        family: ContainerFamily,
+        ty: &crate::monoty::MonoTy,
+    ) -> Result<Self, RepError> {
         let (element, nullable) = match (family, ty.peel_nullable().0) {
             (
                 ContainerFamily::Vec,
