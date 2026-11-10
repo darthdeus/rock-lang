@@ -162,8 +162,8 @@ pub use abi::{
     AbiPlanMemoStats, AbiQuestion, BackendFnAbiPlan, BackendFnAbiPlanHandle, BoundaryClass,
     FunctionRepPlan, GlobalPlan, RepArena, RepArenaStats, RepError, RepGuarantees, RepId,
     RepLayout, RepPlan, RepUse, RepUseFacts, SIGNATURE_SCALAR_LANE_BUDGET,
-    WIDE_VALUE_PAYLOAD_LEAF_CUT, boundary_requires_boxed_representation, declared_boundary_class,
-    owner_abi_plan, owner_abi_plan_for_body, requires_concrete_body_plan,
+    WIDE_VALUE_PAYLOAD_LEAF_CUT, WirePosition, boundary_requires_boxed_representation,
+    declared_boundary_class, owner_abi_plan, owner_abi_plan_for_body, requires_concrete_body_plan,
     selected_sibling_abi_plan,
 };
 

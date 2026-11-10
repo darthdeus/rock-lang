@@ -278,6 +278,7 @@ pub(super) fn emit_body_chunk_with_mutation(
     attribution.mir_instructions = mf.insts.len();
     attribution.mir_lowered = mf.insts.len();
     attribution.lower_facts = mf.lower_attribution.clone();
+    attribution.abi_plan = mf.abi_plan.clone();
     attribution.consumer_instance = ordinary_instance
         .clone()
         .map(|instance| (instance, LoweredInstanceKind::Ordinary));
@@ -792,6 +793,7 @@ pub(super) fn emit_spec_chunk(
         mir_instructions: mf.insts.len(),
         mir_lowered: mf.insts.len(),
         lower_facts: mf.lower_attribution.clone(),
+        abi_plan: mf.abi_plan.clone(),
         consumer_instance: Some((body.clone(), LoweredInstanceKind::Specialized)),
         lowered_instance: (!canonical_reused)
             .then(|| (body.clone(), LoweredInstanceKind::Specialized)),

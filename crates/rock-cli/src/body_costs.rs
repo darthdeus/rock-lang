@@ -156,5 +156,35 @@ pub(crate) fn record(ws: &Workspace, body: &BodyCost) -> Value {
     fields.insert("name".into(), json!(name.as_str()));
     fields.insert("line".into(), json!(span.line_range.0 + 1));
     fields.insert("end_line".into(), json!(span.line_range.1 + 1));
+    if body.wire.iter().any(|w| w.flattened.is_some()) {
+        fields.insert("wire".into(), wire(ws, &body.wire));
+    }
     record
+}
+
+/// Each wire position: its Lua value count and, when it carries a value's
+/// leaves, that type's name, declaration and `nobox`.
+fn wire(ws: &Workspace, wire: &[skull_mir::lower::WirePosition]) -> Value {
+    let declared = |name: ustr::Ustr| {
+        let (module, span) = if let Some(id) = ws.struct_by_name.get(&name) {
+            let module = ws.module(id.module);
+            (module, module.structs[id.def].name_span)
+        } else {
+            let id = ws.enums_by_name.get(&name)?;
+            let module = ws.module(id.module);
+            (module, module.enums[id.def].name_span)
+        };
+        Some(format!("{}:{}", module.file, span.line_range.0 + 1))
+    };
+    wire.iter()
+        .map(|w| {
+            json!({
+                "lanes": w.lanes,
+                "type": w.flattened.map(|name| name.as_str()),
+                "declared": w.flattened.and_then(declared),
+                "nobox": w.nobox,
+                "result": w.result,
+            })
+        })
+        .collect()
 }

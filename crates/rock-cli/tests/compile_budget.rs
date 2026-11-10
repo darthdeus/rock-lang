@@ -253,3 +253,84 @@ fn body_costs_name_each_body_by_its_source_definition() {
         "no inference time for util.rock"
     );
 }
+
+const WIDE: &str = r#"
+mod main;
+
+value Pose { x: float, y: float, z: float, yaw: float, pitch: float, roll: float }
+
+fn spin(p: Pose, turns: int) -> Pose {
+    let out = p
+    for i in 0..turns {
+        out = Pose { ..out, yaw: out.yaw + out.x + float(i), pitch: out.pitch + out.y, roll: out.roll + out.z }
+    }
+    return out
+}
+
+fn main() {
+    let a = spin(Pose { x: 1.0, y: 2.0, z: 3.0, yaw: 0.0, pitch: 0.0, roll: 0.0 }, 3)
+    let b = spin(a, 4)
+    print("{b.yaw + b.pitch + b.roll}")
+}
+"#;
+
+/// A body whose signature flattens a value records, per declared parameter
+/// and then the result, its lane count and the value type it flattens, so the
+/// report can rank types by the width they add to calls.
+#[test]
+fn body_costs_record_the_value_types_a_signature_flattens() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("stick.toml"),
+        "[package]\nname = \"wide\"\n\n[language]\nmodules = \"v1\"\n",
+    )
+    .unwrap();
+    std::fs::write(root.path().join("main.rock"), WIDE).unwrap();
+    let costs = root.path().join("costs.jsonl");
+    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .current_dir(root.path())
+        .args(["compile", ".", "--output"])
+        .arg(root.path().join("out.lua"))
+        .env("ROCK_DIR", root.path())
+        .env("ROCK_INVOCATION_LOG", "off")
+        .env("ROCK_BODY_COSTS", &costs)
+        .env_remove("ROCK_COMPILE_STATS")
+        .env_remove("ROCK_STDLIB_DIR")
+        .output()
+        .expect("start rock");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(&costs)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("one JSON record per line"))
+        .collect();
+    let spin = records
+        .iter()
+        .find(|r| r["name"].as_str().unwrap_or("").ends_with("main::spin"))
+        .unwrap_or_else(|| panic!("no record for spin: {records:?}"));
+    let wire = spin["wire"].as_array().expect("a wire list");
+    assert_eq!(wire.len(), 3, "two parameters and a result: {wire:?}");
+    assert_eq!(wire[0]["type"], "wide::main::Pose");
+    assert_eq!(wire[0]["lanes"], 6);
+    assert_eq!(wire[0]["nobox"], false);
+    assert_eq!(wire[0]["result"], false);
+    assert!(
+        wire[0]["declared"]
+            .as_str()
+            .unwrap()
+            .ends_with("main.rock:4")
+    );
+    assert_eq!(wire[1]["type"], serde_json::Value::Null);
+    assert_eq!(wire[1]["lanes"], 1);
+    assert_eq!(wire[2]["type"], "wide::main::Pose");
+    assert_eq!(wire[2]["result"], true);
+    let main = records
+        .iter()
+        .find(|r| r["name"].as_str().unwrap_or("").ends_with("main::main"))
+        .unwrap_or_else(|| panic!("no record for main: {records:?}"));
+    assert!(main.get("wire").is_none(), "nothing flattened: {main}");
+}

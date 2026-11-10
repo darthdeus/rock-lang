@@ -118,6 +118,8 @@ pub struct BodyCost {
     pub splices: Vec<SpliceCost>,
     pub lua_bytes: usize,
     pub lua_lines: usize,
+    /// The body's wire, parameters then result; empty without an ABI plan.
+    pub wire: Vec<skull_mir::lower::WirePosition>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -400,6 +402,8 @@ pub(super) struct UnitAttribution {
     pub(super) canonical_reused: bool,
     pub(super) always_lowered: bool,
     pub(super) always_callee_keys: Vec<Instance>,
+    /// Kept so the fold can describe the wire; read only when it folds.
+    pub(super) abi_plan: Option<skull_mir::lower::BackendFnAbiPlanHandle>,
 }
 
 #[derive(Clone, Copy)]
@@ -676,6 +680,11 @@ impl AttributionAccumulator {
             splices,
             lua_bytes: lua.map_or(0, str::len),
             lua_lines: lua.map_or(0, |lua| lua.lines().count()),
+            wire: unit
+                .abi_plan
+                .as_ref()
+                .map(|plan| plan.wire_positions())
+                .unwrap_or_default(),
         });
     }
 

@@ -2345,6 +2345,17 @@ pub struct BackendFnAbiPlan {
     fingerprint: std::sync::OnceLock<String>,
 }
 
+/// One position of a function's wire: a declared parameter or the result.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WirePosition {
+    /// Lua values it occupies.
+    pub lanes: usize,
+    /// The nominal value type whose leaves it carries, if it is flattened.
+    pub flattened: Option<Ustr>,
+    pub nobox: bool,
+    pub result: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ParameterTransport {
     original: Vec<RepId>,
@@ -2869,6 +2880,29 @@ impl BackendFnAbiPlan {
             slot_param_names(pd.name.as_str(), slot, &mut names);
         }
         Some(names)
+    }
+
+    /// Each declared parameter's wire position, then the result's. Read only
+    /// by the opt-in per-body cost dump.
+    pub fn wire_positions(&self) -> Vec<WirePosition> {
+        let position = |id: RepId, result: bool| {
+            let plan = self.arena.get(id);
+            WirePosition {
+                lanes: plan.lanes(&self.arena),
+                flattened: match plan.layout() {
+                    RepLayout::Leaves(shape) => Some(shape.name),
+                    _ => None,
+                },
+                nobox: plan.nobox(),
+                result,
+            }
+        };
+        self.representation
+            .params()
+            .iter()
+            .map(|id| position(*id, false))
+            .chain(self.representation.result().map(|id| position(id, true)))
+            .collect()
     }
 
     /// Per-DECLARED-param leaf width (a value-struct param's flattened leaf

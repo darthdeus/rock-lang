@@ -122,7 +122,9 @@ package and line): the worker's stage times (`lower_ns` ... `regalloc_ns`,
 elapsed on the worker; together they are the budget's `codegen.unit_cpu_ms`),
 the worker's thread CPU for the body (`thread_cpu_ns`, for bodies the parallel
 fan-out built), MIR size after lowering, after inlining and after cleanup, the
-body's own Lua bytes and lines, and the callees spliced into it. It also writes
+body's own Lua bytes and lines, the callees spliced into it, and, for a body
+whose signature flattens a value, its wire (`wire`: per parameter and then the
+result, the Lua values it occupies and the value type it flattens). It also writes
 one line per module for the front-end passes that run module by module
 (`lower functions`, `infer functions`). Without the variable nothing is
 collected and the output is byte-identical either way.
@@ -133,7 +135,9 @@ ranked source changes with estimated savings, concentration (share of CPU in
 the top 1/5/20% of definitions), sortable tables per definition, generic,
 file and inlined callee, and output patterns traced to source lines (wide
 signatures and calls, unread parameters, many upvalues, labels, table
-constructors in loops, failure blocks). Every CPU number is summed over
+constructors in loops, failure blocks), plus the value types whose flattened
+leaves widen residual calls, ranked by the argument, parameter and result text
+they add (positions of `--wide-lanes`, default 8, or more). Every CPU number is summed over
 worker threads; wall numbers are labelled as wall.
 
 ```sh

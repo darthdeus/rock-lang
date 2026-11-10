@@ -345,6 +345,124 @@ def attach_lua(bodies, lines, defs, by_name, binds):
         b["exact"] = hashlib.sha1(census.normalized_body(lines, d, False).encode()).hexdigest()
 
 
+def split_args(line, start):
+    """Top-level argument texts of the call whose `(` is at `start`."""
+    depth, out, s, i, n, in_str = 0, [], start + 1, start, len(line), None
+    while i < n:
+        ch = line[i]
+        if in_str:
+            if ch == "\\":
+                i += 2
+                continue
+            if ch == in_str:
+                in_str = None
+        elif ch in "\"'":
+            in_str = ch
+        elif ch in "({[":
+            depth += 1
+        elif ch in ")}]":
+            depth -= 1
+            if depth == 0:
+                if line[s:i].strip():
+                    out.append(line[s:i].strip())
+                return out
+        elif ch == "," and depth == 1:
+            out.append(line[s:i].strip())
+            s = i + 1
+        i += 1
+    return None
+
+
+RESULT_LIST = re.compile(r"^\s*(?:local )?((?:[A-Za-z_][A-Za-z0-9_]*, )+[A-Za-z_][A-Za-z0-9_]*) = $")
+
+
+def value_widening(bodies, lines, defs, binds, min_lanes=1):
+    """Per value type, what flattening it costs at call boundaries that were
+    not inlined: the signatures that carry its leaves, the residual calls into
+    them, and the text of the leaf arguments, parameters and result lists.
+    Needs the body records' `wire` field and the emitted Lua."""
+    sigs = {}
+    for b in bodies:
+        wire, sym = b.get("wire"), b.get("symbol")
+        if not wire or not sym:
+            continue
+        positions, at = [], 0
+        for w in wire:
+            if w["result"]:
+                positions.append((w, None))
+            else:
+                positions.append((w, at))
+                at += w["lanes"]
+        positions = [(w, at) if w["lanes"] >= min_lanes else (dict(w, type=None), at) for w, at in positions]
+        if any(w["type"] for w, _ in positions):
+            sigs[sym] = (b, positions)
+    types = {}
+
+    def entry(w):
+        t = types.get(w["type"])
+        if t is None:
+            t = types[w["type"]] = {"type": w["type"], "declared": w.get("declared"), "nobox": w["nobox"],
+                                    "leaves": 0, "min_leaves": w["lanes"], "signatures": set(), "results": set(), "calls": 0,
+                                    "arg_bytes": 0, "param_bytes": 0, "result_bytes": 0}
+        t["leaves"] = max(t["leaves"], w["lanes"])
+        t["min_leaves"] = min(t["min_leaves"], w["lanes"])
+        return t
+
+    by_name = {d["name"]: d for d in defs}
+    for sym, (b, positions) in sigs.items():
+        d = by_name.get(sym)
+        head = lines[d["start"]] if d else ""
+        m = FACTORY.match(head) or PLAIN.match(head)
+        params = [p for p in (m.groups()[-1].split(", ") if m else []) if p]
+        for w, at in positions:
+            if not w["type"]:
+                continue
+            t = entry(w)
+            if at is None:
+                t["results"].add(sym)
+            else:
+                t["signatures"].add(sym)
+                t["param_bytes"] += sum(len(p) + 2 for p in params[at:at + w["lanes"]])
+    for d in defs:
+        bound = binds.get(d["name"], [])
+        for l in lines[d["start"] + 1:d["end"]]:
+            if "(" not in l:
+                continue
+            for cm in CALL_START.finditer(l):
+                callee = cm.group(0)[:-1]
+                bm = BOUND.match(callee)
+                if bm and int(bm.group(1)) < len(bound):
+                    callee = bound[int(bm.group(1))]
+                sig = sigs.get(callee)
+                if sig is None:
+                    continue
+                args = split_args(l, cm.end() - 1)
+                if args is None:
+                    continue
+                lhs = RESULT_LIST.match(l[:cm.start()])
+                for w, at in sig[1]:
+                    if not w["type"]:
+                        continue
+                    t = entry(w)
+                    if at is None:
+                        if lhs:
+                            t["result_bytes"] += len(lhs.group(1)) + 1
+                        continue
+                    t["calls"] += 1
+                    t["arg_bytes"] += sum(len(a) + 2 for a in args[at:at + w["lanes"]])
+    rows = []
+    for t in types.values():
+        f, _, line = (t["declared"] or "?:0").rpartition(":")
+        t["file"], t["line"], t["package"] = f, int(line) if line.isdigit() else 0, t["type"].split("::", 1)[0]
+        t["signatures"], t["results"] = len(t["signatures"]), len(t["results"])
+        t["bytes"] = t["arg_bytes"] + t["param_bytes"] + t["result_bytes"]
+        t["lanes"] = ("%d" % t["leaves"] if t["min_leaves"] == t["leaves"]
+                      else "%d-%d" % (t["min_leaves"], t["leaves"]))
+        rows.append(t)
+    rows.sort(key=lambda t: -t["bytes"])
+    return rows
+
+
 # ---------------------------------------------------------------- aggregation
 
 def ms(ns):
@@ -674,6 +792,7 @@ def build(args):
     defs = aggregate(bodies, namer)
     callees = aggregate_callees(bodies)
     patterns, synth, wide_targets = find_patterns(bodies, defs) if args.lua else ([], {}, [])
+    widening = value_widening(bodies, lines, ldefs, binds, args.wide_lanes) if args.lua else []
     recs = recommendations(defs, callees, namer)
 
     total_cpu = sum(b["cpu_ns"] for b in bodies)
@@ -861,6 +980,20 @@ def build(args):
                                  ("private:" + hashlib.sha1(c.encode()).hexdigest()[:8] if args.mask else c),
                                  namer.site(t["rec"]) if t["rec"] else "", t["calls"], len(t["callers"]), t["max_args"]]
                                 for c, t in wide_targets[:40]]))
+        if widening:
+            H.append("<h3>Value types widening call boundaries</h3><p>Each value type whose leaves a residual "
+                     "(not inlined) call passes one by one, counting positions of %d or more lanes "
+                     "(<code>--wide-lanes</code>; a lane is one Lua value, after unread leaves are dropped): "
+                     "the signatures that take or return it flattened, the "
+                     "calls into them, and the text of its leaf arguments, parameters and result lists. Bodies also "
+                     "move, store and kill every leaf, often several times this text. Boxing a type (a plain "
+                     "<code>struct</code>), passing fewer fields, or inlining the callee removes it; "
+                     "<code>nobox</code> types never box.</p>" % args.wide_lanes)
+            H.append(table(["<type", "<declared", "nobox", "lanes", "signatures", "returning", "calls",
+                            "arg KB", "param KB", "result KB", "total KB"],
+                           [[namer.symbol(t, t["type"]), namer.site(t), "yes" if t["nobox"] else "", t["lanes"], t["signatures"], t["results"], t["calls"],
+                             fmt_kb(t["arg_bytes"]), fmt_kb(t["param_bytes"]), fmt_kb(t["result_bytes"]),
+                             fmt_kb(t["bytes"])] for t in widening[:args.rows]]))
         if synth:
             H.append("<h3>Generated and annotated definitions</h3><p class='note'>Bodies the compiler synthesized "
                      "(derives, generated accessors) and bodies grouped by their annotations.</p>")
@@ -908,6 +1041,18 @@ def build(args):
         M.append("")
         for p in patterns:
             M.append("- %s: %d bodies in %d definitions, %s ms CPU, %s KB." % (p["title"], p["bodies"], p["definitions"], fmt_ms(p["cpu_ns"]), fmt_kb(p["lua_bytes"])))
+    if widening:
+        M.append("")
+        M.append("## Value types widening call boundaries")
+        M.append("")
+        M.append("Flattened value positions of %d or more lanes in residual calls; bytes are leaf arguments, "
+                 "parameters and result lists." % args.wide_lanes)
+        M.append("")
+        M.append("| type | lanes | nobox | signatures | returning | calls | total KB |")
+        M.append("|---|---:|---|---:|---:|---:|---:|")
+        for t in widening[:15]:
+            M.append("| %s | %s | %s | %d | %d | %d | %s |" % (namer.symbol(t, t["type"]), t["lanes"], "yes" if t["nobox"] else "",
+                                                          t["signatures"], t["results"], t["calls"], fmt_kb(t["bytes"])))
     text = "\n".join(M) + "\n"
     if args.md:
         with open(args.md, "w") as f:
@@ -915,7 +1060,7 @@ def build(args):
     if not args.html and not args.md:
         sys.stdout.write(text)
     return {"bodies": bodies, "defs": defs, "callees": callees, "patterns": patterns,
-            "wide_targets": wide_targets}
+            "wide_targets": wide_targets, "widening": widening}
 
 
 def main():
@@ -930,6 +1075,8 @@ def main():
     p.add_argument("--md", help="write the Markdown summary here")
     p.add_argument("--rows", type=int, default=300, help="rows per table (default 300)")
     p.add_argument("--title", help="report title")
+    p.add_argument("--wide-lanes", type=int, default=8,
+                   help="count a flattened value position from this many lanes (default 8)")
     build(p.parse_args())
 
 
