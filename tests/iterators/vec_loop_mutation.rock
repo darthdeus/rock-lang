@@ -306,3 +306,33 @@ fn a_closure_called_in_the_body_reads_the_element() {
     }
     print("{total} {calls}")
 }
+
+// `push` evaluates its argument before it grows the vector.
+
+fn grow_and_report(xs: [int]) -> int {
+    xs.push(100)
+    return xs.len()
+}
+
+@test(output = "3,5,5,100,7, 8")
+fn push_argument_is_evaluated_before_the_append() {
+    let xs = [1, 2, 3]
+    xs.push(xs.len())
+    xs.push(xs[0] + xs.len())
+    xs.push(xs[xs.len() - 1])
+    xs.push(grow_and_report(xs))
+    let out = ""
+    for i in 3..xs.len() { out = out + "{xs[i]}," }
+    print("{out} {xs.len()}")
+}
+
+struct Pair { a: int, b: [int] }
+
+@test(output = "2 0 1 5")
+fn push_argument_built_from_the_vector_it_extends() {
+    let ps: [Pair] = []
+    ps.push(Pair { a: ps.len(), b: [] })
+    ps.push(Pair { a: ps.len(), b: [ps[0].a] })
+    ps[1].b.push(ps[1].b.len() + 4)
+    print("{ps.len()} {ps[0].a} {ps[1].a} {ps[1].b[1]}")
+}

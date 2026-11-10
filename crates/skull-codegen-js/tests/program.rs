@@ -554,15 +554,19 @@ const result = missingPlan && missingCatalog && empty.len === 0 && nonempty.len 
 /// spelled its specialized name, and emission rejected with `JS subset: no
 /// specialized body emitted`.
 ///
-/// `main` deliberately does NOT push, so the demand has exactly one origin.
-/// The normal lane may inline the specialized call; a no-inline lane must retain
-/// the standalone specialized definition and its concrete append.
+/// `main` deliberately does NOT push or set, so the demand has exactly one
+/// origin. The normal lane may inline the specialized call; a no-inline lane
+/// must retain the standalone specialized `set` and its concrete store. `push`
+/// is the backend's own append in both lanes.
 #[test]
 fn a_specialization_demanded_only_by_a_decorator_body_is_emitted() {
     let ws = ws_with(
         r#"
 global XS: [int] = []
-deco init reg() { XS.push(1) }
+deco init reg() {
+    XS.push(1)
+    XS.set(0, 2)
+}
 @reg
 fn alpha() { print("alpha") }
 fn main() { print("{XS.len}") }
@@ -578,13 +582,14 @@ fn main() { print("{XS.len}") }
     let _inline = crate::common::InlineOffGuard::on();
     let standalone = emit_program(&ws);
     assert!(
-        standalone.contains("function push_"),
-        "decorator-only specialization did not emit the concrete push definition:\n{standalone}"
+        standalone.contains("function set_"),
+        "decorator-only specialization did not emit the concrete set definition:\n{standalone}"
     );
-    let push = &standalone[standalone.find("function push_").expect("push definition")..];
+    let set = &standalone[standalone.find("function set_").expect("set definition")..];
+    let set = &set[..set.find("\n}").expect("end of the set definition")];
     assert!(
-        push.contains("_data[v0.len] = v1") && push.contains("v0.len = v0.len + 1"),
-        "standalone decorator specialization lost the concrete push operation: {push}"
+        set.contains("vec_set"),
+        "standalone decorator specialization lost the concrete set operation: {set}"
     );
 }
 

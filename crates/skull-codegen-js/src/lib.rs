@@ -218,6 +218,12 @@ pub const JS_INTRINSICS: &[(&str, usize, Emission)] = &[
         2,
         Emission::Template("($1._data[$1.len] = $2, $1.len = $1.len + 1)"),
     ),
+    // `Vec<T>.push`, keyed by its signature: other types have a `push` too.
+    (
+        "push_arr_T_T",
+        2,
+        Emission::Template("($1._data[$1.len] = $2, $1.len = $1.len + 1)"),
+    ),
     ("__op_eq", 2, Emission::Template("__op_eq($1, $2)")),
     ("__op_ne", 2, Emission::Template("(!__op_eq($1, $2))")),
     ("len", 1, Emission::Template("$1.length")),

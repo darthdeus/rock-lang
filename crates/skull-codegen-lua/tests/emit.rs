@@ -2963,3 +2963,14 @@ fn len(rows: [Row]) -> int { return 40 + rows.len }
 fn probe() -> int { return len([Row { n: 1 }, Row { n: 2 }]) }";
     assert_eq!(run(src, "probe()"), "42");
 }
+
+/// `xs.push(x)` is the append itself, not a Rock-bodied forward to
+/// `vec_push` that inlining has to splice first.
+#[test]
+fn vec_push_method_is_the_append_without_inlining() {
+    let src = "fn add(xs: [int], x: int) -> int { xs.push(x); xs.push(x + 1); return xs.len() }";
+    let lua = emit_clean(src, "add");
+    assert!(!lua.contains("push"), "{lua}");
+    assert_eq!(lua.matches("c0.len = c0.len + 1").count(), 2, "{lua}");
+    assert_eq!(run(src, "add({_data = {}, len = 0}, 7)"), "2");
+}

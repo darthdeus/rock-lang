@@ -1539,7 +1539,12 @@ fn vec_set<T>(vec: [T], index: int, value: T) {
 // is inline(lua) BODIES that call them by name (`get_app_args`, the
 // NativeBuffer collectors) -- not codegen: `xs[i]` lowers to the
 // `__vec_checked_*` family, never to `vec_get`/`vec_set`.
-@inline fn Vec<T>.push(vec, item: T) { vec_push(vec, item) }
+// `push` is the same append as `vec_push`, not a forward to it: a Rock-bodied
+// forward is spliced into every caller before the append is.
+@intrinsic @relocates @inline inline(lua) fn Vec<T>.push(vec, @repr(opaque) item: T) = """
+    vec.len = vec.len + 1
+    vec._data[vec.len] = item
+"""
 @inline fn Vec<T>.set(vec, index: int, value: T) { vec_set(vec, index, value) }
 @pure @inline fn Vec<T>.len(vec) -> int { return vec_len(vec) }
 

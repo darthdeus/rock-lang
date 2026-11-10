@@ -216,6 +216,7 @@ pub fn total() -> int {
     let steps: [Step] = []
     steps.push(Step { cost: 3 })
     steps.push(Step { cost: 4 })
+    if steps.is_empty() { return 0 }
     let sum = 0
     for s in steps {
         sum = sum + s.cost
@@ -257,7 +258,7 @@ fn a_generic_specialized_at_a_v1_nominal_emits_runnable_lua() {
     assert!(
         emitted
             .lua
-            .contains(&format!("function push_arr_T_T_{encoded}(")),
+            .contains(&format!("function is_empty_arr_T_{encoded}(")),
         "the specialized definition takes the nominal's identifier form:\n{}",
         emitted
             .lua

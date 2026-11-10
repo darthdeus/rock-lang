@@ -250,15 +250,20 @@ enum Binding {
     Mouse(int),
 }
 
-fn copy(bindings: [Binding]) -> [Binding] {
+struct Slot { binding: Binding }
+
+fn copy(slots: [Slot]) -> [Binding] {
     let out: [Binding] = []
-    for binding in bindings { out.push(binding) }
+    for slot in slots { out.push(slot.binding) }
     return out
 }
 
 @test(output = "2 Mouse")
 fn t() {
-    let copied = copy([Binding::Key { scan: "AB", ctrl: true }, Binding::Mouse(7)])
+    let copied = copy([
+        Slot { binding: Binding::Key { scan: "AB", ctrl: true } },
+        Slot { binding: Binding::Mouse(7) },
+    ])
     let name = match copied[1] {
         Binding::Key { .. } => "Key",
         Binding::Mouse(_) => "Mouse",
@@ -275,7 +280,7 @@ fn dynamic_enum_spread_keeps_box_at_vector_escape() {
     let copy = function_body(&lua, "copy");
     assert!(
         copy.contains("{__variant = "),
-        "an enum pushed into retained vector storage must still materialize:\n{copy}"
+        "an enum read out of a struct's flat storage and pushed into retained vector storage must still materialize:\n{copy}"
     );
 }
 
