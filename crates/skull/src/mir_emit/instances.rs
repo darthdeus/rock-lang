@@ -330,12 +330,7 @@ impl<'a> SpecQueue<'a> {
             &mut specs,
         );
         if let Ok(chunk) = &mut result {
-            match (started, &mut chunk.attribution) {
-                (Some(started), Some(unit)) => {
-                    unit.thread_cpu = Some(thread_cpu_time().saturating_sub(started));
-                }
-                _ => chunk.attribution = None,
-            }
+            chunk.finish(started);
         }
         #[cfg(test)]
         if let Some(hook) = &self.hook {

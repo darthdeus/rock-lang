@@ -875,6 +875,19 @@ fn main() { let result = first() }
     }
 
     #[test]
+    fn chunks_hold_their_lua_without_spare_capacity() {
+        let _inline = InlineOn::on();
+        let ws = specialized_workspace();
+        let mid = module_id(&ws, "<specialized-test>");
+        let (_, cache) = FullEmit::program().run(&ws, mid).expect("emission");
+        let chunks: Vec<_> = cache.chunks.values().flatten().collect();
+        assert!(!chunks.is_empty());
+        for chunk in chunks {
+            assert_eq!(chunk.lua.capacity(), chunk.lua.len());
+        }
+    }
+
+    #[test]
     fn attribution_keeps_one_cost_record_per_emitted_body() {
         let _inline = InlineOn::on();
         let ws = specialized_workspace();

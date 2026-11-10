@@ -209,7 +209,7 @@ fn emit_coroutine_chunk(
         comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(mf),
         specs,
-        code_artifact,
+        code_artifact: code_artifact.into(),
         // A coroutine's emitted text is a constructor plus a `__step`, neither
         // of which is the declaration's own body, so neither binds callees.
         binds: Vec::new(),
@@ -474,7 +474,7 @@ pub(super) fn emit_body_chunk_with_mutation(
         statics,
         calls,
         specs,
-        code_artifact,
+        code_artifact: code_artifact.into(),
         attribution: Some(Box::new(attribution)),
         comptime_reads: mf.comptime_reads.clone(),
         binds: bind.into_iter().collect(),
@@ -918,7 +918,7 @@ pub(super) fn emit_spec_chunk(
         comptime_reads: mf.comptime_reads.clone(),
         calls: skull_mir::reach::call_targets(&mf),
         specs,
-        code_artifact,
+        code_artifact: code_artifact.into(),
         binds: bind.into_iter().collect(),
     })
 }

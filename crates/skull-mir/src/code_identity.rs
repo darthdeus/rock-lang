@@ -365,6 +365,30 @@ pub struct CodeArtifact {
     pub census: CodeIdentityCensus,
 }
 
+/// One emitted body's code identities, held from its emission until assembly
+/// merges them, in identity order. A `BTreeMap` allocates a whole node for a
+/// body's one or two entries, about 2.5 KB each.
+#[derive(Clone, Debug, Default)]
+pub struct BodyCodeArtifact {
+    entries: Box<[CodeEntry]>,
+    census: CodeIdentityCensus,
+}
+
+impl From<CodeArtifact> for BodyCodeArtifact {
+    fn from(artifact: CodeArtifact) -> Self {
+        Self {
+            entries: artifact.entries.into_values().collect(),
+            census: artifact.census,
+        }
+    }
+}
+
+impl BodyCodeArtifact {
+    pub fn entries(&self) -> &[CodeEntry] {
+        &self.entries
+    }
+}
+
 /// One escaping CodeRef a program stages into its slot table.
 pub struct StagedCodeSlot<'a> {
     pub key: String,
@@ -456,12 +480,12 @@ impl CodeArtifact {
         }
     }
 
-    pub fn merge_ref(&mut self, other: &Self) {
-        self.census.direct_call_only += other.census.direct_call_only;
-        self.census.missing_identity += other.census.missing_identity;
-        self.census.duplicate_identity += other.census.duplicate_identity;
-        self.census.duplicate_body += other.census.duplicate_body;
-        for entry in other.entries.values() {
+    pub fn merge_body(&mut self, body: &BodyCodeArtifact) {
+        self.census.direct_call_only += body.census.direct_call_only;
+        self.census.missing_identity += body.census.missing_identity;
+        self.census.duplicate_identity += body.census.duplicate_identity;
+        self.census.duplicate_body += body.census.duplicate_body;
+        for entry in body.entries() {
             self.insert(entry.clone());
         }
     }
@@ -827,24 +851,26 @@ impl CodeArtifact {
     /// Replace backend body payloads from an already-built compatible artifact.
     /// The identity keys remain those of `self`; this is the overlay operation's
     /// explicit separation between logical slot identity and current body name.
-    pub fn with_replacements(&self, replacements: &[&Self]) -> Self {
+    pub fn with_replacements<'a>(
+        &self,
+        replacements: impl IntoIterator<Item = &'a CodeEntry>,
+    ) -> Self {
         let mut next = self.clone();
-        for replacement in replacements {
-            for (identity, entry) in &replacement.entries {
-                if entry.body_fingerprint != 0 || !next.entries.contains_key(identity) {
-                    let mut entry = entry.clone();
-                    if next.entries.get(identity).is_some_and(|old| old.escaping) {
-                        entry.escaping = true;
-                    }
-                    next.entries.insert(identity.clone(), entry);
-                } else if entry.escaping {
-                    // A newly stored function value can refer to a body that
-                    // already exists. Keep its payload, but publish its slot.
-                    next.entries
-                        .get_mut(identity)
-                        .expect("existing body")
-                        .escaping = true;
+        for entry in replacements {
+            let identity = &entry.identity;
+            if entry.body_fingerprint != 0 || !next.entries.contains_key(identity) {
+                let mut entry = entry.clone();
+                if next.entries.get(identity).is_some_and(|old| old.escaping) {
+                    entry.escaping = true;
                 }
+                next.entries.insert(identity.clone(), entry);
+            } else if entry.escaping {
+                // A newly stored function value can refer to a body that
+                // already exists. Keep its payload, but publish its slot.
+                next.entries
+                    .get_mut(identity)
+                    .expect("existing body")
+                    .escaping = true;
             }
         }
         let direct_call_only = self.census.direct_call_only;
@@ -1701,7 +1727,7 @@ mod tests {
     }
 
     #[test]
-    fn borrowed_merge_matches_owned_merge() {
+    fn body_merge_matches_owned_merge() {
         let identity = CodeIdentity::Named(Instance::base(declaration()));
         let compatibility = CodeCompatibility {
             call_abi: "unit".to_string(),
@@ -1722,11 +1748,16 @@ mod tests {
         let mut borrowed = owned.clone();
         let incoming = CodeArtifact {
             entries: [(entry.identity.clone(), entry)].into_iter().collect(),
-            census: CodeIdentityCensus::default(),
+            census: CodeIdentityCensus {
+                duplicate_body: 1,
+                ..CodeIdentityCensus::default()
+            },
         };
 
         owned.merge(incoming.clone());
-        borrowed.merge_ref(&incoming);
+        let body = BodyCodeArtifact::from(incoming);
+        assert_eq!(body.entries().len(), 1);
+        borrowed.merge_body(&body);
         assert_eq!(borrowed, owned);
     }
 

@@ -762,7 +762,13 @@ impl SkullEmitCache {
             if let Some(Ok(chunk)) = cache.chunks.get(&body) {
                 if !cache.emitted.contains(&body) {
                     cache.changed_since_full.insert(body.clone());
-                    fingerprint_identities.extend(chunk.code_artifact.entries.keys().cloned());
+                    fingerprint_identities.extend(
+                        chunk
+                            .code_artifact
+                            .entries()
+                            .iter()
+                            .map(|entry| entry.identity.clone()),
+                    );
                 }
                 continue;
             }
@@ -826,7 +832,13 @@ impl SkullEmitCache {
         }
 
         for (body, chunk) in built {
-            fingerprint_identities.extend(chunk.code_artifact.entries.keys().cloned());
+            fingerprint_identities.extend(
+                chunk
+                    .code_artifact
+                    .entries()
+                    .iter()
+                    .map(|entry| entry.identity.clone()),
+            );
             for dep in &chunk.deps {
                 cache
                     .dependents
@@ -1294,7 +1306,12 @@ impl SkullEmitCache {
                     &mut cache.inline_cache,
                 );
                 if let Ok(c) = &chunk {
-                    fingerprint_identities.extend(c.code_artifact.entries.keys().cloned());
+                    fingerprint_identities.extend(
+                        c.code_artifact
+                            .entries()
+                            .iter()
+                            .map(|entry| entry.identity.clone()),
+                    );
                     let new_deps: Vec<FuncRef> = c.deps.iter().copied().collect();
                     for d in new_deps {
                         cache.dependents.entry(d).or_default().insert(body.clone());

@@ -53,12 +53,31 @@ pub(super) struct Chunk {
     /// one, and it must be defined exactly once.
     pub(super) specs: Vec<skull_mir::bound::SpecDemand>,
     /// Compiler-owned logical callable identities in this emitted body.
-    pub(super) code_artifact: skull_mir::code_identity::CodeArtifact,
+    pub(super) code_artifact: skull_mir::code_identity::BodyCodeArtifact,
     /// The definitions in this chunk that were emitted as factories, each with
     /// the second-pass line that binds it. [`assemble`] emits these in
     /// ascending `rank` after EVERY definition, so each captured callee is
     /// already its final closure.
     pub(super) binds: Vec<skull_codegen_lua::CalleeBindingPlan>,
+}
+
+impl Chunk {
+    /// Settle a freshly built chunk for the time it is held until assembly:
+    /// keep its attribution record only when the build measured it (`started`
+    /// is the thread CPU time when the body began), and move its Lua, which
+    /// grew by doubling, into an exact allocation. `shrink_to_fit` would not
+    /// do: mimalloc keeps a block in place when it shrinks by less than half.
+    pub(super) fn finish(&mut self, started: Option<std::time::Duration>) {
+        match (started, &mut self.attribution) {
+            (Some(started), Some(unit)) => {
+                unit.thread_cpu = Some(thread_cpu_time().saturating_sub(started));
+            }
+            _ => self.attribution = None,
+        }
+        if self.lua.capacity() > self.lua.len() {
+            self.lua = self.lua.as_str().to_owned();
+        }
+    }
 }
 
 // Each global definition costs the enclosing LuaJIT proto a child proto and name.

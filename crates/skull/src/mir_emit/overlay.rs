@@ -269,7 +269,7 @@ fn assemble_overlay(
                     emit_global_unit(ws, &cache.scx, &cache.cg, &cache.concrete, a.mid, a.gid);
                 fingerprint_identities.extend(unit.code_artifact.entries.keys().cloned());
                 candidate_code_artifact = std::sync::Arc::new(
-                    candidate_code_artifact.with_replacements(&[&unit.code_artifact]),
+                    candidate_code_artifact.with_replacements(unit.code_artifact.entries.values()),
                 );
                 if let Some(err) = unit.hard_error {
                     return Err(err);
@@ -497,13 +497,12 @@ pub fn emit_overlay_with_span_edits(
         }
     }
     let t_replacements = Instant::now();
-    let replacements: Vec<&skull_mir::code_identity::CodeArtifact> = cache
+    let replacements = cache
         .changed_since_full
         .iter()
         .filter_map(|body| cache.chunks.get(body).and_then(|chunk| chunk.as_ref().ok()))
-        .map(|chunk| &chunk.code_artifact)
-        .collect();
-    let next_code_artifact = cache.code_artifact.with_replacements(&replacements);
+        .flat_map(|chunk| chunk.code_artifact.entries());
+    let next_code_artifact = cache.code_artifact.with_replacements(replacements);
     let initialize_code_slots =
         !cache.code_artifact.has_escaping() && next_code_artifact.has_escaping();
     let d_replacements = t_replacements.elapsed();
