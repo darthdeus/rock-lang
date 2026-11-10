@@ -671,28 +671,39 @@ impl<'a> Program<'a> {
             facts: FxHashMap::default(),
             summaries: FxHashMap::default(),
         };
-        for module in ws.modules.iter() {
-            for (fid, _) in module.functions.iter() {
-                let key = (module.id, fid);
-                let Some((function, body, bi)) = inferred_body(ws, key) else {
-                    continue;
-                };
-                if bi.ref_call_args.is_empty() {
-                    continue;
-                }
-                let ctx = BodyCtx::new(ws, function, body, bi);
-                let mut roots = Vec::new();
-                for &arg in bi.ref_call_args.values().flatten() {
-                    ctx.element_roots(arg, &mut roots);
-                }
-                if roots.is_empty() {
-                    continue;
-                }
-                for root in &roots {
-                    program.relevance.add(&root.key);
-                }
-                program.sites.push(key);
+        // Few bodies pass a reference argument; finding them visits every
+        // function, so the search runs per module in parallel.
+        let candidates: Vec<Vec<FnKey>> = ws
+            .modules
+            .par_iter()
+            .map(|module| {
+                module
+                    .functions
+                    .iter()
+                    .map(|(fid, _)| (module.id, fid))
+                    .filter(|&key| {
+                        inferred_body(ws, key)
+                            .is_some_and(|(_, _, bi)| !bi.ref_call_args.is_empty())
+                    })
+                    .collect()
+            })
+            .collect();
+        for key in candidates.into_iter().flatten() {
+            let Some((function, body, bi)) = inferred_body(ws, key) else {
+                continue;
+            };
+            let ctx = BodyCtx::new(ws, function, body, bi);
+            let mut roots = Vec::new();
+            for &arg in bi.ref_call_args.values().flatten() {
+                ctx.element_roots(arg, &mut roots);
             }
+            if roots.is_empty() {
+                continue;
+            }
+            for root in &roots {
+                program.relevance.add(&root.key);
+            }
+            program.sites.push(key);
         }
         let mut pending = program.sites.clone();
         while let Some(key) = pending.pop() {
