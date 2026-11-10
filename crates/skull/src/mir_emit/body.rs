@@ -140,6 +140,7 @@ fn emit_coroutine_chunk(
     ctx: &skull_mir::bound::BoundCtx,
     concrete_plan: &skull_mir::concrete::ConcreteBodyPlan,
     f: &bone_semantic::hir::Function,
+    name: &str,
     mf: &mut MirFunc,
     mut times: PhaseTimes,
 ) -> Result<Chunk, CompilerError> {
@@ -194,6 +195,7 @@ fn emit_coroutine_chunk(
     let mut literal_globals = skull_mir::reach::global_ref_names(mf);
     crate::push_value_ctor_calls(&lua, &mut literal_globals);
     Ok(Chunk {
+        name: Ustr::from(name),
         abi_deps,
         definition_count: lua_definition_count(&lua),
         lua,
@@ -345,7 +347,8 @@ pub(super) fn emit_body_chunk_with_mutation(
             &plan.bound_tree,
             scx.interner(),
         );
-        let mut chunk = emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, times)?;
+        let name = mangle_fn(ws, f);
+        let mut chunk = emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &name, &mut mf, times)?;
         attribution.mir_instructions = mf.insts.len();
         attribution.times = chunk.times;
         chunk.attribution = Some(Box::new(attribution));
@@ -461,6 +464,7 @@ pub(super) fn emit_body_chunk_with_mutation(
     let mut literal_globals = skull_mir::reach::global_ref_names(&mf);
     crate::push_value_ctor_calls(&lua, &mut literal_globals);
     Ok(Chunk {
+        name: Ustr::from(&name),
         abi_deps,
         definition_count: lua_definition_count(&lua),
         lua,
@@ -819,7 +823,7 @@ pub(super) fn emit_spec_chunk(
     let owner = BodyOwner::Function(fref.func);
     let ctx = skull_mir::bound::concrete_body_ctx(ws, fref.module, owner, tree, scx.interner());
     if f.is_coroutine {
-        let mut chunk = emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, &mut mf, times)?;
+        let mut chunk = emit_coroutine_chunk(ws, cg, scx, &ctx, plan, f, name, &mut mf, times)?;
         attribution.mir_instructions = mf.insts.len();
         attribution.times = chunk.times;
         chunk.attribution = Some(Box::new(attribution));
@@ -903,6 +907,7 @@ pub(super) fn emit_spec_chunk(
     deps.extend(abi_deps.keys().copied());
     crate::push_value_ctor_calls(&lua, &mut literal_globals);
     Ok(Chunk {
+        name: Ustr::from(name),
         abi_deps,
         definition_count: lua_definition_count(&lua),
         lua,

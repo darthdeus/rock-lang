@@ -9,6 +9,8 @@ use skull_codegen_lua::CALLEE_FACTORY_PREFIX;
 /// regenerated on every [`assemble`].
 #[derive(Clone)]
 pub(super) struct Chunk {
+    /// The emitted name of the declaration or instance this chunk defines.
+    pub(super) name: Ustr,
     pub(super) lua: String,
     /// Top-level definitions in `lua`, counted where the chunk is built so
     /// serial assembly does not rescan every emitted line.

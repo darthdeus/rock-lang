@@ -719,7 +719,7 @@ fn place_function<'c>(
         return Placement::None;
     }
     let chunk = match cache.chunks.get(&shared(self_ref)) {
-        Some(Ok(chunk)) => Some(Ok((Ustr::from(&mangle_fn(ws, f)), chunk))),
+        Some(Ok(chunk)) => Some(Ok((chunk.name, chunk))),
         Some(Err(err)) => Some(Err(err)),
         None => None,
     };
