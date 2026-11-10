@@ -2453,6 +2453,7 @@ dependencies = [
  "bone-core",
  "bone-semantic",
  "comfy-la-arena",
+ "libc",
  "log",
  "rayon",
  "rustc-hash",

@@ -32,9 +32,9 @@
 
 use bone_core::prelude::Instant;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use crate::wave::{take_in_order, Unit};
 use bone_core::hir::{Body, BodyOwner, Function, TypeExpr, VarId};
 use bone_core::prelude::{BoundNext, IterWitness, ModuleId, Span, TyId};
 use bone_core::workspace::{BodyInference, Workspace};
@@ -1993,28 +1993,37 @@ impl InstanceGraph {
                     // Every owner of a wave is walked with what the graph held
                     // when the wave began, so the inputs are copied before the
                     // first install. Walks then run on the pool while this
-                    // thread installs finished ones in wave order.
-                    let walks: Arc<Vec<OwnerWalk>> = Arc::new({
+                    // thread installs finished ones in wave order, walking
+                    // ahead itself when the next one is still out.
+                    let walks: Arc<Vec<Unit<OwnerWalk, WalkOutcome>>> = Arc::new({
                         use bone_core::prelude::*;
                         wave.par_iter()
-                            .map(|owner| OwnerWalk::new(owner.clone(), self.walk_inputs(owner)))
+                            .map(|owner| {
+                                Unit::new(OwnerWalk {
+                                    owner: owner.clone(),
+                                    inputs: self.walk_inputs(owner),
+                                })
+                            })
                             .collect()
                     });
+                    let run = |walk: &OwnerWalk| walk.run(ws, &interner, timing_enabled);
                     if cfg!(not(feature = "sequential")) {
                         for first in (0..walks.len()).step_by(WALK_TASK_OWNERS) {
                             let walks = walks.clone();
-                            let interner = interner.clone();
                             scope.spawn(move |_| {
                                 let end = walks.len().min(first + WALK_TASK_OWNERS);
                                 for walk in &walks[first..end] {
-                                    walk.run_unclaimed(ws, &interner, timing_enabled);
+                                    walk.run_unclaimed(run);
                                 }
                             });
                         }
                     }
-                    for (owner, walk) in wave.into_iter().zip(walks.iter()) {
+                    let mut unclaimed_from = 0;
+                    for (index, owner) in wave.into_iter().enumerate() {
                         let (mut prepared_c, mut visit_ns) =
-                            walk.finish(ws, &interner, timing_enabled);
+                            take_in_order(&walks, index, &mut unclaimed_from, run)
+                                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                        let walk = &walks[index].work;
                         let mut used_tree = owner
                             .instance()
                             .map(|_| walk.inputs.tree.clone().unwrap_or_default());
@@ -2483,60 +2492,28 @@ type WalkResult = (Option<Contribution>, u64);
 /// Owners per pool task in a wave's walk.
 const WALK_TASK_OWNERS: usize = 8;
 
-/// One owner's walk, run by whichever thread claims it first: a pool thread
-/// that picked up its task, or the installing thread once the owner's turn
-/// comes.
+/// One owner's walk over what the graph held when its wave began.
 struct OwnerWalk {
     owner: Owner,
     inputs: WalkInputs,
-    claimed: AtomicBool,
-    result: Mutex<Option<std::thread::Result<WalkResult>>>,
 }
 
+/// A walk's result, or the panic of a walk that ran away from the thread
+/// installing it.
+type WalkOutcome = std::thread::Result<WalkResult>;
+
 impl OwnerWalk {
-    fn new(owner: Owner, inputs: WalkInputs) -> Self {
-        OwnerWalk {
-            owner,
-            inputs,
-            claimed: AtomicBool::new(false),
-            result: Mutex::new(None),
-        }
-    }
-
-    fn claim(&self) -> bool {
-        !self.claimed.swap(true, Ordering::AcqRel)
-    }
-
-    fn run(&self, ws: &Workspace, interner: &MonoInterner, timing_enabled: bool) -> WalkResult {
-        // An instance whose substitution was retracted has nothing to walk;
-        // the install decides what that means.
-        if self.owner.instance().is_some() && self.inputs.subst.is_none() {
-            return (None, 0);
-        }
-        let started = timing_enabled.then(Instant::now);
-        let c = expand(ws, interner, &self.owner, &self.inputs, timing_enabled);
-        (Some(c), elapsed_ns(started))
-    }
-
-    fn run_unclaimed(&self, ws: &Workspace, interner: &MonoInterner, timing_enabled: bool) {
-        if self.claim() {
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                self.run(ws, interner, timing_enabled)
-            }));
-            *self.result.lock().expect("walk result") = Some(result);
-        }
-    }
-
-    fn finish(&self, ws: &Workspace, interner: &MonoInterner, timing_enabled: bool) -> WalkResult {
-        if self.claim() {
-            return self.run(ws, interner, timing_enabled);
-        }
-        loop {
-            if let Some(result) = self.result.lock().expect("walk result").take() {
-                return result.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    fn run(&self, ws: &Workspace, interner: &MonoInterner, timing_enabled: bool) -> WalkOutcome {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // An instance whose substitution was retracted has nothing to
+            // walk; the install decides what that means.
+            if self.owner.instance().is_some() && self.inputs.subst.is_none() {
+                return (None, 0);
             }
-            std::thread::yield_now();
-        }
+            let started = timing_enabled.then(Instant::now);
+            let c = expand(ws, interner, &self.owner, &self.inputs, timing_enabled);
+            (Some(c), elapsed_ns(started))
+        }))
     }
 }
 
