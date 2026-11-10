@@ -2051,6 +2051,8 @@ mod session_cache_tests {
 
 #[cfg(test)]
 mod reload_hold_tests {
+    use bone_core::prelude::{Duration, Instant};
+
     #[test]
     fn hold_acknowledges_and_waits_until_the_game_resumes() {
         let dir = tempfile::tempdir().unwrap();
@@ -2062,12 +2064,9 @@ mod reload_hold_tests {
             super::wait_for_reload_resume(&path).unwrap();
             tx.send(()).unwrap();
         });
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(5);
         while !control.with_extension("held").exists() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "hold was not acknowledged"
-            );
+            assert!(Instant::now() < deadline, "hold was not acknowledged");
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert!(
