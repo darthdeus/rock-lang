@@ -102,10 +102,18 @@ fn cargo_command(manifest: &Path) -> Command {
     command
 }
 
-fn cargo_library(lib: &NativeLibrary) -> Result<CargoLibrary> {
+/// Reads the library's Cargo package. Only watching needs `watch_paths`,
+/// which come from the resolved dependency graph; resolving it costs about
+/// ten times as much as reading the workspace's own packages.
+fn cargo_library(lib: &NativeLibrary, watch: bool) -> Result<CargoLibrary> {
     let output = rock_host::timed(format!("{}: cargo metadata", lib.dst_stem), || {
-        cargo_command(&lib.manifest)
-            .args(["metadata", "--format-version=1", "--manifest-path"])
+        let mut command = cargo_command(&lib.manifest);
+        command.args(["metadata", "--format-version=1"]);
+        if !watch {
+            command.arg("--no-deps");
+        }
+        command
+            .arg("--manifest-path")
             .arg(&lib.manifest)
             .stderr(Stdio::inherit())
             .output()
@@ -147,18 +155,39 @@ fn cargo_library(lib: &NativeLibrary) -> Result<CargoLibrary> {
         "{} must declare exactly one cdylib target",
         lib.manifest.display()
     );
-    let string = |value: &Value| -> Result<String> {
-        Ok(value
-            .as_str()
-            .context("expected string in Cargo metadata")?
-            .to_owned())
-    };
     let package_id = string(&package["id"])?;
+    let workspace = PathBuf::from(string(&metadata["workspace_root"])?);
+    let mut watch_paths = Vec::new();
+    if watch {
+        watch_paths = resolved_watch_paths(&metadata, packages, &package_id, &workspace)?;
+    }
+    Ok(CargoLibrary {
+        package_id,
+        package_name: string(&package["name"])?,
+        target_name: string(&targets[0]["name"])?,
+        watch_paths,
+        target_dir: PathBuf::from(string(&metadata["target_directory"])?),
+    })
+}
+
+fn string(value: &Value) -> Result<String> {
+    Ok(value
+        .as_str()
+        .context("expected string in Cargo metadata")?
+        .to_owned())
+}
+
+fn resolved_watch_paths(
+    metadata: &Value,
+    packages: &[Value],
+    package_id: &str,
+    workspace: &Path,
+) -> Result<Vec<PathBuf>> {
     let nodes = metadata["resolve"]["nodes"]
         .as_array()
         .context("Cargo metadata has no dependency graph")?;
     let mut reachable = BTreeSet::new();
-    let mut pending = vec![package_id.clone()];
+    let mut pending = vec![package_id.to_owned()];
     while let Some(id) = pending.pop() {
         if !reachable.insert(id.clone()) {
             continue;
@@ -174,7 +203,6 @@ fn cargo_library(lib: &NativeLibrary) -> Result<CargoLibrary> {
             pending.push(string(dep)?);
         }
     }
-    let workspace = PathBuf::from(string(&metadata["workspace_root"])?);
     let mut watch_paths = vec![
         workspace.join("Cargo.toml"),
         workspace.join("Cargo.lock"),
@@ -192,13 +220,7 @@ fn cargo_library(lib: &NativeLibrary) -> Result<CargoLibrary> {
                 .to_path_buf(),
         );
     }
-    Ok(CargoLibrary {
-        package_id,
-        package_name: string(&package["name"])?,
-        target_name: string(&targets[0]["name"])?,
-        watch_paths,
-        target_dir: PathBuf::from(string(&metadata["target_directory"])?),
-    })
+    Ok(watch_paths)
 }
 
 #[derive(Default)]
@@ -221,7 +243,7 @@ pub fn native_watch_inputs(libs: &[NativeLibrary]) -> Result<NativeInputs> {
     let mut paths = BTreeSet::new();
     let mut excluded = BTreeSet::new();
     for lib in libs {
-        let cargo = cargo_library(lib)?;
+        let cargo = cargo_library(lib, true)?;
         for path in &cargo.watch_paths {
             if path.is_dir() {
                 excluded.insert(path.join(".git"));
@@ -260,7 +282,7 @@ pub fn native_preamble(project: &str) -> Result<String> {
 }
 
 pub fn build_optional_engine_lib(lib: &NativeLibrary) -> Result<()> {
-    let cargo = cargo_library(lib)?;
+    let cargo = cargo_library(lib, false)?;
     log::info!("Building project native library {}", lib.dst_stem);
     let output = rock_host::timed(format!("{}: cargo build", lib.dst_stem), || {
         cargo_command(&lib.manifest)
@@ -324,7 +346,7 @@ pub fn build_optional_engine_lib(lib: &NativeLibrary) -> Result<()> {
 pub fn registry_json(libs: &[NativeLibrary]) -> Result<Value> {
     libs.iter()
         .map(|lib| {
-            let cargo = cargo_library(lib)?;
+            let cargo = cargo_library(lib, false)?;
             Ok(
                 serde_json::json!({ "need": lib.need, "crate": cargo.package_name,
             "manifest": lib.manifest, "stage_dir": lib.stage_dir, "src_stem": cargo.target_name,
