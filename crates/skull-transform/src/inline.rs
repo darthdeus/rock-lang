@@ -2046,7 +2046,7 @@ fn forward_param_reads(
 ) -> SmallVec<[(Idx<Inst>, Idx<Inst>); 8]> {
     let mut forwarded: SmallVec<[(Idx<Inst>, Idx<Inst>); 8]> = SmallVec::new();
     for &(p, read) in &cand.forwardable_reads {
-        if !scratch.coalesced[p] {
+        if !scratch.coalesced[p] && forwards_arg(func, args[p]) {
             forwarded.push((scratch.inst_map[&read], args[p]));
         }
     }
@@ -2067,6 +2067,20 @@ fn forward_param_reads(
         }
     }
     forwarded
+}
+
+/// Whether a splice hands `arg` to the parameter's reads. An aggregate
+/// constructor keeps its parameter cell: scalar replacement splits a
+/// constructor stored to a cell, not one whose fields are read off the value.
+fn forwards_arg(func: &MirFunc, arg: Idx<Inst>) -> bool {
+    !matches!(
+        func.insts[arg],
+        Inst::MakeStruct { .. }
+            | Inst::MakeValueStruct { .. }
+            | Inst::MakeTuple(..)
+            | Inst::MakeEnum { .. }
+            | Inst::MakeEnumDyn { .. }
+    )
 }
 
 /// The reads of a body's coalescable parameters that a splice may rewire to
@@ -3310,7 +3324,9 @@ fn splice_straight(
                 cell: pc,
                 value: *arg,
             });
-            if !cand.reads_all_forwardable.get(i).copied().unwrap_or(false) {
+            if !cand.reads_all_forwardable.get(i).copied().unwrap_or(false)
+                || !forwards_arg(func, *arg)
+            {
                 uses.add_inst(func, store);
                 new_insts.push(store);
             }
@@ -3474,7 +3490,8 @@ fn splice_general(
             cell: pc,
             value: *arg,
         });
-        if !cand.reads_all_forwardable.get(i).copied().unwrap_or(false) {
+        if !cand.reads_all_forwardable.get(i).copied().unwrap_or(false) || !forwards_arg(func, *arg)
+        {
             uses.add_inst(func, store);
             prefix.push(store);
         }
