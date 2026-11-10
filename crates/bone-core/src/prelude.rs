@@ -149,6 +149,17 @@ pub use rayon::iter::{
 #[cfg(not(feature = "sequential"))]
 pub use rayon::join as par_join;
 
+/// Free `value` on the pool instead of the calling thread.
+#[cfg(not(any(feature = "sequential", target_arch = "wasm32")))]
+pub fn drop_in_background<T: Send + 'static>(value: T) {
+    rayon::spawn(move || drop(value));
+}
+
+#[cfg(any(feature = "sequential", target_arch = "wasm32"))]
+pub fn drop_in_background<T>(value: T) {
+    drop(value);
+}
+
 #[cfg(feature = "sequential")]
 pub use sequential_par::*;
 

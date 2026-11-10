@@ -1565,7 +1565,11 @@ impl NamespaceInput {
                 rejected.map_or(Ok(()), Err)
             }
             Self::Fragments(contributions) => {
-                assemble_namespaces(ws, &contributions.iter().collect_vec(), aliases)
+                let built = assemble_namespaces(ws, &contributions.iter().collect_vec(), aliases);
+                // The tree owns what it kept; the rest is not this thread's
+                // work while expansion waits on the join.
+                drop_in_background(contributions);
+                built
             }
         }
     }
