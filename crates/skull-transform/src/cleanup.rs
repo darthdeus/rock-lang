@@ -203,6 +203,11 @@ pub fn cleanup(func: &mut MirFunc) -> Result<(), CompilerError> {
 }
 
 pub(crate) fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(), CompilerError> {
+    // Code after a raising call lowers into a block nothing reaches; its
+    // `return` would keep the values it reads alive.
+    if has_unreached_code(func) {
+        clear_unreachable_blocks(func);
+    }
     scalarize_native_buffer_stores(func);
     // SROA and copy-prop/DCE INTERLEAVE to a fixpoint: peeling a cursor struct
     // leaves its (now-dead) ctor behind, and that ctor's operand uses pin the
@@ -393,8 +398,7 @@ fn fold_never_nil_compares(func: &mut MirFunc) -> bool {
 }
 
 /// Fold `Branch` on a constant bool condition into a `Goto`, then clear blocks
-/// no longer reachable from any root (fn entry, lambda entries, co-fn defer
-/// guards -- the latter two are detached sub-CFGs by design and must survive).
+/// no longer reachable (see [`clear_unreachable_blocks`]).
 /// `loop {}` lowers to a `while true` shape whose const branch hides the loop
 /// head from the FORL matcher's goto-chase (the filter combinator's skip loop)
 /// and leaves a dead exit arm in the emitted Lua. Returns whether anything
@@ -418,6 +422,47 @@ pub fn fold_const_branches(func: &mut MirFunc) -> bool {
     if !changed {
         return false;
     }
+    clear_unreachable_blocks(func);
+    true
+}
+
+/// Whether a block the entry and defer guards do not reach still holds code
+/// or a forced cell. A cheap filter for [`clear_unreachable_blocks`]: it
+/// leaves lambda entries out, so a body with a lambda always passes.
+fn has_unreached_code(func: &MirFunc) -> bool {
+    let mut reach = vec![false; func.blocks.len()];
+    let mut stack = vec![func.entry];
+    stack.extend(func.coro_defers.iter().map(|(_, e)| *e));
+    for b in &stack {
+        reach[raw(*b) as usize] = true;
+    }
+    while let Some(b) = stack.pop() {
+        skull_mir::cfg::successors(&func.blocks[b].term, |t| {
+            if !std::mem::replace(&mut reach[raw(t) as usize], true) {
+                stack.push(t);
+            }
+        });
+    }
+    let holds_code = func.blocks.iter().any(|(b, block)| {
+        !reach[raw(b) as usize]
+            && (!block.insts.is_empty() || !matches!(block.term, Term::Unreachable))
+    });
+    holds_code
+        || func.emit_ids.as_ref().is_some_and(|ids| {
+            let reached: rustc_hash::FxHashSet<u32> = func
+                .blocks
+                .iter()
+                .filter(|(b, _)| reach[raw(*b) as usize])
+                .map(|(b, _)| func.emit_block_id(b))
+                .collect();
+            ids.forced_cell_blocks.iter().any(|b| !reached.contains(b))
+        })
+}
+
+/// Clear blocks no longer reachable from any root (fn entry, lambda entries,
+/// co-fn defer guards -- the latter two are detached sub-CFGs by design and
+/// must survive). Returns whether a cleared block held anything.
+fn clear_unreachable_blocks(func: &mut MirFunc) -> bool {
     let mut roots = vec![func.entry];
     roots.extend(func.coro_defers.iter().map(|(_, e)| *e));
     for (_, inst) in func.insts.iter() {
@@ -451,13 +496,15 @@ pub fn fold_const_branches(func: &mut MirFunc) -> bool {
         ids.forced_cells = forced_cells;
         ids.forced_cell_blocks = forced_cell_blocks;
     }
-    for b in bids {
+    let mut cleared = false;
+    for (b, block) in func.blocks.iter_mut() {
         if !reach.contains(&b) {
-            func.blocks[b].insts.clear();
-            func.blocks[b].term = Term::Unreachable;
+            cleared |= !block.insts.is_empty() || !matches!(block.term, Term::Unreachable);
+            block.insts.clear();
+            block.term = Term::Unreachable;
         }
     }
-    true
+    cleared
 }
 
 /// Whether instruction `i` is removable given the current reference counts: a
@@ -554,6 +601,21 @@ mod tests {
         let cp = copy_propagate_analysis(&f, None);
         let stale = dce_core(&mut f, cp.as_ref());
         assert!(!stale && !cp.is_some_and(|cp| cp.exposes_more), "{f}");
+    }
+
+    /// Code after a raising call lowers into a block nothing reaches. Its
+    /// `return` must not keep alive the values only it reads, such as the
+    /// leaves of a defaulted fallback.
+    #[test]
+    fn a_return_after_a_raise_keeps_no_values_alive() {
+        let mut f = MirFunc::new(ustr::Ustr::from("raise"));
+        let fallback = f.emit(f.entry, Inst::Const(Lit::Int(7)));
+        let one = f.emit(f.entry, Inst::Const(Lit::Int(1)));
+        f.set_term(f.entry, Term::Return(vec![one]));
+        let after_raise = f.new_block();
+        f.set_term(after_raise, Term::Return(vec![fallback]));
+        cleanup(&mut f).unwrap();
+        assert!(!f.blocks[f.entry].insts.contains(&fallback), "{f}");
     }
 
     #[test]
