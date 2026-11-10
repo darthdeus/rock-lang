@@ -912,7 +912,7 @@ pub(super) fn assemble(
     // of the ROOT INPUT the graph and the view were built from -- see
     // [`all_roots`] -- so there is no second population source here.
     // A full build delivers its specializations from the fan-out.
-    let (spec_chunks, spec_rejected) = specs.unwrap_or_else(|| {
+    let (mut spec_chunks, spec_rejected) = specs.unwrap_or_else(|| {
         view_driven_specialized_chunks(ws, &cache.cg, &cache.scx, cache, &asm.needed_specs)
     });
     if lifetime == CacheLifetime::OneShot {
@@ -939,12 +939,13 @@ pub(super) fn assemble(
 
     let mut definitions = LuaDefinitionWriter::new(std::mem::take(&mut asm.out));
     asm.push_function_definitions(ws, cache, &needed_foreign, &mut definitions)?;
+    let specialized_instances: Vec<_> = spec_chunks.keys().cloned().collect();
     asm.rejections.extend(emit_specialized_callees(
         ws,
         &cache.scx,
         &mut asm.needed_specs,
         &cache.chunks,
-        &spec_chunks,
+        &mut spec_chunks,
         &spec_rejected,
         built_specs,
         &mut asm.allocation_bodies,
@@ -954,13 +955,15 @@ pub(super) fn assemble(
         &mut asm.attribution,
         &mut asm.times,
     ));
+    // A built spec moved out of `spec_chunks` was merged from both, so it
+    // still is: the merged census feeds the artifact fingerprint.
     for chunk in spec_chunks.values() {
         asm.code_artifact.merge_ref(&chunk.code_artifact);
     }
     for (_, chunk) in built_specs.iter() {
         asm.code_artifact.merge_ref(&chunk.code_artifact);
+        asm.code_artifact.merge_ref(&chunk.code_artifact);
     }
-    let specialized_instances: Vec<_> = spec_chunks.keys().cloned().collect();
     let one_shot_reads = (lifetime == CacheLifetime::OneShot).then(|| {
         release_one_shot_chunks(
             cache,

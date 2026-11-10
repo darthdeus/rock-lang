@@ -930,7 +930,7 @@ pub(super) fn emit_specialized_callees(
     scx: &skull_mir::lower::ScalarCtx,
     pending: &mut Vec<skull_mir::bound::SpecDemand>,
     cached: &FxHashMap<Instance, Result<Chunk, CompilerError>>,
-    live: &FxHashMap<Instance, Chunk>,
+    live: &mut FxHashMap<Instance, Chunk>,
     rejected: &[(String, CompilerError)],
     built: &mut Vec<(Instance, Chunk)>,
     allocation_bodies: &mut Vec<crate::allocation_report::AllocationBody>,
@@ -951,8 +951,15 @@ pub(super) fn emit_specialized_callees(
         }
         let f = &ws.module(fref.module).functions[fref.func];
         let name = body.symbol(ws, scx.interner());
-        let Some(chunk) = live
-            .get(&body)
+        // A body built for this build moves into `built` instead of copying.
+        let owned = if cached.contains_key(&body) {
+            None
+        } else {
+            live.remove(&body)
+        };
+        let Some(chunk) = owned
+            .as_ref()
+            .or_else(|| live.get(&body))
             .or_else(|| cached.get(&body).and_then(|c| c.as_ref().ok()))
         else {
             // Not a fallback: the walk either built this body or recorded why it
@@ -979,8 +986,8 @@ pub(super) fn emit_specialized_callees(
         // enters the output -- the declaration loop never sees one.
         statics.extend(chunk.statics.iter().cloned());
         pending.extend(chunk.specs.iter().cloned());
-        if !cached.contains_key(&body) {
-            built.push((body.clone(), chunk.clone()));
+        if let Some(chunk) = owned {
+            built.push((body, chunk));
         }
     }
     errs.sort_by(|(a, _), (b, _)| a.cmp(b));
