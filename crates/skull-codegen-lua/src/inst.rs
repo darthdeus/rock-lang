@@ -135,14 +135,47 @@ impl Emitter<'_> {
             write_vname(&mut lv, self.func, &self.colors, result);
         }
 
-        out.push_str(" do\n");
+        // A parameter the body only reads takes a plain operand in place of a
+        // local copy of it: the body writes no register of the caller, and
+        // its result register is assigned by the last statement only.
+        let names = lua_names_of(body.as_str());
+        let mut locals = String::new();
+        let mut stand_ins = Vec::new();
         for (p, a) in callee.param_decls.iter().zip(args.iter()) {
-            let _ = write!(out, "  local {} = ", p.name);
-            self.write_opnd(out, *a);
-            out.push('\n');
+            let mut operand = String::new();
+            self.write_opnd(&mut operand, *a);
+            let standalone = operand
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                || one_group(&operand);
+            // A pure expression the body reads at most once may also move to
+            // that read: nothing the body does can change its value.
+            let movable = || {
+                self.opnd_is_plain(*a)
+                    || self.folds_pure(*a)
+                        && param_reads(body.as_str(), p.name.as_str()).is_some_and(|n| n <= 1)
+            };
+            if standalone
+                && !names.contains(&operand.as_str())
+                && movable()
+                && reads_param_only(body.as_str(), p.name.as_str())
+            {
+                stand_ins.push((p.name.as_str(), operand));
+            } else {
+                let _ = writeln!(locals, "  local {} = {operand}", p.name);
+            }
         }
-        render_spliced_inline_lua(out, body.as_str(), shape, &lv);
-        out.push_str(" end\n");
+        let subs: Vec<(&str, &str)> = stand_ins.iter().map(|(p, o)| (*p, o.as_str())).collect();
+        let body = substitute_params(body.as_str(), &subs);
+        let block = !locals.is_empty() || lv.starts_with("local") || declares_names(&body);
+        if block {
+            out.push_str(" do\n");
+        }
+        out.push_str(&locals);
+        render_spliced_inline_lua(out, &body, shape, &lv);
+        if block {
+            out.push_str(" end\n");
+        }
         true
     }
 

@@ -81,6 +81,7 @@ mod inline_constant_argument;
 
 mod graph_contributions;
 mod inline_lua_column_container_param_sentinel;
+mod inline_lua_splice;
 mod inline_value_specialization;
 mod live_call_conversion;
 mod parallel_inline_mode;

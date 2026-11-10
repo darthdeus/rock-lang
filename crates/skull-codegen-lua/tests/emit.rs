@@ -998,8 +998,8 @@ fn exec_string_concat() {
 
 #[test]
 fn inline_lua_with_inline_annotation_is_spliced() {
-    // `@inline inline(lua)` is SPLICED at the call site (params bound to locals,
-    // tail `return X` rewritten to `<result> = X`) instead of emitting a
+    // `@inline inline(lua)` is SPLICED at the call site (a read-only param
+    // reads the caller's local, tail `return X` becomes `<result> = X`) instead of emitting a
     // `callee(args)` call -- so the body runs in the caller's scope (LuaJIT can
     // sink any cdata it produces; a call boundary blocks that).
     let body = emit(
@@ -1012,8 +1012,8 @@ fn inline_lua_with_inline_annotation_is_spliced() {
         "@inline inline(lua) should be spliced, not called:\n{body}"
     );
     assert!(
-        body.contains("local x = "),
-        "spliced body should bind the param to a local:\n{body}"
+        body.contains(" = c0 * 2\n") && !body.contains("local x"),
+        "a read-only param should read the caller's local:\n{body}"
     );
 }
 
@@ -2146,7 +2146,7 @@ fn callee_binding_keeps_full_names_with_live_inline_lua_calls() {
         "an inline(lua) call must retain the full capture parameter name:\n{bound}"
     );
     assert!(
-        bound.contains("leaf_int(c0)") && bound.contains("r1 = b0(a)"),
+        bound.contains("leaf_int(c0)") && bound.contains("r1 = b0(c0)"),
         "expected the existing capture name and live inline Lua body:\n{bound}"
     );
     assert!(

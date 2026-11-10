@@ -31,6 +31,22 @@ impl Emitter<'_> {
         effect
     }
 
+    /// `id` renders in place as an expression of registers, cells and
+    /// constants that reads no other memory, calls nothing and cannot fail.
+    pub(crate) fn folds_pure(&self, id: Idx<Inst>) -> bool {
+        if !self.inlinable[raw(id) as usize] {
+            return true;
+        }
+        let inst = &self.func.insts[id];
+        if matches!(inst, Inst::Load(_)) {
+            return true;
+        }
+        let mut pure =
+            skull_mir::sinking::always_inlinable(inst) && !skull_mir::sinking::may_throw(inst);
+        regalloc::inst_uses(inst, &mut |u| pure = pure && self.folds_pure(u));
+        pure
+    }
+
     pub(crate) fn write_kills(&self, out: &mut String, locals: &[regalloc::KillLocal]) {
         for local in locals {
             out.push(' ');

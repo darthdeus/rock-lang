@@ -76,7 +76,9 @@ pub(crate) fn render_spliced_inline_lua(
 ) {
     match shape {
         InlineLuaShape::Expr => {
-            let _ = writeln!(out, "  {lv} = {}", body.trim());
+            if body.trim() != lv {
+                let _ = writeln!(out, "  {lv} = {}", body.trim());
+            }
         }
         InlineLuaShape::UnitStmts => {
             for line in body.lines() {
@@ -93,6 +95,7 @@ pub(crate) fn render_spliced_inline_lua(
                 }
                 match inline_lua_return_rest(line) {
                     Some("") => {} // bare tail return: nothing to bind (unit)
+                    Some(rest) if rest == lv => {}
                     Some(rest) => {
                         let _ = writeln!(out, "  {lv} = {rest}");
                     }
@@ -148,4 +151,178 @@ fn is_expr_inline_lua_body(s: &str) -> bool {
         }
     }
     true
+}
+
+/// The byte ranges of the identifiers and keywords in a Lua body, skipping
+/// strings, comments and numbers.
+fn lua_names(body: &str) -> Vec<(usize, usize)> {
+    let b = body.as_bytes();
+    // `[`, `=`* and `[` open a long bracket; returns its level and length.
+    let long_open = |i: usize| -> Option<(usize, usize)> {
+        let level = b[i + 1..].iter().take_while(|&&c| c == b'=').count();
+        (b.get(i + 1 + level) == Some(&b'[')).then_some((level, level + 2))
+    };
+    let long_close = |from: usize, level: usize| -> usize {
+        let close = format!("]{}]", "=".repeat(level));
+        body[from..]
+            .find(&close)
+            .map_or(b.len(), |at| from + at + close.len())
+    };
+    let mut names = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'-' && b.get(i + 1) == Some(&b'-') {
+            i += 2;
+            match (b.get(i) == Some(&b'[')).then(|| long_open(i)).flatten() {
+                Some((level, len)) => i = long_close(i + len, level),
+                None => i = body[i..].find('\n').map_or(b.len(), |at| i + at),
+            }
+        } else if c == b'[' && long_open(i).is_some() {
+            let (level, len) = long_open(i).unwrap_or_default();
+            i = long_close(i + len, level);
+        } else if c == b'"' || c == b'\'' {
+            i += 1;
+            while i < b.len() && b[i] != c {
+                i += if b[i] == b'\\' { 2 } else { 1 };
+            }
+            i += 1;
+        } else if c.is_ascii_digit() {
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'.' || b[i] == b'_') {
+                i += 1;
+            }
+        } else if c.is_ascii_alphabetic() || c == b'_' {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            names.push((start, i));
+        } else {
+            i += 1;
+        }
+    }
+    names
+}
+
+/// The identifiers and keywords a Lua body spells.
+pub(crate) fn lua_names_of(body: &str) -> Vec<&str> {
+    lua_names(body)
+        .into_iter()
+        .map(|(s, e)| &body[s..e])
+        .collect()
+}
+
+/// The occurrences of `name` in `body` that refer to a variable: not a field
+/// after `.` or `:` (a `..` concatenation still reads it).
+fn variable_refs<'a>(
+    body: &'a str,
+    names: &'a [(usize, usize)],
+    name: &'a str,
+) -> impl Iterator<Item = (usize, usize)> + 'a {
+    names.iter().copied().filter(move |&(s, e)| {
+        let before = body[..s].trim_end();
+        &body[s..e] == name
+            && !(before.ends_with(':') || before.ends_with('.') && !before.ends_with(".."))
+    })
+}
+
+/// True if `body` only reads parameter `name`: it never assigns, declares or
+/// captures it, so a plain local of the caller can stand in for it.
+pub(crate) fn reads_param_only(body: &str, name: &str) -> bool {
+    let names = lua_names(body);
+    let keyword = |w: &str| names.iter().any(|&(s, e)| &body[s..e] == w);
+    if keyword("function") || keyword("goto") {
+        return false;
+    }
+    variable_refs(body, &names, name).all(|(s, e)| {
+        let before = body[..s].trim_end();
+        let after = body[e..].trim_start();
+        let assigned = after.starts_with('=') && !after.starts_with("==");
+        // `p, q = ...` assigns `p` too; a comma inside a call or constructor
+        // does not, so only a statement that opens with a name list counts.
+        let line = &before[before.rfind('\n').map_or(0, |at| at + 1)..];
+        let listed = after.starts_with(',')
+            && !line.contains(['(', '{', '='])
+            && !line.trim_start().starts_with("return");
+        let declared = ["local", "for"].iter().any(|kw| {
+            before
+                .strip_suffix(kw)
+                .is_some_and(|rest| !rest.ends_with(|c: char| c.is_alphanumeric() || c == '_'))
+        }) || line.trim_start().starts_with("for ");
+        !(assigned || listed || declared)
+    })
+}
+
+/// `body` with each variable reference to a parameter in `subs` replaced by
+/// its stand-in. A stand-in is a name or a parenthesized expression, so it
+/// keeps its meaning in any operand position.
+pub(crate) fn substitute_params(body: &str, subs: &[(&str, &str)]) -> String {
+    let names = lua_names(body);
+    let mut refs: Vec<(usize, usize, &str)> = subs
+        .iter()
+        .flat_map(|&(name, to)| variable_refs(body, &names, name).map(move |(s, e)| (s, e, to)))
+        .collect();
+    refs.sort_unstable_by_key(|r| r.0);
+    let mut out = String::with_capacity(body.len());
+    let mut at = 0;
+    for (s, e, to) in refs {
+        out.push_str(&body[at..s]);
+        out.push_str(to);
+        at = e;
+    }
+    out.push_str(&body[at..]);
+    out
+}
+
+/// How many times `body` reads parameter `name`, or `None` if a loop may
+/// read it more than once per splice.
+pub(crate) fn param_reads(body: &str, name: &str) -> Option<usize> {
+    let names = lua_names(body);
+    if names
+        .iter()
+        .any(|&(s, e)| matches!(&body[s..e], "for" | "while" | "repeat"))
+    {
+        return None;
+    }
+    Some(variable_refs(body, &names, name).count())
+}
+
+/// True if `s` is one parenthesized group, so it reads as a single operand
+/// wherever it is spelled.
+pub(crate) fn one_group(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.first() != Some(&b'(') || b.last() != Some(&b')') {
+        return false;
+    }
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut i = 0;
+    while i < b.len() {
+        match (quote, b[i]) {
+            (Some(_), b'\\') => i += 1,
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, c @ (b'"' | b'\'')) => quote = Some(c),
+            (None, b'(') => depth += 1,
+            (None, b')') => {
+                depth -= 1;
+                if depth == 0 && i + 1 < b.len() {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    depth == 0
+}
+
+/// True if `body` declares or labels anything, so splicing it needs a block
+/// to scope its names.
+pub(crate) fn declares_names(body: &str) -> bool {
+    let names = lua_names(body);
+    body.contains("::")
+        || names
+            .iter()
+            .any(|&(s, e)| matches!(&body[s..e], "local" | "for"))
 }
