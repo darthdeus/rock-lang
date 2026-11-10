@@ -78,19 +78,13 @@ pub(super) fn graph_rejection_error(
     ws: &Workspace,
     graph: &crate::instance_graph::InstanceGraph,
 ) -> Option<CompilerError> {
-    let mut callers: Option<
-        FxHashMap<&crate::instance_graph::Instance, Vec<&crate::instance_graph::Edge>>,
-    > = None;
-    for rejection in graph.rejections() {
+    let rejections: Vec<&crate::instance_graph::Rejection> = graph.rejections().collect();
+    let mut identity_walk = None;
+    for rejection in &rejections {
         if rejection.kind == crate::instance_graph::RejectionKind::IdentityInOrdinaryStorage {
-            let callers = callers.get_or_insert_with(|| {
-                let mut map: FxHashMap<_, Vec<_>> = FxHashMap::default();
-                for edge in graph.edges() {
-                    map.entry(&edge.to).or_default().push(edge);
-                }
-                map
-            });
-            if let Some(err) = identity_instance_rejection_error(ws, graph, callers, rejection) {
+            let walk = identity_walk
+                .get_or_insert_with(|| IdentityRejectionWalk::new(ws, graph, &rejections));
+            if let Some(err) = walk.error(ws, rejection) {
                 return Some(err);
             }
             continue;
@@ -106,58 +100,125 @@ pub(super) fn graph_rejection_error(
     None
 }
 
+fn identity_storage_exempt(ws: &Workspace, instance: &crate::instance_graph::Instance) -> bool {
+    bone_semantic::identity_storage::identity_storage_exempt(ws, ws.module(instance.func.module))
+}
+
 /// An instance's identity-storage rejection belongs to the package whose call
 /// site instantiated it. The walk goes back
 /// from the instance through its callers; a caller in an exempt package whose
 /// own type arguments carry an identity only forwarded it, so its callers are
 /// asked in turn. Any other caller introduced the identity, and the rejection is
 /// fatal when that caller's package is not exempt.
-fn identity_instance_rejection_error(
-    ws: &Workspace,
-    graph: &crate::instance_graph::InstanceGraph,
-    callers: &FxHashMap<&crate::instance_graph::Instance, Vec<&crate::instance_graph::Edge>>,
-    rejection: &crate::instance_graph::Rejection,
-) -> Option<CompilerError> {
-    let exempt = |instance: &crate::instance_graph::Instance| {
-        bone_semantic::identity_storage::identity_storage_exempt(
-            ws,
-            ws.module(instance.func.module),
-        )
-    };
-    let mut seen = FxHashSet::default();
-    let mut work = vec![&rejection.at];
-    let mut reached_by_edge = false;
-    while let Some(instance) = work.pop() {
-        if !seen.insert(instance) {
-            continue;
+struct IdentityRejectionWalk<'g> {
+    /// The instances that only forward an identity to their callees.
+    forwarders: FxHashSet<&'g crate::instance_graph::Instance>,
+    /// The edges into every rejected instance and every forwarder, in owner
+    /// order. No walk asks for the callers of anything else.
+    callers: FxHashMap<&'g crate::instance_graph::Instance, Vec<&'g crate::instance_graph::Edge>>,
+    /// Instances a walk already went through without finding an introducing
+    /// caller. A later rejection reaching one has nothing left to find there.
+    cleared: FxHashSet<&'g crate::instance_graph::Instance>,
+}
+
+impl<'g> IdentityRejectionWalk<'g> {
+    fn new(
+        ws: &Workspace,
+        graph: &'g crate::instance_graph::InstanceGraph,
+        rejections: &[&'g crate::instance_graph::Rejection],
+    ) -> Self {
+        use bone_core::prelude::*;
+        // The graph keeps no caller index in a full build, so the pool reads
+        // every owner twice: once for the forwarders, once for the edges
+        // into them.
+        let owners: Vec<(
+            &crate::instance_graph::Owner,
+            &crate::instance_graph::Contribution,
+        )> = graph
+            .contributions
+            .iter()
+            .map(|(owner, c)| (owner, &**c))
+            .collect();
+        let forwarders: FxHashSet<&crate::instance_graph::Instance> = owners
+            .par_iter()
+            .filter_map(|(owner, _)| owner.instance())
+            .filter(|caller| {
+                identity_storage_exempt(ws, caller)
+                    && caller.args.iter().any(|arg| {
+                        skull_graph::identity_storage::stores_identity(
+                            ws,
+                            &graph.interner().get(*arg),
+                        )
+                    })
+            })
+            .collect();
+        let rejected: FxHashSet<&crate::instance_graph::Instance> = rejections
+            .iter()
+            .filter(|rejection| {
+                rejection.kind == crate::instance_graph::RejectionKind::IdentityInOrdinaryStorage
+            })
+            .map(|rejection| &rejection.at)
+            .collect();
+        // Nearly every edge targets a plain instance, which is ruled out
+        // without hashing it when no plain instance was rejected.
+        let plain = rejected.iter().any(|instance| instance.args.is_empty());
+        let into: Vec<Vec<&crate::instance_graph::Edge>> = owners
+            .par_iter()
+            .map(|(_, c)| {
+                c.edges
+                    .iter()
+                    .filter(|edge| {
+                        (plain || !edge.to.args.is_empty())
+                            && (rejected.contains(&edge.to) || forwarders.contains(&edge.to))
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut callers: FxHashMap<_, Vec<_>> = FxHashMap::default();
+        for edge in into.into_iter().flatten() {
+            callers.entry(&edge.to).or_default().push(edge);
         }
-        for edge in callers.get(instance).into_iter().flatten() {
-            reached_by_edge = true;
-            let forwarded = exempt(&edge.from)
-                && edge.from.args.iter().any(|arg| {
-                    skull_graph::identity_storage::stores_identity(ws, &graph.interner().get(*arg))
-                });
-            if forwarded {
-                work.push(&edge.from);
-            } else if !exempt(&edge.from) {
-                let callee = &ws.module(rejection.at.func.module).functions[rejection.at.func.func];
-                return Some(
-                    CompilerError::new_with_label(rejection.span, rejection.message.clone())
-                        .with_label(
-                            edge.span,
-                            format!(
-                                "`{}` is instantiated from here with an identity struct",
-                                callee.name
-                            ),
-                        ),
-                );
-            }
+        IdentityRejectionWalk {
+            forwarders,
+            callers,
+            cleared: FxHashSet::default(),
         }
     }
-    // An instance no edge reaches is rooted by an always-emitted body; the
-    // instance's own package answers for it.
-    (!reached_by_edge && !exempt(&rejection.at))
-        .then(|| CompilerError::new_with_label(rejection.span, rejection.message.clone()))
+
+    fn error(
+        &mut self,
+        ws: &Workspace,
+        rejection: &'g crate::instance_graph::Rejection,
+    ) -> Option<CompilerError> {
+        let mut work = vec![&rejection.at];
+        while let Some(instance) = work.pop() {
+            if !self.cleared.insert(instance) {
+                continue;
+            }
+            for edge in self.callers.get(instance).into_iter().flatten() {
+                if self.forwarders.contains(&edge.from) {
+                    work.push(&edge.from);
+                } else if !identity_storage_exempt(ws, &edge.from) {
+                    let callee =
+                        &ws.module(rejection.at.func.module).functions[rejection.at.func.func];
+                    return Some(
+                        CompilerError::new_with_label(rejection.span, rejection.message.clone())
+                            .with_label(
+                                edge.span,
+                                format!(
+                                    "`{}` is instantiated from here with an identity struct",
+                                    callee.name
+                                ),
+                            ),
+                    );
+                }
+            }
+        }
+        // An instance no edge reaches is rooted by an always-emitted body; the
+        // instance's own package answers for it.
+        (!self.callers.contains_key(&rejection.at) && !identity_storage_exempt(ws, &rejection.at))
+            .then(|| CompilerError::new_with_label(rejection.span, rejection.message.clone()))
+    }
 }
 
 pub(super) fn shader_registration_lines(

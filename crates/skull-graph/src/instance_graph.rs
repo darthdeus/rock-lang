@@ -4302,15 +4302,24 @@ impl InstanceGraph {
         )
     }
 
+    /// Every row of one per-owner list, in owner order. Few owners have
+    /// any, and finding those is the work, so the pool looks.
+    fn owner_rows<T: Sync>(&self, rows: impl Fn(&Contribution) -> &[T] + Sync) -> Vec<&T> {
+        use bone_core::prelude::*;
+        let owners: Vec<&Contribution> = self.contributions.values().map(Box::as_ref).collect();
+        let found: Vec<&[T]> = owners
+            .par_iter()
+            .map(|c| rows(c))
+            .filter(|rows| !rows.is_empty())
+            .collect();
+        found.into_iter().flatten().collect()
+    }
+
     /// Every rejection: the per-body ones and the whole-graph ones.
     pub fn rejections(&self) -> impl Iterator<Item = &Rejection> {
         // Type IDs reflect parallel interning order. Preserve declaration and
         // per-body rejection order, but order specializations by logical type.
-        let mut ordinary: Vec<_> = self
-            .contributions
-            .values()
-            .flat_map(|c| c.rejections.iter())
-            .collect();
+        let mut ordinary = self.owner_rows(|c| &c.rejections);
         ordinary.sort_by_cached_key(|rejection| self.diagnostic_key(&rejection.at));
         let mut graph: Vec<_> = self.graph_rejections.iter().collect();
         graph.sort_by_cached_key(|rejection| self.diagnostic_key(&rejection.at));
