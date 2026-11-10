@@ -195,6 +195,8 @@ impl Default for Span {
     }
 }
 
+// The file name is pointer-sized, so the span is smaller still on 32-bit targets.
+#[cfg(target_pointer_width = "64")]
 const _: () = assert!(std::mem::size_of::<Span>() == 32);
 
 fn narrow((first, last): (usize, usize)) -> (u32, u32) {
