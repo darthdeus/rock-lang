@@ -1512,6 +1512,14 @@ pub fn assemble_namespaces(
             pkg.aliases.insert(*alias, *target);
         }
     }
+    // Size the definition table once instead of rehashing it as it grows.
+    let defs = contributions
+        .iter()
+        .flat_map(|contribution| &contribution.items)
+        .filter(|item| matches!(item, ScopeItem::Def { .. }))
+        .count();
+    ws.defs.reserve(defs);
+    ws.fragment_scopes.reserve(contributions.len());
     for contribution in contributions.iter() {
         if is_stdlib_module_file(contribution.file.as_str()) {
             register_stdlib_items(ws, contribution)?;
@@ -2147,6 +2155,16 @@ fn register_items(
         }
     }
 
+    // Every definition of this call sits on the node of `path`.
+    let node_key = NsPackage::path_key(path);
+    let mut def_key_buf = scope.package_name.to_string();
+    for seg in path {
+        def_key_buf.push_str("::");
+        def_key_buf.push_str(seg);
+    }
+    def_key_buf.push_str("::");
+    let def_key_prefix = def_key_buf.len();
+
     for item in items {
         match item {
             ScopeItem::Module {
@@ -2167,7 +2185,7 @@ fn register_items(
                 }
                 // Record the child on the parent node.
                 {
-                    let parent_key = NsPackage::path_key(path);
+                    let parent_key = node_key;
                     let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package");
                     let parent = pkg.nodes.entry(parent_key).or_insert_with(|| NsNode {
                         path_key: parent_key,
@@ -2248,14 +2266,16 @@ fn register_items(
                     }
                 }
                 let pkg = ws.ns.packages.get_mut(&pkg_id).expect("package");
-                let key = NsPackage::path_key(path);
+                let key = node_key;
                 let node = pkg.nodes.entry(key).or_insert_with(|| NsNode {
                     path_key: key,
                     segments: path.to_vec(),
                     ..Default::default()
                 });
-                let def_key =
-                    bone_core::modules::def_key(scope.package_name.as_ref(), path, bare.as_str());
+                // `def_key(package, path, bare)` without joining the path again.
+                def_key_buf.truncate(def_key_prefix);
+                def_key_buf.push_str(&bare);
+                let def_key = ustr::Ustr::from(&def_key_buf);
                 let callable_overload =
                     kind == "callable" && node.owned_callables.contains_key(&bare);
                 let taken = node.owned_types.contains_key(&bare)
