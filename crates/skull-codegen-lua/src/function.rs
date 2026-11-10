@@ -352,7 +352,7 @@ fn emit_named_framed_with_statics_impl(
     let flow = regalloc::Flow::new(func, &rpo);
     let pinned = regalloc::pinned_cells(func, &flow);
     REGALLOC_TIME.with(|c| c.set(c.get() + t_cells.elapsed()));
-    let (mut inlinable, repeatable, readers) = compute_inlinable(func, &rpo, params, &pinned);
+    let (mut inlinable, repeatable, uses) = compute_inlinable(func, &rpo, params, &pinned);
     for tail in tail_forwards.iter().flatten() {
         for &id in &tail.suppressed[1..] {
             inlinable[raw(id) as usize] = true;
@@ -376,6 +376,7 @@ fn emit_named_framed_with_statics_impl(
             &suppressed,
             &call_arg_forwards,
             ctx.line_directives() && !name.is_empty(),
+            &uses,
         )
     } else {
         vec![false; func.insts.len()]
@@ -443,7 +444,7 @@ fn emit_named_framed_with_statics_impl(
         &pinned,
         frame_cell.as_slice(),
         &reads,
-        readers,
+        uses.count,
     );
     let cell_colors = locals.color_cells();
     REGALLOC_TIME.with(|c| c.set(c.get() + t_locals.elapsed()));
