@@ -480,9 +480,12 @@ pub fn use_insertion(
         .find(|(start, end)| src[line_start(*start)..(*end).min(src.len())] > *line.as_str());
     let at = match (
         later,
-        uses.last()
-            .map(|u| u.1)
-            .or_else(|| contribution.header.as_ref().map(|h| h.span.offset_range().1)),
+        uses.last().map(|u| u.1).or_else(|| {
+            contribution
+                .header
+                .as_ref()
+                .map(|h| h.span.offset_range().1)
+        }),
     ) {
         (Some(&(start, _)), _) => line_start(start),
         (None, Some(end)) => {

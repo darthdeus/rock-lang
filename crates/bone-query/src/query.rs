@@ -370,7 +370,9 @@ pub fn hover_at(
                                     let fe = body
                                         .expr_spans
                                         .get(fld.value)
-                                        .map_or(fld.name_span.offset_range().1, |s| s.offset_range().0);
+                                        .map_or(fld.name_span.offset_range().1, |s| {
+                                            s.offset_range().0
+                                        });
                                     if fs <= offset && offset < fe {
                                         if let Some(s) = render_record_field(
                                             ws,
@@ -443,7 +445,8 @@ pub fn hover_at(
                                     {
                                         return Some((s, body.name_spans[*variant_span]));
                                     }
-                                } else if body.name_spans[*enum_name_span].offset_range().0 <= offset
+                                } else if body.name_spans[*enum_name_span].offset_range().0
+                                    <= offset
                                     && offset < vs
                                 {
                                     if let Some(s) = render_enum_def(ws, *enum_name) {
@@ -1388,10 +1391,9 @@ fn variant_field_references(
 ) -> Vec<RefSite> {
     let mut out: Vec<RefSite> = Vec::new();
     let mut push = |site: RefSite| {
-        if !out
-            .iter()
-            .any(|s| s.span.offset_range() == site.span.offset_range() && s.span.file == site.span.file)
-        {
+        if !out.iter().any(|s| {
+            s.span.offset_range() == site.span.offset_range() && s.span.file == site.span.file
+        }) {
             out.push(site);
         }
     };
@@ -1450,10 +1452,11 @@ fn variant_field_references(
                         let f = &body.record_pat_field_arena[fidx];
                         if f.name == field {
                             let is_shorthand = match body.pattern_arena[f.pat] {
-                                hir::Pattern::Bind(b) => body
-                                    .binding_spans
-                                    .get(b)
-                                    .is_some_and(|bs| bs.offset_range() == f.name_span.offset_range()),
+                                hir::Pattern::Bind(b) => {
+                                    body.binding_spans.get(b).is_some_and(|bs| {
+                                        bs.offset_range() == f.name_span.offset_range()
+                                    })
+                                }
                                 _ => false,
                             };
                             push(RefSite {
@@ -1772,10 +1775,9 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
     let flen = field.as_str().len();
     let mut out: Vec<RefSite> = Vec::new();
     let mut push = |site: RefSite| {
-        if !out
-            .iter()
-            .any(|s| s.span.offset_range() == site.span.offset_range() && s.span.file == site.span.file)
-        {
+        if !out.iter().any(|s| {
+            s.span.offset_range() == site.span.offset_range() && s.span.file == site.span.file
+        }) {
             out.push(site);
         }
     };
@@ -1801,10 +1803,9 @@ fn field_references(ws: &Workspace, sname: Ustr, field: Ustr) -> Vec<RefSite> {
                         for fidx in *fields {
                             let f = &body.struct_lit_field_arena[fidx];
                             if f.name == field {
-                                let is_shorthand = body
-                                    .expr_spans
-                                    .get(f.value)
-                                    .is_some_and(|vs| vs.offset_range() == f.name_span.offset_range());
+                                let is_shorthand = body.expr_spans.get(f.value).is_some_and(|vs| {
+                                    vs.offset_range() == f.name_span.offset_range()
+                                });
                                 push(RefSite {
                                     span: f.name_span,
                                     shorthand: is_shorthand
@@ -2409,7 +2410,9 @@ fn local_references(ws: &Workspace, mid: ModuleId, offset: usize) -> Option<Vec<
             } if *x == b => {
                 if let Some(s) = body.expr_spans.get(e) {
                     let start = s.offset_range().0;
-                    out.push(RefSite::plain(s.with_offset_range((start, start + name_len))));
+                    out.push(RefSite::plain(
+                        s.with_offset_range((start, start + name_len)),
+                    ));
                 }
             }
 
@@ -3548,7 +3551,10 @@ fn find_binding_by_name(body: &Body, head: &str, offset: usize) -> Option<Idx<hi
         if !in_scope {
             continue;
         }
-        let pos = body.binding_spans.get(idx).map_or(0, |s| s.offset_range().0);
+        let pos = body
+            .binding_spans
+            .get(idx)
+            .map_or(0, |s| s.offset_range().0);
         if best.map_or(true, |(bp, _)| pos >= bp) {
             best = Some((pos, idx));
         }
@@ -3772,7 +3778,9 @@ fn variant_head_hover(
     }
     if let Some(en) = enum_name {
         // The qualifier plus the `::` up to the variant name.
-        let qual = en.span.with_offset_range((en.span.offset_range().0, variant_name.span.offset_range().0));
+        let qual = en
+            .span
+            .with_offset_range((en.span.offset_range().0, variant_name.span.offset_range().0));
         if on(qual) {
             if let Some(edef) = enum_def_for_variant(ws, want, variant_name.name) {
                 if let Some(s) = render_enum_def(ws, edef.name) {
@@ -3804,7 +3812,9 @@ fn variant_head_def(
         }
     }
     if let Some(en) = enum_name {
-        let qual = en.span.with_offset_range((en.span.offset_range().0, variant_name.span.offset_range().0));
+        let qual = en
+            .span
+            .with_offset_range((en.span.offset_range().0, variant_name.span.offset_range().0));
         if on(qual) {
             if let Some(edef) = enum_def_for_variant(ws, want, variant_name.name) {
                 return Some(edef.name_span);
@@ -4684,7 +4694,8 @@ fn init_is_pure(body: &hir::Body, e: Idx<hir::Expr>) -> bool {
 /// `defer`. A region that also holds the `let` re-runs the initializer too.
 fn uses_rerun_outside_let(body: &hir::Body, let_span: Span, uses: &[Span]) -> bool {
     let contains = |outer: Span, inner: Span| {
-        outer.offset_range().0 <= inner.offset_range().0 && inner.offset_range().1 <= outer.offset_range().1
+        outer.offset_range().0 <= inner.offset_range().0
+            && inner.offset_range().1 <= outer.offset_range().1
     };
     let mut regions: Vec<Span> = Vec::new();
     for (i, statement) in body.statement_arena.iter() {

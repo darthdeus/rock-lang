@@ -481,7 +481,8 @@ impl CursorAst {
                 let v = self.expr(*val);
                 let (vs, ve) = v.span.offset_range();
                 if vs <= self.probe && self.probe < ve {
-                    let pun = path.len() == 1 && path[0].span.offset_range() == v.span.offset_range();
+                    let pun =
+                        path.len() == 1 && path[0].span.offset_range() == v.span.offset_range();
                     if !pun {
                         let fname = path.last()?.name.to_string();
                         value_field = Some((fname, self.lambda_body_contains(v)));

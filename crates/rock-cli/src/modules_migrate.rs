@@ -1078,7 +1078,11 @@ fn verify_ascriptions(
                 skull_parser::ExprKind::ParenAscription(op, ty) => {
                     let op = ast.exprs[*op].span.offset_range();
                     let ty = ast.types[*ty].span.offset_range();
-                    Some((e.span.offset_range().0, &text[op.0..op.1], &text[ty.0..ty.1]))
+                    Some((
+                        e.span.offset_range().0,
+                        &text[op.0..op.1],
+                        &text[ty.0..ty.1],
+                    ))
                 }
                 _ => None,
             })

@@ -153,7 +153,8 @@ impl<'a> Printer<'a> {
             // At the top level the parser captures a trailing comment as its own
             // `Comment` item; trivia already re-emits it as a trailing comment on
             // the preceding item, so skip it here to avoid double output.
-            if matches!(item.kind, ItemKind::Comment(_)) && prev_end == Some(item.span.line_range().0)
+            if matches!(item.kind, ItemKind::Comment(_))
+                && prev_end == Some(item.span.line_range().0)
             {
                 continue;
             }
@@ -929,7 +930,8 @@ impl<'a> Printer<'a> {
             .iter()
             .map(|g| {
                 let (f, l) = (spans[g[0]], spans[*g.last().unwrap()]);
-                f.with_line_range((f.line_range().0, l.line_range().1)).with_offset_range((f.offset_range().0, l.offset_range().1))
+                f.with_line_range((f.line_range().0, l.line_range().1))
+                    .with_offset_range((f.offset_range().0, l.offset_range().1))
             })
             .collect();
         // A multi-statement line is sliced verbatim (preserving the `;`
@@ -951,7 +953,9 @@ impl<'a> Printer<'a> {
         let eligible: Vec<bool> = groups
             .iter()
             .zip(&gspans)
-            .map(|(g, gs)| g.len() == 1 && gs.line_range().0 == gs.line_range().1 && !is_comment(g[0]))
+            .map(|(g, gs)| {
+                g.len() == 1 && gs.line_range().0 == gs.line_range().1 && !is_comment(g[0])
+            })
             .collect();
         let no_skip = vec![false; groups.len()];
         let mut verbatim = groups.iter().map(|g| g.len() > 1).collect::<Vec<_>>();
@@ -1394,7 +1398,10 @@ impl<'a> Printer<'a> {
         // with bodies) keep structural rendering; their headers are handled by
         // `header_verbatim`.
         let mut span = self.ast.s(&s).span;
-        if let Some((cs, ce)) = self.trivia.inline_block_starting_after(span.offset_range().1) {
+        if let Some((cs, ce)) = self
+            .trivia
+            .inline_block_starting_after(span.offset_range().1)
+        {
             let gap = self.slice_range(span.offset_range().1, cs);
             if gap.bytes().all(|b| b == b' ' || b == b'\t') {
                 span = span.with_offset_range((span.offset_range().0, ce));
@@ -1709,7 +1716,11 @@ impl<'a> Printer<'a> {
                     // The arg list's layout follows the method's own span, not
                     // the receiver's (see `method_chain`).
                     let method = self.ast.e(func).span;
-                    let own_span = data.span.with_line_range((method.line_range().0, data.span.line_range().1)).with_col_range((method.col_range().0, data.span.col_range().1)).with_offset_range((method.offset_range().0, data.span.offset_range().1));
+                    let own_span = data
+                        .span
+                        .with_line_range((method.line_range().0, data.span.line_range().1))
+                        .with_col_range((method.col_range().0, data.span.col_range().1))
+                        .with_offset_range((method.offset_range().0, data.span.offset_range().1));
                     Doc::concat([
                         self.receiver(args[0].value),
                         Doc::text("."),
@@ -1921,9 +1932,10 @@ impl<'a> Printer<'a> {
         // `_ => /* c */ e`) has no structural home -- slice the arm verbatim.
         for k in 0..arm_spans.len() {
             if eligible[k]
-                && self
-                    .trivia
-                    .has_block_comment_in(arm_spans[k].offset_range().0, arm_spans[k].offset_range().1)
+                && self.trivia.has_block_comment_in(
+                    arm_spans[k].offset_range().0,
+                    arm_spans[k].offset_range().1,
+                )
             {
                 docs[k] = self.verbatim_line(arm_spans[k]);
             }
@@ -2045,7 +2057,12 @@ impl<'a> Printer<'a> {
                     .trivia
                     .close_paren_after(last.offset_range().1)
                     .unwrap_or((last.offset_range().1, last.line_range().1));
-                Span::new(f.file, (f.line_range().0, end_line), (f.col_range().0, last.col_range().1), (f.offset_range().0, end))
+                Span::new(
+                    f.file,
+                    (f.line_range().0, end_line),
+                    (f.col_range().0, last.col_range().1),
+                    (f.offset_range().0, end),
+                )
             }
         };
         let head = match syntax {
@@ -2268,7 +2285,10 @@ impl<'a> Printer<'a> {
             // two-line cumulative span and expanded the (single-line) args, an
             // oscillation. The own span tracks only the
             // author's arg-list layout, which is stable under chain reflow.
-            let own_span = cur_span.with_line_range((method.span.line_range().0, cur_span.line_range().1)).with_col_range((method.span.col_range().0, cur_span.col_range().1)).with_offset_range((method.span.offset_range().0, cur_span.offset_range().1));
+            let own_span = cur_span
+                .with_line_range((method.span.line_range().0, cur_span.line_range().1))
+                .with_col_range((method.span.col_range().0, cur_span.col_range().1))
+                .with_offset_range((method.span.offset_range().0, cur_span.offset_range().1));
             segs.push((method.name, cur_args, own_span));
             // Continue the spine only while the receiver is itself a method call.
             // A receiver call with explicit type arguments ends the spine: a
@@ -2577,7 +2597,8 @@ impl<'a> Printer<'a> {
             );
             Doc::concat([key, Doc::text(": "), self.expr(*value)])
         };
-        let field_line = |names: &[Ident]| names.first().map(|n| n.span.line_range().0).unwrap_or(0);
+        let field_line =
+            |names: &[Ident]| names.first().map(|n| n.span.line_range().0).unwrap_or(0);
         // A field with a trailing comment, or a standalone comment in the body,
         // forces the comment-preserving multi-line layout (a `// ...` can't sit
         // inside an inline `{ a, b }`). A field claims a trailing comment only if
@@ -2626,7 +2647,13 @@ impl<'a> Printer<'a> {
                     .map(|((names, value), doc)| {
                         let v = self.ast.e(value).span;
                         // The field's full source span: first key name -> value end.
-                        let full = v.with_line_range((names[0].span.line_range().0, v.line_range().1)).with_col_range((names[0].span.col_range().0, v.col_range().1)).with_offset_range((names[0].span.offset_range().0, v.offset_range().1));
+                        let full = v
+                            .with_line_range((names[0].span.line_range().0, v.line_range().1))
+                            .with_col_range((names[0].span.col_range().0, v.col_range().1))
+                            .with_offset_range((
+                                names[0].span.offset_range().0,
+                                v.offset_range().1,
+                            ));
                         (full, doc)
                     })
                     .collect();
@@ -2644,7 +2671,8 @@ impl<'a> Printer<'a> {
                     // inline block comment (`/* y field */ y: 2`) is in the
                     // entry's leading gap; the end is unchanged, so trailing
                     // comma/comment detection is unaffected.
-                    let full = v.with_offset_range((names[0].span.offset_range().0, v.offset_range().1));
+                    let full =
+                        v.with_offset_range((names[0].span.offset_range().0, v.offset_range().1));
                     (doc, field_line(names), full)
                 })
                 .collect();
@@ -2689,7 +2717,8 @@ impl<'a> Printer<'a> {
                         .trivia
                         .has_block_comment_in(if_span.offset_range().0, body_span.offset_range().0)
                 {
-                    let header = self.slice_range(if_span.offset_range().0, body_span.offset_range().0);
+                    let header =
+                        self.slice_range(if_span.offset_range().0, body_span.offset_range().0);
                     parts.push(Doc::text(header.trim_end().to_string()));
                     parts.push(Doc::text(" "));
                     parts.push(self.branch_body(*body));
@@ -2719,7 +2748,9 @@ impl<'a> Printer<'a> {
                 parts.push(hardline());
                 if eb_span.line_range().0 == eb_span.line_range().1 {
                     let start = self.line_first_token_offset(eb_span.offset_range().0);
-                    parts.push(self.verbatim_line(eb_span.with_offset_range((start, eb_span.offset_range().1))));
+                    parts.push(self.verbatim_line(
+                        eb_span.with_offset_range((start, eb_span.offset_range().1)),
+                    ));
                 } else {
                     parts.push(Doc::text("else "));
                     parts.push(self.branch_body(eb));

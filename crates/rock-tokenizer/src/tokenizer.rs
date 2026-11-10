@@ -1095,7 +1095,12 @@ impl<'a> Tokenizer<'a> {
             offset_range
         );
 
-        Span::new(start.file, (start.line, self.line), (start.col, end_col), offset_range)
+        Span::new(
+            start.file,
+            (start.line, self.line),
+            (start.col, end_col),
+            offset_range,
+        )
     }
 
     pub fn empty_span(&self) -> Span {
@@ -1138,7 +1143,11 @@ mod test {
         let file = ustr::ustr("big.rock");
         assert!(source_fits_spans(file, 0, u32::MAX as usize).is_ok());
         let err = source_fits_spans(file, 0, u32::MAX as usize + 1).unwrap_err();
-        assert!(err.message.contains("big.rock is too large"), "{}", err.message);
+        assert!(
+            err.message.contains("big.rock is too large"),
+            "{}",
+            err.message
+        );
         assert!(source_fits_spans(file, 1, u32::MAX as usize).is_err());
     }
 

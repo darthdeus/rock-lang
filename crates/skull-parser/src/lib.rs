@@ -196,10 +196,15 @@ mod tests {
         let m = &mini.items[0];
 
         assert_eq!(
-            m.span.offset_range(), item.span.offset_range(),
+            m.span.offset_range(),
+            item.span.offset_range(),
             "item offset span"
         );
-        assert_eq!(m.span.line_range(), item.span.line_range(), "item line range");
+        assert_eq!(
+            m.span.line_range(),
+            item.span.line_range(),
+            "item line range"
+        );
 
         let body_block = |it: &Item| match &it.kind {
             ItemKind::Function(f) => f.body.rock_block().unwrap(),
@@ -234,7 +239,8 @@ mod tests {
         )
         .expect("parse_one_item");
         assert_eq!(
-            mini.items[0].span.offset_range(), item.span.offset_range(),
+            mini.items[0].span.offset_range(),
+            item.span.offset_range(),
             "annotated item span"
         );
         assert_eq!(mini.items[0].annotations.len(), 1, "annotation preserved");
@@ -363,7 +369,8 @@ mod tests {
             "anno span non-empty"
         );
         assert_ne!(
-            a.span.offset_range(), f.params[0].name.span.offset_range(),
+            a.span.offset_range(),
+            f.params[0].name.span.offset_range(),
             "anno span != name span"
         );
     }
@@ -1499,8 +1506,16 @@ mod tests {
             match b.braces {
                 Some((open, close)) => {
                     let (bs, be) = (b.span.offset_range().0, b.span.offset_range().1);
-                    assert_eq!(open.offset_range(), (bs, bs + 1), "open brace at span start");
-                    assert_eq!(close.offset_range(), (be - 1, be), "close brace at span end");
+                    assert_eq!(
+                        open.offset_range(),
+                        (bs, bs + 1),
+                        "open brace at span start"
+                    );
+                    assert_eq!(
+                        close.offset_range(),
+                        (be - 1, be),
+                        "close brace at span end"
+                    );
                     assert_eq!(&src[bs..bs + 1], "{", "open brace char");
                     assert_eq!(&src[be - 1..be], "}", "close brace char");
                 }

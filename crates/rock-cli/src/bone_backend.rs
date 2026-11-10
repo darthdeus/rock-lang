@@ -855,7 +855,12 @@ mod tests {
         let head = &unified.contents[..offset];
         let line = head.matches('\n').count();
         let col = offset - head.rfind('\n').map_or(0, |i| i + 1);
-        let span = rock_core::Span::new(ustr::Ustr::from(rock_stdlib::stdlib_file_id("unified.rock").as_str()), (line, line), (col, col + NEEDLE.len()), (offset, offset + NEEDLE.len()));
+        let span = rock_core::Span::new(
+            ustr::Ustr::from(rock_stdlib::stdlib_file_id("unified.rock").as_str()),
+            (line, line),
+            (col, col + NEEDLE.len()),
+            (offset, offset + NEEDLE.len()),
+        );
         let err = CompilerError::new_with_label(span, "boxed here".to_string());
         let rendered = render_errs(&SourceFiles::empty(), &[err]);
 

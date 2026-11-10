@@ -177,8 +177,12 @@ fn snapshot(ws: &Workspace, files: &[SessionFile]) -> Snapshot {
                     let target = ws.module(*tmid);
                     let f = &target.functions[*fid];
                     let (s, e) = body.expr_spans[*call].offset_range();
-                    let selected =
-                        format!("{}::{}@{}", target.file, f.name, f.name_span.offset_range().0);
+                    let selected = format!(
+                        "{}::{}@{}",
+                        target.file,
+                        f.name,
+                        f.name_span.offset_range().0
+                    );
                     references.insert((file.clone(), s, e, "selects", selected, None));
                 }
             }

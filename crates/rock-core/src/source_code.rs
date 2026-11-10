@@ -394,7 +394,11 @@ mod tests {
         let unknown = Span::unknown();
         assert_eq!(unknown.file.as_str(), "<unknown>");
         assert_eq!(
-            (unknown.line_range(), unknown.col_range(), unknown.offset_range()),
+            (
+                unknown.line_range(),
+                unknown.col_range(),
+                unknown.offset_range()
+            ),
             ((0, 0), (0, 0), (0, 0))
         );
     }

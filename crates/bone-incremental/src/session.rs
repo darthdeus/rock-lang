@@ -2268,7 +2268,8 @@ impl Session {
             _ => return Ok(None),
         };
         let at = old_fn_span.offset_range().1;
-        let byte_delta = new_fn_span.offset_range().1 as isize - old_fn_span.offset_range().1 as isize;
+        let byte_delta =
+            new_fn_span.offset_range().1 as isize - old_fn_span.offset_range().1 as isize;
         let line_delta = new_fn_span.line_range().1 as isize - old_fn_span.line_range().1 as isize;
 
         // --- commit: install the new prints, then relower under rebuild_or_revert
@@ -2494,7 +2495,8 @@ impl Session {
         let annotations = item.annotations.as_slice();
 
         let at = old_fn_span.offset_range().1;
-        let byte_delta = new_fn_span.offset_range().1 as isize - old_fn_span.offset_range().1 as isize;
+        let byte_delta =
+            new_fn_span.offset_range().1 as isize - old_fn_span.offset_range().1 as isize;
         let line_delta = new_fn_span.line_range().1 as isize - old_fn_span.line_range().1 as isize;
 
         let old_inf = self

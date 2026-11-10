@@ -1866,7 +1866,9 @@ impl BoneWorkspace {
             .into_iter()
             .map(|s| s.span)
             .find(|s| {
-                s.file.as_str() == path && s.offset_range().0 <= offset && offset < s.offset_range().1
+                s.file.as_str() == path
+                    && s.offset_range().0 <= offset
+                    && offset < s.offset_range().1
             });
         Ok(here.map(|here| range_from_offsets(src, here.offset_range().0, here.offset_range().1)))
     }
@@ -2395,7 +2397,12 @@ impl BoneWorkspace {
                         Some(true),
                     )
                 } else {
-                    (h.span.offset_range().1, InlayHintKind::TYPE, Some(true), None)
+                    (
+                        h.span.offset_range().1,
+                        InlayHintKind::TYPE,
+                        Some(true),
+                        None,
+                    )
                 };
                 InlayHint {
                     position: line_index.position(src, offset),

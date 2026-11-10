@@ -485,7 +485,8 @@ fn dedup(mut found: Vec<RowEscape>) -> Vec<RowEscape> {
 }
 
 fn contains(outer: Span, inner: Span) -> bool {
-    outer.offset_range().0 <= inner.offset_range().0 && inner.offset_range().1 <= outer.offset_range().1
+    outer.offset_range().0 <= inner.offset_range().0
+        && inner.offset_range().1 <= outer.offset_range().1
 }
 
 fn callee_fn<'a>(ws: &'a Workspace, bi: &BodyInference, call: Idx<Expr>) -> Option<&'a Function> {

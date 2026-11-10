@@ -2210,7 +2210,8 @@ fn vanishing() -> int {
     let span_edit = instance_graph::TextEditDelta {
         file: Ustr::from("<test>"),
         at: old_main_span.offset_range().1,
-        byte_delta: new_main_span.offset_range().1 as isize - old_main_span.offset_range().1 as isize,
+        byte_delta: new_main_span.offset_range().1 as isize
+            - old_main_span.offset_range().1 as isize,
         line_delta: new_main_span.line_range().1 as isize - old_main_span.line_range().1 as isize,
     };
     let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &[main], &[span_edit]);

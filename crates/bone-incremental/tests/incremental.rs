@@ -366,7 +366,8 @@ fn macro_def_span_shifts_on_fast_body_edit() {
     assert_eq!(before.len(), 1, "one macro recorded");
     assert_eq!(before[0].name.as_str(), "m");
     assert_eq!(
-        before[0].span.line_range().0, 4,
+        before[0].span.line_range().0,
+        4,
         "macro starts on line 5 (0-based 4)"
     );
 
@@ -382,7 +383,8 @@ fn macro_def_span_shifts_on_fast_body_edit() {
     let after = &h.session.files["m.rock"].macros;
     assert_eq!(after.len(), 1);
     assert_eq!(
-        after[0].span.line_range().0, 5,
+        after[0].span.line_range().0,
+        5,
         "macro def-line must follow the +1 line shift (was 4, now 5)"
     );
 }
@@ -1778,7 +1780,8 @@ fn shift_module_after_edit_moves_only_later_item_spans() {
 
     // (1) `a` is entirely before `at`: untouched, header and body.
     assert_eq!(
-        module.functions[a].span.offset_range(), a_hdr0,
+        module.functions[a].span.offset_range(),
+        a_hdr0,
         "earlier fn `a` header must not move"
     );
     assert_eq!(

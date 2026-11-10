@@ -1160,7 +1160,9 @@ fn span_field_probes() -> Vec<(&'static str, Box<dyn Fn(&mut Span)>)> {
         ),
         (
             "edges.span_offsets",
-            Box::new(|s: &mut Span| s.set_offset_range((s.offset_range().0, s.offset_range().1 + 1))),
+            Box::new(|s: &mut Span| {
+                s.set_offset_range((s.offset_range().0, s.offset_range().1 + 1))
+            }),
         ),
     ]
 }

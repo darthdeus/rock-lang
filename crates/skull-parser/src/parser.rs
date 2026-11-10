@@ -2528,7 +2528,8 @@ impl<'a> Parser<'a> {
             return;
         }
         let stmt_line = self.tokens[self.pos - 1].span.line_range().0;
-        while matches!(self.kind(), TokenKind::Comment(_)) && self.span().line_range().0 == stmt_line
+        while matches!(self.kind(), TokenKind::Comment(_))
+            && self.span().line_range().0 == stmt_line
         {
             self.advance();
         }
@@ -4038,8 +4039,10 @@ impl<'a> Parser<'a> {
                 let (s, e) = t.span.offset_range();
                 let remap = |o: usize| map.get(o.saturating_sub(base)).copied().unwrap_or(o);
                 let (rs, re) = (remap(s), remap(e));
-                t.span.set_col_range((t.span.col_range().0 + (rs - s), t.span.col_range().1));
-                t.span.set_col_range((t.span.col_range().0, t.span.col_range().1 + (re - e)));
+                t.span
+                    .set_col_range((t.span.col_range().0 + (rs - s), t.span.col_range().1));
+                t.span
+                    .set_col_range((t.span.col_range().0, t.span.col_range().1 + (re - e)));
                 t.span.set_offset_range((rs, re));
             }
         }

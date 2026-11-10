@@ -96,8 +96,10 @@ impl Trivia {
                         );
                     } else if code_on_line == Some(line) {
                         line_comments.insert(lo);
-                        trailing
-                            .insert(line, (text.as_str().to_string(), tok.span.col_range().0, lo));
+                        trailing.insert(
+                            line,
+                            (text.as_str().to_string(), tok.span.col_range().0, lo),
+                        );
                     } else if lines
                         .get(line)
                         .is_some_and(|l| l.trim_start().starts_with("//"))
