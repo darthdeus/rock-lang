@@ -5233,9 +5233,34 @@ fn search_changing_instance_recursion<'a>(
     g: &InstanceGraph,
     ws: &Workspace,
     mut order: Vec<&'a Instance>,
-    successors: impl Fn(&Instance) -> &'a [Edge],
+    successors: impl Fn(&Instance) -> &'a [Edge] + Sync,
 ) -> (usize, Vec<RecursionFinding>) {
     order.retain(|i| g.index.decls.get(&i.func).is_some_and(|n| *n > 1));
+    // Each start's search reads only the graph, so they run in parallel. A
+    // program without polymorphic recursion -- the normal case -- is then
+    // done: the ordered pass below exists to report findings in a stable
+    // order and to skip a declaration once it has one.
+    let any_finding = {
+        use bone_core::prelude::*;
+        order.par_iter().any(|start| {
+            let mut seen: FxHashSet<&Instance> = FxHashSet::default();
+            let mut queue = vec![*start];
+            while let Some(node) = queue.pop() {
+                if node.func == start.func && node.args != start.args {
+                    return true;
+                }
+                for edge in successors(node) {
+                    if seen.insert(&edge.to) {
+                        queue.push(&edge.to);
+                    }
+                }
+            }
+            false
+        })
+    };
+    if !any_finding {
+        return (order.len(), Vec::new());
+    }
     order.sort_by_cached_key(|instance| g.diagnostic_key(instance));
     let mut found = Vec::new();
     let mut already = BTreeSet::new();
@@ -6579,23 +6604,38 @@ fn record_inline_body_deps(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclK
     // recording it here without a target would be a second, weaker reachability
     // mechanism. All members of a represented backend-variant group are scanned;
     // the artifact later reads only the declaration it selected.
-    for decl in decls {
-        for member in skull_mir::lower::backend_variant_group(ws, decl.0) {
-            let member = DeclKey(member);
-            let f = &ws.module(member.0.module).functions[member.0.func];
-            let Some(body) = &f.inline_body else { continue };
-            let text = body.1.as_str();
-            for name in ERASED_RUNTIME_ENTRIES {
-                if text.contains(name) {
-                    let inserted = g.inline_body_deps.entry(member).or_default().insert(name);
-                    if inserted {
-                        g.inline_erased_users
-                            .entry(name.to_string())
-                            .or_default()
-                            .insert(member);
+    // Few declarations have an inline body; finding them is the work, and
+    // each declaration's group is read independently.
+    let found: Vec<(DeclKey, &'static str)> = {
+        use bone_core::prelude::*;
+        decls
+            .par_iter()
+            .map(|decl| {
+                let mut found = Vec::new();
+                for member in skull_mir::lower::backend_variant_group(ws, decl.0) {
+                    let f = &ws.module(member.module).functions[member.func];
+                    let Some(body) = &f.inline_body else { continue };
+                    let text = body.1.as_str();
+                    for name in ERASED_RUNTIME_ENTRIES {
+                        if text.contains(name) {
+                            found.push((DeclKey(member), *name));
+                        }
                     }
                 }
-            }
+                found
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flatten()
+            .collect()
+    };
+    for (member, name) in found {
+        let inserted = g.inline_body_deps.entry(member).or_default().insert(name);
+        if inserted {
+            g.inline_erased_users
+                .entry(name.to_string())
+                .or_default()
+                .insert(member);
         }
     }
 }
@@ -6607,50 +6647,74 @@ pub fn opaque_boundary_roots_for_decls(
     ws: &Workspace,
     decls: impl IntoIterator<Item = FuncRef>,
 ) -> BTreeMap<DeclKey, FxHashSet<FuncRef>> {
-    let mut roots = BTreeMap::new();
-    for decl in decls {
-        for member in skull_mir::lower::backend_variant_group(ws, decl) {
-            let owner = DeclKey(member);
-            let targets = roots.entry(owner).or_insert_with(FxHashSet::default);
-            let f = &ws.module(member.module).functions[member.func];
-            let Some((bone_core::hir::FnBackend::Js, body)) = f.inline_body else {
-                continue;
-            };
-            let text = body.as_str();
-            let bytes = text.as_bytes();
-            let mut i = 0;
-            while i < bytes.len() {
-                let c = bytes[i] as char;
-                if c.is_ascii_alphabetic() || c == '_' {
-                    let start = i;
-                    while i < bytes.len()
-                        && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'_')
-                    {
-                        i += 1;
-                    }
-                    let name = ustr::Ustr::from(&text[start..i]);
-                    if let Some(candidates) = ws.functions_by_name.get(&name) {
-                        for &(target_module, target_func) in candidates {
-                            let target = &ws.module(target_module).functions[target_func];
-                            if target
-                                .annotations
-                                .iter()
-                                .any(|annotation| annotation.name.name.as_str() == "nomangle")
-                            {
-                                targets.insert(FuncRef {
-                                    module: target_module,
-                                    func: target_func,
-                                });
-                            }
-                        }
-                    }
-                } else {
-                    i += 1;
-                }
-            }
-        }
+    // Each declaration's group is scanned independently, and few members
+    // have an opaque JS body at all.
+    let decls: Vec<FuncRef> = decls.into_iter().collect();
+    let found: Vec<(DeclKey, FxHashSet<FuncRef>)> = {
+        use bone_core::prelude::*;
+        decls
+            .par_iter()
+            .map(|decl| {
+                skull_mir::lower::backend_variant_group(ws, *decl)
+                    .into_iter()
+                    .filter_map(|member| {
+                        opaque_js_nomangle_targets(ws, member).map(|t| (DeclKey(member), t))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .flatten()
+            .collect()
+    };
+    let mut roots: BTreeMap<DeclKey, FxHashSet<FuncRef>> = BTreeMap::new();
+    for (owner, targets) in found {
+        roots.entry(owner).or_default().extend(targets);
     }
     roots
+}
+
+/// The `@nomangle` declarations an opaque JS body names, or `None` when the
+/// declaration has no such body. A reader takes an absent record as empty.
+fn opaque_js_nomangle_targets(ws: &Workspace, member: FuncRef) -> Option<FxHashSet<FuncRef>> {
+    let f = &ws.module(member.module).functions[member.func];
+    let Some((bone_core::hir::FnBackend::Js, body)) = f.inline_body else {
+        return None;
+    };
+    let mut targets = FxHashSet::default();
+    let text = body.as_str();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            while i < bytes.len()
+                && ((bytes[i] as char).is_ascii_alphanumeric() || bytes[i] == b'_')
+            {
+                i += 1;
+            }
+            let name = ustr::Ustr::from(&text[start..i]);
+            if let Some(candidates) = ws.functions_by_name.get(&name) {
+                for &(target_module, target_func) in candidates {
+                    let target = &ws.module(target_module).functions[target_func];
+                    if target
+                        .annotations
+                        .iter()
+                        .any(|annotation| annotation.name.name.as_str() == "nomangle")
+                    {
+                        targets.insert(FuncRef {
+                            module: target_module,
+                            func: target_func,
+                        });
+                    }
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    Some(targets)
 }
 
 fn record_inline_body_nomangle_roots(
@@ -6666,10 +6730,12 @@ fn classify_boundaries(g: &mut InstanceGraph, ws: &Workspace, decls: &[DeclKey])
     let erased: BTreeSet<String> = g.erased_entries.clone();
     for decl in decls {
         let f = &ws.module(decl.0.module).functions[decl.0.func];
-        let symbol = mangle_fn(ws, f);
+        // Classified before it is named: few declarations are boundaries, and
+        // a mangled name is a formatted string.
         let Some(class) = boundary_class_for(f, &erased) else {
             continue;
         };
+        let symbol = mangle_fn(ws, f);
         g.boundaries
             .insert(symbol.clone(), Boundary { class, symbol });
     }
