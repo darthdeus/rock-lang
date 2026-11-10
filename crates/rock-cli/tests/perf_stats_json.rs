@@ -125,3 +125,47 @@ fn incremental_stats_times_body_and_signature_edits_as_json() {
     assert_eq!(signature["reload"], "full");
     assert!(signature["mean_ms"].as_f64().unwrap() > 0.0);
 }
+
+const SIM: &str = r#"
+@test fn the_largest_body_of_the_project() {
+    let a = 1
+    let b = a + 1
+    let c = b + 1
+    let d = c + 1
+    let e = d + 1
+    let f = e + 1
+    assert(f == 6, "six")
+}
+"#;
+
+/// The reloaded project is the production build: a test-only file is no
+/// source of it, however large its bodies are.
+#[test]
+fn incremental_stats_edits_only_sources_of_the_project_it_reloads() {
+    let root = project();
+    std::fs::create_dir(root.path().join("tests")).unwrap();
+    std::fs::write(root.path().join("tests/sim.rock"), SIM).unwrap();
+    let out = invoke(
+        root.path(),
+        &[
+            "incremental-stats",
+            ".",
+            "--iters",
+            "1",
+            "--warmup",
+            "0",
+            "--format",
+            "json",
+        ],
+    );
+    let report = json_stdout(&out);
+    let edits = report["edits"].as_array().unwrap();
+    assert!(edits.iter().any(|e| e["kind"] == "body"), "{edits:?}");
+    for edit in edits {
+        assert!(edit["error"].is_null(), "{edit:?}");
+        assert!(
+            !edit["file"].as_str().unwrap().ends_with("tests/sim.rock"),
+            "{edit:?}"
+        );
+    }
+}

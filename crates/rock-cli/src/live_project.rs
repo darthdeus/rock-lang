@@ -56,16 +56,21 @@ pub struct LiveProject {
     last_route_timing: LiveRouteTiming,
 }
 
+/// The sources a live project of `dir` compiles and accepts edits to: every
+/// discovered file, or without `include_tests` the production build's.
+pub(crate) fn project_sources(dir: &str, include_tests: bool) -> Result<SourceFiles> {
+    let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
+    let discovered = crate::unified_compile::discover_sources(&spec)?;
+    if include_tests {
+        return Ok(discovered);
+    }
+    rock_host::source_files::production_only(&discovered, Path::new(dir))
+        .map_err(|error| anyhow::anyhow!(error.to_string()))
+}
+
 impl LiveProject {
     pub fn init(dir: &str, include_tests: bool) -> Result<Self> {
-        let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
-        let discovered = crate::unified_compile::discover_sources(&spec)?;
-        let sources = if include_tests {
-            discovered
-        } else {
-            rock_host::source_files::production_only(&discovered, Path::new(dir))
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?
-        };
+        let sources = project_sources(dir, include_tests)?;
         let entry_path = entry_path(&sources)?;
         let files = crate::bone_backend::session_files(&sources);
         // bone_session_for_emission resolves [build.vars] at construction, so
@@ -433,14 +438,7 @@ impl LiveProject {
     }
 
     fn rediscover(&mut self) -> Result<()> {
-        let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(&self.dir));
-        let discovered = crate::unified_compile::discover_sources(&spec)?;
-        self.sources = if self.include_tests {
-            discovered
-        } else {
-            rock_host::source_files::production_only(&discovered, Path::new(&self.dir))
-                .map_err(|error| anyhow::anyhow!(error.to_string()))?
-        };
+        self.sources = project_sources(&self.dir, self.include_tests)?;
         self.entry_path = entry_path(&self.sources)?;
         Ok(())
     }

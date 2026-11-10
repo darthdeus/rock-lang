@@ -144,8 +144,8 @@ pub(crate) fn incremental_stats(
 
     // Project statistics from a throwaway Session: the IncrementalProject
     // keeps its own Session private, and the stats need the dependents map.
-    let spec = crate::unified_compile::SourceSpec::Directory(dir.to_path_buf());
-    let sources = crate::unified_compile::discover_sources(&spec)?;
+    // Its sources are the reloaded project's, so every candidate is editable.
+    let sources = crate::live_project::project_sources(&dir_str, false)?;
     let session = crate::bone_backend::bone_session(crate::bone_backend::session_files(&sources))
         .map_err(|e| anyhow::anyhow!("bone session warm failed: {}", e.message))?;
     let (_mods, fns) = collect_stats(&session, &proj_marker)?;
