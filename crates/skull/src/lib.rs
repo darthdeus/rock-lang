@@ -544,6 +544,21 @@ do
 -- the program assigns it from __rock_globals_open before running any code.
 local __rock_state_cell
 {UINT_CHECK}
+if not _G.__rock_vec_headers then _G.__rock_vec_headers = {} end
+-- Shared headers of unreserved flat Vecs. The stride is part of the key, so a
+-- hot reload that changes an element's layout gets a fresh header.
+function __rock_vec_header(repr, elem, stride)
+  local by_elem = __rock_vec_headers[elem]
+  if not by_elem then by_elem = {}; __rock_vec_headers[elem] = by_elem end
+  local key = repr == "strided" and stride or repr
+  local h = by_elem[key]
+  if not h then
+    h = repr == "strided" and { repr = repr, elem = elem, stride = stride, cap = 0 }
+      or { repr = repr, elem = elem, cap = 0 }
+    by_elem[key] = h
+  end
+  return h
+end
 local __rock_table_new = require("table.new")
 if not _G.ffi then _G.ffi = require("ffi") end
 if not _G.__ROCK_C_STRUCT then _G.__ROCK_C_STRUCT = {} end

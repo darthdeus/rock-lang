@@ -103,7 +103,7 @@ fn wide_nobox_vec_declares_strided_storage() {
         try_emit_module(&program(PUSH_MAIN)).expect("a wide nobox element must stay flat in a Vec");
     let main = function_body(&lua, "main");
     assert!(
-        main.contains(r#"repr = "strided""#),
+        crate::common::has_vec_header(main, "strided", None),
         "a wide nobox Vec must use the row-major strided backing:\n{main}"
     );
     assert!(
@@ -281,7 +281,7 @@ fn main() {
 fn wide_nobox_strided_vec_keeps_the_mutating_surface() {
     let lua = try_emit_module(&program(SURFACE_MAIN)).expect("emits");
     assert!(
-        lua.contains(r#"repr = "strided""#),
+        crate::common::has_vec_header(&lua, "strided", None),
         "fixture must exercise strided storage"
     );
     assert_eq!(
@@ -331,7 +331,7 @@ fn main() {
 fn wide_nobox_strided_vec_releases_removed_references() {
     let lua = try_emit_module(RELEASE_MAIN).expect("emits");
     assert!(
-        lua.contains(r#"repr = "strided""#),
+        crate::common::has_vec_header(&lua, "strided", None),
         "fixture must exercise strided storage"
     );
     assert_eq!(run_main(&lua), "true,true,true");
@@ -439,7 +439,7 @@ fn wide_generic_rows_clone_owned_leaves_and_release_removed_references() {
         .replace("[Holder]", "[Holder<[int]?>]");
     let lua = try_emit_module(&release).expect("generic reference cleanup emits");
     assert!(
-        lua.contains(r#"repr = "strided""#),
+        crate::common::has_vec_header(&lua, "strided", None),
         "fixture must exercise strided storage"
     );
     assert_eq!(run_main(&lua), "true,true,true",);
@@ -450,7 +450,8 @@ fn a_nobox_element_at_the_threshold_keeps_columns() {
     let lua = try_emit_module(NARROW).expect("emits");
     let main = function_body(&lua, "main");
     assert!(
-        main.contains(r#"repr = "columns""#) && !main.contains(r#"repr = "strided""#),
+        crate::common::has_vec_header(main, "columns", None)
+            && !crate::common::has_vec_header(main, "strided", None),
         "a four-leaf nobox element stays in columns:\n{main}"
     );
     assert_eq!(run_main(&lua), "4");
@@ -485,7 +486,8 @@ fn main() {
 fn a_nested_leaf_of_a_flat_stored_element_is_one_slot_write() {
     let lua = try_emit_module(NESTED_WRITE).expect("emits");
     assert!(
-        lua.contains(r#"repr = "strided""#) && lua.contains(r#"repr = "columns""#),
+        crate::common::has_vec_header(&lua, "strided", None)
+            && crate::common::has_vec_header(&lua, "columns", None),
         "fixture must exercise both flat tiers"
     );
     assert_eq!(run_main(&lua), "1,1,2.5,3|6,70,8,11|1,20|50");
@@ -525,7 +527,7 @@ fn main() {
 fn an_emptied_strided_vec_answers_like_a_boxed_one() {
     let lua = try_emit_module(&program(EMPTY_EDGES_MAIN)).expect("emits");
     assert!(
-        lua.contains(r#"repr = "strided""#),
+        crate::common::has_vec_header(&lua, "strided", None),
         "fixture must exercise strided storage"
     );
     assert_eq!(

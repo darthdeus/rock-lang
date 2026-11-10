@@ -810,3 +810,19 @@ impl AllocationActivationGuard {
         AllocationActivationGuard(skull::allocation_report::activation_scope(true))
     }
 }
+
+/// Whether `lua` builds a flat Vec header of `repr` (and of `elem`, when
+/// given), in either the per-Vec or the shared-header spelling.
+pub fn has_vec_header(lua: &str, repr: &str, elem: Option<&str>) -> bool {
+    let (own, shared) = match elem {
+        Some(elem) => (
+            format!("repr = \"{repr}\", elem = \"{elem}\""),
+            format!("__rock_vec_header(\"{repr}\", \"{elem}\""),
+        ),
+        None => (
+            format!("repr = \"{repr}\""),
+            format!("__rock_vec_header(\"{repr}\""),
+        ),
+    };
+    lua.contains(&own) || lua.contains(&shared)
+}

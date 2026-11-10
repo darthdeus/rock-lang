@@ -809,7 +809,7 @@ fn collection_storage_keeps_nobox_elements_in_columns() {
     let lua = emit_module(NOBOX_COLLECTION);
     let body = function_body(&lua, "sum");
     assert!(
-        body.contains(r#"["@vec"] = {repr = "columns", elem = "NV2""#),
+        crate::common::has_vec_header(body, "columns", Some("NV2")),
         "nobox collection did not use columns:\n{body}"
     );
     assert!(

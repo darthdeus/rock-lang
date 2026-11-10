@@ -38,7 +38,7 @@ fn wide_nobox_vec_stays_flat_past_the_implicit_threshold() {
         "wide nobox Vec materialized an element:\n{body}"
     );
     assert!(
-        body.contains(r#"repr = "strided""#),
+        crate::common::has_vec_header(body, "strided", None),
         "wide nobox Vec left flat row storage:\n{body}"
     );
     assert_eq!(run_main(&lua), "6 10");

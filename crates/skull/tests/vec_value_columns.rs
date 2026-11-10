@@ -105,7 +105,7 @@ fn tuple_spread_literal_never_boxes_column_elements() {
         "tuple spread built temporary V2 elements before storing their leaves:\n{body}"
     );
     assert!(
-        body.contains(r#"["@vec"] = {repr = "columns", elem = "V2""#),
+        crate::common::has_vec_header(body, "columns", Some("V2")),
         "tuple spread did not produce the marked column representation:\n{body}"
     );
 }
@@ -588,7 +588,7 @@ fn two_leaves_of_one_element_check_once() {
              fn main() {{\n    let xs: [P] = [{init}]\n    print(sum(xs, 0))\n}}\n"
         );
         let lua = emit_module(&src);
-        assert!(lua.contains(&format!("repr = \"{layout}\"")), "{lua}");
+        assert!(crate::common::has_vec_header(&lua, layout, None), "{lua}");
         let body = function_body(&lua, "sum");
         assert_eq!(
             body.matches("__vec_checked_index(").count(),
@@ -606,4 +606,44 @@ fn two_leaves_of_one_element_check_once() {
             }
         }
     }
+}
+
+const EMPTY_FLAT_VECS: &str = r#"
+value V2 { x: float, y: float }
+nobox value Wide { a: float, b: float, c: float, d: float, e: float, f: float }
+
+@nomangle fn empty_columns() -> [V2] { return [] }
+@nomangle fn empty_strided() -> [Wide] { return [] }
+@nomangle fn reserved_strided() -> [Wide] { return vec_new_with_capacity(4) }
+@nomangle fn fill(xs: [V2], ws: [Wide]) -> float {
+    xs.push(V2 { x: 1.0, y: 2.0 })
+    ws.push(Wide { a: 1.0, b: 2.0, c: 3.0, d: 4.0, e: 5.0, f: 6.0 })
+    return xs[0].y + ws[0].f + xs.len + ws.len
+}
+"#;
+
+/// An empty flat Vec with no reserved capacity never writes its header, so
+/// every such Vec of one element type shares one header table.
+#[test]
+fn empty_flat_vecs_share_their_header() {
+    let lua = emit_module(EMPTY_FLAT_VECS);
+    for name in ["empty_columns", "empty_strided"] {
+        let body = function_body(&lua, name);
+        assert!(!body.contains("cap = (0)"), "{body}");
+    }
+    let driver = format!(
+        r#"{lua}
+local a, b = empty_columns(), empty_columns()
+assert(rawget(a, "@vec") == rawget(b, "@vec"))
+local s, t = empty_strided(), empty_strided()
+assert(rawget(s, "@vec") == rawget(t, "@vec"))
+assert(rawget(s, "@vec").repr == "strided" and rawget(a, "@vec").repr == "columns")
+local r = reserved_strided()
+assert(rawget(r, "@vec") ~= rawget(s, "@vec"))
+assert(fill(a, s) == 10 and fill(b, r) == 10 and fill(a, t) == 11)
+assert(rawget(s, "@vec").cap == 0 and not rawget(s, "@vec").reserved)
+print("ok")
+"#
+    );
+    assert_eq!(crate::common::run_luajit(&driver), "ok");
 }

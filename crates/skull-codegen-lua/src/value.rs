@@ -217,13 +217,9 @@ impl Emitter<'_> {
             } => {
                 out.push_str("{[");
                 write_lua_string(out, skull_mir::mir::VEC_COLUMN_HEADER_FIELD);
-                out.push_str("] = {repr = ");
-                write_lua_string(out, skull_mir::mir::VEC_COLUMN_REPR);
-                out.push_str(", elem = ");
-                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *elem).as_str());
-                out.push_str(", cap = ");
-                self.write_opnd(out, *capacity);
-                out.push_str("}, ");
+                out.push_str("] = ");
+                self.write_vec_header(out, skull_mir::mir::VEC_COLUMN_REPR, *elem, None, *capacity);
+                out.push_str(", ");
                 for (name, vs) in columns {
                     out.push('[');
                     write_lua_string(out, name.as_str());
@@ -234,13 +230,7 @@ impl Emitter<'_> {
                 let _ = write!(out, "len = {len}, __ty = \"Vec\"}}");
             }
             Inst::MakeVecColumnHeader { elem, capacity, .. } => {
-                out.push_str("{repr = ");
-                write_lua_string(out, skull_mir::mir::VEC_COLUMN_REPR);
-                out.push_str(", elem = ");
-                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *elem).as_str());
-                out.push_str(", cap = ");
-                self.write_opnd(out, *capacity);
-                out.push('}');
+                self.write_vec_header(out, skull_mir::mir::VEC_COLUMN_REPR, *elem, None, *capacity);
             }
             Inst::MakeVecStrided {
                 elem,
@@ -256,13 +246,15 @@ impl Emitter<'_> {
                 let _ = write!(out, "{len}");
                 out.push_str(", __ty = \"Vec\", [");
                 write_lua_string(out, skull_mir::mir::VEC_COLUMN_HEADER_FIELD);
-                out.push_str("] = {repr = ");
-                write_lua_string(out, skull_mir::mir::VEC_STRIDED_REPR);
-                out.push_str(", elem = ");
-                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *elem).as_str());
-                let _ = write!(out, ", stride = {stride}, cap = ");
-                self.write_opnd(out, *capacity);
-                out.push_str("}}");
+                out.push_str("] = ");
+                self.write_vec_header(
+                    out,
+                    skull_mir::mir::VEC_STRIDED_REPR,
+                    *elem,
+                    Some(*stride),
+                    *capacity,
+                );
+                out.push('}');
             }
             Inst::MakeVecStridedHeader {
                 elem,
@@ -270,13 +262,13 @@ impl Emitter<'_> {
                 capacity,
                 ..
             } => {
-                out.push_str("{repr = ");
-                write_lua_string(out, skull_mir::mir::VEC_STRIDED_REPR);
-                out.push_str(", elem = ");
-                write_lua_string(out, skull_mir::mangle::type_symbol(self.ws, *elem).as_str());
-                let _ = write!(out, ", stride = {stride}, cap = ");
-                self.write_opnd(out, *capacity);
-                out.push('}');
+                self.write_vec_header(
+                    out,
+                    skull_mir::mir::VEC_STRIDED_REPR,
+                    *elem,
+                    Some(*stride),
+                    *capacity,
+                );
             }
             Inst::MakeStruct { ty, fields } => {
                 out.push('{');
@@ -630,6 +622,37 @@ impl Emitter<'_> {
                 out.push(']');
             }
         }
+    }
+
+    /// A flat Vec's header. Only a reservation (`cap > 0`) ever writes one, so
+    /// a header with a constant zero capacity is shared per element type.
+    fn write_vec_header(
+        &self,
+        out: &mut String,
+        repr: &str,
+        elem: ustr::Ustr,
+        stride: Option<usize>,
+        capacity: Idx<Inst>,
+    ) {
+        let elem = skull_mir::mangle::type_symbol(self.ws, elem);
+        if matches!(self.func.insts[capacity], Inst::Const(Lit::Int(0))) {
+            out.push_str("__rock_vec_header(");
+            write_lua_string(out, repr);
+            out.push_str(", ");
+            write_lua_string(out, elem.as_str());
+            let _ = write!(out, ", {})", stride.unwrap_or(0));
+            return;
+        }
+        out.push_str("{repr = ");
+        write_lua_string(out, repr);
+        out.push_str(", elem = ");
+        write_lua_string(out, elem.as_str());
+        if let Some(stride) = stride {
+            let _ = write!(out, ", stride = {stride}");
+        }
+        out.push_str(", cap = ");
+        self.write_opnd(out, capacity);
+        out.push('}');
     }
 
     pub(crate) fn cell_is_frame_field(&self, cell: Idx<Cell>) -> bool {

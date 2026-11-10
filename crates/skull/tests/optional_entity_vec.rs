@@ -72,12 +72,12 @@ fn nullable_entity_field_assignment_and_consumers_round_trip() {
         lua
     );
     assert!(
-        lua.contains(r#"repr = "columns", elem = "ColumnCell""#),
+        crate::common::has_vec_header(&lua, "columns", Some("ColumnCell")),
         "column control stopped using columns:\n{}",
         lua
     );
     assert!(
-        !lua.contains(r#"repr = "columns", elem = "Entity""#),
+        !crate::common::has_vec_header(&lua, "columns", Some("Entity")),
         "nullable Entity assignment selected columns:\n{}",
         lua
     );
