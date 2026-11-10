@@ -1687,7 +1687,7 @@ pub(crate) fn is_value_ctor_global(name: &str) -> bool {
 pub(crate) fn push_value_ctor_calls(lua: &str, out: &mut Vec<ustr::Ustr>) {
     for suffix in VALUE_CTOR_SUFFIXES {
         let call = format!("{suffix}(");
-        for (at, _) in lua.match_indices(&call) {
+        for at in memchr::memmem::find_iter(lua.as_bytes(), call.as_bytes()) {
             let start = lua[..at]
                 .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                 .map_or(0, |i| i + 1);
