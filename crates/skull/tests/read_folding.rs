@@ -267,3 +267,28 @@ fn main() {
     assert!(!body.contains(" = nil"), "{body}");
     assert_eq!(compile_and_run(src), "f3\nf6");
 }
+
+#[test]
+fn a_discarded_call_through_a_local_runs_as_a_bare_statement() {
+    let src = r#"
+fn h(cb: fn() -> int, n: int) {
+    let i = 0
+    while i < n {
+        cb()
+        i = i + 1
+    }
+}
+fn main() {
+    let t = 0
+    h(() => {
+        t = t + 1
+        print("t{t}")
+        return t
+    }, 2)
+}
+"#;
+    let lua = emit_module(src);
+    let body = function_body(&lua, "h");
+    assert!(!body.contains(" = nil"), "{body}");
+    assert_eq!(compile_and_run(src), "t1\nt2");
+}

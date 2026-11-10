@@ -543,11 +543,14 @@ pub(crate) fn store_targets(
 /// A call whose result nothing reads runs as a bare call statement, with no
 /// register to assign and then kill. Its callee must render as a name: a
 /// statement opening with `(` would continue the previous line's expression.
-fn result_discarded(inst: &Inst, inline: &[bool], used: &[bool], id: Idx<Inst>) -> bool {
+/// A folded cell read prints as the cell's name.
+fn result_discarded(func: &MirFunc, inline: &[bool], used: &[bool], id: Idx<Inst>) -> bool {
     !used[raw(id)]
-        && match inst {
+        && match func.insts[id] {
             Inst::Call { .. } => true,
-            Inst::CallValue { callee, .. } => !inline[raw(*callee)],
+            Inst::CallValue { callee, .. } => {
+                !inline[raw(callee)] || matches!(func.insts[callee], Inst::Load(_))
+            }
             _ => false,
         }
 }
@@ -619,7 +622,7 @@ pub(crate) fn color_values(
             if inst.produces_value()
                 && !inline[raw(id)]
                 && alias_at(alias, id).is_none()
-                && !result_discarded(inst, inline, &used, id)
+                && !result_discarded(func, inline, &used, id)
             {
                 values.push(id);
             }
