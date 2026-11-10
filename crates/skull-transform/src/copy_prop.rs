@@ -14,6 +14,10 @@ pub(crate) struct CopyProp {
     pub(crate) self_stores: Vec<bool>,
     /// Projections proven not to raise; their abandoned nodes need not survive DCE.
     pub(crate) nonthrowing: Vec<bool>,
+    /// Whether applying `subst` creates a shape the next analysis proves more
+    /// on: a field read whose base resolves to a fresh `MakeStruct`, or a store
+    /// whose value resolves to a load of its own cell.
+    pub(crate) exposes_more: bool,
 }
 
 /// Build the analysis without applying it. Returns `None` when the walk proves
@@ -111,6 +115,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
     let mut self_stores = vec![false; func.insts.len()];
     let mut nonthrowing = vec![false; func.insts.len()];
     let mut any_subst = false;
+    let mut exposes_more = false;
     let mut cur: Vec<Option<Idx<Inst>>> = vec![None; func.cells.len()];
     let mut touched: Vec<usize> = Vec::new();
     // A block entered only by a `Goto` starts with the literals its predecessor
@@ -203,6 +208,8 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                     if noop {
                         self_stores[raw(id) as usize] = true;
                     } else {
+                        exposes_more |= cur[ck].is_none()
+                            && matches!(&func.insts[v], Inst::Load(d) if *d == *cell);
                         if cur[ck].is_none() {
                             touched.push(ck);
                         }
@@ -251,6 +258,8 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
                             subst[raw(id) as usize] = Some(resolve_subst(&subst, *op));
                             any_subst = true;
                         }
+                    } else if base != rb && matches!(func.insts[rb], Inst::MakeStruct { .. }) {
+                        exposes_more = true;
                     } else if base == rb
                         && !struct_uses.is_empty()
                         && struct_uses[raw(base) as usize] == 1
@@ -322,6 +331,7 @@ pub(crate) fn copy_propagate_analysis(func: &MirFunc, ws: Option<&Workspace>) ->
             subst,
             self_stores,
             nonthrowing,
+            exposes_more,
         })
 }
 

@@ -27,7 +27,10 @@ pub fn dce(func: &mut MirFunc) {
 /// substitution as they are counted, and its proven no-op stores are seeded
 /// dead -- so DCE's post-substitution reference counts and the store deletion
 /// fall out of work DCE needs anyway. With `None` it is plain DCE.
-fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) {
+///
+/// Returns whether a removal can let a later copy-prop analysis prove more
+/// (see [`cleanup_in`]).
+fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) -> bool {
     let ni = func.insts.len();
     let nc = func.cells.len();
     // Reference counts over the CURRENT program (dense, raw-id keyed): live value
@@ -105,11 +108,17 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) {
             }
         }
     }
+    let mut exposes = false;
+    let mut removed_store_cells: Vec<usize> = Vec::new();
     while let Some(i) = work.pop() {
+        if let Inst::Store { cell, .. } = &func.insts[i] {
+            removed_store_cells.push(raw(*cell) as usize);
+        }
         // Each value operand of the removed inst loses a use; a value that hits
         // zero (and is pure) is itself now dead.
         func.insts[i].uses_each(&mut |op| {
             let k = raw(op) as usize;
+            exposes |= matches!(func.insts[op], Inst::MakeStruct { .. });
             use_count[k] = use_count[k].saturating_sub(1);
             if !dead[k]
                 && use_count[k] == 0
@@ -137,6 +146,7 @@ fn dce_core(func: &mut MirFunc, cp: Option<&CopyProp>) {
     }
 
     drop_flagged(func, &dead);
+    exposes || removed_store_cells.iter().any(|&c| load_count[c] > 0)
 }
 
 /// Remove every instruction whose `dead` flag is set from its block.
@@ -200,6 +210,17 @@ pub(crate) fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(
     // cursors: MapIter{__inner: VecIter{..}}). Sweeping between rounds lets
     // each level peel; depth = chain nesting, so this converges fast. The ctor
     // store prefilter avoids allocating the per-cell analysis for no-op rounds.
+    //
+    // A round where neither SROA nor the nil fold changed anything reruns
+    // copy-prop/DCE only when the previous round's removals or substitution
+    // can let the analysis prove more. Otherwise DCE is at its fixpoint and the
+    // analysis would find what it found last round, which is already applied.
+    // Copy-prop facts that removals can extend: a cell stops escaping once its
+    // stores inside closures are gone, a cell-keyed bounds-check fact survives
+    // a removed store, a fresh `MakeStruct` read by one field read folds once
+    // its other uses are gone or its base is substituted, and a store becomes a
+    // provable no-op once its value is substituted by a load of its own cell.
+    let mut stale = true;
     loop {
         let changed = if has_scalarizable_store(func) {
             scalarize_struct_cells_once(func)?
@@ -210,8 +231,12 @@ pub(crate) fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(
         // nullable value field's read to the literal that filled it leaves a
         // presence test whose operand is now a fresh ctor.
         let folded = fold_never_nil_compares(func);
-        let cp = copy_propagate_analysis(func, ws);
-        dce_core(func, cp.as_ref());
+        if changed || folded || stale {
+            let cp = copy_propagate_analysis(func, ws);
+            stale = dce_core(func, cp.as_ref()) || cp.as_ref().is_some_and(|cp| cp.exposes_more);
+        } else if skull_mir::verify::checks_enabled() {
+            assert_round_settled(ws, func);
+        }
         if !changed && !folded {
             break;
         }
@@ -294,6 +319,20 @@ fn has_scalarizable_store(func: &MirFunc) -> bool {
             )
         })
     })
+}
+
+/// Under MIR checks, run the copy-prop/DCE round `cleanup_in` skipped and
+/// panic if it would have changed the body: a later change to either pass can
+/// expose something the skip predicate does not report.
+fn assert_round_settled(ws: Option<&Workspace>, func: &MirFunc) {
+    let mut probe = func.clone();
+    let cp = copy_propagate_analysis(&probe, ws);
+    dce_core(&mut probe, cp.as_ref());
+    assert!(
+        probe == *func,
+        "cleanup skipped a copy-prop/DCE round that changes `{}`:\n{func}\nwould become\n{probe}",
+        func.name
+    );
 }
 
 /// Fold a nil test whose operand is a freshly CONSTRUCTED aggregate: a ctor result
@@ -456,6 +495,82 @@ mod tests {
         rooted.set_term(rooted.entry, Term::Return(Vec::new()));
         let _ = cleanup(&mut rooted);
         assert!(rooted.blocks[rooted.entry].insts.contains(&store));
+    }
+
+    /// `Store(x, Load(y))` where `y` holds `Load(x)`: only once the load of `y`
+    /// is substituted is the store visibly a write-back of `x`'s own value, so
+    /// the round that substitutes must report that another round can remove it.
+    #[test]
+    fn a_store_substituted_into_a_write_back_asks_for_another_round() {
+        let mut f = MirFunc::new(ustr::Ustr::from("write_back"));
+        let (x, y) = (f.new_cell(None), f.new_cell(None));
+        let old = f.emit(f.entry, Inst::Load(x));
+        f.emit(
+            f.entry,
+            Inst::Store {
+                cell: y,
+                value: old,
+            },
+        );
+        let copied = f.emit(f.entry, Inst::Load(y));
+        let back = f.emit(
+            f.entry,
+            Inst::Store {
+                cell: x,
+                value: copied,
+            },
+        );
+        let read = f.emit(f.entry, Inst::Load(x));
+        f.set_term(f.entry, Term::Return(vec![read]));
+
+        let cp = copy_propagate_analysis(&f, None);
+        let stale = dce_core(&mut f, cp.as_ref());
+        assert!(f.blocks[f.entry].insts.contains(&back), "{f}");
+        assert!(stale || cp.is_some_and(|cp| cp.exposes_more), "{f}");
+
+        let cp = copy_propagate_analysis(&f, None);
+        dce_core(&mut f, cp.as_ref());
+        assert!(!f.blocks[f.entry].insts.contains(&back), "{f}");
+    }
+
+    /// A round that substitutes nothing new and removes nothing that feeds the
+    /// analysis leaves nothing for another round.
+    #[test]
+    fn a_settled_body_asks_for_no_further_round() {
+        let mut f = MirFunc::new(ustr::Ustr::from("settled"));
+        let x = f.new_cell(None);
+        let one = f.emit(f.entry, Inst::Const(Lit::Int(1)));
+        f.emit(
+            f.entry,
+            Inst::Store {
+                cell: x,
+                value: one,
+            },
+        );
+        let read = f.emit(f.entry, Inst::Load(x));
+        f.emit(f.entry, Inst::Const(Lit::Int(2)));
+        f.set_term(f.entry, Term::Return(vec![read]));
+
+        let cp = copy_propagate_analysis(&f, None);
+        let stale = dce_core(&mut f, cp.as_ref());
+        assert!(!stale && !cp.is_some_and(|cp| cp.exposes_more), "{f}");
+    }
+
+    #[test]
+    #[should_panic(expected = "cleanup skipped a copy-prop/DCE round")]
+    fn the_settled_round_probe_catches_a_body_with_work_left() {
+        let mut f = MirFunc::new(ustr::Ustr::from("unsettled"));
+        f.emit(f.entry, Inst::Const(Lit::Int(2)));
+        f.set_term(f.entry, Term::Return(Vec::new()));
+        assert_round_settled(None, &f);
+    }
+
+    #[test]
+    fn the_settled_round_probe_accepts_a_settled_body() {
+        let mut f = MirFunc::new(ustr::Ustr::from("settled"));
+        let one = f.emit(f.entry, Inst::Const(Lit::Int(1)));
+        f.set_term(f.entry, Term::Return(vec![one]));
+        assert_round_settled(None, &f);
     }
 
     #[test]
