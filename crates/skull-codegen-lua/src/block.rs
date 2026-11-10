@@ -49,7 +49,7 @@ impl Emitter<'_> {
             &self.kills.at_entry[raw(bb) as usize]
         } else {
             match after {
-                Some(id) => &self.kills.after_inst[raw(id) as usize],
+                Some(id) => self.kills.after_inst(id),
                 None => &[],
             }
         };

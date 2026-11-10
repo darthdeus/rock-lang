@@ -44,31 +44,78 @@ impl BitSet {
     fn get(&self, i: usize) -> bool {
         self.words[i >> 6] & (1u64 << (i & 63)) != 0
     }
-    fn copy_from(&mut self, o: &BitSet) {
-        self.words.copy_from_slice(&o.words);
+    fn copy_from(&mut self, o: &[u64]) {
+        self.words.copy_from_slice(o);
     }
     /// Zero every bit (reuse as a scratch buffer without reallocating).
     fn clear(&mut self) {
         self.words.iter_mut().for_each(|w| *w = 0);
     }
     /// `self |= o`; returns whether any bit was newly set.
-    fn or_with(&mut self, o: &BitSet) -> bool {
+    fn or_with(&mut self, o: &[u64]) -> bool {
         let mut changed = false;
-        for (a, b) in self.words.iter_mut().zip(o.words.iter()) {
+        for (a, b) in self.words.iter_mut().zip(o.iter()) {
             let merged = *a | *b;
             changed |= merged != *a;
             *a = merged;
         }
         changed
     }
-    fn for_each(&self, mut f: impl FnMut(usize)) {
-        for (wi, &w) in self.words.iter().enumerate() {
-            let mut bits = w;
-            while bits != 0 {
-                let b = bits.trailing_zeros() as usize;
-                f(wi * 64 + b);
-                bits &= bits - 1;
-            }
+    fn for_each(&self, f: impl FnMut(usize)) {
+        for_each_bit(&self.words, f);
+    }
+}
+
+/// `rows` bit sets of one width in one allocation: the per-block liveness
+/// tables. A `Vec<BitSet>` paid an allocation per block per table.
+#[derive(Clone)]
+struct BitRows {
+    width: usize,
+    words: Vec<u64>,
+}
+
+impl BitRows {
+    fn new(rows: usize, n: usize) -> Self {
+        let width = n.div_ceil(64);
+        BitRows {
+            width,
+            words: vec![0; rows * width],
+        }
+    }
+    fn row(&self, r: usize) -> &[u64] {
+        &self.words[r * self.width..(r + 1) * self.width]
+    }
+    fn row_mut(&mut self, r: usize) -> &mut [u64] {
+        &mut self.words[r * self.width..(r + 1) * self.width]
+    }
+    fn set(&mut self, r: usize, i: usize) {
+        self.words[r * self.width + (i >> 6)] |= 1u64 << (i & 63);
+    }
+    fn get(&self, r: usize, i: usize) -> bool {
+        self.words[r * self.width + (i >> 6)] & (1u64 << (i & 63)) != 0
+    }
+    /// `row r |= o`; returns whether any bit was newly set.
+    fn or_row(&mut self, r: usize, o: &BitSet) -> bool {
+        let mut changed = false;
+        for (a, b) in self.row_mut(r).iter_mut().zip(o.words.iter()) {
+            let merged = *a | *b;
+            changed |= merged != *a;
+            *a = merged;
+        }
+        changed
+    }
+    fn for_each(&self, r: usize, f: impl FnMut(usize)) {
+        for_each_bit(self.row(r), f);
+    }
+}
+
+fn for_each_bit(words: &[u64], mut f: impl FnMut(usize)) {
+    for (wi, &w) in words.iter().enumerate() {
+        let mut bits = w;
+        while bits != 0 {
+            let b = bits.trailing_zeros() as usize;
+            f(wi * 64 + b);
+            bits &= bits - 1;
         }
     }
 }
@@ -262,8 +309,8 @@ pub(crate) fn color_values(
 
     // Per-block upward-exposed uses and defs (bit sets). Inlined insts are skipped
     // (no def, no own-position use — their reads fold in at the use site).
-    let mut use_set: Vec<BitSet> = vec![BitSet::new(v_count); n];
-    let mut def_set: Vec<BitSet> = vec![BitSet::new(v_count); n];
+    let mut use_set = BitRows::new(n, v_count);
+    let mut def_set = BitRows::new(n, v_count);
     for (bi, &b) in blocks.iter().enumerate() {
         let block = &func.blocks[b];
         for &id in &block.insts {
@@ -272,18 +319,18 @@ pub(crate) fn color_values(
             }
             for &k in list(use_range[raw(id)]) {
                 let k = k as usize;
-                if def_set[bi].words[k >> 6] & (1u64 << (k & 63)) == 0 {
-                    use_set[bi].set(k);
+                if !def_set.get(bi, k) {
+                    use_set.set(bi, k);
                 }
             }
             if func.insts[id].produces_value() {
-                def_set[bi].set(vi[raw(id)] as usize);
+                def_set.set(bi, vi[raw(id)] as usize);
             }
         }
         for &k in list(term_range[bi]) {
             let k = k as usize;
-            if def_set[bi].words[k >> 6] & (1u64 << (k & 63)) == 0 {
-                use_set[bi].set(k);
+            if !def_set.get(bi, k) {
+                use_set.set(bi, k);
             }
         }
     }
@@ -294,7 +341,7 @@ pub(crate) fn color_values(
     // seed), so the n-wide `live_out` bit-array is never allocated. The fixpoint
     // converges on `live_in` growth alone (monotone), so dropping the explicit
     // `live_out` change-tracking is correct.
-    let mut live_in: Vec<BitSet> = vec![BitSet::new(v_count); n];
+    let mut live_in = BitRows::new(n, v_count);
     // Scratch buffers reused across every block/iteration (the per-block `clone`
     // + fresh `out` alloc were the regalloc memmove/malloc hot spot).
     let mut out = BitSet::new(v_count);
@@ -308,14 +355,14 @@ pub(crate) fn color_values(
             successors(&func.blocks[b].term, |s| {
                 let si = pos[raw(s)];
                 if si != usize::MAX {
-                    out.or_with(&live_in[si]);
+                    out.or_with(live_in.row(si));
                 }
             });
-            inn.copy_from(&use_set[bi]);
-            for (wi, (&o, &d)) in out.words.iter().zip(def_set[bi].words.iter()).enumerate() {
+            inn.copy_from(use_set.row(bi));
+            for (wi, (&o, &d)) in out.words.iter().zip(def_set.row(bi)).enumerate() {
                 inn.words[wi] |= o & !d;
             }
-            changed |= live_in[bi].or_with(&inn);
+            changed |= live_in.or_row(bi, &inn);
         }
     }
 
@@ -379,8 +426,8 @@ pub(crate) fn color_values(
                 let cur = val_part[k];
                 val_part[k] = if cur == u32::MAX { p } else { lca(cur, p) };
             };
-            def_set[bi].for_each(&mut fold);
-            use_set[bi].for_each(&mut fold);
+            def_set.for_each(bi, &mut fold);
+            use_set.for_each(bi, &mut fold);
         }
         for (k, ls) in loops.iter().enumerate() {
             let hbi = pos[raw(ls.header)];
@@ -388,7 +435,7 @@ pub(crate) fn color_values(
                 continue;
             }
             let lp = k as u32 + 1;
-            live_in[hbi].for_each(|v| {
+            live_in.for_each(hbi, |v| {
                 let mut p = val_part[v];
                 if p == u32::MAX {
                     return;
@@ -427,7 +474,7 @@ pub(crate) fn color_values(
         successors(&block.term, |s| {
             let si = pos[raw(s)];
             if si != usize::MAX {
-                live.or_with(&live_in[si]);
+                live.or_with(live_in.row(si));
             }
         });
         // term operands are after all insts.
@@ -697,8 +744,8 @@ pub(crate) fn color_cells_with_analysis(
     }
 
     // Per-block upward-exposed uses and defs (bit sets) over top-level blocks.
-    let mut use_set: Vec<BitSet> = vec![BitSet::new(c_count); n];
-    let mut def_set: Vec<BitSet> = vec![BitSet::new(c_count); n];
+    let mut use_set = BitRows::new(n, c_count);
+    let mut def_set = BitRows::new(n, c_count);
     // The dense cells each statement and each terminator reads, flattened
     // once for both liveness walks; seeing through inlined operands is the
     // expensive part of either.
@@ -725,18 +772,18 @@ pub(crate) fn color_cells_with_analysis(
             // first so the cursor read is upward-exposed.
             for &k in list(use_range[raw(id)]) {
                 let k = k as usize;
-                if def_set[bi].words[k >> 6] & (1u64 << (k & 63)) == 0 {
-                    use_set[bi].set(k);
+                if !def_set.get(bi, k) {
+                    use_set.set(bi, k);
                 }
             }
             cell_defs(&func.insts[id], &mut |c| {
-                def_set[bi].set(ci[raw(c)] as usize)
+                def_set.set(bi, ci[raw(c)] as usize)
             });
         }
         for &k in list(term_range[bi]) {
             let k = k as usize;
-            if def_set[bi].words[k >> 6] & (1u64 << (k & 63)) == 0 {
-                use_set[bi].set(k);
+            if !def_set.get(bi, k) {
+                use_set.set(bi, k);
             }
         }
     }
@@ -747,7 +794,7 @@ pub(crate) fn color_cells_with_analysis(
     // live-in grew, so its work tracks actual propagation. Only `live_in` is
     // stored; `live_out[b] = ∪ successors' live_in` is recomputed on the fly (here
     // and at the interference seed). Predecessors (within scope) drive re-queueing.
-    let mut live_in: Vec<BitSet> = vec![BitSet::new(c_count); n];
+    let mut live_in = BitRows::new(n, c_count);
 
     // Predecessor CSR over scope blocks: `pred_list[pred_off[si]..pred_off[si+1]]`
     // are the scope-indices that have `top[si]` as a successor.
@@ -789,15 +836,15 @@ pub(crate) fn color_cells_with_analysis(
         successors(&func.blocks[b].term, |s| {
             let si = pos[raw(s)];
             if si != usize::MAX {
-                out.or_with(&live_in[si]);
+                out.or_with(live_in.row(si));
             }
         });
         // in = use ∪ (out \ def): start from use, then add out-minus-def.
-        inn.copy_from(&use_set[bi]);
-        for (wi, (&o, &d)) in out.words.iter().zip(def_set[bi].words.iter()).enumerate() {
+        inn.copy_from(use_set.row(bi));
+        for (wi, (&o, &d)) in out.words.iter().zip(def_set.row(bi)).enumerate() {
             inn.words[wi] |= o & !d;
         }
-        if live_in[bi].or_with(&inn) {
+        if live_in.or_row(bi, &inn) {
             // live-in grew -> each predecessor's live-out (hence live-in) may grow.
             for pi in pred_off[bi]..pred_off[bi + 1] {
                 let p = pred_list[pi as usize] as usize;
@@ -852,7 +899,7 @@ pub(crate) fn color_cells_with_analysis(
         successors(&block.term, |s| {
             let si = pos[raw(s)];
             if si != usize::MAX {
-                live.or_with(&live_in[si]);
+                live.or_with(live_in.row(si));
             }
         });
         for &k in list(term_range[bi]) {
@@ -964,19 +1011,24 @@ pub(crate) enum KillLocal {
 }
 
 pub(crate) struct NilKills {
-    /// Dense `raw(inst) -> locals dead right after that instruction's statement`.
-    pub after_inst: Vec<Vec<KillLocal>>,
+    /// Dense `raw(inst) -> range of after_locals`: the locals dead right after
+    /// that instruction's statement. One list for the body instead of a vector
+    /// per instruction.
+    after_range: Vec<(u32, u32)>,
+    after_locals: Vec<KillLocal>,
     /// Dense `raw(block) -> locals dead on entry to the block that some
     /// predecessor still had live` (dying on the edge or at its terminator).
     pub at_entry: Vec<Vec<KillLocal>>,
     /// Per scope block: live-in slots, and slots live at the block's end
     /// (successor live-in plus the terminator's own reads).
-    live_in: Vec<BitSet>,
-    end_live: Vec<BitSet>,
+    live_in: BitRows,
+    end_live: BitRows,
     pos: Vec<usize>,
-    /// Per scope block: slots redefined by its leading call-free statements,
-    /// so an entry kill of them would be wasted.
-    first_pure_defs: Vec<Vec<usize>>,
+    /// Per scope block: the range of `first_pure_slots` holding the slots
+    /// redefined by its leading call-free statements, so an entry kill of them
+    /// would be wasted.
+    first_pure_range: Vec<(u32, u32)>,
+    first_pure_slots: Vec<usize>,
     value_count: u32,
     value_scope: Vec<Option<Idx<Block>>>,
     loop_blocks: Vec<(Idx<Block>, HashSet<Idx<Block>>)>,
@@ -986,15 +1038,25 @@ impl NilKills {
     /// No kills anywhere (coroutine `__step` bodies, or the pass disabled).
     pub(crate) fn none(func: &MirFunc) -> Self {
         NilKills {
-            after_inst: vec![Vec::new(); func.insts.len()],
+            after_range: Vec::new(),
+            after_locals: Vec::new(),
             at_entry: vec![Vec::new(); func.blocks.len()],
-            live_in: Vec::new(),
-            end_live: Vec::new(),
+            live_in: BitRows::new(0, 0),
+            end_live: BitRows::new(0, 0),
             pos: Vec::new(),
-            first_pure_defs: Vec::new(),
+            first_pure_range: Vec::new(),
+            first_pure_slots: Vec::new(),
             value_count: 0,
             value_scope: Vec::new(),
             loop_blocks: Vec::new(),
+        }
+    }
+
+    /// Locals dead right after the statement of `id`.
+    pub(crate) fn after_inst(&self, id: Idx<Inst>) -> &[KillLocal] {
+        match self.after_range.get(raw(id)) {
+            Some(&(start, end)) => &self.after_locals[start as usize..end as usize],
+            None => &[],
         }
     }
 
@@ -1025,17 +1087,25 @@ impl NilKills {
     /// control-flow edge the emitter renders as a direct fall-through (the
     /// `math.min`/`math.max` selection skips its arm blocks).
     pub(crate) fn on_edge(&self, from: Idx<Block>, to: Idx<Block>) -> Vec<KillLocal> {
+        let mut out = Vec::new();
+        self.each_on_edge(from, to, |local| out.push(local));
+        out
+    }
+
+    fn each_on_edge(&self, from: Idx<Block>, to: Idx<Block>, mut f: impl FnMut(KillLocal)) {
         let (Some(&fi), Some(&ti)) = (self.pos.get(raw(from)), self.pos.get(raw(to))) else {
-            return Vec::new();
+            return;
         };
         if fi == usize::MAX || ti == usize::MAX {
-            return Vec::new();
+            return;
         }
-        let mut out = Vec::new();
-        for (wi, (&e, &l)) in self.end_live[fi]
-            .words
+        let (start, end) = self.first_pure_range[ti];
+        let first_pure = &self.first_pure_slots[start as usize..end as usize];
+        for (wi, (&e, &l)) in self
+            .end_live
+            .row(fi)
             .iter()
-            .zip(self.live_in[ti].words.iter())
+            .zip(self.live_in.row(ti))
             .enumerate()
         {
             let mut bits = e & !l;
@@ -1043,13 +1113,12 @@ impl NilKills {
                 let b = bits.trailing_zeros() as usize;
                 let slot = wi * 64 + b;
                 let local = self.decode(slot);
-                if self.allowed_at(local, to) && !self.first_pure_defs[ti].contains(&slot) {
-                    out.push(local);
+                if self.allowed_at(local, to) && !first_pure.contains(&slot) {
+                    f(local);
                 }
                 bits &= bits - 1;
             }
         }
-        out
     }
 }
 
@@ -1251,8 +1320,8 @@ pub(crate) fn nil_kills(
 
     // Per-block upward-exposed uses and defs, then the same worklist liveness
     // as `color_cells_with_analysis`, over the slot space.
-    let mut use_set: Vec<BitSet> = vec![BitSet::new(s_count); n];
-    let mut def_set: Vec<BitSet> = vec![BitSet::new(s_count); n];
+    let mut use_set = BitRows::new(n, s_count);
+    let mut def_set = BitRows::new(n, s_count);
     for (bi, &b) in scope.iter().enumerate() {
         for &id in &func.blocks[b].insts {
             if inline[raw(id)] {
@@ -1260,17 +1329,17 @@ pub(crate) fn nil_kills(
             }
             let (defs, uses) = stmt_defs_uses(id);
             for &s in uses {
-                if !def_set[bi].get(s as usize) {
-                    use_set[bi].set(s as usize);
+                if !def_set.get(bi, s as usize) {
+                    use_set.set(bi, s as usize);
                 }
             }
             for &s in defs {
-                def_set[bi].set(s as usize);
+                def_set.set(bi, s as usize);
             }
         }
         term_slots(&func.blocks[b].term, &mut |s| {
-            if !def_set[bi].get(s) {
-                use_set[bi].set(s);
+            if !def_set.get(bi, s) {
+                use_set.set(bi, s);
             }
         });
     }
@@ -1297,7 +1366,7 @@ pub(crate) fn nil_kills(
             }
         });
     }
-    let mut live_in: Vec<BitSet> = vec![BitSet::new(s_count); n];
+    let mut live_in = BitRows::new(n, s_count);
     let mut out = BitSet::new(s_count);
     let mut inn = BitSet::new(s_count);
     let mut work: Vec<u32> = (0..n as u32).collect();
@@ -1309,14 +1378,14 @@ pub(crate) fn nil_kills(
         successors(&func.blocks[scope[bi]].term, |s| {
             let si = pos[raw(s)];
             if si != usize::MAX {
-                out.or_with(&live_in[si]);
+                out.or_with(live_in.row(si));
             }
         });
-        inn.copy_from(&use_set[bi]);
-        for (wi, (&o, &d)) in out.words.iter().zip(def_set[bi].words.iter()).enumerate() {
+        inn.copy_from(use_set.row(bi));
+        for (wi, (&o, &d)) in out.words.iter().zip(def_set.row(bi)).enumerate() {
             inn.words[wi] |= o & !d;
         }
-        if live_in[bi].or_with(&inn) {
+        if live_in.or_row(bi, &inn) {
             for pi in pred_off[bi]..pred_off[bi + 1] {
                 let p = pred_list[pi as usize] as usize;
                 if !in_queue[p] {
@@ -1328,12 +1397,14 @@ pub(crate) fn nil_kills(
     }
 
     let mut kills = NilKills {
-        after_inst: vec![Vec::new(); func.insts.len()],
+        after_range: vec![(0, 0); func.insts.len()],
+        after_locals: Vec::new(),
         at_entry: vec![Vec::new(); func.blocks.len()],
         live_in,
-        end_live: vec![BitSet::new(s_count); n],
+        end_live: BitRows::new(n, s_count),
         pos,
-        first_pure_defs: vec![Vec::new(); n],
+        first_pure_range: vec![(0, 0); n],
+        first_pure_slots: Vec::new(),
         value_count,
         value_scope: value_scope.to_vec(),
         loop_blocks: loops
@@ -1358,11 +1429,11 @@ pub(crate) fn nil_kills(
         successors(&block.term, |s| {
             let si = kills.pos[raw(s)];
             if si != usize::MAX {
-                live.or_with(&kills.live_in[si]);
+                live.or_with(kills.live_in.row(si));
             }
         });
         term_slots(&block.term, &mut |s| live.set(s));
-        kills.end_live[bi].copy_from(&live);
+        kills.end_live.row_mut(bi).copy_from_slice(&live.words);
         next_pure_defs.clear();
         for &id in block.insts.iter().rev() {
             if inline[raw(id)] {
@@ -1381,10 +1452,12 @@ pub(crate) fn nil_kills(
             } else {
                 next_pure_defs.clear();
             }
+            let start = kills.after_locals.len() as u32;
             for &s in &dead {
                 let local = kills.decode(s);
-                kills.after_inst[raw(id)].push(local);
+                kills.after_locals.push(local);
             }
+            kills.after_range[raw(id)] = (start, kills.after_locals.len() as u32);
             for &s in defs {
                 live.remove(s as usize);
             }
@@ -1393,7 +1466,9 @@ pub(crate) fn nil_kills(
             }
         }
         // After the walk this holds the defs of the leading pure statements.
-        kills.first_pure_defs[bi] = next_pure_defs.clone();
+        let start = kills.first_pure_slots.len() as u32;
+        kills.first_pure_slots.extend_from_slice(&next_pure_defs);
+        kills.first_pure_range[bi] = (start, kills.first_pure_slots.len() as u32);
         if b == func.entry() {
             // A parameter is defined at entry; one never read dies there.
             for &p in params {
@@ -1411,11 +1486,13 @@ pub(crate) fn nil_kills(
     // the successor's label is the one place that covers every such edge.
     for &b in scope {
         successors(&func.blocks[b].term, |s| {
-            for local in kills.on_edge(b, s) {
-                if !kills.at_entry[raw(s)].contains(&local) {
-                    kills.at_entry[raw(s)].push(local);
+            let mut entry = std::mem::take(&mut kills.at_entry[raw(s)]);
+            kills.each_on_edge(b, s, |local| {
+                if !entry.contains(&local) {
+                    entry.push(local);
                 }
-            }
+            });
+            kills.at_entry[raw(s)] = entry;
         });
     }
     kills
