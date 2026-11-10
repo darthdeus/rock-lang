@@ -454,9 +454,10 @@ pub fn lower_modules_seeded(
         let timer = Instant::now();
 
         let timed = module_timings_requested();
-        let (modules, times): (Vec<_>, Vec<_>) = ctxts
-            .into_par_iter()
-            .map(|(rock_module, mut c)| {
+        let (modules, times): (Vec<_>, Vec<_>) = par_map_largest_first(
+            ctxts,
+            |(rock_module, _)| rock_module.exprs.len(),
+            |(rock_module, mut c)| {
                 let started = timed.then(Instant::now);
                 pass_lower_functions(rock_module, &mut c)?;
                 c.flush_scope_probes();
@@ -465,10 +466,12 @@ pub fn lower_modules_seeded(
 
                 let time = started.map(|started| started.elapsed());
                 Ok::<_, CompilerError>((c.module, time))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .unzip();
+            },
+        )
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .unzip();
         lower_times = modules
             .iter()
             .zip(times)
@@ -828,15 +831,24 @@ pub(crate) fn infer_modules(ws: &mut Workspace, ids: &[ModuleId]) -> Result<(), 
         let timer = Instant::now();
 
         let timed = module_timings_requested();
-        let inference_results = ids
-            .par_iter()
-            .map(|id| {
+        let inference_results = par_map_largest_first(
+            ids.to_vec(),
+            |id| {
+                ws.module(*id)
+                    .bodies
+                    .values()
+                    .map(|body| body.expr_arena.len())
+                    .sum()
+            },
+            |id| {
                 let _m = tracing::info_span!("check_module", module = %id.0).entered();
                 let started = timed.then(Instant::now);
-                let inf = check_module(ws, *id, ws.module(*id))?;
-                Ok((*id, inf, started.map(|started| started.elapsed())))
-            })
-            .collect::<Result<Vec<_>, CompilerError>>()?;
+                let inf = check_module(ws, id, ws.module(id))?;
+                Ok((id, inf, started.map(|started| started.elapsed())))
+            },
+        )
+        .into_iter()
+        .collect::<Result<Vec<_>, CompilerError>>()?;
 
         for (key, inf, time) in inference_results.into_iter() {
             ws.set_inference(key, inf);

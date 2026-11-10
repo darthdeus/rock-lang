@@ -160,6 +160,38 @@ pub fn drop_in_background<T>(value: T) {
     drop(value);
 }
 
+/// `items.into_par_iter().map(f).collect()`, in the same order, but each
+/// worker takes the costliest item left. Split-based scheduling can start a
+/// large item last and leave it running alone after the others finish.
+#[cfg(not(any(feature = "sequential", target_arch = "wasm32")))]
+pub fn par_map_largest_first<T: Send, R: Send>(
+    items: Vec<T>,
+    cost: impl Fn(&T) -> usize,
+    f: impl Fn(T) -> R + Sync + Send,
+) -> Vec<R> {
+    use rayon::iter::ParallelBridge;
+    let n = items.len();
+    let mut queue: Vec<(usize, T)> = items.into_iter().enumerate().collect();
+    queue.sort_by_cached_key(|(_, item)| std::cmp::Reverse(cost(item)));
+    let mut done: Vec<(usize, R)> = queue
+        .into_iter()
+        .par_bridge()
+        .map(|(index, item)| (index, f(item)))
+        .collect();
+    done.sort_unstable_by_key(|(index, _)| *index);
+    debug_assert_eq!(done.len(), n);
+    done.into_iter().map(|(_, result)| result).collect()
+}
+
+#[cfg(any(feature = "sequential", target_arch = "wasm32"))]
+pub fn par_map_largest_first<T, R>(
+    items: Vec<T>,
+    _cost: impl Fn(&T) -> usize,
+    f: impl Fn(T) -> R,
+) -> Vec<R> {
+    items.into_iter().map(f).collect()
+}
+
 #[cfg(feature = "sequential")]
 pub use sequential_par::*;
 

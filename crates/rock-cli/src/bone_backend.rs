@@ -269,16 +269,15 @@ pub(crate) fn bone_pipeline_timed(
 pub(crate) fn parse_user_modules(
     sources: &SourceFiles,
 ) -> std::result::Result<(Vec<skull_parser::Ast>, ustr::Ustr, Duration), Vec<CompilerError>> {
-    use rayon::prelude::*;
     let t = Instant::now();
     // Parse every module in parallel — each parse is independent (own arenas; the
-    // only shared state, `Ustr` interning, is concurrent-safe). `par_iter`
-    // preserves order, so the dedup/entry scan below sees files in the same order
-    // the old serial loop did. Carry each module's id-path Ustr alongside its Ast.
-    let parsed: Vec<(skull_parser::Ast, ustr::Ustr)> = sources
-        .files
-        .par_iter()
-        .map(|file| {
+    // only shared state, `Ustr` interning, is concurrent-safe). Results keep file
+    // order, so the dedup/entry scan below sees files in the same order the old
+    // serial loop did. Carry each module's id-path Ustr alongside its Ast.
+    let parsed: Vec<(skull_parser::Ast, ustr::Ustr)> = bone_core::prelude::par_map_largest_first(
+        sources.files.iter().collect(),
+        |file| file.borrow().contents.len(),
+        |file| {
             let f = file.borrow();
             let id = ustr::Ustr::from(f.file.to_id_path().as_str());
             let mut module = skull_parser::parse_module_with_dialect(&f.contents, id, f.dialect)
@@ -286,8 +285,10 @@ pub(crate) fn parse_user_modules(
             module.package = f.package.clone();
             module.global_policy = f.global_policy;
             Ok((module, id))
-        })
-        .collect::<std::result::Result<Vec<_>, Vec<CompilerError>>>()?;
+        },
+    )
+    .into_iter()
+    .collect::<std::result::Result<Vec<_>, Vec<CompilerError>>>()?;
 
     // Sequential post-pass: reject duplicate module ids and pick the entry file.
     let mut modules = Vec::with_capacity(parsed.len());
