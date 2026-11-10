@@ -76,15 +76,16 @@ fn single_receive_cells(func: &MirFunc, scope: &[Idx<Block>], pinned: &[bool]) -
 /// candidates qualify at one same-block use, subject to the shared order check.
 /// Loads of parameters never written in this scope qualify at every use: the
 /// Lua parameter is already their value.
-/// Returns the folded values, and the folded loads that may be rendered at any
-/// number of use sites: a parameter never written here, or a cell whose one
-/// write dominates every read.
+/// Returns the folded values, the folded loads that may be rendered at any
+/// number of use sites (a parameter never written here, or a cell whose one
+/// write dominates every read), and how many operands in `scope` read each
+/// value.
 pub(crate) fn compute_inlinable(
     func: &MirFunc,
     scope: &[Idx<Block>],
     params: &[Idx<Cell>],
     pinned: &[bool],
-) -> (Vec<bool>, Vec<bool>) {
+) -> (Vec<bool>, Vec<bool>, Vec<u32>) {
     // Dense side-tables keyed by raw inst id (no hashing): use count, and the
     // block of the (single) use and of the def. `NONE` = unset. Insts outside
     // `scope` (other closures share the arena) stay at 0/NONE and never qualify.
@@ -160,7 +161,7 @@ pub(crate) fn compute_inlinable(
             }
         }
     }
-    (inl, repeatable)
+    (inl, repeatable, use_count)
 }
 
 /// Whether `consumer` renders each of its operands exactly once, so a folded

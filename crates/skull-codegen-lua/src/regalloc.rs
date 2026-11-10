@@ -114,6 +114,8 @@ pub(crate) struct Flow {
     /// One entry longer than `succ_off`: the fill cursor trails by a slot.
     pred_off: Vec<u32>,
     pred: Vec<u32>,
+    /// Instructions placed in the order's blocks.
+    placed: usize,
 }
 
 impl Flow {
@@ -128,7 +130,9 @@ impl Flow {
         // Counted two slots up, so that after the prefix sum slot `i + 1` is
         // the start of block `i` and filling it leaves the start of `i + 1`.
         let mut pred_off = vec![0u32; n + 2];
+        let mut placed = 0;
         for &b in order {
+            placed += func.blocks[b].insts.len();
             succ_off.push(succ.len() as u32);
             successors(&func.blocks[b].term, |s| {
                 let si = pos[raw(s)];
@@ -156,6 +160,7 @@ impl Flow {
             succ,
             pred_off,
             pred,
+            placed,
         }
     }
 
@@ -401,6 +406,39 @@ pub(crate) struct LoopScope {
     pub region: Vec<Idx<Block>>,
 }
 
+/// Items grouped by a key, as one chain per key threaded through the items:
+/// two tables for the whole grouping instead of a list per key.
+struct Chains {
+    /// `key -> its last item`, then `item -> the one before it`; `u32::MAX`
+    /// ends a chain.
+    head: Vec<u32>,
+    prev: Vec<u32>,
+}
+
+impl Chains {
+    /// Group items `0..` by the key each one yields.
+    fn new(keys: usize, key_of_item: impl Iterator<Item = usize>) -> Self {
+        let mut head = vec![u32::MAX; keys];
+        let prev = key_of_item
+            .enumerate()
+            .map(|(item, key)| std::mem::replace(&mut head[key], item as u32))
+            .collect();
+        Chains { head, prev }
+    }
+
+    /// The items of `key`, in no order a caller may rely on.
+    fn of(&self, key: usize) -> impl Iterator<Item = usize> + '_ {
+        let mut at = self.head[key];
+        std::iter::from_fn(move || {
+            (at != u32::MAX).then(|| {
+                let item = at as usize;
+                at = self.prev[item];
+                item
+            })
+        })
+    }
+}
+
 /// Backward liveness over a small set of tracked bits (some values, some
 /// cells) in one body, with each emitted statement's and terminator's reads
 /// and writes of them flattened once. The two fold analyses below walk it
@@ -434,8 +472,8 @@ impl<'a> TrackedLiveness<'a> {
         let mut t = TrackedLiveness {
             flow,
             block_stmts: Vec::with_capacity(n),
-            stmts: Vec::new(),
-            stmt_bits: Vec::new(),
+            stmts: Vec::with_capacity(flow.placed),
+            stmt_bits: Vec::with_capacity(flow.placed),
             term_bits: Vec::with_capacity(n),
             bits: Vec::new(),
             live_in: BitRows::new(0, width),
@@ -653,10 +691,7 @@ pub(crate) fn stable_loads(
     if loads.is_empty() {
         return stable;
     }
-    let mut by_cell = vec![Vec::new(); func.cells.len()];
-    for (k, &(_, cell)) in loads.iter().enumerate() {
-        by_cell[raw(cell)].push(k as u32);
-    }
+    let by_cell = Chains::new(func.cells.len(), loads.iter().map(|&(_, cell)| raw(cell)));
     let tracked = |v: Idx<Inst>, bits: &mut Vec<u32>| {
         if li[raw(v)] != u32::MAX {
             bits.push(li[raw(v)]);
@@ -679,19 +714,19 @@ pub(crate) fn stable_loads(
     // it the cell's name is the outer local, so a load still live after an
     // early exit must stay in a register.
     for (&header, cl) in loops {
-        for &k in &by_cell[raw(cl.slot)] {
-            conflict[k as usize] = scope.iter().enumerate().any(|(bi, &b)| {
+        for k in by_cell.of(raw(cl.slot)) {
+            conflict[k] = scope.iter().enumerate().any(|(bi, &b)| {
                 b != header
                     && b != cl.latch
                     && !cl.region.contains(&b)
-                    && liveness.live_in.get(bi, k as usize)
+                    && liveness.live_in.get(bi, k)
             });
         }
     }
     liveness.walk(|id, live| {
         func.insts[id].cell_writes_each(&mut |cell| {
-            for &k in &by_cell[raw(cell)] {
-                conflict[k as usize] |= live.get(k as usize);
+            for k in by_cell.of(raw(cell)) {
+                conflict[k] |= live.get(k);
             }
         });
     });
@@ -758,10 +793,10 @@ pub(crate) fn store_targets(
             c_count += 1;
         }
     }
-    let mut by_cell = vec![Vec::new(); c_count as usize];
-    for (k, &c) in cells.iter().enumerate() {
-        by_cell[(ci[raw(c)] as usize) - k_count].push(k as u32);
-    }
+    let by_cell = Chains::new(
+        c_count as usize,
+        cells.iter().map(|&c| ci[raw(c)] as usize - k_count),
+    );
     let value_bit = |v: Idx<Inst>, bits: &mut Vec<u32>| {
         if vi[raw(v)] != u32::MAX {
             bits.push(vi[raw(v)]);
@@ -801,8 +836,7 @@ pub(crate) fn store_targets(
                 Inst::Store { value, .. } => Some(value),
                 _ => None,
             };
-            for &k in &by_cell[ci[raw(c)] as usize - k_count] {
-                let k = k as usize;
+            for k in by_cell.of(ci[raw(c)] as usize - k_count) {
                 if live.get(k) && copies != Some(vals[k]) {
                     conflict[k] = true;
                 }
@@ -813,11 +847,7 @@ pub(crate) fn store_targets(
             let bit = ci[raw(cells[k])] as usize;
             // The cell must be dead here, and no other value of the cell may
             // still be live.
-            if live.get(bit)
-                || by_cell[bit - k_count]
-                    .iter()
-                    .any(|&o| o as usize != k && live.get(o as usize))
-            {
+            if live.get(bit) || by_cell.of(bit - k_count).any(|o| o != k && live.get(o)) {
                 conflict[k] = true;
             }
         }
@@ -834,12 +864,26 @@ pub(crate) fn store_targets(
     alias
 }
 
+/// How many operands of the statements and terminators in `scope` read each
+/// value, as a dense `raw(inst) -> count`.
+#[cfg(test)]
+fn reader_counts(func: &MirFunc, scope: &[Idx<Block>]) -> Vec<u32> {
+    let mut readers = vec![0; func.insts.len()];
+    for &b in scope {
+        for &id in &func.blocks[b].insts {
+            func.insts[id].uses_each(&mut |v| readers[raw(v)] += 1);
+        }
+        func.blocks[b].term.uses_each(&mut |v| readers[raw(v)] += 1);
+    }
+    readers
+}
+
 /// A call whose result nothing reads runs as a bare call statement, with no
 /// register to assign and then kill. Its callee must render as a name: a
 /// statement opening with `(` would continue the previous line's expression.
 /// A folded cell read prints as the cell's name.
-fn result_discarded(func: &MirFunc, inline: &[bool], used: &[bool], id: Idx<Inst>) -> bool {
-    !used[raw(id)]
+fn result_discarded(func: &MirFunc, inline: &[bool], readers: &[u32], id: Idx<Inst>) -> bool {
+    readers[raw(id)] == 0
         && match func.insts[id] {
             Inst::Call { .. } => true,
             Inst::CallValue { callee, .. } => {
@@ -986,7 +1030,8 @@ pub(crate) struct Locals<'a> {
 impl<'a> Locals<'a> {
     /// `pinned` and `extra_pinned` cells never share a color; the second
     /// names cells the emitter references implicitly (a coroutine's frame
-    /// parameter).
+    /// parameter). `readers` counts the operands in `scope` that read each
+    /// value ([`reader_counts`]).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         func: &'a MirFunc,
@@ -997,27 +1042,31 @@ impl<'a> Locals<'a> {
         pinned: &[bool],
         extra_pinned: &[Idx<Cell>],
         reads: &Reads,
+        mut readers: Vec<u32>,
     ) -> Self {
         let n = scope.len();
+        let placed = flow.placed;
         // Only placed instructions count as readers: a transform can leave a
-        // dropped instruction allocated in the arena, still naming its operands.
-        let mut used = vec![false; func.insts.len()];
-        for (_, block) in func.blocks.iter() {
-            for &id in &block.insts {
-                func.insts[id].uses_each(&mut |v| used[raw(v)] = true);
+        // dropped instruction allocated in the arena, still naming its
+        // operands. A block outside the scope is still placed.
+        if func.blocks.len() != n {
+            for (b, block) in func.blocks.iter() {
+                if flow.index(b).is_none() {
+                    for &id in &block.insts {
+                        func.insts[id].uses_each(&mut |v| readers[raw(v)] += 1);
+                    }
+                    block.term.uses_each(&mut |v| readers[raw(v)] += 1);
+                }
             }
-            block.term.uses_each(&mut |v| used[raw(v)] = true);
         }
-        let mut placed = 0;
         let mut values: Vec<Idx<Inst>> = Vec::new();
         for &b in scope {
-            placed += func.blocks[b].insts.len();
             for &id in &func.blocks[b].insts {
                 let inst = &func.insts[id];
                 if inst.produces_value()
                     && !inline[raw(id)]
                     && alias_at(alias, id).is_none()
-                    && !result_discarded(func, inline, &used, id)
+                    && !result_discarded(func, inline, &readers, id)
                 {
                     values.push(id);
                 }
@@ -1478,7 +1527,19 @@ pub(crate) fn color_cells(func: &MirFunc) -> Vec<u32> {
     let pinned = pinned_cells(func, &flow);
     let inline = vec![false; func.insts.len()];
     let reads = Reads::new(func, &order, &inline);
-    Locals::new(func, &order, &flow, &inline, &[], &pinned, &[], &reads).color_cells()
+    let readers = reader_counts(func, &order);
+    Locals::new(
+        func,
+        &order,
+        &flow,
+        &inline,
+        &[],
+        &pinned,
+        &[],
+        &reads,
+        readers,
+    )
+    .color_cells()
 }
 
 /// Cells held by reference for the whole body -- a closure's params, any cell
@@ -1933,7 +1994,8 @@ pub(crate) fn nil_kills<'a>(
 
     let mut kills = NilKills {
         after_range: vec![(0, 0); func.insts.len()],
-        after_locals: Vec::new(),
+        // A statement kills no more than the slots it names.
+        after_locals: Vec::with_capacity(slots.len()),
         entry_range: vec![(0, 0); func.blocks.len()],
         entry_locals: Vec::new(),
         live_in,
