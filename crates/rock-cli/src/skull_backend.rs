@@ -1994,7 +1994,7 @@ pub(crate) fn skull_watch(path: &str, output: Option<String>) -> Result<()> {
             && (crate::registry::RuntimeServices::registered().is_game_project)(path_ref)
                 .unwrap_or(false)
         {
-            match sources.production_only(path_ref) {
+            match rock_host::source_files::production_only(&sources, path_ref) {
                 Ok(sources) => sources,
                 Err(error) => {
                     log::error!(target: "WATCH", "skull: production source selection failed: {error}");
@@ -2259,8 +2259,7 @@ fn skull_emit_project_with_inputs(
     };
     // Game build: drop test-only files (tests/ dirs) so a compile error in a
     // sim/test can't break the running game.
-    let sources = sources
-        .production_only(std::path::Path::new(dir))
+    let sources = rock_host::source_files::production_only(&sources, std::path::Path::new(dir))
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     crate::compile_budget::phase("discovery");
     crate::compile_budget::sources(&sources);

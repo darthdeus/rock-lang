@@ -58,52 +58,52 @@ impl SourceFiles {
         }
     }
 
-    /// A copy without the test-only files. Test-only means the path
-    /// convention: a file with a `tests` component below the root of the
-    /// package that owns it (sims live in `<pkg>/tests/sims/`, unit tests in
-    /// `<pkg>/tests/`). Production builds ask for this copy so that an error
-    /// in a test-only file cannot break the application, while the test, sim,
-    /// lint and lsp paths keep working on the full set.
-    pub fn production_only(&self, project_root: &Path) -> Result<SourceFiles, CompilerError> {
-        let mut files = Vec::with_capacity(self.files.len());
+    /// The classifier that decides which files a production build keeps.
+    /// Test-only means the path convention: a file with a `tests` component
+    /// below the root of the package that owns it (sims live in
+    /// `<pkg>/tests/sims/`, unit tests in `<pkg>/tests/`). Production builds
+    /// keep the other files so that an error in a test-only file cannot break
+    /// the application, while the test, sim, lint and lsp paths keep working
+    /// on the full set.
+    pub fn production_filter<'a>(&'a self, project_root: &'a Path) -> ProductionFilter<'a> {
         // Every file shares one of a few roots; canonicalize each root once.
-        let mut canonical_roots: Vec<(&Path, Result<PathBuf, String>)> = Vec::new();
-        // Sources share their directories; each is probed once.
-        let mut plain_dirs = std::collections::HashSet::new();
-        for source in &self.files {
-            let file = source.borrow();
-            let path = file.file.to_id_path();
-            let (root, tagged) = match file.package.as_ref() {
-                Some(tag) => (self.package_root(tag.id, &path), true),
-                None => (project_root, false),
-            };
-            let index = match canonical_roots.iter().position(|(known, _)| *known == root) {
-                Some(index) => index,
-                None => {
-                    let canonical = root.canonicalize().map_err(|error| error.to_string());
-                    canonical_roots.push((root, canonical));
-                    canonical_roots.len() - 1
-                }
-            };
-            let canonical_root = Self::canonical_root_for(&path, root, &canonical_roots[index].1)?;
-            if !Self::is_test_only_path_under(&path, root, canonical_root, tagged, &mut plain_dirs)?
-            {
-                files.push(source.clone());
-            }
+        let canonical = |root: &Path| root.canonicalize().map_err(|error| error.to_string());
+        ProductionFilter {
+            sources: self,
+            project_root: (project_root, canonical(project_root)),
+            package_roots: self
+                .package_roots
+                .iter()
+                .map(|(_, root)| canonical(root))
+                .collect(),
         }
-        Ok(SourceFiles {
-            files,
-            package_roots: self.package_roots.clone(),
-            ns_aliases: self.ns_aliases.clone(),
-        })
     }
 
-    /// The recorded root of one package. A tagged file whose package has no
-    /// recorded root breaks the invariant that the loader stamps both together,
-    /// and classification must not guess a root for it.
-    fn package_root(&self, id: u32, path: &str) -> &Path {
-        match self.package_roots.iter().find(|(known, _)| *known == id) {
-            Some((_, root)) => root.as_path(),
+    /// A copy holding the files whose `keep` is true, in order.
+    pub fn retaining(&self, keep: &[bool]) -> SourceFiles {
+        SourceFiles {
+            files: self
+                .files
+                .iter()
+                .zip(keep)
+                .filter(|(_, keep)| **keep)
+                .map(|(file, _)| file.clone())
+                .collect(),
+            package_roots: self.package_roots.clone(),
+            ns_aliases: self.ns_aliases.clone(),
+        }
+    }
+
+    /// The index of one package's recorded root. A tagged file whose package
+    /// has no recorded root breaks the invariant that the loader stamps both
+    /// together, and classification must not guess a root for it.
+    fn package_root_index(&self, id: u32, path: &str) -> usize {
+        match self
+            .package_roots
+            .iter()
+            .position(|(known, _)| *known == id)
+        {
+            Some(index) => index,
             None => panic!(
                 "SourceFiles invariant: tagged source `{path}` has no package root for package id {id}"
             ),
@@ -236,6 +236,39 @@ impl SourceFiles {
     }
 }
 
+/// [`SourceFiles::production_filter`]: the roots are resolved, so callers
+/// may classify files from several threads.
+pub struct ProductionFilter<'a> {
+    sources: &'a SourceFiles,
+    project_root: (&'a Path, Result<PathBuf, String>),
+    /// Canonical spellings of `sources.package_roots`, in the same order.
+    package_roots: Vec<Result<PathBuf, String>>,
+}
+
+impl ProductionFilter<'_> {
+    /// Whether a production build keeps `source`. `plain_dirs` holds the
+    /// directories this caller already found to be no symlink.
+    pub fn keeps(
+        &self,
+        source: &SourceFile,
+        plain_dirs: &mut std::collections::HashSet<PathBuf>,
+    ) -> Result<bool, CompilerError> {
+        let path = source.file.to_id_path();
+        let (root, canonical_root, tagged) = match source.package.as_ref() {
+            Some(tag) => {
+                let index = self.sources.package_root_index(tag.id, &path);
+                let root = self.sources.package_roots[index].1.as_path();
+                (root, &self.package_roots[index], true)
+            }
+            None => (self.project_root.0, &self.project_root.1, false),
+        };
+        let canonical_root = SourceFiles::canonical_root_for(&path, root, canonical_root)?;
+        let test_only =
+            SourceFiles::is_test_only_path_under(&path, root, canonical_root, tagged, plain_dirs)?;
+        Ok(!test_only)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,41 +337,6 @@ mod tests {
         assert!(!SourceFiles::is_test_only_relative_path(Path::new(
             "src/testing.rock"
         )));
-    }
-
-    #[test]
-    fn production_only_keeps_files_when_project_root_is_under_tests() {
-        let temp_root =
-            std::env::temp_dir().join(format!("rock_core_source_files_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp_root);
-        let project_root = temp_root.join("tests/project");
-        std::fs::create_dir_all(project_root.join("tests")).unwrap();
-        let main_path = project_root.join("main.rock");
-        let broken_path = project_root.join("tests/broken.rock");
-        std::fs::write(&main_path, "fn main() {}\n").unwrap();
-        std::fs::write(&broken_path, "fn broken() {}\n").unwrap();
-        let main_path = main_path.to_string_lossy().into_owned();
-        let broken_path = broken_path.to_string_lossy().into_owned();
-        let sources = SourceFiles {
-            files: vec![
-                std::sync::Arc::new(atomic_refcell::AtomicRefCell::new(source(&main_path))),
-                std::sync::Arc::new(atomic_refcell::AtomicRefCell::new(source(&broken_path))),
-            ],
-            package_roots: Vec::new(),
-            ns_aliases: None,
-        };
-
-        let production = sources.production_only(&project_root).unwrap();
-        let paths: Vec<_> = production
-            .files
-            .iter()
-            .map(|file| file.borrow().file.to_id_path())
-            .collect();
-
-        assert_eq!(paths.as_slice(), std::slice::from_ref(&main_path));
-        assert!(!SourceFiles::is_test_only_path(&main_path, &project_root).unwrap());
-        assert!(SourceFiles::is_test_only_path(&broken_path, &project_root).unwrap());
-        std::fs::remove_dir_all(temp_root).unwrap();
     }
 
     /// A path spelled below the root is classified by where it really is: a

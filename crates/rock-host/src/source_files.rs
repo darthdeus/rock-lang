@@ -57,6 +57,28 @@ impl SourceFilesExt for SourceFiles {
     }
 }
 
+/// `sources` without the files a production build drops (see
+/// [`SourceFiles::production_filter`]). Each file costs a few `lstat`s; they
+/// run in parallel, and the first failing file in order reports.
+pub fn production_only(
+    sources: &SourceFiles,
+    project_root: &Path,
+) -> std::result::Result<SourceFiles, rock_core::errors::CompilerError> {
+    use rayon::prelude::*;
+    let filter = sources.production_filter(project_root);
+    let keep: Vec<_> = sources
+        .files
+        .par_iter()
+        .map_init(std::collections::HashSet::new, |plain_dirs, file| {
+            filter.keeps(&file.borrow(), plain_dirs)
+        })
+        .collect();
+    let keep = keep
+        .into_iter()
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(sources.retaining(&keep))
+}
+
 fn source_files_from_dir_impl<P: AsRef<Path>>(
     source_dir: P,
     preprocess: bool,
@@ -255,6 +277,50 @@ pub fn source_file_from_code(id_path: String, contents: String) -> SourceFile {
         used_packages,
     )
     .unwrap_or_else(|e| panic!("rock: {e:#}"))
+}
+
+#[cfg(test)]
+mod production_tests {
+    use rock_core::SourceFiles;
+    use rock_core::source_code::source_file_from_path_and_contents;
+
+    #[test]
+    fn production_only_keeps_files_when_project_root_is_under_tests() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let project_root = temp.path().join("tests/project");
+        std::fs::create_dir_all(project_root.join("tests")).unwrap();
+        let main_path = project_root.join("main.rock");
+        let broken_path = project_root.join("tests/broken.rock");
+        std::fs::write(&main_path, "fn main() {}\n").unwrap();
+        std::fs::write(&broken_path, "fn broken() {}\n").unwrap();
+        let main_path = main_path.to_string_lossy().into_owned();
+        let broken_path = broken_path.to_string_lossy().into_owned();
+        let source = |path: &str| {
+            std::sync::Arc::new(atomic_refcell::AtomicRefCell::new(
+                source_file_from_path_and_contents(
+                    path.to_string(),
+                    "source.rock".to_string(),
+                    "fn main() {}\n".to_string(),
+                ),
+            ))
+        };
+        let sources = SourceFiles {
+            files: vec![source(&main_path), source(&broken_path)],
+            package_roots: Vec::new(),
+            ns_aliases: None,
+        };
+
+        let production = super::production_only(&sources, &project_root).unwrap();
+        let paths: Vec<_> = production
+            .files
+            .iter()
+            .map(|file| file.borrow().file.to_id_path())
+            .collect();
+
+        assert_eq!(paths.as_slice(), std::slice::from_ref(&main_path));
+        assert!(!SourceFiles::is_test_only_path(&main_path, &project_root).unwrap());
+        assert!(SourceFiles::is_test_only_path(&broken_path, &project_root).unwrap());
+    }
 }
 
 #[cfg(all(test, unix))]

@@ -138,8 +138,7 @@ fn nearest_manifest(path: &Path) -> Option<PathBuf> {
 fn frame_source_inputs(project: &Path) -> Result<Value> {
     let spec = crate::unified_compile::SourceSpec::Directory(project.to_path_buf());
     let discovered = crate::unified_compile::discover_sources(&spec)?;
-    let sources = discovered
-        .production_only(project)
+    let sources = rock_host::source_files::production_only(&discovered, project)
         .map_err(|error| anyhow!(error.to_string()))?;
     let mut inputs = Vec::new();
     let mut manifests = std::collections::BTreeSet::new();

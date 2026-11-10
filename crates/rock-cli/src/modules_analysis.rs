@@ -46,8 +46,7 @@ pub(crate) fn population(
     let root_path = &graph.package(graph.root()).root;
     let mode = mode.unwrap_or(PopMode::Production);
     let analyzed = match mode {
-        PopMode::Production => discovered
-            .production_only(root_path)
+        PopMode::Production => rock_host::source_files::production_only(&discovered, root_path)
             .map_err(|error| error.to_string())?,
         PopMode::Test => discovered.clone(),
     };

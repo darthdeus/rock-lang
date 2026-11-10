@@ -696,8 +696,7 @@ pub(crate) fn try_emit_js_program_project_cached(
         if (crate::registry::RuntimeServices::registered().is_game_project)(&PathBuf::from(dir))
             .unwrap_or(false)
         {
-            sources
-                .production_only(std::path::Path::new(dir))
+            rock_host::source_files::production_only(&sources, std::path::Path::new(dir))
                 .map_err(|error| anyhow::anyhow!(error.to_string()))?
         } else {
             sources
