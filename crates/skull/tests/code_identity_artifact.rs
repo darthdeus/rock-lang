@@ -305,3 +305,24 @@ print(old.len .. ":" .. new.len .. ":" .. old._data[1].name .. ":" .. new._data[
     let out = run_luajit(&script);
     assert_eq!(out, "2:2:removed:retained:added");
 }
+
+#[test]
+fn a_specialized_body_counts_its_direct_calls_once() {
+    let census = |src: &str| emit_mir(src).code_artifact.census.direct_call_only;
+    let generic = census(
+        r#"
+fn target(x: int) -> int { return x + 1 }
+fn caller<T>(x: T, n: int) -> int { return target(n) + target(n) }
+fn main() { print("{caller(1, 2)}") }
+"#,
+    );
+    let plain = census(
+        r#"
+fn target(x: int) -> int { return x + 1 }
+fn caller(x: int, n: int) -> int { return target(n) + target(n) }
+fn main() { print("{caller(1, 2)}") }
+"#,
+    );
+    assert!(plain > 0, "the fixture must make direct calls");
+    assert_eq!(generic, plain);
+}

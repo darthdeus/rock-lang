@@ -1087,8 +1087,6 @@ pub(super) fn assemble(
                             for chunk in &order.emitted[..declared] {
                                 code_artifact.merge_body(&chunk.code_artifact);
                             }
-                            // A built spec is merged twice: once as built and once
-                            // as moved, which the artifact census has always seen.
                             for (instance, chunk) in spec_chunks.iter() {
                                 if !moved_set.contains(instance) {
                                     code_artifact.merge_body(&chunk.code_artifact);
@@ -1096,7 +1094,6 @@ pub(super) fn assemble(
                             }
                             let built = built_specs.iter().map(|(_, chunk)| chunk);
                             for chunk in built.chain(moved.iter().map(|i| &spec_chunks[i])) {
-                                code_artifact.merge_body(&chunk.code_artifact);
                                 code_artifact.merge_body(&chunk.code_artifact);
                             }
                         },
