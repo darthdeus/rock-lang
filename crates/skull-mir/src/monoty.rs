@@ -753,8 +753,9 @@ pub struct MonoInterner {
     write_acqs: std::sync::atomic::AtomicU64,
     /// Interns answered without the write lock, from the worker-local cache
     /// or a shared read; the index's own attempt counter sees only the write
-    /// path.
-    shared_intern_hits: std::sync::atomic::AtomicU64,
+    /// path. Nearly every intern lands here, so each worker counts on a
+    /// cache line of its own.
+    shared_intern_hits: crate::striped::Striped<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Default)]
@@ -828,7 +829,7 @@ impl MonoInterner {
             }),
             arena_gen: ARENA_GEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             write_acqs: std::sync::atomic::AtomicU64::new(0),
-            shared_intern_hits: std::sync::atomic::AtomicU64::new(0),
+            shared_intern_hits: Default::default(),
         }
     }
 
@@ -854,6 +855,7 @@ impl MonoInterner {
             }
             if let Some(id) = cache.ids.get(&ty) {
                 self.shared_intern_hits
+                    .local()
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 return *id;
             }
@@ -867,6 +869,7 @@ impl MonoInterner {
             let id = match found {
                 Some(id) => {
                     self.shared_intern_hits
+                        .local()
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     id
                 }
@@ -990,7 +993,11 @@ impl MonoInterner {
         MonoInternerStats {
             write_acqs: self.write_acqs.load(Ordering::Relaxed),
             intern_attempts: index.intern_attempts
-                + self.shared_intern_hits.load(Ordering::Relaxed),
+                + self
+                    .shared_intern_hits
+                    .iter()
+                    .map(|hits| hits.load(Ordering::Relaxed))
+                    .sum::<u64>(),
             intern_new: index.intern_new,
             types: self.len() as u64,
         }

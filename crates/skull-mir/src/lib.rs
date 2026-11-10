@@ -30,6 +30,7 @@ pub mod shader_ir;
 pub mod sinking;
 pub mod site;
 pub mod spec_census;
+mod striped;
 pub mod struct_defaults;
 pub mod verdict;
 pub mod verify;

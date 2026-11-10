@@ -467,12 +467,8 @@ impl AbiSlots {
     }
 }
 
-const ABI_COUNTER_STRIPES: usize = 16;
-
-/// One worker's share of the memo counters, on its own cache line so the
-/// counting adds no shared write to a lookup.
+/// One worker's share of the memo counters.
 #[derive(Default)]
-#[repr(align(128))]
 struct AbiCounters {
     owner_hits: std::sync::atomic::AtomicU64,
     owner_misses: std::sync::atomic::AtomicU64,
@@ -480,15 +476,6 @@ struct AbiCounters {
     callee_misses: std::sync::atomic::AtomicU64,
     stores: std::sync::atomic::AtomicU64,
     duplicate_cold_stores: std::sync::atomic::AtomicU64,
-}
-
-fn counter_stripe() -> usize {
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    thread_local! {
-        static STRIPE: usize =
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % ABI_COUNTER_STRIPES;
-    }
-    STRIPE.with(|stripe| *stripe)
 }
 
 /// Build-scoped memo for [`BackendFnAbiPlan`] derivations, owned by
@@ -499,25 +486,13 @@ fn counter_stripe() -> usize {
 /// keeps every error path re-derived and spanned exactly as before. Lowering
 /// workers ask it at every call site, so answers sit in a lock-free table
 /// indexed by instance id.
+#[derive(Default)]
 pub(super) struct AbiPlanCache {
     /// Shared by clones: the ids stay meaningful in every copy of the slots.
     ids: Arc<crate::instance::InstanceIndex>,
     slots: crate::append_vec::SlotTable<AbiSlots>,
     unique_keys: std::sync::atomic::AtomicU64,
-    counters: Box<[AbiCounters]>,
-}
-
-impl Default for AbiPlanCache {
-    fn default() -> Self {
-        Self {
-            ids: Arc::default(),
-            slots: Default::default(),
-            unique_keys: Default::default(),
-            counters: (0..ABI_COUNTER_STRIPES)
-                .map(|_| AbiCounters::default())
-                .collect(),
-        }
-    }
+    counters: crate::striped::Striped<AbiCounters>,
 }
 
 impl std::fmt::Debug for AbiPlanCache {
@@ -538,7 +513,7 @@ impl Clone for AbiPlanCache {
             ..Self::default()
         };
         let stats = self.stats();
-        let counters = &copy.counters[0];
+        let counters = copy.counters.local();
         counters.owner_hits.store(stats.owner_hits, Relaxed);
         counters.owner_misses.store(stats.owner_misses, Relaxed);
         counters.callee_hits.store(stats.callee_hits, Relaxed);
@@ -564,7 +539,7 @@ impl AbiPlanCache {
     ) -> Option<BackendFnAbiPlanHandle> {
         use std::sync::atomic::Ordering::Relaxed;
         let found = self.slots(inst).slot(question).get().map(Arc::clone);
-        let counters = &self.counters[counter_stripe()];
+        let counters = self.counters.local();
         let counter = match (question, found.is_some()) {
             (AbiQuestion::Owner, true) => &counters.owner_hits,
             (AbiQuestion::Owner, false) => &counters.owner_misses,
@@ -582,7 +557,7 @@ impl AbiPlanCache {
         plan: &BackendFnAbiPlanHandle,
     ) {
         use std::sync::atomic::Ordering::Relaxed;
-        let counters = &self.counters[counter_stripe()];
+        let counters = self.counters.local();
         counters.stores.fetch_add(1, Relaxed);
         match self.slots(inst).slot(question).set(Arc::clone(plan)) {
             Ok(()) => {
