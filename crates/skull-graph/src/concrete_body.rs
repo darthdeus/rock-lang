@@ -1722,34 +1722,120 @@ impl OwnerFacts {
 type PublishedSignatures = FxHashMap<Instance, Result<ConcreteSignatureHandle, MonoTyReason>>;
 type PublishedDomains = BTreeMap<SiteDomain, Result<ConcreteTypeTables, MonoTyReason>>;
 
-fn publish_signatures(
-    ws: &Workspace,
-    g: &InstanceGraph,
-    expanded: &[Instance],
-) -> (PublishedSignatures, usize, std::time::Duration) {
-    let mut instances: FxHashSet<&Instance> = FxHashSet::default();
-    for inst in expanded {
-        instances.insert(inst);
-        if let Some(sites) = g.sites_of(inst) {
-            for record in sites.values() {
-                if let SiteOutcome::Resolved(target) = &record.outcome {
-                    instances.insert(target);
+/// What a fresh build publishes before it plans bodies: every instance a
+/// signature is derived for, and every site domain whose struct defaults are
+/// converted. Each owner's rows are read off its own record in parallel; only
+/// the de-duplication is serial.
+struct PublicationInputs<'g> {
+    instances: Vec<&'g Instance>,
+    domains: BTreeSet<SiteDomain>,
+}
+
+fn collect_publication_inputs(g: &InstanceGraph) -> PublicationInputs<'_> {
+    let owners: Vec<(&Owner, &crate::instance_graph::Contribution)> =
+        g.contributions.iter().collect();
+    #[cfg(not(feature = "sequential"))]
+    let (instances, domains) = {
+        use rayon::prelude::*;
+        // Each worker folds its owners into sets of its own; the sets are
+        // merged pairwise, so no single thread hashes every row.
+        owners
+            .into_par_iter()
+            .fold(
+                PublicationSets::default,
+                |mut sets, (owner, contribution)| {
+                    sets.add(owner, contribution);
+                    sets
+                },
+            )
+            .reduce(PublicationSets::default, PublicationSets::merge)
+            .into_parts()
+    };
+    #[cfg(feature = "sequential")]
+    let (instances, domains) = {
+        let mut sets = PublicationSets::default();
+        for (owner, contribution) in owners {
+            sets.add(owner, contribution);
+        }
+        sets.into_parts()
+    };
+    PublicationInputs {
+        instances: instances.into_iter().collect(),
+        domains: domains.into_iter().cloned().collect(),
+    }
+}
+
+#[derive(Default)]
+struct PublicationSets<'g> {
+    instances: FxHashSet<&'g Instance>,
+    domains: FxHashSet<&'g SiteDomain>,
+}
+
+impl<'g> PublicationSets<'g> {
+    /// Expanded instances publish themselves, their resolved callees and the
+    /// domains of their resolved sites; every owner publishes the callees of
+    /// its always-emitted sites, and an always-emitted owner also the domains
+    /// of all of them. Both kinds publish their struct-default domains.
+    fn add(&mut self, owner: &'g Owner, contribution: &'g crate::instance_graph::Contribution) {
+        let mut domains: Vec<&'g SiteDomain> = Vec::new();
+        if let Owner::Instance(i) = owner {
+            if contribution.expanded {
+                self.instances.insert(i);
+                domains.extend(contribution.struct_default_domains.iter());
+                for (site, record) in &contribution.call_sites {
+                    if let SiteOutcome::Resolved(target) = &record.outcome {
+                        self.instances.insert(target);
+                        domains.push(&site.domain);
+                    }
                 }
             }
         }
-    }
-    for contribution in g.contributions.values() {
         for record in contribution.always_call_sites.values() {
             if let SiteOutcome::Resolved(target) = &record.outcome {
-                instances.insert(target);
+                self.instances.insert(target);
             }
         }
+        if matches!(owner, Owner::AlwaysEmitted(..)) {
+            domains.extend(contribution.struct_default_domains.iter());
+            domains.extend(
+                contribution
+                    .always_call_sites
+                    .keys()
+                    .map(|site| &site.domain),
+            );
+        }
+        // Publication skips a body's own domain, which almost every site has.
+        self.domains.extend(
+            domains
+                .into_iter()
+                .filter(|domain| !matches!(domain, SiteDomain::Own)),
+        );
     }
+
+    #[cfg(not(feature = "sequential"))]
+    fn merge(mut self, mut other: Self) -> Self {
+        if self.instances.len() < other.instances.len() {
+            std::mem::swap(&mut self.instances, &mut other.instances);
+        }
+        self.instances.extend(other.instances);
+        self.domains.extend(other.domains);
+        self
+    }
+
+    fn into_parts(self) -> (FxHashSet<&'g Instance>, FxHashSet<&'g SiteDomain>) {
+        (self.instances, self.domains)
+    }
+}
+
+fn publish_signatures(
+    ws: &Workspace,
+    g: &InstanceGraph,
+    instances: Vec<&Instance>,
+) -> (PublishedSignatures, usize, std::time::Duration) {
     let started = bone_core::prelude::Instant::now();
     // Each signature converts one declaration's types against the shared
     // interner, which locks only for a type it has not seen; the table is
     // keyed by instance, so the derivation order is not observable.
-    let instances: Vec<&Instance> = instances.into_iter().collect();
     let published: PublishedSignatures = {
         use bone_core::prelude::*;
         instances
@@ -1810,38 +1896,6 @@ fn publish_signatures_local(
             (instance, result)
         })
         .collect()
-}
-
-fn collect_foreign_domains(g: &InstanceGraph, expanded: &[Instance]) -> BTreeSet<SiteDomain> {
-    // Deduplicated by reference first: most of the sites share a handful of
-    // domains, and a domain carries its argument list, so cloning one per
-    // site cost more than the publication that follows.
-    let mut domains: FxHashSet<&SiteDomain> = FxHashSet::default();
-    for inst in expanded {
-        if let Some(contribution) = g.contributions.get(&Owner::Instance(inst.clone())) {
-            domains.extend(contribution.struct_default_domains.iter());
-        }
-        if let Some(sites) = g.sites_of(inst) {
-            for (site, record) in sites {
-                if matches!(&record.outcome, SiteOutcome::Resolved(_)) {
-                    domains.insert(&site.domain);
-                }
-            }
-        }
-    }
-    for (owner, contribution) in &g.contributions {
-        if !matches!(owner, Owner::AlwaysEmitted(..)) {
-            continue;
-        }
-        domains.extend(contribution.struct_default_domains.iter());
-        domains.extend(
-            contribution
-                .always_call_sites
-                .keys()
-                .map(|site| &site.domain),
-        );
-    }
-    domains.into_iter().cloned().collect()
 }
 
 fn collect_foreign_domains_local(
@@ -3197,18 +3251,12 @@ fn build_published_impl(
     };
     let preparation_time = t_preparation.elapsed();
 
-    let publication_instances = prepared
-        .iter()
-        .map(PreparedInstanceResult::instance)
-        .cloned()
-        .collect::<Vec<_>>();
     let t_signature_publication = bone_core::prelude::Instant::now();
-    let (signatures, signature_derivations, signature_time) =
-        publish_signatures(ws, g, &publication_instances);
+    let PublicationInputs { instances, domains } = collect_publication_inputs(g);
+    let (signatures, signature_derivations, signature_time) = publish_signatures(ws, g, instances);
     let signature_publication_time = t_signature_publication.elapsed();
     let mut publication_stats = ConcreteBuildStats::default();
     let t_foreign_publication = bone_core::prelude::Instant::now();
-    let domains = collect_foreign_domains(g, &publication_instances);
     let published_domains =
         publish_foreign_domains(ws, g, domains, &mut publication_stats, timing_enabled);
     publication_stats.signature_ns += signature_time.as_nanos() as u64;
