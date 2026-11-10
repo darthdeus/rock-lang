@@ -246,3 +246,24 @@ fn main() {
     assert_eq!(copies.count(), 0, "{body}");
     assert_eq!(compile_and_run(src), "18");
 }
+
+#[test]
+fn a_call_bound_to_underscore_runs_as_a_bare_statement() {
+    let src = r#"
+fn f(x: int) -> int {
+    print("f{x}")
+    return x + 1
+}
+fn h(n: int) {
+    let _ = f(n)
+    let _ = f(n * 2)
+}
+fn main() {
+    h(3)
+}
+"#;
+    let lua = emit_module(src);
+    let body = function_body(&lua, "h");
+    assert!(!body.contains(" = nil"), "{body}");
+    assert_eq!(compile_and_run(src), "f3\nf6");
+}

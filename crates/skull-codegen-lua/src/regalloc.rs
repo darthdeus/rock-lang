@@ -603,11 +603,13 @@ pub(crate) fn color_values(
     // Dense `0..V` index over the value-producing insts in this scope (excluding
     // inlined ones, which get no register), so liveness/interference run on bit
     // sets instead of per-element HashSets.
+    // Only placed instructions count: a transform can leave a dropped
+    // instruction allocated in the arena, still naming its operands.
     let mut used = vec![false; func.insts.len()];
-    for (_, inst) in func.insts.iter() {
-        inst.uses_each(&mut |v| used[raw(v)] = true);
-    }
     for (_, block) in func.blocks.iter() {
+        for &id in &block.insts {
+            func.insts[id].uses_each(&mut |v| used[raw(v)] = true);
+        }
         block.term.uses_each(&mut |v| used[raw(v)] = true);
     }
     let mut values: Vec<Idx<Inst>> = Vec::with_capacity(func.insts.len());
