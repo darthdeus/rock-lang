@@ -658,12 +658,7 @@ impl InlineCandidateTable {
             if warm.lower_attempted {
                 stats.lower_attempted += 1;
             }
-            if warm.lowered {
-                stats.lowered += 1;
-                stats
-                    .lower_ns_by_key
-                    .insert(warm.key.clone(), warm.lower_ns);
-            }
+            stats.lowered += usize::from(warm.lowered);
             stats.eligibility_ns += warm.eligibility_ns;
             if !warm.worker.is_empty() {
                 *stats
@@ -4351,6 +4346,27 @@ fn top() -> int { return sum_all(Counter { n: 0 }) }
             !stats.profiles[&key].eligible,
             "the replacement profile is stale"
         );
+    }
+
+    #[test]
+    fn lower_times_by_key_are_kept_only_for_a_census() {
+        let key = candidate_test_key();
+        let lowered = |worker: &str| InlineCandidateWarm {
+            lowered: true,
+            lower_ns: 7,
+            worker: worker.to_string(),
+            ..candidate_warm(key.clone(), None)
+        };
+        let plain =
+            InlineCandidateTable::from_warms_with_base(None, vec![key.clone()], vec![lowered("")]);
+        assert_eq!(plain.stats().lowered, 1);
+        assert!(plain.stats().lower_ns_by_key.is_empty());
+        let census = InlineCandidateTable::from_warms_with_base(
+            None,
+            vec![key.clone()],
+            vec![lowered("census")],
+        );
+        assert_eq!(census.stats().lower_ns_by_key.get(&key), Some(&7));
     }
 
     fn resolved_tree_count(mf: &MirFunc) -> (usize, usize) {
