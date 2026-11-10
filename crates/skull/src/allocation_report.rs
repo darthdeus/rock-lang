@@ -751,7 +751,7 @@ fn natural_loop_depths(func: &MirFunc) -> HashMap<Idx<Block>, u32> {
             if body.insert(latch) {
                 let mut stack = vec![latch];
                 while let Some(block) = stack.pop() {
-                    for &pred in all_preds.get(&block).map_or(&[][..], Vec::as_slice) {
+                    for &pred in all_preds.get(&block).unwrap_or_default() {
                         if pred != header && body.insert(pred) {
                             stack.push(pred)
                         }

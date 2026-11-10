@@ -259,7 +259,7 @@ impl Emitter<'_> {
                     };
                 }
             }
-            let [parent] = preds.get(&block)?.as_slice() else {
+            let [parent] = preds.get(&block)? else {
                 return None;
             };
             block = *parent;

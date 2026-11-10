@@ -99,25 +99,18 @@ pub fn reverse_postorder(func: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
 /// Predecessor lists, dense by block id; a block with none has no entry.
 #[derive(Clone, Debug, Default)]
 pub struct PredMap {
-    lists: Vec<Vec<Idx<Block>>>,
+    /// `preds[off[b]..off[b + 1]]` are the predecessors of block `b`, in
+    /// discovery order: one allocation per map instead of one per block.
+    off: Vec<u32>,
+    preds: Vec<Idx<Block>>,
 }
 
 impl PredMap {
-    fn sized(n: usize) -> Self {
-        Self {
-            lists: vec![Vec::new(); n],
-        }
-    }
-
-    fn push(&mut self, to: Idx<Block>, from: Idx<Block>) {
-        self.lists[dense::bx(to)].push(from);
-    }
-
     /// The predecessors of `b`, `None` when it has none.
-    pub fn get(&self, b: &Idx<Block>) -> Option<&Vec<Idx<Block>>> {
-        self.lists
-            .get(dense::bx(*b))
-            .filter(|preds| !preds.is_empty())
+    pub fn get(&self, b: &Idx<Block>) -> Option<&[Idx<Block>]> {
+        let at = dense::bx(*b);
+        let (start, end) = (*self.off.get(at)? as usize, *self.off.get(at + 1)? as usize);
+        (start < end).then(|| &self.preds[start..end])
     }
 }
 
@@ -127,24 +120,55 @@ pub fn predecessors(func: &MirFunc, rpo: &[Idx<Block>]) -> (PredMap, PredMap) {
     for &b in rpo {
         reach[dense::bx(b)] = true;
     }
-    let mut all = PredMap::sized(n);
-    let mut goto = PredMap::sized(n);
-    for &b in rpo {
-        match &func.blocks[b].term {
-            Term::Goto(t) => {
-                all.push(*t, b);
-                goto.push(*t, b);
-            }
-            t => {
-                successors(t, |s| {
+    // Every edge `b -> s` in rpo order, for both maps: counted, then placed.
+    let each_edge = |f: &mut dyn FnMut(Idx<Block>, Idx<Block>, bool)| {
+        for &b in rpo {
+            match &func.blocks[b].term {
+                Term::Goto(t) => f(*t, b, true),
+                t => successors(t, |s| {
                     if reach[dense::bx(s)] {
-                        all.push(s, b);
+                        f(s, b, false);
                     }
-                });
+                }),
             }
         }
+    };
+    let mut all_off = vec![0u32; n + 1];
+    let mut goto_off = vec![0u32; n + 1];
+    each_edge(&mut |to, _, goto| {
+        all_off[dense::bx(to) + 1] += 1;
+        if goto {
+            goto_off[dense::bx(to) + 1] += 1;
+        }
+    });
+    for i in 0..n {
+        all_off[i + 1] += all_off[i];
+        goto_off[i + 1] += goto_off[i];
     }
-    (all, goto)
+    let placeholder = func.entry();
+    let mut all_preds = vec![placeholder; all_off[n] as usize];
+    let mut goto_preds = vec![placeholder; goto_off[n] as usize];
+    let mut all_fill = all_off.clone();
+    let mut goto_fill = goto_off.clone();
+    each_edge(&mut |to, from, goto| {
+        let t = dense::bx(to);
+        all_preds[all_fill[t] as usize] = from;
+        all_fill[t] += 1;
+        if goto {
+            goto_preds[goto_fill[t] as usize] = from;
+            goto_fill[t] += 1;
+        }
+    });
+    (
+        PredMap {
+            off: all_off,
+            preds: all_preds,
+        },
+        PredMap {
+            off: goto_off,
+            preds: goto_preds,
+        },
+    )
 }
 
 /// The immediate-dominator tree over the blocks reachable from `entry`,
