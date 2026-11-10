@@ -13,11 +13,11 @@
 //! perf-tuned two-pool scheme; this runs once per emit and the corpus functions
 //! are small.
 
-use rustc_hash::FxHashSet as HashSet;
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use comfy_la_arena::Idx;
 
-use crate::{collect_lambda_params, reachable_blocks_from, successors};
+use crate::{CountedLoop, collect_lambda_params, reachable_blocks_from, successors};
 use skull_mir::mir::{Block, Cell, Inst, MirFunc, Term};
 
 /// A dense fixed-size bit set over `0..n` — used for cell liveness/interference,
@@ -355,6 +355,7 @@ pub(crate) fn stable_loads(
     scope: &[Idx<Block>],
     inline: &[bool],
     pinned: &[bool],
+    loops: &HashMap<Idx<Block>, CountedLoop>,
 ) -> Vec<Idx<Inst>> {
     let mut written = vec![false; func.cells.len()];
     for &b in scope {
@@ -409,6 +410,19 @@ pub(crate) fn stable_loads(
     // A statement writes its cells after it reads its operands, so a write
     // conflicts with a load that is still live after the statement.
     let mut conflict = vec![false; loads.len()];
+    // A counted loop's counter is a fresh Lua local inside the `for`; outside
+    // it the cell's name is the outer local, so a load still live after an
+    // early exit must stay in a register.
+    for (&header, cl) in loops {
+        for &k in &by_cell[raw(cl.slot)] {
+            conflict[k as usize] = scope.iter().enumerate().any(|(bi, &b)| {
+                b != header
+                    && b != cl.latch
+                    && !cl.region.contains(&b)
+                    && liveness.live_in.get(bi, k as usize)
+            });
+        }
+    }
     liveness.walk(func, scope, |id, live| {
         func.insts[id].cell_writes_each(&mut |cell| {
             for &k in &by_cell[raw(cell)] {

@@ -353,14 +353,14 @@ fn emit_named_framed_with_statics_impl(
     );
     keep_reads_ordered(func, &rpo, &mut inlinable, &folded_reads);
     bound_fold_levels(func, &rpo, &mut inlinable, &folded_reads);
+    let loops = recognize_counted_loops(func, &rpo, frame);
     if frame.is_none() {
-        for id in regalloc::stable_loads(func, &rpo, &inlinable, &cell_analysis.pinned) {
+        for id in regalloc::stable_loads(func, &rpo, &inlinable, &cell_analysis.pinned, &loops) {
             inlinable[raw(id) as usize] = true;
         }
     }
     record_representation_violations(ctx, func);
     let (hoist, hoist_names, hoist_defs) = collect_const_hoists(ws, ctx, func, name);
-    let loops = recognize_counted_loops(func, &rpo, frame);
     // A value moves into the cell it is copied to when it renders through the
     // plain `<local> = <value>` statement, outside the lines a counted `for`
     // subsumes.

@@ -1,0 +1,178 @@
+// A loop counter read after the loop is left early. The emitter prints
+// counted loops as Lua numeric `for` loops, whose variable is a fresh local:
+// outside the loop the counter's name refers to the outer local, which still
+// holds the start value. Every value read from the counter inside the loop
+// and used after leaving it must be copied out before the exit.
+
+nobox value Handle { slot: int, tag: int, }
+
+fn find(xs: [int?], want: int) -> Handle? {
+    for (slot, stored) in xs.enumerate() {
+        let x = stored ?? continue
+        let h = Handle { slot: slot, tag: x * 10 }
+        if x == want { return h }
+    }
+    return null
+}
+
+@test(output = "slot 3 tag 90")
+fn test_value_returned_from_inside_an_enumerate_loop() {
+    let xs: [int?] = [5, null, 7, 9]
+    let h = find(xs, 9).unwrap()
+    print("slot {h.slot} tag {h.tag}")
+}
+
+fn first_index(xs: [int], want: int) -> int {
+    for (i, x) in xs.enumerate() {
+        if x == want { return i }
+    }
+    return -1
+}
+
+@test(output = "2\n-1")
+fn test_index_returned_from_inside_a_loop() {
+    print(first_index([4, 5, 6, 7], 6))
+    print(first_index([4, 5], 6))
+}
+
+fn index_and_square(n: int, want: int) -> (int, int) {
+    for i in 0..n {
+        let sq = i * i
+        if sq >= want { return (i, sq) }
+    }
+    return (-1, -1)
+}
+
+@test(output = "4 16\n-1 -1")
+fn test_range_counter_returned_in_a_tuple() {
+    let (a, b) = index_and_square(10, 15)
+    print("{a} {b}")
+    let (c, d) = index_and_square(3, 15)
+    print("{c} {d}")
+}
+
+@test(output = "3")
+fn test_counter_kept_after_break() {
+    let found = -1
+    for i in 0..10 {
+        let j = i
+        if j * j > 5 {
+            found = j
+            break
+        }
+    }
+    print(found)
+}
+
+fn nested_find(n: int, want: int) -> (int, int) {
+    for i in 0..n {
+        for j in 0..n {
+            if i * n + j == want { return (i, j) }
+        }
+    }
+    return (-1, -1)
+}
+
+@test(output = "2 1\n-1 -1")
+fn test_nested_counters_returned() {
+    let (a, b) = nested_find(4, 9)
+    print("{a} {b}")
+    let (c, d) = nested_find(2, 9)
+    print("{c} {d}")
+}
+
+fn offset_find(n: int, want: int) -> int {
+    for i in 1..n + 1 {
+        let k = i
+        if k == want { return k * 100 + i }
+    }
+    return 0
+}
+
+@test(output = "505\n0")
+fn test_offset_counter_returned() {
+    print(offset_find(6, 5))
+    print(offset_find(3, 5))
+}
+
+fn skip_then_find(xs: [int], want: int) -> int {
+    for (i, x) in xs.enumerate() {
+        if x < 0 { continue }
+        let at = i
+        if x == want { return at }
+    }
+    return -1
+}
+
+@test(output = "3")
+fn test_counter_returned_after_continue() {
+    print(skip_then_find([-1, 2, -3, 8], 8))
+}
+
+// Values computed inside a loop into a variable that outlives it.
+
+@test(output = "12 4")
+fn test_values_stored_inside_then_read_after_break() {
+    let last = 0
+    let at = -1
+    for i in 0..10 {
+        let doubled = i * 2
+        last = doubled + i
+        if last > 10 {
+            at = i
+            break
+        }
+    }
+    print("{last} {at}")
+}
+
+fn pick(xs: [int], want: int) -> Handle {
+    let best = Handle { slot: -1, tag: 0 }
+    for (slot, x) in xs.enumerate() {
+        best = Handle { slot: slot, tag: x }
+        if x == want { break }
+    }
+    return best
+}
+
+@test(output = "1 8\n2 3")
+fn test_nobox_value_assigned_in_loop_survives_break() {
+    let a = pick([4, 8, 3], 8)
+    print("{a.slot} {a.tag}")
+    let b = pick([4, 8, 3], 9)
+    print("{b.slot} {b.tag}")
+}
+
+fn outer_inner(n: int) -> int {
+    let hit = 0
+    for i in 0..n {
+        for j in 0..n {
+            if i + j == 3 {
+                hit = i * 10 + j
+                break
+            }
+        }
+        if hit != 0 { break }
+    }
+    return hit
+}
+
+@test(output = "3")
+fn test_inner_break_value_read_by_outer_loop() {
+    print(outer_inner(5))
+}
+
+fn last_index_below(xs: [int], limit: int) -> int? {
+    let found: int? = null
+    for (i, x) in xs.enumerate() {
+        if x >= limit { return found }
+        found = i
+    }
+    return found
+}
+
+@test(output = "1\nnil")
+fn test_optional_assigned_in_loop_returned_early() {
+    print(last_index_below([1, 2, 9, 3], 5))
+    print(last_index_below([9], 5))
+}
