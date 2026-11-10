@@ -783,6 +783,10 @@ pub struct InstanceGraph {
     /// the first update derives them from the contributions and keeps them
     /// current from then on.
     incremental_indexes: bool,
+    /// How many updates this graph has applied. A retained view derives its
+    /// update-only rows from the graph it was realized from, so it checks the
+    /// revision it saw rather than trusting the call order.
+    revision: u64,
     /// **The build's one arena, SHARED rather than owned.**
     ///
     /// A retained graph and the emission that consumes it both mint and read
@@ -1799,6 +1803,7 @@ impl InstanceGraph {
         empty.run_stats = self.run_stats;
         empty.verify_whole_graph = self.verify_whole_graph;
         empty.incremental_indexes = self.incremental_indexes;
+        empty.revision = self.revision;
         std::mem::replace(self, empty)
     }
 
@@ -1806,6 +1811,7 @@ impl InstanceGraph {
         InstanceGraph {
             verify_whole_graph: false,
             incremental_indexes: false,
+            revision: 0,
             interner,
             contributions: BTreeMap::new(),
             contributed: FxHashSet::default(),
@@ -3412,6 +3418,7 @@ impl InstanceGraph {
         changed: &[(ModuleId, BodyOwner)],
         edits: &[TextEditDelta],
     ) -> UpdateStats {
+        self.revision += 1;
         self.ensure_incremental_indexes();
         self.reseed_roots_for_update(ws, roots);
         self.update_bodies_after_roots(ws, changed, edits, Vec::new())
@@ -3428,6 +3435,7 @@ impl InstanceGraph {
         changed: &[(ModuleId, BodyOwner)],
         edits: &[TextEditDelta],
     ) -> UpdateStats {
+        self.revision += 1;
         self.ensure_incremental_indexes();
         let pending_roots = canonical_roots(ws, root_added.to_vec(), false)
             .into_iter()
@@ -3449,6 +3457,11 @@ impl InstanceGraph {
         update.census.root_hole_reason_buckets_examined =
             self.run_stats.root_hole_reason_buckets_examined;
         update
+    }
+
+    /// How many updates this graph has applied since its build.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Derive the update-only reverse indexes from the contributions the

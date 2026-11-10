@@ -173,6 +173,8 @@ pub(super) fn update_js_session(
         .filter(|root| !roots.contains(root))
         .copied()
         .collect();
+    // The view retracts against the graph it was realized from.
+    session.view.prepare_update(&session.graph);
     let update =
         session
             .graph

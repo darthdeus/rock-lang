@@ -49,15 +49,16 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 thread_local! {
     static REALIZE_INVOCATIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    static FRESH_INDEX_SITE_ROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static UPDATE_INDEX_SITE_ROWS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 pub fn realize_invocations() -> u64 {
     REALIZE_INVOCATIONS.with(std::cell::Cell::get)
 }
 
-pub fn fresh_index_site_rows() -> u64 {
-    FRESH_INDEX_SITE_ROWS.with(std::cell::Cell::get)
+/// Graph site rows copied into an artifact view's update-only rows.
+pub fn update_index_site_rows() -> u64 {
+    UPDATE_INDEX_SITE_ROWS.with(std::cell::Cell::get)
 }
 
 /// Where an artifact's realization of a callee comes from, when the
@@ -642,6 +643,14 @@ pub struct ArtifactView {
 #[derive(Clone, Default)]
 struct ArtifactIndex {
     realizable: FxHashMap<Instance, Result<Realized, Unrealizable>>,
+    /// The graph revision the view's decisions were taken over.
+    graph_revision: u64,
+    /// Whether the update-only rows below are present: `outgoing`,
+    /// `incoming`, `site_counts`, `fn_values_by_caller`, `fn_value_users`,
+    /// `symbol_users`, `realization_by_decl` and `instances_by_decl`. A
+    /// realization has no reader for them; the first update derives them from
+    /// the graph revision the view was realized from and keeps them current.
+    update_rows: bool,
     outgoing: FxHashMap<Instance, FxHashMap<Site, Instance>>,
     incoming: FxHashMap<Instance, FxHashSet<Instance>>,
     site_counts: FxHashMap<Instance, usize>,
@@ -724,6 +733,98 @@ fn publication_candidates(ws: &Workspace, req: &ArtifactRequest<'_>) -> BTreeMap
 }
 
 impl ArtifactView {
+    /// Derive the update-only rows from `g`, the graph this view was realized
+    /// from, unless an earlier update already did. A caller about to update
+    /// the graph calls this first: the rows describe the graph BEFORE the
+    /// update, which is what the update retracts.
+    pub fn prepare_update(&mut self, g: &InstanceGraph) {
+        if self.index.update_rows {
+            return;
+        }
+        assert_eq!(
+            g.revision(),
+            self.index.graph_revision,
+            "an artifact view's update rows are derived from the graph it was realized \
+             from; call `prepare_update` before updating the graph"
+        );
+        self.index.update_rows = true;
+        // Each owner's row is its own; the rows are built in parallel and the
+        // reverse rows, which join owners, are filled from them in owner order.
+        // A callee is listed once per owner with whether any site of that
+        // owner takes it as a value.
+        let owner_rows: Vec<(
+            &Instance,
+            usize,
+            FxHashMap<Site, Instance>,
+            Vec<(&Instance, bool)>,
+        )> = {
+            use bone_core::prelude::*;
+            let owners: Vec<_> = g.call_sites().collect();
+            owners
+                .into_par_iter()
+                .map(|(owner, sites)| {
+                    let mut outgoing: FxHashMap<Site, Instance> = FxHashMap::default();
+                    let mut callees: FxHashMap<&Instance, bool> = FxHashMap::default();
+                    for (site, record) in sites {
+                        let SiteOutcome::Resolved(callee) = &record.outcome else {
+                            continue;
+                        };
+                        outgoing.insert(site.clone(), callee.clone());
+                        *callees.entry(callee).or_insert(false) |=
+                            site.op == skull_mir::site::SiteOp::FnValue;
+                    }
+                    (owner, sites.len(), outgoing, callees.into_iter().collect())
+                })
+                .collect()
+        };
+        let index = &mut self.index;
+        for (owner, site_count, outgoing, callees) in owner_rows {
+            UPDATE_INDEX_SITE_ROWS.with(|count| count.set(count.get() + site_count as u64));
+            index.site_counts.insert(owner.clone(), site_count);
+            if !outgoing.is_empty() {
+                index.outgoing.insert(owner.clone(), outgoing);
+            }
+            for (callee, fn_value) in callees {
+                index
+                    .incoming
+                    .entry(callee.clone())
+                    .or_default()
+                    .insert(owner.clone());
+                if fn_value {
+                    index
+                        .fn_values_by_caller
+                        .entry(owner.clone())
+                        .or_default()
+                        .insert(callee.clone());
+                    index
+                        .fn_value_users
+                        .entry(callee.clone())
+                        .or_default()
+                        .insert(owner.clone());
+                }
+            }
+        }
+        for (i, symbol) in &self.symbols {
+            index
+                .symbol_users
+                .entry(symbol.clone())
+                .or_default()
+                .insert(i.clone());
+        }
+        for (i, r) in &self.realization {
+            index
+                .realization_by_decl
+                .entry(r.decl)
+                .or_default()
+                .insert(i.clone());
+            index
+                .instances_by_decl
+                .entry(i.func)
+                .or_default()
+                .insert(i.clone());
+        }
+    }
+
     /// Apply graph deltas to this target without re-realizing the workspace.
     /// The retained view owns the indexes needed to retract an old owner and
     /// install its replacement; unchanged owners keep their immutable output.
@@ -803,6 +904,9 @@ impl ArtifactView {
         root_added: &BTreeSet<DeclKey>,
         root_removed: &BTreeSet<DeclKey>,
     ) -> ArtifactUpdateStats {
+        // A caller that did not update the graph may skip `prepare_update`.
+        self.prepare_update(g);
+        self.index.graph_revision = g.revision();
         let mut local_index_rows_examined = 0;
         let mut root_subjects = BTreeSet::new();
         for decl in root_added.iter().chain(root_removed) {
@@ -2040,64 +2144,10 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .collect();
     let mut index = ArtifactIndex {
         realizable,
+        graph_revision: g.revision(),
         root_decls: root_decls.clone(),
         ..Default::default()
     };
-    // Each owner's row of the site index is its own; the rows are built in
-    // parallel and the reverse rows, which join owners, are filled from them
-    // in owner order. A callee is listed once per owner with whether any site
-    // of that owner takes it as a value.
-    let owner_rows: Vec<(
-        &Instance,
-        usize,
-        FxHashMap<Site, Instance>,
-        Vec<(&Instance, bool)>,
-    )> = {
-        use bone_core::prelude::*;
-        let owners: Vec<_> = g.call_sites().collect();
-        owners
-            .into_par_iter()
-            .map(|(owner, sites)| {
-                let mut outgoing: FxHashMap<Site, Instance> = FxHashMap::default();
-                let mut callees: FxHashMap<&Instance, bool> = FxHashMap::default();
-                for (site, record) in sites {
-                    let SiteOutcome::Resolved(callee) = &record.outcome else {
-                        continue;
-                    };
-                    outgoing.insert(site.clone(), callee.clone());
-                    *callees.entry(callee).or_insert(false) |=
-                        site.op == skull_mir::site::SiteOp::FnValue;
-                }
-                (owner, sites.len(), outgoing, callees.into_iter().collect())
-            })
-            .collect()
-    };
-    for (owner, site_count, outgoing, callees) in owner_rows {
-        FRESH_INDEX_SITE_ROWS.with(|count| count.set(count.get() + site_count as u64));
-        index.site_counts.insert(owner.clone(), site_count);
-        if !outgoing.is_empty() {
-            index.outgoing.insert(owner.clone(), outgoing);
-        }
-        for (callee, fn_value) in callees {
-            index
-                .incoming
-                .entry(callee.clone())
-                .or_default()
-                .insert(owner.clone());
-            if fn_value {
-                index
-                    .fn_values_by_caller
-                    .entry(owner.clone())
-                    .or_default()
-                    .insert(callee.clone());
-                index
-                    .fn_value_users
-                    .entry(callee.clone())
-                    .or_default()
-                    .insert(owner.clone());
-            }
-        }
-    }
     let mut roots: BTreeSet<Instance> = BTreeSet::new();
     let mut declared_roots: BTreeSet<Instance> = BTreeSet::new();
     for i in &g.instances {
@@ -2114,11 +2164,12 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // Reachability over the walk's OWN record of what each site resolved to.
     // Not over `g.edges`: an edge says two instances are related, a site says
     // WHICH operation related them, which is what a severed call has to name.
-    let mut instances: BTreeSet<Instance> = BTreeSet::new();
-    let mut realization: BTreeMap<Instance, Realized> = BTreeMap::new();
+    // The site tables are read in place; the reverse rows an update needs
+    // are derived by that update.
+    let site_tables: FxHashMap<&Instance, &BTreeMap<Site, instance_graph::SiteRecord>> =
+        g.call_sites().collect();
     let mut severed: Vec<Severed> = Vec::new();
     let mut sites_walked = 0usize;
-    let mut queue: VecDeque<Instance> = VecDeque::new();
 
     // Admitting one reached instance. EVERY reached callee goes through here --
     // roots and call sites alike -- so plan S 9's `Rock` / `Boundary` split is
@@ -2129,39 +2180,36 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // The boundary's IDENTITY is not minted here. It needs this artifact's
     // spelling, which is the planner's answer over the full retained set, so it
     // is built once below -- see `boundaries`.
-    // Most sites reach an instance already admitted: the hashed set answers
-    // that before the ordered record is touched or the key cloned.
-    let mut admitted: FxHashSet<Instance> = FxHashSet::default();
-    let mut admit = |i: &Instance,
-                     instances: &mut BTreeSet<Instance>,
-                     realization: &mut BTreeMap<Instance, Realized>,
-                     queue: &mut VecDeque<Instance>| {
-        if admitted.contains(i) {
-            return;
+    // The ordered records are built once from the admitted set afterwards.
+    struct Admission<'g> {
+        admitted: FxHashSet<&'g Instance>,
+        reached: Vec<(&'g Instance, Realized)>,
+        queue: VecDeque<&'g Instance>,
+    }
+    impl<'g> Admission<'g> {
+        fn admit(
+            &mut self,
+            i: &'g Instance,
+            realizable: &FxHashMap<Instance, Result<Realized, Unrealizable>>,
+        ) {
+            if !self.admitted.insert(i) {
+                return;
+            }
+            let r = *realizable[i].as_ref().expect("admitted means realizable");
+            self.reached.push((i, r));
+            if r.kind.boundary_class().is_none() {
+                self.queue.push_back(i);
+            }
         }
-        admitted.insert(i.clone());
-        let r = *index.realizable[i]
-            .as_ref()
-            .expect("admitted means realizable");
-        realization.insert(i.clone(), r);
-        index
-            .realization_by_decl
-            .entry(r.decl)
-            .or_default()
-            .insert(i.clone());
-        index
-            .instances_by_decl
-            .entry(i.func)
-            .or_default()
-            .insert(i.clone());
-        if r.kind.boundary_class().is_none() {
-            instances.insert(i.clone());
-            queue.push_back(i.clone());
-        }
+    }
+    let mut walk = Admission {
+        admitted: FxHashSet::default(),
+        reached: Vec::new(),
+        queue: VecDeque::new(),
     };
-
-    for r in &roots {
-        admit(r, &mut instances, &mut realization, &mut queue);
+    let root_refs: Vec<&Instance> = g.instances.iter().filter(|i| roots.contains(*i)).collect();
+    for r in root_refs {
+        walk.admit(r, &index.realizable);
     }
     // A function named by a global initializer or a decorator body is a value
     // take with no caller instance, so the site walk below cannot see it.
@@ -2171,18 +2219,21 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         .cloned()
         .collect();
     let mut fn_value_targets: BTreeSet<Instance> = index.always_fn_values.iter().cloned().collect();
-    while let Some(caller) = queue.pop_front() {
-        sites_walked += index.site_counts.get(&caller).copied().unwrap_or(0);
-        let Some(sites) = index.outgoing.get(&caller) else {
+    while let Some(caller) = walk.queue.pop_front() {
+        let Some(sites) = site_tables.get(caller) else {
             continue;
         };
-        for (site, callee) in sites {
+        sites_walked += sites.len();
+        for (site, record) in sites.iter() {
+            let SiteOutcome::Resolved(callee) = &record.outcome else {
+                continue;
+            };
             match index.realizable.get(callee) {
                 Some(Ok(_)) => {
                     if site.op == skull_mir::site::SiteOp::FnValue {
                         fn_value_targets.insert(callee.clone());
                     }
-                    admit(callee, &mut instances, &mut realization, &mut queue)
+                    walk.admit(callee, &index.realizable)
                 }
                 Some(Err(cause)) => {
                     let row = Severed {
@@ -2209,6 +2260,16 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     for rows in index.severed_by_caller.values_mut() {
         rows.sort_by(severed_order);
     }
+    let mut reached = walk.reached;
+    reached.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    let realization: BTreeMap<Instance, Realized> =
+        reached.iter().map(|(i, r)| ((*i).clone(), *r)).collect();
+    let instances: BTreeSet<Instance> = reached
+        .iter()
+        .filter(|(_, r)| r.kind.boundary_class().is_none())
+        .map(|(i, _)| (*i).clone())
+        .collect();
+    drop(site_tables);
 
     // The partition: every shared instance is a retained Rock instance, a
     // retained boundary, unrealizable, or unreachable. Reported as a partition
@@ -2230,8 +2291,6 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     }
 
     // One symbol per retained instance, from THIS artifact's planner.
-    let mut by_symbol: FxHashMap<&str, Vec<&Instance>> = FxHashMap::default();
-    let mut symbols = BTreeMap::new();
     // The planner answers each instance independently; the names are
     // derived in parallel and recorded in instance order.
     let planned: Vec<(&Instance, String)> = {
@@ -2241,13 +2300,9 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             .map(|(i, r)| (i, req.symbols.symbol(ws, g, i, r)))
             .collect()
     };
+    let mut by_symbol: FxHashMap<&str, Vec<&Instance>> = FxHashMap::default();
     for (i, s) in &planned {
         by_symbol.entry(s.as_str()).or_default().push(i);
-        index
-            .symbol_users
-            .entry(s.clone())
-            .or_default()
-            .insert((*i).clone());
     }
     // Reported in symbol order, which the hashed grouping does not keep.
     let mut symbol_collisions: Vec<SymbolCollision> = by_symbol
@@ -2259,9 +2314,8 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
         })
         .collect();
     symbol_collisions.sort_by(|a, b| a.symbol.cmp(&b.symbol));
-    for (i, s) in planned {
-        symbols.insert(i.clone(), s);
-    }
+    let symbols: BTreeMap<Instance, String> =
+        planned.into_iter().map(|(i, s)| (i.clone(), s)).collect();
 
     // THE boundary identities, minted once, per retained instance. Every
     // consumer -- an ordinary call site and an opaque dependency alike -- reads
@@ -2288,12 +2342,21 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
     // Opaque dependencies, terminating in a concrete callee of THIS artifact.
     let mut inline_deps = Vec::new();
     let mut unresolved_inline_deps = Vec::new();
-    let retained_decls: BTreeSet<DeclKey> = index
-        .realization_by_decl
-        .keys()
-        .copied()
-        .map(DeclKey)
+    let retained_decls: BTreeSet<DeclKey> = realization.values().map(|r| DeclKey(r.decl)).collect();
+    // The retained instances of the declarations an inline body depends on,
+    // the only declarations this realization asks that question of.
+    let dependency_decls: FxHashSet<FuncRef> = g
+        .inline_body_deps
+        .values()
+        .flatten()
+        .filter_map(|entry| instance_graph::stdlib_entry_representative(ws, entry))
         .collect();
+    let mut instances_by_decl: FxHashMap<FuncRef, Vec<&Instance>> = FxHashMap::default();
+    for i in realization.keys() {
+        if dependency_decls.contains(&i.func) {
+            instances_by_decl.entry(i.func).or_default().push(i);
+        }
+    }
     for (owner, entries) in &g.inline_body_deps {
         let owner_retained = retained_decls.contains(owner);
         for entry in entries {
@@ -2333,7 +2396,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
             // WHICH instance, not merely which declaration. A runtime entry is
             // non-generic so one instance is expected, but picking the first of
             // several would silently choose.
-            let Some(instances) = index.instances_by_decl.get(&rep) else {
+            let Some(instances) = instances_by_decl.get(&rep) else {
                 unresolved_inline_deps.push(UnresolvedInlineDep {
                     owner: owner.0,
                     entry,
@@ -2358,7 +2421,7 @@ pub fn realize(ws: &Workspace, g: &InstanceGraph, req: &ArtifactRequest<'_>) -> 
                 });
                 continue;
             }
-            let inst = inst.clone();
+            let inst = (*inst).clone();
             let callee = match boundaries.get(&inst) {
                 Some(id) => RealizedCallee::Boundary(id.clone()),
                 None => RealizedCallee::Rock(inst),

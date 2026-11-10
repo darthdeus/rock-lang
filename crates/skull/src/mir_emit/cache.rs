@@ -964,6 +964,8 @@ impl SkullEmitCache {
         } else {
             None
         };
+        // The view retracts against the graph it was realized from.
+        cache.lua_view.prepare_update(&cache.graph);
         let update = cache.graph.update_bodies_with_root_delta(
             ws,
             &root_added,

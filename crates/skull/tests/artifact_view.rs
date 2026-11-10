@@ -2221,6 +2221,7 @@ fn main() { let a = left()\n print(\"{a}\") }";
         .find(|(_, function)| function.name.as_str() == "main")
         .map(|(function, _)| (module, BodyOwner::Function(function)))
         .expect("main body");
+    local.prepare_update(&graph);
     let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &[main], &[]);
     let fresh_roots = skull::mir_emit::emission_roots(&ws2, Some("/project"));
     let fresh_graph = instance_graph::build(&ws2, fresh_roots, false);
@@ -2309,6 +2310,7 @@ fn main() { let x = caller() }
                 .map(|(fid, _)| (module.id, BodyOwner::Function(fid)))
         })
         .expect("caller body");
+    local.prepare_update(&graph);
     let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &[caller], &[]);
     let all_roots2 = skull::mir_emit::emission_roots(&ws2, None);
     let fresh_graph = instance_graph::build(&ws2, all_roots2, false);
@@ -2339,8 +2341,10 @@ fn main() { let x = caller() }
     );
 }
 
+// A realization reads the graph's site tables in place; only an update
+// copies them into its own rows, once.
 #[test]
-fn fresh_artifact_indexes_each_graph_site_once() {
+fn artifact_update_rows_index_each_graph_site_once_on_first_update() {
     let ws = ws_with_stdlib("fn leaf(x: int) -> int { x + 1 }\nfn main() { let x = leaf(1) }");
     let (g, roots) = graph_for(&ws);
     let expected: usize = g.call_sites().map(|(_, sites)| sites.len()).sum();
@@ -2348,16 +2352,53 @@ fn fresh_artifact_indexes_each_graph_site_once() {
         expected > 0,
         "artifact-index fixture has no graph-site population"
     );
-    let before = artifact::fresh_index_site_rows();
-    let view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
-    let indexed = artifact::fresh_index_site_rows().saturating_sub(before) as usize;
+    let before = artifact::update_index_site_rows();
+    let mut view = artifact::realize(&ws, &g, &ArtifactRequest::new(LUAJIT_DESKTOP, &roots));
     assert_eq!(
-        indexed, expected,
-        "fresh ArtifactIndex installed graph sites more than once"
+        artifact::update_index_site_rows(),
+        before,
+        "a realization copied graph sites into update rows"
     );
     assert!(
         view.census().sites_walked > 0,
         "the fixture did not retain a site-bearing body"
+    );
+    view.prepare_update(&g);
+    view.prepare_update(&g);
+    let indexed = artifact::update_index_site_rows().saturating_sub(before) as usize;
+    assert_eq!(
+        indexed, expected,
+        "the update rows installed graph sites other than once"
+    );
+}
+
+// The update rows describe the graph the view was realized from, so deriving
+// them from a graph that has since moved is refused rather than guessed.
+#[test]
+#[should_panic(expected = "call `prepare_update` before updating the graph")]
+fn artifact_update_rows_refuse_a_graph_updated_first() {
+    let ws1 = ws_with_stdlib(GLOBAL_FN_VALUE_V1);
+    let roots = skull::mir_emit::emission_roots(&ws1, Some("/project"));
+    let mut graph = instance_graph::build(&ws1, roots.clone(), false);
+    let request = ArtifactRequest::new(LUAJIT_DESKTOP, &roots);
+    let mut local = artifact::realize(&ws1, &graph, &request);
+    let ws2 = ws_with_stdlib(GLOBAL_FN_VALUE_V2);
+    let module = module_id(&ws2, "<test>");
+    let global = ws2
+        .module(module)
+        .globals
+        .iter()
+        .find(|(_, g)| g.name.as_str() == "F")
+        .map(|(gid, _)| (module, BodyOwner::Global(gid)))
+        .expect("global F");
+    let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &[global], &[]);
+    local.update_local(
+        &ws2,
+        &graph,
+        &request,
+        &update.revisited,
+        &update.added,
+        &update.removed,
     );
 }
 
@@ -2414,6 +2455,7 @@ fn local_global_initializer_fn_value_retarget_matches_fresh_view() {
         .find(|(_, g)| g.name.as_str() == "F")
         .map(|(gid, _)| (module, BodyOwner::Global(gid)))
         .expect("global F");
+    local.prepare_update(&graph);
     let update = graph.update_bodies_with_root_delta(&ws2, &[], &[], &[global], &[]);
     let fresh_roots = skull::mir_emit::emission_roots(&ws2, Some("/project"));
     let fresh_graph = instance_graph::build(&ws2, fresh_roots.clone(), false);
