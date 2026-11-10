@@ -52,6 +52,7 @@ impl SourceFilesExt for SourceFiles {
         Ok(SourceFiles {
             files,
             package_roots: Vec::new(),
+            ns_aliases: None,
         })
     }
 }
@@ -78,6 +79,7 @@ fn source_files_from_dir_impl<P: AsRef<Path>>(
     Ok(SourceFiles {
         files,
         package_roots: Vec::new(),
+        ns_aliases: None,
     })
 }
 

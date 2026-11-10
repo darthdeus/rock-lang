@@ -15,6 +15,10 @@ pub struct SourceFiles {
     /// id. Left empty by standalone and synthetic source sets, which own no
     /// package.
     pub package_roots: Vec<(u32, PathBuf)>,
+    /// The alias table of the package graph that selected these files, kept
+    /// so the check does not build the graph again. `None` when no graph
+    /// selected them or the source set did not keep it.
+    pub ns_aliases: Option<crate::package_aliases::NsAliases>,
 }
 
 impl SourceFiles {
@@ -22,6 +26,7 @@ impl SourceFiles {
         Self {
             files: Vec::new(),
             package_roots: Vec::new(),
+            ns_aliases: None,
         }
     }
 
@@ -29,6 +34,7 @@ impl SourceFiles {
         Self {
             files: vec![Arc::new(AtomicRefCell::new(file))],
             package_roots: Vec::new(),
+            ns_aliases: None,
         }
     }
 
@@ -88,6 +94,7 @@ impl SourceFiles {
         Ok(SourceFiles {
             files,
             package_roots: self.package_roots.clone(),
+            ns_aliases: self.ns_aliases.clone(),
         })
     }
 
@@ -318,6 +325,7 @@ mod tests {
                 std::sync::Arc::new(atomic_refcell::AtomicRefCell::new(source(&broken_path))),
             ],
             package_roots: Vec::new(),
+            ns_aliases: None,
         };
 
         let production = sources.production_only(&project_root).unwrap();

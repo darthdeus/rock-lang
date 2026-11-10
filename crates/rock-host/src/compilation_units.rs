@@ -380,6 +380,7 @@ fn load_sources_from_paths(paths: &[PathBuf]) -> Result<SourceFiles> {
     Ok(SourceFiles {
         files: sources,
         package_roots: Vec::new(),
+        ns_aliases: None,
     })
 }
 

@@ -41,6 +41,16 @@ pub fn ns_aliases(graph: Option<&PackageGraph>) -> NsAliases {
 pub fn ns_aliases_for_sources<'a>(
     sources: impl IntoIterator<Item = (&'a str, Dialect, Option<&'a PackageTag>)>,
 ) -> Result<NsAliases, CompilerError> {
+    ns_aliases_for_selected_sources(sources, None)
+}
+
+/// [`ns_aliases_for_sources`] given the alias table of the graph that
+/// selected the files, when the caller kept it, instead of building that
+/// graph again from the root file's manifest.
+pub fn ns_aliases_for_selected_sources<'a>(
+    sources: impl IntoIterator<Item = (&'a str, Dialect, Option<&'a PackageTag>)>,
+    selecting_graph: Option<&NsAliases>,
+) -> Result<NsAliases, CompilerError> {
     let mut has_v1 = false;
     let mut root = None;
     for (file, dialect, package) in sources {
@@ -58,7 +68,10 @@ pub fn ns_aliases_for_sources<'a>(
             "modules-v1 sources have no root package file from which to load dependency aliases",
         ));
     };
-    ns_aliases_for_root_file(Path::new(root))
+    match selecting_graph {
+        Some(aliases) => Ok(aliases.clone()),
+        None => ns_aliases_for_root_file(Path::new(root)),
+    }
 }
 
 /// The alias table for a program whose root package owns `root_file`, read

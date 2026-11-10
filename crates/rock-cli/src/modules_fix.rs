@@ -276,6 +276,7 @@ impl Round {
                 })
                 .collect(),
             package_roots: ctx.sources.package_roots.clone(),
+            ns_aliases: ctx.sources.ns_aliases.clone(),
         };
         match modules_analysis::check(&sources) {
             Ok(checked) => {

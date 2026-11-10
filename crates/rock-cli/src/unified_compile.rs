@@ -73,6 +73,7 @@ pub(crate) fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> 
                 Ok(SourceFiles {
                     files: dependency_files,
                     package_roots,
+                    ns_aliases: Some(graph.ns_aliases()),
                 })
             } else {
                 // No stick.toml - check if there's exactly one .rock file

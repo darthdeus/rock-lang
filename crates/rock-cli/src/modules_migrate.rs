@@ -1138,6 +1138,7 @@ fn candidate_sources(
     SourceFiles {
         files,
         package_roots: c.sources.package_roots.clone(),
+        ns_aliases: c.sources.ns_aliases.clone(),
     }
 }
 

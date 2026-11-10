@@ -78,7 +78,12 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
         &mut self,
         modules: &skull_parser::stdlib::ModuleSet,
     ) -> std::result::Result<bone_core::modules::NsAliases, CompilerError> {
-        crate::bone_backend::aliases_for_modules(modules.iter())
+        rock_host::program_inputs::ns_aliases_for_selected_sources(
+            modules
+                .iter()
+                .map(|m| (m.file.as_str(), m.dialect, m.package.as_ref())),
+            self.sources.ns_aliases.as_ref(),
+        )
     }
 
     fn phase(&mut self, phase: skull::pipeline::Phase<'_>) {

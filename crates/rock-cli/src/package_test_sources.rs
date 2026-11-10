@@ -314,6 +314,7 @@ pub(crate) fn select(sources: &SourceFiles, project_root: &Path) -> Result<Sourc
             .map(|(file, _)| file.clone())
             .collect(),
         package_roots: sources.package_roots.clone(),
+        ns_aliases: sources.ns_aliases.clone(),
     })
 }
 
