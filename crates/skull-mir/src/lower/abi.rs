@@ -389,20 +389,32 @@ impl FunctionRepPlan {
     /// recursive layouts they name, so a later artifact can compare it without
     /// depending on arena allocation order.
     pub(crate) fn logical_fingerprint(&self, arena: &RepArena) -> String {
-        let params = self
-            .params
-            .iter()
-            .map(|id| rep_logical_fingerprint_shared(arena, *id))
-            .collect::<Vec<_>>()
-            .join(",");
-        let result = self
-            .result
-            .map(|id| rep_logical_fingerprint_shared(arena, id))
-            .unwrap_or_else(|| "none".into());
-        format!(
-            "params=[{params}];result={result};lanes={};scalar={}",
+        let mut out = String::new();
+        self.write_logical_fingerprint(arena, &mut out);
+        out
+    }
+
+    /// Appends [`Self::logical_fingerprint`]. Every body lowered asks for its
+    /// owner's, so the parts go straight into the caller's buffer.
+    fn write_logical_fingerprint(&self, arena: &RepArena, out: &mut String) {
+        use std::fmt::Write as _;
+        out.push_str("params=[");
+        for (i, id) in self.params.iter().enumerate() {
+            if i > 0 {
+                out.push(',');
+            }
+            out.push_str(&rep_logical_fingerprint_shared(arena, *id));
+        }
+        out.push_str("];result=");
+        match self.result {
+            Some(id) => out.push_str(&rep_logical_fingerprint_shared(arena, id)),
+            None => out.push_str("none"),
+        }
+        let _ = write!(
+            out,
+            ";lanes={};scalar={}",
             self.return_lanes, self.scalar_abi
-        )
+        );
     }
 }
 
@@ -2777,11 +2789,12 @@ impl BackendFnAbiPlan {
     pub(crate) fn logical_fingerprint(&self) -> String {
         self.fingerprint
             .get_or_init(|| {
-                format!(
-                    "target={:?};{}",
-                    self.target,
-                    self.representation.logical_fingerprint(&self.arena)
-                )
+                use std::fmt::Write as _;
+                let mut out = String::with_capacity(160);
+                let _ = write!(out, "target={:?};", self.target);
+                self.representation
+                    .write_logical_fingerprint(&self.arena, &mut out);
+                out
             })
             .clone()
     }
