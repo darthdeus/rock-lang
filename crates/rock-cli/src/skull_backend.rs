@@ -1472,7 +1472,7 @@ fn skull_build_package_with_limit(
             rendered: render_project_errs(&sources, &failure.errors),
         },
     )?;
-    let lua = emit.lua;
+    let (lua, bridge_end) = (emit.lua, emit.globals_bridge_end);
     let test_fns = collect_package_test_fns(&ws, dir).map_err(|e| SkullFailure {
         reason: categorize(&e.message),
         rendered: render_project_err(&sources, &e),
@@ -1486,7 +1486,7 @@ fn skull_build_package_with_limit(
         .map(|(_, test)| test)
         .collect::<Vec<_>>();
     let facts = test_program_facts(&ws);
-    let lua = install_global_accessors(lua, &ws)
+    let lua = install_global_accessors(lua, bridge_end, &ws)
         .map_err(|e| SkullFailure {
             reason: categorize(&e.message),
             rendered: render_project_err(&sources, &e),
@@ -2338,7 +2338,8 @@ fn skull_emit_project_with_inputs(
         AccessorPlanning::Planned(metadata) => metadata,
         _ => global_accessor_metadata(&ws),
     };
-    let lua = match metadata.and_then(|metadata| GameProgram::new(lua, metadata, &ws)) {
+    let bridge_end = emit.globals_bridge_end;
+    let lua = match metadata.and_then(|metadata| GameProgram::new(lua, bridge_end, metadata, &ws)) {
         Ok(lua) => lua,
         Err(error) => {
             eprintln!("{}", render_project_err(&sources, &error));
@@ -2393,25 +2394,42 @@ pub struct GameProgram {
 impl GameProgram {
     fn new(
         lua: String,
+        bridge_end: Option<usize>,
         metadata: String,
         ws: &bone_semantic::inference::Workspace,
     ) -> std::result::Result<Self, CompilerError> {
-        let mut program = Self::with_metadata(lua, metadata)?;
+        let mut program = Self::with_metadata(lua, bridge_end, metadata)?;
         program.comptime_inputs = ws.comptime_inputs.clone();
         Ok(program)
     }
 
-    fn with_metadata(lua: String, metadata: String) -> std::result::Result<Self, CompilerError> {
-        let marker = "__rock_globals_install_bridge()\n";
-        let at = memchr::memmem::find(lua.as_bytes(), marker.as_bytes()).ok_or_else(|| {
-            CompilerError::new_no_location(
-                "compiled program is missing its global directory".to_string(),
-            )
-        })?;
+    /// `bridge_end` is where the emit says the bridge install ends; without
+    /// it the program is searched.
+    fn with_metadata(
+        lua: String,
+        bridge_end: Option<usize>,
+        metadata: String,
+    ) -> std::result::Result<Self, CompilerError> {
+        let marker = skull::mir_emit::GLOBALS_BRIDGE_LINE;
+        let metadata_at = match bridge_end {
+            Some(at) if lua.get(..at).is_some_and(|head| head.ends_with(marker)) => at,
+            Some(at) => {
+                return Err(CompilerError::new_no_location(format!(
+                    "internal: the global directory bridge does not end at byte {at}"
+                )));
+            }
+            None => {
+                memchr::memmem::find(lua.as_bytes(), marker.as_bytes()).ok_or_else(|| {
+                    CompilerError::new_no_location(
+                        "compiled program is missing its global directory".to_string(),
+                    )
+                })? + marker.len()
+            }
+        };
         Ok(Self {
             lua,
             metadata,
-            metadata_at: at + marker.len(),
+            metadata_at,
             comptime_inputs: Default::default(),
         })
     }
@@ -2424,9 +2442,10 @@ impl GameProgram {
 
 fn install_global_accessors(
     lua: String,
+    bridge_end: Option<usize>,
     ws: &bone_semantic::inference::Workspace,
 ) -> std::result::Result<GameProgram, CompilerError> {
-    GameProgram::new(lua, global_accessor_metadata(ws)?, ws)
+    GameProgram::new(lua, bridge_end, global_accessor_metadata(ws)?, ws)
 }
 
 /// The directory fields a host attaches to the emitted globals.
@@ -3409,7 +3428,7 @@ impl IncrementalProject {
                 anyhow::anyhow!("compiler did not publish an Artifact fingerprint")
             })?;
             let emits_main = emit.emits_main;
-            let lua = install_global_accessors(emit.lua, ws)
+            let lua = install_global_accessors(emit.lua, emit.globals_bridge_end, ws)
                 .map_err(|e| anyhow::anyhow!(render_project_err(project.sources(), &e)))?;
             (lua, c, artifact_fingerprint, emits_main)
         };
@@ -3747,7 +3766,7 @@ impl IncrementalProject {
                     });
                 }
                 let emits_main = emit.emits_main;
-                let lua = install_global_accessors(emit.lua, ws)
+                let lua = install_global_accessors(emit.lua, emit.globals_bridge_end, ws)
                     .map_err(|e| anyhow::anyhow!(render_project_err(self.project.sources(), &e)))?;
                 ((lua, emits_main), c)
             };
@@ -3901,8 +3920,8 @@ impl IncrementalProject {
                 anyhow::anyhow!("compiler did not publish an Artifact fingerprint")
             })?;
             let emits_main = emit.emits_main;
-            let lua =
-                install_global_accessors(emit.lua, ws).map_err(|e| anyhow::anyhow!(e.message))?;
+            let lua = install_global_accessors(emit.lua, emit.globals_bridge_end, ws)
+                .map_err(|e| anyhow::anyhow!(e.message))?;
             (lua, c, artifact_fingerprint, emits_main)
         };
         self.preamble = (RuntimeServices::registered().program_preamble)(

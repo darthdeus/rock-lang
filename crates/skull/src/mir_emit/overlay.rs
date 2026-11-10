@@ -404,6 +404,7 @@ fn assemble_overlay(
                 dependency_edges: None,
             },
             lua: out,
+            globals_bridge_end: None,
             allocation_report: crate::allocation_report::AllocationReport::default(),
             code_artifact: candidate_code_artifact,
             lifecycle_plan,

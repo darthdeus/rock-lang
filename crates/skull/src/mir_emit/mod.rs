@@ -84,10 +84,16 @@ pub struct CompileReleaseStats {
 }
 
 /// The assembled Lua program and what was emitted into it.
+/// The line after which a host attaches its own global directory fields.
+pub const GLOBALS_BRIDGE_LINE: &str = "__rock_globals_install_bridge()\n";
+
 pub struct MirEmit {
     pub release_stats: CompileReleaseStats,
     pub compile_counts: CompileCounts,
     pub lua: String,
+    /// The byte offset in `lua` just past [`GLOBALS_BRIDGE_LINE`]. `None` for
+    /// an overlay, which has no bridge, and for text rewritten after assembly.
+    pub globals_bridge_end: Option<usize>,
     /// Allocation-capable operations registered by final Lua emission, with
     /// residual call edges and compiler-owned per-frame lifecycle routes.
     pub allocation_report: crate::allocation_report::AllocationReport,

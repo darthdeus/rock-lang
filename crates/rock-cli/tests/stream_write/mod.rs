@@ -37,7 +37,10 @@ fn streamed_game_main_matches_metadata_splice_and_entry() {
                 ""
             }
         );
-        let program = GameProgram::with_metadata(lua, metadata.into()).unwrap();
+        let bridge_end = lua.find(marker).unwrap() + marker.len();
+        let searched = GameProgram::with_metadata(lua.clone(), None, metadata.into()).unwrap();
+        assert_eq!(searched.parts()[0].len(), bridge_end);
+        let program = GameProgram::with_metadata(lua, Some(bridge_end), metadata.into()).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let main = dir.path().join("main.lua");
         let overlay = dir.path().join("incremental.lua");
@@ -48,7 +51,9 @@ fn streamed_game_main_matches_metadata_splice_and_entry() {
         assert_eq!(std::fs::read(&main).unwrap(), expected.as_bytes());
         assert!(!overlay.exists());
     }
-    assert!(GameProgram::with_metadata("no bridge".into(), "metadata".into()).is_err());
+    assert!(GameProgram::with_metadata("no bridge".into(), None, "metadata".into()).is_err());
+    let lua = format!("head\n{marker}tail\n");
+    assert!(GameProgram::with_metadata(lua, Some(2), "metadata".into()).is_err());
 }
 
 #[test]

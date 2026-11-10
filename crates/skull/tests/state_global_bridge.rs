@@ -134,3 +134,22 @@ check("state write past a bare reinstall", _G.bar, 17)
         "not every case reported; the program stopped early:\n{out}"
     );
 }
+
+/// A host attaches its own directory fields right after the bridge install,
+/// at the offset the emit reports, without searching the program for it.
+#[test]
+fn the_emit_reports_where_the_bridge_install_ends() {
+    let ws = ws_of(SRC);
+    let mid = skull::user_module_id(&ws).unwrap();
+    let emit = skull::mir_emit::emit_full(&ws, mid).expect("emit_full").0;
+    let at = emit
+        .globals_bridge_end
+        .expect("a full emit installs the bridge");
+    assert!(emit.lua[..at].ends_with(skull::mir_emit::GLOBALS_BRIDGE_LINE));
+    assert_eq!(
+        emit.lua
+            .matches(skull::mir_emit::GLOBALS_BRIDGE_LINE)
+            .count(),
+        1
+    );
+}

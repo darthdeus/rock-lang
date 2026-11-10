@@ -1192,7 +1192,8 @@ pub(super) fn assemble(
         &globals_directory?,
     ));
     // A host attaches its own directory fields right after this line.
-    out.push_str("__rock_globals_install_bridge()\n");
+    out.push_str(GLOBALS_BRIDGE_LINE);
+    let bridge_end_in_tail = out.len();
 
     // Globals: an init fn + a dependency-ordered `<NAME> = __skull_ginit_<NAME>()`.
     // (Lowered above, so the walk could see their call edges; appended here, in
@@ -1243,6 +1244,8 @@ pub(super) fn assemble(
     runtime_refs.extend(glue_calls);
     runtime_refs.extend(host_accessor_value_ctors(ws, scx));
     let value_ctor_lua = crate::value_ctor_defs(&value_ctors, &runtime_refs);
+    let mut globals_bridge_end =
+        Some(head.len() + value_ctor_lua.len() + definitions_lua.len() + bridge_end_in_tail);
     asm.out = par_concat(&[
         &head[..value_ctors_at],
         &value_ctor_lua,
@@ -1296,6 +1299,7 @@ pub(super) fn assemble(
     // numbered definition reports its position in that file.
     if cache.cg.line_directives() {
         out = skull_codegen_lua::resolve_line_directive_resets(&out, "main.lua");
+        globals_bridge_end = None;
     }
     cg.report_trace_frames(&out);
     step("assembly: finalize", &mut steps);
@@ -1305,6 +1309,7 @@ pub(super) fn assemble(
             release_stats,
             compile_counts,
             lua: out,
+            globals_bridge_end,
             allocation_report,
             code_artifact: std::sync::Arc::new(code_artifact),
             lifecycle_plan,
