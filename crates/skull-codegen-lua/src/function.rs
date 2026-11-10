@@ -459,7 +459,6 @@ fn emit_named_framed_with_statics_impl(
         entry,
         params,
         &rpo,
-        &flow,
         &locals,
         &inlinable,
         &alias,

@@ -966,6 +966,13 @@ pub(crate) struct Locals<'a> {
     ci: Vec<u32>,
     /// Words of a bit row that hold registers; cells follow.
     v_words: usize,
+    /// The bits each statement defines and then reads, block by block, each
+    /// block closed by an entry for what its terminator reads.
+    bits: Vec<u32>,
+    /// Per entry: where its defs start and where its uses start.
+    marks: Vec<(u32, u32)>,
+    /// Per block: its first entry; its last is the terminator's.
+    first: Vec<u32>,
     /// Per block: upward-exposed uses, defs, and the bits live on entry.
     use_set: BitRows,
     def_set: BitRows,
@@ -1044,9 +1051,7 @@ impl<'a> Locals<'a> {
         // them. A folded statement keeps only its cell writes: the suppressed
         // store of a forwarded tail call still clobbers its cell's color.
         let mut bits: Vec<u32> = Vec::with_capacity(placed + reads.leaves.len());
-        // Per entry: where its defs start and where its uses start.
         let mut marks: Vec<(u32, u32)> = Vec::with_capacity(placed + n + 1);
-        // Per block: its first entry; its last is the terminator's.
         let mut first: Vec<u32> = Vec::with_capacity(n + 1);
         let push_reads = |bits: &mut Vec<u32>, leaves: &[u32]| {
             Reads::values(func, inline, leaves, |v| {
@@ -1189,6 +1194,9 @@ impl<'a> Locals<'a> {
             cells,
             ci,
             v_words,
+            bits,
+            marks,
+            first,
             use_set,
             def_set,
             live_in,
@@ -1196,6 +1204,16 @@ impl<'a> Locals<'a> {
             cell_graph: cell_graph.finish(c_count),
             force,
         }
+    }
+
+    /// The bits entry `e` defines.
+    fn defs(&self, e: usize) -> &[u32] {
+        &self.bits[self.marks[e].0 as usize..self.marks[e].1 as usize]
+    }
+
+    /// The bits entry `e` reads.
+    fn uses(&self, e: usize) -> &[u32] {
+        &self.bits[self.marks[e].1 as usize..self.marks[e + 1].0 as usize]
     }
 
     /// Color every register: values that never interfere share a color, and
@@ -1519,9 +1537,11 @@ pub(crate) struct NilKills<'a> {
     /// per instruction.
     after_range: Vec<(u32, u32)>,
     after_locals: Vec<KillLocal>,
-    /// Dense `raw(block) -> locals dead on entry to the block that some
-    /// predecessor still had live` (dying on the edge or at its terminator).
-    pub at_entry: Vec<Vec<KillLocal>>,
+    /// Dense `raw(block) -> range of entry_locals`: the locals dead on entry
+    /// to the block that some predecessor still had live (dying on the edge
+    /// or at its terminator).
+    entry_range: Vec<(u32, u32)>,
+    entry_locals: Vec<KillLocal>,
     /// Per scope block: live-in slots, and slots live at the block's end
     /// (successor live-in plus the terminator's own reads).
     live_in: BitRows,
@@ -1542,11 +1562,12 @@ pub(crate) struct NilKills<'a> {
 
 impl NilKills<'_> {
     /// No kills anywhere (coroutine `__step` bodies, or the pass disabled).
-    pub(crate) fn none(func: &MirFunc) -> Self {
+    pub(crate) fn none() -> Self {
         NilKills {
             after_range: Vec::new(),
             after_locals: Vec::new(),
-            at_entry: vec![Vec::new(); func.blocks.len()],
+            entry_range: Vec::new(),
+            entry_locals: Vec::new(),
             live_in: BitRows::new(0, 0),
             end_live: BitRows::new(0, 0),
             flow: None,
@@ -1582,9 +1603,9 @@ impl NilKills<'_> {
                 }
             }
         }
-        for (b, _) in func.blocks.iter() {
-            if tail[raw(b)] {
-                self.at_entry[raw(b)].clear();
+        for (range, &tail) in self.entry_range.iter_mut().zip(&tail) {
+            if tail {
+                *range = (0, 0);
             }
         }
         self.return_tail = tail;
@@ -1596,11 +1617,21 @@ impl NilKills<'_> {
 
     /// No kills in `b`, on entry or after any of its statements.
     pub(crate) fn drop_block(&mut self, func: &MirFunc, b: Idx<Block>) {
-        self.at_entry[raw(b)].clear();
+        if let Some(range) = self.entry_range.get_mut(raw(b)) {
+            *range = (0, 0);
+        }
         for &id in &func.blocks[b].insts {
             if let Some(range) = self.after_range.get_mut(raw(id)) {
                 *range = (0, 0);
             }
+        }
+    }
+
+    /// Locals dead on entry to `b` that a predecessor still had live.
+    pub(crate) fn at_entry(&self, b: Idx<Block>) -> &[KillLocal] {
+        match self.entry_range.get(raw(b)) {
+            Some(&(start, end)) => &self.entry_locals[start as usize..end as usize],
+            None => &[],
         }
     }
 
@@ -1757,19 +1788,19 @@ pub(crate) fn statement_is_pure(func: &MirFunc, inline: &[bool], id: Idx<Inst>) 
 }
 
 /// Compute the death point of every emitted local of one function body.
-/// `inline` marks instructions that emit no statement of their own (tree-folded
-/// values, hoisted constants); their reads are attributed to the consumer, as
-/// the emitter renders them. `loops` supplies the blocks in which a loop-scoped
-/// register may be killed (its `for` body plus the latch label, both inside the
-/// `for` block). `cell_excluded` is every cell this body does NOT render as a
-/// bare `c<color>` local, from the caller's own declaration predicate: a kill of
-/// one of those would assign a GLOBAL of that name.
+/// `quiet` marks the instructions that emit no statement of their own when
+/// that is more than the values `locals` already folds (hoisted constants, a
+/// counted loop's header and latch); their reads are attributed to the
+/// consumer, as the emitter renders them. `loops` supplies the blocks in
+/// which a loop-scoped register may be killed (its `for` body plus the latch
+/// label, both inside the `for` block). `cell_excluded` is every cell this
+/// body does NOT render as a bare `c<color>` local, from the caller's own
+/// declaration predicate: a kill of one of those would assign a GLOBAL of
+/// that name.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn nil_kills<'a>(
-    func: &MirFunc,
-    scope: &[Idx<Block>],
-    flow: &'a Flow,
-    inline: &[bool],
+    locals: &Locals<'a>,
+    quiet: Option<&[bool]>,
     value_colors: &[u32],
     value_scope: &[Option<Idx<Block>>],
     loops: &[LoopScope],
@@ -1779,13 +1810,11 @@ pub(crate) fn nil_kills<'a>(
     alias: &[Option<Idx<Cell>>],
     reads: &Reads,
 ) -> NilKills<'a> {
+    let (func, scope, flow) = (locals.func, locals.scope, locals.flow);
+    let inline = quiet.unwrap_or(locals.inline);
     let n = scope.len();
-    let value_count = value_colors
-        .iter()
-        .filter(|&&c| c != u32::MAX)
-        .map(|&c| c + 1)
-        .max()
-        .unwrap_or(0);
+    // Every color is held by some register, so the palette is the count.
+    let value_count = value_scope.len() as u32;
     // Slot space: value colors first, then killable cell colors. `cell_excluded`
     // carries both reasons a cell is not killable: it is pinned (owning its color
     // alone, so excluding it by cell excludes the color), or the emitter renders
@@ -1800,91 +1829,113 @@ pub(crate) fn nil_kills<'a>(
         }
     }
     let s_count = (value_count + cell_count) as usize;
-    let value_slot = |v: Idx<Inst>| -> Option<usize> {
-        let c = value_colors[raw(v)];
-        (c != u32::MAX).then_some(c as usize)
-    };
-    let leaf_slots = |leaves: &[u32], push: &mut dyn FnMut(usize)| {
-        Reads::values(func, inline, leaves, |v| {
-            if let Some(s) = value_slot(v) {
-                push(s);
-            }
-        });
-        Reads::cells(func, inline, alias, leaves, |c| {
-            let s = cell_slot[raw(c)];
-            if s != u32::MAX {
-                push(s as usize);
-            }
-        });
-    };
-    let defs_of = |id: Idx<Inst>, push: &mut dyn FnMut(usize)| {
-        if func.insts[id].produces_value() {
-            if let Some(s) = value_slot(id) {
-                push(s);
+
+    // The slots each emitted statement defines and then reads, per entry of
+    // `locals`: the liveness pass and the backward kill walk both read them.
+    let mut slots: Vec<u32> = Vec::with_capacity(locals.bits.len());
+    let mut marks: Vec<(u32, u32)> = Vec::with_capacity(locals.marks.len());
+    if quiet.is_none() {
+        // The statements are the ones `locals` flattened, so each of its bits
+        // names the slot directly.
+        let cell_base = locals.v_words * 64;
+        let mut slot_of = vec![u32::MAX; cell_base + locals.cells.len()];
+        for (i, &v) in locals.values.iter().enumerate() {
+            slot_of[i] = value_colors[raw(v)];
+        }
+        for (i, c) in locals.cells.iter().enumerate() {
+            if let Some(c) = c {
+                slot_of[cell_base + i] = cell_slot[raw(*c)];
             }
         }
-        emitted_cell_defs(func, alias, id, &mut |c| {
-            let s = cell_slot[raw(c)];
-            if s != u32::MAX {
-                push(s as usize);
+        let named = |bits: &[u32], slots: &mut Vec<u32>| {
+            slots.extend(
+                bits.iter()
+                    .map(|&k| slot_of[k as usize])
+                    .filter(|&s| s != u32::MAX),
+            )
+        };
+        let mut e = 0;
+        for &b in scope {
+            for &id in &func.blocks[b].insts {
+                let start = slots.len() as u32;
+                let mut mid = start;
+                // A folded statement defines no slot: its entry holds only
+                // the cell writes the colorer needs.
+                if !inline[raw(id)] {
+                    named(locals.defs(e), &mut slots);
+                    mid = slots.len() as u32;
+                    named(locals.uses(e), &mut slots);
+                }
+                marks.push((start, mid));
+                e += 1;
             }
-        });
-    };
-
-    // The slots each emitted statement defines and then reads, flattened once:
-    // the forward liveness pass and the backward kill walk both read them, and
-    // the walk through inlined operands is the expensive part of either.
-    let mut stmt_slots: Vec<u32> = Vec::new();
-    let mut stmt_range = vec![(0u32, 0u32, 0u32); func.insts.len()];
-    for &b in scope {
-        for &id in &func.blocks[b].insts {
-            if inline[raw(id)] {
-                continue;
+            let start = slots.len() as u32;
+            marks.push((start, start));
+            named(locals.uses(e), &mut slots);
+            e += 1;
+        }
+    } else {
+        let value_slot = |v: Idx<Inst>| -> Option<u32> {
+            let c = value_colors[raw(v)];
+            (c != u32::MAX).then_some(c)
+        };
+        let leaf_slots = |leaves: &[u32], slots: &mut Vec<u32>| {
+            Reads::values(func, inline, leaves, |v| slots.extend(value_slot(v)));
+            Reads::cells(func, inline, alias, leaves, |c| {
+                if cell_slot[raw(c)] != u32::MAX {
+                    slots.push(cell_slot[raw(c)]);
+                }
+            });
+        };
+        for &b in scope {
+            for &id in &func.blocks[b].insts {
+                let start = slots.len() as u32;
+                if inline[raw(id)] {
+                    marks.push((start, start));
+                    continue;
+                }
+                if func.insts[id].produces_value() {
+                    slots.extend(value_slot(id));
+                }
+                emitted_cell_defs(func, alias, id, &mut |c| {
+                    if cell_slot[raw(c)] != u32::MAX {
+                        slots.push(cell_slot[raw(c)]);
+                    }
+                });
+                marks.push((start, slots.len() as u32));
+                leaf_slots(reads.stmt(id), &mut slots);
             }
-            let start = stmt_slots.len() as u32;
-            defs_of(id, &mut |s| stmt_slots.push(s as u32));
-            let n_defs = stmt_slots.len() as u32 - start;
-            leaf_slots(reads.stmt(id), &mut |s| stmt_slots.push(s as u32));
-            stmt_range[raw(id)] = (start, n_defs, stmt_slots.len() as u32);
+            let start = slots.len() as u32;
+            marks.push((start, start));
+            leaf_slots(reads.term(b), &mut slots);
         }
     }
-    let stmt_defs_uses = |id: Idx<Inst>| -> (&[u32], &[u32]) {
-        let (start, n_defs, end) = stmt_range[raw(id)];
-        let slots = &stmt_slots[start as usize..end as usize];
-        slots.split_at(n_defs as usize)
-    };
+    marks.push((slots.len() as u32, slots.len() as u32));
+    let defs_at = |e: usize| &slots[marks[e].0 as usize..marks[e].1 as usize];
+    let uses_at = |e: usize| &slots[marks[e].1 as usize..marks[e + 1].0 as usize];
+    let first = &locals.first;
 
-    // Per-block upward-exposed uses and defs, then the same worklist liveness
-    // as `color_cells_with_analysis`, over the slot space.
     let mut use_set = BitRows::new(n, s_count);
     let mut def_set = BitRows::new(n, s_count);
-    for (bi, &b) in scope.iter().enumerate() {
-        for &id in &func.blocks[b].insts {
-            if inline[raw(id)] {
-                continue;
-            }
-            let (defs, uses) = stmt_defs_uses(id);
-            for &s in uses {
+    for bi in 0..n {
+        for e in first[bi] as usize..first[bi + 1] as usize {
+            for &s in uses_at(e) {
                 if !def_set.get(bi, s as usize) {
                     use_set.set(bi, s as usize);
                 }
             }
-            for &s in defs {
+            for &s in defs_at(e) {
                 def_set.set(bi, s as usize);
             }
         }
-        leaf_slots(reads.term(b), &mut |s| {
-            if !def_set.get(bi, s) {
-                use_set.set(bi, s);
-            }
-        });
     }
     let live_in = flow.live_in(&use_set, &def_set);
 
     let mut kills = NilKills {
         after_range: vec![(0, 0); func.insts.len()],
         after_locals: Vec::new(),
-        at_entry: vec![Vec::new(); func.blocks.len()],
+        entry_range: vec![(0, 0); func.blocks.len()],
+        entry_locals: Vec::new(),
         live_in,
         end_live: BitRows::new(n, s_count),
         flow: Some(flow),
@@ -1912,14 +1963,17 @@ pub(crate) fn nil_kills<'a>(
     for (bi, &b) in scope.iter().enumerate() {
         let block = &func.blocks[b];
         flow.live_out(&kills.live_in, bi, &mut live);
-        leaf_slots(reads.term(b), &mut |s| live.set(s));
+        let term = first[bi + 1] as usize - 1;
+        for &s in uses_at(term) {
+            live.set(s as usize);
+        }
         kills.end_live.row_mut(bi).copy_from_slice(&live.words);
         next_pure_defs.clear();
-        for &id in block.insts.iter().rev() {
+        for (e, &id) in (first[bi] as usize..term).zip(&block.insts).rev() {
             if inline[raw(id)] {
                 continue;
             }
-            let (defs, uses) = stmt_defs_uses(id);
+            let (defs, uses) = (defs_at(e), uses_at(e));
             dead.clear();
             for &s in defs.iter().chain(uses) {
                 let s = s as usize;
@@ -1949,32 +2003,34 @@ pub(crate) fn nil_kills<'a>(
         let start = kills.first_pure_slots.len() as u32;
         kills.first_pure_slots.extend_from_slice(&next_pure_defs);
         kills.first_pure_range[bi] = (start, kills.first_pure_slots.len() as u32);
-        if b == func.entry() {
+    }
+    // Slots live at the end of a predecessor and dead on entry die on the edge;
+    // the successor's label is the one place that covers every such edge.
+    let mut entry: Vec<KillLocal> = Vec::new();
+    for (ti, &to) in scope.iter().enumerate() {
+        entry.clear();
+        if to == func.entry() {
             // A parameter is defined at entry; one never read dies there.
             for &p in params {
                 let s = cell_slot[raw(p)];
-                if s != u32::MAX && !live.get(s as usize) {
+                if s != u32::MAX && !kills.live_in.get(ti, s as usize) {
                     let local = kills.decode(s as usize);
-                    if !kills.at_entry[raw(b)].contains(&local) {
-                        kills.at_entry[raw(b)].push(local);
+                    if !entry.contains(&local) {
+                        entry.push(local);
                     }
                 }
             }
         }
-    }
-    // Slots live at the end of a predecessor and dead on entry die on the edge;
-    // the successor's label is the one place that covers every such edge.
-    for bi in 0..n {
-        for &si in flow.succs(bi) {
-            let s = scope[si as usize];
-            let mut entry = std::mem::take(&mut kills.at_entry[raw(s)]);
-            kills.each_on_edge_at(bi, si as usize, s, |local| {
+        for &fi in flow.preds(ti) {
+            kills.each_on_edge_at(fi as usize, ti, to, |local| {
                 if !entry.contains(&local) {
                     entry.push(local);
                 }
             });
-            kills.at_entry[raw(s)] = entry;
         }
+        let start = kills.entry_locals.len() as u32;
+        kills.entry_locals.extend_from_slice(&entry);
+        kills.entry_range[raw(to)] = (start, kills.entry_locals.len() as u32);
     }
     kills
 }

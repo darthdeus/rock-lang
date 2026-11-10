@@ -402,7 +402,7 @@ impl Walk<'_, '_> {
             let em = &*self.em;
             // Dead on entry to the header is dead for the whole loop unless
             // redefined, so the header's kills go once, above it.
-            em.write_kills(self.out, &em.kills.at_entry[bx(h)]);
+            em.write_kills(self.out, em.kills.at_entry(h));
             let head = self.control.line(self.out.len(), 1);
             em.write_for_head(self.out, h);
             self.with_followers(&inside, Follow::Cont(h), Inner::Tree(body_entry));
@@ -410,7 +410,7 @@ impl Walk<'_, '_> {
                 self.label(Label::Continue, h);
             }
             let em = &*self.em;
-            em.write_kills(self.out, &em.kills.at_entry[bx(latch)]);
+            em.write_kills(self.out, em.kills.at_entry(latch));
             // FORI skips past FORL; FORL loops back into the body.
             let end = self.line("end", 1);
             scope_guard::close(self.em.func, h);
@@ -508,7 +508,7 @@ impl Walk<'_, '_> {
             || !p.followers(b).is_empty()
             || self.visited[bx(b)]
             || self.em.tail_forwards[bx(b)].is_some()
-            || !self.em.kills.at_entry[bx(b)].is_empty()
+            || !self.em.kills.at_entry(b).is_empty()
         {
             return None;
         }

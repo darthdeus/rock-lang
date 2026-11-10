@@ -15,7 +15,6 @@ pub(crate) fn render_scope(
     entry: Idx<Block>,
     params: &[Idx<Cell>],
     rpo: &[Idx<Block>],
-    flow: &regalloc::Flow,
     locals: &regalloc::Locals<'_>,
     inlinable: &[bool],
     alias: &[Option<Idx<Cell>>],
@@ -87,23 +86,29 @@ pub(crate) fn render_scope(
     // dead slots out of LuaJIT exit snapshots (see `regalloc::nil_kills`). A
     // coroutine `__step` keeps raw cell names and frame fields; it gets none.
     let kills = if frame.is_some() {
-        regalloc::NilKills::none(func)
+        regalloc::NilKills::none()
     } else {
-        let mut emits_nothing = inlinable.to_vec();
-        for id in hoist.keys() {
-            emits_nothing[raw(*id) as usize] = true;
-        }
-        // A counted loop's header (compare) and latch (increment) are subsumed
-        // by the `for` line; their instructions never run as statements.
-        for (h, cl) in loops.iter() {
-            for &id in func.blocks[*h]
-                .insts
-                .iter()
-                .chain(func.blocks[cl.latch].insts.iter())
-            {
-                emits_nothing[raw(id) as usize] = true;
+        // The folded values, plus what else emits no statement: only then is
+        // a second table needed.
+        let emits_nothing = (!hoist.is_empty() || !loops.is_empty()).then(|| {
+            let mut quiet = inlinable.to_vec();
+            for id in hoist.keys() {
+                quiet[raw(*id) as usize] = true;
             }
-        }
+            // A counted loop's header (compare) and latch (increment) are
+            // subsumed by the `for` line; their instructions never run as
+            // statements.
+            for (h, cl) in loops.iter() {
+                for &id in func.blocks[*h]
+                    .insts
+                    .iter()
+                    .chain(func.blocks[cl.latch].insts.iter())
+                {
+                    quiet[raw(id) as usize] = true;
+                }
+            }
+            quiet
+        });
         // A loop-scoped register may be killed anywhere inside its `for` block:
         // the body region and the latch label, not the header (rendered as the
         // `for` line itself, outside the block).
@@ -128,10 +133,8 @@ pub(crate) fn render_scope(
             }
         }
         let mut kills = regalloc::nil_kills(
-            func,
-            rpo,
-            flow,
-            &emits_nothing,
+            locals,
+            emits_nothing.as_deref(),
             &colors,
             &color_scope,
             &kill_scopes,
@@ -146,6 +149,7 @@ pub(crate) fn render_scope(
         for b in raising_blocks(ws, func) {
             kills.drop_block(func, b);
         }
+        let emits_nothing = emits_nothing.as_deref().unwrap_or(inlinable);
         kills.mark_return_tails(func, |id| {
             emits_nothing[raw(id) as usize] || suppressed[raw(id) as usize]
         });
@@ -375,7 +379,7 @@ impl Emitter<'_> {
     fn is_empty_forwarder(&self, b: Idx<Block>) -> bool {
         let r = raw(b) as usize;
         self.tail_forwards[r].is_none()
-            && self.kills.at_entry[r].is_empty()
+            && self.kills.at_entry(b).is_empty()
             && self.func.blocks[b]
                 .insts
                 .iter()

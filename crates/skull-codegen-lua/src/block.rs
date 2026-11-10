@@ -98,7 +98,7 @@ impl Emitter<'_> {
         after: Option<Idx<Inst>>,
     ) {
         let locals: &[regalloc::KillLocal] = if at_entry {
-            &self.kills.at_entry[raw(bb) as usize]
+            self.kills.at_entry(bb)
         } else {
             match after {
                 Some(id) => self.kills.after_inst(id),
@@ -395,7 +395,7 @@ impl Emitter<'_> {
         self.emitted[raw(header) as usize] = true;
         // Dead on entry to the header is dead for the whole loop unless
         // redefined, so the header's kills go once, above the `for`.
-        self.write_kills(out, &self.kills.at_entry[raw(header) as usize]);
+        self.write_kills(out, self.kills.at_entry(header));
         self.write_for_head(out, header);
         self.emit_block(out, body_entry);
         for &bb in self.rpo {
@@ -408,7 +408,7 @@ impl Emitter<'_> {
         self.emitted[raw(latch) as usize] = true;
         self.drop_fallthrough_goto(out, latch);
         self.write_block_label(out, latch);
-        self.write_kills(out, &self.kills.at_entry[raw(latch) as usize]);
+        self.write_kills(out, self.kills.at_entry(latch));
         out.push_str(" end\n");
         scope_guard::close(self.func, header);
         self.write_goto(out, exit);
