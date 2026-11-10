@@ -252,6 +252,7 @@ pub(super) fn emit_global_unit(
     let g = &ws.module(mid).globals[gid];
     let init_name = crate::global_init_fn_name(skull_mir::mangle::symbol_of_key(g.name).as_str());
     out.attribution.owner = format!("m{}:global{}", mid.index(), u32::from(gid.into_raw()));
+    out.attribution.source = BodySource::Global(mid, gid);
     let tl = Instant::now();
     let owner = skull_mir::concrete::ConcreteOwner::Global {
         module: mid,
@@ -286,6 +287,7 @@ pub(super) fn emit_global_unit(
             out.attribution.examined = true;
             out.attribution.hir_nodes = hir_nodes_for_owner(ws, mid, BodyOwner::Global(gid));
             out.attribution.mir_instructions = mf.insts.len();
+            out.attribution.mir_lowered = mf.insts.len();
             out.attribution.lower_facts = mf.lower_attribution.clone();
             out.times.lower_work = out.attribution.mir_instructions > 0;
             // A global-initializer body can carry lambdas (e.g. a `[TileDef]`

@@ -178,17 +178,19 @@ pub trait CompileHost {
         target: EmitTarget,
     ) -> Result<MirEmit, CompilerError> {
         // The one-shot program is written once; nothing replays or reloads it.
-        crate::mir_emit::FullEmit::one_shot()
+        let mut emit = crate::mir_emit::FullEmit::one_shot()
             .without_fingerprint()
             .project_root(target.project_root)
-            .renderer(target.renderer)
-            .run(ws, entry)
-            .map(|(emit, cache)| {
-                // The emitted program is complete; the cache is dead weight
-                // whose release need not delay it.
-                crate::mir_emit::par::drop_in_background(cache);
-                emit
-            })
+            .renderer(target.renderer);
+        if target.attribution {
+            emit = emit.with_attribution();
+        }
+        emit.run(ws, entry).map(|(emit, cache)| {
+            // The emitted program is complete; the cache is dead weight
+            // whose release need not delay it.
+            crate::mir_emit::par::drop_in_background(cache);
+            emit
+        })
     }
 }
 
@@ -199,12 +201,15 @@ pub struct EmitTarget<'a> {
     /// prune to what the project reaches. `None` for a single source.
     pub project_root: Option<&'a str>,
     pub renderer: RendererTarget,
+    /// Keep per-body cost records ([`crate::mir_emit::FullEmit::with_attribution`]).
+    pub attribution: bool,
 }
 
 impl EmitTarget<'_> {
     pub const SINGLE_SOURCE: EmitTarget<'static> = EmitTarget {
         project_root: None,
         renderer: RendererTarget::Gl,
+        attribution: false,
     };
 }
 

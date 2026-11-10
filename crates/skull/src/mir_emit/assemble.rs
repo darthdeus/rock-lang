@@ -158,7 +158,7 @@ impl Assembly {
             self.always_emitted_names.extend(u.global_names);
             self.code_artifact.merge(u.code_artifact);
             self.allocation_bodies.extend(u.allocation_bodies);
-            self.attribution.add_unit(&u.attribution);
+            self.attribution.add_body(&u.attribution, Some(&u.lua));
             self.times.add(&u.times);
         }
     }
@@ -344,7 +344,8 @@ impl Assembly {
                     .insert(key, chunk.direct_globals.clone());
                 self.direct_calls.insert(key, chunk.direct_calls.clone());
                 self.times.add(&chunk.times);
-                self.attribution.add_unit(&chunk.attribution);
+                self.attribution
+                    .add_body(&chunk.attribution, emit_def.then_some(chunk.lua.as_str()));
                 if emit_def {
                     self.emits_main |= key.as_str() == "main";
                     definitions.push_chunk(chunk);

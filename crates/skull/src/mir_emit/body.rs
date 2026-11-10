@@ -274,6 +274,7 @@ pub(super) fn emit_body_chunk_with_mutation(
     attribution.hir_nodes =
         hir_nodes_for_owner(ws, self_ref.module, BodyOwner::Function(self_ref.func));
     attribution.mir_instructions = mf.insts.len();
+    attribution.mir_lowered = mf.insts.len();
     attribution.lower_facts = mf.lower_attribution.clone();
     attribution.consumer_instance = ordinary_instance
         .clone()
@@ -785,6 +786,7 @@ pub(super) fn emit_spec_chunk(
         examined: true,
         hir_nodes: hir_nodes_for_owner(ws, fref.module, BodyOwner::Function(fref.func)),
         mir_instructions: mf.insts.len(),
+        mir_lowered: mf.insts.len(),
         lower_facts: mf.lower_attribution.clone(),
         consumer_instance: Some((body.clone(), LoweredInstanceKind::Specialized)),
         lowered_instance: (!canonical_reused)
@@ -976,7 +978,7 @@ pub(super) fn emit_specialized_callees(
         out.push_chunk(chunk);
         binds.extend(chunk.binds.iter().cloned());
         allocation_bodies.extend(chunk.allocation_bodies.iter().cloned());
-        attribution.add_unit(&chunk.attribution);
+        attribution.add_body(&chunk.attribution, Some(&chunk.lua));
         times.add(&chunk.times);
         // A specialized definition's `static` cells are cells the program uses,
         // so they register for hot-reload preservation on the same terms as a

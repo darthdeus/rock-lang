@@ -39,6 +39,10 @@ memchr = { workspace = true }
 rustc-hash = { workspace = true }
 rayon = { workspace = true }
 
+[target.'cfg(unix)'.dependencies]
+# The per-thread CPU clock that attributed builds read per body.
+libc = "0.2"
+
 [dev-dependencies]
 rock-host = { workspace = true }
 rock-stdlib = { workspace = true }

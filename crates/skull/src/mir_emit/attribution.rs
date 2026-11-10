@@ -61,6 +61,63 @@ pub struct EmitAttribution {
     pub regalloc: AttributionPhase,
     pub stringify: AttributionPhase,
     pub top_bodies: Vec<BodyAttributionOwner>,
+    /// One record per body assembly folded, in fold order.
+    pub bodies: Vec<BodyCost>,
+}
+
+/// The source definition an emitted body belongs to.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BodySource {
+    #[default]
+    Unknown,
+    Function(FuncRef),
+    Global(ModuleId, Idx<bone_semantic::hir::GlobalDef>),
+    Decorator(ModuleId, Idx<bone_semantic::hir::DecoratorDef>),
+}
+
+/// One callee spliced into a body: how often, and the callee instructions
+/// copied in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpliceCost {
+    pub callee: FuncRef,
+    pub count: usize,
+    pub instructions: usize,
+}
+
+/// One emitted body's own costs. Stage times are elapsed time on the worker
+/// that built the body, the same quantity the compile budget sums per pass;
+/// `thread_cpu` is that worker's CPU time for the whole body where the
+/// fan-out measured it.
+#[derive(Clone, Debug, Default)]
+pub struct BodyCost {
+    pub source: BodySource,
+    /// A specialization's Lua name; empty for a declaration's own body.
+    pub symbol: String,
+    /// Whether the body's text is in the output (assembly can drop one).
+    pub emitted: bool,
+    /// Lowering reused the inline candidate's body instead of lowering again.
+    pub canonical_reused: bool,
+    pub thread_cpu: Option<Duration>,
+    pub lower: Duration,
+    pub inline: Duration,
+    pub cleanup: Duration,
+    pub closure: Duration,
+    pub counted_loop: Duration,
+    pub hoisted_inline: Duration,
+    pub validation: Duration,
+    /// Lua printing, register allocation included.
+    pub emit: Duration,
+    pub regalloc: Duration,
+    pub hir_nodes: usize,
+    /// MIR instructions lowering produced, before any splice.
+    pub mir_lowered: usize,
+    /// Live MIR instructions entering and leaving cleanup, summed over the
+    /// body's cleanup runs: after splicing, and as printed.
+    pub mir_inlined: usize,
+    pub mir_final: usize,
+    pub splices: Vec<SpliceCost>,
+    pub lua_bytes: usize,
+    pub lua_lines: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -329,6 +386,9 @@ impl InlineWork {
 #[derive(Default, Clone)]
 pub(super) struct UnitAttribution {
     pub(super) owner: String,
+    pub(super) source: BodySource,
+    pub(super) mir_lowered: usize,
+    pub(super) thread_cpu: Option<Duration>,
     pub(super) examined: bool,
     pub(super) times: PhaseTimes,
     pub(super) hir_nodes: usize,
@@ -507,6 +567,22 @@ impl skull_transform::body_chain::PassObserver for ChainStats<'_> {
     }
 }
 
+/// The calling thread's CPU time; zero where the platform has no such clock.
+pub(super) fn thread_cpu_time() -> Duration {
+    #[cfg(unix)]
+    {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY: `ts` is a valid, writable timespec for the call's duration.
+        if unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) } == 0 {
+            return Duration::new(ts.tv_sec as u64, ts.tv_nsec as u32);
+        }
+    }
+    Duration::ZERO
+}
+
 fn duration_us(duration: Duration) -> u64 {
     duration.as_micros().max(1) as u64
 }
@@ -547,7 +623,63 @@ fn finish_distribution(phase: &mut AttributionPhase, samples: &mut [u64]) {
 }
 
 impl AttributionAccumulator {
-    pub(super) fn add_unit(&mut self, unit: &UnitAttribution) {
+    /// Fold one body and keep its cost record; `lua` is its text, or `None`
+    /// when assembly drops the body.
+    pub(super) fn add_body(&mut self, unit: &UnitAttribution, lua: Option<&str>) {
+        if !self.enabled || !unit.examined {
+            return;
+        }
+        self.add_unit(unit);
+        let times = &unit.times;
+        let source = match (&unit.source, &unit.consumer_instance) {
+            (BodySource::Unknown, Some((instance, _))) => BodySource::Function(instance.func),
+            (source, _) => *source,
+        };
+        let specialized = matches!(
+            unit.consumer_instance,
+            Some((_, LoweredInstanceKind::Specialized))
+        );
+        let mut splices: Vec<SpliceCost> = unit
+            .inline
+            .owners
+            .iter()
+            .map(|(callee, (count, instructions, ..))| SpliceCost {
+                callee: *callee,
+                count: *count,
+                instructions: *instructions,
+            })
+            .collect();
+        splices.sort_by_key(|s| (s.callee.module.index(), u32::from(s.callee.func.into_raw())));
+        self.result.bodies.push(BodyCost {
+            source,
+            symbol: if specialized {
+                unit.owner.clone()
+            } else {
+                String::new()
+            },
+            emitted: lua.is_some(),
+            canonical_reused: unit.canonical_reused,
+            thread_cpu: unit.thread_cpu,
+            lower: times.lower,
+            inline: times.inline,
+            cleanup: times.cleanup,
+            closure: times.closure,
+            counted_loop: times.counted_loop,
+            hoisted_inline: times.hoisted_inline,
+            validation: times.validation,
+            emit: times.emit,
+            regalloc: times.regalloc,
+            hir_nodes: unit.hir_nodes,
+            mir_lowered: unit.mir_lowered,
+            mir_inlined: unit.inline.cleanup_live_before,
+            mir_final: unit.inline.cleanup_live_after,
+            splices,
+            lua_bytes: lua.map_or(0, str::len),
+            lua_lines: lua.map_or(0, |lua| lua.lines().count()),
+        });
+    }
+
+    fn add_unit(&mut self, unit: &UnitAttribution) {
         if !self.enabled || !unit.examined {
             return;
         }

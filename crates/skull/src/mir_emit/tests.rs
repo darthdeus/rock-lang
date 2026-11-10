@@ -828,6 +828,57 @@ fn main() { let result = first() }
     }
 
     #[test]
+    fn attribution_keeps_one_cost_record_per_emitted_body() {
+        let _inline = InlineOn::on();
+        let ws = specialized_workspace();
+        let mid = module_id(&ws, "<specialized-test>");
+        let func = |name: &str| FuncRef {
+            module: mid,
+            func: ws
+                .module(mid)
+                .functions
+                .iter()
+                .find(|(_, f)| f.name == Ustr::from(name))
+                .map(|(id, _)| id)
+                .expect("fixture function"),
+        };
+        let (plain, _) = FullEmit::program().run(&ws, mid).expect("plain emission");
+        assert!(plain.attribution.bodies.is_empty());
+        let (emit, _) = FullEmit::program()
+            .with_attribution()
+            .run(&ws, mid)
+            .expect("attributed emission");
+        let bodies = &emit.attribution.bodies;
+        let top = bodies
+            .iter()
+            .find(|b| b.source == BodySource::Function(func("top")))
+            .expect("a record for top");
+        assert!(top.emitted && top.symbol.is_empty());
+        assert!(top.lua_bytes > 0 && top.lua_lines > 0);
+        assert!(top.mir_lowered > 0);
+        let generic = bodies
+            .iter()
+            .find(|b| b.source == BodySource::Function(func("generic")))
+            .expect("a record for the specialization of generic");
+        assert!(generic.emitted && !generic.symbol.is_empty());
+        assert!(
+            generic
+                .splices
+                .iter()
+                .any(|s| s.callee == func("bump") && s.count == 1 && s.instructions > 0),
+            "{:?}",
+            generic.splices
+        );
+        let emitted: usize = bodies
+            .iter()
+            .filter(|b| b.emitted)
+            .map(|b| b.lua_bytes)
+            .sum();
+        assert!(emitted <= emit.lua.len());
+        assert_eq!(plain.lua, emit.lua);
+    }
+
+    #[test]
     fn concrete_result_order_preserves_emitted_lua_bytes() {
         let _inline = InlineOn::on();
         let ws = workspace();

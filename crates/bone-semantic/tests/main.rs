@@ -3,6 +3,7 @@
 mod cw7_macro_namespace_kind;
 mod default_type_params;
 mod enum_variant_spans;
+mod module_timings;
 mod operator_table;
 mod query_generation;
 mod stdlib_base;

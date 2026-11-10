@@ -194,3 +194,62 @@ fn without_the_variable_nothing_is_written() {
     );
     assert!(!root.path().join("stats.jsonl").exists());
 }
+
+/// `ROCK_BODY_COSTS=<file>` writes one record per emitted body, named by its
+/// source definition, and leaves the output unchanged.
+#[test]
+fn body_costs_name_each_body_by_its_source_definition() {
+    let root = project();
+    let costs = root.path().join("costs.jsonl");
+    let attributed = root.path().join("attributed.lua");
+    let out = Command::new(env!("CARGO_BIN_EXE_rock"))
+        .current_dir(root.path())
+        .args(["compile", ".", "--output"])
+        .arg(&attributed)
+        .env("ROCK_DIR", root.path())
+        .env("ROCK_INVOCATION_LOG", "off")
+        .env("ROCK_BODY_COSTS", &costs)
+        .env_remove("ROCK_COMPILE_STATS")
+        .env_remove("ROCK_STDLIB_DIR")
+        .output()
+        .expect("start rock");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let plain = root.path().join("plain.lua");
+    let stats = root.path().join("stats.jsonl");
+    assert!(compile(root.path(), &stats, &plain).status.success());
+    assert_eq!(
+        std::fs::read(&plain).unwrap(),
+        std::fs::read(&attributed).unwrap()
+    );
+    let records: Vec<serde_json::Value> = std::fs::read_to_string(&costs)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("one JSON record per line"))
+        .collect();
+    let main = records
+        .iter()
+        .find(|r| r["name"].as_str().unwrap_or("").ends_with("main::main"))
+        .unwrap_or_else(|| panic!("no record for main: {records:?}"));
+    assert!(main["file"].as_str().unwrap().ends_with("main.rock"));
+    assert_eq!(main["kind"], "function");
+    assert_eq!(main["symbol"], "main");
+    assert_eq!(main["line"], 6);
+    assert_eq!(main["emitted"], true);
+    assert!(main["lua_bytes"].as_u64().unwrap() > 0);
+    assert!(main["lua_lines"].as_u64().unwrap() > 0);
+    assert!(main["mir_lowered"].as_u64().unwrap() > 0);
+    assert!(main["lower_ns"].as_u64().is_some());
+    assert!(main["thread_cpu_ns"].as_u64().is_some());
+    assert_eq!(main["record"], "body");
+    assert!(
+        records.iter().any(|r| r["record"] == "module"
+            && r["pass"] == "infer functions"
+            && r["file"].as_str().unwrap().ends_with("util.rock")
+            && r["elapsed_ns"].as_u64().is_some()),
+        "no inference time for util.rock"
+    );
+}

@@ -1392,6 +1392,7 @@ fn skull_build_package_with_limit(
     let target = skull::pipeline::EmitTarget {
         project_root: None,
         renderer: skull::mir_emit::RendererTarget::Gl,
+        attribution: false,
     };
     let skull::pipeline::Compiled {
         ws, emission: emit, ..
@@ -2219,9 +2220,11 @@ fn skull_emit_project_with_inputs(
         comptime: CliComptime::Resolved(Some(inputs)),
         prepare_timings: Vec::new(),
     };
+    let body_costs = crate::body_costs::begin();
     let target = skull::pipeline::EmitTarget {
         project_root: Some(dir),
         renderer: skull::mir_emit::RendererTarget::Gl,
+        attribution: body_costs.is_some(),
     };
     let compiled = skull::pipeline::compile_modules(modules, entry_file, target, &mut host);
     let skull::pipeline::Compiled {
@@ -2248,6 +2251,12 @@ fn skull_emit_project_with_inputs(
             crate::invocation_log::exit(1);
         }
     };
+    if let Some(path) = body_costs
+        && let Err(e) = crate::body_costs::write(&path, &ws, &emit.attribution)
+    {
+        log::error!(target: "SKULL", "cannot write body costs to {}: {:#}", path.display(), e);
+        crate::invocation_log::exit(1);
+    }
     let allocation_report_path = allocation_report_path_from_env();
     if let Err(e) =
         write_allocation_report(allocation_report_path.as_deref(), &emit.allocation_report)

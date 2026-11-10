@@ -15,6 +15,7 @@ pub(super) fn emit_decorator_unit(
     let d = &ws.module(mid).decorators[did];
     let deco_name = decorator_symbol(d.def_key.as_str());
     out.attribution.owner = format!("m{}:deco{}", mid.index(), u32::from(did.into_raw()));
+    out.attribution.source = BodySource::Decorator(mid, did);
     let tl = Instant::now();
     let owner = skull_mir::concrete::ConcreteOwner::Decorator {
         module: mid,
@@ -40,6 +41,7 @@ pub(super) fn emit_decorator_unit(
             out.attribution.examined = true;
             out.attribution.hir_nodes = hir_nodes_for_owner(ws, mid, BodyOwner::Decorator(did));
             out.attribution.mir_instructions = mf.insts.len();
+            out.attribution.mir_lowered = mf.insts.len();
             out.attribution.lower_facts = mf.lower_attribution.clone();
             out.times.lower_work = out.attribution.mir_instructions > 0;
             // Decorator bodies can carry lambdas too -- convert like an ordinary fn.

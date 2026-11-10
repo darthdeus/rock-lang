@@ -832,6 +832,7 @@ fn emit_full_chunks<'a>(
     concrete: &crate::concrete_body::ConcreteBodies,
     lua_view: &crate::artifact::ArtifactView,
     mutation: BodyMutation,
+    attribution: bool,
     setup_phases: &mut SetupPhases,
 ) -> Result<
     (
@@ -873,7 +874,8 @@ fn emit_full_chunks<'a>(
             None,
         )
     })?;
-    let queue = SpecQueue::new(ws, scx, graph, None);
+    let mut queue = SpecQueue::new(ws, scx, graph, None);
+    queue.thread_cpu = attribution;
     #[cfg(test)]
     if let Some(hook) = queue.hook() {
         for job in &jobs {
@@ -896,7 +898,8 @@ fn emit_full_chunks<'a>(
                 let mut demanded = Vec::new();
                 match job {
                     FanOutJob::Body(at, self_ref, f) => {
-                        let chunk = emit_body_chunk_with_mutation(
+                        let started = attribution.then(thread_cpu_time);
+                        let mut chunk = emit_body_chunk_with_mutation(
                             ws,
                             cg,
                             scx,
@@ -906,6 +909,10 @@ fn emit_full_chunks<'a>(
                             inline_cache,
                             mutation,
                         );
+                        if let (Some(started), Ok(chunk)) = (started, &mut chunk) {
+                            chunk.attribution.thread_cpu =
+                                Some(thread_cpu_time().saturating_sub(started));
+                        }
                         #[cfg(test)]
                         if let Some(hook) = queue.hook() {
                             hook.finished(&mangle_fn(ws, f));
@@ -1094,6 +1101,7 @@ pub(super) fn emit_full_build(
                 &concrete,
                 &lua_view,
                 mutation,
+                attribution,
                 &mut setup_phases,
             )
         },

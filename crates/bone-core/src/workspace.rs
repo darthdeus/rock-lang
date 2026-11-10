@@ -5,6 +5,11 @@
 use crate::hir::*;
 use crate::prelude::*;
 
+/// Record [`Workspace::module_timings`]; set by a host that reports source
+/// costs, off otherwise so a compile pays nothing.
+pub static MODULE_TIMINGS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 #[derive(Clone, Debug)]
 pub struct Workspace {
     pub modules: Vec<Module>,
@@ -66,6 +71,9 @@ pub struct Workspace {
     pub decorator_names: FxHashSet<Ustr>,
 
     pub phase_timings: Vec<(&'static str, Duration)>,
+    /// Per-module time of the front-end passes that run module by module,
+    /// recorded only while [`MODULE_TIMINGS`] is set.
+    pub module_timings: Vec<(ModuleId, &'static str, Duration)>,
 
     /// Count of function bodies actually re-inferred (check_function run, NOT
     /// reused) since the last reset. `check_module_incremental` bumps it on the
@@ -225,6 +233,7 @@ impl Workspace {
             decorator_names: Default::default(),
 
             phase_timings: Default::default(),
+            module_timings: Default::default(),
 
             reinferred_body_count: Default::default(),
             relowered_body_count: Default::default(),

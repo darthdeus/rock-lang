@@ -32,6 +32,7 @@ pub use ustr::Ustr;
 pub(crate) mod allocation_join;
 pub mod allocator;
 pub(crate) mod backend_stats;
+pub(crate) mod body_costs;
 pub mod bone_backend;
 pub mod child_lifetime;
 pub mod common;
