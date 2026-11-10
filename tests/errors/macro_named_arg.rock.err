@@ -31,3 +31,18 @@ macro three(a: expr, b: expr = 2, c: expr = 3) -> int { a + b + c }
 fn main() {
     let _ = three(1, 2, a: 3)   // ERROR: `a` already filled positionally
 }
+
+//=== TEST CASE: label_reported_before_namespace_errors_Rejected ===
+//! expect: no parameter named `zzz`
+// The label gate reads the un-expanded trees beside the namespace build; its
+// diagnostic still comes first. Defining a stdlib name keeps the whole
+// module set in that pass instead of the shared stdlib base.
+use stone::engine::State;
+
+fn print(a: int, b: int, c: int, d: int) {}
+
+macro three(a: expr, b: expr = 2, c: expr = 3) -> int { a + b + c }
+
+fn main() {
+    let _ = three(1, zzz: 3)
+}

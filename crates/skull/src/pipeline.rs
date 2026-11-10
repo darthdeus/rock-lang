@@ -56,8 +56,11 @@ pub fn semantic_pass(
     aliases: &NsAliases,
     gate: ClosureGate,
 ) -> Result<Workspace, CompilerError> {
-    let mut ws =
-        bone_semantic::semantic_passes::semantic_pass_without_closure_gate(modules, aliases)?;
+    let ws = bone_semantic::semantic_passes::semantic_pass_without_closure_gate(modules, aliases)?;
+    apply_closure_gate(ws, gate)
+}
+
+fn apply_closure_gate(mut ws: Workspace, gate: ClosureGate) -> Result<Workspace, CompilerError> {
     if gate == ClosureGate::Enforce {
         let timer = bone_core::prelude::Instant::now();
         bone_semantic::semantic_passes::pass_validate_api_closure(&ws)?;
@@ -81,22 +84,27 @@ pub fn check_modules(
     if !syntax.is_empty() {
         return Err(syntax);
     }
-    // Macro names must be unique against function names (call-position
-    // ambiguity), and a macro argument label must name a parameter: both are
-    // checked before expansion drops the macro defs and the labels.
-    let macro_dupes = skull_parser::check_macro_name_uniqueness(modules.iter());
-    if !macro_dupes.is_empty() {
-        return Err(macro_dupes);
-    }
-    let macro_labels = skull_parser::check_macro_call_labels(modules.iter());
-    if !macro_labels.is_empty() {
-        return Err(macro_labels);
-    }
     let gates_time = gates_timer.elapsed();
     let aliases_timer = bone_core::prelude::Instant::now();
-    let aliases = aliases(modules).map_err(|error| vec![error])?;
+    let aliases = match aliases(modules) {
+        Ok(aliases) => aliases,
+        Err(error) => {
+            let macro_errors = macro_gates(&modules.iter().collect::<Vec<_>>());
+            return Err(if macro_errors.is_empty() {
+                vec![error]
+            } else {
+                macro_errors
+            });
+        }
+    };
     let aliases_time = aliases_timer.elapsed();
-    let ws = semantic_pass(modules, &aliases, gate);
+    let ws =
+        bone_semantic::semantic_passes::semantic_pass_after_gate(modules, &aliases, &macro_gates);
+    let ws = match ws {
+        Err(bone_semantic::semantic_passes::PassFailure::Gate(errors)) => return Err(errors),
+        Err(bone_semantic::semantic_passes::PassFailure::Pass(error)) => Err(error),
+        Ok(ws) => apply_closure_gate(ws, gate),
+    };
     // Expansion recovers: a macro that must not expand records the reason on
     // `recovery_errors` and leaves the call in place. That reason explains
     // any type error the unexpanded call caused, so it reports first.
@@ -111,6 +119,18 @@ pub fn check_modules(
     let errs = skull_mir::verdict::body_errors(&ws);
     ws.log_time("body verdict", timer);
     Ok((ws, errs))
+}
+
+/// The checks expansion would make impossible, since it drops the macro
+/// definitions and the argument labels. Macro names must be unique against
+/// function names (call-position ambiguity), and a macro argument label must
+/// name a parameter.
+fn macro_gates(modules: &[&Ast]) -> Vec<CompilerError> {
+    let macro_dupes = skull_parser::check_macro_name_uniqueness(modules.iter().copied());
+    if !macro_dupes.is_empty() {
+        return macro_dupes;
+    }
+    skull_parser::check_macro_call_labels(modules.iter().copied())
 }
 
 /// Modules the lint pass treats as warm (scanned, never reported): every

@@ -1199,8 +1199,46 @@ pub fn semantic_pass_without_closure_gate(
     modules: &mut ModuleSet,
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<Workspace, CompilerError> {
-    if let Some(pass) = crate::stdlib_base::semantic_pass(modules, aliases) {
-        return pass;
+    semantic_pass_after_gate(modules, aliases, &|_| Vec::new()).map_err(PassFailure::ungated)
+}
+
+/// A check of the un-expanded modules whose diagnostics come before any the
+/// semantic pass reports.
+pub type PreExpansionGate<'g> = &'g (dyn Fn(&[&Ast]) -> Vec<CompilerError> + Sync);
+
+/// Why [`semantic_pass_after_gate`] failed.
+#[derive(Debug)]
+pub enum PassFailure {
+    /// The gate's diagnostics: the pass reports nothing of its own then.
+    Gate(Vec<CompilerError>),
+    Pass(CompilerError),
+}
+
+impl PassFailure {
+    /// The pass's error, from a pass behind a gate that rejects nothing.
+    fn ungated(self) -> CompilerError {
+        match self {
+            PassFailure::Gate(_) => unreachable!("an empty gate rejects nothing"),
+            PassFailure::Pass(error) => error,
+        }
+    }
+}
+
+/// [`semantic_pass_without_closure_gate`] behind `gate`. The gate reads the
+/// modules before expansion, beside the namespace build.
+pub fn semantic_pass_after_gate(
+    modules: &mut ModuleSet,
+    aliases: &bone_core::modules::NsAliases,
+    gate: PreExpansionGate,
+) -> Result<Workspace, PassFailure> {
+    if crate::stdlib_base::applies(modules) {
+        let errors = gate(&modules.iter().collect_vec());
+        if !errors.is_empty() {
+            return Err(PassFailure::Gate(errors));
+        }
+        if let Some(pass) = crate::stdlib_base::semantic_pass(modules, aliases) {
+            return pass.map_err(PassFailure::Pass);
+        }
     }
     let timer = Instant::now();
     let owned = modules.make_owned();
@@ -1209,7 +1247,7 @@ pub fn semantic_pass_without_closure_gate(
         ..Workspace::default()
     };
     ws.log_time("own stdlib", timer);
-    semantic_pass_into(ws, owned, aliases)
+    semantic_pass_into_after_gate(ws, owned, aliases, gate)
 }
 
 /// [`semantic_pass`] enforcing identity storage in unpackaged files: the bone
@@ -1237,33 +1275,51 @@ pub fn semantic_pass_enforcing_identity_storage_with_aliases(
 }
 
 pub fn semantic_pass_into(
-    mut ws: Workspace,
+    ws: Workspace,
     rock_modules: &mut [Ast],
     aliases: &bone_core::modules::NsAliases,
 ) -> Result<Workspace, CompilerError> {
+    semantic_pass_into_after_gate(ws, rock_modules, aliases, &|_| Vec::new())
+        .map_err(PassFailure::ungated)
+}
+
+fn semantic_pass_into_after_gate(
+    mut ws: Workspace,
+    rock_modules: &mut [Ast],
+    aliases: &bone_core::modules::NsAliases,
+    gate: PreExpansionGate,
+) -> Result<Workspace, PassFailure> {
     let _span = tracing::info_span!("bone_semantic_pass").entered();
 
     let timer = Instant::now();
     let namespaces = NamespaceInput::read(&*rock_modules);
     // Building the namespace tree is mostly serial and reads only what
-    // `read` took from the trees, so macro expansion and desugaring rewrite
-    // the trees beside it.
-    let (built, namespaces_time) = par_join(
+    // `read` took from the trees, so the gate, macro expansion and
+    // desugaring run beside it.
+    let ((built, namespaces_time), gate_errors) = par_join(
         || {
             let built = namespaces.build(&mut ws, aliases);
             (built, timer.elapsed())
         },
-        || expand_and_desugar_trees(rock_modules),
-    )
-    .0;
-    built?;
+        || {
+            let gate_errors = gate(&rock_modules.iter().collect_vec());
+            if gate_errors.is_empty() {
+                expand_and_desugar_trees(rock_modules);
+            }
+            gate_errors
+        },
+    );
+    if !gate_errors.is_empty() {
+        return Err(PassFailure::Gate(gate_errors));
+    }
+    built.map_err(PassFailure::Pass)?;
     // Expansion overlaps the namespace build; only what outlasts it adds wall.
     ws.phase_timings.push(("namespaces", namespaces_time));
     ws.phase_timings.push((
         "macro_expand",
         timer.elapsed().saturating_sub(namespaces_time),
     ));
-    lower_and_infer(&mut ws, rock_modules)?;
+    lower_and_infer(&mut ws, rock_modules).map_err(PassFailure::Pass)?;
 
     Ok(ws)
 }

@@ -212,6 +212,14 @@ impl StdlibBase {
     }
 }
 
+/// Whether [`semantic_pass`] may start from the shared stdlib: `modules`
+/// begins with it and no user module can change it. `semantic_pass` can
+/// still decline when the stdlib base cannot be built.
+pub(crate) fn applies(modules: &ModuleSet) -> bool {
+    skull_parser::stdlib::is_process_stdlib(modules.shared())
+        && names().is_some_and(|names| modules.rest().iter().all(|user| names.admits(user)))
+}
+
 /// The semantic pass over `modules` from the shared stdlib base, or `None`
 /// when it does not apply: the shared prefix of `modules` must be the process
 /// stdlib itself ([`skull_parser::stdlib::is_process_stdlib`]) and every
@@ -222,11 +230,7 @@ pub(crate) fn semantic_pass(
     modules: &mut ModuleSet,
     aliases: &bone_core::modules::NsAliases,
 ) -> Option<Result<Workspace, CompilerError>> {
-    if !skull_parser::stdlib::is_process_stdlib(modules.shared()) {
-        return None;
-    }
-    let names = names()?;
-    if !modules.rest().iter().all(|user| names.admits(user)) {
+    if !applies(modules) {
         return None;
     }
     let base_timer = Instant::now();
