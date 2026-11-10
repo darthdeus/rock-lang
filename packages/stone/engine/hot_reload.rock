@@ -29,6 +29,38 @@ inline(lua) fn __hot_reload_enabled() -> bool = """
     return os.getenv("STONE_HOT_RELOAD") == "1"
 """
 
+// The watcher acknowledges only at a boundary where it cannot replace the
+// child. The game stops loading overlays immediately, including ones already
+// being compiled when the user requested the hold.
+pub inline(lua) fn stone_reload_hold(held: bool) -> bool = """
+    local path = os.getenv("STONE_RELOAD_CONTROL")
+    if not path then return false end
+    if held then
+        local f, err = io.open(path, "w")
+        if not f then error(err) end
+        _G.__stone_reload_request_seq = (_G.__stone_reload_request_seq or 0) + 1
+        assert(f:write(tostring(_G.__stone_reload_request_seq))); assert(f:close())
+    else
+        local f = io.open(path, "r")
+        if f then f:close(); assert(os.remove(path)) end
+    end
+    return true
+"""
+
+pub inline(lua) fn stone_reload_hold_status() -> string = """
+    local path = os.getenv("STONE_RELOAD_CONTROL")
+    if not path then return "unavailable" end
+    local f = io.open(path, "r")
+    if not f then return "watching" end
+    local requested = f:read("*a")
+    f:close()
+    local ack = io.open(path:gsub("%.hold$", ".held"), "r")
+    if not ack then return "holding" end
+    local acknowledged = ack:read("*a")
+    ack:close()
+    return acknowledged == requested and "held" or "holding"
+"""
+
 // The identity the compiler stamps as line 1 of a game main.lua
 // (`skull_backend::skull_game_preamble`). Empty for a chunk carrying no such
 // line, which `hot_reload_chunk_is_ours` treats as foreign. The literal is
@@ -67,6 +99,8 @@ fn check_hot_reload() {
     // script pushed to disk is watchable, and a baked-in chunk simply has no
     // path to resolve.
     if !__hot_reload_enabled() { return }
+    let hold = stone_reload_hold_status()
+    if hold == "holding" || hold == "held" { return }
 
     // Get the path of the current script on first run
     if hot_reload_script_path == "" {
