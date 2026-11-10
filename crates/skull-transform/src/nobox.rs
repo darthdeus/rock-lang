@@ -156,6 +156,20 @@ pub fn flatten_nobox_nested_ctors(
     ws: &Workspace,
     func: &mut MirFunc,
 ) -> Result<bool, CompilerError> {
+    // Every target's tree holds a nobox ctor, which is itself a block inst, and
+    // almost no body has one: most bodies skip the inner-operand set entirely.
+    let any_nobox = func.blocks.iter().any(|(_, b)| {
+        b.insts.iter().any(|&i| match &func.insts[i] {
+            Inst::MakeValueStruct { name, .. } | Inst::MaterializeValueStruct { name, .. } => ws
+                .struct_by_name
+                .get(name)
+                .is_some_and(|sid| ws.modules[sid.module.index()].structs[sid.def].is_nobox),
+            _ => false,
+        })
+    });
+    if !any_nobox {
+        return Ok(false);
+    }
     let all: Vec<Idx<Inst>> = func
         .blocks
         .iter()

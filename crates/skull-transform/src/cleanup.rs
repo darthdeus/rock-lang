@@ -228,11 +228,18 @@ pub(crate) fn cleanup_in(ws: Option<&Workspace>, func: &mut MirFunc) -> Result<(
 pub(crate) fn drop_f32_rounding_into_float_views(func: &mut MirFunc) -> bool {
     let float_view = skull_mir::lower::leaf_view_field("float");
     let mut changed = false;
-    let insts: Vec<Idx<Inst>> = func
-        .blocks
-        .iter()
-        .flat_map(|(_, b)| b.insts.iter().copied())
-        .collect();
+    let mut insts: Vec<Idx<Inst>> = Vec::new();
+    for (_, b) in func.blocks.iter() {
+        insts.extend(b.insts.iter().copied().filter(|&i| {
+            matches!(
+                func.insts[i],
+                Inst::StoreIndex {
+                    kind: ContainerKind::NativeBufferLeaf,
+                    ..
+                }
+            )
+        }));
+    }
     for i in insts {
         let Inst::StoreIndex {
             base,
