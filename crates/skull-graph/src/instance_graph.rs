@@ -798,9 +798,12 @@ pub struct InstanceGraph {
     /// The primary records. Every flat field below is derived from these plus
     /// [`Self::root_instances`]; nothing writes a flat field directly.
     pub contributions: BTreeMap<Owner, Contribution>,
-    /// The keys of `contributions`, hashed: the walk asks whether a reached
-    /// instance already has one once per reached row.
-    contributed: FxHashSet<Owner>,
+    /// The instance keys of `contributions`, hashed: the walk asks whether a
+    /// reached instance already has one once per reached row, and keying by
+    /// the instance lets it ask without building an owner.
+    contributed: FxHashSet<Instance>,
+    /// The always-emitted keys of `contributions`.
+    contributed_always: FxHashSet<(ModuleId, BodyOwner)>,
     /// Instances production roots regardless of any call. A reachability walk
     /// starts here and at every always-emitted target.
     pub root_instances: BTreeSet<Instance>,
@@ -1815,6 +1818,7 @@ impl InstanceGraph {
             interner,
             contributions: BTreeMap::new(),
             contributed: FxHashSet::default(),
+            contributed_always: FxHashSet::default(),
             lost: BTreeSet::new(),
             root_instances: BTreeSet::new(),
             instances: BTreeSet::new(),
@@ -1970,7 +1974,7 @@ impl InstanceGraph {
         let mut same_frontier_marks: FxHashSet<Owner> = FxHashSet::default();
         let initially_forced: FxHashSet<Owner> = pending
             .iter()
-            .filter(|owner| self.contributed.contains(*owner))
+            .filter(|owner| self.is_contributed(owner))
             .cloned()
             .collect();
         let mut first_pass_seen: FxHashSet<Owner> = FxHashSet::default();
@@ -2175,7 +2179,7 @@ impl InstanceGraph {
             let mut stale: Vec<Owner> = walked_with
                 .iter()
                 .filter(|(i, used)| {
-                    self.contributed.contains(&Owner::Instance((*i).clone()))
+                    self.contributed.contains(*i)
                         && self.bound_tree(i).unwrap_or(&InstanceBoundTree::default()) != *used
                 })
                 .map(|(i, _)| Owner::Instance(i.clone()))
@@ -2439,7 +2443,7 @@ impl InstanceGraph {
         track_incremental_state: bool,
     ) -> (Vec<Owner>, InstallTiming) {
         let uninstall_start = timing_enabled.then(Instant::now);
-        let replaced = self.contributed.contains(&owner);
+        let replaced = self.is_contributed(&owner);
         if track_incremental_state && owner.instance().is_none() {
             if let Some(old) = self.contributions.get(&owner) {
                 self.last_run_always_targets
@@ -2448,12 +2452,17 @@ impl InstanceGraph {
             self.last_run_always_targets
                 .extend(c.always_emitted_targets.iter().cloned());
         }
-        let root_hole_rows_retracted = self
-            .contributions
-            .get(&owner)
-            .map(|c| c.always_emitted_holes.len())
-            .unwrap_or(0);
-        self.uninstall(&owner);
+        let root_hole_rows_retracted = if replaced {
+            let rows = self
+                .contributions
+                .get(&owner)
+                .map(|c| c.always_emitted_holes.len())
+                .unwrap_or(0);
+            self.uninstall(&owner);
+            rows
+        } else {
+            0
+        };
         if track_incremental_state && replaced {
             self.last_run_retracted.insert(owner.clone());
         }
@@ -2562,8 +2571,6 @@ impl InstanceGraph {
         // so a body that reaches ITSELF -- any recursive function -- would
         // otherwise find itself absent at the moment it asked and re-walk
         // forever.
-        // `expand` folded repeated callees and ordered the rows by instance.
-        let reached: Vec<Instance> = c.reached.iter().map(|(to, _)| to.clone()).collect();
         for (name, failure) in &c.always_emitted_holes {
             self.root_hole_dirty_names.insert(name.clone());
             self.root_hole_sites
@@ -2574,7 +2581,14 @@ impl InstanceGraph {
                 .push(failure.clone());
         }
         self.add_contribution_counters(&c);
-        self.contributed.insert(owner.clone());
+        self.mark_contributed(&owner);
+        // `expand` folded repeated callees and ordered the rows by instance.
+        let demanded: Vec<Owner> = c
+            .reached
+            .iter()
+            .filter(|(to, _)| !self.contributed.contains(to))
+            .map(|(to, _)| Owner::Instance(to.clone()))
+            .collect();
         self.contributions.insert(owner.clone(), c);
         if disagreed {
             // Rare, and only an invalid program: deciding between the sides
@@ -2590,11 +2604,6 @@ impl InstanceGraph {
                 }
             }
         }
-        let demanded: Vec<Owner> = reached
-            .into_iter()
-            .map(Owner::Instance)
-            .filter(|o| !self.contributed.contains(o))
-            .collect();
         index.commit_ns = elapsed_ns(lane_start);
         (
             demanded,
@@ -2611,6 +2620,22 @@ impl InstanceGraph {
     /// An index entry disappears when its last owner does, never when a count
     /// reaches zero: the owner SET is the record, so a stale fact cannot
     /// survive as a positive number nobody can check.
+    fn is_contributed(&self, owner: &Owner) -> bool {
+        match owner {
+            Owner::Instance(i) => self.contributed.contains(i),
+            Owner::AlwaysEmitted(module, body) => {
+                self.contributed_always.contains(&(*module, *body))
+            }
+        }
+    }
+
+    fn mark_contributed(&mut self, owner: &Owner) {
+        match owner {
+            Owner::Instance(i) => self.contributed.insert(i.clone()),
+            Owner::AlwaysEmitted(module, body) => self.contributed_always.insert((*module, *body)),
+        };
+    }
+
     fn uninstall(&mut self, owner: &Owner) {
         if !self.contributions.contains_key(owner) {
             return;
@@ -2621,7 +2646,10 @@ impl InstanceGraph {
             .contributions
             .remove(owner)
             .expect("presence was checked above");
-        self.contributed.remove(owner);
+        match owner {
+            Owner::Instance(i) => self.contributed.remove(i),
+            Owner::AlwaysEmitted(module, body) => self.contributed_always.remove(&(*module, *body)),
+        };
         self.subtract_contribution_counters(&old);
         for (name, _) in &old.always_emitted_holes {
             self.root_hole_dirty_names.insert(name.clone());
