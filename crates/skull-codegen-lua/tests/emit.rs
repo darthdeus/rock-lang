@@ -1459,16 +1459,12 @@ fn if_as_value_branch_and_cell_join() {
         ),
         "\
 function sign_int(c0)
- local r0
  if (c0 < (0)) then
  c0 = (0)
  else
  c0 = (1)
  end
- r0 = c0
- c0 = r0
- r0 = c0
- do return r0 end
+ do return c0 end
 end
 "
     );
@@ -1815,9 +1811,9 @@ fn dead_locals_are_nil_killed_after_their_last_use() {
         "live register killed before the branch:\n{lua}"
     );
     // A kill immediately before a plain `return` buys nothing (RET drops the
-    // frame): the load of `t` into the return register is followed by no kill.
-    let ret_load = at("r0 = c0");
-    assert_eq!(lines[ret_load + 1], "do return r0 end", "{lua}");
+    // frame): `t` is returned straight from its cell with no kill before it.
+    let ret = at("do return c0 end");
+    assert_eq!(ret, branch + 1, "{lua}");
 }
 
 /// A register declared inside a `for` block (a loop-scoped color) is only ever

@@ -18,6 +18,18 @@ impl Emitter<'_> {
                     });
                     return;
                 }
+                // Two cells that share a local make a copy between them a
+                // self-assignment. (Frame fields were handled above.)
+                if let Inst::Load(source) = self.func.insts[*value]
+                    && self.inlinable[raw(*value) as usize]
+                    && !self.cell_is_frame_field(source)
+                    && (source == *cell || {
+                        let color = self.cell_colors[raw(*cell) as usize];
+                        color != u32::MAX && color == self.cell_colors[raw(source) as usize]
+                    })
+                {
+                    return;
+                }
                 out.push(' ');
                 write_cellname(out, self.func, self.frame, self.cell_colors, *cell);
                 out.push_str(" = ");

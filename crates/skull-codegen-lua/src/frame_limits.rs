@@ -354,6 +354,19 @@ pub(crate) struct EmittedShape<'a> {
     /// Blocks whose `Term::Return` is replaced by a tail call, so the returned
     /// values never occupy registers of their own.
     pub(crate) return_replaced: &'a [bool],
+    /// Values rendered inside their single use instead of a local.
+    pub(crate) inlinable: Option<&'a [bool]>,
+}
+
+impl EmittedShape<'static> {
+    /// No overrides: every call keeps its arguments and results.
+    const PLAIN: Self = EmittedShape {
+        emits_nothing: &[],
+        results_unassigned: &[],
+        fixed_arity_override: &[],
+        return_replaced: &[],
+        inlinable: None,
+    };
 }
 
 fn raw<T>(i: Idx<T>) -> usize {
@@ -380,6 +393,99 @@ fn statement_slots_upper_bound(inst: &Inst) -> usize {
     }
 }
 
+/// Whether the folded expression `value` renders a call anywhere in its tree.
+pub(crate) fn folded_call_within(func: &MirFunc, inlinable: &[bool], value: Idx<Inst>) -> bool {
+    if !inlinable[raw(value)] {
+        return false;
+    }
+    let inst = &func.insts[value];
+    if call_arity(func, &EmittedShape::PLAIN, value).is_some() {
+        return true;
+    }
+    let mut found = false;
+    inst.uses_each(&mut |v| found = found || folded_call_within(func, inlinable, v));
+    found
+}
+
+/// Slots, from the one it lands in upward, that evaluating `value` occupies.
+/// A value in a local or a constant needs only its landing slot. A folded
+/// call stacks its callee, frame link and arguments there, and an argument's
+/// own folded call stacks again from that argument's slot. Other folded
+/// expressions put each non-trivial operand but the last in a temporary.
+/// Spellings this does not see (a runtime helper behind an index) only make
+/// it lower, the direction the model may err in.
+fn folded_height(func: &MirFunc, shape: &EmittedShape<'_>, value: Idx<Inst>) -> usize {
+    let Some(inlinable) = shape.inlinable else {
+        return 1;
+    };
+    if !inlinable[raw(value)] || matches!(func.insts[value], Inst::Const(_) | Inst::Load(_)) {
+        return 1;
+    }
+    operand_height(func, shape, value).max(1)
+}
+
+/// Slots the statement or folded expression `id` stacks above the first free
+/// register, counting its folded operands.
+fn operand_height(func: &MirFunc, shape: &EmittedShape<'_>, id: Idx<Inst>) -> usize {
+    let inst = &func.insts[id];
+    if let Some(arity) = call_arity(func, shape, id) {
+        let mut height = CALL_BASE_SLOTS + arity;
+        if let Inst::CallValue { callee, .. } | Inst::CallValueMulti { callee, .. } = inst {
+            height = height.max(folded_height(func, shape, *callee));
+        }
+        let mut stack = |i: usize, arg: Idx<Inst>| {
+            if i < arity {
+                height = height.max(CALL_BASE_SLOTS + i + folded_height(func, shape, arg));
+            }
+        };
+        match inst {
+            Inst::Call { args, .. }
+            | Inst::CallMulti { args, .. }
+            | Inst::CallValue { args, .. }
+            | Inst::CallValueMulti { args, .. } => {
+                for (i, &arg) in args.iter().enumerate() {
+                    stack(i, arg);
+                }
+            }
+            Inst::MakeValueStruct { fields, .. } | Inst::MaterializeValueStruct { fields, .. } => {
+                for (i, &(_, arg)) in fields.iter().enumerate() {
+                    stack(i, arg);
+                }
+            }
+            _ => {}
+        }
+        return height;
+    }
+    let mut height = 0;
+    let mut temporaries = 0;
+    inst.uses_each(&mut |v| {
+        let own = folded_height(func, shape, v);
+        height = height.max(temporaries + own);
+        if shape.inlinable.is_some_and(|m| m[raw(v)])
+            && !matches!(func.insts[v], Inst::Const(_) | Inst::Load(_))
+        {
+            temporaries += 1;
+        }
+    });
+    height
+}
+
+/// Slots a terminator's operands stack above the first free register.
+fn terminator_height(func: &MirFunc, shape: &EmittedShape<'_>, term: &Term) -> usize {
+    let mut height = 0;
+    match term {
+        // `do return v0, .., vN end` discharges each value into its own
+        // register (`expr_list`).
+        Term::Return(values) => {
+            for (i, &v) in values.iter().enumerate() {
+                height = height.max(i + folded_height(func, shape, v));
+            }
+        }
+        _ => term.uses_each(&mut |v| height = height.max(folded_height(func, shape, v))),
+    }
+    height
+}
+
 /// Whether this function is so far under both caps that the exact model cannot
 /// possibly reject it. One allocation-free pass over the instructions, against
 /// an upper bound of what [`frame_overflow`] would compute:
@@ -395,24 +501,26 @@ pub(crate) fn fits_without_measuring(
     top_locals: usize,
     loop_count: usize,
     loop_scoped_locals: usize,
+    inlinable: &[bool],
 ) -> bool {
     let actives_upper = top_locals + loop_count * FOR_CONTROL_LOCALS + loop_scoped_locals;
     if actives_upper > LJ_MAX_LOCVAR {
         return false;
     }
+    let shape = EmittedShape {
+        inlinable: Some(inlinable),
+        ..EmittedShape::PLAIN
+    };
     let mut widest = 0usize;
-    for (_, inst) in func.insts.iter() {
-        let slots = statement_slots_upper_bound(inst);
-        if slots > widest {
-            widest = slots;
+    for (id, inst) in func.insts.iter() {
+        let mut slots = statement_slots_upper_bound(inst);
+        if !inlinable[raw(id)] {
+            slots = slots.max(operand_height(func, &shape, id));
         }
+        widest = widest.max(slots);
     }
     for (_, block) in func.blocks.iter() {
-        if let Term::Return(values) = &block.term
-            && values.len() > widest
-        {
-            widest = values.len();
-        }
+        widest = widest.max(terminator_height(func, &shape, &block.term));
     }
     actives_upper + widest <= FrameLimit::Slots.max_loadable()
 }
@@ -421,7 +529,7 @@ pub(crate) fn fits_without_measuring(
 /// CALL. `None` for every other form -- an unlisted form only makes the bound
 /// looser, never wrong.
 fn call_arity(func: &MirFunc, shape: &EmittedShape<'_>, id: Idx<Inst>) -> Option<usize> {
-    if let Some(fixed) = shape.fixed_arity_override[raw(id)] {
+    if let Some(&Some(fixed)) = shape.fixed_arity_override.get(raw(id)) {
         return Some(fixed);
     }
     Some(match &func.insts[id] {
@@ -496,8 +604,11 @@ pub(crate) fn frame_overflow(
             }
             let arity = call_arity(func, shape, id);
             let received = receive_width(func, shape, id);
-            let cost = arity.map_or(0, |n| CALL_BASE_SLOTS + n).max(received);
-            if cost == 0 {
+            let mut cost = arity.map_or(0, |n| CALL_BASE_SLOTS + n).max(received);
+            if shape.inlinable.is_some_and(|m| !m[raw(id)]) {
+                cost = cost.max(operand_height(func, shape, id));
+            }
+            if cost <= 1 {
                 continue;
             }
             wide.push((cost, id));
@@ -519,21 +630,26 @@ pub(crate) fn frame_overflow(
         }
         // `do return v0, .., vN end` discharges each value into its own
         // register (`expr_list`).
-        if !shape.return_replaced[raw(b)]
-            && let Term::Return(values) = &func.blocks[b].term
-            && values.len() > 1
-        {
+        let term = &func.blocks[b].term;
+        let height = terminator_height(func, shape, term);
+        if !shape.return_replaced[raw(b)] && height > 1 {
+            let mut first = None;
+            term.uses_each(&mut |v| first = first.or(Some(v)));
+            let returned = match term {
+                Term::Return(values) => values.len(),
+                _ => 0,
+            };
             keep(
                 &mut slots,
                 FrameOverflow {
                     limit: FrameLimit::Slots,
-                    count: active + values.len(),
+                    count: active + height,
                     actives: active,
-                    at: values.first().copied(),
+                    at: first,
                     cost: StatementCost {
-                        slots: values.len(),
+                        slots: height,
                         call_arity: 0,
-                        wire_values: values.len(),
+                        wire_values: returned,
                     },
                     wide_calls: Vec::new(),
                 },

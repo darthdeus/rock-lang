@@ -352,7 +352,7 @@ fn a_wide_receive_agrees_with_luajit_across_the_boundary() {
 
 #[test]
 fn a_wide_call_in_a_loop_agrees_with_luajit_across_the_boundary() {
-    walk("in_loop", 134, 137, |pad| padded_receive_in_loop(50, pad));
+    walk("in_loop", 136, 139, |pad| padded_receive_in_loop(50, pad));
 }
 
 #[test]

@@ -262,6 +262,7 @@ pub(crate) fn render_scope(
             hoist,
             tail_forwards,
             call_arg_forwards,
+            &inlinable,
         );
     }
 

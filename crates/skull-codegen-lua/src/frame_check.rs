@@ -23,13 +23,20 @@ pub(crate) fn check_frame_limits(
     hoist: &HashMap<Idx<Inst>, u32>,
     tail_forwards: &[Option<TailForward>],
     call_arg_forwards: &[Option<CallArgForward>],
+    inlinable: &[bool],
 ) {
     // Almost every body is far under both caps, and the exact walk below needs
     // several instruction-sized side tables. Take an allocation-free upper
     // bound first, so a large project pays one linear scan per body rather than
     // five allocations.
     let loop_scoped_locals = color_scope.iter().flatten().count();
-    if frame_limits::fits_without_measuring(func, top_locals, loops.len(), loop_scoped_locals) {
+    if frame_limits::fits_without_measuring(
+        func,
+        top_locals,
+        loops.len(),
+        loop_scoped_locals,
+        inlinable,
+    ) {
         return;
     }
 
@@ -89,6 +96,7 @@ pub(crate) fn check_frame_limits(
         results_unassigned: &results_unassigned,
         fixed_arity_override: &fixed_arity_override,
         return_replaced: &return_replaced,
+        inlinable: Some(inlinable),
     };
     let Some(overflow) = frame_limits::frame_overflow(func, rpo, &actives, &shape) else {
         return;

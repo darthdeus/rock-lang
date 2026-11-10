@@ -328,9 +328,31 @@ fn emit_named_framed_with_statics_impl(
             inlinable[raw_id] = true;
         }
     }
+    // Coroutine frame fields are shared with the step's detached hooks, so a
+    // step keeps its reads at their program position.
+    let folded_reads = if frame.is_none() {
+        fold_single_use_reads(
+            ws,
+            func,
+            &rpo,
+            &mut inlinable,
+            &cell_analysis.pinned,
+            &suppressed,
+            &call_arg_forwards,
+            ctx.line_directives() && !name.is_empty(),
+        )
+    } else {
+        vec![false; func.insts.len()]
+    };
     alias_int_to_float(func, &rpo, &mut inlinable, &repeatable);
-    skull_mir::sinking::preserve_effect_order(func, &rpo, &mut inlinable);
-    bound_fold_levels(func, &rpo, &mut inlinable);
+    skull_mir::sinking::preserve_effect_order_with(
+        func,
+        &rpo,
+        &mut inlinable,
+        same_base_projections(func),
+    );
+    keep_reads_ordered(func, &rpo, &mut inlinable, &folded_reads);
+    bound_fold_levels(func, &rpo, &mut inlinable, &folded_reads);
     // Frame fields map to their dense slots before this table is consulted.
     // Frame accesses name `s` implicitly in the printer rather than through a
     // MIR cell use; reserve its parameter's color so a later local can never

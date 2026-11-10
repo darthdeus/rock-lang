@@ -174,6 +174,7 @@ mod condition_branches;
 
 mod projection_demand;
 
+mod read_folding;
 mod result_destinations;
 
 mod argument_demand;

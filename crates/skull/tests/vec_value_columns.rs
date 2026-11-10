@@ -597,7 +597,8 @@ fn two_leaves_of_one_element_check_once() {
         );
         if layout == "columns" {
             for col in [".a", ".b"] {
-                let loads = body.lines().filter(|l| l.ends_with(col)).count();
+                let loads = body.matches(&format!("{col})")).count()
+                    + body.lines().filter(|l| l.ends_with(col)).count();
                 assert_eq!(
                     loads, 1,
                     "{layout}: column `{col}` loaded {loads}x:\n{body}"

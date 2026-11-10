@@ -61,8 +61,8 @@ fn nullable_embed_clear_skips_absent_hash_slots_without_materializing() {
         } else {
             "resolution"
         };
-        let read = format!(" = c0.{prefix}");
-        let read_nested = format!(" = c0[\"{prefix}\"]");
+        let read = format!("c0.{prefix}");
+        let read_nested = format!("c0[\"{prefix}\"]");
         assert!(
             (body.contains(&read) || body.contains(&read_nested)) && body.contains("if "),
             "{name} must test stored presence before clearing missing hash slots:\n{body}"

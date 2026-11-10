@@ -106,3 +106,35 @@ print("linedefined=" .. info.linedefined)
     let linedefined: u32 = field("linedefined").parse().expect("linedefined");
     assert!((1..=7).contains(&linedefined), "{stdout}");
 }
+
+/// A numbered statement reports its own Rock line, so a call on one line is
+/// not folded into a statement on the next.
+#[test]
+fn a_call_keeps_its_own_numbered_statement() {
+    let src = "fn twice(n: int) -> int { return n * 2 }
+fn split(n: int) -> int {
+    let a = twice(n)
+    return a + 1
+}
+fn main() { print(split(1)) }
+";
+    let emit = |line_directives| {
+        common::emit_module_shaped(
+            src,
+            FILE,
+            ShapeOverrides {
+                line_directives: Some(line_directives),
+                ..Default::default()
+            },
+        )
+    };
+    let assigned = |lua: &str| {
+        common::function_body(lua, "split")
+            .lines()
+            .any(|line| line.starts_with(" r0 = "))
+    };
+    let plain = emit(false);
+    assert!(!assigned(&plain), "{plain}");
+    let numbered = emit(true);
+    assert!(assigned(&numbered), "{numbered}");
+}

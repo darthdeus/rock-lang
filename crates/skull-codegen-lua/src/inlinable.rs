@@ -160,6 +160,260 @@ pub(crate) fn compute_inlinable(
     (inl, repeatable)
 }
 
+/// Whether `consumer` renders each of its operands exactly once, so a folded
+/// call among them still runs once. Shapes that spell an operand several
+/// times (`UintMul`, a `Switch` ladder, a guarded store) are absent.
+fn spells_operands_once(consumer: &Inst) -> bool {
+    matches!(
+        consumer,
+        Inst::Store { .. }
+            | Inst::StoreGlobal { .. }
+            | Inst::Call { .. }
+            | Inst::CallValue { .. }
+            | Inst::CallMulti { .. }
+            | Inst::CallValueMulti { .. }
+            | Inst::Field { .. }
+            | Inst::TupleIndex { .. }
+            | Inst::IntAdd(..)
+            | Inst::IntSub(..)
+            | Inst::IntMul(..)
+            | Inst::FloatAdd(..)
+            | Inst::FloatSub(..)
+            | Inst::FloatMul(..)
+            | Inst::FloatDiv(..)
+            | Inst::IntLt(..)
+            | Inst::IntLeq(..)
+            | Inst::IntGt(..)
+            | Inst::IntGeq(..)
+            | Inst::FloatLt(..)
+            | Inst::FloatLeq(..)
+            | Inst::FloatGt(..)
+            | Inst::FloatGeq(..)
+            | Inst::Eq(..)
+            | Inst::NotEq(..)
+            | Inst::Not(_)
+            | Inst::StringConcat(..)
+    )
+}
+
+/// Fold a read or call into its one use in the same block, so its value
+/// never occupies a Lua local of its own: no register, no move into the
+/// cell or argument slot that consumes it, and no kill afterwards. A cell
+/// load qualifies when no write to the cell can run before the consumer
+/// ([`keep_reads_ordered`]); a projection or call is a throwing
+/// instruction whose order with other effects [`preserve_effect_order`]
+/// keeps. Returns the newly folded instructions.
+///
+/// [`preserve_effect_order`]: skull_mir::sinking::preserve_effect_order
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn fold_single_use_reads(
+    ws: &Workspace,
+    func: &MirFunc,
+    scope: &[Idx<Block>],
+    inlinable: &mut [bool],
+    pinned: &[bool],
+    suppressed: &[bool],
+    call_arg_forwards: &[Option<CallArgForward>],
+    line_marked: bool,
+) -> Vec<bool> {
+    const NONE: u32 = u32::MAX;
+    // Under line directives a statement reports its own source line, so a
+    // value folded into a statement must come from that line.
+    let same_line = |a: Idx<Inst>, b: u32| {
+        let b = Idx::from_raw(b.into());
+        match (func.inst_spans.get(a), func.inst_spans.get(b)) {
+            (Some(x), Some(y)) => x.file == y.file && x.line_range.0 == y.line_range.0,
+            _ => true,
+        }
+    };
+    let ni = func.insts.len();
+    let mut use_count = vec![0u32; ni];
+    let mut use_block = vec![NONE; ni];
+    // The consumer of a single use: an instruction, or `NONE` for a terminator.
+    let mut user = vec![NONE; ni];
+    let mut term_user_once = vec![false; ni];
+    for &b in scope {
+        for &id in &func.blocks[b].insts {
+            regalloc::inst_uses(&func.insts[id], &mut |u| {
+                let k = raw(u) as usize;
+                use_count[k] += 1;
+                use_block[k] = raw(b);
+                user[k] = raw(id);
+            });
+        }
+        let term = &func.blocks[b].term;
+        regalloc::term_uses(term, &mut |u| {
+            let k = raw(u) as usize;
+            use_count[k] += 1;
+            use_block[k] = raw(b);
+            user[k] = NONE;
+            term_user_once[k] = matches!(term, Term::Return(_) | Term::Branch { .. });
+        });
+    }
+    // Operands that must keep a register: one that would open its statement
+    // (a parenthesized operand there is ambiguous Lua after an expression
+    // line), and the operands of a push, which writes the length before it
+    // evaluates the pushed value.
+    let mut pinned_operand = vec![false; ni];
+    for &b in scope {
+        for &id in &func.blocks[b].insts {
+            let mut pin = |v: Idx<Inst>| pinned_operand[raw(v) as usize] = true;
+            match &func.insts[id] {
+                Inst::StoreField { base, .. } | Inst::StoreIndex { base, .. } => pin(*base),
+                Inst::CallValueMulti { dests, callee, .. } if dests.is_empty() => pin(*callee),
+                Inst::ArrayPush { arr, value, .. } => {
+                    pin(*arr);
+                    pin(*value);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut newly = vec![false; ni];
+    for &b in scope {
+        for &id in &func.blocks[b].insts {
+            let k = raw(id) as usize;
+            if inlinable[k]
+                || pinned_operand[k]
+                || suppressed[k]
+                || call_arg_forwards[k].is_some()
+                || use_count[k] != 1
+                || use_block[k] != raw(b)
+            {
+                continue;
+            }
+            let ok = match &func.insts[id] {
+                Inst::Load(cell) => !pinned[raw(*cell) as usize],
+                Inst::Field { .. }
+                | Inst::TupleIndex { .. }
+                | Inst::Index { .. }
+                | Inst::VecCheckedIndex { .. }
+                | Inst::Len { .. } => true,
+                inst @ (Inst::Call { .. } | Inst::CallValue { .. }) => {
+                    // An inline(lua) callee may be spliced, which needs a
+                    // register to receive its result.
+                    let splices = matches!(inst, Inst::Call { func: f, .. }
+                        if func_of(ws, *f).inline_body.is_some());
+                    !splices
+                        && match user[k] {
+                            NONE => term_user_once[k],
+                            u => spells_operands_once(&func.insts[Idx::from_raw(u.into())]),
+                        }
+                }
+                _ => false,
+            };
+            // A call folded into another call's operands stacks its frame on
+            // the outer one's. One level keeps `f(g(x))` while a chain cannot
+            // grow the frame past LuaJIT's slot cap.
+            let mut nested = false;
+            if matches!(func.insts[id], Inst::Call { .. } | Inst::CallValue { .. }) {
+                func.insts[id].uses_each(&mut |v| {
+                    nested |= frame_limits::folded_call_within(func, inlinable, v);
+                });
+            }
+            let misplaced = line_marked && user[k] != NONE && !same_line(id, user[k]);
+            if ok && !nested && !misplaced {
+                inlinable[k] = true;
+                newly[k] = true;
+            }
+        }
+    }
+    newly
+}
+
+/// The value a projection indexes, when the projection can fail only by
+/// indexing a non-table, which LuaJIT reports by the indexed operand alone.
+fn indexed_base(inst: &Inst) -> Option<Idx<Inst>> {
+    match *inst {
+        Inst::Field { base, .. } | Inst::TupleIndex { base, .. } => Some(base),
+        Inst::Len {
+            base,
+            kind:
+                ContainerKind::Vec
+                | ContainerKind::VecValueColumns(_)
+                | ContainerKind::VecValueStrided(_)
+                | ContainerKind::NativeBuffer
+                | ContainerKind::NativeBufferValue(_),
+        } => Some(base),
+        _ => None,
+    }
+}
+
+/// Two projections of the same operand fail together with one message, so
+/// either may be evaluated first: `f(p.x, p.y)` needs no register for `p.x`.
+/// Separate loads of one cell count as one operand: only other projections
+/// may stand between the two, so nothing writes the cell in between.
+pub(crate) fn same_base_projections(func: &MirFunc) -> impl Fn(&Inst, &Inst) -> bool + '_ {
+    let operand = |base: Idx<Inst>| match func.insts[base] {
+        Inst::Load(cell) => (true, cell.into_raw().into_u32()),
+        _ => (false, base.into_raw().into_u32()),
+    };
+    move |folded, between| {
+        indexed_base(folded)
+            .is_some_and(|a| indexed_base(between).is_some_and(|b| operand(a) == operand(b)))
+    }
+}
+
+/// Unfold a newly folded cell load whose consumer runs after a write to the
+/// same cell: the folded read would see the new value. Runs after every
+/// other folding decision, since unfolding a consumer only moves its
+/// operands' evaluation earlier.
+pub(crate) fn keep_reads_ordered(
+    func: &MirFunc,
+    scope: &[Idx<Block>],
+    inlinable: &mut [bool],
+    newly: &[bool],
+) {
+    let ni = func.insts.len();
+    // Position in its block of the statement that finally evaluates a value.
+    let mut eval = vec![0usize; ni];
+    let mut user = vec![u32::MAX; ni];
+    for &b in scope {
+        let insts = &func.blocks[b].insts;
+        for &id in insts {
+            regalloc::inst_uses(&func.insts[id], &mut |u| user[raw(u) as usize] = raw(id));
+        }
+        regalloc::term_uses(&func.blocks[b].term, &mut |u| {
+            user[raw(u) as usize] = u32::MAX
+        });
+        for (pos, &id) in insts.iter().enumerate().rev() {
+            let k = raw(id) as usize;
+            eval[k] = if inlinable[k] {
+                match user[k] {
+                    u32::MAX => insts.len(),
+                    u => eval[u as usize],
+                }
+            } else {
+                pos
+            };
+        }
+        for (pos, &id) in insts.iter().enumerate() {
+            let k = raw(id) as usize;
+            if !newly[k] || !inlinable[k] {
+                continue;
+            }
+            let Inst::Load(cell) = func.insts[id] else {
+                // A push writes the container's length before it evaluates
+                // the pushed value, so no memory read may be deferred into it.
+                if insts
+                    .get(eval[k])
+                    .is_some_and(|&at| matches!(func.insts[at], Inst::ArrayPush { .. }))
+                {
+                    inlinable[k] = false;
+                }
+                continue;
+            };
+            let mut written = false;
+            for &between in &insts[pos + 1..eval[k].min(insts.len())] {
+                func.insts[between].cell_writes_each(&mut |c| written |= c == cell);
+            }
+            if written {
+                inlinable[k] = false;
+            }
+        }
+    }
+}
+
 /// Fold every `IntToFloat` whose operand renders as a bare local (a register
 /// or a `repeatable` load) into its uses, however many: the conversion is the
 /// identity on LuaJIT numbers, and its own register would only copy that
@@ -273,7 +527,12 @@ fn fold_operand_levels(func: &MirFunc, inlinable: &[bool], id: Idx<Inst>) -> Vec
 /// operands that put it there, which restores the bound without touching any
 /// expression that already fits. An unfolded value is evaluated at its own
 /// definition, which is the order the MIR states.
-pub(crate) fn bound_fold_levels(func: &MirFunc, scope: &[Idx<Block>], inlinable: &mut [bool]) {
+pub(crate) fn bound_fold_levels(
+    func: &MirFunc,
+    scope: &[Idx<Block>],
+    inlinable: &mut [bool],
+    unfoldable: &[bool],
+) {
     let budget = skull_mir::lua_nesting::EXPRESSION_LEVEL_BUDGET;
     // Levels a value costs where it is rendered as an operand; 0 for a register.
     let mut levels = vec![0u32; func.insts.len()];
@@ -314,7 +573,10 @@ pub(crate) fn bound_fold_levels(func: &MirFunc, scope: &[Idx<Block>], inlinable:
             }
             for (u, at) in fold_operand_levels(func, inlinable, id) {
                 let x = raw(u) as usize;
-                if inlinable[x] && 1 + at + levels[x] > budget && always_inlinable(&func.insts[u]) {
+                if inlinable[x]
+                    && 1 + at + levels[x] > budget
+                    && (always_inlinable(&func.insts[u]) || unfoldable[x])
+                {
                     inlinable[x] = false;
                     levels[x] = 0;
                 }

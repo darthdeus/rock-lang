@@ -189,7 +189,7 @@ fn arena_bare_loop_used_entity_scalarizes_into_call() {
             .iter()
             .any(|global| {
                 let callee = crate::common::bound_callee_name(&lua, "hot", global);
-                hot.contains(&format!(" = {callee}("))
+                hot.contains(&format!("{callee}("))
             }),
         "entity should thread into the scalarized get() call:\n{hot}"
     );
