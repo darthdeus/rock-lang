@@ -1056,15 +1056,48 @@ impl<'a> Builder<'a> {
             None => self.loop_binder_ty(vars, Some(1)),
         };
         let repr = self.loop_element_snapshot(ty, repr)?;
-        match &split {
-            // split: index already bound to i_cell; bind the element pattern.
-            Some((_, xpat)) => self.bind_loop_element_repr(xpat, repr)?,
-            None if !enumerated => self.bind_loop_element_repr(vars, repr)?,
-            // single: bind the whole `(index, element)` tuple.
-            None => {
-                let elem = self.pack(repr)?;
-                let pair = self.emit_cur(Inst::MakeTuple(vec![i_now, elem]));
-                self.bind_for_pattern(vars, pair);
+        let elem_pat = match &split {
+            Some((_, xpat)) => Some(xpat),
+            None if !enumerated => Some(vars),
+            None => None,
+        };
+        // A tuple element whose `nobox` parts ride its box as leaves
+        // destructures from the box's slots, not from its plain indices.
+        let box_shape = match (elem_pat, &repr) {
+            (Some(BindingPattern::Tuple(_)), ValueRepr::Scalar(_)) => {
+                match self.concrete_expr_ty(coll) {
+                    Some(MonoTy::App { params, .. }) if params.len() == 1 => {
+                        let elem = params[0].clone();
+                        match elem {
+                            MonoTy::Tuple(_) => self
+                                .concrete_rep_tuple(&elem, RepUse::Return, true, false)?
+                                .filter(TupleRetShape::splats),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let (Some(pat), Some(shape), ValueRepr::Scalar(base)) = (elem_pat, &box_shape, &repr) {
+            let base = *base;
+            let slots: Vec<Idx<Inst>> = (0..shape.slot_count())
+                .map(|index| self.emit_cur(Inst::TupleIndex { base, index }))
+                .collect();
+            let tuple = self.tuple_from_slots(shape, &slots, &mut 0);
+            self.bind_tuple_repr(pat, shape, tuple)?;
+        } else {
+            match &split {
+                // split: index already bound to i_cell; bind the element pattern.
+                Some((_, xpat)) => self.bind_loop_element_repr(xpat, repr)?,
+                None if !enumerated => self.bind_loop_element_repr(vars, repr)?,
+                // single: bind the whole `(index, element)` tuple.
+                None => {
+                    let elem = self.pack(repr)?;
+                    let pair = self.emit_cur(Inst::MakeTuple(vec![i_now, elem]));
+                    self.bind_for_pattern(vars, pair);
+                }
             }
         }
         self.loop_targets.push((latch, exit, self.defers.len()));

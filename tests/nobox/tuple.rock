@@ -272,3 +272,32 @@ fn iteration_agrees_with_indexing() {
     }
     assert_eq(seen > 0.0, true)
 }
+
+// A plain loop destructures every element from the same boxes.
+@test
+fn tuple_pattern_iteration_reads_every_part() {
+    TILES.clear()
+    add_tile(Vec2 { x: 3.0, y: 4.0 }, IR4 { x: 5, y: 6, w: 7, h: 8 })
+    add_tile(Vec2 { x: 1.0, y: 2.0 }, IR4 { x: 1, y: 2, w: 3, h: 4 })
+    let seen = 0.0
+    for (p, s) in TILES {
+        seen = seen + p.x + p.y + s.w + s.h
+    }
+    assert_eq(seen, 32.0)
+}
+
+// An enumerated element destructures into the same boxes.
+@test
+fn enumerated_iteration_agrees_with_indexing() {
+    TILES.clear()
+    add_tile(Vec2 { x: 3.0, y: 4.0 }, IR4 { x: 5, y: 6, w: 7, h: 8 })
+    add_tile(Vec2 { x: 1.0, y: 2.0 }, IR4 { x: 1, y: 2, w: 3, h: 4 })
+    let seen = 0.0
+    let last = -1
+    for (i, (p, s)) in enumerate(TILES) {
+        seen = seen + p.x + p.y + s.w + s.h
+        last = i
+    }
+    assert_eq(seen, 32.0)
+    assert_eq(last, 1)
+}

@@ -1,0 +1,96 @@
+// A loop over a vector leaves through break, return and continue. What the
+// body copied out of the element or a counter must survive the exit.
+
+fn first_over(xs: [int], limit: int) -> int {
+    for x in xs {
+        if x > limit { return x }
+    }
+    return -1
+}
+
+@test(output = "7 -1")
+fn return_from_inside_the_loop() {
+    print("{first_over([1, 7, 9], 3)} {first_over([1, 2], 3)}")
+}
+
+@test(output = "5 2")
+fn break_keeps_what_the_body_copied() {
+    let xs = [4, 2, 5, 8, 1]
+    let found = 0
+    let seen = 0
+    for x in xs {
+        if x == 5 {
+            found = x
+            break
+        }
+        seen += 1
+    }
+    print("{found} {seen}")
+}
+
+@test(output = "9 3 2")
+fn continue_skips_and_the_last_element_survives() {
+    let xs = [3, 4, 9, 6, 8]
+    let last_odd = 0
+    let odd = 0
+    let evens_after = 0
+    for x in xs {
+        if x % 2 == 0 {
+            if odd > 0 { evens_after += 1 }
+            continue
+        }
+        last_odd = x
+        odd += 1
+    }
+    print("{last_odd} {evens_after} {odd}")
+}
+
+@test(output = "2 30")
+fn enumerated_break_reads_the_index_after() {
+    let xs = [10, 20, 30, 40]
+    let at = -1
+    let value = 0
+    for (i, x) in enumerate(xs) {
+        if x > 25 {
+            at = i
+            value = x
+            break
+        }
+    }
+    print("{at} {value}")
+}
+
+@test(output = "3 c 1")
+fn tuple_pattern_break_reads_parts_after() {
+    let pairs = [(1, "a"), (2, "b"), (3, "c"), (4, "d")]
+    let n = 0
+    let s = ""
+    let skipped = 0
+    for (k, v) in pairs {
+        if k == 2 {
+            skipped += 1
+            continue
+        }
+        n = k
+        s = v
+        if k == 3 { break }
+    }
+    print("{n} {s} {skipped}")
+}
+
+@test(output = "6 1")
+fn nested_loops_break_only_the_inner() {
+    let rows = [[1, 2, 9], [3, 9], [9]]
+    let total = 0
+    let empty = 0
+    for row in rows {
+        let sum = 0
+        for x in row {
+            if x == 9 { break }
+            sum += x
+        }
+        if sum == 0 { empty += 1 }
+        total += sum
+    }
+    print("{total} {empty}")
+}
