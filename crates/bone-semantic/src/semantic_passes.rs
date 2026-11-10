@@ -563,116 +563,117 @@ fn static_type_contains_ref(ws: &Workspace, ty: TyId) -> bool {
 }
 
 fn check_frame_ref_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
-    let mut errs = Vec::new();
-    for module in ws.modules.iter() {
-        if !fresh.contains(&module.id) {
-            continue;
-        }
-        for (_, def) in module.structs.iter() {
-            for field in &def.fields {
-                if static_type_contains_ref(ws, field.ty) {
-                    errs.push((
-                        module.id,
-                        CompilerError::new_with_label(
-                            field.span,
-                            format!(
-                                "field `{}` cannot store a frame reference; store an `Entity<T>` or a value instead",
-                                field.name
+    let per_module: Vec<Vec<(ModuleId, CompilerError)>> = fresh
+        .par_iter()
+        .map(|&mid| {
+            let module = ws.module(mid);
+            let mut errs = Vec::new();
+            for (_, def) in module.structs.iter() {
+                for field in &def.fields {
+                    if static_type_contains_ref(ws, field.ty) {
+                        errs.push((
+                            module.id,
+                            CompilerError::new_with_label(
+                                field.span,
+                                format!(
+                                    "field `{}` cannot store a frame reference; store an `Entity<T>` or a value instead",
+                                    field.name
+                                ),
                             ),
-                        ),
-                    ));
+                        ));
+                    }
                 }
             }
-        }
-        for (_, def) in module.enums.iter() {
-            for variant in &def.variants {
-                match &variant.payload {
-                    VariantPayload::Unit => {}
-                    VariantPayload::Tuple(types) => {
-                        if types.iter().any(|ty| static_type_contains_ref(ws, *ty)) {
-                            errs.push((
-                                module.id,
-                                CompilerError::new_with_label(
-                                    variant.name_span,
-                                    format!(
-                                        "enum variant `{}` cannot store a frame reference; store an `Entity<T>` or a value instead",
-                                        variant.name
-                                    ),
-                                ),
-                            ));
-                        }
-                    }
-                    VariantPayload::Record(fields) => {
-                        for field in fields {
-                            if static_type_contains_ref(ws, field.ty) {
+            for (_, def) in module.enums.iter() {
+                for variant in &def.variants {
+                    match &variant.payload {
+                        VariantPayload::Unit => {}
+                        VariantPayload::Tuple(types) => {
+                            if types.iter().any(|ty| static_type_contains_ref(ws, *ty)) {
                                 errs.push((
                                     module.id,
                                     CompilerError::new_with_label(
-                                        field.span,
+                                        variant.name_span,
                                         format!(
-                                            "enum field `{}` cannot store a frame reference; store an `Entity<T>` or a value instead",
-                                            field.name
+                                            "enum variant `{}` cannot store a frame reference; store an `Entity<T>` or a value instead",
+                                            variant.name
                                         ),
                                     ),
                                 ));
                             }
                         }
+                        VariantPayload::Record(fields) => {
+                            for field in fields {
+                                if static_type_contains_ref(ws, field.ty) {
+                                    errs.push((
+                                        module.id,
+                                        CompilerError::new_with_label(
+                                            field.span,
+                                            format!(
+                                                "enum field `{}` cannot store a frame reference; store an `Entity<T>` or a value instead",
+                                                field.name
+                                            ),
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
                     }
                 }
             }
-        }
-        for (_, def) in module.newtypes.iter() {
-            if static_type_contains_ref(ws, def.wrapped) {
-                errs.push((
-                    module.id,
-                    CompilerError::new_with_label(
-                        def.span,
-                        format!("newtype `{}` cannot store a frame reference", def.name),
-                    ),
-                ));
-            }
-        }
-        for (_, global) in module.globals.iter() {
-            if static_type_contains_ref(ws, global.ty) {
-                errs.push((
-                    module.id,
-                    CompilerError::new_with_label(
-                        global.span,
-                        format!(
-                            "global `{}` cannot store a frame reference; store an `Entity<T>` or a value instead",
-                            global.name
+            for (_, def) in module.newtypes.iter() {
+                if static_type_contains_ref(ws, def.wrapped) {
+                    errs.push((
+                        module.id,
+                        CompilerError::new_with_label(
+                            def.span,
+                            format!("newtype `{}` cannot store a frame reference", def.name),
                         ),
-                    ),
-                ));
+                    ));
+                }
             }
-        }
-        for (_, function) in module.functions.iter() {
-            if !function.is_extern && function.inline_body.is_none() {
-                continue;
-            }
-            let carries_ref = function
-                .param_decls
-                .iter()
-                .any(|param| static_type_contains_ref(ws, param.ty))
-                || function
-                    .return_ty
-                    .is_some_and(|ty| static_type_contains_ref(ws, ty));
-            if carries_ref {
-                errs.push((
-                    module.id,
-                    CompilerError::new_with_label(
-                        function.span,
-                        format!(
-                            "foreign or inline function `{}` cannot carry a frame reference across an opaque boundary",
-                            function.name
+            for (_, global) in module.globals.iter() {
+                if static_type_contains_ref(ws, global.ty) {
+                    errs.push((
+                        module.id,
+                        CompilerError::new_with_label(
+                            global.span,
+                            format!(
+                                "global `{}` cannot store a frame reference; store an `Entity<T>` or a value instead",
+                                global.name
+                            ),
                         ),
-                    ),
-                ));
+                    ));
+                }
             }
-        }
-    }
-
-    for (mid, err) in errs {
+            for (_, function) in module.functions.iter() {
+                if !function.is_extern && function.inline_body.is_none() {
+                    continue;
+                }
+                let carries_ref = function
+                    .param_decls
+                    .iter()
+                    .any(|param| static_type_contains_ref(ws, param.ty))
+                    || function
+                        .return_ty
+                        .is_some_and(|ty| static_type_contains_ref(ws, ty));
+                if carries_ref {
+                    errs.push((
+                        module.id,
+                        CompilerError::new_with_label(
+                            function.span,
+                            format!(
+                                "foreign or inline function `{}` cannot carry a frame reference across an opaque boundary",
+                                function.name
+                            ),
+                        ),
+                    ));
+                }
+            }
+            errs
+        })
+        .collect();
+    for (mid, err) in per_module.into_iter().flatten() {
         ws.module_mut(mid).interface_errors.push(err);
     }
 }

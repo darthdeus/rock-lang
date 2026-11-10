@@ -503,27 +503,22 @@ fn capability_errors(module: &Module) -> Vec<CompilerError> {
 }
 
 pub fn check_identity_storage(ws: &mut Workspace, fresh: &[ModuleId]) {
-    let mut errs = Vec::new();
-    for module in ws.modules.iter() {
-        if !fresh.contains(&module.id) {
-            continue;
-        }
-        errs.extend(
-            capability_errors(module)
-                .into_iter()
-                .map(|e| (module.id, e)),
-        );
-        if identity_storage_exempt(ws, module) {
-            continue;
-        }
-        errs.extend(identity_storage_sites(ws, module).into_iter().map(|site| {
-            (
-                module.id,
-                CompilerError::new_with_label(site.span, site.message),
-            )
-        }));
-    }
-    for (mid, err) in errs {
-        ws.module_mut(mid).interface_errors.push(err);
+    let errs: Vec<Vec<CompilerError>> = fresh
+        .par_iter()
+        .map(|&mid| {
+            let module = ws.module(mid);
+            let mut errs: Vec<CompilerError> = capability_errors(module).into_iter().collect();
+            if !identity_storage_exempt(ws, module) {
+                errs.extend(
+                    identity_storage_sites(ws, module)
+                        .into_iter()
+                        .map(|site| CompilerError::new_with_label(site.span, site.message)),
+                );
+            }
+            errs
+        })
+        .collect();
+    for (&mid, errs) in fresh.iter().zip(errs) {
+        ws.module_mut(mid).interface_errors.extend(errs);
     }
 }
