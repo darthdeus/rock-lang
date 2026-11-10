@@ -2929,10 +2929,13 @@ impl CompletionScheduler {
     }
 }
 
+/// The prepared rows are consumed where they lie: a 16k-row table of large
+/// values copied into a ready list first cost more serial time than the copy
+/// suggests.
 fn produce_instances(
     ws: &Workspace,
     g: &InstanceGraph,
-    ready: Vec<PreparedInstance>,
+    prepared: Vec<PreparedInstanceResult>,
     signatures: &PublishedSignatures,
     domains: &PublishedDomains,
     timing_enabled: bool,
@@ -2945,8 +2948,9 @@ fn produce_instances(
 
     match schedule {
         BuildSchedule::Default => {
-            let results = concrete_map(ready, census, |instance| {
-                InstanceResult::Built(produce_instance(
+            let results = concrete_map(prepared, census, |prepared| match prepared {
+                PreparedInstanceResult::Gap(gap) => InstanceResult::Gap(gap),
+                PreparedInstanceResult::Ready(instance) => InstanceResult::Built(produce_instance(
                     ws,
                     g,
                     instance,
@@ -2954,7 +2958,7 @@ fn produce_instances(
                     domains,
                     timing_enabled,
                     retain_callee_maps,
-                ))
+                )),
             });
             (
                 results,
@@ -2968,12 +2972,20 @@ fn produce_instances(
         }
         #[cfg(not(feature = "sequential"))]
         BuildSchedule::ReverseCompletion => {
+            let mut results = Vec::new();
+            let mut ready = Vec::new();
+            for prepared in prepared {
+                match prepared {
+                    PreparedInstanceResult::Gap(gap) => results.push(InstanceResult::Gap(gap)),
+                    PreparedInstanceResult::Ready(instance) => ready.push(instance),
+                }
+            }
             let scheduler = std::sync::Arc::new(CompletionScheduler::new(&ready));
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(2)
                 .build()
                 .expect("reverse-completion test pool");
-            let results = pool.install(|| {
+            let built: Vec<InstanceResult> = pool.install(|| {
                 ready
                     .into_par_iter()
                     .map(|instance| {
@@ -2994,6 +3006,7 @@ fn produce_instances(
                     })
                     .collect()
             });
+            results.extend(built);
             (results, Some(scheduler.trace()))
         }
     }
@@ -3215,21 +3228,13 @@ fn build_published_impl(
     };
     let signatures = std::sync::Arc::new(signatures);
     let published_domains = std::sync::Arc::new(published_domains);
-    let mut gaps = Vec::new();
-    let mut ready = Vec::new();
-    for result in prepared {
-        match result {
-            PreparedInstanceResult::Gap(gap) => gaps.push(gap),
-            PreparedInstanceResult::Ready(instance) => ready.push(instance),
-        }
-    }
     let partition_time = t_partition.elapsed();
     let ordinary_census = WorkerCensus::new(traced);
     let t_ordinary_parallel = bone_core::prelude::Instant::now();
     let (mut results, completion_trace) = produce_instances(
         ws,
         g,
-        ready,
+        prepared,
         signatures.as_ref(),
         published_domains.as_ref(),
         timing_enabled,
@@ -3238,7 +3243,6 @@ fn build_published_impl(
         retain_callee_maps,
     );
     let ordinary_parallel_time = t_ordinary_parallel.elapsed();
-    results.extend(gaps.into_iter().map(InstanceResult::Gap));
     results.sort_by(|left, right| left.instance().cmp(right.instance()));
 
     let t_ordinary_merge = bone_core::prelude::Instant::now();
