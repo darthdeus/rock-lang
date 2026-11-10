@@ -10,10 +10,10 @@ use crate::mir::FuncRef;
 use bone_core::hir::{BindingInfo, Body, Callee, Expr};
 use bone_core::hir_walk::HirChild;
 use comfy_la_arena::Idx;
-use std::collections::HashSet;
 use ustr::Ustr;
 
-pub(super) type Demand = Option<Vec<Option<HashSet<Ustr>>>>;
+/// Field lists hold each name once, in first-mention order.
+pub(super) type Demand = Option<Vec<Option<Vec<Ustr>>>>;
 
 pub(super) fn of_function(ws: &Workspace, func: FuncRef) -> Demand {
     let body = ws
@@ -43,13 +43,24 @@ pub(super) fn key(demand: &Demand) -> u64 {
 
 fn fields(body: &Body) -> Demand {
     let params: Vec<Idx<BindingInfo>> = body.param_bindings.into_iter().collect();
-    let mut demand = vec![Some(HashSet::default()); params.len()];
+    let mut demand = vec![Some(Vec::new()); params.len()];
+    /// Marks a whole use. `open` counts the parameters still read by field
+    /// only; at zero no later mention can change the answer and the walk stops.
+    fn whole(slot: &mut Option<Vec<Ustr>>, open: &mut usize) {
+        if slot.take().is_some() {
+            *open -= 1;
+        }
+    }
     fn visit(
         body: &Body,
         node: HirChild,
         params: &[Idx<BindingInfo>],
-        demand: &mut [Option<HashSet<Ustr>>],
+        demand: &mut [Option<Vec<Ustr>>],
+        open: &mut usize,
     ) {
+        if *open == 0 {
+            return;
+        }
         let param = |binding| params.iter().position(|p| *p == binding);
         if let HirChild::Expr(e) = node {
             match body.expr_arena[e] {
@@ -57,15 +68,17 @@ fn fields(body: &Body) -> Demand {
                     if let Expr::Var(binding) = body.expr_arena[base]
                         && let Some(i) = param(binding)
                     {
-                        if let Some(fields) = &mut demand[i] {
-                            fields.insert(field);
+                        if let Some(fields) = &mut demand[i]
+                            && !fields.contains(&field)
+                        {
+                            fields.push(field);
                         }
                         return;
                     }
                 }
                 Expr::Var(binding) => {
                     if let Some(i) = param(binding) {
-                        demand[i] = None;
+                        whole(&mut demand[i], open);
                     }
                 }
                 Expr::Call {
@@ -73,7 +86,7 @@ fn fields(body: &Body) -> Demand {
                     ..
                 } => {
                     if let Some(i) = param(binding) {
-                        demand[i] = None;
+                        whole(&mut demand[i], open);
                     }
                 }
                 // Field transport does not cover writes into the parameter.
@@ -88,16 +101,23 @@ fn fields(body: &Body) -> Demand {
                     if let Expr::Var(binding) = body.expr_arena[root]
                         && let Some(i) = param(binding)
                     {
-                        demand[i] = None;
+                        whole(&mut demand[i], open);
                     }
                 }
                 // A capture holds the whole value.
                 Expr::Lambda { body: inner, .. } => {
-                    let mut captured = vec![Some(HashSet::default()); params.len()];
-                    visit(body, HirChild::Expr(inner), params, &mut captured);
+                    let mut captured = vec![Some(Vec::new()); params.len()];
+                    let mut inner_open = params.len();
+                    visit(
+                        body,
+                        HirChild::Expr(inner),
+                        params,
+                        &mut captured,
+                        &mut inner_open,
+                    );
                     for (slot, seen) in demand.iter_mut().zip(captured) {
                         if seen.is_none_or(|fields| !fields.is_empty()) {
-                            *slot = None;
+                            whole(slot, open);
                         }
                     }
                     return;
@@ -105,8 +125,15 @@ fn fields(body: &Body) -> Demand {
                 _ => {}
             }
         }
-        body.for_each_child(node, |child| visit(body, child, params, demand));
+        body.for_each_child(node, |child| visit(body, child, params, demand, open));
     }
-    visit(body, HirChild::Expr(body.root?), &params, &mut demand);
+    let mut open = params.len();
+    visit(
+        body,
+        HirChild::Expr(body.root?),
+        &params,
+        &mut demand,
+        &mut open,
+    );
     Some(demand)
 }

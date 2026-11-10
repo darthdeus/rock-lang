@@ -2357,11 +2357,7 @@ impl Eq for BackendFnAbiPlan {}
 
 /// A boxed value child is read through its declared field position, which a
 /// narrowed parameter group no longer has.
-fn keeps_opaque_value_child(
-    ws: &Workspace,
-    shape: &ValueShape,
-    kept: &std::collections::HashSet<ustr::Ustr>,
-) -> bool {
+fn keeps_opaque_value_child(ws: &Workspace, shape: &ValueShape, kept: &[ustr::Ustr]) -> bool {
     let Some(sid) = ws.struct_by_name.get(&shape.name) else {
         return false;
     };
