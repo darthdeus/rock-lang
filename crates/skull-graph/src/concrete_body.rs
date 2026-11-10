@@ -1742,7 +1742,7 @@ struct PublicationInputs<'g> {
 
 fn collect_publication_inputs(g: &InstanceGraph) -> PublicationInputs<'_> {
     let owners: Vec<(&Owner, &crate::instance_graph::Contribution)> =
-        g.contributions.iter().collect();
+        g.contributions.iter().map(|(o, c)| (o, &**c)).collect();
     #[cfg(not(feature = "sequential"))]
     let (instances, domains) = {
         use rayon::prelude::*;

@@ -180,7 +180,7 @@ fn every_live_instance_owns_a_contribution() {
 fn the_operational_censuses_are_sums_of_the_primary_records() {
     let (_ws, g) = build();
     let sum = |f: fn(&skull::instance_graph::Contribution) -> usize| -> usize {
-        g.contributions.values().map(f).sum()
+        g.contributions.values().map(|c| f(c)).sum()
     };
     let census = &g.run_stats;
     assert!(g.sites_attempted > 0, "the fixture attempted no sites");

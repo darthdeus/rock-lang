@@ -799,7 +799,7 @@ pub struct InstanceGraph {
     interner: std::sync::Arc<MonoInterner>,
     /// The primary records. Every flat field below is derived from these plus
     /// [`Self::root_instances`]; nothing writes a flat field directly.
-    pub contributions: BTreeMap<Owner, Contribution>,
+    pub contributions: BTreeMap<Owner, Box<Contribution>>,
     /// The instance keys of `contributions`, hashed: the walk asks whether a
     /// reached instance already has one once per reached row, and keying by
     /// the instance lets it ask without building an owner.
@@ -2302,7 +2302,7 @@ fn expand(
     owner: &Owner,
     inputs: &WalkInputs,
     timing_enabled: bool,
-) -> Contribution {
+) -> Box<Contribution> {
     let mut out = expand_sites(ws, interner, owner, inputs, timing_enabled);
     // A body reaching one callee from several sites asserts its
     // substitution once: the index records owners, not sites, and the
@@ -2327,8 +2327,8 @@ fn expand_sites(
     owner: &Owner,
     inputs: &WalkInputs,
     timing_enabled: bool,
-) -> Contribution {
-    let mut out = Contribution::default();
+) -> Box<Contribution> {
+    let mut out = Box::<Contribution>::default();
     match owner {
         Owner::AlwaysEmitted(module, body_owner) => {
             let prep_start = timing_enabled.then(Instant::now);
@@ -2487,7 +2487,7 @@ struct WalkInputs {
     tree: Option<InstanceBoundTree>,
 }
 
-type WalkResult = (Option<Contribution>, u64);
+type WalkResult = (Option<Box<Contribution>>, u64);
 
 /// Owners per pool task in a wave's walk.
 const WALK_TASK_OWNERS: usize = 8;
@@ -2531,7 +2531,7 @@ impl InstanceGraph {
     fn install(
         &mut self,
         owner: Owner,
-        c: Contribution,
+        c: Box<Contribution>,
         timing_enabled: bool,
         track_incremental_state: bool,
     ) -> (Vec<Owner>, InstallTiming) {
@@ -3808,7 +3808,9 @@ impl InstanceGraph {
     /// [`Self::sites_of`] and [`Self::is_expanded`], and publishing the whole
     /// record would invite a consumer to answer a third one its own way.
     fn contribution(&self, i: &Instance) -> Option<&Contribution> {
-        self.contributions.get(&Owner::Instance(i.clone()))
+        self.contributions
+            .get(&Owner::Instance(i.clone()))
+            .map(Box::as_ref)
     }
 
     /// **Owner-local**: what each of this instance's operations resolved to.
@@ -7093,9 +7095,10 @@ mod recursion_search_tests {
                     span: Span::unknown(),
                 });
             }
-            graph
-                .contributions
-                .insert(Owner::Instance(instances[from].clone()), contribution);
+            graph.contributions.insert(
+                Owner::Instance(instances[from].clone()),
+                Box::new(contribution),
+            );
         }
         let seeds = instances.iter().cloned().collect();
         detect_changing_instance_recursion(&mut graph, &ws);
