@@ -42,16 +42,22 @@ pub(super) fn is_library_module(file: &str, project_root: Option<&str>) -> bool 
     }
 }
 
+/// `program`: the project target defines `main`. A program's own functions are
+/// reached from its entry like a library's; only a target without an entry (a
+/// library compiled alone, whose functions are its exports) roots them all.
 pub(crate) fn is_emission_root(
     file: &str,
     project_root: Option<&str>,
+    program: bool,
     f: &bone_semantic::hir::Function,
     decorators: &DecoratorTable,
 ) -> bool {
-    if !is_library_module(file, project_root) {
+    let own = !is_library_module(file, project_root);
+    if own && !program {
         return true;
     }
-    if f.name.as_str() == "main" {
+    let declared = skull_mir::mangle::declared_name(f.name.as_str());
+    if f.name.as_str() == "main" || (own && declared == "main") {
         return true;
     }
     let has = |n: &str| f.annotations.iter().any(|a| a.is_builtin(n));
@@ -272,12 +278,26 @@ pub(super) fn named_sim_dependencies(
     Ok(roots)
 }
 
+/// Whether a project build's own sources define `main`. A single-file compile
+/// (no project root) keeps every function: codegen tests and `rock compile` on a
+/// file of helpers expect them.
+fn is_program_target(ws: &Workspace, project_root: Option<&str>) -> bool {
+    project_root.is_some()
+        && ws.source_modules().any(|m| {
+            !is_library_module(m.file.as_str(), project_root)
+                && m.functions
+                    .iter()
+                    .any(|(_, f)| skull_mir::mangle::declared_name(f.name.as_str()) == "main")
+        })
+}
+
 fn emission_roots_with_census(
     ws: &Workspace,
     project_root: Option<&str>,
     mut census: Option<&mut RootEnumerationCensus>,
 ) -> Vec<FuncRef> {
     let decorators = DecoratorTable::collect(ws);
+    let program = is_program_target(ws, project_root);
     let mut roots = Vec::new();
     for module in ws.source_modules() {
         if let Some(census) = census.as_deref_mut() {
@@ -285,7 +305,7 @@ fn emission_roots_with_census(
             census.functions_examined += module.functions.len();
         }
         for (fid, f) in module.functions.iter() {
-            if is_emission_root(module.file.as_str(), project_root, f, &decorators) {
+            if is_emission_root(module.file.as_str(), project_root, program, f, &decorators) {
                 roots.push(FuncRef {
                     module: module.id,
                     func: fid,

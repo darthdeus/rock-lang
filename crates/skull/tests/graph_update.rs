@@ -26,8 +26,9 @@ use skull::instance_graph::{self, Instance, InstanceGraph, RejectionKind, Update
 
 /// The compilation target's own directory. Everything outside it is a LIBRARY,
 /// which is what makes anything prunable at all: `mir_emit::is_emission_root`
-/// roots every declaration of the target itself, so a fixture whose functions
-/// all live in `main.rock` can never lose one.
+/// roots every declaration of a target without `main`, so a fixture whose
+/// functions all live in `main.rock` can never lose one. The fixtures name
+/// their entry `zz_start` to stay such a target.
 const PROJ: &str = "proj/";
 const MAIN: &str = "proj/main.rock";
 const LIB: &str = "lib/helpers.rock";
@@ -206,11 +207,11 @@ fn other() -> int { return 7 }
 fn incremental_update_preserves_graph_verification_configuration() {
     let before = std::env::var_os("ROCK_GRAPH_VERIFY");
     let mut case = Case::new(
-        "fn main() { print(\"{chain_a()} {other()}\") }\n",
+        "fn zz_start() { print(\"{chain_a()} {other()}\") }\n",
         CHAIN_LIB,
     );
 
-    case.edit(MAIN, "fn main() { print(\"{other()}\") }\n");
+    case.edit(MAIN, "fn zz_start() { print(\"{other()}\") }\n");
     case.assert_matches_fresh("subtree deletion");
 
     assert_eq!(
@@ -223,7 +224,7 @@ fn incremental_update_preserves_graph_verification_configuration() {
 #[test]
 fn deleting_the_only_edge_into_a_subtree_removes_the_whole_subtree() {
     let mut case = Case::new(
-        "fn main() { print(\"{chain_a()} {other()}\") }\n",
+        "fn zz_start() { print(\"{chain_a()} {other()}\") }\n",
         CHAIN_LIB,
     );
     for name in ["chain_a", "chain_b", "chain_c"] {
@@ -231,7 +232,7 @@ fn deleting_the_only_edge_into_a_subtree_removes_the_whole_subtree() {
     }
     let before = case.instance_names();
 
-    let stats = case.edit(MAIN, "fn main() { print(\"{other()}\") }\n");
+    let stats = case.edit(MAIN, "fn zz_start() { print(\"{other()}\") }\n");
 
     for name in ["chain_a", "chain_b", "chain_c"] {
         assert!(
@@ -260,7 +261,7 @@ fn deleting_the_only_edge_into_a_subtree_removes_the_whole_subtree() {
 
 #[test]
 fn explicit_root_delta_adds_and_removes_a_library_subtree() {
-    let mut case = Case::new("fn main() { print(\"{other()}\") }\n", CHAIN_LIB);
+    let mut case = Case::new("fn zz_start() { print(\"{other()}\") }\n", CHAIN_LIB);
     let ws = case.session.workspace();
     let chain_a = crate::common::fn_ref(ws, "chain_a");
     let base_roots = skull::mir_emit::emission_roots(ws, Some(PROJ));
@@ -309,7 +310,7 @@ fn explicit_root_delta_adds_and_removes_a_library_subtree() {
 #[test]
 fn a_replaced_root_can_be_restored_by_an_earlier_install_in_its_wave() {
     let ws = check_two_files(
-        "fn main() {}",
+        "fn zz_start() {}",
         "fn old_root() -> int { return leaf() }\n\
          fn leaf() -> int { return 1 }\n\
          fn new_root() -> int { return old_root() }\n",
@@ -355,7 +356,10 @@ fn other() -> int { return 7 }
 
 #[test]
 fn deleting_the_only_external_edge_prunes_a_mutually_reachable_cycle() {
-    let mut case = Case::new("fn main() { print(\"{cyc_a(4)} {other()}\") }\n", CYCLE_LIB);
+    let mut case = Case::new(
+        "fn zz_start() { print(\"{cyc_a(4)} {other()}\") }\n",
+        CYCLE_LIB,
+    );
     assert!(case.has_instance_named("cyc_a") && case.has_instance_named("cyc_b"));
     // The cycle is real: each member has an incoming edge from the other, so a
     // "nothing points at it" rule would keep both alive forever.
@@ -371,7 +375,7 @@ fn deleting_the_only_external_edge_prunes_a_mutually_reachable_cycle() {
     );
     let before = case.instance_names();
 
-    let stats = case.edit(MAIN, "fn main() { print(\"{other()}\") }\n");
+    let stats = case.edit(MAIN, "fn zz_start() { print(\"{other()}\") }\n");
 
     assert!(
         !case.has_instance_named("cyc_a"),
@@ -402,15 +406,15 @@ fn generated_cycle_sources(length: usize, rooted: bool) -> (String, String, Stri
         ));
     }
     let v1 = if rooted {
-        "fn main() { print(\"{cycle_0()}\") }\nfn root_anchor() -> int { return cycle_0() }\n"
+        "fn zz_start() { print(\"{cycle_0()}\") }\nfn root_anchor() -> int { return cycle_0() }\n"
             .to_string()
     } else {
-        "fn main() { print(\"{cycle_0()}\") }\n".to_string()
+        "fn zz_start() { print(\"{cycle_0()}\") }\n".to_string()
     };
     let v2 = if rooted {
-        "fn main() { print(\"0\") }\nfn root_anchor() -> int { return cycle_0() }\n".to_string()
+        "fn zz_start() { print(\"0\") }\nfn root_anchor() -> int { return cycle_0() }\n".to_string()
     } else {
-        "fn main() { print(\"0\") }\n".to_string()
+        "fn zz_start() { print(\"0\") }\n".to_string()
     };
     (v1, v2, lib)
 }
@@ -549,11 +553,12 @@ fn generated_support_sources(depth: usize) -> (String, String, String, Vec<Strin
             ));
         }
     }
-    let v1 = "fn main() { print(\"{shared(1)}\") }\n\
+    let v1 = "fn zz_start() { print(\"{shared(1)}\") }\n\
          fn independent_root() -> int { return support_0() }\n"
         .to_string();
-    let v2 = "fn main() { print(\"0\") }\nfn independent_root() -> int { return support_0() }\n"
-        .to_string();
+    let v2 =
+        "fn zz_start() { print(\"0\") }\nfn independent_root() -> int { return support_0() }\n"
+            .to_string();
     let subtree = [
         "shared",
         "shared_left",
@@ -669,8 +674,8 @@ fn a_live_non_root_support_chain_of_depth_eight_stays_local() {
 }
 
 const INTERSECTING_SUPPORT_MAIN_V1: &str =
-    "fn main() { print(\"{lost_a()} {lost_b()} {independent_root()}\") }\n";
-const INTERSECTING_SUPPORT_MAIN_V2: &str = "fn main() { print(\"{independent_root()}\") }\n";
+    "fn zz_start() { print(\"{lost_a()} {lost_b()} {independent_root()}\") }\n";
+const INTERSECTING_SUPPORT_MAIN_V2: &str = "fn zz_start() { print(\"{independent_root()}\") }\n";
 const INTERSECTING_SUPPORT_LIB: &str = r#"
 fn lost_a() -> int { return shared() + support_a() }
 fn lost_b() -> int { return shared() + support_b() }
@@ -815,10 +820,10 @@ fn intersecting_tentative_support_components_release_together() {
 }
 
 fn branching_support_sources(dead_first: bool) -> (String, String, String) {
-    let v1 = "fn main() { print(\"{lost_b()} {dead_c()}\") }\n\
+    let v1 = "fn zz_start() { print(\"{lost_b()} {dead_c()}\") }\n\
 fn independent_root() -> int { return root_branch() }\n"
         .to_string();
-    let v2 = "fn main() { print(\"0\") }\n\
+    let v2 = "fn zz_start() { print(\"0\") }\n\
 fn independent_root() -> int { return root_branch() }\n"
         .to_string();
     let mut lib = String::from(
@@ -986,7 +991,7 @@ fn ident<T>(x: T) -> T { return passthru(x) }
 
 #[test]
 fn adding_a_call_records_a_new_specialization() {
-    let mut case = Case::new("fn main() { print(\"{ident(1)}\") }\n", GENERIC_LIB);
+    let mut case = Case::new("fn zz_start() { print(\"{ident(1)}\") }\n", GENERIC_LIB);
     let has_string_ident = |c: &Case| {
         c.graph.instances.iter().any(|i| {
             let k = c.identity(i);
@@ -995,7 +1000,10 @@ fn adding_a_call_records_a_new_specialization() {
     };
     assert!(!has_string_ident(&case), "v1 already had `ident<string>`");
 
-    let stats = case.edit(MAIN, "fn main() { print(\"{ident(1)} {ident(\"s\")}\") }\n");
+    let stats = case.edit(
+        MAIN,
+        "fn zz_start() { print(\"{ident(1)} {ident(\"s\")}\") }\n",
+    );
 
     assert!(
         has_string_ident(&case),
@@ -1033,7 +1041,7 @@ fn deep<T>(x: T, n: int) -> int {
 
 #[test]
 fn removing_polymorphic_recursion_clears_the_whole_graph_rejection() {
-    let mut case = Case::new("fn main() { print(\"{deep(1, 3)}\") }\n", POLY_LIB);
+    let mut case = Case::new("fn zz_start() { print(\"{deep(1, 3)}\") }\n", POLY_LIB);
     let recursion_rejections = |c: &Case| {
         c.graph
             .rejections()
@@ -1079,26 +1087,26 @@ fn removing_polymorphic_recursion_clears_the_whole_graph_rejection() {
 #[test]
 fn a_sequential_edit_chain_agrees_with_a_fresh_build_at_every_step() {
     let mut case = Case::new(
-        "fn main() { print(\"{chain_a()} {other()}\") }\n",
+        "fn zz_start() { print(\"{chain_a()} {other()}\") }\n",
         CHAIN_LIB,
     );
     case.assert_matches_fresh("v1");
 
-    let s1 = case.edit(MAIN, "fn main() { print(\"{other()}\") }\n");
+    let s1 = case.edit(MAIN, "fn zz_start() { print(\"{other()}\") }\n");
     assert!(
         s1.pruned == 3 && s1.newly_reached == 0,
         "step 1 is a deletion: {s1:?}"
     );
     case.assert_matches_fresh("after delete");
 
-    let s2 = case.edit(MAIN, "fn main() { print(\"{chain_a()} {other()}\") }\n");
+    let s2 = case.edit(MAIN, "fn zz_start() { print(\"{chain_a()} {other()}\") }\n");
     assert!(
         s2.newly_reached == 3 && s2.pruned == 0,
         "step 2 is an addition: {s2:?}"
     );
     case.assert_matches_fresh("after re-add");
 
-    let s3 = case.edit(MAIN, "fn main() { print(\"{chain_b()}\") }\n");
+    let s3 = case.edit(MAIN, "fn zz_start() { print(\"{chain_b()}\") }\n");
     assert!(s3.pruned > 0, "step 3 strands `chain_a`: {s3:?}");
     assert!(
         !case.has_instance_named("chain_a"),
@@ -1206,7 +1214,7 @@ fn caller() -> int { return passthru(1) }
 #[test]
 fn resolving_a_call_removes_its_stale_unresolved_record() {
     let p = Perturbed::new(
-        "fn main() { print(\"{caller()}\") }\n",
+        "fn zz_start() { print(\"{caller()}\") }\n",
         IDENT_LIB,
         "caller",
         |_body, inf| {
@@ -1249,7 +1257,7 @@ fn probe(m: Map<string, int>) -> int { return m.len() }
 #[test]
 fn a_resolvable_conversion_removes_its_stale_storage_failure() {
     let p = Perturbed::new(
-        "fn main() { let m: Map<string, int> = map_new()\n print(\"{probe(m)}\") }\n",
+        "fn zz_start() { let m: Map<string, int> = map_new()\n print(\"{probe(m)}\") }\n",
         MAP_LIB,
         "probe",
         |body, inf| {
@@ -1304,9 +1312,9 @@ const TAKE_LIB: &str = "fn take<T>(x: T) -> int { return 1 }\n";
 
 #[test]
 fn reducing_a_too_deep_instantiation_removes_the_depth_cap() {
-    let deep_main = "fn main() {\n    let v: [[[[[[[[[[[[[[int]]]]]]]]]]]]]] = \
+    let deep_main = "fn zz_start() {\n    let v: [[[[[[[[[[[[[[int]]]]]]]]]]]]]] = \
                      [[[[[[[[[[[[[[1]]]]]]]]]]]]]]\n    print(\"{take(v)}\")\n}\n";
-    let shallow_main = "fn main() {\n    let v: [[int]] = [[1]]\n    print(\"{take(v)}\")\n}\n";
+    let shallow_main = "fn zz_start() {\n    let v: [[int]] = [[1]]\n    print(\"{take(v)}\")\n}\n";
     let mut case = Case::new(deep_main, TAKE_LIB);
     assert_eq!(
         case.graph.depth_capped().count(),
@@ -1345,7 +1353,7 @@ fn pick_b() -> int { return 2 }
 #[test]
 fn editing_a_const_initializer_replaces_its_always_emitted_owner() {
     let mut case = Case::new(
-        "const C: int = pick_a()\nfn main() { print(\"{C}\") }\n",
+        "const C: int = pick_a()\nfn zz_start() { print(\"{C}\") }\n",
         PICK_LIB,
     );
     assert!(
@@ -1360,7 +1368,7 @@ fn editing_a_const_initializer_replaces_its_always_emitted_owner() {
 
     let stats = case.edit(
         MAIN,
-        "const C: int = pick_b()\nfn main() { print(\"{C}\") }\n",
+        "const C: int = pick_b()\nfn zz_start() { print(\"{C}\") }\n",
     );
 
     assert!(
@@ -1387,7 +1395,7 @@ fn editing_a_const_initializer_replaces_its_always_emitted_owner() {
 /// decorator WHOLE-item into the interface print.
 #[test]
 fn a_struct_enum_newtype_or_decorator_edit_is_interface_tier() {
-    let main = "fn main() { print(\"{use_all()}\") }\n";
+    let main = "fn zz_start() { print(\"{use_all()}\") }\n";
     let base = concat!(
         "struct S { v: int = 1 }\n",
         "enum E { A, B }\n",
@@ -1437,7 +1445,7 @@ fn a_struct_enum_newtype_or_decorator_edit_is_interface_tier() {
 /// interface, so its initializer never reaches `update_bodies` either.
 #[test]
 fn editing_a_mutable_global_initializer_is_interface_tier() {
-    let main = "global g: int = pick_a()\nfn main() { print(\"{g}\") }\n";
+    let main = "global g: int = pick_a()\nfn zz_start() { print(\"{g}\") }\n";
     let mut s = Session::new(
         stdlib_asts(),
         vec![
@@ -1450,7 +1458,7 @@ fn editing_a_mutable_global_initializer_is_interface_tier() {
     let r = s
         .update_file(
             MAIN,
-            "global g: int = pick_b()\nfn main() { print(\"{g}\") }\n",
+            "global g: int = pick_b()\nfn zz_start() { print(\"{g}\") }\n",
         )
         .expect("update");
     assert_ne!(r.tier, UpdateTier::BodyOnly);
@@ -1471,7 +1479,7 @@ fn takes(f: fn(int) -> int) -> int { return f(1) }
 #[test]
 fn fixing_an_always_emitted_call_clears_its_root_hole() {
     let mut case = Case::new(
-        "const C: int = takes(gen_id)\nfn main() { print(\"{C}\") }\n",
+        "const C: int = takes(gen_id)\nfn zz_start() { print(\"{C}\") }\n",
         FNVALUE_LIB,
     );
     let holes = |c: &Case| -> usize {
@@ -1489,7 +1497,7 @@ fn fixing_an_always_emitted_call_clears_its_root_hole() {
 
     let stats = case.edit(
         MAIN,
-        "const C: int = takes(mono_id)\nfn main() { print(\"{C}\") }\n",
+        "const C: int = takes(mono_id)\nfn zz_start() { print(\"{C}\") }\n",
     );
 
     assert_eq!(
@@ -1526,7 +1534,7 @@ fn fixing_an_always_emitted_call_clears_its_root_hole() {
 #[test]
 fn a_body_with_no_facts_that_gains_a_call_is_still_re_walked() {
     let mut case = Case::new(
-        "fn main() { print(\"{leaf()}\") }\n",
+        "fn zz_start() { print(\"{leaf()}\") }\n",
         "fn leaf() -> int { return 1 }\nfn added() -> int { return 2 }\n",
     );
     let leaf_owner = case
@@ -1561,7 +1569,7 @@ fn a_body_with_no_facts_that_gains_a_call_is_still_re_walked() {
 #[test]
 fn a_semantic_edit_shifts_unedited_owner_spans_without_rewalking_that_owner() {
     let mut case = Case::new(
-        "fn main() { print(other()) }\n",
+        "fn zz_start() { print(other()) }\n",
         "fn leaf() -> int { return 1 }\nfn other() -> int { return leaf() }\n",
     );
     let span_before = case
@@ -1613,12 +1621,15 @@ fn a_semantic_edit_shifts_unedited_owner_spans_without_rewalking_that_owner() {
 /// callee at all and gains one.
 #[test]
 fn a_const_initializer_with_no_facts_that_gains_a_call_is_still_re_walked() {
-    let mut case = Case::new("const C: int = 1\nfn main() { print(\"{C}\") }\n", PICK_LIB);
+    let mut case = Case::new(
+        "const C: int = 1\nfn zz_start() { print(\"{C}\") }\n",
+        PICK_LIB,
+    );
     assert!(!case.has_instance_named("pick_a"));
 
     let stats = case.edit(
         MAIN,
-        "const C: int = pick_a()\nfn main() { print(\"{C}\") }\n",
+        "const C: int = pick_a()\nfn zz_start() { print(\"{C}\") }\n",
     );
 
     assert!(
@@ -1636,7 +1647,7 @@ fn a_const_initializer_with_no_facts_that_gains_a_call_is_still_re_walked() {
 #[test]
 #[should_panic(expected = "the root set moved during a body-only update")]
 fn a_moved_root_set_is_refused_rather_than_absorbed() {
-    let case = Case::new("fn main() { print(\"{other()}\") }\n", CHAIN_LIB);
+    let case = Case::new("fn zz_start() { print(\"{other()}\") }\n", CHAIN_LIB);
     let ws = case.ws();
     let mut roots = skull::mir_emit::emission_roots(ws, Some(PROJ));
     roots.pop().expect("the fixture has roots");
@@ -1672,7 +1683,7 @@ fn other() -> int { return 7 }
 #[test]
 fn an_always_emitted_target_anchors_what_the_edit_stranded() {
     let mut case = Case::new(
-        "fn main() { print(\"{shared()} {other()} {C}\") }\n",
+        "fn zz_start() { print(\"{shared()} {other()} {C}\") }\n",
         ANCHOR_LIB,
     );
     assert!(
@@ -1689,7 +1700,7 @@ fn an_always_emitted_target_anchors_what_the_edit_stranded() {
         "the fixture's anchor is not an always-emitted target: {anchored:?}"
     );
 
-    let stats = case.edit(MAIN, "fn main() { print(\"{other()} {C}\") }\n");
+    let stats = case.edit(MAIN, "fn zz_start() { print(\"{other()} {C}\") }\n");
 
     assert!(
         case.has_instance_named("shared"),
@@ -1721,7 +1732,7 @@ fn dead_leaf() -> int { return 5 }
 #[test]
 fn an_external_anchor_stops_a_branched_strand_search() {
     let mut case = Case::new(
-        "fn main() { print(\"{entry()} {anchor()}\") }\n",
+        "fn zz_start() { print(\"{entry()} {anchor()}\") }\n",
         BRANCHED_ANCHOR_LIB,
     );
     for name in [
@@ -1752,7 +1763,7 @@ fn an_external_anchor_stops_a_branched_strand_search() {
         "the fixture has no external anchor: {incoming:?}"
     );
 
-    let stats = case.edit(MAIN, "fn main() { print(\"{anchor()}\") }\n");
+    let stats = case.edit(MAIN, "fn zz_start() { print(\"{anchor()}\") }\n");
 
     assert!(
         case.has_instance_named("shared_root"),
@@ -1839,7 +1850,7 @@ fn dead_leaf() -> int { return 3 }
 #[test]
 fn a_long_anchor_path_is_included_in_prune_locality() {
     let mut case = Case::new(
-        "fn main() { print(\"{entry()} {anchor()}\") }\n",
+        "fn zz_start() { print(\"{entry()} {anchor()}\") }\n",
         LONG_ANCHOR_LIB,
     );
     for name in ["shared_root", "dead_root", "dead_leaf", "anchor_31"] {
@@ -1864,7 +1875,7 @@ fn a_long_anchor_path_is_included_in_prune_locality() {
         "the fixture has no shared external anchor: {incoming:?}"
     );
 
-    let stats = case.edit(MAIN, "fn main() { print(\"{anchor()}\") }\n");
+    let stats = case.edit(MAIN, "fn zz_start() { print(\"{anchor()}\") }\n");
 
     assert!(
         case.has_instance_named("shared_root"),
@@ -1902,9 +1913,9 @@ fn a_long_anchor_path_is_included_in_prune_locality() {
     assert_local_boundary(&stats, "long external anchor path");
 }
 
-const DIRECT_SEED_MAIN_V1: &str = "fn main() { print(\"{shared_root()}\") }\nfn independent_root() -> int { return shared_root() }\n";
+const DIRECT_SEED_MAIN_V1: &str = "fn zz_start() { print(\"{shared_root()}\") }\nfn independent_root() -> int { return shared_root() }\n";
 const DIRECT_SEED_MAIN_V2: &str =
-    "fn main() { print(\"0\") }\nfn independent_root() -> int { return shared_root() }\n";
+    "fn zz_start() { print(\"0\") }\nfn independent_root() -> int { return shared_root() }\n";
 const DIRECT_SEED_LIB: &str = r#"
 fn shared_root() -> int { return shared_left() + shared_right() }
 fn shared_left() -> int { return shared_left_a() + shared_left_b() }
@@ -2006,9 +2017,9 @@ fn an_externally_supported_lost_seed_stops_before_its_subtree() {
 }
 
 const NESTED_SEED_MAIN_V1: &str =
-    "fn main() { print(\"{shared(1)}\") }\nfn independent_root() { print(\"{outer(1)}\") }\n";
+    "fn zz_start() { print(\"{shared(1)}\") }\nfn independent_root() { print(\"{outer(1)}\") }\n";
 const NESTED_SEED_MAIN_V2: &str =
-    "fn main() { print(\"0\") }\nfn independent_root() { print(\"{outer(1)}\") }\n";
+    "fn zz_start() { print(\"0\") }\nfn independent_root() { print(\"{outer(1)}\") }\n";
 const NESTED_SEED_LIB: &str = r#"
 fn shared<T>(x: T) -> int { return shared_left() + shared_right() }
 fn outer<T>(x: T) -> int { return shared(x) }
@@ -2139,14 +2150,14 @@ fn other() -> int { return 7 }
 #[test]
 fn a_later_lost_predecessor_releases_a_tentative_boundary() {
     let mut case = Case::new(
-        "fn main() { print(\"{entry()}\") }\n",
+        "fn zz_start() { print(\"{entry()}\") }\n",
         DEFERRED_BOUNDARY_LIB,
     );
     for name in ["entry", "branch", "apparent", "shared", "dead"] {
         assert!(case.has_instance_named(name), "v1 never reached `{name}`");
     }
 
-    let stats = case.edit(MAIN, "fn main() { print(\"{other()}\") }\n");
+    let stats = case.edit(MAIN, "fn zz_start() { print(\"{other()}\") }\n");
 
     for name in ["entry", "branch", "apparent", "shared", "dead"] {
         assert!(
@@ -2175,7 +2186,7 @@ fn dead_leaf() -> int { return 1 }
 #[test]
 fn a_rooted_cycle_survives_while_the_lost_branch_is_pruned() {
     let mut case = Case::new(
-        "fn main() { print(\"{entry()} {rooted_a()}\") }\nfn root_anchor() -> int { return rooted_a() }\n",
+        "fn zz_start() { print(\"{entry()} {rooted_a()}\") }\nfn root_anchor() -> int { return rooted_a() }\n",
         ROOTED_CYCLE_LIB,
     );
     for name in ["entry", "rooted_a", "rooted_b", "dead", "dead_leaf"] {
@@ -2184,7 +2195,7 @@ fn a_rooted_cycle_survives_while_the_lost_branch_is_pruned() {
 
     let stats = case.edit(
         MAIN,
-        "fn main() { print(\"0\") }\nfn root_anchor() -> int { return rooted_a() }\n",
+        "fn zz_start() { print(\"0\") }\nfn root_anchor() -> int { return rooted_a() }\n",
     );
 
     assert!(
@@ -2236,7 +2247,7 @@ fn other() -> int { return 7 }
 #[test]
 fn pruning_an_instance_retracts_its_bound_tree() {
     let mut case = Case::new(
-        "fn main() { print(\"{total([1, 2])} {other()}\") }\n",
+        "fn zz_start() { print(\"{total([1, 2])} {other()}\") }\n",
         BOUNDED_LIB,
     );
     let before = case.graph.bound_trees().count();
@@ -2245,7 +2256,7 @@ fn pruning_an_instance_retracts_its_bound_tree() {
         "the fixture recorded no bound tree, so the arm has no population"
     );
 
-    let stats = case.edit(MAIN, "fn main() { print(\"{other()}\") }\n");
+    let stats = case.edit(MAIN, "fn zz_start() { print(\"{other()}\") }\n");
 
     assert!(
         stats.pruned > 0,
@@ -2283,7 +2294,7 @@ struct Holder { v: int = make(5) }
 #[test]
 fn a_global_initializers_struct_default_reaches_its_omitted_fields_callee() {
     let case = Case::new(
-        "global G: Holder = Holder {}\nfn main() { print(\"{1}\") }\n",
+        "global G: Holder = Holder {}\nfn zz_start() { print(\"{1}\") }\n",
         STRUCT_DEFAULT_LIB,
     );
     let has_make_int = case.graph.instances.iter().any(|i| {
@@ -2304,7 +2315,7 @@ fn a_global_initializers_struct_default_reaches_its_omitted_fields_callee() {
 /// present.
 #[test]
 fn with_no_holder_construction_the_defaults_callee_is_absent() {
-    let case = Case::new("fn main() { print(\"{1}\") }\n", STRUCT_DEFAULT_LIB);
+    let case = Case::new("fn zz_start() { print(\"{1}\") }\n", STRUCT_DEFAULT_LIB);
     let has_make_int = case
         .graph
         .instances
@@ -2323,7 +2334,7 @@ fn descend<T>(x: T) -> int { return relay([x]) }
 fn relay<T>(x: [T]) -> int { return 0 }
 "#;
     let recursive = flat.replace("return 0", "return descend(x)");
-    let mut case = Case::new("fn main() { print(\"{descend(1)}\") }\n", flat);
+    let mut case = Case::new("fn zz_start() { print(\"{descend(1)}\") }\n", flat);
     let count = |case: &Case| {
         case.graph
             .rejections()
@@ -2370,8 +2381,7 @@ fn ItD.next(it) -> (bool, int) { return (false, 0) }
     // `walk<ItC>` stays reached from `main`, so the edit removes only the
     // edge that witnessed the first finding: no instance of `walk` enters or
     // leaves, and nothing seeds the `ItB` region through its declaration.
-    let main =
-        "fn main() { print(\"{walk(ItA { i: 0 })} {walk(ItB { i: 0 })} {walk(ItC { i: 0 })}\") }\n";
+    let main = "fn zz_start() { print(\"{walk(ItA { i: 0 })} {walk(ItB { i: 0 })} {walk(ItC { i: 0 })}\") }\n";
     let at = |case: &Case| -> Vec<String> {
         case.graph
             .rejections()

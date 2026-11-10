@@ -1195,8 +1195,14 @@ impl SkullEmitCache {
         // declaration must not be indistinguishable from editing the other's.
         // `Instance::base` is still taken for every changed fn: a non-generic one
         // IS its base instance, and a declaration the graph never reached still has
-        // a chunk here that an edit can invalidate.
-        let mut affected: FxHashSet<Instance> = changed.iter().copied().map(shared).collect();
+        // a chunk here that an edit can invalidate. One with no chunk has no plan
+        // either: a program's own function nothing calls is not built at all.
+        let mut affected: FxHashSet<Instance> = changed
+            .iter()
+            .copied()
+            .map(shared)
+            .filter(|body| cache.chunks.contains_key(body))
+            .collect();
         if !changed_literals.is_empty() {
             affected.extend(cache.chunks.iter().filter_map(|(body, chunk)| {
                 chunk

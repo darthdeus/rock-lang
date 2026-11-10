@@ -146,6 +146,7 @@ mod nullable_value_in_tuple_sentinel;
 mod nullable_value_join_sroa;
 mod optional_value_wire;
 mod plain_struct_scalarize;
+mod program_roots;
 mod removed_global_markers;
 mod reserved_namespace;
 mod shader_pipeline_register;
