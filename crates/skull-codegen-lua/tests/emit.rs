@@ -2936,3 +2936,30 @@ fn specialized_symbols_are_spelled_per_context() {
     assert_eq!(first_inst, second_inst);
     assert_ne!(first, second);
 }
+
+/// `xs.len()` and `vec_len(xs)` on a `[T]` lower to the length read itself:
+/// with no inlining there is still no call to make.
+#[test]
+fn vec_len_lowers_to_the_length_read() {
+    let src = "fn n(xs: [int], ys: [string]) -> int { return xs.len() + vec_len(ys) }";
+    let lua = emit_clean(src, "n");
+    assert!(lua.contains("c0.len") && lua.contains("c1.len"), "{lua}");
+    assert!(!lua.contains("len_") && !lua.contains("vec_len"), "{lua}");
+    assert_eq!(
+        run(
+            src,
+            "n({_data = {1, 2}, len = 2}, {_data = {'a'}, len = 1})"
+        ),
+        "3"
+    );
+}
+
+/// A user function that shares the name is still called.
+#[test]
+fn a_user_len_over_a_vector_is_still_called() {
+    let src = "
+struct Row { n: int }
+fn len(rows: [Row]) -> int { return 40 + rows.len }
+fn probe() -> int { return len([Row { n: 1 }, Row { n: 2 }]) }";
+    assert_eq!(run(src, "probe()"), "42");
+}

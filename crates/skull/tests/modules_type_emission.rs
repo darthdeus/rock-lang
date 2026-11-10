@@ -257,8 +257,14 @@ fn a_generic_specialized_at_a_v1_nominal_emits_runnable_lua() {
     assert!(
         emitted
             .lua
-            .contains(&format!("function vec_len_arr_T_{encoded}(")),
-        "the specialized definition takes the nominal's identifier form"
+            .contains(&format!("function push_arr_T_T_{encoded}(")),
+        "the specialized definition takes the nominal's identifier form:\n{}",
+        emitted
+            .lua
+            .lines()
+            .filter(|l| l.contains(&encoded))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
     let out = run_main(&emitted.lua);
     assert_eq!(out, "total=9");

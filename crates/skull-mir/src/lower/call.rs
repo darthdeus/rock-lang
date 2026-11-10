@@ -29,6 +29,30 @@ pub(crate) struct DirectCall<'a> {
 }
 
 impl<'a> Builder<'a> {
+    /// Whether the call at `e` passes a plain `[T]` receiver to the stdlib's
+    /// own Rock-bodied `name`. A user function may share the name.
+    fn calls_stdlib_vec_fn(&self, e: Idx<Expr>, name: Ustr, recv: Idx<Expr>) -> bool {
+        if self.body.arg_names.contains_key(&recv) || self.body.spread_args.contains(&recv) {
+            return false;
+        }
+        let is_vec = matches!(
+            self.concrete_expr_ty(recv),
+            Some(MonoTy::App {
+                ctor: MonoCtor::Array,
+                ..
+            })
+        );
+        if !is_vec {
+            return false;
+        }
+        let Ok(func) = self.resolve_funcref(e, name) else {
+            return false;
+        };
+        let module = self.ws.module(func.module);
+        bone_core::modules::is_stdlib_module_file(module.file.as_str())
+            && module.functions[func.func].inline_body.is_none()
+    }
+
     fn lower_nullable_field_get(
         &mut self,
         e: Idx<Expr>,
@@ -632,6 +656,22 @@ impl<'a> Builder<'a> {
                 });
                 return Ok(ValueRepr::Scalar(nb));
             }
+        }
+        // `xs.len()` / `vec_len(xs)` on a `[T]` is the stdlib's read of the
+        // length field. Emitting that read here spares the inliner two splices
+        // per site and gives a body that never inlines the same read.
+        if let Callee::Unresolved { name, .. } = callee
+            && matches!(name.as_str(), "len" | "vec_len")
+            && let [recv] = arg_idxs[..]
+            && self.scx.target() == bone_core::hir::FnBackend::Lua
+            && !self.scx.values_first_class
+            && self.calls_stdlib_vec_fn(e, name, recv)
+        {
+            let base = self.lower_expr(recv)?;
+            return Ok(ValueRepr::Scalar(self.emit_cur(Inst::Field {
+                base,
+                field: crate::names::ustr("len"),
+            })));
         }
         // `xs.push(v)` / `vec_push(xs, v)` onto a COLUMN-stored Vec. The stdlib
         // push bodies write one element into a single `_data` backing, which

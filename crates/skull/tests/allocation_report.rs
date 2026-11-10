@@ -48,7 +48,7 @@ fn alloc_leaf() -> [int] {
 }
 
 fn update_root() -> int {
-    return alloc_leaf().len()
+    return alloc_leaf().get(1) ?? 0
 }
 "#,
     );
@@ -64,7 +64,7 @@ fn update_root() -> int {
     );
     assert_eq!(
         route.reachable_bodies, 4,
-        "the route must include the residual stdlib len chain"
+        "the route must include the residual stdlib get chain"
     );
     assert_eq!(
         route.findings.len(),
