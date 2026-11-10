@@ -177,21 +177,30 @@ pub trait CompileHost {
         entry: ModuleId,
         target: EmitTarget,
     ) -> Result<MirEmit, CompilerError> {
-        // The one-shot program is written once; nothing replays or reloads it.
-        let mut emit = crate::mir_emit::FullEmit::one_shot()
-            .without_fingerprint()
-            .project_root(target.project_root)
-            .renderer(target.renderer);
-        if target.attribution {
-            emit = emit.with_attribution();
-        }
-        emit.run(ws, entry).map(|(emit, cache)| {
-            // The emitted program is complete; the cache is dead weight
-            // whose release need not delay it.
-            crate::mir_emit::par::drop_in_background(cache);
-            emit
-        })
+        emit_program(ws, entry, target)
     }
+}
+
+/// [`CompileHost::emit`]'s program emission, for hosts that wrap it.
+pub fn emit_program(
+    ws: &Workspace,
+    entry: ModuleId,
+    target: EmitTarget,
+) -> Result<MirEmit, CompilerError> {
+    // The one-shot program is written once; nothing replays or reloads it.
+    let mut emit = crate::mir_emit::FullEmit::one_shot()
+        .without_fingerprint()
+        .project_root(target.project_root)
+        .renderer(target.renderer);
+    if target.attribution {
+        emit = emit.with_attribution();
+    }
+    emit.run(ws, entry).map(|(emit, cache)| {
+        // The emitted program is complete; the cache is dead weight
+        // whose release need not delay it.
+        crate::mir_emit::par::drop_in_background(cache);
+        emit
+    })
 }
 
 /// Where emission prunes and which renderer it targets.

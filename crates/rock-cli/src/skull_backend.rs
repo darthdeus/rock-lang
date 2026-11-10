@@ -54,6 +54,14 @@ struct CliCompileHost<'a> {
     lint_scope: crate::lint_pass::Scope,
     comptime: CliComptime<'a>,
     prepare_timings: Vec<(&'static str, std::time::Duration)>,
+    accessors: AccessorPlanning,
+}
+
+/// Whether the host plans the global accessor metadata beside emission.
+enum AccessorPlanning {
+    Skip,
+    BesideEmit,
+    Planned(std::result::Result<String, CompilerError>),
 }
 
 enum CliComptime<'a> {
@@ -144,6 +152,29 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
         found
     }
 
+    fn emit(
+        &mut self,
+        ws: &bone_semantic::inference::Workspace,
+        entry: bone_semantic::prelude::ModuleId,
+        target: skull::pipeline::EmitTarget,
+    ) -> std::result::Result<skull::mir_emit::MirEmit, CompilerError> {
+        if !matches!(self.accessors, AccessorPlanning::BesideEmit) {
+            return skull::pipeline::emit_program(ws, entry, target);
+        }
+        // Accessor planning reads only the checked workspace and runs on one
+        // thread, so it overlaps emission instead of following it.
+        let (emit, metadata) = std::thread::scope(|scope| {
+            let metadata = scope.spawn(|| global_accessor_metadata(ws));
+            let emit = skull::pipeline::emit_program(ws, entry, target);
+            let metadata = metadata
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+            (emit, metadata)
+        });
+        self.accessors = AccessorPlanning::Planned(metadata);
+        emit
+    }
+
     fn report_soft_findings(&mut self, soft: Vec<bone_lints::Finding>) {
         crate::lint_pass::report_soft(&soft, self.sources, self.lint_root);
     }
@@ -217,6 +248,7 @@ fn skull_emit_full(
         lint_scope: crate::lint_pass::Scope::WholeProject,
         comptime: CliComptime::FromEntry(file),
         prepare_timings: Vec::new(),
+        accessors: AccessorPlanning::Skip,
     };
     let skull::pipeline::Compiled {
         ws,
@@ -1391,6 +1423,7 @@ fn skull_build_package_with_limit(
             lint_scope: crate::lint_pass::Scope::WholeProject,
             comptime: CliComptime::FromEntry(dir),
             prepare_timings: Vec::new(),
+            accessors: AccessorPlanning::Skip,
         },
         test_dir: dir,
     };
@@ -2217,6 +2250,7 @@ fn skull_emit_project_with_inputs(
         lint_scope: crate::lint_pass::Scope::ProductionOnly,
         comptime: CliComptime::Project(Some(inputs)),
         prepare_timings: Vec::new(),
+        accessors: AccessorPlanning::BesideEmit,
     };
     let body_costs = crate::body_costs::begin();
     let target = skull::pipeline::EmitTarget {
@@ -2267,7 +2301,11 @@ fn skull_emit_project_with_inputs(
     let compile = t.elapsed();
     crate::bone_backend::log_compile_stats(&sources, &ws, compile, compile, None);
 
-    let lua = match install_global_accessors(lua, &ws) {
+    let metadata = match std::mem::replace(&mut host.accessors, AccessorPlanning::Skip) {
+        AccessorPlanning::Planned(metadata) => metadata,
+        _ => global_accessor_metadata(&ws),
+    };
+    let lua = match metadata.and_then(|metadata| GameProgram::new(lua, metadata, &ws)) {
         Ok(lua) => lua,
         Err(error) => {
             eprintln!("{}", render_project_err(&sources, &error));
@@ -2320,9 +2358,19 @@ pub struct GameProgram {
 }
 
 impl GameProgram {
+    fn new(
+        lua: String,
+        metadata: String,
+        ws: &bone_semantic::inference::Workspace,
+    ) -> std::result::Result<Self, CompilerError> {
+        let mut program = Self::with_metadata(lua, metadata)?;
+        program.comptime_inputs = ws.comptime_inputs.clone();
+        Ok(program)
+    }
+
     fn with_metadata(lua: String, metadata: String) -> std::result::Result<Self, CompilerError> {
         let marker = "__rock_globals_install_bridge()\n";
-        let at = lua.find(marker).ok_or_else(|| {
+        let at = memchr::memmem::find(lua.as_bytes(), marker.as_bytes()).ok_or_else(|| {
             CompilerError::new_no_location(
                 "compiled program is missing its global directory".to_string(),
             )
@@ -2345,6 +2393,13 @@ fn install_global_accessors(
     lua: String,
     ws: &bone_semantic::inference::Workspace,
 ) -> std::result::Result<GameProgram, CompilerError> {
+    GameProgram::new(lua, global_accessor_metadata(ws)?, ws)
+}
+
+/// The directory fields a host attaches to the emitted globals.
+fn global_accessor_metadata(
+    ws: &bone_semantic::inference::Workspace,
+) -> std::result::Result<String, CompilerError> {
     let mut rows = std::collections::BTreeMap::new();
     let scx = skull_mir::lower::ScalarCtx::new(ws);
     build_global_nobox_accessors(ws, &scx, &mut rows)?;
@@ -2353,9 +2408,7 @@ fn install_global_accessors(
         metadata.push_str(&format!("[{identity:?}]={{{}}},\n", fields.join(",")));
     }
     metadata.push_str("})\n");
-    let mut program = GameProgram::with_metadata(lua, metadata)?;
-    program.comptime_inputs = ws.comptime_inputs.clone();
-    Ok(program)
+    Ok(metadata)
 }
 
 /// The `get`/`set` directory fields of each `nobox` global: the rebuild and
@@ -2589,12 +2642,22 @@ pub(crate) fn skull_compile_project_with_recorded_inputs(
     inputs: impl Into<crate::comptime::ProjectInputs>,
 ) -> Result<bone_semantic::inference::ComptimeInputs> {
     let budget = crate::compile_budget::Scope::begin(dir);
+    // The preamble reads only the project's manifest and files, so it is
+    // built while the program compiles.
+    let preamble = {
+        let dir = dir.to_string();
+        std::thread::spawn(move || {
+            (RuntimeServices::registered().program_preamble)(&dir, ProgramKind::Project)
+        })
+    };
     let (emit, emits_main) = skull_emit_project_with_inputs(dir, inputs.into())?;
     // A game's runnable main.lua is the same shape run/engine produce via
     // write_full_main: preamble (game source dir) + emit +
     // __rock_main_wrapper(main). Without the preamble game asset paths are
     // wrong; without the wrapper it never starts.
-    let preamble = (RuntimeServices::registered().program_preamble)(dir, ProgramKind::Project)?;
+    let preamble = preamble
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
     crate::compile_budget::phase("preamble");
     let parts = skull_game_main(&preamble, &emit, emits_main);
     match output {

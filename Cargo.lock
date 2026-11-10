@@ -1845,6 +1845,7 @@ dependencies = [
  "libc",
  "log",
  "lsp-types-manual",
+ "memchr",
  "mimalloc",
  "notify",
  "notify-debouncer-full",

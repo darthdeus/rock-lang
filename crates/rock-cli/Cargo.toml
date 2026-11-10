@@ -27,6 +27,7 @@ rock-visual-bank = { path = "../rock-visual-bank" }
 gamelibs = { path = "../gamelibs" }
 sound-core = { workspace = true }
 globset = "0.4.19"
+memchr = { workspace = true }
 rodio = { version = "0.22", default-features = false, features = ["mp3", "vorbis", "wav"] }
 
 test-utils = { workspace = true, optional = true }
