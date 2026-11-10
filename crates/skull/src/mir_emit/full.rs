@@ -811,6 +811,10 @@ fn reject_abi_param_collisions(ws: &Workspace, scx: &skull_mir::lower::ScalarCtx
 
 type ChunkMap = FxHashMap<Instance, Result<Chunk, CompilerError>>;
 
+/// The fan-out's bodies, one filled slot per declaration, in the order the
+/// chunk map is built in.
+type FanOutBodies = Vec<Option<(Instance, Result<Chunk, CompilerError>)>>;
+
 /// One job of the fan-out: a retained declaration's body (with its position,
 /// which fixes the chunk map's order) or a specialization a lowered body
 /// demanded.
@@ -836,7 +840,7 @@ fn emit_full_chunks<'a>(
     setup_phases: &mut SetupPhases,
 ) -> Result<
     (
-        ChunkMap,
+        FanOutBodies,
         std::sync::Arc<skull_transform::InlineCandidateTable>,
         SpecQueue<'a>,
     ),
@@ -885,7 +889,7 @@ fn emit_full_chunks<'a>(
     }
     // One slot per body, so the chunk map is built in declaration order
     // without moving the chunks through a sort.
-    let bodies: std::sync::Mutex<Vec<Option<(Instance, Result<Chunk, CompilerError>)>>> =
+    let bodies: std::sync::Mutex<FanOutBodies> =
         std::sync::Mutex::new(std::iter::repeat_with(|| None).take(jobs.len()).collect());
     // The fan-out's wall window, beside the per-unit sums the chunks carry:
     // the budget reads idle time as threads * window - summed unit time.
@@ -929,13 +933,8 @@ fn emit_full_chunks<'a>(
             },
         )
     });
-    let chunks = bodies
-        .into_inner()
-        .expect("fan-out chunks")
-        .into_iter()
-        .map(|slot| slot.expect("every fan-out body is emitted"))
-        .collect();
-    Ok((chunks, inline_candidate_table, queue))
+    let bodies = bodies.into_inner().expect("fan-out chunks");
+    Ok((bodies, inline_candidate_table, queue))
 }
 
 /// Seed the reverse dependency index from every chunk's codegen deps (only a
@@ -1143,19 +1142,28 @@ pub(super) fn emit_full_build(
         },
     );
     let (shader_view, shader_registrations) = shader_result?;
-    let (chunks, inline_candidate_table, spec_queue) = chunks?;
-    // Decorator and global units are lowered beside the fan-out; what they
-    // demand is usually built already.
-    let mut spec_jobs = Vec::new();
-    spec_queue.admit_all(early.demands(), &mut spec_jobs);
-    drain_spec_jobs(
-        &spec_queue,
-        &cg,
-        &concrete,
-        Some(&inline_candidate_table),
-        spec_jobs,
+    let (bodies, inline_candidate_table, spec_queue) = chunks?;
+    // The chunk map only moves the finished bodies, so it is built while the
+    // specializations are settled. Decorator and global units are lowered
+    // beside the fan-out; what they demand is usually built already.
+    let (chunks, specs) = parallel_join(
+        || {
+            let filled = |slot: Option<_>| slot.expect("every fan-out body is emitted");
+            bodies.into_iter().map(filled).collect::<ChunkMap>()
+        },
+        || {
+            let mut spec_jobs = Vec::new();
+            spec_queue.admit_all(early.demands(), &mut spec_jobs);
+            drain_spec_jobs(
+                &spec_queue,
+                &cg,
+                &concrete,
+                Some(&inline_candidate_table),
+                spec_jobs,
+            );
+            spec_queue.finish()
+        },
     );
-    let specs = spec_queue.finish();
     setup_lanes.shader_population = shader_lane.population;
     setup_phases
         .0
