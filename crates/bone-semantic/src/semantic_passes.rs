@@ -1661,18 +1661,18 @@ fn validate_v1_use_targets(
     ws: &Workspace,
     contributions: &[&FragmentContribution],
 ) -> Result<(), CompilerError> {
-    for contribution in contributions {
+    // Read-only per fragment; the first failing fragment in module order
+    // reports, as a sequential walk would.
+    let first_error = contributions.par_iter().find_map_first(|contribution| {
         if contribution.dialect != skull_parser::Dialect::V1
             || is_stdlib_module_file(contribution.file.as_str())
         {
-            continue;
+            return None;
         }
-        let Some(frag) = ws.fragment_scopes.get(&contribution.file) else {
-            continue;
-        };
-        validate_use_items(ws, frag, &frag.module_path, &contribution.items)?;
-    }
-    Ok(())
+        let frag = ws.fragment_scopes.get(&contribution.file)?;
+        validate_use_items(ws, frag, &frag.module_path, &contribution.items).err()
+    });
+    first_error.map_or(Ok(()), Err)
 }
 
 fn validate_use_items(
