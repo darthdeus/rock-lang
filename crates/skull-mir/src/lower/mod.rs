@@ -2477,6 +2477,13 @@ impl<'a> Builder<'a> {
                 );
             }
         }
+        // Whatever follows a raising call lowers into a block nothing reaches,
+        // which cleanup drops. The raising block keeps its open terminator.
+        if let Inst::Call { func, .. } = self.f.insts[id]
+            && crate::intrinsics::never_returns(&self.ws.module(func.module).functions[func.func])
+        {
+            self.cur = self.f.new_block();
+        }
         id
     }
 

@@ -1119,3 +1119,13 @@ fn write_lua_string(out: &mut String, s: &str) {
     }
     out.push('"');
 }
+
+/// Whether `bb` ends in a call that never returns, which lowering leaves with
+/// the open `Unreachable` terminator.
+pub(crate) fn raises(ws: &Workspace, func: &MirFunc, bb: Idx<Block>) -> bool {
+    matches!(func.blocks[bb].term, Term::Unreachable)
+        && func.blocks[bb].insts.last().is_some_and(|last| {
+            matches!(func.insts[*last], Inst::Call { func: callee, .. }
+                if skull_mir::intrinsics::never_returns(func_of(ws, callee)))
+        })
+}

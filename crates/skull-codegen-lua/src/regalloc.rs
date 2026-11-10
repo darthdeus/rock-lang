@@ -1498,6 +1498,16 @@ impl NilKills {
         }
     }
 
+    /// No kills in `b`, on entry or after any of its statements.
+    pub(crate) fn drop_block(&mut self, func: &MirFunc, b: Idx<Block>) {
+        self.at_entry[raw(b)].clear();
+        for &id in &func.blocks[b].insts {
+            if let Some(range) = self.after_range.get_mut(raw(id)) {
+                *range = (0, 0);
+            }
+        }
+    }
+
     /// Locals dead right after the statement of `id`.
     pub(crate) fn after_inst(&self, id: Idx<Inst>) -> &[KillLocal] {
         match self.after_range.get(raw(id)) {

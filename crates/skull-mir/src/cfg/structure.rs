@@ -372,6 +372,7 @@ const NO_BLOCK: u32 = u32::MAX;
 const HEADER: u8 = 1;
 const FOLLOWER: u8 = 2;
 const UNPLACED: u8 = 4;
+const IN_PLACE: u8 = 8;
 
 impl Placement {
     fn at(&self, b: Idx<Block>) -> u32 {
@@ -472,9 +473,16 @@ fn reset<T: Copy>(v: &mut Vec<T>, len: usize, x: T) {
 /// [`Placement`] over `succ` (successors that may differ from the function's
 /// own edges) from `entry`. `unplaced` blocks are never printed as statements
 /// (a counted loop's latch, which its `for` line subsumes), so they are never
-/// followers. `None` when the CFG is irreducible.
-pub fn place(entry: Idx<Block>, succ: &Succ, unplaced: &[Idx<Block>]) -> Option<Placement> {
-    SCRATCH.with(|s| place_in(&mut s.borrow_mut(), entry, succ, unplaced))
+/// followers. `in_place` exits (blocks that raise) print where they are
+/// branched to, even inside a loop they leave. `None` when the CFG is
+/// irreducible.
+pub fn place(
+    entry: Idx<Block>,
+    succ: &Succ,
+    unplaced: &[Idx<Block>],
+    in_place: &[Idx<Block>],
+) -> Option<Placement> {
+    SCRATCH.with(|s| place_in(&mut s.borrow_mut(), entry, succ, unplaced, in_place))
 }
 
 fn place_in(
@@ -482,6 +490,7 @@ fn place_in(
     entry: Idx<Block>,
     succ: &Succ,
     unplaced: &[Idx<Block>],
+    in_place: &[Idx<Block>],
 ) -> Option<Placement> {
     let n = succ.offsets.len() - 1;
     // Reverse postorder by an iterative depth-first search.
@@ -525,6 +534,12 @@ fn place_in(
         let p = order[bx(u)];
         if p != NO_BLOCK {
             pos[p as usize].flags |= UNPLACED;
+        }
+    }
+    for &u in in_place {
+        let p = order[bx(u)];
+        if p != NO_BLOCK {
+            pos[p as usize].flags |= IN_PLACE;
         }
     }
     if k == 1 {
@@ -674,6 +689,11 @@ fn place_in(
         let mut parent = idom[p];
         let mut lifted = false;
         let mut l = pos[parent as usize].loop_of;
+        // A raise reached from one place never falls through, so it prints
+        // there inside the loop instead of after it behind a goto.
+        if pos[p].flags & IN_PLACE != 0 && s.forward_in[p] == 1 {
+            l = NO_BLOCK;
+        }
         while l != NO_BLOCK && !in_loop(&pos, l, p as u32) {
             parent = l;
             lifted = true;
@@ -922,7 +942,7 @@ mod tests {
                 Term::Return(vec![]),
             ],
         );
-        assert!(place(bi(0), &dense_succ(&f), &[]).is_none());
+        assert!(place(bi(0), &dense_succ(&f), &[], &[]).is_none());
     }
 
     #[test]
@@ -937,7 +957,7 @@ mod tests {
                 Term::Return(vec![]),
             ],
         );
-        let p = place(bi(0), &dense_succ(&f), &[]).expect("reducible");
+        let p = place(bi(0), &dense_succ(&f), &[], &[]).expect("reducible");
         assert_eq!(p.followers(bi(0)), &[bi(3)]);
         assert!(!p.is_follower(bi(1)) && !p.is_follower(bi(2)));
     }
@@ -956,11 +976,28 @@ mod tests {
                 Term::Return(vec![]),
             ],
         );
-        let p = place(bi(0), &dense_succ(&f), &[]).expect("reducible");
+        let p = place(bi(0), &dense_succ(&f), &[], &[]).expect("reducible");
         assert!(p.is_header(bi(1)));
         assert_eq!(p.latches(bi(1)).collect::<Vec<_>>(), vec![bi(2)]);
         assert!(p.in_loop(bi(1), bi(2)) && !p.in_loop(bi(1), bi(3)));
         assert_eq!(p.followers(bi(1)), &[bi(3)]);
+    }
+
+    #[test]
+    fn place_keeps_a_raising_loop_exit_where_it_branches_from() {
+        // As above, but the exit 3 raises: it prints inside the loop.
+        let f = mk(
+            4,
+            vec![
+                Term::Goto(bi(1)),
+                branch(2, 3),
+                Term::Goto(bi(1)),
+                Term::Unreachable,
+            ],
+        );
+        let p = place(bi(0), &dense_succ(&f), &[], &[bi(3)]).expect("reducible");
+        assert!(!p.in_loop(bi(1), bi(3)) && !p.is_follower(bi(3)));
+        assert!(p.followers(bi(1)).is_empty());
     }
 
     #[test]
@@ -977,7 +1014,7 @@ mod tests {
                 Term::Return(vec![]),
             ],
         );
-        let p = place(bi(0), &dense_succ(&f), &[]).expect("reducible");
+        let p = place(bi(0), &dense_succ(&f), &[], &[]).expect("reducible");
         assert!(p.in_loop(bi(1), bi(4)) && p.in_loop(bi(2), bi(4)));
         assert!(p.in_loop(bi(1), bi(5)) && !p.in_loop(bi(2), bi(5)));
         // The inner exit stays inside the outer loop.

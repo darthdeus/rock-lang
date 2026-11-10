@@ -120,7 +120,7 @@ pub(crate) fn render_scope(
                 excluded[raw(cid) as usize] = true;
             }
         }
-        regalloc::nil_kills(
+        let mut kills = regalloc::nil_kills(
             func,
             rpo,
             &emits_nothing,
@@ -131,7 +131,13 @@ pub(crate) fn render_scope(
             &excluded,
             params,
             &alias,
-        )
+        );
+        // A path that can only end in a raise unwinds the frame; no slot it
+        // leaves stale is ever observed.
+        for b in raising_blocks(ws, func) {
+            kills.drop_block(func, b);
+        }
+        kills
     };
     REGALLOC_TIME.with(|c| c.set(c.get() + t_ra.elapsed()));
 
@@ -318,8 +324,15 @@ pub(crate) fn render_scope(
         }
         Some(frame_limits::ControlLines::default())
     } else {
-        structured::Shape::analyze(func, entry, rpo, &loops, |b| em.is_empty_forwarder(b))
-            .map(|shape| structured::emit_body(&mut em, &shape, entry, out))
+        structured::Shape::analyze(
+            func,
+            entry,
+            rpo,
+            &loops,
+            |b| em.is_empty_forwarder(b),
+            |b| crate::raises(ws, func, b),
+        )
+        .map(|shape| structured::emit_body(&mut em, &shape, entry, out))
     };
     if control.is_none() {
         em.label_refs = block::label_ref_counts(func, rpo, &loops);
@@ -355,4 +368,33 @@ impl Emitter<'_> {
                 .iter()
                 .all(|&id| !self.suppressed[raw(id) as usize] && !self.emits_statement(id))
     }
+}
+
+/// The blocks every path from which ends in a call that never returns.
+fn raising_blocks(ws: &Workspace, func: &MirFunc) -> Vec<Idx<Block>> {
+    let mut raising = vec![false; func.blocks.len()];
+    for (b, blk) in func.blocks.iter() {
+        raising[raw(b) as usize] = crate::raises(ws, func, b) && !blk.insts.is_empty();
+    }
+    let mut changed = raising.iter().any(|&r| r);
+    while changed {
+        changed = false;
+        for (b, blk) in func.blocks.iter() {
+            if raising[raw(b) as usize] || !matches!(blk.term, Term::Goto(_) | Term::Branch { .. })
+            {
+                continue;
+            }
+            let mut all = true;
+            skull_mir::cfg::successors(&blk.term, |s| all &= raising[raw(s) as usize]);
+            if all {
+                raising[raw(b) as usize] = true;
+                changed = true;
+            }
+        }
+    }
+    func.blocks
+        .iter()
+        .filter(|(b, _)| raising[raw(*b) as usize])
+        .map(|(b, _)| b)
+        .collect()
 }

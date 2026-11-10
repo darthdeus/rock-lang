@@ -337,7 +337,11 @@ impl Emitter<'_> {
             // Bone proves these blocks dead; reaching one is a compiler bug,
             // which a bare return would turn into a silent early exit.
             Term::Unreachable => {
-                out.push_str(" error(\"rock: reached an unreachable block\")\n");
+                // Lowering ends a block at a call that raises; its open
+                // terminator is not a dead block.
+                if !crate::raises(self.ws, self.func, bb) {
+                    out.push_str(" error(\"rock: reached an unreachable block\")\n");
+                }
             }
             Term::Goto(b) => {
                 self.write_goto(out, *b);

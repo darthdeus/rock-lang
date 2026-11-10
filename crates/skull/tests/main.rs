@@ -139,6 +139,7 @@ mod nobox_tuple_call_spec_key;
 mod nobox_tuple_option_presence_sentinel;
 mod nobox_values;
 mod nobox_wide_strided;
+mod noreturn_calls;
 mod nullable_embed_clear;
 mod nullable_generic_binding_sroa;
 mod nullable_value_in_tuple_sentinel;

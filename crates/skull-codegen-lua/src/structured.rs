@@ -52,6 +52,7 @@ impl Shape {
         rpo: &[Idx<Block>],
         counted: &HashMap<Idx<Block>, CountedLoop>,
         forwarder: impl Fn(Idx<Block>) -> bool,
+        raises: impl Fn(Idx<Block>) -> bool,
     ) -> Option<Shape> {
         let n = func.blocks.len();
         let forward = thread_forwarders(func, rpo, counted, forwarder);
@@ -75,7 +76,13 @@ impl Shape {
             latch_of[bx(h)] = raw(cl.latch);
             unplaced.push(cl.latch);
         }
-        let placement = place(entry, &succ, &unplaced)?;
+        let raising: Vec<Idx<Block>> = func
+            .blocks
+            .iter()
+            .map(|(b, _)| b)
+            .filter(|&b| raises(b))
+            .collect();
+        let placement = place(entry, &succ, &unplaced, &raising)?;
         // The `for` subsumes header and latch, so its natural loop must lie in
         // the recognized region (threaded forwarders may drop out of it): it
         // holds header, latch and nothing outside the region.

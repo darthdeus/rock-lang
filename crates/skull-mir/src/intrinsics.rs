@@ -286,3 +286,10 @@ pub fn intrinsic_rejection(ws: &Workspace, mid: ModuleId) -> Option<CompilerErro
     }
     None
 }
+
+/// Whether a call to `f` never returns: the stdlib intrinsics that raise. A
+/// block ends at such a call, so lowering emits nothing after it.
+pub fn never_returns(f: &bone_core::hir::Function) -> bool {
+    matches!(f.name.as_str(), "error" | "__unwrap_failed")
+        && f.annotations.iter().any(|a| a.is_builtin("intrinsic"))
+}
