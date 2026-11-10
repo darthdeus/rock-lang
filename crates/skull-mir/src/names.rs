@@ -25,6 +25,40 @@ pub fn ustr(name: &str) -> Ustr {
     })
 }
 
+/// `ustr` of `parts` joined, spelled into a stack buffer: these names are
+/// minted per cell and per field, where a `format!` is one allocation each.
+pub fn concat(parts: &[&str]) -> Ustr {
+    let mut buf = [0u8; 96];
+    let len: usize = parts.iter().map(|part| part.len()).sum();
+    if len > buf.len() {
+        return ustr(&parts.concat());
+    }
+    let mut at = 0;
+    for part in parts {
+        buf[at..at + part.len()].copy_from_slice(part.as_bytes());
+        at += part.len();
+    }
+    // Whole `str`s end to end are valid UTF-8.
+    ustr(std::str::from_utf8(&buf[..len]).expect("joined names"))
+}
+
+/// `ustr` of `"{base}{sep}{index}"`.
+pub fn indexed(base: &str, sep: &str, index: usize) -> Ustr {
+    let mut digits = [0u8; 20];
+    let mut at = digits.len();
+    let mut rest = index;
+    loop {
+        at -= 1;
+        digits[at] = b'0' + (rest % 10) as u8;
+        rest /= 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    let digits = std::str::from_utf8(&digits[at..]).expect("decimal digits");
+    concat(&[base, sep, digits])
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -33,5 +67,23 @@ mod tests {
             assert_eq!(super::ustr(name), ustr::Ustr::from(name));
             assert_eq!(super::ustr(name), ustr::Ustr::from(name));
         }
+    }
+
+    #[test]
+    fn joined_names_match_formatting() {
+        let long = "n".repeat(200);
+        for base in ["", "self", long.as_str()] {
+            for index in [0, 7, 10, 4096, usize::MAX] {
+                assert_eq!(
+                    super::indexed(base, "__", index).as_str(),
+                    format!("{base}__{index}")
+                );
+            }
+            assert_eq!(
+                super::concat(&[base, ".", "x"]).as_str(),
+                format!("{base}.x")
+            );
+        }
+        assert_eq!(super::concat(&[]).as_str(), "");
     }
 }

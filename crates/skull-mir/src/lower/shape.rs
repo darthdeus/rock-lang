@@ -203,6 +203,14 @@ pub(crate) fn leaf_names(shape: &ValueShape, prefix: &str, sep: &str) -> Vec<Str
 }
 
 pub(crate) fn leaf_names_rec(shape: &ValueShape, prefix: &str, sep: &str, out: &mut Vec<String>) {
+    let mut path = String::with_capacity(prefix.len() + 32);
+    path.push_str(prefix);
+    leaf_names_under(shape, &mut path, sep, out);
+}
+
+/// [`leaf_names_rec`] with the prefix in a buffer every level extends and
+/// restores, so only the leaves themselves are allocated.
+fn leaf_names_under(shape: &ValueShape, path: &mut String, sep: &str, out: &mut Vec<String>) {
     // A NULLABLE nested shape leads with its presence leaf, matching
     // `repr_to_leaves` (which pushes presence before the fields) and `leaf_count`
     // (which counts it). Its key is the field's own name with no child appended
@@ -215,24 +223,25 @@ pub(crate) fn leaf_names_rec(shape: &ValueShape, prefix: &str, sep: &str, out: &
     // Only the NESTED case: a top-level nullable shape has no field name to key
     // on, and no column path reaches one today (a column element is
     // non-nullable), so that case is deliberately left as it was.
-    if shape.nullable && !prefix.is_empty() {
-        out.push(prefix.to_string());
+    if shape.nullable && !path.is_empty() {
+        out.push(path.clone());
     }
+    let prefix = path.len();
     for (fname, fs) in &shape.fields {
         // The field name must JOIN its ancestors. Recursing with the prefix
         // unchanged made the Lua namer non-injective -- `Rect { tl: V2, br: V2 }`
         // emitted `f(r__x, r__y, r__x, r__y)`, and Lua binds the later pair over
         // the earlier, so a hand-written body silently read `br` where it wrote
         // `tl`.
-        let joined = if prefix.is_empty() {
-            fname.to_string()
-        } else {
-            format!("{prefix}{sep}{fname}")
-        };
-        match fs {
-            FieldShape::Prim => out.push(joined),
-            FieldShape::Nested(sub) => leaf_names_rec(sub, &joined, sep, out),
+        if prefix != 0 {
+            path.push_str(sep);
         }
+        path.push_str(fname);
+        match fs {
+            FieldShape::Prim => out.push(path.clone()),
+            FieldShape::Nested(sub) => leaf_names_under(sub, path, sep, out),
+        }
+        path.truncate(prefix);
     }
 }
 
@@ -2208,7 +2217,7 @@ impl EnumCdataShape {
 /// a record field. (Record field names are identifiers, so they never collide
 /// with the numeric tuple form.)
 pub(crate) fn slot_name(suffix: &str) -> Ustr {
-    crate::names::ustr(format!("_{suffix}").as_str())
+    crate::names::concat(&["_", suffix])
 }
 
 pub(crate) fn scalar_c_type(ws: &Workspace, ty: TyId) -> Option<&'static str> {
@@ -2454,10 +2463,7 @@ impl EnumFlatShape {
     pub(crate) fn value_shape(&self) -> ValueShape {
         let mut fields = vec![(crate::names::ustr("__tag"), FieldShape::Prim)];
         for i in 0..self.tuple_width() {
-            fields.push((
-                crate::names::ustr(format!("_{i}").as_str()),
-                FieldShape::Prim,
-            ));
+            fields.push((crate::names::indexed("_", "", i), FieldShape::Prim));
         }
         for rf in &self.record_fields {
             fields.push((*rf, FieldShape::Prim));
@@ -2781,10 +2787,7 @@ impl YieldChannel {
     pub(crate) fn value_shape(&self) -> ValueShape {
         let mut fields = vec![(crate::names::ustr("__tag"), FieldShape::Prim)];
         for i in 0..self.tuple_width {
-            fields.push((
-                crate::names::ustr(format!("_{i}").as_str()),
-                FieldShape::Prim,
-            ));
+            fields.push((crate::names::indexed("_", "", i), FieldShape::Prim));
         }
         for field in &self.record_fields {
             fields.push((*field, FieldShape::Prim));

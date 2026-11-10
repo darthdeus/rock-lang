@@ -69,12 +69,7 @@ fn ctor_fields(
             StructId::Tuple(vs.len()),
             vs.iter()
                 .enumerate()
-                .map(|(i, v)| {
-                    (
-                        skull_mir::names::ustr(&format!("_{i}")),
-                        FieldSrc::Operand(*v),
-                    )
-                })
+                .map(|(i, v)| (skull_mir::names::indexed("_", "", i), FieldSrc::Operand(*v)))
                 .collect(),
         )),
         Inst::MakeEnum {
@@ -94,10 +89,7 @@ fn ctor_fields(
                 ),
             ];
             for (i, p) in positional.iter().enumerate() {
-                f.push((
-                    skull_mir::names::ustr(&format!("_{i}")),
-                    FieldSrc::Operand(*p),
-                ));
+                f.push((skull_mir::names::indexed("_", "", i), FieldSrc::Operand(*p)));
             }
             for (n, v) in named {
                 f.push((*n, FieldSrc::Operand(*v)));
@@ -118,10 +110,7 @@ fn ctor_fields(
                 ),
             ];
             for (i, p) in positional.iter().enumerate() {
-                f.push((
-                    skull_mir::names::ustr(&format!("_{i}")),
-                    FieldSrc::Operand(*p),
-                ));
+                f.push((skull_mir::names::indexed("_", "", i), FieldSrc::Operand(*p)));
             }
             for (n, v) in named {
                 f.push((*n, FieldSrc::Operand(*v)));
@@ -590,7 +579,7 @@ impl Families {
                             Inst::StoreField { base, field, .. } => *base == op && known(field),
                             // An enum positional payload read: `v[index+1]`, named `_<index>`.
                             Inst::TupleIndex { base, index } => {
-                                *base == op && known(&skull_mir::names::ustr(&format!("_{index}")))
+                                *base == op && known(&skull_mir::names::indexed("_", "", *index))
                             }
                             Inst::Eq(a, b) | Inst::NotEq(a, b)
                                 if matches!(
@@ -816,8 +805,9 @@ struct FieldCells(HashMap<(Idx<Cell>, ustr::Ustr), Idx<Cell>>);
 impl FieldCells {
     fn get(&mut self, func: &mut MirFunc, c: Idx<Cell>, f: ustr::Ustr) -> Idx<Cell> {
         *self.0.entry((c, f)).or_insert_with(|| {
-            let base = func.cells[c].name.map(|n| n.as_str().to_string());
-            let name = base.map(|b| skull_mir::names::ustr(&format!("{b}__{f}")));
+            let name = func.cells[c]
+                .name
+                .map(|base| skull_mir::names::concat(&[base.as_str(), "__", f.as_str()]));
             let capture_identity = func.cells[c]
                 .capture_identity
                 .as_ref()
@@ -943,7 +933,7 @@ fn rewrite_projections(
                 .get(base)
                 .copied()
                 .filter(|&c| fam.is_cand(c))
-                .map(|c| (i, c, skull_mir::names::ustr(&format!("_{index}")))),
+                .map(|c| (i, c, skull_mir::names::indexed("_", "", *index))),
             _ => None,
         })
         .collect();

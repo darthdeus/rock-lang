@@ -2728,9 +2728,9 @@ impl<'a> Builder<'a> {
                             .map(|li| {
                                 self.new_binding_cell(
                                     pb,
-                                    crate::names::ustr(format!("{name}__{li}").as_str()),
+                                    crate::names::indexed(name.as_str(), "__", li),
                                     None,
-                                    crate::names::ustr(li.to_string().as_str()),
+                                    crate::names::indexed("", "", li),
                                 )
                             })
                             .collect()
@@ -2740,9 +2740,9 @@ impl<'a> Builder<'a> {
                 .map(|li| {
                     self.new_binding_cell(
                         pb,
-                        crate::names::ustr(format!("{name}__{li}").as_str()),
+                        crate::names::indexed(name.as_str(), "__", li),
                         None,
-                        crate::names::ustr(li.to_string().as_str()),
+                        crate::names::indexed("", "", li),
                     )
                 })
                 .collect(),

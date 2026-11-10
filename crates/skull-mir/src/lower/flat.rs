@@ -61,15 +61,15 @@ impl<'a> Builder<'a> {
                     .enumerate()
                 {
                     let index = offset + relative;
-                    *field = Some(crate::names::ustr(index.to_string().as_str()));
+                    *field = Some(crate::names::indexed("", "", index));
                 }
             }
             offset += slot.width();
         }
         let cells = (0..flat.leaf_count())
             .map(|index| {
-                let cell_name = crate::names::ustr(format!("{name}__{index}").as_str());
-                let projection = crate::names::ustr(index.to_string().as_str());
+                let cell_name = crate::names::indexed(name.as_str(), "__", index);
+                let projection = crate::names::indexed("", "", index);
                 let cell = self.new_binding_cell(binding, cell_name, None, projection);
                 if index == 0 {
                     self.f.cells[cell].native_ty = tag_ty;

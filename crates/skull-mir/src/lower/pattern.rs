@@ -660,7 +660,7 @@ impl<'a> Builder<'a> {
             }),
             Scrut::Val(v) if cdata => self.emit_cur(Inst::Field {
                 base: *v,
-                field: crate::names::ustr(format!("_{i}").as_str()),
+                field: crate::names::indexed("_", "", i),
             }),
             Scrut::Val(v) => self.emit_cur(Inst::TupleIndex { base: *v, index: i }),
             Scrut::Tuple(_) => {
