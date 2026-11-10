@@ -312,7 +312,7 @@ fn initial_session_build(
     output_path: &std::path::Path,
     compiler: &mut dyn crate::game_runtime::GameCompiler,
 ) -> Result<String> {
-    use crate::frame_compile_cache::{SessionStart, session_start, store_session_artifact};
+    use crate::frame_compile_cache::{session_start, store_session_artifact, SessionStart};
     let pending = match session_start(cache_root, backend, path, output_path)? {
         SessionStart::Hit(cached) => {
             let fingerprint = cached.artifact_fingerprint.clone();
@@ -342,6 +342,29 @@ fn initial_session_build(
         }
     }
     Ok(fingerprint)
+}
+
+fn wait_for_reload_resume(control: &std::path::Path) -> Result<()> {
+    let acknowledged = control.with_extension("held");
+    let mut announced: Option<Vec<u8>> = None;
+    while control.exists() {
+        let requested = match fs_err::read(control) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        };
+        if announced.as_ref() != Some(&requested) {
+            fs_err::write(&acknowledged, &requested)?;
+            info!("Reloads held by the running game; edits wait until resumed");
+            announced = Some(requested);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if acknowledged.exists() {
+        fs_err::remove_file(acknowledged)?;
+        info!("Reloads resumed");
+    }
+    Ok(())
 }
 
 pub(crate) fn do_stone_watch(
@@ -528,7 +551,15 @@ pub(crate) fn do_stone_watch(
     let mut sound_dirty = false;
     let mut force_game_compile = !initial_compilation_success;
 
-    for event in change_rx {
+    let reload_control = output_path.with_file_name("reload.hold");
+    loop {
+        wait_for_reload_resume(&reload_control)?;
+        let event = match change_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+            Ok(event) => event,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        };
+        wait_for_reload_resume(&reload_control)?;
         let _keep_native_watch = &native_watcher;
         // Check for manual restart trigger first
         let mut manual_restart_requested = false;
@@ -688,6 +719,7 @@ pub(crate) fn do_stone_watch(
         // desync). Only returns if the exec itself failed, in which case we log
         // and fall through to a best-effort rebuild+restart on the old binary.
         if compiler_rebuilt {
+            wait_for_reload_resume(&reload_control)?;
             reexec_with_new_binary(&mut game_process);
         }
 
@@ -696,6 +728,7 @@ pub(crate) fn do_stone_watch(
         let has_game_changes = !changed_paths.is_empty() || force_game_compile;
         let mut compilation_succeeded = false;
         if has_game_changes || compiler_rebuilt {
+            wait_for_reload_resume(&reload_control)?;
             match compiler.compile(&changed_paths, compiler_rebuilt) {
                 Ok(outcome) => {
                     // Consumed successfully; start the next edit clean. On error
@@ -729,6 +762,10 @@ pub(crate) fn do_stone_watch(
                 }
             }
         }
+
+        // Compilation may have overlapped the hold request. Acknowledge only
+        // after publication ends, before any child replacement can occur.
+        wait_for_reload_resume(&reload_control)?;
 
         // If game hasn't been started yet and compilation just succeeded, start it now
         if game_process.is_none() && compilation_succeeded {
@@ -895,7 +932,11 @@ fn start_game_process(
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
         // Only the stone watch loop enables the in-game hot-reload watcher.
         cmd.env("STONE_HOT_RELOAD", "1")
-            .env("STONE_BUILD_ID", build_id);
+            .env("STONE_BUILD_ID", build_id)
+            .env(
+                "STONE_RELOAD_CONTROL",
+                lua_file.with_file_name("reload.hold"),
+            );
 
         // 1) Linux: Ensure the child gets PDEATHSIG (SIGTERM) if parent dies
         #[cfg(target_os = "linux")]
@@ -975,7 +1016,11 @@ fn start_game_process(
             cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
             // Only the stone watch loop enables the in-game hot-reload watcher.
             cmd.env("STONE_HOT_RELOAD", "1")
-                .env("STONE_BUILD_ID", build_id);
+                .env("STONE_BUILD_ID", build_id)
+                .env(
+                    "STONE_RELOAD_CONTROL",
+                    lua_file.with_file_name("reload.hold"),
+                );
 
             let child = cmd.spawn()?;
 
@@ -1215,15 +1260,15 @@ mod tests {
 #[cfg(test)]
 mod watch_reload_tests {
     use super::{
-        StoneChanges, StoneWatcher, categorize_stone_changes, retain_production_changes,
-        stone_source_watch_paths,
+        categorize_stone_changes, retain_production_changes, stone_source_watch_paths,
+        StoneChanges, StoneWatcher,
     };
-    use crate::FileChangeEvent;
     use crate::game_runtime::{GameCompiler, SkullGameCompiler};
+    use crate::FileChangeEvent;
     use bone_core::prelude::{Duration, Instant};
     use std::collections::HashSet;
     use std::path::PathBuf;
-    use std::sync::mpsc::{Receiver, channel};
+    use std::sync::mpsc::{channel, Receiver};
     use test_utils::HANG_BACKSTOP;
 
     fn run_lua(code: &str) -> anyhow::Result<rock_host::lua_runner::LuaRun> {
@@ -1750,8 +1795,8 @@ mod watch_reload_tests {
 #[cfg(test)]
 mod session_cache_tests {
     use super::initial_session_build;
-    use crate::Backend;
     use crate::game_runtime::{AdoptedArtifact, CompileOutcome, GameCompiler, SkullGameCompiler};
+    use crate::Backend;
     use std::cell::Cell;
     use std::collections::HashSet;
     use std::path::{Path, PathBuf};
@@ -2001,5 +2046,36 @@ mod session_cache_tests {
             expected,
             "the restart loads the edited program"
         );
+    }
+}
+
+#[cfg(test)]
+mod reload_hold_tests {
+    #[test]
+    fn hold_acknowledges_and_waits_until_the_game_resumes() {
+        let dir = tempfile::tempdir().unwrap();
+        let control = dir.path().join("reload.hold");
+        std::fs::write(&control, "hold").unwrap();
+        let path = control.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            super::wait_for_reload_resume(&path).unwrap();
+            tx.send(()).unwrap();
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !control.with_extension("held").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "hold was not acknowledged"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(rx
+            .recv_timeout(std::time::Duration::from_millis(150))
+            .is_err());
+        std::fs::remove_file(&control).unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
+        worker.join().unwrap();
+        assert!(!control.with_extension("held").exists());
     }
 }
