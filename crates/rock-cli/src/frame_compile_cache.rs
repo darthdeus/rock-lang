@@ -752,15 +752,14 @@ pub(crate) fn compile_game_for_frame(
     let Some(root) = cache_root()? else {
         return crate::frame_runtime::compile_game_for_run(backend, &project_path, output);
     };
-    crate::frame_runtime::prepare_game_compile(&project_path)?;
-    // The lookup resolves what the compile would: discovery, build vars.
-    let lookup = Lookup::current(&project, backend)?;
-    let output_path = PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME);
-    let compiled =
+    crate::frame_runtime::with_game_prepared(&project_path, || {
+        // The lookup resolves what the compile would: discovery, build vars.
+        let lookup = Lookup::current(&project, backend)?;
+        let output_path = PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME);
         prepare_cached_artifact(&root, &lookup, &output_path, frame_count, |artifact_dir| {
             compile_game(backend, &project_path, artifact_dir)
-        })?;
-    Ok(compiled)
+        })
+    })
 }
 
 #[cfg(test)]

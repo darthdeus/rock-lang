@@ -11,8 +11,9 @@ pub(crate) fn compile_game_for_run(
     path: &str,
     output: &str,
 ) -> Result<CompiledGame> {
-    prepare_game_compile(path)?;
-    let artifact = crate::game_compile::compile_game(backend, path, std::path::Path::new(output))?;
+    let artifact = with_game_prepared(path, || {
+        crate::game_compile::compile_game(backend, path, std::path::Path::new(output))
+    })?;
     Ok(CompiledGame {
         lua_file: PathBuf::from(output).join(rock_host::project::MAIN_LUA_FILENAME),
         artifact_fingerprint: artifact.artifact_fingerprint,
@@ -48,16 +49,39 @@ pub(crate) fn compile_frame_invocation(
     Ok((invocation, compiled))
 }
 
-/// Everything a run compile needs before the compiler: project resolution,
-/// renderer feature, sound bank and engine libs.
-pub(crate) fn prepare_game_compile(path: &str) -> Result<()> {
+/// Runs `compile` with what a run compile needs: project resolution and the
+/// sound bank first, then the engine libraries beside the compile. The compile
+/// does not read the libraries, and they are built before the program starts.
+pub(crate) fn with_game_prepared<T>(path: &str, compile: impl FnOnce() -> Result<T>) -> Result<T> {
     let services = crate::registry::RuntimeServices::registered();
     let project = rock_host::timed("resolve project", || (services.resolve_project_dir)(path))?;
-    let path = project.to_string_lossy();
-    let path = path.as_ref();
-    rock_host::timed("sound bank", || (services.prepare_sound_bank)(path))?;
-    rock_host::timed("engine libraries", || (services.build_engine_libs)(path))?;
-    Ok(())
+    let project = project.to_string_lossy();
+    rock_host::timed("sound bank", || (services.prepare_sound_bank)(&project))?;
+    beside(
+        || {
+            rock_host::timed("engine libraries", || {
+                (services.build_engine_libs)(&project)
+            })
+        },
+        compile,
+    )
+}
+
+/// Runs `prepare` beside `compile` and returns the compile's result once
+/// both are done. `prepare`'s error wins, as when it ran first.
+pub(crate) fn beside<T>(
+    prepare: impl FnOnce() -> Result<()> + Send,
+    compile: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    std::thread::scope(|scope| {
+        let prepared = scope.spawn(prepare);
+        let compiled = compile();
+        match prepared.join() {
+            Ok(prepared) => prepared?,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+        compiled
+    })
 }
 
 /// Disable device audio for bounded headless frame execution unless explicitly selected.
@@ -127,6 +151,33 @@ mod tests {
                 requested: None,
             })
         );
+    }
+
+    #[test]
+    fn preparation_runs_beside_the_compile() {
+        let (started, compile_started) = std::sync::mpsc::channel();
+        let compiled = beside(
+            move || {
+                compile_started
+                    .recv_timeout(std::time::Duration::from_secs(10))
+                    .map_err(|_| anyhow::anyhow!("the compile waited for the preparation"))
+            },
+            || {
+                started.send(()).unwrap();
+                Ok(7)
+            },
+        );
+        assert_eq!(compiled.unwrap(), 7);
+    }
+
+    #[test]
+    fn a_failed_preparation_wins_over_a_failed_compile() {
+        let error = beside(
+            || anyhow::bail!("native build failed"),
+            || -> Result<()> { anyhow::bail!("type error") },
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "native build failed");
     }
 
     #[test]
