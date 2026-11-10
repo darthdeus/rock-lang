@@ -478,6 +478,10 @@ impl PackageGraph {
                 return None;
             }
         };
+        self.package_of_canonical_file(&path)
+    }
+
+    fn package_of_canonical_file(&self, path: &Path) -> Option<PackageId> {
         let mut best: Option<(PackageId, usize)> = None;
         for node in &self.packages {
             if path.starts_with(&node.root) {
@@ -495,12 +499,21 @@ impl PackageGraph {
     /// packages keep today's inclusion (everything under the root, including
     /// nested package directories).
     pub fn owns_file(&self, owner: PackageId, path: &Path) -> bool {
+        self.owns(owner, path, |path| self.package_of_file(path))
+    }
+
+    fn owns(
+        &self,
+        owner: PackageId,
+        path: &Path,
+        package_of: impl FnOnce(&Path) -> Option<PackageId>,
+    ) -> bool {
         let node = self.package(owner);
         if !path.starts_with(&node.root) {
             return false;
         }
         if node.dialect == Dialect::V1 {
-            self.package_of_file(path) == Some(owner)
+            package_of(path) == Some(owner)
         } else {
             true
         }
@@ -509,7 +522,16 @@ impl PackageGraph {
     /// Selected source membership. Inactive groups vanish before parsing and
     /// never contribute definitions, initializers or lifecycle hooks.
     pub fn includes_file(&self, owner: PackageId, path: &Path) -> bool {
-        if !self.owns_file(owner, path) {
+        self.includes(owner, path, |path| self.package_of_file(path))
+    }
+
+    fn includes(
+        &self,
+        owner: PackageId,
+        path: &Path,
+        package_of: impl FnOnce(&Path) -> Option<PackageId>,
+    ) -> bool {
+        if !self.owns(owner, path, package_of) {
             return false;
         }
         !self
@@ -519,12 +541,56 @@ impl PackageGraph {
             .any(|group| path.starts_with(&group.directory) && !group.active)
     }
 
+    /// The files under `directory` that `owner` contributes, by the path the
+    /// walk reached each one.
     pub fn selected_rock_files(&self, owner: PackageId, directory: &Path) -> Result<Vec<PathBuf>> {
-        Ok(crate::project::find_rock_files_at_path(directory)?
+        Ok(self
+            .select(owner, directory)?
             .into_iter()
-            .map(PathBuf::from)
-            .filter(|path| self.includes_file(owner, path))
+            .map(|(walked, _)| walked)
             .collect())
+    }
+
+    /// [`Self::selected_rock_files`] by canonical path, for a loader that
+    /// would otherwise resolve every file once more.
+    pub fn selected_canonical_rock_files(
+        &self,
+        owner: PackageId,
+        directory: &Path,
+    ) -> Result<Vec<PathBuf>> {
+        Ok(self
+            .select(owner, directory)?
+            .into_iter()
+            .map(|(walked, canonical)| canonical.unwrap_or(walked))
+            .collect())
+    }
+
+    /// Each selected file as walked, with its canonical path where that is
+    /// another one. Resolving a path costs several system calls, and only a
+    /// symlinked file needs it.
+    fn select(
+        &self,
+        owner: PackageId,
+        directory: &Path,
+    ) -> Result<Vec<(PathBuf, Option<PathBuf>)>> {
+        let mut selected = Vec::new();
+        for file in crate::project::walk_rock_files(directory)? {
+            let walked = PathBuf::from(file.path);
+            let resolved = file
+                .symlink
+                .then(|| fs_err::canonicalize(&walked).ok())
+                .flatten();
+            let canonical = if file.symlink {
+                resolved.as_deref()
+            } else {
+                Some(walked.as_path())
+            };
+            let package_of = |_: &Path| self.package_of_canonical_file(canonical?);
+            if self.includes(owner, &walked, package_of) {
+                selected.push((walked, resolved));
+            }
+        }
+        Ok(selected)
     }
 }
 
@@ -866,6 +932,51 @@ mod tests {
             err.to_string().contains("inner-v1"),
             "error names the nested package: {err}"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn selection_resolves_symlinked_files_and_follows_no_symlinked_directory() {
+        use std::os::unix::fs::symlink;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("app");
+        let inner = root.join("lib");
+        write_manifest(&inner, "inner", "\n[language]\nmodules = \"v1\"\n");
+        write_manifest(
+            &root,
+            "app",
+            "\n[language]\nmodules = \"v1\"\n\n[dependencies]\ninner = { path = \"lib\" }\n",
+        );
+        fs::create_dir_all(root.join("sub")).expect("sub directory");
+        for file in ["main.rock", "library.rock", "sub/deep.rock", "lib/lib.rock"] {
+            fs::write(root.join(file), "fn f() {}\n").expect("source");
+        }
+        let alias = tmp.path().join("alias");
+        symlink(&root, &alias).expect("symlinked package root");
+        symlink(inner.join("lib.rock"), root.join("linked.rock")).expect("link into dependency");
+        symlink(root.join("library.rock"), root.join("same.rock")).expect("link within package");
+        symlink(root.join("sub"), root.join("linked_dir")).expect("symlinked directory");
+
+        let graph = PackageGraph::build(&alias).expect("graph through symlink");
+        let real = fs::canonicalize(&root).expect("canonical root");
+        let walked = graph
+            .selected_rock_files(graph.root(), &alias)
+            .expect("selection");
+        let expected: Vec<PathBuf> = ["library.rock", "main.rock", "same.rock", "sub/deep.rock"]
+            .iter()
+            .map(|file| real.join(file))
+            .collect();
+        assert_eq!(walked, expected);
+
+        let canonical = graph
+            .selected_canonical_rock_files(graph.root(), &alias)
+            .expect("canonical selection");
+        let resolved: Vec<PathBuf> = walked
+            .iter()
+            .map(|path| fs::canonicalize(path).expect("canonical source"))
+            .collect();
+        assert_eq!(canonical, resolved);
+        assert_eq!(canonical[2], real.join("library.rock"));
     }
 
     #[test]

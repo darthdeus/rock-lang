@@ -20,6 +20,8 @@ pub trait SourceFilesExt {
     fn from_dir_preprocessed<P: AsRef<Path>>(source_dir: P) -> Result<SourceFiles>;
     fn from_single_path_preprocessed<P: AsRef<Path>>(path: P) -> Result<SourceFiles>;
     fn from_multiple_paths(paths: &[PathBuf], preprocess: bool) -> Result<SourceFiles>;
+    /// [`Self::from_multiple_paths`] for paths that are canonical already.
+    fn from_canonical_paths(paths: &[PathBuf], preprocess: bool) -> Result<SourceFiles>;
 }
 
 impl SourceFilesExt for SourceFiles {
@@ -33,28 +35,38 @@ impl SourceFilesExt for SourceFiles {
     }
 
     fn from_multiple_paths(paths: &[PathBuf], preprocess: bool) -> Result<SourceFiles> {
-        // Load in parallel, then collect in path order so the reported error
-        // is still the first failing path's.
-        let loaded: Vec<Result<SourceFile>> = {
-            use rayon::prelude::*;
-            paths
-                .par_iter()
-                .map(|path| source_file_load(path, preprocess))
-                .collect()
-        };
-        let files = loaded.into_iter().collect::<Result<Vec<_>>>()?;
+        load_paths(paths, |path| source_file_load(path, preprocess))
+    }
 
-        let files = files
-            .into_iter()
-            .map(|x| Arc::new(AtomicRefCell::new(x)))
-            .collect();
-
-        Ok(SourceFiles {
-            files,
-            package_roots: Vec::new(),
-            ns_aliases: None,
+    fn from_canonical_paths(paths: &[PathBuf], preprocess: bool) -> Result<SourceFiles> {
+        load_paths(paths, |path| {
+            source_file_from_canonical_path(path, preprocess)
         })
     }
+}
+
+fn load_paths(
+    paths: &[PathBuf],
+    load: impl Fn(&PathBuf) -> Result<SourceFile> + Sync + Send,
+) -> Result<SourceFiles> {
+    // Load in parallel, then collect in path order so the reported error
+    // is still the first failing path's.
+    let loaded: Vec<Result<SourceFile>> = {
+        use rayon::prelude::*;
+        paths.par_iter().map(load).collect()
+    };
+    let files = loaded.into_iter().collect::<Result<Vec<_>>>()?;
+
+    let files = files
+        .into_iter()
+        .map(|x| Arc::new(AtomicRefCell::new(x)))
+        .collect();
+
+    Ok(SourceFiles {
+        files,
+        package_roots: Vec::new(),
+        ns_aliases: None,
+    })
 }
 
 /// `sources` without the files a production build drops (see

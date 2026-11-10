@@ -42,8 +42,8 @@ pub(crate) fn discover_sources(source_spec: &SourceSpec) -> Result<SourceFiles> 
                             } else {
                                 graph.package(*id).root.clone()
                             };
-                            let selected = graph.selected_rock_files(*id, &load_dir)?;
-                            SourceFiles::from_multiple_paths(&selected, true)
+                            let selected = graph.selected_canonical_rock_files(*id, &load_dir)?;
+                            SourceFiles::from_canonical_paths(&selected, true)
                         })
                         .collect()
                 };

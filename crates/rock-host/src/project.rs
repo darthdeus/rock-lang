@@ -342,11 +342,28 @@ pub fn build_luajit_stdin_command() -> std::process::Command {
     cmd
 }
 
+/// A `.rock` file found below a directory.
+pub struct WalkedRockFile {
+    pub path: String,
+    /// The entry is a symlink to a file. Every other path is canonical
+    /// already: the walk starts at a canonical directory and follows no link.
+    pub symlink: bool,
+}
+
 /// Recursively find every `.rock` file under `source_dir` (absolute paths,
-/// `~`-suffixed editor backups skipped). Surfaces per-entry walk errors to
-/// stderr rather than silently dropping them — a permission error on stdlib/
-/// would otherwise masquerade as "module not found" (silent-errors audit).
+/// `~`-suffixed editor backups skipped).
 pub fn find_rock_files_at_path(source_dir: impl AsRef<Path>) -> Result<Vec<String>> {
+    Ok(walk_rock_files(source_dir)?
+        .into_iter()
+        .map(|file| file.path)
+        .collect())
+}
+
+/// [`find_rock_files_at_path`], keeping what the walk learned about each
+/// file. Surfaces per-entry walk errors to stderr rather than silently
+/// dropping them — a permission error on stdlib/ would otherwise masquerade
+/// as "module not found" (silent-errors audit).
+pub fn walk_rock_files(source_dir: impl AsRef<Path>) -> Result<Vec<WalkedRockFile>> {
     use anyhow::Context;
     use walkdir::WalkDir;
 
@@ -386,7 +403,10 @@ pub fn find_rock_files_at_path(source_dir: impl AsRef<Path>) -> Result<Vec<Strin
         if file_type.is_file() || (file_type.is_symlink() && path.is_file()) {
             if let Some(ext) = path.extension() {
                 if ext == "rock" && !path.to_string_lossy().ends_with("~") {
-                    files.push(path.to_string_lossy().to_string());
+                    files.push(WalkedRockFile {
+                        path: path.to_string_lossy().to_string(),
+                        symlink: file_type.is_symlink(),
+                    });
                 }
             }
         }
