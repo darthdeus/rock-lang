@@ -790,6 +790,17 @@ pub(super) struct EarlyAssembly {
     globals_directory: Result<String, CompilerError>,
 }
 
+impl EarlyAssembly {
+    /// The specializations the decorator and global units demand.
+    pub(super) fn demands(&self) -> Vec<skull_mir::bound::SpecDemand> {
+        self.decorator_units
+            .iter()
+            .chain(&self.global_units)
+            .flat_map(|u| u.specs.iter().cloned())
+            .collect()
+    }
+}
+
 pub(super) fn prepare_early_assembly(
     ws: &Workspace,
     scx: &skull_mir::lower::ScalarCtx,
@@ -843,6 +854,7 @@ pub(super) fn assemble(
     built_specs: &mut Vec<(Instance, Chunk)>,
     lifetime: CacheLifetime,
     early: Option<EarlyAssembly>,
+    specs: Option<SpecChunks>,
 ) -> Result<(MirEmit, FxHashSet<Instance>, UnitComptimeReads), CompilerError> {
     let mut release_stats = CompileReleaseStats {
         retained_dependency_edges: cache.dependents.values().map(|keys| keys.len()).sum(),
@@ -894,8 +906,10 @@ pub(super) fn assemble(
     // Generated-glue obligations (`register_sim`, shader dependencies) are part
     // of the ROOT INPUT the graph and the view were built from -- see
     // [`all_roots`] -- so there is no second population source here.
-    let (spec_chunks, spec_rejected) =
-        view_driven_specialized_chunks(ws, &cache.cg, &cache.scx, cache, &asm.needed_specs);
+    // A full build delivers its specializations from the fan-out.
+    let (spec_chunks, spec_rejected) = specs.unwrap_or_else(|| {
+        view_driven_specialized_chunks(ws, &cache.cg, &cache.scx, cache, &asm.needed_specs)
+    });
     if lifetime == CacheLifetime::OneShot {
         let instances = cache.graph.instances.len();
         drop_in_background(cache.graph.take_records());

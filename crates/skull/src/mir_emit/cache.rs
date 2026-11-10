@@ -1304,8 +1304,14 @@ pub fn emit_incremental(
     // The two-file split (`emit_overlay`) avoids it entirely on a body edit.
     let t_asm = Instant::now();
     let mut built_specs: Vec<(Instance, Chunk)> = Vec::new();
-    let (mut emit, emitted, unit_reads) =
-        assemble(ws, cache, &mut built_specs, CacheLifetime::Retained, None)?;
+    let (mut emit, emitted, unit_reads) = assemble(
+        ws,
+        cache,
+        &mut built_specs,
+        CacheLifetime::Retained,
+        None,
+        None,
+    )?;
     if concrete_stats_requested() {
         emit.concrete_stats = cache.concrete.snapshot_build_stats();
     }

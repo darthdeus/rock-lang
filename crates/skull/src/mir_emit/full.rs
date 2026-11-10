@@ -811,12 +811,24 @@ fn reject_abi_param_collisions(ws: &Workspace, scx: &skull_mir::lower::ScalarCtx
 
 type ChunkMap = FxHashMap<Instance, Result<Chunk, CompilerError>>;
 
+/// One job of the fan-out: a retained declaration's body (with its position,
+/// which fixes the chunk map's order) or a specialization a lowered body
+/// demanded.
+enum FanOutJob<'w> {
+    Body(usize, FuncRef, &'w bone_semantic::hir::Function),
+    Spec(Instance),
+}
+
 /// Emit every retained ordinary/coroutine body into its chunk, in parallel
-/// with one inline cache per worker over a shared candidate table.
-fn emit_full_chunks(
-    ws: &Workspace,
+/// with one inline cache per worker over a shared candidate table, together
+/// with every specialization those bodies demand: a body's demand joins the
+/// same queue the moment the body is lowered, so specializations need no
+/// window of their own after the fan-out.
+fn emit_full_chunks<'a>(
+    ws: &'a Workspace,
     cg: &CodegenCtx,
-    scx: &skull_mir::lower::ScalarCtx,
+    scx: &'a skull_mir::lower::ScalarCtx,
+    graph: &'a crate::instance_graph::InstanceGraph,
     concrete: &crate::concrete_body::ConcreteBodies,
     lua_view: &crate::artifact::ArtifactView,
     mutation: BodyMutation,
@@ -825,10 +837,11 @@ fn emit_full_chunks(
     (
         ChunkMap,
         std::sync::Arc<skull_transform::InlineCandidateTable>,
+        SpecQueue<'a>,
     ),
     CompilerError,
 > {
-    let fn_items: Vec<(FuncRef, &bone_semantic::hir::Function)> = ws
+    let jobs: Vec<FanOutJob<'_>> = ws
         .source_modules()
         .flat_map(|m| {
             m.functions.iter().filter_map(move |(fid, f)| {
@@ -840,6 +853,8 @@ fn emit_full_chunks(
                     .then_some((self_ref, f))
             })
         })
+        .enumerate()
+        .map(|(at, (self_ref, f))| FanOutJob::Body(at, self_ref, f))
         .collect();
     let inline_candidate_table = setup_phases.timed("setup: inline candidate table", || {
         build_inline_candidate_table(
@@ -854,34 +869,64 @@ fn emit_full_chunks(
             None,
         )
     })?;
+    let queue = SpecQueue::new(ws, scx, graph, None);
+    #[cfg(test)]
+    if let Some(hook) = queue.hook() {
+        for job in &jobs {
+            if let FanOutJob::Body(_, _, f) = job {
+                hook.scheduled(&mangle_fn(ws, f));
+            }
+        }
+    }
+    // One slot per body, so the chunk map is built in declaration order
+    // without moving the chunks through a sort.
+    let bodies: std::sync::Mutex<Vec<Option<(Instance, Result<Chunk, CompilerError>)>>> =
+        std::sync::Mutex::new(std::iter::repeat_with(|| None).take(jobs.len()).collect());
     // The fan-out's wall window, beside the per-unit sums the chunks carry:
     // the budget reads idle time as threads * window - summed unit time.
-    let chunks = setup_phases.timed("window: fan-out", || {
-        par_map_with(
-            fn_items,
-            || {
-                skull_transform::InlineCache::with_candidate_table(std::sync::Arc::clone(
-                    &inline_candidate_table,
-                ))
-            },
-            |inline_cache, (self_ref, f)| {
-                (
-                    shared(self_ref),
-                    emit_body_chunk_with_mutation(
-                        ws,
-                        cg,
-                        scx,
-                        concrete,
-                        self_ref,
-                        f,
-                        inline_cache,
-                        mutation,
-                    ),
-                )
+    setup_phases.timed("window: fan-out", || {
+        par_drain(
+            jobs,
+            || worker_inline_cache(Some(&inline_candidate_table)),
+            |inline_cache, job, follow_ups| {
+                let mut demanded = Vec::new();
+                match job {
+                    FanOutJob::Body(at, self_ref, f) => {
+                        let chunk = emit_body_chunk_with_mutation(
+                            ws,
+                            cg,
+                            scx,
+                            concrete,
+                            self_ref,
+                            f,
+                            inline_cache,
+                            mutation,
+                        );
+                        #[cfg(test)]
+                        if let Some(hook) = queue.hook() {
+                            hook.finished(&mangle_fn(ws, f));
+                        }
+                        if let Ok(chunk) = &chunk {
+                            queue.admit_all(&chunk.specs, &mut demanded);
+                        }
+                        bodies.lock().expect("fan-out chunks")[at] =
+                            Some((shared(self_ref), chunk));
+                    }
+                    FanOutJob::Spec(inst) => {
+                        queue.build(cg, concrete, inline_cache, inst, &mut demanded)
+                    }
+                }
+                follow_ups.extend(demanded.into_iter().map(FanOutJob::Spec));
             },
         )
     });
-    Ok((chunks.into_iter().collect(), inline_candidate_table))
+    let chunks = bodies
+        .into_inner()
+        .expect("fan-out chunks")
+        .into_iter()
+        .map(|slot| slot.expect("every fan-out body is emitted"))
+        .collect();
+    Ok((chunks, inline_candidate_table, queue))
 }
 
 /// Seed the reverse dependency index from every chunk's codegen deps (only a
@@ -1040,6 +1085,7 @@ pub(super) fn emit_full_build(
                 ws,
                 &cg,
                 &scx,
+                &graph,
                 &concrete,
                 &lua_view,
                 mutation,
@@ -1066,7 +1112,19 @@ pub(super) fn emit_full_build(
         },
     );
     let (shader_view, shader_registrations) = shader_result?;
-    let (chunks, inline_candidate_table) = chunks?;
+    let (chunks, inline_candidate_table, spec_queue) = chunks?;
+    // Decorator and global units are lowered beside the fan-out; what they
+    // demand is usually built already.
+    let mut spec_jobs = Vec::new();
+    spec_queue.admit_all(&early.demands(), &mut spec_jobs);
+    drain_spec_jobs(
+        &spec_queue,
+        &cg,
+        &concrete,
+        Some(&inline_candidate_table),
+        spec_jobs,
+    );
+    let specs = spec_queue.finish();
     setup_lanes.shader_population = shader_lane.population;
     setup_phases
         .0
@@ -1133,6 +1191,7 @@ pub(super) fn emit_full_build(
         &mut built_specs,
         build.lifetime(),
         Some(early),
+        Some(specs),
     )?;
     let assembly_window = assembly_started.elapsed();
     emit.concrete_stats = concrete_stats;
