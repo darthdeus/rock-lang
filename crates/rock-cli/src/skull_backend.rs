@@ -61,8 +61,8 @@ enum CliComptime<'a> {
     /// checks (single-file emission walks up, matching the JS single-file
     /// path: the same source must agree across backends).
     FromEntry(&'a str),
-    /// Resolved before discovery (a project build).
-    Resolved(Option<bone_semantic::inference::ComptimeInputs>),
+    /// A project build: resolving since before discovery.
+    Project(Option<crate::comptime::ProjectInputs>),
 }
 
 impl skull::pipeline::CompileHost for CliCompileHost<'_> {
@@ -97,7 +97,12 @@ impl skull::pipeline::CompileHost for CliCompileHost<'_> {
                     CompilerError::new_no_location(format!("build var resolution failed: {e:#}"))
                 })
             }
-            CliComptime::Resolved(inputs) => Ok(inputs.take().unwrap_or_default()),
+            CliComptime::Project(inputs) => match inputs.take() {
+                Some(inputs) => inputs.wait().map_err(|e| {
+                    CompilerError::new_no_location(format!("build var resolution failed: {e:#}"))
+                }),
+                None => Ok(Default::default()),
+            },
         }
     }
 
@@ -2160,27 +2165,20 @@ pub(crate) fn render_project_errs(sources: &SourceFiles, errs: &[CompilerError])
 /// emit failure. The `bool` is the emitter's own `emits_main`, which decides
 /// whether the caller appends the `__rock_main_wrapper(main)` entry.
 fn skull_emit_project(dir: &str) -> Result<(GameProgram, bool)> {
-    let inputs = match crate::comptime::inputs_for_project_dir(std::path::Path::new(dir)) {
-        Ok(inputs) => inputs,
-        Err(e) => {
-            log::error!(target: "SKULL", "build var resolution failed for project {}: {:#}", dir, e);
-            crate::invocation_log::exit(1);
-        }
-    };
+    let inputs = crate::comptime::ProjectInputs::resolve(std::path::Path::new(dir));
     skull_emit_project_with_inputs(dir, inputs)
 }
 
 fn skull_emit_project_with_inputs(
     dir: &str,
-    inputs: bone_semantic::inference::ComptimeInputs,
+    inputs: crate::comptime::ProjectInputs,
 ) -> Result<(GameProgram, bool)> {
     use std::path::PathBuf;
     let _slot = crate::compile_slots::acquire(dir)?;
     crate::compile_budget::phase("compile slot");
-    // Discovery reads the project serially; the stdlib parse and the
-    // compiler image hash need nothing from it and run alongside.
+    // Discovery reads the project serially; the stdlib parse, the build vars
+    // and the compiler image hash need nothing from it and run alongside.
     skull::pipeline::warm_stdlib();
-    crate::comptime::prefetch_compiler_identity(&inputs);
     let spec = crate::unified_compile::SourceSpec::Directory(PathBuf::from(dir));
     let sources = match crate::unified_compile::discover_sources(&spec) {
         Ok(s) => s,
@@ -2217,7 +2215,7 @@ fn skull_emit_project_with_inputs(
         sources: &sources,
         lint_root: std::path::Path::new(dir),
         lint_scope: crate::lint_pass::Scope::ProductionOnly,
-        comptime: CliComptime::Resolved(Some(inputs)),
+        comptime: CliComptime::Project(Some(inputs)),
         prepare_timings: Vec::new(),
     };
     let body_costs = crate::body_costs::begin();
@@ -2572,22 +2570,14 @@ pub fn collect_sim_descriptors(ws: &bone_semantic::inference::Workspace) -> Vec<
 /// analogue of the single-file [`skull_compile_single`] path; shares
 /// [`skull_emit_project`] with `run`.
 fn skull_compile_project(dir: &str, output: Option<String>) -> Result<()> {
-    // The record opens before the build vars so their commands show as a node
-    // instead of time before the budget.
+    // The build vars resolve on their own thread; time the compile still
+    // waits for them shows under prepare's "comptime inputs".
     let budget = crate::compile_budget::Scope::begin(dir);
-    let inputs = crate::comptime::inputs_for_project_dir(std::path::Path::new(dir))?;
+    let inputs = crate::comptime::ProjectInputs::resolve(std::path::Path::new(dir));
     crate::compile_budget::phase("build vars");
-    skull_compile_project_with_inputs(dir, output, inputs)?;
+    skull_compile_project_with_recorded_inputs(dir, output, inputs)?;
     budget.success();
     Ok(())
-}
-
-pub(crate) fn skull_compile_project_with_inputs(
-    dir: &str,
-    output: Option<String>,
-    inputs: bone_semantic::inference::ComptimeInputs,
-) -> Result<()> {
-    skull_compile_project_with_recorded_inputs(dir, output, inputs).map(|_| ())
 }
 
 /// Compile with pre-resolved host inputs and return the final recorded map,
@@ -2596,10 +2586,10 @@ pub(crate) fn skull_compile_project_with_inputs(
 pub(crate) fn skull_compile_project_with_recorded_inputs(
     dir: &str,
     output: Option<String>,
-    inputs: bone_semantic::inference::ComptimeInputs,
+    inputs: impl Into<crate::comptime::ProjectInputs>,
 ) -> Result<bone_semantic::inference::ComptimeInputs> {
     let budget = crate::compile_budget::Scope::begin(dir);
-    let (emit, emits_main) = skull_emit_project_with_inputs(dir, inputs)?;
+    let (emit, emits_main) = skull_emit_project_with_inputs(dir, inputs.into())?;
     // A game's runnable main.lua is the same shape run/engine produce via
     // write_full_main: preamble (game source dir) + emit +
     // __rock_main_wrapper(main). Without the preamble game asset paths are

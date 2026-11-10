@@ -334,3 +334,46 @@ fn body_costs_record_the_value_types_a_signature_flattens() {
         .unwrap_or_else(|| panic!("no record for main: {records:?}"));
     assert!(main.get("wire").is_none(), "nothing flattened: {main}");
 }
+
+/// A project's `cmd` build vars run beside discovery, parsing and checking:
+/// the compile reads their values only after the program checks, so a slow
+/// command must not hold up the front end.
+#[test]
+fn slow_build_var_commands_overlap_the_front_end() {
+    let root = project();
+    std::fs::write(
+        root.path().join("stick.toml"),
+        "[package]\nname = \"budget\"\n\n[language]\nmodules = \"v1\"\n\n\
+         [build]\nchannels = [\"dev\"]\n\n\
+         [build.vars]\nSLOW = { cmd = \"sleep 1; echo late-value\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.path().join("main.rock"),
+        MAIN.replace("{bump(41)}", "{bump(41)} {build_var(\"SLOW\")}"),
+    )
+    .unwrap();
+    let stats = root.path().join("stats.jsonl");
+    let output = root.path().join("out.lua");
+    let out = compile(root.path(), &stats, &output);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        std::fs::read_to_string(&output)
+            .unwrap()
+            .contains("late-value"),
+        "the command's value is stamped"
+    );
+    let text = std::fs::read_to_string(&stats).unwrap();
+    let record: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+    let budget = &record["budget"];
+    let before_discovery = ms(child(budget, "build vars"));
+    assert!(
+        before_discovery < 500.0,
+        "build vars held the front end for {before_discovery} ms"
+    );
+    assert!(ms(budget) >= 1000.0, "the compile waited for the command");
+}

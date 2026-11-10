@@ -139,6 +139,43 @@ pub(crate) fn inputs_for_project_dir(dir: &Path) -> Result<ComptimeInputs> {
     inputs_for_project_dir_as(dir, None)
 }
 
+/// A project's comptime inputs, resolved on a thread of their own. Its `cmd`
+/// vars are processes the compile would otherwise wait on before discovery,
+/// and nothing reads the values before the program checks.
+pub(crate) enum ProjectInputs {
+    Ready(ComptimeInputs),
+    Resolving(std::thread::JoinHandle<Result<ComptimeInputs>>),
+}
+
+impl ProjectInputs {
+    /// Start resolving the project at/above `dir`. The compiler image hash
+    /// starts as soon as the inputs say a source fingerprint needs it.
+    pub(crate) fn resolve(dir: &Path) -> Self {
+        let dir = dir.to_path_buf();
+        Self::Resolving(std::thread::spawn(move || {
+            let inputs = inputs_for_project_dir(&dir)?;
+            prefetch_compiler_identity(&inputs);
+            Ok(inputs)
+        }))
+    }
+
+    pub(crate) fn wait(self) -> Result<ComptimeInputs> {
+        match self {
+            Self::Ready(inputs) => Ok(inputs),
+            Self::Resolving(thread) => thread
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+        }
+    }
+}
+
+impl From<ComptimeInputs> for ProjectInputs {
+    fn from(inputs: ComptimeInputs) -> Self {
+        prefetch_compiler_identity(&inputs);
+        Self::Ready(inputs)
+    }
+}
+
 /// [`inputs_for_project_dir`] as resolved by a `build_command` invocation
 /// (`ROCK_BUILD_COMMAND`), whatever command this process is.
 pub(crate) fn inputs_for_project_dir_as(
