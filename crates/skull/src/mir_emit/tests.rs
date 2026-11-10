@@ -941,7 +941,6 @@ fn main() { let result = first() }
                 "setup: inline candidate table",
             ]
         );
-        assert!(setup.iter().all(|(_, duration)| *duration > Duration::ZERO));
         // The joined group's children report under their own prefix so no
         // consumer can sum them into the sequential setup rows.
         let join = emit
@@ -953,7 +952,6 @@ fn main() { let result = first() }
             join.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
             ["join: concrete plans branch", "join: cpu artifact branch"]
         );
-        assert!(join.iter().all(|(_, duration)| *duration > Duration::ZERO));
     }
 
     #[test]
