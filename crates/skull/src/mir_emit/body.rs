@@ -63,25 +63,27 @@ fn emit_function_with_allocation_report(
     cg: &CodegenCtx,
     interner: &skull_mir::monoty::MonoInterner,
     self_ref: FuncRef,
-    mf: &MirFunc,
+    mf: &mut MirFunc,
     bound: Option<&skull_codegen_lua::CalleeBindingPlan>,
 ) -> skull_codegen_lua::LuaEmission {
-    if crate::allocation_report::enabled() {
-        skull_codegen_lua::emit_function_with_allocation_sites(
-            ws,
-            cg,
-            interner,
-            self_ref,
-            mf,
-            bound,
-            crate::allocation_report::activation_enabled(),
-        )
-    } else {
-        skull_codegen_lua::LuaEmission {
-            lua: emit_function(ws, cg, interner, self_ref, mf, bound),
-            allocation_sites: Vec::new(),
+    skull_codegen_lua::with_constants_baked(cg, mf, |mf| {
+        if crate::allocation_report::enabled() {
+            skull_codegen_lua::emit_function_with_allocation_sites(
+                ws,
+                cg,
+                interner,
+                self_ref,
+                mf,
+                bound,
+                crate::allocation_report::activation_enabled(),
+            )
+        } else {
+            skull_codegen_lua::LuaEmission {
+                lua: emit_function(ws, cg, interner, self_ref, mf, bound),
+                allocation_sites: Vec::new(),
+            }
         }
-    }
+    })
 }
 
 pub(super) fn emit_named_with_allocation_report(
@@ -89,36 +91,38 @@ pub(super) fn emit_named_with_allocation_report(
     cg: &CodegenCtx,
     interner: &skull_mir::monoty::MonoInterner,
     name: &str,
-    mf: &MirFunc,
+    mf: &mut MirFunc,
     inherited_statics: &[skull_mir::mir::StaticCell],
     bound: Option<&skull_codegen_lua::CalleeBindingPlan>,
 ) -> skull_codegen_lua::LuaEmission {
-    if crate::allocation_report::enabled() {
-        skull_codegen_lua::emit_named_framed_with_allocation_sites(
-            ws,
-            cg,
-            interner,
-            name,
-            mf,
-            None,
-            inherited_statics,
-            bound,
-            crate::allocation_report::activation_enabled(),
-        )
-    } else {
-        skull_codegen_lua::LuaEmission {
-            lua: skull_codegen_lua::emit_named_with_statics(
+    skull_codegen_lua::with_constants_baked(cg, mf, |mf| {
+        if crate::allocation_report::enabled() {
+            skull_codegen_lua::emit_named_framed_with_allocation_sites(
                 ws,
                 cg,
                 interner,
                 name,
                 mf,
+                None,
                 inherited_statics,
                 bound,
-            ),
-            allocation_sites: Vec::new(),
+                crate::allocation_report::activation_enabled(),
+            )
+        } else {
+            skull_codegen_lua::LuaEmission {
+                lua: skull_codegen_lua::emit_named_with_statics(
+                    ws,
+                    cg,
+                    interner,
+                    name,
+                    mf,
+                    inherited_statics,
+                    bound,
+                ),
+                allocation_sites: Vec::new(),
+            }
         }
-    }
+    })
 }
 
 /// **The one Lua emission of a `co fn`**, shared by the declaration's own body
@@ -420,8 +424,14 @@ pub(super) fn emit_body_chunk_with_mutation(
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
     let bind = skull_codegen_lua::callee_binding_plan(ws, cg, scx.interner(), &name, self_ref, &mf);
-    let emission =
-        emit_function_with_allocation_report(ws, cg, scx.interner(), self_ref, &mf, bind.as_ref());
+    let emission = emit_function_with_allocation_report(
+        ws,
+        cg,
+        scx.interner(),
+        self_ref,
+        &mut mf,
+        bind.as_ref(),
+    );
     let mut lua = emission.lua;
     let mut allocation_bodies = Vec::new();
     if let Some(body) = crate::allocation_report::collect_emitted_body(
@@ -642,15 +652,18 @@ pub(super) fn emit_pass_nested_fns(
                 bodies.push(body);
             }
         } else {
-            out.push_str(&skull_codegen_lua::emit_named_with_statics(
-                ws,
-                cg,
-                scx.interner(),
-                nf.name.as_str(),
-                nf,
-                inherited_statics,
-                None,
-            ));
+            let name = nf.name;
+            out.push_str(&skull_codegen_lua::with_constants_baked(cg, nf, |nf| {
+                skull_codegen_lua::emit_named_with_statics(
+                    ws,
+                    cg,
+                    scx.interner(),
+                    name.as_str(),
+                    nf,
+                    inherited_statics,
+                    None,
+                )
+            }));
         }
         let emit = te.elapsed();
         times.emit += emit;
@@ -863,8 +876,15 @@ pub(super) fn emit_spec_chunk(
     skull_codegen_lua::regalloc_time_reset();
     let te = Instant::now();
     let bind = skull_codegen_lua::callee_binding_plan(ws, cg, scx.interner(), name, fref, &mf);
-    let emission =
-        emit_named_with_allocation_report(ws, cg, scx.interner(), name, &mf, &[], bind.as_ref());
+    let emission = emit_named_with_allocation_report(
+        ws,
+        cg,
+        scx.interner(),
+        name,
+        &mut mf,
+        &[],
+        bind.as_ref(),
+    );
     let mut lua = emission.lua;
     let mut allocation_bodies = Vec::new();
     if let Some(body) = crate::allocation_report::collect_emitted_body(

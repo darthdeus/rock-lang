@@ -212,6 +212,41 @@ pub fn emit_named_framed_with_allocation_sites(
     }
 }
 
+/// Runs `emit` over `func` with every read of a scalar constant replaced by
+/// its literal, and puts the reads back afterwards. The emit entry points
+/// rewrite a copy of a body that still reads a constant; a caller that owns
+/// its body lends it here and spares the copy.
+pub fn with_constants_baked<R>(
+    ctx: &CodegenCtx,
+    func: &mut MirFunc,
+    emit: impl FnOnce(&MirFunc) -> R,
+) -> R {
+    struct Baked<'a> {
+        func: &'a mut MirFunc,
+        reads: Vec<(Idx<Inst>, ustr::Ustr)>,
+    }
+    // Restored on unwind too: the body outlives a failed emit in a host that
+    // keeps compiling.
+    impl Drop for Baked<'_> {
+        fn drop(&mut self) {
+            for &(id, name) in &self.reads {
+                self.func.insts[id] = Inst::Global(name);
+            }
+        }
+    }
+    let mut reads = Vec::new();
+    for (id, inst) in func.insts.iter_mut() {
+        if let Inst::Global(name) = inst
+            && let Some(lit) = ctx.scalar_constants.get(name)
+        {
+            reads.push((id, *name));
+            *inst = Inst::Const(lit.clone());
+        }
+    }
+    let baked = Baked { func, reads };
+    emit(baked.func)
+}
+
 /// Returns the emitted definition and the byte offset of its header (the
 /// `function` keyword that opens the body), which the allocation-site reporter
 /// turns into a body-relative line number.

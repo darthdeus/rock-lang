@@ -80,7 +80,7 @@ pub(super) fn emit_decorator_unit(
                 cg,
                 scx.interner(),
                 &deco_name,
-                &mf,
+                &mut mf,
                 &[],
                 None,
             );

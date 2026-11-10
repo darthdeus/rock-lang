@@ -339,7 +339,7 @@ pub(super) fn emit_global_unit(
                 cg,
                 scx.interner(),
                 &init_name,
-                &mf,
+                &mut mf,
                 &[],
                 None,
             );
