@@ -19,7 +19,9 @@ jobs:
       - name: Install native build and test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsdl2-dev libasound2-dev libxtst-dev pkg-config clang xvfb i3 mesa-utils libgl1-mesa-dri
+          sudo apt-get install -y libsdl2-dev libasound2-dev libxtst-dev pkg-config clang xvfb i3 mesa-utils libgl1-mesa-dri locales
+          # tests/json/number_locale.rock needs a locale whose decimal separator is a comma.
+          sudo locale-gen de_DE.UTF-8
       - name: Install native bundle
         run: |
           python3 scripts/gamelibs.py sync
