@@ -204,6 +204,18 @@ pub(crate) struct LoopScope {
     pub region: Vec<Idx<Block>>,
 }
 
+/// A call whose result nothing reads runs as a bare call statement, with no
+/// register to assign and then kill. Its callee must render as a name: a
+/// statement opening with `(` would continue the previous line's expression.
+fn result_discarded(inst: &Inst, inline: &[bool], used: &[bool], id: Idx<Inst>) -> bool {
+    !used[raw(id)]
+        && match inst {
+            Inst::Call { .. } => true,
+            Inst::CallValue { callee, .. } => !inline[raw(*callee)],
+            _ => false,
+        }
+}
+
 /// Result of [`color_values`]: the per-inst color table plus, per color, the
 /// counted loop that lexically owns it (`None` = declared at function top).
 pub(crate) struct ValueAlloc {
@@ -254,10 +266,21 @@ pub(crate) fn color_values(
     // Dense `0..V` index over the value-producing insts in this scope (excluding
     // inlined ones, which get no register), so liveness/interference run on bit
     // sets instead of per-element HashSets.
+    let mut used = vec![false; func.insts.len()];
+    for (_, inst) in func.insts.iter() {
+        inst.uses_each(&mut |v| used[raw(v)] = true);
+    }
+    for (_, block) in func.blocks.iter() {
+        block.term.uses_each(&mut |v| used[raw(v)] = true);
+    }
     let mut values: Vec<Idx<Inst>> = Vec::with_capacity(func.insts.len());
     for &b in &blocks {
         for &id in &func.blocks[b].insts {
-            if func.insts[id].produces_value() && !inline[raw(id)] {
+            let inst = &func.insts[id];
+            if inst.produces_value()
+                && !inline[raw(id)]
+                && !result_discarded(inst, inline, &used, id)
+            {
                 values.push(id);
             }
         }
@@ -323,7 +346,7 @@ pub(crate) fn color_values(
                     use_set.set(bi, k);
                 }
             }
-            if func.insts[id].produces_value() {
+            if vi[raw(id)] != u32::MAX {
                 def_set.set(bi, vi[raw(id)] as usize);
             }
         }
@@ -485,8 +508,8 @@ pub(crate) fn color_values(
             if inline[raw(id)] {
                 continue; // no register; its reads fold in at the use site
             }
-            if func.insts[id].produces_value() {
-                let d = vi[raw(id)] as u32;
+            if vi[raw(id)] != u32::MAX {
+                let d = vi[raw(id)];
                 live.remove(d as usize);
                 live.for_each(|o| edges.push((d, o as u32)));
             }

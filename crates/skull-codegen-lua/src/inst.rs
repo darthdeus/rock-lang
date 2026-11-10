@@ -30,8 +30,11 @@ impl Emitter<'_> {
         let inst = &self.func.insts[id];
         if inst.produces_value() {
             out.push(' ');
-            write_vname(out, self.func, &self.colors, id);
-            out.push_str(" = ");
+            // Only a discarded call result reaches here without a register.
+            if self.colors[raw(id) as usize] != u32::MAX {
+                write_vname(out, self.func, &self.colors, id);
+                out.push_str(" = ");
+            }
             self.write_value(out, id, inst);
             out.push('\n');
         } else {
@@ -41,8 +44,10 @@ impl Emitter<'_> {
 
     fn emit_call_arg_forward(&self, out: &mut String, forward: &CallArgForward) {
         out.push(' ');
-        write_vname(out, self.func, &self.colors, forward.consumer);
-        out.push_str(" = ");
+        if self.colors[raw(forward.consumer) as usize] != u32::MAX {
+            write_vname(out, self.func, &self.colors, forward.consumer);
+            out.push_str(" = ");
+        }
         self.write_call_arg_forward(out, forward);
         out.push('\n');
     }
@@ -121,10 +126,14 @@ impl Emitter<'_> {
         let Some(shape) = classify_inline_lua_body(body.as_str()) else {
             return false;
         };
-        // A `Call`/`Index` value is never tree-folded here (`always_inlinable`
-        // excludes them), so `result` has a register.
+        // A spliced call is never tree-folded, so `result` has a register
+        // unless nothing reads it.
         let mut lv = String::new();
-        write_vname(&mut lv, self.func, &self.colors, result);
+        if self.colors[raw(result) as usize] == u32::MAX {
+            lv.push_str("local _");
+        } else {
+            write_vname(&mut lv, self.func, &self.colors, result);
+        }
 
         out.push_str(" do\n");
         for (p, a) in callee.param_decls.iter().zip(args.iter()) {

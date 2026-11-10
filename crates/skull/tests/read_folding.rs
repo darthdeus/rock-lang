@@ -1,7 +1,8 @@
 //! A read or call with one use in the same block renders inside that use, so
 //! its value never occupies a Lua local: no register, no copy into the cell or
 //! argument that consumes it, and no `nil` kill afterwards. The fold must keep
-//! every read ordered against the writes it could observe.
+//! every read ordered against the writes it could observe. A call whose result
+//! nothing reads is a bare call statement.
 
 use crate::common::{compile_and_run, emit_module, function_body};
 
@@ -78,3 +79,28 @@ fn main() {
     assert_eq!(compile_and_run(src), "109 150 111 13 3 1");
 }
 
+#[test]
+fn unused_call_results_run_as_bare_statements() {
+    let src = r#"
+global marks: int = 0
+fn bump() -> int { marks += 1; return marks }
+@inline inline(lua) fn checked(x: int) -> int = "x + 1"
+fn run(n: int) {
+    bump()
+    checked(n)
+    bump()
+}
+fn main() {
+    run(1)
+    print("{marks}")
+}
+"#;
+    let lua = emit_module(src);
+    let body = function_body(&lua, "run");
+    assert!(
+        !body.contains(" local r") && !body.contains(" r0"),
+        "an unused call result took a register:\n{body}"
+    );
+    assert!(body.contains("local _ = "), "{body}");
+    assert_eq!(compile_and_run(src), "2");
+}
