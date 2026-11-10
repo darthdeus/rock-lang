@@ -31,6 +31,7 @@
 //! instantiation reached.
 
 use bone_core::prelude::Instant;
+use parking_lot::Mutex;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -425,6 +426,24 @@ pub struct Contribution {
     pub synthesized_examined: usize,
     pub synthesized_approximated: usize,
     pub(crate) timing: ExpandTiming,
+}
+
+impl Contribution {
+    fn add_counters(&mut self, c: &Contribution) {
+        self.sites_attempted += c.sites_attempted;
+        self.always_emitted_seeds += c.always_emitted_seeds;
+        self.synthesized_examined += c.synthesized_examined;
+        self.synthesized_approximated += c.synthesized_approximated;
+        self.body_exprs_scanned += c.body_exprs_scanned;
+        self.resolved_overload_rows += c.resolved_overload_rows;
+        self.fn_value_rows += c.fn_value_rows;
+        self.generated_rows += c.generated_rows;
+        self.dispatched_rows += c.dispatched_rows;
+        self.implicit_iter_rows += c.implicit_iter_rows;
+        self.bound_tree_rows += c.bound_tree_rows;
+        self.bound_call_rows += c.bound_call_rows;
+        self.iterator_rows += c.iterator_rows;
+    }
 }
 
 #[derive(Clone)]
@@ -1942,6 +1961,19 @@ impl InstanceGraph {
             self.last_run_always_targets.clear();
         }
         let mono_before = self.interner.stats();
+        let timing_enabled = graph_timing_enabled();
+        stats.census_enabled = timing_enabled;
+        // A build with nothing installed, started from the always-emitted
+        // bodies and the roots, has no order to keep: see `run_fresh_waves`.
+        // The census and the owner-tracking indexes read what only the
+        // ordered install records.
+        let fresh = include_missing_roots
+            && !track_incremental_state
+            && !timing_enabled
+            && !self.incremental_indexes
+            && self.contributions.is_empty()
+            && self.index.subst.is_empty()
+            && pending.iter().all(|owner| owner.instance().is_none());
         if include_missing_roots {
             for i in self.root_instances.clone() {
                 stats.root_instances_checked += 1;
@@ -1950,8 +1982,13 @@ impl InstanceGraph {
                 }
             }
         }
-        let timing_enabled = graph_timing_enabled();
-        stats.census_enabled = timing_enabled;
+        // A conformance tree is supplied by an owner's CALLER, so an owner
+        // walked before its caller was re-walked read a stale one. Recorded
+        // here and re-checked below rather than assumed away by walk order.
+        let mut walked_with: FxHashMap<Instance, InstanceBoundTree> = FxHashMap::default();
+        if fresh {
+            pending = self.run_fresh_waves(ws, pending, &mut stats, &mut walked_with);
+        }
         let mut queued: FxHashSet<Owner> = FxHashSet::default();
         let mut unique_pending = Vec::with_capacity(pending.len());
         for owner in pending {
@@ -1979,10 +2016,6 @@ impl InstanceGraph {
             .cloned()
             .collect();
         let mut first_pass_seen: FxHashSet<Owner> = FxHashSet::default();
-        // A conformance tree is supplied by an owner's CALLER, so an owner
-        // walked before its caller was re-walked read a stale one. Recorded
-        // here and re-checked below rather than assumed away by walk order.
-        let mut walked_with: FxHashMap<Instance, InstanceBoundTree> = FxHashMap::default();
         let mut rounds = 0usize;
         let mut expansion_times = Vec::new();
         let interner = self.interner.clone();
@@ -2134,15 +2167,7 @@ impl InstanceGraph {
                         stats.witness_bound_tree_ns += c.timing.witness_bound_tree_ns;
                         stats.walk_body_edges_ns += c.timing.walk_body_edges_ns;
                         stats.walk_struct_default_edges_ns += c.timing.walk_struct_default_edges_ns;
-                        stats.body_exprs_scanned += c.body_exprs_scanned;
-                        stats.resolved_overload_rows += c.resolved_overload_rows;
-                        stats.fn_value_rows += c.fn_value_rows;
-                        stats.generated_rows += c.generated_rows;
-                        stats.dispatched_rows += c.dispatched_rows;
-                        stats.implicit_iter_rows += c.implicit_iter_rows;
-                        stats.bound_tree_rows += c.bound_tree_rows;
-                        stats.bound_call_rows += c.bound_call_rows;
-                        stats.iterator_rows += c.iterator_rows;
+                        stats.add_body_rows(&c);
                         if timing_enabled {
                             stats.contribution_reached += c.reached.len();
                             stats.contribution_bound_trees += c.bound_trees.len();
@@ -2291,6 +2316,229 @@ impl InstanceGraph {
             },
             Owner::AlwaysEmitted(..) => WalkInputs::default(),
         }
+    }
+}
+
+/// Shards of the substitution index while a fresh build's walkers fill it.
+const SUBST_SHARDS: usize = 256;
+
+type SubstShard = Mutex<FxHashMap<Instance, Agreed<MonoSubst>>>;
+
+fn subst_shard(to: &Instance) -> usize {
+    use std::hash::BuildHasher;
+    let hash = rustc_hash::FxBuildHasher.hash_one(to);
+    // Remixed: a shard's own table probes by the plain hash's bits.
+    (hash.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 56) as usize
+}
+
+/// What one thread walked and indexed of a fresh build's wave.
+#[derive(Default)]
+struct WaveShare {
+    installed: Vec<(Owner, Box<Contribution>)>,
+    /// Positions in `installed` with rows for [`InstanceGraph::index_owned_rows`]
+    /// or root holes.
+    owned: Vec<usize>,
+    /// The instances this thread reached first, as the next wave's walks.
+    demanded: Vec<OwnerWalk>,
+    walked_with: Vec<(Instance, InstanceBoundTree)>,
+    disagreed: bool,
+    reached_rows: usize,
+    /// The sum of the walked contributions' counters, and nothing else.
+    counts: Contribution,
+}
+
+impl InstanceGraph {
+    /// A fresh build's waves, with the walkers doing the install.
+    ///
+    /// Nothing is installed yet, so nothing is replaced and a wave's result is
+    /// a function of the SET of owners in it: the substitution index only
+    /// gains rows, the first reach of an instance is its demand, and the rows
+    /// kept by owner are decided by owner order. The walkers therefore write
+    /// the substitution index themselves, shard by shard, and each takes the
+    /// instances it reached first as its share of the next wave. This thread
+    /// installs the few owned rows between waves, so every walk of a wave
+    /// still reads the conformance trees the wave began with.
+    ///
+    /// Returns the owners still pending when two reaches disagreed, which
+    /// the ordered install has to decide.
+    fn run_fresh_waves(
+        &mut self,
+        ws: &Workspace,
+        pending: Vec<Owner>,
+        stats: &mut RunStats,
+        walked_with: &mut FxHashMap<Instance, InstanceBoundTree>,
+    ) -> Vec<Owner> {
+        let interner = self.interner.clone();
+        let shards: Vec<SubstShard> = (0..SUBST_SHARDS).map(|_| Mutex::default()).collect();
+        let mut wave: Vec<OwnerWalk> = pending
+            .into_iter()
+            .map(|owner| OwnerWalk {
+                inputs: self.walk_inputs(&owner),
+                owner,
+            })
+            .collect();
+        let mut installed = Vec::new();
+        let mut index = IndexMaintenanceTiming::default();
+        let mut disagreed = false;
+        while !wave.is_empty() && !disagreed {
+            let helpers = if cfg!(feature = "sequential") {
+                0
+            } else {
+                rayon::current_num_threads().min(wave.len() / WALK_TASK_OWNERS)
+            };
+            let units = Mutex::new(std::mem::take(&mut wave).into_iter());
+            let shares = Mutex::new(Vec::with_capacity(helpers + 1));
+            {
+                let graph = &*self;
+                let walk = || {
+                    let share = graph.walk_wave_share(ws, &interner, &units, &shards);
+                    shares.lock().push(share);
+                };
+                rayon::in_place_scope(|scope| {
+                    for _ in 0..helpers {
+                        scope.spawn(|_| walk());
+                    }
+                    walk();
+                });
+            }
+            for mut share in shares.into_inner() {
+                disagreed |= share.disagreed;
+                stats.owner_visits += share.installed.len();
+                stats.add_body_rows(&share.counts);
+                self.add_contribution_counters(&share.counts);
+                index.subst_updates += share.reached_rows;
+                for &at in &share.owned {
+                    let (owner, c) = &share.installed[at];
+                    self.index_owned_rows(owner, c, false, &mut index);
+                    self.record_root_holes(owner, c);
+                }
+                walked_with.extend(share.walked_with);
+                installed.append(&mut share.installed);
+                wave.append(&mut share.demanded);
+            }
+        }
+        stats.expanded += installed.len();
+        stats.first_owner_visits += installed.len();
+        stats.index_subst_updates += index.subst_updates;
+        stats.index_trees_updates += index.trees_updates;
+        stats.index_erased_updates += index.erased_updates;
+        stats.index_always_emitted_updates += index.always_emitted_updates;
+        stats.index_decls_updates += self.install_fresh(installed, shards);
+        // A walk that read no tree is not in `walked_with`; it read the
+        // default one, and only an instance with a tree now can differ.
+        for i in self.index.trees.keys() {
+            if !walked_with.contains_key(i) {
+                walked_with.insert(i.clone(), InstanceBoundTree::default());
+            }
+        }
+        if disagreed {
+            // Rare, and only an invalid program: deciding between the sides
+            // needs the owners.
+            self.ensure_incremental_indexes();
+        }
+        wave.into_iter().map(|walk| walk.owner).collect()
+    }
+
+    /// Walk owners of a fresh build's wave until none is left, entering each
+    /// walk's reaches in the substitution index.
+    fn walk_wave_share(
+        &self,
+        ws: &Workspace,
+        interner: &MonoInterner,
+        units: &Mutex<std::vec::IntoIter<OwnerWalk>>,
+        shards: &[SubstShard],
+    ) -> WaveShare {
+        let mut share = WaveShare::default();
+        let mut claimed = Vec::with_capacity(WALK_TASK_OWNERS);
+        loop {
+            claimed.extend(units.lock().by_ref().take(WALK_TASK_OWNERS));
+            if claimed.is_empty() {
+                return share;
+            }
+            for OwnerWalk { owner, mut inputs } in claimed.drain(..) {
+                if let Owner::Instance(i) = &owner {
+                    inputs.tree = self.bound_tree(i).cloned();
+                }
+                let c = expand(ws, interner, &owner, &inputs, false);
+                for (to, subst) in &c.reached {
+                    let mut shard = shards[subst_shard(to)].lock();
+                    if let Some(agreed) = shard.get_mut(to) {
+                        share.disagreed |= !agreed.assert_unowned(subst);
+                        continue;
+                    }
+                    shard.insert(to.clone(), Agreed::unowned(subst.clone()));
+                    drop(shard);
+                    // The first reach of an instance is its demand. A root
+                    // is in the first wave whether or not anything reaches it.
+                    if !self.root_instances.contains(to) {
+                        share.demanded.push(OwnerWalk {
+                            owner: Owner::Instance(to.clone()),
+                            inputs: WalkInputs {
+                                subst: Some(subst.clone()),
+                                tree: None,
+                            },
+                        });
+                    }
+                }
+                share.reached_rows += c.reached.len();
+                share.counts.add_counters(&c);
+                if !(c.bound_trees.is_empty()
+                    && c.erased_entries.is_empty()
+                    && c.always_emitted_targets.is_empty()
+                    && c.always_emitted_holes.is_empty())
+                {
+                    share.owned.push(share.installed.len());
+                }
+                if let (Owner::Instance(i), Some(tree)) = (&owner, inputs.tree) {
+                    share.walked_with.push((i.clone(), tree));
+                }
+                share.installed.push((owner, c));
+            }
+        }
+    }
+
+    /// Take a fresh build's contributions and substitution shards as the
+    /// graph's records. Returns the number of instance owners.
+    fn install_fresh(
+        &mut self,
+        mut installed: Vec<(Owner, Box<Contribution>)>,
+        shards: Vec<SubstShard>,
+    ) -> usize {
+        let ((), subst) = bone_core::prelude::par_join(
+            || {
+                if cfg!(feature = "sequential") {
+                    installed.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                } else {
+                    use rayon::slice::ParallelSliceMut;
+                    installed.par_sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                }
+            },
+            || {
+                let shards: Vec<_> = shards.into_iter().map(Mutex::into_inner).collect();
+                let mut subst = FxHashMap::default();
+                subst.reserve(shards.iter().map(FxHashMap::len).sum());
+                for shard in shards {
+                    subst.extend(shard);
+                }
+                subst
+            },
+        );
+        self.index.subst = subst;
+        let mut instances = 0;
+        // Owner order groups an instance with the others of its declaration.
+        for decl in installed
+            .chunk_by(|a, b| a.0.instance().map(|i| i.func) == b.0.instance().map(|i| i.func))
+        {
+            if let Some(i) = decl[0].0.instance() {
+                self.index.decls.insert(i.func, decl.len());
+                instances += decl.len();
+            }
+        }
+        for (owner, _) in &installed {
+            self.mark_contributed(owner);
+        }
+        self.contributions = installed.into_iter().collect();
+        instances
     }
 }
 
@@ -2579,39 +2827,7 @@ impl InstanceGraph {
             }
         }
         index.subst_ns = elapsed_ns(lane_start);
-        let lane_start = timing_enabled.then(Instant::now);
-        for (i, tree) in &c.bound_trees {
-            index.trees_updates += 1;
-            match self.index.trees.get_mut(i) {
-                Some(a) => a.assert_by(&owner, tree),
-                None => {
-                    self.index
-                        .trees
-                        .insert(i.clone(), Agreed::new(owner.clone(), tree.clone()));
-                }
-            }
-        }
-        index.trees_ns = elapsed_ns(lane_start);
-        let lane_start = timing_enabled.then(Instant::now);
-        for name in &c.erased_entries {
-            index.erased_updates += 1;
-            self.index
-                .erased
-                .entry(name.clone())
-                .or_default()
-                .insert(owner.clone());
-        }
-        index.erased_ns = elapsed_ns(lane_start);
-        let lane_start = timing_enabled.then(Instant::now);
-        for to in &c.always_emitted_targets {
-            index.always_emitted_updates += 1;
-            self.index
-                .always_emitted
-                .entry(to.clone())
-                .or_default()
-                .insert(owner.clone());
-        }
-        index.always_emitted_ns = elapsed_ns(lane_start);
+        self.index_owned_rows(&owner, &c, timing_enabled, &mut index);
         let lane_start = timing_enabled.then(Instant::now);
         if let Some(from) = owner.instance() {
             for e in &c.edges {
@@ -2664,15 +2880,7 @@ impl InstanceGraph {
         // so a body that reaches ITSELF -- any recursive function -- would
         // otherwise find itself absent at the moment it asked and re-walk
         // forever.
-        for (name, failure) in &c.always_emitted_holes {
-            self.root_hole_dirty_names.insert(name.clone());
-            self.root_hole_sites
-                .entry(name.clone())
-                .or_default()
-                .entry(owner.clone())
-                .or_default()
-                .push(failure.clone());
-        }
+        self.record_root_holes(&owner, &c);
         self.add_contribution_counters(&c);
         self.mark_contributed(&owner);
         // `expand` folded repeated callees and ordered the rows by instance.
@@ -2706,6 +2914,63 @@ impl InstanceGraph {
                 index,
             },
         )
+    }
+
+    /// The index rows that are kept with their owner: conformance trees,
+    /// erased entries and always-emitted targets. Few bodies have any, and
+    /// only the build thread writes them.
+    fn index_owned_rows(
+        &mut self,
+        owner: &Owner,
+        c: &Contribution,
+        timing_enabled: bool,
+        index: &mut IndexMaintenanceTiming,
+    ) {
+        let lane_start = timing_enabled.then(Instant::now);
+        for (i, tree) in &c.bound_trees {
+            index.trees_updates += 1;
+            match self.index.trees.get_mut(i) {
+                Some(a) => a.assert_by(owner, tree),
+                None => {
+                    self.index
+                        .trees
+                        .insert(i.clone(), Agreed::new(owner.clone(), tree.clone()));
+                }
+            }
+        }
+        index.trees_ns = elapsed_ns(lane_start);
+        let lane_start = timing_enabled.then(Instant::now);
+        for name in &c.erased_entries {
+            index.erased_updates += 1;
+            self.index
+                .erased
+                .entry(name.clone())
+                .or_default()
+                .insert(owner.clone());
+        }
+        index.erased_ns = elapsed_ns(lane_start);
+        let lane_start = timing_enabled.then(Instant::now);
+        for to in &c.always_emitted_targets {
+            index.always_emitted_updates += 1;
+            self.index
+                .always_emitted
+                .entry(to.clone())
+                .or_default()
+                .insert(owner.clone());
+        }
+        index.always_emitted_ns = elapsed_ns(lane_start);
+    }
+
+    fn record_root_holes(&mut self, owner: &Owner, c: &Contribution) {
+        for (name, failure) in &c.always_emitted_holes {
+            self.root_hole_dirty_names.insert(name.clone());
+            self.root_hole_sites
+                .entry(name.clone())
+                .or_default()
+                .entry(owner.clone())
+                .or_default()
+                .push(failure.clone());
+        }
     }
 
     /// Remove a contribution and everything the indices held on its behalf.
@@ -4650,6 +4915,20 @@ pub struct RunStats {
     /// it is what makes the result independent of walk ORDER rather than a pass
     /// the answer depends on.
     pub settle_rounds: usize,
+}
+
+impl RunStats {
+    fn add_body_rows(&mut self, c: &Contribution) {
+        self.body_exprs_scanned += c.body_exprs_scanned;
+        self.resolved_overload_rows += c.resolved_overload_rows;
+        self.fn_value_rows += c.fn_value_rows;
+        self.generated_rows += c.generated_rows;
+        self.dispatched_rows += c.dispatched_rows;
+        self.implicit_iter_rows += c.implicit_iter_rows;
+        self.bound_tree_rows += c.bound_tree_rows;
+        self.bound_call_rows += c.bound_call_rows;
+        self.iterator_rows += c.iterator_rows;
+    }
 }
 
 /// What [`InstanceGraph::derive`] pruned, and over how much.

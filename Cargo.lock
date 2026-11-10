@@ -2455,6 +2455,7 @@ dependencies = [
  "comfy-la-arena",
  "libc",
  "log",
+ "parking_lot",
  "rayon",
  "rustc-hash",
  "skull-mir",

@@ -24,6 +24,7 @@ ustr = { workspace = true }
 rustc-hash = { workspace = true }
 log = { workspace = true }
 rayon = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 bone-semantic = { workspace = true }
