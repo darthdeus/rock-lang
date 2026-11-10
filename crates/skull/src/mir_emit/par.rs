@@ -49,26 +49,47 @@ pub(super) fn par_map<T: Send, R: Send>(items: Vec<T>, f: impl Fn(T) -> R + Sync
 /// Like [`par_map`], but threads a per-worker mutable state `S` (built by `init`)
 /// into `f` — for the function fan-out, an [`InlineCache`](skull_transform::InlineCache)
 /// reused across every fn a rayon worker handles, so each callee lowers + classifies
-/// at most once per worker. PARALLEL by default (`map_init`, one `S` per worker
+/// at most once per worker. PARALLEL by default (one `S` per pool
 /// thread); SEQUENTIALLY under `--features sequential` ONE `S` is shared across all
 /// items, exactly reproducing the original whole-workspace cache. Order-preserving
 /// in both modes.
 #[cfg(not(feature = "sequential"))]
-pub(super) fn par_map_with<T: Send, R: Send, S>(
+pub(super) fn par_map_with<T: Send, R: Send, S: Send>(
     items: Vec<T>,
     init: impl Fn() -> S + Sync + Send,
     f: impl Fn(&mut S, T) -> R + Sync + Send,
 ) -> Vec<R> {
     use rayon::prelude::*;
     let mode = WorkerMode::capture();
+    // Rayon splits a range further only when a thief steals part of it, and
+    // these items vary widely in cost, so with `map_init`'s coarse leaves one
+    // thread was left finishing a long run alone. Short leaves keep every
+    // thread busy to the end; the state lives per pool thread instead of per
+    // leaf so it is still built once per worker.
+    let states: Vec<std::sync::Mutex<Option<S>>> = (0..=rayon::current_num_threads())
+        .map(|_| std::sync::Mutex::new(None))
+        .collect();
+    let outside_pool = states.len() - 1;
     items
         .into_par_iter()
-        .map_init(
-            move || (init(), mode.enter()),
-            move |state, item| f(&mut state.0, item),
-        )
+        .with_max_len(PAR_MAP_LEAF)
+        .map(|item| {
+            let _scope = mode.enter();
+            let slot = rayon::current_thread_index()
+                .filter(|index| *index < outside_pool)
+                .unwrap_or(outside_pool);
+            // A thread waiting inside `f` can steal another item of this
+            // map; the nested item gets a state of its own.
+            match states[slot].try_lock() {
+                Ok(mut state) => f(state.get_or_insert_with(&init), item),
+                Err(_) => f(&mut init(), item),
+            }
+        })
         .collect()
 }
+
+#[cfg(not(feature = "sequential"))]
+const PAR_MAP_LEAF: usize = 4;
 
 #[cfg(feature = "sequential")]
 pub(super) fn par_map_with<T, R, S>(
@@ -222,6 +243,18 @@ pub(crate) fn drop_in_background<T>(value: T) {
 #[cfg(all(test, not(feature = "sequential")))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn par_map_with_keeps_order_and_survives_nested_maps() {
+        let items: Vec<usize> = (0..1000).collect();
+        let out = par_map_with(items, Vec::<usize>::new, |seen, item| {
+            seen.push(item);
+            let inner = par_map_with((0..8).collect(), || (), |_, x: usize| x + item);
+            inner.iter().sum::<usize>()
+        });
+        let expected: Vec<usize> = (0..1000).map(|item| 8 * item + 28).collect();
+        assert_eq!(out, expected);
+    }
 
     #[test]
     fn parallel_join_carries_compile_modes_into_both_branches() {
