@@ -4563,21 +4563,30 @@ pub fn collect_shader_collection(ws: &Workspace) -> Result<ShaderCollection, Com
     let mut by_key: BTreeMap<String, ShaderPair> = BTreeMap::new();
     let mut callsites: HashSet<(ModuleId, BodyOwner)> = HashSet::default();
     let mut contributions = std::collections::HashMap::new();
-    for &mid in ws.module_ids.values() {
-        let module = ws.module(mid);
-        for owner in module.bodies.keys() {
-            let key = (mid, *owner);
-            let (pairs, callsite) = collect_shader_body(ws, mid, *owner)?;
-            if callsite {
-                callsites.insert(key);
-            }
-            for pair in &pairs {
-                by_key
-                    .entry(pair.key.clone())
-                    .or_insert_with(|| pair.clone());
-            }
-            contributions.insert(key, pairs);
+    let keys: Vec<(ModuleId, BodyOwner)> = ws
+        .module_ids
+        .values()
+        .flat_map(|&mid| ws.module(mid).bodies.keys().map(move |owner| (mid, *owner)))
+        .collect();
+    // Each body is scanned on its own; the fold keeps the serial order, so
+    // the first registration of a key and the first error are the same ones.
+    let scanned: Vec<_> = {
+        use bone_core::prelude::*;
+        keys.par_iter()
+            .map(|&(mid, owner)| collect_shader_body(ws, mid, owner))
+            .collect()
+    };
+    for (key, scanned) in keys.into_iter().zip(scanned) {
+        let (pairs, callsite) = scanned?;
+        if callsite {
+            callsites.insert(key);
         }
+        for pair in &pairs {
+            by_key
+                .entry(pair.key.clone())
+                .or_insert_with(|| pair.clone());
+        }
+        contributions.insert(key, pairs);
     }
     Ok(ShaderCollection {
         pairs: by_key.into_values().collect(),
