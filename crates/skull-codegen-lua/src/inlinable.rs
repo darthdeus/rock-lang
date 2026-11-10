@@ -480,32 +480,35 @@ pub(crate) fn concat_run(
     parts.push(id);
 }
 
-/// Each operand of the folded value `id`, with the LuaJIT syntax levels its
-/// rendering nests that operand under, not counting the parenthesis
-/// `write_opnd` wraps `id` in. A binary operator's left operand is parsed in
+/// Call `each` with every operand of the folded value `id` and the LuaJIT
+/// syntax levels its rendering nests that operand under, not counting the
+/// parenthesis `write_opnd` wraps `id` in. A binary operator's left operand is parsed in
 /// its own loop and costs nothing; the right operand, a call argument list, a
 /// table constructor and a parenthesis cost one each, so the default allows
 /// two; a `..` run's operand costs its position. Allocation instrumentation
 /// wraps an allocating value in `(<site> and ..)`, counted always so the
 /// instrumented and plain builds fold alike.
-fn fold_operand_levels(func: &MirFunc, inlinable: &[bool], id: Idx<Inst>) -> Vec<(Idx<Inst>, u32)> {
+fn fold_operand_levels(
+    func: &MirFunc,
+    inlinable: &[bool],
+    id: Idx<Inst>,
+    each: &mut impl FnMut(Idx<Inst>, u32),
+) {
     let inst = &func.insts[id];
     let instrument = if emitted_value_allocation_kind(inst).is_some() {
         2
     } else {
         0
     };
-    let uniform = |levels: u32| {
-        let mut out = Vec::new();
-        regalloc::inst_uses(inst, &mut |u| out.push((u, levels)));
-        out
-    };
+    let mut uniform = |levels: u32| regalloc::inst_uses(inst, &mut |u| each(u, levels));
     match *inst {
         Inst::StringConcat(a, b) => {
             let mut run = Vec::new();
             concat_run(func, inlinable, &mut run, a);
             concat_run(func, inlinable, &mut run, b);
-            run.into_iter().zip(instrument..).collect()
+            for (u, at) in run.into_iter().zip(instrument..) {
+                each(u, at);
+            }
         }
         Inst::IntAdd(a, b)
         | Inst::FloatAdd(a, b)
@@ -529,8 +532,11 @@ fn fold_operand_levels(func: &MirFunc, inlinable: &[bool], id: Idx<Inst>) -> Vec
         | Inst::UintGeq(a, b)
         | Inst::FloatGeq(a, b)
         | Inst::Eq(a, b)
-        | Inst::NotEq(a, b) => vec![(a, 0), (b, 1)],
-        Inst::Neg(x) | Inst::Not(x) => vec![(x, 1)],
+        | Inst::NotEq(a, b) => {
+            each(a, 0);
+            each(b, 1);
+        }
+        Inst::Neg(x) | Inst::Not(x) => each(x, 1),
         Inst::UintMul(..) => uniform(8),
         Inst::UintShr(..) => uniform(5),
         Inst::UintBitcastInt(_) => uniform(3),
@@ -563,11 +569,10 @@ pub(crate) fn bound_fold_levels(
             // Rendered as its operand alone.
             Inst::IntToFloat(x) => levels[raw(x) as usize],
             _ => {
-                let deepest = fold_operand_levels(func, inlinable, id)
-                    .iter()
-                    .map(|&(u, at)| at + levels[raw(u) as usize])
-                    .max()
-                    .unwrap_or(0);
+                let mut deepest = 0;
+                fold_operand_levels(func, inlinable, id, &mut |u, at| {
+                    deepest = deepest.max(at + levels[raw(u) as usize]);
+                });
                 1 + deepest
             }
         }
@@ -592,7 +597,9 @@ pub(crate) fn bound_fold_levels(
                     }
                 }
             }
-            for (u, at) in fold_operand_levels(func, inlinable, id) {
+            let mut operands = Vec::new();
+            fold_operand_levels(func, inlinable, id, &mut |u, at| operands.push((u, at)));
+            for (u, at) in operands {
                 let x = raw(u) as usize;
                 if inlinable[x]
                     && 1 + at + levels[x] > budget
