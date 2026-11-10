@@ -265,6 +265,10 @@ fn definition_global(line: &str) -> Option<&str> {
 /// into `str` lines cost more than the whole emit of some bodies.
 pub(super) fn lua_definition_count(lua: &str) -> usize {
     fn is_definition(lua: &str, start: usize) -> bool {
+        // Most lines are indented statements; one byte rules them out.
+        if !matches!(lua.as_bytes().get(start), Some(b'f' | b'_')) {
+            return false;
+        }
         let rest = &lua[start..];
         if !(rest.starts_with("function ") || rest.starts_with(CALLEE_FACTORY_PREFIX)) {
             return false;

@@ -1706,6 +1706,8 @@ fn value_struct_metatypes(ws: &Workspace, emitted: &rustc_hash::FxHashSet<ustr::
 pub(crate) type ValueCtors = Vec<(ustr::Ustr, String)>;
 
 const VALUE_CTOR_SUFFIXES: [&str; 2] = ["_lct", "_vt"];
+/// Each suffix followed by the call's opening parenthesis.
+const VALUE_CTOR_CALLS: [&str; 2] = ["_lct(", "_vt("];
 
 pub(crate) fn is_value_ctor_global(name: &str) -> bool {
     VALUE_CTOR_SUFFIXES.iter().any(|s| name.ends_with(s))
@@ -1713,13 +1715,12 @@ pub(crate) fn is_value_ctor_global(name: &str) -> bool {
 
 /// Adds every value ctor that `lua` calls to `out`.
 pub(crate) fn push_value_ctor_calls(lua: &str, out: &mut Vec<ustr::Ustr>) {
-    for suffix in VALUE_CTOR_SUFFIXES {
-        let call = format!("{suffix}(");
+    for call in VALUE_CTOR_CALLS {
         for at in memchr::memmem::find_iter(lua.as_bytes(), call.as_bytes()) {
             let start = lua[..at]
                 .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
                 .map_or(0, |i| i + 1);
-            let name = ustr::Ustr::from(&lua[start..at + suffix.len()]);
+            let name = ustr::Ustr::from(&lua[start..at + call.len() - 1]);
             if !out.contains(&name) {
                 out.push(name);
             }
