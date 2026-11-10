@@ -519,11 +519,11 @@ pub fn convert_closures_framed(
         }
     }
 
-    // --- Split each live lambda body into a sibling MirFunc. A full arena clone
-    // (already fully rewritten above) keeps every `Idx` valid with zero remapping;
-    // the clone emits only its own region (entry = the lambda entry) -- the
-    // enclosing + sibling regions go unreachable, exactly as they do in `mf`. ---
+    // --- Split each live lambda body into a sibling MirFunc holding only the
+    // region its entry reaches (already fully rewritten above); the enclosing and
+    // sibling regions stay in `mf`, unreachable there as before. ---
     let mut nested: Vec<MirFunc> = Vec::with_capacity(ordered.len());
+    let facts = crate::inline::ArenaFacts::of(mf);
     for &(_k, sid) in &ordered {
         let lambda = tree.scopes[sid]
             .lambda
@@ -562,76 +562,19 @@ pub fn convert_closures_framed(
             mf.code_value_identities.insert(lambda, identity.clone());
             mf.nested_fn_identities.insert(hoisted_name[&sid], identity);
         }
-        nested.push(MirFunc {
-            name: hoisted_name[&sid],
-            code_identity,
-            code_abi_fingerprint: mf.lambda_abi_fingerprints.get(&lambda).cloned(),
-            lambda_abi_fingerprints: mf.lambda_abi_fingerprints.clone(),
-            lambda_abi_representations: mf.lambda_abi_representations.clone(),
-            code_value_identities: mf.code_value_identities.clone(),
-            nested_fn_identities: mf.nested_fn_identities.clone(),
-            code_compatibility: compatibility,
-            params,
-            param_default_guards: mf.param_default_guards.clone(),
-            param_default_materialized: mf.param_default_materialized.clone(),
-            param_default_values: mf.param_default_values.clone(),
-            lower_timing_enabled: mf.lower_timing_enabled,
-            lower_attribution: mf.lower_attribution.clone(),
-            abi_plan: None,
-            abi_representation: mf.lambda_abi_representations.get(&lambda).cloned(),
-            abi_logical_type: None,
-            rep_arena: mf.rep_arena.clone(),
-            global_plan: mf.global_plan.clone(),
-            statics: Vec::new(),
-            // Reads were recorded while lowering the whole pre-split fn, so the
-            // parent's set covers every lambda region; carrying it is at worst
-            // an over-invalidation within this fn's own hoists.
-            comptime_reads: mf.comptime_reads.clone(),
-            struct_registry_roots: mf.struct_registry_roots.clone(),
-            insts: mf.insts.clone(),
-            cells: mf.cells.clone(),
-            blocks: mf.blocks.clone(),
-            emit_ids: mf.emit_ids.clone(),
-            inline_cleanup_load_cells: mf.inline_cleanup_load_cells.clone(),
-            entry: tree.scopes[sid].entry,
-            is_coroutine: false,
-            resume_arg: None,
-            coro_defers: Vec::new(),
-            for_iter_headers: mf.for_iter_headers.clone(),
-            bound_trees: mf.bound_trees.clone(),
-            resolved_bound_trees: mf.resolved_bound_trees.clone(),
-            // The split is a full arena clone sharing `mf`'s `Idx` space, so the
-            // parent's keys stay valid and the entries for this lambda's own calls
-            // come across with them. Dropping them stranded every specialized call
-            // inside a lambda: the binding stayed on the parent (keyed to an inst
-            // whose only reachable home is now here), which the parent could not
-            // splice and the split body no longer knew about. Entries outside this
-            // body's region address unreachable blocks and are ignored -- both the
-            // inliner and the residual-binding check work on reachable blocks.
-            spec_bindings: mf.spec_bindings.clone(),
-            bound_next_split: mf.bound_next_split.clone(),
-            nested_fns: Vec::new(),
-            // Same arena clone, same `Idx` space: the parent's spans address the
-            // instructions this body now owns.
-            inst_spans: mf.inst_spans.clone(),
-            inst_logical_types: mf.inst_logical_types.clone(),
-            // Same arena clone, same `Idx` space -- and the same reason the
-            // `spec_bindings` above come across: this lambda's own calls are
-            // keyed to insts whose only reachable home is now this body, so
-            // dropping them would strand their site identity here.
-            call_sites: mf.call_sites.clone(),
-            callee_instances: mf.callee_instances.clone(),
-            call_abi_plans: mf.call_abi_plans.clone(),
-            call_rep_plans: mf.call_rep_plans.clone(),
-            flat_call_lanes: mf.flat_call_lanes.clone(),
-            closure_env_plans: mf.closure_env_plans.clone(),
-            fn_value_symbols: mf.fn_value_symbols.clone(),
-            hoisted_fn_globals: mf.hoisted_fn_globals.clone(),
-            flat_variant_source: None,
-            // The owner table comes across with the entries that index it;
-            // cloning one without the other would repoint every site.
-            site_owners: mf.site_owners.clone(),
-        });
+        let mut header = MirFunc::new(hoisted_name[&sid]);
+        header.code_identity = code_identity;
+        header.code_abi_fingerprint = mf.lambda_abi_fingerprints.get(&lambda).cloned();
+        header.code_compatibility = compatibility;
+        header.params = params;
+        header.abi_representation = mf.lambda_abi_representations.get(&lambda).cloned();
+        header.entry = tree.scopes[sid].entry;
+        // The split body shares `mf`'s `Idx` space only through the copy: it
+        // keeps the instructions, cells and blocks its entry reaches, with
+        // every side-table entry keyed to them (specialized bindings, call
+        // sites and owners, spans, ABI plans) remapped along, so a lambda's own
+        // calls keep their records.
+        nested.push(crate::inline::compact_split_body(&header, mf, &facts));
     }
     // APPEND, don't overwrite: lowering already hoisted the enclosing fn's named
     // nested `fn`s into `mf.nested_fns`, and clobbering them would drop those
@@ -897,6 +840,39 @@ mod tests {
             plan.env_cell().is_some(),
             "a capturing closure must own an env cell"
         );
+    }
+
+    #[test]
+    fn split_lambda_bodies_hold_only_their_own_region() {
+        let mut func = lower(
+            "fn f() -> int {\n\
+                 let captured = true\n\
+                 let a = () => captured\n\
+                 let b = () => {\n\
+                     if captured { return 1 }\n\
+                     return 2\n\
+                 }\n\
+                 if a() { return b() }\n\
+                 return 3\n\
+             }",
+            "f",
+        );
+        convert_closures(&mut func, "f");
+        assert_eq!(func.nested_fns.len(), 2, "both lambdas are split out");
+        for nested in &func.nested_fns {
+            let reachable = reachable_blocks_from(nested, nested.entry).len();
+            assert_eq!(
+                nested.blocks.len(),
+                reachable,
+                "`{}` must not carry the enclosing body's blocks",
+                nested.name
+            );
+            assert!(
+                nested.insts.len() < func.insts.len(),
+                "`{}` must not carry the enclosing body's instructions",
+                nested.name
+            );
+        }
     }
 
     #[test]

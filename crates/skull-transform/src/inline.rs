@@ -1167,37 +1167,83 @@ struct LiveClosure {
     cells: HashSet<Idx<Cell>>,
 }
 
-fn forced_cells(func: &MirFunc) -> Vec<(u32, u32)> {
-    let top: HashSet<Idx<Block>> = top_level_blocks(func).into_iter().collect();
-    let mut cells = HashSet::default();
-    for (_, inst) in func.insts.iter() {
-        if let Inst::Lambda { params, entry } = inst {
-            for &cell in params {
-                cells.insert((cell, *entry));
+/// Per-arena facts every region compacted out of one arena shares, computed
+/// once so splitting k regions out of an n-instruction arena does not hash
+/// all n instructions k times.
+pub(crate) struct ArenaFacts {
+    /// `(emit cell, emit block)` of every lambda parameter, sorted.
+    lambda_params: Vec<(u32, u32)>,
+    /// `(emit cell, emit block, block)` of every cell an instruction names,
+    /// sorted and unique by the emit pair.
+    uses: Vec<(u32, u32, Idx<Block>)>,
+    /// `(block, cell)` of every `Load`.
+    loads: Vec<(Idx<Block>, Idx<Cell>)>,
+}
+
+impl ArenaFacts {
+    pub(crate) fn of(func: &MirFunc) -> Self {
+        let mut lambda_params = Vec::new();
+        for (_, inst) in func.insts.iter() {
+            if let Inst::Lambda { params, entry } = inst {
+                for &cell in params {
+                    lambda_params.push((func.emit_cell_id(cell), func.emit_block_id(*entry)));
+                }
             }
         }
-    }
-    for (bid, block) in func.blocks.iter() {
-        if top.contains(&bid) {
-            continue;
+        lambda_params.sort_unstable();
+        lambda_params.dedup();
+        let mut uses = Vec::new();
+        let mut loads = Vec::new();
+        for (bid, block) in func.blocks.iter() {
+            let emit_block = func.emit_block_id(bid);
+            for &iid in &block.insts {
+                let inst = &func.insts[iid];
+                inst.cells_each(&mut |cell| uses.push((func.emit_cell_id(cell), emit_block, bid)));
+                if let Inst::Load(cell) = inst {
+                    loads.push((bid, *cell));
+                }
+            }
         }
-        for &iid in &block.insts {
-            func.insts[iid].cells_each(&mut |cell| {
-                cells.insert((cell, bid));
-            });
+        uses.sort_unstable_by_key(|&(cell, block, _)| (cell, block));
+        uses.dedup_by_key(|&mut (cell, block, _)| (cell, block));
+        Self {
+            lambda_params,
+            uses,
+            loads,
         }
     }
-    let mut cells: Vec<(u32, u32)> = cells
-        .into_iter()
-        .map(|(cell, block)| (func.emit_cell_id(cell), func.emit_block_id(block)))
-        .collect();
-    cells.sort_unstable();
-    cells
+
+    /// Cells named outside the top-level blocks reached from `entry`, plus
+    /// every lambda parameter, as sorted `(emit cell, emit block)` pairs.
+    fn forced_cells(&self, func: &MirFunc, entry: Idx<Block>) -> Vec<(u32, u32)> {
+        let mut top = vec![false; func.blocks.len()];
+        for block in crate::visit::top_level_blocks_from(func, entry) {
+            top[u32::from(block.into_raw()) as usize] = true;
+        }
+        let mut cells: Vec<(u32, u32)> = self
+            .uses
+            .iter()
+            .filter(|(_, _, block)| !top[u32::from(block.into_raw()) as usize])
+            .map(|&(cell, block, _)| (cell, block))
+            .collect();
+        if !self.lambda_params.is_empty() {
+            cells.extend(self.lambda_params.iter().copied());
+            cells.sort_unstable();
+            cells.dedup();
+        }
+        cells
+    }
 }
 
 fn live_closure(func: &MirFunc) -> LiveClosure {
+    live_closure_at(func, func)
+}
+
+/// The live closure of `header`'s entry, parameters and coroutine cells over
+/// `func`'s arena.
+fn live_closure_at(header: &MirFunc, func: &MirFunc) -> LiveClosure {
     let mut live = LiveClosure::default();
-    let mut blocks = vec![func.entry];
+    let mut blocks = vec![header.entry];
     let mut insts = Vec::new();
     while let Some(bid) = blocks.pop() {
         if !live.blocks.insert(bid) {
@@ -1208,7 +1254,7 @@ fn live_closure(func: &MirFunc) -> LiveClosure {
         block.term.uses_each(&mut |iid| insts.push(iid));
         skull_mir::cfg::successors(&block.term, |target| blocks.push(target));
     }
-    for param in &func.params {
+    for param in &header.params {
         live.cells.insert(*param);
     }
     while let Some(iid) = insts.pop() {
@@ -1233,10 +1279,10 @@ fn live_closure(func: &MirFunc) -> LiveClosure {
             skull_mir::cfg::successors(&block.term, |target| blocks.push(target));
         }
     }
-    if let Some(cell) = func.resume_arg {
+    if let Some(cell) = header.resume_arg {
         live.cells.insert(cell);
     }
-    for (flag, block) in &func.coro_defers {
+    for (flag, block) in &header.coro_defers {
         if live.blocks.contains(block) {
             live.cells.insert(*flag);
         }
@@ -1364,43 +1410,49 @@ fn compact_live_template(
     mut source: MirFunc,
     live: &LiveClosure,
 ) -> (MirFunc, HashMap<Idx<Block>, Idx<Block>>) {
-    let source_inst_span = source.emit_inst_span();
-    let source_cell_span = source.emit_cell_span();
-    let source_block_span = source.emit_block_span();
-    let source_forced_cells = forced_cells(&source);
-    let mut cleanup_load_cells = HashSet::default();
-    for (bid, block) in source.blocks.iter() {
-        if live.blocks.contains(&bid) {
-            continue;
-        }
-        for &iid in &block.insts {
-            if let Inst::Load(cell) = source.insts[iid] {
-                cleanup_load_cells.insert(cell);
-            }
-        }
-    }
+    let nested = std::mem::take(&mut source.nested_fns);
+    let facts = ArenaFacts::of(&source);
+    compact_region(&source, &source, &facts, nested, live)
+}
+
+/// [`compact_live_template`] with the header fields (name, identity, params,
+/// entry, coroutine cells, statics) read from `header` and the arena and its
+/// side tables from `arena`.
+fn compact_region(
+    header: &MirFunc,
+    arena: &MirFunc,
+    facts: &ArenaFacts,
+    nested: Vec<MirFunc>,
+    live: &LiveClosure,
+) -> (MirFunc, HashMap<Idx<Block>, Idx<Block>>) {
+    let source_inst_span = arena.emit_inst_span();
+    let source_cell_span = arena.emit_cell_span();
+    let source_block_span = arena.emit_block_span();
+    let source_forced_cells = facts.forced_cells(arena, header.entry);
+    // Arena order, walked over the live entries only.
+    let mut live_cells: Vec<Idx<Cell>> = live.cells.iter().copied().collect();
+    live_cells.sort_unstable_by_key(|id| u32::from(id.into_raw()));
+    let mut live_blocks: Vec<Idx<Block>> = live.blocks.iter().copied().collect();
+    live_blocks.sort_unstable_by_key(|id| u32::from(id.into_raw()));
+    let mut live_insts: Vec<Idx<Inst>> = live.insts.iter().copied().collect();
+    live_insts.sort_unstable_by_key(|id| u32::from(id.into_raw()));
+
     let mut cell_map = HashMap::default();
     let mut cells = comfy_la_arena::Arena::with_capacity(live.cells.len());
-    for (id, cell) in source.cells.iter() {
-        if live.cells.contains(&id) {
-            cell_map.insert(id, cells.alloc(cell.clone()));
-        }
+    for &id in &live_cells {
+        cell_map.insert(id, cells.alloc(arena.cells[id].clone()));
     }
 
     let mut block_map = HashMap::default();
     let mut blocks = comfy_la_arena::Arena::with_capacity(live.blocks.len());
-    for (id, _) in source.blocks.iter() {
-        if live.blocks.contains(&id) {
-            block_map.insert(id, blocks.alloc(Block::new()));
-        }
+    for &id in &live_blocks {
+        block_map.insert(id, blocks.alloc(Block::new()));
     }
 
     let mut inst_map = HashMap::default();
     let mut insts = comfy_la_arena::Arena::with_capacity(live.insts.len());
-    for (id, inst) in source.insts.iter() {
-        if live.insts.contains(&id) {
-            inst_map.insert(id, insts.alloc(inst.clone()));
-        }
+    for &id in &live_insts {
+        inst_map.insert(id, insts.alloc(arena.insts[id].clone()));
     }
     for id in &live.insts {
         let new_id = inst_map[id];
@@ -1408,7 +1460,7 @@ fn compact_live_template(
     }
     for id in live.blocks.iter().copied() {
         let new_id = block_map[&id];
-        let old = &source.blocks[id];
+        let old = &arena.blocks[id];
         blocks[new_id].insts = old.insts.iter().map(|inst| inst_map[inst]).collect();
         let mut term = old.term.clone();
         remap_term_clone(&mut term, &inst_map, &block_map);
@@ -1417,22 +1469,22 @@ fn compact_live_template(
 
     let mut emit_insts = vec![0; insts.len()];
     for (old, new) in &inst_map {
-        emit_insts[u32::from(new.into_raw()) as usize] = source.emit_inst_id(*old);
+        emit_insts[u32::from(new.into_raw()) as usize] = arena.emit_inst_id(*old);
     }
     let mut emit_cells = vec![0; cells.len()];
     for (old, new) in &cell_map {
-        emit_cells[u32::from(new.into_raw()) as usize] = source.emit_cell_id(*old);
+        emit_cells[u32::from(new.into_raw()) as usize] = arena.emit_cell_id(*old);
     }
     let mut emit_blocks = vec![0; blocks.len()];
     for (old, new) in &block_map {
-        emit_blocks[u32::from(new.into_raw()) as usize] = source.emit_block_id(*old);
+        emit_blocks[u32::from(new.into_raw()) as usize] = arena.emit_block_id(*old);
     }
 
-    let mut template = MirFunc::new(source.name);
-    template.code_identity = source.code_identity.clone();
-    template.code_abi_fingerprint = source.code_abi_fingerprint.clone();
-    template.code_compatibility = source.code_compatibility.clone();
-    template.lambda_abi_fingerprints = source
+    let mut template = MirFunc::new(header.name);
+    template.code_identity = header.code_identity.clone();
+    template.code_abi_fingerprint = header.code_abi_fingerprint.clone();
+    template.code_compatibility = header.code_compatibility.clone();
+    template.lambda_abi_fingerprints = arena
         .lambda_abi_fingerprints
         .iter()
         .filter_map(|(old_id, fingerprint)| {
@@ -1441,7 +1493,7 @@ fn compact_live_template(
                 .map(|new_id| (*new_id, fingerprint.clone()))
         })
         .collect();
-    template.lambda_abi_representations = source
+    template.lambda_abi_representations = arena
         .lambda_abi_representations
         .iter()
         .filter_map(|(old_id, representation)| {
@@ -1450,25 +1502,31 @@ fn compact_live_template(
                 .map(|new_id| (*new_id, representation.clone()))
         })
         .collect();
-    template.nested_fn_identities = source.nested_fn_identities.clone();
-    template.rep_arena = source.rep_arena.clone();
-    template.params = source.params.iter().map(|param| cell_map[param]).collect();
-    template.lower_timing_enabled = source.lower_timing_enabled;
-    template.lower_attribution = source.lower_attribution.clone();
-    template.abi_plan = source.abi_plan.clone();
-    template.abi_representation = source.abi_representation.clone();
-    template.global_plan = source.global_plan.clone();
-    template.statics = source.statics.clone();
-    template.comptime_reads = source.comptime_reads.clone();
-    template.struct_registry_roots = source.struct_registry_roots.clone();
+    template.nested_fn_identities = arena.nested_fn_identities.clone();
+    template.rep_arena = arena.rep_arena.clone();
+    template.params = header.params.iter().map(|param| cell_map[param]).collect();
+    template.lower_timing_enabled = arena.lower_timing_enabled;
+    template.lower_attribution = arena.lower_attribution.clone();
+    template.abi_plan = header.abi_plan.clone();
+    template.abi_representation = header.abi_representation.clone();
+    template.global_plan = arena.global_plan.clone();
+    template.statics = header.statics.clone();
+    template.comptime_reads = arena.comptime_reads.clone();
+    template.struct_registry_roots = arena.struct_registry_roots.clone();
     template.insts = insts;
     template.cells = cells;
     template.blocks = blocks;
-    let mut cleanup_load_cells: Vec<_> = cleanup_load_cells
-        .into_iter()
-        .filter_map(|cell| cell_map.get(&cell).copied())
+    // Kept cells loaded only outside the region, so cleanup still counts them.
+    let mut cleanup_load_cells: Vec<Idx<Cell>> = facts
+        .loads
+        .iter()
+        .filter_map(|(block, cell)| {
+            let mapped = cell_map.get(cell).copied()?;
+            (!live.blocks.contains(block)).then_some(mapped)
+        })
         .collect();
     cleanup_load_cells.sort_unstable_by_key(|cell| u32::from(cell.into_raw()));
+    cleanup_load_cells.dedup();
     template.inline_cleanup_load_cells = cleanup_load_cells;
     template.emit_ids = Some(skull_mir::mir::EmitIds {
         insts: emit_insts,
@@ -1483,26 +1541,26 @@ fn compact_live_template(
         next_cells: source_cell_span,
         next_blocks: source_block_span,
     });
-    template.entry = block_map[&source.entry];
-    template.is_coroutine = source.is_coroutine;
-    template.resume_arg = source.resume_arg.map(|cell| cell_map[&cell]);
-    template.coro_defers = source
+    template.entry = block_map[&header.entry];
+    template.is_coroutine = header.is_coroutine;
+    template.resume_arg = header.resume_arg.map(|cell| cell_map[&cell]);
+    template.coro_defers = header
         .coro_defers
         .iter()
         .filter(|&(_, block)| live.blocks.contains(block))
         .map(|(flag, block)| (cell_map[flag], block_map[block]))
         .collect();
-    template.for_iter_headers = source
+    template.for_iter_headers = arena
         .for_iter_headers
         .iter()
         .filter(|header| live.blocks.contains(header))
         .map(|header| block_map[header])
         .collect();
-    template.hoisted_fn_globals = source.hoisted_fn_globals.clone();
+    template.hoisted_fn_globals = arena.hoisted_fn_globals.clone();
 
     macro_rules! remap_inst_table {
         ($field:ident) => {
-            for (old_id, value) in &source.$field {
+            for (old_id, value) in &arena.$field {
                 if let Some(&new_id) = inst_map.get(old_id) {
                     template.$field.insert(new_id, value.clone());
                 }
@@ -1519,7 +1577,7 @@ fn compact_live_template(
     remap_inst_table!(fn_value_symbols);
     remap_inst_table!(param_default_guards);
     remap_inst_table!(inst_logical_types);
-    for (param, values) in &source.param_default_values {
+    for (param, values) in &arena.param_default_values {
         let values = values
             .iter()
             .filter_map(|value| inst_map.get(value).copied())
@@ -1528,14 +1586,14 @@ fn compact_live_template(
             template.param_default_values.insert(*param, values);
         }
     }
-    for (old_id, identity) in &source.code_value_identities {
+    for (old_id, identity) in &arena.code_value_identities {
         if let Some(&new_id) = inst_map.get(old_id) {
             template
                 .code_value_identities
                 .insert(new_id, identity.clone());
         }
     }
-    for (old_id, plan) in &source.closure_env_plans {
+    for (old_id, plan) in &arena.closure_env_plans {
         let Some(&new_id) = inst_map.get(old_id) else {
             continue;
         };
@@ -1546,26 +1604,26 @@ fn compact_live_template(
             skull_mir::mir::ClosureEnvPlan::new(captures, env_cell),
         );
     }
-    for old_id in &source.bound_next_split {
+    for old_id in &arena.bound_next_split {
         if let Some(&new_id) = inst_map.get(old_id) {
             template.bound_next_split.insert(new_id);
         }
     }
-    for (old_id, span) in source.inst_spans.iter() {
+    for (old_id, span) in arena.inst_spans.iter() {
         if let Some(&new_id) = inst_map.get(&old_id) {
             template.inst_spans.insert(new_id, *span);
         }
     }
 
     let mut owner_map: HashMap<u32, skull_mir::site::OwnerRef> = HashMap::default();
-    for (old_id, site) in &source.call_sites {
+    for (old_id, site) in &arena.call_sites {
         let Some(&new_id) = inst_map.get(old_id) else {
             continue;
         };
         let owner = match owner_map.get(&site.owner.0) {
             Some(&owner) => owner,
             None => {
-                let owner = source
+                let owner = arena
                     .site_owners
                     .get(site.owner.0 as usize)
                     .expect("call-site owner must exist in the candidate template")
@@ -1584,7 +1642,6 @@ fn compact_live_template(
         );
     }
 
-    let nested = std::mem::take(&mut source.nested_fns);
     template.nested_fns = nested
         .into_iter()
         .map(|nested| {
@@ -1593,6 +1650,41 @@ fn compact_live_template(
         })
         .collect();
     (template, block_map)
+}
+
+/// Build a body split out of `arena` (a hoisted lambda) from the region its
+/// entry reaches, keeping the arena's emission identities so the output is the
+/// same as for a full arena copy. `header` carries the split body's own name,
+/// identity, parameters and entry. Later passes then cost the region, not the
+/// whole arena, which made many lambdas in one large body quadratic.
+pub(crate) fn compact_split_body(header: &MirFunc, arena: &MirFunc, facts: &ArenaFacts) -> MirFunc {
+    let live = live_closure_at(header, arena);
+    let (mut compact, _) = compact_region(header, arena, facts, Vec::new(), &live);
+    compact.param_default_materialized = arena.param_default_materialized.clone();
+    if !arena.inline_cleanup_load_cells.is_empty() {
+        // Live cells keep their relative order, so the compact id of a carried
+        // cell is its rank among the live cells.
+        let mut rank = HashMap::default();
+        for (id, _) in arena.cells.iter() {
+            if live.cells.contains(&id) {
+                let next = rank.len() as u32;
+                rank.insert(id, Idx::from_raw(comfy_la_arena::RawIdx::from_u32(next)));
+            }
+        }
+        let mut seen: HashSet<Idx<Cell>> =
+            compact.inline_cleanup_load_cells.iter().copied().collect();
+        for cell in &arena.inline_cleanup_load_cells {
+            if let Some(&mapped) = rank.get(cell)
+                && seen.insert(mapped)
+            {
+                compact.inline_cleanup_load_cells.push(mapped);
+            }
+        }
+        compact
+            .inline_cleanup_load_cells
+            .sort_unstable_by_key(|cell| u32::from(cell.into_raw()));
+    }
+    compact
 }
 
 #[derive(Clone, Copy, Default)]

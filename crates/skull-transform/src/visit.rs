@@ -11,10 +11,14 @@ pub(crate) fn raw<T>(i: Idx<T>) -> u32 {
 /// Blocks reachable from the function entry via terminators — the co-fn's own
 /// CFG, EXCLUDING closure sub-blocks (reached only through `Inst::Lambda`).
 pub(crate) fn top_level_blocks(f: &MirFunc) -> Vec<Idx<Block>> {
+    top_level_blocks_from(f, f.entry)
+}
+
+pub(crate) fn top_level_blocks_from(f: &MirFunc, entry: Idx<Block>) -> Vec<Idx<Block>> {
     let mut seen = vec![false; f.blocks.len()];
     let mut stack = Vec::with_capacity(f.blocks.len());
-    stack.push(f.entry);
-    seen[raw(f.entry) as usize] = true;
+    stack.push(entry);
+    seen[raw(entry) as usize] = true;
     let mut order = Vec::with_capacity(f.blocks.len());
     while let Some(b) = stack.pop() {
         order.push(b);
