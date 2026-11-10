@@ -204,6 +204,148 @@ pub(crate) struct LoopScope {
     pub region: Vec<Idx<Block>>,
 }
 
+/// Backward liveness over a small set of tracked bits (some values, some
+/// cells) in one body, with each emitted statement's and terminator's reads
+/// and writes of them flattened once. The two fold analyses below walk it
+/// once more, statement by statement, to find their conflicts.
+struct TrackedLiveness {
+    pos: Vec<usize>,
+    /// Per block: `(first, end)` into `stmts`.
+    block_stmts: Vec<(u32, u32)>,
+    stmts: Vec<Idx<Inst>>,
+    /// Per statement, then per block terminator: `(uses, defs)` ranges.
+    stmt_bits: Vec<(u32, u32, u32)>,
+    term_bits: Vec<(u32, u32)>,
+    bits: Vec<u32>,
+    live_in: BitRows,
+    width: usize,
+}
+
+impl TrackedLiveness {
+    fn new(
+        func: &MirFunc,
+        scope: &[Idx<Block>],
+        inline: &[bool],
+        width: usize,
+        uses: impl Fn(Idx<Inst>, &mut Vec<u32>),
+        defs: impl Fn(Idx<Inst>, &mut Vec<u32>),
+        term: impl Fn(Idx<Block>, &mut Vec<u32>),
+    ) -> Self {
+        let n = scope.len();
+        let mut pos = vec![usize::MAX; func.blocks.len()];
+        for (i, &b) in scope.iter().enumerate() {
+            pos[raw(b)] = i;
+        }
+        let mut t = TrackedLiveness {
+            pos,
+            block_stmts: Vec::with_capacity(n),
+            stmts: Vec::new(),
+            stmt_bits: Vec::new(),
+            term_bits: Vec::with_capacity(n),
+            bits: Vec::new(),
+            live_in: BitRows::new(n, width),
+            width,
+        };
+        let mut use_set = BitRows::new(n, width);
+        let mut def_set = BitRows::new(n, width);
+        for (bi, &b) in scope.iter().enumerate() {
+            let first = t.stmts.len() as u32;
+            for &id in &func.blocks[b].insts {
+                if inline[raw(id)] {
+                    continue;
+                }
+                let u0 = t.bits.len() as u32;
+                uses(id, &mut t.bits);
+                let d0 = t.bits.len() as u32;
+                defs(id, &mut t.bits);
+                let d1 = t.bits.len() as u32;
+                for &k in &t.bits[u0 as usize..d0 as usize] {
+                    if !def_set.get(bi, k as usize) {
+                        use_set.set(bi, k as usize);
+                    }
+                }
+                for &k in &t.bits[d0 as usize..d1 as usize] {
+                    def_set.set(bi, k as usize);
+                }
+                t.stmts.push(id);
+                t.stmt_bits.push((u0, d0, d1));
+            }
+            t.block_stmts.push((first, t.stmts.len() as u32));
+            let u0 = t.bits.len() as u32;
+            term(b, &mut t.bits);
+            for &k in &t.bits[u0 as usize..] {
+                if !def_set.get(bi, k as usize) {
+                    use_set.set(bi, k as usize);
+                }
+            }
+            t.term_bits.push((u0, t.bits.len() as u32));
+        }
+        let mut out = BitSet::new(width);
+        let mut inn = BitSet::new(width);
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for bi in (0..n).rev() {
+                t.live_out(func, scope[bi], &mut out);
+                inn.copy_from(use_set.row(bi));
+                for (wi, (&o, &d)) in out.words.iter().zip(def_set.row(bi)).enumerate() {
+                    inn.words[wi] |= o & !d;
+                }
+                changed |= t.live_in.or_row(bi, &inn);
+            }
+        }
+        t
+    }
+
+    fn live_out(&self, func: &MirFunc, b: Idx<Block>, out: &mut BitSet) {
+        out.clear();
+        successors(&func.blocks[b].term, |s| {
+            if self.pos[raw(s)] != usize::MAX {
+                out.or_with(self.live_in.row(self.pos[raw(s)]));
+            }
+        });
+    }
+
+    /// Visit every statement backward with the bits live just after it.
+    fn walk(&self, func: &MirFunc, scope: &[Idx<Block>], mut at: impl FnMut(Idx<Inst>, &BitSet)) {
+        let mut live = BitSet::new(self.width);
+        for (bi, &b) in scope.iter().enumerate() {
+            self.live_out(func, b, &mut live);
+            let (t0, t1) = self.term_bits[bi];
+            for &k in &self.bits[t0 as usize..t1 as usize] {
+                live.set(k as usize);
+            }
+            let (first, end) = self.block_stmts[bi];
+            for si in (first..end).rev() {
+                let id = self.stmts[si as usize];
+                at(id, &live);
+                let (u0, d0, d1) = self.stmt_bits[si as usize];
+                for &k in &self.bits[d0 as usize..d1 as usize] {
+                    live.remove(k as usize);
+                }
+                for &k in &self.bits[u0 as usize..d0 as usize] {
+                    live.set(k as usize);
+                }
+            }
+        }
+    }
+}
+
+/// The value operands statement or terminator operand `v` reads where it is
+/// evaluated: itself, or for a folded operand the values its expression reads.
+fn evaluated_reads(
+    func: &MirFunc,
+    inline: &[bool],
+    v: Idx<Inst>,
+    push: &mut impl FnMut(Idx<Inst>),
+) {
+    if inline[raw(v)] {
+        effective_uses(func, inline, &func.insts[v], push);
+    } else {
+        push(v);
+    }
+}
+
 /// The loads in `scope` that can render as their cell at every use: no
 /// statement writes the cell while the loaded value is live. Folding one
 /// removes its register, the copy into it and that copy's kill; the cell
@@ -214,139 +356,83 @@ pub(crate) fn stable_loads(
     inline: &[bool],
     pinned: &[bool],
 ) -> Vec<Idx<Inst>> {
-    let n = scope.len();
-    let mut pos = vec![usize::MAX; func.blocks.len()];
-    for (i, &b) in scope.iter().enumerate() {
-        pos[raw(b)] = i;
+    let mut written = vec![false; func.cells.len()];
+    for &b in scope {
+        for &id in &func.blocks[b].insts {
+            func.insts[id].cell_writes_each(&mut |c| written[raw(c)] = true);
+        }
     }
-    let mut loads: Vec<(Idx<Inst>, Idx<Cell>)> = Vec::new();
+    // A load of a cell nothing in the body writes is stable outright.
+    let mut stable = Vec::new();
     let mut li = vec![u32::MAX; func.insts.len()];
+    let mut loads: Vec<(Idx<Inst>, Idx<Cell>)> = Vec::new();
     for &b in scope {
         for &id in &func.blocks[b].insts {
             if let Inst::Load(cell) = func.insts[id]
                 && !inline[raw(id)]
                 && !pinned[raw(cell)]
             {
-                li[raw(id)] = loads.len() as u32;
-                loads.push((id, cell));
+                if written[raw(cell)] {
+                    li[raw(id)] = loads.len() as u32;
+                    loads.push((id, cell));
+                } else {
+                    stable.push(id);
+                }
             }
         }
     }
     if loads.is_empty() {
-        return Vec::new();
+        return stable;
     }
-    let l_count = loads.len();
     let mut by_cell = vec![Vec::new(); func.cells.len()];
     for (k, &(_, cell)) in loads.iter().enumerate() {
-        by_cell[raw(cell)].push(k);
+        by_cell[raw(cell)].push(k as u32);
     }
-    // A load is read where the statement or terminator that evaluates it
-    // runs, which for a folded consumer is that consumer's statement.
-    let stmt_uses = |id: Idx<Inst>, push: &mut dyn FnMut(usize)| {
-        effective_uses(func, inline, &func.insts[id], &mut |v| {
-            if li[raw(v)] != u32::MAX {
-                push(li[raw(v)] as usize);
-            }
-        });
-    };
-    let term_reads = |b: Idx<Block>, push: &mut dyn FnMut(usize)| {
-        term_uses(&func.blocks[b].term, &mut |v| {
-            let mut one = |w: Idx<Inst>| {
-                if li[raw(w)] != u32::MAX {
-                    push(li[raw(w)] as usize);
-                }
-            };
-            if inline[raw(v)] {
-                effective_uses(func, inline, &func.insts[v], &mut one);
-            } else {
-                one(v);
-            }
-        });
-    };
-    let mut use_set = BitRows::new(n, l_count);
-    let mut def_set = BitRows::new(n, l_count);
-    for (bi, &b) in scope.iter().enumerate() {
-        for &id in &func.blocks[b].insts {
-            if inline[raw(id)] {
-                continue;
-            }
-            stmt_uses(id, &mut |k| {
-                if !def_set.get(bi, k) {
-                    use_set.set(bi, k);
-                }
-            });
-            if li[raw(id)] != u32::MAX {
-                def_set.set(bi, li[raw(id)] as usize);
-            }
+    let tracked = |v: Idx<Inst>, bits: &mut Vec<u32>| {
+        if li[raw(v)] != u32::MAX {
+            bits.push(li[raw(v)]);
         }
-        term_reads(b, &mut |k| {
-            if !def_set.get(bi, k) {
-                use_set.set(bi, k);
-            }
-        });
-    }
-    let mut live_in = BitRows::new(n, l_count);
-    let mut out = BitSet::new(l_count);
-    let mut inn = BitSet::new(l_count);
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for bi in (0..n).rev() {
-            out.clear();
-            successors(&func.blocks[scope[bi]].term, |s| {
-                if pos[raw(s)] != usize::MAX {
-                    out.or_with(live_in.row(pos[raw(s)]));
-                }
-            });
-            inn.copy_from(use_set.row(bi));
-            for (wi, (&o, &d)) in out.words.iter().zip(def_set.row(bi)).enumerate() {
-                inn.words[wi] |= o & !d;
-            }
-            changed |= live_in.or_row(bi, &inn);
-        }
-    }
+    };
+    let liveness = TrackedLiveness::new(
+        func,
+        scope,
+        inline,
+        loads.len(),
+        |id, bits| effective_uses(func, inline, &func.insts[id], &mut |v| tracked(v, bits)),
+        |id, bits| tracked(id, bits),
+        |b, bits| {
+            term_uses(&func.blocks[b].term, &mut |v| {
+                evaluated_reads(func, inline, v, &mut |w| tracked(w, bits))
+            })
+        },
+    );
     // A statement writes its cells after it reads its operands, so a write
     // conflicts with a load that is still live after the statement.
-    let mut conflict = vec![false; l_count];
-    let mut live = BitSet::new(l_count);
-    for &b in scope {
-        live.clear();
-        successors(&func.blocks[b].term, |s| {
-            if pos[raw(s)] != usize::MAX {
-                live.or_with(live_in.row(pos[raw(s)]));
+    let mut conflict = vec![false; loads.len()];
+    liveness.walk(func, scope, |id, live| {
+        func.insts[id].cell_writes_each(&mut |cell| {
+            for &k in &by_cell[raw(cell)] {
+                conflict[k as usize] |= live.get(k as usize);
             }
         });
-        term_reads(b, &mut |k| live.set(k));
-        for &id in func.blocks[b].insts.iter().rev() {
-            if inline[raw(id)] {
-                continue;
-            }
-            func.insts[id].cell_writes_each(&mut |cell| {
-                for &k in &by_cell[raw(cell)] {
-                    conflict[k] |= live.get(k);
-                }
-            });
-            if li[raw(id)] != u32::MAX {
-                live.remove(li[raw(id)] as usize);
-            }
-            stmt_uses(id, &mut |k| live.set(k));
-        }
-    }
-    loads
-        .iter()
-        .zip(conflict)
-        .filter(|&(_, c)| !c)
-        .map(|(&(id, _), _)| id)
-        .collect()
+    });
+    stable.extend(
+        loads
+            .iter()
+            .zip(conflict)
+            .filter(|&(_, c)| !c)
+            .map(|(&(id, _), _)| id),
+    );
+    stable
 }
 
 /// Values to compute directly in the cell a later `Store` copies them into,
-/// as a dense `raw(inst) -> cell` table. A value qualifies when its cell is
-/// dead where the value is defined and no other statement writes the cell
-/// while the value is live, so the cell holds the value at every use; the
-/// store then assigns the cell to itself. Two values of one cell never
-/// overlap. `eligible` says which values may move; `pinned` cells never take
-/// one.
+/// as a dense `raw(inst) -> cell` table (empty when there are none). A value
+/// qualifies when its cell is dead where the value is defined and no other
+/// statement writes the cell while the value is live, so the cell holds the
+/// value at every use; the store then assigns the cell to itself. Two values
+/// of one cell never overlap. `eligible` says which values may move; `pinned`
+/// cells never take one.
 pub(crate) fn store_targets(
     func: &MirFunc,
     scope: &[Idx<Block>],
@@ -354,26 +440,18 @@ pub(crate) fn store_targets(
     pinned: &[bool],
     eligible: impl Fn(Idx<Inst>, Idx<Cell>) -> bool,
 ) -> Vec<Option<Idx<Cell>>> {
-    let n = scope.len();
-    let mut pos = vec![usize::MAX; func.blocks.len()];
-    for (i, &b) in scope.iter().enumerate() {
-        pos[raw(b)] = i;
-    }
-    let mut defined = vec![false; func.insts.len()];
-    for &b in scope {
-        for &id in &func.blocks[b].insts {
-            defined[raw(id)] = true;
-        }
-    }
     // Candidate k: value `vals[k]` into cell `cells[k]`.
     let mut vi = vec![u32::MAX; func.insts.len()];
     let mut vals: Vec<Idx<Inst>> = Vec::new();
     let mut cells: Vec<Idx<Cell>> = Vec::new();
+    let mut defined = vec![false; func.insts.len()];
     for &b in scope {
         for &id in &func.blocks[b].insts {
+            defined[raw(id)] = true;
             if let Inst::Store { cell, value } = func.insts[id]
                 && !inline[raw(id)]
                 && !inline[raw(value)]
+                // Defined earlier in this scope, as a dominating def must be.
                 && defined[raw(value)]
                 && vi[raw(value)] == u32::MAX
                 && !pinned[raw(cell)]
@@ -386,152 +464,89 @@ pub(crate) fn store_targets(
             }
         }
     }
-    let mut alias = vec![None; func.insts.len()];
     if vals.is_empty() {
-        return alias;
+        return Vec::new();
     }
     let k_count = vals.len();
-    // Dense index over the candidate cells, for their liveness.
+    // Bits: the candidate values in `0..k_count`, then their cells.
     let mut ci = vec![u32::MAX; func.cells.len()];
-    let mut c_count = 0usize;
+    let mut c_count = 0u32;
     for &c in &cells {
         if ci[raw(c)] == u32::MAX {
-            ci[raw(c)] = c_count as u32;
+            ci[raw(c)] = k_count as u32 + c_count;
             c_count += 1;
         }
     }
-    let mut by_cell = vec![Vec::new(); c_count];
+    let mut by_cell = vec![Vec::new(); c_count as usize];
     for (k, &c) in cells.iter().enumerate() {
-        by_cell[ci[raw(c)] as usize].push(k);
+        by_cell[(ci[raw(c)] as usize) - k_count].push(k as u32);
     }
-    // One liveness over both: candidate values in `0..k_count`, then their
-    // cells.
-    let width = k_count + c_count;
-    let cell_bit = |c: Idx<Cell>| (ci[raw(c)] != u32::MAX).then(|| k_count + ci[raw(c)] as usize);
-    let stmt_uses = |id: Idx<Inst>, push: &mut dyn FnMut(usize)| {
-        effective_uses(func, inline, &func.insts[id], &mut |v| {
-            if vi[raw(v)] != u32::MAX {
-                push(vi[raw(v)] as usize);
-            }
-        });
-        emitted_cell_uses(func, Some(inline), &[], id, &mut |c| {
-            if let Some(bit) = cell_bit(c) {
-                push(bit);
-            }
-        });
-    };
-    let stmt_defs = |id: Idx<Inst>, push: &mut dyn FnMut(usize)| {
-        if vi[raw(id)] != u32::MAX {
-            push(vi[raw(id)] as usize);
+    let value_bit = |v: Idx<Inst>, bits: &mut Vec<u32>| {
+        if vi[raw(v)] != u32::MAX {
+            bits.push(vi[raw(v)]);
         }
-        func.insts[id].cell_writes_each(&mut |c| {
-            if let Some(bit) = cell_bit(c) {
-                push(bit);
-            }
-        });
     };
-    let term_reads = |b: Idx<Block>, push: &mut dyn FnMut(usize)| {
-        term_uses(&func.blocks[b].term, &mut |v| {
-            let mut one = |w: Idx<Inst>| {
-                if vi[raw(w)] != u32::MAX {
-                    push(vi[raw(w)] as usize);
-                }
-            };
-            if inline[raw(v)] {
-                effective_uses(func, inline, &func.insts[v], &mut one);
-            } else {
-                one(v);
-            }
-        });
-        term_cell_uses(func, Some(inline), &[], &func.blocks[b].term, &mut |c| {
-            if let Some(bit) = cell_bit(c) {
-                push(bit);
-            }
-        });
+    let cell_bit = |c: Idx<Cell>, bits: &mut Vec<u32>| {
+        if ci[raw(c)] != u32::MAX {
+            bits.push(ci[raw(c)]);
+        }
     };
-    let mut use_set = BitRows::new(n, width);
-    let mut def_set = BitRows::new(n, width);
-    for (bi, &b) in scope.iter().enumerate() {
-        for &id in &func.blocks[b].insts {
-            if inline[raw(id)] {
-                continue;
-            }
-            stmt_uses(id, &mut |k| {
-                if !def_set.get(bi, k) {
-                    use_set.set(bi, k);
-                }
+    let liveness = TrackedLiveness::new(
+        func,
+        scope,
+        inline,
+        k_count + c_count as usize,
+        |id, bits| {
+            effective_uses(func, inline, &func.insts[id], &mut |v| value_bit(v, bits));
+            emitted_cell_uses(func, Some(inline), &[], id, &mut |c| cell_bit(c, bits));
+        },
+        |id, bits| {
+            value_bit(id, bits);
+            func.insts[id].cell_writes_each(&mut |c| cell_bit(c, bits));
+        },
+        |b, bits| {
+            let term = &func.blocks[b].term;
+            term_uses(term, &mut |v| {
+                evaluated_reads(func, inline, v, &mut |w| value_bit(w, bits))
             });
-            stmt_defs(id, &mut |k| def_set.set(bi, k));
-        }
-        term_reads(b, &mut |k| {
-            if !def_set.get(bi, k) {
-                use_set.set(bi, k);
-            }
-        });
-    }
-    let mut live_in = BitRows::new(n, width);
-    let mut out = BitSet::new(width);
-    let mut inn = BitSet::new(width);
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for bi in (0..n).rev() {
-            out.clear();
-            successors(&func.blocks[scope[bi]].term, |s| {
-                if pos[raw(s)] != usize::MAX {
-                    out.or_with(live_in.row(pos[raw(s)]));
-                }
-            });
-            inn.copy_from(use_set.row(bi));
-            for (wi, (&o, &d)) in out.words.iter().zip(def_set.row(bi)).enumerate() {
-                inn.words[wi] |= o & !d;
-            }
-            changed |= live_in.or_row(bi, &inn);
-        }
-    }
+            term_cell_uses(func, Some(inline), &[], term, &mut |c| cell_bit(c, bits));
+        },
+    );
     let mut conflict = vec![false; k_count];
-    let mut live = BitSet::new(width);
-    for &b in scope {
-        live.clear();
-        successors(&func.blocks[b].term, |s| {
-            if pos[raw(s)] != usize::MAX {
-                live.or_with(live_in.row(pos[raw(s)]));
+    liveness.walk(func, scope, |id, live| {
+        func.insts[id].cell_writes_each(&mut |c| {
+            if ci[raw(c)] == u32::MAX {
+                return;
             }
-        });
-        term_reads(b, &mut |k| live.set(k));
-        for &id in func.blocks[b].insts.iter().rev() {
-            if inline[raw(id)] {
-                continue;
-            }
-            // `live` holds what is live after this statement.
-            func.insts[id].cell_writes_each(&mut |c| {
-                if ci[raw(c)] == u32::MAX {
-                    return;
-                }
-                let copies = match func.insts[id] {
-                    Inst::Store { value, .. } => Some(value),
-                    _ => None,
-                };
-                for &k in &by_cell[ci[raw(c)] as usize] {
-                    if live.get(k) && copies != Some(vals[k]) {
-                        conflict[k] = true;
-                    }
-                }
-            });
-            if vi[raw(id)] != u32::MAX {
-                let k = vi[raw(id)] as usize;
-                let cell = ci[raw(cells[k])] as usize;
-                // The cell must be dead here, and no other value of the cell
-                // may still be live.
-                if live.get(k_count + cell) || by_cell[cell].iter().any(|&o| o != k && live.get(o))
-                {
+            let copies = match func.insts[id] {
+                Inst::Store { value, .. } => Some(value),
+                _ => None,
+            };
+            for &k in &by_cell[ci[raw(c)] as usize - k_count] {
+                let k = k as usize;
+                if live.get(k) && copies != Some(vals[k]) {
                     conflict[k] = true;
                 }
             }
-            stmt_defs(id, &mut |k| live.remove(k));
-            stmt_uses(id, &mut |k| live.set(k));
+        });
+        if vi[raw(id)] != u32::MAX {
+            let k = vi[raw(id)] as usize;
+            let bit = ci[raw(cells[k])] as usize;
+            // The cell must be dead here, and no other value of the cell may
+            // still be live.
+            if live.get(bit)
+                || by_cell[bit - k_count]
+                    .iter()
+                    .any(|&o| o as usize != k && live.get(o as usize))
+            {
+                conflict[k] = true;
+            }
         }
+    });
+    if conflict.iter().all(|&c| c) {
+        return Vec::new();
     }
+    let mut alias = vec![None; func.insts.len()];
     for k in 0..k_count {
         if !conflict[k] {
             alias[raw(vals[k])] = Some(cells[k]);
