@@ -31,8 +31,16 @@ pub(crate) fn recognize_counted_loops(
     rpo: &[Idx<Block>],
     frame: Option<&FrameCtx>,
 ) -> HashMap<Idx<Block>, CountedLoop> {
-    let (all_preds, goto_preds) = predecessors(func, rpo);
     let mut loops = HashMap::default();
+    // Every counted loop has an increment latch, and few bodies have a block
+    // of that shape: look for one before building the predecessor maps.
+    let latched = rpo
+        .iter()
+        .any(|&p| matches!(func.blocks[p].term, Term::Goto(h) if latch_slot(func, p, h).is_some()));
+    if !latched {
+        return loops;
+    }
+    let (all_preds, goto_preds) = predecessors(func, rpo);
     for &h in rpo {
         if let Some(cl) = try_match_loop(func, h, &all_preds, &goto_preds, frame) {
             loops.insert(h, cl);

@@ -90,6 +90,30 @@ impl CallArgForwards {
     }
 }
 
+/// The cells a multi-return call receives its results in.
+fn multi_dests(inst: &Inst) -> Option<&[Idx<Cell>]> {
+    match inst {
+        Inst::CallMulti { dests, .. } | Inst::CallValueMulti { dests, .. } => Some(dests),
+        _ => None,
+    }
+}
+
+/// The multi-return call `id` as the call a forward re-emits.
+fn multi_call(func: &MirFunc, id: Idx<Inst>) -> TailForwardCall {
+    match &func.insts[id] {
+        Inst::CallMulti { func, args, .. } => TailForwardCall::Direct {
+            call: id,
+            func: *func,
+            args: args.clone(),
+        },
+        Inst::CallValueMulti { callee, args, .. } => TailForwardCall::Value {
+            callee: *callee,
+            args: args.clone(),
+        },
+        other => unreachable!("{other:?} is not a multi-return call"),
+    }
+}
+
 fn cell_reference_counts(func: &MirFunc) -> Vec<u32> {
     let mut counts = vec![0; func.cells.len()];
     for (_, block) in func.blocks.iter() {
@@ -142,7 +166,8 @@ pub(crate) fn tail_forwards(
     direct: bool,
 ) -> Vec<Option<TailForward>> {
     let mut forwards = vec![None; func.blocks.len()];
-    let cell_references = cell_reference_counts(func);
+    // Counted for the first multi-return candidate; most bodies have none.
+    let cell_references = std::cell::OnceCell::new();
     for (block_id, block) in func.blocks.iter() {
         let Term::Return(values) = &block.term else {
             continue;
@@ -186,31 +211,13 @@ pub(crate) fn tail_forwards(
         }
         let first = block.insts.len() - values.len() - 1;
         let call_id = block.insts[first];
-        let (dests, call) = match &func.insts[call_id] {
-            Inst::CallMulti { dests, func, args } => (
-                dests,
-                TailForwardCall::Direct {
-                    call: call_id,
-                    func: *func,
-                    args: args.clone(),
-                },
-            ),
-            Inst::CallValueMulti {
-                dests,
-                callee,
-                args,
-            } => (
-                dests,
-                TailForwardCall::Value {
-                    callee: *callee,
-                    args: args.clone(),
-                },
-            ),
-            _ => continue,
+        let Some(dests) = multi_dests(&func.insts[call_id]) else {
+            continue;
         };
         if dests.len() != values.len() {
             continue;
         }
+        let cell_references = cell_references.get_or_init(|| cell_reference_counts(func));
         let exact_wire = values
             .iter()
             .zip(dests)
@@ -226,7 +233,7 @@ pub(crate) fn tail_forwards(
         forwards[raw(block_id) as usize] = Some(TailForward {
             first_suppressed: first,
             suppressed: block.insts[first..].to_vec(),
-            call,
+            call: multi_call(func, call_id),
         });
     }
     forwards
@@ -235,32 +242,14 @@ pub(crate) fn tail_forwards(
 pub(crate) fn call_arg_forwards(ws: &Workspace, func: &MirFunc) -> (CallArgForwards, Vec<bool>) {
     let mut forwards = Vec::new();
     let mut suppressed = vec![false; func.insts.len()];
-    let cell_references = cell_reference_counts(func);
-    let instruction_references = instruction_reference_counts(func);
+    // Counted for the first multi-return call that feeds a call; most bodies
+    // have none.
+    let references = std::cell::OnceCell::new();
     for (_, block) in func.blocks.iter() {
         for first in 0..block.insts.len() {
             let producer_id = block.insts[first];
-            let (dests, producer) = match &func.insts[producer_id] {
-                Inst::CallMulti { dests, func, args } => (
-                    dests,
-                    TailForwardCall::Direct {
-                        call: producer_id,
-                        func: *func,
-                        args: args.clone(),
-                    },
-                ),
-                Inst::CallValueMulti {
-                    dests,
-                    callee,
-                    args,
-                } => (
-                    dests,
-                    TailForwardCall::Value {
-                        callee: *callee,
-                        args: args.clone(),
-                    },
-                ),
-                _ => continue,
+            let Some(dests) = multi_dests(&func.insts[producer_id]) else {
+                continue;
             };
             let consumer_position = first + dests.len() + 1;
             if dests.is_empty() || consumer_position >= block.insts.len() {
@@ -281,6 +270,12 @@ pub(crate) fn call_arg_forwards(ws: &Workspace, func: &MirFunc) -> (CallArgForwa
             }
             let prefix_len = consumer_args.len() - dests.len();
             let loads = &block.insts[first + 1..consumer_position];
+            let (cell_references, instruction_references) = references.get_or_init(|| {
+                (
+                    cell_reference_counts(func),
+                    instruction_reference_counts(func),
+                )
+            });
             let exact_wire = loads
                 .iter()
                 .zip(dests)
@@ -299,7 +294,7 @@ pub(crate) fn call_arg_forwards(ws: &Workspace, func: &MirFunc) -> (CallArgForwa
                 suppressed[raw(load) as usize] = true;
             }
             forwards.push(CallArgForward {
-                producer,
+                producer: multi_call(func, producer_id),
                 prefix: consumer_args[..prefix_len].to_vec(),
                 consumer,
                 func: *consumer_func,
