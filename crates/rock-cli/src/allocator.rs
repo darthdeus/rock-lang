@@ -135,6 +135,18 @@ pub(crate) fn release_freed_memory() {
     unsafe { mi_collect(true) }
 }
 
+/// Drops `value` on a thread of its own and then returns the freed pages to
+/// the OS, so a host that only waits on a child afterwards neither delays the
+/// child's start by the teardown nor holds the compile's memory while it runs.
+/// Dropping only frees memory; a process that exits first loses nothing.
+pub(crate) fn drop_and_release_in_background<T: Send + 'static>(value: T) {
+    std::thread::spawn(move || {
+        rock_host::timed("drop compiler", || drop(value));
+        rock_host::timed("release freed memory", release_freed_memory);
+        log::debug!("after release: {}", process_memory());
+    });
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(not(feature = "sequential"))]

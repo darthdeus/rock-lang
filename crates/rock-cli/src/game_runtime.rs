@@ -256,7 +256,7 @@ pub(crate) fn game_compiler_for(
     backend: crate::Backend,
     path: &str,
     output_path: &Path,
-) -> Box<dyn GameCompiler> {
+) -> Box<dyn GameCompiler + Send> {
     match backend {
         crate::Backend::Skull => {
             let incremental_path = output_path.with_file_name("incremental.lua");
