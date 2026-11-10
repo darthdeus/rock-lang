@@ -38,6 +38,11 @@ impl<T, V> ArenaMap<Idx<T>, V> {
         self.v.clear();
     }
 
+    /// Removes the values of every index at or after `len`.
+    pub fn truncate(&mut self, len: usize) {
+        self.v.truncate(len);
+    }
+
     /// Shrinks the capacity of the map as much as possible.
     pub fn shrink_to_fit(&mut self) {
         let min_len = self

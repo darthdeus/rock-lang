@@ -3280,3 +3280,38 @@ fn all(xs: [int], n: int?, p: P) -> string {
         missed.join("\n")
     );
 }
+
+// Overload scoring tries every candidate and rolls the substitutions back;
+// the types it builds for the losers (fresh generics, substituted params)
+// must not stay in the body's arena, which lives as long as the compile.
+// Only the committed call instantiates its generic, so `main`'s arena holds
+// exactly one inference variable.
+#[test]
+fn overload_scoring_leaves_no_types_in_the_body_arena() {
+    use bone_semantic::hir::{BodyOwner, TypeExpr};
+
+    let ws = check(
+        "\
+fn pick<T>(a: T, b: int) -> T { a }
+fn pick<T>(a: T, b: string) -> T { a }
+fn pick<T>(a: T, b: bool) -> T { a }
+fn main() {
+    let x = pick(1.5, true)
+}",
+    )
+    .unwrap();
+    let mid = ws.source_modules().next().expect("one user module").id;
+    let (main, _) = ws
+        .module(mid)
+        .functions
+        .iter()
+        .find(|(_, f)| f.name.as_str() == "main")
+        .unwrap();
+    let bi = &ws.inference(mid).unwrap().per_fn[&BodyOwner::Function(main)];
+    let vars = bi
+        .ty_arena
+        .iter()
+        .filter(|(_, t)| matches!(t, TypeExpr::Infer(..)))
+        .count();
+    assert_eq!(vars, 1, "losing candidates left their types behind");
+}

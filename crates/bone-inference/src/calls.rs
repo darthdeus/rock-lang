@@ -735,8 +735,44 @@ pub(crate) fn score_candidate_with_generics(
     span: Span,
     bound_fail: &mut Option<CompilerError>,
 ) -> Option<usize> {
+    // Scoring only reads the candidate's fit: every type it builds (fresh
+    // generics, substituted params, unification results) is garbage once the
+    // trail is rolled back, so drop them instead of keeping them in the
+    // body's arena. A spread argument is inferred while slots are mapped and
+    // records its type, so that path keeps what it allocated.
     let snap = gamma.out.checkpoint();
+    let cost = fit_candidate(
+        c,
+        gamma,
+        mid,
+        fid,
+        recv_ty,
+        args,
+        arg_ty,
+        generic_args,
+        span,
+        bound_fail,
+    );
+    if args.iter().any(|arg| c.body.spread_args.contains(arg)) {
+        gamma.out.rollback_to(snap);
+    } else {
+        gamma.out.discard_since(snap);
+    }
+    cost
+}
 
+fn fit_candidate(
+    c: BodyCtx,
+    gamma: &mut Gamma,
+    mid: ModuleId,
+    fid: Idx<Function>,
+    recv_ty: Option<TyId>,
+    args: &[Idx<Expr>],
+    arg_ty: &FxHashMap<Idx<Expr>, TyId>,
+    generic_args: IdxRange<TypeExpr>,
+    span: Span,
+    bound_fail: &mut Option<CompilerError>,
+) -> Option<usize> {
     let f = &gamma.workspace.module(mid).functions[fid];
 
     let mut declared: SmallVec<[TyId; 8]> = SmallVec::with_capacity(c.body.param_bindings.len());
@@ -749,18 +785,10 @@ pub(crate) fn score_candidate_with_generics(
 
     let bounded_vars = bounded_generic_vars(gamma, f);
 
-    let subs = match instantiate_call_generics(gamma, f, generic_args, span) {
-        Ok((s, _)) => s,
-        Err(_) => {
-            gamma.out.rollback_to(snap);
-            return None;
-        }
-    };
+    let (subs, _) = instantiate_call_generics(gamma, f, generic_args, span).ok()?;
 
     let offset = if recv_ty.is_some() { 1 } else { 0 };
     if offset > declared.len() {
-        gamma.out.rollback_to(snap);
-
         return None;
     }
 
@@ -777,28 +805,16 @@ pub(crate) fn score_candidate_with_generics(
         let pty = if subs.is_empty() {
             declared[0]
         } else {
-            match substitute(gamma, declared[0], &subs, span) {
-                Ok(t) => t,
-                Err(_) => {
-                    gamma.out.rollback_to(snap);
-                    return None;
-                }
-            }
+            substitute(gamma, declared[0], &subs, span).ok()?
         };
 
         let db = declared_is_bounded_generic(gamma, declared[0], &bounded_vars);
-        match fit_cost_with_iter_coercion(c, gamma, r, pty, db, span) {
-            Some(c) => total += c,
-            None => {
-                gamma.out.rollback_to(snap);
-                return None;
-            }
-        }
+        total += fit_cost_with_iter_coercion(c, gamma, r, pty, db, span)?;
     }
 
     // Map named + positional args onto THIS candidate's slots
 
-    let slots = match reorder_call_args(
+    let slots = reorder_call_args(
         c,
         gamma,
         args,
@@ -806,37 +822,20 @@ pub(crate) fn score_candidate_with_generics(
         f.num_required.saturating_sub(offset),
         false,
         span,
-    ) {
-        Ok(s) => s,
-        Err(_) => {
-            gamma.out.rollback_to(snap);
-            return None;
-        }
-    };
+    )
+    .ok()?;
 
     for (i, slot) in slots.iter().enumerate() {
         let pty = if subs.is_empty() {
             declared[offset + i]
         } else {
-            match substitute(gamma, declared[offset + i], &subs, span) {
-                Ok(t) => t,
-                Err(_) => {
-                    gamma.out.rollback_to(snap);
-                    return None;
-                }
-            }
+            substitute(gamma, declared[offset + i], &subs, span).ok()?
         };
 
         match slot {
             Some(fill) => {
                 let aty = match fill {
-                    SlotFill::Direct(arg) => match arg_ty.get(arg) {
-                        Some(&t) => t,
-                        None => {
-                            gamma.out.rollback_to(snap);
-                            return None;
-                        }
-                    },
+                    SlotFill::Direct(arg) => *arg_ty.get(arg)?,
                     SlotFill::SpreadField(_, fty) => *fty,
                 };
 
@@ -846,17 +845,11 @@ pub(crate) fn score_candidate_with_generics(
                     if matches!(c.body.expr_arena[*arg], Expr::Int(value)
                         if (0..=u32::MAX as i64).contains(&value))
                     && matches!(gamma.get(pty_r), TypeExpr::Builtin(BuiltinTy::Uint)));
-                match if contextual_uint {
-                    Some(1)
+                total += if contextual_uint {
+                    1
                 } else {
-                    fit_cost_with_iter_coercion(c, gamma, aty, pty, db, span)
-                } {
-                    Some(c) => total += c,
-                    None => {
-                        gamma.out.rollback_to(snap);
-                        return None;
-                    }
-                }
+                    fit_cost_with_iter_coercion(c, gamma, aty, pty, db, span)?
+                };
             }
 
             None => total += 1, // omitted default param
@@ -886,7 +879,6 @@ pub(crate) fn score_candidate_with_generics(
             if bound_fail.is_none() {
                 *bound_fail = berr;
             }
-            gamma.out.rollback_to(snap);
             return None;
         }
         // A bounded `it: I` is a bare generic hole, so `param_genericity` already
@@ -913,7 +905,6 @@ pub(crate) fn score_candidate_with_generics(
     //
     // total += declared.len() - arg_tys.len();
 
-    gamma.out.rollback_to(snap);
     Some(total)
 }
 

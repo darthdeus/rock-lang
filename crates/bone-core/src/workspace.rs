@@ -773,6 +773,7 @@ pub struct BodyInference {
 pub struct BodyCheckpoint {
     trail: usize,
     any_erasures: usize,
+    types: usize,
 }
 
 impl BodyInference {
@@ -807,6 +808,7 @@ impl BodyInference {
         BodyCheckpoint {
             trail: self.trail.len(),
             any_erasures: self.any_erasures.len(),
+            types: self.ty_arena.len(),
         }
     }
 
@@ -816,6 +818,15 @@ impl BodyInference {
             self.substitutions.restore(v, prev);
         }
         self.any_erasures.truncate(cp.any_erasures);
+    }
+
+    /// [`Self::rollback_to`], also dropping every type allocated since `cp`.
+    /// Only for a caller that knows nothing it recorded since `cp` outside the
+    /// substitution trail still names one of those types.
+    pub fn discard_since(&mut self, cp: BodyCheckpoint) {
+        self.rollback_to(cp);
+        self.ty_arena.truncate(cp.types);
+        self.ty_spans.truncate(cp.types);
     }
 
     /// The erasures recorded since `cp`, for a caller whose rollback undoes a

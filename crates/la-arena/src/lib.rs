@@ -346,6 +346,21 @@ impl<T> Arena<T> {
         self.data.clear();
     }
 
+    /// Drops every value allocated at or after index `len`; indices below it
+    /// stay valid.
+    ///
+    /// ```
+    /// let mut arena = comfy_la_arena::Arena::new();
+    /// let kept = arena.alloc(1);
+    /// arena.alloc(2);
+    /// arena.truncate(1);
+    /// assert_eq!(arena.len(), 1);
+    /// assert_eq!(arena[kept], 1);
+    /// ```
+    pub fn truncate(&mut self, len: usize) {
+        self.data.truncate(len);
+    }
+
     /// Returns the length of the arena.
     ///
     /// ```
