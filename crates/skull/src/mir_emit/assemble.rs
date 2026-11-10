@@ -222,21 +222,7 @@ impl Assembly {
     ) -> Result<(), CompilerError> {
         // Each function's placement reads only that function, so all of them
         // are found in parallel and the ordered pass only appends.
-        let fns: Vec<(FuncRef, &bone_semantic::hir::Function)> = ws
-            .source_modules()
-            .flat_map(|module| {
-                let mid = module.id;
-                module.functions.iter().map(move |(fid, f)| {
-                    (
-                        FuncRef {
-                            module: mid,
-                            func: fid,
-                        },
-                        f,
-                    )
-                })
-            })
-            .collect();
+        let fns: Vec<(FuncRef, &bone_semantic::hir::Function)> = source_functions(ws).collect();
         let placements: Vec<Placement<'c>> = {
             use bone_core::prelude::*;
             fns.par_iter()
@@ -455,28 +441,57 @@ fn collect_needed_foreign(
     always_emitted_calls: &[FuncRef],
     spec_chunks: &FxHashMap<Instance, Chunk>,
 ) -> FxHashSet<Instance> {
-    let mut needed_foreign: FxHashSet<Instance> = FxHashSet::default();
-    needed_foreign.extend(always_emitted_calls.iter().map(|f| shared(*f)));
-    for module in ws.source_modules() {
-        for (fid, f) in module.functions.iter() {
-            let self_ref = FuncRef {
-                module: module.id,
-                func: fid,
-            };
+    const BODIES_PER_JOB: usize = 512;
+    // Only an `inline(lua)` declaration is ever looked up in the set, so
+    // every other callee is dropped where it is read.
+    let foreign = |f: &FuncRef| ws.module(f.module).functions[f.func].inline_body.is_some();
+    let fns: Vec<(FuncRef, &bone_semantic::hir::Function)> = source_functions(ws).collect();
+    let specs: Vec<&Chunk> = spec_chunks.values().collect();
+    let jobs: Vec<(&[(FuncRef, &bone_semantic::hir::Function)], &[&Chunk])> = fns
+        .chunks(BODIES_PER_JOB)
+        .map(|fns| (fns, &[][..]))
+        .chain(specs.chunks(BODIES_PER_JOB).map(|specs| (&[][..], specs)))
+        .collect();
+    let found = par_map(jobs, |(fns, specs)| {
+        let mut calls: FxHashSet<FuncRef> = FxHashSet::default();
+        for &(self_ref, f) in fns {
             if !is_cached_emitted_body(f, &shared(self_ref))
                 || !should_emit_via_view(ws, &cache.lua_view, self_ref)
             {
                 continue;
             }
             if let Some(Ok(c)) = cache.chunks.get(&shared(self_ref)) {
-                needed_foreign.extend(c.calls.iter().map(|f| shared(*f)));
+                calls.extend(c.calls.iter().copied().filter(foreign));
             }
         }
-    }
-    for c in spec_chunks.values() {
-        needed_foreign.extend(c.calls.iter().map(|f| shared(*f)));
-    }
-    needed_foreign
+        for c in specs {
+            calls.extend(c.calls.iter().copied().filter(foreign));
+        }
+        calls
+    });
+    let always = always_emitted_calls.iter().copied().filter(foreign);
+    always
+        .chain(found.into_iter().flatten())
+        .map(shared)
+        .collect()
+}
+
+/// Every source function with its reference, in declaration order.
+fn source_functions(
+    ws: &Workspace,
+) -> impl Iterator<Item = (FuncRef, &bone_semantic::hir::Function)> {
+    ws.source_modules().flat_map(|module| {
+        let mid = module.id;
+        module.functions.iter().map(move |(fid, f)| {
+            (
+                FuncRef {
+                    module: mid,
+                    func: fid,
+                },
+                f,
+            )
+        })
+    })
 }
 
 /// The name, parameter list and body of the thin wrapper binding an
