@@ -196,6 +196,36 @@ impl<T> SlotTable<T> {
     }
 }
 
+impl<T> SlotTable<T> {
+    /// Every installed value with its index, in index order.
+    pub fn for_each(&self, mut visit: impl FnMut(usize, &T)) {
+        for (segment, base) in self.segments.iter().enumerate() {
+            let base = base.load(Ordering::Acquire);
+            if base.is_null() {
+                continue;
+            }
+            for offset in 0..(FIRST << segment) {
+                // SAFETY: every slot of an allocated segment is initialized.
+                let value = unsafe { (*base.add(offset)).load(Ordering::Acquire) };
+                if !value.is_null() {
+                    // SAFETY: an installed value lives until the table is dropped.
+                    visit(FIRST * ((1 << segment) - 1) + offset, unsafe { &*value });
+                }
+            }
+        }
+    }
+}
+
+impl<T: Clone> Clone for SlotTable<T> {
+    fn clone(&self) -> Self {
+        let copy = Self::default();
+        self.for_each(|index, value| {
+            copy.get_or_init(index, || value.clone());
+        });
+        copy
+    }
+}
+
 impl<T> Drop for SlotTable<T> {
     fn drop(&mut self) {
         for (segment, base) in self.segments.iter_mut().enumerate() {

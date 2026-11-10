@@ -20,7 +20,7 @@
 //! across targets would be answering with another target's ABI.
 
 use rustc_hash::FxHashMap as HashMap;
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use bone_core::hir::{FnBackend, Function};
 use bone_core::prelude::Span;
@@ -452,27 +452,43 @@ impl AbiPlanMemoStats {
     }
 }
 
-const ABI_PLAN_SHARDS: usize = 64;
-
-#[derive(Clone, Debug, Default)]
-struct AbiPlanShard {
-    owner: rustc_hash::FxHashMap<crate::instance::Instance, BackendFnAbiPlanHandle>,
-    callee: rustc_hash::FxHashMap<crate::instance::Instance, BackendFnAbiPlanHandle>,
-    /// Counted under the shard lock the lookup already holds, so the counters
-    /// add no shared cache line of their own.
-    stats: AbiPlanMemoStats,
+#[derive(Clone, Default)]
+struct AbiSlots {
+    owner: OnceLock<BackendFnAbiPlanHandle>,
+    callee: OnceLock<BackendFnAbiPlanHandle>,
 }
 
-impl AbiPlanShard {
-    fn table(
-        &mut self,
-        question: AbiQuestion,
-    ) -> &mut rustc_hash::FxHashMap<crate::instance::Instance, BackendFnAbiPlanHandle> {
+impl AbiSlots {
+    fn slot(&self, question: AbiQuestion) -> &OnceLock<BackendFnAbiPlanHandle> {
         match question {
-            AbiQuestion::Owner => &mut self.owner,
-            AbiQuestion::Callee => &mut self.callee,
+            AbiQuestion::Owner => &self.owner,
+            AbiQuestion::Callee => &self.callee,
         }
     }
+}
+
+const ABI_COUNTER_STRIPES: usize = 16;
+
+/// One worker's share of the memo counters, on its own cache line so the
+/// counting adds no shared write to a lookup.
+#[derive(Default)]
+#[repr(align(128))]
+struct AbiCounters {
+    owner_hits: std::sync::atomic::AtomicU64,
+    owner_misses: std::sync::atomic::AtomicU64,
+    callee_hits: std::sync::atomic::AtomicU64,
+    callee_misses: std::sync::atomic::AtomicU64,
+    stores: std::sync::atomic::AtomicU64,
+    duplicate_cold_stores: std::sync::atomic::AtomicU64,
+}
+
+fn counter_stripe() -> usize {
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    thread_local! {
+        static STRIPE: usize =
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) % ABI_COUNTER_STRIPES;
+    }
+    STRIPE.with(|stripe| *stripe)
 }
 
 /// Build-scoped memo for [`BackendFnAbiPlan`] derivations, owned by
@@ -481,41 +497,64 @@ impl AbiPlanShard {
 /// is a pure function of its key under a fixed (workspace, context, concrete
 /// plans), so equal keys always store equal plans; caching only the `Ok` side
 /// keeps every error path re-derived and spanned exactly as before. Lowering
-/// workers ask it at every call site, so it is sharded by instance hash to keep
-/// them off one lock.
-#[derive(Debug)]
+/// workers ask it at every call site, so answers sit in a lock-free table
+/// indexed by instance id.
 pub(super) struct AbiPlanCache {
-    shards: Box<[Mutex<AbiPlanShard>]>,
+    /// Shared by clones: the ids stay meaningful in every copy of the slots.
+    ids: Arc<crate::instance::InstanceIndex>,
+    slots: crate::append_vec::SlotTable<AbiSlots>,
+    unique_keys: std::sync::atomic::AtomicU64,
+    counters: Box<[AbiCounters]>,
 }
 
 impl Default for AbiPlanCache {
     fn default() -> Self {
         Self {
-            shards: (0..ABI_PLAN_SHARDS).map(|_| Mutex::default()).collect(),
-        }
-    }
-}
-
-impl Clone for AbiPlanCache {
-    fn clone(&self) -> Self {
-        Self {
-            shards: self
-                .shards
-                .iter()
-                .map(|shard| Mutex::new(shard.lock().expect("abi plan cache poisoned").clone()))
+            ids: Arc::default(),
+            slots: Default::default(),
+            unique_keys: Default::default(),
+            counters: (0..ABI_COUNTER_STRIPES)
+                .map(|_| AbiCounters::default())
                 .collect(),
         }
     }
 }
 
+impl std::fmt::Debug for AbiPlanCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AbiPlanCache")
+            .field("stats", &self.stats())
+            .finish()
+    }
+}
+
+impl Clone for AbiPlanCache {
+    fn clone(&self) -> Self {
+        use std::sync::atomic::Ordering::Relaxed;
+        let copy = Self {
+            ids: Arc::clone(&self.ids),
+            slots: self.slots.clone(),
+            unique_keys: self.unique_keys.load(Relaxed).into(),
+            ..Self::default()
+        };
+        let stats = self.stats();
+        let counters = &copy.counters[0];
+        counters.owner_hits.store(stats.owner_hits, Relaxed);
+        counters.owner_misses.store(stats.owner_misses, Relaxed);
+        counters.callee_hits.store(stats.callee_hits, Relaxed);
+        counters.callee_misses.store(stats.callee_misses, Relaxed);
+        counters.stores.store(stats.stores, Relaxed);
+        counters
+            .duplicate_cold_stores
+            .store(stats.duplicate_cold_stores, Relaxed);
+        copy
+    }
+}
+
 impl AbiPlanCache {
-    fn shard(&self, inst: &crate::instance::Instance) -> std::sync::MutexGuard<'_, AbiPlanShard> {
-        use std::hash::BuildHasher;
-        let hash = rustc_hash::FxBuildHasher.hash_one(inst);
-        // FxHash mixes into the high bits; the low bits of a multiply are weak.
-        self.shards[(hash >> 58) as usize % ABI_PLAN_SHARDS]
-            .lock()
-            .expect("abi plan cache poisoned")
+    fn slots(&self, inst: &crate::instance::Instance) -> &AbiSlots {
+        self.slots
+            .get_or_init(self.ids.id(inst).index(), AbiSlots::default)
     }
 
     pub(super) fn lookup(
@@ -523,17 +562,16 @@ impl AbiPlanCache {
         question: AbiQuestion,
         inst: &crate::instance::Instance,
     ) -> Option<BackendFnAbiPlanHandle> {
-        let mut shard = self.shard(inst);
-        let found = shard.table(question).get(inst).map(Arc::clone);
-        let stats = &mut shard.stats;
-        let (hits, misses) = match question {
-            AbiQuestion::Owner => (&mut stats.owner_hits, &mut stats.owner_misses),
-            AbiQuestion::Callee => (&mut stats.callee_hits, &mut stats.callee_misses),
+        use std::sync::atomic::Ordering::Relaxed;
+        let found = self.slots(inst).slot(question).get().map(Arc::clone);
+        let counters = &self.counters[counter_stripe()];
+        let counter = match (question, found.is_some()) {
+            (AbiQuestion::Owner, true) => &counters.owner_hits,
+            (AbiQuestion::Owner, false) => &counters.owner_misses,
+            (AbiQuestion::Callee, true) => &counters.callee_hits,
+            (AbiQuestion::Callee, false) => &counters.callee_misses,
         };
-        match found {
-            Some(_) => *hits += 1,
-            None => *misses += 1,
-        }
+        counter.fetch_add(1, Relaxed);
         found
     }
 
@@ -543,29 +581,38 @@ impl AbiPlanCache {
         inst: &crate::instance::Instance,
         plan: &BackendFnAbiPlanHandle,
     ) {
-        let mut shard = self.shard(inst);
-        let replaced = shard.table(question).insert(inst.clone(), Arc::clone(plan));
-        shard.stats.stores += 1;
-        if replaced.is_some() {
-            shard.stats.duplicate_cold_stores += 1;
+        use std::sync::atomic::Ordering::Relaxed;
+        let counters = &self.counters[counter_stripe()];
+        counters.stores.fetch_add(1, Relaxed);
+        match self.slots(inst).slot(question).set(Arc::clone(plan)) {
+            Ok(()) => {
+                self.unique_keys.fetch_add(1, Relaxed);
+            }
+            Err(_) => {
+                counters.duplicate_cold_stores.fetch_add(1, Relaxed);
+            }
         }
     }
 
     pub(super) fn clear(&mut self) {
-        for shard in self.shards.iter_mut() {
-            let shard = shard.get_mut().expect("abi plan cache poisoned");
-            shard.owner.clear();
-            shard.callee.clear();
-        }
+        self.slots = Default::default();
+        *self.unique_keys.get_mut() = 0;
     }
 
     /// Lifetime counters plus the table's current population.
     pub(super) fn stats(&self) -> AbiPlanMemoStats {
-        let mut total = AbiPlanMemoStats::default();
-        for shard in self.shards.iter() {
-            let shard = shard.lock().expect("abi plan cache poisoned");
-            total.merge(&shard.stats);
-            total.unique_keys += (shard.owner.len() + shard.callee.len()) as u64;
+        use std::sync::atomic::Ordering::Relaxed;
+        let mut total = AbiPlanMemoStats {
+            unique_keys: self.unique_keys.load(Relaxed),
+            ..Default::default()
+        };
+        for counters in self.counters.iter() {
+            total.owner_hits += counters.owner_hits.load(Relaxed);
+            total.owner_misses += counters.owner_misses.load(Relaxed);
+            total.callee_hits += counters.callee_hits.load(Relaxed);
+            total.callee_misses += counters.callee_misses.load(Relaxed);
+            total.stores += counters.stores.load(Relaxed);
+            total.duplicate_cold_stores += counters.duplicate_cold_stores.load(Relaxed);
         }
         total
     }
