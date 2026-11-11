@@ -1,4 +1,4 @@
-// Microbenchmark for loops over a vector or an arena and for `xs[i]` reads.
+// Microbenchmark for vector and arena loops, indexed reads, and row pushes.
 //
 //     rock run benchmarks/vec_loop.rock
 //
@@ -260,6 +260,31 @@ fn store_ints(xs: [int]) -> float {
     return xs[xs.len() - 1] as float
 }
 
+// Two leaves keep columns; eight and twenty-four exercise strided row pushes.
+nobox value PushRow2 { f0: int, f1: int }
+
+fn push_rows_2(xs: [PushRow2], n: int) -> float {
+    xs.clear()
+    for i in 0..n { xs.push(PushRow2 { f0: i + 0, f1: i + 1 }) }
+    return (xs.len() + xs[n - 1].f1) as float
+}
+
+nobox value PushRow8 { f0: int, f1: int, f2: int, f3: int, f4: int, f5: int, f6: int, f7: int }
+
+fn push_rows_8(xs: [PushRow8], n: int) -> float {
+    xs.clear()
+    for i in 0..n { xs.push(PushRow8 { f0: i + 0, f1: i + 1, f2: i + 2, f3: i + 3, f4: i + 4, f5: i + 5, f6: i + 6, f7: i + 7 }) }
+    return (xs.len() + xs[n - 1].f7) as float
+}
+
+nobox value PushRow24 { f0: int, f1: int, f2: int, f3: int, f4: int, f5: int, f6: int, f7: int, f8: int, f9: int, f10: int, f11: int, f12: int, f13: int, f14: int, f15: int, f16: int, f17: int, f18: int, f19: int, f20: int, f21: int, f22: int, f23: int }
+
+fn push_rows_24(xs: [PushRow24], n: int) -> float {
+    xs.clear()
+    for i in 0..n { xs.push(PushRow24 { f0: i + 0, f1: i + 1, f2: i + 2, f3: i + 3, f4: i + 4, f5: i + 5, f6: i + 6, f7: i + 7, f8: i + 8, f9: i + 9, f10: i + 10, f11: i + 11, f12: i + 12, f13: i + 13, f14: i + 14, f15: i + 15, f16: i + 16, f17: i + 17, f18: i + 18, f19: i + 19, f20: i + 20, f21: i + 21, f22: i + 22, f23: i + 23 }) }
+    return (xs.len() + xs[n - 1].f23) as float
+}
+
 fn report(name: string, counts: string, elems: int, jit_s: float, interp_elems: int, interp_s: float, sink: float) {
     let ns = jit_s * 1000000000.0 / (elems as float)
     let interp_ns = interp_s * 1000000000.0 / (interp_elems as float)
@@ -313,6 +338,12 @@ fn main() {
     drive("store_columns", 1000, 20000, () => store_columns(cs))
     drive("store_strided", 1000, 20000, () => store_strided(ss))
     drive("store_ints", 1000, 20000, () => store_ints(writes))
+    let rows2: [PushRow2] = []
+    drive("push_rows_2", 1000, 20000, () => push_rows_2(rows2, 1000))
+    let rows8: [PushRow8] = []
+    drive("push_rows_8", 1000, 20000, () => push_rows_8(rows8, 1000))
+    let rows24: [PushRow24] = []
+    drive("push_rows_24", 1000, 20000, () => push_rows_24(rows24, 1000))
     // One slot in ten is free.
     let arena = units(1000)
     drive("sum_arena", 900, 20000, () => sum_arena(arena) as float)

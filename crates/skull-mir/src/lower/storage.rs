@@ -158,10 +158,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    /// Store one row, `row` counted from 0. Each slot is the previous slot
-    /// plus one rather than `base + offset`: a LuaJIT trace interns every
-    /// distinct offset as a constant, and a wide row's offsets alone used up the
-    /// trace's constant budget. The running index costs one shared constant.
+    /// Store one row with a shared base and single-use slot offsets, so the
+    /// backend folds each addition into its store instead of printing a local.
     fn strided_store_leaves_at(
         &mut self,
         vec: Idx<Inst>,
@@ -175,12 +173,16 @@ impl<'a> Builder<'a> {
             base: vec,
             field: crate::names::ustr("_data"),
         });
-        let mut at = self.strided_row_slot(row, stride, 0);
-        let one = self.emit_cur(Inst::Const(Lit::Int(1)));
+        let width = self.emit_cur(Inst::Const(Lit::Int(stride as i64)));
+        let base = self.emit_cur(Inst::IntMul(row, width));
         for (offset, leaf) in leaves.into_iter().enumerate() {
-            if offset > 0 {
-                at = self.emit_cur(Inst::IntAdd(at, one));
-            }
+            let physical = offset + usize::from(self.column_base_is_one());
+            let at = if physical == 0 {
+                base
+            } else {
+                let offset = self.emit_cur(Inst::Const(Lit::Int(physical as i64)));
+                self.emit_cur(Inst::IntAdd(base, offset))
+            };
             let value = if raw {
                 leaf
             } else {

@@ -8,8 +8,8 @@
 //! LuaJIT trace that costs about three IR constants and ten instructions per
 //! leaf, and a hot caller's root trace hits the 500-constant limit ("trace too
 //! long") inside the push.
-//! Row-major storage touches one table, and the push walks it with a running
-//! index, so a leaf costs no new constant.
+//! Row-major storage touches one table. Each push computes the row base once
+//! and adds each leaf offset in the store.
 //!
 //! Unlike the numeric flat-enum tier, these leaves may be bools, strings,
 //! closures and nil (an inactive enum payload slot, an absent nullable), so the
@@ -113,25 +113,25 @@ fn wide_nobox_vec_declares_strided_storage() {
 }
 
 #[test]
-fn wide_nobox_push_writes_one_backing_with_a_running_index() {
+fn wide_nobox_push_stores_slots_with_one_shared_base() {
     let lua = try_emit_module(&program(PUSH_MAIN)).expect("emits");
     let push = function_body(&lua, "emit");
-    assert_eq!(
-        push.matches("._data").count(),
-        1,
-        "the push must load the one backing table once:\n{push}"
-    );
+    assert_eq!(push.matches("._data").count(), 1, "{push}");
+    assert_eq!(push.matches(".len").count(), 2, "{push}");
+    assert_eq!(push.matches(" * ").count(), 1, "{push}");
+    let slot_stores: Vec<_> = push.lines().filter(|line| line.contains("] = ")).collect();
     assert!(
-        !push.contains(r#"["pay.__tag"]"#) && !push.contains(".lethal"),
-        "the push must not address per-leaf column tables:\n{push}"
+        slot_stores.len() > 8,
+        "fixture must exercise a wide row: {push}"
     );
-    // A leaf's slot is the previous leaf's slot plus one, so no leaf past the
-    // first spends a distinct numeric constant on its offset.
-    for offset in 2..=14 {
-        assert!(
-            !push.contains(&format!("+ ({offset})")),
-            "leaf offset {offset} is spelled as its own constant:\n{push}"
-        );
+    let mut shared_base = None;
+    for (offset, line) in slot_stores.iter().enumerate() {
+        let (slot, _) = line.trim().split_once("] = ").expect("slot store");
+        let (base, physical) = slot.split_once(" + ").unwrap_or_else(|| {
+            panic!("each slot must add its offset directly to the shared base: {push}")
+        });
+        assert_eq!(*shared_base.get_or_insert(base), base, "{push}");
+        assert_eq!(physical, format!("({}))", offset + 1), "{push}");
     }
 }
 
@@ -534,4 +534,46 @@ fn an_emptied_strided_vec_answers_like_a_boxed_one() {
         run_main(&lua),
         "true,1,true,true,true,1,2|true,1,true,true,true,1,2"
     );
+}
+
+#[test]
+fn row_push_growth_and_iteration_preserve_all_leaves() {
+    for width in [1, 2, 8, 24] {
+        let fields = (0..width)
+            .map(|i| format!("f{i}: int"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let values = (0..width)
+            .map(|i| format!("f{i}: n + {i}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let checks = (0..width)
+            .map(|i| format!("assert(xs[n].f{i} == n + {i})"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let src = format!(
+            r#"
+nobox value Row {{ {fields} }}
+fn row(n: int) -> Row {{ return Row {{ {values} }} }}
+fn main() {{
+    let xs: [Row] = vec_new_with_capacity(1)
+    for n in 0..65 {{ xs.push(row(n)) }}
+    let visited = 0
+    for r in xs {{
+        xs.push(row(65 + visited))
+        visited += 1
+        assert(r.f0 == visited - 1)
+    }}
+    assert(visited == 65 && xs.len() == 130)
+    for n in 0..130 {{ {checks} }}
+    xs.clear()
+    xs.push(row(7))
+    assert(xs.len() == 1 && xs[0].f0 == 7)
+    print("ok")
+}}
+"#
+        );
+        let lua = try_emit_module(&src).expect("row push emits");
+        assert_eq!(run_main(&lua), "ok", "row width {width}");
+    }
 }
