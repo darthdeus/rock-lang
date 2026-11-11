@@ -1,4 +1,4 @@
-//! Counted-loop recognition for numeric `for` emission.
+//! Recognition of numeric and map loops for native Lua `for` emission.
 
 use super::*;
 
@@ -10,13 +10,23 @@ pub(crate) enum HiLimit {
     Cell(Idx<Cell>),
 }
 
-/// A recognized counted loop: the `for slot = <slot>, hi[-1] do <body> end` shape.
-/// The init reads `slot` (the preheader's `Store{slot, lo}` set it) so it never
-/// depends on `lo`'s register still being live at the loop head.
-pub(crate) struct CountedLoop {
-    pub(crate) slot: Idx<Cell>,
-    pub(crate) hi: HiLimit,
-    pub(crate) inclusive: bool,
+pub(crate) enum ForControl {
+    Numeric {
+        slot: Idx<Cell>,
+        hi: HiLimit,
+        inclusive: bool,
+    },
+    Map {
+        key: Idx<Cell>,
+        value: Idx<Cell>,
+        table: Idx<Inst>,
+    },
+}
+
+/// A native Lua `for`. Numeric loops subsume a separate increment latch;
+/// map loops use their header as the continue target and have no latch work.
+pub(crate) struct ForLoop {
+    pub(crate) control: ForControl,
     pub(crate) body_entry: Idx<Block>,
     pub(crate) latch: Idx<Block>,
     pub(crate) exit: Idx<Block>,
@@ -24,25 +34,39 @@ pub(crate) struct CountedLoop {
     pub(crate) region: HashSet<Idx<Block>>,
 }
 
-/// Every counted loop in `func`, keyed by header block. `frame` excludes a
-/// coroutine state-field cell (it can't be a Lua `for` variable).
-pub(crate) fn recognize_counted_loops(
+impl ForLoop {
+    pub(crate) fn control_locals(&self) -> usize {
+        match self.control {
+            ForControl::Numeric { .. } => 4,
+            ForControl::Map { .. } => 5,
+        }
+    }
+}
+
+/// Every recognized loop in `func`, keyed by header block. Coroutine cursors
+/// stay in frame cells, since native Lua `for` state cannot survive a yield.
+pub(crate) fn recognize_for_loops(
     func: &MirFunc,
     rpo: &[Idx<Block>],
     frame: Option<&FrameCtx>,
-) -> HashMap<Idx<Block>, CountedLoop> {
+) -> HashMap<Idx<Block>, ForLoop> {
     let mut loops = HashMap::default();
-    // Every counted loop has an increment latch, and few bodies have a block
-    // of that shape: look for one before building the predecessor maps.
-    let latched = rpo
-        .iter()
-        .any(|&p| matches!(func.blocks[p].term, Term::Goto(h) if latch_slot(func, p, h).is_some()));
+    // Avoid predecessor maps for bodies without either kind of loop.
+    let latched = rpo.iter().any(|&p| {
+        matches!(func.blocks[p].term, Term::Goto(h) if latch_slot(func, p, h).is_some())
+            || func.blocks[p]
+                .insts
+                .iter()
+                .any(|&i| matches!(func.insts[i], Inst::MapNext { .. }))
+    });
     if !latched {
         return loops;
     }
     let (all_preds, goto_preds) = predecessors(func, rpo);
     for &h in rpo {
-        if let Some(cl) = try_match_loop(func, h, &all_preds, &goto_preds, frame) {
+        if let Some(cl) = try_match_map(func, h, &all_preds, frame)
+            .or_else(|| try_match_loop(func, h, &all_preds, &goto_preds, frame))
+        {
             loops.insert(h, cl);
         }
     }
@@ -55,7 +79,7 @@ fn try_match_loop(
     all_preds: &PredMap,
     goto_preds: &PredMap,
     frame: Option<&FrameCtx>,
-) -> Option<CountedLoop> {
+) -> Option<ForLoop> {
     let Term::Branch {
         cond,
         then_bb,
@@ -92,10 +116,12 @@ fn try_match_loop(
     if !slot_sound(func, slot, h, latch, &region) {
         return None;
     }
-    Some(CountedLoop {
-        slot,
-        hi,
-        inclusive,
+    Some(ForLoop {
+        control: ForControl::Numeric {
+            slot,
+            hi,
+            inclusive,
+        },
         body_entry: then_bb,
         latch,
         exit: else_bb,
@@ -235,4 +261,115 @@ fn slot_sound(
         }
     }
     stores == 2
+}
+
+// A map loop has no separate increment: the header is also its continue
+// target. Its nil-initialized cursor and values are private to this walk.
+fn try_match_map(
+    func: &MirFunc,
+    header: Idx<Block>,
+    preds: &PredMap,
+    frame: Option<&FrameCtx>,
+) -> Option<ForLoop> {
+    if frame.is_some() {
+        return None;
+    }
+    let Term::Branch {
+        cond,
+        then_bb: exit,
+        else_bb: body_entry,
+    } = func.blocks[header].term
+    else {
+        return None;
+    };
+    let insts = &func.blocks[header].insts;
+    let &next = insts.first()?;
+    let Inst::MapNext {
+        key_cell: key,
+        val_cell: value,
+        table,
+    } = func.insts[next]
+    else {
+        return None;
+    };
+    let Inst::Eq(a, b) = func.insts[cond] else {
+        return None;
+    };
+    let is_key = |i| matches!(func.insts[i], Inst::Load(c) if c == key);
+    let is_nil = |i| matches!(func.insts[i], Inst::Const(Lit::Nil));
+    if !(is_key(a) && is_nil(b) || is_key(b) && is_nil(a)) {
+        return None;
+    }
+    if insts
+        .iter()
+        .any(|&i| i != next && i != cond && !is_key(i) && !is_nil(i))
+    {
+        return None;
+    }
+    // Exactly one store initializes the cursor, and it must be nil. The
+    // generic-for state then advances independently of body-local kills.
+    let mut preheader = None;
+    for (bid, block) in func.blocks.iter() {
+        for &i in &block.insts {
+            if let Inst::Store { cell, value: v } = func.insts[i]
+                && cell == key
+            {
+                if preheader.is_some() || !is_nil(v) || block.term != Term::Goto(header) {
+                    return None;
+                }
+                preheader = Some(bid);
+            }
+        }
+    }
+    let preheader = preheader?;
+    let mut region = HashSet::default();
+    let mut stack: Vec<_> = preds
+        .get(&header)?
+        .iter()
+        .copied()
+        .filter(|&b| b != preheader)
+        .collect();
+    while let Some(b) = stack.pop() {
+        if b == header || !region.insert(b) {
+            continue;
+        }
+        for &p in preds.get(&b).into_iter().flatten() {
+            if p != header {
+                stack.push(p);
+            }
+        }
+    }
+    if !region.contains(&body_entry)
+        || region.contains(&preheader)
+        || region.contains(&exit)
+        || region.iter().any(|b| preds.get(b).is_none())
+    {
+        return None;
+    }
+    for (bid, block) in func.blocks.iter() {
+        for &i in &block.insts {
+            let mut sound = true;
+            func.insts[i].cell_writes_each(&mut |c| {
+                if (c == key || c == value) && i != next && !(c == key && bid == preheader) {
+                    sound = false;
+                }
+            });
+            if !sound {
+                return None;
+            }
+            if matches!(func.insts[i], Inst::Load(c) if c == key || c == value)
+                && bid != header
+                && !region.contains(&bid)
+            {
+                return None;
+            }
+        }
+    }
+    Some(ForLoop {
+        control: ForControl::Map { key, value, table },
+        body_entry,
+        latch: header,
+        exit,
+        region,
+    })
 }

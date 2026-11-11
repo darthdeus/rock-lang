@@ -1,0 +1,185 @@
+// Map workloads: run the emitted Lua with LuaJIT, with the JIT enabled.
+// Each case warms an empty trace cache before measuring. Length reports ns
+// per call; loops report ns per visited entry. Interpreter time is diagnostic.
+
+@nomangle inline(lua) fn bench_clock() -> float = "return os.clock()"
+
+@nomangle inline(lua) fn bench_jit(on: bool) = """
+    local jit = require("jit")
+    if on then jit.on() else jit.off() end
+    jit.flush()
+"""
+
+@nomangle inline(lua) fn bench_reset() = """
+    local jit = require("jit")
+    jit.flush()
+    _G.__bench = { start = 0, stop = 0, abort = 0 }
+    _G.__bench_cb = function(what, tr, fn, pc, otr, oex)
+      local b = _G.__bench
+      if what == "start" then
+        b.start = b.start + 1
+      elseif what == "stop" then
+        b.stop = b.stop + 1
+      elseif what == "abort" then
+        b.abort = b.abort + 1
+      end
+    end
+    jit.attach(_G.__bench_cb, "trace")
+"""
+
+@nomangle inline(lua) fn bench_counts() -> string = """
+    local jit = require("jit")
+    jit.attach(_G.__bench_cb)
+    local util = require("jit.util")
+    local b = _G.__bench
+    local traces, mc = 0, 0
+    for tr = 1, 32000 do
+      local mcode = util.tracemc(tr)
+      if mcode then
+        traces = traces + 1
+        mc = mc + #mcode
+      end
+    end
+    collectgarbage("collect")
+    return string.format("traces=%d stops=%d aborts=%d mcode_bytes=%d",
+      traces, b.stop, b.abort, mc)
+"""
+
+
+struct Row { x: int, y: int, z: int, w: int }
+nobox value Column { x: int, y: int, z: int, w: int }
+
+fn scalars(n: int) -> Map<string, int> {
+    let m: Map<string, int> = map_new()
+    for i in 0..n { m["k{i}"] = i % 11 }
+    return m
+}
+fn rows(n: int) -> Map<string, Row> {
+    let m: Map<string, Row> = map_new()
+    for i in 0..n { m["k{i}"] = Row { x: i % 11, y: i, z: i, w: i } }
+    return m
+}
+fn columns(n: int) -> Map<string, Column> {
+    let m: Map<string, Column> = map_new()
+    for i in 0..n { m["k{i}"] = Column { x: i % 11, y: i, z: i, w: i } }
+    return m
+}
+fn count_keys<K, V>(m: Map<K, V>) -> int {
+    let n = 0
+    for (k, _) in m { n += 1 }
+    return n
+}
+fn sum_scalars(m: Map<string, int>) -> int {
+    let n = 0
+    for (_, v) in m { n += v }
+    return n
+}
+fn sum_rows(m: Map<string, Row>) -> int {
+    let n = 0
+    for (_, v) in m { n += v.x }
+    return n
+}
+fn sum_columns(m: Map<string, Column>) -> int {
+    let n = 0
+    for (_, v) in m { n += v.x }
+    return n
+}
+fn snapshot_keys(m: Map<string, int>) -> int {
+    let n = 0
+    for k in m.keys() { n += k.len() }
+    return n
+}
+fn snapshot_values(m: Map<string, int>) -> int {
+    let n = 0
+    for v in m.values() { n += v }
+    return n
+}
+fn snapshot_pairs(m: Map<string, int>) -> int {
+    let n = 0
+    for (k, v) in m.to_array() { n += v }
+    return n
+}
+fn register_row(m: Map<string, Row>) -> int {
+    if m.len() >= 201 { return 0 }
+    m["transient"] = Row { x: 1, y: 2, z: 3, w: 4 }
+    m.remove("transient")
+    return 1
+}
+fn register_column(m: Map<string, Column>) -> int {
+    if m.len() >= 201 { return 0 }
+    m["transient"] = Column { x: 1, y: 2, z: 3, w: 4 }
+    m.remove("transient")
+    return 1
+}
+// Native controls quantify whether the current goto protocol costs the JIT.
+inline(lua) fn native_count(m: Map<string, int>) -> int = """
+    local n = 0
+    for k in pairs(m) do n = n + 1 end
+    return n
+"""
+inline(lua) fn native_sum(m: Map<string, int>) -> int = """
+    local n = 0
+    for k, v in pairs(m) do n = n + v end
+    return n
+"""
+inline(lua) fn native_row_count(m: Map<string, Row>) -> int = """
+    local n = 0
+    for k in pairs(m) do n = n + 1 end
+    return n
+"""
+
+fn report(name: string, counts: string, elems: int, jit_s: float, interp_elems: int, interp_s: float, sink: float) {
+    let ns = jit_s * 1000000000.0 / (elems as float)
+    let interp_ns = interp_s * 1000000000.0 / (interp_elems as float)
+    print("workload={name} {counts} ns_per_elem={ns} interp_ns_per_elem={interp_ns} sink={sink}")
+}
+
+// `reps` timed passes of `pass`, each over `n` elements; one twentieth of
+// them again with the JIT off.
+fn drive(name: string, n: int, reps: int, pass: fn() -> float) {
+    bench_reset()
+    let sink = 0.0
+    for r in 0..200 { sink += pass() }
+    let counts = bench_counts()
+    let t0 = bench_clock()
+    for r in 0..reps { sink += pass() }
+    let jit_s = bench_clock() - t0
+    bench_jit(false)
+    let interp_reps = reps ./ 20 + 1
+    let t1 = bench_clock()
+    for r in 0..interp_reps { sink += pass() }
+    let interp_s = bench_clock() - t1
+    bench_jit(true)
+    report(name, counts, n * reps, jit_s, n * interp_reps, interp_s, sink)
+}
+
+fn main() {
+    let small = scalars(8)
+    let large = scalars(1000)
+    let rs = rows(8)
+    let rl = rows(1000)
+    let cs = columns(8)
+    let cl = columns(1000)
+    drive("len_scalar_small", 1, 500000, () => small.len() as float)
+    drive("len_scalar_large", 1, 10000, () => large.len() as float)
+    drive("len_row_small", 1, 500000, () => rs.len() as float)
+    drive("len_row_large", 1, 10000, () => rl.len() as float)
+    drive("len_column_small", 1, 500000, () => cs.len() as float)
+    drive("len_column_large", 1, 500000, () => cl.len() as float)
+    drive("keys_scalar", 1000, 10000, () => count_keys(large) as float)
+    drive("keys_row", 1000, 10000, () => count_keys(rl) as float)
+    drive("keys_column", 1000, 10000, () => count_keys(cl) as float)
+    drive("values_scalar", 1000, 10000, () => sum_scalars(large) as float)
+    drive("values_row", 1000, 10000, () => sum_rows(rl) as float)
+    drive("values_column", 1000, 10000, () => sum_columns(cl) as float)
+    let outline_rows = rows(200)
+    let outline_columns = columns(200)
+    drive("register_row_200", 1, 50000, () => register_row(outline_rows) as float)
+    drive("register_column_200", 1, 50000, () => register_column(outline_columns) as float)
+    drive("snapshot_keys", 1000, 1000, () => snapshot_keys(large) as float)
+    drive("snapshot_values", 1000, 1000, () => snapshot_values(large) as float)
+    drive("snapshot_pairs", 1000, 1000, () => snapshot_pairs(large) as float)
+    drive("native_keys_scalar", 1000, 10000, () => native_count(large) as float)
+    drive("native_keys_row", 1000, 10000, () => native_row_count(rl) as float)
+    drive("native_values_scalar", 1000, 10000, () => native_sum(large) as float)
+}

@@ -50,7 +50,7 @@ impl Shape {
         func: &MirFunc,
         entry: Idx<Block>,
         rpo: &[Idx<Block>],
-        counted: &HashMap<Idx<Block>, CountedLoop>,
+        counted: &HashMap<Idx<Block>, ForLoop>,
         forwarder: impl Fn(Idx<Block>) -> bool,
         raises: impl Fn(Idx<Block>) -> bool,
     ) -> Option<Shape> {
@@ -74,7 +74,9 @@ impl Shape {
         let mut unplaced: Vec<Idx<Block>> = Vec::with_capacity(counted.len());
         for (&h, cl) in counted {
             latch_of[bx(h)] = raw(cl.latch);
-            unplaced.push(cl.latch);
+            if cl.latch != h {
+                unplaced.push(cl.latch);
+            }
         }
         let raising: Vec<Idx<Block>> = func
             .blocks
@@ -88,7 +90,7 @@ impl Shape {
         // holds header, latch and nothing outside the region.
         for (&h, cl) in counted {
             let mut latches = placement.latches(h);
-            if latches.next() != Some(cl.latch) || latches.next().is_some() {
+            if cl.latch != h && (latches.next() != Some(cl.latch) || latches.next().is_some()) {
                 return None;
             }
             let inside = cl
@@ -96,7 +98,7 @@ impl Shape {
                 .iter()
                 .filter(|&&b| placement.in_loop(h, b))
                 .count();
-            if placement.loop_size(h) != inside + 2 {
+            if placement.loop_size(h) != inside + 1 + usize::from(cl.latch != h) {
                 return None;
             }
         }
@@ -123,7 +125,7 @@ impl Shape {
 fn thread_forwarders(
     func: &MirFunc,
     rpo: &[Idx<Block>],
-    counted: &HashMap<Idx<Block>, CountedLoop>,
+    counted: &HashMap<Idx<Block>, ForLoop>,
     forwarder: impl Fn(Idx<Block>) -> bool,
 ) -> Vec<u32> {
     let n = func.blocks.len();
@@ -410,7 +412,9 @@ impl Walk<'_, '_> {
                 self.label(Label::Continue, h);
             }
             let em = &*self.em;
-            em.write_kills(self.out, em.kills.at_entry(latch));
+            if latch != h {
+                em.write_kills(self.out, em.kills.at_entry(latch));
+            }
             // FORI skips past FORL; FORL loops back into the body.
             let end = self.line("end", 1);
             scope_guard::close(self.em.func, h);

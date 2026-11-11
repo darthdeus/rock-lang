@@ -390,7 +390,7 @@ fn emit_named_framed_with_statics_impl(
     );
     keep_reads_ordered(func, &rpo, &mut inlinable, &folded_reads);
     bound_fold_levels(func, &rpo, &mut inlinable, &folded_reads);
-    let loops = recognize_counted_loops(func, &rpo, frame);
+    let loops = recognize_for_loops(func, &rpo, frame);
     let reads = regalloc::Reads::new(func, &rpo, &inlinable);
     if frame.is_none() {
         for id in regalloc::stable_loads(func, &rpo, &flow, &inlinable, &pinned, &loops, &reads) {
@@ -424,7 +424,9 @@ fn emit_named_framed_with_statics_impl(
                 && !hoist.contains_key(&v)
                 && call_arg_forwards.get(v).is_none()
                 && !suppressed[raw(v) as usize]
-                && !loops.values().any(|cl| cl.slot == cell)
+                && !loops.values().any(
+                    |cl| matches!(cl.control, ForControl::Numeric { slot, .. } if slot == cell),
+                )
         })
     } else {
         Vec::new()

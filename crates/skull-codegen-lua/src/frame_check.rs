@@ -18,7 +18,7 @@ pub(crate) fn check_frame_limits(
     func: &MirFunc,
     rpo: &[Idx<Block>],
     top_locals: usize,
-    loops: &HashMap<Idx<Block>, CountedLoop>,
+    loops: &HashMap<Idx<Block>, ForLoop>,
     color_scope: &[Option<Idx<Block>>],
     hoist: &HashMap<Idx<Inst>, u32>,
     tail_forwards: &[Option<TailForward>],
@@ -33,7 +33,11 @@ pub(crate) fn check_frame_limits(
     if frame_limits::fits_without_measuring(
         func,
         rpo,
-        top_locals,
+        top_locals
+            + loops
+                .values()
+                .filter(|l| matches!(l.control, ForControl::Map { .. }))
+                .count(),
         loops.len(),
         loop_scoped_locals,
         inlinable,
@@ -51,7 +55,7 @@ pub(crate) fn check_frame_limits(
         *loop_locals.entry(*header).or_default() += 1;
     }
     for (header, cl) in loops.iter() {
-        let add = frame_limits::FOR_CONTROL_LOCALS + loop_locals.get(header).copied().unwrap_or(0);
+        let add = cl.control_locals() + loop_locals.get(header).copied().unwrap_or(0);
         for &b in cl.region.iter().chain(std::iter::once(&cl.latch)) {
             actives[raw(b) as usize] += add;
         }

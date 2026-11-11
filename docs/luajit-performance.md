@@ -179,3 +179,71 @@ Do not retry these; each was measured.
 - `i < 0 or i >= n` as a single product-sign test diverges on fractional `i`.
 - Removing a whole abort class or a downstream guard as a fix: the exit
   moves. Measure totals and per-site rows together.
+
+## Map loops (2026-11-11)
+
+`Map` walks lower to `MapNext` over a bare table or a column map's spine.
+Emit a recognized non-suspending walk as `for k, v in next, table do`: LuaJIT's
+native table-iteration bytecode is much cheaper than calling `next` at a
+backward goto. Keep the anonymous cursor separate from user bindings, including
+bindings captured or written by closures. A coroutine keeps its framed cursor.
+Removing the current or a pending entry and replacing an existing entry retain
+the live walk's behavior; inserting new keys during a walk has no new guarantee.
+
+Unused map bindings need no value snapshot. In particular, don't generate a
+column bounds check for an unused value: cleanup correctly preserves checks
+that were emitted, even after removing all their dead leaf loads. This also
+helps `is_empty`, `clear`, and the key walk in `keys_into`. `values` and
+`to_array` still return sorted snapshots and read their values in key order.
+
+`benchmarks/map_loop.rock` measures scalar, row-struct, and flattened column
+values, small/large lengths, direct key/value walks, sorted snapshots, native
+Lua controls, and a register/remove workload with 200 retained entries. Compile
+it, then run the emitted Lua with `dofile("map.lua"); main()`. Each case flushes
+and warms the JIT, records traces and aborts, then times the warm workload.
+Interpreter times are diagnostic only. Length timings are per call; direct
+walk timings below are per entry over 1,000 entries. Results are min/median ns
+from 15 interleaved baseline/candidate rounds, reversing order each round.
+The baseline is `bd14ff9d`; both machines used bundled LuaJIT 2.1.1794164915,
+with the JIT enabled. These are isolated workloads, not an engine frame claim.
+
+| Workload | Apple M4 Max baseline | Candidate | Intel i9-14900K baseline | Candidate |
+| --- | ---: | ---: | ---: | ---: |
+| Scalar len, 8 entries | 45.35 / 51.03 | 17.94 / 18.44 | 64.40 / 66.81 | 15.33 / 16.17 |
+| Scalar len, 1,000 entries | 4322.9 / 4688.2 | 1163.0 / 1194.3 | 6250.4 / 6708.3 | 1439.5 / 1450.6 |
+| Row len, 1,000 entries | 4108.7 / 4574.5 | 1191.3 / 1215.1 | 6322.7 / 6765.9 | 1415.1 / 1423.4 |
+| Scalar keys | 4.343 / 5.079 | 1.192 / 1.208 | 6.263 / 6.622 | 1.430 / 1.442 |
+| Row keys | 4.235 / 4.681 | 1.197 / 1.215 | 6.316 / 6.600 | 1.414 / 1.422 |
+| Column keys | 4.055 / 4.915 | 1.167 / 1.214 | 6.207 / 6.627 | 1.426 / 1.448 |
+| Scalar values | 3.937 / 4.559 | 1.159 / 1.216 | 6.297 / 6.674 | 1.407 / 1.416 |
+| Row values | 5.219 / 6.095 | 1.503 / 1.652 | 6.599 / 7.067 | 1.639 / 1.741 |
+| Column values | 4.547 / 5.022 | 1.411 / 1.481 | 6.268 / 6.739 | 1.667 / 1.686 |
+| Row registration, 200 entries | 900.82 / 1177.40 | 303.18 / 310.58 | 1258.38 / 1314.42 | 352.76 / 360.82 |
+
+Direct walks generally recorded two completed traces and two warmup aborts
+on both versions; across all rounds some cases recorded up to four aborts.
+The improvement comes from cheaper iteration, without a claim of fewer trace
+aborts. The native Lua controls were effectively unchanged (about 1.2 ns/entry
+on arm64 and 1.4 ns/entry on x86), and candidate key walks reached that range.
+
+Column-map `len` was already an `occupied_count` read and showed no gain:
+about 0.4 ns/call on warm, invariant maps, where the JIT can hoist the read.
+The mutating column registration case also showed no consistent gain (arm64
+median 5.84 -> 6.74 ns; x86 4.62 -> 4.50 ns). Sorted `keys`, `values`, and
+`to_array` snapshots improved only 2-6% at the median; allocation and sorting
+still dominate. No count is added to bare maps and no insertion cost is added.
+
+For `rock compile packages/stone` on the M4 Max, 15 interleaved fresh-process
+runs at one thread, caches disabled, writing to internal storage: retired
+instructions min/median were 3.39530/3.40610 billion before and
+3.39583/3.40643 billion after (median +0.010%, no compile-speed gain).
+Wall min/median was 0.28/0.29 s before and 0.27/0.29 s after. Emitted Lua shrank
+from 4,663,279 to 4,659,316 bytes and from 128,653 to 128,284 lines. Its map
+loops change shape, so output identity is intentionally different.
+
+A separate 15-round ablation kept native generic-for emission and restored the
+old unused-binding lowering. Removing the unused column read then changed the
+column key-walk min/median from 1.405/1.447 to 1.206/1.225 ns/entry on arm64
+(-15.3% median). On x86 it showed no gain: 1.421/1.436 -> 1.435/1.453 ns/entry.
+Other direct walks were effectively unchanged in this ablation. Keep the
+simpler key-only lowering for its measured arm64 gain and smaller emitted work.

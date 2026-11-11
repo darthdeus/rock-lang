@@ -20,8 +20,8 @@
 
 mod binding;
 mod block;
-mod counted_loops;
 mod effect;
+mod for_loops;
 mod forward;
 mod frame_check;
 mod frame_limits;
@@ -43,7 +43,7 @@ mod trace_frames;
 mod value;
 
 pub use binding::*;
-use counted_loops::*;
+use for_loops::*;
 use forward::*;
 use frame_check::*;
 pub use function::*;
@@ -977,7 +977,7 @@ struct Emitter<'a> {
     frame: Option<&'a FrameCtx>,
     /// Recognized counted loops, keyed by header — a goto into an un-emitted
     /// header expands a structured `for`.
-    loops: &'a HashMap<Idx<Block>, CountedLoop>,
+    loops: &'a HashMap<Idx<Block>, ForLoop>,
     /// Reverse-postorder block layout (loop bodies emit their region in RPO).
     rpo: &'a [Idx<Block>],
     /// Values tree-folded into their single use site (no register); referenced

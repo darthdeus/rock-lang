@@ -40,7 +40,7 @@ impl Drop for Installed {
 
 pub(crate) fn install(
     func: &MirFunc,
-    loops: &HashMap<Idx<Block>, CountedLoop>,
+    loops: &HashMap<Idx<Block>, ForLoop>,
     cell_colors: &[u32],
     color_scope: &[Option<Idx<Block>>],
 ) -> Installed {
@@ -50,7 +50,12 @@ pub(crate) fn install(
     ANY.store(true, Ordering::Relaxed);
     let loops = loops
         .iter()
-        .map(|(&h, cl)| (h, cl.slot, cell_number(func, cell_colors, cl.slot)))
+        .filter_map(|(&h, cl)| match cl.control {
+            ForControl::Numeric { slot, .. } => {
+                Some((h, slot, cell_number(func, cell_colors, slot)))
+            }
+            ForControl::Map { .. } => None,
+        })
         .collect();
     GUARDS.with(|g| {
         g.borrow_mut().push(Guard {

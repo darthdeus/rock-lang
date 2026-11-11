@@ -18,7 +18,7 @@ pub(crate) fn render_scope(
     locals: &regalloc::Locals<'_>,
     inlinable: &[bool],
     alias: &[Option<Idx<Cell>>],
-    loops: HashMap<Idx<Block>, CountedLoop>,
+    loops: HashMap<Idx<Block>, ForLoop>,
     is_top: bool,
     frame: Option<&FrameCtx>,
     cell_colors: &[u32],
@@ -104,7 +104,9 @@ pub(crate) fn render_scope(
                     .iter()
                     .chain(func.blocks[cl.latch].insts.iter())
                 {
-                    quiet[raw(id) as usize] = true;
+                    // MapNext still supplies the generic-for head's table
+                    // read and cursor definitions to kill liveness.
+                    quiet[raw(id) as usize] = !matches!(func.insts[id], Inst::MapNext { .. });
                 }
             }
             quiet
@@ -358,7 +360,8 @@ pub(crate) fn render_scope(
         }
     }
     if ctx.frame_limits() {
-        let declared = params.len() + top_locals + loops.len() * frame_limits::FOR_CONTROL_LOCALS;
+        let declared =
+            params.len() + top_locals + loops.values().map(ForLoop::control_locals).sum::<usize>();
         let control = control.unwrap_or_default();
         check_body_limits(
             ctx,

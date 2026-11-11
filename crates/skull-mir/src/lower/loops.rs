@@ -842,7 +842,11 @@ impl<'a> Builder<'a> {
         );
 
         self.cur = body_bb;
-        let vv = match col {
+        let needs_value = match vars {
+            BindingPattern::Tuple(subs) if subs.len() == 2 => self.map_pattern_used(&subs[1]),
+            _ => self.map_pattern_used(vars),
+        };
+        let vv = match col.filter(|_| needs_value) {
             Some(elem) => {
                 let slot = self.emit_cur(Inst::Load(val_cell));
                 let data = self.map_col_data(m);
@@ -944,6 +948,22 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    // An unused map binding needs no snapshot. In particular, a column read
+    // includes a bounds check, which cleanup must otherwise preserve even
+    // when none of its leaves are used. Count writes as uses too: lowering a
+    // later assignment still needs the binding's cell.
+    fn map_pattern_used(&self, pattern: &BindingPattern) -> bool {
+        let leaves = pattern.leaves();
+        self.body.expr_arena.iter().any(|(_, expr)| match expr {
+            Expr::Var(b)
+            | Expr::Call {
+                callee: Callee::Local(b),
+                ..
+            } => leaves.contains(b),
+            _ => false,
+        })
+    }
+
     /// `col_value` is the already-built element for a COLUMN-stored Map, whose
     /// value is leaves at a slot rather than a cell. `None` keeps the boxed
     /// walk, loading the value cell in place so the emitted order is unchanged.
@@ -956,8 +976,13 @@ impl<'a> Builder<'a> {
     ) -> Result<(), CompilerError> {
         match vars {
             BindingPattern::Tuple(subs) if subs.len() == 2 => {
-                let kv = self.emit_cur(Inst::Load(key_cell));
-                self.bind_for_pattern(&subs[0], kv);
+                if self.map_pattern_used(&subs[0]) {
+                    let kv = self.emit_cur(Inst::Load(key_cell));
+                    self.bind_for_pattern(&subs[0], kv);
+                }
+                if !self.map_pattern_used(&subs[1]) {
+                    return Ok(());
+                }
                 let vv = match col_value {
                     Some(v) => v,
                     None => {
@@ -971,6 +996,9 @@ impl<'a> Builder<'a> {
                 Ok(())
             }
             BindingPattern::Leaf(_) => {
+                if !self.map_pattern_used(vars) {
+                    return Ok(());
+                }
                 let kv = self.emit_cur(Inst::Load(key_cell));
                 let vv = match col_value {
                     Some(v) => v,

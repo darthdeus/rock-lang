@@ -1130,10 +1130,6 @@ v3 = const nil
 v4 = eq v2, v3
 branch v4 -> bb3, bb2
   bb2:
-v5 = load c1
-store c3, v5
-v6 = load c2
-store c4, v6
 goto bb1
   bb3:
 return

@@ -17,7 +17,7 @@ use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use comfy_la_arena::{Idx, RawIdx};
 
-use crate::{CountedLoop, collect_lambda_params, successors};
+use crate::{ForControl, ForLoop, collect_lambda_params, successors};
 use skull_mir::mir::{Block, Cell, Inst, MirFunc, Term};
 
 /// A dense fixed-size bit set over `0..n` — used for cell liveness/interference,
@@ -404,7 +404,7 @@ pub(crate) fn term_uses(term: &Term, push: &mut impl FnMut(Idx<Inst>)) {
 
 /// A counted loop the emitter renders as a Lua `for ... do .. end` block:
 /// header + body region (excluding header and latch), as recognized by the
-/// emitter's `recognize_counted_loops`. Used to partition value colors by
+/// emitter's `recognize_for_loops`. Used to partition value colors by
 /// lexical scope.
 pub(crate) struct LoopScope {
     pub header: Idx<Block>,
@@ -660,7 +660,7 @@ pub(crate) fn stable_loads(
     flow: &Flow,
     inline: &[bool],
     pinned: &[bool],
-    loops: &HashMap<Idx<Block>, CountedLoop>,
+    loops: &HashMap<Idx<Block>, ForLoop>,
     reads: &Reads,
 ) -> Vec<Idx<Inst>> {
     let mut written = vec![false; func.cells.len()];
@@ -714,7 +714,10 @@ pub(crate) fn stable_loads(
     // it the cell's name is the outer local, so a load still live after an
     // early exit must stay in a register.
     for (&header, cl) in loops {
-        for k in by_cell.of(raw(cl.slot)) {
+        let ForControl::Numeric { slot, .. } = cl.control else {
+            continue;
+        };
+        for k in by_cell.of(raw(slot)) {
             conflict[k] = scope.iter().enumerate().any(|(bi, &b)| {
                 b != header
                     && b != cl.latch

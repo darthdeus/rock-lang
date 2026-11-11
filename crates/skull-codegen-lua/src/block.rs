@@ -349,15 +349,35 @@ impl Emitter<'_> {
         let cl = &self.loops[&header];
         scope_guard::open(self.func, header);
         out.push_str(" for ");
-        write_cellname(out, self.func, self.frame, self.cell_colors, cl.slot);
-        out.push_str(" = ");
-        write_cellname(out, self.func, self.frame, self.cell_colors, cl.slot);
-        out.push_str(", ");
-        match &cl.hi {
-            HiLimit::Value(v) => self.write_opnd(out, *v),
-            HiLimit::Cell(c) => write_cellname(out, self.func, self.frame, self.cell_colors, *c),
+        match &cl.control {
+            ForControl::Numeric {
+                slot,
+                hi,
+                inclusive,
+            } => {
+                write_cellname(out, self.func, self.frame, self.cell_colors, *slot);
+                out.push_str(" = ");
+                write_cellname(out, self.func, self.frame, self.cell_colors, *slot);
+                out.push_str(", ");
+                match hi {
+                    HiLimit::Value(v) => self.write_opnd(out, *v),
+                    HiLimit::Cell(c) => {
+                        write_cellname(out, self.func, self.frame, self.cell_colors, *c)
+                    }
+                }
+                out.push_str(if *inclusive { " do\n" } else { " - 1 do\n" });
+            }
+            ForControl::Map { key, value, table } => {
+                let h = self.func.emit_block_id(header);
+                write!(out, "mk{h}, mv{h} in next, ").unwrap();
+                self.write_opnd(out, *table);
+                out.push_str(" do\n ");
+                write_cellname(out, self.func, self.frame, self.cell_colors, *key);
+                out.push_str(", ");
+                write_cellname(out, self.func, self.frame, self.cell_colors, *value);
+                writeln!(out, " = mk{h}, mv{h}").unwrap();
+            }
         }
-        out.push_str(if cl.inclusive { " do\n" } else { " - 1 do\n" });
         // Body-scoped temp registers: declared INSIDE the `for` block, above the
         // loop-control slots, so LuaJIT's snapshot liveness can prune them at
         // loop exits (else they pin their values into every side trace and
@@ -408,7 +428,9 @@ impl Emitter<'_> {
         self.emitted[raw(latch) as usize] = true;
         self.drop_fallthrough_goto(out, latch);
         self.write_block_label(out, latch);
-        self.write_kills(out, self.kills.at_entry(latch));
+        if latch != header {
+            self.write_kills(out, self.kills.at_entry(latch));
+        }
         out.push_str(" end\n");
         scope_guard::close(self.func, header);
         self.write_goto(out, exit);
@@ -421,7 +443,7 @@ impl Emitter<'_> {
 pub(crate) fn label_ref_counts(
     func: &MirFunc,
     rpo: &[Idx<Block>],
-    loops: &HashMap<Idx<Block>, CountedLoop>,
+    loops: &HashMap<Idx<Block>, ForLoop>,
 ) -> Vec<u32> {
     let mut refs = vec![0u32; func.blocks.len()];
     for &bb in rpo {
